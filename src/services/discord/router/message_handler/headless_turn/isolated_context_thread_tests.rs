@@ -125,23 +125,29 @@ async fn a_thread_create_nobody_confirmed_is_repeated_by_neither_the_run_nor_its
         return;
     }
     let fixture = fixture().await;
-    let registry = Some(fixture.registry.clone());
-    let logger =
-        RoutineDiscordLogger::new_with_health_registry(Arc::new(fixture.pool.clone()), registry);
     let before = channel_state(&fixture, PRIMARY).await;
     let prompt = || "nightly report".to_string();
     let unavailable = || Some("thread_unavailable".to_string());
+    // The executor and the outcome logger of a runtime whose thread calls reach `api`.
+    let pool = Arc::new(fixture.pool.clone());
     let serve = |api: &ThreadApi| {
-        let http = api.http.clone();
-        fixture.registry.register_http("claude".to_string(), http)
+        let (http, shared, pool) = (api.http.clone(), fixture.shared.clone(), pool.clone());
+        async move {
+            let registry = Arc::new(HealthRegistry::new());
+            registry.register("claude".to_string(), shared).await;
+            registry.register_http("claude".to_string(), http).await;
+            let executor = RoutineAgentExecutor::new(pool.clone(), Some(registry.clone()), 60);
+            let logger = RoutineDiscordLogger::new_with_health_registry(pool, Some(registry));
+            (executor.with_headless_fresh_agents(true), logger)
+        }
     };
 
     // The routine has no thread yet; Discord takes the create and never answers. With or without
     // a retry budget and a fallback agent, the run ends there.
     for policy in [(0, None), (2, Some("fallback8117"))] {
         let api = thread_api(Create::Unanswered).await;
-        serve(&api).await;
-        let (store, executor, claimed, routine_id) =
+        let (executor, logger) = serve(&api).await;
+        let (store, _, claimed, routine_id) =
             routine_claim_with(&fixture, false, None, policy).await;
         let run = claimed.run_id.clone();
         let start =
@@ -175,9 +181,9 @@ async fn a_thread_create_nobody_confirmed_is_repeated_by_neither_the_run_nor_its
 
     // Control: a create Discord refuses also ends the run at once, as a refusal.
     let api = thread_api(Create::Refused).await;
-    serve(&api).await;
+    let (executor, _) = serve(&api).await;
     let spare = (2, Some("fallback8117"));
-    let (store, executor, claimed, _) = routine_claim_with(&fixture, false, None, spare).await;
+    let (store, _, claimed, _) = routine_claim_with(&fixture, false, None, spare).await;
     let run = claimed.run_id.clone();
     let start = executor.start_agent_run(&store, claimed, prompt(), None, None, None, None, false);
     assert_eq!(start.await.unwrap().status, "failed");
@@ -191,8 +197,8 @@ async fn a_thread_create_nobody_confirmed_is_repeated_by_neither_the_run_nor_its
     fixture.discord.unname_channel(THREAD.get());
     fixture.discord.add_thread(THREAD.get(), PRIMARY.get());
     let api = thread_api(Create::Made).await;
-    serve(&api).await;
-    let (store, executor, claimed, _) = routine_claim(&fixture, false, None, 0).await;
+    let (executor, _) = serve(&api).await;
+    let (store, _, claimed, _) = routine_claim(&fixture, false, None, 0).await;
     let run = claimed.run_id.clone();
     let start = executor.start_agent_run(&store, claimed, prompt(), None, None, None, None, false);
     let started = start.await.unwrap();
@@ -213,8 +219,8 @@ async fn a_thread_create_nobody_confirmed_is_repeated_by_neither_the_run_nor_its
 
     // Control: a create that never reached Discord made nothing, so the run waits to try again.
     let api = thread_api(Create::Offline).await;
-    serve(&api).await;
-    let (store, executor, claimed, _) = routine_claim(&fixture, false, None, 0).await;
+    let (executor, _) = serve(&api).await;
+    let (store, _, claimed, _) = routine_claim(&fixture, false, None, 0).await;
     let start = executor.start_agent_run(&store, claimed, prompt(), None, None, None, None, false);
     let deferred = start.await.unwrap();
     assert_eq!(deferred.status, "deferred", "{deferred:?}");

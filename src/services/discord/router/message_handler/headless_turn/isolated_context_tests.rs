@@ -485,14 +485,17 @@ async fn routine_claim_with(
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO agents (id, name, provider, discord_channel_cc)
-         VALUES ('agent8117', 'A', 'claude', $1) ON CONFLICT (id) DO NOTHING",
-    )
-    .bind(PRIMARY.get().to_string())
-    .execute(pool)
-    .await
-    .unwrap();
+    for agent in ["agent8117"].into_iter().chain(fallback) {
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_cc)
+             VALUES ($2, 'A', 'claude', $1) ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(PRIMARY.get().to_string())
+        .bind(agent)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
     let store = RoutineStore::new_with_timezone_and_checkpoint_limit(
         Arc::new(pool.clone()),
         "Asia/Seoul",

@@ -208,3 +208,4 @@ per-run exact1 모델의 소스와18cfg는 변경하지 않았다. 연속 실패
 | `RoutineRunHeadlessNoRowClose` | 수정 전: 완료가 행을 닫지 않아 `turn_active` 로 남음 | liveness RED `RunRowRemoved` |
 | `RoutineRunHeadlessWideRowClose` | 닫는 대상에 primary 행이 섞임 | RED `PrimaryRowKept` |
 
+검증 범위(리뷰 뒤 좁힘): 이 모델의 thread 보류는 횟수만 세고, 창 소진을 곧바로 terminal 로 둔다. 구현이 그와 같아진 것은 시작 실패 처분(창 소진·영구 거절·응답 없는 생성은 retry·fallback 없이 종결)을 넣은 리뷰 수리부터다. 그 대응은 모델이 아니라 Rust 시험이 본다. 모델에 없는 것: thread 생성 응답이 불명인 상태와 실패 로그의 thread 생성, 대기 입력 kickoff 배선(`HumanProcess` 의 fairness 는 가정이다), `CloseRunRow` 의 실패(내부 API 거절), `interrupted` run 의 행.

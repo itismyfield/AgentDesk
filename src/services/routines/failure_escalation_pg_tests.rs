@@ -381,8 +381,10 @@ async fn a_headless_run_recovered_after_a_restart_posts_nothing_in_a_saved_threa
             .unwrap();
         let recovered = store.recover_stale_running_runs().await.unwrap();
         assert_eq!(recovered.len(), 1, "{name}");
-        assert_eq!(recovered[0].run_id, run_id, "{name}");
+        let closed = (&recovered[0].run_id, &recovered[0].routine_id);
+        assert_eq!(closed, (&run_id, &attached.id), "{name}");
         let logged = logger.log_recovery(&store, &recovered[0]).await;
+        store.pause_routine(&attached.id).await.unwrap();
         let posts: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM message_outbox WHERE session_key LIKE 'routine:' || $1 || ':%'",
         )
