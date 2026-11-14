@@ -178,7 +178,13 @@ struct Outcome {
     logs: String,
 }
 
-async fn invoke(branch: Branch, root: &Path, fail_save: bool, trace: &Trace) -> Outcome {
+async fn invoke(
+    branch: Branch,
+    root: &Path,
+    fail_save: bool,
+    trace: &Trace,
+    content: Option<&str>,
+) -> Outcome {
     let channel = serenity::ChannelId::new(branch.channel());
     let thread = serenity::ChannelId::new(branch.channel() + 1);
     let message_id = serenity::MessageId::new(branch.channel() + 4);
@@ -191,6 +197,13 @@ async fn invoke(branch: Branch, root: &Path, fail_save: bool, trace: &Trace) -> 
     }
     message.author.bot = matches!(branch, Branch::ThreadGuard);
     let shared = crate::services::discord::make_shared_data_for_tests();
+    if let Some(content) = content {
+        message.content = content.into();
+        shared
+            .known_slash_commands
+            .set(std::collections::HashSet::from(["clear".into()]))
+            .unwrap();
+    }
     {
         let mut settings = shared.settings.write().await;
         settings.owner_user_id = Some(message.author.id.get());
@@ -425,6 +438,10 @@ async fn invoke(branch: Branch, root: &Path, fail_save: bool, trace: &Trace) -> 
 }
 
 fn run(test: &str, branches: &[Branch], fail_save: bool) {
+    run_with_content(test, branches, fail_save, None);
+}
+
+fn run_with_content(test: &str, branches: &[Branch], fail_save: bool, content: Option<&str>) {
     let qualified = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
     if !crate::services::discord::admin_host_guard::tests::api_child(&qualified) {
         return;
@@ -499,7 +516,7 @@ fn run(test: &str, branches: &[Branch], fail_save: bool) {
         for &branch in branches {
             outcomes.push((
                 branch,
-                Box::pin(invoke(branch, &root, fail_save, &trace)).await,
+                Box::pin(invoke(branch, &root, fail_save, &trace, content)).await,
             ));
         }
         outcomes
@@ -510,6 +527,27 @@ fn run(test: &str, branches: &[Branch], fail_save: bool) {
             outcome.original, outcome.after,
             "{branch:?}: the whole gateway Message stays original"
         );
+        if content == Some("/clear") {
+            assert!(!outcome.held);
+            assert!(outcome.queued.is_empty() && outcome.durable.is_empty());
+            assert!(
+                outcome
+                    .http
+                    .iter()
+                    .all(|(method, _)| *method == Method::GET)
+            );
+            assert_eq!(outcome.original["type"], 0);
+            let skips: Vec<_> = outcome
+                .logs
+                .lines()
+                .filter(|line| line.contains("HUMAN-SLASH:"))
+                .collect();
+            assert_eq!(skips.len(), 1, "one observable live skip: {}", outcome.logs);
+            assert!(skips[0].contains("INFO"));
+            assert!(skips[0].contains(&outcome.message.to_string()));
+            assert!(skips[0].contains(&branch.channel().to_string()));
+            continue;
+        }
         if fail_save {
             assert_eq!(
                 outcome
@@ -625,5 +663,25 @@ fn busy_active_turn_reports_queue_save_failure() {
         "busy_active_turn_reports_queue_save_failure",
         &[Branch::BusyActiveTurn],
         true,
+    );
+}
+
+#[test]
+fn registered_human_slash_text_is_skipped_with_info_log() {
+    run_with_content(
+        "registered_human_slash_text_is_skipped_with_info_log",
+        &[Branch::BusyActiveTurn],
+        false,
+        Some("/clear"),
+    );
+}
+
+#[test]
+fn unregistered_human_slash_text_reaches_live_queue() {
+    run_with_content(
+        "unregistered_human_slash_text_reaches_live_queue",
+        &[Branch::BusyActiveTurn],
+        false,
+        Some("/unregistered request"),
     );
 }

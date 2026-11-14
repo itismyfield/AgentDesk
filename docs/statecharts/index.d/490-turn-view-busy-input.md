@@ -1,0 +1,2 @@
+key: 490-turn-view-busy-input
+| `turn-view` busy input (#8113) | `5bcbb82297f5cc3ab8897b81ddb9891459e0321b` + repair | BusyActiveBefore adds a queue marker before the busy result | BusyActiveFixed includes the NotSent fallback and V2 queue membership; HeldFrontFollower covers a non-merging second input behind a modal-held front; NoFallback and QueueMembershipBefore expose invisible input; [report](turn-view/turn-view.report.md). |
