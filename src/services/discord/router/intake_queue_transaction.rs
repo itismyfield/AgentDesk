@@ -80,6 +80,7 @@ pub(super) struct PendingReactionRepair {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct IntakeQueueCommitOptions {
     pub(super) pending_reaction: IntakeQueuePendingReactionPolicy,
+    pub(super) defer_pending_reaction: bool,
     pub(super) advance_checkpoint: bool,
     pub(super) idle_kickoff: IntakeQueueIdleKickoffPolicy,
 }
@@ -97,6 +98,7 @@ impl Default for IntakeQueueCommitOptions {
     fn default() -> Self {
         Self {
             pending_reaction: IntakeQueuePendingReactionPolicy::QueueState,
+            defer_pending_reaction: false,
             advance_checkpoint: true,
             idle_kickoff: IntakeQueueIdleKickoffPolicy::Never,
         }
@@ -371,8 +373,9 @@ where
 
     match outcome.status {
         IntakeQueueCommitStatus::Enqueued { .. } => {
-            match options.pending_reaction {
-                IntakeQueuePendingReactionPolicy::QueueState => {
+            match (options.defer_pending_reaction, options.pending_reaction) {
+                (true, _) => {}
+                (false, IntakeQueuePendingReactionPolicy::QueueState) => {
                     let emoji = queue_pending_reaction_for(&outcome.mailbox_outcome);
                     if effects
                         .apply_pending_reaction(channel_id, message_id, emoji)
@@ -390,7 +393,7 @@ where
                             .await;
                     }
                 }
-                IntakeQueuePendingReactionPolicy::Static(emoji) => {
+                (false, IntakeQueuePendingReactionPolicy::Static(emoji)) => {
                     if effects
                         .apply_pending_reaction(channel_id, message_id, emoji)
                         .await
@@ -418,7 +421,9 @@ where
             }
         }
         IntakeQueueCommitStatus::Refused { reason } => {
-            let repair = if reason == Some(EnqueueRefusalReason::SourceIdAlreadyQueued) {
+            let repair = if !options.defer_pending_reaction
+                && reason == Some(EnqueueRefusalReason::SourceIdAlreadyQueued)
+            {
                 effects
                     .repair_queued_source_pending_reaction(
                         channel_id,
@@ -539,7 +544,7 @@ fn log_commit_outcome(outcome: &IntakeQueueCommitOutcome) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     struct EnvRootGuard {
@@ -676,6 +681,55 @@ mod tests {
                 pending_uploads: Vec::new(),
             },
             options,
+        }
+    }
+
+    #[cfg(unix)]
+    pub(in crate::services::discord::router) async fn committed_pending_ops(
+        options: IntakeQueueCommitOptions,
+    ) -> Vec<(char, bool)> {
+        let mut effects = FakeEffects {
+            enqueue_outcome: MailboxEnqueueOutcome {
+                enqueued: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let outcome = commit_soft_intervention_transaction(&mut effects, request(options)).await;
+        assert!(outcome.accepted());
+        effects
+            .reactions
+            .into_iter()
+            .map(|(_, _, emoji)| (emoji, true))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn deferred_busy_commit_skips_pending_and_duplicate_repair() {
+        for enqueued in [true, false] {
+            let mut effects = FakeEffects {
+                enqueue_outcome: MailboxEnqueueOutcome {
+                    enqueued,
+                    merged: false,
+                    refusal_reason: (!enqueued)
+                        .then_some(EnqueueRefusalReason::SourceIdAlreadyQueued),
+                    persistence_error: None,
+                },
+                repair_reaction: Some('📬'),
+                ..Default::default()
+            };
+            let outcome = commit_soft_intervention_transaction(
+                &mut effects,
+                request(IntakeQueueCommitOptions {
+                    defer_pending_reaction: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+            assert_eq!(outcome.accepted(), enqueued);
+            assert!(effects.reactions.is_empty());
+            assert!(effects.fallback_notices.is_empty());
+            assert_eq!(effects.checkpoints.len(), usize::from(enqueued));
         }
     }
 

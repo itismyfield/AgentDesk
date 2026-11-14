@@ -66,6 +66,11 @@ SELF_TEST_INPUTS: dict[str, tuple[str, ...]] = {
         "tests/test_script_check_inputs.py",
         "tests/test_high_risk_recovery_path_filter.py",
     ),
+    "Statechart index generator tests": (
+        "scripts/ci/statechart_index.py",
+        "tests/test_statechart_index.py",
+        "docs/statecharts/**",
+    ),
     "Writer namespace Windows exact-target runner fixtures (#5670)": SCRIPT_TEST_INPUTS,
     "External toolchain draft/approval/smoke tests (#4555)": SCRIPT_TEST_INPUTS,
     "Comment-only change checker self-tests": (
