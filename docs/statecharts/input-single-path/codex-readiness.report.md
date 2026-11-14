@@ -147,6 +147,7 @@ A related candidate found while replaying, not a model path: the lenient reader 
 - [`codex-readiness.ups.chart.mmd`](codex-readiness.ups.chart.mmd): `CodexReadyUpsUntilEnd`.
 - [`codex-readiness.no-fallback.chart.mmd`](codex-readiness.no-fallback.chart.mmd): `CodexReadyNoFallback`.
 - [`codex-readiness.stop-screen.chart.mmd`](codex-readiness.stop-screen.chart.mmd): `CodexStopScreenNarrow`.
+- [`codex-readiness.enter-gap.chart.mmd`](codex-readiness.enter-gap.chart.mmd): `CodexReadyAfterEnterGapSilent` (the 4-step path: boot, a person's Enter, an input proven ready before the start record, the key reaches the running turn).
 
 The charts do not draw steps that stay in one label (a restart that changes nothing visible, a refused proof, the idle wait step).
 
