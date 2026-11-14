@@ -184,6 +184,22 @@ fn listed_kinds(
     key: &str,
     channels: &BTreeSet<u64>,
 ) -> Result<BTreeMap<u64, RuntimeHandoffKind>> {
+    let kinds = registered_kinds(config, key, channels)?;
+    for id in channels {
+        ensure!(
+            kinds.contains_key(id),
+            "{key}: channel {id} is not registered"
+        );
+    }
+    Ok(kinds)
+}
+
+/// Resolves registered bindings, rejecting invalid kinds while leaving absent channels untyped.
+fn registered_kinds(
+    config: &Config,
+    key: &str,
+    channels: &BTreeSet<u64>,
+) -> Result<BTreeMap<u64, RuntimeHandoffKind>> {
     let mut kinds = BTreeMap::new();
     for (id, channel_provider, channel) in agent_bindings(config) {
         if !channels.contains(&id) {
@@ -197,12 +213,6 @@ fn listed_kinds(
                 "{key}: channel {id} has conflicting providers"
             );
         }
-    }
-    for id in channels {
-        ensure!(
-            kinds.contains_key(id),
-            "{key}: channel {id} is not registered"
-        );
     }
     Ok(kinds)
 }
@@ -288,13 +298,15 @@ impl BootChannels {
                     .filter(|channel| !self.selected.contains(channel))
                     .copied()
                     .collect();
-                let kinds = listed_kinds(config, "o_store", &kept)
+                let kinds = registered_kinds(config, "o_store", &kept)
                     .context("a channel committed to O here left the writer selection")?;
                 for &channel in &kept {
-                    tracing::warn!(
-                        channel,
-                        "[tui_o] committed channel missing from writer selection"
-                    );
+                    if kinds.contains_key(&channel) {
+                        tracing::warn!(
+                            channel,
+                            "[tui_o] committed channel missing from writer selection"
+                        );
+                    }
                     alarms.raise_at(channel, &WriterAlarm::SelectionMissing, Instant::now());
                 }
                 self.kinds.extend(kinds);

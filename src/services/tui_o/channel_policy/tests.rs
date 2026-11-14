@@ -586,15 +586,21 @@ fn a_committed_channel_left_out_of_the_selection_stays_o_on_the_home() {
     let Some(role) = boot_role(test, &roles) else {
         return;
     };
-    let store = commit_on_disk(&[41, 42], &[43]);
-    std::fs::create_dir(store.join("44")).unwrap();
-    std::fs::write(store.join("44/init"), b"{").unwrap();
-    std::fs::create_dir(store.join("045")).unwrap();
-    std::fs::write(store.join("045/init"), b"{").unwrap();
+    let store = if role == "rebound" {
+        crate::config::runtime_root().unwrap().join("o_store")
+    } else {
+        let store = commit_on_disk(&[41, 42], &[43]);
+        std::fs::create_dir(store.join("44")).unwrap();
+        std::fs::write(store.join("44/init"), b"{").unwrap();
+        std::fs::create_dir(store.join("045")).unwrap();
+        std::fs::write(store.join("045/init"), b"{").unwrap();
+        store
+    };
+    let saved_init = std::fs::read(store.join("43/init")).unwrap();
     // 46 is bound to no runtime: a TUI binding left out uncommitted would refuse the boot.
     let registered = [41, 42, 43, 44];
     let selected: &[u64] = match role.as_str() {
-        "dropped" | "unregistered" => &[41],
+        "dropped" | "unregistered" | "rebound" => &[41],
         "listed" => &[41, 42, 43, 44],
         _ => &[],
     };
@@ -604,21 +610,22 @@ fn a_committed_channel_left_out_of_the_selection_stays_o_on_the_home() {
         &registered[..]
     };
     let config = boot_config(selected, registered, serde_json::json!({}));
-    if role == "unregistered" {
-        let error = install(&config).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("o_store: channel 43 is not registered"),
-            "{error:#}"
-        );
-        return;
-    }
     if role == "empty" {
         let error = install(&config).unwrap_err();
         let error = format!("{error:#}");
         assert!(error.contains("tui_o.writer.all_tui: false"), "{error}");
         return;
     }
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(log.reopen().unwrap())
+        .finish();
+    let _tracing = tracing::subscriber::set_default(subscriber);
     install(&config).unwrap();
+    assert_eq!(std::fs::read(store.join("43/init")).unwrap(), saved_init);
     let owned: Vec<_> = [41, 42, 43, 44, 46]
         .into_iter()
         .filter(|&c| o_owns(c))
@@ -626,7 +633,7 @@ fn a_committed_channel_left_out_of_the_selection_stays_o_on_the_home() {
     let held = boot().unwrap().candidate(44).map(Candidate::peek);
     assert_eq!((owned, held), (vec![41, 42, 43, 44], Some(Adoption::Held)));
     let missing = match role.as_str() {
-        "dropped" => vec![42, 43, 44],
+        "dropped" | "unregistered" | "rebound" => vec![42, 43, 44],
         _ => vec![],
     };
     let missing: Vec<_> = missing
@@ -637,6 +644,43 @@ fn a_committed_channel_left_out_of_the_selection_stays_o_on_the_home() {
     install(&config).unwrap();
     let changes = crate::config_live_reload::restart_required_changes(&config, &config);
     assert!(!changes.contains(&"tui_o.writer.channels"), "{changes:?}");
+    if role == "unregistered" {
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        for channel in [43, 44] {
+            assert_eq!(boot().unwrap().kind(channel), None);
+            let warnings: Vec<_> = text
+                .lines()
+                .filter(|line| line.contains(&format!("channel={channel}")))
+                .collect();
+            assert_eq!(warnings.len(), 1, "{text}");
+            assert!(warnings[0].contains("SelectionMissing"), "{text}");
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("services::tui_o::channel_policy::tests::{test}"),
+                "--nocapture",
+            ])
+            .env("ADK_TEST_WRITER_BOOT_ROLE", "rebound")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed; 0 ignored"));
+    } else if role == "rebound" {
+        assert_eq!(
+            boot().unwrap().kind(43),
+            Some(RuntimeHandoffKind::ClaudeTui)
+        );
+        assert_eq!(
+            boot().unwrap().candidate(43).unwrap().peek(),
+            Adoption::Committed
+        );
+    }
 }
 
 /// The unsupported two-node drift: the home keeps its committed channel with an alarm, while a
@@ -761,4 +805,46 @@ fn implicit_default_off_boots_and_holds_tui_bindings() {
         ["tui_o:halted:41", "tui_o:halted:42"],
         "{reasons:?}"
     );
+}
+
+#[test]
+fn kept_registered_channels_still_reject_invalid_provider_and_runtime() {
+    for (binding, expected) in [
+        (
+            serde_json::json!({"id": "42", "provider": "codex", "runtime": "tui"}),
+            "conflicting providers",
+        ),
+        (
+            serde_json::json!({"id": "42", "runtime": "pipe"}),
+            "is not TUI",
+        ),
+        (
+            serde_json::json!({"id": "42", "runtime": "invalid"}),
+            "invalid runtime",
+        ),
+        (
+            serde_json::json!({"id": "42", "provider": "other"}),
+            "non-TUI provider",
+        ),
+    ] {
+        let mut value =
+            serde_json::to_value(boot_config(&[41], &[41, 42], serde_json::json!({}))).unwrap();
+        value["agents"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "extra", "name": "Extra", "channels": {"claude": binding},
+            }));
+        let config = serde_json::from_value::<Config>(value).unwrap();
+        let error = BootChannels::validate(&config)
+            .unwrap()
+            .seeded(&config, |_, _| {
+                Ok(BTreeMap::from([
+                    (41, Adoption::Committed),
+                    (42, Adoption::Committed),
+                ]))
+            })
+            .unwrap_err();
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    }
 }
