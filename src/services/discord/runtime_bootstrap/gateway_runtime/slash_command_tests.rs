@@ -313,7 +313,8 @@ impl Rig {
             );
             let allowed = result.is_ok();
             assert!(
-                name == "cancel-queued" || self.writes.lock().unwrap().is_empty(),
+                matches!(name, "cancel-queued" | "effort")
+                    || self.writes.lock().unwrap().is_empty(),
                 "unexpected non-callback HTTP write"
             );
             json!({"allowed": allowed, "replies": *self.replies.lock().unwrap(), "messages": *self.messages.lock().unwrap()})
@@ -710,11 +711,6 @@ fn registered_choices_cover_every_fixed_slash_parameter() {
     for (command, parameter, expected) in [
         ("tool-call", "action", vec!["on", "off", "status"]),
         ("allowall", "action", vec!["on", "off", "status"]),
-        (
-            "effort",
-            "level",
-            vec!["low", "medium", "high", "xhigh", "max"],
-        ),
         ("usage", "period", vec!["ratelimit", "month"]),
         (
             "inspect",
@@ -740,6 +736,263 @@ fn registered_choices_cover_every_fixed_slash_parameter() {
         assert_eq!(names, expected, "{command}");
         assert!(names.len() <= 25 && names.iter().all(|name| name.chars().count() <= 100));
     }
+}
+
+const EFFORT_LEVELS: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
+
+/// Local TUI hosting for both providers and a Codex home whose metadata lists three models.
+fn effort_fixture(work: impl std::future::Future<Output = ()>) {
+    let _hosting = crate::services::provider_hosting::TEST_CONFIG_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            crate::services::provider_hosting::install_provider_hosting_config(
+                &crate::config::Config::default(),
+            );
+        }
+    }
+    let _restore = Restore;
+    isolated(async {
+        let home = tempfile::tempdir().unwrap();
+        let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+        let _home = set("CODEX_HOME", home.path());
+        let _config = set("AGENTDESK_CONFIG", &home.path().join("missing.yaml"));
+        let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+        let levels = |count: usize| -> Vec<Value> {
+            let listed = EFFORT_LEVELS[..count].iter();
+            listed.map(|effort| json!({"effort": effort})).collect()
+        };
+        let models = json!({"models": [
+            {"slug": "gpt-6-astra", "supported_reasoning_levels": levels(6)},
+            {"slug": "gpt-6-luna", "supported_reasoning_levels": levels(5)},
+            {"slug": "gpt-5.5", "supported_reasoning_levels": levels(4)},
+        ]});
+        std::fs::write(home.path().join("models_cache.json"), models.to_string()).unwrap();
+        let mut config = crate::config::Config::default();
+        for provider in ["claude", "codex"] {
+            let hosted = crate::config::ProviderConfig {
+                tui_hosting: Some(true),
+                ..Default::default()
+            };
+            config.providers.insert(provider.into(), hosted);
+        }
+        crate::services::provider_hosting::install_provider_hosting_config(&config);
+        work.await;
+    });
+}
+
+impl Rig {
+    fn forget(&self) {
+        for seen in [&self.replies, &self.messages] {
+            seen.lock().unwrap().clear();
+        }
+        self.writes.lock().unwrap().clear();
+    }
+
+    /// What the registered `/effort` autocomplete handler suggests for `typed`.
+    async fn effort_choices(&self, data: &Data, typed: &str) -> Vec<String> {
+        self.forget();
+        let found = self.invoke(data, "effort", Some(("level", typed))).await;
+        let choices = found["choices"].as_array().unwrap().iter();
+        choices
+            .map(|choice| {
+                assert_eq!(choice["name"], choice["value"]);
+                choice["value"].as_str().unwrap().to_string()
+            })
+            .collect()
+    }
+
+    /// What the registered `/effort` command says for `level`, typed or picked.
+    async fn effort(&self, data: &Data, level: &str) -> String {
+        self.forget();
+        let focused = Some(("level", level));
+        let ran = self.invoke_inner(data, "effort", focused, false).await;
+        assert_eq!(ran["allowed"], true);
+        let said = ran["messages"].as_array().unwrap().last().cloned();
+        said.expect("the command answers")["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+}
+
+/// The saved level, its pending relaunch, and the level on disk.
+async fn effort_state(data: &Data) -> (Option<String>, bool, Option<String>) {
+    let key = discord_mock::CHANNEL_ID.to_string();
+    let settings = data.shared.settings.read().await;
+    let stored = crate::services::discord::settings::load_bot_settings(&data.token);
+    (
+        settings.channel_effort_levels.get(&key).cloned(),
+        settings.channel_relaunch_pending.contains(&key),
+        stored.channel_effort_levels.get(&key).cloned(),
+    )
+}
+
+fn effort_model(data: &Data, model: &str) {
+    let channel = ChannelId::new(discord_mock::CHANNEL_ID);
+    let models = &data.shared.overrides.model_overrides;
+    models.insert(channel, model.into());
+}
+
+// The suggestions are the channel model's levels, and the command accepts a level exactly when
+// it is suggested; a refused level changes nothing, in memory or on disk.
+#[test]
+fn effort_suggestions_and_command_agree_on_each_codex_model() {
+    effort_fixture(async {
+        let rig = Rig::new_for_channel("example-cdx").await;
+        let data = data(ProviderKind::Codex);
+        data.shared.settings.write().await.owner_user_id = Some(42);
+        for (model, count) in [
+            ("gpt-6-astra", 6),
+            ("gpt-6-luna", 5),
+            ("gpt-5.5", 4),
+            ("unlisted", 0),
+        ] {
+            effort_model(&data, model);
+            let offered = rig.effort_choices(&data, "").await;
+            assert_eq!(offered, EFFORT_LEVELS[..count], "{model}: suggested levels");
+            for level in EFFORT_LEVELS {
+                let before = effort_state(&data).await;
+                let said = rig.effort(&data, level).await;
+                if offered.iter().any(|offer| offer == level) {
+                    assert!(
+                        !said.contains("바꾸지 않았습니다"),
+                        "{model}/{level}: {said}"
+                    );
+                    let saved = Some(level.to_string());
+                    assert_eq!(effort_state(&data).await, (saved.clone(), true, saved));
+                } else {
+                    assert!(
+                        said.starts_with("effort를 바꾸지 않았습니다"),
+                        "{model}/{level}: {said}"
+                    );
+                    assert_eq!(effort_state(&data).await, before, "{model}/{level}");
+                }
+            }
+        }
+        // The channel still holds the last level its listed models took.
+        let held = Some("xhigh".to_string());
+        assert_eq!(effort_state(&data).await, (held.clone(), true, held));
+        effort_model(&data, "gpt-6-luna");
+        assert_eq!(rig.effort_choices(&data, "M").await, ["medium", "max"]);
+        assert_eq!(rig.effort_choices(&data, "x").await, ["xhigh"]);
+        assert_eq!(rig.effort_choices(&data, "u").await, Vec::<String>::new());
+        effort_model(&data, "gpt-6-astra");
+        assert_eq!(rig.effort_choices(&data, "u").await, ["ultra"]);
+        // Typed text that is no level is refused without being echoed.
+        let before = effort_state(&data).await;
+        for typed in ["ultracode", "@everyone", "HIGH!", ""] {
+            let said = rig.effort(&data, typed).await;
+            assert!(said.contains("알 수 없는 effort 값"), "{typed}: {said}");
+            assert!(typed.is_empty() || !said.contains(typed), "{said}");
+            assert_eq!(effort_state(&data).await, before, "{typed}");
+        }
+        data.shared.settings.write().await.owner_user_id = Some(7);
+        assert!(rig.effort_choices(&data, "").await.is_empty());
+    });
+}
+
+// A Codex channel's `/effort` reaches the channel's saved setting: ultra where the model has it,
+// and a refusal that names the level and keeps the setting where it does not.
+#[test]
+fn codex_effort_command_saves_supported_ultra_and_refuses_it_on_luna() {
+    effort_fixture(async {
+        let rig = Rig::new_for_channel("example-cdx").await;
+        let data = data(ProviderKind::Codex);
+        data.shared.settings.write().await.owner_user_id = Some(42);
+        effort_model(&data, "gpt-6-luna");
+        let said = rig.effort(&data, "ultra").await;
+        assert_eq!(
+            said,
+            "effort를 바꾸지 않았습니다: 현재 채널 모델은 effort `ultra`를 지원하지 않습니다. 모델은 그대로 유지됩니다."
+        );
+        assert_eq!(effort_state(&data).await, (None, false, None));
+        let model = data
+            .shared
+            .overrides
+            .model_overrides
+            .get(&ChannelId::new(discord_mock::CHANNEL_ID));
+        assert_eq!(
+            model.map(|model| model.clone()).as_deref(),
+            Some("gpt-6-luna")
+        );
+
+        effort_model(&data, "gpt-6-astra");
+        let said = rig.effort(&data, "ultra").await;
+        assert!(said.contains("effort를 `ultra`로 저장했습니다"), "{said}");
+        assert!(said.contains("Codex TUI"), "{said}");
+        let ultra = Some("ultra".to_string());
+        assert_eq!(effort_state(&data).await, (ultra.clone(), true, ultra));
+        let read = crate::services::discord::commands::channel_effort_level;
+        let channel = ChannelId::new(discord_mock::CHANNEL_ID);
+        let launched = read(&data.shared, &ProviderKind::Codex, channel).await;
+        assert_eq!(
+            launched.as_deref(),
+            Some("ultra"),
+            "the level a launch reads"
+        );
+        let said = rig.effort(&data, "ultra").await;
+        assert!(said.contains("이미 `ultra`"), "{said}");
+    });
+}
+
+// Claude ultra is suggested and saved only while the launch's own CLI answers that ultracode can
+// turn on; an answer of no, or no answer, keeps the five levels and refuses ultra with no change.
+#[cfg(unix)]
+#[test]
+fn claude_ultra_follows_the_capability_the_launch_cli_reports() {
+    use crate::services::claude::capability_probe::tests::{answer, stand_in};
+    effort_fixture(async {
+        let rig = Rig::new_for_channel("example-cc").await;
+        let data = data(ProviderKind::Claude);
+        data.shared.settings.write().await.owner_user_id = Some(42);
+        let dir = tempfile::tempdir().unwrap();
+        let claude = stand_in(dir.path(), &answer(true, true, true));
+        let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+        let _bin = set("AGENTDESK_CLAUDE_PATH", &claude);
+        let five = &EFFORT_LEVELS[..5];
+
+        // No session yet, so no launch folder: ultra is unknown, the five levels still work.
+        effort_model(&data, "claude-opus-4-8");
+        assert_eq!(rig.effort_choices(&data, "").await, five);
+        let said = rig.effort(&data, "ultra").await;
+        assert!(said.contains("확인하지 못했습니다"), "{said}");
+        assert_eq!(effort_state(&data).await, (None, false, None));
+        assert!(!dir.path().join("runs").exists(), "nothing was run");
+
+        session(
+            &data,
+            discord_mock::CHANNEL_ID,
+            dir.path().to_str().unwrap(),
+        )
+        .await;
+        assert_eq!(rig.effort_choices(&data, "h").await, ["high"]);
+        assert!(!dir.path().join("runs").exists(), "ultra was not at stake");
+        assert_eq!(rig.effort_choices(&data, "").await, EFFORT_LEVELS);
+        assert_eq!(rig.effort_choices(&data, "u").await, ["ultra"]);
+        let said = rig.effort(&data, "ultra").await;
+        assert!(said.contains("effort를 `ultra`로 저장했습니다"), "{said}");
+        let ultra = Some("ultra".to_string());
+        assert_eq!(
+            effort_state(&data).await,
+            (ultra.clone(), true, ultra.clone())
+        );
+        let runs = std::fs::read_to_string(dir.path().join("runs")).unwrap();
+        assert!(runs.contains("--model\nclaude-opus-4-8\n"), "{runs}");
+
+        // Another model on the same channel is asked about on its own.
+        std::fs::write(dir.path().join("answer"), answer(true, false, false)).unwrap();
+        effort_model(&data, "claude-haiku-4-5");
+        assert_eq!(rig.effort_choices(&data, "").await, five);
+        assert_eq!(rig.effort_choices(&data, "u").await, Vec::<String>::new());
+        let said = rig.effort(&data, "ultra").await;
+        assert!(said.contains("ultra를 지원하지 않아"), "{said}");
+        assert_eq!(effort_state(&data).await, (ultra.clone(), true, ultra));
+        let said = rig.effort(&data, "high").await;
+        assert!(said.contains("effort를 `high`로 저장했습니다"), "{said}");
+    });
 }
 
 #[test]

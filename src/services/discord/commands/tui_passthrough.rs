@@ -5,32 +5,6 @@ pub(super) mod herdr_settings;
 use super::super::{Context, Error, SharedData, check_auth};
 use super::config::{effective_provider_for_channel, fallback_channel_name_for_feature_toggle};
 
-#[derive(Debug, Clone, Copy, poise::ChoiceParameter)]
-pub(super) enum EffortLevel {
-    #[name = "low"]
-    Low,
-    #[name = "medium"]
-    Medium,
-    #[name = "high"]
-    High,
-    #[name = "xhigh"]
-    Xhigh,
-    #[name = "max"]
-    Max,
-}
-
-impl EffortLevel {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::Xhigh => "xhigh",
-            Self::Max => "max",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 enum ClaudeSlashPassthrough {
     Compact,
@@ -93,18 +67,6 @@ pub(in crate::services::discord) fn is_local_only_slash_command_kind(kind: &str)
     crate::services::tui_prompt_control::is_local_only_slash_command_kind(kind)
 }
 
-fn unsupported_effort_notice(provider: &ProviderKind) -> String {
-    if matches!(provider, ProviderKind::Codex) {
-        return "`/effort`는 로컬 Claude TUI 채널의 기동 설정입니다. Codex의 reasoning effort는 \
-wrapper/env 시작 옵션 경로는 있지만 AgentDesk에 채널 단위 설정면이 아직 없어 여기서는 바꾸지 않습니다."
-            .to_string();
-    }
-    format!(
-        "/effort is only available for local Claude TUI channels. Current provider: {}.",
-        provider.display_name()
-    )
-}
-
 fn unsupported_notice(provider: &ProviderKind, command: ClaudeSlashPassthrough) -> String {
     format!(
         "{} is only available for live Claude TUI channels. Current provider: {}.",
@@ -113,37 +75,32 @@ fn unsupported_notice(provider: &ProviderKind, command: ClaudeSlashPassthrough) 
     )
 }
 
-/// Applies effort on a live Herdr pane and records it in the channel's settings, or saves it
-/// for a local tmux TUI relaunch.
+/// Checks the level against what the channel takes now, then applies it on a live Herdr pane and
+/// records it, or saves it for a local TUI.
 pub(super) async fn effort_save_notice(
     shared: &std::sync::Arc<SharedData>,
     token: &str,
     channel_id: poise::serenity_prelude::ChannelId,
     provider: &ProviderKind,
-    level: EffortLevel,
+    level: &str,
 ) -> String {
-    if !matches!(provider, ProviderKind::Claude) {
-        return unsupported_effort_notice(provider);
-    }
+    let validated = super::config::validate_effort_entry(shared, provider, channel_id, level);
+    let level = match validated.await {
+        Ok(level) => level,
+        Err(reason) => return format!("effort를 바꾸지 않았습니다: {reason}"),
+    };
     if crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some() {
-        use crate::services::provider_hosting::{
-            ProviderSessionDriver, resolve_provider_session_selection_with_channel,
-        };
-        if resolve_provider_session_selection_with_channel(provider, true, Some(channel_id.get()))
-            .driver
-            != ProviderSessionDriver::TuiHosting
-        {
-            return "Herdr /effort는 live Claude TUI pane에서만 지원합니다.".into();
-        }
         return match herdr_settings::effort(shared, token, channel_id, level).await {
             // Claude Code keeps `max` for the running session only, unlike the other levels.
-            Ok(()) if matches!(level, EffortLevel::Max) => "effort를 `max`로 적용했습니다. max는 이 Claude 세션에만 유지되어 pane을 새로 띄우면 Claude 기본값으로 돌아갑니다.".into(),
-            Ok(()) => format!("effort를 `{}`로 적용했습니다.", level.as_str()),
+            Ok(()) if level == "max" => "effort를 `max`로 적용했습니다. max는 이 Claude 세션에만 유지되어 pane을 새로 띄우면 Claude 기본값으로 돌아갑니다.".into(),
+            Ok(()) => format!("effort를 `{level}`로 적용했습니다."),
             Err(error) => format!("effort 적용 미확인: {error}"),
         };
     }
-    let level = level.as_str();
     match super::config::update_channel_effort(shared, token, channel_id, provider, level).await {
+        Ok(true) if matches!(provider, ProviderKind::Codex) => {
+            format!("effort를 `{level}`로 저장했습니다. 다음 Codex TUI 기동부터 적용합니다.")
+        }
         Ok(true) => format!(
             "effort를 `{level}`로 저장했습니다. 다음 새 턴 시작 때 같은 세션으로 TUI를 재기동해 적용합니다(맥락 유지)."
         ),
@@ -304,11 +261,31 @@ async fn run_claude_passthrough(
     Ok(())
 }
 
-/// /effort <level> — apply live Herdr effort or save it for a local tmux TUI relaunch.
+/// The levels this channel's provider and model take that start with what was typed.
+async fn autocomplete_effort(
+    ctx: Context<'_>,
+    partial: &str,
+) -> poise::serenity_prelude::CreateAutocompleteResponse {
+    if !super::autocomplete::authorized(ctx).await {
+        return poise::serenity_prelude::CreateAutocompleteResponse::new();
+    }
+    super::autocomplete::complete(ctx, partial, async {
+        let (provider, _) = resolve_effective_provider_and_tmux_name(ctx).await;
+        let (shared, channel) = (&ctx.data().shared, ctx.channel_id());
+        let levels = super::config::effort_entry_choices(shared, &provider, channel, partial);
+        let levels = levels.await.into_iter();
+        levels.map(|level| (level.clone(), level)).collect()
+    })
+    .await
+}
+
+/// /effort <level> — apply live Herdr effort or save it for a local TUI launch.
 #[poise::command(slash_command, rename = "effort")]
 pub(in crate::services::discord) async fn cmd_effort(
     ctx: Context<'_>,
-    #[description = "Level: low / medium / high / xhigh / max"] level: EffortLevel,
+    #[description = "Level this channel's model supports (ultra where available)"]
+    #[autocomplete = "autocomplete_effort"]
+    level: String,
 ) -> Result<(), Error> {
     let user_name = &ctx.author().name;
     if !check_auth(
@@ -324,12 +301,12 @@ pub(in crate::services::discord) async fn cmd_effort(
     log_command_received!(
         ctx.channel_id().get(),
         user_name,
-        format!("/effort {}", level.as_str())
+        format!("/effort {}", level.escape_debug())
     );
     let (provider, _) = resolve_effective_provider_and_tmux_name(ctx).await;
     let (shared, token) = (&ctx.data().shared, &ctx.data().token);
     ctx.defer().await?;
-    let notice = effort_save_notice(shared, token, ctx.channel_id(), &provider, level).await;
+    let notice = effort_save_notice(shared, token, ctx.channel_id(), &provider, &level).await;
     ctx.say(notice).await?;
     Ok(())
 }

@@ -23,8 +23,8 @@
 | `/fast` | 없음 | 토글, 대상 인자 없음 | `commands/fast_mode.rs:40` | #7678-1 |
 | `/tool-call` | `action` | 기존 choices: on / off / status | `commands/tool_call.rs:182` | #7678-1 |
 | `/goals` | 없음 | 토글, 대상 인자 없음 | `commands/goals.rs:24` | #7678-1 |
-| `/effort` | `level` | 기존 choices: low / medium / high / xhigh / max | `commands/tui_passthrough.rs:333` | #7678-1 |
-| `/compact` | 없음 | 대상 인자 없음 | `commands/tui_passthrough.rs:340` | #7678-1 |
+| `/effort` | `level` | autocomplete: 채널의 provider·모델이 지금 지원하는 effort 값 중 입력 prefix로 시작하는 값(Codex는 모델별, Claude ultra는 capability 확인 시). 직접 입력도 같은 검증을 지나며 미지원 값은 설정 변화 없이 거절 | `commands/tui_passthrough.rs:285` | #8109 |
+| `/compact` | 없음 | 대상 인자 없음 | `commands/tui_passthrough.rs:317` | #7678-1 |
 | `/adk` | 하위 명령 | inspect로 분기, 문자열 인자 없음 | `commands/inspect/mod.rs:60` | #7678-1 |
 | `/adk inspect` | `view` | 기존 choices: last / session / prompt / context / recovery | `commands/inspect/mod.rs:68` | #7678-1 |
 | `/queue` | `all` | Discord 기본 boolean UI, ID·이름 인자 아님 | `commands/diagnostics/mod.rs:66` | #7678-1 |

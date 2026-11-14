@@ -130,7 +130,7 @@ impl Fixture {
                 "test-token",
                 ChannelId::new(CHANNEL),
                 &ProviderKind::Claude,
-                EffortLevel::High,
+                "high",
             ),
             WAIT_CAP,
         )
@@ -442,7 +442,7 @@ fn herdr_settings_rechecks_draft_under_composer_lock_pg() {
                 "test-token",
                 ChannelId::new(CHANNEL),
                 &ProviderKind::Claude,
-                EffortLevel::High,
+                "high",
             )
             .await
         });
@@ -491,7 +491,7 @@ fn herdr_effort_waits_for_overlay_before_navigation_pg() {
             let fx = Fixture::new(&rig).await;
             rig.answer_after_send("pane.read",screen(READY));
             let shared = fx.shared.clone();
-            let command = tokio::spawn(async move {effort_save_notice(&shared,"test-token",ChannelId::new(CHANNEL),&ProviderKind::Claude,EffortLevel::High).await});
+            let command = tokio::spawn(async move {effort_save_notice(&shared,"test-token",ChannelId::new(CHANNEL),&ProviderKind::Claude,"high").await});
             await_within(async {while rig.sends().len()<2 && !command.is_finished() {tokio::task::yield_now().await;}},WAIT_CAP).await;
             assert_eq!(rig.sends().len(),2,"only /effort and Enter precede overlay");
             assert!(!command.is_finished(),"closed-only is not confirmation");
@@ -1070,7 +1070,7 @@ fn herdr_first_input_and_effort_never_submit_mixed_content_pg() {
                 "test-token",
                 ChannelId::new(CHANNEL),
                 &ProviderKind::Claude,
-                EffortLevel::High,
+                "high",
             ))
         });
         await_within(

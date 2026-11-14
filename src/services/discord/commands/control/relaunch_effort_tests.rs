@@ -3,12 +3,12 @@
 
 use super::model_tests::{TOKEN, model_confirm, relaunched_as, transcript};
 use super::*;
-use crate::services::discord::commands::tui_passthrough::{EffortLevel, effort_save_notice};
+use crate::services::discord::commands::tui_passthrough::effort_save_notice;
 
 impl Fixture {
     /// Saves `level` through the `/effort` command, its pending fast change dropped so the effort
     /// change stands alone; what the command said.
-    async fn save_effort(&self, level: EffortLevel) -> String {
+    async fn save_effort(&self, level: &str) -> String {
         let keys = &self.shared.overrides.fast_mode_session_reset_pending;
         keys.clear();
         let (shared, channel, provider) = (&self.shared, self.channel, &ProviderKind::Claude);
@@ -57,7 +57,7 @@ async fn a_saved_effort_relaunches_its_tui_on_the_same_session_pg() {
     let fx = Fixture::new(20, RuntimeHandoffKind::ClaudeTui).await;
     let _idle = crate::services::discord::router::set_hosted_tui_promote_busy_for_tests(false);
 
-    let said = fx.save_effort(EffortLevel::High).await;
+    let said = fx.save_effort("high").await;
     assert!(said.contains("effort를 `high`로 저장했습니다"), "{said}");
     let typed = called(&fx.tmux.take_calls(), "send-keys");
     assert!(!typed, "nothing is typed into the TUI");
@@ -99,7 +99,7 @@ async fn a_saved_effort_relaunches_its_tui_on_the_same_session_pg() {
     assert!(fx.consume().await.is_none(), "the change applies once");
     assert!(!called(&fx.tmux.take_calls(), "kill-session"));
 
-    let said = fx.save_effort(EffortLevel::High).await;
+    let said = fx.save_effort("high").await;
     assert!(said.contains("이미 `high`"), "{said}");
     assert!(
         !fx.relaunch_pending().await,
@@ -119,7 +119,7 @@ async fn clear_keeps_the_saved_effort_and_drops_its_relaunch_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let fx = Fixture::new(21, RuntimeHandoffKind::ClaudeTui).await;
     let _idle = crate::services::discord::router::set_hosted_tui_promote_busy_for_tests(false);
-    fx.save_effort(EffortLevel::Low).await;
+    fx.save_effort("low").await;
     assert!(fx.stored_relaunch_pending());
 
     super::super::native::clear_process_reset_pending(&fx.shared, fx.channel).await;
@@ -154,7 +154,7 @@ async fn effort_off_the_local_tui_is_refused_with_the_setting_kept_pg() {
     let local = crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
     let herdr =
         crate::config::session_hosts::force_for_test(Some(&local), &[(fx.channel.get(), &local)]);
-    let said = fx.save_effort(EffortLevel::Max).await;
+    let said = fx.save_effort("max").await;
     assert!(
         said.contains("effort 적용 미확인") && said.contains("pane 실행 기록 미확인"),
         "{said}"
@@ -170,7 +170,7 @@ async fn effort_off_the_local_tui_is_refused_with_the_setting_kept_pg() {
     };
     headless.providers.insert("claude".into(), claude);
     crate::services::provider_hosting::install_provider_hosting_config(&headless);
-    let said = fx.save_effort(EffortLevel::Max).await;
+    let said = fx.save_effort("max").await;
     assert!(said.contains("로컬 Claude TUI 채널에서만"), "{said}");
     assert_eq!(fx.effort_state().await, untouched);
     assert!(fx.consume().await.is_none());
@@ -192,14 +192,24 @@ async fn effort_off_the_local_tui_is_refused_with_the_setting_kept_pg() {
     let (args, _, env) = fx.launch_with(fx.channel, &fx.name, SESSION, None, effort.as_deref());
     assert!(!args.iter().any(|arg| arg == "--effort"), "{args:?}");
     assert_eq!(env, "max", "without a level the inherited variable stays");
-    let said = effort_save_notice(
-        &fx.shared,
-        TOKEN,
-        fx.channel,
-        &ProviderKind::Codex,
-        EffortLevel::Max,
-    );
-    assert!(said.await.contains("Codex의 reasoning effort"));
+    // Values the channel does not take are refused before any save: an unprobed ultra, the raw
+    // CLI word, and text that is no level, which is not echoed back.
+    let before = fx.effort_state().await;
+    fx.tmux.take_calls();
+    for (given, said_part) in [
+        ("ultra", "확인하지 못했습니다"),
+        ("ultracode", "알 수 없는 effort 값"),
+        ("@everyone", "알 수 없는 effort 값"),
+    ] {
+        let said = fx.save_effort(given).await;
+        assert!(
+            said.starts_with("effort를 바꾸지 않았습니다") && said.contains(said_part),
+            "{said}"
+        );
+        assert!(!said.contains("@everyone"), "{said}");
+        assert_eq!(fx.effort_state().await, before, "{given}");
+    }
+    assert!(!called(&fx.tmux.take_calls(), "kill-session"));
     tc::cleanup_session_temp_files(&fx.name);
 }
 
