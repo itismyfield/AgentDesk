@@ -2776,8 +2776,8 @@ async fn native_8148_merge_real_custody_refuses_clear_before_and_after_v2_adopti
     use crate::test_support::wait::{WAIT_CAP, await_within};
     use futures::FutureExt;
     let runtime = crate::config::TestRuntimeRootGuard::new();
-    for adopted_first in [false, true] {
-        let channel = 8_148_991 + u64::from(adopted_first);
+    for (adopted_first, read_only) in [(false, false), (true, false), (true, true)] {
+        let channel = 8_148_991 + u64::from(adopted_first) + u64::from(read_only);
         let history_path = runtime.path().join(format!("runtime/merge-{channel}.json"));
         let f = Fixture::at(history_path.clone(), channel, true);
         let shared = b2b_shared(None);
@@ -2811,8 +2811,7 @@ async fn native_8148_merge_real_custody_refuses_clear_before_and_after_v2_adopti
             key.channel_id,
         );
         let (path, namespace) =
-            crate::services::turn_orchestrator::queued_head::v2_queue(&persistence, key.channel_id)
-                .unwrap();
+            crate::services::turn_orchestrator::v2_queue(&persistence, key.channel_id).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let snapshot = serde_json::json!({"version":2,"namespace":namespace,
             "items":[{"author_id":7,"message_id":channel+10,"channel_id":channel,
@@ -2826,6 +2825,9 @@ async fn native_8148_merge_real_custody_refuses_clear_before_and_after_v2_adopti
                 .await
                 .unwrap();
         }
+        if read_only {
+            std::fs::write(&path, br#"{"version":3,"items":[]}"#).unwrap();
+        }
         let before = std::fs::read(&path).unwrap();
         let history_before = std::fs::read(&history_path).unwrap();
         let lock = std::fs::OpenOptions::new()
@@ -2835,7 +2837,9 @@ async fn native_8148_merge_real_custody_refuses_clear_before_and_after_v2_adopti
             .truncate(false)
             .open(history_path.with_extension("lock"))
             .unwrap();
-        lock.lock().unwrap();
+        if !read_only {
+            lock.lock().unwrap();
+        }
         let signal = crate::services::turn_orchestrator::ChannelMailboxRegistry::default()
             .turn_finished(key.channel_id);
         let refused = await_within(
@@ -2847,7 +2851,14 @@ async fn native_8148_merge_real_custody_refuses_clear_before_and_after_v2_adopti
             WAIT_CAP,
         )
         .await;
-        assert_eq!(refused.persistence.failed, ["native_input"]);
+        assert_eq!(
+            refused.persistence.failed,
+            [if read_only {
+                "queue_read_only"
+            } else {
+                "native_input"
+            }]
+        );
         assert!(refused.removed_token.is_none());
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert_eq!(std::fs::read(&history_path).unwrap(), history_before);
@@ -2879,6 +2890,9 @@ async fn native_8148_merge_real_custody_refuses_clear_before_and_after_v2_adopti
             )
             .unwrap(),
             serde_json::to_value(row).unwrap()
+        );
+        eprintln!(
+            "MERGE_CLEAR_CASE adopted={adopted_first} read_only={read_only} all_axes_preserved"
         );
         drop(lock);
         drop(custody);
