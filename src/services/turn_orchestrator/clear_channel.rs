@@ -117,7 +117,7 @@ pub(super) fn clear_channel_state(
     active: ActivePolicy,
 ) -> ClearChannelResult {
     // Unknown snapshot versions stay untouched; supported V2 clears through its owner.
-    if let Ok(path) =
+    if let Some(path) =
         pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel_id)
         && let Ok(raw) = std::fs::read_to_string(path)
         && let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw)
