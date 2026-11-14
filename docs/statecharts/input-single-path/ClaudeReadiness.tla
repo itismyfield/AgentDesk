@@ -8,7 +8,19 @@ Ids == 1..N
 Before == Mode = "ready-before-narrow"
 ClearHeld == Mode \in {"ready-clear-held-before", "ready-clear-held-after"}
 ClearPreSource == ClearHeld \/ Mode \in {"ready-clear-pending-before", "ready-clear-pending-after", "ready-clear-pending-recheck"}
-Fresh == ClearPreSource \/ Mode \in {"ready-fresh", "ready-clear", "ready-resume", "ready-late-dialog", "ready-preflight-only"}
+\* A resumed run starts over its old transcript: a finished turn under exit metadata, or a turn cut short.
+\* The daemon restarts over the resumed session and attaches the same transcript again: the start is
+\* gone and a recovery floor stands at the transcript's end. Only the retaining modes end that wait.
+RetainsUnproven == Mode \in {"ready-resume-restart-after", "ready-resume-restart-person",
+                             "ready-resume-restart-any-timeout", "ready-resume-restart-cut"}
+ResumeRestart == RetainsUnproven \/ Mode = "ready-resume-restart-before"
+ResumeAfter == ResumeRestart \/ Mode \in {"ready-resume-meta-after", "ready-resume-cut-after", "ready-resume-person-after"}
+ResumeNoQuiet == Mode = "ready-resume-no-quiet"
+ResumeCut == Mode \in {"ready-resume-cut-before", "ready-resume-cut-after", "ready-resume-restart-cut"}
+ResumeHistory == ResumeAfter \/ ResumeNoQuiet \/ ResumeCut \/ Mode = "ready-resume-meta-before"
+ResumePerson == Mode \in {"ready-resume-person-after", "ready-resume-no-quiet",
+                          "ready-resume-restart-person", "ready-resume-restart-any-timeout"}
+Fresh == ClearPreSource \/ ResumeHistory \/ Mode \in {"ready-fresh", "ready-clear", "ready-resume", "ready-late-dialog", "ready-preflight-only"}
 Dialog == Mode \in {"ready-late-dialog", "ready-preflight-only"}
 Permission == Mode \in {"ready-permission-later", "ready-permission-poison"}
 Race == Mode \in {"ready-race", "ready-no-revalidate"}
@@ -46,33 +58,44 @@ Initial ==
      route |-> [i \in Ids |-> IF Busy /\ i = 1 THEN "busy" ELSE "idle"],
      head |-> 0, proofEpoch |-> 0, proofTurn |-> 0,
      nativeStarts |-> IF Race THEN 1 ELSE 0,
-     restarts |-> IF Mode = "ready-restart" THEN 1 ELSE 0,
+     restarts |-> IF Mode = "ready-restart" \/ ResumeRestart THEN 1 ELSE 0,
+     restored |-> "no", notices |-> [i \in Ids |-> 0], badExpire |-> FALSE,
      compactPending |-> Compact, compacts |-> 0,
      compactFence |-> FALSE, compactEvidence |-> FALSE, compactReady |-> FALSE,
      stashRoundTrips |-> 0,
      badIdleRunning |-> FALSE, badDraft |-> FALSE, badEarly |-> FALSE,
      dialog |-> IF Dialog THEN "Boot" ELSE "None", dialogKeys |-> 0,
      permissionStage |-> 0, poisoned |-> FALSE,
-     badCompact |-> FALSE, badContinuation |-> FALSE]
+     badCompact |-> FALSE, badContinuation |-> FALSE,
+     history |-> IF ResumeCut THEN "cut" ELSE IF ResumeHistory THEN "meta" ELSE "none",
+     personTurns |-> IF ResumePerson THEN 1 ELSE 0]
 Init == r = Initial
 TerminalEligible ==
     /\ ~r.continuing
     /\ r.tail = "hard" \/ (r.tail = "summary" /\ r.stopBoundary = r.turn)
+\* The start alone admits an empty transcript. Over old history it admits only while no turn of
+\* this run exists; the no-quiet mutant drops that condition.
+ResumedStart == r.started /\ ((ResumeAfter /\ r.turn = 0) \/ ResumeNoQuiet)
 CurrentEvidence ==
-    /\ r.observed = "Idle" /\ r.seenEpoch = r.epoch /\ r.seenTurn = r.turn
-    /\ (~r.needsStart \/ r.started)
+    /\ (r.observed = "Idle" /\ r.seenEpoch = r.epoch /\ r.seenTurn = r.turn) \/ ResumedStart
+    /\ (~r.needsStart \/ r.started \/ r.restored = "passed")
+    /\ r.restored # "floor"
     /\ ~r.continuing
     /\ ~r.compactFence
-    /\ (r.started /\ r.turn = 0) \/ r.compactReady \/
+    /\ (r.started /\ r.turn = 0 /\ r.history = "none") \/ ResumedStart \/ r.compactReady \/
        (r.terminal = r.turn /\ r.turn > 0 /\ TerminalEligible)
 Ready == CurrentEvidence /\ ~Before /\ ~r.poisoned
     /\ (~r.oldBinding \/ (ClearPreSource /\ Mode # "ready-clear-pending-before" /\ r.started /\ r.durableClear))
+\* Idle bytes the wait has read, nothing in flight on them, and still no proof: only new activity
+\* in the pane can change that, so no later look does.
+Unproven == r.phase = "Idle" /\ r.observed = "Idle" /\ r.seenEpoch = r.epoch /\ r.seenTurn = r.turn
+    /\ ~r.continuing /\ ~r.compactFence /\ ~CurrentEvidence
 First == {i \in Ids : r.q[i] \in {"queued", "held"} /\
-          \A j \in 1..(i-1) : r.q[j] = "done"}
+          \A j \in 1..(i-1) : r.q[j] \in {"done", "retained"}}
 SessionStart ==
     /\ r.phase = "Booting"
     /\ ~Dialog \/ r.dialog = "Dismissed"
-    /\ r' = [r EXCEPT !.phase = "Idle", !.started = TRUE, !.awake = TRUE]
+    /\ r' = [r EXCEPT !.phase = "Idle", !.started = TRUE, !.awake = TRUE, !.restored = "no"]
 PollDialog ==
     /\ Dialog /\ r.phase = "Booting"
     /\ r.dialog = "Boot" \/ (r.dialog = "Picker" /\ Mode # "ready-preflight-only")
@@ -90,6 +113,7 @@ Finish ==
     /\ ~Suppressed \/ r.softStage >= 4
     /\ ~Permission \/ r.permissionStage = 3
     /\ r' = [r EXCEPT !.phase = "Idle", !.terminal = r.turn, !.tail = "hard",
+                     !.restored = IF @ = "floor" THEN "passed" ELSE @,
                      !.continuing = FALSE, !.softStage = IF Suppressed THEN 5 ELSE @]
 \* A raw matching Stop boundary is recorded together with continuation disposition.
 SuppressStop ==
@@ -102,7 +126,8 @@ SoftSummary ==
 \* Shared observer may report Idle for a summary while the provider is still Running.
 Observe ==
     /\ r' = [r EXCEPT !.observed = IF r.tail = "summary" THEN "Idle"
-                                  ELSE IF r.phase = "Booting" THEN "Unknown" ELSE r.phase,
+                                  ELSE IF r.phase = "Booting" THEN "Unknown"
+                                  ELSE IF r.turn = 0 /\ r.history = "cut" THEN "Running" ELSE r.phase,
                      !.seenEpoch = r.epoch, !.seenTurn = r.turn,
                      !.softStage = IF Suppressed /\ r.softStage = 2 THEN 3 ELSE @,
                      !.awake = IF NoWake \/ (ClearHeld /\ r.heldOnce) \/ (ModalWatch /\ r.modalHeld) THEN @ ELSE TRUE]
@@ -130,9 +155,17 @@ Hold(i) ==
     /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake
     /\ ~ClearHeld \/ Ready
     /\ ~Ready \/ ~ComposerPrepared \/ (ModalWatch /\ r.modalOpen)
+    /\ ~(RetainsUnproven /\ Unproven)
     /\ r' = [r EXCEPT !.q[i] = "held", !.awake = FALSE,
                      !.heldOnce = @ \/ ClearHeld,
                      !.modalHeld = @ \/ (ModalWatch /\ r.modalOpen)]
+\* The readiness budget ends on an unproven source: the owner retains the original with one resend
+\* ask and releases the front. The any-timeout mutant retains whatever the wait was for.
+Expire(i) ==
+    /\ RetainsUnproven /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake
+    /\ Unproven \/ (Mode = "ready-resume-restart-any-timeout" /\ ~Ready)
+    /\ r' = [r EXCEPT !.q[i] = "retained", !.notices[i] = @ + 1,
+                     !.badExpire = @ \/ ~Unproven]
 \* Source evidence and modal focus are independent; close itself emits no owner wake.
 CloseModal ==
     /\ ModalWatch /\ r.modalHeld /\ r.modalOpen
@@ -179,7 +212,7 @@ Submit ==
                      !.badIdleRunning = @ \/ r.phase = "Running",
                      !.badDraft = @ \/ (r.human /\ ~CanPark),
                      !.stashRoundTrips = @ + IF CanPark /\ r.human THEN 1 ELSE 0,
-                     !.badEarly = @ \/ (r.needsStart /\ ~r.started),
+                     !.badEarly = @ \/ (r.needsStart /\ ~r.started /\ r.restored # "passed"),
                      !.badClear = @ \/ (r.oldBinding /\ (~r.started \/ ~r.durableClear \/ r.proofPending # r.pendingSeq)),
                      !.filePublished = IF ClearPreSource THEN TRUE ELSE @,
                      !.badContinuation = @ \/ (Suppressed /\ r.softStage < 5)]
@@ -210,6 +243,10 @@ BusyConsume(i) ==
     /\ r.q[i] = "native-queued" /\ r.phase = "Idle"
     /\ r' = [r EXCEPT !.q[i] = "sent", !.effects[i] = @ + 1,
                      !.phase = "Running", !.turn = @ + 1, !.tail = "assistant"]
+\* A person types into the resumed pane before the queued input goes.
+PersonTurn ==
+    /\ r.personTurns > 0 /\ r.phase = "Idle" /\ (r.started \/ r.restored = "floor")
+    /\ r' = [r EXCEPT !.phase = "Running", !.turn = @ + 1, !.tail = "assistant", !.personTurns = 0]
 Receipt(i) ==
     /\ r.q[i] = "sent"
     /\ r' = [r EXCEPT !.q[i] = "done"]
@@ -217,6 +254,7 @@ Receipt(i) ==
 Restart ==
     /\ r.restarts > 0 /\ r.head = 0
     /\ r' = [r EXCEPT !.epoch = @ + 1, !.observed = "Unknown",
+                     !.restored = IF ResumeRestart THEN "floor" ELSE @,
                      !.started = FALSE, !.awake = FALSE, !.restarts = 0]
 Replay(i) ==
     /\ Mode = "ready-replay" /\ r.q[i] = "done" /\ r.effects[i] = 1
@@ -238,17 +276,18 @@ FinishSelfCompactFence ==
     /\ r' = [r EXCEPT !.compactFence = FALSE, !.compactReady = TRUE, !.awake = TRUE]
 Next == CloseModal \/ WatchModal \/ WatchHeld \/ ChangeClearPending \/ PublishClearFile \/ CompactCompletionEvidence \/ FinishSelfCompactFence \/ PollDialog \/ PermissionRecord \/ SessionStart \/ Finish \/ Observe \/ Stop \/ OldStop \/ RecoverDraft \/ HumanClears \/
         SuppressStop \/ SoftSummary \/ LateAssistant \/
-        NativeStart \/ Revoke \/ Submit \/ Restart \/ CompactSubmit \/ IdleWake \/
-        (\E i \in Ids : Hold(i) \/ Prepare(i) \/ SelectBusy(i) \/ BusyInject(i) \/ BusyPublish(i) \/ ReexposeBusy(i) \/ BusyAbsorb(i) \/ BusyConsume(i) \/ Receipt(i) \/ Replay(i))
+        NativeStart \/ Revoke \/ Submit \/ Restart \/ CompactSubmit \/ IdleWake \/ PersonTurn \/
+        (\E i \in Ids : Hold(i) \/ Expire(i) \/ Prepare(i) \/ SelectBusy(i) \/ BusyInject(i) \/ BusyPublish(i) \/ ReexposeBusy(i) \/ BusyAbsorb(i) \/ BusyConsume(i) \/ Receipt(i) \/ Replay(i))
 Fairness == WF_r(CloseModal) /\ WF_r(WatchModal) /\ WF_r(WatchHeld) /\ WF_r(ChangeClearPending) /\ WF_r(PublishClearFile) /\ WF_r(CompactCompletionEvidence) /\ WF_r(FinishSelfCompactFence) /\ WF_r(PollDialog) /\ WF_r(PermissionRecord) /\ WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
             WF_r(SuppressStop) /\ WF_r(SoftSummary) /\ WF_r(LateAssistant) /\
             WF_r(RecoverDraft) /\ WF_r(HumanClears) /\ WF_r(NativeStart) /\
             WF_r(Revoke) /\ WF_r(Submit) /\ WF_r(CompactSubmit) /\
-            (\A i \in Ids : WF_r(Hold(i)) /\ WF_r(Prepare(i)) /\
+            (\A i \in Ids : WF_r(Hold(i)) /\ WF_r(Expire(i)) /\ WF_r(Prepare(i)) /\
                            WF_r(SelectBusy(i)) /\ WF_r(BusyInject(i)) /\ WF_r(BusyPublish(i)) /\ WF_r(BusyAbsorb(i)) /\ WF_r(BusyConsume(i)) /\ WF_r(Receipt(i)))
 Spec == Init /\ [][Next]_r /\ Fairness
 TypeOK ==
-    /\ r.q \in [Ids -> {"queued", "held", "prepared", "busy-selected", "busy-written", "native-queued", "sent", "done"}]
+    /\ r.q \in [Ids -> {"queued", "held", "prepared", "busy-selected", "busy-written", "native-queued", "sent", "done", "retained"}]
+    /\ r.restored \in {"no", "floor", "passed"} /\ r.notices \in [Ids -> 0..2]
     /\ r.effects \in [Ids -> 0..2] /\ r.writes \in [Ids -> 0..2] /\ r.head \in 0..N
     /\ r.phase \in {"Booting", "Idle", "Running"}
     /\ r.dialogKeys \in 0..1 /\ r.permissionStage \in 0..3
@@ -272,4 +311,11 @@ PendingEventuallyExecutes == \A i \in Ids : (r.q[i] \in {"queued", "held", "prep
 CompactEventuallyExecutes == r.compactPending ~> (r.compacts = 1)
 SelfCompactEventuallyReleases == (r.compacts = 1 /\ r.compactEvidence) ~> (\E i \in Ids : r.writes[i] > 0)
 BusyEventuallyQueues == Busy => <>(r.busyWrites[1] = 1)
+\* A retained original took no key, owes exactly one resend ask, and never leaves custody again.
+RetainedOnce == \A i \in Ids : r.notices[i] <= 1 /\ (r.notices[i] = 1 <=> r.q[i] = "retained")
+    /\ (r.q[i] = "retained" => r.writes[i] = 0 /\ r.effects[i] = 0)
+ExpiryOnlyUnproven == ~r.badExpire
+PendingEventuallySettles == \A i \in Ids : (r.q[i] \in {"queued", "held", "prepared"}) ~> (r.effects[i] >= 1 \/ r.q[i] = "retained")
+ResumedIdleEventuallyReceives == ResumeHistory =>
+    ((r.started /\ r.phase = "Idle" /\ r.draft = "Empty") ~> (\E i \in Ids : r.effects[i] >= 1))
 =============================================================================

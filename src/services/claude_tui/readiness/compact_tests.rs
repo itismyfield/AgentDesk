@@ -131,6 +131,34 @@ fn compact_fresh_start_yields_to_first_input_and_waits_for_its_terminal() {
     );
 }
 
+// A resume start admits the first input over old history; that history's terminal is not this
+// run's, so a compact still waits for the terminal of a turn this run finished.
+#[test]
+fn compact_resumed_start_yields_to_first_input_and_waits_for_its_terminal() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    r.append(
+        json!({"type":"assistant","timestamp":Utc::now() - chrono::Duration::hours(1),
+        "message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}}),
+    );
+    r.terminal();
+    r.append(json!({"type":"cost-state"}));
+    r.hook("resume");
+    let tmux = pane();
+    let mut pending = Pending::capture(&r.session).unwrap();
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Pending);
+    assert!(tmux.sends().is_empty());
+    assert_eq!(r.send(), Ok(()));
+    assert_eq!(tmux.sends(), ["load", "paste", "Enter"]);
+    r.assistant("first answer");
+    r.terminal();
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Submitted);
+    assert_eq!(
+        tmux.sends(),
+        ["load", "paste", "Enter", "/compact", "Enter"]
+    );
+}
+
 #[test]
 fn compact_yields_to_the_shared_first_input_reservation() {
     let _root = crate::config::TestRuntimeRootGuard::new();
