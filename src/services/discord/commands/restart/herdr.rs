@@ -259,6 +259,7 @@ async fn restart(request: Request) -> (String, Option<Seed>) {
         by,
         target,
     } = request;
+    let epoch = Arc::new(epoch);
     let mailbox = shared.mailbox(channel);
     // The turn captured now decides whether the row's dispatch is this restart's to detach.
     let expected = match target.as_deref().filter(|target| target.live()) {
@@ -279,6 +280,10 @@ async fn restart(request: Request) -> (String, Option<Seed>) {
         nonce: target.as_ref().map(|t| t.record.execution_nonce.as_str()),
         dispatch: owned.and_then(|expected| expected.dispatch.as_deref()),
     };
+    #[cfg(test)]
+    if let Some(probe) = PROBES.with(|slot| slot.borrow_mut().before_seed.take()) {
+        probe().await;
+    }
     let admitted = match seed.as_mut() {
         Ok(seed) => seed.admit(&mailbox, (by.0, &by.1), against).await,
         Err(reason) => Admitted::Refused(reason.clone()),
@@ -297,7 +302,7 @@ async fn restart(request: Request) -> (String, Option<Seed>) {
         None => Ok(Applied::Vacant),
         // Already retired: nothing is ended again; the greeting's permit detaches what is left.
         Some(target) => match expected {
-            Some(expected) => terminate(&shared, *target, expected, epoch).await,
+            Some(expected) => terminate(&shared, *target, expected, Arc::clone(&epoch)).await,
             None => Ok(Applied::Retired),
         },
     };
@@ -318,10 +323,26 @@ async fn restart(request: Request) -> (String, Option<Seed>) {
         Some(seed) if absent.is_none() => seed.status(&mailbox).await.ok(),
         _ => None,
     };
+    #[cfg(test)]
+    if let Some(probe) = PROBES.with(|slot| slot.borrow_mut().seed_admitted.take()) {
+        probe().await;
+    }
+    // Include no-close requests and admission retries: clear may finish before either commit.
+    let ended = ended.map(|applied| {
+        if epoch.unchanged() {
+            applied
+        } else {
+            Applied::Cleared
+        }
+    });
     match ended {
         Ok(Applied::Cleared) => {
             if let Some(seed) = seed.take().filter(|_| own) {
-                seed.withdraw(&mailbox).await;
+                // A vacant row cannot refuse a late greeting; keep delivery gated until removal.
+                while let Err(error) = seed.withdraw_confirmed(&mailbox).await {
+                    tracing::warn!(%error, channel_id = channel.get(), "clear waits for restart greeting withdrawal");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
             }
             (Applied::Cleared.response().into(), None)
         }
@@ -351,7 +372,7 @@ async fn terminate(
     shared: &Arc<SharedData>,
     target: Target,
     expected: http_force::Expected,
-    epoch: Epoch,
+    epoch: Arc<Epoch>,
 ) -> Result<Applied, String> {
     let Target {
         pool,
@@ -484,9 +505,7 @@ impl Applied {
             Self::Vacant => "종료할 활성 세션이 없어 새 세션으로 시작합니다.",
             Self::Retired => "기존 세션은 이미 종료되어 있습니다.",
             Self::Ended => "기존 세션 종료를 확인했습니다.",
-            Self::Cleared => {
-                "기존 세션 종료를 확인했습니다.\n겹친 비우기 요청으로 재시작을 중단했습니다."
-            }
+            Self::Cleared => "겹친 비우기 요청으로 재시작을 중단했습니다.",
             Self::Failed => {
                 "기존 세션 종료를 확인했습니다.\n세션 정리를 마치지 못했습니다. 인사말 turn은 시작하지 못했습니다."
             }
@@ -501,12 +520,27 @@ impl Released for Applied {
 #[cfg(test)]
 type DisconnectProbe = Box<dyn FnOnce() -> BoxFuture<'static, ()> + Send>;
 #[cfg(test)]
+#[derive(Default)]
+struct RestartProbes {
+    before_disconnect: Option<DisconnectProbe>,
+    before_seed: Option<DisconnectProbe>,
+    seed_admitted: Option<DisconnectProbe>,
+}
+#[cfg(test)]
 thread_local! {
-    static BEFORE_DISCONNECT: std::cell::RefCell<Option<DisconnectProbe>> = const { std::cell::RefCell::new(None) };
+    static PROBES: std::cell::RefCell<RestartProbes> = std::cell::RefCell::new(RestartProbes::default());
+}
+#[cfg(test)]
+pub(in crate::services::discord) fn probe_restart_seed_admitted_for_tests(probe: DisconnectProbe) {
+    PROBES.with(|slot| slot.borrow_mut().seed_admitted = Some(probe));
+}
+#[cfg(test)]
+pub(in crate::services::discord) fn probe_restart_seed_for_tests(probe: DisconnectProbe) {
+    PROBES.with(|slot| slot.borrow_mut().before_seed = Some(probe));
 }
 #[cfg(test)]
 pub(in crate::services::discord) fn probe_restart_disconnect_for_tests(probe: DisconnectProbe) {
-    BEFORE_DISCONNECT.with(|slot| *slot.borrow_mut() = Some(probe));
+    PROBES.with(|slot| slot.borrow_mut().before_disconnect = Some(probe));
 }
 
 async fn apply(held: &RetiredExclusion, pool: &PgPool, id: i64, epoch: &Epoch) -> Applied {
@@ -514,7 +548,7 @@ async fn apply(held: &RetiredExclusion, pool: &PgPool, id: i64, epoch: &Epoch) -
         return clear_selector(held, pool, id).await;
     }
     #[cfg(test)]
-    if let Some(probe) = BEFORE_DISCONNECT.with(|slot| slot.borrow_mut().take()) {
+    if let Some(probe) = PROBES.with(|slot| slot.borrow_mut().before_disconnect.take()) {
         probe().await;
     }
     match held.disconnect_session_keeping_provider(pool).await {

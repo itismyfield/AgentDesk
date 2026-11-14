@@ -128,6 +128,25 @@ impl Seed {
             tracing::warn!(%error, "restart greeting stays queued for its permit to refuse");
         }
     }
+
+    /// Confirms removal before a clear releases delivery onto a possibly vacant session row.
+    pub(crate) async fn withdraw_confirmed(
+        &self,
+        mailbox: &ChannelMailboxHandle,
+    ) -> Result<(), String> {
+        if mailbox
+            .v2_withdraw_seed(self.ticket.as_str().into())
+            .await?
+        {
+            return Ok(());
+        }
+        match self.status(mailbox).await? {
+            SeedStatus::Gone | SeedStatus::Absent => Ok(()),
+            status => Err(format!(
+                "restart greeting withdrawal unconfirmed: {status:?}"
+            )),
+        }
+    }
 }
 
 /// The execution and dispatch a stored greeting was queued against.

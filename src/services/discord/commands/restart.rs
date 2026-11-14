@@ -499,7 +499,10 @@ mod host_guard_tests {
 mod seed_tests;
 
 #[cfg(all(test, unix))]
-pub(in crate::services::discord) use herdr::probe_restart_disconnect_for_tests;
+pub(in crate::services::discord) use herdr::{
+    probe_restart_disconnect_for_tests, probe_restart_seed_admitted_for_tests,
+    probe_restart_seed_for_tests,
+};
 
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) async fn restart_channel_for_tests(

@@ -145,6 +145,9 @@ impl Owner {
 
     /// Takes the still queued greeting out with a cancelled receipt; a started one stays.
     pub(crate) fn withdraw_seed(&mut self, ticket: &Ticket) -> Result<bool, String> {
+        if self.pending.is_some() && self.recover().is_err() && self.pending.is_some() {
+            return Err("restart greeting withdrawal commit is unconfirmed".into());
+        }
         let prefix = ticket.prefix();
         let at = self
             .snapshot

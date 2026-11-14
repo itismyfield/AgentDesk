@@ -1263,6 +1263,7 @@ src/
 │   │   │   ├── busy_tests.rs
 │   │   │   ├── composer_tests.rs
 │   │   │   ├── first_input.rs
+│   │   │   ├── restart_intent.rs
 │   │   │   └── restart_resume_tests.rs
 │   │   ├── tui_session_launch/
 │   │   │   ├── first_input/

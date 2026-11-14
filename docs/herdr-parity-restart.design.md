@@ -346,7 +346,8 @@ restart와 만나는 시점별 결과:
 
 | clear가 시작한 시점 | 일어나는 일 | 결과 |
 |---|---|---|
-| seed 적재 전 | 평범한 clear. 그 뒤 restart는 clear 뒤 상태에서 시작 | selector 삭제, fresh successor가 인사말 |
+| restart epoch 캡처 전 | 평범한 clear. 그 뒤 restart는 clear 뒤 상태에서 시작 | selector 삭제, fresh successor가 인사말 |
+| epoch 캡처 뒤, seed 적재 전 | 종료할 실행이 없는 Retired·Vacant 요청도 마지막 적재·재적재 뒤 epoch을 확인하고 자기 seed의 철회를 확인할 때까지 gate를 유지 | seed 0, selector 삭제 유지, 새 create·재시작 성공 응답 0 |
 | 적재 뒤, restart exclusion 전(clear가 transition 보유) | clear가 seed를 폐기하고 옛 실행을 끝낸다. restart의 종료는 nonce 불일치로 실패하고 응답은 epoch을 보고 superseded | seed 0, selector 삭제, 세션 0 |
 | restart exclusion 중(clear는 3초 뒤 지나감) | clear가 큐를 폐기한다. 자기 종료는 `transition busy`로 끝날 수 있다(`herdr_terminate.rs:483`). postlude가 epoch을 보고 selector를 지우고 남은 seed를 철회한다 | seed 0, selector 삭제, 세션 0 |
 | exclusion 해제 뒤, owner가 seed를 잡기 전 | 기존 clear가 Retired row를 처리(`herdr_recovery.rs:58`, `:83`, `:115`) | seed 폐기, selector 삭제 |

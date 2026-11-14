@@ -1,7 +1,8 @@
 use super::*;
 use crate::services::discord::commands::{SayProbe, restart_channel_probed_for_tests};
 use crate::services::discord::commands::{
-    probe_restart_disconnect_for_tests, restart_channel_for_tests,
+    probe_restart_disconnect_for_tests, probe_restart_seed_admitted_for_tests,
+    probe_restart_seed_for_tests, restart_channel_for_tests,
 };
 use crate::services::discord::queue_io::cancel_backstop_test_support as wake_probe;
 use crate::services::discord::queue_io::input_owner::restart_gate;
@@ -9,7 +10,7 @@ use crate::services::discord::queue_io::input_owner::restart_seed::{
     Admitted, Seed, SeedStatus, Target,
 };
 use crate::services::discord::router::message_handler::{
-    install_root_recovery_launch, wake_drive_for_test,
+    install_root_recovery_launch, owner_drive_for_test, start_idle_for_test, wake_drive_for_test,
 };
 use crate::services::herdr_launch::clear_epoch;
 use crate::services::turn_orchestrator::restart_operation::Operation;
@@ -62,9 +63,10 @@ async fn selectors(node: &Node) -> (Option<String>, Option<String>) {
         "SELECT claude_session_id, raw_provider_session_id FROM sessions WHERE session_key=$1",
     )
     .bind(&node.key)
-    .fetch_one(&node.pool)
+    .fetch_optional(&node.pool)
     .await
     .unwrap()
+    .unwrap_or_default()
 }
 
 async fn install_owner(node: &Node) {
@@ -1060,6 +1062,337 @@ fn restart_common_on_a_retired_row_queues_the_greeting_without_a_close_pg() {
         wakes.after_reopen().await;
         drop(wakes);
         node.finish().await;
+    });
+}
+
+async fn text_clear(node: &Node) -> Vec<String> {
+    use crate::services::discord::admin_host_guard::tests::Recorder;
+    use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+
+    let api = Recorder::start().await;
+    let (_, gateway, server) = discord_mock::start(discord_mock::DiscordMockState::new()).await;
+    let context =
+        discord_mock::serenity_context(format!("http://127.0.0.1:{}", api.port), gateway).await;
+    crate::services::discord::ready_gateway_for_test(&node.shared, context.clone());
+    let mut message = serenity::Message::default();
+    message.id = serenity::MessageId::new(CHANNEL + 2);
+    message.channel_id = channel();
+    message.author.id = serenity::UserId::new(1);
+    message.author.name = "clear-fixture".into();
+    message.content = "!clear".into();
+    let data = data(node);
+    let handled = crate::services::discord::commands::handle_text_command(
+        &context,
+        &message,
+        &data,
+        channel(),
+        "!clear",
+    );
+    assert!(tokio::time::timeout(WAIT, handled).await.unwrap().unwrap());
+    let posted = format!("POST /api/v10/channels/{CHANNEL}/messages ");
+    let replies = api
+        .take()
+        .into_iter()
+        .filter_map(|call| {
+            let body: Value = serde_json::from_str(call.strip_prefix(&posted)?).ok()?;
+            Some(body["content"].as_str()?.to_owned())
+        })
+        .collect();
+    server.abort();
+    replies
+}
+
+/// Waits for one real owner pass to finish, including its no-front path.
+async fn owner_pass(node: &Node) {
+    use crate::services::discord::queue_io::input_owner::drive::{self, Handoff};
+    let shared = node.shared.clone();
+    let idle: Handoff =
+        Arc::new(move |front| Box::pin(start_idle_for_test(shared.clone(), channel(), front)));
+    let mut drive = owner_drive_for_test(
+        (node.shared.mailbox(channel()), Some(node.pool.clone())),
+        (ProviderKind::Claude, CHANNEL),
+        idle,
+        Some(node.shared.clone()),
+    );
+    let previous = Arc::get_mut(&mut drive).unwrap().settled.take();
+    let completed = ran();
+    let observed = completed.clone();
+    Arc::get_mut(&mut drive).unwrap().settled = Some(Arc::new(move || {
+        let (previous, observed) = (previous.clone(), observed.clone());
+        Box::pin(async move {
+            if let Some(previous) = previous {
+                previous().await;
+            }
+            observed.store(true, Ordering::SeqCst);
+        })
+    }));
+    drive::wake(drive);
+    until("the actual owner pass settles", async || {
+        completed.load(Ordering::SeqCst)
+    })
+    .await;
+}
+
+async fn no_successor(node: &Node, rig: &herdr::P11TerminationRig) {
+    let live: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sessions WHERE discord_token_hash=$1 AND channel_id=$2 AND hosted_execution->>'state' IN ('pending', 'bound')",
+    ).bind(&node.shared.token_hash).bind(CHANNEL.to_string()).fetch_one(&node.pool).await.unwrap();
+    assert_eq!(
+        live, 0,
+        "the overtaken restart installs no Pending or Bound successor"
+    );
+    assert_eq!(
+        rig.writes_with_params()
+            .iter()
+            .filter(|(method, _)| method == "workspace.create")
+            .count(),
+        0,
+        "the overtaken restart sends no Herdr create"
+    );
+    assert_eq!(
+        selectors(node).await,
+        (None, None),
+        "clear's deleted selectors stay deleted"
+    );
+}
+
+async fn clear_before_seed(
+    rig: &herdr::P11TerminationRig,
+    vacant: bool,
+    fault: Option<crate::services::discord::runtime_store::durable_probe::Step>,
+) {
+    use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
+    let _tmux = crate::services::discord::host_defer_gate::tests::ScriptedTmux::install();
+    let node = Node::bind(rig, herdr::HostedState::Retired, None).await;
+    seed_selector(&node).await;
+    node.sql("UPDATE sessions SET status='idle', active_dispatch_id=NULL, last_heartbeat=NULL WHERE session_key=$1 AND $2::TEXT IS NULL", None).await;
+    if vacant {
+        node.sql(
+            "DELETE FROM sessions WHERE session_key=$1 AND $2::TEXT IS NULL",
+            None,
+        )
+        .await;
+    }
+    rig.restore_shell();
+    crate::services::discord::host_defer_gate::tests::map_channel(&node.shared, channel(), "e07")
+        .await;
+    install_owner(&node).await;
+    let wakes = Wakes::observe(&node.shared);
+    let launches = Arc::new(AtomicUsize::new(0));
+    let observed = launches.clone();
+    let _launch = install_root_recovery_launch(
+        channel(),
+        Box::new(move |owner, _| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            owner.defer_before_submit("fixture_stop");
+            Err("NotSent(\"fixture_stop\")".into())
+        }),
+    );
+    let (arrived, paused) = tokio::sync::oneshot::channel();
+    let (resume, released) = tokio::sync::oneshot::channel();
+    probe_restart_seed_for_tests(Box::new(move || {
+        Box::pin(async move {
+            arrived.send(()).unwrap();
+            tokio::time::timeout(WAIT, released)
+                .await
+                .expect("seed admission is released")
+                .unwrap();
+        })
+    }));
+    let watch = Arc::new(Mutex::new(None::<Watch>));
+    if let Some(step) = fault {
+        let saved = watch.clone();
+        let persistence = crate::services::discord::queue_persistence_context(
+            &node.shared,
+            &ProviderKind::Claude,
+            channel(),
+        );
+        let (path, _) =
+            crate::services::turn_orchestrator::v2_queue(&persistence, channel()).unwrap();
+        probe_restart_seed_admitted_for_tests(Box::new(move || {
+            Box::pin(async move {
+                *saved.lock().unwrap() = Some(Watch::new(
+                    &path,
+                    Plan {
+                        fail: vec![step],
+                        ..Default::default()
+                    },
+                ));
+            })
+        }));
+    }
+    let operation_id = match (vacant, fault) {
+        (true, _) => 900_812_824,
+        (false, Some(Step::CreateTemp)) => 900_812_825,
+        (false, Some(_)) => 900_812_826,
+        (false, None) => 900_812_823,
+    };
+    let shared = node.shared.clone();
+    let request = tokio::spawn(async move {
+        let data = crate::services::discord::Data {
+            shared,
+            token: "restart-common-fixture".into(),
+            provider: ProviderKind::Claude,
+        };
+        let http = Arc::new(serenity::Http::new(""));
+        restart_channel_for_tests(
+            &http,
+            &data,
+            channel(),
+            ("restart-fixture", "/restart", operation_id),
+        )
+        .await
+    });
+    tokio::time::timeout(WAIT, paused)
+        .await
+        .expect("restart pauses before seed admission")
+        .unwrap();
+    assert_eq!(prior_of(&node, operation_id).await, Ok(SeedStatus::Absent));
+    assert!(restart_gate::inflight(
+        "claude",
+        &node.shared.token_hash,
+        CHANNEL
+    ));
+    let replies = text_clear(&node).await;
+    assert!(
+        matches!(replies.as_slice(), [reply] if reply.contains("대기 메시지 0건을 비웠어요.")),
+        "{replies:?}"
+    );
+    assert_eq!(
+        selectors(&node).await,
+        (None, None),
+        "the actual clear finishes before seed admission"
+    );
+    resume.send(()).unwrap();
+    if let Some(step) = fault {
+        until(
+            &format!("withdrawal hits the injected {step:?} publication failure"),
+            async || {
+                request.is_finished()
+                    || watch.lock().unwrap().as_ref().is_some_and(|watch| {
+                        watch
+                            .events()
+                            .iter()
+                            .any(|event| event.step == step && !event.ok)
+                    })
+            },
+        )
+        .await;
+        let failures: Vec<_> = watch
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .events()
+            .into_iter()
+            .map(|event| (event.step, event.ok, event.target))
+            .collect();
+        assert!(
+            failures.iter().any(|(at, ok, _)| *at == step && !ok),
+            "{step:?}: publication failure ran before request completion: {failures:?}"
+        );
+        assert!(
+            restart_gate::inflight("claude", &node.shared.token_hash, CHANNEL),
+            "failed withdrawal keeps the restart gate closed"
+        );
+        assert!(
+            !request.is_finished(),
+            "an unconfirmed withdrawal is not reported as a completed restart"
+        );
+        assert_eq!(prior_of(&node, operation_id).await, Ok(SeedStatus::Queued));
+        assert_eq!(
+            items(&node).await,
+            [GREETING],
+            "the failure was not silently discarded in memory"
+        );
+        owner_pass(&node).await;
+        assert_eq!(
+            launches.load(Ordering::SeqCst),
+            0,
+            "the held seed never reaches a launch"
+        );
+        no_successor(&node, rig).await;
+        drop(watch.lock().unwrap().take());
+    }
+    let response = tokio::time::timeout(WAIT, request)
+        .await
+        .expect("restart settles after clear")
+        .unwrap()
+        .unwrap();
+    assert!(
+        response
+            .last()
+            .is_some_and(|text| text.contains("겹친 비우기 요청")),
+        "clear cancels this restart: {response:?}"
+    );
+    assert!(
+        response
+            .iter()
+            .all(|text| !text.contains("새 세션으로 시작합니다")
+                && !text.contains("인사말을 대기열에 등록")
+                && !text.contains("인사말 turn이 시작")),
+        "no successful restart is reported: {response:?}"
+    );
+    wakes.after_reopen().await;
+    assert_eq!(
+        prior_of(&node, operation_id).await,
+        Ok(SeedStatus::Gone),
+        "the admitted greeting is durably withdrawn before gate release"
+    );
+    assert!(
+        items(&node).await.is_empty(),
+        "clear leaves no greeting to run"
+    );
+    owner_pass(&node).await;
+    assert_eq!(
+        launches.load(Ordering::SeqCst),
+        0,
+        "a real owner pass reaches no launch"
+    );
+    no_successor(&node, rig).await;
+    drop(wakes);
+    node.finish().await;
+}
+
+#[test]
+fn restart_common_retired_clear_before_seed_admission_leaves_no_successor_pg() {
+    let Some((rig, runtime)) = rig_child(
+        "restart_channel_tests::restart_common_retired_clear_before_seed_admission_leaves_no_successor_pg",
+    ) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::platform::shell::with_hostname_for_test(herdr::NODE, || {
+        runtime.block_on(clear_before_seed(&rig, false, None));
+    });
+}
+
+#[test]
+fn restart_common_vacant_clear_before_seed_admission_leaves_no_successor_pg() {
+    let Some((rig, runtime)) = rig_child(
+        "restart_channel_tests::restart_common_vacant_clear_before_seed_admission_leaves_no_successor_pg",
+    ) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::platform::shell::with_hostname_for_test(herdr::NODE, || {
+        runtime.block_on(clear_before_seed(&rig, true, None));
+    });
+}
+
+#[test]
+fn restart_common_clear_keeps_the_gate_until_seed_withdrawal_is_confirmed_pg() {
+    use crate::services::discord::runtime_store::durable_probe::Step;
+    let Some((rig, runtime)) = rig_child(
+        "restart_channel_tests::restart_common_clear_keeps_the_gate_until_seed_withdrawal_is_confirmed_pg",
+    ) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    crate::services::platform::shell::with_hostname_for_test(herdr::NODE, || {
+        for fault in [Step::CreateTemp, Step::ParentSync] {
+            runtime.block_on(clear_before_seed(&rig, false, Some(fault)));
+        }
     });
 }
 
