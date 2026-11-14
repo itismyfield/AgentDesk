@@ -239,6 +239,21 @@ class InstanceSupervisorTests(unittest.TestCase):
         self.binary = self.fixture.worktree / "target/debug/agentdesk"
         self.binary.parent.mkdir(parents=True)
 
+    def test_occupied_declared_ports_refuse_after_lease_before_spawn(self):
+        digest = self.binary_fixture()
+        for section in ('api', 'postgres'):
+            with self.subTest(endpoint=section), socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+                occupied.bind(('127.0.0.1', self.manifest[section]['port']))
+                occupied.listen(1)
+                spawn = mock.Mock(side_effect=AssertionError('occupied declared port reached Gateway spawn'))
+                with self.assertRaises(InstanceError):
+                    self.supervise(digest, spawn=spawn)
+                spawn.assert_not_called()
+                self.assertFalse((self.root / 'child-capture.json').exists())
+                self.assertTrue((self.fixture.base / lease.LEASE_NAME).exists())
+            with lease.acquire(self.root, self.fixture.instance_id):
+                pass
+
     def binary_fixture(self, *, wait=False, ignore_term=False, exit_code=0):
         script = f'''#!{sys.executable}
 import fcntl,json,os,signal,sys,time
