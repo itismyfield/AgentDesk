@@ -162,7 +162,7 @@ pub enum WriterAlarm {
         source: SourceId,
         detail: String,
     },
-    /// The writer host stopped before any store write, so Legacy keeps the channel's output.
+    /// The writer host refused the adoption before any store write; the body stays held.
     Released {
         detail: String,
     },

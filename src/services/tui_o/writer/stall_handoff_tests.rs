@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::tui_o::channel_policy::Candidate;
+use crate::services::tui_o::channel_policy::racing_legacy_body;
 use crate::services::tui_o::cutover::claims_judged;
 use crate::services::tui_o::ownership::GatewayOwnership;
 use crate::services::tui_o::writer::host::{FencedFacts, HostParts};
@@ -185,7 +186,7 @@ async fn zombie_markers_expire_soft_at_exact_boundary() {
     clock.to(SOFT + Duration::from_nanos(1)).await;
     assert_eq!(fence_calls(&stalled.io), 1, "the handoff commits once");
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -205,9 +206,13 @@ async fn transcript_cursor_and_placement_do_not_restart_delivery_clocks() {
         clock.to(minute * MINUTE).await;
         append(
             &stalled.path,
-            &[row(&format!("m{minute}"), "capture only"), closed()].concat(),
+            &[
+                row(&format!("m{minute}"), &format!("capture {minute}")),
+                closed(),
+            ]
+            .concat(),
         );
-        stalled.legacy.at(stalled.len());
+        stalled.legacy.at(lagging_now(&stalled));
         for _ in 0..5 {
             assert!(!candidate().claim(CHANNEL));
         }
@@ -223,7 +228,7 @@ async fn transcript_cursor_and_placement_do_not_restart_delivery_clocks() {
     );
     clock.to(SOFT + TICK).await;
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -237,7 +242,7 @@ async fn frontier_progress_restarts_both_clocks_at_the_observed_tick() {
     }
     let first = row("m0", "delivered late");
     let body = [first.clone(), row("m1", "undelivered"), closed()].concat();
-    let stalled = Stalled::new(&body, body.len() as u64, Some(0), Custody::Row);
+    let stalled = Stalled::new(&body, lagging(&body), Some(0), Custody::Row);
     let clock = Clock::new();
     let tasks = stalled.start();
     clock.started().await;
@@ -250,9 +255,7 @@ async fn frontier_progress_restarts_both_clocks_at_the_observed_tick() {
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     clock.to(70 * MINUTE + TICK).await;
     drop(clock);
-    stalled
-        .assert_adopted_at_end(Some(first.len() as u64))
-        .await;
+    stalled.assert_adopted_from(Some(first.len() as u64)).await;
     finish(tasks).await;
 }
 
@@ -269,13 +272,9 @@ async fn actual_completed_body_send_restarts_soft_clock_at_the_observed_tick() {
     let tasks = stalled.start();
     clock.started().await;
     clock.to(30 * MINUTE - TICK).await;
-    let sent = claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
-        "sent"
-    })
-    .await;
+    let sent = racing_legacy_body(CHANNEL, || async { "sent" }).await;
     assert_eq!(sent, Ok(BodySend::Sent("sent")));
     assert_eq!(candidate().sends(), (1, 1));
-    assert!(!claims_judged(CHANNEL).is_empty());
     clock.to(30 * MINUTE).await;
     clock.to(70 * MINUTE - TICK).await;
     stalled.assert_waiting("actual body progress restarted soft expiry");
@@ -283,7 +282,7 @@ async fn actual_completed_body_send_restarts_soft_clock_at_the_observed_tick() {
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     clock.to(70 * MINUTE + TICK).await;
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -315,7 +314,7 @@ async fn epoch_churn_does_not_postpone_exact_hard_boundary() {
     );
     clock.to(HARD + Duration::from_nanos(1)).await;
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -363,7 +362,7 @@ async fn relay_started_after_fence_blocks_hard_expiry_without_progress() {
         clock.to(HARD + TICK).await;
         assert_eq!(adoption(CHANNEL), Adoption::Committed);
         drop(clock);
-        stalled.assert_adopted_at_end(Some(0)).await;
+        stalled.assert_adopted_from(Some(0)).await;
         finish(tasks).await;
     }
     assert_eq!(*logged.0.lock().unwrap(), ["hard", "hard"]);
@@ -378,7 +377,7 @@ async fn redrive_schedule_keeps_hard_expiry_blocked_until_relay_slot_clears() {
         return;
     }
     let body = row("m0", "open through the first redrive rearm");
-    let stalled = Stalled::new(&body, body.len() as u64, Some(0), Custody::Row);
+    let stalled = Stalled::new(&body, lagging(&body), Some(0), Custody::Row);
     let clock = Clock::new();
     let tasks = stalled.start();
     clock.started().await;
@@ -398,7 +397,7 @@ async fn redrive_schedule_keeps_hard_expiry_blocked_until_relay_slot_clears() {
     clock.to(HARD + 2 * TICK).await;
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -414,7 +413,7 @@ async fn both_expired_clocks_choose_soft_after_a_long_open_turn() {
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(logged.clone()))
         .unwrap();
     let body = row("m0", "still open");
-    let stalled = Stalled::new(&body, body.len() as u64, Some(0), Custody::Active);
+    let stalled = Stalled::new(&body, lagging(&body), Some(0), Custody::Active);
     stalled.io.relaying.store(true, Ordering::SeqCst);
     let clock = Clock::new();
     let tasks = stalled.start();
@@ -434,7 +433,7 @@ async fn both_expired_clocks_choose_soft_after_a_long_open_turn() {
         "the successful handoff records its chosen clock"
     );
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -497,7 +496,7 @@ async fn expired_rotation_is_released_before_an_unchanged_open_turn_refusal() {
     clock.to(SOFT + TICK).await;
     assert_eq!(
         adoption(CHANNEL),
-        Adoption::Released,
+        Adoption::Refused,
         "the next expired tick handles rotation before stale OpenTurn cache or B quiet"
     );
     assert!(!stalled.harness.store.has_channel_dir(CHANNEL));
@@ -514,7 +513,7 @@ async fn expired_rotation_is_released_before_an_unchanged_open_turn_refusal() {
     );
     assert_eq!(stalled.alarms().len(), 1, "no unrelated alarm was reported");
     clock.to(SOFT + 3 * TICK).await;
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    assert_eq!(adoption(CHANNEL), Adoption::Refused);
     assert_eq!(stalled.io.alarms.released(), released);
     assert_eq!(fence_calls(&stalled.io), 0);
     assert_eq!(stalled.harness.port.posts(), Vec::<String>::new());
@@ -570,7 +569,7 @@ async fn expired_intake_queue_and_fence_errors_block_without_restarting_the_cloc
             "clearing {blocker} does not add another40m"
         );
         drop(clock);
-        stalled.assert_adopted_at_end(Some(0)).await;
+        stalled.assert_adopted_from(Some(0)).await;
         finish(tasks).await;
     }
 }
@@ -608,9 +607,12 @@ async fn source_appended_when_expiry_pin_starts_must_be_quiet_before_handoff() {
     clock.to(SOFT + 2 * TICK).await;
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     let init = stalled.harness.store.read_init(CHANNEL).unwrap().unwrap();
-    assert_eq!(init.sources[0].delivery_start, new_end);
+    assert_eq!(
+        init.sources[0].delivery_start, 0,
+        "{new_end} is past the frontier"
+    );
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -640,7 +642,7 @@ async fn appended_source_at_expiry_lock_refuses_once_without_restarting_the_cloc
         "source stats do not restart delivery clocks"
     );
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -654,7 +656,7 @@ async fn frontier_at_expiry_lock_refuses_and_restarts_delivery_clocks() {
     }
     let first = row("m0", "delivered late");
     let body = [first.clone(), row("m1", "undelivered"), closed()].concat();
-    let stalled = Stalled::new(&body, body.len() as u64, Some(0), Custody::Row);
+    let stalled = Stalled::new(&body, lagging(&body), Some(0), Custody::Row);
     let clock = Clock::new();
     let tasks = stalled.start();
     clock.started().await;
@@ -671,7 +673,7 @@ async fn frontier_at_expiry_lock_refuses_and_restarts_delivery_clocks() {
     clock.to(HARD).await;
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     drop(clock);
-    stalled.assert_adopted_at_end(Some(delivered)).await;
+    stalled.assert_adopted_from(Some(delivered)).await;
     finish(tasks).await;
 }
 
@@ -690,10 +692,7 @@ async fn expired_adoption_legacy_attempts_are_judged_owned_and_o_posts_once() {
     clock.to(SOFT).await;
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     let sends = AtomicUsize::default();
-    let sent = claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
-        sends.fetch_add(1, Ordering::SeqCst)
-    })
-    .await;
+    let sent = racing_legacy_body(CHANNEL, || async { sends.fetch_add(1, Ordering::SeqCst) }).await;
     assert_eq!(sent, Ok(BodySend::OwnedByO));
     let judged = claims_judged(CHANNEL);
     assert!(
@@ -703,7 +702,7 @@ async fn expired_adoption_legacy_attempts_are_judged_owned_and_o_posts_once() {
     assert!(judged.iter().all(|owned| *owned));
     assert_eq!(sends.load(Ordering::SeqCst), 0);
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -723,14 +722,11 @@ async fn a_real_body_transport_survives_soft_expiry_until_it_finishes() {
     let (started, at_transport) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     let transport = tokio::spawn(async move {
-        claim_then_send(
-            Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))),
-            || async move {
-                started.send(()).unwrap();
-                resumed.await.unwrap();
-                "legacy"
-            },
-        )
+        racing_legacy_body(CHANNEL, || async move {
+            started.send(()).unwrap();
+            resumed.await.unwrap();
+            "legacy"
+        })
         .await
     });
     at_transport.await.unwrap();
@@ -747,7 +743,7 @@ async fn a_real_body_transport_survives_soft_expiry_until_it_finishes() {
     clock.to(HARD).await;
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }
 
@@ -786,7 +782,7 @@ async fn binding_and_epoch_changes_under_the_expiry_lock_refuse_the_old_snapshot
         }
         assert_eq!(adoption(CHANNEL), Adoption::Committed);
         drop(clock);
-        stalled.assert_adopted_at_end(Some(0)).await;
+        stalled.assert_adopted_from(Some(0)).await;
         finish(tasks).await;
     }
 }
@@ -808,15 +804,12 @@ async fn normal_deferred_commit_rejects_a_real_send_started_before_its_fence() {
     let (entered, at_transport) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     let transport = tokio::spawn(async move {
-        claim_then_send(
-            Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))),
-            || async move {
-                sent.fetch_add(1, Ordering::SeqCst);
-                entered.send(()).unwrap();
-                resumed.await.unwrap();
-                "legacy"
-            },
-        )
+        racing_legacy_body(CHANNEL, || async move {
+            sent.fetch_add(1, Ordering::SeqCst);
+            entered.send(()).unwrap();
+            resumed.await.unwrap();
+            "legacy"
+        })
         .await
     });
     at_transport.await.unwrap();
@@ -874,14 +867,11 @@ async fn normal_deferred_commit_rejects_a_real_send_started_before_its_lock() {
                 .enable_all()
                 .build()
                 .unwrap();
-            runtime.block_on(claim_then_send(
-                Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))),
-                || async move {
-                    entered.send(()).unwrap();
-                    completed.await.unwrap();
-                    "legacy"
-                },
-            ))
+            runtime.block_on(racing_legacy_body(CHANNEL, || async move {
+                entered.send(()).unwrap();
+                completed.await.unwrap();
+                "legacy"
+            }))
         });
         at_transport.recv_timeout(Duration::from_secs(2)).unwrap();
         *save.lock().unwrap() = Some(worker);
@@ -918,6 +908,7 @@ async fn ownership_stays_locked_through_init(expired: bool) {
     let tasks = stalled.start();
     clock.started().await;
     if !expired {
+        stalled.legacy.at(stalled.len());
         *stalled.legacy.frontier.lock().unwrap() = Some(stalled.len());
         *stalled.io.custody.lock().unwrap() = Ok(Custody::Free);
     }
@@ -991,6 +982,7 @@ async fn renewed_owned_epoch_between_fence_and_admit_refuses_both_commit_paths()
         let tasks = stalled.start();
         clock.started().await;
         if !expired {
+            stalled.legacy.at(stalled.len());
             *stalled.legacy.frontier.lock().unwrap() = Some(stalled.len());
             *stalled.io.custody.lock().unwrap() = Ok(Custody::Free);
         }
@@ -1084,6 +1076,7 @@ async fn default_intake_fence_prevents_actual_deferred_activation() {
         });
         clock.started().await;
         if !expired {
+            stalled.legacy.at(stalled.len());
             *stalled.legacy.frontier.lock().unwrap() = Some(stalled.len());
             *stalled.io.custody.lock().unwrap() = Ok(Custody::Free);
         }
@@ -1120,10 +1113,7 @@ async fn unselected_pending_and_recovered_channels_preserve_their_paths() {
     let tasks = start_host(&harness, &io, &ready);
     assert!(tasks.is_empty());
     tokio::time::advance(90 * MINUTE).await;
-    let sent = claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
-        "legacy"
-    })
-    .await;
+    let sent = racing_legacy_body(CHANNEL, || async { "legacy" }).await;
     assert_eq!(sent, Ok(BodySend::Sent("legacy")));
     assert!(io.calls().is_empty());
     assert!(!harness.store.has_channel_dir(CHANNEL));
@@ -1189,15 +1179,12 @@ async fn permanent_open_turn_and_held_body_reservation_block_for_120_minutes() {
             let (entered, at_transport) = tokio::sync::oneshot::channel();
             let (resume, resumed) = tokio::sync::oneshot::channel();
             let transport = tokio::spawn(async move {
-                claim_then_send(
-                    Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))),
-                    || async move {
-                        sent.fetch_add(1, Ordering::SeqCst);
-                        entered.send(()).unwrap();
-                        resumed.await.unwrap();
-                        "legacy"
-                    },
-                )
+                racing_legacy_body(CHANNEL, || async move {
+                    sent.fetch_add(1, Ordering::SeqCst);
+                    entered.send(()).unwrap();
+                    resumed.await.unwrap();
+                    "legacy"
+                })
                 .await
             });
             at_transport.await.unwrap();
@@ -1219,7 +1206,7 @@ async fn permanent_open_turn_and_held_body_reservation_block_for_120_minutes() {
             assert_eq!(adoption(CHANNEL), Adoption::Committed);
             assert_eq!(sends.load(Ordering::SeqCst), 1);
             drop(clock);
-            stalled.assert_adopted_at_end(Some(0)).await;
+            stalled.assert_adopted_from(Some(0)).await;
         } else {
             assert_eq!(candidate().sends(), (0, 0));
             assert_eq!(sends.load(Ordering::SeqCst), 0);
@@ -1250,14 +1237,14 @@ async fn frontier_lost_or_misaligned_after_deferral_never_initializes_for_120_mi
         assert!(stalled.harness.port.posts().is_empty());
         assert_eq!(candidate().sends(), (0, 0));
         if frontier.is_none() {
-            assert_eq!(adoption(CHANNEL), Adoption::Released);
+            assert_eq!(adoption(CHANNEL), Adoption::Refused);
             assert_eq!(
                 stalled.alarms(),
                 [(
                     CHANNEL,
                     WriterAlarm::Released {
                         detail:
-                            "writer host: adoption held: the delivery record is not authoritative"
+                            "writer host: adoption refused: the delivery record is not authoritative"
                                 .into(),
                     },
                 )]
@@ -1282,7 +1269,7 @@ async fn frontier_decrease_restarts_the_hard_clock_despite_epoch_churn() {
     let body = [first.clone(), row("m1", "undelivered"), closed()].concat();
     let stalled = Stalled::new(
         &body,
-        body.len() as u64,
+        lagging(&body),
         Some(first.len() as u64),
         Custody::Row,
     );
@@ -1333,6 +1320,6 @@ async fn frontier_decrease_restarts_the_hard_clock_despite_epoch_churn() {
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     assert_eq!(fence_calls(&stalled.io), 1, "the handoff commits once");
     drop(clock);
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     finish(tasks).await;
 }

@@ -1,5 +1,5 @@
-//! A deferred channel whose Legacy stays behind, driven through the real host: O starts at the
-//! source's end after delivery stops progressing; marker and capture activity do not reset it.
+//! A deferred channel whose Legacy stays behind, driven through the real host: O starts at Legacy's
+//! frontier after delivery stops progressing; marker and capture activity do not reset it.
 
 use super::*;
 use crate::services::tui_o::writer::adoption::LegacyEpoch;
@@ -48,6 +48,16 @@ impl LegacyView for Behind {
     }
 }
 
+/// Legacy's cursor before `body`'s closing record, so only the stall takes the turn it ends.
+fn lagging(body: &[u8]) -> u64 {
+    (body.len() - closed().len()) as u64
+}
+
+/// The same lag on the transcript as it stands now.
+fn lagging_now(stalled: &Stalled) -> u64 {
+    stalled.len() - closed().len() as u64
+}
+
 /// A selected channel whose transcript holds `body` and whose Legacy reads it from `cursor` with
 /// its delivered frontier at `frontier`; the gateway reports `custody`.
 struct Stalled {
@@ -87,10 +97,12 @@ impl Stalled {
         }
     }
 
-    /// A closed turn Legacy never delivered, behind an inflight row; Legacy read all of it.
+    /// A closed turn Legacy never delivered, behind an inflight row; Legacy's cursor has not read
+    /// its turn end, so only the stall takes it.
     fn dead_tail() -> Self {
         let body = [row("m0", "undelivered"), closed()].concat();
-        Self::new(&body, body.len() as u64, Some(0), Custody::Row)
+        let cursor = row("m0", "undelivered").len() as u64;
+        Self::new(&body, cursor, Some(0), Custody::Row)
     }
 
     fn start(&self) -> Vec<tokio::task::JoinHandle<()>> {
@@ -111,8 +123,9 @@ impl Stalled {
         assert_eq!(self.alarms(), [], "{why}");
     }
 
-    /// Committed at the source's end with `abandoned` reported once, and the next unit posted once.
-    async fn assert_adopted_at_end(&self, abandoned: Option<u64>) {
+    /// Committed at Legacy's frontier `owed` when records past it were undelivered, else at the
+    /// source's end; nothing is abandoned, nothing posted twice, and the next unit posted once.
+    async fn assert_adopted_from(&self, owed: Option<u64>) {
         assert_eq!(
             adoption(CHANNEL),
             Adoption::Committed,
@@ -121,20 +134,30 @@ impl Stalled {
         );
         let init = self.harness.store.read_init(CHANNEL).unwrap().unwrap();
         let starts: Vec<_> = init.sources.iter().map(|s| s.delivery_start).collect();
-        assert_eq!(starts, [self.len()], "O starts at the source's end");
-        let source = init.sources[0].source_id.clone();
-        let to = self.len();
-        let reported = abandoned.map(|from| WriterAlarm::Abandoned { source, from, to });
-        let reported: Vec<_> = reported.into_iter().map(|alarm| (CHANNEL, alarm)).collect();
-        assert_eq!(self.alarms(), reported);
+        assert_eq!(
+            starts,
+            [owed.unwrap_or(self.len())],
+            "O starts at the frontier"
+        );
+        assert_eq!(self.alarms(), [], "nothing is abandoned");
+        polls(3).await;
+        let before = self.harness.port.posts();
+        // Turn summaries repeat by design; every body is posted once.
+        let bodies: Vec<_> = before
+            .iter()
+            .filter(|post| !post.starts_with("-# "))
+            .collect();
+        let unique: std::collections::BTreeSet<_> = bodies.iter().collect();
+        assert_eq!(unique.len(), bodies.len(), "posted twice: {before:?}");
         append(&self.path, &row("m9", "next"));
         polls(3).await;
-        assert_eq!(self.harness.port.posts(), ["next"]);
+        let after = self.harness.port.posts();
+        assert_eq!(after, [before, vec!["next".to_owned()]].concat());
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_cursor_behind_a_closed_tail_at_boot_waits_out_the_stall_and_starts_at_the_end() {
+async fn a_cursor_behind_a_closed_tail_at_boot_waits_out_the_stall_and_starts_at_the_frontier() {
     let tail = [row("m0", "undelivered"), closed()].concat();
     let cursor = row("m0", "undelivered").len() as u64;
     let stalled = Stalled::new(&tail, cursor, Some(0), Custody::Row);
@@ -142,7 +165,9 @@ async fn a_cursor_behind_a_closed_tail_at_boot_waits_out_the_stall_and_starts_at
     tokio::time::sleep(39 * MINUTE).await;
     stalled.assert_waiting("Legacy may still catch up");
     tokio::time::sleep(2 * MINUTE).await;
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
+    let posts = stalled.harness.port.posts();
+    assert_eq!(posts, ["undelivered", "-# ✅ 완료", "next"]);
 
     // Legacy delivered everything but never read the closing record: nothing is reported.
     let cursor = row("m0", "delivered").len() as u64;
@@ -152,7 +177,7 @@ async fn a_cursor_behind_a_closed_tail_at_boot_waits_out_the_stall_and_starts_at
     tokio::time::sleep(39 * MINUTE).await;
     caught_up.assert_waiting("the cursor still lags");
     tokio::time::sleep(2 * MINUTE).await;
-    caught_up.assert_adopted_at_end(None).await;
+    caught_up.assert_adopted_from(None).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -194,7 +219,7 @@ async fn a_cursor_that_cannot_be_waited_out_leaves_the_channel_to_legacy_at_boot
     async fn released(stalled: Stalled, why: &str) {
         let _tasks = stalled.start();
         polls(3).await;
-        assert_eq!(adoption(CHANNEL), Adoption::Released, "{why}");
+        assert_eq!(adoption(CHANNEL), Adoption::Refused, "{why}");
         assert_eq!(stalled.io.alarms.released().len(), 1, "{why}");
         assert!(!stalled.harness.store.has_channel_dir(CHANNEL), "{why}");
     }
@@ -222,7 +247,7 @@ async fn an_open_turn_at_the_cursor_waits_only_on_a_sound_frontier() {
         let stalled = Stalled::new(&open, end, Some(frontier), Custody::Row);
         let _tasks = stalled.start();
         polls(3).await;
-        assert_eq!(adoption(CHANNEL), Adoption::Released, "{why}");
+        assert_eq!(adoption(CHANNEL), Adoption::Refused, "{why}");
         assert!(!stalled.harness.store.has_channel_dir(CHANNEL), "{why}");
     }
     let stalled = Stalled::new(&open, end, Some(0), Custody::Row);
@@ -255,7 +280,7 @@ async fn a_turn_opened_and_closed_during_the_stall_restarts_it() {
     stalled.assert_waiting("an open turn blocks the expired clock");
     append(&stalled.path, &closed());
     retried().await;
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     abort(tasks);
 }
 
@@ -271,7 +296,7 @@ async fn stall_restarted_by(nudge: impl FnOnce(&Stalled), settle: impl FnOnce(&S
     tokio::time::sleep(39 * MINUTE).await;
     stalled.assert_waiting("the stall restarted");
     tokio::time::sleep(3 * MINUTE).await;
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
 }
 
 async fn stall_not_restarted_by(nudge: impl FnOnce(&Stalled), settle: impl FnOnce(&Stalled)) {
@@ -284,7 +309,7 @@ async fn stall_not_restarted_by(nudge: impl FnOnce(&Stalled), settle: impl FnOnc
     tokio::time::sleep(9 * MINUTE).await;
     stalled.assert_waiting("marker activity did not shorten the wait");
     tokio::time::sleep(2 * MINUTE).await;
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     abort(tasks);
 }
 
@@ -319,7 +344,7 @@ async fn a_new_legacy_redrive_episode_restarts_the_stall() {
 
 #[tokio::test(start_paused = true)]
 async fn a_cursor_that_moves_restarts_the_stall() {
-    stall_not_restarted_by(|s| s.legacy.at(0), |s| s.legacy.at(s.len())).await;
+    stall_not_restarted_by(|s| s.legacy.at(0), |s| s.legacy.at(lagging_now(s))).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -342,7 +367,7 @@ async fn legacy_intake_open_when_the_stall_ends_restarts_it() {
     stalled.assert_waiting("an open intake holds the expired adoption");
     intake(0);
     retried().await;
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     abort(tasks);
 }
 
@@ -360,7 +385,7 @@ async fn a_restart_starts_the_stall_over() {
     tokio::time::sleep(39 * MINUTE).await;
     stalled.assert_waiting("the clock is this process's own");
     tokio::time::sleep(3 * MINUTE).await;
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -381,7 +406,7 @@ async fn a_custody_that_appears_after_its_first_read_releases_the_channel() {
     let _tasks = stalled.start();
     polls(3).await;
     assert!(reached.load(Ordering::SeqCst));
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    assert_eq!(adoption(CHANNEL), Adoption::Refused);
     let released = stalled.io.alarms.released();
     assert!(
         matches!(released.as_slice(), [(CHANNEL, detail)] if detail.contains("custody")),
@@ -419,7 +444,7 @@ async fn a_stalled_adoption_refused_under_the_lock_reports_nothing_and_waits_aga
     tokio::time::sleep(39 * MINUTE).await;
     stalled.assert_waiting("body completion restarted the soft clock");
     tokio::time::sleep(3 * MINUTE).await;
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     abort(tasks);
 }
 
@@ -438,7 +463,7 @@ async fn moved_before_the_lock(stalled: Stalled, nudge: fn(&Behind), abandoned: 
     tokio::time::sleep(38 * MINUTE).await;
     stalled.assert_waiting("a new stall started");
     tokio::time::sleep(3 * MINUTE).await;
-    stalled.assert_adopted_at_end(Some(abandoned)).await;
+    stalled.assert_adopted_from(Some(abandoned)).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -469,7 +494,7 @@ async fn a_cursor_moving_right_before_the_lock_restarts_the_stall() {
     let tasks = stalled.start();
     tokio::time::sleep(41 * MINUTE).await;
     assert!(reached.load(Ordering::SeqCst));
-    stalled.assert_adopted_at_end(Some(0)).await;
+    stalled.assert_adopted_from(Some(0)).await;
     abort(tasks);
 }
 
@@ -483,7 +508,7 @@ async fn a_delivery_right_before_the_lock_restarts_the_stall() {
     }
     let first = row("m0", "delivered late");
     let body = [first.clone(), row("m1", "undelivered"), closed()].concat();
-    let stalled = Stalled::new(&body, body.len() as u64, Some(0), Custody::Row);
+    let stalled = Stalled::new(&body, lagging(&body), Some(0), Custody::Row);
     let nudge: fn(&Behind) = |legacy| {
         let delivered = row("m0", "delivered late").len() as u64;
         *legacy.frontier.lock().unwrap() = Some(delivered);

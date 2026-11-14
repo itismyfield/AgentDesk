@@ -1,8 +1,9 @@
-//! Whether a Codex rollout still sits before any output: its verified `session_meta`, records the
-//! classifier ignores, one turn opener, and one user prompt with that prompt's own mirrors.
+//! Whether a Codex rollout still sits before any output (verified `session_meta`, one opener, one
+//! prompt and its mirrors), and else which turns it records, so delivery is judged turn by turn.
 
-use std::io::Read;
+use std::io::{BufRead, Read};
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -35,6 +36,172 @@ pub(super) fn judge(source: &SourceId) -> Verdict {
     judged(source).unwrap_or_else(|verdict| verdict)
 }
 
+/// One turn as the rollout records it: its first record, when Codex opened it, and when it ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::services::tui_o::writer::late_adopt) struct Span {
+    pub(in crate::services::tui_o::writer::late_adopt) opened: u64,
+    pub(in crate::services::tui_o::writer::late_adopt) opened_at: Option<DateTime<Utc>>,
+    /// `None` while open; a turn the next opener supersedes ends when that opener was written.
+    pub(in crate::services::tui_o::writer::late_adopt) ended_at: Option<Option<DateTime<Utc>>>,
+    /// Where the record that ended it ends, or where the opener superseding it starts.
+    pub(in crate::services::tui_o::writer::late_adopt) ended_end: Option<u64>,
+}
+
+/// A rollout's turns in order, ended or not, and the end of its last complete record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::services::tui_o::writer::late_adopt) struct Frontier {
+    pub(in crate::services::tui_o::writer::late_adopt) turns: Vec<Span>,
+    pub(in crate::services::tui_o::writer::late_adopt) complete: u64,
+    /// Where each record ends, in order.
+    ends: Vec<u64>,
+}
+
+/// How far a delivery's own time may trail the Codex clock of the turn end it posted.
+const DELIVERY_CLOCK_SLACK: chrono::TimeDelta = chrono::TimeDelta::seconds(1);
+
+impl Frontier {
+    /// Where a delivered `(from, to)` leaves these bytes as one turn's delivery: both ends on
+    /// record ends inside that turn's window, and a dated delivery no earlier than its end.
+    pub(in crate::services::tui_o::writer::late_adopt) fn closes(
+        &self,
+        (from, to): (u64, u64),
+        at: Option<DateTime<Utc>>,
+    ) -> Option<u64> {
+        let on_record = |offset: u64| offset == 0 || self.ends.binary_search(&offset).is_ok();
+        if from >= to || to > self.complete || !on_record(from) || !on_record(to) {
+            return None;
+        }
+        let turns = &self.turns;
+        let at_turn = turns
+            .iter()
+            .rposition(|t| t.ended_end.is_some_and(|end| end <= to))?;
+        let (turn, end) = (&turns[at_turn], turns[at_turn].ended_end?);
+        let before = match at_turn.checked_sub(1) {
+            Some(previous) => turns[previous].ended_end?,
+            None => 0,
+        };
+        let past_next = turns.get(at_turn + 1).is_some_and(|next| next.opened < to);
+        let early = matches!((at, turn.ended_at),
+            (Some(at), Some(Some(ended))) if at + DELIVERY_CLOCK_SLACK < ended);
+        (!past_next && !early && before <= from && from < end).then_some(to)
+    }
+}
+
+/// Streams `source` for its turns, whatever its size. A turn end only ends its turn and never
+/// moves where delivery stands; a later `session_meta` drops every turn before it.
+pub(in crate::services::tui_o::writer::late_adopt) fn frontier(
+    source: &SourceId,
+) -> Result<Frontier, Verdict> {
+    let mut reader = std::io::BufReader::new(open(source)?);
+    let (mut turns, mut start, mut metas) = (Vec::<Span>::new(), 0, 0);
+    let (mut ends, mut line) = (Vec::new(), Vec::new());
+    loop {
+        line.clear();
+        reader.read_until(b'\n', &mut line).map_err(waits(source))?;
+        if line.last() != Some(&b'\n') {
+            break;
+        }
+        let line = line.as_slice();
+        let at = start;
+        start += line.len() as u64;
+        ends.push(start);
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let value = serde_json::from_slice::<Value>(line).ok();
+        let value = value
+            .filter(Value::is_object)
+            .ok_or_else(|| Verdict::Refuse(format!("malformed record at {at}")))?;
+        if value["type"] == "session_meta" {
+            metas += 1;
+            if metas > 1 {
+                turns.clear();
+            }
+            continue;
+        }
+        let stamp = value["timestamp"].as_str();
+        let stamp = stamp.and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok());
+        let written = stamp.map(|stamp| stamp.with_timezone(&Utc));
+        for fact in classify(ShadowProvider::Codex, &value) {
+            match fact {
+                RecordFact::TurnStart(_) => {
+                    if let Some(turn) = turns.last_mut().filter(|turn| turn.ended_at.is_none()) {
+                        turn.ended_at = Some(written);
+                        turn.ended_end = Some(at);
+                    }
+                    turns.push(Span {
+                        opened: at,
+                        opened_at: written,
+                        ended_at: None,
+                        ended_end: None,
+                    });
+                }
+                RecordFact::Prompt(..)
+                    if turns.last().is_none_or(|turn| turn.ended_at.is_some())
+                        && !is_codex_context_record(&value["payload"]) =>
+                {
+                    turns.push(Span {
+                        opened: at,
+                        opened_at: written,
+                        ended_at: None,
+                        ended_end: None,
+                    });
+                }
+                RecordFact::Idle(_) => {
+                    if let Some(turn) = turns.last_mut().filter(|turn| turn.ended_at.is_none()) {
+                        turn.ended_at = Some(written);
+                        turn.ended_end = Some(start);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if metas == 0 {
+        return Err(Verdict::Wait("no session_meta yet".into()));
+    }
+    session_proven(source)?;
+    Ok(Frontier {
+        turns,
+        complete: start,
+        ends,
+    })
+}
+
+/// The SHA-256 of `source`'s bytes before `at`, as an init records the prefix it starts after.
+pub(in crate::services::tui_o::writer::late_adopt) fn hash_before(
+    source: &SourceId,
+    at: u64,
+) -> Result<String, Verdict> {
+    let mut prefix = open(source)?.take(at);
+    let (mut hasher, mut chunk, mut read) = (Sha256::new(), vec![0; 64 << 10], 0);
+    loop {
+        let got = prefix.read(&mut chunk).map_err(waits(source))?;
+        if got == 0 {
+            break;
+        }
+        hasher.update(&chunk[..got]);
+        read += got as u64;
+    }
+    if read < at {
+        let shown = source.path.display();
+        return Err(Verdict::Wait(format!(
+            "source {shown} holds fewer than {at} bytes"
+        )));
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// A failed read waits; a header that does not prove the bound session refuses the rollout.
+fn session_proven(source: &SourceId) -> Result<(), Verdict> {
+    strict_parent_session(&source.path, &source.session_id)
+        .map(|_| ())
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::Other => Verdict::Refuse(error.to_string()),
+            _ => Verdict::Wait(error.to_string()),
+        })
+}
+
 fn judged(source: &SourceId) -> Result<Verdict, Verdict> {
     let bytes = read(source)?;
     let complete = bytes
@@ -54,13 +221,7 @@ fn judged(source: &SourceId) -> Result<Verdict, Verdict> {
     if complete != bytes.len() {
         return Err(Verdict::Wait("the rollout ends inside a record".into()));
     }
-    // A failed read waits; a header that does not prove the bound session refuses the rollout.
-    strict_parent_session(&source.path, &source.session_id).map_err(|error| {
-        match error.kind() {
-            std::io::ErrorKind::Other => Verdict::Refuse(error.to_string()),
-            _ => Verdict::Wait(error.to_string()),
-        }
-    })?;
+    session_proven(source)?;
     Ok(Verdict::Eligible(Prefix {
         len: bytes.len() as u64,
         sha256: hex::encode(Sha256::digest(&bytes)),
@@ -68,20 +229,31 @@ fn judged(source: &SourceId) -> Result<Verdict, Verdict> {
     }))
 }
 
+/// A failed read of `source` waits.
+fn waits(source: &SourceId) -> impl Fn(std::io::Error) -> Verdict + '_ {
+    move |error| Verdict::Wait(format!("source {}: {error}", source.path.display()))
+}
+
+/// `source`'s file while it is still the file the bind named.
+fn open(source: &SourceId) -> Result<std::fs::File, Verdict> {
+    let file = std::fs::File::open(&source.path).map_err(waits(source))?;
+    let meta = file.metadata().map_err(waits(source))?;
+    if file_identity(&meta).1 != source.ino {
+        let shown = source.path.display();
+        return Err(Verdict::Refuse(format!("source {shown} was replaced")));
+    }
+    Ok(file)
+}
+
+/// A rollout judged before any output, read whole within the small fresh-prefix budget.
 pub(in crate::services::tui_o::writer::late_adopt) fn read(
     source: &SourceId,
 ) -> Result<Vec<u8>, Verdict> {
     let shown = source.path.display();
-    let wait = |error: std::io::Error| Verdict::Wait(format!("source {shown}: {error}"));
-    let file = std::fs::File::open(&source.path).map_err(wait)?;
-    let meta = file.metadata().map_err(wait)?;
-    if file_identity(&meta).1 != source.ino {
-        return Err(Verdict::Refuse(format!("source {shown} was replaced")));
-    }
     let mut bytes = Vec::new();
-    file.take(MAX_READ_BYTES + 1)
+    (open(source)?.take(MAX_READ_BYTES + 1))
         .read_to_end(&mut bytes)
-        .map_err(wait)?;
+        .map_err(waits(source))?;
     match bytes.len() as u64 {
         len if len > MAX_READ_BYTES => Err(Verdict::Refuse(format!(
             "source {shown} holds more than {MAX_READ_BYTES} bytes"

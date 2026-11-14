@@ -41,6 +41,9 @@ pub struct SourceEvidence {
     pub proof: Proof,
     /// Legacy's proof-linked native checkpoint `C`: where it stopped consuming, not delivering.
     pub native_cursor: Option<u64>,
+    /// Legacy's delivered end `F` on the same checkpoint, at most `C`; O starts there while a turn
+    /// is held for its adoption.
+    pub frontier: Option<u64>,
     pub prefix: Parse,
     /// The records in `[C, B)`.
     pub suffix: Suffix,
@@ -146,7 +149,10 @@ evidence_enum!(
     /// A boot step: `Spawned` and `Skipped` say a task started or was left out, not that it ended.
     Step { Complete, Spawned, Skipped, Timeout }
 );
-evidence_enum!(Load { Clear, Busy });
+evidence_enum!(
+    /// `Held`: busy with a turn whose body waits for O's adoption; it stays busy and does not refuse.
+    Load { Clear, Busy, Held }
+);
 evidence_enum!(
     /// What Legacy may still owe a channel; every kind must read Clear before adoption.
     Obligation {

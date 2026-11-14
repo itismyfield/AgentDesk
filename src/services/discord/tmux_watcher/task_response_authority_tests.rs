@@ -182,7 +182,8 @@ async fn a_watcher_task_response_that_sends_no_body_leaves_a_pending_adoption() 
         let session = format!("AgentDesk-claude-census-task-{channel}");
         let jsonl = temp.path().join(format!("census-task-{channel}.jsonl"));
         let _tui = test_override::bind_claude_tui_session(&session, &jsonl.to_string_lossy());
-        let _candidate = test_override::force_candidates(&[(channel, ClaudeTui)]);
+        // An empty selection leaves the response Legacy's, whose census source this checks.
+        let _legacy = test_override::force_channels(&[]);
         let body = if chunks {
             "watcher response line\n".repeat(100)
         } else {

@@ -256,10 +256,10 @@ pub(super) async fn run_standby_relay(
                     text,
                 )
             };
-            // The relay claims the channel as it posts; O taking it meanwhile ends the relay.
+            // The relay claims the channel as it posts; once O takes it, only a row O owes settles.
             let claim = (!result_text.trim().is_empty())
                 .then(|| BodyClaim::new(channel_id.get(), turn_binding.runtime_kind));
-            let Ok(BodySend::Sent(delivered)) = turn_binding
+            let sent = turn_binding
                 .census_source
                 .clone()
                 .observe(
@@ -269,8 +269,8 @@ pub(super) async fn run_standby_relay(
                         claim_then_send_at(BodySite::StandbyRelay, claim, send).await
                     }),
                 )
-                .await
-            else {
+                .await;
+            let Some(delivered) = scheduled_settle::delivered(sent, &provider, channel_id) else {
                 return;
             };
             if delivered {

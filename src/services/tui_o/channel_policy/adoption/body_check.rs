@@ -1,14 +1,9 @@
-//! Test-only check that a claim which released a pending adoption was followed by the body it was
-//! taken for: a sink showing that body settles the release and must find it released already.
+//! Test-only check that a selected channel's held body never leaves through Legacy: no sink write
+//! carries it while O has not adopted the channel, and the body path leaves the adoption as it was.
 
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use super::{Adoption, Candidate};
-
-pub(super) fn note_release(candidate: &Candidate) {
-    candidate.bodiless.store(true, Ordering::SeqCst);
-}
 
 /// The write that carried content to a sink.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,13 +16,11 @@ pub(crate) enum SinkOp {
 /// scenario would send. Clones share the watch, so a sink on another task or thread can hold one.
 #[derive(Clone, Debug)]
 pub(crate) struct BodyCheck {
-    channel: u64,
     candidate: Candidate,
     body: String,
-    /// Adoptions a sink found as the body left without a claim before it.
-    early: Arc<Mutex<Vec<Adoption>>>,
-    /// Writes that carried the body to another channel; they settle no release.
-    misdirected: Arc<Mutex<Vec<(u64, SinkOp)>>>,
+    start: Adoption,
+    /// Writes that carried the body, with the adoption each found.
+    leaked: Arc<Mutex<Vec<(u64, SinkOp, Adoption)>>>,
 }
 
 impl BodyCheck {
@@ -41,13 +34,11 @@ impl BodyCheck {
             !body.trim().is_empty(),
             "the watched body must be visible text"
         );
-        candidate.bodiless.store(false, Ordering::SeqCst);
         Self {
-            channel,
+            start: candidate.peek(),
             candidate,
             body: body.trim().to_string(),
-            early: Arc::default(),
-            misdirected: Arc::default(),
+            leaked: Arc::default(),
         }
     }
 
@@ -55,21 +46,12 @@ impl BodyCheck {
         self.candidate.peek()
     }
 
-    /// A sink is about to write `content` to `channel`. When it carries the body to the watched
-    /// channel, the claim must already have released the adoption, and that release is settled.
+    /// A sink is about to write `content` to `channel`; carrying the watched body is a leak.
     pub(crate) fn sink(&self, channel: u64, op: SinkOp, content: &str) {
-        if !content.contains(&self.body) {
-            return;
+        if content.contains(&self.body) {
+            let state = self.candidate.peek();
+            self.leaked.lock().unwrap().push((channel, op, state));
         }
-        if channel != self.channel {
-            self.misdirected.lock().unwrap().push((channel, op));
-            return;
-        }
-        let state = self.candidate.peek();
-        if state != Adoption::Released {
-            self.early.lock().unwrap().push(state);
-        }
-        self.candidate.bodiless.store(false, Ordering::SeqCst);
     }
 
     /// An HTTP sink's request: the channel comes from its `/channels/{id}` path, and only a POST
@@ -86,28 +68,41 @@ impl BodyCheck {
         self.sink(channel.unwrap_or(0), op, content);
     }
 
-    /// Whether a claim released the adoption and no sink has shown the body since.
-    pub(crate) fn bodiless_release(&self) -> bool {
-        self.candidate.bodiless.load(Ordering::SeqCst)
-    }
-
-    /// Scenario end: the body never left before its claim, and no claim released the adoption
-    /// without the body following.
+    /// Scenario end: no write carried the held body, and the adoption is still the one watched.
     pub(crate) fn assert_settled(&self) {
-        let early = self.early.lock().unwrap().clone();
-        assert!(
-            early.is_empty(),
-            "the body left before its claim, as {early:?}"
-        );
-        let misdirected = self.misdirected.lock().unwrap().clone();
-        assert!(
-            misdirected.is_empty(),
-            "the body went to another channel: {misdirected:?}"
-        );
-        assert!(
-            !self.bodiless_release(),
-            "a claim released a pending adoption and no body was shown (adoption {:?})",
-            self.adoption()
+        let leaked = self.leaked.lock().unwrap().clone();
+        assert!(leaked.is_empty(), "the held body left: {leaked:?}");
+        assert_eq!(
+            self.adoption(),
+            self.start,
+            "the body path changed the adoption"
         );
     }
 }
+
+/// A Legacy body send racing a writer test: on an unadopted channel it is counted by a direct
+/// claim, as the gate holds such a body; an adopted or unselected channel answers through the gate.
+pub(crate) async fn racing_legacy_body<T, F, Fut>(channel: u64, send: F) -> RacingSend<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    use crate::services::tui_o::cutover::{self, BodyClaim, BodySend};
+    let (candidate, kind) = cutover::test_override::with_channels(|boot| {
+        let boot = boot?;
+        Some((boot.candidate(channel).cloned(), boot.kind(channel)))
+    })
+    .expect("a forced snapshot");
+    let Some(candidate) = candidate.filter(|candidate| !candidate.peek().owned()) else {
+        return cutover::claim_then_send(Some(BodyClaim::new(channel, kind)), send).await;
+    };
+    let claimed = candidate.claim_body(channel);
+    let sent = send().await;
+    drop(claimed);
+    Ok(BodySend::Sent(sent))
+}
+
+type RacingSend<T> = Result<
+    crate::services::tui_o::cutover::BodySend<T>,
+    crate::services::tui_o::cutover::IdentityError,
+>;

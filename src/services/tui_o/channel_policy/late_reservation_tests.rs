@@ -85,7 +85,11 @@ fn boot_off_and_writer_off_keep_the_original_pending_policy() {
     let candidate = boot.candidate(41).unwrap();
     assert!(!candidate.late_adopt_origin());
     assert!(!candidate.claim(41));
-    assert_eq!(candidate.peek(), Adoption::Released);
+    assert_eq!(
+        candidate.peek(),
+        Adoption::Pending,
+        "a claim no longer releases it"
+    );
 }
 
 #[test]
@@ -130,7 +134,7 @@ fn cleanup_before_first_poll_and_panic_releases_absent_store() {
         } else {
             drop(guard);
         }
-        assert_eq!(candidate.peek(), Adoption::Released);
+        assert_eq!(candidate.peek(), Adoption::Refused);
     }
 }
 

@@ -866,10 +866,10 @@ async fn busy_crash_snapshot_before_first_key_preserves_the_accepted_original() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gated_idle_start_restores_pending_and_delivers_native_answer() {
+async fn gated_idle_start_restores_pending_and_leaves_the_native_answer_to_o() {
     if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::single_marker::",
-        "gated_idle_start_restores_pending_and_delivers_native_answer"
+        "gated_idle_start_restores_pending_and_leaves_the_native_answer_to_o"
     )) {
         return;
     }
@@ -929,6 +929,8 @@ async fn gated_idle_start_restores_pending_and_delivers_native_answer() {
         await_within(settled.recv(), WAIT_CAP).await.unwrap(),
         Ok(())
     );
+    // O adopts the channel while the admitted turn runs, so its answer is O's to deliver.
+    crate::test_support::o_store::adopt_installed(rig.channel.get());
     await_within(recorded.recv(), WAIT_CAP).await.unwrap();
     let mut native = fs::OpenOptions::new()
         .append(true)
@@ -943,10 +945,11 @@ async fn gated_idle_start_restores_pending_and_delivers_native_answer() {
     .unwrap();
     await_within(bridge, WAIT_CAP).await.unwrap();
     assert!(
-        rig.mock
+        !rig.mock
             .written_texts()
             .iter()
-            .any(|text| text == "idle completed")
+            .any(|text| text.contains("idle completed")),
+        "O delivers the native answer, not Legacy"
     );
     assert!(
         reaction_ops(&rig)

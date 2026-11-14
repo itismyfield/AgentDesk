@@ -172,12 +172,12 @@ async fn o_delegated_anchor_repost_is_skipped() {
     }
 }
 
-/// A repost refused before its send (its attempt was not recorded) leaves a pending adoption; the
-/// repost that posts ends it first and shows the answer once.
+/// A pending adoption holds an anchor repost whether or not its attempt was recorded: the row is
+/// preserved for O, nothing posts, and the adoption stays.
 #[tokio::test(flavor = "current_thread")]
-async fn only_an_anchor_repost_that_posts_ends_a_pending_adoption() {
+async fn a_pending_adoption_holds_an_anchor_repost_and_preserves_its_row() {
     use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
-    if !isolated("only_an_anchor_repost_that_posts_ends_a_pending_adoption") {
+    if !isolated("a_pending_adoption_holds_an_anchor_repost_and_preserves_its_row") {
         return;
     }
     let shared = crate::services::discord::make_shared_data_for_tests();
@@ -205,21 +205,15 @@ async fn only_an_anchor_repost_that_posts_ends_a_pending_adoption() {
             .filter(|content| content.contains(BODY))
             .count();
         check.assert_settled();
-        if refused {
-            assert_eq!(outcome, AnchorRepostOutcome::RefusedPreserveRow);
-            assert_eq!(
-                (posts, check.adoption()),
-                (0, Adoption::Pending),
-                "{shown:?}"
-            );
-        } else {
-            let delivered = AnchorRepostOutcome::Relayed(RecoveryRelayOutcome::Delivered);
-            assert_eq!(outcome, delivered);
-            assert_eq!(
-                (posts, check.adoption()),
-                (1, Adoption::Released),
-                "{shown:?}"
-            );
-        }
+        assert_eq!(
+            outcome,
+            AnchorRepostOutcome::RefusedPreserveRow,
+            "refused={refused}"
+        );
+        assert_eq!(
+            (posts, check.adoption()),
+            (0, Adoption::Pending),
+            "{shown:?}"
+        );
     }
 }

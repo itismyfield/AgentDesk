@@ -178,7 +178,7 @@ impl Channel {
             detail.contains(reason),
             "refused for {reason}, not: {detail}"
         );
-        assert_eq!(self.candidate.peek(), Adoption::Released);
+        assert_eq!(self.candidate.peek(), Adoption::Refused);
         assert_eq!(store.read_init(self.channel).unwrap(), None, "no init");
     }
 }
@@ -447,6 +447,30 @@ fn a_prompt_past_legacys_frontier_is_reported_undelivered() {
     let channel = delivered(641009, &[first, next].concat(), 3);
     let quiet = line_len(&system("turn_duration"));
     assert_eq!(abandoned_past_frontier(&channel), quiet);
+}
+
+/// With a quiet record between Legacy's frontier and the first owed one, O takes over from the
+/// frontier itself, quiet record included, over the hash of the bytes before it.
+#[test]
+fn records_owed_past_a_quiet_gap_start_the_init_at_the_frontier() {
+    let first = [prompt("q"), answer("first"), system("stop_hook_summary")];
+    let next = [
+        system("turn_duration"),
+        prompt("next"),
+        system("turn_duration"),
+    ];
+    let channel = delivered(641012, &[first, next].concat(), 3);
+    let frontier = channel.legacy.frontier.lock().unwrap().unwrap();
+    let snapshot = channel.pin().unwrap().owed_to_o();
+    assert!(snapshot.owed().is_none() && snapshot.abandoned().is_none());
+    let sources = snapshot.recheck(&channel.legacy, &channel.log, channel.channel);
+    let source = sources.unwrap().remove(0);
+    let bytes = std::fs::read(&channel.source.path).unwrap();
+    let before = hex::encode(Sha256::digest(&bytes[..frontier as usize]));
+    assert_eq!(
+        (source.delivery_start, source.prefix_hash),
+        (frontier, before)
+    );
 }
 
 #[test]

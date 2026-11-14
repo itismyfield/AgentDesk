@@ -141,10 +141,10 @@ async fn tick_with(
     inflight_state
 }
 
-/// A tick that streams no body (no unsent visible text, or a done tick that leaves the answer to
-/// the terminal delivery) leaves a pending adoption; the tick that streams one ends it first.
+/// A pending adoption holds every streamed body: a tick with no unsent visible text, a done tick
+/// and a tick that would stream the body all leave it pending and show no body.
 #[tokio::test(flavor = "current_thread")]
-async fn only_a_tick_that_streams_a_body_ends_a_pending_adoption() {
+async fn a_pending_adoption_holds_every_streamed_body() {
     let temp = tempfile::TempDir::new().expect("runtime root");
     let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
     let channel = ChannelId::new(42_593_310);
@@ -158,7 +158,7 @@ async fn only_a_tick_that_streams_a_body_ends_a_pending_adoption() {
         })
     };
 
-    for (unsent, done) in [("", false), (" \n", false), (BODY, true)] {
+    for (unsent, done) in [("", false), (" \n", false), (BODY, true), (BODY, false)] {
         let quiet = gateway();
         tick(channel, unsent, quiet.clone(), done).await;
         assert!(
@@ -172,13 +172,6 @@ async fn only_a_tick_that_streams_a_body_ends_a_pending_adoption() {
         check.assert_settled();
         assert_eq!(check.adoption(), Adoption::Pending, "{unsent:?}");
     }
-
-    let body = gateway();
-    tick(channel, BODY, body.clone(), false).await;
-    check.assert_settled();
-    let edits = body.edits.lock().unwrap().clone();
-    let shown: Vec<_> = edits.iter().filter(|edit| edit.contains(BODY)).collect();
-    assert_eq!(shown.len(), 1, "{edits:?}");
 }
 
 /// A footer-mode shared state whose live panel saw `Bash` start in `channel`.

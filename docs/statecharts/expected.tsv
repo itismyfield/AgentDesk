@@ -8,6 +8,7 @@
 # S4-07 r2 predictions only; SC_RUN=mac-needed; see intake-consent report.
 # Applies to: tui-o-writer/WriterAdoptionMain.cfg, tui-o-writer/WriterAdoptionGateOnly.cfg, tui-o-writer/WriterAdoptionStage1.cfg, tui-o-writer/WriterAdoptionOwnedMut.cfg, tui-o-writer/WriterAdoptionUnadoptedOwned.cfg, tui-o-writer/WriterAdoptionExemptAll.cfg, tui-o-writer/WriterAdoptionWatcherNoGuard.cfg, tui-o-writer/WriterAdoptionBudgetMut.cfg, tui-o-writer/WriterAdoptionHeadlessMut.cfg
 # WriterAdoption (TUI Legacy body, stage 1): Main and GateOnly document the gaps; Stage1 passes; the rest drop one stage-1 guard.
+# CodexLateDelivery (Codex late takeover start point): R3*, D1*, R4* and R5* reproduce the reviewed rules' losses; R6* pass; R6 mutants each break NoAdoptionLoss; R6Residual lists what r6 leaves to Legacy.
 atomic-write/AtomicWrite.cfg	AtomicWrite	-	-
 atomic-write/AtomicWriteMissingObservation.cfg	AtomicWrite	DiskObservation	-
 campaign-execution/CampaignVerification.cfg	CampaignVerification	-	-
@@ -513,6 +514,30 @@ session-lifecycle/SessionIdentityGateAfter.cfg	SessionIdentityGate	-	-
 session-lifecycle/SessionIdentityGateBefore.cfg	SessionIdentityGate	NoForeignMutation	-
 session-lifecycle/TmuxSession.cfg	TmuxSession	NoDeadlock,RowNamesSession,RowOnlyWithTurn	-
 session-lifecycle/TmuxSocketBoot.cfg	TmuxSocketBoot	-	-
+tui-o-writer/CodexLateDeliveryD1Gen.cfg	CodexLateDelivery	NoAdoptionLoss	-
+tui-o-writer/CodexLateDeliveryD1Moved.cfg	CodexLateDelivery	NoAdoptionLoss	-
+tui-o-writer/CodexLateDeliveryD1Pending.cfg	CodexLateDelivery	NoAdoptionLoss	-
+tui-o-writer/CodexLateDeliveryR3Free.cfg	CodexLateDelivery	NoAdoptionLoss	-
+tui-o-writer/CodexLateDeliveryR3Rotate.cfg	CodexLateDelivery	NoAdoptionLoss	-
+tui-o-writer/CodexLateDeliveryR3RowPending.cfg	CodexLateDelivery	NoAdoptionLoss	-
+tui-o-writer/CodexLateDeliveryR4GenMove.cfg	CodexLateDelivery	JudgedOwedKept	-
+tui-o-writer/CodexLateDeliveryR4Hist.cfg	CodexLateDelivery	NoAdoptionLoss	-
+tui-o-writer/CodexLateDeliveryR5Edit.cfg	CodexLateDelivery	NoAdoptionLoss	-
+tui-o-writer/CodexLateDeliveryR5GenFresh.cfg	CodexLateDelivery	JudgedOwedKept	-
+tui-o-writer/CodexLateDeliveryR6All.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6Edit.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6Free.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6Gen.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6GenFresh.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6GenIgnore.cfg	CodexLateDelivery	NoAdoptionLoss	-
+tui-o-writer/CodexLateDeliveryR6GenMove.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6Hist.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6Moved.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6Pending.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6PrebindFilter.cfg	CodexLateDelivery	NoAdoptionLoss	-
+tui-o-writer/CodexLateDeliveryR6Residual.cfg	CodexLateDelivery	NoLossStrict,NoDupDelivered	-
+tui-o-writer/CodexLateDeliveryR6Rotate.cfg	CodexLateDelivery	-	-
+tui-o-writer/CodexLateDeliveryR6RowPending.cfg	CodexLateDelivery	-	-
 tui-o-writer/NoticeEvidenceAfterDirect.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceAfterOwned.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceAfterPolicy.cfg	NoticeEvidence	-	-
@@ -530,13 +555,20 @@ tui-o-writer/NoticeEvidenceReasonLog.cfg	NoticeEvidence	PendingLoggedOnce	-
 tui-o-writer/NoticeEvidenceSameSource.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceUnavailable.cfg	NoticeEvidence	-	EveryPendingTerminates
 tui-o-writer/NoticeEvidenceWaitBoundary.cfg	NoticeEvidence	-	EveryPendingTerminates
+tui-o-writer/WriterAdoptionAdvanceOnEnd.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered
 tui-o-writer/WriterAdoptionBudgetMut.cfg	WriterAdoption	RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionExemptAll.cfg	WriterAdoption	OtherCustodyBlocks	-
 tui-o-writer/WriterAdoptionGateOnly.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered,AdoptionSettles
 tui-o-writer/WriterAdoptionHeadlessMut.cfg	WriterAdoption	HeadlessKept	-
+tui-o-writer/WriterAdoptionLateExemptIntake.cfg	WriterAdoption	OtherCustodyBlocks	-
 tui-o-writer/WriterAdoptionMain.cfg	WriterAdoption	NoLegacyBodyOnTui,UnadoptedNotOwned,RowClearedHasEvidence,NoEarlyDispatch	AdoptionSettles
+tui-o-writer/WriterAdoptionNoRetry.cfg	WriterAdoption	-	RowEventuallySettled
+tui-o-writer/WriterAdoptionNoSerial.cfg	WriterAdoption	MarkerAtMostOnce	-
 tui-o-writer/WriterAdoptionOwnedMut.cfg	WriterAdoption	UnadoptedNotOwned,RowClearedHasEvidence	-
+tui-o-writer/WriterAdoptionRelayedByTime.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered
+tui-o-writer/WriterAdoptionRetries4.cfg	WriterAdoption	TriesBound	-
 tui-o-writer/WriterAdoptionStage1.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAdoptionSwallowOwed.cfg	WriterAdoption	NoCommitPastOwed	-
 tui-o-writer/WriterAdoptionUnadoptedOwned.cfg	WriterAdoption	UnadoptedNotOwned,RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionWatcherNoGuard.cfg	WriterAdoption	NoEarlyDispatch	-
 tui-o-writer/WriterArchivedSourceAfter.cfg	WriterArchivedSource	-

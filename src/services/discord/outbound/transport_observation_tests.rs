@@ -628,10 +628,7 @@ async fn claim_held_context_preserves_lifetime_none_guard_and_outer_site() {
         return;
     }
     let log = journal().await;
-    for (case, claimed, reason) in [
-        ("held-pending", true, "PENDING_RELEASED"),
-        ("held-none", false, "NO_CLAIM"),
-    ] {
+    for (case, claimed) in [("held-pending", true), ("held-none", false)] {
         let _boot = cutover::test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
         let candidate = cutover::test_override::with_channels(|boot| {
             boot.unwrap().candidate(CHANNEL).unwrap().clone()
@@ -639,7 +636,7 @@ async fn claim_held_context_preserves_lifetime_none_guard_and_outer_site() {
         let mock = Mock::start(vec![message(9011), message(9011)]).await;
         let http = client(&mock);
         let claim = claimed.then(|| BodyClaim::new(CHANNEL, Some(ClaudeTui)));
-        let (sent, context) = raw_output::census_scope(
+        let held = raw_output::census_scope(
             Some(json!({"case":case})),
             cutover::claim_then_send_held_at(BodySite::StandbyRelay, claim, || async {
                 crate::services::discord::http::send_channel_message(
@@ -650,10 +647,25 @@ async fn claim_held_context_preserves_lifetime_none_guard_and_outer_site() {
                 .await
             }),
         )
-        .await
-        .unwrap();
+        .await;
+        if claimed {
+            assert!(matches!(
+                held,
+                Err(cutover::IdentityError::AwaitingAdoption)
+            ));
+            assert_eq!(
+                candidate.peek(),
+                crate::services::tui_o::channel_policy::Adoption::Pending
+            );
+            assert_eq!(candidate.sends(), (0, 0));
+            assert!(mock.requests().is_empty());
+            flushed().await;
+            assert!(events(&log, case).is_empty());
+            continue;
+        }
+        let (sent, context) = held.unwrap();
         assert!(matches!(sent, cutover::BodySend::Sent(Ok(_))));
-        assert_eq!(candidate.sends(), (u64::from(claimed), 0));
+        assert_eq!(candidate.sends(), (0, 0));
         context
             .run(async {
                 tokio::task::yield_now().await;
@@ -667,9 +679,9 @@ async fn claim_held_context_preserves_lifetime_none_guard_and_outer_site() {
                 .unwrap();
             })
             .await;
-        assert_eq!(candidate.sends(), (u64::from(claimed), 0));
+        assert_eq!(candidate.sends(), (0, 0));
         drop(context);
-        assert_eq!(candidate.sends(), (u64::from(claimed), u64::from(claimed)));
+        assert_eq!(candidate.sends(), (0, 0));
         assert_eq!(mock.requests().len(), 2);
         flushed().await;
         let recorded = events(&log, case);
@@ -680,7 +692,7 @@ async fn claim_held_context_preserves_lifetime_none_guard_and_outer_site() {
         );
         for event in recorded {
             assert_eq!(event["census"]["site"], "W06");
-            assert_eq!(event["census"]["reason"], reason);
+            assert_eq!(event["census"]["reason"], "NO_CLAIM");
         }
     }
     let mock = Mock::start(vec![message(9012)]).await;

@@ -125,6 +125,8 @@ async fn start_meets(id: u64, case: Read) {
     use crate::services::agents::input_result::{InputResult, OriginChannel, lookup};
     const ORIGIN: &str = "G-native-read";
     let _root = crate::config::TestRuntimeRootGuard::new();
+    // Its turn ends only through O's delegated delivery, which needs the channel adopted.
+    crate::test_support::o_store::commit_o_store(_root.path(), &[id]);
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let rig = IntakeRig::turn_start_stored(id, pool.clone(), ORIGIN).await;
