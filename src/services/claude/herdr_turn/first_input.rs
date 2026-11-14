@@ -81,7 +81,7 @@ fn write(
         .as_ref()
         .map(|scope| scope.check_epoch())
         .transpose()
-        .map_err(|error| before_payload(logical, &error))?;
+        .map_err(|error| before_payload(logical, &error, false))?;
     let path = attached.transcript.as_path();
     let transcript = path.display().to_string();
     let length = || std::fs::metadata(path).map_or(0, |meta| meta.len());
@@ -127,7 +127,7 @@ fn write(
     }
     if let Some(detail) = denied {
         before_start::release_claude_hold(logical, &held);
-        return Err(before_payload(logical, &detail));
+        return Err(before_payload(logical, &detail, false));
     }
     let HerdrInputRun::Ran(run) = result? else {
         before_start::release_claude_hold(logical, &held);
