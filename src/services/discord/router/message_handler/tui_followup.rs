@@ -8,7 +8,9 @@ mod nameless_gate;
 #[cfg(all(test, unix))]
 pub(super) use codex_observation::observe_codex_tui_rollout_state_for_cwd_with_sessions;
 #[cfg(unix)]
-pub(super) use codex_observation::{codex_native_end, observe_codex_tui_rollout_state_for_cwd};
+pub(super) use codex_observation::{
+    codex_native_end, codex_verdict, observe_codex_tui_rollout_state_for_cwd,
+};
 pub(in crate::services::discord) use nameless_gate::hosted_tui_promote_readiness_blocked;
 
 use super::*;
@@ -452,11 +454,16 @@ pub(super) fn tui_busy_followup_diagnostic(
             session_id,
             Some(tmux_session_name),
         ),
-        ProviderKind::Codex => observe_codex_tui_rollout_state_for_cwd(
-            current_path,
-            Some(tmux_session_name),
-            session_id,
-        ),
+        // A bound pane is judged from its rollout, hooks and process; an unbound one keeps the
+        // cwd read.
+        ProviderKind::Codex => match codex_verdict(tmux_session_name, current_path) {
+            Some(verdict) => codex_turn_state(&verdict),
+            None => observe_codex_tui_rollout_state_for_cwd(
+                current_path,
+                Some(tmux_session_name),
+                session_id,
+            ),
+        },
         _ => crate::services::tui_turn_state::TuiTurnState::Unknown,
     };
     if transcript_turn_state == crate::services::tui_turn_state::TuiTurnState::Idle {
@@ -545,6 +552,21 @@ pub(super) fn tui_busy_followup_diagnostic(
         transcript_turn_state,
         tmux_session_name,
     )
+}
+
+/// A Codex readiness judgment as the busy follow-up diagnostic reads a turn: only a proven end is
+/// idle, and what proves nothing leaves the pane read to answer.
+#[cfg(unix)]
+fn codex_turn_state(
+    verdict: &crate::services::codex_tui::readiness::Verdict,
+) -> crate::services::tui_turn_state::TuiTurnState {
+    use crate::services::codex_tui::readiness::Verdict;
+    use crate::services::tui_turn_state::TuiTurnState;
+    match verdict {
+        Verdict::Idle(_) => TuiTurnState::Idle,
+        Verdict::Busy(_) => TuiTurnState::Streaming,
+        Verdict::Unknown(_) | Verdict::Gone => TuiTurnState::Unknown,
+    }
 }
 
 /// #4270 test seam for [`hosted_tui_promote_readiness_blocked`]: lets pin tests

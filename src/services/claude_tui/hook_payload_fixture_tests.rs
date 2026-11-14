@@ -391,3 +391,83 @@ fn claude_tool_results_and_synthetic_errors_carry_no_block_key() {
     indexes.dedup();
     assert_eq!(indexes.len(), 3);
 }
+
+/// Codex 0.169.0: what the readiness judgment reads of a turn is in the hooks and the rollout.
+#[test]
+fn codex_0_169_hooks_and_rollout_records_name_the_same_turns() {
+    let fixture = load("codex-0.169.0.json");
+    let at = |value: &Value| -> chrono::DateTime<chrono::Utc> {
+        value.as_str().expect("time").parse().expect("RFC 3339")
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut stops = Vec::new();
+    for run in runs(&fixture) {
+        let records = run["rollout_turn_records"].as_array().expect("records");
+        let of = |kind: &str| -> Vec<&Value> {
+            let named = records.iter().filter(|record| record["payload"]["type"] == kind);
+            named.collect()
+        };
+        let turns = |kind: &str| -> Vec<&str> {
+            let named = of(kind).into_iter();
+            named.map(|record| text(&record["payload"], "turn_id")).collect()
+        };
+        let run_events = run["events"].as_array().expect("events");
+        // The session header parses, and each hook names the rollout of its own session.
+        let mut sessions = Vec::new();
+        for (index, record) in run["rollout_session_meta"].as_array().expect("meta").iter().enumerate() {
+            let path = dir.path().join(format!("{}-{index}.jsonl", text(run, "name")));
+            std::fs::write(&path, format!("{record}\n")).expect("write rollout header");
+            let meta = read_rollout_session_meta(&path).expect("session_meta parses");
+            sessions.push(meta.id.expect("session_meta.id"));
+        }
+        for event in run_events {
+            let payload = &event["payload"];
+            let session = text(payload, "session_id");
+            assert!(text(payload, "transcript_path").ends_with(&format!("-{session}.jsonl")));
+            assert!(sessions.iter().any(|id| id == session), "{session}");
+            let turn = payload["turn_id"].as_str();
+            match text(event, "event") {
+                // A Stop names the turn whose end the rollout records.
+                "Stop" => {
+                    let turn = turn.expect("Stop turn_id");
+                    assert!(turns("task_complete").contains(&turn), "{turn}");
+                    stops.push(turn);
+                }
+                // A UserPromptSubmit names a started turn; its start record was written first.
+                "UserPromptSubmit" => {
+                    let started = of("task_started").into_iter();
+                    let started = started
+                        .find(|record| record["payload"]["turn_id"].as_str() == turn)
+                        .expect("the submitted turn's start record");
+                    assert!(at(&started["timestamp"]) < at(&event["received_at"]));
+                }
+                other => assert_eq!((other, turn), ("SessionStart", None)),
+            }
+        }
+        // No hook fires at launch, and the rollout file is born with the first prompt.
+        assert_eq!(run["hooks_fired_before_first_prompt"], 0);
+        for stat in run["rollout_stats"].as_array().expect("stats") {
+            assert!(at(&stat["file_birth"]) > at(&run["launched_at"]));
+            assert_eq!(stat["records_without_top_level_timestamp"], 0);
+        }
+        // Every started turn has an end that names it.
+        let ends = [turns("task_complete"), turns("turn_aborted")].concat();
+        assert!(turns("task_started").iter().all(|turn| ends.contains(turn)));
+        // An interrupted turn fires no Stop.
+        assert!(turns("turn_aborted").iter().all(|turn| !stops.contains(turn)));
+    }
+    assert_eq!(stops.len(), 2, "captured Stop hooks");
+    // The turn the model failed ends with its own record and no Stop.
+    let failed = events(&fixture, "tui_bypass_model_error");
+    assert!(failed.iter().all(|event| event["event"] != "Stop"));
+
+    // /clear fires no hook; the next prompt opens a new session and its SessionStart says so.
+    let cleared = events(&fixture, "tui_bypass_startup_clear_abort");
+    let starts = cleared.iter().filter(|event| event["event"] == "SessionStart");
+    let sources: Vec<_> = starts
+        .map(|event| (text(&event["payload"], "source"), text(&event["payload"], "session_id")))
+        .collect();
+    assert_eq!(sources.len(), 2);
+    assert_eq!((sources[0].0, sources[1].0), ("startup", "clear"));
+    assert_ne!(sources[0].1, sources[1].1);
+}

@@ -1,5 +1,5 @@
 -------------------------- MODULE CodexReadiness --------------------------
-\* Codex ready / busy / end / stop judgment (#8082 design d3).
+\* Codex ready / busy / end / stop judgment (#8082 design d3, Enter gap from the 0.169.0 capture).
 \* Production code baseline 082c77aa4e06b81c76b614f55b8fed73ce01923f.
 \* "before" is the code as it is: tmux waits on the pane and replaces it after a timeout,
 \* Herdr waits on the pane and refuses. "after" reads the bound rollout, the hooks and the process.
@@ -20,7 +20,8 @@ CONSTANTS
     Stops,        \* /stop requests on an owned running turn
     HerdrReplace, \* Herdr can end and relaunch a pane and observe its children (#8128 B2a/B2b)
     Config,       \* tmux warm reuse becomes ineligible: launch options, binding or runtime kind changed
-    Blocked       \* UserPromptSubmit hooks that are followed by no turn
+    Blocked,      \* UserPromptSubmit hooks that are followed by no turn
+    EnterGap      \* what follows a person's Enter first: "hook" (0.157.1) | "silent" | "record"
 VARIABLE r
 
 Ids == 1..N
@@ -98,22 +99,33 @@ ArgvLaunch(i) ==
 Boot ==
     /\ r.phase = "Booting"
     /\ r' = [r EXCEPT !.phase = "Idle", !.started = TRUE]
-\* A person presses Enter in the TUI. The UserPromptSubmit hook is delivered before the turn goes
-\* on; the rollout's task_started is written a moment later.
+\* A person presses Enter in the TUI. "hook": the UserPromptSubmit hook is delivered before the
+\* turn goes on and task_started is written a moment later (0.157.1). Codex 0.169.0 writes
+\* task_started first and delivers the hook after it: "silent" keeps the moment before that record,
+\* in which nothing says busy, and "record" takes the record as written with the Enter.
+UpsOn == After /\ Mode # "after-no-ups"
+\* A hook that follows its start record is released at once when that record can be read.
+UpsAfterRecord == UpsOn /\ (r.file # "plain" \/ Mode = "after-ups-until-end")
 PersonEnter ==
     /\ r.person > 0 /\ r.phase = "Idle" /\ ~r.late
-    /\ r' = [r EXCEPT !.person = @ - 1, !.phase = "Running", !.turn = @ + 1, !.pending = TRUE,
-                     !.hook = FALSE, !.owner = 0, !.ups = (After /\ Mode # "after-no-ups")]
+    /\ LET entered == [r EXCEPT !.person = @ - 1, !.phase = "Running", !.turn = @ + 1,
+                               !.hook = FALSE, !.owner = 0]
+       IN r' = CASE EnterGap = "hook" -> [entered EXCEPT !.pending = TRUE, !.ups = UpsOn]
+                 [] EnterGap = "silent" -> [entered EXCEPT !.pending = TRUE]
+                 [] OTHER -> [entered EXCEPT !.rec = "started", !.seen = r.turn + 1,
+                                             !.late = FALSE, !.ups = UpsAfterRecord]
 \* The task_started record releases the UserPromptSubmit evidence when it can be read:
 \* from there the open turn itself is the Busy evidence.
 RecordStart ==
     /\ r.pending
     /\ r' = [r EXCEPT !.pending = FALSE, !.rec = "started", !.seen = r.turn, !.late = FALSE,
-                     !.ups = IF Mode # "after-ups-until-end" /\ r.file = "plain" THEN FALSE ELSE @]
+                     !.ups = IF EnterGap # "hook" THEN UpsAfterRecord
+                             ELSE IF Mode # "after-ups-until-end" /\ r.file = "plain" THEN FALSE
+                             ELSE @]
 \* A UserPromptSubmit hook arrives and no turn follows (a prompt that a user-level hook blocks).
 PersonBlocked ==
     /\ r.blocked > 0 /\ r.phase = "Idle" /\ ~r.late
-    /\ r' = [r EXCEPT !.blocked = @ - 1, !.ups = (After /\ Mode # "after-no-ups")]
+    /\ r' = [r EXCEPT !.blocked = @ - 1, !.ups = UpsOn]
 \* The operator changes the launch options, or the binding no longer matches: warm reuse is refused.
 ConfigChange ==
     /\ r.config > 0 /\ Host = "tmux" /\ r.head = 0 /\ r.wait = 0
@@ -266,7 +278,7 @@ Spec == Init /\ [][Next]_r
 CodexTypeOK ==
     /\ Mode \in Modes /\ Host \in {"tmux", "herdr"} /\ Screen \in {"ok", "unread"}
     /\ Loss \in {"none", "record", "hook", "both", "unnamed", "unnamed-both"}
-    /\ Silent \in {"none", "tool", "model"}
+    /\ Silent \in {"none", "tool", "model"} /\ EnterGap \in {"hook", "silent", "record"}
     /\ Host = "herdr" => Config = 0
     /\ r.phase \in {"Booting", "Idle", "Running", "Exited"}
     /\ r.rec \in {"none", "started", "ended", "unknown"}

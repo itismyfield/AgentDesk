@@ -14,7 +14,8 @@ pub(crate) use crate::services::claude_tui::busy_inject::Pane;
 use crate::services::claude_tui::busy_inject::{MAX_INPUT_BYTES, at_offsets, frame};
 use crate::services::claude_tui::owner_input;
 pub(crate) use rollout::{
-    NativeEnd, TurnVerdict, read_native_end, read_turn, read_turn_detail, submitted,
+    NativeEnd, TurnRead, TurnVerdict, read_latest_turn, read_native_end, read_turn,
+    read_turn_detail, submitted,
 };
 
 /// Why nothing reached the pane; the caller may queue the input instead.

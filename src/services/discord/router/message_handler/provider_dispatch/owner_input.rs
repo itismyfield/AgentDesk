@@ -818,10 +818,19 @@ fn native_read(provider: &ProviderKind, target: &NativeTarget) -> Screen {
     }
 }
 
-/// A live Codex pane is idle only once its rollout shows its latest turn's own end; a rollout with
-/// no start or with any end it cannot attribute proves no idle.
+/// A live Codex pane is idle only once its bound rollout, its hooks and its process prove the
+/// latest turn's end; with no binding the rollout its session id names is read for that end.
 fn codex_read(target: &NativeTarget) -> Screen {
     use crate::services::codex_tui::busy_inject::NativeEnd;
+    use crate::services::codex_tui::readiness::Verdict;
+    let cwd = crate::services::tmux_diagnostics::tmux_session_pane_cwd(&target.tmux);
+    match super::super::tui_followup::codex_verdict(&target.tmux, cwd.as_deref()) {
+        Some(Verdict::Idle(_)) => return Screen::Ready,
+        Some(Verdict::Busy(_)) => return Screen::Blocked,
+        Some(Verdict::Gone) => return Screen::Gone,
+        Some(Verdict::Unknown(_)) => return Screen::Unknown,
+        None => {}
+    }
     let end = super::super::tui_followup::codex_native_end;
     match end(&target.tmux, target.session_id.as_deref()) {
         NativeEnd::Ended => Screen::Ready,

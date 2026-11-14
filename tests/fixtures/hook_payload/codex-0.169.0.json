@@ -1,0 +1,523 @@
+{
+ "schema": "agentdesk-hook-payload-fixture/v1",
+ "provider": "codex",
+ "cli_version": "codex-cli 0.169.0",
+ "provenance": "captured",
+ "captured_at": "2026-11-14T09:06:00+09:00/2026-11-14T09:10:00+09:00",
+ "capture": {
+  "host": "MacBook-Pro-14 (mac-book)",
+  "env": "env -i HOME USER LOGNAME PATH LANG TERM; tmux sessions i8082-cap-a and i8082-cap-b",
+  "hook_injection": "--dangerously-bypass-hook-trust -c features.hooks=true -c hooks={SessionStart(startup|resume|clear),UserPromptSubmit,Stop} in the render_codex_hook_config_override shape without the state table, command = capture stub",
+  "launch": "codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -c check_for_update_on_startup=false -C /private/tmp",
+  "global_config_changed": false,
+  "user_layer_hooks": "~/.codex/hooks.json (moshi-hook, herdr) also ran in every trial; they are not part of this fixture",
+  "redaction": "session, turn and window ids are placeholders that keep equality; the home directory is /Users/redacted; base_instructions, turn_attribution and error bodies are omitted"
+ },
+ "rollout_identity": {
+  "session_meta_id_field": "payload.id",
+  "turn_id_records": "task_started, task_complete and turn_aborted carry payload.turn_id equal to the hook turn_id",
+  "file_created": "with the first prompt, not at launch: session_meta.payload.timestamp is the thread creation time, the record timestamp and the file birth are the first prompt",
+  "record_order": "task_started is written before the SessionStart and UserPromptSubmit hooks are delivered; the Stop hook is delivered before task_complete is written",
+  "top_level_timestamp": "every record of the captured rollouts carries a top-level timestamp"
+ },
+ "observations": {
+  "stop_hook_on_interrupted_turn": false,
+  "stop_hook_on_model_error_turn": false,
+  "archived_rollouts": {
+   "method": "read-only listing of ~/.codex/sessions and lsof of live codex processes on the capture host",
+   "plain_files": 1942,
+   "zst_files": 5882,
+   "newest_zst_mtime": "2026-11-02T11:42+09:00",
+   "oldest_plain_mtime": "2026-11-03T19:09+09:00",
+   "same_session_plain_and_zst": 0,
+   "longest_live_tui": "4d22h, rollout still plain",
+   "live_rollout_archived": "not observed; no live session was older than the archive age, so this stays unconfirmed",
+   "binary_skip_counters": [
+    "skipped_busy",
+    "skipped_not_cold",
+    "skipped_changed",
+    "skipped_already_compressed",
+    "skipped_cooldown",
+    "skipped_unreadable_meta"
+   ]
+  }
+ },
+ "runs": [
+  {
+   "name": "tui_bypass_startup_clear_abort",
+   "mode": "interactive",
+   "steps": [
+    "launch",
+    "prompt",
+    "/clear",
+    "prompt",
+    "prompt",
+    "Escape",
+    "/quit"
+   ],
+   "launched_at": "2026-11-14T00:06:28.847Z",
+   "hooks_fired_before_first_prompt": 0,
+   "note": "no hook fired at launch; the rollout file was created with the first prompt; /clear fired no hook and created the next rollout only with the next prompt; the interrupted turn wrote turn_aborted(reason=interrupted) and fired no Stop hook",
+   "events": [
+    {
+     "event": "SessionStart",
+     "command_session_id": "agentdesk-codex-hook-relay",
+     "t_rel_s": 0.0,
+     "received_at": "2026-11-14T00:06:42.001Z",
+     "transcript_exists_at_hook": true,
+     "transcript_size_at_hook": 159601,
+     "env_codex_keys": [
+      "CODEX_MANAGED_BY_NPM",
+      "CODEX_MANAGED_PACKAGE_ROOT"
+     ],
+     "payload": {
+      "session_id": "00000000-0000-7000-8000-000000000001",
+      "transcript_path": "/Users/redacted/.codex/sessions/2026/11/14/rollout-2026-11-14T09-06-30-00000000-0000-7000-8000-000000000001.jsonl",
+      "cwd": "/private/tmp",
+      "hook_event_name": "SessionStart",
+      "model": "gpt-6.1-sol",
+      "permission_mode": "bypassPermissions",
+      "source": "startup"
+     }
+    },
+    {
+     "event": "UserPromptSubmit",
+     "command_session_id": "agentdesk-codex-hook-relay",
+     "t_rel_s": 0.05,
+     "received_at": "2026-11-14T00:06:42.051Z",
+     "transcript_exists_at_hook": true,
+     "transcript_size_at_hook": 159601,
+     "env_codex_keys": [
+      "CODEX_MANAGED_BY_NPM",
+      "CODEX_MANAGED_PACKAGE_ROOT"
+     ],
+     "payload": {
+      "session_id": "00000000-0000-7000-8000-000000000001",
+      "turn_id": "00000000-0000-7000-8000-000000000002",
+      "transcript_path": "/Users/redacted/.codex/sessions/2026/11/14/rollout-2026-11-14T09-06-30-00000000-0000-7000-8000-000000000001.jsonl",
+      "cwd": "/private/tmp",
+      "hook_event_name": "UserPromptSubmit",
+      "model": "gpt-6.1-sol",
+      "permission_mode": "bypassPermissions",
+      "prompt": "Reply with exactly the word: ok"
+     }
+    },
+    {
+     "event": "Stop",
+     "command_session_id": "agentdesk-codex-hook-relay",
+     "t_rel_s": 2.447,
+     "received_at": "2026-11-14T00:06:44.448Z",
+     "transcript_exists_at_hook": true,
+     "transcript_size_at_hook": 163887,
+     "env_codex_keys": [
+      "CODEX_MANAGED_BY_NPM",
+      "CODEX_MANAGED_PACKAGE_ROOT"
+     ],
+     "payload": {
+      "session_id": "00000000-0000-7000-8000-000000000001",
+      "turn_id": "00000000-0000-7000-8000-000000000002",
+      "transcript_path": "/Users/redacted/.codex/sessions/2026/11/14/rollout-2026-11-14T09-06-30-00000000-0000-7000-8000-000000000001.jsonl",
+      "cwd": "/private/tmp",
+      "hook_event_name": "Stop",
+      "model": "gpt-6.1-sol",
+      "permission_mode": "bypassPermissions",
+      "stop_hook_active": false,
+      "last_assistant_message": "ok"
+     }
+    },
+    {
+     "event": "SessionStart",
+     "command_session_id": "agentdesk-codex-hook-relay",
+     "t_rel_s": 12.098,
+     "received_at": "2026-11-14T00:06:54.099Z",
+     "transcript_exists_at_hook": true,
+     "transcript_size_at_hook": 159601,
+     "env_codex_keys": [
+      "CODEX_MANAGED_BY_NPM",
+      "CODEX_MANAGED_PACKAGE_ROOT"
+     ],
+     "payload": {
+      "session_id": "00000000-0000-7000-8000-000000000003",
+      "transcript_path": "/Users/redacted/.codex/sessions/2026/11/14/rollout-2026-11-14T09-06-45-00000000-0000-7000-8000-000000000003.jsonl",
+      "cwd": "/private/tmp",
+      "hook_event_name": "SessionStart",
+      "model": "gpt-6.1-sol",
+      "permission_mode": "bypassPermissions",
+      "source": "clear"
+     }
+    },
+    {
+     "event": "UserPromptSubmit",
+     "command_session_id": "agentdesk-codex-hook-relay",
+     "t_rel_s": 12.566,
+     "received_at": "2026-11-14T00:06:54.567Z",
+     "transcript_exists_at_hook": true,
+     "transcript_size_at_hook": 159601,
+     "env_codex_keys": [
+      "CODEX_MANAGED_BY_NPM",
+      "CODEX_MANAGED_PACKAGE_ROOT"
+     ],
+     "payload": {
+      "session_id": "00000000-0000-7000-8000-000000000003",
+      "turn_id": "00000000-0000-7000-8000-000000000004",
+      "transcript_path": "/Users/redacted/.codex/sessions/2026/11/14/rollout-2026-11-14T09-06-45-00000000-0000-7000-8000-000000000003.jsonl",
+      "cwd": "/private/tmp",
+      "hook_event_name": "UserPromptSubmit",
+      "model": "gpt-6.1-sol",
+      "permission_mode": "bypassPermissions",
+      "prompt": "Reply with exactly the word: two"
+     }
+    },
+    {
+     "event": "Stop",
+     "command_session_id": "agentdesk-codex-hook-relay",
+     "t_rel_s": 15.511,
+     "received_at": "2026-11-14T00:06:57.512Z",
+     "transcript_exists_at_hook": true,
+     "transcript_size_at_hook": 167982,
+     "env_codex_keys": [
+      "CODEX_MANAGED_BY_NPM",
+      "CODEX_MANAGED_PACKAGE_ROOT"
+     ],
+     "payload": {
+      "session_id": "00000000-0000-7000-8000-000000000003",
+      "turn_id": "00000000-0000-7000-8000-000000000004",
+      "transcript_path": "/Users/redacted/.codex/sessions/2026/11/14/rollout-2026-11-14T09-06-45-00000000-0000-7000-8000-000000000003.jsonl",
+      "cwd": "/private/tmp",
+      "hook_event_name": "Stop",
+      "model": "gpt-6.1-sol",
+      "permission_mode": "bypassPermissions",
+      "stop_hook_active": false,
+      "last_assistant_message": "two"
+     }
+    },
+    {
+     "event": "UserPromptSubmit",
+     "command_session_id": "agentdesk-codex-hook-relay",
+     "t_rel_s": 16.373,
+     "received_at": "2026-11-14T00:06:58.374Z",
+     "transcript_exists_at_hook": true,
+     "transcript_size_at_hook": 172743,
+     "env_codex_keys": [
+      "CODEX_MANAGED_BY_NPM",
+      "CODEX_MANAGED_PACKAGE_ROOT"
+     ],
+     "payload": {
+      "session_id": "00000000-0000-7000-8000-000000000003",
+      "turn_id": "00000000-0000-7000-8000-000000000005",
+      "transcript_path": "/Users/redacted/.codex/sessions/2026/11/14/rollout-2026-11-14T09-06-45-00000000-0000-7000-8000-000000000003.jsonl",
+      "cwd": "/private/tmp",
+      "hook_event_name": "UserPromptSubmit",
+      "model": "gpt-6.1-sol",
+      "permission_mode": "bypassPermissions",
+      "prompt": "Count from 1 to 300, one number per line, no other text."
+     }
+    }
+   ],
+   "rollout_session_meta": [
+    {
+     "timestamp": "2026-11-14T00:06:41.307Z",
+     "ordinal": 0,
+     "type": "session_meta",
+     "payload": {
+      "account_scoped": true,
+      "creator_user_id": "<redacted>",
+      "creator_account_id": "<redacted>",
+      "session_id": "00000000-0000-7000-8000-000000000001",
+      "id": "00000000-0000-7000-8000-000000000001",
+      "timestamp": "2026-11-14T00:06:30.846Z",
+      "cwd": "/private/tmp",
+      "runtime_workspace_roots": [
+       "/private/tmp"
+      ],
+      "originator": "codex-tui",
+      "cli_version": "0.169.0",
+      "source": "cli",
+      "thread_source": "user",
+      "model_provider": "openai",
+      "base_instructions": "<omitted>",
+      "history_mode": "paginated",
+      "context_window": {
+       "window_id": "00000000-0000-7000-8000-000000000006"
+      }
+     }
+    },
+    {
+     "timestamp": "2026-11-14T00:06:53.555Z",
+     "ordinal": 0,
+     "type": "session_meta",
+     "payload": {
+      "account_scoped": true,
+      "creator_user_id": "<redacted>",
+      "creator_account_id": "<redacted>",
+      "session_id": "00000000-0000-7000-8000-000000000003",
+      "id": "00000000-0000-7000-8000-000000000003",
+      "timestamp": "2026-11-14T00:06:45.417Z",
+      "cwd": "/private/tmp",
+      "runtime_workspace_roots": [
+       "/private/tmp"
+      ],
+      "originator": "codex-tui",
+      "cli_version": "0.169.0",
+      "source": "cli",
+      "thread_source": "user",
+      "model_provider": "openai",
+      "base_instructions": "<omitted>",
+      "history_mode": "paginated",
+      "context_window": {
+       "window_id": "00000000-0000-7000-8000-000000000007"
+      }
+     }
+    }
+   ],
+   "rollout_turn_records": [
+    {
+     "timestamp": "2026-11-14T00:06:41.308Z",
+     "ordinal": 1,
+     "type": "event_msg",
+     "payload": {
+      "type": "task_started",
+      "turn_attribution": "<omitted>",
+      "turn_id": "00000000-0000-7000-8000-000000000002",
+      "root_turn_id": "00000000-0000-7000-8000-000000000002",
+      "started_at": 1794614801,
+      "model_context_window": 475000,
+      "collaboration_mode_kind": "default"
+     }
+    },
+    {
+     "timestamp": "2026-11-14T00:06:44.539Z",
+     "ordinal": 17,
+     "type": "event_msg",
+     "payload": {
+      "type": "task_complete",
+      "root_turn_id": "00000000-0000-7000-8000-000000000002",
+      "turn_id": "00000000-0000-7000-8000-000000000002",
+      "last_agent_message": "ok",
+      "started_at": 1794614801,
+      "completed_at": 1794614804,
+      "duration_ms": 3235,
+      "time_to_first_token_ms": 2984
+     }
+    },
+    {
+     "timestamp": "2026-11-14T00:06:53.555Z",
+     "ordinal": 1,
+     "type": "event_msg",
+     "payload": {
+      "type": "task_started",
+      "turn_attribution": "<omitted>",
+      "turn_id": "00000000-0000-7000-8000-000000000004",
+      "root_turn_id": "00000000-0000-7000-8000-000000000004",
+      "started_at": 1794614813,
+      "model_context_window": 475000,
+      "collaboration_mode_kind": "default"
+     }
+    },
+    {
+     "timestamp": "2026-11-14T00:06:57.668Z",
+     "ordinal": 19,
+     "type": "event_msg",
+     "payload": {
+      "type": "task_complete",
+      "root_turn_id": "00000000-0000-7000-8000-000000000004",
+      "turn_id": "00000000-0000-7000-8000-000000000004",
+      "last_agent_message": "two",
+      "started_at": 1794614813,
+      "completed_at": 1794614817,
+      "duration_ms": 4114,
+      "time_to_first_token_ms": 3829
+     }
+    },
+    {
+     "timestamp": "2026-11-14T00:06:58.257Z",
+     "ordinal": 21,
+     "type": "event_msg",
+     "payload": {
+      "type": "task_started",
+      "turn_attribution": "<omitted>",
+      "turn_id": "00000000-0000-7000-8000-000000000005",
+      "root_turn_id": "00000000-0000-7000-8000-000000000005",
+      "started_at": 1794614818,
+      "model_context_window": 475000,
+      "collaboration_mode_kind": "default"
+     }
+    },
+    {
+     "timestamp": "2026-11-14T00:07:01.575Z",
+     "ordinal": 29,
+     "type": "event_msg",
+     "payload": {
+      "type": "turn_aborted",
+      "root_turn_id": "00000000-0000-7000-8000-000000000005",
+      "turn_id": "00000000-0000-7000-8000-000000000005",
+      "reason": "interrupted",
+      "started_at": 1794614818,
+      "completed_at": 1794614821,
+      "duration_ms": 3318
+     }
+    }
+   ],
+   "rollout_stats": [
+    {
+     "rollout": "rollout-2026-11-14T09-06-30-00000000-0000-7000-8000-000000000001.jsonl",
+     "records": 18,
+     "records_without_top_level_timestamp": 0,
+     "top_level_keys": [
+      "metadata",
+      "ordinal",
+      "payload",
+      "timestamp",
+      "type"
+     ],
+     "file_birth": "2026-11-14T00:06:41.307Z"
+    },
+    {
+     "rollout": "rollout-2026-11-14T09-06-45-00000000-0000-7000-8000-000000000003.jsonl",
+     "records": 30,
+     "records_without_top_level_timestamp": 0,
+     "top_level_keys": [
+      "metadata",
+      "ordinal",
+      "payload",
+      "timestamp",
+      "type"
+     ],
+     "file_birth": "2026-11-14T00:06:53.555Z"
+    }
+   ]
+  },
+  {
+   "name": "tui_bypass_model_error",
+   "mode": "interactive",
+   "steps": [
+    "launch with an unsupported model",
+    "prompt",
+    "/quit"
+   ],
+   "launched_at": "2026-11-14T00:08:30.755Z",
+   "hooks_fired_before_first_prompt": 0,
+   "note": "the turn failed with a model error: task_complete carries an error field and the same turn_id; no Stop hook fired",
+   "events": [
+    {
+     "event": "SessionStart",
+     "command_session_id": "agentdesk-codex-hook-relay",
+     "t_rel_s": 0.0,
+     "received_at": "2026-11-14T00:08:43.616Z",
+     "transcript_exists_at_hook": true,
+     "transcript_size_at_hook": 77079,
+     "env_codex_keys": [
+      "CODEX_MANAGED_BY_NPM",
+      "CODEX_MANAGED_PACKAGE_ROOT"
+     ],
+     "payload": {
+      "session_id": "00000000-0000-7000-8000-000000000008",
+      "transcript_path": "/Users/redacted/.codex/sessions/2026/11/14/rollout-2026-11-14T09-08-31-00000000-0000-7000-8000-000000000008.jsonl",
+      "cwd": "/private/tmp",
+      "hook_event_name": "SessionStart",
+      "model": "i8082-no-such-model",
+      "permission_mode": "bypassPermissions",
+      "source": "startup"
+     }
+    },
+    {
+     "event": "UserPromptSubmit",
+     "command_session_id": "agentdesk-codex-hook-relay",
+     "t_rel_s": 0.176,
+     "received_at": "2026-11-14T00:08:43.792Z",
+     "transcript_exists_at_hook": true,
+     "transcript_size_at_hook": 77079,
+     "env_codex_keys": [
+      "CODEX_MANAGED_BY_NPM",
+      "CODEX_MANAGED_PACKAGE_ROOT"
+     ],
+     "payload": {
+      "session_id": "00000000-0000-7000-8000-000000000008",
+      "turn_id": "00000000-0000-7000-8000-000000000009",
+      "transcript_path": "/Users/redacted/.codex/sessions/2026/11/14/rollout-2026-11-14T09-08-31-00000000-0000-7000-8000-000000000008.jsonl",
+      "cwd": "/private/tmp",
+      "hook_event_name": "UserPromptSubmit",
+      "model": "i8082-no-such-model",
+      "permission_mode": "bypassPermissions",
+      "prompt": "Reply with exactly the word: ok"
+     }
+    }
+   ],
+   "rollout_session_meta": [
+    {
+     "timestamp": "2026-11-14T00:08:43.185Z",
+     "ordinal": 0,
+     "type": "session_meta",
+     "payload": {
+      "account_scoped": true,
+      "creator_user_id": "<redacted>",
+      "creator_account_id": "<redacted>",
+      "session_id": "00000000-0000-7000-8000-000000000008",
+      "id": "00000000-0000-7000-8000-000000000008",
+      "timestamp": "2026-11-14T00:08:31.836Z",
+      "cwd": "/private/tmp",
+      "runtime_workspace_roots": [
+       "/private/tmp"
+      ],
+      "originator": "codex-tui",
+      "cli_version": "0.169.0",
+      "source": "cli",
+      "thread_source": "user",
+      "model_provider": "openai",
+      "base_instructions": "<omitted>",
+      "history_mode": "paginated",
+      "context_window": {
+       "window_id": "00000000-0000-7000-8000-000000000010"
+      }
+     }
+    }
+   ],
+   "rollout_turn_records": [
+    {
+     "timestamp": "2026-11-14T00:08:43.185Z",
+     "ordinal": 1,
+     "type": "event_msg",
+     "payload": {
+      "type": "task_started",
+      "turn_attribution": "<omitted>",
+      "turn_id": "00000000-0000-7000-8000-000000000009",
+      "root_turn_id": "00000000-0000-7000-8000-000000000009",
+      "started_at": 1794614923,
+      "model_context_window": 258400,
+      "collaboration_mode_kind": "default"
+     }
+    },
+    {
+     "timestamp": "2026-11-14T00:08:44.674Z",
+     "ordinal": 9,
+     "type": "event_msg",
+     "payload": {
+      "type": "task_complete",
+      "root_turn_id": "00000000-0000-7000-8000-000000000009",
+      "turn_id": "00000000-0000-7000-8000-000000000009",
+      "last_agent_message": null,
+      "error": "<omitted>",
+      "started_at": 1794614923,
+      "completed_at": 1794614924,
+      "duration_ms": 1489
+     }
+    }
+   ],
+   "rollout_stats": [
+    {
+     "rollout": "rollout-2026-11-14T09-08-31-00000000-0000-7000-8000-000000000008.jsonl",
+     "records": 10,
+     "records_without_top_level_timestamp": 0,
+     "top_level_keys": [
+      "metadata",
+      "ordinal",
+      "payload",
+      "timestamp",
+      "type"
+     ],
+     "file_birth": "2026-11-14T00:08:43.185Z"
+    }
+   ]
+  }
+ ]
+}

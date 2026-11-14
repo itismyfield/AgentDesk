@@ -87,6 +87,7 @@ hosted-cleanup/ThreadGCBefore.cfg	HostedCleanup	-	-
 hosted-cleanup/ThreadGCBeforeGaps.cfg	HostedCleanup	GCAliasesRechecked,GCCurrentLegacyMarkerSafe,GCCurrentOwnerLocal	-
 hosted-cleanup/ThreadGCNoRecheck.cfg	HostedCleanup	GCConditionalRefusalsKept,GCNewTurnKept	-
 input-single-path/CodexReadyAfterArchivedSilentTurn.cfg	CodexReadiness	CodexNoRunningKill	-
+input-single-path/CodexReadyAfterArchivedSilentTurnRecordFirst.cfg	CodexReadiness	CodexNoRunningKill	-
 input-single-path/CodexReadyAfterBlockedPrompt.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterBlockedPromptHerdr.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterCompressed.cfg	CodexReadiness	-	-
@@ -95,6 +96,7 @@ input-single-path/CodexReadyAfterCompressedHerdr8128.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterConfig.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterConfigCompressed.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterConfigPerson.cfg	CodexReadiness	-	-
+input-single-path/CodexReadyAfterEnterGapSilent.cfg	CodexReadiness	CodexNoEarlyInput	-
 input-single-path/CodexReadyAfterEnterRestart.cfg	CodexReadiness	CodexNoEarlyInput	-
 input-single-path/CodexReadyAfterExit.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterExitHerdr.cfg	CodexReadiness	-	-
@@ -107,10 +109,13 @@ input-single-path/CodexReadyAfterNarrow.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterNarrowHerdr.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterPerson.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterPersonHerdr.cfg	CodexReadiness	-	-
+input-single-path/CodexReadyAfterPersonRecordFirst.cfg	CodexReadiness	-	-
+input-single-path/CodexReadyAfterPersonRecordFirstHerdr.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterRestart.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterRestartHerdr.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterSilentModel.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterSilentTool.cfg	CodexReadiness	-	-
+input-single-path/CodexReadyAfterSilentToolRecordFirst.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterUnnamed.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterUnnamedHerdr.cfg	CodexReadiness	-	CodexPendingEventuallyDelivered
 input-single-path/CodexReadyAfterUnnamedHerdr8128.cfg	CodexReadiness	-	-
@@ -118,6 +123,7 @@ input-single-path/CodexReadyAfterUnnamedHook.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterUnnamedHookHerdr.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterUnnamedPerson.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyAfterUnnamedPersonHerdr8128.cfg	CodexReadiness	-	-
+input-single-path/CodexReadyAfterUnnamedPersonRecordFirst.cfg	CodexReadiness	-	-
 input-single-path/CodexReadyBeforeCompressed.cfg	CodexReadiness	-	CodexPendingEventuallyDelivered
 input-single-path/CodexReadyBeforeExit.cfg	CodexReadiness	-	CodexPendingEventuallyDelivered
 input-single-path/CodexReadyBeforeLostBoth.cfg	CodexReadiness	-	CodexPendingEventuallyDelivered

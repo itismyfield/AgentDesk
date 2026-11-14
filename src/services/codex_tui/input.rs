@@ -251,6 +251,96 @@ enum RolloutReadySnapshotDecision {
     SessionDead,
 }
 
+/// What the rollout judgment says of a waiting input; `Unproven` leaves the pane read to decide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceReady {
+    Ready,
+    NotReady,
+    Gone,
+    Unproven,
+}
+
+/// Judges the pane's bound rollout for a readiness wait. A draft that was read still blocks an
+/// idle pane. A judgment that differs from the pane read is logged once per change and decides.
+fn source_ready(
+    session_name: &str,
+    snapshot: &PromptReadinessSnapshot,
+    draft_policy: PromptDraftPolicy,
+) -> SourceReady {
+    use super::readiness::Verdict;
+    let verdict = super::readiness::judge(session_name);
+    let judged = match &verdict {
+        Verdict::Idle(_) if draft_policy.should_block_rollout_ready(snapshot) => {
+            SourceReady::NotReady
+        }
+        Verdict::Idle(_) => SourceReady::Ready,
+        Verdict::Busy(_) => SourceReady::NotReady,
+        Verdict::Gone => SourceReady::Gone,
+        Verdict::Unknown(_) => SourceReady::Unproven,
+    };
+    let screen_ready = draft_policy.accepts(snapshot);
+    note_ready_disagreement(session_name, &verdict, judged, screen_ready);
+    judged
+}
+
+/// Logs a rollout judgment that the pane read contradicts; it reads nothing and decides nothing.
+fn note_ready_disagreement(
+    session_name: &str,
+    verdict: &super::readiness::Verdict,
+    judged: SourceReady,
+    screen_ready: bool,
+) {
+    static LAST: Mutex<Option<(String, &'static str, bool)>> = Mutex::new(None);
+    if judged == SourceReady::Unproven || (judged == SourceReady::Ready) == screen_ready {
+        return;
+    }
+    let seen = (session_name.to_string(), verdict.label(), screen_ready);
+    let mut last = LAST.lock().unwrap_or_else(|poison| poison.into_inner());
+    if last.as_ref() != Some(&seen) {
+        tracing::info!(
+            tmux_session_name = session_name,
+            codex_ready_verdict = verdict.label(),
+            turn_id = verdict.turn(),
+            screen_ready,
+            "codex_ready_disagreement"
+        );
+        *last = Some(seen);
+    }
+}
+
+/// A readiness wait's answer for one pane read: the rollout judgment when it proves anything,
+/// the pane read otherwise.
+fn wait_ready(
+    session_name: &str,
+    snapshot: &PromptReadinessSnapshot,
+    draft_policy: PromptDraftPolicy,
+) -> bool {
+    match source_ready(session_name, snapshot, draft_policy) {
+        SourceReady::Ready => true,
+        SourceReady::NotReady | SourceReady::Gone => false,
+        SourceReady::Unproven => draft_policy.accepts(snapshot),
+    }
+}
+
+/// The rollout ready latch only wakes a wait: the judgment decides, and the pane read decides
+/// only where the judgment proves nothing.
+fn decide_latched_ready(
+    session_name: &str,
+    snapshot: &PromptReadinessSnapshot,
+    draft_policy: PromptDraftPolicy,
+) -> RolloutReadySnapshotDecision {
+    match source_ready(session_name, snapshot, draft_policy) {
+        SourceReady::Ready => RolloutReadySnapshotDecision::Accept,
+        SourceReady::NotReady => RolloutReadySnapshotDecision::Ignore,
+        SourceReady::Gone => RolloutReadySnapshotDecision::SessionDead,
+        SourceReady::Unproven => decide_rollout_ready_snapshot(
+            snapshot,
+            draft_policy,
+            super::warm_followup::codex_tui_warm_followup_enabled(),
+        ),
+    }
+}
+
 fn decide_rollout_ready_snapshot(
     snapshot: &PromptReadinessSnapshot,
     draft_policy: PromptDraftPolicy,
@@ -531,11 +621,7 @@ fn wait_until_codex_tui_input_ready_with_policy(
                 return Err(timeout_error(&snapshot));
             }
             let snapshot = prompt_readiness_snapshot(session_name);
-            match decide_rollout_ready_snapshot(
-                &snapshot,
-                draft_policy,
-                super::warm_followup::codex_tui_warm_followup_enabled(),
-            ) {
+            match decide_latched_ready(session_name, &snapshot, draft_policy) {
                 RolloutReadySnapshotDecision::SessionDead => {
                     return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
                 }
@@ -590,7 +676,7 @@ fn wait_until_codex_tui_input_ready_with_policy(
         return Err(err);
     }
     if let Some(snapshot) = post_event_snapshot {
-        if draft_policy.accepts(&snapshot) {
+        if wait_ready(session_name, &snapshot, draft_policy) {
             if let Some(err) = cancel_check() {
                 return Err(err);
             }
@@ -632,11 +718,7 @@ fn wait_until_codex_tui_input_ready_with_policy(
         }
         if observe_rollout_composer_ready_for_prompt_wait(session_name) {
             let snapshot = prompt_readiness_snapshot(session_name);
-            match decide_rollout_ready_snapshot(
-                &snapshot,
-                draft_policy,
-                super::warm_followup::codex_tui_warm_followup_enabled(),
-            ) {
+            match decide_latched_ready(session_name, &snapshot, draft_policy) {
                 RolloutReadySnapshotDecision::SessionDead => {
                     return Err(PROMPT_READY_SESSION_DEAD_ERROR.to_string());
                 }
@@ -680,7 +762,7 @@ fn wait_until_codex_tui_input_ready_with_policy(
         if Instant::now() >= deadline {
             return Err(timeout_error(&snapshot));
         }
-        if draft_policy.accepts(&snapshot) {
+        if wait_ready(session_name, &snapshot, draft_policy) {
             return Ok(());
         }
         if !snapshot.tmux_pane_alive {
@@ -738,7 +820,7 @@ fn run_prompt_ready_fast_path(
         if cancel_requested(cancel_token.as_deref()) {
             return (HookFastPathOutcome::Cancelled, None);
         }
-        if draft_policy.accepts(&pre_snapshot) {
+        if wait_ready(&session_name, &pre_snapshot, draft_policy) {
             return (HookFastPathOutcome::PreSnapshotReady, None);
         }
         if !pre_snapshot.tmux_pane_alive {
