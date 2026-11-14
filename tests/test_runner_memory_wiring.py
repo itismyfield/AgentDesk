@@ -14,7 +14,6 @@ PHASES = {
     "pg15_owner_proof": ["PostgreSQL 15 exact owner proof"],
     "lint": ["just lint"],
     "scripts": ["Run script checks"],
-    "relay_authority_mutations": ["Require relay-authority mutations to be killed"],
 }
 TARGETS = {"ci-pr.yml": set(PHASES), "ci-main.yml": {"rust_build", "lint", "scripts"}, "ci-nightly.yml": {"rust_build"}}
 NAMES = ["Start runner memory sampler", "Begin runner memory step", "End runner memory step", "Summarize runner memory", "Upload runner memory"]

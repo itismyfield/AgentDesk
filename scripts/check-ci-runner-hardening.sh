@@ -27,7 +27,7 @@ require "yaml"
 require "json"
 specs = JSON.parse(ARGV.shift)
 pr_path, main_path, nightly_path = ARGV
-phases = {"rust_build" => ["Archive, list, compare and plan"], "base_compare" => ["Compare tests with the comparison base"], "pg15_owner_proof" => ["PostgreSQL 15 exact owner proof"], "lint" => ["just lint"], "scripts" => ["Run script checks"], "relay_authority_mutations" => ["Require relay-authority mutations to be killed"]}
+phases = {"rust_build" => ["Archive, list, compare and plan"], "base_compare" => ["Compare tests with the comparison base"], "pg15_owner_proof" => ["PostgreSQL 15 exact owner proof"], "lint" => ["just lint"], "scripts" => ["Run script checks"]}
 targets = {pr_path => phases, main_path => phases.slice("rust_build", "lint", "scripts").merge("lint" => ["just lint", "Non-lib tests and doctests"]), nightly_path => phases.slice("rust_build")}
 errors = []
 targets.each do |path, jobs_with_memory|
@@ -43,9 +43,6 @@ targets.each do |path, jobs_with_memory|
     expected = [specs.fetch("Start runner memory sampler")]
     labels.each do |label|
       begin_step = specs.fetch("Begin runner memory step").merge("env" => {"BASH_ENV" => "/dev/null", "MEMORY_STEP" => label})
-      if job_id == "relay_authority_mutations"
-        begin_step = begin_step.merge("if" => "steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'")
-      end
       expected.concat([begin_step, specs.fetch("End runner memory step")])
       index = steps.index(begin_step)
       span_names = path == pr_path && job_id == "scripts" ? ["Protect writer gate aggregate wiring (#5308)", label, "Production PR cap"] : [label]
@@ -744,7 +741,7 @@ expected_uploads = {
 }
 jobs.each do |job_id, job|
   uploads = Array(job["steps"]).select { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/upload-artifact") }
-  uploads = uploads.reject { |step| %w[rust_build base_compare pg15_owner_proof lint scripts relay_authority_mutations].include?(job_id) && step == memory_specs.fetch("Upload runner memory") }
+  uploads = uploads.reject { |step| %w[rust_build base_compare pg15_owner_proof lint scripts].include?(job_id) && step == memory_specs.fetch("Upload runner memory") }
   next if job_id == "scripts" || (uploads.empty? && !expected_uploads.key?(job_id))
   unless uploads == expected_uploads[job_id]
     warn "#{path}: artifact uploads must stay in approved jobs with their exact names"
@@ -896,7 +893,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "870e40401b83cdc2aecc1f21d41b6fa39ef3639e319ef451296e0343070b6bf8",
+    "job_sha256" => "4b493dd1746981ce7715b46d680350f84cb514678a48b2688867f4548f80af4d",
     "job_timeout_minutes" => 60,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {

@@ -924,8 +924,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", job)
         steps = job["steps"]
         self.assertEqual(steps[0], {"uses": "actions/checkout@v4", "with": {"fetch-depth": 2}})
-        self.assertEqual(steps[1].get("name"), "Start runner memory sampler")
-        path_filter_index = 2
+        path_filter_index = 1
         path_filter = steps[path_filter_index]
         self.assertEqual(path_filter.get("id"), "mutation_paths")
         self.assertEqual(path_filter.get("uses"), "dorny/paths-filter@v3")

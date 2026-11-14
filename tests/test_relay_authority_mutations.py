@@ -956,7 +956,6 @@ class MutationPathFilterContractTests(unittest.TestCase):
             "Cache Cargo dependencies": STEP_CONDITION,
             "Ensure swap for the lib test build": STEP_CONDITION,
             "Fetch Cargo dependencies": STEP_CONDITION,
-            "Begin runner memory step": STEP_CONDITION,
             MUTATION_STEP: STEP_CONDITION,
             "sccache stats": f"always() && ({STEP_CONDITION})",
         })

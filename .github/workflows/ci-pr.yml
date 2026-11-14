@@ -1065,7 +1065,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh dca865ac07a6094d92f8c27fc85e3fcadf45c8f48d84966f49ca38cbf1f8e2f5
+          pin scripts/check-ci-runner-hardening.sh e256ee60298077dc178779eb58b038480261be5a1d435e2f04e7786a9cf087ee
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1640,12 +1640,6 @@ jobs:
           fetch-depth: 2
 
       # Filter mutation setup and execution; a missing output still runs the gate.
-      - name: Start runner memory sampler
-        continue-on-error: true
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-        run: bash scripts/ci/runner-memory.sh start
       - name: Detect relay-authority mutation sources
         id: mutation_paths
         uses: dorny/paths-filter@v3
@@ -1706,14 +1700,6 @@ jobs:
         timeout-minutes: 10
         run: cargo fetch --locked
 
-      - name: Begin runner memory step
-        if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
-        continue-on-error: true
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-          MEMORY_STEP: "Require relay-authority mutations to be killed"
-        run: bash scripts/ci/runner-memory.sh begin "$MEMORY_STEP"
       - name: Require relay-authority mutations to be killed
         if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         env:
@@ -1724,31 +1710,6 @@ jobs:
         timeout-minutes: 60
         run: bash scripts/run_relay_authority_mutations.sh
 
-      - name: End runner memory step
-        if: always()
-        continue-on-error: true
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-        run: bash scripts/ci/runner-memory.sh end
       - name: sccache stats
         if: always() && (steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false')
         run: sccache --show-stats || true
-      - name: Summarize runner memory
-        if: always()
-        continue-on-error: true
-        timeout-minutes: 1
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-        run: bash scripts/ci/runner-memory.sh finish
-      - name: Upload runner memory
-        if: always()
-        continue-on-error: true
-        timeout-minutes: 2
-        uses: actions/upload-artifact@v4
-        with:
-          name: runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/runner-memory
-          if-no-files-found: warn
-          retention-days: 7
