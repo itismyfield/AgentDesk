@@ -117,6 +117,17 @@ async fn thread_outcome(fixture: &Fixture, run: &str) -> ThreadOutcome {
     .unwrap()
 }
 
+/// Where every outbox message of the routine is addressed.
+async fn notices(fixture: &Fixture, routine: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT target FROM message_outbox WHERE session_key LIKE 'routine:' || $1 || ':%'",
+    )
+    .bind(routine)
+    .fetch_all(&fixture.pool)
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn a_thread_create_nobody_confirmed_is_repeated_by_neither_the_run_nor_its_log_pg() {
     if !api_child(&format!(
@@ -128,6 +139,7 @@ async fn a_thread_create_nobody_confirmed_is_repeated_by_neither_the_run_nor_its
     let before = channel_state(&fixture, PRIMARY).await;
     let prompt = || "nightly report".to_string();
     let unavailable = || Some("thread_unavailable".to_string());
+    let primary = || format!("channel:{}", PRIMARY.get());
     // The executor and the outcome logger of a runtime whose thread calls reach `api`.
     let pool = Arc::new(fixture.pool.clone());
     let serve = |api: &ThreadApi| {
@@ -165,31 +177,33 @@ async fn a_thread_create_nobody_confirmed_is_repeated_by_neither_the_run_nor_its
         assert_eq!(thread_outcome(&fixture, &run).await, unconfirmed);
         // The failure notice goes to the agent's primary channel, not to a new thread.
         assert_eq!(logged.status, "ok", "{policy:?} {logged:?}");
-        let notices: Vec<String> = sqlx::query_scalar(
-            "SELECT target FROM message_outbox
-             WHERE session_key = 'routine:' || $1 || ':run:' || $2 || ':attention'",
-        )
-        .bind(&routine_id)
-        .bind(&run)
-        .fetch_all(&fixture.pool)
-        .await
-        .unwrap();
-        assert_eq!(notices, [format!("channel:{}", PRIMARY.get())]);
+        assert_eq!(notices(&fixture, &routine_id).await, [primary()]);
         assert!(nothing_ran(&fixture, &[PRIMARY, THREAD]));
         assert_eq!(channel_state(&fixture, PRIMARY).await, before);
     }
 
-    // Control: a create Discord refuses also ends the run at once, as a refusal.
+    // The saved thread is gone (404) and Discord refuses a replacement (403): the run ends at
+    // once, and its failure notice reaches the primary channel instead of the thread that is gone.
+    let gone = ChannelId::new(1_479_671_302_387_081_173);
     let api = thread_api(Create::Refused).await;
-    let (executor, _) = serve(&api).await;
+    let (executor, logger) = serve(&api).await;
     let spare = (2, Some("fallback8117"));
-    let (store, _, claimed, _) = routine_claim_with(&fixture, false, None, spare).await;
+    let (store, _, claimed, routine_id) =
+        routine_claim_with(&fixture, false, Some(gone), spare).await;
     let run = claimed.run_id.clone();
     let start = executor.start_agent_run(&store, claimed, prompt(), None, None, None, None, false);
-    assert_eq!(start.await.unwrap().status, "failed");
+    let failed = start.await.unwrap();
+    assert_eq!(failed.status, "failed", "{failed:?}");
+    let logged = logger.log_run_outcome(&store, &failed).await;
+    assert_eq!(logged.status, "ok", "{logged:?}");
+    assert_eq!(notices(&fixture, &routine_id).await, [primary()]);
     let ended = ("failed".to_string(), 0, unavailable());
     assert_eq!(run_state(&fixture, &run).await, ended);
-    let refused = (Some("refused".to_string()), None, None);
+    let refused = (
+        Some("refused".to_string()),
+        None,
+        Some(gone.get().to_string()),
+    );
     assert_eq!(thread_outcome(&fixture, &run).await, refused);
     assert_eq!(api.creates.load(Ordering::SeqCst), 1);
 

@@ -19,23 +19,27 @@ impl RoutineDiscordLogger {
     ) -> RoutineDiscordLogStatus {
         let snapshot: Result<(String, bool, bool), _> = sqlx::query_as(
             "SELECT status, COALESCE(run_spec ->> 'execution_mode' = 'headless', FALSE),
-                    COALESCE(result_json ->> 'thread_failure' = 'create_unconfirmed', FALSE)
+                    result_json ->> 'thread_failure' IS NOT NULL
              FROM routine_runs WHERE id = $1 AND routine_id = $2",
         )
         .bind(&outcome.run_id)
         .bind(&routine.id)
         .fetch_one(&*self.pool)
         .await;
-        let (status, headless, create_unconfirmed) = match snapshot {
+        let (status, headless, thread_failed) = match snapshot {
             Ok(status) => status,
             Err(error) => return RoutineDiscordLogStatus::failed(error),
         };
-        // A run whose thread create went unanswered gets no second thread from its own log.
-        let thread_store = (!create_unconfirmed).then_some(store);
+        // A run that ended for want of its thread is reported on the agent's primary channel:
+        // its log neither trusts the saved thread nor creates another.
+        let thread = match thread_failed {
+            true => (None, None),
+            false => (Some(store), routine.discord_thread_id.as_deref()),
+        };
         // The census verdict goes to the routine's thread, which a headless run does not have.
         if !headless && super::super::legacy_body_census::applies(&routine.script_ref) {
             return self
-                .log_census_outcome(store, thread_store, routine, outcome)
+                .log_census_outcome(store, thread, routine, outcome)
                 .await;
         }
         // Headless failures are reported at close; a headless pause goes to the primary channel.
@@ -50,11 +54,11 @@ impl RoutineDiscordLogger {
         };
         let target = match self
             .resolve_routine_log_target(
-                thread_store,
+                thread.0,
                 Some(&routine.id),
                 Some(&routine.name),
                 routine.agent_id.as_deref(),
-                routine.discord_thread_id.as_deref(),
+                thread.1,
             )
             .await
         {
