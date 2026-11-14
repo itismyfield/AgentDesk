@@ -404,23 +404,6 @@ fn build_dispatch_completion_summary(info: &CompletedDispatchInfo) -> Option<Str
     Some(prepend_result_header(&body, header))
 }
 
-/// A reused dispatch thread under an O parent is recorded from a checked read; the JSON parent
-/// only decides whether to read.
-async fn record_reused_thread(thread_id: &str, body: &serde_json::Value) {
-    let parent = body.get("parent_id").and_then(|value| value.as_str());
-    let (Ok(channel), Some(Ok(parent))) = (thread_id.parse(), parent.map(str::parse)) else {
-        return;
-    };
-    let recorded = crate::services::tui_o::cutover::record_thread_child_by_id(channel, parent);
-    if let Err(detail) = recorded.await {
-        tracing::warn!(
-            channel,
-            detail,
-            "[tui_o] dispatch thread parent not recorded"
-        );
-    }
-}
-
 async fn ensure_thread_is_postable(
     client: &reqwest::Client,
     token: &str,
@@ -445,7 +428,6 @@ async fn ensure_thread_is_postable(
         .json::<serde_json::Value>()
         .await
         .map_err(|err| format!("failed to parse dispatch thread {thread_id}: {err}"))?;
-    record_reused_thread(thread_id, &body).await;
     let metadata = body.get("thread_metadata");
     let is_locked = metadata
         .and_then(|value| value.get("locked"))

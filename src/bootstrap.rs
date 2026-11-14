@@ -71,6 +71,10 @@ pub(crate) fn install_boot_snapshots(
 ) -> Result<()> {
     crate::config::validate_config(config)?;
     crate::services::tui_o::channel_policy::install(config)?;
+    // Before any runtime opens, so an open thread turn's Legacy sends are counted from the start.
+    if let Some(boot) = crate::services::tui_o::channel_policy::boot() {
+        boot.reserve_boot_children(&crate::services::discord::open_tui_thread_hints());
+    }
     crate::services::provider_hosting::install_provider_hosting_config(config);
     crate::config::session_hosts::install_selected(selection);
     #[cfg(unix)]

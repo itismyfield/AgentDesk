@@ -931,6 +931,23 @@ pub(in crate::services::discord) mod o_seed_observation;
 #[path = "inflight/o_seed_observation_tests.rs"]
 mod o_seed_observation_tests;
 
+/// TUI turns left open on disk with the parent each recorded: a hint for which threads O reserves
+/// at boot, never evidence of the relationship.
+pub(crate) fn open_tui_thread_hints() -> Vec<(u64, u64)> {
+    use RuntimeHandoffKind::{ClaudeTui, CodexTui};
+    [ProviderKind::Claude, ProviderKind::Codex]
+        .iter()
+        .flat_map(load_inflight_states)
+        .filter(|state| matches!(state.runtime_kind, Some(ClaudeTui | CodexTui)))
+        .filter_map(|state| {
+            let hinted = state
+                .logical_channel_id
+                .filter(|p| *p != state.channel_id)?;
+            Some((state.channel_id, hinted))
+        })
+        .collect()
+}
+
 pub(super) fn load_inflight_states(provider: &ProviderKind) -> Vec<InflightTurnState> {
     let Some(root) = inflight_runtime_root() else {
         return Vec::new();

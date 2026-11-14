@@ -495,27 +495,6 @@ fn install_thread_lookup(shared: &Arc<SharedData>) {
     }));
 }
 
-/// Turns left open in unconfigured TUI threads stay Legacy's, counted on their own late adoption,
-/// until a placement reads the parent. The recorded parent is only a hint for picking them.
-pub(super) fn reserve_boot_threads(provider: &ProviderKind) {
-    use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
-    let Some(boot) = crate::services::tui_o::cutover::boot_snapshot() else {
-        return;
-    };
-    let open = crate::services::discord::inflight::load_inflight_states(provider);
-    let threads: Vec<(u64, u64)> = open
-        .iter()
-        .filter(|state| matches!(state.runtime_kind, Some(ClaudeTui | CodexTui)))
-        .filter_map(|state| {
-            let hinted = state
-                .logical_channel_id
-                .filter(|p| *p != state.channel_id)?;
-            Some((state.channel_id, hinted))
-        })
-        .collect();
-    boot.reserve_boot_children(&threads);
-}
-
 /// Starts the ordinary gateway writer under its PG gateway lease.
 pub(super) fn spawn(
     shared: &Arc<SharedData>,
