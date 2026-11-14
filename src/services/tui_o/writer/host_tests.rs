@@ -1411,7 +1411,8 @@ mod receipt_projection;
 
 #[tokio::test(start_paused = true)]
 async fn an_unregistered_member_starts_no_writer_and_rebinding_resumes_its_store() {
-    let (harness, _, _) = switched_over(&row("m0", "before the switch"));
+    let (harness, _, source) = switched_over(&row("m0", "before the switch"));
+    p5_log(harness._runtime.path(), CHANNEL, &startup(source));
     harness.gate.acquired();
     let saved = std::fs::read(init_path(&harness, CHANNEL)).unwrap();
     for registered in [false, true] {
