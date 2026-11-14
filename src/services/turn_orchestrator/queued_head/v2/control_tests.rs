@@ -430,15 +430,16 @@ fn v2_clear_preserves_delivery_history_and_accepts_the_next_ticket() {
                 "{field}: delivered history stays"
             );
         }
-        let settled: Vec<_> = before["admission_binds"]
+        let history: Vec<_> = before["admission_binds"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|bind| bind["at"]["kind"] == "settled")
+            .filter(|bind| matches!(bind["at"]["kind"].as_str(), Some("settled" | "queued")))
             .cloned()
             .collect();
-        assert!(!settled.is_empty());
-        assert_eq!(after["admission_binds"], json!(settled));
+        assert!(history.iter().any(|bind| bind["at"]["kind"] == "settled"));
+        assert!(history.iter().any(|bind| bind["at"]["kind"] == "queued"));
+        assert_eq!(after["admission_binds"], json!(history));
         handle
             .v2_request(move |slot| {
                 let owner = slot.as_mut().ok_or("no owner")?;
