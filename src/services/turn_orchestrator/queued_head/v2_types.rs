@@ -9,6 +9,8 @@ pub(crate) struct ClaudeHandoffJournal {
     pub(crate) ended: bool,
     pub(crate) failures: u32,
     pub(crate) notice_acked: bool,
+    #[serde(default)]
+    pub(crate) retry_after_ms: u64,
 }
 
 use super::{HeadPhase, PendingQueueItem, QueueIdentity};

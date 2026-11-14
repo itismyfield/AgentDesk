@@ -1106,11 +1106,10 @@ pub(super) async fn handle_text_message(
             .await.map(|_| IntakeExecution::deferred(channel_id));
         }
 
-        let defer_busy_view = owner.is_some() && provider == ProviderKind::Claude
-            && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none()
-            && super::super::intake_gate::busy_inject::queued_head_covers(
-                channel_id, final_thread_parent.as_ref().map(|(parent, _)| *parent),
-            );
+        let defer_busy_view = super::super::intake_gate::busy_inject::defer_owned_busy_view(
+            owner.is_some(), &provider, channel_id,
+            final_thread_parent.as_ref().map(|(parent, _)| *parent),
+        );
         // Owned input remains durable while its pane decides between a start and a busy paste.
         let _turn_start_attempt = if add_turn_pending && !defer_busy_view {
             tv_start_current_with_attempt(shared, http, original_channel_id, user_msg_id, "intake_start")

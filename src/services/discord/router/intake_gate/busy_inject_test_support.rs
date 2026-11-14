@@ -89,3 +89,18 @@ pub(super) fn note_outcome(message: u64, attempt: &InjectAttempt) {
     let outcome = format!("{attempt:?}");
     record(message, |seen| seen.outcomes.push(outcome));
 }
+
+#[cfg(unix)]
+pub(crate) async fn self_heal_pending(
+    ctx: &super::serenity::Context,
+    data: &super::Data,
+    channel: super::ChannelId,
+    message: super::MessageId,
+) {
+    assert!(
+        super::super::queue_effects::add_queue_pending_reaction_self_healing(
+            ctx, data, channel, message, '📬',
+        )
+        .await
+    );
+}

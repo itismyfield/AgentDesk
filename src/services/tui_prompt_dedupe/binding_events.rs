@@ -238,7 +238,7 @@ fn fault(_step: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn log_path(channel_id: u64) -> io::Result<Option<PathBuf>> {
+pub(crate) fn log_path(channel_id: u64) -> io::Result<Option<PathBuf>> {
     Ok(events_dir()?.map(|dir| dir.join(format!("{channel_id}.log"))))
 }
 

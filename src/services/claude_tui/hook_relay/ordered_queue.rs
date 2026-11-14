@@ -490,10 +490,10 @@ pub(super) fn start_ordered_hook_relay_worker(queue_dir: &Path) -> Result<(), St
         "--exact",
         "services::claude_tui::hook_relay::tests::non_wait_relay_worker_subprocess_entry",
     ]);
+    crate::config::test_instance::configure_reentry_command(&mut command)?;
     let child = command
         .env(NON_WAIT_RELAY_WORKER_ENV, encoded)
         .env_remove(FAILURE_MARKER_WORKER_ENV)
-        .env_remove("AGENTDESK_ROOT_DIR")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

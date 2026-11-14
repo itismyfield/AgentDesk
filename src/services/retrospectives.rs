@@ -4,7 +4,7 @@ use sqlx::{PgPool, Row};
 use std::future::Future;
 
 use crate::domain::memory::MemoryBackendKind;
-use crate::services::discord::settings::resolve_memory_settings;
+use crate::services::channel_roles::resolve_memory_settings;
 use crate::services::memory::sanitize_memento_workspace_segment;
 
 const MAX_SUMMARY_CHARS: usize = 220;

@@ -18,14 +18,15 @@ mod queue_effects;
 mod reply_context;
 pub(super) mod stale_turn;
 
-pub(in crate::services::discord) use gate::should_process_turn_message;
+pub(in crate::services::discord) use gate::{
+    should_process_turn_message, should_skip_human_slash_message,
+};
 
 use gate::{
     bot_author_allowed_for_live_intake, live_sender_excluded_from_human_preservation,
     should_admit_turn_message, should_merge_consecutive_messages,
-    should_skip_for_missing_required_mention, should_skip_human_slash_message,
-    should_skip_self_authored_turn_message, should_start_attachment_only_turn,
-    strip_leading_bot_mention,
+    should_skip_for_missing_required_mention, should_skip_self_authored_turn_message,
+    should_start_attachment_only_turn, strip_leading_bot_mention,
 };
 pub(in crate::services::discord::router) use queue_effects::should_schedule_post_enqueue_idle_drain;
 use queue_effects::{IntakeGateQueueEffects, render_visible_queued_ack};
@@ -365,12 +366,16 @@ pub(in crate::services::discord) async fn handle_event(
 
             // Registered slash commands are handled by poise interactions.
             // Unknown `/...` text should fall through to the AI provider.
-            if !new_message.author.bot
-                && should_skip_human_slash_message(
-                    &new_message.content,
-                    data.shared.known_slash_commands.get(),
-                )
-            {
+            if should_skip_human_slash_message(
+                new_message.author.bot,
+                &new_message.content,
+                data.shared.known_slash_commands.get(),
+            ) {
+                tracing::info!(
+                    message_id = new_message.id.get(),
+                    channel_id = new_message.channel_id.get(),
+                    "HUMAN-SLASH: skipping registered slash command text"
+                );
                 return Ok(());
             }
 
@@ -1010,7 +1015,7 @@ pub(in crate::services::discord) async fn handle_event(
                                 is_allowed_bot,
                             ),
                             intervention: busy_queue::spec(&live),
-                            options: IntakeQueueCommitOptions::default(),
+                            options: busy_inject::queue_commit_options(data, &live).await,
                         },
                     )
                     .await

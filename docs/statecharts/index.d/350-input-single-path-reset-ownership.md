@@ -1,0 +1,2 @@
+key: 350-input-single-path-reset-ownership
+| `input-single-path` reset ownership (#7835) | `435710f6a2` + repair | External reset overwrites the adopted snapshot: live and catch-up CAS reject it; a Pending original needs catch-up for its first commit | Fixed and Pending configs pass; raw writer and always-rejected Pending catch-up mutants expose the named safety/liveness counterexamples. See [report](input-single-path/reset.report.md). |

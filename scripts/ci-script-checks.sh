@@ -283,6 +283,11 @@ cargo build --bin agentdesk
 instance_test_bin="$(cd "${CARGO_TARGET_DIR:-$PWD/target}/debug" && pwd -P)"
 export PATH="$instance_test_bin:$PATH"
 "$PYTHON" -m unittest tests.test_dev_instance_credential
+"$PYTHON" -m unittest -v tests.test_dev_instance_identity
+"$PYTHON" -m unittest tests.test_dev_instance_lifecycle
+"$PYTHON" -m unittest tests.test_dev_instance_completion
+"$PYTHON" -m unittest tests.test_dev_instance_driver
+"$PYTHON" -m unittest tests.test_dev_instance_runtime
 fi
 
 if run_check guards "PG audit guard"; then
@@ -518,7 +523,7 @@ bash scripts/main-ci-triage.sh --self-test
 fi
 
 if run_check guards "Lib test build and clippy swap + memory probe contract"; then
-"$PYTHON" -m unittest tests.test_ensure_swap_ci_wiring
+"$PYTHON" -m unittest tests.test_ensure_swap_ci_wiring tests.test_ci_runner_memory tests.test_runner_memory_wiring
 fi
 
 if run_check guards "CI timeout wrapper tests (#4413)"; then
@@ -605,6 +610,14 @@ fi
 
 if run_check contracts "Script checks input selection contract"; then
 "$PYTHON" -m unittest tests.test_script_check_inputs
+fi
+
+if run_check contracts "Statechart index drift"; then
+"$PYTHON" scripts/ci/statechart_index.py --check
+fi
+
+if run_check contracts "Statechart index generator tests"; then
+"$PYTHON" -m unittest tests.test_statechart_index
 fi
 
 if run_check contracts "Giant deadline warning reporter contract"; then

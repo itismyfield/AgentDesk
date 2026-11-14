@@ -3,7 +3,7 @@ use sqlx::PgPool;
 use super::markers::{ApiFrictionReport, truncate_chars};
 use super::storage::SourceContext;
 use crate::domain::memory::{MemoryBackendKind, ResolvedMemorySettings};
-use crate::services::discord::settings::resolve_memory_settings;
+use crate::services::channel_roles::resolve_memory_settings;
 use crate::services::memory::{MementoBackend, MementoRememberRequest, TokenUsage};
 
 const MAX_MEMORY_CONTENT_CHARS: usize = 900;

@@ -1,0 +1,2 @@
+key: 460-tui-o-writer-adoption
+| `tui-o-writer` writer adoption (#7651 stage 1) | `13f9acdd9a` + plan r2.1 | main: Legacy posts a Deferred TUI turn; with no runtime root or an execution view without a store the gate answers owned and the row and dispatch settle with nothing posted; gate-only: a warm channel never commits, or commits at end of file past the held turn | Stage1 passes; six configs each drop one stage-1 guard; see [report](tui-o-writer/writer-adoption.report.md) |

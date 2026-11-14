@@ -100,7 +100,7 @@
           "source": "src/services/claude_tui/hook_relay.rs",
           "function": "handoff_hook_relay_failure",
           "stdout": "null",
-          "sha256": "40af63e2da134adc2f7de92008efe42c19ceef5bdcef4627519d57fc85b67b62",
+          "sha256": "883a361d069cfa36fb8d4e35296b01a1f0e21e98689a056a9d56869895995c41",
           "ignored_args": 1
         }
       ]
@@ -139,7 +139,7 @@
           "source": "src/services/claude_tui/hook_relay/ordered_queue.rs",
           "function": "start_ordered_hook_relay_worker",
           "stdout": "null",
-          "sha256": "d90fe73a45206a5cdc87edb5ee0777a5c29d1faeeb6177ca38732a8fc7058a4f",
+          "sha256": "abe634eae94e49ab19efaba0cef40715ba14347284135459f82d82abbbd0fa75",
           "ignored_args": 1
         }
       ]

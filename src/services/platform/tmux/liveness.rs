@@ -24,6 +24,7 @@ pub(super) fn pane_liveness_using(
 pub(super) fn prepared_tmux_command() -> Option<Command> {
     let path = binary_resolver::prepared_runtime_path()?;
     let mut command = binary_resolver::command_with_path("tmux".as_ref(), Some(path)).ok()?;
+    crate::config::test_instance::configure_tmux_command(&mut command).ok()?;
     command.arg("-u");
     Some(command)
 }
@@ -56,6 +57,9 @@ fn probe_pane_liveness(
     session_name: &str,
     mut run: impl FnMut(&[&str]) -> Result<Output, String>,
 ) -> PaneLiveness {
+    if validate_target(session_name).is_err() {
+        return PaneLiveness::ProbeError;
+    }
     match run(&["has-session", "-t", &exact_target(session_name)]) {
         // Spawn/exec failure ⇒ we never reached tmux: unknown, not dead.
         Err(_) => return PaneLiveness::ProbeError,

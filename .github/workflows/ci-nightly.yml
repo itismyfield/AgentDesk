@@ -264,6 +264,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
+      - name: Start runner memory sampler
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh start
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -288,6 +294,13 @@ jobs:
         env:
           BASH_ENV: /dev/null
         run: python3 scripts/ci/rust_test_sources.py check
+      - name: Begin runner memory step
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          MEMORY_STEP: "Archive, list, compare and plan"
+        run: bash scripts/ci/runner-memory.sh begin "$MEMORY_STEP"
       - name: Archive, list, compare and plan
         timeout-minutes: 45
         shell: bash
@@ -311,6 +324,13 @@ jobs:
             --target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \
             --build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode policy --output "$NEXTEST_DIR/plan" "${timings[@]}"
           python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"
+      - name: End runner memory step
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh end
       - name: Upload nextest plan
         uses: actions/upload-artifact@v4
         with:
@@ -320,6 +340,24 @@ jobs:
           retention-days: 1
 
   # Every worker runs its planned exact IDs once, serially, against its own PostgreSQL server.
+      - name: Summarize runner memory
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh finish
+      - name: Upload runner memory
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-memory
+          if-no-files-found: warn
+          retention-days: 7
   rust_tests:
     name: Rust tests (worker ${{ matrix.worker }})
     needs: rust_build

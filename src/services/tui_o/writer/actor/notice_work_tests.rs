@@ -1085,6 +1085,7 @@ async fn notice_admission_contention_after_preflight_still_lets_the_later_body_p
         "the notice passed preflight between the Bodies"
     );
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
+    crate::services::tui_o::writer::input_notices::admission::NOTICE_CALLS.with(|c| c.set((0, 0)));
     actor.deliver_owed(&progress).await;
     assert!(
         crate::services::tmux_common::try_with_tmux_source_authority(logical, |_| ()).is_none(),
@@ -1106,9 +1107,25 @@ async fn notice_admission_contention_after_preflight_still_lets_the_later_body_p
     assert_eq!(actor.progress().debt, 1);
     assert_eq!(actor.writer.boot.done(), 2, "only the two Bodies drained");
 
+    for _ in 0..4 {
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        actor.deliver_owed(&progress).await;
+    }
+    assert_eq!(
+        crate::services::tui_o::writer::input_notices::admission::NOTICE_CALLS.with(|c| c.get()),
+        (1, 1),
+        "final admission and withheld log stay bounded during contention"
+    );
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    actor.deliver_owed(&progress).await;
+    assert_eq!(
+        crate::services::tui_o::writer::input_notices::admission::NOTICE_CALLS.with(|c| c.get()),
+        (2, 2)
+    );
     let (release, thread) = port.holder.lock().unwrap().take().unwrap();
     release.send(()).unwrap();
     thread.join().unwrap();
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
     actor.deliver_owed(&progress).await;
     let posts = port.posts.lock().unwrap();
     assert_eq!(posts.len(), 3);

@@ -1,0 +1,2 @@
+key: 500-session-lifecycle-effort
+| `session-lifecycle` effort 즉시 재기동 (#8109 design) | `193a57168f` | Current has no interrupt; nine proposed guard mutants keep expected RED (notice, queue, wake, continuation priority, duplicate reply, request progress) | Existing TmuxSession extended; 10 GREEN + 9 expected RED configs; original-never-finishes still reaches ready/failure, continuation once per actual interrupted root. Capability/session/applied evidence remain explicit port assumptions. [report](session-lifecycle/effort-restart.report.md) |

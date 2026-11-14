@@ -27,7 +27,7 @@ pub use registry::{
 pub(crate) use session_probe::SessionProbe;
 
 pub(crate) use crate::domain::provider::LegacyDispatchKind;
-pub use crate::domain::provider::naming::{TMUX_SESSION_PREFIX, tmux_env_suffix};
+pub use crate::domain::provider::naming::tmux_env_suffix;
 pub use crate::domain::provider::{ProviderCapabilities, ProviderDefaultBehavior, ProviderKind};
 pub use runtime::{ProviderRuntimeExt, ProviderRuntimeProbe};
 
