@@ -2,10 +2,12 @@
 EXTENDS Naturals
 VARIABLES lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
           lateCommits, lateSkips, lateEnd, lateKind, lateCheckedOutput,
-          lateLife, lateSends, lateBadCommit, lateRestored
+          lateLife, lateSends, lateBadCommit, lateRestored,
+          lateRevision, lateCheckedRevision
 lateVars == <<lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
               lateCommits, lateSkips, lateEnd, lateKind, lateCheckedOutput,
-              lateLife, lateSends, lateBadCommit, lateRestored>>
+              lateLife, lateSends, lateBadCommit, lateRestored,
+              lateRevision, lateCheckedRevision>>
 CONSTANTS Fix, Mut
 VARIABLES sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
           otherCustody, lp, op, rowCleared, dispatchSettled, attempts, restarts,
@@ -74,6 +76,7 @@ Init ==
     /\ lateCommits = 0 /\ lateSkips = 0 /\ lateEnd = "waiting"
     /\ lateKind = "clean" /\ lateCheckedOutput = FALSE /\ lateLife = "live"
     /\ lateSends = 0 /\ lateBadCommit = FALSE /\ lateRestored = FALSE
+    /\ lateRevision = 0 /\ lateCheckedRevision = 0
     /\ sel \in {"default", "explicitOff", "listExcl", "lateOff", "defaultOff"}
     /\ site \in IF sel = "default" THEN {"home", "foreign"} ELSE {"home"}
     /\ root \in IF sel = "default" THEN BOOLEAN ELSE {TRUE}
@@ -258,6 +261,7 @@ LateInit == /\ sel = 0 /\ site = 0 /\ root = 0 /\ exec = 0 /\ bound = 0
                               "turnEnd", "secondInput", "otherTurn"}
             /\ lateLife = "live" /\ lateSends = 0
             /\ lateBadCommit = FALSE /\ lateRestored = FALSE
+            /\ lateRevision = 0 /\ lateCheckedRevision = 0
 
 LateValid == ~lateOutput \/ lateKind \in {"announced", "identified", "turnEnd"}
 LateAccept == IF Fix = "lateBuffered"
@@ -265,81 +269,101 @@ LateAccept == IF Fix = "lateBuffered"
               ELSE ~lateOutput
 LateCurrent == lateLife = "live" \/ Mut = "incarnation"
 LateQuiet == lateSends = 0 \/ Mut = "unfenced"
+LateRecheck == ~(Mut = "recheck" \/ (Mut = "bufferedRecheck" /\ lateCheckedOutput))
+LateReserved == Fix = "lateBuffered" /\ lateLife = "live"
+                /\ lateJudge \in {"waiting", "checked"}
 
-LateBind == /\ ~lateModal /\ ~lateBound
+LateBind == /\ UNCHANGED vars /\ ~lateModal /\ ~lateBound
             /\ (Fix # "lateBefore" \/ lateOutput)
             /\ lateBound' = TRUE /\ lateBoundFirst' = ~lateOutput
             /\ UNCHANGED <<lateModal, lateOutput, lateJudge, lateCommits, lateSkips,
                             lateEnd, lateKind, lateCheckedOutput, lateLife, lateSends,
-                            lateBadCommit, lateRestored>>
+                            lateBadCommit, lateRestored, lateRevision, lateCheckedRevision>>
 
 LateNativeOutput ==
-    /\ ~lateModal /\ ~lateOutput /\ lateKind # "clean"
+    /\ UNCHANGED vars /\ ~lateModal /\ ~lateOutput /\ lateKind # "clean"
     /\ (Fix \in {"lateBefore", "lateBuffered"} \/ lateBound)
     /\ (Fix # "lateFenced" \/ Mut = "unfenced" \/ lateJudge = "committed")
     /\ lateOutput' = TRUE
+    /\ lateRevision' = 1
     /\ UNCHANGED <<lateModal, lateBound, lateBoundFirst, lateJudge, lateCommits,
                     lateSkips, lateEnd, lateKind, lateCheckedOutput, lateLife,
-                    lateSends, lateBadCommit, lateRestored>>
+                    lateSends, lateBadCommit, lateRestored, lateCheckedRevision>>
+
+\* A checked buffered prefix can grow once more, either safely or with an invalid record.
+LateAppend ==
+    /\ UNCHANGED vars /\ Fix = "lateBuffered" /\ lateJudge = "checked"
+    /\ lateOutput /\ LateValid /\ lateRevision = 1
+    /\ lateRevision' = 2
+    /\ lateKind' \in {"announced", "identified", "turnEnd", "unidentified",
+                      "secondInput", "otherTurn", "rewritten"}
+    /\ UNCHANGED <<lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
+                    lateCommits, lateSkips, lateEnd, lateCheckedOutput, lateLife,
+                    lateSends, lateBadCommit, lateRestored, lateCheckedRevision>>
 
 \* Separate initial judge and final judgment: output can arrive during intake_fence.await.
-LateJudge == /\ lateBound /\ lateJudge = "waiting" /\ LateCurrent
+LateJudge == /\ UNCHANGED vars /\ lateBound /\ lateJudge = "waiting" /\ LateCurrent
              /\ lateJudge' = IF LateAccept THEN "checked" ELSE "skipped"
              /\ lateCheckedOutput' = lateOutput
+             /\ lateCheckedRevision' = lateRevision
              /\ lateSkips' = IF LateAccept THEN 0 ELSE 1
              /\ UNCHANGED <<lateModal, lateBound, lateOutput, lateBoundFirst,
                              lateCommits, lateEnd, lateKind, lateLife, lateSends,
-                             lateBadCommit, lateRestored>>
+                             lateBadCommit, lateRestored, lateRevision>>
 
 LateCommit ==
-    /\ lateJudge = "checked" /\ LateCurrent
-    /\ IF (~LateAccept /\ Mut # "recheck") \/ ~LateQuiet
+    /\ UNCHANGED vars /\ lateJudge = "checked" /\ LateCurrent
+    /\ IF (~LateAccept /\ LateRecheck) \/ ~LateQuiet
        THEN /\ lateJudge' = "skipped" /\ lateSkips' = 1
             /\ UNCHANGED <<lateCommits, lateBadCommit>>
-       ELSE IF lateCheckedOutput # lateOutput /\ Mut # "recheck"
+       ELSE IF lateCheckedRevision # lateRevision /\ LateRecheck
             THEN /\ lateJudge' = "waiting"
                  /\ UNCHANGED <<lateSkips, lateCommits, lateBadCommit>>
             ELSE /\ lateJudge' = "committed" /\ lateCommits' = lateCommits + 1
-                 /\ lateBadCommit' = (~LateValid \/ lateSends # 0 \/ lateLife # "live")
+                 /\ lateBadCommit' = (~LateValid \/ lateSends # 0 \/ lateLife # "live"
+                                      \/ lateRevision # lateCheckedRevision)
                  /\ UNCHANGED lateSkips
     /\ UNCHANGED <<lateModal, lateBound, lateOutput, lateBoundFirst, lateEnd,
-                    lateKind, lateCheckedOutput, lateLife, lateSends, lateRestored>>
+                    lateKind, lateCheckedOutput, lateLife, lateSends, lateRestored,
+                    lateRevision, lateCheckedRevision>>
 
 \* Lifecycle invalidation is environment, including before/inside/after the commit fence.
 \* A restarted process restores a durable init; it must not recommit an unproved old attempt.
 LateInvalidate ==
-    /\ Fix = "lateBuffered" /\ lateLife = "live" /\ ~lateModal
-    /\ lateLife' \in {"restarted", "cancelled", "terminated", "cleared", "stopped"}
+    /\ UNCHANGED vars /\ Fix = "lateBuffered" /\ lateLife = "live" /\ ~lateModal
+    /\ lateLife' \in {"restarted", "cancelled", "terminated", "cleared", "stopped",
+                      "rebound", "evicted"}
     /\ UNCHANGED <<lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
                     lateCommits, lateSkips, lateEnd, lateKind, lateCheckedOutput,
-                    lateSends, lateBadCommit, lateRestored>>
+                    lateSends, lateBadCommit, lateRestored, lateRevision, lateCheckedRevision>>
 LateRestore ==
-    /\ lateLife = "restarted" /\ ~lateRestored
+    /\ UNCHANGED vars /\ lateLife = "restarted" /\ ~lateRestored
     /\ lateRestored' = TRUE
     /\ lateCommits' = IF Mut = "restore" /\ lateCommits = 1 THEN 2 ELSE lateCommits
     /\ UNCHANGED <<lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
                     lateSkips, lateEnd, lateKind, lateCheckedOutput, lateLife,
-                    lateSends, lateBadCommit>>
+                    lateSends, lateBadCommit, lateRevision, lateCheckedRevision>>
 
 LateLegacySend ==
-    /\ Fix = "lateBuffered" /\ ~lateModal /\ lateSends = 0
+    /\ UNCHANGED vars /\ Fix = "lateBuffered" /\ ~lateModal /\ lateSends = 0
     /\ lateJudge # "committed"
+    /\ (~LateReserved \/ Mut \in {"admissionHold", "unfenced"})
     /\ lateSends' = 1
     /\ UNCHANGED <<lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
                     lateCommits, lateSkips, lateEnd, lateKind, lateCheckedOutput,
-                    lateLife, lateBadCommit, lateRestored>>
+                    lateLife, lateBadCommit, lateRestored, lateRevision, lateCheckedRevision>>
 
 LateStartupEnd ==
-    /\ lateModal /\ lateEnd = "waiting"
+    /\ UNCHANGED vars /\ lateModal /\ lateEnd = "waiting"
     /\ lateEnd' = IF Fix = "lateBefore" \/ Mut = "timeout"
                    THEN "timeout" ELSE "reasonedFailure"
     /\ UNCHANGED <<lateModal, lateBound, lateOutput, lateBoundFirst,
                     lateJudge, lateCommits, lateSkips, lateKind, lateCheckedOutput,
-                    lateLife, lateSends, lateBadCommit, lateRestored>>
+                    lateLife, lateSends, lateBadCommit, lateRestored,
+                    lateRevision, lateCheckedRevision>>
 
-LateNext == /\ UNCHANGED vars
-            /\ (LateBind \/ LateNativeOutput \/ LateJudge \/ LateCommit \/ LateStartupEnd
-                \/ LateInvalidate \/ LateRestore \/ LateLegacySend)
+LateNext == LateBind \/ LateNativeOutput \/ LateAppend \/ LateJudge \/ LateCommit
+            \/ LateStartupEnd \/ LateInvalidate \/ LateRestore \/ LateLegacySend
 LateSpec == LateInit /\ [][LateNext]_lateVars
             /\ WF_lateVars(LateBind) /\ WF_lateVars(LateNativeOutput)
             /\ WF_lateVars(LateJudge) /\ WF_lateVars(LateCommit)
@@ -352,6 +376,6 @@ LateBoundBeforeCommits == [](lateBoundFirst => <>(lateCommits = 1))
 LateModalExplained == [](lateModal => <>(lateEnd = "reasonedFailure"))
 LateNoUnsafeCommit == ~lateBadCommit
 LateEligibleCommits == []((lateBound /\ LateValid /\ lateLife = "live" /\ lateSends = 0)
-                          => <>(lateCommits = 1 \/ ~LateValid \/ lateLife # "live" \/ lateSends # 0))
+                          => <>(lateCommits = 1 \/ ~LateValid \/ lateLife # "live"))
 LateRestartRestores == [](lateLife = "restarted" => <>lateRestored)
 =============================================================================

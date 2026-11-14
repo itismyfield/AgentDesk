@@ -534,6 +534,8 @@ tui-o-writer/WriterArchivedSourceNoDrain.cfg	WriterArchivedSource	NoUnsentTailLo
 tui-o-writer/WriterArchivedSourceRebindAfter.cfg	WriterArchivedSource	-	-
 tui-o-writer/WriterArchivedSourceRebindBefore.cfg	WriterArchivedSource	-	NewBindingProgress
 tui-o-writer/WriterCodexLateBefore.cfg	WriterAdoption	LateBindingPrecedesOutput	LateModalExplained
+tui-o-writer/WriterCodexLateBufferedAdmissionHoldMut.cfg	WriterAdoption	-	LateEligibleCommits
+tui-o-writer/WriterCodexLateBufferedCheckedRecheckMut.cfg	WriterAdoption	LateNoUnsafeCommit	-
 tui-o-writer/WriterCodexLateBufferedDesign.cfg	WriterAdoption	-	-
 tui-o-writer/WriterCodexLateBufferedIdentityMut.cfg	WriterAdoption	LateNoUnsafeCommit	-
 tui-o-writer/WriterCodexLateBufferedIncarnationMut.cfg	WriterAdoption	LateNoUnsafeCommit	-

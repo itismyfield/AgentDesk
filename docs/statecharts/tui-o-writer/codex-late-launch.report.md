@@ -24,6 +24,12 @@ DESIGN_READY
 4. **원자적 채택**: intake hold와 gateway epoch, adoption lock을 유지한 상태에서 final recheck와 durable init publication을 끝낸다. write가 오류를 반환해도 실제 init이 readable하면 기존 settled 판정으로 Committed를 복구한다. 실패를 이유로 새 init을 중복 발행하지 않는다 (`activation.rs:234-278`).
 5. **무효화 우선**: Cancel/Terminate/clear/stop, incarnation 변경, binding 이동을 final recheck가 관찰하면 그 시도는 commit하지 않는다. 이미 commit된 init/posted ledger는 유지하며 기존 stop/clear/recovery가 처리한다. 부분 B에 새로운 kill/delete/cleanup 권한을 추가하지 않는다.
 
+### 첫 admission의 Legacy 전송 보류 계약
+
+provider가 첫 출력을 만들기 전에 fresh local admission의 현재 execution nonce·turn nonce·order·첫 prompt에 연결된 보류를 설치한다. `mark_turn_admitted`의 send snapshot만으로 이 보류가 구현되었다고 보지 않는다. 같은 admission의 Legacy body는 실제 send claim 전에 기다리며, 이 대기는 O ownership이나 delivery evidence가 아니다. durable init이 없는 동안 `owned=true`를 반환해 body를 버리지 않는다. commit 시에는 기존 O capture/identity/ledger가 같은 source를 재생하고 보류된 Legacy continuation은 실제 O ownership을 다시 읽는다. unsupported prefix, 최종 Refuse, lifecycle 무효화, launch/actor 종료는 보류를 끝내며, 기존 custody/continuation으로 정상 Legacy 전달을 재개한다. send counter의 초기·final 검사는 유지한다.
+
+보류 대기는 채택이 검사하는 relay slot/terminal custody를 획득하기 전에 배치한다. gate 안에서 기다린 채 `local_custody().blocks_takeover()` 또는 `relaying()`을 참으로 유지하면 순환 대기가 생긴다(`cutover/channel_gate.rs:196-205`, `:327-338`, `writer/late_adopt/codex.rs:281-283`, `discord/runtime_bootstrap/o_writer_host.rs:306-359`). 기존 unrelated custody와 queued-body 차단을 풀어 해결하지 않는다. 실제 bridge/watcher 진입점 시험은 결정 전 send 0, commit 후 전체 send 1, Refuse 후 Legacy 재개, bounded join을 확인해야 한다. 보류만 제거한 mutant는 성공 속성과 실제 body gate 시험을 깨뜨려야 한다.
+
 ### 제안하는 lifecycle 동기화 접점
 
 문서상의 가드를 실제로 만들기 위해, 현재 `Candidate::lock` (`channel_policy/adoption.rs:264`, `writer/activation.rs:195-246`)에 **해당 first admission의 무효화 stamp**를 함께 보호하도록 확장한다. stamp는 기존 turn-mark order와 active token의 turn nonce에 묶고, first admission에서만 새로 만든다. late attempt는 이것을 initial/final에 비교한다. 오래된 stop 토큰이 새 admission을 무효화하지 않도록 nonce/order 일치를 먼저 확인한다. 이 필드는 제안이며 부분 A에는 추가하지 않는다.
@@ -31,6 +37,12 @@ DESIGN_READY
 Cancel·user stop·clear·Terminate가 그 실행을 변경하기 **전** 동일한 candidate lock 아래 그 stamp를 invalid로 바꾼다. lock을 획득했을 때 이미 Committed이면 현재 O 소유 상태로 기존 stop/clear/termination 판정을 다시 실행한다. adoption은 같은 lock 아래 stamp 비교부터 durable init 및 Committed 설정까지 유지하므로, lifecycle가 먼저 이기면 그 시도는 commit할 수 없고 adoption이 먼저 이기면 lifecycle는 O 소유를 관찰한다. 무효화 이후 효과는 기존 권한/토큰/clearance만 사용한다. 무효화 자체가 kill/delete 허가가 아니다.
 
 lock 순서는 기존 activation의 intake fence→candidate를 따른다. lifecycle는 candidate에서 무효화만 기록하고 **lock을 놓은 뒤** source authority, DB, host I/O를 수행한다. candidate를 잡은 채 async await하거나 source-authority guard를 가진 채 candidate를 기다리는 새 경로는 만들지 않는다. 원격 요청은 기존 home/owner 라우팅에서 invalidate하며, home/ownership을 확인하지 못하면 takeover를 fail-closed로 유지한다. restart는 이 메모리 stamp를 복원 증거로 쓰지 않는다. durable init이 없으면 재증명하고 있으면 기존 recovery를 쓴다. 구현 리뷰는 아래 모든 실제 진입점에서 이 호출과 lock 순서를 확인해야 한다.
+
+### source 변경과 init publication의 같은 동기 구간
+
+final recheck가 authority를 확인하는 동안만 guard를 얻었다 놓는 것으로 끝내지 않는다. intake fence·gateway epoch·candidate lock 아래 현재 tmux source authority를 획득하고, 같은 guard를 source/binding/nonce 재확인부터 durable init write·settled 판정·Committed 메모리 표기까지 유지한다. STATE는 source authority 다음으로 읽는다. publisher/삭제 경로는 source authority를 잡은 채 candidate를 기다리지 않는다. lifecycle의 candidate 무효화는 source authority·DB·host I/O 이전에 끝내고 lock을 놓는다. 기존 callback이 역순을 만들지 않는지도 구현 시험으로 확인한다. 이 단락은 구현 요구이며 현재 activation이 이미 이 구간을 제공한다는 주장이 아니다.
+
+삭제도 같은 직렬화에 포함한다. Codex orphan pass `discord/tui_prompt_relay/rehydration.rs:217-236`, `:665-725` → `runtime_binding.rs:946-961`의 runtime/channel/provider-session mapping 제거는 `with_runtime_binding_authority`(`:147-153`) → `with_tmux_source_authority`를 사용한다. `session_resume.rs:632-637`의 명시적 binding 제거도 별도로 대조한다. adoption이 먼저 이기면 후속 변경은 기존 O 전이로 처리하고, 변경/eviction이 먼저 이기면 old attempt는 init을 발행하지 않는다. `BeforeWrite`에서 rebind/incarnation 변경/eviction을 각각 경쟁시키고 guard 수명을 final 검사까지 줄인 mutant를 검출한다.
 
 ### 입력·출력 출처 분류 (최초 판정 = 최종 재판정)
 
@@ -77,7 +89,7 @@ lock 순서는 기존 activation의 intake fence→candidate를 따른다. lifec
 | native preserve-stop | `discord/turn_bridge/tmux_runtime/native_stop.rs:58-95`, `:199-289`, `codex_stop_delivery.rs:416` | source incarnation과 turn nonce를 함께 유지. buffered output이 있다고 legacy completion으로 강제 정리하지 않음 |
 | clear commit/retire | `discord/commands/control.rs:510-564`, `control/clear_teardown.rs:61-132`, `runtime_binding/codex_policy/clear_relaunch.rs:83-113`, `:205` | 기존 clear boundary/retirement commit 뒤 이전 prefix·baseline을 폐기; confirmed end가 없으면 retirement 권한 확대 금지 |
 | Terminate / teardown | `provider_teardown.rs:40-82`, `session_resume.rs:330`, `:632`, `discord/commands/control/clear_teardown.rs:139-201`, `discord/herdr_terminate.rs:224`, `:401` (HTTP 진입은 `src/server/routes/herdr_terminate.rs:40`) | 기존 clearance/execution exclusion만 사용. takeover용 오류가 새로운 kill/delete 허가가 되지 않음 |
-| writer cleanup transition | `tui_o/writer/transition_port.rs:115-179`, `tui_o/store/spool/transition.rs:1`, `writer/rotation/clear_end.rs:26-103` | candidate source가 current execution과 겹치면 막는 기존 판단 유지. clear end는 첫 턴 E와 동일한 권한으로 취급하지 않음 |
+| writer cleanup transition | `tui_o/writer/transition_port.rs:115-179`, `tui_o/store/spool/transition.rs:1`, `writer/rotation/codex_end.rs:22-103` | candidate source가 current execution과 겹치면 막는 기존 판단 유지. Codex native end만 확인하며 Claude clear end를 첫 턴 E 권한으로 확대하지 않음 |
 | next input / turn mode | `tui_o/cutover/intake_route.rs:117-122`, `cutover.rs:81-120`, `channel_policy/adoption.rs:196-238` | commit만으로 두 번째 입력을 자동 해제하지 않음. native first-turn confirmation이 기존 hold 해제 조건 |
 | headless/process/remote | `tui_o/cutover/channel_gate.rs:186-208`, `writer/late_adopt/codex.rs:86` | fresh local Codex 범위 밖. 기존 원격/다른 provider 입력·body gate 변경 없음 |
 
@@ -91,13 +103,14 @@ lock 순서는 기존 activation의 intake fence→candidate를 따른다. lifec
 |---|---|---|
 | admission→turn mark | `discord/router/turn_start.rs:587`, `tui_o/cutover.rs:99-120`, `tui_o/channel_policy/adoption.rs:204-238` | first prompt/admission된 경계. clean과 secondInput 구분 |
 | argv create / observe | `codex/tui_session_launch/first_input.rs:45-55`, `:171`, `codex_tui/tail_launch.rs:104` | modal 유무; provider 출력과 actor는 독립 |
-| fresh discovery | `codex_tui/rollout_tail/handoff.rs:67-83` | binding absent/present; 발견 자체는 권한 아님 |
-| warm/resume discovery | `codex_tui/rollout_tail.rs:296`, `:435`, `:459`, `codex_tui/tail_launch.rs:75-99` | 기존 resume proof/offset 유지 |
-| post-tail binding | `codex/tui_session_launch.rs:430`, `codex.rs:552`, `codex_tui/session.rs:304-375` | lateBefore 바인딩 순서 |
+| fresh discovery | `codex_tui/rollout_tail/handoff.rs:70-89` | binding absent/present; 발견 자체는 권한 아님 |
+| warm/resume discovery | `codex_tui/rollout_tail.rs:295`, `:420`, `:443`, `codex_tui/tail_launch.rs:75-99` | 기존 resume proof/offset 유지 |
+| post-tail binding | `codex/tui_session_launch.rs:431`, `codex.rs:556`, `codex_tui/session.rs:304-375` | lateBefore 바인딩 순서 |
 | ordinary hook / launched publication | `tui_prompt_dedupe/runtime_binding/codex_hook.rs:15`, `:299-345`, `:441`, `runtime_binding.rs:257-273` | current incarnation authority 확인. shadow first proof(:93-192)는 publication이 아님 |
-| verified ingress / resolution | `runtime_binding/codex_verified.rs:534`, `:616`, `:698`, `:771`, `codex/absence_launch.rs:390` | verified proof는 별도. cold 변경으로 우회 금지 |
+| verified ingress / resolution | `runtime_binding/codex_verified.rs:534`, `:616`, `:732`, `:771`, `codex/absence_launch.rs:390` | verified proof는 별도. cold 변경으로 우회 금지 |
 | durable event / wake | `tui_prompt_dedupe/binding_events.rs:564-589`, `tui_o/writer/late_adopt.rs:25-35` | bind와 check가 별도 전이 |
 | rehydrate / manual rebind | `runtime_binding.rs:350-428`, `runtime_binding/pane_registration.rs:88`, `:249`, `discord/recovery_engine/manual_rebind/episode_handoff.rs:135`, `discord/tui_prompt_relay/herdr_source.rs:314` | restarted→restore. init 복원과 새 commit 구분 |
+| Codex dead/orphan eviction / explicit remove | `discord/tui_prompt_relay/rehydration.rs:217`, `:236`, `:665`, `:721`, `runtime_binding.rs:927-961`, `:147-153`, `session_resume.rs:630-637` | `LateInvalidate`의 rebound/evicted; source authority와 init 직렬화 요구 |
 | output classification / emission | `tui_o/shadow/identity.rs:268-337`, `codex_tui/rollout_tail/parser.rs:163-208`, `:714`, `:856-868`, `following_source.rs:297` | clean/announced/identified/unidentified/turnEnd/secondInput/otherTurn. native record와 send를 분리 |
 | first judge | `tui_o/writer/late_adopt/codex.rs:203-230`, `codex/prefix.rs:110-212` | waiting→checked/skipped |
 | fence / final recheck | `late_adopt/codex.rs:255-286`, `:314-347`, `writer/activation.rs:195-246` | checked 뒤 output 증가; 전송 0/1, unsafe commit 여부 |
@@ -105,7 +118,9 @@ lock 순서는 기존 activation의 intake fence→candidate를 따른다. lifec
 | lifecycle 경로 (전 행은 위 표) | `judged_stop.rs:174`, `native_stop.rs:58`, `control.rs:510`, `clear_teardown.rs:61`, `provider_teardown.rs:75`, `host/recover.rs:47` | live/restarted/cancelled/terminated/cleared/stopped. 환경이 한 번 무효화. current/old nonce를 문자열 숫자로 invent하지 않음 |
 | startup reason | `codex_tui/rollout_tail/legacy_selection.rs:14-31`, `codex_tui/input.rs:1013-1041` | waiting/timeout/reasonedFailure |
 
-`lateCheckedOutput`는 initial과 final 사이 바이트 증가 유무, `lateBadCommit`는 commit 시점의 잘못된 증거 여부를 기록하는 ghost다. lifecycle 변경 뒤 과거의 정상 commit을 잘못 위반으로 세지 않는다. `lateRestored`는 restart 후 durable init 복원을 별도로 기록한다. commit 수 0/1(restore mutant만 2), skip 수 0/1은 해당 첫 채택 1회의 범위다. 기존 모델 변수 0 고정은 비활성 placeholder이며 운영 도메인이 아니다.
+`lateRevision`은 0(출력 없음), 1(첫 출력까지), 2(checked buffered prefix 뒤 한 번 더 기록이 추가됨)의 유한 ghost다. `lateCheckedRevision`은 initial judge가 읽은 revision이며, 둘이 다르면 eligible append도 Again→재판정해야 한다. `lateCheckedOutput`은 initial에서 buffered 출력을 봤는지 보존하여 그 경우에만 final 재분류를 생략하는 mutant를 표현한다. `LateAppend`는 최신 전체 prefix 분류를 eligible/식별 불가/두 번째 입력/다른 턴/rewrite 중 하나로 바꾼다. append를 무제한 기록열로 모델링하지 않는다.
+
+`lateBadCommit`는 commit 시점의 잘못된 증거·stale revision을 기록한다. lifecycle 변경 뒤 과거 정상 commit을 소급 위반으로 세지 않는다. `lateRestored`는 restart 후 durable init 복원이다. commit 수 0/1(restore mutant만 2), skip 수 0/1은 첫 채택 한 번의 범위다. 기존 모델 변수 0 고정은 비활성 placeholder다. `LateReserved`는 fresh admission부터 결정을 기다리는 전송 보류이며 ownership이 아니다. Refuse/무효화 이후 Legacy 전송을 허용하지만 Committed는 Legacy 전송을 억제한다. source rebind와 eviction은 `LateInvalidate`의 별도 값으로 표현하며 원자적 commit 전후로만 발생한다. 실제 Rust guard 수명은 별도 경합 시험으로 증명해야 한다.
 
 ## 상태 차트 및 cfg 전/후
 
@@ -115,7 +130,8 @@ stateDiagram-v2
     Waiting --> Waiting: bind / native append (independent)
     Waiting --> Checked: current source + eligible first-turn prefix
     Waiting --> Skipped: unidentified output / second input / other turn
-    Checked --> Waiting: complete eligible prefix grew
+    Checked --> Checked: second append revises buffered prefix
+    Checked --> Waiting: complete eligible prefix revision grew
     Checked --> Committed: intake fence + identical final evidence + durable init
     Checked --> Skipped: new unsafe record / Legacy send
     Waiting --> Invalidated: Cancel / Terminate / clear / stop / incarnation change
@@ -133,15 +149,17 @@ stateDiagram-v2
 | WriterCodexLateBufferedDesign | 추천안: first-turn buffered output + 동일한 final 판정 + lifecycle/send guards | GREEN: NoUnsafeCommit·CommitAtMostOnce / EligibleCommits·ModalExplained·RestartRestores |
 | WriterCodexLateFencedDesign | 대안: commit acknowledgement 전 native output 금지 가정 | GREEN: 기존 safety 3 / liveness 2 |
 | WriterCodexLateUnfencedMut | 추천안에서 no-Legacy-send check 제거 | RED: NoUnsafeCommit / 나머지 활성 확인 |
+| WriterCodexLateBufferedAdmissionHoldMut | admission 보류 제거, send를 liveness 탈출로 취급하지 않음 | RED: EligibleCommits |
+| WriterCodexLateBufferedCheckedRecheckMut | initial에 buffered output이 있었을 때만 final 재분류 생략 | RED: NoUnsafeCommit |
 | WriterCodexLateBufferedIdentityMut | 식별 불가/다른 입력·턴도 수용 | RED: NoUnsafeCommit |
 | WriterCodexLateBufferedRecheckMut | final에서 최초 판정만 재사용 | RED: NoUnsafeCommit (fence 대기 중 invalid record) |
 | WriterCodexLateBufferedIncarnationMut | lifecycle/current-incarnation check 제거 | RED: NoUnsafeCommit |
 | WriterCodexLateBufferedRestoreMut | init 복원에서 재commit | RED: CommitAtMostOnce |
 | WriterCodexLateTimeoutMut | 시작 대화창 failure 제거 | RED: ModalExplained |
 
-모든 GREEN은 **설계 모델의 결과**이며 제품 시험 완료가 아니다. `LateEligibleCommits`는 유효 prefix, zero new Legacy sends, 현재 incarnation이 유지되는 경우에 commit한다는 조건부 활성이다. 환경이 invalid input/send/lifecycle를 추가하면 안전하게 제외되므로 성공 응답 무조건 보장이 아니다. announced output 이후 sealing record가 영원히 없으면 answer delivery 활성은 증명하지 않는다. WF는 Bind/NativeOutput/Judge/Commit/StartupEnd/Restore에만 부여하며 Cancel/Restart/LegacySend 같은 환경을 공정성으로 강제하지 않는다.
+모든 GREEN은 **설계 모델의 결과**이며 제품 시험 완료가 아니다. `LateEligibleCommits`는 유효 prefix, zero new Legacy sends, 현재 incarnation이 유지되는 경우에 commit한다는 조건부 활성이다. 환경이 invalid input/lifecycle를 추가하면 안전하게 제외되므로 성공 응답 무조건 보장이 아니다. 예약 중 Legacy send는 더 이상 성공 속성의 탈출 조건이 아니다. 유한한 두 번째 append 뒤 Judge/Commit의 WF로 수렴하며 Append 자체에는 WF를 주지 않는다. announced output 이후 sealing record가 영원히 없으면 answer delivery 활성은 증명하지 않는다. WF는 Bind/NativeOutput/Judge/Commit/StartupEnd/Restore에만 부여하며 Cancel/Restart/LegacySend 같은 환경을 공정성으로 강제하지 않는다.
 
-실행기: 저장소 공식 `scripts/ci/statecharts_tlc.py`의 `check_cfg`/fairness precheck. cold cfg 10개 TLC 44회 + fairness 10회, 기존 cfg 9개 TLC 50회 + fairness 9회; 기대 위반 불일치 0. 합계 cfg 19개/TLC 94회/fairness 19회. 최초 모델 작성 중 불완전한 boolean assignment 1건은 수정 후 전체를 다시 검증했으며 실패 실행을 GREEN에 포함하지 않는다. 결과와 원시 로그: `logs/leg2/statechart/results.log`, `existing-models.log`, `WriterCodexLate*.log`. 예상 위반 목록은 `docs/statecharts/expected.tsv`에 있다. 무위반과 mutant의 예상 RED를 구별했다. 모델의 liveness 결과로 runtime race 시험을 대체하지 않는다.
+설계 레그의 이전 실행 이력(아래 B 레그 검증과 구분): 저장소 공식 `scripts/ci/statecharts_tlc.py`의 `check_cfg`/fairness precheck. cold cfg 10개 TLC 44회 + fairness 10회, 기존 cfg 9개 TLC 50회 + fairness 9회; 기대 위반 불일치 0. 합계 cfg 19개/TLC 94회/fairness 19회. 최초 모델 작성 중 불완전한 boolean assignment 1건은 수정 후 전체를 다시 검증했으며 실패 실행을 GREEN에 포함하지 않는다. 결과와 원시 로그: `logs/leg2/statechart/results.log`, `existing-models.log`, `WriterCodexLate*.log`. 예상 위반 목록은 `docs/statecharts/expected.tsv`에 있다. 무위반과 mutant의 예상 RED를 구별했다. 모델의 liveness 결과로 runtime race 시험을 대체하지 않는다.
 
 ## 독립 리뷰가 답해야 할 항목 / 구현 검증 요구
 
@@ -151,3 +169,12 @@ stateDiagram-v2
 - 구현 시 baseline RED→GREEN: first output이 bind 전/후, initial judge 전/후, intake fence 대기 중, final recheck 직전 각각 발생하는 fixture; 2초 미만 완료 및 !clear 이후 새 incarnation.
 - 입력 분류 각 행은 초기와 final 양쪽 시험을 둔다. 별도 fence/sends/nonce/ID/final-recheck/restore mutation은 각각 RED여야 한다. Cancel/Terminate/clear/stop을 각 경계에서 삽입하고 duplicate body/cleanup authority 증가가 없는지 확인한다.
 - restart는 init 전·publication 뒤 메모리 commit 전·Posted 뒤로 나눠 복원하며 duplicate init/send가 없어야 한다. 기존 adopted/trusted 채널·headless/remote tests를 유지하고 실기 메시지 ID/commit 로그를 코디네이터가 확보한다.
+
+
+## B 구현 레그 1의 0단계 검증
+
+B 전체 예상 생산 순증 +1300~1700으로 +1200 정지선을 넘어 PLAN_READY로 분할을 요청했다. Rust 변경·commit·push는 없다. 첫 admission 보류와 source/init 동기화 단락은 B 첫 커밋에 포함할 계약이며 구현 완료가 아니다.
+
+강화한 `LateEligibleCommits`를 보류 없는 기존 모델에 적용하면 RED, 현 buffered 설계는 GREEN이다. 새 AdmissionHold mutant는 같은 liveness를 깨뜨리고, CheckedRecheck mutant는 이미 buffered prefix를 판정한 뒤의 추가 기록에서 NoUnsafeCommit을 깨뜨린다. 기존 cold cfg와 legacy cfg의 기대 위반은 유지했다. 저장소 cfg 21개/TLC 103회/fairness 21회, baseline 및 경로 witness를 포함한 최종 28개 케이스/TLC 136회/fairness 28회에서 기대 불일치 0·실행 오류 0이었다.
+
+identified→checked→secondInput, announced→checked→otherTurn은 정상 final에서 skipped/commit 0으로 끝나고 conditional recheck mutant에서 unsafe committed가 된다. 같은 턴의 eligible append는 Again→재판정→revision 2 commit에 도달한다. witness의 의도적 RED와 제품 실패를 구별했다. 원시 로그 164개와 재현 스크립트, 전수표, 미실행 검증은 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8165/report-impl-b-1.md` 및 `/Users/itismyfield/.adk/lane-runs/i8165/logs/b1-*`에 있다. 모델 경로의 실제 Rust replay는 후속 구현 조각의 필수 잔여다.
