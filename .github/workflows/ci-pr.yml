@@ -665,6 +665,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
+      - name: Start runner memory sampler
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh start
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -689,6 +695,13 @@ jobs:
         env:
           BASH_ENV: /dev/null
         run: python3 scripts/ci/rust_test_sources.py check
+      - name: Begin runner memory step
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          MEMORY_STEP: "Archive, list, compare and plan"
+        run: bash scripts/ci/runner-memory.sh begin "$MEMORY_STEP"
       - name: Archive, list, compare and plan
         timeout-minutes: 45
         shell: bash
@@ -712,6 +725,13 @@ jobs:
             --target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \
             --build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan" "${timings[@]}"
           python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"
+      - name: End runner memory step
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh end
       - name: Upload nextest plan
         uses: actions/upload-artifact@v4
         with:
@@ -722,6 +742,24 @@ jobs:
 
   # Lost tests against the comparison base fail unless scripts/ci/test-removal-justifications.txt names them.
   # A job of its own, so the workers start at the plan upload rather than after a base plan rebuild.
+      - name: Summarize runner memory
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh finish
+      - name: Upload runner memory
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-memory
+          if-no-files-found: warn
+          retention-days: 7
   base_compare:
     name: Rust tests base comparison
     needs: [changes, rust_build]
@@ -737,6 +775,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {fetch-depth: 2}
+      - name: Start runner memory sampler
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh start
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with: {toolchain: "1.94.1"}
@@ -757,6 +801,13 @@ jobs:
       - name: Download nextest plan
         uses: actions/download-artifact@v4
         with: {name: nextest-plan, path: "${{ runner.temp }}/nextest"}
+      - name: Begin runner memory step
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          MEMORY_STEP: "Compare tests with the comparison base"
+        run: bash scripts/ci/runner-memory.sh begin "$MEMORY_STEP"
       - name: Compare tests with the comparison base
         timeout-minutes: 40
         shell: bash
@@ -767,6 +818,31 @@ jobs:
         run: bash scripts/ci/nextest-base-diff.sh "$RUNNER_TEMP/nextest"
 
   # Every worker runs its planned exact IDs once, serially, against its own PostgreSQL server.
+      - name: End runner memory step
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh end
+      - name: Summarize runner memory
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh finish
+      - name: Upload runner memory
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-memory
+          if-no-files-found: warn
+          retention-days: 7
   rust_tests:
     name: Rust tests (worker ${{ matrix.worker }})
     needs: [changes, rust_build]
@@ -989,7 +1065,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh 64f57fecb95b8ddd73b87a3b2529190506216265d6b1f201099c716d34bf258b
+          pin scripts/check-ci-runner-hardening.sh dca865ac07a6094d92f8c27fc85e3fcadf45c8f48d84966f49ca38cbf1f8e2f5
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1021,6 +1097,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Start runner memory sampler
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh start
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
 
@@ -1054,6 +1136,13 @@ jobs:
         uses: ./.github/actions/ensure-swap
 
       # The ids file and this exact list must match; run_test_lane fails a missing, extra or unexecuted id.
+      - name: Begin runner memory step
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          MEMORY_STEP: "PostgreSQL 15 exact owner proof"
+        run: bash scripts/ci/runner-memory.sh begin "$MEMORY_STEP"
       - name: PostgreSQL 15 exact owner proof
         timeout-minutes: 40
         shell: bash
@@ -1087,9 +1176,34 @@ jobs:
           services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg
           --test-threads=1
 
+      - name: End runner memory step
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh end
       - name: Stop PostgreSQL service
         if: always()
         run: ./scripts/ci/postgres-service.sh stop
+      - name: Summarize runner memory
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh finish
+      - name: Upload runner memory
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-memory
+          if-no-files-found: warn
+          retention-days: 7
 
   lint:
     name: Lint runner
@@ -1103,6 +1217,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Start runner memory sampler
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh start
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -1145,6 +1265,13 @@ jobs:
       - name: Ensure swap for clippy
         uses: ./.github/actions/ensure-swap
 
+      - name: Begin runner memory step
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          MEMORY_STEP: "just lint"
+        run: bash scripts/ci/runner-memory.sh begin "$MEMORY_STEP"
       - name: just lint
         shell: bash
         env:
@@ -1155,9 +1282,34 @@ jobs:
           cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
           python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref "$CLIPPY_BASE_REF"
 
+      - name: End runner memory step
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh end
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
+      - name: Summarize runner memory
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh finish
+      - name: Upload runner memory
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-memory
+          if-no-files-found: warn
+          retention-days: 7
 
   win32_build_token_required_context:
     name: Win32 build-token required context
@@ -1180,6 +1332,12 @@ jobs:
           fetch-depth: 0
       # Keep Rust available for the lib inventory fallback.
 
+      - name: Start runner memory sampler
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh start
       - name: Install Rust toolchain for lib inventory
         uses: dtolnay/rust-toolchain@master
         with:
@@ -1226,6 +1384,13 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck zsh
       # Check aggregate wiring independently so deleting an aggregate gate still fails.
+      - name: Begin runner memory step
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          MEMORY_STEP: "Run script checks"
+        run: bash scripts/ci/runner-memory.sh begin "$MEMORY_STEP"
       - name: Protect writer gate aggregate wiring (#5308)
         timeout-minutes: 10
         shell: bash
@@ -1263,6 +1428,13 @@ jobs:
           PR_CAP_CI: "1"
           PR_CAP_MODE: ${{ vars.PR_CAP_MODE || 'enforce' }}
           BASH_ENV: /dev/null
+      - name: End runner memory step
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh end
       - name: Check generated documentation at PR head
         shell: bash
         env:
@@ -1311,6 +1483,24 @@ jobs:
 
   # Parallel Script checks shards without cargo. ci-script-checks.sh assigns
   # every check to one shard, and the required-context judge requires all of them.
+      - name: Summarize runner memory
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh finish
+      - name: Upload runner memory
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-memory
+          if-no-files-found: warn
+          retention-days: 7
   scripts_guards:
     name: Script checks runner (guards)
     needs: changes
@@ -1450,6 +1640,12 @@ jobs:
           fetch-depth: 2
 
       # Filter mutation setup and execution; a missing output still runs the gate.
+      - name: Start runner memory sampler
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh start
       - name: Detect relay-authority mutation sources
         id: mutation_paths
         uses: dorny/paths-filter@v3
@@ -1510,6 +1706,14 @@ jobs:
         timeout-minutes: 10
         run: cargo fetch --locked
 
+      - name: Begin runner memory step
+        if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          MEMORY_STEP: "Require relay-authority mutations to be killed"
+        run: bash scripts/ci/runner-memory.sh begin "$MEMORY_STEP"
       - name: Require relay-authority mutations to be killed
         if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         env:
@@ -1520,6 +1724,31 @@ jobs:
         timeout-minutes: 60
         run: bash scripts/run_relay_authority_mutations.sh
 
+      - name: End runner memory step
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh end
       - name: sccache stats
         if: always() && (steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false')
         run: sccache --show-stats || true
+      - name: Summarize runner memory
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh finish
+      - name: Upload runner memory
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runner-memory
+          if-no-files-found: warn
+          retention-days: 7

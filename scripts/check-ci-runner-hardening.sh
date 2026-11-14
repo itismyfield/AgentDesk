@@ -13,6 +13,60 @@ python3 scripts/ci/cargo_test_filters.py || error "main, nightly and Windows war
 
 readonly REQUIRED_CHECKS_JSON='["CI required"]'
 readonly REQUIRED_CHECK_MIRROR_SHA256="57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
+readonly RUNNER_MEMORY_STEPS_JSON='{
+  "Start runner memory sampler": {"name":"Start runner memory sampler","continue-on-error":true,"shell":"bash","env":{"BASH_ENV":"/dev/null"},"run":"bash scripts/ci/runner-memory.sh start"},
+  "Begin runner memory step": {"name":"Begin runner memory step","continue-on-error":true,"shell":"bash","env":{"BASH_ENV":"/dev/null"},"run":"bash scripts/ci/runner-memory.sh begin \"$MEMORY_STEP\""},
+  "End runner memory step": {"name":"End runner memory step","if":"always()","continue-on-error":true,"shell":"bash","env":{"BASH_ENV":"/dev/null"},"run":"bash scripts/ci/runner-memory.sh end"},
+  "Summarize runner memory": {"name":"Summarize runner memory","if":"always()","continue-on-error":true,"timeout-minutes":1,"shell":"bash","env":{"BASH_ENV":"/dev/null"},"run":"bash scripts/ci/runner-memory.sh finish"},
+  "Upload runner memory": {"name":"Upload runner memory","if":"always()","continue-on-error":true,"timeout-minutes":2,"uses":"actions/upload-artifact@v4","with":{"name":"runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}","path":"${{ runner.temp }}/runner-memory","if-no-files-found":"warn","retention-days":7}}
+}'
+
+validate_runner_memory_wiring() {
+  if ! ruby - "$RUNNER_MEMORY_STEPS_JSON" "$pr_workflow" "$main_workflow" "$nightly_workflow" <<'RUBY'
+require "yaml"
+require "json"
+specs = JSON.parse(ARGV.shift)
+pr_path, main_path, nightly_path = ARGV
+phases = {"rust_build" => ["Archive, list, compare and plan"], "base_compare" => ["Compare tests with the comparison base"], "pg15_owner_proof" => ["PostgreSQL 15 exact owner proof"], "lint" => ["just lint"], "scripts" => ["Run script checks"], "relay_authority_mutations" => ["Require relay-authority mutations to be killed"]}
+targets = {pr_path => phases, main_path => phases.slice("rust_build", "lint", "scripts").merge("lint" => ["just lint", "Non-lib tests and doctests"]), nightly_path => phases.slice("rust_build")}
+errors = []
+targets.each do |path, jobs_with_memory|
+  jobs = YAML.load_file(path).fetch("jobs", {})
+  jobs.each do |job_id, job|
+    steps = Array(job.is_a?(Hash) && job["steps"])
+    observer_steps = steps.select { |step| step.is_a?(Hash) && specs.key?(step["name"]) }
+    labels = jobs_with_memory[job_id]
+    if labels.nil?
+      errors << "#{path}: job #{job_id} must not contain runner memory observers" unless observer_steps.empty?
+      next
+    end
+    expected = [specs.fetch("Start runner memory sampler")]
+    labels.each do |label|
+      begin_step = specs.fetch("Begin runner memory step").merge("env" => {"BASH_ENV" => "/dev/null", "MEMORY_STEP" => label})
+      if job_id == "relay_authority_mutations"
+        begin_step = begin_step.merge("if" => "steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'")
+      end
+      expected.concat([begin_step, specs.fetch("End runner memory step")])
+      index = steps.index(begin_step)
+      span_names = path == pr_path && job_id == "scripts" ? ["Protect writer gate aggregate wiring (#5308)", label, "Production PR cap"] : [label]
+      span = index && steps[index + 1, span_names.length]
+      unless span && span.map { |step| step["name"] } == span_names && steps[index + span_names.length + 1] == specs.fetch("End runner memory step")
+        errors << "#{path}: job #{job_id} runner memory boundaries must surround exactly #{span_names.inspect}"
+      end
+    end
+    expected.concat([specs.fetch("Summarize runner memory"), specs.fetch("Upload runner memory")])
+    errors << "#{path}: job #{job_id} must retain exact runner memory observer steps" unless observer_steps == expected
+    errors << "#{path}: job #{job_id} must start memory observation immediately after checkout" unless steps[1] == expected.first
+    errors << "#{path}: job #{job_id} must summarize and upload memory last" unless steps.last(2) == expected.last(2)
+  end
+end
+errors.each { |message| warn message }
+exit(errors.empty? ? 0 : 1)
+RUBY
+  then
+    error "runner memory observers must retain their exact step shapes, jobs and boundaries"
+  fi
+}
 
 verify_required_check_mirror_hash() {
   local helper="scripts/required-check-mirror.sh"
@@ -36,7 +90,7 @@ validate_pr_debug_envs() {
     return
   fi
 
-  if ! ruby - "$pr_workflow" <<'RUBY'
+  if ! ruby - "$pr_workflow" "$RUNNER_MEMORY_STEPS_JSON" <<'RUBY'
 require "yaml"
 require "json"
 require "digest"
@@ -234,6 +288,7 @@ def execution_contract(snapshot, expected)
 end
 
 path = ARGV.fetch(0)
+memory_specs = JSON.parse(ARGV.fetch(1))
 gate_sha256 = Digest::SHA256.file("scripts/check-ci-runner-hardening.sh").hexdigest
 begin
   document = YAML.load_file(path)
@@ -483,7 +538,7 @@ script_check_execution = effective_execution(
 expected_script_check_execution = {
   "runs-on" => "ubuntu-latest",
   "protected_step_inventory" => {
-    "protected_indices" => [9, 10],
+    "protected_indices" => [11, 12],
     "steps_between_protected" => [],
   },
   "shell_candidates" => {
@@ -539,7 +594,7 @@ expected_script_check_execution = {
   ),
 }
 unless script_check_execution["protected_step_inventory"] == expected_script_check_execution["protected_step_inventory"]
-  warn "#{path}: Script checks protected step inventory changed; expected indices [9, 10] with no interstitial steps, found #{JSON.generate(script_check_execution["protected_step_inventory"])}"
+  warn "#{path}: Script checks protected step inventory changed; expected indices [11, 12] with no interstitial steps, found #{JSON.generate(script_check_execution["protected_step_inventory"])}"
   exit 1
 end
 unless execution_contract(script_check_execution, expected_script_check_execution)
@@ -606,7 +661,7 @@ writer_wiring_execution = effective_execution(
 expected_writer_wiring_execution = {
   "runs-on" => "ubuntu-latest",
   "protected_step_inventory" => {
-    "protected_indices" => [9, 10],
+    "protected_indices" => [11, 12],
     "steps_between_protected" => [],
   },
   "shell_candidates" => {
@@ -630,7 +685,7 @@ expected_writer_wiring_execution = {
   "effective_env" => expected_workflow_env,
 }
 unless writer_wiring_execution["protected_step_inventory"] == expected_writer_wiring_execution["protected_step_inventory"]
-  warn "#{path}: Script checks protected step inventory changed; expected indices [9, 10] with no interstitial steps, found #{JSON.generate(writer_wiring_execution["protected_step_inventory"])}"
+  warn "#{path}: Script checks protected step inventory changed; expected indices [11, 12] with no interstitial steps, found #{JSON.generate(writer_wiring_execution["protected_step_inventory"])}"
   exit 1
 end
 unless execution_contract(writer_wiring_execution, expected_writer_wiring_execution)
@@ -689,6 +744,7 @@ expected_uploads = {
 }
 jobs.each do |job_id, job|
   uploads = Array(job["steps"]).select { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/upload-artifact") }
+  uploads = uploads.reject { |step| %w[rust_build base_compare pg15_owner_proof lint scripts relay_authority_mutations].include?(job_id) && step == memory_specs.fetch("Upload runner memory") }
   next if job_id == "scripts" || (uploads.empty? && !expected_uploads.key?(job_id))
   unless uploads == expected_uploads[job_id]
     warn "#{path}: artifact uploads must stay in approved jobs with their exact names"
@@ -700,7 +756,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 100, "job_sha256" => "2a9bc6139c91a288215cacd933e570cfaadd458cb0162a13faf8e11e31a1b9a2",
+    "job_timeout_minutes" => 100, "job_sha256" => "b9a4e7ea687a54e297db3f60c62b7dd607ccaa896b7a74461bbc0e800c8484c5",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
@@ -728,7 +784,7 @@ targets = {
   "base_compare" => {
     "label" => "nextest base comparison job", "name" => "Rust tests base comparison",
     "needs" => %w[changes rust_build], "if" => built_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 60, "job_sha256" => "71752609857f8e44770e812c3865cda75a0dcff9b0b00af3f488df86e00813d4",
+    "job_timeout_minutes" => 60, "job_sha256" => "53a1a4957e3c354b92be97fa4911afe91746d33e687c4590b377d29643693a0d",
     "cargo_steps" => {
       # Dropping this step or changing its argv (a report-only diff) is rejected here.
       "Compare tests with the comparison base" => {
@@ -825,7 +881,7 @@ targets = {
     "if" => rust_tests_gate,
     "runs_on" => "ubuntu-latest",
     "job_timeout_minutes" => 50,
-    "job_sha256" => "dc65253eee0288f8167e522302053a74ad3094e967d738848ea57d2b320bd83d",
+    "job_sha256" => "7e69c5279aafb8b5164fcf2a81a13a4d0852a84f0f1bebc5c6afdd1162e13fc2",
     "cargo_steps" => {
       "PostgreSQL 15 exact owner proof" => {
         "commands" => ["python3 scripts/run_test_lane.py --lane pg --max-summaries 4 --expected-ids scripts/ci/pg15_required_ids.txt -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- --exact db::auto_queue::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg db::auto_queue::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg db::auto_queue::run_owner_guard_pg_tests::force_pause_cleanup_waits_for_run_token_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_cannot_escape_cancel_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_waits_on_run_token_not_origin_row_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_context_create_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_foreign_to_target_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_target_to_foreign_serializes_with_cancel_pg db::auto_queue::run_owner_guard_pg_tests::rest_revival_refused_for_cancelled_owner_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_cas_rejects_direct_cancel_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_refuses_failed_dispatch_of_cancelled_run_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_waits_for_run_cancel_and_refuses_pg db::auto_queue::run_owner_guard_pg_tests::verdict_rollback_revival_refused_for_cancelled_owner_pg db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_census_failure_rolls_back_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg --test-threads=1"],
@@ -840,7 +896,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "4b493dd1746981ce7715b46d680350f84cb514678a48b2688867f4548f80af4d",
+    "job_sha256" => "870e40401b83cdc2aecc1f21d41b6fa39ef3639e319ef451296e0343070b6bf8",
     "job_timeout_minutes" => 60,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {
@@ -969,7 +1025,7 @@ targets.each do |job_id, spec|
       unless lines == step_spec.fetch("commands")
         errors << "#{label} #{name.inspect} must retain the exact cargo/test command list"
       end
-    else
+    elsif !memory_specs.key?(name)
       forbidden = keys + ["BASH_ENV"]
       forbidden.each do |key|
         errors << "#{label} step #{index + 1} must not set #{key}" if step_env.is_a?(Hash) && step_env.key?(key)
@@ -996,10 +1052,13 @@ main_workflow=".github/workflows/ci-main.yml"
 warm_workflow=".github/workflows/ci-windows-cache-warm.yml"
 nightly_workflow=".github/workflows/ci-nightly.yml"
 sccache_action=".github/actions/sccache-or-nothing/action.yml"
+validate_runner_memory_wiring
 validate_main_script_check_shards() {
-  if ! ruby - "$main_workflow" <<'RUBY'
+  if ! ruby - "$main_workflow" "$RUNNER_MEMORY_STEPS_JSON" <<'RUBY'
 require "yaml"
+require "json"
 path = ARGV.fetch(0)
+memory_specs = JSON.parse(ARGV.fetch(1))
 document = YAML.load_file(path)
 jobs = document.fetch("jobs", {})
 errors = []
@@ -1058,7 +1117,7 @@ end
 clippy_upload = {"name" => "Upload Clippy observation", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "clippy-observation-${{ github.sha }}", "path" => "target/clippy-observation/", "if-no-files-found" => "error"}}
 census_upload = {"name" => "Upload census execution evidence", "if" => "${{ steps.audit.outputs.census_evidence_dir != '' }}", "continue-on-error" => true, "uses" => "actions/upload-artifact@v4", "with" => {"name" => "legacy-body-census-test-evidence-${{ github.run_attempt }}", "path" => "${{ steps.audit.outputs.census_evidence_dir }}", "if-no-files-found" => "warn", "retention-days" => 7}}
 nextest_upload = ->(job_id, step) { %w[rust_build rust_tests].include?(job_id) && step["uses"] == "actions/upload-artifact@v4" && step["with"].to_h["name"].to_s.start_with?("nextest-") }
-errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) || nextest_upload.(job_id, step) || (job_id == "test_evidence" && step == census_upload) }
+errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) || nextest_upload.(job_id, step) || (job_id == "test_evidence" && step == census_upload) || (%w[rust_build lint scripts].include?(job_id) && step == memory_specs.fetch("Upload runner memory")) }
 errors.each { |message| warn "#{path}: #{message}" }
 exit(errors.empty? ? 0 : 1)
 RUBY
@@ -1069,11 +1128,12 @@ RUBY
 validate_main_script_check_shards
 
 validate_main_lint_and_nextest() {
-  if ! ruby - "$main_workflow" "$pr_workflow" "$nightly_workflow" <<'RUBY'
+  if ! ruby - "$main_workflow" "$pr_workflow" "$nightly_workflow" "$RUNNER_MEMORY_STEPS_JSON" <<'RUBY'
 require "yaml"
 require "json"
 require "digest"
-main_path, pr_path, nightly_path = ARGV
+main_path, pr_path, nightly_path, memory_json = ARGV
+memory_specs = JSON.parse(memory_json)
 main_jobs = YAML.load_file(main_path).fetch("jobs", {})
 pr_jobs = YAML.load_file(pr_path).fetch("jobs", {})
 nightly_jobs = YAML.load_file(nightly_path).fetch("jobs", {})
@@ -1091,6 +1151,7 @@ cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./script
   %w[if needs continue-on-error strategy].each { |key| errors << "job #{job_id} must not set #{key}" if job.key?(key) }
   Array(job["steps"]).each do |step|
     next unless step.is_a?(Hash)
+    next if memory_specs.key?(step["name"])
     label = "job #{job_id} step #{(step["name"] || step["uses"] || step["run"]).to_s.inspect}"
     errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error")
     errors << "#{label} may only set if: always() as a cleanup step" if step.key?("if") && !(step["if"] == "always()" && cleanup.(step))
