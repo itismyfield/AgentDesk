@@ -22,6 +22,7 @@ use tracing_subscriber::fmt::MakeWriter;
 
 #[cfg(unix)]
 mod codex_empty_tests;
+mod o_done_reaction_tests;
 mod provider_failure_tests;
 #[cfg(all(test, unix))]
 mod recovery_retry_guard_tests;

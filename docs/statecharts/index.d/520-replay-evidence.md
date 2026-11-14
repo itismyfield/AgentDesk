@@ -1,0 +1,2 @@
+key: 520-replay-evidence
+| `replay-evidence` (#7353 S15a/b) | `68cd533396df10378f8402320ed94eea6ddca7a2` + S15a | Forge·Reuse·TakeTwice·WrongRoot·OwnProcess and RootlessNeedsProof·RootlessAuthority are expected controls | 13 cfg: live private-key proof and separate existing-withheld restoration; rootless Current/Proposed restore without new authority. [report](replay-evidence/replay-evidence.report.md) |

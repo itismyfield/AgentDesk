@@ -32,6 +32,7 @@ pub(in crate::services::discord) fn codex_supported_efforts(
         .map(Path::to_path_buf)
         .or_else(crate::services::codex_tui::rollout_tail::default_codex_home)
         .ok_or_else(|| "Codex launch home을 확인하지 못했습니다.".to_string())?;
+    crate::config::test_instance::environment::validate_provider_home("codex", &home)?;
     let raw = super::bounded_cache_file::read_regular_file_bounded(
         &home.join("models_cache.json"),
         MAX_CACHE_BYTES,
@@ -111,6 +112,47 @@ mod tests {
             .is_err()
         );
         assert!(from_cache(b"not json", "gpt-6-astra").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_instance_effort_cache_rejects_foreign_explicit_and_default_home() {
+        if !crate::services::provider_auth_profile::instance_env_tests::instance_child(concat!(
+            module_path!(),
+            "::test_instance_effort_cache_rejects_foreign_explicit_and_default_home"
+        )) {
+            return;
+        }
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        crate::config::test_instance::initialize().unwrap();
+        let instance = crate::config::test_instance::current().unwrap().unwrap();
+        let home = instance.root.join("home/.adk/profiles/codex/test-codex");
+        std::fs::write(
+            home.join("models_cache.json"),
+            metadata(&[("gpt-6-astra", &["high"])]),
+        )
+        .unwrap();
+        let foreign = instance.root.join("foreign-codex");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(
+            foreign.join("models_cache.json"),
+            metadata(&[("gpt-6-astra", &["ultra"])]),
+        )
+        .unwrap();
+        assert_eq!(
+            codex_supported_efforts(Some("gpt-6-astra"), Some(&home)).unwrap(),
+            ["high"]
+        );
+        assert_eq!(
+            codex_supported_efforts(Some("gpt-6-astra"), None).unwrap(),
+            ["high"]
+        );
+        assert!(codex_supported_efforts(Some("gpt-6-astra"), Some(&foreign)).is_err());
+        let _home = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "CODEX_HOME",
+            &foreign,
+        );
+        assert!(codex_supported_efforts(Some("gpt-6-astra"), None).is_err());
     }
 
     #[test]

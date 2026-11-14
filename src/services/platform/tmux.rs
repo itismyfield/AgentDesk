@@ -30,6 +30,7 @@ fn is_blank_session_name(session_name: &str) -> bool {
 fn tmux_command() -> std::io::Result<Command> {
     let mut cmd = binary_resolver::runtime_command("tmux")?;
     // -u forces UTF-8 mode so non-ASCII session names are not masked in output.
+    crate::config::test_instance::configure_tmux_command(&mut cmd)?;
     cmd.arg("-u");
     Ok(cmd)
 }
@@ -37,7 +38,10 @@ fn tmux_command() -> std::io::Result<Command> {
 fn tmux_output<S: AsRef<std::ffi::OsStr>>(
     args: impl IntoIterator<Item = S>,
 ) -> std::io::Result<Output> {
-    tmux_command()?.args(args).output()
+    let mut command = tmux_command()?;
+    command.args(args);
+    instance_scope::validate_command(&command)?;
+    command.output()
 }
 
 #[cfg(unix)]
@@ -67,6 +71,7 @@ fn wait_for_tmux_output(
     timeout: Duration,
     label: &str,
 ) -> Result<Output, String> {
+    instance_scope::validate_command(&command).map_err(|e| e.to_string())?;
     configure_child_process_group(&mut command);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = command
@@ -76,6 +81,8 @@ fn wait_for_tmux_output(
 }
 
 mod availability;
+mod instance_scope;
+pub(crate) use instance_scope::{input_command, validate_target};
 pub(crate) mod health_probe;
 pub(crate) mod session_identity;
 #[cfg(all(test, unix))]
@@ -160,6 +167,7 @@ pub fn create_session(
     working_dir: Option<&str>,
     shell_command: &str,
 ) -> Result<Output, String> {
+    validate_target(session_name).map_err(|e| e.to_string())?;
     let identity = crate::services::session_identity_metadata::runtime_identity(session_name)?;
     create_session_with_identity(session_name, working_dir, shell_command, &identity)
 }
@@ -170,6 +178,7 @@ pub(crate) fn create_session_with_identity(
     shell_command: &str,
     identity: &crate::domain::session_identity::managed::ManagedIdentity,
 ) -> Result<Output, String> {
+    validate_target(session_name).map_err(|e| e.to_string())?;
     let mut cmd = tmux_command().map_err(|e| format!("Failed to create tmux session: {e}"))?;
     cmd.args(["new-session", "-d", "-s", session_name]);
     cmd.args(["-e", &identity.environment_assignment()?]);
@@ -195,6 +204,7 @@ pub fn respawn_dead_pane(
     working_dir: Option<&str>,
     shell_command: &str,
 ) -> Result<Output, String> {
+    validate_target(session_name).map_err(|e| e.to_string())?;
     let mut cmd = tmux_command().map_err(|e| format!("Failed to respawn tmux pane: {e}"))?;
     cmd.args(["respawn-pane", "-t", &exact_target(session_name)]);
     if let Some(dir) = working_dir {
@@ -225,9 +235,11 @@ fn dead_marker_shell_command(session_name: &str, cleanup_hook_index: Option<u64>
         sh_single_quote(&parent),
         sh_single_quote(&marker_path)
     );
-    if let Some(index) = cleanup_hook_index {
+    if let Some(index) = cleanup_hook_index
+        && let Ok(tmux) = instance_scope::hook_tmux_prefix()
+    {
         shell.push_str(&format!(
-            "; tmux set-hook -g -u {} >/dev/null 2>&1; tmux set-hook -g -u {} >/dev/null 2>&1",
+            "; {tmux} set-hook -g -u {} >/dev/null 2>&1; {tmux} set-hook -g -u {} >/dev/null 2>&1",
             sh_single_quote(&format!("pane-exited[{index}]")),
             sh_single_quote(&format!("session-closed[{index}]"))
         ));
@@ -657,6 +669,7 @@ fn capture_pane_command(
     scroll_back: i32,
     preserve_escapes: bool,
 ) -> std::io::Result<Command> {
+    validate_target(session_name)?;
     let scroll = scroll_back.to_string();
     let mut command = tmux_command()?;
     command.arg("capture-pane");
@@ -695,7 +708,7 @@ pub fn list_session_names() -> Result<Vec<String>, String> {
     }
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter(|l| !l.is_empty())
+        .filter(|l| !l.is_empty() && validate_target(l).is_ok())
         .map(|l| l.to_string())
         .collect())
 }
@@ -754,7 +767,7 @@ pub fn list_sessions_with_pane_command() -> Result<Vec<EnumeratedSession>, Strin
         }
         let mut parts = line.splitn(3, '|');
         let session_name = parts.next().unwrap_or("").trim().to_string();
-        if session_name.is_empty() {
+        if session_name.is_empty() || validate_target(&session_name).is_err() {
             continue;
         }
         let pane_current_command = parts.next().unwrap_or("").trim().to_string();
@@ -799,7 +812,7 @@ fn parse_sessions_with_server_pid(text: &str) -> Vec<SessionServer> {
         }
         let mut parts = line.splitn(2, '|');
         let session_name = parts.next().unwrap_or("").trim().to_string();
-        if session_name.is_empty() {
+        if session_name.is_empty() || validate_target(&session_name).is_err() {
             continue;
         }
         let server_pid = parts

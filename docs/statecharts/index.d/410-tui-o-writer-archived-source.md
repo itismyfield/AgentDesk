@@ -1,0 +1,2 @@
+key: 410-tui-o-writer-archived-source
+| `tui-o-writer` archived source (#8051) | `a84d9cdb13` + rebind repair | Before: verified drained archive halts; NoDrain: retirement hides unread bytes; RebindBefore: archived A blocks the new B forever | actual FD EOF authorizes retirement; historical A parks without retirement after a valid B bind; guarded resume/attach fairness gives progress; [model and limits](tui-o-writer/archived-source.report.md) |

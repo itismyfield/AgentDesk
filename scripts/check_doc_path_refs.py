@@ -166,6 +166,8 @@ def _check_line_refs(doc, lineno, line, index, findings, seen, removed) -> None:
 
 
 def _check_links(doc, lineno, raw, index, findings) -> None:
+    # Index fragments render in README, so links use its directory while findings name the source.
+    link_doc = "docs/statecharts/README.md" if os.path.dirname(doc) == "docs/statecharts/index.d" else doc
     for match in LINK_RE.finditer(raw):
         target = match.group(1)
         if re.match(r"[a-zA-Z][\w+.-]*:", target) or target.startswith("#"):
@@ -176,7 +178,7 @@ def _check_links(doc, lineno, raw, index, findings) -> None:
         if target.startswith("/"):
             resolved = target.lstrip("/")
         else:
-            resolved = os.path.normpath(os.path.join(os.path.dirname(doc), target))
+            resolved = os.path.normpath(os.path.join(os.path.dirname(link_doc), target))
         if not index.exists(resolved):
             findings.append(Finding(doc, lineno, target, "link target missing"))
 

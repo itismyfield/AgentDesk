@@ -171,6 +171,15 @@ pub(super) fn loads(pane: busy_inject::Pane) -> impl FnMut() -> bool + Send + 's
     crate::services::claude_tui::host_input::busy::loads(pane)
 }
 
+/// A hold waits at the front for the look that clears it; one no look clears is retained with
+/// its resend ask instead.
+fn held(hold: &crate::services::claude_tui::input::PreparationHold) -> Completion {
+    match hold.unproven {
+        true => Completion::NotSent(format!("unproven: {hold:?}")),
+        false => Completion::Held(format!("held: {hold:?}")),
+    }
+}
+
 /// An idle Claude tmux pane: main's warm submission, whose stash the owner scope admits.
 pub(crate) fn idle_claude(
     pane: busy_inject::Pane,
@@ -195,7 +204,7 @@ pub(crate) fn idle_claude(
                     arm_screen(channel, pane.clone());
                     Ok(Completion::Held(MODAL.into()))
                 }
-                Err(SubmissionError::Held(hold)) => Ok(Completion::Held(format!("held: {hold:?}"))),
+                Err(SubmissionError::Held(hold)) => Ok(held(&hold)),
                 Err(error) => Ok(Completion::WriteUncertain(format!("{error:?}"))),
             }
         })
@@ -213,7 +222,7 @@ pub(crate) fn created(submit: owner_input::CreatedSubmit, writer: Option<String>
         }
         Ok(match submit(frame) {
             Ok(()) => Completion::Submitted,
-            Err(SubmissionError::Held(hold)) => Completion::Held(format!("held: {hold:?}")),
+            Err(SubmissionError::Held(hold)) => held(&hold),
             Err(error) => Completion::WriteUncertain(format!("{error:?}")),
         })
     })

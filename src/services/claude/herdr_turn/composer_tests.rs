@@ -407,3 +407,106 @@ fn herdr_ready_revalidates_a_source_changed_by_the_capture_before_any_key() {
     );
     assert!(matches!(result, InputRun::Refused(_)));
 }
+
+// A Herdr execution relaunched with `--resume` idles at its composer over whatever its old
+// transcript ends with; its own SessionStart admits the first queued input before any new turn.
+#[test]
+fn a_resumed_execution_takes_its_first_input_before_any_new_turn_ends() {
+    use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
+    use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding, binding_context};
+    use serde_json::json;
+    let old = chrono::Utc::now() - chrono::Duration::hours(1);
+    let said = |text: &str| json!({"type":"assistant","timestamp":old,"message":{"role":"assistant","content":[{"type":"text","text":text}]}});
+    let exit = [json!({"type":"last-prompt"}), json!({"type":"cost-state"})];
+    let finished = [
+        said("earlier answer"),
+        json!({"type":"system","subtype":"stop_hook_summary","timestamp":old}),
+        json!({"type":"system","subtype":"turn_duration","timestamp":old}),
+    ];
+    let cut_short = [
+        json!({"type":"user","timestamp":old,"message":{"role":"user","content":"earlier prompt"}}),
+        json!({"type":"assistant","timestamp":old,"message":{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"Read","input":{}}]}}),
+        json!({"type":"permission-mode","permissionMode":"bypassPermissions"}),
+    ];
+    for (name, history) in [("finished", &finished[..]), ("cut short", &cut_short[..])] {
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        readiness::initialize();
+        let rig = HerdrRig::start();
+        let _registry = rig.registry_on_this_thread();
+        let logical = format!("i8161-resumed-{}", uuid::Uuid::new_v4().simple());
+        let native = uuid::Uuid::new_v4().to_string();
+        let projects = root.path().join("projects");
+        let path = projects.join("workspace").join(format!("{native}.jsonl"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let rows = |rows: &[serde_json::Value]| {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            for row in rows {
+                let mut row = row.clone();
+                row["sessionId"] = json!(native);
+                writeln!(file, "{row}").unwrap();
+            }
+        };
+        rows(history);
+        rows(&exit);
+        let context: binding_context::BindingContext = serde_json::from_value(json!({
+            "schema":1,"provider":"claude","created_at":chrono::Utc::now(),"execution_nonce":NONCE,
+            "tmux_session":logical,"channel_id":1,"owner_runtime_root":"test","host":null,
+            "expected_native_session_id":native,"launch_mode":"resume","provider_root":projects
+        }))
+        .unwrap();
+        let launch = binding_context::PreparedIncarnation::create(context.clone()).unwrap();
+        rig.run_provider(&launch.path, false);
+        for (marker, value) in [("host_kind", "herdr"), ("spawn_nonce", NONCE)] {
+            let marker = crate::services::tmux_common::session_temp_path(&logical, marker);
+            std::fs::write(marker, value).unwrap();
+        }
+        let (_owner, target) = bound_target(&rig, &logical);
+        let _admission = crate::services::herdr_admission::force_for_test(
+            crate::services::herdr_admission::Admission::new(
+                true,
+                Some(root.path().join("no-stop")),
+            ),
+        );
+        readiness::note_hook(
+            "claude",
+            &HookEventKind::SessionStart,
+            &logical,
+            &json!({"session_id":native,"transcript_path":path,"source":"resume"}),
+            Some(&context),
+            Some(chrono::Utc::now()),
+            false,
+        );
+        // The launch's attach names the resumed transcript; the resume then adds its own metadata.
+        tui_prompt_dedupe::register_tmux_runtime_binding(
+            &logical,
+            TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                output_path: path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(native.clone()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        rows(&[json!({"type":"tools-used"})]);
+        rig.answer("pane.read", json!({"type":"pane_read", "read":{"pane_id":PANE,"source":"recent_unwrapped","text":pane("✻ Baked for 2s", ""),"revision":1,"truncated":false}}));
+        let plan = [
+            TuiInputAction::PasteBuffer("queued while it resumed".into()),
+            TuiInputAction::Enter,
+        ];
+        assert_eq!(
+            run_ready(&logical, &path, &target, &plan, None),
+            InputRun::Applied,
+            "{name}: a resumed idle execution takes the queued input"
+        );
+        assert_eq!(rig.sends().len(), 2, "{name}: one paste and one Enter");
+        tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
+    }
+}

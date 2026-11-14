@@ -1,0 +1,2 @@
+key: 210-session-lifecycle-herdr-root-replaced-preclaim
+| `session-lifecycle` (Herdr RootReplaced, #7788 S2) | `61bc2876e3` + S2 | an early old-binding claim retains current inflight that blocks quiet; missing completion wake leaves the same original Held | preclaim before claim and one wake for a process-seen completion close both progress gaps; same-root and nonapplicable-row controls pass; see `docs/statecharts/session-lifecycle/herdr-root-s2.report.md` |

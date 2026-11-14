@@ -460,7 +460,10 @@ fn decide_unbound(
     }
     // Only a name in AgentDesk's tmux namespace can be this channel's session under a name its
     // own evidence lacks; a session it names or owns already held above.
-    let namespace = format!("{}-", crate::services::provider::TMUX_SESSION_PREFIX);
+    let namespace = format!(
+        "{}-",
+        crate::domain::provider::naming::tmux_session_prefix()
+    );
     if names.iter().any(|name| {
         name.starts_with(&namespace)
             && !matches!(owners.get(name), Some(Some(owner)) if *owner != candidates.channel)
