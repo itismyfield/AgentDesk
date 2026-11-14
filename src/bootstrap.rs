@@ -53,6 +53,10 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
         tracing::warn!("  [mcp] Failed to clean retired Gemini MCP settings: {error}");
     }
 
+    if let Err(error) = crate::services::mcp_config::sync_antigravity_mcp_servers(&config) {
+        tracing::warn!("  [mcp] Failed to sync Antigravity MCP servers: {error}");
+    }
+
     // #1699: install the prompt-manifest retention snapshot so write-time
     // truncation in `db::prompt_manifests::save_prompt_manifest_pg` reflects
     // the operator-chosen `agentdesk.yaml` policy. Set-once; restart required

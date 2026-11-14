@@ -160,7 +160,12 @@ fn skill_deployment_plan(
         let providers = normalize_provider_list(&entry.providers)
             .into_iter()
             .collect::<Vec<_>>();
-        let providers = if providers.is_empty() {
+        // An explicitly retired target must not fall back to every other provider.
+        let retired_target = entry
+            .providers
+            .iter()
+            .any(|provider| normalize_provider_name(provider).as_deref() == Some("gemini"));
+        let providers = if providers.is_empty() && !retired_target {
             all_skill_providers()
         } else {
             providers
@@ -237,6 +242,16 @@ fn workspace_targets_for_names(
     result
 }
 
+fn skill_target_identity(provider: &str, target: &Path) -> (bool, PathBuf) {
+    // Directory aliases share entries, while Claude command links use a different filename.
+    (
+        provider == "claude",
+        target
+            .canonicalize()
+            .unwrap_or_else(|_| target.to_path_buf()),
+    )
+}
+
 fn prune_unplanned_managed_skill_links(
     root: &Path,
     skill_name: &str,
@@ -247,17 +262,23 @@ fn prune_unplanned_managed_skill_links(
     let mut desired_dirs = BTreeSet::new();
     if let Some(home) = current_home_dir() {
         for provider in &deployment.global_providers {
-            desired_dirs.insert(provider_target_dir(provider, &home));
+            desired_dirs.insert(skill_target_identity(
+                provider,
+                &provider_target_dir(provider, &home),
+            ));
         }
     }
     for target in &deployment.workspace_targets {
         for provider in &target.providers {
-            desired_dirs.insert(provider_target_dir(provider, &target.root));
+            desired_dirs.insert(skill_target_identity(
+                provider,
+                &provider_target_dir(provider, &target.root),
+            ));
         }
     }
 
     for (provider, target_dir) in all_candidate_skill_target_dirs(root, workspace_names) {
-        if desired_dirs.contains(&target_dir) {
+        if desired_dirs.contains(&skill_target_identity(&provider, &target_dir)) {
             continue;
         }
         let (source_path, link_path, _is_dir_link) =
@@ -423,8 +444,18 @@ fn normalize_skill_provider_name(value: &str) -> Option<String> {
 }
 
 fn cleanup_retired_gemini_skills(root: &Path) -> Result<(), String> {
+    let workspaces = root.join("workspaces");
+    if fs::symlink_metadata(&workspaces).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        tracing::warn!("Preserving Gemini skills under aliased workspaces root");
+        return Ok(());
+    }
     for workspace in discover_workspaces(root)? {
-        let gemini = root.join("workspaces").join(workspace).join(".gemini");
+        let workspace = workspaces.join(workspace);
+        if fs::symlink_metadata(&workspace).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            tracing::warn!(path = %workspace.display(), "Preserving Gemini skills under aliased workspace");
+            continue;
+        }
+        let gemini = workspace.join(".gemini");
         let skills = gemini.join("skills");
         // Do not follow a directory alias into another workspace or a user's home.
         if fs::symlink_metadata(&gemini).is_ok_and(|meta| meta.file_type().is_symlink())
@@ -458,6 +489,7 @@ fn cleanup_retired_gemini_skills(root: &Path) -> Result<(), String> {
 
 fn all_skill_providers() -> Vec<String> {
     vec![
+        "antigravity".to_string(),
         "claude".to_string(),
         "codex".to_string(),
         "qwen".to_string(),
@@ -705,6 +737,7 @@ fn managed_skill_has_extra_files(
 
 fn provider_target_dir(provider: &str, base: &Path) -> PathBuf {
     match provider {
+        "antigravity" => base.join(".agents").join("skills"),
         "claude" => base.join(".claude").join("commands"),
         "codex" => base.join(".codex").join("skills"),
         "qwen" => base.join(".qwen").join("skills"),

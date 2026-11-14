@@ -1,3 +1,8 @@
+#[path = "mcp_config/antigravity.rs"]
+mod antigravity;
+
+pub(crate) use antigravity::sync as sync_antigravity_mcp_servers;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -82,6 +87,12 @@ pub(crate) fn provider_has_mcp_server(provider: &ProviderKind, server_name: &str
         ProviderKind::Qwen => {
             runtime_config_contains_server(normalized) || qwen_config_contains_server(normalized)
         }
+        ProviderKind::Antigravity => current_home_dir().is_some_and(|home| {
+            json_mcp_config_contains_server(
+                &home.join(".gemini/config/mcp_config.json"),
+                normalized,
+            )
+        }),
         ProviderKind::Gemini => {
             runtime_config_contains_server(normalized) || gemini_config_contains_server(normalized)
         }
@@ -629,8 +640,17 @@ fn load_qwen_sync_state_from_path(path: &Path) -> QwenMcpSyncState {
         .unwrap_or_default()
 }
 
+fn claude_user_mcp_config_path(home: &Path) -> PathBuf {
+    let legacy = home.join(".claude/.mcp.json");
+    if legacy.exists() {
+        legacy
+    } else {
+        home.join(".claude.json")
+    }
+}
+
 fn claude_global_mcp_config_contains_server(server_name: &str) -> bool {
-    let Some(path) = current_home_dir().map(|home| home.join(".claude").join(".mcp.json")) else {
+    let Some(path) = current_home_dir().map(|home| claude_user_mcp_config_path(&home)) else {
         return false;
     };
     let Ok(raw) = std::fs::read_to_string(path) else {

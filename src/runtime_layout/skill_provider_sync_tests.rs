@@ -46,9 +46,21 @@ fn fixture(root: &Path, providers: Value) -> (PathBuf, PathBuf) {
 fn retired_gemini_is_not_recreated_by_default_explicit_or_legacy_manifests() {
     isolated(|root| {
         for providers in [serde_json::json!([]), serde_json::json!(["gemini"])] {
+            let retired_only = providers == serde_json::json!(["gemini"]);
             let (_, workspace) = fixture(root, providers);
-            sync_managed_skills(root).unwrap();
+            let report = sync_managed_skills(root).unwrap();
             assert!(!workspace.join(".gemini/skills").exists());
+            if retired_only {
+                assert_eq!(report.created_links, 0);
+                for path in [
+                    ".claude/commands/demo.md",
+                    ".codex/skills/demo",
+                    ".qwen/skills/demo",
+                    ".agents/skills/demo",
+                ] {
+                    assert!(!workspace.join(path).exists());
+                }
+            }
         }
         let (_, workspace) = fixture(root, serde_json::json!([]));
         fs::write(
@@ -146,4 +158,38 @@ impl std::io::Write for Capture {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+#[test]
+fn antigravity_skills_support_default_explicit_alias_and_pruning_without_touching_codex() {
+    isolated(|root| {
+        for providers in [
+            serde_json::json!([]),
+            serde_json::json!(["antigravity"]),
+            serde_json::json!(["agy", "antigravity", "codex"]),
+        ] {
+            let (skill, workspace) = fixture(root, providers);
+            sync_managed_skills(root).unwrap();
+            let agy = workspace.join(".agents/skills/demo");
+            assert!(same_canonical_path(&agy, &skill));
+            assert!(fs::symlink_metadata(&agy).unwrap().file_type().is_symlink());
+            let first = fs::read_link(&agy).unwrap();
+            assert_eq!(sync_managed_skills(root).unwrap().created_links, 0);
+            assert_eq!(fs::read_link(&agy).unwrap(), first);
+        }
+        let (_, workspace) = fixture(root, serde_json::json!(["codex"]));
+        sync_managed_skills(root).unwrap();
+        assert!(!workspace.join(".agents/skills/demo").exists());
+        assert!(workspace.join(".codex/skills/demo/SKILL.md").exists());
+        let shared = workspace.join(".agents/skills");
+        fs::remove_dir(&shared).unwrap();
+        create_symlink_entry(&workspace.join(".codex/skills"), &shared, true).unwrap();
+        let (skill, _) = fixture(root, serde_json::json!(["antigravity", "codex"]));
+        fs::remove_file(workspace.join(".codex/skills/demo")).unwrap();
+        assert_eq!(sync_managed_skills(root).unwrap().created_links, 1);
+        fixture(root, serde_json::json!(["antigravity"]));
+        assert_eq!(sync_managed_skills(root).unwrap().created_links, 0);
+        assert!(same_canonical_path(&shared.join("demo"), &skill));
+        assert!(workspace.join(".codex/skills/demo/SKILL.md").exists());
+    });
 }
