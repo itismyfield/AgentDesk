@@ -16,7 +16,8 @@ Init == \E c1, noReply, held, verified \in BOOLEAN, owned \in Owned,
              scope |-> IF Mode \in {"headless", "channel"} THEN "shared_primary"
                        ELSE IF Mode = "thread" THEN owned ELSE "none",
              actor |-> "original", hArrived |-> 0, hQueued |-> 0, hDone |-> 0,
-             humanBusy |-> busy, deferTries |-> 0, threadFault |-> fault, primaryFallback |-> FALSE, status |-> "running", action |-> IF Mode = "script" THEN "complete" ELSE "agent",
+             humanBusy |-> busy, deferTries |-> 0, threadFault |-> fault, primaryFallback |-> FALSE,
+             runRow |-> "none", primaryRow |-> "kept", status |-> "running", action |-> IF Mode = "script" THEN "complete" ELSE "agent",
              input |-> "none", queued |-> FALSE, acceptedTurns |-> 0,
              lateAcceptedTurns |-> 0, expired |-> FALSE, recorded |-> FALSE,
              notified |-> FALSE, retryCount |-> 0, sharedDestroyed |-> FALSE, recovering |-> FALSE,
@@ -74,6 +75,14 @@ DeferStart ==
 
 ThreadRecover == s.threadFault = "transient" /\ s' = [s EXCEPT !.threadFault = "none"]
 
+\* The turn's completion ends and removes the run's own session row, and no other row. A run
+\* interrupted by a restart never reaches its completion; its row is left to the stale-session GC.
+CloseRunRow ==
+    /\ s.runRow = "active" /\ s.status \in Terminal /\ s.status # "interrupted"
+    /\ Policy # "no_row_close"
+    /\ s' = [s EXCEPT !.runRow = "removed",
+                      !.primaryRow = IF Policy = "wide_row_close" THEN "removed" ELSE @]
+
 \* Only a routine-owned thread or DM actor retires; the shared primary actor stays even when idle.
 RetireActor ==
     /\ s.status \in Terminal /\ s.actor = "original" /\ s.acceptedTurns > 0
@@ -102,7 +111,8 @@ Submit ==
     /\ s.acceptedTurns < 2
     /\ \E accepted \in {0, 1}:
          s' = [s EXCEPT !.input = "MayHaveSent", !.queued = FALSE,
-                        !.acceptedTurns = @ + accepted, !.keyPending = accepted = 0]
+                        !.acceptedTurns = @ + accepted, !.keyPending = accepted = 0,
+                        !.runRow = IF Mode = "headless" THEN "active" ELSE @]
 
 ObserveAccepted ==
     /\ ~s.recovering
@@ -273,9 +283,10 @@ Next == Prejudge \/ Admit \/ OwnerAccept \/ RefuseBeforeKey \/ RearmKnownUnsent 
         \/ Expire \/ Finish \/ BeginRecovery \/ RecoveryFinish \/ AwaitRecoveryCommit
         \/ LateDispatch \/ TeardownChannel \/ AwaitHeld \/ Restart \/ RestartCompleted \/ RestoreCompleted \/ ConsumeUnverifiedMarker \/ Done
         \/ HumanArrive \/ HumanProcess \/ HumanFinish \/ DeferStart \/ ThreadRecover \/ RetireActor
+        \/ CloseRunRow
 Spec == Init /\ [][Next]_vars /\ WF_vars(Expire) /\ WF_vars(Finish)
         /\ WF_vars(RecoveryFinish) /\ WF_vars(RestoreCompleted)
-        /\ WF_vars(HumanProcess) /\ WF_vars(RetireActor)
+        /\ WF_vars(HumanProcess) /\ WF_vars(RetireActor) /\ WF_vars(CloseRunRow)
 
 NoDuplicateTurn == s.acceptedTurns <= 1
 SuccessfulAgentExactlyOne == (s.status = "succeeded" /\ s.outcomeKind = "agent") => s.acceptedTurns = 1
@@ -296,7 +307,10 @@ HeldEpisodeSurvives == s.replayHeld => s.episodePresent
 PrimaryActorPreserved == s.scope = "shared_primary" => s.actor = "original"
 NoPrimaryFallback == ~s.primaryFallback
 HumanInputsConserved == s.hDone + s.hQueued = s.hArrived
+PrimaryRowKept == s.primaryRow = "kept"
 EveryRunTerminates == <>(s.status \in Terminal)
+RunRowRemoved == (s.runRow = "active" /\ s.status \in Terminal /\ s.status # "interrupted")
+                   ~> (s.runRow = "removed")
 HumanInputsEventuallyProcessed == <>[](s.hQueued = 0)
 OwnedSurfaceRetires == (s.scope \in Owned /\ s.status \in Terminal /\ s.acceptedTurns > 0)
                          ~> (s.actor = "retired")

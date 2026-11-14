@@ -367,9 +367,11 @@ routine-run/RoutineRunConsumedAsAgent.cfg	RoutineRun	SuccessfulAgentExactlyOne	-
 routine-run/RoutineRunDropHeld.cfg	RoutineRun	NoSilentLoss	-
 routine-run/RoutineRunHeadless.cfg	RoutineRun	-	-
 routine-run/RoutineRunHeadlessNoRelease.cfg	RoutineRun	-	HumanInputsEventuallyProcessed
+routine-run/RoutineRunHeadlessNoRowClose.cfg	RoutineRun	-	RunRowRemoved
 routine-run/RoutineRunHeadlessPrejudge.cfg	RoutineRun	-	-
 routine-run/RoutineRunHeadlessRetireShared.cfg	RoutineRun	PrimaryActorPreserved	-
 routine-run/RoutineRunHeadlessStartedRetry.cfg	RoutineRun	NoDuplicateTurn,SuccessfulAgentExactlyOne	-
+routine-run/RoutineRunHeadlessWideRowClose.cfg	RoutineRun	PrimaryRowKept	-
 routine-run/RoutineRunNoDeadlineCancel.cfg	RoutineRun	NoLateDispatch,TerminalLeavesNothingQueued	-
 routine-run/RoutineRunNoRecoveryCancel.cfg	RoutineRun	NoLateDispatch,TerminalLeavesNothingQueued	-
 routine-run/RoutineRunResendUnknown.cfg	RoutineRun	NoDuplicateTurn,NoLateDispatch,SuccessfulAgentExactlyOne	-
