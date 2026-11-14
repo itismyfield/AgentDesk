@@ -1,7 +1,7 @@
 //! A headless routine run through the real headless start on its agent's primary channel: the
 //! channel's session, clear boundary and session row stay as they were from start to turn end.
 use crate::services::discord::SharedData;
-use crate::services::discord::admin_host_guard::tests::{ModeTmux, Tmux, api_child};
+use crate::services::discord::admin_host_guard::tests::{ModeTmux, Recorder, Tmux, api_child};
 use crate::services::discord::health::{
     HealthRegistry, reserve_headless_agent_turn,
     start_reserved_headless_agent_turn_with_owner_channel,
@@ -27,8 +27,11 @@ const TEST: &str =
 struct Fixture {
     _root: crate::config::TestRuntimeRootGuard,
     _tmux: ModeTmux,
-    /// PATH-first directory of the stub CLIs and their `release` file.
+    /// Directory of the stub CLIs and their `release` file.
     stubs: std::path::PathBuf,
+    _clis: [crate::config::TestEnvVarGuard; 2],
+    /// Records every runtime API call, the session status hook among them.
+    api: Recorder,
     db: crate::db::auto_queue::test_support::TestPostgresDb,
     pool: PgPool,
     shared: Arc<SharedData>,
@@ -36,7 +39,7 @@ struct Fixture {
     _workdir: tempfile::TempDir,
 }
 
-/// The provider CLI is a stub that holds its turn open until `release` and then fails.
+/// The provider CLI is pinned to a stub that holds its turn open until `release` and then fails.
 async fn fixture() -> Fixture {
     let root = crate::config::TestRuntimeRootGuard::with_isolated_config();
     let workdir = tempfile::tempdir().unwrap();
@@ -56,13 +59,24 @@ async fn fixture() -> Fixture {
     tmux.serve(Tmux::Live);
     let paths = std::env::var_os("PATH").unwrap();
     let stubs = std::env::split_paths(&paths).next().unwrap();
-    let hold =
-        "#!/bin/sh\nwhile [ ! -e \"$(dirname \"$0\")/release\" ]; do sleep 0.05; done\nexit 1\n";
+    let hold = concat!(
+        "#!/bin/sh\n",
+        "case \"$*\" in *--version*) echo 0.0.0-stub; exit 0 ;; esac\n",
+        "while [ ! -e \"$(dirname \"$0\")/release\" ]; do sleep 0.05; done\nexit 1\n"
+    );
     for cli in ["claude", "codex"] {
         std::fs::write(stubs.join(cli), hold).unwrap();
         let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
         std::fs::set_permissions(stubs.join(cli), mode).unwrap();
     }
+    // The override skips binary discovery, so no installed CLI can be picked over the stub.
+    let pin = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let clis = [
+        pin("AGENTDESK_CLAUDE_PATH", &stubs.join("claude")),
+        pin("AGENTDESK_CODEX_PATH", &stubs.join("codex")),
+    ];
+    let api = Recorder::start().await;
+    crate::services::discord::internal_api::init(api.port, None);
     let (db, pool) = postgres().await;
     let (shared, registry) = runtime(&pool).await;
     use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
@@ -104,6 +118,8 @@ async fn fixture() -> Fixture {
         _root: root,
         _tmux: tmux,
         stubs,
+        _clis: clis,
+        api,
         db,
         pool,
         shared,
@@ -185,15 +201,38 @@ async fn channel_state(fixture: &Fixture, channel: ChannelId) -> String {
     format!("{session} boundaries={boundaries} rows={rows:?}")
 }
 
+async fn turn_active(fixture: &Fixture, channel: ChannelId) -> bool {
+    let mailbox = crate::services::discord::mailbox_snapshot(&fixture.shared, channel).await;
+    mailbox.cancel_token.is_some()
+}
+
+/// Releases the stub CLI and waits for the failed turn's completion to release the mailbox.
 async fn turn_ended(fixture: &Fixture, channel: ChannelId) {
     std::fs::write(fixture.stubs.join("release"), "").unwrap();
     let ended = async {
-        while load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).is_some() {
+        while turn_active(fixture, channel).await {
             tokio::task::yield_now().await;
         }
     };
     await_within(ended, WAIT_CAP).await;
-    std::fs::remove_file(fixture.stubs.join("release")).unwrap();
+}
+
+/// The session keys every session status was sent for, and the identity kinds they named.
+fn status_posts(fixture: &Fixture) -> (Vec<String>, Vec<String>) {
+    let (mut keys, mut kinds) = (Vec::new(), Vec::new());
+    for call in fixture.api.take() {
+        let Some(body) = call.strip_prefix("POST /api/dispatched-sessions/webhook ") else {
+            continue;
+        };
+        let body: Value = serde_json::from_str(body).unwrap();
+        keys.push(body["session_key"].as_str().unwrap().to_string());
+        kinds.extend(body["identity_kind"].as_str().map(str::to_owned));
+    }
+    keys.sort();
+    keys.dedup();
+    kinds.sort();
+    kinds.dedup();
+    (keys, kinds)
 }
 
 #[tokio::test]
@@ -216,7 +255,7 @@ async fn a_headless_run_leaves_its_primary_channel_session_untouched_pg() {
         &fixture.shared,
         &ProviderKind::Claude.build_tmux_session_name(LABEL),
     );
-    assert!(row.routine_presentation.isolated_run());
+    assert!(row.routine_presentation.isolated_run() && turn_active(&fixture, PRIMARY).await);
     assert_eq!(row.session_key.as_deref(), Some(per_run.as_str()));
     assert_eq!(row.session_id, None);
     let starts = STARTS_RESOLVED.lock().unwrap().clone();
@@ -229,16 +268,11 @@ async fn a_headless_run_leaves_its_primary_channel_session_untouched_pg() {
     assert_eq!(channel_state(&fixture, PRIMARY).await, before, "at start");
     turn_ended(&fixture, PRIMARY).await;
     assert_eq!(channel_state(&fixture, PRIMARY).await, before, "at end");
-    // Only the per-run key got a session row, and not as the channel's own identity.
-    let own: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT session_key, identity_kind FROM sessions
-         WHERE channel_id = $1 AND identity_kind IS DISTINCT FROM 'discord_channel'",
-    )
-    .bind(PRIMARY.get().to_string())
-    .fetch_all(&fixture.pool)
-    .await
-    .unwrap();
-    assert_eq!(own, [(per_run, Some("scheduled_snapshot".to_string()))]);
+    // Session status went only to the per-run key, and never as the channel's own identity.
+    assert_eq!(
+        status_posts(&fixture),
+        (vec![per_run], vec!["scheduled_snapshot".to_string()])
+    );
 
     // Positive control: the same routine as a shared-session fresh run does clear its channel.
     let shared_before = channel_state(&fixture, THREAD).await;
@@ -255,7 +289,15 @@ async fn a_headless_run_leaves_its_primary_channel_session_untouched_pg() {
             && shared_after.contains("boundaries=1"),
         "{shared_before} -> {shared_after}"
     );
+    let shared_key = channel_key(
+        &fixture.shared,
+        &ProviderKind::Claude.build_tmux_session_name(label.unwrap()),
+    );
     turn_ended(&fixture, THREAD).await;
+    assert_eq!(
+        status_posts(&fixture),
+        (vec![shared_key], vec!["discord_channel".to_string()])
+    );
     fixture.db.drop().await;
 }
 
@@ -295,11 +337,7 @@ async fn a_headless_mark_that_cannot_be_isolated_is_refused_without_a_shared_fal
             load_inflight_state_read_only(&ProviderKind::Claude, PRIMARY.get()).is_none(),
             "{case}"
         );
-        let active = crate::services::discord::mailbox_snapshot(&fixture.shared, PRIMARY)
-            .await
-            .cancel_token
-            .is_some();
-        assert!(!active, "{case}");
+        assert!(!turn_active(&fixture, PRIMARY).await, "{case}");
         assert_eq!(channel_state(&fixture, PRIMARY).await, before, "{case}");
     }
     fixture.db.drop().await;
