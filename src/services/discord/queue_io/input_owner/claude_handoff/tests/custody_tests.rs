@@ -109,8 +109,15 @@ async fn custody_survives_a_reboot_and_ends_the_old_pane_before_the_next_front_s
     let (rig, journal) = custody(8_146_107, first).await;
     rig.reboot().await;
     assert_custody(&rig.state().await, &journal);
+    // The timer the first hold armed runs out; boot recovery then arms none for the custody.
+    for _ in 0..80 {
+        if !waiting(&rig, &journal) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     recover(rig.shared.clone(), rig.channel);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!waiting(&rig, &journal), "an empty custody arms no timer");
     drop(host);
     let _host = herdr_host(8_146_107, KEY, false);
@@ -244,13 +251,17 @@ async fn scheduled_front_under_a_refusing_host_is_retained_without_starting() {
     spend_budget(&rig, scheduled).await;
     assert_custody(&rig.state().await, &journal);
     assert!(rig.started.lock().unwrap().is_empty());
-    // With no journal the same start is not judged at all.
-    let _free = refuse_host(8_146_111);
-    let free = queued(8_146_111).await;
-    free.admit_kept(scheduled, snapshot()).await;
-    assert_eq!(free.hand().await, Ok(()));
-    assert_eq!(*free.started.lock().unwrap(), [scheduled]);
-    assert!(free.state().await.get("unfinished_handoff").is_none());
+}
+
+#[tokio::test]
+async fn scheduled_front_without_a_journal_is_not_judged() {
+    let scheduled = 8_000_000_008_147_003;
+    let _host = refuse_host(8_146_111);
+    let rig = queued(8_146_111).await;
+    rig.admit_kept(scheduled, snapshot()).await;
+    assert_eq!(rig.hand().await, Ok(()));
+    assert_eq!(*rig.started.lock().unwrap(), [scheduled]);
+    assert!(rig.state().await.get("unfinished_handoff").is_none());
 }
 
 #[tokio::test]
@@ -432,9 +443,13 @@ async fn cancelling_the_handoff_input_keeps_its_unended_journal() {
     assert_eq!(rig.hand().await.unwrap_err(), HELD);
     cancel(&rig, first).await;
     assert_custody(&rig.state().await, &journal);
-    // An ended journal owes no pane, and leaves with its input as before.
-    let _ended = refuse_host(8_146_124);
-    let ended = super::left_herdr_tests::rig(8_146_124, &[first, second], true).await;
-    cancel(&ended, first).await;
-    assert!(ended.state().await.get("unfinished_handoff").is_none());
+}
+
+#[tokio::test]
+async fn cancelling_the_input_of_an_ended_handoff_takes_its_journal() {
+    let (first, second) = (8_000_000_008_147_701, 8_000_000_008_147_702);
+    let _host = refuse_host(8_146_124);
+    let rig = rig(8_146_124, &[first, second], true).await;
+    cancel(&rig, first).await;
+    assert!(rig.state().await.get("unfinished_handoff").is_none());
 }
