@@ -44,6 +44,7 @@ pub(in crate::services::tui_o::writer::late_adopt) fn judge(source: &SourceId) -
         return Verdict::Wait("the transcript ends inside a record".into());
     }
     Verdict::Eligible(Prefix {
+        prompt_digest: None,
         len: bytes.len() as u64,
         sha256: hex::encode(Sha256::digest(&bytes)),
         prompt_end,

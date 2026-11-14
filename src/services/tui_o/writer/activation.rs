@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use super::adoption::logged;
 use super::binding::BindingEvents;
-use crate::services::tui_o::channel_policy::{Adoption, Candidate};
+use crate::services::tui_o::channel_policy::{Adoption, Candidate, FirstProof};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::capture::same_file;
@@ -79,7 +79,7 @@ pub fn activate_with(
         local_custody,
         candidate,
         sources,
-        origin,
+        (origin, None),
     )
 }
 
@@ -90,7 +90,7 @@ fn activate_as(
     local_custody: impl FnOnce() -> Result<bool, String>,
     candidate: &Candidate,
     sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
-    origin: InitOrigin,
+    (origin, proof): (InitOrigin, Option<&FirstProof>),
 ) -> Result<(), String> {
     #[cfg(test)]
     test_hook::run(channel, test_hook::Step::BeforeLock)?;
@@ -99,15 +99,24 @@ fn activate_as(
     let mut adoption = candidate.lock();
     let locked = Instant::now();
     let mut spent = Spent::default();
-    let result = adopt(
-        &mut adoption,
-        candidate,
-        store,
-        (channel, facts),
-        local_custody,
-        sources,
-        (origin, &mut spent),
-    );
+    let decide = || {
+        adopt(
+            &mut adoption,
+            candidate,
+            store,
+            (channel, facts),
+            local_custody,
+            sources,
+            (origin, &mut spent),
+        )
+    };
+    let result = match proof {
+        Some(proof) => proof.with_current(decide),
+        None => decide(),
+    };
+    if !matches!(*adoption, Adoption::Pending | Adoption::Deferred) {
+        candidate.settle_first();
+    }
     tracing::info!(
         channel,
         adoption = ?*adoption,
@@ -156,6 +165,26 @@ pub fn activate_takeover(
     sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
     origin: InitOrigin,
 ) -> Result<(), String> {
+    activate_takeover_proved(
+        store,
+        channel,
+        (facts, queued_bodies),
+        local_custody,
+        candidate,
+        sources,
+        (origin, None),
+    )
+}
+
+pub(crate) fn activate_takeover_proved(
+    store: &OStore,
+    channel: u64,
+    (facts, queued_bodies): (ActivationFacts, i64),
+    local_custody: impl FnOnce() -> Result<bool, String>,
+    candidate: &Candidate,
+    sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
+    (origin, proof): (InitOrigin, Option<&FirstProof>),
+) -> Result<(), String> {
     let facts = ActivationFacts {
         open_intake: 0,
         ..facts
@@ -171,7 +200,7 @@ pub fn activate_takeover(
         local_custody,
         candidate,
         sources,
-        origin,
+        (origin, proof),
     )
 }
 

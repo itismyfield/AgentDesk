@@ -79,6 +79,8 @@ pub(crate) fn teardown_tmux(
     code: &str,
     reason: &str,
 ) -> Result<(), String> {
+    admitted(clearance, tmux_name)?;
+    crate::services::tui_o::cutover::invalidate_codex_first(None, None, Some(tmux_name));
     report_tmux_death(clearance, tmux_name, component, code, reason, None)?;
     crate::services::tmux_diagnostics::record_tmux_exit_reason(tmux_name, reason);
     crate::services::platform::tmux::kill_session(tmux_name, reason);

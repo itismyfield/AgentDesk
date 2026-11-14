@@ -489,11 +489,25 @@ impl CancelToken {
         self.set_cancel_source_kind_transactional(kind, |_| {});
     }
 
+    /// Admission and cancellation publish under the same lock, before either can affect a source.
+    pub(crate) fn with_live_admission<R>(&self, admit: impl FnOnce() -> R) -> Option<R> {
+        let publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let admitted = (!self.cancelled.load(Ordering::Acquire)).then(admit);
+        drop(publication);
+        admitted
+    }
+
     pub(crate) fn publish_cancel(&self, source: impl Into<String>) {
         let _publication = self
             .cancellation_publication
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if let Some(nonce) = self.turn_nonce() {
+            crate::services::tui_o::cutover::invalidate_codex_first(None, Some(nonce), None);
+        }
         self.set_cancel_source_locked(source);
         let _record = self.codex_owed_publication();
         self.cancelled.store(true, Ordering::Release);
@@ -504,6 +518,9 @@ impl CancelToken {
             .cancellation_publication
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if let Some(nonce) = self.turn_nonce() {
+            crate::services::tui_o::cutover::invalidate_codex_first(None, Some(nonce), None);
+        }
         self.set_cancel_source_if_absent_locked(source);
         let _record = self.codex_owed_publication();
         self.cancelled.store(true, Ordering::Release);

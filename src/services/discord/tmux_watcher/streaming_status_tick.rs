@@ -28,6 +28,13 @@ pub(super) async fn update_streaming_status_tick(
     suppress: &mut StreamingSuppressState<'_>,
     generation: &mut PanelGenerationState<'_>,
 ) -> StreamingStatusTickOutcome {
+    let first_nonce = crate::services::discord::inflight::load_inflight_state(
+        ctx.watcher_provider,
+        ctx.channel_id.get(),
+    )
+    .and_then(|row| row.turn_nonce);
+    crate::services::tui_o::cutover::wait_codex_first(ctx.channel_id.get(), first_nonce.as_deref())
+        .await;
     let http = ctx.http;
     let shared = ctx.shared;
     let channel_id = ctx.channel_id;
@@ -709,7 +716,8 @@ pub(super) async fn update_streaming_status_tick(
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::Fallthrough;
         }
-        let body_claim = BodyClaim::tmux(channel_id.get(), Some(&tmux_session_name));
+        let body_claim = BodyClaim::tmux(channel_id.get(), Some(&tmux_session_name))
+            .for_turn(first_nonce.as_deref());
         let banner_identity = turn_identity_for_panel.as_ref();
         let banner_user_msg_id = banner_identity
             .map(|identity| identity.user_msg_id)

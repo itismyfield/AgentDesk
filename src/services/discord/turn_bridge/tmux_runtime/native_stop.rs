@@ -228,6 +228,11 @@ impl NativeStop {
             stop.finished = true;
             return Some(stop);
         }
+        crate::services::tui_o::cutover::invalidate_codex_first(
+            Some(channel.get()),
+            token.turn_nonce(),
+            None,
+        );
         // A stop that takes a fresh writer's gate before its first key leaves the turn to main's
         // cancel; the writer then sends no key.
         if token.native_stop.receipt_sink().stop_before_key() == Some(true)

@@ -27,6 +27,7 @@ pub(in crate::services::tui_o::writer::late_adopt) enum Verdict {
 pub(in crate::services::tui_o::writer::late_adopt) struct Prefix {
     pub(in crate::services::tui_o::writer::late_adopt) len: u64,
     pub(in crate::services::tui_o::writer::late_adopt) sha256: String,
+    pub(in crate::services::tui_o::writer::late_adopt) prompt_digest: Option<String>,
     /// End of the first user prompt's record, once one is written.
     pub(in crate::services::tui_o::writer::late_adopt) prompt_end: Option<u64>,
 }
@@ -64,6 +65,9 @@ fn judged(source: &SourceId) -> Result<Verdict, Verdict> {
     Ok(Verdict::Eligible(Prefix {
         len: bytes.len() as u64,
         sha256: hex::encode(Sha256::digest(&bytes)),
+        prompt_digest: turn.prompt.as_ref().map(|prompt| {
+            crate::services::tui_o::channel_policy::first_prompt_digest(&prompt.text)
+        }),
         prompt_end: turn.prompt.map(|prompt| prompt.end),
     }))
 }

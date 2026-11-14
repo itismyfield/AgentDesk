@@ -95,7 +95,8 @@ pub(crate) fn turn_selected(channel: u64) -> bool {
     test_override::with_channels(|snapshot| snapshot.is_some_and(|s| s.turn().selects(channel)))
 }
 
-/// Fresh local Codex admission precedes provider effects.
+/// The legacy mark used by output-free adoption fixtures.
+#[cfg(test)]
 pub(crate) fn mark_codex_turn_admitted(
     channel: u64,
     provider: &crate::services::provider::ProviderKind,
@@ -123,6 +124,94 @@ pub(crate) fn mark_codex_turn_admitted(
             });
         }
     });
+}
+
+/// Installs the hold before spawning the provider, only for a fresh local Codex turn.
+pub(crate) fn admit_codex_first(
+    channel: u64,
+    provider: &crate::services::provider::ProviderKind,
+    session: Option<&str>,
+    prompt: &str,
+    token: &crate::services::provider::CancelToken,
+    tmux: Option<&str>,
+) -> Option<channel_policy::FirstAdmission> {
+    use super::writer::binding::{BindingEvents, ChannelBindingLog};
+    if *provider != crate::services::provider::ProviderKind::Codex || session.is_some() {
+        return None;
+    }
+    token
+        .with_live_admission(|| {
+            test_override::with_channels(|boot| {
+                let boot = boot.filter(|b| {
+                    b.late_adopt_capable()
+                        && b.site() == &Site::Home
+                        && b.kind(channel) == Some(RuntimeHandoffKind::CodexTui)
+                })?;
+                boot.output_candidate(channel)?.admit_first(
+                    channel,
+                    token.turn_nonce()?,
+                    prompt,
+                    tmux?,
+                    || {
+                        ChannelBindingLog::new(channel, super::shadow::ShadowProvider::Codex)
+                            .binding_events_since(channel, 0)
+                            .map(|events| events.last().map_or(0, |event| event.seq))
+                    },
+                )
+            })
+        })
+        .flatten()
+}
+
+pub(crate) fn attach_codex_first(
+    context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    prompt: &str,
+    nonce: Option<&str>,
+) {
+    test_override::with_channels(|boot| {
+        if let Some(candidate) = context
+            .channel_id
+            .and_then(|channel| boot?.output_candidate(channel))
+        {
+            candidate.attach_first_execution(context, prompt, nonce);
+        }
+    });
+}
+
+pub(crate) fn pause_codex_first(channel: u64) -> Option<channel_policy::FirstPause> {
+    test_override::with_channels(|boot| {
+        let boot = boot.filter(|b| b.kind(channel) == Some(RuntimeHandoffKind::CodexTui))?;
+        Some(boot.output_candidate(channel)?.pause_first())
+    })
+}
+
+pub(crate) fn invalidate_codex_first(
+    channel: Option<u64>,
+    nonce: Option<&str>,
+    tmux: Option<&str>,
+) {
+    test_override::with_channels(|boot| {
+        if let Some(boot) = boot {
+            for id in boot.channels() {
+                if channel.is_none_or(|channel| channel == *id)
+                    && let Some(candidate) = boot.output_candidate(*id)
+                {
+                    candidate.invalidate_first(nonce, tmux);
+                }
+            }
+        }
+    });
+}
+
+pub(crate) async fn wait_codex_first(channel: u64, nonce: Option<&str>) {
+    wait_codex_first_id(channel, nonce.map(channel_policy::first_nonce_id)).await;
+}
+
+async fn wait_codex_first_id(channel: u64, nonce: Option<[u8; 32]>) {
+    let candidate = test_override::with_channels(|boot| boot?.output_candidate(channel));
+    if let Some(candidate) = candidate {
+        candidate.wait_first(nonce).await;
+    }
 }
 
 /// Before a new placement: a non-home node holds a selected channel, and the home releases a

@@ -2119,7 +2119,11 @@ pub(super) async fn handle_text_message(
             tmux_session_name.as_deref(),
         )
         .await;
+        let first_admission = matches!(turn_host, crate::services::turn_host::TurnHost::Tmux).then(|| {
+            crate::services::tui_o::cutover::admit_codex_first(channel_id.get(), &provider, session_id.as_deref(), &context_prompt, &cancel_token, tmux_session_name.as_deref())
+        }).flatten();
         tokio::task::spawn_blocking(move || {
+            let mut first_admission = first_admission;
             let _original_registration = producer_registration;
             let _upload_lifetime = materialized_uploads;
             let prompt_capture = session_prompt::Scope::enter(&cancel_token_clone);
@@ -2163,6 +2167,7 @@ pub(super) async fn handle_text_message(
                 },
             );
 
+            if matches!(&result, Ok(Ok(()))) && let Some(admission) = &mut first_admission { admission.completed(); }
             match result {
                 Ok(Ok(())) => prompt_capture.success(),
                 Ok(Err(e)) => {

@@ -578,7 +578,8 @@ pub(super) async fn resume_with_gateway(
             // Reuse the ordinary chunk formatter and gateway. Persist each
             // acknowledged prefix before another await, while the SAME source
             // lease and custody file lock remain held across the whole loop.
-            let claim = crate::services::tui_o::cutover::BodyClaim::new(snapshot.channel_id, kind);
+            let claim = crate::services::tui_o::cutover::BodyClaim::new(snapshot.channel_id, kind)
+                .for_turn(snapshot.local.turn_nonce.as_deref());
             let census = crate::services::discord::outbound::body_census::BodySource::from_state(
                 &snapshot.local,
             );

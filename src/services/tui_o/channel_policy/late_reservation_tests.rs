@@ -122,10 +122,10 @@ fn cleanup_before_first_poll_and_panic_releases_absent_store() {
             .late_cleanup_guard(41, Some(root.path().to_owned()))
             .unwrap();
         if panic {
-            let result = std::panic::catch_unwind(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 let _guard = guard;
                 panic!("pre-init host");
-            });
+            }));
             assert!(result.is_err());
         } else {
             drop(guard);

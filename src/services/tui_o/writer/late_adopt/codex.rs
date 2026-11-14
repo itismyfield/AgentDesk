@@ -4,7 +4,7 @@
 use sha2::{Digest, Sha256};
 
 use super::Wake;
-use crate::services::tui_o::channel_policy::{Adoption, Candidate};
+use crate::services::tui_o::channel_policy::{Adoption, Candidate, FirstProof};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::{InitOrigin, InitSource, OStore};
@@ -18,6 +18,11 @@ use crate::services::tui_o::writer::renumbered;
 
 pub(super) mod prefix;
 use prefix::{Prefix, Verdict};
+
+struct Checked {
+    prefix: Prefix,
+    admission: Option<FirstProof>,
+}
 
 /// Legacy's sends, then the last binding seq: only a rollout bound after it, with no Legacy send
 /// started since, may be taken.
@@ -104,6 +109,7 @@ pub(super) async fn activate<I: HostIo>(
         judge: prefix::judge,
         origin: InitOrigin::LateCodexTakeover,
     };
+    let mut admission_changes = candidate.first_changes();
     let (mut baseline, mut logged) = (None, None);
     let (mut retry_order, mut short_retries) = (0, 0);
     loop {
@@ -111,7 +117,13 @@ pub(super) async fn activate<I: HostIo>(
             return false;
         }
         if io.late_adopt_enabled() {
-            until_owned(gate).await;
+            while gate.current().epoch().is_none() {
+                candidate.invalidate_first(None, None);
+                tokio::select! {
+                    () = until_owned(gate) => {},
+                    changed = admission_changes.changed() => { if changed.is_err() { return false; } }
+                }
+            }
             let sampled = baseline.map_or_else(|| takeover.baseline(), Ok);
             let mut used = None;
             let outcome = match sampled {
@@ -138,6 +150,7 @@ pub(super) async fn activate<I: HostIo>(
                 }
                 Err(Taken::Again(_)) => continue,
                 Err(Taken::Skip(detail)) => {
+                    candidate.decline_first(used.expect("attempt baseline").order);
                     let detail = format!("{detail}; {}", used.expect("attempt baseline").detail());
                     tracing::info!(channel, detail, "[tui_o] Codex takeover skips this rollout");
                     baseline = None;
@@ -146,6 +159,11 @@ pub(super) async fn activate<I: HostIo>(
                     continue;
                 }
                 Err(Taken::Soon(detail)) => {
+                    if candidate.first_ended() {
+                        if let Some(at) = used {
+                            candidate.decline_first(at.order);
+                        }
+                    }
                     if logged.as_ref() != Some(&detail) {
                         tracing::info!(channel, detail, "[tui_o] Codex takeover waits");
                         logged = Some(detail);
@@ -157,13 +175,29 @@ pub(super) async fn activate<I: HostIo>(
                     }
                 }
                 Err(Taken::Retry(detail)) if logged.as_ref() != Some(&detail) => {
+                    if candidate.first_ended() {
+                        if let Some(at) = used {
+                            candidate.decline_first(at.order);
+                        }
+                    }
                     tracing::info!(channel, detail, "[tui_o] Codex takeover waits");
                     logged = Some(detail);
                 }
-                Err(Taken::Retry(_)) => {}
+                Err(Taken::Retry(_)) => {
+                    if candidate.first_ended() {
+                        if let Some(at) = used {
+                            candidate.decline_first(at.order);
+                        }
+                    }
+                }
             }
+        } else {
+            candidate.invalidate_first(None, None);
         }
-        wake.wait().await;
+        tokio::select! {
+            () = wake.wait() => {},
+            changed = admission_changes.changed() => { if changed.is_err() { return false; } }
+        }
     }
 }
 
@@ -189,8 +223,9 @@ impl<I: HostIo> Takeover<'_, I> {
     }
 
     fn newest(&self, at: Baseline) -> Baseline {
-        match self.candidate.turn_mark() {
-            Some(mark) if mark.order > at.order => Baseline {
+        let first = self.candidate.first_mark();
+        match first.or_else(|| self.candidate.turn_mark()) {
+            Some(mark) if first.is_some() || mark.order > at.order => Baseline {
                 sends: mark.sends,
                 seq: mark.seq,
                 order: mark.order,
@@ -201,6 +236,11 @@ impl<I: HostIo> Takeover<'_, I> {
     }
 
     async fn attempt(&self, at: Baseline) -> Result<(), Taken> {
+        if !self.candidate.first_ready() {
+            return Err(Taken::Retry(
+                "first admission is reading its binding boundary".into(),
+            ));
+        }
         let events = self.events()?;
         let Some(bound) = bound_after(&events, at.seq) else {
             return Err(Taken::Retry("no rollout bound since the baseline".into()));
@@ -238,6 +278,36 @@ impl<I: HostIo> Takeover<'_, I> {
         bound: &(SourceId, u64),
         prefix: &Prefix,
     ) -> Result<(), Taken> {
+        let admission = if self.provider == ShadowProvider::Codex {
+            let guard = self.candidate.lock();
+            let proof = self.candidate.first_proof(&bound.0).map_err(Taken::Skip)?;
+            drop(guard);
+            proof
+        } else {
+            None
+        };
+        if let Some(proof) = &admission {
+            if proof.mark.order != at.order || prefix.prompt_digest.as_ref() != Some(&proof.digest)
+            {
+                return Err(Taken::Skip(
+                    "prefix does not name the first admitted prompt".into(),
+                ));
+            }
+            if !self
+                .events()?
+                .iter()
+                .any(|event| event.seq == bound.1 && proof.names_binding(event))
+            {
+                return Err(Taken::Skip(
+                    "binding event does not name the admitted execution".into(),
+                ));
+            }
+            proof.with_current(|| Ok(())).map_err(Taken::Skip)?;
+        }
+        let checked = Checked {
+            prefix: prefix.clone(),
+            admission,
+        };
         let (io, channel) = (self.io, self.channel);
         let Some(expected) = self.gate.current().epoch() else {
             return Err(Taken::Retry(
@@ -270,7 +340,7 @@ impl<I: HostIo> Takeover<'_, I> {
             }
             let mut why = None;
             let sources = || {
-                self.recheck(at, fence_sends, bound, prefix)
+                self.recheck(at, fence_sends, bound, &checked)
                     .map_err(|taken| {
                         let detail = taken.detail().to_owned();
                         why = Some(taken);
@@ -284,14 +354,14 @@ impl<I: HostIo> Takeover<'_, I> {
             };
             let result = self.gate.admit(|epoch| {
                 (epoch == expected).then(|| {
-                    activation::activate_takeover(
+                    activation::activate_takeover_proved(
                         self.store,
                         channel,
                         (facts, queued_bodies),
                         local,
                         self.candidate,
                         sources,
-                        self.origin,
+                        (self.origin, checked.admission.as_ref()),
                     )
                 })
             });
@@ -316,8 +386,16 @@ impl<I: HostIo> Takeover<'_, I> {
         at: Baseline,
         fence_sends: (u64, u64),
         (source, seq): &(SourceId, u64),
-        prefix: &Prefix,
+        checked: &Checked,
     ) -> Result<Vec<InitSource>, Taken> {
+        let prefix = &checked.prefix;
+        if self.provider == ShadowProvider::Codex
+            && self.candidate.first_proof(source).map_err(Taken::Skip)? != checked.admission
+        {
+            return Err(Taken::Skip(
+                "first admission changed during the intake fence".into(),
+            ));
+        }
         // A send started since the baseline may be this rollout's; one only finished is older.
         let sends = self.candidate.sends();
         if sends.0 != at.sends.0 || sends.0 != fence_sends.0 {
@@ -330,7 +408,26 @@ impl<I: HostIo> Takeover<'_, I> {
                 "a Legacy body send finished while O fenced the takeover".into(),
             ));
         }
-        let now = bound_after(&self.events()?, at.seq);
+        // The admitted path already holds this source authority and revalidates its policy.
+        // Reading unjudged history here avoids reacquiring that same authority in the log port.
+        let events = if checked.admission.is_some() {
+            self.log
+                .binding_history(self.channel)
+                .map(renumbered::first_named)
+                .map_err(Taken::Final)?
+        } else {
+            self.events()?
+        };
+        if checked.admission.as_ref().is_some_and(|proof| {
+            !events
+                .iter()
+                .any(|event| event.seq == *seq && proof.names_binding(event))
+        }) {
+            return Err(Taken::Skip(
+                "binding execution changed during the intake fence".into(),
+            ));
+        }
+        let now = bound_after(&events, at.seq);
         if now.as_ref().is_none_or(|(s, q)| s != source || q != seq) {
             return Err(Taken::Retry(
                 "the binding moved while O fenced the takeover".into(),

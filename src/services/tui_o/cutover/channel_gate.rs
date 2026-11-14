@@ -100,6 +100,7 @@ pub(crate) struct BodyClaim<'a> {
     channel_id: u64,
     kind: KindOf<'a>,
     direct: bool,
+    nonce: Option<[u8; 32]>,
     origin: &'static std::panic::Location<'static>,
 }
 
@@ -117,6 +118,7 @@ impl<'a> BodyClaim<'a> {
             channel_id,
             kind,
             direct: true,
+            nonce: None,
             origin: std::panic::Location::caller(),
         }
     }
@@ -128,7 +130,15 @@ impl<'a> BodyClaim<'a> {
             channel_id,
             kind,
             direct: true,
+            nonce: None,
             origin: std::panic::Location::caller(),
+        }
+    }
+
+    pub(crate) fn for_turn(self, nonce: Option<&str>) -> Self {
+        Self {
+            nonce: nonce.map(channel_policy::first_nonce_id),
+            ..self
         }
     }
 
@@ -197,6 +207,9 @@ pub(crate) async fn claim_then_send_held<T, F: std::future::Future<Output = T>>(
     claim: Option<BodyClaim<'_>>,
     send: impl FnOnce() -> F,
 ) -> Result<(BodySend<T>, Option<LegacySend>), IdentityError> {
+    if let Some(claim) = claim {
+        super::wait_codex_first_id(claim.channel_id, claim.nonce).await;
+    }
     let claimed = reserve_body(claim)?;
     if claimed.owned {
         return Ok((BodySend::OwnedByO, None));
@@ -329,6 +342,9 @@ pub(crate) async fn claim_then_send_held_at<T, F: std::future::Future<Output = T
     claim: Option<BodyClaim<'_>>,
     send: impl FnOnce() -> F,
 ) -> Result<(BodySend<T>, BodyTransport), IdentityError> {
+    if let Some(claim) = claim {
+        super::wait_codex_first_id(claim.channel_id, claim.nonce).await;
+    }
     let claimed = reserve_body(claim)?;
     let context = BodyTransport::inherited(site, claimed.send, claimed.reason);
     if claimed.owned {

@@ -86,8 +86,12 @@ pub(in crate::services::discord) async fn complete_watcher_terminal_footer_or_st
     {
         return;
     }
+    let first_nonce = completion_actor
+        .and_then(std::sync::Weak::upgrade)
+        .and_then(|token| token.turn_nonce().map(str::to_owned));
     let body_claim =
-        crate::services::tui_o::cutover::BodyClaim::tmux(channel_id.get(), session.as_deref());
+        crate::services::tui_o::cutover::BodyClaim::tmux(channel_id.get(), session.as_deref())
+            .for_turn(first_nonce.as_deref());
     let summary = crate::services::discord::turn_end_summary::WatcherSummary::capture(
         summary,
         completion_actor,

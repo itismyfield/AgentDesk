@@ -135,6 +135,14 @@ pub(super) async fn run_terminal_relay_plan<'a>(
     locals: TerminalRelayPlanLocals<'a>,
     state: &mut TerminalRelayPlanState<'a>,
 ) -> TerminalRelayPlanOutcome<'a> {
+    crate::services::tui_o::cutover::wait_codex_first(
+        context.channel_id.get(),
+        context
+            .inflight_before_relay
+            .as_ref()
+            .and_then(|row| row.turn_nonce.as_deref()),
+    )
+    .await;
     let http = context.http;
     let shared = context.shared;
     let channel_id = context.channel_id;

@@ -1160,7 +1160,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
         } else if watcher_direct_fallback_after_session_bound_ack {
             let claims = watcher_will_direct_send && task_notification_kind.is_none();
-            let body_claim = o_delegated_arm::direct_body_claim(claims, channel_id, &tmux_session_name);
+            let body_claim = o_delegated_arm::direct_body_claim(claims, channel_id, &tmux_session_name).map(|claim| claim.for_turn(inflight_before_relay.as_ref().and_then(|row| row.turn_nonce.as_deref())));
             let sent = Box::pin(terminal_direct_fallback::apply_watcher_direct_fallback_send(
                 &http,
                 &shared,

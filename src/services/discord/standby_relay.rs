@@ -52,6 +52,7 @@ const COMPLETED_SIGNAL_DRAIN_GRACE: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub(in crate::services::discord) struct StandbyRelayTurnBinding {
     identity: InflightTurnIdentity,
+    turn_nonce: Option<String>,
     dispatch_id: Option<String>,
     session_key: Option<String>,
     turn_start_offset: Option<u64>,
@@ -75,6 +76,7 @@ impl StandbyRelayTurnBinding {
     pub(in crate::services::discord) fn from_state(state: &InflightTurnState) -> Self {
         Self {
             identity: InflightTurnIdentity::from_state(state),
+            turn_nonce: state.turn_nonce.clone(),
             dispatch_id: state.dispatch_id.clone(),
             session_key: state.session_key.clone(),
             turn_start_offset: state.turn_start_offset,
@@ -257,8 +259,10 @@ pub(super) async fn run_standby_relay(
                 )
             };
             // The relay claims the channel as it posts; O taking it meanwhile ends the relay.
-            let claim = (!result_text.trim().is_empty())
-                .then(|| BodyClaim::new(channel_id.get(), turn_binding.runtime_kind));
+            let claim = (!result_text.trim().is_empty()).then(|| {
+                BodyClaim::new(channel_id.get(), turn_binding.runtime_kind)
+                    .for_turn(turn_binding.turn_nonce.as_deref())
+            });
             let Ok(BodySend::Sent(delivered)) = turn_binding
                 .census_source
                 .clone()
