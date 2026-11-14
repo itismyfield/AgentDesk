@@ -268,7 +268,7 @@ fn source_ready(
     draft_policy: PromptDraftPolicy,
 ) -> SourceReady {
     use super::readiness::Verdict;
-    let verdict = super::readiness::judge(session_name);
+    let verdict = super::readiness::judge_in(session_name, None, snapshot.tmux_pane_alive);
     let judged = match &verdict {
         Verdict::Idle(_) if draft_policy.should_block_rollout_ready(snapshot) => {
             SourceReady::NotReady

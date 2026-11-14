@@ -75,7 +75,7 @@ pub(in crate::services::discord::router::message_handler) fn codex_verdict(
     use crate::services::codex_tui::readiness::{Verdict, Why, judge_in};
     codex_binding(tmux)?;
     Some(match cwd {
-        Some(cwd) => judge_in(tmux, Some(cwd)),
+        Some(cwd) => judge_in(tmux, Some(cwd), false),
         None => Verdict::Unknown(Why::NoSource),
     })
 }

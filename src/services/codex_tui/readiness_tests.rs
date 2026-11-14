@@ -438,11 +438,14 @@ fn a_submitted_prompt_is_busy_until_its_turn_shows_or_the_evidence_expires() {
     assert_eq!(world.judge(&path).label(), "idle");
 }
 
-/// The readiness wait's own entry, over a spy pane and a rollout bound to it.
-#[test]
-fn the_readiness_wait_follows_the_bound_rollout_whatever_the_pane_shows() {
+/// The readiness wait's own entry, over a spy pane and a rollout bound to it. The wait reads the
+/// pane on the caller's thread only inside a multi-thread runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_readiness_wait_follows_the_bound_rollout_whatever_the_pane_shows() {
     use super::super::host_input::spy::{SpyGuard, SpyState};
-    use super::super::input::{PromptReadinessKind, wait_until_codex_tui_input_ready};
+    use super::super::input::{
+        PromptReadinessKind, is_prompt_ready_timeout_error, wait_until_codex_tui_input_ready,
+    };
     let (floor, at) = clock();
     let world = World::launched(floor);
     let composer = include_str!("../../../tests/fixtures/tui_input/codex-0.160.0-idle.ansi");
@@ -450,7 +453,7 @@ fn the_readiness_wait_follows_the_bound_rollout_whatever_the_pane_shows() {
     assert_ne!(draft, composer);
     let started = event(at(1), "task_started", Some("t1"));
     let ended = [started.clone(), event(at(2), "task_complete", Some("t1"))];
-    let wait = |name: &str, pane: Option<&str>, records: &[Value]| {
+    let wait = |name: &str, kind: PromptReadinessKind, pane: Option<&str>, records: &[Value]| {
         let path = world.rollout(&format!("{name}.jsonl"));
         records.iter().for_each(|record| append(&path, record));
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
@@ -469,18 +472,34 @@ fn the_readiness_wait_follows_the_bound_rollout_whatever_the_pane_shows() {
             captures: std::iter::repeat_n(pane.map(str::to_string), 64).collect(),
             ..SpyState::default()
         });
-        wait_until_codex_tui_input_ready(name, PromptReadinessKind::PostTurnHandoff, None).is_ok()
+        let ready = wait_until_codex_tui_input_ready(name, kind, None);
+        // A wait that was not ready ran out of time; nothing else ended it.
+        let ready =
+            ready.map_err(|error| is_prompt_ready_timeout_error(&error).then_some("timeout"));
+        (ready, judge(name).label())
     };
-    assert!(
-        wait("i8082-wait-unread-ended", None, &ended),
+    let (followup, probe) = (
+        PromptReadinessKind::Followup,
+        PromptReadinessKind::PostTurnHandoff,
+    );
+    assert_eq!(
+        wait("i8082-wait-unread-ended", followup, None, &ended),
+        (Ok(()), "idle"),
         "a pane that cannot be read, over an ended turn, is ready"
     );
-    assert!(
-        !wait("i8082-wait-composer-open", Some(composer), &[started]),
+    assert_eq!(
+        wait(
+            "i8082-wait-composer-open",
+            probe,
+            Some(composer),
+            &[started]
+        ),
+        (Err(Some("timeout")), "busy_open_turn"),
         "a pane that shows an empty composer over an open turn is not ready"
     );
-    assert!(
-        !wait("i8082-wait-draft-ended", Some(&draft), &ended),
+    assert_eq!(
+        wait("i8082-wait-draft-ended", probe, Some(&draft), &ended),
+        (Err(Some("timeout")), "idle"),
         "a draft that was read still blocks an ended turn"
     );
 }

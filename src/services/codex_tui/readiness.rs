@@ -216,12 +216,12 @@ pub(crate) struct Pane<'a> {
 /// Judges the legacy tmux Codex pane `tmux`. A pane with no bound rollout proves nothing, not even
 /// through its process: its caller's own pane read stays the only answer.
 pub(crate) fn judge(tmux: &str) -> Verdict {
-    judge_in(tmux, None)
+    judge_in(tmux, None, false)
 }
 
-/// [`judge`] with the cwd the pane's rollout must belong to; `None` reads the pane's own. A bound
-/// rollout that another cwd owns is no source.
-pub(crate) fn judge_in(tmux: &str, cwd: Option<&str>) -> Verdict {
+/// [`judge`] with what its caller already read: the cwd the pane's rollout must belong to (`None`
+/// reads the pane's own) and that the pane is `alive`. A rollout another cwd owns is no source.
+pub(crate) fn judge_in(tmux: &str, cwd: Option<&str>, alive: bool) -> Verdict {
     if crate::services::tui_prompt_dedupe::codex_verified_input_blocked(tmux) {
         return Verdict::Unknown(Why::SourceChanging);
     }
@@ -246,7 +246,7 @@ pub(crate) fn judge_in(tmux: &str, cwd: Option<&str>) -> Verdict {
         }
     }
     // The pane read the input path itself uses; only a clean negative from tmux is Gone.
-    let liveness = if super::host_input::legacy_pane_alive(tmux) {
+    let liveness = if alive || super::host_input::legacy_pane_alive(tmux) {
         PaneLiveness::Live
     } else {
         match crate::services::platform::tmux::pane_liveness(tmux) {
