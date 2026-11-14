@@ -166,8 +166,10 @@ async fn a_thread_create_nobody_confirmed_is_repeated_by_neither_the_run_nor_its
             executor.start_agent_run(&store, claimed, prompt(), None, None, None, None, false);
         let failed = start.await.unwrap();
         assert_eq!(failed.status, "failed", "{policy:?} {failed:?}");
-        // The runtime logs the outcome it got, and later polls find the run closed.
+        // The runtime logs the outcome it got and raises the failure-streak alert the run
+        // completes; later polls find the run closed.
         let logged = logger.log_run_outcome(&store, &failed).await;
+        let alerted = logger.alert_consecutive_failures(&store, &failed, 1).await;
         let polled = executor.poll_agent_runs(&store, 10, false).await.unwrap();
         assert!(polled.is_empty(), "{policy:?} {polled:?}");
         assert_eq!(api.creates.load(Ordering::SeqCst), 1, "{policy:?}");
@@ -175,15 +177,17 @@ async fn a_thread_create_nobody_confirmed_is_repeated_by_neither_the_run_nor_its
         assert_eq!(run_state(&fixture, &run).await, ended, "{policy:?}");
         let unconfirmed = (Some("create_unconfirmed".to_string()), None, None);
         assert_eq!(thread_outcome(&fixture, &run).await, unconfirmed);
-        // The failure notice goes to the agent's primary channel, not to a new thread.
+        // The failure notice and the streak alert go to the agent's primary channel, not to a
+        // new thread.
         assert_eq!(logged.status, "ok", "{policy:?} {logged:?}");
-        assert_eq!(notices(&fixture, &routine_id).await, [primary()]);
+        assert_eq!(alerted.status, "ok", "{policy:?} {alerted:?}");
+        assert_eq!(notices(&fixture, &routine_id).await, [primary(), primary()]);
         assert!(nothing_ran(&fixture, &[PRIMARY, THREAD]));
         assert_eq!(channel_state(&fixture, PRIMARY).await, before);
     }
 
     // The saved thread is gone (404) and Discord refuses a replacement (403): the run ends at
-    // once, and its failure notice reaches the primary channel instead of the thread that is gone.
+    // once; its failure notice and streak alert reach the primary channel, not the gone thread.
     let gone = ChannelId::new(1_479_671_302_387_081_173);
     let api = thread_api(Create::Refused).await;
     let (executor, logger) = serve(&api).await;
@@ -195,8 +199,10 @@ async fn a_thread_create_nobody_confirmed_is_repeated_by_neither_the_run_nor_its
     let failed = start.await.unwrap();
     assert_eq!(failed.status, "failed", "{failed:?}");
     let logged = logger.log_run_outcome(&store, &failed).await;
+    let alerted = logger.alert_consecutive_failures(&store, &failed, 1).await;
     assert_eq!(logged.status, "ok", "{logged:?}");
-    assert_eq!(notices(&fixture, &routine_id).await, [primary()]);
+    assert_eq!(alerted.status, "ok", "{alerted:?}");
+    assert_eq!(notices(&fixture, &routine_id).await, [primary(), primary()]);
     let ended = ("failed".to_string(), 0, unavailable());
     assert_eq!(run_state(&fixture, &run).await, ended);
     let refused = (

@@ -10,37 +10,55 @@ pub(super) fn attention_message(routine: &RoutineRecord, summary: &str) -> Strin
     )
 }
 
+/// Where a run's notices may find the routine thread: the store that may create a missing one,
+/// and the saved thread id.
+pub(super) type ThreadTarget<'a> = (Option<&'a RoutineStore>, Option<&'a str>);
+
 impl RoutineDiscordLogger {
+    /// A run that ended for want of its thread gets neither a saved thread nor a new one, so
+    /// every notice about it reaches the agent's primary channel.
+    pub(super) async fn run_thread_target<'a>(
+        &self,
+        store: &'a RoutineStore,
+        routine: &'a RoutineRecord,
+        run_id: &str,
+    ) -> Result<ThreadTarget<'a>, String> {
+        let thread_failed: Result<bool, _> = sqlx::query_scalar(
+            "SELECT result_json ->> 'thread_failure' IS NOT NULL
+             FROM routine_runs WHERE id = $1 AND routine_id = $2",
+        )
+        .bind(run_id)
+        .bind(&routine.id)
+        .fetch_one(&*self.pool)
+        .await;
+        match thread_failed {
+            Ok(true) => Ok((None, None)),
+            Ok(false) => Ok((Some(store), routine.discord_thread_id.as_deref())),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     pub(super) async fn log_public_run_outcome(
         &self,
         store: &RoutineStore,
         routine: &RoutineRecord,
         outcome: &RoutineRunOutcome,
     ) -> RoutineDiscordLogStatus {
-        let snapshot: Result<(String, bool, bool), _> = sqlx::query_as(
-            "SELECT status, COALESCE(run_spec ->> 'execution_mode' = 'headless', FALSE),
-                    result_json ->> 'thread_failure' IS NOT NULL
+        let snapshot: Result<(String, bool), _> = sqlx::query_as(
+            "SELECT status, COALESCE(run_spec ->> 'execution_mode' = 'headless', FALSE)
              FROM routine_runs WHERE id = $1 AND routine_id = $2",
         )
         .bind(&outcome.run_id)
         .bind(&routine.id)
         .fetch_one(&*self.pool)
         .await;
-        let (status, headless, thread_failed) = match snapshot {
+        let (status, headless) = match snapshot {
             Ok(status) => status,
             Err(error) => return RoutineDiscordLogStatus::failed(error),
         };
-        // A run that ended for want of its thread is reported on the agent's primary channel:
-        // its log neither trusts the saved thread nor creates another.
-        let thread = match thread_failed {
-            true => (None, None),
-            false => (Some(store), routine.discord_thread_id.as_deref()),
-        };
         // The census verdict goes to the routine's thread, which a headless run does not have.
         if !headless && super::super::legacy_body_census::applies(&routine.script_ref) {
-            return self
-                .log_census_outcome(store, thread, routine, outcome)
-                .await;
+            return self.log_census_outcome(store, routine, outcome).await;
         }
         // Headless failures are reported at close; a headless pause goes to the primary channel.
         if headless {
@@ -51,6 +69,11 @@ impl RoutineDiscordLogger {
             "failed" => "실행 실패 · 점검이 필요합니다",
             "paused" => "일시정지됨 · 실행 이력을 확인해 주세요",
             _ => return RoutineDiscordLogStatus::skipped(),
+        };
+        let thread = self.run_thread_target(store, routine, &outcome.run_id);
+        let thread = match thread.await {
+            Ok(thread) => thread,
+            Err(error) => return RoutineDiscordLogStatus::failed(error),
         };
         let target = match self
             .resolve_routine_log_target(

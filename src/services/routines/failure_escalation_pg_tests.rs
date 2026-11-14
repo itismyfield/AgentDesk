@@ -400,3 +400,98 @@ async fn a_headless_run_recovered_after_a_restart_posts_nothing_in_a_saved_threa
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn every_notice_of_a_run_its_thread_failed_goes_to_the_primary_channel_pg() {
+    const SAVED: &str = "1479671302387081999";
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    // The census verdict is sent straight to Discord: this stand-in records where.
+    let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = sent.clone();
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+        seen.lock().unwrap().push(uri.path().to_string());
+        async { axum::Json(json!({"id": "8117001"})) }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let _api = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_DISCORD_API_BASE_URL",
+        std::ffi::OsStr::new(&base),
+    );
+    let token = crate::runtime_layout::credential_token_path(root.path(), "notify");
+    std::fs::create_dir_all(token.parent().unwrap()).unwrap();
+    std::fs::write(token, "fixture-token").unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (db, pool, store) = setup().await;
+    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let census = super::legacy_body_census::SCRIPT_REF;
+
+    // The routine kept a thread. Its run ends for each way a thread can fail, or (control) for
+    // another reason; an ordinary routine and the census routine are both logged.
+    let ways = [
+        Some("create_unconfirmed"),
+        Some("refused"),
+        Some("unreachable"),
+        None,
+    ];
+    for (way, script) in ways
+        .into_iter()
+        .flat_map(|way| [(way, "plain.js"), (way, census)])
+    {
+        let mut row = routine(&format!("{}-{}", way.unwrap_or("other"), script.len()));
+        (row.script_ref, row.discord_thread_id) = (script.to_string(), Some(SAVED.to_string()));
+        let attached = store.attach_routine_with_execution(row, None, 3);
+        let attached = attached.await.unwrap();
+        let run_id = claim(&store).await;
+        let mut result = json!({"status": "thread_unavailable"});
+        if let Some(way) = way {
+            result["thread_failure"] = json!(way);
+        }
+        assert!(
+            store
+                .fail_agent_run(&run_id, "no thread", Some(result.clone()), None)
+                .await
+                .unwrap()
+        );
+        store.pause_routine(&attached.id).await.unwrap();
+        let outcome = RoutineRunOutcome {
+            run_id: run_id.clone(),
+            routine_id: attached.id.clone(),
+            script_ref: script.to_string(),
+            action: "agent".into(),
+            status: "failed".into(),
+            result_json: Some(result),
+            error: Some("no thread".into()),
+            fresh_context_guaranteed: false,
+        };
+        sent.lock().unwrap().clear();
+        logger.log_run_outcome(&store, &outcome).await;
+        let alerted = logger.alert_consecutive_failures(&store, &outcome, 1);
+        assert_eq!(alerted.await.status, "ok", "{way:?} {script}");
+        // Queued notices, then the channels the census verdict was posted to.
+        let queued: Vec<String> = sqlx::query_scalar(
+            "SELECT target FROM message_outbox
+             WHERE session_key LIKE 'routine:' || $1 || ':%' ORDER BY id",
+        )
+        .bind(&attached.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let posted = sent.lock().unwrap().clone();
+        let channel = if way.is_some() { "6551001" } else { SAVED };
+        let to = format!("channel:{channel}");
+        if script == census {
+            assert_eq!(queued, [to], "{way:?} census alert");
+            let verdict = [format!("/channels/{channel}/messages")];
+            assert_eq!(posted, verdict, "{way:?} census verdict");
+        } else {
+            assert_eq!(queued, [to.clone(), to], "{way:?} notice and alert");
+            assert!(posted.is_empty(), "{way:?} {posted:?}");
+        }
+    }
+
+    server.abort();
+    pool.close().await;
+    db.drop().await;
+}

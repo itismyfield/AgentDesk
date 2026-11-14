@@ -42,12 +42,9 @@ fn render(outcome: &RoutineRunOutcome) -> String {
 }
 
 impl RoutineDiscordLogger {
-    /// `thread` is the store that may create a missing routine thread and the saved thread id;
-    /// both are `None` for a run its thread failed, whose verdict goes to the primary channel.
     pub(super) async fn log_census_outcome(
         &self,
         store: &RoutineStore,
-        (thread_store, saved_thread): (Option<&RoutineStore>, Option<&str>),
         routine: &RoutineRecord,
         outcome: &RoutineRunOutcome,
     ) -> RoutineDiscordLogStatus {
@@ -57,6 +54,11 @@ impl RoutineDiscordLogger {
             .await
         {
             Ok(state) => state,
+            Err(error) => return RoutineDiscordLogStatus::failed(error),
+        };
+        let thread = self.run_thread_target(store, routine, &outcome.run_id);
+        let (thread_store, saved_thread) = match thread.await {
+            Ok(thread) => thread,
             Err(error) => return RoutineDiscordLogStatus::failed(error),
         };
         let target = match self
