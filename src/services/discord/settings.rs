@@ -2,12 +2,11 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use serde::Deserialize;
 use serenity::ChannelId;
 
 use poise::serenity_prelude as serenity;
 
-use crate::domain::memory::{DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS, DEFAULT_MEMORY_RECALL_TIMEOUT_MS};
+#[cfg(test)]
 use crate::runtime_layout;
 use crate::services::agent_protocol::DEFAULT_ALLOWED_TOOLS;
 use crate::services::provider::ProviderKind;
@@ -34,7 +33,6 @@ pub(super) use content::{
 };
 pub(crate) use memory::{
     memory_settings_for_binding, memory_settings_for_role, resolve_agent_memory_settings,
-    resolve_memory_settings,
 };
 pub(super) use read::{load_bot_settings, load_last_session_path};
 pub use read::{
@@ -115,35 +113,26 @@ pub(crate) struct RoleBinding {
     pub memory: ResolvedMemorySettings,
 }
 
+impl From<crate::services::channel_roles::RoleProjection> for RoleBinding {
+    fn from(binding: crate::services::channel_roles::RoleProjection) -> Self {
+        Self {
+            role_id: binding.role_id,
+            prompt_file: binding.prompt_file,
+            provider: binding.provider,
+            model: binding.model,
+            reasoning_effort: binding.reasoning_effort,
+            peer_agents_enabled: binding.peer_agents_enabled,
+            auth_profile: binding.auth_profile,
+            memory: binding.memory,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RegisteredChannelBinding {
     pub channel_id: u64,
     pub owner_provider: ProviderKind,
     pub fallback_name: Option<String>,
-}
-
-const MIN_MEMORY_RECALL_TIMEOUT_MS: u64 = 100;
-const MAX_MEMORY_RECALL_TIMEOUT_MS: u64 = 2_000;
-const MIN_MEMORY_CAPTURE_TIMEOUT_MS: u64 = 500;
-const MAX_MEMORY_CAPTURE_TIMEOUT_MS: u64 = 30_000;
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(default)]
-pub(crate) struct MemoryConfigOverride {
-    pub backend: Option<String>,
-    pub recall_timeout_ms: Option<u64>,
-    pub capture_timeout_ms: Option<u64>,
-}
-
-fn clamp_timeout(name: &str, value: u64, min: u64, max: u64, default: u64) -> u64 {
-    let clamped = value.clamp(min, max);
-    if value != clamped {
-        eprintln!(
-            "  [memory] Warning: {name}={} is out of range; clamping to {clamped}",
-            value
-        );
-    }
-    if clamped == 0 { default } else { clamped }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -426,3 +426,211 @@ fn a_returned_resume_without_its_resumed_start_types_nothing() {
     }
     crate::services::tmux_common::cleanup_session_temp_files(NAME);
 }
+
+#[test]
+fn test_instance_failed_presence_never_becomes_missing_on_an_absent_default_socket() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    if crate::config::test_instance::requested() {
+        crate::config::test_instance::initialize().unwrap();
+        let name = format!(
+            "{}-claude-presence",
+            crate::config::test_instance::current()
+                .unwrap()
+                .unwrap()
+                .tmux
+                .prefix
+        );
+        let _presence =
+            InjectedPresenceGuard::set(HostSessionRef::tmux(&name), HostPresence::ProbeFailed);
+        assert!(
+            super::session_exists(&name)
+                .unwrap_err()
+                .contains("unobserved")
+        );
+        return;
+    }
+    let sockets = tempfile::tempdir().unwrap();
+    let _tmpdir = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "TMUX_TMPDIR",
+        sockets.path(),
+    );
+    let _attached = crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock("TMUX");
+    const NAME: &str = "adk-test-presence-unknown";
+    let _presence =
+        InjectedPresenceGuard::set(HostSessionRef::tmux(NAME), HostPresence::ProbeFailed);
+    assert_eq!(super::session_exists(NAME), Ok(false));
+    let (_temp, root) = crate::config::test_instance::tests::fixture();
+    let filter = concat!(
+        module_path!(),
+        "::test_instance_failed_presence_never_becomes_missing_on_an_absent_default_socket"
+    )
+    .strip_prefix("agentdesk::")
+    .unwrap();
+    let output = crate::config::test_instance::tests::command(&root)
+        .args(["--exact", filter, "--nocapture"])
+        .env("AGENTDESK_TEST_MANIFEST", root.join("manifest.json"))
+        .env("AGENTDESK_ROOT_DIR", &root)
+        .env("AGENTDESK_CONFIG", root.join("config/agentdesk.yaml"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
+    assert_eq!(super::session_exists(NAME), Ok(false));
+}
+
+#[test]
+fn test_instance_claude_native_launch_and_respawn_execute_declared_environment() {
+    use crate::config::TestEnvVarGuard as Guard;
+    use crate::services::provider_auth_profile::instance_env_tests as scope;
+    use std::os::unix::fs::PermissionsExt;
+    scope::with_instance(
+        concat!(
+            module_path!(),
+            "::test_instance_claude_native_launch_and_respawn_execute_declared_environment"
+        ),
+        || {
+            let instance = crate::config::test_instance::current().unwrap().unwrap();
+            let binary = scope::fake_provider(&instance.root, "claude");
+            let _binary =
+                Guard::set_path_after_shared_test_env_lock("AGENTDESK_CLAUDE_PATH", &binary);
+            let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+            let tmux = instance.root.join("fixture-worktree/target/debug/tmux");
+            std::fs::write(
+                &tmux,
+                r#"#!/bin/bash
+while [ "$1" = -u ] || [ "$1" = -S ]; do
+  if [ "$1" = -S ]; then shift 2; else shift; fi
+done
+printf '%s\n' "$*" >> "$AGENTDESK_ROOT_DIR/tmux.calls"
+case "$1" in
+new-session|respawn-pane)
+  for command in "$@"; do :; done
+  /bin/bash -c "$command" > "$AGENTDESK_ROOT_DIR/native.capture" || exit 42
+  touch "$AGENTDESK_ROOT_DIR/native.executed"
+  echo 'synthetic tmux refusal after child capture' >&2
+  exit 1 ;;
+list-panes) echo 1 ;;
+has-session)
+  case "$*" in *-native-true:*) exit 0 ;; *) echo "can't find session" >&2; exit 1 ;; esac ;;
+*) exit 0 ;;
+esac
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+            for returned in [false, true] {
+                let name = format!("{}-claude-native-{returned}", instance.tmux.prefix);
+                let session = HostSessionRef::tmux(&name);
+                let _presence = InjectedPresenceGuard::set(
+                    session,
+                    if returned {
+                        HostPresence::Present
+                    } else {
+                        HostPresence::Missing
+                    },
+                );
+                let _liveness = InjectedLivenessGuard::set(session, HostLiveness::DeadOrAbsent);
+                crate::services::tmux_common::write_tmux_session_auth_profile(&name, "test-claude")
+                    .unwrap();
+                let (tx, _rx) = std::sync::mpsc::channel();
+                let result = execute_streaming_local_tui_tmux(
+                    "instance Claude prompt",
+                    None,
+                    instance.root.to_str().unwrap(),
+                    tx,
+                    None,
+                    &name,
+                    returned.then_some(&TeardownClearance::Returned),
+                    None,
+                    None,
+                    Default::default(),
+                    None,
+                    "http://127.0.0.1:9".into(),
+                );
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("synthetic tmux refusal after child capture"),
+                    "returned={returned}: {error}"
+                );
+                assert!(instance.root.join("native.executed").is_file());
+                scope::assert_environment_capture(
+                    &std::fs::read(instance.root.join("native.capture")).unwrap(),
+                    &instance.root,
+                    "native-capture",
+                );
+                std::fs::remove_file(instance.root.join("native.executed")).unwrap();
+            }
+            let calls = std::fs::read_to_string(instance.root.join("tmux.calls")).unwrap();
+            assert!(calls.lines().any(|line| line.starts_with("new-session")));
+            assert!(calls.lines().any(|line| line.starts_with("respawn-pane")));
+            assert!(!calls.lines().any(|line| line.starts_with("kill-session")));
+        },
+    );
+}
+
+#[test]
+fn test_instance_claude_wrapper_script_executes_declared_environment_and_argv() {
+    use crate::config::TestEnvVarGuard as Guard;
+    use crate::services::provider_auth_profile::instance_env_tests as scope;
+    scope::with_instance(
+        concat!(
+            module_path!(),
+            "::test_instance_claude_wrapper_script_executes_declared_environment_and_argv"
+        ),
+        || {
+            let instance = crate::config::test_instance::current().unwrap().unwrap();
+            let binary = scope::fake_provider(&instance.root, "claude");
+            let wrapper = scope::fake_provider(&instance.root, "wrapper");
+            let _binary =
+                Guard::set_path_after_shared_test_env_lock("AGENTDESK_CLAUDE_PATH", &binary);
+            let _wrapper = Guard::set_path_after_shared_test_env_lock(
+                "ADK_TEST_PROCESS_WRAPPER_EXE",
+                &wrapper,
+            );
+            let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+            scope::capturing_tmux(&instance.root);
+            let name = format!("{}-claude-wrapper-env", instance.tmux.prefix);
+            let session = HostSessionRef::tmux(&name);
+            let _presence = InjectedPresenceGuard::set(session, HostPresence::Missing);
+            let _liveness = InjectedLivenessGuard::set(session, HostLiveness::DeadOrAbsent);
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let result = execute_streaming_local_tmux(
+                &[],
+                "instance Claude wrapper prompt",
+                None,
+                instance.root.to_str().unwrap(),
+                tx,
+                None,
+                &name,
+                None,
+                None,
+                None,
+                None,
+                0,
+            );
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("synthetic tmux refusal after child capture")
+            );
+            assert!(instance.root.join("native.executed").is_file());
+            scope::assert_environment_capture(
+                &std::fs::read(instance.root.join("native.capture")).unwrap(),
+                &instance.root,
+                "native-capture",
+            );
+            let argv = std::fs::read_to_string(instance.root.join("wrapper.argv")).unwrap();
+            assert_eq!(argv.lines().next(), Some("tmux-wrapper"));
+            assert!(
+                argv.lines()
+                    .any(|argument| argument == binary.to_str().unwrap())
+            );
+            assert!(argv.lines().any(|argument| argument == "--input-fifo"));
+        },
+    );
+}

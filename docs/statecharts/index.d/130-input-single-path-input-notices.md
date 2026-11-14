@@ -1,0 +1,2 @@
+key: 130-input-single-path-input-notices
+| `input-single-path` input notices (#7811) | `a2fdbaf6c52190a8cb1d6b45989fe9f76eb12433` | Before: owned receipt-gap input stays Pending and accepted iMessage has no echo; BeforeKnown: global frame knowledge excludes a direct twin; AcceptanceGap: backend effect without echo | design model only; After pairs original-source attempts and echoes accepted winners; implementation and route/writer tests remain pending; see [report](input-single-path/InputNoticeSettlement.report.md) |

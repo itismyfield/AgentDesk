@@ -6,8 +6,9 @@ use super::super::{
     o_writer_io::GatewayPort,
 };
 use super::*;
-use crate::services::discord::{SharedData, inflight::InflightTurnState};
+use crate::services::discord::{SharedData, inflight::InflightTurnState, serenity};
 use crate::services::tui_o::{cutover, store::delivery_evidence};
+use std::sync::Arc;
 use tokio::time::Instant;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,18 +106,37 @@ fn build(
     Some(plan)
 }
 
+/// A real Discord input whose native turn was not interrupted and whose answer O posts.
+fn o_answers_input(row: &InflightTurnState) -> bool {
+    row.user_msg_id != 0
+        && !row.silent_turn
+        && !crate::services::discord::is_synthetic_headless_message_id_raw(row.user_msg_id)
+        && row.tui_terminal_kind
+            != Some(crate::services::agent_protocol::NativeTerminalKind::Aborted)
+        && cutover::peek_o_owns_tui_output_for_channel_quiet(row.channel_id, row.runtime_kind)
+            == Ok(true)
+}
+
+/// No Legacy delivery marks an input whose answer O posts, so the turn's own end marks it done.
+pub(in crate::services::discord) async fn mark_done(
+    shared: &Arc<SharedData>,
+    row: &InflightTurnState,
+    message: serenity::MessageId,
+) {
+    if !o_answers_input(row) {
+        return;
+    }
+    let done =
+        crate::services::discord::turn_view_reconciler::note_intake_turn_completed_via_shared;
+    let channel = serenity::ChannelId::new(row.channel_id);
+    done(shared, channel, message, row.born_generation, "o_turn_done").await;
+}
+
 pub(in crate::services::discord) async fn capture(
     provider: &ProviderKind,
     row: &InflightTurnState,
 ) {
-    if row.user_msg_id == 0
-        || row.silent_turn
-        || crate::services::discord::is_synthetic_headless_message_id_raw(row.user_msg_id)
-        || row.tui_terminal_kind
-            == Some(crate::services::agent_protocol::NativeTerminalKind::Aborted)
-        || cutover::peek_o_owns_tui_output_for_channel_quiet(row.channel_id, row.runtime_kind)
-            != Ok(true)
-    {
+    if !o_answers_input(row) {
         return;
     }
     let (provider, row) = (provider.clone(), row.clone());

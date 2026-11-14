@@ -46,6 +46,9 @@ pub(crate) fn health_tmux_command_using(
     if query != HealthTmuxQuery::Version && is_blank_session_name(session) {
         return Err(HealthTmuxRefusal::BlankSession);
     }
+    if query != HealthTmuxQuery::Version && super::validate_target(session).is_err() {
+        return Err(HealthTmuxRefusal::Unsupported);
+    }
     if cfg!(not(unix)) && query == HealthTmuxQuery::PanePid {
         return Err(HealthTmuxRefusal::Unsupported);
     }

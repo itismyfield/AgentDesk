@@ -995,6 +995,21 @@ pub(super) async fn run_terminal_outcome_delivery(
         )
         .await;
     }
+    // O posts this answer, so the turn's own end marks its input done after the hourglass clear.
+    #[cfg(unix)]
+    if let Some(user_msg_id) = user_msg_id
+        && completion_proof::ran_to_end(
+            &ctx,
+            &inflight_state,
+            preserve_inflight_for_cleanup_retry
+                || auto_retry.queued()
+                || busy_requeue_outcome.is_some()
+                || claude_tui_busy_requeue_pending,
+        )
+    {
+        let done = super::super::outbound::completed_turn_ledger::o_pending::mark_done;
+        done(&shared_owned, &inflight_state, user_msg_id).await;
+    }
     // A terminal answer without a busy requeue unties the card so no later turn edits it; any
     // spent retries stay with the input.
     if busy_requeue_outcome.is_none() && completion_proof::waiting(&inflight_state).is_none() {

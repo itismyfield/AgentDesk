@@ -6,6 +6,12 @@ coverage_class: live
 # Herdr: tmux identity checks are not_applicable; Codex follow-up expected-fail #5340 P10-2.
 cells: [codex-tui, codex-herdr]
 isolation: required
+feature_coverage:
+  schema: 1
+  references:
+    - feature_id: herdr-handoff
+      scope: Codex의 연속 후속 응답·중복 부재 명세만 참조한다. 입력은 legacy_automation, output_path는 unspecified다. 현재 수기 칸은 Claude이므로 provider가 다르고, Herdr에서는 tmux identity step이 N/A여서 실제 host·동일 세션·취소를 증명하지 않는다.
+      needs_live: true
 notes: |
   Optional live scenario; the matrix preflight may skip the codex-tui cell when
   tmux is unavailable. This scenario is intentionally not a required CI gate.

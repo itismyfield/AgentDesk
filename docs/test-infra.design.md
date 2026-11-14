@@ -107,11 +107,10 @@ main의 전역 스캔/정리 동작은 이 조각에서 확대하지 않는다. 
 
 ### 1.3 봇 수·비밀값·권한
 
-권고는 **세 앱**이다: `Test Discord Claude`, `Test Discord Codex`, `Test Discord Driver`.
-앞의 둘은 제품 수신/출력, Driver는 입력·관측·시험 실패 알림을 담당한다. utility/notify 봇은 추가하지 않는다.
-최소 단일 provider만 보면 수신 1 + Driver 1로 두 앱이지만, 두 provider 정규 경로를 고정 구성으로 덮으려면 세 앱이 필요하다.
-전체 matrix도 수신 봇 provider를 바꾸며 매번 재기동하면 두 앱으로 순차 실행할 수 있다.
-따라서 세 앱은 이론적 최소가 아니라 고정 provider 구성·작성자 검증·반복 실행을 단순하게 하는 권고다.
+사용자 11-13 결정은 **네 앱**이다: 금고 항목 `Test-ClaudeCode`, `Test-Codex`,
+`Test-Announce`, `Test-Notify`. 앞의 둘은 제품 수신/출력이고, Driver는 Announce로 message GET,
+Notify로 DISPATCH 입력과 자기 public thread 생성을 수행한다. 새 Driver 앱/credential 파일을 만들지 않는다.
+프로필의 세 author ID는 Claude·Codex·Driver(Notify)이며 Announce는 별도의 네 번째 credential identity다.
 
 근거: `src/config.rs:241`의 bot provider는 단일 값이고,
 `src/services/discord/settings/read.rs:339`는 token으로 launch configs를 중복 제거한다.
@@ -122,15 +121,22 @@ main의 전역 스캔/정리 동작은 이 조각에서 확대하지 않는다. 
 Driver를 수신 봇과 합치면 `src/services/discord/router/intake_gate.rs:314`의 자기 메시지 무시 경로에 걸린다.
 Driver ID만 수신 봇의 `allowed_bot_ids`에 넣는다(`intake_gate.rs:352`). 다른 봇의 메시지는 허용하지 않는다.
 
-사용자에게 한 번에 준비를 요청할 것은 세 앱 생성·기존 길드 초대·아래 권한 적용·1Password 항목 추가다.
-금고는 `AgentDesk`, **항목 이름은 위 세 이름**, 필드는 `token`으로 제안한다(현재 존재 여부 미확인).
-`agent-op` provisioner가 token을 stdin/pipe로 받아 fresh instance root의 `credential/`에만 쓴다.
-설정 bot 키 `claude`, `codex`의 정확한 파일명은 `claude_bot_token`, `codex_bot_token`; Driver는 별도 `driver_bot_token`을 직접 읽고 daemon bot 목록에 넣지 않는다.
+준비 대상은 위 네 앱의 길드 초대·아래 권한·기존 금고 `AgentDesk` 항목이다.
+항목 필드 `자격 증명`을 agent-op stdout→stdin pipe로 fresh instance root에만 provision한다.
+`파일 이름`은 기존 basename을 재사용하며 항목/파일 매핑은 다음과 같다.
+
+| 항목 | 기존 credential basename | 역할 |
+| --- | --- | --- |
+| Test-ClaudeCode | claude_bot_token | Claude 수신/출력 |
+| Test-Codex | codex_bot_token | Codex 수신/출력 |
+| Test-Announce | announce_bot_token | Driver GET |
+| Test-Notify | notify_bot_token | Driver DISPATCH 입력·public thread 생성 |
+
 기존 `write_secret_file`(`src/utils/secret_file.rs:41`, `:96`)로 디렉터리0700·파일0600을 만든다.
 root guard는 env PathBuf를 반환할 뿐 ancestor canonical 검증은 하지 않는다. wrapper가 root/ancestor/leaf symlink·외부 경로를 검사하고 unknown legacy credential subtree는 거부한다.
 기존 reader의 leaf 검사(`src/utils/secret_file.rs:124`)·legacy migration(`src/runtime_layout/mod.rs:357`)만으로 이 검증을 대신하지 않는다.
 dcserver·provider·tmux/Herdr·Driver에는 Discord token env·agent-op 자격을 전달하지 않는다. token 값/항목 내용은 문서·manifest·argv·로그에 남기지 않는다.
-빈 파일·다른 앱 ID는 접속 전/identity 조회에서 오류다. `down`은 제품/Driver 종료 뒤 credential 파일을 제거한다.
+빈 파일·다른 앱 ID는 접속 전/identity 조회에서 오류다. 사용자 11-14 축소 결정대로 `down` 뒤에도 credential 파일 네 개는 0700 instance root에 남긴다.
 시험 자식 env와 ps env/argv에 sentinel token이 없는지 검사하며, env 정리 제거 뮤턴트는 RED여야 한다.
 root credential은 같은 UID의 임의 파일읽기를 막는 sandbox가 아니라 **환경변수 전파 방지**다. debug·shell xtrace는 허용하지 않는다.
 
@@ -143,7 +149,7 @@ root credential은 같은 UID의 임의 파일읽기를 막는 sandbox가 아니
 | --- | --- | --- |
 | 수신 Claude/Codex | View Channel, Read Message History, Send Messages, Send Messages in Threads, Create Public Threads, Add Reactions, Embed Links, Attach Files; 해당 제품의 guild message·Message Content intents | Administrator, Manage Guild/Roles/Channels/Webhooks, Mention Everyone. private-thread 시험 전에는 Manage Threads도 제외 |
 | Driver | 위 중 관측·입력·첨부·public thread 생성에 필요한 권한, Guild Message Reactions intent 및 Message Content; 자기 시험 메시지/반응만 정리 | 운영 채널 접근, 다른 사용자의 메시지를 삭제하는 Manage Messages. 종료는 자신이 만든 thread만 대상 |
-| 세 앱 OAuth | `bot` 및 제품 slash 시험 대상 수신 앱의 `applications.commands` | 운영 앱 token·기존 운영 command 등록 경로 공유 |
+| 네 앱 OAuth | `bot` 및 제품 slash 시험 대상 수신 앱의 `applications.commands` | 운영 앱 token·기존 운영 command 등록 경로 공유 |
 
 첫 기동에서 앱 ID와 slash 등록 대상 application ID를 기록한다.
 현재 `src/services/discord/runtime_bootstrap/framework_setup.rs:35`는 guild 등록을 호출한다.
@@ -153,11 +159,15 @@ root credential은 같은 UID의 임의 파일읽기를 막는 sandbox가 아니
 `src/services/discord/runtime_bootstrap/gateway_runtime/command_guard.rs:29`의 담당 채널 외 ephemeral 거절도 유지하고, 비허용 채널을 모사한 음성 시험에서 거절·시험 PG 변화0을 확인한다(운영 채널에 시험 명령을 보내지 않음).
 초기 프로필은 public thread만 포함하며 DM·private thread는 기능 지도에 gap으로 남긴다.
 
-세 앱만으로 기존 하네스를 그대로 쓸 수는 없다. `src/server/routes/discord.rs:189`의 message GET은 announce credential을 읽고,
+기존 message GET은 `src/server/routes/discord.rs:189`에서 announce credential을 읽고,
 `scripts/e2e/tui_relay/discord.py:125`의 control 전송은 notify 봇을 지정한다.
-I3b에 **Driver credential로 실제 Discord REST 입력/조회/thread 생성**을 하는 instance adapter를 넣고,
-receipt의 세 앱 ID를 기존 author override(`scripts/e2e/tui_relay/assertions.py:27`)로 전달한다.
-세 ID는 필수다. 누락·운영 기본 bot ID·receipt 불일치·중복이면 **첫 전송 전 `UNEVALUABLE(identity)`·전송0건**으로 닫는다(P2-6).
+I3b의 독립 `python3 -m scripts.dev_instance.driver`가 이 두 Driver 역할로 Discord REST를 직접 사용한다.
+선언·receipt·현재 health와 네 credential identity 검증을 마친 뒤에만 assertions를 import하고
+세 author ID를 설정한다. 세 양의 u64 ID·상호 구별·운영 기본 ID 불일치·Notify 역할 결박이 필수이며,
+실패는 첫 thread POST 전 `UNEVALUABLE(identity)`·전송0이다. DELETE·명시 archive 권한은 없고
+자기 public thread는 auto_archive_duration=60으로 생성한다. 전송 응답 유실은 attempts와 미확정 transmissions를 구분한다.
+실제 inflight의 message/author/provider/thread/parent를 입력과 결박하고, 비어 있는 source_message_ids는
+직접 입력 증거로 보존하며 queued lineage로 합성하지 않는다.
 사용자 입력 경로의 회귀는 headless deliver API로 대체하지 않는다.
 다만 Driver 입력은 실제 Gateway를 지나는 **allowed-bot 공통 경로** 증거다.
 claim에 `input_source: allowed_bot`을 붙이고 아래 분기를 명시한다(P2-7).
@@ -471,7 +481,7 @@ r1의 SSH helper·원격 owner·TTL 상태/분산 복구 모델은 제거한다.
 
 I2나 E1의 진입점 전수조사에서 +1200을 넘길 것이 보이면 host별/observer별로 먼저 분할한다.
 I3a의 acquire1000회 시험은 attempt별로 lease 파일을 독립 open하고, winner가 barrier 동안 lock을 유지한 상태의 경합을 뜻한다.
-I3b는 assertions 모듈 import 전에 세 양의 u64 ID·상호 구별·credential identity·receipt·운영 기본값 불일치를 검증한다. gate FAIL의 summary는 UNEVALUABLE(identity)이며 전송0건이다.
+I3b는 assertions 모듈 import 전에 Claude·Codex·Notify의 세 양의 u64 ID·상호 구별·네 credential identity·receipt·운영 기본값 불일치를 검증한다. gate FAIL의 summary는 UNEVALUABLE(identity)이며 전송0건이다.
 P2-8은 cells 밖 host/provider, registry/YAML 교집합 밖 ID, thread/busy witness 제거, 감축 사유 제거의 네 fixture와 검사 제거 뮤턴트를 각각 RED로 고정한다.
 P2-3/4의 운영 상태 음성 시험은 합성 release 경로/프로세스 표/비허용 채널 fixture로 수행하며 운영 파일·프로세스·Discord 채널을 실제 조작하지 않는다.
 휴면 prod 코드를 미리 쌓아 clippy no-growth를 깨지 않는다. 각 opt-in 기능은 실제 호출자와 거부 경로를 함께 착지한다.
@@ -503,7 +513,7 @@ M1 착지와 r2 문서 제출을 막는 결정은 없다. 선택은 아래 두 �
 | **기본값으로 진행·확인 요청** | M1/#8122 병렬·I1–I3b 최소 선행 | 통보 후 이의가 있으면 §4 엄격 순서. 별도 승인 대기로 구현 준비를 멈추지 않음 |
 | **반드시 물어야 함** | 머지 전 실제 실행을 **모든 관련 PR의 새 차단 게이트**로 강제할지 | 기본은 권고/증거 첨부·차단 아님. 사용자 결정 전 게이트를 켜지 않음. E1 자체 수용의 실물 증거는 별개 |
 | **반드시 물어야 함** | 운영 봇 Administrator/다른 권한 때문에 시험 category 경계를 만족하지 못할 때 운영 권한 변경 | 운영 권한을 자동 변경하지 않음. 해당 live 기동만 HOLD하고 사용자에게 선택 요청 |
-| **반드시 준비를 요청** | 세 시험 앱·§1.3 금고 항목·독립 provider 인증/키체인·시험 채널·명령 Integrations 제한·알림 recipient | I3a identity 조회/I3b live 전 한 번에 요청. token 값/금고 내용은 요청·출력하지 않고 항목 생성/권한만 안내. 준비 안 됨은 BLOCKED_AUTH/권한 HOLD |
+| **반드시 준비를 요청** | 네 시험 앱·§1.3 금고 항목·독립 provider 인증/키체인·시험 채널·명령 Integrations 제한·알림 recipient | I3a identity 조회/I3b live 전 한 번에 요청. token 값/금고 내용은 요청·출력하지 않고 항목 생성/권한만 안내. 준비 안 됨은 BLOCKED_AUTH/권한 HOLD |
 | **반드시 물어야 함(확대 시)** | 활성턴2(E-11)·추가 bot-set/호스트·원격/DM/private-thread 확대 | 초기 gap 유지. 자원/권한/coverage 실측 없이 자동 확대하지 않음 |
 
 운영과 다른 비밀 없는 기능 플래그는 키/시험 적용값 목록을 제시해 한 번 확인한다. 운영 env 파일을 읽어 복사하지 않는다.

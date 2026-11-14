@@ -116,7 +116,14 @@ async fn plan<P: DiscordPort>(
     let cohort: Vec<_> = state
         .evidence
         .values()
-        .filter(|input| member(snapshot, &input.record))
+        .filter(|input| {
+            member(snapshot, &input.record)
+                && !state.settled.contains_key(&(
+                    input.record.source.clone(),
+                    input.record.start,
+                    input.record.end,
+                ))
+        })
         .collect();
     let blocked: BTreeSet<_> = state
         .unresolved
@@ -127,7 +134,8 @@ async fn plan<P: DiscordPort>(
         .evidence
         .iter()
         .filter(|(id, input)| {
-            !before_migration_floor(state, input)
+            !state.settled.contains_key(*id)
+                && !before_migration_floor(state, input)
                 && !state.unresolved.contains_key(*id)
                 && input
                     .unit_key

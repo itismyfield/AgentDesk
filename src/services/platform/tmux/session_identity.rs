@@ -13,6 +13,7 @@ pub(crate) fn require_managed_with_program(
     program: &Path,
     budget: Duration,
 ) -> Result<(), String> {
+    validate_target(session).map_err(|e| e.to_string())?;
     if session.starts_with("AgentDesk-") {
         return Ok(());
     }
@@ -21,6 +22,7 @@ pub(crate) fn require_managed_with_program(
         return Err(refused());
     }
     let mut command = binary_resolver::runtime_command(program).map_err(|_| refused())?;
+    crate::config::test_instance::configure_tmux_command(&mut command).map_err(|_| refused())?;
     command.args([
         "-u",
         "show-environment",
