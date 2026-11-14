@@ -174,6 +174,10 @@ Ready는 전달 성공이 아니다. proof를 serialize하거나 다른 pane/원
 4. fresh/clear/resume 직후에는 같은 incarnation의 accepted SessionStart(startup/resume/clear)가 첫 입력 후보를 만든다.
    init-only/empty만으로 허용하지 않는다. 파일이 아직 없으면 immutable launch와 anticipated UUID/path까지 일치한 Start만 후보며
    transport 조기 수용은 [U] 시험을 요구한다.
+   resume은 옛 이력 위에서 시작한다. Start를 받은 시점의 transcript 길이 뒤에 턴 레코드와 permission-mode가 없고
+   launch 시각 이후의 활동도 없을 때만 그 Start가 첫 입력 후보다. 이력 꼬리(종료·재개 메타, 끊긴 턴)는 이 판정에 쓰지 않는다.
+   준비 예산이 끝날 때까지 transcript가 움직이지 않았고 공유 observer가 Idle이며 예약·continuation·compact가 없는데도
+   증거가 없으면(재시작 뒤 recovery floor, 수락되지 않은 Start) Held로 두지 않고 기존 proven-unsent 보관과 재전송 요청으로 끝낸다.
 5. SessionStart(compact)는 진행 중 housekeeping으로, 첫 입력 gate를 열지 않는다.
    fork/unknown도 startup으로 바꾸지 않고 검증된 current Idle을 기다린다.
 6. R 뒤 기존 D를 관측하고 mutation 직전 동일 composer lock 안에서 source/turn/proof/cancel을 다시 확인한다.

@@ -380,7 +380,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "maybe_recover_completed_stale_leak:peek",
         "maybe_recover_completed_stale_leak:claim",
     ),
-    "src/services/discord/outbound/completed_turn_ledger/o_pending.rs": ("capture:peek",),
+    "src/services/discord/outbound/completed_turn_ledger/o_pending.rs": ("o_answers_input:peek",),
     "src/services/discord/outbound/turn_output_controller.rs": (
         "deliver_turn_output_inner:claim",
     ),

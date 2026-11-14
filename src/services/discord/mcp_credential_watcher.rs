@@ -264,6 +264,9 @@ impl CredentialNotifyDedupe {
 /// Resolve the MCP config files we should watch. Returns the (existing-or-not)
 /// candidate paths so that creation events are also picked up.
 pub(super) fn credential_paths() -> Vec<PathBuf> {
+    if crate::config::test_instance::requested() {
+        return Vec::new();
+    }
     let override_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     credential_paths_with_overrides(override_dir, dirs::home_dir())
 }
@@ -484,6 +487,18 @@ async fn broadcast_credential_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_instance_mcp_watcher_registers_no_credential_paths() {
+        crate::services::provider_auth_profile::instance_env_tests::with_instance(
+            concat!(
+                module_path!(),
+                "::test_instance_mcp_watcher_registers_no_credential_paths"
+            ),
+            || assert!(credential_paths().is_empty()),
+        );
+    }
 
     fn config_snapshot(json: &str) -> FileSnapshot {
         FileSnapshot::Config(canonical_mcp_config(json))

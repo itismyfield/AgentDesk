@@ -13,7 +13,7 @@ pub(super) fn spawn_server(
     let mut cmd = Command::new(bin);
     crate::services::platform::apply_binary_resolution(&mut cmd, resolution);
     configure_child_process_group(&mut cmd);
-    crate::services::provider_auth_profile::apply_overlay_to_command(&mut cmd, overlay);
+    crate::services::provider_auth_profile::apply_overlay_to_command(&mut cmd, overlay)?;
     cmd.arg("serve")
         .arg("--hostname")
         .arg("127.0.0.1")
@@ -67,4 +67,49 @@ pub(super) fn drain_startup_output<R>(
             }
         }
     });
+}
+
+#[cfg(all(test, unix))]
+mod instance_env_tests {
+    use super::*;
+
+    #[test]
+    fn test_instance_opencode_direct_command_refuses_before_provider_spawn() {
+        crate::services::provider_auth_profile::instance_env_tests::with_instance(
+            concat!(
+                module_path!(),
+                "::test_instance_opencode_direct_command_refuses_before_provider_spawn"
+            ),
+            || {
+                use crate::services::provider_auth_profile::ProviderAuthOverlay;
+                let instance = crate::config::test_instance::current().unwrap().unwrap();
+                let binary =
+                    crate::services::provider_auth_profile::instance_env_tests::fake_provider(
+                        &instance.root,
+                        "opencode",
+                    );
+                let resolution = crate::services::platform::BinaryResolution {
+                    requested_binary: "opencode".into(),
+                    resolved_path: Some(binary.display().to_string()),
+                    canonical_path: None,
+                    source: None,
+                    attempts: vec![],
+                    failure_kind: None,
+                    exec_path: None,
+                };
+                let result = spawn_server(
+                    binary.to_str().unwrap(),
+                    &resolution,
+                    1,
+                    "synthetic",
+                    instance.root.to_str().unwrap(),
+                    &ProviderAuthOverlay::default_for(ProviderKind::OpenCode),
+                );
+                assert!(
+                    matches!(result, Err(error) if error == "test instance host declaration rejected")
+                );
+                assert!(!instance.root.join("opencode.argv").exists());
+            },
+        );
+    }
 }

@@ -1,0 +1,473 @@
+"""Actual private PG/Herdr and native production listener; synthetic identity REST."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import unittest
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
+
+from scripts.dev_instance import files, identity, keeper, lease, lifecycle
+from tests.dev_instance_keeper_real import RealKeeperTests
+from tests.test_dev_instance import profile
+from scripts.dev_instance.manifest import prepare
+
+NAMES = ('announce_bot_token', 'claude_bot_token', 'codex_bot_token', 'notify_bot_token')
+SELECTOR = 'config::test_instance::bound_health_tests::b2a_native_bound_health_child'
+REPO = Path(__file__).resolve().parents[1]
+
+
+def wrapper():
+    from scripts.dev_instance import __main__ as entry, lifecycle
+    mode, endpoint = sys.argv[2:4]
+    original_request = identity.request_json
+    changed = False
+    children, canceled = [], False
+    def stop_fixture(signum, frame):
+        nonlocal canceled
+        canceled = True
+        # This test wrapper still owns these unreaped Popen handles; it does not adopt a PID.
+        for child in children:
+            if child.poll() is None:
+                child.terminate()
+    signal.signal(signal.SIGTERM, stop_fixture)
+    def request(url, deadline, token=None):
+        nonlocal changed
+        if token is not None:
+            result = original_request(endpoint, deadline, token)
+            if mode == 'wrong-id' and result['id'] == '900001': result['id'] = '999999'
+            return result
+        if mode == 'replace-path' and not changed:
+            changed = True
+            binary = Path(os.environ['B2A_FIXTURE_BINARY'])
+            backup=binary.with_name('b2a-image-'+uuid.uuid4().hex)
+            binary.rename(backup)
+            shutil.copyfile(backup,binary)
+            record=Path(os.environ['HOME'])/'image-backup.json'
+            record.write_text(json.dumps({'path':str(backup),'inode':backup.stat().st_ino}))
+            binary.chmod(0o700)
+        result = original_request(url, deadline)
+        if mode == 'wrong-nonce': result['test_instance']['nonce'] = 'foreign-run'
+        if mode == 'wrong-head': result['test_instance']['head'] = '0'*40
+        if mode == 'missing-app': result['test_instance']['identities'].pop()
+        return result
+    identity.request_json = request
+    def native_spawn(argv, **kwargs):
+        if canceled: raise files.InstanceError('fixture cancellation before child spawn')
+        if len(argv) != 2 or argv[1] != 'dcserver':
+            raise AssertionError('unexpected production child argv')
+        kwargs['env'] = {**kwargs['env'], 'I3A_B2A_NATIVE_CHILD':'1'}
+        if mode == 'registry': kwargs['env']['I3A_B2A_NATIVE_REGISTRY'] = '1'
+        native_log = Path(kwargs['cwd'])/'logs/native-child.log'
+        with native_log.open('wb') as output:
+            kwargs['stdout'] = kwargs['stderr'] = output
+            child = subprocess.Popen([argv[0], '--exact', SELECTOR, '--nocapture'], **kwargs)
+            children.append(child)
+            launch=Path(kwargs['cwd'])/'runtime/native-launch.json'
+            launch.write_text(json.dumps({'pid':child.pid,'argv':[argv[0],'--exact',SELECTOR,'--nocapture'],'env':kwargs['env']}))
+            launch.chmod(0o600)
+            return child
+    if mode == 'control-failure':
+        def refuse_control(*args, **kwargs):
+            raise identity.ControlRefused('synthetic control refusal')
+        identity.cooperative_stop = refuse_control
+    if mode == 'control-image':
+        original_stop = identity.cooperative_stop
+        def verify_refusal_before_wait(manifest, nonce, child, *args, **kwargs):
+            with mock.patch.object(child, 'wait', wraps=child.wait) as wait:
+                try:
+                    original_stop(manifest, nonce, child, *args, **kwargs)
+                except identity.ControlRefused:
+                    if wait.called: raise AssertionError('unverified image reached original-child wait')
+                    path = Path(manifest['root'])/'runtime/control-refusal-before-wait.json'
+                    path.write_text(json.dumps({'control_refused':True, 'child_pid':child.pid, 'wait_calls':0}))
+                    path.chmod(0o600)
+                    raise
+                raise AssertionError('replaced execution path was accepted by cooperative stop')
+        identity.cooperative_stop = verify_refusal_before_wait
+    if mode == 'keeper-forward-failure':
+        def refuse_keeper(*args, **kwargs):
+            raise OSError('synthetic original keeper forwarding failure')
+        keeper.request = refuse_keeper
+    def supervise(*args, **kwargs):
+        return lifecycle.supervise(*args, **kwargs, spawn=native_spawn)
+    if mode == 'publication-io-error':
+        original_publish=lifecycle.publish_runtime
+        def publication(root,relative,*args,**kwargs):
+            if str(relative)=='runtime/instance-run.json': raise OSError('synthetic owned publication failure')
+            return original_publish(root,relative,*args,**kwargs)
+        lifecycle.publish_runtime=publication
+    entry.supervise = supervise
+    return entry.main(sys.argv[4:])
+
+
+class BoundHealthRealTests(RealKeeperTests):
+    # The inherited fixture supplies only original-handle cleanup, not its test selection.
+    test_actual_caller_down_reaps_in_reverse_order_and_refuses_foreign_nonce = None
+    test_actual_caller_partial_start_failure_rolls_back_before_gateway = None
+    test_actual_caller_reap_uses_same_current_run_and_waits_for_exit = None
+    test_actual_live_resources_and_lost_lock_marker_refuse_another_keeper = None
+    test_foreign_tcp_listener_prevents_sql_and_resource_adoption = None
+    test_replaced_global_marker_never_reports_successful_down = None
+    test_wrapper_sigkill_is_hold_without_gateway_guess_or_credential_delete = None
+
+    def setUp(self):
+        super().setUp()
+        native = os.environ.get('ADK_B2A_NATIVE_BINARY')
+        self.assertTrue(native and Path(native).is_file(), 'fresh native test binary is required')
+        self.instance_id = str(uuid.uuid4())
+        self.worktree = REPO
+        self.manifest = prepare(self.base,self.instance_id,REPO,profile(),{})
+        self.root = Path(self.manifest['root'])
+        os.utime(self.root/'herdr-home/config.toml',(time.time()-3,time.time()-3))
+        self.binary = REPO/'target/debug/agentdesk'
+        self.assertEqual(self.binary.stat().st_ino,Path(native).stat().st_ino,
+                         'the actual lane artifact must be the explicitly pinned native fixture')
+        self.digest = hashlib.sha256(self.binary.read_bytes()).hexdigest()
+        self.frame = {'kind':'admission','schema':1,
+                      'identities':dict(zip(NAMES, ('900003','900001','900002','900006')))}
+        self.tokens = {}
+        for index, name in enumerate(NAMES):
+            value = 'SYNTHETIC_B2A_PRIVATE_'+str(index)
+            self.tokens[value] = self.frame['identities'][name]
+            path = self.root/'credential'/name
+            path.write_text(value); path.chmod(0o600)
+        requests = self.requests = []
+        values = self.tokens
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_GET(self):
+                app = values.get(self.headers.get('Authorization','').removeprefix('Bot '))
+                requests.append(app)
+                body = json.dumps({'id':app}).encode()
+                self.send_response(200); self.send_header('Content-Length',str(len(body)))
+                self.end_headers(); self.wfile.write(body)
+        self.api = ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread = threading.Thread(target=self.api.serve_forever,daemon=True);thread.start()
+        self.addCleanup(self.api.server_close); self.addCleanup(self.api.shutdown)
+        self.gateway_nonce = None
+
+    def start(self, mode='positive', digest=None):
+        self.specpath.write_text(json.dumps(self.spec))
+        read, write = os.pipe()
+        os.write(write,(json.dumps(self.frame)+'\n').encode())
+        environment = {'PATH':'/usr/bin:/bin','HOME':str(self.home),'LC_ALL':'C',
+                       'B2A_FIXTURE_BINARY':str(self.binary),'DISCORD_TOKEN':'SYNTHETIC_NEVER_INHERIT'}
+        try:
+            self.wrapper = subprocess.Popen([sys.executable,'-E','-s','-m',__name__,
+                '--wrapper',mode,f'http://127.0.0.1:{self.api.server_port}/identity',
+                'up','--instance',self.instance_id,'--head',self.manifest['head'],
+                '--binary-sha256',digest or self.digest,'--wall-timeout','120','--stop-grace','5',
+                '--resources',str(self.specpath)],cwd=str(REPO),env=environment,
+                stdin=read,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        finally:
+            os.close(read)
+        self.control = os.fdopen(write,'w')
+        self.addCleanup(self.control.close)
+        (REPO/'reports/i3a-b2a/logs'/('progress-'+self._testMethodName+'.json')).write_text(
+            json.dumps({'root':str(self.root),'mode':mode,'wrapper_pid':self.wrapper.pid,'head':self.manifest['head']}))
+        return self.wrapper
+
+    def finish_fixture(self):
+        # Every subprocess remains this fixture's original handle. Missing witness stays a failure.
+        if getattr(self,'control',None) and self.gateway_nonce and self.wrapper.poll() is None:
+            try:
+                self.control.write(json.dumps({'root':str(self.root),'nonce':self.gateway_nonce,'action':'down'})+'\n')
+                self.control.flush()
+            except (OSError,ValueError): pass
+        if self.wrapper is not None:
+            try: out,err = self.wrapper.communicate(timeout=12)
+            except subprocess.TimeoutExpired:
+                self.wrapper.terminate(); out,err = self.wrapper.communicate(timeout=15)
+            artifact = REPO/'reports/i3a-b2a/logs'/self._testMethodName
+            artifact.mkdir(exist_ok=True)
+            (artifact/'wrapper.stdout').write_text(out)
+            (artifact/'wrapper.stderr').write_text(err)
+            for relative in ('logs/native-child.log',keeper.OWNER_FILE,'runtime/b2a-child-capture.json','runtime/instance-run.json',
+                             'runtime/native-launch.json','runtime/control-refusal-before-wait.json'):
+                source=self.root/relative
+                if source.exists(): shutil.copyfile(source,artifact/source.name)
+            fresh = getattr(self, 'fresh_gateway_capture', None)
+            if fresh is not None and fresh.exists(): shutil.copyfile(fresh, artifact/'fresh-gateway.json')
+        if (self.root/keeper.OWNER_FILE).exists():
+            self.wait_for(lambda:self.record().get('known_resources_closed'),'owned resource exit',timeout=15)
+
+    def receipt(self):
+        path = self.root/'runtime/instance-run.json'
+        if self.wrapper.poll() is not None and not path.exists():
+            out,err = self.wrapper.communicate(timeout=5)
+            log = self.root/'logs/native-child.log'
+            self.fail(f'native wrapper exited {self.wrapper.returncode}: {out} {err}; '+
+                      (log.read_text()[-6000:] if log.exists() else 'no native log'))
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def assert_closed(self):
+        record = self.wait_for(lambda:self.record() if self.record().get('known_resources_closed') else None,
+                               'actual PG/Herdr rollback')
+        self.assertEqual(record['close_order'],['herdr','postgres'])
+        self.assertTrue(all(item['state']=='STOPPED' for item in record['resources']))
+        with lease.acquire(self.root,self.instance_id): pass
+        for path in [*self.root.joinpath('runtime').rglob('*.json'), *self.root.joinpath('logs').glob('*')]:
+            if path.is_file():
+                data = path.read_bytes()
+                self.assertNotIn(b'SYNTHETIC_B2A_PRIVATE_',data,str(path))
+                self.assertNotIn(b'SYNTHETIC_NEVER_INHERIT',data,str(path))
+        return record
+
+    def acceptance(self,mode):
+        self.start(mode)
+        receipt = self.wait_for(self.receipt,'actual native bound health',timeout=100)
+        self.gateway_nonce = receipt['nonce']
+        launch=json.loads((self.root/'runtime/native-launch.json').read_text())
+        self.assertEqual(launch['pid'],receipt['pid'])
+        self.assertEqual(launch['argv'][1:],['--exact',SELECTOR,'--nocapture'])
+        self.assertNotIn('SYNTHETIC_B2A_PRIVATE_',json.dumps(launch))
+        self.assertNotIn('SYNTHETIC_NEVER_INHERIT',json.dumps(launch))
+        capture=self.wait_for(lambda:json.loads((self.root/'runtime/b2a-child-capture.json').read_text()),'actual child capture')
+        self.assertEqual(capture['pid'],receipt['pid']); self.assertEqual(capture['bound_pid'],receipt['pid'])
+        self.assertEqual(capture['port'],receipt['port'])
+        self.assertTrue(capture['binary_fd_cloexec'] and capture['lease_fd_cloexec'])
+        self.assertEqual(capture['registry'],mode=='registry')
+        self.assertNotIn('SYNTHETIC_B2A_PRIVATE_',json.dumps(capture))
+        self.assertNotIn('SYNTHETIC_NEVER_INHERIT',json.dumps(capture))
+        self.assertTrue(receipt['verified']); self.assertTrue(receipt['live_ready'])
+        # These retained diagnostics come from the caller, beyond the three Ready fields.
+        self.assertEqual(receipt['head'],self.manifest['head'])
+        self.assertEqual(receipt['binary_sha256'],self.digest)
+        self.assertEqual(receipt['port'],self.manifest['api']['port'])
+        self.assertEqual({x['name']:x['application_id'] for x in receipt['identities']},self.frame['identities'])
+        self.assertEqual(len(self.requests),4)
+        self.control.write(json.dumps({'root':str(self.root),'nonce':receipt['nonce'],'action':'down'})+'\n');self.control.flush()
+        out,err = self.wrapper.communicate(timeout=15)
+        self.assertEqual(self.wrapper.returncode,0,out+err)
+        result=json.loads(out)
+        self.assertTrue(result['verified']);self.assertFalse(result['live_ready'])
+        self.assertTrue(result['cooperative_stop'])
+        self.assertTrue(result['gateway_wait_ack'])
+        self.assertFalse(result['forced_cleanup'])
+        self.assertEqual(result['child_exit'], -signal.SIGTERM)
+        self.assert_closed()
+        print('B2A_ACTUAL '+json.dumps({'pid':receipt['pid'],'port':receipt['port'],'nonce':receipt['nonce'],
+             'binary_sha256':self.digest,'identities':len(receipt['identities']),'ready_live_ready':True,
+             'live_ready':False,'resources_remaining':0,'scope_cut':mode in {'wrong-head','missing-app'}}),flush=True)
+
+    def test_actual_native_same_run_four_identities_health_and_down(self): self.acceptance('positive')
+    def test_actual_native_registry_arm_preserves_same_run_witness(self): self.acceptance('registry')
+
+    def test_public_nonce_alone_cannot_stop_the_native_child(self):
+        import urllib.error
+        import urllib.request
+        self.start()
+        receipt = self.wait_for(self.receipt, 'bound public witness', timeout=100)
+        self.gateway_nonce = receipt['nonce']
+        request = {'schema':1, 'action':'stop', 'root':str(self.root),
+                   'instance_id':self.instance_id, 'nonce':receipt['nonce'],
+                   'challenge':str(uuid.uuid4()), 'proof':'0'*64}
+        url = f"http://127.0.0.1:{receipt['port']}/_agentdesk/test-control"
+        with self.assertRaises(urllib.error.HTTPError) as refused:
+            urllib.request.urlopen(urllib.request.Request(url, json.dumps(request).encode(),
+                {'Content-Type':'application/json'}, method='POST'), timeout=3)
+        self.assertEqual(refused.exception.code, 403)
+        refused.exception.close()
+        self.assertIsNone(self.wrapper.poll())
+        self.assertFalse((self.root/'runtime/instance-control-ack.json').exists())
+
+    def test_control_failure_is_forced_hold_after_original_handle_cleanup(self):
+        self.start('control-failure')
+        receipt = self.wait_for(self.receipt, 'bound public witness', timeout=100)
+        self.gateway_nonce = receipt['nonce']
+        self.control.write(json.dumps({'root':str(self.root),'nonce':receipt['nonce'],'action':'down'})+'\n')
+        self.control.flush()
+        out, err = self.wrapper.communicate(timeout=15)
+        result = json.loads(out)
+        self.assertEqual(result['status'], 'HOLD', out+err)
+        self.assertEqual(self.wrapper.returncode, 6, out+err)
+        self.assertFalse(result['cooperative_stop'])
+        self.assertTrue(result['forced_cleanup'])
+        self.assertTrue(result['gateway_wait_ack'])
+        self.assertFalse(result['live_ready'])
+        self.assert_closed()
+
+    def test_sigterm_forward_failure_is_bounded_forced_hold(self):
+        self.start('keeper-forward-failure')
+        receipt = self.wait_for(self.receipt, 'bound public witness', timeout=100)
+        self.gateway_nonce = receipt['nonce']
+        started = time.monotonic()
+        self.wrapper.terminate()
+        out, err = self.wrapper.communicate(timeout=15)
+        result = json.loads(out)
+        self.assertLess(time.monotonic()-started, 12)
+        self.assertEqual(result['status'], 'HOLD', out+err)
+        self.assertEqual(self.wrapper.returncode, 6, out+err)
+        self.assertFalse(result['cooperative_stop'])
+        self.assertTrue(result['forced_cleanup'])
+        self.assertTrue(result['gateway_wait_ack'])
+        self.assert_closed()
+
+    def test_wrapper_sigterm_requests_cooperation_before_keeper_close(self):
+        self.start()
+        receipt = self.wait_for(self.receipt, 'bound public witness', timeout=100)
+        self.gateway_nonce = receipt['nonce']
+        self.wrapper.terminate()
+        out, err = self.wrapper.communicate(timeout=15)
+        result = json.loads(out)
+        self.assertEqual(result['status'], 'STOPPED', out+err)
+        self.assertTrue(result['cooperative_stop'])
+        self.assertTrue(result['gateway_wait_ack'])
+        self.assertFalse(result['forced_cleanup'])
+        self.assertFalse(result['live_ready'])
+        self.assert_closed()
+
+    def test_normal_up_reclaims_recorded_native_orphan_before_fresh_spawn(self):
+        self.start()
+        receipt = self.wait_for(self.receipt, 'bound native Ready', timeout=100)
+        self.gateway_nonce = receipt['nonce']
+        old_manifest, old_root = self.manifest, self.root
+        credentials = {name:(old_root/'credential'/name).stat().st_ino for name in NAMES}
+        lease_inode = (self.base/lease.LEASE_NAME).stat().st_ino
+        retain = {'home':False, 'reclaimed':False}
+        # Preserve the private witness root if its recorded process cannot be reclaimed.
+        for index, (function, args, kwargs) in enumerate(self._cleanups):
+            if function is shutil.rmtree and args == (self.home,):
+                self._cleanups[index] = (lambda home=self.home: None if retain['home'] else shutil.rmtree(home), (), {})
+                break
+        else:
+            self.fail('private HOME cleanup registration is unavailable')
+        def reclaim_recorded_gateway():
+            if retain['reclaimed'] or self.wrapper.poll() is None:
+                return
+            try:
+                lifecycle.cleanup_orphan(old_manifest, receipt, 5)
+            except BaseException:
+                retain['home'] = True
+                print('RECORDED_ORPHAN_HOLD '+json.dumps({'root':str(old_root), 'pid':receipt['pid'],
+                                                        'nonce':receipt['nonce']}), flush=True)
+                raise
+        self.addCleanup(reclaim_recorded_gateway)
+        self.wrapper.kill()
+        self.assertEqual(self.wrapper.wait(timeout=10), -signal.SIGKILL)
+        self.assertTrue(lifecycle._pid_alive(receipt['pid']))
+        try:
+            with lease.acquire(old_root, self.instance_id):
+                self.fail('the surviving Gateway must retain the global lease')
+        except lease.LeaseBusy:
+            pass
+        closed = self.wait_for(lambda:self.record() if self.record().get('known_resources_closed') else None,
+                               'B1 closes only its owned resources after wrapper exit', timeout=20)
+        self.assertEqual(closed['state'], 'HOLD')
+        self.assertFalse(closed['gateway_exit_confirmed'])
+        owner_bytes = (old_root/keeper.OWNER_FILE).read_bytes()
+        fresh_id = str(uuid.uuid4())
+        fresh = prepare(self.base, fresh_id, self.worktree, profile(), {})
+        fresh_root, events, owned = Path(fresh['root']), [], []
+        self.fresh_gateway_capture = fresh_root/'runtime/fresh-gateway.json'
+        original_cleanup, original_acquire = lifecycle.cleanup_orphan, lifecycle.acquire
+        def cleanup(manifest, record, grace):
+            self.assertEqual((manifest['root'], record['pid']), (str(old_root), receipt['pid']))
+            events.append('recorded-cleanup')
+            original_cleanup(manifest, record, grace)
+            retain['reclaimed'] = True
+            self.assertFalse(lifecycle._pid_alive(receipt['pid']))
+            events.append('recorded-exit')
+        def acquire(root, instance_id):
+            handle = original_acquire(root, instance_id)
+            self.assertEqual((Path(root), instance_id), (fresh_root, fresh_id))
+            events.append('fresh-lease')
+            return handle
+        def spawn(argv, **kwargs):
+            self.assertEqual(argv, [str(self.binary), 'dcserver'])
+            self.assertEqual(events, ['recorded-cleanup', 'recorded-exit', 'fresh-lease'])
+            witness = json.loads(kwargs['env']['AGENTDESK_TEST_LEASE'])
+            self.assertEqual(witness['root'], str(fresh_root))
+            self.assertNotEqual(witness['nonce'], receipt['nonce'])
+            self.assertEqual(os.fstat(witness['fd']).st_ino, lease_inode)
+            events.append('fresh-spawn')
+            code = ('import json,os;from pathlib import Path;'
+                    'w=json.loads(os.environ["AGENTDESK_TEST_LEASE"]);m=os.fstat(w["fd"]);'
+                    'p=Path(os.environ["AGENTDESK_ROOT_DIR"])/"runtime/fresh-gateway.json";'
+                    'p.write_text(json.dumps({"pid":os.getpid(),"root":str(Path.cwd()),'
+                    '"nonce":w["nonce"],"lease_inode":m.st_ino}));p.chmod(0o600)')
+            child = subprocess.Popen([sys.executable, '-c', code], **kwargs)
+            owned.append(child)
+            return child
+        def close_owned_fakes():
+            for child in owned:
+                if child.poll() is None: child.terminate()
+                child.wait(timeout=5)
+        self.addCleanup(close_owned_fakes)
+        with mock.patch.object(lifecycle, 'cleanup_orphan', side_effect=cleanup) as cleanup_call, \
+                mock.patch.object(lifecycle, 'acquire', side_effect=acquire):
+            result = lifecycle.supervise(self.base, fresh_id, {}, head=fresh['head'], binary_sha256=self.digest,
+                                         wall_timeout=10, stop_grace=1, spawn=spawn)
+        cleanup_call.assert_called_once()
+        capture = json.loads((fresh_root/'runtime/fresh-gateway.json').read_text())
+        self.assertEqual(result['status'], 'STOPPED')
+        self.assertEqual(result['child_exit'], 0)
+        self.assertEqual(capture['pid'], result['child_pid'])
+        self.assertEqual(capture['pid'], owned[0].pid)
+        self.assertFalse(result['live_ready'])
+        self.assertEqual((capture['root'], capture['nonce'], capture['lease_inode']),
+                         (str(fresh_root), result['nonce'], lease_inode))
+        self.assertEqual(events, ['recorded-cleanup', 'recorded-exit', 'fresh-lease', 'fresh-spawn'])
+        self.assertEqual((old_root/keeper.OWNER_FILE).read_bytes(), owner_bytes)
+        self.assertEqual({name:(old_root/'credential'/name).stat().st_ino for name in NAMES}, credentials)
+        print('RECORDED_ORPHAN_REPLACED '+json.dumps({'old_root':str(old_root), 'old_pid':receipt['pid'],
+              'fresh_root':str(fresh_root), 'fresh_pid':capture['pid'], 'lease_inode':lease_inode,
+              'new_nonce':capture['nonce'], 'events':events, 'credentials_unchanged':True}), flush=True)
+
+    def test_control_rechecks_the_current_execution_path_before_self_signal(self):
+        self.start('control-image')
+        receipt = self.wait_for(self.receipt, 'bound public witness', timeout=100)
+        self.gateway_nonce = receipt['nonce']
+        backup = self.binary.with_name('b2b1-original-'+uuid.uuid4().hex)
+        self.binary.rename(backup)
+        try:
+            shutil.copyfile(backup, self.binary)
+            self.binary.chmod(0o700)
+            self.assertIsNone(self.wrapper.poll())
+            self.control.write(json.dumps({'root':str(self.root),'nonce':receipt['nonce'],'action':'down'})+'\n')
+            self.control.flush()
+            out, err = self.wrapper.communicate(timeout=15)
+            result = json.loads(out)
+            self.assertEqual(result['status'], 'HOLD', out+err)
+            self.assertEqual(self.wrapper.returncode, 6, out+err)
+            self.assertTrue(result['forced_cleanup'])
+            self.assertFalse(result['cooperative_stop'])
+            refusal = json.loads((self.root/'runtime/control-refusal-before-wait.json').read_text())
+            self.assertTrue(refusal['control_refused'])
+            self.assertEqual(refusal['child_pid'], receipt['pid'])
+            self.assertEqual(refusal['wait_calls'], 0)
+            self.assert_closed()
+        finally:
+            # Restore this fixture's executable inode, never a foreign process or file.
+            backup.replace(self.binary)
+
+    def refusal(self, mode, *, digest=None, started=True):
+        self.start(mode,digest)
+        out,err=self.wrapper.communicate(timeout=110)
+        self.assertEqual(self.wrapper.returncode,2,out+err)
+        self.assertEqual(json.loads(out)['status'],'REJECTED')
+        self.assertFalse((self.root/'runtime/instance-run.json').exists())
+        if started: self.assert_closed()
+        else: self.assertFalse((self.root/keeper.OWNER_FILE).exists())
+
+    def test_publication_io_error_reuses_original_handle_rollback(self): self.refusal('publication-io-error')
+    def test_wrong_identity_refuses_before_any_runtime_resource(self): self.refusal('wrong-id',started=False)
+    def test_foreign_run_nonce_rolls_back_actual_resources(self): self.refusal('wrong-nonce')
+    def test_foreign_health_head_is_a_ready_scope_cut_positive(self): self.acceptance('wrong-head')
+    def test_missing_health_identity_is_a_ready_scope_cut_positive(self): self.acceptance('missing-app')
+    def test_executable_path_replacement_rolls_back_actual_resources(self): self.refusal('replace-path')
+    def test_old_artifact_sha_refuses_before_any_runtime_resource(self): self.refusal('positive',digest='0'*64,started=False)
+
+
+if __name__ == '__main__':
+    if len(sys.argv)>1 and sys.argv[1]=='--wrapper': sys.exit(wrapper())
+    unittest.main()

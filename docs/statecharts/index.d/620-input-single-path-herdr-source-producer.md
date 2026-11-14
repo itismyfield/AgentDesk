@@ -1,0 +1,2 @@
+key: 620-input-single-path-herdr-source-producer
+| `input-single-path` fresh Claude source producer (#8114 Slice2b) | `1c4742af92ef9c5223bfee19c17294864243336f` merged with Slice2 | Absent producer liveness and replacement identity mutant are expected RED | 60 cfg expected sets matched (GREEN33 / expected RED27), including six independently registered producer cfg; existing30 and dynamic24 contracts retained. Fresh registration alone grants no pin; [report](input-single-path/herdr-producer.report.md). |

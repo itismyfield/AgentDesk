@@ -16,6 +16,9 @@ use crate::runtime_layout::legacy_config_file_path;
 pub(crate) mod selection;
 use selection::{explicit_env, resolve_with, search};
 
+/// Canonical declaration path without consulting process state during instance initialization.
+pub(crate) use selection::config_file_path as canonical_config_path;
+
 #[cfg(test)]
 const EXPLICIT_ENV: &str = "AGENTDESK_CONFIG";
 

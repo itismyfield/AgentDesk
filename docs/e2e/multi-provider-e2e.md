@@ -273,6 +273,10 @@ feature_coverage:
       state: idle
       qualifiers: {turn_origin: managed, output_path: unspecified, input_source: legacy_automation}
       assertion_ids: [provider_text_present, no_duplicate_marker, no_duplicate_content]
+  references:
+    - feature_id: reset-clear
+      scope: Clear acknowledgement wait and post-clear delivery marker; fresh session identity is not asserted.
+      needs_live: true
 ```
 
 The rows file uses `schema: 1`, a nonempty `features` list and top-level
@@ -284,6 +288,8 @@ list. This excerpt shows the nested requirement and source-rule shape:
 features:
   - feature_id: message-delivery
     # title, visible_contract, verification, owner and chart accompany this excerpt.
+    needs_live: true
+    test_names: []
     applicable:
       - host: tmux
         provider: claude
@@ -295,6 +301,37 @@ features:
       provider_text_present: [human, allowed_bot, legacy_automation]
     pending_assertions: []
 ```
+
+Each feature may declare `needs_live` (a boolean, default `true`) and
+`test_names` (a list of distinct source test names, default `[]`). A test name
+uses `path.py::Class.test_name` or `path.rs::test_fn`; for example,
+`tests/test_generate_user_feature_map.py::FeatureMapTests.test_valid_bootstrap_counts_declarations_without_execution_claim`.
+The generator checks that each named test definition exists in its source.
+The full bytes of each named source file also contribute to `source_hash`.
+Changing an existing test body therefore requires the official `--write`
+regeneration even when its declared name stays the same. Python and Rust source
+changes select both feature-map checks through the CI input bundle.
+These names connect existing tests to a feature; they do not report that the
+tests ran or passed, and they do not satisfy a live assertion. Setting
+`needs_live: false` does not turn test-name references into covered live cells
+or remove the row's applicable requirements. The JSON `by_feature` entries
+export `needs_live`, `test_names` and `scenario_references`; the Markdown map
+shows these declarations alongside the existing live-claim counts.
+
+A scenario's `feature_coverage.references` list connects only the stated
+partial scope to a known feature. Each entry supplies `feature_id`, a nonempty
+`scope` and `needs_live: true`. It does not declare a claim tuple, infer host or
+provider support, or contribute to `applicable`, `covered`, `missing` or
+`unsupported` counts. This allows existing scenarios to document the portion
+of a feature they exercise while its full contract remains missing.
+
+The partial references on `E-18`, `E-19`, `E-30`, `E-37`, `E-50`, `E-51` and
+`E-54` do not establish the missing busy-state, reaction-history, fresh-thread,
+actual host/output-binding or fresh-session witnesses. In particular,
+`busy-input`, `reaction-display` and `threads` retain zero full covered cells.
+The existing `E-50`/`E-51` common-delivery claims remain their own limited
+coverage. Declared test names and partial scenario references add no execution
+PASS or freshness evidence.
 
 `assertion_sources` maps required operation names to their allowed input-source
 lists. A missing operation is described in `pending_assertions` as
