@@ -761,14 +761,18 @@ impl NativeCleanup {
         }
         if let Some((key, actor)) = &self.admission.cleanup {
             let current = match shared.mailbox_peek(key.channel_id) {
-                Some(mailbox) => mailbox.snapshot().await.cancel_token,
+                Some(mailbox) => Some(mailbox.snapshot().await),
                 None => None,
             };
-            if !current
+            let token = current
                 .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, actor))
-                && self.row_snapshot(key, current.is_none())?.is_none()
-            {
+                .and_then(|current| current.cancel_token.as_ref());
+            let owns_lease = current.as_ref().is_some_and(|current| {
+                current.active_user_message_id.map(|id| id.get()) == Some(key.user_msg_id)
+                    && key.matches_episode_nonce(current.active_turn_nonce.as_deref())
+                    && token.is_some_and(|current| Arc::ptr_eq(current, actor))
+            });
+            if !owns_lease && self.row_snapshot(key, token.is_none())?.is_none() {
                 history.ack_native_cleanup(&evidence.namespace, &evidence.ticket, &outcome)?;
                 return Ok(true);
             }

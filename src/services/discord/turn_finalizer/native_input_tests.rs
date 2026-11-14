@@ -1327,13 +1327,18 @@ async fn native_8148_s2_persistence_error_keeps_row_and_wake_debt() {
 async fn native_8148_s2_transfer_closes_debt_without_successor_row_or_wake() {
     use super::super::super::inflight;
     let runtime = crate::config::TestRuntimeRootGuard::new();
-    for (n, (successor_lease, missing_row)) in [(false, false), (true, false), (true, true)]
-        .into_iter()
-        .enumerate()
+    for (n, (successor_lease, missing_row, reuse_actor)) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (true, false, true),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let f = Fixture::at(
             runtime.path().join(format!("runtime/transfer-{n}.json")),
-            8148977 + n as u64,
+            8148991 + n as u64,
             true,
         );
         let shared = b2b_shared(None);
@@ -1351,7 +1356,11 @@ async fn native_8148_s2_transfer_closes_debt_without_successor_row_or_wake() {
             ))
             .await;
         assert!(released.removed_token.is_some());
-        let successor = Arc::new(CancelToken::new());
+        let successor = if reuse_actor {
+            actor.clone()
+        } else {
+            Arc::new(CancelToken::new())
+        };
         if successor_lease {
             shared
                 .mailbox(key.channel_id)
