@@ -108,9 +108,8 @@ pub(super) async fn resolve_completion_scope(
     (isolated, routine)
 }
 
-/// An isolated routine run plans nothing against the channel session: whether that session is
-/// live, cleared or absent, the run records only its own transcript, and only when its routine
-/// attempt owns the turn. `None` for every other turn, which plans against the channel session.
+/// An isolated routine run records only its own transcript, and only when its routine attempt owns
+/// the turn, whatever the channel session holds. `None` leaves a shared turn to the channel's plan.
 pub(super) fn isolated_run_transcript(
     inflight: &crate::services::discord::inflight::InflightTurnState,
     routine_attempt_owns_turn: bool,

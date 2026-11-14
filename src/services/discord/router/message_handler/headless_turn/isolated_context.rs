@@ -1,6 +1,5 @@
-//! Turn-local context of a headless routine run. The run shares its agent's primary channel
-//! mailbox but none of that channel's session: it cold-starts under its own per-run session key
-//! and neither reads nor writes the channel's session, uploads, clear boundary or binding.
+//! Turn-local context of a headless routine run: it shares its agent's primary channel mailbox but
+//! cold-starts under a per-run session key and never touches the channel's session or boundary.
 use super::*;
 
 /// Launch metadata key carrying the run's pinned execution mode.
