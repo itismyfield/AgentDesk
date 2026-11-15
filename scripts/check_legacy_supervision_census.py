@@ -22,14 +22,14 @@ ENTRIES = {}
 # "*" pins a whole file.
 PROTECTED = {
     'src/cli/dcserver.rs': {'handle_dcserver': '9dc9380f24596803fbf95d81c73f0e13a5bc22db6d8d0dbfcd445d50ddafaa7d'},
-    'src/services/discord/runtime_bootstrap.rs': {'run_bot': '5cbb344eacb30de4967ccbc984211d300694a4581387d5ab2db46d8dacf38b6b',
+    'src/services/discord/runtime_bootstrap.rs': {'run_bot': '06ae46609cfb2637f9c4ed727fea5ca23ed81e69da24a088fe9602f1ea321e0f',
         'start_standby_runtime': 'fe2e996b7e5fa48866d44cf039ba3d975dd5fbd15fceac68309f5db2b1cd3b6d'},
     'src/services/discord/inflight/removal/boot_reaper.rs': {
         'run_once': '6364c6e13da83bbf08092a6460de03dda10281c0af81b5f1293ab51b3ace9858',
-        'prepare_before_reap': '9de0e7d478987fc0464a1753bee32171dc54a76cbebd4f8db4a7df6b47068f3e',
+        'prepare_before_reap': '6fb297a7141fb536191f6c48d059e9b20ad972ba9eb8deda0a1c9167a5557e1b',
         'reap_inflight_rows_at_boot_blocking': '33ea1fcffa8493b9269880c2b9d4d10d9ccd2fafb316e7c9b8eca353b72913f1',
         'reap_inflight_rows_at_boot_with_guard': 'b4caa2fdf84b50fb3ff8e255d9712b791bfd07ea69e0aee9a8bb08f1a3d8e284',
-        'reap_inflight_rows_after_preparation': 'f3fee466ddc3d3925b5bfee8805a6678875db72874f30c51a9a74fee38d693bd'},
+        'reap_inflight_rows_after_preparation': 'bdc7ef941ae4f3b7da82e5bc40089fcab821d5f521e72729425c6bee078af36f'},
     'src/services/discord/tui_direct_pending_start/turn_retirement.rs': {'confirm_at_boot': '835b358746ebb4b1dd99bf662b73923f4904b73ce0b973b9aea84fa1d128ad07'},
     'src/services/discord/runtime_bootstrap/o_writer_host.rs': {'adopted': '0fe2f48e1465b84da5a3b7155df25e012efc1510762c78a4c61ae55ea48f2a23'},
     'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': '1e669ee286c18ddb74970ad8ce6ba753202c9f5d317127e1dc15bb58173a18c2'}}
