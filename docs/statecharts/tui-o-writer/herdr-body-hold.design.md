@@ -1,5 +1,7 @@
 # Herdr execution retirement and retained body debt
 
+<!-- doc-path-refs: proposed tui_o/writer/herdr_body_debt.rs herdr_body_debt/replay.rs herdr_body_debt/receipts.rs -->
+
 Design audit on `13355ee75c74ef65b2c5564f0a95efb37f988d26`, containing main
 `ad04f6f3ecc33e86e7dc0968822ce2ce3f087e90`. This note and its model change no
 production behavior. The outer-only ownership mapping is withdrawn. C is selected by user decision A (2026-11-16). Accepted Refused bodies remain
