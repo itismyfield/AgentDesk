@@ -71,6 +71,7 @@ SCCACHE_ACTION = Path(".github/actions/sccache-or-nothing/action.yml")
 RUNNER_MEMORY_OBSERVER_NAMES = {
     "Start runner memory sampler", "Begin runner memory step",
     "End runner memory step", "Summarize runner memory", "Upload runner memory",
+    "Save runner memory checkpoint", "Upload runner memory checkpoint",
 }
 
 
@@ -482,12 +483,19 @@ class FastCheckCiWiringTests(unittest.TestCase):
 
     def test_pg15_owner_proof_runs_whenever_the_rust_tests_run(self) -> None:
         jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        self.assertEqual(jobs["pg15_owner_proof"]["needs"], "changes")
+        self.assertEqual(jobs["pg15_owner_proof"]["needs"], ["changes", "rust_build"])
         for rust_tests in ("true", "false"):
             for job_id in ("pg15_owner_proof", "rust_build"):
                 with self.subTest(job=job_id, rust_tests=rust_tests):
                     condition = jobs[job_id]["if"].replace("!cancelled()", "true")
-                    self.assertEqual(eval_step_if(condition, {"github.event.pull_request.draft": False, "needs.changes.outputs.rust_tests": rust_tests}), rust_tests == "true")
+                    context = {"github.event.pull_request.draft": False,
+                               "needs.changes.outputs.rust_tests": rust_tests,
+                               "needs.rust_build.result": "success" if rust_tests == "true" else "skipped"}
+                    self.assertEqual(eval_step_if(condition, context), rust_tests == "true")
+        for result in ("failure", "cancelled", "skipped"):
+            self.assertFalse(eval_step_if(jobs["pg15_owner_proof"]["if"], {
+                "github.event.pull_request.draft": False, "cancelled()": False,
+                "needs.rust_build.result": result}))
 
     def test_fast_targeted_context_fails_closed_on_each_pg15_outcome_its_gate_forbids(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
@@ -540,10 +548,48 @@ class FastCheckCiWiringTests(unittest.TestCase):
         lane, command = words[: words.index("--")], words[words.index("--") + 1 :]
         self.assertEqual(lane[:2], ["python3", "scripts/run_test_lane.py"])
         self.assertEqual(lane[lane.index("--expected-ids") + 1], "scripts/ci/pg15_required_ids.txt")
-        self.assertEqual(command[-1], "--test-threads=1")
-        exact = command[command.index("--exact") + 1 : -1]
+        self.assertIn("--require-artifact", command)
+        self.assertNotIn("--test-threads=1", command)
+        exact = command[command.index("--exact") + 1 :]
         ids = (REPO_ROOT / "scripts/ci/pg15_required_ids.txt").read_text(encoding="utf-8").split()
         self.assertEqual(exact, ids)
+
+    def test_pg15_imports_the_current_run_archive_without_a_build(self) -> None:
+        jobs = yaml.safe_load(PR_WORKFLOW.read_text())["jobs"]
+        job = jobs["pg15_owner_proof"]
+        self.assertEqual(job["needs"], ["changes", "rust_build"])
+        self.assertEqual(job["if"], "${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}")
+        downloads = [s for s in job["steps"] if s.get("uses", "").startswith("actions/download-artifact")]
+        self.assertEqual(downloads, [{"name": "Download nextest plan", "uses": "actions/download-artifact@v4",
+                                     "with": {"name": "nextest-plan", "path": "${{ runner.temp }}/nextest"}}])
+        names = [s.get("name") for s in job["steps"]]
+        prepare = next(s for s in job["steps"] if s.get("name") == "Reuse archived lib test binary")
+        self.assertLess(names.index("Download nextest plan"), names.index(prepare["name"]))
+        self.assertLess(names.index(prepare["name"]), names.index("PostgreSQL 15 exact owner proof"))
+        self.assertEqual(prepare["run"].split(), ["python3", "scripts/ci/lib-test-artifact.py", "prepare-nextest",
+                                               "--source", '"$RUNNER_TEMP/nextest"',
+                                               "--directory", '"$RUNNER_TEMP/lib-test-artifact"'])
+        self.assertNotIn("continue-on-error", prepare)
+        self.assertTrue(any(s.get("with", {}).get("tool") == "cargo-nextest@0.9.149" for s in job["steps"]))
+
+    def test_lint_build_limit_reaches_the_cargo_process(self) -> None:
+        for workflow in (PR_WORKFLOW, REPO_ROOT / ".github/workflows/ci-main.yml"):
+            with self.subTest(workflow=workflow.name), tempfile.TemporaryDirectory() as temp:
+                job = yaml.safe_load(workflow.read_text())["jobs"]["lint"]
+                self.assertEqual(job.get("env", {}).get("CARGO_BUILD_JOBS"), "2")
+                step = next(s for s in job["steps"] if s.get("name") == "just lint")
+                self.assertNotIn("CARGO_BUILD_JOBS", step.get("env", {}))
+                for tool, body in (("cargo", 'printf "%s\\n" "$CARGO_BUILD_JOBS" > "$LIMIT_LOG"'),
+                                   ("python3", "exit 0")):
+                    path = Path(temp) / tool
+                    path.write_text("#!/bin/sh\n" + body + "\n")
+                    path.chmod(0o755)
+                env = {**os.environ, **job["env"], **step.get("env", {}),
+                       "PATH": f"{temp}:{os.environ['PATH']}", "LIMIT_LOG": str(Path(temp) / "limit")}
+                result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=temp, env=env,
+                                        text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((Path(temp) / "limit").read_text(), "2\n")
 
     def test_pg15_required_ids_are_inventoried_and_never_ledgered(self) -> None:
         ids = (REPO_ROOT / "scripts/ci/pg15_required_ids.txt").read_text(encoding="utf-8").split()
@@ -1348,7 +1394,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         cross_os = "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}"
         expected_if = {
             "changes": "${{ !github.event.pull_request.draft }}", "required_contexts": JUDGE_IF, "scripts": MIRROR_IF, "scripts_guards": MIRROR_IF, "scripts_census": MIRROR_IF, "scripts_contracts": MIRROR_IF,
-            "rust_build": rust_gate, "pg15_owner_proof": rust_gate, "base_compare": n_gate, "rust_tests": n_gate, "test_evidence": n_gate,
+            "rust_build": rust_gate, "pg15_owner_proof": n_gate, "base_compare": n_gate, "rust_tests": n_gate, "test_evidence": n_gate,
             "relay_authority_mutations": RUST_REQUIRED_IF,
             "lint": _LINT_FILTER, "dashboard": "${{ !github.event.pull_request.draft && needs.changes.outputs.dashboard == 'true' }}",
             "check_fast_cross_os": cross_os, "check_fast_cross_os_targets": cross_os,
