@@ -13,7 +13,7 @@ A single `(source,start,end)` is sufficient to reproduce this bug. Presence of e
 
 | Entry point at code SHA above | Model value/action |
 |---|---|
-| `writer/input_notices.rs:139-211` validates Claude native row, UUID and original provenance, suppresses known injected input, returns Piece | seed `owed = TRUE`; one source-bound notice |
+| `writer/input_notices.rs:139-186` validates Claude native row, UUID and original provenance, suppresses known injected input, returns Piece | seed `owed = TRUE`; one source-bound notice |
 | `writer/pieces.rs:115-139`, `writer/rotation/owe.rs:24-26,102-122` enqueue a Piece on both replay/live capture | initial owed debt; later Body represented by `bodyPosted` |
 | `writer/input_notices/evidence.rs:16-58` retains pending evidence, then `mem::take` consumes it | seed corresponds to the queue/evidence split after pending consumption; pending memory is not durable evidence |
 | `writer/actor/notice_work.rs:177-182`, `writer/input_notices/evidence.rs:64-78` skip below-floor evidence before Materialized | `Scenario = Floor`, initial `evidence = FALSE`; Before classifies by migration lower/timestamp/binding; After terminal proof additionally requires a row offset or timestamp boundary |
@@ -24,7 +24,7 @@ A single `(source,start,end)` is sufficient to reproduce this bug. Presence of e
 | `writer/actor/notice_settlement.rs:100-162`, `store/ledger/input_notices/settlement.rs:86-141,146-194` Policy/Owned settlement; retains evidence, sets exclusion, refuses settlement of prepared work | `ObserveLedger`, `excluded = TRUE`; evidence remains present if already materialized |
 | `store/ledger.rs:583-610`, `writer/confirm.rs:89-99`, `writer/deliver.rs:860-875` Posted/Excluded, delivery reconciliation and SpoolGc | `posted`, `excluded`; SpoolGc changes retention metadata, never deletes durable evidence |
 | `writer/input_notices/admission.rs:56-69,90-99,269-283` reads evidence before checking migration floor; existing Excluded path | `Deliver` refuses absent evidence in Before; After uses the existing floor policy only with proven floor evidence |
-| `writer/deliver.rs:696-725`, `writer/input_notices/retry.rs:24-34`, `tui_input/human_frame/history/notice_owner/generation.rs:133-155` Withheld creates a five-second delivery timer | `delayed = TRUE`, `withheld = TRUE`; the model omits timer expiry since immediate erasure already suffices |
+| `writer/deliver.rs:696-725`, `writer/input_notices/retry.rs:24-34`, `tui_input/human_frame/history/notice_owner/generation.rs:133-154` Withheld creates a five-second delivery timer | `delayed = TRUE`, `withheld = TRUE`; the model omits timer expiry since immediate erasure already suffices |
 | `writer/actor/notice_settlement.rs:82-98`, `tui_input/human_frame/history/notice_owner/generation.rs:36-61` select removes delivery timers whose evidence is absent | `Select` in Before resets `delayed` without a wake |
 | `writer/actor.rs:716-762` rotates an unacked input once per finite pass, lets later Body run | `Deliver`, `Rotate`, `bodyPosted`; no infinite inner pass is assumed |
 | `writer/actor.rs:350-405`, `writer/rotation/readers.rs:198-263`, `writer/replay.rs:16-55`, `writer/deliver.rs:269-271` restart reconstructs owed from retained raw and restores durable terminal acknowledgements, resets cache | one optional `Restart`; one fresh boot observation is allowed, then the same no-retry rule |
