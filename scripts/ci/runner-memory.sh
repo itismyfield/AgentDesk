@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -206,7 +207,8 @@ def main():
             if (STATE / "metadata.json").exists():
                 raise ValueError("already_started")
             write_json(STATE / "phase.json", {"phase": IDLE})
-            write_json(STATE / "metadata.json", {"interval_seconds": interval, "cpu_count": os.cpu_count()})
+            write_json(STATE / "metadata.json", {"interval_seconds": interval, "cpu_count": os.cpu_count(),
+                                                "cargo_build_jobs": os.environ.get("CARGO_BUILD_JOBS")})
             sample()
         with (STATE / "sampler.log").open("a") as log:
             subprocess.Popen(["bash", str(SCRIPT), "_sample"], stdin=subprocess.DEVNULL,
@@ -226,6 +228,14 @@ def main():
             status = "stopped" if (STATE / "stop").exists() else "expired"
         finally:
             write_json(STATE / "done.json", {"status": status})
+    elif COMMAND == "checkpoint":
+        # Freeze a pre-build copy for upload before a later runner loss can stop cleanup.
+        with locked():
+            sample()
+            checkpoint = STATE.parent / "runner-memory-checkpoint"
+            checkpoint.mkdir()
+            for name in ("metadata.json", "phase.json", "samples.jsonl"):
+                shutil.copy2(STATE / name, checkpoint / name)
     elif COMMAND in ("begin", "end"):
         with locked():
             if COMMAND == "begin":
@@ -239,7 +249,7 @@ def main():
     elif COMMAND == "finish":
         finish()
     else:
-        raise ValueError("expected_start_begin_end_finish")
+        raise ValueError("expected_start_checkpoint_begin_end_finish")
 
 
 try:
