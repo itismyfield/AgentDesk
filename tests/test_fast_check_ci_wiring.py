@@ -2650,5 +2650,66 @@ jobs:
                     self.assertEqual(run(call), (1, calls[:index + 1]))
 
 
+class StatechartsMatrixWorkflowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/statecharts-tlc.yml").read_text())
+        self.tlc = self.workflow["jobs"]["tlc"]
+        self.summary = self.workflow["jobs"]["summary"]
+
+    def step(self, job, name):
+        return next(step for step in job["steps"] if step.get("name") == name)
+
+    def test_matrix_covers_every_shard_and_does_not_cancel_siblings(self) -> None:
+        self.assertEqual(self.tlc["strategy"], {"fail-fast": False, "matrix": {"shard": [0, 1, 2, 3]}})
+        self.assertEqual(self.tlc["timeout-minutes"], 45)
+        check = self.step(self.tlc, "Check models against expected.tsv")
+        self.assertEqual(check["env"]["SHARD_INDEX"], "${{ matrix.shard }}")
+        self.assertIn('--shard-index "$SHARD_INDEX" --shard-count 4', check["run"])
+        self.assertIn("--timeout 300 --jobs 2", check["run"])
+        self.assertIn('--report-json "$RUNNER_TEMP/tlc-${SHARD_INDEX}.json"', check["run"])
+        self.assertIn('--summary "$GITHUB_STEP_SUMMARY"', check["run"])
+
+    def test_every_shard_uploads_a_distinct_report_even_on_failure(self) -> None:
+        upload = self.step(self.tlc, "Upload shard timings and coverage")
+        self.assertEqual(upload["if"], "always()")
+        self.assertEqual(upload["with"]["name"], "statecharts-tlc-${{ matrix.shard }}-attempt-${{ github.run_attempt }}")
+        self.assertEqual(upload["with"]["path"], "${{ runner.temp }}/tlc-${{ matrix.shard }}.json")
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+
+    def test_report_always_validates_all_artifacts_against_the_same_pr_selection(self) -> None:
+        self.assertEqual(self.summary["needs"], "tlc")
+        self.assertEqual(self.summary["if"], "always()")
+        self.assertEqual(self.summary["permissions"], {"contents": "read"})
+        download = self.step(self.summary, "Download all shard reports")
+        self.assertEqual(download["with"]["pattern"], "statecharts-tlc-*")
+        self.assertFalse(download["with"].get("merge-multiple", False))
+        aggregate = self.step(self.summary, "Verify coverage and summarize all shards")
+        self.assertEqual(aggregate["if"], "always()")
+        self.assertNotIn("continue-on-error", aggregate)
+        self.assertIn('--aggregate-reports "$RUNNER_TEMP/tlc-reports" --shard-count 4', aggregate["run"])
+        self.assertEqual(aggregate["env"]["TLC_RESULT"], "${{ needs.tlc.result }}")
+        self.assertIn('--upstream-result "$TLC_RESULT"', aggregate["run"])
+        for job in (self.tlc, self.summary):
+            checkout = next(s for s in job["steps"] if s.get("uses") == "actions/checkout@v4")
+            self.assertEqual(checkout["with"]["ref"], "${{ github.event.pull_request.head.sha || github.sha }}")
+        for key in ("BASE_SHA", "HEAD_SHA"):
+            self.assertEqual(aggregate["env"][key], self.step(self.tlc, "Check models against expected.tsv")["env"][key])
+        self.assertIn('args+=(--base "$BASE_SHA" --head "$HEAD_SHA")', aggregate["run"])
+
+    def test_nightly_alert_covers_failed_cancelled_skipped_and_missing_shards(self) -> None:
+        report = self.workflow["jobs"]["report"]
+        self.assertEqual(report["needs"], ["tlc", "summary"])
+        self.assertEqual(report["permissions"], {"issues": "write"})
+        states = ("success", "failure", "cancelled", "skipped", "")
+        for event in ("pull_request", "schedule", "workflow_dispatch"):
+            for result in states:
+                for aggregate in states:
+                    context = {"github.event_name": event, "needs.tlc.result": result,
+                               "needs.summary.result": aggregate}
+                    with self.subTest(context=context):
+                        self.assertEqual(eval_step_if(report["if"], context), event == "schedule" and
+                                         (result != "success" or aggregate != "success"))
+
+
 if __name__ == "__main__":
     unittest.main()

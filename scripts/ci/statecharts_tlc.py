@@ -10,6 +10,7 @@ set. Any TLC end that is not a named rule breaking or a clean finish fails.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -19,6 +20,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -30,6 +32,11 @@ STATECHARTS_PATH = Path("docs/statecharts")
 CHECKER_PATHS = {
     "scripts/ci/statecharts_tlc.py", "scripts/ci/StatechartFairness.java",
     ".github/workflows/statecharts-tlc.yml",
+}
+CONFIG_TIMEOUTS = {
+    "campaign-execution/CampaignVerificationClaimKept.cfg": (
+        600.0, "Full claim state space: nine invariants and five liveness properties require "
+        "eight TLC runs plus fairness validation; keep every rule and state."),
 }
 
 # tlc2.output.EC message codes and tlc2.TLC exit codes (tla2tools 1.7.4).
@@ -448,19 +455,85 @@ def git_selection(base: str, head: str) -> tuple[list[str] | None, dict[str, str
     return [path for path in paths if path], previous
 
 
+def shard_configs(selected: list[str], index: int, count: int) -> list[str]:
+    """Round-robin a sorted selection, including configs added after this code."""
+    return sorted(selected)[index::count]
+
+
+def config_timeout(cfg: str, default: float) -> float:
+    return max(default, CONFIG_TIMEOUTS.get(cfg, (default, ""))[0])
+
+
+def coverage_problems(selected: list[str], results: list[dict]) -> list[str]:
+    problems = []
+    if Counter(row["cfg"] for row in results) != Counter(selected):
+        problems.append("config coverage mismatch: missing, duplicate or unexpected results")
+    problems += [f"{row['cfg']}: no TLC runs recorded" for row in results if row["runs"] < 1]
+    return problems
+
+
+def aggregate_reports(directory: Path, selected: list[str], count: int) -> dict:
+    reports = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(directory.rglob("*.json"))]
+    identities = Counter((r["shard_index"], r["run_attempt"]) for r in reports)
+    if any(copies != 1 for copies in identities.values()):
+        raise CheckError("duplicate shard reports for the same run attempt")
+    latest = {}
+    for report in reports:
+        index = report["shard_index"]
+        if index not in latest or report["run_attempt"] > latest[index]["run_attempt"]:
+            latest[index] = report
+    reports = list(latest.values())
+    if Counter(r["shard_index"] for r in reports) != Counter(range(count)):
+        raise CheckError("shard coverage mismatch: missing, duplicate or unexpected reports")
+    results, problems = [], []
+    for report in reports:
+        if report["shard_count"] != count or report["selected"] != selected:
+            raise CheckError("shards disagree with the current config selection or shard count")
+        problems += report["problems"]
+        problems += coverage_problems(shard_configs(selected, report["shard_index"], count), report["results"])
+        results.extend(report["results"])
+    problems += coverage_problems(selected, results)
+    started = min(r["started"] for r in reports)
+    return {"results": results, "problems": problems, "selected": selected,
+            "seconds": max(r["started"] + r["seconds"] for r in reports) - started}
+
+
+def summarize(report: dict, selected_count: int, summary: Path | None) -> None:
+    rows = report["results"]
+    text = (f"## Statecharts TLC\n\n{'FAIL' if report['problems'] else 'PASS'}: "
+            f"{len(rows)}/{selected_count} configs; elapsed {report['seconds']:.1f}s.\n\n"
+            "### Slowest 10 configs\n\n| cfg | seconds | limit | TLC runs |\n|---|---:|---:|---:|\n")
+    for row in sorted(rows, key=lambda r: (-r["seconds"], r["cfg"]))[:10]:
+        text += f"| {row['cfg']} | {row['seconds']:.1f} | {row['limit_seconds']:g} | {row['runs']} |\n"
+    print(text, flush=True)
+    if summary:
+        with summary.open("a", encoding="utf-8") as out:
+            out.write(text + "\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--java", default=os.environ.get("JAVA", "java"))
     parser.add_argument("--jar", default=os.environ.get("TLA2TOOLS"), help="tla2tools.jar 1.7.4 (env TLA2TOOLS)")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
-    parser.add_argument("--timeout", type=float, default=300.0, help="seconds per config")
+    parser.add_argument("--timeout", type=float, default=300.0,
+                        help="seconds per config (recorded config-specific limits may allow more)")
     parser.add_argument("--base", help="select configs changed from this commit's merge-base with --head")
     parser.add_argument("--head", default="HEAD", help="diff head (default HEAD); model files come from --root")
     parser.add_argument("--jobs", type=int, default=1, help="number of configs to check concurrently (default 1)")
+    parser.add_argument("--shard-index", type=int, default=0, help="zero-based shard index")
+    parser.add_argument("--shard-count", type=int, default=1, help="number of deterministic config shards")
+    parser.add_argument("--report-json", type=Path, help="write timings and coverage for aggregation")
+    parser.add_argument("--aggregate-reports", type=Path, help="validate and summarize all shard JSON reports")
+    parser.add_argument("--upstream-result", default="success", help="matrix job result; aggregate fails unless success")
+    parser.add_argument("--summary", type=Path, help="append elapsed time and slowest ten to a job summary")
     args = parser.parse_args(argv)
     if args.jobs < 1:
         parser.error("--jobs must be at least 1")
+    if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
+        parser.error("--shard-count must be positive and 0 <= --shard-index < --shard-count")
     root = args.root.resolve()
+    wall_started = time.time()
     started = time.monotonic()
     try:
         expected = read_expected(root / "expected.tsv")
@@ -472,21 +545,43 @@ def main(argv: list[str] | None = None) -> int:
     on_disk = {p.relative_to(root).as_posix() for p in root.rglob("*.cfg")}
     problems = [f"{cfg}: config not listed in expected.tsv" for cfg in sorted(on_disk - set(expected))]
     problems += [f"{cfg}: listed in expected.tsv but the file is gone" for cfg in sorted(set(expected) - on_disk)]
+    if args.aggregate_reports:
+        try:
+            report = aggregate_reports(args.aggregate_reports, selected, args.shard_count)
+            problems += report["problems"]
+            if args.upstream_result != "success":
+                problems.append(f"TLC matrix result is {args.upstream_result!r}, not success")
+            if not selected:
+                problems.append("NO_TARGETS: no configs selected; TLC was not run.")
+            report["problems"] = problems
+            summarize(report, len(selected), args.summary)
+        except (CheckError, OSError, ValueError, KeyError, TypeError) as error:
+            problems.append(str(error))
+        for problem in problems:
+            print(f"FAIL {problem}", file=sys.stderr)
+        return 1 if problems else 0
+    all_selected = selected
+    selected = shard_configs(all_selected, args.shard_index, args.shard_count)
     print(f"Selected {len(selected)} configs ({'changed' if args.base else 'all'}):", flush=True)
     for cfg in selected:
         print(f"  {cfg}", flush=True)
-    if not selected:
+        if cfg in CONFIG_TIMEOUTS:
+            print(f"CONFIG_LIMIT {cfg}: {config_timeout(cfg, args.timeout):g}s; {CONFIG_TIMEOUTS[cfg][1]}", flush=True)
+    if not all_selected:
         print("NO_TARGETS: no configs selected; TLC was not run.", flush=True)
         for problem in problems:
             print(f"FAIL {problem}", file=sys.stderr)
         return 1
+    if not selected:
+        print(f"EMPTY_SHARD: no configs assigned to shard {args.shard_index}/{args.shard_count}; "
+              "the aggregate check validates full coverage.", flush=True)
     if not args.jar or not Path(args.jar).is_file():
         parser.error("tla2tools.jar not found: pass --jar or set TLA2TOOLS")
     results = []
 
     def check(cfg: str) -> Result:
         module, rules = expected[cfg]
-        return check_cfg(root, cfg, module, rules, args.java, Path(args.jar).resolve(), args.timeout)
+        return check_cfg(root, cfg, module, rules, args.java, Path(args.jar).resolve(), config_timeout(cfg, args.timeout))
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         for result in pool.map(check, selected):
@@ -500,6 +595,16 @@ def main(argv: list[str] | None = None) -> int:
         actual = "ERROR" if r.error else (", ".join(sorted(r.broken)) or "-")
         print(f"| {r.cfg} | {', '.join(sorted(r.expected)) or '-'} | {actual} | {r.seconds:.1f} |")
     print(f"\ntotal {time.monotonic() - started:.1f}s, {len(results)} configs")
+    rows = [{"cfg": r.cfg, "seconds": r.seconds, "runs": r.runs,
+             "limit_seconds": config_timeout(r.cfg, args.timeout)} for r in results]
+    problems += coverage_problems(selected, rows)
+    report = {"shard_index": args.shard_index, "shard_count": args.shard_count,
+              "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
+              "selected": all_selected, "started": wall_started, "seconds": time.monotonic() - started,
+              "results": rows, "problems": problems}
+    if args.report_json:
+        args.report_json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    summarize(report, len(selected), args.summary)
     for problem in problems:
         print(f"FAIL {problem}", file=sys.stderr)
     return 1 if problems else 0
