@@ -79,6 +79,20 @@ class IdentityAdmissionTests(unittest.TestCase):
             self.assertEqual((item['device'], item['inode']), (metadata.st_dev, metadata.st_ino))
         self.assertNotIn('SYNTHETIC_PRIVATE_IDENTITY_', json.dumps(observed))
 
+    def test_discord_identity_503_is_not_retried(self):
+        from contextlib import nullcontext
+        import urllib.error
+        identity = self.identity()
+        opener = mock.Mock()
+        def refuse(request, **kwargs):
+            raise urllib.error.HTTPError(request.full_url, 503, 'synthetic unavailable', {}, io.BytesIO(b'{}'))
+        opener.open.side_effect = refuse
+        with mock.patch.object(identity, '_transport', side_effect=lambda deadline: nullcontext(opener)), mock.patch.object(identity.time, 'sleep') as sleep:
+            with self.assertRaises(files.InstanceError):
+                identity.probe(self.root, self.frame, time.monotonic()+1, declared_roles=self.manifest['profile']['bots'])
+        self.assertEqual(opener.open.call_count, 1)
+        sleep.assert_not_called()
+
     def test_each_wrong_authenticated_identity_rejects(self):
         for index, name in enumerate(NAMES):
             wrong = ('SYNTHETIC_PRIVATE_IDENTITY_' + str(index)).encode()
@@ -282,6 +296,78 @@ class IdentityTransportTests(unittest.TestCase):
             with self.assertRaises(files.InstanceError):
                 identity.request_json(f'http://127.0.0.1:{server.server_port}/redirect',time.monotonic()+2,b'SYNTHETIC_AUTH_ONLY')
         self.assertEqual(seen,['/identity','/redirect'])
+
+
+class HealthStartupTests(unittest.TestCase):
+    def setUp(self):
+        from scripts.dev_instance import identity
+        self.identity = identity
+        self.manifest = {'api': {'port': 18791}, 'instance_id': 'synthetic', 'head': 'a'*40}
+        self.body = {'test_instance': {'instance_id': 'synthetic', 'nonce': 'nonce', 'pid': 123}}
+        self.clock, self.calls, self.sleeps = 0.0, [], []
+
+    def wait(self, responses, error_url=None, deadline=.05):
+        from contextlib import nullcontext
+        import urllib.error
+        class Response:
+            status = 200
+            def __init__(self, body):self.body = body
+            def read(self, count):return json.dumps(self.body).encode()
+            def __enter__(self):return self
+            def __exit__(self, *args):pass
+        def request(request, **kwargs):
+            self.calls.append(request.full_url)
+            item = responses.pop(0) if len(responses)>1 else responses[0]
+            if type(item) is int:
+                raise urllib.error.HTTPError(error_url or request.full_url, item, 'synthetic status', {}, io.BytesIO(b'{}'))
+            return Response(item)
+        def sleep(delay):
+            self.sleeps.append(delay)
+            self.clock += delay
+        opener = mock.Mock();opener.open.side_effect = request
+        with mock.patch.object(self.identity, '_transport', side_effect=lambda end: nullcontext(opener)), mock.patch.object(self.identity.time, 'monotonic', side_effect=lambda:self.clock), mock.patch.object(self.identity.time, 'sleep', side_effect=sleep):
+            return self.identity.wait_health(self.manifest, 'nonce', 123, 'b'*64, [], deadline)
+
+    def test_local_health_503_then_200_reaches_ready(self):
+        result = self.wait([503, self.body])
+        self.assertTrue(result['live_ready'])
+        self.assertEqual(self.calls, ['http://127.0.0.1:18791/api/health']*2)
+        self.assertEqual(self.sleeps, [.02])
+
+    def test_local_health_500_is_not_retried(self):
+        with self.assertRaises(files.InstanceError) as refused:self.wait([500, self.body])
+        self.assertEqual(vars(refused.exception), {'status': 500, 'local_health_port': 18791})
+        self.assertEqual(str(refused.exception), 'identity or health request was refused')
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.sleeps, [])
+
+    def test_health_503_at_other_endpoint_is_not_retried(self):
+        for endpoint in ['https://discord.com/api/v10/users/@me',
+                         'http://127.0.0.2:18791/api/health',
+                         'http://localhost:18791/api/health',
+                         'http://127.0.0.1:18792/api/health',
+                         'http://127.0.0.1:18791/other',
+                         'http://127.0.0.1:18791/api/health?extra=1',
+                         'http://user@127.0.0.1:18791/api/health']:
+            self.calls.clear();self.sleeps.clear()
+            with self.subTest(endpoint=endpoint), self.assertRaises(files.InstanceError):
+                self.wait([503, self.body], error_url=endpoint)
+            self.assertEqual(len(self.calls), 1)
+            self.assertEqual(self.sleeps, [])
+
+    def test_health_503_retry_stops_at_deadline(self):
+        with self.assertRaisesRegex(files.InstanceError, 'health did not become available before deadline'):
+            self.wait([503])
+        self.assertEqual(len(self.calls), 3)
+        self.assertAlmostEqual(self.clock, .05)
+        self.assertTrue(all(0<delay<=.02 for delay in self.sleeps))
+
+    def test_identity_mismatch_after_503_is_not_retried(self):
+        wrong = copy.deepcopy(self.body);wrong['test_instance']['nonce'] = 'foreign'
+        with self.assertRaisesRegex(files.InstanceError, 'current instance health identity mismatch'):
+            self.wait([503, wrong, self.body])
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.sleeps, [.02])
 
 
 class ControlProtocolTests(unittest.TestCase):
