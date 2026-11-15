@@ -7,6 +7,7 @@ import sys
 import uuid
 from pathlib import Path
 
+from .down import remove
 from .files import BlockedBinary, InstanceError, instance_root, safe_absolute, write_credential
 from .manifest import child_environment, prepare, read_json, validate
 from .profile import Unevaluable, require_preconditions
@@ -35,6 +36,8 @@ def main(argv=None):
     credential = commands.add_parser("credential", help="Read one root credential from stdin")
     credential.add_argument("--instance", required=True)
     credential.add_argument("--name", required=True)
+    down = commands.add_parser("down", help="Stop and remove one isolated instance")
+    down.add_argument("--instance", required=True)
     up = commands.add_parser("up")
     up.add_argument("--instance", required=True)
     up.add_argument("--head", required=True)
@@ -51,6 +54,8 @@ def main(argv=None):
             instance_id = args.instance or str(uuid.uuid4())
             result = prepare(base, instance_id, Path(args.worktree).absolute(), profile, os.environ,
                              args.api_port, args.pg_port)
+        elif args.command == "down":
+            result = remove(base, args.instance, os.environ)
         elif args.command == "up":
             result = supervise(base, args.instance, os.environ, binary_sha256=args.binary_sha256,
                                head=args.head, wall_timeout=args.wall_timeout,

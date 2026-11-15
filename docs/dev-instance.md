@@ -1,9 +1,8 @@
 # 독립 시험 인스턴스 선언
 
-`scripts/dev-instance.sh`는 I1의 파일 준비·입력 검증만 수행한다. `up`, PG 기동,
-Discord 접속, provider 실행, cleanup 명령은 아직 없다. 성공한 선언도
-`status=DECLARED`, `live_ready=false`이며 실제 제품 시험 PASS가 아니다.
-I2/I3의 실행 경계·수명·identity read-back이 붙기 전에는 이 config로 daemon을 실행하지 않는다.
+`scripts/dev-instance.sh`는 파일 준비·검증, 명시적으로 승인한 격리 runtime 기동,
+종료·삭제를 제공한다. 준비만 한 선언은 `status=DECLARED`, `live_ready=false`다.
+실제 live readiness는 네 시험 앱의 identity와 실행 중 health를 대조한 뒤 게시한다.
 
 ```sh
 scripts/dev-instance.sh prepare /absolute/clean/worktree \
@@ -15,7 +14,7 @@ root는 `$HOME/.adk/dev/instances/<canonical-uuid>`로 고정된다. root·confi
 주소를 프로필이나 argv로 override할 수 없다. 시험 포트 풀은 API 18791–18806,
 PG 25432–25447이며 loopback만 사용한다. prepare/validate 시 점유를 확인하지만
 예약하지 않으므로 launcher가 bind 직전 다시 확인해야 한다. PG data/socket/DB/role은
-인스턴스별 선언이며 실제 cluster 생성·전용 권한 확인은 후속 단계 책임이다.
+인스턴스별 선언이며 `up --resources`의 keeper가 cluster 생성·전용 권한을 확인한다.
 상속 `DATABASE_URL`·`PG*`는 빈 값이어도 거부한다.
 
 프로필은 JSON이며 아래 예시의 다섯 ID를 준비된 **시험 앱/채널 ID**로 바꾼다.
@@ -76,14 +75,15 @@ scripts/dev-instance.sh credential --instance <uuid> --name claude_bot_token < /
 scripts/dev-instance.sh validate --instance <uuid> --require-credentials
 ```
 
-허용 파일명은 `claude_bot_token`, `codex_bot_token`, `driver_bot_token`뿐이다.
+허용 파일명은 `claude_bot_token`, `codex_bot_token`, `driver_bot_token`,
+`announce_bot_token`, `notify_bot_token`이다. live admission은 claude·codex·announce·notify
+네 credential을 요구한다. driver_bot_token은 기존 선언 검증용이다.
 PATH 첫 디렉터리의 레인 바이너리 `agentdesk dev-instance credential-write`가 stdin을
 받아 기존 Rust `write_secret_file`의 공유 정책·저장 코어로 쓴다. 디렉터리0700/
 파일0600·fsync 및 fresh leaf를 적용하며 Python 직접 쓰기 fallback은 없다.
 바이너리가 없으면 `BLOCKED_BINARY`(exit 4)다. root/ancestor/leaf symlink·hardlink credential·
 외부 절대경로·unknown credential·legacy credential subtree를 거부한다. 기존
-reader의 migration은 사용하지 않는다. 실행 후 제품이 만드는 legacy symlink의
-처리는 I2/I3 startup 경계에서 별도로 정해야 한다.
+reader의 migration은 사용하지 않는다. 정리도 링크를 따라가지 않으며 소유권이 불확실하면 root를 보존한다.
 
 `child_environment()`는 고정 PATH/locale 및 검증된 시험 선언으로 새 env를 만든다.
 Discord token·agent-op 자격·Memento key 및 임의 ADK env를 상속하지 않는다.
@@ -118,6 +118,39 @@ canonical Herdr config는 prepare 단계에서 만들며 수동 spawn 전에 동
 1초 preparation margin을 확인한다. margin 미충족은 `UNEVALUABLE`이다.
 실제 E7 provenance/age/read-back 통과는 supervisor의 별도 수용 조건이다.
 
-**아직 live 가능하지 않다.** HOME/provider·label/API/Memento·프로세스 scan과
-복원/clear/cancel 연결 완결은 I2b, lease·실제 up/down과 health 확인은 I3a 책임이다.
-현재 선언만으로 daemon/provider/Discord를 기동하지 않는다.
+## 명시적 기동과 정리
+
+깨끗한 worktree의 HEAD와 PATH 첫 디렉터리의 레인 바이너리 SHA256을 지정한다.
+resources JSON은 `postgres_bin`, `initdb_bin`, `psql_bin`, `herdr_bin`의 안전한 절대경로와
+`startup_timeout`, `stop_grace`, `max_aux=2`, `pg_pool=4`, `pg_reserve=1`을 선언한다.
+wall 상한은 600초, stop grace 상한은 30초이며 resources의 grace와 일치해야 한다.
+stdin 첫 줄에 아래 형식의 비밀 없는 admission JSON을 미리 넣어 live 검증을 명시한다.
+네 application ID는 서로 달라야 하고 준비한 시험 앱과 일치해야 한다.
+
+```json
+{"kind":"admission","schema":1,"identities":{"claude_bot_token":"900001","codex_bot_token":"900002","announce_bot_token":"900006","notify_bot_token":"900003"}}
+```
+
+```sh
+scripts/dev-instance.sh up --instance <uuid> --head <sha40> \
+  --binary-sha256 <sha256> --wall-timeout 420 --stop-grace 20 \
+  --resources /absolute/resources.json < /absolute/admission.json
+# 다른 셸에서 준비한 시험 인스턴스의 턴 하나를 관측한다.
+python3 -E -s -m scripts.dev_instance.driver --instance <uuid> --provider codex --timeout 180
+scripts/dev-instance.sh down --instance <uuid>
+```
+
+`up`은 foreground에서 Gateway 하나와 keeper가 소유한 PG·Herdr만 실행한다.
+완료 시 `STOPPED`, 기한 초과 시 `TIMEOUT`, 회수 불확실 시 `HOLD`를 반환한다.
+`runtime/instance-run.json`의 verified/live_ready는 현재 실행의 검증 결과다.
+Discord identity와 Driver는 공통 `DiscordBot (https://github.com/itismyfield/AgentDesk, 0.1)`
+User-Agent를 사용한다.
+
+`down`은 살아 있는 keeper에 기존 nonce/socket을 대조한 종료 요청을 보내고 원래
+핸들의 회수를 기다린다. supervisor가 죽은 기록 PID는 기존 root/cwd 검사로만 회수한다.
+자식 종료·keeper 종료·pool lease 해제를 확인한 뒤 credential을 포함한 canonical
+`$HOME/.adk/dev/instances/<uuid>` 하나를 삭제하고 `REMOVED`를 반환한다.
+root 밖 경로, release 경로, symlink, hardlink 및 소유하지 않은 특수 파일을 거절한다.
+종료/소유권이 불확실하면 `HOLD`(exit 6)로 파일을 보존한다. 변경된 선언이나 worktree도
+검증을 통과해야 한다. 재기동과 경합하지 않도록 pool의 고정 close-only lease inode는
+삭제하지 않으며 잠금만 해제한다. 다른 인스턴스와 운영 자원은 삭제 대상이 아니다.

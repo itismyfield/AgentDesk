@@ -16,7 +16,10 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+
 import uuid
+
+from .discord_http import USER_AGENT
 
 from .files import InstanceError, LIVE_CREDENTIAL_NAMES, _open_parent, _token_bytes
 
@@ -136,7 +139,7 @@ def request_json(url, deadline, token=None):
     remaining = deadline-time.monotonic()
     if remaining <= 0:
         raise InstanceError('identity or health deadline exhausted')
-    headers = {'Accept': 'application/json'}
+    headers = {'Accept': 'application/json', 'User-Agent': USER_AGENT}
     if token is not None:
         try:
             headers['Authorization'] = 'Bot '+token.decode('ascii')
