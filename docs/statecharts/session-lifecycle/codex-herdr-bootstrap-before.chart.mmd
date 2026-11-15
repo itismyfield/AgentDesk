@@ -8,59 +8,132 @@ stateDiagram-v2
   }
   class lg0 bugPath
   class lg1 repeats
-  s0: writer 부팅
-  s1: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 입력 없음
-  s2: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; 입력 없음
-  s3: writer 부팅 #183; 재시작 뒤
-  s4: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 입력 보관
-  s5: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; 입력 보관
-  s6: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 입력 없음 #183; 재시작 뒤
-  s7: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; 입력 없음 #183; 재시작 뒤
-  s8: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 취소
-  s9: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; 취소
-  s10: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 입력 보관 #183; 재시작 뒤
-  s11: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; 입력 보관 #183; 재시작 뒤
-  s12: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 취소 #183; 재시작 뒤
-  s13: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; 취소 #183; 재시작 뒤
+  s0: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 입력 없음
+  s1: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; 입력 없음
+  s2: writer 부팅 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 입력 없음
+  s3: writer 부팅 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; 입력 없음
+  s4: writer 부팅 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 입력 없음 #183; 재시작 뒤
+  s5: writer 부팅 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; 입력 없음 #183; 재시작 뒤
+  s6: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; front 판정 대기
+  s7: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; front 판정 대기
+  s8: writer 부팅 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; front 판정 대기
+  s9: writer 부팅 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; front 판정 대기
+  s10: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 취소
+  s11: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; 취소
+  s12: writer 부팅 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 취소
+  s13: writer 부팅 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; 취소
+  s14: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; front 보관(관측 없음)
+  s15: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; front 보관(관측 없음)
+  s16: writer 부팅 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; front 보관(관측 없음)
+  s17: writer 부팅 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; front 보관(관측 없음)
+  s18: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 입력 없음 #183; 재시작 뒤
+  s19: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; 입력 없음 #183; 재시작 뒤
+  s20: writer 부팅 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; front 판정 대기 #183; 재시작 뒤
+  s21: writer 부팅 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; front 판정 대기 #183; 재시작 뒤
+  s22: writer 부팅 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 취소 #183; 재시작 뒤
+  s23: writer 부팅 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; 취소 #183; 재시작 뒤
+  s24: writer 부팅 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; front 보관(관측 없음) #183; 재시작 뒤
+  s25: writer 부팅 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; front 보관(관측 없음) #183; 재시작 뒤
+  s26: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; front 판정 대기 #183; 재시작 뒤
+  s27: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; front 판정 대기 #183; 재시작 뒤
+  s28: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 취소 #183; 재시작 뒤
+  s29: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; 취소 #183; 재시작 뒤
+  s30: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; front 보관(관측 없음) #183; 재시작 뒤
+  s31: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; front 보관(관측 없음) #183; 재시작 뒤
   [*] --> s0
-  s0 --> s0: 입력 도착
-  s0 --> s1: 부팅(first_drain까지)
-  s0 --> s3: dcserver 재시작
-  s0 --> s2: 부팅(first_drain까지)
-  s0 --> s4: 부팅(first_drain까지)
-  s0 --> s5: 부팅(first_drain까지)
-  s1 --> s3: dcserver 재시작
-  s1 --> s4: 입력 도착
-  s2 --> s1: 퇴역 정리 완료
-  s2 --> s3: dcserver 재시작
-  s2 --> s5: 입력 도착
-  s3 --> s6: 부팅(first_drain까지)
-  s3 --> s7: 부팅(first_drain까지)
-  s0 --> s8: 부팅(first_drain까지)
-  s0 --> s9: 부팅(first_drain까지)
-  s4 --> s3: dcserver 재시작
-  s4 --> s8: 취소
+  [*] --> s1
+  [*] --> s2
+  [*] --> s3
+  s0 --> s4: dcserver 재시작
+  s0 --> s6: 입력 도착
+  s1 --> s0: 퇴역 정리 완료
+  s1 --> s5: dcserver 재시작
+  s1 --> s7: 입력 도착
+  s2 --> s0: 부팅(first_drain까지)
+  s2 --> s4: dcserver 재시작
+  s2 --> s8: 입력 도착
+  s3 --> s1: 부팅(first_drain까지)
+  s3 --> s2: 퇴역 정리 완료
+  s3 --> s5: dcserver 재시작
+  s3 --> s9: 입력 도착
+  s4 --> s18: 부팅(first_drain까지)
+  s4 --> s20: 입력 도착
   s5 --> s4: 퇴역 정리 완료
-  s5 --> s3: dcserver 재시작
-  s5 --> s9: 취소
-  s3 --> s10: 부팅(first_drain까지)
-  s3 --> s11: 부팅(first_drain까지)
-  s6 --> s10: 입력 도착
+  s5 --> s19: 부팅(first_drain까지)
+  s5 --> s21: 입력 도착
+  s6 --> s10: 취소
+  s6 --> s14: owner front 판정
+  s6 --> s20: dcserver 재시작
   s7 --> s6: 퇴역 정리 완료
-  s7 --> s11: 입력 도착
-  s8 --> s1: NextInput
-  s8 --> s3: dcserver 재시작
-  s9 --> s2: NextInput
+  s7 --> s11: 취소
+  s7 --> s15: owner front 판정
+  s7 --> s21: dcserver 재시작
+  s8 --> s6: 부팅(first_drain까지)
+  s8 --> s12: 취소
+  s8 --> s16: owner front 판정
+  s8 --> s20: dcserver 재시작
+  s9 --> s7: 부팅(first_drain까지)
   s9 --> s8: 퇴역 정리 완료
-  s9 --> s3: dcserver 재시작
-  s3 --> s12: 부팅(first_drain까지)
-  s3 --> s13: 부팅(first_drain까지)
-  s10 --> s12: 취소
+  s9 --> s13: 취소
+  s9 --> s17: owner front 판정
+  s9 --> s21: dcserver 재시작
+  s10 --> s0: 다음 입력 차례
+  s10 --> s22: dcserver 재시작
+  s11 --> s1: 다음 입력 차례
   s11 --> s10: 퇴역 정리 완료
-  s11 --> s13: 취소
-  s12 --> s6: NextInput
-  s13 --> s7: NextInput
+  s11 --> s23: dcserver 재시작
+  s12 --> s2: 다음 입력 차례
+  s12 --> s10: 부팅(first_drain까지)
+  s12 --> s22: dcserver 재시작
+  s13 --> s3: 다음 입력 차례
+  s13 --> s11: 부팅(first_drain까지)
   s13 --> s12: 퇴역 정리 완료
-  class s0 bugPath
-  class s3 bugPath
-  class s10 repeats
+  s13 --> s23: dcserver 재시작
+  s14 --> s10: 취소
+  s14 --> s20: dcserver 재시작
+  s15 --> s11: 취소
+  s15 --> s14: 퇴역 정리 완료
+  s15 --> s21: dcserver 재시작
+  s16 --> s12: 취소
+  s16 --> s14: 부팅(first_drain까지)
+  s16 --> s20: dcserver 재시작
+  s17 --> s13: 취소
+  s17 --> s15: 부팅(first_drain까지)
+  s17 --> s16: 퇴역 정리 완료
+  s17 --> s21: dcserver 재시작
+  s18 --> s26: 입력 도착
+  s19 --> s18: 퇴역 정리 완료
+  s19 --> s27: 입력 도착
+  s20 --> s22: 취소
+  s20 --> s24: owner front 판정
+  s20 --> s26: 부팅(first_drain까지)
+  s21 --> s20: 퇴역 정리 완료
+  s21 --> s23: 취소
+  s21 --> s25: owner front 판정
+  s21 --> s27: 부팅(first_drain까지)
+  s22 --> s4: 다음 입력 차례
+  s22 --> s28: 부팅(first_drain까지)
+  s23 --> s5: 다음 입력 차례
+  s23 --> s22: 퇴역 정리 완료
+  s23 --> s29: 부팅(first_drain까지)
+  s24 --> s22: 취소
+  s24 --> s30: 부팅(first_drain까지)
+  s25 --> s23: 취소
+  s25 --> s24: 퇴역 정리 완료
+  s25 --> s31: 부팅(first_drain까지)
+  s26 --> s28: 취소
+  s26 --> s30: owner front 판정
+  s27 --> s26: 퇴역 정리 완료
+  s27 --> s29: 취소
+  s27 --> s31: owner front 판정
+  s28 --> s18: 다음 입력 차례
+  s29 --> s19: 다음 입력 차례
+  s29 --> s28: 퇴역 정리 완료
+  s30 --> s28: 취소
+  s31 --> s29: 취소
+  s31 --> s30: 퇴역 정리 완료
+  class s2 bugPath
+  class s4 bugPath
+  class s20 bugPath
+  class s24 bugPath
+  class s30 repeats

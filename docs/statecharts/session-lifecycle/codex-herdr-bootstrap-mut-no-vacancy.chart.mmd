@@ -8,20 +8,22 @@ stateDiagram-v2
   }
   class lg0 breaks
   class lg1 bugPath
-  s0: writer 부팅
-  s1: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 입력 없음 #183; 옛 tmux 살아 있음
-  s2: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 입력 통과 #183; 옛 tmux 살아 있음
-  s3: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 턴 호스트 통과 #183; 옛 tmux 살아 있음
-  s4: writer 막힘(옛 pin) #183; 새 실행 Pending #183; 새 nonce 표식 #183; 새 실행 시작 중 #183; 옛 tmux 살아 있음
-  s5: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; 새 실행 시작 중 #183; 옛 tmux 살아 있음
-  s6: 옛 tmux source 게시(경계 밖)
+  s0: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 입력 없음 #183; tmux 살아 있음
+  s1: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; front 판정 대기 #183; tmux 살아 있음
+  s2: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 입력 통과 #183; tmux 살아 있음
+  s3: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 턴 호스트 통과 #183; tmux 살아 있음
+  s4: writer 막힘(옛 pin) #183; 새 실행 Pending #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; Pending CAS #183; tmux 살아 있음
+  s5: writer 막힘(옛 pin) #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 새 실행 시작 중 #183; tmux 살아 있음
+  s6: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 새 실행 시작 중 #183; tmux 살아 있음
+  s7: 옛 tmux source 게시(경계 밖)
   [*] --> s0
-  s0 --> s1: 부팅(first_drain까지)
-  s1 --> s2: 입력 도착
+  s0 --> s1: 입력 도착
+  s1 --> s2: owner front 판정
   s2 --> s3: 턴 호스트 판정
-  s3 --> s4: Retired#8594;Pending CAS#183;새 nonce 표식
-  s4 --> s5: source 허용 #8594; resume
-  s5 --> s6: 옛 tmux source 게시
+  s3 --> s4: Retired#8594;Pending CAS#183;listing
+  s4 --> s5: 새 nonce 표식 게시
+  s5 --> s6: source 허용 #8594; resume
+  s6 --> s7: 옛 tmux source 게시
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 bugPath
   class s1 bugPath
@@ -30,5 +32,6 @@ stateDiagram-v2
   class s4 breaks
   class s4 bugPath
   class s5 bugPath
-  class s6 breaks
   class s6 bugPath
+  class s7 breaks
+  class s7 bugPath

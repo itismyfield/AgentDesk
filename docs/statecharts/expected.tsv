@@ -425,8 +425,15 @@ routine-run/RoutineRunThread.cfg	RoutineRun	-	-
 routine-run/RoutineRunThreadPrejudge.cfg	RoutineRun	-	-
 session-lifecycle/CodexHerdrBootstrapBefore.cfg	CodexHerdrBootstrap	-	HeldStarts,WriterReady
 session-lifecycle/CodexHerdrBootstrapDesign.cfg	CodexHerdrBootstrap	-	-
+session-lifecycle/CodexHerdrBootstrapDesign1Listing.cfg	CodexHerdrBootstrap	-	HeldStarts,WriterReady
+session-lifecycle/CodexHerdrBootstrapDesign1WakeA.cfg	CodexHerdrBootstrap	-	HeldStarts,WriterReady
+session-lifecycle/CodexHerdrBootstrapDesign1WakeB.cfg	CodexHerdrBootstrap	-	HeldStarts,WriterReady
 session-lifecycle/CodexHerdrBootstrapDesignLive.cfg	CodexHerdrBootstrap	-	-
+session-lifecycle/CodexHerdrBootstrapDesignNoNextFair.cfg	CodexHerdrBootstrap	-	WriterReady
+session-lifecycle/CodexHerdrBootstrapMutCond4.cfg	CodexHerdrBootstrap	-	HeldStarts,WriterReady
+session-lifecycle/CodexHerdrBootstrapMutNoRecheck.cfg	CodexHerdrBootstrap	NoDualExecution,SourceInBoundary	-
 session-lifecycle/CodexHerdrBootstrapMutNoVacancy.cfg	CodexHerdrBootstrap	NoDualExecution,SourceInBoundary	-
+session-lifecycle/CodexHerdrBootstrapMutNoWatch.cfg	CodexHerdrBootstrap	-	HeldStarts,WriterReady
 session-lifecycle/CodexHerdrBootstrapMutPinDrop.cfg	CodexHerdrBootstrap	NoDualExecution,ResumedOnlyWithEvidence,SourceInBoundary	-
 session-lifecycle/EffortRestartCoalesce.cfg	TmuxSession	-	-
 session-lifecycle/EffortRestartCurrentHerdr.cfg	TmuxSession	-	-
