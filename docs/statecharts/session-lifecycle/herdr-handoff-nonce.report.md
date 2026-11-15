@@ -148,9 +148,9 @@ End-evidence census (`git grep -n -E 'retire_pg\(|retire_confirmed\(|\.state = H
 | IdFixedHerdrOther (Retired row names another nonce, h1 may run) | GREEN | GREEN | not checked |
 | IdNoNonce / IdNoRetired (mutants) | RED | GREEN | not checked |
 
-The admitted pin must be verified. A Herdr resume start logs a stat record (`binding_events.rs:874-882`
+The admitted pin must be verified. A Herdr resume start logs a stat record (`binding_events.rs:876-884`
 via `herdr_resume.rs:41-45`). The writer promotes it to a verified re-pin only when the pane's
-verified pin names an earlier boot's device (`binding_events.rs:821-833`); a resume on the same
+verified pin names an earlier boot's device (`binding_events.rs:823-835`); a resume on the same
 device leaves the pin unverified. The r4 section below covers that case.
 
 All earlier configs gained `Again = FALSE`; their results are unchanged. Twenty-six configs,
@@ -161,9 +161,11 @@ All earlier configs gained `Again = FALSE`; their results are unchanged. Twenty-
 Review of r3 (P1-1): a normal Herdr resume on an unchanged device leaves only its own SessionStart
 stat, so after its execution ends (host reboot or not) `current_session` finds no verified pin, the
 legacy branch refuses a hook record, and every start fails with "no verified durable binding"
-before the r3 renumbering rule runs. Nothing on the normal path writes a verified record later:
-the same-session hook skips the continuation check, reclaim needs another session's Pending, the
-turn's registration is an unchanged stat, and reconnect covers only a live listed execution.
+before the r3 renumbering rule runs. On base `5726d52ca8` nothing on the normal path wrote a
+verified record later. Main since `1c4742af92` (#8184) pins that stat from the execution's own
+same-session hook (`claude_source.rs` `promote_registered`), so new executions that got a prompt
+hook are verified; records logged before it, or of an execution that ended before such a hook,
+still need the recovery below.
 Observed 11-15 16:2x (read only): channel 1559670200419352696 (`claude-tui-2-e2e`) has this shape
 (latest seq 294, own resume start of nonce `8be5…`, unverified; its row names that nonce Retired).
 
@@ -179,11 +181,12 @@ Binding-record census (`git grep -n -E 'record_verified\(|record_source\(|record
 
 | Writer | Verified | Code | Model |
 |---|---|---|---|
-| Herdr resume's own SessionStart | stat, unless it re-pins a renumbered verified pin | `observation_ingress/resume_start.rs:27-49` → `binding_events.rs:821-833,874-882` | `Launch` sets `verified = FALSE` |
-| Turn completion registration | stat, unchanged for the same source and nonce | `herdr_turn/first_input.rs:249` | no step |
-| Hook continuation check | verified, only for a proposal | `runtime_binding/claude_source.rs:215` | not on the normal resume path |
-| Reclaim | verified, only past another session's Pending | `runtime_binding/claude_source.rs:269-292` | not modeled |
-| Reconnect / restore | verified (`Record::Exact`, `Record::Verified`) | `tui_prompt_relay/herdr_source.rs:318`, `tui_prompt_dedupe/pending.rs:670,692` | live listed execution only; its Bound row never reaches this judgment |
+| Herdr resume's own SessionStart | stat, unless it re-pins a renumbered verified pin | `observation_ingress/resume_start.rs:27-49` → `binding_events.rs:823-835,876-884` | `Launch` sets `verified = FALSE` |
+| Turn completion registration | stat, unchanged for the same source and nonce | `herdr_turn/first_input.rs:288` | no step |
+| Hook continuation check | verified, only for a proposal | `runtime_binding/claude_source.rs:254` | not on the normal resume path |
+| Reclaim | verified, only past another session's Pending | `runtime_binding/claude_source.rs` (`reclaim`) | not modeled |
+| Same-session launch promotion (main `1c4742af92`) | verified, the execution's own stat proven by its prompt hook | `runtime_binding/claude_source.rs` (`promote_registered`) | `Verified = TRUE` start; not required by the recovery |
+| Reconnect / restore | verified (`Record::Exact`, `Record::Verified`) | `tui_prompt_relay/herdr_source.rs:318`, `tui_prompt_dedupe/pending.rs:672,694` | live listed execution only; its Bound row never reaches this judgment |
 | Recovery pin (new) | verified | `herdr_turn/handoff.rs` (`pin_retired_resume`) | `PinOk` with `PinPolicy = "fixed"` |
 
 Restart and reboot: a dcserver restart of a live execution keeps it Bound, so the judgment is not
@@ -208,3 +211,8 @@ from a live row of the same nonce (`herdrlive`); the other-nonce start stays ref
 
 Earlier configs gained `Verified = TRUE` and `PinPolicy = "fixed"`; their results are unchanged.
 Thirty-eight configs, `--jobs 1`, 71.2 s, every expected violation matched.
+
+After main `d40c06eb47` merged, the model is unchanged: the same-session promotion only makes a
+start's record verified earlier, which `Verified = TRUE` already covers, and the recovery still
+covers records without it. The Herdr reboot test now refuses another execution's Retired row at the
+identity check (its pin is verified) instead of the pin check; both rest on the missing end proof.

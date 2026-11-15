@@ -412,8 +412,7 @@ fn a_herdr_execution_retired_by_each_host_reboot_resumes_its_renumbered_transcri
     let fx = Fixture::with_root("herdr-reboots", None, root);
     let (session, path) = fx.seed_resumable(true);
     let mut sends = 0;
-    // The tmux switch, then two host reboots of the Herdr execution each one started; each start
-    // leaves only its own resume's stat record.
+    // The tmux switch, then two host reboots of the Herdr execution each one started.
     for turn in 0..3 {
         let launcher = Arc::new(Launcher::default());
         let ports = fx.ports(&launcher);
@@ -436,7 +435,8 @@ fn a_herdr_execution_retired_by_each_host_reboot_resumes_its_renumbered_transcri
         fx.store(&record);
         reboot_renumbers_the_volume();
     }
-    // A Retired row of another execution proves nothing about the one that logged the binding.
+    // A Retired row of another execution proves nothing about the one that logged the binding:
+    // its renumbered transcript is refused, and nothing is launched, logged or stored.
     let HostedRecord::Known(mut record) = fx.record() else {
         panic!("no hosted record");
     };
@@ -447,17 +447,21 @@ fn a_herdr_execution_retired_by_each_host_reboot_resumes_its_renumbered_transcri
         expected.binding_nonce = other;
     }
     fx.store(&record);
-    assert!(matches!(fx.record(), HostedRecord::Known(_)));
+    let stored = fx.record();
+    assert!(matches!(stored, HostedRecord::Known(_)));
+    let log = crate::services::tui_prompt_dedupe::binding_events::log_path(CHANNEL);
+    let log = log.unwrap().unwrap();
+    let logged = std::fs::read_to_string(&log).unwrap();
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
-    let (result, _) = fx.turn(&fx.record(), &ports, || {});
+    let (result, _) = fx.turn(&stored, &ports, || {});
     assert_eq!(
         result,
-        Err(
-            "herdr launch current_session: handoff native session has no verified durable binding"
-                .into()
-        )
+        Err("herdr launch current_session: handoff transcript identity changed".into())
     );
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
+    assert!(launcher.nonces.lock().unwrap().is_empty());
     assert_eq!(fx.rig.sends().len(), sends);
+    assert_eq!(fx.record(), stored);
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), logged);
 }

@@ -262,8 +262,8 @@ impl PriorExecution<'_> {
     }
 }
 
-/// A Herdr resume logs its own SessionStart as a stat, which leaves the pin unverified unless it
-/// re-pins a renumbered one. Once the row names it Retired, its own proven file is pinned now.
+/// A Herdr resume logs its own SessionStart as a stat; the pin stays unverified until a same-session
+/// hook proves it or it re-pins a renumbered one. Once the row names it Retired, it is pinned now.
 fn pin_retired_resume(
     channel: u64,
     logical: &str,
