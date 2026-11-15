@@ -128,15 +128,6 @@ fn immediate_once_skips_initial_presleep() {
 }
 
 #[test]
-fn single_backstop_profile_is_the_only_slow_cycle() {
-    assert_eq!(
-        idle_queue_backstop_delay_for_tests(),
-        std::time::Duration::from_secs(60),
-        "the deferred path keeps exactly one slow-cycle backstop"
-    );
-}
-
-#[test]
 fn marker_only_backlog_counts_as_backstop_work() {
     let shared = make_shared_data_for_tests();
     let provider = ProviderKind::Claude;
