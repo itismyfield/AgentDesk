@@ -1,0 +1,15 @@
+stateDiagram-v2
+    [*] --> Native: original source row projected
+    Native --> Settled: offset/time proves floor and exact unprepared Piece matches
+    Native --> Owed: retained notice awaits its evidence
+    Owed --> Withheld: admission finds no evidence
+    Withheld --> Owed: Before select erases hold without a wake
+    Withheld --> Ready: After exact evidence materialized
+    Withheld --> Settled: After durable terminal acknowledgement
+    Ready --> Posted: existing guarded delivery
+    Posted --> [*]
+    Settled --> [*]
+    note right of Withheld
+        Rotation lets later normal output pass.
+        Session absence and binding age alone grant no cleanup.
+    end note
