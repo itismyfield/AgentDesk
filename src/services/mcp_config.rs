@@ -1,3 +1,8 @@
+#[path = "mcp_config/antigravity.rs"]
+mod antigravity;
+
+pub(crate) use antigravity::sync as sync_antigravity_mcp_servers;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,7 +16,6 @@ use crate::services::provider::ProviderKind;
 const CODEX_SYNC_STATE_FILE: &str = "codex-mcp-sync-state.json";
 const OPENCODE_SYNC_STATE_FILE: &str = "opencode-mcp-sync-state.json";
 const QWEN_SYNC_STATE_FILE: &str = "qwen-mcp-sync-state.json";
-const GEMINI_SYNC_STATE_FILE: &str = "gemini-mcp-sync-state.json";
 const MEMENTO_SERVER_NAME: &str = "memento";
 const REVIEW_MCP_ALLOWLIST_ENV: &str = "AGENTDESK_REVIEW_MCP_ALLOWLIST";
 const DEFAULT_REVIEW_MCP_ALLOWLIST: &[&str] = &[
@@ -58,12 +62,6 @@ struct QwenMcpSyncState {
     managed_servers: Vec<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct GeminiMcpSyncState {
-    #[serde(default)]
-    managed_servers: Vec<String>,
-}
-
 pub(crate) fn provider_has_memento_mcp(provider: &ProviderKind) -> bool {
     provider_has_mcp_server(provider, MEMENTO_SERVER_NAME)
 }
@@ -89,6 +87,12 @@ pub(crate) fn provider_has_mcp_server(provider: &ProviderKind, server_name: &str
         ProviderKind::Qwen => {
             runtime_config_contains_server(normalized) || qwen_config_contains_server(normalized)
         }
+        ProviderKind::Antigravity => current_home_dir().is_some_and(|home| {
+            json_mcp_config_contains_server(
+                &home.join(".gemini/config/mcp_config.json"),
+                normalized,
+            )
+        }),
         ProviderKind::Gemini => {
             runtime_config_contains_server(normalized) || gemini_config_contains_server(normalized)
         }
@@ -264,42 +268,34 @@ pub(crate) fn sync_qwen_mcp_servers(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn sync_gemini_mcp_servers(config: &Config) -> Result<(), String> {
-    let runtime_root = crate::config::runtime_root()
-        .ok_or_else(|| "AGENTDESK_ROOT_DIR is unavailable".to_string())?;
-    let sync_state_path =
-        crate::runtime_layout::config_dir(&runtime_root).join(GEMINI_SYNC_STATE_FILE);
-    let desired = resolved_mcp_servers(config, None);
-    let previous = load_gemini_sync_state_from_path(&sync_state_path);
-    let desired_names = desired.keys().cloned().collect::<BTreeSet<_>>();
-    let previous_names = previous
-        .managed_servers
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-
-    if desired_names.is_empty() && previous_names.is_empty() {
+pub(crate) fn retired_gemini_sync(_config: &Config) -> Result<(), String> {
+    let Some(root) = crate::config::runtime_root() else {
         return Ok(());
+    };
+    let state_path = crate::runtime_layout::config_dir(&root).join("gemini-mcp-sync-state.json");
+    let raw = match std::fs::read_to_string(&state_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("Failed to read retired Gemini MCP sync state".into()),
+    };
+    let previous: QwenMcpSyncState = serde_json::from_str(&raw)
+        .map_err(|_| "Invalid retired Gemini MCP sync state".to_string())?;
+    if let Some(path) = gemini_config_path().filter(|path| path.exists()) {
+        let mut value = load_json_object_config_value(&path, "retired Gemini")?;
+        if let Some(servers) = value.get_mut("mcpServers").and_then(Value::as_object_mut) {
+            let mut changed = false;
+            for name in previous.managed_servers {
+                changed |= servers.remove(&name).is_some();
+            }
+            if changed {
+                let rendered = serde_json::to_string_pretty(&value)
+                    .map_err(|_| "Failed to serialize retired Gemini config".to_string())?;
+                atomic_write(&path, &rendered)?;
+            }
+        }
     }
-
-    let Some(config_path) = gemini_config_path() else {
-        return Err("Gemini config path unavailable".to_string());
-    };
-    sync_json_mcp_servers(
-        &config_path,
-        &desired,
-        &desired_names,
-        &previous_names,
-        gemini_mcp_entry,
-        "Gemini",
-    )?;
-
-    let next_state = GeminiMcpSyncState {
-        managed_servers: desired_names.into_iter().collect(),
-    };
-    let serialized = serde_json::to_string_pretty(&next_state)
-        .map_err(|error| format!("Failed to serialize Gemini MCP sync state: {error}"))?;
-    atomic_write(&sync_state_path, &serialized)?;
-    Ok(())
+    std::fs::remove_file(state_path)
+        .map_err(|_| "Failed to remove retired Gemini MCP sync state".to_string())
 }
 
 fn claude_mcp_config_arg_from_servers(
@@ -644,15 +640,17 @@ fn load_qwen_sync_state_from_path(path: &Path) -> QwenMcpSyncState {
         .unwrap_or_default()
 }
 
-fn load_gemini_sync_state_from_path(path: &Path) -> GeminiMcpSyncState {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<GeminiMcpSyncState>(&raw).ok())
-        .unwrap_or_default()
+fn claude_user_mcp_config_path(home: &Path) -> PathBuf {
+    let legacy = home.join(".claude/.mcp.json");
+    if legacy.exists() {
+        legacy
+    } else {
+        home.join(".claude.json")
+    }
 }
 
 fn claude_global_mcp_config_contains_server(server_name: &str) -> bool {
-    let Some(path) = current_home_dir().map(|home| home.join(".claude").join(".mcp.json")) else {
+    let Some(path) = current_home_dir().map(|home| claude_user_mcp_config_path(&home)) else {
         return false;
     };
     let Ok(raw) = std::fs::read_to_string(path) else {
@@ -792,16 +790,6 @@ fn qwen_mcp_entry(server: &ResolvedMcpServer) -> Value {
     Value::Object(entry)
 }
 
-fn gemini_mcp_entry(server: &ResolvedMcpServer) -> Value {
-    let mut entry = Map::new();
-    entry.insert("httpUrl".to_string(), Value::String(server.url.clone()));
-    entry.insert("trust".to_string(), Value::Bool(true));
-    if let Some(headers) = bearer_headers(server, "${", "}") {
-        entry.insert("headers".to_string(), Value::Object(headers));
-    }
-    Value::Object(entry)
-}
-
 fn bearer_headers(
     server: &ResolvedMcpServer,
     env_var_prefix: &str,
@@ -931,3 +919,7 @@ mod snapshot_tests;
 #[cfg(test)]
 #[path = "mcp_config_atomic_write_tests.rs"]
 mod atomic_write_tests;
+
+#[cfg(test)]
+#[path = "mcp_config_retirement_tests.rs"]
+mod retirement_tests;

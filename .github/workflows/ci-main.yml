@@ -315,6 +315,9 @@ jobs:
     # the non-lib `test-non-pg` lines. The env matches the PR `Lint runner`.
     name: Main lint and non-lib tests (ubuntu-latest)
     runs-on: ubuntu-latest
+    env:
+      # Also bounds the non-lib builds in this job.
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -363,6 +366,22 @@ jobs:
       # Workspace clippy can exhaust hosted-runner memory; swap pages it instead of killing the runner.
       - name: Ensure swap for clippy
         uses: ./.github/actions/ensure-swap
+
+      - name: Save runner memory checkpoint
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh checkpoint
+      - name: Upload runner memory checkpoint
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}-before-build
+          path: ${{ runner.temp }}/runner-memory-checkpoint
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Begin runner memory step
         continue-on-error: true
