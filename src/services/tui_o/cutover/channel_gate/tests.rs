@@ -19,10 +19,10 @@ fn an_empty_list_leaves_even_an_unknown_destination_to_legacy_while_no_snapshot_
     );
 }
 
-// The helper is where a Legacy body ends a pending adoption: its send runs right after the claim
-// and finds it released, O's channel sends nothing, and a body-free send claims nothing.
+// The helper holds a pending channel's body: its send never runs and the adoption stays, O's
+// channel sends nothing, and a body-free send claims nothing.
 #[tokio::test(flavor = "current_thread")]
-async fn claim_then_send_releases_a_pending_adoption_only_for_the_send_it_runs() {
+async fn claim_then_send_holds_a_pending_body_and_runs_no_send_until_o_adopts() {
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
     use crate::services::tui_o::channel_policy::{Adoption, BodyCheck, SinkOp};
     let claim = |channel| Some(BodyClaim::new(channel, Some(ClaudeTui)));
@@ -36,7 +36,7 @@ async fn claim_then_send_releases_a_pending_adoption_only_for_the_send_it_runs()
             check.adoption()
         })
         .await;
-        assert_eq!(sent, Ok(BodySend::Sent(Adoption::Released)));
+        assert_eq!(sent, Err(IdentityError::AwaitingAdoption));
         check.assert_settled();
     }
     let _owned = test_override::force_channels(&[(52, ClaudeTui)]);
@@ -49,50 +49,44 @@ async fn claim_then_send_releases_a_pending_adoption_only_for_the_send_it_runs()
     assert!(!ran.get(), "nothing is sent on O's channel");
 }
 
-// A claimed Legacy body stays counted against its channel's adoption until its transport is done,
-// a held one until the caller drops it; O's channel, a peek and an unclaimed send count nothing.
+// A pending, deferred or refused channel's body is held whether its transport is held or not: no
+// send runs or is counted, and the adoption stays; O's channel reserves no Legacy send either.
 #[tokio::test(flavor = "current_thread")]
-async fn a_claimed_legacy_send_stays_counted_until_its_transport_is_done() {
+async fn a_held_body_runs_and_counts_no_legacy_send_in_any_unadopted_state() {
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
-    use crate::services::tui_o::channel_policy::{Adoption, Candidate};
+    use crate::services::tui_o::channel_policy::Candidate;
     let claim = |channel| Some(BodyClaim::new(channel, Some(ClaudeTui)));
     let candidate = |channel| -> Candidate {
         test_override::with_channels(|boot| boot?.candidate(channel).cloned()).unwrap()
     };
-    let _pending = test_override::force_candidates(&[(61, ClaudeTui), (62, ClaudeTui)]);
-    let (pending, deferred) = (candidate(61), candidate(62));
+    let channels = [(61, ClaudeTui), (62, ClaudeTui), (64, ClaudeTui)];
+    let _pending = test_override::force_candidates(&channels);
+    let (pending, deferred, refused) = (candidate(61), candidate(62), candidate(64));
     assert!(deferred.defer(62));
-    for (channel, adoption) in [(61, &pending), (62, &deferred)] {
-        let during = claim_then_send(claim(channel), || async { adoption.sends() }).await;
-        assert_eq!(
-            during,
-            Ok(BodySend::Sent((1, 0))),
-            "{channel}: counted while it sends"
+    refused.release(64);
+    let ran = std::cell::Cell::new(0);
+    for (channel, adoption, error) in [
+        (61, &pending, IdentityError::AwaitingAdoption),
+        (62, &deferred, IdentityError::AwaitingAdoption),
+        (64, &refused, IdentityError::AdoptionRefused),
+    ] {
+        let state = adoption.peek();
+        let during = claim_then_send(claim(channel), || async { ran.set(ran.get() + 1) }).await;
+        assert_eq!(during, Err(error), "{channel}");
+        let held = claim_then_send_held(claim(channel), || async { ran.set(ran.get() + 1) });
+        assert!(
+            matches!(held.await, Err(held) if held == error),
+            "{channel}"
         );
-        assert_eq!(adoption.sends(), (1, 1), "{channel}: done once the send is");
+        assert_eq!(
+            peek_o_owns_tui_output_for_channel(channel, Some(ClaudeTui)),
+            Err(error)
+        );
+        assert_eq!((adoption.sends(), adoption.peek()), ((0, 0), state));
     }
-    assert_eq!(
-        deferred.peek(),
-        Adoption::Deferred,
-        "a body leaves a deferral in place"
-    );
-    let held = claim_then_send_held(claim(62), || async { deferred.sends() }).await;
-    let (sent, held) = held.unwrap();
-    assert_eq!(sent, BodySend::Sent((2, 1)));
-    assert_eq!(
-        deferred.sends(),
-        (2, 1),
-        "still counted after its first step"
-    );
-    drop(held);
-    assert_eq!(deferred.sends(), (2, 2));
+    assert_eq!(ran.get(), 0, "no held body runs its send");
     let unclaimed = claim_then_send(None, || async { deferred.sends() }).await;
-    assert_eq!(unclaimed, Ok(BodySend::Sent((2, 2))));
-    assert_eq!(
-        peek_o_owns_tui_output_for_channel(62, Some(ClaudeTui)),
-        Ok(false)
-    );
-    assert_eq!(deferred.sends(), (2, 2), "a peek sends nothing");
+    assert_eq!(unclaimed, Ok(BodySend::Sent((0, 0))));
 
     let _owned = test_override::force_channels(&[(63, ClaudeTui)]);
     let owned = claim_then_send_held(claim(63), || async {}).await;
@@ -128,9 +122,10 @@ fn claim_reason_follows_gate_returns_without_changing_ownership() {
         assert!(format!("{answer:?}").contains("reason: OwnedByO"));
     }
     let _foreign = test_override::force_foreign(&[(701, ClaudeTui)], "other-node");
-    let answer = observed(701);
-    assert!(!answer.owned);
-    assert!(format!("{answer:?}").contains("reason: NoCandidate"));
+    let held = test_override::with_channels(|snapshot| {
+        decide_with_snapshot(snapshot, 701, Use::Body, None, || Some(ClaudeTui))
+    });
+    assert_eq!(held.unwrap_err(), IdentityError::AwaitingAdoption);
 }
 
 #[test]
@@ -139,6 +134,7 @@ fn claim_reason_distinguishes_adoption_transition_and_existing_states() {
     for (state, reason) in [
         (Adoption::Pending, "PendingReleased"),
         (Adoption::Released, "Released"),
+        (Adoption::Refused, "Refused"),
         (Adoption::Deferred, "Deferred"),
         (Adoption::Committed, "OwnedByO"),
         (Adoption::Held, "OwnedHeld"),
@@ -151,14 +147,7 @@ fn claim_reason_distinguishes_adoption_transition_and_existing_states() {
             "{state:?}"
         );
         assert_eq!(candidate.sends(), (u64::from(!state.owned()), 0));
-        assert_eq!(
-            candidate.peek(),
-            if state == Adoption::Pending {
-                Adoption::Released
-            } else {
-                state
-            }
-        );
+        assert_eq!(candidate.peek(), state, "a claim changes no adoption");
         drop(answer);
         assert_eq!(
             candidate.sends(),
@@ -166,12 +155,7 @@ fn claim_reason_distinguishes_adoption_transition_and_existing_states() {
         );
         if !state.owned() {
             let second = candidate.claim_body(703);
-            let expected = if state == Adoption::Deferred {
-                "Deferred"
-            } else {
-                "Released"
-            };
-            assert!(format!("{second:?}").contains(&format!("reason: {expected}")));
+            assert!(format!("{second:?}").contains(&format!("reason: {reason}")));
         }
     }
 }
@@ -201,7 +185,11 @@ fn claim_reason_is_fixed_while_the_existing_adoption_lock_excludes_activation() 
     barrier.wait();
     let answer = worker.join().unwrap();
     assert_eq!(answer.reason, ClaimReason::PendingReleased);
-    assert!(!activation.join().unwrap());
+    assert!(
+        activation.join().unwrap(),
+        "the claim left the adoption pending, so the activation commits once the lock frees"
+    );
+    assert_eq!(candidate.peek(), Adoption::Committed);
     assert_eq!(candidate.sends(), (1, 0));
     drop(answer);
     assert_eq!(candidate.sends(), (1, 1));
@@ -252,4 +240,21 @@ async fn an_unobserved_held_context_leaves_later_ambient_metadata_intact() {
     let tag = Some(serde_json::json!({"site":"W30", "reason":"RELEASED"}));
     let actual = census_scope(tag.clone(), context.run(async { current_census() })).await;
     assert_eq!(actual, tag);
+
+    let candidate = channel_policy::Candidate::new(channel_policy::Adoption::Pending);
+    let claimed = candidate.claim_body(9_765_104);
+    let context = BodyTransport::inherited(BodySite::StandbyRelay, claimed.send, claimed.reason);
+    assert_eq!(candidate.sends(), (1, 0));
+    let actual = census_scope(
+        tag.clone(),
+        context.run(async {
+            tokio::task::yield_now().await;
+            current_census()
+        }),
+    )
+    .await;
+    assert_eq!(actual, tag);
+    assert_eq!(candidate.sends(), (1, 0));
+    drop(context);
+    assert_eq!(candidate.sends(), (1, 1));
 }

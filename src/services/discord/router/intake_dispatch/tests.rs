@@ -440,15 +440,15 @@ async fn an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_post
     assert_eq!(
         local(o).await,
         Ok(()),
-        "a pending channel is placed as Legacy"
+        "a pending channel is placed; its body is held until O adopts it"
     );
-    let released = |boot: Option<&crate::services::tui_o::channel_policy::BootChannels>| {
+    let state = |boot: Option<&crate::services::tui_o::channel_policy::BootChannels>| {
         boot.unwrap().candidate(o.get()).unwrap().peek()
     };
-    let state = test_override::with_channels(released);
+    let state = test_override::with_channels(state);
     assert_eq!(
         state,
-        crate::services::tui_o::channel_policy::Adoption::Released
+        crate::services::tui_o::channel_policy::Adoption::Pending
     );
 }
 

@@ -13,9 +13,12 @@ One TUI-bound channel carries one turn; one non-TUI channel in the same config c
 | `root` | runtime root present or not | `channel_policy/adoption.rs:419-421` reads every channel as `Held` without a root |
 | `exec` | none, permit, unverifiedHeld | `channel_policy.rs:446-513`, `ownership/execution.rs:72-78`, gate `cutover/channel_gate.rs:461-471` |
 | `bound` | none, fresh, withOutput | `writer/late_adopt/codex.rs:205-207` (no new bind, Retry), `late_adopt/codex/prefix.rs:205-213` with `codex.rs:229-230` (bound rollout already has output, Skip) |
-| `store` | none, init, damaged | `channel_policy/adoption.rs:414-439` |
+| `store` | none, init, damaged | `channel_policy/adoption.rs:409-434` |
 | `adopt` | None, Pending, Deferred, Committed, Held, Released, Refused | `channel_policy/adoption.rs:16-28`; `Refused` is the stage-1 refusal (plan r2 G5) |
 | custody | another turn's row, pending start or open intake; the held turn's own row | `runtime_bootstrap/o_writer_host.rs:306-339`, `writer/deferred.rs:89-92`; the kinds block alike, so the model keeps whose custody it is |
+| `nativeEnded` | the TUI turn's own end record written before anyone delivered the turn | `writer/late_adopt/codex/prefix.rs` `frontier` (a `task_complete` ends its turn and never moves where delivery stands) |
+| `endedBeforeBase` | that end was written before the takeover's baseline | `writer/late_adopt/codex.rs` `start_on` (`ended_before`) |
+| `prevOwed` | the rollout bound before holds a turn Legacy may have sent part of | `writer/late_adopt/codex.rs` `owed` (`Start::Legacy` retries) |
 | `attempts` | 0..3, tmux absent | `discord/inflight.rs:341-344`, `recovery_paths/shared.rs:156-171` |
 
 Actions map to the bridge tick and terminal (`turn_bridge/stream_tick.rs:389-397`, `terminal_outcome_delivery.rs:440-453`), restart recovery (`recovery_engine/completion_delivery.rs:117-151`), the watcher dispatch finalizer (`tmux_watcher.rs:2351-2392`), the takeovers (`late_adopt.rs:182-186`, `late_adopt/codex.rs:203-310`), the stale end-of-file handoff (`writer/deferred.rs:26-29`), refusal (`writer/host.rs:659-678`, `host/first_init.rs:79-80`, `writer/activation.rs:223-225`) and headless delivery (`turn_bridge/headless_delivery.rs:588-608`).
@@ -28,14 +31,15 @@ A restart keeps the turn: a running turn's bridge is restored and judges again (
 - `AnswerAtMostOnce`: O and Legacy together post the turn at most once.
 - `UnadoptedNotOwned`: without an O store the gate never answers that O owns the body.
 - `RowClearedHasEvidence`, `NoEarlyDispatch`: the row and the watcher dispatch settle only after a post, or while the O store owns the turn's range unposted.
-- `HeldBodyNotSkipped`: a commit while the turn is held starts at the Legacy delivery frontier, not at the end of file.
+- `HeldBodyNotSkipped`: a commit while the turn is held starts at the Legacy delivery frontier, not at the end of file, even after Codex wrote the turn's end.
 - `OtherCustodyBlocks`: no commit while another turn's custody is open.
+- `NoCommitPastOwed`: no commit while the rollout bound before still holds a turn Legacy may have sent part of.
 - `HeadlessKept`: the non-TUI turn is never held and posts its body.
 - `HeldTurnAnswered` (PROPERTY): a held turn on an adoptable channel (home, default selection) is posted by O unless a refusal happened.
 - `AdoptionSettles` (PROPERTY): a Deferred adoption with a turn on an adoptable channel commits unless a refusal happened.
 - `RowEventuallySettled` (PROPERTY): a turn O posted gets its row settled.
 
-`rejected` records any refusal: the `Reject` action, and a seed that is `Refused` (no runtime root, or an unverified execution view without a store). `Reject`, `Input`, `Restart`, the stale handoff and the watcher finalizer carry no fairness; writer, recovery and turn-end actions are weakly fair.
+`NativeEnd` (Codex writing the turn's end, before or after the baseline) is environment, like `Input`; `PrevDrains` (the earlier rollout's turn delivered or proven unsent) is weakly fair. `rejected` records any refusal: the `Reject` action, and a seed that is `Refused` (no runtime root, or an unverified execution view without a store). `Reject`, `Input`, `Restart`, the stale handoff and the watcher finalizer carry no fairness; writer, recovery and turn-end actions are weakly fair.
 
 ## Results (TLC 1.7.4, `scripts/ci/statecharts_tlc.py`)
 
@@ -50,6 +54,12 @@ A restart keeps the turn: a running turn's bridge is restored and judges again (
 | WatcherNoGuard | stage1, dispatch without evidence | `NoEarlyDispatch` |
 | BudgetMut | stage1, waiting and refusal counted in the recovery budget | `RowClearedHasEvidence` |
 | HeadlessMut | stage1, the non-TUI turn held too | `HeadlessKept` |
+| AdvanceOnEnd | stage1, a warm takeover that moves the frontier past a turn Codex ended but nobody delivered | `HeldBodyNotSkipped`, `RowClearedHasEvidence`; liveness `HeldTurnAnswered` |
+| RelayedByTime | stage1, a turn that ended before the baseline counted delivered by time alone | `HeldBodyNotSkipped`, `RowClearedHasEvidence`; liveness `HeldTurnAnswered` |
+| SwallowOwed | stage1, the new rollout committed while the one before still owes a retry | `NoCommitPastOwed` |
+| NoSerial | stage1, a second recovery of the kept row without the restore lock and disk recheck | `MarkerAtMostOnce` |
+| NoRetry | stage1, the adoption wake gives up at its first judgement when a claim holds the row; the claim still ends | liveness `RowEventuallySettled` |
+| Retries4 | stage1, a fourth wake retry allowed | `TriesBound` |
 
 Main's violations are code paths on the baseline. Legacy posts the Deferred turn (the 11-08 trace: Deferred seed, a bound rollout with output skipped, warm input, Legacy W14/W10). Without a runtime root, or with an execution view and no store, the gate answers owned (`adoption.rs:419-421`, `channel_gate.rs:461-471`), so the bridge commits and the watcher settles with nothing posted. GateOnly holds the body but the warm channel never commits, or commits at end of file and skips the held turn.
 
@@ -61,4 +71,7 @@ Main's violations are code paths on the baseline. Legacy posts the Deferred turn
 - The output lock and delivery lease (`terminal_outcome_delivery.rs:735-757`) prevent duplicates; a held body takes no lease.
 - Turn presence keeps a held turn Busy; that is `turn-presence`'s `EventuallyStableBusy`.
 - Census instrumentation (denominators, end evidence) is an observation contract checked by Rust tests.
+- A transiently failed recovery send is not modelled (`Answer` is the gate's answer only); the wake's retry after one is fixed by the Rust test `a_transient_recovery_failure_is_judged_again_and_settles_the_kept_row_pg`.
+- The kick's claim is assumed to stay open across at most `MaxSpan` judgements, within the wake's retry window (`MaxSpan` = `Retries`); the claim ends on its own (`ClaimEnds`) at any judgement. Only Stage1, NoRetry and Retries4 explore an open claim; the other configs start without one to keep their state space. A claim outlasting the window exhausts the wake (`WakeGiveUp`) and leaves the row to the next ready transition or a restart; that path is explored with `NoRetry`.
+- A wake's transient send failures spend no restart budget; that and the four judgements with 1, 2, 3 s backoff are fixed by the Rust test `a_wake_whose_sends_keep_failing_ends_after_three_retries_and_keeps_the_row_pg`.
 - tmux presence: with tmux alive the recovery budget never clears a row, so only the absent case is modelled.

@@ -68,6 +68,8 @@ pub struct NativeCheckpoint {
     pub path: PathBuf,
     pub ino: u64,
     pub cursor: Offset,
+    /// Where Legacy's delivery to Discord ended, at most `cursor`.
+    pub delivered: Offset,
 }
 
 /// A pane's normalized wrapper spool, read in its own namespace.
@@ -135,6 +137,16 @@ pub fn native_cursor(
         (true, Some(at)) => (Proof::Linked, Some(at)),
         _ => (Proof::Mismatch, None),
     }
+}
+
+/// Legacy's delivered end on `source` from a checkpoint `native_cursor` linked to it, counted in
+/// the source's own namespace.
+pub fn native_delivered(source: &SourceId, checkpoint: &NativeCheckpoint) -> Option<u64> {
+    let namespace = Namespace::Native {
+        path: source.path.clone(),
+        ino: source.ino,
+    };
+    checkpoint.delivered.within(&namespace)
 }
 
 /// A pane's wrapper read in its own namespace: none only when neither its live binding nor a

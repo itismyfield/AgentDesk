@@ -3,16 +3,24 @@ EXTENDS Naturals
 CONSTANTS Fix, Mut
 VARIABLES sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
           otherCustody, lp, op, rowCleared, dispatchSettled, attempts, restarts,
-          recovered, rejected, commitWithOther, hturn, hp
+          recovered, rejected, commitWithOther, hturn, hp, nativeEnded,
+          endedBeforeBase, prevOwed, commitPastOwed, otherIntake, mk, wakeRead, claim, tries, woke, opened
 vars == <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
           otherCustody, lp, op, rowCleared, dispatchSettled, attempts, restarts,
-          recovered, rejected, commitWithOther, hturn, hp>>
+          recovered, rejected, commitWithOther, hturn, hp, nativeEnded,
+          endedBeforeBase, prevOwed, commitPastOwed, otherIntake, mk, wakeRead, claim, tries, woke, opened>>
 
 \* Code baseline 13f9acdd9a; the stage-1 adoption plan r2 with its r2.1 corrections.
 \* One TUI-bound channel with one turn, plus one non-TUI (headless) channel in the same config.
 \* Fix: "main" as written, "gateOnly" holds unadopted bodies without the warm takeover from the
 \* Legacy delivery frontier, "stage1" is the whole stage (boot refusal, hold, frontier takeover).
 \* Mut removes one stage-1 guard. Value ranges come from the entry table in report-p1-2.md.
+\*   nativeEnded  late_adopt/codex/prefix.rs frontier: the turn's own end record (task_complete)
+\*            written before Legacy delivered it; advanceOnEnd is the takeover that moved F past it
+\*   endedBeforeBase  that end was written before the takeover's baseline; relayedByTime counted it
+\*            delivered by time alone (late_adopt/codex.rs start_on)
+\*   prevOwed the rollout bound before holds a turn Legacy may have sent part of (codex.rs owed);
+\*            swallowOwed committed the new rollout without it
 \*   sel      tap.rs:61-67, channel_policy.rs:73-134 (explicit off, list excluding, late off,
 \*            implicit default off when the default cannot apply)
 \*   site     adoption.rs:384-390 (only the O home has candidates)
@@ -22,8 +30,19 @@ vars == <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
 \*            codex.rs:229-230 (bound rollout already has output), fresh source or rollout
 \*   store    adoption.rs:414-439 (init, damaged or era-only, none)
 \*   adopt    adoption.rs:16-28; Refused is the stage-1 refusal state
-\*   custody  o_writer_host.rs:306-339, deferred.rs:89-92 (all kinds block alike)
+\*   custody  o_writer_host.rs:317-350, deferred.rs:89-92 (all kinds block alike)
 \*   attempts inflight.rs:341-344, recovery_paths/shared.rs:156-171 (tmux absent)
+\*   otherIntake  another turn's open intake row read under the intake fence
+\*            (o_channel_activation.rs fenced rows, o_channel_activation/owner.rs:25)
+\*   mk       body-free recovery markers posted for the kept row (completion_delivery.rs:302-357)
+\*   wakeRead a second recovery of the kept row (boot restore and ready wake,
+\*            restore_inflight.rs:111 and adoption_wake.rs) has read it
+\*   claim    a queued input's mailbox claim is open when the wake judges (adoption_wake.rs
+\*            Held::Claimed; the kick claims, then foreign_row.rs:70-80 releases it)
+\*   tries    the wake's judgements after the first, at most RETRIES = 3 (adoption_wake.rs)
+\*   opened   the claim has opened once for the held row (a kick racing the wake, queue_io.rs:370)
+\*   woke     the wake still judges; FALSE once its retries are spent and the row waits for the
+\*            next ready transition or restart
 
 Booted == Fix = "main" \/ sel \in {"default", "defaultOff"}
 Selected == sel \in {"default", "lateOff"}
@@ -58,9 +77,21 @@ Duty == store # "none" /\ lp = 0
         /\ (adopt = "Held" \/ (adopt = "Committed" /\ oStart = "F"))
 Evidence == op >= 1 \/ lp >= 1 \/ Duty
 
+\* No wait marker is stored: a row passes, while another turn's open intake, pending start or
+\* terminal delivery blocks; waitMark only names the held turn's own row.
 OwnCustody == turn \in {"running", "held"}
 Exempt == Mut = "exemptAllRows" \/ (Fix # "main" /\ waitMark /\ turn = "held")
-Blocked == (otherCustody /\ Mut # "exemptAllRows") \/ (OwnCustody /\ ~Exempt)
+Blocked == ((otherCustody \/ otherIntake) /\ Mut # "exemptAllRows") \/ (OwnCustody /\ ~Exempt)
+
+\* noSerial drops the per-channel restore lock and the disk recheck (restore_serial.rs);
+\* noRetry ends the wake at its first judgement; retries4 allows a fourth retry.
+Serial == Mut # "noSerial"
+Retries == CASE Mut = "noRetry" -> 0 [] Mut = "retries4" -> 4 [] OTHER -> 3
+\* Assumed: a queued input's claim stays open across at most MaxSpan wake judgements, within the
+\* retry window (backoff 1+2+3 s; foreign_row.rs:70-80 releases it on AlreadyExists).
+MaxSpan == IF Retries = 0 THEN 1 ELSE Retries
+\* Only the configs that check the wake open a claim; the others keep their state space.
+WakeModel == Fix = "stage1" /\ Mut \in {"none", "noRetry", "retries4"}
 
 Init ==
     /\ sel \in {"default", "explicitOff", "listExcl", "lateOff", "defaultOff"}
@@ -73,11 +104,16 @@ Init ==
     /\ oStart = IF store = "init" THEN "F" ELSE "none"
     /\ rejected = (adopt = "Refused")
     /\ turn = "none" /\ waitMark = FALSE /\ otherCustody \in BOOLEAN
+    /\ otherIntake \in IF Fix = "stage1" THEN BOOLEAN ELSE {FALSE}
     /\ lp = 0 /\ op = 0 /\ rowCleared = FALSE /\ dispatchSettled = FALSE
     /\ attempts = 0 /\ restarts = 0 /\ recovered = FALSE /\ commitWithOther = FALSE
-    /\ hturn = "none" /\ hp = 0
+    /\ hturn = "none" /\ hp = 0 /\ nativeEnded = FALSE /\ endedBeforeBase = FALSE
+    /\ prevOwed \in BOOLEAN /\ commitPastOwed = FALSE
+    /\ mk = 0 /\ wakeRead = FALSE /\ claim = FALSE /\ tries = 0 /\ woke = TRUE /\ opened = FALSE
 
-Fixed == UNCHANGED <<sel, site, root, exec, bound>>
+FixedBase == UNCHANGED <<sel, site, root, exec, bound, nativeEnded, endedBeforeBase, prevOwed,
+                         commitPastOwed, otherIntake>>
+Fixed == FixedBase /\ UNCHANGED <<mk, wakeRead, claim, tries, woke, opened>>
 
 \* Discord intake on the TUI channel opens a turn (intake_dispatch.rs:281-294).
 Input == /\ Booted /\ turn = "none" /\ turn' = "running"
@@ -105,7 +141,8 @@ TerminalBody == /\ Booted /\ turn = "running" /\ Judge("held")
                                 restarts, recovered, rejected, commitWithOther, hturn, hp>>
 
 \* A held row judged again: the live bridge's next tick, or the adoption wake.
-ReEval == /\ Booted /\ turn = "held" /\ Answer # "held" /\ Judge("held")
+\* A wake that meets a claim judges only after it (WakeDefer), and not once it gave up.
+ReEval == /\ Booted /\ turn = "held" /\ Answer # "held" /\ ~claim /\ woke /\ Judge("held")
           /\ Fixed
           /\ UNCHANGED <<store, oStart, otherCustody, op, dispatchSettled, attempts,
                           restarts, recovered, rejected, commitWithOther, hturn, hp>>
@@ -116,6 +153,7 @@ RecoveryBody ==
     /\ Booted /\ turn = "held" /\ restarts >= 1 /\ ~recovered /\ recovered' = TRUE
     /\ IF Answer # "held"
        THEN /\ Judge("held") /\ UNCHANGED attempts
+            /\ mk' = IF Answer = "owned" THEN mk + 1 ELSE mk
        ELSE IF Counts
             THEN /\ attempts' = attempts + 1
                  /\ IF attempts + 1 >= 3
@@ -123,7 +161,8 @@ RecoveryBody ==
                     ELSE UNCHANGED <<rowCleared, turn, waitMark>>
                  /\ UNCHANGED <<lp, adopt>>
             ELSE UNCHANGED <<attempts, lp, rowCleared, turn, waitMark, adopt>>
-    /\ Fixed
+    /\ (Answer = "held" => UNCHANGED mk)
+    /\ FixedBase /\ UNCHANGED <<wakeRead, claim, tries, woke, opened>>
     /\ UNCHANGED <<store, oStart, otherCustody, op, dispatchSettled, restarts, rejected,
                     commitWithOther, hturn, hp>>
 
@@ -138,17 +177,46 @@ WatcherDispatch ==
 
 Commit(start) ==
     /\ adopt' = "Committed" /\ store' = "init" /\ oStart' = start
-    /\ commitWithOther' = (commitWithOther \/ otherCustody)
-    /\ Fixed
+    /\ commitWithOther' = (commitWithOther \/ otherCustody \/ otherIntake)
+    /\ commitPastOwed' = (commitPastOwed \/ prevOwed)
+    /\ UNCHANGED <<sel, site, root, exec, bound, nativeEnded, endedBeforeBase, prevOwed,
+                    otherIntake, mk, wakeRead, claim, tries, woke, opened>>
     /\ UNCHANGED <<turn, waitMark, otherCustody, lp, op, rowCleared, dispatchSettled,
                     attempts, restarts, recovered, rejected, hturn, hp>>
 
 \* A fresh source or rollout is taken before it has output (late_adopt.rs:182-186, codex.rs:203-310).
+\* Stage 1 retries while the rollout bound before still holds a turn Legacy may have sent from.
+OwedClear == Fix # "stage1" \/ Mut = "swallowOwed" \/ ~prevOwed
 FreshAdopt == /\ Booted /\ adopt \in {"Deferred", "Pending"} /\ bound = "fresh" /\ ~Blocked
-              /\ Commit("F")
-\* Warm takeover from the Legacy delivery frontier (stage 1 P3a and P3b).
+              /\ OwedClear /\ Commit("F")
+\* Warm takeover from the Legacy delivery frontier (stage 1 P3a and P3b). A turn's own end does
+\* not move the frontier; advanceOnEnd starts past a turn Codex ended but nobody delivered.
+\* relayedByTime counts a turn that ended before the baseline as delivered with no evidence.
+SkipsEnded == nativeEnded /\ (Mut = "advanceOnEnd" \/ (Mut = "relayedByTime" /\ endedBeforeBase))
 WarmAdoptF == /\ Fix = "stage1" /\ adopt = "Deferred" /\ bound # "fresh" /\ ~Blocked
-              /\ Commit("F")
+              /\ OwedClear /\ Commit(IF SkipsEnded THEN "EOF" ELSE "F")
+
+\* Codex writes the turn's end into its transcript before anyone delivered the turn.
+NativeEnd == /\ turn \in {"running", "held"} /\ ~nativeEnded /\ nativeEnded' = TRUE
+             /\ endedBeforeBase' \in BOOLEAN
+             /\ UNCHANGED <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
+                             otherCustody, lp, op, rowCleared, dispatchSettled, attempts,
+                             restarts, recovered, rejected, commitWithOther, hturn, hp,
+                             prevOwed, commitPastOwed, otherIntake, mk, wakeRead, claim, tries, woke, opened>>
+
+\* Legacy finishes the earlier rollout's turn, or a later read proves it unsent.
+PrevDrains == /\ prevOwed /\ prevOwed' = FALSE
+              /\ UNCHANGED <<sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
+                              otherCustody, lp, op, rowCleared, dispatchSettled, attempts,
+                              restarts, recovered, rejected, commitWithOther, hturn, hp,
+                              nativeEnded, endedBeforeBase, commitPastOwed, otherIntake, mk,
+                              wakeRead, claim, tries, woke, opened>>
+\* Late takeover of the source Legacy runs a turn on (late_adopt/codex.rs:284,363 and :440, which
+\* claude.rs:84 takes): Legacy's running turn is taken, another turn's open intake still blocks.
+\* lateExemptIntake lets every open intake row pass, as activation.rs activate_takeover did.
+TakeoverBlocked == otherCustody \/ (otherIntake /\ Mut # "lateExemptIntake")
+LateTakeover == /\ Fix = "stage1" /\ adopt \in {"Deferred", "Pending"} /\ ~TakeoverBlocked
+                /\ OwedClear /\ Commit(IF bound # "fresh" /\ SkipsEnded THEN "EOF" ELSE "F")
 \* Stale handoff at the end of file (deferred.rs:26-29); not guaranteed to happen.
 EofHandoff == /\ Fix # "stage1" /\ adopt = "Deferred" /\ bound = "withOutput" /\ ~Blocked
               /\ Commit(IF turn = "none" THEN "F" ELSE "EOF")
@@ -182,7 +250,8 @@ OtherTurnEnds == /\ otherCustody /\ otherCustody' = FALSE
 \* A process restart keeps the row and seeds adoption from the store (channel_policy.rs:285-351).
 \* A running turn's bridge is restored and judges again (restore_inflight.rs:2378); a held row
 \* waits for the boot recovery.
-Restart == /\ Booted /\ restarts < 3 /\ turn \in {"running", "held"}
+\* Assumed: no restart lands inside a queued input's claim (it lasts under one wake backoff).
+Restart == /\ Booted /\ restarts < 3 /\ turn \in {"running", "held"} /\ ~claim
            /\ restarts' = restarts + 1 /\ recovered' = FALSE
            /\ adopt' = Seed(store)
            /\ rejected' = (rejected \/ Seed(store) = "Refused")
@@ -205,17 +274,72 @@ HeadlessTerminal == /\ hturn = "running"
                                     rowCleared, dispatchSettled, attempts, restarts,
                                     recovered, rejected, commitWithOther>>
 
+\* Another turn's open intake row is routed or ends.
+OtherIntakeEnds == /\ otherIntake /\ otherIntake' = FALSE
+                   /\ UNCHANGED <<sel, site, root, exec, bound, store, adopt, oStart, turn,
+                                   waitMark, otherCustody, lp, op, rowCleared, dispatchSettled,
+                                   attempts, restarts, recovered, rejected, commitWithOther,
+                                   hturn, hp, nativeEnded, endedBeforeBase, prevOwed,
+                                   commitPastOwed, mk, wakeRead, claim, tries, woke, opened>>
+
+\* The wake meets a queued input's claim and judges again after a backoff, at most Retries times.
+WakeDefer == /\ Booted /\ turn = "held" /\ woke /\ claim /\ tries < Retries /\ tries < MaxSpan
+             /\ tries' = tries + 1
+             /\ FixedBase /\ UNCHANGED <<mk, wakeRead, claim, woke, opened>>
+             /\ UNCHANGED <<store, adopt, oStart, turn, waitMark, otherCustody, lp, op, rowCleared,
+                             dispatchSettled, attempts, restarts, recovered, rejected,
+                             commitWithOther, hturn, hp>>
+\* With its retries spent while the claim is still open, the wake ends and keeps the row.
+WakeGiveUp == /\ Booted /\ turn = "held" /\ woke /\ claim /\ tries >= Retries /\ tries < MaxSpan
+              /\ woke' = FALSE
+              /\ FixedBase /\ UNCHANGED <<mk, wakeRead, claim, tries, opened>>
+              /\ UNCHANGED <<store, adopt, oStart, turn, waitMark, otherCustody, lp, op,
+                              rowCleared, dispatchSettled, attempts, restarts, recovered,
+                              rejected, commitWithOther, hturn, hp>>
+\* A queued input's kick claims the mailbox while the row is held, once (the wake races it). It
+\* races the wake of this process's ready transition, before a restart or a second recovery.
+ClaimOpens == /\ WakeModel /\ Booted /\ turn = "held" /\ ~opened /\ restarts = 0 /\ ~wakeRead
+              /\ opened' = TRUE /\ claim' = TRUE
+              /\ FixedBase /\ UNCHANGED <<mk, wakeRead, tries, woke>>
+              /\ UNCHANGED <<store, adopt, oStart, turn, waitMark, otherCustody, lp, op,
+                              rowCleared, dispatchSettled, attempts, restarts, recovered,
+                              rejected, commitWithOther, hturn, hp>>
+\* The queued input's claim ends (its create fails and foreign_row.rs:70-80 releases it).
+ClaimEnds == /\ claim /\ claim' = FALSE
+             /\ FixedBase /\ UNCHANGED <<mk, wakeRead, tries, woke, opened>>
+             /\ UNCHANGED <<store, adopt, oStart, turn, waitMark, otherCustody, lp, op, rowCleared,
+                             dispatchSettled, attempts, restarts, recovered, rejected,
+                             commitWithOther, hturn, hp>>
+
+\* A second recovery of the kept row reads it while the first may still be posting.
+SecondRead == /\ Booted /\ turn = "held" /\ ~rowCleared /\ ~wakeRead /\ wakeRead' = TRUE
+              /\ FixedBase /\ UNCHANGED <<mk, claim, tries, woke, opened>>
+              /\ UNCHANGED <<store, adopt, oStart, turn, waitMark, otherCustody, lp, op,
+                              rowCleared, dispatchSettled, attempts, restarts, recovered,
+                              rejected, commitWithOther, hturn, hp>>
+\* It posts its marker; serialized, it first rechecks that the row is still that turn.
+SecondPost == /\ wakeRead /\ Answer = "owned" /\ (Serial => ~rowCleared)
+              /\ mk' = mk + 1 /\ wakeRead' = FALSE
+              /\ rowCleared' = TRUE /\ turn' = "done" /\ waitMark' = FALSE
+              /\ FixedBase /\ UNCHANGED <<claim, tries, woke, opened>>
+              /\ UNCHANGED <<store, adopt, oStart, otherCustody, lp, op, dispatchSettled,
+                              attempts, restarts, recovered, rejected, commitWithOther, hturn, hp>>
+
 Rest == UNCHANGED vars
 Next == Input \/ TerminalBody \/ ReEval \/ RecoveryBody \/ WatcherDispatch \/ FreshAdopt
-        \/ WarmAdoptF \/ EofHandoff \/ Reject \/ OPost \/ OtherTurnEnds \/ Restart
+        \/ WarmAdoptF \/ EofHandoff \/ Reject \/ OPost \/ OtherTurnEnds \/ Restart \/ NativeEnd \/ PrevDrains
+        \/ LateTakeover \/ OtherIntakeEnds \/ WakeDefer \/ WakeGiveUp \/ ClaimOpens \/ ClaimEnds
+        \/ SecondRead \/ SecondPost
         \/ HeadlessInput \/ HeadlessTerminal \/ Rest
 
-\* Writer, recovery and turn-end actions are fair. Input, Restart, Reject, the stale handoff
-\* and the watcher finalizer are environment.
+\* Writer, recovery and turn-end actions are fair. Input, Restart, Reject, the stale handoff,
+\* the watcher finalizer and Codex's own turn end are environment.
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(TerminalBody) /\ WF_vars(ReEval) /\ WF_vars(RecoveryBody)
         /\ WF_vars(FreshAdopt) /\ WF_vars(WarmAdoptF) /\ WF_vars(OPost)
-        /\ WF_vars(OtherTurnEnds) /\ WF_vars(HeadlessTerminal)
+        /\ WF_vars(OtherTurnEnds) /\ WF_vars(HeadlessTerminal) /\ WF_vars(PrevDrains)
+        /\ WF_vars(LateTakeover) /\ WF_vars(OtherIntakeEnds) /\ WF_vars(WakeDefer)
+        /\ WF_vars(ClaimEnds)
 
 NoLegacyBodyOnTui == lp = 0
 AnswerAtMostOnce == op + lp <= 1
@@ -224,10 +348,16 @@ RowClearedHasEvidence == rowCleared => Evidence
 NoEarlyDispatch == dispatchSettled => Evidence
 HeldBodyNotSkipped == (turn = "held" /\ adopt = "Committed") => oStart = "F"
 OtherCustodyBlocks == ~commitWithOther
+NoCommitPastOwed == ~commitPastOwed
 HeadlessKept == hturn # "held" /\ (hturn = "done" => hp = 1)
+MarkerAtMostOnce == mk <= 1
+TriesBound == tries \in 0..3
 
 HeldTurnAnswered == [](turn = "held" /\ Adoptable => <>(op = 1 \/ rejected))
 AdoptionSettles == [](adopt = "Deferred" /\ Adoptable /\ turn # "none"
                       => <>(adopt = "Committed" \/ rejected))
 RowEventuallySettled == [](op = 1 => <>rowCleared)
+\* A late takeover held by another turn's open intake commits once that input ends.
+TakeoverSettles == [](otherIntake /\ Adoptable /\ adopt \in {"Deferred", "Pending"}
+                      => <>(adopt = "Committed" \/ rejected))
 =============================================================================

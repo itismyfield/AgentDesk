@@ -1,5 +1,5 @@
-//! A channel whose first adoption met an open turn, a record Legacy owes, its custody or a lagging
-//! cursor: O adopts once an idle Legacy owes nothing, or at EOF after delivery stops progressing.
+//! A channel whose first adoption met an open turn, its custody or a lagging cursor: O adopts once
+//! Legacy is idle, taking what Legacy owes from its delivered frontier, also after a stall.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +15,7 @@ use super::late_adopt::claude::{self, Floor, Owed, Sample};
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
-use crate::services::tui_o::store::OStore;
+use crate::services::tui_o::store::{InitSource, OStore};
 
 /// How often a deferred channel is looked at again.
 const RETRY: Duration = Duration::from_secs(5);
@@ -70,8 +70,8 @@ pub(super) enum First {
     Leave(Refused),
 }
 
-/// An open turn, a record Legacy owes, its custody, or a cursor that lags a source whose end O could
-/// start at waits; any other refusal leaves the channel to Legacy.
+/// An open turn, its custody, or a cursor that lags a source whose end O could start at waits; a
+/// record Legacy owes is O's from the frontier. Any other refusal leaves the channel to Legacy.
 pub(super) async fn first<I: HostIo>(
     io: &I,
     channel: u64,
@@ -82,10 +82,8 @@ pub(super) async fn first<I: HostIo>(
     let pinned = pin(Arc::clone(legacy), events.clone(), channel, At::Cursor).await;
     let refused = match pinned {
         Ok(snapshot) => {
-            // Legacy resumes from its frontier after a restart, so what it owes is not given up yet.
-            if let Some(owed) = snapshot.owed() {
-                return First::Wait(Refused::retry(owed.to_string()));
-            }
+            // Legacy sends no TUI body, so what it owes past its frontier is O's to post.
+            let snapshot = snapshot.owed_to_o();
             return match io.local_custody(channel, provider) {
                 Ok(Custody::Row | Custody::PendingStart | Custody::Active) => {
                     First::Wait(Refused::retry("Legacy retains delivery custody"))
@@ -336,7 +334,11 @@ pub(super) async fn retry<I: HostIo>(
                 .map_err(|error| Refused::retry(format!("late pin task: {error}")))
                 .and_then(|pinned| pinned);
                 sample = sampled(&waiting, &observed, sends, &pinned).or(sample);
-                pinned.and_then(|snapshot| match owing(&waiting, &observed) {
+                let sends = {
+                    let _adoption = candidate.lock();
+                    candidate.sends()
+                };
+                pinned.and_then(|snapshot| match owing(&waiting, &observed, sends) {
                     Some(detail) => Err(Refused::retry(detail)),
                     None => Ok(snapshot),
                 })
@@ -349,19 +351,16 @@ pub(super) async fn retry<I: HostIo>(
                 )
                 .await
             };
-            let again = match pinned {
-                Ok(snapshot) => match snapshot.owed() {
-                    Some(again) => again,
-                    None => match commit(&waiting, &snapshot, None, None).await {
-                        Ok(()) => {
-                            committed(&waiting, &alarms, &snapshot);
-                            return Retried::Committed;
-                        }
-                        Err(again) => {
-                            clocks.observe(latest_progress(&waiting));
-                            again
-                        }
-                    },
+            let again = match pinned.map(Snapshot::owed_to_o) {
+                Ok(snapshot) => match commit(&waiting, &snapshot, None, None).await {
+                    Ok(()) => {
+                        committed(&waiting, &alarms, &snapshot);
+                        return Retried::Committed;
+                    }
+                    Err(again) => {
+                        clocks.observe(latest_progress(&waiting));
+                        again
+                    }
                 },
                 Err(again) => again,
             };
@@ -425,7 +424,7 @@ pub(super) async fn retry<I: HostIo>(
         }
         let pinned = pin(Arc::clone(&waiting.legacy), Ok(observed), channel, At::End).await;
         let snapshot = match pinned {
-            Ok(snapshot) => snapshot,
+            Ok(snapshot) => snapshot.owed_to_o(),
             Err(again) => {
                 if leaves(&waiting, &alarms, &again) {
                     return Retried::Left;
@@ -450,7 +449,7 @@ pub(super) async fn retry<I: HostIo>(
                     kind = kind.name(),
                     stalled_secs = clocks.elapsed(kind).as_secs(),
                     ?relaxed,
-                    "[tui_o] Legacy delivered nothing through the stall; O starts at the source's end"
+                    "[tui_o] Legacy delivered nothing through the stall; O starts at its frontier"
                 );
                 committed(&waiting, &alarms, &snapshot);
                 return Retried::Committed;
@@ -545,6 +544,7 @@ async fn commit<I: HostIo>(
                 } else {
                     snapshot.recheck(&*waiting.legacy, waiting.log, channel)
                 }
+                .and_then(|sources| owed_ranges(waiting, sources))
             })();
             sources.map_err(|again| {
                 let detail = again.to_string();
@@ -651,16 +651,43 @@ fn rebased<I: HostIo>(
     Some(Rebased { new, floor, owed })
 }
 
-/// The first earlier source still unsettled, which a commit of the current one would orphan.
-fn owing<I: HostIo>(waiting: &Waiting<'_, I>, events: &[BindingEvent]) -> Option<String> {
+/// The first earlier source neither settled nor taken from where Legacy last delivered it, which
+/// a commit of the current one would orphan.
+fn owing<I: HostIo>(
+    waiting: &Waiting<'_, I>,
+    events: &[BindingEvent],
+    sends: (u64, u64),
+) -> Option<String> {
     let owed = waiting.owed.iter();
     owed.map(|owed| (owed, owed.settled(events, waiting.candidate)))
+        .filter(|(owed, _)| owed.range(events, sends).is_err())
         .find_map(|(owed, settled)| {
             let path = owed.old.0.path.display();
             settled
                 .err()
                 .map(|detail| format!("{path} still owes delivery: {detail}"))
         })
+}
+
+/// Under the adoption lock: each earlier source still owed starts where Legacy last delivered it,
+/// in place of its pinned end.
+fn owed_ranges<I: HostIo>(
+    waiting: &Waiting<'_, I>,
+    mut sources: Vec<InitSource>,
+) -> Result<Vec<InitSource>, Refused> {
+    if waiting.owed.is_empty() {
+        return Ok(sources);
+    }
+    let events = events(waiting).map_err(Refused::retry)?;
+    let sends = waiting.candidate.sends();
+    for owed in &waiting.owed {
+        let range = owed.range(&events, sends).map_err(Refused::retry)?;
+        match sources.iter_mut().find(|s| s.source_id == range.source_id) {
+            Some(pinned) => *pinned = range,
+            None => sources.push(range),
+        }
+    }
+    Ok(sources)
 }
 
 /// The current source as delivered through Legacy's late pin, with no body send in flight when
@@ -671,17 +698,20 @@ fn sampled<I: HostIo>(
     sends: (u64, u64),
     pinned: &Result<Snapshot, Refused>,
 ) -> Option<Sample> {
-    let snapshot = pinned.as_ref().ok().filter(|s| s.owed().is_none())?;
+    let snapshot = pinned.as_ref().ok();
+    let snapshot = snapshot.filter(|s| s.owed().is_none() && s.delivered_to_start())?;
     let (source, _) = adoption::current(events)?;
     if activation::body_in_flight(sends) || source != waiting.bound.0 {
         return None;
     }
     let nonce = claude::nonce_of(events, &source)?;
+    let hash = snapshot.start_hash()?.to_owned();
     Some(Sample {
         source,
         nonce,
         len: snapshot.start(),
         sends,
+        hash,
     })
 }
 

@@ -164,31 +164,6 @@ async fn an_unbound_codex_channel_commits_an_empty_init_and_posts_a_late_source_
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_legacy_claim_before_the_activation_lock_leaves_no_init_and_legacy_sends() {
-    const CODEX: u64 = 61_802;
-    let harness = fresh_on(CODEX);
-    harness.gate.acquired();
-    let _selected = test_override::force_candidates(&[(CODEX, CodexTui)]);
-    let legacy_sends = Arc::new(AtomicUsize::new(0));
-    let sends = Arc::clone(&legacy_sends);
-    test_hook::set(CODEX, Step::BeforeLock, move || {
-        let claimed = o_owns_tui_output_for_channel_reserving(CODEX, Some(CodexTui)).unwrap();
-        if !claimed.owned {
-            sends.fetch_add(1, Ordering::SeqCst);
-        }
-        Ok(())
-    });
-    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
-    let _tasks = start_codex(&harness, &io, &ready);
-    polls(3).await;
-    assert_eq!(legacy_sends.load(Ordering::SeqCst), 1);
-    assert_eq!(adoption(CODEX), Adoption::Released);
-    assert_eq!(harness.store.read_era().unwrap(), None);
-    assert!(!harness.store.has_channel_dir(CODEX));
-    assert!(!ready.is_ready(CODEX) && harness.port.posts().is_empty());
-}
-
-#[tokio::test(start_paused = true)]
 async fn a_bound_codex_source_holding_only_metadata_starts_at_its_end() {
     const CODEX: u64 = 61_803;
     let prefix = metadata("s-codex");
@@ -250,7 +225,7 @@ async fn a_bound_codex_source_that_already_holds_output_gets_no_init() {
             matches!(released.as_slice(), [(CODEX, d)] if d.contains("holds more than metadata")),
             "{why}: {released:?}"
         );
-        assert_eq!(adoption(CODEX), Adoption::Released, "{why}");
+        assert_eq!(adoption(CODEX), Adoption::Refused, "{why}");
         assert!(!init_path(&harness, CODEX).exists(), "{why}");
         assert_eq!(harness.store.read_era().unwrap(), None, "{why}");
         assert!(!harness.store.has_channel_dir(CODEX), "{why}");
@@ -622,8 +597,10 @@ async fn resume_companion_metadata_only_log_allows_actual_host_first_init() {
 
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
-async fn resume_companion_history_log_releases_actual_host_and_allows_legacy_body() {
-    use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send, claims_judged};
+async fn resume_companion_history_log_refuses_actual_host_and_holds_the_body() {
+    use crate::services::tui_o::cutover::{
+        BodyClaim, IdentityError, claim_then_send, claims_judged,
+    };
     const CODEX: u64 = 61_810;
     let (harness, resume) = settled_resume_for_first_init(CODEX, true);
     harness.gate.acquired();
@@ -631,7 +608,7 @@ async fn resume_companion_history_log_releases_actual_host_and_allows_legacy_bod
     let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
     let tasks = start_codex(&harness, &io, &ready);
     polls(3).await;
-    assert_eq!(adoption(CODEX), Adoption::Released);
+    assert_eq!(adoption(CODEX), Adoption::Refused);
     assert!(
         matches!(io.alarms.released().as_slice(), [(CODEX, detail)]
         if detail.contains("holds more than metadata")),
@@ -642,22 +619,16 @@ async fn resume_companion_history_log_releases_actual_host_and_allows_legacy_bod
     assert_eq!(harness.store.read_era().unwrap(), None);
     assert!(!init_path(&harness, CODEX).exists());
     let sent = claim_then_send(Some(BodyClaim::new(CODEX, Some(CodexTui))), || async {
-        "Legacy delivered the resumed answer"
+        unreachable!("Legacy sent a refused channel's body")
     })
     .await;
-    assert_eq!(
-        sent,
-        Ok(BodySend::Sent("Legacy delivered the resumed answer"))
-    );
+    assert_eq!(sent, Err(IdentityError::AdoptionRefused));
     assert_eq!(
         claims_judged(CODEX),
-        [false],
-        "the actual body claim is owned=false"
+        Vec::<bool>::new(),
+        "a held body is no claim"
     );
-    assert!(
-        harness.port.posts().is_empty(),
-        "O leaves the body to Legacy"
-    );
+    assert!(harness.port.posts().is_empty(), "the body stays held");
     let (reason, idle) =
         crate::services::discord::e2e_control::companion_activity_for_log_for_tests(
             CODEX,

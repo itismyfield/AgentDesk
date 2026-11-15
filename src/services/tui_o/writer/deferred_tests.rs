@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::services::tui_o::cutover::test_override::ChannelsGuard;
-use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+use crate::services::tui_o::cutover::{BodyClaim, BodySend, IdentityError, claim_then_send};
 use crate::services::tui_o::writer::activation::test_hook::{self, Step};
 
 /// Legacy's relay as it moves: cursor and delivered frontier on `path`, and how often a pin read them.
@@ -180,8 +180,8 @@ async fn an_open_turn_defers_the_adoption_and_its_close_adopts_it_without_a_rest
     let sent = claim_then_send(body, || async { "legacy" }).await;
     assert_eq!(
         sent,
-        Ok(BodySend::Sent("legacy")),
-        "Legacy sends while it waits"
+        Err(IdentityError::AwaitingAdoption),
+        "the body is held while it waits"
     );
     retried().await;
     open.assert_waiting("the turn is still open");
@@ -350,7 +350,7 @@ async fn a_final_reason_ends_the_adoption_even_behind_an_open_turn() {
         let open = Open::new();
         edit(open.io.facts.lock().unwrap().as_mut().unwrap());
         let _tasks = open.start().await;
-        assert_eq!(adoption(CHANNEL), Adoption::Released, "{why}");
+        assert_eq!(adoption(CHANNEL), Adoption::Refused, "{why}");
         let released = open.io.alarms.released();
         assert!(
             matches!(released.as_slice(), [(CHANNEL, d)] if d.contains(why)),
@@ -376,7 +376,7 @@ async fn a_final_reason_ends_the_adoption_even_behind_an_open_turn() {
         .node_override = Some("runner".into());
     open.close();
     retried().await;
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    assert_eq!(adoption(CHANNEL), Adoption::Refused);
     let released = open.io.alarms.released();
     assert!(
         matches!(released.as_slice(), [(CHANNEL, d)] if d.contains("node override")),
@@ -431,51 +431,78 @@ async fn a_unit_written_after_the_cursor_caught_up_is_read_again_before_adoption
     open.assert_adopted().await;
 }
 
+/// A record past Legacy's frontier is O's: the adoption starts at the frontier without waiting for
+/// Legacy, O posts the record once, and a restart over the init posts nothing again.
 #[tokio::test(start_paused = true)]
-async fn a_record_past_legacys_frontier_waits_until_the_frontier_covers_it() {
+async fn a_record_past_legacys_frontier_is_taken_from_the_frontier_and_posted_once() {
     let open = Open::new();
+    let tasks = open.start().await;
+    let frontier = open.len();
+    append(&open.path, &[row("m1", "owed"), closed()].concat());
+    open.legacy.caught_up(&open.path);
+    open.legacy.frontier.store(frontier, Ordering::SeqCst);
+    retried().await;
+    assert_eq!(
+        adoption(CHANNEL),
+        Adoption::Committed,
+        "{:?}",
+        open.alarms()
+    );
+    assert_eq!(
+        open.start_of_o(),
+        Some(frontier),
+        "O starts at Legacy's frontier"
+    );
+    assert_eq!(open.alarms(), [], "nothing is abandoned");
+    polls(3).await;
+    let owed = ["owed", "-# ✅ 완료"];
+    assert_eq!(open.harness.port.posts(), owed);
+
+    abort(tasks);
+    polls(2).await;
+    let ready = Arc::new(Readiness::default());
+    let _tasks = start_host(&open.harness, &open.io, &ready);
+    polls(3).await;
+    assert!(ready.is_ready(CHANNEL), "{:?}", open.alarms());
+    assert_eq!(open.harness.port.posts(), owed, "a restart reposts nothing");
+    append(&open.path, &row("m9", "next"));
+    polls(3).await;
+    assert_eq!(open.harness.port.posts(), ["owed", "-# ✅ 완료", "next"]);
+}
+
+/// The held turn's own row never blocks adoption while another turn's open intake does: once the
+/// intake clears, the row still there, O takes the channel from the frontier and posts once.
+#[tokio::test(start_paused = true)]
+async fn the_held_turns_own_row_passes_while_another_turns_open_intake_blocks() {
+    let open = Open::new();
+    *open.io.custody.lock().unwrap() = Ok(Custody::Row);
+    open.io.facts.lock().unwrap().as_mut().unwrap().open_intake = 1;
     let _tasks = open.start().await;
     let frontier = open.len();
     append(&open.path, &[row("m1", "owed"), closed()].concat());
     open.legacy.caught_up(&open.path);
     open.legacy.frontier.store(frontier, Ordering::SeqCst);
     retried().await;
-    open.assert_waiting("Legacy may still send the record");
-    retried().await;
-    open.assert_waiting("the frontier has not moved");
+    open.assert_waiting("another turn's open intake blocks");
+    assert!(open.harness.port.posts().is_empty());
 
-    open.legacy.caught_up(&open.path);
+    open.io.facts.lock().unwrap().as_mut().unwrap().open_intake = 0;
+    // A transient refusal over an unchanged transcript is read again on its reread period.
     retried().await;
-    open.assert_adopted().await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn legacy_taking_the_channel_during_the_first_read_leaves_nothing_to_retry() {
-    if !isolated(concat!(
-        module_path!(),
-        "::legacy_taking_the_channel_during_the_first_read_leaves_nothing_to_retry"
-    )) {
-        return;
-    }
-    let open = Open::new();
-    let candidate = test_override::with_channels(|boot| boot.unwrap().candidate(CHANNEL).cloned());
-    let candidate = candidate.unwrap();
-    let reached = hook_reached(Step::Snapshot, move || {
-        assert!(!candidate.claim(CHANNEL));
-    });
-    let _tasks = open.start().await;
-    assert!(reached.load(Ordering::SeqCst));
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
-    let released = open.io.alarms.released();
-    assert!(
-        matches!(released.as_slice(), [(CHANNEL, d)] if d.contains("still open")),
-        "{released:?}"
+    retried().await;
+    assert_eq!(
+        adoption(CHANNEL),
+        Adoption::Committed,
+        "{:?}",
+        open.alarms()
     );
-    open.close();
-    retried().await;
-    assert_eq!((open.facts(), open.legacy.reads()), (1, 1), "no retry runs");
-    assert_eq!(open.io.alarms.released().len(), 1);
-    assert!(!open.harness.store.has_channel_dir(CHANNEL));
+    assert_eq!(
+        open.start_of_o(),
+        Some(frontier),
+        "the row did not move the start"
+    );
+    polls(3).await;
+    assert_eq!(open.harness.port.posts(), ["owed", "-# ✅ 완료"]);
 }
 
 /// A binding log that binds each of `sources` in turn, from seq 1.
@@ -490,8 +517,10 @@ fn binds(sources: &[&SourceId]) -> Vec<u8> {
     sources.iter().enumerate().flat_map(event).collect()
 }
 
+/// A source bound while a non-late adoption waited refuses the channel: the body stays held with
+/// a refusal alarm, nothing retries it here, and only a restart seeds the adoption again.
 #[tokio::test(start_paused = true)]
-async fn a_source_bound_while_waiting_leaves_the_channel_to_legacy() {
+async fn a_source_bound_while_waiting_refuses_the_channel_until_a_restart() {
     for resumed in [false, true] {
         let open = Open::new();
         let runtime = open.harness._runtime.path().to_path_buf();
@@ -515,7 +544,7 @@ async fn a_source_bound_while_waiting_leaves_the_channel_to_legacy() {
         p5_log(&runtime, CHANNEL, &log);
         open.legacy.caught_up(current);
         retried().await;
-        assert_eq!(adoption(CHANNEL), Adoption::Released, "resumed {resumed}");
+        assert_eq!(adoption(CHANNEL), Adoption::Refused, "resumed {resumed}");
         let released = open.io.alarms.released();
         assert!(
             matches!(released.as_slice(), [(CHANNEL, d)] if d.contains("bound while the adoption waited")),

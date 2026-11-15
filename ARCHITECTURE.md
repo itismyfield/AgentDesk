@@ -1659,8 +1659,8 @@ src/
 │   │   │   │   ├── inflight_repair.rs
 │   │   │   │   ├── inflight_repair_tests.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
-│   │   │   │   ├── legacy_send_tests.rs
 │   │   │   │   ├── live_agent_recovery.rs
+│   │   │   │   ├── o_owed_leak_tests.rs
 │   │   │   │   ├── retirement_await_tests.rs
 │   │   │   │   ├── runtime_lookup.rs
 │   │   │   │   ├── runtime_lookup_tests.rs
@@ -1950,6 +1950,7 @@ src/
 │   │   │   ├── o_writer_io.rs
 │   │   │   ├── o_writer_late_tmux_tests.rs
 │   │   │   ├── o_writer_legacy.rs
+│   │   │   ├── o_writer_legacy_codex_tests.rs
 │   │   │   ├── o_writer_repost_io.rs
 │   │   │   ├── o_writer_repost_io_tests.rs
 │   │   │   ├── outbound_delivery_port_tests.rs
@@ -2185,6 +2186,8 @@ src/
 │   │   │   ├── relay_output_replacements.rs
 │   │   │   ├── restore_inflight.rs
 │   │   │   ├── restore_persist_outcome.rs
+│   │   │   ├── restore_serial.rs
+│   │   │   ├── restore_serial_tests.rs
 │   │   │   ├── routing_orphan.rs
 │   │   │   ├── routing_orphan_tests.rs
 │   │   │   ├── runtime.rs
@@ -2200,6 +2203,7 @@ src/
 │   │   │   ├── controller_cutover.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── o_anchor_repost_tests.rs
+│   │   │   ├── o_duty.rs
 │   │   │   ├── restart.rs
 │   │   │   └── shared.rs
 │   │   ├── relay_health/
@@ -2512,6 +2516,8 @@ src/
 │   │   │   │   │   │   ├── refresh_tests.rs
 │   │   │   │   │   │   └── unbound_gateway_tests.rs
 │   │   │   │   │   └── owner_execution.rs
+│   │   │   │   ├── adoption_wake.rs
+│   │   │   │   ├── adoption_wake_tests.rs
 │   │   │   │   └── owner_port.rs
 │   │   │   ├── owner_execution/
 │   │   │   │   ├── tests/
@@ -2542,6 +2548,7 @@ src/
 │   │   │   ├── intake_delivery_sweep.rs
 │   │   │   ├── o_writer_host.rs
 │   │   │   ├── o_writer_host_custody_tests.rs
+│   │   │   ├── o_writer_host_intake_takeover_tests.rs
 │   │   │   ├── o_writer_host_takeover_tests.rs
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── orphan_recovery_fence_tests.rs
@@ -2612,6 +2619,7 @@ src/
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
 │   │   ├── standby_relay/
+│   │   │   ├── o_owed_settle_tests.rs
 │   │   │   ├── scheduled_settle.rs
 │   │   │   └── scheduled_settle_tests.rs
 │   │   ├── startup_reclaim/
@@ -4297,6 +4305,7 @@ src/
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── codex/
+│   │   │   │   │   ├── delivered.rs
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── claude.rs

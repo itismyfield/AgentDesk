@@ -169,7 +169,7 @@ mod tests {
                 channel,
                 Some(RuntimeHandoffKind::ClaudeTui)
             ),
-            Ok(false)
+            Err(cutover::IdentityError::AwaitingAdoption)
         );
         assert!(!transcript_turns(channel));
         cutover::test_override::with_channels(|snapshot| {

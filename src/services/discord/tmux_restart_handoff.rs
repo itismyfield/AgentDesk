@@ -821,10 +821,10 @@ mod o_cut_tests {
         }
     }
 
-    /// A cleanup that posts no notice leaves a pending adoption; the notice that carries the saved
-    /// body ends it before it is sent and shows that body once.
+    /// A pending adoption holds a restart handoff, with or without a notice: nothing is shown,
+    /// the row stays for O, and the adoption is unchanged.
     #[tokio::test(flavor = "current_thread")]
-    async fn only_a_handoff_notice_with_the_body_ends_a_pending_adoption() {
+    async fn a_pending_adoption_holds_a_restart_handoff_and_keeps_its_row() {
         use crate::services::discord::recovery_engine::o_cut_recorder::start_watching;
         use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
         use crate::services::tui_o::cutover::test_override;
@@ -869,21 +869,21 @@ mod o_cut_tests {
                         BODY,
                     )
                     .await;
-                    assert!(handled);
+                    assert!(!handled, "rebind={rebind_origin}");
                     assert!(
                         crate::services::discord::inflight::load_inflight_state(
                             &ProviderKind::Codex,
                             CHANNEL,
                         )
-                        .is_none(),
-                        "completed handoff must clear its exact row, rebind={rebind_origin}"
+                        .is_some(),
+                        "a held handoff keeps its row, rebind={rebind_origin}"
                     );
                     recorder.calls()
                 }
             };
-            for (rebind_origin, current_msg_id) in [(true, 0), (false, 0)] {
+            for (rebind_origin, current_msg_id) in [(true, 0), (false, 0), (false, 9_425_911)] {
                 let calls = handoff(rebind_origin, current_msg_id).await;
-                assert!(calls.is_empty(), "no notice: {calls:?}");
+                assert!(calls.is_empty(), "held: {calls:?}");
                 check.assert_settled();
                 assert_eq!(
                     check.adoption(),
@@ -891,14 +891,6 @@ mod o_cut_tests {
                     "rebind={rebind_origin}"
                 );
             }
-            let calls = handoff(false, 9_425_911).await;
-            let shown: Vec<_> = calls
-                .iter()
-                .filter(|call| call.content.as_deref().is_some_and(|c| c.contains(BODY)))
-                .collect();
-            assert_eq!(shown.len(), 1, "{calls:?}");
-            check.assert_settled();
-            assert_eq!(check.adoption(), Adoption::Released);
         })
         .await;
     }

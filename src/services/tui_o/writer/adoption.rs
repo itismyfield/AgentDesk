@@ -1,5 +1,5 @@
 //! Adoption of a selected Claude channel that already holds output: O starts at Legacy's cursor, or
-//! at the source's end once Legacy stalled behind it. Records Legacy left before it are only reported.
+//! at Legacy's delivered frontier when records past it were never delivered, and posts those.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -49,10 +49,33 @@ pub trait LegacyView: Send + Sync + 'static {
     /// Legacy's delivered frontier within `eof`; `None` from a host that keeps no delivery record.
     fn frontier(&self, channel: u64, tmux: &str, eof: u64) -> Option<u64>;
     fn tail_running(&self, tmux: &str) -> bool;
+    /// Legacy's Codex delivery records of `tmux`'s current generation; none from a host that keeps
+    /// no record, so nothing is left out of a takeover on its word.
+    fn codex_delivered(&self, _channel: u64, _tmux: &str) -> Result<CodexDelivered, String> {
+        Ok(CodexDelivered::default())
+    }
     /// What restarts Legacy's own redrive cycle for the channel; unchanged when nothing can say.
     fn epoch(&self, _channel: u64) -> LegacyEpoch {
         LegacyEpoch::default()
     }
+}
+
+/// One Codex delivery Legacy recorded: rollout bytes it posted, and when, if the record says.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CodexDelivery {
+    pub range: (u64, u64),
+    pub at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// A channel's Codex delivery records of one tmux generation; they name no rollout file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CodexDelivered {
+    /// When the generation began; `None` when it cannot be read, and then no record is given.
+    pub generation_since: Option<chrono::DateTime<chrono::Utc>>,
+    /// The durable delivered frontier, when that generation wrote it.
+    pub frontier: Option<CodexDelivery>,
+    /// Confirmed delivery receipts of that generation and tmux.
+    pub receipts: Vec<CodexDelivery>,
 }
 
 pub type LegacyTurnIdentity = (u64, String, Option<String>, Option<u64>, Option<String>);
@@ -273,6 +296,8 @@ struct Pinned {
     len: u64,
     modified: Option<SystemTime>,
     hash: String,
+    /// Where O starts instead of `len`, over the hash of the bytes before it.
+    start: Option<(u64, String)>,
 }
 
 impl Pinned {
@@ -303,10 +328,12 @@ impl Pinned {
     }
 
     fn init(&self) -> InitSource {
+        let (delivery_start, prefix_hash) =
+            (self.start.clone()).unwrap_or((self.len, self.hash.clone()));
         InitSource {
             source_id: self.source.clone(),
-            delivery_start: self.len,
-            prefix_hash: self.hash.clone(),
+            delivery_start,
+            prefix_hash,
         }
     }
 }
@@ -320,6 +347,8 @@ struct Turns {
     /// Whether the frontier is 0 or ends a record.
     frontier_on_line: bool,
     undelivered: Option<u64>,
+    /// The hash of the bytes before the frontier, once it ends a record.
+    frontier_hash: Option<String>,
 }
 
 /// What neither Legacy nor O posts: turn ends and the TUI's own bookkeeping. Anything else
@@ -347,6 +376,7 @@ impl Turns {
             open: false,
             frontier_on_line: frontier == 0,
             undelivered: None,
+            frontier_hash: (frontier == 0).then(|| hex::encode(Sha256::digest(b""))),
         }
     }
 
@@ -425,6 +455,9 @@ fn read(source: &SourceId, len: u64, turns: Option<&mut Turns>) -> Result<Pinned
         }
         if let Some(turns) = turns.as_deref_mut() {
             turns.record(&line, start, at);
+            if at == turns.frontier {
+                turns.frontier_hash = Some(hex::encode(hasher.clone().finalize()));
+            }
         }
     }
     if at != len {
@@ -438,6 +471,7 @@ fn read(source: &SourceId, len: u64, turns: Option<&mut Turns>) -> Result<Pinned
         len,
         modified: meta.modified().ok(),
         hash: hex::encode(hasher.finalize()),
+        start: None,
     })
 }
 
@@ -455,6 +489,9 @@ pub struct Snapshot {
     /// The first record past Legacy's delivered frontier that is not quiet.
     undelivered: Option<u64>,
     frontier: u64,
+    frontier_hash: Option<String>,
+    /// O took over the records past the frontier, so the frontier must not move before the init.
+    owed_taken: bool,
     /// The nonblocking cursor observation a late pin must still hold at publication.
     late: Option<LegacyCursor>,
 }
@@ -555,9 +592,9 @@ fn pin_at_mode(
         }
     };
     let frontier = legacy.frontier(channel, &tmux, start);
-    if late && frontier != Some(start) {
+    if late && frontier.is_none() {
         return Err(Refused::retry(format!(
-            "Legacy frontier {frontier:?} does not cover EOF {start}"
+            "Legacy frontier unknown at {start}"
         )));
     }
     let not_authority = || Refused::new(Hold::Final, "the delivery record is not authoritative");
@@ -584,9 +621,6 @@ fn pin_at_mode(
     }
     if turns.open {
         return Err(open());
-    }
-    if late && turns.undelivered.is_some() {
-        return Err(Refused::retry("Legacy still owes records before O's start"));
     }
     let mut pinned = vec![head];
     // Only the newest past sources within budget that still exist are pinned; a later bind of any
@@ -625,6 +659,8 @@ fn pin_at_mode(
         named: named.into_iter().cloned().collect(),
         undelivered: turns.undelivered,
         frontier,
+        frontier_hash: turns.frontier_hash,
+        owed_taken: false,
         late: origin,
     })
 }
@@ -733,12 +769,19 @@ impl Snapshot {
         if let Some(expected) = self.late.as_ref() {
             let observed = legacy.late_cursor(&self.tmux).map_err(Refused::retry)?;
             if &observed != expected
-                || legacy.frontier(channel, &self.tmux, current.len) != Some(current.len)
+                || legacy.frontier(channel, &self.tmux, current.len) != Some(self.frontier)
             {
                 return Err(Refused::retry(
                     "Legacy cursor or frontier changed after late pin",
                 ));
             }
+        }
+        if self.owed_taken
+            && legacy.frontier(channel, &self.tmux, current.len) != Some(self.frontier)
+        {
+            return Err(Refused::retry(
+                "Legacy's frontier moved after O took the records it owes",
+            ));
         }
         if !past_stall && legacy.tail_running(&self.tmux) {
             return Err(Refused::retry("a Legacy response tail is running"));
@@ -753,9 +796,32 @@ impl Snapshot {
         Ok(self.pinned.iter().map(Pinned::init).collect())
     }
 
-    /// Where O starts on the current source.
+    /// Where the pin read the current source to.
     pub fn start(&self) -> u64 {
         self.pinned.first().map_or(0, |pinned| pinned.len)
+    }
+
+    /// The hash of the current source's bytes before `start`.
+    pub fn start_hash(&self) -> Option<&str> {
+        self.pinned.first().map(|pinned| pinned.hash.as_str())
+    }
+
+    /// Whether Legacy's delivered frontier reaches the current source's read end.
+    pub fn delivered_to_start(&self) -> bool {
+        self.frontier == self.start()
+    }
+
+    /// O takes over the records Legacy owes past its frontier: the current source starts there,
+    /// so nothing is waited for and nothing is abandoned.
+    pub fn owed_to_o(mut self) -> Self {
+        let (Some(_), Some(hash)) = (self.undelivered, self.frontier_hash.clone()) else {
+            return self;
+        };
+        if let Some(current) = self.pinned.first_mut() {
+            current.start = Some((self.frontier, hash));
+            (self.undelivered, self.owed_taken) = (None, true);
+        }
+        self
     }
 
     /// Why an adoption must wait: a record past Legacy's frontier that Legacy may still send.
