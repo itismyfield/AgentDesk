@@ -17,7 +17,7 @@ pub(super) use state::*;
 #[path = "turn_stream_collector/entry.rs"]
 mod entry;
 #[cfg(test)]
-#[path = "turn_stream_collector/observations.rs"]
+#[path = "turn_stream_collector/observations_tests.rs"]
 mod o_test;
 pub(super) use entry::collect_turn_stream_until_terminal;
 

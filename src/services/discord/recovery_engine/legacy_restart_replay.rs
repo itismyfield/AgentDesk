@@ -4,7 +4,7 @@
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::inflight::{InflightEpisodePin, InflightTurnState};
 
-#[path = "legacy_restart_replay/proof.rs"]
+#[path = "legacy_restart_replay/proof_tests.rs"]
 pub(super) mod proof;
 
 /// The pinned source policy of the row's tmux source authority.

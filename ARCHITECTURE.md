@@ -1590,8 +1590,8 @@ src/
 │   │   ├── delivery_lease_cell/
 │   │   │   ├── exact_lease/
 │   │   │   │   ├── tests.rs
-│   │   │   │   └── token.rs
-│   │   │   ├── exact_lease.rs
+│   │   │   │   └── token_tests.rs
+│   │   │   ├── exact_lease_tests.rs
 │   │   │   └── source_epoch_observer.rs
 │   │   ├── execution_identity/
 │   │   │   ├── herdr_agent_hint.rs
@@ -2062,7 +2062,7 @@ src/
 │   │   │   │   │   ├── claude.rs
 │   │   │   │   │   ├── codex.rs
 │   │   │   │   │   ├── codex_herdr_tests.rs
-│   │   │   │   │   ├── herdr.rs
+│   │   │   │   │   ├── herdr_fixture_tests.rs
 │   │   │   │   │   ├── herdr_safety_tests.rs
 │   │   │   │   │   └── herdr_tests.rs
 │   │   │   │   ├── admission.rs
@@ -2119,7 +2119,7 @@ src/
 │   │   │   │   ├── owner.rs
 │   │   │   │   └── placeholder.rs
 │   │   │   ├── legacy_restart_replay/
-│   │   │   │   └── proof.rs
+│   │   │   │   └── proof_tests.rs
 │   │   │   ├── manual_rebind/
 │   │   │   │   ├── adoption.rs
 │   │   │   │   ├── adoption_notice_pg_tests.rs
@@ -2259,8 +2259,8 @@ src/
 │   │   │   ├── model/
 │   │   │   │   ├── entry_tests.rs
 │   │   │   │   └── tests.rs
-│   │   │   ├── capacity.rs
-│   │   │   └── model.rs
+│   │   │   ├── capacity_tests.rs
+│   │   │   └── model_tests.rs
 │   │   ├── router/
 │   │   │   ├── herdr_consent/
 │   │   │   │   ├── admission.rs
@@ -2440,7 +2440,7 @@ src/
 │   │   │   │   ├── input_payload.rs
 │   │   │   │   ├── intake_turn.rs
 │   │   │   │   ├── latency_spans.rs
-│   │   │   │   ├── owned_turn_start.rs
+│   │   │   │   ├── owned_turn_start_fixture_tests.rs
 │   │   │   │   ├── owned_turn_start_tests.rs
 │   │   │   │   ├── pre_admission_control.rs
 │   │   │   │   ├── provider_dispatch.rs
@@ -2744,7 +2744,7 @@ src/
 │   │   │   │   ├── chunk_forward.rs
 │   │   │   │   ├── entry.rs
 │   │   │   │   ├── idle_read.rs
-│   │   │   │   ├── observations.rs
+│   │   │   │   ├── observations_tests.rs
 │   │   │   │   ├── state.rs
 │   │   │   │   ├── stream_chunk.rs
 │   │   │   │   └── stream_seed.rs
@@ -3381,7 +3381,7 @@ src/
 │   │   │   │   ├── tests.rs
 │   │   │   │   ├── watch_host.rs
 │   │   │   │   ├── watch_host_tests.rs
-│   │   │   │   └── watcher_install_fixture.rs
+│   │   │   │   └── watcher_install_fixture_tests.rs
 │   │   │   ├── codex_tui_restore.rs
 │   │   │   ├── dispatched_origin_ghost.rs
 │   │   │   ├── dispatched_origin_ghost_tests.rs

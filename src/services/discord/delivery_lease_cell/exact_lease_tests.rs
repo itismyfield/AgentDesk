@@ -1,3 +1,4 @@
+#[path = "exact_lease/token_tests.rs"]
 pub(super) mod token;
 
 use std::marker::PhantomData;
@@ -362,4 +363,5 @@ fn exact_matches(
 }
 
 #[cfg(test)]
+#[path = "exact_lease/tests.rs"]
 mod tests;
