@@ -24,7 +24,8 @@ IdleRestart == IdleRestartFloor \/ IdleRestartRestored
 ResumeRestartRestored == Mode \in {"ready-resume-restart-durable", "ready-resume-restart-durable-cut",
                                    "ready-resume-restart-durable-late", "ready-resume-restart-durable-person",
                                    "ready-resume-restart-durable-no-quiet", "ready-resume-restart-tmux",
-                                   "ready-resume-restart-durable-marker", "ready-resume-restart-durable-marker-l0"}
+                                   "ready-resume-restart-durable-marker", "ready-resume-restart-durable-marker-l0",
+                                   "ready-resume-restart-durable-turn", "ready-resume-restart-durable-turn-no-quiet"}
 \* A tmux resume before its start was recorded: the restart finds no record to restore from.
 ResumeRestartUnrecorded == Mode = "ready-resume-restart-tmux-before"
 \* A permission marker lands after the start, before or after the restart. The recorded start length
@@ -33,6 +34,10 @@ ResumeRestartUnrecorded == Mode = "ready-resume-restart-tmux-before"
 Marker == Mode \in {"ready-resume-restart-durable-marker", "ready-resume-restart-durable-marker-l0"}
 MarkerL0 == Mode = "ready-resume-restart-durable-marker-l0"
 LateRestore == Mode = "ready-resume-restart-durable-late"
+\* This run closes a turn after the recorded start, then the daemon restarts. The no-quiet variant
+\* restores the start without the quiet judgment and so withholds the closed turn's own proof.
+TurnFirst == Mode \in {"ready-resume-restart-durable-turn", "ready-resume-restart-durable-turn-no-quiet"}
+RestoreNoQuiet == Mode = "ready-resume-restart-durable-turn-no-quiet"
 Restored == IdleRestartRestored \/ ResumeRestartRestored
 RetainsUnproven == IdleRestart \/ ResumeRestartRestored \/ ResumeRestartUnrecorded \/
                    Mode \in {"ready-resume-restart-after", "ready-resume-restart-person",
@@ -48,7 +53,8 @@ ResumeCut == Mode \in {"ready-resume-cut-before", "ready-resume-cut-after", "rea
 ResumeHistory == ResumeAfter \/ ResumeNoQuiet \/ ResumeCut \/ Mode = "ready-resume-meta-before"
 ResumePerson == Mode \in {"ready-resume-person-after", "ready-resume-no-quiet",
                           "ready-resume-restart-person", "ready-resume-restart-any-timeout",
-                          "ready-resume-restart-durable-person", "ready-resume-restart-durable-no-quiet"}
+                          "ready-resume-restart-durable-person", "ready-resume-restart-durable-no-quiet",
+                          "ready-resume-restart-durable-turn", "ready-resume-restart-durable-turn-no-quiet"}
 Fresh == ClearPreSource \/ ResumeHistory \/ Mode \in {"ready-fresh", "ready-clear", "ready-resume", "ready-late-dialog", "ready-preflight-only"}
 Dialog == Mode \in {"ready-late-dialog", "ready-preflight-only"}
 Permission == Mode \in {"ready-permission-later", "ready-permission-poison"}
@@ -160,15 +166,17 @@ SoftSummary ==
 ObservedNow == IF r.tail = "summary" THEN "Idle"
                ELSE IF r.phase = "Booting" THEN "Unknown"
                ELSE IF r.turn = 0 /\ r.history = "cut" THEN "Running" ELSE r.phase
-\* The same observation restores this execution's logged resume start while no turn of this run
-\* exists (the no-quiet mutant drops that check); the late placement only past an Idle observer.
-RestoresStart == r.restore = "pending"
-                 /\ (r.turn = 0 \/ ResumeNoQuiet \/ (MarkerL0 /\ r.marked /\ r.turn = 1))
-                 /\ (~LateRestore \/ ObservedNow = "Idle")
+\* The code's quiet judgment on the same tail: no turn record or marker after the recorded start
+\* length (base). The no-quiet mutants skip it; the L0 mutant measures from the length at restore.
+RecordQuiet == r.turn = r.base \/ ResumeNoQuiet \/ RestoreNoQuiet \/ MarkerL0
+\* The same observation restores this execution's recorded resume start only when it is quiet; the
+\* late placement only past an Idle observer. A restored start keeps the floor and so ends R1.
+RestoresStart == r.restore = "pending" /\ RecordQuiet /\ (~LateRestore \/ ObservedNow = "Idle")
 Observe ==
     /\ r' = [r EXCEPT !.observed = ObservedNow,
                      !.restore = IF RestoresStart THEN "done" ELSE @,
                      !.started = @ \/ RestoresStart,
+                     !.restored = IF RestoresStart THEN "floor" ELSE @,
                      !.base = IF RestoresStart /\ MarkerL0 THEN r.turn ELSE @,
                      !.seenEpoch = r.epoch, !.seenTurn = r.turn,
                      !.softStage = IF Suppressed /\ r.softStage = 2 THEN 3 ELSE @,
@@ -307,6 +315,7 @@ RestoreProof ==
 \* The in-memory continuation latch does not survive the restart in the idle-restart modes.
 Restart ==
     /\ r.restarts > 0 /\ r.head = 0
+    /\ ~TurnFirst \/ (r.personTurns = 0 /\ r.phase = "Idle")
     /\ r' = [r EXCEPT !.epoch = @ + 1, !.observed = "Unknown",
                      !.restored = IF ResumeRestart \/ IdleRestartFloor THEN "floor"
                                   ELSE IF Restored THEN (IF RestoreProof THEN "passed" ELSE "floor")

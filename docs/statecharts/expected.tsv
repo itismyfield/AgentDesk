@@ -317,6 +317,8 @@ input-single-path/InputPathReadyResumeRestartDurableMarker.cfg	InputPath	-	-
 input-single-path/InputPathReadyResumeRestartDurableMarkerL0.cfg	InputPath	ReadyNoIdleRunningInjection	-
 input-single-path/InputPathReadyResumeRestartDurableNoQuiet.cfg	InputPath	ReadyNoIdleRunningInjection	-
 input-single-path/InputPathReadyResumeRestartDurablePerson.cfg	InputPath	-	-
+input-single-path/InputPathReadyResumeRestartDurableTurn.cfg	InputPath	-	-
+input-single-path/InputPathReadyResumeRestartDurableTurnNoQuiet.cfg	InputPath	-	ReadyPendingEventuallyExecutes,ReadyRestartedIdleEventuallyReceives,ReadyResumedIdleEventuallyReceives
 input-single-path/InputPathReadyResumeRestartGap.cfg	InputPath	-	ReadyPendingEventuallyExecutes,ReadyResumedIdleEventuallyReceives
 input-single-path/InputPathReadyResumeRestartPerson.cfg	InputPath	-	-
 input-single-path/InputPathReadyResumeRestartTmux.cfg	InputPath	-	-
