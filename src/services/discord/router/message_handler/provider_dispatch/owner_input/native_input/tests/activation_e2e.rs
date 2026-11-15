@@ -757,7 +757,10 @@ async fn isolated(kind: &str) {
         WAIT_CAP,
     )
     .await;
-    let mut foreign = "external N1 runs".to_string();
+    let mut foreign = (0..3)
+        .map(|i| format!("foreign-reply-N1-1-{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         crate::services::discord::turn_bridge::native_input::reject_legacy_body(
             &shared,
@@ -769,7 +772,7 @@ async fn isolated(kind: &str) {
         .await
     );
     assert!(foreign.is_empty());
-    assert_eq!(
+    assert!(
         crate::services::discord::turn_bridge::native_input::neutral_exit(
             &shared,
             &ProviderKind::Claude,
@@ -777,7 +780,7 @@ async fn isolated(kind: &str) {
             &actor
         )
         .await,
-        strict
+        "native pending and settled episodes both leave the bridge neutrally"
     );
     let own: Vec<&str> = if !strict {
         vec!["N1-1"]
