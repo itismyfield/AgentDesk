@@ -200,13 +200,13 @@ SupplyResult == /\ review.pc = 4 /\ admitted
                 /\ review' = [review EXCEPT !.pc = 5, !.firstProof = 1, !.proofs = {"two"}]
                 /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, source, restored, admitted>>
 SupplyActorCAS == /\ review.pc = 5 /\ result # "None"
-                  /\ review' = [review EXCEPT !.pc = 6, !.clearLease = 0]
+                  /\ review' = [review EXCEPT !.pc = 6, !.clearLease = IF role = "Primary" THEN 0 ELSE @]
                   /\ UNCHANGED BaseVars
-SupplyRowCAS == /\ review.pc = 6 /\ review.clearLease = 0
-                /\ review' = [review EXCEPT !.pc = 7, !.clearRows = 0]
+SupplyRowCAS == /\ review.pc = 6 /\ (role = "Follower" \/ review.clearLease = 0)
+                /\ review' = [review EXCEPT !.pc = 7, !.clearRows = IF role = "Primary" THEN 0 ELSE @]
                 /\ UNCHANGED BaseVars
-SupplyWake == /\ review.pc = 7 /\ review.clearRows = 0
-              /\ review' = [review EXCEPT !.pc = 8, !.clearHead = TRUE]
+SupplyWake == /\ review.pc = 7 /\ (role = "Follower" \/ review.clearRows = 0)
+              /\ review' = [review EXCEPT !.pc = 8, !.clearHead = IF role = "Primary" THEN TRUE ELSE @]
               /\ UNCHANGED BaseVars
 ForeignTypedRun == /\ review.pc >= 8 /\ review.pc < 11
                    /\ review' = [review EXCEPT !.pc = @ + 1,
@@ -218,12 +218,13 @@ SupplySpec == Init /\ [][SupplyCaptured \/ SupplyRegistration \/ OOffer \/ Nativ
               /\ WF_vars(SupplyCaptured) /\ WF_vars(SupplyRegistration) /\ WF_vars(OOffer)
               /\ WF_vars(NativePreparedAdmit) /\ WF_vars(SupplyRejected) /\ WF_vars(SupplyResult)
               /\ WF_vars(SupplyActorCAS) /\ WF_vars(SupplyRowCAS) /\ WF_vars(SupplyWake) /\ WF_vars(ForeignTypedRun)
+SupplyFollowerNoParent == role = "Follower" => review.clearLease = 1 /\ review.clearRows = 1 /\ ~review.clearHead
 SupplyTyped == admitted => SupplyValid
 SupplyOrder == /\ (review.clearLease = 0 => result # "None")
                /\ (review.clearRows = 0 => review.clearLease = 0)
                /\ (review.clearHead => review.clearRows = 0)
 SupplyResultEventually == <>(result # "None")
-SupplyLeaseEventuallyFree == <>(review.clearLease = 0)
+SupplyLeaseEventuallyFree == role = "Primary" => <>(review.clearLease = 0)
 SupplyHeadEventuallyInjected == <>review.clearHead
 SupplyRejectedEventually == <>(review.pc = 11)
 NoForeignResponse == review.firstProof <= 1 /\ review.proofs \subseteq {"two"}
