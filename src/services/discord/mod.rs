@@ -31,6 +31,7 @@ pub(crate) mod host_key_derivation;
 pub(crate) mod host_liveness;
 pub(crate) mod host_teardown_gate;
 pub(crate) mod http;
+mod id_bridge;
 mod idle_detector;
 mod idle_relay_drift;
 mod inflight;
