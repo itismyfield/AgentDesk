@@ -528,4 +528,7 @@ ReadyRetainedOnce == Readiness!RetainedOnce
 ReadyExpiryOnlyUnproven == Readiness!ExpiryOnlyUnproven
 ReadyPendingEventuallySettles == Readiness!PendingEventuallySettles
 
+ReadyNoUnsafeClearRetire == Readiness!NoUnsafeClearRetire
+ReadyClearCursorPreserved == Readiness!ClearCursorPreserved
+ReadyClearAtomic == Readiness!ClearAtomic
 =============================================================================

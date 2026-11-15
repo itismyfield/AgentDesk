@@ -175,3 +175,88 @@ async fn r1_unsent_full_frame_keeps_external_direct_notice_pg() {
         &format!("-# ⌨️ tui direct input\n```\n{frame}\n```")
     );
 }
+
+/// One hook prompt whose own transcript row is a scheduled fire or a typed input, on a channel
+/// whose turns are transcript-driven or not; returns the one notice that names `canary`.
+async fn announce_hook_prompt(turn_mode: bool, scheduled: bool, canary: &str) -> String {
+    let busy = idle().await;
+    let rt = &busy.rt;
+    let _confirmed = turn_mode.then(|| TestConfirmation::new(CHANNEL_ID));
+    assert_eq!(
+        crate::services::tui_o::turn_mode::transcript_turns(CHANNEL_ID),
+        turn_mode
+    );
+    let tx = observer(rt);
+    let session = busy.pane.session();
+    let transcript = busy.pane.path(InjectPane::TRANSCRIPT);
+    let prompt_id = format!("i8142-fire-{}", fresh_id());
+    let text = format!("{canary}\nsecond line");
+    let row = if scheduled {
+        // The fire's own row, with the marks Claude Code 2.1.325 writes on it.
+        serde_json::json!({"type":"user", "isMeta":true, "promptId":prompt_id,
+            "uuid":format!("{prompt_id}-row"), "promptSource":"system",
+            "wakeupSource":"schedule_wakeup", "scheduledTaskId":"abbf09df",
+            "turnOrigin":"scheduled", "message":{"role":"user","content":text}})
+    } else {
+        serde_json::json!({"type":"user", "promptId":prompt_id,
+            "uuid":format!("{prompt_id}-row"), "turnOrigin":"human",
+            "message":{"role":"user","content":text}})
+    };
+    busy.pane.set(
+        InjectPane::TRANSCRIPT,
+        &format!("{{\"type\":\"system\",\"subtype\":\"turn_duration\"}}\n{row}\n"),
+    );
+    tx.send(HookEvent {
+        original_context: None,
+        provider: "claude".into(),
+        session_id: session,
+        kind: HookEventKind::UserPromptSubmit,
+        received_at: chrono::Utc::now(),
+        payload: serde_json::json!({"prompt":text, "prompt_id":prompt_id,
+            "transcript_path":transcript}),
+        fanout: None,
+    })
+    .unwrap();
+    assert!(
+        wait_until(WAIT, || {
+            let found = rt.notices().iter().any(|notice| notice.contains(canary));
+            Box::pin(async move { found })
+        })
+        .await,
+        "the hook prompt must be announced: {:?}",
+        rt.notices()
+    );
+    let notices = rt.notices();
+    rt.finish().await;
+    let matching: Vec<_> = notices
+        .iter()
+        .filter(|notice| notice.contains(canary))
+        .collect();
+    assert_eq!(matching.len(), 1, "one notice: {notices:?}");
+    matching[0].clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduled_fire_hook_is_announced_under_the_scheduled_header_pg() {
+    assert_eq!(
+        announce_hook_prompt(true, true, "i8142 turn-mode fire").await,
+        "-# ⏰ scheduled prompt\n```\ni8142 turn-mode fire\nsecond line\n```"
+    );
+}
+
+/// A channel whose turns are not transcript-driven posts from the relay's own turn start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduled_fire_hook_without_transcript_turns_keeps_the_scheduled_header_pg() {
+    assert_eq!(
+        announce_hook_prompt(false, true, "i8142 relay-turn fire").await,
+        "-# ⏰ scheduled prompt\n```\ni8142 relay-turn fire\nsecond line\n```"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_hook_prompt_without_transcript_turns_keeps_the_typed_header_pg() {
+    assert_eq!(
+        announce_hook_prompt(false, false, "i8142 relay-turn typed").await,
+        "-# ⌨️ tui direct input\n```\ni8142 relay-turn typed\nsecond line\n```"
+    );
+}

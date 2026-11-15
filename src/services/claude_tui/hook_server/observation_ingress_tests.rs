@@ -209,6 +209,9 @@ impl Drop for Ingress {
 #[path = "native_clear_fence_tests.rs"]
 mod native_clear_fence_tests;
 
+#[path = "same_session_source_tests.rs"]
+mod same_session_source_tests;
+
 #[path = "resume_renumber_tests.rs"]
 mod resume_renumber_tests;
 

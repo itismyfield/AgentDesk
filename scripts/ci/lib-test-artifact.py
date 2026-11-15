@@ -14,6 +14,7 @@ import sys
 
 BUILD = ["cargo", "test", "--locked", "--lib", "--no-run",
          "--message-format=json"]
+NEXTEST_BUILD = ["cargo", "nextest", "archive", "--lib"]
 FILES = ("lib-tests", "plain.list", "ignored.list")
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -107,18 +108,69 @@ def prepare(directory, root=ROOT):
             executables.add(item["executable"])
     if len(executables) != 1:
         raise ValueError("Cargo must produce exactly one libtest executable")
+    _package(directory, Path(executables.pop()), metadata, root)
+    print("lib-test artifact: prepared one lib build", file=sys.stderr)
+
+
+def _package(directory, executable, metadata, root, inventory=None):
     directory.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(executables.pop(), directory / "lib-tests")
+    shutil.copy2(executable, directory / "lib-tests")
     plain = _capture([str((directory / "lib-tests").resolve()), "--list"], root)
     ignored = _capture([str((directory / "lib-tests").resolve()),
                         "--list", "--ignored"], root)
     if not _inventory(plain) or not _inventory(ignored) <= _inventory(plain):
         raise ValueError("empty or inconsistent compiled inventory")
+    if inventory is not None and (_inventory(plain), _inventory(ignored)) != inventory:
+        raise ValueError("binary inventory differs from the nextest plan")
     (directory / "plain.list").write_text(plain)
     (directory / "ignored.list").write_text(ignored)
     metadata["checksums"] = {name: _checksum(directory / name) for name in FILES}
     (directory / "metadata.json").write_text(json.dumps(metadata, sort_keys=True) + "\n")
-    print("lib-test artifact: prepared one lib build", file=sys.stderr)
+
+
+def prepare_nextest(directory, source, root=ROOT):
+    """Import this run's existing archive without invoking a Cargo build."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import nextest_ci
+
+    root, source = root.resolve(), source.resolve()
+    metadata = _contract(root)
+    plan = nextest_ci.load_plan(source / "plan/plan.json")
+    identity = plan["identity"]
+    expected = {
+        "sha": metadata["sha"], "run_id": metadata["run_id"],
+        "rust": metadata["rust"], "scope": "linux-lib",
+        "build": {"target": metadata["host"], "features": ["default"],
+                  "cargo_profile": "test", "nextest_profile": "ci",
+                  "options": ["CARGO_PROFILE_DEV_DEBUG=0", "CARGO_PROFILE_TEST_DEBUG=0"]},
+    }
+    if {key: identity.get(key) for key in expected} != expected:
+        raise ValueError("nextest checkout/build/run contract mismatch")
+    archive = source / "lib-tests.tar.zst"
+    if _checksum(archive) != identity["archive_sha256"]:
+        raise ValueError("nextest archive checksum mismatch")
+    extract = source / "extract"
+    extract.mkdir(parents=True, exist_ok=True)
+    listing = json.loads(_capture([
+        "cargo", "nextest", "list", "--archive-file", str(archive),
+        "--workspace-remap", str(root), "--extract-to", str(extract),
+        "--extract-overwrite", "--ignore-default-filter", "--message-format", "json",
+    ], root))
+    suites = list(listing["rust-suites"].values())
+    if len(suites) != 1 or suites[0]["kind"] != "lib":
+        raise ValueError("nextest archive must contain exactly one lib binary")
+    suite = suites[0]
+    binary = Path(suite["binary-path"]).resolve()
+    if not binary.is_relative_to(extract) or not binary.is_file():
+        raise ValueError("nextest binary must be inside the extracted archive")
+    runnable = {tuple(test) for worker in plan["workers"] for test in worker["tests"]}
+    ignored = {tuple(test) for test in plan["ignored"]}
+    if {binary_id for binary_id, _ in runnable | ignored} != {suite["binary-id"]}:
+        raise ValueError("nextest plan binary identity mismatch")
+    metadata["build"] = NEXTEST_BUILD
+    _package(directory, binary, metadata, root,
+             ({name for _, name in runnable | ignored}, {name for _, name in ignored}))
+    print("lib-test artifact: reused validated nextest archive (no build)", file=sys.stderr)
 
 
 def validate(directory, root=ROOT):
@@ -126,6 +178,8 @@ def validate(directory, root=ROOT):
     root = root.resolve()
     metadata = json.loads((directory / "metadata.json").read_text())
     expected = _contract(root)
+    if metadata.get("build") == NEXTEST_BUILD:
+        expected["build"] = NEXTEST_BUILD
     # Failed-job reruns reuse successful producers from earlier attempts.
     expected.pop("run_attempt")
     if {key: metadata.get(key) for key in expected} != expected:
@@ -196,7 +250,7 @@ def _libtest_args(command, root):
     return filters + after
 
 
-def run(command, root=ROOT):
+def run(command, root=ROOT, require_artifact=False):
     root = root.resolve()
     if command[:2] != ["cargo", "test"]:
         print("lib-test artifact: expected cargo test command", file=sys.stderr)
@@ -208,6 +262,9 @@ def run(command, root=ROOT):
             raise ValueError("artifact input absent")
         binary = validate(Path(directory), root)
     except (OSError, ValueError, TypeError, KeyError) as error:
+        if require_artifact:
+            print(f"lib-test artifact: required artifact invalid: {error}", file=sys.stderr)
+            return 1
         print(f"lib-test artifact: Cargo fallback: {error}", file=sys.stderr)
         return subprocess.call(command, cwd=root)
     print("lib-test artifact: using validated binary", file=sys.stderr)
@@ -222,19 +279,25 @@ def run(command, root=ROOT):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="operation", required=True)
-    for operation in ("prepare", "validate", "list"):
+    for operation in ("prepare", "prepare-nextest", "validate", "list"):
         sub = subparsers.add_parser(operation)
         sub.add_argument("--directory", required=True, type=Path)
+        if operation == "prepare-nextest":
+            sub.add_argument("--source", required=True, type=Path)
         if operation == "list":
             sub.add_argument("--ignored", action="store_true")
-    subparsers.add_parser("run").add_argument("command", nargs=argparse.REMAINDER)
+    run_parser = subparsers.add_parser("run")
+    run_parser.add_argument("--require-artifact", action="store_true")
+    run_parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     try:
         if args.operation == "run":
             command = args.command[1:] if args.command[:1] == ["--"] else args.command
-            return run(command)
+            return run(command, require_artifact=args.require_artifact)
         if args.operation == "prepare":
             prepare(args.directory)
+        elif args.operation == "prepare-nextest":
+            prepare_nextest(args.directory, args.source)
         elif args.operation == "validate":
             print(validate(args.directory))
         else:
