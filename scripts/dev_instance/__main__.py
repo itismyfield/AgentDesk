@@ -7,6 +7,7 @@ import sys
 import uuid
 from pathlib import Path
 
+from .config import active_claude_login
 from .down import remove
 from .files import BlockedBinary, InstanceError, instance_root, safe_absolute, write_credential
 from .manifest import child_environment, prepare, read_json, validate
@@ -29,6 +30,7 @@ def main(argv=None):
     create.add_argument("--instance", default=None)
     create.add_argument("--api-port", type=int)
     create.add_argument("--pg-port", type=int)
+    create.add_argument("--claude-login", action="store_true", help="Use the active personal Claude login without switching or copying")
     inspect = commands.add_parser("validate")
     inspect.add_argument("--instance", required=True)
     inspect.add_argument("--require-credentials", action="store_true")
@@ -53,7 +55,7 @@ def main(argv=None):
             profile = read_json(Path(args.profile).absolute())
             instance_id = args.instance or str(uuid.uuid4())
             result = prepare(base, instance_id, Path(args.worktree).absolute(), profile, os.environ,
-                             args.api_port, args.pg_port)
+                             args.api_port, args.pg_port, active_claude_login(Path.home()) if args.claude_login else None)
         elif args.command == "down":
             result = remove(base, args.instance, os.environ)
         elif args.command == "up":

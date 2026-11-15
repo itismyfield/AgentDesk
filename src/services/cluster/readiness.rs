@@ -258,7 +258,7 @@ fn collect(config: &Config) -> ExecutionProbe {
         let Some(kind) = ProviderKind::from_str(&id) else {
             continue;
         };
-        let Some(probe) = kind.probe_runtime() else {
+        let Some(probe) = readiness_probe(&kind) else {
             continue;
         };
         let mut profiles = BTreeMap::from([("default".into(), probe.credential_present)]);
@@ -267,7 +267,12 @@ fn collect(config: &Config) -> ExecutionProbe {
                 if profile.provider != id {
                     continue;
                 }
-                let present =
+                let present = if id == "claude"
+                    && profile_id == "test-claude"
+                    && crate::config::test_instance::environment::claude_login_enabled()
+                {
+                    probe.credential_present
+                } else {
                     provider_auth_profile::resolve(kind.clone(), Some(profile_id), None, &catalog)
                         .ok()
                         .is_some_and(|overlay| {
@@ -277,7 +282,8 @@ fn collect(config: &Config) -> ExecutionProbe {
                                 Some(&overlay),
                             )
                             .credential_present
-                        });
+                        })
+                };
                 profiles.insert(profile_id.clone(), present);
             }
         }
@@ -395,4 +401,25 @@ mod profile_projection_tests {
         drop(home_guard);
         drop(runtime);
     }
+}
+
+fn readiness_probe(kind: &ProviderKind) -> Option<crate::services::provider::ProviderRuntimeProbe> {
+    if *kind != ProviderKind::Claude
+        || !crate::config::test_instance::environment::claude_login_enabled()
+    {
+        return kind.probe_runtime();
+    }
+    let entry = kind.registry_entry()?;
+    let binary = platform::probe_provider_binary_version(entry.capabilities.binary_name);
+    Some(crate::services::provider::ProviderRuntimeProbe {
+        provider: kind.clone(),
+        capabilities: entry.capabilities,
+        resolution: binary.resolution,
+        version: binary.version_output,
+        probe_failure_kind: binary.probe_failure_kind,
+        skipped_candidate_failures: binary.skipped_candidate_failures,
+        credential_present: crate::config::test_instance::environment::claude_login_presence()
+            .unwrap_or(false),
+        credential_source: None,
+    })
 }

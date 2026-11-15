@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from .config import HERDR_CONFIG, build_config, build_org, declared_hosts, provider_home
+from .config import HERDR_CONFIG, build_config, build_org, declared_hosts, provider_home, validate_claude_login, login_runtime_path
 from .files import (InstanceError, LAYOUT_DIRS, create_layout, instance_root, read_regular_text,
                     safe_absolute, validate_tree, write_private_json, write_private_text)
 from .profile import same_json, validate_profile
@@ -130,7 +130,7 @@ def allocate_port(requested, pool):
     raise InstanceError("test port pool is exhausted")
 
 
-def declared_manifest(base, instance_id, worktree, head, profile, api_port, pg_port):
+def declared_manifest(base, instance_id, worktree, head, profile, api_port, pg_port, claude_login=None):
     applied = validate_profile(profile)
     root = instance_root(base, instance_id)
     safe_absolute(worktree)
@@ -138,6 +138,7 @@ def declared_manifest(base, instance_id, worktree, head, profile, api_port, pg_p
         raise InstanceError("invalid committed head")
     if type(api_port) is not int or api_port not in API_PORTS or type(pg_port) is not int or pg_port not in PG_PORTS:
         raise InstanceError("port is outside the loopback test pool")
+    claude_login = validate_claude_login(claude_login, root.parents[3])
     db_identity = "adktest_" + instance_id.replace("-", "")
     return {
         "schema_version": 1, "status": "DECLARED", "live_ready": False,
@@ -153,7 +154,7 @@ def declared_manifest(base, instance_id, worktree, head, profile, api_port, pg_p
         "execution_node_id": instance_id,
         "hosts": declared_hosts(root, instance_id),
         "preferred_node_seed_required": True,
-    }
+    } | ({"claude_login": claude_login} if claude_login is not None else {})
 
 
 def child_environment(manifest, ambient):
@@ -162,10 +163,10 @@ def child_environment(manifest, ambient):
     root = safe_absolute(manifest["root"])
     expected = declared_manifest(root.parent, manifest["instance_id"], manifest["worktree"],
                                  manifest["head"], manifest["profile"],
-                                 manifest["api"]["port"], manifest["postgres"]["port"])
+                                 manifest["api"]["port"], manifest["postgres"]["port"], manifest.get("claude_login"))
     if not same_json(manifest, expected):
         raise InstanceError("child environment differs from its declaration")
-    environment = {"PATH": str(safe_absolute(manifest["worktree"]) / "target/debug") + ":/usr/bin:/bin",
+    environment = {"PATH": login_runtime_path(safe_absolute(manifest["worktree"]), manifest.get("claude_login")),
                    "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
     flags = validate_profile(manifest["profile"])
     if not same_json(flags, manifest["applied_env"]):
@@ -179,7 +180,7 @@ def child_environment(manifest, ambient):
         "TMUX_TMPDIR": manifest["hosts"]["tmux"]["tmpdir"],
         "HOME": str(root / "home"), "TMPDIR": str(root / "tmp"),
         "XDG_CONFIG_HOME": str(root / "xdg"),
-        "CLAUDE_CONFIG_DIR": str(provider_home(root, "claude")),
+        "CLAUDE_CONFIG_DIR": manifest["claude_login"]["config_dir"] if "claude_login" in manifest else str(provider_home(root, "claude")),
         "CODEX_HOME": str(provider_home(root, "codex")),
         "AGENTDESK_DCSERVER_LABEL": "com.agentdesk.test." + manifest["instance_id"],
         "AGENTDESK_RELEASE_TMUX_SESSION": "AdkTest-" + manifest["instance_id"] + "-dcserver",
@@ -192,16 +193,16 @@ def receipt_for(manifest):
         "schema_version", "status", "live_ready", "instance_id", "root", "worktree",
         "head", "api", "postgres", "applied_env", "execution_node_id", "preferred_node_seed_required", "hosts"
     )} | {"features": manifest["profile"]["features"],
-         "bots": manifest["profile"]["bots"], "channels": manifest["profile"]["channels"]}
+         "bots": manifest["profile"]["bots"], "channels": manifest["profile"]["channels"]} | ({"claude_login": manifest["claude_login"]} if "claude_login" in manifest else {})
 
 
-def prepare(base, instance_id, worktree, profile, ambient, api_port=None, pg_port=None):
+def prepare(base, instance_id, worktree, profile, ambient, api_port=None, pg_port=None, claude_login=None):
     reject_database_env(ambient)
     validate_profile(profile)
     root = instance_root(base, instance_id)
     head = worktree_identity(worktree)
     manifest = declared_manifest(base, instance_id, worktree, head, profile,
-                                 allocate_port(api_port, API_PORTS), allocate_port(pg_port, PG_PORTS))
+                                 allocate_port(api_port, API_PORTS), allocate_port(pg_port, PG_PORTS), claude_login)
     safe_absolute(base).mkdir(mode=0o700, parents=True, exist_ok=True)
     create_layout(root)
     for relative in HOST_DIRS:
@@ -211,7 +212,7 @@ def prepare(base, instance_id, worktree, profile, ambient, api_port=None, pg_por
         write_private_text(root, f"config/agents/{provider}.md", "Isolated test agent.\n")
     config = build_config(root, profile, manifest["api"]["port"], manifest["postgres"]["port"], instance_id)
     write_private_json(root, "config/agentdesk.yaml", config)
-    write_private_json(root, "config/org.yaml", build_org(root, profile))
+    write_private_json(root, "config/org.yaml", build_org(root, profile, manifest.get("claude_login")))
     write_private_json(root, MANIFEST_NAME, manifest)
     write_private_json(root, RECEIPT_NAME, receipt_for(manifest))
     return manifest
@@ -252,7 +253,7 @@ def validate(base, instance_id, ambient, require_credentials=False, check_ports=
     manifest = read_json(root / MANIFEST_NAME)
     try:
         expected = declared_manifest(base, instance_id, manifest["worktree"], manifest["head"],
-                                     manifest["profile"], manifest["api"]["port"], manifest["postgres"]["port"])
+                                     manifest["profile"], manifest["api"]["port"], manifest["postgres"]["port"], manifest.get("claude_login"))
         if not same_json(manifest, expected) or not same_json(read_json(root / RECEIPT_NAME), receipt_for(expected)):
             raise InstanceError("manifest or receipt differs from its declaration")
         if check_head and worktree_identity(manifest["worktree"]) != manifest["head"]:
@@ -261,7 +262,7 @@ def validate(base, instance_id, ambient, require_credentials=False, check_ports=
         if not same_json(config, build_config(root, manifest["profile"], manifest["api"]["port"],
                                              manifest["postgres"]["port"], instance_id)):
             raise InstanceError("explicit config differs from its declaration")
-        if not same_json(read_org(root / "config/org.yaml"), build_org(root, manifest["profile"])):
+        if not same_json(read_org(root / "config/org.yaml"), build_org(root, manifest["profile"], manifest.get("claude_login"))):
             raise InstanceError("org catalog differs from its declaration")
     except (KeyError, TypeError, AttributeError):
         raise InstanceError("invalid startup manifest") from None

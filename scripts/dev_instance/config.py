@@ -1,6 +1,10 @@
 """Build a standalone runtime config from an already validated test profile."""
 
+import json
+import subprocess
 from pathlib import Path
+
+from .files import InstanceError, safe_absolute
 
 HERDR_CONFIG = "[session]\nresume_agents_on_restore = false\n"
 
@@ -15,16 +19,58 @@ def postgres_connections(config: dict, reserve: int) -> int:
     return pool + warmup + gateways + leader + reserve
 
 
+def validate_claude_login(value, home):
+    if value is None:
+        return None
+    keys = {'mode', 'account_slot', 'login_home', 'config_dir', 'cli'}
+    if (type(value) is not dict or set(value) != keys or value['mode'] != 'default_active'
+            or type(value['account_slot']) is not int or value['account_slot'] not in (2, 3)):
+        raise InstanceError('explicit non-company Claude login required')
+    home = safe_absolute(home)
+    if (safe_absolute(value['login_home']) != home
+            or safe_absolute(value['config_dir']) != home / '.claude'
+            or not safe_absolute(value['cli']).is_relative_to(home / '.local')):
+        raise InstanceError('Claude login binding is not the default location')
+    return dict(value)
+
+
+def active_claude_login(home):
+    home = safe_absolute(home)
+    try:
+        result = subprocess.run([str(home / '.local/bin/cswap'), 'list', '--json'],
+                                env={'HOME': str(home), 'PATH': '/opt/homebrew/bin:/usr/bin:/bin'},
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        raise InstanceError("active Claude slot unavailable") from None
+    try:
+        slot = json.loads(result.stdout)['activeAccountNumber']
+    except (ValueError, KeyError, TypeError):
+        raise InstanceError('active Claude slot unavailable') from None
+    if result.returncode or type(slot) is not int or slot not in (2, 3):
+        raise InstanceError('active Claude slot must be 2 or 3; switching is forbidden')
+    return validate_claude_login({'mode': 'default_active', 'account_slot': slot,
+        'login_home': str(home), 'config_dir': str(home / '.claude'),
+        'cli': str((home / '.local/bin/claude').resolve(strict=True))}, home)
+
+
+def login_runtime_path(worktree, login=None):
+    original = str(worktree / 'target/debug') + ':/usr/bin:/bin'
+    if login is None:
+        return original
+    return str(worktree / 'target/debug') + ':' + str(Path(login['login_home']) / '.local/bin') + ':/opt/homebrew/bin:/usr/bin:/bin'
+
+
 def provider_home(root: Path, provider: str) -> Path:
     return root / "home/.adk/profiles" / provider / f"test-{provider}"
 
 
-def build_org(root: Path, profile: dict) -> dict:
+def build_org(root: Path, profile: dict, claude_login=None) -> dict:
     providers = ("claude", "codex")
     return {
         "version": 1, "name": "Isolated test instance",
         "provider_auth_profiles": {
-            f"test-{provider}": {"provider": provider, "home": str(provider_home(root, provider)), "env": {}}
+            f"test-{provider}": {"provider": provider, "home": claude_login["config_dir"] if provider == "claude" and claude_login else str(provider_home(root, provider)), "env": {}}
             for provider in providers
         },
         "provider_auth_primary_profiles": {provider: f"test-{provider}" for provider in providers},

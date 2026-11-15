@@ -394,6 +394,7 @@ pub fn build_claude_tui_args(
 
     args.push("--settings".to_string());
     args.push(hook_settings_path.display().to_string());
+    args.extend(crate::config::test_instance::environment::claude_launch_args());
 
     // A resumed session keeps its last model unless one is named; `default` is the account default.
     let model = config.model.as_deref().filter(|value| !value.is_empty());

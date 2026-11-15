@@ -128,19 +128,7 @@ pub fn write_claude_hook_settings(path: &Path, config: &HookBundleConfig) -> Res
 }
 
 fn hook_relay_command(config: &HookBundleConfig, event: &str) -> String {
-    [
-        shell_quote(&config.agentdesk_exe),
-        "claude-hook-relay".to_string(),
-        "--endpoint".to_string(),
-        shell_quote(&config.endpoint),
-        "--provider".to_string(),
-        shell_quote(&config.provider),
-        "--event".to_string(),
-        shell_quote(event),
-        "--session-id".to_string(),
-        shell_quote(&config.session_id),
-    ]
-    .join(" ")
+    crate::config::test_instance::environment::claude_relay_command(config, event, shell_quote)
 }
 
 fn codex_hook_relay_command(config: &HookBundleConfig, event: &str) -> String {

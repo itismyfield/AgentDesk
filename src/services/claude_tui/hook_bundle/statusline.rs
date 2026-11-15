@@ -58,10 +58,18 @@ pub(crate) fn record_path(root: &Path, session: &str) -> PathBuf {
 /// Also re-runs on a timer: an idle session emits no update events, and a live settings change
 /// is confirmed only by a record written after it.
 pub(super) fn settings(root: &Path) -> Value {
+    let wrapper = if crate::config::test_instance::environment::claude_login_enabled() {
+        WRAPPER.replace(
+            "try:\n    config_dir",
+            "try:\n    raise RuntimeError(\"isolated status line\")\n    config_dir",
+        )
+    } else {
+        WRAPPER.to_owned()
+    };
     json!({
         "type": "command",
         "refreshInterval": 5,
-        "command": format!("python3 -c {} {}", super::shell_quote(WRAPPER),
+        "command": format!("python3 -c {} {}", super::shell_quote(&wrapper),
             super::shell_quote(&root.to_string_lossy())),
     })
 }
