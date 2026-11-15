@@ -95,6 +95,18 @@ async fn owner_start_context(
     context
 }
 
+/// The session key a kept start's headless turn judges its host by, resolved as that turn does.
+pub(in crate::services::discord) async fn owner_start_session_key(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    context: &serde_json::Value,
+) -> Option<String> {
+    let context = owner_start_context(shared, context).await;
+    let metadata = Some(context["metadata"].clone()).filter(|m| !m.is_null());
+    let basis = headless_session_basis(metadata.as_ref(), context["synthetic_label"].as_str());
+    build_adk_session_key(shared, channel, &shared.provider, basis.as_deref()).await
+}
+
 /// A start whose pane its channel's name gives, while the lookup of that name failed.
 #[derive(Debug)]
 pub(in crate::services::discord) struct Unnamed;

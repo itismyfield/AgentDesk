@@ -328,9 +328,8 @@ async fn configured_turn(
     })
 }
 
-/// Whether the blocked canary writer's Herdr launch may start: its old pin alone blocks it, the old
-/// pane is vacant, a live owned actor waits, and the row is this owner's retired execution, neither
-/// admitted nor held, under a seeded O store.
+/// Whether the pin-blocked canary writer's Herdr launch may start: a vacant old pane, a live owned
+/// actor, a seeded O store and this owner's Retired row, neither admitted nor held.
 fn bootstrap_eligible(
     provider: &ProviderKind,
     channel: u64,

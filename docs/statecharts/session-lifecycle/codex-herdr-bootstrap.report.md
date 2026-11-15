@@ -41,7 +41,7 @@ implementation; the design's tests T1-T11 and their mutants are still required i
   settled, and whether it resumes on its own, is left to the implementation tests.
 - Not modelled: the headless turn/start path (`turn_host.rs:191` executor_not_wired, issue #8125), non-canary
   channels, Legacy or missing rows, late hooks of an older nonce (`codex_hook.rs:333` checks the listed
-  nonce; covered by test T6), and more than one front.
+  nonce; covered by test T6), and more than one front (see `CodexHerdrBootstrapFront` below).
 
 ## Implementation check
 
@@ -50,7 +50,8 @@ admits on the pin, the vacant target and the live actor (`intake_route/input.rs`
 plans a bootstrap only for the owner's exact retired row, an absent or withheld listing of that
 nonce, a released hold and a seeded store (`turn_host.rs` `bootstrap_eligible`); the launch reads
 the vacancy again inside `prepare`, under the fence and before the CAS (`codex/herdr_turn.rs`); a held
-front is armed with the turn host's own judgement at the three refusal points (`owner_input.rs`).
+front is armed with the turn host's own judgement at the three refusal points (`owner_input.rs`): a
+writer hold reads the channel's turn key, a turn host refusal reads the key that refusal used.
 Two code facts sit outside the model and are covered by tests instead. The attach admits the new
 execution and then reads the row again, withholding a retired one, so a Terminate between the
 reconcile and the admission leaves no admitted retired execution. `retire_confirmed` withholds only
@@ -114,3 +115,36 @@ state; it does not by itself prove the recheck.
 Ignoring the pin when the channel is Herdr-configured makes the writer ready with no current evidence, lets a
 running tmux source publish, and lets the ordinary launch path start a second execution. This is why the
 design keeps the pin and adds an admission instead.
+
+## CodexHerdrBootstrapFront: a snapshot front ahead of a person input
+
+Written against `c1ad7d1c7b` after review: a scheduled snapshot front keyed off its own label (Ks, no Herdr
+row) ahead of a later person input (K, the exact Retired row). The main module keeps one front; this module
+models the owner queue's order instead, so the twelve configs above are unchanged.
+
+Key entry points (the only sources of the probe's key and of the start's key):
+
+| what | where | key |
+|---|---|---|
+| person start, turn host judgement | `adk_session.rs:95` `turn_session_key`, `intake_turn.rs:926` | K |
+| kept start's headless judgement | `headless_turn.rs:148-152` `headless_session_basis`, `entrypoints.rs:76-108` normalisation and `owner_start_session_key` | Ks for a snapshot or a fresh routine label, else K |
+| writer hold probe | `owner_input.rs:179` (owner_drive), `:988` (person queued intake `DeferredWriterBoot`) | K |
+| turn host refusal probe | `owner_input.rs:956` `bootstrap_probe(.., kept)` | the start's own key |
+| queue rotation | `owner_input.rs:249-265` `prefer_person` on START_WAITS and BOOTSTRAP_WAITS, `v2.rs:125-151` | - |
+
+`NoFutileRedrive` fails when a probe wakes a front whose own judgement is unchanged; `PersonStarts` asks that
+a person input behind the front reaches its start or is removed; `SnapshotSettles` asks that the snapshot
+settles once that person's bootstrap made the writer ready (it fails as ExecutorNotWired, #8125).
+
+| cfg | Fix | result |
+|---|---|---|
+| `FrontBefore` | `c1ad7d1c7b`: probe on K, no rotation on BOOTSTRAP_WAITS | NoFutileRedrive, PersonStarts break: K reads Ready, the snapshot is driven again every look and the person never leads |
+| `FrontDesign` | probe on the start's key, rotation on BOOTSTRAP_WAITS | all rules hold |
+| `FrontMutKey` | rotation only | NoFutileRedrive breaks: with no person yet, the K probe re-drives the snapshot |
+| `FrontMutPrefer` | front key only | PersonStarts breaks: the snapshot waits on Ks forever and the person stays behind it |
+| `FrontMutPlaceFront` | design, but the writer hold probe also reads the front's key | PersonStarts breaks: a snapshot held by the writer hold never wakes when placement clears, and WRITER_HELD does not rotate |
+
+`FrontMutPlaceFront` is why the writer hold sites keep K: that hold is the channel's placement, which lifts
+when K could bootstrap; the snapshot's next drive then stops at its own turn host refusal and rotates.
+`Remove` (Cancel, Terminate, clear, stop) removes either input at any point and `Restart` keeps the durable
+order and drops the watch; both are in every config.

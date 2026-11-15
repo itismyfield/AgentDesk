@@ -1553,9 +1553,8 @@ mod live_end;
 #[path = "provider_dispatch_codex_herdr_pending_tests.rs"]
 mod pending_registration;
 
-// The bootstrap launch reads its target again under the launch fence: a process that appears after
-// the turn host judged it vacant refuses the launch before its Pending row, its create, its markers
-// and its listing, and the prompt reaches no pane and leaves no input hold.
+// A target that reappears after the turn host judged it vacant refuses the bootstrap launch under
+// its fence, before any Pending row, create, marker, listing, prompt or input hold.
 #[test]
 fn bootstrap_launch_refuses_before_pending_when_its_target_reappears_pg() {
     const RETIRED: &str = "0123456789abcdef0123456789abcdef";

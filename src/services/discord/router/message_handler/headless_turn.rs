@@ -11,9 +11,9 @@ use replay_start::take_session_retry_context;
 mod process_mailbox;
 mod routine_metadata;
 use routine_metadata::{
-    fresh_routine_turn, routine_metadata_agent_id, routine_metadata_role_binding,
-    routine_tmux_session_name, scheduled_snapshot_session_label, session_key_basis_override,
-    valid_routine_metadata,
+    fresh_routine_turn, headless_session_basis, routine_metadata_agent_id,
+    routine_metadata_role_binding, routine_tmux_session_name, scheduled_snapshot_session_label,
+    session_key_basis_override, valid_routine_metadata,
 };
 
 use routine_metadata::persist_boundary_before_provider_clear;
@@ -146,12 +146,7 @@ async fn start_reserved_headless_turn_admitted(
     }
     // A Herdr-configured channel is refused before this turn claims, resets or clears anything.
     let session_key = || {
-        let basis = session_key_basis_override(
-            scheduled_snapshot_session_label(metadata.as_ref()).as_deref(),
-            metadata.as_ref(),
-            tmux_session_label.as_deref(),
-        )
-        .map(str::to_owned);
+        let basis = headless_session_basis(metadata.as_ref(), tmux_session_label.as_deref());
         let provider = &provider;
         async move { build_adk_session_key(shared, channel_id, provider, basis.as_deref()).await }
     };

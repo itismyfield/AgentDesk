@@ -1305,9 +1305,8 @@ impl HerdrExecutionReader for RetiredOnRead<'_> {
     }
 }
 
-/// A Terminate's retire lands between the attach's reconcile read and its admission: the attach
-/// refuses and leaves the retired execution listed but withheld, so no retired execution stays
-/// admitted for its hooks or for the next bootstrap.
+/// A retire landing between the attach's reconcile read and its admission leaves the execution
+/// listed but withheld, never admitted for its hooks or the next bootstrap.
 async fn retired_during_attach(rig: herdr::P11TerminationRig) {
     use crate::db::dispatched_sessions::hosted_execution::{
         HostedLookup, HostedLookupKey, HostedRecord, load_hosted_execution_pg,

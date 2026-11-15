@@ -176,7 +176,8 @@ pub(in crate::services::discord) fn owner_drive(
             .await
             {
                 let id = ChannelId::new(channel);
-                if let Some(probe) = bootstrap_probe(runtime.as_ref(), &provider, channel).await {
+                let probe = bootstrap_probe(runtime.as_ref(), &provider, channel, None).await;
+                if let Some(probe) = probe {
                     held_watch::arm(channel, probe);
                 }
                 hold_start(&mailbox, id, &front).await;
@@ -247,7 +248,10 @@ pub(in crate::services::discord) fn owner_drive(
             };
             if synthetic
                 && origin != InputOrigin::EffortContinue
-                && result.as_ref().err().map(String::as_str) == Some(START_WAITS)
+                && matches!(
+                    result.as_ref().err().map(String::as_str),
+                    Some(START_WAITS | BOOTSTRAP_WAITS)
+                )
             {
                 let held = original.clone();
                 mailbox
@@ -928,12 +932,12 @@ async fn start_idle(
     let owner_name = crate::services::discord::queue_dispatch::kickoff::queued_owner_name;
     let name = owner_name(deps.http, intervention.author_id).await;
     let at = (shared.provider.clone(), channel);
-    let started = match (kept, deps.ctx_for_chained_dispatch) {
+    let started = match (&kept, deps.ctx_for_chained_dispatch) {
         // Its session key, role, workspace and fresh boundary resolve as its legacy start's do.
         (Some(context), Some(ctx)) => {
             let start = super::super::headless_turn::start_owner_headless;
             let at = (ctx, &shared, deps.token);
-            let started = start(at, channel, (&intervention.text, &context), owner).await;
+            let started = start(at, channel, (&intervention.text, context), owner).await;
             started.map(drop).map_err(|error| error.to_string())
         }
         (Some(_), None) => {
@@ -949,7 +953,13 @@ async fn start_idle(
     let typed = refusal.lock().unwrap_or_else(|e| e.into_inner()).take();
     let mut bootstrap = match typed {
         Some(crate::services::turn_host::HerdrRefusal::OWriterNotReady) => {
-            bootstrap_probe(Some(&shared), &shared.provider, channel.get()).await
+            bootstrap_probe(
+                Some(&shared),
+                &shared.provider,
+                channel.get(),
+                kept.as_ref(),
+            )
+            .await
         }
         _ => None,
     };
@@ -975,7 +985,7 @@ async fn start_idle(
     match (answer.await, started) {
         (_, Err(error)) if error == WRITER_HELD => {
             if let Some(probe) =
-                bootstrap_probe(Some(&shared), &shared.provider, channel.get()).await
+                bootstrap_probe(Some(&shared), &shared.provider, channel.get(), None).await
             {
                 held_watch::arm(channel.get(), probe);
             }
@@ -1025,13 +1035,13 @@ const START_WAITS: &str = "NotSent(\"synthetic_waits_idle\")";
 /// A start the turn host refused while the canary bootstrap may still unblock its writer.
 const BOOTSTRAP_WAITS: &str = "NotSent(\"herdr_bootstrap_waits\")";
 
-/// The read a held canary front is watched through: the turn host's own judgement, run as a task
-/// of the runtime turns run on while the watch's blocking thread waits; `None` off the bootstrap
-/// path.
+/// The turn host's judgement on the key the refusal used: a kept start's own, else the channel's
+/// turn key that writer holds and user inputs are judged on. `None` off the bootstrap path.
 async fn bootstrap_probe(
     shared: Option<&Shared>,
     provider: &ProviderKind,
     channel: u64,
+    kept: Option<&serde_json::Value>,
 ) -> Option<held_watch::ScreenProbe> {
     use crate::services::turn_host::{HeldLook, bootstrap_watched, held_look};
     if !bootstrap_watched(provider, channel) {
@@ -1039,7 +1049,13 @@ async fn bootstrap_probe(
     }
     let shared = shared?;
     let id = ChannelId::new(channel);
-    let key = crate::services::discord::adk_session::turn_session_key(shared, id, provider).await;
+    let key = match kept {
+        Some(context) => {
+            let resolve = super::super::headless_turn::owner_start_session_key;
+            resolve(shared, id, context).await
+        }
+        None => crate::services::discord::adk_session::turn_session_key(shared, id, provider).await,
+    };
     let (pool, provider) = (shared.pg_pool.clone(), provider.clone());
     let runtime = tokio::runtime::Handle::current();
     Some(Box::new(move || {

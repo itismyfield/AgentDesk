@@ -1,6 +1,5 @@
-//! The retired Herdr canary over its real fixture: a verified tmux-era pin, no spawn marker, a live
-//! blocked writer, a seeded O store and its owner's Retired row. Placement, the turn host and a
-//! held front's watch judge it alike.
+//! The retired Herdr canary over its real fixture (old pin, no marker, blocked writer, Retired row):
+//! placement, the turn host and a held front's watch judge it alike.
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::tests::record;
 use crate::db::dispatched_sessions::hosted_execution::{HostedOwner, HostedState};
@@ -216,9 +215,8 @@ impl Canary {
     }
 }
 
-// A retired canary whose old pin alone blocks its writer starts its first Herdr turn only while the
-// old target is gone, the row is its owner's retired execution, unheld and not admitted; every
-// other state keeps the existing o_writer_not_ready.
+// A pin-blocked canary bootstraps only on a vacant target and its owner's unheld, unadmitted Retired
+// row; every other state keeps o_writer_not_ready.
 #[test]
 fn retired_herdr_canary_bootstraps_only_on_an_exact_vacant_unheld_retired_row_pg() {
     on_herdr_canary(
@@ -431,9 +429,8 @@ async fn read(probe: &mut Option<held_watch::ScreenProbe>) -> Screen {
     screen
 }
 
-// A held canary front's watch reads what the turn host would do: ready for a bootstrap and for an
-// accepting writer with a checkpoint, blocked while the checkpoint is torn. The blocked front is
-// not driven again however many looks pass, and is driven once when the checkpoint returns.
+// A held canary front's watch reads what the turn host would do: blocked while the checkpoint is
+// torn, however many looks pass, and driven once when it returns.
 #[test]
 fn held_canary_front_is_driven_again_once_only_when_the_turn_host_would_plan_it_pg() {
     on_herdr_canary(
@@ -444,7 +441,7 @@ fn held_canary_front_is_driven_again_once_only_when_the_turn_host_would_plan_it_
 async fn held_canary_front_is_driven_again_once_only_when_the_turn_host_would_plan_it_pg_case() {
     let canary = Canary::new().await;
     let shared = Some(&canary.fixture.shared);
-    let mut probe = bootstrap_probe(shared, &ProviderKind::Codex, CANARY_CHANNEL).await;
+    let mut probe = bootstrap_probe(shared, &ProviderKind::Codex, CANARY_CHANNEL, None).await;
     assert!(probe.is_some(), "the canary's held front is watched");
     assert_eq!(read(&mut probe).await, Screen::Ready);
     assert_eq!(canary.judge().await, Ok(true), "the same bootstrap plan");
@@ -486,5 +483,167 @@ async fn held_canary_front_is_driven_again_once_only_when_the_turn_host_would_pl
     tokio::time::sleep(Duration::from_millis(4_500)).await;
     assert_eq!(driven.load(Ordering::SeqCst), 1, "driven once");
     drop(front);
+    canary.stop().await;
+}
+
+/// The V2 queue's originals in order, as the owner's file keeps them.
+fn queued_texts(path: &std::path::Path) -> Vec<String> {
+    let snapshot: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let items = snapshot["items"].as_array().unwrap();
+    items
+        .iter()
+        .map(|item| item["text"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+// A snapshot front refused on its own label's key is not driven again by its watch; a later person
+// input moves ahead and reaches its start with the bootstrap plan, the snapshot queued unrun.
+#[test]
+fn held_snapshot_front_waits_on_its_own_key_and_lets_a_later_person_bootstrap_pg() {
+    on_herdr_canary(
+        held_snapshot_front_waits_on_its_own_key_and_lets_a_later_person_bootstrap_pg_case(),
+    );
+}
+
+async fn held_snapshot_front_waits_on_its_own_key_and_lets_a_later_person_bootstrap_pg_case() {
+    use crate::services::discord::queue_io::input_owner::{admission, drive, routine};
+    use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+    let canary = Canary::new().await;
+    let shared = canary.fixture.shared.clone();
+    let (proxy, gateway, _server) =
+        discord_mock::start(discord_mock::DiscordMockState::new()).await;
+    let ctx = discord_mock::serenity_context(proxy, gateway).await;
+    let _ = shared.http.cached_serenity_ctx.set(ctx);
+    let _ = shared.http.cached_bot_token.set("bootstrap-token".into());
+    // Without turn mode the snapshot's own pane, gone here, decides its wait, so it reaches its start.
+    if crate::services::tui_o::turn_mode::transcript_turns(CANARY_CHANNEL) {
+        drop(crate::services::tui_o::turn_mode::TestConfirmation::confirmed(CANARY_CHANNEL));
+    }
+    let channel = ChannelId::new(CANARY_CHANNEL);
+    let mailbox = shared.mailbox(channel);
+    let dir = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("codex/snapshot-bootstrap");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{CANARY_CHANNEL}.json"));
+    mailbox
+        .v2_adopt(path.clone(), "input-owner".into())
+        .await
+        .unwrap();
+    let generation = crate::services::discord::runtime_store::generation_path().unwrap();
+    std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
+    std::fs::write(generation, "5").unwrap();
+    let turn = format!("discord:{CANARY_CHANNEL}:9100000000000818101");
+    let (snapshot, ticket) =
+        routine::synthetic_original(&turn, CANARY_CHANNEL, "frozen snapshot prompt", 1).unwrap();
+    let label = "snap-bootstrap-8181";
+    let metadata = json!({"scheduled_message_id":"sm-bootstrap",
+        "scheduled_snapshot_session_label":label});
+    let mut context = metadata.clone();
+    context["metadata"] = metadata;
+    (context["synthetic_label"], context["source"]) = (json!(label), json!("scheduled_message"));
+    (context["channel_name_hint"], context["is_dm"]) = (json!("adk-codex-tui-e2e"), json!(false));
+    let admitted = admission::admit_with_context(&mailbox, &snapshot, ticket, context).await;
+    assert!(
+        matches!(admitted, admission::Admission::Accepted(_)),
+        "the snapshot is admitted"
+    );
+
+    let person = CANARY_CHANNEL + 8182;
+    let handed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (seen, at, key) = (handed.clone(), shared.clone(), canary.key.clone());
+    let pool = canary.pool().clone();
+    // The person's start is judged where its intake would judge it; the snapshot runs the real one.
+    let idle: drive::Handoff = Arc::new(move |front: Front| {
+        let (seen, at, key, pool) = (seen.clone(), at.clone(), key.clone(), pool.clone());
+        Box::pin(async move {
+            if front.1.message_id != person {
+                seen.lock().unwrap().push((front.1.message_id, None));
+                return start_idle_for_test(at, channel, front).await;
+            }
+            let plan = match for_turn(
+                Some(&pool),
+                &ProviderKind::Codex,
+                CANARY_CHANNEL,
+                Some(&key),
+            )
+            .await
+            {
+                TurnHost::Herdr(plan) => Ok(plan.bootstrap),
+                TurnHost::Refused(refusal) => Err(refusal),
+                other => panic!("{other:?}"),
+            };
+            seen.lock().unwrap().push((person, Some(plan)));
+            Err("NotSent(\"person_started\")".to_string())
+        })
+    });
+    let owner = (mailbox.clone(), shared.pg_pool.clone());
+    let drive = owner_drive(
+        owner,
+        (ProviderKind::Codex, CANARY_CHANNEL),
+        idle,
+        Some(shared.clone()),
+    );
+    drive::wake(drive.clone());
+    let snapshot_id = snapshot.message_id;
+    let count = |id: u64| {
+        handed
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(at, _)| *at == id)
+            .count()
+    };
+    // The first drive and three looks of the held snapshot front.
+    tokio::time::sleep(Duration::from_millis(7_000)).await;
+    assert_eq!(
+        count(snapshot_id),
+        1,
+        "the held snapshot is not driven again: {handed:?}"
+    );
+
+    let original: PendingQueueItem = serde_json::from_value(json!({"author_id":7,
+        "message_id":person,"channel_id":CANARY_CHANNEL,"source_message_ids":[person],
+        "queued_generation":5,"text":"person after the snapshot"}))
+    .unwrap();
+    let admitted = admit(&mailbox, &original, AdmissionTicket::new()).await;
+    assert!(
+        matches!(admitted, admission::Admission::Accepted(_)),
+        "the person is admitted"
+    );
+    // New input wakes the drive, as the ingress does.
+    drive::wake(drive.clone());
+    let reached = tokio::time::timeout(Duration::from_secs(10), async {
+        while count(person) == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(reached.is_ok(), "the person reaches its start: {handed:?}");
+    tokio::time::sleep(Duration::from_millis(4_500)).await;
+    let handed_now = handed.lock().unwrap().clone();
+    assert_eq!(
+        handed_now,
+        vec![
+            (snapshot_id, None),
+            (snapshot_id, None),
+            (person, Some(Ok(true)))
+        ],
+        "the snapshot once per real wake, then the person with the bootstrap plan, each once"
+    );
+    assert_eq!(
+        queued_texts(&path),
+        ["person after the snapshot", "frozen snapshot prompt"],
+        "the snapshot stays queued with its text behind the person"
+    );
+    assert!(
+        crate::services::discord::inflight::load_inflight_state_read_only(
+            &ProviderKind::Codex,
+            CANARY_CHANNEL
+        )
+        .is_none(),
+        "the snapshot started no turn"
+    );
+    drop(drive);
     canary.stop().await;
 }
