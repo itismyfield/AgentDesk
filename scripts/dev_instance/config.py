@@ -5,6 +5,16 @@ from pathlib import Path
 HERDR_CONFIG = "[session]\nresume_agents_on_restore = false\n"
 
 
+def postgres_connections(config: dict, reserve: int) -> int:
+    pool = max(config['database']['pool_max'], 1)
+    warmup = max((pool * 3 + 1) // 2, 2)
+    gateways = len(config['discord']['bots'])
+    cluster = config['cluster']
+    leader = int(cluster['enabled'] and cluster['role'] in {'hub', 'auto'})
+    # server::run retains the runtime pool while its native warmup pool is open.
+    return pool + warmup + gateways + leader + reserve
+
+
 def provider_home(root: Path, provider: str) -> Path:
     return root / "home/.adk/profiles" / provider / f"test-{provider}"
 

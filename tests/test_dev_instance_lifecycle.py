@@ -641,6 +641,47 @@ class ResourceFixture(unittest.TestCase):
 
 
 class ResourceAuthorityTests(ResourceFixture):
+    def test_postgres_server_capacity_covers_both_pools_and_dedicated_leases(self):
+        from scripts.dev_instance.config import build_config
+        config=build_config(self.root,self.manifest['profile'],self.manifest['api']['port'],
+                            self.manifest['postgres']['port'],self.root.name)
+        from scripts.dev_instance import config as config_module
+        method=getattr(config_module,'postgres_connections',None)
+        self.assertTrue(callable(method),'server capacity must reflect native connection consumers')
+        self.assertEqual(method(config,self.spec['pg_reserve']),14)
+        captured=[]
+        def spawn(kind,args,**kwargs):
+            captured.append(args)
+            raise ValueError('capture complete')
+        owner=self.owner()
+        with mock.patch.object(owner,'_run',return_value=''),mock.patch.object(owner,'_spawn',side_effect=spawn):
+            with self.assertRaisesRegex(ValueError,'capture complete'):owner.start()
+        self.assertEqual(int(captured[0][captured[0].index('-N')+1]),method(config,self.spec['pg_reserve']))
+
+    def test_python_connection_formula_matches_the_native_source(self):
+        import re
+        from scripts.dev_instance import config as config_module
+        method=getattr(config_module,'postgres_connections',None)
+        self.assertTrue(callable(method))
+        source=RUST_POSTGRES_SOURCE
+        body=source.split('fn startup_pool_settings(',1)[1].split('pub async fn ',1)[0]
+        floor=re.search(r'let steady_max = config.database.pool_max.max\((\d+)\);',body)
+        formula=re.search(r'max_connections: steady_max.saturating_mul\((\d+)\).div_ceil\((\d+)\).max\((\d+)\)',body)
+        self.assertIsNotNone(floor,'native warmup floor changed; update the capacity contract')
+        self.assertIsNotNone(formula,'native warmup expression changed; update the capacity contract')
+        runtime=source.split('fn runtime_pool_settings(',1)[1].split('fn bootstrap_pool_settings(',1)[0]
+        runtime_floor=re.search(r'max_connections: config.database.pool_max.max\((\d+)\)',runtime)
+        self.assertIsNotNone(runtime_floor)
+        lower=int(floor.group(1));mul,den,minimum=map(int,formula.groups())
+        for pool in [1,2,3,4,7,15]:
+            for cluster in [False,True]:
+                config={'database':{'pool_max':pool},'discord':{'bots':{'claude':{},'codex':{}}},
+                        'cluster':{'enabled':cluster,'role':'hub'}}
+                steady=max(pool,lower)
+                warmup=max((steady*mul+den-1)//den,minimum)
+                expected=max(pool,int(runtime_floor.group(1)))+warmup+len(config['discord']['bots'])+int(cluster)+1
+                self.assertEqual(method(config,1),expected,(pool,cluster))
+
     def test_ambient_database_or_foreign_binary_rejects_before_spawn(self):
         with mock.patch.object(subprocess, "Popen") as spawn:
             with self.assertRaises(InstanceError):
@@ -830,3 +871,5 @@ class VerifiedSupervisorWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+RUST_POSTGRES_SOURCE = (Path(__file__).resolve().parents[1] / 'src/db/postgres.rs').read_text()

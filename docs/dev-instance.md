@@ -150,7 +150,21 @@ User-Agent를 사용한다.
 핸들의 회수를 기다린다. supervisor가 죽은 기록 PID는 기존 root/cwd 검사로만 회수한다.
 자식 종료·keeper 종료·pool lease 해제를 확인한 뒤 credential을 포함한 canonical
 `$HOME/.adk/dev/instances/<uuid>` 하나를 삭제하고 `REMOVED`를 반환한다.
-root 밖 경로, release 경로, symlink, hardlink 및 소유하지 않은 특수 파일을 거절한다.
+root 밖 경로, release 경로, 임의 symlink, hardlink 및 소유하지 않은 특수 파일을 거절한다.
+제품 호환 alias `config/credential`만 단일 owned symlink이고 대상이 root 내부의
+다른 symlink 없는 디렉터리로 해석될 때 허용한다. 검증은 대상을 순회하지 않으며
+down은 링크 자체만 unlink한다.
 종료/소유권이 불확실하면 `HOLD`(exit 6)로 파일을 보존한다. 변경된 선언이나 worktree도
 검증을 통과해야 한다. 재기동과 경합하지 않도록 pool의 고정 close-only lease inode는
 삭제하지 않으며 잠금만 해제한다. 다른 인스턴스와 운영 자원은 삭제 대상이 아니다.
+
+시험 PG 서버 상한은 runtime pool + `max(ceil(max(pool_max,1)×3/2),2)` warmup pool +
+설정된 Discord bot 수의 전용 advisory 연결 + 활성 hub/auto cluster lease + reserve로 계산한다.
+현재 프로필은 4 + 6 + 2 + 1 + 1 = 14다. runtime/warmup의 동시 보유와 pool 밖
+advisory 연결을 포함하며 `pg_pool=4`, `pg_reserve=1`, `max_aux=2` 계약은 유지한다.
+Rust warmup 계산식과 Python 식의 일치는 소스 계약 시험으로 확인한다.
+
+기동은 clean HEAD 일치를 계속 요구한다. down은 저장된 선언을 검증하되 worktree의
+HEAD가 나중에 바뀌어도 정리할 수 있다. 오래된 RUNNING/HOLD receipt는 canonical nonce,
+두 자원 종류(PG·Herdr), keeper와 기록 자식 PID의 부재를 확인하고 pool lease를 획득한
+경우에만 회수한다. 살아 있거나 소유 증거가 부족한 기록은 계속 HOLD다.

@@ -76,6 +76,104 @@ class InstanceDownTests(unittest.TestCase):
         self.root.unlink()
         saved.rename(self.root)
 
+    def test_exact_internal_credential_alias_is_valid_and_removed_without_traversal(self):
+        from scripts.dev_instance.files import validate_tree
+        marker = self.root/'outputs/retained-until-root-delete'
+        marker.write_text('synthetic')
+        alias = self.root/'config/credential'
+        alias.symlink_to('../outputs',target_is_directory=True)
+        try:validate_tree(self.root)
+        except ValueError as error:self.fail('valid native alias rejected: '+str(error))
+        original = os.unlink
+        removed = []
+        def capture(name, *args, **kwargs):
+            removed.append(name)
+            return original(name,*args,**kwargs)
+        with patch('scripts.dev_instance.down.os.unlink',side_effect=capture):
+            self.assertEqual(self.down()[0],0)
+        self.assertEqual(removed.count('retained-until-root-delete'),1)
+        self.assertEqual(removed.count('credential'),1)
+        self.assertFalse(self.root.exists())
+
+    def test_alias_boundary_rejects_outside_wrong_name_and_hardlink_without_deletion(self):
+        from scripts.dev_instance.files import validate_tree
+        outside = self.fixture.home/'outside-dir'
+        outside.mkdir()
+        marker = outside/'marker'
+        marker.write_text('unchanged')
+        cases = [('config/credential',outside,'symlink'),
+                 ('config/credentials',self.root/'credential','symlink'),
+                 ('outputs/credential',self.root/'credential','symlink'),
+                 ('config/credential',marker,'hardlink')]
+        for name,target,kind in cases:
+            alias=self.root/name
+            if kind=='symlink':alias.symlink_to(target,target_is_directory=True)
+            else:os.link(target,alias)
+            before=sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*'))
+            with self.subTest(name=name,kind=kind):
+                with self.assertRaises(ValueError):validate_tree(self.root)
+                self.assertEqual(self.down()[0],2)
+                self.assertEqual(before,sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*')))
+                self.assertEqual(marker.read_text(),'unchanged')
+            alias.unlink()
+
+    def test_hardlinked_credential_alias_is_rejected(self):
+        from scripts.dev_instance.files import validate_tree
+        alias=self.root/'config/credential'
+        alias.symlink_to('../credential',target_is_directory=True)
+        linked=self.fixture.home/'linked-alias'
+        os.link(alias,linked,follow_symlinks=False)
+        self.assertEqual(alias.lstat().st_nlink,2)
+        with self.assertRaises(ValueError):validate_tree(self.root)
+        self.assertEqual(self.down()[0],2)
+        self.assertTrue(alias.is_symlink())
+        self.assertTrue((self.root/'receipt.json').exists())
+        linked.unlink()
+        alias.unlink()
+
+    def test_down_removes_unchanged_declaration_after_worktree_head_advances(self):
+        self.fixture.git('commit','--allow-empty','-qm','later clean head')
+        from scripts.dev_instance.manifest import validate
+        with self.assertRaises(ValueError):validate(self.fixture.base,self.root.name,{})
+        self.assertEqual(self.down()[0],0)
+        self.assertFalse(self.root.exists())
+
+    def test_stale_full_owner_is_removed_only_after_all_pids_and_lease_are_gone(self):
+        import uuid
+        dead = subprocess.Popen([sys.executable,'-c','pass'])
+        dead.wait(timeout=5)
+        write_private_json(self.root,'runtime/resources-owner.json',
+            {'root':str(self.root),'nonce':str(uuid.uuid4()),'state':'RUNNING',
+             'keeper_pid':dead.pid,'known_resources_closed':False,'gateway_exit_confirmed':False,
+             'sockets':{},'resources':[{'kind':kind,'pid':dead.pid,'exitcode':None,'state':'LIVE'}
+                                      for kind in ['postgres','herdr']]})
+        self.assertEqual(self.down()[0],0)
+        self.assertFalse(self.root.exists())
+
+    def test_retired_owner_cannot_be_deleted_while_kernel_lease_is_held(self):
+        import uuid
+        from scripts.dev_instance.lease import acquire
+        dead=subprocess.Popen([sys.executable,'-c','pass']);dead.wait(timeout=5)
+        write_private_json(self.root,'runtime/resources-owner.json',
+            {'root':str(self.root),'nonce':str(uuid.uuid4()),'state':'RUNNING',
+             'keeper_pid':dead.pid,'known_resources_closed':False,'gateway_exit_confirmed':False,
+             'sockets':{},'resources':[{'kind':kind,'pid':dead.pid,'exitcode':None,'state':'LIVE'}
+                                      for kind in ['postgres','herdr']]})
+        with acquire(self.root,self.root.name),patch('scripts.dev_instance.lifecycle.MAX_STOP_GRACE_SECONDS',.05):
+            self.assertEqual(self.down()[0],6)
+        self.assertTrue((self.root/'receipt.json').exists())
+
+    def test_stale_owner_with_live_resource_is_hold_and_never_signals_it(self):
+        import uuid
+        dead = subprocess.Popen([sys.executable,'-c','pass']);dead.wait(timeout=5)
+        write_private_json(self.root,'runtime/resources-owner.json',
+            {'root':str(self.root),'nonce':str(uuid.uuid4()),'state':'RUNNING',
+             'keeper_pid':dead.pid,'known_resources_closed':False,'gateway_exit_confirmed':False,
+             'sockets':{},'resources':[{'kind':kind,'pid':os.getpid(),'exitcode':None,'state':'LIVE'}
+                                      for kind in ['postgres','herdr']]})
+        self.assertEqual(self.down()[0],6)
+        self.assertTrue((self.root/'receipt.json').exists())
+
     def test_external_instance_pool_is_refused_before_any_deletion(self):
         from scripts.dev_instance.down import remove
         from scripts.dev_instance.manifest import prepare

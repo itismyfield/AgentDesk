@@ -140,6 +140,25 @@ def _socket_witnesses(root, live_sockets):
         raise InstanceError("live socket witness differs from its declaration") from None
 
 
+def credential_alias(root, relative, descriptor, metadata):
+    """Recognize the sole native compatibility link without traversing its target."""
+    if tuple(relative) != ('config', 'credential') or not stat.S_ISLNK(metadata.st_mode):
+        return False
+    if metadata.st_uid != os.geteuid() or metadata.st_nlink != 1:
+        raise InstanceError('credential alias must be an owned single link')
+    target = Path(os.readlink(relative[-1], dir_fd=descriptor))
+    candidate = Path(os.path.normpath(target if target.is_absolute() else Path(root).joinpath(*relative[:-1], target)))
+    if not candidate.is_relative_to(root):
+        raise InstanceError('credential alias target is outside the instance root')
+    candidate = safe_absolute(candidate)
+    destination = candidate.lstat()
+    current = os.stat(relative[-1], dir_fd=descriptor, follow_symlinks=False)
+    if (not stat.S_ISDIR(destination.st_mode) or destination.st_uid != os.geteuid()
+            or (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino)):
+        raise InstanceError('credential alias target or identity changed')
+    return True
+
+
 def validate_tree(root: str | Path, require_credentials: bool = False, live_sockets=None) -> None:
     root = safe_absolute(root)
     sockets = _socket_witnesses(root, live_sockets)
@@ -147,7 +166,7 @@ def validate_tree(root: str | Path, require_credentials: bool = False, live_sock
     try:
         if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o700:
             raise InstanceError("instance root permissions must be 0700")
-        _validate_directory(descriptor, (), sockets)
+        _validate_directory(descriptor, (), sockets, root)
         if require_credentials:
             credentials = _open_dir(root / "credential")
             try:
@@ -166,10 +185,12 @@ def validate_tree(root: str | Path, require_credentials: bool = False, live_sock
         os.close(descriptor)
 
 
-def _validate_directory(descriptor: int, relative: tuple[str, ...], sockets) -> None:
+def _validate_directory(descriptor: int, relative: tuple[str, ...], sockets, root) -> None:
     for name in os.listdir(descriptor):
         child = relative + (name,)
         metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        if credential_alias(root, child, descriptor, metadata):
+            continue
         if stat.S_ISLNK(metadata.st_mode):
             raise InstanceError("instance tree contains a symlink")
         if name.casefold() in {"credential", "credentials"} and child != ("credential",):
@@ -188,7 +209,7 @@ def _validate_directory(descriptor: int, relative: tuple[str, ...], sockets) -> 
                 raise InstanceError("credential directory permissions must be 0700")
             nested = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
             try:
-                _validate_directory(nested, child, sockets)
+                _validate_directory(nested, child, sockets, root)
             finally:
                 os.close(nested)
         elif not stat.S_ISREG(metadata.st_mode):

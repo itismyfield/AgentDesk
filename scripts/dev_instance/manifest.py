@@ -194,7 +194,7 @@ def resource_spec(value):
     return dict(value)
 
 
-def validate(base, instance_id, ambient, require_credentials=False, check_ports=True, live_sockets=None):
+def validate(base, instance_id, ambient, require_credentials=False, check_ports=True, live_sockets=None, check_head=True):
     reject_database_env(ambient)
     root = instance_root(base, instance_id)
     validate_tree(root, require_credentials=require_credentials, live_sockets=live_sockets)
@@ -206,7 +206,7 @@ def validate(base, instance_id, ambient, require_credentials=False, check_ports=
                                      manifest["profile"], manifest["api"]["port"], manifest["postgres"]["port"])
         if not same_json(manifest, expected) or not same_json(read_json(root / RECEIPT_NAME), receipt_for(expected)):
             raise InstanceError("manifest or receipt differs from its declaration")
-        if worktree_identity(manifest["worktree"]) != manifest["head"]:
+        if check_head and worktree_identity(manifest["worktree"]) != manifest["head"]:
             raise InstanceError("worktree head changed")
         config = read_json(root / "config/agentdesk.yaml")
         if not same_json(config, build_config(root, manifest["profile"], manifest["api"]["port"],
