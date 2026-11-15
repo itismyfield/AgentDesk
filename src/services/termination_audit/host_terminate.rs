@@ -2,12 +2,12 @@
 
 use std::borrow::Cow;
 
-use crate::services::session_host::{
-    HostKind, HostRefusal, HostedRuntimeLocator, InteractiveSessionHost,
-};
+use crate::services::session_host::{HostedRuntimeLocator, InteractiveSessionHost};
 
-/// Operation name carried by the `Unsupported` refusal.
-pub(crate) const TERMINATE_OP: &str = "terminate";
+mod contract;
+
+use contract::TerminateProof;
+pub(crate) use contract::{HostTerminateEffect, HostTerminateWarrant, TERMINATE_OP};
 
 /// The execution-identity owner's comparison for the target, as it returned it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,18 +23,6 @@ pub(crate) enum StopVerdict {
     DeliveryFencePermits,
     CancelCommitted,
     Withheld,
-}
-
-/// Proof that the existing owners cleared this exact target. Not a lease or a
-/// new authority: it only carries their verdicts and is consumed by one call.
-pub(crate) struct HostTerminateWarrant<'a> {
-    proof: TerminateProof<'a>,
-}
-
-enum TerminateProof<'a> {
-    Identity(Cow<'a, HostedRuntimeLocator>),
-    #[cfg(unix)]
-    Operator(herdr_terminate::OperatorTerminateWarrant<'a>),
 }
 
 impl HostTerminateWarrant<'_> {
@@ -53,38 +41,6 @@ impl HostTerminateWarrant<'_> {
             proof: TerminateProof::Identity(Cow::Owned(target)),
         })
     }
-
-    pub(crate) fn kind(&self) -> HostKind {
-        match &self.proof {
-            TerminateProof::Identity(target) => target.host_kind,
-            #[cfg(unix)]
-            TerminateProof::Operator(_) => HostKind::Herdr,
-        }
-    }
-}
-
-#[cfg(unix)]
-impl<'a> HostTerminateWarrant<'a> {
-    pub(crate) fn from_operator(warrant: herdr_terminate::OperatorTerminateWarrant<'a>) -> Self {
-        Self {
-            proof: TerminateProof::Operator(warrant),
-        }
-    }
-
-    pub(crate) fn into_operator(self) -> Option<herdr_terminate::OperatorTerminateWarrant<'a>> {
-        match self.proof {
-            TerminateProof::Operator(warrant) => Some(warrant),
-            TerminateProof::Identity(_) => None,
-        }
-    }
-}
-
-/// A physical close reply retains every detail; only the service can confirm disappearance.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum HostTerminateEffect {
-    Refused(HostRefusal),
-    #[cfg(unix)]
-    Close(herdr_terminate::HerdrTerminateResult),
 }
 
 pub(crate) fn terminate_hosted_session(
@@ -97,13 +53,11 @@ pub(crate) fn terminate_hosted_session(
 // Its only production caller is the operator termination service.
 #[cfg(unix)]
 pub(crate) mod herdr_terminate {
-    use crate::services::session_host::{HerdrGateRefusal, HerdrTarget};
+    use crate::services::session_host::HerdrTarget;
 
-    /// Explicit operator intent bound to one gate; a cancel warrant cannot convert into it.
-    pub(crate) struct OperatorTerminateWarrant<'a> {
-        target: HerdrTarget,
-        fence: Option<&'a crate::services::session_host::TerminationFence>,
-    }
+    mod contract;
+
+    pub(crate) use contract::{HerdrTerminateResult, OperatorTerminateWarrant, TerminateRefusal};
 
     impl<'a> OperatorTerminateWarrant<'a> {
         #[cfg(test)]
@@ -121,32 +75,6 @@ pub(crate) mod herdr_terminate {
                 target,
                 fence: Some(fence),
             }
-        }
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    pub(crate) enum TerminateRefusal {
-        Disabled,
-        Gate(HerdrGateRefusal),
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    pub(crate) enum HerdrTerminateResult {
-        Refused(TerminateRefusal),
-        Acknowledged,
-        NotSent(String),
-        Indeterminate(String),
-        ConfirmationRequired,
-    }
-
-    impl<'a> OperatorTerminateWarrant<'a> {
-        pub(crate) fn into_parts(
-            self,
-        ) -> (
-            HerdrTarget,
-            Option<&'a crate::services::session_host::TerminationFence>,
-        ) {
-            (self.target, self.fence)
         }
     }
 
@@ -175,7 +103,7 @@ mod tests {
     use super::*;
     use crate::services::session_host::{
         HostCapabilities, HostError, HostKind, HostLiveness, HostMutation, HostPresence,
-        HostSessionRef, host_for,
+        HostRefusal, HostSessionRef, host_for,
     };
 
     const KINDS: [HostKind; 3] = [HostKind::Tmux, HostKind::Process, HostKind::Herdr];
