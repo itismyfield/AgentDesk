@@ -16,17 +16,21 @@ stateDiagram-v2
   s1: No session, a message waiting
   s2: Creating, a message waiting
   s3: Created, location not yet recorded, a message waiting
-  s4: Session up
-  s5: End requested, provider running
-  s6: Closing the session
+  s4: Pane recorded, only a shell, a message waiting
+  s5: Pane recorded, provider up, not bound, a message waiting
+  s6: Session up
+  s7: End requested, provider running
+  s8: Closing the session
   [*] --> s0
   s0 --> s1: a message arrives
   s1 --> s2: a message reserves a new execution
   s2 --> s3: the host creates it
-  s3 --> s4: its location is recorded and the turn starts
-  s4 --> s4: a host probe stops failing
-  s4 --> s5: an end is requested
-  s5 --> s6: the close is sent
+  s3 --> s4: its pane is recorded
+  s4 --> s5: the provider starts in the pane
+  s5 --> s6: the turn binds the execution
+  s6 --> s6: a host probe stops failing
+  s6 --> s7: an end is requested
+  s7 --> s8: the close is sent
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 teal
   class s0 bugPath
@@ -38,8 +42,12 @@ stateDiagram-v2
   class s3 bugPath
   class s4 teal
   class s4 bugPath
-  class s5 pink
+  class s5 teal
   class s5 bugPath
-  class s6 pink
-  class s6 breaks
+  class s6 teal
   class s6 bugPath
+  class s7 pink
+  class s7 bugPath
+  class s8 pink
+  class s8 breaks
+  class s8 bugPath

@@ -13,35 +13,24 @@ stateDiagram-v2
   s2: No session, a message waiting
   s3: Boot reconcile (after the restart)
   s4: dcserver down, nothing running, a message waiting
-  s5: Input refused, no session
+  s5: No session, input kept for a host
   s6: Boot reconcile, a message waiting (after the restart)
   s7: No session (after the restart)
   s8: No session, a message waiting (after the restart)
-  s9: Input refused, no session (no more messages)
-  s10: dcserver down, nothing running (no more messages)
-  s11: Input refused, no session (after the restart)
-  s12: Boot reconcile (after the restart) (no more messages)
-  s13: Input refused, no session (after the restart) (no more messages)
+  s9: No session, input kept for a host (after the restart)
   [*] --> s0
   s0 --> s1: dcserver stops
   s0 --> s2: a message arrives
   s1 --> s3: dcserver starts
   s2 --> s4: dcserver stops
-  s2 --> s5: the message is refused before any spawn
+  s2 --> s5: no host: one notice, the message is kept
   s3 --> s7: intake opens
   s4 --> s6: dcserver starts
   s5 --> s1: dcserver stops
-  s5 --> s2: a message arrives
   s6 --> s8: intake opens
-  s2 --> s9: the message is refused before any spawn
   s7 --> s8: a message arrives
-  s3 --> s11: intake opens
-  s8 --> s11: the message is refused before any spawn
-  s9 --> s10: dcserver stops
-  s10 --> s12: dcserver starts
-  s11 --> s8: a message arrives
-  s12 --> s13: intake opens
-  s8 --> s13: the message is refused before any spawn
+  s3 --> s9: intake opens
+  s8 --> s9: no host: one notice, the message is kept
   class s0 teal
   class s1 blue
   class s2 teal
@@ -52,7 +41,3 @@ stateDiagram-v2
   class s7 teal
   class s8 teal
   class s9 teal
-  class s10 blue
-  class s11 teal
-  class s12 blue
-  class s13 teal

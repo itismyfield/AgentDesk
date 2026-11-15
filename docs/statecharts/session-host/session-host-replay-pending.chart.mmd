@@ -5,13 +5,15 @@ stateDiagram-v2
   state "Legend" as legend {
     lg0: Recovery
     lg1: Session
-    lg2: Breaks NoDoubleSession
-    lg3: Path to the NoDoubleSession bug
+    lg2: Breaks NoOrphanAfterTerminate or NoSessionLoss
+    lg3: Breaks NoDoubleSession in some cases
+    lg4: Path to the NoDoubleSession or NoOrphanAfterTerminate or NoSessionLoss bug
   }
   class lg0 blue
   class lg1 teal
   class lg2 breaks
-  class lg3 bugPath
+  class lg3 mayBreak
+  class lg4 bugPath
   s0: No session
   s1: No session, a message waiting
   s2: Creating, a message waiting
@@ -21,6 +23,10 @@ stateDiagram-v2
   s6: Waiting to re-adopt the created execution, a message waiting (after the restart)
   s7: Waiting to re-adopt the created execution (provider gone), an unrecorded provider running, a message waiting (after the restart)
   s8: Waiting to re-adopt the created execution, two providers running, a message waiting (after the restart)
+  s9: Waiting to re-adopt the created execution, two providers running (after the restart)
+  s10: Closing the session, two providers running (after the restart)
+  s11: Waiting to re-adopt the created execution (provider gone), an unrecorded provider running (after the restart)
+  s12: Row closed, provider still running, an unrecorded provider running (after the restart)
   [*] --> s0
   s0 --> s1: a message arrives
   s1 --> s2: a message reserves a new execution
@@ -28,9 +34,16 @@ stateDiagram-v2
   s3 --> s4: dcserver stops
   s4 --> s5: dcserver starts
   s5 --> s6: intake opens
+  s6 --> s6: a host probe stops failing
   s6 --> s7: a second create from the same Pending
   s7 --> s8: the host creates it
+  s8 --> s8: its pane is recorded
+  s8 --> s9: the turn is refused: no provider in the pane
+  s9 --> s10: the lone shell is closed
+  s10 --> s11: the owned provider is confirmed gone
+  s11 --> s12: the recorded pane is gone: row closed
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 teal
   class s0 bugPath
   class s1 teal
@@ -48,5 +61,14 @@ stateDiagram-v2
   class s7 blue
   class s7 bugPath
   class s8 blue
-  class s8 breaks
+  class s8 mayBreak
   class s8 bugPath
+  class s9 blue
+  class s9 bugPath
+  class s10 blue
+  class s10 bugPath
+  class s11 blue
+  class s11 bugPath
+  class s12 teal
+  class s12 breaks
+  class s12 bugPath

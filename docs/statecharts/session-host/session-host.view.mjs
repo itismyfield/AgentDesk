@@ -10,11 +10,19 @@ const base = v => {
   if (v.stop) return !count(v.live) ? "End requested, provider gone" : unreachable ? "End requested, provider running but unreachable" : "End requested, provider running";
   if (v.recoverOwed) return `Waiting to re-adopt the ${v.row === "Pending" ? "created" : "bound"} execution`
     + (has(v.live, v.record) ? "" : " (provider gone)");
-  if (v.row === "Pending") return v.flight === "created" ? "Created, location not yet recorded"
-    : v.flight === "creating" ? "Creating" : "Pending, awaiting the host census";
+  if (v.row === "Pending") {
+    if (v.flight === "created") return "Created, location not yet recorded";
+    if (v.flight === "creating") return "Creating";
+    if (!v.locator) return "Pending, no pane recorded";
+    if (!has(v.live, v.record)) return "Pane recorded, pane gone";
+    return v.prov ? "Pane recorded, provider up, not bound" : "Pane recorded, only a shell";
+  }
   if (v.row === "Bound") return has(v.live, v.record) ? "Session up" : "Row bound, provider gone";
   if (count(v.live)) return "Row closed, provider still running";
-  return v.answer === "refused" ? "Input refused, no session" : "No session";
+  if (v.kept) return "No session, input kept for a host";
+  if (v.lost) return "No session, input lost";
+  return v.answer === "refused" ? "Input refused, no session"
+    : v.answer === "unavailable" ? "No host, input answered" : "No session";
 };
 export const state = v => {
   let label = base(v);
@@ -24,6 +32,8 @@ export const state = v => {
   else if (v.losses === 1) label += ", host server replaced";
   if (v.want && !label.includes("waiting")) label += ", a message waiting";
   if (v.srv !== "down" && v.crashes === 1 && !v.killed) label += " (after the restart)";
+  if (v.cancel === "requested") label += ", cancel pending";
+  if (v.cancel === "dropped") label += ", cancel dropped";
   if (v.inputs >= 2 && !v.want) label += " (no more messages)";
   return label;
 };
@@ -31,8 +41,14 @@ export const group = v => v.recoverOwed || v.srv !== "up" ? "Recovery" : v.stop 
 export const colors = { Recovery: "blue", Termination: "pink", Session: "teal" };
 const words = {
   Arrive: "a message arrives", Reserve: "a message reserves a new execution", CreateEffect: "the host creates it",
-  CreateAborts: "the create reply is lost", RecordLocation: "its location is recorded and the turn starts",
-  StartTurn: "the next turn starts on the same session", Refuse: "the message is refused before any spawn", Crash: "dcserver stops",
+  CreateAborts: "the create reply is lost", RecordLocation: "its pane is recorded",
+  ProviderStarts: "the provider starts in the pane", Bind: "the turn binds the execution",
+  TurnFails: "the turn is refused: no provider in the pane", PolicyRefuse: "the message is refused by policy",
+  Unavailable: "no host: one notice, the message is kept", Requeue: "a host is back: the kept message runs",
+  RequestCancel: "a cancel is requested", DeliverCancel: "the cancel is delivered or dropped",
+  AdoptUnplaced: "the census finds its pane", AdoptPlaced: "the recorded pane's provider is adopted",
+  ResolvePlacedGone: "the recorded pane is gone: row closed", ResidueClose: "the lone shell is closed",
+  StartTurn: "the next turn starts on the same session", Crash: "dcserver stops",
   Boot: "dcserver starts", BootDone: "intake opens", ProbeRecovers: "a host probe stops failing",
   Adopt: "the same execution is adopted again", HostLoss: "the host server ends",
   HostStart: "the host server starts again", ResolveEmpty: "the census finds nothing and closes the row",

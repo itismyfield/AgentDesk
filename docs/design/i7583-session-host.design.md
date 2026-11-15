@@ -1,11 +1,12 @@
 # #7583 최종 설계 — Herdr를 Windows 세션 호스트로, ProcessBackend 삭제, 세션 호스트 공통 경계
 
-<!-- doc-path-refs: proposed src/services/session_host/herdr/transport_pipe.rs src/services/session_host/herdr_core/ src/services/platform/file_identity.rs src/services/session_host/channel_host_plan.rs -->
+<!-- doc-path-refs: proposed src/services/session_host/herdr/transport_pipe.rs src/services/session_host/herdr_core/ src/services/platform/file_identity.rs src/services/session_host/channel_host_plan.rs src/services/herdr_launch/placed.rs -->
 
 - 기준: `origin/main` `1974cff8a67bf5d1db041abfdd4d615c518ee104`(2026-11-15). 모든 좌표는 이 SHA에서 다시 확인했다.
 - 입력: A(WebGPT pro 초안, 실측 없음), B(Fable xhigh, `refs/review/i7583-design-fable-1` `abad58858d`), C(WSL Codex, `refs/review/i7583-design-1` `b6766912fd`).
 - **정본 기반: C.** 채택 이유는 §2. 사실 근거는 C의 전수표([진입점 표](i7583/entrypoints.md)와 TSV)를 우선했고, 전수표 밖 좌표는 합류 레그가 main에서 직접 확인해 보충했다.
-- 상태 모델: `docs/statecharts/session-host/`(17 cfg, GREEN 8 + 예상 RED 9). [보고서](../statecharts/session-host/session-host.report.md).
+- 상태 모델: `docs/statecharts/session-host/`(23 cfg, GREEN 9 + 예상 RED 14). [보고서](../statecharts/session-host/session-host.report.md).
+- 개정 2(r2): 독립 리뷰(P0 0·P1 4·P2 2)를 반영했다. 바뀐 결정은 §2.1 표에 모았고, 정본 C 채택과 전체 방향은 그대로다.
 - 이 레그는 설계만 한다. Rust 구현·cargo·운영 설정·Windows 접속은 하지 않았다.
 
 ## 0. 결론
@@ -17,12 +18,16 @@
    (`src/services/platform/windows_job.rs:35`, `:52`, 부팅 `src/cli/dcserver.rs:882`). Herdr 서버가 이 job 안에 있으면 dcserver와 함께 죽는다(모델 `WindowsServerInJob`).
 3. 채널 선택은 `runtime.herdr_turn_enabled` 자리를 bool 호환 타입으로 넓힌다. Unix 기본값은 지금과 같다. **선택이 없는 Windows 관리 Claude/Codex만**
    내부 dedicated endpoint로 Herdr를 쓴다(설정에 쓰지 않고 부팅마다 재구성). 운영자가 채널을 옮겨 적는 수동 이사는 없다.
-4. ProcessBackend는 Windows Claude·Codex 활성화 뒤 지운다. 삭제 뒤 tmux 없는 Unix 관리 세션은 spawn 전에 명시적 오류로 답하고 원문을 보존한다.
+   이 PlatformDefault 실행에는 Claude·Codex 실행 bool과 Cancel bool을 적용하지 않는다(실행 허가와 Cancel 허가를 선택과 함께 정한다, §5.1).
+4. ProcessBackend는 Windows Claude·Codex 활성화 뒤 지운다. 삭제 뒤 쓸 호스트가 없는 관리 세션(tmux 없는 Unix 등)은 provider 함수의 오류가 아니라
+   **intake admission 경계**에서 거절하고, 모든 provider(Qwen 포함)의 원문·첨부를 내구 큐에 남긴다(§10.2).
    Windows Qwen은 세션 없는 직접 실행(이미 있는 headless 경로)으로 간다.
 5. `InteractiveSessionHost`는 `create`·`submit`·`interrupt`·`terminate(warrant)`·`recover`를 얻는다. 정책(허가·fence·신원·큐 원문·O 게시)은 지금 소유자에 둔다.
    "우회 0"은 **관리 세션의 물리 효과가 `session_host` 어댑터 메서드로만 일어난다**로 정의하고 ratchet으로 지킨다.
-6. Herdr Core는 채널 세션 호스트가 아니라 #7438 F4 레인 전용 구현체다.
-7. 착지 조각 **32개**(공통 13·Windows 11·삭제 6·Core 2) + 측정 1(W00). 미측정 [U] **20개**(win-desktop 17, 격리 VM 1, 맥 2).
+6. 위치(pane)가 기록됐지만 Bound가 안 된 Herdr Pending은 재시작·주기 복구 패스가 사람 개입 없이 끝낸다: 같은 실행이면 재채택, pane이 없으면 retire,
+   자기 nonce의 셸만 남았으면 그 pane만 닫고 retire(§7.3, 조각 S06b).
+7. Herdr Core는 채널 세션 호스트가 아니라 #7438 F4 레인 전용 구현체다.
+8. 착지 조각 **33개**(공통 14·Windows 11·삭제 6·Core 2) + 측정 1(W00). 미측정 [U] **20개**(win-desktop 17, 격리 VM 1, 맥 2).
 
 ## 1. 비교표
 
@@ -63,12 +68,23 @@
 | Core 계약(`run --keep`, `spawn_pending`, 재연결 뒤 snapshot) | A §9 | C01 |
 | Core는 `hc --json` CLI 래핑 + 버전·schema 고정 | B §8 C1 + C C01 | C01 |
 
+### 2.1 리뷰 반영(r2)
+
+| 리뷰 항목 | 처리 | 바뀐 곳 |
+|---|---|---|
+| P1-1 위치가 기록된 Pending의 자동 탈출 | **고침.** main은 placed Pending을 복구 패스에서 건너뛰고(`src/services/discord/recovery_engine/herdr_reader.rs:463-464`), unplaced resolver는 위치 없는 행만 받으며(`src/services/herdr_launch/unplaced.rs:353`), server-replaced의 placed 처리는 user_default·재부팅 뒤에만 있다(`src/services/discord/recovery_engine/herdr_server_replaced.rs:177`, `:238-262`). 세 상태를 나눈 placed Pending resolver를 새로 둔다 | §7.2, §7.3, S06b, W08, W09, U11, 모델 `RecordLocation`/`AdoptPlaced`/`ResidueClose`/`ResolvePlacedGone`, cfg `SkipPlaced`·`UnixHerdrCurrent` RED → 제안 GREEN |
+| P1-2 Windows 암묵 기본과 Codex 실행·Cancel bool | **고침.** `ChannelHostPlan`이 호스트와 함께 실행 허가·Cancel 허가를 정한다. PlatformDefault 실행은 `herdr_codex_turn_enabled`(`src/services/turn_host.rs:220-232`)와 `herdr_cancel_enabled`(`src/services/provider/cancel_token_claude_interrupt.rs:544-563`)를 읽지 않는다. endpoint·explicit 채널과 Unix는 지금 뜻 그대로 | §2 충돌표, §5.1, W01, W09, W10, 모델 `GateRun`·`GateCancel` |
+| P1-3 D01의 Qwen 대기 원문 | **고침.** 호스트 없음을 provider 함수 `Err`가 아니라 기존 intake admission 거절(`src/services/discord/router/message_handler/intake_turn/host_refusal.rs:6-63`, 큐 복원 `src/services/discord/router/intake_dispatch/queued.rs:353-357`)로 옮긴다. 모든 provider가 같은 경계를 지난다(`src/services/discord/router/message_handler/intake_turn.rs:252`) | §10.2, D01, 모델 `Unavailable`·`ErrConsumes` |
+| P1-4 reset-tmux 종료의 NON_MANAGED 오분류 | **고침.** `src/cli/utils.rs:168`(관찰)·`:186`(종료)은 `AgentDesk-*` 관리 세션을 다룬다. 전수표 두 행을 BYPASS로 재분류(BYPASS 320·NON_MANAGED 28), S01에 `:186` 추가(prod 22파일, 관리 종료 28곳), 비관리 종료 허용 4→3, `:168`은 S02 | [audited-bypasses.tsv](i7583/audited-bypasses.tsv), [진입점 표](i7583/entrypoints.md), §4, §12.4 |
+| P2-1 S01 ratchet 표기·시험 포함 범위 | **고침.** 기존 `tmux_kill` 통계 범주는 두고, 생산 텍스트(통째 시험 파일·`cfg(test)` 제외)에서 `platform::tmux::`와 `tmux::` 두 표기를 모두 세는 새 범주를 S01에 넣는다. 새 생산 호출 파일은 검사기 상수의 허용 목록으로만 들어간다 | §12.4 |
+| P2-2 모델 991=991이 §5 동일성을 보이지 않음 | **고침.** §5 표를 생산 선택 함수의 표 기반 시험 정본으로 삼고 조합 누락을 실패로 만든다(W01). 모델은 endpoint와 스위치를 나눴지만 보장 범위를 "선택된 호스트의 수명 계약"으로 좁혔다 | §5.2, 모델 보고서 |
+
 ### 충돌한 결정과 판정
 
 | 쟁점 | 안 | 판정과 근거 |
 |---|---|---|
 | 선택 없는 Windows 채널 | B: 삭제 뒤 오류, 운영자가 매핑 / C·A: 내부 기본 Herdr | **C.** 수동 설정 이사는 사용자 결정 위반. 내부 endpoint는 설정에 쓰지 않는다 |
-| `herdr_turn_enabled` bool이 Windows 암묵 기본에 걸리는가 | C: 명시 false면 Windows도 거절 | **걸리지 않는다(합류 판정).** bool의 현재 뜻은 "endpoint가 설정된 채널의 Claude 턴 허가"다(`src/config/runtime_settings.rs:87-90`). 공유 설정의 false가 Windows 노드 전체를 끊는 것을 막는다. Windows에서 명시 채널 `"tmux"`는 명시적 unavailable |
+| `herdr_turn_enabled`·`herdr_codex_turn_enabled`·`herdr_cancel_enabled`가 Windows 암묵 기본에 걸리는가 | C: 명시 false면 Windows도 거절 | **셋 다 걸리지 않는다(합류 판정, r2에서 Codex·Cancel로 넓힘).** 세 bool의 현재 뜻은 "endpoint가 설정된 채널의 Herdr 실행·Escape 허가"다(`src/config/runtime_settings.rs:87-96`). 공유 설정의 false가 Windows 노드 전체를 끊거나 Cancel을 막지 않게 한다. 대체되는 process 경로는 Cancel(SIGINT)이 기본으로 됐다. Windows에서 명시 채널 `"tmux"`는 명시적 unavailable. 운영자 pane-close `herdr_terminate_enabled`는 바꾸지 않는다 |
 | Windows Qwen | A: Herdr 위 wrapper / B: headless 직접 / C: U10 뒤 결정 | **B.** headless 경로가 이미 있고 cfg 게이트가 없다(`src/services/qwen.rs:417`). 지금 Windows Qwen process 세션도 job으로 dcserver와 함께 끝나므로 연속성이 나빠지지 않는다. 새 호스팅 결합을 만들지 않는다 |
 | "입력이 trait을 지난다" | B: #7272 실행기를 tmux 어댑터로 인정(사용자 결정 요청) / C: 실행기는 두고 물리 효과만 호스트 경유 | **C.** 실행기 로직은 옮기지 않고 그 안의 tmux 인자 조립 23곳(B 부록 A3)만 `TmuxHost` 메서드로 바꾼다. DoD 문장 그대로라 설계 이탈이 없다 |
 | 재채택 메서드 | B `reattach` / C·A `recover` | **`recover`**, 4값(`SameExecution`·`Gone`·`Withheld`·`Unknown`). "attach"는 쓰지 않는 terminal attach와 헷갈린다 |
@@ -96,6 +112,9 @@
 | A §5.4 | owner 입력 선택에 `cfg!(unix)` | 맞다(`src/services/discord/queue_io/input_owner/ingress.rs:351-377`, `src/services/discord/router/message_handler/provider_dispatch.rs:320-327`) |
 | B §3.3 | 스위치 둘 다 `cfg!(unix) &&` | 맞다(`src/services/turn_host.rs:228`, `:243`) |
 | B §7.1 | 가용성 캐시 3회 실패 | 맞다(`src/services/platform/tmux/availability.rs:13-14`: TTL 45초, 임계 3) |
+| 합류 r1 전수표(C 원본) | `src/cli/utils.rs:168`·`:186` NON_MANAGED | reset-tmux가 `AgentDesk-*` 관리 세션을 나열·종료한다(`src/cli/utils.rs:166-194`). r2에서 BYPASS로 재분류(관찰·종료 각 1행) |
+| 합류 r1 §7.2 | unplaced census를 wake에 걸면 Pending이 스스로 풀린다 | unplaced resolver는 위치·expected가 모두 없는 행만 받고(`src/services/herdr_launch/unplaced.rs:353`), 복구 패스는 Pending을 건너뛴다(`src/services/discord/recovery_engine/herdr_reader.rs:463-464`). 위치 CAS 뒤 확인 못 한 실행 명령은 위치를 남기고 Indeterminate다(`src/services/herdr_launch.rs:533-569`). placed resolver를 새로 둔다(§7.3) |
+| 합류 r1 §5 | Cancel은 `herdr_cancel_enabled` 하나만 막는다 | Claude Herdr Escape는 settlement(`src/services/provider/cancel_token_claude_interrupt.rs:535-541`, `cfg!(unix)`)와 `#[cfg(unix)]` 판정(`src/services/discord/turn_bridge/tmux_runtime/judged_stop.rs:478-490`)만 본다. bool은 Codex Escape에만 걸린다(`src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs:257-262`) |
 
 이 문서의 나머지 좌표는 문서 경로 검사기(`scripts/check_doc_path_refs.py`)로 파일·줄 범위를 확인했다.
 
@@ -122,17 +141,18 @@ dead code를 만들지 않는다.
 
 **우회 0의 정의(DoD 3).** 관리 세션의 물리 효과(생성·입력·관찰·중단·종료·복구 판독)는 `session_host` 어댑터의 메서드로만 일어난다.
 호스트 중립 호출자는 trait(`host_for`)을, tmux 이름만 아는 기존 tmux 전용 호출자는 같은 어댑터(`TmuxHost`)의 메서드를 쓴다.
-`platform::tmux`의 세션 함수, tmux 명령 인자 조립, Herdr 요청, provider spawn은 어댑터 밖에서 0이다. 예외는 C 전수표의 `NON_MANAGED` 30행
-(`src/cli/dcserver.rs:831`, `src/server/routes/provider_auth_profiles.rs:339`, `src/cli/utils.rs:186` 등)과 `TEST_OR_HELPER`뿐이고 ratchet 허용 목록에 좌표로 고정한다.
-닫힘의 증거는 [audited-bypasses.tsv](i7583/audited-bypasses.tsv) BYPASS 318행 각각의 호출 체인이 어댑터에 닿는 것이다. 단순 삭제로 0을 만들지 않는다.
+`platform::tmux`의 세션 함수, tmux 명령 인자 조립, Herdr 요청, provider spawn은 어댑터 밖에서 0이다. 예외는 전수표의 `NON_MANAGED` 28행
+(`src/cli/dcserver.rs:831`, `src/server/routes/provider_auth_profiles.rs:339` 등, 자기 fallback·로그인·인증 프로필 세션)과 `TEST_OR_HELPER`뿐이고 ratchet 허용 목록에 좌표로 고정한다.
+닫힘의 증거는 [audited-bypasses.tsv](i7583/audited-bypasses.tsv) BYPASS 320행 각각의 호출 체인이 어댑터에 닿는 것이다. 단순 삭제로 0을 만들지 않는다.
 
 ## 5. 채널 선택과 기본값
 
 `runtime.herdr_turn_enabled: Option<bool>`(`src/config/runtime_settings.rs:90`) 자리에 untagged `Legacy(bool) | Channels { channels: BTreeMap<ChannelId, "tmux" | "herdr"> }`를 넣는다.
-목록에 없는 채널은 `Legacy(false)`와 같다. 모르는 값·필드는 검증 오류. 새 top-level 키·명령은 없다. `herdr_codex_turn_enabled`는 그대로 Codex의 별도 게이트다.
+목록에 없는 채널은 `Legacy(false)`와 같다. 모르는 값·필드는 검증 오류. 새 top-level 키·명령은 없다. `herdr_codex_turn_enabled`·`herdr_cancel_enabled`는
+endpoint·explicit 채널에서 지금 뜻 그대로 Codex 실행·Codex Escape의 별도 게이트다. PlatformDefault에는 적용하지 않는다(§5.1).
 endpoint의 위치는 기존 `session_hosts`(`src/config/session_hosts.rs:350`)가 소유한다.
 
-선택은 하나의 `ChannelHostPlan { host, endpoint, source: Explicit | Endpoint | PlatformDefault }`으로 정규화하고, 생성(`src/services/turn_host.rs:151`)·
+선택은 하나의 `ChannelHostPlan { host, endpoint, source: Explicit | Endpoint | PlatformDefault, permits }`으로 정규화하고, 생성(`src/services/turn_host.rs:151`)·
 부팅 복구·Cancel·Terminate·clear·채널 제외 목록이 **같은 값**을 읽는다. desired host일 뿐이고, 살아 있는 실행의 current host는 내구 witness가 정한다.
 설정 변경만으로 살아 있는 실행을 덮어쓰지 않는다(이동은 기존 handoff/return 경계).
 
@@ -144,16 +164,54 @@ endpoint의 위치는 기존 `session_hosts`(`src/config/session_hosts.rs:350`)�
 | unix | 있음 | Codex, 게이트 false/None | unsupported | 같음 | — |
 | unix | 없음 | 채널 `"herdr"` | (표현 없음) | IO 전 거절, endpoint 없음 사유 | W01 |
 | unix | 있음 | 채널 `"tmux"` | (표현 없음) | tmux. 살아 있는 Herdr 실행은 기존 return/handoff 경계(`src/services/turn_host.rs:102`)에서 옮김 | W01 |
-| unix, tmux 없음 | 없음 | 없음 | process 폴백 | **spawn 전 오류, 원문 보존** | D01 |
-| windows | 없음 | 없음, Claude/Codex | process | **Herdr(내부 dedicated endpoint)** | W09(Claude)·W10(Codex) |
+| unix, tmux 없음 | 없음 | 없음 | process 폴백 | **intake admission 거절, 모든 provider 원문 보존(§10.2)** | D01 |
+| windows | 없음 | 없음, Claude/Codex | process | **Herdr(내부 dedicated endpoint), 실행·Escape 허가 포함(§5.1)** | W09(Claude)·W10(Codex) |
 | windows | 있음 | true/`"herdr"` | 거절(`cfg!(unix)`) | Herdr | W09 |
 | windows | 무관 | 채널 `"tmux"` | (표현 없음) | 명시적 unavailable | W09 |
 | windows | 없음 | Qwen | process | headless 직접 실행 | D01 |
+| 아무 플랫폼 | 위 결과 호스트를 지금 쓸 수 없음(Herdr 서버 down·미설치, tmux 일시 부재 3회 초과) | 무관 | (process 폴백 또는 오류) | admission 거절 + 원문 보존 + 호스트 복귀 wake. tmux로 새지 않음 | D01·W09 |
 
-Unix의 모든 줄은 W01 이후에도 같다(모델 `UnixTmux*`·`UnixHerdr*`: main과 최종 991 상태 동일). 바뀌는 두 줄(tmux 없는 Unix, Windows 무선택)은
-ProcessBackend 삭제가 강제하는 변화이며 숨기지 않는다. 내부 Windows endpoint는 runtime root와 실행 노드에서 결정하는 키 `windows-managed-default/v1`과
+Unix의 모든 줄은 W01 이후에도 같다. 근거는 §5.2의 표 기반 시험이다(r1의 "모델 상태 수 991=991"은 근거에서 뺐다 — 상태 수가 같다고 선택 결과가 같다는 뜻이 아니다).
+바뀌는 두 줄(tmux 없는 Unix, Windows 무선택)은 ProcessBackend 삭제가 강제하는 변화이며 숨기지 않는다. 내부 Windows endpoint는 runtime root와 실행 노드에서 결정하는 키 `windows-managed-default/v1`과
 고정 named session으로 부팅마다 재구성하고 설정에 저장하지 않는다. `legacy_dedicated` 모드만 쓴다(`user_default`는 어댑터 없는 플랫폼에서 부팅 거절,
 `src/config/session_hosts.rs:193`). Herdr 미설치·접속 불가는 생성 전 명시적 오류와 원문 보존이며 자동 설치·자동 demotion은 없다.
+
+### 5.1 허가 정규화 — 실행·Escape를 선택과 함께 정한다
+
+main의 세 bool은 모두 "endpoint가 설정된 채널"의 Herdr 허가다(`src/config/runtime_settings.rs:87-97`). 읽는 곳은 실행
+(`src/services/turn_host.rs:220-247`, Codex 거절 `:288-295`)과 Escape(`src/services/provider/cancel_token_claude_interrupt.rs:544-563`, 소비는
+Codex 전달 `src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs:257-262`, `:595-600`, `:641`, `:796`)다. 이 함수들이 설정을 직접 읽으면
+PlatformDefault 실행도 `unwrap_or(false)`에 걸려, 기본 설정의 Windows Codex는 실행이 거절되고(삭제 뒤에는 쓸 호스트가 없음) Codex Escape는 버려진다.
+W01은 `ChannelHostPlan.permits { run, escape }`를 선택과 **같은 함수**에서 계산하고, 위 두 함수는 그 값을 읽는 얇은 접근자로 바뀐다.
+
+| source | Claude 실행 | Codex 실행 | Claude Escape | Codex Escape | 조각 |
+|---|---|---|---|---|---|
+| Endpoint / Explicit, unix | `herdr_turn_enabled`(Legacy bool) 또는 채널 `"herdr"` | `herdr_codex_turn_enabled` | settlement | settlement ∧ `herdr_cancel_enabled` | W01(값 무변화) |
+| Endpoint / Explicit, windows | 같음 | 같음 | settlement(W08 이식) | 같음 | W09·W10 |
+| PlatformDefault(windows 내부 endpoint) | 허가 | 허가(bool 무시) | settlement | settlement(bool 무시) | W09·W10 |
+| 호스트 없음 / 채널 `"tmux"`인 windows | admission 거절(§10.2) | 같음 | — | — | D01·W09 |
+
+- Escape 허가는 **실행의 내구 endpoint 키**로 고른다. 내부 키 `windows-managed-default/v1`로 만든 실행은 설정이 나중에 바뀌어도 PlatformDefault 허가로 취소된다
+  (desired host와 current host 분리 §5). 운영자 pane-close `herdr_terminate_enabled`는 바꾸지 않는다.
+- settlement(`src/services/provider/cancel_token_claude_interrupt.rs:535-541`)는 `cfg!(unix)`다. Windows는 W08이 terminal settlement를 이식한 뒤 참이 되고,
+  그 전에는 Windows Herdr 실행 자체가 열리지 않는다(W09가 W08 뒤). 이 값이 거짓인 Windows 실행이 생기지 않으므로 Escape가 조용히 꺼지는 칸은 없다.
+- **다른 게이트 점검**(리뷰 집중 2): Windows Codex 실행·Escape를 막는 지점은 위 두 함수 외에 owner 입력 `cfg!(unix)`(`src/services/discord/queue_io/input_owner/ingress.rs:351-377`,
+  `src/services/discord/router/message_handler/provider_dispatch.rs:320-327`), `#[cfg(unix)]` 판정(`src/services/discord/turn_bridge/tmux_runtime/judged_stop.rs:478-490`),
+  Codex settlement 분기(`src/services/codex/herdr_turn.rs:132`)다. W09가 앞 둘, W08이 settlement 함수의 Windows판(terminal settlement 이식)을, W10이 Codex 허가를 연다.
+  PlatformDefault 계획의 host는 언제나 Herdr이고 `Pick`에 tmux 분기가 없다. Herdr를 못 쓰면 tmux가 아니라 admission 거절이다(모델 `GateRun`·`GateCancel` RED, `WindowsImplicit` GREEN).
+- 기본값 보존 근거: 세 bool의 기본 `None`은 지금도 "endpoint 채널을 Herdr로 열지 않는다"이고 그 칸은 그대로다. PlatformDefault가 대신하는 process 경로는
+  실행·Cancel(SIGINT)이 기본으로 열려 있었다. bool을 PlatformDefault에 걸면 오히려 Windows 기본 동작이 "실행 거절·Cancel 없음"으로 바뀐다. 새 스위치는 없다.
+
+### 5.2 기본값 동일성의 증명 방식
+
+- **정본은 표 기반 시험이다(W01).** 생산 선택 함수(`ChannelHostPlan`을 만드는 단일 함수, 플랫폼을 인자로 받음)에
+  (플랫폼 2 × endpoint 유무 × 선택 값 {없음, `Legacy(true)`, `Legacy(false)`, 채널 `"herdr"`, 채널 `"tmux"`, 목록 밖 채널} × provider {Claude, Codex, Qwen} × Codex bool × Cancel bool × tmux 가용)
+  전 조합을 넣고, 기대값은 §5·§5.1 표를 옮긴 **리터럴 표**로 둔다(코드로 계산하지 않는다). 표에 없는 조합이 생기면 실패한다(완전성 검사).
+  Unix 칸의 기대값은 main의 현재 결과(`src/services/turn_host.rs:151` 결과·거절 사유)와 같은 문자열이다.
+- 생산 경계 시험 2개: (1) Unix endpoint + bool false가 pane IO 전에 거절된다(기존 거절 사유 단언 유지), (2) Windows 기본 Codex 계획이 bool false에서도 Herdr·run·escape 허가다.
+- 판별력: 뮤턴트 (a) PlatformDefault에 `unwrap_or(false)`를 다시 적용, (b) endpoint + false를 tmux로 보냄, (c) 표 한 줄 삭제 — 셋 다 표 시험이 죽인다(커밋하지 않음).
+- 모델은 보조다. 모델이 보이는 것은 "고른 호스트에서 재시작·Pending·종료 계약이 성립하는가"와 "PlatformDefault 실행이 bool 때문에 거절·Escape 유실되지 않는가"(`GateRun`·`GateCancel`)뿐이며,
+  §5 표 전체의 동일성은 보이지 않는다. 보고서도 이 범위로 좁혔다.
 
 ## 6. Windows 전송·서버 수명·신원
 
@@ -196,12 +254,55 @@ Windows에서 Herdr 서버 재시작·업데이트는 모든 pane을 끝낸다(l
 | Herdr 재연결 | `src/services/discord/tui_prompt_relay/rehydration.rs:270`, `:668` → `src/services/discord/recovery_engine/herdr_reader.rs:220` | 새 pipe 연결로 snapshot·process info, witness 비교 → `host.recover` → `attach_restarted_herdr_source`(`src/services/discord/tui_prompt_relay/herdr_source.rs:274`). provider spawn 0, terminal attach 0, payload 재전송 0. W08 수용 시험이 Windows 생산 부팅 진입점에서 이 호출 도달을 단언(모델 `NoWake`) |
 | intake 열기 | `src/services/discord/runtime_bootstrap.rs:35`, standby `src/services/discord/runtime_bootstrap.rs:472`; 로그 `src/services/discord/runtime_bootstrap/recovery_flush.rs:118-131` | active reconcile 뒤 wake. standby는 주입 0 |
 | Unknown 판독 | `src/services/session_host/model.rs:52`, `src/services/discord/recovery_engine/host_reconcile.rs:81` | 행 보존, health·rehydration 주기 재판독. 죽었다고 단정하지 않음 |
-| Pending 탈출 | `src/services/claude/herdr_turn/never_attached.rs:57-76` | 기존 unplaced census·in-flight·quiet 검사를 recovery wake에 연결해 다음 사용자 입력 없이도 정리. 안내문의 `agentdesk herdr terminate`/`retire` 명령은 기존 Unix 문구이며 Windows의 정상 탈출 경로로 쓰지 않는다(넓히지 않음, 문구 정리는 후속 후보) |
+| Pending 탈출(위치 없음) | `src/services/herdr_launch/unplaced.rs:353`, 복구 패스 `src/services/discord/recovery_engine/herdr_reader.rs:377-392` | 기존 unplaced resolver(nonce census·in-flight·quiet). 무변화 |
+| Pending 탈출(위치 있음) | 건너뜀 `src/services/discord/recovery_engine/herdr_reader.rs:463-464`, 위치 기록 `src/services/herdr_launch.rs:533-569`, 안내문 `src/services/claude/herdr_turn/never_attached.rs:57-76` | **§7.3 placed resolver(S06b)**. boot·health 복구 패스가 다음 사용자 입력 없이 끝낸다. 안내문의 `agentdesk herdr terminate`/`retire`는 정상 탈출 경로가 아니다. resolver가 결론을 못 낸 동안(Unknown)만 거절 안내가 나가고, 그 문구는 수동 명령 대신 "자동 정리 대기"로 바꾼다(S06b) |
 | Herdr 서버 소실·재부팅 | `src/services/discord/recovery_engine/herdr_server_replaced.rs:246`, `src/services/discord/recovery_engine/herdr_row_end.rs` | witness 불일치·부재 → 서버 재기동(W04) → 옛 실행 Retired + 알림 1회 → 대기 큐 wake → 다음 입력이 `--resume <id>`로 새 nonce 실행. 돌던 턴만 잃고 대화는 이어진다. Herdr 자체의 agent 자동 resume은 E7 off로 막아 이중 실행 0 |
 | 옛 inflight 행 | `src/services/discord/recovery_engine/restore_inflight.rs:226`, `:985`; `src/services/discord/inflight/model.rs:1367` | D03: `"process_backend"` 문자열은 읽기 전용 legacy 값으로 남겨 "세션 없음"으로 닫고 알림 1회. 모르는 값으로 떨어져 조용히 건너뛰지 않게 한다. tmux로 추정하지 않는다 |
 | 첫 Windows 전환 | O writer `src/services/tui_o/writer/renumbered.rs`, `src/services/tui_o/writer/rotation.rs`; resume 판정 `src/services/claude/herdr_turn/handoff.rs:38-43`, `src/services/claude/session_handoff.rs:155` | 유효한 Fresh owner → writer 빈 초기화 → 실제 checkpoint 0 저장 → input-ready → create와 첫 입력. O 파일에 0을 직접 쓰지 않는다. process 시절 Claude 세션은 O가 그 transcript의 커서를 갖지 않아 main 규칙대로 resume이 `Err`가 되고, 그대로 두면 채널의 **모든 입력이 시작 실패**한다. W09는 이 경우를 (1) 기존 writer adoption(#7651 단계 1, 파일 끝에서 commit)이 그 transcript를 채널 자기 bind로 묶어 `o_reads`가 참이 되면 resume, (2) 아니면 기존 `src/services/claude/fresh_notice.rs` 알림 1회와 fresh 실행으로 처리한다. 어느 쪽인지는 U20. 재게시·오류 반복·수동 `/clear` 요구 0. Codex Herdr 실행은 main에서 항상 fresh(`src/services/codex/herdr_turn.rs:194`)라 Windows Codex도 전환 때 새 대화로 시작한다(기존 Herdr Codex 제약, 넓히지 않음) |
 | 채널 호스트 이동 | `src/services/turn_host.rs:102-121`, `src/services/claude/herdr_return.rs`, `src/services/claude/session_handoff.rs` | Unix 무변화. Windows는 tmux가 없어 Return이 생기지 않음 |
 | `/restart`·tmux 재생성 | `src/services/discord/commands/restart.rs`, `src/services/discord/commands/tmux_recreate.rs:57` | 무변화(tmux 전용) |
+
+### 7.3 위치가 기록된 Pending — 자동 탈출 계약
+
+**왜 남는가.** create가 pane을 돌려줬지만 실행 명령 확인이 끊기면(`CreatedUnconfirmed`) 위치 CAS 뒤 Indeterminate로 끝난다(`src/services/herdr_launch.rs:533-569`).
+행은 위치가 있는 Pending이다. main에서 이 행을 끝내는 길은 셋뿐이다: 다음 입력이 never-attached 거절로 수동 명령을 안내(`src/services/claude/herdr_turn/never_attached.rs:57-76`),
+user_default endpoint에서 재부팅 뒤의 server-replaced(`src/services/discord/recovery_engine/herdr_server_replaced.rs:26-31`, `:238-262`, Darwin boot만),
+운영자 명령. Windows는 `legacy_dedicated`·FILETIME boot라 둘째도 닿지 않는다. 사람 없이 끝나지 않으면 그 채널 입력이 영영 행 뒤에 묶인다(모델 `UnixHerdrCurrent`·`SkipPlaced` RED).
+
+**세 상태를 나눈다.**
+
+| 상태 | 식별 | 처리 |
+|---|---|---|
+| 위치 없음 | `location = None ∧ expected = None` | 기존 unplaced resolver(무변화) |
+| 위치 있음, provider 미확인 | `location = Some ∧ expected = None` | 아래 placed resolver |
+| expected 있음, source 미연결 | `expected = Some`, 행 Pending | placed resolver의 "provider 증명" 칸과 같다. 증명되면 같은 nonce로 adopt |
+
+**placed resolver** (새 `src/services/herdr_launch/placed.rs`(제안), 호출은 `src/services/discord/recovery_engine/herdr_reader.rs`의 boot·health 패스가 Pending을 건너뛰던 자리):
+
+1. 그 행의 transition lease를 owner·nonce·endpoint·서버 witness·pane 신원으로 잡는다. 같은 채널에 in-flight 턴·진행 중 create·close가 있으면 이번 패스는 넘긴다.
+2. 서버 witness가 행을 만든 서버와 다르면 server-replaced 경로로 넘긴다. Windows는 live handoff가 없어 옛 pane이 남지 않으므로
+   W08이 `legacy_dedicated`에도 그 경로를 열고, 재부팅 조건 없이 witness 불일치를 소실로 본다(Unix user_default의 재부팅 조건은 그대로).
+3. 같은 서버에서 `host.recover`로 판독한다.
+   - **provider 증명**(hook spawn nonce 또는 root/provider tree가 행 nonce와 일치) → 같은 nonce로 expected 기록·Bound·source attach. create 0, 재전송 0.
+   - **pane 없음**, 그리고 nonce 작업공간 census에 `논리키#nonce`가 없음 → retire + 큐 wake. kill 0.
+   - **pane에 다른 nonce**(pane id 재사용) → 자기 nonce 작업공간이 census에 없으면 위와 같이 retire. 남의 pane에는 효과 0.
+   - **자기 nonce 작업공간에 셸만**(provider 자식 없음), quiet 기간 경과, 첫 입력 receipt 없음 → residue warrant로 `host.terminate` → pane 부재 재확인 뒤 retire + wake.
+   - **Unknown**(probe 오류·시간 초과) → 행·원문 유지, 다음 패스(기존 `UNPLACED_RETRY` 30초 간격)에서 재판독. 죽었다고 단정하지 않는다.
+4. 결론마다 한 번만 기록·알림한다. retire 뒤 대기 큐가 깨어나 새 nonce로 create한다.
+
+**residue warrant.** `src/services/termination_audit/host_terminate.rs:27-48`의 warrant에 새 발급 근거 하나를 더한다: 같은 서버 witness, pane label nonce = 행 nonce, provider 자식 없음, 행이 그 위치의 Pending.
+소비 직전 같은 조건을 재확인하고 하나라도 어긋나면 Refused. 운영자 경로·tmux에는 발급하지 않는다. main에서 운영자가 안내문을 보고 하던 같은 close를,
+자기 create가 남긴 증명된 잔여 하나로 좁혀 자동화한 것이다(리뷰 P1-1이 수용 기준). 더 넓은 정리·kill 권한은 얹지 않는다.
+
+**경합.** 확인과 close 사이에 provider가 늦게 떠도 잃는 것이 없다: 사용자 입력은 Bound·SessionStart 뒤에만 전달되고(첫 입력 receipt가 있으면 residue close 금지),
+원문은 그때까지 내구 큐가 소유한다. 늦게 뜬 provider가 닫혀도 새 nonce create가 원문을 한 번 보낸다(이중 0, 유실 0).
+
+**Unix 동작 변화(의도).** 같은 resolver가 Unix Herdr에도 돈다. main의 never-attached 고정 시험
+`a_never_attached_pending_with_only_its_shell_is_judged_nothing_pg`(`src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs:980`, 픽스처 `:766-781`)는
+"판정 없음·수동 안내"에서 "복구 패스가 residue close 뒤 retire"로 기대가 바뀐다. 단언 변경이라 S06b PR에 사유를 적는다.
+
+**수용 시험(S06b, owner 경계 1곳: 복구 패스 진입점).** 픽스처 네 가지(provider 증명·pane 없음·셸만·Unknown)마다 사용자 입력 없이 패스 1회 뒤
+각각 Bound(같은 nonce, create 0) / Retired + wake 1 / close 1 + Retired + wake 1 / 행 유지 + close 0. 재시작 뒤 같은 결과. 뮤턴트: 셸만 칸에서 receipt 검사 제거, 패스가 Pending을 다시 건너뜀.
 
 **재시작 유실 경로 점검**: dcserver 재시작만으로는 유실이 없다 — 조건은 W04(job 밖 서버)·W03a(witness)·W08(부팅 도달)이고 각각 U04·U03·U11로 확인한다.
 남는 유실은 Herdr 서버 자체가 끝나는 경우(업데이트·재부팅·로그오프 U07)이며 조용하지 않다(행 닫기 + 알림 + resume).
@@ -261,14 +362,36 @@ close 응답이 불명확하면 행과 원문을 남겨 재관측한다. close �
 | **남김** | `src/services/session_backend.rs:26`(`ReadOutputFailure`), `:855`(stream_line), `:868`(terminal_usage), `:887` 이후 JSONL tail/harvest; `src/services/session_backend/stream_line.rs`; `src/services/process/`(`kill_pid_tree`, `ProcessIdentity`); headless 직접 실행 | tmux wrapper·headless가 쓴다 |
 | 먼저 옮김 | `src/services/claude/process_session_launch.rs:183` `without_resume_arg`(호출 `src/services/claude.rs:2430`) | D01 전에 provider argv 준비로 이동 |
 
-### 10.2 tmux 없는 Unix
+### 10.2 호스트 없음 — intake admission 경계에서 거절 (tmux 없는 Unix 등)
 
-세 진입점에서 관리 세션 이름이 있고 tmux를 쓸 수 없고 Herdr 선택도 없으면 **아무것도 띄우지 않고** `Err`를 돌려 기존 start failure 경로
-(`src/services/discord/router/message_handler/provider_dispatch/start_failure.rs`)로 사용자에게 한 번 알린다. 큐 원문은 소비하지 않는다.
-문구 예: `managed session host unavailable: tmux is not installed on this node and the channel has no Herdr endpoint`.
-일시 부재는 지금처럼 가용성 캐시(45초·3회)가 흡수하고, 기록된 pane이 살아 있으면 사용 가능으로 본다. 부팅을 막지 않는다(Herdr 채널·headless는 돈다).
+**r1의 결함.** r1은 세 provider 함수(`src/services/claude.rs:794-821`, `src/services/codex/command_streaming.rs:184-203`, `src/services/qwen.rs:357-368`)가 `Err`를 돌려
+start failure로 알린다고 했다. 그러나 이 함수들은 큐에서 원문을 꺼내 턴을 시작한 **뒤**에 불린다. owner가 없는 턴(Qwen 전부, owner 경로가 아닌 Claude/Codex)은
+`src/services/discord/router/message_handler/provider_dispatch/start_failure.rs:284-286`에서 곧바로 `execute_inner`로 가고, 그 `Err`는 원문을 큐에 되돌리지 않는다.
+대기 중이던 Qwen 원문이 사라지는 경로다.
+
+**최종.** "쓸 관리 호스트가 없다"는 판정을 provider 함수보다 앞, 이미 원문 복원 계약이 있는 intake admission 경계로 옮긴다.
+
+1. `src/services/turn_host.rs:177`의 `refusal_before_turn`은 지금 endpoint 없는 채널을 IO 없이 통과시킨다(`:186`). D01은 이 판정을 `ChannelHostPlan`(§5) 결과로 바꿔,
+   관리 세션 이름이 있고 계획 호스트가 없거나 지금 못 쓰면(tmux 미설치·가용성 캐시 연속 실패 3회 초과·Herdr 서버 down) `HostUnavailable { reason }`을 돌린다.
+   endpoint 있는 채널의 판정과 순서는 그대로다. `intake_refusal_before_turn`(`:198`)도 같은 값을 쓴다.
+2. 거절은 기존 경계가 처리한다: `src/services/discord/router/message_handler/intake_turn/host_refusal.rs:6-63`이 첨부·clear 플래그까지 원문을 되돌리고,
+   queued drain이면 `QueuedTransitionBusyHandoff`로 큐 owner가 통째 복원한다(`src/services/discord/router/intake_dispatch/queued.rs:353-357`). 호출은
+   일반 intake(`src/services/discord/router/message_handler/intake_turn.rs:252`)와 ADK thread(`src/services/discord/router/message_handler/intake_turn/adk_thread.rs:171`) 둘이고,
+   provider 구분 없이 모든 턴이 지난다. 이 경계는 provider spawn·reset·reconcile·clear보다 먼저다.
+3. 알림은 채널당 사유가 바뀔 때 한 번(queued 재시도는 이미 조용함, `src/services/discord/router/message_handler/intake_turn/host_refusal.rs:36`). 문구 예: `managed session host unavailable: tmux is not installed on this node and the channel has no Herdr endpoint`.
+4. 복원된 원문은 hold로 남고, 호스트 가용성이 돌아오는 신호(tmux 가용성 캐시 회복, Herdr 서버 기동·health 성공)가 큐 drain을 깨운다. 사용자가 다시 말하지 않아도 한 번 제출된다.
+   큐는 내구라 dcserver 재시작을 지나도 남는다(부팅 복원 `src/services/discord/runtime_bootstrap/queued_recovery.rs:26`).
+5. provider 함수 안의 "호스트 없음" 분기는 방어용 `Err`로만 남는다(admission을 지난 뒤 호스트가 사라진 경합). 그 경우도 원문은 이미 큐가 아니라 턴이 갖고 있으므로
+   기존 start failure 규칙(owner 있으면 owner 복원)을 따르고, D01 수용 시험이 경합 아닌 경로에서는 이 분기에 닿지 않음을 단언한다.
+
+일시 부재는 지금처럼 가용성 캐시(45초·3회, `src/services/platform/tmux/availability.rs:13-14`)가 흡수하고, 기록된 pane이 살아 있으면 사용 가능으로 본다
+(`src/services/claude/backend_routing.rs:92`의 규칙을 가용성 판정 안으로). 부팅을 막지 않는다(Herdr 채널·headless는 돈다).
 업그레이드 순간 옛 바이너리가 남긴 process wrapper(자기 process group, `src/services/session_backend.rs:240`)는 정리하지 않는다(main에 없던 kill). 운영 노드 해당 여부는 U14.
-모델 `UnixNoTmux` GREEN, `SilentFallback`(폴백을 남김) RED.
+
+**수용 시험(D01, 실제 queued kickoff·intake 진입점).** tmux·Herdr 둘 다 없는 노드에서 대기 중인 Qwen 원문(첨부 포함)으로 drain을 돌린다:
+자식 프로세스 0, 알림 1, 큐에 원문·첨부 그대로, dcserver 재시작 뒤에도 남음, 호스트 가용 신호 뒤 정확히 한 번 제출. Claude·Codex의 owner 없는 턴도 같은 표로 한 번 더.
+뮤턴트: admission 판정을 빼고 provider 함수의 일반 `Err`만 남김 → 원문 단언이 실패해야 한다(커밋하지 않음).
+모델 `UnixNoTmux` GREEN, `ErrConsumes`(호스트 없음 오류가 원문을 소비) RED `NoInputLoss`, `SilentFallback`(폴백을 남김) RED.
 
 ### 10.3 Windows Qwen
 
@@ -304,21 +427,22 @@ wrapper 종료 뒤 늦게 append하는 후손 시험(`src/services/discord/repla
 
 | 조각 | 목적 | 소유 파일 | prod 파일 / 순증 | 수용 시험 | win | 의존 |
 |---|---|---|---|---|---|---|
-| **S01** | tmux 종료 효과를 `TmuxHost`로 이전 + 어댑터 밖 관리 효과 ratchet 도입(현재 수를 기준선으로) | §12.4 목록 20파일 + `src/services/session_host/tmux_host.rs` | 21 / +90 | 바뀐 모듈과 호출 형제 모듈의 기존 시험, ratchet: 종료 범주는 NON_MANAGED만, 다른 범주는 현재 수 이하 | CI 컴파일 | — |
+| **S01** | tmux 종료 효과를 `TmuxHost`로 이전 + 어댑터 밖 관리 효과 ratchet 도입(현재 수를 기준선으로) | §12.4 목록 21파일 + `src/services/session_host/tmux_host.rs` | 22 / +95 | 바뀐 모듈과 호출 형제 모듈의 기존 시험, ratchet 새 범주: 생산 텍스트의 두 표기 종료 호출이 허용 3곳뿐, 다른 범주는 현재 수 이하(§12.4) | CI 컴파일 | — |
 | S02 | 관찰 포트: presence/liveness/has_session 경로 | `src/services/session_host/{tmux_host,legacy_collapse,resolve}.rs`, `src/services/tmux_diagnostics.rs`, `src/services/provider/session_probe.rs`, `src/services/session_activity.rs` 외 C S02 | 12 / +350 | 3값·기존 bool collapse 같은 장소·같은 뜻, ProbeError를 Missing으로 합치지 않음 | 컴파일 | S01 |
 | S03 | `submit` 포트 + 입력 물리 효과(실행기 23곳의 tmux 인자 조립, FIFO, Herdr gated adapter) | `src/services/claude_tui/host_input.rs`, `src/services/codex_tui/host_input.rs`, `src/services/tui_input/actor/pane.rs`, `src/services/tui_input/submission_tmux.rs`, `src/services/claude_tui/busy_inject.rs` 외 C S03 | 18 / +850 | 원문 owner·first-key cancel·draft stash·partial write·receipt. spy가 어댑터 밖 tmux 호출 0 확인 | 컴파일 | S01 |
 | S04 | `create` 포트 + 생성·핸드오프 | `src/services/claude/tui_session_launch.rs`, `src/services/claude/herdr_turn/handoff.rs`, `src/services/claude/herdr_turn/never_attached.rs`, `src/services/codex/tui_session_launch/first_input.rs`, `src/services/herdr_launch.rs` 외 C S04 | 18 / +850 | Pending crash·ACK 유실·동시 create 2개·same-session Return·argv. Codex create 완료에 SourceBound 요구 0 | 컴파일 | S01 |
 | S05 | `interrupt`·`terminate(warrant)` 포트 + Herdr 종료 | `src/services/termination_audit/host_terminate.rs`, `src/services/discord/turn_bridge/tmux_runtime/judged_stop.rs`, `src/services/discord/turn_bridge/tmux_runtime/native_stop.rs`, `src/services/dispatched_sessions/herdr_kill/effects.rs` 외 C S05 | 16 / +600 | Cancel 뒤 세션 생존, close 전/후 crash, mismatch·Unknown warrant 무효, tmux 운영자 terminate Unsupported 유지 | 컴파일 | S01 |
 | S06 | `recover` 포트 + 복구 소비자 | `src/services/discord/recovery_engine/host_reconcile.rs`, `src/services/discord/recovery_engine/herdr_reader.rs`, `src/services/discord/recovery_engine/herdr_server_replaced.rs`, `src/services/discord/recovery_engine/restore_inflight.rs`, `src/services/discord/tui_prompt_relay/herdr_source.rs`, `src/services/discord/tui_prompt_relay/rehydration.rs` 외 C S06 | 18 / +850 | source cursor·옛 형식·standby·boot+health 재채택·reconcile wake | 컴파일 | S02 |
+| **S06b** | 위치가 기록된 Pending 자동 탈출(§7.3): placed resolver, residue warrant, never-attached 문구 | `src/services/discord/recovery_engine/herdr_reader.rs`, `src/services/herdr_launch.rs`, 새 `src/services/herdr_launch/placed.rs`(제안), `src/services/herdr_launch/unplaced.rs`, `src/db/dispatched_sessions/hosted_execution.rs`, `src/services/termination_audit/host_terminate.rs`, `src/services/claude/herdr_turn/never_attached.rs`, `src/services/codex/herdr_turn.rs` | 8 / +650 | §7.3 수용 시험(복구 패스 진입점, 네 픽스처, 재시작 뒤 같음). 기존 never-attached 시험 기대 변경(사유 기록) | 컴파일 | S05, S06 |
 | S07a~f | 잔여 소비자 6묶음 | [consumer-slices.tsv](i7583/consumer-slices.tsv)의 파일 목록(앞 조각과 겹치면 남은 효과만) | 각 ≤17 / +250 | leaf spy + source scan, 기존 guard·bool·결과 동등 | 각 컴파일 | S02~S06 |
-| S08 | ratchet 마감: 모든 범주 어댑터 밖 관리 효과 0(W 트랙 코드 포함 재검색) | `scripts/check_destructive_call_site_ratchet.py`와 기준선 | 0 / 스크립트 | 스크립트 시험, 전수표 BYPASS 318행 재검색 0 | — | S07f |
+| S08 | ratchet 마감: 모든 범주 어댑터 밖 관리 효과 0(W 트랙 코드 포함 재검색) | `scripts/check_destructive_call_site_ratchet.py`와 기준선 | 0 / 스크립트 | 스크립트 시험, 전수표 BYPASS 320행 재검색 0 | — | S07f |
 
 ### 12.2 Windows 트랙
 
 | 조각 | 목적 | 소유 파일 | prod 파일 / 순증 | 수용 시험 | win | 의존 |
 |---|---|---|---|---|---|---|
 | W00 | 측정만: 게이트를 임시로 뒤집어 Windows 컴파일 오류·파일 수 census(착지 없음) | — | 0 | U15 기록 | 맥 | — |
-| W01 | 선택 표현 + `ChannelHostPlan` 정규화(Windows는 W09 전까지 기존 결과). [state-entrypoints.tsv](i7583/state-entrypoints.tsv)의 `herdr_turn_enabled` reader·시험 setter 전부를 새 타입으로 | `src/config/runtime_settings.rs`, `src/config/session_hosts.rs`, `src/services/turn_host.rs`, reload/validation, 새 `src/services/session_host/channel_host_plan.rs`(제안) | 14 / +700 | §5 표 전 칸(bool/None/Channels, Codex 게이트, endpoint 없는 `"herdr"` 거절), stale current host, 생산 진입점에서 off일 때 IO 0 | 컴파일 | — |
+| W01 | 선택 표현 + `ChannelHostPlan` 정규화와 허가(§5.1) 계산(Windows는 W09 전까지 기존 결과). [state-entrypoints.tsv](i7583/state-entrypoints.tsv)의 `herdr_turn_enabled` reader·시험 setter 전부를 새 타입으로, 실행·Escape 허가 접근자를 계획 읽기로 | `src/config/runtime_settings.rs`, `src/config/session_hosts.rs`, `src/services/turn_host.rs`, `src/services/provider/cancel_token_claude_interrupt.rs`, reload/validation, 새 `src/services/session_host/channel_host_plan.rs`(제안) | 16 / +850 | §5.2 표 기반 시험(전 조합·완전성), 생산 경계 2건, stale current host, 생산 진입점에서 off일 때 IO 0. 뮤턴트 §5.2 (a)~(c) | 컴파일 | — |
 | W02 | named pipe 전송 | `src/services/session_host.rs`, `src/services/session_host/herdr/{transport,model,wire,contract}.rs`, 새 `src/services/session_host/herdr/transport_pipe.rs`(제안), registry/factory | 10 / +950 | 실제 임시 pipe·framing·timeout·write 0바이트 전/후·동시 mutation 직렬. Unix rig 무변화 | **Windows CI** | W00 |
 | W03a | 서버 witness(pipe 서버 PID·FILETIME·boot) | `src/services/session_host/herdr/provenance.rs`, `src/services/session_host/herdr/transport.rs` 소비부, Windows OS leaf | 6 / +500 | PID 재사용·새 서버·boot 변경·권한 오류를 absent로 바꾸지 않음 | **CI** | W02 |
 | W03b | 점유·E7·loaded image·retired hold | `src/services/session_host/herdr/{pane_probe,observe}.rs`, `src/services/session_host/herdr/policy/`, `src/services/herdr_launch/retired_hold.rs` | 10 / +650 | 살아 있는/죽은 pid, nonce 점유, E7 Off 미증명 Withheld, hold 왕복, user_default 부팅 거절 유지 | **CI** | W03a |
@@ -326,16 +450,16 @@ wrapper 종료 뒤 늦게 append하는 후손 시험(`src/services/discord/repla
 | W05 | 파일 신원·잠금 공통 헬퍼 | 새 `src/services/platform/file_identity.rs`(제안) + dev·inode 사용 파일 | 22 / +150 | Unix: 같은·다른·교체된 파일 판정이 이전과 같음. Windows CI: 같은 3경우 | **CI** | W00 |
 | W06 | Windows launch 명령 + native hook/source | `src/services/herdr_launch.rs`, `src/services/claude/tui_session_launch.rs`, `src/services/codex/tui_session_launch/first_input.rs`, `src/services/discord/tmux_session_files.rs`, hook relay 경로 | 14 / +800 | `.cmd` 런처를 `cmd.exe`로 실행해 env·인자·cwd 전달, HERDR 변수 없음, 공백·한글·npm shim, SessionStart·rollout 경로 | **CI + win** | W03b, W04, W05 |
 | W07 | 게이트 열기 1: 실행 경로 컴파일(스위치는 아직 `cfg!(unix)`) | `src/services/claude.rs`, `src/services/codex.rs`, `src/services/claude_tui/mod.rs`, `src/services/discord/router/message_handler/provider_dispatch.rs`와 하위 | ~20 / +300(W00로 확정) | Windows CI: 컴파일, 생산 진입점에서 Windows Herdr 턴 거절·IO 0 유지 | **CI** | W01, W06 |
-| W08 | 게이트 열기 2: 복구·종료·관찰 컴파일 + 부팅 도달 | `src/services/discord/mod.rs`, `src/services/discord/recovery_engine.rs`, `src/services/discord/tui_prompt_relay.rs`와 하위 | ~25 / +400(W00로 확정) | Windows CI: 생산 부팅 진입점이 재시작 패스(`rehydration.rs:270`, `:668`)에 도달, 같은 서버 pane 재채택, 서버 교체면 Retired + 알림 1회 | **CI** | W07, S06 |
-| W09 | 활성화 — Windows Claude: PlatformDefault Herdr, 스위치 `cfg!(unix)` 해제, owner 입력 경로, process 시절 세션의 resume 처리 | `src/services/turn_host.rs`, `src/services/discord/queue_io/input_owner/ingress.rs`, `src/services/provider_hosting.rs`, `src/services/claude/herdr_turn/handoff.rs`, CI 선택 감사 | 9 / +260 | 부팅·턴 중간·dcserver crash 행렬에서 같은 session/pane/nonce, 이중 0, O cursor, cancel/terminate, never-attached 자동 탈출, O writer 빈 초기화. 생산 진입점: O 커서 없는 저장 세션이 있는 채널의 첫 입력이 시작 실패가 아니라 resume 또는 fresh + 알림 1회로 시작 | **CI + win(U01~U12 전부)** | W08, U 패킷 |
-| W10 | 활성화 — Windows Codex | `src/services/turn_host.rs`, Codex hosting 경로 | 6 / +150 | 위 행렬의 Codex판, 첫 입력 hook 순서 | **CI + win(U10)** | W09 |
+| W08 | 게이트 열기 2: 복구·종료·관찰 컴파일 + 부팅 도달 + terminal settlement Windows판 + server-replaced를 `legacy_dedicated`·Pending까지 | `src/services/discord/mod.rs`, `src/services/discord/recovery_engine.rs`, `src/services/discord/recovery_engine/herdr_server_replaced.rs`, `src/services/provider/cancel_token_claude_interrupt.rs`, `src/services/discord/tui_prompt_relay.rs`와 하위 | ~27 / +550(W00로 확정, 30파일을 넘으면 settlement·server-replaced를 W08b로 분리) | Windows CI: 생산 부팅 진입점이 재시작 패스(`rehydration.rs:270`, `:668`)에 도달, 같은 서버 pane 재채택, 서버 교체면 Bound·placed Pending 모두 Retired + 알림 1회(재부팅 조건 없음), settlement 참 | **CI** | W07, S06b |
+| W09 | 활성화 — Windows Claude: PlatformDefault Herdr와 허가, 스위치 `cfg!(unix)` 해제, owner 입력 경로, `#[cfg(unix)]` Escape 판정, process 시절 세션의 resume 처리 | `src/services/turn_host.rs`, `src/services/discord/queue_io/input_owner/ingress.rs`, `src/services/discord/router/message_handler/provider_dispatch.rs`, `src/services/discord/turn_bridge/tmux_runtime/judged_stop.rs`, `src/services/provider_hosting.rs`, `src/services/claude/herdr_turn/handoff.rs`, CI 선택 감사 | 11 / +320 | 부팅·턴 중간·dcserver crash 행렬에서 같은 session/pane/nonce, 이중 0, O cursor, cancel/terminate, placed Pending 자동 탈출(S06b 픽스처의 Windows판), O writer 빈 초기화. 생산 진입점: 공유 설정 `herdr_turn_enabled=false`에서도 Windows 기본 Claude가 Herdr로 시작하고 Escape 전달. O 커서 없는 저장 세션이 있는 채널의 첫 입력이 시작 실패가 아니라 resume 또는 fresh + 알림 1회로 시작. Herdr down이면 tmux 0·admission 거절 | **CI + win(U01~U12 전부)** | W08, U 패킷 |
+| W10 | 활성화 — Windows Codex: PlatformDefault 실행·Escape 허가 | `src/services/turn_host.rs`, `src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs`, Codex hosting 경로 | 7 / +180 | 위 행렬의 Codex판, 첫 입력 hook 순서. 생산 진입점: `herdr_codex_turn_enabled`·`herdr_cancel_enabled` 미설정/false에서 Windows 기본 Codex가 시작되고 Escape가 `SwitchOff`로 버려지지 않음. endpoint 채널은 지금처럼 bool을 따름 | **CI + win(U10)** | W09 |
 
 ### 12.3 삭제 트랙과 Core
 
 | 조각 | 목적 | 소유 파일 | prod 파일 / 순증 | 수용 시험 | win | 의존 |
 |---|---|---|---|---|---|---|
 | D00 | 시험 대역 치환(시험만) | §10.4 둘째·셋째 부류 약 30 시험 파일, `src/services/session_host/test_support.rs` | 0(+가짜 호스트 60줄) | 바꾼 시험 통과, 단언 삭제 0 | CI | — |
-| D01 | 라우팅·process launch 삭제, spawn 전 오류, Windows Qwen headless, 가용성 규칙 | `src/services/claude.rs`, `src/services/claude/backend_routing.rs`, `src/services/claude/process_session_launch.rs`, `src/services/codex/command_streaming.rs`, `src/services/codex/process_session_launch.rs`, `src/services/qwen.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/claude_command.rs`, `src/services/platform/tmux/availability.rs` | 10 / −900 | 생산 진입점: tmux·Herdr 둘 다 없으면 오류로 끝나고 자식 프로세스 0, 원문 보존. 살아 있는 pane이면 tmux | **CI** | W10, D00 |
+| D01 | 라우팅·process launch 삭제, intake admission의 호스트 없음 거절과 가용성 wake(§10.2), Windows Qwen headless, 가용성 규칙 | `src/services/claude.rs`, `src/services/claude/backend_routing.rs`, `src/services/claude/process_session_launch.rs`, `src/services/codex/command_streaming.rs`, `src/services/codex/process_session_launch.rs`, `src/services/qwen.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/claude_command.rs`, `src/services/platform/tmux/availability.rs`, `src/services/turn_host.rs`, `src/services/discord/router/message_handler/intake_turn/host_refusal.rs`, `src/services/discord/router/intake_dispatch/queued.rs`, 가용성 wake 등록 | ~15 / −650 | §10.2 수용 시험: 실제 queued kickoff·intake에서 tmux·Herdr 둘 다 없을 때 Qwen 대기 원문·첨부 보존, 자식 0, 알림 1, 재시작 뒤 보존, 호스트 복귀 뒤 1회 제출. Claude·Codex owner 없는 턴도. 살아 있는 pane이면 tmux | **CI** | W10, D00 |
 | D02 | 레지스트리 조회 소비자 정리 | §10.1 소비자 15곳의 13파일 + `src/services/provider/session_probe.rs` | 13 / −120 | clear·reset·admin guard 기존 시험 | CI | D01 |
 | D03 | `ProcessBackend` 종류·`ProcessReady`·process 취소 삭제 | `src/services/agent_protocol.rs`, `src/services/discord/turn_bridge/runtime_handoff_loop.rs`, `src/services/discord/turn_bridge/stream_loop.rs`, `src/services/discord/recovery_engine.rs`, `src/services/discord/turn_bridge/tmux_runtime.rs`, `src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs`, `src/services/discord/inflight/model.rs`, `src/services/discord/health/routine_process.rs` 등 | 24 / −600 | 0단계: 종류 없는 헤드리스 행의 현재 복구 분기를 시험으로 먼저 고정. 디스크 `"process_backend"` 행은 "세션 없음"으로 닫히고 알림 1회, silent-skip 0 | CI | D02 |
 | D04 | 레지스트리·`ProcessHost`·`HostKind::Process` 삭제, 클러스터 광고 | `src/services/session_backend.rs`, `src/services/session_backend/auth_profiles.rs`, `src/services/session_backend/output.rs`, `src/services/session_host/process_host.rs`, `src/services/session_host/model.rs`, `src/services/session_host/resolve.rs`, `src/domain/host_observation.rs`, `src/services/cluster/readiness.rs` 등 | 14 / −900 | 실행 소스의 ProcessBackend/ProcessHost/Process kind 0, JSONL 파서·3종 runtime 유지, 옛 `process` 표식 Unrecognized | CI | D03, U14 |
@@ -343,24 +467,39 @@ wrapper 종료 뒤 늦게 append하는 후손 시험(`src/services/discord/repla
 | C01 | `HerdrCoreHost`(hc CLI) | 새 `src/services/session_host/herdr_core/`(제안), `src/domain/host_observation.rs` | 6 / +700 | hc 출력 JSON 파싱 계약, 고정 버전 왕복(실제 hc 있을 때) | win(U16) | S04·S05·S06 |
 | C02 | F4 레인 하나 실측 기록 + 하니스 | #7438 소유 소비자 경로, 기존 command/store API를 부르는 하니스 | ≤10 / +800 | 첫 지시·OSC·parent wait·결과·재부팅 loss, 다른 terminal 정리 0 | **win(U17~U19)** | C01, #7438 F4 intake |
 
-조각 수: S01~S06 6 + S07a~f 6 + S08 1 + W01~W10(W03a·b 포함) 11 + D00~D05 6 + C01·C02 2 = **착지 32**, 측정 W00 1.
+조각 수: S01~S06 6 + S06b 1 + S07a~f 6 + S08 1 + W01~W10(W03a·b 포함) 11 + D00~D05 6 + C01·C02 2 = **착지 33**, 측정 W00 1.
+최대 추정은 prod 27파일(W08), 순증 +950(W02). +1200을 넘는 조각은 없다. W08은 W00 측정이 30파일을 넘기면 W08b로 나눈다(그때 34).
 순서: S 트랙과 W 트랙은 병렬. W09 전에는 Windows 기본 전환이 없고, W10 전에는 ProcessBackend 삭제가 없다. DoD 3 최종 검사는 S08과 D05 뒤 각각 한다.
 
 ### 12.4 첫 조각 S01 — 구현 레그 인계
 
 - 목적: 관리 세션의 tmux 종료 효과(`kill_session`·`kill_session_output`·`kill_session_output_timeout`)를 `TmuxHost` 메서드 뒤로 옮긴다. 동작·조건·반환·감사 기록 동일.
 - `TmuxHost`에 `kill(name, reason) -> bool`, `kill_output(name, reason)`, `kill_output_timeout(name, reason, timeout)`를 더하고 `platform::tmux`에 위임한다(새 정책 없음).
-- 바꿀 호출부(C 전수표 terminate·BYPASS 중 tmux, process 행 제외):
-  `src/engine/ops/exec_ops.rs:437`, `:438`; `src/services/claude_tui/host_input.rs:216`; `src/services/codex.rs:1243`, `:1395`; `src/services/codex_tui/host_input.rs:188`;
+- 바꿀 호출부: 생산 텍스트(`RUST_LEXER._production_text`, 통째 시험 파일·`cfg(test)` 제외)에서 두 표기(`platform::tmux::kill_session*`와 `tmux::kill_session*`)를 모두 찾은
+  31곳 중 관리 세션 28곳, 21파일. 전수표 terminate·BYPASS의 `tmux::kill_session*` 행 28개와 좌표가 같다(r2 재분류 반영, 전송 trait 메서드 `src/services/codex_tui/host_input.rs:681`은 경로 표기가 아니라 S03).
+  `src/cli/utils.rs:186`; `src/engine/ops/exec_ops.rs:437`, `:438`; `src/services/claude_tui/host_input.rs:216`; `src/services/codex.rs:1243`, `:1395`; `src/services/codex_tui/host_input.rs:188`;
   `src/services/discord/commands/control/managed_reset.rs:142`; `src/services/discord/commands/tmux_recreate.rs:57`; `src/services/discord/router/message_handler/provider_isolation.rs:546`;
   `src/services/discord/tmux_reaper.rs:329`, `:553`, `:674`, `:1542`; `src/services/discord/tmux_watcher/post_stream_exit.rs:273`; `src/services/discord/tmux_watcher/pre_emit_guard.rs:330`;
   `src/services/discord/tmux_watcher/terminal_abort_exits.rs:148`; `src/services/discord/turn_bridge/retry_state.rs:376`; `src/services/discord/watchers/lifecycle/restore.rs:890`;
   `src/services/dispatched_sessions/tmux_cleanup.rs:338`; `src/services/provider/cancel_token_cleanup/executor.rs:371`; `src/services/provider_teardown.rs:84`;
   `src/services/qwen/session_lifecycle.rs:57`, `:83`, `:105`; `src/services/tmux_turn_liveness.rs:48`; `src/services/tui_prompt_dedupe/binding_context.rs:466`; `src/services/turn_lifecycle.rs:489`.
-- 건드리지 않음: `src/services/codex_tui/host_input.rs:681`(전송 trait 메서드, S03), `src/services/claude/herdr_return.rs:80`, `:83`(`/exit` 경로, S03), NON_MANAGED(`src/cli/dcserver.rs:831`, `src/cli/utils.rs:186`, `src/server/routes/provider_auth_profiles.rs:341`, `:490`), process 행(D 트랙).
-- ratchet: `scripts/check_destructive_call_site_ratchet.py`의 `kill_session` 범주(`:202`)에 어댑터 파일 소유 규칙을 더하고 기준선을 NON_MANAGED 4곳으로 낮춘다. 같은 조각에서 생성·입력·관찰 tmux 세션 함수와 tmux 인자 조립에 "어댑터 밖" 범주를 현재 수 기준선으로 더해, W 트랙과 이후 조각이 새 우회를 늘리지 못하게 한다(줄기만 함). 기준선 수치·허용 항목은 코디네이터 소유라 FILES로 승인받는다.
-- 시험: 새 시험 없음(동작 보존 이동). 바뀐 모듈과 호출 형제 모듈 시험(`turn_lifecycle`, `tmux_reaper`, `provider_teardown`, `cancel_token_cleanup`, `exec_ops`, `managed_reset`)과 source-scan reader. 뮤턴트: 어댑터 메서드가 reason을 버리는 변형을 기존 감사 시험이 잡는지 확인(커밋하지 않음).
-- 크기: prod 21파일, 순증 약 +90. Windows: unix 전용 API를 새로 쓰지 않음(CI가 컴파일 확인).
+- `src/cli/utils.rs:186`은 reset-tmux(`src/cli/utils.rs:166-194`)의 `AgentDesk-*` 관리 세션 종료다. 기존 marker 거절·이름 필터와 시험
+  `reset_tmux_leaves_another_hosts_session_running`(`src/cli/utils.rs:224`)을 그대로 지나게 옮긴다. 같은 함수의 나열(`:168`)은 관찰이라 S02.
+- 건드리지 않음: `src/services/codex_tui/host_input.rs:681`(전송 trait 메서드, S03), `src/services/claude/herdr_return.rs:80`, `:83`(`/exit` 경로, S03),
+  비관리 종료 3곳(`src/cli/dcserver.rs:831`, `src/server/routes/provider_auth_profiles.rs:341`, `:490`), process 행(D 트랙).
+- ratchet(`scripts/check_destructive_call_site_ratchet.py`): 지금 `tmux_kill` 패턴(`:199-203`)은 `platform::tmux::` 표기만 잡고, 통째 시험 파일 제외(`:671`) **전에** 센다(`:664-669`).
+  `use crate::services::platform::tmux;` 뒤 `tmux::kill_session(...)` 표기는 빠지고, 시험 파일의 호출은 들어간다. 그래서 기존 범주는 통계용으로 그대로 두고
+  새 범주 `managed_tmux_kill_outside_adapter`를 더한다:
+  (1) 두 표기를 모두 잡는 패턴(`(?:platform\s*::\s*)?tmux\s*::\s*kill_session(?:_output_timeout|_output|_checked)?\s*\(`, `TmuxHost` 메서드 이름과 겹치지 않게 경로 접두 필수),
+  (2) `_is_whole_test_file` 제외 뒤 `RUST_LEXER._production_text`로 센 생산 텍스트만,
+  (3) 어댑터 파일(`src/services/session_host/tmux_host.rs`, `src/services/platform/tmux*`)은 제외, (4) 허용은 위 비관리 3곳의 **파일 단위 수**를 검사기 상수로 고정
+  (`src/cli/dcserver.rs` 1, `src/server/routes/provider_auth_profiles.rs` 2). 그 밖의 파일에 하나라도 생기면 실패, 허용 파일의 수가 늘어도 실패.
+  스크립트 시험에 두 표기·시험 파일·`cfg(test)` 블록·어댑터 파일 픽스처를 넣어 각 규칙을 고정한다.
+  같은 조각에서 생성·입력·관찰 tmux 세션 함수와 tmux 인자 조립에 "어댑터 밖" 범주를 현재 수 기준선으로 더해, W 트랙과 이후 조각이 새 우회를 늘리지 못하게 한다(줄기만 함).
+  기준선 수치·허용 항목은 코디네이터 소유라 FILES로 승인받는다.
+- 시험: 새 Rust 시험 없음(동작 보존 이동). 바뀐 모듈과 호출 형제 모듈 시험(`turn_lifecycle`, `tmux_reaper`, `provider_teardown`, `cancel_token_cleanup`, `exec_ops`, `managed_reset`, `cli::utils`)과 source-scan reader,
+  ratchet 스크립트 시험. 뮤턴트: 어댑터 메서드가 reason을 버리는 변형을 기존 감사 시험이 잡는지, ratchet이 `tmux::` 표기 새 호출을 잡는지 확인(커밋하지 않음).
+- 크기: prod 22파일, 순증 약 +95(스크립트 제외). Windows: unix 전용 API를 새로 쓰지 않음(CI가 컴파일 확인).
 
 ## 13. [U] 통합
 
@@ -380,7 +519,7 @@ U-CENSUS(C 전수표로 해소), U-MODEL(이번 모델 실행으로 해소), U-S
 | U08 | Claude TUI in ConPTY | pane에서 `claude` 실행 뒤 bracketed paste, `enter`·`esc`·`ctrl+u`·`ctrl+c`, `pane.read`; SessionStart·Stop hook의 HTTP POST 도달; `%USERPROFILE%\.claude\projects\` 경로; `claude --resume <id>` | 붙여넣기 한 덩어리 여부, 키 동작, hook 도달, transcript 경로 | Unix와 같음 / 키 표 Windows 분기 | W06·W09 | B U5·U7, C U07 |
 | U09 | `pane.process_info` | claude 실행 중·종료 뒤 호출 | foreground pid·이름 | 셸 pid만 나오면 점유 증거를 hook nonce + 자식 목록으로 | W03b | B U6 |
 | U10 | Codex TUI | rollout 경로, `codex resume`, 키·붙여넣기, 첫 prompt와 첫 hook 순서 | U08과 같은 항목 | Unix와 같음 / 다르면 W10만 늦춤 | W10 | B U10, C U07 |
-| U11 | 재시작 crash 행렬 | 임시 dcserver를 create 앞·ACK 유실·위치 CAS 앞·Bound idle·턴 중간·완료 뒤·O 게시 앞에 종료 후 같은 sandbox로 재기동 | server/pane/root/provider/session/nonce, 실행 수, 원문, 출력 | 같은 실행, 실행 수 1, 누락 0, 중복 0, terminal attach 0 | W09 | C U08 |
+| U11 | 재시작 crash 행렬 | 임시 dcserver를 create 앞·ACK 유실·위치 CAS 앞·**위치 CAS 뒤 실행 명령 확인 전·provider 기동 중·expected 기록 뒤 Bound 전**·Bound idle·턴 중간·완료 뒤·O 게시 앞에 종료 후 같은 sandbox로 재기동. 같은 서버에서 닫힌 pane의 id가 재사용되는지도 기록 | server/pane/root/provider/session/nonce, 실행 수, 원문, 출력, placed Pending 결론, pane id 재사용 여부 | 같은 실행, 실행 수 1, 누락 0, 중복 0, terminal attach 0. 위치 있는 Pending은 사용자 입력 없이 §7.3의 한 결론으로 끝남 / Unknown이 반복되면 W09 보류 | W09 | C U08, r2 P1-1 |
 | U12 | Cancel·Terminate·clear·stop | 임시 왕복 중 Cancel/Stop/HTTP force/clear/reset, close 앞·뒤 crash, foreign nonce | pane 생존·소유 child | cancel 뒤 생존, 종료 뒤 소유 child 0, 오류면 행·원문 보존, foreign 변경 0 | W09·D03 | C U09 |
 | U13 | Qwen headless·기본값 표 | Windows에서 Qwen headless 첫·후속 입력과 resume; Unix harness PATH에서 tmux 제거 후 §5 표 전 칸 | 응답·오류 문구·원문 보존 | Qwen 동작, tmux 없음 거절 1·silent loss 0, 표 일치 | D01 | C U10, B 결정 2 |
 | U14 | 운영 사실(읽기 전용) | 코디네이터가 운영 설정을 읽어 Windows 노드의 Qwen 채널 수, tmux 없는 Unix 노드 유무, 클러스터 정책의 `process` backend 요구, Windows 노드의 기존 `herdr_turn_enabled` 값 | 개수·값 | 모두 0 또는 영향 없음 / 정책 항목 먼저 정리 | D01·D04 | B U12 |
@@ -395,21 +534,33 @@ U01~U12를 일부만 발사하지 않는다(W09의 일괄 조건). 실측 불가
 
 ## 14. 상태 모델
 
+23 cfg, TLC 1.7.4. 성립 9, 예상 RED 14. 상세·반례 대조는 [보고서](../statecharts/session-host/session-host.report.md).
+
 | cfg | 깨지는 규칙 | 상태 수 |
 |---|---|---|
-| UnixTmuxCurrent, UnixTmux, UnixHerdrCurrent, UnixHerdr | 없음 | 991 |
-| UnixNoTmux | 없음 | 40 |
-| WindowsHerdr, WindowsImplicit | 없음 | 991 |
+| UnixTmuxCurrent, UnixTmux | 없음 | 4,434 |
+| UnixHerdr, WindowsHerdr, WindowsImplicit | 없음 | 8,299 |
+| UnixHerdrCurrent | PendingEventuallyResolved, RestartEventuallyReconnect(main의 placed Pending, P1-1 수정 전) | 3,647 |
+| UnixEndpointOffCurrent, UnixEndpointOff | 없음(endpoint + bool false는 거절, 무변화) | 40 |
+| UnixNoTmux | 없음 | 24 |
 | WindowsSelectedCurrent | 없음 | 40 |
-| WindowsCurrent | NoSessionLoss | 238 |
-| UnixNoTmuxCurrent | NoSessionLoss, NoDoubleSession, NoOrphanAfterTerminate; RestartEventuallyReconnect, InputAnswered, TerminateEventuallyGone | 231 |
-| SilentFallback | 위 6개 + NoProcessHost | 231 |
-| WindowsServerInJob | NoSessionLoss | 1,113 |
-| WindowsNoAutostart | HostRecovers | 528 |
-| ReplayPending | NoDoubleSession | 634 |
-| EarlyRetire | NoSessionLoss, NoOrphanAfterTerminate | 1,004 |
-| NoWake | RestartEventuallyReconnect, InputAnswered, PendingEventuallyResolved | 364 |
-| ForgetIdentity | NoSessionLoss; RestartEventuallyReconnect, InputAnswered, PendingEventuallyResolved | 238 |
+| WindowsCurrent | NoSessionLoss | 682 |
+| UnixNoTmuxCurrent | NoSessionLoss, NoDoubleSession, NoOrphanAfterTerminate; RestartEventuallyReconnect, InputAnswered, TerminateEventuallyGone | 680 |
+| SilentFallback | 위 6개 + NoProcessHost | 680 |
+| ErrConsumes | NoInputLoss | 40 |
+| GateRun | NoDefaultRefusal | 40 |
+| GateCancel | NoDefaultCancelDrop | 8,299 |
+| SkipPlaced | PendingEventuallyResolved, RestartEventuallyReconnect | 3,647 |
+| WindowsServerInJob | NoSessionLoss | 9,169 |
+| WindowsNoAutostart | HostRecovers | 4,226 |
+| ReplayPending | NoSessionLoss, NoDoubleSession, NoOrphanAfterTerminate | 4,095 |
+| EarlyRetire | NoSessionLoss, NoOrphanAfterTerminate | 8,470 |
+| NoWake | RestartEventuallyReconnect, InputAnswered, PendingEventuallyResolved | 1,113 |
+| ForgetIdentity | NoSessionLoss; RestartEventuallyReconnect, InputAnswered, PendingEventuallyResolved | 774 |
+
+리뷰 항목의 수정 전/후: P1-1 `UnixHerdrCurrent`(main) RED → `UnixHerdr` GREEN, Windows는 `SkipPlaced` RED → `WindowsImplicit` GREEN.
+P1-2 `GateRun`·`GateCancel` RED → `WindowsImplicit` GREEN. P1-3 `ErrConsumes` RED → `UnixNoTmux` GREEN.
+Unix Herdr 쌍의 상태 수가 다른 것(3,647 / 8,299)은 placed Pending 자동 탈출이 Unix에도 도는 의도한 변화 때문이다. 모델은 §5 표 전체의 동일성을 보이지 않는다(§5.2).
 
 ## 15. DoD 대조
 
@@ -418,9 +569,10 @@ U01~U12를 일부만 발사하지 않는다(W09의 일괄 조건). 실측 불가
 | Windows에서 Claude·Codex 관리 세션이 Herdr로 뜬다 | §5, §6 | W01~W10 | W09·W10 Windows CI + U08·U10 |
 | 입력·출력·취소가 된다 | §8, §9 | S03, S05, W09 | U08·U12 |
 | dcserver 재시작 뒤 재연결(Windows CI·win 실측) | §7 | W04, W08, W09 | W08 생산 부팅 도달 시험, U04·U11 |
-| ProcessBackend·ProcessHost·`HostKind::Process`가 없고 Windows CI 녹색 | §10 | D00~D05 | 심볼 삭제 컴파일, `tmux_missing_turn_errors_without_spawning`(생산 진입점) |
-| 생성·입력·관찰·중단·종료가 trait을 지나고 우회 전수표 0 | §4 | S01~S08 | ratchet 0, BYPASS 318행 재검색 |
-| 채널별 tmux·Herdr 선택, 기본값 같음 | §5 | W01 | §5 표 전 칸 시험, 모델 Unix 쌍 동일 상태 수 |
+| ProcessBackend·ProcessHost·`HostKind::Process`가 없고 Windows CI 녹색 | §10 | D00~D05 | 심볼 삭제 컴파일, D01 admission 시험(호스트 없음 → 자식 0·원문 보존·복귀 뒤 1회, 모든 provider) |
+| 생성·입력·관찰·중단·종료가 trait을 지나고 우회 전수표 0 | §4 | S01~S08 | ratchet 0(두 표기·생산 텍스트), BYPASS 320행 재검색 |
+| 채널별 tmux·Herdr 선택, 기본값 같음 | §5 | W01 | §5.2 표 기반 시험(전 조합·완전성)과 생산 경계 2건. 모델은 보조(`GateRun`·`GateCancel`) |
+| (재시작 뒤 사람 개입 없음) 위치가 기록된 Pending도 자동으로 끝난다 | §7.3 | S06b, W08, W09 | S06b 복구 패스 시험, U11 |
 | HerdrCoreHost가 F4 레인 하나를 띄우고 결과를 받는 실측 기록 | §11 | C01, C02 | U16~U19 기록 |
 
 ## 16. 리뷰 집중 항목
@@ -429,6 +581,10 @@ U01~U12를 일부만 발사하지 않는다(W09의 일괄 조건). 실측 불가
 |---|---|
 | 고르지 않은 안의 결정이 충돌한 채 남았는가 | §2 충돌표 13건에 하나씩 판정. B의 수동 매핑·tmux 운영자 terminate·`exec_ops` 비관리, C의 Windows bool 적용·옛 Process 실행 이관, A의 Qwen wrapper를 기각하고 이유를 적었다. 남은 것: 없음 |
 | Windows 재채택의 세션 유실 경로 | job 밖 서버(W04, U04)·witness(W03a, U03)·부팅 도달(W08, `NoWake`)이 모두 서야 유실 0. 모델 `WindowsServerInJob`·`NoWake`·`ForgetIdentity`가 각 조건을 뺀 반례. 합류 자체 공격에서 찾은 인접 경로: 첫 전환 때 process 시절 Claude 세션의 resume 거절이 입력마다 시작 실패를 내는 경로 → W09 수용 시험과 U20으로 막음. 남는 것: Herdr 서버 자체 소실(업데이트·재부팅·로그오프 U07)은 행 닫기 + 알림 + resume로 조용하지 않게 처리, Codex는 main 규칙대로 새 대화 |
-| ProcessBackend 삭제가 tmux 부재 폴백을 조용한 유실로 바꾸는가 | spawn 전 오류 + 원문 보존 + start failure 알림(`UnixNoTmux` GREEN, `SilentFallback` RED). 옛 `"process_backend"` 행 silent-skip은 D03이 막는다. 남는 것: 업그레이드 순간 옛 wrapper 고아는 정리하지 않음(main에 없던 kill) |
-| 우회 전수표 대비 0 경로 | BYPASS 318행 → S01~S07이 파일 단위로 덮고, S01이 들인 ratchet이 W 트랙 포함 이후 조각의 새 우회를 막으며 S08이 0으로 닫는다. NON_MANAGED 30행은 좌표 허용 목록. 남는 것: 함수 포인터·재수출 호출은 grep으로 못 잡음 — 삭제는 컴파일러, 이동은 ratchet과 source scan |
-| 채널 기본값이 지금과 같은가 | Unix 전 칸 동일(모델 991=991). bool은 Windows 암묵 기본에 걸지 않아 공유 설정 false가 Windows를 끊지 않는다. 바뀌는 두 칸(tmux 없는 Unix, Windows 무선택)은 삭제가 강제하는 변화로 표에 명시 |
+| ProcessBackend 삭제가 tmux 부재 폴백을 조용한 유실로 바꾸는가 | intake admission 거절 + 원문 보존 + 알림 1회 + 호스트 복귀 wake(§10.2, `UnixNoTmux` GREEN, `SilentFallback`·`ErrConsumes` RED). 옛 `"process_backend"` 행 silent-skip은 D03이 막는다. 남는 것: 업그레이드 순간 옛 wrapper 고아는 정리하지 않음(main에 없던 kill) |
+| 우회 전수표 대비 0 경로 | BYPASS 320행 → S01~S07이 파일 단위로 덮고, S01이 들인 ratchet이 W 트랙 포함 이후 조각의 새 우회를 막으며 S08이 0으로 닫는다. NON_MANAGED 28행은 좌표 허용 목록. 남는 것: 함수 포인터·재수출 호출은 grep으로 못 잡음 — 삭제는 컴파일러, 이동은 ratchet과 source scan |
+| 채널 기본값이 지금과 같은가 | Unix 전 칸 동일 — 근거는 §5.2 표 기반 시험(리터럴 기대값, 완전성 검사)이고 모델 상태 수가 아니다. 세 bool은 Windows 암묵 기본에 걸지 않아 공유 설정 false가 Windows 실행·Escape를 끊지 않는다. 바뀌는 두 칸(tmux 없는 Unix, Windows 무선택)은 삭제가 강제하는 변화로 표에 명시 |
+| (r2) 재시작 뒤 사람 없이 끝나지 않는 placed Pending이 남는가 | 남지 않는다. 위치 있는 Pending은 boot·health 패스의 placed resolver가 provider 증명 → 같은 nonce adopt, pane 없음·다른 nonce → retire, 자기 nonce 셸만 → residue close 후 retire로 끝낸다(§7.3). Windows 서버 교체는 W08이 `legacy_dedicated`에서 재부팅 조건 없이 retire. 남는 것: probe가 계속 Unknown이면 행·원문을 지키며 30초마다 재판독(호스트 자체 장애로 보고) — 사람 명령을 요구하지 않는다. 모델 `UnixHerdrCurrent`·`SkipPlaced` RED → `UnixHerdr`·`WindowsImplicit` GREEN |
+| (r2) Windows Codex 실행·Cancel이 다른 게이트에 막히거나 tmux로 새는가 | 허가를 `ChannelHostPlan`이 선택과 함께 정하고(§5.1) PlatformDefault는 세 bool을 읽지 않는다. 나머지 게이트(owner 입력 `cfg!(unix)`, `#[cfg(unix)]` Escape 판정, settlement `cfg!(unix)`, Codex `SwitchOff`)를 W08·W09·W10이 하나씩 열고 각 생산 진입점 시험이 bool false 설정에서 시작·Escape 전달을 단언한다. PlatformDefault의 host는 Herdr뿐이라 tmux 분기가 없고, Herdr를 못 쓰면 admission 거절이다. 모델 `GateRun`·`GateCancel` RED → `WindowsImplicit` GREEN |
+| (r2) tmux·Herdr 둘 다 없을 때 원문을 잃는 provider가 있는가 | 없다. 판정을 provider 함수 `Err`에서 intake admission(`refusal_before_turn` → `host_refusal.rs` 복원·queued busy handoff)으로 옮겨 모든 provider·모든 intake 진입이 provider 호출 전에 같은 복원 경계를 지난다. D01 시험이 Qwen 대기 원문·첨부의 보존·재시작 생존·복귀 뒤 1회 제출을 실제 kickoff에서 단언. 남는 것: admission 통과 뒤 호스트가 사라지는 경합은 기존 start failure 규칙(owner 없는 턴은 원문을 이미 턴이 가짐) — 경합 창은 admission~spawn 사이로 좁다. 모델 `ErrConsumes` RED → `UnixNoTmux` GREEN |
+| (r2) S01 목록과 ratchet 기준선이 전수표와 맞는가 | 맞다. 생산 텍스트 두 표기 스캔 31곳 = 관리 28(S01 목록 21파일) + 비관리 3(허용 상수). 전수표 terminate BYPASS의 tmux 행과 같은 좌표다(`src/cli/utils.rs:186` 재분류 포함). 새 ratchet 범주는 두 표기·생산 텍스트만 세고 허용은 파일 단위 수로 고정 |

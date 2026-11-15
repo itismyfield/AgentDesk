@@ -1,0 +1,50 @@
+---
+title: "Session host: one channel across dcserver restarts, host loss and terminate"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Session
+    lg1: Breaks NoDefaultCancelDrop
+    lg2: Path to the NoDefaultCancelDrop bug
+  }
+  class lg0 teal
+  class lg1 breaks
+  class lg2 bugPath
+  s0: No session
+  s1: No session, a message waiting
+  s2: Creating, a message waiting
+  s3: Created, location not yet recorded, a message waiting
+  s4: Pane recorded, only a shell, a message waiting
+  s5: Pane recorded, provider up, not bound, a message waiting
+  s6: Session up
+  s7: Session up, cancel pending
+  s8: Session up, cancel dropped
+  [*] --> s0
+  s0 --> s1: a message arrives
+  s1 --> s2: a message reserves a new execution
+  s2 --> s3: the host creates it
+  s3 --> s4: its pane is recorded
+  s4 --> s5: the provider starts in the pane
+  s5 --> s6: the turn binds the execution
+  s6 --> s7: a cancel is requested
+  s7 --> s8: the cancel is delivered or dropped
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 teal
+  class s0 bugPath
+  class s1 teal
+  class s1 bugPath
+  class s2 teal
+  class s2 bugPath
+  class s3 teal
+  class s3 bugPath
+  class s4 teal
+  class s4 bugPath
+  class s5 teal
+  class s5 bugPath
+  class s6 teal
+  class s6 bugPath
+  class s7 teal
+  class s7 bugPath
+  class s8 teal
+  class s8 breaks
+  class s8 bugPath

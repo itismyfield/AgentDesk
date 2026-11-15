@@ -14,37 +14,41 @@ stateDiagram-v2
   class lg3 repeats
   s0: No session
   s1: No session, a message waiting
-  s2: Creating, a message waiting
-  s3: Creating, host server down, a message waiting
-  s4: dcserver down, nothing running, host server down, a message waiting
-  s5: Boot reconcile, host server down, a message waiting (after the restart)
-  s6: Pending, awaiting the host census, host server down (after the restart)
-  s7: No session, host server down, a message waiting (after the restart)
-  s8: Input refused, no session, host server down (after the restart)
-  s9: Input refused, no session, host server down (after the restart) (no more messages)
+  s2: dcserver down, nothing running, a message waiting
+  s3: Boot reconcile, a message waiting (after the restart)
+  s4: No session, a message waiting (after the restart)
+  s5: Creating, a message waiting (after the restart)
+  s6: Created, location not yet recorded, a message waiting (after the restart)
+  s7: Pane recorded, only a shell, a message waiting (after the restart)
+  s8: Pane recorded, pane gone, host server down, a message waiting (after the restart)
+  s9: Pane recorded, pane gone, host server down (after the restart)
+  s10: Pane recorded, pane gone, host server down (after the restart) (no more messages)
+  s11: No session, host server down (after the restart) (no more messages)
   [*] --> s0
-  s0 --> s0: a host probe stops failing
   s0 --> s1: a message arrives
-  s1 --> s2: a message reserves a new execution
-  s2 --> s3: the host server ends
-  s3 --> s4: dcserver stops
-  s4 --> s5: dcserver starts
-  s5 --> s6: intake opens
-  s6 --> s7: the census finds nothing and closes the row
-  s7 --> s8: the message is refused before any spawn
-  s8 --> s7: a message arrives
-  s7 --> s9: the message is refused before any spawn
+  s1 --> s1: a host probe stops failing
+  s1 --> s2: dcserver stops
+  s2 --> s3: dcserver starts
+  s3 --> s4: intake opens
+  s4 --> s5: a message reserves a new execution
+  s5 --> s6: the host creates it
+  s6 --> s7: its pane is recorded
+  s7 --> s8: the host server ends
+  s8 --> s9: the turn is refused: no provider in the pane
+  s9 --> s8: a message arrives
+  s8 --> s10: the turn is refused: no provider in the pane
+  s10 --> s11: the recorded pane is gone: row closed
   class s0 teal
   class s0 bugPath
   class s1 teal
   class s1 bugPath
-  class s2 teal
+  class s2 blue
   class s2 bugPath
-  class s3 teal
+  class s3 blue
   class s3 bugPath
-  class s4 blue
+  class s4 teal
   class s4 bugPath
-  class s5 blue
+  class s5 teal
   class s5 bugPath
   class s6 teal
   class s6 bugPath
@@ -53,4 +57,8 @@ stateDiagram-v2
   class s8 teal
   class s8 bugPath
   class s9 teal
-  class s9 repeats
+  class s9 bugPath
+  class s10 teal
+  class s10 bugPath
+  class s11 teal
+  class s11 repeats

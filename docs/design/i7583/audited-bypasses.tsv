@@ -24,8 +24,8 @@ src/cli/dcserver.rs:839	create	NON_MANAGED	handle_restart_dcserver	crate::servic
 src/cli/dcserver.rs:847	observe	NON_MANAGED	handle_restart_dcserver	if !crate::services::platform::tmux::has_session(tmux_session) {
 src/cli/herdr.rs:213	observe	BYPASS	read_pane	let read = tokio::task::spawn_blocking(move || view.read_execution()).await;
 src/cli/herdr.rs:222	observe	BYPASS	read_end	let reading = view.read_execution();
-src/cli/utils.rs:168	observe	NON_MANAGED	kill_agentdesk_tmux_sessions_local	let names = match crate::services::platform::tmux::list_session_names() {
-src/cli/utils.rs:186	terminate	NON_MANAGED	kill_agentdesk_tmux_sessions_local	if crate::services::platform::tmux::kill_session(
+src/cli/utils.rs:168	observe	BYPASS	kill_agentdesk_tmux_sessions_local	let names = match crate::services::platform::tmux::list_session_names() {
+src/cli/utils.rs:186	terminate	BYPASS	kill_agentdesk_tmux_sessions_local	if crate::services::platform::tmux::kill_session(
 src/engine/ops/exec_ops.rs:418	input	BYPASS	send_keys	Some(timeout) => tmux::send_keys_timeout(name, keys, timeout),
 src/engine/ops/exec_ops.rs:419	input	BYPASS	send_keys	None => tmux::send_keys(name, keys),
 src/engine/ops/exec_ops.rs:437	terminate	BYPASS	kill	Some(timeout) => tmux::kill_session_output_timeout(name, reason, timeout),
