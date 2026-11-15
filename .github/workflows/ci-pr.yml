@@ -1067,7 +1067,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh a8b9d17d5db1a52bc89bda4b95cac7d9b9cace12276e951e2145d81aecef4e7b
+          pin scripts/check-ci-runner-hardening.sh 2baa0aed23335c566e6252337dd04de85fb5430593f1a7674bebb40e912da98c
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1684,11 +1684,12 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       RELAY_AUTHORITY_MUTATION_SHARD_INDEX: ${{ matrix.shard }}
-      RELAY_AUTHORITY_MUTATION_SHARD_TOTAL: "3"
+      RELAY_AUTHORITY_MUTATION_SHARD_TOTAL: "7"
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2]
+        # #8162: one mutant per shard, so no runner rebuilds incrementally under swap pressure.
+        shard: [0, 1, 2, 3, 4, 5, 6]
     steps:
       # Depth 2 keeps HEAD^1, the base side the wiring digest compares against.
       - uses: actions/checkout@v4

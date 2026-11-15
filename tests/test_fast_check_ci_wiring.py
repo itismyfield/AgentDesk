@@ -943,9 +943,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
         setup = [step for step in mutation["steps"] if "uses" in step and step.get("id") != "mutation_paths"]
         self.assertEqual(setup[0], {"uses": "actions/checkout@v4", "with": {"fetch-depth": 2}})
         self.assertEqual(setup[1]["with"]["toolchain"], "1.94.1")
-        self.assertEqual(mutation["strategy"], {"fail-fast": False, "matrix": {"shard": [0, 1, 2]}})
+        self.assertEqual(mutation["strategy"], {"fail-fast": False, "matrix": {"shard": [0, 1, 2, 3, 4, 5, 6]}})
         self.assertEqual(mutation["env"]["RELAY_AUTHORITY_MUTATION_SHARD_INDEX"], "${{ matrix.shard }}")
-        self.assertEqual(mutation["env"]["RELAY_AUTHORITY_MUTATION_SHARD_TOTAL"], "3")
+        self.assertEqual(mutation["env"]["RELAY_AUTHORITY_MUTATION_SHARD_TOTAL"], "7")
         self.assertRegex(
             job_block(workflow, "relay_authority_mutations"),
             r"(?m)^      - name: Require relay-authority mutations to be killed\n"

@@ -906,7 +906,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "32f7fae912bd564b1ef29464ed6fe2853aa5ec783a469e4202b83d3ade5ab16f",
+    "job_sha256" => "9092e64de66c3e290612d9a5c5893a4a619414c08290892f0d54aa77b1a93ade",
     "job_timeout_minutes" => 60,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {
