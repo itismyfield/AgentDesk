@@ -189,3 +189,90 @@ fn instance_backend_refuses_foreign_files_before_create_or_spawn() {
         assert!(configure_tmux_command(&mut Command::new("/bin/false")).is_err());
     }
 }
+
+#[test]
+fn instance_reentry_accepts_yaml_org_with_same_scope() {
+    const CHILD: &str = "I3_ORG_YAML_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        initialize().unwrap();
+        assert!(current().unwrap().is_some());
+        return;
+    }
+    let (_temp, root) = tests::fixture();
+    let path = root.join("config/org.yaml");
+    let org = read_json(&path).unwrap();
+    let mut child = tests::command(&root);
+    std::fs::write(&path, serde_yaml::to_string(&org).unwrap()).unwrap();
+    let result = child
+        .args(["--exact", "config::test_instance::environment_tests::instance_reentry_accepts_yaml_org_with_same_scope", "--nocapture"])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    tests::assert_single_test_passed(
+        &result,
+        "config::test_instance::environment_tests::instance_reentry_accepts_yaml_org_with_same_scope",
+    );
+    let mut changed = org;
+    changed["provider_auth_profiles"]["test-codex"]["home"] =
+        serde_json::json!("/synthetic/foreign");
+    std::fs::write(&path, serde_yaml::to_string(&changed).unwrap()).unwrap();
+    assert!(
+        load_instance_declaration(
+            &root.join("manifest.json"),
+            &root,
+            &root.join("config/agentdesk.yaml")
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn instance_other_declarations_remain_json_only() {
+    let (_temp, root) = tests::fixture();
+    for name in ["manifest.json", "receipt.json", "config/agentdesk.yaml"] {
+        let path = root.join(name);
+        let bytes = std::fs::read(&path).unwrap();
+        let value = read_json(&path).unwrap();
+        std::fs::write(&path, serde_yaml::to_string(&value).unwrap()).unwrap();
+        assert!(
+            load_instance_declaration(
+                &root.join("manifest.json"),
+                &root,
+                &root.join("config/agentdesk.yaml")
+            )
+            .is_err(),
+            "{name}"
+        );
+        std::fs::write(path, bytes).unwrap();
+    }
+}
+
+#[test]
+fn unscoped_initialization_does_not_read_org() {
+    const CHILD: &str = "I3_UNSCOPED_ORG_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        assert!(!requested());
+        initialize().unwrap();
+        assert!(current().unwrap().is_none());
+        return;
+    }
+    let (_temp, root) = tests::fixture();
+    let mut child = tests::command(&root);
+    let path = root.join("config/org.yaml");
+    std::fs::write(&path, "invalid: [").unwrap();
+    let result = child
+        .args([
+            "--exact",
+            "config::test_instance::environment_tests::unscoped_initialization_does_not_read_org",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env_remove(MARKER)
+        .output()
+        .unwrap();
+    tests::assert_single_test_passed(
+        &result,
+        "config::test_instance::environment_tests::unscoped_initialization_does_not_read_org",
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "invalid: [");
+}

@@ -82,6 +82,47 @@ class InstanceDeclarationTests(unittest.TestCase):
             "host": "local", "execution_node": manifest["execution_node_id"],
         }
 
+    def test_yaml_org_with_same_mapping_validates_and_down_removes_root(self):
+        import yaml
+        manifest=self.prepare()
+        root=self.base/self.instance_id
+        path=root/'config/org.yaml'
+        org=json.loads(path.read_text())
+        path.write_text(yaml.safe_dump(org,sort_keys=False))
+        try:actual=validate(self.base,self.instance_id,{})
+        except InstanceError as error:self.fail('equivalent YAML org rejected: '+str(error))
+        self.assertEqual(actual,manifest)
+        self.assertEqual(self.cli('validate','--instance',self.instance_id).returncode,0)
+        result=self.cli('down','--instance',self.instance_id)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertFalse(root.exists())
+
+    def test_yaml_org_changed_keys_values_and_types_are_rejected(self):
+        import yaml
+        self.prepare()
+        root=self.base/self.instance_id
+        path=root/'config/org.yaml'
+        original=json.loads(path.read_text())
+        for mutate in [lambda org:org.update(extra='different'),
+                       lambda org:org['agents']['codex'].update(auth_profile='default'),
+                       lambda org:org.update(version='1')]:
+            org=copy.deepcopy(original);mutate(org)
+            path.write_text(yaml.safe_dump(org))
+            with self.assertRaises(InstanceError):validate(self.base,self.instance_id,{})
+            self.assertEqual(self.cli('down','--instance',self.instance_id).returncode,2)
+            self.assertTrue(path.exists())
+
+    def test_other_declaration_files_still_require_json(self):
+        import yaml
+        self.prepare()
+        root=self.base/self.instance_id
+        for name in ['manifest.json','receipt.json','config/agentdesk.yaml']:
+            path=root/name;before=path.read_text();value=json.loads(before)
+            try:
+                path.write_text(yaml.safe_dump(value))
+                with self.subTest(name=name),self.assertRaises(InstanceError):validate(self.base,self.instance_id,{})
+            finally:path.write_text(before)
+
     def test_declaration_records_private_local_targets_and_explicit_features(self):
         manifest = self.prepare()
         root = self.base / self.instance_id

@@ -9,6 +9,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import yaml
+
 from .config import HERDR_CONFIG, build_config, build_org, declared_hosts, provider_home
 from .files import (InstanceError, LAYOUT_DIRS, create_layout, instance_root, read_regular_text,
                     safe_absolute, validate_tree, write_private_json, write_private_text)
@@ -31,6 +33,20 @@ def read_json(path):
         return json.loads(read_regular_text(path), object_pairs_hook=_unique_object)
     except (OSError, ValueError, UnicodeError):
         raise InstanceError("invalid JSON declaration file") from None
+
+
+def read_org(path):
+    try:
+        text = read_regular_text(path)
+        try:
+            value = json.loads(text, object_pairs_hook=_unique_object)
+        except json.JSONDecodeError:
+            value = yaml.safe_load(text)
+        if type(value) is not dict:
+            raise InstanceError('org declaration must be a mapping')
+        return value
+    except (OSError, ValueError, yaml.YAMLError):
+        raise InstanceError('invalid org declaration file') from None
 
 
 def _unique_object(pairs):
@@ -212,7 +228,7 @@ def validate(base, instance_id, ambient, require_credentials=False, check_ports=
         if not same_json(config, build_config(root, manifest["profile"], manifest["api"]["port"],
                                              manifest["postgres"]["port"], instance_id)):
             raise InstanceError("explicit config differs from its declaration")
-        if not same_json(read_json(root / "config/org.yaml"), build_org(root, manifest["profile"])):
+        if not same_json(read_org(root / "config/org.yaml"), build_org(root, manifest["profile"])):
             raise InstanceError("org catalog differs from its declaration")
     except (KeyError, TypeError, AttributeError):
         raise InstanceError("invalid startup manifest") from None

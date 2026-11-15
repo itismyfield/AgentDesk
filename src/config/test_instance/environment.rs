@@ -4,7 +4,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use super::{checked_path, current, read_json, rejected, requested};
+use super::{checked_path, current, rejected, requested};
 
 #[derive(Debug)]
 pub(super) struct Environment {
@@ -69,7 +69,16 @@ impl Environment {
         ] {
             required.insert(key.into(), value);
         }
-        let org = read_json(&root.join("config/org.yaml"))?;
+        let org_path = root.join("config/org.yaml");
+        checked_path(&org_path)?;
+        if !std::fs::metadata(&org_path)
+            .map_err(|_| rejected())?
+            .is_file()
+        {
+            return Err(rejected());
+        }
+        let org: Value = serde_yaml::from_slice(&std::fs::read(&org_path).map_err(|_| rejected())?)
+            .map_err(|_| rejected())?;
         if org["provider_auth_profiles"]
             .as_object()
             .is_none_or(|map| map.len() != 2)
