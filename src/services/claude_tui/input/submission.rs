@@ -23,11 +23,17 @@ pub(super) fn send(
     guarded_outcome::capture_preparation(|| {
         // An invalid prompt fails here, before any readiness wait or key.
         let text = payload_text(prompt)?;
-        // A warm follow-up waited on its transcript turn before it got here.
-        if !matches!(readiness, PromptReadinessKind::ProvenWarmFollowup) {
-            wait_for_prompt_ready(session, readiness, cancel)
-                .map_err(|error| preparation_hold::readiness_failure(session, error))?;
+        #[cfg(unix)]
+        if readiness == PromptReadinessKind::ProvenWarmFollowup
+            && !cancel_requested(cancel)
+            && busy_inject::Pane::with_program(session, "tmux".into()).is_err()
+        {
+            let run = InputRun::Refused(InputRefusal::IdentityMismatch);
+            guarded_outcome::finish(&run);
+            return SubmissionError::from_run(run);
         }
+        wait_for_prompt_ready(session, readiness, cancel)
+            .map_err(|error| preparation_hold::readiness_failure(session, error))?;
         submit(session, prompt, &text, readiness, cancel)
     })
 }
@@ -145,18 +151,38 @@ fn run(
         let Ok(pane) = busy_inject::Pane::with_program(session, "tmux".into()) else {
             return InputRun::Refused(InputRefusal::IdentityMismatch);
         };
-        let park = match busy_inject::before_paste(&pane, stash_allowed) {
+        let park = match super::super::readiness::idle::before_paste(&pane, stash_allowed) {
             Ok(park) => park,
             Err(veto) => {
+                if veto == busy_inject::Veto::Modal {
+                    super::super::readiness::watch_modal(session, None);
+                } else {
+                    super::super::readiness::watch_current(session, None);
+                }
                 modal.set(veto == busy_inject::Veto::Modal);
                 return refused(Refusal::NotReady);
             }
         };
+        let Some(proof) = super::super::readiness::observe(session, None) else {
+            super::super::readiness::watch_current(session, None);
+            return refused(Refusal::NotReady);
+        };
+        let Some(reservation) = super::super::readiness::reserve(proof) else {
+            super::super::readiness::watch_current(session, None);
+            return refused(Refusal::NotReady);
+        };
         if authority.claim(session).is_err() {
+            reservation.not_sent();
             return refused(Refusal::SubmissionFence);
         }
         // A stop that took the writer token's gate first leaves the pane without a key.
+        if !reservation.current() {
+            super::super::readiness::watch_current(session, None);
+            reservation.not_sent();
+            return refused(Refusal::NotReady);
+        }
         if !guarded_outcome::first_key() {
+            reservation.not_sent();
             return InputRun::Cancelled { confirmed: 0 };
         }
         guarded_outcome::begin();
@@ -167,8 +193,14 @@ fn run(
         );
         let nonce = busy_inject::fresh_nonce();
         match stash::submit(&pane, &nonce, request.text, request.timing, park) {
-            Outcome::Injected => InputRun::Applied,
-            Outcome::NotSent(_) => refused(Refusal::CaptureUnavailable),
+            Outcome::Injected => {
+                reservation.sent();
+                InputRun::Applied
+            }
+            Outcome::NotSent(_) => {
+                reservation.not_sent();
+                refused(Refusal::CaptureUnavailable)
+            }
             Outcome::Failed(error) => InputRun::Indeterminate {
                 confirmed: 0,
                 cause: StopCause::Send(format!("managed idle input write failed: {error:?}")),

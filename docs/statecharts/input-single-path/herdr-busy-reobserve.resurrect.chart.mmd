@@ -1,0 +1,24 @@
+---
+title: "Slice2: 같은 원문의 재관측과 clear 위임"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks AtMostOnce or NoResurrection or SettledExactlyOnce or WakeNeedsSameOwner
+    lg1: Path to the AtMostOnce or NoResurrection or SettledExactlyOnce or WakeNeedsSameOwner bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: UnknownKeep 원문은 재송신하지 않음
+  s1: 소유하지 않은 대상#183;원문을 깨움
+  s2: 처분된 원문이 부활함
+  [*] --> s0
+  s0 --> s0: 같은 operation의 새 근거 도착
+  s0 --> s1: 현재 원문#183;대상으로 재관측
+  s1 --> s2: 같은 원문 재평가 wake
+  s2 --> s2: 공통 대상 근거로 분기 or 기존 gate로 본문과 Enter 기록 or native 영수증 관측 or 원문 정산
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 breaks
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath

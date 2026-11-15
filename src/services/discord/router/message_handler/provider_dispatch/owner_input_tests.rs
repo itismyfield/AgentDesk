@@ -116,6 +116,12 @@ pub(super) fn owned(
     let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
     fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
     fs::write(marker, &nonce).unwrap();
+    if provider == "claude" {
+        crate::services::claude_tui::readiness::tests::pre_source(
+            name,
+            &renderer.join("transcript"),
+        );
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -290,6 +296,14 @@ impl Rig {
         transcript: &Path,
         execution: Execution,
     ) -> Registration {
+        if *provider == ProviderKind::Claude && phase == target::Phase::Idle {
+            let binding =
+                crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&self.name);
+            let path = binding
+                .as_ref()
+                .map_or(transcript, |binding| Path::new(binding.relay_output_path()));
+            crate::services::claude_tui::readiness::tests::pre_source(&self.name, path);
+        }
         let root = crate::services::tmux_common::current_tmux_owner_marker();
         // A live pane's attempt names the transcript it was observed on.
         let source = if phase == target::Phase::Busy {
@@ -321,6 +335,7 @@ impl Rig {
             // The rig's AI turn ends as soon as it is read.
             until_done: Some(Box::new(|| Ok(()))),
             native_pin_submitted: None,
+            observation: None,
         }
     }
 
@@ -631,7 +646,7 @@ fn rig_cancelled_after_claim() -> Rig {
 #[test]
 fn an_idle_handoff_ends_at_settlement_while_its_ai_turn_runs() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let rig = rig("oi-turn", 7_272_538, "normal", view("", false), BUSY);
+    let rig = rig("oi-turn", 7_272_538, "normal", view("", false), IDLE);
     let mut next = rig.original.clone();
     next.message_id += 1;
     next.source_message_ids = vec![next.message_id];
@@ -1032,6 +1047,7 @@ fn prepared_before_launch(rig: &Rig) -> Registration {
         timing: &OWNER_TIMING,
         until_done: None,
         native_pin_submitted: None,
+        observation: None,
     }
 }
 
@@ -1093,9 +1109,15 @@ fn startup_enter_is_the_attempts_first_key() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let dialog = "Resume from summary\n❯ 1. Resume from summary\n  2. Resume full session\n\
         Enter to confirm · Esc to cancel\n";
-    let rig = rig("oc-dialog", 7_272_515, "normal", dialog.into(), IDLE);
+    let rig = rig("oc-dialog", 7_272_515, "startup", dialog.into(), IDLE);
     let _driver = rig.trace_driver();
     fs::write(rig.renderer.join("body"), "").unwrap();
+    // A menu confirmation is not a native user turn; keep its renderer record off the transcript.
+    fs::write(
+        rig.renderer.join("record-path"),
+        rig.renderer.join("startup-ui.jsonl").display().to_string(),
+    )
+    .unwrap();
     fs::write(rig.renderer.join("after"), view("", false)).unwrap();
     let pane = rig.f.tmux(&[
         "display-message",
@@ -1121,6 +1143,7 @@ fn startup_enter_is_the_attempts_first_key() {
     let result = created_first_prompt(&rig);
     assert!(result.is_err(), "{result:?}");
     rig.assert_hooks_completed();
+    assert_eq!(fs::read_to_string(rig.transcript()).unwrap(), IDLE);
     assert_eq!(rig.events(), ["Enter"], "startup key only; the load failed");
     let trace =
         fs::read_to_string(rig.f.root.path().join(format!("{}-owner/trace", rig.name))).unwrap();
@@ -1891,9 +1914,9 @@ fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
     let path = rig.transcript();
     let past = json!({"type":"user","uuid":"past","sessionId":"receipt-sid","message":{"role":"user","content":PROMPT}});
     use std::io::Write;
-    writeln!(
+    write!(
         fs::OpenOptions::new().append(true).open(&path).unwrap(),
-        "{past}"
+        "{past}\n{IDLE}"
     )
     .unwrap();
     let before = fs::metadata(&path).unwrap().len();
@@ -1911,12 +1934,17 @@ fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
             relay_last_offset: None,
         },
     );
+    crate::services::claude_tui::readiness::tests::pre_source(&rig.name, &path);
     let claim = rig.claim(&rig.granted_front()).unwrap();
     let registration = rig.registration(
         &ProviderKind::Claude,
         target::Phase::Idle,
         &path,
         Execution::LocalTui,
+    );
+    assert!(
+        crate::services::claude_tui::readiness::observe(&rig.name, Some(&path)).is_some(),
+        "Idle source before dispatch"
     );
     let (settled, _) = tokio::sync::oneshot::channel();
     let mut written_token = None;
@@ -2095,3 +2123,6 @@ fn busy_native_pin_submitted_write_arms_before_its_answer_observer() {
     );
     assert_eq!(events, ["paste", "Enter"]);
 }
+
+#[path = "owner_input_busy_race_tests.rs"]
+mod busy_race_tests;

@@ -28,6 +28,7 @@ async fn a2_fresh_hold_preserves_binding_through_no_init_and_notifies_once_pg() 
         relay_last_offset: None,
     };
     tui_prompt_dedupe::register_tmux_runtime_binding(&name, binding.clone());
+    crate::services::claude_tui::readiness::tests::pre_source(&name, &transcript);
     crate::services::claude_tui::composer_lock::guard_draft(
         &name,
         crate::services::claude_tui::composer_lock::DraftGuard::RecoveryRequired,
@@ -540,6 +541,7 @@ async fn a2_cleanup_refusal_then_success_delivers_once_without_requeue() {
             relay_last_offset: None,
         },
     );
+    crate::services::claude_tui::readiness::tests::pre_source(&session, &path);
     let view = crate::services::claude_tui::input::submission::tests::view;
     let empty = view("", false);
     let mut captures = std::collections::VecDeque::from([Some(view("person draft", false))]);

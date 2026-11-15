@@ -187,6 +187,13 @@ pub(super) fn sync(
 /// Compare interpretation and raw native content; transport/session metadata is not body identity.
 fn native_content(line: &[u8]) -> Option<serde_json::Value> {
     let value: serde_json::Value = serde_json::from_slice(line).ok()?;
+    if value["type"] == "system" && value["subtype"] == "away_summary" {
+        return Some(serde_json::json!([
+            value["type"],
+            value["subtype"],
+            value["content"]
+        ]));
+    }
     let message = &value["message"];
     let native = serde_json::json!([
         value["type"],

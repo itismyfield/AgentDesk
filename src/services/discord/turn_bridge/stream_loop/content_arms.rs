@@ -269,6 +269,9 @@ pub(super) async fn handle_stream_content_message(
                         } => {
                             if let Some(ref sid) = sid { crate::services::provider::session_prompt::observe(ctx.cancel_token, sid); }
                             let session_died_retry = result == "__session_died_retry__";
+                            if !session_died_retry && !ctx.herdr_aborted {
+                                inflight_state.routine_presentation.observe_terminal(&result);
+                            }
                             if !session_died_retry { ctx.cancel_token.native_stop.completed(); }
                             if session_died_retry {
                                 // Recovery reader requests the generic Discord-history
@@ -524,9 +527,7 @@ pub(super) async fn handle_stream_content_message(
                                     managed_turn.expect("eligible active usage has managed turn identity"),
                                     &provider,
                                     model.as_deref(),
-                                    Some(input_tokens),
-                                    Some(cache_create_tokens),
-                                    Some(cache_read_tokens),
+                                    (Some(input_tokens), Some(cache_create_tokens), Some(cache_read_tokens)),
                                     context_compact_percent,
                                     context_compact_lower_bound_tokens,
                                 );

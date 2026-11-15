@@ -74,6 +74,7 @@ impl super::InflightTurnState {
             native_turn_id,
             delivery_bot: _,
             silent_turn: _,
+            routine_presentation: _,
             dispatch_id,
             turn_nonce,
             last_watcher_relayed_offset: _,

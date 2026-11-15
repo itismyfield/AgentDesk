@@ -51,6 +51,10 @@ mod output_paths;
 pub(super) use output_paths::detect_live_tmux_output_path;
 #[path = "restore_inflight/replay_hold.rs"]
 mod replay_hold;
+#[path = "restore_inflight/routine_presentation.rs"]
+mod routine_presentation;
+pub(super) use routine_presentation::adopt_quiet_drain_restart;
+pub(super) use routine_presentation::settle_routine_no_visible;
 
 #[path = "restore_inflight/replay_decision.rs"]
 mod replay_decision;
@@ -140,6 +144,9 @@ pub(in crate::services::discord) async fn restore_inflight_states(
         if state.herdr_before_start_stop.is_some()
             || inflight::before_start_receipt_present(provider, state.channel_id)
         {
+            continue;
+        }
+        if settle_routine_no_visible(shared, provider, &state).await {
             continue;
         }
         // An unverified projected receipt waits for another pass without persisting a read error.

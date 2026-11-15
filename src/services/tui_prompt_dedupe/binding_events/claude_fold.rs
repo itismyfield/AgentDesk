@@ -139,12 +139,60 @@ pub(crate) fn binding_events_judged_since(
         .collect())
 }
 
+/// Observes only a fold already published by the writer; never reloads, repairs or syncs a log.
+pub(crate) fn published_claude_history(
+    channel: u64,
+    session: &str,
+    nonce: &str,
+) -> Option<(u64, SourceHistory)> {
+    let path = log_path(channel).ok()??;
+    let logs = lock_logs();
+    let writer = logs.get(&path)?.writer.as_ref()?;
+    let pane = writer.panes.get(session)?;
+    Some((
+        writer.last_seq,
+        pane.claude.history(Some(nonce), writer.tainted),
+    ))
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct ClaudeFold {
     nonce: Option<String>,
     history: SourceHistory,
     /// Seq of the Pending record behind `history.awaiting`.
     awaiting_seq: Option<u64>,
+}
+
+/// The current execution's stat identity, only while no verified pin or other waiting session owns it.
+pub(crate) fn unverified_current_source(
+    channel_id: u64,
+    tmux_session: &str,
+    nonce: &str,
+) -> io::Result<Option<super::SourceId>> {
+    let mut found = None;
+    super::commit_with(channel_id, |writer| {
+        if let Some(pane) = writer.panes.get(tmux_session)
+            && !pane.verified
+            && pane.nonce.as_deref() == Some(nonce)
+            && let Some(source) = &pane.current
+        {
+            let history = pane.claude.history(Some(nonce), writer.tainted);
+            if history.complete
+                && history
+                    .current
+                    .as_ref()
+                    .is_some_and(|v| v.session == source.session_id)
+                && history
+                    .awaiting
+                    .as_ref()
+                    .is_none_or(|v| v.session == source.session_id)
+            {
+                found = Some(source.clone());
+            }
+        }
+        super::Planned::Keep(super::Committed::Unchanged)
+    })?;
+    Ok(found)
 }
 
 impl ClaudeFold {

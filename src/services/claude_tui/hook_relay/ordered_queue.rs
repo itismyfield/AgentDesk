@@ -1,3 +1,4 @@
+use crate::services::process::reaping::CommandReapExt;
 use crate::services::tui_prompt_dedupe::binding_context::HookBindingEnvelope;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -490,14 +491,14 @@ pub(super) fn start_ordered_hook_relay_worker(queue_dir: &Path) -> Result<(), St
         "--exact",
         "services::claude_tui::hook_relay::tests::non_wait_relay_worker_subprocess_entry",
     ]);
+    crate::config::test_instance::configure_reentry_command(&mut command)?;
     let child = command
         .env(NON_WAIT_RELAY_WORKER_ENV, encoded)
         .env_remove(FAILURE_MARKER_WORKER_ENV)
-        .env_remove("AGENTDESK_ROOT_DIR")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .spawn_reaping()
         .map_err(|err| format!("start non-wait hook relay worker: {err}"))?;
     drop(child);
     Ok(())

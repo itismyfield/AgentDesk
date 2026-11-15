@@ -217,6 +217,7 @@ use terminal_delivery::{
     terminal_delivery_should_send_new_chunks, turn_bridge_replace_outcome_committed,
     warn_preserved_uncommitted as td_warn,
 };
+pub(in crate::services::discord) use terminal_outcome_delivery::NoVisibleResultLease;
 use tmux_runtime::is_dcserver_restart_command;
 pub(super) use turn_analytics::persist_turn_analytics_row_with_handles;
 use turn_analytics::{

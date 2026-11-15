@@ -193,7 +193,9 @@ pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
 pub(crate) use tui_prompt_relay::rehydration::observer_binding_published;
 #[cfg(all(test, unix))]
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
-pub(crate) use tui_prompt_relay::{input_notice_content, input_notice_line};
+pub(crate) use tui_prompt_relay::{
+    input_notice_content, input_notice_line, scheduled_input_notice_content,
+};
 pub(crate) mod replay_policy;
 mod tui_task_card;
 mod turn_bridge;
@@ -255,6 +257,8 @@ pub(crate) use queue_io::input_ingress::{
     ADOPTS as OWNER_ADOPTS_FOR_TEST, execution as owner_execution_for_test,
     installed as input_owner_installed_for_test,
 };
+#[cfg(all(test, unix))]
+pub(crate) use queue_io::input_owner::claude_handoff::observe_busy as observe_owned_claude_busy_for_test;
 #[cfg(all(test, unix))]
 pub(crate) use queue_io::input_owner::origin::Execution as OwnerExecutionForTest;
 #[cfg(all(test, unix))]
@@ -346,8 +350,9 @@ use adk_session::{
     build_adk_session_key, build_session_key_candidates, derive_adk_session_info,
     lookup_pending_dispatch_for_thread, parse_dispatch_id,
 };
+use compact_turn_authority::compact_eligible_turn_source;
 pub(in crate::services) use compact_turn_authority::{
-    ManagedCompactTurnIdentity, compact_eligible_turn_source, live_managed_turn_matches,
+    ManagedCompactTurnIdentity, pending_managed_turn_matches,
 };
 use formatting::{format_for_discord, format_tool_input, send_long_message_raw, truncate_str};
 use inflight::InflightTurnState;
@@ -3422,3 +3427,5 @@ pub(crate) use tmux::tmux_output_stream::{
 pub(crate) async fn revoke_notice_author_for_test(shared: &SharedData) {
     shared.settings.write().await.allowed_user_ids.clear();
 }
+
+pub(super) mod routine_presentation;

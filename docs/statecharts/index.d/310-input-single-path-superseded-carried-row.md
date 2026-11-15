@@ -1,0 +1,2 @@
+key: 310-input-single-path-superseded-carried-row
+| `input-single-path` superseded carried row (#7896 B) | `b5e0f2115f` + repair | `SupersededBefore`: an unproven carried row bound to the session the pane left keeps B pending forever (#7889 D) | `SupersededAfter` closes it on the existing native end, O drain and lock proof with one deduplicated notice; `SupersededSameSession` keeps the #7828 gap; `SupersededNoDedupe` breaks `UnprovenCloseToldOnce`. See [report](input-single-path/superseded-carried.report.md). |

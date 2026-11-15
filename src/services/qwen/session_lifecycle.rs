@@ -21,7 +21,7 @@ pub(super) fn execute_streaming_local_tmux(
         tmux_session_name,
     )?;
     let auth_env_lines =
-        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay)?;
     let session_exists = tmux_present_bool(tmux_session_name);
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
@@ -477,4 +477,57 @@ pub(super) fn execute_streaming_local_process(
     }
 
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod instance_env_tests {
+    use super::*;
+
+    #[test]
+    fn test_instance_qwen_launch_refuses_before_shell_or_provider_effects() {
+        crate::services::provider_auth_profile::instance_env_tests::with_instance(
+            concat!(
+                module_path!(),
+                "::test_instance_qwen_launch_refuses_before_shell_or_provider_effects"
+            ),
+            || {
+                let instance = crate::config::test_instance::current().unwrap().unwrap();
+                let name = format!("{}-qwen-scope", instance.tmux.prefix);
+                let (tx, _rx) = std::sync::mpsc::channel();
+                let resolution = crate::services::platform::BinaryResolution {
+                    requested_binary: "qwen".into(),
+                    resolved_path: None,
+                    canonical_path: None,
+                    source: None,
+                    attempts: vec![],
+                    failure_kind: None,
+                    exec_path: None,
+                };
+                let result = execute_streaming_local_tmux(
+                    "scope prompt",
+                    None,
+                    None,
+                    instance.root.to_str().unwrap(),
+                    tx,
+                    None,
+                    &name,
+                    &resolution,
+                    None,
+                    None,
+                    None,
+                    false,
+                );
+                assert_eq!(
+                    result,
+                    Err("test instance host declaration rejected".into())
+                );
+                assert!(
+                    !Path::new(&crate::services::tmux_common::session_temp_path(
+                        &name, "sh"
+                    ))
+                    .exists()
+                );
+            },
+        );
+    }
 }

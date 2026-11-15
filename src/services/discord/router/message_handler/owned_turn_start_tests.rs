@@ -77,6 +77,12 @@ async fn leaf(
     });
     tokio::task::spawn_blocking(move || {
         let _lease = lease;
+        crate::services::claude_tui::readiness::tests::pre_source(
+            NAME,
+            &crate::config::runtime_root()
+                .unwrap()
+                .join("owned-start.jsonl"),
+        );
         let _spy = SpyGuard::install(SpyState {
             captures: std::iter::repeat_n(Some(screen()), 24).collect(),
             ..Default::default()

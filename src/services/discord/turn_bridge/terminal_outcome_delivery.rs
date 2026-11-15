@@ -45,6 +45,7 @@ mod cancel_prompt_replace;
 mod completion_proof;
 mod contracts;
 mod delivery_epilogue;
+pub(in crate::services::discord) use delivery_epilogue::NoVisibleResultLease;
 #[cfg(test)]
 mod delivery_epilogue_tests;
 mod empty_response_recovery;
@@ -295,6 +296,23 @@ pub(super) async fn run_terminal_outcome_delivery(
         match outcome {
             CancelPromptReplaceOutcome::Continue => {}
         }
+    } else if bridge_output_owner.is_none()
+        && !transport_error
+        && !resume_failure_detected
+        && !recovery_retry
+        && !ctx.transcript_terminal_error
+        && inflight_state.routine_presentation.terminal_presentation()
+            == crate::services::discord::routine_presentation::TerminalPresentation::NoVisibleResult
+    {
+        terminal_delivery_committed = delivery_epilogue::settle_no_visible_result(
+            &shared_owned,
+            watcher_owner_channel_id,
+            &inflight_state,
+            tmux_last_offset,
+        );
+        preserve_inflight_for_cleanup_retry |= !terminal_delivery_committed;
+        bridge_skip_holder_owns_inflight = !terminal_delivery_committed;
+        epilogue_response = Some(String::new());
     } else if let Some(owner) = bridge_output_owner {
         foreign_terminal_handoff::handle_known_owner(
             owner,
@@ -488,15 +506,19 @@ pub(super) async fn run_terminal_outcome_delivery(
                 }
             }
         } else {
-            delivery_response = DiscordTurnSessionBanner::new_with_turn_key(
+            let banner = DiscordTurnSessionBanner::new_with_turn_key(
                 shared_owned.as_ref(),
                 channel_id,
                 &provider,
                 inflight_state.user_msg_id,
                 Some(&inflight_state.started_at),
                 inflight_state.turn_start_offset,
-            )
-            .format_and_prefix(response_sent_offset == 0, &delivery_response);
+            );
+            delivery_response = if inflight_state.routine_presentation.holds_body() {
+                banner.format_discord_body(&delivery_response)
+            } else {
+                banner.format_and_prefix(response_sent_offset == 0, &delivery_response)
+            };
             if o_body_cut == Ok(true) && !o_notice {
                 if optional_durable_current_msg_id_from_detached(current_msg_id).is_some() {
                     let _ = gateway.delete_message(channel_id, current_msg_id).await;
@@ -972,6 +994,21 @@ pub(super) async fn run_terminal_outcome_delivery(
             },
         )
         .await;
+    }
+    // O posts this answer, so the turn's own end marks its input done after the hourglass clear.
+    #[cfg(unix)]
+    if let Some(user_msg_id) = user_msg_id
+        && completion_proof::ran_to_end(
+            &ctx,
+            &inflight_state,
+            preserve_inflight_for_cleanup_retry
+                || auto_retry.queued()
+                || busy_requeue_outcome.is_some()
+                || claude_tui_busy_requeue_pending,
+        )
+    {
+        let done = super::super::outbound::completed_turn_ledger::o_pending::mark_done;
+        done(&shared_owned, &inflight_state, user_msg_id).await;
     }
     // A terminal answer without a busy requeue unties the card so no later turn edits it; any
     // spent retries stay with the input.

@@ -18,6 +18,21 @@ pub(crate) enum NoticeRefusal {
     Violation(String),
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static NOTICE_CALLS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+pub(crate) fn count_notice_refusal(piece: &PieceWork) {
+    if piece.unit_key.kind == UnitKind::InputNotice {
+        NOTICE_CALLS.with(|c| {
+            let (calls, logs) = c.get();
+            c.set((calls, logs + 1));
+        });
+    }
+}
+
 fn withheld(reason: impl Into<String>) -> NoticeRefusal {
     NoticeRefusal::Withheld(reason.into())
 }
@@ -31,6 +46,11 @@ pub(crate) fn admit_notice<R>(
     if piece.unit_key.kind != UnitKind::InputNotice {
         return Ok(start(store));
     }
+    #[cfg(test)]
+    NOTICE_CALLS.with(|c| {
+        let (calls, logs) = c.get();
+        c.set((calls + 1, logs));
+    });
     if let Some(reason) = store.ledger().violation() {
         return Err(NoticeRefusal::Violation(reason.into()));
     }
@@ -47,6 +67,12 @@ pub(crate) fn admit_notice<R>(
         .evidence
         .get(&(record.source.clone(), record.start, record.end))
         .ok_or_else(|| withheld("input notice evidence missing"))?;
+    if notices
+        .settled
+        .contains_key(&(record.source.clone(), record.start, record.end))
+    {
+        return Err(withheld("input notice record already settled"));
+    }
     if piece.unit_key.channel_id != store.init().channel
         || piece.index != 0
         || evidence.unit_key.as_ref() != Some(&piece.unit_key)
@@ -76,7 +102,8 @@ pub(crate) fn admit_notice<R>(
         if cleared(&events, origin, store)? {
             return exclude(piece, store, "input_notice_clear");
         }
-        if super::discord_input(&prompt) || discord::input_notice_content(&prompt).is_none() {
+        if super::legacy_discord_input(&prompt) || discord::input_notice_content(&prompt).is_none()
+        {
             return exclude(piece, store, "input_notice_source");
         }
         match history::observed_attempt_checked(

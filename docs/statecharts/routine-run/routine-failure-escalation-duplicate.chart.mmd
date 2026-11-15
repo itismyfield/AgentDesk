@@ -1,0 +1,82 @@
+---
+title: "연속 실패 알림과 한 번의 복구 요청"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: accepted
+    lg1: normal
+    lg2: Breaks AllEligibleStreaksOffered or AtMostOneRemediationPerIncident or AtMostOneTriggerPerStreak
+    lg3: Path to the AllEligibleStreaksOffered or AtMostOneRemediationPerIncident or AtMostOneTriggerPerStreak bug
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 breaks
+  class lg3 bugPath
+  s0: 예약 실행 이력 대기
+  s1: 실패 누적
+  s2: N+1 복구 요청 저장됨
+  s3: 실패 묶음 중복 요청
+  s4: 기존 outbox 전송 대기
+  s5: 명령봇 메시지 도착
+  s6: 허용 봇 입력 수용
+  s7: 복구 요청 결과 기록
+  s8: 추가 실패#183;알림만
+  s9: 성공#183;비실패로 카운터 초기화
+  s10: 실패 묶음 중복 요청 #183; 새 묶음 요청 수 오류
+  s11: 실패 묶음 중복 요청 #183; 복구 턴 중복
+  s12: 실패 묶음 중복 요청 #183; 복구 턴 중복 #183; 새 묶음 요청 수 오류
+  [*] --> s0
+  s0 --> s1: 실패 알림만#183;턴 0
+  s1 --> s2: N+1회#183;명령봇 복구 요청
+  s2 --> s3: 다른 키로 중복 복구 요청
+  s2 --> s4: 기존 outbox가 전송 시작
+  s2 --> s2: 실패 알림만#183;턴 0 or interrupted#183;카운터 유지 or 비실패 terminal#183;카운터 0 or N+1회#183;명령봇 복구 요청
+  s3 --> s3: 기존 outbox가 전송 시작 or 명령봇으로 게시 or 기존 Discord intake 통과 or 기존 owner가 별도 복구 턴 시작 or 전송 결과 종결 or 비실패 terminal#183;카운터 0 or 실패 알림만#183;턴 0
+  s4 --> s3: 다른 키로 중복 복구 요청
+  s4 --> s5: 명령봇으로 게시
+  s5 --> s3: 다른 키로 중복 복구 요청
+  s5 --> s6: 기존 Discord intake 통과
+  s6 --> s3: 다른 키로 중복 복구 요청
+  s6 --> s7: 기존 owner가 별도 복구 턴 시작
+  s7 --> s3: 다른 키로 중복 복구 요청
+  s7 --> s1: 전송 결과 종결
+  s1 --> s3: 다른 키로 중복 복구 요청
+  s1 --> s8: 실패 알림만#183;턴 0
+  s7 --> s8: 전송 결과 종결
+  s8 --> s3: 다른 키로 중복 복구 요청
+  s8 --> s9: 비실패 terminal#183;카운터 0
+  s7 --> s9: 전송 결과 종결
+  s3 --> s10: 비실패 terminal#183;카운터 0
+  s2 --> s10: 다른 키로 중복 복구 요청
+  s9 --> s3: 다른 키로 중복 복구 요청
+  s9 --> s1: 실패 알림만#183;턴 0
+  s4 --> s10: 다른 키로 중복 복구 요청
+  s3 --> s11: 기존 owner가 별도 복구 턴 시작
+  s7 --> s2: 전송 결과 종결
+  s5 --> s10: 다른 키로 중복 복구 요청
+  s6 --> s10: 다른 키로 중복 복구 요청
+  s7 --> s10: 다른 키로 중복 복구 요청
+  s1 --> s9: 비실패 terminal#183;카운터 0
+  s11 --> s12: 비실패 terminal#183;카운터 0
+  s10 --> s12: 기존 owner가 별도 복구 턴 시작
+  s9 --> s10: 다른 키로 중복 복구 요청
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 breaks
+  class s3 bugPath
+  class s4 blue
+  class s5 blue
+  class s6 teal
+  class s7 blue
+  class s8 blue
+  class s9 blue
+  class s10 breaks
+  class s10 bugPath
+  class s11 breaks
+  class s11 bugPath
+  class s12 breaks

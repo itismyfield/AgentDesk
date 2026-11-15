@@ -1,0 +1,11 @@
+stateDiagram-v2
+    [*] --> WaitingForCurrentEvidence
+    WaitingForCurrentEvidence --> WaitingForCurrentEvidence: Running / no key
+    WaitingForCurrentEvidence --> ReadyComposer: current Idle or SessionStart
+    ReadyComposer --> Held: unmanaged or unparkable draft
+    ReadyComposer --> Writer: empty composer or authorized managed stash
+    Writer --> WaitingForCurrentEvidence: reserve/current + C-s if needed + own paste/Enter
+    note right of Writer
+      Person draft survives the existing stash round trip.
+      No readiness authority comes from the screen.
+    end note

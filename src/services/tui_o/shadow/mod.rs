@@ -4,6 +4,7 @@ pub mod binding_reader;
 pub mod capture;
 
 pub mod identity;
+mod recap;
 pub mod seal;
 pub mod unit_plan;
 
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_READ_BYTES: u64 = 1024 * 1024;
 /// Raised when unit identity, turn extraction or historical rules change; old samples do not mix.
-pub const IDENTITY_VERSION: u32 = 7;
+pub const IDENTITY_VERSION: u32 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +32,7 @@ pub enum UnitKind {
     Tool,
     ToolResult,
     InputNotice,
+    Recap,
 }
 
 /// Unit identity; session id is deliberately absent so forked sources inherit keys.

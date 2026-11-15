@@ -145,7 +145,13 @@ fn exact_codex_resume_id(id: &str) -> bool {
 #[cfg(unix)]
 fn codex_tui_home(
     overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
-) -> (Option<PathBuf>, bool) {
+) -> Result<(Option<PathBuf>, bool), String> {
+    crate::config::test_instance::environment::validate_overlay(
+        "codex",
+        &overlay.profile_id,
+        overlay.home.as_deref(),
+        &overlay.env,
+    )?;
     let pinned = overlay.env.get("CODEX_HOME").map(PathBuf::from);
     let unpinned = pinned.is_none() && !overlay.unset.contains("CODEX_HOME");
     let home = match pinned {
@@ -153,7 +159,7 @@ fn codex_tui_home(
         None if unpinned => crate::services::codex_tui::rollout_tail::default_codex_home(),
         None => dirs::home_dir().map(|home| home.join(".codex")),
     };
-    (home, unpinned)
+    Ok((home, unpinned))
 }
 
 #[cfg(all(test, unix))]
@@ -196,11 +202,12 @@ fn prepare_codex_tui_launch_script(
     warm: bool,
     overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
 ) -> Result<CodexTuiLaunchScript, String> {
+    let (home, _) = codex_tui_home(overlay)?;
     let resume_root = options
         .resume_session_id
         .as_deref()
         .filter(|id| exact_codex_resume_id(id))
-        .and_then(|_| codex_tui_home(overlay).0.map(|home| home.join("sessions")));
+        .and_then(|_| home.map(|home| home.join("sessions")));
     let prepared =
         prepare_codex_tui_incarnation(tmux, report.0, options, overlay, resume_root.as_deref())
             .map_err(|error| error.to_string())?;
@@ -280,6 +287,13 @@ pub(super) fn codex_herdr_launch_admissible()
 pub(super) fn codex_herdr_home(
     auth_overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
 ) -> Option<PathBuf> {
+    crate::config::test_instance::environment::validate_overlay(
+        "codex",
+        &auth_overlay.profile_id,
+        auth_overlay.home.as_deref(),
+        &auth_overlay.env,
+    )
+    .ok()?;
     match auth_overlay.env.get("CODEX_HOME") {
         Some(home) => Some(PathBuf::from(home)),
         None => crate::services::codex_tui::rollout_tail::default_codex_home(),
@@ -506,6 +520,60 @@ pub(crate) fn emit_codex_tui_post_tail_handoff(
 #[cfg(unix)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_instance_codex_tmux_and_herdr_refuse_unpinned_and_foreign_home() {
+        crate::services::provider_auth_profile::instance_env_tests::with_instance(
+            concat!(
+                module_path!(),
+                "::test_instance_codex_tmux_and_herdr_refuse_unpinned_and_foreign_home"
+            ),
+            || {
+                use crate::services::provider_auth_profile::{
+                    self as profiles, ProviderAuthOverlay,
+                };
+                let catalog = profiles::queries::provider_auth_catalog();
+                let named =
+                    profiles::resolve(ProviderKind::Codex, Some("test-codex"), None, &catalog)
+                        .unwrap();
+                let home = named.home.clone().unwrap();
+                assert_eq!(codex_tui_home(&named).unwrap(), (Some(home.clone()), false));
+                assert_eq!(codex_herdr_home(&named), Some(home));
+                for overlay in [ProviderAuthOverlay::default_for(ProviderKind::Codex), {
+                    let mut foreign = named.clone();
+                    foreign
+                        .env
+                        .insert("CODEX_HOME".into(), "/synthetic/foreign/home".into());
+                    foreign
+                }] {
+                    assert!(codex_tui_home(&overlay).is_err());
+                    assert!(codex_herdr_home(&overlay).is_none());
+                    let instance = crate::config::test_instance::current().unwrap().unwrap();
+                    let tmux = format!("{}-codex-scope", instance.tmux.prefix);
+                    let options = CodexLaunchOptions::new("scope prompt");
+                    assert!(
+                        prepare_codex_tui_launch_script(
+                            &tmux,
+                            None,
+                            "scope prompt",
+                            &options,
+                            (None, None),
+                            false,
+                            &overlay
+                        )
+                        .is_err()
+                    );
+                    assert!(
+                        !PathBuf::from(crate::services::tmux_common::session_temp_path(
+                            &tmux, "sh"
+                        ))
+                        .exists()
+                    );
+                }
+            },
+        );
+    }
+
     #[test]
     fn exact_verified_resume_with_hooks_off_requires_unique_file_proof_and_pins_the_child_home() {
         use crate::config::TestEnvVarGuard as Guard;

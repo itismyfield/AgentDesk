@@ -1,0 +1,2 @@
+key: 010-outbox-transaction
+| `outbox-transaction` (#7353 S4-13·14 design) | `5c3ed37cddc80036fa8a274419b0219f49926704` | PreSource·Preobserve·SplitInsert·EarlyCensus·FreshTask are expected negative controls | Plain TLC 9 cfg matched after tx/connection P2 controls; canonical Current/Service GREEN. `statechart` wrapper unavailable on WSL (`sc=not-run`); [report](outbox-transaction/outbox-transaction.report.md) |

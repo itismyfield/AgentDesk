@@ -1,0 +1,26 @@
+---
+title: "연속 실패 알림과 한 번의 복구 요청"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: normal
+    lg1: Breaks TriggerOnlyAtNPlusOne
+    lg2: Path to the TriggerOnlyAtNPlusOne bug
+  }
+  class lg0 blue
+  class lg1 breaks
+  class lg2 bugPath
+  s0: 예약 실행 이력 대기
+  s1: 실패 누적
+  s2: N+1 경계 오류
+  [*] --> s0
+  s0 --> s1: 실패 알림만#183;턴 0
+  s1 --> s1: 실패 알림만#183;턴 0
+  s1 --> s2: N회에 조기 복구 요청
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath

@@ -283,6 +283,11 @@ cargo build --bin agentdesk
 instance_test_bin="$(cd "${CARGO_TARGET_DIR:-$PWD/target}/debug" && pwd -P)"
 export PATH="$instance_test_bin:$PATH"
 "$PYTHON" -m unittest tests.test_dev_instance_credential
+"$PYTHON" -m unittest -v tests.test_dev_instance_identity
+"$PYTHON" -m unittest tests.test_dev_instance_lifecycle
+"$PYTHON" -m unittest tests.test_dev_instance_completion
+"$PYTHON" -m unittest tests.test_dev_instance_driver
+"$PYTHON" -m unittest tests.test_dev_instance_runtime
 fi
 
 if run_check guards "PG audit guard"; then
@@ -518,7 +523,7 @@ bash scripts/main-ci-triage.sh --self-test
 fi
 
 if run_check guards "Lib test build and clippy swap + memory probe contract"; then
-"$PYTHON" -m unittest tests.test_ensure_swap_ci_wiring
+"$PYTHON" -m unittest tests.test_ensure_swap_ci_wiring tests.test_ci_runner_memory tests.test_runner_memory_wiring
 fi
 
 if run_check guards "CI timeout wrapper tests (#4413)"; then
@@ -562,6 +567,9 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tui_relay.test_matrix_runner \
   scripts.e2e.tui_relay.test_post_deploy_relay_continuity \
   scripts.e2e.tui_relay.test_post_deploy_turn_smoke \
+  scripts.e2e.tests.test_smoke_replay \
+  scripts.e2e.tests.test_continuous_catalog \
+  tests.test_e2e_continuous_manifest \
   scripts.e2e.tui_relay.test_retained_queue_idle \
   scripts.e2e.tui_relay.test_restart_queued_inputs \
   scripts.e2e.tui_relay.test_cleared_queued_bind_idle \
@@ -602,6 +610,14 @@ fi
 
 if run_check contracts "Script checks input selection contract"; then
 "$PYTHON" -m unittest tests.test_script_check_inputs
+fi
+
+if run_check contracts "Statechart index drift"; then
+"$PYTHON" scripts/ci/statechart_index.py --check
+fi
+
+if run_check contracts "Statechart index generator tests"; then
+"$PYTHON" -m unittest tests.test_statechart_index
 fi
 
 if run_check contracts "Giant deadline warning reporter contract"; then
@@ -865,6 +881,10 @@ if run_check guards "Low-level accessor ratchet tests"; then
 "$PYTHON" -m unittest tests.test_low_level_accessors
 "$PYTHON" -m unittest tests.test_low_level_accessor_baseline
 "$PYTHON" -m unittest tests.test_low_level_accessor_wiring
+fi
+
+if run_check guards "Repeated condition advisory tests"; then
+"$PYTHON" -m unittest tests.test_duplicate_conditions
 fi
 
 if run_check cargo "Maintainability audit"; then

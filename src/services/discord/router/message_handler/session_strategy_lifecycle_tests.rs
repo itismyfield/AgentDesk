@@ -595,104 +595,6 @@ fn claude_tui_transcript_busy_can_block_even_if_prompt_marker_is_visible() {
 
 #[cfg(unix)]
 #[test]
-fn claude_busy_preflight_uses_idle_transcript_wait_when_transcript_exists() {
-    let cwd = tempfile::tempdir().expect("create temp cwd");
-    let claude_home = tempfile::tempdir().expect("create temp claude home");
-    let session_id = "01234567-89ab-cdef-0123-456789abcdef";
-    let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
-        cwd.path(),
-        session_id,
-        Some(claude_home.path()),
-    )
-    .expect("resolve transcript path");
-    std::fs::create_dir_all(transcript_path.parent().expect("transcript parent"))
-        .expect("create transcript parent");
-    std::fs::write(
-        &transcript_path,
-        r#"{"type":"system","subtype":"turn_duration","session_id":"s"}"#,
-    )
-    .expect("write transcript");
-
-    let wait_strategy = hosted_tui_busy_preflight_readiness_wait_with_claude_home(
-        &ProviderKind::Claude,
-        cwd.path().to_str(),
-        Some(session_id),
-        None,
-        Some(claude_home.path()),
-        None,
-        Some(std::time::SystemTime::UNIX_EPOCH),
-    );
-
-    assert_eq!(
-        wait_strategy,
-        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(transcript_path)
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn claude_busy_preflight_falls_back_when_transcript_is_unavailable() {
-    let cwd = tempfile::tempdir().expect("create temp cwd");
-    let claude_home = tempfile::tempdir().expect("create temp claude home");
-
-    assert_eq!(
-        hosted_tui_busy_preflight_readiness_wait_with_claude_home(
-            &ProviderKind::Claude,
-            cwd.path().to_str(),
-            None,
-            None,
-            Some(claude_home.path()),
-            None,
-            Some(std::time::SystemTime::UNIX_EPOCH),
-        ),
-        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
-    );
-    assert_eq!(
-        hosted_tui_busy_preflight_readiness_wait_with_claude_home(
-            &ProviderKind::Claude,
-            cwd.path().to_str(),
-            Some("not-a-uuid"),
-            None,
-            Some(claude_home.path()),
-            None,
-            Some(std::time::SystemTime::UNIX_EPOCH),
-        ),
-        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
-    );
-    assert_eq!(
-        hosted_tui_busy_preflight_readiness_wait_with_claude_home(
-            &ProviderKind::Claude,
-            cwd.path().to_str(),
-            Some("01234567-89ab-cdef-0123-456789abcdef"),
-            None,
-            Some(claude_home.path()),
-            None,
-            Some(std::time::SystemTime::UNIX_EPOCH),
-        ),
-        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn codex_busy_preflight_keeps_codex_readiness_wait() {
-    let cwd = tempfile::tempdir().expect("create temp cwd");
-
-    let wait_strategy = hosted_tui_busy_preflight_readiness_wait_with_claude_home(
-        &ProviderKind::Codex,
-        cwd.path().to_str(),
-        Some("01234567-89ab-cdef-0123-456789abcdef"),
-        None,
-        None,
-        None,
-        None,
-    );
-
-    assert_eq!(wait_strategy, HostedTuiBusyPreflightReadinessWait::Codex);
-}
-
-#[cfg(unix)]
-#[test]
 fn codex_rollout_idle_state_allows_followup() {
     let _cache = lock_rollout_cache_test();
     // observe_codex_tui_rollout_state_for_cwd_with_sessions returns Idle
@@ -1282,14 +1184,8 @@ fn write_idle_claude_transcript(
     path
 }
 
-// #3208 (B): a genuinely-idle TUI whose live session runs in a *rotating
-// worktree* (pane_cwd) — distinct from the channel's configured workspace
-// (current_path) — and whose Claude session_id is NOT carried into intake (the
-// common `runtime_cached_provider_session` resume case). The preflight readiness
-// resolver MUST find the worktree transcript via the pane cwd and engage the
-// idle-JSONL fallback (ClaudePromptMarkerOrIdleTranscript) instead of falling
-// back to the prompt-marker-only wait that times out at 45s while the screen
-// shows "Waiting for N background agents to finish".
+// Busy diagnostics still resolve a unique worktree transcript without a session id.
+// Idle submission separately follows its verified current source.
 #[cfg(unix)]
 #[test]
 fn claude_busy_preflight_resolves_worktree_transcript_when_session_id_missing() {
@@ -1315,24 +1211,6 @@ fn claude_busy_preflight_resolves_worktree_transcript_when_session_id_missing() 
         resolved.as_deref(),
         Some(worktree_transcript.as_path()),
         "resolver must adopt the worktree transcript via pane cwd"
-    );
-
-    // And the preflight wait must therefore allow the idle-transcript fallback.
-    let wait_strategy = hosted_tui_busy_preflight_readiness_wait_with_claude_home(
-        &ProviderKind::Claude,
-        workspace.path().to_str(),
-        None,
-        Some(worktree.path()),
-        Some(claude_home.path()),
-        None,
-        Some(std::time::SystemTime::UNIX_EPOCH),
-    );
-    assert_eq!(
-        wait_strategy,
-        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(
-            worktree_transcript
-        ),
-        "idle worktree transcript must engage the JSONL fallback, not prompt-marker-only"
     );
 }
 

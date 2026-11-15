@@ -64,7 +64,7 @@ if [ "$2" = "$(cat "$d/hold" 2>/dev/null)" ] && [ ! -f "$d/held" ]; then
 fi
 case "$2" in
 display-message) for last do :; done; case "$last" in '#{pane_dead}'|'#{pane_in_mode}') echo 0 ;; *) echo 1 ;; esac ;;
-capture-pane) cat "$d/screen" ;;
+capture-pane) [ ! -f "$d/capture_fail" ] || exit 1; cat "$d/screen"; if [ -f "$d/next_screen" ]; then mv "$d/next_screen" "$d/screen"; fi ;;
 list-panes) if [ -f "$d/pane_model" ]; then if [ -f "$d/dead" ]; then echo 1; else echo 0; fi; fi ;;
 load-buffer|paste-buffer|send-keys)
   n=$(cat "$d/sent" 2>/dev/null || echo 0); echo $((n + 1)) > "$d/sent"
@@ -77,7 +77,8 @@ load-buffer|paste-buffer|send-keys)
   fi
   [ "$(cat "$d/fail" 2>/dev/null)" != "$n" ] || exit 1
   if [ "$key" = Enter ] && [ -f "$d/on_enter" ]; then cat "$d/on_enter" >> "$(cat "$d/on_enter_target")"; fi
-  if [ "$key" = Enter ] && [ -f "$d/die_on_enter" ]; then touch "$d/dead"; fi ;;
+  if [ "$key" = Enter ] && [ -f "$d/die_on_enter" ]; then touch "$d/dead"; fi
+  if [ -f "$d/on_key" ]; then sh "$d/on_key" "$key"; fi ;;
 esac
 exit 0
 "#
@@ -91,6 +92,10 @@ exit 0
         let tmux = Self { dir, _path: path };
         tmux.show(screen);
         tmux
+    }
+
+    pub(crate) fn directory(&self) -> &Path {
+        self.dir.path()
     }
 
     pub(crate) fn show(&self, screen: &str) {
@@ -177,6 +182,7 @@ fn events_in(file: &Path) -> Vec<String> {
 }
 
 fn request(session: &str) -> Request<'_> {
+    crate::services::claude_tui::readiness::tests::idle_fixture(session);
     Request {
         session,
         prompt: PROMPT,
@@ -302,6 +308,8 @@ while True:
         if mode == 'swallow' and not (root/'swallowed').exists():
             (root/'swallowed').write_text('1'); pending=b''; continue
         body=(root/'body').read_text()
+        if mode == 'startup' and not body:
+            pending=b''; render('after'); continue
         if (root/'unabsorbed').exists():
             row={'type':'queue-operation','operation':'enqueue','content':body}
             if (root/'native-sid').exists(): row['sessionId']=(root/'native-sid').read_text()
@@ -542,10 +550,10 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                 "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
                 PROMPT,
             );
-            // The first plain capture, a readiness probe, lets the renderer draw its input box.
+            // The first draft capture lets the renderer draw its input box.
             let hook = format!(
                 "capture=0; escapes=0\nfor arg in \"$@\"; do\n case \"$arg\" in capture-pane) capture=1;; -e) escapes=1;; esac\ndone\n\
-                 if [ \"$capture\" = 1 ] && [ \"$escapes\" = 0 ] && [ ! -f {release} ]; then\n\
+                 if [ \"$capture\" = 1 ] && [ ! -f {release} ]; then\n\
                   {real} -L {socket} -f /dev/null \"$@\"\n touch {release}\n\
                   polls=0\n while [ ! -f {ready} ]; do\n\
                    polls=$((polls + 1))\n [ \"$polls\" -lt 400 ] || exit 1\n sleep 0.01\n done\n exit 0\nfi\n",
@@ -579,6 +587,7 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                     relay_last_offset: None,
                 },
             );
+            crate::services::claude_tui::readiness::tests::pre_source(&name, &transcript);
             let token = Arc::new(CancelToken::new());
             let (stop, stopped) = std::sync::mpsc::channel();
             let timer_token = token.clone();
@@ -747,6 +756,7 @@ esac
         "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
     )
     .unwrap();
+    crate::services::claude_tui::readiness::tests::pre_source("scripted-idle", &transcript);
     let request = request("scripted-idle");
     let authority = Authority {
         admitted: Cell::new(true),
@@ -762,6 +772,17 @@ esac
             vec![],
         ),
     ] {
+        use std::io::Write;
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&transcript)
+                .unwrap(),
+            "{}\n{}",
+            serde_json::json!({"type":"assistant","message":{"content":"completed fixture turn"}}),
+            serde_json::json!({"type":"system","subtype":"turn_duration"})
+        )
+        .unwrap();
         fs::write(dir.path().join("before"), before).unwrap();
         fs::write(dir.path().join("calls"), "").unwrap();
         fs::write(dir.path().join("events"), "").unwrap();
@@ -786,11 +807,12 @@ esac
     fs::write(dir.path().join("events"), "").unwrap();
     fs::write(&transcript, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n").unwrap();
     assert!(observe_claude_jsonl_turn_state(&transcript).is_busy());
+    // This is the Idle adapter; a Running source must take the separate Busy caller path.
     assert_eq!(
         run(&authority, true, (&request, &Default::default())),
-        InputRun::Applied
+        refused(Refusal::NotReady)
     );
-    assert_eq!(events(dir.path()), ["paste", "Enter"]);
+    assert!(events(dir.path()).is_empty());
 
     fs::write(dir.path().join("calls"), "").unwrap();
     fs::write(dir.path().join("events"), "").unwrap();
@@ -863,6 +885,7 @@ fn every_entry_on_an_unlisted_channel_takes_the_one_submission() {
         for managed in [false, true] {
             for (label, send) in entries {
                 let session = format!("one-path-{label}-{managed}-{n}");
+                crate::services::claude_tui::readiness::tests::idle_fixture(&session);
                 tmux.clear();
                 let spy = SpyGuard::install(SpyState {
                     captures: std::iter::repeat_n(Some(IDLE.to_string()), 64).collect(),
@@ -998,6 +1021,7 @@ fn fresh_swallowed_enter_preserves_payload_and_never_retries() {
                 relay_last_offset: None,
             },
         );
+        crate::services::claude_tui::readiness::tests::pre_source(&name, &root.join("transcript"));
         let send = || {
             crate::services::claude_tui::input::send_prompt_with_readiness(
                 &name,
@@ -1085,6 +1109,7 @@ pub(crate) async fn owner_retry_leaf(
         .unwrap();
     let ticket = Arc::new(Mutex::new(None));
     let transcript = fixture.root.path().join("not-created.jsonl");
+    crate::services::claude_tui::readiness::tests::pre_source(&session, &transcript);
     let pane_name = session.clone();
     let submitted_ticket = ticket.clone();
     let leaf = move |frame: String| {
@@ -1134,6 +1159,7 @@ mod first_key_gate;
 pub(crate) fn gated_warm_write(token: &Arc<CancelToken>, stop: bool) -> Vec<String> {
     use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
     let tmux = ScriptedTmux::new(&view("", false));
+    crate::services::claude_tui::readiness::tests::idle_fixture("gated-warm");
     let stopper = stop.then(|| {
         let (held, go) = tmux.hold_first("capture-pane");
         let token = token.clone();

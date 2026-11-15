@@ -49,8 +49,9 @@ pub(super) fn submit_owned(
     let submit = Box::new(move |frame: String| {
         guarded_outcome::capture_preparation(|| {
             let written = write(&logical, cancel.as_deref(), attached, &frame, &sender)?;
-            let submitted = written
-                .ok_or_else(|| before_payload(&logical, "input cancelled before first key"))?;
+            let submitted = written.ok_or_else(|| {
+                before_payload(&logical, "input cancelled before first key", false)
+            })?;
             *ticket.lock().unwrap_or_else(|e| e.into_inner()) = Some(submitted);
             Ok(())
         })
@@ -96,7 +97,30 @@ fn write(
     };
     let HerdrInputRun::Ran(run) = observed_input(cancel, start, || {
         crate::services::claude_tui::composer_lock::with_composer_mutation_lock(logical, || {
-            composer::run(&attached.target, &plan, cancel)
+            if attached.awaiting_clear {
+                match composer::wait_for(cancel, Duration::from_secs(10), || {
+                    if crate::services::claude_tui::readiness::adopt_awaiting_clear(
+                        logical,
+                        &attached.nonce,
+                        path,
+                    ) {
+                        std::ops::ControlFlow::Break(())
+                    } else {
+                        std::ops::ControlFlow::Continue(())
+                    }
+                }) {
+                    Ok(()) => (),
+                    Err(composer::WaitStop::Cancelled) => {
+                        return InputRun::Cancelled { confirmed: 0 };
+                    }
+                    Err(composer::WaitStop::TimedOut) => {
+                        return InputRun::Refused(
+                            crate::services::claude_tui::host_input::InputRefusal::Unknown,
+                        );
+                    }
+                }
+            }
+            composer::run_ready(logical, path, &attached.target, &plan, cancel)
         })
     })?
     else {
@@ -116,22 +140,43 @@ fn write(
         InputRun::Applied => (),
         stopped @ (InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }) => {
             let pane = attached.target.clone();
+            let watched_session = logical.to_owned();
+            let clearing = attached.awaiting_clear;
+            let epoch = attached.nonce.clone();
+            let clear_path = path.to_path_buf();
+            let watched_path = attached.transcript.clone();
             crate::services::claude_tui::owner_input::record_preparation_watch(Box::new(
                 move || {
                     use crate::services::claude_tui::busy_inject::Screen;
-                    match composer::when_ready(
-                        || pane.capture_ansi(-80),
-                        None,
-                        || InputRun::Applied,
-                    ) {
-                        InputRun::Applied => Screen::Ready,
-                        _ => Screen::Unknown,
-                    }
+                    let ready = if clearing {
+                        crate::services::claude_tui::readiness::clear_wakeable(
+                            &watched_session,
+                            &epoch,
+                            &clear_path,
+                        )
+                    } else {
+                        crate::services::claude_tui::readiness::observe(
+                            &watched_session,
+                            Some(&watched_path),
+                        )
+                        .is_some()
+                    };
+                    if ready
+                        && pane.capture_ansi(-80).as_deref().is_some_and(|capture|
+                            crate::services::claude_tui::readiness::empty_draft(capture)
+                            && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(capture)) {
+                        Screen::Ready
+                    } else { Screen::Unknown }
                 },
             ));
+            let unproven = matches!(
+                stopped,
+                InputRun::Refused(crate::services::claude_tui::host_input::InputRefusal::Unproven)
+            );
             return Err(before_payload(
                 logical,
                 &format!("Claude composer held before first key: {stopped:?}"),
+                unproven,
             ));
         }
         stopped => return Err(SubmissionError::Guarded(stopped)),
@@ -144,7 +189,7 @@ fn write(
     }))
 }
 
-fn before_payload(logical: &str, detail: &str) -> SubmissionError {
+fn before_payload(logical: &str, detail: &str, unproven: bool) -> SubmissionError {
     crate::services::claude_tui::owner_input::vetoed(detail);
     SubmissionError::Held(crate::services::claude_tui::input::PreparationHold {
         target: logical.into(),
@@ -152,6 +197,7 @@ fn before_payload(logical: &str, detail: &str) -> SubmissionError {
         phase: crate::services::claude_tui::input::EffectPhase::BeforePayload,
         detail: detail.into(),
         modal: false,
+        unproven,
     })
 }
 
@@ -262,7 +308,11 @@ pub(super) fn observe(
 }
 
 #[cfg(test)]
+mod clear_held_tests;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod unproven_tests;
 
 #[cfg(test)]
 #[test]
@@ -388,6 +438,7 @@ mod regression_tests {
                 baseline_event_seq: None,
             },
         };
+        crate::services::claude_tui::readiness::tests::pre_source(logical, transcript);
         (
             owner,
             Attached {
@@ -396,6 +447,7 @@ mod regression_tests {
                 transcript: transcript.to_path_buf(),
                 target: herdr_endpoints().target(&record).unwrap(),
                 bound: true,
+                awaiting_clear: false,
                 physical: None,
             },
         )

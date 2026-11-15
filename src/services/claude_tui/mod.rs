@@ -1,3 +1,4 @@
+pub(crate) mod activity;
 pub(crate) mod busy_inject;
 #[cfg(all(test, unix))]
 mod busy_inject_tests;
@@ -21,6 +22,7 @@ pub mod input;
 pub(crate) mod memento_feedback;
 pub(crate) mod memento_writer_hook;
 pub(super) mod prompt_readiness;
+pub(crate) mod readiness;
 pub mod session;
 pub(crate) mod source_verify;
 pub(crate) mod startup_dialog;

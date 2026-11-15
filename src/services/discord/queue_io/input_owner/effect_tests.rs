@@ -42,6 +42,7 @@ fn cold_claude_first_prompt_is_one_owner_attempt() {
             "source_message_ids":[id],"queued_generation":1,"text":frame}))
         .unwrap();
     let transcript = f.root.path().join("not-created.jsonl");
+    crate::services::claude_tui::readiness::tests::pre_source(name, &transcript);
     let ticket = Arc::new(std::sync::Mutex::new(None));
     let completion = runtime.block_on(async {
         let dir = crate::services::discord::runtime_store::discord_pending_queue_root()

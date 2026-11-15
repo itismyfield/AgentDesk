@@ -1,21 +1,16 @@
 //! A recovery root retains the real singleton lock, never a PID-file assertion.
+#[cfg(unix)]
 use std::{
     fs::File,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-#[derive(Clone, Debug)]
-pub(crate) struct OwnedRuntimeRoot {
-    root: PathBuf,
-    _lock: Arc<File>,
-}
-
-impl OwnedRuntimeRoot {
-    pub(crate) fn covers(&self, root: &Path) -> bool {
-        root.canonicalize().is_ok_and(|root| root == self.root)
-    }
-}
+pub(crate) use crate::domain::replay_evidence::recovery::root::OwnedRuntimeRoot;
+#[cfg(unix)]
+use crate::domain::replay_evidence::recovery::root::issuer;
+#[cfg(unix)]
+pub(crate) mod issuer_key;
 
 #[cfg(unix)]
 pub(super) struct Singleton {
@@ -49,10 +44,11 @@ impl Singleton {
     }
 
     pub(super) fn recovery_root(&self) -> Option<OwnedRuntimeRoot> {
-        Some(OwnedRuntimeRoot {
-            root: self.root.clone()?,
-            _lock: self.file.clone(),
-        })
+        Some(issuer::owned(
+            issuer_key::SingletonRootKey(()),
+            self.root.clone()?,
+            self.file.clone(),
+        ))
     }
 }
 

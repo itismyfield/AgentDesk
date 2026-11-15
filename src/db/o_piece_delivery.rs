@@ -64,7 +64,7 @@ impl PieceKey {
     pub(crate) fn new(unit: UnitKey, piece_index: u32) -> Option<Self> {
         let postable = match (unit.provider, unit.kind) {
             (_, UnitKind::Body) | (ShadowProvider::Claude, UnitKind::ToolResult) => true,
-            (_, UnitKind::Tool | UnitKind::InputNotice)
+            (_, UnitKind::Tool | UnitKind::InputNotice | UnitKind::Recap)
             | (ShadowProvider::Codex, UnitKind::ToolResult) => false,
         };
         let named = unit.channel_id > 0 && !unit.native_key.trim().is_empty();
@@ -125,6 +125,7 @@ pub(crate) fn kind_name(kind: UnitKind) -> &'static str {
         UnitKind::Tool => "tool",
         UnitKind::ToolResult => "tool_result",
         UnitKind::InputNotice => "input_notice",
+        UnitKind::Recap => "recap",
     }
 }
 

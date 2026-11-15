@@ -433,7 +433,11 @@ async fn client_unavailable_transport_and_invalid_header_are_safe_classes() {
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/v1beta/decisions", listener.local_addr().unwrap());
-    drop(listener);
+    // Closing without a response avoids platform-dependent connection-refusal delays.
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+    });
     assert_eq!(
         gate(endpoint, Arc::new(|| Some(DecisionGateConfig::default())))
             .decide(&request())
@@ -441,6 +445,7 @@ async fn client_unavailable_transport_and_invalid_header_are_safe_classes() {
             .result,
         DecisionResult::NoAnswer(NoAnswerReason::Transport)
     );
+    await_within(server, WAIT_CAP).await.unwrap();
 }
 
 #[tokio::test]

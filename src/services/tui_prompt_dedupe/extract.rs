@@ -101,6 +101,17 @@ pub(crate) fn is_claude_compact_summary(json: &Value) -> bool {
     json.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
 }
 
+/// A scheduled-task fire's own row marks, which the hook and the writer both read. `turnOrigin`
+/// belongs to the whole turn, so a typed input and a compact summary of that turn carry it too.
+pub(crate) fn carries_scheduled_fire_marks(json: &Value) -> bool {
+    !is_claude_compact_summary(json)
+        && (json.get("scheduledTaskId").is_some_and(Value::is_string)
+            || matches!(
+                json.get("wakeupSource").and_then(Value::as_str),
+                Some("schedule_wakeup" | "loop_wakeup")
+            ))
+}
+
 /// #3540: same extraction as [`extract_claude_transcript_user_prompt`], but also
 /// returns the JSONL entry's STABLE identity (`uuid`) when present.
 ///
@@ -147,6 +158,33 @@ pub fn extract_claude_transcript_user_prompt_with_entry_id(
     let prompt = reject_synthetic_claude_user_prompt(extract_message_content_text(message)?)?;
     let entry_id = extract_claude_transcript_entry_id(json, message);
     Some((prompt, entry_id))
+}
+
+/// What the tui_o writer announces off a native row: a typed input, or with the flag set a
+/// scheduled fire's own row. The idle scanner keeps to the shared extraction, which drops it.
+pub(crate) fn extract_claude_writer_input_with_entry_id(
+    json: &Value,
+) -> Option<(String, Option<String>, bool)> {
+    if let Some((prompt, entry_id)) = extract_claude_transcript_user_prompt_with_entry_id(json) {
+        return Some((prompt, entry_id, false));
+    }
+    // The shared extraction drops every `isMeta` row; the writer takes back only a fire's own.
+    let scheduled_fire = json.get("isMeta").and_then(Value::as_bool) == Some(true)
+        && carries_scheduled_fire_marks(json);
+    if json.get("type").and_then(Value::as_str) != Some("user") || !scheduled_fire {
+        return None;
+    }
+    let message = json.get("message")?;
+    if message
+        .get("role")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role != "user")
+    {
+        return None;
+    }
+    let prompt = reject_synthetic_claude_user_prompt(extract_message_content_text(message)?)?;
+    let entry_id = extract_claude_transcript_entry_id(json, message);
+    Some((prompt, entry_id, true))
 }
 
 /// #3540: pull the stable entry identity for a Claude transcript `user` entry.

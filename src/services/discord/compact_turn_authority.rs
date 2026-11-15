@@ -1,6 +1,9 @@
 //! Live turn-authority identity used by Claude compact steering.
 
-use super::inflight::{InflightTurnState, TurnSource, load_inflight_state_read_only};
+use super::inflight::{
+    InflightTurnState, TurnSource, load_inflight_state_read_only,
+    load_inflight_state_read_only_result,
+};
 use crate::services::provider::ProviderKind;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,7 +19,7 @@ pub(in crate::services) struct ManagedCompactTurnIdentity {
 /// `Managed` is the AgentDesk-launched path; `ExternalInput`/`ExternalAdopted`
 /// are interactive Discord-bound sessions (tty / adopted) that #4652 wrongly
 /// gated out. `MonitorTriggered` stays excluded (synthetic auto-turn).
-pub(in crate::services) fn compact_eligible_turn_source(source: TurnSource) -> bool {
+pub(in crate::services::discord) fn compact_eligible_turn_source(source: TurnSource) -> bool {
     matches!(
         source,
         TurnSource::Managed | TurnSource::ExternalInput | TurnSource::ExternalAdopted
@@ -74,11 +77,12 @@ impl ManagedCompactTurnIdentity {
     }
 }
 
-pub(in crate::services) fn live_managed_turn_matches(
+/// A captured eligible turn can finish before compact; a successor or failed read cannot approve it.
+pub(in crate::services) fn pending_managed_turn_matches(
     expected: &ManagedCompactTurnIdentity,
-) -> bool {
-    load_inflight_state_read_only(&ProviderKind::Claude, expected.channel_id)
-        .is_some_and(|state| managed_turn_matches_state(expected, &state))
+) -> Result<bool, String> {
+    load_inflight_state_read_only_result(&ProviderKind::Claude, expected.channel_id)
+        .map(|state| state.is_none_or(|state| managed_turn_matches_state(expected, &state)))
 }
 
 fn managed_turn_matches_state(
@@ -147,5 +151,26 @@ mod tests {
             ManagedCompactTurnIdentity::capture(&state).is_none(),
             "MonitorTriggered turns must not capture a compact identity"
         );
+    }
+    #[test]
+    fn pending_authority_distinguishes_completed_absence_error_and_a_successor() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let mut state = state_with_source(TurnSource::Managed);
+        let identity = ManagedCompactTurnIdentity::capture(&state).unwrap();
+        let root = super::super::inflight::inflight_runtime_root().unwrap();
+        let path = super::super::inflight::inflight_state_path(
+            &root,
+            &ProviderKind::Claude,
+            state.channel_id,
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        assert_eq!(pending_managed_turn_matches(&identity), Ok(true));
+        std::fs::write(&path, "invalid json").unwrap();
+        assert!(pending_managed_turn_matches(&identity).is_err());
+        std::fs::write(&path, serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(pending_managed_turn_matches(&identity), Ok(true));
+        state.user_msg_id += 1;
+        std::fs::write(&path, serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(pending_managed_turn_matches(&identity), Ok(false));
     }
 }

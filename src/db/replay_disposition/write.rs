@@ -10,7 +10,7 @@ pub(crate) use start::{
     ensure_same_request, register_or_reuse, register_or_reuse_on_tx,
 };
 
-use crate::services::discord::replay_policy::live::{NoEffectEvidence, TerminalEvidence};
+use crate::domain::replay_evidence::live::{NoEffectEvidence, TerminalEvidence};
 use sqlx::PgPool;
 
 /// Why a transition produced no acknowledgement.
@@ -91,7 +91,7 @@ pub(crate) async fn classify_normal(
     attempt: &ExactAttempt,
     terminal: &TerminalEvidence,
 ) -> Result<(), WriteError> {
-    if !terminal.names(attempt) {
+    if !terminal.names(attempt.receipt_id(), attempt.nonce()) {
         return Err(WriteError::CasMiss);
     }
     settle(pool, attempt, "classified_normal", None).await
@@ -116,7 +116,7 @@ pub(crate) async fn classify_no_effect(
     attempt: ExactAttempt,
     evidence: &NoEffectEvidence,
 ) -> Result<NoEffectAck, WriteError> {
-    if !evidence.names(&attempt) {
+    if !evidence.names(attempt.receipt_id(), attempt.nonce()) {
         return Err(WriteError::CasMiss);
     }
     settle(pool, &attempt, "startup_failed_no_effect", None).await?;

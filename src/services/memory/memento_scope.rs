@@ -22,7 +22,7 @@ pub(crate) fn resolve_memento_workspace_for_channel(
     }
 
     if channel_id != 0 {
-        if let Some(group) = crate::services::discord::settings::resolve_role_binding(
+        if let Some(group) = crate::services::channel_roles::resolve_role_binding(
             ChannelId::new(channel_id),
             channel_name,
         )
@@ -31,7 +31,7 @@ pub(crate) fn resolve_memento_workspace_for_channel(
         {
             return group;
         }
-        if let Some(workspace) = crate::services::discord::settings::resolve_workspace(
+        if let Some(workspace) = crate::services::channel_roles::resolve_workspace(
             ChannelId::new(channel_id),
             channel_name,
         )
@@ -88,12 +88,9 @@ pub(super) fn resolve_remember_agent_id(
         return agent_id;
     }
     let channel_id = channel_id.filter(|id| *id != 0)?;
-    crate::services::discord::settings::resolve_role_binding(
-        ChannelId::new(channel_id),
-        channel_name,
-    )
-    .filter(|binding| binding.memory.memory_group.is_some())
-    .map(|binding| resolve_memento_agent_id(&binding.role_id, channel_id))
+    crate::services::channel_roles::resolve_role_binding(ChannelId::new(channel_id), channel_name)
+        .filter(|binding| binding.memory.memory_group.is_some())
+        .map(|binding| resolve_memento_agent_id(&binding.role_id, channel_id))
 }
 
 pub(crate) fn resolve_memento_agent_id(role_id: &str, channel_id: u64) -> String {

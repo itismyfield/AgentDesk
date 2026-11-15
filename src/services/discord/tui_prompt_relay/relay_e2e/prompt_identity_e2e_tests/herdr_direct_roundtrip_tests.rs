@@ -196,14 +196,28 @@ fn records(session: &str, prompt: &str, answer: &str) -> [Value; 4] {
 }
 
 async fn hook(session: &str, event: &str, payload: &Value, envelope: &str) {
+    let router = hook_receiver_router();
+    let published = chrono::Utc::now();
     let request = Request::builder()
         .method(Method::POST)
         .uri(format!("/hooks/claude/{event}?session_id={session}"))
         .header("content-type", "application/json")
         .header(BINDING_HEADER, envelope)
+        .header(
+            crate::services::claude_tui::hook_server::relay_receipts::RELAY_PUBLISHED_AT_HEADER,
+            published.to_rfc3339(),
+        )
+        .header(
+            crate::services::claude_tui::hook_server::relay_receipts::RELAY_REQUEST_ID_HEADER,
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .header(
+            crate::services::claude_tui::hook_server::relay_receipts::RELAY_DEADLINE_HEADER,
+            (published + chrono::Duration::seconds(60)).to_rfc3339(),
+        )
         .body(Body::from(payload.to_string()))
         .unwrap();
-    let response = hook_receiver_router().oneshot(request).await.unwrap();
+    let response = router.oneshot(request).await.unwrap();
     assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
 }
 

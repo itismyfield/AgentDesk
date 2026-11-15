@@ -86,6 +86,7 @@ enum StreamTickSaveMode {
     StrictBridgeMutation,
 }
 
+#[cfg(test)]
 pub(in crate::services::discord::inflight) fn save_stream_tick_state_preserving_current_message_races_in_root(
     root: &Path,
     persisted_baseline: &mut InflightTurnState,
@@ -106,6 +107,7 @@ pub(in crate::services::discord::inflight) fn save_stream_tick_state_preserving_
     )
 }
 
+#[cfg(test)]
 pub(in crate::services::discord::inflight) fn save_stream_tick_state_if_bridge_authority_in_root(
     root: &Path,
     persisted_baseline: &mut InflightTurnState,
@@ -355,6 +357,11 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         &persisted_baseline.has_post_tool_text,
         &state.has_post_tool_text,
         &mut updated.has_post_tool_text,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.routine_presentation,
+        &state.routine_presentation,
+        &mut updated.routine_presentation,
     );
     apply_local_change_if_durable_unchanged(
         &persisted_baseline.long_running_placeholder_active,

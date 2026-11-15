@@ -140,6 +140,7 @@ async fn scenario(rig: herdr::P11TerminationRig, events: &std::path::Path) {
     ]);
     let register = crate::services::tui_prompt_dedupe::register_tmux_runtime_binding;
     register(&tmux, claude(&transcript, &session));
+    crate::services::claude_tui::readiness::tests::pre_source(&tmux, &transcript);
     log_session_start(events, &tmux, &session, &transcript);
 
     let first = recent_message_id();

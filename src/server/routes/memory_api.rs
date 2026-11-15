@@ -396,7 +396,7 @@ fn uuid_like() -> String {
 // ── Memento bridge (remember only; recall/forget TBD) ────────────
 
 async fn memento_remember(body: &RememberBody) -> Result<(), String> {
-    let base = crate::services::discord::settings::memory_settings_for_binding(None);
+    let base = crate::services::channel_roles::memory_settings_for_binding(None);
     // Force memento regardless of the resolved binding default, since the
     // caller explicitly selected memento via backend detection.
     let settings = crate::domain::memory::ResolvedMemorySettings {

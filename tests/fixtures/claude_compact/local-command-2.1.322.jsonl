@@ -1,0 +1,19 @@
+{"type": "system", "subtype": "compact_boundary", "compactMetadata": {"trigger": "manual"}}
+{"type": "user", "isCompactSummary": true, "message": {"content": "[redacted summary]"}}
+{"type": "user", "message": {"content": "<local-command-caveat>[redacted caveat]</local-command-caveat>"}}
+{"type": "user", "message": {"content": "<command-name>/compact</command-name><command-message>compact</command-message>"}}
+{"type": "user", "message": {"content": "<local-command-stdout>\u001b[2mCompacted (ctrl+o to see full summary)\u001b[22m</local-command-stdout>"}}
+{"type": "attachment"}
+{"type": "attachment"}
+{"type": "attachment"}
+{"type": "attachment"}
+{"type": "attachment"}
+{"type": "attachment"}
+{"type": "attachment"}
+{"type": "last-prompt"}
+{"type": "ai-title"}
+{"type": "mode"}
+{"type": "permission-mode"}
+{"type": "session-owner"}
+{"type": "atis-latch"}
+{"type": "cost-state"}

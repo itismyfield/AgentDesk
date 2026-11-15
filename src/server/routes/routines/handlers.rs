@@ -462,14 +462,13 @@ pub async fn run_routine_now(
 
     let agent_executor = routine_agent_executor(&state)?;
     let discord_logger = routine_discord_logger(&state)?;
-    discord_logger.log_run_started(&store, &claimed).await;
+    crate::services::routines::run_diagnostics::started(&store, &claimed).await;
     let run_id = claimed.run_id.clone();
     let pause_on_terminal_failure = state.config.routines.failure_pause_auto_resume_secs > 0;
     let Some(outcome) = execute_claimed_script_run(
         &store,
         &loader,
         Some(&agent_executor),
-        Some(&discord_logger),
         claimed,
         pause_on_terminal_failure,
     )
@@ -480,6 +479,7 @@ pub async fn run_routine_now(
             "routine run {run_id} was already closed before outcome capture"
         )));
     };
+    crate::services::routines::run_diagnostics::outcome(&store, &outcome).await;
     let discord_log = discord_logger.log_run_outcome(&store, &outcome).await;
     let threshold = state.config.routines.max_consecutive_failures;
     discord_logger

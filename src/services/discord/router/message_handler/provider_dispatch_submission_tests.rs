@@ -592,6 +592,7 @@ async fn actual_creator(creator: Creator) {
             relay_last_offset: None,
         },
     );
+    crate::services::claude_tui::readiness::tests::pre_source(&name, &transcript);
     crate::services::discord::host_defer_gate::tests::map_channel(&shared, channel, &channel_name)
         .await;
     {

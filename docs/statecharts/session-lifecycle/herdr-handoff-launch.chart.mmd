@@ -1,0 +1,17 @@
+stateDiagram-v2
+    [*] --> Bound
+    Bound --> Retired: herdr restart / proved RootReplaced
+    Retired --> FreshLaunch: first input / no journal
+    Retired --> EndedJournal: restored unfinished_handoff ended=true
+    EndedJournal --> Launch: retry deadline reached / exact claim
+    Launch --> Backoff: launch failed / persist failures + deadline
+    Backoff --> Launch: 2,4,8,16 seconds / row removed AND token released
+    Launch --> Retained: fifth launch failure / atomic original + notice intent
+    Retained --> NextHead: clear journal / revoke claim
+    FreshLaunch --> Submitted: reserve consumes original once
+    Launch --> Submitted: reserve consumes ended journal once
+    Submitted --> [*]
+    NextHead --> [*]: deduplicated visible failure notice
+    EndedJournal --> Cancelled: Cancel original or clear waiting
+    Backoff --> Cancelled: Cancel original or clear waiting
+    Cancelled --> [*]

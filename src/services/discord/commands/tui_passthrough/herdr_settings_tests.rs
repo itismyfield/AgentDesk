@@ -970,6 +970,10 @@ fn herdr_first_input_and_effort_never_submit_mixed_content_pg() {
         use crate::services::claude_tui::owner_input::{self, Lineage};
         use crate::services::session_host::herdr_socket_rig_tests::HerdrRequest;
         let fx = Fixture::new(&rig).await;
+        crate::services::claude_tui::readiness::tests::pre_source(
+            &fx.logical,
+            &crate::config::runtime_root().unwrap().join("not-created.jsonl"),
+        );
         // Normal submission must leave a ready composer; only /effort opens the overlay.
         rig.answer_after_send("pane.read", screen(READY));
         let submitted = Arc::new(std::sync::Mutex::new((String::new(), Vec::<String>::new())));
@@ -1203,8 +1207,15 @@ fn herdr_effort_on_long_history_names_read_failure_and_closes_selector_pg() {
             .unwrap();
         use crate::services::claude_tui::input::TuiInputAction::{Enter, Literal};
         let plan = [Literal("next prompt".into()), Enter];
+        let logical = fx.logical.clone();
+        let source = crate::config::runtime_root()
+            .unwrap()
+            .join("next-input.jsonl");
+        crate::services::claude_tui::readiness::tests::pre_source(&logical, &source);
         let next = tokio::task::spawn_blocking(move || {
-            crate::services::claude::herdr_turn::composer::run(&target, &plan, None)
+            crate::services::claude::herdr_turn::composer::run_ready(
+                &logical, &source, &target, &plan, None,
+            )
         });
         let next = await_within(next, WAIT_CAP).await.unwrap();
         assert!(

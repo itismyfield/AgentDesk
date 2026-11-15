@@ -41,9 +41,7 @@ pub async fn run_due_tick(
     let claimed = store.claim_due_runs(max_due_per_tick).await?;
     let mut outcomes = Vec::with_capacity(claimed.len());
     for run in claimed {
-        if let Some(logger) = discord_logger {
-            logger.log_run_started(store, &run).await;
-        }
+        super::run_diagnostics::started(store, &run).await;
         if let Err(error) = validate_claimed_migrated_launchd_run(loader, &run, routine_dirs) {
             let message = error.to_string();
             tracing::warn!(
@@ -71,6 +69,7 @@ pub async fn run_due_tick(
                     error: Some(message),
                     fresh_context_guaranteed: false,
                 };
+                super::run_diagnostics::outcome(store, &outcome).await;
                 if let Some(logger) = discord_logger {
                     logger.log_run_outcome(store, &outcome).await;
                 }
@@ -87,13 +86,13 @@ pub async fn run_due_tick(
             store,
             loader,
             agent_executor,
-            discord_logger,
             run,
             pause_on_terminal_failure,
         )
         .await
         {
             Ok(Some(outcome)) => {
+                super::run_diagnostics::outcome(store, &outcome).await;
                 if let Some(logger) = discord_logger {
                     logger.log_run_outcome(store, &outcome).await;
                 }
@@ -157,16 +156,19 @@ pub async fn poll_agent_turns(
     max_per_tick: u32,
     pause_on_terminal_failure: bool,
 ) -> Result<Vec<RoutineRunOutcome>> {
-    agent_executor
+    let outcomes = agent_executor
         .poll_agent_runs(store, max_per_tick, pause_on_terminal_failure)
-        .await
+        .await?;
+    for outcome in &outcomes {
+        super::run_diagnostics::outcome(store, outcome).await;
+    }
+    Ok(outcomes)
 }
 
 pub async fn execute_claimed_script_run(
     store: &RoutineStore,
     loader: &RoutineScriptLoader,
     agent_executor: Option<&RoutineAgentExecutor>,
-    discord_logger: Option<&RoutineDiscordLogger>,
     claimed: ClaimedRoutineRun,
     pause_on_terminal_failure: bool,
 ) -> Result<Option<RoutineRunOutcome>> {
@@ -239,17 +241,14 @@ pub async fn execute_claimed_script_run(
     } else {
         Some(automation_inventory)
     };
-    if let Some(logger) = discord_logger {
-        logger
-            .log_run_js_inputs(
-                store,
-                &claimed,
-                observation_count,
-                automation_inventory_count,
-                claimed.checkpoint.as_ref(),
-            )
-            .await;
-    }
+    super::run_diagnostics::inputs(
+        store,
+        &claimed,
+        observation_count,
+        automation_inventory_count,
+        claimed.checkpoint.as_ref(),
+    )
+    .await;
     let context = RoutineTickContext {
         routine: RoutineTickRoutine {
             id: claimed.routine_id.clone(),
@@ -312,18 +311,15 @@ pub async fn execute_claimed_script_run(
             }));
         }
     };
-    if let Some(logger) = discord_logger {
-        logger
-            .log_run_js_action(
-                store,
-                &claimed,
-                action.action_name(),
-                action_detail(&action).as_deref(),
-                action_prompt(&action),
-                action_has_checkpoint(&action),
-            )
-            .await;
-    }
+    super::run_diagnostics::action(
+        store,
+        &claimed,
+        action.action_name(),
+        action_detail(&action).as_deref(),
+        action_prompt(&action),
+        action_has_checkpoint(&action),
+    )
+    .await;
 
     close_action(
         store,

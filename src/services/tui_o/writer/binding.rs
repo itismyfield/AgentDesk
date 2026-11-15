@@ -19,6 +19,7 @@ pub enum BindingCause {
     Compact,
     Continuation,
     Fork,
+    SameSessionVerified,
     Unknown,
 }
 
@@ -258,6 +259,7 @@ fn bound(event: &p5::BindingEvent, reclaims: bool, new: BindingTarget) -> Bindin
         p5::BindingCause::Compact => BindingCause::Compact,
         p5::BindingCause::Continuation => BindingCause::Continuation,
         p5::BindingCause::Fork => BindingCause::Fork,
+        p5::BindingCause::SameSessionVerified => BindingCause::SameSessionVerified,
         p5::BindingCause::Unknown => BindingCause::Unknown,
     };
     let evidence = BindingEvidence {
