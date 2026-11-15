@@ -154,6 +154,10 @@ async fn a_saved_model_relaunches_its_tui_once_on_the_same_session_pg() {
     assert!(fx.consume().await.is_none(), "the change applies once");
     assert!(!called(&fx.tmux.take_calls(), "kill-session"));
 
+    let user_home = fx._account.1.path().join(".claude");
+    std::fs::create_dir_all(&user_home).unwrap();
+    std::fs::write(user_home.join("settings.json"), r#"{"model":"haiku"}"#).unwrap();
+    std::fs::write(fx._account.2.join("settings.json"), r#"{"model":"opus"}"#).unwrap();
     manage_bot_in_yaml();
     fx.save_model(None).await;
     let root = crate::config::runtime_root().unwrap();
@@ -171,11 +175,53 @@ async fn a_saved_model_relaunches_its_tui_once_on_the_same_session_pg() {
     let (args, _) = fx.launch(fx.channel, &fx.name, SESSION, model.as_deref());
     assert!(args.windows(2).any(|pair| pair == ["--resume", SESSION]));
     assert!(
-        args.windows(2).any(|pair| pair == ["--model", "default"]),
-        "a resumed session returns to the default model: {args:?}"
+        args.windows(2).any(|pair| pair == ["--model", "opus"]),
+        "the reset uses its account's user settings: {args:?}"
+    );
+    fx.restart().await;
+    fx.tmux.mark_missing();
+    let (args, _) = fx.launch(fx.channel, &fx.name, SESSION, None);
+    assert!(args.windows(2).any(|pair| pair == ["--resume", SESSION]));
+    assert!(
+        !args.iter().any(|arg| arg == "--model"),
+        "an ordinary resume after restart has no model reset signal: {args:?}"
     );
     tc::cleanup_session_temp_files(&fx.name);
     tc::cleanup_session_temp_files(&thread_name);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_model_reset_relaunch_defaults_for_missing_invalid_or_unset_settings_pg() {
+    let test = "services::discord::commands::control::relaunch_tests::model_tests::a_model_reset_relaunch_defaults_for_missing_invalid_or_unset_settings_pg";
+    if !api_child(test) {
+        return;
+    }
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let idle = crate::services::discord::router::set_hosted_tui_promote_busy_for_tests(false);
+    for (n, settings) in [(101, None), (102, Some("{broken")), (103, Some("{}"))] {
+        let fx = Fixture::new(n, RuntimeHandoffKind::ClaudeTui).await;
+        if let Some(settings) = settings {
+            std::fs::write(fx._account.2.join("settings.json"), settings).unwrap();
+        }
+        fx.save_model(Some("sonnet")).await;
+        fx.save_model(None).await;
+        let reset = fx.consume().await;
+        assert!(relaunched_as(&reset, &fx.name), "{reset:?}");
+        super::super::relaunch::forget(fx.channel);
+        let (args, settings) = fx.launch(fx.channel, &fx.name, SESSION, None);
+        assert!(args.windows(2).any(|pair| pair == ["--resume", SESSION]));
+        assert!(args.windows(2).any(|pair| pair == ["--model", "default"]));
+        assert!(
+            settings.get("model").is_none(),
+            "the hook payload stays separate"
+        );
+        fx.tmux.mark_missing();
+        let (args, _) = fx.launch(fx.channel, &fx.name, SESSION, None);
+        assert!(!args.iter().any(|arg| arg == "--model"));
+        tc::cleanup_session_temp_files(&fx.name);
+    }
+    drop(idle);
+    drop(root);
 }
 
 // A model change whose session left no transcript cannot resume: the session is reset, the channel

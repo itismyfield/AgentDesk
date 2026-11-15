@@ -509,11 +509,12 @@ impl ChannelStore {
                 if unit_key.kind == super::shadow::UnitKind::InputNotice || notice_origin.is_some())
             || matches!(&entry, LedgerEntry::Excluded { unit_key, .. }
                 if unit_key.kind == super::shadow::UnitKind::InputNotice);
+        let store_root = self.dir.parent().expect("channel has store root");
         if notice_format {
-            input_notice_floor::before_append(
-                self.dir.parent().expect("channel has store root"),
-                true,
-            )?;
+            input_notice_floor::before_append(store_root, true)?;
+        }
+        if matches!(&entry, LedgerEntry::InputNotice { entry } if entry.records_scheduled_fire()) {
+            input_notice_floor::before_scheduled_append(store_root)?;
         }
         ledger::append(&self.dir.join(LEDGER_FILE), at, &entry)?;
         self.ledger.apply(at, entry);
