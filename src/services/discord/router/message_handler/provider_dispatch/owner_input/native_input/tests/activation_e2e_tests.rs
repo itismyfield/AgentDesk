@@ -781,14 +781,19 @@ async fn isolated(kind: &str) {
     } else {
         vec!["N1-1", "N1-2"]
     };
+    let mut bodies = Vec::new();
     let mut units = Vec::new();
     for id in &own {
+        bodies.push(format!("a-{id}"));
         units.push(format!("a-{id}"));
         for i in 0..3 {
-            units.push(format!("f-{id}-{i}"));
+            bodies.push(format!("f-{id}-{i}"));
+            if strict || i > 0 {
+                units.push(format!("f-{id}-{i}"));
+            }
         }
     }
-    activation_units(&store, &posts, channel.get(), &units).await;
+    activation_units(&store, &posts, channel.get(), &bodies, &units).await;
     if withdrawn {
         let count:i64=sqlx::query_scalar("SELECT count(*) FROM message_outbox WHERE target=$1 AND source='retained_input_notice'").bind(format!("channel:{channel}")).fetch_one(&pool).await.unwrap();
         assert_eq!(count, 1);
@@ -882,11 +887,13 @@ async fn isolated(kind: &str) {
             WAIT_CAP,
         )
         .await;
+        bodies.push("a-N2-1".into());
         units.push("a-N2-1".into());
         for i in 0..3 {
+            bodies.push(format!("f-N2-1-{i}"));
             units.push(format!("f-N2-1-{i}"));
         }
-        activation_units(&store, &posts, channel.get(), &units).await;
+        activation_units(&store, &posts, channel.get(), &bodies, &units).await;
         assert_eq!(
             posts
                 .to(channel.get())

@@ -324,7 +324,8 @@ async fn activation_units(
     store: &crate::services::tui_o::store::OStore,
     posts: &crate::services::tui_o::writer::host::test_io::Posts,
     channel: u64,
-    units: &[String],
+    bodies: &[String],
+    turns: &[String],
 ) {
     use crate::services::tui_o::{
         shadow::{UnitKey, UnitKind},
@@ -332,24 +333,22 @@ async fn activation_units(
         writer::DiscordPort,
     };
     let era = store.read_era().unwrap().unwrap();
-    let keys: Vec<_> = units
+    let body_key = |unit: &String| UnitKey {
+        channel_id: channel,
+        provider: crate::services::tui_o::shadow::ShadowProvider::Claude,
+        native_key: format!("{unit}:0"),
+        kind: UnitKind::Body,
+    };
+    let footer_key = |unit: &String| UnitKey {
+        channel_id: channel,
+        provider: crate::services::tui_o::shadow::ShadowProvider::Claude,
+        native_key: format!("{unit}:0#turn_end"),
+        kind: UnitKind::Tool,
+    };
+    let keys: Vec<_> = bodies
         .iter()
-        .flat_map(|unit| {
-            [
-                UnitKey {
-                    channel_id: channel,
-                    provider: crate::services::tui_o::shadow::ShadowProvider::Claude,
-                    native_key: format!("{unit}:0"),
-                    kind: UnitKind::Body,
-                },
-                UnitKey {
-                    channel_id: channel,
-                    provider: crate::services::tui_o::shadow::ShadowProvider::Claude,
-                    native_key: format!("{unit}:0#turn_end"),
-                    kind: UnitKind::Tool,
-                },
-            ]
-        })
+        .map(body_key)
+        .chain(turns.iter().map(footer_key))
         .collect();
     await_within(async {loop {
         let c=store.open_channel(&era,channel).unwrap().unwrap();
@@ -360,7 +359,13 @@ async fn activation_units(
     }},WAIT_CAP).await;
     let c = store.open_channel(&era, channel).unwrap().unwrap();
     let ledger = c.ledger();
+    assert_eq!(
+        ledger.next_serial() as usize,
+        keys.len(),
+        "no extra body or footer"
+    );
     let seen = posts.history_after(channel, 0).await.unwrap();
+    assert_eq!(seen.len(), keys.len(), "no duplicate or unowned post");
     for key in keys {
         let pieces: Vec<_> = (0..ledger.next_serial())
             .filter_map(|i| ledger.piece(i))
@@ -376,7 +381,17 @@ async fn activation_units(
             "unit delivery {key:?}"
         );
     }
-    println!("ISOLATED_UNITS pairs={} body=1 footer=1 each", units.len());
+    for body in bodies.iter().filter(|body| !turns.contains(body)) {
+        assert!(
+            ledger.latest_piece(&footer_key(body), 0).is_none(),
+            "a mid-turn assistant must not acquire a separate footer"
+        );
+    }
+    println!(
+        "ISOLATED_UNITS bodies={} turns={} delivery=1 each",
+        bodies.len(),
+        turns.len()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

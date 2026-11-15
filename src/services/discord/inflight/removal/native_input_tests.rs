@@ -563,7 +563,7 @@ async fn native_8148_boot_pending_registration_is_adopted_without_a_result_or_le
             .is_none()
     );
     assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
-    assert!(!crate::services::discord::turn_finalizer::native_prepare::enabled());
+    assert!(crate::services::discord::turn_finalizer::native_prepare::enabled());
 }
 
 #[tokio::test]

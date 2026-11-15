@@ -110,7 +110,7 @@ marker 저장→Idle 전 crash, generic release→row/queue admission 사이 cra
 
 | 이름/기존 입구 | 단언 | 원인 뮤턴트 |
 |---|---|---|
-| `native_8148_activation_isolated_herdr_stop_only_preserves_original_pg` / activation_e2e.rs:475 | 기대를 native Executed0, 원 입력 physical send1, next head는 actual Idle 뒤1로 수정. source progress/human3턴/body/footer 단일 도착 유지 | barrier 제거 / abstain 제거 |
+| `native_8148_activation_isolated_herdr_stop_only_preserves_original_pg` / activation_e2e_tests.rs:475 | 기대를 native Executed0, 원 입력 physical send1, next head는 actual Idle 뒤1로 수정. source progress/human3턴/body/footer 단일 도착 유지 | barrier 제거 / abstain 제거 |
 | `native_8148_barrier_own_strict_before_foreign_pg` | own strict closer 결과1·정리1, 이후 foreign3턴 영향0 | 자기 closer까지 차단 |
 | `native_8148_barrier_own_midturn_identity_pg` | 자기 receipt/full identity 합류는 barrier 아님, 정상 결과1. 같은 ticket/별도 follower ticket 및 source=None→Some·늦은 receipt를 각각 시험 | 모든 prompt 차단 / 미확정 row를 외부로 확정 |
 | `native_8148_barrier_late_own_closer_abstains_pg` | foreign 뒤 late own closer도 Executed0, Idle 이후 다음 head1 | own ID로 barrier 해제 |

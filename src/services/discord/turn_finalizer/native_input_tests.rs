@@ -4727,6 +4727,15 @@ async fn native_8148_barrier_boot_none_outcome_uses_current_execution_idle_pg() 
 
 #[tokio::test]
 async fn native_8148_barrier_rebound_epoch_preserves_replacement_pg() {
+    barrier_epoch_case(false).await;
+}
+
+#[tokio::test]
+async fn native_8148_barrier_stale_idle_cannot_clean_after_resume_pg() {
+    barrier_epoch_case(true).await;
+}
+
+async fn barrier_epoch_case(stale_binding: bool) {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::services::tui_o::writer::input_notices::NoticeOrigin;
     use std::sync::atomic::Ordering;
@@ -4821,6 +4830,80 @@ async fn native_8148_barrier_rebound_epoch_preserves_replacement_pg() {
         shared.clone(),
         capture.bindings.clone(),
     );
+    if stale_binding {
+        let mut next = capture.bindings.events.lock().unwrap()[0].clone();
+        next.seq = 2;
+        next.execution_nonce = "incarnation-2".into();
+        if let crate::services::tui_o::writer::binding::BindingRecord::Bound {
+            old, cause, ..
+        } = &mut next.record
+        {
+            *old = Some(observed.binding.source.clone());
+            *cause = crate::services::tui_o::writer::binding::BindingCause::Resume;
+        }
+        capture.bindings.events.lock().unwrap().push(next);
+        capture.bindings.notice.send_replace(2);
+        let rejected = port
+            .inner
+            .abstain(
+                observed.clone(),
+                observed,
+                (analysis.barriers.clone(), analysis.barriers),
+                true,
+                origin,
+            )
+            .await;
+        assert!(rejected.is_err());
+        assert!(Arc::ptr_eq(
+            shared
+                .mailbox(key.channel_id)
+                .snapshot()
+                .await
+                .cancel_token
+                .as_ref()
+                .unwrap(),
+            &actor
+        ));
+        assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            serde_json::to_value(
+                super::super::super::inflight::load_inflight_state_read_only(
+                    &ProviderKind::Claude,
+                    key.channel_id.get()
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(row).unwrap()
+        );
+        assert!(
+            shared
+                .turn_finalizer
+                .native_scope(key, &actor)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !shared
+                .turn_finalizer
+                .native_settled(key, &actor)
+                .await
+                .unwrap()
+        );
+        assert!(
+            f.history
+                .native_settlement("native-fixture", &f.ticket)
+                .unwrap()
+                .outcome
+                .is_none()
+        );
+        while let Ok(event) = events.try_recv() {
+            assert!(!event.queue_is_eligible());
+        }
+        pool.close().await;
+        db.drop().await;
+        return;
+    }
     let mut pending = port.inner.abstain(
         observed.clone(),
         observed,
