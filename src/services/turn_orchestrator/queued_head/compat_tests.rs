@@ -98,14 +98,6 @@ fn v2_clear_purge_drain_and_restore_preserve_originals_and_marker() {
                     .intervention
                     .is_none()
             );
-            let clear = handle.clear(context()).await;
-            assert!(clear.persistence.count_unknown);
-            assert!(clear.discarded_message_ids.is_empty());
-            assert_eq!(
-                std::fs::read(&path).unwrap(),
-                before,
-                "A24 clear preserves bytes"
-            );
             let drained = handle.restart_drain(context()).await;
             assert_eq!(drained.queued_count, 0);
             assert!(drained.persistence_error.is_none());
@@ -117,6 +109,36 @@ fn v2_clear_purge_drain_and_restore_preserve_originals_and_marker() {
                 b"independent marker evidence"
             );
             assert_eq!(std::fs::read(&path).unwrap(), before);
+            std::fs::remove_file(&marker).unwrap();
+
+            let clear = handle.clear(context()).await;
+
+            let after: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(after["version"], 2);
+            if cfg!(unix) {
+                assert!(clear.persistence.failed.is_empty());
+                assert!(!clear.persistence.count_unknown);
+                assert_eq!(clear.discarded_message_ids.len(), waiting + 1);
+                assert_eq!(after["items"], json!([]));
+                assert_eq!(after["retained_inputs"], json!([]));
+                assert!(after["head_injection"].is_null());
+            } else {
+                assert!(
+                    !clear.persistence.failed.is_empty(),
+                    "unconfirmed V2 durability is a failure"
+                );
+                assert!(clear.persistence.count_unknown);
+                assert_eq!(after["items"], fixture(channel.get(), waiting)["items"]);
+                assert_eq!(
+                    after["retained_inputs"],
+                    fixture(channel.get(), waiting)["retained_inputs"]
+                );
+            }
+            assert_eq!(
+                after["terminal_identities"],
+                fixture(channel.get(), waiting)["terminal_identities"]
+            );
+            assert!(!marker.exists());
         }
     });
 }
@@ -312,18 +334,19 @@ fn v2_and_unknown_objects_refuse_legacy_mutation_before_unlink() {
                 .handle(channel)
                 .clear(context())
                 .await;
-            assert!(result.persistence.count_unknown);
-            assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+            assert!(result.persistence.failed.is_empty());
+            let after = std::fs::read_to_string(path).unwrap();
+            assert!(parse_snapshot(&after).unwrap().0.is_empty());
         }
         // An object that does not parse is not a snapshot to protect; /clear clears it as main does.
         let channel = ChannelId::new(7_272_272);
         let (path, _) = seed(channel.get(), &json!([]));
         std::fs::write(&path, "{\"version\":2,").unwrap();
-        assert!(compat::require_clearable(&path).is_ok());
-        ChannelMailboxRegistry::default()
+        let cleared = ChannelMailboxRegistry::default()
             .handle(channel)
             .clear(context())
             .await;
+        assert!(cleared.persistence.failed.is_empty());
         assert_ne!(
             std::fs::read_to_string(&path).ok().as_deref(),
             Some("{\"version\":2,")
@@ -449,6 +472,10 @@ fn legacy_save_keeps_an_unreadable_snapshot_that_a_failed_clear_left() {
             "the save refusal is reported, never as saved"
         );
         assert_eq!(std::fs::read(&path).unwrap(), before, "original kept");
-        assert!(compat::require_clearable(&path).is_ok());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let cleared = handle.clear(context()).await;
+        assert!(cleared.persistence.failed.is_empty());
+        let replaced = std::fs::read_to_string(&path).unwrap();
+        assert!(parse_snapshot(&replaced).unwrap().0.is_empty());
     });
 }

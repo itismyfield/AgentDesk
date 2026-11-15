@@ -116,3 +116,89 @@ async fn a_confirmed_claude_terminal_input_leaves_its_notice_to_the_writer_once_
     // The writer owns only the human input class; a slash control keeps its live note.
     assert_eq!(post("/loop inspect relay").await, 1);
 }
+
+/// A scheduled fire the hook can read off its transcript row, as Claude Code 2.1.325 marks it.
+fn scheduled_fire(dir: &std::path::Path, text: &str) -> ObservedTuiPrompt {
+    let prompt_id = format!("writer-notice-fire-{}", uuid::Uuid::new_v4());
+    let transcript = dir.join(format!("{prompt_id}.jsonl"));
+    let row = serde_json::json!({"type":"user", "isMeta":true, "promptId":prompt_id,
+        "uuid":format!("{prompt_id}-row"), "promptSource":"system",
+        "wakeupSource":"schedule_wakeup", "scheduledTaskId":"abbf09df",
+        "turnOrigin":"scheduled", "message":{"role":"user","content":text}});
+    std::fs::write(&transcript, format!("{row}\n")).unwrap();
+    scheduled_prompt::note_hook_transcript(
+        "claude",
+        Some(prompt_id.as_str()),
+        &serde_json::json!({"transcript_path": transcript}),
+    );
+    ObservedTuiPrompt {
+        hook_prompt_id: Some(prompt_id.clone()),
+        ..observed(&prompt_id, text)
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_scheduled_fire_is_announced_by_the_hook_path_only_until_the_writer_takes_notices_over() {
+    use crate::services::discord::admin_host_guard::tests::Recorder;
+    use crate::services::tui_o::store::ledger::{LedgerEntry, input_notices};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let api = Recorder::start().await;
+    let registry = Arc::new(super::super::health::HealthRegistry::new());
+    let mut shared = super::super::make_shared_data_for_tests_with_storage(None);
+    Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+    let channel = ChannelId::new(74_190_291);
+    shared.settings.write().await.allowed_channel_ids = vec![channel.get()];
+    registry.register("claude".into(), shared.clone()).await;
+    let _http = super::super::shared_state::test_rest::install(api.http.clone());
+    let _confirmed = crate::services::tui_o::turn_mode::TestConfirmation::new(channel.get());
+    let transcripts = tempfile::tempdir().unwrap();
+    let text = "hourly briefing the schedule fired";
+    let post = || {
+        let (shared, api) = (shared.clone(), &api);
+        let prompt = scheduled_fire(transcripts.path(), text);
+        async move {
+            let decision = relay_observed_prompt_injected_prompt_decision(text);
+            let observation = task_notification_prompt::observe(
+                &shared,
+                &prompt,
+                channel,
+                decision.injected_class,
+            );
+            let returned = tokio::time::timeout(
+                Duration::from_secs(5),
+                synthetic_start_wiring::post_passive_prompt_notice(
+                    &shared,
+                    &prompt,
+                    channel,
+                    &decision,
+                    observation,
+                ),
+            )
+            .await
+            .expect("passive notice path finishes");
+            assert!(returned.is_none());
+            api.take()
+        }
+    };
+    // The live owner announces the fire under its own header.
+    let posted = post().await;
+    assert_eq!(posted.len(), 1, "{posted:?}");
+    assert!(
+        posted[0].contains(r#""content":"-# ⏰ scheduled prompt\n"#),
+        "{posted:?}"
+    );
+    ledger_line(
+        channel.get(),
+        LedgerEntry::InputNotice {
+            entry: Box::new(input_notices::NoticeEntry::MigrationStarted {
+                snapshot: input_notices::MigrationSnapshot {
+                    sources: Vec::new(),
+                    binding_checkpoint: 0,
+                    history: input_notices::MigrationHistory::Fixed { lower: 1, upper: 1 },
+                },
+            }),
+        },
+    );
+    // The writer reads the fire's row itself, so a hook notice would be a second one.
+    assert_eq!(post().await, Vec::<String>::new());
+}

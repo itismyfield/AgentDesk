@@ -415,6 +415,11 @@ thread_local! {
     static REAL_PID_KILL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(test)]
+pub(crate) fn real_pid_kill_enabled_for_test() -> bool {
+    REAL_PID_KILL.with(std::cell::Cell::get)
+}
+
 /// Runs `test` with this thread's PID kills sent for real instead of counted.
 #[cfg(test)]
 pub(crate) fn with_real_pid_kill<T>(test: impl FnOnce() -> T) -> T {

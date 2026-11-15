@@ -243,6 +243,8 @@ pub enum WriterAlarm {
     },
     /// The home keeps a channel it committed to O although its writer selection no longer names it.
     SelectionMissing,
+    /// The home keeps output ownership, but cannot start a writer without a configured binding.
+    BindingMissing,
 }
 
 pub trait AlarmSink: Send + Sync {

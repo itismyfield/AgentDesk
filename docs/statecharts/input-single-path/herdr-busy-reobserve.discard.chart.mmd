@@ -1,0 +1,13 @@
+---
+title: "Slice2: 같은 원문의 재관측과 clear 위임"
+---
+stateDiagram-v2
+  s0: 소유된 원문 도착
+  s1: Unknown 원문 보류
+  s2: clear가 버린 원문은 부활하지 않음
+  s3: Unknown 보류 표시
+  [*] --> s0
+  s0 --> s1: 공통 대상 근거로 분기
+  s1 --> s2: clear가 원문 처분
+  s1 --> s3: 보류 표시
+  s3 --> s2: clear가 원문 처분

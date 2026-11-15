@@ -17,10 +17,9 @@ impl Projection {
         if matches!(projected, Ok(None)) || !self.enabled || provider != ShadowProvider::Claude {
             return projected;
         }
-        let input = serde_json::from_slice(&record.line).ok().and_then(|value| {
-            tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(&value)
-        });
-        if let Some((prompt, uuid)) = input {
+        let input = (serde_json::from_slice(&record.line).ok())
+            .and_then(|value: serde_json::Value| native_input(&value));
+        if let Some(input) = input {
             let range = SourceRange {
                 source: source.clone(),
                 start: record.start,
@@ -32,7 +31,8 @@ impl Projection {
                     && origin.binding_seq != 0
                     && !origin.execution_nonce.trim().is_empty()
             });
-            let payload = discord::input_notice_content(&prompt);
+            let payload = input.notice();
+            let NativeInput { prompt, uuid, .. } = input;
             let key = uuid
                 .filter(|uuid| !uuid.trim().is_empty())
                 .map(|native_key| UnitKey {
