@@ -151,9 +151,13 @@ def credential_alias(root, relative, descriptor, metadata):
     if not candidate.is_relative_to(root):
         raise InstanceError('credential alias target is outside the instance root')
     candidate = safe_absolute(candidate)
-    destination = candidate.lstat()
+    try:
+        destination = candidate.lstat()
+    except FileNotFoundError:
+        # Cleanup may have already removed this internal directory; unlink only the alias.
+        destination = None
     current = os.stat(relative[-1], dir_fd=descriptor, follow_symlinks=False)
-    if (not stat.S_ISDIR(destination.st_mode) or destination.st_uid != os.geteuid()
+    if ((destination is not None and (not stat.S_ISDIR(destination.st_mode) or destination.st_uid != os.geteuid()))
             or (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino)):
         raise InstanceError('credential alias target or identity changed')
     return True

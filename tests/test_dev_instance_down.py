@@ -95,6 +95,75 @@ class InstanceDownTests(unittest.TestCase):
         self.assertEqual(removed.count('credential'),1)
         self.assertFalse(self.root.exists())
 
+    def test_dangling_exact_internal_alias_is_unlinked_without_following_target(self):
+        from scripts.dev_instance.files import validate_tree
+        alias = self.root/'config/credential'
+        missing = self.root/'outputs/missing'
+        alias.symlink_to('../outputs/missing', target_is_directory=True)
+        validate_tree(self.root)
+        original = os.unlink
+        removed = []
+        def capture(name, *args, **kwargs):
+            removed.append(name)
+            return original(name, *args, **kwargs)
+        with patch('scripts.dev_instance.down.os.unlink', side_effect=capture):
+            code, result = self.down()
+        self.assertEqual(code, 0, result)
+        self.assertEqual(removed.count('credential'), 1)
+        self.assertNotIn('missing', removed)
+        self.assertFalse(missing.exists())
+        self.assertFalse(self.root.exists())
+
+    def test_dangling_external_alias_is_rejected_without_deletion(self):
+        from scripts.dev_instance.files import validate_tree
+        alias = self.root/'config/credential'
+        target = self.fixture.home/'outside-missing'
+        alias.symlink_to(target, target_is_directory=True)
+        before = sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*'))
+        with self.assertRaises(ValueError):validate_tree(self.root)
+        self.assertEqual(self.down()[0], 2)
+        self.assertEqual(before, sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*')))
+        self.assertTrue(alias.is_symlink())
+        self.assertFalse(target.exists())
+
+    def test_dangling_wrong_alias_name_is_rejected_without_deletion(self):
+        from scripts.dev_instance.files import validate_tree
+        alias = self.root/'config/credentials'
+        alias.symlink_to('../outputs/missing', target_is_directory=True)
+        before = sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*'))
+        with self.assertRaises(ValueError):validate_tree(self.root)
+        self.assertEqual(self.down()[0], 2)
+        self.assertEqual(before, sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*')))
+        self.assertTrue(alias.is_symlink())
+
+    def test_alias_removal_survives_target_directory_deleted_first(self):
+        alias = self.root/'config/credential'
+        alias.symlink_to('../credential', target_is_directory=True)
+        original = os.listdir
+        root_identity = self.root.stat().st_ino
+        def credential_first(descriptor):
+            names = original(descriptor)
+            if isinstance(descriptor, int) and os.fstat(descriptor).st_ino == root_identity:
+                return sorted(names, key=lambda name: (name != 'credential', name))
+            return names
+        with patch('scripts.dev_instance.down.os.listdir', side_effect=credential_first):
+            code, result = self.down()
+        self.assertEqual(code, 0, result)
+        self.assertFalse(self.root.exists())
+
+    def test_dangling_alias_does_not_restore_missing_required_directory(self):
+        from scripts.dev_instance.files import validate_tree
+        from scripts.dev_instance.manifest import validate
+        alias = self.root/'config/credential'
+        alias.symlink_to('../credential', target_is_directory=True)
+        (self.root/'credential').rmdir()
+        validate_tree(self.root)
+        with self.assertRaisesRegex(ValueError, 'declared instance directory is missing'):
+            validate(self.fixture.base, self.root.name, {})
+        self.assertEqual(self.down()[0], 2)
+        self.assertTrue(alias.is_symlink())
+        self.assertFalse((self.root/'credential').exists())
+
     def test_alias_boundary_rejects_outside_wrong_name_and_hardlink_without_deletion(self):
         from scripts.dev_instance.files import validate_tree
         outside = self.fixture.home/'outside-dir'
