@@ -464,6 +464,7 @@ src/
 │   ├── automation_contract.rs
 │   ├── bot_role.rs
 │   ├── cluster_policy.rs
+│   ├── conversation.rs
 │   ├── dispatch_route.rs
 │   ├── file_sync.rs
 │   ├── host_observation.rs
@@ -3434,6 +3435,7 @@ src/
 │   │   ├── host_liveness.rs
 │   │   ├── host_teardown_gate.rs
 │   │   ├── http.rs
+│   │   ├── id_bridge.rs
 │   │   ├── idle_detector.rs
 │   │   ├── idle_relay_drift.rs
 │   │   ├── inflight.rs
