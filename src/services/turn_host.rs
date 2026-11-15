@@ -13,7 +13,6 @@ use crate::services::codex_tui::canary::CANARY_TMUX;
 use crate::services::herdr_admission::{self, StopCause};
 use crate::services::herdr_launch::{HerdrLaunchEndpoint, o_bootstrap_base, o_writer_ready};
 use crate::services::provider::ProviderKind;
-use crate::services::tui_o::writer::host::initial_fresh_refusal;
 use crate::services::tui_prompt_dedupe::clear_relaunch::herdr_bootstrap;
 
 #[derive(Debug)]
@@ -337,7 +336,7 @@ fn bootstrap_eligible(
     row: Option<&HostedObservation>,
 ) -> Result<(), &'static str> {
     let pin = herdr_bootstrap::local_eligible(channel)?;
-    if let Some(refusal) = initial_fresh_refusal(channel) {
+    if let Some(refusal) = writer_refusal(channel) {
         return Err(refusal);
     }
     let Some(HostedRecord::Known(record)) = row.map(|observed| &observed.record) else {
@@ -367,6 +366,22 @@ fn bootstrap_eligible(
         return Err("o_not_seeded");
     }
     Ok(())
+}
+
+/// The O writer's refusal of a fresh placement, installed with the process's writer readiness.
+static WRITER_REFUSAL: std::sync::OnceLock<fn(u64) -> Option<&'static str>> =
+    std::sync::OnceLock::new();
+
+/// Installs the writer's own judgement; the first install wins.
+pub(crate) fn install_writer_refusal(judge: fn(u64) -> Option<&'static str>) {
+    let _ = WRITER_REFUSAL.set(judge);
+}
+
+/// Before the writer readiness exists no channel has a live writer, as `host_missing` says.
+fn writer_refusal(channel: u64) -> Option<&'static str> {
+    WRITER_REFUSAL
+        .get()
+        .map_or(Some("host_missing"), |judge| judge(channel))
 }
 
 /// The owner a turn under `session_key` would write, as the Codex Herdr turn builds it.
@@ -426,8 +441,7 @@ pub(crate) async fn held_look(
         return HeldLook::Ready;
     }
     if !o_writer_ready(channel, RuntimeHandoffKind::CodexTui)
-        && (herdr_bootstrap::local_eligible(channel).is_err()
-            || initial_fresh_refusal(channel).is_some())
+        && (herdr_bootstrap::local_eligible(channel).is_err() || writer_refusal(channel).is_some())
     {
         return HeldLook::Wait;
     }
