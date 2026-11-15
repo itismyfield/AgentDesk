@@ -294,7 +294,7 @@ mod projection {
             self.analyze(registrations).map(|a| a.evidence)
         }
         pub(crate) fn analyze(&self, registrations: &[Registration]) -> Result<Analysis, String> {
-            reduce(&self.binding, &self.facts, registrations)
+            reduce(&self.binding, &self.facts, registrations, self.through)
         }
         pub(crate) fn idle(&self) -> bool {
             self.state == super::super::TurnState::Idle
@@ -483,6 +483,7 @@ mod projection {
         binding: &SourceBinding,
         records: &[Fact],
         registrations: &[Registration],
+        through: u64,
     ) -> Result<Analysis, String> {
         if binding.provider != super::ShadowProvider::Claude {
             return Ok(Analysis::default());
@@ -507,6 +508,7 @@ mod projection {
                         && owned.range.1 <= record.range.0
                         && results[i].is_none()
                         && barriers[i].is_none()
+                        && !ambiguous[i]
                     {
                         match foreign_prompt(
                             registrations,
@@ -806,7 +808,7 @@ mod projection {
                 .into_iter()
                 .flatten()
                 .map(|mut proof| {
-                    proof.through = records.last().map_or(0, |r| r.range.1);
+                    proof.through = through;
                     proof.registrations_fingerprint = fingerprint.clone();
                     proof
                 })

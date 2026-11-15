@@ -4993,3 +4993,306 @@ async fn barrier_epoch_case(stale_binding: bool) {
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test]
+async fn native_8148_barrier_full_tail_keeps_capture_through_pg() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for (n, tail) in [
+        serde_json::json!({"type":"file-history-snapshot","snapshot":{}}),
+        serde_json::json!({"type":"system","subtype":"turn_duration"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let f = Fixture::at(
+            runtime.path().join(format!("runtime/full-tail-{n}.json")),
+            81480501 + n as u64,
+            true,
+        );
+        supply_rows(&f, false, false);
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&f.ticket.source.as_ref().unwrap().transcript)
+                .unwrap(),
+            "{tail}"
+        )
+        .unwrap();
+        let shared = b2b_shared(Some(pool.clone()));
+        let (key, actor) = b2b_active(&f, &shared).await;
+        b2b_row(&f);
+        supply_register(&f, &shared, key, Some(actor.clone())).await;
+        barrier_receipt(&f);
+        let mut events =
+            super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        let mut capture =
+            SupplyCapture::new(&f, &runtime.path().join(format!("tail-store-{n}")), true);
+        capture.poll(&shared).await;
+        let settled = f
+            .history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap();
+        assert!(
+            settled.barrier("native-fixture").unwrap().is_some(),
+            "complete capture must persist its barrier: {tail}"
+        );
+        assert!(settled.outcome.is_none());
+        assert!(
+            shared
+                .turn_finalizer
+                .native_settled(key, &actor)
+                .await
+                .unwrap()
+        );
+        assert!(
+            shared
+                .mailbox(key.channel_id)
+                .snapshot()
+                .await
+                .cancel_token
+                .is_none()
+        );
+        assert!(
+            super::super::super::inflight::load_inflight_state_read_only(
+                &ProviderKind::Claude,
+                key.channel_id.get()
+            )
+            .is_none()
+        );
+        assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+        let mut eligible = 0;
+        while let Ok(event) = events.try_recv() {
+            eligible += usize::from(event.queue_is_eligible());
+        }
+        assert_eq!(eligible, 1);
+        let before =
+            std::fs::read(runtime.path().join(format!("runtime/full-tail-{n}.json"))).unwrap();
+        capture.poll(&shared).await;
+        assert_eq!(
+            std::fs::read(runtime.path().join(format!("runtime/full-tail-{n}.json"))).unwrap(),
+            before
+        );
+        assert!(events.try_recv().is_err());
+        assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn native_8148_barrier_ambiguous_follower_supply_rechecks_before_marker_pg() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::tui_o::writer::{
+        input_facts::native::{Observation, Projection, registrations_fingerprint},
+        input_notices::NoticeOrigin,
+    };
+    use sha2::Digest;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for cold in [false, true] {
+        for follower_first in [false, true] {
+            let label = format!("{cold}-{follower_first}");
+            let channel = 81480510 + u64::from(cold) * 2 + u64::from(follower_first);
+            let f = Fixture::at(
+                runtime
+                    .path()
+                    .join(format!("runtime/ambiguous-{label}.json")),
+                channel,
+                true,
+            );
+            let mut input = f.input.clone();
+            input["identity"]["primary"] = (channel + 20).into();
+            input["identity"]["sources"][0]["message_id"] = (channel + 20).into();
+            input["attempt"]["nonce"] = "follower-attempt".into();
+            input["payload"]["frame"] = "follower request".into();
+            let source = f.ticket.source.as_ref().unwrap();
+            if cold {
+                input["attempt"]["source"] = serde_json::json!({"kind":"pre_source","expected_session_id":"native","expected_transcript":source.transcript,"binding_watermark":null});
+            }
+            f.history.prepare("native-fixture", &input).unwrap();
+            let mut ticket = f.ticket.clone();
+            ticket.key =
+                serde_json::json!({"identity":input["identity"],"attempt":input["attempt"]});
+            ticket.owning_episode = None;
+            if cold {
+                ticket.source = None;
+            }
+            f.history.prepare_native("native-fixture", &ticket).unwrap();
+            let follower = Fixture {
+                history: f.history.clone(),
+                ticket,
+                input,
+            };
+            let rows = [
+                serde_json::json!({"type":"user","uuid":"own","sessionId":"native","message":{"content":"한국어 원본 입력"}}),
+                serde_json::json!({"type":"user","uuid":"follower","sessionId":"native","message":{"content":"follower request"}}),
+                serde_json::json!({"type":"system","subtype":"turn_duration"}),
+                serde_json::json!({"type":"user","uuid":"foreign","sessionId":"native","message":{"content":"foreign request"}}),
+                serde_json::json!({"type":"system","subtype":"turn_duration"}),
+            ];
+            std::fs::write(
+                &source.transcript,
+                rows.iter().map(|r| format!("{r}\n")).collect::<String>(),
+            )
+            .unwrap();
+            let shared = b2b_shared(Some(pool.clone()));
+            let (key, actor) = b2b_active(&f, &shared).await;
+            b2b_row(&f);
+            supply_register(&f, &shared, key, Some(actor)).await;
+            supply_register(
+                &follower,
+                &shared,
+                TurnKey::new(key.channel_id, channel + 20, 1),
+                None,
+            )
+            .await;
+            barrier_receipt(&f);
+            let mut capture = SupplyCapture::new(
+                &f,
+                &runtime.path().join(format!("ambiguous-store-{label}")),
+                true,
+            );
+            let bytes = std::fs::read(&source.transcript).unwrap();
+            let binding = SourceBinding {
+                channel_id: channel,
+                provider: ShadowProvider::Claude,
+                source: SourceId {
+                    session_id: source.session_id.clone(),
+                    path: source.transcript.clone(),
+                    dev: source.file[0],
+                    ino: source.file[1],
+                },
+            };
+            let (_, projection) = Projection::reopen(
+                binding.clone(),
+                bytes.len() as u64,
+                &hex::encode(sha2::Sha256::digest(&bytes)),
+            )
+            .unwrap();
+            let projection = projection.unwrap();
+            let pending = projection
+                .analyze(&f.history.native_classification_registrations().unwrap())
+                .unwrap();
+            assert!(!pending.evidence.iter().any(|e| e.ticket == f.ticket));
+            assert!(
+                pending.barriers.is_empty(),
+                "unresolved follower must not commit a permanent barrier"
+            );
+            capture.poll(&shared).await;
+            let saved = f
+                .history
+                .native_settlement("native-fixture", &f.ticket)
+                .unwrap();
+            assert!(saved.barrier("native-fixture").unwrap().is_none());
+            assert!(saved.outcome.is_none());
+            if cold {
+                f.history
+                    .bind("native-fixture", &follower.ticket.key, source)
+                    .unwrap();
+            }
+            assert_eq!(
+                f.history.receipt(
+                    "native-fixture",
+                    &follower.ticket.key,
+                    (
+                        &source.transcript,
+                        0,
+                        "user",
+                        Some("follower"),
+                        "follower request"
+                    )
+                ),
+                Some(true)
+            );
+            let port =
+                super::native_supply::port(channel, shared.clone(), capture.bindings.clone());
+            let origin = NoticeOrigin {
+                record: crate::services::tui_o::shadow::SourceRange {
+                    source: binding.source.clone(),
+                    start: 0,
+                    end: bytes.len() as u64,
+                },
+                logical_session: "fixture-pane".into(),
+                binding_seq: 1,
+                execution_nonce: "incarnation-1".into(),
+            };
+            let order = if follower_first {
+                [&follower, &f]
+            } else {
+                [&f, &follower]
+            };
+            let first_close = rows[..3]
+                .iter()
+                .map(|r| format!("{r}\n").len() as u64)
+                .sum::<u64>();
+            for input in order {
+                let snapshot = port.inner.snapshot(origin.clone()).await.unwrap();
+                let analysis = projection.analyze(&snapshot.registrations).unwrap();
+                assert!(analysis.barriers.is_empty());
+                let index = analysis
+                    .evidence
+                    .iter()
+                    .position(|e| e.ticket.key == input.ticket.key)
+                    .unwrap();
+                assert_eq!(analysis.evidence[index].range.1, first_close);
+                let observation = Observation {
+                    binding: binding.clone(),
+                    generation: snapshot.generation,
+                    binding_seq: 1,
+                    revision: 1,
+                    through: bytes.len() as u64,
+                    registrations_fingerprint: registrations_fingerprint(&snapshot.registrations)
+                        .unwrap(),
+                    evidence: analysis.evidence,
+                };
+                port.inner
+                    .abstain(
+                        observation.clone(),
+                        observation.clone(),
+                        (analysis.barriers.clone(), analysis.barriers),
+                        false,
+                        origin.clone(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    port.inner
+                        .offer(observation.clone(), observation, index, origin.clone())
+                        .await
+                        .unwrap()
+                );
+                let bound_ticket = input
+                    .history
+                    .native_classification_registrations()
+                    .unwrap()
+                    .into_iter()
+                    .find(|r| r.ticket.key == input.ticket.key)
+                    .unwrap()
+                    .ticket;
+                let bound = input
+                    .history
+                    .native_boot_record("native-fixture", &bound_ticket)
+                    .unwrap();
+                assert_eq!(
+                    bound.settlement.outcome.as_ref().unwrap().disposition,
+                    Disposition::Executed
+                );
+                assert!(
+                    bound
+                        .settlement
+                        .barrier("native-fixture")
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
+    pool.close().await;
+    db.drop().await;
+}

@@ -665,14 +665,16 @@ pub(in crate::services::tui_o::writer::input_facts) fn fold(
     binding: &SourceBinding,
     records: &[Record],
     registrations: &[Registration],
+    through: u64,
 ) -> Result<Vec<Evidence>, String> {
-    analyze_batch(binding, records, registrations).map(|a| a.evidence)
+    analyze_batch(binding, records, registrations, through).map(|a| a.evidence)
 }
 
 fn analyze_batch(
     binding: &SourceBinding,
     records: &[Record],
     registrations: &[Registration],
+    through: u64,
 ) -> Result<Analysis, String> {
     if binding.provider != super::ShadowProvider::Claude {
         return Ok(Analysis::default());
@@ -698,6 +700,7 @@ fn analyze_batch(
                     && owned.range.1 <= record.range.0
                     && results[i].is_none()
                     && barriers[i].is_none()
+                    && !ambiguous[i]
                 {
                     match foreign_prompt(
                         registrations,
@@ -1006,7 +1009,7 @@ fn analyze_batch(
             .into_iter()
             .flatten()
             .map(|mut proof| {
-                proof.through = records.last().map_or(0, |r| r.range.1);
+                proof.through = through;
                 proof.registrations_fingerprint = fingerprint.clone();
                 proof
             })
@@ -1053,6 +1056,7 @@ impl Fixture {
             &self.binding,
             facts.native_records.as_ref().unwrap(),
             &registrations,
+            facts.observation_progress().0,
         )
         .unwrap();
         let bytes = std::fs::read(&self.binding.source.path).unwrap();
@@ -1163,7 +1167,13 @@ fn native_8148_barrier_unresolved_follower_holds_until_receipt() {
     let f = Fixture::new();
     let a = f.register("primary", "a");
     let b = f.register("follower", "b");
-    f.append(&[user("a", "a"), user("b", "b"), close()]);
+    f.append(&[
+        user("a", "a"),
+        user("b", "b"),
+        close(),
+        user("c", "foreign c"),
+        close(),
+    ]);
     f.receipt(&a, "a", "a");
     let pending = f.analysis();
     assert!(!pending.evidence.iter().any(|e| e.ticket == a));
@@ -1213,7 +1223,13 @@ fn native_8148_barrier_cold_follower_source_and_receipt_are_reclassified() {
         extra: Default::default(),
     };
     f.history.prepare_native("native-b1", &b).unwrap();
-    f.append(&[user("a", "a"), user("b", "b"), close()]);
+    f.append(&[
+        user("a", "a"),
+        user("b", "b"),
+        close(),
+        user("c", "foreign c"),
+        close(),
+    ]);
     f.receipt(&a, "a", "a");
     let pending = f.analysis();
     assert!(pending.evidence.is_empty());

@@ -427,6 +427,8 @@ input-single-path/NativeForeignTypedRunsBefore.cfg	NativeInputPreparation	NoFore
 input-single-path/NativeForeignTypedRunsFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativePreparationBackstopBefore.cfg	NativeInputPreparation	NativeBackstopKeepsInput	-
 input-single-path/NativePreparationBackstopFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationBarrierAmbiguousBefore.cfg	NativeInputPreparation	BarrierAmbiguousNoMarker	BarrierReceiptEventuallySettles
+input-single-path/NativePreparationBarrierAmbiguousFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativePreparationBarrierForeignBefore.cfg	NativeInputPreparation	BarrierNoForeignExecuted	-
 input-single-path/NativePreparationBarrierForeignFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativePreparationBarrierIdentityBefore.cfg	NativeInputPreparation	BarrierNoForeignExecuted	-

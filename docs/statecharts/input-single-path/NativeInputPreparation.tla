@@ -7,7 +7,7 @@ vars == <<BaseVars, review>>
 Init == /\ phase = "Intent" /\ role \in {"Primary", "Follower"}
         /\ pin = "None" /\ prepared = FALSE /\ anyKey = FALSE /\ original = TRUE
         /\ result = "None" /\ source = "PreSource" /\ restored = FALSE /\ admitted = FALSE
-        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed", "SupplyPrefixBefore", "SupplyPrefixFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {Mode \in {"ClearRouteBefore", "ClearRouteFixed"}}), clearDenied : {Mode \notin {"ClearRouteBefore", "ClearRouteFixed"}}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed", "ClearRouteBefore", "ClearRouteFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}, unwindIdentity : (IF Mode \in {"ActivationForeignBefore", "ActivationForeignFixed"} THEN {"own", "other_message", "old_generation", "other_actor", "rebound"} ELSE {"own"}), available : {TRUE, FALSE}, producerOn : {FALSE}, bridgeOn : {FALSE}, hostOn : {FALSE}, ticketExecution : {"N1", "N2"}, nativeBinding : {0}, supplyTicket : {Mode \notin {"SupplyTicketBefore", "SupplyTicketFixed"}}, supplySource : {Mode \notin {"SupplySourceBefore", "SupplySourceFixed"}}, supplyKey : {Mode \notin {"SupplyKeyBefore", "SupplyKeyFixed"}}, supplyStamp : {Mode \notin {"SupplyStampBefore", "SupplyStampFixed"}}, bStep : {0}, bBatch : {FALSE}, bCompact : {FALSE}, bBatchResult : {"None"}, bCommits : {0}, bOwn : {Mode \in {"BarrierSelfBefore", "BarrierSelfFixed"}}, bOwnFirst : {Mode = "BarrierOwnFirstFixed"}]
+        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed", "SupplyPrefixBefore", "SupplyPrefixFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {Mode \in {"ClearRouteBefore", "ClearRouteFixed"}}), clearDenied : {Mode \notin {"ClearRouteBefore", "ClearRouteFixed"}}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed", "ClearRouteBefore", "ClearRouteFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}, unwindIdentity : (IF Mode \in {"ActivationForeignBefore", "ActivationForeignFixed"} THEN {"own", "other_message", "old_generation", "other_actor", "rebound"} ELSE {"own"}), available : {TRUE, FALSE}, producerOn : {FALSE}, bridgeOn : {FALSE}, hostOn : {FALSE}, ticketExecution : {"N1", "N2"}, nativeBinding : {0}, supplyTicket : {Mode \notin {"SupplyTicketBefore", "SupplyTicketFixed"}}, supplySource : {Mode \notin {"SupplySourceBefore", "SupplySourceFixed"}}, supplyKey : {Mode \notin {"SupplyKeyBefore", "SupplyKeyFixed"}}, supplyStamp : {Mode \notin {"SupplyStampBefore", "SupplyStampFixed"}}, bStep : {0}, bBatch : {FALSE}, bCompact : {FALSE}, bBatchResult : {"None"}, bCommits : {0}, bOwn : {Mode \in {"BarrierSelfBefore", "BarrierSelfFixed"}}, bOwnFirst : {Mode = "BarrierOwnFirstFixed"}, bAmbiguous : {FALSE}]
 Prepare == /\ phase = "Intent"
            /\ phase' = "Prepared" /\ prepared' = TRUE
            /\ pin' = IF role = "Primary" \/ Mode = "BorrowBusy" THEN "Primary" ELSE "None"
@@ -351,5 +351,32 @@ BarrierSingleResult == review.bCommits <= 1
 BarrierOwnEventuallySettles == review.bOwn => <>(result = "Executed")
 BarrierDecisionEventually == <>(review.bStep = 5)
 BarrierOwnFirstPreserved == (review.bOwnFirst /\ review.bStep \in {4,5,6}) => result = "Executed"
+
+
+\* Classification uncertainty blocks a durable marker; receipt change reevaluates cached facts.
+BATakeOwn == /\ review.bStep = 0
+              /\ review' = [review EXCEPT !.bStep = 1]
+              /\ UNCHANGED BaseVars
+BAUnresolvedFollower == /\ review.bStep = 1
+                        /\ review' = [review EXCEPT !.bStep = 2, !.bAmbiguous = TRUE]
+                        /\ UNCHANGED BaseVars
+BAStrict == /\ review.bStep = 2
+             /\ review' = [review EXCEPT !.bStep = 3]
+             /\ UNCHANGED BaseVars
+BAForeign == /\ review.bStep = 3
+              /\ LET marker == Mode = "BarrierAmbiguousBefore" \/ ~review.bAmbiguous
+                 IN review' = [review EXCEPT !.bStep = 4, !.bBatch = marker, !.bCompact = marker]
+              /\ UNCHANGED BaseVars
+BAReceipt == /\ review.bStep = 4
+              /\ review' = [review EXCEPT !.bStep = 5, !.bAmbiguous = FALSE,
+                   !.bBatchResult = IF review.bBatch THEN "None" ELSE "Executed"]
+              /\ result' = (IF review.bCompact THEN "None" ELSE "Executed")
+              /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, source, restored, admitted>>
+BADone == /\ review.bStep = 5 /\ UNCHANGED vars
+BarrierAmbiguousSpec == Init /\ [][BATakeOwn \/ BAUnresolvedFollower \/ BAStrict \/ BAForeign \/ BAReceipt \/ BADone]_vars
+                        /\ WF_vars(BATakeOwn) /\ WF_vars(BAUnresolvedFollower) /\ WF_vars(BAStrict)
+                        /\ WF_vars(BAForeign) /\ WF_vars(BAReceipt)
+BarrierAmbiguousNoMarker == review.bAmbiguous => (~review.bBatch /\ ~review.bCompact)
+BarrierReceiptEventuallySettles == <>(result = "Executed")
 
 ====

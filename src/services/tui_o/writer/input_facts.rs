@@ -596,6 +596,7 @@ impl InputFacts {
                 .as_deref()
                 .ok_or("native capture not enabled")?,
             registrations,
+            self.observation_progress().0,
         )
     }
 

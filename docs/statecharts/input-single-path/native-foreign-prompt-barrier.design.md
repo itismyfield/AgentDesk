@@ -200,3 +200,21 @@ P2-4: aNext는 물리 주입 관측 횟수를 증가시킨다. 동일 head guard
 | `episode.rs::claim_episode` native cutoff / generic now | AEpochFinalize Before는 교체 lease/row/counter를 없애 RED; Fixed는 보존. 새 authority의 외부 완료는 이 집중 cfg의 범위 밖이며 기존 control/successor cfg가 별도로 검사함 |
 
 추가 cfg `NativeAttributionAbstainEpochBefore/Fixed`는 실제 PG cutpoint(approval→same-actor rebind→늦은 abstain)를 모델링한다. 새 enum·저장소는 없다. 전체는160cfg이며 실행 판정은 이번 레그 보고서에 둔다.
+
+
+## 4i3 review repairs
+
+A barrier covers the authenticated captured-through position, including complete metadata rows
+and consecutive closers omitted by the compact fact projection. `Projection::analyze` passes its
+actual `through` to the reducer; the independent B1 batch oracle receives the capture position
+separately. The typed port continues to require exact equality with the observation stamp.
+
+Classification uncertainty is sticky for a single fold. Once an earlier input is ambiguous,
+a later foreign prompt cannot create its permanent barrier. A new registration/receipt snapshot
+reevaluates the same cached facts from the beginning; it never erases an existing marker.
+`NativePreparationBarrierAmbiguousBefore/Fixed` covers `[A, unconfirmed B, close, C, close]`:
+Before creates a marker while B is ambiguous; Fixed waits for B's receipt and recognizes the
+first strict closer for both A and B. The model has no physical byte offsets, so captured-through
+is checked at the actual O capture → typed port → marker/result CAS boundary in PG tests.
+The 162-cfg expectation set includes this RED/GREEN pair; reboots and physical-injection
+leads-to properties remain unchanged.
