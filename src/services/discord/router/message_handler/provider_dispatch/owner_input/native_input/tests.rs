@@ -406,7 +406,7 @@ async fn native_8148_activation_prekey_cutoff_keeps_a_rebound_epoch() {
         .store(1, std::sync::atomic::Ordering::SeqCst);
     let key = TurnKey::new(channel, id, 1).with_episode_nonce(actor.turn_nonce());
     let producer = Producer::at(shared.clone(), key, Some(actor.clone()));
-    let old=crate::services::discord::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(&shared,&ProviderKind::Claude,channel,id,actor.turn_nonce().map(str::to_owned),std::time::Instant::now(),Some(actor.clone())).await;
+    let old=crate::services::discord::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(&shared,&ProviderKind::Claude,channel,id.into(),actor.turn_nonce().map(str::to_owned),std::time::Instant::now(),Some(actor.clone())).await;
     assert!(old.removed_token.is_some());
     mailbox
         .restore_active_turn(

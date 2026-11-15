@@ -48,7 +48,7 @@ impl Producer {
         }
         tokio::runtime::Handle::current().block_on(async {
             let finish=crate::services::discord::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
-                &self.shared,&self.shared.provider,self.key.channel_id,self.key.user_msg_id,
+                &self.shared,&self.shared.provider,self.key.channel_id,self.key.user_msg_id.into(),
                 actor.turn_nonce().map(str::to_owned),self.started_before,Some(actor.clone()),
             ).await;
             if let Some(removed)=finish.removed_token {
