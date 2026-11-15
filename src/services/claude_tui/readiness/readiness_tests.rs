@@ -690,6 +690,202 @@ fn an_idle_session_closed_before_a_restart_takes_its_first_input_once() {
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
 }
 
+/// A Claude relaunched with `--resume` over `history`: its accepted SessionStart, then the resume's
+/// own metadata.
+fn resumed_over(history: &dyn Fn(&Rig)) -> Rig {
+    let r = Rig::new();
+    history(&r);
+    r.append(json!({"type":"last-prompt"}));
+    r.hook("resume");
+    r.append(json!({"type":"tools-used"}));
+    r
+}
+fn old_history(r: &Rig, rows: &[Value]) {
+    let old = Utc::now() - chrono::Duration::hours(1);
+    for row in rows {
+        let mut row = row.clone();
+        row["timestamp"] = json!(old);
+        r.append(row);
+    }
+}
+fn finished(r: &Rig) {
+    old_history(
+        r,
+        &[
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}}),
+            json!({"type":"system","subtype":"turn_duration"}),
+        ],
+    );
+}
+fn cut_short(r: &Rig) {
+    old_history(
+        r,
+        &[
+            json!({"type":"user","message":{"role":"user","content":"earlier prompt"}}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"Read","input":{}}]}}),
+        ],
+    );
+}
+fn permission_marked(r: &Rig) {
+    cut_short(r);
+    r.append(json!({"type":"permission-mode","permissionMode":"bypassPermissions"}));
+}
+fn typed(r: &Rig) {
+    r.append(json!({"type":"user","timestamp":Utc::now(),"message":{"role":"user","content":"typed in the pane"}}));
+}
+fn marked(r: &Rig) {
+    r.append(json!({"type":"permission-mode","permissionMode":"default"}));
+}
+
+// A resumed session the daemon restarts under, before or after a turn of its own, takes the first
+// input once on the tmux and the Herdr path; the record of its start stands in for the forgotten
+// hook only while nothing of this run followed it, so this run's closed turn still proves itself.
+#[cfg(unix)]
+#[test]
+fn a_resumed_session_takes_its_first_input_once_after_a_restart() {
+    use super::super::input::submission::tests::{ScriptedTmux, view};
+    use crate::services::claude::herdr_turn::composer;
+    use crate::services::claude_tui::host_input::InputRun;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pane = "✻ Baked for 2s\n\n────────────────────────────────────────\n❯ \n────────────────────────────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)";
+    let closed_turn: &dyn Fn(&Rig) = &|r| {
+        typed(r);
+        ended_turn(r, Utc::now(), &[(relay(r), QUIET)], quiet_summary());
+        r.terminal();
+    };
+    let cases: [(&str, &dyn Fn(&Rig), &dyn Fn(&Rig)); 4] = [
+        ("an old finished turn", &finished, &|_| ()),
+        ("an old turn cut short", &cut_short, &|_| ()),
+        ("an old permission marker", &permission_marked, &|_| ()),
+        (
+            "this run's closed turn after the start",
+            &finished,
+            closed_turn,
+        ),
+    ];
+    for (why, history, after) in cases {
+        for herdr in [false, true] {
+            let r = resumed_over(history);
+            after(&r);
+            daemon_restart(&r.session);
+            if herdr {
+                composer::READY_WAIT_FOR_TESTS.with(|b| b.set(Some(Duration::from_millis(300))));
+                let sent = std::cell::Cell::new(0);
+                let run = composer::when_idle(
+                    &r.session,
+                    &r.path,
+                    || Some(pane.into()),
+                    None,
+                    || {
+                        sent.set(sent.get() + 1);
+                        InputRun::Applied
+                    },
+                );
+                composer::READY_WAIT_FOR_TESTS.with(|b| b.set(None));
+                assert_eq!((run, sent.get()), (InputRun::Applied, 1), "herdr: {why}");
+            } else {
+                let tmux = ScriptedTmux::new(&view("", false));
+                tmux.set_dead(false);
+                super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS
+                    .with(|b| b.set(Some(Duration::ZERO)));
+                let sent = r.send();
+                super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|b| b.set(None));
+                assert_eq!(sent, Ok(()), "tmux: {why}");
+                assert_eq!(tmux.sends(), ["load", "paste", "Enter"], "tmux: {why}");
+            }
+        }
+    }
+}
+
+// The recorded start admits nothing once a prompt or permission marker of this run follows it,
+// whether that landed before the restart or after the restore, and nothing for an execution,
+// launch or transcript file other than the one the hook was accepted for.
+#[test]
+fn a_recorded_resume_start_proves_nothing_after_its_run_moved_or_for_another_execution() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (why, moved) in [
+        ("a prompt", typed as fn(&Rig)),
+        ("a permission marker", marked),
+    ] {
+        let r = resumed_over(&finished);
+        moved(&r);
+        daemon_restart(&r.session);
+        assert!(!r.ready(), "{why} before the restart");
+        let r = resumed_over(&finished);
+        daemon_restart(&r.session);
+        assert!(r.ready(), "the recorded start alone");
+        moved(&r);
+        assert!(!r.ready(), "{why} after the restore");
+    }
+    let relaunched = |r: &mut Rig| {
+        r.ctx.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+        r.ctx.created_at = Utc::now();
+        crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(
+            r.ctx.clone(),
+        )
+        .unwrap();
+        let marker = crate::services::tmux_common::session_temp_path(&r.session, "spawn_nonce");
+        fs::write(marker, &r.ctx.execution_nonce).unwrap();
+    };
+    let earlier_launch = |r: &mut Rig| {
+        let path = resume_record::record_path(&r.ctx.execution_nonce).unwrap();
+        let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record["launched"] = json!(r.ctx.created_at - chrono::Duration::minutes(5));
+        fs::write(path, record.to_string()).unwrap();
+    };
+    let replaced_file = |r: &mut Rig| {
+        let copy = r.path.with_extension("copy");
+        fs::copy(&r.path, &copy).unwrap();
+        fs::rename(copy, &r.path).unwrap();
+    };
+    let mut others: Vec<(&str, &dyn Fn(&mut Rig))> = vec![
+        ("a later execution on the same session", &relaunched),
+        ("a record of another launch", &earlier_launch),
+    ];
+    if cfg!(unix) {
+        others.push(("a transcript replaced at the same path", &replaced_file));
+    }
+    for (why, other) in others {
+        let mut r = resumed_over(&finished);
+        other(&mut r);
+        daemon_restart(&r.session);
+        assert!(!r.ready(), "{why}");
+    }
+}
+
+// Recording a start never refuses its hook: a record never published leaves a restart its floor,
+// while one published whose directory sync failed is whole and restores the start.
+#[test]
+fn an_unrecorded_resume_start_keeps_the_restart_floor_without_refusing_its_hook() {
+    use crate::domain::atomic_write::{Stage, tests::FaultGuard};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for stage in [Stage::Write, Stage::FileSync, Stage::Rename] {
+        let r = Rig::new();
+        finished(&r);
+        let path = resume_record::record_path(&r.ctx.execution_nonce).unwrap();
+        let fault = FaultGuard::new(&path, stage, 28);
+        r.hook("resume");
+        drop(fault);
+        assert!(r.ready(), "{stage:?}: the hook still starts this run");
+        assert!(!path.exists(), "{stage:?}");
+        daemon_restart(&r.session);
+        assert!(!r.ready(), "{stage:?}: nothing was recorded");
+    }
+    let r = resumed_over(&finished);
+    let path = resume_record::record_path(&r.ctx.execution_nonce).unwrap();
+    fs::remove_file(&path).unwrap();
+    let source = Source::current(&r.session, None).unwrap();
+    let stamp = Stamp::read(&r.path).unwrap();
+    let record = resume_record::Record::accepted(&r.ctx, &source, &stamp, Utc::now());
+    let failed = |_: &Path| Err(std::io::Error::from_raw_os_error(5));
+    assert_eq!(
+        resume_record::write(&record, failed),
+        resume_record::Written::Published
+    );
+    daemon_restart(&r.session);
+    assert!(r.ready(), "a published record is whole");
+}
+
 /// A daemon restart: the ledger forgets `session`, while its files, markers and launch remain.
 pub(crate) fn daemon_restart(session: &str) {
     let mut state = ledger();

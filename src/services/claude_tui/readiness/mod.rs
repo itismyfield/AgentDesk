@@ -5,6 +5,7 @@ pub(crate) mod compact;
 mod dialog;
 mod evidence;
 pub(crate) mod idle;
+mod resume_record;
 mod source;
 #[cfg(test)]
 #[path = "readiness_tests.rs"]
@@ -37,6 +38,13 @@ struct Entry {
     resumed: Option<(u64, DateTime<Utc>)>,
 }
 impl Entry {
+    /// A restarted daemon's first look: everything up to the transcript's end is history.
+    fn restart(tail: Option<&evidence::Tail>) -> Self {
+        Self {
+            recovery: Some((tail.map_or(0, |tail| tail.stamp.len), *STARTED)),
+            ..Self::default()
+        }
+    }
     /// The accepted start no input of ours has consumed yet.
     fn start_open(&self) -> bool {
         self.start && !self.submitted && self.pending.is_none()
@@ -105,7 +113,30 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
         || crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(
             &source.path,
         ) == crate::services::tui_turn_state::TuiTurnState::Idle;
+    let restorable = || {
+        ledger()
+            .entries
+            .get(&source)
+            .is_none_or(Entry::restart_floor)
+    };
+    let restored = tail
+        .as_ref()
+        .filter(|_| restorable())
+        .and_then(|tail| resume_record::restored(&source, tail));
     let mut state = ledger();
+    // The restart forgot this execution's resume start; its record restores it, floor kept, ahead
+    // of the early return an old cut or permission-marked history would otherwise take.
+    if let Some(resumed) = restored
+        && state.entries.get(&source).is_none_or(Entry::restart_floor)
+    {
+        let entry = state
+            .entries
+            .entry(source.clone())
+            .or_insert_with(|| Entry::restart(tail.as_ref()));
+        entry.start = true;
+        entry.resumed = Some(resumed);
+        entry.revision += 1;
+    }
     // Keep ordinary Running observation side-effect-free; only our completed control or an
     // unconsumed resume start, whose history says nothing of this run, can differ.
     if !native_idle
@@ -143,10 +174,7 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
     let entry = state
         .entries
         .entry(source.clone())
-        .or_insert_with(|| Entry {
-            recovery: Some((tail.as_ref().map_or(0, |tail| tail.stamp.len), *STARTED)),
-            ..Entry::default()
-        });
+        .or_insert_with(|| Entry::restart(tail.as_ref()));
     if let Some(tail) = &tail {
         if entry.file.is_some_and(|file| file != tail.stamp.file)
             || tail.stamp.len < entry.high_water
@@ -489,10 +517,19 @@ pub(crate) fn note_hook(
             state.entries.retain(|old, _| {
                 old.session != source.session || old.nonce != source.nonce || old == &source
             });
-            let resumed = (payload["source"] == "resume").then(|| {
-                let floor = Stamp::read(&source.path).map_or(0, |stamp| stamp.len);
-                (floor, ctx.created_at)
-            });
+            let stamp = Stamp::read(&source.path);
+            let resumed = (payload["source"] == "resume")
+                .then(|| (stamp.as_ref().map_or(0, |stamp| stamp.len), ctx.created_at));
+            // Recorded before the hook answers, and only for the execution its spawn marker names.
+            if resumed.is_some()
+                && let Some(stamp) = &stamp
+                && source::nonce(&ctx.tmux_session) == Some(Some(ctx.execution_nonce.clone()))
+            {
+                resume_record::write(
+                    &resume_record::Record::accepted(ctx, &source, stamp, at),
+                    crate::domain::file_sync::fsync_parent_dir,
+                );
+            }
             let entry = state.entries.entry(source).or_default();
             entry.start = true;
             entry.resumed = resumed;
