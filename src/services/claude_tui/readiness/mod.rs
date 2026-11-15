@@ -178,6 +178,8 @@ fn evidence(session: &str, path: Option<&Path>, restart_ok: bool) -> Option<Proo
         {
             entry.recovery = Some((tail.stamp.len, Utc::now()));
             entry.start = false;
+            // A byte offset of the old file says nothing of the new one.
+            entry.resumed = None;
             entry.compact_done = None;
             entry.revision += 1;
         }
@@ -191,6 +193,7 @@ fn evidence(session: &str, path: Option<&Path>, restart_ok: bool) -> Option<Proo
             .into_iter()
             .chain(entry.recovery.map(|(floor, _)| floor))
             .chain(blocked.map(|(floor, _)| floor))
+            .chain(entry.resumed.map(|(floor, _)| floor))
             .max();
         if let Some(floor) = floor
             && tail.activity <= floor

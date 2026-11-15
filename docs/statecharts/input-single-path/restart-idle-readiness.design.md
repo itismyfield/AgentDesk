@@ -110,6 +110,19 @@ composer::when_idle 루프 (기존)
 - `first_input.rs:153-171` 보류 감시 closure도 `observe_restored`로 읽고, proof가 restart면 같은 capture에 S1을 더한다. 사람 초안으로 보류된 front가 초안이 지워진 뒤 깨어나야 하기 때문이다. awaiting_clear일 때는 기존 `clear_wakeable`만 쓴다.
 - `Watched::unproven`(구현 커밋 `readiness/mod.rs:322`)과 대기 예산은 바꾸지 않는다. restored 증거가 있으면 대기가 먼저 끝나고, 화면이 실행 중이면 곧 transcript가 움직여 unproven이 거짓이 된다. unproven 판정은 바이트·공유 Idle·예약·continuation·compact만 읽고 화면·restored proof는 읽지 않는다. 그래서 transcript만 늦는(`lag=transcript`) 동안 화면이 실행 중이어도 예산이 끝나면 unproven으로 retained될 수 있다. 이것은 기존 동작이고 이번에 넓히지 않는다(모델 `Unproven`, §10).
 - `settled`에 한 줄을 더했다(`mod.rs:253`): resume으로 시작한 실행(`entry.resumed = Some((floor, _))`)은 floor 뒤의 활동이 있어야 그 terminal을 자기 것으로 본다. (B)로 메타 레코드가 `End`를 지우지 않게 되면서, 옛 history의 마지막 terminal이 resume 직후 실행을 settled로 잘못 읽는 것을 막는다(기존 시험 `compact_resumed_start_yields…`가 잡았다).
+  - 이 조건은 공유 `evidence()`에 있다(herdr 전용이 아니다). (B)가 공유 판독이라, 옛 history 끝의 메타 꼬리가 hard terminal을 지우지 않게 되면 tmux 경로에서도 resume 직후 옛 terminal이 settled가 된다. 모델 `CurrentEvidence`는 원래 "이번 실행의 턴(`turn > 0`) terminal이거나 ResumedStart"만 증거로 본다. 그래서 이 조건은 코드를 모델 의미에 맞춘 공유 정정이다.
+  - 같은 transcript 바이트를 다시 볼 때도 resume 뒤 활동을 재구성하도록, 보충 판독(`activity_after`) floor 체인에 resume floor를 넣었다. 그러지 않으면 마지막 assistant 행이 256 KiB 판독 창보다 클 때 pending이 소비된 뒤의 재관측(`reserve`)에서 activity가 0이 된다. 보충은 `tail.terminal > floor`일 때만 돌고 floor 뒤 구간만 읽으므로, 옛 history는 보충 대상이 아니다.
+  - 파일 교체·축소를 감지하면 새 recovery floor는 유지하고 `entry.resumed`는 버린다. 옛 파일의 byte offset을 새 파일에 넘기지 않는다.
+
+  tmux 경로 판정 변화(resume한 실행만 해당):
+
+  | 상황 | base | 이번 변경 |
+  |---|---|---|
+  | resume 직후, 옛 history가 hard terminal로 끝남(메타 꼬리 없음), 새 활동 없음 | settled proof(compact가 첫 입력을 기다리지 않을 수 있음) | resumed proof(`resumed_quiet`). 첫 입력은 같게 받고, compact는 `!proof.resumed`로 첫 입력 턴을 기다린다 |
+  | resume 직후, 옛 history가 메타 꼬리로 끝남 | 꼬리가 `End::None` → resumed proof | 꼬리는 무시하지만 guard가 막아 resumed proof(같음) |
+  | resume 뒤 우리 턴이 끝남, 마지막 행 ≤ 256 KiB | settled | settled(같음) |
+  | resume 뒤 우리 턴이 끝남, 마지막 행 > 256 KiB, pending 소비 뒤 재관측 | settled | settled(resume floor 보충). 보충이 없으면 거절된다(리뷰 P1) |
+  | resume 뒤 파일 교체·축소, 새 파일에서 턴이 끝남 | settled(recovery floor 뒤 활동) | settled(옛 resume offset 폐기) |
 
 ### 5.3 진입점 전수표 (원장 상태를 만들거나 바꾸는 모든 경로)
 
@@ -208,7 +221,7 @@ composer::when_idle 루프 (기존)
 - **adk-cc 원인(메타 레코드 꼬리)**: 이번에 같이 고쳤다(§5.4). `permission-mode`는 barrier로 남긴다.
 - **백그라운드 셸 표시(Q6에서 해소)**: 게임-cc pane의 `1 shell still running`은 busy 파서가 실행 중으로 보지 않는다. S1을 통과한다.
 - **unproven 예산과 transcript 지연**: §5.2. 화면이 실행 중이고 transcript만 늦는 동안 예산이 끝나면 retained될 수 있다. 기존 정책이고 넓히지 않는다.
-- **Q4 통합 시험**: 복구 엔진 전체(inflight 행 복원 → row-end 정산 → owner 깨움 → restored 첫 입력)를 한 시험으로 돌리지는 않았다. 근거는 각 경계의 시험(S1의 hook-running 거부, restored 예약 single-flight)과 모델 `RowEnd`/`LateBlind`다. 후속 후보.
+- **Q4 통합 시험**: 복구 엔진 PG rig(`herdr_row_end_settle_tests.rs` `an_unrecorded_input_holds_its_row_and_the_next_input_until_its_turn_lands_pg`)가 이어서 본다. 이전 hard terminal만 있는 transcript + 훅 대기 화면에서는 행·hold가 유지되고 대기 입력은 시작하지 않는다. 늦은 기록 + idle 화면 뒤에는 행이 정산되고 대기 입력이 한 번 시작하며, 옛 원본은 다시 시작하지 않는다. 이 rig는 새 턴 시작까지만 보고 pane 키 개수는 보지 않는다(기존 rig 시험과 같음). 키 개수는 composer 시험이 맡는다.
 
 ## 10. 상태 차트
 

@@ -1,4 +1,5 @@
-//! A pane that outlived the daemon restart, and a turn's trailing session metadata.
+//! A pane that outlived the daemon restart, a turn's trailing session metadata, and a resumed run
+//! proving its own turn.
 use super::*;
 
 fn finished(r: &Rig) {
@@ -245,4 +246,57 @@ fn the_boot_clock_starts_before_any_new_incarnation() {
             "the child ran"
         );
     }
+}
+
+/// A run resumed over an older history of `filler` answer bytes ending in a hard terminal.
+fn resumed_over_history(filler: usize) -> Rig {
+    initialize();
+    let r = Rig::launched(None, Utc::now());
+    let old = Utc::now() - chrono::Duration::hours(1);
+    r.append(json!({"type":"user","timestamp":old,
+        "message":{"role":"user","content":"earlier prompt"}}));
+    r.append(json!({"type":"assistant","timestamp":old,
+        "message":{"role":"assistant","content":[{"type":"text","text":"x".repeat(filler)}]}}));
+    r.terminal();
+    r.hook("resume");
+    r
+}
+fn our_turn(r: &Rig, answer: &str) {
+    r.append(json!({"type":"user","timestamp":Utc::now(),
+        "message":{"role":"user","content":"one original"}}));
+    r.assistant(answer);
+    r.terminal();
+}
+
+#[test]
+fn a_resumed_runs_oversized_answer_proves_its_turn_on_every_look() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = resumed_over_history(16);
+    reserve(observe(&r.session, Some(&r.path)).unwrap())
+        .unwrap()
+        .sent();
+    our_turn(&r, &"x".repeat(512 * 1024));
+    assert!(r.ready(), "the look that consumes our reservation");
+    let proof = observe(&r.session, Some(&r.path)).expect("the same bytes, looked at again");
+    let reservation = reserve(proof).expect("the reservation re-reads that proof");
+    reservation.not_sent();
+    let again = reserve(observe(&r.session, Some(&r.path)).expect("after a pre-key refusal"));
+    again.expect("and reserves again").not_sent();
+}
+
+#[test]
+fn a_replaced_transcript_proves_its_turn_without_the_old_files_resume_offset() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = resumed_over_history(32 * 1024);
+    assert!(r.ready(), "the resumed start admits its first input");
+    fs::rename(&r.path, r.path.with_extension("aside")).unwrap();
+    r.append(
+        json!({"type":"assistant","timestamp":Utc::now() - chrono::Duration::hours(1),
+        "message":{"role":"assistant","content":[{"type":"text","text":"short history"}]}}),
+    );
+    r.terminal();
+    assert!(!r.ready(), "a smaller new file proves nothing yet");
+    our_turn(&r, "its answer");
+    let proof = observe(&r.session, Some(&r.path)).expect("its own turn after the new floor");
+    reserve(proof).expect("and reserves").not_sent();
 }
