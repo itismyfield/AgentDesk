@@ -1,0 +1,52 @@
+---
+title: "Session host: one channel across dcserver restarts, host loss and terminate"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Recovery
+    lg1: Session
+    lg2: Breaks NoDoubleSession
+    lg3: Path to the NoDoubleSession bug
+  }
+  class lg0 blue
+  class lg1 teal
+  class lg2 breaks
+  class lg3 bugPath
+  s0: No session
+  s1: No session, a message waiting
+  s2: Creating, a message waiting
+  s3: Created, location not yet recorded, a message waiting
+  s4: dcserver down, provider still running, a message waiting
+  s5: Boot reconcile, a message waiting (after the restart)
+  s6: Waiting to re-adopt the created execution, a message waiting (after the restart)
+  s7: Waiting to re-adopt the created execution (provider gone), an unrecorded provider running, a message waiting (after the restart)
+  s8: Waiting to re-adopt the created execution, two providers running, a message waiting (after the restart)
+  [*] --> s0
+  s0 --> s1: a message arrives
+  s1 --> s2: a message reserves a new execution
+  s2 --> s3: the host creates it
+  s3 --> s4: dcserver stops
+  s4 --> s5: dcserver starts
+  s5 --> s6: intake opens
+  s6 --> s7: a second create from the same Pending
+  s7 --> s8: the host creates it
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 teal
+  class s0 bugPath
+  class s1 teal
+  class s1 bugPath
+  class s2 teal
+  class s2 bugPath
+  class s3 teal
+  class s3 bugPath
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s5 bugPath
+  class s6 blue
+  class s6 bugPath
+  class s7 blue
+  class s7 bugPath
+  class s8 blue
+  class s8 breaks
+  class s8 bugPath

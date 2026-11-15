@@ -1,0 +1,36 @@
+---
+title: "Session host: one channel across dcserver restarts, host loss and terminate"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Recovery
+    lg1: Session
+    lg2: Breaks NoSessionLoss
+    lg3: Path to the NoSessionLoss bug
+  }
+  class lg0 blue
+  class lg1 teal
+  class lg2 breaks
+  class lg3 bugPath
+  s0: No session
+  s1: No session, a message waiting
+  s2: Creating, a message waiting
+  s3: Created, location not yet recorded, a message waiting
+  s4: Provider ended with dcserver, host server down, a message waiting
+  [*] --> s0
+  s0 --> s1: a message arrives
+  s1 --> s2: a message reserves a new execution
+  s2 --> s3: the host creates it
+  s3 --> s4: dcserver stops
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 teal
+  class s0 bugPath
+  class s1 teal
+  class s1 bugPath
+  class s2 teal
+  class s2 bugPath
+  class s3 teal
+  class s3 bugPath
+  class s4 blue
+  class s4 breaks
+  class s4 bugPath

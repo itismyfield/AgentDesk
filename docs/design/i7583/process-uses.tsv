@@ -1,0 +1,604 @@
+coordinate	scope	boundary	nearest_function_lexical	source
+scripts/smoke-tmux-wrapper-scenarios.sh:7	production-or-inline-test	consumer-or-definition	(module)	# sessions with --input-mode fifo. It does not cover ProcessBackend/pipe stdin
+scripts/smoke-tmux-wrapper-scenarios.sh:387	production-or-inline-test	consumer-or-definition	marker_from	--input-mode fifo \\
+scripts/smoke-tmux-wrapper-scenarios.sh:402	production-or-inline-test	consumer-or-definition	marker_from	--input-mode fifo
+src/cli/args.rs:687	production-or-inline-test	consumer-or-definition	provider_wrappers_accept_process_backend_pipe_arguments	fn provider_wrappers_accept_process_backend_pipe_arguments() {
+src/cli/args.rs:704	production-or-inline-test	consumer-or-definition	provider_wrappers_accept_process_backend_pipe_arguments	"""--input-mode"","
+src/cli/args.rs:708	production-or-inline-test	consumer-or-definition	provider_wrappers_accept_process_backend_pipe_arguments	"Cli::try_parse_from(args).expect(""ProcessBackend command is available on every OS"");"
+src/cli/run.rs:421	production-or-inline-test	consumer-or-definition	execute	super::args::InputModeArg::Pipe => crate::services::tmux_wrapper::InputMode::Pipe,
+src/cli/run.rs:452	production-or-inline-test	consumer-or-definition	execute	super::args::InputModeArg::Pipe => crate::services::tmux_wrapper::InputMode::Pipe,
+src/cli/run.rs:495	production-or-inline-test	consumer-or-definition	execute	super::args::InputModeArg::Pipe => crate::services::tmux_wrapper::InputMode::Pipe,
+src/config/test_instance/environment_tests.rs:86	test-named	consumer-or-definition	instance_backend_refuses_foreign_files_before_create_or_spawn	use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
+src/config/test_instance/environment_tests.rs:89	test-named	consumer-or-definition	instance_backend_refuses_foreign_files_before_create_or_spawn	let config = SessionConfig {
+src/config/test_instance/environment_tests.rs:100	test-named	consumer-or-definition	instance_backend_refuses_foreign_files_before_create_or_spawn	assert!(ProcessBackend::new().create_session(&config).is_err());
+src/config/test_instance/environment_tests.rs:126	test-named	consumer-or-definition	instance_backend_refuses_foreign_files_before_create_or_spawn	let config = SessionConfig {
+src/config/test_instance/environment_tests.rs:132	test-named	consumer-or-definition	instance_backend_refuses_foreign_files_before_create_or_spawn	let handle = ProcessBackend::new().create_session(&config).unwrap();
+src/config/test_instance/environment_tests.rs:133	test-named	consumer-or-definition	instance_backend_refuses_foreign_files_before_create_or_spawn	if let crate::services::session_backend::SessionHandle::Process { child, .. } = handle {
+src/config/test_instance/environment_tests.rs:163	test-named	consumer-or-definition	instance_backend_refuses_foreign_files_before_create_or_spawn	"""--input-mode"","
+src/config/test_instance/environment_tests.rs:177	test-named	consumer-or-definition	instance_backend_refuses_foreign_files_before_create_or_spawn	ProcessBackend::new()
+src/server/routes/agents_crud.rs:1089	production-or-inline-test	consumer-or-definition	drop	crate::services::session_backend::remove_process_session(&self.0);
+src/server/routes/agents_crud.rs:1196	production-or-inline-test	consumer-or-definition	restart_gate_projection_preserves_default_bytes_and_non_tmux_rows_pg	crate::services::session_backend::insert_process_session(
+src/server/routes/agents_crud.rs:1198	production-or-inline-test	consumer-or-definition	restart_gate_projection_preserves_default_bytes_and_non_tmux_rows_pg	crate::services::session_backend::SessionHandle::TestProcess {
+src/server/routes/agents_crud.rs:1217	production-or-inline-test	consumer-or-definition	restart_gate_projection_preserves_default_bytes_and_non_tmux_rows_pg	"raw[""runtime_kind""] = json!(""process_backend"");"
+src/server/routes/agents_crud.rs:1262	production-or-inline-test	consumer-or-definition	restart_gate_projection_preserves_default_bytes_and_non_tmux_rows_pg	assert!(crate::services::session_backend::process_session_pid(&name).is_none());
+src/services/agent_protocol.rs:72	production-or-inline-test	consumer-or-definition	from_str	ProcessBackend,
+src/services/agent_protocol.rs:81	production-or-inline-test	consumer-or-definition	as_str	"Self::ProcessBackend => ""process_backend"","
+src/services/agent_protocol.rs:90	production-or-inline-test	consumer-or-definition	from_str	"""process_backend"" => Some(Self::ProcessBackend),"
+src/services/agent_protocol.rs:100	production-or-inline-test	consumer-or-definition	label	"Self::ProcessBackend => ""ProcessBackend"","
+src/services/agent_protocol.rs:129	production-or-inline-test	consumer-or-definition	requires_input_fifo	ProcessBackend {
+src/services/agent_protocol.rs:308	production-or-inline-test	consumer-or-definition	same_codex_turn	/// ProcessBackend session completed first turn (no tmux watcher needed)
+src/services/agent_protocol.rs:309	production-or-inline-test	consumer-or-definition	same_codex_turn	ProcessReady {
+src/services/claude.rs:5	production-or-inline-test	consumer-or-definition	(module)	mod process_session_launch;
+src/services/claude.rs:6	production-or-inline-test	consumer-or-definition	(module)	pub(crate) use process_session_launch::execute_streaming_local_process;
+src/services/claude.rs:50	production-or-inline-test	consumer-or-definition	(module)	insert_process_session_and_mark_active_turn, mark_process_session_active_turn,
+src/services/claude.rs:52	production-or-inline-test	consumer-or-definition	(module)	process_session_available_for_followup, process_session_probe, read_output_file_until_result,
+src/services/claude.rs:53	production-or-inline-test	consumer-or-definition	(module)	remove_process_session, send_process_session_input, terminate_process_handle,
+src/services/claude.rs:73	production-or-inline-test	consumer-or-definition	(module)	LocalTmuxStartupPlan, classify_local_tmux_startup_plan, cleanup_process_backend_before_tmux,
+src/services/claude.rs:74	production-or-inline-test	consumer-or-definition	(module)	prepare_tmux_backend_after_refused_process_demotion, process_backend_demotion_guard_liveness,
+src/services/claude.rs:75	production-or-inline-test	consumer-or-definition	(module)	should_preserve_live_reused_provider_session, should_refuse_process_backend_demotion,
+src/services/claude.rs:717	production-or-inline-test	consumer-or-definition	execute_command_streaming	cleanup_process_backend_before_tmux(tmux_name);
+src/services/claude.rs:754	production-or-inline-test	consumer-or-definition	execute_command_streaming	cleanup_process_backend_before_tmux(tmux_name);
+src/services/claude.rs:772	production-or-inline-test	consumer-or-definition	execute_command_streaming	process_backend_demotion_guard_liveness(Some(tmux_name));
+src/services/claude.rs:773	production-or-inline-test	consumer-or-definition	execute_command_streaming	if should_refuse_process_backend_demotion(
+src/services/claude.rs:794	production-or-inline-test	consumer-or-definition	execute_command_streaming	// Local without tmux → ProcessBackend (new path)
+src/services/claude.rs:795	production-or-inline-test	consumer-or-definition	execute_command_streaming	"debug_log(&format!(""ProcessBackend session (no tmux): {}"", tmux_name));"
+src/services/claude.rs:796	production-or-inline-test	consumer-or-definition	execute_command_streaming	return execute_streaming_local_process(
+src/services/claude.rs:810	production-or-inline-test	consumer-or-definition	execute_command_streaming	// No tmux on non-Unix — fall through to ProcessBackend
+src/services/claude.rs:811	production-or-inline-test	consumer-or-definition	execute_command_streaming	"debug_log(&format!(""ProcessBackend session (non-unix): {}"", tmux_name));"
+src/services/claude.rs:812	production-or-inline-test	consumer-or-definition	execute_command_streaming	return execute_streaming_local_process(
+src/services/claude.rs:1226	production-or-inline-test	consumer-or-definition	execute_command_streaming	| StreamMessage::ProcessReady { .. } => {
+src/services/claude.rs:1228	production-or-inline-test	consumer-or-definition	execute_command_streaming	"""  >>> TmuxReady/RuntimeReady/ProcessReady (ignored in direct execution)"","
+src/services/claude.rs:2430	production-or-inline-test	consumer-or-definition	execute_streaming_local_tmux	fresh_args = process_session_launch::without_resume_arg(args);
+src/services/claude.rs:2853	production-or-inline-test	consumer-or-definition	send_followup_to_tmux	/// Send a follow-up message to an existing ProcessBackend session.
+src/services/claude.rs:2879	production-or-inline-test	consumer-or-definition	send_followup_to_process	let active_turn = mark_process_session_active_turn(session_name);
+src/services/claude.rs:2881	production-or-inline-test	consumer-or-definition	send_followup_to_process	send_process_session_input(session_name, &msg.to_string(), cancel_token.as_deref())
+src/services/claude.rs:2898	production-or-inline-test	consumer-or-definition	send_followup_to_process	process_session_probe(session_name),
+src/services/claude.rs:2911	production-or-inline-test	consumer-or-definition	send_followup_to_process	let _ = sender.send(StreamMessage::ProcessReady {
+src/services/claude.rs:2920	production-or-inline-test	consumer-or-definition	send_followup_to_process	remove_process_session(session_name);
+src/services/claude.rs:2925	production-or-inline-test	consumer-or-definition	send_followup_to_process	remove_process_session(session_name);
+src/services/claude.rs:3004	production-or-inline-test	consumer-or-definition	issue_4113_process_demotion_guard_truth_table_pins_cached_missing_cells	should_refuse_process_backend_demotion(false, tmux_missing, pane_liveness),
+src/services/claude.rs:3010	production-or-inline-test	consumer-or-definition	issue_4113_process_demotion_guard_truth_table_pins_cached_missing_cells	assert!(!should_refuse_process_backend_demotion(
+src/services/claude.rs:3020	production-or-inline-test	consumer-or-definition	issue_4113_cached_missing_probe_error_allows_process_fallback	backend_routing::process_backend_demotion_guard_liveness_from_cached_missing(
+src/services/claude.rs:3031	production-or-inline-test	consumer-or-definition	issue_4113_cached_missing_probe_error_allows_process_fallback	assert!(!should_refuse_process_backend_demotion(
+src/services/claude.rs:3041	production-or-inline-test	consumer-or-definition	issue_4113_cached_missing_without_recorded_session_skips_probe	backend_routing::process_backend_demotion_guard_liveness_from_cached_missing(
+src/services/claude.rs:3052	production-or-inline-test	consumer-or-definition	issue_4113_cached_missing_without_recorded_session_skips_probe	assert!(!should_refuse_process_backend_demotion(
+src/services/claude.rs:3063	production-or-inline-test	consumer-or-definition	issue_4113_active_process_wrapper_is_reaped_by_terminal_completion_after_tmux_skip	crate::services::session_backend::insert_process_session(
+src/services/claude.rs:3065	production-or-inline-test	consumer-or-definition	issue_4113_active_process_wrapper_is_reaped_by_terminal_completion_after_tmux_skip	crate::services::session_backend::SessionHandle::TestProcess {
+src/services/claude.rs:3071	production-or-inline-test	consumer-or-definition	issue_4113_active_process_wrapper_is_reaped_by_terminal_completion_after_tmux_skip	crate::services::session_backend::mark_process_session_active_turn(&session_name);
+src/services/claude.rs:3073	production-or-inline-test	consumer-or-definition	issue_4113_active_process_wrapper_is_reaped_by_terminal_completion_after_tmux_skip	assert!(crate::services::session_backend::process_session_is_alive(
+src/services/claude.rs:3076	production-or-inline-test	consumer-or-definition	issue_4113_active_process_wrapper_is_reaped_by_terminal_completion_after_tmux_skip	assert!(!cleanup_process_backend_before_tmux(&session_name));
+src/services/claude.rs:3079	production-or-inline-test	consumer-or-definition	issue_4113_active_process_wrapper_is_reaped_by_terminal_completion_after_tmux_skip	assert!(crate::services::session_backend::process_session_is_alive(
+src/services/claude.rs:3086	production-or-inline-test	consumer-or-definition	issue_4113_active_process_wrapper_is_reaped_by_terminal_completion_after_tmux_skip	"|_| panic!(""terminal death path must not emit ProcessReady""),"
+src/services/claude.rs:3088	production-or-inline-test	consumer-or-definition	issue_4113_active_process_wrapper_is_reaped_by_terminal_completion_after_tmux_skip	crate::services::session_backend::remove_process_session(&session_name);
+src/services/claude.rs:3093	production-or-inline-test	consumer-or-definition	issue_4113_active_process_wrapper_is_reaped_by_terminal_completion_after_tmux_skip	crate::services::session_backend::process_session_pid(&session_name),
+src/services/claude.rs:3097	production-or-inline-test	consumer-or-definition	issue_4113_active_process_wrapper_is_reaped_by_terminal_completion_after_tmux_skip	assert!(!cleanup_process_backend_before_tmux(&session_name));
+src/services/claude/backend_routing.rs:2	production-or-inline-test	consumer-or-definition	(module)	use crate::services::session_backend::terminate_process_session_before_tmux;
+src/services/claude/backend_routing.rs:48	production-or-inline-test	consumer-or-definition	should_preserve_live_reused_provider_session	/// Decide whether ProcessBackend demotion must be refused when tmux is not
+src/services/claude/backend_routing.rs:57	production-or-inline-test	consumer-or-definition	should_preserve_live_reused_provider_session	/// ProcessBackend demotion and therefore a narrow double-resume risk.
+src/services/claude/backend_routing.rs:58	production-or-inline-test	consumer-or-definition	should_refuse_process_backend_demotion	pub(super) fn should_refuse_process_backend_demotion(
+src/services/claude/backend_routing.rs:68	production-or-inline-test	consumer-or-definition	process_backend_demotion_guard_liveness_from_cached_missing	pub(super) fn process_backend_demotion_guard_liveness_from_cached_missing(
+src/services/claude/backend_routing.rs:82	production-or-inline-test	consumer-or-definition	process_backend_demotion_guard_liveness	pub(super) fn process_backend_demotion_guard_liveness(
+src/services/claude/backend_routing.rs:85	production-or-inline-test	consumer-or-definition	process_backend_demotion_guard_liveness	process_backend_demotion_guard_liveness_from_cached_missing(
+src/services/claude/backend_routing.rs:108	production-or-inline-test	consumer-or-definition	prepare_tmux_backend_after_refused_process_demotion	"""routing through tmux backend instead of ProcessBackend demotion"""
+src/services/claude/backend_routing.rs:110	production-or-inline-test	consumer-or-definition	prepare_tmux_backend_after_refused_process_demotion	cleanup_process_backend_before_tmux(tmux_session_name);
+src/services/claude/backend_routing.rs:113	production-or-inline-test	consumer-or-definition	cleanup_process_backend_before_tmux	pub(super) fn cleanup_process_backend_before_tmux(session_name: &str) -> bool {
+src/services/claude/backend_routing.rs:114	production-or-inline-test	consumer-or-definition	cleanup_process_backend_before_tmux	let cleaned = terminate_process_session_before_tmux(session_name);
+src/services/claude/backend_routing.rs:118	production-or-inline-test	consumer-or-definition	cleanup_process_backend_before_tmux	"""terminated orphan ProcessBackend wrapper before returning to tmux backend"""
+src/services/claude/process_session_launch.rs:5	production-or-inline-test	consumer-or-definition	(module)	/// Execute Claude via ProcessBackend (direct child process, no tmux).
+src/services/claude/process_session_launch.rs:7	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	pub(crate) fn execute_streaming_local_process(
+src/services/claude/process_session_launch.rs:16	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	use crate::services::session_backend::{ProcessBackend, SessionConfig};
+src/services/claude/process_session_launch.rs:19	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	"""=== execute_streaming_local_process START: {} ==="","
+src/services/claude/process_session_launch.rs:49	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	// ProcessBackend sessions don't persist across restarts, so we track via static map
+src/services/claude/process_session_launch.rs:50	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	if process_session_available_for_followup(session_name) {
+src/services/claude/process_session_launch.rs:65	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	if let Some(handle) = remove_process_session(session_name) {
+src/services/claude/process_session_launch.rs:74	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	if let Some(handle) = remove_process_session(session_name) {
+src/services/claude/process_session_launch.rs:91	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	// Build wrapper args — no shell_escape here because ProcessBackend uses
+src/services/claude/process_session_launch.rs:95	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	claude_bin.append_process_backend_wrapper_args(&mut wrapper_args);
+src/services/claude/process_session_launch.rs:119	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	let config = SessionConfig {
+src/services/claude/process_session_launch.rs:131	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	let backend = ProcessBackend::new();
+src/services/claude/process_session_launch.rs:148	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	let active_turn = insert_process_session_and_mark_active_turn(session_name.to_string(), handle);
+src/services/claude/process_session_launch.rs:156	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	process_session_probe(session_name),
+src/services/claude/process_session_launch.rs:163	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	let _ = sender.send(StreamMessage::ProcessReady {
+src/services/claude/process_session_launch.rs:175	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	remove_process_session(session_name);
+src/services/claude/process_session_launch.rs:179	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	"debug_log(""=== execute_streaming_local_process END ==="");"
+src/services/claude_command.rs:85	production-or-inline-test	consumer-or-definition	append_process_backend_wrapper_args	pub(crate) fn append_process_backend_wrapper_args(&self, args: &mut Vec<String>) {
+src/services/codex.rs:14	production-or-inline-test	consumer-or-definition	(module)	mod process_session_launch;
+src/services/codex.rs:15	production-or-inline-test	consumer-or-definition	(module)	use process_session_launch::execute_streaming_local_process_codex;
+src/services/codex.rs:72	production-or-inline-test	consumer-or-definition	(module)	insert_process_session, process_session_is_alive, process_session_probe,
+src/services/codex.rs:73	production-or-inline-test	consumer-or-definition	(module)	read_output_file_until_result, read_output_file_until_result_tracked, remove_process_session,
+src/services/codex.rs:74	production-or-inline-test	consumer-or-definition	(module)	send_process_session_input, terminate_process_handle,
+src/services/codex.rs:110	production-or-inline-test	consumer-or-definition	codex_tui_session_turn_lock	ProcessBackend,
+src/services/codex.rs:123	production-or-inline-test	consumer-or-definition	as_str	"Self::ProcessBackend => ""process-backend"","
+src/services/codex.rs:134	production-or-inline-test	consumer-or-definition	uses_codex_exec_json	| Self::ProcessBackend
+src/services/codex.rs:371	production-or-inline-test	consumer-or-definition	render_codex_wrapper_tmux_script	"--input-mode fifo{wrapper_args}\n"","
+src/services/codex.rs:693	production-or-inline-test	consumer-or-definition	codex_wrapper_script_input_mode	"if mentions(""--input-mode fifo"") {"
+src/services/codex.rs:695	production-or-inline-test	consumer-or-definition	codex_wrapper_script_input_mode	"} else if mentions(""--input-mode pipe"") {"
+src/services/codex.rs:696	production-or-inline-test	consumer-or-definition	codex_wrapper_script_input_mode	CodexWrapperInputMode::Pipe
+src/services/codex.rs:739	production-or-inline-test	consumer-or-definition	codex_input_mode_allows_live_session_preservation	!matches!(input_mode, CodexWrapperInputMode::Pipe)
+src/services/codex.rs:1737	production-or-inline-test	consumer-or-definition	send_codex_pipe_prompt_to_fifo	// The reused wrapper runs with `--input-mode fifo` and reads followups from
+src/services/codex.rs:2328	production-or-inline-test	consumer-or-definition	codex_legacy_tmux_script_preserves_wrapper_launch	"assert!(script.contains(""--input-mode fifo""));"
+src/services/codex.rs:2338	production-or-inline-test	consumer-or-definition	codex_wrapper_input_mode_detector_distinguishes_fifo_pipe_and_unknown	"let fifo_script = ""exec agentdesk codex-tmux-wrapper \\\n  --input-mode fifo \\\n"";"
+src/services/codex.rs:2339	production-or-inline-test	consumer-or-definition	codex_wrapper_input_mode_detector_distinguishes_fifo_pipe_and_unknown	"let pipe_script = ""exec agentdesk codex-tmux-wrapper \\\n  --input-mode pipe \\\n"";"
+src/services/codex.rs:2348	production-or-inline-test	consumer-or-definition	codex_wrapper_input_mode_detector_distinguishes_fifo_pipe_and_unknown	CodexWrapperInputMode::Pipe
+src/services/codex.rs:2385	production-or-inline-test	consumer-or-definition	codex_live_session_preservation_excludes_only_explicit_pipe_mode	CodexWrapperInputMode::Pipe
+src/services/codex.rs:2404	production-or-inline-test	consumer-or-definition	codex_runtime_kind_records_exec_json_policy	assert!(CodexRuntimeKind::ProcessBackend.uses_codex_exec_json());
+src/services/codex/command_streaming.rs:184	production-or-inline-test	consumer-or-definition	execute_command_streaming_observed	// ProcessBackend fallback for Codex (no tmux or non-unix)
+src/services/codex/command_streaming.rs:187	production-or-inline-test	consumer-or-definition	execute_command_streaming_observed	CodexRuntimeKind::ProcessBackend,
+src/services/codex/command_streaming.rs:189	production-or-inline-test	consumer-or-definition	execute_command_streaming_observed	return execute_streaming_local_process_codex(
+src/services/codex/process_session_launch.rs:5	production-or-inline-test	consumer-or-definition	(module)	/// Execute Codex via ProcessBackend (direct child process, no tmux).
+src/services/codex/process_session_launch.rs:7	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	pub(super) fn execute_streaming_local_process_codex(
+src/services/codex/process_session_launch.rs:22	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
+src/services/codex/process_session_launch.rs:45	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	let process_session_alive = process_session_is_alive(session_name);
+src/services/codex/process_session_launch.rs:46	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	if should_reuse_existing_provider_session(process_session_alive, force_fresh_provider_session) {
+src/services/codex/process_session_launch.rs:59	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	send_process_session_input(session_name, &encoded, cancel_token.as_deref())?;
+src/services/codex/process_session_launch.rs:65	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	process_session_probe(session_name),
+src/services/codex/process_session_launch.rs:71	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	let _ = sender.send(StreamMessage::ProcessReady {
+src/services/codex/process_session_launch.rs:82	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	remove_process_session(session_name);
+src/services/codex/process_session_launch.rs:88	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	if force_fresh_provider_session && process_session_alive {
+src/services/codex/process_session_launch.rs:89	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	if let Some(handle) = remove_process_session(session_name) {
+src/services/codex/process_session_launch.rs:118	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	let config = SessionConfig {
+src/services/codex/process_session_launch.rs:137	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	let backend = ProcessBackend::new();
+src/services/codex/process_session_launch.rs:147	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	insert_process_session(session_name.to_string(), handle);
+src/services/codex/process_session_launch.rs:154	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	process_session_probe(session_name),
+src/services/codex/process_session_launch.rs:160	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	let _ = sender.send(StreamMessage::ProcessReady {
+src/services/codex/process_session_launch.rs:171	production-or-inline-test	consumer-or-definition	execute_streaming_local_process_codex	remove_process_session(session_name);
+src/services/codex_tmux_wrapper.rs:41	production-or-inline-test	consumer-or-definition	run	"InputMode::Pipe => ""pipe-mode"","
+src/services/codex_tmux_wrapper/input.rs:67	production-or-inline-test	consumer-or-definition	spawn_external_input_reader	InputMode::Pipe => BufReader::new(Box::new(std::io::stdin())),
+src/services/codex_tui/execution_end/confirm.rs:28	production-or-inline-test	consumer-or-definition	observe	managed_pid: crate::services::session_backend::process_session_pid(
+src/services/discord/admin_host_guard.rs:283	production-or-inline-test	consumer-or-definition	apply	super::commands::reset_managed_process_session(name);
+src/services/discord/admin_host_guard.rs:381	production-or-inline-test	consumer-or-definition	row_is_legacy_tmux	if crate::services::session_backend::process_session_pid(tmux_name).is_some() {
+src/services/discord/admin_host_guard_tests.rs:23	test-named	consumer-or-definition	(module)	use crate::services::session_backend::{SessionHandle, insert_process_session};
+src/services/discord/admin_host_guard_tests.rs:125	test-named	consumer-or-definition	process	let handle = SessionHandle::TestProcess {
+src/services/discord/admin_host_guard_tests.rs:129	test-named	consumer-or-definition	process	insert_process_session(name.to_string(), handle);
+src/services/discord/admin_host_guard_tests.rs:198	test-named	consumer-or-definition	a_clear_goes_ahead_on_any_host_while_a_reset_refuses_a_kept_session_pg	crate::services::session_backend::remove_process_session(&name);
+src/services/discord/admin_host_guard_tests.rs:403	test-named	consumer-or-definition	a_refused_dispatch_reset_stops_before_the_turn_pg	crate::services::session_backend::remove_process_session(&name);
+src/services/discord/admin_host_guard_tests.rs:752	test-named	consumer-or-definition	a_configured_channel_refuses_a_dispatch_reset_before_any_change_pg	crate::services::session_backend::remove_process_session(&name);
+src/services/discord/admin_host_guard_verified_reset_tests.rs:207	test-named	consumer-or-definition	new	crate::services::session_backend::insert_process_session(
+src/services/discord/admin_host_guard_verified_reset_tests.rs:209	test-named	consumer-or-definition	new	crate::services::session_backend::SessionHandle::TestProcess {
+src/services/discord/admin_host_guard_verified_reset_tests.rs:345	test-named	consumer-or-definition	drop	let _ = crate::services::session_backend::remove_process_session(&self.tmux);
+src/services/discord/commands/control.rs:26	production-or-inline-test	consumer-or-definition	(module)	pub(in crate::services::discord) use managed_reset::reset_managed_process_session;
+src/services/discord/commands/control/clear_end_tests.rs:83	test-named	consumer-or-definition	launch	let handle = crate::services::session_backend::SessionHandle::TestProcess {
+src/services/discord/commands/control/clear_end_tests.rs:87	test-named	consumer-or-definition	launch	crate::services::session_backend::insert_process_session(tmux.clone(), handle);
+src/services/discord/commands/control/clear_end_tests.rs:113	test-named	consumer-or-definition	drop	crate::services::session_backend::remove_process_session(&self.tmux);
+src/services/discord/commands/control/clear_persist_failure_tests.rs:300	test-named	consumer-or-definition	persisted_clear_still_resets_the_managed_process	crate::services::session_backend::insert_process_session(
+src/services/discord/commands/control/clear_persist_failure_tests.rs:302	test-named	consumer-or-definition	persisted_clear_still_resets_the_managed_process	crate::services::session_backend::SessionHandle::TestProcess {
+src/services/discord/commands/control/clear_persist_failure_tests.rs:327	test-named	consumer-or-definition	persisted_clear_still_resets_the_managed_process	crate::services::session_backend::remove_process_session(&session_name).is_none(),
+src/services/discord/commands/control/clear_persist_failure_tests.rs:452	test-named	consumer-or-definition	a_clear_whose_boundary_write_fails_still_resets_the_session_and_process_pg	crate::services::session_backend::insert_process_session(
+src/services/discord/commands/control/clear_persist_failure_tests.rs:454	test-named	consumer-or-definition	a_clear_whose_boundary_write_fails_still_resets_the_session_and_process_pg	crate::services::session_backend::SessionHandle::TestProcess {
+src/services/discord/commands/control/clear_persist_failure_tests.rs:527	test-named	consumer-or-definition	a_clear_whose_boundary_write_fails_still_resets_the_session_and_process_pg	crate::services::session_backend::remove_process_session(&session_name);
+src/services/discord/commands/control/clear_teardown.rs:99	production-or-inline-test	consumer-or-definition	end_session	let ended = super::managed_reset::end_managed_process_session(name);
+src/services/discord/commands/control/clear_teardown/clear_end_record.rs:135	production-or-inline-test	consumer-or-definition	vacant	&& crate::services::session_backend::process_session_pid(&captured.tmux).is_none()
+src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:161	production-or-inline-test	consumer-or-definition	run_with	&& crate::services::session_backend::process_session_pid(owner).is_none()
+src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:309	production-or-inline-test	consumer-or-definition	normal_end	&& crate::services::session_backend::process_session_pid(owner).is_none()
+src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:382	production-or-inline-test	consumer-or-definition	inflight_ready	"&& crate::services::session_backend::process_session_pid(native[""owner""].as_str().unwrap())"
+src/services/discord/commands/control/codex_clear_relaunch_tests.rs:355	test-named	consumer-or-definition	build_with_host	crate::services::session_backend::insert_process_session(
+src/services/discord/commands/control/codex_clear_relaunch_tests.rs:357	test-named	consumer-or-definition	build_with_host	crate::services::session_backend::SessionHandle::TestProcess {
+src/services/discord/commands/control/codex_clear_relaunch_tests.rs:573	test-named	consumer-or-definition	drop	let _ = crate::services::session_backend::remove_process_session(CANARY_TMUX);
+src/services/discord/commands/control/codex_clear_relaunch_tests.rs:814	test-named	consumer-or-definition	clear_and_first_input_at_tick	crate::services::session_backend::remove_process_session(CANARY_TMUX);
+src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests.rs:273	test-named	consumer-or-definition	restored_head_reaches_provider_with_capture	crate::services::session_backend::remove_process_session(CANARY_TMUX);
+src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests.rs:166	test-named	consumer-or-definition	target_missing	crate::services::session_backend::remove_process_session(CANARY_TMUX);
+src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests.rs:884	test-named	consumer-or-definition	recovery_diagnostic	crate::services::session_backend::process_session_pid(CANARY_TMUX)
+src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/negative_tests.rs:164	test-named	consumer-or-definition	restored_head_stays_held	crate::services::session_backend::remove_process_session(CANARY_TMUX);
+src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/negative_tests.rs:214	test-named	consumer-or-definition	restored_head_stays_held	assert!(crate::services::session_backend::process_session_pid(CANARY_TMUX).is_some());
+src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/negative_tests.rs:292	test-named	consumer-or-definition	unobserved_preflight_preserves_absent_verified_pin_pg	crate::services::session_backend::remove_process_session(CANARY_TMUX);
+src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/source_boundary_tests.rs:49	test-named	consumer-or-definition	mark_absent	crate::services::session_backend::remove_process_session(CANARY_TMUX);
+src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/source_boundary_tests.rs:58	test-named	consumer-or-definition	mark_absent	assert!(crate::services::session_backend::process_session_pid(CANARY_TMUX).is_none());
+src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/source_boundary_tests.rs:103	test-named	consumer-or-definition	owned_absence_preserves_source_authority_and_all_evidence_pg	assert!(crate::services::session_backend::process_session_pid(CANARY_TMUX).is_some());
+src/services/discord/commands/control/codex_clear_retirement_tests.rs:36	test-named	consumer-or-definition	vacate	let _ = crate::services::session_backend::remove_process_session(CANARY_TMUX);
+src/services/discord/commands/control/codex_clear_retirement_tests.rs:112	test-named	consumer-or-definition	relaunch_predicate_closes_on_any_live_or_newer_evidence_pg	crate::services::session_backend::insert_process_session(
+src/services/discord/commands/control/codex_clear_retirement_tests.rs:114	test-named	consumer-or-definition	relaunch_predicate_closes_on_any_live_or_newer_evidence_pg	crate::services::session_backend::SessionHandle::TestProcess {
+src/services/discord/commands/control/codex_clear_retirement_tests.rs:120	test-named	consumer-or-definition	relaunch_predicate_closes_on_any_live_or_newer_evidence_pg	let _ = crate::services::session_backend::remove_process_session(CANARY_TMUX);
+src/services/discord/commands/control/codex_clear_retirement_tests.rs:233	test-named	consumer-or-definition	clear_of_dead_canary_with_stale_marker_reopens_launch_pg	let _ = crate::services::session_backend::remove_process_session(CANARY_TMUX);
+src/services/discord/commands/control/codex_clear_retirement_tests.rs:281	test-named	consumer-or-definition	clear_during_inflight_canary_launch_still_ends_pane_pg	assert!(crate::services::session_backend::process_session_pid(CANARY_TMUX).is_none());
+src/services/discord/commands/control/codex_verified_clear_tests.rs:72	test-named	consumer-or-definition	new	crate::services::session_backend::insert_process_session(
+src/services/discord/commands/control/codex_verified_clear_tests.rs:74	test-named	consumer-or-definition	new	crate::services::session_backend::SessionHandle::TestProcess {
+src/services/discord/commands/control/codex_verified_clear_tests.rs:163	test-named	consumer-or-definition	drop	crate::services::session_backend::remove_process_session(&self.context.tmux_session);
+src/services/discord/commands/control/codex_verified_clear_tests.rs:327	test-named	consumer-or-definition	codex_verified_low_level_reset_and_unavailable_context_preserve_evidence	assert!(!reset_managed_process_session(
+src/services/discord/commands/control/codex_verified_clear_tests.rs:346	test-named	consumer-or-definition	codex_verified_low_level_reset_and_unavailable_context_preserve_evidence	assert!(!reset_managed_process_session(
+src/services/discord/commands/control/codex_verified_clear_tests.rs:366	test-named	consumer-or-definition	legacy_codex_and_claude_clear_admission_remains_open	assert!(reset_managed_process_session(&fixture.context.tmux_session));
+src/services/discord/commands/control/managed_reset.rs:57	production-or-inline-test	consumer-or-definition	reset_managed_process_session	pub(in crate::services::discord) fn reset_managed_process_session(session_name: &str) -> bool {
+src/services/discord/commands/control/managed_reset.rs:62	production-or-inline-test	consumer-or-definition	reset_managed_process_session	end_managed_process_session(session_name).reset
+src/services/discord/commands/control/managed_reset.rs:74	production-or-inline-test	consumer-or-definition	end_managed_process_session	pub(super) fn end_managed_process_session(session_name: &str) -> ManagedEnd {
+src/services/discord/commands/control/managed_reset.rs:120	production-or-inline-test	consumer-or-definition	end_process	crate::services::session_backend::process_session_pid(session_name).map(|pid| pid as i32);
+src/services/discord/commands/control/managed_reset.rs:121	production-or-inline-test	consumer-or-definition	end_process	if let Some(handle) = crate::services::session_backend::remove_process_session(session_name) {
+src/services/discord/commands/control/provider_reset.rs:53	production-or-inline-test	consumer-or-definition	reset_channel_provider_state	reset_managed_process_session(name);
+src/services/discord/commands/mod.rs:89	production-or-inline-test	consumer-or-definition	owner_error_response	clear_channel_session_state, reset_channel_provider_state, reset_managed_process_session,
+src/services/discord/commands/restart.rs:408	production-or-inline-test	consumer-or-definition	restart_keeps_the_turn_and_process_of_a_refused_session_pg	crate::services::session_backend::remove_process_session(&name);
+src/services/discord/commands/restart.rs:420	production-or-inline-test	consumer-or-definition	restart_keeps_the_turn_and_process_of_a_refused_session_pg	crate::services::session_backend::remove_process_session(&name);
+src/services/discord/commands/restart.rs:461	production-or-inline-test	consumer-or-definition	restart_keeps_the_turn_and_process_of_a_refused_session_pg	crate::services::session_backend::remove_process_session(&name);
+src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs:146	test-named	consumer-or-definition	finish	crate::services::session_backend::remove_process_session(&channel.tmux_name);
+src/services/discord/health/recovery.rs:311	production-or-inline-test	consumer-or-definition	clear_provider_channel_runtime	discord::commands::reset_managed_process_session(name);
+src/services/discord/health/recovery/live_agent_recovery.rs:185	production-or-inline-test	consumer-or-definition	fence_runtime	let process_backend = session
+src/services/discord/health/recovery/live_agent_recovery.rs:187	production-or-inline-test	consumer-or-definition	fence_runtime	.is_some_and(|name| crate::services::session_backend::process_session_pid(name).is_some());
+src/services/discord/health/recovery/live_agent_recovery.rs:203	production-or-inline-test	consumer-or-definition	fence_runtime	if process_backend {
+src/services/discord/health/recovery/live_agent_recovery.rs:204	production-or-inline-test	consumer-or-definition	fence_runtime	return !crate::services::session_backend::process_session_is_alive(&session);
+src/services/discord/health/routine_process.rs:44	production-or-inline-test	consumer-or-definition	cancel_routine_process_turn	// ProcessReady stores a logical process-session name in tmux_session_name.
+src/services/discord/health/routine_process.rs:45	production-or-inline-test	consumer-or-definition	cancel_routine_process_turn	// Only an explicit ProcessBackend kind makes that name safe to disregard.
+src/services/discord/health/routine_process.rs:47	production-or-inline-test	consumer-or-definition	cancel_routine_process_turn	Some(RuntimeHandoffKind::ProcessBackend) => true,
+src/services/discord/health/routine_process.rs:218	production-or-inline-test	consumer-or-definition	exact_process_handoff_accepts_its_logical_session_name	row.runtime_kind = Some(RuntimeHandoffKind::ProcessBackend);
+src/services/discord/health/routine_process.rs:276	production-or-inline-test	consumer-or-definition	tmux_rows_and_actual_token_bindings_are_never_cancelled	row.runtime_kind = Some(RuntimeHandoffKind::ProcessBackend);
+src/services/discord/inflight/finalizer_identity.rs:22	production-or-inline-test	consumer-or-definition	parse_inflight_state_content_with_finalizer_backfill	"""legacy_tmux_wrapper"" | ""claude_tui"" | ""codex_tui"" | ""process_backend"""
+src/services/discord/inflight/host_locator.rs:138	production-or-inline-test	consumer-or-definition	rows_without_a_locator_keep_their_exact_bytes_for_every_runtime_kind	RuntimeHandoffKind::ProcessBackend,
+src/services/discord/inflight/host_locator.rs:144	production-or-inline-test	consumer-or-definition	rows_without_a_locator_keep_their_exact_bytes_for_every_runtime_kind	"""process_backend"","
+src/services/discord/inflight/host_recovery_guard.rs:421	production-or-inline-test	consumer-or-definition	caller_runtime_evidence_survives_the_inflight_row_merge	use RuntimeHandoffKind::{ClaudeTui, LegacyTmuxWrapper, ProcessBackend};
+src/services/discord/inflight/host_recovery_guard.rs:443	production-or-inline-test	consumer-or-definition	caller_runtime_evidence_survives_the_inflight_row_merge	let (absent, process) = (|| HostWitness::Absent, Some(ProcessBackend));
+src/services/discord/inflight/host_recovery_guard.rs:455	production-or-inline-test	consumer-or-definition	caller_runtime_evidence_survives_the_inflight_row_merge	with_row_kind(ProcessBackend, None),
+src/services/discord/inflight/host_recovery_guard.rs:460	production-or-inline-test	consumer-or-definition	caller_runtime_evidence_survives_the_inflight_row_merge	with_row_kind(ProcessBackend, None),
+src/services/discord/inflight/model.rs:1390	production-or-inline-test	consumer-or-definition	runtime_kind_for_recovery	RuntimeHandoffKind::ProcessBackend
+src/services/discord/inflight/model/serde_adapters.rs:25	production-or-inline-test	consumer-or-definition	deserialize_runtime_kind_tolerant	"""process_backend"" => Some(RuntimeHandoffKind::ProcessBackend),"
+src/services/discord/inflight/save_store/identity_gate/runtime_stamp.rs:850	production-or-inline-test	consumer-or-definition	runtime_first_stamp_supports_process_claude_tui_and_codex_tui	RuntimeHandoffKind::ProcessBackend,
+src/services/discord/outbound/body_census.rs:139	production-or-inline-test	consumer-or-definition	from_state	Some(RuntimeHandoffKind::LegacyTmuxWrapper | RuntimeHandoffKind::ProcessBackend) => {
+src/services/discord/queue_dispatch/canary_workspace_tests.rs:84	test-named	consumer-or-definition	canary_without_core_session_and_unresolved_workspace_parks_original_pg	crate::services::session_backend::remove_process_session(CANARY_TMUX);
+src/services/discord/recovery_engine.rs:408	production-or-inline-test	consumer-or-definition	runtime_handoff_for_recovery	RuntimeHandoffKind::ProcessBackend => RuntimeHandoff::ProcessBackend {
+src/services/discord/recovery_engine/rebind_runtime.rs:772	production-or-inline-test	consumer-or-definition	codex_rebind_stream_message_json	| crate::services::agent_protocol::StreamMessage::ProcessReady { .. }
+src/services/discord/relay_recovery_circuit_breaker.rs:1043	production-or-inline-test	consumer-or-definition	same_external_ids_still_pin_session_output_and_nonce_axes	Some(crate::services::agent_protocol::RuntimeHandoffKind::ProcessBackend);
+src/services/discord/replay_policy/activation.rs:93	production-or-inline-test	consumer-or-definition	p5_activation_runtime_matrix_is_closed	"""process_backend"","
+src/services/discord/replay_policy/live/observer_tests.rs:381	test-named	consumer-or-definition	p2_only_owned_direct_runtimes_can_activate	Some(R::ProcessBackend),
+src/services/discord/replay_policy/live/observer_tests.rs:522	test-named	consumer-or-definition	file_backend	use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
+src/services/discord/replay_policy/live/observer_tests.rs:530	test-named	consumer-or-definition	file_backend	let backend = ProcessBackend::new();
+src/services/discord/replay_policy/live/observer_tests.rs:533	test-named	consumer-or-definition	file_backend	.create_session(&SessionConfig {
+src/services/discord/replay_policy/live/observer_tests.rs:548	test-named	consumer-or-definition	file_backend	crate::services::session_backend::SessionHandle::Process { child, .. } => {
+src/services/discord/replay_policy/live/observer_tests.rs:564	test-named	consumer-or-definition	file_backend	SessionProbe::new(move || ProcessBackend::new().is_alive(&polled), || false),
+src/services/discord/replay_policy/live/observer_tests.rs:598	test-named	consumer-or-definition	file_backend	"json!({""runtime"":""ProcessBackend"",""mode"":mode,""starts"":case.starts().len(),""stderr_captured"":stderr_captured,""read_result"":format!(""{:?}"",result.0),""source_identity"":format!(""{:?}"",result.1.source_file),""late_growth"":after-before,""messages"":counts(&messages),""facts"":format!(""{:?}"",lock(&live.observation))})"
+src/services/discord/replay_policy/live/tap.rs:28	production-or-inline-test	consumer-or-definition	for_file	Some(crate::services::agent_protocol::RuntimeHandoffKind::ProcessBackend),
+src/services/discord/router/intake_dispatch/replay_admission_tests.rs:1176	test-named	consumer-or-definition	p5_scoped_admission_cannot_produce_for_unsupported_runtimes_pg	"""process_backend"","
+src/services/discord/router/message_handler/goal_lifecycle.rs:363	production-or-inline-test	consumer-or-definition	goal_clear_reports_a_refusal_before_any_session_clear_pg	crate::services::session_backend::remove_process_session(&name);
+src/services/discord/router/message_handler/goal_lifecycle.rs:378	production-or-inline-test	consumer-or-definition	goal_clear_reports_a_refusal_before_any_session_clear_pg	crate::services::session_backend::remove_process_session(&name);
+src/services/discord/router/message_handler/headless_turn/process_mailbox/bridge_tests.rs:117	test-named	consumer-or-definition	actual_quiet_bridge_completion_retires_its_actor_and_durable_inflight	row.runtime_kind = Some(RuntimeHandoffKind::ProcessBackend);
+src/services/discord/router/message_handler/headless_turn/process_mailbox/bridge_tests.rs:315	test-named	consumer-or-definition	a_scheduled_bridge_completion_settles_on_the_next_poll_pg	row.runtime_kind = Some(RuntimeHandoffKind::ProcessBackend);
+src/services/discord/router/message_handler/headless_turn/process_mailbox/routine_presentation_tests.rs:51	test-named	consumer-or-definition	i8117_actual_bridge_uses_exact_terminal_not_progress_or_preview	row.runtime_kind = Some(RuntimeHandoffKind::ProcessBackend);
+src/services/discord/router/message_handler/headless_turn/process_mailbox/tests.rs:644	test-named	consumer-or-definition	delayed_episode_state_settlement_retries_the_original_completion_callback	Some(crate::services::agent_protocol::RuntimeHandoffKind::ProcessBackend);
+src/services/discord/router/message_handler/headless_turn/replay_start_tests.rs:300	test-named	consumer-or-definition	close	if let Some(handle) = crate::services::session_backend::remove_process_session(&name) {
+src/services/discord/router/message_handler/headless_turn/replay_start_tests.rs:813	test-named	consumer-or-definition	p5_unsupported_process_backend_keeps_existing_effects_pg	fn p5_unsupported_process_backend_keeps_existing_effects_pg() {
+src/services/discord/router/message_handler/headless_turn/replay_start_tests.rs:816	test-named	consumer-or-definition	p5_unsupported_process_backend_keeps_existing_effects_pg	"""::p5_unsupported_process_backend_keeps_existing_effects_pg"""
+src/services/discord/router/message_handler/provider_dispatch/replay_scope.rs:42	production-or-inline-test	consumer-or-definition	selected	"""process_backend"""
+src/services/discord/router/message_handler/provider_isolation.rs:583	production-or-inline-test	consumer-or-definition	apply_prelaunch_runtime_kind	// ProcessBackend we still clear, since neither legacy nor current
+src/services/discord/router/message_handler/provider_isolation.rs:587	production-or-inline-test	consumer-or-definition	apply_prelaunch_runtime_kind	RuntimeHandoffKind::CodexTui | RuntimeHandoffKind::ProcessBackend => {
+src/services/discord/router/message_handler/root_replaced_recovery_tests/legacy_clear_tests.rs:116	test-named	consumer-or-definition	clear_retired_without_endpoint_keeps_legacy_managed_end_pg	use crate::services::session_backend::{SessionHandle, insert_process_session};
+src/services/discord/router/message_handler/root_replaced_recovery_tests/legacy_clear_tests.rs:131	test-named	consumer-or-definition	clear_retired_without_endpoint_keeps_legacy_managed_end_pg	insert_process_session(
+src/services/discord/router/message_handler/root_replaced_recovery_tests/legacy_clear_tests.rs:133	test-named	consumer-or-definition	clear_retired_without_endpoint_keeps_legacy_managed_end_pg	SessionHandle::TestProcess {
+src/services/discord/router/message_handler/session_strategy_lifecycle_tests.rs:262	test-named	consumer-or-definition	cli_just_spawned_for_emit_handles_none_and_blank_session_names	// Non-tmux mode (ProcessBackend / no managed session) always
+src/services/discord/tmux.rs:1127	production-or-inline-test	consumer-or-definition	process_backend_skips_the_gate	fn process_backend_skips_the_gate() {
+src/services/discord/tmux.rs:1129	production-or-inline-test	consumer-or-definition	process_backend_skips_the_gate	Some(RuntimeHandoffKind::ProcessBackend),
+src/services/discord/tmux_reaper.rs:793	production-or-inline-test	consumer-or-definition	parse_orphan_tmux_wrapper_process_line	"let has_pipe_input_mode = extract_arg_value(&argv, ""--input-mode"") == Some(""pipe"");"
+src/services/discord/tmux_reaper.rs:1378	production-or-inline-test	consumer-or-definition	parses_ppid_one_managed_provider_wrappers	"let line = "" 6260     1 /Users/me/.adk/release/bin/agentdesk codex-tmux-wrapper --output-file /var/folders/x/agentdesk-AgentDesk-codex-adk-cdx.jsonl --input-mode pipe"";"
+src/services/discord/tmux_reaper.rs:1405	production-or-inline-test	consumer-or-definition	rejects_partial_substring_matches	"let line = "" 6260     1 /Users/me/.adk/release/bin/agentdesk not-codex-tmux-wrapper --output-file /var/folders/x/agentdesk-AgentDesk-codex-adk-cdx.jsonl --input-mode pipe"";"
+src/services/discord/tmux_reaper.rs:1408	production-or-inline-test	consumer-or-definition	rejects_partial_substring_matches	"let flag_line = "" 6260     1 /Users/me/.adk/release/bin/agentdesk codex-tmux-wrapper --not-output-file /var/folders/x/agentdesk-AgentDesk-codex-adk-cdx.jsonl --input-mode pipe"";"
+src/services/discord/tmux_reaper.rs:1414	production-or-inline-test	consumer-or-definition	rejects_non_agentdesk_commands_with_wrapper_tokens	"let line = "" 6260     1 /usr/bin/python3 codex-tmux-wrapper --output-file /var/folders/x/agentdesk-AgentDesk-codex-adk-cdx.jsonl --input-mode pipe"";"
+src/services/discord/tmux_reaper.rs:1420	production-or-inline-test	consumer-or-definition	accepts_persistent_runtime_session_paths	"let line = "" 6260     1 /Users/me/.adk/release/bin/agentdesk codex-tmux-wrapper --output-file /Users/me/.adk/release/runtime/sessions/host-AgentDesk-codex-adk-cdx.jsonl --input-mode pipe"";"
+src/services/discord/tmux_watcher/completion_gate.rs:97	production-or-inline-test	consumer-or-definition	jsonl_terminal_can_confirm_completion	| crate::services::agent_protocol::RuntimeHandoffKind::ProcessBackend,
+src/services/discord/tmux_watcher/completion_gate_tests.rs:41	test-named	consumer-or-definition	state_for_matched_session	_ => crate::services::agent_protocol::RuntimeHandoffKind::ProcessBackend,
+src/services/discord/tmux_watcher/completion_gate_tests.rs:476	test-named	consumer-or-definition	jsonl_terminal_completion_accepts_managed_process_backend_bridge_owned_placeholder	fn jsonl_terminal_completion_accepts_managed_process_backend_bridge_owned_placeholder() {
+src/services/discord/tmux_watcher/completion_gate_tests.rs:482	test-named	consumer-or-definition	jsonl_terminal_completion_accepts_managed_process_backend_bridge_owned_placeholder	state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ProcessBackend);
+src/services/discord/turn_bridge/cancel_finalize_policy.rs:465	production-or-inline-test	consumer-or-definition	terminal_frame_classifier_matches_loop_done_assignments	/// (RuntimeReady, TmuxReady, ProcessReady, OutputOffset, Text, Error,
+src/services/discord/turn_bridge/completion_postlude/prelude_lifecycle/tests.rs:96	test-named	consumer-or-definition	process_completion_keeps_reminders_without_a_tui_receipt_snapshot	state.runtime_kind = Some(RuntimeHandoffKind::ProcessBackend);
+src/services/discord/turn_bridge/headless_delivery/observation_tests.rs:627	test-named	consumer-or-definition	w17_direct_fallback_keeps_runtime_mode_while_journal_is_blocked	"(Some(RuntimeHandoffKind::ProcessBackend), ""NON_TUI""),"
+src/services/discord/turn_bridge/runtime_handoff_loop.rs:27	production-or-inline-test	consumer-or-definition	(module)	ProcessReady {
+src/services/discord/turn_bridge/runtime_handoff_loop.rs:52	production-or-inline-test	consumer-or-definition	into_stream_message	Self::ProcessReady {
+src/services/discord/turn_bridge/runtime_handoff_loop.rs:56	production-or-inline-test	consumer-or-definition	into_stream_message	} => StreamMessage::ProcessReady {
+src/services/discord/turn_bridge/runtime_handoff_loop.rs:831	production-or-inline-test	consumer-or-definition	handle_runtime_handoff_loop_message	RuntimeHandoff::ProcessBackend {
+src/services/discord/turn_bridge/runtime_handoff_loop.rs:842	production-or-inline-test	consumer-or-definition	handle_runtime_handoff_loop_message	inflight_state.runtime_kind = Some(RuntimeHandoffKind::ProcessBackend);
+src/services/discord/turn_bridge/runtime_handoff_loop.rs:852	production-or-inline-test	consumer-or-definition	handle_runtime_handoff_loop_message	"""turn_bridge::runtime_handoff_loop::runtime_ready_process_backend"","
+src/services/discord/turn_bridge/runtime_handoff_loop.rs:871	production-or-inline-test	consumer-or-definition	handle_runtime_handoff_loop_message	RuntimeHandoffLoopMessage::ProcessReady {
+src/services/discord/turn_bridge/runtime_handoff_loop.rs:877	production-or-inline-test	consumer-or-definition	handle_runtime_handoff_loop_message	// ProcessBackend completed first turn.
+src/services/discord/turn_bridge/runtime_handoff_loop.rs:880	production-or-inline-test	consumer-or-definition	handle_runtime_handoff_loop_message	// Do NOT set tmux_handed_off: ProcessBackend has no watcher,
+src/services/discord/turn_bridge/runtime_handoff_loop.rs:889	production-or-inline-test	consumer-or-definition	handle_runtime_handoff_loop_message	inflight_state.runtime_kind = Some(RuntimeHandoffKind::ProcessBackend);
+src/services/discord/turn_bridge/runtime_handoff_loop/tests.rs:159	test-named	consumer-or-definition	process_runtime_ready_first_population_is_saved	handoff: RuntimeHandoff::ProcessBackend {
+src/services/discord/turn_bridge/runtime_handoff_loop/tests.rs:179	test-named	consumer-or-definition	process_runtime_ready_first_population_is_saved	Some(RuntimeHandoffKind::ProcessBackend)
+src/services/discord/turn_bridge/runtime_handoff_loop/tests.rs:569	test-named	consumer-or-definition	process_ready_skips_reowned_row_and_does_not_queue_stale_flush	RuntimeHandoffLoopMessage::ProcessReady {
+src/services/discord/turn_bridge/stream_loop.rs:278	production-or-inline-test	consumer-or-definition	run_stream_loop	// (`RuntimeReady`, `TmuxReady`, `ProcessReady`,
+src/services/discord/turn_bridge/stream_loop.rs:687	production-or-inline-test	consumer-or-definition	run_stream_loop	StreamMessage::ProcessReady {
+src/services/discord/turn_bridge/stream_loop.rs:694	production-or-inline-test	consumer-or-definition	run_stream_loop	RuntimeHandoffLoopMessage::ProcessReady {
+src/services/discord/turn_bridge/stream_loop/expected_identity_tests.rs:202	test-named	consumer-or-definition	disconnected_runtime_ready_retry_ahead_of_done_is_backed_off_before_done	handoff: crate::services::agent_protocol::RuntimeHandoff::ProcessBackend {
+src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/routine_presentation_tests.rs:9	test-named	consumer-or-definition	pin	row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ProcessBackend);
+src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/turn_mode_anchor_tests.rs:272	test-named	consumer-or-definition	o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless	use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, ProcessBackend};
+src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/turn_mode_anchor_tests.rs:295	test-named	consumer-or-definition	o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless	&deliver(bound(false, listed()), ProcessBackend).await,
+src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/turn_mode_anchor_tests.rs:306	test-named	consumer-or-definition	explicitly_off_writer_holds_tui_bodies_and_keeps_legacy_for_other_channels	use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, ProcessBackend};
+src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/turn_mode_anchor_tests.rs:316	test-named	consumer-or-definition	explicitly_off_writer_holds_tui_bodies_and_keeps_legacy_for_other_channels	&deliver(bound(false, off()), ProcessBackend).await,
+src/services/discord/turn_bridge/tmux_runtime.rs:26	production-or-inline-test	consumer-or-definition	(module)	mod process_backend_cancel;
+src/services/discord/turn_bridge/tmux_runtime.rs:34	production-or-inline-test	consumer-or-definition	(module)	use process_backend_cancel::{
+src/services/discord/turn_bridge/tmux_runtime.rs:35	production-or-inline-test	consumer-or-definition	(module)	hard_stop_unresponsive_process_backend_turn, interrupt_process_backend_turn,
+src/services/discord/turn_bridge/tmux_runtime.rs:216	production-or-inline-test	consumer-or-definition	interrupt_on	return interrupt_process_backend_turn(provider, tracked_child_pid, reason);
+src/services/discord/turn_bridge/tmux_runtime.rs:606	production-or-inline-test	consumer-or-definition	hard_stop_unresponsive_provider_cli_turn	hard_stop_unresponsive_process_backend_turn(provider, token, interrupt_outcome, reason)
+src/services/discord/turn_bridge/tmux_runtime.rs:800	production-or-inline-test	consumer-or-definition	cancel_active_token_on	crate::services::session_backend::mark_process_sessions_stopped_by_pid(pid);
+src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs:1	production-or-inline-test	consumer-or-definition	(module)	//! ProcessBackend cancellation for provider turns without a tmux runtime.
+src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs:13	production-or-inline-test	consumer-or-definition	(module)	provider_cli_pid_for_process_backend, send_sigint, send_sigint_to_process_group_or_pid,
+src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs:18	production-or-inline-test	consumer-or-definition	interrupt_process_backend_turn	pub(super) fn interrupt_process_backend_turn(
+src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs:54	production-or-inline-test	consumer-or-definition	interrupt_process_backend_turn	crate::services::session_backend::mark_process_sessions_stopped_by_pid(child_pid);
+src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs:71	production-or-inline-test	consumer-or-definition	interrupt_process_backend_turn	let signal_target = provider_cli_pid_for_process_backend(child_pid, provider);
+src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs:123	production-or-inline-test	consumer-or-definition	hard_stop_unresponsive_process_backend_turn	pub(super) async fn hard_stop_unresponsive_process_backend_turn(
+src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs:131	production-or-inline-test	consumer-or-definition	hard_stop_unresponsive_process_backend_turn	"""provider hard-stop skipped: provider={} reason={} error=no_verified_process_backend_target interrupt_missing_tmux_session={} sigint_target_missing={}"","
+src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs:153	production-or-inline-test	consumer-or-definition	hard_stop_unresponsive_process_backend_turn	crate::services::session_backend::mark_process_sessions_stopped_by_pid(wrapper_pid);
+src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs:18	test-named	consumer-or-definition	(module)	use crate::services::session_backend::SessionHandle;
+src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs:20	test-named	consumer-or-definition	(module)	"const TEST: &str = ""services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests::force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg"";"
+src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs:111	test-named	consumer-or-definition	register	let handle = SessionHandle::Process {
+src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs:118	test-named	consumer-or-definition	register	crate::services::session_backend::insert_process_session(session.clone(), handle);
+src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs:150	test-named	consumer-or-definition	force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg	fn force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg() {
+src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs:204	test-named	consumer-or-definition	force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg	let pid = crate::services::session_backend::process_session_pid(&held);
+src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs:235	test-named	consumer-or-definition	force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg	let kept = crate::services::session_backend::remove_process_session(&session);
+src/services/discord/turn_bridge/tmux_runtime/process_table.rs:34	production-or-inline-test	consumer-or-definition	set_process_backend_provider_pid_for_test	pub(super) fn set_process_backend_provider_pid_for_test(wrapper_pid: u32, provider_pid: u32) {
+src/services/discord/turn_bridge/tmux_runtime/process_table.rs:42	production-or-inline-test	consumer-or-definition	clear_process_backend_provider_pid_for_test	pub(super) fn clear_process_backend_provider_pid_for_test(wrapper_pid: u32) {
+src/services/discord/turn_bridge/tmux_runtime/process_table.rs:69	production-or-inline-test	consumer-or-definition	provider_cli_pid_for_process_backend	pub(super) fn provider_cli_pid_for_process_backend(
+src/services/discord/turn_bridge/tmux_runtime/process_table.rs:216	production-or-inline-test	consumer-or-definition	provider_cli_pid_for_process_backend	pub(super) fn provider_cli_pid_for_process_backend(
+src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:267	test-named	consumer-or-definition	a_stop_on_another_host_reaches_no_tmux_signal_or_kill	crate::services::session_backend::SessionHandle::TestProcess {
+src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:271	test-named	consumer-or-definition	a_stop_on_another_host_reaches_no_tmux_signal_or_kill	crate::services::session_backend::insert_process_session(
+src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:291	test-named	consumer-or-definition	a_stop_on_another_host_reaches_no_tmux_signal_or_kill	!crate::services::session_backend::process_session_was_stopped(
+src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:301	test-named	consumer-or-definition	a_stop_on_another_host_reaches_no_tmux_signal_or_kill	crate::services::session_backend::remove_process_session(&name);
+src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:1028	test-named	consumer-or-definition	a_runtime_clear_refuses_another_hosts_session_before_any_change_pg	crate::services::session_backend::remove_process_session(&name);
+src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs:1106	test-named	consumer-or-definition	a_runtime_clear_refuses_another_hosts_session_before_any_change_pg	crate::services::session_backend::remove_process_session(name);
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:61	test-named	consumer-or-definition	issue_4112_pipe_interrupt_sends_sigint_and_marks_stopped	crate::services::session_backend::insert_process_session(
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:63	test-named	consumer-or-definition	issue_4112_pipe_interrupt_sends_sigint_and_marks_stopped	crate::services::session_backend::SessionHandle::TestProcess { pid: 4112, alive },
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:76	test-named	consumer-or-definition	issue_4112_pipe_interrupt_sends_sigint_and_marks_stopped	assert!(crate::services::session_backend::process_session_was_stopped(&session_name));
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:77	test-named	consumer-or-definition	issue_4112_pipe_interrupt_sends_sigint_and_marks_stopped	assert!(!crate::services::session_backend::process_session_is_alive(
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:85	test-named	consumer-or-definition	issue_3169_process_backend_anonymous_teardown_is_noop	fn issue_3169_process_backend_anonymous_teardown_is_noop() {
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:91	test-named	consumer-or-definition	issue_3169_process_backend_anonymous_teardown_is_noop	crate::services::session_backend::insert_process_session(
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:93	test-named	consumer-or-definition	issue_3169_process_backend_anonymous_teardown_is_noop	crate::services::session_backend::SessionHandle::TestProcess {
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:112	test-named	consumer-or-definition	issue_3169_process_backend_anonymous_teardown_is_noop	assert!(!crate::services::session_backend::process_session_was_stopped(&session_name));
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:113	test-named	consumer-or-definition	issue_3169_process_backend_anonymous_teardown_is_noop	assert!(crate::services::session_backend::process_session_is_alive(
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:118	test-named	consumer-or-definition	issue_3169_process_backend_anonymous_teardown_is_noop	crate::services::session_backend::remove_process_session(&session_name)
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:127	test-named	consumer-or-definition	issue_4112_process_backend_registry_miss_skips_sigint	fn issue_4112_process_backend_registry_miss_skips_sigint() {
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:144	test-named	consumer-or-definition	issue_4112_preserve_session_cancel_does_not_mark_process_backend_stopped	fn issue_4112_preserve_session_cancel_does_not_mark_process_backend_stopped() {
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:147	test-named	consumer-or-definition	issue_4112_preserve_session_cancel_does_not_mark_process_backend_stopped	crate::services::session_backend::insert_process_session(
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:149	test-named	consumer-or-definition	issue_4112_preserve_session_cancel_does_not_mark_process_backend_stopped	crate::services::session_backend::SessionHandle::TestProcess {
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:162	test-named	consumer-or-definition	issue_4112_preserve_session_cancel_does_not_mark_process_backend_stopped	assert!(!crate::services::session_backend::process_session_was_stopped(&session_name));
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:163	test-named	consumer-or-definition	issue_4112_preserve_session_cancel_does_not_mark_process_backend_stopped	assert!(crate::services::session_backend::process_session_is_alive(
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:167	test-named	consumer-or-definition	issue_4112_preserve_session_cancel_does_not_mark_process_backend_stopped	if let Some(handle) = crate::services::session_backend::remove_process_session(&session_name) {
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:174	test-named	consumer-or-definition	issue_4112_process_backend_stop_hard_stops_sigint_ignoring_provider	fn issue_4112_process_backend_stop_hard_stops_sigint_ignoring_provider() {
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:207	test-named	consumer-or-definition	issue_4112_process_backend_stop_hard_stops_sigint_ignoring_provider	process_table::set_process_backend_provider_pid_for_test(wrapper_pid, provider_pid);
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:209	test-named	consumer-or-definition	issue_4112_process_backend_stop_hard_stops_sigint_ignoring_provider	crate::services::session_backend::insert_process_session(
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:211	test-named	consumer-or-definition	issue_4112_process_backend_stop_hard_stops_sigint_ignoring_provider	crate::services::session_backend::SessionHandle::Process {
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:231	test-named	consumer-or-definition	issue_4112_process_backend_stop_hard_stops_sigint_ignoring_provider	assert!(crate::services::session_backend::process_session_was_stopped(&session_name));
+src/services/discord/turn_bridge/tmux_runtime_tests.rs:234	test-named	consumer-or-definition	issue_4112_process_backend_stop_hard_stops_sigint_ignoring_provider	process_table::clear_process_backend_provider_pid_for_test(wrapper_pid);
+src/services/discord/turn_finalizer/completion_signal.rs:18	production-or-inline-test	consumer-or-definition	(module)	///   ProcessBackend, or a non-JSONL provider).
+src/services/discord/turn_finalizer/completion_signal.rs:308	production-or-inline-test	consumer-or-definition	completion_signal_non_jsonl_runtime_is_unknown	// ProcessBackend is also non-JSONL.
+src/services/discord/turn_finalizer/completion_signal.rs:312	production-or-inline-test	consumer-or-definition	completion_signal_non_jsonl_runtime_is_unknown	Some(RuntimeHandoffKind::ProcessBackend),
+src/services/discord/turn_presence/activity/unbound/live.rs:62	production-or-inline-test	consumer-or-definition	local_trace	process: crate::services::session_backend::process_session_pid(name),
+src/services/discord/turn_presence/activity/unbound/live.rs:864	production-or-inline-test	consumer-or-definition	scope	|| matches!(trace.runtime, Ok(Some(RuntimeHandoffKind::ProcessBackend)))
+src/services/discord/turn_presence/activity/unbound/live_review_tests.rs:265	test-named	consumer-or-definition	s1e_runtime_marker_restore_preserves_legacy_and_canonical_priority	"std::fs::write(&legacy.0, ""process_backend"").unwrap();"
+src/services/discord/turn_presence/activity/unbound/live_review_tests.rs:268	test-named	consumer-or-definition	s1e_runtime_marker_restore_preserves_legacy_and_canonical_priority	Ok(Some(RuntimeHandoffKind::ProcessBackend)),
+src/services/discord/turn_presence/activity/unbound/live_review_tests.rs:273	test-named	consumer-or-definition	s1e_runtime_marker_restore_preserves_legacy_and_canonical_priority	Some(RuntimeHandoffKind::ProcessBackend)
+src/services/discord/turn_presence/activity/unbound/live_review_tests.rs:304	test-named	consumer-or-definition	install	crate::services::session_backend::insert_process_session(
+src/services/discord/turn_presence/activity/unbound/live_review_tests.rs:306	test-named	consumer-or-definition	install	crate::services::session_backend::SessionHandle::TestProcess {
+src/services/discord/turn_presence/activity/unbound/live_review_tests.rs:316	test-named	consumer-or-definition	drop	crate::services::session_backend::remove_process_session(&self.0);
+src/services/discord/turn_presence/activity/unbound/stale_binding_tests.rs:681	test-named	consumer-or-definition	s1_historical_and_canonical_host_runtime_nonce_traces_are_required_pg	"&b""process_backend""[..],"
+src/services/herdr_launch/runtime_marker.rs:90	production-or-inline-test	consumer-or-definition	clear_owned	if crate::services::session_backend::process_session_pid(logical).is_some()
+src/services/herdr_launch/runtime_marker/tests.rs:133	test-named	consumer-or-definition	i8069_foreign_host_runtime_and_unreadable_marker_are_preserved	"for runtime in [""claude_tui"", ""process_backend"", ""unknown-runtime""] {"
+src/services/herdr_launch/runtime_marker/tests.rs:152	test-named	consumer-or-definition	i8069_foreign_legacy_fallback_keeps_canonical_runtime_too	"std::fs::write(&legacy, ""process_backend"").unwrap();"
+src/services/herdr_launch/runtime_marker/tests.rs:155	test-named	consumer-or-definition	i8069_foreign_legacy_fallback_keeps_canonical_runtime_too	"assert_eq!(std::fs::read_to_string(legacy).unwrap(), ""process_backend"");"
+src/services/platform/tmux/availability.rs:6	production-or-inline-test	adapter-internal	(module)	//! fork failure cannot demote a turn to ProcessBackend and double-resume the
+src/services/provider/session_probe.rs:264	production-or-inline-test	consumer-or-definition	for_target	crate::services::session_backend::process_session_probe(name),
+src/services/provider_exec.rs:11	production-or-inline-test	consumer-or-definition	(module)	//!   [`crate::services::session_backend`] (`SessionBackend` trait,
+src/services/provider_exec.rs:12	production-or-inline-test	consumer-or-definition	(module)	//!   `ProcessBackend`, `insert_process_session`/`process_session_*`).
+src/services/qwen.rs:26	production-or-inline-test	consumer-or-definition	(module)	use session_lifecycle::execute_streaming_local_process;
+src/services/qwen.rs:45	production-or-inline-test	consumer-or-definition	(module)	ReadOutputFailure, StreamLineState, insert_process_session, process_session_is_alive,
+src/services/qwen.rs:46	production-or-inline-test	consumer-or-definition	(module)	process_session_probe, process_stream_line, remove_process_session, send_process_session_input,
+src/services/qwen.rs:47	production-or-inline-test	consumer-or-definition	(module)	terminate_process_session,
+src/services/qwen.rs:357	production-or-inline-test	consumer-or-definition	execute_command_streaming	return execute_streaming_local_process(
+src/services/qwen/session_lifecycle.rs:310	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	pub(super) fn execute_streaming_local_process(
+src/services/qwen/session_lifecycle.rs:322	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
+src/services/qwen/session_lifecycle.rs:351	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	let _ = terminate_process_session(session_name);
+src/services/qwen/session_lifecycle.rs:352	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	} else if process_session_is_alive(session_name) {
+src/services/qwen/session_lifecycle.rs:361	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	send_process_session_input(session_name, &encoded, cancel_token.as_deref())?;
+src/services/qwen/session_lifecycle.rs:367	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	process_session_probe(session_name),
+src/services/qwen/session_lifecycle.rs:373	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	let _ = sender.send(StreamMessage::ProcessReady {
+src/services/qwen/session_lifecycle.rs:384	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	remove_process_session(session_name);
+src/services/qwen/session_lifecycle.rs:402	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	let config = SessionConfig {
+src/services/qwen/session_lifecycle.rs:441	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	let backend = ProcessBackend::new();
+src/services/qwen/session_lifecycle.rs:451	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	insert_process_session(session_name.to_string(), handle);
+src/services/qwen/session_lifecycle.rs:458	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	process_session_probe(session_name),
+src/services/qwen/session_lifecycle.rs:464	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	let _ = sender.send(StreamMessage::ProcessReady {
+src/services/qwen/session_lifecycle.rs:475	production-or-inline-test	consumer-or-definition	execute_streaming_local_process	remove_process_session(session_name);
+src/services/qwen_tmux_wrapper.rs:68	production-or-inline-test	consumer-or-definition	run	"InputMode::Pipe => ""pipe-mode"","
+src/services/qwen_tmux_wrapper.rs:128	production-or-inline-test	consumer-or-definition	run	InputMode::Pipe => BufReader::new(Box::new(std::io::stdin())),
+src/services/session_backend.rs:4	production-or-inline-test	consumer-or-definition	(module)	//! - direct child-process wrapper spawning (`ProcessBackend`)
+src/services/session_backend.rs:56	production-or-inline-test	consumer-or-definition	recover_followup	pub struct SessionConfig {
+src/services/session_backend.rs:78	production-or-inline-test	consumer-or-definition	recover_followup	pub enum SessionHandle {
+src/services/session_backend.rs:93	production-or-inline-test	consumer-or-definition	recover_followup	struct ProcessSessionEntry {
+src/services/session_backend.rs:94	production-or-inline-test	consumer-or-definition	recover_followup	handle: SessionHandle,
+src/services/session_backend.rs:100	production-or-inline-test	consumer-or-definition	recover_followup	struct ProcessSessionRegistry {
+src/services/session_backend.rs:101	production-or-inline-test	consumer-or-definition	recover_followup	handles: HashMap<String, ProcessSessionEntry>,
+src/services/session_backend.rs:108	production-or-inline-test	consumer-or-definition	recover_followup	impl ProcessSessionRegistry {
+src/services/session_backend.rs:109	production-or-inline-test	consumer-or-definition	insert	fn insert(&mut self, session_name: String, handle: SessionHandle) {
+src/services/session_backend.rs:116	production-or-inline-test	consumer-or-definition	insert_with_active_turns	handle: SessionHandle,
+src/services/session_backend.rs:123	production-or-inline-test	consumer-or-definition	insert_with_active_turns	ProcessSessionEntry {
+src/services/session_backend.rs:153	production-or-inline-test	consumer-or-definition	prune_stopped_markers	pub trait SessionBackend: Send + Sync {
+src/services/session_backend.rs:155	production-or-inline-test	consumer-or-definition	create_session	fn create_session(&self, config: &SessionConfig) -> Result<SessionHandle, String>;
+src/services/session_backend.rs:158	production-or-inline-test	consumer-or-definition	send_input	fn send_input(&self, handle: &SessionHandle, message: &str) -> Result<(), String>;
+src/services/session_backend.rs:161	production-or-inline-test	consumer-or-definition	is_alive	fn is_alive(&self, handle: &SessionHandle) -> bool;
+src/services/session_backend.rs:164	production-or-inline-test	consumer-or-definition	is_alive	// ─── ProcessBackend ───────────────────────────────────────────────────────────
+src/services/session_backend.rs:166	production-or-inline-test	consumer-or-definition	is_alive	pub struct ProcessBackend;
+src/services/session_backend.rs:168	production-or-inline-test	consumer-or-definition	is_alive	impl ProcessBackend {
+src/services/session_backend.rs:175	production-or-inline-test	consumer-or-definition	create_session_with_command_env	config: &SessionConfig,
+src/services/session_backend.rs:177	production-or-inline-test	consumer-or-definition	create_session_with_command_env	) -> Result<SessionHandle, String> {
+src/services/session_backend.rs:221	production-or-inline-test	consumer-or-definition	create_session_with_command_env	"""--input-mode"".to_string(),"
+src/services/session_backend.rs:268	production-or-inline-test	consumer-or-definition	create_session_with_command_env	Ok(SessionHandle::Process {
+src/services/session_backend.rs:277	production-or-inline-test	consumer-or-definition	create_session_with_command_env	impl SessionBackend for ProcessBackend {
+src/services/session_backend.rs:278	production-or-inline-test	consumer-or-definition	create_session	fn create_session(&self, config: &SessionConfig) -> Result<SessionHandle, String> {
+src/services/session_backend.rs:282	production-or-inline-test	consumer-or-definition	send_input	fn send_input(&self, handle: &SessionHandle, message: &str) -> Result<(), String> {
+src/services/session_backend.rs:284	production-or-inline-test	consumer-or-definition	send_input	SessionHandle::Process { child_stdin, .. } => {
+src/services/session_backend.rs:300	production-or-inline-test	consumer-or-definition	send_input	SessionHandle::TestProcess { alive, .. } => {
+src/services/session_backend.rs:310	production-or-inline-test	consumer-or-definition	is_alive	fn is_alive(&self, handle: &SessionHandle) -> bool {
+src/services/session_backend.rs:312	production-or-inline-test	consumer-or-definition	is_alive	SessionHandle::Process { child, .. } => {
+src/services/session_backend.rs:324	production-or-inline-test	consumer-or-definition	is_alive	SessionHandle::TestProcess { alive, .. } => {
+src/services/session_backend.rs:331	production-or-inline-test	consumer-or-definition	is_alive	impl SessionHandle {
+src/services/session_backend.rs:334	production-or-inline-test	consumer-or-definition	pid	SessionHandle::Process { pid, .. } => *pid,
+src/services/session_backend.rs:336	production-or-inline-test	consumer-or-definition	pid	SessionHandle::TestProcess { pid, .. } => *pid,
+src/services/session_backend.rs:341	production-or-inline-test	consumer-or-definition	pid	static PROCESS_SESSIONS: LazyLock<Mutex<ProcessSessionRegistry>> =
+src/services/session_backend.rs:342	production-or-inline-test	consumer-or-definition	pid	LazyLock::new(|| Mutex::new(ProcessSessionRegistry::default()));
+src/services/session_backend.rs:344	production-or-inline-test	consumer-or-definition	process_sessions	fn process_sessions() -> MutexGuard<'static, ProcessSessionRegistry> {
+src/services/session_backend.rs:351	production-or-inline-test	consumer-or-definition	process_sessions	pub struct ProcessSessionActiveTurnGuard {
+src/services/session_backend.rs:355	production-or-inline-test	consumer-or-definition	process_sessions	impl Drop for ProcessSessionActiveTurnGuard {
+src/services/session_backend.rs:357	production-or-inline-test	consumer-or-definition	drop	let mut registry = process_sessions();
+src/services/session_backend.rs:364	production-or-inline-test	consumer-or-definition	mark_process_session_active_turn	pub fn mark_process_session_active_turn(
+src/services/session_backend.rs:366	production-or-inline-test	consumer-or-definition	mark_process_session_active_turn	) -> ProcessSessionActiveTurnGuard {
+src/services/session_backend.rs:368	production-or-inline-test	consumer-or-definition	mark_process_session_active_turn	let mut registry = process_sessions();
+src/services/session_backend.rs:373	production-or-inline-test	consumer-or-definition	mark_process_session_active_turn	ProcessSessionActiveTurnGuard { session_name }
+src/services/session_backend.rs:376	production-or-inline-test	consumer-or-definition	insert_process_session	pub fn insert_process_session(session_name: impl Into<String>, handle: SessionHandle) {
+src/services/session_backend.rs:377	production-or-inline-test	consumer-or-definition	insert_process_session	process_sessions().insert(session_name.into(), handle);
+src/services/session_backend.rs:380	production-or-inline-test	consumer-or-definition	insert_process_session_and_mark_active_turn	pub fn insert_process_session_and_mark_active_turn(
+src/services/session_backend.rs:382	production-or-inline-test	consumer-or-definition	insert_process_session_and_mark_active_turn	handle: SessionHandle,
+src/services/session_backend.rs:383	production-or-inline-test	consumer-or-definition	insert_process_session_and_mark_active_turn	) -> ProcessSessionActiveTurnGuard {
+src/services/session_backend.rs:385	production-or-inline-test	consumer-or-definition	insert_process_session_and_mark_active_turn	let mut registry = process_sessions();
+src/services/session_backend.rs:388	production-or-inline-test	consumer-or-definition	insert_process_session_and_mark_active_turn	ProcessSessionActiveTurnGuard { session_name }
+src/services/session_backend.rs:391	production-or-inline-test	consumer-or-definition	remove_process_session	pub fn remove_process_session(session_name: &str) -> Option<SessionHandle> {
+src/services/session_backend.rs:392	production-or-inline-test	consumer-or-definition	remove_process_session	process_sessions()
+src/services/session_backend.rs:398	production-or-inline-test	consumer-or-definition	terminate_process_session	pub fn terminate_process_session(session_name: &str) -> bool {
+src/services/session_backend.rs:399	production-or-inline-test	consumer-or-definition	terminate_process_session	let Some(handle) = remove_process_session(session_name) else {
+src/services/session_backend.rs:406	production-or-inline-test	consumer-or-definition	terminate_process_session_before_tmux	pub fn terminate_process_session_before_tmux(session_name: &str) -> bool {
+src/services/session_backend.rs:407	production-or-inline-test	consumer-or-definition	terminate_process_session_before_tmux	let mut registry = process_sessions();
+src/services/session_backend.rs:424	production-or-inline-test	consumer-or-definition	terminate_process_session_before_tmux	if entry.active_turns > 0 && ProcessBackend::new().is_alive(&entry.handle) {
+src/services/session_backend.rs:428	production-or-inline-test	consumer-or-definition	terminate_process_session_before_tmux	"""skipping ProcessBackend cleanup before tmux because wrapper is hosting an active turn"""
+src/services/session_backend.rs:441	production-or-inline-test	consumer-or-definition	process_session_was_stopped	pub fn process_session_was_stopped(session_name: &str) -> bool {
+src/services/session_backend.rs:442	production-or-inline-test	consumer-or-definition	process_session_was_stopped	process_sessions().stopped.contains(session_name)
+src/services/session_backend.rs:446	production-or-inline-test	consumer-or-definition	mark_process_session_stopped	fn mark_process_session_stopped(session_name: impl Into<String>) {
+src/services/session_backend.rs:447	production-or-inline-test	consumer-or-definition	mark_process_session_stopped	process_sessions().mark_stopped(session_name.into());
+src/services/session_backend.rs:478	production-or-inline-test	consumer-or-definition	mark_process_sessions_stopped_by_pid	pub fn mark_process_sessions_stopped_by_pid(pid: u32) -> Vec<String> {
+src/services/session_backend.rs:479	production-or-inline-test	consumer-or-definition	mark_process_sessions_stopped_by_pid	let mut registry = process_sessions();
+src/services/session_backend.rs:515	production-or-inline-test	consumer-or-definition	process_session_pid	pub fn process_session_pid(session_name: &str) -> Option<u32> {
+src/services/session_backend.rs:516	production-or-inline-test	consumer-or-definition	process_session_pid	let registry = process_sessions();
+src/services/session_backend.rs:526	production-or-inline-test	consumer-or-definition	process_session_is_alive	pub fn process_session_is_alive(session_name: &str) -> bool {
+src/services/session_backend.rs:527	production-or-inline-test	consumer-or-definition	process_session_is_alive	let registry = process_sessions();
+src/services/session_backend.rs:534	production-or-inline-test	consumer-or-definition	process_session_is_alive	.map(|entry| ProcessBackend::new().is_alive(&entry.handle))
+src/services/session_backend.rs:538	production-or-inline-test	consumer-or-definition	process_session_available_for_followup	pub fn process_session_available_for_followup(session_name: &str) -> bool {
+src/services/session_backend.rs:539	production-or-inline-test	consumer-or-definition	process_session_available_for_followup	if process_session_was_stopped(session_name) {
+src/services/session_backend.rs:540	production-or-inline-test	consumer-or-definition	process_session_available_for_followup	if let Some(handle) = remove_process_session(session_name) {
+src/services/session_backend.rs:545	production-or-inline-test	consumer-or-definition	process_session_available_for_followup	process_session_is_alive(session_name)
+src/services/session_backend.rs:548	production-or-inline-test	consumer-or-definition	send_process_session_input	pub fn send_process_session_input(
+src/services/session_backend.rs:553	production-or-inline-test	consumer-or-definition	send_process_session_input	let registry = process_sessions();
+src/services/session_backend.rs:567	production-or-inline-test	consumer-or-definition	send_process_session_input	ProcessBackend::new().send_input(&handle.handle, message)
+src/services/session_backend.rs:570	production-or-inline-test	consumer-or-definition	process_session_probe	pub fn process_session_probe(session_name: &str) -> SessionProbe {
+src/services/session_backend.rs:572	production-or-inline-test	consumer-or-definition	process_session_probe	SessionProbe::process(move || process_session_is_alive(&session_name))
+src/services/session_backend.rs:575	production-or-inline-test	consumer-or-definition	terminate_process_handle	pub fn terminate_process_handle(handle: SessionHandle) {
+src/services/session_backend.rs:577	production-or-inline-test	consumer-or-definition	terminate_process_handle	SessionHandle::Process {
+src/services/session_backend.rs:593	production-or-inline-test	consumer-or-definition	terminate_process_handle	SessionHandle::TestProcess { alive, .. } => {
+src/services/session_backend.rs:599	production-or-inline-test	consumer-or-definition	reap_stopped_process_handle	fn reap_stopped_process_handle(handle: SessionHandle) {
+src/services/session_backend.rs:601	production-or-inline-test	consumer-or-definition	reap_stopped_process_handle	SessionHandle::Process {
+src/services/session_backend.rs:623	production-or-inline-test	consumer-or-definition	reap_stopped_process_handle	SessionHandle::TestProcess { alive, .. } => {
+src/services/session_backend.rs:637	production-or-inline-test	consumer-or-definition	every_process_followup_binds_its_current_turn_token_before_input	insert_process_session(
+src/services/session_backend.rs:639	production-or-inline-test	consumer-or-definition	every_process_followup_binds_its_current_turn_token_before_input	SessionHandle::TestProcess {
+src/services/session_backend.rs:647	production-or-inline-test	consumer-or-definition	every_process_followup_binds_its_current_turn_token_before_input	"send_process_session_input(&session_name, ""followup"", Some(&token)).unwrap();"
+src/services/session_backend.rs:653	production-or-inline-test	consumer-or-definition	every_process_followup_binds_its_current_turn_token_before_input	"send_process_session_input(&session_name, ""must not run"", Some(&cancelled))"
+src/services/session_backend.rs:657	production-or-inline-test	consumer-or-definition	every_process_followup_binds_its_current_turn_token_before_input	remove_process_session(&session_name);
+src/services/session_backend.rs:661	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	fn issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup() {
+src/services/session_backend.rs:664	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	insert_process_session(
+src/services/session_backend.rs:666	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	SessionHandle::TestProcess {
+src/services/session_backend.rs:672	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	assert!(process_session_is_alive(&session_name));
+src/services/session_backend.rs:673	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	assert_eq!(process_session_pid(&session_name), Some(424_242));
+src/services/session_backend.rs:675	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	let stopped = mark_process_sessions_stopped_by_pid(424_242);
+src/services/session_backend.rs:678	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	assert!(process_session_was_stopped(&session_name));
+src/services/session_backend.rs:679	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	assert!(!process_session_is_alive(&session_name));
+src/services/session_backend.rs:680	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	assert_eq!(process_session_pid(&session_name), None);
+src/services/session_backend.rs:681	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	"assert!(send_process_session_input(&session_name, ""{}"", None).is_err());"
+src/services/session_backend.rs:683	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	insert_process_session(
+src/services/session_backend.rs:685	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	SessionHandle::TestProcess {
+src/services/session_backend.rs:690	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	assert!(!process_session_was_stopped(&session_name));
+src/services/session_backend.rs:691	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	assert!(process_session_is_alive(&session_name));
+src/services/session_backend.rs:693	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	if let Some(handle) = remove_process_session(&session_name) {
+src/services/session_backend.rs:696	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	assert!(!process_session_is_alive(&session_name));
+src/services/session_backend.rs:697	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup	assert!(!process_session_was_stopped(&session_name));
+src/services/session_backend.rs:701	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_followup_guard_forces_fresh_session	fn issue_4112_stopped_process_session_followup_guard_forces_fresh_session() {
+src/services/session_backend.rs:704	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_followup_guard_forces_fresh_session	insert_process_session(
+src/services/session_backend.rs:706	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_followup_guard_forces_fresh_session	SessionHandle::TestProcess {
+src/services/session_backend.rs:711	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_followup_guard_forces_fresh_session	assert!(process_session_available_for_followup(&session_name));
+src/services/session_backend.rs:713	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_followup_guard_forces_fresh_session	mark_process_session_stopped(session_name.clone());
+src/services/session_backend.rs:716	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_followup_guard_forces_fresh_session	!process_session_available_for_followup(&session_name),
+src/services/session_backend.rs:719	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_followup_guard_forces_fresh_session	assert!(process_session_was_stopped(&session_name));
+src/services/session_backend.rs:725	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_followup_guard_forces_fresh_session	"""Claude ProcessBackend follow-up maps stopped pipe sessions to cold-start recreation"""
+src/services/session_backend.rs:728	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_followup_guard_forces_fresh_session	insert_process_session(
+src/services/session_backend.rs:730	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_followup_guard_forces_fresh_session	SessionHandle::TestProcess {
+src/services/session_backend.rs:735	production-or-inline-test	consumer-or-definition	issue_4112_stopped_process_session_followup_guard_forces_fresh_session	if let Some(handle) = remove_process_session(&session_name) {
+src/services/session_backend.rs:741	production-or-inline-test	consumer-or-definition	issue_4113_process_session_cleanup_terminates_registered_wrapper	fn issue_4113_process_session_cleanup_terminates_registered_wrapper() {
+src/services/session_backend.rs:744	production-or-inline-test	consumer-or-definition	issue_4113_process_session_cleanup_terminates_registered_wrapper	insert_process_session(
+src/services/session_backend.rs:746	production-or-inline-test	consumer-or-definition	issue_4113_process_session_cleanup_terminates_registered_wrapper	SessionHandle::TestProcess {
+src/services/session_backend.rs:752	production-or-inline-test	consumer-or-definition	issue_4113_process_session_cleanup_terminates_registered_wrapper	assert!(process_session_is_alive(&session_name));
+src/services/session_backend.rs:753	production-or-inline-test	consumer-or-definition	issue_4113_process_session_cleanup_terminates_registered_wrapper	assert!(terminate_process_session(&session_name));
+src/services/session_backend.rs:756	production-or-inline-test	consumer-or-definition	issue_4113_process_session_cleanup_terminates_registered_wrapper	assert!(!process_session_is_alive(&session_name));
+src/services/session_backend.rs:758	production-or-inline-test	consumer-or-definition	issue_4113_process_session_cleanup_terminates_registered_wrapper	!terminate_process_session(&session_name),
+src/services/session_backend.rs:767	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_terminates_idle_alive_wrapper_without_active_turn	insert_process_session(
+src/services/session_backend.rs:769	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_terminates_idle_alive_wrapper_without_active_turn	SessionHandle::TestProcess {
+src/services/session_backend.rs:775	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_terminates_idle_alive_wrapper_without_active_turn	assert!(terminate_process_session_before_tmux(&session_name));
+src/services/session_backend.rs:777	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_terminates_idle_alive_wrapper_without_active_turn	assert!(!process_session_is_alive(&session_name));
+src/services/session_backend.rs:779	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_terminates_idle_alive_wrapper_without_active_turn	!terminate_process_session_before_tmux(&session_name),
+src/services/session_backend.rs:788	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_skips_inflight_wrapper_without_stopped_marker	insert_process_session(
+src/services/session_backend.rs:790	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_skips_inflight_wrapper_without_stopped_marker	SessionHandle::TestProcess {
+src/services/session_backend.rs:795	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_skips_inflight_wrapper_without_stopped_marker	let active_turn = mark_process_session_active_turn(&session_name);
+src/services/session_backend.rs:797	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_skips_inflight_wrapper_without_stopped_marker	assert!(!terminate_process_session_before_tmux(&session_name));
+src/services/session_backend.rs:799	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_skips_inflight_wrapper_without_stopped_marker	assert!(process_session_is_alive(&session_name));
+src/services/session_backend.rs:802	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_skips_inflight_wrapper_without_stopped_marker	assert!(terminate_process_session_before_tmux(&session_name));
+src/services/session_backend.rs:804	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_skips_inflight_wrapper_without_stopped_marker	assert!(!process_session_is_alive(&session_name));
+src/services/session_backend.rs:808	production-or-inline-test	consumer-or-definition	issue_4134_insert_process_session_active_turn_skips_tmux_cleanup_until_guard_drop	fn issue_4134_insert_process_session_active_turn_skips_tmux_cleanup_until_guard_drop() {
+src/services/session_backend.rs:811	production-or-inline-test	consumer-or-definition	issue_4134_insert_process_session_active_turn_skips_tmux_cleanup_until_guard_drop	let active_turn = insert_process_session_and_mark_active_turn(
+src/services/session_backend.rs:813	production-or-inline-test	consumer-or-definition	issue_4134_insert_process_session_active_turn_skips_tmux_cleanup_until_guard_drop	SessionHandle::TestProcess {
+src/services/session_backend.rs:819	production-or-inline-test	consumer-or-definition	issue_4134_insert_process_session_active_turn_skips_tmux_cleanup_until_guard_drop	assert!(!terminate_process_session_before_tmux(&session_name));
+src/services/session_backend.rs:821	production-or-inline-test	consumer-or-definition	issue_4134_insert_process_session_active_turn_skips_tmux_cleanup_until_guard_drop	assert!(process_session_is_alive(&session_name));
+src/services/session_backend.rs:824	production-or-inline-test	consumer-or-definition	issue_4134_insert_process_session_active_turn_skips_tmux_cleanup_until_guard_drop	assert!(terminate_process_session_before_tmux(&session_name));
+src/services/session_backend.rs:826	production-or-inline-test	consumer-or-definition	issue_4134_insert_process_session_active_turn_skips_tmux_cleanup_until_guard_drop	assert!(!process_session_is_alive(&session_name));
+src/services/session_backend.rs:833	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_terminates_stopped_wrapper	insert_process_session(
+src/services/session_backend.rs:835	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_terminates_stopped_wrapper	SessionHandle::TestProcess {
+src/services/session_backend.rs:840	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_terminates_stopped_wrapper	mark_process_session_stopped(session_name.clone());
+src/services/session_backend.rs:842	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_terminates_stopped_wrapper	assert!(terminate_process_session_before_tmux(&session_name));
+src/services/session_backend.rs:844	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_terminates_stopped_wrapper	assert!(!process_session_is_alive(&session_name));
+src/services/session_backend.rs:845	production-or-inline-test	consumer-or-definition	issue_4134_tmux_cleanup_terminates_stopped_wrapper	assert!(process_session_was_stopped(&session_name));
+src/services/session_backend/auth_profiles.rs:3	production-or-inline-test	consumer-or-definition	(module)	use super::{SessionHandle, remove_process_session, terminate_process_handle};
+src/services/session_backend/auth_profiles.rs:12	production-or-inline-test	consumer-or-definition	prepare	if !matches && let Some(handle) = remove_process_session(session_name) {
+src/services/session_backend/auth_profiles.rs:23	production-or-inline-test	consumer-or-definition	record_launch	handle: SessionHandle,
+src/services/session_backend/auth_profiles.rs:24	production-or-inline-test	consumer-or-definition	record_launch	) -> Result<SessionHandle, String> {
+src/services/session_backend/auth_profiles.rs:35	production-or-inline-test	consumer-or-definition	record_launch	use crate::services::session_backend::{insert_process_session, process_session_is_alive};
+src/services/session_backend/auth_profiles.rs:50	production-or-inline-test	consumer-or-definition	account_switch_fences_warm_process_and_retains_old_resume_identity_until_launch	SessionHandle::TestProcess {
+src/services/session_backend/auth_profiles.rs:56	production-or-inline-test	consumer-or-definition	account_switch_fences_warm_process_and_retains_old_resume_identity_until_launch	insert_process_session(name.clone(), handle);
+src/services/session_backend/auth_profiles.rs:58	production-or-inline-test	consumer-or-definition	account_switch_fences_warm_process_and_retains_old_resume_identity_until_launch	assert!(process_session_is_alive(&name));
+src/services/session_backend/auth_profiles.rs:62	production-or-inline-test	consumer-or-definition	account_switch_fences_warm_process_and_retains_old_resume_identity_until_launch	assert!(!process_session_is_alive(&name));
+src/services/session_backend/output.rs:5	production-or-inline-test	consumer-or-definition	(module)	use super::{ProcessBackend, SessionBackend, SessionHandle, process_sessions};
+src/services/session_backend/output.rs:20	production-or-inline-test	consumer-or-definition	capture_process_output	let registry = process_sessions();
+src/services/session_backend/output.rs:23	production-or-inline-test	consumer-or-definition	capture_process_output	SessionHandle::Process { output, .. } => (
+src/services/session_backend/output.rs:25	production-or-inline-test	consumer-or-definition	capture_process_output	ProcessBackend::new().is_alive(&entry.handle),
+src/services/session_backend/output.rs:28	production-or-inline-test	consumer-or-definition	capture_process_output	"SessionHandle::TestProcess { .. } => return Some(Err(""process_output_not_bound"")),"
+src/services/session_backend/output.rs:112	production-or-inline-test	consumer-or-definition	process_output_uses_bound_file_and_stops_with_native_session	let handle = SessionHandle::Process {
+src/services/session_backend/output.rs:118	production-or-inline-test	consumer-or-definition	process_output_uses_bound_file_and_stops_with_native_session	super::super::insert_process_session(&name, handle);
+src/services/session_backend/output.rs:120	production-or-inline-test	consumer-or-definition	process_output_uses_bound_file_and_stops_with_native_session	let stopped = super::super::terminate_process_session(&name);
+src/services/session_host.rs:81	production-or-inline-test	consumer-or-definition	(module)	pub(crate) use process_host::ProcessHost;
+src/services/session_host/process_host.rs:12	production-or-inline-test	adapter-internal	(module)	pub(crate) struct ProcessHost;
+src/services/session_host/process_host.rs:21	production-or-inline-test	adapter-internal	refused	impl InteractiveSessionHost for ProcessHost {
+src/services/session_host/process_host.rs:39	production-or-inline-test	adapter-internal	presence	if session_backend::process_session_pid(name).is_some() {
+src/services/session_host/process_host.rs:50	production-or-inline-test	adapter-internal	liveness	if session_backend::process_session_is_alive(name) {
+src/services/session_host/process_host.rs:62	production-or-inline-test	adapter-internal	send_text	session_backend::send_process_session_input(session.legacy_name()?, text, None)
+src/services/session_host/process_host.rs:95	production-or-inline-test	adapter-internal	execution_pid	Ok(session_backend::process_session_pid(session.legacy_name()?))
+src/services/session_host/process_host.rs:107	production-or-inline-test	adapter-internal	capabilities_cover_observation_and_text_input_only	let caps = ProcessHost.capabilities();
+src/services/session_host/process_host.rs:111	production-or-inline-test	adapter-internal	capabilities_cover_observation_and_text_input_only	assert_eq!(ProcessHost.kind(), HostKind::Process);
+src/services/session_host/process_host.rs:117	production-or-inline-test	adapter-internal	unregistered_session_reads_as_missing_and_dead	assert_eq!(ProcessHost.presence(session), HostPresence::Missing);
+src/services/session_host/process_host.rs:118	production-or-inline-test	adapter-internal	unregistered_session_reads_as_missing_and_dead	assert_eq!(ProcessHost.liveness(session), HostLiveness::DeadOrAbsent);
+src/services/session_host/process_host.rs:119	production-or-inline-test	adapter-internal	unregistered_session_reads_as_missing_and_dead	assert_eq!(ProcessHost.execution_pid(session), Ok(None));
+src/services/session_host/process_host.rs:120	production-or-inline-test	adapter-internal	unregistered_session_reads_as_missing_and_dead	assert_eq!(ProcessHost.current_working_dir(session), Ok(None));
+src/services/session_host/process_host.rs:126	production-or-inline-test	adapter-internal	send_text_surfaces_the_registry_error_as_transport	"let expected = session_backend::send_process_session_input(UNREGISTERED, ""x"", None)"
+src/services/session_host/process_host.rs:129	production-or-inline-test	adapter-internal	send_text_surfaces_the_registry_error_as_transport	"ProcessHost.send_text(session, ""x""),"
+src/services/session_host/process_host.rs:143	production-or-inline-test	adapter-internal	destructive_and_screen_operations_are_refused	"assert_eq!(ProcessHost.interrupt(session), unsupported(""interrupt""));"
+src/services/session_host/process_host.rs:145	production-or-inline-test	adapter-internal	destructive_and_screen_operations_are_refused	"ProcessHost.send_keys(session, &[""C-c""]),"
+src/services/session_host/process_host.rs:149	production-or-inline-test	adapter-internal	destructive_and_screen_operations_are_refused	ProcessHost.capture_screen(session, -50),
+src/services/session_host/process_host.rs:157	production-or-inline-test	adapter-internal	herdr_ref_is_not_a_registry_miss	assert_eq!(ProcessHost.presence(herdr), HostPresence::ProbeFailed);
+src/services/session_host/process_host.rs:158	production-or-inline-test	adapter-internal	herdr_ref_is_not_a_registry_miss	assert_eq!(ProcessHost.liveness(herdr), HostLiveness::ProbeError);
+src/services/session_host/process_host.rs:159	production-or-inline-test	adapter-internal	herdr_ref_is_not_a_registry_miss	"assert!(ProcessHost.send_text(herdr, ""x"").is_err());"
+src/services/session_host/process_host.rs:160	production-or-inline-test	adapter-internal	herdr_ref_is_not_a_registry_miss	assert!(ProcessHost.execution_pid(herdr).is_err());
+src/services/session_host/resolve.rs:6	production-or-inline-test	adapter-internal	(module)	use super::process_host::ProcessHost;
+src/services/session_host/resolve.rs:22	production-or-inline-test	adapter-internal	(module)	/// `session_backend::process_session_pid(name).is_some()` as read by the caller.
+src/services/session_host/resolve.rs:60	production-or-inline-test	adapter-internal	kind_hint	RuntimeHandoffKind::ProcessBackend => HostKind::Process,
+src/services/session_host/resolve.rs:447	production-or-inline-test	adapter-internal	legacy_target_host	static PROCESS_HOST: ProcessHost = ProcessHost;
+src/services/session_host/resolve.rs:508	production-or-inline-test	adapter-internal	single_vote_is_known_with_its_source	runtime_kind_marker: Some(R::ProcessBackend),
+src/services/session_host/resolve.rs:528	production-or-inline-test	adapter-internal	agreeing_votes_report_the_first_source	durable_runtime_kind: Some(R::ProcessBackend),
+src/services/session_host/resolve.rs:529	production-or-inline-test	adapter-internal	agreeing_votes_report_the_first_source	runtime_kind_marker: Some(R::ProcessBackend),
+src/services/session_host/resolve.rs:559	production-or-inline-test	adapter-internal	conflict_pairs_the_first_vote_with_the_first_disagreeing_vote	durable_runtime_kind: Some(R::ProcessBackend),
+src/services/session_host/resolve.rs:576	production-or-inline-test	adapter-internal	kind_hint_maps_every_runtime_kind	(R::ProcessBackend, HostKind::Process),
+src/services/session_host/resolve.rs:759	production-or-inline-test	adapter-internal	each_known_host_comes_from_its_witness	durable_runtime_kind: Some(R::ProcessBackend),
+src/services/tmux_diagnostics.rs:302	production-or-inline-test	consumer-or-definition	should_recreate_session_after_followup_fifo_error	/// #170: Classify ProcessBackend stdin pipe errors as recoverable (session recreation)
+src/services/tmux_diagnostics.rs:317	production-or-inline-test	consumer-or-definition	should_recreate_session_after_stdin_error	// ProcessBackend stopped markers intentionally force a cold start on the
+src/services/tmux_diagnostics.rs:355	production-or-inline-test	consumer-or-definition	process_backend_stopped_error_forces_recreate	fn process_backend_stopped_error_forces_recreate() {
+src/services/tmux_wrapper.rs:10	production-or-inline-test	consumer-or-definition	(module)	//!   No terminal input thread (headless mode for ProcessBackend).
+src/services/tmux_wrapper.rs:69	production-or-inline-test	consumer-or-definition	redacted_stderr_line	/// Read external input from process stdin pipe (headless, for ProcessBackend)
+src/services/tmux_wrapper.rs:87	production-or-inline-test	consumer-or-definition	run	"InputMode::Pipe => ""pipe-mode"","
+src/services/tmux_wrapper.rs:375	production-or-inline-test	consumer-or-definition	run	InputMode::Pipe => {
+src/services/tui_o/channel_policy/tests.rs:13	test-named	consumer-or-definition	ownership_uses_flag_membership_and_tui_kind_together	(Some(RuntimeHandoffKind::ProcessBackend), false),
+src/services/tui_o/channel_policy/tests.rs:906	test-named	consumer-or-definition	implicit_default_off_boots_and_holds_tui_bindings	assert_eq!(peek(43, RuntimeHandoffKind::ProcessBackend), Ok(false));
+src/services/tui_prompt_dedupe/runtime_binding/codex_policy/absent_open.rs:93	production-or-inline-test	consumer-or-definition	target_absent	&& crate::services::session_backend::process_session_pid(tmux).is_none()
+src/services/tui_prompt_dedupe/runtime_binding/codex_policy/clear_relaunch.rs:119	production-or-inline-test	consumer-or-definition	dead	&& crate::services::session_backend::process_session_pid(tmux).is_none()
+src/services/tui_turn_state.rs:231	production-or-inline-test	consumer-or-definition	provider_runtime_has_structured_jsonl_turn_state	Some(RuntimeHandoffKind::LegacyTmuxWrapper | RuntimeHandoffKind::ProcessBackend)
+src/services/tui_turn_state.rs:314	production-or-inline-test	consumer-or-definition	runtime_binding_ready_for_input	RuntimeHandoffKind::LegacyTmuxWrapper | RuntimeHandoffKind::ProcessBackend => return None,
+src/services/tui_turn_state.rs:334	production-or-inline-test	consumer-or-definition	runtime_binding_turn_state	RuntimeHandoffKind::LegacyTmuxWrapper | RuntimeHandoffKind::ProcessBackend => return None,
