@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "9fa3d96efdcdef1ce8c420afc60a8dc75839dcef",
+  "measured_at_sha": "b4b11fd4772deef80bb0da688b8f823b82fd34b3",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -368,7 +368,6 @@
       "files": {
         "src/cli/dcserver.rs": 2,
         "src/cli/doctor/orchestrator.rs": 2,
-        "src/cli/utils.rs": 1,
         "src/server/routes/provider_auth_profiles.rs": 2,
         "src/services/agents/turn.rs": 1,
         "src/services/claude.rs": 1,
@@ -407,7 +406,6 @@
         "src/services/routines/agent_executor/reliability.rs": 1,
         "src/services/termination_audit.rs": 1,
         "src/services/tmux_common.rs": 1,
-        "src/services/tmux_diagnostics.rs": 4,
         "src/services/tmux_turn_liveness.rs": 1,
         "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/absent_open.rs": 2,
         "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/clear_relaunch.rs": 1,

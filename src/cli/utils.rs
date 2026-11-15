@@ -165,7 +165,7 @@ pub fn handle_reset_tmux() {
 }
 
 fn kill_agentdesk_tmux_sessions_local() -> usize {
-    let names = match crate::services::platform::tmux::list_session_names() {
+    let names = match crate::services::session_host::TmuxHost.list_session_names() {
         Ok(n) => n,
         Err(_) => return 0,
     };

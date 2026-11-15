@@ -38,6 +38,28 @@ pub(crate) fn tmux_key_name(key: HostKey) -> &'static str {
 }
 
 impl TmuxHost {
+    /// Keep the legacy boolean collapse inside the platform compatibility probe.
+    pub(crate) fn legacy_has_session(&self, name: &str) -> bool {
+        tmux::has_session(name)
+    }
+
+    /// Keep the legacy bool probe, including its unbounded list-panes call.
+    pub(crate) fn legacy_has_live_pane(&self, name: &str) -> bool {
+        tmux::has_live_pane(name)
+    }
+
+    pub(crate) fn pane_liveness(&self, name: &str) -> tmux::PaneLiveness {
+        tmux::pane_liveness(name)
+    }
+
+    pub(crate) fn pane_current_path(&self, name: &str) -> Option<String> {
+        tmux::pane_current_path(name)
+    }
+
+    pub(crate) fn list_session_names(&self) -> Result<Vec<String>, String> {
+        tmux::list_session_names()
+    }
+
     pub(crate) fn kill(&self, name: &str, reason: &str) -> bool {
         tmux::kill_session(name, reason)
     }
@@ -120,7 +142,7 @@ impl InteractiveSessionHost for TmuxHost {
         if let Some(injected) = super::test_support::injected_liveness(session) {
             return injected;
         }
-        let probe = |name| tmux::pane_liveness(name).into();
+        let probe = |name| self.pane_liveness(name).into();
         session
             .legacy_name()
             .map_or(HostLiveness::ProbeError, probe)
@@ -159,7 +181,9 @@ impl InteractiveSessionHost for TmuxHost {
         &self,
         session: HostSessionRef<'_>,
     ) -> Result<Option<PathBuf>, HostError> {
-        Ok(tmux::pane_current_path(session.legacy_name()?).map(PathBuf::from))
+        Ok(self
+            .pane_current_path(session.legacy_name()?)
+            .map(PathBuf::from))
     }
 
     fn execution_pid(&self, session: HostSessionRef<'_>) -> Result<Option<u32>, HostError> {
@@ -170,6 +194,63 @@ impl InteractiveSessionHost for TmuxHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn observations_keep_probe_errors_distinct_from_legacy_bool_results() {
+        use crate::services::provider_teardown::tests::test_support::FakeTmux;
+        use crate::services::session_host::legacy_collapse;
+        use crate::services::tmux_diagnostics;
+
+        let root = crate::config::TestRuntimeRootGuard::new();
+        let name = "adk-s02-observation-port";
+        let fake = FakeTmux::install(name);
+        let session = HostSessionRef::tmux(name);
+        let check = |presence: HostPresence, liveness: HostLiveness, legacy_live: bool| {
+            assert_eq!(TmuxHost.presence(session), presence);
+            assert_eq!(HostLiveness::from(TmuxHost.pane_liveness(name)), liveness);
+            assert_eq!(TmuxHost.liveness(session), liveness);
+            assert_eq!(
+                HostLiveness::from(tmux_diagnostics::tmux_session_pane_liveness(name)),
+                liveness
+            );
+            assert_eq!(
+                TmuxHost.legacy_has_session(name),
+                presence == HostPresence::Present
+            );
+            assert_eq!(
+                tmux_diagnostics::tmux_session_exists(name),
+                presence == HostPresence::Present
+            );
+            assert_eq!(TmuxHost.legacy_has_live_pane(name), legacy_live);
+            assert_eq!(legacy_collapse::tmux_live_pane_bool(name), legacy_live);
+            assert_eq!(
+                tmux_diagnostics::tmux_session_has_live_pane(name),
+                legacy_live
+            );
+            let calls = fake.take_calls();
+            assert!(!calls.is_empty());
+            let expected_target = format!("={name}:");
+            assert!(
+                calls.iter().all(|call| {
+                    let mut args = call.split_whitespace();
+                    matches!(args.next(), Some("has-session" | "list-panes"))
+                        && args.next() == Some("-t")
+                        && args.next() == Some(expected_target.as_str())
+                }),
+                "{calls:?}"
+            );
+        };
+        check(HostPresence::Present, HostLiveness::Live, true);
+        fake.mark_dead_pane();
+        check(HostPresence::Present, HostLiveness::DeadOrAbsent, false);
+        fake.mark_missing();
+        check(HostPresence::Missing, HostLiveness::DeadOrAbsent, false);
+        fake.fail_probes();
+        check(HostPresence::ProbeFailed, HostLiveness::ProbeError, false);
+        drop(fake);
+        drop(root);
+    }
 
     #[test]
     fn kill_methods_preserve_the_exact_audit_reason() {
