@@ -39,8 +39,8 @@ ProbeUnknown은 한 번 뒤 정상화한다. 영구 DB 장애, 권한 불일치,
 `python3 scripts/ci/statecharts_tlc.py --root <logs>/tlc-root --jobs 2`를 썼다.
 root에는 이 폴더의 **동일 바이트** 모델/cfg와 expected.tsv의 해당 10행을 복사했다.
 최종 checker는 **rc=0, 10 cfg, 29 TLC 호출, 4 GREEN/6 기대 RED, 예상 밖 위반 0**이다.
-각 cfg에 대한 직접 TLC 로그도 별도로 보존했다. 최초 실행의 경로 선택 오류 두 건과
-ReplayPending의 liveness 기대값 오판은 최종 결과로 덮어 보고하지 않고 원본 로그에 남겼다.
+각 cfg에 대한 직접 TLC 로그도 별도로 보존했다. 최초 root 선택/모듈명 오류 두 건은 도구 출력에,
+이후 ReplayPending의 liveness 기대값 오판은 `tlc-first.log`에 남아 있다. 최종 결과와 구분한다.
 
 | cfg | 기대/실제 safety 위반 | 기대/실제 PROPERTY 위반 |
 |---|---|---|

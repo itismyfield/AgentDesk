@@ -310,7 +310,7 @@ S12 전에는 Windows 기본 전환과 Process 경로 제거를 활성화하지 
 Core는 공통 포트가 안정된 뒤 C01→C02다. C01은 runtime 호출자가 없으면 cfg(test)로 두고 C02에서 활성화한다.
 DoD 3 최종 검사는 S07 이후와 D04/C02 이후 각각 수행한다. 소스/의존성이 바뀌면 이전 head 실행 증거를 재사용하지 않는다.
 
-## [U] 실측 항목 — 전부 win-desktop 측정 패킷으로 전달
+## 미확인 실측 항목 — 전부 win-desktop 측정 패킷으로 전달
 
 이번 레그에서 한 실측은 설치/버전의 읽기뿐이다. `/mnt/c/Windows/System32/cmd.exe /d /c where herdr`는
 `C:\Users\itism\.herdr\packages\standalone\releases\0.9.5-x86_64-pc-windows-msvc\herdr.exe`를 찾았고
