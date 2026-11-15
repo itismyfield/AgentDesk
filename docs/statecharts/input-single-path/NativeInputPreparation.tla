@@ -148,4 +148,25 @@ ClearRefusalKeepsOwnership == review.clearStep = 1 =>
     review.clearLease = 1 /\ review.clearRows = 1 /\ ~review.clearSignal
 ClearReadOnlyKeepsIntent == (review.clearStep = 1 /\ review.clearReadOnly) => review.clearIntents = 0
 ClearEventuallyProgresses == <>(review.clearLease = 0 /\ review.clearRows = 0 /\ review.clearHead)
-=====================================================================
+
+\* Registration followed by a Watcher Start may re-arm a generic deadline.
+BackstopRegister == /\ review.pc = 0
+                    /\ prepared' = TRUE /\ phase' = "Prepared"
+                    /\ review' = [review EXCEPT !.pc = 1]
+                    /\ UNCHANGED <<role, pin, anyKey, original, result, source, restored, admitted>>
+BackstopKey == /\ review.pc = 1 /\ anyKey' = TRUE /\ phase' = "Unknown"
+               /\ review' = [review EXCEPT !.pc = 2]
+               /\ UNCHANGED <<role, pin, prepared, original, result, source, restored, admitted>>
+BackstopWatcher == /\ review.pc = 2 /\ review' = [review EXCEPT !.pc = 3]
+                   /\ UNCHANGED BaseVars
+BackstopFinalize == /\ review.pc = 3
+                    /\ review' = [review EXCEPT !.pc = 4,
+                         !.stored = IF Mode = "BackstopBefore" THEN "Cancelled" ELSE @,
+                         !.clearLease = IF Mode = "BackstopBefore" THEN 0 ELSE @,
+                         !.clearRows = IF Mode = "BackstopBefore" THEN 0 ELSE @]
+                    /\ UNCHANGED BaseVars
+BackstopSpec == Init /\ [][BackstopRegister \/ BackstopKey \/ BackstopWatcher \/ BackstopFinalize]_vars
+                /\ WF_vars(BackstopRegister) /\ WF_vars(BackstopKey) /\ WF_vars(BackstopWatcher) /\ WF_vars(BackstopFinalize)
+NativeBackstopKeepsInput == review.stored = "None" /\ review.clearLease = 1 /\ review.clearRows = 1
+BackstopWasAttempted == <>(review.pc = 4)
+=============================================================================

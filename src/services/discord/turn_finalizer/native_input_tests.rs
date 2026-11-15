@@ -2898,3 +2898,127 @@ async fn native_8148_merge_real_custody_refuses_clear_before_and_after_v2_adopti
         drop(custody);
     }
 }
+
+#[tokio::test]
+async fn native_8148_supply_backstop_keeps_keyed_input_after_watcher_start_pg() {
+    use super::super::{actor_state, native_prepare};
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use std::sync::atomic::Ordering;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for watcher_deadline in [false, true] {
+        let f = Fixture::at(
+            runtime
+                .path()
+                .join(format!("runtime/backstop-{watcher_deadline}.json")),
+            81489860 + u64::from(watcher_deadline),
+            true,
+        );
+        let shared = b2b_shared(Some(pool.clone()));
+        let (key, actor) = b2b_active(&f, &shared).await;
+        let row = b2b_row(&f);
+        let mut ledger = HashMap::new();
+        let mut pending = HashMap::new();
+        let mut cached = None;
+        let start = |owner| super::super::FinalizeMsg::Start {
+            key,
+            provider: ProviderKind::Claude,
+            relay_owner: owner,
+            recovery_lease: None,
+            completion_admission_plan:
+                super::super::completion_admission::CompletionAdmissionPlan::Immediate,
+            shared: Arc::downgrade(&shared),
+        };
+        actor_state::handle_start(
+            start(super::super::RelayOwnerKind::None),
+            &mut ledger,
+            &mut pending,
+            &mut cached,
+        );
+        let (ack, rx) = oneshot::channel();
+        native_prepare::handle(
+            super::super::FinalizeMsg::NativeRegister {
+                key,
+                actor: Some(actor.clone()),
+                history: f.history.clone(),
+                namespace: "native-fixture".into(),
+                ticket: Box::new(f.ticket.clone()),
+                shared: shared.clone(),
+                ack,
+            },
+            &mut ledger,
+        )
+        .await;
+        let input = rx.await.unwrap().unwrap();
+        let (ack, rx) = oneshot::channel();
+        native_prepare::handle(
+            super::super::FinalizeMsg::NativeKeyed {
+                key,
+                input,
+                keyed: true,
+                history: f.history.clone(),
+                shared: shared.clone(),
+                ack,
+            },
+            &mut ledger,
+        )
+        .await;
+        rx.await.unwrap().unwrap();
+        actor_state::handle_start(
+            start(super::super::RelayOwnerKind::Watcher),
+            &mut ledger,
+            &mut pending,
+            &mut cached,
+        );
+        let entry = ledger.get_mut(&key.exact_key()).unwrap();
+        assert!(entry.watcher_backstop_deadline.is_some());
+        let due = Instant::now() - Duration::from_secs(1);
+        if watcher_deadline {
+            entry.watcher_backstop_deadline = Some(due);
+        } else {
+            entry.terminal_deadline = Some(due);
+        }
+        assert!(
+            super::super::watcher_backstop::watcher_backstop_turn_is_terminal(
+                &shared,
+                key,
+                &ProviderKind::Claude,
+                true
+            )
+        );
+        let mut events =
+            super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        super::super::reconcile::reconcile(&mut ledger, &mut pending, &shared).await;
+        let settlement = f
+            .history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap();
+        assert!(
+            settlement.outcome.is_none(),
+            "generic backstop created a native result"
+        );
+        assert!(!settlement.cleanup_complete);
+        assert_eq!(
+            ledger[&key.exact_key()].phase,
+            super::super::actor_state::Phase::Pending
+        );
+        let current = shared.mailbox(key.channel_id).snapshot().await;
+        assert!(Arc::ptr_eq(current.cancel_token.as_ref().unwrap(), &actor));
+        assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            serde_json::to_value(
+                super::super::super::inflight::load_inflight_state_read_only(
+                    &ProviderKind::Claude,
+                    key.channel_id.get()
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(row).unwrap()
+        );
+        assert!(events.try_recv().is_err());
+    }
+    pool.close().await;
+    db.drop().await;
+}

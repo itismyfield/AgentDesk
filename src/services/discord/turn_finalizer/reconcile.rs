@@ -27,7 +27,12 @@ async fn run_backstop_finalize(
     now: Instant,
 ) {
     match ledger.get_mut(&ledger_key) {
-        Some(entry) if entry.phase == Phase::Pending => entry.phase = Phase::Finalizing,
+        Some(entry)
+            if entry.phase == Phase::Pending
+                && entry.completion_admission.native_input.is_none() =>
+        {
+            entry.phase = Phase::Finalizing;
+        }
         _ => return,
     }
     // Backstop finalize: the deferred terminal originated from the watcher but
