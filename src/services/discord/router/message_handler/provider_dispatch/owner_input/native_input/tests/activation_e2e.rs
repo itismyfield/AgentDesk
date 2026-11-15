@@ -890,6 +890,11 @@ async fn isolated(kind: &str) {
             WAIT_CAP,
         )
         .await;
+        units.push("a-N2-1".into());
+        for i in 0..3 {
+            units.push(format!("f-N2-1-{i}"));
+        }
+        activation_units(&store, &posts, channel.get(), &units).await;
         assert_eq!(
             posts
                 .to(channel.get())
@@ -914,11 +919,6 @@ async fn isolated(kind: &str) {
                 .count(),
             1
         );
-        units.push("a-N2-1".into());
-        for i in 0..3 {
-            units.push(format!("f-N2-1-{i}"));
-        }
-        activation_units(&store, &posts, channel.get(), &units).await;
         resumed_writer.stop().await;
     }
     println!(
