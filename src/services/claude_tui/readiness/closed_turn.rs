@@ -8,9 +8,8 @@ use std::path::Path;
 const WINDOW: u64 = 256 * 1024;
 const QUIET_STOP: &str = r#"{"suppressOutput":true}"#;
 
-/// Whether `path` still ends on the closed turn its last activity began at or after `since`: the
-/// relay's quiet Stop as the only Stop output, then its summary, then `turn_duration`, then only
-/// records the readiness tail ignores. Any other or unknown shape proves nothing.
+/// Whether `path` ends on a turn closed at or after `since` by the relay's quiet Stop, the only Stop
+/// output and the one its summary names, then `turn_duration`; any other shape proves nothing.
 pub(super) fn closed_since(path: &Path, stamp: &Stamp, native: &str, since: DateTime<Utc>) -> bool {
     let Some(records) = tail(path, stamp) else {
         return false;
@@ -40,7 +39,8 @@ pub(super) fn closed_since(path: &Path, stamp: &Stamp, native: &str, since: Date
         }
         let output = &record["attachment"];
         if output["toolUseID"].as_str() == Some(stop) || output["hookEvent"] == "Stop" {
-            if !quiet_relay_stop(output, native) {
+            // A Stop output the summary does not name belongs to no turn this proves closed.
+            if output["toolUseID"].as_str() != Some(stop) || !quiet_relay_stop(output, native) {
                 return false;
             }
             relay += 1;

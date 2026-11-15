@@ -563,15 +563,27 @@ fn a_timed_out_hold_tells_an_unmoved_idle_source_from_a_running_turn() {
 /// The end of a turn as Claude writes it: the answer, each Stop hook output, the summary, the
 /// duration. `stops` are `(command, stdout)` pairs sharing the summary's tool use id.
 fn ended_turn(r: &Rig, answered: DateTime<Utc>, stops: &[(String, &str)], summary: Value) {
+    ended_turn_as(r, answered, stops, summary, &|_, id| json!(id));
+}
+/// `link` maps each Stop output's index and the summary's tool use id to the output's id; null drops it.
+fn ended_turn_as(
+    r: &Rig,
+    answered: DateTime<Utc>,
+    stops: &[(String, &str)],
+    summary: Value,
+    link: &dyn Fn(usize, &str) -> Value,
+) {
     let id = uuid::Uuid::new_v4().to_string();
     r.append(json!({"type":"assistant","timestamp":answered,
         "message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}));
-    for (command, stdout) in stops {
-        r.append(
-            json!({"type":"attachment","timestamp":Utc::now(),"attachment":{
-            "type":"hook_success","hookName":"Stop","hookEvent":"Stop","toolUseID":id,
-            "command":command,"stdout":stdout,"stderr":"","exitCode":0}}),
-        );
+    for (i, (command, stdout)) in stops.iter().enumerate() {
+        let mut output = json!({"type":"hook_success","hookName":"Stop","hookEvent":"Stop",
+            "command":command,"stdout":stdout,"stderr":"","exitCode":0});
+        let linked = link(i, &id);
+        if !linked.is_null() {
+            output["toolUseID"] = linked;
+        }
+        r.append(json!({"type":"attachment","timestamp":Utc::now(),"attachment":output}));
     }
     let mut summary = summary;
     summary["type"] = json!("system");
@@ -591,9 +603,8 @@ fn quiet_summary() -> Value {
 }
 const QUIET: &str = "{\"suppressOutput\":true}\n";
 
-// After a restart only this run's turn closed by the relay's quiet Stop, read back from the file,
-// stands in for the forgotten Stop; continuations, other hooks' outputs, unknown shapes and turns
-// of an earlier run keep the restart floor.
+// After a restart only this run's turn closed by the relay's quiet Stop its summary names stands in
+// for the forgotten Stop; continuations, other or unlinked outputs and earlier runs keep the floor.
 #[test]
 fn a_restart_trusts_only_this_runs_turn_closed_by_a_quiet_relay_stop() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -613,7 +624,23 @@ fn a_restart_trusts_only_this_runs_turn_closed_by_a_quiet_relay_stop() {
     assert!(!proof.resumed, "a turn of this run, not a resumed start");
     let flush = "{\"hookSpecificOutput\":{\"hookEventName\":\"Stop\",\"additionalContext\":\"x\"}}";
     let block = "{\"decision\":\"block\",\"reason\":\"x\"}";
-    let rejected: [(&str, &dyn Fn(&Rig)); 9] = [
+    let rejected: [(&str, &dyn Fn(&Rig)); 12] = [
+        ("a quiet relay Stop the summary does not name", &|r| {
+            let other = &|_, _: &str| json!("another-tool-use");
+            ended_turn_as(r, now(), &[(relay(r), QUIET)], quiet_summary(), other);
+            r.terminal();
+        }),
+        ("a quiet relay Stop with no tool use id", &|r| {
+            let unlinked = &|_, _: &str| Value::Null;
+            ended_turn_as(r, now(), &[(relay(r), QUIET)], quiet_summary(), unlinked);
+            r.terminal();
+        }),
+        ("another quiet relay Stop under a different id", &|r| {
+            let second = &|i, id: &str| json!(if i == 0 { id } else { "another-tool-use" });
+            let stops = [(relay(r), QUIET), (relay(r), QUIET)];
+            ended_turn_as(r, now(), &stops, quiet_summary(), second);
+            r.terminal();
+        }),
         ("memento flush continues the turn", &|r| {
             ended_turn(r, now(), &[(relay(r), flush)], quiet_summary());
             r.terminal();
@@ -737,9 +764,8 @@ fn marked(r: &Rig) {
     r.append(json!({"type":"permission-mode","permissionMode":"default"}));
 }
 
-// A resumed session the daemon restarts under, before or after a turn of its own, takes the first
-// input once on the tmux and the Herdr path; the record of its start stands in for the forgotten
-// hook only while nothing of this run followed it, so this run's closed turn still proves itself.
+// A resumed session restarted under, before or after a closed turn of its own, takes the first input
+// once on tmux and Herdr: its start record serves only while quiet, so that turn still proves itself.
 #[cfg(unix)]
 #[test]
 fn a_resumed_session_takes_its_first_input_once_after_a_restart() {
@@ -797,9 +823,8 @@ fn a_resumed_session_takes_its_first_input_once_after_a_restart() {
     }
 }
 
-// The recorded start admits nothing once a prompt or permission marker of this run follows it,
-// whether that landed before the restart or after the restore, and nothing for an execution,
-// launch or transcript file other than the one the hook was accepted for.
+// The recorded start admits nothing once this run's prompt or marker follows it, before the restart
+// or after the restore, nor for another execution, launch or transcript file.
 #[test]
 fn a_recorded_resume_start_proves_nothing_after_its_run_moved_or_for_another_execution() {
     let _root = crate::config::TestRuntimeRootGuard::new();
