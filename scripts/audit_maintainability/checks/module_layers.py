@@ -13,7 +13,7 @@ from .service_server_backflow import USE_TREE, _use_paths
 from .. import common
 from ..common import Finding
 from . import CheckSpec
-from .module_layer_baseline import load_mapping, project
+from .module_layer_baseline import _id, load_mapping, project
 
 SCHEMA_VERSION = 1
 ITEMS = {"fn", "struct", "enum", "union", "trait", "type", "const", "static"}
@@ -61,7 +61,36 @@ def _sccs(nodes, edges):
     return sorted(groups, key=lambda group: (-len(group), group))
 
 
-def _crate(root, repo, coverage, external, occurrences=None):
+def _call_expressions(source):
+    from ..rust_accessor_scan import pairs, tokens
+    try:
+        raw = source.read_text("utf-8")
+        ts = tokens(raw)
+        matched = pairs(ts)
+    except (OSError, UnicodeError, ValueError):
+        return {}
+    result = {}
+    for index, token in enumerate(ts):
+        if (token.kind != "code" or token.value != "!" or index + 1 not in matched
+                or index == 0 or not ts[index - 1].value.isidentifier()):
+            continue
+        start = index - 1
+        while start >= 2 and ts[start - 1].value == "::" and ts[start - 2].value.isidentifier():
+            start -= 2
+        offset = ts[start].start
+        if start and ts[start - 1].value == "$":
+            if ts[start].value == "crate":
+                offset = ts[start - 1].start
+            start -= 1
+        if start and ts[start - 1].value == "::":
+            start -= 1
+        spelling = [(t.kind, ("r#" if t.kind == "code" and raw.startswith("r#", t.start) else "") + t.value)
+                    for t in ts[start:matched[index + 1] + 1]]
+        result[offset] = _id("macro-expression", spelling)
+    return result
+
+
+def _crate(root, repo, coverage, external, occurrences=None, reference_expressions=False):
     inv = walk(root, repo, production=True)
     root, repo = root.resolve(), repo.resolve()
     rel_root = root.relative_to(repo).as_posix()
@@ -74,12 +103,14 @@ def _crate(root, repo, coverage, external, occurrences=None):
     coverage["cfg_conditions"].extend({"root": rel_root, "module": node(outer), "conditions": cfgs}
                                       for _source, outer, cfgs in inv.sources if cfgs)
     symbols, imports, exports, refs, macros = {}, {}, {}, [], {}
-    module_scopes, symbol_kinds, scoped_items = {}, {}, {}
+    module_scopes, symbol_kinds, scoped_items, expressions = {}, {}, {}, {}
     for source, outer, cfgs in inv.sources:
         tokens = inv.source_tokens[source]
         values = [t.value for t in tokens]
         offsets = [t.start for t in tokens]
         rel = source.relative_to(repo).as_posix()
+        if reference_expressions:
+            expressions.update({(rel, offset): value for offset, value in _call_expressions(source).items()})
         scopes, owners, metadata, openings = [], [outer], [], {}
         # Scope identities include the source file because literal includes can share a module.
         for i, token in enumerate(tokens):
@@ -294,8 +325,11 @@ def _crate(root, repo, coverage, external, occurrences=None):
         result, reason = resolve(path, owner, scope, macro=kind == "macro", namespace=namespace)
         site = f"{file}:{line}"
         if result is None or kind == "macro":
-            coverage["unresolved_references"].append({"source": node(owner), "site": site, "path": "::".join(path),
-                                                        "reason": reason if result is None else "macro expansion not evaluated"})
+            uncertainty = {"source": node(owner), "site": site, "path": "::".join(path),
+                           "reason": reason if result is None else "macro expansion not evaluated"}
+            if reference_expressions and kind == "macro":
+                uncertainty["expression"] = expressions.get((file, _offset))
+            coverage["unresolved_references"].append(uncertainty)
         if result is not None and result[0] is not None:
             target, canonical = result
             if target != owner:
@@ -338,7 +372,8 @@ def _crate(root, repo, coverage, external, occurrences=None):
     return nodes, edges, census
 
 
-def analyze(repo: Path, *, occurrence_projection: list[dict] | None = None) -> dict:
+def analyze(repo: Path, *, occurrence_projection: list[dict] | None = None,
+            reference_expressions=False) -> dict:
     """Measure every production crate root; unknown constructs always retain evidence."""
     coverage = {"reached_files": set(), "cfg_scope": "all-non-test-cfg-union", "read_failures": [],
                 "module_errors": [], "cfg_uncertainties": [], "unresolved_references": [], "cfg_conditions": [],
@@ -359,7 +394,7 @@ def analyze(repo: Path, *, occurrence_projection: list[dict] | None = None) -> d
     if not roots:
         coverage["module_errors"].append("no crate roots found")
     for root in roots:
-        found, dependencies, references = _crate(root, repo, coverage, external, occurrences)
+        found, dependencies, references = _crate(root, repo, coverage, external, occurrences, reference_expressions)
         nodes.update(found)
         for key, sites in dependencies.items():
             edges[key].update(sites)

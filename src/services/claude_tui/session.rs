@@ -41,6 +41,17 @@ static PERSISTED_CONTINUATION_SESSIONS: LazyLock<
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
 const PERSISTED_CONTINUATION_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+static RELAUNCH_MODEL_RESETS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Only a model reset relaunch asks its next launch to replace the resumed model.
+pub(crate) fn request_model_reset_for_relaunch(tmux: &str, session: &str) {
+    RELAUNCH_MODEL_RESETS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(tmux.to_string(), session.to_string());
+}
+
 fn continuation_persistence_cached(tmux_session_name: &str, session_id: &str) -> bool {
     let now = Instant::now();
     let mut persisted = PERSISTED_CONTINUATION_SESSIONS
@@ -298,6 +309,54 @@ pub struct ClaudeTuiLaunchConfig {
 }
 
 impl ClaudeTuiLaunchConfig {
+    #[cfg(any(unix, test))]
+    pub(crate) fn apply_relaunch_model_reset(
+        &mut self,
+        claude_home: Option<&Path>,
+    ) -> Option<String> {
+        let requested = RELAUNCH_MODEL_RESETS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&self.tmux_session_name)
+            .cloned();
+        if !self.resume
+            || self.model.as_deref().is_some_and(|model| !model.is_empty())
+            || requested.as_deref() != Some(self.session_id.as_str())
+        {
+            return requested;
+        }
+        let settings = claude_home
+            .map(Path::to_path_buf)
+            .or_else(super::transcript_tail::default_claude_home)
+            .and_then(|home| {
+                crate::services::provider_auth::read_json_path(&home.join("settings.json"))
+            });
+        self.model = Some(
+            settings
+                .as_ref()
+                .and_then(|settings| settings.get("model"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|model| !model.trim().is_empty())
+                .unwrap_or("default")
+                .to_string(),
+        );
+        requested
+    }
+
+    /// Keep the request on preparation failure; a durable launch consumes its own request once.
+    #[cfg(any(unix, test))]
+    pub(crate) fn complete_relaunch_model_reset(&self, requested_session: Option<&str>) {
+        let Some(requested_session) = requested_session else {
+            return;
+        };
+        let mut requests = RELAUNCH_MODEL_RESETS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if requests.get(&self.tmux_session_name).map(String::as_str) == Some(requested_session) {
+            requests.remove(&self.tmux_session_name);
+        }
+    }
+
     pub fn session_files(&self) -> ClaudeTuiSessionFiles {
         ClaudeTuiSessionFiles {
             hook_settings_path: PathBuf::from(crate::services::tmux_common::session_temp_path(
@@ -396,9 +455,8 @@ pub fn build_claude_tui_args(
     args.push("--settings".to_string());
     args.push(hook_settings_path.display().to_string());
 
-    // A resumed session keeps its last model unless one is named; `default` is the account default.
     let model = config.model.as_deref().filter(|value| !value.is_empty());
-    if let Some(model) = model.or(config.resume.then_some("default")) {
+    if let Some(model) = model {
         args.push("--model".to_string());
         args.push(model.to_string());
     }
@@ -608,17 +666,83 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "--model"));
     }
 
-    // A resumed session would keep the model it last ran; without a model it is sent back to the
-    // account default, while a new session needs no selector.
+    // Ordinary resumes keep the last session model without overriding user settings.
     #[test]
-    fn tui_args_name_the_default_model_when_resuming_without_one() {
+    fn tui_args_omit_model_when_resuming_without_one() {
         let mut config = sample_config();
         config.model = None;
         config.resume = true;
 
         let args = build_claude_tui_args(&config, Path::new("/tmp/settings.json"));
 
-        assert!(args.windows(2).any(|pair| pair == ["--model", "default"]));
+        assert!(!args.iter().any(|arg| arg == "--model"));
+    }
+
+    #[test]
+    fn model_reset_relaunch_uses_user_settings_and_is_consumed_once() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("settings.json"), r#"{"model":"opus"}"#).unwrap();
+        let mut config = sample_config();
+        config.tmux_session_name = "model-reset-user-settings".into();
+        config.model = None;
+        config.resume = true;
+        request_model_reset_for_relaunch(&config.tmux_session_name, &config.session_id);
+        let reset = config.apply_relaunch_model_reset(Some(home.path()));
+        let args = build_claude_tui_args(&config, Path::new("/tmp/settings.json"));
+        assert!(args.windows(2).any(|pair| pair == ["--model", "opus"]));
+        config.complete_relaunch_model_reset(reset.as_deref());
+        config.model = None;
+        let reset = config.apply_relaunch_model_reset(Some(home.path()));
+        assert!(reset.is_none());
+        let args = build_claude_tui_args(&config, Path::new("/tmp/settings.json"));
+        assert!(!args.iter().any(|arg| arg == "--model"));
+    }
+
+    #[test]
+    fn model_reset_relaunch_defaults_when_settings_cannot_name_a_model() {
+        let home = tempfile::tempdir().unwrap();
+        let mut config = sample_config();
+        config.tmux_session_name = "model-reset-unavailable-settings".into();
+        config.resume = true;
+        for settings in [
+            None,
+            Some("{}"),
+            Some("{broken"),
+            Some(r#"{"model":null}"#),
+            Some(r#"{"model":17}"#),
+            Some(r#"{"model":" "}"#),
+        ] {
+            if let Some(settings) = settings {
+                fs::write(home.path().join("settings.json"), settings).unwrap();
+            }
+            config.model = None;
+            request_model_reset_for_relaunch(&config.tmux_session_name, &config.session_id);
+            let reset = config.apply_relaunch_model_reset(Some(home.path()));
+            let args = build_claude_tui_args(&config, Path::new("/tmp/settings.json"));
+            assert!(args.windows(2).any(|pair| pair == ["--model", "default"]));
+            config.complete_relaunch_model_reset(reset.as_deref());
+        }
+    }
+
+    #[test]
+    fn model_reset_relaunch_never_changes_a_fresh_or_different_session_or_channel_model() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("settings.json"), r#"{"model":"opus"}"#).unwrap();
+        for (resume, session, model) in [
+            (false, "same", None),
+            (true, "different", None),
+            (true, "same", Some("sonnet")),
+        ] {
+            let mut config = sample_config();
+            config.tmux_session_name = "model-reset-scope".into();
+            config.session_id = session.into();
+            config.resume = resume;
+            config.model = model.map(str::to_string);
+            request_model_reset_for_relaunch(&config.tmux_session_name, "same");
+            let reset = config.apply_relaunch_model_reset(Some(home.path()));
+            assert_eq!(config.model.as_deref(), model);
+            config.complete_relaunch_model_reset(reset.as_deref());
+        }
     }
 
     #[test]

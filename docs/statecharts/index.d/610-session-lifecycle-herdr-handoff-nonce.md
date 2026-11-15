@@ -1,0 +1,2 @@
+key: 610-session-lifecycle-herdr-handoff-nonce
+| `session-lifecycle` (Herdr handoff nonce after a tmux switch, #8177) | `94194fc65b` | Before: an unlogged tmux resume marker refuses every Herdr start after that tmux ended; a Hangul name never closes a live tmux | a mismatch passes only for a tmux-marked execution proven ended. Nine TLC configs: Before 2 RED Delivered, Fixed GREEN, NoHostCheck/NoEndProof RED NoCapture. [Report](session-lifecycle/herdr-handoff-nonce.report.md). |

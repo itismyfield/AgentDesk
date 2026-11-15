@@ -33,9 +33,11 @@ pub(super) fn first_boundary(cause: BindingCause, parented: bool, unread: bool) 
             candidates: vec![0],
         },
         (BindingCause::Startup | BindingCause::Clear, _) => Boundary::Owed { from: 0 },
-        (BindingCause::Unknown, _) | (_, false) => Boundary::Pending {
-            candidates: vec![0],
-        },
+        (BindingCause::Unknown | BindingCause::SameSessionVerified, _) | (_, false) => {
+            Boundary::Pending {
+                candidates: vec![0],
+            }
+        }
         _ => Boundary::Undecided,
     }
 }

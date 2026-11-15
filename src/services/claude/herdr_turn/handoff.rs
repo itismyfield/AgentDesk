@@ -63,16 +63,16 @@ pub(super) fn launched_source(
         .map_err(|e| launch_error("auth_overlay", e))?;
     let auth = crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay)
         .map_err(|e| launch_error("auth_overlay", e))?;
+    let mut earlier = ports.earlier_tmux(logical);
     let requested = if turn.force_fresh {
         None
     } else {
-        current_session(turn.channel_id, logical, turn.session_id)
+        current_session(turn.channel_id, logical, turn.session_id, earlier.as_mut())
             .map_err(|e| launch_error("current_session", e))?
     };
     let prior = resumed_session(turn, &overlay, requested.as_deref())
         .map_err(|e| launch_error("resume_source", e))?;
     if prior.is_some() {
-        let mut earlier = ports.earlier_tmux(logical);
         if earlier.liveness() != session_handoff::Liveness::Ended {
             runtime
                 .block_on(session_handoff::pinned_tmux::end(
@@ -87,7 +87,7 @@ pub(super) fn launched_source(
     let latest = if turn.force_fresh {
         None
     } else {
-        current_session(turn.channel_id, logical, turn.session_id)
+        current_session(turn.channel_id, logical, turn.session_id, earlier.as_mut())
             .map_err(|e| launch_error("current_session", e))?
     };
     let resumed = resumed_session(turn, &overlay, latest.as_deref())
@@ -137,6 +137,7 @@ fn current_session(
     channel: u64,
     logical: &str,
     original: Option<&str>,
+    earlier: &mut dyn session_handoff::EarlierExecution,
 ) -> Result<Option<String>, String> {
     use crate::services::tui_prompt_dedupe::binding_events as events;
     use std::os::unix::fs::MetadataExt;
@@ -179,9 +180,12 @@ fn current_session(
         use crate::services::tui_prompt_dedupe::binding_context::{
             SpawnNonceMarker, observe_spawn_nonce_marker,
         };
-        // A failed create can leave a marker without logging a native execution.
+        // A failed create can leave a marker without logging a native execution. A tmux resume
+        // of the same transcript logs nothing either, so its marker is no live owner once it ended.
         match (nonce, observe_spawn_nonce_marker(logical)) {
-            (Some(recorded), SpawnNonceMarker::Known(current)) if recorded != current => {
+            (Some(recorded), SpawnNonceMarker::Known(current))
+                if recorded != current && !ended_tmux_execution(logical, earlier) =>
+            {
                 return Err("handoff binding belongs to another execution".into());
             }
             (_, SpawnNonceMarker::Unreadable) => {
@@ -210,6 +214,17 @@ fn current_session(
         Some(source.session_id)
     })
 }
+
+/// Whether the marker names a tmux execution whose session is proven gone. Herdr writes its own
+/// host marker before its nonce, so a Herdr create never reads as tmux here.
+fn ended_tmux_execution(
+    logical: &str,
+    earlier: &mut dyn session_handoff::EarlierExecution,
+) -> bool {
+    crate::services::claude::host_gate::tmux_marked(logical)
+        && earlier.liveness() == session_handoff::Liveness::Ended
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +388,16 @@ mod tests {
                 .join(format!("{}.log", self.channel))
         }
     }
+    struct Earlier(Liveness);
+    impl session_handoff::EarlierExecution for Earlier {
+        fn liveness(&mut self) -> Liveness {
+            self.0.clone()
+        }
+        fn send_exit(&mut self) -> session_handoff::ExitSend {
+            panic!("the binding check never types into the old pane")
+        }
+    }
+    use session_handoff::Liveness;
     impl Drop for Log {
         fn drop(&mut self) {
             events::forget_channel_for_tests(self.channel);
@@ -405,13 +430,27 @@ mod tests {
             payload_session_id: continued.clone(),
             payload_transcript_path: Some(source.path.display().to_string()),
         });
-        assert!(current_session(log.channel, log.logical, Some(&argv)).is_err());
+        assert!(
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&argv),
+                &mut Earlier(Liveness::Running)
+            )
+            .is_err()
+        );
         log.push(events::BindingTarget::Resolved {
             pending_seq: 2,
             source,
         });
         assert_eq!(
-            current_session(log.channel, log.logical, Some(&argv)).unwrap(),
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&argv),
+                &mut Earlier(Liveness::Running)
+            )
+            .unwrap(),
             Some(continued.clone())
         );
         log.push(events::BindingTarget::Rejected {
@@ -420,7 +459,13 @@ mod tests {
             reason: "audit only".into(),
         });
         assert_eq!(
-            current_session(log.channel, log.logical, Some(&argv)).unwrap(),
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&argv),
+                &mut Earlier(Liveness::Running)
+            )
+            .unwrap(),
             Some(continued)
         );
         drop(root_guard);
@@ -460,24 +505,52 @@ mod tests {
                     .is_none()
             );
             assert_eq!(
-                current_session(log.channel, log.logical, Some(&original)).unwrap(),
+                current_session(
+                    log.channel,
+                    log.logical,
+                    Some(&original),
+                    &mut Earlier(Liveness::Running)
+                )
+                .unwrap(),
                 Some(original.clone())
             );
             if let Some(nonce) = &nonce {
                 std::fs::write(&marker, "b".repeat(32)).unwrap();
-                assert!(current_session(log.channel, log.logical, Some(&original)).is_err());
+                assert!(
+                    current_session(
+                        log.channel,
+                        log.logical,
+                        Some(&original),
+                        &mut Earlier(Liveness::Running)
+                    )
+                    .is_err()
+                );
                 std::fs::write(&marker, nonce).unwrap();
             } else {
                 std::fs::write(&marker, "b".repeat(32)).unwrap();
                 assert_eq!(
-                    current_session(log.channel, log.logical, Some(&original)).unwrap(),
+                    current_session(
+                        log.channel,
+                        log.logical,
+                        Some(&original),
+                        &mut Earlier(Liveness::Running)
+                    )
+                    .unwrap(),
                     Some(original.clone())
                 );
                 std::fs::remove_file(&marker).unwrap();
             }
             std::fs::rename(&source.path, source.path.with_extension("old")).unwrap();
             std::fs::write(&source.path, b"{}\n").unwrap();
-            assert!(current_session(log.channel, log.logical, Some(&original)).is_err());
+            assert!(
+                current_session(
+                    log.channel,
+                    log.logical,
+                    Some(&original),
+                    &mut Earlier(Liveness::Running)
+                )
+                .is_err()
+            );
         }
     }
     #[test]
@@ -485,14 +558,76 @@ mod tests {
         let mut log = Log::new(8077012);
         let original = uuid::Uuid::new_v4().to_string();
         assert_eq!(
-            current_session(log.channel, log.logical, Some(&original)).unwrap(),
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&original),
+                &mut Earlier(Liveness::Running)
+            )
+            .unwrap(),
             Some(original.clone())
         );
         let source = log.source(&original);
         log.push(events::BindingTarget::Source(source.clone()));
         std::fs::remove_file(&source.path).unwrap();
-        assert!(current_session(log.channel, log.logical, Some(&original)).is_err());
+        assert!(
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&original),
+                &mut Earlier(Liveness::Running)
+            )
+            .is_err()
+        );
         std::fs::write(log.path(), b"not-json\n").unwrap();
-        assert!(current_session(log.channel, log.logical, Some(&original)).is_err());
+        assert!(
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&original),
+                &mut Earlier(Liveness::Running)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn an_unlogged_tmux_resume_marker_yields_the_binding_only_once_its_tmux_ended() {
+        let _root_guard = crate::config::TestRuntimeRootGuard::new();
+        let log = Log::new(8177001);
+        let original = uuid::Uuid::new_v4().to_string();
+        let source = log.source(&original);
+        let marker = crate::services::tmux_common::session_temp_path(log.logical, "spawn_nonce");
+        let host = crate::services::tmux_common::session_temp_path(log.logical, "host_kind");
+        std::fs::write(&marker, "a".repeat(32)).unwrap();
+        crate::services::tui_prompt_dedupe::register_tmux_channel(log.logical, log.channel);
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            log.logical,
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: source.path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(original.clone()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        // The later tmux resume of the same transcript replaced the marker without a record.
+        std::fs::write(&marker, "b".repeat(32)).unwrap();
+        let judged = |host_kind: &str, liveness: Liveness| {
+            std::fs::write(&host, host_kind).unwrap();
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&original),
+                &mut Earlier(liveness),
+            )
+        };
+        assert_eq!(judged("tmux", Liveness::Ended), Ok(Some(original.clone())));
+        let refused = Err("handoff binding belongs to another execution".to_string());
+        assert_eq!(judged("tmux", Liveness::Running), refused);
+        assert_eq!(judged("tmux", Liveness::Unknown("probe".into())), refused);
+        assert_eq!(judged("herdr", Liveness::Ended), refused);
     }
 }

@@ -2160,6 +2160,33 @@ fn local_slash_control_note_path_dedupes_and_seals_dropped_half() {
 }
 
 #[test]
+fn a_compacted_row_the_display_dedupe_drops_still_ends_the_compact_command_slot() {
+    let sess = format!("local-control-compacted-slot-{:p}", &0u8 as *const u8);
+    let command = local_control_prompt(&sess, "/compact", "compact-slot-command");
+    assert!(prepare_local_only_slash_control_note(&command, "/compact").is_some());
+    let compacted = local_control_prompt(
+        &sess,
+        "<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>",
+        "compact-slot-output",
+    );
+    assert!(
+        prepare_local_only_slash_control_note(&compacted, "/compact").is_none(),
+        "the output row shares the command's kind inside the dedupe window"
+    );
+    let cost = "<local-command-stdout>Total cost: $1.00</local-command-stdout>";
+    let unpaired = local_control_prompt(&sess, cost, "compact-slot-cost");
+    assert_eq!(
+        prepare_local_only_slash_control_note(&unpaired, "local-command-stdout"),
+        Some(format_slash_command_control_note(
+            &sess,
+            "local-command-stdout",
+            cost
+        )),
+        "a later output row without a command row is not shown under /compact"
+    );
+}
+
+#[test]
 fn local_slash_control_note_allows_same_kind_after_window() {
     let sess = format!("local-control-note-window-{:p}", &0u8 as *const u8);
     let first = local_control_prompt(&sess, "/compact", "compact-window-a");

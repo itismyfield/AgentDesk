@@ -52,7 +52,7 @@ pub(super) fn prepare(
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
     let (claude_bin, _resolution) = resolve_claude_binary()?;
-    let launch_config = crate::services::claude_tui::session::ClaudeTuiLaunchConfig {
+    let mut launch_config = crate::services::claude_tui::session::ClaudeTuiLaunchConfig {
         tmux_session_name: tmux_session_name.to_string(),
         working_dir: working_dir_path.to_path_buf(),
         claude_bin,
@@ -63,6 +63,7 @@ pub(super) fn prepare(
         model: launch.model.map(str::to_string),
         resume,
     };
+    let model_reset = launch_config.apply_relaunch_model_reset(claude_home);
     use crate::services::claude_tui::session;
     // A resume under an effort restart leaves the first submit to that restart's continuation.
     let owner_first = resume && session::owner_first_submit(resolved_session_id);
@@ -84,6 +85,7 @@ pub(super) fn prepare(
         "bash {}",
         shell_escape(&launch_script_path.display().to_string())
     );
+    launch_config.complete_relaunch_model_reset(model_reset.as_deref());
     Ok((prepared, command))
 }
 
