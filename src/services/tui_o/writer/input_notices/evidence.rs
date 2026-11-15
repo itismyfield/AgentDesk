@@ -78,6 +78,20 @@ pub(crate) fn before_migration_floor(
     })
 }
 
+// An older binding alone does not date a row from a source absent at the freeze.
+pub(crate) fn has_frozen_record_boundary(
+    state: &crate::services::tui_o::store::ledger::input_notices::NoticeState,
+    input: &NoticeEvidence,
+) -> bool {
+    state.migration.as_ref().is_some_and(|snapshot| {
+        snapshot
+            .sources
+            .iter()
+            .any(|source| source.source == input.record.source)
+            || written_at(&input.raw_record).is_some()
+    })
+}
+
 fn written_at(raw: &[u8]) -> Option<chrono::DateTime<chrono::Utc>> {
     let row: serde_json::Value = serde_json::from_slice(raw).ok()?;
     let at = chrono::DateTime::parse_from_rfc3339(row.get("timestamp")?.as_str()?).ok()?;
