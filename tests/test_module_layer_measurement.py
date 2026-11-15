@@ -31,6 +31,13 @@ class ModuleLayerMeasurementTests(unittest.TestCase):
             self.assertEqual(list(_call_expressions(source).values()), expected)
             source.write_text(original.replace("});", "};"))
             self.assertEqual(_call_expressions(source), {})
+            for before, after in (("external::call!(r#value)", "external::call!(value)"),
+                                  ("$callee!(value)", "callee!(value)")):
+                source.write_text(before)
+                expected = list(_call_expressions(source).values())
+                self.assertEqual(len(expected), 1)
+                source.write_text(after)
+                self.assertNotEqual(list(_call_expressions(source).values()), expected)
 
     def test_closure_test_parameter_keeps_production_body_and_reports_uncertainty(self):
         bodies = (

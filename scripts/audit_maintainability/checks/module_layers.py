@@ -64,7 +64,8 @@ def _sccs(nodes, edges):
 def _call_expressions(source):
     from ..rust_accessor_scan import pairs, tokens
     try:
-        ts = tokens(source.read_text("utf-8"))
+        raw = source.read_text("utf-8")
+        ts = tokens(raw)
         matched = pairs(ts)
     except (OSError, UnicodeError, ValueError):
         return {}
@@ -76,12 +77,16 @@ def _call_expressions(source):
         start = index - 1
         while start >= 2 and ts[start - 1].value == "::" and ts[start - 2].value.isidentifier():
             start -= 2
-        if start and ts[start - 1].value == "$" and ts[start].value == "crate":
-            start -= 1
         offset = ts[start].start
+        if start and ts[start - 1].value == "$":
+            if ts[start].value == "crate":
+                offset = ts[start - 1].start
+            start -= 1
         if start and ts[start - 1].value == "::":
             start -= 1
-        result[offset] = _id("macro-expression", [(t.kind, t.value) for t in ts[start:matched[index + 1] + 1]])
+        spelling = [(t.kind, ("r#" if t.kind == "code" and raw.startswith("r#", t.start) else "") + t.value)
+                    for t in ts[start:matched[index + 1] + 1]]
+        result[offset] = _id("macro-expression", spelling)
     return result
 
 
