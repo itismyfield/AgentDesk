@@ -313,10 +313,14 @@ input-single-path/InputPathReadyResumeRestartCut.cfg	InputPath	-	ReadyPendingEve
 input-single-path/InputPathReadyResumeRestartDurable.cfg	InputPath	-	-
 input-single-path/InputPathReadyResumeRestartDurableCut.cfg	InputPath	-	-
 input-single-path/InputPathReadyResumeRestartDurableLate.cfg	InputPath	-	ReadyPendingEventuallyExecutes,ReadyPendingEventuallySettles,ReadyRestartedIdleEventuallyReceives,ReadyResumedIdleEventuallyReceives
+input-single-path/InputPathReadyResumeRestartDurableMarker.cfg	InputPath	-	-
+input-single-path/InputPathReadyResumeRestartDurableMarkerL0.cfg	InputPath	ReadyNoIdleRunningInjection	-
 input-single-path/InputPathReadyResumeRestartDurableNoQuiet.cfg	InputPath	ReadyNoIdleRunningInjection	-
 input-single-path/InputPathReadyResumeRestartDurablePerson.cfg	InputPath	-	-
 input-single-path/InputPathReadyResumeRestartGap.cfg	InputPath	-	ReadyPendingEventuallyExecutes,ReadyResumedIdleEventuallyReceives
 input-single-path/InputPathReadyResumeRestartPerson.cfg	InputPath	-	-
+input-single-path/InputPathReadyResumeRestartTmux.cfg	InputPath	-	-
+input-single-path/InputPathReadyResumeRestartTmuxBefore.cfg	InputPath	-	ReadyPendingEventuallyExecutes,ReadyRestartedIdleEventuallyReceives,ReadyResumedIdleEventuallyReceives
 input-single-path/InputPathReadySuppressedCompact.cfg	InputPath	-	-
 input-single-path/InputPathReadySuppressedStop.cfg	InputPath	-	-
 input-single-path/InputPathReadyUnread.cfg	InputPath	-	-

@@ -23,16 +23,24 @@ IdleRestartRestored == Mode \in {"ready-idle-restart-after", "ready-idle-restart
 IdleRestart == IdleRestartFloor \/ IdleRestartRestored
 ResumeRestartRestored == Mode \in {"ready-resume-restart-durable", "ready-resume-restart-durable-cut",
                                    "ready-resume-restart-durable-late", "ready-resume-restart-durable-person",
-                                   "ready-resume-restart-durable-no-quiet"}
+                                   "ready-resume-restart-durable-no-quiet", "ready-resume-restart-tmux",
+                                   "ready-resume-restart-durable-marker", "ready-resume-restart-durable-marker-l0"}
+\* A tmux resume before its start was recorded: the restart finds no record to restore from.
+ResumeRestartUnrecorded == Mode = "ready-resume-restart-tmux-before"
+\* A permission marker lands after the start, before or after the restart. The recorded start length
+\* keeps it a turn of this run; the L0 mutant measures from the length at restore and absorbs one
+\* that landed before the restart.
+Marker == Mode \in {"ready-resume-restart-durable-marker", "ready-resume-restart-durable-marker-l0"}
+MarkerL0 == Mode = "ready-resume-restart-durable-marker-l0"
 LateRestore == Mode = "ready-resume-restart-durable-late"
 Restored == IdleRestartRestored \/ ResumeRestartRestored
-RetainsUnproven == IdleRestart \/ ResumeRestartRestored \/
+RetainsUnproven == IdleRestart \/ ResumeRestartRestored \/ ResumeRestartUnrecorded \/
                    Mode \in {"ready-resume-restart-after", "ready-resume-restart-person",
                              "ready-resume-restart-any-timeout", "ready-resume-restart-cut"}
 ResumeRestart == Mode \in {"ready-resume-restart-after", "ready-resume-restart-person",
                            "ready-resume-restart-any-timeout", "ready-resume-restart-cut",
                            "ready-resume-restart-before"}
-ResumeAfter == ResumeRestart \/ ResumeRestartRestored \/
+ResumeAfter == ResumeRestart \/ ResumeRestartRestored \/ ResumeRestartUnrecorded \/
                Mode \in {"ready-resume-meta-after", "ready-resume-cut-after", "ready-resume-person-after"}
 ResumeNoQuiet == Mode \in {"ready-resume-no-quiet", "ready-resume-restart-durable-no-quiet"}
 ResumeCut == Mode \in {"ready-resume-cut-before", "ready-resume-cut-after", "ready-resume-restart-cut",
@@ -81,8 +89,8 @@ Initial ==
      head |-> 0, proofEpoch |-> 0, proofTurn |-> 0,
      nativeStarts |-> IF Race THEN 1 ELSE 0,
      restarts |-> IF Mode = "ready-restart" \/ ResumeRestart \/ IdleRestart \/ ResumeRestartRestored
-                  THEN 1 ELSE 0,
-     durable |-> 0, restore |-> "none",
+                     \/ ResumeRestartUnrecorded THEN 1 ELSE 0,
+     durable |-> 0, restore |-> "none", base |-> 0, marks |-> IF Marker THEN 1 ELSE 0, marked |-> FALSE,
      restored |-> "no", notices |-> [i \in Ids |-> 0], badExpire |-> FALSE,
      compactPending |-> Compact, compacts |-> 0,
      compactFence |-> FALSE, compactEvidence |-> FALSE, compactReady |-> FALSE,
@@ -99,11 +107,12 @@ TerminalEligible ==
     /\ r.tail = "hard" \/ (r.tail = "summary" /\ r.stopBoundary = r.turn)
 \* The start alone admits an empty transcript. Over old history it admits only while no turn of
 \* this run exists; the no-quiet mutant drops that condition.
-ResumedStart == r.started /\ ((ResumeAfter /\ r.turn = 0) \/ ResumeNoQuiet)
+ResumedStart == r.started /\ ((ResumeAfter /\ r.turn = r.base) \/ ResumeNoQuiet)
 CurrentEvidence ==
     /\ (r.observed = "Idle" /\ r.seenEpoch = r.epoch /\ r.seenTurn = r.turn) \/ ResumedStart
     /\ (~r.needsStart \/ r.started \/ r.restored = "passed")
-    /\ r.restored # "floor"
+    \* A restored resume start keeps the restart floor; only the start itself admits the first input.
+    /\ r.restored # "floor" \/ (ResumeRestartRestored /\ ResumedStart)
     /\ ~r.continuing
     /\ ~r.compactFence
     /\ (r.started /\ r.turn = 0 /\ r.history = "none") \/ ResumedStart \/ r.compactReady \/
@@ -153,13 +162,14 @@ ObservedNow == IF r.tail = "summary" THEN "Idle"
                ELSE IF r.turn = 0 /\ r.history = "cut" THEN "Running" ELSE r.phase
 \* The same observation restores this execution's logged resume start while no turn of this run
 \* exists (the no-quiet mutant drops that check); the late placement only past an Idle observer.
-RestoresStart == r.restore = "pending" /\ (r.turn = 0 \/ ResumeNoQuiet)
+RestoresStart == r.restore = "pending"
+                 /\ (r.turn = 0 \/ ResumeNoQuiet \/ (MarkerL0 /\ r.marked /\ r.turn = 1))
                  /\ (~LateRestore \/ ObservedNow = "Idle")
 Observe ==
     /\ r' = [r EXCEPT !.observed = ObservedNow,
                      !.restore = IF RestoresStart THEN "done" ELSE @,
                      !.started = @ \/ RestoresStart,
-                     !.restored = IF RestoresStart THEN "no" ELSE @,
+                     !.base = IF RestoresStart /\ MarkerL0 THEN r.turn ELSE @,
                      !.seenEpoch = r.epoch, !.seenTurn = r.turn,
                      !.softStage = IF Suppressed /\ r.softStage = 2 THEN 3 ELSE @,
                      !.awake = IF NoWake \/ (ClearHeld /\ r.heldOnce) \/ (ModalWatch /\ r.modalHeld) THEN @ ELSE TRUE]
@@ -275,6 +285,12 @@ BusyConsume(i) ==
     /\ r.q[i] = "native-queued" /\ r.phase = "Idle"
     /\ r' = [r EXCEPT !.q[i] = "sent", !.effects[i] = @ + 1,
                      !.phase = "Running", !.turn = @ + 1, !.tail = "assistant"]
+\* An untimestamped permission marker after the start opens a turn of this run.
+PermissionMarker ==
+    /\ r.marks > 0 /\ r.phase = "Idle" /\ r.turn = 0
+    /\ r.started \/ r.restore = "pending"
+    /\ r' = [r EXCEPT !.marks = 0, !.marked = TRUE, !.phase = "Running", !.turn = 1,
+                     !.tail = "permission", !.terminal = 0]
 \* A person types into the resumed pane before the queued input goes.
 PersonTurn ==
     /\ r.personTurns > 0 /\ r.phase = "Idle" /\ (r.started \/ r.restored = "floor")
@@ -319,7 +335,7 @@ FinishSelfCompactFence ==
     /\ r' = [r EXCEPT !.compactFence = FALSE, !.compactReady = TRUE, !.awake = TRUE]
 Next == CloseModal \/ WatchModal \/ WatchHeld \/ ChangeClearPending \/ PublishClearFile \/ CompactCompletionEvidence \/ FinishSelfCompactFence \/ PollDialog \/ PermissionRecord \/ SessionStart \/ Finish \/ Observe \/ Stop \/ OldStop \/ RecoverDraft \/ HumanClears \/
         SuppressStop \/ SoftSummary \/ LateAssistant \/
-        NativeStart \/ Revoke \/ Submit \/ Restart \/ CompactSubmit \/ IdleWake \/ PersonTurn \/
+        NativeStart \/ Revoke \/ Submit \/ Restart \/ CompactSubmit \/ IdleWake \/ PersonTurn \/ PermissionMarker \/
         (\E i \in Ids : Hold(i) \/ Expire(i) \/ Prepare(i) \/ SelectBusy(i) \/ BusyInject(i) \/ BusyPublish(i) \/ ReexposeBusy(i) \/ BusyAbsorb(i) \/ BusyConsume(i) \/ Receipt(i) \/ Replay(i))
 Fairness == WF_r(CloseModal) /\ WF_r(WatchModal) /\ WF_r(WatchHeld) /\ WF_r(ChangeClearPending) /\ WF_r(PublishClearFile) /\ WF_r(CompactCompletionEvidence) /\ WF_r(FinishSelfCompactFence) /\ WF_r(PollDialog) /\ WF_r(PermissionRecord) /\ WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
             WF_r(SuppressStop) /\ WF_r(SoftSummary) /\ WF_r(LateAssistant) /\
@@ -360,7 +376,7 @@ RetainedOnce == \A i \in Ids : r.notices[i] <= 1 /\ (r.notices[i] = 1 <=> r.q[i]
 ExpiryOnlyUnproven == ~r.badExpire
 PendingEventuallySettles == \A i \in Ids : (r.q[i] \in {"queued", "held", "prepared"}) ~> (r.effects[i] >= 1 \/ r.q[i] = "retained")
 \* After a daemon restart an idle session with an empty composer still takes an input.
-RestartedIdleEventuallyReceives == (IdleRestart \/ ResumeRestartRestored) =>
+RestartedIdleEventuallyReceives == (IdleRestart \/ ResumeRestartRestored \/ ResumeRestartUnrecorded) =>
     ((r.epoch > 1 /\ r.phase = "Idle" /\ r.draft = "Empty") ~> (\E i \in Ids : r.effects[i] >= 1))
 ResumedIdleEventuallyReceives == ResumeHistory =>
     ((r.started /\ r.phase = "Idle" /\ r.draft = "Empty") ~> (\E i \in Ids : r.effects[i] >= 1))
