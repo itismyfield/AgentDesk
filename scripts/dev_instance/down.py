@@ -96,7 +96,10 @@ def _quiesce(manifest, owner, run, deadline):
         if owner.get('root') != str(root) or not isinstance(owner.get('nonce'), str) or not owner['nonce']:
             raise InstanceError("cleanup owner identity mismatch")
         if (root / keeper.SOCKET_FILE).exists():
-            owner = keeper.request(root, owner['nonce'], 'down', timeout=max(.01, deadline-time.monotonic()))
+            try:
+                owner = keeper.request(root, owner['nonce'], 'down', timeout=max(.01, deadline-time.monotonic()))
+            except EOFError:
+                raise lifecycle.CleanupPending(None) from None
         if (owner.get('root') != str(root) or owner.get('known_resources_closed') is not True
                 or owner.get('gateway_exit_confirmed') is not True):
             raise lifecycle.CleanupPending(None)

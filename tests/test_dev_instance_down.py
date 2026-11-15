@@ -99,6 +99,32 @@ class InstanceDownTests(unittest.TestCase):
         self.assertTrue(credential.exists())
         self.assertTrue((self.root/'receipt.json').exists())
 
+    def test_keeper_disconnect_is_hold_without_deletion(self):
+        import socket
+        import threading
+        from scripts.dev_instance import keeper
+        from scripts.dev_instance.files import publish_runtime
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(self.root/keeper.SOCKET_FILE))
+            listener.listen(1)
+            listener.settimeout(5)
+            metadata = (self.root/keeper.SOCKET_FILE).lstat()
+            sockets = {str(self.root/keeper.SOCKET_FILE):(metadata.st_dev,metadata.st_ino)}
+            publish_runtime(self.root, keeper.OWNER_FILE,
+                {'root':str(self.root),'nonce':'fixture','sockets':sockets},live_sockets=sockets)
+            def disconnect():
+                with listener.accept()[0] as channel:
+                    channel.settimeout(5)
+                    keeper.receive(channel)
+            worker = threading.Thread(target=disconnect)
+            worker.start()
+            result = self.fixture.cli('down','--instance',self.root.name)
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(result.returncode,6,result.stdout+result.stderr)
+        self.assertEqual(json.loads(result.stdout)['status'],'HOLD')
+        self.assertTrue((self.root/'receipt.json').exists())
+
     def test_missing_gateway_ack_is_hold_even_with_closed_resources(self):
         dead = subprocess.Popen([sys.executable, '-c', 'pass'])
         dead.wait(timeout=5)
