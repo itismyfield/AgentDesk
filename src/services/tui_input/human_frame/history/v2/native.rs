@@ -220,7 +220,7 @@ pub(crate) fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, St
         .collect()
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 fn evidence_registrations(
     state: &Snapshot,
 ) -> Result<Vec<crate::services::tui_o::writer::input_facts::native::Registration>, String> {
@@ -484,7 +484,7 @@ impl Registry {
         })
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     pub(crate) fn native_evidence_registrations(
         &self,
     ) -> Result<Vec<crate::services::tui_o::writer::input_facts::native::Registration>, String>
@@ -550,7 +550,7 @@ impl Registry {
         })
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     pub(crate) fn record_native_outcome_at_stamp(
         &self,
         namespace: &str,

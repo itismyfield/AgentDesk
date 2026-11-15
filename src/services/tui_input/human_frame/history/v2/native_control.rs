@@ -65,6 +65,81 @@ impl Registry {
     pub(crate) fn same_control_registry(&self, other: &Self) -> bool {
         self.path == other.path
     }
+    pub(crate) fn try_native_settlement(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+    ) -> Result<Settlement, String> {
+        self.try_control_transaction(|snapshot| {
+            let (registration, _) = snapshot
+                .locate(namespace, &ticket.key)
+                .ok_or("native registration missing")?;
+            let current = registration
+                .native_settlement
+                .as_ref()
+                .ok_or("native ticket missing")?;
+            current.validate(registration)?;
+            if current.ticket != *ticket {
+                return Err("native settlement ticket mismatch".into());
+            }
+            Ok(current.clone())
+        })
+    }
+    pub(crate) fn try_ack_native_cleanup(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+        outcome: &Outcome,
+    ) -> Result<bool, String> {
+        self.try_control_transaction(|snapshot| {
+            let (registration, _) = snapshot
+                .locate(namespace, &ticket.key)
+                .ok_or("native registration missing")?;
+            registration
+                .native_settlement
+                .as_ref()
+                .ok_or("native ticket missing")?
+                .validate(registration)?;
+            let current = settlement_mut(snapshot, namespace, &ticket.key)?;
+            if current.ticket != *ticket
+                || current.outcome.as_ref() != Some(outcome)
+                || (outcome.disposition == Disposition::WithdrawnNotExecuted
+                    && !current.withdrawal_notice)
+            {
+                return Err("native cleanup admission missing".into());
+            }
+            let first = !current.cleanup_complete;
+            current.cleanup_complete = true;
+            snapshot.version = 3;
+            Ok(first)
+        })
+    }
+    pub(crate) fn try_native_boot_record(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+    ) -> Result<RestoredRecord, String> {
+        self.try_control_transaction(|snapshot| {
+            let (registration, entry) = snapshot
+                .locate(namespace, &ticket.key)
+                .ok_or("native registration missing")?;
+            let settlement = registration
+                .native_settlement
+                .clone()
+                .ok_or("native ticket missing")?;
+            settlement.validate(registration)?;
+            if settlement.ticket != *ticket {
+                return Err("native boot record ticket changed".into());
+            }
+            Ok(RestoredRecord {
+                namespace: namespace.into(),
+                settlement,
+                registration: registration.clone(),
+                entry: entry.cloned(),
+            })
+        })
+    }
+
     pub(crate) fn try_native_not_sent(
         &self,
         namespace: &str,

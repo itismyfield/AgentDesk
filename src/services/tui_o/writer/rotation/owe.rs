@@ -5,8 +5,8 @@ use std::collections::VecDeque;
 
 use super::fork_lineage::{Class, RowIds};
 use super::{
-    BindingEvents, BindingRecord, BindingTarget, Boundary, Derived, Sources, UnitDeriver,
-    claude_boundary,
+    BindingEvents, BindingRecord, BindingTarget, Boundary, CaptureBatch, CleanupWitness, Derived,
+    Fingerprint, Instant, SourceCapture, Sources, SystemTime, UnitDeriver, claude_boundary,
 };
 use crate::services::tui_o::shadow::{CapturedRecord, SourceId};
 use crate::services::tui_o::store::rotation::SourceLink;
@@ -44,6 +44,10 @@ impl<B: BindingEvents> Sources<B> {
         record: &CapturedRecord,
         identity_version: u32,
     ) {
+        #[cfg(unix)]
+        if let Some(native) = &mut self.native {
+            native.append(source, record);
+        }
         let key = source_key(source);
         let Some(link) = self.rotation.links.get(&key).cloned() else {
             owed.owe(
@@ -204,5 +208,235 @@ impl<B: BindingEvents> Sources<B> {
         Ok(RowIds::of(self.provider, &record.line).is_some_and(|row| {
             !row.is_empty() && lineage.class_from(&row, from) == Class::Inherited
         }))
+    }
+}
+
+pub(super) struct Reader {
+    pub(super) source: SourceId,
+    /// `None` once a retired source's watch has ended or its file is gone.
+    pub(super) capture: Option<SourceCapture>,
+    /// A batch the full spool refused; it is retried before the source is read again.
+    pub(super) pending: Option<CaptureBatch>,
+    pub(super) captured_any: bool,
+    /// Last length seen and since when it held after the successor's first record.
+    pub(super) quiet: Option<(u64, Instant)>,
+    pub(super) rotated_at: Option<Instant>,
+    pub(super) growth_alarmed: bool,
+    /// Set while retired: the source is only stat-watched until then.
+    pub(super) watch_until: Option<Instant>,
+    /// The old source's length at its rotation; its successor waits until it is read and spooled.
+    pub(super) drain_to: Option<u64>,
+    pub(super) dormant: Option<Instant>,
+    pub(super) idle: Option<(Fingerprint, Instant)>,
+    pub(super) observation: Option<CleanupWitness>,
+    pub(super) persisted_at: Option<SystemTime>,
+    pub(super) parked: bool,
+}
+impl Reader {
+    pub(super) fn new(source: SourceId, capture: Option<SourceCapture>) -> Self {
+        Self {
+            source,
+            capture,
+            pending: None,
+            captured_any: false,
+            quiet: None,
+            rotated_at: None,
+            growth_alarmed: false,
+            watch_until: None,
+            drain_to: None,
+            dormant: None,
+            idle: None,
+            observation: None,
+            persisted_at: None,
+            parked: false,
+        }
+    }
+
+    pub(super) fn reading(&self) -> bool {
+        self.capture.is_some() && self.watch_until.is_none()
+    }
+
+    pub(super) fn backlog_end(&self) -> Option<u64> {
+        let capture = self.capture.as_ref().filter(|_| self.watch_until.is_none());
+        capture.and_then(|capture| capture.file_len().ok())
+    }
+}
+
+#[derive(Default)]
+pub(super) struct NativeSources {
+    #[cfg(unix)]
+    seeds: std::collections::HashMap<
+        SourceId,
+        Result<super::super::input_facts::native::Projection, String>,
+    >,
+    #[cfg(unix)]
+    revision: u64,
+}
+
+pub(super) fn open_native(
+    native: &mut Option<NativeSources>,
+    channel: u64,
+    provider: crate::services::tui_o::shadow::ShadowProvider,
+    cursor: &crate::services::tui_o::store::spool::Cursor,
+) -> std::io::Result<SourceCapture> {
+    #[cfg(unix)]
+    if let Some(native) = native {
+        let binding = crate::services::tui_o::shadow::SourceBinding {
+            channel_id: channel,
+            provider,
+            source: cursor.source.clone(),
+        };
+        let (capture, seed) = super::super::input_facts::native::Projection::reopen(
+            binding,
+            cursor.captured_through,
+            &cursor.prefix_hash,
+        )?;
+        native.seeds.insert(cursor.source.clone(), seed);
+        return Ok(capture);
+    }
+    let _ = (native, channel, provider);
+    SourceCapture::reopen(
+        cursor.source.clone(),
+        cursor.captured_through,
+        &cursor.prefix_hash,
+    )
+}
+
+pub(super) fn reopen_native(
+    native: &mut Option<NativeSources>,
+    channel: u64,
+    provider: crate::services::tui_o::shadow::ShadowProvider,
+    cursor: &crate::services::tui_o::store::spool::Cursor,
+) -> Result<SourceCapture, super::Reopen> {
+    open_native(native, channel, provider, cursor).map_err(|error| match error.kind() {
+        std::io::ErrorKind::InvalidData => super::Reopen::Changed,
+        _ => super::Reopen::Unread(error),
+    })
+}
+
+#[cfg(unix)]
+impl NativeSources {
+    fn append(&mut self, source: &SourceId, record: &CapturedRecord) {
+        if let Some(seed) = self.seeds.get_mut(source) {
+            if let Ok(projection) = seed
+                && let Err(error) = projection.append(record)
+            {
+                *seed = Err(error);
+            }
+        }
+    }
+
+    fn observe(
+        &self,
+        channel: u64,
+        source: &SourceId,
+        origin: &super::super::input_notices::NoticeOrigin,
+        snapshot: super::super::actor::native_input::Snapshot,
+    ) -> Result<super::super::input_facts::native::Observation, String> {
+        use super::super::input_facts::native::{Observation, registrations_fingerprint};
+        let projection = self
+            .seeds
+            .get(source)
+            .ok_or("native prefix absent")?
+            .as_ref()
+            .map_err(Clone::clone)?;
+        let binding = crate::services::tui_o::shadow::SourceBinding {
+            channel_id: channel,
+            provider: crate::services::tui_o::shadow::ShadowProvider::Claude,
+            source: source.clone(),
+        };
+        let registrations: Vec<_> = snapshot
+            .registrations
+            .into_iter()
+            .filter(|r| r.matches(&binding))
+            .collect();
+        Ok(Observation {
+            binding,
+            generation: snapshot.generation,
+            binding_seq: origin.binding_seq,
+            revision: self.revision,
+            through: projection.through(),
+            registrations_fingerprint: registrations_fingerprint(&registrations)?,
+            evidence: projection.evidence(&registrations)?,
+        })
+    }
+}
+
+impl<B: BindingEvents> Sources<B> {
+    pub(crate) fn with_native_inputs(mut self, enabled: bool) -> Self {
+        if enabled && self.provider == crate::services::tui_o::shadow::ShadowProvider::Claude {
+            self.native = Some(NativeSources::default());
+        }
+        self
+    }
+
+    pub(super) fn reopen_native(
+        &mut self,
+        cursor: &crate::services::tui_o::store::spool::Cursor,
+    ) -> Result<SourceCapture, super::Reopen> {
+        reopen_native(&mut self.native, self.channel, self.provider, cursor)
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn offer_native(
+        &mut self,
+        port: &super::super::actor::native_input::NativePort,
+    ) {
+        port.inner.retry().await;
+        let sources: Vec<_> = self
+            .readers
+            .iter()
+            .filter(|r| !self.suspension.contains(&r.source))
+            .map(|r| r.source.clone())
+            .collect();
+        for source in sources {
+            let Some(native) = &mut self.native else {
+                return;
+            };
+            native.revision = native.revision.saturating_add(1);
+            let through = match native.seeds.get(&source) {
+                Some(Ok(seed)) => seed.through(),
+                _ => continue,
+            };
+            let record = CapturedRecord {
+                start: 0,
+                end: through,
+                line: Vec::new(),
+            };
+            let Ok(origin) = self.notice_origin(&source, &record) else {
+                continue;
+            };
+            let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
+                continue;
+            };
+            let Ok(observed) =
+                self.native
+                    .as_ref()
+                    .unwrap()
+                    .observe(self.channel, &source, &origin, snapshot)
+            else {
+                continue;
+            };
+            for index in 0..observed.evidence.len() {
+                let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
+                    break;
+                };
+                let Ok(current) =
+                    self.native
+                        .as_ref()
+                        .unwrap()
+                        .observe(self.channel, &source, &origin, snapshot)
+                else {
+                    break;
+                };
+                if let Err(error) = port
+                    .inner
+                    .offer(observed.clone(), current, index, origin.clone())
+                    .await
+                {
+                    tracing::debug!(channel=self.channel, %error, "native input offer held");
+                }
+            }
+        }
     }
 }

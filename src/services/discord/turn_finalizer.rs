@@ -609,10 +609,10 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         actor_state::handle_start(msg, &mut ledger, &mut pending_admission, &mut cached_shared);
                     }
                     #[cfg(unix)]
-                    msg @ (FinalizeMsg::NativeRegister { .. } | FinalizeMsg::NativeKeyed { .. } | FinalizeMsg::NativeScope { .. } | FinalizeMsg::NativeSettled { .. } | FinalizeMsg::NativeBoot { .. } | FinalizeMsg::NativeBootReady { .. }) => {
+                    msg @ (FinalizeMsg::NativeRemember { .. } | FinalizeMsg::NativeInputs { .. } | FinalizeMsg::NativeRegister { .. } | FinalizeMsg::NativeKeyed { .. } | FinalizeMsg::NativeScope { .. } | FinalizeMsg::NativeSettled { .. } | FinalizeMsg::NativeBoot { .. } | FinalizeMsg::NativeBootReady { .. }) => {
                         native_prepare::handle(msg, &mut ledger).await;
                     }
-                    #[cfg(all(test, unix))]
+                    #[cfg(unix)]
                     FinalizeMsg::Native { work, history, shared, ack } => {
                         actor_state::handle_native(*work, history, shared, ack, &mut ledger).await;
                     }

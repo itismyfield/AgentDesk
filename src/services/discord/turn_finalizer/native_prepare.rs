@@ -131,6 +131,24 @@ impl TurnFinalizer {
 
 pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, LedgerEntry>) {
     match msg {
+        FinalizeMsg::NativeRemember { work, ack } => {
+            let _ = ack.send(super::terminal_handler::native_supply::remember(
+                ledger, &work,
+            ));
+        }
+        FinalizeMsg::NativeInputs { channel, ack } => {
+            let inputs = ledger
+                .values()
+                .filter(|e| e.turn_key.channel_id == channel)
+                .flat_map(|e| e.native_inputs.values().cloned())
+                .collect();
+            let restored = ledger
+                .values()
+                .filter(|e| e.turn_key.channel_id == channel)
+                .flat_map(|e| e.native_boot_inputs.values().cloned())
+                .collect();
+            let _ = ack.send((inputs, restored));
+        }
         FinalizeMsg::NativeBoot {
             inputs,
             step,
@@ -257,3 +275,7 @@ pub(super) fn boot_pending(entry: &LedgerEntry) -> bool {
         .values()
         .any(|input| !input.settled)
 }
+
+pub(in crate::services::discord) use super::terminal_handler::native_supply::port as supply_port;
+
+pub(super) use native_restore::validate_record as validate_saved_record;

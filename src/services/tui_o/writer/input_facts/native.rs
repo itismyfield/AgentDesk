@@ -87,7 +87,7 @@ pub(crate) struct Registration {
     pub(crate) receipts: Vec<String>,
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) fn registrations_fingerprint(registrations: &[Registration]) -> Result<String, String> {
     serde_json::to_vec(registrations)
         .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
@@ -113,7 +113,7 @@ impl Registration {
 }
 
 /// A candidate batch is read-only; its stamp is rechecked before any future actor mutation.
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Observation {
     pub(crate) binding: SourceBinding,
@@ -251,6 +251,20 @@ mod projection {
             registrations: &[Registration],
         ) -> Result<Vec<Evidence>, String> {
             reduce(&self.binding, &self.facts, registrations)
+        }
+        pub(crate) fn append(
+            &mut self,
+            record: &crate::services::tui_o::shadow::CapturedRecord,
+        ) -> Result<(), String> {
+            if record.end <= self.through {
+                return Ok(());
+            }
+            if record.start != self.through
+                || record.end != record.start + record.line.len() as u64 + 1
+            {
+                return Err("native capture has a gap or overlapping record".into());
+            }
+            self.read(&record.line)
         }
         pub(crate) fn through(&self) -> u64 {
             self.through

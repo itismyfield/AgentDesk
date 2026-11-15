@@ -156,6 +156,16 @@ pub(super) enum FinalizeMsg {
         ack: oneshot::Sender<Result<(), String>>,
     },
     #[cfg(unix)]
+    NativeRemember {
+        work: Box<super::terminal_handler::NativeCleanup>,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    #[cfg(unix)]
+    NativeInputs {
+        channel: ChannelId,
+        ack: oneshot::Sender<super::terminal_handler::native_supply::Custody>,
+    },
+    #[cfg(unix)]
     NativeScope {
         key: TurnKey,
         actor: usize,
@@ -175,7 +185,7 @@ pub(super) enum FinalizeMsg {
         completion_admission_plan: CompletionAdmissionPlan,
         shared: std::sync::Weak<SharedData>,
     },
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     Native {
         work: Box<super::terminal_handler::NativeCleanup>,
         history: crate::services::tui_input::human_frame::history::v2::Registry,
@@ -317,7 +327,7 @@ pub(super) fn handle_start(
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 impl TurnFinalizer {
     pub(super) async fn submit_native(
         &self,
@@ -341,7 +351,7 @@ impl TurnFinalizer {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(super) async fn handle_native(
     work: super::terminal_handler::NativeCleanup,
     history: crate::services::tui_input::human_frame::history::v2::Registry,
@@ -361,6 +371,9 @@ pub(super) async fn handle_native(
         entry.completion_admission.native_input = Some(true);
         entry.completion_admission.note_mailbox_released();
         entry.completion_admission.queue_eligible_published = true;
+    }
+    if result.as_ref() == Ok(&true) {
+        super::terminal_handler::native_supply::finish_follower(ledger, &work);
     }
     let _ = ack.send(result);
 }

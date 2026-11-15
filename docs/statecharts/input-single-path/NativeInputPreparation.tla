@@ -7,7 +7,7 @@ vars == <<BaseVars, review>>
 Init == /\ phase = "Intent" /\ role \in {"Primary", "Follower"}
         /\ pin = "None" /\ prepared = FALSE /\ anyKey = FALSE /\ original = TRUE
         /\ result = "None" /\ source = "PreSource" /\ restored = FALSE /\ admitted = FALSE
-        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {Mode \in {"ClearRouteBefore", "ClearRouteFixed"}}), clearDenied : {Mode \notin {"ClearRouteBefore", "ClearRouteFixed"}}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed", "ClearRouteBefore", "ClearRouteFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}]
+        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed", "SupplyPrefixBefore", "SupplyPrefixFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {Mode \in {"ClearRouteBefore", "ClearRouteFixed"}}), clearDenied : {Mode \notin {"ClearRouteBefore", "ClearRouteFixed"}}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed", "ClearRouteBefore", "ClearRouteFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}, supplyTicket : {Mode \notin {"SupplyTicketBefore", "SupplyTicketFixed"}}, supplySource : {Mode \notin {"SupplySourceBefore", "SupplySourceFixed"}}, supplyKey : {Mode \notin {"SupplyKeyBefore", "SupplyKeyFixed"}}, supplyStamp : {Mode \notin {"SupplyStampBefore", "SupplyStampFixed"}}]
 Prepare == /\ phase = "Intent"
            /\ phase' = "Prepared" /\ prepared' = TRUE
            /\ pin' = IF role = "Primary" \/ Mode = "BorrowBusy" THEN "Primary" ELSE "None"
@@ -169,4 +169,90 @@ BackstopSpec == Init /\ [][BackstopRegister \/ BackstopKey \/ BackstopWatcher \/
                 /\ WF_vars(BackstopRegister) /\ WF_vars(BackstopKey) /\ WF_vars(BackstopWatcher) /\ WF_vars(BackstopFinalize)
 NativeBackstopKeepsInput == review.stored = "None" /\ review.clearLease = 1 /\ review.clearRows = 1
 BackstopWasAttempted == <>(review.pc = 4)
-=============================================================================
+
+SupplyCaptured == /\ review.pc = 0
+                  /\ prepared' = TRUE /\ phase' = "Unknown"
+                  /\ anyKey' = review.supplyKey
+                  /\ source' = IF review.supplySource THEN "Bound" ELSE "PreSource"
+                  /\ pin' = IF role = "Primary" THEN "Primary" ELSE "None"
+                  /\ review' = [review EXCEPT !.pc = 1, !.prefixReads = 1, !.seed = IF review.prefixHash /\ review.prefixFifo THEN "Ready" ELSE "Unavailable"]
+                  /\ UNCHANGED <<role, original, result, restored, admitted>>
+SupplyRegistration == /\ review.pc = 1
+                      /\ review' = [review EXCEPT !.pc = 2, !.version = 1,
+                           !.readVersion = IF review.supplyStamp THEN 1 ELSE 0, !.receipts = {"two"}]
+                      /\ UNCHANGED BaseVars
+OOffer == /\ review.pc = 2 /\ Mode \notin {"SupplyQueueBefore", "SupplyWithdrawBefore"}
+          /\ (review.seed = "Ready" \/ Mode = "SupplyPrefixBefore")
+          /\ review' = [review EXCEPT !.pc = 3]
+          /\ UNCHANGED BaseVars
+SupplyValid == prepared /\ anyKey /\ source = "Bound" /\ review.supplyTicket /\ review.readVersion = review.version
+               /\ review.seed = "Ready" /\ review.prefixHash /\ review.prefixFifo
+SupplyBypass == Mode \in {"SupplyTicketBefore", "SupplySourceBefore", "SupplyKeyBefore", "SupplyStampBefore", "SupplyPrefixBefore"}
+NativePreparedAdmit == /\ review.pc = 3 /\ (SupplyValid \/ SupplyBypass)
+                       /\ admitted' = TRUE /\ review' = [review EXCEPT !.pc = 4]
+                       /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, result, source, restored>>
+SupplyRejected == /\ ((review.pc = 3 /\ ~SupplyValid /\ ~SupplyBypass)
+                       \/ (review.pc = 2 /\ review.seed # "Ready" /\ Mode # "SupplyPrefixBefore"))
+                   /\ review' = [review EXCEPT !.pc = 11]
+                   /\ UNCHANGED BaseVars
+SupplyResult == /\ review.pc = 4 /\ admitted
+                /\ result' = IF Mode = "SupplyWithdrawFixed" THEN "WithdrawnNotExecuted" ELSE "Executed"
+                /\ review' = [review EXCEPT !.pc = 5, !.firstProof = 1, !.proofs = {"two"}]
+                /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, source, restored, admitted>>
+SupplyActorCAS == /\ review.pc = 5 /\ result # "None"
+                  /\ review' = [review EXCEPT !.pc = 6, !.clearLease = 0]
+                  /\ UNCHANGED BaseVars
+SupplyRowCAS == /\ review.pc = 6 /\ review.clearLease = 0
+                /\ review' = [review EXCEPT !.pc = 7, !.clearRows = 0]
+                /\ UNCHANGED BaseVars
+SupplyWake == /\ review.pc = 7 /\ review.clearRows = 0
+              /\ review' = [review EXCEPT !.pc = 8, !.clearHead = TRUE]
+              /\ UNCHANGED BaseVars
+ForeignTypedRun == /\ review.pc >= 8 /\ review.pc < 11
+                   /\ review' = [review EXCEPT !.pc = @ + 1,
+                        !.firstProof = IF Mode = "ForeignTypedRunsBefore" THEN 2 ELSE @,
+                        !.proofs = IF Mode = "ForeignTypedRunsBefore" THEN {"two", "foreign"} ELSE @]
+                   /\ UNCHANGED BaseVars
+SupplySpec == Init /\ [][SupplyCaptured \/ SupplyRegistration \/ OOffer \/ NativePreparedAdmit \/ SupplyRejected
+              \/ SupplyResult \/ SupplyActorCAS \/ SupplyRowCAS \/ SupplyWake \/ ForeignTypedRun]_vars
+              /\ WF_vars(SupplyCaptured) /\ WF_vars(SupplyRegistration) /\ WF_vars(OOffer)
+              /\ WF_vars(NativePreparedAdmit) /\ WF_vars(SupplyRejected) /\ WF_vars(SupplyResult)
+              /\ WF_vars(SupplyActorCAS) /\ WF_vars(SupplyRowCAS) /\ WF_vars(SupplyWake) /\ WF_vars(ForeignTypedRun)
+SupplyTyped == admitted => SupplyValid
+SupplyOrder == /\ (review.clearLease = 0 => result # "None")
+               /\ (review.clearRows = 0 => review.clearLease = 0)
+               /\ (review.clearHead => review.clearRows = 0)
+SupplyResultEventually == <>(result # "None")
+SupplyLeaseEventuallyFree == <>(review.clearLease = 0)
+SupplyHeadEventuallyInjected == <>review.clearHead
+SupplyRejectedEventually == <>(review.pc = 11)
+NoForeignResponse == review.firstProof <= 1 /\ review.proofs \subseteq {"two"}
+\* Restored custody accepts an authentic result without minting a current live actor.
+SupplyBootCapture == /\ review.pc = 0 /\ restored' = TRUE
+                     /\ result' = IF Mode \in {"SupplySavedBefore", "SupplySavedFixed"} THEN "Executed" ELSE "None"
+                     /\ review' = [review EXCEPT !.pc = 1, !.clearLease = 0,
+                          !.firstProof = IF Mode \in {"SupplySavedBefore", "SupplySavedFixed"} THEN 1 ELSE 0,
+                          !.prefixReads = 1]
+                     /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, source, admitted>>
+SupplyBootOffer == /\ review.pc = 1
+                   /\ admitted' = (Mode = "SupplyBootBefore")
+                   /\ review' = [review EXCEPT !.pc = 2]
+                   /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, result, source, restored>>
+SupplyBootResult == /\ review.pc = 2 /\ result' = "Executed"
+                    /\ review' = [review EXCEPT !.pc = 3,
+                         !.firstProof = IF result = "None" \/ Mode = "SupplySavedBefore" THEN @ + 1 ELSE @]
+                    /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, source, restored, admitted>>
+SupplyBootRow == /\ review.pc = 3 /\ result # "None"
+                 /\ review' = [review EXCEPT !.pc = 4, !.clearRows = 0]
+                 /\ UNCHANGED BaseVars
+SupplyBootWake == /\ review.pc = 4 /\ review.clearRows = 0
+                  /\ review' = [review EXCEPT !.pc = 5, !.clearHead = TRUE]
+                  /\ UNCHANGED BaseVars
+SupplyBootSpec == Init /\ [][SupplyBootCapture \/ SupplyBootOffer \/ SupplyBootResult \/ SupplyBootRow \/ SupplyBootWake]_vars
+                  /\ WF_vars(SupplyBootCapture) /\ WF_vars(SupplyBootOffer) /\ WF_vars(SupplyBootResult)
+                  /\ WF_vars(SupplyBootRow) /\ WF_vars(SupplyBootWake)
+SupplyBootNoRemint == ~admitted
+SupplySavedExactlyOnce == review.firstProof <= 1
+SupplyBootEventuallyFree == <>(review.clearRows = 0 /\ review.clearHead)
+
+====

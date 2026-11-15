@@ -327,7 +327,7 @@ pub(super) async fn handle_policy_close(
 }
 
 /// An inactive native admission carries separate result and cleanup authority.
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 #[derive(Clone)]
 struct NativeAdmission {
     evidence: crate::services::tui_o::writer::input_facts::native::Evidence,
@@ -335,7 +335,7 @@ struct NativeAdmission {
     cleanup: Option<(TurnKey, Arc<CancelToken>)>,
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 impl NativeAdmission {
     fn capture(
         observed: &crate::services::tui_o::writer::input_facts::native::Observation,
@@ -346,70 +346,7 @@ impl NativeAdmission {
         captured_actor: Option<&Arc<CancelToken>>,
         current_actor: Option<&Arc<CancelToken>>,
     ) -> Result<Self, String> {
-        use crate::services::tui_input::human_frame::history::v2::native::Disposition;
-        if observed.binding != current.binding
-            || observed.generation != current.generation
-            || observed.binding_seq != current.binding_seq
-            || observed.revision != current.revision
-            || observed.through != current.through
-            || observed.registrations_fingerprint != current.registrations_fingerprint
-        {
-            return Err("native observation superseded".into());
-        }
-        let evidence = observed
-            .evidence
-            .get(index)
-            .ok_or("native candidate missing")?;
-        let source = evidence
-            .ticket
-            .source
-            .as_ref()
-            .ok_or("native source missing")?;
-        source.validate(&evidence.ticket.key)?;
-        if observed.binding.provider != crate::services::tui_o::shadow::ShadowProvider::Claude
-            || source.target != *current_target
-            || evidence.namespace.is_empty()
-            || evidence.ticket.channel_id != observed.binding.channel_id
-            || source.provider != "claude"
-            || source.session_id != observed.binding.source.session_id
-            || source.transcript != observed.binding.source.path
-            || source.file != [observed.binding.source.dev, observed.binding.source.ino]
-            || evidence.range.0 < source.offset
-            || evidence.range.0 >= evidence.range.1
-            || evidence.range.1 > observed.through
-        {
-            return Err("native proof source/range mismatch".into());
-        }
-        match evidence.disposition {
-            Disposition::Executed | Disposition::Cancelled => {
-                let membership = evidence
-                    .membership_range
-                    .ok_or("native membership missing")?;
-                let closer = evidence.closer_range.ok_or("native closer missing")?;
-                if evidence.run.is_none()
-                    || membership.0 < source.offset
-                    || membership.0 >= membership.1
-                    || membership.1 != evidence.range.0
-                    || closer.0 < membership.1
-                    || closer.0 >= closer.1
-                    || closer.1 != evidence.range.1
-                {
-                    return Err("native run boundary mismatch".into());
-                }
-            }
-            Disposition::WithdrawnNotExecuted | Disposition::TransferredUnverified => {
-                if evidence.run.is_some()
-                    || evidence.membership_range.is_some()
-                    || evidence.closer_range.is_some()
-                    || evidence.membership_row.is_some()
-                {
-                    return Err("native withdrawal carries run authority".into());
-                }
-            }
-            Disposition::OperatorReleased => {
-                return Err("native observation is not operator release".into());
-            }
-        }
+        let evidence = native_supply::source_evidence(observed, current, index, current_target)?;
         let cleanup = match &evidence.ticket.owning_episode {
             None => None,
             Some(episode) => {
@@ -428,7 +365,7 @@ impl NativeAdmission {
             }
         };
         Ok(Self {
-            evidence: evidence.clone(),
+            evidence,
             registrations_fingerprint: observed.registrations_fingerprint.clone(),
             cleanup,
         })
@@ -445,6 +382,7 @@ pub(super) struct NativePrepared {
     key: TurnKey,
     actor: Option<Arc<CancelToken>>,
     started_before: std::time::Instant,
+    row_witness: Option<super::super::inflight::InflightTurnState>,
 }
 
 #[cfg(unix)]
@@ -502,6 +440,7 @@ impl NativePrepared {
             key,
             actor,
             started_before,
+            row_witness: None,
         })
     }
 
@@ -550,7 +489,7 @@ impl NativePrepared {
         Ok(())
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     async fn admit(
         &self,
         observed: &crate::services::tui_o::writer::input_facts::native::Observation,
@@ -604,7 +543,7 @@ impl NativePrepared {
 }
 
 /// A captured native result retains its row debt until the snapshot CAS succeeds.
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 #[derive(Clone)]
 pub(super) struct NativeCleanup {
     admission: NativeAdmission,
@@ -612,7 +551,7 @@ pub(super) struct NativeCleanup {
     started_before: std::time::Instant,
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 impl NativeCleanup {
     pub(super) fn primary_key(&self) -> Option<TurnKey> {
         self.admission.cleanup.as_ref().map(|(key, _)| *key)
@@ -743,7 +682,7 @@ impl NativeCleanup {
         use crate::services::tui_input::human_frame::history::v2::native::Disposition;
         let evidence = &self.admission.evidence;
         let outcome = self.outcome()?;
-        let settlement = history.native_settlement(&evidence.namespace, &evidence.ticket)?;
+        let settlement = history.try_native_settlement(&evidence.namespace, &evidence.ticket)?;
         if settlement.outcome.as_ref() != Some(&outcome) {
             return Err("native durable result missing".into());
         }
@@ -768,7 +707,7 @@ impl NativeCleanup {
                     && token.is_some_and(|current| Arc::ptr_eq(current, actor))
             });
             if !owns_lease && self.row_snapshot(key, token.is_none())?.is_none() {
-                history.ack_native_cleanup(&evidence.namespace, &evidence.ticket, &outcome)?;
+                history.try_ack_native_cleanup(&evidence.namespace, &evidence.ticket, &outcome)?;
                 return Ok(true);
             }
             if let Some(mailbox) = shared.mailbox_peek(key.channel_id) {
@@ -813,7 +752,8 @@ impl NativeCleanup {
                 return Ok(false);
             }
         }
-        let first = history.ack_native_cleanup(&evidence.namespace, &evidence.ticket, &outcome)?;
+        let first =
+            history.try_ack_native_cleanup(&evidence.namespace, &evidence.ticket, &outcome)?;
         if first && let Some((key, _)) = &self.admission.cleanup {
             super::super::turn_completion_events::publish_queue_eligible_completion_event(
                 shared,
@@ -837,7 +777,7 @@ pub(super) async fn prepare_saved_notice(
     shared: &Arc<SharedData>,
 ) -> Result<(), String> {
     use crate::services::tui_input::human_frame::history::v2::native::Disposition;
-    let settlement = history.native_settlement(namespace, ticket)?;
+    let settlement = history.try_native_settlement(namespace, ticket)?;
     if settlement.cleanup_complete {
         return Ok(());
     }
@@ -874,3 +814,7 @@ pub(super) async fn prepare_saved_notice(
     }
     Ok(())
 }
+
+#[cfg(unix)]
+#[path = "native_supply.rs"]
+pub(in crate::services::discord) mod native_supply;

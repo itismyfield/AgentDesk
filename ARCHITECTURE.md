@@ -3245,6 +3245,7 @@ src/
 │   │   │   ├── native_prepare.rs
 │   │   │   ├── native_restore.rs
 │   │   │   ├── native_restore_gc_tests.rs
+│   │   │   ├── native_supply.rs
 │   │   │   ├── policy_commit.rs
 │   │   │   ├── reconcile.rs
 │   │   │   ├── terminal_handler.rs
@@ -4258,6 +4259,7 @@ src/
 │   │   │   │   ├── codex_retention_tests.rs
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
+│   │   │   │   ├── native_input.rs
 │   │   │   │   ├── notice_activation_tests.rs
 │   │   │   │   ├── notice_cache_tests.rs
 │   │   │   │   ├── notice_owner_tests.rs

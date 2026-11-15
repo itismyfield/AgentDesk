@@ -190,6 +190,27 @@ impl HostIo for GatewayHost {
         .unwrap_or(None)
     }
 
+    fn native_inputs(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> Option<crate::services::tui_o::writer::actor::native_input::NativePort> {
+        #[cfg(unix)]
+        if provider == ShadowProvider::Claude
+            && crate::services::discord::turn_finalizer::native_prepare::enabled()
+        {
+            return Some(
+                crate::services::discord::turn_finalizer::native_prepare::supply_port(
+                    channel,
+                    self.shared.clone(),
+                    self.bindings(channel, provider),
+                ),
+            );
+        }
+        let _ = (channel, provider);
+        None
+    }
+
     fn execution_permit(&self, channel: u64) -> Option<Result<Arc<OwnerPermit>, String>> {
         self.execution.get(&channel).cloned()
     }

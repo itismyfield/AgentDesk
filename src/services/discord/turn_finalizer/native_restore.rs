@@ -59,87 +59,64 @@ impl RestoredInput {
         Ok(input)
     }
 
-    fn proof(&self) -> Result<(), String> {
-        let Some(outcome) = &self.record.settlement.outcome else {
-            return Ok(());
-        };
-        if let Some(value) = outcome.extra.get("control_proof") {
-            let intent: crate::services::tui_input::human_frame::history::v2::native::control::Intent = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
-            if !intent.validates(
-                &self.record.namespace,
-                &self.record.settlement.ticket,
-                outcome,
-            ) || self.record.settlement.extra.get("any_key")
-                != Some(&serde_json::Value::Bool(true))
-                || intent.row.as_ref().is_some_and(|row| !intent.owns_row(row))
-            {
-                return Err("native boot control proof mismatch".into());
-            }
-            return Ok(());
-        }
-        let evidence: Evidence = serde_json::from_value(
-            outcome
-                .extra
-                .get("native_proof")
-                .ok_or("native boot result proof missing")?
-                .clone(),
-        )
-        .map_err(|e| e.to_string())?;
-        let source = evidence
-            .ticket
-            .source
-            .as_ref()
-            .ok_or("native boot source missing")?;
-        if source.provider != "claude"
-            || source.session_id.is_empty()
-            || source.file == [0, 0]
-            || (outcome.disposition == Disposition::Executed
-                && evidence.membership_row.as_deref().is_none_or(str::is_empty))
-            || evidence.namespace != self.record.namespace
-            || evidence.ticket != self.record.settlement.ticket
-            || evidence.disposition != outcome.disposition
-            || outcome.range != Some([evidence.range.0, evidence.range.1])
-            || evidence.range.0 < source.offset
-            || evidence.range.0 >= evidence.range.1
-            || source.target != evidence.ticket.key["attempt"]["target"]
-            || source.target["execution_nonce"]
-                .as_str()
-                .is_none_or(str::is_empty)
-            || self.record.settlement.extra.get("any_key") != Some(&serde_json::Value::Bool(true))
+    pub(in crate::services::discord::turn_finalizer) fn identity(
+        &self,
+    ) -> (
+        &str,
+        &crate::services::tui_input::human_frame::history::v2::native::Ticket,
+    ) {
+        (&self.record.namespace, &self.record.settlement.ticket)
+    }
+
+    pub(in crate::services::discord::turn_finalizer) fn refreshed(
+        &self,
+        history: &Registry,
+    ) -> Result<Self, String> {
+        let (namespace, original) = self.identity();
+        let ticket = history.native_ticket(namespace, &original.key)?;
+        if ticket.key != original.key
+            || ticket.owning_episode != original.owning_episode
+            || ticket.extra != original.extra
+            || (original.source.is_some() && original.source != ticket.source)
         {
-            return Err("native boot result proof mismatch".into());
+            return Err("native boot identity changed".into());
         }
-        match outcome.disposition {
-            Disposition::Executed | Disposition::Cancelled => {
-                let member = evidence
-                    .membership_range
-                    .ok_or("native boot membership missing")?;
-                let closer = evidence.closer_range.ok_or("native boot closer missing")?;
-                if evidence.run.is_none()
-                    || member.0 < source.offset
-                    || member.0 >= member.1
-                    || member.1 != evidence.range.0
-                    || closer.0 < member.1
-                    || closer.0 >= closer.1
-                    || closer.1 != evidence.range.1
-                {
-                    return Err("native boot run proof mismatch".into());
-                }
-            }
-            Disposition::WithdrawnNotExecuted | Disposition::TransferredUnverified => {
-                if evidence.run.is_some()
-                    || evidence.membership_range.is_some()
-                    || evidence.closer_range.is_some()
-                    || evidence.membership_row.is_some()
-                {
-                    return Err("native boot withdrawal carries run proof".into());
-                }
-            }
-            Disposition::OperatorReleased => {
-                return Err("native boot control proof unavailable".into());
-            }
+        if let Some(source) = &ticket.source {
+            source.validate(&ticket.key)?;
         }
-        Ok(())
+        let mut current = self.clone();
+        current.record = history.native_boot_record(namespace, &ticket)?;
+        current.proof()?;
+        Ok(current)
+    }
+
+    pub(in crate::services::discord::turn_finalizer) async fn settle_saved(
+        &self,
+        shared: &Arc<SharedData>,
+    ) -> Result<bool, String> {
+        let history = Registry::runtime()?;
+        let (namespace, ticket) = self.identity();
+        super::super::terminal_handler::prepare_saved_notice(&history, namespace, ticket, shared)
+            .await?;
+        let (ack, rx) = oneshot::channel();
+        shared
+            .turn_finalizer
+            .tx
+            .send(FinalizeMsg::NativeBoot {
+                inputs: vec![self.clone()],
+                step: RestoreStep::Settle,
+                shared: shared.clone(),
+                ack,
+            })
+            .map_err(|_| "native boot cleanup actor unavailable")?;
+        rx.await.map_err(|_| "native boot cleanup reply lost")??;
+        Ok(history
+            .native_settlement(namespace, ticket)?
+            .cleanup_complete)
+    }
+
+    fn proof(&self) -> Result<(), String> {
+        validate_record(&self.record)
     }
 
     fn owns_row(&self, row: &InflightTurnState) -> bool {
@@ -160,14 +137,14 @@ impl RestoredInput {
     fn preserve_terminal(&self, history: &Registry) -> Result<(), String> {
         let root = crate::services::discord::runtime_store::runtime_root()
             .ok_or("native boot root unavailable")?;
-        let record =
-            history.native_boot_record(&self.record.namespace, &self.record.settlement.ticket)?;
+        let record = history
+            .try_native_boot_record(&self.record.namespace, &self.record.settlement.ticket)?;
         inflight::persist_native_boot_record(&root, &record)
     }
 
     async fn drive(&mut self, shared: &Arc<SharedData>, history: &Registry) -> Result<(), String> {
-        self.record.settlement =
-            history.native_settlement(&self.record.namespace, &self.record.settlement.ticket)?;
+        self.record.settlement = history
+            .try_native_settlement(&self.record.namespace, &self.record.settlement.ticket)?;
         self.proof()?;
         let Some(outcome) = self.record.settlement.outcome.clone() else {
             return Ok(());
@@ -234,7 +211,7 @@ impl RestoredInput {
                 None => wake = snapshot.cancel_token.is_none(),
             }
         }
-        let first = history.ack_native_cleanup(
+        let first = history.try_ack_native_cleanup(
             &self.record.namespace,
             &self.record.settlement.ticket,
             &outcome,
@@ -401,3 +378,85 @@ impl TurnFinalizer {
 #[cfg(test)]
 #[path = "native_restore_gc_tests.rs"]
 mod gc_tests;
+
+pub(in crate::services::discord::turn_finalizer) fn validate_record(
+    record: &RestoredRecord,
+) -> Result<(), String> {
+    let Some(outcome) = record.settlement.outcome.as_ref() else {
+        return Ok(());
+    };
+    if let Some(value) = outcome.extra.get("control_proof") {
+        let intent: crate::services::tui_input::human_frame::history::v2::native::control::Intent =
+            serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+        if !intent.validates(&record.namespace, &record.settlement.ticket, outcome)
+            || record.settlement.extra.get("any_key") != Some(&serde_json::Value::Bool(true))
+            || intent.row.as_ref().is_some_and(|row| !intent.owns_row(row))
+        {
+            return Err("native boot control proof mismatch".into());
+        }
+        return Ok(());
+    }
+    let evidence: Evidence = serde_json::from_value(
+        outcome
+            .extra
+            .get("native_proof")
+            .ok_or("native boot result proof missing")?
+            .clone(),
+    )
+    .map_err(|e| e.to_string())?;
+    let source = evidence
+        .ticket
+        .source
+        .as_ref()
+        .ok_or("native boot source missing")?;
+    if source.provider != "claude"
+        || source.session_id.is_empty()
+        || source.file == [0, 0]
+        || (outcome.disposition == Disposition::Executed
+            && evidence.membership_row.as_deref().is_none_or(str::is_empty))
+        || evidence.namespace != record.namespace
+        || evidence.ticket != record.settlement.ticket
+        || evidence.disposition != outcome.disposition
+        || outcome.range != Some([evidence.range.0, evidence.range.1])
+        || evidence.range.0 < source.offset
+        || evidence.range.0 >= evidence.range.1
+        || source.target != evidence.ticket.key["attempt"]["target"]
+        || source.target["execution_nonce"]
+            .as_str()
+            .is_none_or(str::is_empty)
+        || record.settlement.extra.get("any_key") != Some(&serde_json::Value::Bool(true))
+    {
+        return Err("native boot result proof mismatch".into());
+    }
+    match outcome.disposition {
+        Disposition::Executed | Disposition::Cancelled => {
+            let member = evidence
+                .membership_range
+                .ok_or("native boot membership missing")?;
+            let closer = evidence.closer_range.ok_or("native boot closer missing")?;
+            if evidence.run.is_none()
+                || member.0 < source.offset
+                || member.0 >= member.1
+                || member.1 != evidence.range.0
+                || closer.0 < member.1
+                || closer.0 >= closer.1
+                || closer.1 != evidence.range.1
+            {
+                return Err("native boot run proof mismatch".into());
+            }
+        }
+        Disposition::WithdrawnNotExecuted | Disposition::TransferredUnverified => {
+            if evidence.run.is_some()
+                || evidence.membership_range.is_some()
+                || evidence.closer_range.is_some()
+                || evidence.membership_row.is_some()
+            {
+                return Err("native boot withdrawal carries run proof".into());
+            }
+        }
+        Disposition::OperatorReleased => {
+            return Err("native boot control proof unavailable".into());
+        }
+    }
+    Ok(())
+}
