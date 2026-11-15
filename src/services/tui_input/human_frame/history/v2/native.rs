@@ -5,6 +5,24 @@ use super::*;
 pub(crate) mod control;
 
 #[cfg(unix)]
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct EvidenceRegistration {
+    pub(crate) namespace: String,
+    pub(crate) ticket: Ticket,
+    pub(crate) frame_hash: String,
+    pub(crate) receipts: Vec<String>,
+}
+
+#[cfg(unix)]
+pub(crate) fn registrations_fingerprint(
+    registrations: &[EvidenceRegistration],
+) -> Result<String, String> {
+    serde_json::to_vec(registrations)
+        .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(unix)]
 pub(crate) fn frame_hashes(text: &str) -> Vec<String> {
     super::super::class_hashes(text)
 }
@@ -221,9 +239,7 @@ pub(crate) fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, St
 }
 
 #[cfg(unix)]
-fn evidence_registrations(
-    state: &Snapshot,
-) -> Result<Vec<crate::services::tui_o::writer::input_facts::native::Registration>, String> {
+fn evidence_registrations(state: &Snapshot) -> Result<Vec<EvidenceRegistration>, String> {
     let registrations = state
         .live
         .iter()
@@ -246,19 +262,17 @@ fn evidence_registrations(
         })
         .map(|(registration, entry, settlement)| {
             settlement.validate(registration)?;
-            Ok(
-                crate::services::tui_o::writer::input_facts::native::Registration {
-                    namespace: registration.namespace.clone(),
-                    ticket: settlement.ticket.clone(),
-                    frame_hash: registration.frame.class_hash.clone(),
-                    receipts: entry
-                        .into_iter()
-                        .flat_map(|e| e.events.iter())
-                        .filter(|e| matches!(e.kind.as_str(), "user" | "command"))
-                        .filter_map(|e| e.row.clone())
-                        .collect(),
-                },
-            )
+            Ok(EvidenceRegistration {
+                namespace: registration.namespace.clone(),
+                ticket: settlement.ticket.clone(),
+                frame_hash: registration.frame.class_hash.clone(),
+                receipts: entry
+                    .into_iter()
+                    .flat_map(|e| e.events.iter())
+                    .filter(|e| matches!(e.kind.as_str(), "user" | "command"))
+                    .filter_map(|e| e.row.clone())
+                    .collect(),
+            })
         })
         .collect()
 }
@@ -487,8 +501,7 @@ impl Registry {
     #[cfg(unix)]
     pub(crate) fn native_evidence_registrations(
         &self,
-    ) -> Result<Vec<crate::services::tui_o::writer::input_facts::native::Registration>, String>
-    {
+    ) -> Result<Vec<EvidenceRegistration>, String> {
         self.inspect(evidence_registrations)
     }
 
@@ -585,10 +598,7 @@ impl Registry {
                             })
                     })
                     .collect();
-                let fingerprint =
-                    crate::services::tui_o::writer::input_facts::native::registrations_fingerprint(
-                        &registrations,
-                    )?;
+                let fingerprint = registrations_fingerprint(&registrations)?;
                 if fingerprint != expected {
                     return Err("native registrations superseded".into());
                 }

@@ -409,24 +409,17 @@ impl<B: BindingEvents> Sources<B> {
             let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
                 continue;
             };
-            let Ok(observed) =
-                self.native
-                    .as_ref()
-                    .unwrap()
-                    .observe(self.channel, &source, &origin, snapshot)
-            else {
+            let Some(native) = self.native.as_ref() else {
+                continue;
+            };
+            let Ok(observed) = native.observe(self.channel, &source, &origin, snapshot) else {
                 continue;
             };
             for index in 0..observed.evidence.len() {
                 let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
                     break;
                 };
-                let Ok(current) =
-                    self.native
-                        .as_ref()
-                        .unwrap()
-                        .observe(self.channel, &source, &origin, snapshot)
-                else {
+                let Ok(current) = native.observe(self.channel, &source, &origin, snapshot) else {
                     break;
                 };
                 if let Err(error) = port

@@ -18,9 +18,9 @@ pub(in crate::services::discord::turn_finalizer) type Custody = (
 );
 #[derive(Clone)]
 enum Job {
-    Live(NativeCleanup, Registry),
+    Live(Box<NativeCleanup>, Registry),
     Boot(
-        super::super::native_prepare::RestoredInput,
+        Box<super::super::native_prepare::RestoredInput>,
         Registry,
         Option<(Outcome, String)>,
     ),
@@ -150,7 +150,7 @@ impl Port {
         };
         let work =
             NativeCleanup::capture(admission, input.row_witness.clone(), input.started_before)?;
-        Ok(Some(Job::Live(work, input.history.clone())))
+        Ok(Some(Job::Live(Box::new(work), input.history.clone())))
     }
     async fn submit(&self, id: &str, job: Job) -> Result<bool, String> {
         let done = match job {
@@ -166,7 +166,7 @@ impl Port {
                 } else {
                     self.shared
                         .turn_finalizer
-                        .submit_native(work, history, self.shared.clone())
+                        .submit_native(*work, history, self.shared.clone())
                         .await?
                 }
             }
@@ -255,7 +255,7 @@ impl Port {
                 .map_err(|_| "native row custody unavailable")?;
             rx.await
                 .map_err(|_| "native row custody acknowledgement lost")??;
-            Job::Live(work, prepared.history)
+            Job::Live(Box::new(work), prepared.history)
         } else {
             let input = boot
                 .into_iter()
@@ -298,7 +298,7 @@ impl Port {
                 )]),
             };
             Job::Boot(
-                input,
+                Box::new(input),
                 history,
                 Some((outcome, observed.registrations_fingerprint.clone())),
             )
@@ -366,7 +366,7 @@ impl EvidencePort for Port {
                                 && !saved.cleanup_complete
                                 && let Ok(id) = input_id(ns, t)
                             {
-                                jobs.insert(id, Job::Boot(input, history.clone(), None));
+                                jobs.insert(id, Job::Boot(Box::new(input), history.clone(), None));
                             }
                         }
                     }

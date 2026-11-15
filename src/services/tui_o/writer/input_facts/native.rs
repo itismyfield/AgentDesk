@@ -79,20 +79,9 @@ fn body(value: &Value) -> Option<String> {
 }
 
 #[cfg(unix)]
-#[derive(Clone, serde::Serialize)]
-pub(crate) struct Registration {
-    pub(crate) namespace: String,
-    pub(crate) ticket: Ticket,
-    pub(crate) frame_hash: String,
-    pub(crate) receipts: Vec<String>,
-}
-
-#[cfg(unix)]
-pub(crate) fn registrations_fingerprint(registrations: &[Registration]) -> Result<String, String> {
-    serde_json::to_vec(registrations)
-        .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
-        .map_err(|e| e.to_string())
-}
+pub(crate) use crate::services::tui_input::human_frame::history::v2::native::{
+    EvidenceRegistration as Registration, registrations_fingerprint,
+};
 
 #[cfg(unix)]
 impl Registration {
