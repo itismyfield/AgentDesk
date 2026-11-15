@@ -146,7 +146,11 @@ def credential_alias(root, relative, descriptor, metadata):
         return False
     if metadata.st_uid != os.geteuid() or metadata.st_nlink != 1:
         raise InstanceError('credential alias must be an owned single link')
-    target = Path(os.readlink(relative[-1], dir_fd=descriptor))
+    raw_target = os.readlink(relative[-1], dir_fd=descriptor)
+    target = Path(raw_target)
+    parts = target.parts[1:] if not target.is_absolute() and target.parts[:1] == ('..',) else target.parts
+    if raw_target != str(target) or any(part == '..' for part in parts):
+        raise InstanceError('credential alias target is not a canonical path')
     candidate = Path(os.path.normpath(target if target.is_absolute() else Path(root).joinpath(*relative[:-1], target)))
     if not candidate.is_relative_to(root):
         raise InstanceError('credential alias target is outside the instance root')

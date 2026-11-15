@@ -32,20 +32,20 @@ def _scan(descriptor, sockets=None, prefix=(), root=None):
             raise InstanceError("cleanup entry has a foreign owner")
         token = (metadata.st_dev, metadata.st_ino)
         if credential_alias(root, relative, descriptor, metadata):
-            result[relative] = token
+            result[relative] = (token, True)
         elif stat.S_ISDIR(metadata.st_mode):
             child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
             try:
                 if token != _inode(os.fstat(child)):
                     raise InstanceError("cleanup directory changed")
-                result[relative] = token
+                result[relative] = (token, False)
                 result.update(_scan(child, sockets, relative, root))
             finally:
                 os.close(child)
         elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
-            result[relative] = token
+            result[relative] = (token, False)
         elif stat.S_ISSOCK(metadata.st_mode) and (sockets or {}).get(relative) == token:
-            result[relative] = token
+            result[relative] = (token, False)
         else:
             raise InstanceError("cleanup refuses links and unowned special entries")
     return result
@@ -59,14 +59,19 @@ def _erase(descriptor, entries, prefix=(), root=None):
     for name in os.listdir(descriptor):
         relative = prefix + (name,)
         metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-        if _inode(metadata) != entries.get(relative):
+        identity, approved_alias = entries.get(relative, (None, False))
+        if _inode(metadata) != identity:
             raise InstanceError("cleanup tree changed before deletion")
-        if credential_alias(root, relative, descriptor, metadata):
+        if approved_alias:
+            # Scan approves the target; erasure only rechecks the witnessed link itself.
+            if (relative != ('config', 'credential') or not stat.S_ISLNK(metadata.st_mode)
+                    or metadata.st_uid != os.geteuid() or metadata.st_nlink != 1):
+                raise InstanceError("approved cleanup alias changed")
             os.unlink(name, dir_fd=descriptor)
         elif stat.S_ISDIR(metadata.st_mode):
             child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
             try:
-                if _inode(os.fstat(child)) != entries[relative]:
+                if _inode(os.fstat(child)) != identity:
                     raise InstanceError("cleanup directory changed before deletion")
                 _erase(child, entries, relative, root)
             finally:
@@ -151,7 +156,7 @@ def remove(base, instance_id, ambient):
     try:
         sockets = {path: tuple(token) for path, token in (owner or {}).get('sockets', {}).items()
                    if Path(path).exists()}
-        manifest = validate(base, instance_id, ambient, check_ports=False, live_sockets=sockets, check_head=False)
+        manifest = validate(base, instance_id, ambient, check_ports=False, live_sockets=sockets, check_head=False, allow_missing_directories=True)
         relative_sockets = {Path(path).relative_to(root).parts: token for path, token in sockets.items()}
     except (KeyError, TypeError, AttributeError):
         raise InstanceError("invalid cleanup ownership witness") from None
@@ -173,7 +178,7 @@ def remove(base, instance_id, ambient):
         # The shared close-only lease excludes new up while every existing owner is gone.
         if (root.parent / keeper.MARKER_NAME).exists() or (root.parent / keeper.MARKER_NAME).is_symlink():
             raise lifecycle.CleanupPending(None)
-        validate(base, instance_id, ambient, check_ports=False, check_head=False)
+        validate(base, instance_id, ambient, check_ports=False, check_head=False, allow_missing_directories=True)
         entries = _scan(descriptor, root=root)
         if (root_identity != _inode(os.stat(root.name, dir_fd=parent, follow_symlinks=False))
                 or root_identity != _inode(os.stat(root, follow_symlinks=False))):

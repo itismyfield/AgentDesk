@@ -35,13 +35,45 @@ def read_json(path):
         raise InstanceError("invalid JSON declaration file") from None
 
 
+class _OrgLoader(yaml.SafeLoader):
+    def compose_node(self, parent, index):
+        if self.check_event(yaml.AliasEvent) or getattr(self.peek_event(), 'anchor', None) is not None:
+            raise yaml.YAMLError('org anchors and aliases are not allowed')
+        return super().compose_node(parent, index)
+
+    def construct_mapping(self, node, deep=False):
+        keys = set()
+        for key_node, _ in node.value:
+            if key_node.tag != 'tag:yaml.org,2002:str':
+                raise yaml.YAMLError('org keys must be strings without merges')
+            key = self.construct_object(key_node, deep=deep)
+            if key in keys:
+                raise yaml.YAMLError('duplicate org key')
+            keys.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+    def construct_yaml_bool(self, node):
+        if not re.fullmatch(r'true|True|TRUE|false|False|FALSE', node.value):
+            raise yaml.YAMLError('unsupported org boolean')
+        return node.value.lower() == 'true'
+
+
+# Keep this dialect local to org; Native uses YAML 1.2 boolean spellings.
+_OrgLoader.yaml_implicit_resolvers = {
+    key: [(tag, pattern) for tag, pattern in rules if tag != 'tag:yaml.org,2002:bool']
+    for key, rules in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_OrgLoader.add_implicit_resolver('tag:yaml.org,2002:bool', re.compile(r'^(?:true|True|TRUE|false|False|FALSE)$'), list('tTfF'))
+_OrgLoader.add_constructor('tag:yaml.org,2002:bool', _OrgLoader.construct_yaml_bool)
+
+
 def read_org(path):
     try:
         text = read_regular_text(path)
         try:
             value = json.loads(text, object_pairs_hook=_unique_object)
         except json.JSONDecodeError:
-            value = yaml.safe_load(text)
+            value = yaml.load(text, Loader=_OrgLoader)
         if type(value) is not dict:
             raise InstanceError('org declaration must be a mapping')
         return value
@@ -210,11 +242,12 @@ def resource_spec(value):
     return dict(value)
 
 
-def validate(base, instance_id, ambient, require_credentials=False, check_ports=True, live_sockets=None, check_head=True):
+def validate(base, instance_id, ambient, require_credentials=False, check_ports=True, live_sockets=None, check_head=True, allow_missing_directories=False):
     reject_database_env(ambient)
     root = instance_root(base, instance_id)
     validate_tree(root, require_credentials=require_credentials, live_sockets=live_sockets)
-    if any(not (root / relative).is_dir() for relative in (*LAYOUT_DIRS, *HOST_DIRS)):
+    if any(not (root / relative).is_dir() and (not allow_missing_directories or (root / relative).exists())
+           for relative in (*LAYOUT_DIRS, *HOST_DIRS)):
         raise InstanceError("declared instance directory is missing")
     manifest = read_json(root / MANIFEST_NAME)
     try:

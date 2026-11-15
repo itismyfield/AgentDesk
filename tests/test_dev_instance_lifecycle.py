@@ -663,15 +663,28 @@ class ResourceAuthorityTests(ResourceFixture):
         from scripts.dev_instance import config as config_module
         method=getattr(config_module,'postgres_connections',None)
         self.assertTrue(callable(method))
-        source=RUST_POSTGRES_SOURCE
-        body=source.split('fn startup_pool_settings(',1)[1].split('pub async fn ',1)[0]
-        floor=re.search(r'let steady_max = config.database.pool_max.max\((\d+)\);',body)
-        formula=re.search(r'max_connections: steady_max.saturating_mul\((\d+)\).div_ceil\((\d+)\).max\((\d+)\)',body)
+        source=re.sub(r'/\*.*?\*/|//[^\n]*', '', RUST_POSTGRES_SOURCE, flags=re.S)
+        def body(name):
+            starts=list(re.finditer(r'\bfn\s+'+name+r'\s*\(',source))
+            self.assertEqual(len(starts),1,'native function boundary changed: '+name)
+            start=source.index('{',starts[0].end());depth=0
+            for end in range(start,len(source)):
+                depth += (source[end]=='{')-(source[end]=='}')
+                if depth==0:return source[start+1:end]
+            self.fail('unterminated native function: '+name)
+        def expression(function):
+            fields=re.findall(r'\bmax_connections\s*:\s*([^,]+),',function)
+            self.assertEqual(len(fields),1,'native max_connections field boundary changed')
+            return re.sub(r'\s+','',fields[0])
+        startup=body('startup_pool_settings')
+        floors=re.findall(r'\blet\s+steady_max\s*=\s*([^;]+);',startup)
+        self.assertEqual(len(floors),1)
+        floor=re.fullmatch(r'config\.database\.pool_max\.max\((\d+)\)',re.sub(r'\s+','',floors[0]))
+        formula=re.fullmatch(r'steady_max\.saturating_mul\((\d+)\)\.div_ceil\((\d+)\)\.max\((\d+)\)',expression(startup))
+        runtime_floor=re.fullmatch(r'config\.database\.pool_max\.max\((\d+)\)',expression(body('runtime_pool_settings')))
         self.assertIsNotNone(floor,'native warmup floor changed; update the capacity contract')
         self.assertIsNotNone(formula,'native warmup expression changed; update the capacity contract')
-        runtime=source.split('fn runtime_pool_settings(',1)[1].split('fn bootstrap_pool_settings(',1)[0]
-        runtime_floor=re.search(r'max_connections: config.database.pool_max.max\((\d+)\)',runtime)
-        self.assertIsNotNone(runtime_floor)
+        self.assertIsNotNone(runtime_floor,'native runtime expression changed; update the capacity contract')
         lower=int(floor.group(1));mul,den,minimum=map(int,formula.groups())
         for pool in [1,2,3,4,7,15]:
             for cluster in [False,True]:
@@ -681,6 +694,18 @@ class ResourceAuthorityTests(ResourceFixture):
                 warmup=max((steady*mul+den-1)//den,minimum)
                 expected=max(pool,int(runtime_floor.group(1)))+warmup+len(config['discord']['bots'])+int(cluster)+1
                 self.assertEqual(method(config,1),expected,(pool,cluster))
+
+    def test_native_capacity_contract_refuses_suffixes_and_commented_old_expressions(self):
+        warmup = 'max_connections: steady_max.saturating_mul(3).div_ceil(2).max(2)'
+        runtime = 'max_connections: config.database.pool_max.max(1)'
+        variants = [RUST_POSTGRES_SOURCE.replace(warmup, warmup+'.saturating_add(2)', 1),
+                    RUST_POSTGRES_SOURCE.replace(runtime, runtime+'.saturating_add(2)', 1),
+                    RUST_POSTGRES_SOURCE.replace(warmup, '// '+warmup+'\n        max_connections: 99', 1)]
+        module = sys.modules[self.__class__.__module__]
+        for source in variants:
+            with self.subTest(source=variants.index(source)), mock.patch.object(module, 'RUST_POSTGRES_SOURCE', source):
+                with self.assertRaises(AssertionError):
+                    self.test_python_connection_formula_matches_the_native_source()
 
     def test_ambient_database_or_foreign_binary_rejects_before_spawn(self):
         with mock.patch.object(subprocess, "Popen") as spawn:

@@ -20,9 +20,7 @@ from scripts.dev_instance.files import write_private_json
 class InstanceDownTests(unittest.TestCase):
     def setUp(self):
         self.fixture = fixture.InstanceDeclarationTests()
-        temporary_directory = tempfile.TemporaryDirectory
-        with patch.object(tempfile, 'TemporaryDirectory', side_effect=lambda **kwargs: temporary_directory(prefix='d-', dir='/private/tmp')):
-            self.fixture.setUp()
+        self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.manifest = self.fixture.prepare()
         self.root = self.fixture.base / self.fixture.instance_id
@@ -136,22 +134,38 @@ class InstanceDownTests(unittest.TestCase):
         self.assertEqual(before, sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*')))
         self.assertTrue(alias.is_symlink())
 
-    def test_alias_removal_survives_target_directory_deleted_first(self):
+    def _canonical_alias_down_in_order(self, first):
+        from scripts.dev_instance import down
         alias = self.root/'config/credential'
         alias.symlink_to('../credential', target_is_directory=True)
-        original = os.listdir
+        original_listdir, original_erase, original_alias = os.listdir, down._erase, down.credential_alias
         root_identity = self.root.stat().st_ino
-        def credential_first(descriptor):
-            names = original(descriptor)
+        erasing = False
+        def ordered(descriptor):
+            names = original_listdir(descriptor)
             if isinstance(descriptor, int) and os.fstat(descriptor).st_ino == root_identity:
-                return sorted(names, key=lambda name: (name != 'credential', name))
+                return sorted(names, key=lambda name: (name != first, name))
             return names
-        with patch('scripts.dev_instance.down.os.listdir', side_effect=credential_first):
+        def erase(*args, **kwargs):
+            nonlocal erasing
+            erasing = True
+            return original_erase(*args, **kwargs)
+        def validate_alias(*args, **kwargs):
+            self.assertFalse(erasing, 'erasure must not revalidate alias targets')
+            return original_alias(*args, **kwargs)
+        with patch.object(down.os, 'listdir', side_effect=ordered), patch.object(down, '_erase', side_effect=erase), patch.object(down, 'credential_alias', side_effect=validate_alias):
             code, result = self.down()
         self.assertEqual(code, 0, result)
+        self.assertEqual(result['status'], 'REMOVED')
         self.assertFalse(self.root.exists())
 
-    def test_dangling_alias_does_not_restore_missing_required_directory(self):
+    def test_alias_removal_survives_target_directory_deleted_first(self):
+        self._canonical_alias_down_in_order('credential')
+
+    def test_alias_removal_survives_config_directory_deleted_first(self):
+        self._canonical_alias_down_in_order('config')
+
+    def test_down_recovers_missing_required_directories_with_intact_declarations(self):
         from scripts.dev_instance.files import validate_tree
         from scripts.dev_instance.manifest import validate
         alias = self.root/'config/credential'
@@ -160,9 +174,57 @@ class InstanceDownTests(unittest.TestCase):
         validate_tree(self.root)
         with self.assertRaisesRegex(ValueError, 'declared instance directory is missing'):
             validate(self.fixture.base, self.root.name, {})
+        code, result = self.down()
+        self.assertEqual(code, 0, result)
+        self.assertFalse(self.root.exists())
+
+    def test_partial_root_without_manifest_is_preserved(self):
+        (self.root/'credential').rmdir()
+        (self.root/'manifest.json').unlink()
         self.assertEqual(self.down()[0], 2)
+        self.assertTrue((self.root/'receipt.json').exists())
+
+    def test_cleanup_refuses_existing_wrong_layout_type(self):
+        (self.root/'home').rename(self.root/'outputs/saved-home')
+        (self.root/'home').write_text('invalid directory replacement')
+        self.assertEqual(self.down()[0], 2)
+        self.assertTrue((self.root/'manifest.json').exists())
+        self.assertEqual((self.root/'home').read_text(), 'invalid directory replacement')
+
+    def test_erase_refuses_alias_replacement_or_new_hardlink_after_scan(self):
+        from scripts.dev_instance import down
+        alias = self.root/'config/credential'
+        alias.symlink_to('../credential', target_is_directory=True)
+        original_listdir = os.listdir
+        root_inode = self.root.stat().st_ino
+        def alias_first(descriptor):
+            names = original_listdir(descriptor)
+            first = 'config' if os.fstat(descriptor).st_ino == root_inode else 'credential'
+            return sorted(names, key=lambda name: (name != first, name))
+        for kind in ['replacement', 'hardlink']:
+            descriptor = down._open_dir(self.root)
+            try:
+                entries = down._scan(descriptor, root=self.root)
+                link = self.fixture.home/'changed-alias'
+                if kind == 'replacement':
+                    link.symlink_to('../credential', target_is_directory=True)
+                    os.replace(link, alias)
+                else:os.link(alias, link, follow_symlinks=False)
+                with self.subTest(kind=kind), patch.object(down.os, 'listdir', side_effect=alias_first):
+                    with self.assertRaises(ValueError):down._erase(descriptor, entries, root=self.root)
+                self.assertTrue(alias.is_symlink())
+                self.assertTrue((self.root/'manifest.json').exists())
+                if link.is_symlink():link.unlink()
+            finally:os.close(descriptor)
+
+    def test_alias_target_parent_cancellation_is_rejected_before_deletion(self):
+        from scripts.dev_instance.files import validate_tree
+        alias = self.root/'config/credential'
+        alias.symlink_to('credential/../../credential', target_is_directory=True)
+        with self.assertRaises(ValueError):validate_tree(self.root)
+        self.assertEqual(self.down()[0], 2)
+        self.assertTrue((self.root/'manifest.json').exists())
         self.assertTrue(alias.is_symlink())
-        self.assertFalse((self.root/'credential').exists())
 
     def test_alias_boundary_rejects_outside_wrong_name_and_hardlink_without_deletion(self):
         from scripts.dev_instance.files import validate_tree
