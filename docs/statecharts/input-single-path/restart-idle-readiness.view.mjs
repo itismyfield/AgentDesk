@@ -8,8 +8,8 @@ export const state = (v) => {
   const sent = Object.values(r.effects ?? {}).some((n) => n > 0);
   if (sent) return "Delivered";
   if (r.restarts > 0) return r.phase === "Running" ? "Before restart: turn running" : "Before restart: idle";
-  if (r.lag === "both") return "Restarted: earlier send unrecorded, durable in-flight";
-  if (r.lag === "transcript") return "Restarted: person's Enter unrecorded, screen running";
+  if (r.lag === "both") return "Restarted: earlier send hidden from transcript and screen";
+  if (r.lag === "transcript") return r.inflight ? "Restarted: earlier send unrecorded, screen running, durable in-flight" : "Restarted: person's Enter unrecorded, screen running";
   if (r.phase === "Booting") return "Restarted: new incarnation booting";
   if (q.every((s) => s === "retained")) return "Every input retained (resend asked)";
   if (q.includes("retained")) return "One input retained, next waits";

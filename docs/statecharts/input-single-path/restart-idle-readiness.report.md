@@ -9,30 +9,40 @@ Design: [restart-idle-readiness.design.md](restart-idle-readiness.design.md). Vi
 |---|---|---|
 | `Restart` in `ready-restart-*` modes | the ledger empties; the first look sets the restart floor (`restored = "floor"`) | `readiness/mod.rs:136-142`, `:517-520` |
 | `oldIncarnation` | the pane's incarnation was launched before this daemon run; a handoff mode's restart makes a new one (`Booting`, `needsStart`) | T4: `execution_context.created_at < STARTED` |
-| `PreRestartSend`, `lag = "both"`, `inflight` | keys reached the provider before the restart; neither transcript nor screen shows the turn yet; the durable in-flight record survives | herdr hold `claude/herdr_turn.rs:572`/`:264`, V2 `head_injection`, inflight recovery `runtime_bootstrap/recovery_flush.rs:48` |
-| `PersonLateSubmit`, `lag = "transcript"` | a person's Enter (or a continuation) not yet recorded; the screen shows the turn | screen check S1 (`herdr_turn/composer.rs` `observation`) |
+| `PreRestartSend`, `lag = "transcript"`, `inflight` | keys reached the provider before the restart; the transcript does not show the turn yet, the screen does; the durable in-flight record survives (`lag = "both"` only in the `late-blind` mutant) | herdr hold `claude/herdr_turn.rs:572`/`:264`, V2 `head_injection`, prior-process row `provider_dispatch/owner_input.rs:207`, `herdr_row_end/owner.rs:105`/`:111` |
+| `RowEnd` | the recovery row end: on an idle screen of the same execution with the last turn closed it settles NoTerminal, drops the in-flight row and wakes the owner | `recovery_engine/herdr_row_end.rs:557` `idle_read` |
+| `PersonLateSubmit`, `lag = "transcript"` | a person's Enter (or a continuation) not yet recorded; the screen shows the turn | screen check S1 (`herdr_turn/composer.rs:97` `restored_screen_idle`) |
+| `WatchHeld` (restart-draft modes) | the held-front watch wakes a front held by a person's draft once the draft clears, on restored evidence + screen; `HumanClears` and `Observe` alone never wake it | `herdr_turn/first_input.rs:153-171` |
+| `Unproven` | what `Watched::unproven` reads: not Booting, shared Idle, current source, no continuation/compact fence, no current evidence; never the screen, the restored proof or the provider phase | `readiness/mod.rs` `Watched::unproven` |
 | `LateRecord` | the provider writes the late turn's first record | transcript |
 | `LostStart` | the new incarnation idles but its SessionStart never reached this run | lost hook |
-| `RestoredEvidence` | the fixed path: restart floor + hard terminal + current Idle observation + no continuation/compact + no durable in-flight + idle screen + old incarnation | `observe_restored` (new) |
+| `RestoredEvidence` | the fixed path: restart floor + hard terminal + current Idle observation + no continuation/compact + no durable in-flight + idle screen + old incarnation | `observe_restored` (`readiness/mod.rs:98`) |
 | `Arrived` | inputs arrive only after the restart; a restored in-flight turn owns the channel | incident timing; D3 |
 | `RestartIdleEventuallyReceives` | an idle pane that outlived the restart, with an empty composer and nothing unsettled, eventually takes an input | new liveness rule |
 
 ## Results
 
-`python3 scripts/ci/statecharts_tlc.py --base 9b42e53297 --jobs 4 --timeout 600`: 104 configs selected (every
-`ClaudeReadiness*`/`InputPath*` config), every result as listed in `expected.tsv`, exit 0, 273 s.
+Implementation leg (this model revision): every restart config run directly with the statechart skill
+(`sc-out/impl3`), then the CI selection (see the implementation report for its line).
 
-| Config | Mode | Distinct states | Expected | Result |
+| Config | Mode | Design leg | Implementation leg | Expected |
 |---|---|---|---|---|
-| `InputPathReadyRestartIdleBefore.cfg` | current code | 1,804 | `ReadyRestartIdleEventuallyReceives` breaks | RED as expected: restart → floor → both inputs retained, forever ([chart](restart-idle-before.chart.mmd)) |
-| `InputPathReadyRestartIdleAfter.cfg` | fixed | 1,960 | all hold | GREEN |
-| `InputPathReadyRestartLateAfter.cfg` | fixed, earlier send unrecorded | 3,626 | all hold | GREEN |
-| `InputPathReadyRestartLateIgnoreDurable.cfg` | mutant: no durable gate | 337 | `ReadyNoIdleRunningInjection` | RED as expected ([chart](restart-idle-ignore-durable.chart.mmd)) |
-| `InputPathReadyRestartRunningAfter.cfg` | fixed, person's Enter unrecorded | 2,641 | all hold | GREEN |
-| `InputPathReadyRestartRunningIgnoreScreen.cfg` | mutant: no screen check | 540 | `ReadyNoIdleRunningInjection` | RED as expected ([chart](restart-idle-ignore-screen.chart.mmd)) |
-| `InputPathReadyRestartDraftAfter.cfg` | fixed, person draft | 2,634 | all hold | GREEN (no draft overwrite, sent after the person clears) |
-| `InputPathReadyRestartHandoffAfter.cfg` | fixed, new incarnation | 2,334 | all hold | GREEN (Start path, or retained when the Start is lost) |
-| `InputPathReadyRestartHandoffIgnoreIncarnation.cfg` | mutant: no incarnation check | 614 | `ReadyNoEarlyInput` | RED as expected |
+| `InputPathReadyRestartIdleBefore.cfg` | current code | RED liveness, 1,804 | RED `ReadyRestartIdleEventuallyReceives`, 1,804 | breaks: the incident ([chart](restart-idle-before.chart.mmd)) |
+| `InputPathReadyRestartIdleAfter.cfg` | fixed | GREEN 1,960 | GREEN 1,960 | all hold |
+| `InputPathReadyRestartLateAfter.cfg` | fixed, earlier send unrecorded | GREEN 3,626 (`lag = "both"`) | GREEN 3,626 (`lag = "transcript"` + `RowEnd`) | all hold |
+| `InputPathReadyRestartLateIgnoreDurable.cfg` → `InputPathReadyRestartLateBlind.cfg` | mutant: was "no durable gate"; now "screen blind to the unrecorded send", so `RowEnd` frees the row early | RED `ReadyNoIdleRunningInjection`, 337 | RED `ReadyNoIdleRunningInjection`, 689 | breaks ([chart](restart-idle-late-blind.chart.mmd)) |
+| `InputPathReadyRestartRunningAfter.cfg` | fixed, person's Enter unrecorded | GREEN 2,641 | GREEN 5,790 | all hold |
+| `InputPathReadyRestartRunningIgnoreScreen.cfg` | mutant: no screen check | RED `ReadyNoIdleRunningInjection`, 540 | RED `ReadyNoIdleRunningInjection`, 540 | breaks ([chart](restart-idle-ignore-screen.chart.mmd)) |
+| `InputPathReadyRestartDraftAfter.cfg` | fixed, person draft | GREEN 2,634 | GREEN 506 (held front wakes only through `WatchHeld`) | all hold |
+| `InputPathReadyRestartDraftNoWatch.cfg` (new) | mutant: no restored-aware watch | — | RED `ReadyPendingEventuallySettles`, `ReadyRestartIdleEventuallyReceives`, 422 | both liveness break |
+| `InputPathReadyRestartHandoffAfter.cfg` | fixed, new incarnation | GREEN 2,334 | GREEN 2,334 | all hold |
+| `InputPathReadyRestartHandoffIgnoreIncarnation.cfg` | mutant: no incarnation check | RED `ReadyNoEarlyInput`, 614 | RED `ReadyNoEarlyInput`, 614 | breaks |
+
+State counts are distinct states from TLC. `LateAfter` keeps 3,626 because with the screen showing the late turn
+`RowEnd` is enabled only after `Finish`, which already clears `inflight`; `LateBlind` shows the same action freeing
+the row early when the screen hides the turn. `DraftAfter` shrank because a restart-draft front no longer wakes on
+`Observe`/`HumanClears` or idle wakes; it is reached only through `WatchHeld`, and `DraftNoWatch` proves that path is
+needed.
 
 Every config checks `ReadyTypeOK`, `ReadyNoDuplicate`, `ReadyNoSilentLoss`, `ReadyNoIdleRunningInjection`,
 `ReadyNoHumanDraftExecution`, `ReadyNoEarlyInput`, `ReadyCompactAfterStopIdle`, `ReadyNoContinuationEarlyInput`,
@@ -49,11 +59,11 @@ retained `known_not_sent: vetoed … Refused(Unproven)`.
 ## Boundaries the model does not prove
 
 - `PersonLateSubmit` is enabled only while the restart floor stands. After a passed floor, a person's Enter not yet
-  recorded is the existing unreported-key window (`transcript-readiness.design.md:418`); a first draft of this mode
-  that allowed it there broke `ReadyNoIdleRunningInjection` on the old path, not the new one.
-- Screen and transcript both lagging with no durable record (a person's Enter while the UserPromptSubmit hook waits on
-  the stopped daemon) is not modelled as safe; it is measurement Q5 in the design.
+  recorded is the existing unreported-key window (`transcript-readiness.design.md:418`). The liveness premise also
+  requires `preSends = 0`, the same window.
+- Screen and transcript both hiding a sent turn is the `late-blind` mutant, not a safe mode. Measurement Q5 (Claude
+  Code 2.1.325) found the screen shows `running UserPromptSubmit hooks…` until the transcript row lands.
 - The model's `Submit` rechecks readiness atomically; the code's screen check precedes the first key by one poll, the
   same check-to-key window as the existing Idle path.
-- D3 (a restored in-flight turn keeps the channel off the Idle first-input path) is an assumption of `Arrived`; the
-  design's test Q4 checks it in code.
+- The trailing session-metadata fix (design §5.4) does not change what a hard terminal means, so the model has no
+  action for it.

@@ -162,9 +162,9 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
                     tail.assistant = text;
                 }
             }
+            // Written in the session-state block after a turn's own records, never before its
+            // prompt; only a resume start reads it as a turn starting.
             "permission-mode" => {
-                tail.end = End::None;
-                tail.terminal = 0;
                 tail.empty = false;
                 tail.barrier = offset;
             }
@@ -175,7 +175,18 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
                 tail.activity_at = timestamp(&record);
                 tail.end = End::None;
             }
-            "file-history-snapshot" | "queue-operation" | "last-prompt" => {}
+            // Session metadata a turn writes after its own records: no turn progress.
+            "file-history-snapshot"
+            | "queue-operation"
+            | "last-prompt"
+            | "ai-title"
+            | "mode"
+            | "session-owner"
+            | "atis-latch"
+            | "cost-state"
+            | "tools-used"
+            | "pr-link"
+            | "frame-link" => {}
             _ => {
                 tail.end = End::None;
                 tail.empty = false;
