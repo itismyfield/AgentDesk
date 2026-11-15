@@ -4055,6 +4055,10 @@ src/
 │   │   ├── runner.rs
 │   │   └── session.rs
 │   ├── termination_audit/
+│   │   ├── host_terminate/
+│   │   │   ├── herdr_terminate/
+│   │   │   │   └── contract.rs
+│   │   │   └── contract.rs
 │   │   └── host_terminate.rs
 │   ├── tmux_common/
 │   │   ├── claude_footer.rs
