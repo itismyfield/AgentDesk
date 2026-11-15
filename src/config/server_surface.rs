@@ -9,9 +9,9 @@ use super::ServerConfig;
 #[serde(rename_all = "snake_case")]
 pub enum BrowserGuardMode {
     /// Serve it unchanged and log one WARN line.
-    #[default]
     Log,
     /// Reject it (403, or 415 for the body type rule).
+    #[default]
     Enforce,
 }
 
@@ -54,17 +54,30 @@ mod tests {
     use crate::config::Config;
 
     #[test]
-    fn browser_guard_defaults_to_log_and_saved_config_keeps_an_explicit_enforce() {
+    fn browser_guard_defaults_to_enforce_and_saved_config_keeps_an_explicit_log() {
         let default_yaml = serde_yaml::to_string(&Config::default()).unwrap();
         assert!(!default_yaml.contains("browser_guard"), "{default_yaml}");
+        let default_saved: Config = serde_yaml::from_str(&default_yaml).unwrap();
+        assert_eq!(
+            default_saved.server.browser_guard,
+            BrowserGuardMode::Enforce
+        );
         let missing: Config = serde_yaml::from_str("server:\n  port: 8791\n").unwrap();
-        assert_eq!(missing.server.browser_guard, BrowserGuardMode::Log);
+        assert_eq!(missing.server.browser_guard, BrowserGuardMode::Enforce);
 
-        let parsed: Config = serde_yaml::from_str("server:\n  browser_guard: enforce\n").unwrap();
-        assert_eq!(parsed.server.browser_guard, BrowserGuardMode::Enforce);
+        let parsed: Config = serde_yaml::from_str("server:\n  browser_guard: log\n").unwrap();
+        assert_eq!(parsed.server.browser_guard, BrowserGuardMode::Log);
         let saved = serde_yaml::to_string(&parsed).unwrap();
+        assert!(saved.contains("browser_guard: log"), "{saved}");
         let reparsed: Config = serde_yaml::from_str(&saved).unwrap();
-        assert_eq!(reparsed.server.browser_guard, BrowserGuardMode::Enforce);
+        assert_eq!(reparsed.server.browser_guard, BrowserGuardMode::Log);
+        let explicit: Config = serde_yaml::from_str("server:\n  browser_guard: enforce\n").unwrap();
+        assert_eq!(explicit.server.browser_guard, BrowserGuardMode::Enforce);
+        assert!(
+            !serde_yaml::to_string(&explicit)
+                .unwrap()
+                .contains("browser_guard")
+        );
         assert!(serde_yaml::from_str::<Config>("server:\n  browser_guard: off\n").is_err());
     }
 
@@ -75,6 +88,6 @@ mod tests {
         let rendered = format!("{:?}", config.server);
         assert!(!rendered.contains("secret-token-value"), "{rendered}");
         assert!(rendered.contains("<redacted>"), "{rendered}");
-        assert!(rendered.contains("browser_guard: Log"), "{rendered}");
+        assert!(rendered.contains("browser_guard: Enforce"), "{rendered}");
     }
 }

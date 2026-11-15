@@ -65,8 +65,8 @@ impl Ports for Fake {
         }
         self.ready.load(Ordering::SeqCst)
     }
-    fn pane_busy(&self, _: &str) -> bool {
-        self.busy.load(Ordering::SeqCst)
+    fn claude_busy(&self, _: &str) -> claude_activity::Busy {
+        self.busy.load(Ordering::SeqCst).into()
     }
     fn spawn(&self, job: Job) -> bool {
         self.spawns.fetch_add(1, Ordering::SeqCst);
@@ -427,7 +427,7 @@ fn every_observation_maps_to_its_activity_and_reason() {
         ("closed", (Idle, "closed")),
         ("open", (Busy, "open")),
         ("stale open, pane idle", (Unknown, "open_without_progress")),
-        ("stale open, pane busy", (Busy, "open_pane_busy")),
+        ("stale open, pane busy", (Busy, "open_activity_busy")),
         ("codex open", (Busy, "open")),
         ("codex stale open", (Unknown, "open_without_progress")),
         ("metadata only, ready", (Idle, "no_turn_evidence_ready")),

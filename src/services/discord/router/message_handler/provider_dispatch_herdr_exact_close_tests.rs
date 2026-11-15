@@ -334,3 +334,26 @@ fn f3_a_person_draft_is_closed_without_reading_or_submitting_it_pg() {
     assert_eq!(fx.rig.sends(), prompt_sends());
     ports.old_tmux.assert_no_input();
 }
+
+#[test]
+fn an_unlogged_tmux_resume_marker_lets_the_first_herdr_turn_resume_once_that_tmux_ended_pg() {
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let fx = Fixture::with_root("resume-ended-tmux", None, root);
+    let marker = crate::services::tmux_common::session_temp_path(fx.logical(), "spawn_nonce");
+    std::fs::write(&marker, "a".repeat(32)).unwrap();
+    let (session, path) = fx.seed_resumable(true);
+    // The tmux resume after that record replaced the marker and logged nothing; it has ended.
+    std::fs::write(&marker, "b".repeat(32)).unwrap();
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        if let Some(started) = fx.start_provider_as(&launcher, true, "resume") {
+            assert_eq!((&started.session, &started.path), (&session, &path));
+            fx.answer(&started);
+        }
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(fx.row(), Some(HostedState::Bound));
+    assert_eq!(fx.rig.sends(), prompt_sends());
+}

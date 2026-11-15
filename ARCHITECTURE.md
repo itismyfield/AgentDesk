@@ -569,6 +569,7 @@ src/
 │   ├── legacy_migration.rs
 │   ├── mod.rs
 │   ├── paths.rs
+│   ├── skill_provider_sync_tests.rs
 │   ├── skill_refresh.rs
 │   ├── skill_sync.rs
 │   ├── snapshot_reader_tests.rs
@@ -1041,6 +1042,19 @@ src/
 │   │   ├── tui_session_launch.rs
 │   │   └── tui_session_launch_geometry_tests.rs
 │   ├── claude_tui/
+│   │   ├── activity/
+│   │   │   ├── background/
+│   │   │   │   └── child.rs
+│   │   │   ├── background.rs
+│   │   │   ├── events.rs
+│   │   │   ├── hooks.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── poll.rs
+│   │   │   ├── processes.rs
+│   │   │   ├── source.rs
+│   │   │   ├── tools.rs
+│   │   │   ├── transcript.rs
+│   │   │   └── transcript_tests.rs
 │   │   ├── busy_inject/
 │   │   │   ├── screen/
 │   │   │   │   └── paste_footer.rs
@@ -1088,10 +1102,12 @@ src/
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs
 │   │   │   ├── relay_receipts.rs
-│   │   │   └── resume_renumber_tests.rs
+│   │   │   ├── resume_renumber_tests.rs
+│   │   │   └── same_session_source_tests.rs
 │   │   ├── host_input/
 │   │   │   ├── busy/
 │   │   │   │   ├── herdr.rs
+│   │   │   │   ├── herdr_tests.rs
 │   │   │   │   └── tmux.rs
 │   │   │   ├── busy.rs
 │   │   │   └── transport.rs
@@ -1119,6 +1135,8 @@ src/
 │   │   ├── readiness/
 │   │   │   ├── compact/
 │   │   │   │   └── completion.rs
+│   │   │   ├── source/
+│   │   │   │   └── clear.rs
 │   │   │   ├── clear.rs
 │   │   │   ├── clear_tests.rs
 │   │   │   ├── compact.rs
@@ -2352,6 +2370,7 @@ src/
 │   │   │   │   │   ├── host_refusal.rs
 │   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── intake_dispatch.rs
+│   │   │   │   │   ├── owned_busy.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── replay_start.rs
@@ -2442,6 +2461,8 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_actual_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_composed_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_busy_entry_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_busy_late_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
@@ -2984,7 +3005,11 @@ src/
 │   │   │   ├── rehydration_pending_tests.rs
 │   │   │   ├── relay_ownership.rs
 │   │   │   ├── restore_after_rehydration_tests.rs
+│   │   │   ├── scheduled_prompt.rs
+│   │   │   ├── scheduled_prompt_tests.rs
 │   │   │   ├── session_rotation_settle.rs
+│   │   │   ├── slash_command_output.rs
+│   │   │   ├── slash_command_output_tests.rs
 │   │   │   ├── source_tick.rs
 │   │   │   ├── synthetic_orphan_reclaim.rs
 │   │   │   ├── synthetic_start.rs
@@ -3302,6 +3327,11 @@ src/
 │   │   │   │   │   ├── superseded_measurement_tests.rs
 │   │   │   │   │   ├── unit_tests.rs
 │   │   │   │   │   └── watcher_runtime_tests.rs
+│   │   │   │   ├── claude_activity.rs
+│   │   │   │   ├── claude_activity_b1_tests.rs
+│   │   │   │   ├── claude_activity_leaf_tests.rs
+│   │   │   │   ├── claude_activity_p2_tests.rs
+│   │   │   │   ├── claude_activity_tests.rs
 │   │   │   │   ├── closed_boundary.rs
 │   │   │   │   ├── effect_reads.rs
 │   │   │   │   ├── effect_reads_tests.rs
@@ -3677,6 +3707,9 @@ src/
 │   │   ├── admission_intent.rs
 │   │   ├── operation.rs
 │   │   └── record.rs
+│   ├── mcp_config/
+│   │   ├── antigravity.rs
+│   │   └── antigravity_tests.rs
 │   ├── memory/
 │   │   ├── local.rs
 │   │   ├── memento.rs
@@ -4077,6 +4110,7 @@ src/
 │   │   ├── runtime_hint_fence.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
+│   │   ├── claude_idle.rs
 │   │   ├── cleanup_host.rs
 │   │   └── tests_pg.rs
 │   ├── tui_input/
@@ -4772,6 +4806,7 @@ src/
 │   ├── manual_steer.rs
 │   ├── mcp_config.rs
 │   ├── mcp_config_atomic_write_tests.rs
+│   ├── mcp_config_retirement_tests.rs
 │   ├── mcp_config_snapshot_tests.rs
 │   ├── message_outbox.rs
 │   ├── message_outbox_circuit_authority.rs

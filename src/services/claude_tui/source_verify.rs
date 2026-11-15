@@ -37,7 +37,7 @@ pub(crate) struct ClaudeHookSource {
 
 impl ClaudeHookSource {
     /// Reads parent fields only, so a subagent's `agent_transcript_path` never names the pane source.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn from_payload(payload: &Value) -> Option<Self> {
         let field = |key: &str| payload.get(key).and_then(Value::as_str);
         Some(Self {
@@ -128,17 +128,16 @@ pub(crate) struct ClaudeSource {
 impl ClaudeSource {
     /// The log identity of a verified source; `None` without a Unix file identity.
     pub(crate) fn source_id(&self) -> Option<SourceId> {
-        let (dev, ino) = match self.file? {
+        match self.file? {
             #[cfg(unix)]
-            SourceFileIdentity::Unix { dev, ino } => (dev, ino),
-            SourceFileIdentity::Unavailable => return None,
-        };
-        Some(SourceId {
-            session_id: self.session_id.clone(),
-            path: self.path.clone(),
-            dev,
-            ino,
-        })
+            SourceFileIdentity::Unix { dev, ino } => Some(SourceId {
+                session_id: self.session_id.clone(),
+                path: self.path.clone(),
+                dev,
+                ino,
+            }),
+            SourceFileIdentity::Unavailable => None,
+        }
     }
 }
 

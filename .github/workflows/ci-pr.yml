@@ -1068,7 +1068,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh e256ee60298077dc178779eb58b038480261be5a1d435e2f04e7786a9cf087ee
+          pin scripts/check-ci-runner-hardening.sh 2baa0aed23335c566e6252337dd04de85fb5430593f1a7674bebb40e912da98c
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1080,8 +1080,8 @@ jobs:
 
   pg15_owner_proof:
     name: PostgreSQL 15 owner proof
-    needs: changes
-    if: ${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}
+    needs: [changes, rust_build]
+    if: ${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     env:
@@ -1124,6 +1124,17 @@ jobs:
         with:
           toolchain: "1.94.1"
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.149
+
+      - name: Download nextest plan
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-plan
+          path: ${{ runner.temp }}/nextest
+
       - name: Setup sccache
         uses: ./.github/actions/sccache-or-nothing
 
@@ -1137,6 +1148,31 @@ jobs:
 
       - name: Ensure swap for the lib test build
         uses: ./.github/actions/ensure-swap
+
+      - name: Save runner memory checkpoint
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh checkpoint
+      - name: Upload runner memory checkpoint
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}-before-build
+          path: ${{ runner.temp }}/runner-memory-checkpoint
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Reuse archived lib test binary
+        timeout-minutes: 5
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: >-
+          python3 scripts/ci/lib-test-artifact.py prepare-nextest
+          --source "$RUNNER_TEMP/nextest" --directory "$RUNNER_TEMP/lib-test-artifact"
 
       # The ids file and this exact list must match; run_test_lane fails a missing, extra or unexecuted id.
       - name: Begin runner memory step
@@ -1155,7 +1191,7 @@ jobs:
         run: >-
           python3 scripts/run_test_lane.py --lane pg --max-summaries 4
           --expected-ids scripts/ci/pg15_required_ids.txt --
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run --
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run --require-artifact --
           cargo test --lib -- --exact
           db::auto_queue::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg
           db::auto_queue::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg
@@ -1177,7 +1213,6 @@ jobs:
           services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg
           services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg
           services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg
-          --test-threads=1
 
       - name: End runner memory step
         if: always()
@@ -1215,6 +1250,9 @@ jobs:
     # compile is the existence proof for the `relay_state_contract_refs` blocks.
     if: ${{ !github.event.pull_request.draft && (needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true') }}
     runs-on: ubuntu-latest
+    env:
+      # Limit simultaneous workspace target checks on the 4-CPU hosted runner.
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1267,6 +1305,22 @@ jobs:
       # Workspace clippy can exhaust hosted-runner memory; swap pages it instead of killing the runner.
       - name: Ensure swap for clippy
         uses: ./.github/actions/ensure-swap
+
+      - name: Save runner memory checkpoint
+        continue-on-error: true
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/runner-memory.sh checkpoint
+      - name: Upload runner memory checkpoint
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}-before-build
+          path: ${{ runner.temp }}/runner-memory-checkpoint
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Begin runner memory step
         continue-on-error: true
@@ -1631,11 +1685,12 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       RELAY_AUTHORITY_MUTATION_SHARD_INDEX: ${{ matrix.shard }}
-      RELAY_AUTHORITY_MUTATION_SHARD_TOTAL: "3"
+      RELAY_AUTHORITY_MUTATION_SHARD_TOTAL: "7"
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2]
+        # #8162: one mutant per shard, so no runner rebuilds incrementally under swap pressure.
+        shard: [0, 1, 2, 3, 4, 5, 6]
     steps:
       # Depth 2 keeps HEAD^1, the base side the wiring digest compares against.
       - uses: actions/checkout@v4
@@ -1692,6 +1747,8 @@ jobs:
       - name: Ensure swap for the lib test build
         if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         uses: ./.github/actions/ensure-swap
+        # #8162: lib test builds peak near 16G RAM + 19G swap; rebuilding per mutant lost the runner twice.
+        with: {size-gb: "24"}
 
       - name: Fetch Cargo dependencies
         if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'

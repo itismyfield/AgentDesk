@@ -1478,6 +1478,7 @@ impl AttachedOwner {
             "export AGENTDESK_BINDING_CONTEXT='{}'\ncd '{}'\nexec 'claude' '--session-id' '{session}'\n",
             context.display(), project.display(),
         )).unwrap();
+        crate::services::claude_tui::readiness::tests::pre_source(&self.rig.name, &path);
         (session, path)
     }
 
@@ -2921,6 +2922,7 @@ pub(crate) fn claimed_root_recovery_launch(
         timing: &busy_inject::TIMING,
         until_done: None,
         native_pin_submitted: None,
+        observation: None,
     };
     created(
         registration,
