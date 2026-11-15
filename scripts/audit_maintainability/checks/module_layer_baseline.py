@@ -274,7 +274,8 @@ def _guard_mapping_reductions(accepted, payload, moves, measured_edges, reclassi
             raise ValueError(f"mapping-only reverse reduction requires --reclassify <prefix>: {row['id']}")
 
 
-def _admit_classification(accepted, payload, moves, graph, occurrences, mapping, previous_mapping):
+def _admit_classification(accepted, payload, moves, graph, occurrences, mapping, previous_mapping,
+                          previous_graph=None, previous_occurrences=None):
     from audit_maintainability.checks.module_layer_ratchet import compare, _validate
     if accepted["mapping_sha256"] != _id(_ordered(previous_mapping)):
         raise ValueError("previous mapping hash does not match the accepted baseline")
@@ -282,12 +283,34 @@ def _admit_classification(accepted, payload, moves, graph, occurrences, mapping,
         raise ValueError("classification admission requires a changed mapping hash")
     if _mapping_errors(previous_mapping)[1] or mapping["layers"] != previous_mapping["layers"]:
         raise ValueError("classification admission must preserve layer ranks")
+    historical = graph if previous_graph is None else previous_graph
+    historical_occurrences = occurrences if previous_occurrences is None else previous_occurrences
+    known = project(historical, previous_mapping, historical_occurrences)
+    reviewed = project(historical, mapping, historical_occurrences)
+    assigned = {row["module"]: row["layer"] for row in reviewed["classifications"]}
+    if any(row["layer"] is not None and assigned[row["module"]] != row["layer"]
+           for row in known["classifications"]):
+        raise ValueError("classification admission must preserve every known layer")
     before = project(graph, previous_mapping, occurrences)
     after = project(graph, mapping, occurrences)
     assigned = {row["module"]: row["layer"] for row in after["classifications"]}
-    if any(row["layer"] is not None and assigned[row["module"]] != row["layer"]
-           for row in before["classifications"]):
-        raise ValueError("classification admission must preserve every known layer")
+    existing = set(historical["nodes"])
+    previous_mapping = deepcopy(previous_mapping)
+    for row in before["classifications"]:
+        if row["module"] in existing or row["layer"] == assigned[row["module"]]:
+            continue
+        # A new module has no historical layer to inherit; use its reviewed layer
+        # in the comparison projection so inherited debt cannot be invented or admitted.
+        root, _, logical = row["module"].partition("::crate")
+        prefix = logical.removeprefix("::")
+        for category in ("rules", "unclassified"):
+            previous_mapping[category] = [rule for rule in previous_mapping.get(category, [])
+                if (rule["prefix"], rule.get("root", root)) != (prefix, root)]
+        layer = assigned[row["module"]]
+        rule = {"root": root, "prefix": prefix, "reason": "new source module"}
+        previous_mapping["rules" if layer is not None else "unclassified"].append(
+            {**rule, "layer": layer} if layer is not None else rule)
+    before = project(graph, previous_mapping, occurrences)
     previous = baseline(graph, previous_mapping, payload["input_sha"], occurrences)
     sources = {row["id"]: row for row in before["uncertainties"]}
     if compare(accepted, previous, moves, sources)["errors"]:
@@ -327,9 +350,30 @@ def _admit_classification(accepted, payload, moves, graph, occurrences, mapping,
     return result, rows
 
 
+def _unrecorded_reduction_uncertainties(accepted, payload, moves, sources):
+    from audit_maintainability.checks.module_layer_ratchet import _normalized
+    old, zeros, current = _normalized(accepted, payload, moves)
+    shrunk_sources = {row["source"] for identity, row in old["reverse_dependencies"].items()
+                      if current["reverse_dependencies"].get(identity, {"count": 0})["count"] < row["count"]}
+    return [row for identity, row in sorted(current["uncertainties"].items())
+            if identity not in old["uncertainties"] and identity not in zeros["uncertainties"]
+            and (sources or {}).get(row["id"], {}).get("source") in shrunk_sources]
+
+
+def _record_proven_uncertainties(accepted, payload, moves, sources, history, previous_revision):
+    previous = {row["id"]: row["count"] for row in _uncertainties(history)}
+    result, proofs = deepcopy(accepted), []
+    for row in _unrecorded_reduction_uncertainties(accepted, payload, moves, sources):
+        if previous.get(row["id"], 0) >= row["count"]:
+            result["uncertainties"].append(deepcopy(row))
+            proofs.append({"id": row["id"], "previous_revision": previous_revision,
+                           "previous_count": previous[row["id"]], "current_count": row["count"]})
+    return result, proofs
+
+
 def update_baseline(path, payload, moves, *, upgrade=False, legacy_records=None, sources=None,
                     measured_edges=None, reclassify=(), admission=None, previous_mapping_rev=None,
-                    dry_run=False, report=None):
+                    history=None, dry_run=False, report=None):
     """Only the explicit reduction command may replace an accepted snapshot."""
     from audit_maintainability.checks.module_layer_ratchet import compare, reduced_baseline, _validate
     lock = path.with_name(path.name + ".lock")
@@ -342,7 +386,7 @@ def update_baseline(path, payload, moves, *, upgrade=False, legacy_records=None,
         try:
             original = path.read_bytes()
             accepted = json.loads(original)
-            rows = []
+            rows, proofs = [], []
             if upgrade:
                 _validate(payload)
                 if accepted.get("schema_version") != 2 or moves != {"schema_version": 1, "moves": []}:
@@ -362,14 +406,22 @@ def update_baseline(path, payload, moves, *, upgrade=False, legacy_records=None,
                 result = payload
             else:
                 _guard_mapping_reductions(accepted, payload, moves, measured_edges, reclassify)
+                if history is not None:
+                    accepted, proofs = _record_proven_uncertainties(
+                        accepted, payload, moves, sources, history, previous_mapping_rev)
                 if admission is not None:
                     accepted, rows = _admit_classification(accepted, payload, moves, **admission)
                 result = reduced_baseline(accepted, payload, moves, sources)
             suffix = " --upgrade-records" if upgrade else " --update-reductions"
-            if rows:
+            if rows or (admission is not None and proofs):
                 suffix = f" --admit-classification --previous-mapping-rev {previous_mapping_rev}"
+            elif previous_mapping_rev is not None and admission is None:
+                suffix += f" --previous-mapping-rev {previous_mapping_rev}"
             result["generation_command"] += suffix + "".join(f" --reclassify {prefix}" for prefix in reclassify)
             data = encode_baseline(result).encode("utf-8")
+            def emit_proofs():
+                for proof in proofs:
+                    print("recorded_uncertainty " + " ".join(f"{key}={value}" for key, value in proof.items()), file=sys.stderr)
             if report is not None:
                 report.parent.mkdir(parents=True, exist_ok=True)
                 descriptor, name = tempfile.mkstemp(prefix=report.name + ".", dir=report.parent)
@@ -387,8 +439,10 @@ def update_baseline(path, payload, moves, *, upgrade=False, legacy_records=None,
                       f"accepted_indeterminate_count={sum(row['accepted_indeterminate_count'] for row in rows)} "
                       f"grown_since_accepted={sum(row['grown_since_accepted'] for row in rows)}", file=sys.stderr)
             if dry_run:
+                emit_proofs()
                 return result
             if original == data:
+                emit_proofs()
                 return result
             descriptor, name = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
             temporary = Path(name)
@@ -399,6 +453,7 @@ def update_baseline(path, payload, moves, *, upgrade=False, legacy_records=None,
             if path.read_bytes() != original:
                 raise ValueError("accepted baseline changed during reduction")
             os.replace(temporary, path)
+            emit_proofs()
             return result
         finally:
             if temporary is not None:
@@ -407,8 +462,8 @@ def update_baseline(path, payload, moves, *, upgrade=False, legacy_records=None,
             lock.unlink()
 
 
-def historical_baseline(repo, input_sha, mapping):
-    """Replay tracked source at the original SHA before extending its record schema."""
+def historical_measurement(repo, input_sha):
+    """Replay only tracked Rust inputs, retaining the historical module graph."""
     from audit_maintainability.checks.module_layers import analyze
     listing = subprocess.check_output(["git", "-C", str(repo), "ls-tree", "-r", "--name-only",
                                        input_sha, "--", "src", "Cargo.toml"], text=True)
@@ -431,7 +486,13 @@ def historical_baseline(repo, input_sha, mapping):
                     raise ValueError("historical replay requires regular source files")
         occurrences = []
         graph = analyze(root, occurrence_projection=occurrences)
-        return baseline(graph, mapping, input_sha, occurrences)
+        return graph, occurrences
+
+
+def historical_baseline(repo, input_sha, mapping):
+    """Replay tracked source at the original SHA before extending its record schema."""
+    graph, occurrences = historical_measurement(repo, input_sha)
+    return baseline(graph, mapping, input_sha, occurrences)
 
 
 def main():
@@ -448,8 +509,10 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
-    if args.admit_classification != bool(args.previous_mapping_rev):
-        parser.error("--admit-classification requires --previous-mapping-rev (and vice versa)")
+    if args.admit_classification and not args.previous_mapping_rev:
+        parser.error("--admit-classification requires --previous-mapping-rev")
+    if args.previous_mapping_rev and not (args.admit_classification or args.update_reductions):
+        parser.error("--previous-mapping-rev requires reduction or classification admission mode")
     if (args.dry_run or args.report or args.reclassify) and not (args.update_reductions or args.admit_classification):
         parser.error("dry-run, report and reclassify require reduction or classification admission mode")
     revision = subprocess.run(["git", "-C", str(args.repo), "rev-parse", "--verify", args.input_sha + "^{commit}"], capture_output=True, text=True)
@@ -474,16 +537,35 @@ def main():
         from audit_maintainability.checks.module_layer_ratchet import MOVES
         moves = tomllib.loads((args.repo / MOVES).read_text("utf-8"))
         legacy_records = historical_baseline(args.repo, json.loads(args.output.read_bytes())["input_sha"], mapping) if args.upgrade_records else None
-        admission = None
+        admission, history, historical_occurrences = None, None, None
+        accepted = json.loads(args.output.read_bytes())
+        sources = uncertainty_sources(graph, mapping, occurrences)
+        pending = _unrecorded_reduction_uncertainties(accepted, payload, moves, sources) if not args.upgrade_records else []
+        if args.previous_mapping_rev or (args.update_reductions and pending):
+            reference = args.previous_mapping_rev or accepted["input_sha"]
+            previous_sha = subprocess.run(["git", "-C", str(args.repo), "rev-parse", "--verify", reference + "^{commit}"],
+                                          capture_output=True, text=True)
+            if previous_sha.returncode:
+                parser.error("previous mapping revision is unavailable")
+            args.previous_mapping_rev = previous_sha.stdout.strip()
+            for descendant in ("HEAD", args.input_sha):
+                ancestry = subprocess.run(["git", "-C", str(args.repo), "merge-base", "--is-ancestor",
+                                           args.previous_mapping_rev, descendant])
+                if ancestry.returncode or (pending and args.previous_mapping_rev == args.input_sha):
+                    parser.error("previous mapping revision must be an ancestor of HEAD and the input SHA; uncertainty proof requires a strict ancestor")
+            history, historical_occurrences = historical_measurement(args.repo, args.previous_mapping_rev)
+            if any(history["coverage"].get(key) for key in ("read_failures", "module_errors")):
+                parser.error("previous source graph is incomplete")
         if args.admit_classification:
             previous = subprocess.run(["git", "-C", str(args.repo), "show", f"{args.previous_mapping_rev}:{MAPPING}"],
                                       capture_output=True, text=True)
             if previous.returncode:
                 parser.error("previous mapping revision is unavailable")
             admission = dict(graph=graph, occurrences=occurrences, mapping=mapping,
-                             previous_mapping=tomllib.loads(previous.stdout))
+                             previous_mapping=tomllib.loads(previous.stdout),
+                             previous_graph=history, previous_occurrences=historical_occurrences)
         result = update_baseline(args.output, payload, moves, upgrade=args.upgrade_records, legacy_records=legacy_records,
-                                 sources=uncertainty_sources(graph, mapping, occurrences),
+                                 sources=sources, history=history,
                                  measured_edges=_edges(graph, occurrences), reclassify=args.reclassify,
                                  admission=admission, previous_mapping_rev=args.previous_mapping_rev,
                                  dry_run=args.dry_run, report=args.report)
