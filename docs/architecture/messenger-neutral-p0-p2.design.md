@@ -153,15 +153,15 @@ P0-C의 최소 닫힘은 TmuxWatcherHandle, ReservationRecord, TmuxWatcherRegist
 
 새 vocabulary 값은 `domain::conversation::ConversationId(u64)`와 `MessageRef { conversation: ConversationId, raw: String }`로 정한다. ConversationId는 내부 키이고 Discord snowflake라는 의미를 부여하지 않는다. `new/get`, Copy/Eq/Hash/Ord/Debug를 제공한다. 기존 raw u64의 0 sentinel은 기존 경로에 그대로 두며, 신규 송신 경계에서는 유효 대화 키를 검사해 0을 transport에 보내지 않는다. ConversationId 자체의 생성은 내부 값 표현이므로 0을 저장할 수 있고 송신 가능 여부와 구분한다. 신규 serde는 transparent u64 숫자, MessageRef는 두 필드의 신규 값 표현으로만 정의한다. 기존 snowflake string serde와 SQL Type impl은 교체하지 않는다. MessageRef는 문자열 ts·opaque ID를 parse_u64 없이 보존한다. Discord adapter에서만 MessageId/OutboundMessageId와의 fallible 변환을 한다. 요청 conversation과 서버가 반환한 conversation/message를 구별한 receipt를 잃지 않는다.
 
-**ChannelId를 새 타입의 별칭으로 교체하지 않고 변환으로 잇는다.** Discord 아래 `id_bridge`에 `From<serenity::ChannelId> for ConversationId`, nonzero 검증을 포함한 반대 방향 `TryFrom<ConversationId> for serenity::ChannelId`를 둔다. u64 동등 mapping은 기존 Discord 경로에서만 identity다. domain에서 Serenity를 import하지 않는다. 기존 OutboundChannelId/OutboundMessageId는 `src/domain/outbound/ids.rs:8`의 snowflake wire 계약을 계속 소유한다.
+**ChannelId를 새 타입의 별칭으로 교체하지 않고 변환으로 잇는다.** Discord 아래 `id_bridge`에 명시적 함수 `conversation_from_discord(ChannelId) -> ConversationId`와 nonzero 검증을 포함한 `discord_channel_from_conversation(ConversationId) -> Result<ChannelId, IdError>`를 둔다. SDK에 새 From/TryFrom impl을 추가하지 않아 기존 generic `.into()`의 후보 집합도 그대로 둔다. u64 동등 mapping은 기존 Discord 경로에서만 identity다. domain에서 Serenity를 import하지 않는다. 기존 OutboundChannelId/OutboundMessageId는 `src/domain/outbound/ids.rs:8`의 snowflake wire 계약을 계속 소유한다.
 
 | 컴파일 단위 | 변경 | 기존 ChannelId/DB/serde가 그대로인 근거 |
 |---|---|---|
 | vocabulary 새 파일 | 중립 새 타입/값만 추가 | 기존 import 대상과 trait impl set을 바꾸지 않음. 신규 serde는 별도 새 wire에만 사용 |
-| Discord id_bridge | 변환 impl과 실제 사용 경계 추가 | 두 타입 중 새 로컬 타입이 있어 orphan 규칙에 맞음. SDK 타입 재정의/외부 trait 구현 대체 없음 |
+| Discord id_bridge | 명시적 변환 함수와 실제 사용 경계 추가 | 기존 SDK의 trait impl 후보 집합도 변경 0. 새 함수 호출에만 새 타입이 관여하며 orphan 규칙을 우회하는 impl도 없음 |
 | 기존 모든 ChannelId 모듈 | **import·형·impl 변경 0** | 여전히 Serenity::ChannelId; new/get, serde, method resolution, Eq/Hash, sqlx bind 전 `.get()` 등 기존 식이 동일 |
 | 기존 channel_id:u64/SQL·파일 wire | 변경 0 | migration/DB 바인딩·serde 명명/형식·키 생성식을 바꾸지 않음. 새 MessageRef를 옛 wire 필드에 덮어쓰지 않음 |
-| 새 MessengerOutbound caller | 경계에서 `.into()`/TryFrom | 새 API만 ConversationId/MessageRef. 기존 string outbound IDs는 adapter에서 변환 오류를 기존 error 분류로 환원 |
+| 새 MessengerOutbound caller | 경계에서 명명한 변환 함수 호출 | 새 API만 ConversationId/MessageRef. 기존 string outbound IDs는 adapter에서 변환 오류를 기존 error 분류로 환원 |
 
 직접 type alias 교체는 `ChannelId::new/get`의 nonzero panic, 외부 impl/SDK 메서드, 문자열 snowflake serde를 같은 것으로 보장하지 못한다. 그래서 “새 wrapper가 layout상 u64”를 기존 580파일 무수정 근거로 쓰지 않는다. 무수정 근거는 **기존 타입 자체가 바뀌지 않는 것**이다. 이 레그에서는 빌드 증명이 아니라 소유/형 해석 논증을 제공하며, P1 구현 조각에서 모든 target check와 serde/DB compatibility 시험으로 확인해야 한다.
 
@@ -585,7 +585,7 @@ I-set은 A~G 전환 뒤 old 이름의 잔여 재수출/상위 import만 정리�
 
 main에서 이미 충족된 부분은 다시 만들지 않는다. **d40c06eb47**의 `src/domain/outbound.rs:1`/`src/domain/outbound/port.rs:88`에 Serenity 없는 송신 값/port가 있고, `src/domain/message_split.rs:5`/`src/domain/message_split.rs:25`에 아래 층 splitter/단위 계산이 있다. `src/domain/outbound/ids.rs:8`의 snowflake serde 계약, `src/services/turn_orchestrator.rs:1133`의 mailbox registry도 재사용한다. 이것은 새 MessengerOutbound/EngineRuntime이 이미 완료됐다는 뜻은 아니다.
 
-이 문서 레그에서는 cargo 금지에 따라 시험·뮤턴트·clippy·빌드를 실행하지 않는다. `check_doc_path_refs.py` rc=0, docs-only cap, `prepush_gates.sh --static-only`를 실행한다. `source_scan_readers.py --run`은 변경 문서를 읽는 module이 없는 경우 cargo 없이 반환하는 것을 스크립트에서 먼저 확인한 뒤 실행한다. 선택 0이면 **해당 없음(문서 독자 없음)**이지 시험 PASS가 아니다. 바이너리·PG·cargo profile 증거는 해당 없음으로 보고한다.
+이 문서 레그에서는 cargo 금지에 따라 Rust 대상 시험·뮤턴트·clippy·빌드를 실행하지 않는다. prepush에 내장된 Python 정적 검사/CI wiring unittest는 수행한다. `check_doc_path_refs.py` rc=0, docs-only cap, `prepush_gates.sh --static-only`를 실행한다. `source_scan_readers.py --run`은 변경 문서를 읽는 module이 없는 경우 cargo 없이 반환하는 것을 스크립트에서 먼저 확인한 뒤 실행한다. 선택 0이면 **해당 없음(문서 독자 없음)**이지 시험 PASS가 아니다. Rust 시험 바이너리·PG·cargo profile 증거는 해당 없음으로 보고한다.
 
 각 구현 조각은 다음을 충족해야 한다. 대상 test filter는 선택 수=통과 수, 실패/skip=0인지 출력에서 확인하며 0 tests를 성공으로 쓰지 않는다. SDK compatibility에는 lib/prod와 lib test의 cfg 쌍 및 Windows 대상을 포함한다. 소스 이동/alias가 있는 조각은 source_scan_readers의 관련 module을 같은 cargo 환경에서 실행한다. clippy workspace/all-targets/all-features의 자기 파일 warning 0, module_layers 새 역의존/기존 count 증가 0, cap≤30/+1500을 확인한다. 새 allow/baseline 상향은 하지 않는다.
 
