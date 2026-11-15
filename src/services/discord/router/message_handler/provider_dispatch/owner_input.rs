@@ -15,7 +15,7 @@ use crate::services::discord::queue_io::input_owner::effect::{
     self, BusyClaude, BusyCodex, BusyCodexHerdr, Clock, CodexInput, Completion, PreparedPayload,
 };
 use crate::services::discord::queue_io::input_owner::origin::{Execution, InputOrigin};
-use crate::services::discord::queue_io::input_owner::{pump, target};
+use crate::services::discord::queue_io::input_owner::{held_watch, pump, target};
 use crate::services::discord::router::intake_dispatch::WRITER_HELD;
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -176,6 +176,9 @@ pub(in crate::services::discord) fn owner_drive(
             .await
             {
                 let id = ChannelId::new(channel);
+                if let Some(probe) = bootstrap_probe(runtime.as_ref(), &provider, channel).await {
+                    held_watch::arm(channel, probe);
+                }
                 hold_start(&mailbox, id, &front).await;
                 #[cfg(test)]
                 crate::services::discord::queue_io::cancel_backstop_test_support::owner_boot_hold_finished(
@@ -944,6 +947,12 @@ async fn start_idle(
         }
     };
     let typed = refusal.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let mut bootstrap = match typed {
+        Some(crate::services::turn_host::HerdrRefusal::OWriterNotReady) => {
+            bootstrap_probe(Some(&shared), &shared.provider, channel.get()).await
+        }
+        _ => None,
+    };
     if let Some(refusal) = typed
         && let Some(kind) = super::start_failure::confirmed(&refusal)
     {
@@ -965,6 +974,11 @@ async fn start_idle(
     let turn_mode = crate::services::discord::router::intake_dispatch::TURN_MODE_AWAITED;
     match (answer.await, started) {
         (_, Err(error)) if error == WRITER_HELD => {
+            if let Some(probe) =
+                bootstrap_probe(Some(&shared), &shared.provider, channel.get()).await
+            {
+                held_watch::arm(channel.get(), probe);
+            }
             hold_start(&holder, channel, &held).await;
             if crate::services::tui_o::writer::host::channel_accepts(channel.get())
                 && intake_route::for_input_placement(shared.provider.as_str(), channel.get()).await
@@ -986,6 +1000,14 @@ async fn start_idle(
             }
             Err(error)
         }
+        // A canary writer the bootstrap could unblock: held until the turn host would plan it.
+        (_, Err(_)) if bootstrap.is_some() => {
+            if let Some(probe) = bootstrap.take() {
+                held_watch::arm(channel.get(), probe);
+            }
+            hold_start(&holder, channel, &held).await;
+            Err(BOOTSTRAP_WAITS.into())
+        }
         // The late read held the claimed start: it waits as an unclaimed start would, watched.
         (Ok(Err(error)), _) if error == START_WAITS => {
             hold_start(&holder, channel, &held).await;
@@ -999,6 +1021,41 @@ async fn start_idle(
 
 /// A start's settlement while its pane's native turn runs or cannot be read: nothing was sent.
 const START_WAITS: &str = "NotSent(\"synthetic_waits_idle\")";
+
+/// A start the turn host refused while the canary bootstrap may still unblock its writer.
+const BOOTSTRAP_WAITS: &str = "NotSent(\"herdr_bootstrap_waits\")";
+
+/// The read a held canary front is watched through: the turn host's own judgement, run as a task
+/// of the runtime turns run on while the watch's blocking thread waits; `None` off the bootstrap
+/// path.
+async fn bootstrap_probe(
+    shared: Option<&Shared>,
+    provider: &ProviderKind,
+    channel: u64,
+) -> Option<held_watch::ScreenProbe> {
+    use crate::services::turn_host::{HeldLook, bootstrap_watched, held_look};
+    if !bootstrap_watched(provider, channel) {
+        return None;
+    }
+    let shared = shared?;
+    let id = ChannelId::new(channel);
+    let key = crate::services::discord::adk_session::turn_session_key(shared, id, provider).await;
+    let (pool, provider) = (shared.pg_pool.clone(), provider.clone());
+    let runtime = tokio::runtime::Handle::current();
+    Some(Box::new(move || {
+        let (pool, provider, key) = (pool.clone(), provider.clone(), key.clone());
+        let (sender, judged) = std::sync::mpsc::sync_channel(1);
+        runtime.spawn(async move {
+            let look = held_look(pool.as_ref(), &provider, channel, key.as_deref()).await;
+            let _ = sender.send(look);
+        });
+        match judged.recv() {
+            Ok(HeldLook::Ready) => Screen::Ready,
+            Ok(HeldLook::Wait) => Screen::Blocked,
+            Ok(HeldLook::Unread) | Err(_) => Screen::Unknown,
+        }
+    }))
+}
 
 /// Marks the start's front held so the drive watches the read a hold armed.
 async fn hold_start(mailbox: &ChannelMailboxHandle, channel: ChannelId, front: &Front) {
@@ -1572,6 +1629,9 @@ fn draft_notice(turn: &StreamingTurn<'_>, sources: &[String]) -> Option<effect::
     }))
 }
 
+#[cfg(test)]
+#[path = "owner_input_bootstrap_tests.rs"]
+mod bootstrap_tests;
 #[cfg(test)]
 #[path = "owner_input_codex_tests.rs"]
 mod codex_tests;

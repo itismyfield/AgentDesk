@@ -489,6 +489,7 @@ pub(crate) mod tests {
                     herdr_session: "not-used".into(),
                 },
                 row: Some(f.row.clone()),
+                bootstrap: false,
             })),
         ))
     }

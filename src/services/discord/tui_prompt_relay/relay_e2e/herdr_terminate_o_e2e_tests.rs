@@ -127,6 +127,15 @@ fn m2t_t7_codex_execution_unsealed_survives_its_own_termination_pg() {
 }
 
 #[test]
+fn codex_attach_withholds_an_execution_retired_after_its_reconcile_read_pg() {
+    let path = concat!(
+        module_path!(),
+        "::codex_attach_withholds_an_execution_retired_after_its_reconcile_read_pg"
+    );
+    in_child(path, |rig, _| Box::pin(retired_during_attach(rig)));
+}
+
+#[test]
 fn m2t_t7u_o_actor_unsealed_survives_rotation_stall_pg() {
     let path = concat!(
         module_path!(),
@@ -1272,6 +1281,82 @@ async fn unsealed(rig: herdr::P11TerminationRig) {
     let (b, b_path) = launch_codex_successor(&run, &sessions, &a, &b_body).await;
     let channel = unsealed.stalled(&out, running, &b).await;
     unsealed.restarted(&out, channel, bindings, &b_path).await;
+    run.finish().await;
+}
+
+/// The execution's own pane, retired the first time the attach's reconcile reads it.
+struct RetiredOnRead<'a> {
+    pane: LaunchedPane,
+    retire: Box<dyn Fn() + 'a>,
+    read: std::cell::Cell<bool>,
+}
+
+impl HerdrExecutionReader for RetiredOnRead<'_> {
+    fn endpoint(&self) -> Option<&HerdrEndpointId> {
+        self.pane.endpoint()
+    }
+
+    fn read_pane(&self, pane_id: &str) -> HerdrPaneReading {
+        let reading = self.pane.read_pane(pane_id);
+        if !self.read.replace(true) {
+            (self.retire)();
+        }
+        reading
+    }
+}
+
+/// A Terminate's retire lands between the attach's reconcile read and its admission: the attach
+/// refuses and leaves the retired execution listed but withheld, so no retired execution stays
+/// admitted for its hooks or for the next bootstrap.
+async fn retired_during_attach(rig: herdr::P11TerminationRig) {
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedLookup, HostedLookupKey, HostedRecord, load_hosted_execution_pg,
+    };
+    let (run, context, sessions) = Terminating::launch_codex(&rig).await;
+    let session = uuid::Uuid::new_v4().to_string();
+    let path = rollout(&sessions, &session);
+    let started = session_start(&run.logical, &context, &session, &path);
+    assert_eq!(started, IngressOutcome::Durable(DurableKind::Adopted));
+    let logged = binding_events::binding_events_since(CHANNEL_ID, 0).unwrap();
+    let binding_events::BindingTarget::Source(source) = &logged.last().unwrap().new else {
+        panic!("a logged source: {logged:?}");
+    };
+    let (pool, key) = (run.pool.clone(), run.session_key.clone());
+    let retire = move || {
+        let (pool, key) = (pool.clone(), key.clone());
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                let lookup = load_hosted_execution_pg(&pool, HostedLookupKey::SessionKey(&key));
+                let HostedLookup::Found(row) = lookup.await else {
+                    panic!("the launched row");
+                };
+                let HostedRecord::Known(record) = &row.record else {
+                    panic!("a known record");
+                };
+                let retired = crate::services::discord::herdr_terminate::retire_confirmed(
+                    &pool, &row, record,
+                );
+                assert!(retired.await.is_ok());
+            })
+        })
+    };
+    let reader = RetiredOnRead {
+        pane: run.own_pane(&session),
+        retire: Box::new(retire),
+        read: std::cell::Cell::new(false),
+    };
+    let nonce = herdr::EXECUTION;
+    let attach = attach_launched_codex_herdr_source;
+    let attached = attach(&run.pool, &run.owner, CHANNEL_ID, nonce, source, &reader).await;
+    assert!(reader.read.get(), "the reconcile read the pane");
+    assert_eq!(attached, HerdrSourceAttach::NotPublished);
+    let row = herdr::row(&run.pool, &run.session_key).await;
+    assert_eq!(row, Some((herdr::HostedState::Retired, nonce.to_string())));
+    assert_eq!(
+        dedupe::herdr_listing(&run.logical),
+        Some((nonce.to_string(), false)),
+        "listed but withheld"
+    );
     run.finish().await;
 }
 

@@ -142,9 +142,11 @@ LaunchCAS ==
     /\ row' = "pending" /\ exec' = "pending" /\ listing' = "rw" /\ intake' = "cas"
     /\ Keep(<<cleanup, marker, tmuxLive, writer, resumedBy, watch, viaBoot, pub, fails, boots>>)
 
+\* codex/herdr_turn.rs prepare: the recheck fails before the CAS; the turn ends with that error
+\* through the existing launch failure path, without a bootstrap hold or watch.
 LaunchRefused ==
     /\ intake = "admitted" /\ row = "retired" /\ viaBoot /\ Recheck /\ ~Vacant
-    /\ intake' = "held" /\ watch' = Arm("held")
+    /\ intake' = "failed" /\ watch' = FALSE
     /\ Keep(<<row, cleanup, marker, listing, tmuxLive, writer, resumedBy, viaBoot, exec, pub,
               fails, boots>>)
 

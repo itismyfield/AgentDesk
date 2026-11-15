@@ -1,7 +1,9 @@
 # CodexHerdrBootstrap
 
 Model written against AgentDesk `3fa2ab95c8068bb0c4a58bc742f65f0db80c5a71` (2026-11-15, issue #8181 design, revision 2).
-Counterexamples were replayed against that code; dispositions are below.
+Counterexamples were replayed against that code; dispositions are below. Rechecked against the S1
+implementation on base `3cbd2b04f9`: `LaunchRefused` now ends the turn, as the launch's refusal does in
+code, instead of holding and arming the front (see "Implementation check").
 
 The Codex canary channel (`codex_tui::canary`, channel 1509350778043895902) runs on Herdr. Its hosted row
 is Retired, its spawn nonce marker is gone, and the binding log still ends its codex ownership records with
@@ -34,9 +36,25 @@ implementation; the design's tests T1-T11 and their mutants are still required i
 - `TmuxAppears` is limited to the bootstrap window (no new incarnation, no marker, writer not ready). With a
   ready writer the ordinary launch has no vacancy check at all (`herdr_launch.rs:497` stamps before the
   `:502` check), a pre-existing gap outside this design (design F1).
+- `LaunchRefused` abstracts a refusal before the Pending CAS only for safety (no second execution, no
+  row change). It does not prove what happens to the front afterwards: whether that front is kept or
+  settled, and whether it resumes on its own, is left to the implementation tests.
 - Not modelled: the headless turn/start path (`turn_host.rs:191` executor_not_wired, issue #8125), non-canary
   channels, Legacy or missing rows, late hooks of an older nonce (`codex_hook.rs:333` checks the listed
   nonce; covered by test T6), and more than one front.
+
+## Implementation check
+
+Rechecked against the S1 implementation. The rules above are the ones the code applies: placement
+admits on the pin, the vacant target and the live actor (`intake_route/input.rs`); the turn host
+plans a bootstrap only for the owner's exact retired row, an absent or withheld listing of that
+nonce, a released hold and a seeded store (`turn_host.rs` `bootstrap_eligible`); the launch reads
+the vacancy again inside `prepare`, under the fence and before the CAS (`codex/herdr_turn.rs`); a held
+front is armed with the turn host's own judgement at the three refusal points (`owner_input.rs`).
+Two code facts sit outside the model and are covered by tests instead. The attach admits the new
+execution and then reads the row again, withholding a retired one, so a Terminate between the
+reconcile and the admission leaves no admitted retired execution. `retire_confirmed` withholds only
+Codex executions; Claude's move back releases its own listing.
 
 ## Configs
 
