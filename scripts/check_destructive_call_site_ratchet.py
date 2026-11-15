@@ -17,6 +17,10 @@ functions and whole test files are excluded. This lexical category recognizes
 ``fs::remove_*`` and ``std::fs::remove_*`` spellings; aliases and wrappers may
 remain unseen.
 
+``managed_tmux_kill_outside_adapter`` scans both ``platform::tmux::`` and
+``tmux::`` kill calls in production text, excluding the tmux adapters. Only
+fixed per-file non-managed counts are allowed; the JSON baseline cannot relax them.
+
 The ``identity_fence_bind`` and ``delivery_fence_bind`` categories are the
 inverse of the others: they count the FENCED entry points, not unfenced
 destruction.
@@ -178,6 +182,15 @@ CATEGORIES = (
     "discord_message_edit",
 )
 WARNING = "These counts are a growth-blocking baseline, not proof of safety."
+MANAGED_TMUX_KILL_CATEGORY = "managed_tmux_kill_outside_adapter"
+MANAGED_TMUX_KILL_ALLOWED = {
+    "src/cli/dcserver.rs": 1,
+    "src/server/routes/provider_auth_profiles.rs": 2,
+}
+MANAGED_TMUX_KILL_PATTERN = re.compile(
+    r"\b(?:platform\s*::\s*)?tmux\s*::\s*"
+    r"kill_session(?:_output_timeout|_output|_checked)?\s*\("
+)
 REGISTRY_REMOVE_COMMENT = (
     "Measured production external removals are 3/5/4/2 (total 14). "
     "The design's 10/2/3/2=17 counted turn_finalizer/watcher_backstop.rs:252, "
@@ -651,6 +664,7 @@ def scan(repo_root: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
     if not source_root.is_dir():
         raise RatchetError("scan root src/ is missing")
     counts: dict[str, dict[str, int]] = {category: {} for category in CATEGORIES}
+    counts[MANAGED_TMUX_KILL_CATEGORY] = {}
     registry_subcounts = {name: 0 for name in REGISTRY_PATTERNS}
     paths = sorted(source_root.rglob("*.rs"))
     if not paths:
@@ -671,6 +685,14 @@ def scan(repo_root: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
         if _is_whole_test_file(path, rel):
             continue
         production = RUST_LEXER._production_text(path)
+        if not (
+            rel == "src/services/session_host/tmux_host.rs"
+            or rel == "src/services/platform/tmux.rs"
+            or rel.startswith("src/services/platform/tmux/")
+        ):
+            kill_found = len(MANAGED_TMUX_KILL_PATTERN.findall(production))
+            if kill_found:
+                counts[MANAGED_TMUX_KILL_CATEGORY][rel] = kill_found
         unlink_found = len(FS_UNLINK_PATTERN.findall(production))
         if unlink_found:
             counts["fs_unlink"][rel] = unlink_found
@@ -768,6 +790,19 @@ def growth_errors(
                 errors.append(
                     f"{category}: GROWTH in {path}: found {found}x, baseline {pinned}x"
                 )
+    return errors
+
+
+def managed_tmux_kill_errors(actual: Mapping[str, Mapping[str, int]]) -> list[str]:
+    """Only fixed non-managed callers may bypass the adapter; JSON cannot relax this."""
+    errors: list[str] = []
+    for path, found in sorted(actual.get(MANAGED_TMUX_KILL_CATEGORY, {}).items()):
+        allowed = MANAGED_TMUX_KILL_ALLOWED.get(path, 0)
+        if found > allowed:
+            errors.append(
+                f"{MANAGED_TMUX_KILL_CATEGORY}: {path} has {found}x outside the adapter, "
+                f"allowed {allowed}x"
+            )
     return errors
 
 
@@ -986,7 +1021,7 @@ def write_baseline(
 def _totals(counts: Mapping[str, Mapping[str, int]]) -> str:
     return ", ".join(
         f"{category}={sum(counts[category].values())}/{len(counts[category])}files"
-        for category in CATEGORIES
+        for category in (*CATEGORIES, MANAGED_TMUX_KILL_CATEGORY)
     )
 
 
@@ -1010,6 +1045,7 @@ def main(argv: Sequence[str] | None = None, repo_root: Path = REPO_ROOT) -> int:
         baseline, _payload = load_baseline(root / BASELINE_PATH)
         errors = (
             growth_errors(counts, baseline)
+            + managed_tmux_kill_errors(counts)
             + owner_only_errors(counts, baseline)
             + pairing_errors(counts)
             + controller_detach_errors(root)

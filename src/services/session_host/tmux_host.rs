@@ -38,6 +38,23 @@ pub(crate) fn tmux_key_name(key: HostKey) -> &'static str {
 }
 
 impl TmuxHost {
+    pub(crate) fn kill(&self, name: &str, reason: &str) -> bool {
+        tmux::kill_session(name, reason)
+    }
+
+    pub(crate) fn kill_output(&self, name: &str, reason: &str) -> std::io::Result<Output> {
+        tmux::kill_session_output(name, reason)
+    }
+
+    pub(crate) fn kill_output_timeout(
+        &self,
+        name: &str,
+        reason: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Output, String> {
+        tmux::kill_session_output_timeout(name, reason, timeout)
+    }
+
     /// Raw `send-keys` output, so the caller keeps tmux's exit status and stderr.
     pub(crate) fn send_host_keys(&self, session: &str, keys: &[HostKey]) -> Result<Output, String> {
         let names: Vec<&str> = keys.iter().map(|key| tmux_key_name(*key)).collect();

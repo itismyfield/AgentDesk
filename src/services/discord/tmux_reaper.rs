@@ -326,10 +326,8 @@ async fn clean_orphan_sessions(shared: &Arc<SharedData>, output: &[String]) {
             std::time::Duration::from_secs(10),
             tokio::task::spawn_blocking(move || {
                 record_tmux_exit_reason(&name_clone, "orphan cleanup: no owning channel session");
-                crate::services::platform::tmux::kill_session(
-                    &name_clone,
-                    "orphan cleanup: no owning channel session",
-                )
+                crate::services::session_host::TmuxHost
+                    .kill(&name_clone, "orphan cleanup: no owning channel session")
             }),
         )
         .await
@@ -550,10 +548,8 @@ async fn reap_listed_dead_sessions(shared: &Arc<SharedData>, output: &[String]) 
         let sess = session_name.to_string();
         let kill_result = tokio::task::spawn_blocking(move || {
             record_tmux_exit_reason(&sess, "reaper: dead session with no watcher");
-            crate::services::platform::tmux::kill_session_output(
-                &sess,
-                "reaper: dead session with no watcher",
-            )
+            crate::services::session_host::TmuxHost
+                .kill_output(&sess, "reaper: dead session with no watcher")
         })
         .await;
         match &kill_result {
@@ -671,7 +667,7 @@ async fn reap_fresh_routine_orphan(
                 &name,
                 "tmux reaper backstop: completed fresh routine orphan (#3877)",
             );
-            crate::services::platform::tmux::kill_session(
+            crate::services::session_host::TmuxHost.kill(
                 &name,
                 "tmux reaper backstop: completed fresh routine orphan (#3877)",
             )
@@ -1539,7 +1535,7 @@ async fn kill_unified_thread_session(
     let target = name.clone();
     tokio::task::spawn_blocking(move || {
         record_tmux_exit_reason(&target, "unified-thread run completed");
-        crate::services::platform::tmux::kill_session(&target, "unified-thread run completed");
+        crate::services::session_host::TmuxHost.kill(&target, "unified-thread run completed");
     })
     .await
     .ok()?;

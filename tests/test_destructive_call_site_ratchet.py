@@ -843,6 +843,91 @@ mod tests {
         self.assertIn(f"{ratchet.CONTROLLER_PATH} is missing", stderr.getvalue())
 
 
+class ManagedTmuxKillTests(unittest.TestCase):
+    CATEGORY = "managed_tmux_kill_outside_adapter"
+    CALL = 'tmux::kill_session("probe", "fixture");\n'
+
+    def test_both_paths_and_all_kill_wrappers_are_counted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rel = "src/services/probe.rs"
+            body = "\n".join(
+                f'{prefix}kill_session{suffix}("probe", "fixture");'
+                for prefix in ("tmux::", "crate::services::platform::tmux::")
+                for suffix in ("", "_output", "_output_timeout", "_checked")
+            )
+            body += '\ntmux :: kill_session ("probe", "fixture");\n'
+            body += '// tmux::kill_session("comment", "fixture");\n'
+            body += 'let label = "tmux::kill_session(";\n'
+            body += 'TmuxHost.kill("probe", "fixture");\n'
+            write(root, rel, body)
+            actual, subcounts = ratchet.scan(root)
+        self.assertEqual(actual[self.CATEGORY], {rel: 9})
+        self.assertEqual(len(ratchet.managed_tmux_kill_errors(actual)), 1)
+
+    def test_tests_and_only_the_adapter_paths_are_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel in (
+                "src/services/session_host/tmux_host.rs",
+                "src/services/platform/tmux.rs",
+                "src/services/platform/tmux/cleanup.rs",
+                "src/services/probe_tests.rs",
+                "src/services/discord/relay_recovery/tests/unread_tail_seed.rs",
+            ):
+                write(root, rel, self.CALL)
+            write(root, "src/services/probe.rs", "#[cfg(test)]\nmod tests {\n" + self.CALL + "}\n")
+            write(root, "src/services/another.rs", "#[cfg(test)]\nfn test_only() {\n" + self.CALL + "}\n")
+            lookalike = "src/services/platform/tmux_extra.rs"
+            write(root, lookalike, self.CALL)
+            actual, subcounts = ratchet.scan(root)
+        self.assertEqual(actual[self.CATEGORY], {lookalike: 1})
+
+    def test_fixed_non_managed_limits_allow_decreases_and_refuse_growth(self) -> None:
+        allowed = {
+            "src/cli/dcserver.rs": 1,
+            "src/server/routes/provider_auth_profiles.rs": 2,
+        }
+        self.assertEqual(ratchet.MANAGED_TMUX_KILL_ALLOWED, allowed)
+        for rel, maximum in allowed.items():
+            for found in range(maximum + 2):
+                with self.subTest(path=rel, count=found):
+                    errors = ratchet.managed_tmux_kill_errors({self.CATEGORY: {rel: found}})
+                    self.assertEqual(bool(errors), found > maximum)
+
+    def test_new_managed_call_fails_even_after_baseline_repin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rel = "src/services/probe.rs"
+            write(root, ratchet.CONTROLLER_PATH, "")
+            write_committed_cleanup_callers(root)
+            write(root, rel, "fn clean() {}\n")
+            git = mock.Mock(stdout="a" * 40 + "\n")
+            with mock.patch.object(ratchet.subprocess, "run", return_value=git):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(ratchet.main(["--write-baseline"], repo_root=root), 0)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(ratchet.main(["--check"], repo_root=root), 0)
+            write(root, rel, self.CALL)
+            for repin in (False, True):
+                if repin:
+                    with mock.patch.object(ratchet.subprocess, "run", return_value=git):
+                        with redirect_stdout(io.StringIO()):
+                            self.assertEqual(ratchet.main(["--write-baseline"], repo_root=root), 0)
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    self.assertEqual(ratchet.main(["--check"], repo_root=root), 1)
+                self.assertIn(f"{self.CATEGORY}: {rel} has 1x", stderr.getvalue())
+
+    def test_current_tree_contains_only_the_three_non_managed_calls(self) -> None:
+        actual, subcounts = ratchet.scan(ROOT)
+        self.assertEqual(actual[self.CATEGORY], {
+            "src/cli/dcserver.rs": 1,
+            "src/server/routes/provider_auth_profiles.rs": 2,
+        })
+        self.assertEqual(ratchet.managed_tmux_kill_errors(actual), [])
+
+
 class CommittedCleanupParityTests(unittest.TestCase):
     """Both terminal paths keep calling the shared committed-placeholder helper."""
 

@@ -45,12 +45,9 @@ pub(crate) fn kill_proven_idle_provider_session(
 ) -> Result<bool, IdlePreserved> {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         provider_session_is_proven_idle_under_authority(authority, recover_codex).map(|()| {
-            crate::services::platform::tmux::kill_session_output_timeout(
-                tmux_session_name,
-                reason,
-                std::time::Duration::from_secs(2),
-            )
-            .is_ok_and(|output| output.status.success())
+            crate::services::session_host::TmuxHost
+                .kill_output_timeout(tmux_session_name, reason, std::time::Duration::from_secs(2))
+                .is_ok_and(|output| output.status.success())
         })
     })
 }

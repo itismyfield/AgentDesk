@@ -373,7 +373,7 @@ fn kill_session_before_retry(
         name,
         &format!("forcing fresh session before auto-retry: {reason}"),
     );
-    crate::services::platform::tmux::kill_session(
+    crate::services::session_host::TmuxHost.kill(
         name,
         &format!("forcing fresh session before auto-retry: {reason}"),
     );
