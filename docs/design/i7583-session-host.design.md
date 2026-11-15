@@ -275,7 +275,7 @@ user_default endpoint에서 재부팅 뒤의 server-replaced(`src/services/disco
 |---|---|---|
 | 위치 없음 | `location = None ∧ expected = None` | 기존 unplaced resolver(무변화) |
 | 위치 있음, provider 미확인 | `location = Some ∧ expected = None` | 아래 placed resolver |
-| expected 있음, source 미연결 | `expected = Some`, 행 Pending | placed resolver의 "provider 증명" 칸과 같다. 증명되면 같은 nonce로 adopt |
+| expected 있음, source 미연결 | `expected = Some`, 행 Pending | 같은 placed resolver. provider가 증명되면 같은 nonce로 adopt, provider가 끝나 셸만 남았거나 pane이 없으면 아래 해당 칸 |
 
 **placed resolver** (새 `src/services/herdr_launch/placed.rs`(제안), 호출은 `src/services/discord/recovery_engine/herdr_reader.rs`의 boot·health 패스가 Pending을 건너뛰던 자리):
 
@@ -286,6 +286,7 @@ user_default endpoint에서 재부팅 뒤의 server-replaced(`src/services/disco
    - **provider 증명**(hook spawn nonce 또는 root/provider tree가 행 nonce와 일치) → 같은 nonce로 expected 기록·Bound·source attach. create 0, 재전송 0.
    - **pane 없음**, 그리고 nonce 작업공간 census에 `논리키#nonce`가 없음 → retire + 큐 wake. kill 0.
    - **pane에 다른 nonce**(pane id 재사용) → 자기 nonce 작업공간이 census에 없으면 위와 같이 retire. 남의 pane에는 효과 0.
+     census가 자기 nonce 작업공간을 다른 pane에서 찾으면 같은 nonce의 위치 CAS로 그 pane을 기록하고 이 판정을 한 번 더 한다(Unknown으로 머물지 않음).
    - **자기 nonce 작업공간에 셸만**(provider 자식 없음), quiet 기간 경과, 첫 입력 receipt 없음 → residue warrant로 `host.terminate` → pane 부재 재확인 뒤 retire + wake.
    - **Unknown**(probe 오류·시간 초과) → 행·원문 유지, 다음 패스(기존 `UNPLACED_RETRY` 30초 간격)에서 재판독. 죽었다고 단정하지 않는다.
 4. 결론마다 한 번만 기록·알림한다. retire 뒤 대기 큐가 깨어나 새 nonce로 create한다.
@@ -378,6 +379,9 @@ start failure로 알린다고 했다. 그러나 이 함수들은 큐에서 원�
    queued drain이면 `QueuedTransitionBusyHandoff`로 큐 owner가 통째 복원한다(`src/services/discord/router/intake_dispatch/queued.rs:353-357`). 호출은
    일반 intake(`src/services/discord/router/message_handler/intake_turn.rs:252`)와 ADK thread(`src/services/discord/router/message_handler/intake_turn/adk_thread.rs:171`) 둘이고,
    provider 구분 없이 모든 턴이 지난다. 이 경계는 provider spawn·reset·reconcile·clear보다 먼저다.
+   Discord 큐 밖의 세 번째 진입인 headless 턴(routine·예약 실행, `src/services/discord/router/message_handler/headless_turn/entrypoints.rs:160`)도 routine 관리 세션 이름을 쓰고
+   (`src/services/discord/router/message_handler/headless_turn.rs:391-408`) 같은 `provider_dispatch::execute`로 간다(`:1073`). D01은 이 진입에서도 같은 판정을 예약 전에 내려
+   `HeadlessTurnStartError`의 새 `HostUnavailable`로 돌려준다. 프롬프트는 호출자(run 기록)가 그대로 갖고, 시작 안 된 시도로 남는다(실패로 소비하지 않음).
 3. 알림은 채널당 사유가 바뀔 때 한 번(queued 재시도는 이미 조용함, `src/services/discord/router/message_handler/intake_turn/host_refusal.rs:36`). 문구 예: `managed session host unavailable: tmux is not installed on this node and the channel has no Herdr endpoint`.
 4. 복원된 원문은 hold로 남고, 호스트 가용성이 돌아오는 신호(tmux 가용성 캐시 회복, Herdr 서버 기동·health 성공)가 큐 drain을 깨운다. 사용자가 다시 말하지 않아도 한 번 제출된다.
    큐는 내구라 dcserver 재시작을 지나도 남는다(부팅 복원 `src/services/discord/runtime_bootstrap/queued_recovery.rs:26`).
@@ -390,6 +394,7 @@ start failure로 알린다고 했다. 그러나 이 함수들은 큐에서 원�
 
 **수용 시험(D01, 실제 queued kickoff·intake 진입점).** tmux·Herdr 둘 다 없는 노드에서 대기 중인 Qwen 원문(첨부 포함)으로 drain을 돌린다:
 자식 프로세스 0, 알림 1, 큐에 원문·첨부 그대로, dcserver 재시작 뒤에도 남음, 호스트 가용 신호 뒤 정확히 한 번 제출. Claude·Codex의 owner 없는 턴도 같은 표로 한 번 더.
+headless 진입은 `HostUnavailable` 반환·자식 0·예약 0.
 뮤턴트: admission 판정을 빼고 provider 함수의 일반 `Err`만 남김 → 원문 단언이 실패해야 한다(커밋하지 않음).
 모델 `UnixNoTmux` GREEN, `ErrConsumes`(호스트 없음 오류가 원문을 소비) RED `NoInputLoss`, `SilentFallback`(폴백을 남김) RED.
 
@@ -459,7 +464,7 @@ wrapper 종료 뒤 늦게 append하는 후손 시험(`src/services/discord/repla
 | 조각 | 목적 | 소유 파일 | prod 파일 / 순증 | 수용 시험 | win | 의존 |
 |---|---|---|---|---|---|---|
 | D00 | 시험 대역 치환(시험만) | §10.4 둘째·셋째 부류 약 30 시험 파일, `src/services/session_host/test_support.rs` | 0(+가짜 호스트 60줄) | 바꾼 시험 통과, 단언 삭제 0 | CI | — |
-| D01 | 라우팅·process launch 삭제, intake admission의 호스트 없음 거절과 가용성 wake(§10.2), Windows Qwen headless, 가용성 규칙 | `src/services/claude.rs`, `src/services/claude/backend_routing.rs`, `src/services/claude/process_session_launch.rs`, `src/services/codex/command_streaming.rs`, `src/services/codex/process_session_launch.rs`, `src/services/qwen.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/claude_command.rs`, `src/services/platform/tmux/availability.rs`, `src/services/turn_host.rs`, `src/services/discord/router/message_handler/intake_turn/host_refusal.rs`, `src/services/discord/router/intake_dispatch/queued.rs`, 가용성 wake 등록 | ~15 / −650 | §10.2 수용 시험: 실제 queued kickoff·intake에서 tmux·Herdr 둘 다 없을 때 Qwen 대기 원문·첨부 보존, 자식 0, 알림 1, 재시작 뒤 보존, 호스트 복귀 뒤 1회 제출. Claude·Codex owner 없는 턴도. 살아 있는 pane이면 tmux | **CI** | W10, D00 |
+| D01 | 라우팅·process launch 삭제, intake admission의 호스트 없음 거절과 가용성 wake(§10.2), Windows Qwen headless, 가용성 규칙 | `src/services/claude.rs`, `src/services/claude/backend_routing.rs`, `src/services/claude/process_session_launch.rs`, `src/services/codex/command_streaming.rs`, `src/services/codex/process_session_launch.rs`, `src/services/qwen.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/claude_command.rs`, `src/services/platform/tmux/availability.rs`, `src/services/turn_host.rs`, `src/services/discord/router/message_handler/intake_turn/host_refusal.rs`, `src/services/discord/router/intake_dispatch/queued.rs`, `src/services/discord/router/message_handler/headless_turn/entrypoints.rs`, 가용성 wake 등록 | ~16 / −640 | §10.2 수용 시험: 실제 queued kickoff·intake에서 tmux·Herdr 둘 다 없을 때 Qwen 대기 원문·첨부 보존, 자식 0, 알림 1, 재시작 뒤 보존, 호스트 복귀 뒤 1회 제출. Claude·Codex owner 없는 턴과 headless 턴(시작 안 됨, 프롬프트 호출자 보존)도. 살아 있는 pane이면 tmux | **CI** | W10, D00 |
 | D02 | 레지스트리 조회 소비자 정리 | §10.1 소비자 15곳의 13파일 + `src/services/provider/session_probe.rs` | 13 / −120 | clear·reset·admin guard 기존 시험 | CI | D01 |
 | D03 | `ProcessBackend` 종류·`ProcessReady`·process 취소 삭제 | `src/services/agent_protocol.rs`, `src/services/discord/turn_bridge/runtime_handoff_loop.rs`, `src/services/discord/turn_bridge/stream_loop.rs`, `src/services/discord/recovery_engine.rs`, `src/services/discord/turn_bridge/tmux_runtime.rs`, `src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs`, `src/services/discord/inflight/model.rs`, `src/services/discord/health/routine_process.rs` 등 | 24 / −600 | 0단계: 종류 없는 헤드리스 행의 현재 복구 분기를 시험으로 먼저 고정. 디스크 `"process_backend"` 행은 "세션 없음"으로 닫히고 알림 1회, silent-skip 0 | CI | D02 |
 | D04 | 레지스트리·`ProcessHost`·`HostKind::Process` 삭제, 클러스터 광고 | `src/services/session_backend.rs`, `src/services/session_backend/auth_profiles.rs`, `src/services/session_backend/output.rs`, `src/services/session_host/process_host.rs`, `src/services/session_host/model.rs`, `src/services/session_host/resolve.rs`, `src/domain/host_observation.rs`, `src/services/cluster/readiness.rs` 등 | 14 / −900 | 실행 소스의 ProcessBackend/ProcessHost/Process kind 0, JSONL 파서·3종 runtime 유지, 옛 `process` 표식 Unrecognized | CI | D03, U14 |
@@ -586,5 +591,5 @@ Unix Herdr 쌍의 상태 수가 다른 것(3,647 / 8,299)은 placed Pending 자�
 | 채널 기본값이 지금과 같은가 | Unix 전 칸 동일 — 근거는 §5.2 표 기반 시험(리터럴 기대값, 완전성 검사)이고 모델 상태 수가 아니다. 세 bool은 Windows 암묵 기본에 걸지 않아 공유 설정 false가 Windows 실행·Escape를 끊지 않는다. 바뀌는 두 칸(tmux 없는 Unix, Windows 무선택)은 삭제가 강제하는 변화로 표에 명시 |
 | (r2) 재시작 뒤 사람 없이 끝나지 않는 placed Pending이 남는가 | 남지 않는다. 위치 있는 Pending은 boot·health 패스의 placed resolver가 provider 증명 → 같은 nonce adopt, pane 없음·다른 nonce → retire, 자기 nonce 셸만 → residue close 후 retire로 끝낸다(§7.3). Windows 서버 교체는 W08이 `legacy_dedicated`에서 재부팅 조건 없이 retire. 남는 것: probe가 계속 Unknown이면 행·원문을 지키며 30초마다 재판독(호스트 자체 장애로 보고) — 사람 명령을 요구하지 않는다. 모델 `UnixHerdrCurrent`·`SkipPlaced` RED → `UnixHerdr`·`WindowsImplicit` GREEN |
 | (r2) Windows Codex 실행·Cancel이 다른 게이트에 막히거나 tmux로 새는가 | 허가를 `ChannelHostPlan`이 선택과 함께 정하고(§5.1) PlatformDefault는 세 bool을 읽지 않는다. 나머지 게이트(owner 입력 `cfg!(unix)`, `#[cfg(unix)]` Escape 판정, settlement `cfg!(unix)`, Codex `SwitchOff`)를 W08·W09·W10이 하나씩 열고 각 생산 진입점 시험이 bool false 설정에서 시작·Escape 전달을 단언한다. PlatformDefault의 host는 Herdr뿐이라 tmux 분기가 없고, Herdr를 못 쓰면 admission 거절이다. 모델 `GateRun`·`GateCancel` RED → `WindowsImplicit` GREEN |
-| (r2) tmux·Herdr 둘 다 없을 때 원문을 잃는 provider가 있는가 | 없다. 판정을 provider 함수 `Err`에서 intake admission(`refusal_before_turn` → `host_refusal.rs` 복원·queued busy handoff)으로 옮겨 모든 provider·모든 intake 진입이 provider 호출 전에 같은 복원 경계를 지난다. D01 시험이 Qwen 대기 원문·첨부의 보존·재시작 생존·복귀 뒤 1회 제출을 실제 kickoff에서 단언. 남는 것: admission 통과 뒤 호스트가 사라지는 경합은 기존 start failure 규칙(owner 없는 턴은 원문을 이미 턴이 가짐) — 경합 창은 admission~spawn 사이로 좁다. 모델 `ErrConsumes` RED → `UnixNoTmux` GREEN |
+| (r2) tmux·Herdr 둘 다 없을 때 원문을 잃는 provider가 있는가 | 없다. 판정을 provider 함수 `Err`에서 intake admission(`refusal_before_turn` → `host_refusal.rs` 복원·queued busy handoff)으로 옮겨 모든 provider·모든 intake 진입(일반·ADK thread)이 provider 호출 전에 같은 복원 경계를 지나고, headless(routine) 진입은 예약 전 `HostUnavailable`로 프롬프트를 호출자에게 남긴다. D01 시험이 Qwen 대기 원문·첨부의 보존·재시작 생존·복귀 뒤 1회 제출을 실제 kickoff에서 단언. 남는 것: admission 통과 뒤 호스트가 사라지는 경합은 기존 start failure 규칙(owner 없는 턴은 원문을 이미 턴이 가짐) — 경합 창은 admission~spawn 사이로 좁다. 모델 `ErrConsumes` RED → `UnixNoTmux` GREEN |
 | (r2) S01 목록과 ratchet 기준선이 전수표와 맞는가 | 맞다. 생산 텍스트 두 표기 스캔 31곳 = 관리 28(S01 목록 21파일) + 비관리 3(허용 상수). 전수표 terminate BYPASS의 tmux 행과 같은 좌표다(`src/cli/utils.rs:186` 재분류 포함). 새 ratchet 범주는 두 표기·생산 텍스트만 세고 허용은 파일 단위 수로 고정 |
