@@ -63,10 +63,10 @@ def write_workflow(
                                             "run": "set -euo pipefail\n" + contract.FLOOR_COMMAND + "\n"}]},
             contract.RELAY_AUTHORITY_MUTATIONS_JOB: {
                 "needs": "changes", "if": contract.RUST_REQUIRED_IF,
-                "strategy": {"fail-fast": False, "matrix": {"shard": [0, 1, 2]}},
+                "strategy": {"fail-fast": False, "matrix": {"shard": [0, 1, 2, 3, 4, 5, 6]}},
                 "env": {
                     "RELAY_AUTHORITY_MUTATION_SHARD_INDEX": "${{ matrix.shard }}",
-                    "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL": "3",
+                    "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL": "7",
                 },
                 "steps": mutation_steps,
             },
@@ -181,10 +181,10 @@ class ManifestContract(unittest.TestCase):
         lanes, _ = contract.load_active_lanes(REPO_ROOT / contract.DEFAULT_MANIFEST)
         original = yaml.safe_load((REPO_ROOT / contract.PR_WORKFLOW).read_text(encoding="utf-8"))
         mutations = [
-            ("strategy", {"fail-fast": False, "matrix": {"shard": [0, 1]}}),
-            ("strategy", {"fail-fast": False, "matrix": {"shard": [0, 1, 1]}}),
-            ("strategy", {"fail-fast": True, "matrix": {"shard": [0, 1, 2]}}),
-            ("env", {"RELAY_AUTHORITY_MUTATION_SHARD_INDEX": "0", "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL": "3"}),
+            ("strategy", {"fail-fast": False, "matrix": {"shard": [0, 1, 2]}}),
+            ("strategy", {"fail-fast": False, "matrix": {"shard": [0, 1, 2, 3, 4, 5, 5]}}),
+            ("strategy", {"fail-fast": True, "matrix": {"shard": [0, 1, 2, 3, 4, 5, 6]}}),
+            ("env", {"RELAY_AUTHORITY_MUTATION_SHARD_INDEX": "0", "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL": "7"}),
             ("env", {"RELAY_AUTHORITY_MUTATION_SHARD_INDEX": "${{ matrix.shard }}", "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL": "4"}),
         ]
         for key, value in mutations:
@@ -195,7 +195,7 @@ class ManifestContract(unittest.TestCase):
                 workflow = root / contract.PR_WORKFLOW
                 workflow.parent.mkdir(parents=True)
                 workflow.write_text(yaml.safe_dump(payload), encoding="utf-8")
-                with self.assertRaisesRegex(contract.ManifestError, "must execute all three|must pass its shard"):
+                with self.assertRaisesRegex(contract.ManifestError, "must execute all seven|must pass its shard"):
                     contract.validate_workflow_contract(root, lanes, True)
 
     def test_checked_in_manifest_declares_active_and_gap_rows(self) -> None:

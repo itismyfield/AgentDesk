@@ -18,6 +18,8 @@ PHASES = {
 TARGETS = {"ci-pr.yml": set(PHASES), "ci-main.yml": {"rust_build", "lint", "scripts"}, "ci-nightly.yml": {"rust_build"}}
 NAMES = ["Start runner memory sampler", "Begin runner memory step", "End runner memory step", "Summarize runner memory", "Upload runner memory"]
 COMMANDS = dict(zip(NAMES[:4], ["start", 'begin "$MEMORY_STEP"', "end", "finish"]))
+CHECKPOINT = ["Save runner memory checkpoint", "Upload runner memory checkpoint"]
+COMMANDS[CHECKPOINT[0]] = "checkpoint"
 ARTIFACT = {
     "name": "runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}",
     "path": "${{ runner.temp }}/runner-memory", "if-no-files-found": "warn", "retention-days": 7,
@@ -31,6 +33,15 @@ class RunnerMemoryWiring(unittest.TestCase):
         self.assertTrue(steps[0]["uses"].startswith("actions/checkout@"))
         self.assertEqual(names[1], NAMES[0])
         self.assertEqual(names[-2:], NAMES[-2:])
+        if job_id in ("lint", "pg15_owner_proof"):
+            saved, uploaded = [names.index(name) for name in CHECKPOINT]
+            self.assertEqual(saved + 1, uploaded)
+            first = "just lint" if job_id == "lint" else "Reuse archived lib test binary"
+            self.assertLess(uploaded, names.index(first))
+            self.assertEqual(names.count(CHECKPOINT[0]), 1)
+            self.assertEqual(names.count(CHECKPOINT[1]), 1)
+        else:
+            self.assertFalse(set(CHECKPOINT) & set(names))
         phases = PHASES[job_id] + (["Non-lib tests and doctests"] if workflow == "ci-main.yml" and job_id == "lint" else [])
         begins = [i for i, s in enumerate(steps) if s.get("name") == NAMES[1]]
         ends = [i for i, s in enumerate(steps) if s.get("name") == NAMES[2]]
@@ -50,7 +61,7 @@ class RunnerMemoryWiring(unittest.TestCase):
             name = step.get("name")
             if "runner-memory.sh" in step.get("run", ""):
                 self.assertIn(name, COMMANDS)
-            if name not in NAMES:
+            if name not in NAMES + CHECKPOINT:
                 continue
             self.assertIs(step.get("continue-on-error"), True)
             if name in NAMES[2:]:
@@ -61,7 +72,11 @@ class RunnerMemoryWiring(unittest.TestCase):
                 self.assertEqual(step["env"].get("BASH_ENV"), "/dev/null")
             else:
                 self.assertEqual(step.get("uses"), "actions/upload-artifact@v4")
-                self.assertEqual(step["with"], ARTIFACT)
+                expected_artifact = ARTIFACT
+                if name == CHECKPOINT[1]:
+                    expected_artifact = {**ARTIFACT, "name": ARTIFACT["name"] + "-before-build",
+                                         "path": "${{ runner.temp }}/runner-memory-checkpoint"}
+                self.assertEqual(step["with"], expected_artifact)
                 self.assertEqual(step.get("timeout-minutes"), 2)
         self.assertEqual(steps[-2].get("timeout-minutes"), 1)
 

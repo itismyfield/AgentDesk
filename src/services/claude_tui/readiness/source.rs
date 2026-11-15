@@ -28,12 +28,23 @@ impl Source {
                 return None;
             }
         }
+        #[cfg(unix)]
+        let certified = clear::restore(session);
+        #[cfg(not(unix))]
+        let certified: Option<Source> = None;
         let latest = nonce.as_ref().and_then(|nonce| {
             super::ledger()
                 .starts
                 .get(&(session.to_owned(), nonce.clone()))
                 .map(|(_, source)| source.clone())
         });
+        if certified
+            .as_ref()
+            .is_some_and(|pending| latest.as_ref().is_some_and(|source| source != pending))
+        {
+            return None;
+        }
+        let latest = latest.or(certified);
         if let Some(binding) = tui_prompt_dedupe::runtime_binding_for_tmux_session(session) {
             if binding.runtime_kind
                 != crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
@@ -81,3 +92,22 @@ impl Source {
         sources.next().is_none().then_some(source)
     }
 }
+
+#[cfg(unix)]
+mod clear;
+#[cfg(unix)]
+pub(crate) use clear::adopt as adopt_awaiting_clear;
+#[cfg(unix)]
+pub(super) use clear::note as note_clear;
+
+#[cfg(all(test, unix))]
+pub(crate) use clear::AFTER_PUBLICATION as CLEAR_AFTER_PUBLICATION;
+
+#[cfg(unix)]
+pub(crate) use clear::wakeable as clear_wakeable;
+
+#[cfg(unix)]
+pub(super) use clear::{
+    claim as claim_clear, release as release_clear, usable as clear_usable,
+    usable_under as clear_usable_under,
+};
