@@ -193,7 +193,9 @@ pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
 pub(crate) use tui_prompt_relay::rehydration::observer_binding_published;
 #[cfg(all(test, unix))]
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
-pub(crate) use tui_prompt_relay::{input_notice_content, input_notice_line};
+pub(crate) use tui_prompt_relay::{
+    input_notice_content, input_notice_line, scheduled_input_notice_content,
+};
 pub(crate) mod replay_policy;
 mod tui_task_card;
 mod turn_bridge;
