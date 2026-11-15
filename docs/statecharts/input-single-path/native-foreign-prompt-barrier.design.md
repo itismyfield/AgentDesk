@@ -39,7 +39,7 @@ native outcome=None, cleanup_complete=false를 유지한다. outcome=None에 cle
 1. barrier proof가 유효해도 Busy/catching-up 동안은 lease/row/counter를 바꾸지 않는다. 다른 native 입력의 권한도 바꾸지 않는다.
 2. current source/binding/incarnation의 caught-up Idle을 확인한 뒤 exact prepared episode+actor+nonce+generation 및 row snapshot을 재검증한다. follower와 후속 actor는 자기 completion 권한을 얻지 않는다.
 3. 해당 입력의 control custody만 기존 mailbox.remove_control_custody로 제거한다. native_policy.rs:108의 no-key remove_control을 재사용해 NotSent를 위조하지 않는다. marker 검증을 거친 별도 native leaf 연결이다.
-4. actor의 같은 직렬 처리 안에서 기존 phase Pending→Finalizing을 쓰고, 아래 기존 finalize/episode side effect를 직접 호출한다. generic handle_terminal은 native 표식이 있으면 Deferred이므로 그 guard를 전역으로 열지 않는다. unrelated native Pending이나 새 actor에는 적용하지 않는다. 같은 ledger entry에 다른 비-abstain native primary debt가 남아 있으면 그 episode의 완료 권한을 소비하지 않는다. follower는 자기 debt만 소비하고 parent lease/row/counter를 건드리지 않는다. 타이머용 generic guard를 전역으로 느슨하게 하지 않는다. actor를 떠난 PG/history blocking I/O는 기존 포트에서 하고 최종 actor 권한 검사 뒤에는 기존 try/검증된 자료만 쓴다.
+4. actor의 같은 직렬 처리 안에서 현재 entry를 검사하고 기존 phase Pending→Finalizing으로 작업을 승인한다. 캡처한 exact actor/row witness를 leaf로 돌려준다. 아래 기존 finalize/episode side effect는 finalizer actor 밖의 그 leaf에서 수행하고 ACK를 actor로 돌려보낸다. generic handle_terminal은 native 표식이 있으면 Deferred이므로 그 guard를 전역으로 열지 않는다. unrelated native Pending이나 새 actor에는 적용하지 않는다. 같은 ledger entry에 다른 비-abstain native primary debt가 남아 있으면 그 episode의 완료 권한을 소비하지 않는다. follower는 자기 debt만 소비하고 parent lease/row/counter를 건드리지 않는다. 타이머용 generic guard를 전역으로 느슨하게 하지 않는다. PG/history blocking I/O는 finalizer actor 밖의 기존 포트/side-effect 함수에서 한다. mailbox의 최종 mutation 권한 검사는 기존 exact CAS가 다시 수행하며 그 mailbox actor 안에서는 기존 try/검증 자료만 쓴다. Phase::Finalizing 동안 일반 terminal은 기존 gate로 중복 실행을 거절한다. worker의 오류/패닉은 기존 catch_unwind 방식으로 ACK하고, 이미 제거한 token은 다시 차감하지 않은 채 기존 O poll에서 row/debt 작업을 이어간다. 새 worker 감시 루프나 상태 enum을 만들지 않는다.
 5. 일반 side effect는 event=Complete와 clear-inflight 가능한 기존 context(시간 deadline으로 호출하지 않음)를 사용한다. GateTimeout은 receipt_settle.rs:258에서 Failed receipt를 만들기 때문에 abstain을 그 이벤트로 위장하지 않는다. full_response에 외부 본문을 채워 성공 receipt를 꾸미지도 않는다. 기존 generic receipt bookkeeping과 native Executed proof는 별개이며 Submitted 원본의 재큐는 없다. 호출은 finalize.rs:82 do_finalize_with_probe → episode.rs:64 claim_episode의 exact mailbox CAS/row 정리 → finalize.rs:185~235의 removed_token일 때만 counter 감소 → completion_admission.rs:98의 기존 QueueEligible claim → queue_io/backstop.rs:672 listener → owner drive.rs:88 순서다. 새 lease-release 구현/시간 종결을 추가하지 않는다. generic terminal bookkeeping과 native Executed proof는 구분한다.
 6. 원본은 기존 Submitted terminal identity/receipt에 남아 재전송하지 않는다. 기존 queue/drive의 front claim이 다음 입력을1회 고른다. O output 소유/legacy body 거절은 유지한다. abstain 때문에 bridge가 foreign body를 원 episode response로 흡수하지 않게 한다.
 
@@ -127,7 +127,7 @@ NativeInputPreparation은 own membership→assistant end_turn→Stop metadata→
 
 NativeInputAttribution은 barrier 표식, 기존 source Idle/caught-up, generic handoff의 lease/counter와 row/ACK를 별도 행동으로 분리, row 실패/재시도, boot outcome=None, crash 뒤 재소비, successor/follower 보호, 다음 head claim을 모델링한다. NoForeignExecuted·NoReplay·IdleAuthority와 EventuallyLeavesPending·QueueEventuallyProgresses를 검사한다. 마커 없는 Pending은 별도 보호 cfg이며 전 입력의 Pending 해제를 공정성으로 강제하지 않는다. 부모 lease의 종료는 그 부모의 기존 별도 종료 행동으로만 모델링한다. parentActive는 이전 episode의 counter 기여분이며 다음 head의 새 counter를 0이라고 주장하는 값이 아니다. boot에서 옛 기여분은0으로 복원하고 live에서는 removed_token 때만1회 차감한다. stamp 교체 후 재평가, marker 없는 Pending, follower·successor cfg도 포함한다.
 
-barrier 추가 +70~130, abstain live/boot/custody/general cleanup 및 row retry +220~360, 기존 Idle witness/port 연결 +60~110으로 잔여 **+350~600 / 약9~14 prod 파일**을 재추정한다. 조각4 실측 prod3/+83 + 잔여 = **+433~683 / 약12~17 파일**, +1100 정지선 안이다. 앞 +570~950은 실측 전 전체 추정이었다. 단순 envelope 합계 +920~1550은 이미 끝난 작업을 중복 포함하므로 실제+잔여 정지선 판단에는 쓰지 않는다. 구현 중 실측+잔여가 +1100을 넘으면 PLAN_READY로 나눈다. 30파일/+1500 공통 상한을 유지한다.
+barrier/filter 추가 +90~150, abstain live/boot/custody/general cleanup/ACK 및 row retry +280~460, 기존 Idle witness/port 연결 +80~140으로 잔여 **+450~750 / 약12~17 prod 파일**을 재추정한다. 조각4 실측 prod3/+83 + 잔여 = **+533~833 / 약15~20 파일**, +1100 정지선 안이다. 앞 +570~950은 실측 전 전체 추정이었다. 단순 envelope 합계 +1020~1700은 이미 끝난 작업을 중복 포함하므로 실제+잔여 정지선 판단에는 쓰지 않는다. 구현 중 실측+잔여가 +1100을 넘으면 PLAN_READY로 나눈다. 30파일/+1500 공통 상한을 유지한다.
 
 새 native leaf와 부모 연결/거절만 giant에 넣고 prod 순증0 이하를 지킨다. 필요 leaf 후보는 `turn_finalizer/native_abstain.rs` (제안)와 `history/v2/native_barrier.rs` (제안)이다. 기존 NativeSupply/Prepare/Restore/Policy/Actor/CompletionAdmission과 O native fold/projection/offer 범위에서 연결하며 공통 O tracker·notice·tmux 전용 경로를 고치지 않는다. 새 저장소/새 RuntimeState/Disposition은 없다.
 
@@ -140,3 +140,23 @@ barrier 추가 +70~130, abstain live/boot/custody/general cleanup 및 row retry 
 - O 의미/읽기: 공통 tracker와 notice 불변, 기존 byte pass/facts만 사용, ON source reader/open/byte 실측.
 - 동등성: 동일 prefix와 registration/receipt snapshot에서 B1·3a 실행/abstain proof를 모두 비교한다.
 - 문서 guard/잘못된 PASS: 위 새 연결은 아직 미구현이다. TLC는 설계의 refinement 의무이며 제품 통과를 대체하지 않는다.
+
+## TLC 검증 결과
+
+기존126 + 신규29 = Native 관련 전체155cfg를 저장소 `scripts/ci/statecharts_tlc.py`로 실행했다. runner rc0, 기대 위반 집합 일치, 총645.24초. 원문은 레인 로그 `b2b3p4e-complete-tlc-normal.txt`, meta는 `b2b3p4e-complete-tlc-meta.json`이다. 이는 설계 모델 검증이며 제품 구현/회귀 시험 PASS가 아니다.
+
+| Before/Fixed 계열 | Before RED | Fixed GREEN |
+|---|---|---|
+| PreparationBarrierForeign/Identity/LateOwn | BarrierNoForeignExecuted | 같은 반례에서 native 결과 없음 |
+| PreparationBarrierOneSide | BarrierFoldEquivalent, BarrierNoForeignExecuted | B1/3a 동일 판정 |
+| PreparationBarrierSelf | BarrierOwnEventuallySettles | 자기 mid-turn 이후 자기 closer 정산 |
+| PreparationBarrierOwnFirstFixed | 해당 없음 | 자기 strict-before-foreign 결과1 유지 |
+| AttributionAbstainForeign | AbstainNoForeignExecuted | 외부 closer의 own 결과0 |
+| AttributionAbstainPending/Boot | AbstainEventuallyLeavesPending, AbstainQueueEventuallyProgresses | live/boot Idle handoff 후 진행 |
+| AttributionAbstainIdle/Stamp | AbstainIdleAuthority | caught-up/current witness 후에만 정리 |
+| AttributionAbstainReplay | AbstainNoReplay | 원 입력 전송1, next head1 |
+| AttributionAbstainRow | AbstainRowBarrier, AbstainQueueEventuallyProgresses | lease/counter와 row/ACK 분리, 실패 뒤 재시도 |
+| AttributionAbstainCrash/Follower/SuccessorFixed | 해당 없음 | no-remint·외부 소유 불변·정리/주입 중복0 |
+| AttributionAbstainNoMarkerFixed | 해당 없음 | marker 없는 native guard 유지; session Idle만 확인하고 무조건 head 진행을 주장하지 않음 |
+
+별도 원시 TLC 반례도 보존했다. ForeignBefore는 Init→ACapture→AEndTurn→AStopOnly→AForeignPrompt→AForeignCloser에서 invariant 위반(rc12), PendingBefore는 foreign closer3개와 Idle 뒤에도 stuttering으로 남아 temporal property 위반(rc13)이다. 전체 runner는 이런 Before RED를 예상값과 대조해 rc0을 반환한다. 최초 TLA 괄호/우선순위 오류와 중간 실행은 기능 RED 근거로 세지 않았다.
