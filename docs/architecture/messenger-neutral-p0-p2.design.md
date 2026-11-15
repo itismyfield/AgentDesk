@@ -14,8 +14,6 @@
 <!-- doc-path-refs: proposed src/services/engine_runtime/relay_state.rs -->
 <!-- doc-path-refs: proposed src/services/engine_runtime/execution_state.rs -->
 <!-- doc-path-refs: proposed src/services/engine_runtime/events.rs -->
-<!-- doc-path-refs: proposed src/domain/conversation.rs -->
-<!-- doc-path-refs: proposed src/services/discord/id_bridge.rs -->
 <!-- doc-path-refs: proposed src/domain/outbound/messenger_types.rs -->
 <!-- doc-path-refs: proposed src/services/discord/gateway/turn_context.rs -->
 <!-- doc-path-refs: proposed src/services/messenger_adapters -->
