@@ -46,6 +46,11 @@ SELF_TEST_INPUTS: dict[str, tuple[str, ...]] = {
         "tests/test_dev_instance_files.py",
         "docs/dev-instance.md",
     ),
+    "Claude login binding tests": (
+        "scripts/dev_instance/**",
+        "tests/test_dev_instance.py",
+        "tests/test_dev_instance_claude_login.py",
+    ),
     "Isolated instance credential binary tests": (
         "Cargo.toml",
         "Cargo.lock",

@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
-import test_dev_instance as declarations
+from tests import test_dev_instance as declarations
 from scripts.dev_instance.files import InstanceError
 from scripts.dev_instance.manifest import child_environment, validate
 
