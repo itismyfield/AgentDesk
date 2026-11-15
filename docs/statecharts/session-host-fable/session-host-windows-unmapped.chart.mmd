@@ -1,0 +1,63 @@
+---
+title: "AgentDesk channel session on its host (tmux, Herdr, process) across restarts"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Run
+    lg1: Restart
+  }
+  class lg0 blue
+  class lg1 teal
+  s0: No session
+  s1: dcserver down, no session
+  s2: No session, last input refused
+  s3: Booting, session not picked up yet (no host)
+  s4: dcserver down, no session [run has no more restarts]
+  s5: Booting, session not picked up yet (no host) [run has no more restarts]
+  s6: No session [run has no more restarts]
+  s7: No session, last input refused [run has no more inputs]
+  s8: No session, last input refused [run has no more restarts]
+  s9: dcserver down, no session [run has no more inputs]
+  s10: Booting, session not picked up yet (no host) [run has no more inputs]
+  s11: dcserver down, no session [run has no more inputs, restarts]
+  s12: Booting, session not picked up yet (no host) [run has no more inputs, restarts]
+  s13: No session, last input refused [run has no more inputs, restarts]
+  [*] --> s0
+  s0 --> s1: dcserver stops
+  s0 --> s2: the input is refused with an error
+  s1 --> s3: dcserver starts
+  s2 --> s0: a message arrives
+  s2 --> s1: dcserver stops
+  s3 --> s0: boot reconcile, then intake opens
+  s3 --> s4: dcserver stops
+  s0 --> s4: dcserver stops
+  s4 --> s5: dcserver starts
+  s5 --> s6: boot reconcile, then intake opens
+  s3 --> s2: boot reconcile, then intake opens
+  s0 --> s7: the input is refused with an error
+  s2 --> s4: dcserver stops
+  s6 --> s8: the input is refused with an error
+  s7 --> s9: dcserver stops
+  s5 --> s8: boot reconcile, then intake opens
+  s8 --> s6: a message arrives
+  s9 --> s10: dcserver starts
+  s10 --> s7: boot reconcile, then intake opens
+  s10 --> s11: dcserver stops
+  s7 --> s11: dcserver stops
+  s11 --> s12: dcserver starts
+  s6 --> s13: the input is refused with an error
+  s12 --> s13: boot reconcile, then intake opens
+  class s0 blue
+  class s1 teal
+  class s2 blue
+  class s3 teal
+  class s4 teal
+  class s5 teal
+  class s6 blue
+  class s7 blue
+  class s8 blue
+  class s9 teal
+  class s10 teal
+  class s11 teal
+  class s12 teal
+  class s13 blue

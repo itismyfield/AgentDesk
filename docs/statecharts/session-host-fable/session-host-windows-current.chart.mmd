@@ -1,0 +1,211 @@
+---
+title: "AgentDesk channel session on its host (tmux, Herdr, process) across restarts"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Run
+    lg1: Restart
+    lg2: Lost
+    lg3: Breaks NoKillByRestart
+    lg4: Breaks NoKillByRestart in some cases
+    lg5: Path to the NoKillByRestart bug
+  }
+  class lg0 blue
+  class lg1 teal
+  class lg2 pink
+  class lg3 breaks
+  class lg4 mayBreak
+  class lg5 bugPath
+  s0: No session
+  s1: dcserver down, no session
+  s2: On process, turn running
+  s3: Booting, session not picked up yet (no host)
+  s4: On process, idle
+  s5: Row names a session that is gone (process) [run has no more terminates]
+  s6: dcserver down, no session [run has no more restarts]
+  s7: No session [run has no more terminates]
+  s8: dcserver down, no session [run has no more terminates]
+  s9: Booting, session not picked up yet (no host) [run has no more restarts]
+  s10: Booting, session not picked up yet (process)
+  s11: No session [run has no more restarts]
+  s12: Booting, session not picked up yet (process) [run has no more terminates]
+  s13: On process, turn running [run has no more terminates]
+  s14: dcserver down, no session [run has no more restarts, terminates]
+  s15: Booting, session not picked up yet (process) [run has no more restarts]
+  s16: On process, idle [run has no more terminates]
+  s17: On process, turn running [run has no more restarts]
+  s18: Booting, session not picked up yet (process) [run has no more restarts, terminates]
+  s19: On process, turn running [run has no more inputs]
+  s20: On process, idle [run has no more restarts]
+  s21: Row names a session that is gone (process) [run has no more restarts, terminates]
+  s22: No session [run has no more restarts, terminates]
+  s23: On process, idle [run has no more inputs]
+  s24: On process, turn running [run has no more inputs, terminates]
+  s25: Row names a session that is gone (process) [run has no more inputs, terminates]
+  s26: dcserver down, no session [run has no more inputs]
+  s27: On process, idle [run has no more inputs, terminates]
+  s28: On process, turn running [run has no more restarts, terminates]
+  s29: No session [run has no more inputs, terminates]
+  s30: dcserver down, no session [run has no more inputs, terminates]
+  s31: Booting, session not picked up yet (process) [run has no more inputs]
+  s32: On process, idle [run has no more restarts, terminates]
+  s33: No session [run has no more inputs]
+  s34: Booting, session not picked up yet (process) [run has no more inputs, terminates]
+  s35: dcserver down, no session [run has no more inputs, restarts]
+  s36: On process, turn running [run has no more inputs, restarts]
+  s37: dcserver down, no session [run has no more inputs, restarts, terminates]
+  s38: Booting, session not picked up yet (process) [run has no more inputs, restarts]
+  s39: On process, turn running [run has no more inputs, restarts, terminates]
+  s40: On process, idle [run has no more inputs, restarts]
+  s41: Row names a session that is gone (process) [run has no more inputs, restarts, terminates]
+  s42: No session [run has no more inputs, restarts]
+  s43: Booting, session not picked up yet (process) [run has no more inputs, restarts, terminates]
+  s44: On process, idle [run has no more inputs, restarts, terminates]
+  s45: No session [run has no more inputs, restarts, terminates]
+  [*] --> s0
+  s0 --> s0: a message arrives
+  s0 --> s1: dcserver stops
+  s0 --> s2: a turn launches a new session
+  s1 --> s3: dcserver starts
+  s2 --> s4: the turn ends
+  s2 --> s5: a terminate closes the session on its host
+  s2 --> s1: dcserver stops
+  s3 --> s0: boot reconcile, then intake opens
+  s3 --> s6: dcserver stops
+  s0 --> s6: dcserver stops
+  s4 --> s5: a terminate closes the session on its host
+  s4 --> s1: dcserver stops
+  s5 --> s7: the gone session's row is retired
+  s5 --> s8: dcserver stops
+  s6 --> s9: dcserver starts
+  s1 --> s10: dcserver starts
+  s4 --> s2: a follow-up turn starts
+  s7 --> s8: dcserver stops
+  s8 --> s12: dcserver starts
+  s9 --> s11: boot reconcile, then intake opens
+  s10 --> s0: boot reconcile, then intake opens
+  s10 --> s6: dcserver stops
+  s7 --> s13: a turn launches a new session
+  s2 --> s6: dcserver stops
+  s12 --> s7: boot reconcile, then intake opens
+  s12 --> s14: dcserver stops
+  s6 --> s15: dcserver starts
+  s11 --> s17: a turn launches a new session
+  s13 --> s16: the turn ends
+  s13 --> s8: dcserver stops
+  s4 --> s6: dcserver stops
+  s5 --> s14: dcserver stops
+  s7 --> s14: dcserver stops
+  s14 --> s18: dcserver starts
+  s15 --> s11: boot reconcile, then intake opens
+  s4 --> s19: a follow-up turn starts
+  s16 --> s8: dcserver stops
+  s17 --> s20: the turn ends
+  s17 --> s21: a terminate closes the session on its host
+  s18 --> s22: boot reconcile, then intake opens
+  s16 --> s24: a follow-up turn starts
+  s7 --> s24: a turn launches a new session
+  s19 --> s23: the turn ends
+  s19 --> s25: a terminate closes the session on its host
+  s19 --> s26: dcserver stops
+  s13 --> s14: dcserver stops
+  s20 --> s21: a terminate closes the session on its host
+  s21 --> s22: the gone session's row is retired
+  s20 --> s17: a follow-up turn starts
+  s22 --> s28: a turn launches a new session
+  s23 --> s25: a terminate closes the session on its host
+  s23 --> s26: dcserver stops
+  s24 --> s27: the turn ends
+  s24 --> s30: dcserver stops
+  s25 --> s29: the gone session's row is retired
+  s25 --> s30: dcserver stops
+  s16 --> s14: dcserver stops
+  s0 --> s19: a turn launches a new session
+  s26 --> s31: dcserver starts
+  s27 --> s30: dcserver stops
+  s28 --> s32: the turn ends
+  s29 --> s30: dcserver stops
+  s19 --> s35: dcserver stops
+  s30 --> s34: dcserver starts
+  s31 --> s33: boot reconcile, then intake opens
+  s31 --> s35: dcserver stops
+  s24 --> s37: dcserver stops
+  s20 --> s36: a follow-up turn starts
+  s11 --> s36: a turn launches a new session
+  s23 --> s35: dcserver stops
+  s25 --> s37: dcserver stops
+  s33 --> s35: dcserver stops
+  s34 --> s29: boot reconcile, then intake opens
+  s34 --> s37: dcserver stops
+  s35 --> s38: dcserver starts
+  s32 --> s39: a follow-up turn starts
+  s22 --> s39: a turn launches a new session
+  s27 --> s37: dcserver stops
+  s29 --> s37: dcserver stops
+  s36 --> s40: the turn ends
+  s36 --> s41: a terminate closes the session on its host
+  s37 --> s43: dcserver starts
+  s38 --> s42: boot reconcile, then intake opens
+  s39 --> s44: the turn ends
+  s40 --> s41: a terminate closes the session on its host
+  s41 --> s45: the gone session's row is retired
+  s43 --> s45: boot reconcile, then intake opens
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 mayBreak
+  class s0 bugPath
+  class s1 mayBreak
+  class s1 bugPath
+  class s2 mayBreak
+  class s2 bugPath
+  class s3 teal
+  class s4 mayBreak
+  class s5 mayBreak
+  class s6 mayBreak
+  class s7 mayBreak
+  class s8 mayBreak
+  class s9 teal
+  class s10 pink
+  class s10 breaks
+  class s11 mayBreak
+  class s12 mayBreak
+  class s13 blue
+  class s14 mayBreak
+  class s15 pink
+  class s15 breaks
+  class s16 blue
+  class s17 mayBreak
+  class s18 mayBreak
+  class s19 mayBreak
+  class s20 mayBreak
+  class s21 mayBreak
+  class s22 mayBreak
+  class s23 mayBreak
+  class s24 mayBreak
+  class s25 mayBreak
+  class s26 pink
+  class s26 breaks
+  class s27 mayBreak
+  class s28 blue
+  class s29 mayBreak
+  class s30 mayBreak
+  class s31 pink
+  class s31 breaks
+  class s32 blue
+  class s33 pink
+  class s33 breaks
+  class s34 mayBreak
+  class s35 pink
+  class s35 breaks
+  class s36 mayBreak
+  class s37 mayBreak
+  class s38 pink
+  class s38 breaks
+  class s39 mayBreak
+  class s40 mayBreak
+  class s41 mayBreak
+  class s42 pink
+  class s42 breaks
+  class s43 mayBreak
+  class s44 mayBreak
+  class s45 mayBreak

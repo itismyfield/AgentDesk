@@ -1,0 +1,29 @@
+---
+title: "AgentDesk channel session on its host (tmux, Herdr, process) across restarts"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Run
+    lg1: Lost
+    lg2: Breaks NoKillByRestart
+    lg3: Path to the NoKillByRestart bug
+  }
+  class lg0 blue
+  class lg1 pink
+  class lg2 breaks
+  class lg3 bugPath
+  s0: No session
+  s1: On Herdr, launched, not bound
+  s2: dcserver down, no session, host server down
+  [*] --> s0
+  s0 --> s0: a message arrives
+  s0 --> s1: a turn launches a new session
+  s1 --> s2: dcserver stops
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 pink
+  class s2 breaks
+  class s2 bugPath
