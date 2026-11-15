@@ -159,6 +159,11 @@ prefix는 source 또는 target의 논리 모듈 namespace 경계에 일치해야
 동시 갱신은 exclusive lock 획득에 실패하면 거부하고, 허용된 변경만 같은 디렉터리의
 임시 파일에서 atomic replace로 반영한다. 일반 생성기의 덮어쓰기 거부는 유지한다.
 
+감소 거래(분류 편입 뒤 일반 감소 포함)는 이번에 역참조가 줄어든 source의 미기록 uncertainty만 역사 증명으로 기록할 수 있다.
+`--previous-mapping-rev`(감소 모드 생략 시 accepted의 input SHA)의 소스 그래프에 같은 ID가 현재 count 이상 있어야 하며, 증명 rev는 input의 엄격한 조상이자 HEAD의 조상이어야 한다.
+기존 양수 한도·zero-rule·다른 source의 경고는 흡수하지 않고, 역참조 은폐 검사는 기록 뒤에도 적용한다.
+기록한 ID·이전 rev·이전 count·현재 count는 생성기 stderr에, 증명 rev는 생성 명령에 남긴다. 이전 known 층 보존은 이전 소스 그래프의 모듈 집합으로 판정한다.
+
 ## 분류 편입
 
 분류 편입은 `--admit-classification`으로만 한다. 허용 범위는 같은 source anchor에서 "판정 불가 → 층 역방향"으로 바뀐 정확한 ID와 그 count다. 기존 역방향 양수 records의 한도 인상과 zero-rule의 한도 인상은 금지한다. 편입 PR 본문에는 보고서 TSV의 `accepted_indeterminate_count`와 `grown_since_accepted` 합계를 적는다.

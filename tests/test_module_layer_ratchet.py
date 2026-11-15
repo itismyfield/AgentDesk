@@ -838,5 +838,239 @@ assembly = 1
             self.assertFalse(output.with_name(output.name + ".lock").exists())
 
 
+class S05GeneratorHistoryTest(unittest.TestCase):
+    def setUp(self):
+        from audit_maintainability.checks import module_layer_baseline as snapshots
+        self.provider = snapshots
+        self.fixture = json.loads((ROOT / "tests/fixtures/module_layer_s05.json").read_text())
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.repo = Path(self.temporary.name)
+        self.git("init", "-q")
+        self.git("config", "user.name", "Fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        for name, body in self.fixture["files"].items():
+            self.put(name, body)
+        self.put(snapshots.MAPPING, self.fixture["mapping"])
+        self.put("scripts/audit_maintainability/layer_moves.toml", "schema_version=1\nmoves=[]\n")
+        self.commit()
+        self.previous = self.git("rev-parse", "HEAD")
+        self.path = self.repo / snapshots.BASELINE
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.accepted = self.measure()
+        self.assertEqual(len(self.accepted["reverse_dependencies"]), 1)
+        self.assertEqual(self.accepted["reverse_dependencies"][0]["count"], 1)
+        self.accepted["uncertainties"] = []
+        self.save()
+        self.put("src/services/termination_audit/host_terminate.rs", self.fixture["moved"])
+        self.put(snapshots.MAPPING, self.fixture["mapping"] + self.fixture["rules"])
+        self.commit()
+
+    def put(self, name, body):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+
+    def git(self, *args):
+        return subprocess.check_output(["git", "-C", str(self.repo), *args], text=True).strip()
+
+    def commit(self):
+        self.git("add", "Cargo.toml", "src", self.provider.MAPPING,
+                 "scripts/audit_maintainability/layer_moves.toml")
+        self.git("commit", "-qm", "fixture")
+
+    def measure(self):
+        from audit_maintainability.checks.module_layers import analyze
+        occurrences = []
+        graph = analyze(self.repo, occurrence_projection=occurrences)
+        return self.provider.baseline(graph, self.provider.load_mapping(self.repo),
+                                      self.git("rev-parse", "HEAD"), occurrences)
+
+    def save(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(encode_baseline(self.accepted))
+
+    def cli(self, mode="--update-reductions", previous=True, ok=True, *extra):
+        command = [sys.executable, self.provider.__file__, "--repo", str(self.repo),
+                   "--input-sha", "HEAD", "--output", str(self.path), mode]
+        if previous:
+            command += ["--previous-mapping-rev", self.previous]
+        for prefix in ("contract", "herdr_terminate::contract"):
+            command += ["--reclassify", "services::termination_audit::host_terminate::" + prefix]
+        original = self.path.read_bytes()
+        result = subprocess.run([*command, *extra], text=True, capture_output=True)
+        self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+        if not ok:
+            self.assertEqual(self.path.read_bytes(), original)
+            self.assertFalse(self.path.with_name(self.path.name + ".lock").exists())
+        return result
+
+    def assert_recorded(self, result):
+        updated = json.loads(self.path.read_bytes())
+        self.assertEqual(updated["reverse_dependencies"], [])
+        from audit_maintainability.checks.module_layer_baseline import _id
+        identity = _id("uncertainty", "reference", "src/lib.rs::crate::services::session_host::herdr_gate",
+                       "tracing::warn", "macro expansion not evaluated")
+        self.assertEqual(updated["uncertainties"], [{"id": identity, "count": 2}])
+        self.assertIn(identity, result.stderr)
+        self.assertIn(self.previous, result.stderr)
+        self.assertIn("previous_count=2 current_count=2", result.stderr)
+        self.assertIn("--previous-mapping-rev " + self.previous, updated["generation_command"])
+        from audit_maintainability.checks import module_layer_ratchet as ratchet
+        self.assertEqual(ratchet.compare(updated, self.measure(), {"schema_version": 1, "moves": []})["errors"], [])
+
+    def test_s05_reduction_records_only_proven_uncertainty(self):
+        self.assert_recorded(self.cli())
+
+    def test_s05_reduction_defaults_to_accepted_source_revision(self):
+        self.assert_recorded(self.cli(previous=False))
+
+    def test_s05_classification_admission_uses_previous_source_modules(self):
+        self.assert_recorded(self.cli(mode="--admit-classification"))
+
+    def test_new_macro_is_refused(self):
+        path = "src/services/session_host/herdr_gate.rs"
+        self.put(path, self.fixture["files"][path] + 'pub fn new() { tracing::error!("new"); }\n')
+        self.commit()
+        self.assertIn("baseline reduction refused", self.cli(ok=False).stderr)
+
+    def test_new_unresolved_reference_is_refused(self):
+        path = "src/services/session_host/herdr_gate.rs"
+        self.put(path, self.fixture["files"][path] + 'pub fn new() { crate::missing::run(); }\n')
+        self.commit()
+        self.assertIn("baseline reduction refused", self.cli(ok=False).stderr)
+
+    def test_previous_count_increase_is_refused(self):
+        path = "src/services/session_host/herdr_gate.rs"
+        self.put(path, self.fixture["files"][path] + 'pub fn new() { tracing::warn!("third"); }\n')
+        self.commit()
+        self.assertIn("baseline reduction refused", self.cli(ok=False).stderr)
+
+    def test_zero_rule_reappearance_is_refused(self):
+        from audit_maintainability.checks.module_layer_baseline import _id
+        self.accepted["zero_rules"] = [{"id": _id("uncertainty", "reference",
+            "src/lib.rs::crate::services::session_host::herdr_gate", "tracing::warn",
+            "macro expansion not evaluated"), "count": 0, "section": "uncertainties"}]
+        self.save()
+        self.assertIn("zero-rule", self.cli(ok=False).stderr)
+
+    def test_existing_module_layer_change_is_refused(self):
+        self.put(self.provider.MAPPING, self.fixture["mapping"] + self.fixture["rules"]
+                 + '[[rules]]\nprefix="services::session_host::herdr_gate"\nlayer="assembly"\nreason="mutant"\n')
+        self.assertIn("known layer", self.cli(mode="--admit-classification", ok=False).stderr)
+
+    def test_existing_positive_ceiling_cannot_grow(self):
+        current = self.measure()
+        self.accepted["uncertainties"] = [{**row, "count": 1}
+            for row in current["uncertainties"] if row["count"] == 2]
+        self.save()
+        self.assertIn("increase", self.cli(ok=False).stderr)
+
+    def test_larger_historical_count_records_only_current_count(self):
+        path = "src/services/session_host/herdr_gate.rs"
+        self.git("checkout", "-q", "--detach", self.previous)
+        self.put(path, self.fixture["files"][path] + 'pub fn earlier() { tracing::warn!("third"); }\n')
+        self.commit()
+        self.previous = self.git("rev-parse", "HEAD")
+        self.accepted["input_sha"] = self.previous
+        self.save()
+        self.put(path, self.fixture["files"][path])
+        self.put("src/services/termination_audit/host_terminate.rs", self.fixture["moved"])
+        self.put(self.provider.MAPPING, self.fixture["mapping"] + self.fixture["rules"])
+        self.commit()
+        result = self.cli()
+        updated = json.loads(self.path.read_bytes())
+        self.assertEqual([row["count"] for row in updated["uncertainties"]], [2])
+        self.assertIn("previous_count=3 current_count=2", result.stderr)
+
+    def test_incomplete_previous_source_graph_is_refused(self):
+        self.git("checkout", "-q", "--detach", self.previous)
+        self.put("src/lib.rs", "pub mod services; pub mod missing;\n")
+        self.commit()
+        self.previous = self.git("rev-parse", "HEAD")
+        self.put("src/lib.rs", "pub mod services;\n")
+        self.put("src/services/termination_audit/host_terminate.rs", self.fixture["moved"])
+        self.put(self.provider.MAPPING, self.fixture["mapping"] + self.fixture["rules"])
+        self.commit()
+        self.assertIn("previous source graph is incomplete", self.cli(ok=False).stderr)
+
+    def test_dry_run_proves_records_without_changing_accepted_bytes(self):
+        original = self.path.read_bytes()
+        result = self.cli("--update-reductions", True, True, "--dry-run")
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual([row["count"] for row in json.loads(result.stdout)["uncertainties"]], [2])
+        self.assertIn("previous_count=2 current_count=2", result.stderr)
+
+    def test_nonancestor_revision_is_refused(self):
+        current = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-qb", "side", self.previous)
+        self.put("src/side.rs", "pub fn side() {}\n")
+        self.commit()
+        self.previous = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "--detach", current)
+        self.assertIn("ancestor", self.cli(ok=False).stderr)
+
+    def test_current_revision_cannot_prove_its_own_uncertainty(self):
+        self.previous = self.git("rev-parse", "HEAD")
+        self.assertIn("ancestor", self.cli(ok=False).stderr)
+
+    def test_removed_module_cannot_evade_known_layer_preservation(self):
+        self.put("src/services/session_host/mod.rs", "pub mod renamed;\n")
+        self.put("src/services/session_host/renamed.rs",
+                 self.fixture["files"]["src/services/session_host/herdr_gate.rs"])
+        (self.repo / "src/services/session_host/herdr_gate.rs").unlink()
+        self.put(self.provider.MAPPING, self.fixture["mapping"] + self.fixture["rules"]
+                 + '[[rules]]\nprefix="services::session_host::herdr_gate"\nlayer="assembly"\nreason="mutant"\n')
+        self.commit()
+        self.assertIn("known layer", self.cli(mode="--admit-classification", ok=False).stderr)
+
+    def test_new_module_cannot_admit_a_new_reverse_dependency(self):
+        self.put("src/services/session_host/mod.rs", "pub mod herdr_gate; pub mod new;\n")
+        self.put("src/services/session_host/new.rs", "pub fn run() { crate::services::unrelated::keep(); }\n")
+        self.put(self.provider.MAPPING, self.fixture["mapping"] + self.fixture["rules"]
+                 + '[[rules]]\nprefix="services::session_host::new"\nlayer="adapter"\nreason="fixture"\n')
+        self.commit()
+        self.assertIn("previous projection", self.cli(mode="--admit-classification", ok=False).stderr)
+
+    def test_shared_prefix_override_preserves_other_crate_debt(self):
+        self.git("checkout", "-q", "--detach", self.previous)
+        mapping = self.fixture["mapping"].replace(
+            '[[rules]]\nprefix="services::termination_audit"\nlayer="application"\nreason="fixture"\n',
+            '[[rules]]\nprefix="services::termination_audit::host_terminate::herdr_terminate"\nlayer="application"\nreason="fixture"\n')
+        mapping += '[[rules]]\nprefix="services::termination_audit::host_terminate::contract"\nlayer="assembly"\nreason="shared rule"\n'
+        mapping += '[[rules]]\nprefix="services::lower"\nlayer="application"\nreason="fixture"\n'
+        other = ('pub mod services { pub mod lower { pub fn run() { BODY } } '
+                 'pub mod termination_audit { pub mod host_terminate { pub mod contract { pub struct Value; } } } }\n')
+        self.put("src/bin/other.rs", other.replace("BODY", ""))
+        self.put(self.provider.MAPPING, mapping)
+        self.commit()
+        self.previous = self.git("rev-parse", "HEAD")
+        self.accepted = self.measure()
+        self.accepted["uncertainties"] = []
+        self.save()
+        self.put("src/services/termination_audit/host_terminate.rs", self.fixture["moved"])
+        self.put(self.provider.MAPPING, mapping + self.fixture["rules"].replace(
+            '[[rules]]\n', '[[rules]]\nroot="src/lib.rs"\n'))
+        self.put("src/bin/other.rs", other.replace("BODY",
+            "let _ = crate::services::termination_audit::host_terminate::contract::Value;"))
+        self.commit()
+        self.assertIn("previous projection", self.cli(mode="--admit-classification", ok=False).stderr)
+
+    def test_kept_glob_cannot_hide_reverse_debt_even_with_history(self):
+        # The prior glob proves presence, but it still names the disappearing debt's target.
+        path = "src/services/session_host/herdr_gate.rs"
+        body = self.fixture["files"][path] + "use crate::services::termination_audit::host_terminate::herdr_terminate::*;\n"
+        self.git("checkout", "-q", "--detach", self.previous)
+        self.put(path, body)
+        self.commit()
+        self.previous = self.git("rev-parse", "HEAD")
+        self.accepted = self.measure()
+        self.accepted["uncertainties"] = []
+        self.save()
+        self.put(path, body.replace("pub fn convert(_: crate::services::termination_audit::host_terminate::herdr_terminate::HerdrTerminateResult)", "pub fn convert()"))
+        self.commit()
+        self.assertIn("hidden-reverse", self.cli(ok=False).stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
