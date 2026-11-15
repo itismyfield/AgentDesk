@@ -99,6 +99,7 @@ E01–E22를 모두 다시 읽었다. 행 삭제는 0이며 아래 표 밖 E01�
 | N13 이미 수락된 H terminal 복원 | `src/services/discord/recovery_engine/herdr_admitted_restart.rs:23-43,90-113,124-179`; `src/services/discord/recovery_engine/herdr_row_end.rs:53-72`; `herdr_row_end/owner.rs:113-136` | prior-process durable terminal만 기존 settlement 사용. current live actor를 recovery로 우회하지 않음. 모델 epoch=1/2, captured[i]=0/1/2, restart 횟수0/1. 재시작은 admitted 이후에만 투영하며 token 공백을 fresh start 권한으로 쓰지 않음. |
 | N14 tmux 외부 종료 제어군 | `src/services/claude_tui/hosting/warm_followup.rs:418-443`; `src/services/session_backend.rs:935-955,987-997`; `src/services/session_backend/stream_line.rs:344,477`; `runtime_stamp/captured_terminal_admission.rs:9-18,180-198` | tmux Claude 일반 transcript의 Done은 captured H admission 대상이 아니며 기존 headless outbox로 끝난다. captured tmux terminal도 direct=false면 거절하므로 모든 tmux 경로가 성공한다고 일반화하지 않음. 기존 결함은 넓히지 않음. |
 | M06 종료 동반 모델 / N08–N14 | `ThreadIngressTerminal.tla`, accepted original 두 개(1=iMessage 사람, 2=외부 API machine), Ids=1..2 | phase=queued/running/terminal/admitted/rejected/done, effects=0..1, published=0..2, receipt/retained/bodyReady/lateCleanupTried/wake BOOLEAN. Contract와 BodyOwner는 위 실제 gateway/body owner의 추상값. Mutation=none/doublePublish/dropCustody/keepInflight/noWake/headlessAuthority/reclassify/staleCleanup. CanRestart BOOLEAN. 숫자2는 실제 queue 크기 제한이 아닌 현재 입력+다음 입력의 유한 투영이다. |
+| N15 current-process execution-gone / M07 live-end 모델 | `src/services/discord/recovery_engine/herdr_row_end.rs:120-136`; `herdr_row_end_live.rs:10-25,30-88,100-147` | current-generation/no terminal/no stop receipt의 같은 actor를 transition·fresh row generation·nonce로 재관측. pinned execution E 뒤 자기 source가 terminal이면 reader admission에 양보, unread/unknown 또는 successor면 hold. terminal이 없으면 retire→body-free notice Delivered→captured settlement→completion cleanup/reader wake. 모델 Source=terminal/absent/unknown, Exact/ExecutionEnded BOOLEAN, phase=active/reader/notice/settle/settled/done/held, posted/finished=0..1, token/inflight=0..1, readerWoken/readerOwns BOOLEAN. Mutation=none/omitLiveEnd/stealTerminal/noSettlement/noWake/ignoreUnknown. 숫자1은 한 captured episode 투영이며 실제 generation 아님. |
 
 ### 입력 출처 분류표 — 전수표의 일부
 
@@ -213,6 +214,7 @@ O가 소유한 본문은 직접 전달 가능한 gateway에서도 O가 게시한
 | detached relay/custody `terminal_outcome_delivery/foreign_terminal_handoff.rs:13-95,122-146,311-316` | detached episode의 기존 receipt/source/owner 판정 보존; 새 publisher0 | 새 headless admission latch와 foreign output owner가 이중 publish/cleanup하지 않는지 필요 |
 | prior admitted restart `recovery_engine/herdr_admitted_restart.rs:23-43,90-113,124-179` | persisted terminal kind만 exact settlement; O-body는 O에 남기고 receipt commit 뒤 clear. current actor는 침범0 | headless에서 새로 저장한 kind도 같은 cleanup 권한을 갖게 되므로 restart-before/after-ACK 추가 증명 필요 |
 | pathless row-end `recovery_engine/herdr_row_end.rs:53-72`, `herdr_row_end/owner.rs:113-136` | prior-process pathless/receipt 없는 row 조건 유지. 현재 살아 있는 headless leak의 대리 finalizer 아님 | terminal kind가 추가되면 row-end 제외로 새 orphan이 없는지 확인 필요 |
+| current-process execution-gone `recovery_engine/herdr_row_end.rs:120-136`, `herdr_row_end_live.rs:10-25,30-88,100-147` | N15: 같은 actor·fresh row·pinned execution E 뒤 source 재읽기. 자기 terminal 있음→reader typed admission에 양보(별도 실패/본문 게시0), source 불명·교체 actor→hold. terminal 없음+확정 E→기존 retire, body-free notice Delivered, captured settlement, completion cleanup·reader wake. G external own-turn도 같은 계약 | non-direct admitted terminal의 존재가 live 선택을 막는 시점 및 terminal/retire 경합에서 reader 양보·notice1·successor 보호 재검증 필요 |
 | completion·다음 입력 `completion_postlude.rs:767-805,880-895,932-960`, `finalize_epilogue.rs:69-88,205-223` | terminal receipt/guarded clear/captured allocation/deferred wake 유지. 늦은 이전 턴 정리가 successor token/inflight를 지우지 못함 | non-direct terminal 권한을 cleanup·queue wake까지 전달하는 전체 계약 필요 |
 | Stop/Cancel/clear/Terminate | §5 기존 전수표 및 `turn_bridge/cancel_finalize_policy.rs:85` 유지. Completed/Aborted 기존 의미, 새 kill/reset/delete0 | 새 headless admission이 취소된 actor를 완료시키거나 다른 원본을 정리하지 않는지 필요 |
 
@@ -248,6 +250,8 @@ main `src/services/discord/session_runtime.rs:512-514`는 thread ID exact `herdr
 동시 API 두 건과 Discord 첫 입력 한 건은 같은 child transition/owner admission을 사용한다. winner만 세션을 준비하고 race loser는 준비된 세션을 재사용하며 원본을 각각 보유한다. worktree/native 시작 계수와 입력 효과 계수를 분리한다. 같은 GUID retry는 같은 원본이고 서로 다른 GUID 세 건은 각기 보존된다. mailbox claim 이전에 dispatch parent edge를 publish하지 않는다.
 
 clear·stop·HTTP cancel·restart가 끼면 existing token/transition/exact locator 판정을 재관측한다. 이미 취소된 원본에 늦게 키를 넣지 않고, effect 불명인 입력은 NotSent로 바꾸어 재전송하지 않는다. 기존 NotSent handback·Unconfirmed no-resend 의미를 그대로 유지한다. parent나 sibling의 queue/source/pane을 대신 지우지 않는다. 기존 관리 경로 결함의 처분은 E17/E18과 #8118 H2/#8128에 남기며 본 이슈에서 kill/reset/삭제를 추가하지 않는다.
+
+N15의 current-process execution-gone도 아래 복원 경로와 별개로 소비한다. 외부 own-turn row의 자기 terminal은 reader에 남기며, terminal 없는 확정 E만 기존 안내·captured settlement·wake로 끝낸다. unread/unknown/source 교체는 hold한다.
 
 ### 부팅·incarnation 경로별 소비
 
