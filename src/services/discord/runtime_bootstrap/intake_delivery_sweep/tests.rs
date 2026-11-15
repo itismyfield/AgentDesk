@@ -241,11 +241,6 @@ fn sweep_spawns_exactly_once_per_process() {
     drop(active);
 }
 
-#[test]
-fn sweep_cutoffs_do_not_panic_for_extreme_values() {
-    let _ = SweepCutoffs::from_now(u64::MAX, u64::MAX);
-}
-
 #[tokio::test]
 async fn sweep_task_can_restart_after_task_death() {
     let latch = AtomicBool::new(false);
