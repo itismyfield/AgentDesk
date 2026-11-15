@@ -327,6 +327,12 @@ input-single-path/ManagedObserverRebindGraceBeforeAdoption.cfg	ManagedObserverRe
 input-single-path/ManagedObserverRebindGraceBeforeAdoptionNoHandoff.cfg	ManagedObserverRebind	-	SubmittedEventuallyCloses
 input-single-path/ManagedObserverRebindMetaIsInput.cfg	ManagedObserverRebind	FixedAOnlyOnEvidenceOrGrace	SubmittedEventuallyCloses
 input-single-path/ManagedObserverRebindSinglePoll.cfg	ManagedObserverRebind	FixedAOnlyOnEvidenceOrGrace	SubmittedEventuallyCloses
+input-single-path/NativeActivationFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativeActivationForeignBefore.cfg	NativeInputPreparation	ActivationNoForeignUnwind	-
+input-single-path/NativeActivationForeignFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativeActivationOffBefore.cfg	NativeInputPreparation	-	ActivationLeaseFree,ActivationFinishes
+input-single-path/NativeActivationSplitBefore.cfg	NativeInputPreparation	ActivationShared	ActivationLeaseFree,ActivationFinishes
+input-single-path/NativeActivationUnwindBefore.cfg	NativeInputPreparation	-	ActivationLeaseFree
 input-single-path/NativeAttributionBootBefore.cfg	NativeInputAttribution	NoBootTicketLoss	BootEventuallyRestores
 input-single-path/NativeAttributionBootCorruptBefore.cfg	NativeInputAttribution	NativeBootFailureKeepsRow	NativeBootEventuallyDone
 input-single-path/NativeAttributionBootCorruptFixed.cfg	NativeInputAttribution	-	-
@@ -744,9 +750,3 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
-input-single-path/NativeActivationOffBefore.cfg	NativeInputPreparation	-	ActivationLeaseFree,ActivationFinishes
-input-single-path/NativeActivationSplitBefore.cfg	NativeInputPreparation	ActivationShared	ActivationLeaseFree,ActivationFinishes
-input-single-path/NativeActivationUnwindBefore.cfg	NativeInputPreparation	-	ActivationLeaseFree
-input-single-path/NativeActivationFixed.cfg	NativeInputPreparation	-	-
-input-single-path/NativeActivationForeignBefore.cfg	NativeInputPreparation	ActivationNoForeignUnwind	-
-input-single-path/NativeActivationForeignFixed.cfg	NativeInputPreparation	-	-
