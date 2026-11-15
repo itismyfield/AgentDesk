@@ -1,5 +1,8 @@
 # #7583 Herdr Windows와 공통 세션 호스트 — 설계 1
 
+<!-- doc-path-refs: external 2ecf19a92fc3a7fff75b6ce3655ef04f4625ec01/ crates/herdr-core/ src/SKILL.md -->
+<!-- doc-path-refs: proposed src/services/campaign_execution/tui_runtime.rs -->
+
 기준 코드: **origin/main `1974cff8a67bf5d1db041abfdd4d615c518ee104`**.
 브랜치 `design/i7583`, 2026-11-15, win-desktop WSL 조사. 이 문서와 상태 모델만 작성했다.
 Rust·운영 DB/store·설정·설치·서비스는 바꾸지 않았다. [이슈 원문](https://github.com/itismyfield/AgentDesk/issues/7583)과
