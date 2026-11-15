@@ -171,6 +171,10 @@ fn current_session(
     if history.awaiting.is_some() {
         return Err("handoff native session is still Pending".into());
     }
+    let pin = match pin {
+        Some(pin) => Some(pin),
+        None => pin_retired_resume(channel, logical, latest, prior)?,
+    };
     let legacy = pin.is_none();
     let (source, pinned_at) = pin
         .or_else(|| match &latest.new {
@@ -242,15 +246,96 @@ pub(super) struct PriorExecution<'a> {
 }
 
 impl PriorExecution<'_> {
-    /// The tmux proof, or the channel's row naming execution `nonce` Retired: that state is written
-    /// only for a confirmed-ended execution of its owner and nonce.
+    /// The tmux proof, or the channel's row naming execution `nonce` Retired.
     fn ended(&mut self, logical: &str, nonce: Option<&str>) -> bool {
-        let retired = matches!(self.row, Some(HostedRecord::Known(record))
+        nonce.is_some_and(|nonce| self.retired(nonce))
+            || ended_tmux_execution(logical, self.earlier)
+    }
+
+    /// Whether the channel's row names execution `nonce` of this owner Retired: that state is
+    /// written only for a confirmed-ended execution of its owner and nonce.
+    fn retired(&self, nonce: &str) -> bool {
+        matches!(self.row, Some(HostedRecord::Known(record))
             if record.state == HostedState::Retired
                 && record.owner == *self.owner
-                && Some(record.execution_nonce.as_str()) == nonce);
-        retired || ended_tmux_execution(logical, self.earlier)
+                && record.execution_nonce == nonce)
     }
+}
+
+/// A Herdr resume logs its own SessionStart as a stat, which leaves the pin unverified unless it
+/// re-pins a renumbered one. Once the row names it Retired, its own proven file is pinned now.
+fn pin_retired_resume(
+    channel: u64,
+    logical: &str,
+    latest: &crate::services::tui_prompt_dedupe::binding_events::BindingEvent,
+    prior: &PriorExecution<'_>,
+) -> Result<Option<crate::services::tui_prompt_dedupe::binding_events::PinnedAt>, String> {
+    use crate::services::claude_tui::source_verify::{
+        Observation, PinJudgment, judge_pin, observe_transcript,
+    };
+    use crate::services::tui_prompt_dedupe::binding_context::{
+        SpawnNonceMarker, execution_context, observe_spawn_nonce_marker,
+    };
+    use crate::services::tui_prompt_dedupe::binding_events::{
+        self as events, BindingCause, BindingTarget, CauseSource, Committed, Proposal,
+    };
+    let (BindingTarget::Source(source) | BindingTarget::Resolved { source, .. }) = &latest.new
+    else {
+        return Ok(None);
+    };
+    let (Some(nonce), Some(path)) = (latest.execution_nonce.as_deref(), source.path.to_str())
+    else {
+        return Ok(None);
+    };
+    let resumed = latest.cause == BindingCause::Resume
+        && latest.evidence.hook_event.as_deref() == Some("session_start");
+    // The start must be the one that execution's own launch context resumed, as its hook was.
+    let own = execution_context("claude", nonce).is_ok_and(|context| {
+        context.launch_mode == "resume"
+            && context.tmux_session == logical
+            && context.channel_id == Some(channel)
+            && context.expected_native_session_id.as_deref() == Some(source.session_id.as_str())
+    });
+    let marked = observe_spawn_nonce_marker(logical) == SpawnNonceMarker::Known(nonce.to_owned());
+    if !(resumed && own && marked && prior.retired(nonce)) {
+        return Ok(None);
+    }
+    let opened = observe_transcript(&source.path);
+    let seen = Observation::Opened(opened.as_ref());
+    let pinned_at = Some(latest.committed_at);
+    let judged = judge_pin(
+        Some(source),
+        pinned_at,
+        &source.session_id,
+        &source.path,
+        seen,
+    );
+    let PinJudgment::Verified(verified) = judged else {
+        return Ok(None);
+    };
+    if !events::codex::source_file_matches(&verified) {
+        return Ok(None);
+    }
+    let proposal = Proposal {
+        channel_id: channel,
+        provider: "claude",
+        tmux_session: logical,
+        session_id: Some(&source.session_id),
+        path,
+        replaced: None,
+        cause: CauseSource::Observed,
+        hook: None,
+    };
+    let committed = crate::services::tmux_common::with_tmux_source_authority(logical, |_| {
+        events::record_verified(&proposal, &verified)
+    })
+    .map_err(|e| e.to_string())?;
+    if !matches!(committed, Committed::Appended | Committed::Unchanged) {
+        return Ok(None);
+    }
+    let (pin, _) =
+        events::claude_history_at(channel, logical, Some(nonce)).map_err(|e| e.to_string())?;
+    Ok(pin)
 }
 
 /// Whether the transcript is the recorded file under the device number a host reboot gave its
@@ -703,6 +788,23 @@ mod tests {
         assert_eq!(judged("herdr", Liveness::Ended), refused);
     }
 
+    /// The channel's hosted row naming execution `nonce` of `owner` in `state`.
+    fn hosted_row(owner: HostedOwner, nonce: &str, state: HostedState) -> HostedRecord {
+        use crate::db::dispatched_sessions::hosted_execution::{HostedExecution, SourceRef};
+        let source = SourceRef {
+            runtime_root: owner.runtime_root.clone(),
+            channel: owner.channel_id.clone(),
+            provider: owner.provider.clone(),
+            logical_key: owner.logical_key.clone(),
+            execution_nonce: nonce.into(),
+            initial_source: None,
+            baseline_event_seq: None,
+        };
+        let mut record = HostedExecution::pending(owner, nonce.into(), source);
+        record.state = state;
+        HostedRecord::Known(record)
+    }
+
     /// Rewrites every logged source as if a host reboot after the record renumbered its volume.
     fn reboot_after_record(log: &Log, dev_shift: u64, ino_shift: u64) {
         let text = std::fs::read_to_string(log.path()).unwrap();
@@ -771,24 +873,10 @@ mod tests {
     #[test]
     fn a_reboot_renumbered_transcript_of_a_herdr_execution_resumes_only_once_its_own_row_is_retired()
      {
-        use crate::db::dispatched_sessions::hosted_execution::{HostedExecution, SourceRef};
         let _root_guard = crate::config::TestRuntimeRootGuard::new();
         let session = uuid::Uuid::new_v4().to_string();
         let nonce = "d".repeat(32);
-        let row = |owner: HostedOwner, nonce: &str, state: HostedState| {
-            let source = SourceRef {
-                runtime_root: owner.runtime_root.clone(),
-                channel: owner.channel_id.clone(),
-                provider: owner.provider.clone(),
-                logical_key: owner.logical_key.clone(),
-                execution_nonce: nonce.into(),
-                initial_source: None,
-                baseline_event_seq: None,
-            };
-            let mut record = HostedExecution::pending(owner, nonce.into(), source);
-            record.state = state;
-            HostedRecord::Known(record)
-        };
+        let row = hosted_row;
         let judged = |first: &str, ino_shift: u64, row: Option<&HostedRecord>| {
             let log = Log::new(8177003);
             let path = log.root.path().join(format!("{session}.jsonl"));
@@ -837,5 +925,155 @@ mod tests {
         assert_eq!(judged(&session, 0, Some(&other_owner)), changed);
         assert_eq!(judged("another-session", 0, Some(&retired)), changed);
         assert_eq!(judged(&session, 1, Some(&retired)), changed);
+    }
+
+    /// What a Herdr resume's own start leaves: its launch context, marker and a stat record of it.
+    struct ResumeStart {
+        session: String,
+        nonce: String,
+        first: String,
+        cause: events::BindingCause,
+        logged_nonce: Option<String>,
+        marker: String,
+        context_session: String,
+        readable: bool,
+    }
+
+    impl ResumeStart {
+        fn new(session: &str) -> Self {
+            let nonce = "d".repeat(32);
+            Self {
+                session: session.into(),
+                first: session.into(),
+                cause: events::BindingCause::Resume,
+                logged_nonce: Some(nonce.clone()),
+                marker: nonce.clone(),
+                context_session: session.into(),
+                readable: true,
+                nonce,
+            }
+        }
+
+        /// Logs the start, then judges it after a reboot moving the recorded identity by `shift`.
+        fn judged(
+            &self,
+            shift: (u64, u64),
+            row: Option<&HostedRecord>,
+        ) -> Result<Option<String>, String> {
+            use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
+            let log = Log::new(8177004);
+            let path = log.root.path().join(format!("{}.jsonl", self.session));
+            let first = serde_json::json!({"sessionId": self.first});
+            std::fs::write(&path, format!("{first}\n")).unwrap();
+            let temp = |ext| crate::services::tmux_common::session_temp_path(log.logical, ext);
+            std::fs::write(temp("spawn_nonce"), &self.marker).unwrap();
+            std::fs::write(temp("host_kind"), "herdr").unwrap();
+            let context = BindingContext {
+                schema: 1,
+                provider: "claude".into(),
+                created_at: chrono::Utc::now(),
+                execution_nonce: self.nonce.clone(),
+                tmux_session: log.logical.into(),
+                channel_id: Some(log.channel),
+                owner_runtime_root: "/root".into(),
+                host: None,
+                expected_native_session_id: Some(self.context_session.clone()),
+                launch_mode: "resume".into(),
+                provider_root: None,
+                first_prompt_digest: None,
+                source_policy: None,
+            };
+            let own = crate::services::tui_prompt_dedupe::binding_context::context_path(
+                "claude",
+                &self.nonce,
+            )
+            .unwrap();
+            std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+            std::fs::write(&own, serde_json::to_vec(&context).unwrap()).unwrap();
+            let meta = std::fs::metadata(&path).unwrap();
+            let at = chrono::Utc::now();
+            let event = events::BindingEvent {
+                seq: 1,
+                channel_id: log.channel,
+                provider: "claude".into(),
+                tmux_session: log.logical.into(),
+                execution_nonce: self.logged_nonce.clone(),
+                old: None,
+                new: events::BindingTarget::Source(events::SourceId {
+                    session_id: self.session.clone(),
+                    path: path.clone(),
+                    dev: meta.dev(),
+                    ino: meta.ino(),
+                }),
+                cause: self.cause,
+                parent_hint: None,
+                evidence: events::BindingEvidence {
+                    hook_event: Some("session_start".into()),
+                    received_at: at,
+                },
+                committed_at: at,
+            };
+            let row_json = serde_json::to_string(&event).unwrap();
+            std::fs::write(log.path(), format!("{row_json}\n")).unwrap();
+            events::forget_channel_for_tests(log.channel);
+            if shift != (0, 0) {
+                reboot_after_record(&log, shift.0, shift.1);
+            }
+            use std::os::unix::fs::PermissionsExt;
+            let mode =
+                |bits| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(bits));
+            if !self.readable {
+                mode(0o000).unwrap();
+            }
+            let owner = owner();
+            let earlier = &mut Earlier(Liveness::Ended);
+            let mut prior = PriorExecution {
+                earlier,
+                owner: &owner,
+                row,
+            };
+            let judged = super::current_session(log.channel, log.logical, None, &mut prior);
+            mode(0o600).unwrap();
+            std::fs::remove_file(own).unwrap();
+            judged
+        }
+    }
+
+    #[test]
+    fn a_retired_herdr_resume_whose_start_was_logged_as_a_stat_resumes_its_own_proven_file() {
+        let _root_guard = crate::config::TestRuntimeRootGuard::new();
+        let session = uuid::Uuid::new_v4().to_string();
+        let start = ResumeStart::new(&session);
+        let nonce = start.nonce.clone();
+        let retired = hosted_row(owner(), &nonce, HostedState::Retired);
+        let resumed = Ok(Some(session.clone()));
+        assert_eq!(start.judged((0, 0), Some(&retired)), resumed);
+        assert_eq!(start.judged((1, 0), Some(&retired)), resumed);
+        let refused = Err("handoff native session has no verified durable binding".to_string());
+        for state in [HostedState::Bound, HostedState::Pending] {
+            let live = hosted_row(owner(), &nonce, state);
+            assert_eq!(start.judged((0, 0), Some(&live)), refused);
+        }
+        assert_eq!(start.judged((0, 0), None), refused);
+        let other_nonce = hosted_row(owner(), &"e".repeat(32), HostedState::Retired);
+        assert_eq!(start.judged((0, 0), Some(&other_nonce)), refused);
+        let mut stranger = owner();
+        stranger.discord_token_hash = "another-bot".into();
+        let other_owner = hosted_row(stranger, &nonce, HostedState::Retired);
+        assert_eq!(start.judged((0, 0), Some(&other_owner)), refused);
+        assert_eq!(start.judged((0, 1), Some(&retired)), refused);
+        let variants: [fn(&mut ResumeStart); 6] = [
+            |s| s.first = "another-session".into(),
+            |s| s.readable = false,
+            |s| s.logged_nonce = None,
+            |s| s.marker = "e".repeat(32),
+            |s| s.context_session = uuid::Uuid::new_v4().to_string(),
+            |s| s.cause = events::BindingCause::Startup,
+        ];
+        for vary in variants {
+            let mut other = ResumeStart::new(&session);
+            vary(&mut other);
+            assert_eq!(other.judged((0, 0), Some(&retired)), refused);
+        }
     }
 }

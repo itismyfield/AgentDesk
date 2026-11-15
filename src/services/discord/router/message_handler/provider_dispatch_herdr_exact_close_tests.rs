@@ -406,35 +406,14 @@ fn reboot_renumbers_the_volume() {
     events::forget_channel_for_tests(CHANNEL);
 }
 
-/// The verified record a live Herdr execution's source check logs after its resume start, whose
-/// own record is a stat; it carries the execution's nonce from the pane's marker.
-fn verify_pin(fx: &Fixture, session: &str, path: &Path) {
-    use crate::services::tui_prompt_dedupe::binding_events::{
-        self as events, CauseSource, Proposal,
-    };
-    let named = path.display().to_string();
-    let proposal = Proposal {
-        channel_id: CHANNEL,
-        provider: "claude",
-        tmux_session: fx.logical(),
-        session_id: Some(session),
-        path: &named,
-        replaced: None,
-        cause: CauseSource::Observed,
-        hook: None,
-    };
-    let source =
-        crate::services::claude::session_handoff::transcript_file(fx.cwd.path(), session, None);
-    events::record_verified(&proposal, &source.unwrap().unwrap()).unwrap();
-}
-
 #[test]
 fn a_herdr_execution_retired_by_each_host_reboot_resumes_its_renumbered_transcript_pg() {
     let root = crate::config::TestRuntimeRootGuard::new();
     let fx = Fixture::with_root("herdr-reboots", None, root);
     let (session, path) = fx.seed_resumable(true);
     let mut sends = 0;
-    // The tmux switch, then two host reboots of the Herdr execution each one started.
+    // The tmux switch, then two host reboots of the Herdr execution each one started; each start
+    // leaves only its own resume's stat record.
     for turn in 0..3 {
         let launcher = Arc::new(Launcher::default());
         let ports = fx.ports(&launcher);
@@ -449,7 +428,6 @@ fn a_herdr_execution_retired_by_each_host_reboot_resumes_its_renumbered_transcri
         assert_eq!(fx.row(), Some(HostedState::Bound), "turn {turn}");
         sends += 2;
         assert_eq!(fx.rig.sends().len(), sends, "turn {turn}");
-        verify_pin(&fx, &session, &path);
         // Recovery retires the execution the reboot ended; its transcript comes back renumbered.
         let HostedRecord::Known(mut record) = fx.record() else {
             panic!("turn {turn} left no hosted record");
@@ -475,7 +453,10 @@ fn a_herdr_execution_retired_by_each_host_reboot_resumes_its_renumbered_transcri
     let (result, _) = fx.turn(&fx.record(), &ports, || {});
     assert_eq!(
         result,
-        Err("herdr launch current_session: handoff transcript identity changed".into())
+        Err(
+            "herdr launch current_session: handoff native session has no verified durable binding"
+                .into()
+        )
     );
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
     assert_eq!(fx.rig.sends().len(), sends);

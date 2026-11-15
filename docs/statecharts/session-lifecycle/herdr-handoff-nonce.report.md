@@ -149,10 +149,62 @@ End-evidence census (`git grep -n -E 'retire_pg\(|retire_confirmed\(|\.state = H
 | IdNoNonce / IdNoRetired (mutants) | RED | GREEN | not checked |
 
 The admitted pin must be verified. A Herdr resume start logs a stat record (`binding_events.rs:874-882`
-via `herdr_resume.rs:41-45`), which leaves the pin unverified until a later verified record of the
-same execution (a source check or a restart's reconnect, `herdr_source.rs:318`). A channel whose
-latest record is that stat still refuses with "no verified durable binding"; this rule does not
-change it.
+via `herdr_resume.rs:41-45`). The writer promotes it to a verified re-pin only when the pane's
+verified pin names an earlier boot's device (`binding_events.rs:821-833`); a resume on the same
+device leaves the pin unverified. The r4 section below covers that case.
 
 All earlier configs gained `Again = FALSE`; their results are unchanged. Twenty-six configs,
 `--jobs 1`, 36.7 s, every expected violation matched.
+
+## Unverified start of a retired Herdr resume (r4)
+
+Review of r3 (P1-1): a normal Herdr resume on an unchanged device leaves only its own SessionStart
+stat, so after its execution ends (host reboot or not) `current_session` finds no verified pin, the
+legacy branch refuses a hook record, and every start fails with "no verified durable binding"
+before the r3 renumbering rule runs. Nothing on the normal path writes a verified record later:
+the same-session hook skips the continuation check, reclaim needs another session's Pending, the
+turn's registration is an unchanged stat, and reconnect covers only a live listed execution.
+Observed 11-15 16:2x (read only): channel 1559670200419352696 (`claude-tui-2-e2e`) has this shape
+(latest seq 294, own resume start of nonce `8be5…`, unverified; its row names that nonce Retired).
+
+Rule after the change: with no verified pin, the latest record is pinned now when all hold: a
+`session_start` record with cause Resume and its own nonce; that execution's launch context names a
+resume of the recorded session on this pane and channel; the spawn marker still names that nonce;
+the row names that nonce of this owner Retired; and the recorded file, opened once, passes
+`judge_pin` (same inode, its own first record, a device renumbered only for an earlier boot's
+record) and the path still names it. The pin goes through `record_verified`, as a hook check does.
+Anything else refuses as before. The r3 identity rule then runs on the new pin.
+
+Binding-record census (`git grep -n -E 'record_verified\(|record_source\(|record_reclaim\(' -- src`):
+
+| Writer | Verified | Code | Model |
+|---|---|---|---|
+| Herdr resume's own SessionStart | stat, unless it re-pins a renumbered verified pin | `observation_ingress/resume_start.rs:27-49` → `binding_events.rs:821-833,874-882` | `Launch` sets `verified = FALSE` |
+| Turn completion registration | stat, unchanged for the same source and nonce | `herdr_turn/first_input.rs:249` | no step |
+| Hook continuation check | verified, only for a proposal | `runtime_binding/claude_source.rs:215` | not on the normal resume path |
+| Reclaim | verified, only past another session's Pending | `runtime_binding/claude_source.rs:269-292` | not modeled |
+| Reconnect / restore | verified (`Record::Exact`, `Record::Verified`) | `tui_prompt_relay/herdr_source.rs:318`, `tui_prompt_dedupe/pending.rs:670,692` | live listed execution only; its Bound row never reaches this judgment |
+| Recovery pin (new) | verified | `herdr_turn/handoff.rs` (`pin_retired_resume`) | `PinOk` with `PinPolicy = "fixed"` |
+
+Restart and reboot: a dcserver restart of a live execution keeps it Bound, so the judgment is not
+reached. After a host reboot recovery retires the row and the next start pins the file under its
+new device; the new execution then logs its own stat start, which the next reboot recovers the same
+way (`PinFixedAgain`). Cancel, clear, Terminate and stop neither read nor write the recovery pin;
+they see a verified record of the same source and nonce, as after a hook check.
+
+The r3 mutant `IdNoRetired` skipped the nonce check too. It now drops only the Retired state, checked
+from a live row of the same nonce (`herdrlive`); the other-nonce start stays refused under it.
+
+| Config | NoCapture | OwnTranscript | Delivered / DeliveredAgain |
+|---|---|---|---|
+| PinBeforeResumed (no recovery, retired unverified start) | GREEN | GREEN | RED Delivered |
+| PinBeforeAgainFromTmux (no recovery, tmux switch then reboot) | GREEN | GREEN | RED DeliveredAgain |
+| PinFixedResumed / PinFixedResumedSame (renumbered / same device) | GREEN | GREEN | GREEN |
+| PinFixedAgain (two reboots) | GREEN | GREEN | GREEN |
+| PinFixedLive / PinFixedOther / PinFixedForeign | GREEN | GREEN | not checked |
+| RecNoRetired / RecNoNonce (mutants) | RED | GREEN | not checked |
+| IdFixedHerdrLive / IdNoRetired (mutant, same nonce live) | GREEN / RED | GREEN | not checked |
+| IdNoRetiredOther (mutant, other nonce) | GREEN | GREEN | not checked |
+
+Earlier configs gained `Verified = TRUE` and `PinPolicy = "fixed"`; their results are unchanged.
+Thirty-eight configs, `--jobs 1`, 71.2 s, every expected violation matched.
