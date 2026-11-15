@@ -225,7 +225,7 @@ SupplyOrder == /\ (review.clearLease = 0 => result # "None")
                /\ (review.clearHead => review.clearRows = 0)
 SupplyResultEventually == <>(result # "None")
 SupplyLeaseEventuallyFree == role = "Primary" => <>(review.clearLease = 0)
-SupplyHeadEventuallyInjected == <>review.clearHead
+SupplyHeadEventuallyInjected == role = "Primary" => <>review.clearHead
 SupplyRejectedEventually == <>(review.pc = 11)
 NoForeignResponse == review.firstProof <= 1 /\ review.proofs \subseteq {"two"}
 \* Restored custody accepts an authentic result without minting a current live actor.

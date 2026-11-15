@@ -12,6 +12,16 @@
 use super::completion_admission::publish_claimed_queue_eligible;
 use super::*;
 
+#[cfg(unix)]
+fn generic_backstop_allowed(entry: &LedgerEntry) -> bool {
+    entry.completion_admission.native_input.is_none()
+}
+
+#[cfg(not(unix))]
+fn generic_backstop_allowed(_entry: &LedgerEntry) -> bool {
+    true
+}
+
 /// Run the deadline-elapsed backstop finalize for ONE entry: flip
 /// `Pending → Finalizing` (skip if a concurrent terminal already advanced it),
 /// run `do_finalize` on the backstop context, then flip `Finalized`. Shared by
@@ -27,10 +37,7 @@ async fn run_backstop_finalize(
     now: Instant,
 ) {
     match ledger.get_mut(&ledger_key) {
-        Some(entry)
-            if entry.phase == Phase::Pending
-                && entry.completion_admission.native_input.is_none() =>
-        {
+        Some(entry) if entry.phase == Phase::Pending && generic_backstop_allowed(entry) => {
             entry.phase = Phase::Finalizing;
         }
         _ => return,
