@@ -1,0 +1,2 @@
+key: 001-api-thread-ingress
+| `input-single-path` / `session-lifecycle` API thread ingress (#8125 T1) | `d40c06eb47` | Herdr gate, Idle reservation/recheck, machine Busy join, stale incarnation, source reclassification and ACK replay controls are expected RED | 39 materialized cfg: 22 GREEN + 17 expected RED. Same-incarnation Idle→Busy at delegation and driver reservation is checked; machine policy is independent of provenance. `.cfg.example` files are not CI-registered. [Report](input-single-path/thread-ingress.report.md), [design](../api-thread-ingress.design.md). |
