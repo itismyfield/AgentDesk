@@ -172,6 +172,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn kill_methods_preserve_the_exact_audit_reason() {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(log.reopen().unwrap())
+            .finish();
+        crate::logging::test_capture::pin_callsite_interest();
+        let reasons = [
+            " bool 종료 사유 = keep spaces ",
+            " output 종료 사유 = keep spaces ",
+            " timeout 종료 사유 = keep spaces ",
+        ];
+        // Blank targets reach the platform's refusal log without spawning tmux.
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(!TmuxHost.kill("", reasons[0]));
+            assert!(
+                !TmuxHost
+                    .kill_output("", reasons[1])
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            assert!(
+                TmuxHost
+                    .kill_output_timeout("", reasons[2], std::time::Duration::from_millis(1))
+                    .is_err()
+            );
+        });
+        let logged = std::fs::read_to_string(log.path()).unwrap();
+        let observed: Vec<&str> = logged
+            .lines()
+            .filter_map(|line| line.split_once("reason=").map(|parts| parts.1))
+            .collect();
+        assert_eq!(observed, reasons, "platform audit log: {logged}");
+    }
+
+    #[test]
     fn probes_are_the_platform_probes() {
         // A blank name short-circuits both platform probes without spawning tmux.
         let blank = HostSessionRef::tmux("");
