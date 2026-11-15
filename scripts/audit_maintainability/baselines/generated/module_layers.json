@@ -2,7 +2,7 @@
   "configuration_errors":[],
   "count_unit_version":1,
   "edge_count_unit":"static reference occurrences",
-  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha e8ff4f14281ae37ef5f58d97ec722f7af9001454 --output scripts/audit_maintainability/baselines/generated/module_layers.json --update-reductions",
+  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha 3631b92825e70f2a7e9100185b12ac14a5912c48 --output scripts/audit_maintainability/baselines/generated/module_layers.json --update-reductions",
   "indeterminate_dependencies":[
     {"count":1,"id":"3d29ca6b7465863f206febb861a0f441644c728f409182ccd49d175c2c2806b8","kind":"import","source":"src/lib.rs::crate::cli::discord","target":"src/lib.rs::crate::services"},
     {"count":1,"id":"47c075858c533c75543be0e9196aaa2eecd8c00d2951247879e8d5baff37f816","kind":"import","source":"src/lib.rs::crate::server::routes::reviews","target":"src/lib.rs::crate::services"},
@@ -12,7 +12,7 @@
   ],
   "indeterminate_edges":5,
   "indeterminate_occurrences":5,
-  "input_sha":"e8ff4f14281ae37ef5f58d97ec722f7af9001454",
+  "input_sha":"3631b92825e70f2a7e9100185b12ac14a5912c48",
   "mapping_sha256":"b38dae728ef91d6124e1c5e5932d7a4163dddbbf809c9dc6990c9ae9a53ab2e8",
   "reverse_dependencies":[
     {"count":2,"id":"0035d7ca439517230bc6306b0881fc487fe95b44c2852a7e74379cb98436987d","kind":"path","source":"src/lib.rs::crate::config","target":"src/lib.rs::crate::config::session_hosts"},
@@ -8903,7 +8903,6 @@
     {"count":1,"id":"bb2ddc899de5e670e84714a7970cfe7f1a2e310e57738f83d2c527591eed442f"},
     {"count":1,"id":"bb2fdb08708a973e28a1d5e15a7e32787b6c1ac0a2afc6b2d86d9ec61b993228"},
     {"count":1,"id":"bb3386d9f22857b98aa94a139362b941c0f0630f32bab61c22c8765e278acabb"},
-    {"count":1,"id":"bb3398e97e0ac703a8a545e7ba533bbb186c5ffd24d3eb6cfd07f7d928769f48"},
     {"count":1,"id":"bb354524a96f2929904c290fb8fd5b8322f544fa9b9e351cba0a9db8b1cdbb31"},
     {"count":1,"id":"bb4a2be7cafc66a2f4aee0dd63a836b87d245147e03a3dc9edcce3bea7a1e321"},
     {"count":1,"id":"bb4b12bb42dd6c0d7cad4fb4c0e9580d54c270cb00619d32d1c2041f0ee90831"},
@@ -18583,6 +18582,7 @@
     {"count":0,"id":"b91662c0f3e4010506a20ed24b430bb2d8f29af85ecbb25226a14ac1edb0496e","section":"uncertainties"},
     {"count":0,"id":"badacd69ce7c75ecfb95692b6e05de17dba230659e499d773ed891778cf5f1a5","section":"uncertainties"},
     {"count":0,"id":"badc03d0b63de637db5d157b9deb7743deb02455fbc0fb02ab8003c335d4ccc2","section":"uncertainties"},
+    {"count":0,"id":"bb3398e97e0ac703a8a545e7ba533bbb186c5ffd24d3eb6cfd07f7d928769f48","section":"uncertainties"},
     {"count":0,"id":"bc97dc9b3bb6240978278b17d8cdd2099b1f2848feebe0dd9b0b3ab7e1054e23","section":"uncertainties"},
     {"count":0,"id":"bd6211d05e025d27728dcd0b6f9a124a505bd11730b31ead2bdee3ffa2adc2f7","section":"uncertainties"},
     {"count":0,"id":"be44bf5c03f3bf8ccf26e43de195c36e59848fa1e076613e686d328c9e9348c0","section":"uncertainties"},
