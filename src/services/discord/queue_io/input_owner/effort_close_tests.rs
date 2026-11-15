@@ -189,10 +189,18 @@ async fn dropping_the_waiting_continuation_closes_its_barrier() {
         }
         let kept: &[u64] = if how == "cancel-c" { &[101] } else { &[] };
         assert_eq!(state(&handle).await, (kept.to_vec(), true), "{how}");
+        assert!(
+            continuation(&handle, channel).await.is_err(),
+            "{how}: late ready stays closed"
+        );
         user(&handle, channel, 102).await;
         let first = if how == "cancel-c" { 101 } else { 102 };
         assert_eq!(front(&handle).await, Some(first), "{how}: no barrier");
         let (_registry, restarted) = readopted(&path, channel).await;
+        assert!(
+            continuation(&restarted, channel).await.is_err(),
+            "{how}: closed after readopt"
+        );
         assert_eq!(
             front(&restarted).await,
             Some(first),
@@ -201,39 +209,55 @@ async fn dropping_the_waiting_continuation_closes_its_barrier() {
     }
 }
 
-// A continuation already handed to the provider is not the clear's to drop: it keeps its intent
-// and barrier until its delivery settles.
+// A protected armed continuation keeps its exact custody through a preserving clear; an unsent
+// reservation is dropped by explicit clear and cannot be reopened by a late ready.
 #[tokio::test]
 async fn an_attempted_continuation_survives_clear() {
     let _root = TestRuntimeRootGuard::new();
-    let registry = ChannelMailboxRegistry::default();
-    let channel = 810_930;
-    let (handle, _, _) = waiting(&registry, channel).await;
-    handle
-        .v2_request(|slot| {
-            let owner = slot.as_mut().ok_or("missing owner")?;
-            let front = owner.front().ok_or("missing front")?;
-            owner.grant_front(&front)?;
-            owner.claim_turn(front.1.message_id, &front);
-            let number = owner.claim_number();
-            let attempt =
-                serde_json::from_value(json!({"nonce":"effort-close-c","provider":"claude",
-                "target":{"host":"tmux","owner":"fixture-effort-close","root":"/fixture",
-                "execution_nonce":"new"},"source":{"kind":"pre_source","expected_session_id":null,
-                "expected_transcript":null,"binding_watermark":null}}))
-                .map_err(|e| e.to_string())?;
-            let payload =
-                serde_json::from_value(json!({"frame":PROMPT,"digest":"c","attribution":{}}))
-                    .map_err(|e| e.to_string())?;
-            owner
-                .reserve_claimed((&front, number), attempt, payload)
-                .map(drop)
-        })
-        .await
-        .unwrap();
-    handle.clear(ctx()).await;
-    let json = snapshot(&handle).await;
-    assert!(json["head_injection"].is_object(), "{json}");
-    assert_eq!(json["effort_restart"]["cancelled"], Value::Null, "{json}");
-    assert_eq!(json["effort_restart"]["continuation"]["submitted"], false);
+    for armed in [false, true] {
+        let registry = ChannelMailboxRegistry::default();
+        let channel = 810_930 + u64::from(armed);
+        let (handle, path, c) = waiting(&registry, channel).await;
+        handle
+            .v2_reserve_head_for_tests("effort-close-c", armed)
+            .await
+            .unwrap();
+        if armed {
+            handle
+                .restore_active_turn(
+                    std::sync::Arc::new(crate::services::provider::CancelToken::new()),
+                    poise::serenity_prelude::UserId::new(7),
+                    MessageId::new(c.message_id),
+                )
+                .await;
+            let cleared = handle.discard_waiting_or_refused(ctx()).await.unwrap();
+            assert!(cleared.persistence.failed.is_empty());
+            assert_eq!(cleared.discarded_message_ids, [MessageId::new(101)]);
+            let json = snapshot(&handle).await;
+            assert!(json["head_injection"].is_object(), "{json}");
+            assert_eq!(json["effort_restart"]["cancelled"], Value::Null, "{json}");
+            assert_eq!(json["effort_restart"]["continuation"]["submitted"], false);
+            handle
+                .v2_request(|slot| {
+                    let owner = slot.as_mut().ok_or("missing owner")?;
+                    let key = owner.active_attempt()?;
+                    owner.settle(&key, true, 1)
+                })
+                .await
+                .unwrap();
+            let (_registry, restarted) = readopted(&path, channel).await;
+            assert!(
+                snapshot(&restarted).await["effort_restart"]["continuation"]["submitted"] == true
+            );
+        } else {
+            let cleared = handle.clear(ctx()).await;
+            assert!(cleared.persistence.failed.is_empty());
+            let json = snapshot(&handle).await;
+            assert!(json["head_injection"].is_null(), "{json}");
+            assert_eq!(state(&handle).await, (vec![], true), "{json}");
+            assert!(continuation(&handle, channel).await.is_err());
+            let (_registry, restarted) = readopted(&path, channel).await;
+            assert!(continuation(&restarted, channel).await.is_err());
+        }
+    }
 }

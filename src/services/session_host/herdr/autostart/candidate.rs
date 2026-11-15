@@ -1,6 +1,7 @@
 //! The user's herdr a start would run: from PATH, then the usual install dirs, never `~/.adk`; a
 //! private native arm64 image on APFS reporting a supported stable version.
 
+use crate::services::process::reaping::CommandReapExt;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -126,7 +127,7 @@ pub(crate) fn version_output(path: &Path) -> Result<String, String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .spawn()
+        .spawn_reaping()
         .map_err(|e| format!("--version did not run: {e}"))?;
     let stdout = child.stdout.take().ok_or("--version has no stdout")?;
     let (sent, read) = std::sync::mpsc::channel();

@@ -48,7 +48,7 @@ stateDiagram-v2
 
 | 위치 | 함수 | C 처리 | 모델 |
 |---|---|---|---|
-| `v2/control.rs` | `clear`(`/clear`, idle 정리, host guard 정리) | `close_dropped(All)` | `EffortClear`(clear) |
+| `v2/clear.rs` | `clear_all`(`/clear`, idle 정리, host guard 정리) | `close_dropped(All)` | `EffortClear`(clear) |
 | `v2/control.rs` | `clear_waiting`(`/cancel-queued` 전체) | `close_dropped(All)` | `EffortClear`(clear) |
 | `v2/control.rs` | `cancel`(`/cancel-queued <id>`) | `close_dropped(Only(지운 항목))` | `EffortClear`(cancel-c) |
 | `v2/projection.rs` | `v2_purge_if_unchanged`(force Cancel의 checked purge) | `close_dropped(All)` | `EffortClear`(clear) |
@@ -110,7 +110,7 @@ stateDiagram-v2
 
 ## 모델과 코드가 다른 곳
 
-1. 모델의 `EffortClear`·`EffortCStartFails`는 C가 head(시도 중)에 있는 상태를 따로 두지 않는다. 코드에서 시도 중이거나 전달이 모호한 C는 닫지 않는다(기존 custody). 모델은 C 제출이 원자 전이다.
+1. 모델의 `EffortClear`·`EffortCStartFails`는 C의 reservation·armed 단계를 따로 두지 않는다. `clear_all`은 미전달 Reserved C를 지우고 같은 commit에서 취소한다. preserving clear가 보호한 Armed C는 항목·attempt·intent를 유지해 늦은 정산을 받는다. `clear_waiting`에서 전달이 모호한 C의 custody는 유지한다. 모델은 C 제출을 원자 전이로 축약하며, 제거한 C의 취소와 보존한 C의 custody라는 가정은 같다.
 2. 재시작 때 옛 TUI 생존 판정(pane + bind nonce)을 모델은 "prepared면 생존"으로 줄였다.
 3. witness 실패와 접수 미확정의 재시도는 모델에서 Prepared/Ready에 머무는 것과 `EffortBootResolve`의 wake로만 보인다. 코드는 owner drive가 front 없이 끝날 때마다 resolver를 부른다. 시간 polling은 없다.
 

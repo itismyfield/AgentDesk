@@ -72,6 +72,17 @@ done
 
 echo "§6 an unrecognised reason fails closed, so a newly added one cannot slip through"
 
+expect_ready "a missing O binding retains ownership without blocking deploy" \
+    "$(body '["tui_o:binding_missing:43"]' true)"
+expect_blocked "a registered O channel missing from selection still blocks" \
+    "$(body '["tui_o:selection_missing:43"]' true)"
+expect_blocked "a selection alarm blocks alongside a missing binding" \
+    "$(body '["tui_o:binding_missing:43","tui_o:selection_missing:42"]' true)"
+for reason in tui_o:binding_missing:x tui_o:binding_missing:43:extra; do
+    expect_blocked "malformed missing binding reason blocks: $reason" \
+        "$(body "[\"$reason\"]" true)"
+done
+
 expect_blocked "an unknown reason blocks" \
     "$(body '["relay_verdict_unknown_codex_c1","a_reason_this_script_has_never_seen"]' true)"
 

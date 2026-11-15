@@ -2193,8 +2193,12 @@ pub fn cmd_config_sync_mcp() -> Result<(), String> {
             crate::services::mcp_config::sync_qwen_mcp_servers(&config),
         ),
         (
-            "gemini",
-            crate::services::mcp_config::sync_gemini_mcp_servers(&config),
+            "antigravity",
+            crate::services::mcp_config::sync_antigravity_mcp_servers(&config),
+        ),
+        (
+            "retired-gemini",
+            crate::services::mcp_config::retired_gemini_sync(&config),
         ),
     ] {
         match result {

@@ -569,6 +569,7 @@ src/
 │   ├── legacy_migration.rs
 │   ├── mod.rs
 │   ├── paths.rs
+│   ├── skill_provider_sync_tests.rs
 │   ├── skill_refresh.rs
 │   ├── skill_sync.rs
 │   ├── snapshot_reader_tests.rs
@@ -1004,7 +1005,8 @@ src/
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/
 │   │   │   │   ├── clear_held_tests.rs
-│   │   │   │   └── tests.rs
+│   │   │   │   ├── tests.rs
+│   │   │   │   └── unproven_tests.rs
 │   │   │   ├── boot_host_tests.rs
 │   │   │   ├── coldstop_input_tests.rs
 │   │   │   ├── composer.rs
@@ -1070,6 +1072,7 @@ src/
 │   │   │   │       └── tq_tests.rs
 │   │   │   ├── ordered_queue.rs
 │   │   │   ├── queue_retention.rs
+│   │   │   ├── reaping_tests.rs
 │   │   │   ├── response_window.rs
 │   │   │   ├── too_early.rs
 │   │   │   └── transport_retry.rs
@@ -1282,6 +1285,8 @@ src/
 │   ├── codex/
 │   │   ├── actual_submit_tests/
 │   │   │   └── source_io_tests.rs
+│   │   ├── direct_reader/
+│   │   │   └── reaping_tests.rs
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/
 │   │   │   │   └── pg_tests.rs
@@ -2513,7 +2518,8 @@ src/
 │   │   │   │   │   │   ├── missing_halt_tests.rs
 │   │   │   │   │   │   ├── park_missing_tests.rs
 │   │   │   │   │   │   ├── park_reply_tests.rs
-│   │   │   │   │   │   └── refresh_tests.rs
+│   │   │   │   │   │   ├── refresh_tests.rs
+│   │   │   │   │   │   └── unbound_gateway_tests.rs
 │   │   │   │   │   └── owner_execution.rs
 │   │   │   │   └── owner_port.rs
 │   │   │   ├── owner_execution/
@@ -3661,6 +3667,9 @@ src/
 │   │   ├── admission_intent.rs
 │   │   ├── operation.rs
 │   │   └── record.rs
+│   ├── mcp_config/
+│   │   ├── antigravity.rs
+│   │   └── antigravity_tests.rs
 │   ├── memory/
 │   │   ├── local.rs
 │   │   ├── memento.rs
@@ -3753,12 +3762,15 @@ src/
 │   │   ├── tmux.rs
 │   │   └── windows_job.rs
 │   ├── process/
+│   │   ├── reaping/
+│   │   │   └── tests.rs
 │   │   ├── stream_child/
 │   │   │   ├── stream_queue/
 │   │   │   │   ├── test_delay.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── stream_queue.rs
 │   │   │   └── test_fixture.rs
+│   │   ├── reaping.rs
 │   │   └── stream_child.rs
 │   ├── provider/
 │   │   ├── cancel_token_cleanup/
@@ -3780,6 +3792,7 @@ src/
 │   │   ├── output_reader.rs
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
+│   │   ├── reaping_tests.rs
 │   │   ├── registry.rs
 │   │   ├── runtime.rs
 │   │   ├── session_probe.rs
@@ -4621,6 +4634,7 @@ src/
 │   │   │   │   ├── actor.rs
 │   │   │   │   ├── attempt.rs
 │   │   │   │   ├── claude_handoff.rs
+│   │   │   │   ├── clear.rs
 │   │   │   │   ├── commit.rs
 │   │   │   │   ├── control.rs
 │   │   │   │   ├── control_tests.rs
@@ -4743,6 +4757,7 @@ src/
 │   ├── manual_steer.rs
 │   ├── mcp_config.rs
 │   ├── mcp_config_atomic_write_tests.rs
+│   ├── mcp_config_retirement_tests.rs
 │   ├── mcp_config_snapshot_tests.rs
 │   ├── message_outbox.rs
 │   ├── message_outbox_circuit_authority.rs
