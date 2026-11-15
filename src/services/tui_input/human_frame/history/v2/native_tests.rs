@@ -802,3 +802,50 @@ fn native_8148_control_unflushed_candidate_repairs_or_preserves_a_third_state() 
         }
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn native_8148_classification_keeps_settled_follower_and_unresolved_source() {
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let dir = test_dir(&runtime);
+    let f = Fixture::at(dir.path().join("frames.json"), 81480441, false);
+    assert!(
+        f.history
+            .record_native_outcome(
+                "native-fixture",
+                &f.ticket,
+                &Fixture::outcome(Disposition::Executed)
+            )
+            .unwrap()
+    );
+    assert!(
+        f.history
+            .native_evidence_registrations()
+            .unwrap()
+            .is_empty()
+    );
+    let classified = f.history.native_classification_registrations().unwrap();
+    assert_eq!(classified.len(), 1);
+    assert_eq!(classified[0].ticket, f.ticket);
+    assert!(!classified[0].candidate);
+    let mut cold = f.input.clone();
+    cold["attempt"]["nonce"] = json!("unresolved");
+    cold["attempt"]["source"] = json!({"kind":"cold"});
+    let key = json!({"identity":cold["identity"],"attempt":cold["attempt"]});
+    f.history.prepare("native-fixture", &cold).unwrap();
+    f.history
+        .prepare_native_intent(
+            "native-fixture",
+            &key,
+            f.ticket.channel_id,
+            &native::Intent::Follower,
+        )
+        .unwrap();
+    let classified = f.history.native_classification_registrations().unwrap();
+    assert_eq!(classified.len(), 2);
+    assert!(
+        classified
+            .iter()
+            .any(|r| r.ticket.source.is_none() && r.candidate)
+    );
+}

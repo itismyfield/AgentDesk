@@ -660,7 +660,7 @@ pub(in crate::services::tui_o::writer::input_facts) fn fold(
     }
     let registered: Vec<_> = registrations
         .iter()
-        .filter(|r| r.matches(binding))
+        .filter(|r| r.candidate && r.matches(binding))
         .collect();
     let mut inputs: Vec<Input> = vec![];
     let mut run: Option<Run> = None;

@@ -336,11 +336,14 @@ input-single-path/NativeActivationUnwindBefore.cfg	NativeInputPreparation	-	Acti
 input-single-path/NativeAttributionAbstainBootBefore.cfg	NativeInputAttribution	AbstainEventuallyLeavesPending,AbstainQueueEventuallyProgresses	-
 input-single-path/NativeAttributionAbstainBootFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionAbstainCrashFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionAbstainCrashPendingBefore.cfg	NativeInputAttribution	-	AbstainEventuallyLeavesPending,AbstainQueueEventuallyProgresses
+input-single-path/NativeAttributionAbstainCrashRowFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionAbstainFollowerFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionAbstainForeignBefore.cfg	NativeInputAttribution	AbstainNoForeignExecuted	-
 input-single-path/NativeAttributionAbstainForeignFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionAbstainIdleBefore.cfg	NativeInputAttribution	AbstainIdleAuthority	-
 input-single-path/NativeAttributionAbstainIdleFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionAbstainNextDuplicateBefore.cfg	NativeInputAttribution	AbstainNoReplay	-
 input-single-path/NativeAttributionAbstainNoMarkerFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionAbstainPendingBefore.cfg	NativeInputAttribution	AbstainEventuallyLeavesPending,AbstainQueueEventuallyProgresses	-
 input-single-path/NativeAttributionAbstainPendingFixed.cfg	NativeInputAttribution	-	-

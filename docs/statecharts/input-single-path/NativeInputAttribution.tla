@@ -475,7 +475,7 @@ AForeignPrompt == /\ review.aStep = 3
                   /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count,
                        proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
                        staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
-ARestart == /\ ((ABoot /\ review.aStep = 4) \/ (Mode = "AbstainCrashFixed" /\ review.aAck)) /\ ~restarted
+ARestart == /\ ((ABoot /\ review.aStep = 4) \/ (Mode \in {"AbstainCrashFixed", "AbstainCrashPendingBefore"} /\ review.aAck) \/ (Mode = "AbstainCrashRowFixed" /\ review.phase = "Finalizing")) /\ ~restarted
             /\ restarted' = TRUE /\ generation' = 2 /\ lease' = 0 /\ rows' = {}
             /\ review' = [review EXCEPT !.aAck = FALSE, !.phase = "Pending", !.parentActive = 0]
             /\ UNCHANGED <<pc, native, members, nativeQueue, stage, pending, result, count, proof,
@@ -494,6 +494,7 @@ AOldWrongFinish == /\ Mode = "AbstainForeignBefore" /\ review.aStep = 5 /\ ~revi
                         closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
                         staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
 AIdleFinish == /\ review.barrier /\ review.aIdle /\ ~review.aAck /\ review.phase = "Pending"
+               /\ (Mode # "AbstainCrashPendingBefore" \/ ~restarted)
                /\ (Mode \notin {"AbstainStampBefore", "AbstainStampFixed"} \/ review.aVersion > 0)
                /\ (review.aVersion # 1 \/ Mode = "AbstainStampBefore")
                /\ (review.aCaughtUp \/ Mode = "AbstainIdleBefore")
@@ -522,8 +523,8 @@ AParentFinish == /\ AFollower /\ review.aAck /\ review.aCaughtUp /\ ~review.aPar
                  /\ UNCHANGED <<pc, native, members, nativeQueue, stage, pending, result, count, proof,
                       closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
                       staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
-ANextHead == /\ review.aAck /\ lease = 0 /\ rows = {} /\ review.aCaughtUp /\ review.aNext = 0
-             /\ wake' = TRUE /\ review' = [review EXCEPT !.aNext = 1,
+ANextHead == /\ review.aAck /\ lease = 0 /\ rows = {} /\ review.aCaughtUp /\ (review.aNext = 0 \/ (Mode = "AbstainNextDuplicateBefore" /\ review.aNext < 2))
+             /\ wake' = TRUE /\ review' = [review EXCEPT !.aNext = @ + 1,
                   !.aOwnSends = IF Mode = "AbstainReplayBefore" THEN 2 ELSE @]
              /\ UNCHANGED <<pc, native, members, nativeQueue, stage, lease, rows, pending, result, count,
                   proof, closed, ran, injected, booted, generation, known, restarted, foreignBody,
@@ -547,8 +548,8 @@ AbstainSpec == Init /\ [][ACapture \/ AEndTurn \/ AStopOnly \/ AForeignPrompt \/
 AbstainNoForeignExecuted == result[1] = "None"
 AbstainNoReplay == review.aOwnSends <= 1 /\ review.aNext <= 1
 AbstainIdleAuthority == review.aAck => review.aIdleValid
-AbstainEventuallyLeavesPending == <>(review.aAck)
-AbstainQueueEventuallyProgresses == <>(review.aNext = 1)
+AbstainEventuallyLeavesPending == (review.barrier /\ review.aIdle /\ review.aCaughtUp /\ review.phase = "Pending") ~> review.aAck
+AbstainQueueEventuallyProgresses == (review.barrier /\ review.aIdle /\ review.aCaughtUp) ~> (review.aNext >= 1)
 AbstainFollowerKeepsParent == (AFollower /\ ~review.aParentDone /\ review.aStep > 0) => lease = 2 /\ rows = {2} /\ review.parentActive = 1
 AbstainBootNoRemint == restarted => lease = 0
 

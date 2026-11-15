@@ -11,6 +11,8 @@ pub(crate) struct EvidenceRegistration {
     pub(crate) ticket: Ticket,
     pub(crate) frame_hash: String,
     pub(crate) receipts: Vec<String>,
+    #[serde(skip)]
+    pub(crate) candidate: bool,
 }
 
 #[cfg(unix)]
@@ -239,7 +241,10 @@ pub(crate) fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, St
 }
 
 #[cfg(unix)]
-fn evidence_registrations(state: &Snapshot) -> Result<Vec<EvidenceRegistration>, String> {
+fn evidence_registrations(
+    state: &Snapshot,
+    classify: bool,
+) -> Result<Vec<EvidenceRegistration>, String> {
     let registrations = state
         .live
         .iter()
@@ -257,13 +262,16 @@ fn evidence_registrations(state: &Snapshot) -> Result<Vec<EvidenceRegistration>,
             registration
                 .native_settlement
                 .as_ref()
-                .filter(|s| s.outcome.is_none() && !s.cleanup_complete)
+                .filter(|s| classify || (s.outcome.is_none() && !s.cleanup_complete))
                 .map(|s| (registration, entry, s))
         })
         .map(|(registration, entry, settlement)| {
             settlement.validate(registration)?;
             Ok(EvidenceRegistration {
                 namespace: registration.namespace.clone(),
+                candidate: settlement.outcome.is_none()
+                    && !settlement.cleanup_complete
+                    && !settlement.extra.contains_key("foreign_prompt_barrier"),
                 ticket: settlement.ticket.clone(),
                 frame_hash: registration.frame.class_hash.clone(),
                 receipts: entry
@@ -502,7 +510,14 @@ impl Registry {
     pub(crate) fn native_evidence_registrations(
         &self,
     ) -> Result<Vec<EvidenceRegistration>, String> {
-        self.inspect(evidence_registrations)
+        self.inspect(|s| evidence_registrations(s, false))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn native_classification_registrations(
+        &self,
+    ) -> Result<Vec<EvidenceRegistration>, String> {
+        self.inspect(|s| evidence_registrations(s, true))
     }
 
     /// The cold effect calls this before arming only when its payload carries explicit intent.
@@ -586,11 +601,11 @@ impl Registry {
                     return Ok(());
                 }
                 let source = ticket.source.as_ref().ok_or("native source missing")?;
-                let registrations: Vec<_> = evidence_registrations(snapshot)?
+                let registrations: Vec<_> = evidence_registrations(snapshot, true)?
                     .into_iter()
                     .filter(|r| {
                         r.ticket.channel_id == ticket.channel_id
-                            && r.ticket.source.as_ref().is_some_and(|s| {
+                            && r.ticket.source.as_ref().is_none_or(|s| {
                                 s.provider == source.provider
                                     && s.session_id == source.session_id
                                     && s.transcript == source.transcript

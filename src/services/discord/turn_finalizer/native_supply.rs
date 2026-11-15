@@ -121,7 +121,7 @@ impl Port {
         }
         let mut registrations = Vec::new();
         for history in histories {
-            registrations.extend(history.native_evidence_registrations()?);
+            registrations.extend(history.native_classification_registrations()?);
         }
         Ok(registrations)
     }

@@ -26,7 +26,7 @@ B1 batch oracle은 record/boundary/registration 순서에서, 3a projection은 �
 
 저장 전 live/boot 양쪽에서 source/current stamp·전체 ticket·AnyKey·actor/episode를 현재와 비교한다. 결과가 먼저 저장됐으면 proof를 소급 적용하거나 결과를 덮지 않는다. no-key는 기존 NotSent 경로 그대로다. 결과 CAS와 barrier CAS는 동일 registration lock/fingerprint를 써 한쪽 사실만 이기게 한다. 저장 실패/ack 유실은 기존 보존/재시도에 남으며 성공으로 처리하지 않는다.
 
-저장된 marker를 가진 원본은 이후 native 실행 후보/FIFO 충돌 후보에서 제외하되, 기존 receipt UUID와 full identity의 보관 자료는 지우지 않는다. 그렇지 않으면 완료 증거를 만들지 않은 옛 입력이 다음 동일 본문의 충돌 후보로 살아난다. snapshot은 한 inspect에서 core registrations와 marker archive를 함께 읽고, 모든 core identity를 자기/외부 분류에 쓰며 실행 후보만 marker로 제외한다. 기존 core registration/receipt fingerprint는 그대로 유지하고 marker payload 자체를 그 fingerprint 안에 다시 넣어 자기 참조를 만들지 않는다. marker/result CAS는 같은 registration lock에서 marker 존재/일치도 따로 검사한다. 이미 저장된 marker를 poll마다 새 fingerprint로 덮지 않는다.
+저장된 marker를 가진 원본은 이후 native 실행 후보/FIFO 충돌 후보에서 제외하되, 기존 receipt UUID와 full identity의 보관 자료는 지우지 않는다. 그렇지 않으면 완료 증거를 만들지 않은 옛 입력이 다음 동일 본문의 충돌 후보로 살아난다. 분류용 집합은 outcome·cleanup 상태와 무관하게 동일 source·execution의 확인된 registration/member·receipt를 보존한다. 정상 정산된 follower와 source=None인 미확정 등록도 남긴다. 결과 생성·FIFO 충돌 후보만 따로 거른다. snapshot은 한 inspect에서 core registrations와 marker archive를 함께 읽고, 모든 core identity를 자기/외부 분류에 쓰며 실행 후보만 marker로 제외한다. 기존 core registration/receipt fingerprint는 그대로 유지하고 marker payload 자체를 그 fingerprint 안에 다시 넣어 자기 참조를 만들지 않는다. marker/result CAS는 같은 registration lock에서 marker 존재/일치도 따로 검사한다. 이미 저장된 marker를 poll마다 새 fingerprint로 덮지 않는다.
 
 native outcome=None, cleanup_complete=false를 유지한다. outcome=None에 cleanup_complete=true를 쓰면 기존 reader가 거절하므로 사용하지 않는다. 기존 native result/withdrawal notice를 합성하지 않는다. proof는 미래 native closer 귀속을 계속 거절하는 근거이며 완료된 입력의 재접수 권한이 아니다. v2/옛 형식에 proof를 합성하지 않는다. A reader는 기존 extra 보존 규칙대로 읽으며 abstain을 모르는 reader가 성공으로 바꾸게 하지 않는다. 새 liveness는 새 consumer가 책임진다. 잘못된 proof는 fail-closed, 표식 없는 Pending은 종전 native guard를 유지한다.
 
@@ -42,6 +42,8 @@ native outcome=None, cleanup_complete=false를 유지한다. outcome=None에 cle
 4. actor의 같은 직렬 처리 안에서 현재 entry를 검사하고 기존 phase Pending→Finalizing으로 작업을 승인한다. 캡처한 exact actor/row witness를 leaf로 돌려준다. 아래 기존 finalize/episode side effect는 finalizer actor 밖의 그 leaf에서 수행하고 ACK를 actor로 돌려보낸다. generic handle_terminal은 native 표식이 있으면 Deferred이므로 그 guard를 전역으로 열지 않는다. unrelated native Pending이나 새 actor에는 적용하지 않는다. 같은 ledger entry에 다른 비-abstain native primary debt가 남아 있으면 그 episode의 완료 권한을 소비하지 않는다. follower는 자기 debt만 소비하고 parent lease/row/counter를 건드리지 않는다. 타이머용 generic guard를 전역으로 느슨하게 하지 않는다. PG/history blocking I/O는 finalizer actor 밖의 기존 포트/side-effect 함수에서 한다. mailbox의 최종 mutation 권한 검사는 기존 exact CAS가 다시 수행하며 그 mailbox actor 안에서는 기존 try/검증 자료만 쓴다. Phase::Finalizing 동안 일반 terminal은 기존 gate로 중복 실행을 거절한다. worker의 오류/패닉은 기존 catch_unwind 방식으로 ACK하고, 이미 제거한 token은 다시 차감하지 않은 채 기존 O poll에서 row/debt 작업을 이어간다. 새 worker 감시 루프나 상태 enum을 만들지 않는다.
 5. 일반 side effect는 event=Complete와 clear-inflight 가능한 기존 context(시간 deadline으로 호출하지 않음)를 사용한다. GateTimeout은 receipt_settle.rs:258에서 Failed receipt를 만들기 때문에 abstain을 그 이벤트로 위장하지 않는다. full_response에 외부 본문을 채워 성공 receipt를 꾸미지도 않는다. 기존 generic receipt bookkeeping과 native Executed proof는 별개이며 Submitted 원본의 재큐는 없다. 호출은 finalize.rs:82 do_finalize_with_probe → episode.rs:64 claim_episode의 exact mailbox CAS/row 정리 → finalize.rs:185~235의 removed_token일 때만 counter 감소 → completion_admission.rs:98의 기존 QueueEligible claim → queue_io/backstop.rs:672 listener → owner drive.rs:88 순서다. 새 lease-release 구현/시간 종결을 추가하지 않는다. generic terminal bookkeeping과 native Executed proof는 구분한다.
 6. 원본은 기존 Submitted terminal identity/receipt에 남아 재전송하지 않는다. 기존 queue/drive의 front claim이 다음 입력을1회 고른다. O output 소유/legacy body 거절은 유지한다. abstain 때문에 bridge가 foreign body를 원 episode response로 흡수하지 않게 한다.
+
+token이 이미 제거된 뒤 row만 남으면 전체 do_finalize_with_probe 재호출이나 settle_marked_row만으로 복구하지 않는다. 승인 때 캡처한 exact row witness로 기존 guarded row-clear를 재시도하고 release·counter 차감은 반복하지 않는다. row 읽기·CAS 실패 동안 Some(false)를 유지하며 successor row는 변경하지 않고 안전한 승계 조건으로 옛 debt만 소비한다.
 
 일반 claim은 row CAS 실패 시 row를 보존할 수 있다(episode.rs:140 이후). 이를 atomic 성공으로 선언하지 않는다. 그 경우 counter는 removed_token에 맞춰1회만 차감하고, 기존 receipt mark/row admission fence와 recovery가 행을 소비할 때까지 next head를 열지 않는 것을 시험한다. 부모/후속 row가 이겼다면 기존 exact 권한 거절/정리 권한 승계로 옛 debt만 소비하며, 그 actor/counter/row를 바꾸지 않는다.
 
@@ -176,3 +178,10 @@ barrier/filter 추가 +90~150, abstain live/boot/custody/general cleanup/ACK 및
 | AttributionAbstainNoMarkerFixed | 해당 없음 | marker 없는 native guard 유지; session Idle만 확인하고 무조건 head 진행을 주장하지 않음 |
 
 별도 원시 TLC 반례도 보존했다. ForeignBefore는 Init→ACapture→AEndTurn→AStopOnly→AForeignPrompt→AForeignCloser에서 invariant 위반(rc12), PendingBefore는 foreign closer3개와 Idle 뒤에도 stuttering으로 남아 temporal property 위반(rc13)이다. 전체 runner는 이런 Before RED를 예상값과 대조해 rc0을 반환한다. 최초 TLA 괄호/우선순위 오류와 중간 실행은 기능 RED 근거로 세지 않았다.
+
+## 구현 첫 커밋의 리뷰 보강
+
+P2-1: 분류 집합의 수명과 실행 후보를 분리한다. A/B 결과 CAS 두 순서와 source/receipt 미확정→확정 fixture를 실제 history snapshot으로 검사한다.
+P2-2: token 해제 후 exact row 재시도는 별도 단계다. 전체 finalize 재호출 뮤턴트는 row 고착으로 RED여야 한다.
+P2-3: Pending 재진입마다 leads-to 의무를 검사하며 token 해제 뒤 Finalizing crash cfg를 추가한다. 재부팅 뒤 정리 누락 Before는 RED여야 한다.
+P2-4: aNext는 물리 주입 관측 횟수를 증가시킨다. 동일 head guard 제거 Before는 NoReplay 위반으로 RED여야 한다.

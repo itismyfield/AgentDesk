@@ -348,7 +348,9 @@ impl NativeSources {
         let registrations: Vec<_> = snapshot
             .registrations
             .into_iter()
-            .filter(|r| r.matches(&binding))
+            .filter(|r| {
+                r.ticket.channel_id == channel && (r.ticket.source.is_none() || r.matches(&binding))
+            })
             .collect();
         Ok(Observation {
             binding,
