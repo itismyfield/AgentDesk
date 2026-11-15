@@ -21,11 +21,14 @@ mod busy_inject_e2e;
 #[cfg(unix)]
 #[path = "cancel_backstop_e2e_tests.rs"]
 mod cancel_backstop_e2e;
+#[path = "catch_up_pagination_e2e_tests.rs"]
 mod catch_up_pagination_e2e;
 #[cfg(unix)]
 #[path = "codex_o_handoff_replay_tests.rs"]
 mod codex_o_handoff_replay;
+#[path = "consumed_command_guard_e2e_tests.rs"]
 mod consumed_command_guard_e2e;
+#[path = "discord_mock_tests.rs"]
 pub(in crate::services::discord) mod discord_mock;
 #[cfg(unix)]
 #[path = "idle_phase_split_tests.rs"]
@@ -53,16 +56,21 @@ pub(in crate::services::discord) mod n1a_turn_mode;
 mod pending_admission_e2e;
 #[path = "prompt_identity_e2e_tests.rs"]
 mod prompt_identity_e2e;
+#[path = "queue_recovery_e2e_tests.rs"]
 mod queue_recovery_e2e;
 #[cfg(unix)]
 #[path = "reconcile_stale_turn_e2e_tests.rs"]
 mod reconcile_stale_turn_e2e;
+#[path = "registered_bootstrap_e2e_tests.rs"]
 mod registered_bootstrap_e2e;
 #[path = "replay_defer_intake_e2e_tests.rs"]
 mod replay_defer_intake_e2e;
+#[path = "stale_resume_retry_e2e_tests.rs"]
 mod stale_resume_retry_e2e;
+#[path = "stop_command_catch_up_e2e_tests.rs"]
 mod stop_command_catch_up_e2e;
 #[cfg(unix)]
+#[path = "thread_guard_host_e2e_tests.rs"]
 mod thread_guard_host_e2e;
 // The literal test gate keeps the source censuses from reading this file as production.
 #[cfg(test)]

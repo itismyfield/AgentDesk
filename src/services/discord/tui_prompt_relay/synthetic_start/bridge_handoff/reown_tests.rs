@@ -3,6 +3,7 @@
 use super::*;
 
 #[cfg(test)]
+#[path = "reown/reown_tests.rs"]
 pub(in crate::services::discord::tui_prompt_relay::synthetic_start) mod reown_tests;
 
 /// One prompt as the idle observer saw it: its source `E`, the prompt end in `E`,

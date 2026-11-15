@@ -5,6 +5,7 @@ use super::*;
 use crate::services::discord::inflight::InflightEpisodePin;
 
 #[cfg(test)]
+#[path = "non_bridge_claim/strict_yield_tests.rs"]
 mod strict_yield_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
