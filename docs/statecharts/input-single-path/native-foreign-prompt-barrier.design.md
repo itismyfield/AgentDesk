@@ -1,50 +1,83 @@
-# Native foreign prompt barrier — 보존 포트 확인에서 중단
+# Native foreign prompt barrier와 입력별 abstain
 
-기준: `bad229c4e8fa4f0f219b2fe993cf01072bfff21e`. mac-1641의 barrier 결정은 수용한다. 제품 코드를 바꾸지 않은 조사/시험 계획이다. **DESIGN_DELTA: Submitted 뒤의 native 실행 불명확을 기존 보존 경로로 정상 종결하는 입구가 없다.** bad229c4e의 착지 금지를 유지한다.
+기준 `f5d417ef60b08c5e4e227894931ac77e4101f7d2`, 결정 mac-1658(범위 축소). 설계/모델/시험 계획이며 제품 코드는 아직 바꾸지 않는다. bad229c4e와 f5d417ef6의 착지 금지를 해소하는 구현·검증은 다음 레그다.
 
-## 반례
+## 결정 반영과 수용 기준
 
-격리 fixture의 자기 UUID `N1-1` membership은 `[133,276)`, 자기 assistant end_turn은 `[276,496)`, Stop metadata는 `[496,573)`이다. 자기 strict turn_duration은 없다. 외부 human typed user `[573,795)`, 외부 assistant `[795,978)`, 외부 turn_duration `[978,1079)`가 이어진다.
+이미 TUI에 전달돼 답한 입력의 Submitted 정산은 유지한다. foreign prompt barrier 뒤 native는 해당 입력의 Executed·Withdrawn·Cancelled를 만들지 않는다. 원본을 큐/retained에 되살리지 않고 기존 Idle 준비 판정 뒤 다음 head만 진행한다. native abstain은 전체 채널 off나 O 출력 포기와 다르다.
 
-영속 결과의 membership_row는 `N1-1`인데 closer_range는 외부 `[978,1079)`이며 disposition은 Executed다. 둘째 head가 0이어야 하는 부정 시험에서1이 됐다. 실제 원문은 레인 로그 `b2b3p4-design-delta-proof.json`에 있다. 그 레그의 전체 e2e는 선택3/실행3/통과2/실패1이었다. 이 설계 레그에서 재실행하지 않았다.
+이슈8148의 DoD 첫째는 자기 strict closer가 있는 scheduled-task/queue fixture에서 자기 결과1·inflight 제거·queue kick이다. 그 긍정은 그대로 유지한다. PLAN의 DoD 대응 첫째/둘째 및 agent-manager 판단도 첫 자기 closer가 있는 긍정과 Stop-only 부정을 구분하며 부정에서 head0을 요구하지 않았다. 이전 조각4의 '부정 head0' 기대와 f5d 설계는 mac-1658로 대체한다. 새 부정 기대는 foreign closer에 의한 native Executed0, 원본 전송1, 실제 Idle 이후 다음 head1이다. stale stamp·corrupt·no-marker를 이 예외로 넓히지 않는다.
 
-## 승인된 barrier 계약
+보존 handoff는 답을 못 받은 입력의 조용한 유실이 실제 운영에서 확인될 때만 후속 검토하며 이번에는 만들지 않는다.
 
-native own membership 후보에 자기 strict closer가 생기기 전에 다른 user prompt가 들어오면 barrier다. 그 뒤 closer는 자기 또는 외부 레이블/ID를 달더라도 기존 own run의 결과를 만들지 않는다. barrier 이전 자기 closer로 확정한 결과는 유지한다. 정상 자기 identity의 mid-turn 입력은 barrier가 아니다.
+## 반례와 barrier 계약
 
-자기 판정은 full ticket의 identity/attempt/source/episode와 이미 확인된 transcript receipt UUID의 대응을 사용해야 한다. 본문이 같거나 `origin=human`이라는 사실만으로 자기라고 판정하지 않는다. Discord message ID와 transcript UUID를 직접 비교하지 않는다. 현재 `EvidenceRegistration`은 ticket과 receipts를 운반한다(`human_frame/history/v2/native.rs:8`). 수용 직전에는 기존 registration/receipt fingerprint와 current source/actor를 다시 검사한다.
+자기 UUID N1-1 [133,276), 자기 assistant end_turn [276,496), Stop metadata [496,573) 뒤 외부 human user [573,795), 외부 assistant [795,978), 외부 turn_duration [978,1079)가 왔다. 자기 strict closer는 없지만 foreign range가 own Executed proof로 저장됐다. 이 branch의 native 귀속만 차단한다.
 
-B1 oracle은 ordered records와 registration snapshot에서 run별 barrier를 접는다. 3a projection은 기존 hash pass/동일 capture에서 보존한 prompt identity fact를 같은 순서로 접는다. 원시 JSONL 재독·새 observer·공통 tracker 변경은 없다. 동일 typed 자기 identity가 확인된 mid-turn 행은 두 쪽 모두 통과시킨다. identity가 아직 확인되지 않은 행을 본문 비교만으로 자기로 승격하지 않는다. receipt 변화의 재평가는 기존 facts만 사용한다.
+판정은 full ticket의 identity/attempt/source/episode와 확인된 receipt UUID 대응이다. Discord ID와 transcript UUID를 직접 비교하거나 동일 본문만으로 자기로 승격하지 않는다. 정상 자기 identity의 mid-turn 합류는 barrier가 아니다. 여기서 자기 입력은 해당 run에 확인된 ADK registration/member 집합이다. 별도 Discord ticket의 ADK follower도 각자의 full identity/receipt가 같은 source·execution의 run 가입을 증명하면 자기 합류로 인정한다. 다른 ticket이라는 이유만으로 외부로 만들지 않으며, 다른 execution nonce/source의 등록은 빌리지 않는다. same-body 다른 identity는 외부다. receipt나 cold source 확정이 아직 진행 중이고 해당 user row의 잠재 ADK 소유자가 남아 있으면 자기/외부를 확정하지 않고 기존 facts 재평가에 남긴다. 이 경우 영구 barrier를 먼저 저장하지 않는다. pre-key 등록 ack가 key보다 앞서므로 공급 CAS에서 현재 registration/source/receipt fingerprint를 재확인하고, 뒤늦은 자기 receipt가 명확해진 뒤 같은 facts로 재판정한다. 확정 외부 prompt로 세운 barrier는 late own ID closer로 지우지 않는다.
 
-barrier가 결과 없음으로만 빠지면 actor는 기존 Pending으로 남는다. 그것을 mac-1641의 '불명확 정상 종결'이라고 부르지 않는다. 아래 보존 포트 공백을 먼저 해소해야 한다.
+B1 batch oracle은 record/boundary/registration 순서에서, 3a projection은 같은 capture의 compact prompt identity fact/registration snapshot에서 같은 barrier를 접는다. 구현 시 두 결과에는 실행 Evidence와 별도로 barrier proof 목록이 있어야 한다. proof는 새 실행 상태/Disposition이 아니며, 현재 ticket/run/member UUID와 외부 prompt의 source range를 담는 관측 근거다. 매 prefix와 receipt 변경마다 두 구현을 대조한다.
 
-## 기존 불명확 경로와 공백
+공통 `shadow/seal.rs:103`의 Open 안 Prompt 의미, O notice attachment, body/footer canonical identity는 바꾸지 않는다. seed는 기존 hash pass/reopen에서만 설치한다. source reader/open/prefix byte 추가0이며 native 등록/receipt 변화는 이미 캡처한 facts만 재평가한다.
 
-| 현재 좌표 | 실제 계약 | late barrier에 대한 결론 |
-|---|---|---|
-| `discord/queue_io/input_owner/effect.rs:27` | WriteUncertain은 내용이 pane에 갔는지 불확실한 송신 결과 | 전달이 확정된 Submitted를 이 값으로 바꿀 근거가 아님 |
-| 같은 파일 `:125` | Submitted이면 owner.settle(exact_attempt,true,now) | native 실행 종료보다 먼저 입력 전달만 정산함 |
-| `turn_orchestrator/queued_head/v2/retained.rs:108` | active/retained exact attempt가 없으면 stale exact attempt | 이미 Submitted 정산한 attempt를 settle(false)로 되돌릴 수 없음 |
-| 같은 파일 `:111` | delivered=true는 head/retained와 원본 members 제거, terminal identity 기록 | 후속 O barrier가 올 때 원본 InputAttempt가 더는 해당 위치에 없음 |
-| 같은 파일 `:129` | delivered=false + active인 경우만 HeadPhase::Unknown | late Submitted에는 적용 불가 |
-| 같은 파일 `:58` | tick이 살아 있는 head를 Unconfirmed retention으로 이동 | 제거된 head를 복구하지 않음. 시간을 앞으로 밀어 native 결과를 만들 수도 없음 |
-| 같은 파일 `:246` | 기존 retained unconfirmed + notice enqueue 뒤 owed_to_owner=false | 기존 정상 불명확 종결은 있으나, 해당 retained entry를 만들 late-native 입구가 없음 |
-| `queued_head/v2/source_admission.rs:338` | ticket_original은 items/head/retained에서만 원본 검색 | Settled bind의 receipt/source만으로 원본을 반환하지 않음 |
-| 같은 파일 `:596` / `v2_types.rs:65` | Settled bind는 attempt nonce/source/시각을 보존 | full InputAttempt의 대체물이 아님 |
-| `v2_types.rs:193` | AdmissionContext.original은 선택적 opaque provenance | 모든 native 입력에 존재하는 PendingQueueItem이라고 보장할 수 없음 |
-| `human_frame/history/v2.rs:451` | queue terminal identity를 history settled로 투영, 상태 순위는 단조 | settled를 retained로 되돌리는 late uncertainty 입구가 아님 |
-| 같은 파일 `:139` | settled passive frame의 표시 필드 compact | 원본 큐 항목/본문의 보존 저장소라고 간주할 수 없음 |
-| `discord/turn_finalizer/terminal_handler.rs:378` | NativePrepared는 ticket/actor/row witness/history/cutoff 보유 | 일반 queue InputAttempt/원본 전체를 보유하는 불명확 전달 핸들이 아님 |
-| `human_frame/history/v2/native.rs:78` | native disposition 5개에 generic uncertainty 없음 | 새 outcome을 선언하지 않는다. TransferredUnverified는 delivered_to_agent 증거 전용 |
-| `discord/turn_finalizer/native_restore.rs:145` | outcome=None이면 drive가 그대로 반환 | barrier 뒤 정상 불명확 종결과 무기한 Pending을 구분하지 못함 |
+## proof 저장과 수용
 
-반례 fixture 종료 뒤 queue 파일은 head=null, items=0, retained_inputs=0, terminal_ids=[81490032,81490033]이다. 레인 로그 `b2b3p4d-existing-uncertain-proof.json`에 별도로 고정했다. barrier가 더 늦게 도착하는 유효 순서도 허용되므로 이 공백을 실행 타이밍으로 피할 수 없다.
+현재 `Settlement.extra`(history/v2/native.rs:104)에 foreign-prompt barrier proof를 보존한다. 새 enum 상태, Disposition, 표/파일/journal을 만들지 않는다. 기존 v3 envelope/등록과 같은 transaction/CAS·durability 복구 규칙을 사용한다. proof에는 full ticket, source identity/target nonce, own membership UUID/range, foreign prompt UUID/range, 관측 through와 registration/receipt fingerprint가 들어간다. 범위는 prefix 안이어야 하고 own strict closer가 그 전에 없어야 한다.
 
-현재 불명확 경로 자체가 없다는 결론이 아니다. **native 실행 불명확을, 이미 전달 정산한 exact attempt의 원본 보존으로 넘기는 typed 입구가 부족하다.** Native outcome=None을 그대로 두거나 source 후보를 생략하기만 하면 '불명확 정상 종결' 조건을 충족하지 못한다.
+저장 전 live/boot 양쪽에서 source/current stamp·전체 ticket·AnyKey·actor/episode를 현재와 비교한다. 결과가 먼저 저장됐으면 proof를 소급 적용하거나 결과를 덮지 않는다. no-key는 기존 NotSent 경로 그대로다. 결과 CAS와 barrier CAS는 동일 registration lock/fingerprint를 써 한쪽 사실만 이기게 한다. 저장 실패/ack 유실은 기존 보존/재시도에 남으며 성공으로 처리하지 않는다.
 
-새 상태/저장소/운영자 기능은 설계하지 않았다. 다음 승인 범위에는 기존 retained/unconfirmed 표현을 쓸 수 있는 exact native 보존 handoff, Submitted 전에 원본 custody를 보장하는 지점, late receipt/control/boot가 그것을 없애지 않는 순서가 필요하다. 이 부분을 문서만으로 존재한다고 선언하지 않는다.
+저장된 marker를 가진 원본은 이후 native 실행 후보/FIFO 충돌 후보에서 제외하되, 기존 receipt UUID와 full identity의 보관 자료는 지우지 않는다. 그렇지 않으면 완료 증거를 만들지 않은 옛 입력이 다음 동일 본문의 충돌 후보로 살아난다. snapshot은 한 inspect에서 core registrations와 marker archive를 함께 읽고, 모든 core identity를 자기/외부 분류에 쓰며 실행 후보만 marker로 제외한다. 기존 core registration/receipt fingerprint는 그대로 유지하고 marker payload 자체를 그 fingerprint 안에 다시 넣어 자기 참조를 만들지 않는다. marker/result CAS는 같은 registration lock에서 marker 존재/일치도 따로 검사한다. 이미 저장된 marker를 poll마다 새 fingerprint로 덮지 않는다.
 
-## closer 귀속 진입점 전수표
+native outcome=None, cleanup_complete=false를 유지한다. outcome=None에 cleanup_complete=true를 쓰면 기존 reader가 거절하므로 사용하지 않는다. 기존 native result/withdrawal notice를 합성하지 않는다. proof는 미래 native closer 귀속을 계속 거절하는 근거이며 완료된 입력의 재접수 권한이 아니다. v2/옛 형식에 proof를 합성하지 않는다. A reader는 기존 extra 보존 규칙대로 읽으며 abstain을 모르는 reader가 성공으로 바꾸게 하지 않는다. 새 liveness는 새 consumer가 책임진다. 잘못된 proof는 fail-closed, 표식 없는 Pending은 종전 native guard를 유지한다.
+
+## live liveness: 표식 + 기존 Idle 뒤 일반 정리
+
+현재 단절은 native_prepare.rs:251~275의 Scope/Settled 조회, completion_admission.rs:66의 native guard, terminal_handler.rs:73의 generic Complete/GateTimeout 거절이다. bridge는 mod.rs:678에서 이미 중립 종료할 수 있다. 따라서 native 입력을 목록에서 지우거나 예전 bridge가 돌아올 것이라고 가정하는 방식으로는 진행성을 증명하지 않는다.
+
+**새 observer 없이 기존 writer poll의 barrier/current 관측을 받는 native leaf가 Idle handoff를 구동한다.** 기존 Claude Idle 조건은 activity/tail.rs:87의 caught_up && fact.state==Idle이고 activity.rs:717이 이를 게시한다. 같은 공통 O state/같은 source capture의 caught-up 여부를 공급 관측에 운반해 이 조건을 재사용한다. 시간 경과, 외부 closer의 존재만, capture 일부의 Idle, Unknown/Busy는 충분하지 않다. 새 activity.observe 호출로 reader를 늘리지 않는다.
+
+1. barrier proof가 유효해도 Busy/catching-up 동안은 lease/row/counter를 바꾸지 않는다. 다른 native 입력의 권한도 바꾸지 않는다.
+2. current source/binding/incarnation의 caught-up Idle을 확인한 뒤 exact prepared episode+actor+nonce+generation 및 row snapshot을 재검증한다. follower와 후속 actor는 자기 completion 권한을 얻지 않는다.
+3. 해당 입력의 control custody만 기존 mailbox.remove_control_custody로 제거한다. native_policy.rs:108의 no-key remove_control을 재사용해 NotSent를 위조하지 않는다. marker 검증을 거친 별도 native leaf 연결이다.
+4. actor의 같은 직렬 처리 안에서 기존 phase Pending→Finalizing을 쓰고, 아래 기존 finalize/episode side effect를 직접 호출한다. generic handle_terminal은 native 표식이 있으면 Deferred이므로 그 guard를 전역으로 열지 않는다. unrelated native Pending이나 새 actor에는 적용하지 않는다. 같은 ledger entry에 다른 비-abstain native primary debt가 남아 있으면 그 episode의 완료 권한을 소비하지 않는다. follower는 자기 debt만 소비하고 parent lease/row/counter를 건드리지 않는다. 타이머용 generic guard를 전역으로 느슨하게 하지 않는다. actor를 떠난 PG/history blocking I/O는 기존 포트에서 하고 최종 actor 권한 검사 뒤에는 기존 try/검증된 자료만 쓴다.
+5. 일반 side effect는 event=Complete와 clear-inflight 가능한 기존 context(시간 deadline으로 호출하지 않음)를 사용한다. GateTimeout은 receipt_settle.rs:258에서 Failed receipt를 만들기 때문에 abstain을 그 이벤트로 위장하지 않는다. full_response에 외부 본문을 채워 성공 receipt를 꾸미지도 않는다. 기존 generic receipt bookkeeping과 native Executed proof는 별개이며 Submitted 원본의 재큐는 없다. 호출은 finalize.rs:82 do_finalize_with_probe → episode.rs:64 claim_episode의 exact mailbox CAS/row 정리 → finalize.rs:185~235의 removed_token일 때만 counter 감소 → completion_admission.rs:98의 기존 QueueEligible claim → queue_io/backstop.rs:672 listener → owner drive.rs:88 순서다. 새 lease-release 구현/시간 종결을 추가하지 않는다. generic terminal bookkeeping과 native Executed proof는 구분한다.
+6. 원본은 기존 Submitted terminal identity/receipt에 남아 재전송하지 않는다. 기존 queue/drive의 front claim이 다음 입력을1회 고른다. O output 소유/legacy body 거절은 유지한다. abstain 때문에 bridge가 foreign body를 원 episode response로 흡수하지 않게 한다.
+
+일반 claim은 row CAS 실패 시 row를 보존할 수 있다(episode.rs:140 이후). 이를 atomic 성공으로 선언하지 않는다. 그 경우 counter는 removed_token에 맞춰1회만 차감하고, 기존 receipt mark/row admission fence와 recovery가 행을 소비할 때까지 next head를 열지 않는 것을 시험한다. 부모/후속 row가 이겼다면 기존 exact 권한 거절/정리 권한 승계로 옛 debt만 소비하며, 그 actor/counter/row를 바꾸지 않는다.
+
+현재 CompletionAdmissionPlan은 turn_bridge/guards.rs:171에서 AfterTerminalProjectionAndDispositionSettled일 수 있다. native admission을 None으로 지우고 예전 bridge epilogue를 기다리면 이미 종료된 bridge 때문에 head가 다시 멈춘다. 따라서 이 설계는 plan을 낮추거나 projection/disposition ACK를 합성하지 않는다. 기존 native_input:Some(false)를 유지하다가 **유효 barrier + current Idle + exact lease/row 정리 완료** 뒤 기존 Some(true)로 넘긴다. 이 bool은 QueueEligible 권한 정산 완료이며 Executed outcome이 아니다. native_settled()도 이 입력에서는 소유권 정산 여부만 뜻하고, 실제 실행 결과는 반드시 history.outcome으로 검사한다. generic finalizer가 얻은 mailbox release와 기존 claim_queue_eligible을 결합해1회만 발행한다. 이 변경은 barrier 입력에만 한정한다.
+
+native actor phase는 기존 Pending/Finalizing/Finalized만 쓴다. native_debt_pending(actor_state.rs:80)은 유효 barrier를 가진 입력이 **위 일반 정리를 마친 뒤에만** native pending debt로 세지 않는다. 단순 proof 존재로 phase/debt를 Finalized로 바꾸지 않는다. NativeScope의 body 소유는 completion abstain과 분리해 유지한다. 기존 ttl GC는 일반 종결/boot debt 소비 뒤에만 허용한다.
+
+아래는 기존 phase와 proof 유무를 조합한 primary 경로의 표시이며 새 제품 enum이 아니다. follower는 자기 관측/debt만 소비하고 부모 종료를 대신하지 않는다.
+
+```mermaid
+stateDiagram-v2
+    state "Pending: native" as P
+    state "Pending: barrier proof" as B
+    state "Finalizing: lease/counter 정리, row 대기" as F
+    state "Finalized: native outcome 없음" as D
+    [*] --> P
+    P --> P: Stop metadata / 자기 mid-turn / identity 미확정
+    P --> NativeSettlement: barrier 전 자기 strict closer
+    P --> B: 확인된 외부 user prompt
+    B --> B: 늦은 closer 무시 / Busy·Unknown
+    B --> F: current caught-up Idle + exact 권한
+    F --> F: receipt·row 실패 후 기존 관측에서 재시도
+    F --> D: exact row 정리 또는 안전한 권한 승계
+    D --> NextHead: 기존 QueueEligible + owner claim 1회
+```
+
+## boot·crash
+
+현재 native_restore.rs:145는 outcome=None이면 반환하고, NativeBootReady(native_prepare.rs:179)는 settled=false를 보고 owner 복원을 막는다. 유효 barrier가 있는 경우에만 이 조기 반환을 우회한다. validate_record(:382)도 outcome=None을 무조건 신뢰하지 말고 barrier의 full registration/source/range를 검증해야 한다.
+
+before-reap custody에 proof를 같이 보존하고 기존 reaper→restore 순서를 유지한다. old-generation debt에 current lease/actor를 만들지 않는다. 현재 채널 binding이 가리키는 실행의 기존 caught-up Idle witness가 오면 위 generic row 정리/owner-ready handoff를 소비하고, 기존 RestoredInput.settled를 true로 한다. 현 세대 actor/다른 execution nonce의 row는 건드리지 않는다. marker의 옛 source/nonce 소유 증명과 현재 채널의 Idle 준비 증명은 별도로 검증한다. N1 source가 retired돼도 기존 registry/custody의 marker를 재사용하며, N2의 기존 O 관측으로 현재 채널 준비를 판단한다. N1 transcript를 추가 reopen/replay하지 않는다. N2 Idle은 N1에 실행 권한을 주는 증거가 아니다. reaper가 옛 row를 이미 지웠으면 중복 삭제/차감 없이 기존 boot owner recovery로 간다. 표식 없는 outcome=None과 unreadable/corrupt는 그대로 보존한다. outcome=None인 abstain은 prepare_saved_notice/settle_saved의 native 결과 전용 경로로 보내지 않는다. 그 경로는 cleanup_complete를 결과 ACK로 읽으므로 영원히 false가 된다. barrier 전용 handoff가 기존 NativeBoot 메시지/RestoredInput.settled ACK를 사용하게 연결한다. 공급의 기존 retry/offer에 현재 Idle witness를 운반하고, 저장된 marker와 조합한다. 새 poll/observer는 만들지 않는다.
+
+marker 저장→Idle 전 crash, generic release→row/queue admission 사이 crash, event 전 crash를 각각 시험한다. 재시작 때 proof가 다시 열려도 원 입력은 Submitted 정산돼 재주입0이며 기존 owner front claim/receipt가 다음 head 중복을 막는다. 새 live lost-wake/replay/watchdog는 넣지 않는다. 현재 source가 Busy/Unknown이면 boot도 다음 head를 미리 열지 않는다.
+
+## 진입점 전수표
+
 
 좌표는 위 기준 head다. Git grep 원문은 레인 로그 `b2b3p4d-closer-census.txt`에 있다. 생성과 수용/복원은 구분한다.
 
@@ -68,46 +101,42 @@ barrier가 결과 없음으로만 빠지면 actor는 기존 Pending으로 남는
 
 공통 native policy의 Cancel/Terminate/clear/stop/operator release는 명시 control proof의 종결이며 source closer 귀속과 다르다. barrier가 이 기존 권한을 만들어내거나 지우지 않는다.
 
-## 모델 계획 — 실행하지 않음
 
-변경 대상은 기존 NativeInputAttribution/NativeInputPreparation이다. 추가 행동 후보는 OwnEndTurn, StopMetadataOnly, OwnMidTurnPrompt, ForeignHumanPrompt, ForeignCloser, LateOwnCloser, ExistingUncertainHandoff다. 마지막 행동의 production 포트가 현재 없으므로 모델에 성공 전이를 만들어 GREEN으로 둘 수 없다.
+추가 abstain 접점(구현 예정): native.rs:238/486과 B1 fold:653/721 → barrier proof 산출, rotation/owe.rs:417 → 같은 facts/current Idle 공급, native_supply.rs:199/291 → live/boot marker CAS와 handoff, native_prepare.rs:179/251 → exact Scope/BootReady, native_policy.rs:108 → no-key 전용과 분리한 custody 제거, actor_state.rs:80 → 종결 뒤 debt 필터, terminal_handler.rs:73 및 finalize/episode/completion_admission → 위 일반 정리 연결. 표식 없는 입력에는 기존 guard를 유지한다.
 
-필요 Before/Fixed 쌍:
+## 시험 계획
 
-- `NativeForeignPromptBarrierBefore/Fixed`: 실제 own end_turn→Stop-only→foreign typed→foreign closer의 NoForeignExecuted 반례.
-- `NativeForeignPromptLateOwnBefore/Fixed`: barrier 뒤 late own closer도 과거 own 결과를 만들지 않음.
-- `NativeOwnMidTurnBefore/Fixed`: 자기 typed identity의 합류 뒤 자기 closer는 결국 정산1.
-- `NativeBarrierCustodyBefore/Fixed`: 기존 불명확 보존 handoff 뒤 original 보존, 주입0, 정상 불명확 종결과 Pending 구분, crash/boot에서도 유지.
+| 이름/기존 입구 | 단언 | 원인 뮤턴트 |
+|---|---|---|
+| `native_8148_activation_isolated_herdr_stop_only_preserves_original_pg` / activation_e2e.rs:475 | 기대를 native Executed0, 원 입력 physical send1, next head는 actual Idle 뒤1로 수정. source progress/human3턴/body/footer 단일 도착 유지 | barrier 제거 / abstain 제거 |
+| `native_8148_barrier_own_strict_before_foreign_pg` | own strict closer 결과1·정리1, 이후 foreign3턴 영향0 | 자기 closer까지 차단 |
+| `native_8148_barrier_own_midturn_identity_pg` | 자기 receipt/full identity 합류는 barrier 아님, 정상 결과1. 같은 ticket/별도 follower ticket 및 source=None→Some·늦은 receipt를 각각 시험 | 모든 prompt 차단 / 미확정 row를 외부로 확정 |
+| `native_8148_barrier_late_own_closer_abstains_pg` | foreign 뒤 late own closer도 Executed0, Idle 이후 다음 head1 | own ID로 barrier 해제 |
+| `native_8148_barrier_agent_manager_three_human_turns_pg` | 12:12 입력/3 human run의 own-closer 긍정과 Stop-only 부정 분리, 응답 혼합0 | foreign close로 own proof 생성 |
+| `native_8148_barrier_projection_matches_batch_every_prefix` | B1↔3a 실행/barrier proof 동등, receipt 늦음·같은 본문 다른 identity·abstain 뒤 새 동일 본문 입력 정상 처리, raw 재독0 | 한쪽 barrier만 제거 |
+| `native_8148_barrier_boot_none_outcome_idle_handoff_pg` | 결과 없음+유효 proof만 boot abstain, no-remint·old row exact 정리·next head1 | outcome=None 무조건 return |
+| `native_8148_barrier_no_marker_keeps_native_guard_pg` | marker 없음/stale source/receipt/actor는 기존 Pending 보호, release0 | marker/현재 identity 검사 제거 |
+| `native_8148_barrier_busy_catching_up_does_not_release_pg` | Busy/Unknown/부분 prefix에서 release0, final current Idle에서1 | caught-up/Idle 검사 제거 |
+| `native_8148_barrier_generic_cleanup_crash_and_successor_pg` | 실제 AfterTerminalProjectionAndDispositionSettled plan과 중립 종료된 bridge를 구성, receipt/row 오류·control 선후·restart·N1/N2·late offer에서 원 재주입0, successor 불변, current Idle 후 next1 | row/CAS 권한 검사 제거 |
 
-불변식은 NoForeignExecuted, NoSilentLoss, NoDuplicateInjection이다. 자기 closer가 barrier보다 먼저 도착하면 EventuallySettled를 유지한다. barrier 뒤는 실행 성공으로 바꾸지 않고 기존 불명확 처리의 실제 종결 지점으로 EventuallyUncertain을 증명해야 한다. 무한 Pending을 Uncertain이라고 이름만 바꾸거나 fairness로 입력 순서를 제외하지 않는다.
+실제 구현에서는 O capture→typed port→actor→generic cleanup→실제 QueueEligible 구독→owner drive→isolated Herdr physical next input을 거친다. NativeCleanup 직접 호출이나 helper만으로 e2e PASS를 세지 않는다. 기존 positivity/367+신규 집합과 P2 N1/N2 nonce 시험·읽기 ON 계측·Windows/clippy/static/뮤턴트를 최종 head에서 다시 완료해야 한다. 이 레그의 Rust 시험은 NOT_RUN이다.
 
-이번 레그의 TLC는 NOT_RUN이다. 모델/cfg/expected.tsv를 고치지 않았다. 이전126cfg GREEN은 새 반례와 위 handoff를 증명하지 않는다.
+## 모델과 크기
 
-## 시험 계획 — 구현하지 않음
+NativeInputPreparation은 own membership→assistant end_turn→Stop metadata→외부/자기 prompt→closer를 별도 행동으로 넣는다. own strict-before-foreign은 별도 OwnStrict 행동이다. NoForeignExecuted, batch↔compact 동등성, 결과1, 자기 합류/own closer 진행성을 검사한다.
 
-| 예정 이름/기존 이름 | 실제 입구 | 단언 | 원인 뮤턴트 |
-|---|---|---|---|
-| `native_8148_activation_isolated_herdr_stop_only_preserves_original_pg` 유지 | activation_e2e.rs:475 → 실제 O offer/actor/listener | 원본 보존, Executed0, 둘째 head0, 불명확 보존 후 Pending과 구분 | barrier 제거 |
-| `native_8148_barrier_own_strict_closer_before_foreign_prompt_pg` | O capture→admit | 자기 결과1, 뒤 외부3턴이 원 결과/응답에 합쳐지지 않음 | 자기 closer까지 차단 |
-| `native_8148_barrier_own_midturn_identity_is_not_foreign_pg` | receipt/full-ticket 재평가→fold/projection→admit | 자기 identity 합류를 통과, 결과1 | 모든 prompt에 barrier |
-| `native_8148_barrier_late_own_closer_stays_uncertain_pg` | foreign prompt→later own closer→typed 공급 | 어느 closer도 기존 own 결과를 만들지 않음, 원본 보존 | late own ID로 barrier 해제 |
-| `native_8148_barrier_agent_manager_human_three_runs_pg` | 실제 O capture 및 격리 Herdr | 12:12 입력 뒤 human typed3턴의 positive/negative 분리 | first foreign close를 own으로 채택 |
-| `native_8148_barrier_projection_matches_batch_at_every_prefix` | B1 Fixture::read/native::fold ↔ Projection::evidence | 각 prefix, receipt 변화, same-body 다른 identity, late closer의 동일 결과/불명확 판정. raw 재독0 | 한쪽 barrier만 제거 |
-| `native_8148_barrier_after_submitted_retains_exact_original_pg` | 실제 pump Submitted→owner.settle→late O barrier | 기존 exact 원본/멤버가 보존되고 재주입0. stale exact attempt를 성공으로 무시하지 않음 | 보존 실패 무시 |
+NativeInputAttribution은 barrier 표식, 기존 source Idle/caught-up, generic handoff의 lease/counter와 row/ACK를 별도 행동으로 분리, row 실패/재시도, boot outcome=None, crash 뒤 재소비, successor/follower 보호, 다음 head claim을 모델링한다. NoForeignExecuted·NoReplay·IdleAuthority와 EventuallyLeavesPending·QueueEventuallyProgresses를 검사한다. 마커 없는 Pending은 별도 보호 cfg이며 전 입력의 Pending 해제를 공정성으로 강제하지 않는다. 부모 lease의 종료는 그 부모의 기존 별도 종료 행동으로만 모델링한다. parentActive는 이전 episode의 counter 기여분이며 다음 head의 새 counter를 0이라고 주장하는 값이 아니다. boot에서 옛 기여분은0으로 복원하고 live에서는 removed_token 때만1회 차감한다. stamp 교체 후 재평가, marker 없는 Pending, follower·successor cfg도 포함한다.
 
-각 시험은 구현 레그에서 RED→GREEN과 production 원인 뮤턴트를 실행한다. 이름만 있는 계획을 실행 시험으로 세지 않는다. uncertain handoff가 승인되기 전 기대 성공 전이를 구현하거나 시험하지 않는다.
+barrier 추가 +70~130, abstain live/boot/custody/general cleanup 및 row retry +220~360, 기존 Idle witness/port 연결 +60~110으로 잔여 **+350~600 / 약9~14 prod 파일**을 재추정한다. 조각4 실측 prod3/+83 + 잔여 = **+433~683 / 약12~17 파일**, +1100 정지선 안이다. 앞 +570~950은 실측 전 전체 추정이었다. 단순 envelope 합계 +920~1550은 이미 끝난 작업을 중복 포함하므로 실제+잔여 정지선 판단에는 쓰지 않는다. 구현 중 실측+잔여가 +1100을 넘으면 PLAN_READY로 나눈다. 30파일/+1500 공통 상한을 유지한다.
 
-## 크기 재추정과 중단
-
-fold/projection barrier와 typed identity 재검사만은 prod +70~130 정도로 추정한다(B1 oracle/test 제외). 앞 조각4 총 추정 +570~950에 이를 더하면 +640~1080이다. 그러나 **불명확 보존 handoff의 추가 계약/코드가 이 숫자에 포함돼 있지 않으므로 전체 상한 충족 추정이 아니다.**
-
-현재 eabdd166d..bad229c4e의 실측은 prod3/+83이다. 이후 actual+remaining +1100 정지선을 유지한다. 보존 포트 승인 뒤 추가 파일·순증을 다시 추정해야 하며, 지금 +1100 미만이라고 확정하지 않는다. 수치보다 mac-1641의 '기존 경로가 모자라면 DESIGN_DELTA' 중단 조건을 적용했다.
+새 native leaf와 부모 연결/거절만 giant에 넣고 prod 순증0 이하를 지킨다. 필요 leaf 후보는 `turn_finalizer/native_abstain.rs` (제안)와 `history/v2/native_barrier.rs` (제안)이다. 기존 NativeSupply/Prepare/Restore/Policy/Actor/CompletionAdmission과 O native fold/projection/offer 범위에서 연결하며 공통 O tracker·notice·tmux 전용 경로를 고치지 않는다. 새 저장소/새 RuntimeState/Disposition은 없다.
 
 ## 리뷰 집중 항목
 
-- 경계 시각: barrier 전 own closer만 정산, barrier 뒤 late own/foreign closer 모두 거절.
-- 동시성: full identity와 receipt stamp 재평가, Submitted→barrier 및 barrier→effect-ack 두 순서의 custody 보존.
-- 조용한 유실: outcome=None/해시/terminal ID만으로 full original 보존과 불명확 정상 종결을 선언하지 않음.
-- 공통 O 의미: shadow tracker/notice 수정0, source reopen/open/byte 추가0을 구현 레그에서 실측.
-- 동등성: B1 oracle과 3a projection은 모든 prefix/receipt snapshot에서 같은 barrier 판정이어야 함.
-- 잘못된 PASS: 제품 변경0, 모델 변경0, TLC/새 시험 NOT_RUN. 이전126cfg와 기존9개 진단을 이번 설계 검증으로 재표기하지 않음.
+- 경계 시각: own strict-before-foreign, foreign-before-late-own, receipt 이전/이후, caught-up Idle 이전/이후를 각각 시험한다.
+- 동시성: barrier/결과 first-writer CAS, exact actor/nonce/generation/current source를 재검증하고 control/successor를 덮지 않는다.
+- 무기한 Pending: live/boot에 기존 Idle handoff를 실제로 연결하고 제거 뮤턴트에서 진행성이 RED여야 한다. 표식 없는 입력은 보호한다.
+- 조용한 유실/중복: 입력은 실제 Submitted 상태 그대로, 원본 retained 재생성/재전송0. native 증거 부재와 O 답변/배송을 혼동하지 않는다.
+- O 의미/읽기: 공통 tracker와 notice 불변, 기존 byte pass/facts만 사용, ON source reader/open/byte 실측.
+- 동등성: 동일 prefix와 registration/receipt snapshot에서 B1·3a 실행/abstain proof를 모두 비교한다.
+- 문서 guard/잘못된 PASS: 위 새 연결은 아직 미구현이다. TLC는 설계의 refinement 의무이며 제품 통과를 대체하지 않는다.

@@ -7,7 +7,7 @@ vars == <<BaseVars, review>>
 Init == /\ phase = "Intent" /\ role \in {"Primary", "Follower"}
         /\ pin = "None" /\ prepared = FALSE /\ anyKey = FALSE /\ original = TRUE
         /\ result = "None" /\ source = "PreSource" /\ restored = FALSE /\ admitted = FALSE
-        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed", "SupplyPrefixBefore", "SupplyPrefixFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {Mode \in {"ClearRouteBefore", "ClearRouteFixed"}}), clearDenied : {Mode \notin {"ClearRouteBefore", "ClearRouteFixed"}}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed", "ClearRouteBefore", "ClearRouteFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}, unwindIdentity : (IF Mode \in {"ActivationForeignBefore", "ActivationForeignFixed"} THEN {"own", "other_message", "old_generation", "other_actor", "rebound"} ELSE {"own"}), available : {TRUE, FALSE}, producerOn : {FALSE}, bridgeOn : {FALSE}, hostOn : {FALSE}, ticketExecution : {"N1", "N2"}, nativeBinding : {0}, supplyTicket : {Mode \notin {"SupplyTicketBefore", "SupplyTicketFixed"}}, supplySource : {Mode \notin {"SupplySourceBefore", "SupplySourceFixed"}}, supplyKey : {Mode \notin {"SupplyKeyBefore", "SupplyKeyFixed"}}, supplyStamp : {Mode \notin {"SupplyStampBefore", "SupplyStampFixed"}}]
+        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed", "SupplyPrefixBefore", "SupplyPrefixFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {Mode \in {"ClearRouteBefore", "ClearRouteFixed"}}), clearDenied : {Mode \notin {"ClearRouteBefore", "ClearRouteFixed"}}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed", "ClearRouteBefore", "ClearRouteFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}, unwindIdentity : (IF Mode \in {"ActivationForeignBefore", "ActivationForeignFixed"} THEN {"own", "other_message", "old_generation", "other_actor", "rebound"} ELSE {"own"}), available : {TRUE, FALSE}, producerOn : {FALSE}, bridgeOn : {FALSE}, hostOn : {FALSE}, ticketExecution : {"N1", "N2"}, nativeBinding : {0}, supplyTicket : {Mode \notin {"SupplyTicketBefore", "SupplyTicketFixed"}}, supplySource : {Mode \notin {"SupplySourceBefore", "SupplySourceFixed"}}, supplyKey : {Mode \notin {"SupplyKeyBefore", "SupplyKeyFixed"}}, supplyStamp : {Mode \notin {"SupplyStampBefore", "SupplyStampFixed"}}, bStep : {0}, bBatch : {FALSE}, bCompact : {FALSE}, bBatchResult : {"None"}, bCommits : {0}, bOwn : {Mode \in {"BarrierSelfBefore", "BarrierSelfFixed"}}, bOwnFirst : {Mode = "BarrierOwnFirstFixed"}]
 Prepare == /\ phase = "Intent"
            /\ phase' = "Prepared" /\ prepared' = TRUE
            /\ pin' = IF role = "Primary" \/ Mode = "BorrowBusy" THEN "Primary" ELSE "None"
@@ -309,5 +309,47 @@ ActivationNoFabrication == ~anyKey => result = "None" /\ original
 ActivationLeaseFree == (role = "Primary" /\ review.unwindIdentity = "own") => <>(review.clearLease = 0)
 ActivationFinishes == <>(review.pc = 5)
 ActivationNoForeignUnwind == review.unwindIdentity # "own" => review.clearLease = 1
+
+\* Native-only barriers preserve the common O tracker's prompt semantics.
+BUser == /\ review.bStep = 0 /\ anyKey' = TRUE
+         /\ review' = [review EXCEPT !.bStep = 1]
+         /\ UNCHANGED <<phase, role, pin, prepared, original, result, source, restored, admitted>>
+BEndTurn == /\ review.bStep = 1 /\ review' = [review EXCEPT !.bStep = 2]
+            /\ UNCHANGED BaseVars
+BStopOnly == /\ review.bStep = 2 /\ review' = [review EXCEPT !.bStep = 3]
+             /\ UNCHANGED BaseVars
+BOwnStrict == /\ review.bStep = 3 /\ review.bOwnFirst
+              /\ result' = "Executed"
+              /\ review' = [review EXCEPT !.bStep = 6, !.bBatchResult = "Executed", !.bCommits = 1]
+              /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, source, restored, admitted>>
+BPrompt == /\ ((review.bStep = 3 /\ ~review.bOwnFirst) \/ (review.bStep = 6 /\ review.bOwnFirst))
+           /\ LET foreign == ~review.bOwn /\ ~review.bOwnFirst
+                  aliases == Mode = "BarrierIdentityBefore"
+                  blocks == (foreign /\ ~aliases) \/ Mode = "BarrierSelfBefore"
+              IN review' = [review EXCEPT !.bStep = 4,
+                   !.bBatch = blocks /\ Mode # "BarrierForeignBefore",
+                   !.bCompact = blocks /\ Mode \notin {"BarrierForeignBefore", "BarrierOneSideBefore"}]
+           /\ UNCHANGED BaseVars
+BCloser == /\ review.bStep = 4
+           /\ LET resets == Mode = "BarrierLateOwnBefore"
+                  batch == review.bBatch /\ ~resets
+                  compact == review.bCompact /\ ~resets
+                  creates == result = "None" /\ ~compact
+              IN /\ result' = IF creates THEN "Executed" ELSE result
+                 /\ review' = [review EXCEPT !.bStep = 5,
+                      !.bBatch = batch, !.bCompact = compact,
+                      !.bBatchResult = IF @ = "None" /\ ~batch THEN "Executed" ELSE @,
+                      !.bCommits = IF creates THEN @ + 1 ELSE @]
+           /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, source, restored, admitted>>
+BDone == /\ review.bStep = 5 /\ UNCHANGED vars
+BarrierSpec == Init /\ [][BUser \/ BEndTurn \/ BStopOnly \/ BOwnStrict \/ BPrompt \/ BCloser \/ BDone]_vars
+               /\ WF_vars(BUser) /\ WF_vars(BEndTurn) /\ WF_vars(BStopOnly)
+               /\ WF_vars(BOwnStrict) /\ WF_vars(BPrompt) /\ WF_vars(BCloser)
+BarrierNoForeignExecuted == (~review.bOwn /\ ~review.bOwnFirst) => result = "None"
+BarrierFoldEquivalent == review.bBatch = review.bCompact /\ review.bBatchResult = result
+BarrierSingleResult == review.bCommits <= 1
+BarrierOwnEventuallySettles == review.bOwn => <>(result = "Executed")
+BarrierDecisionEventually == <>(review.bStep = 5)
+BarrierOwnFirstPreserved == (review.bOwnFirst /\ review.bStep \in {4,5,6}) => result = "Executed"
 
 ====
