@@ -19,6 +19,13 @@ pub(crate) trait InteractiveSessionHost: Send + Sync {
         keys: &[&str],
     ) -> Result<HostMutation, HostError>;
     fn interrupt(&self, session: HostSessionRef<'_>) -> Result<HostMutation, HostError>;
+    /// Consumes the existing owner's warrant; close replies remain distinct from proven exit.
+    fn terminate(
+        &self,
+        warrant: crate::services::termination_audit::host_terminate::HostTerminateWarrant<'_>,
+    ) -> crate::services::termination_audit::host_terminate::HostTerminateEffect {
+        super::termination::terminate(self.kind(), warrant)
+    }
     /// `scroll_back` follows `platform::tmux::capture_pane` (negative = history).
     fn capture_screen(
         &self,

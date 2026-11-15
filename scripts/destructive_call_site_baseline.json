@@ -359,8 +359,6 @@
         "src/services/codex/tui_session_launch/first_input.rs": 1,
         "src/services/codex_tui/host_input.rs": 1,
         "src/services/discord/tmux_watcher/terminal_token_update.rs": 1,
-        "src/services/discord/turn_bridge/tmux_runtime.rs": 1,
-        "src/services/discord/turn_bridge/tmux_runtime/claude_stop_delivery.rs": 1,
         "src/services/qwen/session_lifecycle.rs": 1
       }
     },

@@ -982,6 +982,25 @@ class TmuxBoundaryTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("tmux_observe_outside_adapter: UNLISTED call site in src/new_probe.rs", stderr)
 
+    def test_interrupt_calls_cannot_reappear_outside_adapter(self) -> None:
+        bodies = [
+            'tmux::send_keys("probe", &["Escape"]);',
+            'crate::services::platform::tmux::send_keys("probe", &["C-c"]);',
+            'macro_rules! stop { () => { tmux::send_keys("probe", &["Escape"]); } }',
+        ]
+        for body in bodies:
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.tree(root)
+                self.repin(root)
+                self.assertEqual(self.check(root), (0, ""))
+                write(root, "src/reintroduced_stop.rs", body)
+                rc, stderr = self.check(root)
+                self.assertEqual(rc, 1)
+                self.assertIn("tmux_input_outside_adapter: UNLISTED", stderr)
+                write(root, "src/reintroduced_stop.rs", "")
+                self.assertEqual(self.check(root), (0, ""))
+
     def test_both_paths_and_argument_forms_exclude_tests_and_adapters(self) -> None:
         body = "\n".join(self.CASES.values())
         with tempfile.TemporaryDirectory() as tmp:

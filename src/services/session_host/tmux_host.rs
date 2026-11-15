@@ -38,6 +38,11 @@ pub(crate) fn tmux_key_name(key: HostKey) -> &'static str {
 }
 
 impl TmuxHost {
+    /// Preserve the stop owner's keys and raw status/error handling.
+    pub(crate) fn interrupt_keys(&self, name: &str, keys: &[&str]) -> Result<Output, String> {
+        tmux::send_keys(name, keys)
+    }
+
     /// Keep the legacy boolean collapse inside the platform compatibility probe.
     pub(crate) fn legacy_has_session(&self, name: &str) -> bool {
         tmux::has_session(name)
@@ -165,7 +170,7 @@ impl InteractiveSessionHost for TmuxHost {
     }
 
     fn interrupt(&self, session: HostSessionRef<'_>) -> Result<HostMutation, HostError> {
-        self.send_keys(session, &["C-c"])
+        map_output(self.interrupt_keys(session.legacy_name()?, &["C-c"]))
     }
 
     fn capture_screen(
