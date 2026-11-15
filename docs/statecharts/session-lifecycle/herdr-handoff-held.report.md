@@ -73,7 +73,7 @@ closes, so every later input on that channel is retained after its budget until 
 | Timer | `claude_handoff.rs` `schedule`, `retry_start` | one per journal; wakes `recover` and the owner, and is not re-armed for an empty custody |
 | Cancel one input | `queued_head/v2/control.rs` `cancel` → `handoff_input_left` | the original or the spending front empties the budget; an ended journal goes once its original is gone |
 | Cancel every waiting input | `clear_waiting` → `handoff_fronts_left` | ended: dropped; unended: kept, budget emptied |
-| Session reset, idle cleanup | `control.rs` `clear` | dropped with the queue |
+| Session reset, idle cleanup | `queued_head/v2/clear.rs` `clear_channel` → `clear_all` | dropped with the queue |
 | Stop | no journal access; the turn boundary wakes the owner | the held front is judged again |
 | RootReplaced | `recovery_engine/herdr_server_replaced.rs`, `herdr_reader.rs` deferred kickoff | no journal access; the row is Retired and the kickoff wakes the owner |
 | Herdr mapping change | boot config only (`config/session_hosts.rs`) | no journal write; the next `prepare` or `recover` reads the new mapping |

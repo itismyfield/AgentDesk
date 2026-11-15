@@ -27,9 +27,9 @@ Paths below are repository-relative. Function anchors remain the reference when 
 | Entry or consumer | Code coordinate | Model/action and boundary |
 |---|---|---|
 | first/idle/active/retry owner front | `src/services/discord/queue_io/input_owner/drive.rs:87` | Probe/Commit under one channel actor |
-| active Legacy preflight before busy registration | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:195`, `:232` | Begin before hand_busy; no marker prerequisite |
-| active Bound busy queue | same file `:309` | existing composer path, second input remains one queue member |
-| idle wrapper/late busy discovery | same file `:849`, `:939` | same owner front and existing start/target fences |
+| active Legacy preflight before busy registration | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:210`, `:248` | Begin before hand_busy; no marker prerequisite |
+| active Bound busy queue | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:358` | existing composer path, second input remains one queue member |
+| idle wrapper/late busy discovery | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:880`, `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:1109` | same owner front and existing start/target fences |
 | wrapper refusal before reserve | `src/services/discord/router/message_handler/provider_dispatch/start_failure.rs:124` | handoff_start_failed preserves Held and wakes |
 | exact close dispatch and retry | `src/services/claude/session_handoff/pinned_tmux.rs:end_with`; `src/services/discord/queue_io/input_owner/claude_handoff.rs:prepare` | Revalidate/Close/CloseFails/RetryClose; no old keys |
 | Legacy/Retired new launch | `src/services/claude/herdr_turn/handoff.rs:launched_source` | Launch after old absence, re-read durable ID |
@@ -38,12 +38,12 @@ Paths below are repository-relative. Function anchors remain the reference when 
 | repeat-existing input | `src/services/discord/queue_io/input_owner/effect.rs:idle_claude` and `:created` | existing composer; N=2 model tags attempt2 existing |
 | boot persisted actor census | `src/services/turn_orchestrator/pending_queue_persistence/queued_recovery.rs:93` | input OR unfinished Claude journal |
 | restart owner adoption and tick | `src/services/discord/queue_io/input_owner/recovery.rs:15` | existing main Unknown retention contract |
-| journal-only wake and completion | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:675`; new child `claude_handoff.rs:recover` | Census/BootWake/Complete; owed check in actor |
+| journal-only wake and completion | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:724`; new child `claude_handoff.rs:recover` | Census/BootWake/Complete; owed check in actor |
 | retained creation/consumption | `src/services/turn_orchestrator/queued_head/v2/retained.rs:46`, `:58`; owner recovery `:20` | unchanged main tick/requeue-known-unsent; no historical migration |
-| Cancel exact queued input | `src/services/turn_orchestrator/queued_head/v2/control.rs:206` | invalidate its journal on committed removal |
-| clear/clear_waiting | same file `:284`, `:411` | clear journal with removed originals; stale callbacks fail |
+| Cancel exact queued input | `src/services/turn_orchestrator/queued_head/v2/control.rs:231–234` | invalidate its journal on committed removal |
+| clear/clear_waiting | `src/services/turn_orchestrator/queued_head/v2/clear.rs:216–230`; `src/services/turn_orchestrator/queued_head/v2/control.rs:359–367` | clear journal with removed originals; stale callbacks fail |
 | stop/control ingress | `src/services/discord/commands/control.rs:617`, `:689`, `:715` | existing stop/cancel first-key fences; no new cleanup authority |
-| Terminate/root replacement preclaim | owner_input `:849`; existing `discord/herdr_terminate/` | existing target/first-key ownership fences; no broad kill helper reuse |
+| Terminate/root replacement preclaim | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:898`; existing `discord/herdr_terminate/` | existing target/first-key ownership fences; no broad kill helper reuse |
 | reverse Herdr return | `src/services/claude/herdr_return.rs`; `src/services/claude/session_handoff.rs:end_by_exit` | existing reverse `/exit` behavior unchanged |
 
 Person Discord inputs acquire their existing actor receipt/front grant. Bot and AgentDesk automatic inputs retain existing sender/admission classification; this lane adds no synthetic person front. The old input pane is owned by its nonce/context and pin; the new provider input is owned by the durable attempt/writer/first-key gate. Person draft contents are neither read for close nor submitted by the handoff. Existing new-composer Person rejection remains.
