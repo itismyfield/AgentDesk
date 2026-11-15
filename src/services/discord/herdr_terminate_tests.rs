@@ -3,6 +3,38 @@ use serenity::model::id::{MessageId, UserId};
 use std::sync::atomic::Ordering;
 
 #[test]
+fn close_ack_and_refusal_details_do_not_claim_a_gone_execution() {
+    let cases = [
+        (
+            HerdrTerminateResult::Acknowledged,
+            "indeterminate",
+            "close acknowledged, run unfinished",
+        ),
+        (
+            HerdrTerminateResult::NotSent("before write".into()),
+            "not_sent",
+            "before write",
+        ),
+        (
+            HerdrTerminateResult::Indeterminate("lost reply".into()),
+            "indeterminate",
+            "lost reply",
+        ),
+        (
+            HerdrTerminateResult::ConfirmationRequired,
+            "confirmation_required",
+            "herdr asks for a confirmation the service never gives",
+        ),
+    ];
+    for (close, name, detail) in cases {
+        assert_eq!(
+            TerminationResult::Close(close).outcome(),
+            (name, detail.to_string())
+        );
+    }
+}
+
+#[test]
 fn m1_disabled_service_has_zero_io() {
     let _lock = crate::config::shared_test_env_lock();
     let _root = crate::config::TestRuntimeRootGuard::new();

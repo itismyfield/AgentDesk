@@ -4048,6 +4048,7 @@ src/
 │   │   ├── resolve.rs
 │   │   ├── session_record.rs
 │   │   ├── surface_policy.rs
+│   │   ├── termination.rs
 │   │   ├── test_support.rs
 │   │   ├── tmux_host.rs
 │   │   └── traits.rs
@@ -4083,6 +4084,10 @@ src/
 │   │   ├── runner.rs
 │   │   └── session.rs
 │   ├── termination_audit/
+│   │   ├── host_terminate/
+│   │   │   ├── herdr_terminate/
+│   │   │   │   └── contract.rs
+│   │   │   └── contract.rs
 │   │   └── host_terminate.rs
 │   ├── tmux_common/
 │   │   ├── claude_footer.rs

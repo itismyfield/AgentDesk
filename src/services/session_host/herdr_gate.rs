@@ -552,6 +552,11 @@ impl HerdrTarget {
         self.send_pinned(HerdrRequest::PaneSendKeys { pane_id, keys })
     }
 
+    /// The stop owner already pinned Cancel; sending Escape consumes that same judgment.
+    pub(crate) fn interrupt(&self) -> Result<HostMutation, HostError> {
+        self.send_keys(&[HostKey::Escape])
+    }
+
     /// Content passes the owner fence first; a refused write drops its judgment unsent.
     fn send_content(&self, request: HerdrRequest) -> Result<HostMutation, HostError> {
         let mut sent = None;

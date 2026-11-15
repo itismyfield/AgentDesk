@@ -1240,7 +1240,7 @@ fn cleanup_existing_codex_tui_session(
     );
     record_tmux_exit_reason(tmux_session_name, reason_text);
     if !pane_already_stopped {
-        crate::services::platform::tmux::kill_session(tmux_session_name, reason_text);
+        crate::services::session_host::TmuxHost.kill(tmux_session_name, reason_text);
     }
 }
 
@@ -1392,10 +1392,8 @@ fn resolve_codex_tui_tail_result(
                 None,
             );
             record_tmux_exit_reason(tmux_session_name, &format!("rollout tail failed: {error}"));
-            crate::services::platform::tmux::kill_session(
-                tmux_session_name,
-                "codex rollout tail failed",
-            );
+            crate::services::session_host::TmuxHost
+                .kill(tmux_session_name, "codex rollout tail failed");
             Err(error)
         }
     }

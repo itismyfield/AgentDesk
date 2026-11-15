@@ -17,6 +17,15 @@ functions and whole test files are excluded. This lexical category recognizes
 ``fs::remove_*`` and ``std::fs::remove_*`` spellings; aliases and wrappers may
 remain unseen.
 
+``managed_tmux_kill_outside_adapter`` scans both ``platform::tmux::`` and
+``tmux::`` kill calls in production text, excluding the tmux adapters. Only
+fixed per-file non-managed counts are allowed; the JSON baseline cannot relax them.
+
+The other tmux boundary categories pin production creation, input, observation
+calls and command-argument literal spellings outside those same adapters.
+Argument literals include shell snippets and may also count data with the same
+spelling; aliases, runtime assembly and computed command names remain unseen.
+
 The ``identity_fence_bind`` and ``delivery_fence_bind`` categories are the
 inverse of the others: they count the FENCED entry points, not unfenced
 destruction.
@@ -159,6 +168,11 @@ import sys
 from pathlib import Path
 from typing import Mapping, Sequence
 
+try:
+    from ci.rust_test_sources import production_tokens
+except ModuleNotFoundError:
+    from scripts.ci.rust_test_sources import production_tokens
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = Path("scripts/destructive_call_site_baseline.json")
@@ -176,8 +190,50 @@ CATEGORIES = (
     "host_terminate",
     "discord_message_delete",
     "discord_message_edit",
+    "tmux_create_outside_adapter",
+    "tmux_input_outside_adapter",
+    "tmux_observe_outside_adapter",
+    "tmux_command_args_outside_adapter",
 )
 WARNING = "These counts are a growth-blocking baseline, not proof of safety."
+MANAGED_TMUX_KILL_CATEGORY = "managed_tmux_kill_outside_adapter"
+MANAGED_TMUX_KILL_ALLOWED = {
+    "src/cli/dcserver.rs": 1,
+    "src/server/routes/provider_auth_profiles.rs": 2,
+}
+MANAGED_TMUX_KILL_PATTERN = re.compile(
+    r"\b(?:platform\s*::\s*)?tmux\s*::\s*"
+    r"kill_session(?:_output_timeout|_output|_checked)?\s*\("
+)
+TMUX_BOUNDARY_PATTERNS = {
+    "tmux_create_outside_adapter": re.compile(
+        r"\b(?:platform\s*::\s*)?tmux\s*::\s*"
+        r"(?:create_session(?:_with_identity)?|respawn_dead_pane)\s*\("
+    ),
+    "tmux_input_outside_adapter": re.compile(
+        r"\b(?:platform\s*::\s*)?tmux\s*::\s*"
+        r"(?:send_keys(?:_timeout)?|send_literal|load_buffer|paste_buffer|set_option)\s*\("
+    ),
+    "tmux_observe_outside_adapter": re.compile(
+        r"\b(?:platform\s*::\s*)?tmux\s*::\s*"
+        r"(?:has_session|session_presence|has_live_pane|pane_liveness(?:_within)?"
+        r"|pane_pid|pane_current_path|capture_pane(?:_timeout|_with_escapes)?"
+        r"|list_session_names|list_sessions_with_pane_command|list_sessions_with_server_pid"
+        r"|is_available|version)\s*\("
+    ),
+}
+TMUX_COMMAND_VERBS = frozenset({
+    "new-session", "new-window", "respawn-pane", "split-window", "send-keys",
+    "load-buffer", "paste-buffer", "set-buffer", "set-option", "set-hook",
+    "has-session", "list-panes", "capture-pane", "list-sessions", "list-windows",
+    "list-clients", "display-message", "attach-session", "detach-client",
+    "select-pane", "resize-pane", "rename-session", "set-environment",
+    "show-environment", "kill-session", "kill-pane", "kill-server",
+})
+TMUX_BOUNDARY_CATEGORIES = (*TMUX_BOUNDARY_PATTERNS, "tmux_command_args_outside_adapter")
+TMUX_SHELL_COMMAND_PATTERN = re.compile(
+    r"\btmux\b[^\n;]*?\b(?:" + "|".join(sorted(TMUX_COMMAND_VERBS)) + r")\b"
+)
 REGISTRY_REMOVE_COMMENT = (
     "Measured production external removals are 3/5/4/2 (total 14). "
     "The design's 10/2/3/2=17 counted turn_finalizer/watcher_backstop.rs:252, "
@@ -645,12 +701,34 @@ def _is_whole_test_file(path: Path, rel: str) -> bool:
     )
 
 
+def tmux_adapter_file(rel: str) -> bool:
+    return (
+        rel == "src/services/session_host/tmux_host.rs"
+        or rel == "src/services/platform/tmux.rs"
+        or rel.startswith("src/services/platform/tmux/")
+    )
+
+
+def tmux_command_args_count(path: Path) -> int:
+    """Count command-argument literal spellings, including shell snippets; not data flow."""
+    text = path.read_text(encoding="utf-8")
+    if not any(verb in text for verb in TMUX_COMMAND_VERBS):
+        return 0
+    tokens = production_tokens(path) or []
+    return sum(
+        token.value in TMUX_COMMAND_VERBS
+        or len(TMUX_SHELL_COMMAND_PATTERN.findall(token.value))
+        for token in tokens if token.kind == "string"
+    )
+
+
 def scan(repo_root: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
     root = Path(repo_root).resolve()
     source_root = root / "src"
     if not source_root.is_dir():
         raise RatchetError("scan root src/ is missing")
     counts: dict[str, dict[str, int]] = {category: {} for category in CATEGORIES}
+    counts[MANAGED_TMUX_KILL_CATEGORY] = {}
     registry_subcounts = {name: 0 for name in REGISTRY_PATTERNS}
     paths = sorted(source_root.rglob("*.rs"))
     if not paths:
@@ -671,6 +749,17 @@ def scan(repo_root: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
         if _is_whole_test_file(path, rel):
             continue
         production = RUST_LEXER._production_text(path)
+        if not tmux_adapter_file(rel):
+            kill_found = len(MANAGED_TMUX_KILL_PATTERN.findall(production))
+            if kill_found:
+                counts[MANAGED_TMUX_KILL_CATEGORY][rel] = kill_found
+            for category, pattern in TMUX_BOUNDARY_PATTERNS.items():
+                found = len(pattern.findall(production))
+                if found:
+                    counts[category][rel] = found
+            args_found = tmux_command_args_count(path)
+            if args_found:
+                counts["tmux_command_args_outside_adapter"][rel] = args_found
         unlink_found = len(FS_UNLINK_PATTERN.findall(production))
         if unlink_found:
             counts["fs_unlink"][rel] = unlink_found
@@ -771,6 +860,19 @@ def growth_errors(
     return errors
 
 
+def managed_tmux_kill_errors(actual: Mapping[str, Mapping[str, int]]) -> list[str]:
+    """Only fixed non-managed callers may bypass the adapter; JSON cannot relax this."""
+    errors: list[str] = []
+    for path, found in sorted(actual.get(MANAGED_TMUX_KILL_CATEGORY, {}).items()):
+        allowed = MANAGED_TMUX_KILL_ALLOWED.get(path, 0)
+        if found > allowed:
+            errors.append(
+                f"{MANAGED_TMUX_KILL_CATEGORY}: {path} has {found}x outside the adapter, "
+                f"allowed {allowed}x"
+            )
+    return errors
+
+
 def pairing_errors(actual: Mapping[str, Mapping[str, int]]) -> list[str]:
     """Require both lexical members of each pair; equality is two-sided."""
     errors: list[str] = []
@@ -864,6 +966,10 @@ def _snapshot(
         "measured_at_sha": measured_sha,
         "comment": WARNING,
         "categories": {
+            **{
+                category: {"files": dict(sorted(counts[category].items()))}
+                for category in TMUX_BOUNDARY_CATEGORIES
+            },
             "tmux_kill": {"files": dict(sorted(counts["tmux_kill"].items()))},
             "watcher_cancel": {"files": dict(sorted(counts["watcher_cancel"].items()))},
             "process_kill": {"files": dict(sorted(counts["process_kill"].items()))},
@@ -983,10 +1089,23 @@ def write_baseline(
     return snapshot["measured_at_sha"]
 
 
+def write_tmux_boundary_baseline(
+    path: Path,
+    counts: Mapping[str, Mapping[str, int]],
+    measured_sha: str,
+) -> None:
+    """Refresh only the tmux boundary maps, preserving every existing category."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    for category in TMUX_BOUNDARY_CATEGORIES:
+        payload["categories"][category] = {"files": dict(sorted(counts[category].items()))}
+    payload["measured_at_sha"] = measured_sha
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
 def _totals(counts: Mapping[str, Mapping[str, int]]) -> str:
     return ", ".join(
         f"{category}={sum(counts[category].values())}/{len(counts[category])}files"
-        for category in CATEGORIES
+        for category in (*CATEGORIES, MANAGED_TMUX_KILL_CATEGORY)
     )
 
 
@@ -995,21 +1114,27 @@ def main(argv: Sequence[str] | None = None, repo_root: Path = REPO_ROOT) -> int:
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument("--check", action="store_true")
     modes.add_argument("--write-baseline", action="store_true")
+    modes.add_argument("--write-tmux-boundary-baseline", action="store_true")
     args = parser.parse_args(argv)
     root = Path(repo_root).resolve()
     try:
         counts, registry_subcounts = scan(root)
-        if args.write_baseline:
+        if args.write_baseline or args.write_tmux_boundary_baseline:
             sha = subprocess.run(
                 ["git", "rev-parse", "HEAD"], cwd=root, text=True,
                 capture_output=True, check=True,
             ).stdout.strip()
-            measured = write_baseline(root / BASELINE_PATH, counts, registry_subcounts, sha)
+            if args.write_tmux_boundary_baseline:
+                write_tmux_boundary_baseline(root / BASELINE_PATH, counts, sha)
+                measured = sha
+            else:
+                measured = write_baseline(root / BASELINE_PATH, counts, registry_subcounts, sha)
             print(f"WROTE destructive call-site baseline at {measured}: {_totals(counts)}")
             return 0
         baseline, _payload = load_baseline(root / BASELINE_PATH)
         errors = (
             growth_errors(counts, baseline)
+            + managed_tmux_kill_errors(counts)
             + owner_only_errors(counts, baseline)
             + pairing_errors(counts)
             + controller_detach_errors(root)

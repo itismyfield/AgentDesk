@@ -213,7 +213,7 @@ impl InputTransport for TmuxInput {
             None,
         );
         crate::services::tmux_diagnostics::record_tmux_exit_reason(session, reason);
-        tmux::kill_session(session, reason);
+        TmuxHost.kill(session, reason);
     }
 }
 
