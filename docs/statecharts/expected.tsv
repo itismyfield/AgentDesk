@@ -624,3 +624,13 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
+session-host/CurrentProcess.cfg	SessionHost	NoSessionLoss	RestartEventuallyReconnect
+session-host/CurrentWindowsHerdr.cfg	SessionHost	-	RestartEventuallyReconnect
+session-host/ProposedWindowsHerdr.cfg	SessionHost	-	-
+session-host/ProposedTmux.cfg	SessionHost	-	-
+session-host/ProposedPending.cfg	SessionHost	-	-
+session-host/ProposedTerminate.cfg	SessionHost	-	-
+session-host/ReplayPending.cfg	SessionHost	NoDoubleSession	-
+session-host/EarlyRetire.cfg	SessionHost	NoSessionLoss,NoOrphanAfterTerminate	-
+session-host/NoWake.cfg	SessionHost	-	RestartEventuallyReconnect
+session-host/ForgetIdentity.cfg	SessionHost	NoSessionLoss	RestartEventuallyReconnect

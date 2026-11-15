@@ -1,0 +1,442 @@
+coordinate	operation	disposition	nearest_function_lexical	source
+scripts/check_destructive_call_site_ratchet.py:202	terminate	NON_MANAGED	(module)	"r""kill_session(?:_output_timeout|_output|_checked)?\s*\("""
+scripts/check_o_shadow_write_zero.py:129	input	NON_MANAGED	f	"(""fn f() { let _ = crate::services::platform::tmux::send_literal(a, b); }"", False),"
+scripts/e2e/run_tui_relay.py:1224	terminate	NON_MANAGED	hard_reset_provider_session	if tmux.kill_session(session_name, reverify_substring=workspace_substring):
+scripts/e2e/run_tui_relay.py:1531	input	NON_MANAGED	send_tmux_key_sequence	if not tmux.send_keys(session_name, *keys):
+scripts/e2e/run_tui_relay.py:1539	input	NON_MANAGED	send_tmux_key_sequence	if not tmux.send_keys(session_name, key):
+scripts/e2e/run_tui_relay.py:3068	observe	NON_MANAGED	_collect_wait_timeout_diagnostics	pane = tmux.capture_pane(session_name, -120)
+scripts/e2e/run_tui_relay.py:3128	observe	NON_MANAGED	_raise_if_tui_prompt_stuck_while_idle	pane = tmux.capture_pane(session_name, -80)
+scripts/e2e/run_tui_relay.py:4394	input	NON_MANAGED	current_clear_refusal	"if not tmux.send_keys(session_name, step[""send_keys_no_enter""]):"
+scripts/e2e/run_tui_relay.py:4463	input	NON_MANAGED	current_clear_refusal	"if not tmux.send_keys(session_name, step[""send_keys""]):"
+scripts/e2e/run_tui_relay.py:4468	input	NON_MANAGED	current_clear_refusal	"if not tmux.send_keys(session_name, ""C-m""):"
+scripts/e2e/tui_relay/herdr.py:59	input	NON_MANAGED	key_argv	"return [herdr_bin, ""pane"", ""send-keys"", pane_id, HERDR_KEYS[key]]"
+scripts/e2e/tui_relay/tmux.py:43	observe	NON_MANAGED	has_session	def has_session(session_name: str) -> bool:
+scripts/e2e/tui_relay/tmux.py:92	input	NON_MANAGED	send_keys	def send_keys(session_name: str, *keys: str) -> bool:
+scripts/e2e/tui_relay/tmux.py:95	input	NON_MANAGED	send_keys	"cmd = [""tmux"", ""send-keys"", ""-t"", session_name, *keys]"
+scripts/e2e/tui_relay/tmux.py:100	observe	NON_MANAGED	capture_pane	def capture_pane(session_name: str, scroll_back: int = -200) -> str:
+scripts/e2e/tui_relay/tmux.py:103	observe	NON_MANAGED	capture_pane	"cmd = [""tmux"", ""capture-pane"", ""-t"", session_name, ""-p"", ""-S"", str(scroll_back)]"
+scripts/e2e/tui_relay/tmux.py:123	terminate	NON_MANAGED	kill_session	"def kill_session(session_name: str, *, reverify_substring: str = ""e2e"") -> bool:"
+scripts/e2e/tui_relay/tmux.py:135	observe	NON_MANAGED	kill_session	if not has_session(session_name):
+scripts/e2e/tui_relay/tmux.py:138	terminate	NON_MANAGED	kill_session	"[""tmux"", ""kill-session"", ""-t"", session_name],"
+src/cli/dcserver.rs:111	observe	NON_MANAGED	is_tmux_fallback_session_loaded	crate::services::platform::tmux::has_session(session_name)
+src/cli/dcserver.rs:831	terminate	NON_MANAGED	handle_restart_dcserver	crate::services::platform::tmux::kill_session(
+src/cli/dcserver.rs:839	create	NON_MANAGED	handle_restart_dcserver	crate::services::platform::tmux::create_session(tmux_session, None, launcher_str.as_ref())
+src/cli/dcserver.rs:847	observe	NON_MANAGED	handle_restart_dcserver	if !crate::services::platform::tmux::has_session(tmux_session) {
+src/cli/herdr.rs:213	observe	BYPASS	read_pane	let read = tokio::task::spawn_blocking(move || view.read_execution()).await;
+src/cli/herdr.rs:222	observe	BYPASS	read_end	let reading = view.read_execution();
+src/cli/utils.rs:168	observe	NON_MANAGED	kill_agentdesk_tmux_sessions_local	let names = match crate::services::platform::tmux::list_session_names() {
+src/cli/utils.rs:186	terminate	NON_MANAGED	kill_agentdesk_tmux_sessions_local	if crate::services::platform::tmux::kill_session(
+src/engine/ops/exec_ops.rs:418	input	BYPASS	send_keys	Some(timeout) => tmux::send_keys_timeout(name, keys, timeout),
+src/engine/ops/exec_ops.rs:419	input	BYPASS	send_keys	None => tmux::send_keys(name, keys),
+src/engine/ops/exec_ops.rs:437	terminate	BYPASS	kill	Some(timeout) => tmux::kill_session_output_timeout(name, reason, timeout),
+src/engine/ops/exec_ops.rs:438	terminate	BYPASS	kill	None => tmux::kill_session_output(name, reason).map_err(|error| error.to_string()),
+src/engine/ops/exec_ops.rs:494	input	BYPASS	register_session_command_ops_with	"match tmux_send.send_keys(&tmux_name, &[&command, ""Enter""], tmux_timeout) {"
+src/server/routes/agents.rs:415	observe	BYPASS	tmux_relay_adoption_json	let pane_liveness = crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_name);
+src/server/routes/agents.rs:416	observe	BYPASS	tmux_relay_adoption_json	let tmux_session_exists = crate::services::tmux_diagnostics::tmux_session_exists(tmux_name);
+src/server/routes/agents_crud.rs:1262	observe	TEST_OR_HELPER	restart_gate_projection_preserves_default_bytes_and_non_tmux_rows_pg	assert!(crate::services::session_backend::process_session_pid(&name).is_none());
+src/server/routes/provider_auth_profiles.rs:339	observe	NON_MANAGED	remove_profile	if crate::services::platform::tmux::has_session(&session) {
+src/server/routes/provider_auth_profiles.rs:341	terminate	NON_MANAGED	remove_profile	"crate::services::platform::tmux::kill_session(&session, ""provider-auth-profile-unlink"");"
+src/server/routes/provider_auth_profiles.rs:488	observe	NON_MANAGED	spawn_login_tmux	if crate::services::platform::tmux::has_session(session) {
+src/server/routes/provider_auth_profiles.rs:490	terminate	NON_MANAGED	spawn_login_tmux	"crate::services::platform::tmux::kill_session(session, ""provider-auth-login-restart"");"
+src/server/routes/provider_auth_profiles.rs:496	create	NON_MANAGED	spawn_login_tmux	let output = crate::services::platform::tmux::create_session_with_identity(
+src/services/agents/turn.rs:481	observe	BYPASS	capture_recent_tmux_output	crate::services::platform::tmux::capture_pane(tmux_name, TURN_CAPTURE_SCROLLBACK_LINES)?;
+src/services/claude.rs:2699	create	BYPASS	execute_streaming_local_tmux	let tmux_result = crate::services::platform::tmux::create_session_with_identity(
+src/services/claude.rs:2795	input	BYPASS	(manual entrypoint/FIFO supplement)	submit_claude_wrapper_followup(cancel_token.as_deref(), tmux_session_name, || {
+src/services/claude.rs:2801	input	BYPASS	(manual entrypoint/FIFO supplement)	"writeln!(fifo, ""{}"", msg)"
+src/services/claude.rs:2881	interrupt	BYPASS	send_followup_to_process	send_process_session_input(session_name, &msg.to_string(), cancel_token.as_deref())
+src/services/claude.rs:2898	observe	BYPASS	send_followup_to_process	process_session_probe(session_name),
+src/services/claude.rs:3073	observe	TEST_OR_HELPER	issue_4113_active_process_wrapper_is_reaped_by_terminal_completion_after_tmux_skip	assert!(crate::services::session_backend::process_session_is_alive(
+src/services/claude.rs:3079	observe	TEST_OR_HELPER	issue_4113_active_process_wrapper_is_reaped_by_terminal_completion_after_tmux_skip	assert!(crate::services::session_backend::process_session_is_alive(
+src/services/claude.rs:3093	observe	TEST_OR_HELPER	issue_4113_active_process_wrapper_is_reaped_by_terminal_completion_after_tmux_skip	crate::services::session_backend::process_session_pid(&session_name),
+src/services/claude/backend_routing.rs:114	terminate	BYPASS	cleanup_process_backend_before_tmux	let cleaned = terminate_process_session_before_tmux(session_name);
+src/services/claude/herdr_return.rs:80	terminate	BYPASS	execute	session_handoff::end_by_exit(&mut *ports.tmux(logical), ports.exit_wait())
+src/services/claude/herdr_return.rs:83	terminate	BYPASS	execute	session_handoff::end_by_exit(&mut *ports.herdr(record), ports.exit_wait())?;
+src/services/claude/herdr_return.rs:156	observe	BYPASS	liveness	let reading = view.read_execution();
+src/services/claude/herdr_turn/composer.rs:108	interrupt	BYPASS	run_ready	|| run_herdr(target, plan, cancel),
+src/services/claude/herdr_turn/composer.rs:172	input	BYPASS	run_exit	when_ready_to_exit(capture, None, || run_herdr(target, plan, None))
+src/services/claude/herdr_turn/handoff.rs:127	create	BYPASS	launched_source	let outcome = runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host));
+src/services/claude/herdr_turn/never_attached.rs:21	create	BYPASS	probe_again	launched(runtime.block_on(launch_herdr_session(
+src/services/claude/host_gate.rs:56	observe	BYPASS	returned_dead_pane	match pane_liveness(name) {
+src/services/claude/process_session_launch.rs:50	observe	BYPASS	execute_streaming_local_process	if process_session_available_for_followup(session_name) {
+src/services/claude/process_session_launch.rs:66	terminate	BYPASS	execute_streaming_local_process	terminate_process_handle(handle);
+src/services/claude/process_session_launch.rs:75	terminate	BYPASS	execute_streaming_local_process	terminate_process_handle(handle);
+src/services/claude/process_session_launch.rs:132	create	BYPASS	execute_streaming_local_process	let handle = backend.create_session_with_command_env(&config, |command| {
+src/services/claude/process_session_launch.rs:156	observe	BYPASS	execute_streaming_local_process	process_session_probe(session_name),
+src/services/claude/session_handoff.rs:110	observe	BYPASS	liveness	match pane_liveness(self.0) {
+src/services/claude/session_handoff.rs:123	input	BYPASS	send_exit	run_legacy(session, &plan, None)
+src/services/claude/tui_session_launch.rs:94	create	BYPASS	prepare_and_create_claude_tui_session	crate::services::platform::tmux::respawn_dead_pane(
+src/services/claude/tui_session_launch.rs:100	create	BYPASS	prepare_and_create_claude_tui_session	crate::services::platform::tmux::create_session_with_identity(
+src/services/claude_tui/busy_inject.rs:357	input	BYPASS	run	"Some(&""send-keys"" | &""paste-buffer"" | &""if-shell"")"
+src/services/claude_tui/busy_inject.rs:420	observe	BYPASS	capture	"""capture-pane"","
+src/services/claude_tui/busy_inject/stash.rs:46	input	BYPASS	submit_with_start	"if pane.ok(&[""load-buffer"", ""-b"", &buffer, &path]).is_none() {"
+src/services/claude_tui/busy_inject/stash.rs:69	input	BYPASS	submit_with_start	".ok(&[""send-keys"", ""-t"", pane.target(), ""C-s""])"
+src/services/claude_tui/busy_inject/stash.rs:86	input	BYPASS	submit_with_start	"""paste-buffer"","
+src/services/claude_tui/busy_inject/stash.rs:104	input	BYPASS	submit_with_start	"[""send-keys"", ""-t"", target, ""Enter""].map(String::from)"
+src/services/claude_tui/busy_inject/stash.rs:119	input	BYPASS	enter	"let enter = |target: &str| [""send-keys"", ""-t"", target, ""Enter""].map(String::from);"
+src/services/claude_tui/host_input.rs:166	input	THROUGH_TRAIT	send_literal	TmuxHost.send_literal(session, text)
+src/services/claude_tui/host_input.rs:170	input	BYPASS	load_buffer	tmux::load_buffer(buffer, text)
+src/services/claude_tui/host_input.rs:179	input	THROUGH_TRAIT	paste_buffer	TmuxHost.paste_buffer(session, buffer, delete)
+src/services/claude_tui/host_input.rs:187	observe	BYPASS	capture	tmux::capture_pane(session, scroll_back)
+src/services/claude_tui/host_input.rs:199	observe	BYPASS	pane_alive	crate::services::tmux_diagnostics::tmux_session_has_live_pane(session)
+src/services/claude_tui/host_input.rs:203	observe	BYPASS	present	tmux::has_session(session)
+src/services/claude_tui/host_input.rs:216	terminate	BYPASS	retire	tmux::kill_session(session, reason);
+src/services/claude_tui/host_input.rs:267	input	BYPASS	paste_buffer	herdr_written(self.target.send_paste(&text))
+src/services/claude_tui/host_input.rs:271	input	BYPASS	send_keys	herdr_written(self.target.send_keys(keys))
+src/services/claude_tui/host_input.rs:400	input	BYPASS	step	let key = |key: HostKey| -> SendOp<'_> { Box::new(move |t| t.send_keys(session, &[key])) };
+src/services/claude_tui/host_input.rs:403	input	BYPASS	step	self.mutate(action, Box::new(|t| t.send_literal(session, text)))?;
+src/services/claude_tui/host_input.rs:408	input	BYPASS	step	self.send(action, Box::new(|t| t.load_buffer(&buffer, text)))?;
+src/services/claude_tui/host_input.rs:410	input	BYPASS	step	self.mutate(action, Box::new(|t| t.paste_buffer(session, &buffer, true)))?;
+src/services/claude_tui/host_input.rs:424	input	BYPASS	step	self.mutate(action, Box::new(move |t| t.send_keys(session, &batch)))?;
+src/services/claude_tui/host_input.rs:522	input	BYPASS	send	with_transport(|transport| transport.send_keys(session, keys))
+src/services/claude_tui/host_input.rs:580	observe	BYPASS	capture_draft_with	"let args = [""-u"", ""capture-pane"", ""-p"", ""-e"", ""-t"", session, ""-S"", ""-80""];"
+src/services/claude_tui/host_input.rs:619	input	BYPASS	legacy_load_buffer	with_transport(|transport| transport.load_buffer(buffer, text))
+src/services/claude_tui/host_input/busy/herdr.rs:61	input	BYPASS	submit	.and_then(|()| self.target.send_keys(&[HostKey::CtrlS]).ok());
+src/services/claude_tui/host_input/busy/herdr.rs:77	input	BYPASS	submit	BusyReport::outcome(match run_herdr(&self.target, &plan, None) {
+src/services/claude_tui/host_input/busy/tmux.rs:85	input	BYPASS	loads	"&& pane.ok(&[""load-buffer"", ""-b"", buffer, &path]).is_some();"
+src/services/claude_tui/hosting/host_draft.rs:67	terminate	THROUGH_TRAIT	retire	host_input::legacy_retire(session, reason_code, reason);
+src/services/claude_tui/hosting/host_draft.rs:184	observe	THROUGH_TRAIT	cleanup_snapshot	host_input::legacy_pane_alive(session),
+src/services/claude_tui/hosting/warm_followup.rs:671	observe	THROUGH_TRAIT	rebound_source	dead_reads = match crate::services::claude_tui::host_input::legacy_pane_alive(tmux) {
+src/services/claude_tui/hosting/warm_followup.rs:770	observe	THROUGH_TRAIT	busy_owner_observer	dead_reads = if legacy_pane_alive(&tmux) {
+src/services/claude_tui/input.rs:259	interrupt	BYPASS	run_actions	host_input::run_legacy(session_name, actions, cancel_token).into_legacy()
+src/services/claude_tui/input.rs:318	input	BYPASS	ensure_tmux_success	"TuiInputAction::PasteBuffer(_) => ""paste-buffer"","
+src/services/claude_tui/input.rs:371	observe	THROUGH_TRAIT	wait_for_prompt_ready_inner	&& !host_input::legacy_pane_alive(session_name)
+src/services/claude_tui/input.rs:388	observe	THROUGH_TRAIT	wait_for_prompt_ready_inner	if !host_input::legacy_pane_alive(session_name) {
+src/services/claude_tui/input/draft_hold.rs:86	observe	THROUGH_TRAIT	clear_prompt_draft	host_input::legacy_pane_alive(session_name),
+src/services/claude_tui/readiness/compact.rs:130	input	BYPASS	poll	match host_input::run_legacy(
+src/services/claude_tui/readiness/compact.rs:160	input	BYPASS	poll	if host_input::run_legacy(session, &[input::TuiInputAction::Enter], None)
+src/services/claude_tui/tui_relay.rs:104	observe	THROUGH_TRAIT	has_session	host_input::legacy_present(session_name)
+src/services/claude_tui/tui_relay.rs:108	input	BYPASS	load_buffer	host_input::legacy_load_buffer(buffer_name, text).map(|_| ())
+src/services/claude_tui/tui_relay.rs:117	input	BYPASS	paste_buffer	host_input::legacy_write(session_name, |transport| {
+src/services/claude_tui/tui_relay.rs:118	input	BYPASS	paste_buffer	transport.paste_buffer(session_name, buffer_name, delete)
+src/services/claude_tui/tui_relay.rs:124	input	BYPASS	send_enter	host_input::legacy_write(session_name, |transport| {
+src/services/claude_tui/tui_relay.rs:125	input	BYPASS	send_enter	transport.send_keys(session_name, &[HostKey::Enter])
+src/services/claude_tui/tui_relay.rs:260	observe	BYPASS	handle_send_with_backend	if !backend.has_session(&session_name) {
+src/services/claude_tui/tui_relay.rs:303	input	BYPASS	handle_send_with_backend	.load_buffer(&buffer_name, &req.text)
+src/services/claude_tui/tui_relay.rs:313	input	BYPASS	handle_send_with_backend	.paste_buffer(&session_name, &buffer_name, true)
+src/services/codex.rs:1243	terminate	BYPASS	cleanup_existing_codex_tui_session	crate::services::platform::tmux::kill_session(tmux_session_name, reason_text);
+src/services/codex.rs:1268	observe	BYPASS	wire_cancel_token_to_tmux_session	if let Some(pid) = crate::services::platform::tmux::pane_pid(tmux_session_name) {
+src/services/codex.rs:1395	terminate	BYPASS	resolve_codex_tui_tail_result	crate::services::platform::tmux::kill_session(
+src/services/codex.rs:1613	create	BYPASS	execute_streaming_local_tmux	let tmux_result = crate::services::platform::tmux::create_session_with_identity(
+src/services/codex.rs:1732	input	BYPASS	(manual entrypoint/FIFO supplement)	fn send_codex_pipe_prompt_to_fifo(input_fifo_path: &str, prompt: &str) -> Result<(), String> {
+src/services/codex.rs:1785	input	BYPASS	(manual entrypoint/FIFO supplement)	fifo.write_all(encoded.as_bytes())
+src/services/codex/herdr_turn.rs:223	create	BYPASS	fresh_launch	launched(runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host)))
+src/services/codex/herdr_turn.rs:261	create	BYPASS	pending_launch	launched(runtime.block_on(launch_herdr_session(turn.pool, launch, never, host)))?;
+src/services/codex/herdr_turn.rs:636	interrupt	BYPASS	followup_write	let run = observed_input(cancel, nonce, start, || run_herdr(target, plan, cancel))?;
+src/services/codex/herdr_turn/busy.rs:129	input	BYPASS	locked	let run = crate::services::codex_tui::host_input::run_herdr(target, &plan, None);
+src/services/codex/herdr_turn/first_input.rs:154	interrupt	BYPASS	write	let run = observed_input(cancel, nonce, || None, || run_herdr(&target, &plan, cancel))?;
+src/services/codex/process_session_launch.rs:45	observe	BYPASS	execute_streaming_local_process_codex	let process_session_alive = process_session_is_alive(session_name);
+src/services/codex/process_session_launch.rs:59	interrupt	BYPASS	execute_streaming_local_process_codex	send_process_session_input(session_name, &encoded, cancel_token.as_deref())?;
+src/services/codex/process_session_launch.rs:65	observe	BYPASS	execute_streaming_local_process_codex	process_session_probe(session_name),
+src/services/codex/process_session_launch.rs:90	terminate	BYPASS	execute_streaming_local_process_codex	terminate_process_handle(handle);
+src/services/codex/process_session_launch.rs:138	create	BYPASS	execute_streaming_local_process_codex	let handle = backend.create_session(&config)?;
+src/services/codex/process_session_launch.rs:154	observe	BYPASS	execute_streaming_local_process_codex	process_session_probe(session_name),
+src/services/codex/tui_session_launch/first_input.rs:53	create	BYPASS	create	crate::services::platform::tmux::create_session_with_identity(
+src/services/codex/tui_session_launch/first_input.rs:127	create	BYPASS	spawn_owned	crate::services::platform::tmux::create_session_with_identity(
+src/services/codex_tui/busy_inject.rs:216	observe	BYPASS	composer_proof	".ok(&[""capture-pane"", ""-p"", ""-e"", ""-t"", pane.target()])"
+src/services/codex_tui/busy_inject.rs:355	input	BYPASS	inject_locked	"if pane.ok(&[""load-buffer"", ""-b"", &buffer, &path]).is_none() {"
+src/services/codex_tui/busy_inject.rs:437	input	BYPASS	inject_locked	"""paste-buffer"","
+src/services/codex_tui/busy_inject.rs:464	input	BYPASS	inject_locked	"let enter = |target: &str| [""send-keys"", ""-t"", target, ""Enter""].map(String::from);"
+src/services/codex_tui/execution_end/capture.rs:28	observe	BYPASS	capture_under	if tmux::session_presence(pane) != SessionPresence::Present {
+src/services/codex_tui/execution_end/capture.rs:68	observe	BYPASS	capture_under	"let pane_pid = tmux::pane_pid(pane).ok_or(""pane PID unavailable"")?;"
+src/services/codex_tui/execution_end/confirm.rs:27	observe	BYPASS	observe	pane: tmux::session_presence(&capture.record.tmux_session),
+src/services/codex_tui/execution_end/confirm.rs:28	observe	BYPASS	observe	managed_pid: crate::services::session_backend::process_session_pid(
+src/services/codex_tui/execution_end/producer.rs:42	observe	BYPASS	new	if crate::services::platform::tmux::session_presence(pane)
+src/services/codex_tui/execution_end/producer.rs:52	observe	BYPASS	new	crate::services::platform::tmux::pane_pid(pane),
+src/services/codex_tui/host_input.rs:59	input	BYPASS	send_literal	InputTransport::send_literal(self, session, text)
+src/services/codex_tui/host_input.rs:63	input	BYPASS	load_buffer	InputTransport::load_buffer(self, buffer, text)
+src/services/codex_tui/host_input.rs:67	input	BYPASS	paste_buffer	InputTransport::paste_buffer(self, s, buffer, delete)
+src/services/codex_tui/host_input.rs:71	input	BYPASS	send_keys	InputTransport::send_keys(self, session, keys)
+src/services/codex_tui/host_input.rs:77	input	THROUGH_TRAIT	send_literal	TmuxHost.send_literal(session, text)
+src/services/codex_tui/host_input.rs:81	input	BYPASS	load_buffer	tmux::load_buffer(buffer, text)
+src/services/codex_tui/host_input.rs:90	input	THROUGH_TRAIT	paste_buffer	TmuxHost.paste_buffer(session, buffer, delete)
+src/services/codex_tui/host_input.rs:100	input	BYPASS	send_literal	InputTransport::send_literal(self, session, text)
+src/services/codex_tui/host_input.rs:104	input	BYPASS	load_buffer	InputTransport::load_buffer(self, buffer, text)
+src/services/codex_tui/host_input.rs:113	input	BYPASS	paste_buffer	InputTransport::paste_buffer(self, session, buffer, delete)
+src/services/codex_tui/host_input.rs:117	input	BYPASS	send_keys	InputTransport::send_keys(self, session, keys)
+src/services/codex_tui/host_input.rs:163	observe	BYPASS	capture_ansi	tmux::capture_pane_with_escapes(session, scroll_back)
+src/services/codex_tui/host_input.rs:172	observe	BYPASS	capture_bounded	tmux::capture_pane_timeout(session, scroll_back, timeout)
+src/services/codex_tui/host_input.rs:176	observe	BYPASS	pane_alive	crate::services::tmux_diagnostics::tmux_session_has_live_pane(session)
+src/services/codex_tui/host_input.rs:180	observe	BYPASS	pane_pid	tmux::pane_pid(session)
+src/services/codex_tui/host_input.rs:188	terminate	BYPASS	kill_session	tmux::kill_session(session, reason)
+src/services/codex_tui/host_input.rs:195	observe	BYPASS	pane_stopped	crate::services::tmux_diagnostics::tmux_session_pane_liveness(session),
+src/services/codex_tui/host_input.rs:315	input	BYPASS	step	TuiInputAction::Literal(text) => self.mutate(action, |t| t.send_literal(session, text)),
+src/services/codex_tui/host_input.rs:319	input	BYPASS	step	self.send(action, |t| t.load_buffer(&buffer, text))?;
+src/services/codex_tui/host_input.rs:321	input	BYPASS	step	self.mutate(action, |t| t.paste_buffer(session, &buffer, true))
+src/services/codex_tui/host_input.rs:328	input	BYPASS	step	self.mutate(action, |t| t.send_keys(session, &[HostKey::Enter]))
+src/services/codex_tui/host_input.rs:331	input	BYPASS	step	self.mutate(action, |t| t.send_keys(session, &[HostKey::Escape]))
+src/services/codex_tui/host_input.rs:391	input	BYPASS	ensure_tmux_success	"TuiInputAction::PasteBuffer(_) => ""paste-buffer"","
+src/services/codex_tui/host_input.rs:442	input	BYPASS	send_literal	self.transport.send_literal(session, text)
+src/services/codex_tui/host_input.rs:445	input	BYPASS	load_buffer	self.transport.load_buffer(buffer, text)
+src/services/codex_tui/host_input.rs:454	input	BYPASS	paste_buffer	self.transport.paste_buffer(session, buffer, delete)
+src/services/codex_tui/host_input.rs:457	input	BYPASS	send_keys	self.transport.send_keys(session, keys)
+src/services/codex_tui/host_input.rs:597	input	BYPASS	run_prompt_submission_guarded	transport.send_keys(session_name, &[HostKey::Enter])
+src/services/codex_tui/host_input.rs:624	input	BYPASS	legacy_keys	transport.send_keys(session_name, keys)
+src/services/codex_tui/host_input.rs:676	observe	BYPASS	kill_and_confirm_stopped	let pane_pid = transport.pane_pid(tmux_session_name).ok_or_else(|| {
+src/services/codex_tui/host_input.rs:681	terminate	BYPASS	kill_and_confirm_stopped	let kill_succeeded = transport.kill_session(tmux_session_name, reason_text);
+src/services/codex_tui/host_input.rs:736	input	BYPASS	send_literal	self.0.send_literal(session, text)
+src/services/codex_tui/host_input.rs:740	input	BYPASS	load_buffer	self.0.load_buffer(buffer, text)
+src/services/codex_tui/host_input.rs:749	input	BYPASS	paste_buffer	self.0.paste_buffer(session, buffer, delete)
+src/services/codex_tui/host_input.rs:757	input	BYPASS	send_keys	self.0.send_keys(session, &names)
+src/services/codex_tui/input/herdr_cancel.rs:12	interrupt	DOMAIN_CLASSIFIER	(manual entrypoint/FIFO supplement)	pub(crate) fn herdr_turn_in_progress(pane_with_escapes: &str) -> bool {
+src/services/codex_tui/tail_launch.rs:113	observe	BYPASS	dispatch	|| crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name);
+src/services/codex_tui/warm_followup.rs:647	observe	THROUGH_TRAIT	tail_to_end	let alive = || host_input::legacy_pane_alive(tmux);
+src/services/discord/admin_host_guard.rs:381	observe	BYPASS	row_is_legacy_tmux	if crate::services::session_backend::process_session_pid(tmux_name).is_some() {
+src/services/discord/commands/control/clear_teardown.rs:99	terminate	LIFECYCLE_ENTRY	(manual entrypoint/FIFO supplement)	let ended = super::managed_reset::end_managed_process_session(name);
+src/services/discord/commands/control/clear_teardown/clear_end_record.rs:74	observe	BYPASS	capture_under	if tmux::session_presence(tmux) != SessionPresence::Present {
+src/services/discord/commands/control/clear_teardown/clear_end_record.rs:89	observe	BYPASS	capture_under	"let pane_pid = tmux::pane_pid(tmux).ok_or(""no pane pid"")?;"
+src/services/discord/commands/control/clear_teardown/clear_end_record.rs:134	observe	BYPASS	vacant	tmux::session_presence(&captured.tmux) == SessionPresence::Missing
+src/services/discord/commands/control/clear_teardown/clear_end_record.rs:135	observe	BYPASS	vacant	&& crate::services::session_backend::process_session_pid(&captured.tmux).is_none()
+src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:160	observe	BYPASS	run_with	return if tmux::session_presence(owner) == SessionPresence::Missing
+src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:161	observe	BYPASS	run_with	&& crate::services::session_backend::process_session_pid(owner).is_none()
+src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:309	observe	BYPASS	normal_end	&& crate::services::session_backend::process_session_pid(owner).is_none()
+src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:380	observe	BYPASS	inflight_ready	"let gone = crate::services::platform::tmux::session_presence(native[""owner""].as_str().unwrap())"
+src/services/discord/commands/control/clear_teardown/execution_cleanup.rs:382	observe	BYPASS	inflight_ready	"&& crate::services::session_backend::process_session_pid(native[""owner""].as_str().unwrap())"
+src/services/discord/commands/control/managed_reset.rs:120	observe	BYPASS	end_process	crate::services::session_backend::process_session_pid(session_name).map(|pid| pid as i32);
+src/services/discord/commands/control/managed_reset.rs:122	terminate	BYPASS	end_process	crate::services::session_backend::terminate_process_handle(handle);
+src/services/discord/commands/control/managed_reset.rs:134	observe	BYPASS	end_process	match tmux::session_presence(session_name) {
+src/services/discord/commands/control/managed_reset.rs:142	terminate	BYPASS	end_process	"let killed = tmux::kill_session(session_name, ""managed session reset"");"
+src/services/discord/commands/control/provider_reset.rs:53	terminate	LIFECYCLE_ENTRY	(manual entrypoint/FIFO supplement)	reset_managed_process_session(name);
+src/services/discord/commands/control/relaunch.rs:95	observe	BYPASS	pane_state_of	match crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux) {
+src/services/discord/commands/diagnostics/reports.rs:52	observe	BYPASS	tmux_state_label	} else if tmux_session_has_live_pane(session_name) {
+src/services/discord/commands/diagnostics/reports.rs:54	observe	BYPASS	tmux_state_label	} else if tmux_session_exists(session_name) {
+src/services/discord/commands/diagnostics/session_details.rs:24	observe	BYPASS	build_session_details	crate::services::tmux_diagnostics::tmux_session_pane_cwd(&name)
+src/services/discord/commands/model_picker.rs:26	observe	BYPASS	build_model_picker_view	let working_dir = current_working_dir(shared, target_channel_id).await;
+src/services/discord/commands/stop.rs:67	interrupt	BYPASS	finish	"stop.interrupt(""/stop"").await;"
+src/services/discord/commands/system_prompt/reconstruct.rs:20	observe	BYPASS	build	let path = super::super::current_working_dir(shared, channel)
+src/services/discord/commands/text_commands/native_stop.rs:38	interrupt	BYPASS	handle	"stop.interrupt(""!stop"").await;"
+src/services/discord/commands/tmux_recreate.rs:20	observe	BYPASS	recreate_channel_tmux	crate::services::platform::tmux::has_session(session.name())
+src/services/discord/commands/tmux_recreate.rs:57	terminate	BYPASS	kill_and_clean	let killed = crate::services::platform::tmux::kill_session(session.name(), reason);
+src/services/discord/commands/tmux_recreate.rs:99	observe	BYPASS	relaunch_channel_tmux_keeping_session	if !crate::services::platform::tmux::has_session(session.name()) {
+src/services/discord/commands/tui_passthrough.rs:183	observe	BYPASS	passthrough_block	let live = crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_name);
+src/services/discord/commands/tui_passthrough/herdr_settings.rs:122	input	BYPASS	close_after	host_input::run_herdr(pane, &[input::TuiInputAction::Escape], None).into_legacy()
+src/services/discord/commands/tui_passthrough/herdr_settings.rs:245	input	BYPASS	effort	|plan: &[input::TuiInputAction]| host_input::run_herdr(pane, plan, None).into_legacy();
+src/services/discord/commands/tui_passthrough/herdr_settings.rs:318	input	BYPASS	fast	|plan: &[input::TuiInputAction]| host_input::run_herdr(pane, plan, None).into_legacy();
+src/services/discord/health/o_transition/codex_census.rs:41	observe	BYPASS	host_inventory	let names = crate::services::platform::tmux::list_session_names()?;
+src/services/discord/health/recovery/live_agent_recovery.rs:187	observe	BYPASS	fence_runtime	.is_some_and(|name| crate::services::session_backend::process_session_pid(name).is_some());
+src/services/discord/health/recovery/live_agent_recovery.rs:204	observe	BYPASS	fence_runtime	return !crate::services::session_backend::process_session_is_alive(&session);
+src/services/discord/health/turn_deliver/inject/herdr.rs:111	input	BYPASS	run	let result = match run_herdr(pane, &plan, None) {
+src/services/discord/health/turn_deliver/inject/queued_provider.rs:51	input	BYPASS	run	return self.run_herdr(host, session, transcript, turn_id, input);
+src/services/discord/herdr_terminate.rs:192	observe	BYPASS	read_end	let pane = view.read_execution();
+src/services/discord/herdr_terminate.rs:576	observe	BYPASS	terminate_scoped	match tokio::task::spawn_blocking(move || view.ended(&read, &view.read_execution()))
+src/services/discord/idle_relay_drift.rs:514	observe	BYPASS	attempt_drift_repair	crate::services::tmux_diagnostics::tmux_session_pane_liveness(&probe_name)
+src/services/discord/inflight/rebind_reap.rs:39	observe	BYPASS	runtime_watcher_is_proven_dead	let pane = tests::tmux_session_pane_liveness(session, state);
+src/services/discord/model_picker_interaction.rs:278	observe	BYPASS	handle_model_picker_interaction	super::commands::current_working_dir(&data.shared, target_channel_id).await;
+src/services/discord/model_picker_interaction.rs:357	observe	BYPASS	handle_model_picker_interaction	let working_dir = super::commands::current_working_dir(&data.shared, target_channel_id).await;
+src/services/discord/outbound/o_writer_legacy.rs:32	observe	BYPASS	late_source_cursor	None => match crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux) {
+src/services/discord/outbound/o_writer_legacy.rs:59	observe	BYPASS	cursor	None if crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux) => {
+src/services/discord/queue_io/input_owner/effect/codex.rs:192	input	BYPASS	idle_codex	"&& pane.ok(&[""load-buffer"", ""-b"", &buffer, &path]).is_some()"
+src/services/discord/queue_io/input_owner/effect/codex.rs:205	input	BYPASS	idle_codex	"""paste-buffer"","
+src/services/discord/queue_io/input_owner/effect/codex.rs:226	input	BYPASS	idle_codex	"[""send-keys"", ""-t"", target, ""Enter""].map(String::from)"
+src/services/discord/recovery_engine/herdr_reader.rs:57	observe	BYPASS	read_pane	let (root, provider) = match self.view.read_execution() {
+src/services/discord/recovery_engine/herdr_reader.rs:225	recover	BYPASS	reconnect_restarted_herdr_panes	reconnect_restarted_herdr_with_shared(&shared, provider);
+src/services/discord/recovery_engine/herdr_reader.rs:506	recover	BYPASS	reconnect	Some(reader) => attach_restarted_herdr_source(pool, &record.owner, channel, &reader).await,
+src/services/discord/recovery_engine/herdr_reader.rs:507	recover	BYPASS	reconnect	None => attach_restarted_herdr_source(pool, &record.owner, channel, &NoHerdrEndpoint).await,
+src/services/discord/recovery_engine/herdr_row_end.rs:565	observe	BYPASS	idle_read	let before = view.read_execution();
+src/services/discord/recovery_engine/herdr_row_end.rs:620	observe	BYPASS	idle_read	match view.read_execution() == before {
+src/services/discord/recovery_engine/herdr_server_replaced.rs:261	observe	BYPASS	rebooted_pending	let reading = tokio::task::spawn_blocking(move || view.read_execution())
+src/services/discord/relay_recovery/idle_tmux.rs:226	observe	BYPASS	idle_tmux_repair_pane_ready_for_input	crate::services::platform::tmux::capture_pane(tmux_session, -80)
+src/services/discord/router/herdr_consent.rs:256	observe	BYPASS	retry	.snapshot()
+src/services/discord/router/herdr_consent/startup.rs:116	interrupt	BYPASS	restore_excluding	tokio::task::spawn_blocking(move || interrupt(&super::store(), &local, &BOOT))
+src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:84	observe	BYPASS	read_as	(TurnHost::Tmux, None) => match crate::services::platform::tmux::pane_liveness(session)
+src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:807	observe	BYPASS	native_read	match crate::services::platform::tmux::pane_liveness(&target.tmux) {
+src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:1085	observe	BYPASS	execute_owned	&& pane_liveness(session) == PaneLiveness::Live
+src/services/discord/router/message_handler/provider_isolation.rs:335	observe	BYPASS	seed_runtime	crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_name);
+src/services/discord/router/message_handler/provider_isolation.rs:410	observe	BYPASS	live_tui_provider_session_recovery	if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name) {
+src/services/discord/router/message_handler/provider_isolation.rs:499	observe	BYPASS	reconcile_managed_tmux_runtime_kind_for_config	|| !crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
+src/services/discord/router/message_handler/provider_isolation.rs:546	terminate	BYPASS	reconcile_managed_tmux_runtime_kind_for_config	crate::services::platform::tmux::kill_session(tmux_session_name, &reason);
+src/services/discord/router/message_handler/tui_followup.rs:338	observe	BYPASS	claude_session_launch_mtime_cutoff	let pid = crate::services::platform::tmux::pane_pid(tmux_session_name?)?;
+src/services/discord/router/message_handler/tui_followup.rs:418	observe	BYPASS	tui_busy_followup_diagnostic	|| !crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
+src/services/discord/router/message_handler/tui_followup/codex_observation.rs:60	observe	BYPASS	codex_native_end	let cwd = crate::services::tmux_diagnostics::tmux_session_pane_cwd(tmux);
+src/services/discord/router/message_handler/watchdog.rs:88	observe	BYPASS	paused_watcher_tmux_session_has_live_pane	crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
+src/services/discord/router/turn_start.rs:569	observe	BYPASS	cli_just_spawned_for_emit	!crate::services::platform::tmux::has_session(name)
+src/services/discord/router/turn_start.rs:598	observe	BYPASS	log_session_strategy_diagnostic	crate::services::platform::tmux::has_session(&tmux_name)
+src/services/discord/runtime_bootstrap.rs:35	recover	LIFECYCLE_ENTRY	(manual entrypoint/FIFO supplement)	pub(in crate::services::discord) async fn complete_active_reconcile(shared: &Arc<SharedData>) {
+src/services/discord/runtime_bootstrap.rs:472	recover	LIFECYCLE_ENTRY	(manual entrypoint/FIFO supplement)	pub(in crate::services::discord) async fn register_standby_and_settle_reconcile(
+src/services/discord/runtime_bootstrap/owner_cleanup.rs:203	terminate	TEST_OR_HELPER	owner_cleanup_actual_periodic_pass_waits_busy_and_resumes_without_input_pg	".any(|call| call.starts_with(""kill-session""))"
+src/services/discord/runtime_bootstrap/owner_execution.rs:94	observe	THROUGH_TRAIT	prepare	legacy_present(provider, channel, shadow)
+src/services/discord/runtime_bootstrap/owner_execution.rs:168	observe	THROUGH_TRAIT	refresh	legacy_present(provider, channel, shadow)
+src/services/discord/runtime_bootstrap/queued_recovery.rs:210	recover	BYPASS	restore_and_hold	restore_inflight_turns(http, shared, provider).await;
+src/services/discord/runtime_bootstrap/recovery_flush.rs:73	recover	BYPASS	run_bot_spawn_recovery_and_flush_restart_reports	restore_tmux_watchers(&http_for_tmux, &shared_for_tmux2).await;
+src/services/discord/session_idle_cleanup.rs:128	observe	BYPASS	cleanup_expired_sessions	match session_presence(&tmux_name) {
+src/services/discord/session_runtime.rs:360	observe	BYPASS	auto_restore_session_force	let tmux_cwd = crate::services::platform::tmux::pane_current_path(&tmux_name);
+src/services/discord/tmux_reaper.rs:329	terminate	BYPASS	clean_orphan_sessions	crate::services::platform::tmux::kill_session(
+src/services/discord/tmux_reaper.rs:361	observe	BYPASS	reap_dead_tmux_sessions	tokio::task::spawn_blocking(|| crate::services::platform::tmux::list_session_names()),
+src/services/discord/tmux_reaper.rs:553	terminate	BYPASS	reap_listed_dead_sessions	crate::services::platform::tmux::kill_session_output(
+src/services/discord/tmux_reaper.rs:674	terminate	BYPASS	reap_fresh_routine_orphan	crate::services::platform::tmux::kill_session(
+src/services/discord/tmux_reaper.rs:1542	terminate	BYPASS	kill_unified_thread_session	"crate::services::platform::tmux::kill_session(&target, ""unified-thread run completed"");"
+src/services/discord/tmux_watcher/completion_gate.rs:196	observe	BYPASS	run_tui_completion_gate	crate::services::tmux_diagnostics::tmux_session_pane_liveness(
+src/services/discord/tmux_watcher/liveness.rs:391	observe	BYPASS	pane_streaming	let Some(pane) = crate::services::platform::tmux::capture_pane(tmux_session_name, -160) else {
+src/services/discord/tmux_watcher/placeholder_reclaim.rs:169	create	TEST_OR_HELPER	live_tmux_redrive_reclaim_cycle_terminates_4299	"crate::services::platform::tmux::create_session(&tmux_session, None, ""sleep 60"")"
+src/services/discord/tmux_watcher/placeholder_reclaim.rs:347	terminate	TEST_OR_HELPER	live_tmux_redrive_reclaim_cycle_terminates_4299	"let _ = crate::services::platform::tmux::kill_session(&tmux_session, ""#4299 E2E cleanup"");"
+src/services/discord/tmux_watcher/post_stream_exit.rs:245	observe	BYPASS	run_post_stream_exit	crate::services::platform::tmux::capture_pane(&sess, -1000)
+src/services/discord/tmux_watcher/post_stream_exit.rs:273	terminate	BYPASS	run_post_stream_exit	crate::services::platform::tmux::kill_session(
+src/services/discord/tmux_watcher/pre_emit_guard.rs:330	terminate	BYPASS	run_pre_emit_guard	crate::services::platform::tmux::kill_session(
+src/services/discord/tmux_watcher/prompt_observe.rs:97	observe	BYPASS	observe_legacy_wrapper_direct_prompt_from_pane	let Some(pane) = crate::services::platform::tmux::capture_pane(tmux_session_name, -160) else {
+src/services/discord/tmux_watcher/terminal_abort_exits.rs:148	terminate	BYPASS	handle_terminal_abort_exits	crate::services::platform::tmux::kill_session(
+src/services/discord/tmux_watcher/terminal_token_update.rs:113	input	BYPASS	run_watcher_terminal_token_update	"crate::services::platform::tmux::send_keys(&name, &[""/compact"", ""Enter""])"
+src/services/discord/tui_prompt_relay/claude_idle_tail.rs:442	observe	BYPASS	local_tmux_pane_live	&& crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
+src/services/discord/tui_prompt_relay/claude_source.rs:186	observe	BYPASS	other_session_claimed_transcripts	if let Ok(sessions) = crate::services::platform::tmux::list_session_names() {
+src/services/discord/tui_prompt_relay/codex_idle_rollout.rs:693	observe	BYPASS	run_codex_idle_response_tail	|| crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_for_reader),
+src/services/discord/tui_prompt_relay/rehydration.rs:72	observe	BYPASS	claude_tui_session_is_dead_orphaned	|| crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
+src/services/discord/tui_prompt_relay/rehydration.rs:94	observe	BYPASS	pane_is_confirmed_dead_orphaned	if has_live_pane() {
+src/services/discord/tui_prompt_relay/rehydration.rs:185	observe	BYPASS	codex_tui_session_is_dead_orphaned	|| crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
+src/services/discord/tui_prompt_relay/rehydration.rs:204	observe	BYPASS	codex_pass_tmux_session_names	crate::services::platform::tmux::list_session_names()
+src/services/discord/tui_prompt_relay/rehydration.rs:213	observe	BYPASS	codex_pass_pane_is_live	crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
+src/services/discord/tui_prompt_relay/rehydration.rs:270	recover	BYPASS	rehydrate_existing_claude_tui_bindings	super::super::recovery_engine::herdr_reader::reconnect_restarted_herdr_with_shared(
+src/services/discord/tui_prompt_relay/rehydration.rs:668	recover	BYPASS	rehydrate_existing_codex_tui_bindings	super::super::recovery_engine::herdr_reader::reconnect_restarted_herdr_with_shared(
+src/services/discord/tui_prompt_relay/rehydration.rs:964	observe	BYPASS	codex_tui_rehydrate_observations	.then(|| crate::services::platform::tmux::pane_current_path(tmux_session_name))
+src/services/discord/tui_prompt_relay/rehydration.rs:1167	observe	BYPASS	rehydrated_codex_tui_binding_for_tmux_session	let cwd = crate::services::platform::tmux::pane_current_path(tmux_session_name)?;
+src/services/discord/turn_bridge/retry_state.rs:376	terminate	BYPASS	kill_session_before_retry	crate::services::platform::tmux::kill_session(
+src/services/discord/turn_bridge/tmux_runtime.rs:258	input	BYPASS	interrupt_on	crate::services::platform::tmux::send_keys(&session_for_send, &keys)
+src/services/discord/turn_bridge/tmux_runtime.rs:638	observe	BYPASS	hard_stop_unresponsive_provider_cli_turn	.execution_pid(HostSessionRef::tmux(&session_for_probe))
+src/services/discord/turn_bridge/tmux_runtime/claude_stop_delivery.rs:415	observe	BYPASS	interrupt_observed_claude_session	crate::services::platform::tmux::capture_pane(&session_for_probe, -160)
+src/services/discord/turn_bridge/tmux_runtime/claude_stop_delivery.rs:549	observe	BYPASS	interrupt_observed_claude_session	let pane = crate::services::platform::tmux::capture_pane(&session_for_task, -160)
+src/services/discord/turn_bridge/tmux_runtime/claude_stop_delivery.rs:579	input	BYPASS	interrupt_observed_claude_session	"match crate::services::platform::tmux::send_keys(&session_for_task, &[""Escape""]) {"
+src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs:801	input	BYPASS	deliver	let result = match target.send_keys(&[HostKey::Escape]) {
+src/services/discord/turn_bridge/tmux_runtime/judged_stop.rs:411	interrupt	BYPASS	begin_stop	return super::owned_input_stop::interrupt(shared, channel, reason).await;
+src/services/discord/turn_bridge/tmux_runtime/judged_stop.rs:420	interrupt	BYPASS	begin_stop	CommandStop::Observed(stop.interrupt(reason).await.sent_keys)
+src/services/discord/turn_bridge/tmux_runtime/native_stop.rs:51	observe	BYPASS	confirmed_missing_session	match session_presence(session) {
+src/services/discord/turn_bridge/tmux_runtime/process_table.rs:63	observe	BYPASS	provider_cli_pid_in_tmux	let pane_pid = crate::services::platform::tmux::pane_pid(tmux_session_name)?;
+src/services/discord/turn_bridge/tmux_runtime/process_table.rs:93	observe	BYPASS	pane_foreground_is_provider_wrapper	let Some(pane_pid) = crate::services::platform::tmux::pane_pid(tmux_session_name) else {
+src/services/discord/turn_presence/activity.rs:1083	observe	BYPASS	session_present	session_presence(session) != SessionPresence::Missing
+src/services/discord/turn_presence/activity.rs:1096	observe	BYPASS	pane_busy	crate::services::platform::tmux::capture_pane(session, -40).is_some_and(|pane| {
+src/services/discord/turn_presence/activity/unbound/live.rs:62	observe	BYPASS	local_trace	process: crate::services::session_backend::process_session_pid(name),
+src/services/discord/watchers/codex_tui_restore.rs:403	observe	BYPASS	codex_resume_session_id_from_tmux_pane	let pane_pid = crate::services::platform::tmux::pane_pid(tmux_session_name)?;
+src/services/discord/watchers/lifecycle/restore.rs:890	terminate	BYPASS	clean_dead_startup_session	crate::services::platform::tmux::kill_session(&name, reason);
+src/services/dispatched_sessions/herdr_kill/effects.rs:53	terminate	LIFECYCLE_ENTRY	(manual entrypoint/FIFO supplement)	pub(super) async fn herdr_force_kill_effects(
+src/services/dispatched_sessions/hosted_cleanup/thread_gc.rs:26	observe	BYPASS	probe_locally_owned_tmux	session_presence(&tmux_name)
+src/services/dispatched_sessions/output.rs:34	observe	BYPASS	capture	crate::services::platform::tmux::capture_pane(session_name, -lines.clamp(1, 2000))
+src/services/dispatched_sessions/tmux_cleanup.rs:134	observe	BYPASS	kill_tmux_session_impl	let tmux_presence = crate::services::platform::tmux::session_presence(&tmux_name);
+src/services/dispatched_sessions/tmux_cleanup.rs:338	terminate	BYPASS	kill_tmux_session_impl	crate::services::platform::tmux::kill_session(&tmux_name, reason)
+src/services/herdr_launch/runtime_marker.rs:90	observe	BYPASS	clear_owned	if crate::services::session_backend::process_session_pid(logical).is_some()
+src/services/herdr_launch/runtime_marker.rs:91	observe	BYPASS	clear_owned	|| tmux::session_presence(logical) != SessionPresence::Missing
+src/services/maintenance/jobs/worktree_orphan_sweep.rs:619	observe	BYPASS	collect_live_tmux_pane_paths	let sessions = crate::services::platform::tmux::list_session_names().ok()?;
+src/services/maintenance/jobs/worktree_orphan_sweep.rs:621	observe	BYPASS	collect_live_tmux_pane_paths	crate::services::platform::tmux::pane_current_path(session)
+src/services/opencode.rs:1084	create	BYPASS	run_session	let session_id = create_session(base_url, auth, cancel_token)?;
+src/services/platform/tmux.rs:159	observe	ADAPTER_PRIMITIVE	has_session	session_presence(session_name) == SessionPresence::Present
+src/services/platform/tmux.rs:173	create	ADAPTER_PRIMITIVE	create_session	create_session_with_identity(session_name, working_dir, shell_command, &identity)
+src/services/platform/tmux.rs:184	create	ADAPTER_PRIMITIVE	create_session_with_identity	"cmd.args([""new-session"", ""-d"", ""-s"", session_name]);"
+src/services/platform/tmux.rs:210	create	ADAPTER_PRIMITIVE	respawn_dead_pane	"cmd.args([""respawn-pane"", ""-t"", &exact_target(session_name)]);"
+src/services/platform/tmux.rs:407	terminate	ADAPTER_PRIMITIVE	kill_session_output_internal	"let output = tmux_output([""kill-session"", ""-t"", &exact_target(session_name)]);"
+src/services/platform/tmux.rs:439	terminate	ADAPTER_PRIMITIVE	kill_session_output_internal_with_timeout	"command.args([""kill-session"", ""-t"", &exact_target(session_name)]);"
+src/services/platform/tmux.rs:500	input	ADAPTER_PRIMITIVE	send_keys	"let mut args = vec![""send-keys"", ""-t"", &target];"
+src/services/platform/tmux.rs:517	input	ADAPTER_PRIMITIVE	send_keys_timeout	"let mut args = vec![""send-keys"", ""-t"", &target];"
+src/services/platform/tmux.rs:528	input	ADAPTER_PRIMITIVE	send_literal	"tmux_output([""send-keys"", ""-t"", &target, ""-l"", ""--"", text])"
+src/services/platform/tmux.rs:536	input	ADAPTER_PRIMITIVE	load_buffer	".args([""load-buffer"", ""-b"", buffer_name, ""-""])"
+src/services/platform/tmux.rs:563	input	ADAPTER_PRIMITIVE	paste_buffer_args	"let mut args = vec![""paste-buffer"", ""-p"", ""-r""];"
+src/services/platform/tmux.rs:575	input	ADAPTER_PRIMITIVE	paste_buffer_raw_args	"let mut args = vec![""paste-buffer"", ""-r""];"
+src/services/platform/tmux.rs:676	observe	ADAPTER_PRIMITIVE	capture_pane_command	"command.arg(""capture-pane"");"
+src/services/platform/tmux.rs:968	observe	ADAPTER_PRIMITIVE	has_live_pane	has_session(session_name)
+src/services/platform/tmux.rs:1385	observe	TEST_OR_HELPER	session_presence_distinguishes_missing_from_probe_failure	"session_presence(""AgentDesk-timeout-fixture""),"
+src/services/platform/tmux.rs:1390	observe	TEST_OR_HELPER	session_presence_distinguishes_missing_from_probe_failure	"session_presence(""AgentDesk-timeout-fixture""),"
+src/services/platform/tmux.rs:1395	observe	TEST_OR_HELPER	session_presence_distinguishes_missing_from_probe_failure	"session_presence(""AgentDesk-timeout-fixture""),"
+src/services/platform/tmux.rs:1422	observe	TEST_OR_HELPER	missing_socket_presence_requires_namespace_and_lstat	"session_presence(""fixture-session""),"
+src/services/platform/tmux.rs:1431	observe	TEST_OR_HELPER	missing_socket_presence_requires_namespace_and_lstat	"session_presence(""fixture-session""),"
+src/services/platform/tmux.rs:1440	observe	TEST_OR_HELPER	missing_socket_presence_requires_namespace_and_lstat	"session_presence(""fixture-session""),"
+src/services/platform/tmux.rs:1446	observe	TEST_OR_HELPER	missing_socket_presence_requires_namespace_and_lstat	"session_presence(""fixture-session""),"
+src/services/platform/tmux.rs:1454	observe	TEST_OR_HELPER	missing_socket_presence_requires_namespace_and_lstat	"session_presence(""fixture-session""),"
+src/services/platform/tmux.rs:1558	observe	TEST_OR_HELPER	pane_liveness_does_not_classify_probe_failure_as_dead	"pane_liveness(""AgentDesk-timeout-fixture""),"
+src/services/platform/tmux.rs:1564	observe	TEST_OR_HELPER	pane_liveness_does_not_classify_probe_failure_as_dead	"pane_liveness(""AgentDesk-timeout-fixture""),"
+src/services/platform/tmux.rs:1569	observe	TEST_OR_HELPER	pane_liveness_does_not_classify_probe_failure_as_dead	"pane_liveness(""AgentDesk-timeout-fixture""),"
+src/services/platform/tmux.rs:1581	input	TEST_OR_HELPER	send_keys_timeout_reports_hung_tmux	let error = send_keys_timeout(
+src/services/platform/tmux.rs:1597	input	TEST_OR_HELPER	send_keys_timeout_preserves_tmux_stderr_on_fast_failure	let output = send_keys_timeout(
+src/services/platform/tmux.rs:1618	terminate	TEST_OR_HELPER	kill_session_timeout_reports_hung_tmux	let error = kill_session_output_timeout(
+src/services/provider.rs:847	observe	BYPASS	tmux_session_fallback_ready_for_input	crate::services::platform::tmux::capture_pane(tmux_session_name, -80)
+src/services/provider/cancel_token_cleanup/executor.rs:371	terminate	BYPASS	kill_tmux_session_guarded	let killed = crate::services::platform::tmux::kill_session(name, &reason);
+src/services/provider/session_probe.rs:120	observe	BYPASS	tmux_session_alive	crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
+src/services/provider/session_probe.rs:264	observe	BYPASS	for_target	crate::services::session_backend::process_session_probe(name),
+src/services/provider_cli/session_guard.rs:206	observe	BYPASS	artifact_active	crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session);
+src/services/provider_teardown.rs:84	terminate	BYPASS	teardown_tmux	crate::services::platform::tmux::kill_session(tmux_name, reason);
+src/services/queue/herdr_stop.rs:13	interrupt	LIFECYCLE_ENTRY	(manual entrypoint/FIFO supplement)	pub(super) async fn live_turn(
+src/services/qwen/followup_reader.rs:15	input	BYPASS	(manual entrypoint/FIFO supplement)	.write(true)
+src/services/qwen/followup_reader.rs:22	input	BYPASS	(manual entrypoint/FIFO supplement)	BASE64_STANDARD.encode(prompt.as_bytes())
+src/services/qwen/session_lifecycle.rs:57	terminate	BYPASS	execute_streaming_local_tmux	crate::services::platform::tmux::kill_session(
+src/services/qwen/session_lifecycle.rs:83	terminate	BYPASS	execute_streaming_local_tmux	crate::services::platform::tmux::kill_session(
+src/services/qwen/session_lifecycle.rs:105	terminate	BYPASS	execute_streaming_local_tmux	crate::services::platform::tmux::kill_session(
+src/services/qwen/session_lifecycle.rs:220	create	BYPASS	execute_streaming_local_tmux	let tmux_result = crate::services::platform::tmux::create_session_with_identity(
+src/services/qwen/session_lifecycle.rs:351	terminate	BYPASS	execute_streaming_local_process	let _ = terminate_process_session(session_name);
+src/services/qwen/session_lifecycle.rs:352	observe	BYPASS	execute_streaming_local_process	} else if process_session_is_alive(session_name) {
+src/services/qwen/session_lifecycle.rs:361	interrupt	BYPASS	execute_streaming_local_process	send_process_session_input(session_name, &encoded, cancel_token.as_deref())?;
+src/services/qwen/session_lifecycle.rs:367	observe	BYPASS	execute_streaming_local_process	process_session_probe(session_name),
+src/services/qwen/session_lifecycle.rs:442	create	BYPASS	execute_streaming_local_process	let handle = backend.create_session(&config)?;
+src/services/qwen/session_lifecycle.rs:458	observe	BYPASS	execute_streaming_local_process	process_session_probe(session_name),
+src/services/routines/agent_executor/reliability.rs:259	observe	BYPASS	fresh_provider_session_failure	crate::services::platform::tmux::capture_pane_timeout(
+src/services/session_activity.rs:57	observe	BYPASS	resolve	let live = tmux_session_has_live_pane(tmux_name);
+src/services/session_backend.rs:279	create	BYPASS	create_session	self.create_session_with_command_env(config, |_| {})
+src/services/session_backend.rs:402	terminate	BYPASS	terminate_process_session	terminate_process_handle(handle);
+src/services/session_backend.rs:415	terminate	BYPASS	terminate_process_session_before_tmux	terminate_process_handle(handle);
+src/services/session_backend.rs:437	terminate	BYPASS	terminate_process_session_before_tmux	terminate_process_handle(entry.handle);
+src/services/session_backend.rs:541	terminate	BYPASS	process_session_available_for_followup	terminate_process_handle(handle);
+src/services/session_backend.rs:545	observe	BYPASS	process_session_available_for_followup	process_session_is_alive(session_name)
+src/services/session_backend.rs:572	observe	BYPASS	process_session_probe	SessionProbe::process(move || process_session_is_alive(&session_name))
+src/services/session_backend/auth_profiles.rs:13	terminate	BYPASS	prepare	terminate_process_handle(handle);
+src/services/session_backend/auth_profiles.rs:26	terminate	BYPASS	record_launch	terminate_process_handle(handle);
+src/services/session_host/herdr/launch_host.rs:307	observe	ADAPTER_PRIMITIVE	prepare_existing_policy	let peer = read.snapshot()?;
+src/services/session_host/herdr/policy/cache.rs:35	observe	ADAPTER_PRIMITIVE	next_restart	let peer = tokio::task::spawn_blocking(move || observed.snapshot())
+src/services/session_host/herdr/policy/cache.rs:72	observe	ADAPTER_PRIMITIVE	next_restart	validated.fast_revalidate(&source.snapshot()?)?;
+src/services/session_host/herdr/policy/checker.rs:30	observe	ADAPTER_PRIMITIVE	unchanged	"if self.source.snapshot().map_err(|e| format!(""peer: {e:?}""))? != *self.peer {"
+src/services/session_host/herdr/policy/consent/preview.rs:32	observe	ADAPTER_PRIMITIVE	peer_unchanged	"if source.snapshot().map_err(|e| format!(""peer: {e:?}""))? != self.peer {"
+src/services/session_host/herdr/policy/consent/preview.rs:39	observe	ADAPTER_PRIMITIVE	peer_unchanged	"if source.snapshot().map_err(|e| format!(""peer: {e:?}""))? != self.peer {"
+src/services/session_host/herdr/policy/consent/preview.rs:51	observe	ADAPTER_PRIMITIVE	prepare	"let peer = source.snapshot().map_err(|e| format!(""peer: {e:?}""))?;"
+src/services/session_host/herdr/policy/diagnostics.rs:240	observe	ADAPTER_PRIMITIVE	checker_detail	let value = snapshot(socket);
+src/services/session_host/herdr/policy/file.rs:112	observe	ADAPTER_PRIMITIVE	unchanged	let now = snapshot(&self.logical_path, self.limit, false, || {})?;
+src/services/session_host/herdr/policy/file.rs:141	observe	ADAPTER_PRIMITIVE	read	snapshot(path, Some(LIMIT), true, || {})
+src/services/session_host/herdr/policy/file.rs:146	observe	ADAPTER_PRIMITIVE	image	snapshot(path, None, false, || {}).map(|snapshot| snapshot.token)
+src/services/session_host/herdr/policy/types.rs:26	observe	ADAPTER_PRIMITIVE	revalidate	if source.snapshot()? != self.peer {
+src/services/session_host/herdr/policy/types.rs:31	observe	ADAPTER_PRIMITIVE	revalidate	if source.snapshot()? != self.peer {
+src/services/session_host/herdr_registry.rs:99	observe	ADAPTER_PRIMITIVE	capture_screen	self.0.capture_screen(session, scroll_back)
+src/services/session_host/herdr_registry.rs:106	observe	ADAPTER_PRIMITIVE	current_working_dir	self.0.current_working_dir(session)
+src/services/session_host/herdr_registry.rs:110	observe	ADAPTER_PRIMITIVE	execution_pid	self.0.execution_pid(session)
+src/services/session_host/herdr_registry.rs:307	observe	ADAPTER_PRIMITIVE	working_dir	entry.host.current_working_dir(reference).ok().flatten()
+src/services/session_host/legacy_collapse.rs:60	observe	ADAPTER_PRIMITIVE	has_live_pane_bool	tmux_diagnostics::tmux_session_has_live_pane(session.name)
+src/services/session_host/process_host.rs:39	observe	ADAPTER_PRIMITIVE	presence	if session_backend::process_session_pid(name).is_some() {
+src/services/session_host/process_host.rs:50	observe	ADAPTER_PRIMITIVE	liveness	if session_backend::process_session_is_alive(name) {
+src/services/session_host/process_host.rs:62	input	ADAPTER_PRIMITIVE	send_text	session_backend::send_process_session_input(session.legacy_name()?, text, None)
+src/services/session_host/process_host.rs:95	observe	ADAPTER_PRIMITIVE	execution_pid	Ok(session_backend::process_session_pid(session.legacy_name()?))
+src/services/session_host/tmux_host.rs:44	input	ADAPTER_PRIMITIVE	send_host_keys	tmux::send_keys(session, &names)
+src/services/session_host/tmux_host.rs:49	input	ADAPTER_PRIMITIVE	send_literal	"writer_lease::content(""tmux"", session, || tmux::send_literal(session, text))"
+src/services/session_host/tmux_host.rs:58	input	ADAPTER_PRIMITIVE	paste_buffer	"writer_lease::content(""tmux"", s, || tmux::paste_buffer(s, buffer, delete))"
+src/services/session_host/tmux_host.rs:66	observe	ADAPTER_PRIMITIVE	liveness_within	let probe = |name| tmux::pane_liveness_within(name, budget).into();
+src/services/session_host/tmux_host.rs:94	observe	ADAPTER_PRIMITIVE	presence	let probe = |name| tmux::session_presence(name).into();
+src/services/session_host/tmux_host.rs:106	observe	ADAPTER_PRIMITIVE	liveness	let probe = |name| tmux::pane_liveness(name).into();
+src/services/session_host/tmux_host.rs:117	input	ADAPTER_PRIMITIVE	send_text	map_output(self.send_literal(session.legacy_name()?, text))
+src/services/session_host/tmux_host.rs:125	input	ADAPTER_PRIMITIVE	send_keys	map_output(tmux::send_keys(session.legacy_name()?, keys))
+src/services/session_host/tmux_host.rs:129	input	ADAPTER_PRIMITIVE	interrupt	"self.send_keys(session, &[""C-c""])"
+src/services/session_host/tmux_host.rs:137	observe	ADAPTER_PRIMITIVE	capture_screen	tmux::capture_pane(session.legacy_name()?, scroll_back)
+src/services/session_host/tmux_host.rs:145	observe	ADAPTER_PRIMITIVE	current_working_dir	Ok(tmux::pane_current_path(session.legacy_name()?).map(PathBuf::from))
+src/services/session_host/tmux_host.rs:149	observe	ADAPTER_PRIMITIVE	execution_pid	Ok(tmux::pane_pid(session.legacy_name()?))
+src/services/termination_audit.rs:181	observe	BYPASS	record_termination_for_tmux	crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name);
+src/services/termination_audit.rs:183	observe	BYPASS	record_termination_for_tmux	crate::services::platform::tmux::capture_pane(tmux_session_name, -30)
+src/services/tmux_common.rs:543	observe	BYPASS	sniff_background_agent_pending	crate::services::platform::tmux::capture_pane(tmux_session_name, 0)
+src/services/tmux_diagnostics.rs:12	observe	BYPASS	tmux_session_exists	crate::services::platform::tmux::has_session(tmux_session_name)
+src/services/tmux_diagnostics.rs:37	observe	BYPASS	tmux_session_has_live_pane	crate::services::platform::tmux::has_live_pane(tmux_session_name)
+src/services/tmux_diagnostics.rs:46	observe	BYPASS	tmux_session_pane_liveness	crate::services::platform::tmux::pane_liveness(tmux_session_name)
+src/services/tmux_diagnostics.rs:124	observe	BYPASS	probe_tmux_session_pane_liveness	tokio::task::spawn_blocking(move || tmux_session_pane_liveness(&name))
+src/services/tmux_diagnostics.rs:134	observe	BYPASS	tmux_session_pane_cwd	crate::services::platform::tmux::pane_current_path(tmux_session_name)
+src/services/tmux_turn_liveness.rs:48	terminate	BYPASS	kill_proven_idle_provider_session	crate::services::platform::tmux::kill_session_output_timeout(
+src/services/tmux_turn_liveness.rs:97	observe	BYPASS	provider_session_is_proven_idle_under_authority	let Some(pane) = crate::services::platform::tmux::capture_pane_timeout(
+src/services/tmux_turn_liveness.rs:392	observe	BYPASS	independent_tmux_readiness	match session_presence(tmux_session_name) {
+src/services/tui_input/actor/pane.rs:109	input	BYPASS	run	"if matches!(args.first(), Some(&""send-keys"" | &""paste-buffer"")) {"
+src/services/tui_input/actor/pane.rs:173	input	BYPASS	submit_inner	"match self.run(&[""load-buffer"", ""-b"", &buffer, &path]) {"
+src/services/tui_input/actor/pane.rs:180	input	BYPASS	submit_inner	"""paste-buffer"","
+src/services/tui_input/actor/pane.rs:210	input	BYPASS	submit_inner	"match self.run(&[""send-keys"", ""-t"", &target, ""Enter""]) {"
+src/services/tui_input/actor/pane.rs:254	observe	BYPASS	capture	"""capture-pane"","
+src/services/tui_input/submission_tmux.rs:61	observe	BYPASS	capture_raw	"""capture-pane"","
+src/services/tui_input/submission_tmux.rs:82	input	BYPASS	send_literal	"self.run(&[""send-keys"", ""-t"", &target, ""-l"", ""--"", text])"
+src/services/tui_input/submission_tmux.rs:92	input	BYPASS	load_buffer	"self.run(&[""load-buffer"", ""-b"", buffer, &file.path().to_string_lossy()])"
+src/services/tui_input/submission_tmux.rs:103	input	BYPASS	paste_buffer	"let mut args = vec![""paste-buffer"", ""-p"", ""-r""];"
+src/services/tui_input/submission_tmux.rs:114	input	BYPASS	send_keys	"let mut args = vec![""send-keys"", ""-t"", &target];"
+src/services/tui_input/submission_tmux/guarded.rs:147	observe	BYPASS	capture_guarded	"""capture-pane"","
+src/services/tui_o/ownership/execution.rs:162	observe	THROUGH_TRAIT	read_observation	None if legacy_present().map_err(ReadError::temporary)? => {
+src/services/tui_prompt_dedupe/binding_context.rs:466	terminate	BYPASS	finish_spawn	crate::services::platform::tmux::kill_session(
+src/services/tui_prompt_dedupe/runtime_binding/codex_policy/absent_open.rs:92	observe	BYPASS	target_absent	tmux::session_presence(tmux) == SessionPresence::Missing
+src/services/tui_prompt_dedupe/runtime_binding/codex_policy/absent_open.rs:93	observe	BYPASS	target_absent	&& crate::services::session_backend::process_session_pid(tmux).is_none()
+src/services/tui_prompt_dedupe/runtime_binding/codex_policy/absent_open.rs:94	observe	BYPASS	target_absent	&& tmux::pane_liveness(tmux) == PaneLiveness::DeadOrAbsent
+src/services/tui_prompt_dedupe/runtime_binding/codex_policy/clear_relaunch.rs:118	observe	BYPASS	dead	tmux::session_presence(tmux) == SessionPresence::Missing
+src/services/tui_prompt_dedupe/runtime_binding/codex_policy/clear_relaunch.rs:119	observe	BYPASS	dead	&& crate::services::session_backend::process_session_pid(tmux).is_none()
+src/services/turn_lifecycle.rs:390	observe	BYPASS	stop_turn_with_policy	&& crate::services::platform::tmux::has_session(&probe_session_owned);
+src/services/turn_lifecycle.rs:478	observe	BYPASS	stop_turn_with_policy	if crate::services::platform::tmux::has_session(kill_target) {
+src/services/turn_lifecycle.rs:488	observe	BYPASS	stop_turn_with_policy	} else if crate::services::platform::tmux::has_session(kill_target) {
+src/services/turn_lifecycle.rs:489	terminate	BYPASS	stop_turn_with_policy	crate::services::platform::tmux::kill_session(
+src/services/turn_lifecycle.rs:516	observe	BYPASS	stop_turn_with_policy	&& !crate::services::platform::tmux::has_session(&probe_session_owned)
+src/services/turn_orchestrator/herdr_user_stop.rs:55	interrupt	DOMAIN_INTENT	(manual entrypoint/FIFO supplement)	pub(super) fn herdr_user_stop_intent(

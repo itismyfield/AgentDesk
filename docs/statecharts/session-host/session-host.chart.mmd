@@ -1,0 +1,31 @@
+%% Manual projection of SessionHost.tla actions; TLC evidence is in session-host.report.md.
+stateDiagram-v2
+    [*] --> Legacy
+    Legacy --> Pending: Reserve (durable nonce CAS)
+    Pending --> Created: CreateEffect
+    Created --> Bound: RecordLocation
+    Pending --> Down: Crash before host effect
+    Created --> Down: Crash after host effect
+    Bound --> Down: Crash (host keeps the same execution)
+    Down --> Boot: Boot
+    Boot --> Retired: ResolveEmpty (same-server complete census)
+    Boot --> Bound: Adopt (same nonce, pane, root, provider, source)
+    Boot --> Waiting: BootDone
+    Waiting --> Bound: Adopt after transient Unknown clears
+    Bound --> Stopping: RequestStop
+    Stopping --> Closing: BeginClose (row retained)
+    Closing --> Gone: CloseEffect (owned execution confirmed gone)
+    Gone --> Terminated: FinishTerminate
+    Closing --> Down: Crash (stop intent retained)
+    Gone --> Down: Crash before retirement
+    Waiting --> Closing: BeginClose after stop revalidation
+    Waiting --> Terminated: FinishTerminate after confirmed absence
+    note right of Waiting
+      Current process: registry lost, no adoption.
+      Current Windows Herdr: adapter unavailable.
+      Proposed: terminal attach is never used.
+    end note
+    note right of Closing
+      earlyRetire mutant claims termination while live.
+      replay mutant creates twice from the same Pending.
+    end note

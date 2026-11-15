@@ -1,0 +1,2 @@
+key: 650-session-host-windows-design
+| `session-host` Windows/common host (#7583 design 1) | `1974cff8a67bf5d1db041abfdd4d615c518ee104` | CurrentProcess loses its registry; CurrentWindowsHerdr lacks an adapter; replay, early-retire, no-wake and forgotten-identity controls are expected RED | 10 cfg / 29 TLC calls: 4 GREEN and 6 expected RED; same-execution reconnect is a liveness PROPERTY. Windows OS/Job/nonce contracts remain unmeasured. [Model/report](session-host/session-host.report.md), [design](../design/i7583-session-host.design.md). |
