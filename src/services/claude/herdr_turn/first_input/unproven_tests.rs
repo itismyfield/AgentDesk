@@ -18,15 +18,27 @@ enum Case {
     StartRefused,
     /// Restarted like the first, over a turn the transcript shows still running.
     Running,
+    /// Restarted like the first, keeping the start record its accepted resume left.
+    Recorded,
 }
 
+// The resumed cases restart without the start record a resume accepted before its build lacks.
 #[test]
 fn an_idle_source_that_proves_nothing_ends_retained_and_a_running_one_waits() {
-    for (case, channel) in [
+    owner_outcome(&[
         (Case::Restarted, 816_101u64),
         (Case::StartRefused, 816_102),
         (Case::Running, 816_103),
-    ] {
+    ]);
+}
+
+#[test]
+fn a_restarted_resume_with_its_recorded_start_takes_its_input_once() {
+    owner_outcome(&[(Case::Recorded, 816_104)]);
+}
+
+fn owner_outcome(cases: &[(Case, u64)]) {
+    for &(case, channel) in cases {
         let root = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(root.path());
         readiness::initialize();
@@ -54,7 +66,7 @@ fn an_idle_source_that_proves_nothing_ends_retained_and_a_running_one_waits() {
         let asked = json!({"type":"user","timestamp":old,"message":{"role":"user","content":"earlier prompt"}});
         let said = json!({"type":"assistant","timestamp":old,"message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}});
         match case {
-            Case::Restarted => rows(&[
+            Case::Restarted | Case::Recorded => rows(&[
                 asked,
                 said,
                 json!({"type":"system","subtype":"turn_duration","timestamp":old}),
@@ -120,6 +132,9 @@ fn an_idle_source_that_proves_nothing_ends_retained_and_a_running_one_waits() {
                 "{case:?}: the resumed start admits its first input before the restart"
             );
             tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
+            if case != Case::Recorded {
+                readiness::tests::lose_resume_record(NONCE);
+            }
             readiness::tests::daemon_restart(&logical);
             attach();
         }
@@ -179,16 +194,28 @@ fn an_idle_source_that_proves_nothing_ends_retained_and_a_running_one_waits() {
         let result = runtime
             .block_on(effect::run(&mailbox, Arc::new(|| 10_000), leaf))
             .unwrap();
-        assert!(
-            matches!(result, effect::Completion::NotSent(_)),
-            "{case:?}: {result:?}"
-        );
-        assert!(rig.sends().is_empty(), "{case:?}: no key reaches the pane");
         let read = || {
             runtime
                 .block_on(mailbox.v2_request(|slot| slot.as_ref().unwrap().json()))
                 .unwrap()
         };
+        if case == Case::Recorded {
+            assert_eq!(result, effect::Completion::Submitted);
+            let sends = rig.sends();
+            let pasted = sends
+                .iter()
+                .filter(|s| s["text"].as_str() == Some("\u{1b}[200~one original\u{1b}[201~"));
+            assert_eq!((sends.len(), pasted.count()), (2, 1), "{sends:?}");
+            assert!(read()["retained_inputs"].as_array().unwrap().is_empty());
+            drop(entered);
+            tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
+            continue;
+        }
+        assert!(
+            matches!(result, effect::Completion::NotSent(_)),
+            "{case:?}: {result:?}"
+        );
+        assert!(rig.sends().is_empty(), "{case:?}: no key reaches the pane");
         let snapshot = read();
         assert!(snapshot["head_injection"].is_null(), "{case:?}: {snapshot}");
         let (items, retained) = (
