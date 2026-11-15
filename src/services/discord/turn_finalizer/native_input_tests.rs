@@ -3789,13 +3789,13 @@ async fn native_8148_supply_late_offer_preserves_control_results_and_successors_
 async fn native_8148_supply_old_boot_debt_uses_original_generation_and_saved_result_pg() {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use std::sync::atomic::Ordering;
-    let db = TestPostgresDb::create().await;
-    let pool = db.connect_and_migrate().await;
     for (i, (saved, keyed)) in [(false, true), (true, true), (false, false)]
         .into_iter()
         .enumerate()
     {
         let runtime = crate::config::TestRuntimeRootGuard::new();
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
         let root = runtime.path().join("runtime");
         let f = Fixture::at(root.join("injected_frames.json"), 81489892 + i as u64, true);
         supply_rows(&f, false, true);
@@ -3868,6 +3868,8 @@ async fn native_8148_supply_old_boot_debt_uses_original_generation_and_saved_res
                 )
                 .is_some()
             );
+            pool.close().await;
+            db.drop().await;
             continue;
         }
         assert!(stored.cleanup_complete);
@@ -3897,9 +3899,9 @@ async fn native_8148_supply_old_boot_debt_uses_original_generation_and_saved_res
         let before = f.history.json().unwrap();
         capture.poll(&shared).await;
         assert_eq!(f.history.json().unwrap(), before);
+        pool.close().await;
+        db.drop().await;
     }
-    pool.close().await;
-    db.drop().await;
 }
 
 #[tokio::test]
