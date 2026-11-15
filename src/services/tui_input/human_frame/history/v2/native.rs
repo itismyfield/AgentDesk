@@ -1,6 +1,9 @@
 //! Native input evidence stays attached to its original registration through projection.
 use super::*;
 #[cfg(unix)]
+#[path = "native_barrier.rs"]
+pub(crate) mod barrier;
+#[cfg(unix)]
 #[path = "native_control.rs"]
 pub(crate) mod control;
 
@@ -139,6 +142,8 @@ impl Settlement {
         {
             return Err("native input ticket does not match registration".into());
         }
+        #[cfg(unix)]
+        self.barrier(&registration.namespace)?;
         Ok(())
     }
 }
@@ -596,6 +601,11 @@ impl Registry {
                     .ok_or("native ticket missing")?;
                 if current.ticket != *ticket {
                     return Err("native result ticket mismatch".into());
+                }
+                if outcome.extra.contains_key("native_proof")
+                    && current.extra.contains_key("foreign_prompt_barrier")
+                {
+                    return Err("native execution crosses foreign prompt barrier".into());
                 }
                 if current.outcome.as_ref() == Some(outcome) {
                     return Ok(());

@@ -332,7 +332,13 @@ impl NativeSources {
         source: &SourceId,
         origin: &super::super::input_notices::NoticeOrigin,
         snapshot: super::super::actor::native_input::Snapshot,
-    ) -> Result<super::super::input_facts::native::Observation, String> {
+    ) -> Result<
+        (
+            super::super::input_facts::native::Observation,
+            Vec<super::super::input_facts::native::Barrier>,
+        ),
+        String,
+    > {
         use super::super::input_facts::native::{Observation, registrations_fingerprint};
         let projection = self
             .seeds
@@ -352,15 +358,19 @@ impl NativeSources {
                 r.ticket.channel_id == channel && (r.ticket.source.is_none() || r.matches(&binding))
             })
             .collect();
-        Ok(Observation {
-            binding,
-            generation: snapshot.generation,
-            binding_seq: origin.binding_seq,
-            revision: self.revision,
-            through: projection.through(),
-            registrations_fingerprint: registrations_fingerprint(&registrations)?,
-            evidence: projection.evidence(&registrations)?,
-        })
+        let analysis = projection.analyze(&registrations)?;
+        Ok((
+            Observation {
+                binding,
+                generation: snapshot.generation,
+                binding_seq: origin.binding_seq,
+                revision: self.revision,
+                through: projection.through(),
+                registrations_fingerprint: registrations_fingerprint(&registrations)?,
+                evidence: analysis.evidence,
+            },
+            analysis.barriers,
+        ))
     }
 }
 
@@ -416,6 +426,31 @@ impl<B: BindingEvents> Sources<B> {
     }
 
     #[cfg(unix)]
+    fn native_idle(&self, source: &SourceId) -> bool {
+        matches!(&self.current, super::current::Current::Known(current) if current == source)
+            && self
+                .readers
+                .iter()
+                .find(|r| &r.source == source)
+                .is_some_and(|reader| {
+                    reader.pending.is_none()
+                        && reader.capture.as_ref().is_some_and(|capture| {
+                            self.native
+                                .as_ref()
+                                .and_then(|n| n.seeds.get(source))
+                                .is_some_and(|seed| {
+                                    seed.as_ref().is_ok_and(|seed| {
+                                        seed.idle()
+                                            && seed.through() == capture.captured_through()
+                                            && capture.read_through() == seed.through()
+                                            && capture.file_len().ok() == Some(seed.through())
+                                    })
+                                })
+                        })
+                })
+    }
+
+    #[cfg(unix)]
     pub(crate) async fn offer_native(
         &mut self,
         port: &super::super::actor::native_input::NativePort,
@@ -450,9 +485,45 @@ impl<B: BindingEvents> Sources<B> {
             let Some(native) = self.native.as_ref() else {
                 continue;
             };
-            let Ok(observed) = native.observe(self.channel, &source, &origin, snapshot) else {
+            let Ok((observed, barriers)) = native.observe(self.channel, &source, &origin, snapshot)
+            else {
                 continue;
             };
+            for proof in &barriers {
+                let Some(target) = proof.ticket.source.as_ref().map(|s| &s.target) else {
+                    continue;
+                };
+                let Ok(origin) = self.native_origin(&source, &record, Some(target)) else {
+                    continue;
+                };
+                let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
+                    continue;
+                };
+                let Ok((mut current, mut current_barriers)) =
+                    native.observe(self.channel, &source, &origin, snapshot)
+                else {
+                    continue;
+                };
+                let mut offered = observed.clone();
+                offered.binding_seq = origin.binding_seq;
+                offered.evidence.clear();
+                current.evidence.clear();
+                current_barriers
+                    .retain(|p| p.namespace == proof.namespace && p.ticket.key == proof.ticket.key);
+                if let Err(error) = port
+                    .inner
+                    .abstain(
+                        offered,
+                        current,
+                        (vec![proof.clone()], current_barriers),
+                        false,
+                        origin,
+                    )
+                    .await
+                {
+                    tracing::debug!(channel=self.channel, %error, "native barrier held");
+                }
+            }
             for index in 0..observed.evidence.len() {
                 let Some(target) = observed.evidence[index]
                     .ticket
@@ -470,7 +541,8 @@ impl<B: BindingEvents> Sources<B> {
                 let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
                     break;
                 };
-                let Ok(current) = native.observe(self.channel, &source, &origin, snapshot) else {
+                let Ok((current, _)) = native.observe(self.channel, &source, &origin, snapshot)
+                else {
                     break;
                 };
                 if let Err(error) = port
@@ -479,6 +551,46 @@ impl<B: BindingEvents> Sources<B> {
                     .await
                 {
                     tracing::debug!(channel=self.channel, %error, "native input offer held");
+                }
+            }
+            if self.native_idle(&source) {
+                let Ok(events) = self.bindings.binding_events_since(self.channel, 0) else {
+                    continue;
+                };
+                let Some(binding) = events.iter().rev().find(|e| {
+                    e.channel_id == self.channel
+                        && e.provider == self.provider
+                        && matches!(e.record, BindingRecord::Bound { .. })
+                }) else {
+                    continue;
+                };
+                let target = serde_json::json!({"owner":binding.tmux_session,"execution_nonce":binding.execution_nonce});
+                let Ok(origin) = self.native_origin(&source, &record, Some(&target)) else {
+                    continue;
+                };
+                let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
+                    continue;
+                };
+                let Some(native) = &self.native else {
+                    continue;
+                };
+                let Ok((mut current, _)) = native.observe(self.channel, &source, &origin, snapshot)
+                else {
+                    continue;
+                };
+                current.evidence.clear();
+                if let Err(error) = port
+                    .inner
+                    .abstain(
+                        current.clone(),
+                        current,
+                        (Vec::new(), Vec::new()),
+                        self.native_idle(&source),
+                        origin,
+                    )
+                    .await
+                {
+                    tracing::debug!(channel=self.channel, %error, "native Idle handoff held");
                 }
             }
         }

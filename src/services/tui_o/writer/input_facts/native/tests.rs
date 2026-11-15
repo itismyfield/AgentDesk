@@ -40,6 +40,9 @@ impl Fixture {
         }
     }
     fn register(&self, nonce: &str, body: &str) -> Ticket {
+        self.register_as(nonce, body, false)
+    }
+    fn register_as(&self, nonce: &str, body: &str, primary: bool) -> Ticket {
         let source = Source {
             target: json!({"host":"herdr","owner":"fixture","execution_nonce":"birth-1"}),
             provider: "claude".into(),
@@ -59,11 +62,19 @@ impl Fixture {
             "original":{"author_id":7},"payload":{"frame":body}}),
             )
             .unwrap();
+        let owning_episode = primary.then(|| {
+            crate::services::tui_input::human_frame::history::v2::native::Episode {
+                user_message_id: key["identity"]["primary"].as_u64().unwrap(),
+                turn_nonce: format!("episode-{nonce}"),
+                generation: 1,
+                extra: Default::default(),
+            }
+        });
         let ticket = Ticket {
             key,
             channel_id: self.binding.channel_id,
             source: Some(source),
-            owning_episode: None,
+            owning_episode,
             extra: Default::default(),
         };
         self.history.prepare_native("native-b1", &ticket).unwrap();
@@ -655,8 +666,16 @@ pub(in crate::services::tui_o::writer::input_facts) fn fold(
     records: &[Record],
     registrations: &[Registration],
 ) -> Result<Vec<Evidence>, String> {
+    analyze_batch(binding, records, registrations).map(|a| a.evidence)
+}
+
+fn analyze_batch(
+    binding: &SourceBinding,
+    records: &[Record],
+    registrations: &[Registration],
+) -> Result<Analysis, String> {
     if binding.provider != super::ShadowProvider::Claude {
-        return Ok(vec![]);
+        return Ok(Analysis::default());
     }
     let registered: Vec<_> = registrations
         .iter()
@@ -667,8 +686,37 @@ pub(in crate::services::tui_o::writer::input_facts) fn fold(
     let mut member: Vec<Option<Member>> = vec![None; registered.len()];
     let mut results: Vec<Option<Evidence>> = vec![None; registered.len()];
     let mut ambiguous = vec![false; registered.len()];
+    let mut barriers = vec![None; registered.len()];
     let mut unmatched_dequeue = false;
     for record in records {
+        if let Some(QueueRecord::Prompt(body)) = classify_queued_record(&record.value)
+            && record.value["isMeta"] != true
+            && record.value["isCompactSummary"] != true
+        {
+            for (i, owned) in member.iter().enumerate() {
+                if let Some(owned) = owned
+                    && owned.range.1 <= record.range.0
+                    && results[i].is_none()
+                    && barriers[i].is_none()
+                {
+                    match foreign_prompt(
+                        registrations,
+                        binding,
+                        registered[i],
+                        (owned.range, owned.row.as_deref()),
+                        (
+                            record.range,
+                            record.value["uuid"].as_str(),
+                            &frame_hashes(&body),
+                        ),
+                    ) {
+                        Ok(Some(barrier)) => barriers[i] = Some(barrier),
+                        Err(()) => ambiguous[i] = true,
+                        Ok(None) => {}
+                    }
+                }
+            }
+        }
         let mut opened_members = Vec::new();
         if record.value["sessionId"]
             .as_str()
@@ -724,6 +772,7 @@ pub(in crate::services::tui_o::writer::input_facts) fn fold(
                             if let Some(owned) = membership
                                 && owned.run == closing
                                 && !ambiguous[i]
+                                && barriers[i].is_none()
                             {
                                 results[i] = Some(Evidence {
                                     namespace: registered[i].namespace.clone(),
@@ -942,11 +991,27 @@ pub(in crate::services::tui_o::writer::input_facts) fn fold(
             }
         }
     }
-    Ok(results
-        .into_iter()
-        .enumerate()
-        .filter_map(|(i, result)| (!ambiguous[i]).then_some(result).flatten())
-        .collect())
+    let fingerprint = registrations_fingerprint(registrations)?;
+    Ok(Analysis {
+        evidence: results
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, r)| {
+                (!ambiguous[i] && barriers[i].is_none())
+                    .then_some(r)
+                    .flatten()
+            })
+            .collect(),
+        barriers: barriers
+            .into_iter()
+            .flatten()
+            .map(|mut proof| {
+                proof.through = records.last().map_or(0, |r| r.range.1);
+                proof.registrations_fingerprint = fingerprint.clone();
+                proof
+            })
+            .collect(),
+    })
 }
 
 fn accepts_row(registration: &Registration, value: &Value) -> bool {
@@ -976,4 +1041,187 @@ fn settle_removed(
         });
     }
     input.stage = Stage::Removed;
+}
+
+impl Fixture {
+    fn analysis(&self) -> Analysis {
+        let mut facts = InputFacts::open(self.binding.clone()).unwrap();
+        facts.observe_native().unwrap();
+        facts.poll(u64::MAX).unwrap();
+        let registrations = self.history.native_classification_registrations().unwrap();
+        let expected = analyze_batch(
+            &self.binding,
+            facts.native_records.as_ref().unwrap(),
+            &registrations,
+        )
+        .unwrap();
+        let bytes = std::fs::read(&self.binding.source.path).unwrap();
+        let (_, projection) = Projection::reopen(
+            self.binding.clone(),
+            bytes.len() as u64,
+            &hex::encode(sha2::Sha256::digest(&bytes)),
+        )
+        .unwrap();
+        let actual = projection.unwrap().analyze(&registrations).unwrap();
+        assert_eq!(actual, expected, "B1 batch and compact barrier must agree");
+        actual
+    }
+    fn receipt(&self, ticket: &Ticket, row: &str, body: &str) {
+        assert_eq!(
+            self.history.receipt(
+                "native-b1",
+                &ticket.key,
+                (&self.binding.source.path, 0, "user", Some(row), body)
+            ),
+            Some(true)
+        );
+    }
+}
+
+#[test]
+fn native_8148_barrier_settled_follower_keeps_both_result_orders() {
+    for follower_first in [false, true] {
+        let f = Fixture::new();
+        let a = f.register_as("primary", "primary request", true);
+        let b = f.register("follower", "follower request");
+        f.append(&[
+            user("a", "primary request"),
+            user("b", "follower request"),
+            close(),
+        ]);
+        f.receipt(&a, "a", "primary request");
+        f.receipt(&b, "b", "follower request");
+        let initial = f.analysis();
+        assert_eq!(initial.evidence.len(), 2);
+        assert!(initial.barriers.is_empty());
+        let order = if follower_first { [&b, &a] } else { [&a, &b] };
+        for (at, ticket) in order.into_iter().enumerate() {
+            let observed = f.analysis();
+            assert!(observed.barriers.is_empty());
+            let e = observed
+                .evidence
+                .iter()
+                .find(|e| e.ticket == *ticket)
+                .unwrap();
+            let outcome = crate::services::tui_input::human_frame::history::v2::native::Outcome {
+                disposition: e.disposition.clone(),
+                range: Some([e.range.0, e.range.1]),
+                extra: Default::default(),
+            };
+            assert!(
+                f.history
+                    .record_native_outcome("native-b1", ticket, &outcome)
+                    .unwrap()
+            );
+            let after = f.analysis();
+            assert_eq!(after.evidence.len(), 1 - at);
+            assert!(after.barriers.is_empty());
+        }
+    }
+}
+
+#[test]
+fn native_8148_barrier_foreign_prompt_suppresses_late_closers_without_replay() {
+    let f = Fixture::new();
+    let ticket = f.register("ours", "our request");
+    f.append(&[user("own", "our request")]);
+    f.receipt(&ticket, "own", "our request");
+    f.history.note_native_any_key("native-b1", &ticket).unwrap();
+    assert!(f.analysis().barriers.is_empty());
+    for row in [
+        json!({"type":"assistant","uuid":"answer","apiBlockIndex":0,"message":{"id":"answer","content":[{"type":"text","text":"answer"}],"stop_reason":"end_turn"}}),
+        json!({"type":"progress","data":{"type":"hook_progress","hookName":"Stop"}}),
+        user("foreign", "human direct input"),
+        close(),
+        close(),
+    ] {
+        f.append(&[row]);
+        let analysis = f.analysis();
+        assert!(analysis.evidence.is_empty());
+    }
+    let analysis = f.analysis();
+    assert_eq!(analysis.barriers.len(), 1);
+    assert!(
+        f.history
+            .record_native_barrier(&analysis.barriers[0])
+            .unwrap()
+    );
+    assert!(
+        !f.history
+            .record_native_barrier(&analysis.barriers[0])
+            .unwrap()
+    );
+    let settled = f.history.native_settlement("native-b1", &ticket).unwrap();
+    assert!(settled.outcome.is_none());
+    assert!(!settled.cleanup_complete);
+    assert!(f.analysis().evidence.is_empty());
+    assert!(f.analysis().barriers.is_empty());
+}
+
+#[test]
+fn native_8148_barrier_unresolved_follower_holds_until_receipt() {
+    let f = Fixture::new();
+    let a = f.register("primary", "a");
+    let b = f.register("follower", "b");
+    f.append(&[user("a", "a"), user("b", "b"), close()]);
+    f.receipt(&a, "a", "a");
+    let pending = f.analysis();
+    assert!(!pending.evidence.iter().any(|e| e.ticket == a));
+    assert!(pending.barriers.is_empty());
+    f.receipt(&b, "b", "b");
+    let settled = f.analysis();
+    assert_eq!(settled.evidence.len(), 2);
+    assert!(settled.barriers.is_empty());
+}
+
+#[test]
+fn native_8148_barrier_own_strict_before_foreign_keeps_result() {
+    let f = Fixture::new();
+    let a = f.register("primary", "a");
+    f.append(&[
+        user("a", "a"),
+        close(),
+        user("human", "human input"),
+        close(),
+    ]);
+    f.receipt(&a, "a", "a");
+    let settled = f.analysis();
+    assert_eq!(settled.evidence.len(), 1);
+    assert!(settled.barriers.is_empty());
+}
+
+#[test]
+fn native_8148_barrier_cold_follower_source_and_receipt_are_reclassified() {
+    let f = Fixture::new();
+    let a = f.register("primary", "a");
+    let source = a.source.as_ref().unwrap();
+    let key = json!({"identity":a.key["identity"],"attempt":{"nonce":"cold-follower",
+        "provider":"claude","target":source.target,"source":{"kind":"pre_source",
+        "expected_session_id":"parent","expected_transcript":source.transcript,"binding_watermark":null}}});
+    f.history
+        .prepare(
+            "native-b1",
+            &json!({"identity":key["identity"],"attempt":key["attempt"],
+        "original":{"author_id":7},"payload":{"frame":"b"}}),
+        )
+        .unwrap();
+    let b = Ticket {
+        key,
+        channel_id: a.channel_id,
+        source: None,
+        owning_episode: None,
+        extra: Default::default(),
+    };
+    f.history.prepare_native("native-b1", &b).unwrap();
+    f.append(&[user("a", "a"), user("b", "b"), close()]);
+    f.receipt(&a, "a", "a");
+    let pending = f.analysis();
+    assert!(pending.evidence.is_empty());
+    assert!(pending.barriers.is_empty());
+    f.history.bind("native-b1", &b.key, source).unwrap();
+    assert!(f.analysis().evidence.is_empty());
+    f.receipt(&b, "b", "b");
+    let settled = f.analysis();
+    assert_eq!(settled.evidence.len(), 2);
+    assert!(settled.barriers.is_empty());
 }

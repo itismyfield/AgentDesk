@@ -11,6 +11,8 @@ use crate::services::tui_o::writer::{
     input_notices::NoticeOrigin,
 };
 use std::sync::Mutex;
+#[path = "native_abstain.rs"]
+pub(in crate::services::discord::turn_finalizer) mod native_abstain;
 
 pub(in crate::services::discord::turn_finalizer) type Custody = (
     Vec<NativePrepared>,
@@ -18,6 +20,7 @@ pub(in crate::services::discord::turn_finalizer) type Custody = (
 );
 #[derive(Clone)]
 enum Job {
+    Abstain(Box<native_abstain::Work>),
     Live(Box<NativeCleanup>, Registry),
     Boot(
         Box<super::super::native_prepare::RestoredInput>,
@@ -154,6 +157,7 @@ impl Port {
     }
     async fn submit(&self, id: &str, job: Job) -> Result<bool, String> {
         let done = match job {
+            Job::Abstain(_) => return Ok(false),
             Job::Live(work, history) => {
                 let e = &work.admission.evidence;
                 let settlement = history.native_settlement(&e.namespace, &e.ticket)?;
@@ -196,6 +200,120 @@ impl Port {
         }
         Ok(done)
     }
+    async fn abstain(
+        &self,
+        observed: Observation,
+        current: Observation,
+        proofs: (
+            Vec<crate::services::tui_o::writer::input_facts::native::Barrier>,
+            Vec<crate::services::tui_o::writer::input_facts::native::Barrier>,
+        ),
+        idle: bool,
+        origin: NoticeOrigin,
+    ) -> Result<(), String> {
+        self.origin(&origin)?;
+        if observed != current
+            || proofs.0 != proofs.1
+            || current.binding.channel_id != self.channel
+            || current.binding.source != origin.record.source
+            || current.binding_seq != origin.binding_seq
+            || current.generation != self.shared.restart.current_generation
+        {
+            return Err("abstain observation superseded".into());
+        }
+        let (live, boot) = self.custody().await?;
+        for proof in &proofs.0 {
+            let source = proof
+                .ticket
+                .source
+                .as_ref()
+                .ok_or("abstain source missing")?;
+            check_target(&source.target, &origin)?;
+            if !(crate::services::tui_o::writer::input_facts::native::Registration {
+                namespace: proof.namespace.clone(),
+                ticket: proof.ticket.clone(),
+                frame_hash: String::new(),
+                receipts: Vec::new(),
+                candidate: false,
+            })
+            .matches(&current.binding)
+                || proof.through != current.through
+            {
+                return Err("abstain source mismatch".into());
+            }
+            let history = live
+                .iter()
+                .find(|p| p.namespace == proof.namespace && p.ticket.key == proof.ticket.key)
+                .map(|p| p.history.clone())
+                .or_else(|| {
+                    boot.iter()
+                        .find(|p| {
+                            let (ns, t) = p.identity();
+                            ns == proof.namespace && t.key == proof.ticket.key
+                        })
+                        .and_then(|_| Registry::runtime().ok())
+                })
+                .ok_or("abstain custody missing")?;
+            history.record_native_barrier(proof)?;
+        }
+        if !idle {
+            return Ok(());
+        }
+        let events = self.bindings.binding_events_since(self.channel, 0)?;
+        if events
+            .iter()
+            .rev()
+            .find(|e| {
+                e.channel_id == self.channel
+                    && e.provider == current.binding.provider
+                    && matches!(e.record, BindingRecord::Bound { .. })
+            })
+            .is_none_or(|e| e.seq != origin.binding_seq)
+        {
+            return Err("abstain current binding changed".into());
+        }
+        for input in live {
+            let ticket = input.bound_ticket(&input.history)?;
+            let saved = input.history.native_settlement(&input.namespace, &ticket)?;
+            if saved.outcome.is_some() || saved.barrier(&input.namespace)?.is_none() {
+                continue;
+            }
+            let id = input_id(&input.namespace, &ticket)?;
+            let retained = self
+                .pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&id)
+                .cloned();
+            let work = match retained {
+                Some(Job::Abstain(work)) => *work,
+                _ => native_abstain::Work::capture(input, &self.shared)?,
+            };
+            self.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id.clone(), Job::Abstain(Box::new(work.clone())));
+            if work.drive(&self.shared).await? {
+                self.pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&id);
+            }
+        }
+        if !boot.is_empty() {
+            let history = Registry::runtime()?;
+            for input in boot {
+                let input = input.refreshed(&history)?;
+                let (ns, ticket) = input.identity();
+                let saved = history.native_settlement(ns, ticket)?;
+                if saved.outcome.is_none() && saved.barrier(ns)?.is_some() && !input.settled {
+                    input.abstain_idle(&self.shared, &history).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn offer_input(
         &self,
         observed: Observation,
@@ -341,6 +459,19 @@ impl EvidencePort for Port {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + '_>>
     {
         Box::pin(self.offer_input(observed, current, index, origin))
+    }
+    fn abstain(
+        &self,
+        observed: Observation,
+        current: Observation,
+        proofs: (
+            Vec<crate::services::tui_o::writer::input_facts::native::Barrier>,
+            Vec<crate::services::tui_o::writer::input_facts::native::Barrier>,
+        ),
+        idle: bool,
+        origin: NoticeOrigin,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(Port::abstain(self, observed, current, proofs, idle, origin))
     }
     fn retry(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async move {

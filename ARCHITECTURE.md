@@ -3242,6 +3242,7 @@ src/
 │   │   │   ├── finalize.rs
 │   │   │   ├── finalize_context.rs
 │   │   │   ├── guarded_finish_residue.rs
+│   │   │   ├── native_abstain.rs
 │   │   │   ├── native_input_tests.rs
 │   │   │   ├── native_policy.rs
 │   │   │   ├── native_prepare.rs
@@ -4099,6 +4100,7 @@ src/
 │   │   │   │   │   ├── collision.rs
 │   │   │   │   │   ├── migration.rs
 │   │   │   │   │   ├── native.rs
+│   │   │   │   │   ├── native_barrier.rs
 │   │   │   │   │   ├── native_control.rs
 │   │   │   │   │   ├── native_tests.rs
 │   │   │   │   │   └── s4_tests.rs

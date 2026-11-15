@@ -131,6 +131,18 @@ impl TurnFinalizer {
 
 pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, LedgerEntry>) {
     match msg {
+        FinalizeMsg::NativeAbstain {
+            input,
+            finish,
+            shared,
+            ack,
+        } => {
+            let _ = ack.send(
+                super::terminal_handler::native_supply::native_abstain::handle(
+                    *input, finish, &shared, ledger,
+                ),
+            );
+        }
         FinalizeMsg::NativeRemember { work, ack } => {
             let _ = ack.send(super::terminal_handler::native_supply::remember(
                 ledger, &work,

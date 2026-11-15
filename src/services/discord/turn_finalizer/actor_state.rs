@@ -161,6 +161,13 @@ pub(super) enum FinalizeMsg {
         ack: oneshot::Sender<Result<(), String>>,
     },
     #[cfg(unix)]
+    NativeAbstain {
+        input: Box<super::terminal_handler::NativePrepared>,
+        finish: Option<bool>,
+        shared: Arc<SharedData>,
+        ack: oneshot::Sender<Result<bool, String>>,
+    },
+    #[cfg(unix)]
     NativeInputs {
         channel: ChannelId,
         ack: oneshot::Sender<super::terminal_handler::native_supply::Custody>,

@@ -4337,3 +4337,571 @@ async fn native_8148_resume_coexisting_boot_and_live_use_their_own_bindings_pg()
 async fn native_8148_resume_binding_pending_resolved_pg() {
     supply_resume_binding("incarnation-2", false, true).await;
 }
+
+fn barrier_receipt(f: &Fixture) {
+    let source = f.ticket.source.as_ref().unwrap();
+    assert_eq!(
+        f.history.receipt(
+            "native-fixture",
+            &f.ticket.key,
+            (
+                &source.transcript,
+                0,
+                "user",
+                Some("own"),
+                "한국어 원본 입력"
+            )
+        ),
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn native_8148_barrier_live_idle_after_neutral_bridge_releases_once_pg() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use std::sync::atomic::Ordering;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let f = Fixture::at(
+        runtime.path().join("runtime/abstain-live.json"),
+        81480461,
+        true,
+    );
+    supply_rows(&f, false, false);
+    let source = f.ticket.source.as_ref().unwrap();
+    let all = std::fs::read_to_string(&source.transcript).unwrap();
+    let lines: Vec<_> = all.lines().collect();
+    std::fs::write(
+        &source.transcript,
+        lines[..lines.len() - 1].join("\n") + "\n",
+    )
+    .unwrap();
+    let shared = b2b_shared(Some(pool.clone()));
+    let (key, actor) = b2b_active(&f, &shared).await;
+    let row = b2b_row(&f);
+    supply_register(&f, &shared, key, Some(actor.clone())).await;
+    shared
+        .turn_finalizer
+        .register_start_with_completion_admission(
+            key,
+            ProviderKind::Claude,
+            RelayOwnerKind::None,
+            CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
+            &shared,
+        );
+    assert!(
+        super::super::super::turn_bridge::native_input::neutral_exit(
+            &shared,
+            &ProviderKind::Claude,
+            &row,
+            &actor
+        )
+        .await
+    );
+    barrier_receipt(&f);
+    let mut events =
+        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+    let mut capture = SupplyCapture::new(&f, &runtime.path().join("abstain-store"), true);
+    capture.poll(&shared).await;
+    let held = f
+        .history
+        .native_settlement("native-fixture", &f.ticket)
+        .unwrap();
+    assert!(held.outcome.is_none());
+    assert!(held.barrier("native-fixture").unwrap().is_some());
+    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 1);
+    assert!(Arc::ptr_eq(
+        shared
+            .mailbox(key.channel_id)
+            .snapshot()
+            .await
+            .cancel_token
+            .as_ref()
+            .unwrap(),
+        &actor
+    ));
+    assert!(events.try_recv().is_err());
+    use std::io::Write;
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&source.transcript)
+            .unwrap(),
+        "{}",
+        lines.last().unwrap()
+    )
+    .unwrap();
+    capture
+        .sources
+        .capture(&mut capture.writer, &mut capture.deriver, &mut capture.owed)
+        .unwrap();
+    capture.poll(&shared).await;
+    assert!(
+        shared
+            .turn_finalizer
+            .native_settled(key, &actor)
+            .await
+            .unwrap()
+    );
+    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+    assert!(
+        shared
+            .mailbox(key.channel_id)
+            .snapshot()
+            .await
+            .cancel_token
+            .is_none()
+    );
+    assert!(
+        super::super::super::inflight::load_inflight_state_read_only(
+            &ProviderKind::Claude,
+            key.channel_id.get()
+        )
+        .is_none()
+    );
+    assert!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .outcome
+            .is_none()
+    );
+    capture.poll(&shared).await;
+    let mut eligible = 0;
+    while let Ok(event) = events.try_recv() {
+        eligible += usize::from(event.queue_is_eligible());
+    }
+    assert_eq!(eligible, 1);
+    control_next_head(
+        shared.mailbox(key.channel_id),
+        key.channel_id.get(),
+        runtime.path(),
+    )
+    .await;
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_8148_barrier_released_token_retries_exact_row_without_finalize_pg() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use std::sync::atomic::Ordering;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(1).await;
+    let f = Fixture::at(
+        runtime.path().join("runtime/abstain-retry.json"),
+        81480462,
+        true,
+    );
+    supply_rows(&f, false, false);
+    let shared = b2b_shared(Some(pool.clone()));
+    let (key, actor) = b2b_active(&f, &shared).await;
+    b2b_row(&f);
+    supply_register(&f, &shared, key, Some(actor.clone())).await;
+    barrier_receipt(&f);
+    let capture = SupplyCapture::new(&f, &runtime.path().join("abstain-retry-store"), true);
+    let held_pg = pool.acquire().await.unwrap();
+    let mut events =
+        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+    let task = tokio::spawn({
+        let shared = shared.clone();
+        async move {
+            let mut capture = capture;
+            capture.poll(&shared).await;
+            capture
+        }
+    });
+    await_within(
+        async {
+            while shared
+                .mailbox(key.channel_id)
+                .snapshot()
+                .await
+                .cancel_token
+                .is_some()
+            {
+                tokio::task::yield_now().await;
+            }
+        },
+        WAIT_CAP,
+    )
+    .await;
+    assert!(
+        await_within(shared.turn_finalizer.native_scope(key, &actor), WAIT_CAP)
+            .await
+            .unwrap()
+    );
+    let row_path = super::super::super::inflight::inflight_state_path(
+        &super::super::super::inflight::inflight_runtime_root().unwrap(),
+        &ProviderKind::Claude,
+        key.channel_id.get(),
+    );
+    let lock_path = row_path.with_extension("json.lock");
+    std::fs::remove_file(&lock_path).unwrap();
+    std::fs::create_dir(&lock_path).unwrap();
+    drop(held_pg);
+    let mut capture = await_within(task, WAIT_CAP).await.unwrap();
+    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+    assert!(row_path.is_file());
+    assert!(
+        !shared
+            .turn_finalizer
+            .native_settled(key, &actor)
+            .await
+            .unwrap()
+    );
+    while let Ok(event) = events.try_recv() {
+        assert!(!event.queue_is_eligible());
+    }
+    std::fs::remove_dir(&lock_path).unwrap();
+    capture.poll(&shared).await;
+    assert!(!row_path.exists());
+    assert!(
+        shared
+            .turn_finalizer
+            .native_settled(key, &actor)
+            .await
+            .unwrap()
+    );
+    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+    let mut eligible = 0;
+    while let Ok(event) = events.try_recv() {
+        eligible += usize::from(event.queue_is_eligible());
+    }
+    assert_eq!(eligible, 1);
+    assert!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .outcome
+            .is_none()
+    );
+    control_next_head(
+        shared.mailbox(key.channel_id),
+        key.channel_id.get(),
+        runtime.path(),
+    )
+    .await;
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn native_8148_barrier_boot_none_outcome_uses_current_execution_idle_pg() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::tui_o::writer::binding::{BindingCause, BindingRecord};
+    use std::sync::atomic::Ordering;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let root = runtime.path().join("runtime");
+    let f = Fixture::at(root.join("injected_frames.json"), 81480463, true);
+    supply_rows(&f, false, false);
+    let original = b2b_shared(Some(pool.clone()));
+    let (key, actor) = b2b_active(&f, &original).await;
+    let row = b2b_row(&f);
+    supply_register(&f, &original, key, Some(actor)).await;
+    barrier_receipt(&f);
+    let source = f.ticket.source.as_ref().unwrap();
+    let bytes = std::fs::read(&source.transcript).unwrap();
+    use sha2::Digest;
+    let (_, projection) = crate::services::tui_o::writer::input_facts::native::Projection::reopen(
+        SourceBinding {
+            channel_id: f.ticket.channel_id,
+            provider: ShadowProvider::Claude,
+            source: SourceId {
+                session_id: source.session_id.clone(),
+                path: source.transcript.clone(),
+                dev: source.file[0],
+                ino: source.file[1],
+            },
+        },
+        bytes.len() as u64,
+        &hex::encode(sha2::Sha256::digest(&bytes)),
+    )
+    .unwrap();
+    let proof = projection
+        .unwrap()
+        .analyze(&f.history.native_classification_registrations().unwrap())
+        .unwrap()
+        .barriers
+        .remove(0);
+    f.history.record_native_barrier(&proof).unwrap();
+    let boot = super::super::native_prepare::BootInputs::prepare(&root, 2).unwrap();
+    let row_path = super::super::super::inflight::inflight_state_path(
+        &root,
+        &ProviderKind::Claude,
+        f.ticket.channel_id,
+    );
+    std::fs::remove_file(&row_path).unwrap();
+    let mut restored = b2b_shared(Some(pool.clone()));
+    Arc::get_mut(&mut restored)
+        .unwrap()
+        .restart
+        .current_generation = 2;
+    boot.restore(&restored).await.unwrap();
+    assert!(
+        !restored
+            .turn_finalizer
+            .native_boot_ready(key.channel_id)
+            .await
+    );
+    assert_eq!(restored.restart.global_active.load(Ordering::SeqCst), 0);
+    let mut capture = SupplyCapture::new(&f, &runtime.path().join("abstain-boot-store"), true);
+    let mut next = capture.bindings.events.lock().unwrap()[0].clone();
+    next.seq = 2;
+    next.execution_nonce = "incarnation-2".into();
+    if let BindingRecord::Bound { old, cause, .. } = &mut next.record {
+        *old = Some(SourceId {
+            session_id: source.session_id.clone(),
+            path: source.transcript.clone(),
+            dev: source.file[0],
+            ino: source.file[1],
+        });
+        *cause = BindingCause::Resume;
+    }
+    capture.bindings.events.lock().unwrap().push(next);
+    capture.bindings.notice.send_replace(2);
+    capture.sources.follow(&mut capture.writer).unwrap();
+    let mut events =
+        super::super::super::turn_completion_events::subscribe_turn_completion_events(&restored);
+    capture.poll(&restored).await;
+    assert!(
+        restored
+            .turn_finalizer
+            .native_boot_ready(key.channel_id)
+            .await
+    );
+    assert!(
+        restored
+            .mailbox(key.channel_id)
+            .snapshot()
+            .await
+            .cancel_token
+            .is_none()
+    );
+    assert_eq!(restored.restart.global_active.load(Ordering::SeqCst), 0);
+    assert!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .outcome
+            .is_none()
+    );
+    assert!(!row_path.exists());
+    assert_eq!(row.born_generation, 1);
+    super::super::native_prepare::BootInputs::prepare(&root, 2)
+        .unwrap()
+        .restore(&restored)
+        .await
+        .unwrap();
+    assert!(
+        restored
+            .turn_finalizer
+            .native_boot_ready(key.channel_id)
+            .await
+    );
+    capture.poll(&restored).await;
+    let mut eligible = 0;
+    while let Ok(event) = events.try_recv() {
+        eligible += usize::from(event.queue_is_eligible());
+    }
+    assert_eq!(eligible, 1);
+    control_next_head(
+        restored.mailbox(key.channel_id),
+        key.channel_id.get(),
+        runtime.path(),
+    )
+    .await;
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn native_8148_barrier_rebound_epoch_preserves_replacement_pg() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::tui_o::writer::input_notices::NoticeOrigin;
+    use std::sync::atomic::Ordering;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let f = Fixture::at(
+        runtime.path().join("runtime/abstain-epoch.json"),
+        81480464,
+        true,
+    );
+    supply_rows(&f, false, false);
+    let shared = b2b_shared(Some(pool.clone()));
+    let (key, actor) = b2b_active(&f, &shared).await;
+    let row = b2b_row(&f);
+    supply_register(&f, &shared, key, Some(actor.clone())).await;
+    barrier_receipt(&f);
+    let (ack, rx) = oneshot::channel();
+    shared
+        .turn_finalizer
+        .tx
+        .send(super::super::FinalizeMsg::NativeInputs {
+            channel: key.channel_id,
+            ack,
+        })
+        .unwrap();
+    let (inputs, _) =
+        crate::test_support::wait::await_within(rx, crate::test_support::wait::WAIT_CAP)
+            .await
+            .unwrap();
+    let prepared_before = inputs
+        .iter()
+        .find(|p| p.ticket.key == f.ticket.key)
+        .unwrap()
+        .started_before;
+    let capture = SupplyCapture::new(&f, &runtime.path().join("abstain-epoch-store"), true);
+    let source = f.ticket.source.as_ref().unwrap();
+    let bytes = std::fs::read(&source.transcript).unwrap();
+    use sha2::Digest;
+    let source_id = SourceId {
+        session_id: source.session_id.clone(),
+        path: source.transcript.clone(),
+        dev: source.file[0],
+        ino: source.file[1],
+    };
+    let binding = SourceBinding {
+        channel_id: f.ticket.channel_id,
+        provider: ShadowProvider::Claude,
+        source: source_id.clone(),
+    };
+    let (reader, projection) =
+        crate::services::tui_o::writer::input_facts::native::Projection::reopen(
+            binding.clone(),
+            bytes.len() as u64,
+            &hex::encode(sha2::Sha256::digest(&bytes)),
+        )
+        .unwrap();
+    let projection = projection.unwrap();
+    assert!(projection.idle());
+    assert_eq!(reader.read_through(), reader.file_len().unwrap());
+    let registrations = f.history.native_classification_registrations().unwrap();
+    let analysis = projection.analyze(&registrations).unwrap();
+    assert!(analysis.evidence.is_empty());
+    assert_eq!(analysis.barriers.len(), 1);
+    let observed = Observation {
+        binding,
+        generation: shared.restart.current_generation,
+        binding_seq: 1,
+        revision: 1,
+        through: bytes.len() as u64,
+        registrations_fingerprint:
+            crate::services::tui_o::writer::input_facts::native::registrations_fingerprint(
+                &registrations,
+            )
+            .unwrap(),
+        evidence: Vec::new(),
+    };
+    let origin = NoticeOrigin {
+        record: crate::services::tui_o::shadow::SourceRange {
+            source: source_id,
+            start: 0,
+            end: bytes.len() as u64,
+        },
+        logical_session: "fixture-pane".into(),
+        binding_seq: 1,
+        execution_nonce: "incarnation-1".into(),
+    };
+    let mut events =
+        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+    let port = super::native_supply::port(
+        f.ticket.channel_id,
+        shared.clone(),
+        capture.bindings.clone(),
+    );
+    let mut pending = port.inner.abstain(
+        observed.clone(),
+        observed,
+        (analysis.barriers.clone(), analysis.barriers),
+        true,
+        origin,
+    );
+    assert!(futures::poll!(pending.as_mut()).is_pending());
+    assert!(
+        crate::test_support::wait::await_within(
+            shared.turn_finalizer.native_scope(key, &actor),
+            crate::test_support::wait::WAIT_CAP
+        )
+        .await
+        .unwrap()
+    );
+    assert!(futures::poll!(pending.as_mut()).is_pending());
+    crate::test_support::wait::await_within(
+        shared.mailbox(key.channel_id).snapshot(),
+        crate::test_support::wait::WAIT_CAP,
+    )
+    .await;
+    assert!(futures::poll!(pending.as_mut()).is_pending());
+    assert!(
+        crate::test_support::wait::await_within(
+            shared.turn_finalizer.native_scope(key, &actor),
+            crate::test_support::wait::WAIT_CAP
+        )
+        .await
+        .unwrap()
+    );
+    let mailbox = shared.mailbox(key.channel_id);
+    let old = super::super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+        &shared, &ProviderKind::Claude, key.channel_id, key.user_msg_id.into(), actor.turn_nonce().map(str::to_owned),
+        std::time::Instant::now(), Some(actor.clone())).await;
+    assert!(old.removed_token.is_some());
+    mailbox
+        .restore_active_turn(
+            actor.clone(),
+            poise::serenity_prelude::UserId::new(7),
+            key.user_msg_id.into(),
+        )
+        .await;
+    shared.restart.global_active.store(1, Ordering::SeqCst);
+    let refused = super::super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+        &shared, &ProviderKind::Claude, key.channel_id, key.user_msg_id.into(), actor.turn_nonce().map(str::to_owned),
+        prepared_before, Some(actor.clone())).await;
+    assert!(
+        refused.removed_token.is_none(),
+        "the original native cutoff must protect the new epoch"
+    );
+    let result =
+        crate::test_support::wait::await_within(pending, crate::test_support::wait::WAIT_CAP).await;
+    let actual = mailbox.snapshot().await;
+    let row_after = super::super::super::inflight::load_inflight_state_read_only(
+        &ProviderKind::Claude,
+        key.channel_id.get(),
+    );
+    println!(
+        "ABSTAIN_EPOCH result={result:?} actor_present={} counter={} row_present={}",
+        actual.cancel_token.is_some(),
+        shared.restart.global_active.load(Ordering::SeqCst),
+        row_after.is_some()
+    );
+    assert!(
+        actual
+            .cancel_token
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &actor)),
+        "abstain released a rebound epoch"
+    );
+    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        serde_json::to_value(row_after.unwrap()).unwrap(),
+        serde_json::to_value(row).unwrap()
+    );
+    assert!(
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+            .outcome
+            .is_none()
+    );
+    while let Ok(event) = events.try_recv() {
+        assert!(!event.queue_is_eligible());
+    }
+    pool.close().await;
+    db.drop().await;
+}

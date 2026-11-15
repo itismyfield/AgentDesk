@@ -26,6 +26,19 @@ pub(crate) trait EvidencePort: Send + Sync {
         index: usize,
         origin: super::super::input_notices::NoticeOrigin,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + '_>>;
+    fn abstain(
+        &self,
+        _observed: super::super::input_facts::native::Observation,
+        _current: super::super::input_facts::native::Observation,
+        _proofs: (
+            Vec<super::super::input_facts::native::Barrier>,
+            Vec<super::super::input_facts::native::Barrier>,
+        ),
+        _idle: bool,
+        _origin: super::super::input_notices::NoticeOrigin,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(async { Err("native abstention unavailable".into()) })
+    }
     fn retry(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
 }
 

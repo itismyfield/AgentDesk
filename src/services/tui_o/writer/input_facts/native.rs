@@ -141,6 +141,57 @@ pub(crate) struct Evidence {
     pub(crate) disposition: Disposition,
 }
 
+#[cfg(unix)]
+pub(crate) use crate::services::tui_input::human_frame::history::v2::native::barrier::Barrier;
+#[cfg(unix)]
+#[derive(Default, Debug, PartialEq, Eq)]
+pub(crate) struct Analysis {
+    pub(crate) evidence: Vec<Evidence>,
+    pub(crate) barriers: Vec<Barrier>,
+}
+
+// Receipt identities outlive execution candidacy; unresolved ownership blocks a final decision.
+#[cfg(unix)]
+fn foreign_prompt(
+    registrations: &[Registration],
+    binding: &SourceBinding,
+    owner: &Registration,
+    (membership, member_row): ((u64, u64), Option<&str>),
+    (range, row, hashes): ((u64, u64), Option<&str>, &[String]),
+) -> Result<Option<Barrier>, ()> {
+    let Some(row) = row else { return Err(()) };
+    let Some(member_row) = member_row else {
+        return Err(());
+    };
+    let target = &owner.ticket.source.as_ref().ok_or(())?.target;
+    let same_execution = |r: &&Registration| {
+        r.ticket.channel_id == binding.channel_id && r.ticket.key["attempt"]["target"] == *target
+    };
+    if registrations.iter().filter(same_execution).any(|r| {
+        r.matches(binding)
+            && r.receipts.iter().any(|known| known == row)
+            && hashes.contains(&r.frame_hash)
+    }) {
+        return Ok(None);
+    }
+    if registrations.iter().filter(same_execution).any(|r| {
+        (r.ticket.source.is_none() || r.receipts.is_empty()) && hashes.contains(&r.frame_hash)
+    }) {
+        return Err(());
+    }
+    Ok(Some(Barrier {
+        namespace: owner.namespace.clone(),
+        ticket: owner.ticket.clone(),
+        membership_range: [membership.0, membership.1],
+        membership_row: member_row.into(),
+        foreign_range: [range.0, range.1],
+        foreign_row: row.into(),
+        foreign_hashes: hashes.to_vec(),
+        through: range.1,
+        registrations_fingerprint: String::new(),
+    }))
+}
+
 #[cfg(all(test, unix))]
 pub(super) use tests::fold;
 
@@ -235,11 +286,18 @@ mod projection {
             };
             Ok((capture, result))
         }
+        #[cfg(test)]
         pub(crate) fn evidence(
             &self,
             registrations: &[Registration],
         ) -> Result<Vec<Evidence>, String> {
+            self.analyze(registrations).map(|a| a.evidence)
+        }
+        pub(crate) fn analyze(&self, registrations: &[Registration]) -> Result<Analysis, String> {
             reduce(&self.binding, &self.facts, registrations)
+        }
+        pub(crate) fn idle(&self) -> bool {
+            self.state == super::super::TurnState::Idle
         }
         pub(crate) fn append(
             &mut self,
@@ -425,9 +483,9 @@ mod projection {
         binding: &SourceBinding,
         records: &[Fact],
         registrations: &[Registration],
-    ) -> Result<Vec<Evidence>, String> {
+    ) -> Result<Analysis, String> {
         if binding.provider != super::ShadowProvider::Claude {
-            return Ok(vec![]);
+            return Ok(Analysis::default());
         }
         let registered: Vec<_> = registrations
             .iter()
@@ -438,8 +496,32 @@ mod projection {
         let mut member: Vec<Option<Member>> = vec![None; registered.len()];
         let mut results: Vec<Option<Evidence>> = vec![None; registered.len()];
         let mut ambiguous = vec![false; registered.len()];
+        let mut barriers = vec![None; registered.len()];
         let mut unmatched_dequeue = false;
         for record in records {
+            if let Some(Event::Prompt(hashes)) = &record.event
+                && !record.meta
+            {
+                for (i, owned) in member.iter().enumerate() {
+                    if let Some(owned) = owned
+                        && owned.range.1 <= record.range.0
+                        && results[i].is_none()
+                        && barriers[i].is_none()
+                    {
+                        match foreign_prompt(
+                            registrations,
+                            binding,
+                            registered[i],
+                            (owned.range, owned.row.as_deref()),
+                            (record.range, record.row.as_deref(), hashes),
+                        ) {
+                            Ok(Some(barrier)) => barriers[i] = Some(barrier),
+                            Err(()) => ambiguous[i] = true,
+                            Ok(None) => {}
+                        }
+                    }
+                }
+            }
             let mut opened_members = Vec::new();
             for boundary in &record.boundaries {
                 match boundary {
@@ -489,6 +571,7 @@ mod projection {
                                 if let Some(owned) = membership
                                     && owned.run == closing
                                     && !ambiguous[i]
+                                    && barriers[i].is_none()
                                 {
                                     results[i] = Some(Evidence {
                                         namespace: registered[i].namespace.clone(),
@@ -708,11 +791,27 @@ mod projection {
         if unmatched_dequeue {
             return Err("native FIFO is missing its enqueue".into());
         }
-        Ok(results
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, result)| (!ambiguous[i]).then_some(result).flatten())
-            .collect())
+        let fingerprint = registrations_fingerprint(registrations)?;
+        Ok(Analysis {
+            evidence: results
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, result)| {
+                    (!ambiguous[i] && barriers[i].is_none())
+                        .then_some(result)
+                        .flatten()
+                })
+                .collect(),
+            barriers: barriers
+                .into_iter()
+                .flatten()
+                .map(|mut proof| {
+                    proof.through = records.last().map_or(0, |r| r.range.1);
+                    proof.registrations_fingerprint = fingerprint.clone();
+                    proof
+                })
+                .collect(),
+        })
     }
 
     fn accepts_row(registration: &Registration, value: &Fact) -> bool {

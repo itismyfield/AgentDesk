@@ -698,52 +698,46 @@ async fn isolated(kind: &str) {
         .await
         .unwrap();
     let writer = Writer::start(&store, &shared, channel.get(), log.clone(), posts.clone());
-    if strict {
-        let _next_key = await_within(received, WAIT_CAP / 2).await.unwrap();
+    let _next_key = await_within(received, WAIT_CAP / 2).await.unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    listening.processed(1, WAIT_CAP).await;
+    await_within(
+        async {
+            while shared.restart.global_active.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        },
+        WAIT_CAP,
+    )
+    .await;
+    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+    assert!(
+        shared
+            .turn_finalizer
+            .native_settled(key, &actor)
+            .await
+            .unwrap()
+    );
+    if !strict {
+        let history =
+            crate::services::tui_input::human_frame::history::v2::Registry::runtime().unwrap();
+        let registrations = history.native_classification_registrations().unwrap();
+        let originals: Vec<_> = registrations
+            .iter()
+            .filter(|r| r.ticket.key["identity"]["primary"] == first)
+            .collect();
+        assert_eq!(originals.len(), 1);
+        let original = history
+            .native_settlement(&originals[0].namespace, &originals[0].ticket)
+            .unwrap();
+        assert!(
+            original.outcome.is_none(),
+            "foreign closers must never execute the original"
+        );
+        assert!(original.barrier(&originals[0].namespace).unwrap().is_some());
         assert_eq!(count.load(Ordering::SeqCst), 1);
-        listening.processed(1, WAIT_CAP).await;
-        await_within(
-            async {
-                while shared.restart.global_active.load(Ordering::SeqCst) != 0 {
-                    tokio::task::yield_now().await;
-                }
-            },
-            WAIT_CAP,
-        )
-        .await;
-        assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
-        assert!(
-            shared
-                .turn_finalizer
-                .native_settled(key, &actor)
-                .await
-                .unwrap()
-        );
-    } else {
-        await_within(
-            async {
-                while !posts
-                    .to(channel.get())
-                    .iter()
-                    .any(|p| p.contains("body-N1-1"))
-                {
-                    tokio::task::yield_now().await;
-                }
-            },
-            WAIT_CAP,
-        )
-        .await;
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-        assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 1);
-        assert!(
-            !shared
-                .turn_finalizer
-                .native_settled(key, &actor)
-                .await
-                .unwrap()
-        );
     }
-    let last_body = if strict { "body-N1-2" } else { "body-N1-1" };
+    let last_body = "body-N1-2";
     await_within(
         async {
             while !posts
@@ -782,9 +776,7 @@ async fn isolated(kind: &str) {
         .await,
         "native pending and settled episodes both leave the bridge neutrally"
     );
-    let own: Vec<&str> = if !strict {
-        vec!["N1-1"]
-    } else if withdrawn {
+    let own: Vec<&str> = if withdrawn {
         vec!["N1-2"]
     } else {
         vec!["N1-1", "N1-2"]

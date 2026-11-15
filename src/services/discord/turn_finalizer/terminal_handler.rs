@@ -500,9 +500,12 @@ impl NativePrepared {
         shared: &Arc<SharedData>,
     ) -> Result<NativeCleanup, String> {
         let registrations: Vec<_> = history
-            .native_evidence_registrations()?
+            .native_classification_registrations()?
             .into_iter()
-            .filter(|r| r.matches(&observed.binding))
+            .filter(|r| {
+                r.ticket.channel_id == observed.binding.channel_id
+                    && (r.ticket.source.is_none() || r.matches(&observed.binding))
+            })
             .collect();
         let fingerprint =
             crate::services::tui_o::writer::input_facts::native::registrations_fingerprint(

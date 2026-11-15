@@ -159,7 +159,7 @@ barrier/filter 추가 +90~150, abstain live/boot/custody/general cleanup/ACK 및
 | aOwnSends/aNext | 실제 시험의 원 입력/다음 head 물리 주입 횟수 관측 |
 | bOwn/bOwnFirst | full identity·receipt로 확인한 자기 합류 / barrier 전 자기 strict closer 존재 |
 
-## TLC 검증 결과
+## 설계 2의 TLC 검증 결과(53e1c2d3c)
 
 기존126 + 신규29 = Native 관련 전체155cfg를 저장소 `scripts/ci/statecharts_tlc.py`로 실행했다. runner rc0, 기대 위반 집합 일치, 총645.24초. 원문은 레인 로그 `b2b3p4e-complete-tlc-normal.txt`, meta는 `b2b3p4e-complete-tlc-meta.json`이다. 이는 설계 모델 검증이며 제품 구현/회귀 시험 PASS가 아니다.
 
@@ -185,3 +185,5 @@ P2-1: 분류 집합의 수명과 실행 후보를 분리한다. A/B 결과 CAS �
 P2-2: token 해제 후 exact row 재시도는 별도 단계다. 전체 finalize 재호출 뮤턴트는 row 고착으로 RED여야 한다.
 P2-3: Pending 재진입마다 leads-to 의무를 검사하며 token 해제 뒤 Finalizing crash cfg를 추가한다. 재부팅 뒤 정리 누락 Before는 RED여야 한다.
 P2-4: aNext는 물리 주입 관측 횟수를 증가시킨다. 동일 head guard 제거 Before는 NoReplay 위반으로 RED여야 한다.
+
+구현 레그의 P2 보강 뒤 전체는158cfg다. 재부팅 후 Pending 의무의 leads-to, Finalizing crash, 물리 다음 head 횟수 증가를 포함하며 `b2b3p4i-final-tlc-meta.json`/`b2b3p4i-final-tlc.txt`에서158cfg rc0, 기대 위반 집합 일치를 확인했다. Boot ACK는 같은 actor ledger 안에서는 같은 full ticket/barrier에 대해 단조 유지한다. 실제 프로세스 재부팅은 기존 current Idle 관측으로 다시 정산한다.

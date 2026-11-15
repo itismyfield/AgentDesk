@@ -16,13 +16,14 @@ pub(in crate::services::discord::turn_finalizer) struct RestoredInput {
     record: RestoredRecord,
     row: Option<InflightTurnState>,
     key: TurnKey,
-    pub(super) settled: bool,
+    pub(in crate::services::discord::turn_finalizer) settled: bool,
 }
 
 #[derive(Clone, Copy)]
 pub(in crate::services::discord::turn_finalizer) enum RestoreStep {
     Register,
     Settle,
+    Abstain(bool),
 }
 
 impl RestoredInput {
@@ -113,6 +114,86 @@ impl RestoredInput {
         Ok(history
             .native_settlement(namespace, ticket)?
             .cleanup_complete)
+    }
+
+    pub(in crate::services::discord::turn_finalizer) async fn abstain_idle(
+        mut self,
+        shared: &Arc<SharedData>,
+        history: &Registry,
+    ) -> Result<(), String> {
+        self.record.settlement =
+            history.native_settlement(&self.record.namespace, &self.record.settlement.ticket)?;
+        self.record
+            .settlement
+            .barrier(&self.record.namespace)?
+            .ok_or("boot abstain barrier missing")?;
+        if self.record.settlement.outcome.is_some() {
+            return Ok(());
+        }
+        let mut wake = self.record.settlement.ticket.owning_episode.is_some();
+        if wake {
+            let slot = shared.mailbox(self.key.channel_id).snapshot().await;
+            if slot.active_user_message_id.map(|m| m.get()) == Some(self.key.user_msg_id)
+                && self
+                    .key
+                    .matches_episode_nonce(slot.active_turn_nonce.as_deref())
+            {
+                return Err("boot abstain cannot claim live actor".into());
+            }
+            if let Some(row) = inflight::load_inflight_state_read_only_result(
+                &ProviderKind::Claude,
+                self.key.channel_id.get(),
+            )? {
+                if self.owns_row(&row) {
+                    let captured = self.row.as_ref().ok_or("boot abstain row appeared")?;
+                    if slot.cancel_token.is_some()
+                        || captured.started_at != row.started_at
+                        || captured.turn_start_offset != row.turn_start_offset
+                        || !self.owns_row(captured)
+                    {
+                        return Err("boot abstain row authority changed".into());
+                    }
+                    if !crate::services::discord::receipt_settle::record_or_stamp(
+                        shared.pg_pool.as_ref(),
+                        &row,
+                        crate::db::turns::TerminalOutcome::Empty,
+                    )
+                    .await
+                    {
+                        return Err("boot abstain receipt pending".into());
+                    }
+                    let (clear, detail) = GuardedClearOutcome::for_native_snapshot_with_detail(
+                        &ProviderKind::Claude,
+                        &row,
+                    );
+                    if !matches!(
+                        (clear, detail.reason),
+                        (GuardedClearOutcome::Cleared, _)
+                            | (GuardedClearOutcome::Missing, "not_found")
+                    ) {
+                        return Err("boot abstain row CAS deferred".into());
+                    }
+                } else {
+                    wake = false;
+                }
+            } else {
+                wake = slot.cancel_token.is_none();
+            }
+        }
+        self.preserve_terminal(history)?;
+        self.settled = true;
+        let (ack, rx) = oneshot::channel();
+        shared
+            .turn_finalizer
+            .tx
+            .send(FinalizeMsg::NativeBoot {
+                inputs: vec![self],
+                step: RestoreStep::Abstain(wake),
+                shared: shared.clone(),
+                ack,
+            })
+            .map_err(|_| "boot abstain actor unavailable")?;
+        rx.await.map_err(|_| "boot abstain acknowledgement lost")?
     }
 
     fn proof(&self) -> Result<(), String> {
@@ -316,6 +397,20 @@ pub(super) async fn restore(
         let result = match step {
             RestoreStep::Register => Ok(()),
             RestoreStep::Settle => input.drive(shared, &history).await,
+            RestoreStep::Abstain(_) => input.proof().and_then(|()| {
+                if input.settled
+                    && input.record.settlement.outcome.is_none()
+                    && input
+                        .record
+                        .settlement
+                        .barrier(&input.record.namespace)?
+                        .is_some()
+                {
+                    Ok(())
+                } else {
+                    Err("boot abstain acknowledgement invalid".into())
+                }
+            }),
         };
         if let Err(error) = result {
             failure.get_or_insert(error);
@@ -334,6 +429,14 @@ pub(super) async fn restore(
                 None,
             )
         });
+        if let Some(known) = entry.native_boot_inputs.get(&id)
+            && known.settled
+            && known.record.settlement.ticket == input.record.settlement.ticket
+            && known.record.settlement.barrier(&known.record.namespace)?
+                == input.record.settlement.barrier(&input.record.namespace)?
+        {
+            input.settled = true;
+        }
         entry.native_boot_inputs.insert(id, input);
         let settled = entry.native_boot_inputs.values().all(|input| input.settled);
         entry.completion_admission.native_input = Some(settled);
@@ -345,7 +448,11 @@ pub(super) async fn restore(
         if settled {
             entry.finalized_at = Some(Instant::now());
             entry.completion_admission.note_mailbox_released();
-            entry.completion_admission.queue_eligible_published = true;
+            if matches!(step, RestoreStep::Abstain(true)) {
+                super::super::completion_admission::publish_claimed_queue_eligible(shared, entry);
+            } else {
+                entry.completion_admission.queue_eligible_published = true;
+            }
         }
     }
     failure.map_or(Ok(()), Err)
@@ -383,6 +490,7 @@ pub(in crate::services::discord::turn_finalizer) fn validate_record(
     record: &RestoredRecord,
 ) -> Result<(), String> {
     let Some(outcome) = record.settlement.outcome.as_ref() else {
+        record.settlement.barrier(&record.namespace)?;
         return Ok(());
     };
     if let Some(value) = outcome.extra.get("control_proof") {
