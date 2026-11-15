@@ -489,6 +489,15 @@ session-lifecycle/HerdrHandoffNonceFixedHangul.cfg	HerdrHandoffNonce	-	-
 session-lifecycle/HerdrHandoffNonceFixedKilled.cfg	HerdrHandoffNonce	-	-
 session-lifecycle/HerdrHandoffNonceNoEndProof.cfg	HerdrHandoffNonce	NoCapture	-
 session-lifecycle/HerdrHandoffNonceNoHostCheck.cfg	HerdrHandoffNonce	NoCapture	-
+session-lifecycle/HerdrHandoffNonceIdBeforeRenumbered.cfg	HerdrHandoffNonce	-	Delivered
+session-lifecycle/HerdrHandoffNonceIdFixedForeign.cfg	HerdrHandoffNonce	-	-
+session-lifecycle/HerdrHandoffNonceIdFixedRenumbered.cfg	HerdrHandoffNonce	-	-
+session-lifecycle/HerdrHandoffNonceIdFixedRenumberedAlive.cfg	HerdrHandoffNonce	-	-
+session-lifecycle/HerdrHandoffNonceIdFixedRenumberedDirect.cfg	HerdrHandoffNonce	-	-
+session-lifecycle/HerdrHandoffNonceIdFixedRewritten.cfg	HerdrHandoffNonce	-	-
+session-lifecycle/HerdrHandoffNonceIdNoEnd.cfg	HerdrHandoffNonce	NoCapture	-
+session-lifecycle/HerdrHandoffNonceIdNoInode.cfg	HerdrHandoffNonce	OwnTranscript	-
+session-lifecycle/HerdrHandoffNonceIdNoOwn.cfg	HerdrHandoffNonce	OwnTranscript	-
 session-lifecycle/HerdrHandoffPersonBefore.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHandoffQueueBefore.cfg	HerdrSession	-	HandoffProgress
 session-lifecycle/HerdrHandoffTargetBefore.cfg	HerdrSession	NoBusyExit,NoLiteralIntoDraft,NoUnexpectedEnter,NoWrongExecutionExit	HandoffProgress

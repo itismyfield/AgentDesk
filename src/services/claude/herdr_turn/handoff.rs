@@ -159,19 +159,19 @@ fn current_session(
             .filter(|record| record.tmux_session == logical && record.provider == "claude")
             .find_map(|record| record.execution_nonce.as_deref())
     });
-    let (source, history) =
-        events::claude_history(channel, logical, nonce).map_err(|e| e.to_string())?;
+    let (pin, history) =
+        events::claude_history_at(channel, logical, nonce).map_err(|e| e.to_string())?;
     if history.awaiting.is_some() {
         return Err("handoff native session is still Pending".into());
     }
-    let legacy = source.is_none();
-    let source = source
+    let legacy = pin.is_none();
+    let (source, pinned_at) = pin
         .or_else(|| match &latest.new {
             events::BindingTarget::Source(source)
             | events::BindingTarget::Resolved { source, .. }
                 if latest.evidence.hook_event.is_none() =>
             {
-                Some(source.clone())
+                Some((source.clone(), Some(latest.committed_at)))
             }
             _ => None,
         })
@@ -205,7 +205,9 @@ fn current_session(
         }
         Err(error) => return Err(error.to_string()),
     };
-    if (metadata.dev(), metadata.ino()) != (source.dev, source.ino) {
+    if (metadata.dev(), metadata.ino()) != (source.dev, source.ino)
+        && !renumbered_after_end(&source, pinned_at, logical, earlier)
+    {
         return Err("handoff transcript identity changed".into());
     }
     Ok(if legacy {
@@ -223,6 +225,24 @@ fn ended_tmux_execution(
 ) -> bool {
     crate::services::claude::host_gate::tmux_marked(logical)
         && earlier.liveness() == session_handoff::Liveness::Ended
+}
+
+/// Whether the transcript is the recorded file under the device number a host reboot gave its
+/// volume, by the pin rule every Claude source goes through, and its old tmux execution ended.
+fn renumbered_after_end(
+    source: &crate::services::tui_prompt_dedupe::binding_events::SourceId,
+    pinned_at: Option<chrono::DateTime<chrono::Utc>>,
+    logical: &str,
+    earlier: &mut dyn session_handoff::EarlierExecution,
+) -> bool {
+    use crate::services::claude_tui::source_verify::{
+        Observation, PinJudgment, judge_pin, observe_transcript,
+    };
+    let opened = observe_transcript(&source.path);
+    let seen = Observation::Opened(opened.as_ref());
+    let path = source.path.as_path();
+    let judged = judge_pin(Some(source), pinned_at, &source.session_id, path, seen);
+    matches!(judged, PinJudgment::Verified(_)) && ended_tmux_execution(logical, earlier)
 }
 
 #[cfg(test)]
@@ -629,5 +649,70 @@ mod tests {
         assert_eq!(judged("tmux", Liveness::Running), refused);
         assert_eq!(judged("tmux", Liveness::Unknown("probe".into())), refused);
         assert_eq!(judged("herdr", Liveness::Ended), refused);
+    }
+
+    /// Rewrites every logged source as if a host reboot after the record renumbered its volume.
+    fn reboot_after_record(log: &Log, dev_shift: u64, ino_shift: u64) {
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        let mut rows = String::new();
+        for line in text.lines() {
+            let mut row: serde_json::Value = serde_json::from_str(line).unwrap();
+            let source = &mut row["new"]["source"];
+            source["dev"] = (source["dev"].as_u64().unwrap() + dev_shift).into();
+            source["ino"] = (source["ino"].as_u64().unwrap() + ino_shift).into();
+            row["committed_at"] = "2000-01-01T00:00:00Z".into();
+            rows.push_str(&format!("{row}\n"));
+        }
+        std::fs::write(log.path(), rows).unwrap();
+        events::forget_channel_for_tests(log.channel);
+    }
+
+    #[test]
+    fn a_reboot_renumbered_transcript_resumes_only_as_its_own_file_after_its_tmux_ended() {
+        let _root_guard = crate::config::TestRuntimeRootGuard::new();
+        let session = uuid::Uuid::new_v4().to_string();
+        let marker_nonce = "c".repeat(32);
+        let judged = |first: &str, dev_shift: u64, ino_shift: u64, liveness: Liveness| {
+            let log = Log::new(8177002);
+            let path = log.root.path().join(format!("{session}.jsonl"));
+            std::fs::write(
+                &path,
+                format!("{}\n", serde_json::json!({"sessionId": first})),
+            )
+            .unwrap();
+            let marker =
+                crate::services::tmux_common::session_temp_path(log.logical, "spawn_nonce");
+            let host = crate::services::tmux_common::session_temp_path(log.logical, "host_kind");
+            std::fs::write(&marker, &marker_nonce).unwrap();
+            std::fs::write(&host, "tmux").unwrap();
+            crate::services::tui_prompt_dedupe::register_tmux_channel(log.logical, log.channel);
+            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+                log.logical,
+                TuiRuntimeBinding {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    output_path: path.display().to_string(),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: Some(session.clone()),
+                    last_offset: 0,
+                    relay_last_offset: None,
+                },
+            );
+            reboot_after_record(&log, dev_shift, ino_shift);
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&session),
+                &mut Earlier(liveness),
+            )
+        };
+        let changed = Err("handoff transcript identity changed".to_string());
+        assert_eq!(
+            judged(&session, 1, 0, Liveness::Ended),
+            Ok(Some(session.clone()))
+        );
+        assert_eq!(judged(&session, 1, 0, Liveness::Running), changed);
+        assert_eq!(judged("another-session", 1, 0, Liveness::Ended), changed);
+        assert_eq!(judged(&session, 1, 1, Liveness::Ended), changed);
     }
 }

@@ -66,3 +66,50 @@ nine configs, 4.6 s. Every expected violation matched.
 Limits: `Direct` stands for a judgment without the close that `launched_source` runs before
 using the binding, so it only exercises the mismatch branch. A failed Herdr create whose pane
 has ended still refuses (Herdr-side end proof is outside this rule); its liveness is not claimed.
+
+## Transcript identity after a host reboot (r2)
+
+Baseline: `5726d52ca8`. Observed 11-15 (adk-dashboard cc, after the nonce fix): the nonce check
+passed and `current_session` refused with `handoff transcript identity changed`. The recorded
+transcript is the same file: same inode 1388511848, birth 10-31 16:51, first record naming
+session `c45f2c1c…`, last write 11-04 18:57 before the 11-04 19:02 host boot. Its two records hold
+dev 16777230 and 16777229 and the file now stats as 16777231: macOS gave the APFS volume another
+device number at each boot. Nothing rewrote the file and no other execution wrote it.
+
+The pin rule every Claude source already goes through (`claude_tui/source_verify.rs:226-292`,
+`source_verify/renumber.rs:10-21`) treats the same inode on another device, pinned by a record
+committed before this boot, whose first record still names the session, as the pinned file under
+its new device. `current_session` compared `(dev, ino)` exactly. It now admits a mismatch only
+when that rule returns `Verified` and the old tmux execution is proven ended
+(`ended_tmux_execution`). Another inode, a first record of another session, a record from this boot
+or a running/unknown old tmux still refuse.
+
+Identity census (`git grep -n -E 'judge_pin\(|renumbered\(|under_new_device|file_identity|\(source\.dev, source\.ino\)|metadata\.ino\(\)' -- src`):
+
+| Path | Code | Model |
+|---|---|---|
+| Stat registration records `(dev, ino)` | `binding_events.rs:808` | the recorded identity |
+| Hook check records a verified identity | `claude_tui/source_verify.rs:332` → `judge_pin` | the recorded identity |
+| Writer re-pins a renumbered verified pin | `binding_events.rs:768-784` → `renumber.rs:24` | not reached for an unverified legacy record |
+| Host reboot renumbers the volume | OS (no AgentDesk code) | `Transcript = "renumbered"` |
+| Handoff identity check | `herdr_turn/handoff.rs:162-178,208-212,230-246` | `IdentityOk` |
+| Other pin checks (unchanged) | `tui_prompt_dedupe/pending.rs:309`, `source_verify.rs:399` | not changed |
+
+A restart reads the same record, first record and file, so a second judgment matches the first
+(`Boot` leaves `taken` and the transcript unchanged). Cancel, clear, Terminate and stop do not
+write the binding record or the transcript identity.
+
+| Config | NoCapture | OwnTranscript | Delivered |
+|---|---|---|---|
+| IdBeforeRenumbered (exact compare, observed refusal) | GREEN | GREEN | RED |
+| IdFixedRenumbered | GREEN | GREEN | GREEN |
+| IdFixedRenumberedAlive (journal closes the live tmux first) | GREEN | GREEN | GREEN |
+| IdFixedRenumberedDirect (judged while tmux runs) | GREEN | GREEN | not checked |
+| IdFixedRewritten / IdFixedForeign | GREEN | GREEN | not checked |
+| IdNoEnd (mutant: no end proof) | RED | GREEN | not checked |
+| IdNoInode / IdNoOwn (mutant: other inode / other session admitted) | GREEN | RED | not checked |
+
+The nine earlier configs gained `Transcript = "same"` and the `OwnTranscript` invariant; their
+results are unchanged. Eighteen configs, 7.6 s, every expected violation matched.
+A rewritten transcript of the same session (another inode) stays refused, as the pin rule calls it
+an anomaly; its input ends retained with the existing notice and its liveness is not claimed.

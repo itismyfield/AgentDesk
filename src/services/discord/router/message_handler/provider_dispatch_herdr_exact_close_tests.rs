@@ -357,3 +357,38 @@ fn an_unlogged_tmux_resume_marker_lets_the_first_herdr_turn_resume_once_that_tmu
     assert_eq!(fx.row(), Some(HostedState::Bound));
     assert_eq!(fx.rig.sends(), prompt_sends());
 }
+
+#[test]
+fn a_transcript_renumbered_by_a_host_reboot_lets_the_first_herdr_turn_resume_after_its_tmux_ended_pg()
+ {
+    use crate::services::tui_prompt_dedupe::binding_events as events;
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let fx = Fixture::with_root("resume-renumbered", None, root);
+    let marker = crate::services::tmux_common::session_temp_path(fx.logical(), "spawn_nonce");
+    std::fs::write(&marker, "a".repeat(32)).unwrap();
+    let (session, path) = fx.seed_resumable(true);
+    // A host reboot after that record gave the transcript's volume another device number.
+    let log = events::log_path(CHANNEL).unwrap().unwrap();
+    let mut rows = String::new();
+    for line in std::fs::read_to_string(&log).unwrap().lines() {
+        let mut row: Value = serde_json::from_str(line).unwrap();
+        let source = &mut row["new"]["source"];
+        source["dev"] = (source["dev"].as_u64().unwrap() + 1).into();
+        row["committed_at"] = "2000-01-01T00:00:00Z".into();
+        rows.push_str(&format!("{row}\n"));
+    }
+    std::fs::write(&log, rows).unwrap();
+    events::forget_channel_for_tests(CHANNEL);
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        if let Some(started) = fx.start_provider_as(&launcher, true, "resume") {
+            assert_eq!((&started.session, &started.path), (&session, &path));
+            fx.answer(&started);
+        }
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(fx.row(), Some(HostedState::Bound));
+    assert_eq!(fx.rig.sends(), prompt_sends());
+}
