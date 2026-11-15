@@ -185,7 +185,7 @@ impl CodexTransport for TmuxCodexInput {
     }
 
     fn kill_session(&mut self, session: &str, reason: &str) -> bool {
-        tmux::kill_session(session, reason)
+        TmuxHost.kill(session, reason)
     }
 
     #[cfg(unix)]

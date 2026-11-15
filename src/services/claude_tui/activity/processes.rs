@@ -1,8 +1,8 @@
 //! Descendants only veto cleanup; failure and absence never establish idle.
 #[cfg(unix)]
 use crate::services::{
-    platform::tmux,
     process::{self, ProcessIdentity, ProcessIdentityProbe},
+    session_host::{HostSessionRef, InteractiveSessionHost, TmuxHost},
 };
 #[cfg(unix)]
 use std::{
@@ -28,7 +28,10 @@ fn process_table(_: &str) -> Option<(u32, String)> {
 }
 #[cfg(unix)]
 fn process_table(session: &str) -> Option<(u32, String)> {
-    let root = tmux::pane_pid(session)?;
+    let root = TmuxHost
+        .execution_pid(HostSessionRef::tmux(session))
+        .ok()
+        .flatten()?;
     let birth = ProcessIdentity::capture(root);
     let mut command = Command::new("ps");
     command
@@ -44,7 +47,11 @@ fn process_table(session: &str) -> Option<(u32, String)> {
     if !output.status.success()
         || output.stdout.len() > 4 * 1024 * 1024
         || birth.probe(root) != ProcessIdentityProbe::Same
-        || tmux::pane_pid(session) != Some(root)
+        || TmuxHost
+            .execution_pid(HostSessionRef::tmux(session))
+            .ok()
+            .flatten()
+            != Some(root)
     {
         return None;
     }

@@ -4,7 +4,6 @@
 use super::model::{HostKind, HostLiveness, HostPresence, HostSessionRef};
 use super::tmux_host::TmuxHost;
 use super::traits::InteractiveSessionHost;
-use crate::services::tmux_diagnostics;
 
 /// Same answer as `platform::tmux::has_session`: `ProbeFailed` reads as missing.
 pub(crate) fn probe_failed_to_missing(presence: HostPresence) -> bool {
@@ -57,7 +56,7 @@ pub(crate) fn has_live_pane_bool(session: HostSessionRef<'_>) -> bool {
         return true;
     }
     debug_assert_eq!(session.kind, HostKind::Tmux);
-    tmux_diagnostics::tmux_session_has_live_pane(session.name)
+    TmuxHost.legacy_has_live_pane(session.name)
 }
 
 /// `probe_failed_to_missing` over the tmux presence probe, taking the name.
@@ -73,6 +72,7 @@ pub(crate) fn tmux_live_pane_bool(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::tmux_diagnostics;
 
     #[test]
     fn presence_collapse_matches_has_session() {
