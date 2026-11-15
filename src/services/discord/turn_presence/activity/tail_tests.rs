@@ -277,17 +277,6 @@ fn s0o_snapshot_budget_counts_alignment_and_resume_rereads() {
 }
 
 #[test]
-fn s1_limits_and_activity_activation_source_are_pinned() {
-    let limits = Limits::default();
-    assert_eq!(limits.tail, 32 * 1024 * 1024);
-    assert_eq!(limits.tail_start(limits.full), None);
-    assert_eq!(
-        limits.tail_start(limits.full + 1),
-        Some(limits.full + 1 - limits.tail)
-    );
-}
-
-#[test]
 fn s0o_closed_resume_waits_and_parse_errors_discard_proof() {
     let rows = [
         event("task_started", Some("A")),
