@@ -194,6 +194,7 @@ CATEGORIES = (
     "tmux_input_outside_adapter",
     "tmux_observe_outside_adapter",
     "tmux_command_args_outside_adapter",
+    "tmux_bounded_runner_outside_adapter",
 )
 WARNING = "These counts are a growth-blocking baseline, not proof of safety."
 MANAGED_TMUX_KILL_CATEGORY = "managed_tmux_kill_outside_adapter"
@@ -206,6 +207,9 @@ MANAGED_TMUX_KILL_PATTERN = re.compile(
     r"kill_session(?:_output_timeout|_output|_checked)?\s*\("
 )
 TMUX_BOUNDARY_PATTERNS = {
+    "tmux_bounded_runner_outside_adapter": re.compile(
+        r"(?<!fn )\b(?:run_bounded_tmux|run_with_budget)\s*\("
+    ),
     "tmux_create_outside_adapter": re.compile(
         r"\b(?:platform\s*::\s*)?tmux\s*::\s*"
         r"(?:create_session(?:_with_identity)?|respawn_dead_pane)\s*\("
@@ -704,6 +708,7 @@ def _is_whole_test_file(path: Path, rel: str) -> bool:
 def tmux_adapter_file(rel: str) -> bool:
     return (
         rel == "src/services/session_host/tmux_host.rs"
+        or rel.startswith("src/services/session_host/tmux_host/")
         or rel == "src/services/platform/tmux.rs"
         or rel.startswith("src/services/platform/tmux/")
     )

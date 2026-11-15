@@ -16,12 +16,12 @@ use super::input::{
 };
 use super::startup_dialog::detect_claude_startup_dialog;
 use crate::db::dispatched_sessions::hosted_execution::HostedExecution;
-use crate::services::platform::tmux;
 use crate::services::provider::session_probe::SessionLiveness;
 use crate::services::provider::{CancelToken, cancel_requested};
 use crate::services::session_host::{
-    HerdrGateRefusal, HerdrMutation, HerdrTarget, HostError, HostKey, HostKind, HostMutation,
-    ResolvedSessionTarget, TargetHost, TmuxHost, herdr_endpoints,
+    AuthorizedHostTarget, HerdrGateRefusal, HerdrMutation, HerdrTarget, HostError, HostKey,
+    HostKind, HostMutation, ResolvedSessionTarget, SubmitPayload, TargetHost, TmuxHost,
+    herdr_endpoints, host_for,
 };
 use crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal;
 use std::process::Output;
@@ -167,7 +167,7 @@ impl InputTransport for TmuxInput {
     }
 
     fn load_buffer(&mut self, buffer: &str, text: &str) -> Result<Output, String> {
-        tmux::load_buffer(buffer, text)
+        TmuxHost.load_buffer(buffer, text)
     }
 
     fn paste_buffer(
@@ -184,7 +184,7 @@ impl InputTransport for TmuxInput {
     }
 
     fn capture(&mut self, session: &str, scroll_back: i32) -> Option<String> {
-        tmux::capture_pane(session, scroll_back)
+        TmuxHost.capture_raw(session, scroll_back)
     }
 
     fn capture_draft(&mut self, session: &str) -> Option<String> {
@@ -200,7 +200,7 @@ impl InputTransport for TmuxInput {
     }
 
     fn present(&mut self, session: &str) -> bool {
-        tmux::has_session(session)
+        TmuxHost.legacy_has_session(session)
     }
 
     fn retire(&mut self, session: &str, reason_code: &str, reason: &str) {
@@ -251,7 +251,14 @@ fn herdr_written(result: Result<HostMutation, HostError>) -> Result<Output, Stri
 
 impl InputTransport for HerdrInput<'_> {
     fn send_literal(&mut self, _session: &str, text: &str) -> Result<Output, String> {
-        herdr_written(self.target.send_text(text))
+        herdr_written(
+            host_for(HostKind::Herdr)
+                .submit(
+                    AuthorizedHostTarget::herdr(self.target),
+                    SubmitPayload::Literal(text),
+                )
+                .into_herdr(),
+        )
     }
 
     /// Kept here until its paste, which is judged again; nothing reaches the pane.
@@ -264,11 +271,25 @@ impl InputTransport for HerdrInput<'_> {
     fn paste_buffer(&mut self, _s: &str, buffer: &str, _delete: bool) -> Result<Output, String> {
         let text = self.buffers.remove(buffer);
         let text = text.ok_or_else(|| format!("herdr paste of unknown buffer {buffer}"))?;
-        herdr_written(self.target.send_paste(&text))
+        herdr_written(
+            host_for(HostKind::Herdr)
+                .submit(
+                    AuthorizedHostTarget::herdr(self.target),
+                    SubmitPayload::BracketedText(&text),
+                )
+                .into_herdr(),
+        )
     }
 
     fn send_keys(&mut self, _session: &str, keys: &[HostKey]) -> Result<Output, String> {
-        herdr_written(self.target.send_keys(keys))
+        herdr_written(
+            host_for(HostKind::Herdr)
+                .submit(
+                    AuthorizedHostTarget::herdr(self.target),
+                    SubmitPayload::Keys(keys),
+                )
+                .into_herdr(),
+        )
     }
 
     fn capture(&mut self, _session: &str, scroll_back: i32) -> Option<String> {
@@ -575,18 +596,7 @@ pub(crate) fn capture_draft_with(
     session: &str,
     timeout: std::time::Duration,
 ) -> Option<String> {
-    use crate::services::process::{configure_child_process_group, wait_with_output_timeout};
-    let mut command = crate::services::platform::binary_resolver::runtime_command(program).ok()?;
-    let args = ["-u", "capture-pane", "-p", "-e", "-t", session, "-S", "-80"];
-    command.args(args).stdin(std::process::Stdio::null());
-    command
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    configure_child_process_group(&mut command);
-    let child = command.spawn().ok()?;
-    let output = wait_with_output_timeout(child, timeout, "tmux capture-pane -e").ok()?;
-    let text = || String::from_utf8_lossy(&output.stdout).into_owned();
-    output.status.success().then(text)
+    TmuxHost.capture_draft_with(program, session, timeout)
 }
 
 /// The legacy tmux session as the draft-protection reader needs it.

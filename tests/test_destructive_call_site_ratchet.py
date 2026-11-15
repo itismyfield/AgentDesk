@@ -44,6 +44,24 @@ class SourceContractTests(unittest.TestCase):
         cls.actual, cls.registry_subcounts = ratchet.scan(ROOT)
         cls.baseline, cls.payload = ratchet.load_baseline(ROOT / ratchet.BASELINE_PATH)
 
+    def test_input_executors_have_no_direct_tmux_primitive_calls(self) -> None:
+        paths = [
+            "src/services/claude_tui/host_input.rs",
+            "src/services/codex_tui/host_input.rs",
+            "src/services/tui_input/actor/pane.rs",
+            "src/services/tui_input/submission_tmux.rs",
+            "src/services/claude_tui/busy_inject.rs",
+            "src/services/claude_tui/busy_inject/stash.rs",
+            "src/services/codex_tui/busy_inject.rs",
+            "src/services/discord/queue_io/input_owner/effect/codex.rs",
+        ]
+        for path in paths:
+            code = ratchet.RUST_LEXER._production_text(ROOT / path)
+            for category, pattern in ratchet.TMUX_BOUNDARY_PATTERNS.items():
+                with self.subTest(path=path, category=category):
+                    self.assertNotRegex(code, pattern)
+            self.assertNotRegex(code, r"\b(?:Command\s*::\s*new|runtime_command)\s*\(")
+
     def test_registry_remeasurement_and_p2_1_classification_are_explicit(self) -> None:
         # #5504 Stack A moved five channel-only handoff cleanup spellings behind
         # exact cleanup helpers, so 8/3/3/2 became 3/5/4/2. The baseline
@@ -930,6 +948,7 @@ class ManagedTmuxKillTests(unittest.TestCase):
 
 class TmuxBoundaryTests(unittest.TestCase):
     CASES = {
+        "tmux_bounded_runner_outside_adapter": 'run_with_budget(&mut command, budget);',
         "tmux_create_outside_adapter": 'tmux::create_session("probe", None, "cat");',
         "tmux_input_outside_adapter": 'tmux::send_literal("probe", "payload");',
         "tmux_observe_outside_adapter": 'platform::tmux::has_session("probe");',
@@ -1005,7 +1024,7 @@ class TmuxBoundaryTests(unittest.TestCase):
         body = "\n".join(self.CASES.values())
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for rel in ("src/probe_tests.rs", "src/services/session_host/tmux_host.rs", "src/services/platform/tmux.rs", "src/services/platform/tmux/helper.rs"):
+            for rel in ("src/probe_tests.rs", "src/services/session_host/tmux_host.rs", "src/services/session_host/tmux_host/input.rs", "src/services/platform/tmux.rs", "src/services/platform/tmux/helper.rs"):
                 write(root, rel, body)
             write(root, "src/test_only.rs", "#[cfg(test)]\nmod tests {\n" + body + "\n}\n")
             rel = "src/production.rs"
@@ -1019,6 +1038,8 @@ class TmuxBoundaryTests(unittest.TestCase):
                 'command.args(["send-keys", "-t", name]);',
                 'let args = vec![r#"new-session"#];',
                 'let shell = "tmux -u capture-pane -p";',
+                'run_with_budget(&mut command, budget);',
+                'bounded_tmux::run_bounded_tmux(&mut command);',
                 '// command.arg("send-keys");',
             ]))
             actual, subcounts = ratchet.scan(root)

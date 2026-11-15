@@ -5,12 +5,15 @@ use super::model::{
     HostCapabilities, HostError, HostKey, HostKind, HostLiveness, HostMutation, HostPresence,
     HostSessionRef,
 };
+use super::submit::{InputSource, SubmitPayload};
 use super::traits::InteractiveSessionHost;
 use crate::services::platform::tmux;
-use crate::services::tui_input::writer_lease;
 
-/// Thin adapter over `platform::tmux`, which stays the only tmux binary caller
-/// and owns its per-platform behaviour.
+#[cfg(unix)]
+mod fifo;
+pub(super) mod input;
+
+/// Adapter over platform probes and input executors, retaining their transport behaviour.
 pub(crate) struct TmuxHost;
 
 fn map_output(result: Result<Output, String>) -> Result<HostMutation, HostError> {
@@ -65,6 +68,23 @@ impl TmuxHost {
         tmux::list_session_names()
     }
 
+    pub(crate) fn capture_raw(&self, session: &str, scroll_back: i32) -> Option<String> {
+        tmux::capture_pane(session, scroll_back)
+    }
+
+    pub(crate) fn capture_ansi(&self, session: &str, scroll_back: i32) -> Option<String> {
+        tmux::capture_pane_with_escapes(session, scroll_back)
+    }
+
+    pub(crate) fn capture_bounded(
+        &self,
+        session: &str,
+        scroll_back: i32,
+        timeout: std::time::Duration,
+    ) -> Option<String> {
+        tmux::capture_pane_timeout(session, scroll_back, timeout)
+    }
+
     pub(crate) fn kill(&self, name: &str, reason: &str) -> bool {
         tmux::kill_session(name, reason)
     }
@@ -84,13 +104,18 @@ impl TmuxHost {
 
     /// Raw `send-keys` output, so the caller keeps tmux's exit status and stderr.
     pub(crate) fn send_host_keys(&self, session: &str, keys: &[HostKey]) -> Result<Output, String> {
-        let names: Vec<&str> = keys.iter().map(|key| tmux_key_name(*key)).collect();
-        tmux::send_keys(session, &names)
+        self.platform_input(session, InputSource::Inherited, SubmitPayload::Keys(keys))
+            .into_output()
     }
 
     /// Literal text behind the owner content fence; unheld targets run main's command.
     pub(crate) fn send_literal(&self, session: &str, text: &str) -> Result<Output, String> {
-        writer_lease::content("tmux", session, || tmux::send_literal(session, text))
+        self.platform_input(
+            session,
+            InputSource::Inherited,
+            SubmitPayload::Literal(text),
+        )
+        .into_output()
     }
 
     pub(crate) fn paste_buffer(
@@ -99,7 +124,12 @@ impl TmuxHost {
         buffer: &str,
         delete: bool,
     ) -> Result<Output, String> {
-        writer_lease::content("tmux", s, || tmux::paste_buffer(s, buffer, delete))
+        self.platform_input(
+            s,
+            InputSource::Inherited,
+            SubmitPayload::Paste { buffer, delete },
+        )
+        .into_output()
     }
 
     pub(crate) fn liveness_within(
@@ -199,6 +229,68 @@ impl InteractiveSessionHost for TmuxHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn busy_input_preserves_the_original_target_argument() {
+        use super::super::SubmitPayload;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = crate::config::TestRuntimeRootGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("args");
+        let program = dir.path().join("tmux");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let program =
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                program,
+            );
+        let target = "==adk-original-target:";
+        TmuxHost
+            .run_busy(&program, target, &["send-keys", "-t", target, "Enter"])
+            .unwrap();
+        let original = std::fs::read_to_string(&log).unwrap();
+        TmuxHost
+            .busy_input(&program, target, SubmitPayload::Keys(&[HostKey::Enter]))
+            .into_bounded()
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(log).unwrap(), original);
+        drop(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_pid_delegation_preserves_the_lookup_for_herdr_shaped_names() {
+        use crate::services::provider_teardown::tests::test_support::FakeTmux;
+        let root = crate::config::TestRuntimeRootGuard::new();
+        for name in ["adk-pid-delegation", "42"] {
+            let fake = FakeTmux::install(name);
+            fake.run_pane(31337);
+            assert_eq!(tmux::pane_pid(name), Some(31337));
+            assert_eq!(
+                TmuxHost
+                    .execution_pid(HostSessionRef::tmux(name))
+                    .ok()
+                    .flatten(),
+                Some(31337)
+            );
+            assert!(
+                TmuxHost
+                    .execution_pid(HostSessionRef::herdr_pane(name))
+                    .is_err()
+            );
+            assert_eq!(
+                fake.take_calls(),
+                vec![format!("display-message -p -t ={name}: #{{pane_pid}}"); 2]
+            );
+        }
+        drop(root);
+    }
 
     #[cfg(unix)]
     #[test]
