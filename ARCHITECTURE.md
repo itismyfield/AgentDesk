@@ -2385,6 +2385,7 @@ src/
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── handoff_retry_tests.rs
 │   │   │   │   │   ├── owner_input.rs
+│   │   │   │   │   ├── owner_input_bootstrap_tests.rs
 │   │   │   │   │   ├── owner_input_busy_gate_tests.rs
 │   │   │   │   │   ├── owner_input_busy_race_tests.rs
 │   │   │   │   │   ├── owner_input_carried_restart_tests.rs
@@ -4559,6 +4560,7 @@ src/
 │   │   │   │   ├── absent_open_tests.rs
 │   │   │   │   ├── clear_relaunch.rs
 │   │   │   │   ├── fresh_admission.rs
+│   │   │   │   ├── herdr_bootstrap.rs
 │   │   │   │   ├── hold_detail.rs
 │   │   │   │   └── provenance_tests.rs
 │   │   │   ├── codex_verified/
