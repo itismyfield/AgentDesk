@@ -9,7 +9,7 @@ import sys
 import time
 import uuid
 
-from . import discord_rest
+from . import discord_rest, driver_dispatch
 from .driver_admission import IdentityRefused, admit
 from .files import InstanceError, safe_absolute
 from .manifest import read_json
@@ -46,7 +46,7 @@ def admission_witness(root, provider, parent, thread, message, author):
         return None
 
 
-def run(base, instance_id, provider, timeout, *, identity_request=None, rest_factory=None):
+def run(base, instance_id, provider, timeout, *, identity_request=None, rest_factory=None, dispatch_request=None):
     if provider not in ('claude','codex') or type(timeout) not in (int,float) or not math.isfinite(timeout) or not 0<timeout<=600:
         return {'status':'UNEVALUABLE(identity)','transmissions':0}
     deadline = time.monotonic()+timeout
@@ -59,11 +59,21 @@ def run(base, instance_id, provider, timeout, *, identity_request=None, rest_fac
     summary = {'status':'UNEVALUABLE(admission)','input_source':'allowed_bot','human_input_coverage':False,
                'instance_id':instance_id,'nonce':admitted.run['nonce'],'head':manifest['head'],
                'authors':manifest['profile']['bots'],'transmissions':0,'transmission_attempts':0}
+    registrar = None
+    try:
+        registrar = driver_dispatch.Client(admitted, deadline, request=dispatch_request)
+        registration = registrar.create(provider)
+        summary.update(registration, registration_confirmed=True,
+                       registration_requests_started=registrar.requests_started)
+    except (InstanceError, OSError, ValueError, TypeError, KeyError):
+        summary.update(status='UNEVALUABLE(registration)', registration_confirmed=False,
+                       registration_requests_started=registrar.requests_started if registrar else 0)
+        return summary
     try:
         with load_assertions(manifest['profile']['bots']) as assertions:
             client = (rest_factory or discord_rest.Client)(admitted,deadline)
             parent = manifest['profile']['channels'][('claude','codex').index(provider)]
-            run_id = str(uuid.uuid4())
+            run_id = registration['dispatch_id']
             summary['transmission_attempts']=1
             thread = client.create_thread(parent,'adk-test-'+run_id)
             summary.update(thread_id=thread,transmissions=1)

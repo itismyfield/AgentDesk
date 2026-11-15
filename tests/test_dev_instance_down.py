@@ -74,30 +74,38 @@ class InstanceDownTests(unittest.TestCase):
         self.root.unlink()
         saved.rename(self.root)
 
-    def test_exact_internal_credential_alias_is_valid_and_removed_without_traversal(self):
+    def _canonical_alias_is_removed_without_traversal(self, absolute):
         from scripts.dev_instance.files import validate_tree
-        marker = self.root/'outputs/retained-until-root-delete'
-        marker.write_text('synthetic')
+        marker = self.root/'credential/claude_bot_token'
+        marker.write_text('synthetic');marker.chmod(0o600)
         alias = self.root/'config/credential'
-        alias.symlink_to('../outputs',target_is_directory=True)
-        try:validate_tree(self.root)
-        except ValueError as error:self.fail('valid native alias rejected: '+str(error))
+        alias.symlink_to(str(self.root/'credential') if absolute else '../credential', target_is_directory=True)
+        validate_tree(self.root)
         original = os.unlink
         removed = []
         def capture(name, *args, **kwargs):
             removed.append(name)
-            return original(name,*args,**kwargs)
-        with patch('scripts.dev_instance.down.os.unlink',side_effect=capture):
-            self.assertEqual(self.down()[0],0)
-        self.assertEqual(removed.count('retained-until-root-delete'),1)
-        self.assertEqual(removed.count('credential'),1)
+            return original(name, *args, **kwargs)
+        with patch('scripts.dev_instance.down.os.unlink', side_effect=capture):
+            code, result = self.down()
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result['status'], 'REMOVED')
+        self.assertEqual(removed.count('claude_bot_token'), 1)
+        self.assertEqual(removed.count('credential'), 1)
         self.assertFalse(self.root.exists())
+
+    def test_exact_internal_credential_alias_is_valid_and_removed_without_traversal(self):
+        self._canonical_alias_is_removed_without_traversal(False)
+
+    def test_absolute_canonical_credential_alias_is_removed_without_traversal(self):
+        self._canonical_alias_is_removed_without_traversal(True)
 
     def test_dangling_exact_internal_alias_is_unlinked_without_following_target(self):
         from scripts.dev_instance.files import validate_tree
         alias = self.root/'config/credential'
-        missing = self.root/'outputs/missing'
-        alias.symlink_to('../outputs/missing', target_is_directory=True)
+        missing = self.root/'credential'
+        missing.rmdir()
+        alias.symlink_to('../credential', target_is_directory=True)
         validate_tree(self.root)
         original = os.unlink
         removed = []
@@ -108,9 +116,21 @@ class InstanceDownTests(unittest.TestCase):
             code, result = self.down()
         self.assertEqual(code, 0, result)
         self.assertEqual(removed.count('credential'), 1)
-        self.assertNotIn('missing', removed)
         self.assertFalse(missing.exists())
         self.assertFalse(self.root.exists())
+
+    def test_noncanonical_internal_alias_targets_are_rejected_without_deletion(self):
+        from scripts.dev_instance.files import validate_tree
+        alias = self.root/'config/credential'
+        for target in ['../outputs', '..', '../outputs/missing', str(self.root/'outputs')]:
+            alias.symlink_to(target, target_is_directory=True)
+            before = sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*'))
+            with self.subTest(target=target):
+                with self.assertRaises(ValueError):validate_tree(self.root)
+                self.assertEqual(self.down()[0], 2)
+                self.assertEqual(before, sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*')))
+                self.assertTrue((self.root/'manifest.json').exists())
+            alias.unlink()
 
     def test_dangling_external_alias_is_rejected_without_deletion(self):
         from scripts.dev_instance.files import validate_tree

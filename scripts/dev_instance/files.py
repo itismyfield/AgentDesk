@@ -154,6 +154,8 @@ def credential_alias(root, relative, descriptor, metadata):
     candidate = Path(os.path.normpath(target if target.is_absolute() else Path(root).joinpath(*relative[:-1], target)))
     if not candidate.is_relative_to(root):
         raise InstanceError('credential alias target is outside the instance root')
+    if candidate != Path(root) / 'credential':
+        raise InstanceError('credential alias must target the canonical credential directory')
     candidate = safe_absolute(candidate)
     try:
         destination = candidate.lstat()
