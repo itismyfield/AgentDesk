@@ -72,6 +72,12 @@ fn watches() -> MutexGuard<'static, HashMap<u64, Watch>> {
     WATCHES.lock().unwrap_or_else(|error| error.into_inner())
 }
 
+/// Whether a refusal left `channel` a probe no drive has taken yet.
+#[cfg(test)]
+pub(crate) fn armed(channel: u64) -> bool {
+    watches().get(&channel).is_some_and(|w| w.armed.is_some())
+}
+
 /// Leaves the probe of the pane that just refused `channel`'s front, for the drive to watch.
 pub(crate) fn arm(channel: u64, probe: ScreenProbe) {
     watches().entry(channel).or_default().armed = Some(probe);

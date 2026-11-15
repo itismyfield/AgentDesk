@@ -157,3 +157,60 @@ async fn f3_a_changed_pin_holds_the_original_without_launching_or_closing_a_peer
     drop(old);
     drop(root_guard);
 }
+
+#[tokio::test]
+async fn exact_close_interleaves_with_idle_keep_without_closing_the_remaining_peer_pg() {
+    use crate::services::platform::tmux::{SessionPresence, session_presence};
+    use crate::services::tmux_turn_liveness::{
+        kill_proven_idle_provider_session, provider_session_is_proven_idle,
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = 1_479_671_301_387_059_302;
+    let logical = "AgentDesk-claude-t1479671301387059302";
+    let old = PrivateOldTmuxForTest::new_for_channel(logical, None, channel);
+    old.start();
+    assert!(old.exists() && old.peer_exists());
+    let entered = tokio::sync::Barrier::new(2);
+    let release = tokio::sync::Barrier::new(2);
+    let checks = AtomicUsize::new(0);
+    let close = pinned_tmux::end(logical, channel, None, |_| {
+        let first = checks.fetch_add(1, Ordering::SeqCst) == 0;
+        let (entered, release) = (&entered, &release);
+        async move {
+            if first {
+                entered.wait().await;
+                release.wait().await;
+            }
+            Ok(true)
+        }
+    });
+    let keep = async {
+        entered.wait().await;
+        assert!(old.exists());
+        assert_eq!(session_presence(logical), SessionPresence::Present);
+        assert!(!provider_session_is_proven_idle(logical));
+        assert!(
+            kill_proven_idle_provider_session(logical, "private overlap test", || Err(None))
+                .is_err()
+        );
+        release.wait().await;
+    };
+    let (closed, ()) = tokio::join!(close, keep);
+    closed.unwrap();
+    assert!(checks.load(Ordering::SeqCst) >= 2);
+    assert!(!old.exists(), "the pinned old pane really ended");
+    assert!(old.peer_exists());
+    assert_eq!(old.closes(), 1);
+    assert_eq!(session_presence(logical), SessionPresence::Present);
+    assert!(!provider_session_is_proven_idle(logical));
+    assert!(
+        kill_proven_idle_provider_session(logical, "private closed-pane test", || Err(None))
+            .is_err()
+    );
+    assert_eq!(old.closes(), 1);
+    assert!(
+        old.peer_exists(),
+        "idle Keep must preserve the surviving peer"
+    );
+    old.assert_no_input();
+}

@@ -1,8 +1,14 @@
 //! What one live attempt was seen to do, and the evidence a complete observation can give.
 
 use crate::db::replay_disposition::write::ExactAttempt;
+use crate::domain::replay_evidence::live::issuer;
+pub(crate) use crate::domain::replay_evidence::{
+    TerminalKind,
+    live::{NoEffectEvidence, TerminalEvidence},
+};
 use crate::services::agent_protocol::StreamMessage;
 use std::sync::Mutex;
+pub(crate) mod issuer_key;
 pub(crate) mod seal;
 mod tap;
 pub(crate) use tap::RawTap;
@@ -13,13 +19,6 @@ pub(crate) enum Activity {
     Output,
     Tool,
     Unclassified,
-}
-
-/// A terminal the provider itself reported, not one a wrapper synthesised.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TerminalKind {
-    Done,
-    Error,
 }
 
 /// One raw fact from the attempt's reader, recorded before any parsing decision.
@@ -130,11 +129,12 @@ impl RawObservation {
     /// Normal-classification evidence: a complete observation with exactly one provider terminal.
     pub(crate) fn terminal_evidence(&self) -> Option<TerminalEvidence> {
         match self.terminals().as_slice() {
-            [kind] if self.complete() => Some(TerminalEvidence {
-                receipt_id: self.receipt_id,
-                nonce: self.nonce.clone(),
-                kind: *kind,
-            }),
+            [kind] if self.complete() => Some(issuer::terminal(
+                issuer_key::ObservationKey(()),
+                self.receipt_id,
+                self.nonce.clone(),
+                *kind,
+            )),
             _ => None,
         }
     }
@@ -142,9 +142,12 @@ impl RawObservation {
     /// No-effect evidence: complete, no activity at all, and no successful provider turn.
     pub(crate) fn no_effect_evidence(&self) -> Option<NoEffectEvidence> {
         let finished_turn = self.terminals().contains(&TerminalKind::Done);
-        (self.complete() && !self.active() && !finished_turn).then(|| NoEffectEvidence {
-            receipt_id: self.receipt_id,
-            nonce: self.nonce.clone(),
+        (self.complete() && !self.active() && !finished_turn).then(|| {
+            issuer::no_effect(
+                issuer_key::ObservationKey(()),
+                self.receipt_id,
+                self.nonce.clone(),
+            )
         })
     }
 
@@ -154,37 +157,6 @@ impl RawObservation {
         } else {
             "incomplete or unclassified observation"
         }
-    }
-}
-
-/// A provider terminal from its complete reader.
-#[derive(Debug)]
-pub(crate) struct TerminalEvidence {
-    receipt_id: i64,
-    nonce: String,
-    kind: TerminalKind,
-}
-
-impl TerminalEvidence {
-    pub(crate) fn names(&self, attempt: &ExactAttempt) -> bool {
-        self.receipt_id == attempt.receipt_id() && self.nonce == attempt.nonce()
-    }
-
-    pub(crate) fn kind(&self) -> TerminalKind {
-        self.kind
-    }
-}
-
-/// Proof that one exact attempt produced no output, tool, input or provider turn.
-#[derive(Debug)]
-pub(crate) struct NoEffectEvidence {
-    receipt_id: i64,
-    nonce: String,
-}
-
-impl NoEffectEvidence {
-    pub(crate) fn names(&self, attempt: &ExactAttempt) -> bool {
-        self.receipt_id == attempt.receipt_id() && self.nonce == attempt.nonce()
     }
 }
 

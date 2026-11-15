@@ -12,6 +12,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use tower::ServiceExt;
 
+#[path = "handoff_launch_tests.rs"]
+mod handoff_launch;
+
 struct PolicyLauncher {
     io: Arc<Launcher>,
     policy: Arc<dyn HerdrLaunchHost>,

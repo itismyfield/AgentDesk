@@ -1,0 +1,2 @@
+key: 290-input-single-path-ownership-absorbed-recovery
+| `input-single-path` ownership, slice F (#7676) | `a9d59259e5` | main after C: a restart-carried row whose transcript has an input absorbed mid-turn without a `queued_command` row never closes, so every owner start is refused for good (CF); an outside copy of a waiting input is seen twice (FOutside) | F plan: settle an absorbed input at its `remove` record and drop its dequeue credit; the outside copy stays a documented gap |

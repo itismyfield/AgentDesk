@@ -530,6 +530,66 @@ async fn classification_commits_only_for_its_exact_attempt_pg() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn same_receipt_new_nonce_rejects_old_terminal_and_no_effect_evidence_pg() {
+    let (fixture, pool) = setup().await;
+    let first = start(&pool, &input("same-receipt", "chan", &["same-source"])).await;
+    let id = first.receipt_id();
+    let previous = first.nonce().to_string();
+    let observation = observed(
+        &first,
+        &[&COMPLETE[..], &[Seen::Terminal(TerminalKind::Error)]].concat(),
+    );
+    let terminal = observation.terminal_evidence().unwrap();
+    let no_effect = observation.no_effect_evidence().unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (session_key, channel_id, provider, status, current_replay_receipt_id,
+                               replay_episode_nonce, claude_session_id, raw_provider_session_id)
+         VALUES ('same-receipt-session', 'chan', 'claude', 'turn_active', $1, $2, 'stale', 'stale')",
+    )
+    .bind(id)
+    .bind(&previous)
+    .execute(&pool)
+    .await
+    .unwrap();
+    write::classify_no_effect(&pool, first, &no_effect)
+        .await
+        .expect("commit the original no-effect attempt");
+    let binding = serde_json::json!({ "owner": "owner-a" });
+    let next = write::begin(
+        &pool,
+        id,
+        BeginFrom::NoEffect {
+            previous: &previous,
+            next: "same-receipt-next-nonce",
+            session_key: "same-receipt-session",
+        },
+        &effect(&binding),
+        "incarnation-a",
+    )
+    .await
+    .unwrap()
+    .into_parts()
+    .0;
+    assert_eq!(next.receipt_id(), id);
+    assert_ne!(next.nonce(), previous);
+    let before = receipt_row(&pool, id).await;
+    assert!(matches!(
+        write::classify_normal(&pool, &next, &terminal).await,
+        Err(WriteError::CasMiss)
+    ));
+    assert_eq!(receipt_row(&pool, id).await, before);
+    assert!(matches!(
+        write::classify_no_effect(&pool, next, &no_effect).await,
+        Err(WriteError::CasMiss)
+    ));
+    assert_eq!(receipt_row(&pool, id).await, before);
+    assert_eq!(before.0, "started_unclassified");
+    assert_eq!(before.1, "same-receipt-next-nonce");
+    assert_eq!(before.2.as_deref(), Some(previous.as_str()));
+    finish(fixture, pool).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn begin_commit_failure_reports_ack_unknown_not_a_start_pg() {
     let (fixture, pool) = setup().await;
     sqlx::raw_sql(

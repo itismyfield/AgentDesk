@@ -1,6 +1,15 @@
 //! Forward launch preparation preserves the existing source/account and resume checks.
 use super::*;
 
+/// Preserve the wrapper's scheduling-refusal prefix while adding stages to launch errors.
+fn launch_error(stage: &str, error: String) -> String {
+    if error.starts_with("NotSent(") {
+        error
+    } else {
+        format!("herdr launch {stage}: {error}")
+    }
+}
+
 /// The session a launch resumes: the turn's own one while it last ran under the overlay's account,
 /// its transcript exists under the overlay's home and O reads that file; otherwise a new one.
 fn resumed_session(
@@ -49,35 +58,48 @@ pub(super) fn launched_source(
         .clone()
         .ok_or("herdr turn: no hook endpoint")?;
     let logical = &turn.owner.logical_key;
-    let overlay = ports.auth_overlay(logical)?;
-    let auth = crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay);
+    let overlay = ports
+        .auth_overlay(logical)
+        .map_err(|e| launch_error("auth_overlay", e))?;
+    let auth = crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay)
+        .map_err(|e| launch_error("auth_overlay", e))?;
+    let mut earlier = ports.earlier_tmux(logical);
     let requested = if turn.force_fresh {
         None
     } else {
-        current_session(turn.channel_id, logical, turn.session_id)?
+        current_session(turn.channel_id, logical, turn.session_id, earlier.as_mut())
+            .map_err(|e| launch_error("current_session", e))?
     };
-    let prior = resumed_session(turn, &overlay, requested.as_deref())?;
+    let prior = resumed_session(turn, &overlay, requested.as_deref())
+        .map_err(|e| launch_error("resume_source", e))?;
     if prior.is_some() {
-        let mut earlier = ports.earlier_tmux(logical);
         if earlier.liveness() != session_handoff::Liveness::Ended {
-            runtime.block_on(session_handoff::pinned_tmux::end(
-                logical,
-                turn.channel_id,
-                None,
-                |_| async { Ok(!cancel_requested(turn.cancel.as_deref())) },
-            ))?;
+            runtime
+                .block_on(session_handoff::pinned_tmux::end(
+                    logical,
+                    turn.channel_id,
+                    None,
+                    |_| async { Ok(!cancel_requested(turn.cancel.as_deref())) },
+                ))
+                .map_err(|e| launch_error("close_legacy", e))?;
         }
     }
     let latest = if turn.force_fresh {
         None
     } else {
-        current_session(turn.channel_id, logical, turn.session_id)?
+        current_session(turn.channel_id, logical, turn.session_id, earlier.as_mut())
+            .map_err(|e| launch_error("current_session", e))?
     };
-    let resumed = resumed_session(turn, &overlay, latest.as_deref())?;
+    let resumed = resumed_session(turn, &overlay, latest.as_deref())
+        .map_err(|e| launch_error("resume_source", e))?;
     let home = overlay.home.as_deref();
     let session_id = match &resumed {
         Some(session) => session.clone(),
-        None => super::super::fresh_claude_tui_session_resolution(working_dir, home)?.session_id,
+        None => {
+            super::super::fresh_claude_tui_session_resolution(working_dir, home)
+                .map_err(|e| launch_error("fresh_session", e))?
+                .session_id
+        }
     };
     let prepare = |prepared: &PreparedIncarnation| {
         let (system, model) = (turn.system_prompt, turn.model);
@@ -90,10 +112,12 @@ pub(super) fn launched_source(
             model,
             hooks,
             &auth,
-        )?;
+        )
+        .map_err(|e| launch_error("prepare_command", e))?;
         // The account this session runs under, which a later resume of it checks.
         let profile = &overlay.profile_id;
-        crate::services::tmux_common::write_claude_session_auth(logical, session, profile)?;
+        crate::services::tmux_common::write_claude_session_auth(logical, session, profile)
+            .map_err(|e| launch_error("write_auth", e))?;
         Ok(command)
     };
     // Subscribed before the create, so the launch's SessionStart cannot pass unseen.
@@ -101,17 +125,19 @@ pub(super) fn launched_source(
     let mut launch = launch(turn, Some(session_id.clone()), resumed.is_some());
     launch.provider_root = home.map(|home| home.join("projects"));
     let outcome = runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host));
-    let nonce = launched(outcome)?;
+    let nonce = launched(outcome).map_err(|e| launch_error("admit_create_evidence", e))?;
     let resume = resumed.is_some().then_some(nonce.as_str());
     let cancel = turn.cancel.as_deref();
-    session_started(runtime, &mut hooks, (&session_id, resume), cancel)?;
-    attach(turn, runtime, ports, &nonce, &session_id)
+    session_started(runtime, &mut hooks, (&session_id, resume), cancel)
+        .map_err(|e| launch_error("session_start", e))?;
+    attach(turn, runtime, ports, &nonce, &session_id).map_err(|e| launch_error("attach", e))
 }
 
 fn current_session(
     channel: u64,
     logical: &str,
     original: Option<&str>,
+    earlier: &mut dyn session_handoff::EarlierExecution,
 ) -> Result<Option<String>, String> {
     use crate::services::tui_prompt_dedupe::binding_events as events;
     use std::os::unix::fs::MetadataExt;
@@ -154,9 +180,12 @@ fn current_session(
         use crate::services::tui_prompt_dedupe::binding_context::{
             SpawnNonceMarker, observe_spawn_nonce_marker,
         };
-        // A failed create can leave a marker without logging a native execution.
+        // A failed create can leave a marker without logging a native execution. A tmux resume
+        // of the same transcript logs nothing either, so its marker is no live owner once it ended.
         match (nonce, observe_spawn_nonce_marker(logical)) {
-            (Some(recorded), SpawnNonceMarker::Known(current)) if recorded != current => {
+            (Some(recorded), SpawnNonceMarker::Known(current))
+                if recorded != current && !ended_tmux_execution(logical, earlier) =>
+            {
                 return Err("handoff binding belongs to another execution".into());
             }
             (_, SpawnNonceMarker::Unreadable) => {
@@ -185,9 +214,110 @@ fn current_session(
         Some(source.session_id)
     })
 }
+
+/// Whether the marker names a tmux execution whose session is proven gone. Herdr writes its own
+/// host marker before its nonce, so a Herdr create never reads as tmux here.
+fn ended_tmux_execution(
+    logical: &str,
+    earlier: &mut dyn session_handoff::EarlierExecution,
+) -> bool {
+    crate::services::claude::host_gate::tmux_marked(logical)
+        && earlier.liveness() == session_handoff::Liveness::Ended
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn launch_stage_preserves_scheduling_refusals() {
+        let held = "NotSent(\"writer_held\")".to_string();
+        assert_eq!(launch_error("auth_overlay", held.clone()), held);
+        assert_eq!(
+            launch_error("auth_overlay", "forced failure".into()),
+            "herdr launch auth_overlay: forced failure"
+        );
+    }
+
+    #[test]
+    fn test_instance_claude_herdr_default_profile_refuses_before_launch_subscription() {
+        crate::services::provider_auth_profile::instance_env_tests::with_instance(
+            concat!(
+                module_path!(),
+                "::test_instance_claude_herdr_default_profile_refuses_before_launch_subscription"
+            ),
+            || {
+                struct Ports;
+                impl HerdrTurnPorts for Ports {
+                    fn launch_host(&self) -> Option<Arc<dyn HerdrLaunchHost>> {
+                        Some(Arc::new(SocketHerdrLaunchHost::new(
+                            vec![],
+                            Default::default(),
+                        )))
+                    }
+                    fn hook_events(&self) -> broadcast::Receiver<HookEvent> {
+                        panic!("default profile must refuse before launch subscription")
+                    }
+                    fn attach(&self, _: &AttachRequest<'_>) -> Result<bool, String> {
+                        panic!("default profile must never attach")
+                    }
+                    fn confirm_bound(
+                        &self,
+                        _: &HostedOwner,
+                        _: &HostedExecution,
+                        _: &HerdrTarget,
+                    ) -> Result<(), String> {
+                        panic!("default profile must never bind")
+                    }
+                    fn auth_overlay(&self, _: &str) -> Result<ProviderAuthOverlay, String> {
+                        Ok(ProviderAuthOverlay::default_for(ProviderKind::Claude))
+                    }
+                }
+                let instance = crate::config::test_instance::current().unwrap().unwrap();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _entered = runtime.enter();
+                let pool = sqlx::postgres::PgPoolOptions::new()
+                    .connect_lazy("postgres://unused@127.0.0.1:1/unused")
+                    .unwrap();
+                let turn = HerdrTurn {
+                    pool: &pool,
+                    owner: HostedOwner {
+                        provider: "claude".into(),
+                        discord_token_hash: "synthetic".into(),
+                        channel_id: "41".into(),
+                        logical_key: format!("{}-claude-herdr-env", instance.tmux.prefix),
+                        owner_node: instance.instance_id.clone(),
+                        runtime_root: instance.root.display().to_string(),
+                    },
+                    channel_id: 41,
+                    endpoint: HerdrLaunchEndpoint {
+                        execution_node: instance.instance_id.clone(),
+                        config_key: instance.herdr.endpoint_key.clone(),
+                        socket_addr: instance.herdr.socket.display().to_string(),
+                        herdr_session: instance.herdr.session.clone(),
+                    },
+                    row: None,
+                    prompt: "scope prompt",
+                    working_dir: instance.root.to_str().unwrap(),
+                    session_id: None,
+                    force_fresh: true,
+                    system_prompt: None,
+                    model: None,
+                    hook_endpoint: Some("http://127.0.0.1:9".into()),
+                    cancel: None,
+                };
+                assert_eq!(
+                    launched_source(&turn, runtime.handle(), &Ports)
+                        .err()
+                        .as_deref(),
+                    Some("herdr launch auth_overlay: test instance host declaration rejected")
+                );
+            },
+        );
+    }
+
     use crate::services::tui_prompt_dedupe::binding_events as events;
     use std::os::unix::fs::MetadataExt;
     struct Log {
@@ -258,6 +388,16 @@ mod tests {
                 .join(format!("{}.log", self.channel))
         }
     }
+    struct Earlier(Liveness);
+    impl session_handoff::EarlierExecution for Earlier {
+        fn liveness(&mut self) -> Liveness {
+            self.0.clone()
+        }
+        fn send_exit(&mut self) -> session_handoff::ExitSend {
+            panic!("the binding check never types into the old pane")
+        }
+    }
+    use session_handoff::Liveness;
     impl Drop for Log {
         fn drop(&mut self) {
             events::forget_channel_for_tests(self.channel);
@@ -290,13 +430,27 @@ mod tests {
             payload_session_id: continued.clone(),
             payload_transcript_path: Some(source.path.display().to_string()),
         });
-        assert!(current_session(log.channel, log.logical, Some(&argv)).is_err());
+        assert!(
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&argv),
+                &mut Earlier(Liveness::Running)
+            )
+            .is_err()
+        );
         log.push(events::BindingTarget::Resolved {
             pending_seq: 2,
             source,
         });
         assert_eq!(
-            current_session(log.channel, log.logical, Some(&argv)).unwrap(),
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&argv),
+                &mut Earlier(Liveness::Running)
+            )
+            .unwrap(),
             Some(continued.clone())
         );
         log.push(events::BindingTarget::Rejected {
@@ -305,7 +459,13 @@ mod tests {
             reason: "audit only".into(),
         });
         assert_eq!(
-            current_session(log.channel, log.logical, Some(&argv)).unwrap(),
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&argv),
+                &mut Earlier(Liveness::Running)
+            )
+            .unwrap(),
             Some(continued)
         );
         drop(root_guard);
@@ -345,24 +505,52 @@ mod tests {
                     .is_none()
             );
             assert_eq!(
-                current_session(log.channel, log.logical, Some(&original)).unwrap(),
+                current_session(
+                    log.channel,
+                    log.logical,
+                    Some(&original),
+                    &mut Earlier(Liveness::Running)
+                )
+                .unwrap(),
                 Some(original.clone())
             );
             if let Some(nonce) = &nonce {
                 std::fs::write(&marker, "b".repeat(32)).unwrap();
-                assert!(current_session(log.channel, log.logical, Some(&original)).is_err());
+                assert!(
+                    current_session(
+                        log.channel,
+                        log.logical,
+                        Some(&original),
+                        &mut Earlier(Liveness::Running)
+                    )
+                    .is_err()
+                );
                 std::fs::write(&marker, nonce).unwrap();
             } else {
                 std::fs::write(&marker, "b".repeat(32)).unwrap();
                 assert_eq!(
-                    current_session(log.channel, log.logical, Some(&original)).unwrap(),
+                    current_session(
+                        log.channel,
+                        log.logical,
+                        Some(&original),
+                        &mut Earlier(Liveness::Running)
+                    )
+                    .unwrap(),
                     Some(original.clone())
                 );
                 std::fs::remove_file(&marker).unwrap();
             }
             std::fs::rename(&source.path, source.path.with_extension("old")).unwrap();
             std::fs::write(&source.path, b"{}\n").unwrap();
-            assert!(current_session(log.channel, log.logical, Some(&original)).is_err());
+            assert!(
+                current_session(
+                    log.channel,
+                    log.logical,
+                    Some(&original),
+                    &mut Earlier(Liveness::Running)
+                )
+                .is_err()
+            );
         }
     }
     #[test]
@@ -370,14 +558,76 @@ mod tests {
         let mut log = Log::new(8077012);
         let original = uuid::Uuid::new_v4().to_string();
         assert_eq!(
-            current_session(log.channel, log.logical, Some(&original)).unwrap(),
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&original),
+                &mut Earlier(Liveness::Running)
+            )
+            .unwrap(),
             Some(original.clone())
         );
         let source = log.source(&original);
         log.push(events::BindingTarget::Source(source.clone()));
         std::fs::remove_file(&source.path).unwrap();
-        assert!(current_session(log.channel, log.logical, Some(&original)).is_err());
+        assert!(
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&original),
+                &mut Earlier(Liveness::Running)
+            )
+            .is_err()
+        );
         std::fs::write(log.path(), b"not-json\n").unwrap();
-        assert!(current_session(log.channel, log.logical, Some(&original)).is_err());
+        assert!(
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&original),
+                &mut Earlier(Liveness::Running)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn an_unlogged_tmux_resume_marker_yields_the_binding_only_once_its_tmux_ended() {
+        let _root_guard = crate::config::TestRuntimeRootGuard::new();
+        let log = Log::new(8177001);
+        let original = uuid::Uuid::new_v4().to_string();
+        let source = log.source(&original);
+        let marker = crate::services::tmux_common::session_temp_path(log.logical, "spawn_nonce");
+        let host = crate::services::tmux_common::session_temp_path(log.logical, "host_kind");
+        std::fs::write(&marker, "a".repeat(32)).unwrap();
+        crate::services::tui_prompt_dedupe::register_tmux_channel(log.logical, log.channel);
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            log.logical,
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: source.path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(original.clone()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        // The later tmux resume of the same transcript replaced the marker without a record.
+        std::fs::write(&marker, "b".repeat(32)).unwrap();
+        let judged = |host_kind: &str, liveness: Liveness| {
+            std::fs::write(&host, host_kind).unwrap();
+            current_session(
+                log.channel,
+                log.logical,
+                Some(&original),
+                &mut Earlier(liveness),
+            )
+        };
+        assert_eq!(judged("tmux", Liveness::Ended), Ok(Some(original.clone())));
+        let refused = Err("handoff binding belongs to another execution".to_string());
+        assert_eq!(judged("tmux", Liveness::Running), refused);
+        assert_eq!(judged("tmux", Liveness::Unknown("probe".into())), refused);
+        assert_eq!(judged("herdr", Liveness::Ended), refused);
     }
 }

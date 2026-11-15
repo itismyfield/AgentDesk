@@ -15,6 +15,33 @@ use super::file::{self, FileToken};
 mod loaded_image;
 pub(crate) use loaded_image::{LoadedImage, SUPPORTED};
 
+/// Match this process's mapped executable and generation to the already pinned image token.
+pub(crate) fn verify_current_image(checker: &FileToken) -> Result<(), Unverified> {
+    let pid = std::process::id();
+    let start = provenance::process_start(pid).map_err(|_| Unverified::Peer)?;
+    #[cfg(target_os = "macos")]
+    let generation = || {
+        let (stream, _peer) =
+            std::os::unix::net::UnixStream::pair().map_err(|_| Unverified::Peer)?;
+        provenance::socket_peer_token(&stream)
+            .filter(|token| token.pid == pid)
+            .ok_or(Unverified::Changed)
+    };
+    #[cfg(target_os = "macos")]
+    let before = Some(generation()?);
+    #[cfg(not(target_os = "macos"))]
+    let before = None;
+    let loaded = loaded_image::for_process(pid, &start, before.as_ref())?;
+    #[cfg(target_os = "macos")]
+    if Some(generation()?) != before {
+        return Err(Unverified::Changed);
+    }
+    if !loaded.matches(checker) {
+        return Err(Unverified::Identity);
+    }
+    checker.fast_unchanged()
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PeerEnvironment {
     pub home: Vec<String>,
@@ -230,3 +257,7 @@ fn absolute(values: &[String]) -> Result<Option<PathBuf>, Unverified> {
 #[cfg(all(test, unix))]
 #[path = "peer_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "peer_current_image_tests.rs"]
+mod current_image_tests;

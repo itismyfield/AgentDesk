@@ -1,6 +1,8 @@
 //! A current clear can prepare its first input before publishing the new transcript binding.
 use super::{ledger, source, source::Source};
-use crate::services::tui_prompt_dedupe::{self, binding_context, binding_events};
+use crate::services::tui_prompt_dedupe;
+#[cfg(unix)]
+use crate::services::tui_prompt_dedupe::{binding_context, binding_events};
 use chrono::{DateTime, Utc};
 use std::path::Path;
 
@@ -11,7 +13,31 @@ pub(super) struct Evidence {
     started: DateTime<Utc>,
 }
 
+#[cfg(unix)]
 pub(super) fn evidence(source: &Source) -> Option<Evidence> {
+    if !source::clear_usable(source) {
+        return None;
+    }
+    let binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(&source.session);
+    evidence_with(source, binding.as_ref())
+}
+#[cfg(unix)]
+pub(super) fn evidence_under(
+    source: &Source,
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+) -> Option<Evidence> {
+    if !source::clear_usable_under(source, authority) {
+        return None;
+    }
+    let binding =
+        tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority);
+    evidence_with(source, binding.as_ref())
+}
+#[cfg(unix)]
+fn evidence_with(
+    source: &Source,
+    binding: Option<&tui_prompt_dedupe::TuiRuntimeBinding>,
+) -> Option<Evidence> {
     use binding_events::{BindingCause, BindingTarget};
     let nonce = source.nonce.as_deref()?;
     if source::nonce(&source.session) != Some(source.nonce.clone()) {
@@ -86,11 +112,11 @@ pub(super) fn evidence(source: &Source) -> Option<Evidence> {
         return None;
     }
     let old = before.old.as_ref()?;
-    let binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(&source.session)?;
-    if binding.session_id.as_deref() != Some(old.session_id.as_str())
-        || Path::new(binding.relay_output_path()) != old.path
-        || binding_events::published_claude_history(channel, &source.session, nonce).as_ref()
-            != Some(&snapshot)
+    if binding.is_some_and(|binding| {
+        binding.session_id.as_deref() != Some(old.session_id.as_str())
+            || Path::new(binding.relay_output_path()) != old.path
+    }) || binding_events::published_claude_history(channel, &source.session, nonce).as_ref()
+        != Some(&snapshot)
     {
         return None;
     }
@@ -102,9 +128,32 @@ pub(super) fn evidence(source: &Source) -> Option<Evidence> {
 }
 
 pub(super) fn current(source: &Source) -> Option<Option<Evidence>> {
+    let clear_start = ledger()
+        .entries
+        .get(source)
+        .is_some_and(|entry| entry.clear_start);
     let Some(binding) = tui_prompt_dedupe::runtime_binding_for_tmux_session(&source.session) else {
-        return Some(None);
+        return if clear_start {
+            evidence(source).map(Some)
+        } else {
+            Some(None)
+        };
     };
+    #[cfg(unix)]
+    let pending = source
+        .nonce
+        .as_deref()
+        .and_then(|nonce| binding_context::execution_context("claude", nonce).ok())
+        .and_then(|ctx| Some((ctx.channel_id?, ctx.execution_nonce)))
+        .and_then(|(channel, nonce)| {
+            binding_events::published_claude_history(channel, &source.session, &nonce)
+        })
+        .is_some_and(|(_, history)| history.awaiting.is_some());
+    #[cfg(not(unix))]
+    let pending = false;
+    if clear_start && pending && !source.path.exists() {
+        return evidence(source).map(Some);
+    }
     if binding
         .session_id
         .as_deref()
@@ -114,5 +163,40 @@ pub(super) fn current(source: &Source) -> Option<Option<Evidence>> {
         Some(None)
     } else {
         evidence(source).map(Some)
+    }
+}
+
+#[cfg(not(unix))]
+pub(super) fn evidence(source: &Source) -> Option<Evidence> {
+    let _ = source;
+    None
+}
+
+pub(super) fn claim(source: &Source, expected: Option<&Evidence>) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    #[cfg(unix)]
+    {
+        source::claim_clear(source, expected)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (source, expected);
+        false
+    }
+}
+pub(super) fn release(source: &Source, expected: Option<&Evidence>) {
+    let Some(expected) = expected else {
+        return;
+    };
+    #[cfg(unix)]
+    source::release_clear(source, expected);
+    #[cfg(not(unix))]
+    let _ = (source, expected);
+}
+impl Evidence {
+    pub(super) fn same_pending(&self, channel: u64, seq: u64) -> bool {
+        self.channel == channel && self.seq == seq
     }
 }

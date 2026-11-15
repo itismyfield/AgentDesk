@@ -174,6 +174,18 @@ pub(super) async fn finalize_enqueue(
     accepted
 }
 
+/// An accepted unsent front stays pending without entering legacy routing.
+#[cfg(unix)]
+pub(super) async fn note_unsent_front(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    originals: &[crate::services::turn_orchestrator::PendingQueueItem],
+    result: &Result<(), String>,
+) {
+    note_busy_result_routed(shared, provider, channel, originals, &[], result, false).await;
+}
+
 /// Each original gets the result of its busy attempt under its own queued generation.
 #[cfg(unix)]
 pub(super) async fn note_busy_result(
@@ -183,6 +195,19 @@ pub(super) async fn note_busy_result(
     originals: &[crate::services::turn_orchestrator::PendingQueueItem],
     fallback: &[String],
     result: &Result<(), String>,
+) {
+    note_busy_result_routed(shared, provider, channel, originals, fallback, result, true).await;
+}
+
+#[cfg(unix)]
+async fn note_busy_result_routed(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    originals: &[crate::services::turn_orchestrator::PendingQueueItem],
+    fallback: &[String],
+    result: &Result<(), String>,
+    resolve_missing_parent: bool,
 ) {
     use crate::services::discord::turn_view_reconciler::{
         TurnViewIdentity, TurnViewOwner, TurnViewTarget,
@@ -221,7 +246,14 @@ pub(super) async fn note_busy_result(
         }
         let resolve = super::super::super::resolve_thread_parent;
         let parent = match (result, parent, shared.http.cached_serenity_ctx.get()) {
-            (Err(_), None, Some(ctx)) => resolve(&ctx.http, channel).await.map(|(id, _)| id),
+            (Err(_), None, Some(ctx))
+                if resolve_missing_parent
+                    && !super::super::intake_gate::busy_inject::queued_head_covers(
+                        channel, None,
+                    ) =>
+            {
+                resolve(&ctx.http, channel).await.map(|(id, _)| id)
+            }
             (_, parent, _) => parent,
         };
         let target = TurnViewTarget::intake_user_message(channel, message);
@@ -233,7 +265,10 @@ pub(super) async fn note_busy_result(
                     .await
             }
             Err(error)
-                if super::super::intake_gate::busy_inject::queued_head_covers(channel, parent) =>
+                if !resolve_missing_parent
+                    || super::super::intake_gate::busy_inject::queued_head_covers(
+                        channel, parent,
+                    ) =>
             {
                 if error.starts_with("NotSent(") {
                     let queued = shared

@@ -5,6 +5,7 @@ use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState
 use crate::services::claude::session_handoff::{
     EarlierExecution, LegacyTmux, Liveness, pinned_tmux,
 };
+use crate::services::claude_tui::host_input::busy::{self, BusyObservation, BusyState};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_host::{HerdrTurnPlan, TurnHost};
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
@@ -38,6 +39,19 @@ pub(crate) async fn prepare(
         .v2_request(|slot| Ok(slot.as_ref().and_then(|owner| owner.handoff())))
         .await?;
     let channel = Channel::new(channel);
+    if let Some(journal) = &journal
+        && journal.retry_after_ms > now_ms()
+    {
+        return hold(
+            shared,
+            mailbox,
+            channel,
+            front,
+            &journal.id,
+            journal.failures,
+        )
+        .await;
+    }
     let judged = judge(shared, provider, channel, journal.is_some()).await;
     let (key, host) = match judged {
         Ok(Some(target)) => target,
@@ -86,14 +100,7 @@ pub(crate) async fn prepare(
     if journal.is_none()
         && !matches!(
             plan.row.as_ref().map(|row| &row.record),
-            Some(HostedRecord::Legacy)
-                | None
-                | Some(HostedRecord::Known(
-                    crate::db::dispatched_sessions::hosted_execution::HostedExecution {
-                        state: HostedState::Retired,
-                        ..
-                    }
-                ))
+            Some(HostedRecord::Legacy) | None
         )
     {
         return Ok(false);
@@ -256,6 +263,27 @@ fn front_tag(front: &Front) -> String {
     format!("front:{}:{}", front.1.message_id, front.1.queued_generation)
 }
 
+fn now_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis().max(0) as u64
+}
+
+/// Retry only after wrapper row and token cleanup; unrelated wakes still check the durable deadline.
+pub(crate) async fn retry_start(shared: &Shared, channel: Channel) -> Result<bool, String> {
+    let journal = shared
+        .mailbox(channel)
+        .v2_request(|slot| Ok(slot.as_ref().and_then(|owner| owner.handoff())))
+        .await?;
+    if let Some(journal) = journal.filter(|j| j.retry_after_ms > 0) {
+        if journal.retry_after_ms <= now_ms() {
+            recover(shared.clone(), channel);
+            return Ok(false);
+        }
+        schedule(shared.clone(), channel, journal.id, journal.failures);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 async fn hold(
     shared: &Shared,
     mailbox: &ChannelMailboxHandle,
@@ -282,28 +310,53 @@ fn schedule(shared: Shared, channel: Channel, id: String, failures: u32) {
     }
     let waiting = Waiting(key.clone());
     tokio::spawn(async move {
-        let seconds = 1u64 << failures.min(5);
-        tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+        let checked = id.clone();
+        let deadline = shared
+            .mailbox(channel)
+            .v2_request(move |slot| {
+                Ok(slot
+                    .as_ref()
+                    .and_then(|owner| owner.handoff())
+                    .filter(|j| j.id == checked)
+                    .map(|j| j.retry_after_ms))
+            })
+            .await
+            .ok()
+            .flatten()
+            .filter(|at| *at > 0);
+        // A later hold must not reuse an expired launch deadline as a zero-delay retry.
+        let now = now_ms();
+        let delay = deadline
+            .filter(|at| *at > now)
+            .map_or(1_000u64 << failures.min(5), |at| at - now);
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         drop(waiting);
         let checked = id.clone();
         let live = shared
             .mailbox(channel)
             .v2_request(move |slot| {
-                Ok(slot.as_ref().is_some_and(|owner| {
-                    owner.handoff().is_some_and(|j| j.id == checked)
-                        || owner
-                            .front()
-                            .is_some_and(|front| front_tag(&front) == checked)
+                Ok(slot.as_ref().and_then(|owner| {
+                    owner
+                        .handoff()
+                        .filter(|j| j.id == checked)
+                        .map(|j| j.retry_after_ms)
+                        .or_else(|| {
+                            owner
+                                .front()
+                                .filter(|front| front_tag(front) == checked)
+                                .map(|_| 0)
+                        })
                 }))
             })
             .await;
         match live {
-            Ok(true) => {
+            Ok(Some(at)) if at > now_ms() => schedule(shared, channel, id, failures),
+            Ok(Some(_)) => {
                 recover(shared.clone(), channel);
                 crate::services::discord::router::message_handler::owner_wake(&shared, channel);
             }
             Err(_) => schedule(shared, channel, id, failures.saturating_add(1)),
-            Ok(false) => (),
+            Ok(None) => (),
         }
     });
 }
@@ -385,8 +438,60 @@ pub(crate) fn bound_herdr(
     Some((pane, format!("{}#{}", at.socket_addr, at.pane_id), target))
 }
 
+/// Observes the supplied host without resolving a replacement execution.
+pub(crate) fn observe_busy(
+    channel: u64,
+    logical: &str,
+    host: &TurnHost,
+    token_hash: &str,
+) -> BusyObservation {
+    let plan = match host {
+        TurnHost::Tmux => return BusyObservation::only(BusyState::Legacy),
+        TurnHost::Herdr(plan) => plan,
+        // Lifecycle refusals and returns keep the existing driver's recovery policy.
+        TurnHost::Return(_) | TurnHost::Refused(_) => {
+            return BusyObservation::only(BusyState::Idle);
+        }
+    };
+    let Some(row) = plan.row.as_ref() else {
+        return BusyObservation::only(BusyState::Idle);
+    };
+    let record = match &row.record {
+        HostedRecord::Unknown(_) => return BusyObservation::only(BusyState::Held),
+        HostedRecord::Known(record) if record.state == HostedState::Bound => record,
+        _ => return BusyObservation::only(BusyState::Idle),
+    };
+    let runtime_root = crate::config::runtime_root();
+    if token_hash.is_empty()
+        || record.owner.discord_token_hash != token_hash
+        || record.owner.owner_node != plan.endpoint.execution_node
+        || runtime_root.as_deref() != Some(std::path::Path::new(&record.owner.runtime_root))
+        || record.owner.provider != "claude"
+        || record.owner.logical_key != logical
+        || record.owner.channel_id != channel.to_string()
+    {
+        return BusyObservation::only(BusyState::Held);
+    }
+    let Some(target) = bound_herdr(plan) else {
+        return BusyObservation::only(BusyState::Held);
+    };
+    busy::observe_herdr(
+        (channel, logical, &record.execution_nonce),
+        target,
+        busy_output_ready,
+    )
+}
+
+fn busy_output_ready(channel: u64) -> bool {
+    crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+        channel,
+        Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
+    ) == Ok(true)
+        && crate::services::tui_o::writer::host::channel_accepts(channel)
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     mod actual_close_tests;
     use super::*;
     use crate::db::dispatched_sessions::hosted_execution::{
@@ -410,6 +515,19 @@ mod tests {
         fn drop(&mut self) {
             FORCED.lock().unwrap().remove(&self.0);
         }
+    }
+    pub(crate) fn force_host(channel: u64, key: String, row: HostedObservation) -> impl Drop {
+        FORCED.lock().unwrap().insert(
+            channel,
+            Forced {
+                real_close: false,
+                key,
+                row,
+                attempts: 0,
+                done: None,
+            },
+        );
+        Guard(channel)
     }
     pub(super) fn judged(channel: u64) -> Option<(String, TurnHost)> {
         let forced = FORCED.lock().unwrap();
@@ -596,6 +714,13 @@ mod tests {
     }
     #[tokio::test]
     async fn journal_only_boot_census_selects_actor_and_real_owner_recovery_finishes_it_pg() {
+        input_free_journal_recovers(false).await;
+    }
+    #[tokio::test]
+    async fn positive_retry_timer_finishes_an_input_free_bound_journal_pg() {
+        input_free_journal_recovers(true).await;
+    }
+    async fn input_free_journal_recovers(timer: bool) {
         let root_guard = crate::config::TestRuntimeRootGuard::new();
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
@@ -639,7 +764,10 @@ mod tests {
             QueuePersistenceContext::new(&ProviderKind::Claude, &shared.token_hash, None);
         let (path, namespace) =
             crate::services::turn_orchestrator::v2_queue(&persistence, channel).unwrap();
-        mailbox.v2_adopt(path.clone(), namespace).await.unwrap();
+        mailbox
+            .v2_adopt(path.clone(), namespace.clone())
+            .await
+            .unwrap();
         let key_copy = key.clone();
         let raw = mailbox
             .v2_request(move |slot| {
@@ -658,6 +786,13 @@ mod tests {
         // A saved input-free journal still owes completion independently of an input head.
         let mut raw = raw;
         raw["items"] = serde_json::json!([]);
+        if timer {
+            raw["unfinished_handoff"]["retry_after_ms"] = serde_json::json!(now_ms() + 1_000);
+        }
+        let journal_id = raw["unfinished_handoff"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         std::fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
         drop(mailbox);
         drop(shared);
@@ -670,7 +805,17 @@ mod tests {
             )
             .contains(&channel)
         );
-        crate::services::discord::router::message_handler::owner_recover(&shared, channel).await;
+        if timer {
+            shared
+                .mailbox(channel)
+                .v2_adopt(path, namespace)
+                .await
+                .unwrap();
+            schedule(shared.clone(), channel, journal_id, 1);
+        } else {
+            crate::services::discord::router::message_handler::owner_recover(&shared, channel)
+                .await;
+        }
         tokio::time::timeout(std::time::Duration::from_secs(10), completed)
             .await
             .unwrap()

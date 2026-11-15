@@ -77,7 +77,9 @@ fn normalized_selection_inputs_preserve_launch_and_fallback_results() {
                         .provider_auth_fallbacks
                         .insert("codex".into(), policy.clone());
                     let (overlay, route) = launch_overlay_parts(
-                        Some(&schema),
+                        Some(&crate::services::org_catalog::AuthCatalogSnapshot::from(
+                            &schema,
+                        )),
                         &ProviderKind::Codex,
                         Some(61018514),
                         Some("coder"),
@@ -117,7 +119,9 @@ fn normalized_selection_inputs_preserve_launch_and_fallback_results() {
         serde_yaml::from_str("display_name: Other\nauth_profile: a").unwrap(),
     );
     let (profile, pinned) = configured_launch_profile(
-        Some(&schema),
+        Some(&crate::services::org_catalog::AuthCatalogSnapshot::from(
+            &schema,
+        )),
         &ProviderKind::Codex,
         Some(61018514),
         Some("other"),
@@ -129,7 +133,9 @@ fn normalized_selection_inputs_preserve_launch_and_fallback_results() {
     schema.agents.get_mut("other").unwrap().auth_profile = Some("missing".into());
     assert!(
         launch_overlay_parts(
-            Some(&schema),
+            Some(&crate::services::org_catalog::AuthCatalogSnapshot::from(
+                &schema
+            )),
             &ProviderKind::Codex,
             Some(61018514),
             Some("other"),
@@ -140,7 +146,9 @@ fn normalized_selection_inputs_preserve_launch_and_fallback_results() {
     );
     assert!(
         launch_overlay_parts(
-            Some(&schema),
+            Some(&crate::services::org_catalog::AuthCatalogSnapshot::from(
+                &schema
+            )),
             &ProviderKind::Codex,
             None,
             Some("other"),

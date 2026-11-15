@@ -105,5 +105,254 @@ class InstanceFilesTests(unittest.TestCase):
         self.assertFalse(external.exists())
 
 
+
+
+"""Owned live sockets and pinned runtime files, using only private synthetic fixtures."""
+
+import json
+import os
+from pathlib import Path
+import socket
+import stat
+import tempfile
+import unittest
+from unittest.mock import patch
+import uuid
+
+from scripts.dev_instance import files, manifest
+from tests.test_dev_instance import profile
+
+
+class InstanceLiveFilesTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="lf-", dir="/tmp")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name).resolve()
+        self.worktree = self.base / "worktree"
+        self.worktree.mkdir()
+        self.instance_id = str(uuid.uuid4())
+        with patch.object(manifest, "worktree_identity", return_value="1" * 40), \
+                patch.object(manifest, "check_port", side_effect=lambda port, pool: port):
+            self.declaration = manifest.prepare(self.base, self.instance_id, self.worktree, profile(), {},
+                                                api_port=18791, pg_port=25432)
+        self.root = Path(self.declaration["root"])
+
+    def bind(self, relative):
+        path = self.root / relative
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(str(path))
+        listener.listen(1)
+        os.chmod(path, 0o777)
+        meta = path.lstat()
+        return path, (meta.st_dev, meta.st_ino)
+
+    def positive(self, function, *args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except (TypeError, files.InstanceError) as error:
+            self.fail(f"declared owned live effect was refused: {error}")
+
+    def publish(self, data, **kwargs):
+        function = getattr(files, "publish_runtime", None)
+        self.assertTrue(callable(function), "runtime publication API must exist")
+        return function(self.root, "runtime/resources-owner.json", data, **kwargs)
+
+    def test_live_socket_requires_matching_explicit_witness(self):
+        path, identity = self.bind("runtime/herdr/socket")
+        with self.assertRaises(files.InstanceError):
+            files.validate_tree(self.root)
+        self.positive(files.validate_tree, self.root, live_sockets={path: identity})
+        with self.assertRaises(files.InstanceError):
+            files.validate_tree(self.root, live_sockets={path: (identity[0], identity[1] + 1)})
+        self.assertTrue(path.is_socket())
+
+    def test_only_declared_pg_herdr_and_keeper_paths_are_allowed(self):
+        paths = [self.bind(relative) for relative in
+                 ("postgres/socket/.s.PGSQL.25432", ".s.PGSQL.25432", "runtime/herdr/socket",
+                  "runtime/herdr/socket-client.sock", "runtime/keeper.sock")]
+        witnesses = dict(paths)
+        self.positive(files.validate_tree, self.root, live_sockets=witnesses)
+        wrong, identity = self.bind("postgres/socket/.s.PGSQL.25433")
+        with self.assertRaises(files.InstanceError):
+            files.validate_tree(self.root, live_sockets=witnesses | {wrong: identity})
+        wrong.unlink()
+        arbitrary, identity = self.bind("runtime/arbitrary.sock")
+        with self.assertRaises(files.InstanceError):
+            files.validate_tree(self.root, live_sockets=witnesses | {arbitrary: identity})
+        arbitrary.unlink()
+        document = self.root / "manifest.json"
+        changed = json.loads(document.read_text())
+        changed["hosts"]["herdr"]["socket"] = str(self.root / "runtime/other.sock")
+        document.write_text(json.dumps(changed))
+        with self.assertRaises(files.InstanceError):
+            files.validate_tree(self.root, live_sockets=witnesses)
+
+    def test_socket_proof_types_foreign_paths_and_regular_files_are_rejected(self):
+        path, identity = self.bind("runtime/keeper.sock")
+        for invalid in [[], True, ()]:
+            with self.subTest(mapping=invalid), self.assertRaises(files.InstanceError):
+                files.validate_tree(self.root, live_sockets=invalid)
+        for value in [(True, identity[1]), (-1, identity[1]), [*identity], (identity[0],), "socket"]:
+            with self.subTest(value=value), self.assertRaises(files.InstanceError):
+                files.validate_tree(self.root, live_sockets={path: value})
+        with self.assertRaises(files.InstanceError):
+            files.validate_tree(self.root, live_sockets={self.base / "outside.sock": identity})
+        path.unlink()
+        path.write_text("regular file")
+        os.chmod(path, 0o600)
+        metadata = path.stat()
+        with self.assertRaises(files.InstanceError):
+            files.validate_tree(self.root, live_sockets={path: (metadata.st_dev, metadata.st_ino)})
+
+    def test_socket_replacement_private_ancestor_and_uid_are_checked(self):
+        path, identity = self.bind("runtime/herdr/socket")
+        path.unlink()
+        _, replacement = self.bind("runtime/herdr/socket")
+        self.assertNotEqual(identity, replacement)
+        with self.assertRaises(files.InstanceError):
+            files.validate_tree(self.root, live_sockets={path: identity})
+        os.chmod(path.parent, 0o755)
+        with self.assertRaises(files.InstanceError):
+            files.validate_tree(self.root, live_sockets={path: replacement})
+        os.chmod(path.parent, 0o700)
+        with patch.object(files.os, "geteuid", return_value=os.geteuid() + 1):
+            with self.assertRaises(files.InstanceError):
+                files.validate_tree(self.root, live_sockets={path: replacement})
+
+    def test_socket_symlink_never_authorizes_an_external_listener(self):
+        outside = self.base / "outside"
+        outside.mkdir(mode=0o700)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        external = outside / "socket"
+        listener.bind(str(external))
+        external_identity = external.stat()
+        self.root.joinpath("runtime/herdr/socket").symlink_to(external)
+        with self.assertRaises(files.InstanceError):
+            files.validate_tree(self.root, live_sockets={self.root / "runtime/herdr/socket":
+                                (external_identity.st_dev, external_identity.st_ino)})
+        self.root.joinpath("runtime/herdr/socket").unlink()
+        self.root.joinpath("runtime/herdr").rmdir()
+        self.root.joinpath("runtime/herdr").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(files.InstanceError):
+            files.validate_tree(self.root, live_sockets={self.root / "runtime/herdr/socket":
+                                (external_identity.st_dev, external_identity.st_ino)})
+        self.assertTrue(external.is_socket())
+
+    def test_manifest_live_validation_keeps_declared_schema_and_default_strictness(self):
+        path, identity = self.bind("runtime/keeper.sock")
+        with self.assertRaises(files.InstanceError):
+            manifest.validate(self.base, self.instance_id, {}, check_ports=False)
+        with patch.object(manifest, "worktree_identity", return_value=self.declaration["head"]):
+            result = self.positive(manifest.validate, self.base, self.instance_id, {}, check_ports=False,
+                                   live_sockets={path: identity})
+        self.assertEqual(result, self.declaration)
+        self.assertEqual(result["status"], "DECLARED")
+        self.assertIs(result["live_ready"], False)
+
+    def test_runtime_publication_is_fresh_private_bounded_and_conditionally_same_inode(self):
+        identity = self.publish({"nonce": "first", "owned": []})
+        path = self.root / "runtime/resources-owner.json"
+        self.assertEqual(identity, (path.stat().st_dev, path.stat().st_ino))
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        with self.assertRaises(files.InstanceError):
+            self.publish({"nonce": "unconditional overwrite"})
+        self.assertEqual(self.publish({"nonce": "second"}, expected_identity=identity), identity)
+        self.assertEqual(json.loads(path.read_text()), {"nonce": "second"})
+        with self.assertRaises(files.InstanceError):
+            self.publish({"value": "x" * 16384}, expected_identity=identity)
+        self.assertEqual(json.loads(path.read_text()), {"nonce": "second"})
+        with self.assertRaises(files.InstanceError):
+            self.publish({"value": float("nan")}, expected_identity=identity)
+
+    def test_runtime_publication_refuses_foreign_replacements_links_and_names(self):
+        identity = self.publish({"owned": True})
+        path = self.root / "runtime/resources-owner.json"
+        foreign = path.with_name("resources-owner.foreign")
+        foreign.write_text('{"foreign": true}\n')
+        os.chmod(foreign, 0o600)
+        os.replace(foreign, path)
+        with self.assertRaises(files.InstanceError):
+            self.publish({"owned": True}, expected_identity=identity)
+        self.assertEqual(json.loads(path.read_text()), {"foreign": True})
+        current = (path.stat().st_dev, path.stat().st_ino)
+        os.chmod(path, 0o644)
+        with self.assertRaises(files.InstanceError):
+            self.publish({"owned": True}, expected_identity=current)
+        os.chmod(path, 0o600)
+        alias = self.root / "runtime/hardlink"
+        os.link(path, alias)
+        with self.assertRaises(files.InstanceError):
+            self.publish({"owned": True}, expected_identity=current)
+        alias.unlink()
+        path.unlink()
+        outside = self.base / "outside.json"
+        outside.write_text("foreign")
+        path.symlink_to(outside)
+        with self.assertRaises(files.InstanceError):
+            self.publish({}, expected_identity=current)
+        self.assertEqual(outside.read_text(), "foreign")
+        path.unlink()
+        for relative in ["receipt.json", "runtime/keeper-control.json", "runtime/other.json", "../escape"]:
+            with self.subTest(relative=relative), self.assertRaises(files.InstanceError):
+                files.publish_runtime(self.root, relative, {})
+
+    def test_runtime_publication_supports_only_explicit_existing_live_sockets(self):
+        path, identity = self.bind("runtime/keeper.sock")
+        with self.assertRaises(files.InstanceError):
+            self.publish({})
+        result = self.publish({"alive": True}, live_sockets={path: identity})
+        self.assertEqual(result[1], (self.root / "runtime/resources-owner.json").stat().st_ino)
+
+    def test_publication_pins_original_fd_across_a_path_replacement(self):
+        identity = self.publish({"owned": True})
+        path = self.root / "runtime/resources-owner.json"
+        truncate = os.ftruncate
+
+        def replace_before_write(descriptor, size):
+            path.unlink()
+            path.write_text('{"foreign": true}\n')
+            os.chmod(path, 0o600)
+            truncate(descriptor, size)
+
+        with patch.object(files.os, "ftruncate", side_effect=replace_before_write):
+            with self.assertRaises(files.InstanceError):
+                self.publish({"overwrite": True}, expected_identity=identity)
+        self.assertEqual(json.loads(path.read_text()), {"foreign": True})
+
+    def test_resource_spec_is_explicit_bounded_and_never_resolves_a_fallback(self):
+        function = getattr(manifest, "resource_spec", None)
+        self.assertTrue(callable(function), "resource spec API must exist")
+        value = {"startup_timeout": 60, "stop_grace": 5, "max_aux": 2, "pg_pool": 4, "pg_reserve": 1}
+        for key in ("postgres_bin", "initdb_bin", "psql_bin", "herdr_bin"):
+            path = self.base / key
+            path.write_text("#!/bin/sh\nexit 0\n")
+            os.chmod(path, 0o700)
+            value[key] = str(path)
+        self.assertEqual(function(value), value)
+        variants = [{**value, "extra": "unknown"}, {key: item for key, item in value.items() if key != "herdr_bin"}]
+        for key, bad in [("postgres_bin", "postgres"), ("max_aux", 3), ("pg_pool", 5), ("pg_reserve", 0),
+                         ("startup_timeout", True), ("startup_timeout", 601), ("startup_timeout", 10**1000),
+                         ("startup_timeout", float("nan")), ("startup_timeout", float("inf")),
+                         ("herdr_bin", "bad\0path"),
+                         ("stop_grace", 0), ("stop_grace", 31)]:
+            variants.append({**value, key: bad})
+        for variant in variants:
+            with self.subTest(variant=variant), self.assertRaises(files.InstanceError):
+                function(variant)
+        binary = Path(value["herdr_bin"])
+        os.chmod(binary, 0o600)
+        with self.assertRaises(files.InstanceError):
+            function(value)
+        os.chmod(binary, 0o700)
+        alias = self.base / "binary-link"
+        alias.symlink_to(binary)
+        with self.assertRaises(files.InstanceError):
+            function({**value, "herdr_bin": str(alias)})
+
+
+
+
 if __name__ == "__main__":
     unittest.main()

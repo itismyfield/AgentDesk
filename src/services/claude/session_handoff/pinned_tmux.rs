@@ -25,7 +25,13 @@ struct Control {
     output: Lines<BufReader<ChildStdout>>,
 }
 impl Control {
-    async fn attach_with(command: std::process::Command, logical: &str) -> Result<Self, String> {
+    async fn attach_with(
+        mut command: std::process::Command,
+        logical: &str,
+    ) -> Result<Self, String> {
+        crate::services::platform::tmux::validate_target(logical).map_err(|e| e.to_string())?;
+        crate::config::test_instance::configure_tmux_command(&mut command)
+            .map_err(|e| e.to_string())?;
         let mut command = tokio::process::Command::from(command);
         let mut child = command
             .args([
@@ -108,6 +114,16 @@ impl Control {
             tracing::debug!("tmux control client did not detach before deadline");
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn scoped_control_attach_for_test(
+    program: &std::path::Path,
+    logical: &str,
+) -> Result<(), String> {
+    let control = Control::attach_with(std::process::Command::new(program), logical).await?;
+    control.finish().await;
+    Ok(())
 }
 
 fn id(value: &str, prefix: char) -> bool {
@@ -230,10 +246,12 @@ where
     F: FnMut(Pin) -> Fut,
     Fut: std::future::Future<Output = Result<bool, String>>,
 {
+    // The name is spliced into control-mode command text. Letters and digits of any script, as
+    // AgentDesk builds names from channel names, encode no ASCII byte tmux reads as syntax.
     if logical.is_empty()
         || !logical
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-_:.".contains(&b))
+            .chars()
+            .all(|c| c.is_alphanumeric() || "-_:.".contains(c))
     {
         return Err("logical tmux identity unsupported".into());
     }
@@ -271,6 +289,7 @@ where
     let mut control = Control::attach_with(command, logical).await?;
     let query = format!("display-message -p -t ={logical}: '{FORMAT}'");
     let (server, session, window, pane, pid) = fields(&control.command(&query).await?)?;
+    crate::services::platform::tmux::validate_target(&pane).map_err(|e| e.to_string())?;
     let pin = Pin {
         nonce,
         server,
@@ -339,6 +358,9 @@ mod tests {
             String::from_utf8(out.stdout).unwrap()
         }
         fn start(&self) {
+            self.start_named("i8077-close-test");
+        }
+        fn start_named(&self, name: &str) {
             let capture = self.dir.path().join("busy-screen");
             std::fs::write(&capture, CAPTURE_46).unwrap();
             let command = format!("cat '{}'; exec sleep 300", capture.display());
@@ -352,7 +374,7 @@ mod tests {
                 "-y",
                 "39",
                 "-s",
-                "i8077-close-test",
+                name,
                 &command,
             ]);
         }
@@ -565,6 +587,31 @@ except ProcessLookupError:
             .await
             .is_ok()
         );
+        drop(root_guard);
+    }
+
+    #[tokio::test]
+    async fn an_agentdesk_name_in_hangul_closes_only_its_exact_pane() {
+        use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
+        let root_guard = crate::config::TestRuntimeRootGuard::new();
+        let server = Server {
+            dir: tempfile::tempdir().unwrap(),
+        };
+        let logical =
+            crate::services::provider::ProviderKind::Claude.build_tmux_session_name("게임-cc");
+        server.start_named(&logical);
+        server.start_named("i8177-bystander");
+        let prepared =
+            PreparedIncarnation::prepare("claude", &logical, Some(8177), Some("argv-a"), true)
+                .unwrap();
+        crate::services::discord::stamp_spawn_markers(&logical, Some(&prepared)).unwrap();
+        let result = end_with(server.command(), &logical, 8177, None, |_| async {
+            Ok(true)
+        })
+        .await;
+        assert_eq!(result, Ok(()));
+        let names = server.run(&["-N", "list-sessions", "-F", "#{session_name}"]);
+        assert_eq!(names.lines().collect::<Vec<_>>(), ["i8177-bystander"]);
         drop(root_guard);
     }
 }

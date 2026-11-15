@@ -1,0 +1,2 @@
+key: 070-input-single-path-boot-custody
+| `input-single-path` boot custody (#8055) | `e285a5cff1e8f8eadfc87e297ad7a202531f3ed3` | frozen Current: silent completion and premature checkpoint; checkpoint/wake mutants remain expected RED | narrowed existing-Hold custody/ready design passes N=1/N=2; normal V1 local execution unchanged and outside the model; see [report](input-single-path/i8055-boot-design.report.md) |

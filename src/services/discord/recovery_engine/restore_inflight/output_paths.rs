@@ -5,16 +5,18 @@ use super::*;
 #[cfg(unix)]
 fn tmux_pane_pid(tmux_session_name: &str) -> Option<u32> {
     let mut cmd = binary_resolver::runtime_command("tmux").ok()?;
-    let output = cmd
-        .args([
+    crate::services::platform::tmux::input_command(
+        &mut cmd,
+        &[
             "display-message",
             "-p",
             "-t",
             &tmux_exact_target(tmux_session_name),
             "#{pane_pid}",
-        ])
-        .output()
-        .ok()?;
+        ],
+    )
+    .ok()?;
+    let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;
     }

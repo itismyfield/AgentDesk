@@ -3579,6 +3579,7 @@ fn report_config() -> config::Config {
 }
 
 pub(crate) fn run_doctor_report(options: DoctorOptions) -> Result<DoctorReport, String> {
+    config::test_instance::environment::refuse_service_management()?;
     let cfg = report_config();
     let mut actions = Vec::new();
     if options.fix {

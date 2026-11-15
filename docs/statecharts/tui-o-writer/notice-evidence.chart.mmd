@@ -1,0 +1,25 @@
+stateDiagram-v2
+    [*] --> Absent
+    Absent --> Pending: complete native record materialized durably
+    Pending --> Pending: reason rotates / first log per process only
+    Pending --> Pending: other frame context removed / only that hash blocked
+    Pending --> Pending: final admission refused / keep queue and retry after 5 seconds
+    Pending --> Excluded: exact Owned or existing no-notice policy proof
+    Pending --> Expired: same exemption proof + proven closed session
+    Pending --> Prepared: direct Unowned + final admission + migration ready
+    Prepared --> LegacyRetry: saved budget + NotFound + pre-v1 frame
+    LegacyRetry --> Excluded: final source policy / POST 0
+    Prepared --> EffectUnknown: first POST poll / crash before acknowledgement
+    EffectUnknown --> Posted: existing history confirmation
+    Prepared --> Posted: confirmed POST
+    Pending --> Pending: session boundary without exemption proof
+    Pending --> Pending: restart replays evidence; one new log allowed
+    Excluded --> Excluded: restart preserves terminal proof
+    Expired --> Expired: restart preserves terminal proof
+    Posted --> Posted: restart preserves posted identity
+    note right of Pending
+        No timeout erasure. Permanent evidence loss
+        is an explicit liveness counterexample.
+        Custody/checkpoint and blocked self-wake
+        remain WriterWake responsibilities.
+    end note

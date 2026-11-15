@@ -1,0 +1,2 @@
+key: 200-session-lifecycle-herdr-root-replaced-policy
+| `session-lifecycle` (Herdr RootReplaced, #7788 S0/S1) | `d508839828` + S1 | owned channel retains a replaced Bound row when current startup policy evidence is never produced; early input can also leave current-generation inflight blocking quiet | S1 produces evidence before a new target; GREEN assumes input after the first reader pass, with preclaim/wake race reserved for S2; see `session-lifecycle/herdr-root.report.md` |

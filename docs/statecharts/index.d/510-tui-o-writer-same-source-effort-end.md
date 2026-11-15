@@ -1,0 +1,2 @@
+key: 510-tui-o-writer-same-source-effort-end
+| `tui-o-writer` same-source effort End (#8109 S2) | `7d5900ca70` | Current/current-nonce progress and scoped/seal/new-Open/debt mutants keep expected RED | Fixed/Prefix/Native/Guarded GREEN; historical binding + prefix cutoff pre-fold before seal, native facts unchanged, Prepared confirmation/receipt and POST crash boundary; durable ledger/witness remain explicit storage port assumptions. [report](tui-o-writer/restart-end.report.md) |
