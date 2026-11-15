@@ -5,9 +5,10 @@
 - 기준: `origin/main` `1974cff8a67bf5d1db041abfdd4d615c518ee104`(2026-11-15). 모든 좌표는 이 SHA에서 다시 확인했다.
 - 입력: A(WebGPT pro 초안, 실측 없음), B(Fable xhigh, `refs/review/i7583-design-fable-1` `abad58858d`), C(WSL Codex, `refs/review/i7583-design-1` `b6766912fd`).
 - **정본 기반: C.** 채택 이유는 §2. 사실 근거는 C의 전수표([진입점 표](i7583/entrypoints.md)와 TSV)를 우선했고, 전수표 밖 좌표는 합류 레그가 main에서 직접 확인해 보충했다.
-- 상태 모델: `docs/statecharts/session-host/`(30 cfg, GREEN 11 + 예상 RED 19). [보고서](../statecharts/session-host/session-host.report.md).
+- 상태 모델: `docs/statecharts/session-host/`(34 cfg, GREEN 11 + 예상 RED 23). [보고서](../statecharts/session-host/session-host.report.md).
 - 개정 2(r2): 독립 리뷰(P0 0·P1 4·P2 2)를 반영했다. 바뀐 결정은 §2.1 표에 모았고, 정본 C 채택과 전체 방향은 그대로다.
 - 개정 3(r3): r2 독립 리뷰(P0 0·P1 3·P2 1)를 반영했다(§2.2). S01 계약(§12.4)은 바꾸지 않았다.
+- 개정 4(r4, 델타): r3 독립 리뷰(P1 1·P2 2)를 반영했다(§2.3). 33조각 구조와 S01 계약은 그대로다.
 - 이 레그는 설계만 한다. Rust 구현·cargo·운영 설정·Windows 접속은 하지 않았다.
 
 ## 0. 결론
@@ -29,6 +30,8 @@
 6. 위치(pane)가 기록됐지만 Bound가 안 된 Herdr Pending은 재시작·주기 복구 패스가 사람 개입 없이 끝낸다: pane이 없으면 retire,
    자기 nonce의 셸만 남았으면 그 pane만 닫고 retire, provider가 살아 있으면 Pending을 지키며 같은 nonce의 기존 첫 입력 경로로 잇는다.
    **provider 증명은 source 증명이 아니다** — Bound는 자기 source가 기록된 뒤 기존 attach만 만든다(§7.3, 조각 S06b).
+   dcserver 재시작은 그 실행의 메모리 등록(실행 목록·provider 매핑·Codex placeholder·runtime binding)을 비우므로, resolver는 기존 attach·hook 경로 전에
+   같은 nonce의 내구 상태로 그 등록을 DB·pane·hold 쓰기 없이 되살린다(§7.3 재시작 복원).
 7. Herdr Core는 채널 세션 호스트가 아니라 #7438 F4 레인 전용 구현체다.
 8. 착지 조각 **33개**(공통 14·Windows 11·삭제 6·Core 2) + 측정 1(W00). 미측정 [U] **20개**(win-desktop 17, 격리 VM 1, 맥 2).
 
@@ -90,6 +93,14 @@
 | P1-2 §5.1 Unix Claude Escape 칸이 Cancel 기본값을 바꿈 | **고침.** 생산 Herdr Escape 전달자는 하나(`src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs:801`)이고, Claude·Codex 모두 `herdr_command_eligible`(`:250-262`)·`interrupt_herdr`(`:589-600`)의 bool 검사를 지난다(Claude 토큰 설치 `src/services/claude/herdr_turn.rs:240-246`, 진입 `src/services/discord/turn_bridge/tmux_runtime/judged_stop.rs:370`, `:401`, `:471`). r2 §3의 "bool은 Codex만"은 틀렸다. Unix·endpoint 칸은 두 provider 모두 settlement ∧ bool, PlatformDefault만 bool 우회 | §3, §5.1, §5.2(Escape 칸·생산 경계 시험), W01, W09, W10, 모델 `UnixCancelAsMain`, cfg `EscapeNoSwitch` RED |
 | P1-3 D01이 live Qwen 본문을 보존하지 않음 | **고침.** live submission은 owner·outbox 없이 본문만 갖고(`src/services/discord/router/intake_gate.rs:1325-1352`), host_refusal의 비queued 분기는 uploads·clear만 되돌린다(`src/services/discord/router/message_handler/intake_turn/host_refusal.rs:46-63`, `src/services/discord/admin_host_guard.rs:66-88`). 판정을 `IntakeSubmission` 전체를 가진 router admission(`src/services/discord/router/intake_dispatch.rs:229`)으로 옮겨 기존 deferred 계약(내구 hold 뒤에만 checkpoint, `:690-711`)에 태운다 | §10.2, D01, 모델 `TmuxReturns`·`Requeue` |
 | P2 Requeue 도달 불가 | **고침.** tmux 가용성을 변하는 값(`tmuxUp`)으로 바꾸고 가용성 복귀(`TmuxReturns`)를 넣었다. 정상 cfg에서 재제출 도달을 증인 cfg `RequeueReach`(`NeverRequeued` RED)로 확인하고, 복귀 뒤 제출 liveness `HeldInputSubmitted`를 넣었다. `NoAvailWake` 뮤턴트가 그것을 깬다 | 모델, §14 |
+
+### 2.3 리뷰 반영(r4, 델타)
+
+| 리뷰 항목 | 처리 | 바뀐 곳 |
+|---|---|---|
+| P1 재시작한 Codex Pending은 메모리 등록이 비어 기존 attach·hook 경로가 끝내지 못함 | **고침.** 재시작은 실행 목록(`src/services/tui_prompt_dedupe/runtime_binding/adopt_skip.rs:102`)·provider 매핑·placeholder·runtime binding을 비운다. Codex attach는 live binding이 그 source여야 하고 아니면 NotPublished다(`src/services/discord/tui_prompt_relay/herdr_source.rs:231-238`). hook ingress는 목록에 없는 실행을 이 실행으로 기록하지 않고(`src/services/tui_prompt_dedupe/runtime_binding/codex_hook.rs:333-335`) runtime binding이 없으면 425다(`:388-390`). 재시작 복원은 Bound만 받고(`src/services/discord/recovery_engine/host_reconcile.rs:96-98`), 첫 입력 함수는 hook이 기록됐으면 거절이다(`src/services/codex/herdr_turn.rs:235-239`, 검사 `:268-275`). resolver 표 첫 칸·셋째 칸 앞에 쓰기 없는 복원 단계(첫 입력 준비 `src/services/codex/herdr_turn/first_input.rs:90-106`, `:140-146`와 Bound 재시작 복원 `herdr_source.rs:305-332` 재사용)를 두고, 그 전에 온 hook은 425로 재시도시킨다 | §0-6, §7.3(재시작 복원·전제 표·같은 부류 전수), S06b, 모델 `RestoreReg`·`BoundOwnSource`·`RestartedPendingResolved`, cfg `CodexNoRestore`·`HookConsumed`·`ForeignSource` RED |
+| P2-2 headless `HostUnavailable`의 호출자 정산이 정해지지 않음 | **고침.** 예약 메시지는 오류를 문자열로 바꾼 뒤(`src/services/scheduled_messages.rs:442`) 네 문자열(`:272-281`)만 미룸으로 보고 나머지는 유한 재시도를 쓴다(`:235-258`). routine은 600초 창 뒤 실패로 넘긴다(`src/services/routines/agent_executor/start_deferral.rs:9`, `:57-69`, `:115-126`). 새 variant를 문자열로 바꾸지 않고 호출자까지 넘기며, 생산 호출자 8개(호출 자리 10곳)의 정산을 전수표로 정했다 | §10.2 5·전수, D01 |
+| P2-3 모델이 원문 폐기와 재제출을 구별하지 못함 | **고침.** 입력 한 건의 수탁(`owed`: 도착 뒤 답 전)을 추적해 `CustodyKept`(답 전에는 실행 대기 또는 보존)를 두고, `HeldInputSubmitted`의 목표를 보존 해제가 아니라 답(실제 시작·실패·거절)으로, 증인 `NeverResubmitted`를 보존됐던 입력의 실제 시작으로 바꿨다. 폐기 뮤턴트 `DropOnWake`가 `CustodyKept`·`HeldInputSubmitted`를 깬다 | 모델, §14, 보고서 |
 
 ### 충돌한 결정과 판정
 
@@ -313,9 +324,9 @@ source 없는 Bound는 다음 입력이 모두 거절된다(`src/services/codex/
 
 | 판독 | 결론 |
 |---|---|
-| provider 증명(hook spawn nonce 또는 root/provider tree가 행 nonce와 일치), 자기 source 기록됨, 첫 입력이 이미 닿음(Codex nonce hook 기록 — 첫 prompt 뒤 attach 전에 끊긴 경우) | 기존 Codex attach(`attach_launched_codex_herdr_source`)로 Bound. create 0, 재전송 0. 남은 hold는 nonce hook이 제출 증거이므로 기존 `release_hold`(`src/services/claude/herdr_turn.rs:498-510`)로 끝낸다(hook 없이는 끝내지 않음) |
+| provider 증명(hook spawn nonce 또는 root/provider tree가 행 nonce와 일치), 자기 source 기록됨, 첫 입력이 이미 닿음(Codex nonce hook 기록 — 첫 prompt 뒤 attach 전에 끊긴 경우) | 먼저 아래 **재시작 복원**(source 있음 갈래)으로 이 nonce의 메모리 등록과 runtime binding을 되살리고, 기존 Codex attach(`attach_launched_codex_herdr_source`)로 Bound. 복원이 거절되면 Bound 0·hold 유지로 이번 패스를 넘긴다. create 0, 재전송 0. 남은 hold는 nonce hook이 제출 증거이므로 기존 `release_hold`(`src/services/claude/herdr_turn.rs:498-510`)로 끝낸다(hook 없이는 끝내지 않음) |
 | provider 증명, 첫 입력 전(hold 없음, Codex nonce hook 없음; Claude는 자기 SessionStart 기록) | expected만 기록(턴이 하던 같은 probe: Claude `never_attached::probe_again`, Codex `launch_herdr_session`의 생성 금지 probe `src/services/codex/herdr_turn.rs:254-261`)하고 **Pending 유지**. 대기 입력이 있으면 큐를 깨워 기존 첫 입력 경로가 같은 pane·nonce로 첫 paste 1회 → hook·source attach → Bound. create 0 |
-| provider 증명, hold 있음, source 없음(첫 write 뒤 hook 전) | paste 0, close 0, 행·hold 유지. hook이 오면 첫 칸. hook이 끝내 오지 않으면 main의 hold 계약 그대로(자동 해제 없음 `src/services/claude/herdr_turn.rs:557-564`, 해제는 행 끝 `src/services/discord/recovery_engine/herdr_row_end.rs:495`) — 넓히지 않음 |
+| provider 증명, hold 있음, source 없음(첫 write 뒤 hook 전) | paste 0, close 0, 행·hold 유지. 재시작 뒤면 먼저 아래 **재시작 복원**(hold만 갈래)으로 실행 목록·provider 매핑·placeholder를 되살려 hook이 이 실행으로 기록될 수 있게 한다. hook이 기록되면 다음 패스가 첫 칸으로 끝낸다. hook이 끝내 오지 않으면 main의 hold 계약 그대로(자동 해제 없음 `src/services/claude/herdr_turn.rs:557-564`, 해제는 행 끝 `src/services/discord/recovery_engine/herdr_row_end.rs:495`) — 넓히지 않음 |
 | Claude provider 증명, 자기 SessionStart 없음, quiet 경과, hold 없음 | 미시작 잔여: residue warrant로 close → retire + wake. 같은 대기 입력의 자동 재기동은 1회이고, 다시 미시작이면 기존 start failure 경로(알림 1회, owner 원문 복원)로 넘긴다. Codex에는 이 칸이 없다(첫 입력 전 hook 없음이 정상) |
 | pane 없음, 그리고 nonce 작업공간 census에 `논리키#nonce` 없음 | retire + 큐 wake. kill 0. hold가 있으면 행 끝이 해제한다 |
 | pane에 다른 nonce(pane id 재사용) | 자기 nonce 작업공간이 census에 없으면 위와 같이 retire, 남의 pane에는 효과 0. 다른 pane에서 찾으면 같은 nonce의 위치 CAS 뒤 한 번 더 판정 |
@@ -323,6 +334,68 @@ source 없는 Bound는 다음 입력이 모두 거절된다(`src/services/codex/
 | Unknown(probe 오류·시간 초과) | 행·원문 유지, 다음 패스(기존 `UNPLACED_RETRY` 30초)에서 재판독. 죽었다고 단정하지 않는다 |
 
 4. 결론마다 한 번만 기록·알림한다. retire 뒤 대기 큐가 깨어나 새 nonce로 create한다.
+
+**재시작 복원(r4).** dcserver 재시작은 메모리에만 있는 네 가지를 비운다: 실행 목록(`HERDR_EXECUTIONS`, `src/services/tui_prompt_dedupe/runtime_binding/adopt_skip.rs:102`),
+provider 매핑(`register_provider_session`, `src/services/tui_prompt_dedupe/runtime_binding/binding_access.rs:97`), Codex placeholder·채널(`register_codex_herdr_placeholder`,
+`src/services/tui_prompt_dedupe/runtime_binding/codex_hook.rs:31-54`), runtime binding. 내구로 남는 것은 binding 로그(nonce baseline)·hold 파일·행이다.
+첫 prompt를 받은 Codex Pending은 재시작 뒤 이 등록 없이는 아래 전제 표의 어느 경로로도 Bound에 닿지 못한다(모델 `CodexNoRestore` RED).
+첫 입력 함수는 hook이 기록됐으면 거절하므로(`src/services/codex/herdr_turn.rs:235-239`) 다시 불러 메모리를 채울 수도 없다.
+
+| 기존 경로 | 메모리 전제 | 재시작 뒤 등록이 비었을 때 |
+|---|---|---|
+| Codex attach `attach_launched_codex_herdr_source`(`src/services/discord/tui_prompt_relay/herdr_source.rs:210-244`) | live runtime binding이 nonce baseline과 같은 source(`:231-238`) | NotPublished + withhold, 행은 영영 Pending |
+| 재시작 복원 `attach_restarted_herdr_source`(`herdr_source.rs:274-337`) | `admits_reconnect()` = Bound Match뿐(`src/services/discord/recovery_engine/host_reconcile.rs:96-98`) | Pending은 Refused. 이 판정은 넓히지 않는다 |
+| Codex hook ingress `observe_codex_herdr_hook`(`codex_hook.rs:324-342`) | 실행 목록에 같은 nonce(`:333-335`) | None → 이 실행으로 기록하지 않고 다른 경로로 넘어간다(`src/services/claude_tui/hook_server/observation_ingress.rs:187-211`). 소비될 수 있다 |
+| 그 안의 기록 `observe_codex_hook_under_source_authority`(`codex_hook.rs:345`) | runtime binding(placeholder 포함)과 채널 일치(`:372-399`) | binding 없음 → `Unavailable(RestoreNotReady)`(`:388-390`), 425 재시도(`observation_ingress.rs:291-320`) |
+| verified Codex ingress(`src/services/tui_prompt_dedupe/runtime_binding/codex_verified.rs:631-644`) | 문맥 검증과 채널 등록(`:637-644`) | `RestoreNotReady`·`ChannelNotRestored`, 425 재시도 |
+| Codex 첫 입력 `pending_launch`(`src/services/codex/herdr_turn.rs:228-261`) | — | hook 기록 뒤 거절(`:235-239`). 첫 칸의 복구 수단이 아니다 |
+
+복원 단계는 resolver(`placed.rs`)의 작은 내부 helper 하나다. 순서: 행 transition lease(위 1) → 판독(위 3) → **복원** → 기존 attach 또는 hook 대기.
+
+1. 검증은 첫 입력 준비와 같다(`src/services/codex/herdr_turn/first_input.rs:90-106`): listing order 잠금과 source authority 아래에서 행이 Pending, owner·nonce 일치,
+   pane의 spawn nonce marker = 행 nonce. 하나라도 어긋나면 복원 0, 결론 Unknown(다음 패스).
+2. **hold만 갈래(source 없음, 셋째 칸).** `restore_herdr_execution_under_source_authority`(목록), `register_provider_session("codex", logical, logical)`,
+   `register_codex_herdr_placeholder(logical, channel)` — 첫 입력이 `first_input.rs:140-146`에서 부르는 같은 세 호출이다. 이 갈래는 메모리만 바꾼다(쓰기 0).
+   그 뒤 같은 실행의 hook이 기존 ingress에서 source를 기록하고, 다음 패스가 첫 칸으로 attach한다.
+3. **source 있음 갈래(첫 칸).** nonce baseline이 이 nonce의 source를 가리킬 때만, Bound 재시작 복원의 등록부(`herdr_source.rs:305-332`)를 그대로 쓴다:
+   live binding이 없으면 `codex_restored_binding`(`:256`)으로 만들고 `register_restored_codex_pane_under_source_authority`
+   (`src/services/tui_prompt_dedupe/runtime_binding/pane_registration.rs:249-258`, 그 경로가 아직 같은 파일일 때만, 새로 기록하는 사실 없음)로 등록,
+   live binding이 다른 source면 아무것도 바꾸지 않고 거절(`herdr_source.rs:310`의 `Some(_) => return None`), 이어 `restore_execution_fence`. 목록·provider 매핑·placeholder는 2와 같이 되살린다.
+   그 다음에만 기존 `attach_launched_codex_herdr_source`가 Pending CAS로 Bound를 쓰고, Bound 뒤에만 기존 `release_hold`가 돈다.
+4. `admits_reconnect()`는 넓히지 않는다. helper는 새 Bound 작성자가 아니고 행·hold·pane에 쓰지 않는다. Bound 작성자는 여전히 main의 셋이다.
+
+**쓰기 없음의 범위.** DB 행·hold 파일·pane·큐에 쓰지 않고 binding 로그에 새 사실을 남기지 않는다(`pane_registration.rs:247-248`).
+source 있음 갈래의 등록은 Bound 재시작 복원과 같이 로컬 Codex 커서 checkpoint에 복원한 같은 값을 다시 저장한다(`src/services/tui_prompt_dedupe/runtime_binding/codex_cursor.rs:303-307`).
+값이 같아 멱등이며 새 판정 입력이 아니다. DB 쓰기는 그 뒤 기존 attach의 `bind_pg` 하나뿐이다(main과 같음).
+
+**남의 source를 받지 않는다.** 목록은 같은 pane에 다른 nonce가 있으면 바꾸지 않고 거절한다(`adopt_skip.rs:213-226`, Occupied는 같은 nonce일 때만 참).
+source는 이 nonce의 baseline에서만 오고, live binding이 다른 source면 거절, attach는 baseline = source ∧ live = source를 다시 본다(`herdr_source.rs:231-238`).
+행 nonce·spawn marker 검증이 1에 있으므로 다른 실행·다른 세션의 transcript를 이 행에 묶는 경로가 없다(모델 `ForeignSource` RED `BoundOwnSource`).
+
+**이중 등록 없음.** 같은 채널의 in-flight 턴이 있으면 resolver는 그 패스를 넘기므로(위 1) 첫 입력과 복원은 겹치지 않는다. 겹쳐도 세 호출은 멱등이다:
+목록 Occupied 같은 nonce → 참, provider 매핑은 같은 값 덮어쓰기, placeholder는 `entry().or_insert`(`codex_hook.rs:49-52`)라 live binding을 덮지 않고, 채널은 같은 값이다.
+source 있음 갈래는 live binding이 같은 source면 그 binding을 그대로 쓴다(`herdr_source.rs:309`, unread cursor 보존). placeholder·채널이 두 벌 생기는 자료 구조가 없다(맵 키 = 논리 키).
+
+**복원 전에 온 hook.** 재시작 뒤 resolver가 그 행을 처음 판정하기 전에도 hook은 올 수 있다. 지금은 목록이 비어 이 실행으로 기록되지 않고 넘어간다.
+`observe_codex_herdr_hook`은 이번 부팅의 placed 판정이 끝나지 않은 논리 키(부팅 첫 복구 패스 전이면 모두)에서, 자기 runtime root의 Herdr 실행 문맥인데 목록에 없으면
+`Unavailable(RestoreNotReady)`를 돌린다(425, 같은 request id 재시도). 판정 대기 집합은 메모리 static이고 hook 경로는 IO 없이 읽는다.
+resolver가 그 키를 결론 내면(복원·retire·withhold) 집합에서 뺀다. 그 뒤의 미등록 hook은 main 그대로다. 모델 `HookConsumed` RED가 이 재시도를 뺀 반례다.
+"첫 복구 패스 전"은 결론과 무관하게 부팅 복구 패스가 한 번 끝나기 전이다. 그 사이에는 Bound 실행의 미등록 hook도 425로 재시도된다(main은 넘김).
+첫 패스의 `attach_restarted_herdr_source`가 Bound를 목록에 올린 뒤 같은 hook이 기록되므로 바뀌는 것은 지연뿐이다(의도). Unknown으로 남은 키는 결론까지 판정 대기에 남는다.
+
+**같은 부류 전수(r4).** 재시작이 메모리 등록을 비워 기존 경로가 NotPublished·거절·무기록으로 끝나는 곳을 실행 목록·runtime binding·채널 reader에서 모두 찾았다.
+
+| 경로 | 재시작 뒤 결과 | 처리 |
+|---|---|---|
+| Codex placed Pending attach(위 표 첫 행) | NotPublished | 복원 단계(이번 P1) |
+| Codex hook ingress(위 표 셋째·넷째 행) | 무기록 통과 또는 425 | 판정 대기 동안 425, 복원 뒤 기록 |
+| Claude resume 실행의 SessionStart `resume_start::record`(`src/services/claude_tui/hook_server/observation_ingress/resume_start.rs:27-34`) | `herdr_resume_launch`가 목록을 요구해(`src/services/tui_prompt_dedupe/binding_events/herdr_resume.rs:7-15`) 목록이 비면 `own` 거짓 → 기록 없이 `Ok`, hook은 `Proceed`로 끝난다(`observation_ingress.rs:203-210`) | **같은 부류, 이번에 막음.** helper가 Claude placed Pending의 목록만 같은 검증으로 복원하고(provider 매핑·placeholder 없음), 판정 대기 동안 자기 root의 Claude resume 문맥이 목록에 없으면 `NotDurable`(재시도) |
+| health 패스의 "이 프로세스가 목록에 올림 → 건너뜀"(`src/services/discord/recovery_engine/herdr_reader.rs:339-340`) | 복원이 목록을 채우면 다음 패스가 그 행을 건너뛸 수 있다 | resolver는 행 상태 Pending으로 먼저 갈라 이 skip 앞에서 판정한다. 수용 시험의 "hook 뒤 다음 패스가 attach"가 지킨다 |
+| Claude placed Pending attach `attach_launched_herdr_source`(`herdr_source.rs:154-197`) | binding을 스스로 등록(`:185-187`) | 영향 없음 |
+| Bound 재시작 `attach_restarted_herdr_source` | 스스로 복원(`:305-332`) | 영향 없음 |
+| watcher claim `herdr_claim_admission`(`adopt_skip.rs:176-201`) | 복원만 된 목록은 admit 전이라 보류 | 의도. attach가 admit한다(`herdr_source.rs:240`). 무변화 |
+| 목록을 Herdr 표지로 읽는 곳(`src/services/tui_prompt_dedupe/hosted_source.rs:65`, `src/services/discord/watchers/lifecycle/watch_host.rs:44`, `src/services/discord/recovery_engine/producer_resume.rs:182`) | 복원 전에는 marker·endpoint·행이 같은 판정을 한다 | 복원은 재시작 전 값으로 되돌릴 뿐. 무변화 |
+| Herdr 반환 판정 `returned`(`src/services/turn_host.rs:126-130`) | tmux marker가 있는 반환에만 쓴다 | 해당 없음 |
 
 **residue warrant.** `src/services/termination_audit/host_terminate.rs:27-48`의 warrant에 새 발급 근거 하나를 더한다: 같은 서버 witness, pane label nonce = 행 nonce,
 (셸만이거나 Claude 미시작이면서) hold 없음, 행이 그 위치의 Pending. 소비 직전 같은 조건을 재확인하고 하나라도 어긋나면 Refused. 운영자 경로·tmux에는 발급하지 않는다.
@@ -342,6 +415,11 @@ provider가 살아 있는 Pending은 main처럼 다음 입력의 첫 입력 경�
 - 첫 write 뒤 hook 전(hold 있음): 복구 패스 중 paste 0, Bound 0, close 0. 이어 hook이 기록되면 attach로 Bound, paste 0.
 - pane 없음 → Retired + wake 1. 셸만 → close 1 + Retired + wake 1. Unknown → 행 유지 + close 0. Claude 미시작 → close 1 + Retired, 재기동 1회 상한.
 - 재시작 뒤 같은 결과. 뮤턴트: provider 증명만으로 Bound(r2 처방) → 첫 시험 실패, 셸만 칸에서 hold 검사 제거, 패스가 Pending을 다시 건너뜀.
+- **재시작한 Codex Pending(r4).** 첫 prompt를 받은 placed Pending, 메모리 등록을 비운 새 프로세스(실제 재시작 경로의 static 초기 상태)에서 두 시점 각각:
+  (a) hook 전 재시작 — 복원 전에 온 hook은 425, 같은 hook을 한 번 다시 보내면 기록, (b) hook 뒤 attach 전 재시작 — 재주입 0.
+  둘 다 생산 복구 패스 뒤 같은 pane·nonce·source, create 0, paste 0, close 0, Bound, hold 해제, 그 뒤 대기 입력 1건이 정확히 1회 제출.
+  baseline이 다른 nonce·다른 파일을 가리키거나 live binding이 다른 source면 Bound 0·hold 유지·목록 변경 0. Claude resume 실행의 같은 재시작은 SessionStart가 425 뒤 기록된다.
+  뮤턴트: 복원 단계 제거 → (a)(b) Bound 단언 실패, 판정 대기 425 제거 → (a) 실패(커밋하지 않음).
   r2의 "provider 증명 → 무조건 Bound" 단언은 쓰지 않는다.
 
 **재시작 유실 경로 점검**: dcserver 재시작만으로는 유실이 없다 — 조건은 W04(job 밖 서버)·W03a(witness)·W08(부팅 도달)이고 각각 U04·U03·U11로 확인한다.
@@ -436,14 +514,29 @@ submission이고(`src/services/discord/router/intake_gate.rs:1325-1352`, Qwen은
    정책 거절(endpoint 채널의 기존 Herdr 거절)은 main 그대로다(알림·uploads 복원).
 5. **headless 턴**(routine·예약 실행, `src/services/discord/router/message_handler/headless_turn/entrypoints.rs:160`)은 routine 관리 세션 이름을 쓰고
    (`src/services/discord/router/message_handler/headless_turn.rs:391-408`) 같은 `provider_dispatch::execute`로 간다(`:1073`). D01은 예약 전에 같은 판정을 내려
-   `HeadlessTurnStartError`의 새 `HostUnavailable`로 돌려준다. 프롬프트는 호출자(run 기록)가 그대로 갖고, 시작 안 된 시도로 남는다(실패로 소비하지 않음).
+   `HeadlessTurnStartError`(`src/services/discord/router/turn_start.rs:121-125`)의 새 variant `HostUnavailable`로 돌려준다. 프롬프트는 호출자가 그대로 갖고,
+   시작 안 된 시도로 남는다. **문자열로 바꾸기 전에 타입으로 분류하고, 어느 호출자도 이것을 재시도 소비·종단 실패로 정산하지 않는다**(아래 정산표).
+   exhaustive match인 호출자(`agents.rs`·`start_deferral.rs`·`turn_deliver.rs`·`agent_handoff.rs`·`restart.rs`)는 새 variant 없이 컴파일되지 않는다.
 6. 알림은 채널당 사유가 바뀔 때 한 번(queued 재시도는 이미 조용함, `src/services/discord/router/message_handler/intake_turn/host_refusal.rs:36`). 문구 예: `managed session host unavailable: tmux is not installed on this node and the channel has no Herdr endpoint`.
 7. 수탁된 원문은 큐 backlog로 남고, 호스트 가용성이 돌아오는 신호(tmux 가용성 캐시 회복, Herdr 서버 기동·health 성공)가 drain을 깨운다. 사용자가 다시 말하지 않아도 한 번 제출된다.
    큐는 내구라 dcserver 재시작을 지나도 남는다(부팅 복원 `src/services/discord/runtime_bootstrap/queued_recovery.rs:26`). drain은 admission을 다시 지나므로 아직 못 쓰면 조용히 남는다.
 8. provider 함수 안의 "호스트 없음" 분기는 방어용 `Err`로만 남는다. D01 수용 시험이 경합 아닌 경로에서는 이 분기에 닿지 않음을 단언한다.
 
+**headless `HostUnavailable` 정산 전수(r4).** `HeadlessTurnStartError`를 받는 생산 호출자 전부(시험·`cfg(all(test, unix))` `relay_e2e` 제외).
+
+| 호출자 | main의 `Internal` 정산 | `HostUnavailable` 정산(D01) |
+|---|---|---|
+| 예약 메시지 `src/services/scheduled_messages.rs:429-442` → `:235-258` | `anyhow!` 문자열로 바꾼 뒤(`:442`) 네 문자열(`:272-281`)에 안 맞으면 `interrupt_for_retry`(`:856`, 유한 재시도 소비) | 문자열로 바꾸기 전에 분류(오류 체인에 타입을 남겨 `downcast`)해 `defer_delivery_without_retry_pg`(`src/db/scheduled_messages/agent.rs:212`)로 재시도 횟수를 쓰지 않고 미룬다. 호스트가 돌아올 때까지 반복, 종단 실패 0 |
+| routine `src/services/routines/agent_executor/launch.rs:60-68`(DM 예약), `:212` → `start_deferral.rs:57-69`, `:92-97` | runtime 미준비 문자열이면 `ProviderNotReady`로 600초 창(`:9`, `:115-126`) 안에서만 재시도, 창 뒤·다른 `Internal`은 실패 | 새 `TransientStartKind::HostUnavailable`: 같은 60초 cadence(`:7`)로 다시 시도하되 600초 창을 열거나 소비하지 않는다(창 밖에서도 실패로 넘기지 않음). run은 pending 유지 |
+| 사람 입력 전달 `src/services/discord/health/turn_deliver.rs:422-453` | `From`이 `Internal`을 `StartAttempt::Unavailable`로(`:116`) → `HumanInputError::RuntimeUnavailable`(`:244`), ack 0 | 같은 `Unavailable`(ack 0, 원 출처가 원문을 갖고 재시도) |
+| HTTP turn·DM `src/server/routes/agents.rs:838`, `:850` → `:884-902` | 503 | 503 + `status: "host_unavailable"`(호출자가 원문 소유) |
+| agent handoff `src/services/discord/agent_handoff.rs:564` → `:514-518` | `turn_unavailable` | 같은 `turn_unavailable`(handoff 원문은 호출자 소유) |
+| live agent 복구 `src/services/discord/health/recovery/live_agent_recovery.rs:255-275` | 경고 + pending intent 유지 | 같음(intent 유지, 다음 복구 주기) |
+| exact replay `src/services/discord/router/message_handler/headless_turn/replay_start.rs:517-535` | 경고, 시작 전이면 `ExactHandoff::Refused`(`src/services/discord/replay_policy.rs:177-180`) | 같음(시작 전 거절 → 원 소유자 유지) |
+| `/restart` seed `src/services/discord/commands/restart.rs:151`, `:176-196` | 첫 시도 `Failed` 알림 | 같은 `Failed` 알림. seed는 명령이 만든 문구라 사용자 원문 유실이 아니다(넓히지 않음) |
+
 **같은 부류 진입점 전수(r3).** provider 턴을 여는 진입은 router admission의 네 출처, intake_turn의 두 호출(일반 `intake_turn.rs:252`, ADK thread `adk_thread.rs:171`),
-headless 진입(`headless_turn/entrypoints.rs:160`, 호출 `src/services/discord/commands/restart.rs:151`, `src/services/discord/health/headless_turn.rs:351`)이고,
+headless 진입(`headless_turn/entrypoints.rs:160`·`:187`과 owner 진입 `start_reserved_headless_turn_with_owner`; 호출자는 위 정산표 8개(호출 자리 10곳)다. r3은 `turn_deliver.rs:438`의 직접 호출을 빠뜨렸다)이고,
 `provider_dispatch::execute`의 생산 호출은 `intake_turn.rs:2130`과 `headless_turn.rs:1073` 둘뿐이다. 각 진입의 처리: 네 출처 → 2, 두 intake_turn 호출 → 4, headless → 5.
 busy 추가 입력·catch-up은 이미 살아 있는 세션이나 큐 항목이라 새 진입이 아니다.
 
@@ -455,11 +548,13 @@ busy 추가 입력·catch-up은 이미 살아 있는 세션이나 큐 항목이�
 - live intake: `origin = LiveMessage`, `owner = None`, `intake_outbox_id = None`인 Qwen 본문·첨부 메시지 → 호스트 없음 → 자식 0, 알림 1, 큐 항목의 본문·첨부·source id가 입력과 같음,
   dcserver 재시작 뒤 남음, 가용 신호 뒤 제출 정확히 1회. 내구 수탁 실패를 주입하면 checkpoint 미전진.
 - queued drain: 대기 중인 Qwen 원문(첨부 포함)으로 drain → 같은 단언(큐 항목 유지). Claude·Codex의 owner 없는 턴도 live·queued 각각 한 번.
-- headless: `HostUnavailable` 반환·자식 0·예약 0.
+- headless: `HostUnavailable` 반환·자식 0·예약 0. 호출자 정산(정산표 각 행, 실제 호출 경계): 예약 메시지 fire → 배달 행이 미룸 상태·재시도 횟수 불변·종단 실패 0,
+  routine run → 600초 창을 넘긴 뒤에도 pending·실패 0, `turn_deliver` → `RuntimeUnavailable`·ack 0, HTTP → 503 `host_unavailable`.
+  뮤턴트 (d) 예약 메시지를 문자열 분류로 되돌림 → 재시도 횟수 단언 실패, (e) routine을 `ProviderNotReady`(600초 창)로 분류 → 창 뒤 실패 단언 실패(커밋하지 않음).
 - 뮤턴트: (a) 지금처럼 uploads·clear만 복원하고 `Executed` 반환 → live 본문 단언 실패, (b) admission 판정을 빼고 provider 함수의 일반 `Err`만 남김 → 원문 단언 실패,
   (c) 가용성 wake 제거 → 복귀 뒤 제출 단언 실패(커밋하지 않음).
-모델 `UnixNoTmux` GREEN, `ErrConsumes`(호스트 없음 오류가 원문을 소비) RED `NoInputLoss`, `NoAvailWake`(가용성 wake 없음) RED `HeldInputSubmitted`,
-`RequeueReach`(정상 설계에서 보존 → tmux 복귀 → 재제출 도달 증인), `SilentFallback`(폴백을 남김) RED.
+모델 `UnixNoTmux` GREEN, `ErrConsumes`(호스트 없음 오류가 원문을 소비) RED `NoInputLoss`·`CustodyKept`, `NoAvailWake`(가용성 wake 없음) RED `HeldInputSubmitted`,
+`DropOnWake`(wake가 보존을 풀고 실행 대기에 넣지 않음) RED `CustodyKept`·`HeldInputSubmitted`, `RequeueReach`(정상 설계에서 보존된 입력이 tmux 복귀 뒤 실제로 시작되는 도달 증인), `SilentFallback`(폴백을 남김) RED.
 
 ### 10.3 Windows Qwen
 
@@ -501,7 +596,7 @@ wrapper 종료 뒤 늦게 append하는 후손 시험(`src/services/discord/repla
 | S04 | `create` 포트 + 생성·핸드오프 | `src/services/claude/tui_session_launch.rs`, `src/services/claude/herdr_turn/handoff.rs`, `src/services/claude/herdr_turn/never_attached.rs`, `src/services/codex/tui_session_launch/first_input.rs`, `src/services/herdr_launch.rs` 외 C S04 | 18 / +850 | Pending crash·ACK 유실·동시 create 2개·same-session Return·argv. Codex create 완료에 SourceBound 요구 0 | 컴파일 | S01 |
 | S05 | `interrupt`·`terminate(warrant)` 포트 + Herdr 종료 | `src/services/termination_audit/host_terminate.rs`, `src/services/discord/turn_bridge/tmux_runtime/judged_stop.rs`, `src/services/discord/turn_bridge/tmux_runtime/native_stop.rs`, `src/services/dispatched_sessions/herdr_kill/effects.rs` 외 C S05 | 16 / +600 | Cancel 뒤 세션 생존, close 전/후 crash, mismatch·Unknown warrant 무효, tmux 운영자 terminate Unsupported 유지 | 컴파일 | S01 |
 | S06 | `recover` 포트 + 복구 소비자 | `src/services/discord/recovery_engine/host_reconcile.rs`, `src/services/discord/recovery_engine/herdr_reader.rs`, `src/services/discord/recovery_engine/herdr_server_replaced.rs`, `src/services/discord/recovery_engine/restore_inflight.rs`, `src/services/discord/tui_prompt_relay/herdr_source.rs`, `src/services/discord/tui_prompt_relay/rehydration.rs` 외 C S06 | 18 / +850 | source cursor·옛 형식·standby·boot+health 재채택·reconcile wake | 컴파일 | S02 |
-| **S06b** | 위치가 기록된 Pending 자동 탈출(§7.3): placed resolver(provider 증명 ≠ source 증명, 첫 입력 전이면 Pending 유지 + 큐 wake), residue warrant, never-attached 문구 | `src/services/discord/recovery_engine/herdr_reader.rs`, `src/services/herdr_launch.rs`, 새 `src/services/herdr_launch/placed.rs`(제안), `src/services/herdr_launch/unplaced.rs`, `src/db/dispatched_sessions/hosted_execution.rs`, `src/services/termination_audit/host_terminate.rs`, `src/services/claude/herdr_turn/never_attached.rs`, `src/services/codex/herdr_turn.rs`, `src/services/discord/tui_prompt_relay/herdr_source.rs`(기존 Codex attach 재사용 노출), 큐 wake 호출 | 10 / +800 | §7.3 수용 시험(생산 복구 패스 진입점: 첫 입력 전 Codex 2진입·첫 write 뒤 hook 전·pane 없음·셸만·Unknown·Claude 미시작, 재시작 뒤 같음). 뮤턴트: provider 증명만으로 Bound. 기존 never-attached 시험 기대 변경(사유 기록) | 컴파일 | S05, S06 |
+| **S06b** | 위치가 기록된 Pending 자동 탈출(§7.3): placed resolver(provider 증명 ≠ source 증명, 첫 입력 전이면 Pending 유지 + 큐 wake), 재시작한 Pending의 쓰기 없는 메모리 등록 복원과 판정 대기 동안의 hook 425, residue warrant, never-attached 문구 | `src/services/discord/recovery_engine/herdr_reader.rs`, `src/services/herdr_launch.rs`, 새 `src/services/herdr_launch/placed.rs`(제안), `src/services/herdr_launch/unplaced.rs`, `src/db/dispatched_sessions/hosted_execution.rs`, `src/services/termination_audit/host_terminate.rs`, `src/services/claude/herdr_turn/never_attached.rs`, `src/services/codex/herdr_turn.rs`, `src/services/codex/herdr_turn/first_input.rs`(등록 준비 세 호출을 helper와 공유), `src/services/discord/tui_prompt_relay/herdr_source.rs`(기존 Codex attach·재시작 등록부 재사용 노출), `src/services/tui_prompt_dedupe/runtime_binding/adopt_skip.rs`(판정 대기 집합), `src/services/tui_prompt_dedupe/runtime_binding/codex_hook.rs`·`src/services/claude_tui/hook_server/observation_ingress/resume_start.rs`(판정 대기 동안 재시도), 큐 wake 호출 | 14 / +1,050 | §7.3 수용 시험(생산 복구 패스 진입점: 첫 입력 전 Codex 2진입·첫 write 뒤 hook 전·pane 없음·셸만·Unknown·Claude 미시작, 재시작 뒤 같음, 재시작한 Codex Pending 두 시점·남의 source 거절·Claude resume SessionStart). 뮤턴트: provider 증명만으로 Bound, 복원 단계 제거, 판정 대기 425 제거. 기존 never-attached 시험 기대 변경(사유 기록) | 컴파일 | S05, S06 |
 | S07a~f | 잔여 소비자 6묶음 | [consumer-slices.tsv](i7583/consumer-slices.tsv)의 파일 목록(앞 조각과 겹치면 남은 효과만) | 각 ≤17 / +250 | leaf spy + source scan, 기존 guard·bool·결과 동등 | 각 컴파일 | S02~S06 |
 | S08 | ratchet 마감: 모든 범주 어댑터 밖 관리 효과 0(W 트랙 코드 포함 재검색) | `scripts/check_destructive_call_site_ratchet.py`와 기준선 | 0 / 스크립트 | 스크립트 시험, 전수표 BYPASS 320행 재검색 0 | — | S07f |
 
@@ -527,7 +622,7 @@ wrapper 종료 뒤 늦게 append하는 후손 시험(`src/services/discord/repla
 | 조각 | 목적 | 소유 파일 | prod 파일 / 순증 | 수용 시험 | win | 의존 |
 |---|---|---|---|---|---|---|
 | D00 | 시험 대역 치환(시험만) | §10.4 둘째·셋째 부류 약 30 시험 파일, `src/services/session_host/test_support.rs` | 0(+가짜 호스트 60줄) | 바꾼 시험 통과, 단언 삭제 0 | CI | — |
-| D01 | 라우팅·process launch 삭제, 호스트 없음 판정과 router admission의 내구 hold(§10.2: live·queued·slash·첨부 출처, intake_turn 둘째 방어선, headless), 가용성 wake, Windows Qwen headless, 가용성 규칙 | `src/services/claude.rs`, `src/services/claude/backend_routing.rs`, `src/services/claude/process_session_launch.rs`, `src/services/codex/command_streaming.rs`, `src/services/codex/process_session_launch.rs`, `src/services/qwen.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/claude_command.rs`, `src/services/platform/tmux/availability.rs`, `src/services/turn_host.rs`, `src/services/discord/router/intake_dispatch.rs`, `src/services/discord/router/intake_dispatch/replay_admission.rs`, `src/services/discord/router/intake_gate.rs`, `src/services/discord/router/message_handler/intake_turn.rs`, `src/services/discord/router/message_handler/intake_turn/host_refusal.rs`, `src/services/discord/router/intake_dispatch/queued.rs`, `src/services/discord/router/message_handler/headless_turn/entrypoints.rs`, 가용성 wake 등록 | ~19 / −520 | §10.2 수용 시험: live intake(`owner=None`·`intake_outbox_id=None` Qwen 본문·첨부: 자식 0, 알림 1, 내구 원문 동일, 재시작 생존, 복귀 뒤 1회, 수탁 실패 시 checkpoint 유지), queued drain 같은 표, Claude·Codex owner 없는 턴, headless `HostUnavailable`. 뮤턴트 3. 살아 있는 pane이면 tmux | **CI** | W10, D00 |
+| D01 | 라우팅·process launch 삭제, 호스트 없음 판정과 router admission의 내구 hold(§10.2: live·queued·slash·첨부 출처, intake_turn 둘째 방어선, headless), 가용성 wake, Windows Qwen headless, 가용성 규칙 | `src/services/claude.rs`, `src/services/claude/backend_routing.rs`, `src/services/claude/process_session_launch.rs`, `src/services/codex/command_streaming.rs`, `src/services/codex/process_session_launch.rs`, `src/services/qwen.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/claude_command.rs`, `src/services/platform/tmux/availability.rs`, `src/services/turn_host.rs`, `src/services/discord/router/intake_dispatch.rs`, `src/services/discord/router/intake_dispatch/replay_admission.rs`, `src/services/discord/router/intake_gate.rs`, `src/services/discord/router/message_handler/intake_turn.rs`, `src/services/discord/router/message_handler/intake_turn/host_refusal.rs`, `src/services/discord/router/intake_dispatch/queued.rs`, `src/services/discord/router/message_handler/headless_turn/entrypoints.rs`, `src/services/discord/router/turn_start.rs`, headless 정산 호출자(`src/services/scheduled_messages.rs`, `src/services/routines/agent_executor/start_deferral.rs`, `src/services/discord/health/turn_deliver.rs`, `src/server/routes/agents.rs`, `src/services/discord/agent_handoff.rs`, `src/services/discord/commands/restart.rs`), 가용성 wake 등록 | ~26 / −430 | §10.2 수용 시험: live intake(`owner=None`·`intake_outbox_id=None` Qwen 본문·첨부: 자식 0, 알림 1, 내구 원문 동일, 재시작 생존, 복귀 뒤 1회, 수탁 실패 시 checkpoint 유지), queued drain 같은 표, Claude·Codex owner 없는 턴, headless `HostUnavailable`과 호출자 정산(예약 메시지 재시도 횟수 불변, routine 600초 창 뒤에도 pending, `turn_deliver` ack 0, HTTP 503). 뮤턴트 5. 살아 있는 pane이면 tmux | **CI** | W10, D00 |
 | D02 | 레지스트리 조회 소비자 정리 | §10.1 소비자 15곳의 13파일 + `src/services/provider/session_probe.rs` | 13 / −120 | clear·reset·admin guard 기존 시험 | CI | D01 |
 | D03 | `ProcessBackend` 종류·`ProcessReady`·process 취소 삭제 | `src/services/agent_protocol.rs`, `src/services/discord/turn_bridge/runtime_handoff_loop.rs`, `src/services/discord/turn_bridge/stream_loop.rs`, `src/services/discord/recovery_engine.rs`, `src/services/discord/turn_bridge/tmux_runtime.rs`, `src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs`, `src/services/discord/inflight/model.rs`, `src/services/discord/health/routine_process.rs` 등 | 24 / −600 | 0단계: 종류 없는 헤드리스 행의 현재 복구 분기를 시험으로 먼저 고정. 디스크 `"process_backend"` 행은 "세션 없음"으로 닫히고 알림 1회, silent-skip 0 | CI | D02 |
 | D04 | 레지스트리·`ProcessHost`·`HostKind::Process` 삭제, 클러스터 광고 | `src/services/session_backend.rs`, `src/services/session_backend/auth_profiles.rs`, `src/services/session_backend/output.rs`, `src/services/session_host/process_host.rs`, `src/services/session_host/model.rs`, `src/services/session_host/resolve.rs`, `src/domain/host_observation.rs`, `src/services/cluster/readiness.rs` 등 | 14 / −900 | 실행 소스의 ProcessBackend/ProcessHost/Process kind 0, JSONL 파서·3종 runtime 유지, 옛 `process` 표식 Unrecognized | CI | D03, U14 |
@@ -536,7 +631,7 @@ wrapper 종료 뒤 늦게 append하는 후손 시험(`src/services/discord/repla
 | C02 | F4 레인 하나 실측 기록 + 하니스 | #7438 소유 소비자 경로, 기존 command/store API를 부르는 하니스 | ≤10 / +800 | 첫 지시·OSC·parent wait·결과·재부팅 loss, 다른 terminal 정리 0 | **win(U17~U19)** | C01, #7438 F4 intake |
 
 조각 수: S01~S06 6 + S06b 1 + S07a~f 6 + S08 1 + W01~W10(W03a·b 포함) 11 + D00~D05 6 + C01·C02 2 = **착지 33**, 측정 W00 1.
-최대 추정은 prod 27파일(W08), 순증 +950(W02). +1200을 넘는 조각은 없다. W08은 W00 측정이 30파일을 넘기면 W08b로 나눈다(그때 34). r3에서 바뀐 조각: S06b(10 / +800), W01(Escape 표 시험, 크기 같음), W09·W10(수용 시험), D01(~19 / −520).
+최대 추정은 prod 27파일(W08), 순증 +950(W02). +1200을 넘는 조각은 없다. W08은 W00 측정이 30파일을 넘기면 W08b로 나눈다(그때 34). r3에서 바뀐 조각: S06b(10 / +800), W01(Escape 표 시험, 크기 같음), W09·W10(수용 시험), D01(~19 / −520). r4에서 바뀐 조각: S06b(14 / +1,050, +1200 아래), D01(~26 / −430).
 순서: S 트랙과 W 트랙은 병렬. W09 전에는 Windows 기본 전환이 없고, W10 전에는 ProcessBackend 삭제가 없다. DoD 3 최종 검사는 S08과 D05 뒤 각각 한다.
 
 ### 12.4 첫 조각 S01 — 구현 레그 인계
@@ -602,39 +697,46 @@ U01~U12를 일부만 발사하지 않는다(W09의 일괄 조건). 실측 불가
 
 ## 14. 상태 모델
 
-30 cfg, TLC 1.7.4. 성립 11, 예상 RED 19. 상세·반례 대조는 [보고서](../statecharts/session-host/session-host.report.md).
+34 cfg, TLC 1.7.4. 성립 11, 예상 RED 23. 상세·반례 대조는 [보고서](../statecharts/session-host/session-host.report.md).
 
 | cfg | 깨지는 규칙 | 상태 수 |
 |---|---|---|
-| UnixTmuxCurrent, UnixTmux | 없음 | 3,437 |
-| UnixHerdr | 없음(Claude, Cancel bool off → Escape 꺼진 채) | 5,615 |
-| CodexHerdr | 없음(Codex, Unix endpoint) | 7,042 |
-| WindowsHerdr, WindowsImplicit | 없음 | 11,230 |
-| CodexImplicit | 없음(Windows 기본 Codex, 첫 입력 경로) | 14,084 |
+| UnixTmuxCurrent, UnixTmux | 없음 | 3,481 |
+| UnixHerdr | 없음(Claude, Cancel bool off → Escape 꺼진 채) | 6,034 |
+| CodexHerdr | 없음(Codex, Unix endpoint, 재시작 복원 포함) | 8,340 |
+| WindowsHerdr, WindowsImplicit | 없음 | 12,068 |
+| CodexImplicit | 없음(Windows 기본 Codex, 첫 입력 경로) | 16,680 |
 | UnixEndpointOffCurrent, UnixEndpointOff, WindowsSelectedCurrent | 없음 | 40 / 40 / 80 |
-| UnixNoTmux | 없음(admission hold, tmux 복귀 뒤 재제출) | 6,898 |
-| UnixHerdrCurrent | PendingEventuallyResolved, RestartEventuallyReconnect(main의 placed Pending) | 4,044 |
-| CodexHerdrCurrent | PendingEventuallyResolved, RestartEventuallyReconnect(main Codex의 placed Pending) | 5,218 |
-| SkipPlaced | PendingEventuallyResolved, RestartEventuallyReconnect | 8,088 |
-| BindProven | BoundHasSource; CodexFirstInputDelivered(r2 처방: provider 증명만으로 Bound) | 27,138 |
-| EscapeNoSwitch | UnixCancelAsMain(r2 표: Unix Claude Escape = settlement만) | 5,615 |
+| UnixNoTmux | 없음(admission hold, tmux 복귀 뒤 재제출) | 6,886 |
+| UnixHerdrCurrent | PendingEventuallyResolved, RestartEventuallyReconnect(main의 placed Pending) | 4,204 |
+| CodexHerdrCurrent | PendingEventuallyResolved, RestartEventuallyReconnect, RestartedPendingResolved(main Codex의 placed Pending) | 5,915 |
+| CodexNoRestore | PendingEventuallyResolved, RestartEventuallyReconnect, RestartedPendingResolved(r3 설계: 재시작 복원 없음 — 이번 P1) | 8,112 |
+| HookConsumed | PendingEventuallyResolved, RestartEventuallyReconnect, RestartedPendingResolved(복원 전 hook이 무기록으로 소비) | 8,570 |
+| ForeignSource | BoundOwnSource(다른 실행의 source로 Bound) | 8,394 |
+| SkipPlaced | PendingEventuallyResolved, RestartEventuallyReconnect | 8,408 |
+| BindProven | BoundOwnSource; CodexFirstInputDelivered(r2 처방: provider 증명만으로 Bound) | 35,462 |
+| EscapeNoSwitch | UnixCancelAsMain(r2 표: Unix Claude Escape = settlement만) | 6,034 |
 | GateRun | NoDefaultRefusal | 80 |
-| GateCancel | NoDefaultCancelDrop | 11,230 |
-| ErrConsumes | NoInputLoss | 4,548 |
-| NoAvailWake | HeldInputSubmitted | 3,469 |
-| RequeueReach | NeverRequeued(도달 증인: 보존 → tmux 복귀 → 재제출이 정상 설계에서 일어남) | 6,898 |
-| WindowsCurrent | NoSessionLoss | 1,378 |
-| UnixNoTmuxCurrent | NoSessionLoss, NoDoubleSession, NoOrphanAfterTerminate; RestartEventuallyReconnect, InputAnswered, TerminateEventuallyGone | 4,947 |
-| SilentFallback | 위 6개 + NoProcessHost | 4,947 |
-| WindowsServerInJob | NoSessionLoss | 12,008 |
-| WindowsNoAutostart | HostRecovers | 5,658 |
-| ReplayPending | NoSessionLoss, NoDoubleSession, NoOrphanAfterTerminate | 7,598 |
-| EarlyRetire | NoSessionLoss, NoOrphanAfterTerminate | 11,362 |
+| GateCancel | NoDefaultCancelDrop | 12,068 |
+| ErrConsumes | NoInputLoss, CustodyKept | 4,600 |
+| NoAvailWake | HeldInputSubmitted | 3,513 |
+| DropOnWake | CustodyKept; HeldInputSubmitted(wake가 보존을 풀고 실행 대기에 넣지 않음) | 3,687 |
+| RequeueReach | NeverResubmitted(도달 증인: 보존된 입력이 tmux 복귀 뒤 실제로 시작됨) | 6,886 |
+| WindowsCurrent | NoSessionLoss | 1,384 |
+| UnixNoTmuxCurrent | NoSessionLoss, NoDoubleSession, NoOrphanAfterTerminate; RestartEventuallyReconnect, InputAnswered, TerminateEventuallyGone | 5,000 |
+| SilentFallback | 위 6개 + NoProcessHost | 5,000 |
+| WindowsServerInJob | NoSessionLoss | 13,170 |
+| WindowsNoAutostart | HostRecovers | 5,926 |
+| ReplayPending | NoSessionLoss, NoDoubleSession, NoOrphanAfterTerminate | 9,232 |
+| EarlyRetire | NoSessionLoss, NoOrphanAfterTerminate | 12,200 |
 | NoWake | RestartEventuallyReconnect, InputAnswered, PendingEventuallyResolved | 2,522 |
 | ForgetIdentity | NoSessionLoss; RestartEventuallyReconnect, InputAnswered, PendingEventuallyResolved | 1,804 |
 
 리뷰 항목의 수정 전/후: r3 P1-1 `BindProven` RED → `CodexImplicit`·`CodexHerdr` GREEN. r3 P1-2 `EscapeNoSwitch` RED → `UnixHerdr` GREEN(`UnixCancelAsMain`).
 r3 P1-3·P2 `NoAvailWake`·`ErrConsumes` RED → `UnixNoTmux` GREEN, 재제출 도달은 `RequeueReach`가 증인. r2 항목(`SkipPlaced`, `GateRun`, `GateCancel`)은 그대로 RED → GREEN.
+r4 P1 `CodexNoRestore`·`HookConsumed` RED → `CodexHerdr` GREEN, 남의 source는 `ForeignSource` RED(`BoundOwnSource`). r4 P2-3 `DropOnWake` RED → `UnixNoTmux` GREEN(`CustodyKept`).
+r4 모델은 내구 source 기록(`srcOf`, 어느 실행의 source인지)과 재시작이 비우는 이 프로세스의 등록(`reg`)을 나눴다. hook은 등록된 실행에서만 source를 남기고(아니면 재시도),
+attach와 placed resolver의 Bound는 등록 ∧ 자기 source를 요구한다. `RestoreReg`가 재시작 뒤 그 등록을 되살린다. 입력 한 건의 수탁(`owed`)은 도착부터 답(시작·실패·거절)까지다.
 `PendingEventuallyResolved`는 "Bound·Retired, 또는 provider가 살아 있고 첫 입력 전이며 대기 입력이 없는 Pending"에 닿는 것이다(첫 입력 전 Codex는 source가 없어 Bound가 될 수 없다).
 대기 입력이 있으면 `CodexFirstInputDelivered`가 첫 prompt 전달을 요구한다. 모델은 §5 표 전체의 동일성을 보이지 않는다(§5.2). hold가 남은 뒤 hook이 끝내 오지 않는 경우(§7.3 셋째 칸)는 모델에 넣지 않았다(main hold 계약).
 
@@ -645,10 +747,10 @@ r3 P1-3·P2 `NoAvailWake`·`ErrConsumes` RED → `UnixNoTmux` GREEN, 재제출 �
 | Windows에서 Claude·Codex 관리 세션이 Herdr로 뜬다 | §5, §6 | W01~W10 | W09·W10 Windows CI + U08·U10 |
 | 입력·출력·취소가 된다 | §8, §9 | S03, S05, W09 | U08·U12 |
 | dcserver 재시작 뒤 재연결(Windows CI·win 실측) | §7 | W04, W08, W09 | W08 생산 부팅 도달 시험, U04·U11 |
-| ProcessBackend·ProcessHost·`HostKind::Process`가 없고 Windows CI 녹색 | §10 | D00~D05 | 심볼 삭제 컴파일, D01 admission 시험(호스트 없음 → 자식 0·원문 보존·복귀 뒤 1회, 모든 provider) |
+| ProcessBackend·ProcessHost·`HostKind::Process`가 없고 Windows CI 녹색 | §10 | D00~D05 | 심볼 삭제 컴파일, D01 admission 시험(호스트 없음 → 자식 0·원문 보존·복귀 뒤 1회, 모든 provider, headless 호출자 정산) |
 | 생성·입력·관찰·중단·종료가 trait을 지나고 우회 전수표 0 | §4 | S01~S08 | ratchet 0(두 표기·생산 텍스트), BYPASS 320행 재검색 |
 | 채널별 tmux·Herdr 선택, 기본값 같음 | §5 | W01 | §5.2 표 기반 시험(전 조합·완전성)과 생산 경계 3건(Escape 표 포함). 모델은 보조(`GateRun`·`GateCancel`·`UnixCancelAsMain`) |
-| (재시작 뒤 사람 개입 없음) 위치가 기록된 Pending도 자동으로 끝난다 | §7.3 | S06b, W08, W09, W10 | S06b 복구 패스 시험(첫 입력 전 Codex 포함), U11 |
+| (재시작 뒤 사람 개입 없음) 위치가 기록된 Pending도 자동으로 끝난다 | §7.3 | S06b, W08, W09, W10 | S06b 복구 패스 시험(첫 입력 전 Codex, 재시작한 Codex Pending 두 시점 포함), U11 |
 | HerdrCoreHost가 F4 레인 하나를 띄우고 결과를 받는 실측 기록 | §11 | C01, C02 | U16~U19 기록 |
 
 ## 16. 리뷰 집중 항목
@@ -663,4 +765,9 @@ r3 P1-3·P2 `NoAvailWake`·`ErrConsumes` RED → `UnixNoTmux` GREEN, 재제출 �
 | (r3) 위치가 기록된 Pending이 재시작 뒤 사람 개입 없이 끝나지 않는 경로가 남는가 | 막은 것: boot·health 패스의 placed resolver가 pane 없음·다른 nonce → retire, 셸만·Claude 미시작(hold 없음) → residue close 후 retire, provider가 살아 있으면 Pending을 지키고 대기 입력을 깨워 같은 nonce의 기존 첫 입력 경로(Codex 첫 prompt → hook → 기존 attach → Bound)로 잇고, 첫 prompt 뒤 attach 전에 끊긴 Codex는 hook이 기록되면 기존 attach로 Bound한다. provider 증명만으로 Bound하지 않는다(Bound 작성자는 main의 source 필요 3곳뿐). Windows 서버 교체는 W08이 재부팅 조건 없이 retire. **남은 반례**: 첫 write 뒤 hold가 남았는데 hook이 끝내 오지 않는 실행(입력이 composer에 남았을 수 있음)은 main hold 계약대로 자동 해제·재송신하지 않는다(`src/services/claude/herdr_turn.rs:557-564`, Bound 행도 같은 계약). probe가 계속 Unknown이면 행·원문을 지키며 30초마다 재판독. 모델 `BindProven`·`SkipPlaced`·`UnixHerdrCurrent`·`CodexHerdrCurrent` RED → `CodexImplicit`·`CodexHerdr`·`UnixHerdr`·`WindowsImplicit` GREEN |
 | (r3) Windows 기본 전환 뒤 Codex 실행·Cancel이 다른 게이트에 막혀 거절되거나 tmux로 새는가 | 막은 것: `ChannelHostPlan`이 실행·Escape 허가를 선택과 함께 정하고 PlatformDefault(내부 endpoint 키로 만든 실행)만 세 bool을 우회한다. Escape 전달자는 하나(`codex_stop_delivery.rs:801`)이고 그 두 검사(`:250-262`, `:589-600`)가 계획 허가를 읽는다. 나머지 게이트(owner 입력 `cfg!(unix)`, `#[cfg(unix)]` 판정 `judged_stop.rs:364`·`:397`·`:469`·`:480`, settlement `cfg!(unix)`, Codex 실행 거절 `turn_host.rs:288-295`)를 W08·W09·W10이 열고 생산 진입점 시험이 bool 미설정/false에서 시작·Escape 1회를 단언. PlatformDefault의 host는 Herdr뿐이라 tmux 분기가 없고, Herdr를 못 쓰면 admission hold다. Unix·endpoint 채널은 bool을 그대로 따른다. 남은 반례: 없음(설계상). 모델 `GateRun`·`GateCancel`·`EscapeNoSwitch` RED → `WindowsImplicit`·`CodexImplicit`·`UnixHerdr` GREEN |
 | (r3) tmux·Herdr 둘 다 없을 때 어떤 provider든 원문이 사라지는 경로가 남는가 | 막은 것: 판정을 `IntakeSubmission` 전체를 가진 router admission으로 옮겨 live·queued·slash·첨부 네 출처가 기존 deferred 계약(내구 수탁 뒤에만 checkpoint)을 지난다. intake_turn 단계(경합·ADK thread 재사용 thread)는 `Executed` 대신 host-held로 dispatcher에 돌려 같은 수탁을 거치고, headless는 예약 전 `HostUnavailable`로 프롬프트를 호출자에 남긴다. `provider_dispatch::execute` 생산 호출 2곳의 상위 진입을 모두 열거했다(§10.2 전수). 복귀 신호가 drain을 깨워 1회 제출. 남은 반례: admission과 spawn 사이에 호스트가 사라지는 좁은 경합에서 provider 함수의 방어 `Err`에 닿으면 기존 start failure 규칙을 따른다. 모델 `ErrConsumes`·`NoAvailWake` RED → `UnixNoTmux` GREEN, `RequeueReach` 증인 |
+| (r4) 복원 helper가 다른 실행·세션의 source를 등록해 이중 세션·transcript 오귀속을 만드는가 | 막은 것: 검증이 첫 입력 준비와 같다(행 Pending·owner·nonce·spawn marker, `first_input.rs:90-106`). 목록은 같은 pane의 다른 nonce를 덮지 않고(`adopt_skip.rs:213-226`), source는 이 nonce의 baseline에서만 오며 live binding이 다른 source면 거절(`herdr_source.rs:310`), attach가 baseline = source ∧ live = source를 다시 본다(`:231-238`). 모델 `ForeignSource` RED → `CodexHerdr` GREEN(`BoundOwnSource`). 남은 반례: 없음(설계상) |
+| (r4) "쓰기 없음"이 사실인가 | 막은 것: hold만 갈래는 메모리 세 호출뿐이다. source 있음 갈래는 DB·hold·pane·큐 쓰기 0, binding 로그 새 사실 0(`pane_registration.rs:247-248`). 남는 것: Bound 재시작 복원과 같이 로컬 Codex 커서 checkpoint에 복원한 같은 값을 다시 저장한다(`codex_cursor.rs:303-307`). 값이 같아 멱등이고 새 판정 입력이 아니다. DB 쓰기는 기존 attach의 `bind_pg` 하나(main과 같음) |
+| (r4) 첫 입력 경로와 재시작 복원이 두 번 등록해 placeholder·채널이 겹치는가 | 막은 것: 같은 채널의 in-flight 턴이 있으면 resolver가 패스를 넘긴다. 겹쳐도 목록(같은 nonce면 참)·provider 매핑(같은 값)·placeholder(`or_insert`, live binding을 덮지 않음)·채널(같은 값)은 논리 키 맵이라 두 벌이 생기지 않는다. source 있음 갈래는 같은 source의 live binding을 그대로 쓴다(unread cursor 보존). 남은 반례: 없음 |
+| (r4) 같은 부류(재시작이 메모리 등록을 비워 기존 경로가 NotPublished·거절·무기록)가 남는가 | 막은 것: Codex attach·Codex hook ingress·Claude resume SessionStart(`resume_start.rs:27-34`, 목록 요구)를 이번 개정에서 막았고, 복원이 채운 목록 때문에 health 패스가 resolver의 Pending을 건너뛰는 자리(`herdr_reader.rs:339-340`)는 resolver가 그 앞에서 판정한다. 나머지 reader는 §7.3 전수표에서 영향 없음·의도로 판정. 남은 반례: 판정 대기 집합이 비워진 뒤 늦게 온 미등록 hook은 main 그대로 넘어간다(그 실행은 이미 Bound·Retired·withhold 결론) |
+| (r4) headless `HostUnavailable`이 호출자에서 재시도 소비·종단 실패가 되는가 | 막은 것: 문자열로 바꾸기 전에 타입으로 분류하고 생산 호출자 8개(호출 자리 10곳)의 정산을 §10.2 표로 고정했다. 예약 메시지는 재시도를 쓰지 않는 미룸, routine은 600초 창 밖 재시도, `turn_deliver`는 ack 0, HTTP는 503. 남은 반례: `/restart` seed는 main처럼 `Failed` 알림(사용자 원문이 아님) |
 | (r3) S01 호출부 목록과 ratchet 기준선이 전수표와 일치하는가 | 일치(r2 리뷰도 재대조로 확인). 생산 텍스트 두 표기 스캔 31곳 = 관리 28(S01 목록 21파일) + 비관리 3(허용 상수 `src/cli/dcserver.rs` 1, `src/server/routes/provider_auth_profiles.rs` 2). 관리 세션 종료가 NON_MANAGED로 빠진 곳은 없다(`src/cli/utils.rs:186` r2 재분류). S01 계약은 r3에서 바꾸지 않았다 |

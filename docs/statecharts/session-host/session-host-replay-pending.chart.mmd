@@ -1,61 +1,74 @@
+---
+title: "Session host: one channel across dcserver restarts, host loss and terminate"
+---
 stateDiagram-v2
   state "Legend" as legend {
-    lg0: Breaks NoDoubleSession or NoOrphanAfterTerminate or NoSessionLoss
-    lg1: Path to the NoDoubleSession or NoOrphanAfterTerminate or NoSessionLoss bug
+    lg0: Recovery
+    lg1: Session
+    lg2: Breaks NoOrphanAfterTerminate or NoSessionLoss
+    lg3: Breaks NoDoubleSession in some cases
+    lg4: Path to the NoDoubleSession or NoOrphanAfterTerminate or NoSessionLoss bug
   }
-  class lg0 breaks
-  class lg1 bugPath
-  s0: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=1 losses=0 flight="idle" host="none" tmuxBack=0 kept=FALSE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=FALSE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=0 requeues=0 terms=0
-  s1: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=1 losses=0 flight="idle" host="none" tmuxBack=0 kept=FALSE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s2: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Pending" stop=FALSE unknowns=1 losses=0 flight="creating" host="herdr" tmuxBack=0 kept=FALSE record=1 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s3: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Pending" stop=FALSE unknowns=1 losses=0 flight="created" host="herdr" tmuxBack=0 kept=FALSE record=1 firstIn="none" registry=TRUE crashes=0 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={1} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s4: src=FALSE killed=FALSE prov=FALSE srv="down" locator=0 answer="none" recoverOwed=TRUE row="Pending" stop=FALSE unknowns=1 losses=0 flight="idle" host="herdr" tmuxBack=0 kept=FALSE record=1 firstIn="none" registry=FALSE crashes=1 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={1} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s5: src=FALSE killed=FALSE prov=FALSE srv="boot" locator=0 answer="none" recoverOwed=TRUE row="Pending" stop=FALSE unknowns=1 losses=0 flight="idle" host="herdr" tmuxBack=0 kept=FALSE record=1 firstIn="none" registry=FALSE crashes=1 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={1} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s6: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=TRUE row="Pending" stop=FALSE unknowns=1 losses=0 flight="idle" host="herdr" tmuxBack=0 kept=FALSE record=1 firstIn="none" registry=FALSE crashes=1 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={1} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s7: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=TRUE row="Pending" stop=FALSE unknowns=0 losses=0 flight="idle" host="herdr" tmuxBack=0 kept=FALSE record=1 firstIn="none" registry=FALSE crashes=1 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={1} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s8: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=TRUE row="Pending" stop=FALSE unknowns=1 losses=0 flight="creating" host="herdr" tmuxBack=0 kept=FALSE record=2 firstIn="none" registry=FALSE crashes=1 lost=FALSE serial=1 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={1} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s9: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=TRUE row="Pending" stop=FALSE unknowns=0 losses=0 flight="creating" host="herdr" tmuxBack=0 kept=FALSE record=2 firstIn="none" registry=FALSE crashes=1 lost=FALSE serial=1 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={1} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s10: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=TRUE row="Pending" stop=FALSE unknowns=1 losses=0 flight="created" host="herdr" tmuxBack=0 kept=FALSE record=2 firstIn="none" registry=TRUE crashes=1 lost=FALSE serial=1 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={1, 2} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s11: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=TRUE row="Pending" stop=FALSE unknowns=0 losses=0 flight="created" host="herdr" tmuxBack=0 kept=FALSE record=2 firstIn="none" registry=TRUE crashes=1 lost=FALSE serial=1 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={1, 2} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s12: src=FALSE killed=FALSE prov=FALSE srv="up" locator=2 answer="none" recoverOwed=TRUE row="Pending" stop=FALSE unknowns=0 losses=0 flight="idle" host="herdr" tmuxBack=0 kept=FALSE record=2 firstIn="none" registry=TRUE crashes=1 lost=FALSE serial=1 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={1, 2} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s13: src=FALSE killed=FALSE prov=FALSE srv="up" locator=2 answer="failed" recoverOwed=TRUE row="Pending" stop=FALSE unknowns=0 losses=0 flight="idle" host="herdr" tmuxBack=0 kept=FALSE record=2 firstIn="none" registry=TRUE crashes=1 lost=FALSE serial=1 tmuxUp=FALSE waiting=FALSE want=FALSE hostSrv="up" live={1, 2} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s14: src=FALSE killed=FALSE prov=FALSE srv="up" locator=2 answer="failed" recoverOwed=TRUE row="Pending" stop=FALSE unknowns=0 losses=0 flight="closing" host="herdr" tmuxBack=0 kept=FALSE record=2 firstIn="none" registry=TRUE crashes=1 lost=FALSE serial=1 tmuxUp=FALSE waiting=FALSE want=FALSE hostSrv="up" live={1, 2} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s15: src=FALSE killed=FALSE prov=FALSE srv="up" locator=2 answer="failed" recoverOwed=TRUE row="Pending" stop=FALSE unknowns=0 losses=0 flight="idle" host="herdr" tmuxBack=0 kept=FALSE record=2 firstIn="none" registry=TRUE crashes=1 lost=FALSE serial=1 tmuxUp=FALSE waiting=FALSE want=FALSE hostSrv="up" live={1} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s16: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="failed" recoverOwed=FALSE row="Retired" stop=FALSE unknowns=0 losses=0 flight="idle" host="herdr" tmuxBack=0 kept=FALSE record=2 firstIn="none" registry=TRUE crashes=1 lost=FALSE serial=1 tmuxUp=FALSE waiting=FALSE want=FALSE hostSrv="up" live={1} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
+  class lg0 blue
+  class lg1 teal
+  class lg2 breaks
+  class lg3 mayBreak
+  class lg4 bugPath
+  s0: No session
+  s1: No session, a message waiting
+  s2: Creating, a message waiting
+  s3: Created, location not yet recorded, a message waiting
+  s4: dcserver down, provider still running, a message waiting
+  s5: Boot reconcile, a message waiting (after the restart)
+  s6: Waiting to re-adopt the created execution, a message waiting (after the restart)
+  s7: Waiting to re-adopt the created execution (provider gone), an unrecorded provider running, a message waiting (after the restart)
+  s8: Waiting to re-adopt the created execution, two providers running, a message waiting (after the restart)
+  s9: Waiting to re-adopt the created execution, two providers running (after the restart)
+  s10: Closing the session, two providers running (after the restart)
+  s11: Waiting to re-adopt the created execution (provider gone), an unrecorded provider running (after the restart)
+  s12: Row closed, provider still running, an unrecorded provider running (after the restart)
   [*] --> s0
-  s0 --> s1: Arrive
-  s1 --> s2: Reserve
-  s2 --> s3: CreateEffect
-  s3 --> s4: Crash
-  s4 --> s5: Boot
-  s5 --> s6: BootDone
-  s6 --> s7: ProbeRecovers
-  s6 --> s8: ReplayPending
-  s7 --> s9: ReplayPending
-  s8 --> s10: CreateEffect
-  s9 --> s11: CreateEffect
-  s11 --> s12: RecordLocation
-  s12 --> s13: TurnFails
-  s13 --> s14: ResidueClose
-  s14 --> s15: CloseEffect
-  s15 --> s16: ResolvePlacedGone
+  s0 --> s1: a message arrives
+  s1 --> s2: a message reserves a new execution
+  s2 --> s3: the host creates it
+  s3 --> s4: dcserver stops
+  s4 --> s5: dcserver starts
+  s5 --> s6: intake opens
+  s6 --> s6: a host probe stops failing
+  s6 --> s7: a second create from the same Pending
+  s7 --> s8: the host creates it
+  s8 --> s8: its pane is recorded
+  s8 --> s9: the turn is refused: no provider, or its first prompt already taken
+  s9 --> s10: the lone shell is closed
+  s10 --> s11: the owned provider is confirmed gone
+  s11 --> s12: the recorded pane is gone: row closed
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 teal
   class s0 bugPath
+  class s1 teal
   class s1 bugPath
+  class s2 teal
   class s2 bugPath
+  class s3 teal
   class s3 bugPath
+  class s4 blue
   class s4 bugPath
+  class s5 blue
   class s5 bugPath
+  class s6 blue
   class s6 bugPath
+  class s7 blue
   class s7 bugPath
+  class s8 blue
+  class s8 mayBreak
   class s8 bugPath
+  class s9 blue
   class s9 bugPath
-  class s10 breaks
+  class s10 blue
   class s10 bugPath
+  class s11 blue
   class s11 bugPath
+  class s12 teal
+  class s12 breaks
   class s12 bugPath
-  class s13 bugPath
-  class s14 bugPath
-  class s15 bugPath
-  class s16 breaks
-  class s16 bugPath

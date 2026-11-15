@@ -16,10 +16,12 @@ const base = v => {
     if (!v.locator) return "Pending, no pane recorded";
     if (!has(v.live, v.record)) return "Pane recorded, pane gone";
     if (!v.prov) return "Pane recorded, only a shell";
-    if (v.firstIn === "sent") return v.src ? "First prompt taken, its source logged, not bound" : "First prompt sent, waiting for its hook";
-    return v.src ? "Pane recorded, provider up with its source, not bound" : "Pane recorded, provider up, no prompt yet";
+    const own = v.record !== 0 && v.srcOf === v.record;
+    const reg = v.reg ? "" : ", not registered in this process";
+    if (v.firstIn === "sent") return (own ? "First prompt taken, its source logged, not bound" : "First prompt sent, waiting for its hook") + reg;
+    return own ? "Pane recorded, provider up with its source, not bound" : "Pane recorded, provider up, no prompt yet";
   }
-  if (v.row === "Bound") return !has(v.live, v.record) ? "Row bound, provider gone" : v.src ? "Session up" : "Bound without its source";
+  if (v.row === "Bound") return !has(v.live, v.record) ? "Row bound, provider gone" : v.srcOf === v.record ? "Session up" : v.srcOf ? "Bound to another execution's source" : "Bound without its source";
   if (count(v.live)) return "Row closed, provider still running";
   if (v.kept) return "No session, input kept for a host";
   if (v.lost) return "No session, input lost";
@@ -48,10 +50,11 @@ const words = {
   CreateAborts: "the create reply is lost", RecordLocation: "its pane is recorded",
   ProviderStarts: "the provider starts in the pane", Bind: "the turn binds the execution",
   TurnFails: "the turn is refused: no provider, or its first prompt already taken", PolicyRefuse: "the message is refused by policy",
-  Unavailable: "no host: one notice, the message is kept", Requeue: "a host is back: the kept message runs",
+  Unavailable: "no host: one notice, the message is kept", Requeue: "a host is back: the kept message is queued to run again",
   FirstPrompt: "the turn sends Codex its first prompt", HookArrives: "Codex's first hook arrives",
   TurnAttach: "the turn binds on that hook", FollowupNoSource: "the next prompt is refused: no source",
   TmuxReturns: "tmux becomes usable", ConfirmReady: "the waiting provider is confirmed, still Pending",
+  RestoreReg: "the restart restores its listing, provider mapping, placeholder and binding",
   RequestCancel: "a cancel is requested", DeliverCancel: "the cancel is delivered or dropped",
   AdoptUnplaced: "the census finds its pane", AdoptPlaced: "the recorded pane's provider is adopted",
   ResolvePlacedGone: "the recorded pane is gone: row closed", ResidueClose: "the lone shell is closed",

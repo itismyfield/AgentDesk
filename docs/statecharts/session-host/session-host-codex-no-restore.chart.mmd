@@ -1,0 +1,121 @@
+---
+title: "Session host: one channel across dcserver restarts, host loss and terminate"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Recovery
+    lg1: Session
+    lg2: Path to the PendingEventuallyResolved or RestartEventuallyReconnect or RestartedPendingResolved bug
+    lg3: Repeats forever, so PendingEventuallyResolved or RestartEventuallyReconnect or RestartedPendingResolved breaks
+  }
+  class lg0 blue
+  class lg1 teal
+  class lg2 bugPath
+  class lg3 repeats
+  s0: No session
+  s1: No session, a message waiting
+  s2: Creating, a message waiting
+  s3: Created, location not yet recorded, a message waiting
+  s4: Creating, host server down, a message waiting
+  s5: Pending, no pane recorded, host server down, a message waiting
+  s6: Pane recorded, only a shell, a message waiting
+  s7: No session, host server down, a message waiting
+  s8: Pane recorded, provider up, no prompt yet, a message waiting
+  s9: No session, host server replaced, a message waiting
+  s10: First prompt sent, waiting for its hook
+  s11: Creating, host server replaced, a message waiting
+  s12: Created, location not yet recorded, host server replaced, a message waiting
+  s13: First prompt sent, waiting for its hook (no more messages)
+  s14: Pane recorded, only a shell, host server replaced, a message waiting
+  s15: dcserver down, provider still running (no more messages)
+  s16: Pane recorded, only a shell, host server replaced
+  s17: Boot reconcile (after the restart) (no more messages)
+  s18: Waiting to re-adopt the created execution (after the restart) (no more messages)
+  s19: Pane recorded, provider up, no prompt yet, host server replaced
+  s20: Pane recorded, provider up, no prompt yet, host server replaced, a message waiting
+  s21: First prompt sent, waiting for its hook, host server replaced (no more messages)
+  s22: First prompt taken, its source logged, not bound, host server replaced (no more messages)
+  s23: dcserver down, provider still running, host server replaced (no more messages)
+  s24: Boot reconcile, host server replaced (after the restart) (no more messages)
+  s25: Waiting to re-adopt the created execution, host server replaced (after the restart) (no more messages)
+  [*] --> s0
+  s0 --> s1: a message arrives
+  s1 --> s2: a message reserves a new execution
+  s2 --> s3: the host creates it
+  s2 --> s4: the host server ends
+  s3 --> s3: a host probe stops failing
+  s4 --> s4: a host probe stops failing
+  s3 --> s6: its pane is recorded
+  s4 --> s5: the create reply is lost
+  s5 --> s7: the census finds nothing and closes the row
+  s6 --> s8: the provider starts in the pane
+  s7 --> s9: the host server starts again
+  s8 --> s10: the turn sends Codex its first prompt
+  s9 --> s11: a message reserves a new execution
+  s10 --> s10: a message arrives
+  s11 --> s12: the host creates it
+  s10 --> s13: the turn is refused: no provider, or its first prompt already taken
+  s12 --> s14: its pane is recorded
+  s13 --> s15: dcserver stops
+  s14 --> s16: the turn is refused: no provider, or its first prompt already taken
+  s15 --> s17: dcserver starts
+  s16 --> s19: the provider starts in the pane
+  s17 --> s18: intake opens
+  s19 --> s20: a message arrives
+  s20 --> s21: the turn sends Codex its first prompt
+  s21 --> s22: Codex's first hook arrives
+  s22 --> s23: dcserver stops
+  s23 --> s24: dcserver starts
+  s24 --> s25: intake opens
+  class s0 teal
+  class s0 bugPath
+  class s1 teal
+  class s1 bugPath
+  class s2 teal
+  class s2 bugPath
+  class s3 teal
+  class s3 bugPath
+  class s4 teal
+  class s4 bugPath
+  class s5 teal
+  class s5 bugPath
+  class s6 teal
+  class s6 bugPath
+  class s7 teal
+  class s7 bugPath
+  class s8 teal
+  class s8 bugPath
+  class s9 teal
+  class s9 bugPath
+  class s10 teal
+  class s10 bugPath
+  class s11 teal
+  class s11 bugPath
+  class s12 teal
+  class s12 bugPath
+  class s13 teal
+  class s13 bugPath
+  class s14 teal
+  class s14 bugPath
+  class s15 blue
+  class s15 bugPath
+  class s16 teal
+  class s16 bugPath
+  class s17 blue
+  class s17 bugPath
+  class s18 blue
+  class s18 repeats
+  class s19 teal
+  class s19 bugPath
+  class s20 teal
+  class s20 bugPath
+  class s21 teal
+  class s21 bugPath
+  class s22 teal
+  class s22 bugPath
+  class s23 blue
+  class s23 bugPath
+  class s24 blue
+  class s24 bugPath
+  class s25 blue
+  class s25 repeats

@@ -1,0 +1,67 @@
+---
+title: "Session host: one channel across dcserver restarts, host loss and terminate"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Recovery
+    lg1: Session
+    lg2: Breaks CustodyKept
+    lg3: Path to the CustodyKept or HeldInputSubmitted bug
+    lg4: Repeats forever, so HeldInputSubmitted breaks
+  }
+  class lg0 blue
+  class lg1 teal
+  class lg2 breaks
+  class lg3 bugPath
+  class lg4 repeats
+  s0: No session
+  s1: dcserver down, nothing running
+  s2: No session, a message waiting
+  s3: Boot reconcile (after the restart)
+  s4: No session, input kept for a host, no tmux yet
+  s5: No session, input kept for a host
+  s6: No session (after the restart)
+  s7: No host, input answered
+  s8: No session, a message waiting (after the restart)
+  s9: No session, input kept for a host (after the restart), no tmux yet
+  s10: No session, input kept for a host (after the restart)
+  s11: No host, input answered (after the restart)
+  [*] --> s0
+  s0 --> s1: dcserver stops
+  s0 --> s2: a message arrives
+  s1 --> s3: dcserver starts
+  s2 --> s4: no host: one notice, the message is kept
+  s3 --> s3: a host probe stops failing
+  s4 --> s5: tmux becomes usable
+  s3 --> s6: intake opens
+  s5 --> s7: a host is back: the kept message is queued to run again
+  s6 --> s8: a message arrives
+  s8 --> s9: no host: one notice, the message is kept
+  s9 --> s10: tmux becomes usable
+  s10 --> s11: a host is back: the kept message is queued to run again
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 teal
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 teal
+  class s2 bugPath
+  class s3 blue
+  class s3 bugPath
+  class s4 teal
+  class s4 bugPath
+  class s5 teal
+  class s5 bugPath
+  class s6 teal
+  class s6 bugPath
+  class s7 teal
+  class s7 breaks
+  class s7 bugPath
+  class s8 teal
+  class s8 bugPath
+  class s9 teal
+  class s9 bugPath
+  class s10 teal
+  class s10 bugPath
+  class s11 teal
+  class s11 repeats

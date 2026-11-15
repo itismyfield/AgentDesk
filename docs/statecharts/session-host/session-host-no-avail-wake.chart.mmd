@@ -1,31 +1,44 @@
+---
+title: "Session host: one channel across dcserver restarts, host loss and terminate"
+---
 stateDiagram-v2
   state "Legend" as legend {
-    lg0: Path to the HeldInputSubmitted bug
-    lg1: Repeats forever, so HeldInputSubmitted breaks
+    lg0: Recovery
+    lg1: Session
+    lg2: Path to the HeldInputSubmitted bug
+    lg3: Repeats forever, so HeldInputSubmitted breaks
   }
-  class lg0 bugPath
-  class lg1 repeats
-  s0: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=1 losses=0 flight="idle" host="none" tmuxBack=0 kept=FALSE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=FALSE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=0 requeues=0 terms=0
-  s1: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=0 losses=0 flight="idle" host="none" tmuxBack=0 kept=FALSE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=FALSE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=0 requeues=0 terms=0
-  s2: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=0 losses=0 flight="idle" host="none" tmuxBack=0 kept=FALSE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s3: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="unavailable" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=0 losses=0 flight="idle" host="none" tmuxBack=0 kept=TRUE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=FALSE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s4: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="unavailable" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=0 losses=0 flight="idle" host="none" tmuxBack=1 kept=TRUE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=FALSE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s5: src=FALSE killed=FALSE prov=FALSE srv="down" locator=0 answer="unavailable" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=0 losses=0 flight="idle" host="none" tmuxBack=1 kept=TRUE record=0 firstIn="none" registry=FALSE crashes=1 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=FALSE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s6: src=FALSE killed=FALSE prov=FALSE srv="boot" locator=0 answer="unavailable" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=0 losses=0 flight="idle" host="none" tmuxBack=1 kept=TRUE record=0 firstIn="none" registry=FALSE crashes=1 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=FALSE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s7: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="unavailable" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=0 losses=0 flight="idle" host="none" tmuxBack=1 kept=TRUE record=0 firstIn="none" registry=FALSE crashes=1 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=FALSE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
+  class lg0 blue
+  class lg1 teal
+  class lg2 bugPath
+  class lg3 repeats
+  s0: No session
+  s1: dcserver down, nothing running
+  s2: Boot reconcile (after the restart)
+  s3: No session (after the restart)
+  s4: No session, a message waiting (after the restart)
+  s5: No session, input kept for a host (after the restart), no tmux yet
+  s6: No session, input kept for a host (after the restart)
   [*] --> s0
-  s0 --> s1: ProbeRecovers
-  s1 --> s2: Arrive
-  s2 --> s3: Unavailable
-  s3 --> s4: TmuxReturns
-  s4 --> s5: Crash
-  s5 --> s6: Boot
-  s6 --> s7: BootDone
+  s0 --> s1: dcserver stops
+  s1 --> s2: dcserver starts
+  s2 --> s3: intake opens
+  s3 --> s4: a message arrives
+  s4 --> s5: no host: one notice, the message is kept
+  s5 --> s6: tmux becomes usable
+  s6 --> s6: a host probe stops failing
+  class s0 teal
   class s0 bugPath
+  class s1 blue
   class s1 bugPath
+  class s2 blue
   class s2 bugPath
+  class s3 teal
   class s3 bugPath
+  class s4 teal
   class s4 bugPath
+  class s5 teal
   class s5 bugPath
+  class s6 teal
   class s6 bugPath
-  class s7 repeats
+  class s6 repeats

@@ -1,24 +1,50 @@
+---
+title: "Session host: one channel across dcserver restarts, host loss and terminate"
+---
 stateDiagram-v2
   state "Legend" as legend {
-    lg0: Breaks NeverRequeued
-    lg1: Path to the NeverRequeued bug
+    lg0: Session
+    lg1: Breaks NeverResubmitted
+    lg2: Path to the NeverResubmitted bug
   }
-  class lg0 breaks
-  class lg1 bugPath
-  s0: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=1 losses=0 flight="idle" host="none" tmuxBack=0 kept=FALSE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=FALSE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=0 requeues=0 terms=0
-  s1: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=1 losses=0 flight="idle" host="none" tmuxBack=0 kept=FALSE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s2: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="unavailable" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=1 losses=0 flight="idle" host="none" tmuxBack=0 kept=TRUE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=FALSE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s3: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="unavailable" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=1 losses=0 flight="idle" host="none" tmuxBack=1 kept=TRUE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=FALSE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
-  s4: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="unavailable" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=1 losses=0 flight="idle" host="none" tmuxBack=1 kept=FALSE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=TRUE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=1 terms=0
+  class lg0 teal
+  class lg1 breaks
+  class lg2 bugPath
+  s0: No session
+  s1: No session, a message waiting
+  s2: No session, input kept for a host, no tmux yet
+  s3: No session, input kept for a host
+  s4: No host, input answered, a message waiting
+  s5: Creating, a message waiting
+  s6: Created, location not yet recorded, a message waiting
+  s7: Pane recorded, provider up with its source, not bound, a message waiting
+  s8: Session up
   [*] --> s0
-  s0 --> s1: Arrive
-  s1 --> s2: Unavailable
-  s2 --> s3: TmuxReturns
-  s3 --> s4: Requeue
+  s0 --> s1: a message arrives
+  s1 --> s2: no host: one notice, the message is kept
+  s2 --> s3: tmux becomes usable
+  s3 --> s4: a host is back: the kept message is queued to run again
+  s4 --> s5: a message reserves a new execution
+  s5 --> s6: the host creates it
+  s6 --> s7: its pane is recorded
+  s7 --> s8: the turn binds the execution
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 teal
   class s0 bugPath
+  class s1 teal
   class s1 bugPath
+  class s2 teal
   class s2 bugPath
+  class s3 teal
   class s3 bugPath
-  class s4 breaks
+  class s4 teal
   class s4 bugPath
+  class s5 teal
+  class s5 bugPath
+  class s6 teal
+  class s6 bugPath
+  class s7 teal
+  class s7 bugPath
+  class s8 teal
+  class s8 breaks
+  class s8 bugPath
