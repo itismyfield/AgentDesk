@@ -477,6 +477,15 @@ session-lifecycle/HerdrHandoffLaunchImmediateWake.cfg	HerdrHandoffLaunch	Backoff
 session-lifecycle/HerdrHandoffLaunchNoCount.cfg	HerdrHandoffLaunch	BoundedRetries	FrontProgress
 session-lifecycle/HerdrHandoffLaunchRetiredJournal.cfg	HerdrHandoffLaunch	RetiredIsFresh	-
 session-lifecycle/HerdrHandoffLaunchSuccess.cfg	HerdrHandoffLaunch	-	-
+session-lifecycle/HerdrHandoffNonceBeforeHangul.cfg	HerdrHandoffNonce	-	Delivered
+session-lifecycle/HerdrHandoffNonceBeforeKilled.cfg	HerdrHandoffNonce	-	Delivered
+session-lifecycle/HerdrHandoffNonceBeforeLogged.cfg	HerdrHandoffNonce	-	-
+session-lifecycle/HerdrHandoffNonceFixedDirect.cfg	HerdrHandoffNonce	-	-
+session-lifecycle/HerdrHandoffNonceFixedFailedCreate.cfg	HerdrHandoffNonce	-	-
+session-lifecycle/HerdrHandoffNonceFixedHangul.cfg	HerdrHandoffNonce	-	-
+session-lifecycle/HerdrHandoffNonceFixedKilled.cfg	HerdrHandoffNonce	-	-
+session-lifecycle/HerdrHandoffNonceNoEndProof.cfg	HerdrHandoffNonce	NoCapture	-
+session-lifecycle/HerdrHandoffNonceNoHostCheck.cfg	HerdrHandoffNonce	NoCapture	-
 session-lifecycle/HerdrHandoffPersonBefore.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHandoffQueueBefore.cfg	HerdrSession	-	HandoffProgress
 session-lifecycle/HerdrHandoffTargetBefore.cfg	HerdrSession	NoBusyExit,NoLiteralIntoDraft,NoUnexpectedEnter,NoWrongExecutionExit	HandoffProgress
