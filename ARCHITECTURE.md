@@ -2049,7 +2049,6 @@ src/
 │   │   │   │   │   ├── herdr.rs
 │   │   │   │   │   ├── herdr_safety_tests.rs
 │   │   │   │   │   └── herdr_tests.rs
-│   │   │   │   ├── native_intent/
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── claude_handoff.rs
