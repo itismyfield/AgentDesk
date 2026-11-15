@@ -4032,6 +4032,9 @@ src/
 │   │   │   ├── policy_tests.rs
 │   │   │   ├── root_replaced.rs
 │   │   │   └── root_replaced_tests.rs
+│   │   ├── tmux_host/
+│   │   │   ├── fifo.rs
+│   │   │   └── input.rs
 │   │   ├── consumer_guard.rs
 │   │   ├── herdr_gate.rs
 │   │   ├── herdr_gate_tests.rs
@@ -4047,6 +4050,7 @@ src/
 │   │   ├── process_host.rs
 │   │   ├── resolve.rs
 │   │   ├── session_record.rs
+│   │   ├── submit.rs
 │   │   ├── surface_policy.rs
 │   │   ├── termination.rs
 │   │   ├── test_support.rs

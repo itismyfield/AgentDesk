@@ -9,7 +9,10 @@ use crate::services::claude_tui::owner_input;
 use crate::services::claude_tui::source_verify::{
     self, Observation as SourceObservation, PinJudgment,
 };
-use crate::services::session_host::{HerdrMutation, HerdrTarget, HostKey, HostMutation};
+use crate::services::session_host::{
+    AuthorizedHostTarget, HerdrMutation, HerdrTarget, HostKey, HostKind, HostMutation,
+    SubmitPayload, host_for,
+};
 use crate::services::tui_input::human_frame::history;
 use crate::services::tui_prompt_dedupe::binding_events::SourceId;
 use crate::services::tui_prompt_dedupe::{self, binding_events};
@@ -81,8 +84,15 @@ impl Adapter {
         }
         if park {
             owner_input::keyed();
-            let parked = (self.target.pin(HerdrMutation::Input).ok())
-                .and_then(|()| self.target.send_keys(&[HostKey::CtrlS]).ok());
+            let parked = (self.target.pin(HerdrMutation::Input).ok()).and_then(|()| {
+                host_for(HostKind::Herdr)
+                    .submit(
+                        AuthorizedHostTarget::herdr(&self.target),
+                        SubmitPayload::Keys(&[HostKey::CtrlS]),
+                    )
+                    .into_herdr()
+                    .ok()
+            });
             if parked != Some(HostMutation::Confirmed) {
                 return BusyReport::outcome(BusyOutcome::Failed("stash_failed"));
             }
