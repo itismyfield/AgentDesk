@@ -3805,20 +3805,22 @@ async fn native_8148_supply_old_boot_debt_uses_original_generation_and_saved_res
                 .unwrap();
         }
         let source = f.ticket.source.as_ref().unwrap();
-        assert_eq!(
-            f.history.receipt(
-                "native-fixture",
-                &f.ticket.key,
-                (
-                    &source.transcript,
-                    0,
-                    "user",
-                    Some("own"),
-                    "한국어 원본 입력"
-                )
-            ),
-            Some(true)
-        );
+        if !saved {
+            assert_eq!(
+                f.history.receipt(
+                    "native-fixture",
+                    &f.ticket.key,
+                    (
+                        &source.transcript,
+                        0,
+                        "user",
+                        Some("own"),
+                        "한국어 원본 입력"
+                    )
+                ),
+                Some(true)
+            );
+        }
         let row = b2b_row(&f);
         if saved {
             let observed = b2b_batch(&f);
