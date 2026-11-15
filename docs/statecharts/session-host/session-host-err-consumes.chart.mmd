@@ -1,87 +1,18 @@
----
-title: "Session host: one channel across dcserver restarts, host loss and terminate"
----
 stateDiagram-v2
   state "Legend" as legend {
-    lg0: Recovery
-    lg1: Session
-    lg2: Breaks NoInputLoss
-    lg3: Breaks NoInputLoss in some cases
-    lg4: Path to the NoInputLoss bug
+    lg0: Breaks NoInputLoss
+    lg1: Path to the NoInputLoss bug
   }
-  class lg0 blue
-  class lg1 teal
-  class lg2 breaks
-  class lg3 mayBreak
-  class lg4 bugPath
-  s0: No session
-  s1: dcserver down, nothing running
-  s2: No session, a message waiting
-  s3: Boot reconcile (after the restart)
-  s4: dcserver down, nothing running, a message waiting
-  s5: No session, input lost
-  s6: Boot reconcile, a message waiting (after the restart)
-  s7: No session, input lost, a message waiting
-  s8: No session (after the restart)
-  s9: No session, a message waiting (after the restart)
-  s10: No session, input lost (no more messages)
-  s11: dcserver down, nothing running (no more messages)
-  s12: No session, input lost (after the restart)
-  s13: Boot reconcile (after the restart) (no more messages)
-  s14: No session, input lost, a message waiting (after the restart)
-  s15: No session, input lost (after the restart) (no more messages)
+  class lg0 breaks
+  class lg1 bugPath
+  s0: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=1 losses=0 flight="idle" host="none" tmuxBack=0 kept=FALSE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=FALSE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=0 requeues=0 terms=0
+  s1: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=1 losses=0 flight="idle" host="none" tmuxBack=0 kept=FALSE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=FALSE waiting=FALSE want=TRUE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
+  s2: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="unavailable" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=1 losses=0 flight="idle" host="none" tmuxBack=0 kept=FALSE record=0 firstIn="none" registry=FALSE crashes=0 lost=TRUE serial=0 tmuxUp=FALSE waiting=FALSE want=FALSE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
   [*] --> s0
-  s0 --> s1: dcserver stops
-  s0 --> s2: a message arrives
-  s1 --> s3: dcserver starts
-  s2 --> s4: dcserver stops
-  s2 --> s5: no host: one notice, the message is kept
-  s3 --> s8: intake opens
-  s4 --> s6: dcserver starts
-  s5 --> s1: dcserver stops
-  s5 --> s7: a message arrives
-  s6 --> s9: intake opens
-  s7 --> s4: dcserver stops
-  s7 --> s10: no host: one notice, the message is kept
-  s8 --> s9: a message arrives
-  s3 --> s12: intake opens
-  s9 --> s12: no host: one notice, the message is kept
-  s10 --> s11: dcserver stops
-  s6 --> s14: intake opens
-  s11 --> s13: dcserver starts
-  s12 --> s14: a message arrives
-  s13 --> s15: intake opens
-  s14 --> s15: no host: one notice, the message is kept
+  s0 --> s1: Arrive
+  s1 --> s2: Unavailable
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
-  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
-  class s0 teal
   class s0 bugPath
-  class s1 blue
-  class s1 mayBreak
-  class s2 teal
+  class s1 bugPath
+  class s2 breaks
   class s2 bugPath
-  class s3 blue
-  class s3 mayBreak
-  class s4 blue
-  class s4 mayBreak
-  class s5 teal
-  class s5 breaks
-  class s5 bugPath
-  class s6 blue
-  class s6 mayBreak
-  class s7 teal
-  class s7 breaks
-  class s8 teal
-  class s9 teal
-  class s10 teal
-  class s10 breaks
-  class s11 blue
-  class s11 breaks
-  class s12 teal
-  class s12 breaks
-  class s13 blue
-  class s13 breaks
-  class s14 teal
-  class s14 breaks
-  class s15 teal
-  class s15 breaks

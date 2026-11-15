@@ -1,0 +1,36 @@
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks UnixCancelAsMain
+    lg1: Path to the UnixCancelAsMain bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=1 losses=0 flight="idle" host="none" tmuxBack=0 kept=FALSE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=FALSE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=0 requeues=0 terms=0
+  s1: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Legacy" stop=FALSE unknowns=1 losses=0 flight="idle" host="none" tmuxBack=0 kept=FALSE record=0 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=TRUE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
+  s2: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Pending" stop=FALSE unknowns=1 losses=0 flight="creating" host="herdr" tmuxBack=0 kept=FALSE record=1 firstIn="none" registry=FALSE crashes=0 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=TRUE hostSrv="up" live={} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
+  s3: src=FALSE killed=FALSE prov=FALSE srv="up" locator=0 answer="none" recoverOwed=FALSE row="Pending" stop=FALSE unknowns=1 losses=0 flight="created" host="herdr" tmuxBack=0 kept=FALSE record=1 firstIn="none" registry=TRUE crashes=0 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=TRUE hostSrv="up" live={1} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
+  s4: src=FALSE killed=FALSE prov=FALSE srv="up" locator=1 answer="none" recoverOwed=FALSE row="Pending" stop=FALSE unknowns=1 losses=0 flight="idle" host="herdr" tmuxBack=0 kept=FALSE record=1 firstIn="none" registry=TRUE crashes=0 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=TRUE hostSrv="up" live={1} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
+  s5: src=TRUE killed=FALSE prov=TRUE srv="up" locator=1 answer="none" recoverOwed=FALSE row="Pending" stop=FALSE unknowns=1 losses=0 flight="idle" host="herdr" tmuxBack=0 kept=FALSE record=1 firstIn="none" registry=TRUE crashes=0 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=TRUE hostSrv="up" live={1} cancel="none" adopted=FALSE inputs=1 requeues=0 terms=0
+  s6: src=TRUE killed=FALSE prov=TRUE srv="up" locator=1 answer="started" recoverOwed=FALSE row="Bound" stop=FALSE unknowns=1 losses=0 flight="idle" host="herdr" tmuxBack=0 kept=FALSE record=1 firstIn="sent" registry=TRUE crashes=0 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=FALSE hostSrv="up" live={1} cancel="none" adopted=TRUE inputs=1 requeues=0 terms=0
+  s7: src=TRUE killed=FALSE prov=TRUE srv="up" locator=1 answer="started" recoverOwed=FALSE row="Bound" stop=FALSE unknowns=1 losses=0 flight="idle" host="herdr" tmuxBack=0 kept=FALSE record=1 firstIn="sent" registry=TRUE crashes=0 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=FALSE hostSrv="up" live={1} cancel="requested" adopted=TRUE inputs=1 requeues=0 terms=0
+  s8: src=TRUE killed=FALSE prov=TRUE srv="up" locator=1 answer="started" recoverOwed=FALSE row="Bound" stop=FALSE unknowns=1 losses=0 flight="idle" host="herdr" tmuxBack=0 kept=FALSE record=1 firstIn="sent" registry=TRUE crashes=0 lost=FALSE serial=0 tmuxUp=TRUE waiting=FALSE want=FALSE hostSrv="up" live={1} cancel="delivered" adopted=TRUE inputs=1 requeues=0 terms=0
+  [*] --> s0
+  s0 --> s1: Arrive
+  s1 --> s2: Reserve
+  s2 --> s3: CreateEffect
+  s3 --> s4: RecordLocation
+  s4 --> s5: ProviderStarts
+  s5 --> s6: Bind
+  s6 --> s7: RequestCancel
+  s7 --> s8: DeliverCancel
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s7 bugPath
+  class s8 breaks
+  class s8 bugPath

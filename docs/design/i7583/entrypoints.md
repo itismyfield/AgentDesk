@@ -39,31 +39,36 @@ r2 재분류: `src/cli/utils.rs:168`(관찰)·`:186`(종료)을 NON_MANAGED → 
 | `src/services/herdr_launch.rs:533-569` | 위치 CAS 뒤 확인 못 한 실행 명령은 위치를 남긴 Pending + Indeterminate | 모델 `RecordLocation`, 조각 S06b |
 | `src/services/discord/recovery_engine/herdr_reader.rs:463-464`, `src/services/herdr_launch/unplaced.rs:353` | 복구 패스는 Pending을 건너뛰고, unplaced resolver는 위치 없는 행만 | 모델 `PlacedFix`·`SkipPlaced` |
 | `src/services/discord/recovery_engine/herdr_server_replaced.rs:26-31`, `:238-262` | server-replaced의 placed Pending 처리는 user_default·재부팅 뒤만 | 조각 W08 |
-| `src/services/provider/cancel_token_claude_interrupt.rs:535-541`, `:544-563`; `src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs:257-262` | settlement `cfg!(unix)`, Codex Escape는 Cancel bool | 모델 `CancelSwitch`·`CancelOk` |
+| `src/services/provider/cancel_token_claude_interrupt.rs:535-541`, `:544-563`; `src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs:250-262`, `:589-600`, `:801`; `src/services/discord/turn_bridge/tmux_runtime/judged_stop.rs:389-402` | settlement `cfg!(unix)`. Herdr Escape는 Claude·Codex 모두 하나의 전달자로 가고 Cancel bool을 본다(r3 정정) | 모델 `CancelSwitch`·`CancelOk`·`UnixCancelAsMain` |
 | `src/services/discord/router/message_handler/intake_turn/host_refusal.rs:6-63`, `src/services/discord/router/intake_dispatch/queued.rs:353-357`, `src/services/discord/router/message_handler/provider_dispatch/start_failure.rs:284-286` | admission 거절의 원문 복원과, owner 없는 턴의 provider `Err`가 복원 경계를 지나지 않음 | 모델 `Unavailable`·`kept`/`lost`·`ErrConsumes` |
+| `src/services/discord/router/intake_gate.rs:1271-1283`, `:1325-1352`; `src/services/discord/router/intake_dispatch.rs:229`, `:583-589`, `:690-711`, `:861-956`; `src/services/discord/admin_host_guard.rs:66-88` | live submission은 본문만 갖고 owner·outbox가 없다. `host_refusal` 비queued 분기는 uploads·clear만 되돌린다. router admission의 deferred 계약은 내구 수탁 뒤에만 checkpoint | 모델 `Unavailable`·`kept`·`Requeue`, 조각 D01 |
+| `src/services/codex/herdr_turn.rs:156-166`, `:228-274`, `:515-531`; `src/services/codex/herdr_turn/first_input.rs:90-103`; `src/services/discord/tui_prompt_relay/herdr_source.rs:154-244`, `:294-302`; `src/services/claude/herdr_turn.rs:545-580`, `:860-873` | Codex 첫 hook은 첫 prompt와 함께, 첫 입력 함수는 Pending만, Bound 행은 source 필요. Bound 작성자 3곳 모두 source 필요. input hold는 첫 write 전 기록 | 모델 `src`·`firstIn`·`waiting`, 조각 S06b |
 
 ## 모델 값의 유일한 출처
 
 `docs/statecharts/session-host/SessionHost.tla`는 이 표의 유한 추상값만 쓴다. 설계 1 모델(Pending·생성·위치·재채택·종료)을 기반으로
-Fable 모델의 플랫폼별 호스트 선택·tmux 부재·Windows job·호스트 서버 소실·입력 거절을 옮겨 넣었다.
-식별자 1·2·3은 같은 채널 실행을 구별하는 대칭 추상값이다. 채널 1, dcserver 재시작 1, 호스트 서버 소실 1, 입력 2, 종료 요청 1,
+Fable 모델의 플랫폼별 호스트 선택·tmux 부재·Windows job·호스트 서버 소실·입력 거절을 옮겨 넣었다. 개정 3은 provider와 source의 분리, Codex 첫 입력, 바뀌는 tmux 가용성을 더했다.
+식별자 1·2·3은 같은 채널 실행을 구별하는 대칭 추상값이다. 채널 1, dcserver 재시작 1, 호스트 서버 소실 1, tmux 복귀 1, 입력 2, 종료 요청 1,
 일시 관찰 실패 1은 TLC의 탐색 경계이며 운영 상한을 뜻하지 않는다.
 
 | 모델 변수/상수 | 값 | 전수표 좌표 | 추상화 |
 |---|---|---|---|
 | `Platform` | unix, windows | windows-gates/state-entrypoints `src/services/turn_host.rs:228`, `src/services/turn_host.rs:243` | `cfg!(unix)` 게이트 |
 | `Design` | current, proposed | 검사 시나리오 | main과 최종 설계 |
-| `Tmux` | BOOLEAN | `src/services/platform/tmux/availability.rs:6`, `src/services/claude.rs:1650` | tmux 사용 가능 |
+| `Tmux` | BOOLEAN | `src/services/platform/tmux/availability.rs:6`, `src/services/claude.rs:1650` | 시작 때 tmux 사용 가능 |
+| `tmuxUp`, `tmuxBack` | BOOLEAN, 0..1 | `src/services/platform/tmux/availability.rs:13`, `:14` | 지금 tmux 사용 가능(가용성 캐시 회복·설치), 복귀 1회 |
+| `Codex` | BOOLEAN | `src/services/turn_host.rs:220-232` | 채널 provider가 Codex(아니면 Claude) |
 | `Endpoint` | BOOLEAN | `src/config/session_hosts.rs:109`, `src/config/session_hosts.rs:230`, `src/config/session_hosts.rs:350` | 채널에 Herdr endpoint(또는 명시 선택)가 있음 |
 | `Switch` | BOOLEAN | `src/config/runtime_settings.rs:87-94`, `src/services/turn_host.rs:220-247` | 실행 bool(Claude/Codex를 하나로 추상화) |
 | `CancelSwitch` | BOOLEAN | `src/config/runtime_settings.rs:95-97`, `src/services/provider/cancel_token_claude_interrupt.rs:544-563` | Codex Escape bool |
 | `AllowStop`, `MaxInputs` | BOOLEAN, 2 | 검사 시나리오 | 종료 요청 허용, 입력 수 경계 |
 | `Autostart` | BOOLEAN | `src/services/session_host/herdr/autostart/spawn.rs:48` | dcserver 수명 밖에서 Herdr 서버를 다시 띄울 수 있음 |
-| `Mutant` | none, replay, earlyRetire, noWake, forget, serverInJob, silentFallback, skipPlaced, gateRun, gateCancel, errConsumes | `src/services/session_host/traits.rs:9`; 바꿀 포트의 가드 제거 | 제품 상태가 아닌 검사 시나리오 |
+| `Mutant` | none, replay, earlyRetire, noWake, forget, serverInJob, silentFallback, skipPlaced, gateRun, gateCancel, errConsumes, bindProven, escapeNoSwitch, noAvailWake | `src/services/session_host/traits.rs:9`; 바꿀 포트의 가드 제거 | 제품 상태가 아닌 검사 시나리오 |
 | `host` | none, tmux, process, herdr | `src/domain/host_observation.rs:4` | Core는 채널 세션 호스트가 아니므로 모델에 넣지 않음 |
 | `hostSrv` | up, down | `src/services/discord/recovery_engine/herdr_server_replaced.rs:246`, `src/services/discord/recovery_engine/herdr_server_replaced.rs:261` | tmux/Herdr 서버 프로세스 |
 | `row` | Legacy, Pending, Bound, Retired | `src/db/dispatched_sessions/hosted_execution.rs:27`, `src/db/dispatched_sessions/hosted_execution.rs:171` | legacy/없음과 serde 상태 3개 |
 | `prov` | BOOLEAN | `src/services/herdr_launch.rs:553-569`, `src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs:766-781` | pane 안에 provider가 떴는가(셸만 남은 placed Pending 구별) |
+| `src`, `firstIn`, `waiting` | BOOLEAN; none, sent; BOOLEAN | `src/services/discord/tui_prompt_relay/herdr_source.rs:294-302`, `src/services/claude/herdr_turn.rs:545-580`, `src/services/codex/herdr_turn.rs:266-274` | 자기 source 기록(Claude SessionStart, Codex 첫 prompt hook), 첫 입력 전달(hold 기록 뒤 write), 첫 prompt를 보낸 턴이 아직 attach를 기다림 |
 | `live`, `record`, `locator` | {1,2,3}의 부분집합; 0..3 | `src/services/herdr_launch.rs:482`, `src/services/herdr_launch.rs:515`, `src/db/dispatched_sessions/hosted_execution.rs:47`, `src/db/dispatched_sessions/hosted_execution.rs:68` | pane/root/provider/nonce 묶음의 동일성 |
 | `serial` | 0..1 | 위와 같음 | replay 뮤턴트가 한 번만 재생성하게 세는 값 |
 | `flight` | idle, creating, created, closing | `src/services/herdr_launch.rs:474`, `src/services/termination_audit/host_terminate.rs:52` | 생성·닫기 중간 효과 |
@@ -71,7 +76,7 @@ Fable 모델의 플랫폼별 호스트 선택·tmux 부재·Windows job·호스�
 | `stop`, `terms` | BOOLEAN, 0..1 | `src/services/discord/commands/control/clear_teardown.rs:99`, `src/services/queue/herdr_stop.rs:13` | 종료·clear의 끝내기 요청. Cancel은 세션 종료가 아님 |
 | `killed` | BOOLEAN | `src/services/session_backend.rs:341` (+보충 `windows_job.rs:35`) | dcserver 재시작만으로 provider가 끝남 |
 | `want`, `answer`, `inputs` | BOOLEAN; none, started, refused, unavailable, failed; 0..`MaxInputs` | `src/services/discord/router/message_handler/provider_dispatch.rs:559`, `src/services/claude.rs:794`, `src/services/claude.rs:810`, `src/services/codex/command_streaming.rs:184`, `src/services/qwen.rs:357` | 입력이 시작되거나 거절됨 |
-| `kept`, `lost` | BOOLEAN | `src/services/discord/router/message_handler/intake_turn/host_refusal.rs:6-63`, `src/services/discord/router/intake_dispatch/queued.rs:353-357` | 호스트 없음 거절 뒤 원문이 큐에 남음 / 소비됨 |
+| `kept`, `lost`, `requeues` | BOOLEAN, BOOLEAN, 0..1 | `src/services/discord/router/message_handler/intake_turn/host_refusal.rs:6-63`, `src/services/discord/router/intake_dispatch/queued.rs:353-357` | 호스트 없음 뒤 원문이 큐에 남음 / 소비됨, 재제출 횟수 |
 | `cancel` | none, requested, delivered, dropped | `src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs:257-262`, `src/services/discord/turn_bridge/tmux_runtime/judged_stop.rs:478-490` | 턴 Escape 요청과 전달 결과 |
 | `srv`, `crashes` | up, down, boot; 0..1 | `src/cli/dcserver.rs:771`, `src/services/discord/runtime_bootstrap.rs:35`, `src/services/discord/runtime_bootstrap.rs:472` | 실행·종료·재조정 gate |
 | `losses`, `unknowns` | 0..1 | `src/services/discord/recovery_engine/herdr_server_replaced.rs:261`, `src/services/session_host/model.rs:52`, `src/services/discord/recovery_engine/host_reconcile.rs:81` | 호스트 서버 소실 1회, ProbeError/Unknown 1회 뒤 정상화 |

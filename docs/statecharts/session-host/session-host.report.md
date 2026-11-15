@@ -10,16 +10,19 @@ Fable 모델(`refs/review/i7583-design-fable-1`, 14 cfg)에만 있던 플랫폼�
 Fable의 `BootOpensEarly`(재조정 없이 intake가 열림)는 설계 1의 `NoWake`(재시작 패스에 닿지 못함)와 같은 결함이라 `NoWake` 하나로 합쳤다.
 Fable의 `RetireBeforeClose`는 설계 1의 `EarlyRetire`와 같다. 변수 값 범위는 [진입점 표](../../design/i7583/entrypoints.md)에서만 가져왔다.
 
-개정 2(r2)는 독립 리뷰를 반영해 다음을 더했다: 위치가 기록된 Pending(`RecordLocation` 뒤 행이 Pending으로 남음, provider는 뜰 수도 안 뜰 수도 있음)과
-그 자동 탈출(`AdoptPlaced`·`ResolvePlacedGone`·`ResidueClose`), endpoint와 스위치의 분리(`Endpoint`·`Switch`), Codex Escape 스위치(`CancelSwitch`)와 Cancel 전달,
-호스트 없음 거절이 원문을 남기는지(`kept`·`lost`, `Unavailable`·`Requeue`). 뮤턴트 4개(`skipPlaced`, `gateRun`, `gateCancel`, `errConsumes`)와 cfg 6개를 더했다.
+개정 2(r2)는 독립 리뷰를 반영해 위치가 기록된 Pending과 그 자동 탈출, endpoint와 스위치의 분리, Cancel 스위치와 전달, 호스트 없음 거절의 원문 보존을 더했다.
+개정 3(r3)은 r2 리뷰를 반영해 다음을 더했다: provider 증명과 source 증명의 분리(`src`, Codex는 첫 prompt와 함께 첫 hook을 보냄),
+Codex 첫 입력(`FirstPrompt`·`HookArrives`·`TurnAttach`)과 source 없는 Bound의 거절(`FollowupNoSource`), 첫 입력 전 provider의 확인만 하는 resolver 행동(`ConfirmReady`),
+Herdr Escape가 Claude·Codex 모두 Cancel 스위치를 따른다는 사실(`CancelOk`), 바뀌는 tmux 가용성(`tmuxUp`, `TmuxReturns`)과 재제출 횟수(`requeues`).
+상수 `Codex`, 뮤턴트 3개(`bindProven`, `escapeNoSwitch`, `noAvailWake`), cfg 7개를 더했다.
 
-TLC 1.7.4(`statechart` 스킬), 23 cfg: 규칙이 모두 성립 9개, 아래에 적은 규칙만 깨짐 14개(모두 예상). `expected.tsv`가 같은 행을 가진다.
+TLC 1.7.4(`statechart` 스킬), 30 cfg: 규칙이 모두 성립 11개, 아래에 적은 규칙만 깨짐 19개(모두 예상). `expected.tsv`가 같은 행을 가진다.
 Rust는 빌드·실행하지 않았다. 반례는 코드를 읽어 대조했다.
 
 **보장 범위.** 이 모델이 보이는 것은 (1) 고른 호스트 위에서 재시작·Pending·입력·종료 계약이 성립하는가, (2) Windows PlatformDefault 실행이 bool 스위치 때문에
-거절되거나 Escape가 버려지지 않는가다. 채널 선택 표(설계 §5) 전체가 main과 같다는 것은 보이지 않는다 — 그것은 조각 W01의 표 기반 시험이 정본이다(설계 §5.2).
-r1 보고서의 "Unix 쌍 상태 수가 같으므로 기본값이 같다"는 문장은 철회한다(상태 수 동일은 선택 결과 동일을 뜻하지 않는다).
+거절되거나 Escape가 버려지지 않는가, (3) Unix endpoint의 Escape가 Cancel 스위치 off에서 꺼진 채인가, (4) 호스트 없음으로 보존된 입력이 호스트가 돌아오면 다시 제출되는가다.
+채널 선택 표(설계 §5) 전체가 main과 같다는 것은 보이지 않는다 — 그것은 조각 W01의 표 기반 시험이 정본이다(설계 §5.2).
+첫 write 뒤 hold가 남았는데 hook이 끝내 오지 않는 경우(설계 §7.3)는 모델에 넣지 않았다(hold 기록과 write를 한 걸음으로 묶음, main hold 계약 그대로).
 
 ## 규칙
 
@@ -32,64 +35,87 @@ r1 보고서의 "Unix 쌍 상태 수가 같으므로 기본값이 같다"는 문
 | `NoInputLoss` | INVARIANT | 호스트 없음 거절이 원문을 소비하지 않는다 |
 | `NoDefaultRefusal` | INVARIANT | 정책 거절은 endpoint가 설정된 채널에서만 난다(PlatformDefault는 bool로 거절되지 않음) |
 | `NoDefaultCancelDrop` | INVARIANT | Escape가 버려지는 것은 endpoint 채널의 스위치 off뿐이다 |
+| `BoundHasSource` | INVARIANT | Bound 행은 자기 source를 가진다(source 없는 Bound는 모든 입력을 거절한다) |
+| `UnixCancelAsMain` | INVARIANT | Unix endpoint 채널의 Herdr Escape는 Cancel 스위치 off에서 꺼진 채다(main과 같음) |
+| `NeverRequeued` | INVARIANT(증인) | `RequeueReach` cfg에만 둔다. 깨지면 보존 → 복귀 → 재제출이 정상 설계에서 도달 가능하다는 뜻 |
 | `RestartEventuallyReconnect` | PROPERTY | 재시작 뒤 같은 실행을 다시 잡거나, 정말 사라진 실행의 행을 닫는다 |
 | `InputAnswered` | PROPERTY | 모든 입력은 시작되거나 거절·보존된다 |
 | `TerminateEventuallyGone` | PROPERTY | 종료 요청은 소유 실행의 소멸 확인으로 끝난다 |
-| `PendingEventuallyResolved` | PROPERTY | Pending(위치 유무 무관)은 사람 개입 없이 Bound나 Retired로 정리된다 |
+| `PendingEventuallyResolved` | PROPERTY | Pending은 사람 개입 없이 Bound·Retired, 또는 "provider가 살아 있고 첫 입력 전이며 대기 입력이 없는" 상태에 닿는다 |
+| `CodexFirstInputDelivered` | PROPERTY | 첫 입력 전 Codex Pending에 입력이 기다리면 같은 실행에 첫 prompt가 전달된다(또는 실행이 사라짐) |
+| `HeldInputSubmitted` | PROPERTY | 보존된 입력은 호스트를 쓸 수 있게 되면 다시 제출된다 |
 | `HostRecovers` | PROPERTY | 잃은 호스트 서버는 사람 손 없이 다시 뜬다 |
 
-공정성은 dcserver와 호스트가 스스로 하는 일(생성·위치 기록·재조정·재채택·census·placed resolver·닫기·서버 재기동·재대기열)에만 건다.
-입력·재시작·호스트 소실·종료 요청·Cancel 요청과 provider 기동은 강제하지 않는다.
+공정성은 dcserver와 호스트가 스스로 하는 일(생성·위치 기록·재조정·재채택·census·placed resolver·첫 prompt·hook 뒤 attach·닫기·서버 재기동·재대기열)과
+Codex가 첫 prompt와 함께 보내는 첫 hook에 건다. 입력·재시작·호스트 소실·tmux 복귀·종료 요청·Cancel 요청과 provider 기동은 강제하지 않는다.
 
 ## 결과
 
 | cfg | 플랫폼 / 설계 / 조건 | 상태 수 | 깨지는 규칙 |
 |---|---|---|---|
-| `SessionHostUnixTmuxCurrent` | unix, main, tmux | 4,434 | 없음 |
-| `SessionHostUnixTmux` | unix, 최종, tmux | 4,434 | 없음 |
-| `SessionHostUnixHerdrCurrent` | unix, main, endpoint + 스위치 on | 3,647 | `PendingEventuallyResolved`, `RestartEventuallyReconnect` |
-| `SessionHostUnixHerdr` | unix, 최종, endpoint + 스위치 on | 8,299 | 없음 |
+| `SessionHostUnixTmuxCurrent` | unix, main, tmux | 3,437 | 없음 |
+| `SessionHostUnixTmux` | unix, 최종, tmux | 3,437 | 없음 |
+| `SessionHostUnixHerdrCurrent` | unix, main, endpoint + 스위치 on, Claude | 4,044 | `PendingEventuallyResolved`, `RestartEventuallyReconnect` |
+| `SessionHostUnixHerdr` | unix, 최종, endpoint + 스위치 on, Claude, Cancel 스위치 off | 5,615 | 없음 |
+| `SessionHostCodexHerdrCurrent` | unix, main, endpoint, Codex | 5,218 | `PendingEventuallyResolved`, `RestartEventuallyReconnect` |
+| `SessionHostCodexHerdr` | unix, 최종, endpoint, Codex | 7,042 | 없음 |
 | `SessionHostUnixEndpointOffCurrent` | unix, main, endpoint + 스위치 off | 40 | 없음(입력 전 거절) |
 | `SessionHostUnixEndpointOff` | unix, 최종, endpoint + 스위치 off | 40 | 없음(같은 거절) |
-| `SessionHostUnixNoTmuxCurrent` | unix tmux 없음, main(process 폴백) | 680 | `NoSessionLoss`, `NoDoubleSession`, `NoOrphanAfterTerminate`; `RestartEventuallyReconnect`, `InputAnswered`, `TerminateEventuallyGone` |
-| `SessionHostUnixNoTmux` | unix tmux 없음, 최종 | 24 | 없음(admission 거절, 원문 보존) |
-| `SessionHostSilentFallback` | 뮤턴트: 최종 설계가 process 폴백을 남김 | 680 | 위 6개 + `NoProcessHost` |
-| `SessionHostErrConsumes` | 뮤턴트: 호스트 없음 오류가 원문을 소비(provider 함수 `Err`) | 40 | `NoInputLoss` |
-| `SessionHostWindowsCurrent` | windows, main(process) | 682 | `NoSessionLoss` |
-| `SessionHostWindowsSelectedCurrent` | windows, main, endpoint + 스위치 on | 40 | 없음(`cfg!(unix)` 스위치가 거절) |
-| `SessionHostWindowsHerdr` | windows, 최종, endpoint + 스위치 on | 8,299 | 없음 |
-| `SessionHostWindowsImplicit` | windows, 최종, 선택 없음·모든 bool off → 내부 기본 Herdr | 8,299 | 없음 |
-| `SessionHostGateRun` | 뮤턴트: PlatformDefault에 실행 bool 적용 | 40 | `NoDefaultRefusal` |
-| `SessionHostGateCancel` | 뮤턴트: PlatformDefault에 Cancel bool 적용 | 8,299 | `NoDefaultCancelDrop` |
-| `SessionHostWindowsServerInJob` | 뮤턴트: Herdr 서버가 dcserver job 안에서 뜸 | 9,169 | `NoSessionLoss` |
-| `SessionHostWindowsNoAutostart` | windows, 최종, 서버 재기동 수단 없음 | 4,226 | `HostRecovers` |
-| `SessionHostSkipPlaced` | 뮤턴트: placed resolver 없음(main처럼 건너뜀) | 3,647 | `PendingEventuallyResolved`, `RestartEventuallyReconnect` |
-| `SessionHostReplayPending` | 뮤턴트: 잃은 생성 응답을 재생성 허가로 읽음 | 4,095 | `NoSessionLoss`, `NoDoubleSession`, `NoOrphanAfterTerminate` |
-| `SessionHostEarlyRetire` | 뮤턴트: 닫기 전에 행을 Retired로 | 8,470 | `NoSessionLoss`, `NoOrphanAfterTerminate` |
-| `SessionHostNoWake` | 뮤턴트: 부팅이 재시작 패스에 닿지 못함 | 1,113 | `RestartEventuallyReconnect`, `InputAnswered`, `PendingEventuallyResolved` |
-| `SessionHostForgetIdentity` | 뮤턴트: 재시작에서 위치·census 신원을 잃음 | 774 | `NoSessionLoss`; `RestartEventuallyReconnect`, `InputAnswered`, `PendingEventuallyResolved` |
+| `SessionHostUnixNoTmuxCurrent` | unix tmux 없음, main(process 폴백) | 4,947 | `NoSessionLoss`, `NoDoubleSession`, `NoOrphanAfterTerminate`; `RestartEventuallyReconnect`, `InputAnswered`, `TerminateEventuallyGone` |
+| `SessionHostUnixNoTmux` | unix tmux 없음, 최종 | 6,898 | 없음(admission hold, tmux 복귀 뒤 재제출) |
+| `SessionHostRequeueReach` | 위와 같고 증인 규칙 `NeverRequeued` 추가 | 6,898 | `NeverRequeued`(도달 증인) |
+| `SessionHostNoAvailWake` | 뮤턴트: 가용성 복귀 wake 없음 | 3,469 | `HeldInputSubmitted` |
+| `SessionHostSilentFallback` | 뮤턴트: 최종 설계가 process 폴백을 남김 | 4,947 | 위 6개 + `NoProcessHost` |
+| `SessionHostErrConsumes` | 뮤턴트: 호스트 없음 오류가 원문을 소비 | 4,548 | `NoInputLoss` |
+| `SessionHostWindowsCurrent` | windows, main(process) | 1,378 | `NoSessionLoss` |
+| `SessionHostWindowsSelectedCurrent` | windows, main, endpoint + 스위치 on | 80 | 없음(`cfg!(unix)` 스위치가 거절) |
+| `SessionHostWindowsHerdr` | windows, 최종, endpoint + 스위치 on | 11,230 | 없음 |
+| `SessionHostWindowsImplicit` | windows, 최종, 선택 없음·모든 bool off, Claude | 11,230 | 없음 |
+| `SessionHostCodexImplicit` | windows, 최종, 선택 없음·모든 bool off, Codex | 14,084 | 없음 |
+| `SessionHostBindProven` | 뮤턴트(r2 처방): provider 증명만으로 Bound, Codex | 27,138 | `BoundHasSource`; `CodexFirstInputDelivered` |
+| `SessionHostEscapeNoSwitch` | 뮤턴트(r2 표): Unix Claude Escape를 settlement만으로 허가 | 5,615 | `UnixCancelAsMain` |
+| `SessionHostGateRun` | 뮤턴트: PlatformDefault에 실행 bool 적용 | 80 | `NoDefaultRefusal` |
+| `SessionHostGateCancel` | 뮤턴트: PlatformDefault에 Cancel bool 적용 | 11,230 | `NoDefaultCancelDrop` |
+| `SessionHostSkipPlaced` | 뮤턴트: placed resolver 없음(main처럼 건너뜀) | 8,088 | `PendingEventuallyResolved`, `RestartEventuallyReconnect` |
+| `SessionHostWindowsServerInJob` | 뮤턴트: Herdr 서버가 dcserver job 안에서 뜸 | 12,008 | `NoSessionLoss` |
+| `SessionHostWindowsNoAutostart` | windows, 최종, 서버 재기동 수단 없음 | 5,658 | `HostRecovers` |
+| `SessionHostReplayPending` | 뮤턴트: 잃은 생성 응답을 재생성 허가로 읽음 | 7,598 | `NoSessionLoss`, `NoDoubleSession`, `NoOrphanAfterTerminate` |
+| `SessionHostEarlyRetire` | 뮤턴트: 닫기 전에 행을 Retired로 | 11,362 | `NoSessionLoss`, `NoOrphanAfterTerminate` |
+| `SessionHostNoWake` | 뮤턴트: 부팅이 재시작 패스에 닿지 못함 | 2,522 | `RestartEventuallyReconnect`, `InputAnswered`, `PendingEventuallyResolved` |
+| `SessionHostForgetIdentity` | 뮤턴트: 재시작에서 위치·census 신원을 잃음 | 1,804 | `NoSessionLoss`; `RestartEventuallyReconnect`, `InputAnswered`, `PendingEventuallyResolved` |
 
-리뷰 항목의 수정 전/후: P1-1 `UnixHerdrCurrent`(main)·`SkipPlaced` RED → `UnixHerdr`·`WindowsImplicit` GREEN. P1-2 `GateRun`·`GateCancel` RED → `WindowsImplicit` GREEN.
-P1-3 `ErrConsumes` RED → `UnixNoTmux` GREEN. Unix Herdr 쌍의 상태 수가 다른 것(3,647 / 8,299)은 placed Pending 자동 탈출이 Unix에도 도는 의도한 동작 변화다.
+리뷰 항목의 수정 전/후: r3 P1-1 `BindProven` RED → `CodexImplicit`·`CodexHerdr` GREEN. r3 P1-2 `EscapeNoSwitch` RED → `UnixHerdr` GREEN.
+r3 P1-3·P2 `NoAvailWake`·`ErrConsumes` RED → `UnixNoTmux` GREEN, 재제출 도달은 `RequeueReach`가 증인이다(`HeldInputSubmitted`가 공허하게 성립하지 않음).
+r2 항목: `UnixHerdrCurrent`·`SkipPlaced` RED → `UnixHerdr`·`WindowsImplicit` GREEN, `GateRun`·`GateCancel` RED → `WindowsImplicit` GREEN.
 `UnixEndpointOff*`는 endpoint + 스위치 off 거절이 main과 최종에서 같은 결과임을 보인다(표 전체가 아니라 이 칸만).
 
-차트(500 상태 이하이거나 반례가 짧은 것): [Herdr 서버가 job 안](session-host-windows-server-in-job.chart.mmd),
+차트(반례가 짧은 것): [Herdr 서버가 job 안](session-host-windows-server-in-job.chart.mmd),
 [닫기 전 Retired](session-host-early-retire.chart.mmd), [Pending 재생성](session-host-replay-pending.chart.mmd),
-[서버 재기동 수단 없음](session-host-windows-no-autostart.chart.mmd), [tmux 없는 Unix, 최종](session-host-unix-no-tmux.chart.mmd),
-[placed resolver 없음](session-host-skip-placed.chart.mmd), [실행 bool 적용](session-host-gate-run.chart.mmd), [Cancel bool 적용](session-host-gate-cancel.chart.mmd),
-[오류가 원문 소비](session-host-err-consumes.chart.mmd). 나머지 cfg의 차트와 TLC 원본은 레인 폴더 `sc-out/`에 있다(커밋하지 않음).
+[서버 재기동 수단 없음](session-host-windows-no-autostart.chart.mmd), [placed resolver 없음](session-host-skip-placed.chart.mmd),
+[실행 bool 적용](session-host-gate-run.chart.mmd), [Cancel bool 적용](session-host-gate-cancel.chart.mmd), [오류가 원문 소비](session-host-err-consumes.chart.mmd),
+[provider 증명만으로 Bound](session-host-bind-proven.chart.mmd), [Unix Escape가 스위치 없이 켜짐](session-host-escape-no-switch.chart.mmd),
+[가용성 wake 없음](session-host-no-avail-wake.chart.mmd), [보존 → tmux 복귀 → 재제출(증인)](session-host-requeue-reach.chart.mmd).
+나머지 cfg의 차트와 TLC 원본은 레인 폴더 `sc-out/`에 있다(커밋하지 않음).
 
 ## 반례와 코드 대조
 
+- `BindProven` `BoundHasSource`·`CodexFirstInputDelivered`: 생성 → 위치 기록 → (턴 실패) → Codex provider 기동 → resolver가 provider 증명만으로 Bound → 다음 입력이
+  source 없음으로 거절(`src/services/codex/herdr_turn.rs:515-531`)되고, 첫 입력 함수는 Pending만 받으므로(`src/services/codex/herdr_turn/first_input.rs:90-103`) 첫 prompt가 영영 가지 않는다.
+  Codex 첫 hook은 첫 prompt와 함께 오고(`src/services/codex/herdr_turn.rs:266-274`) source attach는 baseline이 없으면 보류된다(`src/services/discord/tui_prompt_relay/herdr_source.rs:294-302`).
+  최종 설계는 첫 입력 전 Pending을 지키고 기존 첫 입력 경로로 잇는다(`CodexImplicit` GREEN).
+- `CodexHerdrCurrent` `PendingEventuallyResolved`: main Codex의 첫 prompt 뒤 provider가 사라지면 Pending은 복구 패스가 건너뛰어 남는다(같은 원인, `UnixHerdrCurrent`와 같은 결함).
+- `EscapeNoSwitch` `UnixCancelAsMain`: Claude Herdr stop도 `src/services/discord/turn_bridge/tmux_runtime/judged_stop.rs:389-402`에서 `codex_stop_delivery`로 가고
+  `herdr_command_eligible`(`:250-262`)이 Cancel 스위치를 본다. r2 표처럼 Unix Claude Escape를 settlement만으로 허가하면 스위치 off인 채널에서 Escape가 나간다.
+- `NoAvailWake` `HeldInputSubmitted`: 보존된 입력이 tmux가 돌아온 뒤에도 깨어나지 않으면 큐에 영영 남는다. 최종 설계는 가용성 신호가 drain을 깨운다(설계 §10.2).
 - `WindowsCurrent` `NoSessionLoss`: 입력 → process 실행 생성 → dcserver 종료. dcserver는 Windows에서 자기 자신을
   kill-on-close job에 넣으므로(`src/services/platform/windows_job.rs:35`, `:52`, 부팅 `src/cli/dcserver.rs:882`) 자식 provider가 함께 끝난다.
   레지스트리는 메모리 static이라(`src/services/session_backend.rs:341`) 새 dcserver가 다시 찾을 것도 없다.
 - `WindowsServerInJob` `NoSessionLoss`: 최종 설계라도 Herdr 서버를 dcserver의 일반 자식으로 띄우면 같은 job이 서버와 모든 pane을 끝낸다.
   최종 설계 조각 W04가 서버를 job 밖에서 띄우는 이유다([U] U04).
 - `UnixNoTmuxCurrent` 세 불변식: process 실행 → dcserver 종료 → 자기 process group이라 살아남지만(`src/services/session_backend.rs:240`) 레지스트리가 비어
-  죽은 것으로 읽혀 행이 닫히고(고아) → 다음 입력이 두 번째 provider를 띄운다(이중 세션). 최종 설계는 admission 거절로 이 경로를 없앤다(`UnixNoTmux` GREEN).
+  죽은 것으로 읽혀 행이 닫히고(고아) → 다음 입력이 두 번째 provider를 띄운다(이중 세션). 최종 설계는 admission hold로 이 경로를 없앤다(`UnixNoTmux` GREEN).
 - `ErrConsumes` `NoInputLoss`: 호스트 없음을 provider 함수 `Err`로만 알리면 owner 없는 턴은 `src/services/discord/router/message_handler/provider_dispatch/start_failure.rs:284-286`에서
-  곧바로 실행 경로로 가고 원문이 큐로 돌아오지 않는다. 최종 설계는 `src/services/discord/router/message_handler/intake_turn/host_refusal.rs:6-63`의 복원 경계에서 거절한다.
+  곧바로 실행 경로로 가고 원문이 큐로 돌아오지 않는다. live 메시지는 `host_refusal`의 비queued 분기(`src/services/discord/router/message_handler/intake_turn/host_refusal.rs:46-63`)도 본문을 남기지 않는다. 최종 설계는 router admission(`src/services/discord/router/intake_dispatch.rs:229`)에서 내구 hold로 분류한다.
 - `UnixHerdrCurrent`·`SkipPlaced` `PendingEventuallyResolved`: 생성 → 위치 기록 → 실행 명령 확인 끊김(provider 미기동) → 재시작. 복구 패스는 Pending을 건너뛰고
   (`src/services/discord/recovery_engine/herdr_reader.rs:463-464`) unplaced resolver는 위치 없는 행만 받으므로(`src/services/herdr_launch/unplaced.rs:353`) 행이 영영 남고
   입력이 그 뒤에 묶인다. 최종 설계는 placed resolver가 adopt·retire·residue close 중 하나로 끝낸다.

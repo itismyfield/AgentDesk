@@ -15,9 +15,11 @@ const base = v => {
     if (v.flight === "creating") return "Creating";
     if (!v.locator) return "Pending, no pane recorded";
     if (!has(v.live, v.record)) return "Pane recorded, pane gone";
-    return v.prov ? "Pane recorded, provider up, not bound" : "Pane recorded, only a shell";
+    if (!v.prov) return "Pane recorded, only a shell";
+    if (v.firstIn === "sent") return v.src ? "First prompt taken, its source logged, not bound" : "First prompt sent, waiting for its hook";
+    return v.src ? "Pane recorded, provider up with its source, not bound" : "Pane recorded, provider up, no prompt yet";
   }
-  if (v.row === "Bound") return has(v.live, v.record) ? "Session up" : "Row bound, provider gone";
+  if (v.row === "Bound") return !has(v.live, v.record) ? "Row bound, provider gone" : v.src ? "Session up" : "Bound without its source";
   if (count(v.live)) return "Row closed, provider still running";
   if (v.kept) return "No session, input kept for a host";
   if (v.lost) return "No session, input lost";
@@ -34,6 +36,8 @@ export const state = v => {
   if (v.srv !== "down" && v.crashes === 1 && !v.killed) label += " (after the restart)";
   if (v.cancel === "requested") label += ", cancel pending";
   if (v.cancel === "dropped") label += ", cancel dropped";
+  if (v.cancel === "delivered") label += ", cancel delivered";
+  if (v.kept && !v.tmuxUp) label += ", no tmux yet";
   if (v.inputs >= 2 && !v.want) label += " (no more messages)";
   return label;
 };
@@ -43,8 +47,11 @@ const words = {
   Arrive: "a message arrives", Reserve: "a message reserves a new execution", CreateEffect: "the host creates it",
   CreateAborts: "the create reply is lost", RecordLocation: "its pane is recorded",
   ProviderStarts: "the provider starts in the pane", Bind: "the turn binds the execution",
-  TurnFails: "the turn is refused: no provider in the pane", PolicyRefuse: "the message is refused by policy",
+  TurnFails: "the turn is refused: no provider, or its first prompt already taken", PolicyRefuse: "the message is refused by policy",
   Unavailable: "no host: one notice, the message is kept", Requeue: "a host is back: the kept message runs",
+  FirstPrompt: "the turn sends Codex its first prompt", HookArrives: "Codex's first hook arrives",
+  TurnAttach: "the turn binds on that hook", FollowupNoSource: "the next prompt is refused: no source",
+  TmuxReturns: "tmux becomes usable", ConfirmReady: "the waiting provider is confirmed, still Pending",
   RequestCancel: "a cancel is requested", DeliverCancel: "the cancel is delivered or dropped",
   AdoptUnplaced: "the census finds its pane", AdoptPlaced: "the recorded pane's provider is adopted",
   ResolvePlacedGone: "the recorded pane is gone: row closed", ResidueClose: "the lone shell is closed",
