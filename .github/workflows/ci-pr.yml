@@ -1745,6 +1745,8 @@ jobs:
       - name: Ensure swap for the lib test build
         if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
         uses: ./.github/actions/ensure-swap
+        # #8162: lib test builds peak near 16G RAM + 19G swap; rebuilding per mutant lost the runner twice.
+        with: {size-gb: "24"}
 
       - name: Fetch Cargo dependencies
         if: steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'
