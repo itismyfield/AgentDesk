@@ -12,8 +12,6 @@ use crate::services::discord::SharedData;
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::provider::ProviderKind;
 
-const CHANNEL_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// Resolve the bot HTTP client by alias.
 /// Utility aliases are parsed into a stable role before provider lookup.
 pub async fn resolve_bot_http(
@@ -125,6 +123,7 @@ fn select_direct_channel_runtime_candidate(
 // lookups on unrelated bots before resolving a configured owner. In particular,
 // health snapshots have a short deadline and would otherwise report a detached
 // watcher when an unrelated bot's channel lookup stalls.
+#[cfg(test)]
 async fn select_candidate_with_live_probe<F, Fut>(
     provider_name: &str,
     channel_id: ChannelId,
@@ -145,89 +144,6 @@ where
         candidate.live_channel_match = probe(candidate.index).await;
     }
     select_direct_channel_runtime_candidate(provider_name, channel_id, &candidates)
-}
-
-async fn resolve_channel_candidate(
-    provider_name: &str,
-    channel_id: ChannelId,
-    owner_provider: &ProviderKind,
-    shared_candidates: &[(usize, Arc<SharedData>)],
-) -> Result<Option<usize>, String> {
-    let mut snapshots = Vec::with_capacity(shared_candidates.len());
-    let mut candidates = Vec::with_capacity(shared_candidates.len());
-    for (index, shared) in shared_candidates {
-        let settings = shared.settings.read().await.clone();
-        candidates.push(DirectChannelRuntimeCandidate {
-            index: *index,
-            explicit_channel_match: settings.allowed_channel_ids.contains(&channel_id.get()),
-            live_channel_match: false,
-        });
-        snapshots.push((*index, shared, settings));
-    }
-    // A worker has no gateway Context. Resolve a thread's authoritative parent
-    // once, then reuse the configured allowlists instead of probing every bot.
-    // Keep explicit child bindings ahead of inherited parent bindings.
-    if !candidates
-        .iter()
-        .any(|candidate| candidate.explicit_channel_match)
-        && snapshots.iter().any(|(_, shared, settings)| {
-            shared.http.cached_serenity_ctx.get().is_none()
-                && !settings.allowed_channel_ids.is_empty()
-        })
-    {
-        let lookup = async {
-            for (_, shared, _) in &snapshots {
-                if let Some(http) = shared.serenity_http_or_token_fallback()
-                    && let Ok(channel) = channel_id.to_channel(&http).await
-                {
-                    return Ok(channel);
-                }
-            }
-            Err("no registered bot can resolve the runner channel".to_string())
-        };
-        let channel = tokio::time::timeout(CHANNEL_LOOKUP_TIMEOUT, lookup)
-            .await
-            .map_err(|_| "runner channel ownership lookup timed out".to_string())??;
-        if let serenity::Channel::Guild(channel) = channel
-            && matches!(
-                channel.kind,
-                serenity::ChannelType::PublicThread
-                    | serenity::ChannelType::PrivateThread
-                    | serenity::ChannelType::NewsThread
-            )
-            && let Some(parent) = channel.parent_id
-        {
-            for candidate in &mut candidates {
-                candidate.explicit_channel_match = snapshots.iter().any(|(index, _, settings)| {
-                    *index == candidate.index
-                        && settings.allowed_channel_ids.contains(&parent.get())
-                });
-            }
-        }
-    }
-    select_candidate_with_live_probe(provider_name, channel_id, candidates, |index| {
-        let snapshot = snapshots
-            .iter()
-            .find(|(candidate_index, _, _)| *candidate_index == index);
-        async move {
-            let Some((_, shared, settings)) = snapshot else {
-                return false;
-            };
-            match shared.http.cached_serenity_ctx.get() {
-                Some(ctx) => {
-                    crate::services::discord::provider_handles_channel(
-                        ctx,
-                        owner_provider,
-                        settings,
-                        channel_id,
-                    )
-                    .await
-                }
-                None => false,
-            }
-        }
-    })
-    .await
 }
 
 pub(super) async fn resolve_direct_channel_runtime(

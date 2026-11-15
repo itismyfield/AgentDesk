@@ -107,8 +107,11 @@ fn in_band_rank(verdict: &ReachabilityVerdict) -> u8 {
 fn external_rank(verdict: ExternalRelayVerdict) -> Option<u8> {
     match verdict {
         ExternalRelayVerdict::Unknown => None,
+        #[cfg(test)]
         ExternalRelayVerdict::NoLoss => Some(0),
+        #[cfg(test)]
         ExternalRelayVerdict::Lagging { .. } => Some(1),
+        #[cfg(test)]
         ExternalRelayVerdict::Unreachable { .. } => Some(3),
     }
 }
@@ -194,8 +197,11 @@ impl RelayVerdict {
             },
             RelayVerdictTier::External => match self.external {
                 ExternalRelayVerdict::Unknown => "unknown",
+                #[cfg(test)]
                 ExternalRelayVerdict::NoLoss => "reachable",
+                #[cfg(test)]
                 ExternalRelayVerdict::Lagging { .. } => "degraded",
+                #[cfg(test)]
                 ExternalRelayVerdict::Unreachable { .. } => "unreachable",
             },
         }
@@ -309,9 +315,12 @@ impl RelayVerdictReport {
             } => (None, None, Some(unknown_reason_str(*reason))),
         };
         let external_lost_blocks = match verdict.external() {
+            #[cfg(test)]
             ExternalRelayVerdict::Lagging { lost_blocks }
             | ExternalRelayVerdict::Unreachable { lost_blocks } => Some(lost_blocks),
-            ExternalRelayVerdict::Unknown | ExternalRelayVerdict::NoLoss => None,
+            ExternalRelayVerdict::Unknown => None,
+            #[cfg(test)]
+            ExternalRelayVerdict::NoLoss => None,
         };
         Self {
             verdict: verdict.label(),
