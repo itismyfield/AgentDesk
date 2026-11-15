@@ -1032,6 +1032,30 @@ class S05GeneratorHistoryTest(unittest.TestCase):
         self.commit()
         self.assertIn("previous projection", self.cli(mode="--admit-classification", ok=False).stderr)
 
+    def test_shared_prefix_override_preserves_other_crate_debt(self):
+        self.git("checkout", "-q", "--detach", self.previous)
+        mapping = self.fixture["mapping"].replace(
+            '[[rules]]\nprefix="services::termination_audit"\nlayer="application"\nreason="fixture"\n',
+            '[[rules]]\nprefix="services::termination_audit::host_terminate::herdr_terminate"\nlayer="application"\nreason="fixture"\n')
+        mapping += '[[rules]]\nprefix="services::termination_audit::host_terminate::contract"\nlayer="assembly"\nreason="shared rule"\n'
+        mapping += '[[rules]]\nprefix="services::lower"\nlayer="application"\nreason="fixture"\n'
+        other = ('pub mod services { pub mod lower { pub fn run() { BODY } } '
+                 'pub mod termination_audit { pub mod host_terminate { pub mod contract { pub struct Value; } } } }\n')
+        self.put("src/bin/other.rs", other.replace("BODY", ""))
+        self.put(self.provider.MAPPING, mapping)
+        self.commit()
+        self.previous = self.git("rev-parse", "HEAD")
+        self.accepted = self.measure()
+        self.accepted["uncertainties"] = []
+        self.save()
+        self.put("src/services/termination_audit/host_terminate.rs", self.fixture["moved"])
+        self.put(self.provider.MAPPING, mapping + self.fixture["rules"].replace(
+            '[[rules]]\n', '[[rules]]\nroot="src/lib.rs"\n'))
+        self.put("src/bin/other.rs", other.replace("BODY",
+            "let _ = crate::services::termination_audit::host_terminate::contract::Value;"))
+        self.commit()
+        self.assertIn("previous projection", self.cli(mode="--admit-classification", ok=False).stderr)
+
     def test_kept_glob_cannot_hide_reverse_debt_even_with_history(self):
         # The prior glob proves presence, but it still names the disappearing debt's target.
         path = "src/services/session_host/herdr_gate.rs"

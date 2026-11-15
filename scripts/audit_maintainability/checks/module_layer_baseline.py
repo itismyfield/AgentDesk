@@ -305,7 +305,7 @@ def _admit_classification(accepted, payload, moves, graph, occurrences, mapping,
         prefix = logical.removeprefix("::")
         for category in ("rules", "unclassified"):
             previous_mapping[category] = [rule for rule in previous_mapping.get(category, [])
-                if (rule["prefix"], rule.get("root", root)) != (prefix, root)]
+                if (rule["prefix"], rule.get("root")) != (prefix, root)]
         layer = assigned[row["module"]]
         rule = {"root": root, "prefix": prefix, "reason": "new source module"}
         previous_mapping["rules" if layer is not None else "unclassified"].append(
