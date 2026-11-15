@@ -70,7 +70,11 @@ pub(super) async fn claim_episode(
         return Ok(None);
     }
     let captured_actor = expected_actor.as_ref().map(Arc::downgrade);
-    let observed_before = std::time::Instant::now();
+    let observed_before = drift
+        .and_then(|w| w.native_prepared_before)
+        .map_or_else(std::time::Instant::now, |captured| {
+            captured.min(std::time::Instant::now())
+        });
     let observed = match shared.mailbox_peek(key.channel_id) {
         Some(mailbox) => Some(mailbox.snapshot().await),
         None => None,
@@ -802,6 +806,7 @@ impl TurnFinalizer {
                 ctx,
                 &shared,
                 RuntimeWitness {
+                    native_prepared_before: None,
                     probed_tmux: probed_tmux.as_deref(),
                     claim_snapshot: cleanup_snapshot.as_ref(),
                 },

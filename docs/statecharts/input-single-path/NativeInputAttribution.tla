@@ -33,7 +33,7 @@ Init == /\ pc = 0 /\ native = "Idle" /\ members = {} /\ nativeQueue = <<>>
              row : {Mode \notin {"BootQueueBefore", "BootQueueFixed", "TransferBefore", "TransferFixed", "TransferDeletes", "TransferAbsentBefore", "TransferAbsentFixed", "TransferUnreadable", "TransferAbsentUnreadable", "NeutralTransferBefore", "NeutralTransferFixed"}}, preserved : {FALSE}, prepared : {FALSE}, head : {FALSE},
              failed : {Mode \in {"BootFailureFixed", "BootIgnoreFailure", "DebtBefore", "DebtFixed", "DebtNoRetry",
                 "PreflightBefore", "PreflightFixed", "TransferUnreadable", "TransferAbsentUnreadable", "BootCorruptBefore", "BootCorruptFixed", "ControlUnreadableFixed"}}, notice : {0},
-             parentLease : {IF Mode \in ConsumerModes \/ Mode \in {"TransferAbsentBefore", "TransferAbsentFixed", "TransferAbsentUnreadable"} THEN 0 ELSE IF Mode \in {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferUnreadable", "NeutralTransferBefore", "NeutralTransferFixed", "ControlStaleBefore", "ControlStaleFixed"} THEN 2 ELSE 1}, parentRow : {TRUE}, parentActive : {1}, nativeAck : {Mode \in {"BootQueueBefore", "BootQueueFixed"}}, neutral : {FALSE}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, aStep : {0}, barrier : {FALSE}, aIdle : {FALSE}, aCaughtUp : {FALSE}, aLeft : {3}, aAck : {FALSE}, aNext : {0}, aOwnSends : {0}, aIdleValid : {FALSE}, aParentDone : {FALSE}, aVersion : {0}, aRowFail : {Mode \in {"AbstainRowBefore", "AbstainRowFixed"}}]
+             parentLease : {IF Mode \in ConsumerModes \/ Mode \in {"TransferAbsentBefore", "TransferAbsentFixed", "TransferAbsentUnreadable"} THEN 0 ELSE IF Mode \in {"TransferBefore", "TransferFixed", "TransferDeletes", "TransferUnreadable", "NeutralTransferBefore", "NeutralTransferFixed", "ControlStaleBefore", "ControlStaleFixed"} THEN 2 ELSE 1}, parentRow : {TRUE}, parentActive : {1}, nativeAck : {Mode \in {"BootQueueBefore", "BootQueueFixed"}}, neutral : {FALSE}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, aStep : {0}, barrier : {FALSE}, aIdle : {FALSE}, aCaughtUp : {FALSE}, aLeft : {3}, aAck : {FALSE}, aNext : {0}, aOwnSends : {0}, aIdleValid : {FALSE}, aParentDone : {FALSE}, aVersion : {0}, aRowFail : {Mode \in {"AbstainRowBefore", "AbstainRowFixed"}}, aLeaseChanged : {FALSE}]
         /\ review.commits = IF review.result = "Executed" THEN 1 ELSE 0
         /\ (~ReviewBoot /\ Mode \notin ConsumerModes) => review.result = "None"
         /\ Mode \in ConsumerModes => review.result = IF Mode \in {"BootPendingFixed", "BootGcBefore", "BootGcFixed"} THEN "None" ELSE "Executed"
@@ -559,5 +559,27 @@ AbstainSessionEventuallyIdle == <>(review.aStep = 5 /\ review.aCaughtUp)
 AbstainOwnCounter == (review.aStep > 0 /\ review.aNext = 0 /\ ~AFollower) => review.parentActive = (IF lease = 0 THEN 0 ELSE 1)
 
 AbstainRowBarrier == (review.aAck /\ ~AFollower) => rows = {}
+
+\* A restored same-actor/same-nonce lease still has a different activation cutoff.
+AEpochRebind == /\ review.aStep = 5 /\ ~review.aLeaseChanged /\ review.phase = "Pending"
+                /\ lease' = 2 /\ review' = [review EXCEPT !.aLeaseChanged = TRUE]
+                /\ UNCHANGED <<pc, native, members, nativeQueue, stage, rows, pending, result, count,
+                     proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                     staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+AEpochFinalize == /\ review.aLeaseChanged /\ review.phase = "Pending"
+                  /\ lease' = IF Mode = "AbstainEpochBefore" THEN 0 ELSE lease
+                  /\ rows' = IF Mode = "AbstainEpochBefore" THEN {} ELSE rows
+                  /\ review' = [review EXCEPT !.phase = "Finalizing",
+                       !.parentActive = IF Mode = "AbstainEpochBefore" THEN 0 ELSE @]
+                  /\ UNCHANGED <<pc, native, members, nativeQueue, stage, pending, result, count,
+                       proof, closed, ran, injected, wake, booted, generation, known, restarted, foreignBody,
+                       staleReleased, warned, incarnation, inputInc, proofInc, replaced, staleSeen, outsideQueued>>
+AbstainEpochSpec == Init /\ [][ACapture \/ AEndTurn \/ AStopOnly \/ AForeignPrompt \/ AForeignCloser
+                       \/ AEpochRebind \/ AEpochFinalize \/ ADone]_vars
+                    /\ WF_vars(ACapture) /\ WF_vars(AEndTurn) /\ WF_vars(AStopOnly)
+                    /\ WF_vars(AForeignPrompt) /\ WF_vars(AForeignCloser)
+                    /\ WF_vars(AEpochRebind) /\ WF_vars(AEpochFinalize)
+AbstainEpochPreserved == review.aLeaseChanged => lease = 2 /\ rows = {1} /\ review.parentActive = 1 /\ ~wake
+AbstainEpochAttempted == <>(review.phase = "Finalizing")
 
 =============================================================================

@@ -187,3 +187,16 @@ P2-3: Pending 재진입마다 leads-to 의무를 검사하며 token 해제 뒤 F
 P2-4: aNext는 물리 주입 관측 횟수를 증가시킨다. 동일 head guard 제거 Before는 NoReplay 위반으로 RED여야 한다.
 
 구현 레그의 P2 보강 뒤 전체는158cfg다. 재부팅 후 Pending 의무의 leads-to, Finalizing crash, 물리 다음 head 횟수 증가를 포함하며 `b2b3p4i-final-tlc-meta.json`/`b2b3p4i-final-tlc.txt`에서158cfg rc0, 기대 위반 집합 일치를 확인했다. Boot ACK는 같은 actor ledger 안에서는 같은 full ticket/barrier에 대해 단조 유지한다. 실제 프로세스 재부팅은 기존 current Idle 관측으로 다시 정산한다.
+
+
+## 준비 cutoff의 최종 CAS 연결(mac-2108)
+
+`NativePrepared.started_before`를 optional `RuntimeWitness.native_prepared_before`로 최종 `claim_episode`에 전달한다. generic 호출은 None으로 기존 now를 유지한다. native caller는 actor/message/nonce가 같아도 준비 뒤 새로 활성화된 lease를 해제할 수 없다. 이 시각은 권한 fence이며 시간 경과에 의한 종결이 아니다.
+
+| 코드 행동 | 모델 값 범위와 대응 |
+|---|---|
+| `terminal_handler.rs::NativePrepared::prepare` 준비 시각 → `native_abstain.rs::Work::drive` witness | `review.aLeaseChanged=FALSE`: lease activation이 준비 cutoff보다 앞섬 |
+| `episode_identity.rs::finish_turn_identity_matches` started_at < active_started_before | `review.aLeaseChanged=TRUE`: 같은 actor/message/nonce의 activation이 준비 뒤임; lease=2로 권한 구분, row={1}와 counter=1 유지 |
+| `episode.rs::claim_episode` native cutoff / generic now | AEpochFinalize Before는 교체 lease/row/counter를 없애 RED; Fixed는 보존. 새 authority의 외부 완료는 이 집중 cfg의 범위 밖이며 기존 control/successor cfg가 별도로 검사함 |
+
+추가 cfg `NativeAttributionAbstainEpochBefore/Fixed`는 실제 PG cutpoint(approval→same-actor rebind→늦은 abstain)를 모델링한다. 새 enum·저장소는 없다. 전체는160cfg이며 실행 판정은 이번 레그 보고서에 둔다.

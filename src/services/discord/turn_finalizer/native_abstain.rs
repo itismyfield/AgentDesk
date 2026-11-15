@@ -94,6 +94,7 @@ impl Work {
                     super::super::super::cleanup::SyntheticClaimSnapshot::from_row(row);
                 snapshot.recovery_actor = Some(Arc::downgrade(actor));
                 let witness = super::super::super::episode::RuntimeWitness {
+                    native_prepared_before: Some(input.started_before),
                     probed_tmux: None,
                     claim_snapshot: Some(&snapshot),
                 };

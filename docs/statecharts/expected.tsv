@@ -338,6 +338,8 @@ input-single-path/NativeAttributionAbstainBootFixed.cfg	NativeInputAttribution	-
 input-single-path/NativeAttributionAbstainCrashFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionAbstainCrashPendingBefore.cfg	NativeInputAttribution	-	AbstainEventuallyLeavesPending,AbstainQueueEventuallyProgresses
 input-single-path/NativeAttributionAbstainCrashRowFixed.cfg	NativeInputAttribution	-	-
+input-single-path/NativeAttributionAbstainEpochBefore.cfg	NativeInputAttribution	AbstainEpochPreserved	-
+input-single-path/NativeAttributionAbstainEpochFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionAbstainFollowerFixed.cfg	NativeInputAttribution	-	-
 input-single-path/NativeAttributionAbstainForeignBefore.cfg	NativeInputAttribution	AbstainNoForeignExecuted	-
 input-single-path/NativeAttributionAbstainForeignFixed.cfg	NativeInputAttribution	-	-

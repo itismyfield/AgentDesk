@@ -3167,6 +3167,11 @@ impl SupplyCapture {
         rig
     }
     async fn poll(&mut self, shared: &Arc<SharedData>) {
+        self.sources.follow(&mut self.writer).unwrap();
+        self.sources
+            .capture(&mut self.writer, &mut self.deriver, &mut self.owed)
+            .unwrap();
+        self.sources.tend(&mut self.writer).unwrap();
         let port = super::native_supply::port(
             self.writer.channel(),
             shared.clone(),
@@ -4632,7 +4637,7 @@ async fn native_8148_barrier_boot_none_outcome_uses_current_execution_idle_pg() 
     f.history.record_native_barrier(&proof).unwrap();
     let boot = super::super::native_prepare::BootInputs::prepare(&root, 2).unwrap();
     let row_path = super::super::super::inflight::inflight_state_path(
-        &root,
+        &super::super::super::inflight::inflight_runtime_root().unwrap(),
         &ProviderKind::Claude,
         f.ticket.channel_id,
     );

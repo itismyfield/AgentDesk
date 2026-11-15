@@ -316,7 +316,7 @@ async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
 }
 
 #[cfg(target_os = "macos")]
-#[path = "tests/activation_e2e.rs"]
+#[path = "tests/activation_e2e_tests.rs"]
 mod activation_e2e;
 
 #[cfg(target_os = "macos")]

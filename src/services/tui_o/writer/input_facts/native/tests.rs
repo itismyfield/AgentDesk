@@ -1219,9 +1219,68 @@ fn native_8148_barrier_cold_follower_source_and_receipt_are_reclassified() {
     assert!(pending.evidence.is_empty());
     assert!(pending.barriers.is_empty());
     f.history.bind("native-b1", &b.key, source).unwrap();
-    assert!(f.analysis().evidence.is_empty());
+    let provisional = f.analysis();
+    assert!(provisional.barriers.is_empty());
+    assert!(provisional.evidence.iter().all(|e| e.ticket.key == b.key));
+    let fingerprint =
+        registrations_fingerprint(&f.history.native_classification_registrations().unwrap())
+            .unwrap();
+    for evidence in &provisional.evidence {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "native_proof".into(),
+            serde_json::to_value(evidence).unwrap(),
+        );
+        let outcome = crate::services::tui_input::human_frame::history::v2::native::Outcome {
+            disposition: evidence.disposition.clone(),
+            range: Some([evidence.range.0, evidence.range.1]),
+            extra,
+        };
+        assert!(
+            f.history
+                .record_native_outcome_at_stamp(
+                    "native-b1",
+                    &evidence.ticket,
+                    &outcome,
+                    &fingerprint
+                )
+                .is_err()
+        );
+        assert!(
+            f.history
+                .native_settlement("native-b1", &evidence.ticket)
+                .unwrap()
+                .outcome
+                .is_none()
+        );
+    }
     f.receipt(&b, "b", "b");
     let settled = f.analysis();
     assert_eq!(settled.evidence.len(), 2);
     assert!(settled.barriers.is_empty());
+    let fingerprint =
+        registrations_fingerprint(&f.history.native_classification_registrations().unwrap())
+            .unwrap();
+    for evidence in &settled.evidence {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "native_proof".into(),
+            serde_json::to_value(evidence).unwrap(),
+        );
+        let outcome = crate::services::tui_input::human_frame::history::v2::native::Outcome {
+            disposition: evidence.disposition.clone(),
+            range: Some([evidence.range.0, evidence.range.1]),
+            extra,
+        };
+        assert!(
+            f.history
+                .record_native_outcome_at_stamp(
+                    "native-b1",
+                    &evidence.ticket,
+                    &outcome,
+                    &fingerprint
+                )
+                .unwrap()
+        );
+    }
 }

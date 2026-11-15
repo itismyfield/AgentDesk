@@ -200,6 +200,7 @@ pub(super) async fn handle_terminal(
     // flip) lets GC reap it and frees the channel for the next turn.
     let exact_normal = released.is_none() && finalize_key.episode.is_some();
     let witness = super::episode::RuntimeWitness {
+        native_prepared_before: None,
         probed_tmux: probed_tmux.as_deref(),
         claim_snapshot: claim_snapshot.as_ref(),
     };

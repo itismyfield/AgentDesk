@@ -11,6 +11,8 @@ pub(in crate::services::discord) struct RuntimeWitness<'a> {
     pub(in crate::services::discord) probed_tmux: Option<&'a str>,
     /// The producer's claim snapshot of the row it settles.
     pub(in crate::services::discord) claim_snapshot: Option<&'a SyntheticClaimSnapshot>,
+    /// A native input keeps the lease activation fence captured before its first key.
+    pub(in crate::services::discord) native_prepared_before: Option<std::time::Instant>,
 }
 
 impl RuntimeWitness<'_> {

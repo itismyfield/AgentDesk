@@ -427,27 +427,26 @@ impl<B: BindingEvents> Sources<B> {
 
     #[cfg(unix)]
     fn native_idle(&self, source: &SourceId) -> bool {
-        matches!(&self.current, super::current::Current::Known(current) if current == source)
-            && self
-                .readers
-                .iter()
-                .find(|r| &r.source == source)
-                .is_some_and(|reader| {
-                    reader.pending.is_none()
-                        && reader.capture.as_ref().is_some_and(|capture| {
-                            self.native
-                                .as_ref()
-                                .and_then(|n| n.seeds.get(source))
-                                .is_some_and(|seed| {
-                                    seed.as_ref().is_ok_and(|seed| {
-                                        seed.idle()
-                                            && seed.through() == capture.captured_through()
-                                            && capture.read_through() == seed.through()
-                                            && capture.file_len().ok() == Some(seed.through())
-                                    })
+        // The typed port rechecks the latest binding; Current is a resume-time history hint.
+        self.readers
+            .iter()
+            .find(|r| &r.source == source)
+            .is_some_and(|reader| {
+                reader.pending.is_none()
+                    && reader.capture.as_ref().is_some_and(|capture| {
+                        self.native
+                            .as_ref()
+                            .and_then(|n| n.seeds.get(source))
+                            .is_some_and(|seed| {
+                                seed.as_ref().is_ok_and(|seed| {
+                                    seed.idle()
+                                        && seed.through() == capture.captured_through()
+                                        && capture.read_through() == seed.through()
+                                        && capture.file_len().ok() == Some(seed.through())
                                 })
-                        })
-                })
+                            })
+                    })
+            })
     }
 
     #[cfg(unix)]

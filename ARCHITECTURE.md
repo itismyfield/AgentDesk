@@ -2370,7 +2370,7 @@ src/
 │   │   │   │   │   ├── owner_input/
 │   │   │   │   │   │   ├── native_input/
 │   │   │   │   │   │   │   ├── tests/
-│   │   │   │   │   │   │   │   └── activation_e2e.rs
+│   │   │   │   │   │   │   │   └── activation_e2e_tests.rs
 │   │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   │   └── native_input.rs
 │   │   │   │   │   ├── handoff_retry_tests.rs
