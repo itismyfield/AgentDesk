@@ -1,0 +1,2 @@
+key: 660-input-single-path-current-clear-certificate
+| input-single-path latest B1 clear certificate (S2 land integration) | `082c77aa4e06b81c76b614f55b8fed73ce01923f` + CurrentClear projection | Missing current-certificate guard breaks CurrentReadyRequiresCertificate; no key leak is claimed | New4: three GREEN/one expected RED; whole readiness selection83: 44 GREEN/39 expected RED. Historical Dual6 stay source-bound to 41ace. |

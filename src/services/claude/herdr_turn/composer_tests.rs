@@ -148,6 +148,7 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
             transcript: root.path().join("same-transcript.jsonl"),
             target: target.clone(),
             bound: true,
+            awaiting_clear: false,
             physical: None,
         };
         let path = attached.transcript.clone();

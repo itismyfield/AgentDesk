@@ -640,6 +640,7 @@ impl PlaceholderLiveEvents {
         provider: &ProviderKind,
         indicator: &str,
     ) -> CompletionFooterRender {
+        subagent_rollout::refresh_observed_children(self, channel_id, provider);
         let snapshot = self
             .status_by_channel
             .get(&channel_id)

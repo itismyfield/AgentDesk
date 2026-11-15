@@ -1,0 +1,24 @@
+---
+title: "Fresh Claude source의 verified pin 발행"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the HealthyBusyEventuallyInjected or ProducerEventuallyVerified bug
+    lg1: Repeats forever, so HealthyBusyEventuallyInjected or ProducerEventuallyVerified breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: fresh source 등록 전
+  s1: 등록 전 hook은 승격 대기
+  s2: 같은 UUID의 Stat 등록
+  s3: authentic hook, pin 없음
+  [*] --> s0
+  s0 --> s0: strict pin이 없어 보류
+  s0 --> s1: 같은 session authentic hook
+  s0 --> s2: launch Stat 등록
+  s1 --> s2: launch Stat 등록
+  s2 --> s3: 같은 session authentic hook
+  s2 --> s2: 보류 표시
+  class s0 bugPath
+  class s2 bugPath
+  class s3 repeats

@@ -1,0 +1,2 @@
+key: 650-input-single-path-clear-authorities
+| input-single-path clear authorities (#8080/#8114 integration) | `8389d4253cd9bd88588f971c39a2b3ded454e991` + model projection | Valid ledger can be public-Ready while a separate invalid disk certificate refuses adoption; bypass and Ready/certificate-coupling mutants remain RED | Actual before68=33 GREEN/35 expected RED; after74=37 GREEN/37 expected RED, existing68 result sets preserved. [Report](input-single-path/clear-authorities.report.md) |
