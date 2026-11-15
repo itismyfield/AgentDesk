@@ -1,0 +1,26 @@
+---
+title: "Daemon restart over an idle herdr Claude pane: first input"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ReadyNoIdleRunningInjection
+    lg1: Path to the ReadyNoIdleRunningInjection bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Before restart: turn running
+  s1: Before restart: idle
+  s2: Restarted: earlier send unrecorded, durable in-flight
+  s3: RED: input over a running turn
+  [*] --> s0
+  s0 --> s1: ReadinessNext
+  s1 --> s0: ReadinessNext
+  s0 --> s2: ReadinessNext
+  s2 --> s2: ReadinessNext
+  s2 --> s3: ReadinessNext
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 breaks
+  class s3 bugPath

@@ -1,0 +1,2 @@
+key: 690-input-single-path-restart-idle-readiness
+| input-single-path / restart idle readiness (#8161 3rd leg, design) | `9b42e532974b4fec350b1aa7c3f59cf7b6dc8fb5` (design base) | IdleBefore liveness and the durable/screen/incarnation guard mutants are expected RED | Restart modes 9 cfg: before RED (incident), after 5 GREEN, mutant 3 RED; selected 104 cfg match expected.tsv. [Report](input-single-path/restart-idle-readiness.report.md), [design](input-single-path/restart-idle-readiness.design.md) |
