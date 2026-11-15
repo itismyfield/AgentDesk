@@ -13,13 +13,20 @@ fn flushed(status: FlushStatus) -> Result<(), String> {
     }
 }
 
+// Opening for writing without truncation rejects a directory before syncing the record.
+fn sync_record_file(path: &Path) -> Result<(), String> {
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| e.to_string())
+}
+
 pub(super) fn publish(path: &Path, encoded: &str) -> Result<(), String> {
     let context = AtomicWriteContext::new("discord_herdr_body_debt");
     match fs::read_to_string(path) {
         Ok(old) if old == encoded => {
-            fs::File::open(path)
-                .and_then(|file| file.sync_all())
-                .map_err(|e| e.to_string())?;
+            sync_record_file(path)?;
             flushed(retry_published_status(path, context))
         }
         Ok(_) => Err("immutable body debt snapshot already differs".into()),
@@ -42,9 +49,7 @@ pub(super) fn read(path: &Path, provider: &ProviderKind) -> Result<Record, Strin
 }
 
 pub(super) fn resync(path: &Path) -> Result<(), String> {
-    fs::File::open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(|e| e.to_string())?;
+    sync_record_file(path)?;
     flushed(retry_published_status(
         path,
         AtomicWriteContext::new("discord_herdr_body_debt"),

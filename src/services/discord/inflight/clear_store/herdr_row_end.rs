@@ -56,7 +56,7 @@ impl InflightTurnState {
                 return GuardedClearOutcome::IoError;
             }
         }
-        if silent && !o_still_owns(&fresh) {
+        if silent && o_still_owns(&fresh) != Ok(true) {
             return GuardedClearOutcome::UserMsgMismatch;
         }
         // Pending circuit evidence outlives the row, as the plain clear keeps it.
@@ -71,32 +71,25 @@ impl InflightTurnState {
             &path,
         );
         let removed = super::remove_row(&path).unwrap_or(GuardedClearOutcome::IoError);
-        if debt.is_some()
-            && removed == GuardedClearOutcome::Cleared
-            && super::super::super::runtime_store::fsync_parent_and_ancestors(&path).is_err()
-        {
-            return GuardedClearOutcome::IoError;
+        if debt.is_some() && removed == GuardedClearOutcome::Cleared {
+            super::super::super::runtime_store::sync_removed(&path);
         }
         removed
     }
 }
 
 /// A silent clear never falls back to a notice: an O owner that changed or does not read keeps it.
-fn output_owner(
+fn o_still_owns(
     fresh: &InflightTurnState,
 ) -> Result<bool, crate::services::tui_o::cutover::IdentityError> {
     let peek = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel;
     peek(fresh.channel_id, fresh.runtime_kind)
 }
 
-fn o_still_owns(fresh: &InflightTurnState) -> bool {
-    output_owner(fresh) == Ok(true)
-}
-
 fn debt_eligible(row: &InflightTurnState) -> bool {
     use crate::services::tui_o::cutover::IdentityError::{AdoptionRefused, AwaitingAdoption};
     matches!(
-        output_owner(row),
+        o_still_owns(row),
         Ok(true) | Err(AwaitingAdoption | AdoptionRefused)
     )
 }

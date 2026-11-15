@@ -989,3 +989,66 @@ fn a_native_herdr_answer_survives_source_rotation_in_its_body_debt_pg() {
         },
     );
 }
+
+#[test]
+fn an_unconfirmed_row_removal_flush_still_wakes_its_waiting_input_pg() {
+    use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
+    in_child(
+        concat!(
+            module_path!(),
+            "::an_unconfirmed_row_removal_flush_still_wakes_its_waiting_input_pg"
+        ),
+        1_479_671_399_000_161,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            let run = Run::start(
+                &rig,
+                Setup {
+                    provider: ProviderKind::Claude,
+                    channel: 1_479_671_399_000_161,
+                    routed: true,
+                },
+            )
+            .await;
+            run.relay.set(|pane| pane.exited = true);
+            let (taken, taking) = run.sentinel().await;
+            let dir = inflight::inflight_runtime_root()
+                .unwrap()
+                .join(run.provider.as_str());
+            let watch = Watch::new(
+                &dir,
+                Plan {
+                    fail: vec![Step::ParentSync],
+                    block: None,
+                },
+            );
+            run.pass().await;
+            assert!(
+                watch
+                    .events()
+                    .iter()
+                    .any(|event| event.step == Step::ParentSync && !event.ok),
+                "the removal directory flush really failed"
+            );
+            assert!(run.durable().is_none());
+            assert!(
+                !debts(&run).is_empty(),
+                "body durability preceded the row removal"
+            );
+            assert!(
+                wait(Duration::from_secs(15), || !taken
+                    .lock()
+                    .unwrap()
+                    .is_empty())
+                .await,
+                "the removed row still wakes the waiting input after a flush failure"
+            );
+            assert_eq!(*taken.lock().unwrap(), vec![false]);
+            assert!(run.texts().is_empty());
+            drop(taking);
+            drop(watch);
+            run.close().await;
+        },
+    );
+}
