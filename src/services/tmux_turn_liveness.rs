@@ -1,4 +1,5 @@
 use std::path::Path;
+mod claude_idle;
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::platform::tmux::{SessionPresence, session_presence};
@@ -21,6 +22,9 @@ pub(crate) enum IndependentTmuxReadiness {
 /// offsets, missing inflight records and old heartbeat timestamps cannot prove
 /// that a provider stopped working. Missing bindings/captures fail closed.
 pub(crate) fn provider_session_is_proven_idle(tmux_session_name: &str) -> bool {
+    if claude_idle::applies(tmux_session_name) {
+        return false;
+    }
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         provider_session_is_proven_idle_under_authority(authority, unrecoverable).is_ok()
     })
@@ -43,6 +47,9 @@ pub(crate) fn kill_proven_idle_provider_session(
     reason: &str,
     recover_codex: impl FnOnce() -> Result<std::path::PathBuf, Option<serde_json::Value>>,
 ) -> Result<bool, IdlePreserved> {
+    if claude_idle::applies(tmux_session_name) {
+        return Err(claude_idle::preserved(tmux_session_name));
+    }
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         provider_session_is_proven_idle_under_authority(authority, recover_codex).map(|()| {
             crate::services::platform::tmux::kill_session_output_timeout(
@@ -65,6 +72,9 @@ pub(crate) fn provider_session_is_proven_idle_under_authority(
     else {
         return Err(("provider_unknown", None));
     };
+    if matches!(provider, ProviderKind::Claude) {
+        return Err((claude_idle::UNPROVEN, None));
+    }
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
             authority,
@@ -108,6 +118,9 @@ pub(crate) fn provider_session_is_proven_idle_under_authority(
 
 fn provider_output_is_proven_idle(provider: &ProviderKind, native_path: &Path, pane: &str) -> bool {
     use std::io::{Read, Seek, SeekFrom};
+    if matches!(provider, ProviderKind::Claude) {
+        return false;
+    }
     // An empty transcript is not evidence of a completed turn.
     let Ok(before) = std::fs::metadata(native_path) else {
         return false;
@@ -149,7 +162,7 @@ fn provider_idle_evidence_agrees(
     pane: &str,
 ) -> bool {
     use crate::services::tui_turn_state::TuiTurnState;
-    state == TuiTurnState::Idle
+    !matches!(provider, ProviderKind::Claude) && state == TuiTurnState::Idle
         && crate::services::provider::tmux_capture_indicates_ready_for_input(pane, provider)
         // Permission selectors can coexist with an older idle transcript and
         // composer. This veto deliberately applies to either provider.
@@ -164,22 +177,6 @@ fn provider_idle_evidence_agrees(
             .filter(|line| !line.trim().is_empty())
             .take(crate::services::tmux_common::CLAUDE_TUI_READINESS_SCAN_LINES)
             .any(|line| line.to_ascii_lowercase().contains("esc to interrupt"))
-        && (!matches!(provider, ProviderKind::Claude)
-            || !crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(pane))
-        // Background work (agents, shells, monitors, tasks) outlives the foreground
-        // turn and only vetoes cleanup; input readiness is unchanged.
-        && (!matches!(provider, ProviderKind::Claude) || !claude_pane_shows_background_work(pane))
-}
-
-/// The pending-agent footer or a bypass row counting shells/monitors/agents/tasks.
-fn claude_pane_shows_background_work(pane: &str) -> bool {
-    crate::services::tmux_common::tmux_capture_indicates_claude_tui_background_agent_pending(pane)
-        || pane
-            .lines()
-            .rev()
-            .filter(|line| !line.trim().is_empty())
-            .take(crate::services::tmux_common::CLAUDE_TUI_READINESS_SCAN_LINES)
-            .any(crate::services::tmux_common::claude_footer::counts_background_work)
 }
 
 /// Judge the hosted row and marker before the existing occupancy query.
@@ -255,7 +252,7 @@ mod idle_cleanup_tests {
             TuiTurnState::Idle,
             "",
         ));
-        assert!(provider_idle_evidence_agrees(
+        assert!(!provider_idle_evidence_agrees(
             &ProviderKind::Claude,
             TuiTurnState::Idle,
             READY,
@@ -279,7 +276,7 @@ mod idle_cleanup_tests {
         )
         .unwrap();
         let idle = format!("{CLAUDE_FRAME}  ⏵⏵ bypass permissions on\n");
-        assert!(provider_output_is_proven_idle(
+        assert!(!provider_output_is_proven_idle(
             &ProviderKind::Claude,
             &native,
             &idle
@@ -351,7 +348,7 @@ mod idle_cleanup_tests {
             "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
         )
         .unwrap();
-        assert!(provider_output_is_proven_idle(
+        assert!(!provider_output_is_proven_idle(
             &ProviderKind::Claude,
             &native,
             READY

@@ -156,6 +156,7 @@ fn an_idle_source_that_proves_nothing_ends_retained_and_a_running_one_waits() {
             transcript: path.clone(),
             target,
             bound: true,
+            awaiting_clear: false,
             physical: None,
         };
         let session = logical.clone();
