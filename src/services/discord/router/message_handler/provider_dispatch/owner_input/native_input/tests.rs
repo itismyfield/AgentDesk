@@ -9,8 +9,18 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
     let guard = crate::config::TestRuntimeRootGuard::new();
     let root = guard.path().join("runtime");
     std::fs::create_dir_all(&root).unwrap();
-    for (primary, stale) in [(true, false), (false, false), (true, true)] {
-        let channel = ChannelId::new(if stale {
+    for (primary, stale, foreign) in [
+        (true, false, 0),
+        (false, false, 0),
+        (true, true, 0),
+        (true, false, 1),
+        (true, false, 2),
+    ] {
+        let channel = ChannelId::new(if foreign == 2 {
+            81489954
+        } else if foreign == 1 {
+            81489950
+        } else if stale {
             8148966
         } else if primary {
             8148961
@@ -31,11 +41,22 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
             .global_active
             .store(1, std::sync::atomic::Ordering::SeqCst);
         let mailbox = shared.mailbox(channel);
+        let active_token = if foreign == 2 {
+            std::sync::Arc::new(CancelToken::from_persisted_turn_nonce(
+                token.turn_nonce().map(str::to_owned),
+            ))
+        } else {
+            token.clone()
+        };
         mailbox
             .restore_active_turn(
-                token.clone(),
+                active_token.clone(),
                 poise::serenity_prelude::UserId::new(7),
-                poise::serenity_prelude::MessageId::new(if primary { id } else { id + 100 }),
+                poise::serenity_prelude::MessageId::new(if primary && foreign != 1 {
+                    id
+                } else {
+                    id + 100
+                }),
             )
             .await;
         let key = TurnKey::new(channel, id, 1);
@@ -70,7 +91,7 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
         let token_leaf = token.clone();
         let leaf: effect::Leaf = Box::new(move |_| {
             assert!(
-                !stale,
+                !stale && foreign == 0,
                 "failed registration acknowledgement must prevent the first key"
             );
             let handle = tokio::runtime::Handle::current();
@@ -120,7 +141,7 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
             WAIT_CAP,
         )
         .await;
-        if stale {
+        if stale || foreign != 0 {
             assert!(matches!(result, Ok(Completion::NotSent(_))), "{result:?}");
             let history = Registry::runtime().unwrap().json().unwrap();
             let settlements: Vec<_> = ["planned", "live", "passive"]
@@ -144,8 +165,15 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
             );
             assert!(std::sync::Arc::ptr_eq(
                 mailbox.snapshot().await.cancel_token.as_ref().unwrap(),
-                &token
+                &active_token
             ));
+            assert_eq!(
+                shared
+                    .restart
+                    .global_active
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
             continue;
         }
         assert_eq!(result, Ok(Completion::WriteUncertain("after key".into())));
@@ -194,6 +222,10 @@ async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
     let token = std::sync::Arc::new(CancelToken::from_persisted_turn_nonce(Some(
         "no-key".into(),
     )));
+    shared
+        .restart
+        .global_active
+        .store(1, std::sync::atomic::Ordering::SeqCst);
     let mailbox = shared.mailbox(channel);
     mailbox
         .restore_active_turn(
@@ -244,6 +276,15 @@ async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
     .await
     .unwrap();
     assert_eq!(result, Completion::NotSent("fixture refusal".into()));
+    assert!(mailbox.snapshot().await.cancel_token.is_none());
+    assert_eq!(
+        shared
+            .restart
+            .global_active
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(token.is_completion_cleanup());
     assert_eq!(
         shared.turn_finalizer.native_scope(key, &token).await,
         Ok(false)
@@ -272,4 +313,123 @@ async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
         assert!(settlement["outcome"].is_null());
         assert_ne!(settlement["any_key"], true);
     }
+}
+
+#[cfg(target_os = "macos")]
+#[path = "tests/activation_e2e.rs"]
+mod activation_e2e;
+
+#[cfg(target_os = "macos")]
+async fn activation_units(
+    store: &crate::services::tui_o::store::OStore,
+    posts: &crate::services::tui_o::writer::host::test_io::Posts,
+    channel: u64,
+    units: &[String],
+) {
+    use crate::services::tui_o::{
+        shadow::{UnitKey, UnitKind},
+        store::ledger::PieceOutcome,
+        writer::DiscordPort,
+    };
+    let era = store.read_era().unwrap().unwrap();
+    let keys: Vec<_> = units
+        .iter()
+        .flat_map(|unit| {
+            [
+                UnitKey {
+                    channel_id: channel,
+                    provider: crate::services::tui_o::shadow::ShadowProvider::Claude,
+                    native_key: format!("{unit}:0"),
+                    kind: UnitKind::Body,
+                },
+                UnitKey {
+                    channel_id: channel,
+                    provider: crate::services::tui_o::shadow::ShadowProvider::Claude,
+                    native_key: format!("{unit}:0#turn_end"),
+                    kind: UnitKind::Tool,
+                },
+            ]
+        })
+        .collect();
+    await_within(async {loop {
+        let c=store.open_channel(&era,channel).unwrap().unwrap();
+        let complete=keys.iter().all(|key|matches!(c.ledger().latest_piece(key,0),Some((_,p)) if matches!(p.outcome,Some(PieceOutcome::Posted(_)))));
+        drop(c);
+        if complete {break;}
+        tokio::task::yield_now().await;
+    }},WAIT_CAP).await;
+    let c = store.open_channel(&era, channel).unwrap().unwrap();
+    let ledger = c.ledger();
+    let seen = posts.history_after(channel, 0).await.unwrap();
+    for key in keys {
+        let pieces: Vec<_> = (0..ledger.next_serial())
+            .filter_map(|i| ledger.piece(i))
+            .filter(|p| p.unit_key == key)
+            .collect();
+        assert_eq!(pieces.len(), 1, "canonical unit {key:?}");
+        let Some(PieceOutcome::Posted(id)) = pieces[0].outcome else {
+            panic!("unit not posted");
+        };
+        assert_eq!(
+            seen.iter().filter(|m| m.id == id).count(),
+            1,
+            "unit delivery {key:?}"
+        );
+    }
+    println!("ISOLATED_UNITS pairs={} body=1 footer=1 each", units.len());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_8148_activation_prekey_cutoff_keeps_a_rebound_epoch() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let mut shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+    std::sync::Arc::get_mut(&mut shared)
+        .unwrap()
+        .restart
+        .current_generation = 1;
+    let channel = ChannelId::new(81489952);
+    let id = 81489953;
+    let actor = std::sync::Arc::new(CancelToken::from_persisted_turn_nonce(Some(
+        "cutoff-rebind".into(),
+    )));
+    let mailbox = shared.mailbox(channel);
+    mailbox
+        .restore_active_turn(
+            actor.clone(),
+            poise::serenity_prelude::UserId::new(7),
+            poise::serenity_prelude::MessageId::new(id),
+        )
+        .await;
+    shared
+        .restart
+        .global_active
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let key = TurnKey::new(channel, id, 1).with_episode_nonce(actor.turn_nonce());
+    let producer = Producer::at(shared.clone(), key, Some(actor.clone()));
+    let old=crate::services::discord::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(&shared,&ProviderKind::Claude,channel,id,actor.turn_nonce().map(str::to_owned),std::time::Instant::now(),Some(actor.clone())).await;
+    assert!(old.removed_token.is_some());
+    mailbox
+        .restore_active_turn(
+            actor.clone(),
+            poise::serenity_prelude::UserId::new(7),
+            poise::serenity_prelude::MessageId::new(id),
+        )
+        .await;
+    await_within(
+        tokio::task::spawn_blocking(move || producer.unwind()),
+        WAIT_CAP,
+    )
+    .await
+    .unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        mailbox.snapshot().await.cancel_token.as_ref().unwrap(),
+        &actor
+    ));
+    assert_eq!(
+        shared
+            .restart
+            .global_active
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
 }

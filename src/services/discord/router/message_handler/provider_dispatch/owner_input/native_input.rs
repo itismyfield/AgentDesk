@@ -8,6 +8,7 @@ pub(super) struct Producer {
     key: TurnKey,
     actor: Option<std::sync::Arc<CancelToken>>,
     intent: Intent,
+    started_before: std::time::Instant,
 }
 
 impl Producer {
@@ -34,28 +35,63 @@ impl Producer {
             key,
             actor,
             intent,
+            started_before: std::time::Instant::now(),
         }
+    }
+
+    fn unwind(&self) {
+        let Some(actor) = &self.actor else {
+            return;
+        };
+        if self.key.generation != self.shared.restart.current_generation {
+            return;
+        }
+        tokio::runtime::Handle::current().block_on(async {
+            let finish=crate::services::discord::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+                &self.shared,&self.shared.provider,self.key.channel_id,self.key.user_msg_id,
+                actor.turn_nonce().map(str::to_owned),self.started_before,Some(actor.clone()),
+            ).await;
+            if let Some(removed)=finish.removed_token {
+                removed.mark_completion_cleanup();
+                removed.cancelled.store(true,std::sync::atomic::Ordering::Relaxed);
+                crate::services::discord::saturating_decrement_global_active(&self.shared);
+                if finish.has_pending {
+                    crate::services::discord::schedule_deferred_idle_queue_kickoff(
+                        self.shared.clone(),self.shared.provider.clone(),self.key.channel_id,"native_pre_key_unwind",
+                    );
+                }
+            }
+        });
     }
 
     pub(super) fn wrap(self, leaf: effect::Leaf) -> effect::Leaf {
         Box::new(move |frame| {
-            let (history, namespace, ticket) =
-                crate::services::tui_input::human_frame::history::v2::native::scoped_ticket()?;
-            let handle = tokio::runtime::Handle::current()
-                .block_on(native_prepare::Handle::prepare(
+            let prepared = (|| {
+                let (history, namespace, ticket) =
+                    crate::services::tui_input::human_frame::history::v2::native::scoped_ticket()?;
+                tokio::runtime::Handle::current().block_on(native_prepare::Handle::prepare(
                     &self.shared,
                     self.key,
-                    self.actor,
+                    self.actor.clone(),
                     history,
                     namespace,
                     ticket,
                 ))
-                .map_err(|error| {
+            })();
+            let handle = match prepared {
+                Ok(handle) => handle,
+                Err(error) => {
                     scope::vetoed(&error);
-                    effect::unsent(error)
-                })?;
+                    self.unwind();
+                    return Err(effect::unsent(error));
+                }
+            };
             let result = leaf(frame);
+            let unkeyed = scope::key_attempted() == Some(false);
             handle.finish()?;
+            if unkeyed {
+                self.unwind();
+            }
             result
         })
     }

@@ -7,7 +7,7 @@ vars == <<BaseVars, review>>
 Init == /\ phase = "Intent" /\ role \in {"Primary", "Follower"}
         /\ pin = "None" /\ prepared = FALSE /\ anyKey = FALSE /\ original = TRUE
         /\ result = "None" /\ source = "PreSource" /\ restored = FALSE /\ admitted = FALSE
-        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed", "SupplyPrefixBefore", "SupplyPrefixFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {Mode \in {"ClearRouteBefore", "ClearRouteFixed"}}), clearDenied : {Mode \notin {"ClearRouteBefore", "ClearRouteFixed"}}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed", "ClearRouteBefore", "ClearRouteFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}, ticketExecution : {"N1", "N2"}, nativeBinding : {0}, supplyTicket : {Mode \notin {"SupplyTicketBefore", "SupplyTicketFixed"}}, supplySource : {Mode \notin {"SupplySourceBefore", "SupplySourceFixed"}}, supplyKey : {Mode \notin {"SupplyKeyBefore", "SupplyKeyFixed"}}, supplyStamp : {Mode \notin {"SupplyStampBefore", "SupplyStampFixed"}}]
+        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed", "SupplyPrefixBefore", "SupplyPrefixFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {Mode \in {"ClearRouteBefore", "ClearRouteFixed"}}), clearDenied : {Mode \notin {"ClearRouteBefore", "ClearRouteFixed"}}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed", "ClearRouteBefore", "ClearRouteFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}, unwindIdentity : (IF Mode \in {"ActivationForeignBefore", "ActivationForeignFixed"} THEN {"own", "other_message", "old_generation", "other_actor", "rebound"} ELSE {"own"}), available : {TRUE, FALSE}, producerOn : {FALSE}, bridgeOn : {FALSE}, hostOn : {FALSE}, ticketExecution : {"N1", "N2"}, nativeBinding : {0}, supplyTicket : {Mode \notin {"SupplyTicketBefore", "SupplyTicketFixed"}}, supplySource : {Mode \notin {"SupplySourceBefore", "SupplySourceFixed"}}, supplyKey : {Mode \notin {"SupplyKeyBefore", "SupplyKeyFixed"}}, supplyStamp : {Mode \notin {"SupplyStampBefore", "SupplyStampFixed"}}]
 Prepare == /\ phase = "Intent"
            /\ phase' = "Prepared" /\ prepared' = TRUE
            /\ pin' = IF role = "Primary" \/ Mode = "BorrowBusy" THEN "Primary" ELSE "None"
@@ -274,5 +274,40 @@ ResumeSpec == Init /\ [][ResumeSelect \/ ResumeAdmit]_vars
 ResumeTicketBinding == admitted => review.nativeBinding = (IF review.ticketExecution = "N1" THEN 1 ELSE 2)
 ResumeOutcomeEventually == <>(result = "Executed")
 ResumeLeaseFree == <>(review.clearLease = 0)
+
+\* Activation is shared; a proven pre-key refusal returns only its own lease.
+ActivationEnable == /\ review.pc = 0
+                    /\ review' = [review EXCEPT !.pc = 1,
+                         !.producerOn = Mode # "ActivationOffBefore",
+                         !.hostOn = Mode # "ActivationOffBefore",
+                         !.bridgeOn = Mode \notin {"ActivationOffBefore", "ActivationSplitBefore"}]
+                    /\ UNCHANGED BaseVars
+ActivationPrepare == /\ review.pc = 1 /\ prepared' = (review.unwindIdentity = "own")
+                     /\ review' = [review EXCEPT !.pc = 2, !.available = @ /\ review.unwindIdentity = "own"]
+                     /\ UNCHANGED <<phase, role, pin, anyKey, original, result, source, restored, admitted>>
+ActivationNotSent == /\ review.pc = 2 /\ ~review.available /\ ~anyKey
+                     /\ phase' = "NotSent"
+                     /\ review' = [review EXCEPT !.pc = 5,
+                          !.clearLease = IF role = "Primary" /\ Mode # "ActivationUnwindBefore" /\ (review.unwindIdentity = "own" \/ Mode = "ActivationForeignBefore") THEN 0 ELSE @]
+                     /\ UNCHANGED <<role, pin, prepared, anyKey, original, result, source, restored, admitted>>
+ActivationKey == /\ review.pc = 2 /\ review.available
+                 /\ review.producerOn /\ review.hostOn /\ review.bridgeOn
+                 /\ anyKey' = TRUE /\ phase' = "Unknown"
+                 /\ review' = [review EXCEPT !.pc = 3]
+                 /\ UNCHANGED <<role, pin, prepared, original, result, source, restored, admitted>>
+ActivationResult == /\ review.pc = 3 /\ anyKey /\ result' = "Executed"
+                    /\ review' = [review EXCEPT !.pc = 5,
+                         !.clearLease = IF role = "Primary" THEN 0 ELSE @,
+                         !.clearRows = IF role = "Primary" THEN 0 ELSE @,
+                         !.clearHead = role = "Primary"]
+                    /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, source, restored, admitted>>
+ActivationSpec == Init /\ [][ActivationEnable \/ ActivationPrepare \/ ActivationNotSent \/ ActivationKey \/ ActivationResult]_vars
+                  /\ WF_vars(ActivationEnable) /\ WF_vars(ActivationPrepare) /\ WF_vars(ActivationNotSent)
+                  /\ WF_vars(ActivationKey) /\ WF_vars(ActivationResult)
+ActivationShared == review.pc > 0 => review.producerOn = review.hostOn /\ review.hostOn = review.bridgeOn
+ActivationNoFabrication == ~anyKey => result = "None" /\ original
+ActivationLeaseFree == (role = "Primary" /\ review.unwindIdentity = "own") => <>(review.clearLease = 0)
+ActivationFinishes == <>(review.pc = 5)
+ActivationNoForeignUnwind == review.unwindIdentity # "own" => review.clearLease = 1
 
 ====

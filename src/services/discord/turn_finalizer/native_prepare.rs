@@ -6,9 +6,9 @@ use crate::services::tui_input::human_frame::history::v2::{Registry, native::Tic
 pub(in crate::services::discord) use native_restore::{BootInputs, boot_ready};
 pub(super) use native_restore::{RestoreStep, RestoredInput};
 
-// Completion evidence production is outside this rollout, so default inputs keep their old path.
+// Producer, bridge and O host share this gate after custody and control consumers are installed.
 pub(in crate::services::discord) fn enabled() -> bool {
-    false
+    true
 }
 
 pub(in crate::services::discord) struct Handle {

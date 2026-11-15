@@ -434,6 +434,9 @@ input-single-path/NativeSupplyPrefixBefore.cfg	NativeInputPreparation	SupplyType
 input-single-path/NativeSupplyPrefixFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativeSupplyQueueBefore.cfg	NativeInputPreparation	-	SupplyResultEventually,SupplyLeaseEventuallyFree,SupplyHeadEventuallyInjected
 input-single-path/NativeSupplyQueueFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativeSupplyResumeFirstBefore.cfg	NativeInputPreparation	-	ResumeOutcomeEventually,ResumeLeaseFree
+input-single-path/NativeSupplyResumeFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativeSupplyResumeLatestBefore.cfg	NativeInputPreparation	-	ResumeOutcomeEventually,ResumeLeaseFree
 input-single-path/NativeSupplySavedBefore.cfg	NativeInputPreparation	SupplySavedExactlyOnce	-
 input-single-path/NativeSupplySavedFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativeSupplySourceBefore.cfg	NativeInputPreparation	SupplyTyped	-
@@ -741,6 +744,9 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
-input-single-path/NativeSupplyResumeFirstBefore.cfg	NativeInputPreparation	-	ResumeOutcomeEventually,ResumeLeaseFree
-input-single-path/NativeSupplyResumeLatestBefore.cfg	NativeInputPreparation	-	ResumeOutcomeEventually,ResumeLeaseFree
-input-single-path/NativeSupplyResumeFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativeActivationOffBefore.cfg	NativeInputPreparation	-	ActivationLeaseFree,ActivationFinishes
+input-single-path/NativeActivationSplitBefore.cfg	NativeInputPreparation	ActivationShared	ActivationLeaseFree,ActivationFinishes
+input-single-path/NativeActivationUnwindBefore.cfg	NativeInputPreparation	-	ActivationLeaseFree
+input-single-path/NativeActivationFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativeActivationForeignBefore.cfg	NativeInputPreparation	ActivationNoForeignUnwind	-
+input-single-path/NativeActivationForeignFixed.cfg	NativeInputPreparation	-	-
