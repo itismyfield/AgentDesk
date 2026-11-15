@@ -9,12 +9,20 @@ pub(crate) struct Fixture {
 
 impl Fixture {
     pub(crate) fn at(path: PathBuf, channel: u64, primary: bool) -> Self {
+        Self::at_execution(path, channel, primary, "incarnation-1")
+    }
+    pub(crate) fn at_execution(
+        path: PathBuf,
+        channel: u64,
+        primary: bool,
+        execution: &str,
+    ) -> Self {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let transcript = path.with_extension("jsonl");
         std::fs::write(&transcript, "native input\n").unwrap();
         let key = json!({"identity":{"primary":channel+1,"sources":[{"message_id":channel+1,"queued_generation":1}]},
             "attempt":{"nonce":format!("attempt-{channel}"),"provider":"claude",
-                "target":{"host":"herdr","owner":"fixture-pane","execution_nonce":"incarnation-1"},
+                "target":{"host":"herdr","owner":"fixture-pane","execution_nonce":execution},
                 "source":{"kind":"existing","session_id":"native","transcript":transcript,
                     "file":file_id(&std::fs::metadata(&transcript).unwrap()),"offset":0}}});
         let input = json!({"identity":key["identity"],"attempt":key["attempt"],

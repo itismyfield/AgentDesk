@@ -4069,3 +4069,102 @@ async fn native_8148_supply_busy_followers_preserve_parent_for_both_results_pg()
     pool.close().await;
     db.drop().await;
 }
+
+async fn supply_resume_binding(execution: &str, boot: bool) {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::tui_o::writer::binding::{BindingCause, BindingRecord};
+    use std::sync::atomic::Ordering;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let root = runtime.path().join("runtime");
+    let f = Fixture::at_execution(root.join("injected_frames.json"), 81489910, true, execution);
+    supply_rows(&f, false, true);
+    let source = f.ticket.source.as_ref().unwrap();
+    assert_eq!(
+        f.history.receipt(
+            "native-fixture",
+            &f.ticket.key,
+            (
+                &source.transcript,
+                0,
+                "user",
+                Some("own"),
+                "한국어 원본 입력"
+            )
+        ),
+        Some(true)
+    );
+    let mut shared = b2b_shared(Some(pool.clone()));
+    if boot {
+        f.history
+            .note_native_any_key("native-fixture", &f.ticket)
+            .unwrap();
+        b2b_row(&f);
+        Arc::get_mut(&mut shared)
+            .unwrap()
+            .restart
+            .current_generation = 2;
+        super::super::native_prepare::BootInputs::prepare(&root, 2)
+            .unwrap()
+            .restore(&shared)
+            .await
+            .unwrap();
+    } else {
+        let (key, actor) = b2b_active(&f, &shared).await;
+        b2b_row(&f);
+        supply_register(&f, &shared, key, Some(actor)).await;
+    }
+    let mut capture = SupplyCapture::new(&f, &runtime.path().join("resume-store"), true);
+    {
+        let mut events = capture.bindings.events.lock().unwrap();
+        let mut resumed = events[0].clone();
+        resumed.seq = 2;
+        resumed.execution_nonce = "incarnation-2".into();
+        if let BindingRecord::Bound { cause, .. } = &mut resumed.record {
+            *cause = BindingCause::Resume;
+        }
+        events.push(resumed);
+    }
+    capture.poll(&shared).await;
+    let settled = f
+        .history
+        .native_settlement("native-fixture", &f.ticket)
+        .unwrap();
+    assert_eq!(
+        settled.outcome.as_ref().map(|o| &o.disposition),
+        Some(&Disposition::Executed),
+        "{execution} boot={boot}: complete source evidence must be accepted"
+    );
+    assert!(settled.cleanup_complete);
+    assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
+    assert!(
+        super::super::super::inflight::load_inflight_state_read_only(
+            &ProviderKind::Claude,
+            f.ticket.channel_id
+        )
+        .is_none()
+    );
+    let bytes = f.history.json().unwrap();
+    capture.poll(&shared).await;
+    assert_eq!(f.history.json().unwrap(), bytes);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn native_8148_resume_binding_live_n2_pg() {
+    supply_resume_binding("incarnation-2", false).await;
+}
+#[tokio::test]
+async fn native_8148_resume_binding_live_n1_pg() {
+    supply_resume_binding("incarnation-1", false).await;
+}
+#[tokio::test]
+async fn native_8148_resume_binding_boot_n2_pg() {
+    supply_resume_binding("incarnation-2", true).await;
+}
+#[tokio::test]
+async fn native_8148_resume_binding_boot_n1_pg() {
+    supply_resume_binding("incarnation-1", true).await;
+}

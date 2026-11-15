@@ -378,6 +378,42 @@ impl<B: BindingEvents> Sources<B> {
     }
 
     #[cfg(unix)]
+    fn native_origin(
+        &self,
+        source: &SourceId,
+        record: &CapturedRecord,
+        target: Option<&serde_json::Value>,
+    ) -> Result<super::super::input_notices::NoticeOrigin, String> {
+        let events = self.bindings.binding_events_since(self.channel, 0)?;
+        let event = events.iter().find(|event| {
+            let bound = match &event.record {
+                BindingRecord::Bound { new: BindingTarget::Source(bound), .. } => bound == source,
+                BindingRecord::Bound { new: BindingTarget::Pending { .. }, .. } => events.iter().any(|resolved| {
+                    resolved.channel_id == self.channel && resolved.provider == self.provider
+                        && matches!(&resolved.record, BindingRecord::Resolved { resolves_seq, source: bound }
+                            if *resolves_seq == event.seq && bound == source)
+                }),
+                _ => false,
+            };
+            bound && event.channel_id == self.channel && event.provider == self.provider
+                && event.seq != 0 && !event.tmux_session.trim().is_empty()
+                && !event.execution_nonce.trim().is_empty()
+                && target.is_none_or(|target| target["owner"] == event.tmux_session
+                    && target["execution_nonce"] == event.execution_nonce)
+        }).ok_or("native ticket binding is missing")?;
+        Ok(super::super::input_notices::NoticeOrigin {
+            record: crate::services::tui_o::shadow::SourceRange {
+                source: source.clone(),
+                start: record.start,
+                end: record.end,
+            },
+            logical_session: event.tmux_session.clone(),
+            binding_seq: event.seq,
+            execution_nonce: event.execution_nonce.clone(),
+        })
+    }
+
+    #[cfg(unix)]
     pub(crate) async fn offer_native(
         &mut self,
         port: &super::super::actor::native_input::NativePort,
@@ -403,7 +439,7 @@ impl<B: BindingEvents> Sources<B> {
                 end: through,
                 line: Vec::new(),
             };
-            let Ok(origin) = self.notice_origin(&source, &record) else {
+            let Ok(origin) = self.native_origin(&source, &record, None) else {
                 continue;
             };
             let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
@@ -416,6 +452,19 @@ impl<B: BindingEvents> Sources<B> {
                 continue;
             };
             for index in 0..observed.evidence.len() {
+                let Some(target) = observed.evidence[index]
+                    .ticket
+                    .source
+                    .as_ref()
+                    .map(|s| &s.target)
+                else {
+                    continue;
+                };
+                let Ok(origin) = self.native_origin(&source, &record, Some(target)) else {
+                    continue;
+                };
+                let mut offered = observed.clone();
+                offered.binding_seq = origin.binding_seq;
                 let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
                     break;
                 };
@@ -424,7 +473,7 @@ impl<B: BindingEvents> Sources<B> {
                 };
                 if let Err(error) = port
                     .inner
-                    .offer(observed.clone(), current, index, origin.clone())
+                    .offer(offered, current, index, origin.clone())
                     .await
                 {
                     tracing::debug!(channel=self.channel, %error, "native input offer held");

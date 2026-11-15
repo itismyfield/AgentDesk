@@ -7,7 +7,7 @@ vars == <<BaseVars, review>>
 Init == /\ phase = "Intent" /\ role \in {"Primary", "Follower"}
         /\ pin = "None" /\ prepared = FALSE /\ anyKey = FALSE /\ original = TRUE
         /\ result = "None" /\ source = "PreSource" /\ restored = FALSE /\ admitted = FALSE
-        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed", "SupplyPrefixBefore", "SupplyPrefixFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {Mode \in {"ClearRouteBefore", "ClearRouteFixed"}}), clearDenied : {Mode \notin {"ClearRouteBefore", "ClearRouteFixed"}}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed", "ClearRouteBefore", "ClearRouteFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}, supplyTicket : {Mode \notin {"SupplyTicketBefore", "SupplyTicketFixed"}}, supplySource : {Mode \notin {"SupplySourceBefore", "SupplySourceFixed"}}, supplyKey : {Mode \notin {"SupplyKeyBefore", "SupplyKeyFixed"}}, supplyStamp : {Mode \notin {"SupplyStampBefore", "SupplyStampFixed"}}]
+        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed", "SupplyPrefixBefore", "SupplyPrefixFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {Mode \in {"ClearRouteBefore", "ClearRouteFixed"}}), clearDenied : {Mode \notin {"ClearRouteBefore", "ClearRouteFixed"}}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed", "ClearRouteBefore", "ClearRouteFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}, ticketExecution : {"N1", "N2"}, nativeBinding : {0}, supplyTicket : {Mode \notin {"SupplyTicketBefore", "SupplyTicketFixed"}}, supplySource : {Mode \notin {"SupplySourceBefore", "SupplySourceFixed"}}, supplyKey : {Mode \notin {"SupplyKeyBefore", "SupplyKeyFixed"}}, supplyStamp : {Mode \notin {"SupplyStampBefore", "SupplyStampFixed"}}]
 Prepare == /\ phase = "Intent"
            /\ phase' = "Prepared" /\ prepared' = TRUE
            /\ pin' = IF role = "Primary" \/ Mode = "BorrowBusy" THEN "Primary" ELSE "None"
@@ -255,5 +255,24 @@ SupplyBootSpec == Init /\ [][SupplyBootCapture \/ SupplyBootOffer \/ SupplyBootR
 SupplyBootNoRemint == ~admitted
 SupplySavedExactlyOnce == review.firstProof <= 1
 SupplyBootEventuallyFree == <>(review.clearRows = 0 /\ review.clearHead)
+
+\* Native supply chooses a binding per ticket; notice attachment keeps its first binding.
+ResumeSelect == /\ review.pc = 0
+                /\ review' = [review EXCEPT !.pc = 1, !.nativeBinding =
+                     IF Mode = "ResumeFirstBefore" THEN 1
+                     ELSE IF Mode = "ResumeLatestBefore" THEN 2
+                     ELSE IF review.ticketExecution = "N1" THEN 1 ELSE 2]
+                /\ restored' = TRUE
+                /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, result, source, admitted>>
+ResumeAdmit == /\ review.pc = 1
+               /\ review.nativeBinding = (IF review.ticketExecution = "N1" THEN 1 ELSE 2)
+               /\ result' = "Executed" /\ admitted' = TRUE
+               /\ review' = [review EXCEPT !.pc = 2, !.clearLease = 0, !.clearRows = 0, !.clearHead = TRUE]
+               /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, source, restored>>
+ResumeSpec == Init /\ [][ResumeSelect \/ ResumeAdmit]_vars
+              /\ WF_vars(ResumeSelect) /\ WF_vars(ResumeAdmit)
+ResumeTicketBinding == admitted => review.nativeBinding = (IF review.ticketExecution = "N1" THEN 1 ELSE 2)
+ResumeOutcomeEventually == <>(result = "Executed")
+ResumeLeaseFree == <>(review.clearLease = 0)
 
 ====
