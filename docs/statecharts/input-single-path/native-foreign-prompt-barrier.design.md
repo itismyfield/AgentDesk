@@ -141,6 +141,22 @@ barrier/filter 추가 +90~150, abstain live/boot/custody/general cleanup/ACK 및
 - 동등성: 동일 prefix와 registration/receipt snapshot에서 B1·3a 실행/abstain proof를 모두 비교한다.
 - 문서 guard/잘못된 PASS: 위 새 연결은 아직 미구현이다. TLC는 설계의 refinement 의무이며 제품 통과를 대체하지 않는다.
 
+## 모델 값과 코드 대응
+
+새 subspec의 단계 cursor/fixture 관측은 제품 상태가 아니다. `review.phase`는 기존 actor Phase를 나타내며 aAck만 세우고 Pending을 남기는 전이는 없다. 이전 시나리오용 base 변수의 미사용 값으로 새 subspec의 진행성을 주장하지 않는다.
+
+| 모델 값 | 실제 대응 |
+|---|---|
+| barrier | 기존 Settlement.extra에 보존할 검증된 proof의 존재 |
+| aAck | 기존 native completion admission의 정산 완료 + Finalized/row barrier 또는 boot RestoredInput.settled ACK |
+| aIdle/aCaughtUp | 공통 TurnState::Idle와 기존 capture의 caught-up 판정 |
+| aVersion=0/1/2 | 같은 registration/receipt 관측의 최초/변경/재평가. 새 저장 버전이 아니라 fingerprint 변화의 추상화 |
+| aRowFail | 기존 receipt/row CAS의 실패/회복 결과 |
+| lease=0/1/2, rows | 없음/자기/부모·후속 소유자의 실제 identity 비교 결과 |
+| parentActive | 이전 episode의 counter 기여분. 다음 head의 global_active 총합을 뜻하지 않음 |
+| aOwnSends/aNext | 실제 시험의 원 입력/다음 head 물리 주입 횟수 관측 |
+| bOwn/bOwnFirst | full identity·receipt로 확인한 자기 합류 / barrier 전 자기 strict closer 존재 |
+
 ## TLC 검증 결과
 
 기존126 + 신규29 = Native 관련 전체155cfg를 저장소 `scripts/ci/statecharts_tlc.py`로 실행했다. runner rc0, 기대 위반 집합 일치, 총645.24초. 원문은 레인 로그 `b2b3p4e-complete-tlc-normal.txt`, meta는 `b2b3p4e-complete-tlc-meta.json`이다. 이는 설계 모델 검증이며 제품 구현/회귀 시험 PASS가 아니다.
