@@ -202,8 +202,19 @@ def _uncertainties(graph):
              "count": value["count"], "sites": sorted(value["sites"])} for key, value in sorted(grouped.items())]
 
 
+def _expression_counts(graph):
+    result = defaultdict(Counter)
+    for row in graph["coverage"].get("unresolved_references", []):
+        if row.get("expression"):
+            identity = _id("uncertainty", "reference", row["source"], row["path"], _reason(row["reason"]))
+            result[identity][row["expression"]] += 1
+    return result
+
+
 def uncertainty_sources(graph, mapping, occurrence_projection):
-    return {row["id"]: {"source": row["source"], "path": row["path"]}
+    expressions = _expression_counts(graph)
+    return {row["id"]: {"source": row["source"], "path": row["path"],
+                        **({"expressions": expressions[row["id"]]} if row["id"] in expressions else {})}
             for row in project(graph, mapping, occurrence_projection)["uncertainties"]}
 
 
@@ -297,7 +308,7 @@ def _admit_classification(accepted, payload, moves, graph, occurrences, mapping,
     existing = set(historical["nodes"])
     previous_mapping = deepcopy(previous_mapping)
     for row in before["classifications"]:
-        if row["module"] in existing or row["layer"] == assigned[row["module"]]:
+        if row["module"] in existing:
             continue
         # A new module has no historical layer to inherit; use its reviewed layer
         # in the comparison projection so inherited debt cannot be invented or admitted.
@@ -362,9 +373,13 @@ def _unrecorded_reduction_uncertainties(accepted, payload, moves, sources):
 
 def _record_proven_uncertainties(accepted, payload, moves, sources, history, previous_revision):
     previous = {row["id"]: row["count"] for row in _uncertainties(history)}
+    previous_expressions = _expression_counts(history)
     result, proofs = deepcopy(accepted), []
     for row in _unrecorded_reduction_uncertainties(accepted, payload, moves, sources):
         if previous.get(row["id"], 0) >= row["count"]:
+            current = (sources or {}).get(row["id"], {}).get("expressions", Counter())
+            if sum(current.values()) != row["count"] or current - previous_expressions.get(row["id"], Counter()):
+                continue
             result["uncertainties"].append(deepcopy(row))
             proofs.append({"id": row["id"], "previous_revision": previous_revision,
                            "previous_count": previous[row["id"]], "current_count": row["count"]})
@@ -485,7 +500,7 @@ def historical_measurement(repo, input_sha):
                 elif not entry.isdir():
                     raise ValueError("historical replay requires regular source files")
         occurrences = []
-        graph = analyze(root, occurrence_projection=occurrences)
+        graph = analyze(root, occurrence_projection=occurrences, reference_expressions=True)
         return graph, occurrences
 
 
@@ -531,7 +546,8 @@ def main():
     if _mapping_errors(mapping)[1]:
         parser.error("invalid or missing layer mapping")
     occurrences = []
-    graph = analyze(args.repo, occurrence_projection=occurrences)
+    graph = analyze(args.repo, occurrence_projection=occurrences,
+                    reference_expressions=args.update_reductions or args.admit_classification)
     payload = baseline(graph, mapping, args.input_sha, occurrences)
     if args.update_reductions or args.upgrade_records or args.admit_classification:
         from audit_maintainability.checks.module_layer_ratchet import MOVES

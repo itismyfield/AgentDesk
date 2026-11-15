@@ -1056,6 +1056,74 @@ class S05GeneratorHistoryTest(unittest.TestCase):
         self.commit()
         self.assertIn("previous projection", self.cli(mode="--admit-classification", ok=False).stderr)
 
+    def _nested_new_modules(self, caller_layer, new_layer):
+        self.put("src/lib.rs", "pub mod lower; pub mod parent;\n")
+        self.put("src/lower.rs", "pub fn run() {}\n")
+        self.put("src/parent.rs", "pub struct Existing;\n")
+        mapping = ('schema_version=1\n[layers]\nadapter=1\napplication=2\nassembly=3\n'
+                   '[[rules]]\nprefix=""\nlayer="assembly"\nreason="fixture"\n'
+                   f'[[rules]]\nprefix="lower"\nlayer="{caller_layer}"\nreason="fixture"\n'
+                   '[[rules]]\nprefix="parent"\nlayer="application"\nreason="fixture"\n')
+        self.put(self.provider.MAPPING, mapping)
+        self.commit()
+        self.previous = self.git("rev-parse", "HEAD")
+        self.accepted = self.measure()
+        self.save()
+        self.put("src/parent.rs", "pub struct Existing; pub mod new { pub mod child { pub struct Value; } }\n")
+        self.put("src/lower.rs", "pub fn run(_: crate::parent::new::child::Value) {}\n")
+        mapping += ('[[unclassified]]\nprefix="parent::new"\nreason="fixture"\n' if new_layer is None else
+                    f'[[rules]]\nprefix="parent::new"\nlayer="{new_layer}"\nreason="fixture"\n')
+        mapping += '[[rules]]\nprefix="parent::new::child"\nlayer="application"\nreason="fixture"\n'
+        self.put(self.provider.MAPPING, mapping)
+        self.commit()
+
+    def test_new_parent_cannot_hide_a_new_child_reverse_edge(self):
+        self._nested_new_modules("adapter", None)
+        self.assertEqual(self.accepted["reverse_dependencies"], [])
+        self.assertEqual(len(self.measure()["reverse_dependencies"]), 1)
+        original = self.path.read_bytes()
+        self.assertIn("previous projection", self.cli(mode="--admit-classification", ok=False).stderr)
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertFalse(self.path.with_name(self.path.name + ".lock").exists())
+
+    def test_new_parent_cannot_invent_a_child_reverse_edge(self):
+        self._nested_new_modules("application", "assembly")
+        self.assertEqual(self.measure()["reverse_dependencies"], [])
+        self.cli(mode="--admit-classification")
+        self.assertEqual(json.loads(self.path.read_bytes())["reverse_dependencies"], [])
+        self.assertFalse(self.path.with_name(self.path.name + ".lock").exists())
+
+    def test_changed_macro_argument_cannot_hide_reverse_debt(self):
+        before = ('macro_rules! call { ($module:ident) => { crate::$module::run() }; }\n'
+                  'pub mod high { pub fn run() -> u8 { 1 } }\n'
+                  'pub mod low { pub fn run() -> u8 { 1 } '
+                  'pub fn f() -> u8 { crate::high::run() + call!(low) } }\n')
+        self.put("src/lib.rs", before)
+        self.put(self.provider.MAPPING,
+                 'schema_version=1\n[layers]\nadapter=1\napplication=2\n'
+                 '[[rules]]\nprefix=""\nlayer="adapter"\nreason="fixture"\n'
+                 '[[rules]]\nprefix="low"\nlayer="adapter"\nreason="fixture"\n'
+                 '[[rules]]\nprefix="high"\nlayer="application"\nreason="fixture"\n')
+        self.commit()
+        self.previous = self.git("rev-parse", "HEAD")
+        self.accepted = self.measure()
+        self.assertEqual(len(self.accepted["reverse_dependencies"]), 1)
+        self.accepted["uncertainties"] = []
+        self.save()
+        self.put("src/lib.rs", before.replace("crate::high::run() + call!(low)", "call!(high) + 1"))
+        self.commit()
+        self.assertEqual(self.measure()["reverse_dependencies"], [])
+        self.assertIn("baseline reduction refused", self.cli(ok=False).stderr)
+
+    def test_same_macro_tokens_allow_comments_whitespace_and_line_moves(self):
+        path = "src/services/session_host/herdr_gate.rs"
+        body = self.fixture["files"][path].replace('tracing::warn!("first")',
+            'tracing /* comment */ :: warn ! (\n "first"\n)')
+        body = body.replace('tracing::warn!("second")', 'tracing::warn!(/* nested /* comment */ */ "second")')
+        self.put(path, "\n// Move the source locations.\n" + body)
+        self.commit()
+        self.assert_recorded(self.cli())
+
     def test_kept_glob_cannot_hide_reverse_debt_even_with_history(self):
         # The prior glob proves presence, but it still names the disappearing debt's target.
         path = "src/services/session_host/herdr_gate.rs"
