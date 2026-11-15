@@ -1,0 +1,66 @@
+---
+title: "Codex canary Herdr 퇴역 뒤 새 실행 시작"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the HeldStarts or WriterReady bug
+    lg1: Repeats forever, so HeldStarts or WriterReady breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: writer 부팅
+  s1: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 입력 없음
+  s2: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; 입력 없음
+  s3: writer 부팅 #183; 재시작 뒤
+  s4: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 입력 보관
+  s5: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; 입력 보관
+  s6: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 입력 없음 #183; 재시작 뒤
+  s7: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; 입력 없음 #183; 재시작 뒤
+  s8: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 취소
+  s9: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; 취소
+  s10: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 입력 보관 #183; 재시작 뒤
+  s11: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; 입력 보관 #183; 재시작 뒤
+  s12: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; 취소 #183; 재시작 뒤
+  s13: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; 취소 #183; 재시작 뒤
+  [*] --> s0
+  s0 --> s0: 입력 도착
+  s0 --> s1: 부팅(first_drain까지)
+  s0 --> s3: dcserver 재시작
+  s0 --> s2: 부팅(first_drain까지)
+  s0 --> s4: 부팅(first_drain까지)
+  s0 --> s5: 부팅(first_drain까지)
+  s1 --> s3: dcserver 재시작
+  s1 --> s4: 입력 도착
+  s2 --> s1: 퇴역 정리 완료
+  s2 --> s3: dcserver 재시작
+  s2 --> s5: 입력 도착
+  s3 --> s6: 부팅(first_drain까지)
+  s3 --> s7: 부팅(first_drain까지)
+  s0 --> s8: 부팅(first_drain까지)
+  s0 --> s9: 부팅(first_drain까지)
+  s4 --> s3: dcserver 재시작
+  s4 --> s8: 취소
+  s5 --> s4: 퇴역 정리 완료
+  s5 --> s3: dcserver 재시작
+  s5 --> s9: 취소
+  s3 --> s10: 부팅(first_drain까지)
+  s3 --> s11: 부팅(first_drain까지)
+  s6 --> s10: 입력 도착
+  s7 --> s6: 퇴역 정리 완료
+  s7 --> s11: 입력 도착
+  s8 --> s1: NextInput
+  s8 --> s3: dcserver 재시작
+  s9 --> s2: NextInput
+  s9 --> s8: 퇴역 정리 완료
+  s9 --> s3: dcserver 재시작
+  s3 --> s12: 부팅(first_drain까지)
+  s3 --> s13: 부팅(first_drain까지)
+  s10 --> s12: 취소
+  s11 --> s10: 퇴역 정리 완료
+  s11 --> s13: 취소
+  s12 --> s6: NextInput
+  s13 --> s7: NextInput
+  s13 --> s12: 퇴역 정리 완료
+  class s0 bugPath
+  class s3 bugPath
+  class s10 repeats
