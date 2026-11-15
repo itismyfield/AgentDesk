@@ -169,7 +169,7 @@ ordering safety under the proposed durable-copy/O-receipt protocol. An optional
 source bind is **not fair**; the NoSource control disables it forever. Actual
 O-ready admission remains separate from old-row-guard progress.
 
-This is **DESIGN_NEEDS_USER**, not an approved After: existing b2 explicitly holds
+Historical design decision point (resolved by user decision A below): existing b2 explicitly holds
 Refused bodies and its original liveness permits rejection. A recovered verified
 store may commit them, but there is no guaranteed body finalizer. Permanent
 source-free Deferred also cannot promise body visibility. CRefused exposes the
@@ -183,3 +183,16 @@ violation sets, tool errors and skips 0. Before/OuterOnly still fail both row
 liveness properties; Main still fails NoLegacyBodyOnTui. Full cfg-by-cfg
 before/after table and limitations are in the design note. The 6-cfg figures
 above belong to the archived resume-2 model, not this expanded model.
+
+
+## User decision A and C1 implementation
+
+The user selected C and existing b2 retention for accepted Refused bodies. No new
+per-input failure receipt is introduced. N and CRefusedDecision are not selected.
+Refused body visibility has liveness only under the fairness assumption that a
+verified owner/store eventually recovers (CRefusedRepair GREEN); no unconditional
+body-visibility liveness is claimed. Permanent no-source Deferred body retention
+has the same conditional recovery assumption. These are known conditional
+results; freeing the old row does not claim that O replay has finished. C2 remains
+the next slice. The 21 unchanged configs rerun after merging main d40c06eb47
+retain 9 GREEN / 12 expected RED with no tool errors, mismatches or skips.

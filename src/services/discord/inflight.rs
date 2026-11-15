@@ -73,6 +73,8 @@ impl InflightTurnState {
 mod circuit_evidence_tests;
 mod circuit_removal;
 mod episode_guard;
+#[cfg(unix)]
+pub(in crate::services::discord) mod herdr_body_debt;
 mod managed_submission;
 pub(in crate::services::discord) mod row_removed;
 mod store;

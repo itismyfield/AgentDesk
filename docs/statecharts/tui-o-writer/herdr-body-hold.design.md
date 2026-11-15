@@ -2,9 +2,9 @@
 
 Design audit on `13355ee75c74ef65b2c5564f0a95efb37f988d26`, containing main
 `ad04f6f3ecc33e86e7dc0968822ce2ce3f087e90`. This note and its model change no
-production behavior. The outer-only ownership mapping is withdrawn. C is a
-candidate, not an approved implementation: the Refused body disposition below
-needs a product decision.
+production behavior. The outer-only ownership mapping is withdrawn. C is selected by user decision A (2026-11-16). Accepted Refused bodies remain
+retained until a verified owner/store recovers. C1 implements storage and execution
+retirement; C2 must implement O replay/receipts. No per-input failure receipt is added.
 
 ## What Refused means today
 
@@ -65,7 +65,7 @@ Herdr launch or delivery without a valid O owner.
 
 | Option | Flow | Cost and risk |
 |---|---|---|
-| C | Verify the old execution ended; fsync a body-debt record keyed by the old episode; guarded removal of that active row; release gateway/input hold. After adoption, O settles the old body and records its receipt before GC | Requires a new durable debt carrier and an O replay/receipt adapter. Keeps old and new output identities separate; Refused still lacks a terminal policy |
+| C | Verify the old execution ended; fsync a body-debt record keyed by the old episode; guarded removal of that active row; release gateway/input hold. After adoption, O settles the old body and records its receipt before GC | Requires a new durable debt carrier and an O replay/receipt adapter. Keeps old and new output identities separate; body visibility remains conditional on verified recovery under decision A |
 | N with existing storage | Send a body-free interruption notice, clear/close the row, rely on existing storage for the answer | Rejected: no generally available durable body copy for pathless unadopted rows. NoBodyLoss and BodyAfterAdoption are RED |
 | N with new storage | Archive as C, then send Neutral, clear/close and replay through O later | At least C's cost plus another notice effect to reconcile after crashes. Safe storage alone does not resolve Refused |
 | Existing STALLED/retry link | Make `writer/deferred.rs:385-455` retry run with no source | Not a sufficient small fix: late-adopt only calls it with a bound source; the retry needs source/snapshot/pin. Empty initialization does not account for an old saved response or Refused disposition |
@@ -81,7 +81,7 @@ provider/channel: leaving the old row there lets a new turn conflict with or
 overwrite it. Circuit handoff (`inflight/circuit_removal.rs:13-42`) preserves
 circuit evidence, not the entire answer.
 
-## C's proposed storage and output contract
+## C storage and output contract (C1 storage, C2 delivery)
 
 1. Under the existing episode/nonce/canonical-owner guard, prove this is the ended
    prior-process execution. Snapshot the full row, saved body/partial, old input
@@ -118,10 +118,10 @@ control uses the brief's explicit assumption that home returns with valid O
 authority **and access to this old debt**. It does not grant a foreign host new
 authority or assume node-local files move automatically.
 
-## Decision still required
+## User decision A and conditional body visibility
 
-Neither C nor stored N is selected for implementation. Two Refused policies are
-shown separately rather than silently changing b2:
+C is selected. N is rejected and CRefusedDecision remains a historical, unselected
+counterfactual. The user chose the first policy below; the second is not implemented:
 
 - **Keep b2's current hold:** archive preserves the body; external verified
   owner/store recovery may later allow O settlement. Execution/row progress is
@@ -135,10 +135,10 @@ shown separately rather than silently changing b2:
   retry/recovery semantics and availability must be approved before production.
 
 A permanently source-free Deferred channel also keeps an invisible body in the
-NoSource control. Separating the row guard does not create O readiness. The
-implementation must either demonstrate valid source-free O initialization and an
-old-body replay adapter, or obtain a visible failure policy for this case too;
-this note adds no timeout-based discard or forced adoption. Existing fresh owner
+NoSource control. Separating the row guard does not create O readiness. C2 must demonstrate valid source-free O initialization when available and an
+old-body replay adapter. Otherwise the body remains retained until verified
+owner/store recovery under decision A. There is no timeout-based discard, forced
+adoption or new visible failure policy. Existing fresh owner
 initialization can use empty sources (`writer/host/first_init.rs:282-324`), but
 requires fenced authority and Free custody; connecting it to old-body debt is
 part of C2, not an already proven recovery service.
@@ -242,3 +242,61 @@ new ownership without old-body evidence; blind duplicate O post after uncertain
 receipt; release ordering before old-body proof; treat an alarm/silent refusal as
 settlement; map UnknownKind to not-owned; restore the withdrawn outer-only mapping.
 Each must produce its corresponding safety/liveness RED before claiming GREEN.
+
+
+Refused body visibility has liveness only under the fairness assumption that a
+verified owner/store eventually recovers (CRefusedRepair GREEN); no unconditional
+body-visibility liveness is claimed. Permanently no-source Deferred bodies are
+retained under the same conditional recovery contract. CDeferredNoSource proves
+old-row guard release and retention, not eventual body visibility.
+
+
+## C1 durable debt format and model refinement
+
+C1 writes `runtime/discord_herdr_body_debt/<provider>/<channel>-<episode>-<snapshot>.json`.
+`episode` is SHA256 of the compact serde_json array `[provider, channel_id,
+request_owner_user_id, user_msg_id, turn_nonce, born_generation, started_at]`.
+`snapshot` is SHA256 of the exact UTF-8 record file bytes. Existing snapshots are
+immutable: a later row/snapshot has a separate filename. No expiry, eviction,
+body-post, completion receipt or garbage collection is implemented in C1.
+
+Version 1 fields:
+
+| Field | Meaning |
+|---|---|
+| version | integer 1; unknown versions remain on disk and do not authorize a clear |
+| episode_key | the old birth-identity digest above, independent of any new turn |
+| provider / channel_id | must match the parsed raw row and directory/filename |
+| row_json | complete, byte-preserved original inflight JSON, including unknown fields and saved partial/input/receipt/provenance |
+| evidence | execution_nonce; idle/end observation; optional source session_id/path/dev/ino; outcome |
+| evidence.outcome | kind terminal/no_terminal/mixed/unknown; terminal includes original result, ordered text/tool parts, terminal_kind, start/end; mixed includes after_prompt |
+| recovery_notice | rendered snapshot of the old recovery notice; raw text is also retained in row_json and terminal evidence |
+| disposition | always retained; not a delivery or completion assertion |
+
+A source in evidence is a binding snapshot. An Unknown outcome does not certify
+its native range. C2 must reconcile saved partial and any later native range
+under the original episode/input identity, check O delivery evidence and avoid a
+second post if O already delivered. It must coalesce multiple snapshots by the
+stable episode key and may collect them only after the appropriate durable O
+proof. C1 also archives an O-owned row: current ownership alone does not prove
+that a newly bound source retained this old answer.
+
+| Model action | C1 production entry / refinement |
+|---|---|
+| Observe | settle_row retains actor/canonical execution/nonce/end/idle and routing guards; only Ok(true) or the two adoption errors enter the archive branch; other identity errors remain held |
+| Archive | archive_restarted_herdr_body locks and rechecks the exact active row; store::publish uses existing durable publication but accepts only Flushed, including parent/ancestor directories |
+| Detach | commit retains the existing retire CAS and hold release; clear_restarted_herdr_body locks again, verifies the same raw snapshot and adoption/error class, preserves circuit evidence, removes only that row and syncs its directory |
+| Start | existing closed/queue kickoff after clear; O-ready admission remains separate |
+| Restart | reconcile validates and re-syncs retained files without recreating active rows or marking bodies delivered; a missing active row can reissue the idempotent queue wake lost between clear and closed |
+| OCreate/OConfirm | C2 only; C1 has no O replay, new Legacy send or body receipt |
+
+The active-row clear's existing generation, nonce, episode pin, receipt,
+hot-swap/rebind/replay guards remain. The body copy is verified under that row's
+lock; a successor or a newer raw row cannot use the old snapshot witness.
+A closing wake is a queue retry, not permission to clear a successor or launch
+without readiness. Reconcile skips a present/unreadable active row.
+
+The 21 CFG files are unchanged in C1. Before and after merging main d40c06eb47:
+9 GREEN / 12 expected RED, including the deliberately conditional Refused results.
+CRefusedDecision remains an unselected historical comparison, not an implemented
+policy or a claimed unconditional recovery service.

@@ -1,4 +1,4 @@
-//! Exact clear of a prior process's path-less Herdr row once recovery has shown its end notice.
+//! Exact prior-process Herdr row clear after notice, O evidence, or a durable body archive.
 
 use super::*;
 
@@ -11,6 +11,25 @@ impl InflightTurnState {
         provider: &ProviderKind,
         current_generation: u64,
         silent: bool,
+    ) -> GuardedClearOutcome {
+        self.clear_restarted_herdr(provider, current_generation, silent, None)
+    }
+
+    pub(in crate::services::discord) fn clear_restarted_herdr_body(
+        &self,
+        provider: &ProviderKind,
+        current_generation: u64,
+        debt: &super::super::herdr_body_debt::Archived,
+    ) -> GuardedClearOutcome {
+        self.clear_restarted_herdr(provider, current_generation, false, Some(debt))
+    }
+
+    fn clear_restarted_herdr(
+        &self,
+        provider: &ProviderKind,
+        current_generation: u64,
+        silent: bool,
+        debt: Option<&super::super::herdr_body_debt::Archived>,
     ) -> GuardedClearOutcome {
         let Some(root) = inflight_runtime_root() else {
             return GuardedClearOutcome::Missing;
@@ -29,23 +48,13 @@ impl InflightTurnState {
         let Ok(fresh) = serde_json::from_str::<InflightTurnState>(&data) else {
             return GuardedClearOutcome::Missing;
         };
-        let expected = InflightTurnIdentity::from_state(self);
-        let receipt = fresh.herdr_before_start_stop.is_some();
-        if receipt
-            || self.turn_nonce.as_deref().is_none_or(str::is_empty)
-            || fresh.turn_nonce != self.turn_nonce
-            || fresh.save_generation != self.save_generation
-            || !InflightEpisodePin::from_state(self).matches_state(&fresh)
-            || expected.is_unnameable()
-            || !expected.matches_state(&fresh)
-            || super::reconcile_gate::row_is_current_generation(&fresh, current_generation)
-            || fresh.tui_terminal_kind.is_some()
-            || fresh.output_path.as_deref().is_some_and(|p| !p.is_empty())
-            || fresh.restart_mode == Some(InflightRestartMode::HotSwapHandoff)
-            || fresh.rebind_origin
-            || fresh.replay_rerun_blocked()
-        {
+        if !matches_restarted(self, &fresh, current_generation) {
             return GuardedClearOutcome::UserMsgMismatch;
+        }
+        if let Some(debt) = debt {
+            if !debt_eligible(&fresh) || debt.verify(provider, &data).is_err() {
+                return GuardedClearOutcome::IoError;
+            }
         }
         if silent && !o_still_owns(&fresh) {
             return GuardedClearOutcome::UserMsgMismatch;
@@ -61,12 +70,89 @@ impl InflightTurnState {
             "clear_restarted_herdr_row",
             &path,
         );
-        super::remove_row(&path).unwrap_or(GuardedClearOutcome::IoError)
+        let removed = super::remove_row(&path).unwrap_or(GuardedClearOutcome::IoError);
+        if debt.is_some()
+            && removed == GuardedClearOutcome::Cleared
+            && super::super::super::runtime_store::fsync_parent_and_ancestors(&path).is_err()
+        {
+            return GuardedClearOutcome::IoError;
+        }
+        removed
     }
 }
 
 /// A silent clear never falls back to a notice: an O owner that changed or does not read keeps it.
-fn o_still_owns(fresh: &InflightTurnState) -> bool {
+fn output_owner(
+    fresh: &InflightTurnState,
+) -> Result<bool, crate::services::tui_o::cutover::IdentityError> {
     let peek = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel;
-    peek(fresh.channel_id, fresh.runtime_kind) == Ok(true)
+    peek(fresh.channel_id, fresh.runtime_kind)
+}
+
+fn o_still_owns(fresh: &InflightTurnState) -> bool {
+    output_owner(fresh) == Ok(true)
+}
+
+fn debt_eligible(row: &InflightTurnState) -> bool {
+    use crate::services::tui_o::cutover::IdentityError::{AdoptionRefused, AwaitingAdoption};
+    matches!(
+        output_owner(row),
+        Ok(true) | Err(AwaitingAdoption | AdoptionRefused)
+    )
+}
+
+impl InflightTurnState {
+    /// Snapshots only this exact restarted row while its canonical file lock remains held.
+    pub(in crate::services::discord) fn archive_restarted_herdr_body(
+        &self,
+        provider: &ProviderKind,
+        current: u64,
+        evidence: serde_json::Value,
+        recovery_notice: String,
+    ) -> Result<super::super::herdr_body_debt::Archived, String> {
+        let root = inflight_runtime_root().ok_or("body archive has no inflight root")?;
+        let path = inflight_state_path(&root, provider, self.channel_id);
+        let lock = lock_inflight_state_path(&path)?;
+        let result = (|| {
+            let data = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let fresh: InflightTurnState =
+                serde_json::from_str(&data).map_err(|e| e.to_string())?;
+            if raw_before_start_receipt(&data)
+                || !matches_restarted(self, &fresh, current)
+                || !debt_eligible(&fresh)
+            {
+                return Err("body archive episode or output observation changed".into());
+            }
+            super::super::herdr_body_debt::archive(
+                provider,
+                &fresh,
+                &data,
+                evidence,
+                recovery_notice,
+            )
+        })();
+        drop(lock);
+        result
+    }
+}
+
+fn matches_restarted(
+    expected_row: &InflightTurnState,
+    fresh: &InflightTurnState,
+    current_generation: u64,
+) -> bool {
+    let expected = InflightTurnIdentity::from_state(expected_row);
+    !(fresh.herdr_before_start_stop.is_some()
+        || expected_row.turn_nonce.as_deref().is_none_or(str::is_empty)
+        || fresh.turn_nonce != expected_row.turn_nonce
+        || fresh.save_generation != expected_row.save_generation
+        || !InflightEpisodePin::from_state(expected_row).matches_state(fresh)
+        || expected.is_unnameable()
+        || !expected.matches_state(fresh)
+        || super::reconcile_gate::row_is_current_generation(&fresh, current_generation)
+        || fresh.tui_terminal_kind.is_some()
+        || fresh.output_path.as_deref().is_some_and(|p| !p.is_empty())
+        || fresh.restart_mode == Some(InflightRestartMode::HotSwapHandoff)
+        || fresh.rebind_origin
+        || fresh.replay_rerun_blocked())
 }

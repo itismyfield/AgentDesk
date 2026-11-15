@@ -151,6 +151,10 @@ enum Owner {
     O,
     /// Legacy, with the recorded provider's process read as alive.
     Alive,
+    Deferred,
+    Refused,
+    Foreign,
+    Unknown,
 }
 
 /// Runs `scenario` in this test's child on a runtime whose every thread has the fixture's
@@ -184,11 +188,40 @@ where
         }
     };
     let root = PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
+    let policy = if matches!(
+        owner,
+        Owner::Deferred | Owner::Refused | Owner::Foreign | Owner::Unknown
+    ) {
+        use crate::services::tui_o::cutover::{self, test_override};
+        let channels = [(
+            channel,
+            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        )];
+        let forced = match owner {
+            Owner::Foreign => test_override::force_foreign(&channels, "other-home"),
+            Owner::Unknown => test_override::force_channels(&channels),
+            _ => test_override::force_candidates(&channels),
+        };
+        let snapshot = cutover::boot_snapshot().unwrap();
+        if owner == Owner::Refused {
+            snapshot.candidate(channel).unwrap().release(channel);
+        } else if owner == Owner::Deferred {
+            assert!(snapshot.candidate(channel).unwrap().defer(channel));
+        }
+        drop(forced);
+        Some(snapshot)
+    } else {
+        None
+    };
     let install = Arc::new(move || {
         fixture();
         crate::services::tui_prompt_dedupe::binding_events::set_test_root(Some(&root));
         HERDR_SETTLEMENT_OVERRIDE.set(false);
-        if owner != Owner::O {
+        if let Some(snapshot) = &policy {
+            std::mem::forget(crate::services::tui_o::cutover::test_override::force_boot(
+                snapshot.clone(),
+            ));
+        } else if owner != Owner::O {
             std::mem::forget(crate::services::tui_o::cutover::test_override::force_channels(&[]));
         }
         if codex {

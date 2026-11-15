@@ -100,6 +100,15 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) {
+    #[cfg(unix)]
+    for channel in inflight::herdr_body_debt::reconcile(provider) {
+        super::super::queue_io::input_owner::closed::closed(
+            shared,
+            provider,
+            ChannelId::new(channel),
+            "herdr_body_debt_restore",
+        );
+    }
     let states = inflight::load_inflight_states(provider);
     let (states, boot) = super::receipt_settle::settle_boot(shared, states).await;
     observe_restore_inflight_snapshot(

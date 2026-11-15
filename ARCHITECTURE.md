@@ -1800,6 +1800,9 @@ src/
 │   │   │   │   ├── operator_disposition.rs
 │   │   │   │   ├── reconcile_gate.rs
 │   │   │   │   └── snapshot.rs
+│   │   │   ├── herdr_body_debt/
+│   │   │   │   ├── reconcile.rs
+│   │   │   │   └── store.rs
 │   │   │   ├── host_recovery_guard/
 │   │   │   │   └── log_state.rs
 │   │   │   ├── managed_submission/
@@ -1881,6 +1884,7 @@ src/
 │   │   │   ├── destructive_commit.rs
 │   │   │   ├── episode_guard.rs
 │   │   │   ├── finalizer_identity.rs
+│   │   │   ├── herdr_body_debt.rs
 │   │   │   ├── host_locator.rs
 │   │   │   ├── host_recovery_guard.rs
 │   │   │   ├── host_recovery_guard_keyed_tests.rs
