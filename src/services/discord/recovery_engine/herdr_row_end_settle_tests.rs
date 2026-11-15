@@ -192,10 +192,8 @@ const UNRECORDED: u64 = 1_479_671_399_000_123;
 /// Claude waiting on its UserPromptSubmit hook: the input's turn shows, no transcript row yet.
 const HOOK_RUNNING: &str = "\u{276f} question\n\u{273d} Marinating\u{2026} (running UserPromptSubmit hooks\u{2026} 1/2 \u{b7} 2s)";
 
-/// The input that reached the pane before the restart left no transcript row: only the earlier
-/// turn's hard terminal is on disk. While the screen shows the input's turn the row and the input
-/// hold stay and the queued input does not start; once the late turn lands and the composer idles
-/// the row settles and the queued input starts once, the earlier input never again.
+/// An input sent before the restart left no transcript row: its row and hold stay, and the next
+/// input waits, until its late turn lands and the composer idles; the earlier input never reruns.
 #[test]
 fn an_unrecorded_input_holds_its_row_and_the_next_input_until_its_turn_lands_pg() {
     let path = concat!(
