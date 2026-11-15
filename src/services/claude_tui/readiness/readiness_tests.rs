@@ -560,6 +560,136 @@ fn a_timed_out_hold_tells_an_unmoved_idle_source_from_a_running_turn() {
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
 }
 
+/// The end of a turn as Claude writes it: the answer, each Stop hook output, the summary, the
+/// duration. `stops` are `(command, stdout)` pairs sharing the summary's tool use id.
+fn ended_turn(r: &Rig, answered: DateTime<Utc>, stops: &[(String, &str)], summary: Value) {
+    let id = uuid::Uuid::new_v4().to_string();
+    r.append(json!({"type":"assistant","timestamp":answered,
+        "message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}));
+    for (command, stdout) in stops {
+        r.append(
+            json!({"type":"attachment","timestamp":Utc::now(),"attachment":{
+            "type":"hook_success","hookName":"Stop","hookEvent":"Stop","toolUseID":id,
+            "command":command,"stdout":stdout,"stderr":"","exitCode":0}}),
+        );
+    }
+    let mut summary = summary;
+    summary["type"] = json!("system");
+    summary["subtype"] = json!("stop_hook_summary");
+    summary["toolUseID"] = json!(id);
+    summary["timestamp"] = json!(Utc::now());
+    r.append(summary);
+}
+fn relay(r: &Rig) -> String {
+    let native = r.ctx.expected_native_session_id.as_deref().unwrap();
+    format!(
+        "/bin/agentdesk claude-hook-relay --endpoint http://127.0.0.1:8791 --provider claude --event Stop --session-id {native}"
+    )
+}
+fn quiet_summary() -> Value {
+    json!({"hookCount":3,"hookErrors":[],"hookAdditionalContext":[],"preventedContinuation":false,"stopReason":"","hasOutput":true})
+}
+const QUIET: &str = "{\"suppressOutput\":true}\n";
+
+// After a restart only this run's turn closed by the relay's quiet Stop, read back from the file,
+// stands in for the forgotten Stop; continuations, other hooks' outputs, unknown shapes and turns
+// of an earlier run keep the restart floor.
+#[test]
+fn a_restart_trusts_only_this_runs_turn_closed_by_a_quiet_relay_stop() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let now = Utc::now;
+    let restarted = |shape: &dyn Fn(&Rig)| {
+        let r = Rig::new();
+        shape(&r);
+        daemon_restart(&r.session);
+        r
+    };
+    let closed = restarted(&|r| {
+        ended_turn(r, now(), &[(relay(r), QUIET)], quiet_summary());
+        r.terminal();
+        r.append(json!({"type":"last-prompt"}));
+    });
+    let proof = observe(&closed.session, None).expect("this run's closed turn after a restart");
+    assert!(!proof.resumed, "a turn of this run, not a resumed start");
+    let flush = "{\"hookSpecificOutput\":{\"hookEventName\":\"Stop\",\"additionalContext\":\"x\"}}";
+    let block = "{\"decision\":\"block\",\"reason\":\"x\"}";
+    let rejected: [(&str, &dyn Fn(&Rig)); 9] = [
+        ("memento flush continues the turn", &|r| {
+            ended_turn(r, now(), &[(relay(r), flush)], quiet_summary());
+            r.terminal();
+        }),
+        ("an output guard block continues the turn", &|r| {
+            ended_turn(r, now(), &[(relay(r), block)], quiet_summary());
+            r.terminal();
+        }),
+        ("another Stop hook's output", &|r| {
+            ended_turn(
+                r,
+                now(),
+                &[(relay(r), QUIET), ("node gate.mjs".into(), block)],
+                quiet_summary(),
+            );
+            r.terminal();
+        }),
+        ("no relay Stop output", &|r| {
+            ended_turn(r, now(), &[], quiet_summary());
+            r.terminal();
+        }),
+        ("the relay Stop of another session", &|r| {
+            let other = relay(r).replace(
+                r.ctx.expected_native_session_id.as_deref().unwrap(),
+                "other",
+            );
+            ended_turn(r, now(), &[(other, QUIET)], quiet_summary());
+            r.terminal();
+        }),
+        ("added context in the summary", &|r| {
+            let mut summary = quiet_summary();
+            summary["hookAdditionalContext"] = json!(["x"]);
+            ended_turn(r, now(), &[(relay(r), QUIET)], summary);
+            r.terminal();
+        }),
+        ("hook errors in the summary", &|r| {
+            let mut summary = quiet_summary();
+            summary["hookErrors"] = json!(["x"]);
+            ended_turn(r, now(), &[(relay(r), QUIET)], summary);
+            r.terminal();
+        }),
+        ("a scheduled task fires before the duration", &|r| {
+            ended_turn(r, now(), &[(relay(r), QUIET)], quiet_summary());
+            r.append(json!({"type":"system","subtype":"scheduled_task_fire"}));
+            r.terminal();
+        }),
+        ("the turn of an earlier run on the same transcript", &|r| {
+            let earlier = r.ctx.created_at - chrono::Duration::minutes(5);
+            ended_turn(r, earlier, &[(relay(r), QUIET)], quiet_summary());
+            r.terminal();
+        }),
+    ];
+    for (why, shape) in rejected {
+        assert!(!restarted(shape).ready(), "{why}");
+    }
+}
+
+// The production shape of an idle session whose turn ended before the restart takes the restarted
+// daemon's first input with one paste and Enter.
+#[cfg(unix)]
+#[test]
+fn an_idle_session_closed_before_a_restart_takes_its_first_input_once() {
+    use super::super::input::submission::tests::{ScriptedTmux, view};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    ended_turn(&r, Utc::now(), &[(relay(&r), QUIET)], quiet_summary());
+    r.terminal();
+    daemon_restart(&r.session);
+    let tmux = ScriptedTmux::new(&view("", false));
+    tmux.set_dead(false);
+    super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(Some(Duration::ZERO)));
+    assert_eq!(r.send(), Ok(()));
+    assert_eq!(tmux.sends(), ["load", "paste", "Enter"]);
+    super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
+}
+
 /// A daemon restart: the ledger forgets `session`, while its files, markers and launch remain.
 pub(crate) fn daemon_restart(session: &str) {
     let mut state = ledger();

@@ -1,5 +1,6 @@
 //! Current-source Idle readiness; external Busy injection keeps its own entry path.
 mod clear;
+mod closed_turn;
 pub(crate) mod compact;
 mod dialog;
 mod evidence;
@@ -39,6 +40,14 @@ impl Entry {
     /// The accepted start no input of ours has consumed yet.
     fn start_open(&self) -> bool {
         self.start && !self.submitted && self.pending.is_none()
+    }
+    /// Only the restart's floor stands: nothing of ours is reserved, controlled or started.
+    fn restart_floor(&self) -> bool {
+        self.recovery.is_some_and(|(_, at)| at == *STARTED)
+            && self.pending.is_none()
+            && self.compact_ticket.is_none()
+            && self.compact_done.is_none()
+            && !self.start
     }
     /// The resumed start still admits its first input: only metadata followed it.
     fn resumed_quiet(&self, tail: &evidence::Tail) -> bool {
@@ -149,6 +158,17 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
         }
         entry.file = Some(tail.stamp.file);
         entry.high_water = tail.stamp.len;
+    }
+    // The restart forgot this turn's Stop; the file still shows this execution's quiet Stop closed it.
+    if native_idle
+        && blocked.is_none()
+        && entry.restart_floor()
+        && let (Some(tail), Some(nonce)) = (&tail, source.nonce.as_deref())
+        && let Ok(ctx) =
+            crate::services::tui_prompt_dedupe::binding_context::execution_context("claude", nonce)
+        && closed_turn::closed_since(&source.path, &tail.stamp, &source.native, ctx.created_at)
+    {
+        entry.recovery = None;
     }
     if let Some(tail) = &mut tail {
         let floor = entry
