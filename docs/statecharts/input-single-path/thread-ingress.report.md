@@ -1,149 +1,135 @@
-# API thread ingress 상태 차트 — #8125 설계
+# API thread ingress 상태 차트 — #8125 설계 D2
 
-코드 기준: `33d1f4b5a9dce7023e2d0014e45a05ed6c530bba`. 생산 코드·운영 상태 변경과 Rust/PG 실행은 없다. **설계 포트의 TLC 검증이며 구현 수용 완료가 아니다.**
+코드 기준: **main `ad04f6f3ecc33e86e7dc0968822ce2ce3f087e90`**. 설계1 `2b142514b6`의 ThreadIngress/ThreadIngressRace를 갱신했다. 생산 코드·운영 상태 변경, cargo·Rust/PG 수용 시험은 0이다. 모델 GREEN은 구현·운영 수용 완료가 아니다. #8118 O-b는 merge하지 않았다.
 
-TIME start=2026-11-13T18:13:18+09:00 model_check_end=2026-11-13T18:30:05+09:00 elapsed=16m47s budget=30m
+TIME start=2026-11-16T01:58:47+09:00 / end=2026-11-16T02:14:35+09:00 elapsed=15m48s / budget=30m. 외부 입력의 시작을 #8184의 Idle delegation 및 owned Busy port에 연결했고, 기존 cold/remote 설계 포트는 그대로 보존했다.
 
-기존 색인에서 입력 큐는 [InputPath](InputPath.tla)·[InputOwnership](InputOwnership.tla), cold/warm 시작은 [TmuxSession](../session-lifecycle/TmuxSession.tla)이다. 별도 Discord thread-first-message 시작 모델은 없었다. 이 세 모델의 경계를 [ThreadIngress](ThreadIngress.tla)로 결합하고, 같은 child에 도착한 서로 다른 입력의 경합은 [ThreadIngressRace](ThreadIngressRace.tla)로 검사한다. 기존 모델·설정·알려진 RED는 변경하지 않는다. 기존 두 보고서와 README에 이 접점을 연결했다.
+## 코드 진입점과 값의 출처
 
-모든 변수·상수의 값 범위와 코드 근거 정본은 [설계 진입점 전수표 §2](../../api-thread-ingress.design.md)다. 여기서는 범위를 다시 정의하지 않는다.
+[설계 전수표 §2](../../api-thread-ingress.design.md)의 E01–E22와 N01–N07가 값 범위의 정본이다. 아래 값은 운영 설정을 읽거나 추측해 넣은 값이 아니다.
 
-## 수정 전/후
-
-| 경계 | 수정 전 코드·모델 | 제안 후 모델 | 구현에서 확인할 것 |
-|---|---|---|---|
-| agent에 속한 실제 thread target | `resolve_bound_target`가 bound channel exact match만 허용해 403; Before의 `BoundThreadAdmitted` RED | 부모 관계 확인 후 실제 child를 유지해 수락 | 실제 두 HTTP 라우트에서 parent binding과 destination 분리 |
-| 남의 channel/thread·부모 확인 실패 | 기존 본 채널 거부는 유지. 신규 부모 REST 경계는 아직 없음 | 각각 확정 403 또는 retryable 거부, bootstrap·custody·host effect 없음 | metadata 부모 위조, missing/wrong-kind parent와 REST 오류의 부작용 0 |
-| 세션 있음/없음 | API headless 경로는 기존 thread 첫 메시지 placement를 통과하지 않음 | actual live session에 한 번 제출, 없으면 기존 첫 메시지 시작과 입력 소유권을 한 번 인계 | 준비만 하는 bootstrap과 payload를 이미 소비한 시작 결과 구분 |
-| 같은 child의 동시 도착 | Before는 target 권한에서 거부하므로 이 경합을 구현한 증거가 아님 | 기존 child transition 안에서 존재를 다시 읽고 cold/warm을 결정 | API start·deliver와 Discord barrier 경합·remote worker restore |
-| 부팅·재시작 | 기존 큐/custody와 ready wake가 일반 채널에서 제공하는 경계 | 원본 보관, 준비/확정 부팅 실패 뒤 깨움 또는 보이는 실패. 전송 불명은 재주입 안 함 | 실제 child own ready·retained outbox·known error 알림 연결 |
-| 부모 정책과 살아 있는 child host | #8118이 정책 상속과 actual target의 정본 | 옛 live tmux child를 유지, 새 시작만 부모 정책 사용 | #8118 H 계약 없이 parent 설정으로 live target 대체 금지 |
-
-## 실제 실행 결과
-
-모든 아래 설정은 커밋 대상 `.cfg.example` 그대로 scratch의 실제 `.cfg`로 복제해 TLC 1.7.4와 공식 `scripts/ci/statecharts_tlc.py`로 실행했다. 정본 `harness-committed-artifacts.log`에서 19 configs / 66 TLC runs / 25.0s, 12 GREEN·7 expected RED·오류 0을 확인했다. main의 이미 충족된 안전 규칙을 Before RED로 날조하지 않는다. Before의 기능 RED는 accepted가 비어 liveness가 자명하게 통과해도 `BoundThreadAdmitted`가 별도로 잡는다.
-
-| 설정 | distinct states | 결과 |
-|---|---:|---|
-| `ThreadIngressBefore.cfg.example` | 2 | BoundThreadAdmitted |
-| `ThreadIngressBoundChannel.cfg.example` | 11 | GREEN |
-| `ThreadIngressDoubleSubmit.cfg.example` | 10 | NoDuplicate, NoSilentLoss, SuccessBacked, AcceptedCompletes |
-| `ThreadIngressDropRestart.cfg.example` | 9 | NoSilentLoss, AcceptedCompletes, DeliveredGetsOutcome |
-| `ThreadIngressFixedBoot.cfg.example` | 10 | GREEN |
-| `ThreadIngressFixedCold.cfg.example` | 7 | GREEN |
-| `ThreadIngressFixedColdTmux.cfg.example` | 7 | GREEN |
-| `ThreadIngressFixedLive.cfg.example` | 7 | GREEN |
-| `ThreadIngressFixedRestart.cfg.example` | 11 | GREEN |
-| `ThreadIngressForeign.cfg.example` | 2 | GREEN |
-| `ThreadIngressForeignChannel.cfg.example` | 2 | GREEN |
-| `ThreadIngressNoReadyWake.cfg.example` | 6 | NoDeadlock, AcceptedCompletes |
-| `ThreadIngressParentFail.cfg.example` | 2 | GREEN |
-| `ThreadIngressParentMalformed.cfg.example` | 2 | GREEN |
-| `ThreadIngressParentOpen.cfg.example` | 7 | ParentFailClosed |
-| `ThreadIngressPolicyOverridesLive.cfg.example` | 7 | LiveActualHostPreserved |
-| `ThreadIngressRaceFixed.cfg.example` | 618 | GREEN |
-| `ThreadIngressRaceStale.cfg.example` | 1,070 | NoStaleBootstrap |
-| `ThreadIngressRaceTwo.cfg.example` | 67 | GREEN |
-
-단일 입력 설정의 safety는 `NoDuplicate`, `NoSilentLoss`, `RejectedNoEffects`, `ForeignForbidden`, `ParentFailClosed`, `BoundThreadAdmitted`, `SuccessBacked`, `HttpAcceptanceBacked`, `LiveActualHostPreserved`와 deadlock이다. `AcceptedCompletes`와 `DeliveredGetsOutcome`를 각각 temporal property로 실제 검사했다. 경합 설정은 입력별 중복·성공 근거, 한 child의 시작 소유권과 stale bootstrap 금지, 입력별 진행성과 답 게시를 검사한다.
-
-정확히 한 번의 뜻은 **성공으로 전달된 원본은 제출 한 번이며, 실패로 종결된 원본은 보이는 실패 근거가 남는다**는 것이다. 수락된 원본은 미처리 custody, 전달 근거 또는 실제로 보인 실패 중 하나에 남는다. failure 알림 시도나 큐 삽입 시도만으로 완료를 선언하지 않는다. 전송 뒤 재시작으로 결과가 불명인 경우의 알림은 자동 재전송 허가가 아니다.
-
-## 포트와 코드 대응
-
-| 모델 행동·규칙 | 코드 경계·의미 | 검증 한계 |
+| 모델 값·행동 | main 코드 근거 | 투영한 계약 |
 |---|---|---|
-| `Authorize` / 거부 부작용 0 | `src/server/routes/agents_turn_target.rs:59-72`; 제안된 checked-parent + agent binding 검증 | 외부 metadata를 증거로 쓰지 않는 새 부모 검증은 구현 전 |
-| `Admit` / HTTP 수락 근거 | `src/services/discord/router/message_handler/intake_turn/runtime_transition.rs:35-79`; 기존 source/custody 인계 | 원본 수락·durable commit·응답 원자성은 모델의 포트 가정 |
-| `ColdStart` / 없는 세션 경로 | `src/services/discord/session_runtime.rs:505-535`; `src/services/discord/router/message_handler/intake_turn/adk_thread.rs:179-198,247-258` | bootstrap 함수 자체가 prompt를 제출한다는 뜻이 아니다. 모델은 준비+실제 시작을 합친 한 입력 소유권 인계다 |
-| `ColdStart` / placement·forward | `admit_text_intake:229,357,442` → cluster hook `:388,392` → placement `:97` (정확한 파일은 설계 전수표) | **공개 headless 경로는 현재 이 placement seam을 우회한다.** forward/restore가 provenance·reservation을 보존하고 한 owner만 제출하는 것은 제안 포트이며 main 보장이 아니다 |
-| `WarmSubmit` / `LiveActualHostPreserved` | `src/services/session_host/resolve.rs:239-260`; `turn_deliver/inject.rs`의 actual InputTarget operation | 부모 정책·actual host 해소와 executor는 #8118/#8125 구현 의무. pane/nonce·native source는 추상화 |
-| `Ready` | `src/services/tui_o/writer/host.rs:1007-1010` → `src/services/discord/runtime_bootstrap/o_writer_host.rs:397-407` → `src/services/discord/queue_io.rs:370-390` | child own writer-ready는 #8118 O-b 포트. O-a reader 준비만으로 ready를 주장하지 않음 |
-| active reconcile / transition release | `src/services/discord/runtime_bootstrap.rs:35-41` → `src/services/discord/session_transition.rs:145-155`; `intake_turn/runtime_transition.rs:47-64` | 기존 wake 재사용 연결이 빠지면 `NoReadyWake` RED |
-| `Restart` | `src/services/discord/runtime_bootstrap/queued_recovery.rs:26,67-77`; 기존 retained queued/inflight 복원 | DB·outbox·파일 commit과 crash 사이 원자성, 다중 노드 분할은 모델 밖 |
-| `TakeTransition` / fresh recheck | `src/services/discord/session_transition.rs:165`; `intake_turn/runtime_transition.rs:36-79` | 동일 lock을 재획득하는 연결 금지. actual route barrier 시험으로 재확인해야 함 |
-| `PublishReply` / `ShowFailure` | 기존 thread destination의 output owner·source receipt·notice 경계 | 게시 transport의 실제 성공을 추상화. 호출/로그만 성공으로 세지 않음 |
+| `checked/denied/queued`, `hstatus={0,200,403,422,503}` | `agents_turn_target.rs:59,65`; `agents.rs:892,894`; `agents_turn_deliver.rs:345,347`; `message_handler/headless_turn.rs:159`; `turn_host.rs:177,191,203,208` | deterministic 권한/host/runtime 거절은 custody와 효과 이전. main generic ExecutorNotWired는 **422**; runtimeUnavailable는 503. 새 public start가 열렸다는 기능 규칙은 `HerdrExternalWired`로 별도 검사 |
+| `hactivity={idle,busy,booting}`, `hprobe={none,idle,busy}` | N01 `owned_busy.rs:18,38,46`; N02 `:150,157,173,190`; N04 `busy/herdr.rs:211,215,218,237` | Idle/Busy/Held 관측값과 준비 중 보관을 분리. booting은 기존 부팅/restore/ready port의 유계 상태이며 새 실행 권한이 아님 |
+| `hreserved` 및 `HReturnRead` | N04 `busy/herdr.rs:252,258,277,280,288` | 공개 readiness 읽기예약은 **키 0**으로 반환한 다음 기존 Idle driver에 위임. 위임 자체는 물리 입력이 아님 |
+| `hepoch={1,2}`, `hreadEpoch={0,1,2}` | N03 `claude_handoff.rs:464,475`; N04 `busy/herdr.rs:258,280,297`; N07 `owner_input.rs:690,701,707`; `restore_inflight.rs:128,140,153,204` | 실제 nonce/generation 숫자 1/2가 아니다. prior/current execution nonce·process generation을 최대 1회 교체하는 **bounded projection**, 0은 proof 없음. owner node/token/root/provider/logical/channel/source identity도 이 비교 포트에 포함 |
+| `HBegin`, `hstarted`, `hdelivered={0,1,2(mutant)}` | N05 `busy/herdr.rs:71,75,90,96,106,111`; `provider_dispatch/owner_input.rs:1470`; `provider_dispatch.rs:338,343` | `HBegin`은 실제 첫 native prompt/key 효과이며 여기서 카운트를 올린다. Idle은 native turn 시작, Busy person은 이미 시작된 native turn에 해당 입력이 합류. `HReceipt`는 후속 ACK 관측뿐이며 효과 카운트를 다시 올리지 않음 |
+| `HRestart`, `HUncertainFailure` | E14/N07 복원 및 기존 Unconfirmed/owed notice; N05 keyed 뒤 Uncertain | 효과 **전** 재시작만 proof를 버리고 새 incarnation으로 재관측. 효과 **뒤** 재시작은 uncertain→실제로 보이는 실패 포트, 재전송 0. ACK 전 crash를 다시 submit해 effect 2를 숨기지 않음 |
+| `horigin=externalAPI`, Race `origins` | `input_owner/origin.rs:26,31,42,49,59`; `start.rs:21,32,43,47` | `externalAPI`는 API에서 온 canonical provenance의 추상값이며 실제 source 문자열을 바꾸라는 뜻이 아님. iMessage source/GUID는 그대로다. Race는 `imessageStart`, `humanApiDeliver`, `discordPerson`의 **서로 다른 사람 original** 3개. generic HttpStart나 routine을 Person으로 승격하지 않음 |
+| `HNativeEnd` | `owner_input.rs:723,727,734,887`; `owned_busy.rs:18` | non-person HttpStart는 Busy person injector를 빌리지 않고 기존 턴 종료 후 Idle own-turn을 기다림. MachineBusy cfg에서 실제 starts liveness 검사 |
+| `haccepted/hretained`, `hfailure/hreply` | E11 owner admission, E15 wake, 기존 owed notice/output owner | 채택 전 거절과 채택 뒤 held/실패를 분리. 보이는 실패·reply는 실제 output 성공의 추상 포트이며 시도/로그를 성공으로 세지 않음. 기존 bound channel output은 main; child output은 O-b 수용이 필요한 조건부 포트 |
+| Race `owner`, `reservation`, `begun`, `readEpoch`, `restarts` | E09 actual child transition, N02/N04/N05/N06/N07 | 동일 채널 owner 아래 3 original을 순차 효과로 조인. first-key 효과 뒤 crash는 `uncertain`으로 분리하고 `HShowFailure`에서만 visible failed. old proof로 effect를 내는 mutant는 `HerdrCurrentExecutor` RED |
 
-liveness는 적용된 `SPECIFICATION Spec`의 행동별 weak fairness를 사용한다. 부팅은 준비 또는 확정 실패의 실제 결과를 내고, 보관된 알림은 결국 실제 게시된다는 포트 가정이 있다. 준비된 입력을 깨우는 행동은 별도로 모델링해 삭제 제어에서 진행성이 깨짐을 확인했다. 영구 daemon 정지·영구 Discord 전송 장애·영구 REST/DB 장애까지 진행한다고 주장하지 않는다. `SYMMETRY`는 사용하지 않았다.
+`ThreadIngress.Spec`와 `ThreadIngressRace.Spec`는 설계1의 기존 경계를 그대로 둔다. 추가 `HerdrSpec`은 **외부 API admission을 올바르게 연결한 뒤** 소비할 main #8184의 owned Busy/Idle 포트를 분리해 검사한다. early 관측은 intake 전용(N01)이고 외부 headless 시작은 late 관측(N02)을 소비해야 한다.
 
-## 반례 replay와 원인 제어
+## 지키는 규칙과 liveness
 
-| 설정·규칙 | 최단 경로 | 소스 대조 / 남은 구현시험 |
+- safety: native 효과/답 중복 0(`HerdrExactlyOnce`/`NoDuplicate`), custody 없는 조용한 유실 0, 거절은 명시 403/422/503과 효과·lease 0, Idle 판독예약 반환, 현재 incarnation만 효과, canonical 출처 보존.
+- healthy accepted liveness: `HerdrAcceptedStarts`, Race `EachAcceptedStarts`를 실제 `PROPERTY`로 실행한다. starts는 readiness/lease만으로 TRUE가 되지 않고 native first-key 효과 행동에서만 생긴다. busy 사람 입력은 기존 native turn 합류이며 같은 채널에 별도 own-turn을 중복 시작하지 않는다.
+- `HerdrAcceptedCompletes` 및 `HerdrDeliveredGetsOutcome`는 실제 전달 또는 보이는 실패를 요구한다. 확정 실패 cfg는 healthy starts 요구를 따로 적용하지 않는다. post-effect crash는 불명 상태의 자동 재전송 없이 보이는 실패로 종결한다.
+- fairness는 실제 ready/watch wake·native 턴 종료·writer/notice 성공의 유한 진행 포트에만 둔다. 영구 daemon/DB/Discord 장애나 영구 Busy의 진행을 증명하지 않는다. `SYMMETRY` 없음.
+
+## 실제 수정 전/후 — 기존 모든 liveness cfg
+
+설계1 bytes를 `before/`로 복제해 공식 `scripts/ci/statecharts_tlc.py`로 **19cfg 모두** 실행했다. 갱신 후에도 아래 기대집합은 바뀌지 않았다. `-`는 모든 safety/temporal property 성립이며, 나머지는 named expected RED 집합이다.
+
+| cfg | D1 수정 전 actual broken | D2 수정 후 actual broken |
 |---|---|---|
-| Before / `BoundThreadAdmitted` | 도착 → bound thread 403 | `agents_turn_target.rs:65-72`가 exact binding 외 override를 거부함을 소스에서 확인. HTTP RED는 설계 레그에서 미실행 |
-| ParentOpen / `ParentFailClosed` | 도착 → 부모 미확정인데 권한 허용 | 제안 fail-closed 분기 제거 제어. REST failure/forged metadata 실제 라우트 mutant 필요 |
-| DoubleSubmit / `NoDuplicate`, `NoSilentLoss`, `SuccessBacked`, `AcceptedCompletes` | 도착 → 수락/custody → 첫 시작이 입력 소비 → 기존 세션으로 재주입 | 준비와 prompt consumption 결과 혼동 제어. 실제 executor/headless callback+provider spy의 제출 횟수로 RED→GREEN 필요 |
-| DropRestart / `NoSilentLoss`, `AcceptedCompletes` | 도착 → 수락/custody → 재시작에서 원본 제거 | 기존 retained 복원 포트 제거 제어. delivered 뒤 재시작 경로는 `DeliveredGetsOutcome`도 RED |
-| NoReadyWake / `NoDeadlock`, `AcceptedCompletes` | 도착 → 수락/보류 → 준비되었지만 깨우지 않음 | 위 ready wake chain이 설계의 실제 연결 지점. child API held 원본의 release/ready barrier 시험 필요 |
-| PolicyOverridesLive / `LiveActualHostPreserved` | 도착 → 수락 → parent 정책으로 live actual target 교체 | actual target을 정책으로 대체하는 제어. live tmux/parent Herdr에서 tmux 제출 1·Herdr 제출 0 시험 필요 |
-| RaceStale / `NoStaleBootstrap` | 첫 관측 → 첫 transition → 둘째도 없음 관측 → 첫 시작 → ready → 둘째 transition → stale cold start | lock 전에 읽은 없음을 lock 뒤 재사용하는 설계 제어. 실제 API start·deliver·Discord 동시 barrier, session bootstrap/submit count 검증 필요 |
+| `ThreadIngressBefore.cfg` | BoundThreadAdmitted | BoundThreadAdmitted |
+| `ThreadIngressBoundChannel.cfg` | - | - |
+| `ThreadIngressDoubleSubmit.cfg` | AcceptedCompletes,NoDuplicate,NoSilentLoss,SuccessBacked | AcceptedCompletes,NoDuplicate,NoSilentLoss,SuccessBacked |
+| `ThreadIngressDropRestart.cfg` | AcceptedCompletes,DeliveredGetsOutcome,NoSilentLoss | AcceptedCompletes,DeliveredGetsOutcome,NoSilentLoss |
+| `ThreadIngressFixedBoot.cfg` | - | - |
+| `ThreadIngressFixedCold.cfg` | - | - |
+| `ThreadIngressFixedColdTmux.cfg` | - | - |
+| `ThreadIngressFixedLive.cfg` | - | - |
+| `ThreadIngressFixedRestart.cfg` | - | - |
+| `ThreadIngressForeign.cfg` | - | - |
+| `ThreadIngressForeignChannel.cfg` | - | - |
+| `ThreadIngressNoReadyWake.cfg` | AcceptedCompletes,NoDeadlock | AcceptedCompletes,NoDeadlock |
+| `ThreadIngressParentFail.cfg` | - | - |
+| `ThreadIngressParentMalformed.cfg` | - | - |
+| `ThreadIngressParentOpen.cfg` | ParentFailClosed | ParentFailClosed |
+| `ThreadIngressPolicyOverridesLive.cfg` | LiveActualHostPreserved | LiveActualHostPreserved |
+| `ThreadIngressRaceFixed.cfg` | - | - |
+| `ThreadIngressRaceStale.cfg` | NoStaleBootstrap | NoStaleBootstrap |
+| `ThreadIngressRaceTwo.cfg` | - | - |
 
-위 controls는 **TLA+ 설계 뮤턴트**다. Before의 source replay 외 신규 구현 경로가 존재하지 않아 Rust/PG production mutant와 실제 iMessage 답장은 미실행이다. 소스와 달리 모델이 보이는 반례를 제품 결함으로 확정하지 않는다. 포트 연결 뒤 실제 route RED→GREEN과 원인 제거 mutant RED, 원복 바이트 동일을 구현 레그에서 남겨야 한다.
+## 신규 Herdr cfg의 main gate baseline과 제안 후
 
-## 차트
+`prewire-v4/`는 **동일 신모델 bytes에서 HAdmit의 executor gate만 항상 닫는 main projection**이다. main `headless_turn.rs:159→turn_host.rs:191`의 422를 투영한다. 새 cfg가 설계1에 없었다는 사실을 숨기지 않고, 동일 fixture의 closed-gate control을 별도로 실제 실행했다. baseline 14cfg에서 accepted=0이므로 temporal 성립은 vacuous이고 성공 증거가 아니다. 기능 불변식 `HerdrExternalWired`가 수락 경로 부재를 RED로 드러낸다. RuntimeUnready/Foreign은 제안 후에도 채택 전 거절·효과 0이다.
 
-[Before](thread-ingress-before.chart.mmd), [cold 시작](thread-ingress-cold.chart.mmd), [부팅](thread-ingress-boot.chart.mmd), [재시작](thread-ingress-restart.chart.mmd), [ready wake 제거](thread-ingress-no-ready-wake.chart.mmd), [경합 stale read](thread-ingress-race-stale.chart.mmd).
+| 신규 cfg | main closed-gate actual broken / liveness | 제안 후 actual broken |
+|---|---|---|
+| `ThreadIngressHerdrBefore.cfg` | HerdrExternalWired / temporal 전부 성립(accepted 0) | HerdrExternalWired |
+| `ThreadIngressHerdrBoot.cfg` | HerdrExternalWired / temporal 전부 성립(accepted 0) | - |
+| `ThreadIngressHerdrBusy.cfg` | HerdrExternalWired / temporal 전부 성립(accepted 0) | - |
+| `ThreadIngressHerdrDoubleSubmit.cfg` | HerdrExternalWired / temporal 전부 성립(accepted 0) | HerdrAcceptedCompletes,HerdrExactlyOnce,HerdrNoSilentLoss |
+| `ThreadIngressHerdrFailure.cfg` | HerdrExternalWired / temporal 전부 성립(accepted 0) | - |
+| `ThreadIngressHerdrForeign.cfg` | - / temporal 전부 성립(accepted 0) | - |
+| `ThreadIngressHerdrIdle.cfg` | HerdrExternalWired / temporal 전부 성립(accepted 0) | - |
+| `ThreadIngressHerdrKeepReservation.cfg` | HerdrExternalWired / temporal 전부 성립(accepted 0) | HerdrReservationReturned |
+| `ThreadIngressHerdrMachineBusy.cfg` | HerdrExternalWired / temporal 전부 성립(accepted 0) | - |
+| `ThreadIngressHerdrNoWake.cfg` | HerdrExternalWired / temporal 전부 성립(accepted 0) | HerdrAcceptedCompletes,HerdrAcceptedStarts,NoDeadlock |
+| `ThreadIngressHerdrReclassify.cfg` | HerdrExternalWired / temporal 전부 성립(accepted 0) | HerdrSourcePreserved |
+| `ThreadIngressHerdrRestart.cfg` | HerdrExternalWired / temporal 전부 성립(accepted 0) | - |
+| `ThreadIngressHerdrRuntimeUnready.cfg` | - / temporal 전부 성립(accepted 0) | - |
+| `ThreadIngressHerdrStaleEpoch.cfg` | HerdrExternalWired / temporal 전부 성립(accepted 0) | HerdrCurrentExecutor |
 
-`RaceFixed` GREEN은 chart 예산을 넘으므로 도구가 전체 차트를 만들지 않았다. `RaceStale`은 도구가 최단 반례 경로만 그린다. view는 행동을 임의로 숨기지 않으며 같은 reader label을 유지하는 terminal stutter만 차트에서 생략된다. 경합 반례의 각 상태는 보관/관측/준비/시작/전달/답/실패 수와 세션 상태로 구분한다.
+Race 신규 3cfg는 **이미 채택한 서로 다른 사람 original**의 owner 조인 포트이다. main에서 아직 거절하는 idle external start가 채택되었다고 가정한 뒤의 조건부 검사이며, main API 수락 성공의 증거로 사용하지 않는다. 수정 전 대응은 위 기존 Race 3cfg의 실제 결과이며 거기에는 Herdr proof/epoch 행동이 없었다. 새 Herdr 경합 속성은 Idle/Busy 정상 2cfg GREEN, old epoch mutant 1cfg `HerdrCurrentExecutor` expected RED다. 모든 입력별 `EachAcceptedStarts`, `EachAcceptedCompletes`, `EachDeliveredGetsOutcome`를 실제 검사했다.
 
-```mermaid
----
-title: "API 입력을 같은 스레드 세션으로 전달"
----
-stateDiagram-v2
-  s0: 외부 입력 도착
-  s1: 대상 권한 확인
-  s2: 원본 인계 보관
-  s3: 실패 알림 보관
-  s4: 세션에 한 번 입력
-  s5: 스레드 답 게시
-  s6: 보이는 실패
-  [*] --> s0
-  s0 --> s1: 부모와 에이전트 바인딩 확인
-  s1 --> s2: 검증한 원본 인계
-  s2 --> s3: 시작 또는 주입 실패
-  s2 --> s4: 첫 메시지 시작 경로가 입력 소유
-  s3 --> s6: 실패를 실제로 알림
-  s4 --> s5: 같은 스레드에 답 게시
-```
+| 신규 Race cfg | 수정 전 경계 | 제안 후 actual broken |
+|---|---|---|
+| `ThreadIngressRaceHerdrIdle.cfg` | D1에는 Herdr 관측 spec/cfg 없음. 기존 RaceFixed GREEN/2b142514b6 bytes 실제 실행 | - |
+| `ThreadIngressRaceHerdrBusy.cfg` | D1에는 Busy probe spec/cfg 없음. 기존 Race 3cfg 실제 before/after 집합은 위 표; main API 채택을 가정한 PASS 없음 | - |
+| `ThreadIngressRaceHerdrStale.cfg` | D1 old snapshot 제어는 NoStaleBootstrap RED였으며 epoch/proof 규칙은 신규 | HerdrCurrentExecutor |
 
-## 재현과 원시 증거
 
-`*.cfg.example`은 이 설계 레그의 수동 실행 입력이다. 저장소 `expected.tsv`는 변경하지 않았으며 CI 자동 실행에 등록됐다고 주장하지 않는다. `scripts/ci/statecharts_tlc.py:369-426`의 dependency 선택은 기존 등록 cfg가 이 새 모듈을 소비하지 않으므로 PR에서 `NO_TARGETS`가 될 수 있다. 그것은 모델 PASS가 아니라 미실행이다. 구현 조각에서 코디네이터가 cfg 정식 등록을 승인한 뒤 `.cfg`와 manifest를 함께 연결한다.
+## 반례와 구현 시험에 넘길 것
 
-scratch를 새로 만들어 공식 harness를 다시 실행한다. 각 sample의 기대값 header는 제어의 예상 규칙이며 실제 결과에서 동적으로 만들어 PASS를 맞추지 않는다.
+| 제어 | 반례·코드 대조 | 실제 구현 수용 |
+|---|---|---|
+| HerdrBefore | checked→422 deny, accepted0. E13 generic gate는 main에 남음 | 실제 start/idle deliver가 E13 switched admission→기존 executor까지 도달하고 fallback 0 |
+| KeepReservation | Idle 판독예약 보유 상태로 첫 native 효과 | N04 반환 제거 mutant, 예약 현재성/반환과 첫 키 0/1 spy |
+| StaleEpoch/RaceHerdrStale | old proof 확보→재시작→old proof로 first-key | N03/N04 exact identity 및 same-front generation 제거 mutant. old endpoint key0/new effect1 |
+| NoWake | accepted→crash/boot→현재 준비→held 고착 | N06/N07 wake 제거: `HerdrAcceptedStarts`와 completes, deadlock RED. 실제 준비 이벤트 뒤 owner wake 확인 |
+| Reclassify | API original을 Discord provenance로 바꿈 | source/GUID/child 유지, Person 정책과 transport provenance 별도 단언 |
+| DoubleSubmit | 첫 native effect1→ACK를 재주입 허가로 오해→effect2 | Idle delegate+기존 driver 둘 다 prompt 제출하는 mutant. first-key 효과 계수로 RED |
+| post-effect crash | native effect1→ACK 전 crash→uncertain→실제로 보이는 실패, native 재효과 0 | Unconfirmed를 NotSent로 바꾸지 않기. receipt 불명·provider failure와 원본 보유를 실제 route/owner 시험 |
+| MachineBusy | non-person request accepted→Busy held→기존 native end→Idle first-key | machine source를 Person Busy 경로로 올리는 mutant와 API own-turn 대기 회귀 |
+
+채택 뒤 실패는 deterministic denied와 다르다. 현재 main deliver_once가 origin reserve 뒤 받은 늦은 host refusal를 영속 unknown으로 남기는 경계는 모델의 거절 효과0 증거가 아니다. 설계 T1에서 deterministic host/runtime 검사를 pre-admission으로 옮기고, 그 뒤 TOCTOU는 retained/visible terminal로 처리해야 한다.
+
+## 차트와 재현 증거
+
+[정상 Idle](thread-ingress-herdr.chart.mmd), [옛 incarnation 제어](thread-ingress-herdr-stale.chart.mmd), [wake 제거](thread-ingress-herdr-no-wake.chart.mmd)는 최종 모델/config bytes를 statechart wrapper로 다시 실행해 만든 산출물이다. `HBegin` 직후 `입력1`이고 `HReceipt`가 카운트를 올리지 않는 것을 상태에서 확인할 수 있다.
+
+원시 로그 정본: `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8125/logs/design2-model/`.
+
+- `before.log`, `before/`: 수정 전 원본 19cfg.
+- `final-v5.log`, `final-v5/`: 최종 **36cfg=22 GREEN+14 expected RED**, 모든 기대집합 일치. mismatch/tool error/skip/미선택 0. 기존19+신규 Herdr14+새 경합3. 141 TLC runs, 64.3s. 모든 cfg에는 liveness가 있고 official harness가 각 PROPERTY를 독립 검사한다.
+- `prewire-v4.log`, `prewire-v4/`: 14cfg closed-gate baseline, 12 expected RED+2 GREEN. accepted0 temporal 성립을 기능 PASS로 쓰지 않음.
+- `chart-v5-ThreadIngressHerdr*/`: 최종 모델의 원시 TLC 출력/규칙별 보고·차트. 기대 RED wrapper exit1은 모델 반례이며 도구 오류가 아님.
+- `model-sha256.txt`: 두 모델+36 cfg examples+Herdr view(총39개)의 SHA256. final-v5 scratch bytes를 커밋 대상 bytes와 실제 대조했다.
+- 초기 `after`, `final`, `final-v2`, `final-v3`, `final-v4` 및 초기 chart는 교정 중 진단 기록이며 최종 증거에 사용하지 않는다.
+
+재현은 저장된 `check.py <새 scratch>`가 `.cfg.example`을 실제 `.cfg`로 materialize하고 header의 EXPECTED_SAFETY/LIVENESS에서 scratch manifest를 만든 뒤 공식 harness를 실행한다. `check.py <새 scratch> prewire`는 위 main gate control만 바꾼다. 기대값을 actual output에서 역생성하지 않는다.
 
 ```sh
-unset TMUX TMUX_PANE
-scratch=$(mktemp -d /tmp/i8125-statecharts.XXXXXX)
-python3 - "$PWD" "$scratch" <<'PYCODE'
-from pathlib import Path
-import re, shutil, sys
-src = Path(sys.argv[1]) / "docs/statecharts/input-single-path"
-out = Path(sys.argv[2])
-for name in ("ThreadIngress.tla", "ThreadIngressRace.tla", "thread-ingress.view.mjs", "thread-ingress-race.view.mjs"):
-    shutil.copyfile(src / name, out / name)
-rows = []
-for sample in sorted(src.glob("ThreadIngress*.cfg.example")):
-    text = sample.read_text()
-    safety, liveness = re.search(r"EXPECTED_SAFETY=(\S+) EXPECTED_LIVENESS=(\S+)", text).groups()
-    name = sample.name.removesuffix(".example")
-    (out / name).write_text(text)
-    module = "ThreadIngressRace" if name.startswith("ThreadIngressRace") else "ThreadIngress"
-    rows.append(f"{name}\t{module}\t{safety}\t{liveness}")
-(out / "expected.tsv").write_text("\n".join(rows) + "\n")
-print(f"materialized={len(rows)} scratch={out}")
-PYCODE
+unset TMUX TMUX_PANE AGENTDESK_ROOT_DIR AGENTDESK_CONFIG AGENTDESK_SINGLE_MESSAGE_PANEL
+umask 077
 TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar \
 JAVA=/opt/homebrew/opt/openjdk/bin/java \
-python3 scripts/ci/statecharts_tlc.py --root "$scratch" --jobs 3
-TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar \
-JAVA=/opt/homebrew/opt/openjdk/bin/java \
-~/.codex/skills/statechart/scripts/statechart "$scratch/ThreadIngress.tla" \
- --config "$scratch/ThreadIngressFixedCold.cfg" \
- --view "$scratch/thread-ingress.view.mjs" --out "$scratch/chart-cold"
+python3 scripts/ci/statecharts_tlc.py --root <materialized-scratch> --jobs 3
 ```
 
-원시 로그 정본: `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8125/logs/statecharts/`. 최종 단일-ticket wrapper는 `ThreadIngress*-final-v4/`, 경합 wrapper는 `ThreadIngressRace*-final-v3/`의 `tlc.out`·규칙별 반례·`report.md`, 공식 harness는 최종 sample을 그대로 materialize한 `harness-committed-artifacts.log`이며, 동일 포트 모델의 `harness-final-v4.log`도 보존했다. 초기 parser/기대값 교정 로그는 이 최종 증거로 사용하지 않는다. Java/TLC 입력은 같은 최종 model bytes다. `model-sha256.txt`의 23개 model/cfg/view 경로·SHA256을 커밋 대상 파일 바이트와 다시 대조해 모두 일치함을 확인했다.
+정본 `docs/statecharts/expected.tsv`는 변경하지 않았다. `.cfg.example`만 존재하므로 저장소 CI 자동 선택은 0일 수 있으며 **이를 PASS로 쓰지 않는다**. 이 레그는 명시 materialization된 36cfg 목록과 공식 harness actual 결과를 증거로 삼는다. 정식 cfg/expected 등록은 구현 조각에서 코디네이터 승인을 받아 진행한다.
 
-추상화 한계: 단일 ticket 모델은 같은 GUID의 중복 HTTP 요청이나 서로 다른 원본의 body 동등성을 dedupe했다는 증거가 아니다. 경합 모델은 서로 다른 accepted tickets가 동일 child transition을 경합하는 projection이며 다중 node/outbox 원자성·외부 API retry identity·attachment/cancel/clear/stop·provider transcript 수신 receipt는 직접 모델링하지 않는다. 이 항목은 설계의 실제 route/worker/outbox 시험과 negative assertions에 남긴다.
+## 범위 밖과 한계
+
+- 같은 GUID API 동시요청/durable origin DB의 atomic commit 및 서로 다른 same-text original 구분은 모델의 ticket 포트 바깥이며 실제 route/PG/mutant 시험이 필요하다.
+- 다중 node/outbox·cold/remote placement는 기존 D1 포트를 보존했다. T1/T2a를 그것까지 구현한 것으로 확대하지 않는다.
+- parent 확인 권한/actual child host·O-b child writer의 실제 준비는 코드 검증·통합 수용의 별도 경계다. 본 모델의 reply 포트가 O-b의 구현·운영 증거를 대신하지 않는다.
+- Cancel·Terminate·clear·stop의 모든 진입점은 설계 전수표에 고정했다. 이 모델은 기존 exact-front/epoch와 visible terminal 포트를 소비하며 새 kill/삭제/reset 권한을 만들지 않는다. native modal·draft·source inode 검사는 N03~N05의 기존 입력 모델/생산 경계에 남긴다.
+- all fields의 실제 DB/lease/notice 원자성을 TLA 한 행동으로 승격해 보장하지 않는다. 실제 pre-admission 효과0, first-key exact identity, after-effect no-resend는 구현 대상 시험과 원인 제거 production mutant로 확인해야 한다.

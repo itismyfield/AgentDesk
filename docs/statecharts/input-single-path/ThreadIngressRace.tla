@@ -4,9 +4,19 @@
 EXTENDS Naturals
 CONSTANTS N, Mutation
 Ids == 1..N
+\* Baseline: ad04f6f3ec; HerdrSpec adds external API/Discord same-channel owner joins.
 VARIABLES phase, snapshot, owner, session, launches, delivered, reply, failed
+VARIABLES activity, epoch, readEpoch, reservation, begun, staleEffect, restarts, origins
+hfields == <<activity, epoch, readEpoch, reservation, begun, staleEffect, restarts, origins>>
+HFields ==
+    /\ activity = IF Mutation = "herdrBusy" THEN "busy" ELSE "idle"
+    /\ epoch = 1 /\ readEpoch = [i \in Ids |-> 0]
+    /\ reservation = FALSE /\ begun = [i \in Ids |-> FALSE]
+    /\ staleEffect = FALSE /\ restarts = 0
+    /\ origins = [i \in Ids |-> IF i = 1 THEN "imessageStart" ELSE IF i = 2 THEN "humanApiDeliver" ELSE "discordPerson"]
 vars == <<phase, snapshot, owner, session, launches, delivered, reply, failed>>
 Init ==
+    /\ HFields
     /\ phase = [i \in Ids |-> "queued"] /\ snapshot = [i \in Ids |-> "none"]
     /\ owner = 0 /\ session = "absent" /\ launches = 0
     /\ delivered = [i \in Ids |-> 0] /\ reply = [i \in Ids |-> 0] /\ failed = {}
@@ -47,8 +57,9 @@ Post(i) ==
     /\ UNCHANGED <<snapshot, owner, session, launches, delivered, failed>>
 Done == /\ \A i \in Ids : phase[i] \in {"done", "failed"}
         /\ UNCHANGED vars
-Next == (\E i \in Ids : Peek(i) \/ TakeTransition(i) \/ Start(i) \/ StartupReady(i)
+BaseNext == (\E i \in Ids : Peek(i) \/ TakeTransition(i) \/ Start(i) \/ StartupReady(i)
                         \/ Warm(i) \/ Failure(i) \/ Post(i)) \/ Done
+Next == BaseNext /\ UNCHANGED hfields
 Spec == Init /\ [][Next]_vars
         /\ \A i \in Ids : WF_vars(Peek(i)) /\ WF_vars(TakeTransition(i))
             /\ WF_vars(Start(i) \/ Warm(i) \/ Failure(i))
@@ -61,4 +72,70 @@ NoStaleBootstrap == (\E i \in Ids : delivered[i] = 1) =>
 SuccessBacked == \A i \in Ids : phase[i] = "done" => delivered[i] = 1 /\ reply[i] = 1
 EachAcceptedCompletes == \A i \in Ids : TRUE ~> (delivered[i] = 1 \/ i \in failed)
 EachDeliveredGetsReply == \A i \in Ids : delivered[i] = 1 ~> reply[i] = 1
+
+HInit ==
+    /\ HFields /\ phase = [i \in Ids |-> "queued"]
+    /\ snapshot = [i \in Ids |-> "none"] /\ owner = 0
+    /\ session = "live" /\ launches = 0
+    /\ delivered = [i \in Ids |-> 0] /\ reply = [i \in Ids |-> 0] /\ failed = {}
+HClaim(i) ==
+    /\ phase[i] = "queued" /\ owner = 0 /\ owner' = i
+    /\ phase' = [phase EXCEPT ![i] = "observe"]
+    /\ UNCHANGED <<snapshot, session, launches, delivered, reply, failed, hfields>>
+HObserve(i) ==
+    /\ owner = i /\ phase[i] = "observe"
+    /\ phase' = [phase EXCEPT ![i] = IF activity = "idle" THEN "idleProbe" ELSE "busyProbe"]
+    /\ readEpoch' = [readEpoch EXCEPT ![i] = epoch]
+    /\ reservation' = (activity = "idle")
+    /\ UNCHANGED <<snapshot, owner, session, launches, delivered, reply, failed,
+                   activity, epoch, begun, staleEffect, restarts, origins>>
+HReturn(i) ==
+    /\ owner = i /\ phase[i] = "idleProbe"
+    /\ phase' = [phase EXCEPT ![i] = "delegated"] /\ reservation' = FALSE
+    /\ UNCHANGED <<snapshot, owner, session, launches, delivered, reply, failed,
+                   activity, epoch, readEpoch, begun, staleEffect, restarts, origins>>
+HBegin(i) ==
+    /\ owner = i /\ phase[i] \in {"delegated", "busyProbe"}
+    /\ (readEpoch[i] = epoch \/ Mutation = "herdrStaleEpoch")
+    /\ phase' = [phase EXCEPT ![i] = "begun"]
+    /\ begun' = [begun EXCEPT ![i] = TRUE]
+    /\ delivered' = [delivered EXCEPT ![i] = @ + 1]
+    /\ staleEffect' = (staleEffect \/ (readEpoch[i] # epoch)) /\ activity' = "busy"
+    /\ launches' = launches + IF phase[i] = "delegated" THEN 1 ELSE 0
+    /\ UNCHANGED <<snapshot, owner, session, reply, failed,
+                   epoch, readEpoch, reservation, restarts, origins>>
+HReceipt(i) ==
+    /\ owner = i /\ phase[i] = "begun"
+    /\ phase' = [phase EXCEPT ![i] = "submitted"] /\ owner' = 0
+    /\ UNCHANGED <<snapshot, session, launches, delivered, reply, failed, hfields>>
+HRestart ==
+    /\ restarts = 0 /\ owner \in Ids
+    /\ phase[owner] \in {"observe", "idleProbe", "delegated", "busyProbe", "begun"}
+    /\ restarts' = 1 /\ epoch' = epoch + 1 /\ reservation' = FALSE
+    /\ phase' = [phase EXCEPT ![owner] =
+          IF @ = "begun" THEN "uncertain"
+          ELSE IF Mutation = "herdrStaleEpoch" /\ @ = "delegated" THEN "delegated" ELSE "observe"]
+    /\ owner' = IF phase[owner] = "begun" THEN 0 ELSE owner
+    /\ UNCHANGED <<snapshot, session, launches, delivered, reply, failed,
+                   activity, readEpoch, begun, staleEffect, origins>>
+HShowFailure(i) ==
+    /\ phase[i] = "uncertain" /\ phase' = [phase EXCEPT ![i] = "failed"]
+    /\ failed' = failed \cup {i}
+    /\ UNCHANGED <<snapshot, owner, session, launches, delivered, reply, hfields>>
+HPost(i) == Post(i) /\ UNCHANGED hfields
+HNext == (\E i \in Ids : HClaim(i) \/ HObserve(i) \/ HReturn(i) \/ HBegin(i)
+                         \/ HReceipt(i) \/ HShowFailure(i) \/ HPost(i)) \/ HRestart
+         \/ (Done /\ UNCHANGED hfields)
+hvars == <<vars, hfields>>
+HerdrSpec == HInit /\ [][HNext]_hvars
+    /\ \A i \in Ids : WF_hvars(HClaim(i)) /\ WF_hvars(HObserve(i))
+        /\ WF_hvars(HReturn(i)) /\ WF_hvars(HBegin(i))
+        /\ WF_hvars(HReceipt(i)) /\ WF_hvars(HShowFailure(i)) /\ WF_hvars(HPost(i))
+HerdrCurrentExecutor == ~staleEffect
+HerdrReservationReturned ==
+    (\E i \in Ids : phase[i] = "begun") => ~reservation
+HerdrSourcePreserved ==
+    origins = [i \in Ids |-> IF i = 1 THEN "imessageStart" ELSE IF i = 2 THEN "humanApiDeliver" ELSE "discordPerson"]
+EachDeliveredGetsOutcome == \A i \in Ids : delivered[i] = 1 ~> (reply[i] = 1 \/ i \in failed)
+EachAcceptedStarts == \A i \in Ids : TRUE ~> begun[i]
 =============================================================================

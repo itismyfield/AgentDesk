@@ -1,0 +1,11 @@
+\* EXPECTED_SAFETY=NoDeadlock EXPECTED_LIVENESS=HerdrAcceptedStarts,HerdrAcceptedCompletes
+CONSTANTS
+    Target = "boundChannel"
+    InitialSession = "live"
+    ActualHost = "herdr"
+    DesiredHost = "herdr"
+    Mutation = "herdrNoWake"
+    CanCrash = TRUE
+SPECIFICATION HerdrSpec
+INVARIANT HerdrExactlyOnce HerdrNoSilentLoss HerdrRejectedNoEffects HerdrExternalWired HerdrReservationReturned HerdrCurrentExecutor HerdrSourcePreserved
+PROPERTY HerdrAcceptedStarts HerdrAcceptedCompletes HerdrDeliveredGetsOutcome
