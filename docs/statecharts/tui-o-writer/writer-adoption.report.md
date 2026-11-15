@@ -66,7 +66,7 @@ Main's violations are code paths on the baseline. Legacy posts the Deferred turn
 ## Left out, and how it relates
 
 - Codex turn-mode confirmation (`cutover.rs:81-91`) waits for input after a commit; it does not change adoption.
-- Herdr row-end and restart notices are not bodies; a held row is kept as on the restart path.
+- Herdr row-end was excluded from the stage-1 model. Its notice can carry a body; the companion below audits the held row and execution/body split.
 - Watcher streaming (W02) uses the same gate; only the terminal and dispatch are modelled.
 - The output lock and delivery lease (`terminal_outcome_delivery.rs:735-757`) prevent duplicates; a held body takes no lease.
 - Turn presence keeps a held turn Busy; that is `turn-presence`'s `EventuallyStableBusy`.
@@ -75,3 +75,111 @@ Main's violations are code paths on the baseline. Legacy posts the Deferred turn
 - The kick's claim is assumed to stay open across at most `MaxSpan` judgements, within the wake's retry window (`MaxSpan` = `Retries`); the claim ends on its own (`ClaimEnds`) at any judgement. Only Stage1, NoRetry and Retries4 explore an open claim; the other configs start without one to keep their state space. A claim outlasting the window exhausts the wake (`WakeGiveUp`) and leaves the row to the next ready transition or a restart; that path is explored with `NoRetry`.
 - A wake's transient send failures spend no restart budget; that and the four judgements with 1, 2, 3 s backoff are fixed by the Rust test `a_wake_whose_sends_keep_failing_ends_after_three_retries_and_keeps_the_row_pg`.
 - tmux presence: with tmux alive the recovery budget never clears a row, so only the absent case is modelled.
+
+## Herdr row-end boundary on the relanding head
+
+The outer-only proposal below is historical and **withdrawn**. The current design
+audit is [Herdr execution retirement and retained body debt](herdr-body-hold.design.md).
+The notice can carry a response body; the old nonbody exclusion is not a body
+settlement guarantee.
+
+Code: `13355ee75c74ef65b2c5564f0a95efb37f988d26`, containing main
+`ad04f6f3ecc33e86e7dc0968822ce2ce3f087e90` and the existing body-adoption gate.
+`WriterAdoptionHerdrRowEnd.tla` is a companion leaf of this adoption model. It checks
+an already-retired prior-process Herdr row, with readable canonical identity,
+no active actor, healthy routing and successful transport if offered a notice.
+The existing episode/nonce guarded clear is retained. It does not model an
+unconditional permission to start a new Herdr execution.
+
+The outer ownership observation is not the final body boundary. Mapping
+AwaitingAdoption and AdoptionRefused to false there still selects `Settle::Notice`.
+That branch can contain recovered assistant text, and its helper peeks at ownership
+again before even classifying a body-free marker. The proposed outer mapping
+therefore does not establish the requested progress.
+
+| Value/action | Existing code on the code SHA above |
+|---|---|
+| owner=Deferred | `channel_policy.rs:345`, `channel_policy/adoption.rs:181`; `cutover/channel_gate.rs:445` returns AwaitingAdoption |
+| owner=Refused | `channel_policy/adoption.rs:343`; `cutover/channel_gate.rs:446` returns AdoptionRefused |
+| owner=NoCandidate | `channel_policy.rs:320`, `cutover/channel_gate.rs:509`; selected channel without a local candidate or execution view |
+| owner=Committed | `writer/activation.rs:243`; the output peek answers true |
+| owner=UnknownKind | `cutover/channel_gate.rs:487`; a genuine identity error remains unreadable |
+| bound | `writer/late_adopt.rs:221,250`; `late_adopt/codex.rs:260`; no-source retry cannot commit |
+| row/inputHold | `discord/recovery_engine/herdr_row_end.rs:52,238,254,269,495`; a prior-process row and the execution's input hold are distinct |
+| noticeBody | `herdr_row_end/outcome.rs:57-72`; completed answer, saved partial, or body-free empty-answer marker; `completion_delivery.rs:316` classifies it |
+| Observe/Commit | `herdr_row_end.rs:238,254`; commit releases the execution hold before the notice |
+| Notice | `herdr_row_end.rs:310` calls `completion_delivery.rs:392`; the latter peeks again at `:412` and returns held at `:416` |
+| Clear/Closed | `herdr_row_end.rs:269,279`; neither executes after notice_not_delivered |
+| gatewayHeld/nextInput | `herdr_row_end_settle_tests.rs:347-385`; both gateway and REST new starts queue while this old row remains |
+| Bind/Adopt | new-source progress can follow the input passing that old-row guard; with a source and row-only custody adoption may commit (`deferred.rs:793`, `host/activation_io.rs:26`) |
+
+`NewStartEventuallyPassesRow` means passing the **old row's guard**. It does not
+bypass the separate `OWriterNotReady` check at `turn_host.rs:308`. The no-binding
+cases permit adoption never arriving, as required by this audit. Bound-source
+and already-owned controls separately check progress when adoption is possible.
+The safety invariant remains `NoLegacyBodyOnTui`; the companion also checks
+`UnadoptedNotOwned`, `UnknownOwnerKept` and `ClearHasEvidence`. All row-end actions
+have weak fairness, so unfair scheduling is not the reason for the counterexample.
+
+| Companion cfg | b2 before outer mapping | With the proposed outer mapping / control | Safety |
+|---|---|---|---|
+| HerdrBefore | row settlement and next-input row-guard liveness RED | baseline negative control | all four invariants GREEN |
+| HerdrOuterOnly | same unadopted Deferred/Refused/NoCandidate inputs as Before | both liveness properties still RED at the inner notice gate | all four invariants GREEN |
+| HerdrBound | bound source permits fair adoption | both liveness properties GREEN | all four GREEN |
+| HerdrOwned | already Committed | both liveness properties GREEN | all four GREEN |
+| HerdrUnknown | true identity error | row remains held; no progress property is claimed | all four GREEN |
+| HerdrMain | historical false/Legacy delivery behavior | both liveness properties GREEN | NoLegacyBodyOnTui RED when the notice carries a body |
+
+All six configs were run through `scripts/ci/statecharts_tlc.py`: **6 configs,
+17 TLC runs, 9.8 s, exact expected violation sets matched**. The checker's exit 0
+means the registered negative controls reproduced; it does **not** mean the
+proposed change passed liveness. Three additional plain TLC runs, one each for
+Deferred, Refused and NoCandidate, all returned liveness exit 13. Their trace is
+Observe -> Commit -> Notice -> stutter: row=true, gatewayHeld=true, nextInput=queued,
+bound=false, noticeSent=false. The execution input hold has already been released,
+which still does not clear the row or unblock the next input.
+
+Raw logs and per-owner traces:
+`/home/adk/adk/lane-runs/i7651/logs/reland-b2/resume2-tlc/`.
+TLA tools jar SHA256:
+`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`.
+The initial model-initialization error is retained as `checker-initial-error.log`;
+it generated zero states and is excluded from all RED/GREEN counts.
+
+The actual body helper's existing tests also ran on the unchanged source:
+`a_pending_adoption_holds_every_recovery_notice_until_o_adopts` and
+`a_held_recovery_body_spends_no_restart_budget_and_keeps_its_row` passed 2/2,
+failed/ignored 0. They confirm that pending/refused recovery bodies remain held,
+and that even body-free markers passed through this helper wait for adoption.
+The approved outer-only production mapping has not been applied: the remaining
+body boundary prevents the requested liveness, so this leg stops for DESIGN_DELTA.
+
+
+## Execution hold versus body hold (design audit)
+
+The companion now compares C, N and explicit negative controls. C archives an old
+body under its own episode identity before releasing its active row; N with only
+existing storage loses a pathless unadopted body. The detailed note fixes the
+production entry points, provenance/receipt boundaries, implementation slices and
+acceptance tests. No production gate, row clear, fixture or Rust assertion changed.
+
+C frees the old-row guard with Deferred/no source, Refused and NoCandidate. It
+keeps NoLegacyBodyOnTui, UnadoptedNotOwned, UnknownOwnerKept, loss/duplicate and
+ordering safety under the proposed durable-copy/O-receipt protocol. An optional
+source bind is **not fair**; the NoSource control disables it forever. Actual
+O-ready admission remains separate from old-row-guard progress.
+
+This is **DESIGN_NEEDS_USER**, not an approved After: existing b2 explicitly holds
+Refused bodies and its original liveness permits rejection. A recovered verified
+store may commit them, but there is no guaranteed body finalizer. Permanent
+source-free Deferred also cannot promise body visibility. CRefused exposes the
+missing RefusedExplicitlySettled property; CRefusedRepair assumes external
+recovery and CRefusedDecision assumes a new per-input visible failure contract.
+Neither assumption is silently added to b2. The Released alarm is not an input
+receipt or a body disposition. Both C and stored N need that product decision.
+
+Current companion results: **21 cfg, 9 fully GREEN / 12 expected RED**, exact
+violation sets, tool errors and skips 0. Before/OuterOnly still fail both row
+liveness properties; Main still fails NoLegacyBodyOnTui. Full cfg-by-cfg
+before/after table and limitations are in the design note. The 6-cfg figures
+above belong to the archived resume-2 model, not this expanded model.
