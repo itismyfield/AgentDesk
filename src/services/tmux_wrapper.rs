@@ -136,7 +136,13 @@ pub fn run(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
     }
-    let mut claude_command = builder.into_command();
+    let mut claude_command = match builder.into_command() {
+        Ok(command) => command,
+        Err(error) => {
+            redacted_eprintln!("Claude launch refused: {error}");
+            std::process::exit(1);
+        }
+    };
     let mut child = match claude_command.spawn() {
         Ok(c) => c,
         Err(e) => {

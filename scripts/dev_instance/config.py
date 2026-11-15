@@ -54,13 +54,6 @@ def active_claude_login(home):
         'cli': str((home / '.local/bin/claude').resolve(strict=True))}, home)
 
 
-def login_runtime_path(worktree, login=None):
-    original = str(worktree / 'target/debug') + ':/usr/bin:/bin'
-    if login is None:
-        return original
-    return str(worktree / 'target/debug') + ':' + str(Path(login['login_home']) / '.local/bin') + ':/opt/homebrew/bin:/usr/bin:/bin'
-
-
 def provider_home(root: Path, provider: str) -> Path:
     return root / "home/.adk/profiles" / provider / f"test-{provider}"
 

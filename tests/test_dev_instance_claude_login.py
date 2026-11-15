@@ -31,7 +31,7 @@ class ClaudeLoginTests(TestCase):
         self.assertEqual(env['HOME'], str(root/'home'))
         self.assertEqual(env['CLAUDE_CONFIG_DIR'], self.login['config_dir'])
         self.assertEqual(env['CODEX_HOME'], str(root/'home/.adk/profiles/codex/test-codex'))
-        self.assertIn(str(self.fixture.home/'.local/bin'), env['PATH'].split(':'))
+        self.assertEqual(env['PATH'], str(self.fixture.worktree/'target/debug')+':/usr/bin:/bin')
         self.assertFalse(any((root/'home').rglob('auth.json')))
         self.assertEqual(list((root/'credential').iterdir()), [])
         self.assertEqual(validate(self.fixture.base, m['instance_id'], {})['claude_login'], self.login)
@@ -82,3 +82,31 @@ class ClaudeLoginTests(TestCase):
             with self.assertRaises(InstanceError) as raised:
                 active_claude_login(self.fixture.home)
         self.assertNotIn('private@example.invalid', str(raised.exception))
+
+    def test_opt_in_does_not_expose_codex_and_uses_claude_override(self):
+        import shutil
+        import subprocess
+        outside = self.fixture.home / '.local/bin/codex'
+        outside.parent.mkdir(parents=True)
+        outside.write_text('#!/bin/sh\nexit 99\n')
+        outside.chmod(0o700)
+        cli = Path(self.login['cli'])
+        cli.parent.mkdir(parents=True)
+        cli.write_text('#!/bin/sh\nprintf "fixture-claude-version\\n"\n')
+        cli.chmod(0o700)
+        manifest = self.fixture.prepare(claude_login=self.login)
+        env = child_environment(manifest, {})
+        legacy = copy.deepcopy(manifest)
+        legacy.pop('claude_login')
+        previous = child_environment(legacy, {})
+        self.assertNotEqual(shutil.which('codex', path=env['PATH']), str(outside))
+        self.assertEqual(env['PATH'], previous['PATH'])
+        self.assertEqual(shutil.which('codex', path=env['PATH']),
+                         shutil.which('codex', path=previous['PATH']))
+        self.assertEqual(env['CODEX_HOME'], previous['CODEX_HOME'])
+        self.assertNotIn('AGENTDESK_CLAUDE_PATH', previous)
+        self.assertEqual(env['AGENTDESK_CLAUDE_PATH'], str(cli))
+        probe = subprocess.run([env['AGENTDESK_CLAUDE_PATH'], '--version'], env=env,
+                               capture_output=True, text=True, check=True)
+        self.assertEqual(probe.stdout, 'fixture-claude-version\n')
+        self.assertFalse((Path(manifest['root'])/'home/.adk/profiles/codex/test-codex/auth.json').exists())

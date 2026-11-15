@@ -423,3 +423,8 @@ fn readiness_probe(kind: &ProviderKind) -> Option<crate::services::provider::Pro
         credential_source: None,
     })
 }
+
+#[cfg(all(test, unix))]
+pub(crate) fn collect_for_login_test() -> ExecutionProbe {
+    collect(&Config::default())
+}

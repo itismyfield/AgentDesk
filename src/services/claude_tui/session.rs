@@ -502,12 +502,13 @@ fn write_launch_script(
     config
         .claude_bin
         .append_shell_escaped_to(&mut escaped_claude_bin);
+    let admission = crate::config::test_instance::environment::claude_pre_exec_admission()?;
     let script = format!(
         "#!/bin/bash\n\
          cd {cwd}\n\
          export CLAUDE_CODE_RESUME_PROMPT=\"_\"\n\
          {env_exports}\
-         exec {claude_bin} {args}\n",
+         {admission}exec {claude_bin} {args}\n",
         cwd = shell_escape(&config.working_dir.display().to_string()),
         claude_bin = escaped_claude_bin,
         env_exports = env_exports,

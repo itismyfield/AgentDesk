@@ -72,15 +72,16 @@ impl Environment {
             ),
             (
                 "PATH",
-                claude_login
-                    .as_ref()
-                    .map(|login| login.path.clone())
-                    .unwrap_or_else(|| {
-                        format!("{}/target/debug:/usr/bin:/bin", worktree.display())
-                    }),
+                format!("{}/target/debug:/usr/bin:/bin", worktree.display()),
             ),
         ] {
             required.insert(key.into(), value);
+        }
+        if let Some(login) = &claude_login {
+            required.insert(
+                "AGENTDESK_CLAUDE_PATH".into(),
+                login.cli.to_string_lossy().into_owned(),
+            );
         }
         let org_path = root.join("config/org.yaml");
         checked_path(&org_path)?;
@@ -399,7 +400,8 @@ pub(crate) fn validate_path(path: &Path) -> Result<(), String> {
 struct ClaudeLogin {
     home: PathBuf,
     config_dir: PathBuf,
-    path: String,
+    cli: PathBuf,
+    account_slot: u64,
 }
 
 impl ClaudeLogin {
@@ -430,15 +432,11 @@ impl ClaudeLogin {
         for p in [&home, &config_dir, &cli] {
             checked_path(p)?;
         }
-        let worktree = manifest["worktree"].as_str().ok_or_else(rejected)?;
-        let path = format!(
-            "{worktree}/target/debug:{}/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",
-            home.display()
-        );
         Ok(Some(Self {
             home,
             config_dir,
-            path,
+            cli,
+            account_slot: value["account_slot"].as_u64().ok_or_else(rejected)?,
         }))
     }
 
@@ -506,6 +504,7 @@ pub(crate) fn provider_shell_environment(
     if overlay.provider == crate::services::provider::ProviderKind::Claude
         && let Some(login) = scope()?.and_then(|s| s.claude_login.as_ref())
     {
+        claude_launch_admission()?;
         validate_overlay(
             "claude",
             &overlay.profile_id,
@@ -584,13 +583,17 @@ pub(crate) fn claude_login_presence() -> Option<bool> {
 }
 
 pub(crate) fn claude_login_metadata_command() -> Command {
-    let mut command = Command::new("/usr/bin/security");
+    let mut command = Command::new(metadata_program());
     // No -w/-g: inspect existence, never request the secret value.
     command.args(["find-generic-password", "-s", "Claude Code-credentials"]);
     command
 }
 
 pub(crate) fn metadata_command_present(command: &mut Command) -> bool {
+    bounded_success(command, std::time::Duration::from_secs(2))
+}
+
+fn bounded_success(command: &mut Command, timeout: std::time::Duration) -> bool {
     use std::process::Stdio;
     command
         .stdin(Stdio::null())
@@ -599,7 +602,7 @@ pub(crate) fn metadata_command_present(command: &mut Command) -> bool {
     let Ok(mut child) = command.spawn() else {
         return false;
     };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
@@ -659,4 +662,138 @@ pub(crate) fn expected_profile_home(
     } else {
         crate::services::provider_auth_profile::extra_account_home_at(root, provider, profile)
     }
+}
+
+pub(crate) fn claude_login_enabled_checked() -> Result<bool, String> {
+    Ok(scope()?.is_some_and(|snapshot| snapshot.claude_login.is_some()))
+}
+
+pub(crate) fn provider_resolution_allowed(provider: &str) -> Result<bool, String> {
+    Ok(!provider.trim().eq_ignore_ascii_case("codex") || !claude_login_enabled_checked()?)
+}
+
+#[cfg(test)]
+static METADATA_TEST_PROGRAM: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_metadata_program_for_tests(path: PathBuf) {
+    *METADATA_TEST_PROGRAM.lock().unwrap() = Some(path);
+}
+
+fn metadata_program() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = METADATA_TEST_PROGRAM.lock().unwrap().clone() {
+        return path;
+    }
+    PathBuf::from("/usr/bin/security")
+}
+
+const CLAUDE_ADMISSION: &str = r#"import json, os, signal, subprocess, sys
+
+def run(argv, timeout, capture=False, env=None):
+    child = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, env=env, start_new_session=True)
+    try:
+        output, _ = child.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try: os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        child.communicate()
+        raise
+    return child.returncode, output
+
+try:
+    home, declared, metadata = sys.argv[1:]
+    code, output = run([home+'/.local/bin/cswap', 'list', '--json'], 30, True,
+        {'HOME': home, 'PATH': '/opt/homebrew/bin:/usr/bin:/bin'})
+    slot = json.loads(output)['activeAccountNumber']
+    if code or type(slot) is not int or slot not in (2, 3) or slot != int(declared):
+        sys.exit(1)
+    code, _ = run([metadata, 'find-generic-password', '-s', 'Claude Code-credentials'], 2)
+    if code: sys.exit(1)
+except Exception:
+    sys.exit(1)
+"#;
+
+fn admission_command(login: &ClaudeLogin) -> Command {
+    let mut command = Command::new("/usr/bin/python3");
+    command
+        .args(["-I", "-c", CLAUDE_ADMISSION])
+        .arg(&login.home)
+        .arg(login.account_slot.to_string())
+        .arg(metadata_program());
+    command
+}
+
+pub(crate) fn claude_launch_admission() -> Result<(), String> {
+    if let Some(login) = scope()?.and_then(|snapshot| snapshot.claude_login.as_ref())
+        && !bounded_success(
+            &mut admission_command(login),
+            std::time::Duration::from_secs(35),
+        )
+    {
+        return Err("test instance Claude login admission refused".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn claude_pre_exec_admission() -> Result<String, String> {
+    let Some(login) = scope()?.and_then(|snapshot| snapshot.claude_login.as_ref()) else {
+        return Ok(String::new());
+    };
+    let command = admission_command(login);
+    let line = std::iter::once(command.get_program())
+        .chain(command.get_args())
+        .map(|part| crate::services::process::shell_escape(&part.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(format!("{line} || exit 1\n"))
+}
+
+pub(crate) fn admit_claude_wrapper(command: &mut Command) -> Result<(), String> {
+    let snapshot = scope()?.ok_or_else(rejected)?;
+    let login = snapshot.claude_login.as_ref().ok_or_else(rejected)?;
+    let args = command.get_args().collect::<Vec<_>>();
+    let option = |key: &str, expected: &str| {
+        args.iter().filter(|arg| **arg == key).count() == 1
+            && args
+                .windows(2)
+                .any(|pair| pair[0] == key && pair[1] == expected)
+    };
+    let settings = args
+        .windows(2)
+        .find(|pair| pair[0] == "--settings")
+        .map(|pair| PathBuf::from(pair[1]))
+        .ok_or_else(rejected)?;
+    let instance = current()?.ok_or_else(rejected)?;
+    if args
+        .iter()
+        .filter(|arg| **arg == "--strict-mcp-config")
+        .count()
+        != 1
+        || !option("--setting-sources", "")
+        || !option("--mcp-config", r#"{"mcpServers":{}}"#)
+        || args.iter().filter(|arg| **arg == "--settings").count() != 1
+        || !settings.starts_with(&instance.root)
+        || std::fs::canonicalize(command.get_program()).map_err(|_| rejected())?
+            != std::fs::canonicalize(&login.cli).map_err(|_| rejected())?
+    {
+        return Err(rejected());
+    }
+    checked_path(&settings)?;
+    claude_launch_admission()?;
+    for key in crate::services::provider_auth_profile::provider_credential_env_keys(
+        &crate::services::provider::ProviderKind::Claude,
+    ) {
+        command.env_remove(key);
+    }
+    command.envs(login.provider_env());
+    command.env("PATH", &snapshot.required["PATH"]);
+    configure_child_command(command)
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn login_fixture_for_tests() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    super::environment_tests::review_fixture()
 }

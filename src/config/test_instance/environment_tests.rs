@@ -314,6 +314,15 @@ fn claude_login_fixture(quoted: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
             std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
     }
+    std::fs::write(home.join("active-slot"), "3").unwrap();
+    let cswap = home.join(".local/bin/cswap");
+    std::fs::write(&cswap, format!("#!/bin/sh\nvalue=$(/bin/cat {})\n[ \"$value\" != unavailable ] || exit 1\nprintf '{{\"activeAccountNumber\":%s}}\\n' \"$value\"\n", crate::services::process::shell_escape(&home.join("active-slot").to_string_lossy()))).unwrap();
+    let metadata = home.join("metadata-probe");
+    std::fs::write(&metadata, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    for path in [cswap, metadata] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     (temp, root, home)
 }
 
@@ -343,8 +352,12 @@ fn claude_login_contract_and_operating_golden() {
         let root = PathBuf::from(std::env::var("ADK_LOGIN_FIXTURE_ROOT").unwrap());
         let home = PathBuf::from(std::env::var("ADK_LOGIN_FIXTURE_HOME").unwrap());
         let enabled = mode == "opt-in";
+        if enabled {
+            environment::set_metadata_program_for_tests(home.join("metadata-probe"));
+        }
         assert_eq!(environment::claude_login_enabled(), enabled);
-        let (binary, _) = crate::services::claude_command::ClaudeBinary::resolve().unwrap();
+        let (binary, resolution) =
+            crate::services::claude_command::ClaudeBinary::resolve().unwrap();
         let launch = crate::services::claude_tui::session::ClaudeTuiLaunchConfig {
             tmux_session_name: "fixture".into(),
             working_dir: root.clone(),
@@ -369,6 +382,18 @@ fn claude_login_contract_and_operating_golden() {
         ];
         assert_eq!(&args[..5], original);
         if enabled {
+            assert_eq!(resolution.source.as_deref(), Some("env_override"));
+            assert_eq!(
+                std::env::var("PATH").unwrap(),
+                format!(
+                    "{}/fixture-worktree/target/debug:/usr/bin:/bin",
+                    root.display()
+                )
+            );
+            assert_eq!(
+                std::env::var("AGENTDESK_CLAUDE_PATH").unwrap(),
+                home.join(".local/bin/claude").to_string_lossy()
+            );
             assert_eq!(
                 crate::services::claude_tui::hook_output_guard::configured_claude_projects_root(),
                 Some(home.join(".claude/projects"))
@@ -618,5 +643,754 @@ fn claude_login_rejects_slot_one_unknown_keys_and_receipt_drift() {
             .output()
             .unwrap();
         assert!(!out.status.success(), "accepted {mutation}");
+    }
+}
+
+pub(super) fn review_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let (temp, root, home) = claude_login_fixture(true);
+    bind_claude_login(&root, &home);
+    let sentinel = root.join("runtime/provider-started");
+    let body = format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.325\\n'; exit 0; fi\ntouch {}\nprintf 'fixture-ai\\n'\n",
+        crate::services::process::shell_escape(&sentinel.to_string_lossy())
+    );
+    std::fs::write(home.join(".local/bin/claude"), body).unwrap();
+    let slot = home.join("active-slot");
+    std::fs::write(&slot, "3").unwrap();
+    let cswap = home.join(".local/bin/cswap");
+    std::fs::write(&cswap, format!("#!/bin/sh\nvalue=$(/bin/cat {})\n[ \"$value\" != unavailable ] || exit 1\nprintf '{{\"activeAccountNumber\":%s}}\\n' \"$value\"\n",crate::services::process::shell_escape(&slot.to_string_lossy()))).unwrap();
+    let meta = home.join("metadata-probe");
+    std::fs::write(&meta, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    for p in [cswap, meta] {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    (temp, root, home)
+}
+
+#[test]
+fn review_simple_onboarding_uses_template_in_opt_in() {
+    const CASE: &str = "ADK_REVIEW_SIMPLE_CHILD";
+    if let Ok(mode) = std::env::var(CASE) {
+        if mode != "operating" {
+            initialize().unwrap();
+        }
+        let root = PathBuf::from(std::env::var("ADK_LOGIN_FIXTURE_ROOT").unwrap());
+        environment::set_metadata_program_for_tests(
+            root.ancestors().nth(4).unwrap().join("metadata-probe"),
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (_, axum::Json(value)) = rt.block_on(crate::services::onboarding::generate_prompt(
+            crate::services::onboarding::GeneratePromptBody {
+                name: "fixture".into(),
+                description: "fixture".into(),
+                provider: Some("claude".into()),
+            },
+        ));
+        assert_eq!(
+            value["source"],
+            if mode == "opt-in" { "template" } else { "ai" }
+        );
+        assert_eq!(
+            root.join("runtime/provider-started").exists(),
+            mode != "opt-in"
+        );
+        return;
+    }
+    for mode in ["operating", "legacy", "opt-in"] {
+        let (_temp, root, home) = review_fixture();
+        if mode != "opt-in" {
+            for name in ["manifest.json", "receipt.json"] {
+                let path = root.join(name);
+                let mut value = read_json(&path).unwrap();
+                value.as_object_mut().unwrap().remove("claude_login");
+                std::fs::write(path, value.to_string()).unwrap();
+            }
+            let path = root.join("config/org.yaml");
+            let mut value = read_json(&path).unwrap();
+            value["provider_auth_profiles"]["test-claude"]["home"] =
+                serde_json::json!(root.join("home/.adk/profiles/claude/test-claude"));
+            std::fs::write(path, value.to_string()).unwrap();
+            std::fs::copy(
+                home.join(".local/bin/claude"),
+                root.join("fixture-worktree/target/debug/claude"),
+            )
+            .unwrap();
+        }
+        let mut child = if mode == "operating" {
+            let mut c = Command::new(std::env::current_exe().unwrap());
+            c.env_clear()
+                .env("HOME", &home)
+                .env(
+                    "PATH",
+                    format!("{}:/usr/bin:/bin", home.join(".local/bin").display()),
+                )
+                .env("TMPDIR", root.join("tmp"));
+            c
+        } else {
+            tests::command(&root)
+        };
+        let selector = "config::test_instance::environment_tests::review_simple_onboarding_uses_template_in_opt_in";
+        let out = child
+            .args(["--exact", selector, "--nocapture"])
+            .env(CASE, mode)
+            .env("ADK_LOGIN_FIXTURE_ROOT", &root)
+            .output()
+            .unwrap();
+        tests::assert_single_test_passed(&out, selector);
+    }
+}
+
+#[test]
+fn review_codex_override_is_never_executed_in_opt_in() {
+    const CASE: &str = "ADK_REVIEW_CODEX_CHILD";
+    if std::env::var_os(CASE).is_some() {
+        initialize().unwrap();
+        let root = current().unwrap().unwrap().root.clone();
+        environment::set_metadata_program_for_tests(
+            root.ancestors().nth(4).unwrap().join("metadata-probe"),
+        );
+        let fake = std::env::var("AGENTDESK_CODEX_PATH").unwrap();
+        let registry = serde_json::json!({"schema_version":1,"updated_at":"2026-11-16T00:00:00Z","providers":{"codex":{"current":{"path":fake,"canonical_path":fake,"version":"1.2.3","source":"env_override","checked_at":"2026-11-16T00:00:00Z"}}}});
+        let registry: crate::services::provider_cli::registry::ProviderCliRegistry =
+            serde_json::from_value(registry).unwrap();
+        crate::services::provider_cli::io::save_registry(&root, &registry).unwrap();
+        let probe = crate::services::platform::binary_resolver::with_provider_execution_context(
+            crate::services::provider_cli::ProviderExecutionContext {
+                provider: "codex".into(),
+                ..Default::default()
+            },
+            || crate::services::platform::probe_provider_binary_version("codex"),
+        );
+        assert!(probe.resolution.resolved_path.is_none());
+        let injected = crate::services::platform::BinaryResolution {
+            requested_binary: "codex".into(),
+            resolved_path: Some(fake.clone()),
+            canonical_path: Some(fake.clone()),
+            source: Some("env_override".into()),
+            attempts: vec![],
+            failure_kind: None,
+            exec_path: None,
+        };
+        assert_eq!(
+            crate::services::platform::binary_resolver::probe_resolved_binary_version(
+                &fake, &injected
+            )
+            .1
+            .as_deref(),
+            Some("test_instance_provider_disabled")
+        );
+        assert!(
+            crate::services::codex::execute_command_simple_cancellable("fixture", None).is_err()
+        );
+        let evidence = crate::services::cluster::readiness::collect_for_login_test();
+        assert!(!evidence.providers["codex"].cli_installed);
+        assert!(!evidence.providers["codex"].cli_usable);
+        assert!(evidence.providers["claude"].cli_usable);
+        assert_eq!(
+            evidence.providers["claude"].credential_profiles["test-claude"],
+            true
+        );
+        assert!(!root.join("runtime/codex-executed").exists());
+        return;
+    }
+    let (_temp, root, home) = review_fixture();
+    let fake = home.join(".local/bin/codex");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\ntouch {}\nprintf '1.2.3\\n'\n",
+            crate::services::process::shell_escape(
+                &root.join("runtime/codex-executed").to_string_lossy()
+            )
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let selector = "config::test_instance::environment_tests::review_codex_override_is_never_executed_in_opt_in";
+    let out = tests::command(&root)
+        .args(["--exact", selector, "--nocapture"])
+        .env(CASE, "1")
+        .env("AGENTDESK_CODEX_PATH", fake)
+        .output()
+        .unwrap();
+    tests::assert_single_test_passed(&out, selector);
+}
+
+#[test]
+fn review_tui_script_rechecks_slot_at_exec() {
+    const CASE: &str = "ADK_REVIEW_SLOT_CHILD";
+    if std::env::var_os(CASE).is_some() {
+        initialize().unwrap();
+        let root = current().unwrap().unwrap().root.clone();
+        environment::set_metadata_program_for_tests(
+            root.ancestors().nth(4).unwrap().join("metadata-probe"),
+        );
+        let home = root.ancestors().nth(4).unwrap();
+        let (binary, _) = crate::services::claude_command::ClaudeBinary::resolve().unwrap();
+        let config = crate::services::claude_tui::session::ClaudeTuiLaunchConfig {
+            tmux_session_name: "review-slot".into(),
+            working_dir: root.clone(),
+            claude_bin: binary,
+            agentdesk_exe: PathBuf::from("/fixture/agentdesk"),
+            hook_endpoint: "http://127.0.0.1:18791".into(),
+            session_id: "00000000-0000-4000-8000-000000000001".into(),
+            system_prompt: None,
+            model: None,
+            resume: false,
+        };
+        let files =
+            crate::services::claude_tui::session::prepare_claude_tui_launch(&config).unwrap();
+        for slot in ["3", "2", "1", "unavailable"] {
+            std::fs::write(home.join("active-slot"), slot).unwrap();
+            let marker = root.join("runtime/provider-started");
+            if marker.exists() {
+                std::fs::remove_file(&marker).unwrap();
+            }
+            let out = Command::new("/bin/bash")
+                .arg(&files.launch_script_path)
+                .output()
+                .unwrap();
+            assert_eq!(
+                marker.exists(),
+                slot == "3",
+                "slot={slot}, status={}",
+                out.status
+            );
+        }
+        return;
+    }
+    let (_temp, root, _) = review_fixture();
+    let selector =
+        "config::test_instance::environment_tests::review_tui_script_rechecks_slot_at_exec";
+    let out = tests::command(&root)
+        .args(["--exact", selector, "--nocapture"])
+        .env(CASE, "1")
+        .output()
+        .unwrap();
+    tests::assert_single_test_passed(&out, selector);
+}
+
+#[test]
+fn review_builder_purposes_and_metadata_admission() {
+    const CHILD: &str = "ADK_REVIEW_BUILDER_CHILD";
+    if let Ok(mode) = std::env::var(CHILD) {
+        let root = PathBuf::from(std::env::var("ADK_LOGIN_FIXTURE_ROOT").unwrap());
+        if mode != "operating" {
+            initialize().unwrap();
+        }
+        let home = root.ancestors().nth(4).unwrap();
+        environment::set_metadata_program_for_tests(home.join("metadata-probe"));
+        use crate::services::claude_command::{ClaudeBinary, ClaudeCommandBuilder as B};
+        let (binary, resolution) = ClaudeBinary::resolve().unwrap();
+        let cli = home.join(".local/bin/claude");
+        let constructors = [
+            B::for_simple(&binary, &resolution),
+            B::for_agents(&binary, &resolution),
+            B::for_legacy(&binary, &resolution),
+            B::for_future_for_test(&binary, &resolution),
+            B::for_resolved_version_probe(&binary, &resolution),
+            B::for_version_smoke(cli.to_str().unwrap(), cli.to_str().unwrap()),
+            B::for_tmux_wrapper_argv(cli.to_str().unwrap()),
+        ];
+        for (i, mut builder) in constructors.into_iter().enumerate() {
+            builder
+                .command_mut()
+                .args(["--fixture", "unchanged"])
+                .env("FIXTURE", "same");
+            let mut baseline = Command::new(if i < 5 {
+                resolution.resolved_path.as_deref().unwrap()
+            } else {
+                cli.to_str().unwrap()
+            });
+            if i < 5 {
+                crate::services::platform::apply_binary_resolution(&mut baseline, &resolution);
+            } else {
+                crate::services::platform::augment_exec_path(&mut baseline, &cli);
+            }
+            baseline
+                .args(["--fixture", "unchanged"])
+                .env("FIXTURE", "same");
+            let expected_program = baseline.get_program().to_owned();
+            let expected_args = baseline
+                .get_args()
+                .map(std::ffi::OsStr::to_owned)
+                .collect::<Vec<_>>();
+            let expected_env = baseline
+                .get_envs()
+                .map(|(k, v)| (k.to_owned(), v.map(std::ffi::OsStr::to_owned)))
+                .collect::<Vec<_>>();
+            let result = builder.into_command();
+            if mode.starts_with("opt-in") && (i < 4 || i == 6) {
+                assert!(result.is_err(), "purpose {i} must refuse before spawn");
+            } else {
+                let command = result.unwrap();
+                assert_eq!(command.get_program(), expected_program);
+                assert_eq!(
+                    command.get_args().collect::<Vec<_>>(),
+                    expected_args
+                        .iter()
+                        .map(|x| x.as_os_str())
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    command
+                        .get_envs()
+                        .map(|(k, v)| (k.to_owned(), v.map(std::ffi::OsStr::to_owned)))
+                        .collect::<Vec<_>>(),
+                    expected_env
+                );
+            }
+        }
+        if mode.starts_with("opt-in") {
+            use std::os::unix::fs::PermissionsExt;
+            for (body, present) in [
+                ("#!/bin/sh\nexit 0\n", true),
+                ("#!/bin/sh\nexit 1\n", false),
+                ("#!/usr/bin/python3\nimport time\ntime.sleep(5)\n", false),
+            ] {
+                std::fs::write(home.join("metadata-probe"), body).unwrap();
+                std::fs::set_permissions(
+                    home.join("metadata-probe"),
+                    std::fs::Permissions::from_mode(0o700),
+                )
+                .unwrap();
+                assert_eq!(environment::claude_login_presence(), Some(present));
+                assert_eq!(environment::claude_launch_admission().is_ok(), present);
+                let evidence = crate::services::cluster::readiness::collect_for_login_test();
+                assert_eq!(
+                    evidence.providers["claude"].credential_profiles["test-claude"],
+                    present
+                );
+                let (binary, _) = ClaudeBinary::resolve().unwrap();
+                let config = crate::services::claude_tui::session::ClaudeTuiLaunchConfig {
+                    tmux_session_name: "metadata".into(),
+                    working_dir: root.clone(),
+                    claude_bin: binary,
+                    agentdesk_exe: PathBuf::from("/fixture/agentdesk"),
+                    hook_endpoint: "http://127.0.0.1:18791".into(),
+                    session_id: "00000000-0000-4000-8000-000000000001".into(),
+                    system_prompt: None,
+                    model: None,
+                    resume: false,
+                };
+                let files =
+                    crate::services::claude_tui::session::prepare_claude_tui_launch(&config)
+                        .unwrap();
+                let mut wrapper = B::for_tmux_wrapper_argv(cli.to_str().unwrap());
+                wrapper.command_mut().args(
+                    crate::services::claude_tui::session::build_claude_tui_args(
+                        &config,
+                        &files.hook_settings_path,
+                    ),
+                );
+                assert_eq!(wrapper.into_command().is_ok(), present);
+            }
+            assert!(!root.join("runtime/provider-started").exists());
+        }
+        return;
+    }
+    for mode in ["operating", "legacy", "opt-in", "opt-in-cluster"] {
+        let (_temp, root, home) = review_fixture();
+        if !mode.starts_with("opt-in") {
+            for name in ["manifest.json", "receipt.json"] {
+                let path = root.join(name);
+                let mut value = read_json(&path).unwrap();
+                value.as_object_mut().unwrap().remove("claude_login");
+                std::fs::write(path, value.to_string()).unwrap();
+            }
+            let path = root.join("config/org.yaml");
+            let mut value = read_json(&path).unwrap();
+            value["provider_auth_profiles"]["test-claude"]["home"] =
+                serde_json::json!(root.join("home/.adk/profiles/claude/test-claude"));
+            std::fs::write(path, value.to_string()).unwrap();
+        }
+        if mode == "opt-in-cluster" {
+            let path = root.join("config/agentdesk.yaml");
+            let mut value = read_json(&path).unwrap();
+            value["cluster"]["enabled"] = serde_json::json!(true);
+            std::fs::write(path, value.to_string()).unwrap();
+        }
+        let selector = "config::test_instance::environment_tests::review_builder_purposes_and_metadata_admission";
+        let mut child = if mode == "operating" {
+            let mut c = Command::new(std::env::current_exe().unwrap());
+            c.env_clear()
+                .env("HOME", &home)
+                .env(
+                    "PATH",
+                    format!("{}:/usr/bin:/bin", home.join(".local/bin").display()),
+                )
+                .env("TMPDIR", root.join("tmp"));
+            c
+        } else {
+            tests::command(&root)
+        };
+        let out = child
+            .args(["--exact", selector, "--nocapture"])
+            .env(CHILD, mode)
+            .env("ADK_LOGIN_FIXTURE_ROOT", &root)
+            .output()
+            .unwrap();
+        tests::assert_single_test_passed(&out, selector);
+    }
+}
+
+#[test]
+fn review_legacy_streaming_and_process_backend_do_not_start_opt_in_cli() {
+    const CASE: &str = "ADK_REVIEW_LEGACY_CHILD";
+    let selector = "config::test_instance::environment_tests::review_legacy_streaming_and_process_backend_do_not_start_opt_in_cli";
+    if let Ok(mode) = std::env::var(CASE) {
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        initialize().unwrap();
+        let root = &current().unwrap().unwrap().root;
+        environment::set_metadata_program_for_tests(
+            root.ancestors().nth(4).unwrap().join("metadata-probe"),
+        );
+        if mode == "wrapper" {
+            std::fs::write(root.join("runtime/wrapper-entered"), "fixture").unwrap();
+            let prompt = root.join("runtime/wrapper-prompt");
+            std::fs::write(&prompt, "fixture").unwrap();
+            let cli = root.ancestors().nth(4).unwrap().join(".local/bin/claude");
+            crate::services::tmux_wrapper::run(
+                root.join("runtime/wrapper-output").to_str().unwrap(),
+                root.join("runtime/wrapper-input").to_str().unwrap(),
+                prompt.to_str().unwrap(),
+                root.to_str().unwrap(),
+                &[
+                    cli.display().to_string(),
+                    "--input-format".into(),
+                    "stream-json".into(),
+                ],
+                crate::services::tmux_wrapper::InputMode::Pipe,
+            );
+            return;
+        }
+        let wrapper = root.join("runtime/test-process-wrapper");
+        std::fs::write(&wrapper,format!("#!/bin/bash\nunset AGENTDESK_TEST_CLAUDE_LOGIN\n{}export {CASE}=wrapper\nexec {} --exact {selector} --nocapture\n",environment::shell_environment().unwrap(),crate::services::process::shell_escape(&std::env::current_exe().unwrap().to_string_lossy()))).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _wrapper = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "ADK_TEST_PROCESS_WRAPPER_EXE",
+            &wrapper,
+        );
+        let (sender, _) = std::sync::mpsc::channel();
+        let result = crate::services::claude::execute_command_streaming(
+            "fixture",
+            None,
+            root.to_str().unwrap(),
+            sender.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+        let result = crate::services::claude::execute_streaming_local_process(
+            &[],
+            "fixture",
+            root.to_str().unwrap(),
+            sender,
+            None,
+            "unbound-instance-process",
+            (None, 0),
+        );
+        let _result = result;
+        assert!(
+            root.join("runtime/wrapper-entered").exists(),
+            "actual wrapper entry must run"
+        );
+        assert!(!root.join("runtime/provider-started").exists());
+        return;
+    }
+    let (_temp, root, _) = review_fixture();
+    let output = tests::command(&root)
+        .args(["--exact", selector, "--nocapture"])
+        .env(CASE, "1")
+        .output()
+        .unwrap();
+    tests::assert_single_test_passed(&output, selector);
+}
+
+mod login_admission_tests {
+    use crate::config::test_instance::{environment, tests};
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedExecution, HostedOwner, HostedRecord, HostedState,
+    };
+    use crate::db::dispatched_sessions::hosted_execution::{HostedLocation, SourceRef};
+    use crate::services::claude::herdr_turn::*;
+    use crate::services::claude_tui::hook_server::HookEvent;
+    use crate::services::herdr_launch::{HerdrLaunchEndpoint, HerdrLaunchHost};
+    use crate::services::session_host::HerdrTarget;
+    use crate::services::session_host::herdr_socket_rig_tests::{
+        HerdrRig, KEY, NODE, PANE, SESSION,
+    };
+    use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+
+    #[test]
+    fn slot_and_metadata_refuse_new_bound_pending_before_host_or_input() {
+        const CASE: &str = "ADK_REVIEW_HERDR_CHILD";
+        let selector = "config::test_instance::environment_tests::login_admission_tests::slot_and_metadata_refuse_new_bound_pending_before_host_or_input";
+        if std::env::var_os(CASE).is_none() {
+            let (_temp, root, _) = environment::login_fixture_for_tests();
+            let out = tests::command(&root)
+                .args(["--exact", selector, "--nocapture"])
+                .env(CASE, "1")
+                .output()
+                .unwrap();
+            tests::assert_single_test_passed(&out, selector);
+            return;
+        }
+        crate::config::test_instance::initialize().unwrap();
+        let instance = crate::config::test_instance::current().unwrap().unwrap();
+        let root = &instance.root;
+        let home = root.ancestors().nth(4).unwrap();
+        environment::set_metadata_program_for_tests(home.join("metadata-probe"));
+        struct Ports(std::sync::atomic::AtomicUsize);
+        impl HerdrTurnPorts for Ports {
+            fn launch_host(&self) -> Option<Arc<dyn HerdrLaunchHost>> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                None
+            }
+            fn hook_events(&self) -> broadcast::Receiver<HookEvent> {
+                panic!("no launch host")
+            }
+            fn attach(&self, _: &AttachRequest<'_>) -> Result<bool, String> {
+                Err("fixture attach".into())
+            }
+            fn confirm_bound(
+                &self,
+                _: &HostedOwner,
+                _: &HostedExecution,
+                _: &HerdrTarget,
+            ) -> Result<(), String> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err("fixture bound".into())
+            }
+        }
+        let ports = Ports(std::sync::atomic::AtomicUsize::new(0));
+        let rig = HerdrRig::start();
+        let _registry = rig.registry_on_this_thread();
+        let nonce = "00112233445566778899aabbccddee01";
+        let logical = format!("{}-login", instance.tmux.prefix);
+        let owner = HostedOwner {
+            provider: "claude".into(),
+            discord_token_hash: "fixture".into(),
+            channel_id: "1".into(),
+            logical_key: logical.clone(),
+            owner_node: NODE.into(),
+            runtime_root: root.display().to_string(),
+        };
+        let record = HostedExecution {
+            schema: 1,
+            state: HostedState::Bound,
+            execution_nonce: nonce.into(),
+            owner: owner.clone(),
+            location: Some(HostedLocation {
+                host: "herdr".into(),
+                execution_node: NODE.into(),
+                endpoint_config_key: KEY.into(),
+                socket_addr: rig.socket().display().to_string(),
+                named_session: SESSION.into(),
+                pane_id: PANE.into(),
+            }),
+            expected: Some(rig.expected(nonce)),
+            source_ref: SourceRef {
+                runtime_root: root.display().to_string(),
+                channel: "1".into(),
+                provider: "claude".into(),
+                logical_key: logical.clone(),
+                execution_nonce: nonce.into(),
+                initial_source: None,
+                baseline_event_seq: None,
+            },
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused@127.0.0.1:1/unused")
+            .unwrap();
+        let endpoint = HerdrLaunchEndpoint {
+            execution_node: NODE.into(),
+            config_key: KEY.into(),
+            socket_addr: rig.socket().display().to_string(),
+            herdr_session: SESSION.into(),
+        };
+        for slot in ["3", "2", "1", "unavailable"] {
+            std::fs::write(home.join("active-slot"), slot).unwrap();
+            for state in [None, Some(HostedState::Bound), Some(HostedState::Pending)] {
+                let row = state.map(|state| {
+                    HostedRecord::Known(HostedExecution {
+                        state,
+                        ..record.clone()
+                    })
+                });
+                let turn = HerdrTurn {
+                    pool: &pool,
+                    owner: owner.clone(),
+                    channel_id: 1,
+                    endpoint: endpoint.clone(),
+                    row: row.as_ref(),
+                    prompt: "fixture",
+                    working_dir: root.to_str().unwrap(),
+                    session_id: None,
+                    force_fresh: false,
+                    system_prompt: None,
+                    model: None,
+                    hook_endpoint: Some("http://127.0.0.1:18791".into()),
+                    cancel: None,
+                };
+                let before = ports.0.load(std::sync::atomic::Ordering::SeqCst);
+                let (tx, _) = std::sync::mpsc::channel();
+                let result = execute(turn, &ports, tx);
+                if slot != "3" {
+                    assert_eq!(
+                        result.unwrap_err(),
+                        "test instance Claude login admission refused"
+                    );
+                    assert_eq!(ports.0.load(std::sync::atomic::Ordering::SeqCst), before);
+                    assert!(rig.sends().is_empty());
+                } else {
+                    assert_ne!(
+                        result.err().as_deref(),
+                        Some("test instance Claude login admission refused")
+                    );
+                }
+            }
+        }
+        std::fs::write(home.join("active-slot"), "3").unwrap();
+        std::fs::write(home.join("metadata-probe"), "#!/bin/sh\nexit 1\n").unwrap();
+        let turn = HerdrTurn {
+            pool: &pool,
+            owner,
+            channel_id: 1,
+            endpoint,
+            row: None,
+            prompt: "fixture",
+            working_dir: root.to_str().unwrap(),
+            session_id: None,
+            force_fresh: true,
+            system_prompt: None,
+            model: None,
+            hook_endpoint: None,
+            cancel: None,
+        };
+        let (tx, _) = std::sync::mpsc::channel();
+        assert_eq!(
+            execute(turn, &ports, tx).unwrap_err(),
+            "test instance Claude login admission refused"
+        );
+        assert!(rig.sends().is_empty());
+    }
+    #[test]
+    fn slot_recheck_protects_created_existing_pending_first_input() {
+        const CASE: &str = "ADK_REVIEW_INPUT_CHILD";
+        let selector = "config::test_instance::environment_tests::login_admission_tests::slot_recheck_protects_created_existing_pending_first_input";
+        if std::env::var_os(CASE).is_none() {
+            let (_temp, root, _) = environment::login_fixture_for_tests();
+            let out = tests::command(&root)
+                .args(["--exact", selector, "--nocapture"])
+                .env(CASE, "1")
+                .output()
+                .unwrap();
+            tests::assert_single_test_passed(&out, selector);
+            return;
+        }
+        crate::config::test_instance::initialize().unwrap();
+        let instance = crate::config::test_instance::current().unwrap().unwrap();
+        let root = &instance.root;
+        let home = root.ancestors().nth(4).unwrap();
+        environment::set_metadata_program_for_tests(home.join("metadata-probe"));
+        for lineage in [
+            crate::services::claude_tui::owner_input::Lineage::Created,
+            crate::services::claude_tui::owner_input::Lineage::Existing,
+            crate::services::claude_tui::owner_input::Lineage::Pending,
+        ] {
+            for slot in ["3", "2", "1", "unavailable"] {
+                std::fs::write(home.join("active-slot"), slot).unwrap();
+                let first_input = std::cell::Cell::new(0);
+                let result = with_input_admission(|| {
+                    first_input.set(first_input.get() + 1);
+                    Ok(())
+                });
+                assert_eq!(
+                    first_input.get(),
+                    usize::from(slot == "3"),
+                    "{lineage:?}: {slot}"
+                );
+                assert_eq!(result.is_ok(), slot == "3");
+            }
+        }
+    }
+
+    #[test]
+    fn new_herdr_script_admits_only_the_still_active_declared_slot() {
+        const CASE: &str = "ADK_REVIEW_HERDR_SCRIPT_CHILD";
+        let selector = "config::test_instance::environment_tests::login_admission_tests::new_herdr_script_admits_only_the_still_active_declared_slot";
+        if std::env::var_os(CASE).is_none() {
+            let (_temp, root, _) = environment::login_fixture_for_tests();
+            let out = tests::command(&root)
+                .args(["--exact", selector, "--nocapture"])
+                .env(CASE, "1")
+                .output()
+                .unwrap();
+            tests::assert_single_test_passed(&out, selector);
+            return;
+        }
+        crate::config::test_instance::initialize().unwrap();
+        let instance = crate::config::test_instance::current().unwrap().unwrap();
+        let root = &instance.root;
+        let home = root.ancestors().nth(4).unwrap();
+        environment::set_metadata_program_for_tests(home.join("metadata-probe"));
+        let prepared = PreparedIncarnation::prepare_at(
+            "claude",
+            &format!("{}-new-herdr", instance.tmux.prefix),
+            Some(1),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        let overlay = environment::resolve_profile("claude", Some("test-claude"))
+            .unwrap()
+            .unwrap();
+        let auth = environment::provider_shell_environment(&overlay).unwrap();
+        let command = prepare_herdr_for_login_test(
+            &prepared,
+            root,
+            "00000000-0000-4000-8000-000000000001",
+            None,
+            None,
+            "http://127.0.0.1:18791".into(),
+            &auth,
+        )
+        .unwrap();
+        for slot in ["3", "2", "1", "unavailable"] {
+            std::fs::write(home.join("active-slot"), slot).unwrap();
+            let marker = root.join("runtime/provider-started");
+            if marker.exists() {
+                std::fs::remove_file(&marker).unwrap();
+            }
+            let out = std::process::Command::new("/bin/bash")
+                .args(["-c", &command.command])
+                .output()
+                .unwrap();
+            assert_eq!(marker.exists(), slot == "3", "slot {slot}: {}", out.status);
+        }
     }
 }

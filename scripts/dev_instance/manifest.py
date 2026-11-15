@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from .config import HERDR_CONFIG, build_config, build_org, declared_hosts, provider_home, validate_claude_login, login_runtime_path
+from .config import HERDR_CONFIG, build_config, build_org, declared_hosts, provider_home, validate_claude_login
 from .files import (InstanceError, LAYOUT_DIRS, create_layout, instance_root, read_regular_text,
                     safe_absolute, validate_tree, write_private_json, write_private_text)
 from .profile import same_json, validate_profile
@@ -166,7 +166,7 @@ def child_environment(manifest, ambient):
                                  manifest["api"]["port"], manifest["postgres"]["port"], manifest.get("claude_login"))
     if not same_json(manifest, expected):
         raise InstanceError("child environment differs from its declaration")
-    environment = {"PATH": login_runtime_path(safe_absolute(manifest["worktree"]), manifest.get("claude_login")),
+    environment = {"PATH": str(safe_absolute(manifest["worktree"]) / "target/debug") + ":/usr/bin:/bin",
                    "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
     flags = validate_profile(manifest["profile"])
     if not same_json(flags, manifest["applied_env"]):
@@ -185,6 +185,8 @@ def child_environment(manifest, ambient):
         "AGENTDESK_DCSERVER_LABEL": "com.agentdesk.test." + manifest["instance_id"],
         "AGENTDESK_RELEASE_TMUX_SESSION": "AdkTest-" + manifest["instance_id"] + "-dcserver",
     })
+    if "claude_login" in manifest:
+        environment["AGENTDESK_CLAUDE_PATH"] = manifest["claude_login"]["cli"]
     return environment
 
 
