@@ -97,6 +97,11 @@ pub(super) fn spawn_tui_prompt_relay_observer_inner(
                                 let prompt_id = (event.provider == "claude")
                                     .then(|| extract_prompt_id_from_hook_payload(&event.payload))
                                     .flatten();
+                                super::scheduled_prompt::note_hook_transcript(
+                                    &event.provider,
+                                    prompt_id.as_deref(),
+                                    &event.payload,
+                                );
                                 // Codex hooks name the native turn the input opens or steers.
                                 let native_turn = (event.provider == "codex")
                                     .then(|| event.payload.get("turn_id").and_then(|turn| turn.as_str()))
