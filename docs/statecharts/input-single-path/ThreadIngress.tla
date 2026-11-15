@@ -7,21 +7,23 @@ VARIABLES phase, accepted, retained, delivered, reply, visibleFailure,
           status, session, usedHost, launches, crashes
 VARIABLES hphase, haccepted, hretained, hdelivered, hreply, hfailure,
           hstatus, hactivity, hprobe, hreserved, hepoch, hreadEpoch,
-          hstarted, hstaleEffect, hcrashes, horigin
+          hstarted, hstaleEffect, hcrashes, horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy
 hvars == <<hphase, haccepted, hretained, hdelivered, hreply, hfailure,
            hstatus, hactivity, hprobe, hreserved, hepoch, hreadEpoch,
-           hstarted, hstaleEffect, hcrashes, horigin>>
+           hstarted, hstaleEffect, hcrashes, horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
 vars == <<phase, accepted, retained, delivered, reply, visibleFailure,
           status, session, usedHost, launches, crashes>>
 Authorized == Target \in {"boundThread", "boundChannel"}
 HerdrFields ==
     /\ hphase = "request" /\ haccepted = FALSE /\ hretained = FALSE
     /\ hdelivered = 0 /\ hreply = 0 /\ hfailure = FALSE /\ hstatus = 0
-    /\ hactivity = IF Mutation \in {"herdrBusy", "herdrMachineBusy"} THEN "busy"
+    /\ hactivity = IF Mutation \in {"herdrBusy", "herdrMachineBusy", "herdrMachineJoinsBusy"} THEN "busy"
                     ELSE IF Mutation = "herdrBoot" THEN "booting" ELSE "idle"
     /\ hprobe = "none" /\ hreserved = FALSE /\ hepoch = 1 /\ hreadEpoch = 0
     /\ hstarted = FALSE /\ hstaleEffect = FALSE /\ hcrashes = 0
     /\ horigin = "externalAPI"
+    /\ hnativeChanged = FALSE /\ hjoinedBusy = FALSE /\ hidleWhileBusy = FALSE
+    /\ hmachine = (Mutation \in {"herdrMachineBusy", "herdrMachineJoinsBusy"})
 Init ==
     /\ HerdrFields
     /\ phase = "request" /\ accepted = FALSE /\ retained = FALSE
@@ -128,7 +130,7 @@ HAuthorize ==
     /\ hstatus' = IF Authorized THEN 0 ELSE IF Target = "runtimeUnavailable" THEN 503 ELSE 403
     /\ UNCHANGED <<haccepted, hretained, hdelivered, hreply, hfailure,
                    hactivity, hprobe, hreserved, hepoch, hreadEpoch,
-                   hstarted, hstaleEffect, hcrashes, horigin>>
+                   hstarted, hstaleEffect, hcrashes, horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
 HAdmit ==
     /\ hphase = "checked"
     /\ IF Mutation = "herdrBefore"
@@ -137,62 +139,85 @@ HAdmit ==
        ELSE /\ haccepted' = TRUE /\ hretained' = TRUE /\ hstatus' = 200
             /\ hphase' = IF hactivity = "booting" THEN "held" ELSE "queued"
     /\ UNCHANGED <<hdelivered, hreply, hfailure, hactivity, hprobe, hreserved,
-                   hepoch, hreadEpoch, hstarted, hstaleEffect, hcrashes, horigin>>
+                   hepoch, hreadEpoch, hstarted, hstaleEffect, hcrashes, horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
 HObserve ==
     /\ hphase = "queued" /\ hactivity \in {"idle", "busy"}
-    /\ hphase' = IF Mutation = "herdrMachineBusy" /\ hactivity = "busy" THEN "held" ELSE "probed"
+    /\ hphase' = IF hmachine /\ Mutation # "herdrMachineJoinsBusy" /\ hactivity = "busy" THEN "held" ELSE "probed"
     /\ hprobe' = hactivity /\ hreadEpoch' = hepoch
     /\ hreserved' = (hactivity = "idle")
     /\ horigin' = IF Mutation = "herdrReclassify" THEN "discordPerson" ELSE horigin
     /\ UNCHANGED <<haccepted, hretained, hdelivered, hreply, hfailure, hstatus,
-                   hactivity, hepoch, hstarted, hstaleEffect, hcrashes>>
+                   hactivity, hepoch, hstarted, hstaleEffect, hcrashes, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
 HReturnRead ==
     /\ hphase = "probed" /\ hprobe = "idle"
     /\ hphase' = "delegated"
     /\ hreserved' = (Mutation = "herdrKeepReservation")
     /\ UNCHANGED <<haccepted, hretained, hdelivered, hreply, hfailure, hstatus,
                    hactivity, hprobe, hepoch, hreadEpoch, hstarted,
-                   hstaleEffect, hcrashes, horigin>>
-\* Idle begins its own turn; Busy joins the already started native turn.
-\* The first native effect is counted here; the later receipt is only an ACK.
+                   hstaleEffect, hcrashes, horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
+\* Native activity can change in the same incarnation after the read proof returns.
+HNativeStart ==
+    /\ hphase \in {"delegated", "driverReserved"} /\ hactivity = "idle" /\ ~hnativeChanged
+    /\ hactivity' = "busy" /\ hnativeChanged' = TRUE /\ hreserved' = FALSE
+    /\ UNCHANGED <<hphase, haccepted, hretained, hdelivered, hreply, hfailure, hstatus,
+                   hprobe, hepoch, hreadEpoch, hstarted, hstaleEffect, hcrashes,
+                   horigin, hmachine, hjoinedBusy, hidleWhileBusy>>
+HDriverReserve ==
+    /\ hphase = "delegated" /\ hactivity = "idle"
+    /\ hphase' = "driverReserved" /\ hreserved' = TRUE /\ hreadEpoch' = hepoch
+    /\ UNCHANGED <<haccepted, hretained, hdelivered, hreply, hfailure, hstatus,
+                   hactivity, hprobe, hepoch, hstarted, hstaleEffect, hcrashes,
+                   horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
+HReobserve ==
+    /\ hphase \in {"delegated", "driverReserved"}
+    /\ (hactivity # "idle" \/ hreadEpoch # hepoch \/ (hphase = "driverReserved" /\ ~hreserved))
+    /\ hphase' = "queued" /\ hreserved' = FALSE /\ hprobe' = "none"
+    /\ UNCHANGED <<haccepted, hretained, hdelivered, hreply, hfailure, hstatus,
+                   hactivity, hepoch, hreadEpoch, hstarted, hstaleEffect, hcrashes,
+                   horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
+\* The driver reserves again and checks immediately before the first native effect.
 HBegin ==
-    /\ ((hphase = "delegated" /\ hprobe = "idle")
-        \/ (hphase = "probed" /\ hprobe = "busy"))
+    /\ ((hphase = "driverReserved" /\ hprobe = "idle" /\ hactivity = "idle" /\ hreserved)
+        \/ (Mutation = "herdrNoIdleRecheck" /\ hphase \in {"delegated", "driverReserved"})
+        \/ (hphase = "probed" /\ hprobe = "busy")
+        \/ (Mutation = "herdrStaleEpoch" /\ hphase = "delegated" /\ hactivity = "idle" /\ hreadEpoch # hepoch))
     /\ (hreadEpoch = hepoch \/ Mutation = "herdrStaleEpoch")
     /\ hphase' = "started" /\ hstarted' = TRUE /\ hactivity' = "busy"
-    /\ hdelivered' = hdelivered + 1
+    /\ hdelivered' = hdelivered + 1 /\ hreserved' = FALSE
     /\ hstaleEffect' = (hstaleEffect \/ (hreadEpoch # hepoch))
-    /\ UNCHANGED <<haccepted, hretained, hreply, hfailure, hstatus,
-                   hprobe, hreserved, hepoch, hreadEpoch, hcrashes, horigin>>
+    /\ hjoinedBusy' = (hjoinedBusy \/ (hprobe = "busy" /\ hactivity = "busy"))
+    /\ hidleWhileBusy' = (hidleWhileBusy \/ (hprobe = "idle" /\ hactivity = "busy"))
+    /\ UNCHANGED <<haccepted, hretained, hreply, hfailure, hstatus, hprobe,
+                   hepoch, hreadEpoch, hcrashes, horigin, hnativeChanged, hmachine>>
 HReceipt ==
     /\ hphase = "started"
     /\ hphase' = IF Mutation = "herdrDoubleSubmit" /\ hdelivered = 1 THEN "queued" ELSE "submitted"
     /\ UNCHANGED <<haccepted, hretained, hdelivered, hreply, hfailure, hstatus, hactivity,
                    hprobe, hreserved, hepoch, hreadEpoch, hstarted,
-                   hstaleEffect, hcrashes, horigin>>
+                   hstaleEffect, hcrashes, horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
 HPost ==
     /\ hphase = "submitted" /\ hphase' = "done"
     /\ hreply' = hreply + 1 /\ hretained' = FALSE
     /\ UNCHANGED <<haccepted, hdelivered, hfailure, hstatus, hactivity, hprobe,
                    hreserved, hepoch, hreadEpoch, hstarted, hstaleEffect,
-                   hcrashes, horigin>>
+                   hcrashes, horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
 HReady ==
     /\ hphase = "held" /\ hactivity = "booting"
     /\ hactivity' = "idle"
     /\ hphase' = IF Mutation = "herdrNoWake" THEN "held" ELSE "queued"
     /\ UNCHANGED <<haccepted, hretained, hdelivered, hreply, hfailure, hstatus,
                    hprobe, hreserved, hepoch, hreadEpoch, hstarted,
-                   hstaleEffect, hcrashes, horigin>>
+                   hstaleEffect, hcrashes, horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
 \* Non-person HttpStart never borrows the person Busy injector.
 HNativeEnd ==
-    /\ hphase = "held" /\ hactivity = "busy" /\ Mutation = "herdrMachineBusy"
+    /\ hphase = "held" /\ hactivity = "busy" /\ hmachine
     /\ hactivity' = "idle" /\ hphase' = "queued"
     /\ UNCHANGED <<haccepted, hretained, hdelivered, hreply, hfailure, hstatus,
                    hprobe, hreserved, hepoch, hreadEpoch, hstarted,
-                   hstaleEffect, hcrashes, horigin>>
+                   hstaleEffect, hcrashes, horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
 HRestart ==
     /\ CanCrash /\ hcrashes = 0
-    /\ hphase \in {"queued", "probed", "delegated", "started", "held"}
+    /\ hphase \in {"queued", "probed", "delegated", "driverReserved", "started", "held"}
     /\ hcrashes' = 1 /\ hepoch' = hepoch + 1 /\ hreserved' = FALSE
     /\ IF Mutation = "herdrStaleEpoch" /\ hphase = "delegated"
        THEN /\ hphase' = "delegated" /\ hactivity' = "idle"
@@ -201,26 +226,26 @@ HRestart ==
             /\ hactivity' = "booting"
             /\ hprobe' = "none" /\ hreadEpoch' = 0
     /\ UNCHANGED <<haccepted, hretained, hdelivered, hreply, hfailure, hstatus,
-                   hstarted, hstaleEffect, horigin>>
+                   hstarted, hstaleEffect, horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
 \* A crash after a native effect is not permission to repeat the effect.
 HUncertainFailure ==
     /\ hphase = "uncertain" /\ hphase' = "failed"
     /\ hfailure' = TRUE /\ hretained' = FALSE
     /\ UNCHANGED <<haccepted, hdelivered, hreply, hstatus, hactivity, hprobe,
                    hreserved, hepoch, hreadEpoch, hstarted, hstaleEffect,
-                   hcrashes, horigin>>
+                   hcrashes, horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
 HFail ==
     /\ Mutation = "herdrFailure" /\ hphase = "queued"
     /\ hphase' = "failed" /\ hfailure' = TRUE /\ hretained' = FALSE
     /\ UNCHANGED <<haccepted, hdelivered, hreply, hstatus, hactivity, hprobe,
                    hreserved, hepoch, hreadEpoch, hstarted, hstaleEffect,
-                   hcrashes, horigin>>
+                   hcrashes, horigin, hnativeChanged, hmachine, hjoinedBusy, hidleWhileBusy>>
 HDone == /\ hphase \in {"done", "failed", "denied"} /\ UNCHANGED hvars
-HNext == (HAuthorize \/ HAdmit \/ HObserve \/ HReturnRead \/ HBegin \/ HReceipt
+HNext == (HAuthorize \/ HAdmit \/ HObserve \/ HReturnRead \/ HDriverReserve \/ HReobserve \/ HNativeStart \/ HBegin \/ HReceipt
           \/ HPost \/ HReady \/ HNativeEnd \/ HRestart \/ HUncertainFailure \/ HFail \/ HDone) /\ UNCHANGED vars
 HerdrSpec == Init /\ [][HNext]_hvars
     /\ WF_hvars(HAuthorize) /\ WF_hvars(HAdmit) /\ WF_hvars(HObserve \/ HFail)
-    /\ WF_hvars(HReturnRead) /\ WF_hvars(HBegin) /\ WF_hvars(HReceipt)
+    /\ WF_hvars(HReturnRead) /\ WF_hvars(HDriverReserve) /\ WF_hvars(HReobserve) /\ WF_hvars(HBegin) /\ WF_hvars(HReceipt)
     /\ WF_hvars(HPost) /\ WF_hvars(HReady) /\ WF_hvars(HNativeEnd) /\ WF_hvars(HUncertainFailure)
 HerdrExactlyOnce == hdelivered <= 1 /\ hreply <= 1
 HerdrNoSilentLoss == haccepted => hretained \/ hdelivered = 1 \/ hfailure
@@ -228,7 +253,9 @@ HerdrRejectedNoEffects == hphase = "denied" =>
     hstatus \in {403, 422, 503} /\ ~haccepted /\ ~hretained /\ hdelivered = 0
     /\ hreply = 0 /\ ~hstarted /\ ~hreserved
 HerdrExternalWired == Authorized => hphase # "denied"
-HerdrReservationReturned == hphase \in {"started", "submitted", "done"} => ~hreserved
+HerdrReservationReturned == hphase \in {"delegated", "started", "submitted", "done"} => ~hreserved
+HNoIdleStartWhileBusy == ~hidleWhileBusy
+MachineNeverJoinsBusy == hmachine => ~hjoinedBusy
 HerdrCurrentExecutor == ~hstaleEffect
 HerdrSourcePreserved == horigin = "externalAPI"
 HerdrAcceptedStarts == haccepted ~> hstarted

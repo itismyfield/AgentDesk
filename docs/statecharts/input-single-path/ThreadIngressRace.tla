@@ -6,13 +6,13 @@ CONSTANTS N, Mutation
 Ids == 1..N
 \* Baseline: ad04f6f3ec; HerdrSpec adds external API/Discord same-channel owner joins.
 VARIABLES phase, snapshot, owner, session, launches, delivered, reply, failed
-VARIABLES activity, epoch, readEpoch, reservation, begun, staleEffect, restarts, origins
-hfields == <<activity, epoch, readEpoch, reservation, begun, staleEffect, restarts, origins>>
+VARIABLES activity, epoch, readEpoch, reservation, begun, staleEffect, restarts, origins, nativeChanged, idleWhileBusy
+hfields == <<activity, epoch, readEpoch, reservation, begun, staleEffect, restarts, origins, nativeChanged, idleWhileBusy>>
 HFields ==
     /\ activity = IF Mutation = "herdrBusy" THEN "busy" ELSE "idle"
     /\ epoch = 1 /\ readEpoch = [i \in Ids |-> 0]
     /\ reservation = FALSE /\ begun = [i \in Ids |-> FALSE]
-    /\ staleEffect = FALSE /\ restarts = 0
+    /\ staleEffect = FALSE /\ restarts = 0 /\ nativeChanged = FALSE /\ idleWhileBusy = FALSE
     /\ origins = [i \in Ids |-> IF i = 1 THEN "imessageStart" ELSE IF i = 2 THEN "humanApiDeliver" ELSE "discordPerson"]
 vars == <<phase, snapshot, owner, session, launches, delivered, reply, failed>>
 Init ==
@@ -88,52 +88,75 @@ HObserve(i) ==
     /\ readEpoch' = [readEpoch EXCEPT ![i] = epoch]
     /\ reservation' = (activity = "idle")
     /\ UNCHANGED <<snapshot, owner, session, launches, delivered, reply, failed,
-                   activity, epoch, begun, staleEffect, restarts, origins>>
+                   activity, epoch, begun, staleEffect, restarts, origins, nativeChanged, idleWhileBusy>>
 HReturn(i) ==
     /\ owner = i /\ phase[i] = "idleProbe"
     /\ phase' = [phase EXCEPT ![i] = "delegated"] /\ reservation' = FALSE
     /\ UNCHANGED <<snapshot, owner, session, launches, delivered, reply, failed,
-                   activity, epoch, readEpoch, begun, staleEffect, restarts, origins>>
+                   activity, epoch, readEpoch, begun, staleEffect, restarts, origins, nativeChanged, idleWhileBusy>>
+HNativeStart ==
+    /\ owner \in Ids /\ phase[owner] \in {"delegated", "driverReserved"}
+    /\ activity = "idle" /\ ~nativeChanged
+    /\ activity' = "busy" /\ nativeChanged' = TRUE /\ reservation' = FALSE
+    /\ UNCHANGED <<vars, epoch, readEpoch, begun, staleEffect, restarts, origins, idleWhileBusy>>
+HDriverReserve(i) ==
+    /\ owner = i /\ phase[i] = "delegated" /\ activity = "idle" /\ ~reservation
+    /\ phase' = [phase EXCEPT ![i] = "driverReserved"]
+    /\ reservation' = TRUE /\ readEpoch' = [readEpoch EXCEPT ![i] = epoch]
+    /\ UNCHANGED <<snapshot, owner, session, launches, delivered, reply, failed,
+                   activity, epoch, begun, staleEffect, restarts, origins, nativeChanged, idleWhileBusy>>
+HReobserve(i) ==
+    /\ owner = i /\ phase[i] \in {"delegated", "driverReserved"}
+    /\ (activity # "idle" \/ readEpoch[i] # epoch \/ (phase[i] = "driverReserved" /\ ~reservation))
+    /\ phase' = [phase EXCEPT ![i] = "observe"] /\ reservation' = FALSE
+    /\ UNCHANGED <<snapshot, owner, session, launches, delivered, reply, failed,
+                   activity, epoch, readEpoch, begun, staleEffect, restarts, origins, nativeChanged, idleWhileBusy>>
 HBegin(i) ==
-    /\ owner = i /\ phase[i] \in {"delegated", "busyProbe"}
+    /\ owner = i
+    /\ ((phase[i] = "driverReserved" /\ activity = "idle" /\ reservation)
+        \/ phase[i] = "busyProbe"
+        \/ (Mutation = "herdrNoIdleRecheck" /\ phase[i] \in {"delegated", "driverReserved"})
+        \/ (Mutation = "herdrStaleEpoch" /\ phase[i] = "delegated" /\ activity = "idle" /\ readEpoch[i] # epoch))
     /\ (readEpoch[i] = epoch \/ Mutation = "herdrStaleEpoch")
-    /\ phase' = [phase EXCEPT ![i] = "begun"]
-    /\ begun' = [begun EXCEPT ![i] = TRUE]
-    /\ delivered' = [delivered EXCEPT ![i] = @ + 1]
+    /\ phase' = [phase EXCEPT ![i] = "begun"] /\ begun' = [begun EXCEPT ![i] = TRUE]
+    /\ delivered' = [delivered EXCEPT ![i] = @ + 1] /\ reservation' = FALSE
     /\ staleEffect' = (staleEffect \/ (readEpoch[i] # epoch)) /\ activity' = "busy"
-    /\ launches' = launches + IF phase[i] = "delegated" THEN 1 ELSE 0
+    /\ idleWhileBusy' = (idleWhileBusy \/ (phase[i] # "busyProbe" /\ activity = "busy"))
+    /\ launches' = launches + IF phase[i] # "busyProbe" THEN 1 ELSE 0
     /\ UNCHANGED <<snapshot, owner, session, reply, failed,
-                   epoch, readEpoch, reservation, restarts, origins>>
+                   epoch, readEpoch, restarts, origins, nativeChanged>>
 HReceipt(i) ==
     /\ owner = i /\ phase[i] = "begun"
     /\ phase' = [phase EXCEPT ![i] = "submitted"] /\ owner' = 0
     /\ UNCHANGED <<snapshot, session, launches, delivered, reply, failed, hfields>>
 HRestart ==
     /\ restarts = 0 /\ owner \in Ids
-    /\ phase[owner] \in {"observe", "idleProbe", "delegated", "busyProbe", "begun"}
+    /\ phase[owner] \in {"observe", "idleProbe", "delegated", "driverReserved", "busyProbe", "begun"}
     /\ restarts' = 1 /\ epoch' = epoch + 1 /\ reservation' = FALSE
     /\ phase' = [phase EXCEPT ![owner] =
           IF @ = "begun" THEN "uncertain"
           ELSE IF Mutation = "herdrStaleEpoch" /\ @ = "delegated" THEN "delegated" ELSE "observe"]
     /\ owner' = IF phase[owner] = "begun" THEN 0 ELSE owner
     /\ UNCHANGED <<snapshot, session, launches, delivered, reply, failed,
-                   activity, readEpoch, begun, staleEffect, origins>>
+                   activity, readEpoch, begun, staleEffect, origins, nativeChanged, idleWhileBusy>>
 HShowFailure(i) ==
     /\ phase[i] = "uncertain" /\ phase' = [phase EXCEPT ![i] = "failed"]
     /\ failed' = failed \cup {i}
     /\ UNCHANGED <<snapshot, owner, session, launches, delivered, reply, hfields>>
 HPost(i) == Post(i) /\ UNCHANGED hfields
-HNext == (\E i \in Ids : HClaim(i) \/ HObserve(i) \/ HReturn(i) \/ HBegin(i)
-                         \/ HReceipt(i) \/ HShowFailure(i) \/ HPost(i)) \/ HRestart
+HNext == (\E i \in Ids : HClaim(i) \/ HObserve(i) \/ HReturn(i) \/ HDriverReserve(i) \/ HReobserve(i) \/ HBegin(i)
+                         \/ HReceipt(i) \/ HShowFailure(i) \/ HPost(i)) \/ HRestart \/ HNativeStart
          \/ (Done /\ UNCHANGED hfields)
 hvars == <<vars, hfields>>
 HerdrSpec == HInit /\ [][HNext]_hvars
     /\ \A i \in Ids : WF_hvars(HClaim(i)) /\ WF_hvars(HObserve(i))
-        /\ WF_hvars(HReturn(i)) /\ WF_hvars(HBegin(i))
+        /\ WF_hvars(HReturn(i)) /\ WF_hvars(HDriverReserve(i))
+        /\ WF_hvars(HReobserve(i)) /\ WF_hvars(HBegin(i))
         /\ WF_hvars(HReceipt(i)) /\ WF_hvars(HShowFailure(i)) /\ WF_hvars(HPost(i))
+HNoIdleStartWhileBusy == ~idleWhileBusy
 HerdrCurrentExecutor == ~staleEffect
 HerdrReservationReturned ==
-    (\E i \in Ids : phase[i] = "begun") => ~reservation
+    (\E i \in Ids : phase[i] \in {"delegated", "begun"}) => ~reservation
 HerdrSourcePreserved ==
     origins = [i \in Ids |-> IF i = 1 THEN "imessageStart" ELSE IF i = 2 THEN "humanApiDeliver" ELSE "discordPerson"]
 EachDeliveredGetsOutcome == \A i \in Ids : delivered[i] = 1 ~> (reply[i] = 1 \/ i \in failed)

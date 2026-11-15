@@ -7,5 +7,5 @@ CONSTANTS
     Mutation = "herdrFailure"
     CanCrash = FALSE
 SPECIFICATION HerdrSpec
-INVARIANT HerdrExactlyOnce HerdrNoSilentLoss HerdrRejectedNoEffects HerdrExternalWired HerdrReservationReturned HerdrCurrentExecutor HerdrSourcePreserved
+INVARIANT HNoIdleStartWhileBusy MachineNeverJoinsBusy HerdrExactlyOnce HerdrNoSilentLoss HerdrRejectedNoEffects HerdrExternalWired HerdrReservationReturned HerdrCurrentExecutor HerdrSourcePreserved
 PROPERTY HerdrAcceptedCompletes HerdrDeliveredGetsOutcome

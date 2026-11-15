@@ -133,3 +133,13 @@ python3 scripts/ci/statecharts_tlc.py --root <materialized-scratch> --jobs 3
 - parent 확인 권한/actual child host·O-b child writer의 실제 준비는 코드 검증·통합 수용의 별도 경계다. 본 모델의 reply 포트가 O-b의 구현·운영 증거를 대신하지 않는다.
 - Cancel·Terminate·clear·stop의 모든 진입점은 설계 전수표에 고정했다. 이 모델은 기존 exact-front/epoch와 visible terminal 포트를 소비하며 새 kill/삭제/reset 권한을 만들지 않는다. native modal·draft·source inode 검사는 N03~N05의 기존 입력 모델/생산 경계에 남긴다.
 - all fields의 실제 DB/lease/notice 원자성을 TLA 한 행동으로 승격해 보장하지 않는다. 실제 pre-admission 효과0, first-key exact identity, after-effect no-resend는 구현 대상 시험과 원인 제거 production mutant로 확인해야 한다.
+
+## T1 0단계: Idle 재검사와 machine 정책
+
+T1은 main `d40c06eb47a358373a740b8596144640a3b8ba63`을 먼저 병합했다. 모델 값은 설계 §2 E11/N02/N04/N05의 사람 판정, Idle/Busy, readiness reservation과 같은 incarnation의 native 활동에서 가져왔다. `HNativeStart`는 read reservation을 반환한 뒤와 driver reservation 뒤 양쪽에서 한 번 Idle→Busy로 바꾼다. `HDriverReserve`와 `HReobserve`가 새 예약과 첫 효과 직전 current Idle을 검사한다. 효과 당시 Busy 여부를 따로 기록해 `HNoIdleStartWhileBusy`와 `MachineNeverJoinsBusy`를 검사한다. provenance와 정책을 같은 값으로 취급하지 않는다.
+
+수정 전 모델에 빠졌던 환경 전이를 추가하고 재검사를 제거한 동일 fixture는 단일·Race 모두 `HNoIdleStartWhileBusy` RED다. machine Held 분기 제거는 `MachineNeverJoinsBusy` RED다. 각 정상 Idle/Busy/MachineBusy/Restart cfg는 GREEN이며 기존 mutant 위반집합은 보존했다. 예약 미반환 제어는 위임 직후 reservation도 검사한다.
+
+공식 harness 실행: **39 cfg = 22 GREEN + 17 expected RED**, 기대집합 불일치·도구 오류·skip·미선택 0. 원시 로그는 `/home/adk/adk/lane-runs/i8125/logs/model-t1-verified.log`이고 scratch cfg/expected는 같은 디렉터리의 `model-t1-verified/`다. 재현 명령은 `python3 /home/adk/adk/lane-runs/i8125/logs/check-t1-model.py <새 scratch>`이며 `.cfg.example` 39개를 materialize한 뒤 `scripts/ci/statecharts_tlc.py --root <scratch> --jar /home/adk/adk/lane-runs/i8119/logs/s1/statechart/tla2tools.jar --jobs 3`을 실행한다. initial 2회 진단 로그는 최종 증거가 아니다. 모델 수정·실행은 30분 이내에 마쳤다. 정식 CI cfg/expected 등록은 바꾸지 않았다.
+
+구현 인계: 실제 HTTP→owner 경로에서 read proof 반환 뒤 Busy가 된 early/late barrier는 새 Idle own-turn 효과 0이어야 한다. machine은 native end 이전 Busy join 0, 이후 자기 turn 효과 1이어야 한다. 모델은 HTTP·PG·native 실행 증거를 대신하지 않는다.

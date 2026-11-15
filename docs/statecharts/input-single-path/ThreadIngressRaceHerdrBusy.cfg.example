@@ -1,5 +1,5 @@
 \* EXPECTED_SAFETY=- EXPECTED_LIVENESS=-
 CONSTANTS N = 3 Mutation = "herdrBusy"
 SPECIFICATION HerdrSpec
-INVARIANT NoDuplicate SuccessBacked HerdrCurrentExecutor HerdrReservationReturned HerdrSourcePreserved
+INVARIANT HNoIdleStartWhileBusy NoDuplicate SuccessBacked HerdrCurrentExecutor HerdrReservationReturned HerdrSourcePreserved
 PROPERTY EachAcceptedStarts EachAcceptedCompletes EachDeliveredGetsOutcome
