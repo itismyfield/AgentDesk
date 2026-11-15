@@ -1094,7 +1094,7 @@ class S05GeneratorHistoryTest(unittest.TestCase):
         self.assertFalse(self.path.with_name(self.path.name + ".lock").exists())
 
     def test_changed_macro_argument_cannot_hide_reverse_debt(self):
-        before = ('macro_rules! call { ($module:ident) => { $module::run() }; }\n'
+        before = ('macro_rules! call { ($module:ident) => { crate::$module::run() }; }\n'
                   'pub mod high { pub fn run() -> u8 { 1 } }\n'
                   'pub mod low { pub fn run() -> u8 { 1 } '
                   'pub fn f() -> u8 { crate::high::run() + call!(low) } }\n')
