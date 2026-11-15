@@ -498,6 +498,14 @@ session-lifecycle/HerdrHandoffNonceIdFixedRewritten.cfg	HerdrHandoffNonce	-	-
 session-lifecycle/HerdrHandoffNonceIdNoEnd.cfg	HerdrHandoffNonce	NoCapture	-
 session-lifecycle/HerdrHandoffNonceIdNoInode.cfg	HerdrHandoffNonce	OwnTranscript	-
 session-lifecycle/HerdrHandoffNonceIdNoOwn.cfg	HerdrHandoffNonce	OwnTranscript	-
+session-lifecycle/HerdrHandoffNonceIdFixedHerdr.cfg	HerdrHandoffNonce	-	-
+session-lifecycle/HerdrHandoffNonceIdFixedHerdrAgain.cfg	HerdrHandoffNonce	-	-
+session-lifecycle/HerdrHandoffNonceIdFixedHerdrAgainFromTmux.cfg	HerdrHandoffNonce	-	-
+session-lifecycle/HerdrHandoffNonceIdFixedHerdrOther.cfg	HerdrHandoffNonce	-	-
+session-lifecycle/HerdrHandoffNonceIdNoNonce.cfg	HerdrHandoffNonce	NoCapture	-
+session-lifecycle/HerdrHandoffNonceIdNoRetired.cfg	HerdrHandoffNonce	NoCapture	-
+session-lifecycle/HerdrHandoffNonceIdTmuxOnlyHerdr.cfg	HerdrHandoffNonce	-	Delivered
+session-lifecycle/HerdrHandoffNonceIdTmuxOnlyHerdrAgain.cfg	HerdrHandoffNonce	-	DeliveredAgain
 session-lifecycle/HerdrHandoffPersonBefore.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHandoffQueueBefore.cfg	HerdrSession	-	HandoffProgress
 session-lifecycle/HerdrHandoffTargetBefore.cfg	HerdrSession	NoBusyExit,NoLiteralIntoDraft,NoUnexpectedEnter,NoWrongExecutionExit	HandoffProgress

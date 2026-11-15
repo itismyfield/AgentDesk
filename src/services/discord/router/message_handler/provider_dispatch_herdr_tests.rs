@@ -506,7 +506,14 @@ impl Fixture {
 
     /// The provider's answer to the prompt once its paste and Enter arrived.
     fn answer(&self, started: &Started) {
-        if !wait_for(&self.finished, "the prompt", || self.rig.sends().len() == 2) {
+        self.answer_after(started, 0);
+    }
+
+    /// `answer` for a later turn on the same rig, whose earlier turns made `earlier` pane writes.
+    fn answer_after(&self, started: &Started, earlier: usize) {
+        if !wait_for(&self.finished, "the prompt", || {
+            self.rig.sends().len() == earlier + 2
+        }) {
             return;
         }
         let session = &started.session;

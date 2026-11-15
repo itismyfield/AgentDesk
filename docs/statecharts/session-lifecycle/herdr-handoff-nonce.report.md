@@ -113,3 +113,46 @@ The nine earlier configs gained `Transcript = "same"` and the `OwnTranscript` in
 results are unchanged. Eighteen configs, 7.6 s, every expected violation matched.
 A rewritten transcript of the same session (another inode) stays refused, as the pin rule calls it
 an anomaly; its input ends retained with the existing notice and its liveness is not claimed.
+
+## Renumbered transcript of a Herdr execution (r3)
+
+Review of r2 (P1-1): the renumbering admission required the tmux end proof, so a channel already
+on Herdr (`.host_kind` = herdr) refused every start after a host reboot that renumbered its volume,
+including a channel whose first switch the r2 fix let through. Nothing earlier re-pins its binding:
+reconnect admits only a matching live Herdr execution, the O writer renumbers its own copy, and the
+new SessionStart comes after the refused launch.
+
+Rule after the change: the binding's execution is proven ended by the tmux proof, or by the
+channel's hosted row naming that execution Retired with the same owner and nonce. The turn reaches
+`launched_source` only for a Legacy, absent or Retired row (`herdr_turn.rs:260-275`), so a Bound or
+Pending execution never meets this judgment.
+
+End-evidence census (`git grep -n -E 'retire_pg\(|retire_confirmed\(|\.state = HostedState::Retired|retire_unsent\(|retire_own_(pending|unplaced)\(' -- src`):
+
+| Writer of Retired | Precondition | Code |
+|---|---|---|
+| CAS from the same owner and nonce only | `plan_state_change` → `same_execution` | `db/dispatched_sessions/hosted_execution.rs:459-472,545-560` |
+| Terminate | pane end read, then close | `herdr_terminate.rs:224-236,589-597` |
+| Row end recovery | ended turn read | `recovery_engine/herdr_row_end.rs:488-493`, `herdr_row_end_live.rs:66-67` |
+| Server replaced / root replaced | placed pane Missing or Exited | `recovery_engine/herdr_server_replaced.rs:265-287`, `herdr_terminate/root_replaced.rs:182-188,410,536,554` |
+| Launch that never sent its create, unplaced resolution | no pane was created or placed | `herdr_launch.rs:586-608`, `herdr_launch/unplaced.rs:467-470`, `prepared.rs:25,53` |
+| Herdr return, CLI | after `/exit` end, operator end check | `claude/herdr_return.rs:79-90`, `cli/herdr.rs:305-326` |
+| Readers | `herdr_launch.rs:434-447` (retired hold), `host_reconcile.rs:127`, `herdr_row_end.rs:396`, `runtime_marker.rs:25`, `herdr_turn/handoff.rs` (`PriorExecution::ended`) | |
+
+| Config | NoCapture | OwnTranscript | Delivered / DeliveredAgain |
+|---|---|---|---|
+| IdTmuxOnlyHerdr (r2 rule, retired Herdr execution) | GREEN | GREEN | RED Delivered |
+| IdTmuxOnlyHerdrAgain (r2 rule, tmux switch then reboot) | GREEN | GREEN | RED DeliveredAgain |
+| IdFixedHerdr | GREEN | GREEN | GREEN |
+| IdFixedHerdrAgain / IdFixedHerdrAgainFromTmux (second reboot) | GREEN | GREEN | GREEN |
+| IdFixedHerdrOther (Retired row names another nonce, h1 may run) | GREEN | GREEN | not checked |
+| IdNoNonce / IdNoRetired (mutants) | RED | GREEN | not checked |
+
+The admitted pin must be verified. A Herdr resume start logs a stat record (`binding_events.rs:874-882`
+via `herdr_resume.rs:41-45`), which leaves the pin unverified until a later verified record of the
+same execution (a source check or a restart's reconnect, `herdr_source.rs:318`). A channel whose
+latest record is that stat still refuses with "no verified durable binding"; this rule does not
+change it.
+
+All earlier configs gained `Again = FALSE`; their results are unchanged. Twenty-six configs,
+`--jobs 1`, 36.7 s, every expected violation matched.

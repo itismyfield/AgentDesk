@@ -9,21 +9,31 @@
 \* "renumbered" the recorded inode on a device a host reboot renumbered, first record its own;
 \* "rewritten" another inode naming the same session; "foreign" the recorded inode renumbered
 \* but its first record names another session.
-\* IdPolicy: "before" compares (dev, ino) exactly, "fixed" also admits a proven renumbering.
+\* IdPolicy: "before" compares (dev, ino) exactly; "tmuxonly" admits a proven renumbering only after
+\* the old tmux execution ended; "fixed" also after the binding's own Herdr execution was retired.
+\* Start "herdrretired": the binding was logged by Herdr execution h1, whose row is Retired;
+\* "herdrother": h1 logged it and may still run while the Retired row names another nonce h0.
+\* Again: after a delivery the host reboots once more, retiring h2 and renumbering the volume again.
 EXTENDS Naturals, TLC
-CONSTANTS Policy, Mutant, Ascii, Start, ResumeLogged, Direct, Transcript, IdPolicy
-VARIABLES tmux, herdrPane, marker, hostKind, recorded, journal, msg, captured, rebooted, taken
-vars == <<tmux, herdrPane, marker, hostKind, recorded, journal, msg, captured, rebooted, taken>>
+CONSTANTS Policy, Mutant, Ascii, Start, ResumeLogged, Direct, Transcript, IdPolicy, Again
+VARIABLES tmux, herdrPane, marker, hostKind, recorded, journal, msg, captured, rebooted, taken,
+          rowState, rowNonce, rounds
+vars == <<tmux, herdrPane, marker, hostKind, recorded, journal, msg, captured, rebooted, taken,
+          rowState, rowNonce, rounds>>
+HerdrStart == Start \in {"herdrretired", "herdrother"}
 
 \* t0: the tmux execution that logged the latest record; t1: the tmux resume that replaced it;
 \* h1: a failed herdr create; h2: the new herdr execution.
 Init == /\ tmux = IF Start = "alive" THEN "alive" ELSE "ended"
-        /\ herdrPane = IF Start = "failedcreate" THEN "alive" ELSE "none"
-        /\ marker = IF Start = "failedcreate" THEN "h1" ELSE "t1"
-        /\ hostKind = IF Start = "failedcreate" THEN "herdr" ELSE "tmux"
-        /\ recorded = IF ResumeLogged THEN "t1" ELSE "t0"
+        /\ herdrPane = IF Start \in {"failedcreate", "herdrother"} THEN "alive" ELSE "none"
+        /\ marker = IF Start = "failedcreate" \/ HerdrStart THEN "h1" ELSE "t1"
+        /\ hostKind = IF Start = "failedcreate" \/ HerdrStart THEN "herdr" ELSE "tmux"
+        /\ recorded = IF HerdrStart THEN "h1" ELSE IF ResumeLogged THEN "t1" ELSE "t0"
         /\ journal = "none" /\ msg = "queued" /\ captured = FALSE /\ rebooted = FALSE
         /\ taken = "none"
+        /\ rowState = IF HerdrStart THEN "retired" ELSE "none"
+        /\ rowNonce = IF Start = "herdrretired" THEN "h1" ELSE "h0"
+        /\ rounds = 1
 
 Mismatch == marker # recorded
 \* The old execution the marker names is a tmux one that is proven gone.
@@ -33,60 +43,78 @@ Refused ==
       [] Mutant = "NoEndProof" -> Mismatch /\ hostKind # "tmux"
       [] Mutant = "NoHostCheck" -> Mismatch /\ tmux # "ended"
       [] OTHER -> Mismatch /\ ~TmuxEnded
+\* A Retired row is written only for the confirmed-ended execution of its owner and nonce.
+HerdrRetired == rowState = "retired" /\ (rowNonce = recorded \/ Mutant = "IdNoNonce")
+EndProof == \/ TmuxEnded
+            \/ /\ IdPolicy = "fixed"
+               /\ (HerdrRetired \/ (Mutant = "IdNoRetired" /\ hostKind = "herdr"))
 \* The transcript check after the nonce check: only the recorded file passes, under its new
-\* device number once the old tmux execution is proven ended.
+\* device number once the execution that logged the binding is proven ended.
 IdentityOk ==
     \/ Transcript = "same"
-    \/ /\ IdPolicy = "fixed"
+    \/ /\ IdPolicy \in {"tmuxonly", "fixed"}
        /\ (Transcript = "renumbered" \/ (Mutant = "IdNoOwn" /\ Transcript = "foreign")
            \/ (Mutant = "IdNoInode" /\ Transcript = "rewritten"))
-       /\ (TmuxEnded \/ Mutant = "IdNoEnd")
+       /\ (EndProof \/ Mutant = "IdNoEnd")
 OtherAlive == tmux = "alive" \/ herdrPane = "alive"
 \* The pinned close accepts a non-ASCII name only when the name check is fixed.
 CloseWorks == Ascii \/ Policy = "fixed"
 
 \* The input owner begins a journal for a Legacy front and closes the live pane first.
-Begin == /\ msg = "queued" /\ journal = "none" /\ Start # "failedcreate"
+\* A Retired row is not a Legacy front, so no journal begins for it.
+Begin == /\ msg = "queued" /\ journal = "none" /\ Start # "failedcreate" /\ ~HerdrStart
          /\ journal' = IF tmux = "ended" THEN "ended" ELSE "begun"
-         /\ UNCHANGED <<tmux, herdrPane, marker, hostKind, recorded, msg, captured, rebooted, taken>>
+         /\ UNCHANGED <<tmux, herdrPane, marker, hostKind, recorded, msg, captured, rebooted, taken, rowState, rowNonce, rounds>>
 Close == /\ journal = "begun" /\ CloseWorks
          /\ tmux' = "ended" /\ journal' = "ended"
-         /\ UNCHANGED <<herdrPane, marker, hostKind, recorded, msg, captured, rebooted, taken>>
+         /\ UNCHANGED <<herdrPane, marker, hostKind, recorded, msg, captured, rebooted, taken, rowState, rowNonce, rounds>>
 \* Kill-tmux ends the pane and leaves every marker in place.
 KillTmux == /\ tmux = "alive" /\ tmux' = "ended"
-            /\ UNCHANGED <<herdrPane, marker, hostKind, recorded, journal, msg, captured, rebooted, taken>>
+            /\ UNCHANGED <<herdrPane, marker, hostKind, recorded, journal, msg, captured, rebooted, taken, rowState, rowNonce, rounds>>
 Ready == \/ journal = "ended"
-         \/ Start = "failedcreate" /\ journal = "none"
+         \/ (Start = "failedcreate" \/ HerdrStart) /\ journal = "none"
          \/ Direct /\ journal # "ended"
 Launch == /\ msg \in {"queued", "rejected"} /\ Ready
           /\ IF Refused \/ ~IdentityOk
                THEN /\ msg' = "rejected"
-                    /\ UNCHANGED <<tmux, herdrPane, marker, hostKind, recorded, journal, captured, taken>>
+                    /\ UNCHANGED <<tmux, herdrPane, marker, hostKind, recorded, journal, captured, taken,
+                                   rowState, rowNonce>>
                ELSE /\ captured' = (captured \/ OtherAlive) /\ taken' = Transcript
                     /\ marker' = "h2" /\ hostKind' = "herdr" /\ recorded' = "h2"
                     /\ msg' = "delivered" /\ journal' = "none"
-                    /\ UNCHANGED <<tmux, herdrPane>>
-          /\ UNCHANGED rebooted
+                    /\ herdrPane' = "alive" /\ rowState' = "bound" /\ rowNonce' = "h2"
+                    /\ UNCHANGED tmux
+          /\ UNCHANGED <<rebooted, rounds>>
 \* A rejected input is resent by the user and judged again from the same markers.
 Resend == /\ msg = "rejected" /\ msg' = "queued"
-          /\ UNCHANGED <<tmux, herdrPane, marker, hostKind, recorded, journal, captured, rebooted, taken>>
+          /\ UNCHANGED <<tmux, herdrPane, marker, hostKind, recorded, journal, captured, rebooted, taken, rowState, rowNonce, rounds>>
 \* Restart without file cleanup: markers, the binding log and the journal stay; only memory is rebuilt.
 \* Boot orphan sweep and partial marker writes are not modeled.
 \* The transcript, its first record and the binding record are files, so a restart judges them alike.
 Boot == /\ ~rebooted /\ rebooted' = TRUE
-        /\ UNCHANGED <<tmux, herdrPane, marker, hostKind, recorded, journal, msg, captured, taken>>
+        /\ UNCHANGED <<tmux, herdrPane, marker, hostKind, recorded, journal, msg, captured, taken, rowState, rowNonce, rounds>>
 
-Next == Begin \/ Close \/ KillTmux \/ Launch \/ Resend \/ Boot
+\* Another host reboot: h2 ends, recovery retires its row and the volume is renumbered again.
+Reboot == /\ Again /\ msg = "delivered" /\ rounds = 1
+          /\ herdrPane' = "none" /\ rowState' = "retired" /\ msg' = "queued" /\ rounds' = 2
+          /\ UNCHANGED <<tmux, marker, hostKind, recorded, journal, captured, rebooted, taken, rowNonce>>
+
+Next == Begin \/ Close \/ KillTmux \/ Launch \/ Resend \/ Boot \/ Reboot
 Spec == Init /\ [][Next]_vars /\ WF_vars(Begin) /\ WF_vars(Close) /\ WF_vars(Launch)
+        /\ WF_vars(Reboot)
 TypeOK == /\ tmux \in {"alive", "ended"} /\ herdrPane \in {"none", "alive"}
           /\ marker \in {"t1", "h1", "h2"} /\ hostKind \in {"tmux", "herdr"}
-          /\ recorded \in {"t0", "t1", "h2"} /\ journal \in {"none", "begun", "ended"}
+          /\ recorded \in {"t0", "t1", "h1", "h2"} /\ journal \in {"none", "begun", "ended"}
           /\ msg \in {"queued", "rejected", "delivered"}
           /\ taken \in {"none", "same", "renumbered", "rewritten", "foreign"}
+          /\ rowState \in {"none", "retired", "bound"} /\ rowNonce \in {"h0", "h1", "h2"}
+          /\ rounds \in 1..2
 \* Safety: no launch takes the binding while another execution still runs.
 NoCapture == ~captured
 \* Safety: a launch resumes only the recorded transcript file, never another session's or inode.
 OwnTranscript == taken \in {"none", "same", "renumbered"}
 \* Liveness: the first message after the switch reaches the new herdr session.
 Delivered == <> (msg = "delivered")
+\* Liveness: after the second reboot the next message reaches a new herdr session as well.
+DeliveredAgain == <> (rounds = 2 /\ msg = "delivered")
 ====

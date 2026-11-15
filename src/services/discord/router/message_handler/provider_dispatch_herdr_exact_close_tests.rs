@@ -361,24 +361,12 @@ fn an_unlogged_tmux_resume_marker_lets_the_first_herdr_turn_resume_once_that_tmu
 #[test]
 fn a_transcript_renumbered_by_a_host_reboot_lets_the_first_herdr_turn_resume_after_its_tmux_ended_pg()
  {
-    use crate::services::tui_prompt_dedupe::binding_events as events;
     let root = crate::config::TestRuntimeRootGuard::new();
     let fx = Fixture::with_root("resume-renumbered", None, root);
     let marker = crate::services::tmux_common::session_temp_path(fx.logical(), "spawn_nonce");
     std::fs::write(&marker, "a".repeat(32)).unwrap();
     let (session, path) = fx.seed_resumable(true);
-    // A host reboot after that record gave the transcript's volume another device number.
-    let log = events::log_path(CHANNEL).unwrap().unwrap();
-    let mut rows = String::new();
-    for line in std::fs::read_to_string(&log).unwrap().lines() {
-        let mut row: Value = serde_json::from_str(line).unwrap();
-        let source = &mut row["new"]["source"];
-        source["dev"] = (source["dev"].as_u64().unwrap() + 1).into();
-        row["committed_at"] = "2000-01-01T00:00:00Z".into();
-        rows.push_str(&format!("{row}\n"));
-    }
-    std::fs::write(&log, rows).unwrap();
-    events::forget_channel_for_tests(CHANNEL);
+    reboot_renumbers_the_volume();
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
     let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
@@ -391,4 +379,104 @@ fn a_transcript_renumbered_by_a_host_reboot_lets_the_first_herdr_turn_resume_aft
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
     assert_eq!(fx.row(), Some(HostedState::Bound));
     assert_eq!(fx.rig.sends(), prompt_sends());
+}
+
+/// A host reboot after every logged record: the transcript's volume comes back under another
+/// device number, so each recorded identity keeps its inode and loses its device.
+fn reboot_renumbers_the_volume() {
+    use crate::services::tui_prompt_dedupe::binding_events as events;
+    let shift = |source: Option<&mut Value>| {
+        if let Some(source) = source
+            && let Some(dev) = source.get("dev").and_then(Value::as_u64)
+        {
+            source["dev"] = (dev + 1).into();
+        }
+    };
+    let log = events::log_path(CHANNEL).unwrap().unwrap();
+    let mut rows = String::new();
+    for line in std::fs::read_to_string(&log).unwrap().lines() {
+        let mut row: Value = serde_json::from_str(line).unwrap();
+        shift(row.get_mut("old"));
+        shift(row.pointer_mut("/new/source"));
+        shift(row.pointer_mut("/new/resolved/source"));
+        row["committed_at"] = "2000-01-01T00:00:00Z".into();
+        rows.push_str(&format!("{row}\n"));
+    }
+    std::fs::write(&log, rows).unwrap();
+    events::forget_channel_for_tests(CHANNEL);
+}
+
+/// The verified record a live Herdr execution's source check logs after its resume start, whose
+/// own record is a stat; it carries the execution's nonce from the pane's marker.
+fn verify_pin(fx: &Fixture, session: &str, path: &Path) {
+    use crate::services::tui_prompt_dedupe::binding_events::{
+        self as events, CauseSource, Proposal,
+    };
+    let named = path.display().to_string();
+    let proposal = Proposal {
+        channel_id: CHANNEL,
+        provider: "claude",
+        tmux_session: fx.logical(),
+        session_id: Some(session),
+        path: &named,
+        replaced: None,
+        cause: CauseSource::Observed,
+        hook: None,
+    };
+    let source =
+        crate::services::claude::session_handoff::transcript_file(fx.cwd.path(), session, None);
+    events::record_verified(&proposal, &source.unwrap().unwrap()).unwrap();
+}
+
+#[test]
+fn a_herdr_execution_retired_by_each_host_reboot_resumes_its_renumbered_transcript_pg() {
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let fx = Fixture::with_root("herdr-reboots", None, root);
+    let (session, path) = fx.seed_resumable(true);
+    let mut sends = 0;
+    // The tmux switch, then two host reboots of the Herdr execution each one started.
+    for turn in 0..3 {
+        let launcher = Arc::new(Launcher::default());
+        let ports = fx.ports(&launcher);
+        let (result, _) = fx.turn(&fx.record(), &ports, || {
+            if let Some(started) = fx.start_provider_as(&launcher, true, "resume") {
+                assert_eq!((&started.session, &started.path), (&session, &path));
+                fx.answer_after(&started, sends);
+            }
+        });
+        assert_eq!(result, Ok(()), "turn {turn}");
+        assert_eq!(launcher.creates.load(Ordering::SeqCst), 1, "turn {turn}");
+        assert_eq!(fx.row(), Some(HostedState::Bound), "turn {turn}");
+        sends += 2;
+        assert_eq!(fx.rig.sends().len(), sends, "turn {turn}");
+        verify_pin(&fx, &session, &path);
+        // Recovery retires the execution the reboot ended; its transcript comes back renumbered.
+        let HostedRecord::Known(mut record) = fx.record() else {
+            panic!("turn {turn} left no hosted record");
+        };
+        record.state = HostedState::Retired;
+        fx.store(&record);
+        reboot_renumbers_the_volume();
+    }
+    // A Retired row of another execution proves nothing about the one that logged the binding.
+    let HostedRecord::Known(mut record) = fx.record() else {
+        panic!("no hosted record");
+    };
+    let other = "f".repeat(32);
+    record.execution_nonce = other.clone();
+    record.source_ref.execution_nonce = other.clone();
+    if let Some(expected) = record.expected.as_mut() {
+        expected.binding_nonce = other;
+    }
+    fx.store(&record);
+    assert!(matches!(fx.record(), HostedRecord::Known(_)));
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    let (result, _) = fx.turn(&fx.record(), &ports, || {});
+    assert_eq!(
+        result,
+        Err("herdr launch current_session: handoff transcript identity changed".into())
+    );
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
+    assert_eq!(fx.rig.sends().len(), sends);
 }

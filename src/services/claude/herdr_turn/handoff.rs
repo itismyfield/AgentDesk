@@ -64,11 +64,19 @@ pub(super) fn launched_source(
     let auth = crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay)
         .map_err(|e| launch_error("auth_overlay", e))?;
     let mut earlier = ports.earlier_tmux(logical);
+    let judged = |earlier: &mut dyn EarlierExecution| {
+        let (owner, row) = (&turn.owner, turn.row);
+        let mut prior = PriorExecution {
+            earlier,
+            owner,
+            row,
+        };
+        current_session(turn.channel_id, logical, turn.session_id, &mut prior)
+    };
     let requested = if turn.force_fresh {
         None
     } else {
-        current_session(turn.channel_id, logical, turn.session_id, earlier.as_mut())
-            .map_err(|e| launch_error("current_session", e))?
+        judged(earlier.as_mut()).map_err(|e| launch_error("current_session", e))?
     };
     let prior = resumed_session(turn, &overlay, requested.as_deref())
         .map_err(|e| launch_error("resume_source", e))?;
@@ -87,8 +95,7 @@ pub(super) fn launched_source(
     let latest = if turn.force_fresh {
         None
     } else {
-        current_session(turn.channel_id, logical, turn.session_id, earlier.as_mut())
-            .map_err(|e| launch_error("current_session", e))?
+        judged(earlier.as_mut()).map_err(|e| launch_error("current_session", e))?
     };
     let resumed = resumed_session(turn, &overlay, latest.as_deref())
         .map_err(|e| launch_error("resume_source", e))?;
@@ -137,7 +144,7 @@ fn current_session(
     channel: u64,
     logical: &str,
     original: Option<&str>,
-    earlier: &mut dyn session_handoff::EarlierExecution,
+    prior: &mut PriorExecution<'_>,
 ) -> Result<Option<String>, String> {
     use crate::services::tui_prompt_dedupe::binding_events as events;
     use std::os::unix::fs::MetadataExt;
@@ -184,7 +191,7 @@ fn current_session(
         // of the same transcript logs nothing either, so its marker is no live owner once it ended.
         match (nonce, observe_spawn_nonce_marker(logical)) {
             (Some(recorded), SpawnNonceMarker::Known(current))
-                if recorded != current && !ended_tmux_execution(logical, earlier) =>
+                if recorded != current && !ended_tmux_execution(logical, prior.earlier) =>
             {
                 return Err("handoff binding belongs to another execution".into());
             }
@@ -206,7 +213,7 @@ fn current_session(
         Err(error) => return Err(error.to_string()),
     };
     if (metadata.dev(), metadata.ino()) != (source.dev, source.ino)
-        && !renumbered_after_end(&source, pinned_at, logical, earlier)
+        && !renumbered_after_end(&source, pinned_at, logical, nonce, prior)
     {
         return Err("handoff transcript identity changed".into());
     }
@@ -227,13 +234,33 @@ fn ended_tmux_execution(
         && earlier.liveness() == session_handoff::Liveness::Ended
 }
 
+/// What can prove that the execution which logged a binding has ended.
+pub(super) struct PriorExecution<'a> {
+    pub(super) earlier: &'a mut dyn session_handoff::EarlierExecution,
+    pub(super) owner: &'a HostedOwner,
+    pub(super) row: Option<&'a HostedRecord>,
+}
+
+impl PriorExecution<'_> {
+    /// The tmux proof, or the channel's row naming execution `nonce` Retired: that state is written
+    /// only for a confirmed-ended execution of its owner and nonce.
+    fn ended(&mut self, logical: &str, nonce: Option<&str>) -> bool {
+        let retired = matches!(self.row, Some(HostedRecord::Known(record))
+            if record.state == HostedState::Retired
+                && record.owner == *self.owner
+                && Some(record.execution_nonce.as_str()) == nonce);
+        retired || ended_tmux_execution(logical, self.earlier)
+    }
+}
+
 /// Whether the transcript is the recorded file under the device number a host reboot gave its
-/// volume, by the pin rule every Claude source goes through, and its old tmux execution ended.
+/// volume, by the pin rule every Claude source goes through, and the binding's execution ended.
 fn renumbered_after_end(
     source: &crate::services::tui_prompt_dedupe::binding_events::SourceId,
     pinned_at: Option<chrono::DateTime<chrono::Utc>>,
     logical: &str,
-    earlier: &mut dyn session_handoff::EarlierExecution,
+    nonce: Option<&str>,
+    prior: &mut PriorExecution<'_>,
 ) -> bool {
     use crate::services::claude_tui::source_verify::{
         Observation, PinJudgment, judge_pin, observe_transcript,
@@ -242,7 +269,7 @@ fn renumbered_after_end(
     let seen = Observation::Opened(opened.as_ref());
     let path = source.path.as_path();
     let judged = judge_pin(Some(source), pinned_at, &source.session_id, path, seen);
-    matches!(judged, PinJudgment::Verified(_)) && ended_tmux_execution(logical, earlier)
+    matches!(judged, PinJudgment::Verified(_)) && prior.ended(logical, nonce)
 }
 
 #[cfg(test)]
@@ -418,6 +445,31 @@ mod tests {
         }
     }
     use session_handoff::Liveness;
+    fn owner() -> HostedOwner {
+        HostedOwner {
+            provider: "claude".into(),
+            discord_token_hash: "synthetic".into(),
+            channel_id: "8177".into(),
+            logical_key: "i8077-durable-native".into(),
+            owner_node: "node".into(),
+            runtime_root: "/root".into(),
+        }
+    }
+    /// The judgment with only the tmux proof available, as every channel without a hosted row.
+    fn current_session(
+        channel: u64,
+        logical: &str,
+        original: Option<&str>,
+        earlier: &mut Earlier,
+    ) -> Result<Option<String>, String> {
+        let owner = owner();
+        let mut prior = PriorExecution {
+            earlier,
+            owner: &owner,
+            row: None,
+        };
+        super::current_session(channel, logical, original, &mut prior)
+    }
     impl Drop for Log {
         fn drop(&mut self) {
             events::forget_channel_for_tests(self.channel);
@@ -714,5 +766,76 @@ mod tests {
         assert_eq!(judged(&session, 1, 0, Liveness::Running), changed);
         assert_eq!(judged("another-session", 1, 0, Liveness::Ended), changed);
         assert_eq!(judged(&session, 1, 1, Liveness::Ended), changed);
+    }
+
+    #[test]
+    fn a_reboot_renumbered_transcript_of_a_herdr_execution_resumes_only_once_its_own_row_is_retired()
+     {
+        use crate::db::dispatched_sessions::hosted_execution::{HostedExecution, SourceRef};
+        let _root_guard = crate::config::TestRuntimeRootGuard::new();
+        let session = uuid::Uuid::new_v4().to_string();
+        let nonce = "d".repeat(32);
+        let row = |owner: HostedOwner, nonce: &str, state: HostedState| {
+            let source = SourceRef {
+                runtime_root: owner.runtime_root.clone(),
+                channel: owner.channel_id.clone(),
+                provider: owner.provider.clone(),
+                logical_key: owner.logical_key.clone(),
+                execution_nonce: nonce.into(),
+                initial_source: None,
+                baseline_event_seq: None,
+            };
+            let mut record = HostedExecution::pending(owner, nonce.into(), source);
+            record.state = state;
+            HostedRecord::Known(record)
+        };
+        let judged = |first: &str, ino_shift: u64, row: Option<&HostedRecord>| {
+            let log = Log::new(8177003);
+            let path = log.root.path().join(format!("{session}.jsonl"));
+            let first = serde_json::json!({"sessionId": first});
+            std::fs::write(&path, format!("{first}\n")).unwrap();
+            let temp = |ext| crate::services::tmux_common::session_temp_path(log.logical, ext);
+            std::fs::write(temp("spawn_nonce"), &nonce).unwrap();
+            std::fs::write(temp("host_kind"), "herdr").unwrap();
+            crate::services::tui_prompt_dedupe::register_tmux_channel(log.logical, log.channel);
+            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+                log.logical,
+                TuiRuntimeBinding {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    output_path: path.display().to_string(),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: Some(session.clone()),
+                    last_offset: 0,
+                    relay_last_offset: None,
+                },
+            );
+            reboot_after_record(&log, 1, ino_shift);
+            let owner = owner();
+            let earlier = &mut Earlier(Liveness::Ended);
+            let mut prior = PriorExecution {
+                earlier,
+                owner: &owner,
+                row,
+            };
+            super::current_session(log.channel, log.logical, Some(&session), &mut prior)
+        };
+        let retired = row(owner(), &nonce, HostedState::Retired);
+        let changed = Err("handoff transcript identity changed".to_string());
+        assert_eq!(
+            judged(&session, 0, Some(&retired)),
+            Ok(Some(session.clone()))
+        );
+        assert_eq!(judged(&session, 0, None), changed);
+        let bound = row(owner(), &nonce, HostedState::Bound);
+        assert_eq!(judged(&session, 0, Some(&bound)), changed);
+        let other_nonce = row(owner(), &"e".repeat(32), HostedState::Retired);
+        assert_eq!(judged(&session, 0, Some(&other_nonce)), changed);
+        let mut stranger = owner();
+        stranger.discord_token_hash = "another-bot".into();
+        let other_owner = row(stranger, &nonce, HostedState::Retired);
+        assert_eq!(judged(&session, 0, Some(&other_owner)), changed);
+        assert_eq!(judged("another-session", 0, Some(&retired)), changed);
+        assert_eq!(judged(&session, 1, Some(&retired)), changed);
     }
 }
