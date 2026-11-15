@@ -156,11 +156,41 @@ async fn precondition_changed_handler_contract_is_conflict_and_retryable_pg() {
     pg_db.drop().await;
 }
 
-/// Idle cleanup through the real kill-tmux route: a session whose transcript is
-/// unresolved keeps its tmux and raises one deduplicated alert, while a provider
-/// proven idle by its native transcript and pane is killed.
+/// Idle cleanup keeps an unresolved Codex session and kills it only when its
+/// native transcript and pane both prove idle.
 #[tokio::test(flavor = "current_thread")]
 async fn idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg() {
+    idle_kill_route_case(
+        crate::services::provider::ProviderKind::Codex,
+        crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+        "transcript_unresolved",
+        true,
+    )
+    .await;
+}
+
+/// A Claude terminal and idle-looking pane cannot prove that a person's
+/// composer or selector is empty, so both unresolved and native-idle states survive.
+#[tokio::test(flavor = "current_thread")]
+async fn idle_kill_route_preserves_claude_before_and_after_native_idle_evidence_pg() {
+    idle_kill_route_case(
+        crate::services::provider::ProviderKind::Claude,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+        "UnprovenInteractiveState",
+        false,
+    )
+    .await;
+}
+
+async fn idle_kill_route_case(
+    provider: crate::services::provider::ProviderKind,
+    runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind,
+    native_terminal: &str,
+    unobservable_reason: &str,
+    expect_killed: bool,
+) {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let (tmux_probe, _path_guard) = install_tmux_probe(concat!(
         "[ \"$1\" = -u ] && shift\n",
@@ -179,16 +209,17 @@ async fn idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
     let channel = format!("idle-pin-{}", uuid::Uuid::new_v4().simple());
-    let tmux_name = format!("AgentDesk-claude-{channel}");
+    let tmux_name = format!("AgentDesk-{}-{channel}", provider.as_str());
     let session_key = format!(
         "{}:{tmux_name}",
         crate::services::platform::hostname_short()
     );
     sqlx::query(
         "INSERT INTO sessions (session_key, provider, status, last_heartbeat)
-         VALUES ($1, 'claude', 'idle', NOW() - INTERVAL '7 hours')",
+         VALUES ($1, $2, 'idle', NOW() - INTERVAL '7 hours')",
     )
     .bind(&session_key)
+    .bind(provider.as_str())
     .execute(&pool)
     .await
     .unwrap();
@@ -222,7 +253,7 @@ async fn idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["tmux_killed"], false, "{body}");
         assert_eq!(body["skipped_provider_activity_guard"], true, "{body}");
-        assert_eq!(body["preserved_reason"], "transcript_unresolved", "{body}");
+        assert_eq!(body["preserved_reason"], unobservable_reason, "{body}");
         assert!(
             !killed_log.exists(),
             "unobservable session must not be killed"
@@ -233,17 +264,18 @@ async fn idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
 
     // Observable idle: the bound native transcript and the pane agree.
     let transcript = runtime_root.path().join("native.jsonl");
-    std::fs::write(
-        &transcript,
-        "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
-    )
-    .unwrap();
+    std::fs::write(&transcript, native_terminal).unwrap();
+    assert_eq!(
+        crate::services::tui_turn_state::observe_provider_jsonl_turn_state(&provider, &transcript),
+        crate::services::tui_turn_state::TuiTurnState::Idle,
+        "native terminal fixture must actually prove an idle turn"
+    );
     let old = std::time::SystemTime::now() - Duration::from_secs(24 * 60 * 60);
     filetime::set_file_mtime(&transcript, filetime::FileTime::from_system_time(old)).unwrap();
     crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
         &tmux_name,
         crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            runtime_kind,
             output_path: transcript.to_string_lossy().into_owned(),
             relay_output_path: None,
             input_fifo_path: None,
@@ -255,12 +287,29 @@ async fn idle_kill_route_preserves_unobservable_session_and_kills_proven_idle_pg
     let (status, Json(body)) = kill().await;
     crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&tmux_name);
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["tmux_killed"], true, "{body}");
-    assert_eq!(
-        std::fs::read_to_string(&killed_log).unwrap().trim(),
-        format!("={tmux_name}:")
-    );
-    assert_eq!(preserved(), 2, "a proven-idle kill records no preservation");
+    assert_eq!(body["tmux_killed"], expect_killed, "{body}");
+    if expect_killed {
+        assert_eq!(
+            std::fs::read_to_string(&killed_log).unwrap().trim(),
+            format!("={tmux_name}:")
+        );
+        assert_eq!(preserved(), 2, "a proven-idle kill records no preservation");
+    } else {
+        assert_eq!(body["skipped_provider_activity_guard"], true, "{body}");
+        assert_eq!(
+            body["preserved_reason"], "UnprovenInteractiveState",
+            "{body}"
+        );
+        assert!(
+            !killed_log.exists(),
+            "native idle does not prove an empty Claude composer"
+        );
+        assert_eq!(
+            preserved(),
+            3,
+            "the terminal-evidence skip is also recorded"
+        );
+    }
     assert_eq!(outbox_rows().await, 0);
 
     pool.close().await;

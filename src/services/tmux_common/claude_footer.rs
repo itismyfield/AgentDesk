@@ -18,17 +18,6 @@ pub(crate) fn bypass_interrupt(row: &str) -> Option<bool> {
     }
 }
 
-/// A recognised bypass row whose pill counts background work, with or without an interrupt offer.
-pub(crate) fn counts_background_work(row: &str) -> bool {
-    status_rest(row)
-        .and_then(|rest| rest.strip_prefix(" · "))
-        .is_some_and(|pill| {
-            let pill = pill.strip_suffix(" · ↓ to manage").unwrap_or(pill);
-            let pill = pill.strip_suffix(" · esc to interrupt").unwrap_or(pill);
-            pill.split(", ").all(counted)
-        })
-}
-
 /// The status text after the bypass prefix, mode hint and update notice; None is unrecognised.
 fn status_rest(row: &str) -> Option<&str> {
     let rest = row.trim_end().strip_prefix(BYPASS_FOOTER)?;

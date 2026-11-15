@@ -6,13 +6,19 @@ use super::*;
 use crate::config::BrowserGuardMode;
 use crate::server::dashboard_auth::DashboardAccess;
 
-fn guarded_app(root: &Path, mode: BrowserGuardMode) -> Router {
+fn guarded_app(root: &Path, mode: Option<BrowserGuardMode>) -> Router {
+    let mut config: crate::config::Config = serde_yaml::from_str("server: {}\n").unwrap();
+    config.server.auth_token = Some("web-entry-test-token".into());
+    if let Some(mode) = mode {
+        config.server.browser_guard = mode;
+    }
+    guarded_app_with_config(root, config)
+}
+
+fn guarded_app_with_config(root: &Path, mut config: crate::config::Config) -> Router {
     let dashboard = root.join("dashboard");
     std::fs::create_dir_all(&dashboard).unwrap();
     std::fs::write(dashboard.join("index.html"), "<html>dashboard</html>").unwrap();
-    let mut config = crate::config::Config::default();
-    config.server.auth_token = Some("web-entry-test-token".into());
-    config.server.browser_guard = mode;
     config.cluster.runtime_profile = crate::config::RuntimeProfile::Full;
     config.policies.dir = root.join("policies");
     config.policies.hot_reload = false;
@@ -79,7 +85,7 @@ const HOST_PROBES: &[(&str, &str)] = &[
 #[tokio::test]
 async fn browser_guard_enforce_rejects_foreign_host_on_every_path_including_loopback_trusted() {
     let root = tempfile::tempdir().unwrap();
-    let app = guarded_app(root.path(), BrowserGuardMode::Enforce);
+    let app = guarded_app(root.path(), None);
     for (method, path) in HOST_PROBES {
         let method = Method::from_bytes(method.as_bytes()).unwrap();
         for host in [
@@ -123,7 +129,7 @@ async fn browser_guard_enforce_rejects_foreign_host_on_every_path_including_loop
 #[tokio::test]
 async fn browser_guard_log_mode_serves_foreign_host_unchanged_and_warns_once() {
     let root = tempfile::tempdir().unwrap();
-    let log = guarded_app(root.path(), BrowserGuardMode::Log);
+    let log = guarded_app(root.path(), Some(BrowserGuardMode::Log));
     for (method, path) in HOST_PROBES {
         let method = Method::from_bytes(method.as_bytes()).unwrap();
         let (good_status, _) = send(
@@ -166,7 +172,7 @@ async fn browser_guard_log_mode_serves_foreign_host_unchanged_and_warns_once() {
 #[tokio::test]
 async fn browser_guard_enforce_rejects_cross_site_state_changes() {
     let root = tempfile::tempdir().unwrap();
-    let app = guarded_app(root.path(), BrowserGuardMode::Enforce);
+    let app = guarded_app(root.path(), None);
     let host = ("host", "127.0.0.1:8791");
     for (headers, code) in [
         (
@@ -225,7 +231,7 @@ async fn browser_guard_enforce_rejects_cross_site_state_changes() {
 #[tokio::test]
 async fn browser_guard_passes_cli_and_same_origin_dashboard_requests() {
     let root = tempfile::tempdir().unwrap();
-    let app = guarded_app(root.path(), BrowserGuardMode::Enforce);
+    let app = guarded_app(root.path(), None);
     let cases: &[&[(&str, &str)]] = &[
         // CLI / MCP / node-to-node: no Origin, no Sec-Fetch-Site.
         &[
@@ -280,6 +286,70 @@ async fn browser_guard_passes_cli_and_same_origin_dashboard_requests() {
         status != StatusCode::FORBIDDEN && status != StatusCode::UNAUTHORIZED,
         "{body}"
     );
+
+    // Tailnet clients use the configured server name without entering a token.
+    let mut config: crate::config::Config =
+        serde_yaml::from_str("server:\n  host: 0.0.0.0\n  allow_insecure_nonloopback_bind: true\n")
+            .unwrap();
+    config.cluster.api_base_url = Some("http://node-a.tail1234.ts.net:8791".into());
+    let tokenless = guarded_app_with_config(root.path(), config);
+    let host = ("host", "node-a.tail1234.ts.net:8791");
+    for peer in ["127.0.0.1:50000", "100.90.0.2:50000"] {
+        for (method, path, headers, payload, expected) in [
+            (
+                Method::POST,
+                "/api/auth/ws-ticket",
+                vec![
+                    host,
+                    ("origin", "http://node-a.tail1234.ts.net:8791"),
+                    ("sec-fetch-site", "same-origin"),
+                ],
+                "",
+                StatusCode::OK,
+            ),
+            (
+                Method::GET,
+                "/api/auth/session",
+                vec![host],
+                "",
+                StatusCode::OK,
+            ),
+            // Native CLI/MCP JSON bodies reach the handler without browser headers.
+            (
+                Method::POST,
+                "/api/queue/pause",
+                vec![host, ("content-type", "application/json")],
+                "{}",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                Method::GET,
+                "/api/internal/node-probe",
+                vec![host],
+                "",
+                StatusCode::OK,
+            ),
+        ] {
+            let mut request = browser_request(method.clone(), path, &headers, payload);
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(peer.parse::<std::net::SocketAddr>().unwrap()));
+            let (status, body) = send(&tokenless, request).await;
+            assert_eq!(status, expected, "{peer} {method} {path}: {body}");
+        }
+    }
+    // A loopback-only control route passes auth and reaches its missing-PG response.
+    let (status, body) = send(
+        &tokenless,
+        browser_request(
+            Method::POST,
+            "/api/hook/reset-status",
+            &[("host", "localhost:8791")],
+            "",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
 }
 
 fn concrete(template: &str) -> String {
@@ -382,7 +452,7 @@ async fn browser_guard_violation_mode_matrix_preserves_body_calls_and_warn_throt
 #[tokio::test]
 async fn browser_guard_requires_json_on_every_raw_body_handler() {
     let root = tempfile::tempdir().unwrap();
-    let app = guarded_app(root.path(), BrowserGuardMode::Enforce);
+    let app = guarded_app(root.path(), None);
     let host = ("host", "127.0.0.1:8791");
     let auth = ("authorization", "Bearer web-entry-test-token");
     for template in EXPECTED_RAW_JSON_ROUTES {

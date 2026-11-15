@@ -63,6 +63,23 @@ Tailscale(100.64.0.0/10, fd7a:115c:a1e0::/48), 그 밖이다. 사설 LAN(10/8·1
 - node sharing으로 이 기기를 공유받은 다른 tailnet의 Tailscale 사용자는 Tailscale
   주소로 접속하므로 Tailscale로 분류된다.
 
+[브라우저 요청 가드](../src/server/web_surface/browser_guard.rs)의
+`server.browser_guard` 기본값은 `enforce`다. 대시보드·WebSocket·API·loopback 신뢰
+경로 전체에서 허용 목록 밖의 Host를 403으로 거절한다. 허용 목록은 loopback,
+이 호스트의 이름·인터페이스 IP, 설정된 서버 호스트·클러스터 API 주소·
+`trusted_forward_origin`, 조회 가능한 Tailscale 자기 이름·IP로 자동 구성한다.
+GET/HEAD/OPTIONS 이외의 요청은 `Sec-Fetch-Site: cross-site`이거나 Origin이
+허용되지 않으면 403이다. 본문을 직접 JSON으로 파싱하는 경로는 비어 있지 않은
+본문에 JSON Content-Type을 요구하며, 위반하면 415다.
+
+같은 출처 대시보드 요청과 브라우저 헤더가 없는 CLI·MCP·노드 간 요청은 이 규칙을
+통과한다. JSON 본문에는 `application/json`을 보내야 한다. 이 가드는 토큰을
+추가로 요구하지 않으며, 위의 출처 필터와 아래의 경로별 인증은 계속 적용한다.
+명시적인 `server.browser_guard: log`는 되돌리기 경로로 유지한다. 이 모드에서는
+위반을 WARN으로만 기록하고 요청·응답을 바꾸지 않으므로 브라우저 요청 경계를
+집행하지 않는다. 설정 저장 시 기본값 `enforce`는 생략하고 명시한 `log`는 보존한다.
+모드 변경은 서버를 재시작해야 적용된다.
+
 [사람 입력 API](../src/server/routes/agents_turn_deliver.rs)
 `POST /api/agents/{id}/turn/deliver`는 본문의 `author_discord_user_id`만으로 허용하지
 않는다. 호출자는 이 호스트의 비브라우저 프로세스(loopback peer이고, `Origin`이

@@ -13,70 +13,12 @@
 //! deliberately NOT an option here: it would be an unbounded, blocking read on
 //! the async relay loop (#3086 P1).
 
+pub(super) use crate::services::claude_tui::activity::events::{
+    agent_id_from_tool_use_result, summary_from_tool_use_result, tool_use_result_is_async_launch,
+};
 use serde_json::Value;
 
 use crate::services::agent_protocol::{StatusEvent, SubagentSummary};
-
-/// Extracts the TUI summary from a parent-transcript `tool_result` record's
-/// top-level `toolUseResult` object. Returns `(summary, agent_id)` when the
-/// record looks like a finished subagent (i.e. it carries any of the `total*`
-/// accounting fields). Returns `None` for ordinary tool results and async
-/// launch acknowledgments that have no subagent completion accounting.
-pub(super) fn summary_from_tool_use_result(
-    value: &Value,
-) -> Option<(SubagentSummary, Option<String>)> {
-    let result = value.get("toolUseResult")?;
-    // `toolUseResult` may be a string (non-subagent tools) — only objects carry
-    // the subagent accounting.
-    let result = result.as_object()?;
-
-    if result.get("status").and_then(Value::as_str) == Some("async_launched")
-        || result.get("isAsync").and_then(Value::as_bool) == Some(true)
-    {
-        return None;
-    }
-
-    let agent_id = agent_id_from_tool_use_result(value);
-
-    let has_accounting_field = result.contains_key("totalToolUseCount")
-        || result.contains_key("totalTokens")
-        || result.contains_key("totalDurationMs");
-
-    let tool_count = result.get("totalToolUseCount").and_then(as_u64_lenient);
-    let tokens = result.get("totalTokens").and_then(as_u64_lenient);
-    // Round partial seconds up so a sub-second subagent still reads `1s` rather
-    // than `0s`; `0ms` stays `0s`.
-    let duration_secs = result
-        .get("totalDurationMs")
-        .and_then(as_u64_lenient)
-        .map(|ms| ms.div_ceil(1000));
-
-    let summary = SubagentSummary {
-        tool_count,
-        tokens,
-        duration_secs,
-    };
-
-    // `agentId` alone is present on async launch acknowledgments and is not a
-    // completion signal. Require explicit accounting, while preserving the
-    // existing non-empty summary path for any future summary extraction.
-    if !has_accounting_field && summary.is_empty() {
-        return None;
-    }
-    Some((summary, agent_id))
-}
-
-/// Extracts the async/completion agent id from `toolUseResult`.
-pub(super) fn agent_id_from_tool_use_result(value: &Value) -> Option<String> {
-    value
-        .get("toolUseResult")?
-        .as_object()?
-        .get("agentId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
-}
 
 pub(super) fn description_from_tool_use_result(value: &Value) -> Option<String> {
     value
@@ -137,26 +79,6 @@ pub(super) fn idful_tool_result_close_events(
             ack_only: !is_error,
         },
     ])
-}
-
-/// #3920: `true` when a parent-transcript `tool_result`/`user` record (or a
-/// batched per-block `tool_result`) is an ASYNC subagent LAUNCH acknowledgment
-/// — `toolUseResult.isAsync == true` or `toolUseResult.status == "async_launched"`.
-///
-/// A launch ack is NOT a completion: the launched Agent subagent keeps running
-/// detached and OUTLIVES the launching turn. The async-ness is only knowable
-/// from this launch-ack `toolUseResult` (modern async `Agent` launches do not
-/// carry `run_in_background` in the tool INPUT), so the status panel uses this to
-/// promote the subagent's slot to a background subagent and keep it alive across
-/// turn-boundary resets — the same lifetime a Bash `run_in_background` task gets.
-pub(super) fn tool_use_result_is_async_launch(value: &Value) -> bool {
-    value
-        .get("toolUseResult")
-        .and_then(Value::as_object)
-        .is_some_and(|result| {
-            result.get("isAsync").and_then(Value::as_bool) == Some(true)
-                || result.get("status").and_then(Value::as_str) == Some("async_launched")
-        })
 }
 
 /// #3920: background-promotion [`StatusEvent`]s for a `user`-record `tool_result`
@@ -231,18 +153,61 @@ fn first_idful_tool_result_idx(blocks: &[Value]) -> Option<usize> {
     })
 }
 
-/// Reads a numeric JSON value as `u64`, tolerating integer, float, and
-/// stringified-number encodings.
-fn as_u64_lenient(value: &Value) -> Option<u64> {
-    if let Some(n) = value.as_u64() {
-        return Some(n);
+/// Feed exact child observations into the existing footer owner; no description fallback.
+pub(super) fn refresh_observed_children(
+    live: &super::PlaceholderLiveEvents,
+    channel: poise::serenity_prelude::ChannelId,
+    provider: &crate::services::provider::ProviderKind,
+) {
+    use crate::services::claude_tui::activity::{self, Background};
+    if !matches!(provider, crate::services::provider::ProviderKind::Claude) {
+        return;
     }
-    if let Some(f) = value.as_f64() {
-        if f.is_finite() && f >= 0.0 {
-            return Some(f as u64);
-        }
+    let Some(snapshot) = activity::cached_for_channel(channel.get()) else {
+        return;
+    };
+    let Some(entry) = live.status_by_channel.get(&channel) else {
+        return;
+    };
+    let mut state = entry.lock().unwrap_or_else(|e| e.into_inner());
+    if !snapshot.current() {
+        return;
     }
-    value.as_str().and_then(|s| s.trim().parse::<u64>().ok())
+    // Child observations do not change the parent's status or completion clock.
+    let parent_status = state.status.clone();
+    let parent_completed_at = state.completed_at;
+    for child in snapshot.children {
+        let event = match (child.subagent, child.finished) {
+            (true, Some(success)) => StatusEvent::SubagentEnd {
+                success,
+                agent_id: None,
+                desc: None,
+                tool_use_id: Some(child.tool_id),
+                summary: None,
+                ack_only: false,
+            },
+            (true, None) => StatusEvent::SubagentStart {
+                subagent_type: None,
+                desc: None,
+                agent_id: child.agent_id,
+                tool_use_id: Some(child.tool_id),
+                background: true,
+            },
+            (false, Some(success)) => StatusEvent::BackgroundTaskEnd {
+                tool_use_id: child.tool_id,
+                success,
+            },
+            (false, None) => StatusEvent::BackgroundTaskStart {
+                name: child.tool_name,
+                summary: "Background task".into(),
+                tool_use_id: child.tool_id,
+            },
+        };
+        state.apply(event);
+    }
+    state.status = parent_status;
+    state.completed_at = parent_completed_at;
+    state.background_agent_pending = snapshot.background != Background::Clear;
 }
 
 #[cfg(test)]
