@@ -1050,6 +1050,20 @@ async fn review_recovery_cas_rejects_direct_cancel_pg() {
 async fn wait_helpers_reject_a_waiter_observed_after_the_deadline() {
     let late = poll_within(async || Ok(42), Duration::ZERO, "PostgreSQL lock waiter").await;
     assert!(late.is_err(), "late waiter accepted: {late:?}");
+    let mut observed = false;
+    let late = poll_within(
+        async || {
+            std::thread::sleep(Duration::from_millis(150));
+            observed = true;
+            Ok(42)
+        },
+        Duration::from_millis(100),
+        "late PostgreSQL lock waiter",
+    )
+    .await;
+    assert!(observed, "the late sample must actually complete");
+    let error = late.expect_err("a waiter observed after the deadline is too late");
+    assert!(error.contains("late PostgreSQL lock waiter"), "{error}");
     assert_eq!(
         poll_within(async || Ok(42), WAIT_DEADLINE, "PostgreSQL lock waiter").await,
         Ok(42)
