@@ -1,7 +1,7 @@
-//! Reply-obligated input prepares its host before claiming the original GUID.
+//! Configured Herdr input prepares before admission; other hosts retain lazy delivery.
 use super::{
-    HealthRegistry, HumanInputRequest, RouteResponse, delivery_response, observed_execution,
-    preflight_human_input,
+    HealthRegistry, HumanInputRequest, RouteResponse, delivery_response, observed_delivery,
+    observed_execution, preflight_human_input,
 };
 use crate::services::imsg_reply::{AdmissionInput, ReplyObligation, admission};
 use sqlx::PgPool;
@@ -14,8 +14,11 @@ pub(super) async fn deliver(
     line: Option<&str>,
     reply: ReplyObligation,
 ) -> RouteResponse {
-    let admission_source = "imessage";
     let channel = request.channel_id;
+    if !crate::config::session_hosts::has_herdr_endpoint(channel.get()) {
+        return existing_delivery(pool, registry, input, request, line, reply).await;
+    }
+    let admission_source = "imessage";
     let identity = format!("guid:{}", input.origin_id);
     if let Err(error) =
         preflight_human_input(registry, channel, &request.provider, input.author_id).await
@@ -67,6 +70,48 @@ pub(super) async fn deliver(
     let serialize = |result| delivery_response(channel.get(), result);
     let response =
         crate::services::imsg_reply::deliver_once(pool, input, authorize, deliver, serialize).await;
+    if !executed {
+        super::super::imessage_input_notice::not_echoed(
+            line,
+            channel.get(),
+            &identity,
+            response.0.as_str(),
+        );
+    }
+    response
+}
+
+async fn existing_delivery(
+    pool: &PgPool,
+    registry: &HealthRegistry,
+    input: &AdmissionInput<'_>,
+    request: HumanInputRequest,
+    line: Option<&str>,
+    reply: ReplyObligation,
+) -> RouteResponse {
+    let channel = request.channel_id;
+    let provider = request.provider.clone();
+    let identity = format!("guid:{}", input.origin_id);
+    let mut executed = false;
+    let ran = &mut executed;
+    let response = crate::services::imsg_reply::deliver_once(
+        pool,
+        input,
+        || preflight_human_input(registry, channel, &provider, input.author_id),
+        || async {
+            *ran = true;
+            super::super::imessage_input_notice::delivered(
+                pool,
+                channel.get(),
+                &identity,
+                line,
+                observed_delivery(registry, request, Some(reply)).await,
+            )
+            .await
+        },
+        |result| delivery_response(channel.get(), result),
+    )
+    .await;
     if !executed {
         super::super::imessage_input_notice::not_echoed(
             line,
