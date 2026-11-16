@@ -58,7 +58,7 @@ impl Scope {
     /// Registers immutable coverage only; issuance still requires a live custodian and store.
     pub(crate) async fn register_herdr_body_debt(
         &self,
-        plan: &crate::services::tui_o::writer::herdr_body_debt::Plan,
+        plan: &impl Registration,
         bot: u64,
     ) -> Result<usize, String> {
         let document = plan.registration(bot)?;

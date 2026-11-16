@@ -260,3 +260,4 @@ pub(crate) async fn acquire_unstamped(
 pub(crate) mod tests;
 
 pub(crate) mod debt_recovery;
+pub(crate) use debt_recovery::Registration;

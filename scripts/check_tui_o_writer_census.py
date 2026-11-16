@@ -369,6 +369,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
 # Each file's cutover gates as `enclosing fn:kind`, in source order.
 # claim: a body is sent here (`claim_then_send`, or a RAW_CLAIM_SITES claim). peek: only read.
 EXPECTED_GATES: dict[str, tuple[str, ...]] = {
+    "src/services/discord/runtime_bootstrap/o_writer_host/adoption_wake.rs": ("boot:peek",),
     "src/services/discord/queue_io/input_owner/claude_handoff.rs": ("busy_output_ready:peek",),
     "src/services/discord/tmux_watcher/terminal_relay_plan.rs": ("run_terminal_relay_plan:peek",),
     "src/services/discord/inflight/clear_store/herdr_row_end.rs": ("o_still_owns:peek",),

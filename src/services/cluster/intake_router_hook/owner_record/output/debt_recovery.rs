@@ -9,6 +9,9 @@ use uuid::Uuid;
 mod authority;
 mod receipt;
 mod registry;
+pub(crate) trait Registration {
+    fn registration(&self, bot: u64) -> Result<Value, String>;
+}
 #[cfg(test)]
 #[path = "debt_recovery/debt_recovery_tests.rs"]
 mod tests;

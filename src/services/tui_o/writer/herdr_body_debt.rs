@@ -143,6 +143,11 @@ pub struct Plan {
     native: Vec<(PieceWork, SourceRange)>,
     held: Option<&'static str>,
 }
+impl crate::services::cluster::intake_router_hook::owner_record::output::Registration for Plan {
+    fn registration(&self, bot: u64) -> Result<Value, String> {
+        Plan::registration(self, bot)
+    }
+}
 impl Plan {
     fn from(
         snapshot: Snapshot,
