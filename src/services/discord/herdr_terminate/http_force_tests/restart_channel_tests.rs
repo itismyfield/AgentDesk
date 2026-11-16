@@ -1524,6 +1524,15 @@ fn restart_seed_reaches_the_herdr_launch_through_the_headless_start_pg() {
         install_owner(&node).await;
         crashed_after_commit(&node, 900_812_822).await;
         let workdir = tempfile::tempdir().unwrap();
+        // The scripted host does not run the provider, but command preparation resolves it.
+        let cli = workdir.path().join("claude");
+        std::fs::write(&cli, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _cli = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CLAUDE_PATH",
+            &cli,
+        );
         crate::services::discord::host_defer_gate::tests::map_channel(&node.shared, channel(), "e07")
             .await;
         {
