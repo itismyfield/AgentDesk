@@ -426,11 +426,11 @@ fn authenticated_pending_after_restart_needs_no_volatile_binding_and_sends_once(
     assert_eq!(sent.get(), 1);
     assert!(tui_prompt_dedupe::runtime_binding_for_tmux_session(&r.rig.session).is_none());
     super::forget_session(&r.rig.session);
-    // The consumed certificate leaves an idle source with no readiness proof.
-    let replayed = Cell::new(0);
-    assert!(matches!(
-        r.run(&native, &replayed),
-        InputRun::Refused(InputRefusal::Unproven)
-    ));
-    assert_eq!(replayed.get(), 0);
+    let sent = Cell::new(0);
+    let result = r.run(&native, &sent);
+    assert_eq!(sent.get(), 0, "no payload or Enter for a consumed clear");
+    assert!(
+        matches!(result, InputRun::Refused(InputRefusal::Unproven)),
+        "{result:?}"
+    );
 }

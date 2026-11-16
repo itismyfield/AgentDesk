@@ -1,5 +1,5 @@
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Stable marker embedded in the error returned by [`read_gemini_oauth_creds`]
 /// when `~/.gemini/oauth_creds.json` is simply absent (`ErrorKind::NotFound`),
@@ -449,7 +449,7 @@ fn read_claude_keychain_token() -> Option<String> {
         .filter(|token| !token.trim().is_empty())
 }
 
-fn read_json_path(path: &PathBuf) -> Option<serde_json::Value> {
+pub(crate) fn read_json_path(path: &Path) -> Option<serde_json::Value> {
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
 }

@@ -1,5 +1,6 @@
 mod command_streaming;
 mod effort;
+use crate::services::process::reaping::CommandReapExt;
 #[cfg(unix)]
 use effort::from_env as codex_reasoning_effort_from_env;
 mod direct_reader;
@@ -1186,10 +1187,11 @@ fn execute_streaming_direct(
     crate::services::process::configure_child_process_group(&mut command);
 
     let mut child = command
-        .spawn()
+        .spawn_reaping()
         .map_err(|e| format!("Failed to start Codex: {}", e))?;
 
     register_child_pid(cancel_token.as_deref(), child.id());
+    child.track_cancel_token(cancel_token.as_ref());
     let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "codex-direct-stream");
     if cancel_requested(cancel_token.as_deref()) {
         kill_child_tree(&mut child);

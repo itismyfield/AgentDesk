@@ -136,6 +136,16 @@ async fn preferred_gateway_is_waiting(
     }
 }
 
+/// How the non-preferred yield wait ended.
+#[derive(Debug, PartialEq, Eq)]
+enum YieldEnd {
+    /// Race for the lease now.
+    Acquire,
+    /// A restart request is pending: stand by without the lease so the marker
+    /// poller, spawned only after the lease outcome, can persist it in time.
+    RestartPending,
+}
+
 /// A non-preferred node waits here before it even tries to acquire, giving the
 /// preferred node a head start. Returns as soon as the preferred node goes
 /// offline (nothing to wait for — take the lease) or the grace expires (the
@@ -147,9 +157,9 @@ async fn yield_to_preferred_gateway(
     preference: &GatewayPreference,
     provider: &ProviderKind,
     shared: &Arc<SharedData>,
-) {
+) -> YieldEnd {
     if !preferred_gateway_is_waiting(pool, &preference.preferred_instance_id, provider).await {
-        return;
+        return YieldEnd::Acquire;
     }
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
@@ -171,7 +181,7 @@ async fn yield_to_preferred_gateway(
             .shutting_down
             .load(std::sync::atomic::Ordering::SeqCst)
         {
-            return;
+            return YieldEnd::Acquire;
         }
         let diagnostics = &shared.restart.gateway_lease_diagnostics;
         diagnostics.record(LeaseResult::Waiting);
@@ -183,14 +193,23 @@ async fn yield_to_preferred_gateway(
                 true,
             )
             .await;
-        tokio::time::sleep(GATEWAY_PREFERENCE_POLL_INTERVAL).await;
+        // The deploy clears an unacknowledged request after 20s; this wait lasts 90s.
+        if restart_requested_within(GATEWAY_PREFERENCE_POLL_INTERVAL).await {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ⏭ GATEWAY-LEASE: {} stops yielding to preferred node {} — a restart request is pending; standing by so its marker poller can drain",
+                provider.display_name(),
+                preference.preferred_instance_id
+            );
+            return YieldEnd::RestartPending;
+        }
         if !preferred_gateway_is_waiting(pool, &preference.preferred_instance_id, provider).await {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ▶ GATEWAY-LEASE: preferred node {} is no longer waiting for this gateway — acquiring",
                 preference.preferred_instance_id
             );
-            return;
+            return YieldEnd::Acquire;
         }
     }
     // The preferred node claims to want the lease but has not taken it. Take it
@@ -202,6 +221,7 @@ async fn yield_to_preferred_gateway(
         preference.preferred_instance_id,
         preference.yield_grace.as_secs()
     );
+    YieldEnd::Acquire
 }
 
 /// Wait indefinitely while advertising intent, then pass the guard to the backend.
@@ -303,6 +323,21 @@ async fn acquire_as_preferred_gateway(
 fn restart_request_is_pending() -> bool {
     crate::config::runtime_root()
         .is_some_and(|root| restart_file_nonce(&root, "restart_pending").is_some())
+}
+
+/// Sleeps `period`, returning `true` as soon as a restart request is pending.
+async fn restart_requested_within(period: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + period;
+    loop {
+        if restart_request_is_pending() {
+            return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        tokio::time::sleep((deadline - now).min(Duration::from_secs(1))).await;
+    }
 }
 
 pub(super) fn discord_gateway_lock_id(token_hash: &str) -> i64 {
@@ -465,27 +500,32 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                 Some(pref) => {
                     // Suppression only stops a serving holder from yielding; a restart has
                     // already freed the lock, so a waiting preferred node still gets the grace.
-                    yield_to_preferred_gateway(pool, token_hash, pref, provider, shared).await;
-                    diagnostics.context(
-                        pool,
-                        "startup",
-                        provider.as_str(),
-                        discord_gateway_lock_id(token_hash),
-                    );
-                    try_acquire_with_startup_orphan_reap(
-                        pool,
-                        token_hash,
-                        provider,
-                        handback_breaker,
-                        diagnostics,
-                    )
-                    .await
-                    .map(|lease| {
-                        lease.map(|lease| GatewayLeaseAcquisition {
-                            lease,
-                            waiter: None,
-                        })
-                    })
+                    match yield_to_preferred_gateway(pool, token_hash, pref, provider, shared).await
+                    {
+                        YieldEnd::RestartPending => Ok(None),
+                        YieldEnd::Acquire => {
+                            diagnostics.context(
+                                pool,
+                                "startup",
+                                provider.as_str(),
+                                discord_gateway_lock_id(token_hash),
+                            );
+                            try_acquire_with_startup_orphan_reap(
+                                pool,
+                                token_hash,
+                                provider,
+                                handback_breaker,
+                                diagnostics,
+                            )
+                            .await
+                            .map(|lease| {
+                                lease.map(|lease| GatewayLeaseAcquisition {
+                                    lease,
+                                    waiter: None,
+                                })
+                            })
+                        }
+                    }
                 }
                 None => try_acquire_with_startup_orphan_reap(
                     pool,

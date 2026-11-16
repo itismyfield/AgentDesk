@@ -1,0 +1,2 @@
+key: 620-deploy-restart-peer-deploy
+| `deploy-restart` peer deploy during gateway yield (#8176) | `315143ba6b6f19d21e29d1db7d7ec4e53e787ad8` | Main: a deploy request that lands in the non-preferred peer's 90s yield wait is cleared by the 20s timeout before any poller runs; AnyProof: a self-restart UUID proof acknowledges the deploy | fixed yield wait stands down to standby on a pending request; 3 cfg matched; [report](deploy-restart/peer-deploy.report.md) |

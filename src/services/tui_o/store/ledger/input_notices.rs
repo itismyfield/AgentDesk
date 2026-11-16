@@ -76,6 +76,21 @@ pub enum NoticeEntry {
     },
 }
 
+impl NoticeEntry {
+    /// Evidence of a scheduled fire's own row, which a reader that drops `isMeta` rows refuses.
+    pub fn records_scheduled_fire(&self) -> bool {
+        let Self::Materialized { evidence } = self else {
+            return false;
+        };
+        serde_json::from_slice(&evidence.raw_record)
+            .ok()
+            .and_then(|raw: serde_json::Value| {
+                crate::services::tui_prompt_dedupe::extract_claude_writer_input_with_entry_id(&raw)
+            })
+            .is_some_and(|(_, _, scheduled)| scheduled)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MigrationDebt {
     pub reason: String,
@@ -139,8 +154,9 @@ impl NoticeEvidence {
         if self.prompt.is_some() || self.unit_key.is_some() {
             let raw = serde_json::from_slice(&self.raw_record)
                 .map_err(|_| "input notice classification record is invalid")?;
-            let (prompt, uuid) = crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(&raw)
-                .ok_or("input notice classification evidence is not a native input")?;
+            let (prompt, uuid, _) =
+                crate::services::tui_prompt_dedupe::extract_claude_writer_input_with_entry_id(&raw)
+                    .ok_or("input notice classification evidence is not a native input")?;
             if self.prompt.as_ref().is_some_and(|kept| kept != &prompt)
                 || self
                     .unit_key

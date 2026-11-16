@@ -40,7 +40,13 @@ pub(super) fn read(
     previous: &mut Option<Cursor>,
 ) -> Result<Option<bool>, ()> {
     let path = path(source, id).ok_or(())?;
-    if fs::canonicalize(&path).map_err(|_| ())? != path {
+    // Resolve accepted source-parent aliases without allowing links to redirect
+    // the exact child subtree or transcript.
+    let parent = source.path.parent().ok_or(())?;
+    let expected = fs::canonicalize(parent)
+        .map_err(|_| ())?
+        .join(path.strip_prefix(parent).map_err(|_| ())?);
+    if fs::canonicalize(&path).map_err(|_| ())? != expected {
         return Err(());
     }
     let mut file = File::open(&path).map_err(|_| ())?;
@@ -190,6 +196,50 @@ mod tests {
         assert!(super::path(&source, "../other").is_none());
         let wrong = serde_json::json!({"type":"result","sessionId":source.native,"agentId":"child-b","timestamp":now});
         fs::write(path, format!("{wrong}\n")).unwrap();
+        assert!(read(&source, "child-a", source.visit, &mut None).is_err());
+    }
+
+    #[test]
+    fn source_parent_alias_is_allowed_but_child_symlinks_are_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let alias = dir.path().join("alias");
+        symlink(&real, &alias).unwrap();
+        let source = Source {
+            session: "fixture".into(),
+            channel: 0,
+            owner: "fixture".into(),
+            host: None,
+            nonce: "fixture".into(),
+            native: uuid::Uuid::new_v4().to_string(),
+            path: alias.join("native.jsonl"),
+            file: (0, 0),
+            visit: Utc::now(),
+        };
+        let path = path(&source, "child-a").unwrap();
+        let subagents = path.parent().unwrap();
+        fs::create_dir_all(subagents).unwrap();
+        let row = serde_json::json!({"type":"result","sessionId":source.native,
+            "agentId":"child-a","timestamp":source.visit});
+        fs::write(&path, format!("{row}\n")).unwrap();
+        assert_eq!(
+            read(&source, "child-a", source.visit, &mut None),
+            Ok(Some(true))
+        );
+
+        let other = path.with_file_name("other.jsonl");
+        fs::rename(&path, &other).unwrap();
+        symlink(&other, &path).unwrap();
+        assert!(read(&source, "child-a", source.visit, &mut None).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::rename(&other, &path).unwrap();
+
+        let redirected = dir.path().join("redirected");
+        fs::rename(subagents, &redirected).unwrap();
+        symlink(&redirected, subagents).unwrap();
         assert!(read(&source, "child-a", source.visit, &mut None).is_err());
     }
 }
