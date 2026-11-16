@@ -366,6 +366,15 @@ pub(in crate::services::discord) async fn hand_busy(
     let session = row.tmux_session_name.clone().ok_or_else(unobserved)?;
     let key = row.session_key.as_deref();
     let host = crate::services::turn_host::for_turn(pool.as_ref(), &provider, channel, key).await;
+    let origin = front_origin(&mailbox, &front).await?;
+    let observed = owned_busy::running(
+        runtime.as_ref(),
+        &mailbox,
+        (&provider, origin),
+        (channel, &session, &host),
+        &front,
+    )
+    .await?;
     // Claude's prelaunch row has no transcript until its observer hands it back. Its live pane
     // already has the binding that the idle observer used before submitting the first input.
     let binding = (provider == ProviderKind::Claude
@@ -386,13 +395,11 @@ pub(in crate::services::discord) async fn hand_busy(
         .or(row.session_id.as_deref());
     let live = output.map(|path| (path, native));
     let at = (&host, session.as_str(), live);
-    let kind = (
-        provider.as_str(),
-        front_origin(&mailbox, &front).await?,
-        true,
-    );
-    let owner =
-        Registration::observed(mailbox.clone(), kind, at, &front.1, None).map_err(|error| {
+    let kind = (provider.as_str(), origin, true);
+    let owner = observed
+        .map(Ok)
+        .unwrap_or_else(|| Registration::observed(mailbox.clone(), kind, at, &front.1, None))
+        .map_err(|error| {
             if effect::surely_unsent(&error) {
                 error
             } else {
@@ -863,10 +870,19 @@ fn native_read(provider: &ProviderKind, target: &NativeTarget) -> Screen {
     }
 }
 
-/// A live Codex pane is idle only once its rollout shows its latest turn's own end; a rollout with
-/// no start or with any end it cannot attribute proves no idle.
+/// A live Codex pane is idle only once its bound rollout, its hooks and its process prove the
+/// latest turn's end; with no binding the rollout its session id names is read for that end.
 fn codex_read(target: &NativeTarget) -> Screen {
     use crate::services::codex_tui::busy_inject::NativeEnd;
+    use crate::services::codex_tui::readiness::Verdict;
+    let cwd = crate::services::tmux_diagnostics::tmux_session_pane_cwd(&target.tmux);
+    match super::super::tui_followup::codex_verdict(&target.tmux, cwd.as_deref()) {
+        Some(Verdict::Idle(_)) => return Screen::Ready,
+        Some(Verdict::Busy(_)) => return Screen::Blocked,
+        Some(Verdict::Gone) => return Screen::Gone,
+        Some(Verdict::Unknown(_)) => return Screen::Unknown,
+        None => {}
+    }
     let end = super::super::tui_followup::codex_native_end;
     match end(&target.tmux, target.session_id.as_deref()) {
         NativeEnd::Ended => Screen::Ready,

@@ -1,0 +1,69 @@
+---
+title: "Codex ready, busy, end and /stop judged from the rollout, the hooks and the process"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks CodexNoEarlyInput
+    lg1: Path to the CodexNoEarlyInput bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Booting: wait for this launch's Codex process (tmux launch 1, 0 turn(s) started)
+  s1: Idle: the rollout proves the end (tmux launch 1, 0 turn(s) started)
+  s2: Ready proven: read again before the first key (tmux launch 1, 0 turn(s) started)
+  s3: Enter pressed, task_started not written: no signal says busy (tmux launch 1, 1 turn(s) started)
+  s4: Ready proven: read again before the first key (tmux launch 1, 1 turn(s) started)
+  s5: Turn running: the rollout reads open (tmux launch 1, 1 turn(s) started)
+  s6: Idle, end record not written yet (tmux launch 1, 1 turn(s) started)
+  s7: RED: Idle-route input reached a running turn
+  s8: Idle: the rollout proves the end (tmux launch 1, 1 turn(s) started)
+  s9: Enter pressed, task_started not written: no signal says busy (tmux launch 1, 2 turn(s) started)
+  s10: Turn running: the rollout reads open (tmux launch 1, 2 turn(s) started)
+  s11: Idle, end record not written yet (tmux launch 1, 2 turn(s) started)
+  s12: Ready proven: read again before the first key (tmux launch 1, 2 turn(s) started)
+  s13: Idle: the rollout proves the end (tmux launch 1, 2 turn(s) started)
+  s14: Enter pressed, task_started not written: no signal says busy (tmux launch 1, 3 turn(s) started)
+  s15: Turn running: the rollout reads open (tmux launch 1, 3 turn(s) started)
+  s16: Idle, end record not written yet (tmux launch 1, 3 turn(s) started)
+  s17: Idle: the rollout proves the end (tmux launch 1, 3 turn(s) started)
+  [*] --> s0
+  s0 --> s1: Codex becomes the pane's running process
+  s1 --> s2: the next input proves ready
+  s1 --> s3: a person presses Enter in the TUI
+  s2 --> s4: a person presses Enter in the TUI
+  s2 --> s5: the input is written, or its proof no longer holds
+  s3 --> s4: the next input proves ready
+  s3 --> s5: task_started reaches the rollout
+  s4 --> s7: the input is written, or its proof no longer holds
+  s5 --> s6: the turn ends in the TUI
+  s6 --> s8: the end record reaches the rollout
+  s6 --> s4: the next input proves ready
+  s4 --> s5: the input is written, or its proof no longer holds
+  s8 --> s4: the next input proves ready
+  s8 --> s9: a person presses Enter in the TUI
+  s4 --> s6: the input is written, or its proof no longer holds
+  s4 --> s10: the input is written, or its proof no longer holds
+  s4 --> s8: the input is written, or its proof no longer holds
+  s4 --> s12: a person presses Enter in the TUI
+  s9 --> s12: the next input proves ready
+  s9 --> s10: task_started reaches the rollout
+  s10 --> s11: the turn ends in the TUI
+  s11 --> s13: the end record reaches the rollout
+  s11 --> s12: the next input proves ready
+  s12 --> s7: the input is written, or its proof no longer holds
+  s13 --> s12: the next input proves ready
+  s13 --> s14: a person presses Enter in the TUI
+  s12 --> s15: the input is written, or its proof no longer holds
+  s12 --> s10: the input is written, or its proof no longer holds
+  s12 --> s11: the input is written, or its proof no longer holds
+  s14 --> s15: task_started reaches the rollout
+  s15 --> s16: the turn ends in the TUI
+  s12 --> s13: the input is written, or its proof no longer holds
+  s16 --> s17: the end record reaches the rollout
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s7 breaks
+  class s7 bugPath

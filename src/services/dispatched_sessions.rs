@@ -155,7 +155,8 @@ pub async fn gc_thread_sessions(
     State(state): State<AppState>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
-        let deleted = hosted_cleanup::thread_gc::gc_stale_thread_sessions_pg(pool).await;
+        let children = crate::services::tui_o::writer::host::ChildStores;
+        let deleted = hosted_cleanup::thread_gc::gc_stale_thread_sessions_pg(pool, &children).await;
         return Ok((
             StatusCode::OK,
             Json(json!({"ok": true, "gc_threads": deleted.len()})),

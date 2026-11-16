@@ -1,1 +1,2 @@
-생성물: 손으로 고치지 않는다. 승인된 최초 schema 3 활성화 생성 명령: `python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha 75726b3b1dfd5ea53aa9164324ed54030194a7cb --output scripts/audit_maintainability/baselines/generated/module_layers.json`. 이후 변경은 `--update-reductions`의 감소 전용 갱신만 허용하며 정본 삭제·재생성으로 부채를 수용하지 않는다. 활성화 출처와 제한은 `docs/architecture/layers.md`에 기록한다.
+생성물: 손으로 고치지 않는다. `low_level_accessors/`는 `checks/low_level_accessor_baseline.py`가 쓰고 감소·재표기만 허용한다.
+모듈 층 기준선(`module_layers.json`)은 더 이상 커밋하지 않는다. CI가 main과 후보를 각각 재며, 정당한 증가는 `scripts/audit_maintainability/layer_approvals/`의 승인 파일로 적는다. 계약은 `docs/architecture/layers.md`에 있다.
