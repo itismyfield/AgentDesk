@@ -39,6 +39,11 @@ pub(super) async fn run_stream_loop(
     ctx: StreamLoopContext,
     state: StreamLoopState<'_>,
 ) -> StreamLoopOutput {
+    crate::services::tui_o::cutover::wait_codex_first(
+        ctx.channel_id.get(),
+        ctx.cancel_token.turn_nonce(),
+    )
+    .await;
     let recovery_lease = ctx.capture_recovery_lease();
     let context_compact_lower_bound_tokens = ctx.compact_lower_bound_tokens().await;
     let (shared_owned, gateway) = (ctx.shared_owned, ctx.gateway);

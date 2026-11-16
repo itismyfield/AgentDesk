@@ -2116,3 +2116,6 @@ mod streaming_rollover_frozen_prefix_persistence_tests {
         );
     }
 }
+
+#[cfg(test)]
+pub(crate) use tmux_watcher::first_terminal_plan;

@@ -49,6 +49,7 @@ impl Default for RolloutTailOptions {
             pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
             terminal_range_eligible: false,
             own_turn: None,
+            launch_context: None,
         }
     }
 }
