@@ -409,11 +409,13 @@ def moved_hidden_reverse(accepted, head, moves, sources, comparison):
     """Re-judge shrunk moved reverse debt on its candidate endpoints; compare() keeps the base endpoints.
 
     Errors when an unresolved reference in the moved source still names the moved target, and promotes
-    uncertainty growth in that source to an error, as compare() does for unmoved shrunk sources."""
+    indeterminate and uncertainty growth in that source to an error, as compare() does for unmoved shrunk sources."""
     errors = []
     limits = {row["id"]: row["count"] for row in accepted["reverse_dependencies"]}
     rows = {row["id"]: row for row in head["reverse_dependencies"]}
-    moved_uncertainty = {m["old_id"]: m["new_id"] for m in moves["moves"] if m["section"] == "uncertainties"}
+    destination = {(m["section"], m["old_id"]): m["new_id"] for m in moves["moves"]}
+    source_of = {("uncertainties", identity): evidence.get("source") for identity, evidence in sources.items()}
+    source_of.update((("indeterminate_dependencies", r["id"]), r["source"]) for r in head["indeterminate_dependencies"])
     for move in (m for m in moves["moves"] if m["section"] == "reverse_dependencies"):
         row = rows.get(move["new_id"])
         if row is None or row["count"] >= limits.get(move["old_id"], 0):
@@ -426,8 +428,8 @@ def moved_hidden_reverse(accepted, head, moves, sources, comparison):
                                      id=row["id"]))
                 break
         for warning in list(comparison["warnings"]):
-            if (warning["section"] == "uncertainties"
-                    and sources.get(moved_uncertainty.get(warning.get("id"), warning.get("id")), {}).get("source") == row["source"]):
+            key = (warning["section"], warning.get("id"))
+            if source_of.get((key[0], destination.get(key, key[1]))) == row["source"]:
                 comparison["warnings"].remove(warning)
                 errors.append(warning)
     return errors

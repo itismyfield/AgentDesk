@@ -289,6 +289,33 @@ class Approvals(GateFixture):
                                                  "new_id": new["id"], "reason": "moved"}])
         self.assertEqual(self.codes(self.run_gate(repo)), ["new-id"])
 
+    def test_moved_shrunk_source_blocks_indeterminate_growth_like_an_unmoved_one(self):
+        layers = LAYERS.replace("]\n[layers]", ']\nunclassified = [{prefix="mixed",reason="fixture"}]\n[layers]')
+        tail = "mod mixed { pub fn hit() {} }\nmod spare { pub fn hit() {} }\n"
+        before = lambda body: "mod lower { pub fn run() { " + body + " } }\nmod upper { pub fn hit() {} }\n" + tail
+        after = lambda body: ("mod lower { pub mod inner { pub fn run() { " + body + " } } }\n"
+                              "mod upper { pub mod inner { pub fn hit() {} } }\n" + tail)
+        up, inner, mixed = "crate::upper::hit(); ", "crate::upper::inner::hit(); ", "crate::mixed::hit(); "
+        for name, base_body, head_body, sections, expected in (
+                ("new", up * 2, inner + mixed, ("reverse_dependencies",), ["new-id"]),
+                ("moved-growth", up * 2 + mixed, inner + mixed * 2, ("reverse_dependencies", "indeterminate_dependencies"), ["increase"]),
+                ("not-shrunk", up * 2, inner * 2 + mixed, ("reverse_dependencies",), [])):
+            with self.subTest(name):
+                repo = self.repo(layers=layers, extra="mod mixed { pub fn hit() {} }\n")
+                repo.put("src/lib.rs", before(base_body))
+                repo.commit("main")
+                repo.main()
+                base = self.run_gate(repo)["draft"]["head"]
+                repo.put("src/lib.rs", after(head_body))
+                head = self.run_gate(repo)["draft"]["head"]
+                self.approval(repo, "8131-move", move=[{"section": s, "old_id": base[s][0]["id"], "new_id": head[s][0]["id"],
+                                                        "reason": "moved"} for s in sections])
+                result = self.run_gate(repo)
+                self.assertEqual([(e["code"], e["section"]) for e in result["errors"]],
+                                 [(code, "indeterminate_dependencies") for code in expected])
+                if not expected:
+                    self.assertIn(("new-id", "indeterminate_dependencies"), {(w["code"], w["section"]) for w in result["warnings"]})
+
     def test_draft_approval_lists_blocking_increases_and_needs_review(self):
         repo, row = self.new_spare_debt()
         result = self.run_gate(repo)
