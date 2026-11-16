@@ -907,10 +907,10 @@ fn external_herdr_http_machine_unknown_keeps_custody_and_wakes_on_idle_pg() {
                     })
                     .await
                     .unwrap();
-                if let Some(message) = held {
-                    if super::super::super::OwnerTurn::drive_results(CHANNEL).len() > drives {
-                        break message;
-                    }
+                if let Some(message) = held
+                    && super::super::super::OwnerTurn::drive_results(CHANNEL).len() > drives
+                {
+                    break message;
                 }
                 tokio::task::yield_now().await;
             }
