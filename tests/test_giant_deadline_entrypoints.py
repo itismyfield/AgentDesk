@@ -44,8 +44,6 @@ class DeadlineEntrypointsTest(unittest.TestCase):
             shutil.copy2(ROOT / "scripts" / filename, scripts / filename)
         shutil.copytree(ROOT / "scripts/audit_maintainability", scripts / "audit_maintainability",
                         ignore=shutil.ignore_patterns("__pycache__"))
-        # The fixture runs against its own synthetic baseline, so the repo's pending layer moves must not be checked against it.
-        (scripts / "audit_maintainability/layer_moves.toml").write_text("schema_version = 1\nmoves = []\n")
         (scripts / "ci").mkdir()
         for filename in ("rust_test_sources.py", "merge_candidate.py"):
             shutil.copy2(ROOT / "scripts/ci" / filename, scripts / "ci" / filename)
@@ -123,17 +121,6 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         cls.git_at(cls.template, "config", "user.email", "fixture@example.invalid")
         cls.git_at(cls.template, "add", "-A")
         cls.git_at(cls.template, "commit", "-qm", "fixture sources")
-        source_sha = cls.git_at(cls.template, "rev-parse", "HEAD")
-        result = cls.command_at(cls.template, [
-            sys.executable, "scripts/audit_maintainability/checks/module_layer_baseline.py",
-            "--input-sha", source_sha, "--output", "target/fixture-baseline.json",
-        ])
-        if result.returncode:
-            raise AssertionError(result.stdout + result.stderr)
-        baseline = "scripts/audit_maintainability/baselines/generated/module_layers.json"
-        shutil.copy2(cls.template / "target/fixture-baseline.json", cls.template / baseline)
-        cls.git_at(cls.template, "add", baseline)
-        cls.git_at(cls.template, "commit", "-qm", "fixture module-layer baseline")
         cls.base = cls.git_at(cls.template, "rev-parse", "HEAD")
 
     @classmethod

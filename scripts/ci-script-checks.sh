@@ -878,7 +878,7 @@ if run_check cargo "Agent maintenance freshness tests"; then
 fi
 
 if run_check cargo "Maintainability audit tests"; then
-"$PYTHON" -m unittest tests.test_audit_maintainability tests.test_module_layer_baseline_records tests.test_module_layer_measurement tests.test_module_layer_ratchet tests.test_module_layer_classification
+"$PYTHON" -m unittest tests.test_audit_maintainability tests.test_module_layer_baseline_records tests.test_module_layer_measurement tests.test_module_layer_ratchet tests.test_module_layer_classification tests.test_module_layer_gate
 fi
 
 if run_check guards "Low-level accessor ratchet tests"; then
