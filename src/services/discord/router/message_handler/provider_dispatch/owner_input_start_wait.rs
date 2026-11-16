@@ -16,11 +16,11 @@ pub(super) async fn screen(shared: &Shared, channel: ChannelId, context: &Value)
         key.as_deref(),
     )
     .await;
-    match &host {
+    let plan = match &host {
         TurnHost::Tmux | TurnHost::Return(_) => return None,
         TurnHost::Refused(_) => return Some(Screen::Unknown),
-        TurnHost::Herdr(_) => {}
-    }
+        TurnHost::Herdr(plan) => plan,
+    };
     if *provider != ProviderKind::Claude {
         use crate::services::discord::turn_presence::activity::{Activity, activity_now};
         return Some(
@@ -31,12 +31,21 @@ pub(super) async fn screen(shared: &Shared, channel: ChannelId, context: &Value)
             },
         );
     }
-    let target = match start_target(shared, channel, context).await {
-        Ok(Some(target)) => target,
-        _ => return Some(Screen::Unknown),
+    use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
+    let target = if plan.row.as_ref().is_some_and(|row| {
+        matches!(&row.record, HostedRecord::Known(record) if record.state == HostedState::Bound)
+    }) {
+        match start_target(shared, channel, context).await {
+            Ok(Some(target)) => Some(target),
+            _ => return Some(Screen::Unknown),
+        }
+    } else {
+        None
     };
+    // The reader judges absent/retired rows before needing a pane name.
+    let logical = target.as_ref().map_or("", |target| target.tmux.as_str());
     let observation =
-        claude_handoff::observe_busy(channel.get(), &target.tmux, &host, &shared.token_hash);
+        claude_handoff::observe_busy(channel.get(), logical, &host, &shared.token_hash);
     Some(match observation.state() {
         BusyState::Idle => Screen::Ready,
         BusyState::Busy => Screen::Blocked,

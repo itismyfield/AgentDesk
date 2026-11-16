@@ -9,6 +9,9 @@ pub(super) async fn host(
     provider: &ProviderKind,
     channel: ChannelId,
 ) -> Result<bool, HumanInputError> {
+    if !crate::services::discord::owner_takes_start(provider, channel.get()) {
+        return Ok(false);
+    }
     let key = || {
         crate::services::discord::adk_session::build_adk_session_key(
             shared, channel, provider, None,
@@ -23,9 +26,8 @@ pub(super) async fn host(
     .await
     {
         Some(refusal) => Err(HumanInputError::InvalidTarget(refusal.to_string())),
-        None => Ok(
-            crate::config::session_hosts::has_herdr_endpoint(channel.get())
-                && crate::services::discord::owner_takes_start(provider, channel.get()),
-        ),
+        None => Ok(crate::config::session_hosts::has_herdr_endpoint(
+            channel.get(),
+        )),
     }
 }

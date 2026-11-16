@@ -15,7 +15,9 @@ pub(super) async fn deliver(
     reply: ReplyObligation,
 ) -> RouteResponse {
     let channel = request.channel_id;
-    if !crate::config::session_hosts::has_herdr_endpoint(channel.get()) {
+    if !crate::config::session_hosts::has_herdr_endpoint(channel.get())
+        || !crate::services::discord::owner_takes_start(&request.provider, channel.get())
+    {
         return existing_delivery(pool, registry, input, request, line, reply).await;
     }
     let admission_source = "imessage";
