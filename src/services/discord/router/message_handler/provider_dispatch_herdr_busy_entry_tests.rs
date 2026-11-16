@@ -273,6 +273,9 @@ impl Intake {
     }
 
     fn with_expected_pin(fx: &Fixture, started: &Started, expected: ExpectedPin) -> Self {
+        let generation = discord::runtime_store::generation_path().unwrap();
+        std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
+        std::fs::write(generation, "1").unwrap();
         // The bootstrap transcript has the identities native Claude rows carry before O reopens it.
         let records = std::fs::read_to_string(&started.path).unwrap();
         let records: Vec<_> = records
@@ -374,7 +377,7 @@ impl Intake {
                 discord::make_shared_data_for_tests_with_storage(Some(fx.pool.clone()));
             let own = Arc::get_mut(&mut shared).unwrap();
             own.provider = ProviderKind::Claude;
-            own.restart.current_generation = 1;
+            own.restart.current_generation = discord::runtime_store::process_generation();
             own.token_hash = TOKEN.into();
             own.api_port = api.port;
             shared.settings.write().await.provider = ProviderKind::Claude;
@@ -1061,6 +1064,42 @@ async fn idle_turn_unwound(intake: &Intake) {
             "the submitted native terminal did not unwind its Idle turn: token={token:?}, row={row:?}"
         );
     }
+    use crate::services::tui_input::human_frame::history::v2::{Registry, native::Disposition};
+    let settlement = crate::test_support::wait::await_within(
+        async {
+            loop {
+                let history = Registry::runtime().unwrap();
+                if let Some(input) = history
+                    .native_classification_registrations()
+                    .unwrap()
+                    .into_iter()
+                    .find(|r| {
+                        r.ticket.channel_id == CHANNEL
+                            && r.ticket.key["identity"]["primary"] == MESSAGE
+                    })
+                {
+                    let settlement = history
+                        .native_settlement(&input.namespace, &input.ticket)
+                        .unwrap();
+                    if settlement.cleanup_complete {
+                        break settlement;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        },
+        crate::test_support::wait::WAIT_CAP,
+    )
+    .await;
+    assert_eq!(
+        settlement.outcome.unwrap().disposition,
+        Disposition::Executed
+    );
+    assert!(inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL).is_none());
+    assert_eq!(
+        intake.shared.restart.global_active.load(Ordering::SeqCst),
+        0
+    );
 }
 
 #[test]

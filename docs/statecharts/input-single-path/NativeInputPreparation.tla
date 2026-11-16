@@ -379,4 +379,35 @@ BarrierAmbiguousSpec == Init /\ [][BATakeOwn \/ BAUnresolvedFollower \/ BAStrict
 BarrierAmbiguousNoMarker == review.bAmbiguous => (~review.bBatch /\ ~review.bCompact)
 BarrierReceiptEventuallySettles == <>(result = "Executed")
 
+
+\* The producer carries a canonical physical identity before attempting its first key.
+HostedPrepare == /\ review.pc = 0
+                 /\ phase' = "Prepared" /\ prepared' = TRUE
+                 /\ pin' = IF role = "Primary" THEN "Primary" ELSE "None"
+                 /\ review' = [review EXCEPT !.pc = 1]
+                 /\ UNCHANGED <<role, anyKey, original, result, source, restored, admitted>>
+HostedStamp == /\ review.pc = 1 /\ review.available
+               /\ review' = [review EXCEPT !.pc = 2,
+                    !.nativeBinding = IF Mode = "HostedBefore" THEN 0
+                       ELSE IF review.ticketExecution = "N1" THEN 1 ELSE 2]
+               /\ UNCHANGED BaseVars
+HostedRefuse == /\ review.pc = 1 /\ ~review.available
+                /\ phase' = "NotSent"
+                /\ review' = [review EXCEPT !.pc = 5, !.clearLease = 0, !.clearRows = 0]
+                /\ UNCHANGED <<role, pin, prepared, anyKey, original, result, source, restored, admitted>>
+HostedKey == /\ review.pc = 2 /\ anyKey' = TRUE /\ phase' = "Unknown"
+             /\ review' = [review EXCEPT !.pc = 3]
+             /\ UNCHANGED <<role, pin, prepared, original, result, source, restored, admitted>>
+HostedClose == /\ review.pc = 3
+               /\ review.nativeBinding = (IF review.ticketExecution = "N1" THEN 1 ELSE 2)
+               /\ source' = "Bound" /\ result' = "Executed"
+               /\ review' = [review EXCEPT !.pc = 5, !.clearLease = 0, !.clearRows = 0]
+               /\ UNCHANGED <<phase, role, pin, prepared, anyKey, original, restored, admitted>>
+HostedSpec == Init /\ role = "Primary" /\ [][HostedPrepare \/ HostedStamp \/ HostedRefuse \/ HostedKey \/ HostedClose]_vars
+              /\ WF_vars(HostedPrepare) /\ WF_vars(HostedStamp) /\ WF_vars(HostedRefuse)
+              /\ WF_vars(HostedKey) /\ WF_vars(HostedClose)
+HostedIdentityBeforeKey == anyKey => review.nativeBinding = (IF review.ticketExecution = "N1" THEN 1 ELSE 2)
+HostedOnlyCloserCompletes == result = "Executed" => source = "Bound" /\ anyKey
+HostedEventuallyUnblocks == <>(review.clearLease = 0 /\ review.clearRows = 0)
+
 ====

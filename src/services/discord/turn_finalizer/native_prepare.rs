@@ -11,6 +11,131 @@ pub(in crate::services::discord) fn enabled() -> bool {
     true
 }
 
+/// Installs the canonical physical identity before a primary's first key, under the row CAS.
+pub(in crate::services::discord) async fn bind_hosted_row(
+    shared: &Arc<SharedData>,
+    key: TurnKey,
+    actor: Option<&Arc<CancelToken>>,
+    ticket: &Ticket,
+) -> Result<(), String> {
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedLookup, HostedLookupKey, HostedRecord, HostedState, load_hosted_execution_pg,
+    };
+    let target = &ticket.key["attempt"]["target"];
+    if actor.is_none() || target["host"] != "herdr" {
+        return Ok(());
+    }
+    let Some(row) = super::super::inflight::load_inflight_state_read_only_result(
+        &ProviderKind::Claude,
+        key.channel_id.get(),
+    )?
+    else {
+        return Ok(());
+    };
+    if let Some(nonce) = &row.hosted_execution_nonce {
+        return (target["execution_nonce"] == *nonce)
+            .then_some(())
+            .ok_or_else(|| "native hosted row nonce changed".into());
+    }
+    if key.generation != shared.restart.current_generation
+        || row.provider != "claude"
+        || row.channel_id != key.channel_id.get()
+        || row.effective_finalizer_turn_id() != key.user_msg_id
+        || row.born_generation != key.generation
+        || !key.matches_episode_nonce(row.turn_nonce.as_deref())
+        || row.hosted_record_id.is_some()
+        || row.host_locator.is_some()
+    {
+        return Err("native hosted row episode changed".into());
+    }
+    let current = shared.mailbox(key.channel_id).snapshot().await;
+    if current.active_user_message_id.map(|id| id.get()) != Some(key.user_msg_id)
+        || !key.matches_episode_nonce(current.active_turn_nonce.as_deref())
+        || !current
+            .cancel_token
+            .as_ref()
+            .zip(actor)
+            .is_some_and(|(a, b)| Arc::ptr_eq(a, b))
+    {
+        return Err("native hosted actor changed".into());
+    }
+    let pool = shared
+        .pg_pool
+        .as_ref()
+        .ok_or("native hosted row pool unavailable")?;
+    let HostedLookup::Found(observed) = load_hosted_execution_pg(
+        pool,
+        HostedLookupKey::SessionKey(row.session_key.as_deref().ok_or("native row key missing")?),
+    )
+    .await
+    else {
+        return Err("native hosted row unreadable".into());
+    };
+    let HostedRecord::Known(record) = &observed.record else {
+        return Err("native hosted row unknown".into());
+    };
+    let at = record
+        .location
+        .as_ref()
+        .ok_or("native hosted location missing")?;
+    if !matches!(record.state, HostedState::Pending | HostedState::Bound)
+        || record.expected.is_none()
+        || record.owner.provider != "claude"
+        || record.owner.discord_token_hash != shared.token_hash
+        || record.owner.channel_id != key.channel_id.get().to_string()
+        || target["owner"] != record.owner.logical_key
+        || target["execution_nonce"] != record.execution_nonce
+        || target["root"] != at.socket_addr
+        || at.host != "herdr"
+    {
+        return Err("native hosted target changed".into());
+    }
+    let source = &ticket.key["attempt"]["source"];
+    let session = source["session_id"]
+        .as_str()
+        .or_else(|| source["expected_session_id"].as_str())
+        .ok_or("native hosted session missing")?;
+    let path = source["transcript"]
+        .as_str()
+        .or_else(|| source["expected_transcript"].as_str())
+        .ok_or("native hosted transcript missing")?;
+    let mut next = row.clone();
+    next.hosted_record_id = Some(observed.session_id());
+    next.hosted_execution_nonce = Some(record.execution_nonce.clone());
+    next.host_locator = Some(
+        serde_json::from_value(serde_json::json!({
+            "host_kind":"herdr", "host_session_id":at.named_session,
+            "pane":at.pane_id, "execution_node":at.execution_node,
+        }))
+        .map_err(|e| e.to_string())?,
+    );
+    next.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+    next.tmux_session_name = Some(record.owner.logical_key.clone());
+    next.session_id = Some(session.into());
+    next.output_path = Some(path.into());
+    // The PG lock pins the canonical record while the file CAS preserves any successor row.
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let raw: Option<Option<serde_json::Value>> =
+        sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE id = $1 FOR SHARE")
+            .bind(observed.session_id())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+    if raw.flatten().as_ref() != Some(&serde_json::to_value(record).map_err(|e| e.to_string())?) {
+        return Err("native hosted record superseded".into());
+    }
+    let expected = super::super::inflight::InflightTurnIdentity::from_state(&row);
+    let outcome = super::super::inflight::stamp_runtime_handoff_if_matches_identity(
+        (&row, &mut next),
+        &expected,
+        "native_prepare::bind_hosted_row",
+    );
+    tx.commit().await.map_err(|e| e.to_string())?;
+    (outcome == super::super::inflight::GuardedSaveOutcome::Saved)
+        .then_some(())
+        .ok_or_else(|| format!("native hosted row CAS refused: {outcome:?}"))
+}
+
 pub(in crate::services::discord) struct Handle {
     finalizer: Arc<TurnFinalizer>,
     key: TurnKey,
@@ -29,6 +154,10 @@ impl Handle {
         namespace: String,
         ticket: Ticket,
     ) -> Result<Self, String> {
+        if let Err(error) = bind_hosted_row(shared, key, actor.as_ref(), &ticket).await {
+            history.try_native_not_sent(&namespace, &ticket)?;
+            return Err(error);
+        }
         let (ack, rx) = oneshot::channel();
         shared
             .turn_finalizer

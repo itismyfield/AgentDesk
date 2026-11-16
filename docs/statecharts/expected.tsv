@@ -901,3 +901,5 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
+input-single-path/NativePreparationHostedBefore.cfg	NativeInputPreparation	HostedIdentityBeforeKey	HostedEventuallyUnblocks
+input-single-path/NativePreparationHostedFixed.cfg	NativeInputPreparation	-	-
