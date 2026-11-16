@@ -1036,7 +1036,14 @@ pub(super) struct OutputGate {
 impl OutputGate {
     fn open(&self) {
         self.held.store(false, Ordering::SeqCst);
-        self.release.notify_waiters();
+        self.release.notify_one();
+    }
+}
+
+struct OutputGateRelease(Arc<OutputGate>);
+impl Drop for OutputGateRelease {
+    fn drop(&mut self) {
+        self.0.open();
     }
 }
 
@@ -1197,6 +1204,7 @@ fn external_herdr_http_reply_before_and_after_terminal_pg() {
         let gate = Arc::new(OutputGate::default());
         gate.held.store(after, Ordering::SeqCst);
         let intake = Intake::with_output_gate(&fx, &started, ExpectedPin::Verified, gate.clone());
+        let gate_release = OutputGateRelease(gate.clone());
         let heads = answer_on_enter(&fx, &intake, &started, true);
         let fallback = FallbackCount::new();
         intake.runtime.block_on(async {
@@ -1239,17 +1247,16 @@ fn external_herdr_http_reply_before_and_after_terminal_pg() {
                 gate.open();
                 outcome.unwrap();
             } else {
-                let logical = fx.logical().to_owned();
-                let (entered, locked) = std::sync::mpsc::channel();
+                let (entered, paused) = std::sync::mpsc::channel();
                 let (release, wait) = std::sync::mpsc::channel();
-                let lock = std::thread::spawn(move || {
-                    crate::services::tmux_common::with_tmux_source_authority(&logical, |_| {
-                        entered.send(()).unwrap();
+                let hook = discord::gateway::HeadlessExactGateway::before_next_presentation(
+                    Box::new(move || {
+                        entered.send(()).unwrap_or(());
                         wait.recv_timeout(LIMIT).unwrap_or(());
-                    });
-                });
-                locked.recv_timeout(LIMIT).unwrap();
+                    }),
+                );
                 finish_answer(&started.path, &started.session, 1);
+                paused.recv_timeout(LIMIT).unwrap();
                 let outcome = tokio::time::timeout(LIMIT, async {
                     while !intake
                         .posts
@@ -1269,14 +1276,14 @@ fn external_herdr_http_reply_before_and_after_terminal_pg() {
                 })
                 .await;
                 release.send(()).unwrap_or(());
-                lock.join().unwrap();
+                drop(hook);
                 outcome.unwrap();
             }
             completed(&intake, 1).await;
             assert_eq!(fx.rig.sends().len(), before + 2);
             fallback.assert_none();
         });
-        gate.open();
+        drop(gate_release);
         drop(intake);
         drop(admission);
         drop(registry);

@@ -4,6 +4,26 @@ use crate::services::discord::replay_policy::{ExactHandoff, ExactRetry};
 
 type Restart = dyn Fn(ChannelId, ExactRetry) -> GatewayFuture<'static, ExactHandoff> + Send + Sync;
 
+#[cfg(all(test, unix))]
+type PresentationHook = Box<dyn FnOnce() + Send>;
+#[cfg(all(test, unix))]
+static BEFORE_PRESENTATION: std::sync::Mutex<Option<PresentationHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(all(test, unix))]
+struct PresentationHookGuard;
+#[cfg(all(test, unix))]
+impl Drop for PresentationHookGuard {
+    fn drop(&mut self) {
+        drop(
+            BEFORE_PRESENTATION
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take(),
+        );
+    }
+}
+
 pub(in crate::services::discord) struct HeadlessExactGateway {
     base: HeadlessGateway,
     restart: Option<Arc<Restart>>,
@@ -34,6 +54,16 @@ impl HeadlessExactGateway {
         });
         gateway.presentation = Some(presentation);
         gateway
+    }
+
+    #[cfg(all(test, unix))]
+    pub(in crate::services::discord) fn before_next_presentation(
+        hook: PresentationHook,
+    ) -> impl Drop {
+        *BEFORE_PRESENTATION
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(hook);
+        PresentationHookGuard
     }
 
     fn presentation(&self) -> &dyn TurnGateway {
@@ -125,6 +155,16 @@ impl TurnGateway for HeadlessExactGateway {
         self.base.can_chain_locally()
     }
     fn can_deliver_directly(&self) -> bool {
+        #[cfg(all(test, unix))]
+        if self.presentation.is_some() {
+            let hook = BEFORE_PRESENTATION
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         self.presentation().can_deliver_directly()
     }
     fn bot_owner_provider(&self) -> Option<ProviderKind> {
