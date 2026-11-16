@@ -1,6 +1,5 @@
 # Codex 준비·작업 중·/stop 판정을 rollout·훅·프로세스 신호로 옮기기 — #8082 설계 d3
 
-<!-- doc-path-refs: proposed docs/herdr-parity-restart.design.md -->
 
 기준 코드: `082c77aa4e06b81c76b614f55b8fed73ce01923f` (#8081 B1 리뷰 CLEAN head, main 미착지).
 d3까지는 설계·모델만 다뤘다. 구현은 5절의 조각 순서로 들어가고, 조각 A가 확인한 사실은 **A1** 표시로 적었다.

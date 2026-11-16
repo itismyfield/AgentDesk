@@ -97,7 +97,7 @@ Seeded 요청에 B2a detached worker·결과 cache 메타데이터(`a*`)를 켜�
 | seed용 진입 판정 | `src/services/turn_host.rs:215`, `:177`, `:198` |
 | operation→ticket | `src/services/turn_orchestrator/restart_operation.rs:30` |
 | `!clear`·`/clear` | `src/services/discord/commands/control.rs:523` |
-| clear의 owner 폐기 | `src/services/turn_orchestrator/queued_head/v2/control.rs:412`, `:207` |
+| clear의 owner 폐기 | `src/services/turn_orchestrator/queued_head/v2/control.rs:406`, `:207` |
 | 강제 Cancel | `src/services/queue/http_force.rs:14` |
 | `/stop` | `src/services/discord/commands/stop.rs:19` |
 | provider reset | `src/services/discord/commands/control/provider_reset.rs:16` |
