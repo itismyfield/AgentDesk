@@ -1,50 +1,63 @@
 ---
-title: "이슈 8201: 불확실 Enter 뒤 남은 입력 보류 표지"
+title: "이슈 8201: 불확실 Enter 뒤 남은 입력 보류 표지 (개정 2)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
     lg0: held
-    lg1: Path to the HoldEventuallyReleased or HoldReleasedOrSurfaced or LaterInputStarts bug
-    lg2: Repeats forever, so HoldEventuallyReleased or HoldReleasedOrSurfaced or LaterInputStarts breaks
+    lg1: Path to the HoldEventuallyReleased or HoldReleasedOrNoticed or LaterInputStarts bug
+    lg2: Repeats forever, so HoldEventuallyReleased or HoldReleasedOrNoticed or LaterInputStarts breaks
   }
   class lg0 yellow
   class lg1 bugPath
   class lg2 repeats
-  s0: 보류: 붙여넣기가 아직 안 그려짐
-  s1: 보류: 판독 불가, 붙여넣기 그려지기 전
-  s2: 보류: 우리 붙여넣기가 입력창에 남음
-  s3: 보류: 붙여넣기가 아직 안 그려짐, 새 입력 retained
-  s4: 보류: 입력창 판독 불가
-  s5: 보류: 판독 불가, 붙여넣기 그려지기 전, 새 입력 retained
-  s6: 보류: 우리 붙여넣기가 입력창에 남음, 새 입력 retained
-  s7: 보류: 입력창 판독 불가, 새 입력 retained
+  s0: 보류: 붙여넣기가 아직 안 그려짐 #183; 정착 창 안 #183; receipt 창 안
+  s1: 보류: 붙여넣기가 아직 안 그려짐 #183; 정착 창 안
+  s2: 보류: 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안 #183; receipt 창 안
+  s3: 보류: 붙여넣기가 아직 안 그려짐, 새 입력 retained #183; 정착 창 안 #183; receipt 창 안
+  s4: 보류: 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안
+  s5: 보류: 우리 붙여넣기가 입력창에 남음 #183; receipt 창 안
+  s6: 보류: 붙여넣기가 아직 안 그려짐, 새 입력 retained #183; 정착 창 안
+  s7: 보류: 우리 붙여넣기가 입력창에 남음, 새 입력 retained #183; 정착 창 안 #183; receipt 창 안
+  s8: 보류: 우리 붙여넣기가 입력창에 남음
+  s9: 보류: 우리 붙여넣기가 입력창에 남음, 새 입력 retained #183; 정착 창 안
+  s10: 보류: 우리 붙여넣기가 입력창에 남음, 새 입력 retained #183; receipt 창 안
+  s11: 보류: 우리 붙여넣기가 입력창에 남음, 새 입력 retained
   [*] --> s0
-  s0 --> s1: 부하로 판독 실패
   s0 --> s0: 새 입력 시작이 보류 표지에 거절됨
+  s0 --> s1: receipt 대기 시간이 지남
   s0 --> s2: 붙여넣기가 화면에 그려짐
-  s1 --> s0: 부하가 풀려 판독됨
-  s1 --> s4: 붙여넣기가 화면에 그려짐
   s0 --> s3: 새 입력 시작이 보류 표지에 거절됨
-  s2 --> s4: 부하로 판독 실패
-  s1 --> s5: 새 입력 시작이 보류 표지에 거절됨
-  s3 --> s5: 부하로 판독 실패
-  s3 --> s6: 붙여넣기가 화면에 그려짐
-  s4 --> s2: 부하가 풀려 판독됨
-  s2 --> s6: 새 입력 시작이 보류 표지에 거절됨
-  s5 --> s3: 부하가 풀려 판독됨
-  s5 --> s7: 붙여넣기가 화면에 그려짐
-  s4 --> s7: 새 입력 시작이 보류 표지에 거절됨
-  s6 --> s7: 부하로 판독 실패
-  s7 --> s6: 부하가 풀려 판독됨
+  s1 --> s4: 붙여넣기가 화면에 그려짐
+  s2 --> s4: receipt 대기 시간이 지남
+  s2 --> s5: 붙여넣기 정착 시간이 지남
+  s3 --> s6: receipt 대기 시간이 지남
+  s3 --> s7: 붙여넣기가 화면에 그려짐
+  s1 --> s6: 새 입력 시작이 보류 표지에 거절됨
+  s2 --> s7: 새 입력 시작이 보류 표지에 거절됨
+  s4 --> s8: 붙여넣기 정착 시간이 지남
+  s5 --> s8: receipt 대기 시간이 지남
+  s6 --> s9: 붙여넣기가 화면에 그려짐
+  s7 --> s9: receipt 대기 시간이 지남
+  s7 --> s10: 붙여넣기 정착 시간이 지남
+  s4 --> s9: 새 입력 시작이 보류 표지에 거절됨
+  s5 --> s10: 새 입력 시작이 보류 표지에 거절됨
+  s9 --> s11: 붙여넣기 정착 시간이 지남
+  s10 --> s11: receipt 대기 시간이 지남
+  s8 --> s11: 새 입력 시작이 보류 표지에 거절됨
   class s0 yellow
   class s0 bugPath
   class s1 yellow
+  class s1 bugPath
   class s2 yellow
   class s3 yellow
-  class s3 bugPath
   class s4 yellow
   class s5 yellow
   class s6 yellow
-  class s6 repeats
+  class s6 bugPath
   class s7 yellow
-  class s7 repeats
+  class s8 yellow
+  class s9 yellow
+  class s9 bugPath
+  class s10 yellow
+  class s11 yellow
+  class s11 repeats
