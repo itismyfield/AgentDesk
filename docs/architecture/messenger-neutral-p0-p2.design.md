@@ -9,7 +9,6 @@
 입력은 `gh issue view 8192`, `gh issue view 7353 --comments`의 마지막 “재개 (사용자 결정 11-16 06시)” 댓글, 제공된 #8189 보고서 §4-1·4-4·4-5와 #7353 설계 G06·G08이다. 51조각/CUT/V01~V21은 재개하지 않는다. #7651 전체 완료를 기다리지 않는다. Slack 구현·고유 ID 대응표 구현·DB schema 변경·이벤트 ingress 변경도 범위 밖이다.
 
 <!-- doc-path-refs: proposed src/services/engine_runtime.rs -->
-<!-- doc-path-refs: proposed src/services/engine_runtime/legacy_state.rs -->
 <!-- doc-path-refs: proposed src/services/engine_runtime/session.rs -->
 <!-- doc-path-refs: proposed src/services/engine_runtime/relay_state.rs -->
 <!-- doc-path-refs: proposed src/services/engine_runtime/execution_state.rs -->
