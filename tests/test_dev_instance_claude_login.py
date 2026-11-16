@@ -1,6 +1,8 @@
 """Explicit default Claude login binding, without reading login material."""
 import copy
+import hashlib
 import json
+import stat
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
@@ -18,6 +20,44 @@ class ClaudeLoginTests(TestCase):
         home = self.fixture.home
         self.login = {'mode': 'default_active', 'account_slot': 3, 'login_home': str(home),
                       'config_dir': str(home / '.claude'), 'cli': str(home / '.local/share/claude/versions/fixture')}
+
+    def _prepare_golden(self, manifest):
+        root = Path(manifest['root'])
+        replacements = [(str(root), '<root>'), (str(self.fixture.worktree), '<worktree>'),
+                        (str(self.fixture.home), '<home>'), (manifest['instance_id'], '<uuid>'),
+                        (manifest['instance_id'].replace('-', ''), '<uuid-hex>'),
+                        (manifest['head'], '<head>'), (str(manifest['api']['port']), '<api>'),
+                        (str(manifest['postgres']['port']), '<pg>')]
+        def normalize(value):
+            for original, replacement in replacements:
+                value = value.replace(original, replacement)
+            return value
+        entries = []
+        for path in sorted(root.rglob('*')):
+            metadata = path.lstat()
+            self.assertFalse(path.is_symlink())
+            entries.append([str(path.relative_to(root)), stat.S_IMODE(metadata.st_mode),
+                            'directory' if path.is_dir() else normalize(path.read_text())])
+        snapshot = {'files': entries, 'env': {key: normalize(value) for key, value in child_environment(manifest, {}).items()}}
+        return hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
+
+    def test_explicit_prepare_seeds_only_private_nonsecret_claude_state(self):
+        manifest = self.fixture.prepare(claude_login=self.login)
+        root = Path(manifest['root'])
+        path = Path(manifest['claude_login']['config_dir'])/'.claude.json'
+        self.assertTrue(path.is_relative_to(root))
+        self.assertEqual(json.loads(path.read_text()), {'hasCompletedOnboarding': True, 'theme': 'dark'})
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(list((root/'credential').iterdir()), [])
+        self.assertEqual(list((root/'home/.adk/profiles/codex/test-codex').iterdir()), [])
+        self.assertFalse((self.fixture.home/'.claude').exists())
+        self.assertFalse(list((root/'home').rglob('.credentials.json')))
+        self.assertEqual(validate(self.fixture.base, manifest['instance_id'], {})['claude_login'], manifest['claude_login'])
+
+    def test_no_opt_in_preserves_original_prepare_files_and_environment_golden(self):
+        manifest = self.fixture.prepare()
+        self.assertFalse(list(Path(manifest['root']).rglob('.claude.json')))
+        self.assertEqual(self._prepare_golden(manifest), 'c297bab0ed6fd05a1bac81549ec373a92a8be433652a6b02ede6d658ad13a782')
 
     def test_opt_in_binds_manifest_receipt_and_only_claude_catalog(self):
         m = self.fixture.prepare(claude_login=self.login)
