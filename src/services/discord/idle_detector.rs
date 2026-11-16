@@ -146,9 +146,8 @@ pub(crate) fn classify_with_progress(
     }
 }
 
-/// Transcript progress for a tui_o channel's turn, read from its tmux runtime binding's transcript;
-/// `None` for a channel O does not own. Tool calls are read only when no record is as new as
-/// `quiet_before`.
+/// A tui_o turn's progress from its tmux binding's transcript, `None` when O does not own the
+/// channel; tool calls are read only when no record is as new as `quiet_before`.
 pub(crate) fn observe_turn_progress(
     channel: u64,
     tmux_session: &str,
