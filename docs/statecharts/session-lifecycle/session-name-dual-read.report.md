@@ -1,6 +1,6 @@
 # Session name dual read: reviewed r3 boundary projection
 
-Source: `refs/review/i8119-design-1` (`2c056204cf`), `docs/design/8119-session-names.design.md`, Appendix B. The TLA module is copied unchanged. Eight modes each have four independent invariant configs, preserving the reviewed 32-case matrix. The `fixed` mode is the design contract; it does not assert that every production migration phase already implements that contract.
+Source: `refs/review/i8119-design-1` (`2c056204cf`), [Appendix B of the reviewed design](https://github.com/itismyfield/AgentDesk/blob/2c056204cf2e9b94731f556e68f2a6e39364dcd9/docs/design/8119-session-names.design.md). The TLA module is copied unchanged. Eight modes each have four independent invariant configs, preserving the reviewed 32-case matrix. The `fixed` mode is the design contract; it does not assert that every production migration phase already implements that contract.
 
 | Mode | NoDuplicate | NoForeignAdoption | NoForeignTouch | NoLiveCut |
 |---|---|---|---|---|
