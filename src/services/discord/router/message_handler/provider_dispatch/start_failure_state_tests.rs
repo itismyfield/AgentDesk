@@ -8,6 +8,9 @@ use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+#[path = "handoff_retry_tests.rs"]
+mod handoff_retry;
+
 struct Scope(ChannelId);
 impl Drop for Scope {
     fn drop(&mut self) {
@@ -15,11 +18,16 @@ impl Drop for Scope {
         *FACTS.lock().unwrap() = None;
     }
 }
-async fn scenario(token_first: bool) {
+async fn scenario(token_first: bool, handoff: bool) {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let mut shared = crate::services::discord::make_shared_data_for_tests();
     Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Claude;
-    let channel = ChannelId::new(if token_first { 7787951 } else { 7787952 });
+    let channel = ChannelId::new(match (token_first, handoff) {
+        (true, false) => 7787951,
+        (false, false) => 7787952,
+        (true, true) => 7787961,
+        (false, true) => 7787962,
+    });
     let message = 7787001;
     let mailbox = shared.mailbox(channel);
     let queue = crate::services::discord::runtime_store::discord_pending_queue_root()
@@ -45,6 +53,17 @@ async fn scenario(token_first: bool) {
         })
         .await
         .unwrap();
+    if handoff {
+        let original = front.clone();
+        mailbox
+            .v2_request(move |slot| {
+                let owner = slot.as_mut().unwrap();
+                let journal = owner.begin_handoff(&original, "owned".into(), "key".into())?;
+                owner.handoff_ended(&journal.id).map(drop)
+            })
+            .await
+            .unwrap();
+    }
     let claim = claim_turn(&mailbox, message, &front)
         .await
         .unwrap()
@@ -170,6 +189,14 @@ async fn scenario(token_first: bool) {
             break;
         }
     }
+    if handoff {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let deadline = mailbox
+            .v2_request(|slot| Ok(slot.as_ref().unwrap().handoff().unwrap().retry_after_ms))
+            .await
+            .unwrap();
+        assert!(deadline <= chrono::Utc::now().timestamp_millis().max(0) as u64);
+    }
     assert!(
         mailbox
             .v2_request(|slot| Ok(slot.as_ref().ok_or("owner")?.front().is_none()))
@@ -218,11 +245,19 @@ async fn scenario(token_first: bool) {
 }
 #[tokio::test]
 async fn token_release_with_row_remaining_keeps_closing_and_wake_zero() {
-    scenario(true).await;
+    scenario(true, false).await;
 }
 #[tokio::test]
 async fn row_removal_with_exact_token_active_keeps_closing_and_wake_zero() {
-    scenario(false).await;
+    scenario(false, false).await;
+}
+#[tokio::test]
+async fn handoff_elapsed_deadline_waits_for_row_removal_after_token_release() {
+    scenario(true, true).await;
+}
+#[tokio::test]
+async fn handoff_elapsed_deadline_waits_for_token_release_after_row_removal() {
+    scenario(false, true).await;
 }
 #[test]
 fn only_typed_confirmed_refusals_enter_first_failure_allowlist() {
@@ -265,6 +300,16 @@ fn only_typed_confirmed_refusals_enter_first_failure_allowlist() {
 #[tokio::test]
 async fn start_failure_guard_preserves_effect_owned_error_settlement_before_completion() {
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let trace = handoff_retry::Trace::default();
+    let writer = trace.clone();
+    crate::logging::test_capture::pin_callsite_interest();
+    let _tracing = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
     let shared = crate::services::discord::make_shared_data_for_tests();
     let mailbox = shared.mailbox(ChannelId::new(7787953));
     let queue = crate::services::discord::runtime_store::discord_pending_queue_root()
@@ -359,4 +404,6 @@ async fn start_failure_guard_preserves_effect_owned_error_settlement_before_comp
         vec![Ok(None), Ok(None)],
         "reserve precedes missing, mismatched and unreadable wrapper proof"
     );
+    let log = String::from_utf8(trace.0.lock().unwrap().clone()).unwrap();
+    assert!(!log.contains("owner launch failed before reserve"), "{log}");
 }

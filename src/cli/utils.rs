@@ -165,7 +165,7 @@ pub fn handle_reset_tmux() {
 }
 
 fn kill_agentdesk_tmux_sessions_local() -> usize {
-    let names = match crate::services::platform::tmux::list_session_names() {
+    let names = match crate::services::session_host::TmuxHost.list_session_names() {
         Ok(n) => n,
         Err(_) => return 0,
     };
@@ -183,10 +183,9 @@ fn kill_agentdesk_tmux_sessions_local() -> usize {
             continue;
         }
         if name.starts_with("AgentDesk-") {
-            if crate::services::platform::tmux::kill_session(
-                name,
-                "CLI cleanup of all AgentDesk tmux sessions",
-            ) {
+            if crate::services::session_host::TmuxHost
+                .kill(name, "CLI cleanup of all AgentDesk tmux sessions")
+            {
                 println!("   killed: {}", name);
                 count += 1;
             }

@@ -4,13 +4,10 @@ use super::Ticket;
 use super::*;
 use crate::db::turns::TerminalOutcome;
 use crate::services::turn_orchestrator::{
-    CancelQueuedMessageResult, ChannelMailboxMsg as M, ChannelMailboxState, ClearChannelResult,
+    CancelQueuedMessageResult, ChannelMailboxMsg as M, ChannelMailboxState,
     EnqueueInterventionResult, EnqueueRefusalReason, HasPendingSoftQueueResult,
     HydratePendingQueueResult, Intervention, RequeueInterventionResult, RestartDrainResult,
     TakeNextSoftResult,
-    clear_channel::ActivePolicy,
-    lease_release::release_active_turn_anchor,
-    mark_turn_finished_signal_done,
     pending_queue_persistence::{
         pending_queue_item_from_intervention, pending_queue_item_to_intervention,
     },
@@ -53,8 +50,9 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
         | M::FinishCancelledTurn { .. }
         | M::CloseIfIdle { .. }
         | M::Injection(_)
-        // A forced purge refuses a V2 file before any write; the checked purge has a V2 form.
-        | M::PurgeQueue { .. } => return Some(msg),
+        // Forced purge keeps its guard; explicit clear enters the shared V2-capable clear path.
+        | M::PurgeQueue { .. }
+        | M::Clear { .. } => return Some(msg),
         #[cfg(unix)]
         M::PurgeQueueIfUnchanged(request) => request.run_v2(state, channel_id),
         #[cfg(unix)]
@@ -99,20 +97,6 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
             message_id, reject_ambiguous, reply, ..
         } => {
             let _ = reply.send(cancel(owner, message_id, reject_ambiguous));
-        }
-        M::Clear {
-            persistence,
-            active,
-            reply,
-        } => {
-            let mut result = clear(owner);
-            if active == ActivePolicy::Release {
-                let provider = Some(&persistence.provider);
-                result.removed_token = release_active_turn_anchor(state, channel_id, provider);
-                // Released even when the queue commit failed, so the turn's waiters wake now.
-                mark_turn_finished_signal_done(channel_id);
-            }
-            let _ = reply.send(result);
         }
         M::RestartDrain { reply, .. } => {
             let _ = reply.send(RestartDrainResult {
@@ -189,7 +173,7 @@ fn enqueue(
 }
 
 /// Items behind an attempted head are untried; every original the head carries stays in custody.
-fn untried(owner: &Owner) -> usize {
+pub(super) fn untried(owner: &Owner) -> usize {
     (owner.snapshot.head_injection.as_ref()).map_or(0, |head| head.members().count())
 }
 
@@ -279,37 +263,6 @@ fn cancel(
         removed,
         persistence_error,
     }
-}
-
-/// Discards only untried items; the attempted head, retained inputs and terminals stay.
-fn clear(owner: &mut Owner) -> ClearChannelResult {
-    let mut next = requeued(owner, |_| true);
-    let first = untried(owner);
-    let at = super::origin::now_ms();
-    next.owe_queued(first..next.items.len(), TerminalOutcome::Cancelled, at);
-    let discarded: Vec<PendingQueueItem> = next.items.drain(first..).collect();
-    if first == 0 {
-        next.unfinished_handoff = None;
-    }
-    if first == 0 && !discarded.is_empty() {
-        owner.revoke_front();
-    }
-    let mut result = ClearChannelResult::default();
-    match owner.commit(next) {
-        Ok(()) => {
-            result.discarded_message_ids = discarded
-                .iter()
-                .flat_map(|item| sources::identity(item).sources)
-                .map(|source| MessageId::new(source.message_id))
-                .collect();
-        }
-        Err(error) => {
-            tracing::warn!(%error, "V2 clear could not commit; nothing was discarded");
-            result.persistence.failed.push("queue_publish");
-            result.persistence.count_unknown = true;
-        }
-    }
-    result
 }
 
 #[cfg(test)]
@@ -430,11 +383,7 @@ impl Owner {
             if matches!(entry.reason, RetainedReason::Unconfirmed) {
                 uncertain += entry.input.members().count();
             }
-            if matches!(entry.disposition, Some(RetainedDisposition::KnownNotSent))
-                && entry.input.attempt.is_some()
-                && !entry.notice.enqueued
-                && !super::retained::permanently_refused(entry)
-            {
+            if owes_cancelled(entry) {
                 owed.push(entry.input.clone());
             }
             entry.notice.enqueued = true;
@@ -452,4 +401,13 @@ impl Owner {
             kept: first,
         })
     }
+}
+
+/// Only a proven-unsent attempt without an earlier terminal notice can acquire cancellation debt.
+pub(super) fn owes_cancelled(entry: &RetainedInput) -> bool {
+    entry.notice.kind != super::retained::CLEARED_NOTICE
+        && matches!(entry.disposition, Some(RetainedDisposition::KnownNotSent))
+        && entry.input.attempt.is_some()
+        && !entry.notice.enqueued
+        && !super::retained::permanently_refused(entry)
 }

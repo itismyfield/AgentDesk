@@ -223,6 +223,7 @@ pub(in crate::services::codex) fn publish_codex_tui_launch_script(
         return Err(HERDR_NOT_ADMITTED.to_string());
     }
     let (auth_overlay, prepared, fence) = launch;
+    let (codex_home, unpinned) = codex_tui_home(auth_overlay)?;
     fence.validate_tmux_publisher(tmux_session_name)?;
     let policy = prepared
         .context
@@ -239,7 +240,6 @@ pub(in crate::services::codex) fn publish_codex_tui_launch_script(
 
     let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
     // The auth profile decides the child's home; an unpinned one is exported only with hooks.
-    let (codex_home, unpinned) = codex_tui_home(auth_overlay);
     let resolution = resolve_codex_binary();
     let codex_bin = resolution
         .resolved_path
@@ -251,7 +251,7 @@ pub(in crate::services::codex) fn publish_codex_tui_launch_script(
         report_provider,
     );
     env_lines
-        .push_str(&crate::services::provider_auth_profile::overlay_shell_env_lines(auth_overlay));
+        .push_str(&crate::services::provider_auth_profile::overlay_shell_env_lines(auth_overlay)?);
     env_lines.push_str(&prepared.env_lines());
     env_lines.push_str(&format!(
         "export AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE={}\n",

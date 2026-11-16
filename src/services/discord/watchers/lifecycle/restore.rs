@@ -891,7 +891,7 @@ async fn clean_dead_startup_session(
             }
         }
         record_tmux_exit_reason(&name, reason);
-        crate::services::platform::tmux::kill_session(&name, reason);
+        crate::services::session_host::TmuxHost.kill(&name, reason);
     })
     .await;
     true

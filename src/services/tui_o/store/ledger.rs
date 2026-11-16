@@ -447,19 +447,7 @@ impl LedgerState {
     pub(super) fn apply(&mut self, at: DateTime<Utc>, entry: LedgerEntry) {
         match entry {
             LedgerEntry::InputNotice { entry } => {
-                let started = matches!(*entry, input_notices::NoticeEntry::MigrationStarted { .. });
-                match self.input_notices.apply(*entry) {
-                    Ok(Some(key)) => {
-                        self.excluded
-                            .insert(key, "input_notice_legacy_imported".into());
-                    }
-                    Ok(None) => {}
-                    Err(reason) => self.violate(reason),
-                }
-                // The freeze instant is the time its first snapshot line was written.
-                if started && self.input_notices.migration.is_some() {
-                    self.input_notices.frozen_at.get_or_insert(at);
-                }
+                input_notices::settlement::apply(self, at, *entry);
             }
             LedgerEntry::OperatorResume {
                 rejected_serial,

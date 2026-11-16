@@ -26,6 +26,9 @@ mod anchor;
 pub(crate) use anchor::{SessionAnchorRequest, load_session_anchor_prompt};
 #[path = "memento_endpoint.rs"]
 mod endpoint;
+#[cfg(all(test, unix))]
+#[path = "memento_instance_tests.rs"]
+pub(super) mod instance_tests;
 #[path = "memento_scope.rs"]
 mod scope;
 #[cfg(test)]
@@ -96,6 +99,9 @@ impl MementoBackend {
     }
 
     fn runtime_config(&self) -> Result<MementoRuntimeConfig, String> {
+        if crate::config::test_instance::requested() {
+            return Err("Memento is unavailable in a test instance".to_string());
+        }
         let root = crate::config::runtime_root().ok_or_else(|| {
             "AGENTDESK runtime root is unavailable; skipping memento backend".to_string()
         })?;

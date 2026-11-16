@@ -432,10 +432,12 @@ impl SessionTmux for SystemTmux {
     }
 
     fn kill(&self, name: &str, reason: &str, timeout: Option<Duration>) -> Result<Output, String> {
-        use crate::services::platform::tmux;
+        use crate::services::session_host::TmuxHost;
         match timeout {
-            Some(timeout) => tmux::kill_session_output_timeout(name, reason, timeout),
-            None => tmux::kill_session_output(name, reason).map_err(|error| error.to_string()),
+            Some(timeout) => TmuxHost.kill_output_timeout(name, reason, timeout),
+            None => TmuxHost
+                .kill_output(name, reason)
+                .map_err(|error| error.to_string()),
         }
     }
 }

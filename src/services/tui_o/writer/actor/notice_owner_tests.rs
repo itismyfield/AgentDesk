@@ -759,7 +759,38 @@ async fn notice_owner_history_change_after_preflight_defers_until_next_batch() {
             CHANNEL,
         ))
         .await;
-    assert_eq!(c.notices(), 1);
+    assert_eq!(
+        c.notices(),
+        0,
+        "the final-refusal retry deadline still holds"
+    );
+    assert_eq!(actor.progress().debt, 1);
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    actor.prepare_notices(&[]).await;
+    actor
+        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+            CHANNEL,
+        ))
+        .await;
+    let decision = actor.owed.iter().find_map(|item| match item {
+        Derived::Piece(piece) if piece.unit_key.kind == UnitKind::InputNotice => {
+            piece.notice_origin.as_deref().map(|o| {
+                actor
+                    .writer
+                    .notice_owners
+                    .decision(o, &piece.unit_key.native_key, &frame)
+            })
+        }
+        _ => None,
+    });
+    assert_eq!(
+        c.notices(),
+        1,
+        "owed={} pending={:?} decision={decision:?} calls={:?}",
+        actor.owed.len(),
+        actor.writer.notice_pending,
+        crate::services::tui_o::writer::input_notices::admission::NOTICE_CALLS.with(|c| c.get())
+    );
     assert_eq!(actor.notice_debt_extra(), 0);
 }
 
@@ -891,3 +922,6 @@ async fn notice_owner_keeps_distinct_v2_identities_with_same_nonce() {
 async fn notice_owner_keeps_distinct_v2_namespaces_with_same_nonce() {
     repeated_nonce_case(true).await;
 }
+
+#[path = "notice_settlement_tests.rs"]
+mod settlement_regression;

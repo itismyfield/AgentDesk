@@ -1,0 +1,2 @@
+key: 390-tui-o-writer
+| `tui-o-writer` (#7845) | `7a0c819e12` + park-and-run contract | main: sessionless missing source repeatedly reboots and holds input forever; a superseded missing predecessor prevents the new source's first reply | park keeps the actor ready, replays retained spool debt and readmits input; Present/Unknown and capture/derivation debt remain halted. See [report](tui-o-writer/writer.report.md). |

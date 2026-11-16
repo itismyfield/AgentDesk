@@ -30,6 +30,14 @@ fn complete(input: &NoticeEvidence) -> bool {
     input.unit_key.is_some() && input.payload.is_some() && input.origin.is_some()
 }
 
+/// A frozen scheduled fire the hook path announced under the typed header must not read as a
+/// proven absence, so that notice is a legacy candidate beside the writer's own payload.
+fn legacy_typed_notice(input: &NoticeEvidence) -> Option<String> {
+    use crate::services::tui_o::writer::input_notices::native_input;
+    let row: serde_json::Value = serde_json::from_slice(&input.raw_record).ok()?;
+    native_input(&row)?.legacy_typed_notice()
+}
+
 #[derive(Default)]
 struct History {
     messages: Vec<SeenMessage>,
@@ -116,7 +124,14 @@ async fn plan<P: DiscordPort>(
     let cohort: Vec<_> = state
         .evidence
         .values()
-        .filter(|input| member(snapshot, &input.record))
+        .filter(|input| {
+            member(snapshot, &input.record)
+                && !state.settled.contains_key(&(
+                    input.record.source.clone(),
+                    input.record.start,
+                    input.record.end,
+                ))
+        })
         .collect();
     let blocked: BTreeSet<_> = state
         .unresolved
@@ -127,7 +142,8 @@ async fn plan<P: DiscordPort>(
         .evidence
         .iter()
         .filter(|(id, input)| {
-            !before_migration_floor(state, input)
+            !state.settled.contains_key(*id)
+                && !before_migration_floor(state, input)
                 && !state.unresolved.contains_key(*id)
                 && input
                     .unit_key
@@ -169,10 +185,14 @@ async fn plan<P: DiscordPort>(
             }
             continue;
         }
+        let typed_header = legacy_typed_notice(input);
         let candidates: Vec<_> = history
             .messages
             .iter()
-            .filter(|message| input.payload.as_ref() == Some(&message.content))
+            .filter(|message| {
+                input.payload.as_ref() == Some(&message.content)
+                    || typed_header.as_ref() == Some(&message.content)
+            })
             .map(|message| message.id)
             .collect();
         let reason = if !eligible_input(input) {

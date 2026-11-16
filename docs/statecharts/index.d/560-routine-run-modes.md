@@ -1,0 +1,2 @@
+key: 560-routine-run-modes
+| `routine-run` modes (#8117 r2) | `5bcbb82297f5cc3ab8897b81ddb9891459e0321b` | Started retry·Held 미종결과 철회/Unknown·first-key 뒤 취소·shared teardown·script agent·Consumed 오분류가 기대 RED | 18cfg 실제 검사: 공통 agent3 동형·script 및 optional 사전판정 포함8 GREEN, counter10 기대 RED. owner Submit은 기한/복구와 독립. [설계](../routines/execution-modes.design.md) · [모델 보고서](routine-run/routine-run.report.md). Rust 시험 NOT_RUN |

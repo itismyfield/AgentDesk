@@ -1,13 +1,13 @@
 //! Pure provider/channel derivation from tmux session names.
 
 use super::SessionIdentity;
-use crate::domain::provider::naming::{TMUX_SESSION_PREFIX, tmux_env_suffix};
+use crate::domain::provider::naming::{tmux_env_suffix, tmux_session_prefix};
 use crate::domain::provider::{ProviderKind, provider_catalog};
 
 pub fn parse_provider_and_channel_from_tmux_name(
     session_name: &str,
 ) -> Option<(ProviderKind, String)> {
-    let prefix = format!("{}-", TMUX_SESSION_PREFIX);
+    let prefix = format!("{}-", tmux_session_prefix());
     let stripped = session_name.strip_prefix(&prefix)?;
     let without_suffix = stripped.strip_suffix(tmux_env_suffix()).unwrap_or(stripped);
     for entry in provider_catalog() {

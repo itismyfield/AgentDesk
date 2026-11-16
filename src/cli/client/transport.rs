@@ -16,13 +16,18 @@ fn request_json_at(
     path: &str,
     body: Option<&str>,
 ) -> Result<Value, String> {
+    config::test_instance::environment::validate_api_target(base)?;
     let url = if path.starts_with('/') {
         format!("{base}{path}")
     } else {
         format!("{base}/{path}")
     };
 
-    let a = agent();
+    let a = if config::test_instance::requested() {
+        config::test_instance::environment::http_agent()
+    } else {
+        agent()
+    };
     let mut req = match method.to_uppercase().as_str() {
         "GET" => a.get(&url),
         "POST" => a.post(&url),
@@ -60,6 +65,9 @@ fn request_json_at(
         }
     };
 
+    if config::test_instance::requested() && (300..400).contains(&resp.status()) {
+        return Err("test instance API redirect rejected".to_string());
+    }
     resp.into_json().map_err(|e| format!("Parse error: {e}"))
 }
 
@@ -93,6 +101,8 @@ pub(crate) fn post_local(
     body: &Value,
     read_timeout: std::time::Duration,
 ) -> Result<(u16, Value), LocalPostError> {
+    config::test_instance::environment::validate_api_target(base)
+        .map_err(LocalPostError::Transport)?;
     let url = format!("{base}{path}");
     if !crate::utils::loopback_url::is_loopback_url(&url, None) {
         return Err(LocalPostError::NotLoopback);

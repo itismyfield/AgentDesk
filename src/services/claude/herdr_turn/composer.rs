@@ -13,6 +13,20 @@ use std::time::{Duration, Instant};
 const COMPOSER_READY_WAIT: Duration = Duration::from_secs(10);
 const COMPOSER_POLL: Duration = Duration::from_millis(200);
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static READY_WAIT_FOR_TESTS: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+/// The first input's readiness budget.
+fn composer_ready_wait() -> Duration {
+    #[cfg(test)]
+    if let Some(budget) = READY_WAIT_FOR_TESTS.with(std::cell::Cell::get) {
+        return budget;
+    }
+    COMPOSER_READY_WAIT
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum WaitStop {
     Cancelled,
@@ -104,7 +118,8 @@ pub(crate) fn when_idle(
     send: impl FnOnce() -> InputRun,
 ) -> InputRun {
     use crate::services::claude_tui::readiness;
-    let proof = wait_for(cancel, COMPOSER_READY_WAIT, || {
+    let watched = readiness::watched(session, Some(path));
+    let proof = wait_for(cancel, composer_ready_wait(), || {
         let Some(proof) = readiness::observe(session, Some(path)) else {
             return ControlFlow::Continue(());
         };
@@ -146,6 +161,7 @@ pub(crate) fn when_idle(
             result
         }
         Err(WaitStop::Cancelled) => InputRun::Cancelled { confirmed: 0 },
+        Err(WaitStop::TimedOut) if watched.unproven() => InputRun::Refused(InputRefusal::Unproven),
         _ => InputRun::Refused(InputRefusal::Unknown),
     }
 }

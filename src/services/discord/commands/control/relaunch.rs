@@ -256,6 +256,11 @@ pub(super) async fn run(
         .await
     {
         Relaunch::Relaunched => {
+            if requested.model == Some(None) {
+                crate::services::claude_tui::session::request_model_reset_for_relaunch(
+                    &tmux, &session,
+                );
+            }
             // Only a record or answer written after the old process ended is the new process's.
             let at = super::relaunch_confirm::now();
             let requested_effort = requested.effort;

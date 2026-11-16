@@ -1,3 +1,4 @@
+use crate::services::process::reaping::CommandReapExt;
 use crate::services::process::stream_child::stream_queue;
 use crate::services::process::stream_child::{EXIT_POLL, StreamChild, finish_reader, spawn_reader};
 #[cfg(unix)]
@@ -8,7 +9,7 @@ use followup_reader::send_followup_to_tmux;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -447,10 +448,11 @@ fn execute_qwen_streaming_attempt(
     crate::services::process::configure_child_process_group(&mut command);
 
     let mut child = command
-        .spawn()
+        .spawn_reaping()
         .map_err(|e| format!("Failed to start Qwen: {}", e))?;
 
     register_child_pid(cancel_token.as_deref(), child.id());
+    child.track_cancel_token(cancel_token.as_ref());
     let mut lifecycle = StreamChild::new(&child, cancel_token.clone(), None);
 
     let stdout = child

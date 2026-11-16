@@ -14,6 +14,31 @@ from ci.rust_test_sources import production_tokens, walk
 
 
 class ModuleLayerMeasurementTests(unittest.TestCase):
+    def test_macro_expression_evidence_keeps_literals_operators_and_balanced_groups(self):
+        from audit_maintainability.checks.module_layers import _call_expressions
+        with TemporaryDirectory() as temporary:
+            source = Path(temporary) / "caller.rs"
+            original = 'fn run() { external::call!(r#"text // }"#, b\'x\', [1 + 2], {"a b"}); }'
+            source.write_text(original)
+            expected = list(_call_expressions(source).values())
+            self.assertEqual(len(expected), 1)
+            for before, after in (("1 + 2", "1 + 3"), ("+", "-"), ("b'x'", "b'y'"),
+                                  ("text // }", "different // }"), ("a b", "ab")):
+                with self.subTest(before=before):
+                    source.write_text(original.replace(before, after))
+                    self.assertNotEqual(list(_call_expressions(source).values()), expected)
+            source.write_text(original.replace("external::call!(", "external /* note */ :: call ! (\n"))
+            self.assertEqual(list(_call_expressions(source).values()), expected)
+            source.write_text(original.replace("});", "};"))
+            self.assertEqual(_call_expressions(source), {})
+            for before, after in (("external::call!(r#value)", "external::call!(value)"),
+                                  ("$callee!(value)", "callee!(value)")):
+                source.write_text(before)
+                expected = list(_call_expressions(source).values())
+                self.assertEqual(len(expected), 1)
+                source.write_text(after)
+                self.assertNotEqual(list(_call_expressions(source).values()), expected)
+
     def test_closure_test_parameter_keeps_production_body_and_reports_uncertainty(self):
         bodies = (
             "let closure = |#[cfg(test)] arg: crate::hidden::Hide| {\ncrate::prod::keep();\n};",

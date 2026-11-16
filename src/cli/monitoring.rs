@@ -45,8 +45,10 @@ fn auth_token() -> Option<String> {
 }
 
 fn request_json(method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
-    let url = format!("{}{}", api_base(), path);
-    let agent = ureq::Agent::new();
+    let base = api_base();
+    crate::config::test_instance::environment::validate_api_target(&base)?;
+    let url = format!("{base}{path}");
+    let agent = crate::config::test_instance::environment::http_agent();
     let mut request = match method {
         "POST" => agent.post(&url),
         "DELETE" => agent.delete(&url),
@@ -65,6 +67,12 @@ fn request_json(method: &str, path: &str, body: Option<Value>) -> Result<Value, 
     };
 
     match response {
+        Ok(response)
+            if crate::config::test_instance::requested()
+                && (300..400).contains(&response.status()) =>
+        {
+            Err("test instance API redirect rejected".to_string())
+        }
         Ok(response) => response
             .into_json()
             .map_err(|error| format!("monitoring API response parse failed: {error}")),

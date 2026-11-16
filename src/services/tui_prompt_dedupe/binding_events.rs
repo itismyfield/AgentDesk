@@ -28,6 +28,7 @@ mod claude_fold;
 use claude_fold::Waiting;
 pub(crate) use claude_fold::binding_events_judged_since;
 pub(crate) use claude_fold::published_claude_history;
+pub(crate) use claude_fold::unverified_current_source;
 pub(crate) mod codex;
 mod log_record;
 mod read_cache;
@@ -41,6 +42,7 @@ pub(crate) enum BindingCause {
     Compact,
     Continuation,
     Fork,
+    SameSessionVerified,
     Unknown,
 }
 /// `Resolved` completes the named Pending; bare `Rejected` is audit only.
@@ -238,7 +240,7 @@ fn fault(_step: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn log_path(channel_id: u64) -> io::Result<Option<PathBuf>> {
+pub(crate) fn log_path(channel_id: u64) -> io::Result<Option<PathBuf>> {
     Ok(events_dir()?.map(|dir| dir.join(format!("{channel_id}.log"))))
 }
 

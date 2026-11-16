@@ -53,6 +53,17 @@ for name in ('route-inventory', 'worker-inventory', 'env-reference', 'cli-refere
         self.write("scripts/generate_inventory_docs.py", generator)
         self.write("scripts/generate_env_reference.py", "")
         self.write("scripts/generate_cli_reference.py", "")
+        self.write("docs/e2e-continuous/bundles.schema1.json", json.dumps({
+            "execution_contract": {"missing_precondition_witness": "UNEVALUABLE"},
+            "scenario_catalog": {"old": {}},
+        }) + "\n")
+        self.write("scripts/e2e/generate_continuous_catalog.py", '''import json
+from pathlib import Path
+p=Path('docs/e2e-continuous/bundles.schema1.json')
+data=json.loads(p.read_text())
+data['scenario_catalog']={'current': {}}
+p.write_text(json.dumps(data)+'\\n')
+''')
         self.git("add", ".")
         self.git("commit", "-m", "base")
         self.base = self.git("rev-parse", "HEAD").stdout.strip()
@@ -191,6 +202,34 @@ for name in ('route-inventory', 'worker-inventory', 'env-reference', 'cli-refere
         self.run_regen(expected=2)
         self.assertEqual(REGEN.snapshot(self.root), before)
         self.assertIn("lost manual boundary", (self.root / "artifacts/1/regeneration.diff").read_text())
+
+    def test_catalog_regeneration_preserves_manual_contract(self) -> None:
+        report = self.run_regen()
+        value = json.loads((self.root / "docs/e2e-continuous/bundles.schema1.json").read_text())
+        self.assertEqual(value["scenario_catalog"], {"current": {}})
+        self.assertEqual(value["execution_contract"], {"missing_precondition_witness": "UNEVALUABLE"})
+        self.assertEqual(report["status"], "REGEN_OK")
+
+    def test_catalog_generator_cannot_change_remove_or_add_manual_fields(self) -> None:
+        name = "scripts/e2e/generate_continuous_catalog.py"
+        original = (self.root / name).read_text()
+        for mutation in (
+                "data['execution_contract']['missing_precondition_witness']='PASS'",
+                "del data['execution_contract']",
+                "data['new_contract']='unreviewed'",
+                "data['execution_contract']['missing_precondition_witness']=False"):
+            with self.subTest(mutation=mutation):
+                self.write(name, original + mutation + "\np.write_text(json.dumps(data)+'\\n')\n")
+                before = REGEN.snapshot(self.root)
+                report = self.run_regen(expected=2)
+                self.assertIn("manual JSON fields", report["error"])
+                self.assertEqual(REGEN.snapshot(self.root), before)
+
+    def test_mixed_json_invalid_catalog_and_duplicate_manual_keys_are_rejected(self) -> None:
+        for data in (b'{}', b'[]', b'{"scenario_catalog": []}',
+                     b'{"scenario_catalog": {}, "contract": 1, "contract": 2}'):
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                REGEN.json_manual_bytes(data, ("scenario_catalog",))
 
     def test_generator_failure_is_not_no_change(self) -> None:
         self.write("scripts/generate_env_reference.py", "raise SystemExit(9)\n")

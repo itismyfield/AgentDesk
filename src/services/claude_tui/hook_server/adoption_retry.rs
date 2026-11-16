@@ -244,8 +244,7 @@ pub(crate) fn adopt_from_enveloped_hook(
     })
 }
 
-/// A prompt of the pane's own launch session, which adoption never sees: under the pane authority it
-/// may supersede a waiting Pending it outlived, and then that Pending's queued retry is dropped.
+/// Checks the launch session's source under pane authority; a reclaim drops its queued Pending.
 pub(crate) fn observe_launch_hook(
     session_id: &str,
     hook: &HookSignal,
@@ -255,8 +254,12 @@ pub(crate) fn observe_launch_hook(
     let tmux = observation_pane(session_id, envelope);
     with_tmux_source_authority(&tmux, |_| {
         execution_current(&tmux, captured_nonce(envelope).as_deref())?;
+        let reclaimed = reclaim_with_current_prompt(session_id, hook).map_err(|error| {
+            tracing::warn!(tmux, %error, "Claude launch source verification not persisted");
+            NotDurableReason::Append
+        })?;
         if reclaim
-            && reclaim_with_current_prompt(session_id, hook)
+            && reclaimed
             && front(&tmux).is_some_and(|f| f.pending && f.payload_session_id != session_id)
         {
             pop_front(&tmux);

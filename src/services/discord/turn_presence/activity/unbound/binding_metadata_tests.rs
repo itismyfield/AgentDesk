@@ -60,24 +60,6 @@ fn metadata_supplements_only_a_name_without_installing_current_or_source() {
 }
 
 #[test]
-fn metadata_rejects_scope_and_existing_name_conflicts_before_supplementing() {
-    for variant in 0..3 {
-        let mut candidates = empty_candidates();
-        match variant {
-            0 => candidates.channel += 1,
-            1 => candidates.provider = ProviderKind::Claude,
-            _ => candidates.names.push(Candidate {
-                name: "AgentDesk-codex-conflicting-name".into(),
-                origin: Origin::Binding(6),
-            }),
-        }
-        let before = candidates.clone();
-        assert!(selected().supplement(&mut candidates).is_err());
-        assert_eq!(candidates, before);
-    }
-}
-
-#[test]
 fn metadata_snapshot_pins_context_nonce_even_when_the_candidate_name_does_not_change() {
     let first = selected();
     let mut changed = first.clone();

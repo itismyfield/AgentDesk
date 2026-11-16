@@ -1,0 +1,2 @@
+key: 640-input-single-path-session-lifecycle-idle-readiness-completion
+| input-single-path / session-lifecycle Idle readiness (#8080 A+B completion) | e46154b856cdc6ce4f00b3a628c045e26e16fd0e | BeforeNarrow, compact-no-completion and guard mutants are expected RED | Direct TLC 39 cfg / 111 reported runs: GREEN24, expected RED15, unexpected0. [Report](input-single-path/transcript-readiness.report.md), [design](input-single-path/transcript-readiness.design.md) |

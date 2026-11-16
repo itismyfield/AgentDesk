@@ -979,6 +979,18 @@ pub(super) async fn handle_text_message(
                 tmux: tmux_session_name.as_deref(),
             },
         ).await;
+        #[cfg(unix)]
+        let (owner, legacy_busy_diagnostic) = match super::provider_dispatch::OwnerTurn::early(
+            shared, &provider, channel_id, tmux_session_name.as_deref(),
+            adk_session_key.as_deref(), owner,
+            force_fresh_provider_session,
+        ).await {
+            Ok(owner) => owner,
+            Err(()) => {
+                return Ok(IntakeExecution::deferred(channel_id));
+            }
+        };
+
         let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
 
         // #1332: probe turn liveness BEFORE posting any placeholder so a queued
@@ -1106,11 +1118,10 @@ pub(super) async fn handle_text_message(
             .await.map(|_| IntakeExecution::deferred(channel_id));
         }
 
-        let defer_busy_view = owner.is_some() && provider == ProviderKind::Claude
-            && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none()
-            && super::super::intake_gate::busy_inject::queued_head_covers(
-                channel_id, final_thread_parent.as_ref().map(|(parent, _)| *parent),
-            );
+        let defer_busy_view = super::super::intake_gate::busy_inject::defer_owned_busy_view(
+            owner.is_some(), &provider, channel_id,
+            final_thread_parent.as_ref().map(|(parent, _)| *parent),
+        );
         // Owned input remains durable while its pane decides between a start and a busy paste.
         let _turn_start_attempt = if add_turn_pending && !defer_busy_view {
             tv_start_current_with_attempt(shared, http, original_channel_id, user_msg_id, "intake_start")
@@ -1549,14 +1560,14 @@ pub(super) async fn handle_text_message(
         // A busy transcript queues immediately; otherwise wait once for composer readiness.
         #[cfg(unix)]
         let tui_busy_diagnostic = {
-            let initial = tui_busy_followup_diagnostic(
+            let initial = legacy_busy_diagnostic.then(|| tui_busy_followup_diagnostic(
                 shared,
                 &provider,
                 channel_id,
                 tmux_session_name.as_deref(),
                 Some(&current_path),
                 session_id.as_deref(),
-            );
+            )).flatten();
             if let Some(initial_diagnostic) = initial {
                 if initial_diagnostic.transcript_turn_state.is_busy() {
                     tracing::info!(
@@ -1698,25 +1709,11 @@ pub(super) async fn handle_text_message(
                     shared.api_port,
                 )
                 .await;
-                // A Claude tmux pane running a turn AgentDesk did not start takes the input now;
-                // the row it produces decides who answers. Any other pane keeps the front.
-                let live = (provider == ProviderKind::Claude
-                    && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none())
-                .then(|| {
-                    let session = (session_id.as_deref(), tmux_session_name.as_deref());
-                    claude_followup_transcript(Some(&current_path), session.0, session.1)
-                })
-                .flatten()
-                .zip(tmux_session_name.clone());
-                match live {
-                    Some((transcript, session)) => {
-                        let at = (channel_id.get(), session, adk_session_key.clone());
-                        let live = (transcript.display().to_string(), session_id.clone());
-                        let by = (shared.pg_pool.clone(), provider.clone());
-                        owner.into_busy_pane(by, at, live).await;
-                    }
-                    None => owner.defer_before_submit("hosted_tui_busy_pre_submit"),
-                }
+                owner.legacy_diagnostic(
+                    shared, &provider, channel_id,
+                    (tmux_session_name.clone(), adk_session_key.clone()),
+                    (&current_path, session_id.clone()),
+                ).await;
                 intake_latency.log(channel_id.get(), provider_label, "deferred_busy");
                 return Ok(IntakeExecution::deferred(channel_id));
             }

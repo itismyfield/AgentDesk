@@ -1,12 +1,13 @@
-//! Host-boundary termination entry. No host supports it yet, so every call is
-//! refused before the host is asked anything but its kind.
+//! Host-boundary termination warrants. Operator close authority stays distinct from turn stop.
 
-use crate::services::session_host::{
-    HostMutation, HostRefusal, HostedRuntimeLocator, InteractiveSessionHost,
-};
+use std::borrow::Cow;
 
-/// Operation name carried by the `Unsupported` refusal.
-pub(crate) const TERMINATE_OP: &str = "terminate";
+use crate::services::session_host::{HostedRuntimeLocator, InteractiveSessionHost};
+
+mod contract;
+
+use contract::TerminateProof;
+pub(crate) use contract::{HostTerminateEffect, HostTerminateWarrant, TERMINATE_OP};
 
 /// The execution-identity owner's comparison for the target, as it returned it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,14 +25,7 @@ pub(crate) enum StopVerdict {
     Withheld,
 }
 
-/// Proof that the existing owners cleared this exact target. Not a lease or a
-/// new authority: it only carries their verdicts and is consumed by one call.
-#[derive(Debug)]
-pub(crate) struct HostTerminateWarrant {
-    target: HostedRuntimeLocator,
-}
-
-impl HostTerminateWarrant {
+impl HostTerminateWarrant<'_> {
     /// Only an identity `Match` with a permitting stop verdict yields a warrant.
     pub(super) fn issue(
         target: HostedRuntimeLocator,
@@ -43,40 +37,27 @@ impl HostTerminateWarrant {
                 stop,
                 StopVerdict::DeliveryFencePermits | StopVerdict::CancelCommitted
             );
-        cleared.then_some(Self { target })
+        cleared.then_some(Self {
+            proof: TerminateProof::Identity(Cow::Owned(target)),
+        })
     }
 }
 
-/// Terminate the warrant's target on `host`. A warrant for another host kind is
-/// a precondition refusal; every current host answers `Unsupported`.
 pub(crate) fn terminate_hosted_session(
     host: &dyn InteractiveSessionHost,
-    warrant: HostTerminateWarrant,
-) -> HostMutation {
-    let kind = warrant.target.host_kind;
-    if host.kind() != kind {
-        return HostMutation::Refused(HostRefusal::Precondition(format!(
-            "warrant targets a {} session, host is {}",
-            kind.as_str(),
-            host.kind().as_str()
-        )));
-    }
-    HostMutation::Refused(HostRefusal::Unsupported {
-        kind,
-        op: TERMINATE_OP,
-    })
+    warrant: HostTerminateWarrant<'_>,
+) -> HostTerminateEffect {
+    host.terminate(warrant)
 }
 
 // Its only production caller is the operator termination service.
 #[cfg(unix)]
 pub(crate) mod herdr_terminate {
-    use crate::services::session_host::{HerdrGateRefusal, HerdrTarget};
+    use crate::services::session_host::HerdrTarget;
 
-    /// Explicit operator intent bound to one gate; a cancel warrant cannot convert into it.
-    pub(crate) struct OperatorTerminateWarrant<'a> {
-        target: HerdrTarget,
-        fence: Option<&'a crate::services::session_host::TerminationFence>,
-    }
+    mod contract;
+
+    pub(crate) use contract::{HerdrTerminateResult, OperatorTerminateWarrant, TerminateRefusal};
 
     impl<'a> OperatorTerminateWarrant<'a> {
         #[cfg(test)]
@@ -97,39 +78,20 @@ pub(crate) mod herdr_terminate {
         }
     }
 
-    #[derive(Debug, PartialEq, Eq)]
-    pub(crate) enum TerminateRefusal {
-        Disabled,
-        Gate(HerdrGateRefusal),
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    pub(crate) enum HerdrTerminateResult {
-        Refused(TerminateRefusal),
-        Acknowledged,
-        NotSent(String),
-        Indeterminate(String),
-        ConfirmationRequired,
-    }
-
-    /// One fresh judgment and one witnessed close; ACK never retires or settles a turn.
+    /// Consumes the operator proof; no locator or cancel verdict can replace it.
     pub(crate) fn terminate_herdr_once(
         warrant: OperatorTerminateWarrant<'_>,
     ) -> HerdrTerminateResult {
-        if !crate::config_live_reload::current()
-            .is_some_and(|config| config.runtime.herdr_terminate_enabled == Some(true))
-        {
-            warrant.target.discard_pin();
-            return HerdrTerminateResult::Refused(TerminateRefusal::Disabled);
+        use super::{HostTerminateEffect, HostTerminateWarrant, terminate_hosted_session};
+        use crate::services::session_host::{HostKind, host_for};
+
+        let warrant = HostTerminateWarrant::from_operator(warrant);
+        match terminate_hosted_session(host_for(HostKind::Herdr), warrant) {
+            HostTerminateEffect::Close(result) => result,
+            HostTerminateEffect::Refused(why) => {
+                unreachable!("an operator warrant always selects the Herdr adapter: {why:?}")
+            }
         }
-        let judged = match warrant.fence.as_ref() {
-            Some(fence) => warrant.target.pin_terminate_fenced(fence),
-            None => warrant.target.pin_terminate(),
-        };
-        if let Err(why) = judged {
-            return HerdrTerminateResult::Refused(TerminateRefusal::Gate(why));
-        }
-        warrant.target.send_close_pinned().into()
     }
 }
 
@@ -140,7 +102,8 @@ mod tests {
 
     use super::*;
     use crate::services::session_host::{
-        HostCapabilities, HostError, HostKind, HostLiveness, HostPresence, HostSessionRef, host_for,
+        HostCapabilities, HostError, HostKind, HostLiveness, HostMutation, HostPresence,
+        HostRefusal, HostSessionRef, host_for,
     };
 
     const KINDS: [HostKind; 3] = [HostKind::Tmux, HostKind::Process, HostKind::Herdr];
@@ -154,7 +117,7 @@ mod tests {
         }
     }
 
-    fn warrant(kind: HostKind) -> HostTerminateWarrant {
+    fn warrant(kind: HostKind) -> HostTerminateWarrant<'static> {
         HostTerminateWarrant::issue(
             target(kind),
             IdentityVerdict::Match,
@@ -221,7 +184,7 @@ mod tests {
     #[test]
     fn host_terminate_refuses_every_current_host_without_touching_it() {
         for kind in KINDS {
-            let unsupported = HostMutation::Refused(HostRefusal::Unsupported {
+            let unsupported = HostTerminateEffect::Refused(HostRefusal::Unsupported {
                 kind,
                 op: TERMINATE_OP,
             });
@@ -242,7 +205,7 @@ mod tests {
     fn host_terminate_refuses_a_warrant_for_another_host_kind() {
         let refusal = terminate_hosted_session(host_for(HostKind::Tmux), warrant(HostKind::Herdr));
         assert!(
-            matches!(&refusal, HostMutation::Refused(HostRefusal::Precondition(why)) if why.contains("herdr")),
+            matches!(&refusal, HostTerminateEffect::Refused(HostRefusal::Precondition(why)) if why.contains("herdr")),
             "{refusal:?}"
         );
     }

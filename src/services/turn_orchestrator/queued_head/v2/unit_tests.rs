@@ -447,8 +447,8 @@ async fn cancel_and_clear_leave_every_reserved_member_in_custody() {
         .collect();
     assert_eq!(
         discarded,
-        [BASE + 3],
-        "clear discards only what no unit holds"
+        [BASE + 1, BASE + 2, BASE + 3],
+        "explicit clear discards the entire reserved unit too"
     );
     let left = handle
         .v2_request(|slot| {
@@ -463,5 +463,5 @@ async fn cancel_and_clear_leave_every_reserved_member_in_custody() {
         })
         .await
         .unwrap();
-    assert_eq!(left, [BASE + 1, BASE + 2]);
+    assert!(left.is_empty());
 }

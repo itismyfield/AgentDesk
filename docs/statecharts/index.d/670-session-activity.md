@@ -1,0 +1,2 @@
+key: 670-session-activity
+| `session-activity` (#8081 d1) | `5c3ed37cddc80036fa8a274419b0219f49926704` | Current: missing positive pane signal stalls reacquire; CurrentBackground: missed child veto permits idle kill; both physical-race configs retain the existing read/send gap | Proposed source/lease boundary, exact tool pairing, child terminal recovery, restart and Missing cleanup GREEN; permanent unread and guard mutants remain expected RED. Present ClaudeTui auto cleanup stays Keep. [report](session-activity/activity.report.md) |
