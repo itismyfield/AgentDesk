@@ -181,7 +181,7 @@ fn run(
             reservation.not_sent();
             return refused(Refusal::NotReady);
         }
-        if !guarded_outcome::first_key() {
+        if !pane.first_key() {
             reservation.not_sent();
             return InputRun::Cancelled { confirmed: 0 };
         }

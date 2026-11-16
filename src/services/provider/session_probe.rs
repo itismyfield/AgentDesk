@@ -117,7 +117,7 @@ impl SessionProbe {
 
 #[cfg(unix)]
 fn tmux_session_alive(tmux_session_name: &str) -> bool {
-    crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
+    crate::services::session_host::legacy_collapse::tmux_live_pane_bool(tmux_session_name)
 }
 
 /// Host-aware liveness. Only `Missing` is a death verdict.

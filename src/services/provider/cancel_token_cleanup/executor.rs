@@ -368,7 +368,7 @@ impl CancelToken {
             );
             let reason = format!("explicit cleanup via {cancel_source}");
             crate::services::tmux_diagnostics::record_tmux_exit_reason(name, &reason);
-            let killed = crate::services::platform::tmux::kill_session(name, &reason);
+            let killed = crate::services::session_host::TmuxHost.kill(name, &reason);
             if killed {
                 if let Some(reason_code) = termination_reason {
                     crate::services::termination_audit::record_termination_for_tmux(

@@ -110,6 +110,8 @@ use queue_cancellation::{
 use queue_enqueue::enqueue_behind;
 #[cfg(test)]
 pub(crate) use queue_enqueue::enqueue_intervention;
+#[cfg(unix)]
+pub(crate) use queued_head::HandoffHeld;
 pub(crate) use queued_head::effort_intent;
 pub(crate) use queued_head::{HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim, prefix};
 pub(crate) use queued_head::{OwedDrop, TurnBind, Waiting, v2_queue, waiting_origin};

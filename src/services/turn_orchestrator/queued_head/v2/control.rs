@@ -234,13 +234,7 @@ fn cancel(
                 &mut next,
                 super::effort_continue::Dropped::Only(dropped),
             );
-            if next
-                .unfinished_handoff
-                .as_ref()
-                .is_some_and(|j| j.original == sources::identity(&item))
-            {
-                next.unfinished_handoff = None;
-            }
+            next.handoff_input_left(&sources::identity(&item));
             next.unbind_item(at + first);
             match owner.commit(next) {
                 Ok(()) => {
@@ -374,7 +368,7 @@ impl Owner {
         next.owe_queued(first..next.items.len(), TerminalOutcome::Cancelled, at);
         let queued: Vec<_> = next.items.drain(first..).collect();
         if first == 0 {
-            next.unfinished_handoff = None;
+            next.handoff_fronts_left();
         }
         if first == 0 && !queued.is_empty() {
             self.revoke_front();
