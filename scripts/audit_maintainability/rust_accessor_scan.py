@@ -5,7 +5,10 @@ from dataclasses import dataclass
 from collections import ChainMap
 import re
 
+from ci.rust_test_sources import Inventory, crate_roots, walk
 from rust_lex import StripState, lex_segments
+
+from . import common
 
 TOKEN = re.compile(r"(?:r#)?[A-Za-z_]\w*|[0-9][A-Za-z0-9_]*|::|->|=>|[^\s]")
 
@@ -16,6 +19,36 @@ class Token:
     start: int
     line: int
     kind: str = "code"
+
+
+@dataclass(frozen=True)
+class ProductionWalk:
+    """One production walk over every crate root; consumers must treat ``inventory`` as read-only.
+
+    ``failures[i]`` holds read failures plus errors after root ``i``; ``error`` was raised
+    while walking root ``len(failures)``, so callers can replay per-root or final checks.
+    """
+
+    roots: tuple
+    inventory: Inventory
+    failures: tuple
+    error: Exception | None = None
+
+
+def production_walk(repo):
+    """Walk the non-test module graph of ``repo``; shared by checks within one harness run."""
+    return common.run_cached("production_walk", lambda: _walk_roots(repo), repo)
+
+
+def _walk_roots(repo):
+    roots, inventory, failures = tuple(crate_roots(repo)), Inventory(), []
+    for root in roots:
+        try:
+            walk(root, repo, inventory, production=True)
+        except Exception as exc:  # replayed to each consumer in walk order
+            return ProductionWalk(roots, inventory, tuple(failures), exc)
+        failures.append(tuple(inventory.read_failures + inventory.errors))
+    return ProductionWalk(roots, inventory, tuple(failures))
 
 
 def tokens(text):
