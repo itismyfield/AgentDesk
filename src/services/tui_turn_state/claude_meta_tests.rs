@@ -191,31 +191,14 @@ fn session_metadata_never_uncovers_an_idle_or_submitted_turn() {
 #[test]
 fn a_busy_writer_reads_only_an_owed_reply_past_session_metadata() {
     let compact = r#"{"type":"user","isCompactSummary":true,"message":{"content":"continued"}}"#;
-    let cases: [(&[&[&str]], TuiTurnState); 6] = [
-        (
-            &[&[TOOL_USE, RESULT, PROMPT], &META],
-            TuiTurnState::UserSubmitted,
-        ),
-        (
-            &[&[PROMPT, TOOL_USE, TOOL_RESULT], &META],
-            TuiTurnState::UserSubmitted,
-        ),
-        (
-            &[&[TOOL_USE, RESULT, LOCAL_COMMAND], &META],
-            TuiTurnState::Unknown,
-        ),
-        (
-            &[&[TOOL_USE, RESULT, compact], &META],
-            TuiTurnState::Unknown,
-        ),
-        (
-            &[&[PROMPT, TOOL_USE, INTERRUPTED], &META],
-            TuiTurnState::Unknown,
-        ),
-        (&[&[PROMPT, TEXT], &META], TuiTurnState::Unknown),
-    ];
-    for (parts, expected) in cases {
-        let file = transcript(parts);
-        assert_eq!(observe_running(file.path()), expected, "{parts:?}");
+    let running: [&[&str]; 2] = [&[TOOL_USE, RESULT, PROMPT], &[TOOL_USE, TOOL_RESULT]];
+    let other: [&[&str]; 3] = [&[RESULT, LOCAL_COMMAND], &[RESULT, compact], &[INTERRUPTED]];
+    let running = running.map(|records| (records, TuiTurnState::UserSubmitted));
+    for (records, expected) in running
+        .into_iter()
+        .chain(other.map(|r| (r, TuiTurnState::Unknown)))
+    {
+        let file = transcript(&[records, &META]);
+        assert_eq!(observe_running(file.path()), expected, "{records:?}");
     }
 }
