@@ -290,10 +290,22 @@ HostedReceiptDurable은 결과 또는 새 barrier가 durable 확인에 의존함
 
 P2-1 보강 뒤 Hosted 28cfg는 14 Before RED/14 Fixed GREEN, 관련 전체 190cfg는 expected 위반 집합 일치(rc0)다. pending 재시도와 새 barrier의 durable guard 제거는 각각 HostedReceiptDurable을 깨고, durable 결과 정리에 unrelated flush를 요구하면 HostedIdleEventuallySettles가 깨진다.
 
-## 미승인 구현 실험 — membership 경계 (DESIGN_DELTA)
+## DECISION 3: 실제 membership과 current/legacy FIFO
 
-아래는 구현 중 발견한 반례에 대한 **미승인 실험**이며, 정본의 receipt 권한을 바꾸는 확정 계약이 아니다. raw-row 권한과 B1 FIFO membership 권한의 경계는 `report-receipt-impl-1.md`의 DESIGN_DELTA에서 다시 결정해야 한다.
+receipt는 full ticket 입력과 user/command 물리 행의 유일한 전달 대응을 확인한다. exact hash·source·offset은 후보를 좁히며 queue 소비를 대신하지 않는다. B의 확인된 dequeue를 A 잔여 자리에서 소비하지 않고, A의 늦은 dequeue로 B를 Taken/Running으로 바꾸지 않는다. 식별자 없는 dequeue는 complete-prefix의 전체 FIFO와 지원 provider 의미로만 연결한다. Waiting/Removed 입력과 본문만 같은 외부 prompt는 receipt0이다.
 
-문자열/hash 일치는 membership 후보 탐색이며 그 자체로 receipt 권한은 아니다. 기존 B1 reducer가 같은 records·full registrations에서 인정한 user/command row의 owner·range·UUID와도 일치해야 한다. Waiting 또는 Removed FIFO 입력 뒤의 동일 텍스트 외부 prompt는 새 receipt가 아니다. 결과/cleanup 뒤 역사적 등록의 판정은 후보 비트를 로컬에서 열어 같은 reducer를 적용하되, 실행 결과를 저장하거나 공개하지 않는다. 기존 analyze/B1 결과·barrier 의미는 바꾸지 않는다.
+receipt는 closer/result/barrier를 기다리지 않는다. historical registration도 결과·cleanup과 무관하게 실제 늦은 receipt의 owner/rival로 남고 이미 저장한 terminal 결과는 바꾸지 않는다. 같은 compact facts와 full registration의 B1 membership owner/range/UUID를 확인한 뒤 receipt를 공개한다. receipt 확인 자체가 그 receipt를 선행조건으로 요구하지 않도록 선택한 ticket의 로컬 판정 view만 사용한다. 공개 analyze와 공통 O tracker의 body/card/footer·strict closer 의미는 유지한다.
 
-HostedGuard의 BadMembership 행은 이 차이를 모델링한다. 실제 Projection 시험은 아직 dequeue하지 않은 입력 및 철회된 입력 뒤 같은 텍스트의 human prompt에서 receipt0·Executed0을 확인하며, membership filter 제거 뮤턴트로 재현한다.
+### provider 관측과 fixture 구분
+
+코디네이터 mac-2045/2112의 Claude Code2.1.325 실측: enqueue2686/remove1404/dequeue1280, remove1404/1404가 absorbed_mid_turn이며 commandUuid·deliveryId·content를 기록한다. dequeue에는 operation/sessionId/timestamp만 있고 식별자가 없다. remove 뒤 다음 enqueue 전 dequeue는1건이며 popAll·reason 없는 remove는0건이다. 운영 transcript를 레인에서 추가 조회하지 않았다.
+
+현재 absorbed_mid_turn remove는 live FIFO를 떠나는 **흡수**다. 기존 B1 Absorbed 및 공통 O와 같이 현재 run 또는 다음으로 여는 run의 membership/strict closer로 Executed를 판단하며 철회로 합성하지 않는다. reason 없는 옛 remove는 WithdrawnNotExecuted와 늦은 dequeue 자리를 보존한다. **늦은 dequeue 자리 때문에 다음 입력을 보류하는 진행성 한계는 옛 형식만의 지원 계약이다.**
+
+withdraw e2e는 mac-2112 승인에 따라 기존 지원 popAll로 A 철회 안내1·A 출력0·B head1을 유지한다. [공식 queued-input Up 회수 동작](https://code.claude.com/docs/en/interactive-mode#take-back-what-you-queued)과 리뷰 인용 [anthropics/claude-code#86980](https://github.com/anthropics/claude-code/issues/86980)은 회수/흡수 경로 구분의 근거이며 popAll JSON 스키마의 보편 보증으로 확대하지 않는다. 현재 실측에서 popAll은0건이다. 별도 current-remove fixture는 실제 own run·command/user membership·strict closer를 주고 A의 FIFO 이탈과 B dequeue를 함께 검증한다. 옛 두-dequeue fixture는 유지한다.
+
+### Hosted queue 모델의 관측과 guard
+
+기존 Hosted28cfg에 NativePreparationHostedQueue14cfg를 더한다. review.hq는 A/B의 Waiting/Taken/Attached/Removed/member, live FIFO와 제거 잔여 자리, 물리 행별 visible/durable/write, ticket별 outcome/result/cleanup/head/물리 injection을 둔다. actual/lastActual은 안전성 검사 전용 ghost이며 선택 guard가 읽지 않는다. dequeue 선택은 관측 FIFO Head뿐이다. Mode의 현재 흡수/옛 remove/popAll/Waiting/Removed 사건열은 fixture 입력을 표현하며 정상 B를 BadMembership으로 제외하지 않는다.
+
+Current/PopAll Before는 제거된 자리를 남기는 guard mutant(현재 production 결함 주장 아님), Legacy Before는 늦은 자리를 너무 일찍 버리는 mutant, Waiting/Removed Before는 membership 우회, Durable Before는 ACK 우회다. 각각 B dequeue 비흡수·A 늦은 dequeue 격리·외부 동일문 receipt0·durable admission을 검사한다. A와 정상 B의 cleanup/head를 leads-to로 검사한다. 없는 closer를 강제하거나 A 흡수를 철회로 바꾸는 모델 전이는 없다. Fixed의 GREEN은 실제 Rust 시험/e2e를 대신하지 않는다.

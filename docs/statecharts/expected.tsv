@@ -929,3 +929,17 @@ input-single-path/NativePreparationHostedReceiptBarrierBefore.cfg	NativeInputPre
 input-single-path/NativePreparationHostedReceiptBarrierFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativePreparationHostedReceiptSavedBefore.cfg	NativeInputPreparation	-	HostedIdleEventuallySettles
 input-single-path/NativePreparationHostedReceiptSavedFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationHostedQueueCurrentBefore.cfg	NativeInputPreparation	HostedQueueExactDequeue	HostedQueueBProgress
+input-single-path/NativePreparationHostedQueueCurrentFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationHostedQueuePopAllBefore.cfg	NativeInputPreparation	HostedQueueExactDequeue	HostedQueueBProgress
+input-single-path/NativePreparationHostedQueuePopAllFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationHostedQueueLegacyBefore.cfg	NativeInputPreparation	HostedQueueExactDequeue	-
+input-single-path/NativePreparationHostedQueueLegacyFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationHostedQueueWaitingBefore.cfg	NativeInputPreparation	HostedQueueAuthentic	-
+input-single-path/NativePreparationHostedQueueWaitingFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationHostedQueueRemovedBefore.cfg	NativeInputPreparation	HostedQueueAuthentic	-
+input-single-path/NativePreparationHostedQueueRemovedFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationHostedQueueLegacyForeignBefore.cfg	NativeInputPreparation	HostedQueueExactDequeue,HostedQueueAuthentic	-
+input-single-path/NativePreparationHostedQueueLegacyForeignFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationHostedQueueDurableBefore.cfg	NativeInputPreparation	HostedQueueDurable	-
+input-single-path/NativePreparationHostedQueueDurableFixed.cfg	NativeInputPreparation	-	-

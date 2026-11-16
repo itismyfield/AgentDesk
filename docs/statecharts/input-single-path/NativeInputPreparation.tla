@@ -1,5 +1,5 @@
 -------------------- MODULE NativeInputPreparation --------------------
-EXTENDS Naturals
+EXTENDS Naturals, Sequences
 CONSTANT Mode
 VARIABLES phase, role, pin, prepared, anyKey, original, result, source, restored, admitted, review
 BaseVars == <<phase, role, pin, prepared, anyKey, original, result, source, restored, admitted>>
@@ -7,7 +7,16 @@ vars == <<BaseVars, review>>
 Init == /\ phase = "Intent" /\ role \in {"Primary", "Follower"}
         /\ pin = "None" /\ prepared = FALSE /\ anyKey = FALSE /\ original = TRUE
         /\ result = "None" /\ source = "PreSource" /\ restored = FALSE /\ admitted = FALSE
-        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed", "SupplyPrefixBefore", "SupplyPrefixFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {Mode \in {"ClearRouteBefore", "ClearRouteFixed"}}), clearDenied : {Mode \notin {"ClearRouteBefore", "ClearRouteFixed"}}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed", "ClearRouteBefore", "ClearRouteFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}, unwindIdentity : (IF Mode \in {"ActivationForeignBefore", "ActivationForeignFixed"} THEN {"own", "other_message", "old_generation", "other_actor", "rebound"} ELSE {"own"}), available : {TRUE, FALSE}, producerOn : {FALSE}, bridgeOn : {FALSE}, hostOn : {FALSE}, ticketExecution : {"N1", "N2"}, nativeBinding : {0}, supplyTicket : {Mode \notin {"SupplyTicketBefore", "SupplyTicketFixed"}}, supplySource : {Mode \notin {"SupplySourceBefore", "SupplySourceFixed"}}, supplyKey : {Mode \notin {"SupplyKeyBefore", "SupplyKeyFixed"}}, supplyStamp : {Mode \notin {"SupplyStampBefore", "SupplyStampFixed"}}, bStep : {0}, bBatch : {FALSE}, bCompact : {FALSE}, bBatchResult : {"None"}, bCommits : {0}, bOwn : {Mode \in {"BarrierSelfBefore", "BarrierSelfFixed"}}, bOwnFirst : {Mode = "BarrierOwnFirstFixed"}, bAmbiguous : {FALSE}, hCaptured : {FALSE}, hClosed : {FALSE}, hReceipt : {FALSE}, hDurable : {FALSE}, hBarrier : {FALSE}, hUnrelated : {FALSE}, hVersion : {0}, hObserved : {0}, hRead : {FALSE}, hCommitVersion : {0}, hResultVersion : {0}, hWrites : {0}, hResults : {0}, hInjected : {0}, hNext : {0}, hRestarted : {FALSE}, hFlush : {Mode \notin {"HostedDurabilityBefore", "HostedDurabilityFixed", "HostedPendingBefore", "HostedPendingFixed", "HostedBarrierBefore", "HostedBarrierFixed"}}, hValid : (IF Mode \in {"HostedGuardBefore", "HostedGuardFixed"} THEN {"Good", "BadSource", "BadNonce", "BadUuid", "BadRange", "BadMembership", "BadHash", "Meta", "NoKey"} ELSE {"Good"}), hOtherOwner : {Mode \in {"HostedCollisionBefore", "HostedCollisionFixed"}}, hRace : (IF Mode \in {"HostedControlBefore", "HostedControlFixed"} THEN {"Cancel", "Terminate", "Clear", "Stop", "Release"} ELSE {"None"}), hControl : {FALSE}]
+        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed", "SupplyPrefixBefore", "SupplyPrefixFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {Mode \in {"ClearRouteBefore", "ClearRouteFixed"}}), clearDenied : {Mode \notin {"ClearRouteBefore", "ClearRouteFixed"}}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed", "ClearRouteBefore", "ClearRouteFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}, unwindIdentity : (IF Mode \in {"ActivationForeignBefore", "ActivationForeignFixed"} THEN {"own", "other_message", "old_generation", "other_actor", "rebound"} ELSE {"own"}), available : {TRUE, FALSE}, producerOn : {FALSE}, bridgeOn : {FALSE}, hostOn : {FALSE}, ticketExecution : {"N1", "N2"}, nativeBinding : {0}, supplyTicket : {Mode \notin {"SupplyTicketBefore", "SupplyTicketFixed"}}, supplySource : {Mode \notin {"SupplySourceBefore", "SupplySourceFixed"}}, supplyKey : {Mode \notin {"SupplyKeyBefore", "SupplyKeyFixed"}}, supplyStamp : {Mode \notin {"SupplyStampBefore", "SupplyStampFixed"}}, bStep : {0}, bBatch : {FALSE}, bCompact : {FALSE}, bBatchResult : {"None"}, bCommits : {0}, bOwn : {Mode \in {"BarrierSelfBefore", "BarrierSelfFixed"}}, bOwnFirst : {Mode = "BarrierOwnFirstFixed"}, bAmbiguous : {FALSE}, hCaptured : {FALSE}, hClosed : {FALSE}, hReceipt : {FALSE}, hDurable : {FALSE}, hBarrier : {FALSE}, hUnrelated : {FALSE}, hVersion : {0}, hObserved : {0}, hRead : {FALSE}, hCommitVersion : {0}, hResultVersion : {0}, hWrites : {0}, hResults : {0}, hInjected : {0}, hNext : {0}, hRestarted : {FALSE}, hFlush : {Mode \notin {"HostedDurabilityBefore", "HostedDurabilityFixed", "HostedPendingBefore", "HostedPendingFixed", "HostedBarrierBefore", "HostedBarrierFixed"}}, hValid : (IF Mode \in {"HostedGuardBefore", "HostedGuardFixed"} THEN {"Good", "BadSource", "BadNonce", "BadUuid", "BadRange", "BadMembership", "BadHash", "Meta", "NoKey"} ELSE {"Good"}), hOtherOwner : {Mode \in {"HostedCollisionBefore", "HostedCollisionFixed"}}, hRace : (IF Mode \in {"HostedControlBefore", "HostedControlFixed"} THEN {"Cancel", "Terminate", "Clear", "Stop", "Release"} ELSE {"None"}), hControl : {FALSE}, hq : {[pc |-> 0, stage |-> [i \in {"A","B"} |-> IF i = "A" THEN "Waiting" ELSE "Absent"],
+          fifo |-> <<"A">>, seen |-> [i \in {"A","B"} |-> FALSE],
+          actual |-> [i \in {"A","B"} |-> "None"], member |-> [i \in {"A","B"} |-> FALSE],
+          visible |-> [i \in {"A","B"} |-> FALSE], durable |-> [i \in {"A","B"} |-> FALSE],
+          writes |-> [i \in {"A","B"} |-> 0], closed |-> [i \in {"A","B"} |-> FALSE],
+          outcome |-> [i \in {"A","B"} |-> "None"], results |-> [i \in {"A","B"} |-> 0],
+          cleanup |-> [i \in {"A","B"} |-> FALSE], heads |-> [i \in {"A","B"} |-> 0],
+          injections |-> [i \in {"A","B"} |-> IF i = "A" THEN 1 ELSE 0],
+          lastActual |-> "None", lastTaken |-> "None", wrongDequeue |-> FALSE,
+          flush |-> Mode \notin {"HostedQueueDurableBefore","HostedQueueDurableFixed"}, reads |-> 1]}]
 Prepare == /\ phase = "Intent"
            /\ phase' = "Prepared" /\ prepared' = TRUE
            /\ pin' = IF role = "Primary" \/ Mode = "BorrowBusy" THEN "Primary" ELSE "None"
@@ -503,5 +512,100 @@ HostedReceiptSourceRetained == review.hReceipt => source = "Bound" \/ review.hRe
 HostedIdleEventuallySettles ==
     (review.available /\ review.hValid = "Good" /\ ~review.hOtherOwner /\ phase = "Unknown")
       ~> (result # "None" /\ review.clearLease = 0 /\ review.clearRows = 0 /\ review.hNext = 1)
+
+
+\* A/B are full tickets; actual/lastActual are proof-only physical ownership observations.
+\* Guards use the captured remove kind, the complete FIFO and member stages, never actual.
+HQ == review.hq
+HQCurrent == Mode \in {"HostedQueueCurrentBefore","HostedQueueCurrentFixed", "HostedQueueDurableBefore","HostedQueueDurableFixed"}
+HQLegacy == Mode \in {"HostedQueueLegacyBefore","HostedQueueLegacyFixed", "HostedQueueLegacyForeignBefore","HostedQueueLegacyForeignFixed"}
+HQNormal == Mode \in {"HostedQueueCurrentBefore","HostedQueueCurrentFixed", "HostedQueuePopAllBefore","HostedQueuePopAllFixed", "HostedQueueLegacyBefore","HostedQueueLegacyFixed", "HostedQueueDurableBefore","HostedQueueDurableFixed"}
+HQRetainWrong == Mode \in {"HostedQueueCurrentBefore","HostedQueuePopAllBefore"}
+HQDropWrong == Mode \in {"HostedQueueLegacyBefore","HostedQueueLegacyForeignBefore"}
+HQMembershipOff == Mode \in {"HostedQueueWaitingBefore","HostedQueueRemovedBefore"}
+HQRemove == /\ HQ.pc = 0
+            /\ review' = [review EXCEPT !.hq.pc = 1,
+                 !.hq.stage["A"] = IF HQCurrent THEN "Attached" ELSE "Removed",
+                 !.hq.fifo = IF HQRetainWrong \/ (HQLegacy /\ ~HQDropWrong) THEN <<"A">> ELSE <<>>]
+            /\ UNCHANGED BaseVars
+HQCommand == /\ HQ.pc = 1
+             /\ review' = [review EXCEPT !.hq.pc = 2,
+                  !.hq.seen["A"] = HQCurrent, !.hq.member["A"] = HQCurrent,
+                  !.hq.actual["A"] = IF HQCurrent THEN "A" ELSE "None"]
+             /\ UNCHANGED BaseVars
+HQCloserA == /\ HQ.pc = 2
+             /\ review' = [review EXCEPT !.hq.pc = 3, !.hq.closed["A"] = HQCurrent]
+             /\ UNCHANGED BaseVars
+HQReceipt(i) == /\ HQ.seen[i] /\ ~HQ.visible[i]
+                /\ (HQ.member[i] \/ HQMembershipOff)
+                /\ review' = [review EXCEPT !.hq.visible[i] = TRUE, !.hq.writes[i] = @ + 1]
+                /\ UNCHANGED BaseVars
+HQDurable(i) == /\ HQ.visible[i] /\ ~HQ.durable[i] /\ HQ.flush
+                /\ review' = [review EXCEPT !.hq.durable[i] = TRUE]
+                /\ UNCHANGED BaseVars
+HQRepair == /\ ~HQ.flush
+            /\ review' = [review EXCEPT !.hq.flush = TRUE]
+            /\ UNCHANGED BaseVars
+HQResult(i) == /\ HQ.outcome[i] = "None"
+               /\ (IF HQ.stage[i] = "Removed" THEN i = "A" ELSE
+                    HQ.closed[i] /\ HQ.member[i] /\ HQ.visible[i]
+                      /\ (HQ.durable[i] \/ Mode = "HostedQueueDurableBefore"))
+               /\ review' = [review EXCEPT !.hq.results[i] = @ + 1,
+                    !.hq.outcome[i] = IF HQ.stage[i] = "Removed" THEN "Withdrawn" ELSE "Executed"]
+               /\ UNCHANGED BaseVars
+HQCleanup(i) == /\ HQ.outcome[i] # "None" /\ ~HQ.cleanup[i]
+                /\ review' = [review EXCEPT !.hq.cleanup[i] = TRUE]
+                /\ UNCHANGED BaseVars
+HQHead(i) == /\ HQ.cleanup[i] /\ HQ.heads[i] = 0
+             /\ review' = [review EXCEPT !.hq.heads[i] = @ + 1]
+             /\ UNCHANGED BaseVars
+HQEnqueueB == /\ HQ.pc = 3 /\ HQ.heads["A"] = 1
+              /\ review' = [review EXCEPT !.hq.pc = 4, !.hq.stage["B"] = "Waiting",
+                   !.hq.fifo = Append(@,"B"), !.hq.injections["B"] = @ + 1]
+              /\ UNCHANGED BaseVars
+\* Bare dequeue has no ticket field. Selection below uses only the preserved FIFO.
+HQLateDequeue == /\ HQ.pc = 4
+                 /\ LET taken == IF Len(HQ.fifo) > 0 THEN Head(HQ.fifo) ELSE "None"
+                    IN review' = [review EXCEPT !.hq.pc = 5,
+                         !.hq.fifo = IF HQLegacy /\ Len(@) > 0 THEN Tail(@) ELSE @,
+                         !.hq.stage = IF HQLegacy /\ taken # "None" /\ @[taken] = "Waiting"
+                                      THEN [@ EXCEPT ![taken] = "Taken"] ELSE @,
+                         !.hq.lastActual = IF HQLegacy THEN "A" ELSE "None",
+                         !.hq.lastTaken = IF HQLegacy THEN taken ELSE "None",
+                         !.hq.wrongDequeue = @ \/ (HQLegacy /\ taken # "A")]
+                 /\ UNCHANGED BaseVars
+HQDequeueB == /\ HQ.pc = 5
+              /\ LET taken == IF Len(HQ.fifo) > 0 THEN Head(HQ.fifo) ELSE "None"
+                 IN review' = [review EXCEPT !.hq.pc = 6,
+                      !.hq.fifo = IF HQNormal /\ Len(@) > 0 THEN Tail(@) ELSE @,
+                      !.hq.stage = IF HQNormal /\ taken # "None" /\ @[taken] = "Waiting"
+                                   THEN [@ EXCEPT ![taken] = "Taken"] ELSE @,
+                      !.hq.lastActual = IF HQNormal THEN "B" ELSE HQ.lastActual,
+                      !.hq.lastTaken = IF HQNormal THEN taken ELSE HQ.lastTaken,
+                      !.hq.wrongDequeue = @ \/ (HQNormal /\ taken # "B")]
+              /\ UNCHANGED BaseVars
+HQUser == /\ HQ.pc = 6
+          /\ LET i == IF Mode \in {"HostedQueueRemovedBefore","HostedQueueRemovedFixed"} THEN "A" ELSE "B"
+             IN review' = [review EXCEPT !.hq.pc = 7, !.hq.seen[i] = TRUE,
+                  !.hq.actual[i] = IF HQNormal THEN i ELSE "None",
+                  !.hq.member[i] = HQ.stage[i] = "Taken"]
+          /\ UNCHANGED BaseVars
+HQCloserB == /\ HQ.pc = 7
+             /\ review' = [review EXCEPT !.hq.pc = 8, !.hq.closed["B"] = HQNormal]
+             /\ UNCHANGED BaseVars
+HQNext == HQRemove \/ HQCommand \/ HQCloserA \/ HQEnqueueB \/ HQLateDequeue \/ HQDequeueB \/ HQUser \/ HQCloserB \/ HQRepair
+          \/ (\E i \in {"A","B"}: HQReceipt(i) \/ HQDurable(i) \/ HQResult(i) \/ HQCleanup(i) \/ HQHead(i))
+HostedQueueSpec == Init /\ role = "Primary" /\ review.available /\ review.ticketExecution = "N1"
+                   /\ [][HQNext]_vars
+                   /\ WF_vars(HQRemove) /\ WF_vars(HQCommand) /\ WF_vars(HQCloserA) /\ WF_vars(HQEnqueueB)
+                   /\ WF_vars(HQLateDequeue) /\ WF_vars(HQDequeueB) /\ WF_vars(HQUser) /\ WF_vars(HQCloserB) /\ WF_vars(HQRepair)
+                   /\ (\A i \in {"A","B"}: WF_vars(HQReceipt(i)) /\ WF_vars(HQDurable(i)) /\ WF_vars(HQResult(i)) /\ WF_vars(HQCleanup(i)) /\ WF_vars(HQHead(i)))
+HostedQueueExactDequeue == ~HQ.wrongDequeue
+HostedQueueAuthentic == \A i \in {"A","B"}: HQ.visible[i] => HQ.member[i] /\ HQ.actual[i] = i
+HostedQueueDurable == \A i \in {"A","B"}: HQ.outcome[i] = "Executed" => HQ.durable[i]
+HostedQueueOnce == \A i \in {"A","B"}: HQ.writes[i] <= 1 /\ HQ.results[i] <= 1 /\ HQ.heads[i] <= 1 /\ HQ.injections[i] <= 1
+HostedQueueNoAddedReads == HQ.reads = 1
+HostedQueueAProgress == TRUE ~> (HQ.cleanup["A"] /\ HQ.heads["A"] = 1)
+HostedQueueBProgress == (HQNormal /\ HQ.stage["B"] # "Absent") ~> (HQ.cleanup["B"] /\ HQ.heads["B"] = 1)
 
 ====
