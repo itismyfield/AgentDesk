@@ -21,7 +21,7 @@ pub(super) const THREAD_SLACK: usize = 4;
 
 /// In the test's own process, reruns `test` (a full test path) alone in a new process of this
 /// binary and checks that it ran and passed; returns false inside that rerun.
-pub(super) fn rerun_alone(test: &str) -> bool {
+pub(in crate::server::routes::health_api) fn rerun_alone(test: &str) -> bool {
     if std::env::var_os(ALONE).is_some() {
         return false;
     }

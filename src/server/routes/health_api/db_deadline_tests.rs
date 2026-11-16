@@ -19,7 +19,7 @@ mod amplification_policy_tests;
 mod amplification_profile_tests;
 mod amplification_records_tests;
 mod amplification_verdict_tests;
-mod resource_regression_tests;
+pub(super) mod resource_regression_tests;
 
 const RTT: Duration = Duration::from_millis(300);
 const BUDGET: Duration = Duration::from_secs(2);
