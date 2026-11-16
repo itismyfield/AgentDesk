@@ -10,7 +10,7 @@ use crate::db::session_status::{
 use crate::domain::session_identity::SessionIdentity;
 
 #[cfg(unix)]
-use crate::services::tmux_diagnostics::tmux_session_has_live_pane;
+use crate::services::session_host::legacy_collapse::tmux_live_pane_bool;
 
 const REMOTE_HEARTBEAT_GRACE_SECS: i64 = 90;
 
@@ -54,7 +54,7 @@ impl SessionActivityResolver {
                 return Some(*cached);
             }
             #[cfg(unix)]
-            let live = tmux_session_has_live_pane(tmux_name);
+            let live = tmux_live_pane_bool(tmux_name);
             #[cfg(not(unix))]
             let live = false; // tmux not available on Windows
             live_cache.insert(tmux_name.to_string(), live);
