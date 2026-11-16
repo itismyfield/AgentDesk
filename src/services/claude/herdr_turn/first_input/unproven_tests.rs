@@ -174,7 +174,7 @@ fn an_idle_source_that_proves_nothing_ends_retained_and_a_running_one_waits() {
                 composer::READY_WAIT_FOR_TESTS.with(|wait| wait.set(budget));
                 let result = guarded_outcome::capture_preparation(|| {
                     let (sender, receiver) = std::sync::mpsc::channel();
-                    let result = write(&session, None, attached, &frame, &sender).map(drop);
+                    let result = write(&session, None, attached, &frame, &sender, None).map(drop);
                     drop(receiver);
                     result
                 });
@@ -357,7 +357,7 @@ fn a_restored_front_held_by_a_draft_wakes_once_the_draft_clears() {
         Box::new(move |frame: String| {
             guarded_outcome::capture_preparation(|| {
                 let (sender, _receiver) = std::sync::mpsc::channel();
-                write(&session, None, first, &frame, &sender).map(drop)
+                write(&session, None, first, &frame, &sender, None).map(drop)
             })
         }),
         Some(writer.clone()),
@@ -414,7 +414,7 @@ fn a_restored_front_held_by_a_draft_wakes_once_the_draft_clears() {
                     Box::new(move |frame| {
                         guarded_outcome::capture_preparation(|| {
                             let (sender, _receiver) = std::sync::mpsc::channel();
-                            write(&session, None, attached, &frame, &sender).map(drop)
+                            write(&session, None, attached, &frame, &sender, None).map(drop)
                         })
                     }),
                     Some(writer),

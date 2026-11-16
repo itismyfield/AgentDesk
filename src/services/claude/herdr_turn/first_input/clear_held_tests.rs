@@ -221,7 +221,7 @@ fn run(case: Case) {
                         .expect("owned draft capture exists");
                     assert!(!readiness::empty_draft(&pane));
                 }
-                let result = write(logical, None, attached, &frame, &sender).map(drop);
+                let result = write(logical, None, attached, &frame, &sender, None).map(drop);
                 match case {
                     Case::CommonDraft => readiness::watch_draft(logical, Some(&watched_path)),
                     Case::CommonCurrent => readiness::watch_current(logical, Some(&watched_path)),
@@ -309,7 +309,7 @@ fn run(case: Case) {
                     Box::new(move |frame| {
                         guarded_outcome::capture_preparation(|| {
                             let (sender, _receiver) = std::sync::mpsc::channel();
-                            write(logical, None, attached, &frame, &sender).map(drop)
+                            write(logical, None, attached, &frame, &sender, None).map(drop)
                         })
                     }),
                     Some(writer),
