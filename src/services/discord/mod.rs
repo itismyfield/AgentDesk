@@ -960,11 +960,7 @@ pub(super) struct ModelPickerPendingState {
     pub(super) updated_at: Instant,
 }
 
-/// Core state that requires atomic multi-field access (always locked together)
-pub(super) struct CoreState {
-    /// Per-channel sessions (each Discord channel can have its own Claude Code session)
-    pub(in crate::services::discord) sessions: HashMap<ChannelId, DiscordSession>,
-}
+pub(super) use crate::services::engine_runtime::session::CoreState;
 
 const CHANNEL_ROSTER_MAX_USERS: usize = 64;
 
@@ -1008,10 +1004,6 @@ impl UserRecord {
 /// (Phase 3 worker polling loop).
 pub(crate) struct SharedData {
     pub(in crate::services) engine: Arc<EngineRuntime>,
-    /// Core state (sessions + request lifecycle) — requires atomic access
-    pub(super) core: Mutex<CoreState>,
-    /// Per-channel request lifecycle actor registry.
-    mailboxes: ChannelMailboxRegistry,
     /// Bot settings — mostly reads, rare writes
     pub(super) settings: tokio::sync::RwLock<DiscordBotSettings>,
     /// Per-channel timestamps of the last Discord API call (for rate limiting)
@@ -1334,13 +1326,17 @@ pub(super) fn make_shared_data_for_tests_with_barrier(
         pg_pool,
         PolicyRuntime { engine: None },
         Vec::new(),
+        || {
+            (
+                tokio::sync::Mutex::new(CoreState {
+                    sessions: std::collections::HashMap::new(),
+                }),
+                ChannelMailboxRegistry::default(),
+            )
+        },
     );
     Arc::new(SharedData {
         engine: engine_runtime,
-        core: tokio::sync::Mutex::new(CoreState {
-            sessions: std::collections::HashMap::new(),
-        }),
-        mailboxes: ChannelMailboxRegistry::default(),
         settings: tokio::sync::RwLock::new(DiscordBotSettings::default()),
         api_timestamps: dashmap::DashMap::new(),
         tmux_watchers: TmuxWatcherRegistry::new_with_coords(Arc::clone(&tmux_relay_coords)),

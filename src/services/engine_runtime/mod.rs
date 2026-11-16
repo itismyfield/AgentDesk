@@ -1,11 +1,13 @@
 //! Engine-owned runtime state shared by messenger adapters.
 
 pub(crate) mod legacy_state;
+pub(crate) mod session;
 
 use std::{ops::Deref, sync::Arc};
 
 use self::legacy_state::LegacyState;
 use crate::domain::provider::ProviderKind;
+use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 
 pub(crate) struct PolicyRuntime {
     pub(in crate::services) engine: Option<crate::engine::PolicyEngine>,
@@ -13,6 +15,7 @@ pub(crate) struct PolicyRuntime {
 
 pub(crate) struct EngineRuntime {
     legacy: LegacyState,
+    pub(in crate::services) mailboxes: ChannelMailboxRegistry,
     pub(in crate::services) skills_cache: tokio::sync::RwLock<Vec<(String, String)>>,
     pub(in crate::services) last_turn_at: std::sync::Mutex<Option<String>>,
     pub(in crate::services) provider: ProviderKind,
@@ -28,11 +31,25 @@ impl EngineRuntime {
         pg_pool: Option<sqlx::PgPool>,
         policy: PolicyRuntime,
         initial_skills: Vec<(String, String)>,
+        session_storage: impl FnOnce() -> (
+            tokio::sync::Mutex<session::CoreState>,
+            ChannelMailboxRegistry,
+        ),
     ) -> Arc<Self> {
+        let session_transition_locks = Default::default();
+        let turn_start_times = Default::default();
+        let skills_cache = tokio::sync::RwLock::new(initial_skills);
+        let last_turn_at = std::sync::Mutex::new(None);
+        let (core, mailboxes) = session_storage();
         let runtime = Arc::new(Self {
-            legacy: LegacyState::default(),
-            skills_cache: tokio::sync::RwLock::new(initial_skills),
-            last_turn_at: std::sync::Mutex::new(None),
+            legacy: LegacyState {
+                session_transition_locks,
+                turn_start_times,
+                core,
+            },
+            mailboxes,
+            skills_cache,
+            last_turn_at,
             provider,
             api_port,
             pg_pool,

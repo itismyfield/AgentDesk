@@ -90,13 +90,17 @@ pub(super) fn run_bot_build_shared_data(
         pg_pool,
         PolicyRuntime { engine },
         initial_skills,
+        || {
+            (
+                Mutex::new(CoreState {
+                    sessions: HashMap::new(),
+                }),
+                ChannelMailboxRegistry::default(),
+            )
+        },
     );
     Arc::new(SharedData {
         engine: engine_runtime,
-        core: Mutex::new(CoreState {
-            sessions: HashMap::new(),
-        }),
-        mailboxes: ChannelMailboxRegistry::default(),
         settings: tokio::sync::RwLock::new(bot_settings),
         api_timestamps: dashmap::DashMap::new(),
         tmux_watchers: crate::services::discord::TmuxWatcherRegistry::new_with_coords(Arc::clone(
@@ -358,6 +362,8 @@ mod tests {
         assert!(std::ptr::eq(&shared.api_port, &retained.api_port));
         assert!(std::ptr::eq(&shared.pg_pool, &retained.pg_pool));
         assert!(std::ptr::eq(&shared.policy, &retained.policy));
+        assert!(std::ptr::eq(&shared.core, &retained.core));
+        assert!(std::ptr::eq(&shared.mailboxes, &retained.mailboxes));
         assert_eq!(Arc::strong_count(&retained), 2);
     }
 
@@ -512,6 +518,10 @@ mod tests {
             assert_original_engine_allocation(allocations, &fixture);
             assert_engine_runtime_identity(&shared);
             assert_engine_runtime_identity(&fixture);
+            assert!(shared.engine.core.lock().await.sessions.is_empty());
+            assert!(fixture.engine.core.lock().await.sessions.is_empty());
+            assert!(shared.engine.mailboxes.snapshot_all().await.is_empty());
+            assert!(fixture.engine.mailboxes.snapshot_all().await.is_empty());
             assert!(!Arc::ptr_eq(&shared.engine, &fixture.engine));
             assert_eq!(shared.engine.provider, ProviderKind::Codex);
             assert_eq!(shared.engine.api_port, 8192);
@@ -552,6 +562,99 @@ mod tests {
             assert_eq!(pool.size(), original_size);
         }
         pool.close().await;
+        drop(restore);
+        drop(root);
+    }
+
+    #[tokio::test]
+    async fn core_and_mailboxes_keep_the_same_lock_values_and_actor() {
+        let root = crate::config::TestRuntimeRootGuard::new();
+        let restore = RestoreRegistry(crate::engine::ops::turn_ops::health_registry());
+        let shared = make_shared_data_for_tests_with_storage(None);
+        assert_engine_runtime_identity(&shared);
+        assert!(shared.engine.core.lock().await.sessions.is_empty());
+        assert!(shared.engine.mailboxes.snapshot_all().await.is_empty());
+        let channel = ChannelId::new(8_192_101);
+        let uploads = vec![
+            crate::services::cluster::attachment_transfer::uploads::Upload::Local(
+                "retained-upload".to_owned(),
+            ),
+        ];
+        let upload_storage = uploads.as_ptr();
+        {
+            let mut core = shared.core.lock().await;
+            assert!(shared.engine.core.try_lock().is_err());
+            core.sessions.insert(
+                channel,
+                DiscordSession {
+                    session_id: Some("retained-session".to_owned()),
+                    memento_context_loaded: true,
+                    memento_reflected: false,
+                    current_path: None,
+                    history: Vec::new(),
+                    pending_uploads: uploads,
+                    cleared: false,
+                    channel_id: Some(channel.get()),
+                    channel_name: None,
+                    category_name: None,
+                    last_active: tokio::time::Instant::now(),
+                    worktree: None,
+                    born_generation: 81,
+                },
+            );
+        }
+        let through_shared = shared.mailboxes.handle(channel);
+        let through_engine = shared.engine.mailboxes.handle(channel);
+        assert!(through_shared.same_actor(&through_engine));
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            through_shared
+                .try_start_turn(token.clone(), UserId::new(8192), MessageId::new(8192101),)
+                .await
+        );
+        let observed = through_engine.snapshot().await;
+        assert!(Arc::ptr_eq(observed.cancel_token.as_ref().unwrap(), &token));
+        let retained = shared.engine.clone();
+        drop(shared);
+        let core = retained.core.lock().await;
+        let session = core.sessions.get(&channel).unwrap();
+        let canonical: &crate::services::engine_runtime::session::EngineSession = session;
+        assert_eq!(canonical.session_id.as_deref(), Some("retained-session"));
+        assert_eq!(canonical.pending_uploads.as_ptr(), upload_storage);
+        assert_eq!(canonical.pending_uploads[0], "retained-upload");
+        assert_eq!(canonical.born_generation, 81);
+        drop(core);
+        assert!(through_engine.hard_stop().await.removed_token.is_some());
+        drop(restore);
+        drop(root);
+    }
+
+    #[tokio::test]
+    async fn mailboxes_keep_one_registry_and_the_live_actor() {
+        let root = crate::config::TestRuntimeRootGuard::new();
+        let restore = RestoreRegistry(crate::engine::ops::turn_ops::health_registry());
+        let shared = make_shared_data_for_tests_with_storage(None);
+        assert!(std::ptr::eq(&shared.mailboxes, &shared.engine.mailboxes));
+        assert!(shared.engine.mailboxes.snapshot_all().await.is_empty());
+        let channel = ChannelId::new(8_192_102);
+        let original = shared.mailboxes.handle(channel);
+        let engine_view = shared.engine.mailboxes.handle(channel);
+        assert!(original.same_actor(&engine_view));
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            original
+                .try_start_turn(token.clone(), UserId::new(8192), MessageId::new(8192102),)
+                .await
+        );
+        let snapshots = shared.engine.mailboxes.snapshot_all().await;
+        assert_eq!(snapshots.len(), 1);
+        let snapshot = snapshots.get(&channel).unwrap();
+        assert!(Arc::ptr_eq(snapshot.cancel_token.as_ref().unwrap(), &token));
+        assert_eq!(
+            snapshot.active_user_message_id,
+            Some(MessageId::new(8192102))
+        );
+        assert!(engine_view.hard_stop().await.removed_token.is_some());
         drop(restore);
         drop(root);
     }
