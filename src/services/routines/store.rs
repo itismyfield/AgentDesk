@@ -2081,6 +2081,7 @@ impl RoutineStore {
         Ok(inventory)
     }
 
+    #[cfg(test)]
     pub async fn attach_routine(&self, new_routine: NewRoutine) -> Result<RoutineRecord> {
         self.attach_routine_with_execution(new_routine, None, DEFAULT_HEADLESS_FAILURE_NOTICE_LIMIT)
             .await
