@@ -77,6 +77,18 @@ pub(crate) async fn load_stale_thread_cleanup_rows_pg(
     })
 }
 
+/// Whether any session row still names `thread_channel_id`: a successor or another provider's
+/// session of the same thread.
+pub(crate) async fn thread_session_exists_pg(
+    pool: &PgPool,
+    thread_channel_id: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE thread_channel_id = $1)")
+        .bind(thread_channel_id)
+        .fetch_one(pool)
+        .await
+}
+
 pub(crate) async fn delete_stale_thread_cleanup_row_pg(
     pool: &PgPool,
     row: &CleanupRow,

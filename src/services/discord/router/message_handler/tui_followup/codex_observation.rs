@@ -1,5 +1,3 @@
-use super::*;
-
 #[cfg(unix)]
 pub(in crate::services::discord::router::message_handler) fn observe_codex_tui_rollout_state_for_cwd(
     current_path: Option<&str>,
@@ -63,6 +61,21 @@ pub(in crate::services::discord::router::message_handler) fn codex_native_end(
         Rollout::Named(path) => read_native_end(&path),
         _ => NativeEnd::Unknown,
     }
+}
+
+/// The readiness judgment of Codex pane `tmux` whose rollout must belong to `cwd`, or `None` when
+/// no binding names a rollout: the caller's session-id read stays its answer then.
+#[cfg(unix)]
+pub(in crate::services::discord::router::message_handler) fn codex_verdict(
+    tmux: &str,
+    cwd: Option<&str>,
+) -> Option<crate::services::codex_tui::readiness::Verdict> {
+    use crate::services::codex_tui::readiness::{Verdict, Why, judge_in};
+    codex_binding(tmux)?;
+    Some(match cwd {
+        Some(cwd) => judge_in(tmux, Some(cwd)),
+        None => Verdict::Unknown(Why::NoSource),
+    })
 }
 
 #[cfg(unix)]

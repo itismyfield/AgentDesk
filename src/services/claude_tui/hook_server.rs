@@ -488,17 +488,18 @@ async fn receive_hook(
             event.kind,
             HookEventKind::Stop | HookEventKind::SubagentStop
         );
+    let relay_published = headers
+        .get(relay_receipts::RELAY_PUBLISHED_AT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+        .map(|v| v.to_utc());
     super::readiness::note_hook(
         &event.provider,
         &event.kind,
         &event.session_id,
         &event.payload,
         event.original_context.as_ref(),
-        headers
-            .get(relay_receipts::RELAY_PUBLISHED_AT_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
-            .map(|v| v.to_utc()),
+        relay_published,
         stop_flush_injected,
     );
     super::activity::note_hook(
@@ -508,6 +509,14 @@ async fn receive_hook(
         &event.kind,
         &event.payload,
         stop_flush_injected,
+    );
+    crate::services::codex_tui::readiness::note_hook(
+        activity_accepted,
+        &event.provider,
+        &event.kind,
+        &event.payload,
+        event.original_context.as_ref(),
+        relay_published,
     );
     if should_signal_prompt_ready(&event.provider, &event.kind) && !stop_flush_injected {
         // Wake any task currently awaiting prompt readiness. `notify_waiters`

@@ -965,6 +965,8 @@ pub fn handle_dcserver(token: Option<String>) {
         std::env::remove_var("CLAUDECODE");
     }
     crate::services::legacy_body_census::start();
+    // Before any launch or recovery worker: an incarnation created after this instant is new.
+    crate::services::claude_tui::readiness::initialize();
 
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,

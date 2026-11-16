@@ -20,6 +20,12 @@ impl Rig {
     }
     fn for_channel(channel: Option<u64>) -> Self {
         initialize();
+        let rig = Self::launched(channel, Utc::now());
+        rig.hook("startup");
+        rig
+    }
+    /// A launch created at `created_at` that has sent this ledger no Start.
+    fn launched(channel: Option<u64>, created_at: DateTime<Utc>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("projects");
         let project = root.join("project");
@@ -29,7 +35,7 @@ impl Rig {
         let nonce = uuid::Uuid::new_v4().simple().to_string();
         let path = project.join(format!("{native}.jsonl"));
         let ctx: BindingContext = serde_json::from_value(json!({
-            "schema":1,"provider":"claude","created_at":Utc::now(),"execution_nonce":nonce,
+            "schema":1,"provider":"claude","created_at":created_at,"execution_nonce":nonce,
             "tmux_session":session,"channel_id":channel,"owner_runtime_root":"fixture",
             "host":"readiness-test","expected_native_session_id":native,"launch_mode":"fresh",
             "provider_root":root
@@ -54,15 +60,13 @@ impl Rig {
                 relay_last_offset: None,
             },
         );
-        let rig = Self {
+        Self {
             _dir: dir,
             session,
             path,
             root,
             ctx,
-        };
-        rig.hook("startup");
-        rig
+        }
     }
     fn append(&self, mut value: Value) {
         if value["sessionId"].is_null() {
@@ -107,6 +111,8 @@ impl Rig {
 #[cfg(unix)]
 #[path = "clear_tests.rs"]
 pub(crate) mod clear_tests;
+#[path = "restart_tests.rs"]
+mod restart_tests;
 impl Drop for Rig {
     fn drop(&mut self) {
         tui_prompt_dedupe::clear_tmux_runtime_binding(&self.session);

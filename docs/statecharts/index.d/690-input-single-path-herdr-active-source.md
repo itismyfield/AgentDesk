@@ -1,0 +1,2 @@
+key: 690-input-single-path-herdr-active-source
+| `input-single-path` active Claude busy source (#8114 실기 수리) | `406da315a7` | Before: active inflight path가 없어 검증 source가 있어도 Held; 옛 path는 현재 source 관측 우회 | 현재 verified source의 동일 snapshot을 활성 mailbox에서도 사용. 신규10 cfg GREEN5/expected RED5 일치, source 검사 제거·옛 session 유지·UnknownBusy mutant 모두 RED. [보고서](input-single-path/herdr-busy-active-source.report.md). |
