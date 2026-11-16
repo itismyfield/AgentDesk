@@ -114,15 +114,23 @@ composer::when_idle 루프 (기존)
   - 같은 transcript 바이트를 다시 볼 때도 resume 뒤 활동을 재구성하도록, 보충 판독(`activity_after`) floor 체인에 resume floor를 넣었다. 그러지 않으면 마지막 assistant 행이 256 KiB 판독 창보다 클 때 pending이 소비된 뒤의 재관측(`reserve`)에서 activity가 0이 된다. 보충은 `tail.terminal > floor`일 때만 돌고 floor 뒤 구간만 읽으므로, 옛 history는 보충 대상이 아니다.
   - 파일 교체·축소를 감지하면 새 recovery floor는 유지하고 `entry.resumed`는 버린다. 옛 파일의 byte offset을 새 파일에 넘기지 않는다.
 
-  tmux 경로 판정 변화(resume한 실행만 해당):
+  tmux 경로 판정 변화, 누적(9b42e53297 → 0b7d562e73, resume한 실행만 해당):
 
-  | 상황 | base | 이번 변경 |
+  | 상황 | 9b42e53297 | 0b7d562e73 |
   |---|---|---|
   | resume 직후, 옛 history가 hard terminal로 끝남(메타 꼬리 없음), 새 활동 없음 | settled proof(compact가 첫 입력을 기다리지 않을 수 있음) | resumed proof(`resumed_quiet`). 첫 입력은 같게 받고, compact는 `!proof.resumed`로 첫 입력 턴을 기다린다 |
   | resume 직후, 옛 history가 메타 꼬리로 끝남 | 꼬리가 `End::None` → resumed proof | 꼬리는 무시하지만 guard가 막아 resumed proof(같음) |
   | resume 뒤 우리 턴이 끝남, 마지막 행 ≤ 256 KiB | settled | settled(같음) |
-  | resume 뒤 우리 턴이 끝남, 마지막 행 > 256 KiB, pending 소비 뒤 재관측 | settled | settled(resume floor 보충). 보충이 없으면 거절된다(리뷰 P1) |
-  | resume 뒤 파일 교체·축소, 새 파일에서 턴이 끝남 | settled(recovery floor 뒤 활동) | settled(옛 resume offset 폐기) |
+
+  레그 4 델타(0a4e701ef2 → 0b7d562e73). resume guard와 메타 꼬리 판독은 두 커밋에서 같고, 바뀐 것은 보충 floor 체인과 교체 시 resume offset 폐기뿐이다:
+
+  | 상황 | 0a4e701ef2 | 0b7d562e73 |
+  |---|---|---|
+  | resume 뒤 우리 턴이 끝남, 마지막 행 > 256 KiB, pending 소비 뒤 재관측 | 거절(activity 0) | settled(resume floor 보충) |
+  | resume 뒤 pending 없이 끝난 턴(사람이 pane에서 직접 진행), 마지막 행 > 256 KiB | 거절 | settled(첫 관측부터 resume floor 보충) |
+  | resume 뒤 파일 교체·축소, 새 파일에서 턴이 끝남 | 거절(옛 resume offset) | settled(recovery floor 뒤 활동) |
+
+  레그 6 델타(0b7d562e73 → 이번 커밋): hard terminal 뒤 `mode` 없이 혼자 나온 `permission-mode`는 base처럼 terminal을 지운다(판독 불가). `mode` 바로 다음의 `permission-mode`(턴 끝 세션 상태 블록)만 메타로 읽는다. 실제 transcript 300개에서 `permission-mode` 22,242개는 모두 `mode` 바로 다음이었다.
 
 ### 5.3 진입점 전수표 (원장 상태를 만들거나 바꾸는 모든 경로)
 
@@ -176,7 +184,7 @@ composer::when_idle 루프 (기존)
 | `permission-mode` | 411 | **무시하지 않는다.** `End`·terminal은 그대로 두고 `barrier`만 옮긴다 |
 
 - 위 11종은 `End`·terminal·activity를 바꾸지 않는다(`evidence.rs:179-181`). 블록 다음 레코드는 `user`(2,377)·`api-request*`(3,281)·예약 실행(510)·compact(24)·EOF(68)였고, 블록 안에 턴 진행 레코드가 섞인 경우는 없었다.
-- `permission-mode`는 블록 안에 411번 나왔다. 하지만 resume 경로는 이것을 턴 시작 표지로 읽는다(`readiness_tests.rs` resume 사례). 그래서 hard terminal은 지우지 않되 `barrier = offset`을 남긴다(`evidence.rs:167-170`). 공유 observer(`tui_turn_state.rs:610`)가 `permission-mode`를 Unknown으로 읽는 것은 바꾸지 않고, readiness 쪽 `idle_reading`(`mod.rs:103`)이 "Unknown이고 hard terminal 뒤의 barrier뿐"이면 Idle로 본다.
+- `permission-mode`는 블록 안에 411번 나왔다. 하지만 resume 경로는 이것을 턴 시작 표지로 읽는다(`readiness_tests.rs` resume 사례). 그래서 `mode` 바로 다음일 때만 hard terminal을 지우지 않되 `barrier = offset`을 남긴다(`evidence.rs` permission-mode 갈래). `mode` 없이 혼자 나오면 실제 Claude가 쓰는 모양이 아니므로(최근 300개 transcript의 22,242개가 모두 `mode` 바로 다음) base처럼 terminal을 지우고 판독 불가로 남긴다. herdr busy late 경로(`host_input/busy/herdr.rs` `idle_ready`)가 이 판정으로 Unknown 소스를 hold한다(시험 `busy_entry_tests::late_tests`). 공유 observer(`tui_turn_state.rs:610`)가 `permission-mode`를 Unknown으로 읽는 것은 바꾸지 않고, readiness 쪽 `idle_reading`(`mod.rs:103`)이 "Unknown이고 hard terminal 뒤의 barrier뿐"이면 Idle로 본다.
 - `attachment`, `api-request*`, 모르는 새 type은 지금처럼 `End::None`이다. 새 레코드 종류가 생기면 보수적으로 막는다.
 - 반례 검토: 블록이 다음 턴의 시작에 붙는다면 무시가 실행 중 턴을 숨긴다. `last-prompt` 값이 다음 프롬프트와 맞는 경우가 0이고, 블록 뒤의 다음 턴은 항상 자기 `user`/`api-request` 레코드로 시작했다. 이 레코드들은 지금처럼 `End::None`을 만든다(시험 `turn_records_after_the_metadata_still_run`).
 - hard terminal의 의미는 바꾸지 않으므로 상태 차트는 고치지 않는다(모델의 `tail="hard"`는 "마지막 의미 레코드가 terminal"이고, 메타 레코드는 의미 레코드가 아니다).
