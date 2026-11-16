@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+use crate::services::session_host::TmuxHost;
 use crate::utils::format::safe_prefix;
 
 fn tmux_exit_reason_path(tmux_session_name: &str) -> String {
@@ -9,7 +10,7 @@ fn tmux_exit_reason_path(tmux_session_name: &str) -> String {
 }
 
 pub fn tmux_session_exists(tmux_session_name: &str) -> bool {
-    crate::services::platform::tmux::has_session(tmux_session_name)
+    TmuxHost.legacy_has_session(tmux_session_name)
 }
 
 /// Async-safe exact session-existence probe for request/reaper paths.
@@ -34,7 +35,7 @@ pub async fn probe_tmux_session_exists(tmux_session_name: &str) -> bool {
 }
 
 pub fn tmux_session_has_live_pane(tmux_session_name: &str) -> bool {
-    crate::services::platform::tmux::has_live_pane(tmux_session_name)
+    TmuxHost.legacy_has_live_pane(tmux_session_name)
 }
 
 /// #4489: three-state pane liveness (`Live` / `DeadOrAbsent` / `ProbeError`)
@@ -43,7 +44,7 @@ pub fn tmux_session_has_live_pane(tmux_session_name: &str) -> bool {
 pub fn tmux_session_pane_liveness(
     tmux_session_name: &str,
 ) -> crate::services::platform::tmux::PaneLiveness {
-    crate::services::platform::tmux::pane_liveness(tmux_session_name)
+    TmuxHost.pane_liveness(tmux_session_name)
 }
 
 /// Force (or clear, with `None`) the pane-liveness answer for one session name.
@@ -131,7 +132,7 @@ pub async fn probe_tmux_session_pane_liveness(
 /// JSONL transcript when it lives in a rotating worktree that differs from the
 /// channel's configured workspace cwd.
 pub fn tmux_session_pane_cwd(tmux_session_name: &str) -> Option<String> {
-    crate::services::platform::tmux::pane_current_path(tmux_session_name)
+    TmuxHost.pane_current_path(tmux_session_name)
 }
 
 pub fn clear_tmux_exit_reason(tmux_session_name: &str) {
