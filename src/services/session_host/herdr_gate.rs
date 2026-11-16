@@ -300,13 +300,6 @@ impl std::fmt::Debug for HerdrTarget {
     }
 }
 
-impl HerdrTarget {
-    /// The execution this target is pinned to.
-    pub(crate) fn execution_nonce(&self) -> &str {
-        &self.0.nonce
-    }
-}
-
 impl PartialEq for HerdrTarget {
     fn eq(&self, other: &Self) -> bool {
         (&self.0.endpoint, &self.0.pane, &self.0.nonce)
@@ -434,6 +427,11 @@ impl HerdrTarget {
 
     pub(crate) fn pane_id(&self) -> &str {
         &self.0.pane
+    }
+
+    /// The execution this target is pinned to.
+    pub(crate) fn execution_nonce(&self) -> &str {
+        &self.0.nonce
     }
 
     /// Judges the next input and keeps the judgment for the send that follows it.

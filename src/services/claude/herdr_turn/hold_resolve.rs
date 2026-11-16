@@ -386,9 +386,8 @@ fn noticed(nonce: &str) -> bool {
     }
 }
 
-/// The held front's probe against the evidence the pass decided on, so a change while the pass
-/// ran still wakes. Ready also while the notice row is unsecured, once per self-retry interval;
-/// once Ready it stays Ready until the watch wakes or ends. A wake only re-runs the pass.
+/// Ready, until the watch wakes or ends, once the evidence differs from what the pass decided
+/// on, or per self-retry interval while the notice row is unsecured. A wake only re-runs the pass.
 pub(crate) fn watch(
     nonce: String,
     seen: Option<Basis>,
