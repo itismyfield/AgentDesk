@@ -101,7 +101,7 @@ base는 **항상 main 이력 위의 commit**이다. 결정 규칙은 다음 순�
 - 측정 코드가 바뀐 PR은 측정 결과 차이가 양쪽에서 함께 사라질 수 있다. 이 경로는 6.2절의
   분석기 변경 검사로 막는다.
   측정 코드는 `module_layers.py`·`module_layer_baseline.py`·`service_server_backflow.py`·
-  `audit_maintainability/common.py`·`checks/__init__.py`·`scripts/ci/rust_test_sources.py`와 그 지역 import
+  `audit_maintainability/common.py`·`audit_maintainability/rust_accessor_scan.py`·`checks/__init__.py`·`scripts/ci/rust_test_sources.py`와 그 지역 import
   (`rust_production.py`·`rust_lex.py`·`rust_cfg.py`·`generate_inventory_docs.py`)다. 목록이 실제 import를
   모두 덮는지는 시험이 고정한다.
 - provenance(`input_sha`·`generation_command`)는 비교 대상이 아니다. 비교는 record 본문만 쓴다.

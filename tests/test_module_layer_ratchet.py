@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 import importlib
 import json
+import os
 import shutil
 from pathlib import Path
 import sys
@@ -653,8 +654,14 @@ assembly = 1
             self.assertEqual(len(accepted["indeterminate_dependencies"]), 1)
             self.assertEqual(accepted["indeterminate_occurrences"], 1)
             original = baseline.read_bytes()
+            # #8131 B: the accepted file stays on main beside the gate until B2; main is this commit.
+            git("add", "scripts")
+            git("commit", "-qm", "accepted baseline on main")
+            git("update-ref", "refs/remotes/origin/main", "HEAD")
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith(("GITHUB_", "GIT_")) and k != "MODULE_LAYER_BASE_REF"}
             runner = [sys.executable, str(scripts / "audit_maintainability.py"), "--check", "--format", "json"]
-            before = subprocess.run(runner, cwd=repo, capture_output=True, text=True)
+            before = subprocess.run(runner, cwd=repo, capture_output=True, text=True, env=env)
             self.assertEqual(before.returncode, 0, before.stderr)
             reverse = accepted["reverse_dependencies"][0]
             indeterminate = accepted["indeterminate_dependencies"][0]
@@ -664,15 +671,20 @@ assembly = 1
             put("scripts/audit_maintainability/layer_moves.toml",
                 'schema_version=1\n[[moves]]\nsection="reverse_dependencies"\n'
                 f'old_id="{reverse["id"]}"\nnew_id="{indeterminate["id"]}"\n')
-            git("add", "src", "scripts/audit_maintainability/layer_moves.toml")
+            put("scripts/audit_maintainability/layer_approvals/8131-cross.toml",
+                'schema_version = 1\nissue = 8131\nsummary = "cross-section fixture"\n'
+                f'move = [{{ section = "reverse_dependencies", old_id = "{reverse["id"]}", '
+                f'new_id = "{indeterminate["id"]}", reason = "retained implementation moved" }}]\n')
+            git("add", "src", "scripts/audit_maintainability/layer_moves.toml", "scripts/audit_maintainability/layer_approvals")
             git("commit", "-qm", "move retained implementation over removed implementation")
-            moved = subprocess.run(runner, cwd=repo, capture_output=True, text=True)
+            moved = subprocess.run(runner, cwd=repo, capture_output=True, text=True, env=env)
             refused_update = subprocess.run([*generator, "--update-reductions"], cwd=repo,
                                             capture_output=True, text=True)
             checks = json.loads(moved.stdout)["checks"]
             with self.subTest(operation="runner"):
                 self.assertEqual(moved.returncode, 1, moved.stderr)
-                self.assertTrue(any(row["severity"] == "error" for row in checks["module_layers"]["findings"]))
+                self.assertTrue(any(row["severity"] == "error" and row["extra"].get("code") == "approval-move"
+                                    for row in checks["module_layers"]["findings"]), checks["module_layers"]["findings"])
             with self.subTest(operation="update"):
                 self.assertNotEqual(refused_update.returncode, 0, refused_update.stderr)
             with self.subTest(operation="accepted-bytes"):

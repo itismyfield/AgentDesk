@@ -6,22 +6,15 @@ reported as warnings unless it hides accepted reverse debt."""
 from __future__ import annotations
 
 from copy import deepcopy
-import json
 import re
-import tomllib
 
-from .module_layer_baseline import BASELINE, _id
+from .module_layer_baseline import _id
 
 MOVES = "scripts/audit_maintainability/layer_moves.toml"
 SECTIONS = ("reverse_dependencies", "indeterminate_dependencies", "uncertainties")
 TOTALS = ("unclassified_modules", "indeterminate_edges", "indeterminate_occurrences")
 BLOCKING_SECTIONS = ("reverse_dependencies",)
 EDGE_KINDS = ("import", "path", "reexport", "macro")
-
-
-def load_inputs(repo):
-    return (json.loads((repo / BASELINE).read_bytes()),
-            tomllib.loads((repo / MOVES).read_text("utf-8")))
 
 
 def _record(row, section, zero=False):

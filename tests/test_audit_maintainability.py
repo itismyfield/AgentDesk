@@ -100,21 +100,32 @@ def _files(findings: Iterable) -> set[str]:
 
 
 class _LayerSrcTree(_FakeSrcTree):
-    """Give harness fixtures a generated initial debt baseline for their own source."""
+    """Commit the harness fixture as main so the module-layer gate measures it as its own base (#8131 B)."""
+    def __init__(self, files: dict[str, str], git_main: bool = True) -> None:
+        super().__init__(files)
+        self.git_main = git_main
+
     def __enter__(self):
         root = super().__enter__()
-        from audit_maintainability.checks import module_layers, module_layer_baseline as snapshots
+        import os
+        from audit_maintainability.checks import module_layer_baseline as snapshots
         if not any((root / "src" / name).exists() for name in ("lib.rs", "main.rs")):
             _write(root, "src/lib.rs", "")
         _write(root, snapshots.MAPPING, 'schema_version=1\n[layers]\nassembly=5\n'
                '[[rules]]\nprefix=""\nlayer="assembly"\nreason="fixture assembly"\n')
-        _write(root, "scripts/audit_maintainability/layer_moves.toml", "schema_version=1\nmoves=[]\n")
-        occurrences = []
-        graph = module_layers.analyze(root, occurrence_projection=occurrences)
-        snapshots.write_baseline(root / snapshots.BASELINE,
-                                 snapshots.baseline(graph, snapshots.load_mapping(root), "fixture", occurrences))
         from audit_maintainability.checks import low_level_accessors, low_level_accessor_baseline
         low_level_accessor_baseline.write_baselines(root, low_level_accessors.scan(root))
+        if not self.git_main:
+            return root
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self._patches.append(environment)
+        for key in [k for k in os.environ if k.startswith(("GITHUB_", "GIT_")) or k == "MODULE_LAYER_BASE_REF"]:
+            del os.environ[key]
+        for command in (["init", "-q"], ["config", "user.name", "Fixture"], ["config", "user.email", "fixture@example.invalid"],
+                        ["config", "commit.gpgsign", "false"], ["add", "-A"], ["commit", "-qm", "fixture main"],
+                        ["update-ref", "refs/remotes/origin/main", "HEAD"]):
+            subprocess.run(["git", "-C", str(root), *command], check=True, capture_output=True)
         return root
 
 class GiantFilesCheck(unittest.TestCase):
@@ -1303,7 +1314,7 @@ class HarnessCli(unittest.TestCase):
             self.assertFalse(any(row["severity"] == "error" for key, value in checks.items()
                                  if key != "module_layers" for row in value["findings"]))
 
-    def test_missing_layer_baseline_cannot_pass_check_mode(self):
+    def test_unresolvable_layer_base_cannot_pass_check_mode(self):
         with _FakeSrcTree({"src/main.rs": "fn main() {}"}):
             stream = io.StringIO()
             with mock.patch.object(sys, "stdout", stream), mock.patch.object(sys, "stderr", io.StringIO()):
@@ -1405,14 +1416,17 @@ class HarnessCli(unittest.TestCase):
 
     def test_check_mode_warns_on_undocumented_new_giant(self) -> None:
         big = "fn x() {}\n" * (giant_files.THRESHOLD + 5)
+        # A git fixture would switch the giant ratchet to its base comparison; this case pins the
+        # frozen-baseline path, so it stays outside git and leaves the git-based layer gate out.
+        specs = [spec for spec in HARNESS.load_check_specs() if spec.key != "module_layers"]
         with _LayerSrcTree({"src/new_giant.rs": big,
                            GiantFileRatchetCheck._BASELINE: "[giant_file_ratchet]\n",
-                           **GiantFileRatchetCheck._HISTORY}) as root:
+                           **GiantFileRatchetCheck._HISTORY}, git_main=False) as root:
             allowlist = root / "empty.toml"
             allowlist.write_text("", encoding="utf-8")
             with mock.patch.object(sys, "stdout", new=mock.MagicMock()), mock.patch.object(
                 sys, "stderr", new=io.StringIO()
-            ):
+            ), mock.patch.object(HARNESS, "load_check_specs", return_value=specs):
                 rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
                 self.assertIn("warning `giant_file_ratchet` src/new_giant.rs", sys.stderr.getvalue())
                 self.assertIn("+1005 production lines", sys.stderr.getvalue())

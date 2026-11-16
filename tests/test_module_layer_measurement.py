@@ -235,24 +235,25 @@ class ModuleLayerMeasurementTests(unittest.TestCase):
     def _git(root, *args):
         return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True).stdout.strip()
 
-    def _generate_initial_baseline(self, root):
-        from audit_maintainability.checks import module_layer_baseline as provider
+    def _commit_main(self, root):
+        """Commit the fixture as main; the gate measures this commit as the base (#8131 B)."""
         self._git(root, "init", "-q")
         self._git(root, "config", "user.name", "Fixture")
         self._git(root, "config", "user.email", "fixture@example.invalid")
+        self._git(root, "config", "commit.gpgsign", "false")
         self._git(root, "add", "src", "scripts")
-        self._git(root, "commit", "-qm", "fixture baseline input")
-        result = subprocess.run([sys.executable, str(Path(provider.__file__).resolve()), "--repo", str(root),
-                                 "--input-sha", "HEAD", "--output", str(root / provider.BASELINE)],
-                                capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self._git(root, "commit", "-qm", "fixture main")
+        self._git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
 
     @staticmethod
     def _runner():
         from tests.test_audit_maintainability import HARNESS
         import audit_maintainability.common as common
+        import os
+        from unittest import mock
         stdout, stderr = io.StringIO(), io.StringIO()
-        with redirect_stdout(stdout), redirect_stderr(stderr):
+        scrubbed = {k: v for k, v in os.environ.items() if not k.startswith(("GITHUB_", "GIT_")) and k != "MODULE_LAYER_BASE_REF"}
+        with redirect_stdout(stdout), redirect_stderr(stderr), mock.patch.dict(os.environ, scrubbed, clear=True):
             result = HARNESS.main(["--check", "--format", "json", "--allowlist",
                                    str(common.REPO_ROOT / "scripts/audit_allowlist.toml")])
         return result, json.loads(stdout.getvalue()), stderr.getvalue()
@@ -296,7 +297,7 @@ class ModuleLayerMeasurementTests(unittest.TestCase):
                 layer="application"
                 reason="fixture startup orchestration"
             """, encoding="utf-8")
-            self._generate_initial_baseline(root)
+            self._commit_main(root)
             self.assertEqual(self._runner()[0], 0)
             self.assertFalse(self._snapshot(root)["reverse_dependencies"])
 
@@ -321,7 +322,7 @@ class ModuleLayerMeasurementTests(unittest.TestCase):
                     {"parameter": "[u8; {1}]"}, {"parameter": "Wrapper<{1}>"})
         for context in contexts:
             with self.subTest(context=context), self._tree(self._source("", **context)) as root:
-                self._generate_initial_baseline(root)
+                self._commit_main(root)
                 self.assertEqual(self._runner()[0], 0)
                 (root / "src/lib.rs").write_text(self._source(**context), encoding="utf-8")
                 self._git(root, "commit", "-qam", "add production dependency")
@@ -342,7 +343,7 @@ class ModuleLayerMeasurementTests(unittest.TestCase):
                  ("TypeMacro![1]", "TypeMacro![crate::upper::N]"))
         for before, after in types:
             with self.subTest(parameter=after), self._tree(self._source("", parameter=before)) as root:
-                self._generate_initial_baseline(root)
+                self._commit_main(root)
                 original = self._counts(self._snapshot(root))
                 self.assertEqual(self._runner()[0], 0)
                 (root / "src/lib.rs").write_text(self._source("", parameter=after), encoding="utf-8")
@@ -362,7 +363,7 @@ class ModuleLayerMeasurementTests(unittest.TestCase):
         )
         for before, after in contexts:
             with self.subTest(context=before), self._tree(self._source(**before)) as root:
-                self._generate_initial_baseline(root)
+                self._commit_main(root)
                 original = self._counts(self._snapshot(root))
                 self.assertEqual(self._runner()[0], 0)
                 (root / "src/lib.rs").write_text(self._source(**after), encoding="utf-8")
