@@ -1,0 +1,25 @@
+---
+title: "Codex canary Herdr 퇴역 뒤 새 실행 시작"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the HeldStarts or WriterReady bug
+    lg1: Repeats forever, so HeldStarts or WriterReady breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: writer 부팅 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 입력 없음
+  s1: writer 부팅 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 입력 없음 #183; 재시작 뒤
+  s2: writer 부팅 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; front 판정 대기 #183; 재시작 뒤
+  s3: writer 부팅 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; front 보관(관측 없음) #183; 재시작 뒤
+  s4: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; front 보관(관측 없음) #183; 재시작 뒤
+  [*] --> s0
+  s0 --> s1: dcserver 재시작
+  s1 --> s2: 입력 도착
+  s2 --> s3: owner front 판정
+  s3 --> s4: 부팅(first_drain까지)
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 repeats

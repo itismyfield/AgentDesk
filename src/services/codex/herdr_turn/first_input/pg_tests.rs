@@ -105,6 +105,7 @@ fn run_case(case: Case) {
         goals: None,
         compact_token_limit: None,
         cancel: None,
+        bootstrap: false,
     };
     std::fs::write(
         crate::services::tmux_common::session_temp_path(&turn.owner.logical_key, "host_kind"),
@@ -155,6 +156,7 @@ fn run_case(case: Case) {
                     goals: None,
                     compact_token_limit: None,
                     cancel: None,
+                    bootstrap: false,
                 };
                 let _watch = refuse_commit.then(|| {
                     use crate::services::discord::runtime_store::durable_probe::{
