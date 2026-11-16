@@ -1,0 +1,2 @@
+key: 690-input-single-path-herdr-input-hold
+| `input-single-path` herdr input hold after an uncertain Enter (#8201) | `934a49997e95ffb0d54ae8eed2d7653ea6c1e4bf` | Before breaks HoldEventuallyReleased/HoldReleasedOrSurfaced/LaterInputStarts; six resolver mutants break OriginalAtMostOnce/NoPasteOverResidue/NoReleaseOnResidue/UndeliveredIsTrue | Design resolver GREEN on 6 cfgs; person/unreadable/v1-chip keep the hold but surface it; [report](input-single-path/herdr-input-hold.report.md). |

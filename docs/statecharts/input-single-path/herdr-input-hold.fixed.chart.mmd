@@ -1,0 +1,58 @@
+---
+title: "이슈 8201: 불확실 Enter 뒤 남은 입력 보류 표지"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: held
+    lg1: surfaced
+    lg2: released
+  }
+  class lg0 yellow
+  class lg1 orange
+  class lg2 teal
+  s0: 보류: 붙여넣기가 아직 안 그려짐
+  s1: 보류: 판독 불가, 붙여넣기 그려지기 전
+  s2: 보류: 우리 붙여넣기가 입력창에 남음
+  s3: 보류: 입력창 빔
+  s4: 보류: 붙여넣기가 아직 안 그려짐 (운영자 표시)
+  s5: 보류: 입력창 판독 불가
+  s6: 보류 해제, 새 입력 대기
+  s7: 보류: 판독 불가, 붙여넣기 그려지기 전 (운영자 표시)
+  s8: 보류: 우리 붙여넣기가 입력창에 남음 (운영자 표시)
+  s9: 새 입력 턴 시작
+  s10: 보류: 입력창 빔 (운영자 표시)
+  s11: 보류: 입력창 판독 불가 (운영자 표시)
+  [*] --> s0
+  s0 --> s1: 부하로 판독 실패
+  s0 --> s2: 붙여넣기가 화면에 그려짐
+  s1 --> s0: 부하가 풀려 판독됨
+  s1 --> s5: 붙여넣기가 화면에 그려짐
+  s0 --> s4: 판정 못 함, 보류 유지
+  s2 --> s3: 우리 붙여넣기를 게이트로 지움
+  s2 --> s5: 부하로 판독 실패
+  s3 --> s6: 입력창 빈 것 확인, 보류 해제
+  s3 --> s5: 부하로 판독 실패
+  s1 --> s7: 판정 못 함, 보류 유지
+  s4 --> s8: 붙여넣기가 화면에 그려짐
+  s5 --> s2: 부하가 풀려 판독됨
+  s6 --> s9: 새 입력 붙여넣기와 Enter
+  s5 --> s3: 부하가 풀려 판독됨
+  s7 --> s4: 부하가 풀려 판독됨
+  s7 --> s11: 붙여넣기가 화면에 그려짐
+  s5 --> s11: 판정 못 함, 보류 유지
+  s8 --> s10: 우리 붙여넣기를 게이트로 지움
+  s10 --> s6: 입력창 빈 것 확인, 보류 해제
+  s11 --> s8: 부하가 풀려 판독됨
+  s11 --> s10: 부하가 풀려 판독됨
+  class s0 yellow
+  class s1 yellow
+  class s2 yellow
+  class s3 yellow
+  class s4 orange
+  class s5 yellow
+  class s6 teal
+  class s7 orange
+  class s8 orange
+  class s9 teal
+  class s10 orange
+  class s11 orange
