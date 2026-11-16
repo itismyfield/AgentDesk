@@ -193,10 +193,20 @@ pub(super) fn read(capture: &str) -> Screen {
     }
 }
 
+/// How an input hold's resolver reads the composer: readability first, then the body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HeldRead {
+    /// A turn runs: the footer offers to interrupt it.
+    Busy,
+    /// No capture, an unknown layout, a stash, an unusual footer or a modal.
+    Unread,
+    Empty,
+    Text(Option<String>),
+}
+
 /// A held prompt's composer read whole. A row that may be one wrapped part of a longer line
 /// reads as `Text(None)`: only a lossless body can match a recorded frame.
-pub(super) fn held_read(capture: &str) -> super::HeldRead {
-    use super::HeldRead;
+pub(super) fn held_read(capture: &str) -> HeldRead {
     let rows: Vec<Row> = capture.lines().map(row).collect();
     let running = |row: &Row| claude_footer::bypass_interrupt(row.plain.trim_end()) == Some(true);
     if rows.iter().any(running) {

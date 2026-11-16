@@ -142,26 +142,23 @@ pub(crate) fn ensure_absent_durable(nonce: &str) -> Result<(), String> {
     crate::domain::file_sync::fsync_parent_dir(&path).map_err(|error| error.to_string())
 }
 
-/// The status fields of execution `nonce`'s hold; no path or input text.
-pub(crate) fn summary(nonce: &str) -> serde_json::Value {
-    match read(nonce) {
-        Ok(Some(Held::V2(record))) => serde_json::json!({
-            "schema": 2, "recorded_at": record.recorded_at,
-            "send_outcome": record.send_outcome, "unsent_proof": record.unsent_proof,
-            "cleanup_phase": record.cleanup_phase, "unclear_passes": record.unclear_passes,
-            "notice_intent_at": record.notice_intent_at,
-            "notice_enqueued_at": record.notice_enqueued_at,
-        }),
-        Ok(Some(Held::V1 { .. })) => serde_json::json!({"schema": 1}),
-        Ok(None) => serde_json::Value::Null,
-        Err(_) => "unreadable".into(),
-    }
+/// The status fields of execution `nonce`'s v2 hold; no path or input text. A v1 hold has none.
+pub(crate) fn summary(nonce: &str) -> Option<serde_json::Value> {
+    let Ok(Some(Held::V2(record))) = read(nonce) else {
+        return None;
+    };
+    Some(serde_json::json!({
+        "send_outcome": record.send_outcome, "unsent_proof": record.unsent_proof,
+        "cleanup_phase": record.cleanup_phase, "unclear_passes": record.unclear_passes,
+        "notice_intent_at": record.notice_intent_at,
+        "notice_enqueued_at": record.notice_enqueued_at,
+    }))
 }
 
 /// The execution whose v2 hold names session `logical`, if any.
 pub(crate) fn held_by(logical: &str) -> Option<String> {
     let holds = super::input_holds().ok()?;
-    holds.into_iter().map(|(nonce, _)| nonce).find(|nonce| {
-        matches!(read(nonce), Ok(Some(Held::V2(record))) if record.logical_key == logical)
-    })
+    holds.into_iter().map(|(nonce, _)| nonce).find(
+        |nonce| matches!(read(nonce), Ok(Some(Held::V2(record))) if record.logical_key == logical),
+    )
 }

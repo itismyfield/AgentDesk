@@ -2,9 +2,9 @@
 //! gated prompt after SessionStart, never resent or relaunched; an unclear send holds later ones.
 
 mod first_input;
+mod handoff;
 pub(crate) mod hold_record;
 pub(crate) mod hold_resolve;
-mod handoff;
 use handoff::launched_source;
 
 use std::path::{Path, PathBuf};
@@ -192,7 +192,14 @@ pub(crate) trait HerdrTurnPorts {
     fn unplaced_lease(&self, _owner: &HostedOwner) -> Result<UnplacedLease, String> {
         Err("no channel lease".into())
     }
+    /// Posts an input hold's one notice row; without it a hold that needs one is never released.
+    fn hold_notice(&self) -> Option<Arc<HoldNotice>> {
+        None
+    }
 }
+
+/// Enqueues the notice of hold `(execution nonce, hold id)`; a repeat returns the same row.
+pub(crate) type HoldNotice = dyn Fn(&str, &str) -> Result<i64, String> + Send + Sync;
 
 /// The source a prompt goes to.
 struct Attached {
@@ -225,7 +232,7 @@ pub(crate) fn owned_prompt_for_tests(
         physical: physical(record),
     };
     let (sender, _receiver) = std::sync::mpsc::channel();
-    first_input::submit_owned(turn, hook, lineage, attached, &sender).map(drop)
+    first_input::submit_owned(turn, hook, (lineage, None), attached, &sender).map(drop)
 }
 
 /// The socket and pane the gate of `record` writes to.
@@ -279,7 +286,8 @@ pub(crate) fn execute(
             }
             _ => (launched_source(&turn, &runtime, ports)?, Lineage::Created),
         };
-        prompt_and_read(&turn, &runtime, attached, lineage, sender)
+        let notice = ports.hold_notice();
+        prompt_and_read(&turn, &runtime, attached, (lineage, notice), sender)
     })
 }
 
@@ -723,13 +731,20 @@ fn prompt_and_read(
     turn: &HerdrTurn<'_>,
     runtime: &Handle,
     attached: Attached,
-    lineage: crate::services::claude_tui::owner_input::Lineage,
+    (lineage, notice): (
+        crate::services::claude_tui::owner_input::Lineage,
+        Option<Arc<HoldNotice>>,
+    ),
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
     let submitted = match crate::services::claude_tui::owner_input::launch_hook() {
         // The owner waiting on this thread writes the prompt as its own effect.
         Some(hook) => Some(first_input::submit_owned(
-            turn, hook, lineage, attached, &sender,
+            turn,
+            hook,
+            (lineage, notice),
+            attached,
+            &sender,
         )?),
         None => first_input::submit(turn, attached, &sender)?,
     };

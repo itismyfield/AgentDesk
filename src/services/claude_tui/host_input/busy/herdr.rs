@@ -156,7 +156,13 @@ fn receipt(request: &Request<'_>, text: String, offset: u64, target: HerdrTarget
             tracing::debug!(%nonce, ?result, "Claude Herdr injection receipt diagnostic");
             use crate::services::claude::herdr_turn::hold_resolve::{LivePorts, after_busy};
             let target = &target;
-            after_busy(&session, &LivePorts { target, notice: None });
+            after_busy(
+                &session,
+                &LivePorts {
+                    target,
+                    notice: None,
+                },
+            );
         });
 }
 

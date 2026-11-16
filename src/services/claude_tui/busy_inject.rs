@@ -417,16 +417,7 @@ pub(crate) fn modal(capture: &str) -> bool {
     screen::modal(capture)
 }
 
-/// How an input hold's resolver reads the composer: readability first, then the body.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HeldRead {
-    /// A turn runs: the footer offers to interrupt it.
-    Busy,
-    /// No capture, an unknown layout, a stash, an unusual footer or a modal.
-    Unread,
-    Empty,
-    Text(Option<String>),
-}
+pub(crate) use screen::HeldRead;
 
 pub(crate) fn held_read(capture: &str) -> HeldRead {
     screen::held_read(capture)

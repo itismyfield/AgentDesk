@@ -89,7 +89,11 @@ fn now() -> String {
 fn since(at: &str) -> Duration {
     chrono::DateTime::parse_from_rfc3339(at)
         .ok()
-        .and_then(|at| (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).to_std().ok())
+        .and_then(|at| {
+            (chrono::Utc::now() - at.with_timezone(&chrono::Utc))
+                .to_std()
+                .ok()
+        })
         .unwrap_or(Duration::ZERO)
 }
 
@@ -138,7 +142,8 @@ pub(crate) fn resolve(logical: &str, nonce: &str, ports: &dyn Ports) -> Result<V
     match read {
         HeldRead::Empty => empty(record, receipt, ports),
         HeldRead::Text(Some(body))
-            if record.screen_exact && hold_record::sha256_hex(body.as_bytes()) == record.frame_sha256 =>
+            if record.screen_exact
+                && hold_record::sha256_hex(body.as_bytes()) == record.frame_sha256 =>
         {
             match receipt {
                 true => clean(record, &body, ports),
@@ -190,7 +195,9 @@ fn clean(mut record: HoldRecord, body: &str, ports: &dyn Ports) -> Result<Verdic
         record.cleanup_at = Some(now());
         hold_record::write(&record)?;
         let mut memory = memory();
-        memory.clear_seen.insert(record.hold_id.clone(), Instant::now());
+        memory
+            .clear_seen
+            .insert(record.hold_id.clone(), Instant::now());
     }
     Ok(Verdict::Kept)
 }
@@ -235,7 +242,12 @@ fn unconfirmed(mut record: HoldRecord, ports: &dyn Ports) -> Result<Verdict, Str
 }
 
 /// Rules 3, 6 and 9 for a v1 hold: an empty composer releases it, nothing else does.
-fn legacy(nonce: &str, hold_id: &str, read: &HeldRead, ports: &dyn Ports) -> Result<Verdict, String> {
+fn legacy(
+    nonce: &str,
+    hold_id: &str,
+    read: &HeldRead,
+    ports: &dyn Ports,
+) -> Result<Verdict, String> {
     if *read == HeldRead::Empty {
         memory().v1.remove(hold_id);
         return unlink(nonce, Disposition::Unknown);
@@ -291,7 +303,9 @@ fn delivered(record: &HoldRecord) -> bool {
     let Ok(meta) = file.metadata() else {
         return false;
     };
-    if record.file.is_some_and(|file| file != (meta.dev(), meta.ino()))
+    if record
+        .file
+        .is_some_and(|file| file != (meta.dev(), meta.ino()))
         || meta.len() < record.offset_before
         || file
             .seek(std::io::SeekFrom::Start(record.offset_before))
@@ -302,7 +316,10 @@ fn delivered(record: &HoldRecord) -> bool {
     let lines = std::io::BufReader::new(file).lines().map_while(Result::ok);
     lines
         .filter(|line| super::is_turn_prompt(line))
-        .any(|line| prompt_bodies(&line).any(|body| hold_record::sha256_hex(body.as_bytes()) == record.frame_sha256))
+        .any(|line| {
+            prompt_bodies(&line)
+                .any(|body| hold_record::sha256_hex(body.as_bytes()) == record.frame_sha256)
+        })
 }
 
 fn prompt_bodies(line: &str) -> impl Iterator<Item = String> {
@@ -384,3 +401,7 @@ pub(crate) fn after_busy(logical: &str, ports: &dyn Ports) {
     let verdict = lock(logical, || resolve(logical, &nonce, ports));
     tracing::info!(logical, ?verdict, "herdr turn: hold pass after busy input");
 }
+
+#[cfg(test)]
+#[path = "hold_resolve_tests.rs"]
+mod tests;

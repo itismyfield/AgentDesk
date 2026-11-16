@@ -354,9 +354,8 @@ mod node {
         }
     }
 
-    /// Every local row with its pane as read now, retired rows whose hold is left with its send
-    /// outcome, cleanup and notice record, and every other hold by nonce and recorded time; no
-    /// path or input text is shown.
+    /// Every local row with its pane as read now and its hold record (outcome, cleanup, notice),
+    /// retired rows whose hold is left, and every other hold; no path or input text is shown.
     pub(crate) async fn status(pool: &PgPool) -> Result<Value, String> {
         let node = local_node().map_err(|error| format!("{error:?}"))?;
         let rows = list_local_herdr_rows_pg(pool, &node, LIVE).await?;
@@ -365,7 +364,13 @@ mod node {
         let mut take_hold = |nonce: &str| {
             let held = holds.iter().position(|(held, _)| held == nonce);
             let record = crate::services::claude::herdr_turn::hold_record::summary(nonce);
-            held.map(|at| json!({"recorded_at": holds.remove(at).1, "record": record}))
+            held.map(|at| {
+                let mut hold = json!({"recorded_at": holds.remove(at).1});
+                if let Some(record) = record {
+                    hold["record"] = record;
+                }
+                hold
+            })
         };
         let mut shown = Vec::new();
         for row in rows.iter().chain(&retired) {

@@ -22,23 +22,15 @@ pub(super) fn submit(
         .map_err(SubmissionError::into_legacy)
 }
 
-fn notice(turn: &HerdrTurn<'_>, nonce: &str) -> Arc<Notice> {
-    let (pool, channel, nonce) = (turn.pool.clone(), turn.channel_id, nonce.to_owned());
-    let runtime = Handle::try_current().ok();
-    Arc::new(move |hold: &str| {
-        let runtime = runtime.as_ref().ok_or("herdr turn: no runtime for the hold notice")?;
-        let post = crate::services::discord::herdr_input_hold_notice;
-        runtime.block_on(post(&pool, "claude", channel, (&nonce, hold)))
-    })
-}
-
-
 /// The prompt through the owner waiting on this thread: it reserves the frame on the execution
 /// the driver observed, binds its pane, and runs this write as its effect; its settlement is final.
 pub(super) fn submit_owned(
     turn: &HerdrTurn<'_>,
     hook: crate::services::claude_tui::owner_input::LaunchHook,
-    lineage: crate::services::claude_tui::owner_input::Lineage,
+    (lineage, post): (
+        crate::services::claude_tui::owner_input::Lineage,
+        Option<Arc<HoldNotice>>,
+    ),
     attached: Attached,
     sender: &Sender<StreamMessage>,
 ) -> Result<Submitted, String> {
@@ -61,11 +53,19 @@ pub(super) fn submit_owned(
     };
     let slot = Arc::new(std::sync::Mutex::new(None));
     let (ticket, cancel, sender) = (slot.clone(), turn.cancel.clone(), sender.clone());
-    let notice = notice(turn, &attached.nonce);
+    let nonce = attached.nonce.clone();
+    let notice = post.map(|post| Arc::new(move |hold: &str| post(&nonce, hold)) as Arc<Notice>);
     let submit = Box::new(move |frame: String| {
         guarded_outcome::capture_preparation(|| {
-            let notice = Some(&*notice);
-            let written = write(&logical, cancel.as_deref(), attached, &frame, &sender, notice)?;
+            let notice = notice.as_deref();
+            let written = write(
+                &logical,
+                cancel.as_deref(),
+                attached,
+                &frame,
+                &sender,
+                notice,
+            )?;
             let submitted = written.ok_or_else(|| {
                 before_payload(&logical, "input cancelled before first key", false)
             })?;
@@ -131,38 +131,42 @@ fn write(
             };
             if pending {
                 kept.set(true);
-                return InputRun::Refused(crate::services::claude_tui::host_input::InputRefusal::Unknown);
+                return InputRun::Refused(
+                    crate::services::claude_tui::host_input::InputRefusal::Unknown,
+                );
             }
             if let Err(error) = hold_record::write(&record) {
                 *failed.borrow_mut() = Some(error);
-                return InputRun::Refused(crate::services::claude_tui::host_input::InputRefusal::Unknown);
+                return InputRun::Refused(
+                    crate::services::claude_tui::host_input::InputRefusal::Unknown,
+                );
             }
             let run = (|| {
-            if attached.awaiting_clear {
-                match composer::wait_for(cancel, Duration::from_secs(10), || {
-                    if crate::services::claude_tui::readiness::adopt_awaiting_clear(
-                        logical,
-                        &attached.nonce,
-                        path,
-                    ) {
-                        std::ops::ControlFlow::Break(())
-                    } else {
-                        std::ops::ControlFlow::Continue(())
-                    }
-                }) {
-                    Ok(()) => (),
-                    Err(composer::WaitStop::Cancelled) => {
-                        return InputRun::Cancelled { confirmed: 0 };
-                    }
-                    Err(composer::WaitStop::TimedOut) => {
-                        return InputRun::Refused(
-                            crate::services::claude_tui::host_input::InputRefusal::Unknown,
-                        );
+                if attached.awaiting_clear {
+                    match composer::wait_for(cancel, Duration::from_secs(10), || {
+                        if crate::services::claude_tui::readiness::adopt_awaiting_clear(
+                            logical,
+                            &attached.nonce,
+                            path,
+                        ) {
+                            std::ops::ControlFlow::Break(())
+                        } else {
+                            std::ops::ControlFlow::Continue(())
+                        }
+                    }) {
+                        Ok(()) => (),
+                        Err(composer::WaitStop::Cancelled) => {
+                            return InputRun::Cancelled { confirmed: 0 };
+                        }
+                        Err(composer::WaitStop::TimedOut) => {
+                            return InputRun::Refused(
+                                crate::services::claude_tui::host_input::InputRefusal::Unknown,
+                            );
+                        }
                     }
                 }
-            }
-            let _ = composer::take_touched();
-            composer::run_ready(logical, path, &attached.target, &plan, cancel)
+                let _ = composer::take_touched();
+                composer::run_ready(logical, path, &attached.target, &plan, cancel)
             })();
             record_outcome(record.clone(), &run);
             run
@@ -414,6 +418,8 @@ pub(super) fn observe(
 #[cfg(test)]
 mod clear_held_tests;
 #[cfg(test)]
+mod hold_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod unproven_tests;
@@ -500,7 +506,7 @@ mod regression_tests {
         drop(root_guard);
     }
 
-    fn regression_attached(
+    pub(super) fn regression_attached(
         rig: &crate::services::session_host::herdr_socket_rig_tests::HerdrRig,
         logical: &str,
         transcript: &Path,
