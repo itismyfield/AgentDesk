@@ -186,7 +186,7 @@ Enter 뒤 확인을 rollout 영수증(`busy_inject/rollout.rs:419` `submitted`)�
 
 ### 1.7 기존 tmux pane을 끝내는 모든 길 (사유 × 호출자)
 
-교체 전 판정 확인을 어디에 거는지는 이 표 하나로 정한다. 1.6·2절·3절은 이 표를 가리킨다. `git grep`으로 확인한 범위: `Replacement::begin`의 생산 호출자는 둘(`codex/absence_launch.rs:274`, `codex_tui/warm_followup/submit.rs:68`), `CodexWarmFallbackReason`은 여섯(`warm_followup.rs:25`~`:32`), `cleanup_existing_codex_tui_session`의 호출자는 하나(`absence_launch.rs:280`), `kill_legacy_pane`의 생산 호출자는 하나(`submit.rs:72`), `try_codex_tui_warm_followup`의 생산 호출자는 하나(`absence_launch.rs:235`. `codex.rs:3029`는 시험), `settle_submit`의 생산 호출자는 하나(`warm_followup.rs:605`)다. `verified_warm`(`warm_followup.rs:1218`)은 교체하지 않고 오류로 끝난다.
+교체 전 판정 확인을 어디에 거는지는 이 표 하나로 정한다. 1.6·2절·3절은 이 표를 가리킨다. `git grep`으로 확인한 범위: `Replacement::begin`의 생산 호출자는 둘(`codex/absence_launch.rs:274`, `codex_tui/warm_followup/submit.rs:68`), `CodexWarmFallbackReason`은 여섯(`warm_followup.rs:25`~`:32`), `cleanup_existing_codex_tui_session`의 호출자는 하나(`absence_launch.rs:280`), `kill_legacy_pane`의 생산 호출자는 하나(`submit.rs:72`), `try_codex_tui_warm_followup`의 생산 호출자는 하나(`absence_launch.rs:235`. `codex.rs:2984`는 시험), `settle_submit`의 생산 호출자는 하나(`warm_followup.rs:605`)다. `verified_warm`(`warm_followup.rs:1218`)은 교체하지 않고 오류로 끝난다.
 
 | 사유 | 생기는 곳 | pane을 끝내는 곳 | 지금 | d3의 교체 전 확인 |
 |---|---|---|---|---|
