@@ -48,6 +48,23 @@ class LowLevelAccessorBaselineTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
 
+    def test_output_callback_needs_no_approval_but_host_callback_still_does(self):
+        self.initialize()
+        before = self.baseline_bytes()
+        self.write("src/consumer.rs", "fn old() { herdr_endpoint(channel); }\n" + """
+            fn output() {
+                crate::services::tui_o::cutover::test_override::with_channels(|boot| {
+                    boot.unwrap().channels();
+                });
+            }
+        """)
+        result = self.command("--reduce")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.baseline_bytes(), before)
+        with (self.repo / "src/consumer.rs").open("a") as stream:
+            stream.write("fn host() { crate::config::session_hosts::with_boot(|snapshot| snapshot.unwrap().channels()); }\n")
+        self.assert_rejected_without_write("--reduce")
+
     def baseline_bytes(self):
         return {path.relative_to(self.repo).as_posix(): path.read_bytes()
                 for path in sorted((self.repo / BASELINE).glob("*.json"))}

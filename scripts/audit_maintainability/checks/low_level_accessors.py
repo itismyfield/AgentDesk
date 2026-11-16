@@ -85,7 +85,7 @@ def _sites(path, text, production, *, module=(), exports=None):
             kinds = [kind for name, kind, fn, where, lo, hi in bindings
                      if name == values[receiver] and (fn == function or fn == "<module>")
                      and scope[:len(where)] == where and lo <= i <= hi]
-            if (kinds[-1:] == ["BootSessionHosts"] or not kinds and values[receiver] == "boot"):
+            if kinds[-1:] == ["BootSessionHosts"]:
                 rule = "boot_channels"
         if rule is None or owned(path, RULES[rule]["owned_paths"]):
             continue

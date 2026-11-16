@@ -239,7 +239,7 @@ def call_arguments(values, index):
 
 
 def boot_bindings(ts, metadata, aliases, matched, *, module=(), exports=None):
-    """Recognize explicit boot types and with_boot closure parameters, without type inference."""
+    """Recognize explicit boot types and the typed inventory callback ports."""
     values, bindings = [t.value for t in ts], []
     functions = []
     for i, token in enumerate(ts[:-1]):
@@ -286,13 +286,25 @@ def boot_bindings(ts, metadata, aliases, matched, *, module=(), exports=None):
                                     while hi < len(ts) and values[hi] not in {";", ",", ")", "]", "}"}:
                                         hi = matched[hi] + 1 if hi in matched else hi + 1
                     bindings.append((values[i - 1], resolved[-1], owner, where, lo, hi))
-        if token.kind == "code" and resolve([token.value], scope, aliases, module=module, exports=exports)[-1] == "with_boot":
+        if token.kind == "code":
+            start, names = i, [token.value]
+            while start >= 2 and values[start - 1] == "::":
+                start -= 2
+                names.insert(0, values[start])
+            resolved = resolve(names, scope, aliases, module=module, exports=exports)
+            output_port = ("services", "tui_o", "cutover", "test_override", "with_channels")
+            relative = (*module, *module_context(ts, scope), *resolved)
+            kind = "BootSessionHosts" if resolved[-1] == "with_boot" else (
+                "BootChannels" if tuple(resolved) == output_port or relative == output_port else None
+            )
+            if kind is None:
+                continue
             opening = call_arguments(values, i)
             if opening is not None:
                 end = matched[opening]
                 pipe = opening + 1 + (values[opening + 1:opening + 2] == ["move"])
                 if values[pipe:pipe + 1] == ["|"] and pipe + 1 < end:
-                    bindings.append((values[pipe + 1], "BootSessionHosts", function, scope, pipe, end))
+                    bindings.append((values[pipe + 1], kind, function, scope, pipe, end))
     return bindings
 
 
