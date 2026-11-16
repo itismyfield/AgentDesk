@@ -916,6 +916,7 @@ async fn restore_unlinked_body_debt(root: &Path, channel: u64) {
             })
         },
     ));
+    let completion = crate::services::discord::queue_io::cancel_backstop_test_support::KickoffCompletion::install(id);
     let http = shared.serenity_http_or_token_fallback().unwrap();
     restore_inflight_turns(&http, &shared, &provider).await;
     assert!(
@@ -925,30 +926,22 @@ async fn restore_unlinked_body_debt(root: &Path, channel: u64) {
         "boot restore wakes the durable waiting input"
     );
     assert_eq!(*taken.lock().unwrap(), vec![(SENTINEL, false)]);
-    assert!(
-        wait(Duration::from_secs(15), || !shared
-            .restart
-            .deferred_hook_channels
-            .contains_key(&id))
-        .await
-    );
+    completion.processed(0, Duration::from_secs(15)).await;
     restore_inflight_turns(&http, &shared, &provider).await;
-    assert!(
-        wait(Duration::from_secs(15), || calls.load(Ordering::SeqCst)
-            >= 2)
-        .await
-    );
+    assert_eq!(completion.started_requests(), 2);
+    completion.processed(0, Duration::from_secs(15)).await;
     assert_eq!(
         *taken.lock().unwrap(),
         vec![(SENTINEL, false)],
         "repeated boot never takes the input twice"
     );
     assert!(
-        wait(Duration::from_secs(15), || !shared
-            .restart
-            .deferred_hook_channels
-            .contains_key(&id))
-        .await
+        shared
+            .mailbox(id)
+            .snapshot()
+            .await
+            .intervention_queue
+            .is_empty()
     );
     assert!(inflight::load_inflight_state_read_only(&provider, channel).is_none());
     assert_eq!(
