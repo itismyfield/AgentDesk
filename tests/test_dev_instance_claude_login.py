@@ -58,6 +58,64 @@ class ClaudeLoginTests(TestCase):
         self.assertFalse(list((root/'home').rglob('.credentials.json')))
         self.assertEqual(validate(self.fixture.base, manifest['instance_id'], {})['claude_login'], manifest['claude_login'])
 
+    def test_opt_in_log_capture_keeps_initial_evidence_beyond_the_old_tail(self):
+        from scripts.dev_instance import driver
+        manifest = self.fixture.prepare(claude_login=self.login)
+        root = Path(manifest['root'])
+        first = 'PreparationHold reason=composer_unread\n'
+        tail = 'END_OF_CAPTURE\n'
+        text = first + 'safe diagnostic line\n'*9000 + tail
+        (root/'logs/dcserver.stdout.log').write_text(text)
+        self.assertNotIn(first, text[-131072:])
+        capture = driver.preserve_instance_log(manifest)
+        self.assertGreater(capture['source_bytes'], 131072)
+        self.assertEqual(capture['status'], 'SAVED')
+        self.assertEqual(capture['limit_bytes'], 8*1024*1024)
+        saved = root/capture['path']
+        self.assertTrue(saved.read_text().startswith(first))
+        self.assertTrue(saved.read_text().endswith(tail))
+        self.assertEqual(stat.S_IMODE(saved.stat().st_mode), 0o600)
+
+    def test_log_capture_without_opt_in_does_not_read_or_create_any_file(self):
+        from scripts.dev_instance import driver
+        manifest = self.fixture.prepare()
+        before = self._prepare_golden(manifest)
+        with patch.object(driver, '_open_parent', side_effect=AssertionError('must not read')):
+            self.assertIsNone(driver.preserve_instance_log(manifest))
+            self.assertIsNone(driver.preserve_instance_log({}))
+        self.assertEqual(self._prepare_golden(manifest), before)
+        self.assertEqual(before, 'c297bab0ed6fd05a1bac81549ec373a92a8be433652a6b02ede6d658ad13a782')
+        changed = {**manifest, 'claude_login': self.login, 'root': str(self.fixture.home/'outside')}
+        with self.assertRaises(InstanceError):
+            driver.preserve_instance_log(changed)
+
+    def test_opt_in_log_capture_redacts_and_refuses_links_or_oversize(self):
+        import os
+        from scripts.dev_instance import driver
+        manifest = self.fixture.prepare(claude_login=self.login)
+        root = Path(manifest['root'])
+        source = root/'logs/dcserver.stdout.log'
+        source.write_text('https://private.invalid/path person@example.invalid token=private-value\n'
+                          'Account: private-identity\n' + 'opaque_'+'x'*60+'\n'
+                          '{"token":"json-private-value"}\n{"organizationName":"json-private-identity"}\n'
+                          'authorization=Bearer short-private-header\n')
+        capture = driver.preserve_instance_log(manifest)
+        saved = root/capture['path'];text = saved.read_text()
+        for value in ['private.invalid', 'person@example.invalid', 'private-value', 'private-identity', 'x'*60, 'json-private-value', 'json-private-identity', 'short-private-header']:
+            self.assertNotIn(value, text)
+        self.assertIn('<redacted>', text)
+        saved.unlink();source.unlink()
+        outside = self.fixture.home/'outside-log';outside.write_text('do not read')
+        for kind in ['symlink', 'hardlink', 'oversize']:
+            if kind == 'symlink':source.symlink_to(outside)
+            elif kind == 'hardlink':os.link(outside, source)
+            else:source.write_bytes(b'x'*(8*1024*1024+1))
+            with self.subTest(kind=kind), self.assertRaises((InstanceError, OSError)):
+                driver.preserve_instance_log(manifest)
+            self.assertFalse(saved.exists())
+            source.unlink()
+        self.assertEqual(outside.read_text(), 'do not read')
+
     def test_no_opt_in_preserves_original_prepare_files_and_environment_golden(self):
         manifest = self.fixture.prepare()
         self.assertFalse(list(Path(manifest['root']).rglob('.claude.json')))

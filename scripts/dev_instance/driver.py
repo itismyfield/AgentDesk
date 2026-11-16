@@ -4,6 +4,9 @@ from contextlib import contextmanager
 import importlib
 import json
 import math
+import os
+import re
+import stat
 from pathlib import Path
 import sys
 import time
@@ -11,7 +14,8 @@ import uuid
 
 from . import discord_rest, driver_dispatch
 from .driver_admission import IdentityRefused, admit
-from .files import InstanceError, safe_absolute
+from .files import InstanceError, safe_absolute, _open_parent
+from .manifest import child_environment
 from .manifest import read_json
 
 MAX_OBSERVE_SECONDS = 600
@@ -44,6 +48,40 @@ def admission_witness(root, provider, parent, thread, message, author):
                                         'user_msg_id','source_message_ids','turn_nonce','session_id','output_path')}}
     except (InstanceError,OSError,ValueError,TypeError):
         return None
+
+
+def preserve_instance_log(manifest):
+    if 'claude_login' not in manifest:
+        return None
+    child_environment(manifest, {})
+    root, limit = Path(manifest['root']), 8*1024*1024
+    parent, name = _open_parent(root, 'logs/dcserver.stdout.log', private=True)
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(descriptor, 'rb') as source:
+            metadata = os.fstat(source.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_nlink != 1:
+                raise InstanceError('instance diagnostic log must be an owned single regular file')
+            data = source.read(limit+1)
+    finally:
+        os.close(parent)
+    if len(data) > limit:
+        raise InstanceError('instance diagnostic snapshot exceeds its bound')
+    # Keep the initial admission evidence; filter before writing any retained copy.
+    content = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', data.decode('utf-8', errors='replace'))
+    content = re.sub(r'https?://[^\s\"<>]+|[\w.!#$%&*+/=?^`{|}~-]+@[\w.-]+[.][A-Za-z]{2,}', '<redacted>', content)
+    content = re.sub(r'(?<![A-Za-z0-9_-])(?:mfa[.][A-Za-z0-9_-]{80,100}|[A-Za-z0-9_-]{23,28}[.][A-Za-z0-9_-]{6}[.][A-Za-z0-9_-]{27,45}|[A-Za-z0-9_-]{40,})(?![A-Za-z0-9_-])', '<redacted>', content)
+    content = re.sub(r"(?im)((?:token|password|authorization|api[_-]?key)[\"']?\s*[=:]\s*)[^\r\n]+", r'\1<redacted>', content)
+    content = re.sub(r"(?im)^.*\b(?:account|organization|subscription)\w*[\"']?\s*[:=].*$", '<redacted>', content)
+    relative = 'outputs/instance-startup.log'
+    parent, name = _open_parent(root, relative, private=True)
+    try:
+        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        with os.fdopen(descriptor, 'w') as output:
+            output.write(content)
+    finally:
+        os.close(parent)
+    return {'status': 'SAVED', 'path': relative, 'source_bytes': len(data), 'limit_bytes': limit, 'redacted': True}
 
 
 def run(base, instance_id, provider, timeout, *, identity_request=None, rest_factory=None, dispatch_request=None):
@@ -98,6 +136,11 @@ def run(base, instance_id, provider, timeout, *, identity_request=None, rest_fac
                 time.sleep(min(1.0,max(0,deadline-time.monotonic())))
     except (InstanceError,OSError,ValueError,TypeError,KeyError):
         summary.update(status='UNEVALUABLE(observation)',transmissions=None)
+    finally:
+        if 'claude_login' in manifest:
+            try:summary['log_capture'] = preserve_instance_log(manifest)
+            except (InstanceError, OSError, ValueError, TypeError):
+                summary['log_capture'] = {'status': 'REFUSED'}
     # No DELETE/archive: public threads auto-archive without broader bot permissions.
     return summary
 

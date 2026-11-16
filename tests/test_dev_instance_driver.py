@@ -164,6 +164,26 @@ class DriverTests(unittest.TestCase):
         encoded=json.dumps(result)
         for token in self.tokens.values():self.assertNotIn(token.decode(),encoded)
 
+    def test_driver_preserves_log_only_after_an_explicit_login_turn(self):
+        from dataclasses import replace
+        driver, admission, _ = self.modules()
+        with mock.patch.object(driver, 'preserve_instance_log') as capture:
+            result = self.execute(rest_factory=self.client)
+        self.assertEqual(result['status'], 'OBSERVED')
+        self.assertNotIn('log_capture', result)
+        capture.assert_not_called()
+        admitted = admission.admit(self.fixture.base, self.root.name, time.monotonic()+10, request=self.request)
+        manifest = copy.deepcopy(admitted.manifest)
+        manifest['claude_login'] = {'mode': 'default_active', 'account_slot': 3,
+            'login_home': str(self.fixture.home), 'config_dir': str(self.root/'home/.adk/profiles/claude/test-claude'),
+            'cli': str(self.fixture.home/'.local/share/claude/fixture')}
+        (self.root/'logs/dcserver.stdout.log').write_text('EARLY_ADMISSION_EVIDENCE\n')
+        with mock.patch.object(driver, 'admit', return_value=replace(admitted, manifest=manifest)):
+            result = self.execute(rest_factory=self.client)
+        self.assertEqual(result['status'], 'OBSERVED')
+        self.assertEqual(result['log_capture']['status'], 'SAVED')
+        self.assertEqual((self.root/result['log_capture']['path']).read_text(), 'EARLY_ADMISSION_EVIDENCE\n')
+
     def test_dispatch_is_registered_before_discord_send_with_same_id(self):
         events = []
         def register(url, body, deadline):
