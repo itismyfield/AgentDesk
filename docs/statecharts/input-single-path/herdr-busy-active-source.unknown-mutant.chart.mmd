@@ -1,0 +1,37 @@
+---
+title: "활성 Claude 턴 입력의 검증된 현재 source 선택"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoKeyWithoutVerifiedSource
+    lg1: Path to the NoKeyWithoutVerifiedSource or UnknownActiveHeld bug
+    lg2: Repeats forever, so UnknownActiveHeld breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  s0: 기존 세션으로 턴 실행
+  s1: 세션 교체, 현재 결속 확인 대기
+  s2: 현재 source 근거 Unknown
+  s3: 사람 입력 도착, 활성 턴 행은 옛 경로
+  s4: 현재 source 관측으로 주입 준비
+  s5: Unknown source로 키 실행
+  s6: 입력 1회 전달#183;정산
+  [*] --> s0
+  s0 --> s1: compaction#183;resume으로 세션 교체
+  s1 --> s2: 기존 정상 producer가 현재 결속 발행
+  s2 --> s3: 턴이 끝나기 전 사람 입력
+  s3 --> s4: 활성 mailbox 입력 경로에서 source 선택
+  s4 --> s5: 첫 키 직전 source 검사
+  s5 --> s5: 같은 transcript의 수신 증거
+  s5 --> s6: 한 번 정산
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 breaks
+  class s5 bugPath
+  class s6 breaks
+  class s6 repeats
