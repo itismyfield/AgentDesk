@@ -280,6 +280,7 @@ fn native_collector_case(test_name: &str, mode: u8) {
             terminal_rewind_attempt_key: &mut rewind_key,
             terminal_rewind_attempts: &mut attempts,
             watcher_turn_identity: &identity,
+            watcher_turn_nonce: &fx.nonce,
             last_activity_heartbeat_at: &mut heartbeat,
             active_stream_inflight_reacquire_logged: &mut reacquire,
         };

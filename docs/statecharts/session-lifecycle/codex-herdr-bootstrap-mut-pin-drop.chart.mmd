@@ -1,0 +1,44 @@
+---
+title: "Codex canary Herdr 퇴역 뒤 새 실행 시작"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoDualExecution or ResumedOnlyWithEvidence or SourceInBoundary
+    lg1: Path to the NoDualExecution or ResumedOnlyWithEvidence or SourceInBoundary bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; 입력 없음
+  s1: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; 입력 없음 #183; tmux 살아 있음
+  s2: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; 입력 없음
+  s3: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; 입력 없음 #183; tmux 살아 있음
+  s4: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; front 판정 대기 #183; tmux 살아 있음
+  s5: 옛 tmux source 게시(경계 밖)
+  s6: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; front 판정 대기 #183; tmux 살아 있음
+  s7: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; 입력 통과 #183; tmux 살아 있음
+  s8: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing 없음 #183; 턴 호스트 통과 #183; tmux 살아 있음
+  s9: writer 준비됨 #183; 새 실행 Pending #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; Pending CAS #183; tmux 살아 있음
+  [*] --> s0
+  [*] --> s1
+  s0 --> s2: source 허용 #8594; resume
+  s1 --> s3: source 허용 #8594; resume
+  s1 --> s4: 입력 도착
+  s3 --> s5: 옛 tmux source 게시
+  s4 --> s6: source 허용 #8594; resume
+  s6 --> s7: owner front 판정
+  s7 --> s8: 턴 호스트 판정
+  s8 --> s9: Retired#8594;Pending CAS#183;listing
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 breaks
+  class s5 bugPath
+  class s6 bugPath
+  class s7 bugPath
+  class s8 bugPath
+  class s9 breaks
+  class s9 bugPath

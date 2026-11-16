@@ -823,8 +823,7 @@ pub(super) fn read_codex_idle_completion(
         })
         .ok_or("native idle source binding changed")?;
     crate::services::codex_tui::rollout_tail::tail_idle_rollout_for_tmux(
-        path,
-        start,
+        (path, start),
         binding.session_id,
         tx,
         cancel,

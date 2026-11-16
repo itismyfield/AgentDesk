@@ -6,15 +6,50 @@ Stdlib-only. No third-party dependencies.
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 from hashlib import sha256
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Iterator, TypeVar
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SRC_ROOT = REPO_ROOT / "src"
 SCRIPTS_ROOT = REPO_ROOT / "scripts"
 
 TEST_FILE_NAMES = {"integration_tests.rs", "tests.rs"}
+
+_T = TypeVar("_T")
+_RUN_CACHE: dict[tuple, object] | None = None
+
+
+@contextmanager
+def run_cache() -> Iterator[None]:
+    """Share whole-tree scans between checks for one harness run.
+
+    The tree must not change inside the block; outside it every call recomputes.
+    """
+
+    global _RUN_CACHE
+    previous, _RUN_CACHE = _RUN_CACHE, {}
+    try:
+        yield
+    finally:
+        _RUN_CACHE = previous
+
+
+def run_cached(name: str, compute: Callable[[], _T], *key: object) -> _T:
+    """Memoize ``compute`` inside :func:`run_cache`; failures are not cached.
+
+    The key includes the scanned roots so a re-pointed REPO_ROOT never reuses a scan.
+    Cached values are shared, so callers must store immutable data or hand out copies.
+    """
+
+    if _RUN_CACHE is None:
+        return compute()
+    full_key = (name, REPO_ROOT, SRC_ROOT, *key)
+    if full_key not in _RUN_CACHE:
+        _RUN_CACHE[full_key] = compute()
+    return _RUN_CACHE[full_key]  # type: ignore[return-value]
 
 
 @dataclass(frozen=True)

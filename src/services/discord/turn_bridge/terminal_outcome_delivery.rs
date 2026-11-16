@@ -82,6 +82,11 @@ pub(super) async fn run_terminal_outcome_delivery(
     ctx: TerminalOutcomeDeliveryContext,
     mut state: TerminalOutcomeDeliveryState,
 ) -> TerminalOutcomeDeliveryOutput {
+    crate::services::tui_o::cutover::wait_codex_first(
+        ctx.channel_id.get(),
+        state.cancel_token.turn_nonce(),
+    )
+    .await;
     #[cfg(unix)]
     if !ctx.cancelled && !ctx.transport_error && !ctx.is_prompt_too_long && !ctx.recovery_retry {
         let mut captured = state.inflight_state.clone();

@@ -61,6 +61,15 @@ pub(super) fn fresh_routine_turn(metadata: Option<&serde_json::Value>) -> bool {
         .and_then(|value| value.as_str())
         != Some("persistent")
 }
+/// The session-key basis a headless turn's host judgement uses: the snapshot label, else a fresh
+/// routine's tmux label.
+pub(super) fn headless_session_basis(
+    metadata: Option<&serde_json::Value>,
+    tmux_session_label: Option<&str>,
+) -> Option<String> {
+    let snapshot = scheduled_snapshot_session_label(metadata);
+    session_key_basis_override(snapshot.as_deref(), metadata, tmux_session_label).map(str::to_owned)
+}
 /// Process mode is explicit and only honored on fresh routine metadata.
 pub(super) fn routine_process_turn(metadata: Option<&serde_json::Value>) -> bool {
     fresh_routine_turn(metadata)

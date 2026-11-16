@@ -112,6 +112,14 @@ fn judge_at(
             reason = refusal;
             return super::writer_unready(channel);
         }
+        // The turn host judges the retired row; placement only sees the pin and the vacant pane.
+        if clear_relaunch::herdr_bootstrap::local_eligible(channel).is_ok() {
+            reason = "herdr_retired_bootstrap";
+            if phase == "placement" {
+                tracing::info!(channel, provider, reason, "[tui_o] input admission passed");
+            }
+            return IntakeRoute::Gateway;
+        }
         if clear_relaunch::input_reason_for_channel(channel).is_some() {
             IntakeRoute::Gateway
         } else {
