@@ -1,6 +1,6 @@
 # 메신저 중립 선행 P0~P2 설계 (#8192)
 
-기준: **d40c06eb47a358373a740b8596144640a3b8ba63**, 2026-11-16 WSL. 이 레그의 변경은 이 문서 하나다. 실행 코드·시험·기준선은 변경하지 않으며 빌드·cargo·운영 저장소 접근을 하지 않는다.
+기준: **d40c06eb47a358373a740b8596144640a3b8ba63**, 2026-11-16 WSL의 정적 설계다. 2026-11-17 코디네이터 결정으로 P0-C를 C1/C2로 분할하고 cancel-handoff custody를 Discord 혼합 wrapper에 남긴다. P0-A/B 구현 뒤 main `2f32ed6e23`을 합친 C1 시작점은 `a067a4d7b2`다. 최초 정적 집계는 원래 기준 SHA의 측정이며 새 head의 실행 증거로 재사용하지 않는다.
 
 **입력과 실제 코드 사이의 차이부터 고정한다.** #8189의 `SharedData` 255파일은 구조체 전체 참조 수가 아니라 B 분류 부분집합이다. 원문 `classify.tsv`와 분류 스크립트는 전달된 보고서에 포함되지 않았다. 따라서 C1 106파일/약 38,664줄을 이 SHA에서 재현했다고 주장하지 않는다. 아래 HTTP 인자 전수표는 현재 git grep 결과 전부를 먼저 보존하고, 이 설계의 C1 경계를 별도로 표시한다. 원래 580/206도 prod 중심 집계이고, 아래 전체 src 문자열 집계와 단위가 다르다.
 
@@ -50,8 +50,8 @@
 | `settings` (1018) | `tokio::sync::RwLock<DiscordBotSettings>` | 141/154 | B 유지. DiscordBotSettings의 allow users·bot IDs·role/channel 설정과 save_bot_settings IO. |
 | `api_timestamps` (1020) | `dashmap::DashMap<ChannelId, tokio::time::Instant>` | 2/2 | B 유지. rate_limit_wait의 Discord API 속도 제한 기록. |
 | `skills_cache` (1022) | `tokio::sync::RwLock<Vec<(String, String)>>` | 3/4 | E → P0-A. prompt 조립용 이름/설명 cache; Discord 이벤트가 cache를 읽어도 내용은 메신저 독립. |
-| `tmux_watchers` (1024) | `TmuxWatcherRegistry` | 181/189 | E 저장부 → P0-C. 실제 핸들/registry 값 선언만 내림; claim/teardown/authority impl은 기존 모듈에 유지. |
-| `tmux_relay_coords` (1029) | `Arc<dashmap::DashMap<ChannelId, Arc<TmuxRelayCoord>>>` | 4/6 | E 저장부 → P0-C. emission slot·offset·lease 공유. relay_health/DeliveryLeaseCell 값 폐쇄가 필요. |
+| `tmux_watchers` (1024) | `TmuxWatcherRegistry` | 181/189 | E 저장부 → P0-C1. 순수 map/handle/reservation과 fence 값은 아래 정본으로, coord lookup을 가진 Discord wrapper는 잔류한다. wrapper와 EngineRuntime은 같은 단일 registry 저장 객체를 공유하고 한 방향 Deref로 기존 접근을 잇는다. claim/remove/CAS의 임계 구역 결합과 잠금 순서는 유지한다. |
+| `tmux_relay_coords` (1029) | `Arc<dashmap::DashMap<ChannelId, Arc<TmuxRelayCoord>>>` | 4/6 | M → P0-C2의 순수 상태만 이전. emission slot·offset·lease/atomic은 아래 값으로 닫고, cancel_handoffs(Store/HandoffStore/Pending/RecordedEpisode)와 열린 source·decoder/buffer·collector·parser/표시/inflight 값은 Discord 혼합 wrapper에 남긴다. mixed coord map 전체를 engine으로 내렸다고 보고하지 않는다. |
 | `ui` (1033) | `PlaceholderState` | 68/88 | B 유지. placeholder cleanup/controller/live events 및 표시 gate. |
 | `queued` (1041) | `QueuedPlaceholderState` | 13/49 | B 유지. Discord queued message ID와 write-through 표시 원장; queue 자체는 mailboxes. |
 | `answer_flush_barrier` (1051) | `Arc<answer_flush_barrier::AnswerFlushBarrier>` | 4/4 | B 유지. Discord 분할 answer와 queued card POST 사이의 송신 순서. |
@@ -112,7 +112,7 @@
 
 P0-A에서 SharedData에 `engine: Arc<EngineRuntime>`과 한 방향 `Deref<Target=EngineRuntime>` 호환 경로를 둔다. 기존 `Arc<SharedData> → SharedData → EngineRuntime` autoderef가 필드 읽기/락/atomic을 같은 객체로 연결한다. EngineRuntime에서 SharedData로의 Deref/AsRef/callback 저장은 금지한다. 이전할 필드와 같은 이름의 shadow 필드는 SharedData에서 지운다. 전체 SharedData 가변 borrow/struct destructuring/필드 projection은 grep으로 점검하고, Arc 내부 상태를 복제하는 clone migration을 하지 않는다. 생성자 두 곳을 같은 조각에서 바꾼다.
 
-P0-B/C는 **데이터 선언만** 아래로 소유 이전한다. 같은 crate에서는 공개된 기존 API만 사용하는 상위 Discord의 inherent impl이 허용된다. private 필드를 직접 읽는 impl은 아래의 가시성 폐쇄 규칙을 먼저 따른다. struct 필드 타입을 아래로 닫지 않은 `pub use`만으로 이전을 완료했다고 하지 않는다. SDK ID map은 legacy_state adapter가 소유하고 EngineRuntime이 이 객체를 보유한다. 새 engine API는 ConversationId를 받고 그 adapter 경계에서만 변환한다. 기존 map key를 이번에 ConversationId로 교체하면 수백 caller가 바뀌므로 그렇게 하지 않는다. 따라서 **새 API는 중립이지만 기존 private 저장 타입에는 Serenity 의존이 임시로 남는다**. SDK 제거 완료나 Slack 실행 가능을 P0/P1 완료로 보고하지 않는다.
+P0-B와 P0-C1/C2는 저장 값과 그 private 필드를 읽는 순수 impl의 소유를 이전한다. 공개된 목적별 연산만 쓰는 상위 Discord impl은 유지할 수 있다. field 타입·alias·bound를 아래에서 닫지 않은 재수출은 완료가 아니다. SDK-key map의 순수 저장은 legacy_state adapter가 소유하고 EngineRuntime이 보유한다. mixed wrapper는 같은 저장 객체를 한 방향 Deref하며 engine에 SharedData나 저장 callback을 끌어오지 않는다. 새 engine API는 ConversationId를 쓰되 기존 map key를 이번에 일괄 치환하지 않는다. 따라서 내부 SDK 의존은 임시로 남으며 SDK 제거 완료나 Slack 실행 가능을 보고하지 않는다.
 
 P0-D의 `overrides`와 `restart`는 bot wrapper의 별도 UI/gateway 필드를 보존한다. wrapper는 EngineRuntime 소유 실행 상태의 **같은 Arc**를 보유하고 한 방향 Deref한다. EngineRuntime의 overrides/restart는 engine 부분만 가진다. 예를 들어 `shared.overrides.model_overrides`와 `shared.engine.overrides.model_overrides`는 같은 map이고, model_picker_pending은 첫 경로에만 있다. replay_restart(OwnedRuntimeRoot), gateway_lease_diagnostics, gateway_waiter_cancellation을 engine 타입으로 복사하지 않는다. deferred_hook_channels는 BackstopSlot 저장 선언만 아래에 닫을 수 있을 때 이전하며 wake/Drop guard는 상위에 남긴다. cfg(test) request_acks의 지원 타입도 같은 compile view에서 닫지 못하면 그 map 전체는 wrapper에 남긴다.
 
@@ -124,9 +124,9 @@ P0-E의 첫 실제 engine borrow 대상은 `src/services/discord/mod.rs:1146`의
 
 EngineRuntime이 mailboxes(application의 ChannelMailboxRegistry)를 **직접** 보유한다. adapter로 분류한 legacy_state에 그 registry를 넣으면 adapter→application 새 역의존이므로 금지한다. session 값/legacy map storage는 adapter, 실행 cluster는 application, 완료 값은 vocabulary로 각각 더 구체적인 rule을 둔다. EngineSession의 HistoryItem 정본은 `src/ui/ai_screen.rs:7`(foundation override), PendingUploads는 `src/services/cluster/attachment_transfer/uploads.rs`(vocabulary)라 session 저장은 adapter 이상이어야 한다.
 
-P0-C의 최소 닫힘은 TmuxWatcherHandle, ReservationRecord, TmuxWatcherRegistry 저장 필드, TmuxRelayCoord, FrontierResetState, DeliveryLeaseKey, DeliveryLeaseCell→DeliveryLeasePayload→LeaseState/WatcherReservation 및 그 값 의존이다. `src/services/discord/delivery_lease_cell.rs:295`의 payload mutex와 `src/services/discord/tmux_watcher_registry.rs:209`의 private maps를 pub로 풀어 아래 struct를 상위 impl에서 만지는 방식은 권고하지 않는다. private 필드를 읽는 순수 inherent impl도 **같은 아래 소유 모듈**로 옮기고, IO/SharedData가 필요한 기존 impl은 공개된 기존 목적별 연산만 호출하도록 나눈다. 새로운 remove/kill 연산을 열지 않는다. 이 폐쇄가 15파일 또는 +1200 예상선을 넘으면 P0-C를 저장 값/순수 impl의 두 조각으로 나눠야 한다. bound/수명/visibility를 확인하지 않은 상태에서 “값 선언만 옮기면 컴파일”이라고 완료 판정하지 않는다.
+P0-C1의 닫힘은 TmuxWatcherHandle, ReservationRecord, registry의 순수 maps, identity/delivery fence 값, DeliveryLeaseKey와 DeliveryLeaseCell→DeliveryLeasePayload→LeaseState/WatcherReservation, FrontierResetState다. registry의 coord map과 TmuxRelayCoord의 mixed wrapper 경계는 P0-C2에 속한다. C1에서는 wrapper가 아래 단일 registry 저장 객체로 Deref하고 필요한 coord 조회/identity 관측은 기존 위치에서 즉시 수행한다. private 필드를 pub로 열지 않고, private 필드를 읽는 순수 impl을 같은 아래 소유 모듈로 옮긴다. 상위 IO impl은 목적별 연산만 호출하며 새로운 remove/kill 연산이나 저장 callback을 만들지 않는다. CAS는 private maps + identity 재관측 + delivery payload-locked commit을 같은 임계 구역에서 기존 순서로 결합한다. C1이 15파일 또는 +1200 예상선을 넘거나 이 결합을 유지할 수 없으면 구현 전에 DESIGN_DELTA로 멈춘다.
 
-이 지점은 소스 정적 대조를 통한 계획이며 코드 스파이크/컴파일 확인은 하지 않았다. 특히 private registry/fence 접근과 test-only BackstopSlot 지원 타입 때문에 예상보다 추가 조각이 필요할 수 있다. 그 경우 표의 5/2/9는 확정 실행 수가 아니라 리뷰 기준 추정이고, 코디네이터에게 DESIGN_DELTA로 보고한다.
+P0-C2는 기존 mixed coord map의 단일 entry 생성 경로와 바깥 Arc를 Discord wrapper의 정본으로 유지한다. 그 entry에서 기존 평가 순서대로 relay slot, Store, 나머지 atomic/reset/lease를 각 한 번 생성하고 순수 필드만 하나의 relay-state 객체에 묶어 한 방향 Deref한다. Store Arc·열린 source·decoder/buffer·collector는 옮기거나 복제하지 않고 같은 custody를 successor에게 넘긴다. registry는 기존 coord 조회 지점에서 얻은 같은 lease Arc를 순수 저장 연산에 전달한다. 별도 coord cache/map, 새 default Store, 재생성한 atomic/lease, 저장 callback은 만들지 않는다. 이 projection을 위해 기존 잠금에 새 lock을 중첩하거나 identity 관측/commit을 임계 구역 밖으로 빼야 한다면 C2 착수 전에 DESIGN_DELTA로 보고한다. C2 구현은 C1 리뷰 뒤이며 이 문단만으로 identity/잠금 보존이 검증됐다고 주장하지 않는다. EOF에서 미완성 UTF-8/terminal ACK custody가 그대로 인계되는 시험과 새 Store 주입 RED를 요구한다.
 
 ### 층 래칫
 
@@ -134,7 +134,7 @@ P0-C의 최소 닫힘은 TmuxWatcherHandle, ReservationRecord, TmuxWatcherRegist
 
 새 `services::engine_runtime`은 application, legacy_state는 adapter로 **실제 타입 의존에 맞게** 등록한다. 단순 역의존 숨김을 위한 application→discord 재분류나 baseline 상향은 하지 않는다. 새 app struct의 필드/제네릭/alias/impl bound 전체가 아래 층에서 닫혀야 한다. 이전한 값 선언은 옛 Discord 경로로 재수출하되 canonical target이 새 아래 모듈이어야 한다. 아래 모듈의 `use super::*`가 Discord root를 끌어오는 이동은 불허한다.
 
-각 구현 조각은 module_layers의 source/target/kind/count record를 base와 비교해 **새 역의존 record=0, 기존 record count 증가=0**을 확인한다. 총량이 줄었다고 새 backedge를 상쇄하지 않는다. logical owner/prod+test view/미해석 edge도 따로 대조한다. baseline은 공식 module_layer_baseline 생성기로 감소분만 동기화한다. 이 문서 레그는 mapping/baseline을 쓰지 않는다. 새 모듈 경계 때문에 기존 되먹임의 source 이름만 바뀌어도 기존과 같은 결함으로 자동 면제하지 않는다.
+각 구현 조각은 `scripts/audit_maintainability/checks/module_layer_gate.py`로 같은 실행의 main(base)/candidate source·target·kind·count를 비교해 새 역의존 record=0, 기존 count 증가=0을 확인한다. 감소분으로 새 backedge를 상쇄하지 않으며 logical owner/prod+test/미해석 edge도 구분한다. #8131 B 이후 committed module_layers baseline과 layer_moves는 삭제됐고 되살리지 않는다. 층 이동 승인은 `scripts/audit_maintainability/layer_approvals/README.md`의 PR별 새 항목만 사용한다. C1에서 승인 항목이 필요하면 만들지 않고 FILES로 멈춘다.
 
 ### 보유 방식 두 안
 
@@ -301,24 +301,25 @@ splitter는 기존 fence/semantic boundary 순서를 유지한 채 limit/units �
 
 새 파일은 모두 제안 경로다. prod 수에는 생성/수정하는 소유 파일을 포함하고 시험 파일은 별도다. 예상 상한은 구현 착수 시 부모 diff로 다시 잰다. **+1200 또는 prod 30 초과가 보이면 commit 전 더 나눈다.** giant 파일의 총 줄 수 때문에 금지하지 않는다. 새로운 giant/visibility/unused 경고는 별도 래칫에 맞춘다.
 
-아래 P0 5개/P1 2개/P2 9개, **총 16개, 순증 +1,610~2,890** 추정이다. 구현 중 타입 폐쇄나 소스 스캔 시험 때문에 더 늘어날 수 있다. 원래 2~3/1~2/2~3 예상보다 많아진 이유는 두 타입 군의 혼합과 trait caller/HTTP 전달 caller의 합집합이다. 엔진 물리 이동·P3·CUT 비용은 이 합계에 포함하지 않는다.
+아래 P0 6개/P1 2개/P2 9개, **총 17개, 순증 +1,720~3,040** 추정이다. C1/C2 분할로 구형 5/2/9·16조각 추정은 대체됐다. private impl·test-only 지원 타입 폐쇄가 예상 파일/크기를 넘으면 다시 분할한다. 엔진 물리 이동·P3·CUT는 합계 밖이다.
 
-표에서 ER은 제안 `src/services/engine_runtime.rs` 본체, L은 `scripts/audit_maintainability/layers.toml`이다. 나머지는 저장소 파일 경로다. '값 추출'은 기존 파일에서 선언만 새 파일로 소유 이전하고 상위 impl은 그대로 두는 뜻이다. 생성 baseline 변경은 표의 prod 수와 별도로 공식 스크립트만 사용한다.
+표에서 ER은 `src/services/engine_runtime/mod.rs`, L은 `scripts/audit_maintainability/layers.toml`이다. '값 추출'은 값과 private 순수 impl을 아래에 닫고 상위 IO wrapper는 목적별 연산으로 연결하는 뜻이다. 층 승인은 PR별 파일이며 삭제된 committed baseline을 생성하지 않는다.
 
 | 조각 | 소유 파일/군(§5.1의 정확한 caller 배분 포함) | prod 예상 / 순증 | 선행 | 논리 이동 #[path] | 중간 상태의 안전성과 대상 시험 |
 |---|---|---|---|---|---|
 | P0-A runtime 기본 | services/mod.rs, ER, src/services/engine_runtime/legacy_state.rs, src/services/discord/mod.rs, src/services/discord/runtime_bootstrap/shared_data.rs, src/services/discord/shared_state.rs, L | 8 / +150~250 | P1-A 권장(독립 생성 가능) | 없음; 새 runtime+값 추출 | 단일 allocation/Deref, 두 constructor 동시 전환. 새 identity/Arc-ptr·pool None/Some·provider/cache 보존 시험 |
 | P0-B core/mailbox | ER, src/services/engine_runtime/legacy_state.rs, src/services/engine_runtime/session.rs, src/services/discord/mod.rs, src/services/discord/session_runtime.rs, src/services/discord/session_runtime/worktree.rs, src/services/discord/runtime_bootstrap/shared_data.rs, L | 9 / +100~180 | P0-A | 없음; 값 추출 | CoreState/DiscordSession/WorktreeInfo 값만 이전, mutex 동일. session restore/clear, mailbox registry 초기화, pending uploads 보존 |
-| P0-C watcher 저장 폐쇄 | ER, src/services/engine_runtime/legacy_state.rs, src/services/engine_runtime/relay_state.rs, src/services/discord/tmux_watcher_registry.rs, src/services/discord/relay_coord.rs, src/services/discord/relay_health/frontier.rs, src/services/discord/delivery_lease_cell.rs, src/services/discord/delivery_lease_key.rs, src/services/discord/mod.rs, src/services/discord/runtime_bootstrap/shared_data.rs 및 registry의 fences/owner_observation/session_binding 타입 참조, L | ≤15 / +120~220 | P0-B | 없음; 전체 모듈 #[path] 금지 | 값/identity/fence 상태만 이전, claim/remove/CAS 구현 그대로. registry identity/delivery fence·relay offset·lease 경합/rotation 시험 |
+| P0-C1 lease/registry 순수 저장 | ER, src/services/engine_runtime/legacy_state.rs, src/services/engine_runtime/relay_state.rs와 그 lease/registry 하위 모듈, src/services/discord/tmux_watcher_registry.rs 및 fences/owner_observation/session_binding, src/services/discord/relay_health/frontier.rs, src/services/discord/delivery_lease_cell.rs와 test-only exact_lease 지원, src/services/discord/delivery_lease_key.rs, src/services/discord/mod.rs, src/services/discord/runtime_bootstrap/shared_data.rs, L | ≤15 / +160~240 | P0-B | 없음; 전체 모듈 #[path] 금지 | 단일 순수 registry 객체와 같은 mutex/lease/fence. private 공개 없이 순수 impl을 이전하고 claim/remove/CAS 임계 구역 결합 유지. registry identity·delivery fence·lease 경합/rotation 시험 |
+| P0-C2 relay/mixed wrapper | ER, src/services/engine_runtime/legacy_state.rs, src/services/engine_runtime/relay_state.rs 및 순수 relay 하위 모듈, src/services/discord/relay_coord.rs, src/services/discord/relay_health/frontier.rs, src/services/discord/tmux_watcher_registry.rs의 coord 연결, src/services/discord/mod.rs, src/services/discord/runtime_bootstrap/shared_data.rs, L | ≤10 / +70~130 | P0-C1 리뷰 | 없음 | 순수 slot/offset 상태와 Discord custody wrapper의 경계 완성. 같은 Store/source/decoder/collector/lease/atomic Arc 및 기존 생성·잠금 순서. EOF terminal ACK 인계·새 Store 주입 RED |
 | P0-D 혼합 cluster 분리 | ER, src/services/engine_runtime/execution_state.rs, src/services/engine_runtime/legacy_state.rs, src/services/discord/shared_state.rs, src/services/discord/mod.rs, src/services/discord/runtime_bootstrap/shared_data.rs, src/services/discord/queue_io/backstop.rs, L | ≤9 / +80~160 | P0-A | 없음; 값 추출 | override UI/restart CLI는 wrapper에, engine maps 동일 Arc. model picker isolation·reset pending·restart counter/shutdown slot·backstop wake 불변 시험 |
-| P0-E bus와 engine borrow | src/services/engine_runtime/events.rs, ER, src/services/discord/inflight.rs(값 enum만), src/services/discord/turn_completion_events.rs, src/services/discord/mod.rs, src/services/discord/runtime_bootstrap/shared_data.rs, src/services/discord/session_transition.rs(map lookup만), src/services/discord/relay_health/frontier.rs(순수 관측만), L | ≤12 / +50~120 | P0-B/C/D | 없음 | sender/capacity·동일 signal·다음 wake 순서 유지. session_transition 4개 기존 시험, completion phase/lag·mailbox snapshot/cache 시험; wake 구현은 이동하지 않음 |
+| P0-E bus와 engine borrow | src/services/engine_runtime/events.rs, ER, src/services/discord/inflight.rs(값 enum만), src/services/discord/turn_completion_events.rs, src/services/discord/mod.rs, src/services/discord/runtime_bootstrap/shared_data.rs, src/services/discord/session_transition.rs(map lookup만), src/services/discord/relay_health/frontier.rs(순수 관측만), L | ≤12 / +50~120 | P0-B/C1/C2/D | 없음 | sender/capacity·동일 signal·다음 wake 순서 유지. session_transition 4개 기존 시험, completion phase/lag·mailbox snapshot/cache 시험; wake 구현은 이동하지 않음 |
 | P1-A 중립 vocabulary | domain/mod.rs, domain/conversation.rs, src/services/discord/id_bridge.rs, src/services/discord/mod.rs, src/services/discord/outbound/message.rs | 5 / +100~160 | 없음 | 없음 | 실제 boundary 변환 caller 하나를 같은 조각에 연결. ID roundtrip, zero send rejection, arbitrary raw message, snowflake wire unchanged |
 | P1-B port 경계 적용 | domain/outbound/ids.rs(시험만), src/services/discord/id_bridge.rs, src/services/discord/outbound/message.rs, src/services/discord/outbound/result.rs, src/services/discord/outbound/serenity_reference.rs | ≤5 / +60~100 | P1-A | 없음 | 기존 SDK 타입/import 0변경. requested/returned receipt·serde string/integer fixture·u64 binding guard 시험 |
 | P2-A object-safe bridge | domain/outbound/port.rs, domain/outbound.rs, domain/outbound/messenger_types.rs, src/services/discord/outbound/mod.rs, src/services/discord/outbound/transport.rs, src/services/discord/discord_io.rs, src/services/discord/gateway.rs, src/services/discord/gateway/turn_context.rs, L | ≤11 / +200~350 | P1-B, P0-A | 없음 | 새 trait 실제 caller 사용, 옛 trait compatibility wrapper 유지. dyn compile contract·default fallback·error class·同task census 시험 |
 | P2-B 5 구현 전환 | §1.2의 5 prod impl, src/services/discord/formatting/replace_long_message.rs, src/services/discord/gateway/outbound_messages.rs, src/services/discord/outbound/delivery.rs, src/services/discord/discord_io.rs, services/dispatches/discord_delivery/transport.rs, services/issue_announcements.rs, src/services/discord/outbound/mod.rs | ≤12 / +150~250 | P2-A | 없음 | legacy wrapper와 새 객체를 같은 helper에 위임. reference+nonce 4조합·default 능력 차이·DM/typed edit·dedup reservation 시험 |
 | P2-C bridge 송신 caller 1 | §5.1 C-set | ≤27 / +100~200 | P2-B | 없음 | generic send/replace bound만 축소; retry/dispatch는 TurnContext 유지. turn_output_controller/fresh_send·deferred authority·bridge retry/receipt 시험 |
 | P2-D bridge 송신 caller 2 | §5.1 D-set | ≤21 / +80~150 | P2-C | 없음 | terminal/stream caller 연결, nonce/chunk key·completion latch 유지. terminal_delivery·before_start_stop·stream_tick·foreign_terminal_handoff 시험 |
-| P2-E watcher/relay | §5.1 E-set 및 HTTP C1 E군 | ≤20 / +100~180 | P2-C, P0-C | 없음 | 소유 Arc와 borrow 수명 구분, detached spawn 추가 0. relay/sink cfg(test) shim 양쪽·long chunks rollback·watcher fence 시험 |
+| P2-E watcher/relay | §5.1 E-set 및 HTTP C1 E군 | ≤20 / +100~180 | P2-C, P0-C2 | 없음 | 소유 Arc와 borrow 수명 구분, detached spawn 추가 0. relay/sink cfg(test) shim 양쪽·long chunks rollback·watcher fence 시험 |
 | P2-F recovery C1 | §5.1 F-set 및 HTTP C1 F군 | ≤22 / +100~180 | P2-B, P0-E | 없음 | state/row removal·exact permit 동작 그대로. recovery outcome/probe/held-debt·idempotent terminal·restore old-wire 시험; #7651와 파일 소유 선결 |
 | P2-G bootstrap/잔여 C1 | §5.1 G-set 및 HTTP C1 G군 | ≤21 / +80~150 | P2-E/F | 없음 | Http 생성/route lookup은 adapter에, 기존 None/failure 유지. bootstrap draft/held retry·abandon drain·restart report 시험. directory 필요 함수는 완료에서 제외 |
 | P2-H caps/split | domain/message_split.rs, domain/message_split/literal_code_block.rs, src/services/discord/formatting.rs, src/services/discord/formatting/delivery.rs, src/services/discord/outbound/decision.rs, src/services/discord/outbound/delivery.rs, src/services/discord/single_message_panel.rs, src/services/discord/tui_task_card.rs 및 §4.2의 engine caller만 | ≤18 / +60~100 | P2-B | 없음 | 원래 chunk 결과/nonce 동일, 기존 wrapper 기본값 유지. UTF16/fence/1900·1990·2000 boundary·emoji·rollback 시험 |
@@ -533,18 +534,19 @@ I-set은 A~G 전환 뒤 old 이름의 잔여 재수출/상위 import만 정리�
 - `i7583-s03`: `08e45a6b63f384d4f5a65b153e355c6c34d273f9`, 전체 72파일.
 - `i8125-t1`: `ca904f560d008628d14bed9f6a46e7a807fbf1f0`, 전체 72파일.
 
-아래는 조각의 명시 소유 집합(조건부 HTTP P후보 포함)과 각 레인 diff의 **정확한 교집합**이다. generated module_layers는 이동 rule을 쓰는 조각에만 포함한다. P후보가 directory 등의 이유로 빠지면 교집합을 줄일 수 있다. 동일 파일을 서로 다른 순차 조각이 수정하는 것은 허용하지만 같은 시점에 두 레인이 수정하지 않는다.
+아래는 조각 소유 집합과 다른 레인 diff 교집합의 설계 시점 기록이다. C1/C2는 현재 #7651 C2c의 tui_o/writer/*·runtime_bootstrap/o_writer_host* 및 #8125 headless_turn.rs를 수정하지 않는다. SharedData/constructor는 승인된 소유 연결·재수출·shadow 제거만 바꾼다. 실제 미착지 교집합이 생기면 FILES로 멈춘다. PR별 층 승인 파일은 서로 별도이며, 공통 layers.toml 변경은 교집합으로 본다.
 
 | 조각 | #7651 b2r | #7583 s03 | #8125 t1 | 우선/소유 제안 |
 |---|---|---|---|---|
-| P0-A | `scripts/audit_maintainability/baselines/generated/module_layers.json`<br>`src/services/discord/mod.rs`<br>`src/services/discord/runtime_bootstrap/shared_data.rs`<br>`src/services/discord/shared_state.rs` | `scripts/audit_maintainability/baselines/generated/module_layers.json`<br>`scripts/audit_maintainability/layers.toml` | 없음 | SharedData/생성자 짧은 수직 슬롯 선합의; 비겹침은 즉시 시작 |
-| P0-B | `scripts/audit_maintainability/baselines/generated/module_layers.json`<br>`src/services/discord/mod.rs`<br>`src/services/discord/runtime_bootstrap/shared_data.rs` | `scripts/audit_maintainability/baselines/generated/module_layers.json`<br>`scripts/audit_maintainability/layers.toml` | 없음 | SharedData/생성자 짧은 수직 슬롯 선합의; 비겹침은 즉시 시작 |
-| P0-C | `scripts/audit_maintainability/baselines/generated/module_layers.json`<br>`src/services/discord/mod.rs`<br>`src/services/discord/runtime_bootstrap/shared_data.rs` | `scripts/audit_maintainability/baselines/generated/module_layers.json`<br>`scripts/audit_maintainability/layers.toml` | 없음 | SharedData/생성자 짧은 수직 슬롯 선합의; 비겹침은 즉시 시작 |
-| P0-D | `scripts/audit_maintainability/baselines/generated/module_layers.json`<br>`src/services/discord/mod.rs`<br>`src/services/discord/runtime_bootstrap/shared_data.rs`<br>`src/services/discord/shared_state.rs` | `scripts/audit_maintainability/baselines/generated/module_layers.json`<br>`scripts/audit_maintainability/layers.toml` | 없음 | SharedData/생성자 짧은 수직 슬롯 선합의; 비겹침은 즉시 시작 |
-| P0-E | `scripts/audit_maintainability/baselines/generated/module_layers.json`<br>`src/services/discord/mod.rs`<br>`src/services/discord/runtime_bootstrap/shared_data.rs` | `scripts/audit_maintainability/baselines/generated/module_layers.json`<br>`scripts/audit_maintainability/layers.toml` | 없음 | SharedData/생성자 짧은 수직 슬롯 선합의; 비겹침은 즉시 시작 |
+| P0-A | `src/services/discord/mod.rs`<br>`src/services/discord/runtime_bootstrap/shared_data.rs`<br>`src/services/discord/shared_state.rs` | `scripts/audit_maintainability/layers.toml` | 없음 | SharedData/생성자 짧은 수직 슬롯 선합의; 비겹침은 즉시 시작 |
+| P0-B | `src/services/discord/mod.rs`<br>`src/services/discord/runtime_bootstrap/shared_data.rs` | `scripts/audit_maintainability/layers.toml` | 없음 | SharedData/생성자 짧은 수직 슬롯 선합의; 비겹침은 즉시 시작 |
+| P0-C1 | `src/services/discord/mod.rs`<br>`src/services/discord/runtime_bootstrap/shared_data.rs` | `scripts/audit_maintainability/layers.toml` | 없음 | 순수 registry 연결·재수출·constructor만; C2c writer/host와 겹치면 FILES |
+| P0-C2 | `src/services/discord/mod.rs`<br>`src/services/discord/runtime_bootstrap/shared_data.rs` | `scripts/audit_maintainability/layers.toml` | 없음 | C1 리뷰 뒤 coord wrapper 연결 슬롯; custody/parser/render/inflight 전체 이전 없음 |
+| P0-D | `src/services/discord/mod.rs`<br>`src/services/discord/runtime_bootstrap/shared_data.rs`<br>`src/services/discord/shared_state.rs` | `scripts/audit_maintainability/layers.toml` | 없음 | SharedData/생성자 짧은 수직 슬롯 선합의; 비겹침은 즉시 시작 |
+| P0-E | `src/services/discord/mod.rs`<br>`src/services/discord/runtime_bootstrap/shared_data.rs` | `scripts/audit_maintainability/layers.toml` | 없음 | SharedData/생성자 짧은 수직 슬롯 선합의; 비겹침은 즉시 시작 |
 | P1-A | `src/services/discord/mod.rs` | 없음 | 없음 | SharedData/생성자 짧은 수직 슬롯 선합의; 비겹침은 즉시 시작 |
 | P1-B | 없음 | 없음 | 없음 | 즉시 독립 착수 가능 |
-| P2-A | `scripts/audit_maintainability/baselines/generated/module_layers.json` | `scripts/audit_maintainability/baselines/generated/module_layers.json`<br>`scripts/audit_maintainability/layers.toml` | 없음 | s03 rule/bridge retry 선행 후 적용 |
+| P2-A | PR별 별도 층 승인 항목 | `scripts/audit_maintainability/layers.toml` | 없음 | s03 rule/bridge retry 선행 후 적용 |
 | P2-B | 없음 | 없음 | 없음 | 즉시 독립 착수 가능 |
 | P2-C | 없음 | `src/services/discord/turn_bridge/retry_state.rs` | 없음 | s03 rule/bridge retry 선행 후 적용 |
 | P2-D | `src/services/discord/turn_bridge/stream_tick/o_adoption_tests.rs`<br>`src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests.rs` | 없음 | 없음 | b2가 기존 행위 변경을 먼저 소유; 송신 signature 슬롯 별도 합의 |
@@ -554,7 +556,7 @@ I-set은 A~G 전환 뒤 old 이름의 잔여 재수출/상위 import만 정리�
 | P2-H | `src/services/discord/standby_relay.rs` | 없음 | 없음 | b2가 기존 행위 변경을 먼저 소유; 송신 signature 슬롯 별도 합의 |
 | P2-I | 없음 | 없음 | 없음 | 즉시 독립 착수 가능 |
 
-겹치는 조각 **12/16개**(세 레인 중 하나 이상과 교집합). #8125 t1과 설계 문서 자체/모든 명시 소유 파일의 교집합은 0이다. 이 레그는 그 어떤 소스도 수정하지 않는다. #7651 전체 완료는 전제하지 않고, 실제 교집합만 코디네이터가 owner/선후를 정한다.
+원설계 교집합은 12/16이었고 C를 C1/C2로 나누면 그 표의 중복 조각은 13/17이다. 이는 새 head의 전수 재측정값이 아니다. #7651 전체 완료를 기다리지 않고 실제 공유 파일만 코디네이터가 선후/소유를 정한다.
 
 명시 manifest의 cap 대상 파일 수(시험 제외 규칙 적용, 생성 baseline 제외)는 아래와 같다. optional P후보도 포함하며, 추가 지원 시험/fixture가 prod로 계수되면 다시 잰다. 현재 HEAD의 실제 diff를 측정한 결과가 아니라 미래 소유 집합의 견적이다.
 
@@ -562,7 +564,8 @@ I-set은 A~G 전환 뒤 old 이름의 잔여 재수출/상위 import만 정리�
 |---|---:|
 | P0-A | 7 |
 | P0-B | 8 |
-| P0-C | 14 |
+| P0-C1 | ≤15 |
+| P0-C2 | ≤10 |
 | P0-D | 8 |
 | P0-E | 9 |
 | P1-A | 5 |
@@ -585,13 +588,13 @@ main에서 이미 충족된 부분은 다시 만들지 않는다. **d40c06eb47**
 
 각 구현 조각은 다음을 충족해야 한다. 대상 test filter는 선택 수=통과 수, 실패/skip=0인지 출력에서 확인하며 0 tests를 성공으로 쓰지 않는다. SDK compatibility에는 lib/prod와 lib test의 cfg 쌍 및 Windows 대상을 포함한다. 소스 이동/alias가 있는 조각은 source_scan_readers의 관련 module을 같은 cargo 환경에서 실행한다. clippy workspace/all-targets/all-features의 자기 파일 warning 0, module_layers 새 역의존/기존 count 증가 0, cap≤30/+1500을 확인한다. 새 allow/baseline 상향은 하지 않는다.
 
-대표 대상 시험 필터는 `services::discord::session_transition::tests::`(기존 4개), `services::discord::gateway::answer_flush_gate_tests::`(기존 2개), `services::discord::outbound::`(전송/조합/rollback), `services::discord::turn_bridge::before_start_stop_tests::`, `services::discord::recovery_engine::`, `services::discord::session_relay_sink::`, `domain::message_split::`다. 실제 이전으로 logical owner가 바뀐 시험은 새 모듈 ID를 정본 inventory에서 선택하고, 기존 0선택 필터를 재사용하지 않는다. P0-C의 registry/lease 시험은 cfg(test) shim 쌍을 유지한 시험 모듈을 같이 소유하며 source-scan이 요구하는 생성 inventory는 공식 스크립트로만 동기화한다. 이 문서에서는 해당 시험을 실행하지 않았다.
+대표 대상 시험 필터는 `services::discord::session_transition::tests::`(기존 4개), `services::discord::gateway::answer_flush_gate_tests::`(기존 2개), `services::discord::outbound::`(전송/조합/rollback), `services::discord::turn_bridge::before_start_stop_tests::`, `services::discord::recovery_engine::`, `services::discord::session_relay_sink::`, `domain::message_split::`다. 실제 이전으로 logical owner가 바뀐 시험은 새 모듈 ID를 정본 inventory에서 선택하고, 기존 0선택 필터를 재사용하지 않는다. P0-C1/C2의 registry/lease/custody 시험은 cfg(test) shim 쌍을 유지한 시험 모듈을 같이 소유하며 source-scan이 요구하는 생성 inventory는 공식 스크립트로만 동기화한다. 이 문서에서는 해당 시험을 실행하지 않았다.
 
 행동 변경이 없는 이전이라도 ID/옵션/closure wiring을 실제로 틀리게 만드는 뮤턴트는 유효하다. 같은 Arc 대신 새 registry 생성, nonce 옵션 누락, reference+nonce→nonce 단독 dispatch, UTF16→bytes, rollback 실패→성공, partial continuation→Edited, deferred fallback을 권한 재검증 전에 실행하는 변이를 각각 해당 대상 시험에서 RED로 확인하고 원복 SHA256를 남긴다. 재현 가능한 기존 결함을 수정하게 되면 별도 RED→GREEN→원인 제거 뮤턴트 RED가 필요하며 문서만으로 수정됐다고 하지 않는다.
 
 기존 결함을 넓히지 않는 범위: nonce 미지원 client default(`src/domain/outbound/port.rs:106`), fake delete default Ok(`src/services/discord/gateway.rs:155`), bounded flush timeout, transitional SDK ID map, provider당 bot 배치 관계는 이번에 강한 보장으로 바꾸지 않는다. 신규 Slack delivery의 exactly-once/ledger 보장은 아직 설계하지 않았으며 지금 nonce를 일반 멱등 보장으로 이름만 바꾸지 않는다.
 
-착수 전 코디네이터 결정이 필요한 것은 (1) 혼합 실행 객체가 SharedData에 남는 P0 종료 경계, (2) TurnContext 실행 확장을 보존하는 P2 DoD 해석, (3) P0-C private impl 폐쇄의 분할 여부, (4) §7 교집합의 파일 소유/순서다. 결정 전에도 P1 vocabulary와 겹치지 않는 읽기/설계 검토는 독립 진행 가능하다. 이 문서는 이 결정들이 이미 승인됐다고 기록하지 않는다.
+코디네이터는 2026-11-17 혼합 실행 객체 잔류와 P0-C1/C2 분할, cancel-handoff custody의 Discord wrapper 잔류를 승인했다. C1에서 private 폐쇄나 파일/층 승인이 추가로 필요하면 DESIGN_DELTA/FILES를 따로 보고한다. C2는 C1 리뷰 뒤 진행하며, P2의 실행 확장 보존과 나머지 공유 파일 슬롯은 각 조각의 입력을 따른다.
 
 ## 9. 리뷰 집중 항목
 
