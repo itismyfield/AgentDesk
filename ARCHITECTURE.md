@@ -588,6 +588,8 @@ src/
 │   │   ├── mod.rs
 │   │   └── storage_jobs.rs
 │   ├── outbox_actionable_delivery/
+│   │   ├── routine_incident.rs
+│   │   ├── routine_incident_pg_tests.rs
 │   │   ├── routing_notice.rs
 │   │   └── session_notice.rs
 │   ├── outbox_worker/
@@ -700,6 +702,7 @@ src/
 │   │   │   └── verdict_route.rs
 │   │   ├── routines/
 │   │   │   ├── audit.rs
+│   │   │   ├── execution_mode_http_tests.rs
 │   │   │   ├── handlers.rs
 │   │   │   ├── helpers.rs
 │   │   │   └── responses.rs
@@ -1957,7 +1960,8 @@ src/
 │   │   │   │   ├── image_delivery.rs
 │   │   │   │   ├── image_delivery_tests.rs
 │   │   │   │   ├── production_nonce_tests.rs
-│   │   │   │   └── resolved.rs
+│   │   │   │   ├── resolved.rs
+│   │   │   │   └── routine_incident_nonce.rs
 │   │   │   ├── o_writer_repost_io_tests/
 │   │   │   │   └── owner_tests.rs
 │   │   │   ├── turn_output_controller/
@@ -2349,6 +2353,9 @@ src/
 │   │   │   │   │   │   └── routine_policy_tests.rs
 │   │   │   │   │   ├── entrypoints.rs
 │   │   │   │   │   ├── foreign_row_refusal_tests.rs
+│   │   │   │   │   ├── isolated_context.rs
+│   │   │   │   │   ├── isolated_context_tests.rs
+│   │   │   │   │   ├── isolated_context_thread_tests.rs
 │   │   │   │   │   ├── process_mailbox.rs
 │   │   │   │   │   ├── recovery_context_take_order_tests.rs
 │   │   │   │   │   ├── replay_start.rs
@@ -3737,6 +3744,7 @@ src/
 │   │   ├── identity_tests.rs
 │   │   ├── plain.rs
 │   │   ├── plain_tests.rs
+│   │   ├── routine_incident.rs
 │   │   └── session_notice.rs
 │   ├── observability/
 │   │   ├── events/
@@ -3906,7 +3914,9 @@ src/
 │   │   │   ├── owner_launch_tests.rs
 │   │   │   ├── owner_review_tests.rs
 │   │   │   ├── reliability.rs
-│   │   │   └── start_deferral.rs
+│   │   │   ├── run_policy.rs
+│   │   │   ├── start_deferral.rs
+│   │   │   └── surface.rs
 │   │   ├── discord_log/
 │   │   │   ├── census.rs
 │   │   │   ├── failure_alert.rs
@@ -3918,10 +3928,15 @@ src/
 │   │   ├── run_diagnostics/
 │   │   │   └── formatting.rs
 │   │   ├── store/
-│   │   │   └── agent_start.rs
+│   │   │   ├── agent_start.rs
+│   │   │   ├── execution_modes.rs
+│   │   │   └── failure_escalation.rs
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
+│   │   ├── execution_mode.rs
+│   │   ├── execution_mode_pg_tests.rs
+│   │   ├── failure_escalation_pg_tests.rs
 │   │   ├── fresh_session_reaper.rs
 │   │   ├── legacy_body_census.rs
 │   │   ├── legacy_body_census_tests.rs

@@ -114,7 +114,7 @@ impl RoutineAgentExecutor {
         match attempt {
             Ok(Some((result, attempts))) => {
                 let result = close_routing_result(result, &attempts);
-                self.teardown_fresh_agent_session(store, routine_id, Some(&result), reason)
+                self.teardown_fresh_agent_session(store, routine_id, run_id, Some(&result), reason)
                     .await;
             }
             Ok(None) => {}
