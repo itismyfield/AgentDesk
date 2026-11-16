@@ -733,15 +733,22 @@ async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wa
     if row || rest(provider, id) {
         return Wait::Event;
     }
-    if let Some(screen) = start_wait::screen(shared, channel, context).await {
+    let screen = match start_wait::observe(shared, channel, context).await {
+        start_wait::Observed::Legacy => None,
+        // The driver preserves a known host refusal as a typed, confirmed non-send.
+        start_wait::Observed::Refused => return Wait::Go,
+        start_wait::Observed::Native(screen) => Some(screen),
+    };
+    if let Some(screen) = screen {
         if screen == Screen::Ready {
             return Wait::Go;
         }
         let (shared, context) = (shared.clone(), context.clone());
         return Wait::Watch(Box::new(move || {
             tokio::runtime::Handle::current().block_on(async {
-                start_wait::screen(&shared, channel, &context)
+                start_wait::observe(&shared, channel, &context)
                     .await
+                    .native()
                     .unwrap_or(Screen::Ready)
             })
         }));

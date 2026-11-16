@@ -3,8 +3,23 @@ use super::{
     ChannelId, ProviderKind, Screen, Shared, TurnHost, Value, claude_handoff, start_target,
 };
 
+pub(super) enum Observed {
+    Legacy,
+    Refused,
+    Native(Screen),
+}
+
+impl Observed {
+    pub(super) fn native(self) -> Option<Screen> {
+        match self {
+            Self::Native(screen) => Some(screen),
+            Self::Legacy | Self::Refused => None,
+        }
+    }
+}
+
 /// A Herdr start reads its current exact execution; a watch never reuses an old host proof.
-pub(super) async fn screen(shared: &Shared, channel: ChannelId, context: &Value) -> Option<Screen> {
+pub(super) async fn observe(shared: &Shared, channel: ChannelId, context: &Value) -> Observed {
     use crate::services::claude_tui::host_input::busy::BusyState;
     let provider = &shared.provider;
     let key =
@@ -18,17 +33,20 @@ pub(super) async fn screen(shared: &Shared, channel: ChannelId, context: &Value)
         )
         .await;
         return match host {
-            TurnHost::Tmux | TurnHost::Return(_) => None,
-            _ => Some(Screen::Unknown),
+            TurnHost::Tmux | TurnHost::Return(_) => Observed::Legacy,
+            _ => Observed::Refused,
         };
     };
     if crate::config::session_hosts::local_node().as_deref()
         != Some(endpoint.execution_node.as_str())
     {
-        return Some(Screen::Unknown);
+        return Observed::Refused;
+    }
+    if !matches!(provider, ProviderKind::Claude | ProviderKind::Codex) {
+        return Observed::Refused;
     }
     let (Some(pool), Some(key)) = (shared.pg_pool.as_ref(), key) else {
-        return Some(Screen::Unknown);
+        return Observed::Native(Screen::Unknown);
     };
     use crate::db::dispatched_sessions::hosted_execution::{
         HostedLookup, HostedLookupKey, HostedRecord, HostedState, load_hosted_execution_pg,
@@ -36,7 +54,7 @@ pub(super) async fn screen(shared: &Shared, channel: ChannelId, context: &Value)
     let row = match load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(&key)).await {
         HostedLookup::Found(row) => Some(row),
         HostedLookup::Missing => None,
-        _ => return Some(Screen::Unknown),
+        _ => return Observed::Native(Screen::Unknown),
     };
     // Observation must not wait on execution admission or output-writer readiness.
     let plan = Box::new(crate::services::turn_host::HerdrTurnPlan {
@@ -45,7 +63,7 @@ pub(super) async fn screen(shared: &Shared, channel: ChannelId, context: &Value)
     });
     if *provider != ProviderKind::Claude {
         use crate::services::discord::turn_presence::activity::{Activity, activity_now};
-        return Some(
+        return Observed::Native(
             match activity_now(shared, provider, channel).await.activity {
                 Activity::Idle => Screen::Ready,
                 Activity::Busy => Screen::Blocked,
@@ -58,7 +76,7 @@ pub(super) async fn screen(shared: &Shared, channel: ChannelId, context: &Value)
     }) {
         match start_target(shared, channel, context).await {
             Ok(Some(target)) => Some(target),
-            _ => return Some(Screen::Unknown),
+            _ => return Observed::Native(Screen::Unknown),
         }
     } else {
         None
@@ -68,7 +86,7 @@ pub(super) async fn screen(shared: &Shared, channel: ChannelId, context: &Value)
     let host = TurnHost::Herdr(plan);
     let observation =
         claude_handoff::observe_busy(channel.get(), logical, &host, &shared.token_hash);
-    Some(match observation.state() {
+    Observed::Native(match observation.state() {
         BusyState::Idle => Screen::Ready,
         BusyState::Busy => Screen::Blocked,
         BusyState::Held | BusyState::Legacy => Screen::Unknown,
@@ -82,6 +100,6 @@ impl super::OwnerTurn {
         channel: ChannelId,
         context: &Value,
     ) -> Option<Screen> {
-        screen(shared, channel, context).await
+        observe(shared, channel, context).await.native()
     }
 }
