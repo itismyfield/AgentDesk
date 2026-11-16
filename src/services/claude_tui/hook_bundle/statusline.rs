@@ -74,6 +74,22 @@ pub(super) fn settings(root: &Path) -> Value {
     })
 }
 
+pub(super) fn hook_settings(
+    config: &super::HookBundleConfig,
+    hooks: serde_json::Map<String, Value>,
+) -> Value {
+    let mut value = json!({"hooks": hooks, "statusLine": settings(&record_dir())});
+    if config.provider == "claude"
+        && crate::config::test_instance::environment::claude_startup_prompt_accepted(
+            &config.endpoint,
+        )
+    {
+        // Only the prepared acknowledgement enters flag settings; user hooks and MCP stay excluded.
+        value["skipDangerousModePermissionPrompt"] = json!(true);
+    }
+    value
+}
+
 #[cfg(all(test, unix))]
 #[path = "statusline_tests.rs"]
 mod tests;

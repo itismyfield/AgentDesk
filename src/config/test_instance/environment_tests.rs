@@ -489,6 +489,13 @@ fn claude_login_contract_and_operating_golden() {
         use crate::services::claude_tui::hook_bundle::{
             HookBundleConfig, render_claude_hook_settings,
         };
+        if enabled {
+            crate::utils::secret_file::write_secret_file(
+                &root.join("home/.adk/profiles/claude/test-claude/settings.json"),
+                br#"{"skipDangerousModePermissionPrompt":true,"hooks":{"forbidden-user-hook":[]}}"#,
+            )
+            .unwrap();
+        }
         let mut config = HookBundleConfig {
             endpoint: if enabled {
                 "http://127.0.0.1:18791"
@@ -501,6 +508,48 @@ fn claude_login_contract_and_operating_golden() {
             agentdesk_exe: "/fixture/agentdesk".into(),
         };
         let settings = render_claude_hook_settings(&config);
+        if enabled {
+            assert_eq!(settings["skipDangerousModePermissionPrompt"], true);
+            assert!(!settings.to_string().contains("forbidden-user-hook"));
+            let path = root.join("home/.adk/profiles/claude/test-claude/settings.json");
+            let original = std::fs::read(&path).unwrap();
+            for value in [
+                serde_json::json!(false),
+                serde_json::json!("true"),
+                serde_json::Value::Null,
+            ] {
+                crate::utils::secret_file::write_secret_file(
+                    &path,
+                    serde_json::json!({"skipDangerousModePermissionPrompt": value}).to_string(),
+                )
+                .unwrap();
+                assert!(
+                    render_claude_hook_settings(&config)
+                        .get("skipDangerousModePermissionPrompt")
+                        .is_none()
+                );
+            }
+            std::fs::remove_file(&path).unwrap();
+            let outside = home.join("outside-consent.json");
+            crate::utils::secret_file::write_secret_file(&outside, &original).unwrap();
+            std::os::unix::fs::symlink(&outside, &path).unwrap();
+            assert!(
+                render_claude_hook_settings(&config)
+                    .get("skipDangerousModePermissionPrompt")
+                    .is_none()
+            );
+            std::fs::remove_file(&path).unwrap();
+            std::fs::hard_link(&outside, &path).unwrap();
+            assert!(
+                render_claude_hook_settings(&config)
+                    .get("skipDangerousModePermissionPrompt")
+                    .is_none()
+            );
+            std::fs::remove_file(&path).unwrap();
+            crate::utils::secret_file::write_secret_file(&path, original).unwrap();
+        } else {
+            assert!(settings.get("skipDangerousModePermissionPrompt").is_none());
+        }
         let relay = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
@@ -540,6 +589,7 @@ fn claude_login_contract_and_operating_golden() {
             );
             config.endpoint = "http://127.0.0.1:8791".into();
             let refused = render_claude_hook_settings(&config);
+            assert!(refused.get("skipDangerousModePermissionPrompt").is_none());
             assert_eq!(
                 refused["hooks"]["Stop"][0]["hooks"][0]["command"],
                 "/usr/bin/false"

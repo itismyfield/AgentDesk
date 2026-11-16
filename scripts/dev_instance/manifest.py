@@ -223,7 +223,10 @@ def prepare(base, instance_id, worktree, profile, ambient, api_port=None, pg_por
     create_layout(root)
     if claude_login is not None:
         write_private_json(root, provider_home(root, "claude").relative_to(root) / ".claude.json",
-                           {"hasCompletedOnboarding": True, "theme": "dark"})
+                           {"hasCompletedOnboarding": True, "theme": "dark",
+                            "projects": {str(root / "workspaces/claude"): {"hasTrustDialogAccepted": True}}})
+        write_private_json(root, provider_home(root, "claude").relative_to(root) / "settings.json",
+                           {"skipDangerousModePermissionPrompt": True})
     for relative in HOST_DIRS:
         (root / relative).mkdir(mode=0o700)
     write_private_text(root, "herdr-home/config.toml", HERDR_CONFIG)

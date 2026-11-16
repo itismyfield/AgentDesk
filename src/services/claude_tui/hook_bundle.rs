@@ -61,7 +61,7 @@ pub fn render_claude_hook_settings(config: &HookBundleConfig) -> Value {
         hooks.insert((*event).to_string(), json!([matcher]));
     }
 
-    json!({"hooks": hooks, "statusLine": statusline::settings(&statusline::record_dir())})
+    statusline::hook_settings(config, hooks)
 }
 
 pub fn render_codex_hook_config_override(config: &HookBundleConfig) -> String {

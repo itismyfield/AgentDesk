@@ -46,7 +46,11 @@ class ClaudeLoginTests(TestCase):
         root = Path(manifest['root'])
         path = Path(manifest['claude_login']['config_dir'])/'.claude.json'
         self.assertTrue(path.is_relative_to(root))
-        self.assertEqual(json.loads(path.read_text()), {'hasCompletedOnboarding': True, 'theme': 'dark'})
+        self.assertEqual(json.loads(path.read_text()), {'hasCompletedOnboarding': True, 'theme': 'dark',
+            'projects': {str(root/'workspaces/claude'): {'hasTrustDialogAccepted': True}}})
+        settings = path.with_name('settings.json')
+        self.assertEqual(json.loads(settings.read_text()), {'skipDangerousModePermissionPrompt': True})
+        self.assertEqual(stat.S_IMODE(settings.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertEqual(list((root/'credential').iterdir()), [])
         self.assertEqual(list((root/'home/.adk/profiles/codex/test-codex').iterdir()), [])

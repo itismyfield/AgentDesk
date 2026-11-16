@@ -566,6 +566,23 @@ pub(crate) fn claude_launch_args() -> Vec<String> {
     .collect()
 }
 
+pub(crate) fn claude_startup_prompt_accepted(endpoint: &str) -> bool {
+    #[cfg(unix)]
+    if let Ok(Some(snapshot)) = scope()
+        && snapshot.api == endpoint
+        && let Some(login) = &snapshot.claude_login
+        && let Ok(directory) =
+            crate::utils::secret_file::private_directory::PrivateDirectory::open(&login.config_dir)
+        && let Ok(Some(bytes)) = directory.read("settings.json")
+        && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+    {
+        return value["skipDangerousModePermissionPrompt"].as_bool() == Some(true);
+    }
+    #[cfg(not(unix))]
+    let _ = endpoint;
+    false
+}
+
 pub(crate) fn claude_relay_command(
     config: &crate::services::claude_tui::hook_bundle::HookBundleConfig,
     event: &str,
