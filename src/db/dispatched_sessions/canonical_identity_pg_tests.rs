@@ -2316,8 +2316,8 @@ async fn hosted_execution_cas_writes_only_the_observed_value_and_nonce_pg() {
 
 /// Waits until a statement from another connection matching `pattern` blocks on a lock.
 async fn await_lock_wait(pool: &PgPool, pattern: &str) {
-    let waiting = async {
-        loop {
+    crate::test_support::wait::poll_within(
+        async || {
             let blocked: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
                  WHERE datname = current_database() AND wait_event_type = 'Lock'
@@ -2327,15 +2327,15 @@ async fn await_lock_wait(pool: &PgPool, pattern: &str) {
             .fetch_one(pool)
             .await
             .unwrap();
-            if blocked {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
-        .await
-        .unwrap_or_else(|_| panic!("no statement blocked on a lock: {pattern}"));
+            blocked
+                .then_some(())
+                .ok_or_else(|| format!("no statement blocked on a lock: {pattern}"))
+        },
+        std::time::Duration::from_secs(10),
+        "statement blocked on a lock",
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// The same record with its schema spelled `1.0`: jsonb-equal, but it decodes as Unknown.
@@ -2905,12 +2905,18 @@ async fn canonical_identity_same_host_rename_handoff_converges_and_refuses_reviv
 }
 
 async fn wait_for_two_active_identity_transactions(mut sample: impl AsyncFnMut() -> i64) {
-    loop {
-        if sample().await == 2 {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    crate::test_support::wait::poll_within(
+        async || {
+            let active = sample().await;
+            (active == 2)
+                .then_some(())
+                .ok_or_else(|| format!("{active} active identity transactions, expected 2"))
+        },
+        std::time::Duration::from_secs(10),
+        "two active identity transactions",
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
 }
 
 async fn assert_concurrent_identity_promotion(
@@ -2969,8 +2975,8 @@ async fn assert_concurrent_identity_promotion(
         .await
         .unwrap();
     let overlap = async {
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
+        crate::test_support::wait::poll_within(
+            async || {
                 let waiting: Vec<(i32, String)> = sqlx::query_as(
                     "SELECT waiting.pid, waiting.virtualtransaction
                      FROM pg_locks waiting JOIN pg_locks held
@@ -3006,11 +3012,15 @@ async fn assert_concurrent_identity_promotion(
                     })
                     .await;
                     eprintln!("CANONICAL_IDENTITY_RACE waiting={waiting:?}");
-                    break;
+                    return Ok(());
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
+                Err(format!(
+                    "identity fence waiters {waiting:?}, expected backends {backend_pids:?}"
+                ))
+            },
+            std::time::Duration::from_secs(10),
+            "tuple read and named hook must both wait on the identity fence",
+        )
         .await
         .expect("tuple read and named hook must both wait on the identity fence");
         barrier.rollback().await.unwrap();

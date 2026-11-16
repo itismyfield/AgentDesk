@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -78,24 +78,24 @@ fn spent(rows: &[super::o_piece_attempts::AttemptRow]) -> Vec<(u8, Option<Attemp
 
 /// Waits until `count` sessions of this database block on a lock.
 async fn lock_waiters(pool: &PgPool, count: i64) {
-    let started = Instant::now();
-    loop {
-        let waiting: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM pg_stat_activity
-              WHERE datname = current_database() AND wait_event_type = 'Lock'",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        if waiting == count {
-            return;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(20),
-            "{waiting} lock waiters"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    crate::test_support::wait::poll_within(
+        async || {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_stat_activity
+                  WHERE datname = current_database() AND wait_event_type = 'Lock'",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            (waiting == count)
+                .then_some(())
+                .ok_or_else(|| format!("{waiting} lock waiters"))
+        },
+        Duration::from_secs(20),
+        "PostgreSQL lock waiters",
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
 }
 
 fn sql_state(error: sqlx::Error) -> String {

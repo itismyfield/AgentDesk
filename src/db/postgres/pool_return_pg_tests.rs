@@ -24,11 +24,15 @@ async fn observer(db: &TestPostgresDb) -> PgConnection {
 }
 
 async fn idle(pool: &PgPool) {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while pool.num_idle() != 1 {
-            tokio::task::yield_now().await;
-        }
-    })
+    crate::test_support::wait::poll_within(
+        async || {
+            (pool.num_idle() == 1)
+                .then_some(())
+                .ok_or_else(|| "one-slot pool has not returned its connection".into())
+        },
+        Duration::from_secs(2),
+        "one-slot pool returned its connection",
+    )
     .await
     .expect("one-slot pool returned its connection");
 }

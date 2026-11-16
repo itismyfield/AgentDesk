@@ -913,8 +913,22 @@ mod migration_pg_tests {
             .try_get("updated_at")
             .expect("decode initial updated_at");
 
-        // Sleep just enough for NOW() to advance reliably.
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        crate::test_support::wait::poll_within(
+            async || {
+                let advanced: bool = sqlx::query_scalar("SELECT NOW() > $1")
+                    .bind(initial_updated_at)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read PostgreSQL clock");
+                advanced
+                    .then_some(())
+                    .ok_or_else(|| "PostgreSQL NOW() has not advanced past updated_at".into())
+            },
+            crate::test_support::wait::WAIT_CAP,
+            "PostgreSQL clock advances before the update",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
 
         sqlx::query(
             "UPDATE intake_outbox SET last_error='probe'

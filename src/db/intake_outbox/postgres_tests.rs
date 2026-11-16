@@ -210,7 +210,11 @@ async fn a_claim_holding_no_channel_runs_the_original_two_parameter_statement() 
     let older = insert_pending(&pool, &payload("ch-held", "msg-A"), 1, None)
         .await
         .expect("seed row 1");
-    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    sqlx::query("UPDATE intake_outbox SET created_at = NOW() - INTERVAL '1 second' WHERE id = $1")
+        .bind(older)
+        .execute(&pool)
+        .await
+        .expect("date the older fixture row");
     let newer = insert_pending(&pool, &payload("ch-open", "msg-B"), 1, None)
         .await
         .expect("seed row 2");
@@ -241,8 +245,11 @@ async fn claim_pending_for_target_picks_oldest_pending_and_promotes_to_claimed()
     let id1 = insert_pending(&pool, &payload("ch-claim-1", "msg-A"), 1, None)
         .await
         .expect("seed row 1");
-    // Slight delay so the second row's created_at is strictly later.
-    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    sqlx::query("UPDATE intake_outbox SET created_at = NOW() - INTERVAL '1 second' WHERE id = $1")
+        .bind(id1)
+        .execute(&pool)
+        .await
+        .expect("date the oldest fixture row");
     let _id2 = insert_pending(&pool, &payload("ch-claim-2", "msg-B"), 1, None)
         .await
         .expect("seed row 2");
@@ -598,8 +605,8 @@ async fn issue_5057_pr1_capability_loss_rotates_source_then_next_tick_progresses
     });
     // The old FOR UPDATE NOWAIT probe could lock rotated_id, making the sweep's
     // FOR UPDATE ... SKIP LOCKED pick later_id. Observe the held worker row instead.
-    let wait_for_worker_lock = async {
-        loop {
+    let wait_for_worker_lock = crate::test_support::wait::poll_within(
+        async || {
             let blocked: bool = sqlx::query_scalar(
                 "SELECT EXISTS (
                     SELECT 1 FROM pg_stat_activity
@@ -610,16 +617,14 @@ async fn issue_5057_pr1_capability_loss_rotates_source_then_next_tick_progresses
             .fetch_one(&pool)
             .await
             .expect("observe sweep waiting on capability update"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
-            if blocked {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    };
-    if tokio::time::timeout(std::time::Duration::from_secs(10), wait_for_worker_lock)
-        .await
-        .is_err()
-    {
+            blocked
+                .then_some(())
+                .ok_or_else(|| "sweep has not reached the capability update lock".into())
+        },
+        std::time::Duration::from_secs(10),
+        "sweep waits on capability update",
+    );
+    if wait_for_worker_lock.await.is_err() {
         capability_update
             .rollback()
             .await
@@ -780,11 +785,34 @@ async fn issue_5057_pr1_leader_maintenance_inputs_route_to_current_owner() {
     )
     .await
     .expect("transfer"); // agentdesk-audit: allow-unwrap — owner-transfer regression
+    let transfer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *transfer)
+        .await
+        .expect("read transfer lock holder");
     let race_pool = pool.clone();
     let race = tokio::spawn(async move {
         sweep_failed_pre_accept_once(&race_pool, "leader", 5, 5, Some(300)).await
     });
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    crate::test_support::wait::poll_within(
+        async || {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'
+                   AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(transfer_pid)
+            .fetch_one(&pool)
+            .await
+            .expect("inspect sweep waiting on owner transfer");
+            waiting
+                .then_some(())
+                .ok_or_else(|| "sweep has not reached the owner-transfer lock".into())
+        },
+        crate::test_support::wait::WAIT_CAP,
+        "sweep waits for the owner transfer",
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
     assert!(!race.is_finished());
     transfer.commit().await.expect("commit transfer"); // agentdesk-audit: allow-unwrap — owner-transfer regression
     assert_eq!(
@@ -1575,11 +1603,19 @@ async fn list_recent_rows_supports_channel_filter_and_orders_descending() {
     let _id_a1 = insert_pending(&pool, &payload("ch-A", "msg-A1"), 1, None)
         .await
         .expect("seed A1");
-    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    sqlx::query("UPDATE intake_outbox SET created_at = TIMESTAMPTZ '2000-01-01' WHERE id = $1")
+        .bind(_id_a1)
+        .execute(&pool)
+        .await
+        .expect("date fixture A1");
     let id_b = insert_pending(&pool, &payload("ch-B", "msg-B1"), 1, None)
         .await
         .expect("seed B");
-    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    sqlx::query("UPDATE intake_outbox SET created_at = TIMESTAMPTZ '2000-01-02' WHERE id = $1")
+        .bind(id_b)
+        .execute(&pool)
+        .await
+        .expect("date fixture B");
     sqlx::query("UPDATE intake_outbox SET status='done' WHERE channel_id='ch-A'")
         .execute(&pool)
         .await

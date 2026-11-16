@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const CHILD_MARKER: &str = "ADK_ROOT_GUARD_TEARDOWN_CHILD";
 
@@ -128,14 +128,24 @@ fn run_isolated(test_name: &str, root_was_present: bool, exercise: impl FnOnce()
         command.env_remove("AGENTDESK_ROOT_DIR");
     }
     let mut child = ReapChild(command.spawn().unwrap());
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let status = loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            break status;
-        }
-        assert!(Instant::now() < deadline, "teardown probe watchdog expired");
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    let waiter = std::thread::spawn(move || {
+        crate::test_support::serial_runtime::run(
+            || (),
+            crate::test_support::wait::poll_within(
+                async || {
+                    child
+                        .0
+                        .try_wait()
+                        .unwrap()
+                        .ok_or_else(|| "teardown probe is still running".into())
+                },
+                Duration::from_secs(30),
+                "teardown probe watchdog expired",
+            ),
+        )
+        .unwrap_or_else(|error| panic!("{error}"))
+    });
+    let status = crate::test_support::wait::join_within(waiter, Duration::from_secs(31));
     use std::io::{Read, Seek, SeekFrom};
     let mut output = output;
     output.seek(SeekFrom::Start(0)).unwrap();

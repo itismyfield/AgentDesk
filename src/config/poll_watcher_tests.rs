@@ -123,16 +123,16 @@ fn poll_watcher_handles_in_place_rename_rejection_and_same_content() {
 
             let validated = current().unwrap();
             write_preserving_mtime(&path, "server: [broken", modified);
-            tokio::time::timeout(Duration::from_secs(15), async {
-                loop {
-                    if String::from_utf8_lossy(&logs.0.lock().unwrap())
+            crate::test_support::wait::poll_within(
+                async || {
+                    String::from_utf8_lossy(&logs.0.lock().unwrap())
                         .contains("config hot-reload rejected invalid config")
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
+                        .then_some(())
+                        .ok_or_else(|| "the real watcher has not rejected the invalid edit".into())
+                },
+                Duration::from_secs(15),
+                "the real watcher must attempt and reject the invalid edit",
+            )
             .await
             .expect("the real watcher must attempt and reject the invalid edit");
             assert!(Arc::ptr_eq(&validated, &current().unwrap()));

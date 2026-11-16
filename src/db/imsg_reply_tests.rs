@@ -532,12 +532,19 @@ async fn pg_r7_final_and_expiry_concurrent_claims_start_one_sender() {
     let expiry_claim = action("r7", Purpose::Expiry, "e");
     let sender = FakeSender::default();
     let barrier = tokio::sync::Barrier::new(2);
+    let claims_finished = tokio::sync::Barrier::new(2);
     let attempt = async |pool: &PgPool, claim: &ClaimAction<'_>| {
         barrier.wait().await;
         let result = claim_action(pool, claim).await.unwrap();
         if result.is_some() {
             sender.start();
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        crate::test_support::wait::await_within(
+            claims_finished.wait(),
+            crate::test_support::wait::WAIT_CAP,
+        )
+        .await;
+        if result.is_some() {
             sender.finish();
         }
         result

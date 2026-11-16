@@ -208,8 +208,8 @@ async fn owner_fence_legacy_current_partial_and_target_matrix_pg() {
 }
 
 async fn wait_for_lock(pool: &PgPool, holder: i32) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
+    crate::test_support::wait::poll_within(
+        async || {
             let waiting: bool = sqlx::query_scalar("SELECT EXISTS (
                 SELECT 1 FROM pg_locks held JOIN pg_locks waiter
                   ON waiter.locktype=held.locktype AND waiter.database IS NOT DISTINCT FROM held.database
@@ -218,10 +218,13 @@ async fn wait_for_lock(pool: &PgPool, holder: i32) {
                  AND waiter.objsubid IS NOT DISTINCT FROM held.objsubid AND waiter.mode=held.mode
                 WHERE held.pid=$1 AND held.locktype='advisory' AND held.granted AND NOT waiter.granted)")
                 .bind(holder).fetch_one(pool).await.unwrap();
-            if waiting { return; }
-            tokio::task::yield_now().await;
-        }
-    }).await.expect("writer must wait on the exact advisory key");
+            waiting
+                .then_some(())
+                .ok_or_else(|| "writer must wait on the exact advisory key".into())
+        },
+        Duration::from_secs(10),
+        "writer must wait on the exact advisory key",
+    ).await.expect("writer must wait on the exact advisory key");
 }
 
 #[tokio::test]
@@ -649,19 +652,20 @@ async fn owner_fence_legacy_read_cannot_overwrite_new_stamp_pg() {
             .unwrap();
         let writer = mark_done(&pool, id, "token");
         tokio::pin!(writer);
-        let blocked = async {
-            loop {
+        let blocked = crate::test_support::wait::poll_within(
+            async || {
                 let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))")
                 .bind(pid).fetch_one(&pool).await.unwrap();
-                if waiting {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        };
+                waiting
+                    .then_some(())
+                    .ok_or_else(|| "row lock has not blocked UPDATE".into())
+            },
+            Duration::from_secs(10),
+            "row lock must block UPDATE",
+        );
         tokio::select! {
             result = &mut writer => panic!("row lock must block UPDATE: {result:?}"),
-            result = tokio::time::timeout(Duration::from_secs(10), blocked) => result.unwrap()
+            result = blocked => result.unwrap()
         }
         sqlx::query(
             "UPDATE intake_outbox SET owner_instance_id=$2, owner_generation=$3 WHERE id=$1",

@@ -1674,7 +1674,25 @@ mod dispatch_terminal_sync_pg_tests {
         let save_task = tokio::spawn(async move {
             save_phase_gate_state_on_pg(&pool_for_save, "run-1", 9, &save_state).await
         });
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        crate::test_support::wait::poll_within(
+            async || {
+                let saving: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                     WHERE datname = current_database() AND wait_event = 'PgSleep'
+                       AND query LIKE '%INSERT INTO auto_queue_phase_gates%')",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("inspect atomic phase-gate save");
+                saving
+                    .then_some(())
+                    .ok_or_else(|| "atomic save has not reached the slow insert trigger".into())
+            },
+            crate::test_support::wait::WAIT_CAP,
+            "atomic save reaches the insert trigger before concurrent clear",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
         let pool_for_clear = pool.clone();
         let clear_task =
             tokio::spawn(

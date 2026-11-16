@@ -266,14 +266,17 @@ async fn legacy_return_cas_waits_for_concurrent_incarnation_pg() {
 }
 
 async fn wait_for_row_lock(pool: &PgPool) {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
+    crate::test_support::wait::poll_within(
+        async || {
             let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock')")
                 .fetch_one(pool).await.unwrap();
-            if waiting { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+            waiting
+                .then_some(())
+                .ok_or_else(|| "legacy return has not reached the row lock".into())
+        },
+        std::time::Duration::from_secs(5),
+        "legacy return waits on the row lock",
+    ).await.unwrap();
 }
 
 #[tokio::test]

@@ -99,22 +99,27 @@ async fn child_count(pool: &PgPool, parent: i64) -> Result<i64, sqlx::Error> {
 }
 
 async fn wait_for_sweep_lock(pool: &PgPool, backend: i32) -> Result<bool, sqlx::Error> {
-    for _ in 0..200 {
-        let blocked: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                SELECT 1 FROM pg_locks
-                 WHERE pid = $1 AND relation = 'intake_outbox'::regclass
-                   AND mode = 'RowExclusiveLock' AND NOT granted)",
-        )
-        .bind(backend)
-        .fetch_one(pool)
-        .await?;
-        if blocked {
-            return Ok(true);
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    Ok(false)
+    crate::test_support::wait::poll_within(
+        async || {
+            let blocked: Result<bool, sqlx::Error> = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pg_locks
+                     WHERE pid = $1 AND relation = 'intake_outbox'::regclass
+                       AND mode = 'RowExclusiveLock' AND NOT granted)",
+            )
+            .bind(backend)
+            .fetch_one(pool)
+            .await;
+            match blocked {
+                Ok(false) => Err("sweep has not reached the intake_outbox lock".into()),
+                result => Ok(result),
+            }
+        },
+        Duration::from_secs(2),
+        "sweep intake_outbox lock",
+    )
+    .await
+    .unwrap_or(Ok(false))
 }
 
 #[tokio::test]

@@ -2069,7 +2069,25 @@ mod tests {
         let migration_pool = pool.clone();
         let migration_task =
             tokio::spawn(async move { apply_deploy_gate_constraint(&migration_pool).await });
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        crate::test_support::wait::poll_within(
+            async || {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks
+                     WHERE relation = 'auto_queue_entries'::regclass
+                       AND mode = 'AccessExclusiveLock' AND NOT granted)",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("inspect constraint migration lock waiter");
+                waiting.then_some(()).ok_or_else(|| {
+                    "ALTER TABLE has not reached the concurrent legacy writer".into()
+                })
+            },
+            crate::test_support::wait::WAIT_CAP,
+            "ALTER TABLE must wait for the concurrent legacy writer",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
         assert!(
             !migration_task.is_finished(),
             "ALTER TABLE must wait for the concurrent legacy writer"
@@ -3326,19 +3344,16 @@ mod tests {
 
         drop(holder_a);
 
-        let holder_b = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some(holder) =
-                    AdvisoryLockLease::try_acquire(&pool_b, 91_002, "test advisory lock")
-                        .await
-                        .expect("acquire advisory lock on pool B after drop")
-                {
-                    break holder;
-                }
-
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
+        let holder_b = crate::test_support::wait::poll_within(
+            async || {
+                AdvisoryLockLease::try_acquire(&pool_b, 91_002, "test advisory lock")
+                    .await
+                    .expect("acquire advisory lock on pool B after drop")
+                    .ok_or_else(|| "pool B advisory lock holder after drop".into())
+            },
+            Duration::from_secs(2),
+            "pool B advisory lock holder after drop",
+        )
         .await
         .expect("pool B advisory lock holder after drop");
         holder_b
@@ -3418,12 +3433,23 @@ mod tests {
             .await
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(
-            active.load(Ordering::SeqCst),
-            1,
-            "the second startup section must wait while the first lock holder is active"
-        );
+        let observe_until = std::time::Instant::now() + Duration::from_millis(100);
+        crate::test_support::wait::poll_within(
+            async || {
+                assert_eq!(
+                    active.load(Ordering::SeqCst),
+                    1,
+                    "the second startup section must wait while the first lock holder is active"
+                );
+                (std::time::Instant::now() >= observe_until)
+                    .then_some(())
+                    .ok_or_else(|| "startup exclusion observation window is still open".into())
+            },
+            crate::test_support::wait::WAIT_CAP,
+            "startup sections stay exclusive throughout the observation window",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
 
         release_first.notify_one();
         first
@@ -3454,18 +3480,21 @@ mod tests {
         test_db.drop().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn postgres_test_sqlx_timeout_wrapper_fails_fast() {
-        let err = run_test_postgres_sqlx_op_with_timeout(
-            Duration::from_millis(20),
-            "synthetic postgres timeout",
-            async {
-                tokio::time::sleep(Duration::from_millis(80)).await;
-                Ok::<(), sqlx::Error>(())
-            },
-        )
-        .await
-        .expect_err("sleep should time out");
+        let (result, ()) = tokio::join!(
+            biased;
+            run_test_postgres_sqlx_op_with_timeout(
+                Duration::from_millis(20),
+                "synthetic postgres timeout",
+                async {
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    Ok::<(), sqlx::Error>(())
+                },
+            ),
+            tokio::time::advance(Duration::from_millis(20)),
+        );
+        let err = result.expect_err("sleep should time out");
 
         assert!(
             err.contains("timed out"),

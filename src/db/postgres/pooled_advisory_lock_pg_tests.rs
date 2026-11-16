@@ -60,25 +60,24 @@ impl Fixture {
             .unwrap();
         assert_eq!(next_pid == holder_pid, reused);
         if !reused {
-            await_within(
-                async {
-                    loop {
-                        let ended: bool = sqlx::query_scalar(
-                            "SELECT NOT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1)",
-                        )
-                        .bind(holder_pid)
-                        .fetch_one(&mut self.observer)
-                        .await
-                        .unwrap();
-                        if ended {
-                            break;
-                        }
-                        tokio::task::yield_now().await;
-                    }
+            crate::test_support::wait::poll_within(
+                async || {
+                    let ended: bool = sqlx::query_scalar(
+                        "SELECT NOT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1)",
+                    )
+                    .bind(holder_pid)
+                    .fetch_one(&mut self.observer)
+                    .await
+                    .unwrap();
+                    ended
+                        .then_some(())
+                        .ok_or_else(|| "returned connection backend has not ended".into())
                 },
                 WAIT_CAP,
+                "returned connection backend ends",
             )
-            .await;
+            .await
+            .expect("returned connection backend ends");
         }
         let available: bool = sqlx::query_scalar(
             "SELECT pg_catalog.pg_try_advisory_lock(hashtext($1), hashtext($2))",
@@ -201,26 +200,25 @@ async fn pooled_advisory_cancelled_unlock_discards_the_session_pg() {
         .await
         .unwrap();
     let unlock = tokio::spawn(async move { lock.unlock().await });
-    await_within(
-        async {
-            loop {
-                let waiting: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1
+    crate::test_support::wait::poll_within(
+        async || {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1
                  AND wait_event_type = 'Lock' AND wait_event = 'advisory')",
-                )
-                .bind(holder_pid)
-                .fetch_one(&mut fixture.observer)
-                .await
-                .unwrap();
-                if waiting {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
+            )
+            .bind(holder_pid)
+            .fetch_one(&mut fixture.observer)
+            .await
+            .unwrap();
+            waiting
+                .then_some(())
+                .ok_or_else(|| "unlock has not reached the advisory barrier".into())
         },
         WAIT_CAP,
+        "unlock waits on the advisory barrier",
     )
-    .await;
+    .await
+    .expect("unlock waits on the advisory barrier");
     unlock.abort();
     assert!(
         await_within(unlock, WAIT_CAP)

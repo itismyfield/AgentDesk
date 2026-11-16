@@ -166,8 +166,8 @@ async fn hold_gate(pool: &PgPool) -> sqlx::Transaction<'_, sqlx::Postgres> {
 }
 
 async fn await_gate_waiter(pool: &PgPool) -> i32 {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
+    crate::test_support::wait::poll_within(
+        async || {
             let pid: Option<i32> = sqlx::query_scalar(
                 "SELECT pid FROM pg_stat_activity
                  WHERE datname = current_database() AND wait_event_type = 'Lock'
@@ -176,19 +176,18 @@ async fn await_gate_waiter(pool: &PgPool) -> i32 {
             .fetch_optional(pool)
             .await
             .unwrap();
-            if let Some(pid) = pid {
-                return pid;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
+            pid.ok_or_else(|| "mutation did not reach the parent gate".into())
+        },
+        Duration::from_secs(10),
+        "mutation did not reach the parent gate",
+    )
     .await
-    .expect("mutation did not reach the parent gate")
+    .unwrap_or_else(|error| panic!("{error}"))
 }
 
 async fn await_parent_waiter(pool: &PgPool, blocker: i32) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
+    crate::test_support::wait::poll_within(
+        async || {
             let waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS (
                      SELECT 1 FROM pg_stat_activity
@@ -202,14 +201,15 @@ async fn await_parent_waiter(pool: &PgPool, blocker: i32) {
             .fetch_one(pool)
             .await
             .unwrap();
-            if waiting {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
+            waiting
+                .then_some(())
+                .ok_or_else(|| "second mutation did not wait on the locked parent".into())
+        },
+        Duration::from_secs(10),
+        "second mutation did not wait on the locked parent",
+    )
     .await
-    .expect("second mutation did not wait on the locked parent");
+    .unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[tokio::test]

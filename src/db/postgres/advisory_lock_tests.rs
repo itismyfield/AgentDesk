@@ -54,14 +54,15 @@ impl Db {
         lock_id: i64,
         within: Duration,
     ) -> Option<AdvisoryLockLease> {
-        tokio::time::timeout(within, async {
-            loop {
-                if let Some(lease) = self.competitor(lock_id).await {
-                    break lease;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
+        crate::test_support::wait::poll_within(
+            async || {
+                self.competitor(lock_id)
+                    .await
+                    .ok_or_else(|| format!("competitor has not acquired lock {lock_id}"))
+            },
+            within,
+            "competitor advisory lock acquisition",
+        )
         .await
         .ok()
     }
@@ -121,11 +122,16 @@ async fn expiry_is_in_force_before_the_lock_is_granted_pg() {
         AdvisoryLockLease::try_acquire_named_expiring(&pool, 5_631_002, LABEL, LABEL, Some(EXPIRY))
             .await
     });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !db.granted(5_631_002).await {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
+    crate::test_support::wait::poll_within(
+        async || {
+            db.granted(5_631_002)
+                .await
+                .then_some(())
+                .ok_or_else(|| "stalled acquisition has not been granted its lock".into())
+        },
+        Duration::from_secs(5),
+        "the stalled acquisition holds the lock with its session open",
+    )
     .await
     .expect("the stalled acquisition holds the lock with its session open");
     test_seam::release_stall_for(5_631_002);

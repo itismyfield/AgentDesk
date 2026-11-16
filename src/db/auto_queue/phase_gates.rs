@@ -2522,11 +2522,23 @@ mod reconcile_phase_gate_pg_tests {
             .await
             .unwrap();
 
-        let barrier = Arc::new(Barrier::new(3));
+        // Hold the PATCH row lock before starting repair so the overlap is observed, not timed.
+        let mut patch = pool.begin().await.expect("begin patch-simulation tx");
+        let patch_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *patch)
+            .await
+            .expect("read patch backend");
+        sqlx::query(
+            "UPDATE task_dispatches
+             SET result = CAST($1 AS jsonb), updated_at = NOW()
+             WHERE id = 'dsp-repair-vs-patch'",
+        )
+        .bind(r#"{"verdict":"phase_gate_passed","note":"post-patch","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}}"#)
+        .execute(&mut *patch)
+        .await
+        .expect("patch task_dispatches");
         let repair_pool = pool.clone();
-        let repair_barrier = Arc::clone(&barrier);
         let repair_task = tokio::spawn(async move {
-            repair_barrier.wait().await;
             repair_phase_gates_for_run_on_pg(
                 &repair_pool,
                 "run-pg-test",
@@ -2534,49 +2546,36 @@ mod reconcile_phase_gate_pg_tests {
             )
             .await
         });
-        // Simulate PATCH /api/dispatches/{id}: open its own tx, lock the
-        // same task_dispatches row, mutate, commit. Mirrors the lock
-        // order that `set_dispatch_status_on_pg_with_sync` takes
-        // (task_dispatches first via UPDATE row lock).
-        let patch_pool = pool.clone();
-        let patch_barrier = Arc::clone(&barrier);
-        let patch_task = tokio::spawn(async move {
-            patch_barrier.wait().await;
-            let mut tx = patch_pool.begin().await.expect("begin patch-simulation tx");
-            sqlx::query(
-                "UPDATE task_dispatches
-                 SET result = CAST($1 AS jsonb), updated_at = NOW()
-                 WHERE id = 'dsp-repair-vs-patch'",
-            )
-            .bind(r#"{"verdict":"phase_gate_passed","note":"post-patch","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}}"#)
-            .execute(&mut *tx)
-            .await
-            .expect("patch task_dispatches");
-            // Hold the row lock briefly to maximize lock-order overlap
-            // with the repair task — exposes deadlock if the two paths
-            // ever drift to opposite orders.
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            tx.commit().await.expect("commit patch-simulation tx");
-        });
-        barrier.wait().await;
-
-        // Bounded wait so a regression that re-introduces the deadlock
-        // fails fast instead of hanging the test runner.
-        let repair = tokio::time::timeout(std::time::Duration::from_secs(15), repair_task)
-            .await
-            .expect("repair task did not deadlock")
-            .expect("repair task panicked");
-        let _patch = tokio::time::timeout(std::time::Duration::from_secs(15), patch_task)
-            .await
-            .expect("patch task did not deadlock")
-            .expect("patch task panicked");
+        crate::test_support::wait::poll_within(
+            async || {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                     WHERE datname = current_database() AND wait_event_type = 'Lock'
+                       AND $1 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(patch_pid)
+                .fetch_one(&pool)
+                .await
+                .expect("inspect repair waiting on patch");
+                waiting
+                    .then_some(())
+                    .ok_or_else(|| "repair has not reached the PATCH row lock".into())
+            },
+            std::time::Duration::from_secs(15),
+            "repair waits on concurrent dispatch update",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        patch.commit().await.expect("commit patch-simulation tx");
+        let repair = crate::test_support::wait::await_within(
+            repair_task,
+            std::time::Duration::from_secs(15),
+        )
+        .await
+        .expect("repair task panicked");
         let summary = repair.expect("repair returned Ok");
 
-        // The repair eventually cleared the gate (one of the two orderings
-        // — either it read post-PATCH state and cleared, or pre-PATCH and
-        // still cleared because the existing verdict was already a pass).
-        // The invariant we care about is no deadlock + final consistent
-        // state: the gate row is gone, run resumed.
+        // Repair reads the committed dispatch state and clears the gate without deadlock.
         assert_eq!(summary.cleared_gates + summary.failed_gates, 1);
         assert_eq!(gate_count(&pool, "run-pg-test", 0).await, 0);
 

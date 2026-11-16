@@ -2358,33 +2358,33 @@ mod tests {
             .await
         });
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            sqlx::query("SELECT pg_stat_clear_snapshot()")
-                .execute(&mut *terminalizer)
-                .await
-                .expect("clear late-attach waiter snapshot");
-            let waiting = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (
+        crate::test_support::wait::poll_within(
+            async || {
+                sqlx::query("SELECT pg_stat_clear_snapshot()")
+                    .execute(&mut *terminalizer)
+                    .await
+                    .expect("clear late-attach waiter snapshot");
+                let waiting = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
                      SELECT 1
                      FROM pg_stat_activity
                      WHERE datname = current_database()
                        AND wait_event_type = 'Lock'
                        AND query LIKE '%FOR SHARE%'
                  )",
-            )
-            .fetch_one(&mut *terminalizer)
-            .await
-            .expect("inspect dispatch FOR SHARE waiter");
-            if waiting {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "late attachment did not wait on the terminal dispatch update"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+                )
+                .fetch_one(&mut *terminalizer)
+                .await
+                .expect("inspect dispatch FOR SHARE waiter");
+                waiting.then_some(()).ok_or_else(|| {
+                    "late attachment did not wait on the terminal dispatch update".into()
+                })
+            },
+            std::time::Duration::from_secs(5),
+            "late attachment did not wait on the terminal dispatch update",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
 
         sqlx::query("COMMIT")
             .execute(&mut *terminalizer)

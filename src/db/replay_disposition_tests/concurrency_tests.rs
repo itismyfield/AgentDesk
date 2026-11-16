@@ -181,8 +181,8 @@ async fn a_bulk_update_of_plain_rows_takes_no_source_locks_pg() {
 }
 
 async fn wait_for_lock(pool: &PgPool, pid: i32) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
+    crate::test_support::wait::poll_within(
+        async || {
             let blocked: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 AND NOT granted)",
             )
@@ -190,12 +190,13 @@ async fn wait_for_lock(pool: &PgPool, pid: i32) {
             .fetch_one(pool)
             .await
             .unwrap();
-            if blocked {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
+            blocked.then_some(()).ok_or_else(|| {
+                "contending statement must actually wait on a PostgreSQL lock".into()
+            })
+        },
+        Duration::from_secs(10),
+        "contending statement must actually wait on a PostgreSQL lock",
+    )
     .await
     .expect("contending statement must actually wait on a PostgreSQL lock");
 }

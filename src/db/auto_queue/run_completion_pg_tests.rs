@@ -575,23 +575,23 @@ async fn concurrent_completion_waits_for_token_and_sees_terminal_pg() {
 
     let waiter_pool = pool.clone();
     let waiter = tokio::spawn(async move { finalize_run_if_ready_pg(&waiter_pool, "run-1").await });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let waiting = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("inspect advisory waiters");
-        if waiting > 0 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "second completion never waited for the run token"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    crate::test_support::wait::poll_within(
+        async || {
+            let waiting = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("inspect advisory waiters");
+            (waiting > 0)
+                .then_some(())
+                .ok_or_else(|| "second completion never waited for the run token".into())
+        },
+        std::time::Duration::from_secs(5),
+        "second completion never waited for the run token",
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
 
     assert_eq!(
         finalize_run_if_ready_on_pg_tx(&mut holder, "run-1")
