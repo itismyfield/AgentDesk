@@ -102,6 +102,192 @@ fn retired_gemini_cleans_only_skill_symlinks_even_without_managed_skills() {
 }
 
 #[test]
+fn retired_gemini_removes_dangling_links_alone_or_with_skill_links() {
+    isolated(|root| {
+        let (skill, workspace) = fixture(root, serde_json::json!(["codex"]));
+        let links = workspace.join(".gemini/skills");
+        for with_skill in [false, true] {
+            fs::create_dir_all(&links).unwrap();
+            create_symlink_entry(&root.join("skills/removed"), &links.join("removed"), true)
+                .unwrap();
+            assert_eq!(
+                fs::metadata(links.join("removed")).unwrap_err().kind(),
+                std::io::ErrorKind::NotFound
+            );
+            if with_skill {
+                create_symlink_entry(&skill, &links.join("demo"), true).unwrap();
+            }
+            sync_managed_skills(root).unwrap();
+            assert!(!links.exists(), "with_skill={with_skill}");
+            assert_eq!(fs::read_to_string(skill.join("SKILL.md")).unwrap(), "demo");
+        }
+    });
+}
+
+#[test]
+fn retired_gemini_preserves_dangling_links_mixed_with_user_entries() {
+    isolated(|root| {
+        for entry in ["file", "directory", "file-link", "directory-link"] {
+            let case = root.join(entry);
+            let (skill, workspace) = fixture(&case, serde_json::json!(["codex"]));
+            let links = workspace.join(".gemini/skills");
+            fs::create_dir_all(&links).unwrap();
+            create_symlink_entry(&skill, &links.join("demo"), true).unwrap();
+            create_symlink_entry(&case.join("missing"), &links.join("removed"), true).unwrap();
+            let user = links.join("user");
+            match entry {
+                "file" => fs::write(&user, "preserve").unwrap(),
+                "directory" => fs::create_dir(&user).unwrap(),
+                "file-link" => {
+                    let target = workspace.join("user.txt");
+                    fs::write(&target, "preserve").unwrap();
+                    create_symlink_entry(&target, &user, false).unwrap();
+                }
+                "directory-link" => {
+                    let target = workspace.join("user-dir");
+                    fs::create_dir(&target).unwrap();
+                    create_symlink_entry(&target, &user, true).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            sync_managed_skills(&case).unwrap();
+            assert!(user.exists(), "{entry}");
+            assert!(
+                fs::symlink_metadata(links.join("removed")).is_ok(),
+                "{entry}"
+            );
+            assert!(fs::symlink_metadata(links.join("demo")).is_ok(), "{entry}");
+            if matches!(entry, "file" | "file-link") {
+                assert_eq!(fs::read_to_string(&user).unwrap(), "preserve");
+            }
+        }
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn retired_gemini_preserves_links_with_non_not_found_metadata_errors() {
+    isolated(|root| {
+        let (skill, workspace) = fixture(root, serde_json::json!(["codex"]));
+        let links = workspace.join(".gemini/skills");
+        fs::create_dir_all(&links).unwrap();
+        create_symlink_entry(&skill, &links.join("demo"), true).unwrap();
+        let looping = links.join("loop");
+        create_symlink_entry(&looping, &looping, true).unwrap();
+        assert_ne!(
+            fs::metadata(&looping).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        sync_managed_skills(root).unwrap();
+        assert!(
+            fs::symlink_metadata(&looping)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(fs::symlink_metadata(links.join("demo")).is_ok());
+        assert_eq!(fs::read_to_string(skill.join("SKILL.md")).unwrap(), "demo");
+    });
+}
+
+#[cfg(windows)]
+#[test]
+fn retired_gemini_removes_deleted_directory_symlinks_windows() {
+    isolated(|root| {
+        use std::os::windows::fs::FileTypeExt;
+
+        let (skill, workspace) = fixture(root, serde_json::json!(["codex"]));
+        let links = workspace.join(".gemini/skills");
+        for with_skill in [false, true] {
+            fs::create_dir_all(&links).unwrap();
+            let source = root.join("skills/removed");
+            fs::create_dir(&source).unwrap();
+            let link = links.join("removed");
+            std::os::windows::fs::symlink_dir(&source, &link).unwrap();
+            fs::remove_dir(&source).unwrap();
+            assert_eq!(
+                fs::metadata(&link).unwrap_err().kind(),
+                std::io::ErrorKind::NotFound
+            );
+            assert!(
+                fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink_dir()
+            );
+            if with_skill {
+                create_symlink_entry(&skill, &links.join("demo"), true).unwrap();
+            }
+            sync_managed_skills(root).unwrap();
+            assert_eq!(
+                fs::symlink_metadata(&link).unwrap_err().kind(),
+                std::io::ErrorKind::NotFound
+            );
+            assert_eq!(
+                fs::symlink_metadata(&links).unwrap_err().kind(),
+                std::io::ErrorKind::NotFound
+            );
+            assert_eq!(fs::read_to_string(skill.join("SKILL.md")).unwrap(), "demo");
+        }
+    });
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_link_removal_preserves_live_targets_and_removes_dangling_links() {
+    isolated(|root| {
+        use std::os::windows::fs::FileTypeExt;
+
+        fs::create_dir_all(root).unwrap();
+        for kind in ["file", "directory", "junction"] {
+            for dangling in [false, true] {
+                let target = root.join(format!("{kind}-{dangling}-target"));
+                let link = root.join(format!("{kind}-{dangling}-link"));
+                let content = if kind == "file" {
+                    target.clone()
+                } else {
+                    fs::create_dir(&target).unwrap();
+                    target.join("owned.txt")
+                };
+                fs::write(&content, "preserve").unwrap();
+                match kind {
+                    "file" => std::os::windows::fs::symlink_file(&target, &link).unwrap(),
+                    "directory" => std::os::windows::fs::symlink_dir(&target, &link).unwrap(),
+                    "junction" => {
+                        crate::runtime_layout::windows_links::create_directory_junction(
+                            &target, &link,
+                        )
+                        .unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                let file_type = fs::symlink_metadata(&link).unwrap().file_type();
+                assert_eq!(file_type.is_symlink_file(), kind == "file");
+                assert_eq!(file_type.is_symlink_dir(), kind != "file");
+                if dangling {
+                    fs::remove_file(&content).unwrap();
+                    if kind != "file" {
+                        fs::remove_dir(&target).unwrap();
+                    }
+                    assert_eq!(
+                        fs::metadata(&link).unwrap_err().kind(),
+                        std::io::ErrorKind::NotFound
+                    );
+                }
+                remove_link_or_path(&link).unwrap();
+                assert_eq!(
+                    fs::symlink_metadata(&link).unwrap_err().kind(),
+                    std::io::ErrorKind::NotFound
+                );
+                if !dangling {
+                    assert_eq!(fs::read_to_string(&content).unwrap(), "preserve");
+                }
+            }
+        }
+    });
+}
+
+#[test]
 fn retired_gemini_preserves_mixed_files_unknown_links_and_directory_aliases() {
     isolated(|root| {
         let (skill, workspace) = fixture(root, serde_json::json!(["codex"]));
