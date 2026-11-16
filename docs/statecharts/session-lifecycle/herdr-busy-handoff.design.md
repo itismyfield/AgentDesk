@@ -6,7 +6,7 @@ Code base: `07b57b5724f6bede32f7cc0cf00c7a23652ff3c2`; implementation starts on 
 
 ## Behavior and scope
 
-A mapped local Claude Legacy execution transitions before `hand_busy`, whether active, idle, narrow, unreadable or busy. The actor commits one unfinished journal over the current front grant. The old pane receives no keys: no `/exit`, stash, C-s, or fallback submission. A failed close preserves the queued original as Held, schedules a backoff wake, and after repeated failures owes one durable deduplicated notice without a resend request.
+A mapped local Claude Legacy execution transitions before `hand_busy`, whether active, idle, narrow, unreadable or busy. The actor commits one unfinished journal over the current front grant. The old pane receives no keys: no `/exit`, stash, C-s, or fallback submission. A failed close preserves the queued original as Held, schedules a backoff wake, and after repeated failures owes one durable deduplicated notice without a resend request. Superseded for a close that keeps failing: the original is held only within the handoff budget of five looks, then retained with a resend notice while the journal keeps the old pane ([HerdrHandoffHeld](herdr-handoff-held.report.md)).
 
 The close helper opens one tmux control connection, pins server/session/window/pane/process-start identity, checks the execution nonce/channel context, persists the pin and rechecks authority immediately before `kill-pane -t %N`. EOF discards that connection's authority. Neither a fresh connection's reused pane number nor a numerical PID/PGID is a termination capability. PID/start observations establish identity and positive absence only. The helper never escalates to kill-session/process-tree cleanup. Linux and macOS share the tmux protocol contract; actual private-pane tests run on Linux. macOS process identity remains the existing `ps` observation and needs platform execution coverage.
 
@@ -16,7 +16,7 @@ The new first input uses the existing composer readiness and Person draft guard.
 
 ## Crash contract and journal lifetime
 
-Crash-free close failure, N=2 intake, composer refusal and cancellation preserve the existing queue original without a resend ask. The accepted exception is main's existing durable MayHaveSent/Bootstrap crash window: adopt restores Unknown and central tick retains Unconfirmed once. `retained.rs` is unchanged. This exception needs no protected Unknown custody or new submission protocol. The model represents it explicitly and applies NoRetained only while crashes=0. A retained original is terminal custody, not evidence of provider execution; InputAtMostOnce and NoSilentLoss retain separate meanings.
+Crash-free close failure within the handoff budget, N=2 intake, composer refusal and cancellation preserve the existing queue original without a resend ask. A close that still fails on the fifth look is no longer in this scope: HerdrHandoffHeld retains that original and keeps the journal. The accepted exception is main's existing durable MayHaveSent/Bootstrap crash window: adopt restores Unknown and central tick retains Unconfirmed once. `retained.rs` is unchanged. This exception needs no protected Unknown custody or new submission protocol. The model represents it explicitly and applies NoRetained only while crashes=0. A retained original is terminal custody, not evidence of provider execution; InputAtMostOnce and NoSilentLoss retain separate meanings.
 
 Reserve validates the Herdr target before discharging the handoff journal. Separately, Bound+ended recovery may finish a remaining journal only when its original is no longer owed in queue (settled, retained or canceled). A journal with no input still selects a boot actor and receives an explicit wake. Optional journal serde and None constructor defaults preserve old V2 snapshots. Historical retained recovery and Codex migration are outside this change.
 
@@ -27,9 +27,9 @@ Paths below are repository-relative. Function anchors remain the reference when 
 | Entry or consumer | Code coordinate | Model/action and boundary |
 |---|---|---|
 | first/idle/active/retry owner front | `src/services/discord/queue_io/input_owner/drive.rs:87` | Probe/Commit under one channel actor |
-| active Legacy preflight before busy registration | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:195`, `:232` | Begin before hand_busy; no marker prerequisite |
-| active Bound busy queue | same file `:309` | existing composer path, second input remains one queue member |
-| idle wrapper/late busy discovery | same file `:849`, `:939` | same owner front and existing start/target fences |
+| active Legacy preflight before busy registration | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:195-198`, `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:232-238` | Begin before hand_busy; no marker prerequisite |
+| active Bound busy queue | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:309` | existing composer path, second input remains one queue member |
+| idle wrapper/late busy discovery | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:831`, `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:1065-1079` | same owner front and existing start/target fences |
 | wrapper refusal before reserve | `src/services/discord/router/message_handler/provider_dispatch/start_failure.rs:124` | handoff_start_failed preserves Held and wakes |
 | exact close dispatch and retry | `src/services/claude/session_handoff/pinned_tmux.rs:end_with`; `src/services/discord/queue_io/input_owner/claude_handoff.rs:prepare` | Revalidate/Close/CloseFails/RetryClose; no old keys |
 | Legacy/Retired new launch | `src/services/claude/herdr_turn/handoff.rs:launched_source` | Launch after old absence, re-read durable ID |
@@ -38,12 +38,12 @@ Paths below are repository-relative. Function anchors remain the reference when 
 | repeat-existing input | `src/services/discord/queue_io/input_owner/effect.rs:idle_claude` and `:created` | existing composer; N=2 model tags attempt2 existing |
 | boot persisted actor census | `src/services/turn_orchestrator/pending_queue_persistence/queued_recovery.rs:93` | input OR unfinished Claude journal |
 | restart owner adoption and tick | `src/services/discord/queue_io/input_owner/recovery.rs:15` | existing main Unknown retention contract |
-| journal-only wake and completion | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:675`; new child `claude_handoff.rs:recover` | Census/BootWake/Complete; owed check in actor |
+| journal-only wake and completion | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:675-676`; new child `claude_handoff.rs:recover` | Census/BootWake/Complete; owed check in actor |
 | retained creation/consumption | `src/services/turn_orchestrator/queued_head/v2/retained.rs:46`, `:58`; owner recovery `:20` | unchanged main tick/requeue-known-unsent; no historical migration |
 | Cancel exact queued input | `src/services/turn_orchestrator/queued_head/v2/control.rs:206` | invalidate its journal on committed removal |
-| clear/clear_waiting | same file `:284`, `:411` | clear journal with removed originals; stale callbacks fail |
+| clear/clear_waiting | `src/services/turn_orchestrator/queued_head/v2/control.rs:284`; `src/services/turn_orchestrator/queued_head/v2/control.rs` `clear_waiting` (lines 411–418 at the implementation SHA) | clear journal with removed originals; stale callbacks fail |
 | stop/control ingress | `src/services/discord/commands/control.rs:617`, `:689`, `:715` | existing stop/cancel first-key fences; no new cleanup authority |
-| Terminate/root replacement preclaim | owner_input `:849`; existing `discord/herdr_terminate/` | existing target/first-key ownership fences; no broad kill helper reuse |
+| Terminate/root replacement preclaim | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:849-854`; existing `discord/herdr_terminate/` | existing target/first-key ownership fences; no broad kill helper reuse |
 | reverse Herdr return | `src/services/claude/herdr_return.rs`; `src/services/claude/session_handoff.rs:end_by_exit` | existing reverse `/exit` behavior unchanged |
 
 Person Discord inputs acquire their existing actor receipt/front grant. Bot and AgentDesk automatic inputs retain existing sender/admission classification; this lane adds no synthetic person front. The old input pane is owned by its nonce/context and pin; the new provider input is owned by the durable attempt/writer/first-key gate. Person draft contents are neither read for close nor submitted by the handoff. Existing new-composer Person rejection remains.

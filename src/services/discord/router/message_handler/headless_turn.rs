@@ -145,16 +145,8 @@ async fn start_reserved_headless_turn_admitted(
         return Ok(outcome);
     }
     // A Herdr-configured channel is refused before this turn claims, resets or clears anything.
-    let session_key = || {
-        let basis = session_key_basis_override(
-            scheduled_snapshot_session_label(metadata.as_ref()).as_deref(),
-            metadata.as_ref(),
-            tmux_session_label.as_deref(),
-        )
-        .map(str::to_owned);
-        let provider = &provider;
-        async move { build_adk_session_key(shared, channel_id, provider, basis.as_deref()).await }
-    };
+    let (kept, label) = (metadata.as_ref(), tmux_session_label.as_deref());
+    let session_key = || headless_session_key(shared, channel_id, &provider, kept, label);
     let pool = shared.pg_pool.as_ref();
     let host = crate::services::turn_host::refusal_before_turn;
     if let Some(refusal) = host(pool, &provider, channel_id.get(), session_key).await {
@@ -412,17 +404,19 @@ async fn start_reserved_headless_turn_admitted(
     // session_key row.
     let scheduled_snapshot_label = scheduled_snapshot_session_label(metadata.as_ref());
     let scheduled_snapshot_turn = scheduled_snapshot_label.is_some();
-    let session_key_basis_override = session_key_basis_override(
-        scheduled_snapshot_label.as_deref(),
-        metadata.as_ref(),
-        tmux_session_label.as_deref(),
-    );
+    let label = tmux_session_label.as_deref();
     let adk_session_key =
-        build_adk_session_key(shared, channel_id, &provider, session_key_basis_override).await;
+        headless_session_key(shared, channel_id, &provider, metadata.as_ref(), label).await;
     let canonical_registration = super::super::super::session_locator::headless_registration(
         &mut tmux_session_name,
         adk_session_key.as_deref(),
-        session_key_basis_override.is_none() && tmux_session_label.is_none(),
+        session_key_basis_override(
+            scheduled_snapshot_label.as_deref(),
+            metadata.as_ref(),
+            label,
+        )
+        .is_none()
+            && label.is_none(),
     );
     if !scheduled_snapshot_turn
         && valid_routine_metadata(metadata.as_ref()).is_some()
