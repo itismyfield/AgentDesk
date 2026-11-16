@@ -39,6 +39,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/cluster/intake_worker/test_executor.rs",
         "src/services/discord/session_relay_sink/fixtures/o_writer.rs",
         "src/services/discord/session_relay_sink/tests/stream_frame_fixtures.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/discord_mock.rs",
         "src/services/discord/tui_prompt_relay/tests/scenario_census_e2e.rs",
         "src/services/observability/events/test_capture.rs",
         "src/services/observability/test_support.rs",

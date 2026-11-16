@@ -2894,7 +2894,7 @@ src/
 │   │   │   │   ├── codex_o_handoff_replay_tests.rs
 │   │   │   │   ├── cold_start_incident_e2e_tests.rs
 │   │   │   │   ├── consumed_command_guard_e2e_tests.rs
-│   │   │   │   ├── discord_mock_tests.rs
+│   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── duplicate_intake_e2e_tests.rs
 │   │   │   │   ├── herdr_stop_activation_e2e_tests.rs
 │   │   │   │   ├── herdr_stop_activation_http_e2e_tests.rs

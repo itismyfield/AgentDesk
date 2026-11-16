@@ -28,7 +28,7 @@ mod catch_up_pagination_e2e;
 mod codex_o_handoff_replay;
 #[path = "consumed_command_guard_e2e_tests.rs"]
 mod consumed_command_guard_e2e;
-#[path = "discord_mock_tests.rs"]
+#[path = "discord_mock.rs"]
 pub(in crate::services::discord) mod discord_mock;
 #[cfg(unix)]
 #[path = "idle_phase_split_tests.rs"]
