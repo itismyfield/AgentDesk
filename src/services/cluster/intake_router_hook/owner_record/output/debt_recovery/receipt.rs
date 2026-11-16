@@ -138,17 +138,38 @@ impl Coverage {
     }
 }
 #[cfg(test)]
+#[derive(sqlx::FromRow)]
+struct EffectRow {
+    id: Uuid,
+    piece_index: i32,
+    state: String,
+    receipt: Option<Value>,
+    unit_key: Value,
+    payload_sha: String,
+    bot_id: i64,
+    snapshots: Value,
+}
+#[cfg(test)]
 impl authority::Session {
     pub(crate) async fn inspect(&self, plan: &impl Registration) -> Result<Vec<Effect>, String> {
         let key = plan.lookup();
         if key["provider"] != self.binding.provider || key["channel"] != self.binding.channel {
             return Err("debt lookup destination changed".into());
         }
-        let rows:Vec<(Uuid,i32,String,Option<Value>,Value,String,i64,Value)>=sqlx::query_as("SELECT id,piece_index,state,receipt,unit_key,payload_sha,bot_id,snapshots FROM o_herdr_debt_effects WHERE provider=$1 AND channel_id=$2 AND episode=$3 AND input_key=$4 AND plan_sha=$5 ORDER BY piece_index")
+        let rows:Vec<EffectRow>=sqlx::query_as("SELECT id,piece_index,state,receipt,unit_key,payload_sha,bot_id,snapshots FROM o_herdr_debt_effects WHERE provider=$1 AND channel_id=$2 AND episode=$3 AND input_key=$4 AND plan_sha=$5 ORDER BY piece_index")
             .bind(&self.binding.provider).bind(&self.binding.channel).bind(key["episode"].as_str().ok_or("debt episode")?).bind(key["input_key"].as_str().ok_or("debt input")?).bind(key["plan_sha"].as_str().ok_or("debt plan")?).fetch_all(&self.scope.pool).await.map_err(|e|e.to_string())?;
         rows.into_iter()
             .map(
-                |(id, index, state, receipt, unit, payload, bot, snapshots)| {
+                |EffectRow {
+                     id,
+                     piece_index: index,
+                     state,
+                     receipt,
+                     unit_key: unit,
+                     payload_sha: payload,
+                     bot_id: bot,
+                     snapshots,
+                 }| {
                     if key["snapshots"]
                         .as_array()
                         .ok_or("debt snapshots")?

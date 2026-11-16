@@ -541,7 +541,6 @@ pub(super) fn spawn(
     let Some(shadow) = shadow_of(provider) else {
         return;
     };
-    adoption_wake::boot(shared, provider, shadow);
     host::start(shadow, pg_gateway, || parts(shared, provider, config));
 }
 
