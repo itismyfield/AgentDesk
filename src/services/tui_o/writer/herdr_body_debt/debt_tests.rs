@@ -585,7 +585,16 @@ async fn split_native_coverage(text: &str, channel: u64) {
                 notice_origin: None,
             })
             .unwrap();
+        store
+            .append_ledger(LedgerEntry::NotSent {
+                serial: serial as u64,
+            })
+            .unwrap();
     }
+    assert!(
+        store.ledger().violation().is_none(),
+        "the original multi-piece ledger must be healthy"
+    );
     let path = seed(root.path(), original, evidence);
     let saved = std::fs::read(&path).unwrap();
     let plans = read(
