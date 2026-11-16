@@ -65,6 +65,28 @@ class InstanceDownTests(unittest.TestCase):
         self.assertEqual(result['credential_files'], 0)
         self.assertFalse(self.root.exists())
 
+    def test_live_publication_witness_preserves_strictness_and_original_socket_identity(self):
+        from scripts.dev_instance.files import publish_runtime, read_regular_text
+        listener = self._tmux_socket()
+        listener.close()
+        leaf = self.root/'runtime/instance-run.json'
+        for context in (None, []):
+            with self.assertRaises(ValueError):
+                publish_runtime(self.root, 'runtime/instance-run.json', {'generation': 1}, live_sockets=context)
+            self.assertFalse(leaf.exists())
+        identity = publish_runtime(self.root, 'runtime/instance-run.json', {'generation': 1}, live_sockets={})
+        original = read_regular_text(leaf)
+        metadata = (self.root/'runtime/tmux/socket').lstat()
+        wrong = {str(self.root/'runtime/tmux/socket'): (metadata.st_dev, metadata.st_ino+1)}
+        with self.assertRaises(ValueError):
+            publish_runtime(self.root, 'runtime/instance-run.json', {'generation': 2}, identity, wrong)
+        self.assertEqual(read_regular_text(leaf), original)
+        unknown = self._tmux_socket('unknown')
+        unknown.close()
+        with self.assertRaises(ValueError):
+            publish_runtime(self.root, 'runtime/instance-run.json', {'generation': 2}, identity, {})
+        self.assertEqual(read_regular_text(leaf), original)
+
     def test_down_rejects_unknown_socket_and_fifo_without_partial_deletion(self):
         for kind in ('socket', 'fifo'):
             leaf = self.root/'runtime/tmux/unknown'
@@ -540,6 +562,12 @@ class InstanceDownTests(unittest.TestCase):
         self.assertIsNone(child.poll())
 
     def test_live_keeper_and_child_exit_before_removal(self):
+        self._live_keeper_and_child_exit_before_removal(False)
+
+    def test_live_keeper_publication_accepts_late_native_tmux_socket(self):
+        self._live_keeper_and_child_exit_before_removal(True)
+
+    def _live_keeper_and_child_exit_before_removal(self, native_tmux):
         # A real keeper uses the production request/cleanup path with an owned fixture child.
         program = r'''
 import os, socket, subprocess, sys, time
@@ -582,6 +610,9 @@ with socket.socket(fileno=int(sys.argv[1])) as lifeline:
             process.wait(timeout=5)
             self.fail(process.stderr.read().decode())
         child_pid = ready['resources'][0]['pid']
+        if native_tmux:
+            listener = self._tmux_socket()
+            listener.close()
         import threading
         def acknowledge():
             frame = keeper.receive(parent)

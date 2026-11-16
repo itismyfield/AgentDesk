@@ -11,7 +11,7 @@ import time
 import uuid
 
 from . import host, keeper, lifecycle
-from .files import InstanceError, _open_dir, _open_parent, credential_alias, instance_root, read_regular_text, safe_absolute
+from .files import InstanceError, _open_dir, _open_parent, _tmux_witness, credential_alias, instance_root, read_regular_text
 from .lease import LeaseBusy, acquire
 from .manifest import validate
 
@@ -56,22 +56,6 @@ def _scan(descriptor, sockets=None, prefix=(), root=None):
 
 def _inode(metadata):
     return metadata.st_dev, metadata.st_ino
-
-
-def _tmux_witness(root):
-    if not safe_absolute(root/'runtime/tmux/socket').exists():
-        return {}
-    parent, name = _open_parent(root, 'runtime/tmux/socket', private=True)
-    try:
-        try:
-            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
-        except FileNotFoundError:
-            return {}
-        if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_nlink != 1:
-            raise InstanceError('invalid instance tmux socket')
-        return {str(root/'runtime/tmux/socket'): _inode(metadata)}
-    finally:
-        os.close(parent)
 
 
 def _close_tmux(manifest, witness, deadline):

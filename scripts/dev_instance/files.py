@@ -123,6 +123,8 @@ def _socket_witnesses(root, live_sockets):
         result = {}
         for value, identity in live_sockets.items():
             path = safe_absolute(value)
+            if path == root / "runtime/tmux/socket" and declaration["hosts"]["tmux"]["socket"] != str(path):
+                raise ValueError()
             if path not in allowed or type(identity) is not tuple or len(identity) != 2 \
                     or any(type(item) is not int or item < 0 for item in identity):
                 raise ValueError()
@@ -139,6 +141,22 @@ def _socket_witnesses(root, live_sockets):
         return result
     except (OSError, ValueError, TypeError, KeyError):
         raise InstanceError("live socket witness differs from its declaration") from None
+
+
+def _tmux_witness(root):
+    if not safe_absolute(root/'runtime/tmux/socket').exists():
+        return {}
+    parent, name = _open_parent(root, 'runtime/tmux/socket', private=True)
+    try:
+        try:
+            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return {}
+        if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_nlink != 1:
+            raise InstanceError('invalid instance tmux socket')
+        return {str(root/'runtime/tmux/socket'): (metadata.st_dev, metadata.st_ino)}
+    finally:
+        os.close(parent)
 
 
 def credential_alias(root, relative, descriptor, metadata):
@@ -298,6 +316,11 @@ def publish_runtime(root, relative, data, expected_identity=None, live_sockets=N
              or any(type(item) is not int or item < 0 for item in expected_identity))):
         raise InstanceError("invalid bounded runtime publication")
     root = safe_absolute(root)
+    if live_sockets is not None:
+        if type(live_sockets) is not dict:
+            raise InstanceError("invalid live socket witnesses")
+        # Native creates tmux after startup; both owner publications must witness that exact endpoint.
+        live_sockets = {**_tmux_witness(root), **live_sockets}
     validate_tree(root, live_sockets=live_sockets)
     parent, name = _open_parent(root, relative, private=True)
     descriptor = None
