@@ -1,11 +1,11 @@
 ---
-title: "이슈 8201: 불확실 Enter 뒤 남은 입력 보류 표지 (개정 2)"
+title: "이슈 8201: 불확실 Enter 뒤 남은 입력 보류 표지 (개정 3)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
     lg0: held
-    lg1: Path to the HoldEventuallyReleased or HoldReleasedOrNoticed or LaterInputStarts bug
-    lg2: Repeats forever, so HoldEventuallyReleased or HoldReleasedOrNoticed or LaterInputStarts breaks
+    lg1: Path to the HoldEventuallyReleased or HoldReleasedOrNoticed or LaterInputStarts or ReadableOursCleaned bug
+    lg2: Repeats forever, so HoldEventuallyReleased or HoldReleasedOrNoticed or LaterInputStarts or ReadableOursCleaned breaks
   }
   class lg0 yellow
   class lg1 bugPath
@@ -23,7 +23,6 @@ stateDiagram-v2
   s10: 보류: 우리 붙여넣기가 입력창에 남음, 새 입력 retained #183; receipt 창 안
   s11: 보류: 우리 붙여넣기가 입력창에 남음, 새 입력 retained
   [*] --> s0
-  s0 --> s0: 새 입력 시작이 보류 표지에 거절됨
   s0 --> s1: receipt 대기 시간이 지남
   s0 --> s2: 붙여넣기가 화면에 그려짐
   s0 --> s3: 새 입력 시작이 보류 표지에 거절됨
@@ -34,6 +33,7 @@ stateDiagram-v2
   s3 --> s7: 붙여넣기가 화면에 그려짐
   s1 --> s6: 새 입력 시작이 보류 표지에 거절됨
   s2 --> s7: 새 입력 시작이 보류 표지에 거절됨
+  s4 --> s4: 새 입력 시작이 보류 표지에 거절됨
   s4 --> s8: 붙여넣기 정착 시간이 지남
   s5 --> s8: receipt 대기 시간이 지남
   s6 --> s9: 붙여넣기가 화면에 그려짐
@@ -51,13 +51,13 @@ stateDiagram-v2
   class s2 yellow
   class s3 yellow
   class s4 yellow
+  class s4 bugPath
   class s5 yellow
   class s6 yellow
-  class s6 bugPath
   class s7 yellow
   class s8 yellow
+  class s8 bugPath
   class s9 yellow
-  class s9 bugPath
   class s10 yellow
   class s11 yellow
   class s11 repeats
