@@ -249,7 +249,7 @@ pub(crate) fn judge_in(tmux: &str, cwd: Option<&str>) -> Verdict {
     let liveness = if super::host_input::legacy_pane_alive(tmux) {
         PaneLiveness::Live
     } else {
-        match crate::services::platform::tmux::pane_liveness(tmux) {
+        match crate::services::session_host::TmuxHost.pane_liveness(tmux) {
             PaneLiveness::DeadOrAbsent => PaneLiveness::DeadOrAbsent,
             _ => PaneLiveness::ProbeError,
         }
