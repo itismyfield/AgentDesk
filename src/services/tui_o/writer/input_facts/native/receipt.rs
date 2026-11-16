@@ -40,9 +40,8 @@ fn exact_body(value: &Value) -> Option<String> {
     }
 }
 pub(super) fn read(value: &Value, line: &[u8], range: (u64, u64)) -> Option<Fact> {
-    if ["isMeta", "isCompactSummary", "isSidechain"]
-        .iter()
-        .any(|k| value[*k] == true)
+    if ["isMeta", "isSidechain"].iter().any(|k| value[*k] == true)
+        || crate::services::tui_o::shadow::identity::record_is_compact_summary(value)
     {
         return None;
     }
@@ -188,6 +187,88 @@ mod tests {
         };
         (guard, f, binding)
     }
+    #[test]
+    fn native_8148_receipt_compaction_markers_are_not_delivery() {
+        let (_guard, f, binding) = fixture();
+        let regs = f.history.native_classification_registrations().unwrap();
+        for marker in ["is_compact_summary", "isCompactSummary"] {
+            let mut summary =
+                json!({"type":"user","uuid":"summary","message":{"content":"한국어 원본 입력"}});
+            summary[marker] = json!(true);
+            let line = serde_json::to_vec(&summary).unwrap();
+            assert!(
+                read(&summary, &line, (0, line.len() as u64 + 1)).is_none(),
+                "{marker}: summary is not a receipt fact"
+            );
+            let rows = [
+                json!({"type":"user","uuid":"parent","message":{"content":"parent turn"}}),
+                summary,
+                json!({"type":"assistant","apiBlockIndex":0,"uuid":"answer","sessionId":"native","message":{"id":"answer","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}),
+                json!({"type":"system","subtype":"turn_duration"}),
+            ];
+            let bytes = rows.iter().map(|r| format!("{r}\n")).collect::<String>();
+            std::fs::write(&binding.source.path, &bytes).unwrap();
+            let (_, projection) = Projection::reopen(
+                binding.clone(),
+                bytes.len() as u64,
+                &format!("{:x}", Sha256::digest(bytes.as_bytes())),
+            )
+            .unwrap();
+            let projection = projection.unwrap();
+            assert!(
+                projection.receipts(&regs).is_empty(),
+                "{marker}: summary cannot bootstrap a receipt"
+            );
+            assert!(
+                projection.evidence(&regs).unwrap().is_empty(),
+                "{marker}: summary cannot execute the input"
+            );
+            assert!(
+                f.history
+                    .native_settlement("native-fixture", &f.ticket)
+                    .unwrap()
+                    .outcome
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn native_8148_projection_compaction_markers_are_not_own_prompts() {
+        let (_guard, f, binding) = fixture();
+        let regs = f.history.native_classification_registrations().unwrap();
+        for marker in ["is_compact_summary", "isCompactSummary"] {
+            let mut summary =
+                json!({"type":"user","uuid":"summary","message":{"content":"한국어 원본 입력"}});
+            summary[marker] = json!(true);
+            let rows = [
+                json!({"type":"user","uuid":"parent","message":{"content":"parent turn"}}),
+                summary,
+                json!({"type":"assistant","apiBlockIndex":0,"uuid":"answer","sessionId":"native","message":{"id":"answer","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}),
+                json!({"type":"system","subtype":"turn_duration"}),
+            ];
+            let bytes = rows.iter().map(|r| format!("{r}\n")).collect::<String>();
+            std::fs::write(&binding.source.path, &bytes).unwrap();
+            let (_, projection) = Projection::reopen(
+                binding.clone(),
+                bytes.len() as u64,
+                &format!("{:x}", Sha256::digest(bytes.as_bytes())),
+            )
+            .unwrap();
+            let projection = projection.unwrap();
+            assert!(projection.receipts(&regs).is_empty());
+            let analysis = projection.analyze(&regs).unwrap();
+            assert!(
+                analysis.evidence.is_empty(),
+                "{marker}: a summary is not an own Prompt without a confirmed receipt"
+            );
+            assert!(
+                analysis.barriers.is_empty(),
+                "{marker}: summary is not a foreign Prompt either"
+            );
+        }
+    }
+
     #[test]
     fn native_8148_receipt_exact_fact_rejects_normalized_mixed_meta_and_duplicate_uuid() {
         let (_guard, f, binding) = fixture();

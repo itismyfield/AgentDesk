@@ -467,7 +467,10 @@ mod projection {
                     receipt: receipt::read(&value, line, range),
                     event,
                     boundaries,
-                    meta: value["isMeta"] == true || value["isCompactSummary"] == true,
+                    meta: value["isMeta"] == true
+                        || crate::services::tui_o::shadow::identity::record_is_compact_summary(
+                            &value,
+                        ),
                 });
             }
             Ok(())
