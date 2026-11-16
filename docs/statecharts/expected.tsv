@@ -206,6 +206,15 @@ input-single-path/InputNativeStopRestoredBefore.cfg	InputNativeStop	NoUnprovenRe
 input-single-path/InputNativeStopRunningBefore.cfg	InputNativeStop	OwnInputStops	-
 input-single-path/InputNativeStopSourceBefore.cfg	InputNativeStop	LiveUnboundSourceStops,OwnInputStops	-
 input-single-path/InputNativeStopSummaryBefore.cfg	InputNativeStop	OwnInputStops	-
+input-single-path/InputNoticeRetryAfter.cfg	InputNoticeRetry	-	-
+input-single-path/InputNoticeRetryBefore.cfg	InputNoticeRetry	NoRetryWithoutWake	ImpossibleEventuallyClean
+input-single-path/InputNoticeRetryFloor.cfg	InputNoticeRetry	-	-
+input-single-path/InputNoticeRetryLate.cfg	InputNoticeRetry	-	-
+input-single-path/InputNoticeRetryLedger.cfg	InputNoticeRetry	-	-
+input-single-path/InputNoticeRetryNoEvidenceWake.cfg	InputNoticeRetry	-	EvidenceExactlyOnce
+input-single-path/InputNoticeRetryNoLedgerWake.cfg	InputNoticeRetry	-	ImpossibleEventuallyClean
+input-single-path/InputNoticeRetryNoRecordBoundary.cfg	InputNoticeRetry	NoEarlyLoss	-
+input-single-path/InputNoticeRetryUntimed.cfg	InputNoticeRetry	-	-
 input-single-path/InputNoticeSettlementAcceptanceGap.cfg	InputNoticeSettlement	-	AcceptedEventuallyEchoed
 input-single-path/InputNoticeSettlementAfter.cfg	InputNoticeSettlement	-	-
 input-single-path/InputNoticeSettlementBefore.cfg	InputNoticeSettlement	-	OwnedEventuallyExcluded,AcceptedEventuallyEchoed

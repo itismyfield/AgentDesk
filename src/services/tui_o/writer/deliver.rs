@@ -21,7 +21,7 @@ use crate::services::tui_o::repost::dispatch::{DispatchPermit, RepostWriter};
 use crate::services::tui_o::repost::projection::ReceiptOverlay;
 use crate::services::tui_o::repost::runner::{RepostHook, TurnWriter};
 use crate::services::tui_o::repost::send::{DispatchReport, WireOutcome};
-use crate::services::tui_o::shadow::SourceId;
+use crate::services::tui_o::shadow::{SourceId, UnitKey};
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::{
     LedgerEntry, LedgerState, LocalRetryMark, PieceDisposition, PieceOutcome, PieceRecord,
@@ -207,6 +207,7 @@ pub struct ChannelWriter<P, L, A> {
     pub(super) notice_cache:
         crate::services::tui_input::human_frame::history::notice_owner::generation::WorkCache,
     pub(super) notice_pending: HashMap<(SourceId, u64, u64), String>,
+    pub(super) notice_missing: std::collections::HashSet<UnitKey>,
     pub(super) boot: super::boot::Trace,
     pub(super) suspension: super::suspension::Suspension,
     channel: u64,
@@ -269,6 +270,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             notice_owners: Default::default(),
             notice_cache: Default::default(),
             notice_pending: HashMap::new(),
+            notice_missing: Default::default(),
             boot: super::boot::Trace::new(channel, None, 0, 0),
             suspension: super::suspension::Suspension::default(),
             channel,

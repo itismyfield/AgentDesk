@@ -115,10 +115,21 @@ impl DeliveryLease for Lease {
     }
 }
 #[derive(Clone, Default)]
-struct Alarms(Arc<Mutex<Vec<WriterAlarm>>>);
+struct Alarms(
+    Arc<Mutex<Vec<WriterAlarm>>>,
+    Option<Arc<crate::services::tui_o::alarm::AlarmRouter>>,
+);
 impl AlarmSink for Alarms {
-    fn raise(&self, _: u64, a: WriterAlarm) {
+    fn raise(&self, channel: u64, a: WriterAlarm) {
+        if let Some(router) = &self.1 {
+            router.raise(channel, a.clone());
+        }
         self.0.lock().unwrap().push(a)
+    }
+    fn waiting_cleared(&self, channel: u64) {
+        if let Some(router) = &self.1 {
+            router.waiting_cleared(channel);
+        }
     }
 }
 type Host = Actor<Port, Lease, Alarms, ChannelBindingLog>;
@@ -1142,3 +1153,6 @@ mod activation;
 mod owner;
 
 use owner::{abandon_rival, ambiguous_receipt, ambiguous_registration, ambiguous_withdraw};
+
+#[path = "notice_missing_tests.rs"]
+mod missing;
