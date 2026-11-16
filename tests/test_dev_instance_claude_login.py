@@ -127,6 +127,23 @@ class ClaudeLoginTests(TestCase):
             source.unlink()
         self.assertEqual(outside.read_text(), 'do not read')
 
+    def test_opt_in_log_capture_redacts_cookie_and_secret_fields(self):
+        from scripts.dev_instance import driver
+        manifest = self.fixture.prepare(claude_login=self.login)
+        root = Path(manifest['root'])
+        fields = [('Cookie: ', 'short-cookie-a'), ('Set-Cookie: ', 'short-cookie-b'),
+                  ('client_secret=', 'short-client-a'), ('CLIENT-SECRET: ', 'short-client-b'),
+                  ('{"client_secret":"', 'short-client-c'), ('{"Cookie":"', 'short-cookie-c'),
+                  ('private_key=', 'short-private-a'), ('{"secret":"', 'short-secret-a')]
+        source = root/'logs/dcserver.stdout.log'
+        source.write_text('SAFE_EARLY_EVIDENCE\n'+''.join(key+value+('"}' if key.startswith('{') else '')+'\n' for key, value in fields))
+        capture = driver.preserve_instance_log(manifest)
+        text = (root/capture['path']).read_text()
+        self.assertTrue(text.startswith('SAFE_EARLY_EVIDENCE\n'))
+        for key, value in fields:
+            with self.subTest(field=key):self.assertNotIn(value, text)
+        self.assertEqual(text.count('<redacted>'), len(fields))
+
     def test_no_opt_in_preserves_original_prepare_files_and_environment_golden(self):
         manifest = self.fixture.prepare()
         self.assertFalse(list(Path(manifest['root']).rglob('.claude.json')))

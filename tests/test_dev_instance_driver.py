@@ -164,6 +164,66 @@ class DriverTests(unittest.TestCase):
         encoded=json.dumps(result)
         for token in self.tokens.values():self.assertNotIn(token.decode(),encoded)
 
+    def test_run_uses_manifest_observation_window_and_shorter_caller_limit(self):
+        from types import SimpleNamespace
+        driver, _, _ = self.modules()
+        for opt_in, timeout, expected in [(False, 600, 120), (True, 600, 300), (True, 7, 7)]:
+            with self.subTest(opt_in=opt_in, timeout=timeout):
+                now, deadlines = [1000.0], []
+                manifest = copy.deepcopy(self.manifest)
+                if opt_in:manifest['claude_login'] = {}
+                def factory(admitted, deadline):
+                    deadlines.append(deadline)
+                    child = self.client(admitted, deadline)
+                    child.messages = lambda *args: []
+                    return child
+                with mock.patch.object(driver, 'admit', return_value=SimpleNamespace(manifest=manifest, run=self.record)), \
+                     mock.patch.object(driver.time, 'monotonic', side_effect=lambda: now[0]), \
+                     mock.patch.object(driver.time, 'sleep', side_effect=lambda seconds: now.__setitem__(0, now[0]+seconds)), \
+                     mock.patch.object(driver, 'preserve_instance_log', return_value={'status': 'SAVED'}):
+                    result = driver.run(self.fixture.base, self.root.name, 'claude', timeout,
+                                        rest_factory=factory, dispatch_request=self.dispatch_request)
+                self.assertEqual(deadlines, [1000+expected])
+                self.assertEqual(now[0], 1000+expected)
+                self.assertEqual(result['status'], 'UNEVALUABLE(admission)')
+                self.assertEqual(result['transmissions'], 2)
+
+    def test_default_cli_accepts_opt_in_response_after_180_seconds(self):
+        import contextlib, io
+        from types import SimpleNamespace
+        driver, _, _ = self.modules()
+        now, deadlines = [1000.0], []
+        manifest = {**self.manifest, 'claude_login': {}}
+        def factory(admitted, deadline):
+            deadlines.append(deadline)
+            child = self.client(admitted, deadline)
+            messages = child.messages
+            child.messages = lambda *args: messages(*args) if now[0] >= 1210 else []
+            return child
+        output = io.StringIO()
+        with mock.patch.object(driver, 'admit', return_value=SimpleNamespace(manifest=manifest, run=self.record)), \
+             mock.patch.object(driver.time, 'monotonic', side_effect=lambda: now[0]), \
+             mock.patch.object(driver.time, 'sleep', side_effect=lambda seconds: now.__setitem__(0, now[0]+seconds)), \
+             mock.patch.object(driver.driver_dispatch.Client, '_http', side_effect=self.dispatch_request), \
+             mock.patch.object(driver.discord_rest, 'Client', side_effect=factory), \
+             mock.patch.object(driver, 'preserve_instance_log', return_value={'status': 'SAVED'}), \
+             contextlib.redirect_stdout(output):
+            code = driver.main(['--instance', self.root.name, '--provider', 'claude'])
+        self.assertEqual(code, 0)
+        self.assertEqual(deadlines, [1300])
+        self.assertEqual(now[0], 1210)
+        self.assertEqual(json.loads(output.getvalue())['response_ids'], ['900010'])
+
+    def test_non_opt_in_observed_output_golden_is_unchanged(self):
+        import hashlib
+        result = self.execute(rest_factory=self.client)
+        encoded = json.dumps(result, sort_keys=True)
+        for value, label in [(str(self.root), '<root>'), (self.manifest['head'], '<head>'),
+                             (self.root.name, '<uuid>'), (self.record['nonce'], '<nonce>'),
+                             (self.card_id, '<card>'), (self.dispatch_id, '<dispatch>')]:
+            encoded = encoded.replace(value, label)
+        self.assertEqual(hashlib.sha256(encoded.encode()).hexdigest(), '678bb6d1e516baa2d0fe661044e687cd05edea198fb50ff6bbb402366613692e')
+
     def test_driver_preserves_log_only_after_an_explicit_login_turn(self):
         from dataclasses import replace
         driver, admission, _ = self.modules()

@@ -75,7 +75,7 @@ def preserve_instance_log(manifest):
     content = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', data.decode('utf-8', errors='replace'))
     content = re.sub(r'https?://[^\s\"<>]+|[\w.!#$%&*+/=?^`{|}~-]+@[\w.-]+[.][A-Za-z]{2,}', '<redacted>', content)
     content = re.sub(r'(?<![A-Za-z0-9_-])(?:mfa[.][A-Za-z0-9_-]{80,100}|[A-Za-z0-9_-]{23,28}[.][A-Za-z0-9_-]{6}[.][A-Za-z0-9_-]{27,45}|[A-Za-z0-9_-]{40,})(?![A-Za-z0-9_-])', '<redacted>', content)
-    content = re.sub(r"(?im)((?:token|password|authorization|api[_-]?key)[\"']?\s*[=:]\s*)[^\r\n]+", r'\1<redacted>', content)
+    content = re.sub(r"(?im)((?:token|password|authorization|api[_-]?key|(?:client[_-]?)?secret|(?:set[-_])?cookie|private[_-]?key)[\"']?\s*[=:]\s*)[^\r\n]+", r'\1<redacted>', content)
     content = re.sub(r"(?im)^.*\b(?:account|organization|subscription)\w*[\"']?\s*[:=].*$", '<redacted>', content)
     relative = 'outputs/instance-startup.log'
     parent, name = _open_parent(root, relative, private=True)
@@ -96,8 +96,8 @@ def run(base, instance_id, provider, timeout, *, identity_request=None, rest_fac
         admitted = admit(base,instance_id,deadline,request=identity_request)
     except IdentityRefused:
         return {'status':'UNEVALUABLE(identity)','transmissions':0}
-    deadline = min(deadline,time.monotonic()+MAX_OBSERVE_SECONDS)
     manifest = admitted.manifest
+    deadline = min(deadline,time.monotonic()+min(MAX_OBSERVE_SECONDS,observation_seconds(manifest)))
     summary = {'status':'UNEVALUABLE(admission)','input_source':'allowed_bot','human_input_coverage':False,
                'instance_id':instance_id,'nonce':admitted.run['nonce'],'head':manifest['head'],
                'authors':manifest['profile']['bots'],'transmissions':0,'transmission_attempts':0}
@@ -158,7 +158,7 @@ def main(argv=None):
     parser = Parser(description='Observe one isolated instance Discord turn')
     parser.add_argument('--instance',required=True)
     parser.add_argument('--provider',choices=('claude','codex'),required=True)
-    parser.add_argument('--timeout',type=float,default=180)
+    parser.add_argument('--timeout',type=float,default=MAX_OBSERVE_SECONDS)
     try:
         args = parser.parse_args(argv)
         result=run(safe_absolute(Path.home()/'.adk/dev/instances'),args.instance,args.provider,args.timeout)
