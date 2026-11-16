@@ -146,6 +146,26 @@ class InstanceDownTests(unittest.TestCase):
         self.assertIsNotNone(child.poll())
         self.assertFalse(self.root.exists())
 
+    def test_down_holds_empty_pane_list_even_with_a_valid_server_pid(self):
+        from scripts.dev_instance import down
+        listener = self._tmux_socket()
+        listener.listen(8)
+        self.addCleanup(listener.close)
+        calls = []
+        def control(argv, **kwargs):
+            calls.append(argv[3])
+            output = {'list-sessions': self.manifest['hosts']['tmux']['prefix']+'-claude\n',
+                      'list-panes': '', 'display-message': '99999999\n', 'kill-server': ''}[argv[3]]
+            return SimpleNamespace(returncode=0, stdout=output)
+        with patch.object(down.subprocess, 'run', side_effect=control), patch.object(down, '_wait_gone') as wait:
+            code, result = self.down()
+        self.assertEqual(code, 6, result)
+        self.assertEqual(result['status'], 'HOLD')
+        self.assertEqual(calls, ['list-sessions', 'list-panes', 'display-message'])
+        wait.assert_not_called()
+        self.assertTrue((self.root/'manifest.json').exists())
+        self.assertTrue((self.root/'runtime/tmux/socket').exists())
+
     def test_down_holds_foreign_tmux_sessions_without_kill_or_deletion(self):
         listener = self._tmux_socket()
         listener.listen(1)

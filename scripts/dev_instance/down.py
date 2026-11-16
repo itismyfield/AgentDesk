@@ -107,11 +107,11 @@ def _close_tmux(manifest, witness, deadline):
             if not sessions or any(name != prefix and not name.startswith(prefix+'-') for name in sessions):
                 raise lifecycle.CleanupPending(None)
             pids = control('list-panes', '-a', '-F', '#{pane_pid}').splitlines()
-            pids += control('display-message', '-p', '#{pid}').splitlines()
-            if not pids or any(not pid.isdecimal() or int(pid) <= 1 or int(pid) == os.getpid() for pid in pids):
+            server_pids = control('display-message', '-p', '#{pid}').splitlines()
+            if not pids or not server_pids or any(not pid.isdecimal() or int(pid) <= 1 or int(pid) == os.getpid() for pid in pids + server_pids):
                 raise lifecycle.CleanupPending(None)
             control('kill-server')
-            for pid in set(map(int, pids)):
+            for pid in set(map(int, pids + server_pids)):
                 _wait_gone(pid, deadline)
             try:
                 if connected():
