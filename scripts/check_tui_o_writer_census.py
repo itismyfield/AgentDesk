@@ -25,9 +25,9 @@ keeps that cut honest on every intermediate head:
       raw claim (a claiming gate fn, or under tui_o any `.claim(` call or
       `::claim` path) may appear only in the RAW_CLAIM_SITES functions, each
       listed with its reason.
-  (e) TURN_MARK_SITES pins the fresh-turn admission helper and its Candidate
-      mark call. TURN_ADMISSION_ORDER keeps that hook ahead of provider
-      submission and bridge spawn along the production intake path.
+  (e) TURN_MARK_SITES pins fresh-turn admission and Candidate publication.
+      TURN_ADMISSION_ORDER keeps the live admission guard ahead of provider
+      spawn, submission and bridge spawn along the production intake path.
 
 Census PASS is not flip readiness. `flip_ready` is reported on its own line and
 is true only when no census row is deferred and every FLIP_READY_TESTS funnel
@@ -97,8 +97,12 @@ GATE_RES = {
 }
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
 TURN_MARK_RES = {
-    "admit": re.compile(r"\bmark_codex_turn_admitted\b"),
-    "mark": re.compile(r"\.\s*mark_turn_admitted\s*\(|::\s*mark_turn_admitted\b"),
+    "admit": re.compile(r"\b(?:mark_codex_turn_admitted|admit_codex_first)\b"),
+    "mark": re.compile(r"\.\s*(?:mark_turn_admitted|admit_first)\s*\(|::\s*(?:mark_turn_admitted|admit_first)\b"),
+}
+TURN_ADMISSION_PATTERNS = {
+    # Distinguish provider launch from the earlier follow-up readiness probe.
+    "provider_spawn": re.compile(r"\bspawn_blocking\s*\(\s*move\s*\|\|\s*\{\s*let\s+mut\s+first_admission\b"),
 }
 DEFN_RE = re.compile(r"\bfn\s+$")
 FN_RE = re.compile(r"\bfn\s+(\w+)")
@@ -519,18 +523,24 @@ RAW_CLAIM_SITES: dict[str, tuple[str, ...]] = {
 }
 # The Candidate's send/seq capture is reachable only through local fresh-turn admission.
 TURN_MARK_SITES: dict[str, tuple[str, ...]] = {
-    "src/services/discord/router/turn_start.rs": ("log_session_strategy_diagnostic:admit",),
-    "src/services/tui_o/cutover.rs": ("mark_codex_turn_admitted:mark",),
+    "src/services/discord/router/message_handler/intake_turn.rs": ("handle_text_message:admit",),
+    "src/services/tui_o/cutover.rs": ("admit_codex_first:mark",),
+    # Original input admission shares the method spelling and remains pinned.
+    "src/services/discord/queue_io/input_owner/ingress.rs": ("admit_raw:mark",),
 }
 # Every token must occur once, in this order, inside its named production function.
 TURN_ADMISSION_ORDER: dict[str, dict[str, tuple[str, ...]]] = {
     "src/services/discord/router/message_handler/intake_turn.rs": {
         "handle_text_message": (
-            "log_session_strategy_diagnostic", "provider_dispatch::execute", "spawn_turn_bridge",
+            "log_session_strategy_diagnostic", "admit_codex_first", "provider_spawn",
+            "provider_dispatch::execute", "spawn_turn_bridge",
         ),
     },
     "src/services/discord/router/turn_start.rs": {
-        "log_session_strategy_diagnostic": ("mark_codex_turn_admitted", "spawn_blocking"),
+        "log_session_strategy_diagnostic": ("spawn_blocking",),
+    },
+    "src/services/tui_o/cutover.rs": {
+        "admit_codex_first": ("with_live_admission", "with_channels", "output_candidate", "admit_first"),
     },
 }
 # Funnel -> tests that drive it with O owning the channel. Each must exist as a
@@ -648,7 +658,9 @@ def _admission_order_problems(rel: str, text: str) -> list[str]:
         body = text[start + 1:end]
         positions = []
         for token in tokens:
-            pattern = r"\b" + r"\s*::\s*".join(map(re.escape, token.split("::"))) + r"\b"
+            pattern = TURN_ADMISSION_PATTERNS.get(token) or (
+                r"\b" + r"\s*::\s*".join(map(re.escape, token.split("::"))) + r"\b"
+            )
             matches = list(re.finditer(pattern, body))
             if len(matches) != 1:
                 problems.append(
