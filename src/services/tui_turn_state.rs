@@ -17,6 +17,9 @@ pub(crate) use self::completion_scan::{
 };
 #[cfg(test)]
 use self::completion_scan::{is_interactive_mode_housekeeping_type, is_torn_trailing_fragment};
+#[path = "tui_turn_state/tool_open.rs"]
+mod tool_open;
+pub(crate) use self::tool_open::provider_tool_call_open;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TuiTurnState {

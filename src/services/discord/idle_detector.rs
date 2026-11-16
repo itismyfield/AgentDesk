@@ -16,6 +16,8 @@
 //!     output. We piggy-back on that signal: an active turn whose freshness
 //!     anchor is older than 15 minutes is treated as "에이전트 15분 이상
 //!     응답 없음".
+//!   - tui_o turns run without that watcher, so their newest transcript record also
+//!     counts, and a quiet stretch inside an unreturned tool call is named as such.
 //!
 //! Why turn-start-aware (#1031 follow-up):
 //!   - The original implementation only compared `last_heartbeat` to `now`.
@@ -73,6 +75,9 @@ pub(crate) const MONITORING_KEY: &str = "system-detected:idle";
 /// signal, so the wording is direct.
 const MONITORING_DESCRIPTION: &str = "에이전트 15분 이상 응답 없음";
 
+/// Banner text when the quiet stretch sits inside a tool call that has not returned yet.
+const TOOL_RUNNING_DESCRIPTION: &str = "도구 실행 중 · 15분 이상 새 기록 없음";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IdleClassification {
     /// Mailbox has no active turn. If a system-detected entry is registered,
@@ -83,6 +88,68 @@ pub(crate) enum IdleClassification {
     /// Active turn, no heartbeat advanced within the threshold — register the
     /// auto-entry.
     Idle,
+    /// Like `Idle`, but the transcript shows a tool call still waiting for its
+    /// result; the entry says so instead of "응답 없음".
+    ToolRunning,
+}
+
+/// What a tui_o channel's provider transcript shows about the open turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TurnProgress {
+    /// Timestamp of the newest provider conversation record.
+    pub output_at: Option<DateTime<Utc>>,
+    pub tool_call_open: bool,
+}
+
+/// Records stamped further ahead than this are not progress evidence.
+const FUTURE_RECORD_SKEW: chrono::Duration = chrono::Duration::seconds(60);
+
+/// `classify` with the transcript's newest record as one more freshness anchor. Without
+/// progress evidence the verdict is exactly `classify`'s.
+pub(crate) fn classify_with_progress(
+    has_active_turn: bool,
+    last_heartbeat: Option<DateTime<Utc>>,
+    turn_started_at: Option<DateTime<Utc>>,
+    progress: Option<TurnProgress>,
+    now: DateTime<Utc>,
+    threshold: Duration,
+) -> IdleClassification {
+    let output_at = progress
+        .and_then(|progress| progress.output_at)
+        .filter(|at| *at <= now + FUTURE_RECORD_SKEW);
+    let freshness = last_heartbeat.max(output_at);
+    match classify(has_active_turn, freshness, turn_started_at, now, threshold) {
+        IdleClassification::Idle if progress.is_some_and(|p| p.tool_call_open) => {
+            IdleClassification::ToolRunning
+        }
+        other => other,
+    }
+}
+
+/// Transcript progress for a tui_o channel's turn, read from its tmux runtime binding's transcript;
+/// `None` for a channel O does not own.
+pub(crate) fn observe_turn_progress(channel: u64, tmux_session: &str) -> Option<TurnProgress> {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    if !super::health::o_owns(channel) {
+        return None;
+    }
+    let binding =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session);
+    let Some((provider, path)) = binding.and_then(|binding| {
+        let provider = match binding.runtime_kind {
+            RuntimeHandoffKind::ClaudeTui => ProviderKind::Claude,
+            RuntimeHandoffKind::CodexTui => ProviderKind::Codex,
+            _ => return None,
+        };
+        Some((provider, std::path::PathBuf::from(binding.output_path)))
+    }) else {
+        return Some(TurnProgress::default());
+    };
+    let state = crate::services::tui_turn_state::latest_provider_record_unix_nanos;
+    Some(TurnProgress {
+        output_at: state(&provider, &path).map(DateTime::from_timestamp_nanos),
+        tool_call_open: crate::services::tui_turn_state::provider_tool_call_open(&provider, &path),
+    })
 }
 
 /// Pure classifier suitable for unit testing without DB or tokio runtime.
@@ -206,13 +273,19 @@ async fn run_pass(shared: &SharedData, provider: &ProviderKind) {
         } else {
             None
         };
+        let progress = if has_active_turn && !in_recovery {
+            fetch_turn_progress(shared, provider, channel_id).await
+        } else {
+            None
+        };
         let classification = if in_recovery {
             IdleClassification::ActiveAndFresh
         } else {
-            classify(
+            classify_with_progress(
                 has_active_turn,
                 last_heartbeat,
                 turn_started_at,
+                progress,
                 now,
                 IDLE_THRESHOLD,
             )
@@ -226,7 +299,10 @@ async fn run_pass(shared: &SharedData, provider: &ProviderKind) {
         // Downgrading to `ActiveAndFresh` (rather than just skipping) also
         // CLEARS a banner that was registered while the turn was hung but has
         // since transitioned into a committed/background wait.
-        let effective = if classification == IdleClassification::Idle {
+        let effective = if matches!(
+            classification,
+            IdleClassification::Idle | IdleClassification::ToolRunning
+        ) {
             let signals =
                 super::inflight::load_inflight_state(provider, channel_id.get()).map(|state| {
                     InflightWaitSignals {
@@ -236,7 +312,7 @@ async fn run_pass(shared: &SharedData, provider: &ProviderKind) {
                     }
                 });
             if should_register_system_detected_idle(signals.as_ref()) {
-                IdleClassification::Idle
+                classification
             } else {
                 IdleClassification::ActiveAndFresh
             }
@@ -244,7 +320,10 @@ async fn run_pass(shared: &SharedData, provider: &ProviderKind) {
             classification
         };
         apply_classification(channel_id, effective, health_registry.as_ref()).await;
-        if effective == IdleClassification::Idle {
+        if matches!(
+            effective,
+            IdleClassification::Idle | IdleClassification::ToolRunning
+        ) {
             spawn_idle_expiry_reflect_if_needed(shared, provider, channel_id).await;
         }
     }
@@ -300,7 +379,10 @@ async fn apply_classification(
 ) {
     match classification {
         IdleClassification::Idle => {
-            register_idle_entry(channel_id, health_registry).await;
+            register_idle_entry(channel_id, MONITORING_DESCRIPTION, health_registry).await;
+        }
+        IdleClassification::ToolRunning => {
+            register_idle_entry(channel_id, TOOL_RUNNING_DESCRIPTION, health_registry).await;
         }
         IdleClassification::ActiveAndFresh | IdleClassification::NoActiveTurn => {
             clear_idle_entry(channel_id, health_registry).await;
@@ -310,6 +392,7 @@ async fn apply_classification(
 
 async fn register_idle_entry(
     channel_id: ChannelId,
+    description: &str,
     health_registry: Option<&Arc<super::health::HealthRegistry>>,
 ) {
     let store = global_monitoring_store();
@@ -318,17 +401,17 @@ async fn register_idle_entry(
         guard
             .list(channel_id.get())
             .into_iter()
-            .any(|entry| entry.key == MONITORING_KEY)
+            .any(|entry| entry.key == MONITORING_KEY && entry.description == description)
     };
     {
         let mut guard = store.lock().await;
         guard.upsert(
             channel_id.get(),
             MONITORING_KEY.to_string(),
-            MONITORING_DESCRIPTION.to_string(),
+            description.to_string(),
         );
     }
-    // Re-render only when the entry is newly registered. Subsequent polls
+    // Re-render only when the entry is new or its text changed. Subsequent polls
     // refresh the entry's `last_refresh` timestamp without churning Discord.
     if !already_registered {
         monitoring_status::schedule_render_channel(
@@ -360,6 +443,27 @@ async fn clear_idle_entry(
             channel_id,
         );
     }
+}
+
+/// The channel's transcript progress, read off the async runtime; `None` when the channel is not
+/// O-owned or has no named session.
+async fn fetch_turn_progress(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Option<TurnProgress> {
+    let channel_name = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.clone())
+    }?;
+    let tmux_session = provider.build_tmux_session_name(&channel_name);
+    let channel = channel_id.get();
+    tokio::task::spawn_blocking(move || observe_turn_progress(channel, &tmux_session))
+        .await
+        .ok()
+        .flatten()
 }
 
 async fn fetch_last_heartbeat(
@@ -460,6 +564,104 @@ mod tests {
         // Critical regression guard: absence of an inflight row is NOT a wait.
         // Preserves pre-#3146 behavior exactly (register on stale anchor).
         assert!(should_register_system_detected_idle(None));
+    }
+
+    const CHANNEL: u64 = 8_196_000_001;
+
+    /// A Claude TUI transcript bound to a fresh tmux session; records are `(minutes ago, row)`.
+    fn bound_transcript(
+        dir: &std::path::Path,
+        now: DateTime<Utc>,
+        rows: &[(i64, &str)],
+    ) -> (String, impl Drop) {
+        let tmux = ProviderKind::Claude
+            .build_tmux_session_name(&format!("i8196-{}", uuid::Uuid::new_v4()));
+        let lines: Vec<String> = rows
+            .iter()
+            .map(|(ago, row)| {
+                let at = (now - chrono::Duration::minutes(*ago)).to_rfc3339();
+                format!("{{{row},\"timestamp\":\"{at}\"}}\n")
+            })
+            .collect();
+        let path = dir.join(format!("{tmux}.jsonl"));
+        std::fs::write(&path, lines.concat()).unwrap();
+        let path = path.display().to_string();
+        let binding = crate::services::tui_o::cutover::test_override::bind_claude_tui_session;
+        let guard = binding(&tmux, &path);
+        (tmux, guard)
+    }
+
+    const PROMPT: &str = r#""type":"user","message":{"role":"user","content":"go"}"#;
+    const TOOL_A: &str = r#""type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"Bash","input":{}}]}"#;
+    const RESULT_A: &str = r#""type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"ok"}]}"#;
+    const TOOL_B: &str = r#""type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"b","name":"Bash","input":{}}]}"#;
+    const TEXT: &str = r#""type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"thinking aloud"}]}"#;
+
+    /// Runs the detector's verdict for an O-owned channel's 20-minute-old turn with no heartbeat.
+    fn verdict(channel: u64, tmux: &str, now: DateTime<Utc>) -> IdleClassification {
+        let started = Some(now - chrono::Duration::minutes(20));
+        let progress = observe_turn_progress(channel, tmux);
+        classify_with_progress(true, None, started, progress, now, IDLE_THRESHOLD)
+    }
+
+    /// Serializes env and binding state, isolates the runtime root and makes `CHANNEL` O-owned.
+    fn o_channel_fixture() -> (
+        impl Drop,
+        impl Drop,
+        impl Drop,
+        impl Drop,
+        tempfile::TempDir,
+    ) {
+        let env = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let kind = crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+        let boot =
+            crate::services::tui_o::cutover::test_override::force_channels(&[(CHANNEL, kind)]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            dir.path(),
+        );
+        (env, dedupe, boot, root, dir)
+    }
+
+    #[test]
+    fn tui_o_turn_running_tools_past_threshold_is_not_reported_unresponsive() {
+        let (_env, _dedupe, _boot, _root, dir) = o_channel_fixture();
+        let now = Utc::now();
+        let busy = [(20, PROMPT), (19, TOOL_A), (10, RESULT_A), (2, TOOL_B)];
+        let (tmux, _a) = bound_transcript(dir.path(), now, &busy);
+        assert_eq!(
+            verdict(CHANNEL, &tmux, now),
+            IdleClassification::ActiveAndFresh
+        );
+        // One tool call quiet past the threshold is named as a running tool, not "응답 없음".
+        let (long_tool, _b) = bound_transcript(dir.path(), now, &[(20, PROMPT), (16, TOOL_A)]);
+        assert_eq!(
+            verdict(CHANNEL, &long_tool, now),
+            IdleClassification::ToolRunning
+        );
+    }
+
+    #[test]
+    fn tui_o_turn_without_progress_past_threshold_is_still_reported() {
+        let (_env, _dedupe, _boot, _root, dir) = o_channel_fixture();
+        let now = Utc::now();
+        let quiet = [(20, PROMPT), (17, TOOL_A), (16, RESULT_A), (16, TEXT)];
+        let (tmux, _a) = bound_transcript(dir.path(), now, &quiet);
+        assert_eq!(verdict(CHANNEL, &tmux, now), IdleClassification::Idle);
+        // An unbound session gives no progress evidence and keeps the alarm.
+        assert_eq!(
+            verdict(CHANNEL, "AgentDesk-claude-i8196-unbound", now),
+            IdleClassification::Idle
+        );
+        // A channel O does not own keeps the heartbeat-only verdict even with fresh records.
+        let (fresh, _b) = bound_transcript(dir.path(), now, &[(20, PROMPT), (1, TEXT)]);
+        assert_eq!(verdict(CHANNEL + 1, &fresh, now), IdleClassification::Idle);
     }
 
     #[test]

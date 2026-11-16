@@ -79,6 +79,7 @@ mod transcript_binding_stall;
 pub(in crate::services::discord) use recovery::run_stall_watchdog_pass;
 pub(crate) use tmux_preflight::attach_tmux_probe_preflight;
 pub(crate) use tmux_preflight::spawn as spawn_tmux_probe_preflight;
+pub(in crate::services::discord) use transcript_binding_stall::o_owns;
 #[cfg(test)]
 pub(in crate::services::discord) use transcript_binding_stall::o_witness_backdate_for_tests;
 mod turn_deliver;

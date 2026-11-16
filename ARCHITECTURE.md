@@ -4627,7 +4627,8 @@ src/
 │   ├── tui_turn_state/
 │   │   ├── claude_meta.rs
 │   │   ├── claude_meta_tests.rs
-│   │   └── completion_scan.rs
+│   │   ├── completion_scan.rs
+│   │   └── tool_open.rs
 │   ├── turn_lifecycle/
 │   │   └── stop_result.rs
 │   ├── turn_orchestrator/
