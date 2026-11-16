@@ -813,10 +813,10 @@ impl FrontierResetState {
     pub(in crate::services) fn admit_mutation(
         &mut self,
         token: RelayFrontierToken,
-        confirmed: &AtomicU64,
+        confirmed_end_offset: &AtomicU64,
     ) -> bool {
         if self.incarnation != token.reset_incarnation
-            || confirmed.load(Ordering::Acquire) != token.committed_offset
+            || confirmed_end_offset.load(Ordering::Acquire) != token.committed_offset
         {
             return false;
         }
@@ -838,17 +838,17 @@ impl FrontierResetState {
         &mut self,
         end: u64,
         generation: Option<i64>,
-        confirmed: &AtomicU64,
-        confirmed_generation: &AtomicI64,
+        confirmed_end_offset: &AtomicU64,
+        confirmed_end_generation_mtime_ns: &AtomicI64,
         before_generation: impl FnOnce(),
     ) -> u64 {
-        let current = confirmed.load(Ordering::Acquire);
+        let current = confirmed_end_offset.load(Ordering::Acquire);
         if current < end {
             self.certificate.take();
-            confirmed.store(end, Ordering::Release);
+            confirmed_end_offset.store(end, Ordering::Release);
             if let Some(generation) = generation {
                 before_generation();
-                confirmed_generation.store(generation, Ordering::Release);
+                confirmed_end_generation_mtime_ns.store(generation, Ordering::Release);
             }
         }
         current.max(end)
@@ -856,11 +856,11 @@ impl FrontierResetState {
 
     pub(in crate::services) fn frontier_token(
         &mut self,
-        confirmed: &AtomicU64,
-        confirmed_generation: &AtomicI64,
+        confirmed_end_offset: &AtomicU64,
+        confirmed_end_generation_mtime_ns: &AtomicI64,
     ) -> RelayFrontierToken {
-        let committed_offset = confirmed.load(Ordering::Acquire);
-        let generation = confirmed_generation.load(Ordering::Acquire);
+        let committed_offset = confirmed_end_offset.load(Ordering::Acquire);
+        let generation = confirmed_end_generation_mtime_ns.load(Ordering::Acquire);
         if self.certificate.as_ref().is_some_and(|certificate| {
             !certificate.matches(committed_offset, generation, self.incarnation)
         }) {
@@ -877,15 +877,15 @@ impl FrontierResetState {
         expected_offset: u64,
         new_offset: u64,
         generation: Option<i64>,
-        confirmed: &AtomicU64,
-        confirmed_generation: &AtomicI64,
+        confirmed_end_offset: &AtomicU64,
+        confirmed_end_generation_mtime_ns: &AtomicI64,
         before_generation: impl FnOnce(),
     ) -> bool {
         debug_assert!(new_offset < expected_offset);
         if self.active_mutations != 0 {
             return false;
         }
-        let reset = confirmed
+        let reset = confirmed_end_offset
             .compare_exchange(
                 expected_offset,
                 new_offset,
@@ -898,7 +898,7 @@ impl FrontierResetState {
             self.certificate.take();
             if let Some(generation) = generation {
                 before_generation();
-                confirmed_generation.store(generation, Ordering::Release);
+                confirmed_end_generation_mtime_ns.store(generation, Ordering::Release);
             }
         }
         reset
@@ -910,14 +910,14 @@ impl FrontierResetState {
         end: u64,
         generation: i64,
         certificate: Option<SourceCertificate>,
-        confirmed: &AtomicU64,
-        confirmed_generation: &AtomicI64,
+        confirmed_end_offset: &AtomicU64,
+        confirmed_end_generation_mtime_ns: &AtomicI64,
     ) -> FrontierPublication {
-        let current = confirmed.load(Ordering::Acquire);
+        let current = confirmed_end_offset.load(Ordering::Acquire);
         if self.certificate.as_ref().is_some_and(|certificate| {
             !certificate.matches(
                 current,
-                confirmed_generation.load(Ordering::Acquire),
+                confirmed_end_generation_mtime_ns.load(Ordering::Acquire),
                 self.incarnation,
             )
         }) {
@@ -932,10 +932,10 @@ impl FrontierResetState {
         }
         if current < end {
             self.certificate.take();
-            confirmed.store(end, Ordering::Release);
-            confirmed_generation.store(generation, Ordering::Release);
+            confirmed_end_offset.store(end, Ordering::Release);
+            confirmed_end_generation_mtime_ns.store(generation, Ordering::Release);
         }
-        let current_generation = confirmed_generation.load(Ordering::Acquire);
+        let current_generation = confirmed_end_generation_mtime_ns.load(Ordering::Acquire);
         if let Some(certificate) = certificate
             .filter(|certificate| certificate.matches(end, current_generation, self.incarnation))
         {
@@ -949,11 +949,11 @@ impl FrontierResetState {
     #[cfg(all(test, unix))]
     pub(in crate::services) fn frontier_tuple_for_tests(
         &self,
-        confirmed: &AtomicU64,
+        confirmed_end_offset: &AtomicU64,
         generation: &AtomicI64,
     ) -> (u64, i64, u64, bool) {
         (
-            confirmed.load(Ordering::Acquire),
+            confirmed_end_offset.load(Ordering::Acquire),
             generation.load(Ordering::Acquire),
             self.incarnation,
             self.certificate.is_some(),
