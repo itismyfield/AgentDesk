@@ -776,26 +776,15 @@ mod tests {
     fn tui_o_torn_last_record_reads_as_unknown_until_it_completes() {
         let (_env, _dedupe, _boot, _root, dir) = o_channel_fixture();
         let now = Utc::now();
-        let claude = (big_result("b", 2), TOOL_B);
-        let codex_call =
-            r#""type":"response_item","payload":{"type":"function_call","call_id":"c2"}"#;
-        let codex_out =
+        let result_b = big_result("b", 2);
+        let call = r#""type":"response_item","payload":{"type":"function_call","call_id":"c2"}"#;
+        let out =
             r#""type":"response_item","payload":{"type":"function_call_output","call_id":"c2"}"#;
+        let claude = [(20, PROMPT), (17, TOOL_A), (16, RESULT_A)];
+        let codex = [(17, SEARCH_CALL), (16, SEARCH_OUTPUT)];
         let cases = [
-            (
-                ClaudeTui,
-                CHANNEL,
-                vec![(20, PROMPT), (17, TOOL_A), (16, RESULT_A)],
-                claude.1,
-                claude.0.as_str(),
-            ),
-            (
-                CodexTui,
-                CODEX_CHANNEL,
-                vec![(17, SEARCH_CALL), (16, SEARCH_OUTPUT)],
-                codex_call,
-                codex_out,
-            ),
+            (ClaudeTui, CHANNEL, &claude[..], TOOL_B, result_b.as_str()),
+            (CodexTui, CODEX_CHANNEL, &codex[..], call, out),
         ];
         for (kind, channel, rows, call, result) in cases {
             let (tmux, _g) = bound_as(kind, dir.path(), now, &rows);
@@ -803,16 +792,11 @@ mod tests {
             let (head, tail) = line.split_at(line.len() / 2);
             append(dir.path(), &tmux, head);
             assert_eq!(verdict(channel, &tmux, now), ToolStateUnknown);
-            append(dir.path(), &tmux, tail);
+            // Once whole it reads again; blank, whitespace-only and CRLF endings are no torn tail.
+            append(dir.path(), &tmux, &format!("{tail}\n  \n"));
             assert_eq!(verdict(channel, &tmux, now), ToolRunning);
-            // Blank and whitespace-only lines and a CRLF ending are not a torn tail.
-            append(dir.path(), &tmux, "\n  \n");
-            assert_eq!(verdict(channel, &tmux, now), ToolRunning);
-            append(
-                dir.path(),
-                &tmux,
-                &stamped(result, now, -16 * 60).replace('\n', "\r\n"),
-            );
+            let crlf = stamped(result, now, -16 * 60).replace('\n', "\r\n");
+            append(dir.path(), &tmux, &crlf);
             assert_eq!(verdict(channel, &tmux, now), Idle);
         }
     }
