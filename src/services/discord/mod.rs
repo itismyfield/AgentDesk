@@ -1,3 +1,4 @@
+use crate::services::engine_runtime::EngineRuntime;
 mod abandon_request_store;
 mod adk_session;
 pub(crate) mod admin_host_guard;
@@ -1006,21 +1007,15 @@ impl UserRecord {
 /// can accept `&Arc<SharedData>` from a non-`services::discord` caller
 /// (Phase 3 worker polling loop).
 pub(crate) struct SharedData {
+    pub(in crate::services) engine: Arc<EngineRuntime>,
     /// Core state (sessions + request lifecycle) — requires atomic access
     pub(super) core: Mutex<CoreState>,
     /// Per-channel request lifecycle actor registry.
     mailboxes: ChannelMailboxRegistry,
-    /// Serializes `/resume` rebinds with intake session selection for each channel.
-    /// Weak entries let inactive channels disappear once the final intake/resume
-    /// guard drops; the map is opportunistically pruned on each lookup, so channel
-    /// churn cannot retain one mutex per historical channel for process lifetime.
-    session_transition_locks: dashmap::DashMap<ChannelId, std::sync::Weak<tokio::sync::Mutex<()>>>,
     /// Bot settings — mostly reads, rare writes
     pub(super) settings: tokio::sync::RwLock<DiscordBotSettings>,
     /// Per-channel timestamps of the last Discord API call (for rate limiting)
     pub(super) api_timestamps: dashmap::DashMap<ChannelId, tokio::time::Instant>,
-    /// Cached skill list: (name, description)
-    pub(super) skills_cache: tokio::sync::RwLock<Vec<(String, String)>>,
     /// Active tmux output watchers for terminal→Discord relay.
     pub(super) tmux_watchers: TmuxWatcherRegistry,
     /// Per-channel relay coordination state. Unlike `tmux_watchers`, this
@@ -1072,8 +1067,6 @@ pub(crate) struct SharedData {
     pub(super) dispatch: DispatchRoutingState,
     /// Set to true after Discord gateway ready event fires.
     pub(super) bot_connected: std::sync::atomic::AtomicBool,
-    /// ISO 8601 timestamp of the last completed turn (for health reporting).
-    pub(super) last_turn_at: std::sync::Mutex<Option<String>>,
     /// #3038 cluster D — session-scoped override / reset-pending state (the
     /// `model_overrides` map, the fast-mode / Codex-goals enablement sets, the
     /// per-cause `*_session_reset_pending` sets plus the aggregated
@@ -1092,8 +1085,6 @@ pub(crate) struct SharedData {
     /// Serializes sweeps and retains retries handed to a busy channel.
     pub(super) catch_up_scan_in_progress:
         dashmap::DashMap<ChannelId, (bool, Option<CatchUpRetryState>)>,
-    /// Per-channel turn start time — used for metrics duration calculation.
-    pub(super) turn_start_times: dashmap::DashMap<ChannelId, std::time::Instant>,
     /// Per-channel known speakers collected lazily from incoming messages.
     pub(super) channel_rosters: dashmap::DashMap<ChannelId, Vec<UserRecord>>,
     /// #3038 cluster G — cached Discord HTTP runtime state: the gateway
@@ -1105,16 +1096,6 @@ pub(crate) struct SharedData {
     /// SHA-256 hash of the bot token — used to namespace the pending-queue directory
     /// so that multiple bots sharing the same runtime root cannot steal each other's queues.
     pub(super) token_hash: String,
-    /// #1332 round-3: the provider this `SharedData` was bootstrapped for.
-    /// Persisted alongside `token_hash` so the `queued_placeholders` write-through
-    /// helper can resolve `discord_queued_placeholders/<provider>/<token_hash>/`
-    /// without a hot-path lock acquisition on `settings`.
-    pub(super) provider: ProviderKind,
-    /// HTTP API port for self-referencing requests (from config server.port).
-    pub(super) api_port: u16,
-    /// Shared PostgreSQL pool for PG-backed route and runtime helpers.
-    pub(super) pg_pool: Option<sqlx::PgPool>,
-    pub(in crate::services::discord) policy: PolicyRuntime,
     /// Weak reference to the process-wide health registry so turn handlers can
     /// reach dedicated Discord bot HTTP clients without creating an Arc cycle.
     pub(super) health_registry: std::sync::Weak<health::HealthRegistry>,
@@ -1142,6 +1123,22 @@ pub(crate) struct SharedData {
 pub(crate) use session_transition::{
     SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy, UnplacedLease,
 };
+
+impl std::ops::Deref for SharedData {
+    type Target = EngineRuntime;
+
+    fn deref(&self) -> &Self::Target {
+        &self.engine
+    }
+}
+
+// Fixtures customize immutable inputs before sharing their sole runtime owner.
+#[cfg(test)]
+impl std::ops::DerefMut for SharedData {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::get_mut(&mut self.engine).expect("fixture runtime must have a single owner")
+    }
+}
 
 impl SharedData {
     pub(super) fn has_runtime_storage(&self) -> bool {
@@ -1331,15 +1328,21 @@ pub(super) fn make_shared_data_for_tests_with_barrier(
     shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
 ) -> Arc<SharedData> {
     let tmux_relay_coords = Arc::new(dashmap::DashMap::new());
+    let engine_runtime = Arc::new(EngineRuntime::new(
+        ProviderKind::Claude,
+        9,
+        pg_pool,
+        PolicyRuntime { engine: None },
+        Vec::new(),
+    ));
     Arc::new(SharedData {
+        engine: engine_runtime,
         core: tokio::sync::Mutex::new(CoreState {
             sessions: std::collections::HashMap::new(),
         }),
         mailboxes: ChannelMailboxRegistry::default(),
-        session_transition_locks: dashmap::DashMap::new(),
         settings: tokio::sync::RwLock::new(DiscordBotSettings::default()),
         api_timestamps: dashmap::DashMap::new(),
-        skills_cache: tokio::sync::RwLock::new(Vec::new()),
         tmux_watchers: TmuxWatcherRegistry::new_with_coords(Arc::clone(&tmux_relay_coords)),
         tmux_relay_coords,
         ui: PlaceholderState {
@@ -1392,7 +1395,6 @@ pub(super) fn make_shared_data_for_tests_with_barrier(
             role_overrides: dashmap::DashMap::new(),
         },
         bot_connected: std::sync::atomic::AtomicBool::new(false),
-        last_turn_at: std::sync::Mutex::new(None),
         overrides: SessionOverrideState {
             model_overrides: dashmap::DashMap::new(),
             fast_mode_channels: dashmap::DashSet::new(),
@@ -1407,17 +1409,12 @@ pub(super) fn make_shared_data_for_tests_with_barrier(
         last_message_ids: dashmap::DashMap::new(),
         catch_up_retry_pending: dashmap::DashMap::new(),
         catch_up_scan_in_progress: dashmap::DashMap::new(),
-        turn_start_times: dashmap::DashMap::new(),
         channel_rosters: dashmap::DashMap::new(),
         http: RuntimeHttpCache {
             cached_serenity_ctx: tokio::sync::OnceCell::new(),
             cached_bot_token: tokio::sync::OnceCell::new(),
         },
         token_hash: "test-token-hash".to_string(),
-        provider: ProviderKind::Claude,
-        api_port: 9,
-        pg_pool,
-        policy: PolicyRuntime { engine: None },
         health_registry: std::sync::Weak::new(),
         known_slash_commands: tokio::sync::OnceCell::new(),
         inflight_signals: tokio::sync::broadcast::channel(256).0,

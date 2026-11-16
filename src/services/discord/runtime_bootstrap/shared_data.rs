@@ -55,8 +55,7 @@ pub(super) fn run_bot_build_shared_data(
     flags: UiFeatureFlags,
     restored: RestoredSessionState<'_>,
 ) -> Arc<SharedData> {
-    // #3479 Item 3: destructure the grouped params back into the original
-    // variable names so the construction body below is byte-identical.
+    // Keep supplied handles as owned inputs at the bootstrap boundary.
     let RuntimeServices {
         initial_skills,
         token_hash,
@@ -85,15 +84,21 @@ pub(super) fn run_bot_build_shared_data(
     } = restored;
     let process_generation = runtime_store::allocate_process_generation();
     let tmux_relay_coords = Arc::new(dashmap::DashMap::new());
+    let engine_runtime = Arc::new(EngineRuntime::new(
+        provider.clone(),
+        api_port,
+        pg_pool,
+        PolicyRuntime { engine },
+        initial_skills,
+    ));
     Arc::new(SharedData {
+        engine: engine_runtime,
         core: Mutex::new(CoreState {
             sessions: HashMap::new(),
         }),
         mailboxes: ChannelMailboxRegistry::default(),
-        session_transition_locks: dashmap::DashMap::new(),
         settings: tokio::sync::RwLock::new(bot_settings),
         api_timestamps: dashmap::DashMap::new(),
-        skills_cache: tokio::sync::RwLock::new(initial_skills),
         tmux_watchers: crate::services::discord::TmuxWatcherRegistry::new_with_coords(Arc::clone(
             &tmux_relay_coords,
         )),
@@ -176,7 +181,6 @@ pub(super) fn run_bot_build_shared_data(
             role_overrides: dashmap::DashMap::new(),
         },
         bot_connected: std::sync::atomic::AtomicBool::new(false),
-        last_turn_at: std::sync::Mutex::new(None),
         // #3038 S2: wrapped verbatim at the first-member position (evaluation-order preserved).
         overrides: SessionOverrideState {
             model_overrides: {
@@ -230,17 +234,12 @@ pub(super) fn run_bot_build_shared_data(
         last_message_ids: dashmap::DashMap::new(),
         catch_up_retry_pending: dashmap::DashMap::new(),
         catch_up_scan_in_progress: dashmap::DashMap::new(),
-        turn_start_times: dashmap::DashMap::new(),
         channel_rosters: dashmap::DashMap::new(),
         http: RuntimeHttpCache {
             cached_serenity_ctx: tokio::sync::OnceCell::new(),
             cached_bot_token: tokio::sync::OnceCell::new(),
         },
         token_hash,
-        provider: provider.clone(),
-        api_port,
-        pg_pool,
-        policy: PolicyRuntime { engine },
         health_registry: Arc::downgrade(&health_registry),
         known_slash_commands: tokio::sync::OnceCell::new(),
         // #2448: capacity 256 gives ~hundreds of in-flight turns headroom
@@ -323,5 +322,277 @@ mod tests {
             .upgrade()
             .expect("caller retains its registry while the runtime lives");
         assert!(Arc::ptr_eq(&shared_registry, &registry));
+    }
+
+    fn assert_engine_runtime_identity(shared: &Arc<SharedData>) {
+        use crate::services::engine_runtime::EngineRuntime;
+        let through_shared: &EngineRuntime = shared.as_ref();
+        assert!(std::ptr::eq(through_shared, shared.engine.as_ref()));
+        let retained = Arc::clone(&shared.engine);
+        assert!(Arc::ptr_eq(&retained, &shared.engine));
+        assert!(std::ptr::eq(
+            &shared.session_transition_locks,
+            &retained.session_transition_locks
+        ));
+        assert!(std::ptr::eq(&shared.skills_cache, &retained.skills_cache));
+        assert!(std::ptr::eq(&shared.last_turn_at, &retained.last_turn_at));
+        assert!(std::ptr::eq(
+            &shared.turn_start_times,
+            &retained.turn_start_times
+        ));
+        assert!(std::ptr::eq(&shared.provider, &retained.provider));
+        assert!(std::ptr::eq(&shared.api_port, &retained.api_port));
+        assert!(std::ptr::eq(&shared.pg_pool, &retained.pg_pool));
+        assert!(std::ptr::eq(&shared.policy, &retained.policy));
+        assert_eq!(Arc::strong_count(&retained), 2);
+    }
+
+    #[tokio::test]
+    async fn engine_runtime_fixture_keeps_one_object_and_none_pool() {
+        let shared = make_shared_data_for_tests_with_storage(None);
+        assert_engine_runtime_identity(&shared);
+        assert_eq!(shared.provider, ProviderKind::Claude);
+        assert_eq!(shared.api_port, 9);
+        assert!(shared.engine.pg_pool.is_none());
+        assert!(shared.engine.policy.engine.is_none());
+        let channel = ChannelId::new(8192);
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        shared
+            .session_transition_locks
+            .insert(channel, Arc::downgrade(&lock));
+        assert!(Arc::ptr_eq(
+            &lock,
+            &shared
+                .engine
+                .session_transition_locks
+                .get(&channel)
+                .unwrap()
+                .upgrade()
+                .unwrap()
+        ));
+        shared
+            .skills_cache
+            .write()
+            .await
+            .push(("name".into(), "description".into()));
+        assert_eq!(shared.engine.skills_cache.read().await[0].0, "name");
+        *shared.engine.last_turn_at.lock().unwrap() = Some("completed".into());
+        assert_eq!(
+            shared.last_turn_at.lock().unwrap().as_deref(),
+            Some("completed")
+        );
+        let started = std::time::Instant::now();
+        shared.turn_start_times.insert(channel, started);
+        assert_eq!(
+            *shared.engine.turn_start_times.get(&channel).unwrap(),
+            started
+        );
+        let other_owner = Arc::clone(&shared);
+        assert!(Arc::ptr_eq(&shared.engine, &other_owner.engine));
+        let retained = Arc::clone(&shared.engine);
+        drop(shared);
+        drop(other_owner);
+        assert_eq!(Arc::strong_count(&retained), 1);
+        assert_eq!(retained.skills_cache.read().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn engine_runtime_fixture_customization_keeps_the_unique_arc() {
+        let mut shared = make_shared_data_for_tests_with_storage(None);
+        let original = Arc::as_ptr(&shared.engine);
+        let unique = Arc::get_mut(&mut shared).unwrap();
+        unique.provider = ProviderKind::Codex;
+        unique.api_port = 8193;
+        assert_eq!(shared.engine.provider, ProviderKind::Codex);
+        assert_eq!(shared.engine.api_port, 8193);
+        assert_eq!(original, Arc::as_ptr(&shared.engine));
+        let retained = Arc::clone(&shared.engine);
+        let mutation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Arc::get_mut(&mut shared).unwrap().api_port = 8194;
+        }));
+        assert!(
+            mutation.is_err(),
+            "shared runtime ownership must never clone on mutation"
+        );
+        assert_eq!(retained.api_port, 8193);
+        assert_eq!(original, Arc::as_ptr(&shared.engine));
+    }
+
+    #[tokio::test]
+    async fn engine_runtime_both_constructors_preserve_pool_and_policy_pg() {
+        let root = crate::config::TestRuntimeRootGuard::new();
+        let restore = RestoreRegistry(crate::engine::ops::turn_ops::health_registry());
+        let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
+            eprintln!("SKIP: PostgreSQL fixture is not configured");
+            return;
+        };
+        let database =
+            std::env::var("POSTGRES_TEST_ADMIN_DB").unwrap_or_else(|_| "postgres".into());
+        let pool = crate::db::postgres::connect_test_pool_with_max_connections(
+            &format!("{base}/{database}"),
+            "engine runtime ownership",
+            1,
+        )
+        .await
+        .unwrap();
+        let original_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let original_size = pool.size();
+        for configured in [None, Some(pool.clone())] {
+            let policy = configured.as_ref().map(|_| {
+                let config = crate::config::Config {
+                    policies: crate::config::PoliciesConfig {
+                        dir: root.path().join("empty-policies"),
+                        hot_reload: false,
+                        ..crate::config::PoliciesConfig::default()
+                    },
+                    ..crate::config::Config::default()
+                };
+                crate::engine::PolicyEngine::new(&config).unwrap()
+            });
+            let witness = policy.as_ref().map(crate::engine::PolicyEngine::downgrade);
+            if let Some(policy) = &policy {
+                policy
+                    .eval_js::<()>("globalThis.ownershipTrace = ['before-bootstrap']; undefined")
+                    .unwrap();
+            }
+            let registry = Arc::new(health::HealthRegistry::new());
+            let initial_skills = vec![("retained".into(), "prompt skill".into())];
+            let shared = run_bot_build_shared_data(
+                DiscordBotSettings::default(),
+                &ProviderKind::Codex,
+                RuntimeServices {
+                    initial_skills: initial_skills.clone(),
+                    token_hash: "engine-ownership".into(),
+                    api_port: 8192,
+                    health_registry: registry.clone(),
+                    pg_pool: configured.clone(),
+                    engine: policy,
+                },
+                ProcessLifecycleCounters {
+                    global_active: Arc::new(0.into()),
+                    global_finalizing: Arc::new(0.into()),
+                    shutdown_remaining: Arc::new(1.into()),
+                },
+                UiFeatureFlags {
+                    two_message_panel_enabled: false,
+                },
+                RestoredSessionState {
+                    model_overrides: &[],
+                    node_overrides: &[],
+                    fast_mode_channels: &[],
+                    fast_mode_reset_entries: &[],
+                    fast_mode_reset_channels: &[],
+                    codex_goals_channels: &[],
+                    codex_goals_reset_channels: &[],
+                },
+            );
+            let fixture = make_shared_data_for_tests_with_storage(configured.clone());
+            assert_engine_runtime_identity(&shared);
+            assert_engine_runtime_identity(&fixture);
+            assert!(!Arc::ptr_eq(&shared.engine, &fixture.engine));
+            assert_eq!(shared.engine.provider, ProviderKind::Codex);
+            assert_eq!(shared.engine.api_port, 8192);
+            assert_eq!(*shared.engine.skills_cache.read().await, initial_skills);
+            assert_eq!(shared.pg_pool.is_some(), configured.is_some());
+            assert_eq!(fixture.engine.pg_pool.is_some(), configured.is_some());
+            if configured.is_some() {
+                for stored in [
+                    &shared.pg_pool,
+                    &shared.engine.pg_pool,
+                    &fixture.pg_pool,
+                    &fixture.engine.pg_pool,
+                ] {
+                    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(stored.as_ref().unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(pid, original_pid);
+                }
+                shared
+                    .policy
+                    .engine
+                    .as_ref()
+                    .unwrap()
+                    .eval_js::<()>("ownershipTrace.push('after-bootstrap'); undefined")
+                    .unwrap();
+                let trace: String = witness
+                    .as_ref()
+                    .unwrap()
+                    .upgrade()
+                    .unwrap()
+                    .eval_js("ownershipTrace.join(',')")
+                    .unwrap();
+                assert_eq!(trace, "before-bootstrap,after-bootstrap");
+            } else {
+                assert!(shared.engine.policy.engine.is_none());
+            }
+            assert_eq!(pool.size(), original_size);
+        }
+        pool.close().await;
+        drop(restore);
+        drop(root);
+    }
+
+    #[test]
+    fn engine_runtime_ownership_layout_has_no_shadow_or_extra_allocation() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let discord = std::fs::read_to_string(root.join("src/services/discord/mod.rs")).unwrap();
+        let bootstrap = std::fs::read_to_string(
+            root.join("src/services/discord/runtime_bootstrap/shared_data.rs"),
+        )
+        .unwrap();
+        let layout = discord
+            .split("pub(crate) struct SharedData {")
+            .nth(1)
+            .unwrap()
+            .split("\n}")
+            .next()
+            .unwrap();
+        for field in [
+            "session_transition_locks",
+            "skills_cache",
+            "last_turn_at",
+            "turn_start_times",
+            "provider",
+            "api_port",
+            "pg_pool",
+            "policy",
+        ] {
+            assert!(
+                !layout
+                    .lines()
+                    .any(|line| line.trim_start().starts_with(&format!("{field}:"))
+                        || line.contains(&format!(") {field}:"))),
+                "shadow field: {field}"
+            );
+        }
+        let fixture = discord
+            .split("pub(super) fn make_shared_data_for_tests_with_barrier(")
+            .nth(1)
+            .unwrap()
+            .split("\nuse queue_dispatch")
+            .next()
+            .unwrap();
+        let production = bootstrap
+            .split("pub(super) fn run_bot_build_shared_data(")
+            .nth(1)
+            .unwrap()
+            .split("\n#[cfg(test)]")
+            .next()
+            .unwrap();
+        for constructor in [fixture, production] {
+            assert_eq!(
+                constructor.matches("Arc::new(EngineRuntime::new(").count(),
+                1,
+                "each constructor allocates one runtime"
+            );
+            assert!(
+                constructor.contains("engine: engine_runtime,"),
+                "constructor must retain its runtime"
+            );
+        }
     }
 }
