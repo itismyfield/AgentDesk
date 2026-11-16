@@ -31,6 +31,7 @@ import concurrent.futures
 import copy
 import datetime as dt
 import errno
+import hashlib
 import http.client
 import json
 import uuid
@@ -2657,7 +2658,8 @@ def _mailbox_idle_evidence(mailbox: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# Retained ownership and exact attempt-bind closure mirror SnapshotRead::v2_holds_input.
+# Retained ownership and exact attempt-bind closure mirror SnapshotRead::v2_holds_input; an opaque
+# bind also closes through the unsent retained input its receipt names, as the runtime's TurnBind pairs them.
 # Unsettled drop receipts still need their owner even when every retained notice was enqueued.
 QUEUE_V2_KEYS = frozenset({
     "version", "items", "head_injection", "retained_inputs", "terminal_identities", "namespace",
@@ -2692,12 +2694,16 @@ def _queue_v2_waiting(payload: Any) -> bool | None:
     return bool(payload["items"] or payload.get("owed_drop_receipts")
                 or any(_owed_to_owner(entry) for entry in payload["retained_inputs"])
                 or payload["head_injection"] is not None
-                or any(b["at"].get("kind") not in ("settled", "queued") and not _bind_closed_by_retained(b["at"], payload["retained_inputs"])
+                or any(b["at"].get("kind") not in ("settled", "queued") and not _bind_closed_by_retained(b, payload["retained_inputs"])
                        for b in binds))
 
 
-def _bind_closed_by_retained(at: dict, retained: list) -> bool:
-    """An unowed retained input closes the exact attempt bind of its stored identity or any member."""
+def _bind_closed_by_retained(bind: dict, retained: list) -> bool:
+    """An unowed retained input closes the exact attempt bind of its stored identity or any member;
+    an opaque bind closes through the never-attempted input its receipt names."""
+    at = bind["at"]
+    if at.get("kind") == "opaque":
+        return any(_closes_opaque_bind(entry, bind.get("receipt")) for entry in retained)
     identity, attempt = at.get("identity"), at.get("attempt")
     if (at.get("kind") != "attempt" or not isinstance(identity, dict) or "primary" not in identity
             or not isinstance(attempt, dict) or not attempt.get("nonce")):
@@ -2707,6 +2713,28 @@ def _bind_closed_by_retained(at: dict, retained: list) -> bool:
         and entry["input"].get("attempt") == attempt
         and (entry["input"].get("identity") == identity or identity in _member_identities(entry["input"]))
         for entry in retained)
+
+
+def _closes_opaque_bind(entry: Any, receipt: Any) -> bool:
+    """A never-attempted retained input closes the opaque bind whose receipt names its original
+    (source_admission Ticket::receipt: ``tk:<ticket>:`` and the digest of the canonical original)."""
+    input_ = entry.get("input") if isinstance(entry, dict) else None
+    reason = entry.get("reason") if isinstance(entry, dict) else None
+    if (not isinstance(input_, dict) or not isinstance(input_.get("original"), dict)
+            or not isinstance(receipt, str) or not receipt.startswith("tk:") or not isinstance(reason, dict)):
+        return False
+    start_rejected = (input_.get("attempt") is None and reason.get("kind") == "rejected"
+                      and str(reason.get("reason") or "").startswith("start_rejected: "))
+    if entry.get("disposition") != "opaque_unsent" and not start_rejected:
+        return False
+    canonical = {k: v for k, v in input_["original"].items()
+                 if k not in ("created_at_wall_time_ms", "channel_name", "queue_notice_claimed")}
+    if isinstance(canonical.get("source_message_queued_generations"), list):
+        canonical["source_message_queued_generations"] = [
+            {k: v for k, v in s.items() if k != "enqueued_at_epoch_us"} if isinstance(s, dict) else s
+            for s in canonical["source_message_queued_generations"]]
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return receipt.rsplit(":", 1)[-1] == hashlib.sha256(encoded).hexdigest()[:32]
 
 
 def _member_identities(input_: dict) -> list:
@@ -3038,7 +3066,17 @@ def _target_mailbox_debug_snapshot(
         or detail.get("queue_depth"),
         "target_mailbox_count": len(target),
         "target_mailboxes": [_mailbox_debug_summary(mailbox) for mailbox in target],
+        "target_writers": _target_writer_rows(detail, provider=provider, channel_id=channel_id),
     }
+
+
+def _target_writer_rows(detail: dict[str, Any], *, provider: str, channel_id: str) -> list[dict[str, Any]] | None:
+    """The target channel's tui_o writer readiness rows; None when health detail omits the list."""
+    writers = detail.get("tui_o_writer_readiness")
+    if not isinstance(writers, list):
+        return None
+    return [row for row in writers if isinstance(row, dict) and row.get("provider") == provider
+            and str(row.get("channel_id")) == str(channel_id)]
 
 
 def _collect_wait_timeout_diagnostics(
