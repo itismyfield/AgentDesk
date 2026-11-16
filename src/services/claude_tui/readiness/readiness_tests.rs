@@ -455,6 +455,53 @@ fn restored_history_needs_new_activity_and_summary_needs_a_matching_stop() {
     );
 }
 
+// A resume start admits over the exit metadata its history ends with, and closes for good on the
+// first turn record or permission marker after it; that turn then needs its own terminal.
+#[test]
+fn resumed_start_closes_on_the_first_turn_record_or_permission_marker_after_it() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let old = Utc::now() - chrono::Duration::hours(1);
+    let resumed = || {
+        let r = Rig::new();
+        r.append(json!({"type":"assistant","timestamp":old,
+            "message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}}));
+        r.terminal();
+        r.append(json!({"type":"last-prompt"}));
+        r.append(json!({"type":"cost-state"}));
+        r.hook("resume");
+        r.append(json!({"type":"tools-used"}));
+        r
+    };
+    let r = resumed();
+    assert!(r.ready(), "exit and resume metadata is no turn of this run");
+    r.append(json!({"type":"user","timestamp":Utc::now(),
+        "message":{"role":"user","content":"typed in the pane"}}));
+    assert!(!r.ready(), "a prompt typed after the resume is Running");
+    r.assistant("its answer");
+    r.append(json!({"type":"system","subtype":"stop_hook_summary"}));
+    assert!(
+        !r.ready(),
+        "the resume start cannot stand in for that turn's terminal"
+    );
+    r.terminal();
+    assert!(r.ready());
+    let r = resumed();
+    r.append(json!({"type":"permission-mode","permissionMode":"default"}));
+    assert!(
+        !r.ready(),
+        "a permission marker after the start is a turn starting"
+    );
+    let r = Rig::new();
+    r.terminal();
+    r.append(json!({"type":"user","timestamp":Utc::now(),
+        "message":{"role":"user","content":"typed while the start hook ran"}}));
+    r.hook("resume");
+    assert!(
+        !r.ready(),
+        "a prompt this run already took is not its history"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn fresh_payload_waits_for_session_start_and_running_idle_path_sends_no_key() {
@@ -482,6 +529,42 @@ fn fresh_payload_waits_for_session_start_and_running_idle_path_sends_no_key() {
         ["load", "paste", "Enter", "load", "paste", "Enter"]
     );
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
+}
+
+// The warm follow-up's timed-out hold says whether a later look can clear it: an idle restored
+// source that proves nothing cannot, a turn still running can.
+#[cfg(unix)]
+#[test]
+fn a_timed_out_hold_tells_an_unmoved_idle_source_from_a_running_turn() {
+    use super::super::guarded_outcome::SubmissionError;
+    use super::super::input::submission::tests::{ScriptedTmux, view};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    r.assistant("old answer");
+    r.terminal();
+    daemon_restart(&r.session);
+    let tmux = ScriptedTmux::new(&view("", false));
+    tmux.set_dead(false);
+    super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(Some(Duration::ZERO)));
+    let unproven = || match r.send() {
+        Err(SubmissionError::Held(hold)) => hold.unproven,
+        other => panic!("the wait must hold: {other:?}"),
+    };
+    assert!(unproven(), "nothing in flight can supply the evidence");
+    let seen = watched(&r.session, None);
+    r.append(json!({"type":"ai-title"}));
+    assert!(!seen.unproven(), "a source that moved waits");
+    r.assistant("still Running");
+    assert!(!unproven(), "a running turn ends by itself");
+    assert!(tmux.sends().is_empty());
+    super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
+}
+
+/// A daemon restart: the ledger forgets `session`, while its files, markers and launch remain.
+pub(crate) fn daemon_restart(session: &str) {
+    let mut state = ledger();
+    state.entries.retain(|source, _| source.session != session);
+    state.starts.retain(|(started, _), _| started != session);
 }
 
 #[cfg(unix)]
@@ -911,3 +994,132 @@ fn startup_workspace_caller_uses_home_only_plan_before_every_dialog_key() {
 #[cfg(unix)]
 #[path = "compact_tests.rs"]
 mod compact_tests;
+
+// A process restart forgets volatile readiness without deleting durable hook evidence.
+pub(crate) fn forget_session(session: &str) {
+    let mut state = ledger();
+    state.entries.retain(|source, _| source.session != session);
+    state.starts.retain(|(logical, _), _| logical != session);
+}
+
+// Reproduce the interval after durable certification and before volatile Start publication.
+pub(crate) fn restore_bound_start(session: &str, at: DateTime<Utc>) {
+    let binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(session).unwrap();
+    let nonce = source::nonce(session).flatten().unwrap();
+    let bound = Source {
+        session: session.into(),
+        nonce: Some(nonce.clone()),
+        native: binding.session_id.unwrap(),
+        path: binding.output_path.into(),
+    };
+    let mut state = ledger();
+    state.entries.entry(bound.clone()).or_default();
+    state.starts.insert((session.into(), nonce), (at, bound));
+}
+
+pub(crate) fn retained_sources(session: &str) -> usize {
+    let nonce = source::nonce(session).flatten();
+    ledger()
+        .entries
+        .keys()
+        .filter(|source| source.session == session && source.nonce == nonce)
+        .count()
+}
+
+#[test]
+fn a_closed_managed_attempt_refuses_before_waiting_for_native_readiness() {
+    use crate::services::claude_tui::submission_fence::{self, SubmissionFence};
+    use std::sync::Arc;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fence = Arc::new(submission_fence::test_support::RefusingFence::default());
+    let refused = fence.before_first_payload().unwrap_err().to_string();
+    let result = submission_fence::with_scope(Some(fence.clone()), || {
+        wait::prepare(
+            "closed-without-source",
+            None,
+            None,
+            Duration::ZERO,
+            super::super::input::PromptReadinessKind::ProvenWarmFollowup,
+        )
+    });
+    assert_eq!(result.err().as_deref(), Some(refused.as_str()));
+    let cancel = crate::services::provider::CancelToken::new();
+    cancel
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::Release);
+    let result = submission_fence::with_scope(Some(fence), || {
+        wait::prepare(
+            "closed-without-source",
+            None,
+            Some(&cancel),
+            Duration::ZERO,
+            super::super::input::PromptReadinessKind::ProvenWarmFollowup,
+        )
+    });
+    assert_eq!(
+        result.err().as_deref(),
+        Some(super::super::input::PROMPT_READY_CANCELLED_ERROR)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_stash_holds_when_the_final_composer_capture_is_unreadable() {
+    use super::super::submission_fence::{
+        self, IdleStashContext, PreSubmitPersistenceRefused, SubmissionFence,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    struct Managed;
+    impl SubmissionFence for Managed {
+        fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
+            Ok(())
+        }
+        fn refusal(&self) -> Option<PreSubmitPersistenceRefused> {
+            None
+        }
+        fn idle_stash_context(&self) -> Option<IdleStashContext> {
+            Some(IdleStashContext {
+                channel: 1,
+                target: "unreadable-composer".into(),
+                available: true,
+            })
+        }
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let identity =
+        crate::services::session_identity_metadata::runtime_identity("unreadable-composer")
+            .unwrap()
+            .environment_assignment()
+            .unwrap();
+    fs::write(dir.path().join("identity"), identity).unwrap();
+    let program = dir.path().join("tmux");
+    fs::write(&program, "#!/bin/sh\nd=$(dirname \"$0\")\ncase \"$*\" in *show-environment*) cat \"$d/identity\" ;; *pane_dead*) printf '0\\n' ;; *capture-pane*) [ -f \"$d/capture\" ] && cat \"$d/capture\" ;; *) exit 1 ;; esac\n").unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    let pane =
+        super::super::busy_inject::Pane::with_program("unreadable-composer", program).unwrap();
+    let unread = Err(super::super::busy_inject::Veto::ScreenUnread);
+    assert_eq!(idle::before_paste(&pane, true), Ok(false));
+    assert_eq!(idle::before_paste(&pane, false), Ok(false));
+    fs::write(dir.path().join("capture"), "not a composer").unwrap();
+    assert_eq!(idle::before_paste(&pane, true), Ok(false));
+    fs::write(
+        dir.path().join("capture"),
+        super::super::input::submission::tests::view("person draft", false),
+    )
+    .unwrap();
+    assert_eq!(idle::before_paste(&pane, true), Ok(true));
+    let held = submission_fence::with_scope(Some(std::sync::Arc::new(Managed)), || {
+        idle::before_paste(&pane, false)
+    });
+    assert_eq!(
+        held, unread,
+        "a removed stash permission cannot append to the person's draft"
+    );
+    fs::write(
+        dir.path().join("capture"),
+        super::super::input::submission::tests::view("", false),
+    )
+    .unwrap();
+    assert_eq!(idle::before_paste(&pane, true), Ok(false));
+}

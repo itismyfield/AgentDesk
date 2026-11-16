@@ -30,6 +30,8 @@ USER_FEATURE_MAP_INPUTS = (
     "scripts/generate_user_feature_map.py",
     "tests/test_generate_user_feature_map.py",
     "tests/test_user_feature_map_static.py",
+    "*.py",
+    "*.rs",
 )
 
 # Broad script/test roots cover imported helpers and fixture-copy dependencies.
@@ -47,6 +49,9 @@ SELF_TEST_INPUTS: dict[str, tuple[str, ...]] = {
     "Isolated instance credential binary tests": (
         "Cargo.toml",
         "Cargo.lock",
+        "src/lib.rs",
+        "src/config/test_instance*",
+        "src/services/claude_tui/hook_relay*",
         "scripts/dev-instance.sh",
         "scripts/dev_instance/**",
         "src/cli/args.rs",
@@ -63,6 +68,11 @@ SELF_TEST_INPUTS: dict[str, tuple[str, ...]] = {
         "scripts/ci/script_check_inputs.py",
         "tests/test_script_check_inputs.py",
         "tests/test_high_risk_recovery_path_filter.py",
+    ),
+    "Statechart index generator tests": (
+        "scripts/ci/statechart_index.py",
+        "tests/test_statechart_index.py",
+        "docs/statecharts/**",
     ),
     "Writer namespace Windows exact-target runner fixtures (#5670)": SCRIPT_TEST_INPUTS,
     "External toolchain draft/approval/smoke tests (#4555)": SCRIPT_TEST_INPUTS,

@@ -114,6 +114,106 @@ async fn removed_origins_are_owed_by_the_removing_commit_until_acked() {
     assert!(on_disk(&path).get("owed_drop_receipts").is_none());
 }
 
+#[tokio::test]
+async fn a_clear_removes_opaque_admissions_without_attempt_cancellation_debt() {
+    let _root = TestRuntimeRootGuard::new();
+    let (registry, channel) = (ChannelMailboxRegistry::default(), 7_340_308);
+    let (handle, path) = owner(&registry, channel).await;
+    admit(&handle, channel, 81, None).await;
+    let mut opaque = original(channel, 82);
+    opaque.source_message_ids = vec![81, 82];
+    let admitted = handle
+        .v2_admit_ticket_with_context(opaque, "opaque-82".into(), provenance(Some("o-82")))
+        .await
+        .unwrap();
+    assert!(matches!(
+        admitted,
+        super::super::source_admission::Admitted::RetainedOpaque
+    ));
+    let before = on_disk(&path);
+    assert_eq!(before["retained_inputs"].as_array().unwrap().len(), 1);
+    assert_eq!(waiting(channel, "o-82"), Some(Waiting::Accepted));
+
+    let cleared = handle.clear(ctx()).await;
+    assert!(cleared.persistence.failed.is_empty());
+    assert!(!cleared.persistence.count_unknown);
+    let after = on_disk(&path);
+    assert!(after["items"].as_array().unwrap().is_empty());
+    assert!(after["retained_inputs"].as_array().unwrap().is_empty());
+    assert!(owed(&after).is_empty());
+    assert_eq!(waiting(channel, "o-82"), None);
+}
+
+#[tokio::test]
+async fn a_preserving_clear_keeps_the_running_origins_receipt_unsettled() {
+    let _root = TestRuntimeRootGuard::new();
+    let (registry, channel) = (ChannelMailboxRegistry::default(), 7_340_309);
+    let handle = registry.handle(ChannelId::new(channel));
+    let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+    assert!(
+        handle
+            .try_start_turn(
+                token.clone(),
+                poise::serenity_prelude::UserId::new(1),
+                MessageId::new(91),
+            )
+            .await
+    );
+    let (handle, path) = owner(&registry, channel).await;
+    admit(&handle, channel, 91, Some("o-running")).await;
+    admit(&handle, channel, 92, Some("o-waiting")).await;
+    let key = handle
+        .v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let key = owner.reserve(
+                attempt("nonce-running"),
+                PreparedPayload {
+                    frame: "frame".into(),
+                    digest: "digest".into(),
+                    attribution: json!({}),
+                    followers: Vec::new(),
+                },
+            )?;
+            drop(owner.arm(&key, 0)?);
+            Ok(key)
+        })
+        .await
+        .unwrap();
+
+    let cleared = handle.discard_waiting_or_refused(ctx()).await.unwrap();
+    assert!(cleared.persistence.failed.is_empty());
+    assert!(!cleared.persistence.count_unknown);
+    assert!(cleared.removed_token.is_none());
+    assert_eq!(cleared.discarded_message_ids, [MessageId::new(92)]);
+    assert!(std::sync::Arc::ptr_eq(
+        handle.snapshot().await.cancel_token.as_ref().unwrap(),
+        &token
+    ));
+    let after = on_disk(&path);
+    assert_eq!(after["items"].as_array().unwrap().len(), 1);
+    assert_eq!(after["head_injection"]["identity"]["primary"], 91);
+    assert!(after["retained_inputs"].as_array().unwrap().is_empty());
+    assert_eq!(
+        owed(&after),
+        [(92, "\"o-waiting\"".into(), "\"cancelled\"".into())]
+    );
+    assert_eq!(waiting(channel, "o-running"), Some(Waiting::Accepted));
+    handle
+        .v2_request(move |slot| slot.as_mut().ok_or("no owner")?.settle(&key, true, 1))
+        .await
+        .unwrap();
+    let settled = on_disk(&path);
+    assert_eq!(settled["admission_binds"][0]["at"]["kind"], "settled");
+    assert!(
+        settled["terminal_identities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|terminal| terminal["identity"]["primary"] == 91)
+    );
+    assert_eq!(waiting(channel, "o-running"), None);
+}
+
 fn attempt(nonce: &str) -> AttemptIdentity {
     AttemptIdentity {
         nonce: nonce.into(),
@@ -362,4 +462,112 @@ async fn a_repeated_notice_never_owes_a_settled_refusal_again_pg() {
     }
     pool.close().await;
     db.drop().await;
+}
+
+#[tokio::test]
+async fn a_preserving_clear_cancels_protected_sources_that_were_never_armed() {
+    let _root = TestRuntimeRootGuard::new();
+    for (channel, reserve) in [(7_340_310, false), (7_340_311, true)] {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(channel));
+        let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            handle
+                .try_start_turn(
+                    token,
+                    poise::serenity_prelude::UserId::new(1),
+                    MessageId::new(101)
+                )
+                .await
+        );
+        let (handle, path) = owner(&registry, channel).await;
+        admit(&handle, channel, 101, Some("o-unarmed")).await;
+        if reserve {
+            handle
+                .v2_request(|slot| {
+                    slot.as_mut().ok_or("no owner")?.reserve(
+                        attempt("unarmed"),
+                        PreparedPayload {
+                            frame: "frame".into(),
+                            digest: "digest".into(),
+                            attribution: json!({}),
+                            followers: Vec::new(),
+                        },
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let cleared = handle.discard_waiting_or_refused(ctx()).await.unwrap();
+        assert!(cleared.persistence.failed.is_empty());
+        assert_eq!(cleared.discarded_message_ids, [MessageId::new(101)]);
+        assert!(
+            !cleared
+                .persistence
+                .not_waiting
+                .contains(&MessageId::new(101))
+        );
+        let after = on_disk(&path);
+        assert!(after["items"].as_array().unwrap().is_empty());
+        assert!(after["head_injection"].is_null());
+        assert_eq!(
+            owed(&after),
+            [(101, "\"o-unarmed\"".into(), "\"cancelled\"".into())]
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_clear_does_not_owe_cancelled_after_failed_or_uncertain_attempts() {
+    let _root = TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    let (handle, path) = owner(&registry, 7_340_312).await;
+    for (id, veto) in [(111, "InvalidInput"), (112, "pane_busy")] {
+        admit(&handle, 7_340_312, id, Some(&format!("o-{id}"))).await;
+        let key = refuse_head(&handle, 7_340_312, &format!("n-{id}"), veto).await;
+        if id == 112 {
+            handle
+                .v2_request(move |slot| {
+                    let key = serde_json::from_value(key).map_err(|e| e.to_string())?;
+                    slot.as_mut().ok_or("no owner")?.notice_enqueued(&key)
+                })
+                .await
+                .unwrap();
+        }
+    }
+    handle
+        .v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let owed = owner.owed_drops();
+            owner.ack_owed_drops(&owed)
+        })
+        .await
+        .unwrap();
+    admit(&handle, 7_340_312, 113, Some("o-uncertain")).await;
+    handle
+        .v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let key = owner.reserve(
+                attempt("uncertain"),
+                PreparedPayload {
+                    frame: "frame".into(),
+                    digest: "digest".into(),
+                    attribution: json!({}),
+                    followers: Vec::new(),
+                },
+            )?;
+            drop(owner.arm(&key, 0)?);
+            owner.tick(owner.settle_due().ok_or("no due")?)
+        })
+        .await
+        .unwrap();
+    admit(&handle, 7_340_312, 114, Some("o-retryable")).await;
+    refuse_head(&handle, 7_340_312, "retryable", "pane_busy").await;
+    let cleared = handle.clear(ctx()).await;
+    assert!(cleared.persistence.failed.is_empty());
+    assert_eq!(
+        owed(&on_disk(&path)),
+        [(114, "\"o-retryable\"".into(), "\"cancelled\"".into())]
+    );
 }

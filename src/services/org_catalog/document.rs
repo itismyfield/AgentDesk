@@ -123,6 +123,7 @@ pub(crate) fn parse_org_schema(content: &str) -> Result<OrgSchema, String> {
 }
 
 pub(in crate::services) fn read_document_at(path: &Path) -> Result<Option<OrgSchema>, String> {
+    crate::config::test_instance::environment::validate_path(path)?;
     match std::fs::read_to_string(path) {
         Ok(content) => parse_org_schema(&content)
             .map(Some)

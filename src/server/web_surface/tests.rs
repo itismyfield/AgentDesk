@@ -42,6 +42,7 @@ fn request(method: Method, path: &str, peer: &str) -> Request<Body> {
     let mut request = Request::builder()
         .method(method)
         .uri(path)
+        .header("host", "localhost:8791")
         .body(Body::empty())
         .unwrap();
     request

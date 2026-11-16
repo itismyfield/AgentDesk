@@ -8,6 +8,40 @@ const RAW_SUBAGENT: &str = r#"<subagent_notification>
 const CHROME_RAW_SUBAGENT: &str = "No response requested.\n<subagent_notification>{\"agent_path\":\"/tmp/private-agent\",\"status\":{\"completed\":\"Read-only review complete.\"}}</subagent_notification>";
 pub(super) static SIGINT_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+#[cfg(unix)]
+#[test]
+fn provider_interrupt_on_keeps_the_session_and_uses_only_the_planned_key() {
+    use super::stop_host::tests::{Fixture, bound_token, run};
+    use crate::services::session_host::TmuxHost;
+
+    let fixture = Fixture::new();
+    let name = "stop-fixture";
+    let token = bound_token(&ProviderKind::Codex, name);
+    run(async {
+        let outcome = interrupt_provider_cli_turn(&ProviderKind::Codex, &token, "cancel").await;
+        assert!(outcome.sent_keys, "{outcome:?}");
+        assert!(TmuxHost.legacy_has_session(name));
+        let calls = fixture.take_calls();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("send-keys "))
+                .count(),
+            1
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call == "send-keys -t =stop-fixture: Escape"),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| call.contains("kill-")),
+            "{calls:?}"
+        );
+    });
+}
+
 #[test]
 fn stale_inflight_message_hides_raw_subagent_notification() {
     let message = stale_inflight_message(RAW_SUBAGENT);

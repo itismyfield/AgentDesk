@@ -41,6 +41,8 @@ use self::hook_observer::{
 };
 
 mod observed_prompt_decision;
+mod scheduled_prompt;
+mod slash_command_output;
 pub(in crate::services::discord) use self::observed_prompt_decision::observed_prompt_starts_external_turn_lifecycle;
 use self::observed_prompt_decision::{
     RelayObservedPromptInjectionDecision, relay_observed_prompt_injected_prompt_decision,
@@ -51,6 +53,18 @@ pub(crate) fn input_notice_content(prompt: &str) -> Option<String> {
     let decision = relay_observed_prompt_injected_prompt_decision(prompt);
     (decision.injected_class.is_human_active_turn() && !decision.local_only_slash)
         .then(|| input_notice_line(prompt))
+}
+
+/// The same notice for a scheduled-task fire the writer read off its own row.
+pub(crate) fn scheduled_input_notice_content(prompt: &str) -> Option<String> {
+    input_notice_content(prompt).map(|_| {
+        injected_prompt_policy::format_direct_prompt_notification(
+            InjectedPromptClass::ScheduledPrompt,
+            "claude",
+            "",
+            prompt,
+        )
+    })
 }
 
 pub(crate) fn input_notice_line(text: &str) -> String {
@@ -536,11 +550,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         } else if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
             String::new()
         } else {
-            format_ssh_direct_prompt_notification(
-                &prompt.provider,
-                &prompt.tmux_session_name,
-                &prompt.prompt,
-            )
+            scheduled_prompt::direct_prompt_notice(&prompt).await
         };
         let notification_anchor_message_id = if let Some(message_id) = task_card_anchor {
             synthetic_start_wiring::record_prompt_id_after_post(&prompt, None);
@@ -821,14 +831,17 @@ fn slash_command_control_turn_is_first_sighting(tmux_session_name: &str, kind: &
 }
 
 fn prepare_local_only_slash_control_note(prompt: &ObservedTuiPrompt, kind: &str) -> Option<String> {
+    let paired =
+        slash_command_output::take_output_command(&prompt.tmux_session_name, kind, &prompt.prompt);
     if !slash_command_control_turn_is_first_sighting(&prompt.tmux_session_name, kind) {
         crate::services::tui_prompt_dedupe::seal_deduped_local_only_entry_id(prompt);
         return None;
     }
-    Some(format_slash_command_control_note(
+    Some(slash_command_output::local_slash_control_note(
         &prompt.tmux_session_name,
         kind,
         &prompt.prompt,
+        paired,
     ))
 }
 

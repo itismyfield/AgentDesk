@@ -67,7 +67,10 @@ impl HoldLeaf {
         owners: &BTreeMap<String, Option<u64>>,
     ) -> Self {
         let candidates = candidates.as_ref().ok();
-        let namespace = format!("{}-", crate::services::provider::TMUX_SESSION_PREFIX);
+        let namespace = format!(
+            "{}-",
+            crate::domain::provider::naming::tmux_session_prefix()
+        );
         let (inventory, names) = match inventory {
             Inventory::Sessions(names) => ("sessions", names.as_slice()),
             Inventory::Empty(_) => ("empty", &[][..]),

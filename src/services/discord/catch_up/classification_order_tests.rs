@@ -2803,3 +2803,6 @@ mod consumed_commands_tests;
 
 #[path = "injected_catch_up_tests.rs"]
 mod injected_catch_up_tests;
+
+#[path = "slash_message_tests.rs"]
+mod slash_message_tests;

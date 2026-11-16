@@ -1,0 +1,2 @@
+key: 440-tui-o-writer-parked-old-alias
+| `tui-o-writer` parked old alias (#7845 repair 3) | old `34822f3bf1`, fixed `1e2763de57` | stored empty-session A0 is parked, but raw old A1 is reopened before fresh B attaches; first reply stalls and hosts repeat | only an established unique parked old graph reference uses A0 without reopen; new/parent/unseen/ambiguous aliases keep strict checks and parked new keeps C6. See [report](tui-o-writer/parked-alias.report.md). |

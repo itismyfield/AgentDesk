@@ -1,6 +1,6 @@
 # #8114 구현 전 host boundary 판단
 
-<!-- doc-path-refs: proposed src/services/discord/router/message_handler/provider_dispatch/owner_input/busy_target.rs src/services/discord/router/message_handler/intake_turn/owned_busy.rs src/services/claude_tui/host_input/interactive_session.rs -->
+<!-- doc-path-refs: proposed src/services/discord/router/message_handler/provider_dispatch/owner_input/busy_target.rs src/services/claude_tui/host_input/interactive_session.rs -->
 
 경계 재계획 당시 판정: **기존 경계의 확장이 필요하다. 원 설계 7 prod/+450를 그대로 승인할 수 없으며 DESIGN_DELTA로 경계·크기 계획을 고정한 뒤 구현하는 것이 맞다.** 새 trait는 필수가 아니다. 기존 `claude_tui::host_input::InputTransport`를 확장하는 쪽이 가장 작은 후보이며 Herdr Core 전용 메서드/상태는 필요 없다.
 
@@ -92,8 +92,8 @@ tmux의 hook-free/legacy source 승인 조건은 이번에 Herdr의 stricter non
 ### tmux safeguard 보존 좌표와 필수 RED
 
 - `busy_inject.rs:548-605`의 ledger 등록/offset/withdraw 계약은 common source transaction으로 옮겨도 바이트 의미를 유지한다. legacy busy caller에는 기존 entry를 adapter로 연결하며 별도 ledger registration을 두 번 하지 않는다.
-- `busy_inject/stash.rs:52-64`의 ready_payload→native_stop first_key, `:67-90` optional C-s+payload start, `:97-109` paste→settle→Enter 순서를 유지한다.
-- `stash.rs:135-155`의 owner-pinned `if-shell -F` 조건과 pinned Applied/Held 결과 판독을 **그대로** 호출한다. plain run_legacy/send_keys 대체 금지. 이 현재 owner 경로는 최초 #6692의 attach guard 설명보다 나중에 pinned pane identity guard로 발전했으므로, 구현 base의 guard를 정본으로 삼는다.
+- `busy_inject/stash.rs:58-70`의 ready_payload→native_stop first_key, `:72-88` optional C-s+payload start, `:90-100` paste→settle→Enter 순서를 유지한다.
+- `src/services/session_host/tmux_host/input.rs:294-348`의 owner-pinned `if-shell -F` 조건과 pinned Applied/Held 결과 판독을 **그대로** 호출한다. plain run_legacy/send_keys 대체 금지. 이 현재 owner 경로는 최초 #6692의 attach guard 설명보다 나중에 pinned pane identity guard로 발전했으므로, 구현 base의 guard를 정본으로 삼는다.
 - Herdr는 `HerdrTarget::pin/send_paste/send_keys` 및 writer lease를 그대로 사용한다. 양쪽의 key-time target replacement·first-key stop·post-paste refusal mutant를 공통 효과를 통해 실행한다.
 
 기존 `InputTransport`의 raw operation을 이용해도 위 tmux guard를 지킬 수 있는 최소 IO hook을 먼저 source-level로 고정한다. 불가능하면 새 trait를 자동 추가하지 않고 DESIGN_DELTA에서 구체적인 누락 operation과 비용을 다시 제시한다.
@@ -123,3 +123,10 @@ tmux의 hook-free/legacy source 승인 조건은 이번에 Herdr의 stricter non
 다음 단계에 권고하는 입력은 기존 InputTarget/InputTransport 경계 확장과 공통 ClaudeBusy op 계약을 고정하는 것이다. 원 설계의 FrontClaim/physical lease/Held/Enter-terminal/receipt 재사용과 P2 early/clear 수용 기준은 유지한다. Herdr Core 구현과 #7583 전체 호스트 추상화는 계속 범위 밖이다.
 
 최대 13 prod/+850은 두 조각 누적 PLAN으로 승인됐다. Slice1의 행동 보존 리뷰 뒤에만 Slice2를 활성화한다. PLAN +1200 및 prod30/+1500은 유지한다. raw host 분기 이동이나 generic run_legacy로 안전 원자성을 희생하는 대체는 채택하지 않는다. P2 문서·모델 보완은 같은 docs-only 커밋에 남기며 구현 완료로 보고하지 않는다.
+
+
+## A안 — 공개 Idle 위임 승인 (2026-11-13)
+
+[주 설계 A안 절](herdr-busy-input.design.md#a안--busy-strict-권한과-공개-idle-위임-분리-2026-11-13-승인)을 현재 승인 경계로 따른다. Busy의 strict pin/observer/physical-target 계약을 유지하면서 public B1 Proof/reserve/current의 검증 결과만 Idle 위임에 쓴다. 판독 reservation은 pre-key 반환하고 기존 Idle driver가 실제 송신을 다시 준비한다. 같은 owner/target/front/generation/nonce의 Held 재관측도 현재 공개 Idle 근거로만 깨우며 UnknownKeep/discard 원문은 부활하지 않는다. producer 변경으로 후속 hook0을 보완하는 B안은 별도 검토로 보류했다. 새 production 파일·trait·flag는 추가하지 않는다.
+
+기존60 모델은 그대로이고 [A안 별도 projection](herdr-cold-idle.report.md)이 cold pin0+validIdle+hook0, stale proof/reservation, 같은 owner 재관측을 검사한다. 최종 Rust 동작·cap 판정은 구현 보고서의 증거와 구분한다.

@@ -78,7 +78,7 @@ impl CodexWrites for TmuxCodexInput {
     }
 
     fn load_buffer(&mut self, buffer: &str, text: &str) -> Result<Output, String> {
-        tmux::load_buffer(buffer, text)
+        TmuxHost.load_buffer(buffer, text)
     }
 
     fn paste_buffer(
@@ -160,7 +160,7 @@ impl CodexTransport for SubmissionTmux {
 
 impl CodexTransport for TmuxCodexInput {
     fn capture_ansi(&mut self, session: &str, scroll_back: i32) -> Option<String> {
-        tmux::capture_pane_with_escapes(session, scroll_back)
+        TmuxHost.capture_ansi(session, scroll_back)
     }
 
     fn capture_bounded(
@@ -169,7 +169,7 @@ impl CodexTransport for TmuxCodexInput {
         scroll_back: i32,
         timeout: Duration,
     ) -> Option<String> {
-        tmux::capture_pane_timeout(session, scroll_back, timeout)
+        TmuxHost.capture_bounded(session, scroll_back, timeout)
     }
 
     fn pane_alive(&mut self, session: &str) -> bool {
@@ -177,7 +177,12 @@ impl CodexTransport for TmuxCodexInput {
     }
 
     fn pane_pid(&mut self, session: &str) -> Option<u32> {
-        tmux::pane_pid(session)
+        crate::services::session_host::InteractiveSessionHost::execution_pid(
+            &TmuxHost,
+            crate::services::session_host::HostSessionRef::tmux(session),
+        )
+        .ok()
+        .flatten()
     }
 
     fn kill_tree(&mut self, pid: u32, identity: ProcessIdentity) -> bool {
@@ -185,7 +190,7 @@ impl CodexTransport for TmuxCodexInput {
     }
 
     fn kill_session(&mut self, session: &str, reason: &str) -> bool {
-        tmux::kill_session(session, reason)
+        TmuxHost.kill(session, reason)
     }
 
     #[cfg(unix)]

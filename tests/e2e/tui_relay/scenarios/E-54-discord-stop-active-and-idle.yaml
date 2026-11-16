@@ -5,6 +5,12 @@ coverage_class: live
 # Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
 cells: [claude-tui]
 isolation: required
+feature_coverage:
+  schema: 1
+  references:
+    - feature_id: cancel-stop
+      scope: Claude tmux의 late marker 부재와 idle !stop 답글 정확히 1회 UX만 참조한다. legacy_automation/unspecified 입력·출력이므로 human/tui_o 수기 계약과 다르며 인간 입력 보존·자동 busy witness는 증명하지 않는다.
+      needs_live: true
 destructive: true
 acceptance_criteria:
   - Start a hold turn through normal Discord intake and observe HOLD before stopping.

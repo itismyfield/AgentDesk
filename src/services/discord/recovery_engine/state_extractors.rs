@@ -136,7 +136,7 @@ pub(super) fn recovery_tmux_session_name(
         .map(|name| {
             if name.starts_with(&format!(
                 "{}-",
-                crate::services::provider::TMUX_SESSION_PREFIX
+                crate::domain::provider::naming::tmux_session_prefix()
             )) {
                 name.to_string()
             } else {

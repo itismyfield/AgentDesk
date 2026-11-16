@@ -486,10 +486,8 @@ async fn stop_turn_with_policy(
         let killed_now = if preserve_for_test {
             false
         } else if crate::services::platform::tmux::has_session(kill_target) {
-            crate::services::platform::tmux::kill_session(
-                kill_target,
-                &format!("explicit cleanup via {reason}"),
-            )
+            crate::services::session_host::TmuxHost
+                .kill(kill_target, &format!("explicit cleanup via {reason}"))
         } else {
             tmux_was_alive
         };
