@@ -20,25 +20,90 @@ pub(super) enum Held {
 }
 
 /// Retired rowless debts still wake this runtime's existing queue; custody is rechecked there.
-pub(super) fn boot(shared: &Arc<SharedData>, provider: &ProviderKind, shadow: ShadowProvider) {
+pub(super) async fn boot(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    shadow: ShadowProvider,
+) -> Vec<u64> {
+    #[cfg(test)]
+    tests::boot_scanned();
+    if &shared.provider != provider || shared.restart.shutting_down.load(Ordering::Acquire) {
+        return Vec::new();
+    }
     let Some(root) = crate::config::runtime_root() else {
-        return;
+        return Vec::new();
+    };
+    let Some(snapshot) = crate::services::tui_o::cutover::boot_snapshot() else {
+        return Vec::new();
+    };
+    let gate = crate::services::tui_o::ownership::gate(provider.as_str());
+    let gateway = if let Some(registry) = shared.health_registry.upgrade() {
+        let entries = registry.provider_entries_snapshot().await;
+        let mut owners = entries.iter().filter(|entry| {
+            entry.role == health::ProviderRuntimeRole::Gateway
+                && entry.name.eq_ignore_ascii_case(provider.as_str())
+        });
+        owners
+            .next()
+            .is_some_and(|entry| Arc::ptr_eq(&entry.shared, shared))
+            && owners.next().is_none()
+            && matches!(
+                gate.current(),
+                crate::services::tui_o::ownership::GatewayOwnership::Owned { .. }
+            )
+    } else {
+        false
     };
     let kind = match shadow {
         ShadowProvider::Claude => crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
         ShadowProvider::Codex => crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
     };
+    let mut channels = Vec::new();
     crate::services::tui_o::writer::herdr_body_debt::wake_channels(&root, shadow, |channel| {
-        if crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(channel, Some(kind))
-            == Ok(true)
+        channels.push(channel)
+    });
+    let mut woken = Vec::new();
+    for channel in channels {
+        let authorized = match snapshot.execution(channel) {
+            Some(view) => match view.permit {
+                Ok(permit) => {
+                    let local = super::local_id(snapshot.configured_id(), Duration::ZERO).await;
+                    let observed = permit.gate().current();
+                    let owns = matches!(observed, crate::services::tui_o::ownership::GatewayOwnership::ExecutionOwned { generation, .. } if generation == permit.generation);
+                    let current = if owns && local.as_deref() == Ok(permit.executor.as_str()) {
+                        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM intake_session_owners WHERE provider=$1 AND raw_channel_id=$2 AND owner_instance_id=$3 AND generation=$4 AND status='active' AND routing_cleanup IS NULL)")
+                            .bind(provider.as_str()).bind(channel.to_string()).bind(&permit.executor).bind(permit.generation)
+                            .fetch_one(&permit.pool).await.unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    current && permit.gate().current() == observed
+                }
+                Err(_) => false,
+            },
+            None => {
+                gateway
+                    && matches!(
+                        gate.current(),
+                        crate::services::tui_o::ownership::GatewayOwnership::Owned { .. }
+                    )
+            }
+        };
+        if authorized
+            && crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+                channel,
+                Some(kind),
+            ) == Ok(true)
         {
             crate::services::discord::queue_io::schedule_writer_ready_queue_kick(
                 Arc::clone(shared),
                 provider.clone(),
                 ChannelId::new(channel),
             );
+            woken.push(channel);
         }
-    });
+    }
+    woken
 }
 
 /// Judges `channel`'s kept row on its own task, through the gateway's client once it is cached.

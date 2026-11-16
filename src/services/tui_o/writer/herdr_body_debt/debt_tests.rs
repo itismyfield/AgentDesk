@@ -518,7 +518,7 @@ fn an_unreadable_snapshot_keeps_only_its_episode_without_reordering_other_plans(
     assert_eq!(std::fs::read(copy).unwrap(), corrupt);
 }
 
-async fn split_native_coverage(text: &str, channel: u64) {
+async fn split_native_coverage(text: &str, channel: u64, mutate_second_piece: bool) {
     use crate::services::cluster::intake_router_hook::owner_record::output::tests as original_tests;
     use crate::services::tui_o::shadow::CapturedRecord;
     use crate::services::tui_o::store::ledger::LedgerEntry;
@@ -529,7 +529,13 @@ async fn split_native_coverage(text: &str, channel: u64) {
     let mut original = row(channel);
     original["full_response"] = json!(text);
     original["intake_outbox_id"] = serde_json::to_value(&origin).unwrap()["delivery"].clone();
-    let evidence = native(root.path(), &original, text);
+    let mut native_text = text.to_owned();
+    if mutate_second_piece {
+        assert_eq!(native_text.as_bytes()[1001], b'b');
+        native_text.replace_range(1001..1002, "c");
+    }
+    let mut evidence = native(root.path(), &original, &native_text);
+    evidence["outcome"]["result"] = json!(text);
     let source: SourceId = serde_json::from_value(evidence["source"].clone()).unwrap();
     let bytes = std::fs::read(&source.path).unwrap();
     let record = CapturedRecord {
@@ -605,6 +611,24 @@ async fn split_native_coverage(text: &str, channel: u64) {
     )
     .unwrap();
     let plan = &plans[0];
+    if mutate_second_piece {
+        assert!(
+            plan.registration(42).is_err(),
+            "a changed second payload is not saved coverage"
+        );
+        let scope = Scope {
+            pool: pool.clone(),
+            provider: "claude".into(),
+        };
+        assert!(scope.register_herdr_body_debt(plan, 42).await.is_err());
+        let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM o_herdr_debt_grants),(SELECT COUNT(*) FROM o_herdr_debt_runs)")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(counts, (0, 0));
+        assert_eq!(std::fs::read(path).unwrap(), saved);
+        pool.close().await;
+        drop(db);
+        return;
+    }
     let document = plan
         .registration(42)
         .expect("equal ordered split payloads are original native coverage");
@@ -649,6 +673,7 @@ async fn newline_split_payloads_preserve_original_native_aliases_without_grants_
     split_native_coverage(
         &format!("{}\n{}", "a".repeat(1000), "b".repeat(1000)),
         7651315,
+        false,
     )
     .await;
 }
@@ -661,6 +686,17 @@ async fn fenced_split_payloads_preserve_original_native_aliases_without_grants_p
             "let original = 123456789;\n".repeat(200)
         ),
         7651316,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_changed_second_native_payload_with_healthy_ledger_is_not_saved_coverage_pg() {
+    split_native_coverage(
+        &format!("{}\n{}", "a".repeat(1000), "b".repeat(1000)),
+        7651318,
+        true,
     )
     .await;
 }

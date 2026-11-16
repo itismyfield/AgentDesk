@@ -864,9 +864,19 @@ pub(super) fn spawn_execution(
                 .is_some_and(|snapshot| snapshot.execution(*ch).is_some())
         })
         .collect();
-    adoption_wake::boot(shared, provider, shadow);
     let started = host::start_managed(shadow, false, owned, || parts(shared, provider, config));
     drop(host::keep_stoppable(started));
+}
+
+/// The runtime's completed bootstrap, never its periodic owner refresh.
+pub(super) async fn wake_debt_at_boot(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+) -> Vec<u64> {
+    match shadow_of(provider) {
+        Some(shadow) => adoption_wake::boot(shared, provider, shadow).await,
+        None => Vec::new(),
+    }
 }
 
 /// Retries missing unmanaged hosts only for this runtime's current gateway authority.

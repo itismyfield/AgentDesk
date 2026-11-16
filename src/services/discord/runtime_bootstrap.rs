@@ -33,12 +33,16 @@ pub(in crate::services::discord) async fn restore_queued_and_inflight_for_tests(
 
 /// Opens intake only after this active runtime restored its queues and inflight work.
 pub(in crate::services::discord) async fn complete_active_reconcile(shared: &Arc<SharedData>) {
+    let first = !shared.restart.reconcile_done.swap(true, Ordering::AcqRel);
     mark_reconcile_complete(shared);
     #[cfg(unix)]
     for channel in
         crate::services::turn_orchestrator::v2_channels(&shared.provider, &shared.token_hash)
     {
         super::session_transition::wake_installed_owner(shared, channel).await;
+    }
+    if first {
+        drop(o_writer_host::wake_debt_at_boot(shared, &shared.provider).await);
     }
 }
 
@@ -477,7 +481,11 @@ pub(in crate::services::discord) async fn register_standby_and_settle_reconcile(
     health_registry
         .register_standby(provider.as_str().to_string(), shared.clone())
         .await;
+    let first = !shared.restart.reconcile_done.swap(true, Ordering::AcqRel);
     mark_reconcile_complete(shared);
+    if first {
+        drop(o_writer_host::wake_debt_at_boot(shared, provider).await);
+    }
 }
 
 #[cfg(test)]

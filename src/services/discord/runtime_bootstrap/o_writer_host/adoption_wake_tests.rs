@@ -156,8 +156,13 @@ async fn an_adoption_commit_settles_the_kept_row_once_without_a_legacy_body_pg()
 
 thread_local! {
     static KICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BOOT_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static JUDGED: std::cell::RefCell<Option<tokio::sync::mpsc::UnboundedSender<bool>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn boot_scanned() {
+    BOOT_SCANS.with(|scans| scans.set(scans.get() + 1));
 }
 
 /// Reports each wake judgement to a test waiting on it: whether a claim held the row.
@@ -346,6 +351,12 @@ async fn a_wake_whose_sends_keep_failing_ends_after_three_retries_and_keeps_the_
 #[cfg(unix)]
 #[tokio::test]
 async fn a_c1_archive_is_read_byte_for_byte_and_boot_wakes_only_its_local_channel() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::a_c1_archive_is_read_byte_for_byte_and_boot_wakes_only_its_local_channel"
+    )) {
+        return;
+    }
     with_isolated_runtime_root(|| async move {
         let provider = ProviderKind::Claude;
         let channel = 9_765_131_u64;
@@ -368,7 +379,16 @@ async fn a_c1_archive_is_read_byte_for_byte_and_boot_wakes_only_its_local_channe
         assert_eq!(plans.len(),1,"real C1 directory must reach the rowless reader");
         let document = plans[0].registration(42).unwrap();
         assert_eq!(document["snapshots"].as_object().unwrap().values().next().unwrap()["bytes"].as_str().unwrap().as_bytes(),bytes);
-        let shared = crate::services::discord::make_shared_data_for_tests();
+        let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+        let mut shared = crate::services::discord::make_shared_data_for_tests();
+        Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+        shared.restart.reconcile_done.store(false, Ordering::Release);
+        registry.register(provider.as_str().into(), shared.clone()).await;
+        let mut worker = crate::services::discord::make_shared_data_for_tests();
+        Arc::get_mut(&mut worker).unwrap().health_registry = Arc::downgrade(&registry);
+        worker.restart.reconcile_done.store(false, Ordering::Release);
+        registry.register_worker(provider.as_str().into(), worker.clone()).await;
+        crate::services::tui_o::ownership::gate(provider.as_str()).reacquired().unwrap();
         // Both channels have real waiting input: only the one with debt gets the extra boot wake.
         for queued_channel in [channel, channel+1] {
             use crate::services::turn_orchestrator::{Intervention, InterventionMode, QueuePersistenceContext};
@@ -389,12 +409,82 @@ async fn a_c1_archive_is_read_byte_for_byte_and_boot_wakes_only_its_local_channe
             let captured = captured.clone();
             Box::pin(async move { if ch.get()==channel || ch.get()==channel+1 { captured.lock().unwrap().push(ch.get()); Some(Default::default()) } else { None } })
         }));
-        super::super::spawn_execution(&shared,&provider,None);
+        let complete = crate::services::discord::runtime_bootstrap::complete_active_reconcile;
+        complete(&worker).await;
+        assert!(kicked.lock().unwrap().is_empty(), "the worker cannot borrow the gateway's gate");
+        complete(&shared).await;
         tokio::time::timeout(Duration::from_secs(5),async {
             while kicked.lock().unwrap().is_empty() { tokio::task::yield_now().await; }
         }).await.unwrap();
         assert_eq!(*kicked.lock().unwrap(),vec![channel]);
+        assert_eq!(BOOT_SCANS.with(std::cell::Cell::get), 2);
+        super::super::super::owner_cleanup::refresh_writers(&shared, &provider, None).await;
+        super::super::super::owner_cleanup::refresh_writers(&worker, &provider, None).await;
+        complete(&worker).await;
+        complete(&shared).await;
+        assert_eq!(BOOT_SCANS.with(std::cell::Cell::get), 2, "refresh and repeated reconcile do not rescan");
+        assert_eq!(*kicked.lock().unwrap(), vec![channel]);
+        crate::services::discord::queue_io::schedule_post_enqueue_idle_queue_kick(
+            shared.clone(), provider.clone(), ChannelId::new(channel + 1));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while kicked.lock().unwrap().len() < 2 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert_eq!(*kicked.lock().unwrap(), vec![channel, channel + 1], "ordinary queue wake is unchanged");
         assert_eq!(std::fs::read(file).unwrap(),bytes,"boot/read do not rewrite C1");
         drop(hook);drop(selected);
+    }).await;
+}
+
+/// A store proves output ownership, while only the local current permit permits an execution wake.
+#[cfg(unix)]
+#[tokio::test]
+async fn debt_boot_wake_requires_this_nodes_current_execution_permit_pg() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::debt_boot_wake_requires_this_nodes_current_execution_permit_pg"
+    )) {
+        return;
+    }
+    with_isolated_runtime_root(|| async move {
+        use crate::services::tui_o::{channel_policy::BootChannels, ownership::execution};
+        let provider = ProviderKind::Claude;
+        let channel = 9_765_132;
+        let original = test_override::force_channels(&[(channel, ClaudeTui)]);
+        let mut row = kept_row(channel);
+        row.born_generation = 1;
+        row.turn_nonce = Some("debt-execution-permit".into());
+        inflight::save_inflight_state(&row).unwrap();
+        row = inflight::load_inflight_state(&provider, channel).unwrap();
+        let archive = row.archive_restarted_herdr_body(&provider, 2,
+            serde_json::json!({"source":null,"execution_nonce":"original-host","outcome":{"kind":"unknown"}}),
+            "restart".into()).unwrap();
+        assert_eq!(row.clear_restarted_herdr_body(&provider, 2, &archive), inflight::GuardedClearOutcome::Cleared);
+        let root = crate::config::runtime_root().unwrap();
+        crate::test_support::o_store::commit_o_store(&root, &[channel]);
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create("debt_wake_permit", "local permit wake").await;
+        let pool = db.connect_and_migrate().await;
+        execution::tests::admission(&pool, "claude", channel, "exec-a").await;
+        let permit = execution::read(&pool, "claude", channel, "exec-a", || Ok(false)).await.unwrap().unwrap();
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        for (local, verified, expected) in [("exec-b", true, vec![]), ("exec-a", false, vec![]), ("exec-a", true, vec![channel])] {
+            let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+                "server":{}, "cluster":{"enabled":true,"instance_id":local,"gateway_preferred_instance_id":local},
+                "agents":[{"id":"debt-wake","name":"fixture","channels":{"claude":{"id":channel.to_string(),"runtime":"tui"}}}],
+                "tui_o":{"writer":{"channels":[channel]}}
+            })).unwrap();
+            let boot = BootChannels::validate(&config).unwrap();
+            boot.install_execution(channel, Some(if verified { Ok(permit.clone()) } else { Err("unverified".into()) }));
+            let selected = test_override::force_boot(boot);
+            assert_eq!(super::wake_debt_at_boot(&shared, &provider).await, expected, "{local}, verified={verified}");
+            if local == "exec-a" && verified {
+                sqlx::query("UPDATE intake_session_owners SET generation=generation+1 WHERE provider='claude' AND raw_channel_id=$1")
+                    .bind(channel.to_string()).execute(&pool).await.unwrap();
+                assert!(super::wake_debt_at_boot(&shared, &provider).await.is_empty(), "a stale local permit cannot wake");
+            }
+            drop(selected);
+        }
+        drop(original);
+        pool.close().await;
+        db.drop().await;
     }).await;
 }

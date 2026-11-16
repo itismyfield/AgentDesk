@@ -381,3 +381,63 @@ Plain TLC via `scripts/ci/statecharts_tlc.py`, 2026-11-17: 3 selected / 3
 matched, 15 actual fairness/TLC invocations, mismatch/tool error/skip 0, 55.3 s.
 The composition checks the adoption boundary only. Archived debt replay and
 Legacy/debt evidence reconciliation remain in the C2c acceptance scope.
+
+### Refused child repair refinement
+
+The child recovery component now records Refused and Released separately, the
+verified destination/parent/runtime store result, absent local authority and a
+body observation before and after recovery. These values come from
+`channel_policy/children/tests.rs`'s real `start_managed` first-init/recovery
+scenario and the Recovered::Store branch in `writer/host.rs`. A different
+parent/kind store is not verified recovery. No local authority starts no actor.
+
+| Config | Before / repaired result | TLC runs |
+|---|---|---:|
+| ThreadReleasedRecovery | Expected RED: VerifiedRecoveryEventuallyCommits | 5 |
+| ThreadUncheckedRecovery | Expected RED: RecoveryVerifiedOnly | 6 |
+| ThreadLeakingRecovery | Expected RED: RecoveryNoLegacy | 6 |
+| ThreadVerifiedRecovery | GREEN: verified repair liveness, verified-only commit, Legacy 0 | 5 |
+
+All seven composition configs were run with the official TLC runner: 2 GREEN,
+5 expected RED, 37 actual TLC invocations, 646.5 seconds; expectation mismatch,
+tool error and skip 0. Logs and exact model/config hashes are in the lane report.
+The original failed-init test changes only Released to Refused; its subsequent
+ChildHeld and visible-halt assertions execute. The new entry-point test first
+failed because a different policy parent was accepted, then passed after the
+verified-surface recovery guard. It also checks another runtime kind, missing
+authority and successful repair in the same process, with Legacy body 0.
+
+### One-shot authorized debt wake
+
+The C2b periodic-wake limitation above is repaired at the actual bootstrap
+completion boundary. `discord/runtime_bootstrap.rs` claims the first reconcile
+completion on SharedData before scanning debt. Standby registration takes the
+same one-shot boundary. `o_writer_host.rs` no longer scans from the execution
+writer refresh path. Ordinary queue admission and its existing wake are unchanged.
+
+`o_writer_host/adoption_wake.rs` checks a managed channel's local configured
+executor, current permit gate and matching active PG owner/generation; an
+unverified/stale/foreign execution view cannot borrow the provider gateway gate.
+For an unmanaged channel, this SharedData must be the unique registered provider
+gateway runtime and its gateway gate must be Owned. The scan only selects valid
+C1 snapshot channels already owned by O; it grants no POST permission.
+
+WriterAdoptionBootWake uses precisely these two authority cases (managed and
+unmanaged), four caller cases (gateway, local execution, foreign execution,
+stale execution), debt versus ordinary channel and bootstrap versus repeated
+refresh. The bounded repeat count exposes duplicate wake; it is not a production
+timeout/retry limit. Ordinary enqueue has its own fair action.
+
+| Config | Before / repaired result | TLC runs |
+|---|---|---:|
+| BootWakeBefore | Expected RED: WakeAuthority, WakeOnce | 5 |
+| BootWakeAfter | GREEN: WakeAuthority, WakeOnce, OnlyDebt; owned wake and ordinary enqueue liveness | 3 |
+
+The official runner matched 2/2 configurations, 8 actual invocations, 5.9 seconds,
+with mismatch/tool error/skip 0. The earlier exploratory run found a terminal
+model deadlock; the final model explicitly stutters once bounded observations
+are complete. It is not counted as the production Before counterexample.
+The actual bootstrap/refresh test observes one queue wake on the gateway,
+none on the same-provider worker, no repeated scan/wake, and an independent
+ordinary queue wake. The PG test checks local, foreign, unverified and stale
+execution views against a real C1 archive and owner table.

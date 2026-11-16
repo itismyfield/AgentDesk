@@ -700,6 +700,21 @@ async fn host_channel<I: HostIo>(
         return;
     };
     let store = match recovered {
+        Ok(Recovered::Store(store))
+            if candidate.child_surface().is_some_and(|surface| {
+                let kind = match provider {
+                    ShadowProvider::Claude => RuntimeHandoffKind::ClaudeTui,
+                    ShadowProvider::Codex => RuntimeHandoffKind::CodexTui,
+                };
+                !surface.matches(channel, store.init().policy_parent.unwrap_or(0), Some(kind))
+            }) =>
+        {
+            return hold(
+                &alarms,
+                channel,
+                "recovered child store does not match its verified surface",
+            );
+        }
         Ok(Recovered::Store(_)) if !candidate.confirm_store() => {
             return hold(
                 &alarms,

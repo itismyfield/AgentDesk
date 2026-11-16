@@ -895,9 +895,15 @@ tui-o-writer/WriterAdoptionRelayedByTime.cfg	WriterAdoption	HeldBodyNotSkipped,R
 tui-o-writer/WriterAdoptionRetries4.cfg	WriterAdoption	TriesBound	-
 tui-o-writer/WriterAdoptionStage1.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAdoptionSwallowOwed.cfg	WriterAdoption	NoCommitPastOwed	-
+tui-o-writer/WriterAdoptionBootWakeAfter.cfg	WriterAdoptionBootWake	-	-
+tui-o-writer/WriterAdoptionBootWakeBefore.cfg	WriterAdoptionBootWake	WakeAuthority,WakeOnce	-
 tui-o-writer/WriterAdoptionThreadAfter.cfg	WriterAdoptionThreadComposition	-	-
 tui-o-writer/WriterAdoptionThreadBefore.cfg	WriterAdoptionThreadComposition	NoLegacyBodyOnTui	-
 tui-o-writer/WriterAdoptionThreadLeak.cfg	WriterAdoptionThreadComposition	ConfiguredLegacyZero,NoLegacyBodyOnTui	-
+tui-o-writer/WriterAdoptionThreadLeakingRecovery.cfg	WriterAdoptionThreadComposition	RecoveryNoLegacy	-
+tui-o-writer/WriterAdoptionThreadReleasedRecovery.cfg	WriterAdoptionThreadComposition	-	VerifiedRecoveryEventuallyCommits
+tui-o-writer/WriterAdoptionThreadUncheckedRecovery.cfg	WriterAdoptionThreadComposition	RecoveryVerifiedOnly	-
+tui-o-writer/WriterAdoptionThreadVerifiedRecovery.cfg	WriterAdoptionThreadComposition	-	-
 tui-o-writer/WriterAdoptionUnadoptedOwned.cfg	WriterAdoption	UnadoptedNotOwned,RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionWatcherNoGuard.cfg	WriterAdoption	NoEarlyDispatch	-
 tui-o-writer/WriterArchivedSourceAfter.cfg	WriterArchivedSource	-

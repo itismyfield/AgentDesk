@@ -610,7 +610,7 @@ async fn thread_child_refused_first_init_is_held_visibly_and_never_handed_to_leg
     );
     assert!(!store.has_channel_dir(CHILD));
     assert!(!root.path().join("o_store/thread_children.floor").exists());
-    assert_eq!(host.peek(), Adoption::Released);
+    assert_eq!(host.peek(), Adoption::Refused);
     let _forced = test_override::force_boot(boot.clone());
     assert_eq!(
         legacy_sent(CHILD, RuntimeHandoffKind::ClaudeTui).await,
@@ -618,6 +618,149 @@ async fn thread_child_refused_first_init_is_held_visibly_and_never_handed_to_leg
     );
     let halted = format!("tui_o:halted:{CHILD}");
     assert!(crate::services::tui_o::alarm::health_reasons().contains(&halted));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn thread_child_refused_recovers_only_a_verified_store_without_legacy_body() {
+    use crate::services::tui_o::ownership::OwnershipGate;
+    use crate::services::tui_o::shadow::{ShadowProvider, SourceId, capture::file_identity};
+    use crate::services::tui_o::store::InitOrigin;
+    use crate::services::tui_o::writer::host::{self, HostParts, Readiness, test_io::TestHost};
+
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::thread_child_refused_recovers_only_a_verified_store_without_legacy_body"
+    )) {
+        return;
+    }
+    let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    const CHILD: u64 = 4_807;
+    for case in ["verified", "other_parent", "other_kind", "no_authority"] {
+        let boot = BootChannels::validate(&config())
+            .unwrap()
+            .adopted(Adoption::Committed);
+        assert!(boot.children.resolve(&boot, CHILD, thread(CHILD, 42), true));
+        let candidate = boot.output_candidate(CHILD).unwrap();
+        let forced = test_override::force_boot(boot.clone());
+        let root = tempfile::tempdir().unwrap();
+        let root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let path = root.path().join("native.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        let (dev, ino) = file_identity(&std::fs::metadata(&path).unwrap());
+        let source = SourceId {
+            session_id: "verified-child".into(),
+            path,
+            dev,
+            ino,
+        };
+        let io = TestHost::new([(CHILD, source)]);
+        io.facts.lock().unwrap().runner_sessions = 1;
+        let gate = Arc::new(OwnershipGate::default());
+        gate.reacquired().unwrap();
+        let readiness = Arc::new(Readiness::default());
+        let parts = || HostParts {
+            io: Arc::clone(&io),
+            runtime_root: Some(root.path().to_owned()),
+            gate: Arc::clone(&gate),
+            readiness: Arc::clone(&readiness),
+        };
+        let owned = |kind| vec![(CHILD, Some(kind), Some(candidate.clone()))];
+        let first = host::start_managed(
+            ShadowProvider::Claude,
+            true,
+            owned(RuntimeHandoffKind::ClaudeTui),
+            parts,
+        );
+        assert_eq!(first.len(), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while first[0].live() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the real host refuses the first init");
+        for handle in first {
+            drop(handle.stop_and_join().await);
+        }
+        assert_eq!(candidate.peek(), Adoption::Refused, "{case}");
+        assert_eq!(
+            legacy_sent(CHILD, RuntimeHandoffKind::ClaudeTui).await,
+            Err(crate::services::tui_o::cutover::IdentityError::ChildHeld)
+        );
+
+        let store = store_at(root.path());
+        let parent = if case == "other_parent" { 44 } else { 42 };
+        let creator_kind = if parent == 44 {
+            RuntimeHandoffKind::CodexTui
+        } else {
+            RuntimeHandoffKind::ClaudeTui
+        };
+        let returned = serde_json::from_value(serde_json::json!({
+            "id":CHILD.to_string(),"parent_id":parent.to_string(),"type":11,"name":"verified"
+        }))
+        .unwrap();
+        let surface = crate::services::session_host::surface_policy::VerifiedSurface::from_discord(
+            &returned,
+            creator_kind,
+        )
+        .unwrap();
+        store
+            .begin_era_as(
+                &init(CHILD, Some(parent)),
+                InitOrigin::Fresh,
+                &boot.init_scope_view(),
+                Some(&surface),
+            )
+            .unwrap();
+        io.facts.lock().unwrap().runner_sessions = 0;
+        let kind = if case == "other_kind" {
+            RuntimeHandoffKind::CodexTui
+        } else {
+            RuntimeHandoffKind::ClaudeTui
+        };
+        let provider = if case == "other_kind" {
+            ShadowProvider::Codex
+        } else {
+            ShadowProvider::Claude
+        };
+        let resumed = host::start_managed(provider, case != "no_authority", owned(kind), parts);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while candidate.peek() == Adoption::Refused
+                && resumed.iter().any(|handle| handle.live())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the recovered host is judged");
+        let observed = candidate.peek();
+        let sent = legacy_sent(CHILD, RuntimeHandoffKind::ClaudeTui).await;
+        for handle in resumed {
+            drop(handle.stop_and_join().await);
+        }
+        assert_eq!(
+            observed,
+            if case == "verified" {
+                Adoption::Committed
+            } else {
+                Adoption::Refused
+            },
+            "{case}"
+        );
+        assert_ne!(
+            sent,
+            Ok(true),
+            "Legacy never receives the refused or recovered body: {case}"
+        );
+        assert!(io.posts.to(CHILD).is_empty());
+        drop(forced);
+        drop(root_env);
+    }
+    drop(env_lock);
 }
 
 #[tokio::test]

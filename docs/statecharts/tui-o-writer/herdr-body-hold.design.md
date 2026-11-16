@@ -354,6 +354,24 @@ need an explicit scope/liveness decision. No production code is changed here.
 
 ## C2 debt recovery capability
 
+### Failed child init and verified repair
+
+A failed first child init remains Refused. Only a recovered store matching the
+checked child destination, policy parent and runtime kind may confirm it in the
+same process. A different parent/kind or absent local authority cannot confirm
+it. The body gate remains ChildHeld before repair and O-owned afterwards;
+neither state sends that body through Legacy. The narrow pre-init late-child
+exception above does not extend to Refused children.
+
+`WriterAdoptionThreadComposition` now distinguishes this state from Released.
+The Released control cannot satisfy VerifiedRecoveryEventuallyCommits; the
+unchecked-recovery control violates RecoveryVerifiedOnly and the leaking
+control violates RecoveryNoLegacy. Verified recovery checks all three together.
+The production entry point is `writer/host.rs`'s Recovered::Store branch: it
+checks the existing VerifiedSurface before Candidate::confirm_store. The real
+managed-host child test reaches both the Refused and Committed body gates and
+also attempts a different parent, kind and unverified authority.
+
 **Selected for independent design review, 2026-11-16; not implemented.** The
 coordinator selected the limited recovery capability. Restricting recovery to a
 still-active original admission is rejected. Decision A keeps accepted bodies
