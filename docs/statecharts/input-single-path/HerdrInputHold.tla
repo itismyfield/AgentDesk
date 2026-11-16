@@ -1,5 +1,5 @@
 ---- MODULE HerdrInputHold ----
-\* #8201 projection: held inputs on one live Bound herdr execution (design rev 3).
+\* #8201 projection: held inputs on one live Bound herdr execution (design rev 4).
 \* Refines HerdrBusyInput's "uncertain" phase for the herdr execution-nonce input hold
 \* (runtime/herdr_input_holds/<nonce>) and the readiness reservation the same input consumed.
 \* Value ranges come from the entry-point table in docs/design/8201-herdr-input-hold.design.md.
@@ -18,14 +18,18 @@
 \*   "unreadable"    the composer never reads.
 \*   "secondHold"    the first hold resolves, a later input on the same execution is held too
 \*                   and never reads (two holds, one execution nonce).
+\*   "personSubmits" after our exact read a person presses Enter on our text before our keys.
+\* Rev 4: a v2 hold starts as send_outcome=in_flight before the first key; the write records
+\* the final outcome after InputRun. A crash in between leaves in_flight.
 \* Readers : main `not_held`; design pre-key resolve in `write`. Busy injection reads no hold.
 EXTENDS Naturals
-CONSTANTS Policy,    \* "before" (main 934a49997e) | "fixed" (design rev 3)
+CONSTANTS Policy,    \* "before" (main 934a49997e) | "fixed" (design rev 4)
           Scenario,
           Ends,      \* the execution ends while the later input waits (row end/terminate)
           Restart,   \* one dcserver restart: hold records survive, process memory does not
           Identity,  \* "digest" (hold v2) | "legacy" (v1 file: a time only, written pre-deploy)
           EnqFail,   \* the first notice enqueue fails once
+          CrashWindow, \* "inFlight" (before the outcome record) | "afterRecord" | "any"
           Mutant     \* "None" or one removed rule of the design
 VARIABLE h
 vars == <<h>>
@@ -36,38 +40,52 @@ Keys == {"E", "h1", "h2"}
 \* Notice dedupe key: the hold identity (design) or the bare execution nonce (mutant).
 Key(r) == IF Mutant = "NonceKey" THEN "E" ELSE IF r.holdId = 1 THEN "h1" ELSE "h2"
 
-Init == \E landed \in (IF EnterMay THEN {"no", "pending"} ELSE {"no"}),
-           pasted \in (IF PasteMay THEN {TRUE, FALSE} ELSE {TRUE}) :
-          h = [holdId |-> 1,
-               composer |-> IF landed = "pending" \/ ~pasted THEN "empty" ELSE "ours",
-               rendered |-> landed = "pending" \/ ~pasted,
-               landed |-> landed,
-               busy |-> FALSE, otherBusy |-> FALSE, otherUser |-> FALSE, stash |-> FALSE,
-               hold |-> TRUE,
-               reserved |-> Identity = "digest",
-               lock |-> FALSE,
-               \* durable hold record: send_outcome-derived proof, kept through cleanup
-               unsentProof |-> Identity = "digest" /\ ~EnterMay,
-               cleanup |-> "none",           \* none | clearing | cleared (durable)
-               keysSent |-> FALSE,           \* clear keys sent in this process (memory)
-               readable |-> Scenario # "unreadable",
-               blind |-> FALSE,
-               person |-> "none",
-               pasteSettled |-> FALSE, receiptSettled |-> FALSE,
-               origSubmits |-> IF landed = "pending" THEN 1 ELSE 0,
-               disposition |-> "unknown",
-               nxt |-> "queued", refusals |-> 0,
-               unclear |-> 0,                \* durable
-               intent |-> FALSE,             \* durable notice intent
-               enqueued |-> FALSE,           \* durable: an outbox row for this hold's key exists
-               enqFails |-> 0,
-               rows |-> {},                  \* outbox rows by key (persistent dedupe)
-               sentFor |-> [i \in {1, 2} |-> 0],  \* rows created for each hold
-               trigger |-> TRUE, watch |-> FALSE,
-               humanDeleted |-> FALSE, merged |-> FALSE, releasedOnResidue |-> FALSE,
-               ended |-> FALSE, up |-> TRUE, restarts |-> 0]
+Legacy == Identity = "legacy"
+\* The fields a recorded hold starts with; a v1 hold is only met after the deploy restart.
+Recorded(landed, pasted) ==
+          [holdId |-> 1,
+           composer |-> IF landed = "pending" \/ ~pasted THEN "empty" ELSE "ours",
+           rendered |-> landed = "pending" \/ ~pasted,
+           landed |-> landed,
+           sendStep |-> "recorded",          \* held | pasted | entered | recorded (durable)
+           writer |-> FALSE,                 \* the write that owns the hold runs (memory)
+           busy |-> FALSE, otherBusy |-> FALSE, otherUser |-> FALSE, stash |-> FALSE,
+           hold |-> TRUE,
+           reserved |-> FALSE,
+           lock |-> FALSE,
+           unsentProof |-> FALSE,            \* durable, monotonic
+           cleanup |-> "none",               \* none | clearing | cleared (durable)
+           keysSent |-> FALSE,               \* clear keys sent in this process (memory)
+           clearReceipt |-> FALSE,           \* receipt window since the clearing record
+           readable |-> Scenario # "unreadable",
+           blind |-> FALSE,
+           person |-> "none",
+           pasteSettled |-> FALSE, receiptSettled |-> FALSE,
+           origSubmits |-> IF landed = "pending" THEN 1 ELSE 0,
+           disposition |-> "unknown",
+           nxt |-> "queued", refusals |-> 0,
+           unclear |-> 0,                    \* durable
+           intent |-> FALSE,                 \* durable notice intent
+           enqueued |-> FALSE,               \* durable: this hold's outbox row is recorded
+           enqFails |-> 0,
+           rows |-> {},                      \* outbox rows by key (persistent dedupe)
+           sentFor |-> [i \in {1, 2} |-> 0],
+           trigger |-> TRUE, watch |-> FALSE,
+           humanDeleted |-> FALSE, merged |-> FALSE, releasedOnResidue |-> FALSE,
+           ended |-> FALSE, up |-> TRUE, restarts |-> 0]
+\* v2: hold() persisted in_flight before the first key; the write is still running.
+Init == IF Legacy
+        THEN \E pasted \in (IF PasteMay THEN {TRUE, FALSE} ELSE {TRUE}) :
+                h = Recorded("no", pasted)
+        ELSE h = [Recorded("no", FALSE) EXCEPT !.sendStep = "held", !.writer = TRUE,
+                                               !.composer = "empty", !.rendered = TRUE,
+                                               !.reserved = TRUE]
 
 Live == h.up /\ ~h.ended
+Writing(r) == r.writer /\ r.sendStep # "recorded"
+InFlight == h.sendStep # "recorded"
+\* Enter may have gone: a recorded enter_send_failed, or an outcome never recorded.
+EnterMayNow == EnterMay \/ InFlight
 Busy(r) == r.busy \/ r.otherBusy
 \* The existing classifier: an unrendered paste reads empty; a stash does not show on Empty.
 Existing(r) == IF ~r.readable THEN "unread"
@@ -87,9 +105,13 @@ Wake(r) == [r EXCEPT !.trigger = @ \/ (r.watch /\ (Mutant # "EmptyOnlyWake"
 \* ---------------- environment ----------------
 Render == /\ h.composer = "ours" /\ ~h.rendered
           /\ h' = Wake([h EXCEPT !.rendered = TRUE])
+\* Both windows start at the write's own key (paste, Enter); once no write runs (recorded, or
+\* the writer died in a restart) nothing more is sent and the windows run from the record.
 PasteWindow == /\ ~h.pasteSettled /\ (h.composer # "ours" \/ h.rendered)
+               /\ (~h.writer \/ h.sendStep # "held")
                /\ h' = Wake([h EXCEPT !.pasteSettled = TRUE])
 ReceiptWindow == /\ ~h.receiptSettled /\ h.landed # "pending"
+                 /\ (~h.writer \/ h.sendStep \in {"entered", "recorded"})
                  /\ h' = Wake([h EXCEPT !.receiptSettled = TRUE])
 TranscriptWrite == /\ h.landed = "pending"
                    /\ h' = Wake([h EXCEPT !.landed = "yes", !.busy = TRUE])
@@ -118,6 +140,16 @@ StashReturns == /\ h.stash /\ h.composer = "empty"
                 /\ h' = Wake([h EXCEPT !.composer = "ours", !.stash = FALSE])
 OtherTurnEnd == /\ h.otherBusy
                 /\ h' = Wake([h EXCEPT !.otherBusy = FALSE, !.reserved = FALSE])
+\* After our exact read (clearing recorded) and before our keys, a person submits our text.
+PersonSubmitsOurs == /\ Scenario = "personSubmits" /\ h.person = "none"
+                     /\ h.composer = "ours" /\ h.cleanup = "clearing" /\ ~h.keysSent
+                     /\ h' = Wake([h EXCEPT !.composer = "empty", !.landed = "pending",
+                                            !.origSubmits = @ + 1, !.person = "used"])
+\* Rule 5b: the receipt window measured from the first empty read after the clearing record
+\* (our keys, or a person's Enter). Process memory; a restart measures again (only longer).
+ClearReceiptWindow == /\ h.cleanup # "none" /\ ~h.clearReceipt /\ h.composer = "empty"
+                      /\ h.landed # "pending"
+                      /\ h' = Wake([h EXCEPT !.clearReceipt = TRUE])
 \* A later input on the same execution meets its own unclear Enter; it never reads.
 SecondUncertain == /\ Scenario = "secondHold" /\ h.holdId = 1 /\ ~h.hold /\ Live
                    /\ h.nxt = "submitted" /\ ~Busy(h)
@@ -128,14 +160,35 @@ SecondUncertain == /\ Scenario = "secondHold" /\ h.holdId = 1 /\ ~h.hold /\ Live
                                      !.disposition = "unknown", !.nxt = "queued",
                                      !.unclear = 0, !.intent = FALSE, !.enqueued = FALSE,
                                      !.trigger = TRUE, !.watch = FALSE,
+                                     !.sendStep = "recorded", !.writer = FALSE,
+                                     !.clearReceipt = FALSE,
                                      !.pasteSettled = TRUE, !.receiptSettled = TRUE]
 
+\* ---------------- the write that created the hold ----------------
+PasteKey == /\ h.up /\ h.writer /\ h.sendStep = "held"
+            /\ \E landedPaste \in (IF PasteMay THEN {TRUE, FALSE} ELSE {TRUE}) :
+                 h' = [h EXCEPT !.sendStep = "pasted",
+                                !.composer = IF landedPaste THEN "ours" ELSE "empty",
+                                !.rendered = ~landedPaste]
+EnterKey == /\ h.up /\ h.writer /\ h.sendStep = "pasted"
+            /\ \E landed \in (IF EnterMay /\ h.composer = "ours"
+                               THEN {"no", "pending"} ELSE {"no"}) :
+                 h' = [h EXCEPT !.sendStep = "entered", !.landed = landed,
+                                !.composer = IF landed = "pending" THEN "empty" ELSE @,
+                                !.rendered = IF landed = "pending" THEN TRUE ELSE @,
+                                !.origSubmits = IF landed = "pending" THEN 1 ELSE @]
+\* The final send_outcome is written atomically; an unsent outcome carries its proof.
+RecordOutcome == /\ h.up /\ h.writer /\ h.sendStep = "entered"
+                 /\ h' = Wake([h EXCEPT !.sendStep = "recorded", !.writer = FALSE,
+                                        !.unsentProof = ~EnterMay])
+
 \* ---------------- existing paths ----------------
-StartBefore == /\ Policy = "before" /\ Live /\ ~Busy(h) /\ h.nxt \in {"queued", "refused"}
+StartBefore == /\ Policy = "before" /\ Live /\ ~Busy(h) /\ ~Writing(h)
+               /\ h.nxt \in {"queued", "refused"}
                /\ h.hold
                /\ h' = [h EXCEPT !.refusals = @ + 1,
                                  !.nxt = IF h.nxt = "refused" THEN "retained" ELSE "refused"]
-Paste == /\ Live /\ ~Busy(h) /\ h.nxt \in {"queued", "held"}
+Paste == /\ Live /\ ~Busy(h) /\ ~Writing(h) /\ h.nxt \in {"queued", "held"}
          /\ ~h.hold /\ ~h.reserved /\ ~h.lock /\ Existing(h) = "empty"
          /\ h' = [h EXCEPT !.nxt = "submitted",
                            !.merged = @ \/ h.composer \in {"ours", "edited", "person"}]
@@ -145,10 +198,14 @@ BusyInject == /\ Live /\ h.busy /\ h.nxt = "queued" /\ Existing(h) = "empty"
 End == /\ Ends /\ h.up /\ ~h.ended /\ ~Busy(h)
        /\ h' = [h EXCEPT !.ended = TRUE, !.hold = FALSE]
 Crash == /\ Restart /\ h.up /\ h.restarts = 0
+         /\ CASE CrashWindow = "inFlight" -> h.sendStep # "recorded"
+               [] CrashWindow = "afterRecord" -> h.sendStep = "recorded"
+               [] OTHER -> TRUE
          /\ h' = [h EXCEPT !.up = FALSE, !.restarts = 1]
 Boot == /\ ~h.up
         /\ h' = [h EXCEPT !.up = TRUE, !.reserved = FALSE, !.lock = FALSE, !.watch = FALSE,
-                          !.keysSent = FALSE, !.trigger = TRUE]
+                          !.keysSent = FALSE, !.writer = FALSE, !.clearReceipt = FALSE,
+                          !.trigger = TRUE]
 
 \* ---------------- design: resolve where the hold is read ----------------
 UnclearLimit == 2
@@ -164,24 +221,19 @@ Keep(r) == [r EXCEPT !.nxt = IF Mutant = "OpaqueFailure"
 Retry(r) == IF Mutant = "NoSelfRetry" THEN FALSE
             ELSE IF Mutant = "StopOnIntent" THEN ~r.intent
             ELSE ~r.enqueued
-Enqueued(r) == IF Key(r) \in r.rows THEN [r EXCEPT !.enqueued = TRUE]
-               ELSE [r EXCEPT !.rows = @ \cup {Key(r)},
-                              !.sentFor[r.holdId] = @ + 1, !.enqueued = TRUE]
-\* Undecidable: count durably; at the limit record the intent, then enqueue idempotently.
+\* Undecidable: count durably; at the limit record the notice intent (RecordIntent).
 Bump(r) == LET u == IF r.unclear < UnclearLimit THEN r.unclear + 1 ELSE r.unclear
                k == [Keep(r) EXCEPT !.unclear = u, !.intent = @ \/ u >= UnclearLimit]
-               tries == IF k.intent /\ ~k.enqueued
-                        THEN {Enqueued(k)} \cup
-                             (IF EnqFail /\ k.enqFails = 0
-                              THEN {[k EXCEPT !.enqFails = 1]} ELSE {})
-                        ELSE {k}
-           IN {[t EXCEPT !.trigger = Retry(t)] : t \in tries}
+           IN {[k EXCEPT !.trigger = Retry(k)]}
 Unhold(r) == [r EXCEPT !.hold = FALSE, !.lock = FALSE,
                        !.releasedOnResidue = @ \/ r.stash
                                              \/ r.composer \in {"ours", "edited"}]
 DeliveredSeen == \/ Identity = "digest" /\ h.landed = "yes" /\ Mutant # "IgnoreTranscript"
                  \/ Mutant = "TimeReceipt" /\ (h.landed = "yes" \/ h.otherUser)
-UnsentOK == Identity = "digest" /\ (h.unsentProof \/ Mutant = "ResendNoSettle")
+UnsentOK == Identity = "digest" /\ (h.unsentProof \/ Mutant = "ResendNoSettle"
+                                     \/ (Mutant = "InFlightAsRefused" /\ InFlight))
+\* Rule 5b's wait: after a clearing record the receipt window must pass first.
+ClearWaitOK == h.cleanup = "none" \/ h.clearReceipt \/ Mutant = "SkipClearReceipt"
 Settle(disp) == [h EXCEPT !.lock = TRUE,
                           !.reserved = IF Mutant = "NoSettleReservation" THEN @ ELSE FALSE,
                           !.disposition = disp,
@@ -189,7 +241,7 @@ Settle(disp) == [h EXCEPT !.lock = TRUE,
 \* The old rule 3 gate: any non-empty composer (draft_sighting != Settled) is held.
 Gated == Shown(h) = "unread"
          \/ (Mutant = "SightingGate" /\ Shown(h) \in {"ours", "edited", "person"})
-ExactOurs == Shown(h) = "ours" /\ Identity = "digest" /\ (~EnterMay \/ ReceiptOK)
+ExactOurs == Shown(h) = "ours" /\ Identity = "digest" /\ (~EnterMayNow \/ ReceiptOK)
 
 Choices ==
   CASE Busy(h) -> {Keep(h)}
@@ -200,7 +252,8 @@ Choices ==
     [] Shown(h) \in {"empty", "unread"} /\ h.cleanup = "clearing" /\ h.keysSent ->
            {[h EXCEPT !.cleanup = "cleared",
                       !.unsentProof = IF Mutant = "OverwriteProof" THEN TRUE ELSE @]}
-    [] Shown(h) \in {"empty", "unread"} /\ UnsentOK -> {Settle("undelivered")}
+    [] Shown(h) \in {"empty", "unread"} /\ UnsentOK /\ ClearWaitOK -> {Settle("undelivered")}
+    [] Shown(h) = "empty" /\ UnsentOK -> {Keep(h)}
     [] Shown(h) \in {"empty", "unread"} /\ Identity = "legacy" -> {Settle("unknown")}
     [] Shown(h) = "empty" /\ ~ReceiptOK -> {Keep(h)}
     [] Shown(h) = "ours" /\ Mutant = "ReleaseOnResidue" -> {Unhold(h)}
@@ -214,23 +267,39 @@ Choices ==
            {[h EXCEPT !.composer = "empty", !.unsentProof = TRUE, !.humanDeleted = TRUE]}
     [] OTHER -> Bump(h)
 
-Resolve == /\ Policy = "fixed" /\ Live /\ h.hold /\ h.trigger /\ ~h.lock
+Resolve == /\ Policy = "fixed" /\ Live /\ h.hold /\ h.trigger /\ ~h.lock /\ ~Writing(h)
            /\ \E n \in Choices : h' = n
 Unlink == /\ h.lock /\ h.up
           /\ h' = Unhold(h)
+\* EnqueueNotice: part of a resolver pass; outbox dedupe by key; may fail once.
+EnqueueNotice == /\ Policy = "fixed" /\ Live /\ h.hold /\ h.trigger /\ h.intent
+                 /\ Key(h) \notin h.rows
+                 /\ \/ h' = [h EXCEPT !.rows = @ \cup {Key(h)}, !.sentFor[h.holdId] = @ + 1]
+                    \/ /\ EnqFail /\ h.enqFails = 0
+                       /\ h' = LET f == [h EXCEPT !.enqFails = 1]
+                              IN [f EXCEPT !.trigger = Retry(f)]
+\* RecordEnqueued: the row for this hold's key exists (new or returned by dedupe). The next
+\* resolver pass ends the self-retry; a pending evidence wake is kept.
+RecordEnqueued == /\ Policy = "fixed" /\ Live /\ h.hold /\ h.intent /\ ~h.enqueued
+                  /\ Key(h) \in h.rows
+                  /\ h' = [h EXCEPT !.enqueued = TRUE]
 
 Stay == UNCHANGED vars
 
 Next == Render \/ PasteWindow \/ ReceiptWindow \/ TranscriptWrite \/ TurnEnd
         \/ LoadSpike \/ LoadEnds \/ PersonTypes \/ PersonEdits \/ PersonLeaves
         \/ PersonStashSubmit \/ StashReturns \/ OtherTurnEnd \/ SecondUncertain
+        \/ PersonSubmitsOurs \/ ClearReceiptWindow
+        \/ PasteKey \/ EnterKey \/ RecordOutcome \/ EnqueueNotice \/ RecordEnqueued
         \/ StartBefore \/ Paste \/ BusyInject \/ End \/ Crash \/ Boot
         \/ Resolve \/ Unlink \/ Stay
 
 Fairness == /\ WF_vars(Render) /\ WF_vars(PasteWindow) /\ WF_vars(ReceiptWindow)
             /\ WF_vars(TranscriptWrite) /\ WF_vars(TurnEnd) /\ WF_vars(LoadEnds)
             /\ WF_vars(PersonLeaves) /\ WF_vars(StashReturns) /\ WF_vars(OtherTurnEnd)
-            /\ WF_vars(SecondUncertain)
+            /\ WF_vars(SecondUncertain) /\ WF_vars(ClearReceiptWindow)
+            /\ WF_vars(PasteKey) /\ WF_vars(EnterKey) /\ WF_vars(RecordOutcome)
+            /\ WF_vars(EnqueueNotice) /\ WF_vars(RecordEnqueued)
             /\ WF_vars(StartBefore) /\ WF_vars(Paste) /\ WF_vars(BusyInject)
             /\ WF_vars(End) /\ WF_vars(Boot) /\ WF_vars(Resolve) /\ WF_vars(Unlink)
 Spec == Init /\ [][Next]_vars /\ Fairness
@@ -240,6 +309,7 @@ TypeOK == /\ h.composer \in {"empty", "ours", "edited", "person"}
           /\ h.landed \in {"no", "pending", "yes"}
           /\ h.nxt \in {"queued", "held", "refused", "retained", "submitted"}
           /\ h.cleanup \in {"none", "clearing", "cleared"}
+          /\ h.sendStep \in {"held", "pasted", "entered", "recorded"}
           /\ h.rows \subseteq Keys /\ h.holdId \in {1, 2}
           /\ h.origSubmits \in 0..2 /\ h.unclear \in 0..UnclearLimit
 OriginalAtMostOnce == h.origSubmits <= 1
