@@ -350,7 +350,7 @@ Next == AdoptAwaitedClear \/ RefuseAwaitedClear \/ RepairClearCertificate \/ Inv
         SuppressStop \/ SoftSummary \/ LateAssistant \/
         NativeStart \/ Revoke \/ Submit \/ Restart \/ CompactSubmit \/ IdleWake \/ PersonTurn \/
         (\E i \in Ids : Hold(i) \/ Expire(i) \/ Prepare(i) \/ SelectBusy(i) \/ BusyInject(i) \/ BusyPublish(i) \/ ReexposeBusy(i) \/ BusyAbsorb(i) \/ BusyConsume(i) \/ Receipt(i) \/ Replay(i))
-Fairness == WF_r(AdoptAwaitedClear) /\ WF_r(RefuseAwaitedClear) /\ WF_r(RepairClearCertificate) /\ WF_r(InvalidateObservedCertificate) /\ WF_r(RestartClaimed) /\ WF_r(ClearRetire) /\ WF_r(Restart) /\ WF_r(CloseModal) /\ WF_r(WatchModal) /\ WF_r(WatchHeld) /\ WF_r(ChangeClearPending) /\ WF_r(PublishClearFile) /\ WF_r(CompactCompletionEvidence) /\ WF_r(FinishSelfCompactFence) /\ WF_r(PollDialog) /\ WF_r(PermissionRecord) /\ WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
+Fairness == WF_r(AdoptAwaitedClear) /\ WF_r(RefuseAwaitedClear) /\ WF_r(RepairClearCertificate) /\ WF_r(InvalidateObservedCertificate) /\ WF_r(RestartClaimed) /\ WF_r(ClearRetire) /\ (ResumeHistory \/ WF_r(Restart)) /\ WF_r(CloseModal) /\ WF_r(WatchModal) /\ WF_r(WatchHeld) /\ WF_r(ChangeClearPending) /\ WF_r(PublishClearFile) /\ WF_r(CompactCompletionEvidence) /\ WF_r(FinishSelfCompactFence) /\ WF_r(PollDialog) /\ WF_r(PermissionRecord) /\ WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
             WF_r(SuppressStop) /\ WF_r(SoftSummary) /\ WF_r(LateAssistant) /\
             WF_r(RecoverDraft) /\ WF_r(HumanClears) /\ WF_r(NativeStart) /\
             WF_r(Revoke) /\ WF_r(Submit) /\ WF_r(CompactSubmit) /\
