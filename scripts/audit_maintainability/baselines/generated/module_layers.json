@@ -2,7 +2,7 @@
   "configuration_errors":[],
   "count_unit_version":1,
   "edge_count_unit":"static reference occurrences",
-  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha 825946dbad6ec9e1b3597766c36e7306d34e0510 --output scripts/audit_maintainability/baselines/generated/module_layers.json",
+  "generation_command":"python3 scripts/audit_maintainability/checks/module_layer_baseline.py --input-sha a586b08d6e56e26f03d17d9af9f4dbf3c8e8263f --output scripts/audit_maintainability/baselines/generated/module_layers.json",
   "indeterminate_dependencies":[
     {"count":1,"id":"08853637791398c5dfec8479468682a4979eb79b09e839926bddf4be0dccd923","kind":"path","source":"src/lib.rs::crate::services::session_identity_metadata","target":"src/lib.rs::crate::services::platform::shell"},
     {"count":1,"id":"0dfd6496906265be8c7e24f91c4ac6a05281cb3ca01ca86620a29223a990c345","kind":"path","source":"src/lib.rs::crate::services::platform::tmux::session_identity","target":"src/lib.rs::crate::services::session_identity_metadata"},
@@ -40,7 +40,7 @@
   ],
   "indeterminate_edges":33,
   "indeterminate_occurrences":42,
-  "input_sha":"825946dbad6ec9e1b3597766c36e7306d34e0510",
+  "input_sha":"a586b08d6e56e26f03d17d9af9f4dbf3c8e8263f",
   "mapping_sha256":"e06d1e80855ad9155eafe374b822f50b798ac2940f48d2cc6f2e9cfe6eb7cbf4",
   "reverse_dependencies":[
     {"count":2,"id":"0035d7ca439517230bc6306b0881fc487fe95b44c2852a7e74379cb98436987d","kind":"path","source":"src/lib.rs::crate::config","target":"src/lib.rs::crate::config::session_hosts"},
