@@ -1468,7 +1468,6 @@ struct ActivateLockReleaseGuard {
 #[cfg(test)]
 mod tests {
     use super::activate_fallback_capacity_reached;
-    use crate::test_support::wait::poll_within;
 
     #[test]
     fn fallback_capacity_counts_only_new_dispatches_this_activate() {
@@ -1720,6 +1719,7 @@ mod tests {
             resolve_activate_target_run_id,
         };
         use crate::db::auto_queue::test_support::TestPostgresDb;
+        use crate::test_support::wait::poll_within;
         use sqlx::{Connection, PgConnection, PgPool};
         use std::sync::Arc;
 
