@@ -1,4 +1,4 @@
-"""Measure main and the candidate in one run; only new module-layer debt blocks (#8131 decision B).
+"""Measure main and the candidate in one run; only new module-layer debt blocks.
 
 The base is always a commit on main's history, chosen from the CI event payload (pull request: the
 merge commit's first parent; main push: the event's ``before``) or, locally, ``MODULE_LAYER_BASE_REF``
@@ -338,7 +338,7 @@ def _tables(payload):
     return {section: {row["id"]: row for row in payload[section]} for section in SECTIONS}
 
 
-def apply_approvals(base, head, entries, base_layers, head_layers):
+def apply_approvals(base, head, entries, base_layers, head_layers, base_ranks=None, head_ranks=None):
     """Raise base ceilings by this candidate's approvals; moves are validated on the raw measurements.
 
     Returns (accepted payload, moves manifest, errors). Increase limits are judged on the debt after
@@ -367,9 +367,10 @@ def apply_approvals(base, head, entries, base_layers, head_layers):
         if row["reason"] == "admit-classification":
             previous = old["indeterminate_dependencies"].get(identity)
             if (not mapping_changed or identity in old["reverse_dependencies"] or previous is None
-                    or previous["count"] != current or current > ceiling or relayered):
+                    or previous["count"] != current or current > ceiling or relayered
+                    or (base_ranks or {}) != (head_ranks or {})):
                 errors.append(_error("approval-admit", section, f"{row['file']}: admission of {identity[:12]} requires a changed "
-                                     "mapping that preserves every known layer and an exact base indeterminate edge"))
+                                     "mapping that preserves every layer rank and known layer and an exact base indeterminate edge"))
                 continue
             accepted["indeterminate_dependencies"] = [r for r in accepted["indeterminate_dependencies"] if r["id"] != identity]
             index["indeterminate_dependencies"].pop(identity, None)
@@ -515,7 +516,8 @@ def _evaluate(repo, env):
                                  f"{payload['configuration_errors']}"))
     entries, approval_files, approval_errors = _load_approvals(repo, base_sha)
     errors.extend(approval_errors)
-    accepted, moves, apply_errors = apply_approvals(base, head, entries, base_side["layers_of"], head_layers)
+    accepted, moves, apply_errors = apply_approvals(base, head, entries, base_side["layers_of"], head_layers,
+                                                    base_side.get("ranks", {}), ranks)
     errors.extend(apply_errors)
     comparison = compare(accepted, head, moves, sources)
     errors.extend(comparison["errors"])

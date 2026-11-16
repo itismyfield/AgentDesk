@@ -100,7 +100,7 @@ def _files(findings: Iterable) -> set[str]:
 
 
 class _LayerSrcTree(_FakeSrcTree):
-    """Commit the harness fixture as main so the module-layer gate measures it as its own base (#8131 B)."""
+    """Commit the harness fixture as main so the module-layer gate measures it as its own base."""
     def __init__(self, files: dict[str, str], git_main: bool = True) -> None:
         super().__init__(files)
         self.git_main = git_main
@@ -2372,7 +2372,7 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
     def test_baseline_writer_allows_identical_replay_and_rejects_replacement(self) -> None:
         payload = self.snapshot(self._graph(), self._mapping(), "a" * 40)
         with TemporaryDirectory() as temporary:
-            target = Path(temporary) / "baselines" / "generated" / "module_layers.json"
+            target = Path(temporary) / "snapshot.json"
             self.baselines.write_baseline(target, payload)
             original = target.read_bytes()
             self.assertEqual(original, self.baselines.encode_baseline(payload).encode("utf-8"))
@@ -2469,7 +2469,10 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
             snapshot = json.loads(first.read_text("utf-8"))
             self.assertEqual(snapshot["input_sha"], revision)
             self.assertIn(revision, snapshot["generation_command"])
-            self.assertIn("baselines/generated/module_layers.json", snapshot["generation_command"])
+            removed = repo / self.baselines.BASELINE
+            resurrect = subprocess.run([*command, "--input-sha", "HEAD", "--output", str(removed)], capture_output=True, text=True)
+            self.assertNotEqual(resurrect.returncode, 0)
+            self.assertFalse(removed.exists())
             replay = subprocess.run([*command, "--input-sha", revision, "--output", str(second)],
                                     capture_output=True, text=True)
             self.assertEqual(replay.returncode, 0, replay.stderr)

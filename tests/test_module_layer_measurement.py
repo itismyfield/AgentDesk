@@ -215,7 +215,6 @@ class ModuleLayerMeasurementTests(unittest.TestCase):
                 layer="assembly"
                 reason="fixture upper layer"
             """,
-            "scripts/audit_maintainability/layer_moves.toml": "schema_version=1\nmoves=[]\n",
             "scripts/audit_allowlist.toml": "",
         })
 
@@ -236,7 +235,7 @@ class ModuleLayerMeasurementTests(unittest.TestCase):
         return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True).stdout.strip()
 
     def _commit_main(self, root):
-        """Commit the fixture as main; the gate measures this commit as the base (#8131 B)."""
+        """Commit the fixture as main; the gate measures this commit as the base."""
         self._git(root, "init", "-q")
         self._git(root, "config", "user.name", "Fixture")
         self._git(root, "config", "user.email", "fixture@example.invalid")

@@ -1,5 +1,6 @@
 # 착지 색인·기준선 충돌 제거 설계 (#8131)
 
+<!-- doc-path-refs: removed scripts/audit_maintainability/baselines/generated/module_layers.json scripts/audit_maintainability/layer_moves.toml -->
 <!-- doc-path-refs: proposed docs/architecture/layer-records/ scripts/audit_maintainability/layers.d/ -->
 <!-- doc-path-refs: external prepush_gates.sh merge_main_regen.sh merge_autoresolve.py -->
 
@@ -51,7 +52,7 @@ Rust 선언과 책임 분류 설정에는 일반 텍스트 union을 적용하지
 
 ### 현재 계약과 결정성
 
-`module_layer_baseline.py:228`은 키와 id를 정렬해 한 레코드를 한 줄로 출력한다.
+`module_layer_baseline.py:212`는 키와 id를 정렬해 한 레코드를 한 줄로 출력한다.
 :210의 payload에는 `input_sha`, 그 SHA를 포함하는 `generation_command`, 매핑 hash가 들어간다.
 :455는 인자가 commit으로 해석되는지 확인하고, :459는 그 commit과 작업 소스
 (`src`, `Cargo.toml`)의 일치, :462는 미추적 소스 부재를 검사한다.
@@ -69,7 +70,7 @@ base와 `677e520b6c39267e270029fe906a17c72cb83446` 사이 결과 차이는 정�
 이는 고정 입력의 반복·갱신 멱등성 증거이며, 모든 Python/OS 조합의 결정성 증명은 아니다.
 원시 명령·stderr·바이트는 외부 로그 `d1-determinism-summary.json`과 `d1-module-*`에 있다.
 
-`module_layer_ratchet.py:141`은 id별 새 역의존·증가·zero-rule 부활을 차단한다.
+`module_layer_ratchet.py:139`는 id별 새 역의존·증가·zero-rule 부활을 차단한다.
 판정 불가 edge·uncertainty·미분류의 일반 증가는 기존대로 경고다(:3, :169).
 숨긴 역의존과 연관된 불확실성 증가는 차단한다. 이를 모두 오류로 바꾸거나 모두 흡수하지 않는다.
 `reduced_baseline`(:214)은 승인된 각 count와 실측의 최솟값만 보존하고, 사라진 id를 zero-rule로
@@ -224,7 +225,7 @@ base의 색인은 46행이며 cfg가 있는 area는 14개다. 한 area에도 서
 build.rs·include 기반 자동 발견은 cfg·visibility·도구의 정적 모듈 분석까지 바꾸므로
 이 21줄의 충돌 감소만을 위해 도입하지 않는다. #7353 뒤에도 이 파일이 상위 병목이면 별도 측정한다.
 
-매핑은 `module_layer_baseline.py:67`의 최장 prefix·명시 root 우선 규칙이다.
+매핑은 `module_layer_baseline.py:62`의 최장 prefix·명시 root 우선 규칙이다.
 같은 우선순위에서 서로 다른 층이면 미분류(:85)이지 마지막 행 승리가 아니다.
 현재 TOML에는 규칙 367개·unclassified 1개·rank 6개가 있고 `(root,prefix)` 중복은 없다.
 행 순서 정렬은 가독성을 높이지만 끝의 공통 괄호 충돌을 제거하지 못한다.

@@ -1,12 +1,13 @@
 # 모듈 레이어 기준선: 커밋하지 않고 main과 PR을 각각 계산 (#8131 결정 B)
 
-<!-- doc-path-refs: proposed scripts/audit_maintainability/layer_approvals/ -->
+<!-- doc-path-refs: removed scripts/audit_maintainability/baselines/generated/module_layers.json scripts/audit_maintainability/layer_moves.toml -->
 <!-- doc-path-refs: external coord-tools/ agentdesk-issue-pipeline/ /home/adk/ -->
 
 설계 기준: `56fad666785bcdb8c28324d019067163db31a257` (2026-11-16 KST).
 이 문서는 설계와 레인 폴더 실험의 결과이며 제품 코드·설정·파일 형식은 바꾸지 않았다.
 `docs/landing-conflict-free-index.design.md`의 C1b(착지 단계 재생성 병합)를 이 설계가 대체한다.
 B가 착지하기 전까지는 지금의 재생성 방식(C: 생성 명령으로 기준선 재생성)으로 운영한다.
+B1·B2 구현 뒤 코드 인용은 구현 상태에 맞췄다. 지운 코드는 `(B2 전 :N)`으로 적는다.
 
 ## 1. 결정과 범위
 
@@ -26,7 +27,7 @@ B가 착지하기 전까지는 지금의 재생성 방식(C: 생성 명령으로
 
 | | 안 1: 위반 키 집합 비교 (**채택**) | 안 2: 구획별 개수 비교 + 키 표본 |
 |---|---|---|
-| 흐름 | base·head를 같은 생성기로 측정하고 기존 `compare`(`module_layer_ratchet.py:134`)로 (section,id)별 count를 비교 | 구획마다 발생 수 합계만 비교하고, 늘어난 id 몇 개를 표본으로 출력 |
+| 흐름 | base·head를 같은 생성기로 측정하고 기존 `compare`(`module_layer_ratchet.py:132`)로 (section,id)별 count를 비교 | 구획마다 발생 수 합계만 비교하고, 늘어난 id 몇 개를 표본으로 출력 |
 | 비용 | 측정 2회(병렬이면 벽시계 1회분+α). 비교 자체는 1초 미만 | 측정 비용은 같다. 비교만 조금 싸다 |
 | 위험 | 측정 결정성에 의존(같은 실행·같은 코드로 양쪽을 재므로 통제 가능) | 한 id의 증가가 다른 id의 감소로 상쇄되면 통과. 항목별 승인 불가 |
 | 실측 | S2(증가1+감소1) **오류 1**, 1116b의 불확실성 새 id 12건을 경고로 분리 | S2 역의존 합계 0으로 **통과(놓침)**, 1116b 불확실성 +4로 새 id 12건·감소 15건이 서로 가려짐 |
@@ -60,7 +61,7 @@ B가 착지하기 전까지는 지금의 재생성 방식(C: 생성 명령으로
 - 분류 해제(known→unknown)와 known 층 변경: 실제 세 쌍 모두 0. 1116b는 매핑을 바꿨지만(새 모듈 규칙)
   해제·층 변경 0이었다. S3만 known 층 변경 1.
 - 6.2절의 "역방향 모양 미해결 참조" 규칙에 걸리는 새 불확실성: 실제 세 쌍 모두 0.
-- 1116b에 기존 매핑 가드(`module_layer_baseline.py:271`)를 B 방식(base=main 측정)으로 돌리면 통과,
+- 1116b에 기존 매핑 가드(`module_layer_baseline.py`의 B2 전 `_guard_mapping_reductions`)를 B 방식(base=main 측정)으로 돌리면 통과,
   S3는 `mapping-only reverse reduction requires --reclassify` 거부였다.
 
 현행의 "경고 1,3xx건"은 경고 증가를 기준선이 흡수하지 않아 쌓인 수다. B에서는 PR이 새로 만든 것만 보인다.
@@ -89,11 +90,11 @@ base는 **항상 main 이력 위의 commit**이다. 결정 규칙은 다음 순�
 
 ### 4.2 측정 입력과 결정성
 
-- base: `historical_measurement(repo, base)`(`module_layer_baseline.py:480`)로 base commit의 추적된
-  `src`·`Cargo.toml`을 임시 디렉터리에 풀어 측정한다. 매핑은 `git show base:layers.toml`이다.
+- base: base commit의 추적된 `src`·`Cargo.toml`을 `git archive`로 임시 디렉터리에 풀어 측정한다
+  (`module_layer_gate.py`의 `_materialize`. 설계 때 쓰려던 `historical_measurement`는 쓰지 않아 B2에서 지웠다). 매핑은 `git show base:layers.toml`이다.
   작업 트리 상태를 읽지 않는다.
-- head: CI에서는 작업 트리(= HEAD) 측정 전에 기존 검증과 같은 조건(`module_layer_baseline.py:537`,
-  `:540`: `src`·`Cargo.toml`이 HEAD와 같고 미추적 소스 없음)을 요구한다. 로컬은 작업 트리를 재되
+- head: CI에서는 작업 트리(= HEAD) 측정 전에 기존 검증과 같은 조건(`module_layer_gate.py`의 `_dirty`:
+  `src`·`Cargo.toml`이 HEAD와 같고 미추적 소스 없음)을 요구한다. 로컬은 작업 트리를 재되
   더러운 트리면 결과에 `dirty`를 표시한다(로컬 신호일 뿐 착지 근거가 아니다).
 - 양쪽 모두 **head의 측정 코드·같은 인터프리터·같은 실행**으로 잰다. Python 버전·OS 차이는 양쪽에
   똑같이 걸리므로 거짓 증가를 만들지 않는다. 지금은 레인이 로컬 Python 3.14로 만든 파일을
@@ -116,12 +117,12 @@ base는 **항상 main 이력 위의 commit**이다. 결정 규칙은 다음 순�
 2. base 측정에 **이번 PR의 승인 델타**(5절)를 적용해 `accepted`를 만든다. `[[increase]]`의 효력·상한은
    **이동 정규화 뒤 같은 부채 id**에 대해 판정한다. 승인 파일에는 candidate의 id·끝점을 적고, 그 id가
    이동 목적지이면 내부적으로 base의 old_id record count를 `max_count`로 올린다(목적지 id를 `accepted`에
-   넣지 않으므로 기존 `_moves`의 충돌 검사와 맞는다). 분류 편입은 기존 `_admit_classification`
-   (`module_layer_baseline.py:288`)과 같이 판정 불가 record를 역의존 record로 옮긴다.
-3. `compare(accepted, head, 이번 PR의 [[move]], head sources)`(`module_layer_ratchet.py:134`)를 그대로 쓴다.
+   넣지 않으므로 기존 `_moves`의 충돌 검사와 맞는다). 분류 편입은 B2 전 생성기의 `_admit_classification`과
+   같은 조건으로 판정 불가 record를 역의존 record로 옮긴다(`module_layer_gate.py`의 `apply_approvals`).
+3. `compare(accepted, head, 이번 PR의 [[move]], head sources)`(`module_layer_ratchet.py:132`)를 그대로 쓴다.
    역의존 신규·증가·숨김은 오류, 판정 불가·불확실성 증가는 경고(숨김 관련이면 오류)다.
-4. 매핑이 바뀌었으면 기존 가드 `_guard_mapping_reductions`(`module_layer_baseline.py:271`)를
-   base=main 측정과 이번 PR의 `[[reclassify]]` prefix로 호출한다.
+4. 매핑이 바뀌었으면 B2 전 가드 `_guard_mapping_reductions`와 같은 판정을
+   base=main 측정과 이번 PR의 `[[reclassify]]` prefix로 한다(`module_layer_gate.py`의 `layer_rules`).
 5. 6.2절의 추가 규칙(분류 해제, 역방향 모양 미해결 참조, 분석기 변경, 묘비)을 적용한다.
 6. 승인 항목 검증(5.3절): 쓰이지 않은 승인, 상한 초과, 착지된 승인 파일 수정은 오류다.
 
@@ -130,8 +131,8 @@ base는 **항상 main 이력 위의 commit**이다. 결정 규칙은 다음 순�
 ### 4.4 uncertainty
 
 - 판정 단위는 지금과 같이 id별 count다. 일반 증가는 경고, 기존 역의존을 숨기거나 역의존이 줄어든
-  source에서 늘면 오류다(`module_layer_ratchet.py:169`).
-- 지금의 "역사 증명"(`_record_proven_uncertainties`, `module_layer_baseline.py:374`)은 필요 없다.
+  source에서 늘면 오류다(`module_layer_ratchet.py:167`).
+- 지금의 "역사 증명"(`_record_proven_uncertainties`, B2에서 제거)은 필요 없다.
   그 장치는 커밋 기준선이 경고 증가를 흡수하지 않아 main에 이미 있는 불확실성을 새것처럼 보던 문제를
   풀려고 있었다. B의 base는 main 측정 자체이므로 main에 있는 것은 처음부터 base에 있다.
 - 총계(`unclassified_modules` 등) 증가는 지금처럼 경고다.
@@ -175,10 +176,10 @@ analyzer = [
 ```
 
 - `increase.reason`은 `admit-classification`(판정 불가→역의존 편입) 또는 `accepted-debt`(검토된 새 부채)다.
-  edge의 id는 source·target·kind와 일치해야 한다(지금의 `_record` 검증, `module_layer_ratchet.py:20`).
+  edge의 id는 source·target·kind와 일치해야 한다(`_record` 검증, `module_layer_ratchet.py:18`).
   불확실성 id도 올릴 수 있지만 대상은 count 증가에 걸린 판정(6.2절 `unresolved-reverse`, 증가 기반 숨김)뿐이다.
   기존 `hidden-reverse`(역의존이 줄었는데 같은 source의 미해결 참조가 여전히 대상을 가리킴,
-  `module_layer_ratchet.py:186`)는 count와 무관한 판정이라 **승인 대상이 아니다**. 코드를 고친다.
+  `module_layer_ratchet.py:184`)는 count와 무관한 판정이라 **승인 대상이 아니다**. 코드를 고친다.
 - 파일 이름은 `^[0-9]+-[a-z0-9-]+\.toml$`, 같은 파일 안에서 (section,id)·old_id·new_id·prefix 중복은 오류다.
 
 ### 5.2 델타 의미
@@ -198,7 +199,7 @@ analyzer = [
 | 항목 | 효력 조건 | 오류 |
 |---|---|---|
 | `increase` | 이동 정규화 뒤 같은 부채에서 base count < head count ≤ `max_count` | head count > `max_count`(상한 초과), head count ≤ base count(쓰이지 않음), 정규화 전 목적지 id에 적용(구현 오류로 간주해 시험) |
-| `increase`(admit) | base에서 같은 id가 판정 불가 record로 같은 count, 매핑 hash 변경, known 층 보존(`_admit_classification` 검사 재사용) | 조건 불일치 |
+| `increase`(admit) | base에서 같은 id가 판정 불가 record로 같은 count, 매핑 hash 변경, known 층·층 rank 보존(`apply_approvals`) | 조건 불일치 |
 | `move` | old_id가 base에 있고 head에 없음, new_id가 head에 있고 base에 없음(`_moves`·`_normalized` 재사용) | 조건 불일치, 쓰이지 않음 |
 | `reclassify` | 매핑이 바뀌었고 그 prefix로만 설명되는 매핑 감소 또는 분류 해제가 실제로 있음 | 매핑 무변경, 쓰이지 않음 |
 | `analyzer` | 측정 코드가 바뀌었고 base 소스를 두 코드로 잰 차이의 digest·개수가 일치 | digest 불일치, 측정 코드 무변경 |
@@ -238,14 +239,14 @@ analyzer = [
 
 | 현행 보호 | 근거 | B에서 |
 |---|---|---|
-| 역의존 신규·증가 차단 | `module_layer_ratchet.py:169` | 같다(base=main은 승인 없이는 역의존이 늘지 않은 상태) |
-| zero-rule 재등장 차단(역의존 75건) | `module_layer_ratchet.py:162` | 같은 id가 역의존으로 돌아오면 `new-id` 오류로 여전히 차단 |
-| zero-rule을 숨김 판정에 포함 | `module_layer_ratchet.py:146` | 과거 0이 된 역의존이 판정 불가 edge나 미해결 참조로 숨어 돌아오는 경로가 약해진다 → 6.2의 분류 해제·역방향 모양 규칙으로 보완 |
+| 역의존 신규·증가 차단 | `module_layer_ratchet.py:167` | 같다(base=main은 승인 없이는 역의존이 늘지 않은 상태) |
+| zero-rule 재등장 차단(역의존 75건) | `module_layer_ratchet.py:160` | 같은 id가 역의존으로 돌아오면 `new-id` 오류로 여전히 차단 |
+| zero-rule을 숨김 판정에 포함 | `module_layer_ratchet.py:144` | 과거 0이 된 역의존이 판정 불가 edge나 미해결 참조로 숨어 돌아오는 경로가 약해진다 → 6.2의 분류 해제·역방향 모양 규칙으로 보완 |
 | 판정 불가(6,290)·불확실성(318) zero-rule | 경고 구획 | 경고 코드 이름만 `zero-rule`→`new-id`. 차단 여부는 같다 |
-| 경고 증가를 상한에 흡수하지 않음 | `module_layer_ratchet.py:217` | 착지 뒤 base에 흡수된다. 경고는 원래 막지 않으므로 차단 의미는 같고, PR마다 새 경고만 보인다 |
-| 매핑만으로 줄인 역의존은 `--reclassify` 필요 | `module_layer_baseline.py:271` | 같은 함수, `[[reclassify]]` 승인 |
-| 분류 편입은 명시 명령으로만 | `module_layer_baseline.py:288` | 같은 검사, `increase(admit)` 승인 |
-| 이동은 `layer_moves.toml` | `module_layer_ratchet.py:73` | PR 델타의 `[[move]]`(3절: 과거 manifest는 새 base에서 거부됨) |
+| 경고 증가를 상한에 흡수하지 않음 | `module_layer_ratchet.py`(B2 전 :217) | 착지 뒤 base에 흡수된다. 경고는 원래 막지 않으므로 차단 의미는 같고, PR마다 새 경고만 보인다 |
+| 매핑만으로 줄인 역의존은 `--reclassify` 필요 | `module_layer_baseline.py`(B2 전 :271) | 같은 판정을 gate `layer_rules`가 한다, `[[reclassify]]` 승인 |
+| 분류 편입은 명시 명령으로만 | `module_layer_baseline.py`(B2 전 :288) | 같은 조건을 gate `apply_approvals`가 검사, `increase(admit)` 승인 |
+| 이동은 `layer_moves.toml` | `module_layer_ratchet.py:71` | PR 델타의 `[[move]]`(3절: 과거 manifest는 새 base에서 거부됨) |
 | 동시 착지의 의미 충돌 | 커밋 파일에 없는 역의존 → main과 이후 모든 PR이 빨강 | main 사후 검사가 빨강 + 착지 도구가 다음 착지를 거부(6.2 다섯째 줄) |
 
 ### 6.2 증가를 숨기는 길과 막는 방법
@@ -255,7 +256,7 @@ analyzer = [
 | base를 main이 아닌 곳에서 계산(HEAD 자기 비교, 브랜치 중간 commit, 오래된 commit) | 4.1의 검증: CI는 이벤트 payload로만 base를 정하고 override 거부, PR은 `HEAD^2`=PR head·`HEAD^1`⊂main 확인 | 없음(PR base가 그 실행 시점 main tip보다 뒤질 수 있는 것은 strict 꺼짐의 일반 성질이며 다섯째 줄로 다룬다) |
 | 승인 파일 남용(백지 승인, 옛 승인 재사용, 상한 부풀리기) | 델타 의미, 착지 파일 불변, 쓰이지 않음 오류, `max_count` 정확 상한, edge id-끝점 일치 | 리뷰어가 나쁜 부채를 승인하는 것은 사람의 판단(지금의 편입 명령과 같음) |
 | 분류 해제로 숨김(known 모듈을 미분류로 만들어 과거 0인 역의존을 판정 불가로 되살림) | **새 규칙**: base에서 분류된 모듈이 head에서 미분류·충돌 분류면 오류, `[[reclassify]]`로만 허용. 실측 실제 3쌍 0건 | 이름이 같은 모듈을 지웠다가 미분류로 다시 만드는 경우(긴 prefix 규칙이 보통 덮는다) |
-| 미해결 참조로 숨김(과거 0인 역의존을 경로만 남은 참조로 되살림) | **새 규칙**: 새로 늘어난 불확실성의 적힌 경로가 가리키는 분류 모듈의 rank가 source보다 높으면 오류(`unresolved-reverse`), `increase`로만 허용. zero-rule 집합보다 넓은 상위 집합. 실측 실제 3쌍 0건 | 재수출·별칭으로만 닿는 경로(지금도 알려진 한계, `module_layer_ratchet.py:113`) |
+| 미해결 참조로 숨김(과거 0인 역의존을 경로만 남은 참조로 되살림) | **새 규칙**: 새로 늘어난 불확실성의 적힌 경로가 가리키는 분류 모듈의 rank가 source보다 높으면 오류(`unresolved-reverse`), `increase`로만 허용. zero-rule 집합보다 넓은 상위 집합. 실측 실제 3쌍 0건 | 재수출·별칭으로만 닿는 경로(지금도 알려진 한계, `module_layer_ratchet.py:111`) |
 | 동시에 초록인 두 PR이 합쳐져 생긴 역의존(strict 꺼짐, `agentdesk-issue-pipeline/SKILL.md:403`) | main push CI가 `before`→HEAD를 비교해 빨강. 착지 도구 `coord-tools/open_landing_pr.sh`가 다음 조건을 **모두** 만족하는 run 하나만 통과 근거로 쓴다: `event == push`, `head_sha ==` 현재 origin/main, 그 run attempt에 속한 완료된 `maintainability-audit-main` 산출물에 module_layers 오류 0. 산출물 누락·판독 실패·검사 대기·dispatch 자기 비교·이전 SHA의 초록은 통과 근거가 아니며 착지 PR 개설을 거부 | 사후 검사가 빨강이 된 뒤 도구를 거치지 않고 다른 PR이 머지되면 그 뒤 base에 흡수된다. 착지 PR 동시 2개 제한에서 발생 조건이 좁다. PR CI에 "main tip 자기 검사"를 더하는 안은 1 commit 창만 덮고 측정 1회가 늘어 채택하지 않음 |
 | 측정 코드 변경으로 양쪽에서 함께 사라짐 | **새 규칙**: base·head의 측정 코드 blob이 다르면 base 소스를 base 코드로도 한 번 더 재고, 역의존 구획 차이가 있으면 `[[analyzer]]` digest 승인 필요. 차이가 없으면(예: `_run`만 바뀐 B 자체) 승인 없이 통과 | 불확실성 구획의 차이는 요약에만 표시 |
 | 결정성 깨짐(트리 상태, 캐시, 인터프리터) | CI는 깨끗한 트리 요구, base는 git 객체에서만, 양쪽 같은 실행·같은 코드, CI는 캐시 미사용 | 없음 |
@@ -288,20 +289,20 @@ module_layers base=56fad66678 head=e6d4ae3e48 errors=0 warnings=12
 |---|---|---|---|
 | 1 | R `scripts/audit_maintainability/baselines/generated/module_layers.json` | 커밋된 승인 기준선 2.8MB | 삭제(B2). 묘비 규칙이 부활을 막음 |
 | 2 | R `scripts/audit_maintainability/baselines/generated/README.md:1` | 이 파일의 생성·감소 갱신 규칙 | module_layers 문장 삭제, B 안내로 교체(B2) |
-| 3 | R `scripts/audit_maintainability/checks/module_layer_baseline.py:21` | `BASELINE` 경로 상수 | 묘비 검사 경로로만 남김(B2) |
-| 4 | R `module_layer_baseline.py:225` | payload의 `generation_command`가 커밋 경로를 가리킴 | 진단 스냅숏(`target/`)용 명령으로 바꿈(B2) |
-| 5 | R `module_layer_baseline.py:255` | `write_baseline` exclusive-create | 진단 출력 전용, 커밋 경로 기본값 제거(B2) |
-| 6 | R `module_layer_baseline.py:271` | 매핑만 감소 가드 | 유지. gate가 `[[reclassify]]`로 호출(B1) |
-| 7 | R `module_layer_baseline.py:288` | 분류 편입으로 기준선 수정 | 검사부만 재사용해 admit 승인 검증(B1), 기준선 쓰기 제거(B2) |
-| 8 | R `module_layer_baseline.py:364` | 미기록 불확실성·역사 증명 | 제거(4.4절)(B2) |
-| 9 | R `module_layer_baseline.py:389` | `update_baseline` 잠금·원자 교체 | 제거(B2) |
-| 10 | R `module_layer_baseline.py:480` | 과거 commit 소스 재측정 | 유지. base 측정 경로(B1) |
-| 11 | R `module_layer_baseline.py:513` | CLI: `--update-reductions`·`--upgrade-records`·`--admit-classification`, `--output` 기본 = 커밋 경로 | 세 모드 제거. `--input-sha X --output target/…` 진단만(B2) |
-| 12 | R `scripts/audit_maintainability/checks/module_layer_ratchet.py:11` | `BASELINE` import | 제거(B1) |
-| 13 | R `module_layer_ratchet.py`(B1 전 :22) | `load_inputs`: 커밋 파일 + `layer_moves.toml` 읽기 | 제거, gate가 base 측정·승인 델타를 넘김(B1). `MOVES` 상수는 생성기 CLI(`module_layer_baseline.py:553`)가 쓰므로 B2에서 제거 |
-| 14 | R `module_layer_ratchet.py:73` | `_moves` 이동 검증 | 유지. 입력이 PR 델타 `[[move]]`(B1) |
-| 15 | R `module_layer_ratchet.py:134` | `compare` | 변경 없음(B1에서 재사용) |
-| 16 | R `module_layer_ratchet.py:207` | `reduced_baseline` 감소 기록 | 제거(B2) |
+| 3 | R `scripts/audit_maintainability/checks/module_layer_baseline.py:16` | `BASELINE` 경로 상수 | 묘비 검사 경로로만 남김(B2) |
+| 4 | R `module_layer_baseline.py:209` | payload의 `generation_command`가 커밋 경로를 가리킴 | 진단 스냅숏(`target/`)용 명령으로 바꿈(B2) |
+| 5 | R `module_layer_baseline.py:239` | `write_baseline` exclusive-create | 진단 출력 전용, 커밋 경로 기본값 제거(B2) |
+| 6 | R `module_layer_baseline.py`(B2 전 :271) | 매핑만 감소 가드 | B1 gate의 `layer_rules`가 `[[reclassify]]`로 같은 판정을 해 호출처가 없어져 B2에서 제거 |
+| 7 | R `module_layer_baseline.py`(B2 전 :288) | 분류 편입으로 기준선 수정 | B1 gate의 `apply_approvals`가 같은 조건으로 admit 승인 검증, 함수와 기준선 쓰기 제거(B2) |
+| 8 | R `module_layer_baseline.py`(B2 전 :364) | 미기록 불확실성·역사 증명 | 제거(4.4절)(B2) |
+| 9 | R `module_layer_baseline.py`(B2 전 :389) | `update_baseline` 잠금·원자 교체 | 제거(B2) |
+| 10 | R `module_layer_baseline.py`(B2 전 :480) | 과거 commit 소스 재측정 | B1 gate는 `_materialize`(`git archive`)로 base를 재서 호출처가 없어져 B2에서 제거 |
+| 11 | R `module_layer_baseline.py:255`(B2 전 :513) | CLI: `--update-reductions`·`--upgrade-records`·`--admit-classification`, `--output` 기본 = 커밋 경로 | 세 모드 제거. `--input-sha X --output target/…` 진단만(B2) |
+| 12 | R `scripts/audit_maintainability/checks/module_layer_ratchet.py`(B1 전 :11) | `BASELINE` import | 제거(B1) |
+| 13 | R `module_layer_ratchet.py`(B1 전 :22) | `load_inputs`: 커밋 파일 + `layer_moves.toml` 읽기 | 제거, gate가 base 측정·승인 델타를 넘김(B1). `MOVES` 상수는 생성기 CLI(`module_layer_baseline.py`, B2 전 :553)가 써서 B2에서 제거 |
+| 14 | R `module_layer_ratchet.py:71` | `_moves` 이동 검증 | 유지. 입력이 PR 델타 `[[move]]`(B1) |
+| 15 | R `module_layer_ratchet.py:132` | `compare` | 변경 없음(B1에서 재사용) |
+| 16 | R `module_layer_ratchet.py`(B2 전 :207) | `reduced_baseline` 감소 기록 | 제거(B2) |
 | 17 | R `scripts/audit_maintainability/checks/module_layers.py:416` | `_run`: 커밋 파일과 비교 | base 결정·측정, 승인 델타, 추가 규칙, 요약(B1) |
 | 18 | R `module_layers.py:435` | `hard_gate=True` | 변경 없음(필수 판정 유지) |
 | 19 | R `scripts/audit_maintainability.py:52` | check 등록 | 변경 없음 |
@@ -316,7 +317,7 @@ module_layers base=56fad66678 head=e6d4ae3e48 errors=0 warnings=12
 | 28 | R `docs/architecture/layers.md:121` | 최초 활성화·감소 갱신(:140)·분류 편입(:167) 절차와 명령(:128·:146·:172) | 승인 파일 절차로 교체(B2) |
 | 29 | R `docs/architecture/layers.md:462` | `layer_moves.toml` 링크 | `[[move]]` 안내로 교체(B2) |
 | 30 | R `docs/landing-conflict-free-index.design.md:31` | C1b 처방(같은 문서 :46 절, :350 조각) | 이 문서로 대체 표시(이 설계 commit) |
-| 31 | R `tests/test_module_layer_ratchet.py:574` | fixture가 커밋 기준선 + CLI 갱신(:648) | base 2-commit fixture와 gate 시험으로(B1·B2) |
+| 31 | R `tests/test_module_layer_ratchet.py`(B2 전 :574) | fixture가 커밋 기준선 + CLI 갱신(B2 전 :648) | base 2-commit fixture와 gate 시험으로(B1·B2) |
 | 32 | R `tests/test_module_layer_measurement.py:218` | runner fixture가 기준선 커밋 | base commit 모델로(B1) |
 | 33a | R `tests/test_audit_maintainability.py:102` | 공통 `_LayerSrcTree`가 기준선·이동 manifest를 씀 | base commit fixture로(B1, `_run`이 바뀌므로) |
 | 33 | R `tests/test_audit_maintainability.py:2375` | `write_baseline`·`generation_command` 경로 시험(:2472) | 진단 출력 계약으로 수정(B2) |

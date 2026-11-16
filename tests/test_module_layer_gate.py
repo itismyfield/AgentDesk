@@ -1,4 +1,4 @@
-"""Contracts for the base-recomputing module-layer gate (#8131 decision B).
+"""Contracts for the base-recomputing module-layer gate.
 
 Each fixture is a git repository whose first commit is "main" (refs/remotes/origin/main); the
 candidate is a later commit or the working tree. Only increases against that base may block.
@@ -241,6 +241,35 @@ class Approvals(GateFixture):
         self.assertIn("approval-invalid", self.codes(self.run_gate(repo)))
         repo.put(f"{gate.APPROVALS}/8131-draft.toml", text.replace("TODO: 승인 사유를 리뷰받을 문장으로 쓴다", "reviewed"))
         self.assertEqual(self.codes(self.run_gate(repo)), [])
+
+
+class Admission(GateFixture):
+    UNCLASSIFIED = LAYERS.replace(',\n         {prefix="spare",layer="assembly",reason="fixture spare"}]', "]").replace(
+        "]\n[layers]", ']\nunclassified = [{prefix="spare",reason="fixture"}]\n[layers]')
+
+    def admitted(self, layers=LAYERS, calls=1):
+        repo = self.repo("crate::spare::hit();", layers=self.UNCLASSIFIED)
+        repo.put("scripts/audit_maintainability/layers.toml", layers)
+        repo.put("src/lib.rs", source("crate::spare::hit();" * calls))
+        before = self.run_gate(repo)
+        row = self.edge(before, LOWER, SPARE)
+        self.approval(repo, "8131-admit", increase=[{**{k: row[k] for k in ("id", "source", "target", "kind")},
+                                                     "section": "reverse_dependencies", "max_count": calls,
+                                                     "reason": "admit-classification"}])
+        return repo, before
+
+    def test_exact_indeterminate_transition_is_admitted(self):
+        repo, before = self.admitted()
+        self.assertIn("new-id", self.codes(before))
+        self.assertEqual(self.codes(self.run_gate(repo)), [])
+
+    def test_admission_refuses_known_layer_or_rank_change_and_growth(self):
+        for name, layers, calls in (
+                ("known-layer", LAYERS.replace('prefix="upper",layer="assembly"', 'prefix="upper",layer="foundation"'), 1),
+                ("rank", LAYERS.replace("assembly = 1", "assembly = 2"), 1), ("growth", LAYERS, 2)):
+            with self.subTest(name):
+                repo, _ = self.admitted(layers, calls)
+                self.assertIn("approval-admit", self.codes(self.run_gate(repo)))
 
 
 class LayerRules(GateFixture):

@@ -414,7 +414,7 @@ def analyze(repo: Path, *, occurrence_projection: list[dict] | None = None,
 
 
 def _run(allowlist):
-    """Compare main (the base) with the candidate; both are measured here (#8131 decision B)."""
+    """Compare main (the base) with the candidate; both are measured here."""
     import os
     from .module_layer_gate import evaluate
     result = evaluate(common.REPO_ROOT, os.environ)
