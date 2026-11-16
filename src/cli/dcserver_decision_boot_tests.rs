@@ -2,7 +2,7 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const MODE: &str = "ADK_TEST_DECISION_BOOT_MODE";
 const TEST: &str = "cli::dcserver::decision_boot::tests::startup_lookup_logs_once_with_fixed_availability_and_sigterm_restore";
@@ -125,15 +125,25 @@ fn startup_lookup_logs_once_with_fixed_availability_and_sigterm_restore() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !owned_pid.exists() && Instant::now() < deadline {
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "probe exited before lookup started"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(owned_pid.exists());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(crate::test_support::wait::poll_within(
+            async || {
+                if owned_pid.exists() {
+                    return Ok(());
+                }
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "probe exited before lookup started"
+                );
+                Err("lookup child has not published its pid".into())
+            },
+            Duration::from_secs(5),
+            "lookup child pid",
+        ))
+        .expect("lookup child must publish its pid");
     let pid: i32 = std::fs::read_to_string(owned_pid)
         .unwrap()
         .trim()

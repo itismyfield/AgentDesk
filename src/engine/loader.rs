@@ -1658,8 +1658,8 @@ mod tests {
     /// so the interrupted eval's partial state can be torn down with the
     /// probe context before the outer runtime drops — same pattern the
     /// shutdown-interrupt test uses for QuickJS hygiene.
-    #[test]
-    fn load_single_policy_with_deadline_interrupts_runaway_policy() {
+    #[tokio::test]
+    async fn load_single_policy_with_deadline_interrupts_runaway_policy() {
         let runtime = Runtime::new().expect("create QuickJS runtime");
         let ctx = Context::full(&runtime).expect("create QuickJS context");
         let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
@@ -1695,18 +1695,21 @@ mod tests {
             drop(probe_ctx);
             (result.is_err(), elapsed)
         });
-        let join_deadline = Instant::now() + HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(3);
-        loop {
-            if load_thread.is_finished() {
-                break;
-            }
-            assert!(
-                Instant::now() < join_deadline,
-                "scope-bound deadline interrupt did not fire within budget+3s"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let (is_err, elapsed) = load_thread.join().expect("load thread join");
+        crate::test_support::wait::poll_within(
+            async || {
+                load_thread.is_finished().then_some(()).ok_or_else(|| {
+                    "scope-bound deadline interrupt did not fire within budget+3s".into()
+                })
+            },
+            HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(3),
+            "scope-bound deadline interrupt did not fire within budget+3s",
+        )
+        .await
+        .expect("scope-bound deadline interrupt did not fire within budget+3s");
+        let (is_err, elapsed) = crate::test_support::wait::join_within(
+            load_thread,
+            HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(3),
+        );
         assert!(
             is_err,
             "runaway policy should fail to load (deadline interrupt expected)"
@@ -1924,8 +1927,8 @@ mod tests {
     /// shrinks monotonically and becomes zero once the deadline passes.
     /// After the guard drops, the helper returns `None` again so live
     /// engine bridge ops are not affected.
-    #[test]
-    fn bridge_op_deadline_visible_to_native_ops_while_armed() {
+    #[tokio::test]
+    async fn bridge_op_deadline_visible_to_native_ops_while_armed() {
         assert!(
             bridge_op_deadline_remaining().is_none(),
             "no deadline should be armed at test start"
@@ -1946,9 +1949,20 @@ mod tests {
                 "initial bridge-op budget out of range: {initial:?}"
             );
 
-            // Sleep past the deadline; the helper must now report a zero
-            // remaining budget so synchronous bridge ops short-circuit.
-            std::thread::sleep(Duration::from_millis(250));
+            // The std deadline expires on this thread before the native op checks it.
+            crate::test_support::wait::poll_within(
+                async || {
+                    crate::engine::loader::bridge_op_deadline_remaining()
+                        .expect("deadline remains armed")
+                        .is_zero()
+                        .then_some(())
+                        .ok_or_else(|| "armed bridge deadline has not expired".into())
+                },
+                Duration::from_millis(250),
+                "armed bridge deadline expiry",
+            )
+            .await
+            .expect("armed bridge deadline must expire");
             let after_deadline = bridge_op_deadline_remaining()
                 .expect("deadline should still be visible after it has passed");
             assert!(
@@ -1979,8 +1993,8 @@ mod tests {
     /// so the policy eval itself succeeds — the runaway then triggers
     /// only inside `policy_obj.get("name")`, which is exactly the path
     /// Codex round-2 flagged as both unbounded AND error-swallowing.
-    #[test]
-    fn load_single_policy_deadline_covers_user_property_getters() {
+    #[tokio::test]
+    async fn load_single_policy_deadline_covers_user_property_getters() {
         let runtime = Runtime::new().expect("create QuickJS runtime");
         let ctx = Context::full(&runtime).expect("create QuickJS context");
         let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
@@ -2042,18 +2056,21 @@ mod tests {
             (result.is_err(), elapsed, err_message)
         });
 
-        let join_deadline = Instant::now() + HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(3);
-        loop {
-            if load_thread.is_finished() {
-                break;
-            }
-            assert!(
-                Instant::now() < join_deadline,
-                "deadline did not cover user-controlled property getter within budget+3s"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let (is_err, elapsed, err_message) = load_thread.join().expect("load thread join");
+        crate::test_support::wait::poll_within(
+            async || {
+                load_thread.is_finished().then_some(()).ok_or_else(|| {
+                    "deadline did not cover user-controlled property getter within budget+3s".into()
+                })
+            },
+            HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(3),
+            "deadline did not cover user-controlled property getter within budget+3s",
+        )
+        .await
+        .expect("deadline did not cover user-controlled property getter within budget+3s");
+        let (is_err, elapsed, err_message) = crate::test_support::wait::join_within(
+            load_thread,
+            HOT_RELOAD_EVAL_BUDGET + Duration::from_secs(3),
+        );
         assert!(
             is_err,
             "runaway getter should propagate as a load error (deadline interrupt expected); \

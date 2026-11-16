@@ -253,14 +253,11 @@ async fn boot_and_policy_compete_for_the_same_missing_notify_pg() {
             .await
             .unwrap()
     });
-    let both_waiting = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
+    let both_waiting = crate::test_support::wait::poll_within(async || {
             let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = 734910 AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())")
                 .fetch_one(&pool).await.unwrap();
-            if count == 2 { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }).await;
+            (count == 2).then_some(()).ok_or_else(|| format!("expected both INSERT waiters, observed {count}"))
+    }, std::time::Duration::from_secs(20), "both production entrypoints must reach INSERT").await;
     sqlx::query("SELECT pg_advisory_unlock(734910)")
         .execute(&mut *barrier)
         .await

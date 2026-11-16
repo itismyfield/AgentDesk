@@ -756,7 +756,7 @@ mod tests {
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral cap server");
         let port = listener.local_addr().expect("cap server addr").port();
-        std::thread::spawn(move || {
+        let server = std::thread::spawn(move || {
             if let Ok((mut sock, _)) = listener.accept() {
                 let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
                 let mut buf = [0u8; 4096];
@@ -787,9 +787,7 @@ mod tests {
             "expected streaming cap error, got truncated-or-ok result: {:?}",
             result.as_ref().map(|s| s.len())
         );
-        // Give the server thread a beat to observe the closed socket, then
-        // require that the early abort stopped it well short of the full body.
-        std::thread::sleep(Duration::from_millis(300));
+        crate::test_support::wait::join_within(server, crate::test_support::wait::WAIT_CAP);
         let delivered = sent.load(std::sync::atomic::Ordering::SeqCst);
         assert!(
             delivered < total,
@@ -824,8 +822,9 @@ mod tests {
     fn connect_first_reachable_stops_at_the_deadline() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind reachable server");
         let good = listener.local_addr().expect("addr");
-        let deadline = Instant::now();
-        std::thread::sleep(Duration::from_millis(5));
+        let deadline = Instant::now()
+            .checked_sub(Duration::from_millis(5))
+            .unwrap();
         let stream = connect_first_reachable(&[good], deadline);
         assert!(
             matches!(&stream, Err(message) if message == "connect deadline exceeded"),
@@ -986,11 +985,23 @@ mod tests {
     /// #2378: after the armed deadline elapses, the resolver must
     /// short-circuit so we don't issue a doomed request that would block
     /// the runtime past the deadline.
-    #[test]
-    fn resolve_http_post_timeout_errors_after_deadline_elapses() {
+    #[tokio::test]
+    async fn resolve_http_post_timeout_errors_after_deadline_elapses() {
         let _scope =
             crate::engine::loader::ScopedBridgeDeadline::new(std::time::Duration::from_millis(20));
-        std::thread::sleep(std::time::Duration::from_millis(40));
+        crate::test_support::wait::poll_within(
+            async || {
+                crate::engine::loader::bridge_op_deadline_remaining()
+                    .expect("deadline remains armed")
+                    .is_zero()
+                    .then_some(())
+                    .ok_or_else(|| "armed bridge deadline has not expired".into())
+            },
+            std::time::Duration::from_millis(40),
+            "armed bridge deadline expiry",
+        )
+        .await
+        .expect("armed bridge deadline must expire");
         let resolved = resolve_http_post_timeout();
         assert!(
             matches!(&resolved, Err(msg) if msg.contains("deadline passed")),

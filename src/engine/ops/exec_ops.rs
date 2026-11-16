@@ -802,10 +802,22 @@ mod bridge_deadline_tests {
     /// #2378: once the armed deadline has passed, the clamp must
     /// short-circuit with an error so the bridge op does not start a
     /// blocking child it cannot enforce a deadline against.
-    #[test]
-    fn clamp_returns_error_after_deadline_elapses() {
+    #[tokio::test]
+    async fn clamp_returns_error_after_deadline_elapses() {
         let _scope = ScopedBridgeDeadline::new(Duration::from_millis(20));
-        std::thread::sleep(Duration::from_millis(40));
+        crate::test_support::wait::poll_within(
+            async || {
+                crate::engine::loader::bridge_op_deadline_remaining()
+                    .expect("deadline remains armed")
+                    .is_zero()
+                    .then_some(())
+                    .ok_or_else(|| "armed bridge deadline has not expired".into())
+            },
+            std::time::Duration::from_millis(40),
+            "armed bridge deadline expiry",
+        )
+        .await
+        .expect("armed bridge deadline must expire");
         let result = clamp_exec_timeout_to_bridge_deadline(30_000);
         assert!(
             matches!(result, Err(ref msg) if msg.contains("deadline passed")),
@@ -821,10 +833,22 @@ mod bridge_deadline_tests {
         );
     }
 
-    #[test]
-    fn session_tmux_timeout_returns_error_after_deadline_elapses() {
+    #[tokio::test]
+    async fn session_tmux_timeout_returns_error_after_deadline_elapses() {
         let _scope = ScopedBridgeDeadline::new(Duration::from_millis(20));
-        std::thread::sleep(Duration::from_millis(40));
+        crate::test_support::wait::poll_within(
+            async || {
+                crate::engine::loader::bridge_op_deadline_remaining()
+                    .expect("deadline remains armed")
+                    .is_zero()
+                    .then_some(())
+                    .ok_or_else(|| "armed bridge deadline has not expired".into())
+            },
+            std::time::Duration::from_millis(40),
+            "armed bridge deadline expiry",
+        )
+        .await
+        .expect("armed bridge deadline must expire");
         let result = bridge_tmux_timeout_for_session_op("session.kill");
         assert!(
             matches!(

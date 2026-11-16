@@ -155,7 +155,7 @@ fn measure(out: &Path) {
         (addr, engines)
     });
     if let Some((main, _)) = &engines {
-        policy::seed(main);
+        server.block_on(policy::seed(main));
     }
     if profile == Profile::S3 {
         server.block_on(claims::prewarm_blocking());

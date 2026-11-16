@@ -1142,11 +1142,10 @@ mod tests {
             let release = PathBuf::from(
                 std::env::var_os("ADK_THREAD_LOCK_RELEASE").expect("release marker path"),
             );
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while !release.exists() && std::time::Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            assert!(release.exists(), "parent did not release helper lock");
+            assert!(
+                path_appears(&release, Duration::from_secs(10)),
+                "parent did not release helper lock"
+            );
         }
         drop(lock);
         if let Some(released) = std::env::var_os("ADK_THREAD_LOCK_RELEASED") {
@@ -1154,11 +1153,10 @@ mod tests {
         }
         if let Some(exit) = std::env::var_os("ADK_THREAD_LOCK_EXIT") {
             let exit = PathBuf::from(exit);
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while !exit.exists() && std::time::Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            assert!(exit.exists(), "parent did not let helper runtime exit");
+            assert!(
+                path_appears(&exit, Duration::from_secs(10)),
+                "parent did not let helper runtime exit"
+            );
         }
     }
 
@@ -1223,26 +1221,39 @@ mod tests {
     }
 
     fn path_appears(path: &std::path::Path, timeout: Duration) -> bool {
-        let deadline = std::time::Instant::now() + timeout;
-        while !path.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        path.exists()
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(crate::test_support::wait::poll_within(
+                async || {
+                    path.exists()
+                        .then_some(())
+                        .ok_or_else(|| format!("timed out waiting for {}", path.display()))
+                },
+                timeout,
+                "lock helper marker",
+            ))
+            .is_ok()
     }
 
     fn wait_for_child(mut child: std::process::Child) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                assert!(status.success(), "lock helper failed: {status}");
-                return;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "timed out waiting for lock helper"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let status = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(crate::test_support::wait::poll_within(
+                async || {
+                    child
+                        .try_wait()
+                        .unwrap()
+                        .ok_or_else(|| "timed out waiting for lock helper".into())
+                },
+                Duration::from_secs(10),
+                "lock helper exit",
+            ))
+            .expect("timed out waiting for lock helper");
+        assert!(status.success(), "lock helper failed: {status}");
     }
 
     #[test]
@@ -1288,9 +1299,8 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        std::thread::sleep(Duration::from_millis(200));
         assert!(
-            !second_acquired.exists(),
+            !path_appears(&second_acquired, Duration::from_millis(200)),
             "second process crossed the first process's OS file lock"
         );
 
@@ -1353,9 +1363,8 @@ mod tests {
             .spawn()
             .unwrap();
         wait_for_path(&second_wait_started, Duration::from_secs(10));
-        std::thread::sleep(Duration::from_millis(100));
         assert!(
-            !second_acquired.exists(),
+            !path_appears(&second_acquired, Duration::from_millis(100)),
             "second process must wait before the owner is abandoned"
         );
 
@@ -1438,11 +1447,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unix_lock_directory_and_file_reject_symlinks_and_weak_permissions() {
-        use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, symlink};
+        use std::os::unix::fs::{
+            DirBuilderExt as _, MetadataExt as _, PermissionsExt as _, symlink,
+        };
 
         let temp = tempfile::tempdir().unwrap();
         let weak = temp.path().join("weak");
         fs::DirBuilder::new().mode(0o755).create(&weak).unwrap();
+        fs::set_permissions(&weak, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(ensure_secure_lock_directory(&weak).is_err());
 
         let target = temp.path().join("target");
