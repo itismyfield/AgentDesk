@@ -4,29 +4,31 @@ EXTENDS HerdrBusyReobserve
 Absent == [session |-> 0, path |-> 0, dev |-> 0, ino |-> 0]
 Old == [session |-> 1, path |-> 1, dev |-> 1, ino |-> 1]
 Current == [session |-> 2, path |-> 2, dev |-> 1, ino |-> 2]
-Candidate == IF Scenario = "foreign-source"
-             THEN [session |-> 3, path |-> 3, dev |-> 1, ino |-> 3] ELSE Current
 Healthy == Scenario \in {"missing", "old"}
-ActiveInit == r = [phase |-> "running", native |-> Old, registry |-> Old, pin |-> Old,
+ActiveInit == r = [phase |-> "running", historyCurrent |-> Old, registry |-> Old, pin |-> Old,
     inflight |-> IF Scenario = "missing" THEN Absent ELSE Old,
-    candidateChannel |-> IF Scenario = "foreign-channel" THEN 2 ELSE 1,
-    sourceChannel |-> 1, sourceNonce |-> 1, verified |-> TRUE,
+    ownerChannel |-> IF Scenario = "foreign-channel" THEN 2 ELSE 1,
+    sourceNonce |-> 1, openedFirstSession |-> 1, knownBusy |-> TRUE,
     changed |-> FALSE, published |-> FALSE, observed |-> FALSE,
     snapshot |-> Absent, request |-> Absent, route |-> "none",
     effects |-> 0, used |-> Absent, proof |-> FALSE]
 
 ChangeSession == /\ r.phase = "running"
-                 /\ r' = [r EXCEPT !.phase = "changed", !.native = Current,
-                                   !.changed = TRUE, !.verified = FALSE]
+                 /\ r' = [r EXCEPT !.phase = "changed", !.changed = TRUE, !.knownBusy = FALSE]
 \* Normal hook adoption has already checked the opened first record and file identity.
 PublishSource == /\ r.phase = "changed"
-                 /\ r' = [r EXCEPT !.phase = "ready", !.registry = Candidate,
-                     !.pin = Candidate, !.sourceChannel = r.candidateChannel,
-                     !.verified = Scenario # "unknown", !.published = TRUE]
+                 /\ r' = [r EXCEPT !.phase = "published", !.registry = Current,
+                     !.pin = Current, !.historyCurrent = Current, !.published = TRUE]
+\* Re-read after publication; an in-place foreign first record leaves the pinned file identity.
+InspectTranscript == /\ r.phase = "published"
+                     /\ r' = [r EXCEPT !.phase = "ready",
+                         !.openedFirstSession = IF Scenario = "foreign-source" THEN 3 ELSE 2,
+                         !.knownBusy = Scenario # "unknown"]
 PersonInput == /\ r.phase = "ready"
                /\ r' = [r EXCEPT !.phase = "queued"]
-ExactCurrent == r.verified /\ r.registry = r.pin /\ r.registry = r.native
-                /\ r.sourceChannel = 1 /\ r.sourceNonce = 1
+ExactCurrent == r.knownBusy /\ r.registry = r.pin /\ r.registry = r.historyCurrent
+                /\ r.openedFirstSession = r.pin.session
+                /\ r.ownerChannel = 1 /\ r.sourceNonce = 1
 \* The old active-turn entry bypasses the shared observation and uses its frozen inflight row.
 SelectActive == /\ r.phase = "queued"
                 /\ IF Policy = "Before" \/ Mutant = "NoBindingCheck"
@@ -50,20 +52,20 @@ ActiveReceipt == /\ r.phase = "sent" /\ ~r.proof
 ActiveSettle == /\ r.phase = "sent" /\ r.proof
                 /\ r' = [r EXCEPT !.phase = "done"]
 ActiveWait == UNCHANGED vars
-ActiveNext == ChangeSession \/ PublishSource \/ PersonInput \/ SelectActive \/ SubmitActive
+ActiveNext == ChangeSession \/ PublishSource \/ InspectTranscript \/ PersonInput \/ SelectActive \/ SubmitActive
               \/ ActiveReceipt \/ ActiveSettle \/ ActiveWait
-ActiveFairness == WF_vars(ChangeSession) /\ WF_vars(PublishSource) /\ WF_vars(PersonInput)
+ActiveFairness == WF_vars(ChangeSession) /\ WF_vars(PublishSource) /\ WF_vars(InspectTranscript) /\ WF_vars(PersonInput)
                   /\ WF_vars(SelectActive) /\ WF_vars(SubmitActive)
                   /\ WF_vars(ActiveReceipt) /\ WF_vars(ActiveSettle)
 ActiveSpec == ActiveInit /\ [][ActiveNext]_vars /\ ActiveFairness
 
-ActiveTypeOK == r.phase \in {"running", "changed", "ready", "queued", "captured", "held", "sent", "done"}
+ActiveTypeOK == r.phase \in {"running", "changed", "published", "ready", "queued", "captured", "held", "sent", "done"}
                 /\ r.effects \in 0..1
 ActiveAtMostOnce == r.effects <= 1
-NoForeignSourceKey == r.effects > 0 => r.used = r.native /\ r.sourceChannel = 1 /\ r.sourceNonce = 1
+NoForeignSourceKey == r.effects > 0 => r.used = r.historyCurrent /\ r.ownerChannel = 1 /\ r.sourceNonce = 1
 NoKeyWithoutVerifiedSource == r.effects > 0 => ExactCurrent
 ActiveSettledExactlyOnce == r.phase = "done" => r.effects = 1 /\ r.proof
-ActiveScenarioReached == <> (r.changed /\ r.published /\ r.phase \notin {"running", "changed", "ready"})
+ActiveScenarioReached == <> (r.changed /\ r.published /\ r.phase \notin {"running", "changed", "published", "ready"})
 HealthyActiveBusyDelivered == <> (r.phase = "done")
 UnknownActiveHeld == <> (r.phase = "held")
 =============================================================================
