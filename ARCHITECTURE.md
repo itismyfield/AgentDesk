@@ -1608,8 +1608,8 @@ src/
 │   │   ├── delivery_lease_cell/
 │   │   │   ├── exact_lease/
 │   │   │   │   ├── tests.rs
-│   │   │   │   └── token.rs
-│   │   │   ├── exact_lease.rs
+│   │   │   │   └── token_tests.rs
+│   │   │   ├── exact_lease_tests.rs
 │   │   │   └── source_epoch_observer.rs
 │   │   ├── execution_identity/
 │   │   │   ├── herdr_agent_hint.rs
@@ -2083,7 +2083,7 @@ src/
 │   │   │   │   │   ├── claude.rs
 │   │   │   │   │   ├── codex.rs
 │   │   │   │   │   ├── codex_herdr_tests.rs
-│   │   │   │   │   ├── herdr.rs
+│   │   │   │   │   ├── herdr_fixture_tests.rs
 │   │   │   │   │   ├── herdr_safety_tests.rs
 │   │   │   │   │   └── herdr_tests.rs
 │   │   │   │   ├── admission.rs
@@ -2141,7 +2141,7 @@ src/
 │   │   │   │   ├── owner.rs
 │   │   │   │   └── placeholder.rs
 │   │   │   ├── legacy_restart_replay/
-│   │   │   │   └── proof.rs
+│   │   │   │   └── proof_tests.rs
 │   │   │   ├── manual_rebind/
 │   │   │   │   ├── adoption.rs
 │   │   │   │   ├── adoption_notice_pg_tests.rs
@@ -2281,8 +2281,8 @@ src/
 │   │   │   ├── model/
 │   │   │   │   ├── entry_tests.rs
 │   │   │   │   └── tests.rs
-│   │   │   ├── capacity.rs
-│   │   │   └── model.rs
+│   │   │   ├── capacity_tests.rs
+│   │   │   └── model_tests.rs
 │   │   ├── router/
 │   │   │   ├── herdr_consent/
 │   │   │   │   ├── admission.rs
@@ -2466,7 +2466,7 @@ src/
 │   │   │   │   ├── input_payload.rs
 │   │   │   │   ├── intake_turn.rs
 │   │   │   │   ├── latency_spans.rs
-│   │   │   │   ├── owned_turn_start.rs
+│   │   │   │   ├── owned_turn_start_fixture_tests.rs
 │   │   │   │   ├── owned_turn_start_tests.rs
 │   │   │   │   ├── pre_admission_control.rs
 │   │   │   │   ├── provider_dispatch.rs
@@ -2775,7 +2775,7 @@ src/
 │   │   │   │   ├── chunk_forward.rs
 │   │   │   │   ├── entry.rs
 │   │   │   │   ├── idle_read.rs
-│   │   │   │   ├── observations.rs
+│   │   │   │   ├── observations_tests.rs
 │   │   │   │   ├── state.rs
 │   │   │   │   ├── stream_chunk.rs
 │   │   │   │   └── stream_seed.rs
@@ -2909,7 +2909,7 @@ src/
 │   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── relay_e2e/
 │   │   │   │   ├── cancel_backstop_e2e_tests/
-│   │   │   │   │   └── autoheal.rs
+│   │   │   │   │   └── autoheal_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests/
 │   │   │   │   │   ├── herdr_direct_actual_client_tests.rs
 │   │   │   │   │   └── herdr_direct_roundtrip_tests.rs
@@ -2918,13 +2918,13 @@ src/
 │   │   │   │   ├── busy_inject_thread_e2e_tests.rs
 │   │   │   │   ├── busy_inject_turn_mode_e2e_tests.rs
 │   │   │   │   ├── cancel_backstop_e2e_tests.rs
-│   │   │   │   ├── catch_up_pagination_e2e.rs
+│   │   │   │   ├── catch_up_pagination_e2e_tests.rs
 │   │   │   │   ├── claude_idle_o_host_fixture_tests.rs
 │   │   │   │   ├── claude_idle_o_late_hook_tests.rs
 │   │   │   │   ├── claude_idle_o_transition_tests.rs
 │   │   │   │   ├── codex_o_handoff_replay_tests.rs
 │   │   │   │   ├── cold_start_incident_e2e_tests.rs
-│   │   │   │   ├── consumed_command_guard_e2e.rs
+│   │   │   │   ├── consumed_command_guard_e2e_tests.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── duplicate_intake_e2e_tests.rs
 │   │   │   │   ├── herdr_stop_activation_e2e_tests.rs
@@ -2937,24 +2937,24 @@ src/
 │   │   │   │   ├── herdr_terminate_route_e2e_tests.rs
 │   │   │   │   ├── idle_inject_echo_e2e_tests.rs
 │   │   │   │   ├── idle_phase_split_tests.rs
-│   │   │   │   ├── mod.rs
 │   │   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   │   ├── pending_admission_e2e_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests.rs
-│   │   │   │   ├── queue_recovery_e2e.rs
+│   │   │   │   ├── queue_recovery_e2e_tests.rs
 │   │   │   │   ├── reconcile_stale_turn_e2e_tests.rs
-│   │   │   │   ├── registered_bootstrap_e2e.rs
+│   │   │   │   ├── registered_bootstrap_e2e_tests.rs
+│   │   │   │   ├── relay_e2e_tests.rs
 │   │   │   │   ├── replay_defer_intake_e2e_tests.rs
-│   │   │   │   ├── stale_resume_retry_e2e.rs
-│   │   │   │   ├── stop_command_catch_up_e2e.rs
-│   │   │   │   └── thread_guard_host_e2e.rs
+│   │   │   │   ├── stale_resume_retry_e2e_tests.rs
+│   │   │   │   ├── stop_command_catch_up_e2e_tests.rs
+│   │   │   │   └── thread_guard_host_e2e_tests.rs
 │   │   │   ├── relay_ownership/
 │   │   │   │   └── hosted_source_tests.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff/
 │   │   │   │   │   ├── reown/
 │   │   │   │   │   │   └── reown_tests.rs
-│   │   │   │   │   └── reown.rs
+│   │   │   │   │   └── reown_tests.rs
 │   │   │   │   ├── claim/
 │   │   │   │   │   ├── admitted/
 │   │   │   │   │   │   └── transition_tests.rs
@@ -2966,7 +2966,7 @@ src/
 │   │   │   │   ├── claim.rs
 │   │   │   │   ├── claim_entry_tests.rs
 │   │   │   │   ├── intake_placeholder_retirement_tests.rs
-│   │   │   │   ├── non_bridge_claim.rs
+│   │   │   │   ├── non_bridge_claim_tests.rs
 │   │   │   │   ├── ownership.rs
 │   │   │   │   ├── pending_claim.rs
 │   │   │   │   └── stale_reclaim.rs
@@ -3020,7 +3020,7 @@ src/
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
 │   │   │   ├── launch_script.rs
-│   │   │   ├── local_model_queue_wake_e2e.rs
+│   │   │   ├── local_model_queue_wake_e2e_tests.rs
 │   │   │   ├── observed_prompt_decision.rs
 │   │   │   ├── rehydration.rs
 │   │   │   ├── rehydration_pending_tests.rs
@@ -3412,7 +3412,7 @@ src/
 │   │   │   │   ├── tests.rs
 │   │   │   │   ├── watch_host.rs
 │   │   │   │   ├── watch_host_tests.rs
-│   │   │   │   └── watcher_install_fixture.rs
+│   │   │   │   └── watcher_install_fixture_tests.rs
 │   │   │   ├── codex_tui_restore.rs
 │   │   │   ├── dispatched_origin_ghost.rs
 │   │   │   ├── dispatched_origin_ghost_tests.rs

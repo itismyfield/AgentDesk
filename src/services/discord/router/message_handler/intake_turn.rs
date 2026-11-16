@@ -15,7 +15,7 @@ mod dispatch_runtime;
 mod host_refusal;
 pub(crate) mod inflight_create_log;
 #[cfg(test)]
-#[path = "owned_turn_start.rs"]
+#[path = "owned_turn_start_fixture_tests.rs"]
 pub(in crate::services::discord) mod owned_turn_start;
 mod placeholder_handoff;
 pub(super) mod race_loss;

@@ -761,12 +761,6 @@ fn relay_offset_unchanged_inside_backlog_grace(
         .is_some_and(|age| age < STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS)
 }
 
-fn relay_offset_unchanged_past_backlog_grace(relay_observation: &OffsetObservationResult) -> bool {
-    relay_observation
-        .unchanged_age_secs
-        .is_some_and(|age| age >= STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS)
-}
-
 pub(in crate::services::discord) fn transcript_mtime_age_secs(
     inflight: Option<&InflightTurnState>,
     now_unix_secs: i64,

@@ -224,3 +224,37 @@ pub(in crate::services::discord) fn tree_fingerprint(
     }
     out
 }
+
+#[cfg(test)]
+pub(in crate::services::discord) struct TestOverrideGuard<T: Copy + 'static> {
+    cell: &'static std::sync::Mutex<Option<T>>,
+    previous: Option<T>,
+}
+
+#[cfg(test)]
+impl<T: Copy + 'static> TestOverrideGuard<T> {
+    pub(in crate::services::discord) fn current(cell: &std::sync::Mutex<Option<T>>) -> Option<T> {
+        *cell.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    pub(in crate::services::discord) fn replace(
+        cell: &'static std::sync::Mutex<Option<T>>,
+        value: T,
+    ) -> Self {
+        let previous = cell
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .replace(value);
+        Self { cell, previous }
+    }
+}
+
+#[cfg(test)]
+impl<T: Copy + 'static> Drop for TestOverrideGuard<T> {
+    fn drop(&mut self) {
+        *self
+            .cell
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = self.previous.take();
+    }
+}

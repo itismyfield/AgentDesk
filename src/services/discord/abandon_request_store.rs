@@ -282,24 +282,9 @@ fn load_pending_in_root(
     token_hash: &str,
 ) -> Vec<(u64, AbandonRecord)> {
     let dir = provider_dir_in_root(root, provider, token_hash);
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(channel_id) = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| stem.parse::<u64>().ok())
-        else {
-            continue;
-        };
-        for record in load_channel_in_root(root, provider, token_hash, channel_id) {
-            out.push((channel_id, record));
-        }
-    }
-    out
+    runtime_store::collect_pending_channels(&dir, |channel_id| {
+        load_channel_in_root(root, provider, token_hash, channel_id)
+    })
 }
 
 /// Record a stranded placeholder for durable finalize. Idempotent (set semantics
