@@ -884,3 +884,41 @@ acceptance (about 6 files/+280, overlapping the first slice's reader/receipt
 files). Only the combined result can claim C2 complete. All old-before-new,
 conditional liveness and late-child/old-debt exact-once requirements remain.
 The proposed file set stays inside the approved C2c/wake ownership.
+
+
+## C2c-Ia support boundary
+
+The C2c-I implementation is split at the operational caller boundary. Ia includes
+the typed lower registration port, custodian/runtime/session support, strict shared
+receipt and native coverage proof, and the local ledger's atomic `DebtPrepared`
+and truthful `DebtReceipt` mirror. Issuer, inspection and coverage helpers without
+an operational caller remain `cfg(test)` until Ib. The only production registration
+implementation is the immutable validated writer `Plan`; there is no JSON issuer
+or independent sender. C1 version 1 snapshots and Original artifacts are unchanged.
+
+`DebtPrepared` contains its original debt artifact and Prepared in one fsynced
+ledger line. An incomplete line restores neither; an invalid admission must not
+install an origin first. Existing ordinary Original OutputOrigin/Prepared bytes
+and admission are unchanged. A shared-only `DebtReceipt` advances the observed
+anchor and preserves exact effect identity without manufacturing a native
+Prepared, Posted, local serial, or native POST confirmation. Coverage aliases are
+usable only with the registered original artifact, unit/index and payload and
+strict shared evidence for every canonical fragment. Same text from another
+input is insufficient; repeated ambiguous payload fragments remain retained.
+
+Ia does not install a driver, select sources, start POSTs, or delete C1 snapshots.
+Ib still owns pre-metadata reconciliation, actor drain/final admission barriers,
+reservation-before-Prepared/HTTP, lifecycle invalidation and old-before-new. II
+still owns local snapshot GC after strict shared receipt plus durable local mirror,
+and shared-only manifest/alias lookup after that GC. C2 is incomplete until II.
+
+The fourteen WriterAdoptionDebtDelivery configurations describe that composed
+implementation target. Ia closes StrictSharedReceipt's support boundary and
+Restored/SharedFirst's exact-proof/mirror support, and preserves Unproved's pending
+state across a new run. Their full host liveness, AtMostOnce,
+ReservationBeforeHttp and OldBeforeNew require Ib's operational connections;
+a GREEN abstract target is not a claim that Ia delivers debt. The nine child/boot
+composition and fifty-four capability configurations are unchanged by this split.
+Refused/no-source visibility remains conditional on verified owner/store repair
+and eventually obtaining exact effect evidence or an attempt-bound certain
+no-effect witness. No unconditional liveness is added.

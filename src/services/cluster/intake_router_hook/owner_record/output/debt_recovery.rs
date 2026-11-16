@@ -9,9 +9,19 @@ use uuid::Uuid;
 mod authority;
 mod receipt;
 mod registry;
+#[cfg(test)]
+pub(crate) use authority::{Custodian, Runtime, Session};
+#[cfg(test)]
+pub(crate) use receipt::Coverage;
+pub use receipt::PostedReceipt;
 pub(crate) trait Registration {
     fn registration(&self, bot: u64) -> Result<Value, String>;
+    #[cfg(test)]
+    fn lookup(&self) -> Value;
 }
+#[cfg(test)]
+#[path = "debt_recovery/ia_tests.rs"]
+mod ia_tests;
 #[cfg(test)]
 #[path = "debt_recovery/debt_recovery_tests.rs"]
 mod tests;

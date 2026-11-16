@@ -11,10 +11,10 @@ use crate::services::{
 };
 use chrono::Utc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-struct Runtime {
-    binding: Binding,
-    permit: Arc<execution::OwnerPermit>,
-    active: AtomicBool,
+pub(super) struct Runtime {
+    pub(super) binding: Binding,
+    pub(super) permit: Arc<execution::OwnerPermit>,
+    pub(super) active: AtomicBool,
 }
 impl authority::Live for Runtime {
     fn permits(&self, b: &Binding) -> bool {
@@ -23,16 +23,16 @@ impl authority::Live for Runtime {
             && matches!(self.permit.gate().current(),GatewayOwnership::ExecutionOwned{generation,..} if generation==b.revision)
     }
 }
-struct Frame {
+pub(super) struct Frame {
     db: original_tests::FixtureDb,
-    pool: sqlx::PgPool,
-    root: tempfile::TempDir,
-    original: super::super::Origin,
-    scope: Scope,
-    runtime: Arc<Runtime>,
+    pub(super) pool: sqlx::PgPool,
+    pub(super) root: tempfile::TempDir,
+    pub(super) original: super::super::Origin,
+    pub(super) scope: Scope,
+    pub(super) runtime: Arc<Runtime>,
 }
 impl Frame {
-    async fn new() -> Self {
+    pub(super) async fn new() -> Self {
         let (db, pool, original) = original_tests::fixture("7651201").await;
         original_tests::revoke(&pool, &original).await;
         let permit = execution::read(&pool, "claude", 7651201, "returned-home", || Ok(false))
@@ -127,13 +127,13 @@ impl Frame {
         .await
         .unwrap()
     }
-    async fn finish(self) {
+    pub(super) async fn finish(self) {
         self.pool.close().await;
         drop(self.db);
         drop(self.root);
     }
 }
-fn debt(artifact: &super::super::Artifact) -> &Artifact {
+pub(super) fn debt(artifact: &super::super::Artifact) -> &Artifact {
     let super::super::Artifact::Debt(a) = artifact else {
         panic!("recovery variant")
     };
@@ -148,7 +148,7 @@ fn debt_mut(artifact: &mut super::super::Artifact) -> &mut Artifact {
 async fn acquire(f: &Frame, a: &super::super::Artifact) -> Result<EffectGuard, AcquireError> {
     f.scope.acquire("7651201", "retained answer", Some(a)).await
 }
-fn posted(r: &Reference) -> (PieceRecord, PostConfirmation) {
+pub(super) fn posted(r: &Reference) -> (PieceRecord, PostConfirmation) {
     let piece = PieceRecord {
         unit_key: serde_json::from_value(serde_json::to_value(&r.unit_key).unwrap()).unwrap(),
         piece_index: r.piece_index,

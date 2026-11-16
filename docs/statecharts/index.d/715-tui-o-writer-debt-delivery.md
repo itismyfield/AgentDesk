@@ -1,0 +1,2 @@
+key: 715-tui-o-writer-debt-delivery
+| `tui-o-writer` debt delivery support / composed target | C2c-Ia support, Ib runtime connections pending | Before, unproved pending, duplicate/reservation/receipt/GC/order/run/transfer controls are expected RED | Fourteen cfg: 4 GREEN / 10 expected RED. Strict receipt and truthful mirror support in Ia; operational delivery and ordering remain Ib. [Design](tui-o-writer/herdr-body-hold.design.md#c2c-ia-support-boundary). |

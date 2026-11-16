@@ -147,6 +147,12 @@ impl crate::services::cluster::intake_router_hook::owner_record::output::Registr
     fn registration(&self, bot: u64) -> Result<Value, String> {
         Plan::registration(self, bot)
     }
+    #[cfg(test)]
+    fn lookup(&self) -> Value {
+        json!({"provider":provider_name(self.provider), "channel":self.channel.to_string(),
+            "episode":self.episode,"input_key":self.input_key,"plan_sha":self.plan_sha,
+            "snapshots":self.snapshots.keys().collect::<Vec<_>>(),"pieces":self.pieces.len()})
+    }
 }
 impl Plan {
     fn from(

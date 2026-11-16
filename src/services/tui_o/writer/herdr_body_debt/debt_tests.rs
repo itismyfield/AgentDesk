@@ -700,3 +700,69 @@ async fn a_changed_second_native_payload_with_healthy_ledger_is_not_saved_covera
     )
     .await;
 }
+
+// A real C1 reader and native deriver supply the lower capability boundary tests.
+pub(crate) fn native_recovery_plan(
+    root: &Path,
+    origin: &crate::services::cluster::intake_router_hook::owner_record::output::Origin,
+) -> (Plan, crate::services::tui_o::store::ChannelStore) {
+    use crate::services::tui_o::{
+        shadow::CapturedRecord,
+        store::{OStore, StoreConfig, ledger::LedgerEntry},
+    };
+    let channel = 7651201;
+    let mut original = row(channel);
+    original["intake_outbox_id"] = serde_json::to_value(origin).unwrap()["delivery"].clone();
+    let evidence = native(root, &original, "retained answer");
+    let source: SourceId = serde_json::from_value(evidence["source"].clone()).unwrap();
+    let bytes = std::fs::read(&source.path).unwrap();
+    let record = CapturedRecord {
+        start: 0,
+        end: bytes.len() as u64,
+        line: bytes[..bytes.len() - 1].to_vec(),
+    };
+    let piece = super::super::pieces::UnitDeriver::new(channel, ShadowProvider::Claude)
+        .derive(&record)
+        .into_iter()
+        .find_map(|derived| match derived {
+            super::super::pieces::Derived::Piece(piece) => Some(piece),
+            _ => None,
+        })
+        .unwrap();
+    let disk = OStore::open_if_enabled(&StoreConfig { enabled: true }, root)
+        .unwrap()
+        .unwrap();
+    let era = disk.read_era().unwrap().unwrap();
+    let mut store = disk.open_channel(&era, channel).unwrap().unwrap();
+    store
+        .append_ledger(LedgerEntry::OutputOrigin {
+            serial: 0,
+            artifact: origin.seal(&piece.payload),
+        })
+        .unwrap();
+    store
+        .append_ledger(LedgerEntry::Prepared {
+            serial: 0,
+            unit_key: piece.unit_key,
+            piece_index: piece.index,
+            payload: piece.payload,
+            anchor_id: 0,
+            epoch: 1,
+            local_retry: None,
+            notice_origin: None,
+        })
+        .unwrap();
+    seed(root, original, evidence);
+    let plan = read(root, ShadowProvider::Claude, channel, Some(store.ledger()))
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        plan.registration(42).unwrap()["native"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    (plan, store)
+}
