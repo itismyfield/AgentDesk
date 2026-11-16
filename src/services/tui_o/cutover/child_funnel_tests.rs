@@ -38,8 +38,8 @@ fn child_w04_single_message_footer_sends_no_body() {
 #[test]
 fn child_w11_cancelled_partial_body_is_not_replaced() {
     run(
-        EPILOGUE,
-        "o_delegated_cancelled_partial_body_is_not_replaced",
+        "services::discord::turn_bridge::terminal_outcome_delivery::",
+        "delivery_epilogue_tests::o_delegated_cancelled_partial_body_is_not_replaced",
     );
 }
 
