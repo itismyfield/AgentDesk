@@ -1,5 +1,5 @@
-//! Whether a Codex rollout still sits before any output: its verified `session_meta`, records the
-//! classifier ignores, one turn opener, and one user prompt with that prompt's own mirrors.
+//! Classifies a first-turn prefix. Legacy requires no output; an admitted execution may retain
+//! identified buffered records associated with its one named turn and prompt.
 
 use std::io::Read;
 
@@ -18,30 +18,59 @@ pub(in crate::services::tui_o::writer::late_adopt) enum Verdict {
     Eligible(Prefix),
     /// The file ends inside a record or could not be read; the same rollout is judged again.
     Wait(String),
-    /// The rollout holds output, another turn or input, or a record that cannot be judged.
+    /// The rollout holds unsupported output, another turn or input, or an unjudgeable record.
     Refuse(String),
 }
 
 /// The judged bytes, so a later judgement can tell whether anything changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::services::tui_o::writer::late_adopt) struct Prefix {
+    pub(in crate::services::tui_o::writer::late_adopt) class: PrefixClass,
     pub(in crate::services::tui_o::writer::late_adopt) len: u64,
     pub(in crate::services::tui_o::writer::late_adopt) sha256: String,
+    pub(in crate::services::tui_o::writer::late_adopt) prompt_digest: Option<String>,
     /// End of the first user prompt's record, once one is written.
     pub(in crate::services::tui_o::writer::late_adopt) prompt_end: Option<u64>,
 }
 
-pub(super) fn judge(source: &SourceId) -> Verdict {
-    judged(source).unwrap_or_else(|verdict| verdict)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::services::tui_o::writer::late_adopt) enum PrefixClass {
+    OutputFree,
+    Buffered { turn: String, closed: bool },
 }
 
-fn judged(source: &SourceId) -> Result<Verdict, Verdict> {
-    let bytes = read(source)?;
+pub(super) fn judge(source: &SourceId) -> Verdict {
+    judged(source, false).unwrap_or_else(|verdict| verdict)
+}
+
+pub(super) fn buffered(source: &SourceId) -> Verdict {
+    judged(source, true).unwrap_or_else(|verdict| verdict)
+}
+
+impl Prefix {
+    pub(super) fn preserved_in(&self, source: &SourceId) -> Result<(), Verdict> {
+        let bytes = read_identity(source, true)?;
+        if bytes.len() < self.len as usize
+            || hex::encode(Sha256::digest(&bytes[..self.len as usize])) != self.sha256
+        {
+            return Err(Verdict::Refuse(
+                "previously judged prefix bytes changed".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn judged(source: &SourceId, buffered: bool) -> Result<Verdict, Verdict> {
+    let bytes = read_identity(source, buffered)?;
     let complete = bytes
         .iter()
         .rposition(|b| *b == b'\n')
         .map_or(0, |at| at + 1);
-    let mut turn = Turn::default();
+    let mut turn = Turn {
+        allow_buffered: buffered,
+        ..Turn::default()
+    };
     let mut start = 0;
     for line in bytes[..complete].split_inclusive(|b| *b == b'\n') {
         let end = start + line.len() as u64;
@@ -61,9 +90,26 @@ fn judged(source: &SourceId) -> Result<Verdict, Verdict> {
             _ => Verdict::Wait(error.to_string()),
         }
     })?;
+    let class = if turn.buffered {
+        PrefixClass::Buffered {
+            turn: turn
+                .opener
+                .as_ref()
+                .and_then(Option::as_ref)
+                .unwrap()
+                .clone(),
+            closed: turn.closed,
+        }
+    } else {
+        PrefixClass::OutputFree
+    };
     Ok(Verdict::Eligible(Prefix {
+        class,
         len: bytes.len() as u64,
         sha256: hex::encode(Sha256::digest(&bytes)),
+        prompt_digest: turn.prompt.as_ref().map(|prompt| {
+            crate::services::tui_o::channel_policy::first_prompt_digest(&prompt.text)
+        }),
         prompt_end: turn.prompt.map(|prompt| prompt.end),
     }))
 }
@@ -71,11 +117,15 @@ fn judged(source: &SourceId) -> Result<Verdict, Verdict> {
 pub(in crate::services::tui_o::writer::late_adopt) fn read(
     source: &SourceId,
 ) -> Result<Vec<u8>, Verdict> {
+    read_identity(source, false)
+}
+
+fn read_identity(source: &SourceId, strict: bool) -> Result<Vec<u8>, Verdict> {
     let shown = source.path.display();
     let wait = |error: std::io::Error| Verdict::Wait(format!("source {shown}: {error}"));
     let file = std::fs::File::open(&source.path).map_err(wait)?;
     let meta = file.metadata().map_err(wait)?;
-    if file_identity(&meta).1 != source.ino {
+    if file_identity(&meta).1 != source.ino || (strict && file_identity(&meta).0 != source.dev) {
         return Err(Verdict::Refuse(format!("source {shown} was replaced")));
     }
     let mut bytes = Vec::new();
@@ -93,6 +143,9 @@ pub(in crate::services::tui_o::writer::late_adopt) fn read(
 #[derive(Default)]
 struct Turn {
     meta: bool,
+    allow_buffered: bool,
+    buffered: bool,
+    closed: bool,
     /// The turn opener's native id, once one was read.
     opener: Option<Option<String>>,
     prompt: Option<Prompt>,
@@ -122,7 +175,29 @@ impl Turn {
             (false, false) => return Err(format!("record at {at} precedes the session_meta")),
             (false, true) => {}
         }
+        if self.allow_buffered
+            && value["type"] == "event_msg"
+            && value["payload"]["type"] == "item_completed"
+            && value["payload"]["item"]["type"] == "AgentMessage"
+            && value["payload"]["item"]["id"]
+                .as_str()
+                .is_none_or(str::is_empty)
+        {
+            return Err(format!("an announced output without identity at {at}"));
+        }
+        if self.allow_buffered
+            && value["type"] == "event_msg"
+            && value["payload"]["type"] == "turn_aborted"
+            && value["payload"]["turn_id"]
+                .as_str()
+                .is_none_or(str::is_empty)
+        {
+            return Err(format!("a turn end without turn identity at {at}"));
+        }
         if let Some(mirror) = Mirror::of(&value) {
+            if self.closed {
+                return Err(format!("user input after the first turn end at {at}"));
+            }
             return self.mirror(mirror, at);
         }
         for fact in classify(ShadowProvider::Codex, &value) {
@@ -136,9 +211,41 @@ impl Turn {
                 }
                 RecordFact::TurnStart(_) => return Err(format!("a second turn opener at {at}")),
                 RecordFact::Prompt(..) => return Err(format!("a second user prompt at {at}")),
+                other if self.allow_buffered => self.output(&value, &other, at)?,
                 other => return Err(format!("{} at {at}", output(&other))),
             }
         }
+        Ok(())
+    }
+
+    fn output(&mut self, value: &Value, fact: &RecordFact, at: u64) -> Result<(), String> {
+        let turn = self
+            .opener
+            .as_ref()
+            .and_then(Option::as_deref)
+            .filter(|turn| !turn.is_empty())
+            .ok_or_else(|| format!("output without a named first opener at {at}"))?;
+        if self.prompt.is_none() || self.closed {
+            return Err(format!(
+                "output outside the first prompt's open turn at {at}"
+            ));
+        }
+        let named = value["payload"].get("turn_id");
+        if named.is_some_and(|id| id.as_str() != Some(turn)) {
+            return Err(format!("output names another turn at {at}"));
+        }
+        match fact {
+            RecordFact::Unit(..) if value["type"] == "response_item" => {}
+            RecordFact::Announced(id, _)
+                if !id.is_empty() && named.and_then(Value::as_str) == Some(turn) => {}
+            RecordFact::Idle(Some(id)) if id == turn => self.closed = true,
+            _ => {
+                return Err(format!(
+                    "unsupported or unidentified first-turn output at {at}"
+                ));
+            }
+        }
+        self.buffered = true;
         Ok(())
     }
 

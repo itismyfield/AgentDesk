@@ -3430,3 +3430,6 @@ pub(crate) async fn revoke_notice_author_for_test(shared: &SharedData) {
 }
 
 pub(super) mod routine_presentation;
+
+#[cfg(all(test, unix))]
+pub(crate) use tmux::first_terminal_plan;

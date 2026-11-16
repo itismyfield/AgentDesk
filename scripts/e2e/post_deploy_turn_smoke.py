@@ -4,7 +4,7 @@
 ``cell-reset`` clears configured TUI cells once, before the smoke's first preflight.
 ``cell-path`` names the session host the configured cell channel really runs on.
 ``gateway-ready`` waits, up to a deadline, until the gateway can take Discord input.
-``preflight`` proves the E2E cell idle before the deploy smoke posts prompts.
+``preflight`` proves the E2E cell idle, with its O writer accepting, before the deploy smoke posts prompts.
 ``judge`` folds one ``run_tui_relay.py`` report and the dcserver log bytes
 written during that run into one smoke line. Only a fully evidenced clean run
 passes; missing or unreadable evidence is a FAIL, never a PASS.
@@ -267,6 +267,17 @@ def gateway_observation(detail: Any, *, provider: str, channel_id: str) -> str |
     if target[0].get("accepts") is not True:
         return f"target writer {provider}:{channel_id} not accepting: {target[0].get('hold_reason') or 'unreported'}"
     return None
+
+
+def writer_not_ready(detail: Any, *, provider: str, channel_id: str) -> str | None:
+    """Why the target's O writer refuses input now; None when it accepts or no O writer owns it."""
+    rows = cell_driver._target_writer_rows(detail, provider=provider, channel_id=channel_id)  # noqa: SLF001
+    if rows is None:
+        return "target writer readiness unavailable"
+    if len(rows) > 1:
+        return f"target writer {provider}:{channel_id} ambiguous"
+    refusal = cell_driver.wait_timeout.writer_refusal(rows)
+    return refusal and f"target writer {provider}:{channel_id} not accepting: {refusal}"
 
 
 def wait_gateway_ready(
@@ -628,6 +639,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "preflight":
         try:
+            writer = writer_not_ready(cell_driver._read_health_detail(args.base_url),  # noqa: SLF001
+                                      provider=cell_driver.cell_provider(args.cell), channel_id=args.channel_id)
             busy = preflight_busy_reasons(
                 base_url=args.base_url,
                 cell=args.cell,
@@ -638,6 +651,10 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as error:  # noqa: BLE001 - any unreadable snapshot is "not proven idle"
             print(f"unreadable: {type(error).__name__}: {error}")
             return 2
+        # A refusing writer is the cause even when its held input also leaves the queue busy.
+        if writer:
+            print("writer not ready: " + "; ".join([writer, *busy]))
+            return 1
         if busy:
             print("busy: " + "; ".join(busy))
             return 1

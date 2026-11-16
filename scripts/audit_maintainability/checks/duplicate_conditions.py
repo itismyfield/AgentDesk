@@ -6,10 +6,10 @@ from hashlib import sha256
 import json
 from pathlib import Path
 
-from ci.rust_test_sources import Inventory, crate_roots, walk
 from .. import common
 from ..common import Finding
-from ..rust_accessor_scan import exports_for, imports, pairs, resolve, scopes, tokens
+from ..rust_accessor_scan import (exports_for, imports, pairs, production_walk, resolve, scopes,
+                                 tokens)
 from . import CheckSpec
 from .low_level_accessors import RULES
 
@@ -18,13 +18,14 @@ ACCESSORS = {r["accessor"] for r in RULES.values()} - {"with_boot", "channels"}
 
 
 def _views(repo):
-    roots, inventory = crate_roots(repo), Inventory()
-    if not roots:
+    scanned = production_walk(repo)
+    if not scanned.roots:
         raise ValueError("no Rust crate roots found")
-    for root in roots:
-        walk(root, repo, inventory, production=True)
-    if inventory.read_failures or inventory.errors:
-        raise ValueError("; ".join(inventory.read_failures + inventory.errors))
+    if scanned.error is not None:
+        raise scanned.error
+    inventory = scanned.inventory
+    if scanned.failures[-1]:
+        raise ValueError("; ".join(scanned.failures[-1]))
     views, exports = [], {}
     for path, production in sorted(inventory.source_tokens.items()):
         if production is None:

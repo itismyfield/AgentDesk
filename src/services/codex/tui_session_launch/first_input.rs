@@ -5,6 +5,7 @@ pub(in crate::services::codex) struct Create<'a> {
     pub tmux_session_name: &'a str,
     pub working_dir: &'a str,
     pub prompt: &'a str,
+    pub turn_nonce: Option<&'a str>,
     pub auth_profile: &'a str,
     pub launch: CodexTuiLaunchScript,
     pub selection: &'a crate::services::codex_tui::session::CodexTuiSessionSelection,
@@ -24,6 +25,7 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
         tmux_session_name,
         working_dir,
         prompt,
+        turn_nonce,
         auth_profile,
         launch,
         selection: session_selection,
@@ -39,6 +41,7 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
     } = launch;
     fence.validate_tmux_publisher(tmux_session_name)?;
     end_observation.prepare(&prepared.context);
+    crate::services::tui_o::cutover::attach_codex_first(&prepared.context, prompt, turn_nonce);
     let command = format!("bash {}", shell_escape(&script_path));
     let tmux_result = match crate::services::claude_tui::owner_input::launch_hook() {
         // The owner waiting on this thread spawns the argv create as its own effect.
@@ -162,12 +165,15 @@ pub(in crate::services::codex) fn observe(input: Observe<'_>) -> Result<(), Stri
         prompt,
     } = input;
     let Submitted {
-        prepared: _prepared,
+        prepared,
         validated_tail,
         rollout_modified_since,
         handoff: _handoff,
     } = submitted;
     let cancel_token_for_post_tail = cancel_token.clone();
+    if validated_tail.context() != &prepared.context {
+        return Err("Codex tail ticket does not name its prepared launch".into());
+    }
     let tail_result = crate::services::codex_tui::tail_launch::dispatch(
         validated_tail,
         working_dir,
