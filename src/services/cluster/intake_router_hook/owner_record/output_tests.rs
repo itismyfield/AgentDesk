@@ -219,7 +219,10 @@ async fn output_origin_original_admission_survives_owner_return_and_rejects_old_
         .await
         .unwrap();
     let mut generation = artifact.clone();
-    generation.origin.generation += 1;
+    let Artifact::Original(native) = &mut generation else {
+        panic!("native artifact")
+    };
+    native.origin.generation += 1;
     assert!(
         scope
             .acquire(&origin.channel, "answer", Some(&generation))
@@ -227,7 +230,10 @@ async fn output_origin_original_admission_survives_owner_return_and_rejects_old_
             .is_err()
     );
     let mut changed = artifact.clone();
-    changed.origin.binding = json!({"native":"successor"});
+    let Artifact::Original(native) = &mut changed else {
+        panic!("native artifact")
+    };
+    native.origin.binding = json!({"native":"successor"});
     assert!(
         scope
             .acquire(&origin.channel, "answer", Some(&changed))

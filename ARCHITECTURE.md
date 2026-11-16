@@ -1211,6 +1211,13 @@ src/
 │   │   │   │   │       └── mod.rs
 │   │   │   │   ├── fallback/
 │   │   │   │   │   └── notice.rs
+│   │   │   │   ├── output/
+│   │   │   │   │   ├── debt_recovery/
+│   │   │   │   │   │   ├── authority.rs
+│   │   │   │   │   │   ├── debt_recovery_tests.rs
+│   │   │   │   │   │   ├── receipt.rs
+│   │   │   │   │   │   └── registry.rs
+│   │   │   │   │   └── debt_recovery.rs
 │   │   │   │   ├── adoption.rs
 │   │   │   │   ├── adoption_tests.rs
 │   │   │   │   ├── cleanup.rs

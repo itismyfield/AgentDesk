@@ -608,16 +608,15 @@ writer/mod.rs, writer/herdr_body_debt.rs, authority.rs, receipt.rs and
 store/ledger.rs. Shared files are reviewed as sequential deltas, not parallel
 ownership. The union is the original 15 plus the following **12 additions**.
 
-<!-- doc-path-refs: proposed src/services/cluster/intake_router_hook/owner_record/output/debt_recovery.rs src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/registry.rs src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/authority.rs src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/receipt.rs migrations/postgres/0191_herdr_body_debt_recovery.sql -->
 
 | Additional file (and its tests) | Purpose |
 |---|---|
 | `src/services/cluster/intake_router_hook/owner_record/output.rs` | Disjoint original/recovery artifact dispatch; preserve existing original JOIN and unstamped denial. |
-| `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery.rs` (proposed) | Private validated debt/plan/claim/one-use attachment types. |
-| `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/registry.rs` (proposed) | Shared manifests, coverage aliases, run and effect/attempt CAS; no TTL cleanup. |
-| `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/authority.rs` (proposed) | Custodian verification, issue, guarded acquire and monotone revoke. |
-| `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/receipt.rs` (proposed) | Exact proof bridge and consumption independent of current owner/run. |
-| `migrations/postgres/0191_herdr_body_debt_recovery.sql` (proposed) | Shared schema, immutable key/hash constraints, unique active run and effect/attempt constraints. 0191 is the next number at pinned main; reserve/renumber once with the coordinator before implementation if another lane takes it. |
+| `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery.rs` | Private validated debt/plan/claim/one-use attachment types. |
+| `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/registry.rs` | Shared manifests, coverage aliases, run and effect/attempt CAS; no TTL cleanup. |
+| `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/authority.rs` | Custodian verification, issue, guarded acquire and monotone revoke. |
+| `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/receipt.rs` | Exact proof bridge and consumption independent of current owner/run. |
+| `migrations/postgres/0191_herdr_body_debt_recovery.sql` | Shared schema, immutable key/hash constraints, unique active run and effect/attempt constraints. 0191 is the next number at pinned main; reserve/renumber once with the coordinator before implementation if another lane takes it. |
 | `src/services/discord/runtime_bootstrap/o_writer_host/owner_port.rs` | Attach the validated current custodian/bot to the existing port; no new transport. |
 | `src/services/tui_o/writer/actor/fresh_resume.rs` | Invalidate old run/attachment on an actual rescope before it can be reused. |
 | `src/services/tui_o/writer/suspension.rs` | Expose a scoped live selection/stop witness at debt admission; do not weaken source policy. |
@@ -682,3 +681,39 @@ the GREEN scope, not a guarantee from owner/store recovery alone. The two proof
 mutants (skip witness validation; reset merely on changed run) violate
 NoResetWithoutProof. C2a's shared schema stores attempt identity and no-effect
 proof explicitly; no code may infer or fabricate the witness from run metadata.
+
+
+### C2a implementation boundary
+
+C2a implements the strict original/debt artifact union in `owner_record/output.rs`
+and the shared tables in `migrations/postgres/0191_herdr_body_debt_recovery.sql`.
+Existing original artifact JSON, the original admission JOIN, and managed
+unstamped denial stay unchanged. The recovery branch requires the same custody
+lock plus a nonserialized, one-use live attachment. A deserialized token cannot
+restore that attachment. The registry rechecks immutable effect/plan/snapshot
+bindings and current owner/run/store/bot, and commits a reserved attempt before
+returning the second transaction's effect guard. Dropping that guard retains the
+committed reservation; it never means no effect.
+
+Only the owning guard's pre-poll path records an `owning_not_polled` witness,
+bound to the exact attempt, effect and payload. A started request, owner transfer,
+new run or dead process supplies no such witness. The SQL witness constraint
+also rejects missing or mismatched binding fields. An exact shared receipt
+blocks every grant for that effect, including grants issued before confirmation.
+
+`output/debt_recovery/authority.rs` issuance and the strict Posted bridge in
+`output/debt_recovery/receipt.rs` remain test-only until their real callers arrive.
+The test issuer is a boundary harness, not a verified C1 reader or a production
+registration API. C2b must supply the private validated snapshot/coverage and
+actual host/store/bot/run witnesses before promoting issuance. C2c supplies the
+live writer preflight, receipt/backfill, lifecycle invalidation, ordering and GC.
+The existing port, ledger and writer APIs already carry the Artifact union;
+C2a needs no additional calls in those files. This slice does not claim that
+stored bodies are replayed or that end-to-end conditional liveness is complete.
+
+A live acquisition rejected at the second guarded check still owns its exact
+never-polled Attempt and records that witness before returning a refusal. The
+changed owner/run is only the reason for refusal, never the no-effect evidence.
+A dropped/crashed acquisition has no such in-memory ticket and leaves pending;
+a DB failure that prevents proof commit also leaves pending. Attempt state is
+boxed so ordinary output futures do not carry the complete recovery reference.
