@@ -131,54 +131,28 @@ pub(super) async fn poll_watcher_output_or_continue(
     // If paused (Discord handler is processing its own turn), keep the
     // liveness monitor active so a dead pane still clears watcher state.
     if paused.load(Ordering::Relaxed) {
-        match tmux_liveness_decision(
-            cancel.load(Ordering::Relaxed),
-            shared.restart.shutting_down.load(Ordering::Relaxed),
-            host_gate::tmux_alive_for_watcher(shared, tmux_session_name, channel_id, context.host)
-                .await,
-        ) {
-            TmuxLivenessDecision::Continue => {
-                // #2441 (H1) — graduate the fixed 200ms paused-loop
-                // poll onto the notify-backed JsonlWatcher. A wrapper
-                // write wakes us early; the sleep stays as the upper
-                // bound.
-                sleep_or_jsonl_event(
-                    tokio::time::Duration::from_millis(200),
-                    jsonl_notify,
-                    dead_marker_notify,
-                )
-                .await;
-                commit_poll_state!();
-                return PollOutcome::ContinueWatcherLoop;
-            }
-            TmuxLivenessDecision::QuietStop => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 👁 tmux session {tmux_session_name} ended during shutdown, exiting quietly"
-                );
-                commit_poll_state!();
-                return PollOutcome::BreakWatcherLoop;
-            }
-            TmuxLivenessDecision::TmuxDied => {
-                let stopped = handle_tmux_watcher_observed_death(
-                    channel_id,
-                    http,
+        let outcome = finish_liveness_poll(
+            tmux_liveness_decision(
+                cancel.load(Ordering::Relaxed),
+                shared.restart.shutting_down.load(Ordering::Relaxed),
+                host_gate::tmux_alive_for_watcher(
                     shared,
                     tmux_session_name,
-                    output_path,
-                    watcher_provider,
-                    prompt_too_long_killed,
-                    watcher_lifecycle_terminal_delivery_observed(
-                        terminal_delivery_observed,
-                        turn_delivered.load(Ordering::Acquire),
-                    ),
+                    channel_id,
+                    context.host,
                 )
-                .await;
-                *loop_poll_state.tmux_death = Some(stopped);
-                commit_poll_state!();
-                return PollOutcome::BreakWatcherLoop;
-            }
-        }
+                .await,
+            ),
+            tokio::time::Duration::from_millis(200),
+            context,
+            controls,
+            prompt_too_long_killed,
+            terminal_delivery_observed,
+            loop_poll_state.tmux_death,
+        )
+        .await;
+        commit_poll_state!();
+        return outcome;
     }
 
     rotation_tick = rotation_tick.wrapping_add(1);
@@ -239,57 +213,28 @@ pub(super) async fn poll_watcher_output_or_continue(
     let (data, new_offset, source_file_identity, source_file) = match read_result {
         Ok(Ok(Ok(batch))) => batch.into_retained_parts(),
         _ => {
-            match tmux_liveness_decision(
-                cancel.load(Ordering::Relaxed),
-                shared.restart.shutting_down.load(Ordering::Relaxed),
-                host_gate::tmux_alive_for_watcher(
-                    shared,
-                    tmux_session_name,
-                    channel_id,
-                    context.host,
-                )
-                .await,
-            ) {
-                TmuxLivenessDecision::Continue => {
-                    // #2441 (H1) — notify-backed wake-up for the
-                    // initial-read failure retry.
-                    sleep_or_jsonl_event(
-                        tokio::time::Duration::from_millis(250),
-                        jsonl_notify,
-                        dead_marker_notify,
-                    )
-                    .await;
-                    commit_poll_state!();
-                    return PollOutcome::ContinueWatcherLoop;
-                }
-                TmuxLivenessDecision::QuietStop => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] 👁 tmux session {tmux_session_name} ended during shutdown, exiting quietly"
-                    );
-                    commit_poll_state!();
-                    return PollOutcome::BreakWatcherLoop;
-                }
-                TmuxLivenessDecision::TmuxDied => {
-                    let stopped = handle_tmux_watcher_observed_death(
-                        channel_id,
-                        http,
+            let outcome = finish_liveness_poll(
+                tmux_liveness_decision(
+                    cancel.load(Ordering::Relaxed),
+                    shared.restart.shutting_down.load(Ordering::Relaxed),
+                    host_gate::tmux_alive_for_watcher(
                         shared,
                         tmux_session_name,
-                        output_path,
-                        watcher_provider,
-                        prompt_too_long_killed,
-                        watcher_lifecycle_terminal_delivery_observed(
-                            terminal_delivery_observed,
-                            turn_delivered.load(Ordering::Acquire),
-                        ),
+                        channel_id,
+                        context.host,
                     )
-                    .await;
-                    *loop_poll_state.tmux_death = Some(stopped);
-                    commit_poll_state!();
-                    return PollOutcome::BreakWatcherLoop;
-                }
-            }
+                    .await,
+                ),
+                tokio::time::Duration::from_millis(250),
+                context,
+                controls,
+                prompt_too_long_killed,
+                terminal_delivery_observed,
+                loop_poll_state.tmux_death,
+            )
+            .await;
+            commit_poll_state!();
+            return outcome;
         }
     };
 
@@ -615,6 +560,54 @@ pub(super) async fn poll_watcher_output_or_continue(
             reset_incarnation: source_frontier_token.reset_incarnation,
             source_stamp,
         },
+    }
+}
+
+async fn finish_liveness_poll(
+    decision: TmuxLivenessDecision,
+    retry_delay: tokio::time::Duration,
+    context: &PollWatcherContext<'_>,
+    controls: &PollWatcherControls<'_>,
+    prompt_too_long_killed: bool,
+    terminal_delivery_observed: bool,
+    tmux_death: &mut Option<bool>,
+) -> PollOutcome {
+    let tmux_session_name = context.tmux_session_name;
+    match decision {
+        TmuxLivenessDecision::Continue => {
+            sleep_or_jsonl_event(
+                retry_delay,
+                controls.jsonl_notify,
+                controls.dead_marker_notify,
+            )
+            .await;
+            PollOutcome::ContinueWatcherLoop
+        }
+        TmuxLivenessDecision::QuietStop => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 👁 tmux session {tmux_session_name} ended during shutdown, exiting quietly"
+            );
+            PollOutcome::BreakWatcherLoop
+        }
+        TmuxLivenessDecision::TmuxDied => {
+            let stopped = handle_tmux_watcher_observed_death(
+                context.channel_id,
+                context.http,
+                context.shared,
+                tmux_session_name,
+                context.output_path,
+                context.watcher_provider,
+                prompt_too_long_killed,
+                watcher_lifecycle_terminal_delivery_observed(
+                    terminal_delivery_observed,
+                    controls.turn_delivered.load(Ordering::Acquire),
+                ),
+            )
+            .await;
+            *tmux_death = Some(stopped);
+            PollOutcome::BreakWatcherLoop
+        }
     }
 }
 

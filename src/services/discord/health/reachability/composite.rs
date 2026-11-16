@@ -892,10 +892,7 @@ static RELAY_VERDICT_SOURCE_OVERRIDE: std::sync::Mutex<Option<RelayVerdictSource
 /// unreadable config falls back to the compiled default (`Structural`).
 pub(in crate::services::discord) fn relay_verdict_source() -> RelayVerdictSource {
     #[cfg(test)]
-    if let Some(source) = *RELAY_VERDICT_SOURCE_OVERRIDE
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-    {
+    if let Some(source) = RelayVerdictSourceGuard::current(&RELAY_VERDICT_SOURCE_OVERRIDE) {
         return source;
     }
     crate::config_live_reload::current()
@@ -904,28 +901,14 @@ pub(in crate::services::discord) fn relay_verdict_source() -> RelayVerdictSource
 }
 
 #[cfg(test)]
-pub(in crate::services::discord) struct RelayVerdictSourceGuard {
-    previous: Option<RelayVerdictSource>,
-}
-
-#[cfg(test)]
-impl Drop for RelayVerdictSourceGuard {
-    fn drop(&mut self) {
-        *RELAY_VERDICT_SOURCE_OVERRIDE
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = self.previous.take();
-    }
-}
+pub(in crate::services::discord) type RelayVerdictSourceGuard =
+    crate::services::discord::health::test_support::TestOverrideGuard<RelayVerdictSource>;
 
 #[cfg(test)]
 pub(in crate::services::discord) fn set_relay_verdict_source_for_tests(
     source: RelayVerdictSource,
 ) -> RelayVerdictSourceGuard {
-    let previous = RELAY_VERDICT_SOURCE_OVERRIDE
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .replace(source);
-    RelayVerdictSourceGuard { previous }
+    RelayVerdictSourceGuard::replace(&RELAY_VERDICT_SOURCE_OVERRIDE, source)
 }
 
 #[cfg(test)]
