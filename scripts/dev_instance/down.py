@@ -1,14 +1,17 @@
 """Remove a canonical instance only after its existing owners confirm shutdown."""
 
 import json
+import errno
 import os
 from pathlib import Path
+import socket
 import stat
+import subprocess
 import time
 import uuid
 
 from . import host, keeper, lifecycle
-from .files import InstanceError, _open_dir, credential_alias, instance_root, read_regular_text
+from .files import InstanceError, _open_dir, _open_parent, credential_alias, instance_root, read_regular_text, safe_absolute
 from .lease import LeaseBusy, acquire
 from .manifest import validate
 
@@ -53,6 +56,90 @@ def _scan(descriptor, sockets=None, prefix=(), root=None):
 
 def _inode(metadata):
     return metadata.st_dev, metadata.st_ino
+
+
+def _tmux_witness(root):
+    if not safe_absolute(root/'runtime/tmux/socket').exists():
+        return {}
+    parent, name = _open_parent(root, 'runtime/tmux/socket', private=True)
+    try:
+        try:
+            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return {}
+        if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_nlink != 1:
+            raise InstanceError('invalid instance tmux socket')
+        return {str(root/'runtime/tmux/socket'): _inode(metadata)}
+    finally:
+        os.close(parent)
+
+
+def _close_tmux(manifest, witness, deadline):
+    if not witness:
+        return
+    root = Path(manifest['root'])
+    parent, name = _open_parent(root, 'runtime/tmux/socket', private=True)
+    previous = os.open('.', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        # Relative addressing keeps the verified directory pinned across short Unix socket paths.
+        os.fchdir(parent)
+        expected = witness[str(root/'runtime/tmux/socket')]
+        def unchanged():
+            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if (not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.geteuid()
+                    or metadata.st_nlink != 1 or _inode(metadata) != expected):
+                raise InstanceError('instance tmux socket changed')
+        def connected():
+            unchanged()
+            with socket.socket(socket.AF_UNIX) as channel:
+                channel.settimeout(max(.001, min(.1, deadline-time.monotonic())))
+                try:
+                    channel.connect(name)
+                    return True
+                except OSError as error:
+                    if error.errno == errno.ECONNREFUSED:
+                        return False
+                    raise lifecycle.CleanupPending(None) from None
+        try:
+            alive = connected()
+        except FileNotFoundError:
+            return
+        if alive:
+            from .manifest import child_environment
+            environment = child_environment(manifest, {})
+            def control(*args):
+                unchanged()
+                try:
+                    result = subprocess.run(['tmux', '-S', name, *args], env=environment,
+                                            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                            timeout=max(.001, deadline-time.monotonic()))
+                except (OSError, subprocess.TimeoutExpired):
+                    raise lifecycle.CleanupPending(None) from None
+                if result.returncode:
+                    raise lifecycle.CleanupPending(None)
+                return result.stdout
+            sessions = control('list-sessions', '-F', '#{session_name}').splitlines()
+            prefix = manifest['hosts']['tmux']['prefix']
+            if not sessions or any(name != prefix and not name.startswith(prefix+'-') for name in sessions):
+                raise lifecycle.CleanupPending(None)
+            pids = control('list-panes', '-a', '-F', '#{pane_pid}').splitlines()
+            pids += control('display-message', '-p', '#{pid}').splitlines()
+            if not pids or any(not pid.isdecimal() or int(pid) <= 1 or int(pid) == os.getpid() for pid in pids):
+                raise lifecycle.CleanupPending(None)
+            control('kill-server')
+            for pid in set(map(int, pids)):
+                _wait_gone(pid, deadline)
+            try:
+                if connected():
+                    raise lifecycle.CleanupPending(None)
+            except FileNotFoundError:
+                return
+        unchanged()
+        os.unlink(name, dir_fd=parent)
+    finally:
+        os.fchdir(previous)
+        os.close(previous)
+        os.close(parent)
 
 
 def _erase(descriptor, entries, prefix=(), root=None):
@@ -156,6 +243,8 @@ def remove(base, instance_id, ambient):
     try:
         sockets = {path: tuple(token) for path, token in (owner or {}).get('sockets', {}).items()
                    if Path(path).exists()}
+        tmux = _tmux_witness(root)
+        sockets.update(tmux)
         manifest = validate(base, instance_id, ambient, check_ports=False, live_sockets=sockets, check_head=False, allow_missing_directories=True)
         relative_sockets = {Path(path).relative_to(root).parts: token for path, token in sockets.items()}
     except (KeyError, TypeError, AttributeError):
@@ -178,6 +267,7 @@ def remove(base, instance_id, ambient):
         # The shared close-only lease excludes new up while every existing owner is gone.
         if (root.parent / keeper.MARKER_NAME).exists() or (root.parent / keeper.MARKER_NAME).is_symlink():
             raise lifecycle.CleanupPending(None)
+        _close_tmux(manifest, tmux, deadline)
         validate(base, instance_id, ambient, check_ports=False, check_head=False, allow_missing_directories=True)
         entries = _scan(descriptor, root=root)
         if (root_identity != _inode(os.stat(root.name, dir_fd=parent, follow_symlinks=False))

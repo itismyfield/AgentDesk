@@ -42,6 +42,123 @@ class InstanceDownTests(unittest.TestCase):
         self.assertFalse(credential.exists())
         self.assertFalse(self.root.exists())
 
+    def _tmux_socket(self, name='socket'):
+        import socket
+        listener = socket.socket(socket.AF_UNIX)
+        parent = self.root/'runtime/tmux'
+        # bind relative to the private directory, including on macOS's short socket limit.
+        descriptor = os.open('.', os.O_RDONLY)
+        try:
+            os.chdir(parent)
+            listener.bind(name)
+        finally:
+            os.fchdir(descriptor)
+            os.close(descriptor)
+        return listener
+
+    def test_down_removes_declared_stale_native_tmux_socket(self):
+        listener = self._tmux_socket()
+        listener.close()
+        code, result = self.down()
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result['status'], 'REMOVED')
+        self.assertEqual(result['credential_files'], 0)
+        self.assertFalse(self.root.exists())
+
+    def test_down_rejects_unknown_socket_and_fifo_without_partial_deletion(self):
+        for kind in ('socket', 'fifo'):
+            leaf = self.root/'runtime/tmux/unknown'
+            if kind == 'socket':
+                listener = self._tmux_socket('unknown')
+                listener.close()
+            else:
+                os.mkfifo(leaf)
+            with self.subTest(kind=kind):
+                self.assertEqual(self.down()[0], 2)
+                self.assertTrue((self.root/'manifest.json').exists())
+                self.assertTrue(leaf.exists())
+            leaf.unlink()
+
+    def test_down_holds_unidentified_live_tmux_endpoint(self):
+        listener = self._tmux_socket()
+        listener.listen(1)
+        self.addCleanup(listener.close)
+        with patch('scripts.dev_instance.down.subprocess.run', side_effect=OSError):
+            code, result = self.down()
+        self.assertEqual(code, 6, result)
+        self.assertTrue((self.root/'manifest.json').exists())
+        self.assertTrue((self.root/'runtime/tmux/socket').exists())
+
+    def test_down_closes_only_the_declared_tmux_server_and_waits_for_its_panes(self):
+        from scripts.dev_instance import down
+        listener = self._tmux_socket()
+        listener.listen(8)
+        self.addCleanup(listener.close)
+        child = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(60)'])
+        def finish():
+            if child.poll() is None:
+                child.terminate()
+            child.wait(timeout=5)
+        self.addCleanup(finish)
+        calls = []
+        def control(argv, **kwargs):
+            self.assertEqual(argv[:3], ['tmux', '-S', 'socket'])
+            self.assertEqual(Path.cwd(), self.root/'runtime/tmux')
+            self.assertEqual(kwargs['env']['TMUX_TMPDIR'], str(self.root/'runtime/tmux'))
+            calls.append(argv[3])
+            if argv[3] == 'list-sessions':
+                output = self.manifest['hosts']['tmux']['prefix']+'-claude\n'
+            elif argv[3] in ('list-panes', 'display-message'):
+                output = str(child.pid)+'\n'
+            else:
+                self.assertEqual(argv[3:], ['kill-server'])
+                finish()
+                listener.close()
+                (self.root/'runtime/tmux/socket').unlink()  # tmux can remove its own endpoint.
+                output = ''
+            return SimpleNamespace(returncode=0, stdout=output)
+        with patch.object(down.subprocess, 'run', side_effect=control):
+            code, result = self.down()
+        self.assertEqual(code, 0, result)
+        self.assertEqual(calls, ['list-sessions', 'list-panes', 'display-message', 'kill-server'])
+        self.assertIsNotNone(child.poll())
+        self.assertFalse(self.root.exists())
+
+    def test_down_holds_foreign_tmux_sessions_without_kill_or_deletion(self):
+        listener = self._tmux_socket()
+        listener.listen(1)
+        self.addCleanup(listener.close)
+        with patch('scripts.dev_instance.down.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='AgentDesk-operating\n')) as control:
+            code, result = self.down()
+        self.assertEqual(code, 6, result)
+        self.assertEqual(control.call_count, 1)
+        self.assertEqual(control.call_args.args[0][3], 'list-sessions')
+        self.assertTrue((self.root/'manifest.json').exists())
+
+    def test_down_refuses_replaced_tmux_socket_before_unlink(self):
+        from scripts.dev_instance import down
+        listener = self._tmux_socket()
+        listener.close()
+        original = down._quiesce
+        def replace(*args):
+            result = original(*args)
+            (self.root/'runtime/tmux/socket').rename(self.root/'runtime/tmux/original')
+            replacement = self._tmux_socket()
+            replacement.close()
+            return result
+        with patch.object(down, '_quiesce', side_effect=replace):
+            self.assertEqual(self.down()[0], 2)
+        self.assertTrue((self.root/'runtime/tmux/socket').exists())
+        self.assertTrue((self.root/'manifest.json').exists())
+
+    def test_down_does_not_admit_a_symlink_as_the_tmux_socket(self):
+        outside = self.fixture.home/'outside'
+        outside.write_text('retained')
+        (self.root/'runtime/tmux/socket').symlink_to(outside)
+        self.assertEqual(self.down()[0], 2)
+        self.assertEqual(outside.read_text(), 'retained')
+        self.assertTrue((self.root/'manifest.json').exists())
+
     def test_links_and_external_targets_are_refused_without_deletion(self):
         external = self.fixture.home/'outside'
         external.write_text('retain')

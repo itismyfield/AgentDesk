@@ -118,7 +118,8 @@ def _socket_witnesses(root, live_sockets):
         if type(port) is not int or port not in range(25432, 25448) or herdr != root / "runtime/herdr/socket":
             raise ValueError()
         allowed = {root / "postgres/socket" / f".s.PGSQL.{port}", root / f".s.PGSQL.{port}",
-                   herdr, Path(str(herdr) + "-client.sock"), root / "runtime/keeper.sock"}
+                   herdr, Path(str(herdr) + "-client.sock"), root / "runtime/keeper.sock",
+                   root / "runtime/tmux/socket"}
         result = {}
         for value, identity in live_sockets.items():
             path = safe_absolute(value)
