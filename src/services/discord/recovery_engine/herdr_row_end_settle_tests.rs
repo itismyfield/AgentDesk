@@ -833,6 +833,141 @@ fn an_o_owner_without_old_range_proof_still_archives_the_herdr_body_pg() {
     );
 }
 
+/// Restores the prior process's queue in a fresh gateway with no active row.
+async fn restore_unlinked_body_debt(root: &Path, channel: u64) {
+    let snapshot = || {
+        std::fs::read_dir(root.join("runtime/discord_herdr_body_debt/claude"))
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                (
+                    path.file_name().unwrap().to_owned(),
+                    std::fs::read(path).unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = snapshot();
+    assert!(!before.is_empty());
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let mock = DiscordMockState::new();
+    let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
+    let ctx = discord_mock::serenity_context(proxy, gateway).await;
+    let mut shared =
+        super::super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    Arc::get_mut(&mut shared)
+        .unwrap()
+        .restart
+        .current_generation = CURRENT;
+    shared.http.cached_serenity_ctx.set(ctx).unwrap();
+    generation(CURRENT);
+    let provider = ProviderKind::Claude;
+    let id = ChannelId::new(channel);
+    let context = crate::services::discord::queue_persistence_context(&shared, &provider, id);
+    let mailbox = shared.mailbox(id);
+    let hydrated = mailbox
+        .try_hydrate_pending_queue_from_disk(context)
+        .await
+        .unwrap();
+    assert!(hydrated.persistence_error.is_none());
+    assert_eq!(
+        mailbox
+            .snapshot()
+            .await
+            .intervention_queue
+            .iter()
+            .map(|item| item.message_id.get())
+            .collect::<Vec<_>>(),
+        vec![SENTINEL],
+        "the prior process persisted its waiting input"
+    );
+    assert!(inflight::load_inflight_state_read_only(&provider, channel).is_none());
+    let taken = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (seen, called) = (taken.clone(), calls.clone());
+    let hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
+        move |shared, provider, kicked, reason| {
+            let (seen, called) = (seen.clone(), called.clone());
+            Box::pin(async move {
+                if kicked != id || reason != "herdr_body_debt_restore" {
+                    return None;
+                }
+                let present = inflight::load_inflight_state_read_only(&provider, channel).is_some();
+                let next = crate::services::discord::mailbox_take_next_automatic_intervention(
+                    &shared, &provider, id,
+                )
+                .await;
+                if let Some(item) = next.intervention.as_ref() {
+                    seen.lock().unwrap().push((item.message_id.get(), present));
+                    crate::services::discord::mailbox_abandon_unclaimed_dispatch_after_success(
+                        &shared,
+                        &provider,
+                        id,
+                        item.message_id,
+                        next.dispatch_lease.as_ref().unwrap().clone(),
+                    )
+                    .await;
+                }
+                called.fetch_add(1, Ordering::SeqCst);
+                Some(crate::services::discord::IdleQueueKickoffChannelOutcome {
+                    started: next.intervention.is_some(),
+                })
+            })
+        },
+    ));
+    let http = shared.serenity_http_or_token_fallback().unwrap();
+    restore_inflight_turns(&http, &shared, &provider).await;
+    assert!(
+        wait(Duration::from_secs(15), || calls.load(Ordering::SeqCst)
+            >= 1)
+        .await,
+        "boot restore wakes the durable waiting input"
+    );
+    assert_eq!(*taken.lock().unwrap(), vec![(SENTINEL, false)]);
+    assert!(
+        wait(Duration::from_secs(15), || !shared
+            .restart
+            .deferred_hook_channels
+            .contains_key(&id))
+        .await
+    );
+    restore_inflight_turns(&http, &shared, &provider).await;
+    assert!(
+        wait(Duration::from_secs(15), || calls.load(Ordering::SeqCst)
+            >= 2)
+        .await
+    );
+    assert_eq!(
+        *taken.lock().unwrap(),
+        vec![(SENTINEL, false)],
+        "repeated boot never takes the input twice"
+    );
+    assert!(
+        wait(Duration::from_secs(15), || !shared
+            .restart
+            .deferred_hook_channels
+            .contains_key(&id))
+        .await
+    );
+    assert!(inflight::load_inflight_state_read_only(&provider, channel).is_none());
+    assert_eq!(
+        snapshot(),
+        before,
+        "old body and identity stay byte-for-byte retained"
+    );
+    assert_eq!(
+        crate::services::discord::health::external_turn_hold_for_start(None, &provider, channel)
+            .await,
+        None
+    );
+    assert!(mock.written_texts().is_empty());
+    drop(hook);
+    server.abort();
+    pool.close().await;
+    db.drop().await;
+}
+
 #[test]
 fn a_restarted_herdr_debt_survives_each_copy_clear_closed_crash_cut_pg() {
     const CHANNEL: u64 = 1_479_671_399_000_159;
@@ -861,15 +996,10 @@ fn a_restarted_herdr_debt_survives_each_copy_clear_closed_crash_cut_pg() {
                 .build()
                 .unwrap();
             assert_eq!(
-                runtime.block_on(
-                    crate::services::discord::health::external_turn_hold_for_start(
-                        None,
-                        &ProviderKind::Claude,
-                        CHANNEL
-                    )
-                ),
-                None
+                std::env::var("ADK_TEST_HERDR_DEBT_CUT").unwrap(),
+                "before_closed"
             );
+            runtime.block_on(restore_unlinked_body_debt(&root, CHANNEL));
             drop(env);
             return;
         }
@@ -896,6 +1026,11 @@ fn a_restarted_herdr_debt_survives_each_copy_clear_closed_crash_cut_pg() {
                         "before_closed" => "before_closed",
                         _ => panic!("a named crash cut"),
                     };
+                    if point == "before_closed" {
+                        let (queued, hook) = run.sentinel().await;
+                        assert!(queued.lock().unwrap().is_empty());
+                        std::mem::forget(hook);
+                    }
                     on(point, || Box::pin(async { std::process::exit(73) }));
                     run.pass().await;
                     panic!("the selected crash cut was not reached");
