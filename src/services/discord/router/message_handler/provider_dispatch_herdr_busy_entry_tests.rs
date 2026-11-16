@@ -224,6 +224,16 @@ impl Intake {
         expected: ExpectedPin,
         output_gate: Arc<http_start::OutputGate>,
     ) -> Self {
+        Self::with_launch(fx, started, expected, output_gate, false)
+    }
+
+    fn with_launch(
+        fx: &Fixture,
+        started: &Started,
+        expected: ExpectedPin,
+        output_gate: Arc<http_start::OutputGate>,
+        launch: bool,
+    ) -> Self {
         let live_guard = crate::config_live_reload::test_live_guard_after_shared_test_env_lock();
         let label = fx.logical().strip_prefix("AgentDesk-claude-").unwrap();
         let config: crate::config::Config = serde_json::from_value(json!({
@@ -264,12 +274,19 @@ impl Intake {
         let worker_boot = boot.clone();
         let worker_config = config.clone();
         let on_thread = fx.rig.thread_installer(NODE, KEY, fx.rig.socket(), SESSION);
+        let launch_on_thread = fx.rig.thread_installer_with_launch(NODE, KEY, SESSION);
         let log_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .on_thread_start(move || {
-                on_thread();
+                if launch {
+                    launch_on_thread();
+                    crate::services::herdr_launch::unplaced::QUIET
+                        .with(|quiet| quiet.set(Some(Duration::ZERO)));
+                } else {
+                    on_thread();
+                }
                 crate::services::tui_prompt_dedupe::binding_events::set_test_root(
                     log_root.as_deref(),
                 );

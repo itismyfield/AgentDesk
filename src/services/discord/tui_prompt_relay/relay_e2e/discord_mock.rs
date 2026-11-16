@@ -87,6 +87,7 @@ pub(in crate::services::discord) struct DiscordMockState {
     /// Channels whose `GET` fails, and how many such `GET`s failed.
     failing: Arc<Mutex<std::collections::HashSet<u64>>>,
     failed_reads: Arc<AtomicUsize>,
+    write_refusals: Arc<Mutex<(bool, Vec<String>)>>,
     next_response_id: Arc<AtomicU64>,
     pub(super) admission_probe: Arc<Mutex<Option<Arc<super::pending_admission_e2e::EffectProbe>>>>,
 }
@@ -122,6 +123,7 @@ impl DiscordMockState {
             named: Arc::new(Mutex::new(std::collections::HashMap::new())),
             failing: Arc::new(Mutex::new(std::collections::HashSet::new())),
             failed_reads: Arc::new(AtomicUsize::new(0)),
+            write_refusals: Arc::default(),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
             admission_probe: Arc::new(Mutex::new(None)),
         }
@@ -136,6 +138,35 @@ impl DiscordMockState {
             .map(|(_, text)| text)
             .chain(minted.into_values().map(|(_, text)| text))
             .collect()
+    }
+
+    pub(in crate::services::discord) fn refuse_message_writes(&self, refuse: bool) {
+        self.write_refusals.lock().expect("write refusals").0 = refuse;
+    }
+
+    pub(in crate::services::discord) fn refused_texts(&self) -> Vec<String> {
+        self.write_refusals
+            .lock()
+            .expect("write refusals")
+            .1
+            .clone()
+    }
+
+    pub(in crate::services::discord) fn delivered_texts(&self) -> Vec<String> {
+        self.messages
+            .lock()
+            .expect("messages")
+            .values()
+            .map(|(_, text)| text.clone())
+            .collect()
+    }
+
+    fn refuses_write(&self, content: &str) -> bool {
+        let mut refusals = self.write_refusals.lock().expect("write refusals");
+        if refusals.0 {
+            refusals.1.push(content.to_owned());
+        }
+        refusals.0
     }
 
     pub(in crate::services::discord) fn reply_targets(&self) -> Vec<u64> {
@@ -503,6 +534,13 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        if state.refuses_write(&content) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"message":"Missing Access","code":50001})),
+            )
+                .into_response();
+        }
         state
             .channel_posts
             .lock()
@@ -569,6 +607,13 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
             .get("content")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        if state.refuses_write(content) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"message":"Missing Access","code":50001})),
+            )
+                .into_response();
+        }
         let id = path.rsplit('/').next().and_then(|tail| tail.parse().ok());
         let id = id.unwrap_or(FIRST_RESPONSE_MESSAGE_ID);
         let held = {

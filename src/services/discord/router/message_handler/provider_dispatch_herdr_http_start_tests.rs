@@ -731,6 +731,113 @@ fn external_herdr_http_driver_rechecks_idle_after_its_new_reservation_pg() {
     drop(registry_guard);
 }
 
+fn internal_snapshot_start(flavor: &str) {
+    use discord::queue_io::input_owner::origin::InputOrigin;
+    let fx = Fixture::new(&format!("http-internal-{flavor}"), None);
+    let launcher = Arc::new(Launcher::default());
+    let (_, started) = reconnect::launch(&fx, &launcher);
+    let before = fx.rig.sends().len();
+    let registry_guard = fx.rig.registry_on_this_thread();
+    let admission_guard = open_admission();
+    let intake = Intake::new(&fx, &started);
+    // The snapshot pane is absent; the existing native probe must reach its refusal driver.
+    std::fs::write(
+        fx.cwd.path().join("tmux"),
+        "#!/bin/sh\necho \"can't find session: absent snapshot\" >&2\nexit 1\n",
+    )
+    .unwrap();
+    intake.runtime.block_on(async {
+        let router = app(&fx, &intake).await;
+        let turn = format!("discord:{CHANNEL}:{}", MESSAGE | (1u64 << 63));
+        let label = format!("scheduled:snapshot-{flavor}");
+        let mut metadata = json!({"agent_id":"busy-entry","scheduled_message_id":"smsg-8125",
+            "scheduled_snapshot_session_label":label});
+        let mut context = json!({"origin":"scheduled","provider":"claude","turn_id":turn,
+            "metadata":metadata,"synthetic_label":label,"source":"scheduled_message",
+            "channel_name_hint":fx.logical().strip_prefix("AgentDesk-claude-"),"is_dm":false});
+        if flavor == "restored" {
+            context = metadata.clone();
+            context["origin"] = "scheduled".into();
+            context["provider"] = "claude".into();
+            context["turn_id"] = turn.clone().into();
+        } else if flavor == "routine" {
+            metadata = json!({"routine_id":"routine-8125","execution_strategy":"persistent"});
+            context["metadata"] = metadata;
+            context["origin"] = "routine".into();
+        }
+        assert_eq!(InputOrigin::from_context(Some(&context)), InputOrigin::Routine);
+        let pane = discord::router::message_handler::headless_turn::owner_start_pane(
+            &intake.shared, ChannelId::new(CHANNEL), &context).await.unwrap().unwrap();
+        assert!(!pane.1 && pane.0 != fx.logical(), "snapshot B differs from the Bound channel A");
+        let hosted: Value = sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id=$1")
+            .bind(CHANNEL.to_string()).fetch_one(&fx.pool).await.unwrap();
+        let execution = ChannelMailboxHandle::owner_input_execution("claude", CHANNEL, false);
+        let (original, namespace) = discord::OWNER_ADOPTS_FOR_TEST.scope(true,
+            intake.mailbox.owned_start(execution, (&turn, CHANNEL, "frozen snapshot original B")))
+            .await.unwrap().unwrap();
+        let input = ChannelMailboxHandle::new_owner_input(&original, &namespace, "claude", context.clone());
+        assert!(input.confirm_admission(&intake.mailbox).await.unwrap());
+        let registry = Arc::new(HealthRegistry::new());
+        registry.register("claude".into(), intake.shared.clone()).await;
+        ChannelMailboxHandle::owner_input_wake(&registry, "claude", CHANNEL).await;
+        let rejected = tokio::time::timeout(LIMIT, async {
+            loop {
+                if let Some(reason) = input.start_rejection(&intake.mailbox).await.unwrap() {
+                    break reason;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await;
+        let snapshot = intake.mailbox.v2_request(|slot| slot.as_ref().unwrap().json()).await.unwrap();
+        let screen = discord::router::message_handler::provider_dispatch::OwnerTurn::start_wait_screen_for_test(
+            &intake.shared, ChannelId::new(CHANNEL), &context).await;
+        assert!(rejected.is_ok(), "the actual admitted snapshot must reach start-rejected instead of Watch: screen={screen:?}, owner={snapshot}");
+        let rejected = rejected.unwrap();
+        assert!(rejected.starts_with("start_rejected: ") && rejected.contains("executor_not_wired"), "{rejected}");
+        assert_eq!(snapshot["retained_inputs"][0]["input"]["original"]["text"], original.text);
+        assert_eq!(snapshot["retained_inputs"][0]["disposition"], "known_not_sent");
+        assert_eq!(fx.rig.sends().len(), before, "the rejected snapshot writes nothing to A");
+        assert_eq!(intake.mailbox.has_active_turn().await, Ok(false));
+        assert!(inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL).is_none());
+        let after: Value = sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id=$1")
+            .bind(CHANNEL.to_string()).fetch_one(&fx.pool).await.unwrap();
+        assert_eq!(after, hosted, "internal refusal preserves the existing Bound execution");
+        discord::queue_io::input_owner::notice::drain_synchronously_for_tests(
+            &fx.pool, &intake.mailbox, "claude", CHANNEL).await.unwrap();
+        let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox WHERE source='retained_input_notice' AND target=$1")
+            .bind(format!("channel:{CHANNEL}")).fetch_one(&fx.pool).await.unwrap();
+        assert_eq!(notices, 1, "one retained original owes one visible notice");
+        let pool = Arc::new(fx.pool.clone());
+        assert_eq!(crate::server::outbox_worker::drain_message_outbox_once(&pool, &registry, "snapshot-refusal").await, 1);
+        assert_eq!(intake.mock.delivered_texts().iter().filter(|text| text.contains("원문을 보관")).count(), 1);
+        assert_eq!(crate::server::outbox_worker::drain_message_outbox_once(&pool, &registry, "snapshot-refusal-repeat").await, 0);
+        let heads = answer_input(&fx, &intake, &started);
+        let next = call_source(&router, "start", &format!("after-internal-{flavor}"), "api").await;
+        assert_eq!(next.0, StatusCode::OK, "{}", next.1);
+        completed(&intake, 1).await;
+        assert_eq!(heads.lock().unwrap().len(), 2);
+        assert_eq!(fx.rig.sends().len(), before + 2, "only the later external original runs");
+    });
+    drop(intake);
+    drop(admission_guard);
+    drop(registry_guard);
+}
+
+#[test]
+fn internal_herdr_snapshot_owner_reaches_its_legacy_refusal_pg() {
+    internal_snapshot_start("scheduled");
+}
+
+#[test]
+fn internal_herdr_restored_snapshot_owner_reaches_its_legacy_refusal_pg() {
+    internal_snapshot_start("restored");
+}
+
+#[test]
+fn internal_herdr_routine_owner_reaches_its_legacy_refusal_pg() {
+    internal_snapshot_start("routine");
+}
+
 fn execution_gone(terminal: Option<bool>) {
     let tag = match terminal {
         None => "missing",
@@ -743,7 +850,24 @@ fn execution_gone(terminal: Option<bool>) {
     let before = fx.rig.sends().len();
     let registry_guard = fx.rig.registry_on_this_thread();
     let admission_guard = open_admission();
-    let intake = Intake::new(&fx, &started);
+    let hook_endpoint = terminal.is_none().then(|| {
+        crate::services::claude_tui::hook_server::publish_hook_endpoint("http://127.0.0.1:1".into())
+    });
+    assert_eq!(
+        started.hook(
+            &fx,
+            "Stop",
+            &json!({"session_id":started.session,"transcript_path":started.path})
+        ),
+        202
+    );
+    let intake = Intake::with_launch(
+        &fx,
+        &started,
+        ExpectedPin::Verified,
+        Arc::default(),
+        terminal.is_none(),
+    );
     let (path, session) = (started.path.clone(), started.session.clone());
     fx.rig.on_send(move |params| {
         if params["keys"] == json!(["enter"]) {
@@ -794,32 +918,103 @@ fn execution_gone(terminal: Option<bool>) {
                 Box::pin(async {})
             })
         });
+        let notice = super::super::live_end::LiveEnd::notice();
+        if terminal.is_none() {
+            let next = call_source(&app, "start", "after-execution-gone-machine", "api").await;
+            assert_eq!(next.0, StatusCode::OK, "{}", next.1);
+            assert_eq!(fx.rig.sends().len(), before + 2, "the machine waits for its own turn");
+            intake.mock.refuse_message_writes(true);
+        }
         super::super::live_end::kill(&fx);
         discord::recovery_engine::herdr_row_end::row_end_pass(&intake.shared, &ProviderKind::Claude).await;
+        if terminal.is_none() {
+            tokio::time::timeout(LIMIT, async {
+                loop {
+                    if intake.mock.refused_texts().iter().any(|text| text == &notice) { break; }
+                    discord::recovery_engine::herdr_row_end::row_end_pass(&intake.shared, &ProviderKind::Claude).await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("the actual end pass reaches the refused notice transport");
+            let after_refusal = intake.shared.session_transition_lock(ChannelId::new(CHANNEL)).lock_owned().await;
+            let held = inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL)
+                .expect("a refused notice preserves the captured inflight row");
+            assert_eq!(held.turn_nonce, row.turn_nonce, "a refused notice preserves the same inflight episode");
+            assert!(intake.mailbox.cancel_token().await.unwrap().is_some_and(|token| Arc::ptr_eq(&token, &actor)),
+                "a refused notice preserves the exact mailbox token");
+            assert!(!actor.is_completion_cleanup() && !actor.cancelled.load(Ordering::SeqCst));
+            assert_eq!(fx.rig.sends().len(), before + 2);
+            assert!(!intake.mock.delivered_texts().contains(&notice));
+            drop(after_refusal);
+            intake.mock.refuse_message_writes(false);
+            // The shell from the ended execution has gone; the queued owner launches its successor.
+            fx.rig.show_panes(&[]);
+            fx.rig.answer("workspace.create", json!({"type":"workspace_created","root_pane":{
+                "pane_id":PANE,"workspace_id":"w1","tab_id":"w1:1","revision":0,"cwd":fx.cwd.path()}}));
+            discord::recovery_engine::herdr_row_end::row_end_pass(&intake.shared, &ProviderKind::Claude).await;
+            let pending = tokio::time::timeout(LIMIT, async {
+                loop {
+                    discord::recovery_engine::herdr_row_end::row_end_pass(&intake.shared, &ProviderKind::Claude).await;
+                    let raw: Option<Value> = sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id=$1")
+                        .bind(CHANNEL.to_string()).fetch_one(&fx.pool).await.unwrap();
+                    if let HostedRecord::Known(record) = HostedRecord::decode(raw.as_ref())
+                        && record.state == HostedState::Pending && record.location.is_some() {
+                        break record;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("completion wakes the already queued machine into its actual next launch");
+            let nonce = &pending.execution_nonce;
+            assert_ne!(nonce, actor.herdr_interrupt_state().unwrap().submission.lock().unwrap().execution.as_ref().unwrap());
+            let context = crate::services::tui_prompt_dedupe::binding_context::execution_context("claude", nonce).unwrap();
+            let session = context.expected_native_session_id.unwrap();
+            assert_eq!(session, started.session, "the successor resumes the channel's native source");
+            let context_path = crate::config::runtime_root().unwrap().join(format!("runtime/binding_contexts/claude/{nonce}.json"));
+            fx.rig.run_provider(&context_path, false);
+            fx.rig.foreground(&[crate::services::session_host::herdr_socket_rig_tests::PROVIDER]);
+            fx.rig.show_panes(&[PANE]);
+            let envelope = HookBindingEnvelope::capture_from_env("claude", |name| {
+                (name == "AGENTDESK_BINDING_CONTEXT").then(|| context_path.clone().into_os_string())
+            }).encode().unwrap();
+            let successor = Started { session, path: started.path.clone(), envelope };
+            append(&successor.path, &[json!({"type":"system","subtype":"turn_duration",
+                "sessionId":successor.session,"timestamp":chrono::Utc::now().to_rfc3339()})]);
+            let heads = answer_input(&fx, &intake, &successor);
+            assert_eq!(successor.hook(&fx, "SessionStart", &json!({"session_id":successor.session,
+                "source":"resume","transcript_path":successor.path})), 202);
+            completed(&intake, 1).await;
+            {
+                let heads = heads.lock().unwrap();
+                assert_eq!(heads.len(), 2, "the next machine original has one paste and Enter");
+                assert_eq!(heads[0]["attempt"]["target"]["execution_nonce"], *nonce);
+                assert_eq!(crate::services::claude_tui::host_input::busy::observed(heads[0]["attempt"]["nonce"].as_str().unwrap()), 0);
+            }
+            assert!(actor.is_completion_cleanup() && actor.cancelled.load(Ordering::SeqCst));
+            assert_eq!(fx.rig.sends().len(), before + 4);
+            assert_eq!(intake.posts.to(CHANNEL).iter().filter(|text| text.contains("HTTP session answered")).count(), 1);
+            assert_eq!(intake.posts.to(CHANNEL).len(), 1);
+            assert_eq!(intake.mock.delivered_texts().iter().filter(|text| *text == &notice).count(), 1);
+            let bound: Value = sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id=$1")
+                .bind(CHANNEL.to_string()).fetch_one(&fx.pool).await.unwrap();
+            let HostedRecord::Known(bound) = HostedRecord::decode(Some(&bound)) else { panic!("the next own-turn has a Bound execution") };
+            assert_eq!(bound.state, HostedState::Bound);
+            assert_eq!(&bound.execution_nonce, nonce);
+            assert_eq!(fx.rig.requests().iter().filter(|request| request["method"] == "workspace.create").count(), 1);
+            fallback.assert_none();
+            return;
+        }
         completed(&intake, usize::from(terminal.is_some())).await;
         for trial in 0..2 {
             discord::recovery_engine::herdr_row_end::row_end_pass(&intake.shared, &ProviderKind::Claude).await;
             tokio::time::sleep(Duration::from_millis(10 + trial)).await;
         }
-        let notice = super::super::live_end::LiveEnd::notice();
         let notices = intake.mock.written_texts().into_iter().filter(|text| text == &notice).count();
         assert_eq!(notices, usize::from(terminal.is_none()), "a native terminal is left to its reader");
-        if terminal.is_none() {
-            // Captured settlement releases the row and mailbox before publishing reader cleanup.
-            tokio::time::timeout(LIMIT, async {
-                while !actor.is_completion_cleanup() || !actor.cancelled.load(Ordering::SeqCst) {
-                    tokio::task::yield_now().await;
-                }
-            }).await.expect("the captured E settlement publishes cleanup and wakes its reader");
-        }
         assert_eq!(fx.rig.sends().len(), before + 2);
         fallback.assert_none();
         drop(flush);
     });
-    if terminal.is_none() {
-        assert_eq!(fx.row(), Some(HostedState::Retired));
-    }
     drop(intake);
+    drop(hook_endpoint);
     drop(admission_guard);
     drop(registry_guard);
 }
