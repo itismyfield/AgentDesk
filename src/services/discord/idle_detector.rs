@@ -784,7 +784,6 @@ mod tests {
         false
     }
 
-    #[cfg(unix)]
     #[test]
     fn run_pass_reads_tui_o_progress_of_the_open_turn() {
         const NAME: &str = "services::discord::idle_detector::tests::run_pass_reads_tui_o_progress_of_the_open_turn";
@@ -796,7 +795,22 @@ mod tests {
             let shared = super::super::make_shared_data_for_tests();
             let channel = ChannelId::new(CHANNEL);
             let name = format!("i8196-pass-{}", uuid::Uuid::new_v4());
-            super::super::host_defer_gate::tests::map_channel(&shared, channel, &name).await;
+            let session = super::super::DiscordSession {
+                session_id: None,
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: None,
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                channel_id: Some(CHANNEL),
+                channel_name: Some(name.clone()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: shared.restart.current_generation,
+            };
+            shared.core.lock().await.sessions.insert(channel, session);
             let token = Arc::new(crate::services::provider::CancelToken::new());
             use poise::serenity_prelude::{MessageId, UserId};
             let (user, message) = (UserId::new(1), MessageId::new(11));
