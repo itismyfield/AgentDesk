@@ -934,6 +934,31 @@ fn external_herdr_http_machine_unknown_keeps_custody_and_wakes_on_idle_pg() {
             .unwrap();
         assert_eq!(state["items"].as_array().unwrap().len(), 1);
         assert_eq!(state["items"][0]["author_is_bot"], true);
+        let front = intake
+            .mailbox
+            .v2_request(|slot| Ok(slot.as_ref().unwrap().front().unwrap()))
+            .await
+            .unwrap();
+        let context = intake
+            .mailbox
+            .v2_admission_context(front.1, front.0.unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            context["source"], "api",
+            "the owner keeps the external input source"
+        );
+        assert_eq!(
+            super::super::super::OwnerTurn::start_wait_screen_for_test(
+                &intake.shared,
+                ChannelId::new(CHANNEL),
+                &context,
+            )
+            .await,
+            Some(crate::services::claude_tui::busy_inject::Screen::Unknown),
+            "an unverified Herdr execution stays Unknown at start observation",
+        );
         assert!(state["head_injection"].is_null());
         assert!(state["retained_inputs"].as_array().unwrap().is_empty());
         append(

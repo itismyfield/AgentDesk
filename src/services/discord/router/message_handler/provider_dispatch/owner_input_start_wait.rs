@@ -43,3 +43,14 @@ pub(super) async fn screen(shared: &Shared, channel: ChannelId, context: &Value)
         BusyState::Held | BusyState::Legacy => Screen::Unknown,
     })
 }
+
+#[cfg(test)]
+impl super::OwnerTurn {
+    pub(in crate::services::discord) async fn start_wait_screen_for_test(
+        shared: &Shared,
+        channel: ChannelId,
+        context: &Value,
+    ) -> Option<Screen> {
+        screen(shared, channel, context).await
+    }
+}
