@@ -1,0 +1,31 @@
+---
+title: "활성 Claude 턴 입력의 검증된 현재 source 선택"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the HealthyActiveBusyDelivered bug
+    lg1: Repeats forever, so HealthyActiveBusyDelivered breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: 기존 세션으로 턴 실행
+  s1: 세션 교체, 현재 결속 확인 대기
+  s2: 현재 source 정상 발행 완료
+  s3: 현재 transcript에서 Busy 관측
+  s4: 사람 입력 도착, 활성 턴 행의 경로 없음
+  s5: 빈 transcript로 주입 준비
+  s6: 입력 보류, 키 0회
+  [*] --> s0
+  s0 --> s1: compaction#183;resume으로 세션 교체
+  s1 --> s2: 기존 정상 producer가 현재 결속 발행
+  s2 --> s3: 발행 뒤 같은 파일의 첫 record#183;턴 상태 재독
+  s3 --> s4: 턴이 끝나기 전 사람 입력
+  s4 --> s5: 활성 mailbox 입력 경로에서 source 선택
+  s5 --> s6: 첫 키 직전 source 검사
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 repeats

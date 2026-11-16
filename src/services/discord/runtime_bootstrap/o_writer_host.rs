@@ -478,11 +478,9 @@ fn parts(
             execution: boot
                 .as_ref()
                 .map(|snapshot| {
-                    snapshot
-                        .channels()
-                        .iter()
-                        .filter_map(|ch| snapshot.execution(*ch).map(|view| (*ch, view.permit)))
-                        .collect()
+                    let channels = snapshot.output_channels();
+                    let held = |ch: u64| snapshot.execution(ch).map(|view| (ch, view.permit));
+                    channels.into_iter().filter_map(held).collect()
                 })
                 .unwrap_or_default(),
             alarms,
@@ -515,6 +513,23 @@ fn parts_with_rest(
     prepared
 }
 
+/// O reads a reserved thread's parent the way automatic checks do: a failed read stays an error.
+fn install_thread_lookup(shared: &Arc<SharedData>) {
+    let shared = Arc::clone(shared);
+    crate::services::tui_o::cutover::install_channel_lookup(Arc::new(move |channel| {
+        let shared = Arc::clone(&shared);
+        Box::pin(async move {
+            let http = shared.serenity_http_or_token_fallback();
+            let http = http.ok_or_else(|| "Discord REST is not ready".to_string())?;
+            match serenity::ChannelId::new(channel).to_channel(&http).await {
+                Ok(serenity::Channel::Guild(channel)) => Ok(Some(channel)),
+                Ok(_) => Ok(None),
+                Err(error) => Err(error.to_string()),
+            }
+        })
+    }));
+}
+
 /// Starts the ordinary gateway writer under its PG gateway lease.
 pub(super) fn spawn(
     shared: &Arc<SharedData>,
@@ -522,6 +537,7 @@ pub(super) fn spawn(
     config: Option<&TuiOConfig>,
     pg_gateway: bool,
 ) {
+    install_thread_lookup(shared);
     let Some(shadow) = shadow_of(provider) else {
         return;
     };
@@ -835,6 +851,7 @@ pub(super) fn spawn_execution(
     provider: &ProviderKind,
     config: Option<&TuiOConfig>,
 ) {
+    install_thread_lookup(shared);
     let Some(shadow) = shadow_of(provider) else {
         return;
     };
@@ -848,9 +865,8 @@ pub(super) fn spawn_execution(
         })
         .collect();
     adoption_wake::boot(shared, provider, shadow);
-    for handle in host::start_managed(shadow, false, owned, || parts(shared, provider, config)) {
-        drop(handle.into_detached());
-    }
+    let started = host::start_managed(shadow, false, owned, || parts(shared, provider, config));
+    drop(host::keep_stoppable(started));
 }
 
 /// Retries missing unmanaged hosts only for this runtime's current gateway authority.
@@ -906,15 +922,15 @@ pub(super) async fn resume_gateway(
     let owned = crate::services::tui_o::cutover::boot_ownership()
         .into_iter()
         .filter(|(channel, _, _)| {
+            // A child is served wherever its parent channel is allowed.
             snapshot.execution(*channel).is_none()
-                && (allowed.is_empty() || allowed.contains(channel))
+                && (allowed.is_empty() || allowed.contains(&snapshot.policy_channel(*channel)))
         })
         .collect();
     // Reject changes during sampling; the host follows this gate after the sample.
     if !serving() || gate.current() != observed {
         return;
     }
-    for handle in host::start_managed(shadow, true, owned, || parts(shared, provider, config)) {
-        drop(handle.into_detached());
-    }
+    let started = host::start_managed(shadow, true, owned, || parts(shared, provider, config));
+    drop(host::keep_stoppable(started));
 }

@@ -188,6 +188,108 @@ fn a_queue_hold_ends_a_relayed_restarted_turn_before_the_next_input_pg() {
     );
 }
 
+const UNRECORDED: u64 = 1_479_671_399_000_123;
+/// Claude waiting on its UserPromptSubmit hook: the input's turn shows, no transcript row yet.
+const HOOK_RUNNING: &str = "\u{276f} question\n\u{273d} Marinating\u{2026} (running UserPromptSubmit hooks\u{2026} 1/2 \u{b7} 2s)";
+
+/// An input sent before the restart left no transcript row: its row and hold stay, and the next
+/// input waits, until its late turn lands and the composer idles; the earlier input never reruns.
+#[test]
+fn an_unrecorded_input_holds_its_row_and_the_next_input_until_its_turn_lands_pg() {
+    let path = concat!(
+        module_path!(),
+        "::an_unrecorded_input_holds_its_row_and_the_next_input_until_its_turn_lands_pg"
+    );
+    in_child(
+        path,
+        UNRECORDED,
+        ProviderKind::Claude,
+        Owner::O,
+        |rig| async move {
+            let run = Run::start(
+                &rig,
+                Setup {
+                    provider: ProviderKind::Claude,
+                    channel: UNRECORDED,
+                    routed: true,
+                },
+            )
+            .await;
+            let earlier = |at: &str| {
+                let records = [
+                    json!({"type": "user", "timestamp": at, "message": {"role": "user", "content": "earlier"}}),
+                    json!({"type": "assistant", "timestamp": at, "message": {"content": [{"type": "text", "text": "earlier reply"}]}}),
+                    json!({"type": "system", "subtype": "turn_duration", "timestamp": at, "durationMs": 900}),
+                ];
+                records.map(|record| format!("{record}\n")).concat()
+            };
+            let before = inflight::parse_started_at_unix(&run.row.started_at).unwrap() - 60;
+            let before = chrono::DateTime::from_timestamp(before, 0)
+                .unwrap()
+                .to_rfc3339();
+            // Same file, so the logged source stays bound: only the earlier turn's records.
+            std::fs::write(&run.source, earlier(&before)).unwrap();
+            let _routing = run.real_start().await;
+            run.mock.seed_message(run.row.current_msg_id, SPINNER);
+            run.relay
+                .set(|pane| pane.screen = Some(HOOK_RUNNING.into()));
+            drop(run.sentinel().await);
+            let http = run.shared.serenity_http_or_token_fallback().unwrap();
+            restore_inflight_turns(&http, &run.shared, &run.provider).await;
+            settled_tasks().await;
+            assert!(
+                run.durable().is_some(),
+                "the hook-running screen keeps the row"
+            );
+            let first = run.row.user_msg_id;
+            let kick = |run: &Run| {
+                crate::services::discord::schedule_deferred_idle_queue_kickoff_immediate(
+                    run.shared.clone(),
+                    run.provider.clone(),
+                    run.channel,
+                    "turn_presence_idle",
+                )
+            };
+            kick(&run);
+            run.pass().await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let row = run.durable().expect("the row stays while the turn shows");
+            assert_eq!(row.user_msg_id, first, "no other turn starts over it");
+            assert!(herdr::held(), "the input hold stays");
+            // The late turn lands and the composer idles.
+            let at = stamp(&run.row);
+            let late = json!({"type": "user", "timestamp": at, "message": {"role": "user", "content": "question"}});
+            append(&run.source, &format!("{late}\n"));
+            append(&run.source, &terminal(&ProviderKind::Claude, &run.row));
+            run.relay.set(|pane| pane.screen = Some(READY.into()));
+            kick(&run);
+            let cleared = wait(Duration::from_secs(10), || {
+                run.durable().is_none_or(|row| row.user_msg_id == SENTINEL)
+            })
+            .await;
+            assert!(cleared, "the row settles: {:?}", run.texts());
+            let started = wait(Duration::from_secs(20), || {
+                run.durable().is_some_and(|row| row.user_msg_id == SENTINEL)
+            })
+            .await;
+            assert!(started, "the queued input's turn starts");
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let row = run.durable().expect("the queued input's turn runs");
+            assert_eq!(
+                row.user_msg_id, SENTINEL,
+                "the earlier input never starts again"
+            );
+            let active = crate::services::discord::mailbox_snapshot(&run.shared, run.channel).await;
+            if let Some(token) = active.cancel_token {
+                token
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            run.close().await;
+        },
+    );
+}
+
 const ABORTED: u64 = 1_479_671_399_000_122;
 
 /// An O-owned turn that aborted ends silently too, and its own spinner goes.

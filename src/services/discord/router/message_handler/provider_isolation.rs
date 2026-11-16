@@ -543,7 +543,7 @@ pub(super) async fn reconcile_managed_tmux_runtime_kind_for_config(
         None,
     );
     crate::services::tmux_diagnostics::record_tmux_exit_reason(tmux_session_name, &reason);
-    crate::services::platform::tmux::kill_session(tmux_session_name, &reason);
+    crate::services::session_host::TmuxHost.kill(tmux_session_name, &reason);
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
     let cleared_runtime_binding =
         crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux_session_name);

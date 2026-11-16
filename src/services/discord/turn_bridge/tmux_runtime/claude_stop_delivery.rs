@@ -575,16 +575,16 @@ async fn interrupt_observed_claude_session(
             Ok(())
         };
         let write = || match delivery {
-            ClaudeTurnInterruptDelivery::TuiEscape => {
-                match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"]) {
-                    Ok(output) if output.status.success() => Ok(()),
-                    Ok(output) => Err(format!(
-                        "tmux send-keys Escape failed: status={}",
-                        output.status
-                    )),
-                    Err(error) => Err(format!("tmux send-keys Escape error: {error}")),
-                }
-            }
+            ClaudeTurnInterruptDelivery::TuiEscape => match crate::services::session_host::TmuxHost
+                .interrupt_keys(&session_for_task, &["Escape"])
+            {
+                Ok(output) if output.status.success() => Ok(()),
+                Ok(output) => Err(format!(
+                    "tmux send-keys Escape failed: status={}",
+                    output.status
+                )),
+                Err(error) => Err(format!("tmux send-keys Escape error: {error}")),
+            },
             ClaudeTurnInterruptDelivery::StreamJsonControlRequest => {
                 let Some(input_fifo) = wrapper_input_fifo_path else {
                     return Err("claude wrapper input FIFO unavailable after probe".to_string());

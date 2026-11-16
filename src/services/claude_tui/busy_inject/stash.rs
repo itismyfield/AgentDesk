@@ -6,8 +6,8 @@ use std::io::Write;
 use super::super::owner_input;
 use super::{Outcome, Pane, Timing, Veto, WriteFailure};
 
-const PINNED_APPLIED: &str = "PINNED_KEY_APPLIED";
-const PINNED_HELD: &str = "PINNED_KEY_HELD";
+pub(crate) use crate::services::session_host::KeyOutcome as Key;
+use crate::services::session_host::{HostKey, PinnedInput, SubmitPayload};
 
 pub(in crate::services::claude_tui) fn submit(
     pane: &Pane,
@@ -43,7 +43,13 @@ pub(in crate::services::claude_tui) fn submit_with_start(
     }
     let buffer = format!("agentdesk-busy-inject-{nonce}");
     let path = file.path().to_string_lossy().into_owned();
-    if pane.ok(&["load-buffer", "-b", &buffer, &path]).is_none() {
+    if pane
+        .input_ok(SubmitPayload::LoadFile {
+            buffer: &buffer,
+            path: &path,
+        })
+        .is_none()
+    {
         return load_failed();
     }
     let outcome = (|| {
@@ -59,14 +65,14 @@ pub(in crate::services::claude_tui) fn submit_with_start(
             }
         }
         // A stop that took the writer token's first-key gate leaves the pane without a key.
-        if !super::super::guarded_outcome::first_key() {
+        if !pane.first_key() {
             return Outcome::NotSent(Veto::LockContended);
         }
         on_first_key();
         if stash {
             owner_input::keyed();
             if pane
-                .ok(&["send-keys", "-t", pane.target(), "C-s"])
+                .input_ok(SubmitPayload::Keys(&[HostKey::CtrlS]))
                 .is_none()
             {
                 return Outcome::Failed(WriteFailure::Stash);
@@ -81,28 +87,13 @@ pub(in crate::services::claude_tui) fn submit_with_start(
             };
         }
         owner_input::keyed();
-        let paste = |target: &str| {
-            [
-                "paste-buffer",
-                "-p",
-                "-r",
-                "-d",
-                "-b",
-                &buffer,
-                "-t",
-                target,
-            ]
-            .map(String::from)
-        };
-        match key(pane, paste) {
+        match key(pane, PinnedInput::Paste { buffer: &buffer }) {
             Key::Applied => {}
             Key::Held if stash => return Outcome::Failed(WriteFailure::Stash),
             Key::Held | Key::Failed => return Outcome::Failed(WriteFailure::Paste),
         }
         std::thread::sleep(timing.settle);
-        match key(pane, |target| {
-            ["send-keys", "-t", target, "Enter"].map(String::from)
-        }) {
+        match key(pane, PinnedInput::Enter) {
             Key::Applied => Outcome::Injected,
             // The text may sit in the composer: a refused or failed Enter is never not-sent.
             Key::Held | Key::Failed => Outcome::Failed(WriteFailure::Enter),
@@ -116,8 +107,7 @@ pub(in crate::services::claude_tui) fn submit_with_start(
 
 /// One Enter, pinned like the submit's own keys; whether the server applied it.
 pub(in crate::services::claude_tui) fn enter(pane: &Pane) -> bool {
-    let enter = |target: &str| ["send-keys", "-t", target, "Enter"].map(String::from);
-    matches!(key(pane, enter), Key::Applied)
+    matches!(key(pane, PinnedInput::Enter), Key::Applied)
 }
 
 fn load_failed() -> Outcome {
@@ -125,35 +115,12 @@ fn load_failed() -> Outcome {
     Outcome::NotSent(Veto::LoadFailed)
 }
 
-pub(crate) enum Key {
-    Applied,
-    /// The tmux server found another pane identity and ran nothing.
-    Held,
-    Failed,
-}
-
-/// Runs one content key; under an owner the server runs it only for the pinned pane identity.
-pub(crate) fn key<const N: usize>(pane: &Pane, command: impl Fn(&str) -> [String; N]) -> Key {
-    match owner_input::pinned() {
-        Ok(None) => {}
-        Ok(Some((target, condition))) => {
-            let command = command(&target).join(" ");
-            let applied = format!("{command} ; display-message -p {PINNED_APPLIED}");
-            let held = format!("display-message -p {PINNED_HELD}");
-            let args = ["if-shell", "-F", "-t", &target, &condition, &applied, &held];
-            return match pane.ok(&args).as_deref().map(str::trim) {
-                Some(PINNED_APPLIED) => Key::Applied,
-                Some(PINNED_HELD) => Key::Held,
-                _ => Key::Failed,
-            };
-        }
-        Err(_) => return Key::Held,
-    }
-    let command = command(pane.target());
-    match pane.ok(&command.each_ref().map(String::as_str)) {
-        Some(_) => Key::Applied,
-        None => Key::Failed,
-    }
+pub(crate) fn key(pane: &Pane, input: PinnedInput<'_>) -> Key {
+    pane.input(SubmitPayload::Pinned {
+        input,
+        codex: false,
+    })
+    .into_key()
 }
 
 #[cfg(all(test, unix))]

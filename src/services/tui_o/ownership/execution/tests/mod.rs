@@ -28,6 +28,18 @@ pub(crate) async fn admission(pool: &PgPool, provider: &str, channel: u64, targe
     id
 }
 
+/// The same owner execution as `permit` bound to an existing native session.
+pub(crate) fn bound_like(permit: &OwnerPermit) -> Arc<OwnerPermit> {
+    Arc::new(OwnerPermit {
+        pool: permit.pool.clone(),
+        identity: permit.identity.clone(),
+        executor: permit.executor.clone(),
+        generation: permit.generation,
+        session_ref: SessionRef::Bound(serde_json::json!({"host": "tmux"})),
+        gate: permit.gate(),
+    })
+}
+
 #[tokio::test]
 async fn owner_execution_symmetric_pg_permit_ignores_gateway_home_and_preserves_pending() {
     if !cutover::test_override::isolated_binding_case(concat!(

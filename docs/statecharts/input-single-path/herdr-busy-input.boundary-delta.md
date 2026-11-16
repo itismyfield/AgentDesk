@@ -92,8 +92,8 @@ tmux의 hook-free/legacy source 승인 조건은 이번에 Herdr의 stricter non
 ### tmux safeguard 보존 좌표와 필수 RED
 
 - `busy_inject.rs:548-605`의 ledger 등록/offset/withdraw 계약은 common source transaction으로 옮겨도 바이트 의미를 유지한다. legacy busy caller에는 기존 entry를 adapter로 연결하며 별도 ledger registration을 두 번 하지 않는다.
-- `busy_inject/stash.rs:52-64`의 ready_payload→native_stop first_key, `:67-90` optional C-s+payload start, `:97-109` paste→settle→Enter 순서를 유지한다.
-- `stash.rs:135-155`의 owner-pinned `if-shell -F` 조건과 pinned Applied/Held 결과 판독을 **그대로** 호출한다. plain run_legacy/send_keys 대체 금지. 이 현재 owner 경로는 최초 #6692의 attach guard 설명보다 나중에 pinned pane identity guard로 발전했으므로, 구현 base의 guard를 정본으로 삼는다.
+- `busy_inject/stash.rs:58-70`의 ready_payload→native_stop first_key, `:72-88` optional C-s+payload start, `:90-100` paste→settle→Enter 순서를 유지한다.
+- `src/services/session_host/tmux_host/input.rs:294-348`의 owner-pinned `if-shell -F` 조건과 pinned Applied/Held 결과 판독을 **그대로** 호출한다. plain run_legacy/send_keys 대체 금지. 이 현재 owner 경로는 최초 #6692의 attach guard 설명보다 나중에 pinned pane identity guard로 발전했으므로, 구현 base의 guard를 정본으로 삼는다.
 - Herdr는 `HerdrTarget::pin/send_paste/send_keys` 및 writer lease를 그대로 사용한다. 양쪽의 key-time target replacement·first-key stop·post-paste refusal mutant를 공통 효과를 통해 실행한다.
 
 기존 `InputTransport`의 raw operation을 이용해도 위 tmux guard를 지킬 수 있는 최소 IO hook을 먼저 source-level로 고정한다. 불가능하면 새 trait를 자동 추가하지 않고 DESIGN_DELTA에서 구체적인 누락 operation과 비용을 다시 제시한다.

@@ -7,6 +7,13 @@ use super::model::{
 /// Observation and non-destructive input on one hosted session. Synchronous:
 /// callers keep their own `spawn_blocking`, timeouts and fallback values.
 pub(crate) trait InteractiveSessionHost: Send + Sync {
+    fn submit(
+        &self,
+        target: super::submit::AuthorizedHostTarget<'_>,
+        payload: super::submit::SubmitPayload<'_>,
+    ) -> super::submit::SubmitOutcome {
+        super::submit::submit(self.kind(), target, payload)
+    }
     fn kind(&self) -> HostKind;
     fn capabilities(&self) -> HostCapabilities;
     fn presence(&self, session: HostSessionRef<'_>) -> HostPresence;
@@ -19,6 +26,13 @@ pub(crate) trait InteractiveSessionHost: Send + Sync {
         keys: &[&str],
     ) -> Result<HostMutation, HostError>;
     fn interrupt(&self, session: HostSessionRef<'_>) -> Result<HostMutation, HostError>;
+    /// Consumes the existing owner's warrant; close replies remain distinct from proven exit.
+    fn terminate(
+        &self,
+        warrant: crate::services::termination_audit::host_terminate::HostTerminateWarrant<'_>,
+    ) -> crate::services::termination_audit::host_terminate::HostTerminateEffect {
+        super::termination::terminate(self.kind(), warrant)
+    }
     /// `scroll_back` follows `platform::tmux::capture_pane` (negative = history).
     fn capture_screen(
         &self,

@@ -2,7 +2,7 @@
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct VerifiedSurface {
     destination: u64,
     parent: u64,
@@ -19,13 +19,16 @@ impl VerifiedSurface {
         self.destination == destination && self.parent == parent && kind == Some(self.kind)
     }
 
-    #[cfg(all(test, unix))]
+    /// The parent channel whose policy the destination thread follows.
+    pub(crate) fn parent(&self) -> u64 {
+        self.parent
+    }
+
     pub(crate) fn relationship(&self) -> (u64, u64, RuntimeHandoffKind) {
         (self.destination, self.parent, self.kind)
     }
 
-    // The producer is dormant until child admission is enabled.
-    #[cfg(all(test, unix))]
+    /// Only a channel Discord itself returned, of an actual thread kind, under a nonzero parent.
     pub(crate) fn from_discord(
         channel: &poise::serenity_prelude::GuildChannel,
         kind: RuntimeHandoffKind,

@@ -66,3 +66,153 @@ nine configs, 4.6 s. Every expected violation matched.
 Limits: `Direct` stands for a judgment without the close that `launched_source` runs before
 using the binding, so it only exercises the mismatch branch. A failed Herdr create whose pane
 has ended still refuses (Herdr-side end proof is outside this rule); its liveness is not claimed.
+
+## Transcript identity after a host reboot (r2)
+
+Baseline: `5726d52ca8`. Observed 11-15 (adk-dashboard cc, after the nonce fix): the nonce check
+passed and `current_session` refused with `handoff transcript identity changed`. The recorded
+transcript is the same file: same inode 1388511848, birth 10-31 16:51, first record naming
+session `c45f2c1c…`, last write 11-04 18:57 before the 11-04 19:02 host boot. Its two records hold
+dev 16777230 and 16777229 and the file now stats as 16777231: macOS gave the APFS volume another
+device number at each boot. Nothing rewrote the file and no other execution wrote it.
+
+The pin rule every Claude source already goes through (`claude_tui/source_verify.rs:226-292`,
+`source_verify/renumber.rs:10-21`) treats the same inode on another device, pinned by a record
+committed before this boot, whose first record still names the session, as the pinned file under
+its new device. `current_session` compared `(dev, ino)` exactly. It now admits a mismatch only
+when that rule returns `Verified` and the old tmux execution is proven ended
+(`ended_tmux_execution`). Another inode, a first record of another session, a record from this boot
+or a running/unknown old tmux still refuse.
+
+Identity census (`git grep -n -E 'judge_pin\(|renumbered\(|under_new_device|file_identity|\(source\.dev, source\.ino\)|metadata\.ino\(\)' -- src`):
+
+| Path | Code | Model |
+|---|---|---|
+| Stat registration records `(dev, ino)` | `binding_events.rs:808` | the recorded identity |
+| Hook check records a verified identity | `claude_tui/source_verify.rs:332` → `judge_pin` | the recorded identity |
+| Writer re-pins a renumbered verified pin | `binding_events.rs:768-784` → `renumber.rs:24` | not reached for an unverified legacy record |
+| Host reboot renumbers the volume | OS (no AgentDesk code) | `Transcript = "renumbered"` |
+| Handoff identity check | `herdr_turn/handoff.rs:162-178,208-212,230-246` | `IdentityOk` |
+| Other pin checks (unchanged) | `tui_prompt_dedupe/pending.rs:309`, `source_verify.rs:399` | not changed |
+
+A restart reads the same record, first record and file, so a second judgment matches the first
+(`Boot` leaves `taken` and the transcript unchanged). Cancel, clear, Terminate and stop do not
+write the binding record or the transcript identity.
+
+| Config | NoCapture | OwnTranscript | Delivered |
+|---|---|---|---|
+| IdBeforeRenumbered (exact compare, observed refusal) | GREEN | GREEN | RED |
+| IdFixedRenumbered | GREEN | GREEN | GREEN |
+| IdFixedRenumberedAlive (journal closes the live tmux first) | GREEN | GREEN | GREEN |
+| IdFixedRenumberedDirect (judged while tmux runs) | GREEN | GREEN | not checked |
+| IdFixedRewritten / IdFixedForeign | GREEN | GREEN | not checked |
+| IdNoEnd (mutant: no end proof) | RED | GREEN | not checked |
+| IdNoInode / IdNoOwn (mutant: other inode / other session admitted) | GREEN | RED | not checked |
+
+The nine earlier configs gained `Transcript = "same"` and the `OwnTranscript` invariant; their
+results are unchanged. Eighteen configs, 7.6 s, every expected violation matched.
+A rewritten transcript of the same session (another inode) stays refused, as the pin rule calls it
+an anomaly; its input ends retained with the existing notice and its liveness is not claimed.
+
+## Renumbered transcript of a Herdr execution (r3)
+
+Review of r2 (P1-1): the renumbering admission required the tmux end proof, so a channel already
+on Herdr (`.host_kind` = herdr) refused every start after a host reboot that renumbered its volume,
+including a channel whose first switch the r2 fix let through. Nothing earlier re-pins its binding:
+reconnect admits only a matching live Herdr execution, the O writer renumbers its own copy, and the
+new SessionStart comes after the refused launch.
+
+Rule after the change: the binding's execution is proven ended by the tmux proof, or by the
+channel's hosted row naming that execution Retired with the same owner and nonce. The turn reaches
+`launched_source` only for a Legacy, absent or Retired row (`herdr_turn.rs:260-275`), so a Bound or
+Pending execution never meets this judgment.
+
+End-evidence census (`git grep -n -E 'retire_pg\(|retire_confirmed\(|\.state = HostedState::Retired|retire_unsent\(|retire_own_(pending|unplaced)\(' -- src`):
+
+| Writer of Retired | Precondition | Code |
+|---|---|---|
+| CAS from the same owner and nonce only | `plan_state_change` → `same_execution` | `db/dispatched_sessions/hosted_execution.rs:459-472,545-560` |
+| Terminate | pane end read, then close | `herdr_terminate.rs:224-236,589-597` |
+| Row end recovery | ended turn read | `recovery_engine/herdr_row_end.rs:488-493`, `herdr_row_end_live.rs:66-67` |
+| Server replaced / root replaced | placed pane Missing or Exited | `recovery_engine/herdr_server_replaced.rs:265-287`, `herdr_terminate/root_replaced.rs:182-188,410,536,554` |
+| Launch that never sent its create, unplaced resolution | no pane was created or placed | `herdr_launch.rs:586-608`, `herdr_launch/unplaced.rs:467-470`, `prepared.rs:25,53` |
+| Herdr return, CLI | after `/exit` end, operator end check | `claude/herdr_return.rs:79-90`, `cli/herdr.rs:305-326` |
+| Readers | `herdr_launch.rs:434-447` (retired hold), `host_reconcile.rs:127`, `herdr_row_end.rs:396`, `runtime_marker.rs:25`, `herdr_turn/handoff.rs` (`PriorExecution::ended`) | |
+
+| Config | NoCapture | OwnTranscript | Delivered / DeliveredAgain |
+|---|---|---|---|
+| IdTmuxOnlyHerdr (r2 rule, retired Herdr execution) | GREEN | GREEN | RED Delivered |
+| IdTmuxOnlyHerdrAgain (r2 rule, tmux switch then reboot) | GREEN | GREEN | RED DeliveredAgain |
+| IdFixedHerdr | GREEN | GREEN | GREEN |
+| IdFixedHerdrAgain / IdFixedHerdrAgainFromTmux (second reboot) | GREEN | GREEN | GREEN |
+| IdFixedHerdrOther (Retired row names another nonce, h1 may run) | GREEN | GREEN | not checked |
+| IdNoNonce / IdNoRetired (mutants) | RED | GREEN | not checked |
+
+The admitted pin must be verified. A Herdr resume start logs a stat record (`binding_events.rs:876-884`
+via `herdr_resume.rs:41-45`). The writer promotes it to a verified re-pin only when the pane's
+verified pin names an earlier boot's device (`binding_events.rs:823-835`); a resume on the same
+device leaves the pin unverified. The r4 section below covers that case.
+
+All earlier configs gained `Again = FALSE`; their results are unchanged. Twenty-six configs,
+`--jobs 1`, 36.7 s, every expected violation matched.
+
+## Unverified start of a retired Herdr resume (r4)
+
+Review of r3 (P1-1): a normal Herdr resume on an unchanged device leaves only its own SessionStart
+stat, so after its execution ends (host reboot or not) `current_session` finds no verified pin, the
+legacy branch refuses a hook record, and every start fails with "no verified durable binding"
+before the r3 renumbering rule runs. On base `5726d52ca8` nothing on the normal path wrote a
+verified record later. Main since `1c4742af92` (#8184) pins that stat from the execution's own
+same-session hook (`claude_source.rs` `promote_registered`), so new executions that got a prompt
+hook are verified; records logged before it, or of an execution that ended before such a hook,
+still need the recovery below.
+Observed 11-15 16:2x (read only): channel 1559670200419352696 (`claude-tui-2-e2e`) has this shape
+(latest seq 294, own resume start of nonce `8be5…`, unverified; its row names that nonce Retired).
+
+Rule after the change: with no verified pin, the latest record is pinned now when all hold: a
+`session_start` record with cause Resume and its own nonce; that execution's launch context names a
+resume of the recorded session on this pane and channel; the spawn marker still names that nonce;
+the row names that nonce of this owner Retired; and the recorded file, opened once, passes
+`judge_pin` (same inode, its own first record, a device renumbered only for an earlier boot's
+record) and the path still names it. The pin goes through `record_verified`, as a hook check does.
+Anything else refuses as before. The r3 identity rule then runs on the new pin.
+
+Binding-record census (`git grep -n -E 'record_verified\(|record_source\(|record_reclaim\(' -- src`):
+
+| Writer | Verified | Code | Model |
+|---|---|---|---|
+| Herdr resume's own SessionStart | stat, unless it re-pins a renumbered verified pin | `observation_ingress/resume_start.rs:27-49` → `binding_events.rs:823-835,876-884` | `Launch` sets `verified = FALSE` |
+| Turn completion registration | stat, unchanged for the same source and nonce | `herdr_turn/first_input.rs:288` | no step |
+| Hook continuation check | verified, only for a proposal | `runtime_binding/claude_source.rs:254` | not on the normal resume path |
+| Reclaim | verified, only past another session's Pending | `runtime_binding/claude_source.rs` (`reclaim`) | not modeled |
+| Same-session launch promotion (main `1c4742af92`) | verified, the execution's own stat proven by its prompt hook | `runtime_binding/claude_source.rs` (`promote_registered`) | `Verified = TRUE` start; not required by the recovery |
+| Reconnect / restore | verified (`Record::Exact`, `Record::Verified`) | `tui_prompt_relay/herdr_source.rs:318`, `tui_prompt_dedupe/pending.rs:672,694` | live listed execution only; its Bound row never reaches this judgment |
+| Recovery pin (new) | verified | `herdr_turn/handoff.rs` (`pin_retired_resume`) | `PinOk` with `PinPolicy = "fixed"` |
+
+Restart and reboot: a dcserver restart of a live execution keeps it Bound, so the judgment is not
+reached. After a host reboot recovery retires the row and the next start pins the file under its
+new device; the new execution then logs its own stat start, which the next reboot recovers the same
+way (`PinFixedAgain`). Cancel, clear, Terminate and stop neither read nor write the recovery pin;
+they see a verified record of the same source and nonce, as after a hook check.
+
+The r3 mutant `IdNoRetired` skipped the nonce check too. It now drops only the Retired state, checked
+from a live row of the same nonce (`herdrlive`); the other-nonce start stays refused under it.
+
+| Config | NoCapture | OwnTranscript | Delivered / DeliveredAgain |
+|---|---|---|---|
+| PinBeforeResumed (no recovery, retired unverified start) | GREEN | GREEN | RED Delivered |
+| PinBeforeAgainFromTmux (no recovery, tmux switch then reboot) | GREEN | GREEN | RED DeliveredAgain |
+| PinFixedResumed / PinFixedResumedSame (renumbered / same device) | GREEN | GREEN | GREEN |
+| PinFixedAgain (two reboots) | GREEN | GREEN | GREEN |
+| PinFixedLive / PinFixedOther / PinFixedForeign | GREEN | GREEN | not checked |
+| RecNoRetired / RecNoNonce (mutants) | RED | GREEN | not checked |
+| IdFixedHerdrLive / IdNoRetired (mutant, same nonce live) | GREEN / RED | GREEN | not checked |
+| IdNoRetiredOther (mutant, other nonce) | GREEN | GREEN | not checked |
+
+Earlier configs gained `Verified = TRUE` and `PinPolicy = "fixed"`; their results are unchanged.
+Thirty-eight configs, `--jobs 1`, 71.2 s, every expected violation matched.
+
+After main `d40c06eb47` merged, the model is unchanged: the same-session promotion only makes a
+start's record verified earlier, which `Verified = TRUE` already covers, and the recovery still
+covers records without it. The Herdr reboot test now refuses another execution's Retired row at the
+identity check (its pin is verified) instead of the pin check; both rest on the missing end proof.
