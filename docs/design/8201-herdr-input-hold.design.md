@@ -6,6 +6,7 @@
 - 개정 3 (2026-11-16 21시): pro 재리뷰 2 ISSUES(P1 3·P2 4) 반영.
 - 개정 4 (2026-11-16 22시): xh 재리뷰 3(P1 1·P2 2) 반영. 송신 결과를 모르는 `in_flight` 단계, 정리 뒤 receipt 창의 모델화, 알림 의도·enqueue·확보 기록의 분리. 
 - 개정 5 (2026-11-16 22시): xh 재리뷰 4(P1 1·P2 1) 반영. 코디네이터 결정에 따라 이슈 DoD("입력창에 글이 남은 경우에만 보류 유지")에 설계를 맞춘다. 판독 가능한 빈 입력창에서 증거가 없으면 알림 row를 확보한 뒤 "전달 미확인"으로 해제한다. receipt 창은 시간만 보고, 정리 단계 해제의 표시를 바로잡는다. 항목별 대응은 9장에 있다.
+- S1 구현 첫 커밋 (2026-11-16 23시): xh 재리뷰 5 P1-1 반영. 보류 알림 문구 하나가 보류 지속·전달 불확실·응답이 없으면 다시 보내라는 안내를 함께 담는다(3.5). 모델에 `UnconfirmedNoticeGuides`와 cfg 2개(`PreNoticedInFlight` GREEN, `MutHeldOnlyNotice` RED)를 더했다. 리뷰 5 P2-1(재시작 직전 서버가 받은 Enter의 늦은 적용)은 Herdr 서버 순서 계약 확인이 필요해 S1 범위 밖이다.
 - 운영: 사건 표지 `runtime/herdr_input_holds/bf28830d9ac94338bbe904c8a0c4eb0a`는 사용자 승인(11-16 19:4x)을 받아 메인 세션이 19:41에 치웠다(삭제하지 않고 이동). 그 뒤 같은 보류는 관측되지 않았다.
 
 ## 0. 요약
@@ -203,7 +204,7 @@
 - **알림 순서**: `unclear_passes`가 2에 닿으면 ① 표지에 `notice_intent_at` 기록·fsync → ② outbox enqueue(키 `input-hold:{execution_nonce}:{hold_id}`, LOOPBACK, 영구 dedupe) → ③ 성공(새 row든 같은 키의 기존 row든)이면 `notice_enqueued_at` 기록. ②가 실패하면 ③을 쓰지 않으므로 재시도가 계속된다. ①과 ② 사이에서 crash하면 부팅 뒤 판정이 `notice_intent_at`을 보고 enqueue부터 한다. ②와 ③ 사이에서 crash하면 부팅 뒤 같은 키로 다시 enqueue하고, 영구 dedupe가 기존 row id를 돌려준다. 그래서 보류마다 row는 정확히 하나다. ③을 기록해도 이미 와 있는 근거 변화 Wake는 지우지 않는다. 자체 재시도는 그다음 판정 패스에서 끝난다. 개정 4 모델은 ①(`Bump`가 한도에서 의도 기록) → ②(`EnqueueNotice`) → ③(`RecordEnqueued`)을 따로 전이하고 그 사이 어디서든 재시작이 끼어들 수 있게 했다(`RestartUnreadable`).
 - **보류 단위 키 (리뷰 P1-C)**: 실행 nonce만 키로 쓰면 같은 실행의 두 번째 보류부터 기존 row가 반환되어 알림이 사라진다(대조군 `MutNonceKey`). 기존 `retained_notice.rs`도 입력 identity와 attempt nonce를 키에 넣는다. v1 표지의 `hold_id`는 `sha256(execution_nonce ‖ 파일의 recorded_at 원문)`이다. 파일 내용이 바뀌지 않으므로 그 표지의 생애와 재시작 동안 같다.
 - **알림 이후**: 근거 변화 감시만 남는다. 판독이 회복되거나 사람이 글을 비우면 자동으로 이어진다.
-- **알림의 성격**: 사용자에게 상태를 알리는 채널 메시지다. 보류할 때 예: "앞선 입력이 입력창에 남아 있거나 확인할 수 없어 다음 메시지가 기다리고 있습니다. 입력창이 비거나 다시 읽히면 자동으로 이어집니다." 미확인 해제할 때 예: "앞선 입력이 전달됐는지 확인하지 못했습니다. 응답이 오지 않으면 다시 보내 주세요. 다음 메시지는 이어서 처리합니다." 보류 키가 같으므로 한 보류에서 나가는 알림은 둘 중 하나, 1회뿐이다. 보류 알림이 이미 나간 뒤 미확인 해제가 되면 새 알림을 만들지 않는다. 명령·버튼·수동 해제 기능은 없다. 기존 `agentdesk herdr status/retire` 외에 새 수동 조작을 만들지 않는다.
+- **알림의 성격**: 사용자에게 상태를 알리는 채널 메시지다. 보류 키가 같으므로 한 보류의 알림은 1회뿐이고, 보류 알림이 이미 나간 뒤 미확인 해제가 되면 새 알림을 만들지 않는다. 그래서 문구는 쓰이는 이유(보류 유지·미확인 해제)와 무관한 **하나**이며 처음부터 세 가지를 함께 담는다(리뷰 5 P1-1): ① 앞선 입력 때문에 다음 메시지가 기다리고 있고 입력창이 비거나 다시 읽히면 자동으로 이어진다 ② 앞선 입력이 전달됐는지 확인하지 못했을 수 있다 ③ 보류가 풀린 뒤에도 앞선 입력에 응답이 없으면 그 입력을 다시 보내 달라. 모델 `UnconfirmedNoticeGuides`가 이를 확인한다(대조 `MutHeldOnlyNotice`). 명령·버튼·수동 해제 기능은 없다. 기존 `agentdesk herdr status/retire` 외에 새 수동 조작을 만들지 않는다.
 - **알림의 증명 범위**: 모델과 시험이 증명하는 것은 중복 없는 durable outbox row 확보다. 사용자가 실제로 받았는지는 기존 outbox 전달 계약이 맡는다.
 
 ### 3.6 재전달 여부
@@ -229,7 +230,7 @@
 
 이 경계들은 문서상 기존 동작 유지이며, 모델이 그 교차를 검증한 것은 아니다(6장).
 
-## 5. 상태 차트 결과 (`HerdrInputHold.tla`, 38 cfg)
+## 5. 상태 차트 결과 (`HerdrInputHold.tla`, 40 cfg)
 
 모든 v2 cfg는 `in_flight` 표지에서 시작하고, 붙여넣기 키 → Enter 키 → 결과 기록을 지난다. 재시작 범위(상수 `CrashWindow`)는 다음과 같다.
 - `Restart`: 결과 기록 뒤 재시작만
@@ -246,6 +247,8 @@
 | 설계 | Fixed, LoadSpike, EnterSendFail, PasteSendFail, PersonLeaves, PersonEdits, PersonSubmits, StashOther, Restart, SecondHold | 없음 (**GREEN**) |
 | 설계(결과 기록 전 재시작) | RestartInFlight, RestartInFlightPaste, RestartInFlightSend, RestartInFlightTwice | 없음 (**GREEN**, 개정 4에서는 HoldEventuallyReleased·LaterInputStarts가 깨졌음) |
 | 설계(증명 불가, 예상) | PersonStays, Unreadable, RestartUnreadable, EnqueueFail, Legacy | HoldEventuallyReleased, LaterInputStarts(글이 남았거나 판독 불가라 보류 유지. `HoldReleasedOrNoticed`·`NoticeAtMostOnce`는 통과) |
+| 설계(S1, 리뷰 5 P1-1) | PreNoticedInFlight | 없음 (**GREEN**. main 정책으로는 HoldEventuallyReleased·HoldReleasedOrNoticed·ReadableOursCleaned·LaterInputStarts RED) |
+| 대조군(S1) | MutHeldOnlyNotice | UnconfirmedNoticeGuides |
 | 대조군(개정 5) | MutInFlightKeep | HoldEventuallyReleased, LaterInputStarts |
 | 대조군(개정 5) | MutLateTranscriptAfterClearReceipt | UndeliveredIsTrue |
 | 대조군(개정 5) | MutNoWriteLock | OriginalNotOvertaken, NoPasteOverResidue, NoReleaseOnResidue, LaterInputStarts |
@@ -288,6 +291,7 @@
 | A12 | 재시작 뒤 readiness는 기존 `recovery` 계약을 따르고 판정이 그것을 바꾸지 않는다 | `hold_resolve_after_restart_leaves_recovery_fence_untouched` |
 | A13 (S2) | Enter 전체 re-admit 정책 | `enter_readmit_read_failed_then_success_sends_one_enter`, `enter_readmit_stops_on_admission_marker_closing_or_witness_change`, `enter_readmit_forbidden_gap_never_retries`, `enter_readmit_cancel_during_probe_sends_no_enter`, `enter_readmit_budget_expiry_keeps_indeterminate` |
 | A15 | 정리 단계에서 사람이 같은 원문을 제출한 경우 정리 뒤 receipt 창 안에서는 해제하지 않고, 창 안에 digest가 오면 전달, 창 뒤에도 없으면 "전달 미확인"("미전달" 아님)으로 해제한다. 모델(`PersonSubmits`)은 지우기 기록과 키 사이의 제출을 다루고, 키와 제출이 같은 순간에 겹치는 경합은 이 시험이 맡는다 | `hold_resolve_person_submits_our_text_after_read_is_delivered`(receipt 창 안 해제 없음 → digest 뒤 전달), `hold_resolve_person_submit_with_late_transcript_is_unconfirmed_not_undelivered` |
+| A7a | 보류 알림이 먼저 나간 뒤의 미확인 해제는 새 row 없이 그 row의 문구로 미확인·재전송 안내를 전한다(리뷰 5 P1-1) | `hold_resolve_pre_noticed_inflight_then_empty_unconfirmed_once` |
 | A16 | 결과 기록은 `in_flight` → 최종 결과의 원자적 재기록 한 번이며, 판정·`hold()`·계획 실행·결과 기록이 한 composer 잠금 구간 안에 있다 | `hold_record_outcome_is_single_atomic_rewrite`, `hold_resolve_never_judges_in_flight_while_write_holds_lock`, `hold_resolve_outcome_record_failure_leaves_in_flight_and_is_judged_unknown` |
 | A14 (S3) | Codex 첫 입력: `expected_session_id`/`expected_transcript`가 null로 시작하고 session start 뒤 source가 확정된다. 확정 전에는 전달 판정을 하지 않는다 | `codex_hold_first_input_without_source_never_judges_delivery`, `codex_hold_bound_source_then_digest_receipt_releases` |
 

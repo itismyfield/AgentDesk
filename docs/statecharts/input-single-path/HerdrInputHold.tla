@@ -24,6 +24,8 @@
 \* Rev 5: a readable empty composer with no proof either way (rule 7: in_flight or
 \* enter_send_failed) releases as "unconfirmed" after this hold's notice row is secured.
 \* Windows are time only; they do not know whether a transcript record is still coming.
+\* S1 (review 5 P1-1): a hold's one notice row is written once, so its text always says the
+\* hold continues, the original may or may not have gone, and to resend if no reply follows.
 \* Readers : main `not_held`; design pre-key resolve in `write`. Busy injection reads no hold.
 EXTENDS Naturals
 CONSTANTS Policy,    \* "before" (main 934a49997e) | "fixed" (design rev 5)
@@ -35,6 +37,7 @@ CONSTANTS Policy,    \* "before" (main 934a49997e) | "fixed" (design rev 5)
           CrashWindow, \* "inFlight" (before the outcome record) | "afterRecord" | "any"
                        \* | "inFlightTwice" (first crash in flight, a second one anywhere)
           Mutant     \* "None" or one removed rule of the design
+                     \* ("HeldOnlyNotice": the text depends on why the row was first written)
 VARIABLE h
 vars == <<h>>
 
@@ -70,6 +73,8 @@ Recorded(landed, pasted) ==
            nxt |-> "queued", refusals |-> 0,
            unclear |-> 0,                    \* durable
            intent |-> FALSE,                 \* durable notice intent
+           noticeWhy |-> "none",             \* durable: held | unconfirmed (first intent)
+           guided |-> [i \in {1, 2} |-> FALSE], \* the row's text carries the resend guidance
            enqueued |-> FALSE,               \* durable: this hold's outbox row is recorded
            enqFails |-> 0,
            rows |-> {},                      \* outbox rows by key (persistent dedupe)
@@ -168,6 +173,7 @@ SecondUncertain == /\ Scenario = "secondHold" /\ h.holdId = 1 /\ ~h.hold /\ Live
                                      !.keysSent = FALSE, !.readable = FALSE, !.blind = TRUE,
                                      !.disposition = "unknown", !.nxt = "queued",
                                      !.unclear = 0, !.intent = FALSE, !.enqueued = FALSE,
+                                     !.noticeWhy = "none",
                                      !.trigger = TRUE, !.watch = FALSE,
                                      !.sendStep = "recorded", !.writer = FALSE,
                                      !.clearReceipt = FALSE,
@@ -236,7 +242,9 @@ Retry(r) == IF Mutant = "NoSelfRetry" THEN FALSE
             ELSE ~r.enqueued
 \* Undecidable: count durably; at the limit record the notice intent (RecordIntent).
 Bump(r) == LET u == IF r.unclear < UnclearLimit THEN r.unclear + 1 ELSE r.unclear
-               k == [Keep(r) EXCEPT !.unclear = u, !.intent = @ \/ u >= UnclearLimit]
+               k == [Keep(r) EXCEPT !.unclear = u, !.intent = @ \/ u >= UnclearLimit,
+                                    !.noticeWhy = IF @ = "none" /\ u >= UnclearLimit
+                                                  THEN "held" ELSE @]
            IN {[k EXCEPT !.trigger = Retry(k)]}
 Unhold(r) == [r EXCEPT !.hold = FALSE, !.lock = FALSE,
                        !.releasedOnResidue = @ \/ r.stash
@@ -257,7 +265,8 @@ Gated == Shown(h) = "unread"
 \* An unconfirmed release: this hold's notice row first (intent -> enqueue -> record), then
 \* the release unit. A crash anywhere keeps the hold file and resumes after boot.
 ReleaseUnconfirmed == IF h.enqueued THEN {Settle("unconfirmed")}
-                      ELSE {[h EXCEPT !.intent = TRUE, !.trigger = TRUE]}
+                      ELSE {[h EXCEPT !.intent = TRUE, !.trigger = TRUE,
+                                      !.noticeWhy = IF @ = "none" THEN "unconfirmed" ELSE @]}
 ExactOurs == Shown(h) = "ours" /\ Identity = "digest" /\ (~EnterMayNow \/ ReceiptOK)
 
 Choices ==
@@ -296,10 +305,13 @@ Resolve == /\ Policy = "fixed" /\ Live /\ h.hold /\ h.trigger /\ ~h.lock /\ ~Wri
            /\ \E n \in Choices : h' = n
 Unlink == /\ h.lock /\ h.up
           /\ h' = Unhold(h)
-\* EnqueueNotice: part of a resolver pass; outbox dedupe by key; may fail once.
+\* EnqueueNotice: part of a resolver pass; outbox dedupe by key; may fail once. The row's text
+\* is fixed when written: one text for every hold (design), or one per first reason (mutant).
 EnqueueNotice == /\ Policy = "fixed" /\ Live /\ h.hold /\ h.trigger /\ h.intent
                  /\ Key(h) \notin h.rows
-                 /\ \/ h' = [h EXCEPT !.rows = @ \cup {Key(h)}, !.sentFor[h.holdId] = @ + 1]
+                 /\ \/ h' = [h EXCEPT !.rows = @ \cup {Key(h)}, !.sentFor[h.holdId] = @ + 1,
+                                     !.guided[h.holdId] = Mutant # "HeldOnlyNotice"
+                                                          \/ h.noticeWhy = "unconfirmed"]
                     \/ /\ EnqFail /\ h.enqFails = 0
                        /\ h' = LET f == [h EXCEPT !.enqFails = 1]
                               IN [f EXCEPT !.trigger = Retry(f)]
@@ -344,6 +356,8 @@ NoReleaseOnResidue == ~h.releasedOnResidue
 UndeliveredIsTrue == h.disposition = "undelivered" => h.landed = "no"
 \* An unconfirmed release carries this hold's notice row (exactly one with NoticeAtMostOnce).
 UnconfirmedNoticed == h.disposition = "unconfirmed" => h.sentFor[h.holdId] >= 1
+\* An unconfirmed release's row tells the user the original may not have gone and to resend.
+UnconfirmedNoticeGuides == h.disposition = "unconfirmed" => h.guided[h.holdId]
 \* A later input never goes in ahead of the original (the original never lands after it).
 OriginalNotOvertaken == ~h.overtaken
 DeliveredIsTrue == h.disposition = "delivered" => h.landed = "yes"

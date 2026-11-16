@@ -34,6 +34,7 @@ v2 보류는 결과를 모르는 `in_flight`에서 시작한다. `hold()`가 `se
   - 개정 5에서 추가:
     - `UnconfirmedNoticed`: "전달 미확인" 해제에는 그 보류의 알림 row가 있다. `NoticeAtMostOnce`와 합치면 정확히 1개다.
     - `OriginalNotOvertaken`: 원 입력이 나중 입력보다 늦게 닿지 않는다.
+  - S1에서 추가(리뷰 5 P1-1): `UnconfirmedNoticeGuides`: "전달 미확인" 해제의 알림 row 문구가 원 입력이 전달되지 않았을 수 있다는 것과 다시 보내라는 안내를 담는다. row는 보류마다 한 번만 쓰이므로(`guided`는 enqueue 때 정해짐) 문구는 처음 쓰인 이유(`noticeWhy`: 보류 유지·미확인 해제)와 무관해야 한다.
 - Liveness:
   - `HoldEventuallyReleased`
   - `HoldReleasedOrNoticed` = `hold ~> (~hold ∨ 이 보류의 알림 row ≥ 1)`(보류 단위). 판독 불가·사람 글·v1처럼 증명할 수 없는 보류에 대한 종결 계약이다.
@@ -268,7 +269,7 @@ stateDiagram-v2
 - `MutNonceKey`: 첫 보류 알림(키 E) → 해제 → 두 번째 보류(판독 불가) → 같은 키 E라 이 보류의 알림 0(HoldReleasedOrNoticed RED).
 - `MutStopOnIntent`: 판독 불가 → 알림 의도 기록 → enqueue 실패 → 재시도를 멈춤 → 알림 0으로 영구.
 
-## 결과 (기대 집합 = 실제 집합, 38 cfg)
+## 결과 (기대 집합 = 실제 집합, 40 cfg)
 
 | cfg | 시나리오 | 기대 위반 | 실제 위반 | 상태 수 |
 |---|---|---|---|---|
@@ -281,6 +282,7 @@ stateDiagram-v2
 | `HerdrInputHoldLoadSpike` | 설계: 첫 판독 실패 뒤 회복 | 없음 | 없음 | 308 |
 | `HerdrInputHoldMutEmptyOnlyWake` | 대조: 빈 입력창일 때만 깨움 | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts, ReadableOursCleaned | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts, ReadableOursCleaned | 324 |
 | `HerdrInputHoldMutInFlightAsRefused` | 대조: 결과 미기록(in_flight)을 enter_refused로 취급(+in_flight 재시작) | UndeliveredIsTrue | UndeliveredIsTrue | 131 |
+| `HerdrInputHoldMutHeldOnlyNotice` | 대조(S1): 보류 알림 문구에 미확인·재전송 안내 없음(판독 불가로 먼저 알림 → 빈 입력창 미확인 해제, +in_flight 재시작) | UnconfirmedNoticeGuides | UnconfirmedNoticeGuides | 534 |
 | `HerdrInputHoldMutInFlightKeep` | 대조(개정 5): 규칙 7에서 보류 유지(개정 4 동작, +in_flight 재시작) | HoldEventuallyReleased, LaterInputStarts | HoldEventuallyReleased, LaterInputStarts | 238 |
 | `HerdrInputHoldMutLateTranscriptAfterClearReceipt` | 대조(개정 5): 정리 단계 빈 입력창을 미전달로(사람 Enter + 늦은 transcript) | UndeliveredIsTrue | UndeliveredIsTrue | 50 |
 | `HerdrInputHoldMutNoSelfRetry` | 대조: 자체 재시도 없음 | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts | 47 |
@@ -301,6 +303,7 @@ stateDiagram-v2
 | `HerdrInputHoldPersonLeaves` | 설계: 사람 초안이 결국 비워짐 | 없음 | 없음 | 399 |
 | `HerdrInputHoldPersonStays` | 설계: 사람 초안이 계속 남음(예상) | HoldEventuallyReleased, LaterInputStarts | HoldEventuallyReleased, LaterInputStarts | 186 |
 | `HerdrInputHoldPersonSubmits` | 설계: 지우기 기록 뒤 키 전에 사람이 우리 글에 Enter(transcript가 창보다 늦을 수 있음) | 없음 | 없음 | 257 |
+| `HerdrInputHoldPreNoticedInFlight` | 설계(S1): 판독 불가로 보류 알림이 먼저 나간 뒤 빈 입력창 미확인 해제(+in_flight 재시작). 같은 cfg를 main 정책으로 돌리면 HoldEventuallyReleased·HoldReleasedOrNoticed·ReadableOursCleaned·LaterInputStarts RED | 없음 | 없음 | 835 |
 | `HerdrInputHoldRestart` | 설계 + 결과 기록 뒤 재시작 1회(지우기 기록·키·확인·정산·삭제 사이 어디서나) | 없음 | 없음 | 272 |
 | `HerdrInputHoldRestartInFlight` | 설계: 결과 기록 전 재시작(키 전·붙여넣기 뒤·Enter 뒤) | 없음 | 없음 | 245 |
 | `HerdrInputHoldRestartInFlightPaste` | 설계: pasteSendFail + 결과 기록 전 재시작 | 없음 | 없음 | 322 |
@@ -316,6 +319,7 @@ stateDiagram-v2
 - 개정 5에서 뺀 대조군:
   - `MutIgnoreTranscript`, `MutOverwriteProof`: 규칙 7 해제가 두 결함을 흡수한다. transcript를 무시하거나 증거를 덮어써도 빈 입력창은 알림과 "전달 미확인" 해제로 끝나므로 어떤 규칙도 깨지지 않는다. 남는 비용은 불필요한 알림 1회와 덜 정확한 표시다. 증거를 따로 보존하는 계약(P1-B)은 설계에 그대로 남는다(설계 5장).
   - `MutSkipClearReceipt`: `MutLateTranscriptAfterClearReceipt`로 바꿨다.
+- `PreNoticedInFlight` GREEN(S1, 리뷰 5 P1-1): 판독 불가 2회로 보류 알림 row가 먼저 생기고, 판독이 회복된 뒤 빈 입력창에서 미확인 해제한다. 해제는 기존 row를 다시 쓰지 않으므로 그 row의 문구가 처음부터 미확인·재전송 안내를 담아야 `UnconfirmedNoticeGuides`가 통과한다. 이유별 문구로 되돌린 `MutHeldOnlyNotice`는 이 규칙만 깬다.
 - `SecondHold` GREEN: 두 보류 각각이 해제되거나 자기 알림을 받는다.
 - `BeforeEnds`: main에서도 실행이 끝나면 표지는 풀린다.
 
