@@ -38,3 +38,5 @@ The shortest path has 8 steps:
 
 ## Rules that hold
 NoDuplicatePane
+
+The Codex canary Retired-row bootstrap that gates `StartLaunch` for a Codex Herdr row is modelled separately in `CodexHerdrBootstrap.tla`; see `codex-herdr-bootstrap.report.md`.

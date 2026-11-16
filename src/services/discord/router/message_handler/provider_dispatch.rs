@@ -560,7 +560,7 @@ fn herdr_turn(
         return herdr::execute(turn, plan, sender);
     }
     let refusal = HerdrRefusal::ExecutorNotWired;
-    tracing::warn!(endpoint = %plan.endpoint.config_key, "{refusal}");
+    tracing::warn!(endpoint = %plan.endpoint.config_key, bootstrap = plan.bootstrap, "{refusal}");
     Err(refusal.to_string())
 }
 
@@ -626,6 +626,7 @@ mod herdr {
                 goals: turn.codex_goals,
                 compact_token_limit: turn.compact_token_limit,
                 cancel: Some(Arc::clone(&turn.cancel)),
+                bootstrap: plan.bootstrap,
             };
             return crate::services::codex::herdr_turn::execute(codex, &ports, sender);
         }

@@ -24,7 +24,7 @@ fn reserved(channel: u64) -> BootChannels {
         .unwrap()
 }
 
-async fn intake_at_provider(resumed: bool) {
+async fn intake_at_provider(resumed: bool, ending: &str) {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let root = crate::config::runtime_root().unwrap();
     let config_path = root.join("turn-mark-fixture.yaml");
@@ -124,6 +124,113 @@ async fn intake_at_provider(resumed: bool) {
         actual_provider, "codex",
         "the actual provider boundary must be Codex"
     );
+    if !resumed {
+        use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+        use crate::test_support::wait::{WAIT_CAP, await_within};
+        let current = crate::services::discord::mailbox_snapshot(&shared, channel)
+            .await
+            .cancel_token
+            .expect("current admitted turn");
+        let mut body = Box::pin(claim_then_send(
+            Some(
+                BodyClaim::new(
+                    channel.get(),
+                    Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+                )
+                .for_turn(current.turn_nonce()),
+            ),
+            || async { 1 },
+        ));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            std::future::Future::poll(body.as_mut(), &mut context).is_pending(),
+            "Legacy must not post before the fresh admission decides"
+        );
+        match ending {
+            "cancel" => {
+                current.publish_cancel("fixture ends the admitted attempt");
+                let tmux = ProviderKind::Codex.build_tmux_session_name("turn-mark-entry");
+                assert!(
+                    crate::services::tui_o::cutover::admit_codex_first(
+                        channel.get(),
+                        &ProviderKind::Codex,
+                        None,
+                        "hi",
+                        &current,
+                        Some(&tmux)
+                    )
+                    .is_none(),
+                    "a cancelled token cannot install a later admission stamp"
+                );
+            }
+            "stop" => {
+                crate::services::discord::commands::stop::run_slash_stop(
+                    &shared,
+                    &ProviderKind::Codex,
+                    channel,
+                )
+                .await;
+            }
+            #[cfg(unix)]
+            "terminate" => {
+                crate::services::provider_teardown::teardown_tmux(
+                    Some(&crate::services::provider_teardown::TeardownClearance::Unkeyed),
+                    &ProviderKind::Codex.build_tmux_session_name("turn-mark-entry"),
+                    "fixture",
+                    "terminate",
+                    "end admitted attempt",
+                )
+                .unwrap();
+                assert!(
+                    !current.cancelled.load(std::sync::atomic::Ordering::Acquire),
+                    "terminate releases the reservation independently of Cancel"
+                );
+            }
+            "clear-timeout" => {
+                let transition = shared.session_transition_lock(channel);
+                let held = transition.lock_owned().await;
+                let clearing = crate::services::discord::commands::control::clear_channel_session_state_with_session_key(&api.http, &shared, &ProviderKind::Codex, channel, "fixture", None);
+                let mut clearing = Box::pin(clearing);
+                assert!(std::future::Future::poll(clearing.as_mut(), &mut context).is_pending());
+                assert!(
+                    std::future::Future::poll(body.as_mut(), &mut context).is_ready(),
+                    "clear invalidates before waiting for the transition"
+                );
+                let blocked =
+                    candidate.admit_first(channel.get(), "during-clear", "hi", "fixture", || Ok(0));
+                assert!(
+                    blocked.is_none(),
+                    "clear excludes a fresh admission while awaiting the transition"
+                );
+                let report = await_within(clearing, WAIT_CAP).await.unwrap();
+                let successor =
+                    candidate.admit_first(channel.get(), "after-clear", "hi", "fixture", || Ok(0));
+                assert!(
+                    successor.is_some(),
+                    "clear releases its admission exclusion after the timeout path"
+                );
+                drop(successor);
+                assert!(
+                    report.warning().is_some_and(|warning| warning
+                        .contains("진행 중이던 세션 작업이 끝나기를 기다리지 않고 초기화했어요.")),
+                    "the real timeout path was exercised"
+                );
+                drop(held);
+                release.send(()).unwrap();
+                await_within(bridge_completed, WAIT_CAP).await.unwrap();
+                shared.mailboxes.remove_fixture_for_test(channel);
+                return;
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            matches!(
+                await_within(body, WAIT_CAP).await.unwrap(),
+                BodySend::Sent(1)
+            ),
+            "cancel resumes the retained Legacy body"
+        );
+    }
     release.send(()).unwrap();
     tokio::time::timeout(wait, bridge_completed)
         .await
@@ -146,7 +253,7 @@ async fn fresh_codex_intake_marks_before_provider_input() {
     )) {
         return;
     }
-    intake_at_provider(false).await;
+    intake_at_provider(false, "cancel").await;
 }
 
 #[tokio::test]
@@ -157,5 +264,39 @@ async fn reused_codex_intake_has_no_admission_mark_at_provider_input() {
     )) {
         return;
     }
-    intake_at_provider(true).await;
+    intake_at_provider(true, "cancel").await;
+}
+
+#[tokio::test]
+async fn fresh_codex_stop_resumes_the_retained_body() {
+    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+        "services::discord::router::message_handler::turn_mark_admission_tests::",
+        "fresh_codex_stop_resumes_the_retained_body"
+    )) {
+        return;
+    }
+    intake_at_provider(false, "stop").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fresh_codex_terminate_releases_before_spawn_proof() {
+    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+        "services::discord::router::message_handler::turn_mark_admission_tests::",
+        "fresh_codex_terminate_releases_before_spawn_proof"
+    )) {
+        return;
+    }
+    intake_at_provider(false, "terminate").await;
+}
+
+#[tokio::test]
+async fn fresh_codex_clear_timeout_invalidates_before_transition_wait() {
+    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+        "services::discord::router::message_handler::turn_mark_admission_tests::",
+        "fresh_codex_clear_timeout_invalidates_before_transition_wait"
+    )) {
+        return;
+    }
+    intake_at_provider(false, "clear-timeout").await;
 }
