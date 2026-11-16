@@ -236,8 +236,9 @@ impl Context {
                 return Some(Reading::idle());
             }
             let source = self.current_source(authority)?;
-            let state =
-                crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&source.id.path);
+            let state = crate::services::tui_turn_state::observe_claude_jsonl_running_turn_state(
+                &source.id.path,
+            );
             if self
                 .current_source(authority)
                 .is_none_or(|again| again.id != source.id)
