@@ -1,0 +1,5 @@
+\* EXPECTED_SAFETY=- EXPECTED_LIVENESS=-
+CONSTANTS Host = "tmux" InitialRead = "busy" Mutation = "none"
+SPECIFICATION Spec
+INVARIANT MachineWaits NoDuplicates NoSilentLoss
+PROPERTY MachineOwnTurn EachReply
