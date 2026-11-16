@@ -25,7 +25,7 @@ impl<'a> StartupCheck<'a> {
             return None;
         }
         self.next_probe = Instant::now() + Duration::from_millis(500);
-        let pane = crate::services::platform::tmux::capture_pane_timeout(
+        let pane = crate::services::session_host::TmuxHost.capture_bounded(
             tmux,
             -80,
             Duration::from_millis(100),
