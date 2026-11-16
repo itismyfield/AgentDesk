@@ -159,6 +159,34 @@ fn compact_resumed_start_yields_to_first_input_and_waits_for_its_terminal() {
     );
 }
 
+// After a restart the recorded resume start admits the first input over an old finished turn with
+// no exit metadata; that old terminal still admits no compact, the restart floor stays.
+#[test]
+fn compact_waits_over_a_restored_resume_start_for_this_runs_terminal() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    r.append(
+        json!({"type":"assistant","timestamp":Utc::now() - chrono::Duration::hours(1),
+        "message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}}),
+    );
+    r.terminal();
+    r.hook("resume");
+    daemon_restart(&r.session);
+    let tmux = pane();
+    let mut pending = Pending::capture(&r.session).unwrap();
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Pending);
+    assert!(tmux.sends().is_empty());
+    assert_eq!(r.send(), Ok(()));
+    assert_eq!(tmux.sends(), ["load", "paste", "Enter"]);
+    r.assistant("first answer");
+    r.terminal();
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Submitted);
+    assert_eq!(
+        tmux.sends(),
+        ["load", "paste", "Enter", "/compact", "Enter"]
+    );
+}
+
 #[test]
 fn compact_yields_to_the_shared_first_input_reservation() {
     let _root = crate::config::TestRuntimeRootGuard::new();

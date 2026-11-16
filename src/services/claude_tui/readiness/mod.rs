@@ -1,11 +1,13 @@
 //! Current-source Idle readiness; external Busy injection keeps its own entry path.
 mod clear;
+mod closed_turn;
 pub(crate) mod compact;
 #[cfg(unix)]
 pub(crate) use source::adopt_awaiting_clear;
 mod dialog;
 mod evidence;
 pub(crate) mod idle;
+mod resume_record;
 mod source;
 #[cfg(test)]
 #[path = "readiness_tests.rs"]
@@ -38,9 +40,24 @@ struct Entry {
     resumed: Option<(u64, DateTime<Utc>)>,
 }
 impl Entry {
+    /// A restarted daemon's first look: everything up to the transcript's end is history.
+    fn restart(tail: Option<&evidence::Tail>) -> Self {
+        Self {
+            recovery: Some((tail.map_or(0, |tail| tail.stamp.len), *STARTED)),
+            ..Self::default()
+        }
+    }
     /// The accepted start no input of ours has consumed yet.
     fn start_open(&self) -> bool {
         self.start && !self.submitted && self.pending.is_none()
+    }
+    /// Only the restart's floor stands: nothing of ours is reserved, controlled or started.
+    fn restart_floor(&self) -> bool {
+        self.recovery.is_some_and(|(_, at)| at == *STARTED)
+            && self.pending.is_none()
+            && self.compact_ticket.is_none()
+            && self.compact_done.is_none()
+            && !self.start
     }
     /// The resumed start still admits its first input: only metadata followed it.
     fn resumed_quiet(&self, tail: &evidence::Tail) -> bool {
@@ -130,7 +147,30 @@ fn evidence(session: &str, path: Option<&Path>, restart_ok: bool) -> Option<Proo
         .as_ref()
         .is_none_or(|tail| idle_reading(&source.path, tail));
     let launched_before = restart_ok && launched_before_start(&source);
+    let restorable = || {
+        ledger()
+            .entries
+            .get(&source)
+            .is_none_or(Entry::restart_floor)
+    };
+    let restored = tail
+        .as_ref()
+        .filter(|_| restorable())
+        .and_then(|tail| resume_record::restored(&source, tail));
     let mut state = ledger();
+    // The restart forgot this execution's resume start; its record restores it, floor kept, ahead
+    // of the early return an old cut or permission-marked history would otherwise take.
+    if let Some(resumed) = restored
+        && state.entries.get(&source).is_none_or(Entry::restart_floor)
+    {
+        let entry = state
+            .entries
+            .entry(source.clone())
+            .or_insert_with(|| Entry::restart(tail.as_ref()));
+        entry.start = true;
+        entry.resumed = Some(resumed);
+        entry.revision += 1;
+    }
     // Keep ordinary Running observation side-effect-free; only our completed control or an
     // unconsumed resume start, whose history says nothing of this run, can differ.
     if !native_idle
@@ -168,10 +208,7 @@ fn evidence(session: &str, path: Option<&Path>, restart_ok: bool) -> Option<Proo
     let entry = state
         .entries
         .entry(source.clone())
-        .or_insert_with(|| Entry {
-            recovery: Some((tail.as_ref().map_or(0, |tail| tail.stamp.len), *STARTED)),
-            ..Entry::default()
-        });
+        .or_insert_with(|| Entry::restart(tail.as_ref()));
     if let Some(tail) = &tail {
         if entry.file.is_some_and(|file| file != tail.stamp.file)
             || tail.stamp.len < entry.high_water
@@ -185,6 +222,17 @@ fn evidence(session: &str, path: Option<&Path>, restart_ok: bool) -> Option<Proo
         }
         entry.file = Some(tail.stamp.file);
         entry.high_water = tail.stamp.len;
+    }
+    // The restart forgot this turn's Stop; the file still shows this execution's quiet Stop closed it.
+    if native_idle
+        && blocked.is_none()
+        && entry.restart_floor()
+        && let (Some(tail), Some(nonce)) = (&tail, source.nonce.as_deref())
+        && let Ok(ctx) =
+            crate::services::tui_prompt_dedupe::binding_context::execution_context("claude", nonce)
+        && closed_turn::closed_since(&source.path, &tail.stamp, &source.native, ctx.created_at)
+    {
+        entry.recovery = None;
     }
     if let Some(tail) = &mut tail {
         let floor = entry
@@ -559,10 +607,19 @@ pub(crate) fn note_hook(
             state.entries.retain(|old, _| {
                 old.session != source.session || old.nonce != source.nonce || old == &source
             });
-            let resumed = (payload["source"] == "resume").then(|| {
-                let floor = Stamp::read(&source.path).map_or(0, |stamp| stamp.len);
-                (floor, ctx.created_at)
-            });
+            let stamp = Stamp::read(&source.path);
+            let resumed = (payload["source"] == "resume")
+                .then(|| (stamp.as_ref().map_or(0, |stamp| stamp.len), ctx.created_at));
+            // Recorded before the hook answers, and only for the execution its spawn marker names.
+            if resumed.is_some()
+                && let Some(stamp) = &stamp
+                && source::nonce(&ctx.tmux_session) == Some(Some(ctx.execution_nonce.clone()))
+            {
+                resume_record::write(
+                    &resume_record::Record::accepted(ctx, &source, stamp, at),
+                    crate::domain::file_sync::fsync_parent_dir,
+                );
+            }
             let entry = state.entries.entry(source).or_default();
             entry.start = true;
             entry.resumed = resumed;
