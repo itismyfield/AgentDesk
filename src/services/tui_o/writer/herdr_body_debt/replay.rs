@@ -153,6 +153,7 @@ fn native(
         .as_i64()
         .filter(|id| *id > 0)
         .ok_or("original native input identity unknown")?;
+    let expected_channel = snapshot.record.channel_id.to_string();
     for (piece, _) in &mut aliases {
         let (serial, prepared) = ledger
             .latest_piece(&piece.unit_key, piece.index)
@@ -173,7 +174,7 @@ fn native(
             || stamp["payload_hash"] != sha(piece.payload.as_bytes())
             || stamp["origin"]["delivery"] != delivery
             || stamp["origin"]["provider"] != provider_name(provider)
-            || stamp["origin"]["channel"] != snapshot.record.channel_id.to_string()
+            || stamp["origin"]["channel"].as_str() != Some(expected_channel.as_str())
         {
             return Err("native admission belongs to another input or payload".into());
         }
