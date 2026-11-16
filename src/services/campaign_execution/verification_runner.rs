@@ -1,7 +1,8 @@
+use crate::services::process::reaping::CommandReapExt;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -69,7 +70,7 @@ pub struct RunningPhase {
     phase_id: String,
     check_id: String,
     kind: PhaseKind,
-    child: Child,
+    child: crate::services::process::reaping::ReapingChild,
     process: ProcessIdentity,
     receipt: String,
     command: CommandSpec,
@@ -167,7 +168,7 @@ pub(super) fn launch(
         command.env_remove(OPERATIONAL_ROOT_ENV);
     }
     crate::services::process::configure_child_process_group(&mut command);
-    let child = command.spawn()?;
+    let child = command.spawn_reaping()?;
     let pid = child.id();
     let process = ProcessIdentity {
         host: ctx.host.into(),

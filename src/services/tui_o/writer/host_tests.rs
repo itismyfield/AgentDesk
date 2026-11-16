@@ -758,7 +758,7 @@ fn init_path(harness: &Harness, channel: u64) -> PathBuf {
     let dir = harness
         ._runtime
         .path()
-        .join("o_store")
+        .join(crate::services::tui_o::store::STORE_DIR_NAME)
         .join(channel.to_string());
     dir.join("init")
 }
@@ -1408,3 +1408,80 @@ mod s2a;
 #[cfg(unix)]
 #[path = "../repost/projection_tests.rs"]
 mod receipt_projection;
+
+#[tokio::test(start_paused = true)]
+async fn an_unregistered_member_starts_no_writer_and_rebinding_resumes_its_store() {
+    let (harness, _, source) = switched_over(&row("m0", "before the switch"));
+    p5_log(harness._runtime.path(), CHANNEL, &startup(source));
+    harness.gate.acquired();
+    let saved = std::fs::read(init_path(&harness, CHANNEL)).unwrap();
+    for registered in [false, true] {
+        let agents = if registered {
+            serde_json::json!([{"id": "fixture", "name": "Fixture", "channels": {
+                "claude": {"id": CHANNEL.to_string(), "runtime": "tui"}
+            }}])
+        } else {
+            serde_json::json!([])
+        };
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "server": {}, "agents": agents,
+            "tui_o": {"writer": {"all_tui": false, "channels": []}}
+        }))
+        .unwrap();
+        // A second selected channel causes the real committed-store seed to run.
+        let mut value = serde_json::to_value(config).unwrap();
+        value["agents"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "selected", "name": "Selected", "channels": {
+                    "codex": {"id": OTHER.to_string(), "runtime": "tui"}
+                }
+            }));
+        value["tui_o"]["writer"]["channels"] = serde_json::json!([OTHER]);
+        let config = serde_json::from_value::<crate::config::Config>(value).unwrap();
+        let boot = BootChannels::validate(&config)
+            .unwrap()
+            .seeded(&config, |channels, _| {
+                Ok(crate::services::tui_o::channel_policy::stored(
+                    Some(harness._runtime.path()),
+                    &channels
+                        .union(&std::collections::BTreeSet::from([CHANNEL]))
+                        .copied()
+                        .collect(),
+                ))
+            })
+            .unwrap();
+        assert!(boot.channels().contains(&CHANNEL));
+        let _boot = test_override::force_boot(boot);
+        if !registered {
+            assert_eq!(
+                cutover::o_owns_tui_output_for_channel(CHANNEL, None),
+                Ok(true)
+            );
+            assert_eq!(
+                cutover::peek_o_owns_tui_output_for_channel(CHANNEL, Some(CodexTui)),
+                Ok(true)
+            );
+        }
+        let ran = std::cell::Cell::new(false);
+        let body = cutover::claim_then_send(
+            Some(cutover::BodyClaim::new(CHANNEL, Some(ClaudeTui))),
+            || async { ran.set(true) },
+        )
+        .await;
+        assert_eq!(body, Ok(cutover::BodySend::OwnedByO));
+        assert!(!ran.get(), "no Legacy body or fallback closure");
+        let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+        let tasks = start_host(&harness, &io, &ready);
+        assert_eq!(tasks.len(), usize::from(registered));
+        polls(3).await;
+        assert_eq!(ready.is_ready(CHANNEL), registered);
+        if !registered {
+            assert!(io.calls().is_empty());
+        }
+        assert_eq!(std::fs::read(init_path(&harness, CHANNEL)).unwrap(), saved);
+        abort(tasks);
+        polls(2).await;
+    }
+}

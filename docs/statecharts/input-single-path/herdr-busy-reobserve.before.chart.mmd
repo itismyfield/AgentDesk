@@ -1,0 +1,27 @@
+---
+title: "Slice2: 같은 원문의 재관측과 clear 위임"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the HealthyRecoveryDelivers or VerifiedClearReevaluatesIdle bug
+    lg1: Repeats forever, so HealthyRecoveryDelivers or VerifiedClearReevaluatesIdle breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: 소유된 원문 도착
+  s1: Unknown 원문 보류
+  s2: 새 근거 재관측 대기
+  s3: Unknown 보류 표시
+  s4: 새 근거를 관측했으나 보류 표시 유지
+  [*] --> s0
+  s0 --> s1: 공통 대상 근거로 분기
+  s1 --> s2: 같은 operation의 새 근거 도착
+  s1 --> s3: 보류 표시
+  s2 --> s4: 보류 표시
+  s3 --> s4: 같은 operation의 새 근거 도착
+  s4 --> s4: 현재 원문#183;대상으로 재관측
+  class s0 bugPath
+  class s1 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s4 repeats

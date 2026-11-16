@@ -110,7 +110,15 @@ pub(super) async fn run_watcher_terminal_token_update(ctx: WatcherTerminalTokenU
             );
             let name = tmux_session_name.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                crate::services::platform::tmux::send_keys(&name, &["/compact", "Enter"])
+                crate::services::session_host::TmuxHost
+                    .platform_input(
+                        &name,
+                        crate::services::session_host::InputSource::Control,
+                        crate::services::session_host::SubmitPayload::KeyNames(&[
+                            "/compact", "Enter",
+                        ]),
+                    )
+                    .into_output()
             })
             .await;
             // Set cooldown timestamp

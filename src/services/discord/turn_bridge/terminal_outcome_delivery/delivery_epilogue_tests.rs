@@ -22,6 +22,7 @@ use tracing_subscriber::fmt::MakeWriter;
 
 #[cfg(unix)]
 mod codex_empty_tests;
+mod o_done_reaction_tests;
 mod provider_failure_tests;
 #[cfg(all(test, unix))]
 mod recovery_retry_guard_tests;
@@ -331,6 +332,7 @@ async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
             transcript_terminal_error: false,
         },
         DeliveryEpilogueState {
+            input_marked: &mut false,
             response_sent_offset: &mut response_sent_offset,
             inflight_state: &mut stale,
             terminal_full_replay_cleanup_msg_ids: &mut terminal_full_replay_cleanup_msg_ids,

@@ -325,6 +325,11 @@ async fn empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self
         let (before_unlock, after_unlock) = fixture.unlock_observation().await;
         running.ended().await;
         drop(running);
+        // The exiting process disposes its self-fence request before launchd relaunches it.
+        let root = crate::config::runtime_root().expect("fixture runtime root");
+        let nonce = super::gateway_lease_recovery::restart_file_nonce(&root, "restart_pending")
+            .expect("self-fence publishes a restart request");
+        super::deferred_restart::identity_safe_dispose_restart_marker(&root, &nonce);
         let reacquire_started = Instant::now();
         running = fixture.backup().await;
         assert!(reacquire_started.elapsed() >= Duration::from_secs(grace_secs));
@@ -1108,14 +1113,14 @@ async fn preferred_wait_stands_down_to_standby_when_a_restart_is_requested_pg() 
 
 const RESTART_PROOF_DATABASE_ENV: &str = "AGENTDESK_RESTART_PROOF_CHILD_DATABASE";
 const RESTART_PROOF_ROOT_ENV: &str = "AGENTDESK_RESTART_PROOF_CHILD_ROOT";
+/// Set: codex is a non-preferred node in its preferred-gateway yield wait instead.
+const RESTART_PROOF_YIELD_ENV: &str = "AGENTDESK_RESTART_PROOF_CHILD_YIELD";
 const RESTART_PROOF_NONCE: &str = "20261107T022859-restart-proof-request";
 
-/// The acceptance path ends with the final provider's `exit(0)`, so it runs in a child process.
-#[tokio::test]
-async fn a_restart_requested_during_the_preferred_wait_is_persisted_within_30s_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+/// Runs `restart_proof_child` in its own process (it ends with the final provider's `exit(0)`)
+/// while the codex lease is held elsewhere, and returns the codex proof body it left.
+async fn restart_proof_from_child(yielding: bool) -> Option<String> {
+    let fixture = Fixture::new().await?;
     let holder = try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Codex)
         .await
         .unwrap()
@@ -1125,13 +1130,16 @@ async fn a_restart_requested_during_the_preferred_wait_is_persisted_within_30s_p
         "services::discord::runtime_bootstrap::gateway_handback_integration_tests::",
         "restart_proof_child"
     );
-    let started = Instant::now();
-    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+    let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"));
+    child
         .args(["--exact", test_name, "--nocapture"])
         .env(RESTART_PROOF_DATABASE_ENV, &fixture.database)
-        .env(RESTART_PROOF_ROOT_ENV, proof_root.path())
-        .output()
-        .expect("spawn restart proof child");
+        .env(RESTART_PROOF_ROOT_ENV, proof_root.path());
+    if yielding {
+        child.env(RESTART_PROOF_YIELD_ENV, "1");
+    }
+    let started = Instant::now();
+    let output = child.output().expect("spawn restart proof child");
     let elapsed = started.elapsed();
     let proof_name = format!("restart_persisted.{RESTART_PROOF_NONCE}");
     let proof = std::fs::read_dir(proof_root.path())
@@ -1144,7 +1152,7 @@ async fn a_restart_requested_during_the_preferred_wait_is_persisted_within_30s_p
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     println!(
-        "restart proof child: status={:?} elapsed_ms={}",
+        "restart proof child: yielding={yielding} status={:?} elapsed_ms={}",
         output.status,
         elapsed.as_millis()
     );
@@ -1159,9 +1167,30 @@ async fn a_restart_requested_during_the_preferred_wait_is_persisted_within_30s_p
             .any(|line| line == format!("nonce={RESTART_PROOF_NONCE}")),
         "the identity artifact must carry the request nonce: {body}"
     );
+    Some(body)
+}
+
+#[tokio::test]
+async fn a_restart_requested_during_the_preferred_wait_is_persisted_within_30s_pg() {
+    let Some(body) = restart_proof_from_child(false).await else {
+        return;
+    };
     assert!(
         body.lines().any(|line| line == "provider=codex"),
         "the provider that left the preferred wait must be the final one: {body}"
+    );
+}
+
+/// A cluster deploy's request reaches a peer in its 90s yield wait right after the peer
+/// restarted itself; the deploy clears an unacknowledged request after 20s.
+#[tokio::test]
+async fn a_restart_requested_during_the_non_preferred_yield_wait_is_persisted_within_20s_pg() {
+    let Some(body) = restart_proof_from_child(true).await else {
+        return;
+    };
+    assert!(
+        body.lines().any(|line| line == "provider=codex"),
+        "the provider that left the yield wait must be the final one: {body}"
     );
 }
 
@@ -1170,11 +1199,22 @@ async fn restart_proof_child() {
     let Ok(database) = std::env::var(RESTART_PROOF_DATABASE_ENV) else {
         return;
     };
+    let yielding = std::env::var_os(RESTART_PROOF_YIELD_ENV).is_some();
     let proof_root = std::path::PathBuf::from(std::env::var(RESTART_PROOF_ROOT_ENV).unwrap());
     let fixture = Fixture::attach(&proof_root, database)
         .await
         .expect("the parent configured PostgreSQL");
-    fixture.save_config(|config| config.cluster.instance_id = Some("home".into()));
+    if yielding {
+        // The fixture is the non-preferred "backup"; production yields for 90s.
+        fixture.save_config(|config| config.cluster.gateway_yield_grace_secs = 90);
+        sqlx::query("UPDATE worker_nodes SET status='online',capabilities=$1,last_heartbeat_at=NOW() WHERE instance_id='home'")
+            .bind(json!({"discord_gateway":{"waiting_providers":["codex"]}}))
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+    } else {
+        fixture.save_config(|config| config.cluster.instance_id = Some("home".into()));
+    }
     let shutdown_remaining = Arc::new(AtomicUsize::new(2));
     let claude = super::super::make_shared_data_for_tests_with_barrier(
         Some(fixture.pool.clone()),
@@ -1218,14 +1258,25 @@ async fn restart_proof_child() {
         )
         .await;
     });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !fixture.publish_waiter_for("codex").await {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the preferred waiter is published before its first attempt");
-    // The first attempt has failed and the loop is asleep: this request arrives late.
+    if yielding {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let diagnostics = &codex.restart.gateway_lease_diagnostics;
+            while diagnostics.projection().loop_state != "yield-wait" {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("codex enters the yield wait for the waiting preferred node");
+    } else {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !fixture.publish_waiter_for("codex").await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the preferred waiter is published before its first attempt");
+    }
+    // The wait is already running: this request arrives late.
     tokio::time::sleep(Duration::from_secs(1)).await;
     let root = crate::config::runtime_root().expect("fixture runtime root");
     std::fs::write(
@@ -1233,12 +1284,16 @@ async fn restart_proof_child() {
         format!("nonce={RESTART_PROOF_NONCE}\nsource=test\n"),
     )
     .unwrap();
+    let deadline = Duration::from_secs(if yielding { 20 } else { 30 });
     let issued = Instant::now();
-    while issued.elapsed() < Duration::from_secs(30) {
+    while issued.elapsed() < deadline {
         // The final provider's exit(0) ends this process before the deadline.
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("no final provider published restart_persisted.{RESTART_PROOF_NONCE} within 30s");
+    panic!(
+        "no final provider published restart_persisted.{RESTART_PROOF_NONCE} within {}s",
+        deadline.as_secs()
+    );
 }
 
 #[tokio::test]

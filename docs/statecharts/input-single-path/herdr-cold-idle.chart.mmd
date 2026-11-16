@@ -1,0 +1,20 @@
+---
+title: "pin 없이 공개 Idle 증거로 기존 입력 위임"
+---
+stateDiagram-v2
+  s0: pin0, 현재 준비 근거 확인
+  s1: 공개 Idle 증거 관측
+  s2: 판독 reservation 확보
+  s3: 현재성 확인, 반환 대기
+  s4: 판독 reservation 반환
+  s5: 기존 Idle driver에 위임
+  s6: 본문과 Enter 기록, 수신 대기
+  s7: 수신 증거로 한 번 정산
+  [*] --> s0
+  s0 --> s1: 공개 B1 근거 판독
+  s1 --> s2: 같은 proof 예약 또는 보류
+  s2 --> s3: 예약의 현재성 다시 확인
+  s3 --> s4: pre-key 판독 예약 반환
+  s4 --> s5: 기존 Idle 경로가 입력을 맡음
+  s5 --> s6: 기존 driver가 재검증 후 한 번 기록
+  s6 --> s7: 원문 정산

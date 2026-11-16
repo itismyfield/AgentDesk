@@ -69,11 +69,11 @@ pub(crate) use stash_tests::{FAKE_TUI as FAKE_STASH_TUI, StashChannelGuard};
 
 use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{Duration, Instant};
 
 use crate::services::platform::tmux::pane_dead_is_live;
-use crate::services::tui_input::bounded_tmux::{BoundedTmuxError, run_bounded_tmux};
+use crate::services::tui_input::bounded_tmux::BoundedTmuxError;
 
 /// Larger inputs are refused before any tmux call.
 pub(crate) const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -352,43 +352,29 @@ impl Pane {
     }
 
     fn run(&self, args: &[&str]) -> Result<Output, BoundedTmuxError> {
-        if matches!(
-            args.first(),
-            Some(&"send-keys" | &"paste-buffer" | &"if-shell")
-        ) {
-            let session = self.target.trim_start_matches('=').trim_end_matches(':');
-            crate::services::platform::tmux::session_identity::require_managed_with_program(
-                session,
-                &self.program,
-                Duration::from_secs(3),
-            )
-            .map_err(|error| {
-                BoundedTmuxError::Spawn(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    error,
-                ))
-            })?;
-        }
-        let mut command = Command::new(&self.program);
-        command.arg("-u").args(args);
-        crate::services::platform::binary_resolver::apply_runtime_path(&mut command);
-        // A fresh thread owns its runtime, so this blocks safely from any caller.
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(BoundedTmuxError::Spawn)?
-                        .block_on(run_bounded_tmux(&mut command))
-                })
-                .join()
-                .unwrap_or_else(|_| {
-                    Err(BoundedTmuxError::Spawn(std::io::Error::other(
-                        "tmux worker panicked",
-                    )))
-                })
-        })
+        crate::services::session_host::TmuxHost.run_busy(&self.program, &self.target, args)
+    }
+
+    pub(crate) fn input(
+        &self,
+        payload: crate::services::session_host::SubmitPayload<'_>,
+    ) -> crate::services::session_host::SubmitOutcome {
+        crate::services::session_host::TmuxHost.busy_input(&self.program, &self.target, payload)
+    }
+
+    pub(crate) fn input_ok(
+        &self,
+        payload: crate::services::session_host::SubmitPayload<'_>,
+    ) -> Option<String> {
+        self.input(payload)
+            .into_output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    pub(crate) fn first_key(&self) -> bool {
+        crate::services::session_host::TmuxHost.first_key()
     }
 
     pub(crate) fn ok(&self, args: &[&str]) -> Option<String> {

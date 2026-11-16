@@ -52,15 +52,6 @@ pub(crate) fn inspect(content: &str) -> Result<SnapshotRead, String> {
     Ok(SnapshotRead::Legacy(items, meta.map(Box::new)))
 }
 
-/// /clear's guard: only a parsed non-legacy object refuses; a failed read or parse lets the clear
-/// replace the file as main does.
-pub(crate) fn require_clearable(path: &Path) -> Result<(), String> {
-    match std::fs::read(path) {
-        Ok(content) => refuse_non_legacy(path, &String::from_utf8_lossy(&content)),
-        Err(_) => Ok(()),
-    }
-}
-
 /// The legacy save's guard: a missing file or a legacy one saves, but a file it cannot read is
 /// kept, so the save never replaces a snapshot nobody read.
 pub(crate) fn require_legacy_write(path: &Path) -> Result<(), String> {

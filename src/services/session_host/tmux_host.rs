@@ -5,12 +5,15 @@ use super::model::{
     HostCapabilities, HostError, HostKey, HostKind, HostLiveness, HostMutation, HostPresence,
     HostSessionRef,
 };
+use super::submit::{InputSource, SubmitPayload};
 use super::traits::InteractiveSessionHost;
 use crate::services::platform::tmux;
-use crate::services::tui_input::writer_lease;
 
-/// Thin adapter over `platform::tmux`, which stays the only tmux binary caller
-/// and owns its per-platform behaviour.
+#[cfg(unix)]
+mod fifo;
+pub(super) mod input;
+
+/// Adapter over platform probes and input executors, retaining their transport behaviour.
 pub(crate) struct TmuxHost;
 
 fn map_output(result: Result<Output, String>) -> Result<HostMutation, HostError> {
@@ -38,15 +41,81 @@ pub(crate) fn tmux_key_name(key: HostKey) -> &'static str {
 }
 
 impl TmuxHost {
+    /// Preserve the stop owner's keys and raw status/error handling.
+    pub(crate) fn interrupt_keys(&self, name: &str, keys: &[&str]) -> Result<Output, String> {
+        tmux::send_keys(name, keys)
+    }
+
+    /// Keep the legacy boolean collapse inside the platform compatibility probe.
+    pub(crate) fn legacy_has_session(&self, name: &str) -> bool {
+        tmux::has_session(name)
+    }
+
+    /// Keep the legacy bool probe, including its unbounded list-panes call.
+    pub(crate) fn legacy_has_live_pane(&self, name: &str) -> bool {
+        tmux::has_live_pane(name)
+    }
+
+    pub(crate) fn pane_liveness(&self, name: &str) -> tmux::PaneLiveness {
+        tmux::pane_liveness(name)
+    }
+
+    pub(crate) fn pane_current_path(&self, name: &str) -> Option<String> {
+        tmux::pane_current_path(name)
+    }
+
+    pub(crate) fn list_session_names(&self) -> Result<Vec<String>, String> {
+        tmux::list_session_names()
+    }
+
+    pub(crate) fn capture_raw(&self, session: &str, scroll_back: i32) -> Option<String> {
+        tmux::capture_pane(session, scroll_back)
+    }
+
+    pub(crate) fn capture_ansi(&self, session: &str, scroll_back: i32) -> Option<String> {
+        tmux::capture_pane_with_escapes(session, scroll_back)
+    }
+
+    pub(crate) fn capture_bounded(
+        &self,
+        session: &str,
+        scroll_back: i32,
+        timeout: std::time::Duration,
+    ) -> Option<String> {
+        tmux::capture_pane_timeout(session, scroll_back, timeout)
+    }
+
+    pub(crate) fn kill(&self, name: &str, reason: &str) -> bool {
+        tmux::kill_session(name, reason)
+    }
+
+    pub(crate) fn kill_output(&self, name: &str, reason: &str) -> std::io::Result<Output> {
+        tmux::kill_session_output(name, reason)
+    }
+
+    pub(crate) fn kill_output_timeout(
+        &self,
+        name: &str,
+        reason: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Output, String> {
+        tmux::kill_session_output_timeout(name, reason, timeout)
+    }
+
     /// Raw `send-keys` output, so the caller keeps tmux's exit status and stderr.
     pub(crate) fn send_host_keys(&self, session: &str, keys: &[HostKey]) -> Result<Output, String> {
-        let names: Vec<&str> = keys.iter().map(|key| tmux_key_name(*key)).collect();
-        tmux::send_keys(session, &names)
+        self.platform_input(session, InputSource::Inherited, SubmitPayload::Keys(keys))
+            .into_output()
     }
 
     /// Literal text behind the owner content fence; unheld targets run main's command.
     pub(crate) fn send_literal(&self, session: &str, text: &str) -> Result<Output, String> {
-        writer_lease::content("tmux", session, || tmux::send_literal(session, text))
+        self.platform_input(
+            session,
+            InputSource::Inherited,
+            SubmitPayload::Literal(text),
+        )
+        .into_output()
     }
 
     pub(crate) fn paste_buffer(
@@ -55,7 +124,12 @@ impl TmuxHost {
         buffer: &str,
         delete: bool,
     ) -> Result<Output, String> {
-        writer_lease::content("tmux", s, || tmux::paste_buffer(s, buffer, delete))
+        self.platform_input(
+            s,
+            InputSource::Inherited,
+            SubmitPayload::Paste { buffer, delete },
+        )
+        .into_output()
     }
 
     pub(crate) fn liveness_within(
@@ -103,7 +177,7 @@ impl InteractiveSessionHost for TmuxHost {
         if let Some(injected) = super::test_support::injected_liveness(session) {
             return injected;
         }
-        let probe = |name| tmux::pane_liveness(name).into();
+        let probe = |name| self.pane_liveness(name).into();
         session
             .legacy_name()
             .map_or(HostLiveness::ProbeError, probe)
@@ -126,7 +200,7 @@ impl InteractiveSessionHost for TmuxHost {
     }
 
     fn interrupt(&self, session: HostSessionRef<'_>) -> Result<HostMutation, HostError> {
-        self.send_keys(session, &["C-c"])
+        map_output(self.interrupt_keys(session.legacy_name()?, &["C-c"]))
     }
 
     fn capture_screen(
@@ -142,7 +216,9 @@ impl InteractiveSessionHost for TmuxHost {
         &self,
         session: HostSessionRef<'_>,
     ) -> Result<Option<PathBuf>, HostError> {
-        Ok(tmux::pane_current_path(session.legacy_name()?).map(PathBuf::from))
+        Ok(self
+            .pane_current_path(session.legacy_name()?)
+            .map(PathBuf::from))
     }
 
     fn execution_pid(&self, session: HostSessionRef<'_>) -> Result<Option<u32>, HostError> {
@@ -153,6 +229,164 @@ impl InteractiveSessionHost for TmuxHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn busy_input_preserves_the_original_target_argument() {
+        use super::super::SubmitPayload;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = crate::config::TestRuntimeRootGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("args");
+        let program = dir.path().join("tmux");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let program =
+            crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+                program,
+            );
+        let target = "==adk-original-target:";
+        TmuxHost
+            .run_busy(&program, target, &["send-keys", "-t", target, "Enter"])
+            .unwrap();
+        let original = std::fs::read_to_string(&log).unwrap();
+        TmuxHost
+            .busy_input(&program, target, SubmitPayload::Keys(&[HostKey::Enter]))
+            .into_bounded()
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(log).unwrap(), original);
+        drop(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_pid_delegation_preserves_the_lookup_for_herdr_shaped_names() {
+        use crate::services::provider_teardown::tests::test_support::FakeTmux;
+        let root = crate::config::TestRuntimeRootGuard::new();
+        for name in ["adk-pid-delegation", "42"] {
+            let fake = FakeTmux::install(name);
+            fake.run_pane(31337);
+            assert_eq!(tmux::pane_pid(name), Some(31337));
+            assert_eq!(
+                TmuxHost
+                    .execution_pid(HostSessionRef::tmux(name))
+                    .ok()
+                    .flatten(),
+                Some(31337)
+            );
+            assert!(
+                TmuxHost
+                    .execution_pid(HostSessionRef::herdr_pane(name))
+                    .is_err()
+            );
+            assert_eq!(
+                fake.take_calls(),
+                vec![format!("display-message -p -t ={name}: #{{pane_pid}}"); 2]
+            );
+        }
+        drop(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observations_keep_probe_errors_distinct_from_legacy_bool_results() {
+        use crate::services::provider_teardown::tests::test_support::FakeTmux;
+        use crate::services::session_host::legacy_collapse;
+        use crate::services::tmux_diagnostics;
+
+        let root = crate::config::TestRuntimeRootGuard::new();
+        let name = "adk-s02-observation-port";
+        let fake = FakeTmux::install(name);
+        let session = HostSessionRef::tmux(name);
+        let check = |presence: HostPresence, liveness: HostLiveness, legacy_live: bool| {
+            assert_eq!(TmuxHost.presence(session), presence);
+            assert_eq!(HostLiveness::from(TmuxHost.pane_liveness(name)), liveness);
+            assert_eq!(TmuxHost.liveness(session), liveness);
+            assert_eq!(
+                HostLiveness::from(tmux_diagnostics::tmux_session_pane_liveness(name)),
+                liveness
+            );
+            assert_eq!(
+                TmuxHost.legacy_has_session(name),
+                presence == HostPresence::Present
+            );
+            assert_eq!(
+                tmux_diagnostics::tmux_session_exists(name),
+                presence == HostPresence::Present
+            );
+            assert_eq!(TmuxHost.legacy_has_live_pane(name), legacy_live);
+            assert_eq!(legacy_collapse::tmux_live_pane_bool(name), legacy_live);
+            assert_eq!(
+                tmux_diagnostics::tmux_session_has_live_pane(name),
+                legacy_live
+            );
+            let calls = fake.take_calls();
+            assert!(!calls.is_empty());
+            let expected_target = format!("={name}:");
+            assert!(
+                calls.iter().all(|call| {
+                    let mut args = call.split_whitespace();
+                    matches!(args.next(), Some("has-session" | "list-panes"))
+                        && args.next() == Some("-t")
+                        && args.next() == Some(expected_target.as_str())
+                }),
+                "{calls:?}"
+            );
+        };
+        check(HostPresence::Present, HostLiveness::Live, true);
+        fake.mark_dead_pane();
+        check(HostPresence::Present, HostLiveness::DeadOrAbsent, false);
+        fake.mark_missing();
+        check(HostPresence::Missing, HostLiveness::DeadOrAbsent, false);
+        fake.fail_probes();
+        check(HostPresence::ProbeFailed, HostLiveness::ProbeError, false);
+        drop(fake);
+        drop(root);
+    }
+
+    #[test]
+    fn kill_methods_preserve_the_exact_audit_reason() {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(log.reopen().unwrap())
+            .finish();
+        crate::logging::test_capture::pin_callsite_interest();
+        let reasons = [
+            " bool 종료 사유 = keep spaces ",
+            " output 종료 사유 = keep spaces ",
+            " timeout 종료 사유 = keep spaces ",
+        ];
+        // Blank targets reach the platform's refusal log without spawning tmux.
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(!TmuxHost.kill("", reasons[0]));
+            assert!(
+                !TmuxHost
+                    .kill_output("", reasons[1])
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            assert!(
+                TmuxHost
+                    .kill_output_timeout("", reasons[2], std::time::Duration::from_millis(1))
+                    .is_err()
+            );
+        });
+        let logged = std::fs::read_to_string(log.path()).unwrap();
+        let observed: Vec<&str> = logged
+            .lines()
+            .filter_map(|line| line.split_once("reason=").map(|parts| parts.1))
+            .collect();
+        assert_eq!(observed, reasons, "platform audit log: {logged}");
+    }
 
     #[test]
     fn probes_are_the_platform_probes() {

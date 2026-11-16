@@ -16,7 +16,7 @@ use crate::services::provider::cancel_token_claude_interrupt::{
     herdr_stop_settlement_available,
 };
 use crate::services::provider::{CancelToken, ProviderKind};
-use crate::services::session_host::{HerdrMutation, HerdrTarget, HostKey, HostMutation};
+use crate::services::session_host::{HerdrMutation, HerdrTarget, HostMutation};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CodexStopTurnIdentity {
@@ -798,7 +798,7 @@ fn deliver(
                 return Err(SwitchOff);
             }
             attempted.store(true, Ordering::Release);
-            let result = match target.send_keys(&[HostKey::Escape]) {
+            let result = match target.interrupt() {
                 Ok(HostMutation::Confirmed) => Ok(HerdrDelivery::Sent),
                 Ok(HostMutation::Indeterminate(_)) => Ok(HerdrDelivery::Indeterminate),
                 _ => Err(Gate),

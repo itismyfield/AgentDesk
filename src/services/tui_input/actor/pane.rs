@@ -2,10 +2,9 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
-use super::super::bounded_tmux::{BoundedTmuxError, run_with_budget};
+use super::super::bounded_tmux::BoundedTmuxError;
 use super::gate::{PaneVerdict, judge_pane, own_draft};
 use crate::services::tui_o::shadow::ShadowProvider;
 
@@ -94,48 +93,26 @@ impl TmuxPane {
         self.test_nonce = Some(nonce.into());
     }
 
-    fn command(&self, args: &[&str]) -> std::io::Result<Command> {
-        let mut command =
-            crate::services::platform::binary_resolver::runtime_command(&self.program)?;
-        command.arg("-u").args(args);
-        Ok(command)
-    }
-
     fn target(&self) -> String {
         format!("={}:", self.session)
     }
 
     fn run(&self, args: &[&str]) -> Result<std::process::Output, BoundedTmuxError> {
-        if matches!(args.first(), Some(&"send-keys" | &"paste-buffer")) {
-            crate::services::platform::tmux::session_identity::require_managed_with_program(
-                &self.session,
-                &self.program,
-                self.budget,
-            )
-            .map_err(|error| {
-                BoundedTmuxError::Spawn(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    error,
-                ))
-            })?;
-        }
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    let mut command = self.command(args).map_err(BoundedTmuxError::Spawn)?;
-                    tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(BoundedTmuxError::Spawn)?
-                        .block_on(run_with_budget(&mut command, self.budget))
-                })
-                .join()
-                .unwrap_or_else(|_| {
-                    Err(BoundedTmuxError::Spawn(std::io::Error::other(
-                        "tmux worker panicked",
-                    )))
-                })
-        })
+        crate::services::session_host::TmuxHost.run_actor(
+            &self.program,
+            &self.session,
+            self.budget,
+            args,
+        )
+    }
+
+    fn input(
+        &self,
+        payload: crate::services::session_host::SubmitPayload<'_>,
+    ) -> Result<std::process::Output, BoundedTmuxError> {
+        crate::services::session_host::TmuxHost
+            .actor_input(&self.program, &self.session, self.budget, payload)
+            .into_bounded()
     }
 
     pub fn for_provider(session: &str, provider: ShadowProvider) -> Result<Self, String> {
@@ -170,23 +147,18 @@ impl TmuxPane {
         let buffer = format!("agentdesk-input-{}", uuid::Uuid::new_v4());
         let path = file.path().to_string_lossy().into_owned();
         // Loading a buffer never touches the pane, so every failure here is NotSent.
-        match self.run(&["load-buffer", "-b", &buffer, &path]) {
+        match self.input(crate::services::session_host::SubmitPayload::LoadFile {
+            buffer: &buffer,
+            path: &path,
+        }) {
             Ok(output) if output.status.success() => {}
             Ok(output) => return SendOutcome::NotSent(stderr_of(&output)),
             Err(error) => return SendOutcome::NotSent(error.to_string()),
         }
-        let target = self.target();
-        let paste = [
-            "paste-buffer",
-            "-p",
-            "-r",
-            "-d",
-            "-b",
-            &buffer,
-            "-t",
-            &target,
-        ];
-        match self.run(&paste) {
+        match self.input(crate::services::session_host::SubmitPayload::Paste {
+            buffer: &buffer,
+            delete: true,
+        }) {
             Ok(output) if output.status.success() => {}
             // Unsuccessful paste can follow partial mutation; never infer absence from exit status.
             Ok(output) => {
@@ -207,7 +179,9 @@ impl TmuxPane {
             return SendOutcome::Indeterminate("own draft or modal changed".into());
         }
         // The paste landed, so any Enter failure leaves our text in the composer.
-        match self.run(&["send-keys", "-t", &target, "Enter"]) {
+        match self.input(crate::services::session_host::SubmitPayload::Keys(&[
+            crate::services::session_host::HostKey::Enter,
+        ])) {
             Ok(output) if output.status.success() => SendOutcome::Sent,
             Ok(output) => SendOutcome::Indeterminate(stderr_of(&output)),
             Err(error) => SendOutcome::Indeterminate(error.to_string()),

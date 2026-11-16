@@ -270,10 +270,8 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
                     // before the kill so we only tear down the same
                     // dead-paned session we capture-paned.
                     if host_gate::tmux_dead_pane_present(&provider, channel_id, &sess, &host) {
-                        crate::services::platform::tmux::kill_session(
-                            &sess,
-                            "watcher cleanup: dead session after turn",
-                        );
+                        crate::services::session_host::TmuxHost
+                            .kill(&sess, "watcher cleanup: dead session after turn");
                     }
                     // NOTE: jsonl/FIFO/etc. cleanup intentionally NOT done here.
                     // `claude.rs::start_claude` calls

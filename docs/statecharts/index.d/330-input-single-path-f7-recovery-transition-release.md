@@ -1,0 +1,2 @@
+key: 330-input-single-path-f7-recovery-transition-release
+| `input-single-path` F7 recovery and transition release (#7676) | `1c19e5058f` + F7 repair | `F7RecoveryMain` and `F7TransitionMain`: a refused input is not woken after active reconcile or /resume·clear release; `F7StandbyWake`: standby alone injects | fixed recovery wakes adopted owners; /resume·clear completion releases the guard before waking. `F7ShortTransition` and `F7ShortTransitionMain` keep short intake/Herdr/O-writer locks unchanged: the original is delivered once after A ends, with no loss. |

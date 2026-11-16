@@ -1,0 +1,2 @@
+key: 540-input-single-path-session-lifecycle-idle-readiness-and-clear
+| input-single-path / session-lifecycle Idle readiness and clear Pending (#8080) | d0d8d711b8be5668aacf90a7cd7c362e15ef7ec0 | BeforeNarrow, compact-no-completion, clear-pending-before and guard mutants are expected RED | Latest clear-Held refinement: checker81 cfg/274 calls, GREEN40/expected RED41/unexpected0; clear-Held before RED/after GREEN. Historical direct TLC62 cfg/226 calls. [Report](input-single-path/transcript-readiness.report.md), [design](input-single-path/transcript-readiness.design.md) |

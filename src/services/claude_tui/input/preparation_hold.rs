@@ -15,6 +15,8 @@ pub(crate) struct PreparationHold {
     pub(crate) detail: String,
     /// A modal refused the pane at the capture before any key; legacy callers read the reason.
     pub(crate) modal: bool,
+    /// The readiness budget ended with nothing in flight to supply the evidence: no look clears it.
+    pub(crate) unproven: bool,
 }
 
 impl PreparationHold {
@@ -29,6 +31,7 @@ impl PreparationHold {
             phase: EffectPhase::BeforePayload,
             detail,
             modal: false,
+            unproven: false,
         }
     }
 
@@ -43,6 +46,15 @@ impl PreparationHold {
             phase: EffectPhase::PayloadUncertain,
             detail,
             modal: false,
+            unproven: false,
+        }
+    }
+
+    /// The readiness wait timed out; `unproven` when the source sat idle and unmoved all along.
+    pub(crate) fn evidence_pending(session: &str, detail: String, unproven: bool) -> Self {
+        Self {
+            unproven,
+            ..Self::before(session, "idle_evidence_pending", detail)
         }
     }
 
@@ -79,6 +91,7 @@ pub(super) fn idle_stash_stopped(
             phase: EffectPhase::BeforePayload,
             detail: "claude tui idle preparation held before payload".into(),
             modal,
+            unproven: false,
         }),
         other => other,
     }

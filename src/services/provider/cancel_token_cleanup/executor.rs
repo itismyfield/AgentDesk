@@ -368,7 +368,7 @@ impl CancelToken {
             );
             let reason = format!("explicit cleanup via {cancel_source}");
             crate::services::tmux_diagnostics::record_tmux_exit_reason(name, &reason);
-            let killed = crate::services::platform::tmux::kill_session(name, &reason);
+            let killed = crate::services::session_host::TmuxHost.kill(name, &reason);
             if killed {
                 if let Some(reason_code) = termination_reason {
                     crate::services::termination_audit::record_termination_for_tmux(
@@ -413,6 +413,11 @@ thread_local! {
 #[cfg(test)]
 thread_local! {
     static REAL_PID_KILL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn real_pid_kill_enabled_for_test() -> bool {
+    REAL_PID_KILL.with(std::cell::Cell::get)
 }
 
 /// Runs `test` with this thread's PID kills sent for real instead of counted.

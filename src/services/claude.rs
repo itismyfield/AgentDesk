@@ -1,5 +1,6 @@
 #[cfg(unix)]
 use crate::services::claude_tui::guarded_outcome::{self, OwnedWarmOutcome, SubmissionError};
+use crate::services::process::reaping::CommandReapExt;
 pub(crate) mod capability_probe;
 mod process_session_launch;
 pub(crate) use process_session_launch::execute_streaming_local_process;
@@ -880,9 +881,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
         ProviderKind::Claude,
         report_channel_id,
     )?;
-    crate::services::provider_auth_profile::apply_overlay_to_command(&mut command, &overlay);
+    crate::services::provider_auth_profile::apply_overlay_to_command(&mut command, &overlay)?;
 
-    let mut child = command.spawn().map_err(|e| {
+    let mut child = command.spawn_reaping().map_err(|e| {
         debug_log(&format!(
             "ERROR: Failed to spawn after {:?}: {}",
             spawn_start.elapsed(),
@@ -898,6 +899,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
     session_prompt::claude_args(&args);
     register_child_pid(cancel_token.as_deref(), child.id());
+    child.track_cancel_token(cancel_token.as_ref());
     let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "claude-direct-stream");
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -1721,7 +1723,7 @@ fn execute_streaming_local_tui_tmux(
         tmux_session_name,
     )?;
     let auth_env_lines =
-        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay)?;
     // The account's own home holds its sessions; the selector and the launch context read it.
     let claude_home = auth_overlay.home.as_deref();
     let session_exists = host_gate::session_exists(tmux_session_name)?;
@@ -2412,7 +2414,7 @@ fn execute_streaming_local_tmux(
         tmux_session_name,
     )?;
     let auth_env_lines =
-        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay)?;
     let session_exists = host_gate::session_exists(tmux_session_name)?;
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
@@ -2636,6 +2638,10 @@ fn execute_streaming_local_tmux(
     // Get paths
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
+    #[cfg(test)]
+    let exe = std::env::var_os("ADK_TEST_PROCESS_WRAPPER_EXE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(exe);
     let (claude_bin, resolution) = resolve_claude_binary()?;
 
     // Build wrapper command via script file to avoid tmux "command too long" errors.
@@ -2763,8 +2769,6 @@ fn send_followup_to_tmux(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     tmux_session_name: &str,
 ) -> Result<ClaudeFollowupResult, String> {
-    use std::io::Write;
-
     debug_log(&format!(
         "=== send_followup_to_tmux: {} ===",
         tmux_session_name
@@ -2787,17 +2791,13 @@ fn send_followup_to_tmux(
     // Publish before the prompt is reachable; mark only after a successful flush.
     let write_result =
         submit_claude_wrapper_followup(cancel_token.as_deref(), tmux_session_name, || {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(input_fifo_path)
-                .map_err(|e| format!("Failed to open input FIFO: {}", e))
-                .and_then(|mut fifo| {
-                    writeln!(fifo, "{}", msg)
-                        .map_err(|e| format!("Failed to write to input FIFO: {}", e))?;
-                    fifo.flush()
-                        .map_err(|e| format!("Failed to flush input FIFO: {}", e))?;
-                    Ok(())
-                })
+            crate::services::session_host::TmuxHost
+                .submit_wrapper_frame(
+                    input_fifo_path,
+                    crate::services::session_host::WrapperFrame::Line(&msg),
+                    false,
+                )
+                .into_wrapper()
         });
 
     if let Err(e) = write_result {

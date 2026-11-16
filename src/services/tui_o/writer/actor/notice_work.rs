@@ -10,6 +10,9 @@ use crate::services::tui_o::store::ledger::input_notices::{
 use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState};
 use sha2::Digest;
 
+#[cfg(test)]
+thread_local! { static EVALUATIONS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) }; }
+
 fn notice(item: &Derived) -> Option<&PieceWork> {
     match item {
         Derived::Piece(piece) if piece.unit_key.kind == UnitKind::InputNotice => Some(piece),
@@ -166,6 +169,47 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .is_ok()
     }
 
+    // Settle only the unprepared piece derived from this exact below-floor record.
+    fn exclude_floored_notice(&mut self, evidence: &NoticeEvidence) -> Result<(), Step> {
+        if !super::super::input_notices::evidence::has_frozen_record_boundary(
+            self.writer.store().ledger().input_notices(),
+            evidence,
+        ) {
+            return Ok(());
+        }
+        let key = self
+            .owed
+            .iter()
+            .filter_map(notice)
+            .find(|piece| {
+                piece.index == 0
+                    && piece.unit_key.channel_id == self.writer.channel()
+                    && evidence.unit_key.as_ref() == Some(&piece.unit_key)
+                    && evidence.payload.as_ref() == Some(&piece.payload)
+                    && evidence.origin.as_ref() == piece.notice_origin.as_ref()
+                    && evidence
+                        .origin
+                        .as_ref()
+                        .is_some_and(|origin| origin.record == evidence.record)
+            })
+            .map(|piece| piece.unit_key.clone());
+        if let Some(unit_key) = key
+            && self
+                .writer
+                .store()
+                .ledger()
+                .latest_piece(&unit_key, 0)
+                .is_none()
+            && self.writer.store().ledger().excluded(&unit_key).is_none()
+        {
+            self.writer.record(LedgerEntry::Excluded {
+                unit_key,
+                reason: "input_notice_migration_floor".into(),
+            })?;
+        }
+        Ok(())
+    }
+
     pub(super) fn persist_notice_evidence(&mut self) -> Vec<UnitKey> {
         if !self.deriver.input_notices_enabled() || self.writer.is_stopped() {
             return Vec::new();
@@ -176,6 +220,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 self.writer.store().ledger().input_notices(),
                 &evidence,
             ) {
+                if self.exclude_floored_notice(&evidence).is_err() {
+                    break;
+                }
                 continue;
             }
             if let Some(key) = &evidence.unit_key {
@@ -239,6 +286,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         if !self.deriver.input_notices_enabled() || self.writer.is_stopped() {
             return;
         }
+        let changed = self.changed_notices();
+        if changed.is_empty() {
+            return;
+        }
         let mut pending: Vec<_> = self
             .owed
             .iter()
@@ -256,15 +307,21 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let evidence: Vec<_> = state
             .evidence
             .iter()
-            .filter(|(_, e)| e.unit_key.as_ref().is_none_or(|k| !settled(ledger, k)))
-            .map(|(_, e)| e.clone())
+            .filter(|(id, e)| changed.contains(*id) && !state.terminal(ledger, id, e))
+            .map(|(_, e)| {
+                #[cfg(test)]
+                EVALUATIONS.with(|c| {
+                    let (work, logs) = c.get();
+                    c.set((work + 1, logs));
+                });
+                e.clone()
+            })
             .collect();
         let mut evidence = evidence;
-        let ids: HashSet<_> = evidence
-            .iter()
-            .map(|e| (e.record.source.clone(), e.record.start, e.record.end))
-            .collect();
-        self.writer.notice_pending.retain(|id, _| ids.contains(id));
+        evidence.retain(|e| !self.settle_notice(e));
+        if self.writer.is_stopped() {
+            return;
+        }
         for evidence in &mut evidence {
             let record = CapturedRecord {
                 start: evidence.record.start,
@@ -290,9 +347,32 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         }
         let mut owners = std::mem::take(&mut self.writer.notice_owners);
         owners.refresh(self.writer.store());
+        let mut cache = std::mem::take(&mut self.writer.notice_cache);
+        cache.track_contexts(
+            &owners,
+            &changed,
+            self.writer.store().ledger().input_notices(),
+        );
+        self.writer.notice_cache = cache;
         self.writer.notice_owners = owners;
-        let (mut eligible, mut deferred) = (Vec::new(), Vec::new());
+        let mut eligible = Vec::new();
+        let mut deferred: Vec<_> = self
+            .writer
+            .store()
+            .ledger()
+            .input_notices()
+            .evidence
+            .iter()
+            .filter(|(id, _)| !changed.contains(*id))
+            .filter_map(|(_, e)| e.unit_key.clone())
+            .collect();
         for evidence in evidence {
+            if self.settle_notice(&evidence) {
+                continue;
+            }
+            if self.writer.is_stopped() {
+                return;
+            }
             let id = (
                 evidence.record.source.clone(),
                 evidence.record.start,
@@ -327,7 +407,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             self.writer.notice_owners = owners;
             match admission {
                 Ok(()) => {
-                    self.writer.notice_pending.remove(&id);
                     eligible.push(piece);
                 }
                 Err(NoticeRefusal::Store(detail)) => {
@@ -389,8 +468,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         };
         let ledger = self.writer.store().ledger();
         self.owed.retain(|item| {
-            notice(item)
-                .is_none_or(|p| ready.contains(&p.unit_key) && !settled(ledger, &p.unit_key))
+            notice(item).is_none_or(|p| {
+                let touched = p.notice_origin.as_ref().is_none_or(|o| {
+                    changed.contains(&(o.record.source.clone(), o.record.start, o.record.end))
+                });
+                (!touched || ready.contains(&p.unit_key)) && !settled(ledger, &p.unit_key)
+            })
         });
         let mut queued: HashSet<_> = self
             .owed
@@ -406,16 +489,27 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 self.owed.push_back(Derived::Piece(piece));
             }
         }
+        self.writer
+            .notice_missing
+            .retain(|key| queued.contains(key));
     }
 
     fn defer_notice(&mut self, id: (SourceId, u64, u64), reason: &str) {
+        if reason != "registration_source_mismatch" {
+            let transient = self.writer.notice_owners.transient(&id.0);
+            self.writer.notice_cache.retry(&id, transient);
+        }
         if self
             .writer
             .notice_pending
             .insert(id.clone(), reason.into())
-            .as_deref()
-            != Some(reason)
+            .is_none()
         {
+            #[cfg(test)]
+            EVALUATIONS.with(|c| {
+                let (work, logs) = c.get();
+                c.set((work, logs + 1));
+            });
             let channel = self.writer.store().init().channel;
             tracing::info!(channel, record = ?id, reason, "[tui_o] input notice remains pending");
         }
@@ -445,7 +539,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let mut counted = queued;
         let state = ledger.input_notices();
         (state.evidence.iter())
-            .filter(|(id, _)| migration || !state.unresolved.contains_key(*id))
+            .filter(|(id, e)| {
+                !state.terminal(ledger, id, e) && (migration || !state.unresolved.contains_key(*id))
+            })
             .map(|(_, e)| e)
             .filter(|e| match &e.unit_key {
                 Some(key) => !settled(ledger, key) && counted.insert(key.clone()),

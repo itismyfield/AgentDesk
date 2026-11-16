@@ -1,6 +1,8 @@
 //! Current-source Idle readiness; external Busy injection keeps its own entry path.
 mod clear;
 pub(crate) mod compact;
+#[cfg(unix)]
+pub(crate) use source::adopt_awaiting_clear;
 mod dialog;
 mod evidence;
 pub(crate) mod idle;
@@ -32,6 +34,21 @@ struct Entry {
     recovery: Option<(u64, DateTime<Utc>)>,
     file: Option<(u64, u64)>,
     high_water: u64,
+    /// A resume start's transcript length and launch time; its history is no turn of this run.
+    resumed: Option<(u64, DateTime<Utc>)>,
+}
+impl Entry {
+    /// The accepted start no input of ours has consumed yet.
+    fn start_open(&self) -> bool {
+        self.start && !self.submitted && self.pending.is_none()
+    }
+    /// The resumed start still admits its first input: only metadata followed it.
+    fn resumed_quiet(&self, tail: &evidence::Tail) -> bool {
+        self.start_open()
+            && self
+                .resumed
+                .is_some_and(|(floor, launched)| tail.quiet_from(floor, launched))
+    }
 }
 type FileKey = (PathBuf, (u64, u64), Option<String>);
 #[derive(Default)]
@@ -63,6 +80,8 @@ pub(crate) struct Proof {
     stamp: Option<Stamp>,
     revision: u64,
     clear: Option<clear::Evidence>,
+    /// Rests on a resume start alone: the transcript's terminal belongs to an earlier run.
+    resumed: bool,
 }
 pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
     let source = Source::current(session, path)?;
@@ -80,12 +99,12 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
             &source.path,
         ) == crate::services::tui_turn_state::TuiTurnState::Idle;
     let mut state = ledger();
-    // Keep ordinary Running observation side-effect-free; only our completed control can differ.
+    // Keep ordinary Running observation side-effect-free; only our completed control or an
+    // unconsumed resume start, whose history says nothing of this run, can differ.
     if !native_idle
-        && state
-            .entries
-            .get(&source)
-            .is_none_or(|entry| entry.compact_done.is_none())
+        && state.entries.get(&source).is_none_or(|entry| {
+            entry.compact_done.is_none() && !(entry.start_open() && entry.resumed.is_some())
+        })
     {
         return None;
     }
@@ -170,7 +189,7 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
                 && compact::completion::read(&source.path, &done.floor, &source.native, true)
                     .is_some()
         });
-    let ready = compact_ready
+    let settled = compact_ready
         || (native_idle
             && entry.compact_ticket.is_none()
             && match &tail {
@@ -196,21 +215,16 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
                         || (tail.end == End::Summary
                             && final_stop.is_some_and(|floor| tail.activity <= floor));
                     (terminal && recovered && after_pending && after_continuation)
-                        || (entry.start
-                            && !entry.submitted
-                            && entry.pending.is_none()
-                            && tail.empty
-                            && blocked.is_none())
+                        || (entry.start_open() && tail.empty && blocked.is_none())
                 }
-                None => {
-                    entry.start
-                        && !entry.submitted
-                        && entry.pending.is_none()
-                        && entry.file.is_none()
-                        && !source.path.exists()
-                }
+                None => entry.start_open() && entry.file.is_none() && !source.path.exists(),
             });
-    if !ready {
+    // A resumed session idles at its composer whatever its old history ends with.
+    let resumed = !settled
+        && entry.compact_ticket.is_none()
+        && blocked.is_none()
+        && tail.as_ref().is_some_and(|tail| entry.resumed_quiet(tail));
+    if !settled && !resumed {
         return None;
     }
     if entry.pending.take().is_some() {
@@ -221,11 +235,81 @@ pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
         stamp: tail.map(|t| t.stamp),
         revision: entry.revision,
         clear,
+        resumed,
     };
     drop(state);
     (Source::current(session, path).as_ref() == Some(&proof.source)
         && clear::current(&proof.source) == Some(proof.clear.clone()))
     .then_some(proof)
+}
+/// A wait's first look at its source, kept to tell at the budget's end whether anything moved.
+pub(crate) struct Watched {
+    session: String,
+    path: Option<PathBuf>,
+    seen: Option<(Source, Option<Stamp>)>,
+}
+pub(crate) fn watched(session: &str, path: Option<&Path>) -> Watched {
+    let seen = Source::current(session, path).map(|source| {
+        let stamp = Stamp::read(&source.path);
+        (source, stamp)
+    });
+    Watched {
+        session: session.into(),
+        path: path.map(Path::to_path_buf),
+        seen,
+    }
+}
+impl Watched {
+    /// The budget ended on the same idle bytes with no turn, control or fence open and still no
+    /// proof: only new activity in the pane can make this source ready, so no later look helps.
+    pub(crate) fn unproven(&self) -> bool {
+        let Some((source, stamp)) = &self.seen else {
+            return false;
+        };
+        let path = self.path.as_deref();
+        if observe(&self.session, path).is_some()
+            || Source::current(&self.session, path).as_ref() != Some(source)
+            || clear::current(source).is_none()
+        {
+            return false;
+        }
+        let tail = evidence::read(&source.path);
+        if tail.as_ref().map(|tail| &tail.stamp) != stamp.as_ref()
+            || Stamp::read(&source.path) != *stamp
+        {
+            return false;
+        }
+        let running = tail.as_ref().is_some_and(|tail| {
+            tail.native
+                .as_deref()
+                .is_some_and(|native| native != source.native)
+                || crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(
+                    &source.path,
+                ) != crate::services::tui_turn_state::TuiTurnState::Idle
+        });
+        if running {
+            return false;
+        }
+        let state = ledger();
+        let fenced = [source.nonce.clone(), None].into_iter().any(|nonce| {
+            state
+                .unread_continuations
+                .contains(&(source.path.clone(), nonce.clone()))
+                || stamp.as_ref().is_some_and(|stamp| {
+                    state.continuations.contains_key(&(
+                        source.path.clone(),
+                        stamp.file,
+                        nonce.clone(),
+                    ))
+                })
+        });
+        !fenced
+            && state.entries.get(source).is_some_and(|entry| {
+                entry.pending.is_none()
+                    && entry.compact_ticket.is_none()
+                    && entry.compact_done.is_none()
+            })
+    }
 }
 pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
     let current = observe(&proof.source.session, Some(&proof.source.path))?;
@@ -236,9 +320,18 @@ pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
     {
         return None;
     }
+    if !clear::claim(&proof.source, proof.clear.as_ref()) {
+        return None;
+    }
     let mut state = ledger();
-    let entry = state.entries.get_mut(&proof.source)?;
+    let Some(entry) = state.entries.get_mut(&proof.source) else {
+        drop(state);
+        clear::release(&proof.source, proof.clear.as_ref());
+        return None;
+    };
     if entry.revision != proof.revision || entry.pending.is_some() {
+        drop(state);
+        clear::release(&proof.source, proof.clear.as_ref());
         return None;
     }
     entry.revision += 1;
@@ -279,6 +372,7 @@ impl Reservation {
 
     /// Only a known pre-key refusal releases a local reservation; uncertainty stays fenced.
     pub(crate) fn not_sent(self) {
+        let mut released = false;
         let mut state = ledger();
         if let Some(entry) = state.entries.get_mut(&self.source)
             && entry
@@ -287,7 +381,12 @@ impl Reservation {
         {
             entry.pending = None;
             entry.revision += 1;
+            released = true;
             changed(&mut state);
+        }
+        drop(state);
+        if released {
+            clear::release(&self.source, self.clear.as_ref());
         }
     }
     pub(crate) fn sent(self) {
@@ -351,6 +450,10 @@ pub(crate) fn note_hook(
             }
         }
     }
+    #[cfg(unix)]
+    if *kind == HookEventKind::SessionStart && payload["source"] == "clear" {
+        source::note_clear(context, published, native, &path);
+    }
     let mut state = ledger();
     if *kind == HookEventKind::SessionStart {
         if let (Some(ctx), Some(at)) = (context, published)
@@ -387,8 +490,13 @@ pub(crate) fn note_hook(
             state.entries.retain(|old, _| {
                 old.session != source.session || old.nonce != source.nonce || old == &source
             });
+            let resumed = (payload["source"] == "resume").then(|| {
+                let floor = Stamp::read(&source.path).map_or(0, |stamp| stamp.len);
+                (floor, ctx.created_at)
+            });
             let entry = state.entries.entry(source).or_default();
             entry.start = true;
+            entry.resumed = resumed;
             entry.clear_start = payload["source"] == "clear";
             entry.compact_done = None;
             entry.recovery = None;
@@ -547,14 +655,28 @@ fn watch(session: &str, path: Option<&Path>, draft_required: bool) {
         let session = session.to_owned();
         let path = path.map(Path::to_path_buf);
         super::owner_input::record_preparation_watch(Box::new(move || {
-            if observe(&session,path.as_deref()).is_some()
-                && (!draft_required || super::host_input::observe_draft(&session).as_deref()
-                    .is_some_and(|capture| empty_draft(capture)
-                        && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(capture))) {
+            if observe(&session, path.as_deref()).is_some()
+                && super::host_input::observe_draft(&session)
+                    .as_deref()
+                    .is_some_and(|capture| {
+                        !idle::focus_modal(capture)
+                            && (empty_draft(capture)
+                                || (!draft_required
+                                    && super::busy_inject::screen::parkable(capture)))
+                    })
+            {
                 super::busy_inject::Screen::Ready
-            } else { super::busy_inject::Screen::Unknown }
+            } else {
+                super::busy_inject::Screen::Unknown
+            }
         }));
     }
     #[cfg(not(unix))]
     let _ = (session, path, draft_required);
 }
+
+#[cfg(all(test, unix))]
+pub(crate) use source::CLEAR_AFTER_PUBLICATION;
+
+#[cfg(unix)]
+pub(crate) use source::clear_wakeable;

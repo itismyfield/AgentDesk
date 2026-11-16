@@ -113,6 +113,9 @@ fn env_var_value(name: &str) -> Option<String> {
 }
 
 fn memento_runtime_config() -> Option<MementoRuntimeConfig> {
+    if crate::config::test_instance::requested() {
+        return None;
+    }
     let config = runtime_memory_backend_config()?;
     let endpoint = normalize_memento_endpoint(&config.mcp.endpoint);
     let access_key_env = config.mcp.access_key_env.trim().to_string();
@@ -312,4 +315,36 @@ pub(crate) async fn refresh_backend_health(reason: &str) -> MemoryBackendRuntime
     );
 
     snapshot
+}
+
+#[cfg(all(test, unix))]
+mod instance_tests {
+    use super::*;
+
+    #[test]
+    fn test_instance_memento_startup_probe_never_connects_after_configuration_drift() {
+        super::super::memento::instance_tests::with_configured_memento(
+            concat!(
+                module_path!(),
+                "::test_instance_memento_startup_probe_never_connects_after_configuration_drift"
+            ),
+            |listener, _root| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                assert!(matches!(
+                    runtime.block_on(probe_memento()),
+                    ProbeOutcome::Unconfigured
+                ));
+                let snapshot = runtime.block_on(refresh_backend_health("synthetic-startup"));
+                assert!(!snapshot.memento.configured);
+                assert!(!snapshot.memento.active);
+                assert_eq!(
+                    listener.accept().unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+            },
+        );
+    }
 }

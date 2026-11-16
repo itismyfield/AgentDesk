@@ -945,6 +945,7 @@ pub(super) async fn run_terminal_outcome_delivery(
 
         epilogue_response = Some(delivery_response);
     }
+    let mut input_marked = false;
     if let Some(delivery_response) = epilogue_response {
         handle_delivery_epilogue(
             DeliveryEpilogueMessage::PostCommit,
@@ -985,6 +986,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 transcript_terminal_error: ctx.transcript_terminal_error,
             },
             DeliveryEpilogueState {
+                input_marked: &mut input_marked,
                 response_sent_offset: &mut response_sent_offset,
                 inflight_state: &mut inflight_state,
                 terminal_full_replay_cleanup_msg_ids: &mut terminal_full_replay_cleanup_msg_ids,
@@ -994,6 +996,22 @@ pub(super) async fn run_terminal_outcome_delivery(
             },
         )
         .await;
+    }
+    // O posts this answer; mark its input only if the epilogue left it unmarked.
+    #[cfg(unix)]
+    if let Some(user_msg_id) = user_msg_id
+        && !input_marked
+        && completion_proof::ran_to_end(
+            &ctx,
+            &inflight_state,
+            preserve_inflight_for_cleanup_retry
+                || auto_retry.queued()
+                || busy_requeue_outcome.is_some()
+                || claude_tui_busy_requeue_pending,
+        )
+    {
+        let done = super::super::outbound::completed_turn_ledger::o_pending::mark_done;
+        done(&shared_owned, &inflight_state, user_msg_id).await;
     }
     // A terminal answer without a busy requeue unties the card so no later turn edits it; any
     // spent retries stay with the input.

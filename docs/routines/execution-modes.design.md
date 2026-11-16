@@ -533,6 +533,6 @@ PR1은 P2-C/H의 새 mode/incident 기능을 선행 구현하지 않는다. 현�
 
 <!-- doc-path-refs: proposed src/services/routines/prejudge.rs -->
 
-<!-- doc-path-refs: proposed src/services/discord/router/message_handler/provider_dispatch/owner_input/busy_target.rs src/services/discord/router/message_handler/intake_turn/owned_busy.rs -->
+<!-- doc-path-refs: proposed src/services/discord/router/message_handler/provider_dispatch/owner_input/busy_target.rs -->
 
 <!-- doc-path-refs: proposed src/services/routines/discord_log/failure_escalation.rs -->

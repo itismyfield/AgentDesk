@@ -196,8 +196,8 @@ async fn provider_failure_notice_replace_failure_is_not_a_delivery() {
     }
 }
 
-/// O's own answer, and an errored turn whose body is O's native text rather than the bridge
-/// notice, stay O's: the bridge writes nothing and marks nothing failed. Legacy answers are done.
+/// O's answer and an errored turn's native O body stay O's: the bridge writes nothing and marks
+/// nothing failed. An answered turn is done on both owners; the errored one is not.
 #[tokio::test]
 async fn answers_and_native_bodies_keep_their_owner_and_success_marks() {
     for (o, transport_error) in [(true, false), (true, true), (false, false)] {
@@ -220,7 +220,12 @@ async fn answers_and_native_bodies_keep_their_owner_and_success_marks() {
                 .filter(|c| **c != DriverCall::Delete)
                 .count();
             assert_eq!(writes, 0, "{label}: {:?}", seen.calls);
-            assert!(seen.added.is_empty(), "{label}: {:?}", seen.added);
+            let done = if transport_error {
+                &[][..]
+            } else {
+                &['✅'][..]
+            };
+            assert_eq!(seen.added, done, "{label}");
         } else {
             assert_eq!(seen.bodies.len(), 1, "{label}");
             assert_eq!(seen.added, ['✅'], "{label}");

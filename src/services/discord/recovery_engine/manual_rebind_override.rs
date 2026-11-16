@@ -109,6 +109,7 @@ fn validate_output_path(provider: &ProviderKind, output_path: &str) -> Result<St
     if output_path.is_empty() {
         return Err("output_path override must not be empty".to_string());
     }
+    crate::config::test_instance::environment::validate_path(Path::new(output_path))?;
     let canonical = std::fs::canonicalize(output_path)
         .map_err(|_| "output_path override must exist".to_string())?;
     let metadata =
@@ -159,6 +160,14 @@ fn allowed_output_roots(provider: &ProviderKind) -> Vec<PathBuf> {
 }
 
 fn claude_projects_dir_candidates() -> Vec<PathBuf> {
+    if crate::config::test_instance::requested() {
+        return crate::config::test_instance::environment::provider_home("claude")
+            .ok()
+            .flatten()
+            .map(|home| home.join("projects"))
+            .into_iter()
+            .collect();
+    }
     let mut roots = Vec::new();
     if let Some(config_dir) =
         std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty())
@@ -254,6 +263,57 @@ pub(super) async fn upsert_rebind_session_id_override(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_instance_manual_rebind_rejects_additional_default_home() {
+        crate::services::provider_auth_profile::instance_env_tests::with_instance(
+            concat!(
+                module_path!(),
+                "::test_instance_manual_rebind_rejects_additional_default_home"
+            ),
+            || {
+                let instance = crate::config::test_instance::current().unwrap().unwrap();
+                let named = instance
+                    .root
+                    .join("home/.adk/profiles/claude/test-claude/projects");
+                let default = instance.root.join("home/.claude/projects");
+                assert_eq!(claude_projects_dir_candidates(), [named.clone()]);
+                for directory in [&named, &default] {
+                    std::fs::create_dir_all(directory).unwrap();
+                    std::fs::write(
+                        directory.join("c48f4954-32b9-4d48-b2eb-bcf7eb2a35a1.jsonl"),
+                        b"{}\n",
+                    )
+                    .unwrap();
+                }
+                let named = named.join("c48f4954-32b9-4d48-b2eb-bcf7eb2a35a1.jsonl");
+                let default = default.join("c48f4954-32b9-4d48-b2eb-bcf7eb2a35a1.jsonl");
+                assert!(
+                    ManualRebindOverrides::validated(&ProviderKind::Claude, named.to_str(), None)
+                        .is_ok()
+                );
+                assert!(
+                    ManualRebindOverrides::validated(&ProviderKind::Claude, default.to_str(), None)
+                        .is_err()
+                );
+                let projects = named.parent().unwrap();
+                let saved = instance.root.join("owned-claude-projects");
+                std::fs::rename(projects, &saved).unwrap();
+                std::os::unix::fs::symlink(&saved, projects).unwrap();
+                assert!(
+                    ManualRebindOverrides::validated(&ProviderKind::Claude, named.to_str(), None)
+                        .is_err()
+                );
+                std::fs::remove_file(projects).unwrap();
+                std::fs::rename(&saved, projects).unwrap();
+                assert!(
+                    ManualRebindOverrides::validated(&ProviderKind::Claude, named.to_str(), None)
+                        .is_ok()
+                );
+            },
+        );
+    }
 
     #[test]
     fn health_rebind_override_rejects_missing_and_non_regular_paths() {

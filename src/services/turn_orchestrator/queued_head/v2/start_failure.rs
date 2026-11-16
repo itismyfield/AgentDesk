@@ -46,6 +46,12 @@ impl Owner {
         }
     }
     pub(super) fn retry_member(&self, front: &PendingQueueItem, member: &PendingQueueItem) -> bool {
+        if self
+            .handoff()
+            .is_some_and(|journal| journal.retry_after_ms > 0)
+        {
+            return false;
+        }
         !self.starts.failures.contains_key(&self.start_key(front))
             || self.starts.failures.contains_key(&self.start_key(member))
     }
@@ -78,18 +84,17 @@ impl Owner {
         {
             return Err("start failure members changed".into());
         }
+        // The journal's count joins only when this front is the one that spent it.
+        let spent = self.handoff().map_or(0, |journal| {
+            let spent = journal.spent(&sources::identity(&front.1));
+            spent.saturating_add(1).min(u8::MAX as u32) as u8
+        });
         let counts: Vec<_> = members
             .iter()
             .map(|m| {
                 let key = self.start_key(m);
-                let n = self
-                    .starts
-                    .failures
-                    .get(&key)
-                    .copied()
-                    .unwrap_or(0)
-                    .saturating_add(1);
-                (key, n)
+                let n = self.starts.failures.get(&key).copied().unwrap_or(0);
+                (key, n.saturating_add(1).max(spent))
             })
             .collect();
         let retain = kind != StartFailureKind::Opaque || counts.iter().any(|(_, n)| *n >= 2);
@@ -139,6 +144,7 @@ impl Owner {
                 }
             }
             next.items.drain(..members.len());
+            next.handoff_fronts_left();
         }
         self.commit(next)?;
         for (key, n) in counts {

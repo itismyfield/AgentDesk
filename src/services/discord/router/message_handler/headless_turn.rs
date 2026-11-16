@@ -146,16 +146,8 @@ async fn start_reserved_headless_turn_admitted(
         return Ok(outcome);
     }
     // A Herdr-configured channel is refused before this turn claims, resets or clears anything.
-    let session_key = || {
-        let basis = session_key_basis_override(
-            scheduled_snapshot_session_label(metadata.as_ref()).as_deref(),
-            metadata.as_ref(),
-            tmux_session_label.as_deref(),
-        )
-        .map(str::to_owned);
-        let provider = &provider;
-        async move { build_adk_session_key(shared, channel_id, provider, basis.as_deref()).await }
-    };
+    let (kept, label) = (metadata.as_ref(), tmux_session_label.as_deref());
+    let session_key = || headless_session_key(shared, channel_id, &provider, kept, label);
     let pool = shared.pg_pool.as_ref();
     let host = crate::services::turn_host::refusal_before_turn;
     if let Some(refusal) = host(pool, &provider, channel_id.get(), session_key).await {
@@ -447,17 +439,12 @@ async fn start_reserved_headless_turn_admitted(
     // #4658: scheduled-snapshot turns key their session off the reservation
     // label so they never share (and thus never overwrite) the channel's live
     // session_key row.
-    let scheduled_snapshot_label = scheduled_snapshot_session_label(metadata.as_ref());
-    let scheduled_snapshot_turn = scheduled_snapshot_label.is_some();
+    let scheduled_snapshot_turn = scheduled_snapshot_session_label(metadata.as_ref()).is_some();
     // Both kinds of turn cold-start under their own session key without touching the channel's.
     let turn_local_session = scheduled_snapshot_turn || isolated_run.is_some();
-    let session_key_basis_override = session_key_basis_override(
-        scheduled_snapshot_label.as_deref(),
-        metadata.as_ref(),
-        tmux_session_label.as_deref(),
-    );
+    let label = tmux_session_label.as_deref();
     let adk_session_key =
-        build_adk_session_key(shared, channel_id, &provider, session_key_basis_override).await;
+        headless_session_key(shared, channel_id, &provider, metadata.as_ref(), label).await;
     if !turn_local_session
         && valid_routine_metadata(metadata.as_ref()).is_some()
         && let (Some(pool), Some(binding), Some(session_key)) = (

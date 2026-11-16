@@ -53,7 +53,11 @@ fn write_credential(root: &Path, name: &str, input: impl Read) -> io::Result<()>
     let rejected = || io::Error::other("invalid instance credential declaration");
     if !matches!(
         name,
-        "claude_bot_token" | "codex_bot_token" | "driver_bot_token"
+        "claude_bot_token"
+            | "codex_bot_token"
+            | "driver_bot_token"
+            | "announce_bot_token"
+            | "notify_bot_token"
     ) || !root.is_absolute()
         || root
             .components()

@@ -63,6 +63,50 @@ Pipe cells and empty orchestration cells do not imply a supported TUI claim.
 Thread/busy claims also require actual supported surface/state witness operations;
 metadata alone cannot implement those operations.
 
+The handwritten feature rows also carry `needs_live` and `test_names`.
+`needs_live: true` means the complete user-visible contract still needs live
+execution evidence, including when supporting unit tests already exist.
+`test_names` references existing definitions as
+`<path.py>::Class.test_method` or `<path.rs>::test_fn`. A declaration
+establishes a source link only: it neither runs that test nor records PASS,
+execution count, current-head freshness, or provider/Discord contact. Empty
+lists remain valid when no matching implementation test has been identified;
+pending operations are not replaced by invented test names.
+
+A scenario can link a narrower part of a feature without making a claim:
+
+```yaml
+feature_coverage:
+  schema: 1
+  references:
+    - feature_id: cancel-stop
+      scope: "Idle stop reply UX only; legacy_automation/unspecified does not prove human input preservation or tui_o output."
+      needs_live: true
+```
+
+`references` may stand alone or accompany `claims`. Each `scope` states the
+part described by existing actions/assertions and the remaining source,
+provider, host or output-profile differences. References contribute zero to
+`covered`, even when their live scenario or named unit test exists. Only a
+claim satisfying the exact row combination and every required assertion can
+fill a feature cell.
+
+The initial declared coverage therefore remains **4 cells**, all common
+message delivery claims from `E-50`/`E-51`. References from `E-18`, `E-19`,
+`E-30`, `E-37`, `E-50`, `E-51` and `E-54` document existing partial contracts;
+they do not fill reset/clear acknowledgement and identity, human cancellation
+preservation, Herdr identity checks that are N/A, or actual effort/model
+application. Reaction, busy injection and thread host/output requirements stay
+pending. These counts are generated from the inputs and are not live PASS
+counts.
+
+The separate S0 catalog is absent from this main baseline. This change does
+not create a handwritten substitute for that catalog. When it lands, refresh
+it with its official generator, then regenerate and check the feature map
+using the commands above. Generated files must be refreshed by their owning
+generators; landing does not authorize editing counts or generated output by
+hand.
+
 Initial claims in `E-50`/`E-51` cover common message delivery only. Their
 `send_discord_prompt` step calls `DiscordClient.send` with `channel_id` and
 `content`; the send API defaults to source `system` and the announce bot

@@ -185,7 +185,7 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
   | `check_fast_cross_os_targets` | `changes` | `${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}` |
   | `dashboard` | `changes` | `${{ !github.event.pull_request.draft && needs.changes.outputs.dashboard == 'true' }}` |
   | `lint` | `changes` | `${{ !github.event.pull_request.draft && (needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true') }}` |
-  | `pg15_owner_proof` | `changes` | `${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}` |
+  | `pg15_owner_proof` | `changes`, `rust_build` | `${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}` |
   | `relay_authority_mutations` | `changes` | `${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}` |
   | `required_contexts` | `changes`, `rust_build`, `base_compare`, `rust_tests`, `test_evidence`, `lint`, `scripts`, `scripts_guards`, `scripts_census`, `scripts_contracts`, `dashboard`, `pg15_owner_proof`, `relay_authority_mutations`, `check_fast_cross_os`, `check_fast_cross_os_targets` | `${{ always() }}` |
   | `rust_build` | `changes` | `${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}` |

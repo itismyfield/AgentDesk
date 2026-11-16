@@ -21,11 +21,13 @@ WHOLE_FILES = (
     "docs/generated/route-inventory.md", "docs/generated/worker-inventory.md",
     "docs/generated/env-reference.md", "docs/generated/cli-reference.md",
 )
-OUTPUTS = (*BLOCKS, *WHOLE_FILES)
+MIXED_JSON = {"docs/e2e-continuous/bundles.schema1.json": ("scenario_catalog",)}
+OUTPUTS = (*BLOCKS, *WHOLE_FILES, *MIXED_JSON)
 COMMANDS = (
     ("scripts/generate_inventory_docs.py", "--review-docs-only", "--sync-giant-docs"),
     ("scripts/generate_env_reference.py",),
     ("scripts/generate_cli_reference.py",),
+    ("scripts/e2e/generate_continuous_catalog.py", "--write"),
 )
 CONFLICT = re.compile(rb"^(?:<{7,}|={7,}|>{7,}|\|{7,})(?: |\r?$)", re.MULTILINE)
 
@@ -66,6 +68,22 @@ def manual_bytes(data: bytes, names: tuple[str, ...]) -> bytes:
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def json_manual_bytes(data: bytes, generated: tuple[str, ...]) -> bytes:
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    value = json.loads(data, object_pairs_hook=unique_object)
+    if not isinstance(value, dict) or any(not isinstance(value.get(key), dict) for key in generated):
+        raise ValueError("missing or invalid generated JSON object")
+    return json.dumps({key: item for key, item in value.items() if key not in generated},
+                      sort_keys=True, ensure_ascii=False, allow_nan=False).encode()
 
 
 def snapshot(root: Path) -> dict[str, bytes]:
@@ -113,6 +131,7 @@ def regenerate(root: Path, artifact: Path, check: bool, check_merge: bool = Fals
                 raise ValueError(f"generated output is a symlink: {name}")
         before = snapshot(root)
         manual = {name: manual_bytes(before[name], names) for name, names in BLOCKS.items()}
+        json_manual = {name: json_manual_bytes(before[name], keys) for name, keys in MIXED_JSON.items()}
         resolved = {}
         for name in BLOCKS:
             lines = generated_block(before[name].decode().splitlines(keepends=True),
@@ -139,6 +158,8 @@ def regenerate(root: Path, artifact: Path, check: bool, check_merge: bool = Fals
         after = snapshot(root)
         if any(manual_bytes(after[name], names) != manual[name] for name, names in BLOCKS.items()):
             raise ValueError("generator changed manual regions")
+        if any(json_manual_bytes(after[name], keys) != json_manual[name] for name, keys in MIXED_JSON.items()):
+            raise ValueError("generator changed manual JSON fields")
         if outside_hashes(root) != outside:
             raise ValueError("generator changed an unowned tracked path")
         if any(CONFLICT.search(data) for data in after.values()):

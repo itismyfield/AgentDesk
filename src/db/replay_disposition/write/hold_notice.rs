@@ -4,6 +4,7 @@ use super::{ExactAttempt, settle};
 use super::{WriteError, commit, refused};
 use crate::db::replay_disposition::hold_notice::{self, HoldNotice, NoticeRouting, outbox};
 use crate::domain::outbound::outbox::OutboxMessage;
+use crate::domain::replay_evidence::recovery::LocalSnapshot;
 use sqlx::PgPool;
 use sqlx::Row;
 
@@ -121,7 +122,7 @@ pub(crate) async fn recover_hold_notice(
     receipt_id: i64,
     provider: &str,
     channel: &str,
-    proof: Option<&crate::services::discord::replay_policy::recovery::LocalSnapshot>,
+    proof: Option<&LocalSnapshot>,
     capture: Option<&serde_json::Value>,
     routing: NoticeRouting<'_>,
 ) -> Result<HoldNotice, WriteError> {
@@ -145,6 +146,7 @@ pub(crate) async fn recover_hold_notice(
     let stored: Option<serde_json::Value> = row
         .try_get("replay_preserved")
         .map_err(WriteError::Storage)?;
+    // Only a new settlement needs local root and process-owner evidence.
     if disposition != "withheld" {
         let proof = proof.ok_or(WriteError::CasMiss)?;
         let state = proof.state();
@@ -185,9 +187,9 @@ pub(crate) async fn recover_hold_notice(
             || owner != state.request_owner_user_id.to_string()
             || text != state.user_text
             || sources != local_sources
-            || !incarnation.as_deref().is_some_and(|v| {
-                !v.trim().is_empty() && v != crate::domain::process_incarnation::incarnation()
-            })
+            || !incarnation
+                .as_deref()
+                .is_some_and(|v| !v.trim().is_empty() && v != proof.incarnation())
             || !nonce
                 .as_deref()
                 .is_some_and(|v| !v.is_empty() && Some(v) == projected_nonce)
@@ -207,6 +209,7 @@ pub(crate) async fn recover_hold_notice(
     if nonce.as_deref() == Some("") || (disposition != "withheld" && nonce.is_none()) {
         return Err(WriteError::CasMiss);
     }
+    // An existing withheld notice restores custody without a new settlement proof.
     if let Some(notice) = hold_notice::from_preserved(receipt_id, stored.as_ref())? {
         if disposition != "withheld"
             || notice

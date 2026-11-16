@@ -1,4 +1,4 @@
-use super::*;
+use super::{health, *};
 use crate::services::cluster::node_registry::GatewayWaiterGuard;
 
 mod deferred_restart;

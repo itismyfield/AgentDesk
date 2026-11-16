@@ -1,0 +1,60 @@
+---
+title: "Peer deploy restart during a gateway yield wait"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Confirmed
+    lg1: Pending
+  }
+  class lg0 teal
+  class lg1 yellow
+  s0: peer booting, yielding the gateway#59; no deploy request
+  s1: peer booting, yielding the gateway#59; deploy waiting for its proof, deploy request pending
+  s2: peer running with its marker poller#59; deploy waiting for its proof, deploy request pending
+  s3: peer exiting after a restart#59; deploy waiting for its proof
+  s4: peer running with its marker poller#59; no deploy request
+  s5: peer exiting after a restart#59; deploy proof acknowledged
+  s6: peer booting, yielding the gateway#59; deploy waiting for its proof
+  s7: peer running with its marker poller#59; no deploy request, self restart pending
+  s8: peer booting, yielding the gateway#59; deploy proof acknowledged
+  s9: peer booting, yielding the gateway#59; peer on the new binary
+  s10: peer exiting after a restart#59; no deploy request
+  s11: peer exiting after a restart#59; deploy waiting for its proof, deploy request pending
+  s12: peer running with its marker poller#59; peer on the new binary
+  s13: peer running with its marker poller#59; peer on the new binary, self restart pending
+  s14: peer exiting after a restart#59; peer on the new binary
+  [*] --> s0
+  s0 --> s1: the cluster deploy writes restart_pending
+  s1 --> s2: the yield wait sees a pending request and stands by or the 90s yield wait ends
+  s2 --> s3: the marker poller persists the request and exits
+  s0 --> s4: the 90s yield wait ends
+  s3 --> s5: the deploy sees its own proof
+  s3 --> s6: launchd restarts the peer
+  s4 --> s7: the peer writes its own restart (promotion or handback)
+  s4 --> s2: the cluster deploy writes restart_pending
+  s5 --> s9: the deploy restarts the peer on the staged binary
+  s6 --> s8: the deploy sees its own proof
+  s7 --> s10: the marker poller persists the request and exits
+  s8 --> s9: the deploy restarts the peer on the staged binary
+  s10 --> s11: the cluster deploy writes restart_pending
+  s10 --> s0: launchd restarts the peer
+  s11 --> s1: launchd restarts the peer
+  s9 --> s12: the 90s yield wait ends
+  s12 --> s13: the peer writes its own restart (promotion or handback)
+  s13 --> s14: the marker poller persists the request and exits
+  s14 --> s9: launchd restarts the peer
+  class s0 yellow
+  class s1 yellow
+  class s2 yellow
+  class s3 yellow
+  class s4 yellow
+  class s5 teal
+  class s6 yellow
+  class s7 yellow
+  class s8 teal
+  class s9 teal
+  class s10 yellow
+  class s11 yellow
+  class s12 teal
+  class s13 teal
+  class s14 teal

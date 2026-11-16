@@ -48,6 +48,19 @@ pub(super) struct Tail {
     pub activity_at: Option<chrono::DateTime<chrono::Utc>>,
     pub empty: bool,
     pub native: Option<String>,
+    /// Where the read began, and the end of the newest `permission-mode` record.
+    pub from: u64,
+    pub barrier: u64,
+}
+impl Tail {
+    /// A resumed start stays open while nothing after `floor` is a turn record or a barrier:
+    /// exit and resume metadata is not activity, and history older than `launched` is not ours.
+    pub(super) fn quiet_from(&self, floor: u64, launched: chrono::DateTime<chrono::Utc>) -> bool {
+        self.from <= floor
+            && self.activity <= floor
+            && self.barrier <= floor
+            && self.activity_at.is_none_or(|seen| seen < launched)
+    }
 }
 pub(super) fn read(path: &Path) -> Option<Tail> {
     let mut file = std::fs::File::open(path).ok()?;
@@ -71,6 +84,8 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
         activity_at: None,
         empty: start == 0,
         native: None,
+        from: offset,
+        barrier: 0,
     };
     while reader.read_until(b'\n', &mut line).ok()? > 0 {
         let record_start = offset;
@@ -151,6 +166,7 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
                 tail.end = End::None;
                 tail.terminal = 0;
                 tail.empty = false;
+                tail.barrier = offset;
             }
             "progress" => {
                 tail.empty = false;

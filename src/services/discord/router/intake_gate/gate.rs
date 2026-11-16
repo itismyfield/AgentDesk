@@ -1,4 +1,4 @@
-//! Pure admission predicates for the Discord live-intake gate.
+//! Admission predicates for Discord live intake and history recovery.
 //!
 //! ## What the #5034 gate does not guarantee
 //!
@@ -142,11 +142,13 @@ pub(super) fn live_sender_excluded_from_human_preservation(
         || utility_identity_excludes_human(notify_resolution)
 }
 
-pub(super) fn should_skip_human_slash_message(
+/// Match raw human text against the framework's registered command names.
+pub(in crate::services::discord) fn should_skip_human_slash_message(
+    author_is_bot: bool,
     content: &str,
     known_slash_commands: Option<&std::collections::HashSet<String>>,
 ) -> bool {
-    if !content.starts_with('/') {
+    if author_is_bot || !content.starts_with('/') {
         return false;
     }
 
@@ -169,6 +171,34 @@ pub(super) fn should_merge_consecutive_messages(text: &str, is_allowed_bot: bool
 mod tests {
     use super::*;
     use crate::services::discord::health::UtilityBotUserIdResolution;
+
+    #[test]
+    fn human_slash_policy_preserves_raw_text_and_bot_boundaries() {
+        let commands = std::collections::HashSet::from(["clear".into(), "stop".into()]);
+        for (text, expected) in [
+            ("/clear", true),
+            ("/clear args", true),
+            ("/stop", true),
+            ("/clearance", false),
+            ("/unregistered", false),
+            (" /clear", false),
+            ("/Clear", false),
+            ("/", false),
+            ("plain text", false),
+        ] {
+            assert_eq!(
+                should_skip_human_slash_message(false, text, Some(&commands)),
+                expected,
+                "{text}"
+            );
+            assert!(!should_skip_human_slash_message(
+                true,
+                text,
+                Some(&commands)
+            ));
+            assert!(!should_skip_human_slash_message(false, text, None));
+        }
+    }
 
     #[test]
     fn live_human_preservation_requires_determinate_non_utility_identity() {

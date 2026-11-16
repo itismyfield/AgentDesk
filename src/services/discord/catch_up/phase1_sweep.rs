@@ -502,6 +502,15 @@ async fn recover_messages<A: CatchUpDiscordApi + ?Sized>(
     let noticed = super::classification::noticed_messages(messages, current_bot_user_id);
 
     for msg in messages {
+        if router::should_skip_human_slash_message(
+            msg.author.bot,
+            &msg.content,
+            shared.known_slash_commands.get(),
+        ) {
+            frontier.record_skipped(msg.id.get(), CatchUpClassification::NotAllowed, None);
+            stats.record(CatchUpClassification::NotAllowed);
+            continue;
+        }
         let text = msg.content.trim().to_string();
         let intervention_text = catch_up_intervention_text(&text, msg.author.bot);
         let msg_ts = msg.id.created_at();

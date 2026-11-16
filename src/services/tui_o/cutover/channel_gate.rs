@@ -449,8 +449,16 @@ fn decide_with_snapshot(
     if !snapshot.channels().contains(&channel_id) {
         return outside_selection(snapshot, channel_id, ClaimReason::NonMember);
     }
-    let kind = resolve_kind().ok_or(IdentityError::UnknownKind)?;
     let expected = snapshot.kind(channel_id);
+    // A committed member without a configured kind keeps Legacy out until its binding returns.
+    if expected.is_none() {
+        return Ok(BodyClaimed {
+            owned: true,
+            send: None,
+            reason: ClaimReason::OwnedHeld,
+        });
+    }
+    let kind = resolve_kind().ok_or(IdentityError::UnknownKind)?;
     if expected != Some(kind) {
         return Err(IdentityError::KindMismatch {
             expected,

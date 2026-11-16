@@ -379,7 +379,7 @@ fn changes_are_reported_per_field_and_skip_live_fields() {
         ["github.repos"]
     );
     assert_eq!(
-        changed(|c| c.server.browser_guard = crate::config::BrowserGuardMode::Enforce),
+        changed(|c| c.server.browser_guard = crate::config::BrowserGuardMode::Log),
         ["server.browser_guard"]
     );
     // A section written out at its default compares equal to an absent one.
