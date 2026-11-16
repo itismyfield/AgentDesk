@@ -576,12 +576,12 @@ pub(crate) fn capture_draft_with(
     timeout: std::time::Duration,
 ) -> Option<String> {
     use crate::services::process::{configure_child_process_group, wait_with_output_timeout};
+    use std::process::Stdio;
     let mut command = crate::services::platform::binary_resolver::runtime_command(program).ok()?;
-    let args = ["-u", "capture-pane", "-p", "-e", "-t", session, "-S", "-80"];
-    command.args(args).stdin(std::process::Stdio::null());
-    command
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+    let args = ["capture-pane", "-p", "-e", "-t", session, "-S", "-80"];
+    tmux::input_command(&mut command, &args).ok()?;
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     configure_child_process_group(&mut command);
     let child = command.spawn().ok()?;
     let output = wait_with_output_timeout(child, timeout, "tmux capture-pane -e").ok()?;

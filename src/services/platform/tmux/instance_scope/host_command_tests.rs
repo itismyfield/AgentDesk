@@ -1,5 +1,109 @@
 use super::*;
 
+#[test]
+fn test_instance_draft_capture_uses_declared_socket_over_default_trap() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    const NAME: &str = "services::platform::tmux::instance_scope::tests::test_instance_draft_capture_uses_declared_socket_over_default_trap";
+    if crate::config::test_instance::requested() {
+        crate::config::test_instance::initialize().unwrap();
+        let instance = crate::config::test_instance::current().unwrap().unwrap();
+        let program = instance.root.join("fixture-worktree/target/debug/tmux");
+        let session = format!("{}-draft", instance.tmux.prefix);
+        let capture = crate::services::claude_tui::host_input::capture_draft_with(
+            &program,
+            &session,
+            std::time::Duration::from_secs(2),
+        );
+        assert_eq!(capture.as_deref(), Some("declared socket draft\n"));
+        assert!(
+            crate::services::claude_tui::host_input::capture_draft_with(
+                &program,
+                "AgentDesk-release",
+                std::time::Duration::from_secs(2),
+            )
+            .is_none()
+        );
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let (_temp, root) = crate::config::test_instance::tests::fixture();
+    let program = root.join("fixture-worktree/target/debug/tmux");
+    std::fs::write(
+        &program,
+        r#"#!/bin/sh
+if [ "$1" != '-S' ] || [ "$2" != "$ADK_DRAFT_SOCKET" ]; then
+  printf 'default socket contacted\n' > "$ADK_DRAFT_TRAP"
+  exit 91
+fi
+shift 2
+[ "${TMUX-unset}" = unset ] && [ "${TMUX_PANE-unset}" = unset ] || exit 92
+[ "$TMUX_TMPDIR/socket" = "$ADK_DRAFT_SOCKET" ] || exit 93
+[ "$#" = 8 ] && [ "$1" = '-u' ] && [ "$2" = capture-pane ] || exit 94
+[ "$3" = '-p' ] && [ "$4" = '-e' ] && [ "$5" = '-t' ] || exit 95
+[ "$6" = "$ADK_DRAFT_TARGET" ] && [ "$7" = '-S' ] && [ "$8" = '-80' ] || exit 96
+printf 'declared socket draft\n'
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let trap = root.join("default-socket-trap");
+    let output = crate::config::test_instance::tests::command(&root)
+        .args(["--exact", NAME, "--nocapture"])
+        .env("TMUX", "/synthetic/default/socket,42,0")
+        .env("TMUX_PANE", "%99")
+        .env("ADK_DRAFT_SOCKET", root.join("runtime/tmux/socket"))
+        .env("ADK_DRAFT_TRAP", &trap)
+        .env(
+            "ADK_DRAFT_TARGET",
+            format!(
+                "AdkTest-{}-draft",
+                root.file_name().unwrap().to_str().unwrap()
+            ),
+        )
+        .output()
+        .unwrap();
+    crate::config::test_instance::tests::assert_single_test_passed(&output, NAME);
+    assert!(!trap.exists(), "default socket trap must never run");
+}
+
+#[test]
+fn draft_capture_default_socket_argv_and_environment_golden() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    assert!(crate::config::test_instance::current().unwrap().is_none());
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("tmux");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\"\nprintf '%s\\n' \"${TMUX-unset}\" \"${TMUX_PANE-unset}\" \"${TMUX_TMPDIR-unset}\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _tmux = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "TMUX",
+        std::ffi::OsStr::new("/synthetic/default/socket,42,0"),
+    );
+    let _pane = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "TMUX_PANE",
+        std::ffi::OsStr::new("%99"),
+    );
+    let _tmp = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "TMUX_TMPDIR",
+        std::ffi::OsStr::new("/synthetic/default"),
+    );
+    assert_eq!(
+        crate::services::claude_tui::host_input::capture_draft_with(
+            &program,
+            "AgentDesk-golden",
+            std::time::Duration::from_secs(2),
+        )
+        .as_deref(),
+        Some(
+            "-u\ncapture-pane\n-p\n-e\n-t\nAgentDesk-golden\n-S\n-80\n/synthetic/default/socket,42,0\n%99\n/synthetic/default\n"
+        )
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn test_instance_tmux_entries_use_private_socket_and_refuse_foreign_targets() {
