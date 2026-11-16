@@ -58,7 +58,8 @@ def _test_only_module_files() -> frozenset[Path]:
     Delegates to ``generate_inventory_docs.test_only_module_files`` while
     passing the audit's patchable file iterators. This keeps generator, audit,
     and ratchet on one test-only module graph instead of maintaining a parser
-    mirror here (#3036/#4394). Frozen so one harness run can share it.
+    mirror here (#3036/#4394).
+    Frozen so one harness run can share it.
     """
 
     return common.run_cached("test_only_module_files", lambda: frozenset(
