@@ -1,12 +1,33 @@
 """Build a standalone runtime config from an already validated test profile."""
 
 import json
+import os
+import sys
 import subprocess
 from pathlib import Path
 
 from .files import InstanceError, safe_absolute
 
 HERDR_CONFIG = "[session]\nresume_agents_on_restore = false\n"
+
+
+TMUX_FORMULA_BINS = (Path('/opt/homebrew/opt/tmux/bin'), Path('/usr/local/opt/tmux/bin'))
+
+
+def claude_runtime_path(worktree, enabled):
+    path = str(worktree / 'target/debug') + ':/usr/bin:/bin'
+    if not enabled or sys.platform != 'darwin':
+        return path
+    try:
+        source = next(p for p in TMUX_FORMULA_BINS if p.exists())
+        directory = source.resolve(strict=True)
+        binary = directory / 'tmux'
+        if ({p.name for p in directory.iterdir()} != {'tmux'}
+                or binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK)):
+            raise InstanceError('tmux formula directory must expose only executable tmux')
+    except (OSError, StopIteration):
+        raise InstanceError('isolated tmux formula directory unavailable') from None
+    return path + ':' + str(directory)
 
 
 def postgres_connections(config: dict, reserve: int) -> int:

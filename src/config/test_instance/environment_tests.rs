@@ -279,11 +279,12 @@ fn unscoped_initialization_does_not_read_org() {
 
 fn claude_login_fixture(quoted: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
     let (temp, previous) = tests::fixture();
-    let home = temp.path().canonicalize().unwrap().join(if quoted {
-        "login home 'active'"
+    let home = temp.path().canonicalize().unwrap();
+    let home = if quoted {
+        home.join("login home 'active'")
     } else {
-        "login-home"
-    });
+        home
+    };
     let root = home
         .join(".adk/dev/instances")
         .join(previous.file_name().unwrap());
@@ -384,13 +385,23 @@ fn claude_login_contract_and_operating_golden() {
         assert_eq!(&args[..5], original);
         if enabled {
             assert_eq!(resolution.source.as_deref(), Some("env_override"));
-            assert_eq!(
-                std::env::var("PATH").unwrap(),
-                format!(
-                    "{}/fixture-worktree/target/debug:/usr/bin:/bin",
-                    root.display()
-                )
+            let expected_path = format!(
+                "{}/fixture-worktree/target/debug:/usr/bin:/bin",
+                root.display()
             );
+            #[cfg(target_os = "macos")]
+            let expected_path = format!(
+                "{expected_path}:{}",
+                ["/opt/homebrew/opt/tmux/bin", "/usr/local/opt/tmux/bin"]
+                    .into_iter()
+                    .map(Path::new)
+                    .find(|p| p.exists())
+                    .unwrap()
+                    .canonicalize()
+                    .unwrap()
+                    .display()
+            );
+            assert_eq!(std::env::var("PATH").unwrap(), expected_path);
             assert_eq!(
                 std::env::var("AGENTDESK_CLAUDE_PATH").unwrap(),
                 home.join(".local/bin/claude").to_string_lossy()
@@ -1554,4 +1565,87 @@ fn keychain_herdr_overlay_is_scoped_and_global_data_is_refused() {
             .unwrap();
         tests::assert_single_test_passed(&out, name);
     }
+}
+
+#[test]
+fn claude_login_requires_the_exact_declared_pool() {
+    let (_temp, root, home) = claude_login_fixture(false);
+    bind_claude_login(&root, &home);
+    let manifest = read_json(&root.join("manifest.json")).unwrap();
+    let config = read_json(&root.join("config/agentdesk.yaml")).unwrap();
+    assert!(environment::Environment::load(&root, &manifest, &config).is_ok());
+    let other = home
+        .join("other/pool/instances")
+        .join(root.file_name().unwrap());
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::rename(&root, &other).unwrap();
+    for name in [
+        "manifest.json",
+        "receipt.json",
+        "config/agentdesk.yaml",
+        "config/org.yaml",
+    ] {
+        let path = other.join(name);
+        let body = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace(root.to_str().unwrap(), other.to_str().unwrap());
+        std::fs::write(path, body).unwrap();
+    }
+    let manifest = read_json(&other.join("manifest.json")).unwrap();
+    let config = read_json(&other.join("config/agentdesk.yaml")).unwrap();
+    assert!(environment::Environment::load(&other, &manifest, &config).is_err());
+}
+
+#[test]
+fn claude_login_tmux_is_visible_and_absent_session_is_not_a_probe_error() {
+    let name = concat!(
+        module_path!(),
+        "::claude_login_tmux_is_visible_and_absent_session_is_not_a_probe_error"
+    );
+    let name = name.strip_prefix("agentdesk::").unwrap_or(name);
+    if std::env::var_os("ADK_TMUX_BINDING_CHILD").is_some() {
+        initialize().unwrap();
+        let command = crate::services::platform::binary_resolver::runtime_command("tmux").unwrap();
+        #[cfg(target_os = "macos")]
+        let bin = ["/opt/homebrew/opt/tmux/bin", "/usr/local/opt/tmux/bin"]
+            .into_iter()
+            .map(Path::new)
+            .find(|p| p.exists())
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        #[cfg(not(target_os = "macos"))]
+        let bin = current()
+            .unwrap()
+            .unwrap()
+            .root
+            .join("fixture-worktree/target/debug");
+        assert_eq!(command.get_program(), bin.join("tmux"));
+        assert!(crate::services::platform::binary_resolver::runtime_command("codex").is_err());
+        let session = format!("{}-missing", current().unwrap().unwrap().tmux.prefix);
+        assert_eq!(
+            crate::services::platform::tmux::pane_liveness(&session),
+            crate::services::platform::tmux::PaneLiveness::DeadOrAbsent
+        );
+        return;
+    }
+    let (_temp, root, home) = claude_login_fixture(false);
+    bind_claude_login(&root, &home);
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let tmux = root.join("fixture-worktree/target/debug/tmux");
+        std::fs::write(
+            &tmux,
+            "#!/bin/sh\necho 'no server running on fixture socket' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let result = tests::command(&root)
+        .args(["--exact", name, "--nocapture"])
+        .env("ADK_TMUX_BINDING_CHILD", "1")
+        .output()
+        .unwrap();
+    tests::assert_single_test_passed(&result, name);
 }

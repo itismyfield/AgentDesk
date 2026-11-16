@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from .config import HERDR_CONFIG, build_config, build_org, declared_hosts, provider_home, validate_claude_login
+from .config import HERDR_CONFIG, build_config, build_org, declared_hosts, provider_home, validate_claude_login, claude_runtime_path
 from .files import (InstanceError, LAYOUT_DIRS, create_layout, instance_root, read_regular_text,
                     safe_absolute, validate_tree, write_private_json, write_private_text)
 from .profile import same_json, validate_profile
@@ -177,7 +177,7 @@ def child_environment(manifest, ambient):
                                  manifest["api"]["port"], manifest["postgres"]["port"], manifest.get("claude_login"))
     if not same_json(manifest, expected):
         raise InstanceError("child environment differs from its declaration")
-    environment = {"PATH": str(safe_absolute(manifest["worktree"]) / "target/debug") + ":/usr/bin:/bin",
+    environment = {"PATH": claude_runtime_path(safe_absolute(manifest["worktree"]), "claude_login" in manifest),
                    "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
     flags = validate_profile(manifest["profile"])
     if not same_json(flags, manifest["applied_env"]):

@@ -72,7 +72,7 @@ impl Environment {
             ),
             (
                 "PATH",
-                format!("{}/target/debug:/usr/bin:/bin", worktree.display()),
+                required_runtime_path(worktree, claude_login.is_some())?,
             ),
         ] {
             required.insert(key.into(), value);
@@ -163,6 +163,36 @@ impl Environment {
         }
         Ok(())
     }
+}
+
+fn required_runtime_path(worktree: &Path, claude_login: bool) -> Result<String, String> {
+    let base = format!("{}/target/debug:/usr/bin:/bin", worktree.display());
+    #[cfg(target_os = "macos")]
+    if claude_login {
+        use std::os::unix::fs::PermissionsExt;
+        let source = ["/opt/homebrew/opt/tmux/bin", "/usr/local/opt/tmux/bin"]
+            .into_iter()
+            .map(Path::new)
+            .find(|path| path.exists())
+            .ok_or_else(rejected)?;
+        let directory = std::fs::canonicalize(source).map_err(|_| rejected())?;
+        let entries = std::fs::read_dir(&directory)
+            .map_err(|_| rejected())?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| rejected())?;
+        let binary = std::fs::symlink_metadata(directory.join("tmux")).map_err(|_| rejected())?;
+        if entries.len() != 1
+            || entries[0] != "tmux"
+            || !binary.is_file()
+            || binary.permissions().mode() & 0o111 == 0
+        {
+            return Err(rejected());
+        }
+        return Ok(format!("{base}:{}", directory.display()));
+    }
+    let _ = claude_login;
+    Ok(base)
 }
 
 fn forbidden(key: &str) -> bool {
@@ -421,8 +451,7 @@ impl ClaudeLogin {
         let home = path("login_home")?;
         let config_dir = path("config_dir")?;
         let cli = path("cli")?;
-        if root.ancestors().nth(4) != Some(home.as_path())
-            || root.parent().and_then(Path::file_name) != Some(std::ffi::OsStr::new("instances"))
+        if root.parent() != Some(home.join(".adk/dev/instances").as_path())
             || config_dir != home_at(root, "claude")?
             || !cli.starts_with(home.join(".local"))
         {

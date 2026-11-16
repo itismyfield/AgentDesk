@@ -32,7 +32,8 @@ class ClaudeLoginTests(TestCase):
         self.assertEqual(env['HOME'], str(root/'home'))
         self.assertEqual(env['CLAUDE_CONFIG_DIR'], expected['config_dir'])
         self.assertEqual(env['CODEX_HOME'], str(root/'home/.adk/profiles/codex/test-codex'))
-        self.assertEqual(env['PATH'], str(self.fixture.worktree/'target/debug')+':/usr/bin:/bin')
+        from scripts.dev_instance.config import claude_runtime_path
+        self.assertEqual(env['PATH'], claude_runtime_path(self.fixture.worktree, True))
         self.assertFalse(any((root/'home').rglob('auth.json')))
         self.assertEqual(list((root/'credential').iterdir()), [])
         self.assertEqual(validate(self.fixture.base, m['instance_id'], {})['claude_login'], expected)
@@ -101,7 +102,13 @@ class ClaudeLoginTests(TestCase):
         legacy.pop('claude_login')
         previous = child_environment(legacy, {})
         self.assertNotEqual(shutil.which('codex', path=env['PATH']), str(outside))
-        self.assertEqual(env['PATH'], previous['PATH'])
+        import sys
+        expected_path = previous['PATH']
+        if sys.platform == 'darwin':
+            formula = next(p for p in (Path('/opt/homebrew/opt/tmux/bin'), Path('/usr/local/opt/tmux/bin')) if p.exists())
+            expected_path += ':'+str(formula.resolve(strict=True))
+        self.assertEqual(env['PATH'], expected_path)
+        self.assertNotIn('/opt/homebrew/bin', env['PATH'].split(':'))
         self.assertEqual(shutil.which('codex', path=env['PATH']),
                          shutil.which('codex', path=previous['PATH']))
         self.assertEqual(env['CODEX_HOME'], previous['CODEX_HOME'])
@@ -149,3 +156,26 @@ class ClaudeLoginTests(TestCase):
         with patch.object(Path, 'home', return_value=self.fixture.home):
             self.assertEqual(remove(self.fixture.base, m['instance_id'], {})['status'], 'REMOVED')
         self.assertFalse(root.exists())
+
+    def test_opt_in_exposes_only_the_dedicated_tmux_directory(self):
+        import shutil
+        import subprocess
+        directory = self.fixture.home/'formula/tmux/bin'
+        directory.mkdir(parents=True)
+        binary = directory/'tmux'
+        binary.write_text('#!/bin/sh\nprintf "fixture-tmux\\n"\n')
+        binary.chmod(0o700)
+        outside = self.fixture.home/'.local/bin/codex'
+        outside.parent.mkdir(parents=True)
+        outside.write_text('#!/bin/sh\nexit 99\n')
+        outside.chmod(0o700)
+        m = self.fixture.prepare(claude_login=self.login)
+        with patch('scripts.dev_instance.config.sys.platform', 'darwin'), patch('scripts.dev_instance.config.TMUX_FORMULA_BINS', (directory,), create=True):
+            env = child_environment(m, {})
+            self.assertEqual(env['PATH'], str(self.fixture.worktree/'target/debug')+':/usr/bin:/bin:'+str(directory))
+            self.assertEqual(shutil.which('tmux', path=env['PATH']), str(binary))
+            self.assertIsNone(shutil.which('codex', path=env['PATH']))
+            result = subprocess.run(['tmux', '--version'], env=env, capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout, 'fixture-tmux\n')
+            (directory/'codex').write_text('unexpected executable')
+            with self.assertRaises(InstanceError):child_environment(m, {})
