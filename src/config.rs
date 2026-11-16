@@ -2833,8 +2833,7 @@ pub fn load_graceful() -> Config {
 ///
 /// # Lock hierarchy
 ///
-/// This mutex (`E`) is outside provider hosting's config lock (`C`) and
-/// `db::postgres::POSTGRES_TEST_LIFECYCLE_LOCK` (`P`): `E -> C -> P` when combined.
+/// The shared env lock (`E`) precedes hosting config (`C`) and PG lifecycle (`P`): `E -> C -> P`.
 /// Acquire the environment before changing hosting config or building
 /// a PostgreSQL test database, never the other way round. Reversing it in even
 /// one test is enough to deadlock the suite, because a concurrently in-flight
