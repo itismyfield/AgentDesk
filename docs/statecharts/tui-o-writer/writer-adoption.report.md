@@ -268,3 +268,23 @@ Sixteen mutants break their named safety guards. Each cfg was actually executed
 by scripts/ci/statecharts_tlc.py; the source snapshot and per-cfg invocation counts
 are recorded in the lane design report. Modeling plus final fixed-snapshot check
 finished within30 minutes from the first capability model edit.
+
+## C2a first-commit model correction (P2-1)
+
+The previous CapCertainNotSent guard used lifecycle mismatch as if evidence had
+arrived. It now requires an explicit no-effect witness whose attempt identity
+matches the reserved attempt. CapPrepare and the actual HTTP effect CapPost are
+separate. Reserved-only/Prepared-before-HTTP crashes without proof remain pending
+and send nothing; those liveness controls are expected RED. Proof-supplied
+controls proceed, and both proof-check-removal/run-change-reset mutants break
+NoResetWithoutProof. Evidence fairness applies only to conclusive evidence that
+is supplied, never to a new owner/run or an assumed absence of HTTP. No production
+code is included in this first correction commit.
+
+P2 correction: the audited old reset is RED NoResetWithoutProof; final54cfg
+are16 GREEN/38 expected RED, 276 actual TLC invocations, mismatch/error/skip0
+(rc0,702.8s). The original48 retain14/34. Both no-proof crash cuts are
+conditional liveness RED with pending/POST0 safety; proof-supplied reserved and
+Prepared cuts are GREEN; removing proof checking or resetting on run change is
+RED NoResetWithoutProof. The explicit evidence event replaces, rather than
+renames, the lifecycle inference.

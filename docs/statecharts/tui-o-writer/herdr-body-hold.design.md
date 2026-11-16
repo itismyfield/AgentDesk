@@ -660,3 +660,25 @@ snapshot, effect and payload to old/other identities. It checks the permission
 protocol, not JSON decoding, actual SQL constraints or native-prefix alignment.
 Those are explicit C2a/C2b acceptance tests; their runtime guards are not treated
 as already implemented because a model control is GREEN.
+
+### P2-1: an explicit witness, not a lifecycle inference
+
+A reserved attempt now has a separate identity and optional no-effect witness.
+Only a witness for **that same attempt/effect/payload** can authorize reset.
+Generation, run, live-state, timeout and process disappearance do not create it.
+The implementation boundary is a private owning-attempt proof factory: a request
+known not to have been polled, or another conclusive no-effect transport result.
+It cannot be constructed by restoring a grant, reading NotFound, or observing a
+new owner. The witness remains attributable after a later attempt is reserved;
+a witness for attempt A cannot release attempt B.
+
+CapPrepare is separate from CapPost. Reserved-only and durable-Prepared-before-
+HTTP crash cuts are both explicit. With no evidence, both stay pending with
+POST count zero and conditional body liveness RED. CapProvideNoEffect is an
+external, attempt-bound evidence event; fairness applies only when such evidence
+actually becomes available. With a conclusive exact effect or no-effect witness
+eventually supplied, the attempt can settle or be re-reserved and posted. This is
+the GREEN scope, not a guarantee from owner/store recovery alone. The two proof
+mutants (skip witness validation; reset merely on changed run) violate
+NoResetWithoutProof. C2a's shared schema stores attempt identity and no-effect
+proof explicitly; no code may infer or fabricate the witness from run metadata.

@@ -6,7 +6,7 @@ vars == <<cap, bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, 
 
 \* Current actions: herdr_row_end.rs:238-279; completion_delivery.rs:411-416.
 \* C separates the retired execution from its durable body; NExisting has no pre-adoption copy.
-CapModes == {"CapBefore", "CapFixed", "CapDuplicate", "CapNativeLeak", "CapWrongChannel", "CapWrongOwner", "CapWrongEpisode", "CapWrongSnapshot", "CapWrongEffect", "CapStaleGeneration", "CapRevive", "CapTransferRace", "CapReceiptFalse", "CapGcEarly", "CapEarlyOutput", "CapUnknownPlan", "CapReceiptUnproved", "CapWrongInput", "CapWrongPayload", "CapNoReserve"}
+CapModes == {"CapBefore", "CapFixed", "CapDuplicate", "CapNativeLeak", "CapWrongChannel", "CapWrongOwner", "CapWrongEpisode", "CapWrongSnapshot", "CapWrongEffect", "CapStaleGeneration", "CapRevive", "CapTransferRace", "CapReceiptFalse", "CapGcEarly", "CapEarlyOutput", "CapUnknownPlan", "CapReceiptUnproved", "CapWrongInput", "CapWrongPayload", "CapNoReserve", "CapCrashReservedNoProof", "CapCrashPreparedNoProof", "CapCrashReservedProof", "CapCrashPreparedProof", "CapProofUnchecked", "CapRunReset"}
 CapMode == Mapping \in CapModes
 CMode == CapMode \/ Mapping \in {"C", "CRepair", "CDecision", "CNoDurable", "CDuplicate", "COverwrite", "CEarlyOutput", "CSilentRefusal", "COwnedShortcut", "CNoSource", "CRefusedRevoked", "CNoCandidateRevoked"}
 NStored == Mapping = "NStored"
@@ -20,7 +20,7 @@ OldAvailable == row \/ copyId = "old" \/ storeDuty \/ op >= 1 \/ lp >= 1
 CapInit == [gen |-> 0, custodian |-> "home", run |-> 0, live |-> FALSE,
     grant |-> "none", grantGen |-> 0, grantOwner |-> "none", grantRun |-> 0,
     channel |-> "old", episode |-> "old", input |-> "old", snapshot |-> "old", effect |-> "old", payload |-> "old",
-    locked |-> FALSE, reserved |-> FALSE, reservationGen |-> 0, reservationRun |-> 0, reservationSafe |-> TRUE, prepared |-> FALSE, ended |-> FALSE,
+    locked |-> FALSE, reserved |-> FALSE, reservationGen |-> 0, reservationRun |-> 0, reservationSafe |-> TRUE, attemptId |-> 0, noEffectWitness |-> 0, resetSafe |-> TRUE, quiesced |-> FALSE, forcedCrash |-> FALSE, httpStarted |-> FALSE, prepared |-> FALSE, ended |-> FALSE,
     transferred |-> FALSE, stoppedOnce |-> FALSE, refusedOnce |-> FALSE,
     nativeTried |-> FALSE, nativePosts |-> 0, gc |-> FALSE,
     authoritySafe |-> TRUE, targetSafe |-> TRUE, freshSafe |-> TRUE]
@@ -122,7 +122,7 @@ NewOutput == /\ DetachedMode /\ Owned /\ nextInput = "pastRowGuard" /\ newPosted
 
 \* One bounded crash/restart; copy, effect evidence and receipt remain durable and keep the old identity.
 Restart == /\ ~restarted
-    /\ cap' = (IF CapMode THEN [cap EXCEPT !.run = @ + 1, !.live = FALSE, !.grant = "revoked"] ELSE cap)
+    /\ cap' = (IF CapMode THEN [cap EXCEPT !.run = @ + 1, !.live = FALSE, !.grant = "revoked", !.quiesced = ~cap.httpStarted, !.locked = (IF ~cap.httpStarted THEN FALSE ELSE @)] ELSE cap)
     /\ restarted' = (TRUE) /\ attempt' = ("none") /\ phase' = (IF row THEN "observe" ELSE phase)
     /\ UNCHANGED <<bound, owner, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
 
@@ -153,27 +153,45 @@ CapIssue == /\ CapMode /\ noticeBody /\ Mapping \notin {"CapBefore", "CapUnknown
 
 \* The shared reservation commits before acquiring the effect guard/local Prepared.
 CapReserve == /\ CapMode /\ cap.grant = "issued" /\ CapValid /\ ~cap.reserved /\ ~cap.prepared /\ ~cap.locked /\ ~oldAck /\ op = 0
-    /\ cap' = [cap EXCEPT !.reserved = TRUE, !.reservationGen = cap.gen, !.reservationRun = cap.run]
+    /\ cap' = [cap EXCEPT !.reserved = TRUE, !.attemptId = @ + 1, !.noEffectWitness = 0, !.quiesced = FALSE, !.reservationGen = cap.gen, !.reservationRun = cap.run]
     /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
 
-\* Abstract conclusive no-request proof from the owning attempt, never a timeout/owner mismatch inference.
-\* An unprovable crash gap instead takes CapIndeterminate and has no such progress claim.
-CapCertainNotSent == /\ CapMode /\ cap.reserved /\ op = 0 /\ ~cap.prepared /\ ~cap.locked
-    /\ (cap.reservationGen # cap.gen \/ cap.reservationRun # cap.run \/ ~cap.live)
-    /\ cap' = [cap EXCEPT !.reserved = FALSE]
+\* Witness availability is independent evidence, not a result of gen/run/live mismatch.
+CapProofAvailable == Mapping \notin {"CapReceiptUnproved", "CapCrashReservedNoProof", "CapCrashPreparedNoProof", "CapProofUnchecked", "CapRunReset"}
+CapWitnessMatches == cap.attemptId > 0 /\ cap.noEffectWitness = cap.attemptId
+CapProvideNoEffect == /\ CapMode /\ CapProofAvailable /\ cap.reserved /\ cap.quiesced /\ ~cap.locked /\ ~cap.httpStarted /\ op = 0 /\ ~CapWitnessMatches
+    /\ cap' = [cap EXCEPT !.noEffectWitness = cap.attemptId]
     /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
 
-CapAcquire == /\ CapMode /\ (Mapping = "CapNoReserve" \/ (cap.reserved /\ cap.reservationGen = cap.gen /\ cap.reservationRun = cap.run) \/ (Mapping = "CapDuplicate" /\ cap.prepared)) /\ cap.grant = "issued" /\ CapValid /\ ~cap.locked /\ ~oldAck /\ (op = 0 \/ (Mapping = "CapDuplicate" /\ op = 1)) /\ (~cap.prepared \/ Mapping = "CapDuplicate")
+CapCertainNotSent == /\ CapMode /\ cap.reserved /\ cap.quiesced /\ ~cap.locked /\ ~cap.httpStarted /\ op = 0
+    /\ (CapWitnessMatches \/ Mapping = "CapProofUnchecked" \/ (Mapping = "CapRunReset" /\ cap.reservationRun # cap.run))
+    /\ cap' = [cap EXCEPT !.reserved = FALSE, !.prepared = FALSE, !.resetSafe = @ /\ CapWitnessMatches, !.quiesced = FALSE, !.grant = "revoked"]
+    /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
+
+\* Dedicated cuts force either reservation-only or durable Prepared before a crash.
+CapCrashCut == /\ CapMode /\ ~cap.forcedCrash /\ cap.reserved /\ ~cap.httpStarted /\ op = 0
+    /\ ((Mapping \in {"CapCrashReservedNoProof", "CapCrashReservedProof", "CapProofUnchecked", "CapRunReset"} /\ ~cap.prepared)
+         \/ (Mapping \in {"CapCrashPreparedNoProof", "CapCrashPreparedProof"} /\ cap.prepared))
+    /\ cap' = [cap EXCEPT !.forcedCrash = TRUE, !.run = @ + 1, !.live = FALSE, !.grant = "revoked", !.locked = FALSE, !.quiesced = TRUE]
+    /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
+
+CapAcquire == /\ CapMode /\ (cap.forcedCrash \/ Mapping \notin {"CapCrashReservedNoProof", "CapCrashReservedProof", "CapProofUnchecked", "CapRunReset"}) /\ (Mapping = "CapNoReserve" \/ (cap.reserved /\ cap.reservationGen = cap.gen /\ cap.reservationRun = cap.run) \/ (Mapping = "CapDuplicate" /\ cap.prepared)) /\ cap.grant = "issued" /\ CapValid /\ ~cap.locked /\ ~oldAck /\ (op = 0 \/ (Mapping = "CapDuplicate" /\ op = 1)) /\ (~cap.prepared \/ Mapping = "CapDuplicate")
     /\ cap' = [cap EXCEPT !.locked = TRUE, !.freshSafe = @ /\ CapFresh]
     /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
 
-CapPost == /\ CapMode /\ cap.locked /\ cap.live /\ cap.grant = "issued" /\ ~oldAck /\ (~cap.prepared \/ Mapping = "CapDuplicate") /\ (op = 0 \/ (Mapping = "CapDuplicate" /\ op = 1))
-    /\ cap' = [cap EXCEPT !.prepared = TRUE, !.ended = FALSE, !.reservationSafe = @ /\ cap.reserved, !.authoritySafe = @ /\ CapAuthority, !.targetSafe = @ /\ CapIdentity]
-    /\ op' = op + 1
-    /\ attempt' = "uncertain"
+\* Local Prepared precedes the first HTTP effect; both sides have a crash cut.
+CapPrepare == /\ CapMode /\ cap.locked /\ cap.live /\ cap.grant = "issued" /\ ~oldAck /\ (~cap.prepared \/ Mapping = "CapDuplicate")
+    /\ cap' = [cap EXCEPT !.prepared = TRUE, !.httpStarted = FALSE, !.ended = FALSE]
+    /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
+
+CapPost == /\ CapMode /\ cap.locked /\ cap.prepared /\ ~cap.httpStarted /\ cap.live /\ cap.grant = "issued" /\ ~oldAck
+    /\ (cap.forcedCrash \/ Mapping \notin {"CapCrashPreparedNoProof", "CapCrashPreparedProof"})
+    /\ (op = 0 \/ (Mapping = "CapDuplicate" /\ op = 1))
+    /\ cap' = [cap EXCEPT !.httpStarted = TRUE, !.ended = FALSE, !.reservationSafe = @ /\ cap.reserved, !.authoritySafe = @ /\ CapAuthority, !.targetSafe = @ /\ CapIdentity]
+    /\ op' = op + 1 /\ attempt' = "uncertain"
     /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, oldAck, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
 
-CapEnd == /\ CapMode /\ cap.locked /\ cap.prepared
+CapEnd == /\ CapMode /\ cap.locked /\ cap.httpStarted
     /\ cap' = [cap EXCEPT !.locked = FALSE, !.ended = TRUE]
     /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
 
@@ -191,23 +209,23 @@ CapGc == /\ CapMode /\ copyId = "old" /\ ~row /\ (oldAck \/ Mapping = "CapGcEarl
     /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
 
 CapTransfer == /\ CapMode /\ cap.gen = 1 /\ ~cap.transferred /\ (~cap.locked \/ Mapping = "CapTransferRace")
-    /\ cap' = [cap EXCEPT !.gen = 2, !.custodian = "next", !.transferred = TRUE, !.run = @ + 1, !.live = FALSE, !.grant = (IF Mapping = "CapTransferRace" THEN @ ELSE "revoked")]
+    /\ cap' = [cap EXCEPT !.gen = 2, !.custodian = "next", !.transferred = TRUE, !.run = @ + 1, !.live = FALSE, !.quiesced = ~cap.httpStarted, !.grant = (IF Mapping = "CapTransferRace" THEN @ ELSE "revoked")]
     /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
 
 CapStop == /\ CapMode /\ cap.gen > 0 /\ ~cap.stoppedOnce /\ cap.live
-    /\ cap' = [cap EXCEPT !.stoppedOnce = TRUE, !.live = FALSE, !.run = @ + 1, !.grant = "revoked"]
+    /\ cap' = [cap EXCEPT !.stoppedOnce = TRUE, !.live = FALSE, !.run = @ + 1, !.grant = "revoked", !.quiesced = ~cap.httpStarted]
     /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
 
 CapResume == /\ CapMode /\ cap.gen > 0 /\ ~cap.live /\ ~cap.locked
     /\ cap' = [cap EXCEPT !.live = TRUE]
     /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
 
-CapAbort == /\ CapMode /\ cap.locked /\ ~cap.prepared /\ ~cap.live
-    /\ cap' = [cap EXCEPT !.locked = FALSE]
+CapAbort == /\ CapMode /\ cap.locked /\ ~cap.httpStarted /\ ~cap.live
+    /\ cap' = [cap EXCEPT !.locked = FALSE, !.quiesced = TRUE]
     /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
 
 CapRefuse == /\ CapMode /\ cap.grant = "issued" /\ ~cap.locked /\ ~cap.prepared /\ ~cap.refusedOnce
-    /\ cap' = [cap EXCEPT !.refusedOnce = TRUE, !.live = FALSE, !.run = @ + 1, !.grant = "revoked"]
+    /\ cap' = [cap EXCEPT !.refusedOnce = TRUE, !.live = FALSE, !.run = @ + 1, !.grant = "revoked", !.quiesced = TRUE]
     /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
 
 CapNative == /\ CapMode /\ cap.gen > 0 /\ ~cap.nativeTried
@@ -220,9 +238,11 @@ CapRaceResume == /\ CapMode /\ Mapping = "CapTransferRace" /\ cap.locked /\ ~cap
 
 \* Sensitivity: a Prepared without conclusive remote evidence remains held, never a false receipt.
 CapIndeterminate == /\ Mapping = "CapReceiptUnproved" /\ cap.grant = "issued" /\ ~cap.prepared /\ ~cap.locked
-    /\ cap' = [cap EXCEPT !.reserved = TRUE, !.prepared = TRUE, !.ended = TRUE]
+    /\ cap' = [cap EXCEPT !.reserved = TRUE, !.prepared = TRUE, !.ended = TRUE, !.attemptId = (IF @ = 0 THEN 1 ELSE @), !.quiesced = TRUE]
     /\ UNCHANGED <<bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition>>
 
+NoResetWithoutProof == ~CapMode \/ cap.resetSafe
+PendingUnprovedCrash == ~CapMode \/ (Mapping \in {"CapCrashReservedNoProof", "CapCrashPreparedNoProof"} /\ cap.forcedCrash /\ noticeBody => cap.reserved /\ op = 0 /\ ~oldAck)
 CapPostHadReservation == ~CapMode \/ cap.reservationSafe
 CapReceiptHasEffect == ~CapMode \/ (oldAck => (~noticeBody \/ (op = 1 /\ cap.targetSafe)))
 CapGcHasReceipt == ~CapMode \/ (cap.gc => oldAck)
@@ -233,11 +253,11 @@ CapOldBeforeNew == ~CapMode \/ newPosted = 0 \/ op = 1 \/ ~noticeBody
 CapDebtEventuallyGc == [](CapMode /\ oldAck /\ ~row /\ copyId = "old" => <>(copyId = "none"))
 
 Rest == UNCHANGED vars
-Next == CapReserve \/ CapCertainNotSent \/ CapIndeterminate \/ CapRecovery \/ CapIssue \/ CapAcquire \/ CapPost \/ CapEnd \/ CapConfirm \/ CapGc \/ CapTransfer \/ CapStop \/ CapResume \/ CapAbort \/ CapRefuse \/ CapNative \/ CapRaceResume \/ Observe \/ Archive \/ Detach \/ Commit \/ Notice \/ Neutral \/ Clear \/ Closed \/ Start \/ Bind \/ Adopt \/ HomeReturns \/ Repair \/ OCreate \/ OConfirm \/ RefusalAccount \/ NewOutput \/ Restart \/ Rest
+Next == CapProvideNoEffect \/ CapCrashCut \/ CapPrepare \/ CapReserve \/ CapCertainNotSent \/ CapIndeterminate \/ CapRecovery \/ CapIssue \/ CapAcquire \/ CapPost \/ CapEnd \/ CapConfirm \/ CapGc \/ CapTransfer \/ CapStop \/ CapResume \/ CapAbort \/ CapRefuse \/ CapNative \/ CapRaceResume \/ Observe \/ Archive \/ Detach \/ Commit \/ Notice \/ Neutral \/ Clear \/ Closed \/ Start \/ Bind \/ Adopt \/ HomeReturns \/ Repair \/ OCreate \/ OConfirm \/ RefusalAccount \/ NewOutput \/ Restart \/ Rest
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(Observe) /\ WF_vars(Archive) /\ WF_vars(Detach) /\ WF_vars(Commit) /\ WF_vars(Notice) /\ WF_vars(Neutral) /\ WF_vars(Clear) /\ WF_vars(Closed) /\ WF_vars(Start) /\ WF_vars(Adopt) /\ WF_vars(HomeReturns) /\ WF_vars(Repair) /\ WF_vars(OCreate) /\ WF_vars(OConfirm) /\ WF_vars(RefusalAccount) /\ WF_vars(NewOutput)
 
-        /\ WF_vars(CapReserve) /\ WF_vars(CapCertainNotSent) /\ WF_vars(CapRecovery) /\ WF_vars(CapIssue) /\ WF_vars(CapAcquire) /\ WF_vars(CapPost) /\ WF_vars(CapEnd) /\ WF_vars(CapConfirm) /\ WF_vars(CapGc) /\ WF_vars(CapResume) /\ WF_vars(CapAbort) /\ WF_vars(CapNative) /\ WF_vars(CapRaceResume)
+        /\ WF_vars(CapProvideNoEffect) /\ WF_vars(CapCrashCut) /\ WF_vars(CapPrepare) /\ WF_vars(CapReserve) /\ WF_vars(CapCertainNotSent) /\ WF_vars(CapRecovery) /\ WF_vars(CapIssue) /\ WF_vars(CapAcquire) /\ WF_vars(CapPost) /\ WF_vars(CapEnd) /\ WF_vars(CapConfirm) /\ WF_vars(CapGc) /\ WF_vars(CapResume) /\ WF_vars(CapAbort) /\ WF_vars(CapNative) /\ WF_vars(CapRaceResume)
 
 NoLegacyBodyOnTui == lp = 0
 UnadoptedNotOwned == owner # "Committed" => ~Owned
