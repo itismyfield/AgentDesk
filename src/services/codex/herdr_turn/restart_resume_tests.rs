@@ -39,6 +39,7 @@ async fn ordinary_codex_herdr_launch_stays_fresh_with_existing_native_selector()
         goals: None,
         compact_token_limit: None,
         cancel: None,
+        bootstrap: false,
     };
     let launch = launch_of(&turn, Some(Path::new("/test")));
     assert!(
@@ -147,6 +148,7 @@ mod greeting {
             goals: None,
             compact_token_limit: None,
             cancel: None,
+            bootstrap: false,
         };
         let operation = greeting.then(|| "restart-operation".to_string());
         restart_intent::scope(operation, || launch_of(&turn, Some(Path::new("/test"))))
