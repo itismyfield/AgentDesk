@@ -458,6 +458,16 @@ input-single-path/InputPathReadyPreflightOnly.cfg	InputPath	-	ReadyPendingEventu
 input-single-path/InputPathReadyRace.cfg	InputPath	-	-
 input-single-path/InputPathReadyReplay.cfg	InputPath	ReadyNoDuplicate,ReadyNoSilentLoss	-
 input-single-path/InputPathReadyRestart.cfg	InputPath	-	-
+input-single-path/InputPathReadyRestartDraftAfter.cfg	InputPath	-	-
+input-single-path/InputPathReadyRestartDraftNoWatch.cfg	InputPath	-	ReadyPendingEventuallySettles,ReadyRestartIdleEventuallyReceives
+input-single-path/InputPathReadyRestartHandoffAfter.cfg	InputPath	-	-
+input-single-path/InputPathReadyRestartHandoffIgnoreIncarnation.cfg	InputPath	ReadyNoEarlyInput	-
+input-single-path/InputPathReadyRestartIdleAfter.cfg	InputPath	-	-
+input-single-path/InputPathReadyRestartIdleBefore.cfg	InputPath	-	ReadyRestartIdleEventuallyReceives
+input-single-path/InputPathReadyRestartLateAfter.cfg	InputPath	-	-
+input-single-path/InputPathReadyRestartLateBlind.cfg	InputPath	ReadyNoIdleRunningInjection	-
+input-single-path/InputPathReadyRestartRunningAfter.cfg	InputPath	-	-
+input-single-path/InputPathReadyRestartRunningIgnoreScreen.cfg	InputPath	ReadyNoIdleRunningInjection	-
 input-single-path/InputPathReadyResume.cfg	InputPath	-	-
 input-single-path/InputPathReadyResumeCutAfter.cfg	InputPath	-	-
 input-single-path/InputPathReadyResumeCutBefore.cfg	InputPath	-	ReadyPendingEventuallyExecutes,ReadyResumedIdleEventuallyReceives

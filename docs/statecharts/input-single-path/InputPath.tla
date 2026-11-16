@@ -524,6 +524,7 @@ ReadyNoContinuationEarlyInput == Readiness!NoContinuationEarlyInput
 ReadyBusyKeyPlanPreserved == Readiness!BusyKeyPlanPreserved
 ReadyBusyEventuallyQueues == Readiness!BusyEventuallyQueues
 ReadyResumedIdleEventuallyReceives == Readiness!ResumedIdleEventuallyReceives
+ReadyRestartIdleEventuallyReceives == Readiness!RestartIdleEventuallyReceives
 ReadyRetainedOnce == Readiness!RetainedOnce
 ReadyExpiryOnlyUnproven == Readiness!ExpiryOnlyUnproven
 ReadyPendingEventuallySettles == Readiness!PendingEventuallySettles

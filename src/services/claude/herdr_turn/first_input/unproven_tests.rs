@@ -1,5 +1,6 @@
 //! A first input whose idle source proves no boundary by the end of its readiness budget ends at
-//! the owner retained with a resend ask; one whose turn still runs waits at the front.
+//! the owner retained with a resend ask; one whose turn still runs waits at the front. A launch
+//! older than the daemon restart proves its idle composer on its last hard terminal.
 use super::tests::{NONCE, bound_target};
 use super::*;
 use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
@@ -12,8 +13,11 @@ use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Case {
-    /// Resumed and idle, then the daemon restarts and attaches the same transcript again.
+    /// Resumed and idle, then the daemon restarts and attaches the same transcript again; the
+    /// launch is no older than this run, so only its own Start could admit it.
     Restarted,
+    /// The same, launched before the restart: its last hard terminal admits the input.
+    RestartedOld,
     /// A fresh launch whose SessionStart the ledger refused.
     StartRefused,
     /// Restarted like the first, over a turn the transcript shows still running.
@@ -24,6 +28,7 @@ enum Case {
 fn an_idle_source_that_proves_nothing_ends_retained_and_a_running_one_waits() {
     for (case, channel) in [
         (Case::Restarted, 816_101u64),
+        (Case::RestartedOld, 816_104),
         (Case::StartRefused, 816_102),
         (Case::Running, 816_103),
     ] {
@@ -37,7 +42,8 @@ fn an_idle_source_that_proves_nothing_ends_retained_and_a_running_one_waits() {
         let projects = root.path().join("projects");
         let path = projects.join("workspace").join(format!("{native}.jsonl"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let old = chrono::Utc::now() - chrono::Duration::hours(1);
+        // The earlier run's history predates every launch here.
+        let old = chrono::Utc::now() - chrono::Duration::hours(8);
         let rows = |rows: &[Value]| {
             use std::io::Write;
             let mut file = std::fs::OpenOptions::new()
@@ -54,7 +60,7 @@ fn an_idle_source_that_proves_nothing_ends_retained_and_a_running_one_waits() {
         let asked = json!({"type":"user","timestamp":old,"message":{"role":"user","content":"earlier prompt"}});
         let said = json!({"type":"assistant","timestamp":old,"message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}});
         match case {
-            Case::Restarted => rows(&[
+            Case::Restarted | Case::RestartedOld => rows(&[
                 asked,
                 said,
                 json!({"type":"system","subtype":"turn_duration","timestamp":old}),
@@ -65,7 +71,8 @@ fn an_idle_source_that_proves_nothing_ends_retained_and_a_running_one_waits() {
         }
         let resumed = case != Case::StartRefused;
         let context: binding_context::BindingContext = serde_json::from_value(json!({
-            "schema":1,"provider":"claude","created_at":chrono::Utc::now(),"execution_nonce":NONCE,
+            "schema":1,"provider":"claude","execution_nonce":NONCE,
+            "created_at":if case == Case::RestartedOld { old + chrono::Duration::hours(1) } else { chrono::Utc::now() },
             "tmux_session":logical,"channel_id":1,"owner_runtime_root":"test","host":null,
             "expected_native_session_id":native,
             "launch_mode":if resumed { "resume" } else { "fresh" },"provider_root":projects
@@ -179,6 +186,18 @@ fn an_idle_source_that_proves_nothing_ends_retained_and_a_running_one_waits() {
         let result = runtime
             .block_on(effect::run(&mailbox, Arc::new(|| 10_000), leaf))
             .unwrap();
+        if case == Case::RestartedOld {
+            assert_eq!(result, effect::Completion::Submitted, "{case:?}");
+            assert_eq!(rig.sends().len(), 2, "{case:?}: one paste and one Enter");
+            let snapshot = runtime
+                .block_on(mailbox.v2_request(|slot| slot.as_ref().unwrap().json()))
+                .unwrap();
+            assert!(snapshot["items"].as_array().unwrap().is_empty());
+            assert!(snapshot["retained_inputs"].as_array().unwrap().is_empty());
+            drop(entered);
+            tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
+            continue;
+        }
         assert!(
             matches!(result, effect::Completion::NotSent(_)),
             "{case:?}: {result:?}"
@@ -231,4 +250,201 @@ fn an_idle_source_that_proves_nothing_ends_retained_and_a_running_one_waits() {
         drop(entered);
         tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
     }
+}
+
+// A launch older than the restart, held by a person's draft, is woken by the
+// restart-aware watch once the draft clears, and submits the original exactly once.
+#[test]
+fn a_restored_front_held_by_a_draft_wakes_once_the_draft_clears() {
+    use crate::services::discord::owner_drive_for_test as drive;
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    readiness::initialize();
+    let rig = HerdrRig::start();
+    let _registry = rig.registry_on_this_thread();
+    let logical = format!("i8161-draft-{}", uuid::Uuid::new_v4().simple());
+    let channel = 816_110u64;
+    let native = uuid::Uuid::new_v4().to_string();
+    let projects = root.path().join("projects");
+    let path = projects.join("workspace").join(format!("{native}.jsonl"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let old = chrono::Utc::now() - chrono::Duration::hours(6);
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&path).unwrap();
+        for row in [
+            json!({"type":"user","timestamp":old,"message":{"role":"user","content":"earlier prompt"}}),
+            json!({"type":"assistant","timestamp":old,"message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}}),
+            json!({"type":"system","subtype":"turn_duration","timestamp":old}),
+        ] {
+            let mut row = row;
+            row["sessionId"] = json!(native);
+            writeln!(file, "{row}").unwrap();
+        }
+    }
+    let context: binding_context::BindingContext = serde_json::from_value(json!({
+        "schema":1,"provider":"claude","created_at":old,"execution_nonce":NONCE,
+        "tmux_session":logical,"channel_id":channel,"owner_runtime_root":"test","host":null,
+        "expected_native_session_id":native,"launch_mode":"resume","provider_root":projects
+    }))
+    .unwrap();
+    let launch = binding_context::PreparedIncarnation::create(context).unwrap();
+    rig.run_provider(&launch.path, false);
+    for (marker, value) in [("host_kind", "herdr"), ("spawn_nonce", NONCE)] {
+        let marker = crate::services::tmux_common::session_temp_path(&logical, marker);
+        std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
+        std::fs::write(marker, value).unwrap();
+    }
+    let _admission = crate::services::herdr_admission::force_for_test(
+        crate::services::herdr_admission::Admission::new(true, Some(root.path().join("no-stop"))),
+    );
+    tui_prompt_dedupe::register_tmux_runtime_binding(
+        &logical,
+        TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(native.clone()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    readiness::tests::daemon_restart(&logical);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .on_thread_start(rig.thread_installer(NODE, KEY, rig.socket(), SESSION))
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
+    let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+    let socket = rig.socket().display().to_string();
+    let attempt = json!({"nonce":"restored-draft-1","provider":"claude",
+        "target":{"host":"herdr","owner":logical,"root":socket,"execution_nonce":NONCE},
+        "source":{"kind":"pre_source","expected_session_id":null,
+            "expected_transcript":null,"binding_watermark":null}});
+    runtime
+        .block_on(mailbox.v2_cold_fixture(
+            root.path().join("restored-draft.json"),
+            attempt.clone(),
+            "one original".into(),
+            channel,
+        ))
+        .unwrap();
+    let border = "─".repeat(52);
+    let screen = |draft: &str| {
+        json!({"type":"pane_read","read":{"pane_id":PANE,
+        "source":"recent_unwrapped","text":format!("✻ Baked for 2s\n\n{border}\n❯ {draft}\n{border}\n  🤖 Opus(H) │ 7% │ MCP: 2\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"),
+        "revision":1,"truncated":false}})
+    };
+    rig.answer("pane.read", screen("a person's draft"));
+    let attached = |target: HerdrTarget| Attached {
+        nonce: NONCE.into(),
+        session_id: native.clone(),
+        transcript: path.clone(),
+        target,
+        bound: true,
+        awaiting_clear: false,
+        physical: None,
+    };
+    let (_, target) = bound_target(&rig, &logical, 1);
+    let first = attached(target.clone());
+    let writer = format!("{socket}#{PANE}");
+    let session = logical.clone();
+    let leaf = effect::created(
+        Box::new(move |frame: String| {
+            guarded_outcome::capture_preparation(|| {
+                let (sender, _receiver) = std::sync::mpsc::channel();
+                write(&session, None, first, &frame, &sender).map(drop)
+            })
+        }),
+        Some(writer.clone()),
+    );
+    let held = runtime
+        .block_on(effect::run(&mailbox, Arc::new(|| 10_000), leaf))
+        .unwrap();
+    assert!(matches!(held, effect::Completion::NotSent(_)), "{held:?}");
+    assert!(rig.sends().is_empty(), "the draft takes no key");
+    let snapshot = runtime
+        .block_on(mailbox.v2_request(|slot| slot.as_ref().unwrap().json()))
+        .unwrap();
+    assert_eq!(
+        snapshot["items"].as_array().unwrap().len(),
+        1,
+        "the front stays"
+    );
+    assert!(snapshot["retained_inputs"].as_array().unwrap().is_empty());
+    let message = snapshot["items"][0]["message_id"].as_u64().unwrap();
+    rig.answer("pane.read", screen(""));
+    let (completed, completion) = tokio::sync::oneshot::channel();
+    let completed = Arc::new(std::sync::Mutex::new(Some(completed)));
+    let second = Arc::new(std::sync::Mutex::new(Some(attached(target))));
+    let (m, a, session) = (mailbox.clone(), attempt, logical.clone());
+    let drive = Arc::new(drive::Drive {
+        mailbox: mailbox.clone(),
+        channel,
+        handoff: Arc::new(move |front| {
+            assert_eq!(front.1.text, "one original");
+            let (m, mut a, attached, done, writer, session) = (
+                m.clone(),
+                a.clone(),
+                second.lock().unwrap().take().unwrap(),
+                completed.clone(),
+                writer.clone(),
+                session.clone(),
+            );
+            Box::pin(async move {
+                a["nonce"] = "restored-draft-2".into();
+                m.v2_request(move |slot| {
+                    slot.as_mut()
+                        .unwrap()
+                        .reserve(
+                            serde_json::from_value(a).unwrap(),
+                            serde_json::from_value(
+                                json!({"frame":"one original","digest":"fixture","attribution":{}}),
+                            )
+                            .unwrap(),
+                        )
+                        .map(drop)
+                })
+                .await?;
+                let leaf = effect::created(
+                    Box::new(move |frame| {
+                        guarded_outcome::capture_preparation(|| {
+                            let (sender, _receiver) = std::sync::mpsc::channel();
+                            write(&session, None, attached, &frame, &sender).map(drop)
+                        })
+                    }),
+                    Some(writer),
+                );
+                let result = effect::run(&m, Arc::new(|| 10_001), leaf).await?;
+                done.lock().unwrap().take().unwrap().send(result).unwrap();
+                Ok(())
+            })
+        }),
+        settled: None,
+    });
+    let observed = runtime.block_on(async {
+        let (_, read) = held_watch::watch_observed(drive, message);
+        tokio::time::timeout(Duration::from_secs(5), read)
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert_eq!(
+        observed.verdict,
+        held_watch::Verdict::Wake,
+        "the restart-aware watch wakes the front once the draft clears"
+    );
+    let result = runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), completion)
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert_eq!(result, effect::Completion::Submitted);
+    assert_eq!(rig.sends().len(), 2, "one paste and one Enter");
+    tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
 }
