@@ -327,7 +327,7 @@ pub(super) async fn run_pre_emit_guard(
                 tmux_session_name,
                 "stale session resume detected — forcing fresh session before auto-retry",
             );
-            crate::services::platform::tmux::kill_session(
+            crate::services::session_host::TmuxHost.kill(
                 tmux_session_name,
                 "stale session resume detected — forcing fresh session before auto-retry",
             );

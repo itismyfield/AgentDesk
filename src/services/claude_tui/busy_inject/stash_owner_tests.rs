@@ -239,6 +239,26 @@ fn after_load(steps: &[String]) -> Vec<&str> {
     steps[at..].iter().map(String::as_str).collect()
 }
 
+#[test]
+fn a_stop_that_took_first_key_prevents_stash_and_payload_start() {
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let rig = Rig::new("a4-stop-before-stash");
+    let token = crate::services::provider::CancelToken::new();
+    let sink = token.native_stop.receipt_sink();
+    sink.arm_first_key();
+    assert_eq!(sink.stop_before_key(), Some(true));
+    let (outcome, _, starts) =
+        crate::services::claude_tui::guarded_outcome::with_receipt_sink(Some(&token), || {
+            rig.run(&FAST, true, usize::MAX, false, |_| {}, || {})
+        });
+    assert_eq!(outcome, Outcome::NotSent(Veto::LockContended));
+    assert_eq!(after_load(&rig.steps()), ["load", "pin"]);
+    assert_eq!(starts, 0);
+    assert!(rig.events().is_empty());
+    drop(rig);
+    drop(root);
+}
+
 /// With and without a parked draft the owner sees ready after the load and before any key, and
 /// one payload start after C-s and before content; only the pinned identity takes paste/Enter.
 #[test]
