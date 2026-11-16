@@ -596,7 +596,8 @@ mod tests {
 
     const CHANNEL: u64 = 8_196_000_001;
     const CODEX_CHANNEL: u64 = 8_196_000_003;
-    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::agent_protocol::RuntimeHandoffKind::{self, ClaudeTui, CodexTui};
+    use IdleClassification::{ActiveAndFresh, Idle, ToolRunning, ToolStateUnknown};
 
     /// Writes `(minutes ago, row)` records to `path` with their timestamps.
     fn write_rows(path: &std::path::Path, now: DateTime<Utc>, rows: &[(i64, &str)]) {
@@ -618,7 +619,7 @@ mod tests {
         rows: &[(i64, &str)],
     ) -> (String, impl Drop) {
         let provider = match kind {
-            RuntimeHandoffKind::CodexTui => ProviderKind::Codex,
+            CodexTui => ProviderKind::Codex,
             _ => ProviderKind::Claude,
         };
         let tmux = provider.build_tmux_session_name(&format!("i8196-{}", uuid::Uuid::new_v4()));
@@ -627,14 +628,6 @@ mod tests {
         let bind = crate::services::tui_o::cutover::test_override::bind_tui_session;
         let guard = bind(&tmux, kind, &path.display().to_string());
         (tmux, guard)
-    }
-
-    fn bound_transcript(
-        dir: &std::path::Path,
-        now: DateTime<Utc>,
-        rows: &[(i64, &str)],
-    ) -> (String, impl Drop) {
-        bound_as(RuntimeHandoffKind::ClaudeTui, dir, now, rows)
     }
 
     const PROMPT: &str = r#""type":"user","message":{"role":"user","content":"go"}"#;
@@ -674,8 +667,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let boot = crate::services::tui_o::cutover::test_override::force_channels(&[
-            (CHANNEL, RuntimeHandoffKind::ClaudeTui),
-            (CODEX_CHANNEL, RuntimeHandoffKind::CodexTui),
+            (CHANNEL, ClaudeTui),
+            (CODEX_CHANNEL, CodexTui),
         ]);
         let dir = tempfile::tempdir().unwrap();
         let root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -690,17 +683,11 @@ mod tests {
         let (_env, _dedupe, _boot, _root, dir) = o_channel_fixture();
         let now = Utc::now();
         let busy = [(20, PROMPT), (19, TOOL_A), (10, RESULT_A), (2, TOOL_B)];
-        let (tmux, _a) = bound_transcript(dir.path(), now, &busy);
-        assert_eq!(
-            verdict(CHANNEL, &tmux, now),
-            IdleClassification::ActiveAndFresh
-        );
+        let (tmux, _a) = bound_as(ClaudeTui, dir.path(), now, &busy);
+        assert_eq!(verdict(CHANNEL, &tmux, now), ActiveAndFresh);
         // One tool call quiet past the threshold is named as a running tool, not "응답 없음".
-        let (long_tool, _b) = bound_transcript(dir.path(), now, &[(20, PROMPT), (16, TOOL_A)]);
-        assert_eq!(
-            verdict(CHANNEL, &long_tool, now),
-            IdleClassification::ToolRunning
-        );
+        let (long_tool, _b) = bound_as(ClaudeTui, dir.path(), now, &[(20, PROMPT), (16, TOOL_A)]);
+        assert_eq!(verdict(CHANNEL, &long_tool, now), ToolRunning);
     }
 
     #[test]
@@ -708,16 +695,16 @@ mod tests {
         let (_env, _dedupe, _boot, _root, dir) = o_channel_fixture();
         let now = Utc::now();
         let quiet = [(20, PROMPT), (17, TOOL_A), (16, RESULT_A), (16, TEXT)];
-        let (tmux, _a) = bound_transcript(dir.path(), now, &quiet);
-        assert_eq!(verdict(CHANNEL, &tmux, now), IdleClassification::Idle);
+        let (tmux, _a) = bound_as(ClaudeTui, dir.path(), now, &quiet);
+        assert_eq!(verdict(CHANNEL, &tmux, now), Idle);
         // An unbound session gives no progress evidence and keeps the alarm.
         assert_eq!(
             verdict(CHANNEL, "AgentDesk-claude-i8196-unbound", now),
-            IdleClassification::Idle
+            Idle
         );
         // A channel O does not own keeps the heartbeat-only verdict even with fresh records.
-        let (fresh, _b) = bound_transcript(dir.path(), now, &[(20, PROMPT), (1, TEXT)]);
-        assert_eq!(verdict(CHANNEL + 1, &fresh, now), IdleClassification::Idle);
+        let (fresh, _b) = bound_as(ClaudeTui, dir.path(), now, &[(20, PROMPT), (1, TEXT)]);
+        assert_eq!(verdict(CHANNEL + 1, &fresh, now), Idle);
     }
 
     #[test]
@@ -731,31 +718,22 @@ mod tests {
             (19, TOOL_B),
             (1, result_b.as_str()),
         ];
-        let (fresh, _a) = bound_transcript(dir.path(), now, &rows);
-        assert_eq!(
-            verdict(CHANNEL, &fresh, now),
-            IdleClassification::ActiveAndFresh
-        );
+        let (fresh, _a) = bound_as(ClaudeTui, dir.path(), now, &rows);
+        assert_eq!(verdict(CHANNEL, &fresh, now), ActiveAndFresh);
         rows[3].0 = 16;
-        let (running, _b) = bound_transcript(dir.path(), now, &rows);
-        assert_eq!(
-            verdict(CHANNEL, &running, now),
-            IdleClassification::ToolRunning
-        );
+        let (running, _b) = bound_as(ClaudeTui, dir.path(), now, &rows);
+        assert_eq!(verdict(CHANNEL, &running, now), ToolRunning);
         rows.push((16, RESULT_A));
-        let (done, _c) = bound_transcript(dir.path(), now, &rows);
-        assert_eq!(verdict(CHANNEL, &done, now), IdleClassification::Idle);
+        let (done, _c) = bound_as(ClaudeTui, dir.path(), now, &rows);
+        assert_eq!(verdict(CHANNEL, &done, now), Idle);
         // No turn boundary within the widest tail: the alarm stays, naming the tool state unknown.
         let flood: Vec<String> = (0..17)
             .map(|n| big_result(&format!("x{n}"), 1 << 20))
             .collect();
         let mut rows = vec![(20, PROMPT), (19, TOOL_A)];
         rows.extend(flood.iter().map(|row| (16, row.as_str())));
-        let (unknown, _d) = bound_transcript(dir.path(), now, &rows);
-        assert_eq!(
-            verdict(CHANNEL, &unknown, now),
-            IdleClassification::ToolStateUnknown
-        );
+        let (unknown, _d) = bound_as(ClaudeTui, dir.path(), now, &rows);
+        assert_eq!(verdict(CHANNEL, &unknown, now), ToolStateUnknown);
     }
 
     #[test]
@@ -765,20 +743,13 @@ mod tests {
         let call = r#""type":"response_item","payload":{"type":"tool_search_call","call_id":"s1"}"#;
         let output =
             r#""type":"response_item","payload":{"type":"tool_search_output","call_id":"s1"}"#;
-        let codex =
-            |rows: &[(i64, &str)]| bound_as(RuntimeHandoffKind::CodexTui, dir.path(), now, rows);
+        let codex = |rows: &[(i64, &str)]| bound_as(CodexTui, dir.path(), now, rows);
         let (fresh, _a) = codex(&[(1, call)]);
-        assert_eq!(
-            verdict(CODEX_CHANNEL, &fresh, now),
-            IdleClassification::ActiveAndFresh
-        );
+        assert_eq!(verdict(CODEX_CHANNEL, &fresh, now), ActiveAndFresh);
         let (running, _b) = codex(&[(16, call)]);
-        assert_eq!(
-            verdict(CODEX_CHANNEL, &running, now),
-            IdleClassification::ToolRunning
-        );
+        assert_eq!(verdict(CODEX_CHANNEL, &running, now), ToolRunning);
         let (done, _c) = codex(&[(17, call), (16, output)]);
-        assert_eq!(verdict(CODEX_CHANNEL, &done, now), IdleClassification::Idle);
+        assert_eq!(verdict(CODEX_CHANNEL, &done, now), Idle);
     }
 
     #[test]
@@ -792,8 +763,8 @@ mod tests {
             };
             classify_with_progress(true, None, started, Some(progress), now, IDLE_THRESHOLD)
         };
-        assert_eq!(ahead(60), IdleClassification::ActiveAndFresh);
-        assert_eq!(ahead(61), IdleClassification::Idle);
+        assert_eq!(ahead(60), ActiveAndFresh);
+        assert_eq!(ahead(61), Idle);
     }
 
     /// Runs `name` again in a child process whose every thread sees `CHANNEL` as O-owned, since the
@@ -808,13 +779,13 @@ mod tests {
             .env(env, format!("[[{CHANNEL},\"claude_tui\"]]"))
             .output()
             .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "{stdout}\n{stderr}");
-        assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
+        let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), &output.stderr);
+        let passed = output.status.success() && stdout.contains("1 passed; 0 failed");
+        assert!(passed, "{stdout}\n{}", String::from_utf8_lossy(stderr));
         false
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_pass_reads_tui_o_progress_of_the_open_turn() {
         const NAME: &str = "services::discord::idle_detector::tests::run_pass_reads_tui_o_progress_of_the_open_turn";
@@ -822,43 +793,17 @@ mod tests {
             return;
         }
         let (_env, _dedupe, _boot, _root, dir) = o_channel_fixture();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let (shared, channel) = (
-                super::super::make_shared_data_for_tests(),
-                ChannelId::new(CHANNEL),
-            );
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let channel = ChannelId::new(CHANNEL);
             let name = format!("i8196-pass-{}", uuid::Uuid::new_v4());
-            shared.core.lock().await.sessions.insert(
-                channel,
-                super::super::DiscordSession {
-                    session_id: None,
-                    memento_context_loaded: false,
-                    memento_reflected: false,
-                    current_path: None,
-                    history: Vec::new(),
-                    pending_uploads: Vec::new(),
-                    cleared: false,
-                    channel_id: Some(CHANNEL),
-                    channel_name: Some(name.clone()),
-                    category_name: None,
-                    last_active: tokio::time::Instant::now(),
-                    worktree: None,
-                    born_generation: shared.restart.current_generation,
-                },
-            );
+            super::super::host_defer_gate::tests::map_channel(&shared, channel, &name).await;
             let token = Arc::new(crate::services::provider::CancelToken::new());
-            let (user, message) = (
-                poise::serenity_prelude::UserId::new(1),
-                poise::serenity_prelude::MessageId::new(11),
-            );
-            assert!(
-                super::super::mailbox_try_start_turn(&shared, channel, token, user, message).await
-            );
+            use poise::serenity_prelude::{MessageId, UserId};
+            let (user, message) = (UserId::new(1), MessageId::new(11));
+            let start =
+                super::super::mailbox_try_start_turn(&shared, channel, token, user, message);
+            assert!(start.await);
             let mailbox = shared.mailbox_peek(channel).unwrap();
             mailbox
                 .age_active_turn_for_test(Duration::from_secs(20 * 60))
@@ -870,13 +815,11 @@ mod tests {
             let bind = crate::services::tui_o::cutover::test_override::bind_claude_tui_session;
             let _bound = bind(&tmux, &path.display().to_string());
             let entry = || async {
-                let store = global_monitoring_store();
-                let guard = store.lock().await;
-                let entries = guard.list(CHANNEL).into_iter();
+                let entries = global_monitoring_store().lock().await.list(CHANNEL);
                 entries
-                    .filter(|e| e.key == MONITORING_KEY)
+                    .into_iter()
+                    .find(|e| e.key == MONITORING_KEY)
                     .map(|e| e.description)
-                    .next()
             };
             run_pass(&shared, &ProviderKind::Claude).await;
             assert_eq!(entry().await, None);
