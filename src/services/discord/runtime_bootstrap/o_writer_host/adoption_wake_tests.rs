@@ -343,6 +343,7 @@ async fn a_wake_whose_sends_keep_failing_ends_after_three_retries_and_keeps_the_
 }
 
 /// C1's real publisher and clear produce the rowless bytes the O boot reader consumes.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_c1_archive_is_read_byte_for_byte_and_boot_wakes_only_its_local_channel() {
     with_isolated_runtime_root(|| async move {
