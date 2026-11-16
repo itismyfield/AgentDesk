@@ -1303,6 +1303,10 @@ mod tests {
             !path_appears(&second_acquired, Duration::from_millis(200)),
             "second process crossed the first process's OS file lock"
         );
+        assert!(
+            !second_acquired.exists(),
+            "second process crossed the first process's OS file lock"
+        );
 
         fs::write(&release, b"release").unwrap();
         wait_for_path(&released, Duration::from_secs(10));
@@ -1365,6 +1369,10 @@ mod tests {
         wait_for_path(&second_wait_started, Duration::from_secs(10));
         assert!(
             !path_appears(&second_acquired, Duration::from_millis(100)),
+            "second process must wait before the owner is abandoned"
+        );
+        assert!(
+            !second_acquired.exists(),
             "second process must wait before the owner is abandoned"
         );
 

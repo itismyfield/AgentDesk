@@ -805,19 +805,18 @@ mod bridge_deadline_tests {
     #[tokio::test]
     async fn clamp_returns_error_after_deadline_elapses() {
         let _scope = ScopedBridgeDeadline::new(Duration::from_millis(20));
+        let observe_at = std::time::Instant::now() + Duration::from_millis(40);
         crate::test_support::wait::poll_within(
             async || {
-                crate::engine::loader::bridge_op_deadline_remaining()
-                    .expect("deadline remains armed")
-                    .is_zero()
+                (std::time::Instant::now() >= observe_at)
                     .then_some(())
-                    .ok_or_else(|| "armed bridge deadline has not expired".into())
+                    .ok_or_else(|| "original observation time has not elapsed".into())
             },
-            std::time::Duration::from_millis(40),
-            "armed bridge deadline expiry",
+            crate::test_support::wait::WAIT_CAP,
+            "original bridge observation time",
         )
         .await
-        .expect("armed bridge deadline must expire");
+        .expect("original bridge observation time must elapse");
         let result = clamp_exec_timeout_to_bridge_deadline(30_000);
         assert!(
             matches!(result, Err(ref msg) if msg.contains("deadline passed")),
@@ -836,19 +835,18 @@ mod bridge_deadline_tests {
     #[tokio::test]
     async fn session_tmux_timeout_returns_error_after_deadline_elapses() {
         let _scope = ScopedBridgeDeadline::new(Duration::from_millis(20));
+        let observe_at = std::time::Instant::now() + Duration::from_millis(40);
         crate::test_support::wait::poll_within(
             async || {
-                crate::engine::loader::bridge_op_deadline_remaining()
-                    .expect("deadline remains armed")
-                    .is_zero()
+                (std::time::Instant::now() >= observe_at)
                     .then_some(())
-                    .ok_or_else(|| "armed bridge deadline has not expired".into())
+                    .ok_or_else(|| "original observation time has not elapsed".into())
             },
-            std::time::Duration::from_millis(40),
-            "armed bridge deadline expiry",
+            crate::test_support::wait::WAIT_CAP,
+            "original bridge observation time",
         )
         .await
-        .expect("armed bridge deadline must expire");
+        .expect("original bridge observation time must elapse");
         let result = bridge_tmux_timeout_for_session_op("session.kill");
         assert!(
             matches!(

@@ -989,19 +989,18 @@ mod tests {
     async fn resolve_http_post_timeout_errors_after_deadline_elapses() {
         let _scope =
             crate::engine::loader::ScopedBridgeDeadline::new(std::time::Duration::from_millis(20));
+        let observe_at = std::time::Instant::now() + std::time::Duration::from_millis(40);
         crate::test_support::wait::poll_within(
             async || {
-                crate::engine::loader::bridge_op_deadline_remaining()
-                    .expect("deadline remains armed")
-                    .is_zero()
+                (std::time::Instant::now() >= observe_at)
                     .then_some(())
-                    .ok_or_else(|| "armed bridge deadline has not expired".into())
+                    .ok_or_else(|| "original observation time has not elapsed".into())
             },
-            std::time::Duration::from_millis(40),
-            "armed bridge deadline expiry",
+            crate::test_support::wait::WAIT_CAP,
+            "original bridge observation time",
         )
         .await
-        .expect("armed bridge deadline must expire");
+        .expect("original bridge observation time must elapse");
         let resolved = resolve_http_post_timeout();
         assert!(
             matches!(&resolved, Err(msg) if msg.contains("deadline passed")),

@@ -1949,20 +1949,19 @@ mod tests {
                 "initial bridge-op budget out of range: {initial:?}"
             );
 
-            // The std deadline expires on this thread before the native op checks it.
+            // Keep the original observation delay independent of the deadline being checked.
+            let observe_at = std::time::Instant::now() + Duration::from_millis(250);
             crate::test_support::wait::poll_within(
                 async || {
-                    crate::engine::loader::bridge_op_deadline_remaining()
-                        .expect("deadline remains armed")
-                        .is_zero()
+                    (std::time::Instant::now() >= observe_at)
                         .then_some(())
-                        .ok_or_else(|| "armed bridge deadline has not expired".into())
+                        .ok_or_else(|| "original observation time has not elapsed".into())
                 },
-                Duration::from_millis(250),
-                "armed bridge deadline expiry",
+                crate::test_support::wait::WAIT_CAP,
+                "original bridge observation time",
             )
             .await
-            .expect("armed bridge deadline must expire");
+            .expect("original bridge observation time must elapse");
             let after_deadline = bridge_op_deadline_remaining()
                 .expect("deadline should still be visible after it has passed");
             assert!(
