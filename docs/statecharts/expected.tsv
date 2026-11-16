@@ -230,6 +230,14 @@ input-single-path/HerdrBusyInputTmux.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputTmuxBefore.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputWriterHeld.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputWriterHeldBefore.cfg	HerdrBusyInput	-	-
+input-single-path/HerdrBusyMarkerWindowAllMarkersBusy.cfg	HerdrBusyMarkerWindow	NoBusyKeyWithoutRunningTurn	-
+input-single-path/HerdrBusyMarkerWindowAssistantBefore.cfg	HerdrBusyMarkerWindow	NoMailboxWhenObservable	-
+input-single-path/HerdrBusyMarkerWindowAssistantFixed.cfg	HerdrBusyMarkerWindow	-	-
+input-single-path/HerdrBusyMarkerWindowHerdrMarkerFirst.cfg	HerdrBusyMarkerWindow	NoMailboxWhenObservable	-
+input-single-path/HerdrBusyMarkerWindowNoHandback.cfg	HerdrBusyMarkerWindow	NoSilentHold	-
+input-single-path/HerdrBusyMarkerWindowPromptBefore.cfg	HerdrBusyMarkerWindow	NoMailboxWhenObservable	-
+input-single-path/HerdrBusyMarkerWindowPromptFixed.cfg	HerdrBusyMarkerWindow	-	-
+input-single-path/HerdrBusyMarkerWindowReplyFixed.cfg	HerdrBusyMarkerWindow	-	-
 input-single-path/HerdrBusyReobserveBusyClear.cfg	HerdrBusyReobserve	BusyNeedsExactSourceObserver,ClearIsNotBusyAuthority	VerifiedClearReevaluatesIdle
 input-single-path/HerdrBusyReobserveClearEarlyBefore.cfg	HerdrBusyReobserve	-	HealthyRecoveryDelivers,VerifiedClearReevaluatesIdle
 input-single-path/HerdrBusyReobserveClearEarlyFixed.cfg	HerdrBusyReobserve	-	-

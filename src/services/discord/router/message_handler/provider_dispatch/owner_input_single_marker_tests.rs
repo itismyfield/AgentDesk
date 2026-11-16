@@ -535,10 +535,10 @@ async fn busy_active_codex_keeps_mailbox_op() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn busy_active_herdr_keeps_mailbox_op() {
+async fn busy_active_herdr_defers_mailbox_op() {
     if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::single_marker::",
-        "busy_active_herdr_keeps_mailbox_op"
+        "busy_active_herdr_defers_mailbox_op"
     )) {
         return;
     }
@@ -549,7 +549,10 @@ async fn busy_active_herdr_keeps_mailbox_op() {
     let _gate = discord::router::busy_inject_support::open_gate(rig.channel.get());
     assert!(crate::config::session_hosts::herdr_endpoint(rig.channel.get()).is_some());
     let message = busy_active_arrival(&rig, false).await;
-    assert_eq!(active_message_ops(&rig, message), [('📬', true)]);
+    assert_eq!(
+        active_message_ops(&rig, message),
+        Vec::<(char, bool)>::new()
+    );
 }
 
 fn pause_next_load(rig: &IntakeRig) -> tokio::net::UnixListener {
