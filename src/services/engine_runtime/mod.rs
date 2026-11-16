@@ -1088,7 +1088,17 @@ pub(in crate::services) mod lease {
         })
         }
 
-        pub(in crate::services) fn release_exact(
+        pub(in crate::services) fn release_exact_for_tests(
+            &self,
+            pinned: &Arc<Self>,
+            key: &DeliveryLeaseKey,
+            token: LeaseToken,
+            coordinate: ConsumedCoordinate,
+        ) -> bool {
+            self.release_exact(pinned, key, token, coordinate, |_| true)
+        }
+
+        fn release_exact(
             &self,
             pinned: &Arc<Self>,
             key: &DeliveryLeaseKey,

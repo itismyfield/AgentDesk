@@ -251,6 +251,7 @@ jobs:
             # PR-time Windows lane fail closed. Keep the broad positive list in
             # sync with `rust_compile` and document every relay exception.
             cross_os_rust:
+              - 'src/services/engine_runtime/relay_state.rs'
               - 'src/services/decision_gate/**'
               - 'scripts/ci/run-writer-namespace-windows-targets.sh'
               - 'scripts/exact_rust_test_proof.py'
@@ -1711,7 +1712,7 @@ jobs:
               - 'src/services/discord/session_relay_sink/terminal_handoff.rs'
               - 'src/services/discord/session_relay_sink/delivery_orchestration_tests.rs'
               - 'src/services/discord/session_relay_sink/tests.rs'
-              - 'src/services/discord/tmux_watcher_registry/fences.rs'
+              - 'src/services/engine_runtime/relay_state.rs'
               - 'src/services/discord/tmux_watcher_registry.rs'
               - 'src/services/discord/tmux_watcher_registry_restore_tests.rs'
               - 'src/services/discord/destructive_cancel_gate.rs'

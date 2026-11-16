@@ -84,9 +84,21 @@ fn transitions_are_single_lock_raii_and_keep_owned_identity() {
     assert_unleased(&cell);
 
     let transport_error =
-        PinnedLeaseCell::acquire(Arc::clone(&cell), lease_key, coordinate(41), 300)
+        PinnedLeaseCell::acquire(Arc::clone(&cell), lease_key.clone(), coordinate(41), 300)
             .expect("transport attempt");
     drop(transport_error);
+    assert_unleased(&cell);
+
+    let acquired = PinnedLeaseCell::acquire(Arc::clone(&cell), lease_key, coordinate(41), 400)
+        .expect("uncommitted attempt");
+    let before = super::super::payload_lock_entries_for_test();
+    let released = acquired
+        .release()
+        .unwrap_or_else(|_| panic!("release acquired"));
+    assert_eq!(super::super::payload_lock_entries_for_test() - before, 1);
+    assert_eq!(Arc::strong_count(&cell), 2);
+    drop(released);
+    assert_eq!(Arc::strong_count(&cell), 1);
     assert_unleased(&cell);
 }
 
@@ -204,7 +216,7 @@ fn commit_requires_every_exact_identity_field() {
 #[test]
 fn release_requires_every_exact_identity_field() {
     assert_identity_mismatches(|owner, pinned, key, token, c| {
-        owner.release_exact(pinned, key, token, c, |_| true)
+        owner.release_exact_for_tests(pinned, key, token, c)
     });
 }
 
