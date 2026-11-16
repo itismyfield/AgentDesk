@@ -1,0 +1,2 @@
+key: 690-tui-o-writer-thread-child-activation
+| `tui-o-writer` thread child activation (#8118 O-b) | `33d1f4b5a9` | Before: `NoLegacyBody` (main leaves the child to Legacy); fourteen cause mutants RED across gate, adoption, floor order, ready, boot scan, refresh, rollback guard, retirement, late handoff wait, gate-held body and dormant inheritance | `WriterThreadActive` model, After GREEN with liveness (4337 states). The guard-before-stop race (`NoRecheck`) is a finding for the activation unit. [Report](tui-o-writer/thread-active.report.md) |

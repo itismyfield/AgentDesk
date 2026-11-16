@@ -3559,6 +3559,13 @@ mod tests {
 
     #[test]
     fn task_complete_synthesizes_composer_ready_for_tmux_session() {
+        // Readiness comes from this test's envelope; another test's tmux must not answer it.
+        let _pane = super::super::host_input::spy::SpyGuard::install(
+            super::super::host_input::spy::SpyState {
+                dead: true,
+                ..Default::default()
+            },
+        );
         let session = format!(
             "agentdesk-codex-rollout-composer-ready-{}",
             uuid::Uuid::new_v4().simple()
@@ -3604,6 +3611,13 @@ mod tests {
 
     #[test]
     fn item_completed_agent_message_synthesizes_composer_ready_without_relaying_text() {
+        // Readiness comes from this test's envelope; another test's tmux must not answer it.
+        let _pane = super::super::host_input::spy::SpyGuard::install(
+            super::super::host_input::spy::SpyState {
+                dead: true,
+                ..Default::default()
+            },
+        );
         let session = format!(
             "agentdesk-codex-rollout-item-ready-{}",
             uuid::Uuid::new_v4().simple()

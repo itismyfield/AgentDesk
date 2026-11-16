@@ -348,7 +348,7 @@ A-fence는 기존 publisher/cleanup의 active 직렬화 변경으로 독립 리�
 | `turn_orchestrator/pending_queue_persistence/queued_recovery.rs:53,54,59,87,90,104,111,112,187` | load_pending_queues_checked / read_catalog / v2_channels / v2_held_sources | AHoldsInput/ABoot/source fence; legacy-only parse는 명시 오류 보존 |
 | `turn_orchestrator/pending_queue_persistence/snapshot_io.rs:101` | load_channel_pending_queue_checked | AHoldsInput/ABoot/source fence; legacy-only parse는 명시 오류 보존 |
 | `turn_orchestrator/policy_close.rs:285,341,362` | close / fence / reconcile | AChange(epoch); 기존 release fence 별도 |
-| `turn_orchestrator/queued_head.rs:97,108,112` | is_set / read_snapshot_meta | AHoldsInput/ABoot/source fence; legacy-only parse는 명시 오류 보존 |
+| `turn_orchestrator/queued_head.rs:84,108,112` | is_set / read_snapshot_meta | AHoldsInput/ABoot/source fence; legacy-only parse는 명시 오류 보존 |
 | `turn_orchestrator/queued_head/compat.rs:7,12,13,20,38,42,44` | (module) / holds_input / inspect / v2_holds_input | AHoldsInput/ABoot/source fence; legacy-only parse는 명시 오류 보존 |
 | `turn_orchestrator/queued_head/snapshot.rs:29` | parse_snapshot | AHoldsInput/ABoot/source fence; legacy-only parse는 명시 오류 보존 |
 | `turn_orchestrator/queued_head/v2/origin.rs:3,127` | (module) / waiting_origin | AHoldsInput/ABoot/source fence; legacy-only parse는 명시 오류 보존 |

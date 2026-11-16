@@ -3,6 +3,7 @@ pub(crate) mod canary;
 pub(crate) mod execution_end;
 pub(crate) mod host_input;
 pub mod input;
+pub(crate) mod readiness;
 pub mod rollout_index;
 pub mod rollout_tail;
 pub mod session;

@@ -386,18 +386,25 @@ class FlipReadinessTests(unittest.TestCase):
         tests = self.root / "src/services/discord/funnel_tests.rs"
         tests.parent.mkdir(parents=True)
         tests.write_text("#[test]\nfn o_delegated_funnel_cut() {}\n", encoding="utf-8")
+        child = self.root / "src/services/tui_o/child_funnel_tests.rs"
+        child.parent.mkdir(parents=True)
+        child.write_text("#[test]\nfn child_funnel_cut() {}\n", encoding="utf-8")
 
     def readiness(self, **overrides) -> tuple[bool, str]:
         maps = {
             "CENSUS": {"sink.rs": ("W20", "CUT_D")},
             "FLIP_READY_TESTS": {"W20": ("o_delegated_funnel_cut",)},
+            "CHILD_FLIP_READY_TESTS": {"W20": ("child_funnel_cut",)},
             **overrides,
         }
         with mock.patch.multiple(census, **maps):
             return census.flip_readiness(self.root)
 
     def test_complete_funnels_are_flip_ready(self) -> None:
-        self.assertEqual(self.readiness(), (True, "flip_ready=true: 1 funnel tests over 1 rows"))
+        self.assertEqual(
+            self.readiness(),
+            (True, "flip_ready=true: 1 funnel tests over 1 rows, 1 child tests"),
+        )
 
     def test_each_gap_keeps_flip_ready_false(self) -> None:
         gaps = {
@@ -406,12 +413,30 @@ class FlipReadinessTests(unittest.TestCase):
             "funnel tests missing from src/: o_delegated_gone": (
                 "FLIP_READY_TESTS", {"W20": ("o_delegated_funnel_cut", "o_delegated_gone")}
             ),
+            "funnels without a child test: W20": ("CHILD_FLIP_READY_TESTS", {}),
+            "funnel tests missing from src/: child_gone": (
+                "CHILD_FLIP_READY_TESTS", {"W20": ("child_gone",)}
+            ),
+            "child rows name funnel tests: o_delegated_funnel_cut": (
+                "CHILD_FLIP_READY_TESTS", {"W20": ("o_delegated_funnel_cut",)}
+            ),
+            "child tests for unknown funnels: W99": (
+                "CHILD_FLIP_READY_TESTS", {"W20": ("child_funnel_cut",), "W99": ("child_funnel_cut",)}
+            ),
         }
         for reason, (key, value) in gaps.items():
             with self.subTest(reason=reason):
                 ready, verdict = self.readiness(**{key: value})
                 self.assertFalse(ready, verdict)
                 self.assertIn(reason, verdict)
+
+    def test_one_child_test_cannot_vouch_for_two_funnels(self) -> None:
+        ready, verdict = self.readiness(
+            FLIP_READY_TESTS={"W20": ("o_delegated_funnel_cut",), "W33": ("o_delegated_funnel_cut",)},
+            CHILD_FLIP_READY_TESTS={"W20": ("child_funnel_cut",), "W33": ("child_funnel_cut",)},
+        )
+        self.assertFalse(ready, verdict)
+        self.assertIn("child tests repeated across rows: child_funnel_cut", verdict)
 
     def test_empty_funnel_blocks_readiness_with_another_funnel_present(self) -> None:
         ready, verdict = self.readiness(FLIP_READY_TESTS={

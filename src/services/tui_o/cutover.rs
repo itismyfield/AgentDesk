@@ -16,6 +16,10 @@ pub(crate) use channel_gate::{
     o_owns_tui_output_for_channel_reserving, peek_o_owns_tui_output_for_channel,
     peek_o_owns_tui_output_for_channel_tmux,
 };
+#[cfg(all(test, unix))]
+mod child_funnel_tests;
+#[cfg(all(test, unix))]
+mod thread_child_record_tests;
 #[cfg(test)]
 pub(crate) use channel_gate::{
     claims_judged, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
@@ -32,19 +36,19 @@ pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, Option<C
         let Some(snapshot) = snapshot else {
             return Vec::new();
         };
-        let channels = snapshot.channels();
-        let judged = |&channel: &u64| {
+        let judged = |channel: u64| {
             let kind = snapshot.kind(channel);
-            let hosted = channel_policy::owns_output(channels, channel, kind);
+            let hosted = snapshot.hosts_output(channel);
             let blocked = snapshot
                 .execution(channel)
                 .is_some_and(|view| view.permit.is_err());
+            // A retired or mid-transition child keeps its adoption and gets no writer.
             let candidate = snapshot
                 .output_candidate(channel)
-                .filter(|_| hosted && !blocked);
+                .filter(|_| hosted && !blocked && !snapshot.child_dormant(channel));
             (channel, kind, candidate)
         };
-        channels.iter().map(judged).collect()
+        snapshot.output_channels().into_iter().map(judged).collect()
     };
     test_override::with_channels(evaluate)
 }
@@ -55,8 +59,9 @@ fn owned_channels() -> Vec<(u64, RuntimeHandoffKind)> {
         let Some(snapshot) = snapshot else {
             return Vec::new();
         };
-        let owned = |&channel: &u64| Some((channel, owned_in(snapshot, channel)?));
-        snapshot.channels().iter().filter_map(owned).collect()
+        let owned = |channel: u64| Some((channel, owned_in(snapshot, channel)?));
+        let channels = snapshot.output_channels();
+        channels.into_iter().filter_map(owned).collect()
     })
 }
 
@@ -67,14 +72,151 @@ fn owned_kind(channel: u64) -> Option<RuntimeHandoffKind> {
 
 fn owned_in(snapshot: &BootChannels, channel: u64) -> Option<RuntimeHandoffKind> {
     let kind = snapshot.kind(channel);
-    if snapshot.execution(channel).is_some() {
+    let child = snapshot.child(channel);
+    let late_child = matches!(&child, Some(Ok(c)) if c.body_owner() == Some(false));
+    if let Some(view) = snapshot.execution(channel)
+        && (view.permit.is_err() || !late_child)
+    {
         return kind;
     }
-    let hosted = channel_policy::owns_output(snapshot.channels(), channel, kind);
-    snapshot
-        .output_candidate(channel)
-        .filter(|c| hosted && c.peek().owned())?;
-    kind
+    // A child is O's unless its late reservation still waits for Legacy's open turn.
+    let kept = match child {
+        Some(Ok(child)) => child.body_owner() != Some(false),
+        _ => snapshot
+            .output_candidate(channel)
+            .is_some_and(|c| c.peek().owned()),
+    };
+    kind.filter(|_| kept && snapshot.hosts_output(channel))
+}
+
+/// Whether the shared view knows `channel` as a child it cannot resolve: held, never Legacy's.
+fn child_held(channel: u64) -> bool {
+    test_override::with_channels(|snapshot| {
+        snapshot.is_some_and(|snapshot| matches!(snapshot.child(channel), Some(Err(_))))
+    })
+}
+
+/// Whether `channel` is a child whose store is retired or mid-transition: held until an input at
+/// its placement or claim boundary supersedes the retirement.
+fn child_dormant(channel: u64) -> bool {
+    test_override::with_channels(|snapshot| snapshot.is_some_and(|s| s.child_dormant(channel)))
+}
+
+/// Whether the shared view knows `channel` as a thread child, resolved or not.
+pub(crate) fn thread_child(channel: u64) -> bool {
+    test_override::with_channels(|snapshot| snapshot.is_some_and(|s| s.child(channel).is_some()))
+}
+
+/// A checked Discord read of one channel: `Ok(None)` for a channel that is no guild channel, an
+/// error when the read itself failed. The Discord runtime installs it once per process.
+pub(crate) type ChannelLookup = std::sync::Arc<
+    dyn Fn(
+            u64,
+        ) -> futures::future::BoxFuture<
+            'static,
+            Result<Option<poise::serenity_prelude::GuildChannel>, String>,
+        > + Send
+        + Sync,
+>;
+
+static CHANNEL_LOOKUP: std::sync::OnceLock<ChannelLookup> = std::sync::OnceLock::new();
+
+pub(crate) fn install_channel_lookup(lookup: ChannelLookup) {
+    let _ = CHANNEL_LOOKUP.set(lookup);
+}
+
+/// Before an input is placed on a boot reservation, its parent is read once: a failed read holds
+/// the input, and a channel that is no thread of an O parent stays Legacy's for good.
+pub(crate) async fn resolve_reserved_child(channel: u64) -> Result<(), String> {
+    resolve_reserved_with(channel, CHANNEL_LOOKUP.get().cloned()).await
+}
+
+async fn resolve_reserved_with(channel: u64, lookup: Option<ChannelLookup>) -> Result<(), String> {
+    let Some(snapshot) = boot_snapshot() else {
+        return Ok(());
+    };
+    if snapshot.unresolved_child(channel).is_none() {
+        return Ok(());
+    }
+    let lookup = lookup.ok_or_else(|| format!("O thread {channel} has no checked parent read"))?;
+    let read = lookup(channel).await;
+    match read.map_err(|error| format!("O thread {channel} parent read failed: {error}"))? {
+        Some(read) if record_in(&snapshot, &read, false) => {}
+        _ => snapshot.release_reservation(channel),
+    }
+    Ok(())
+}
+
+/// Records a thread Discord returned under an O parent; `fresh` only for a thread this process
+/// just created, where no Legacy turn has run. Returns whether O now hosts it.
+pub(crate) fn record_thread_child(
+    channel: &poise::serenity_prelude::GuildChannel,
+    fresh: bool,
+) -> bool {
+    test_override::with_channels(|snapshot| snapshot.is_some_and(|s| record_in(s, channel, fresh)))
+}
+
+/// As `record_thread_child` for a channel known by id, read through the checked lookup; only
+/// when `hinted_parent`, which is no evidence, names a channel O selects.
+pub(crate) async fn record_thread_child_by_id(
+    channel: u64,
+    hinted_parent: u64,
+) -> Result<bool, String> {
+    let selected = test_override::with_channels(|snapshot| {
+        snapshot
+            .is_some_and(|s| s.channels().contains(&hinted_parent) && s.child(channel).is_none())
+    });
+    if !selected {
+        return Ok(false);
+    }
+    let lookup = CHANNEL_LOOKUP.get().cloned();
+    let lookup = lookup.ok_or_else(|| "no checked channel read installed".to_string())?;
+    Ok(lookup(channel)
+        .await?
+        .is_some_and(|read| record_thread_child(&read, false)))
+}
+
+fn record_in(
+    snapshot: &BootChannels,
+    channel: &poise::serenity_prelude::GuildChannel,
+    fresh: bool,
+) -> bool {
+    use crate::services::session_host::surface_policy::VerifiedSurface;
+    let parent = channel.parent_id.map(|parent| parent.get());
+    let Some(kind) = parent.and_then(|parent| snapshot.kind(parent)) else {
+        return false;
+    };
+    let Some(surface) = VerifiedSurface::from_discord(channel, kind) else {
+        return false;
+    };
+    snapshot.resolve_child(channel.id.get(), surface, fresh)
+}
+
+/// What thread_gc pins for `channel` before its row delete; none unless it is an active child.
+pub(crate) fn child_retirement_ticket(channel: u64) -> Option<channel_policy::RetirementTicket> {
+    test_override::with_channels(|snapshot| snapshot?.child_retirement_ticket(channel))
+}
+
+/// A claimed input row reached its child again; see `BootChannels::child_input_arrived`.
+fn claimed_child_input(channel: u64) -> Result<(), String> {
+    test_override::with_channels(|snapshot| {
+        snapshot.map_or(Ok(()), |snapshot| snapshot.child_input_arrived(channel))
+    })
+}
+
+/// Every known child that cannot be resolved; they carry no kind, so no provider may claim them.
+fn held_children() -> Vec<u64> {
+    test_override::with_channels(|snapshot| {
+        let Some(snapshot) = snapshot else {
+            return Vec::new();
+        };
+        let held = |channel: &u64| matches!(snapshot.child(*channel), Some(Err(_)));
+        snapshot
+            .output_channels()
+            .into_iter()
+            .filter(held)
+            .collect()
+    })
 }
 
 /// The boot turn selection while a selected Codex channel O owns has not confirmed turn mode.
@@ -87,12 +229,19 @@ pub(crate) fn codex_turn_awaited(
         return None;
     }
     let turn = test_override::with_channels(|snapshot| snapshot.map(|s| s.turn().clone()));
-    turn.filter(|turn| turn.selects(channel))
+    turn.filter(|turn| turn.selects(policy_channel(channel)))
 }
 
 /// Whether the boot turn selection names `channel`, so a Codex input there may wait for turn mode.
 pub(crate) fn turn_selected(channel: u64) -> bool {
-    test_override::with_channels(|snapshot| snapshot.is_some_and(|s| s.turn().selects(channel)))
+    test_override::with_channels(|snapshot| {
+        snapshot.is_some_and(|s| s.turn().selects(s.policy_channel(channel)))
+    })
+}
+
+/// The channel whose boot policy governs `channel`: a resolved thread child's parent, or itself.
+pub(crate) fn policy_channel(channel: u64) -> u64 {
+    test_override::with_channels(|snapshot| snapshot.map_or(channel, |s| s.policy_channel(channel)))
 }
 
 /// The legacy mark used by output-free adoption fixtures.
@@ -222,8 +371,14 @@ fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
             return Ok(());
         };
         // An unparseable destination may be any selected channel.
-        if channel.is_some_and(|channel| !snapshot.channels().contains(&channel)) {
+        let child = channel.and_then(|channel| snapshot.child(channel));
+        if channel.is_some_and(|channel| !snapshot.channels().contains(&channel)) && child.is_none()
+        {
             return Ok(());
+        }
+        // The input stales any older retirement ticket and supersedes a retired store.
+        if let Some(channel) = channel.filter(|_| child.is_some()) {
+            snapshot.child_input_arrived(channel)?;
         }
         if let Some(channel) = channel
             && let Some(view) = snapshot.execution(channel)
@@ -236,7 +391,8 @@ fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
                 "O channel {channel} is served only on O home {home}"
             ));
         }
-        if let Some(channel) = channel
+        // A placement never releases a child's adoption to Legacy.
+        if let Some(channel) = channel.filter(|_| child.is_none())
             && let Some(candidate) = snapshot.candidate(channel)
         {
             candidate.claim(channel);
@@ -303,9 +459,69 @@ pub(crate) mod test_override {
         static CHANNELS: RefCell<Option<BootChannels>> = const { RefCell::new(None) };
     }
 
+    /// Set to a file path, every forced channel is a recorded thread child of its own selected
+    /// parent instead, and each forced child is appended to that file.
+    pub(crate) const AS_CHILD_ENV: &str = "ADK_TEST_O_TUI_AS_CHILD";
+
     /// Selected channels read as committed, as if each already had its store.
     fn snapshot(channels: &[(u64, RuntimeHandoffKind)]) -> BootChannels {
-        unadopted(channels).adopted(Adoption::Committed)
+        match std::env::var_os(AS_CHILD_ENV) {
+            Some(marks) => as_children(channels, std::path::Path::new(&marks)),
+            None => unadopted(channels).adopted(Adoption::Committed),
+        }
+    }
+
+    fn as_children(
+        channels: &[(u64, RuntimeHandoffKind)],
+        marks: &std::path::Path,
+    ) -> BootChannels {
+        use std::io::Write;
+        let parent = |channel: u64| channel ^ (1 << 52);
+        let parents: Vec<_> = channels
+            .iter()
+            .map(|&(id, kind)| (parent(id), kind))
+            .collect();
+        let boot = unadopted(&parents).adopted(Adoption::Committed);
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(marks)
+            .unwrap();
+        for &(channel, _) in channels {
+            boot.record_child_fixture(&crate::services::tui_o::store::Initialized {
+                channel,
+                sources: Vec::new(),
+                initial_anchor: 0,
+                build_digest: "fixture".into(),
+                at: chrono::Utc::now(),
+                policy_parent: Some(parent(channel)),
+            });
+            writeln!(file, "{channel} {}", parent(channel)).unwrap();
+        }
+        boot
+    }
+
+    /// Re-runs the funnel test at crate path `name` with its O channels as thread children.
+    #[cfg(unix)]
+    pub(crate) fn funnel_as_child(name: &str) {
+        let marks = tempfile::NamedTempFile::new().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(AS_CHILD_ENV, marks.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("1 passed; 0 failed; 0 ignored;"),
+            "{stdout}"
+        );
+        let forced = std::fs::read_to_string(marks.path()).unwrap();
+        assert!(
+            !forced.trim().is_empty(),
+            "{name} forced no O channel as a child"
+        );
     }
 
     fn unadopted(channels: &[(u64, RuntimeHandoffKind)]) -> BootChannels {
