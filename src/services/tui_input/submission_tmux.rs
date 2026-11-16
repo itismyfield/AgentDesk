@@ -1,12 +1,9 @@
 //! Bounded tmux transport for submission; it has no session cleanup authority.
 
-use std::io::Write;
 use std::process::Output;
 
-use super::bounded_tmux::run_bounded_tmux;
 use crate::services::claude_tui::host_input::InputTransport;
-use crate::services::platform::binary_resolver::runtime_command;
-use crate::services::session_host::{HostKey, tmux_key_name};
+use crate::services::session_host::{HostKey, SubmitPayload, TmuxHost};
 
 pub(crate) mod guarded;
 
@@ -14,22 +11,7 @@ pub(crate) struct SubmissionTmux;
 
 impl SubmissionTmux {
     fn run(&self, args: &[&str]) -> Result<Output, String> {
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    let mut command = runtime_command("tmux").map_err(|e| e.to_string())?;
-                    crate::services::platform::tmux::input_command(&mut command, args)
-                        .map_err(|e| e.to_string())?;
-                    tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(|e| e.to_string())?
-                        .block_on(run_bounded_tmux(&mut command))
-                        .map_err(|e| e.to_string())
-                })
-                .join()
-                .unwrap_or_else(|_| Err("tmux submission worker panicked".into()))
-        })
+        TmuxHost.run_submission(args)
     }
 
     pub(crate) fn pane_size(&self, session: &str) -> Option<(usize, usize)> {
@@ -76,20 +58,15 @@ impl SubmissionTmux {
 
 impl InputTransport for SubmissionTmux {
     fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String> {
-        crate::services::platform::tmux::session_identity::require_managed(session)?;
-        let target = format!("={session}:");
-        super::writer_lease::content("tmux", session, || {
-            self.run(&["send-keys", "-t", &target, "-l", "--", text])
-        })
+        TmuxHost
+            .submission_input(session, SubmitPayload::Literal(text))
+            .into_output()
     }
 
     fn load_buffer(&mut self, buffer: &str, text: &str) -> Result<Output, String> {
-        // The bounded runner closes stdin, so the buffer stays in a file until tmux exits.
-        let mut file = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
-        file.write_all(text.as_bytes())
-            .and_then(|()| file.flush())
-            .map_err(|e| e.to_string())?;
-        self.run(&["load-buffer", "-b", buffer, &file.path().to_string_lossy()])
+        TmuxHost
+            .submission_input("", SubmitPayload::LoadText { buffer, text })
+            .into_output()
     }
 
     fn paste_buffer(
@@ -98,22 +75,15 @@ impl InputTransport for SubmissionTmux {
         buffer: &str,
         delete: bool,
     ) -> Result<Output, String> {
-        crate::services::platform::tmux::session_identity::require_managed(session)?;
-        let target = format!("={session}:");
-        let mut args = vec!["paste-buffer", "-p", "-r"];
-        if delete {
-            args.push("-d");
-        }
-        args.extend(["-b", buffer, "-t", &target]);
-        super::writer_lease::content("tmux", session, || self.run(&args))
+        TmuxHost
+            .submission_input(session, SubmitPayload::Paste { buffer, delete })
+            .into_output()
     }
 
     fn send_keys(&mut self, session: &str, keys: &[HostKey]) -> Result<Output, String> {
-        crate::services::platform::tmux::session_identity::require_managed(session)?;
-        let target = format!("={session}:");
-        let mut args = vec!["send-keys", "-t", &target];
-        args.extend(keys.iter().map(|key| tmux_key_name(*key)));
-        self.run(&args)
+        TmuxHost
+            .submission_input(session, SubmitPayload::Keys(keys))
+            .into_output()
     }
 
     fn capture(&mut self, session: &str, scroll_back: i32) -> Option<String> {

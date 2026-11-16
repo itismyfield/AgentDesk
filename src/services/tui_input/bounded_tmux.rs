@@ -62,7 +62,7 @@ pub fn spawn_bounded(handle: &Handle, command: &mut Command) -> Result<Pending, 
     spawn_with_budget(handle, command, Duration::from_secs(5))
 }
 
-pub(super) async fn run_with_budget(
+pub(crate) async fn run_with_budget(
     command: &mut Command,
     budget: Duration,
 ) -> Result<Output, BoundedTmuxError> {

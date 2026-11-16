@@ -793,11 +793,11 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       RELAY_AUTHORITY_MUTATION_SHARD_INDEX: ${{ matrix.shard }}
-      RELAY_AUTHORITY_MUTATION_SHARD_TOTAL: "3"
+      RELAY_AUTHORITY_MUTATION_SHARD_TOTAL: "7"
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2]
+        shard: [0, 1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
 

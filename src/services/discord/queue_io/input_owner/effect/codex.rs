@@ -189,7 +189,12 @@ pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String, channel: u64)
             let loaded = tempfile::NamedTempFile::new().ok().filter(|file| {
                 let path = file.path().to_string_lossy().into_owned();
                 std::fs::write(&path, &frame).is_ok()
-                    && pane.ok(&["load-buffer", "-b", &buffer, &path]).is_some()
+                    && pane
+                        .input_ok(crate::services::session_host::SubmitPayload::LoadFile {
+                            buffer: &buffer,
+                            path: &path,
+                        })
+                        .is_some()
             });
             if loaded.is_none() {
                 super::arm_cause(channel, pane.clone(), super::loads(pane.clone()));
@@ -200,20 +205,10 @@ pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String, channel: u64)
                 return refused("owner_refused".into(), false);
             }
             owner_input::keyed();
-            let paste = |target: &str| {
-                [
-                    "paste-buffer",
-                    "-p",
-                    "-r",
-                    "-d",
-                    "-b",
-                    &buffer,
-                    "-t",
-                    target,
-                ]
-                .map(String::from)
-            };
-            match codex_inject::key(&pane, paste) {
+            match codex_inject::key(
+                &pane,
+                crate::services::session_host::PinnedInput::Paste { buffer: &buffer },
+            ) {
                 Key::Applied => {}
                 Key::Held => {
                     owner_input::first_key_held("pane_moved");
@@ -222,9 +217,7 @@ pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String, channel: u64)
                 Key::Failed => return Completion::WriteUncertain("paste_failed".into()),
             }
             std::thread::sleep(codex_inject::TIMING.settle);
-            match codex_inject::key(&pane, |target: &str| {
-                ["send-keys", "-t", target, "Enter"].map(String::from)
-            }) {
+            match codex_inject::key(&pane, crate::services::session_host::PinnedInput::Enter) {
                 Key::Applied => {
                     if before
                         .as_deref()

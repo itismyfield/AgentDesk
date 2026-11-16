@@ -1,0 +1,15 @@
+{
+  "files": {
+    "Cargo.toml": "[package]\nname=\"s05\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[dependencies]\ntracing=\"0.1\"\n",
+    "src/lib.rs": "pub mod services;\n",
+    "src/services/mod.rs": "pub mod session_host; pub mod termination_audit; pub mod unrelated;\n",
+    "src/services/session_host/mod.rs": "pub mod herdr_gate;\n",
+    "src/services/session_host/herdr_gate.rs": "pub fn convert(_: crate::services::termination_audit::host_terminate::herdr_terminate::HerdrTerminateResult) {\n    tracing::warn!(\"first\");\n    tracing::warn!(\"second\");\n}\n",
+    "src/services/termination_audit/mod.rs": "pub mod host_terminate;\n",
+    "src/services/termination_audit/host_terminate.rs": "pub struct Warrant;\npub mod herdr_terminate { pub enum HerdrTerminateResult { Done } }\n",
+    "src/services/unrelated.rs": "pub fn keep() { tracing::warn!(\"outside reduction\"); }\n"
+  },
+  "moved": "pub mod contract { pub struct Warrant; }\npub use contract::Warrant;\npub mod herdr_terminate {\n    pub mod contract { pub enum HerdrTerminateResult { Done } }\n    pub use contract::HerdrTerminateResult;\n}\n",
+  "mapping": "schema_version=1\n[layers]\nadapter=1\napplication=2\nassembly=3\n[[rules]]\nprefix=\"\"\nlayer=\"assembly\"\nreason=\"fixture\"\n[[rules]]\nprefix=\"services::session_host\"\nlayer=\"adapter\"\nreason=\"fixture\"\n[[rules]]\nprefix=\"services::termination_audit\"\nlayer=\"application\"\nreason=\"fixture\"\n[[rules]]\nprefix=\"services::unrelated\"\nlayer=\"assembly\"\nreason=\"fixture\"\n",
+  "rules": "[[rules]]\nprefix=\"services::termination_audit::host_terminate::contract\"\nlayer=\"adapter\"\nreason=\"value contract\"\n[[rules]]\nprefix=\"services::termination_audit::host_terminate::herdr_terminate::contract\"\nlayer=\"adapter\"\nreason=\"value contract\"\n"
+}

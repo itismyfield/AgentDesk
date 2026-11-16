@@ -255,7 +255,7 @@ async fn interrupt_on(
         let session_for_send = tmux_session_name.to_string();
         let keys = plan.keys.to_vec();
         let send_result = tokio::task::spawn_blocking(move || {
-            crate::services::platform::tmux::send_keys(&session_for_send, &keys)
+            crate::services::session_host::TmuxHost.interrupt_keys(&session_for_send, &keys)
         })
         .await;
 
