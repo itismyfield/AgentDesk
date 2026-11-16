@@ -1,0 +1,2 @@
+key: 700-tui-o-writer-thread-child-store-retirement
+| `tui-o-writer` thread child store retirement (#8118 O-b) | `ed19fbbb54` | Before: `RetireResolves` (a GC success reaches no lifecycle owner); seven cause mutants RED across the generation/epoch compare, the mark, the joined stop, the supersede, the delete precondition, boot rehydration and the debt read | New `WriterThreadRetire` model, Fixed GREEN with both liveness properties (2400 states). A request is lost by a crash and is not retried. [Report](tui-o-writer/thread-retire.report.md) |

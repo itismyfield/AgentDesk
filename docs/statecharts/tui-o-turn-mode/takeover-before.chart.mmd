@@ -1,0 +1,36 @@
+---
+title: "Codex takeover 이후 입력 재개"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the TakeoverEventuallyConfirms bug
+    lg1: Repeats forever, so TakeoverEventuallyConfirms breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: 원본 종료 증거 대기
+  s1: 기존 턴 종료 대기
+  s2: 원본 압축 #183; 확정 대기
+  s3: 후속 원본 진행 #183; 확정 대기
+  s4: 원본 턴 종료 #183; 확정 대기
+  s5: 턴 모드 확정
+  s6: 대기 입력 전달됨
+  [*] --> s0
+  [*] --> s1
+  [*] --> s2
+  [*] --> s3
+  s0 --> s3: 후속 원본으로 이동
+  s0 --> s4: 원본 턴 종료
+  s1 --> s0: 기존 턴 정리
+  s2 --> s2: 재시작
+  s3 --> s2: 종료 원본 압축
+  s3 --> s5: 턴 모드 확인
+  s1 --> s2: 기존 턴 정리
+  s1 --> s3: 기존 턴 정리
+  s4 --> s2: 종료 원본 압축
+  s4 --> s3: 후속 원본으로 이동
+  s4 --> s5: 턴 모드 확인
+  s5 --> s6: 보관한 입력 전달
+  s1 --> s4: 기존 턴 정리
+  class s2 bugPath
+  class s2 repeats
