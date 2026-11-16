@@ -2,6 +2,8 @@
 //! in-process server that, like Herdr, answers the one request a connection carries and closes.
 #![cfg(unix)]
 
+#[path = "herdr_gate/enter_readmit_tests.rs"]
+mod enter_readmit_tests;
 #[path = "herdr_gate/notice_fence_tests.rs"]
 mod notice_fence_tests;
 
@@ -285,6 +287,10 @@ fn endpoint(server: &Server) -> HerdrEndpoint {
 }
 
 fn transport(server: &Server, pids: Vec<u32>) -> Arc<dyn HerdrTransport> {
+    transport_with(server, peers(pids))
+}
+
+fn transport_with(server: &Server, peers: PeerReader) -> Arc<dyn HerdrTransport> {
     let config = HerdrSocketConfig {
         io_timeout: Duration::from_millis(500),
         read_deadline: Duration::from_millis(500),
@@ -292,7 +298,7 @@ fn transport(server: &Server, pids: Vec<u32>) -> Arc<dyn HerdrTransport> {
         max_frame_bytes: MAX_FRAME_BYTES,
     };
     let socket = HerdrSocketTransport::new(&endpoint(server), config, LineJsonFraming);
-    Arc::new(socket.with_peer_reader(peers(pids)))
+    Arc::new(socket.with_peer_reader(peers))
 }
 
 type Restore = fn(&dyn HerdrTransport, &HerdrEndpoint) -> RestoreResume;
