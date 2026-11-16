@@ -76,6 +76,17 @@ class ClaudeLoginTests(TestCase):
         self.assertTrue(saved.read_text().endswith(tail))
         self.assertEqual(stat.S_IMODE(saved.stat().st_mode), 0o600)
 
+    def test_opt_in_observation_outlives_native_fresh_admission_and_bootstrap(self):
+        import re
+        from scripts.dev_instance import driver
+        native = (Path(__file__).resolve().parents[1]/'src/services/claude_tui/input.rs').read_text()
+        match = re.search(r'pub const FRESH_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs\((\d+)\);', native)
+        self.assertIsNotNone(match, 'review a changed native readiness expression')
+        fresh = int(match.group(1))
+        self.assertGreater(driver.observation_seconds({'claude_login': {}}), fresh+60)
+        self.assertLessEqual(driver.observation_seconds({'claude_login': {}}), driver.MAX_OBSERVE_SECONDS)
+        self.assertEqual(driver.observation_seconds({}), 120)
+
     def test_log_capture_without_opt_in_does_not_read_or_create_any_file(self):
         from scripts.dev_instance import driver
         manifest = self.fixture.prepare()

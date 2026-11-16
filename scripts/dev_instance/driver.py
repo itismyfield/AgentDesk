@@ -50,6 +50,10 @@ def admission_witness(root, provider, parent, thread, message, author):
         return None
 
 
+def observation_seconds(manifest):
+    return 300 if 'claude_login' in manifest else 120
+
+
 def preserve_instance_log(manifest):
     if 'claude_login' not in manifest:
         return None
