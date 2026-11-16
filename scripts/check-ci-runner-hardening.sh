@@ -762,7 +762,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 100, "job_sha256" => "b9a4e7ea687a54e297db3f60c62b7dd607ccaa896b7a74461bbc0e800c8484c5",
+    "job_timeout_minutes" => 100, "job_sha256" => "bf68473d54f1d35e5c9a4d98c9cea97172cd77f9619e17ab9d01e4dd821cc30c",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
@@ -790,7 +790,7 @@ targets = {
   "base_compare" => {
     "label" => "nextest base comparison job", "name" => "Rust tests base comparison",
     "needs" => %w[changes rust_build], "if" => built_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 60, "job_sha256" => "53a1a4957e3c354b92be97fa4911afe91746d33e687c4590b377d29643693a0d",
+    "job_timeout_minutes" => 60, "job_sha256" => "41081e071c6a78b00398c44a1eb991661e448f8f26b5f0a8cd104d3596473adf",
     "cargo_steps" => {
       # Dropping this step or changing its argv (a report-only diff) is rejected here.
       "Compare tests with the comparison base" => {
@@ -1197,7 +1197,7 @@ if lint.is_a?(Hash)
     errors << "job lint #{lint_tests_name} must keep #{key}=0" unless tests && (tests["env"] || {})[key] == "0"
   end
 end
-# PR N == main N == nightly N: the jobs differ only in needs and the main baseline upload; base_compare is PR-only.
+# The nextest jobs share execution policy; PR builds use more swap and main uploads a baseline.
 built_gate = "${{ !cancelled() && needs.rust_build.result == 'success' }}"
 baseline_upload = {"name" => "Upload nextest baseline", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-baseline", "path" => "${{ runner.temp }}/nextest/plan/plan.json", "if-no-files-found" => "error", "retention-days" => 14}}
 role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key) }.merge("steps" => Array(job["steps"]).reject { |step| role_step && step.is_a?(Hash) && step["name"] == role_step }) }
@@ -1208,7 +1208,13 @@ role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key
     next
   end
   errors << "main #{job_id} must keep needs #{needs.inspect} and if #{gate.inspect}" unless main_job["needs"] == needs && main_job["if"] == gate
-  errors << "main #{job_id} must equal the PR job apart from needs, if and the role step" unless role_free.(main_job, "Upload nextest baseline") == role_free.(pr_job, nil)
+  pr_shape = role_free.(pr_job, nil)
+  if job_id == "rust_build"
+    # Only this complete PR swap step may differ; extra inputs or step overrides stay visible.
+    approved_swap = {"name" => "Ensure swap for the lib test build", "uses" => "./.github/actions/ensure-swap", "with" => {"size-gb" => "24"}}
+    pr_shape = pr_shape.merge("steps" => pr_shape["steps"].map { |step| step == approved_swap ? step.reject { |key, _| key == "with" } : step })
+  end
+  errors << "main #{job_id} must equal the PR job apart from needs, if, the role step and the exact PR swap size" unless role_free.(main_job, "Upload nextest baseline") == pr_shape
   nightly_job = nightly_jobs[job_id]
   expected_nightly = role_free.(main_job, "Upload nextest baseline").merge(main_job.slice("needs", "if"))
   # Nightly keeps the strict retry policy: its plan differs from main only in that argument.

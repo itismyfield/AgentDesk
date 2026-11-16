@@ -335,7 +335,7 @@ pub(super) async fn kill_tmux_session_impl(
     let tmux_killed = if let Some(killed) = idle_tmux_kill_result {
         killed
     } else if tmux_was_alive {
-        crate::services::platform::tmux::kill_session(&tmux_name, reason)
+        crate::services::session_host::TmuxHost.kill(&tmux_name, reason)
     } else {
         false
     };

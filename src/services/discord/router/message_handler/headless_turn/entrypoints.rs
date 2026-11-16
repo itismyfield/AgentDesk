@@ -95,16 +95,30 @@ async fn owner_start_context(
     context
 }
 
-/// The session key a kept start's headless turn judges its host by, resolved as that turn does.
+/// The session key a headless turn runs under: its snapshot's or fresh routine's own label names
+/// it, else the channel does.
+pub(super) async fn headless_session_key(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    provider: &ProviderKind,
+    metadata: Option<&serde_json::Value>,
+    label: Option<&str>,
+) -> Option<String> {
+    let basis = headless_session_basis(metadata, label);
+    build_adk_session_key(shared, channel, provider, basis.as_deref()).await
+}
+
+/// The session key a kept start's headless turn runs under, built as that turn builds it.
+#[cfg(unix)]
 pub(in crate::services::discord) async fn owner_start_session_key(
     shared: &Arc<SharedData>,
     channel: ChannelId,
     context: &serde_json::Value,
 ) -> Option<String> {
     let context = owner_start_context(shared, context).await;
-    let metadata = Some(context["metadata"].clone()).filter(|m| !m.is_null());
-    let basis = headless_session_basis(metadata.as_ref(), context["synthetic_label"].as_str());
-    build_adk_session_key(shared, channel, &shared.provider, basis.as_deref()).await
+    let metadata = Some(&context["metadata"]).filter(|metadata| !metadata.is_null());
+    let label = context["synthetic_label"].as_str();
+    headless_session_key(shared, channel, &shared.provider, metadata, label).await
 }
 
 /// A start whose pane its channel's name gives, while the lookup of that name failed.

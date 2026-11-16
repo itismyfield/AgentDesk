@@ -169,38 +169,12 @@ pub(crate) fn owned_composer_capture(pane: &Pane) -> Result<String, Veto> {
 }
 
 /// An owner pins identity and rejects copy mode atomically with each payload key.
-pub(crate) fn key<const N: usize>(
+pub(crate) fn key(
     pane: &Pane,
-    command: impl Fn(&str) -> [String; N],
+    input: crate::services::session_host::PinnedInput<'_>,
 ) -> crate::services::claude_tui::busy_inject::stash::Key {
-    use crate::services::claude_tui::busy_inject::stash::{self, Key};
-    let (target, condition) = match owner_input::pinned() {
-        Ok(Some(pin)) => pin,
-        Ok(None) => return stash::key(pane, command),
-        Err(_) => return Key::Held,
-    };
-    let condition = format!("#{{&&:{condition},#{{==:#{{pane_in_mode}},0}}}}");
-    let applied = format!(
-        "{} ; display-message -p CODEX_OWNER_KEY_APPLIED",
-        command(&target).join(" ")
-    );
-    match pane
-        .ok(&[
-            "if-shell",
-            "-F",
-            "-t",
-            &target,
-            &condition,
-            &applied,
-            "display-message -p CODEX_OWNER_KEY_HELD",
-        ])
-        .as_deref()
-        .map(str::trim)
-    {
-        Some("CODEX_OWNER_KEY_APPLIED") => Key::Applied,
-        Some("CODEX_OWNER_KEY_HELD") => Key::Held,
-        _ => Key::Failed,
-    }
+    pane.input(crate::services::session_host::SubmitPayload::Pinned { input, codex: true })
+        .into_key()
 }
 
 fn composer_proof(pane: &Pane, owned: bool) -> Result<ComposerProof, Veto> {
@@ -352,7 +326,13 @@ fn inject_locked(
     }
     let buffer = format!("agentdesk-busy-inject-{}", request.nonce);
     let path = file.path().to_string_lossy().into_owned();
-    if pane.ok(&["load-buffer", "-b", &buffer, &path]).is_none() {
+    if pane
+        .input_ok(crate::services::session_host::SubmitPayload::LoadFile {
+            buffer: &buffer,
+            path: &path,
+        })
+        .is_none()
+    {
         return not_sent(Veto::LoadFailed);
     }
     let drop_buffer = || {
@@ -432,20 +412,10 @@ fn inject_locked(
     crate::services::claude_tui::owner_input::keyed();
     // After a write is attempted, its failure cannot prove that the pane took no input.
     use crate::services::claude_tui::busy_inject::stash::Key;
-    let paste = |target: &str| {
-        [
-            "paste-buffer",
-            "-p",
-            "-r",
-            "-d",
-            "-b",
-            &buffer,
-            "-t",
-            target,
-        ]
-        .map(String::from)
-    };
-    match key(pane, paste) {
+    match key(
+        pane,
+        crate::services::session_host::PinnedInput::Paste { buffer: &buffer },
+    ) {
         Key::Applied => {}
         #[cfg(unix)]
         Key::Held if owner_input::active() => {
@@ -461,8 +431,10 @@ fn inject_locked(
         _ => return unconfirmed(Unconfirmed::PasteFailed),
     }
     std::thread::sleep(timing.settle);
-    let enter = |target: &str| ["send-keys", "-t", target, "Enter"].map(String::from);
-    if !matches!(key(pane, enter), Key::Applied) {
+    if !matches!(
+        key(pane, crate::services::session_host::PinnedInput::Enter),
+        Key::Applied
+    ) {
         return unconfirmed(Unconfirmed::EnterFailed);
     }
     if append::mark(request.nonce, request.rollout, Admission::Admitted).is_ok() {

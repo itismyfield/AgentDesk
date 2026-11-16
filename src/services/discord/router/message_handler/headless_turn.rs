@@ -13,7 +13,7 @@ mod routine_metadata;
 use routine_metadata::{
     fresh_routine_turn, headless_session_basis, routine_metadata_agent_id,
     routine_metadata_role_binding, routine_tmux_session_name, scheduled_snapshot_session_label,
-    session_key_basis_override, valid_routine_metadata,
+    valid_routine_metadata,
 };
 
 use routine_metadata::persist_boundary_before_provider_clear;
@@ -145,11 +145,8 @@ async fn start_reserved_headless_turn_admitted(
         return Ok(outcome);
     }
     // A Herdr-configured channel is refused before this turn claims, resets or clears anything.
-    let session_key = || {
-        let basis = headless_session_basis(metadata.as_ref(), tmux_session_label.as_deref());
-        let provider = &provider;
-        async move { build_adk_session_key(shared, channel_id, provider, basis.as_deref()).await }
-    };
+    let (kept, label) = (metadata.as_ref(), tmux_session_label.as_deref());
+    let session_key = || headless_session_key(shared, channel_id, &provider, kept, label);
     let pool = shared.pg_pool.as_ref();
     let host = crate::services::turn_host::refusal_before_turn;
     if let Some(refusal) = host(pool, &provider, channel_id.get(), session_key).await {
@@ -405,15 +402,10 @@ async fn start_reserved_headless_turn_admitted(
     // #4658: scheduled-snapshot turns key their session off the reservation
     // label so they never share (and thus never overwrite) the channel's live
     // session_key row.
-    let scheduled_snapshot_label = scheduled_snapshot_session_label(metadata.as_ref());
-    let scheduled_snapshot_turn = scheduled_snapshot_label.is_some();
-    let session_key_basis_override = session_key_basis_override(
-        scheduled_snapshot_label.as_deref(),
-        metadata.as_ref(),
-        tmux_session_label.as_deref(),
-    );
+    let scheduled_snapshot_turn = scheduled_snapshot_session_label(metadata.as_ref()).is_some();
+    let label = tmux_session_label.as_deref();
     let adk_session_key =
-        build_adk_session_key(shared, channel_id, &provider, session_key_basis_override).await;
+        headless_session_key(shared, channel_id, &provider, metadata.as_ref(), label).await;
     if !scheduled_snapshot_turn
         && valid_routine_metadata(metadata.as_ref()).is_some()
         && let (Some(pool), Some(binding), Some(session_key)) = (
@@ -1214,10 +1206,10 @@ mod recovery_context_take_order_tests;
 
 #[cfg(test)]
 mod fresh_routine_tests {
+    use super::routine_metadata::session_key_basis_override;
     use super::{
         fresh_routine_turn, metadata_parent_channel_id, persist_boundary_before_provider_clear,
         routine_metadata_agent_id, routine_metadata_role_binding, routine_tmux_session_name,
-        session_key_basis_override,
     };
     use crate::services::provider::ProviderKind;
     use serde_json::json;

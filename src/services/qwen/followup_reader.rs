@@ -11,22 +11,18 @@ pub(super) fn send_followup_to_tmux(
 ) -> Result<FollowupResult, String> {
     let start_offset = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
 
-    let write_result = std::fs::OpenOptions::new()
-        .write(true)
-        .open(input_fifo_path)
-        .map_err(|e| format!("Failed to open input FIFO: {}", e))
-        .and_then(|mut fifo| {
-            let encoded = format!(
-                "{}{}",
-                TMUX_PROMPT_B64_PREFIX,
-                BASE64_STANDARD.encode(prompt.as_bytes())
-            );
-            writeln!(fifo, "{}", encoded)
-                .map_err(|e| format!("Failed to write to input FIFO: {}", e))?;
-            fifo.flush()
-                .map_err(|e| format!("Failed to flush input FIFO: {}", e))?;
-            Ok(())
-        });
+    let encoded = format!(
+        "{}{}",
+        TMUX_PROMPT_B64_PREFIX,
+        BASE64_STANDARD.encode(prompt.as_bytes())
+    );
+    let write_result = crate::services::session_host::TmuxHost
+        .submit_wrapper_frame(
+            input_fifo_path,
+            crate::services::session_host::WrapperFrame::Line(&encoded),
+            false,
+        )
+        .into_wrapper();
 
     if let Err(e) = write_result {
         if should_recreate_session_after_followup_fifo_error(&e) {

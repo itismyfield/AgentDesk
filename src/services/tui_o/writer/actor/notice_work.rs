@@ -169,6 +169,47 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .is_ok()
     }
 
+    // Settle only the unprepared piece derived from this exact below-floor record.
+    fn exclude_floored_notice(&mut self, evidence: &NoticeEvidence) -> Result<(), Step> {
+        if !super::super::input_notices::evidence::has_frozen_record_boundary(
+            self.writer.store().ledger().input_notices(),
+            evidence,
+        ) {
+            return Ok(());
+        }
+        let key = self
+            .owed
+            .iter()
+            .filter_map(notice)
+            .find(|piece| {
+                piece.index == 0
+                    && piece.unit_key.channel_id == self.writer.channel()
+                    && evidence.unit_key.as_ref() == Some(&piece.unit_key)
+                    && evidence.payload.as_ref() == Some(&piece.payload)
+                    && evidence.origin.as_ref() == piece.notice_origin.as_ref()
+                    && evidence
+                        .origin
+                        .as_ref()
+                        .is_some_and(|origin| origin.record == evidence.record)
+            })
+            .map(|piece| piece.unit_key.clone());
+        if let Some(unit_key) = key
+            && self
+                .writer
+                .store()
+                .ledger()
+                .latest_piece(&unit_key, 0)
+                .is_none()
+            && self.writer.store().ledger().excluded(&unit_key).is_none()
+        {
+            self.writer.record(LedgerEntry::Excluded {
+                unit_key,
+                reason: "input_notice_migration_floor".into(),
+            })?;
+        }
+        Ok(())
+    }
+
     pub(super) fn persist_notice_evidence(&mut self) -> Vec<UnitKey> {
         if !self.deriver.input_notices_enabled() || self.writer.is_stopped() {
             return Vec::new();
@@ -179,6 +220,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 self.writer.store().ledger().input_notices(),
                 &evidence,
             ) {
+                if self.exclude_floored_notice(&evidence).is_err() {
+                    break;
+                }
                 continue;
             }
             if let Some(key) = &evidence.unit_key {
@@ -445,6 +489,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 self.owed.push_back(Derived::Piece(piece));
             }
         }
+        self.writer
+            .notice_missing
+            .retain(|key| queued.contains(key));
     }
 
     fn defer_notice(&mut self, id: (SourceId, u64, u64), reason: &str) {
