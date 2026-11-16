@@ -1,31 +1,80 @@
-//! Whether the transcript tail shows a tool call of the current turn still waiting for its result.
+//! Idle-detector reads of a transcript tail, widened until a whole record or a turn boundary is in
+//! view so one oversized record never hides the progress behind it.
 use super::*;
 use std::collections::HashSet;
 
-/// True when a root tool call in `path`'s tail window has no result yet. A call that started
-/// before the window, or an unreadable file, reads as `false`.
-pub(crate) fn provider_tool_call_open(provider: &ProviderKind, path: &Path) -> bool {
-    let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
-        return false;
-    };
-    let mut open = HashSet::new();
-    for json in window
-        .lines
-        .iter()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-    {
-        match provider {
-            ProviderKind::Claude => claude_step(&json, &mut open),
-            ProviderKind::Codex => codex_step(&json, &mut open),
-            _ => return false,
-        }
-    }
-    !open.is_empty()
+/// The widest tail these reads load before calling the answer unknown.
+const MAX_PROGRESS_TAIL_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The current turn's root tool calls as far as the transcript tail shows them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolCalls {
+    /// A call has no result yet.
+    Open,
+    /// Every call since the turn boundary has its result.
+    Closed,
+    /// No turn boundary fits in the widest tail, or the file could not be read.
+    Inconclusive,
 }
 
-fn claude_step(json: &Value, open: &mut HashSet<String>) {
+/// Unix nanos of the newest stamped conversation record, also when that record is longer than
+/// the standard tail window.
+pub(crate) fn latest_provider_record_unix_nanos_widening(
+    provider: &ProviderKind,
+    path: &Path,
+) -> Option<i64> {
+    widen(path, |window| {
+        let found = latest_record_in(provider, &window.lines);
+        (found.is_some() || window.window_covers_file).then_some(found)
+    })
+    .flatten()
+}
+
+/// Whether the current turn has a root tool call still waiting for its result.
+pub(crate) fn provider_tool_calls(provider: &ProviderKind, path: &Path) -> ToolCalls {
+    let step = match provider {
+        ProviderKind::Claude => claude_step,
+        ProviderKind::Codex => codex_step,
+        _ => return ToolCalls::Inconclusive,
+    };
+    widen(path, |window| {
+        let mut open = HashSet::new();
+        let mut bounded = window.window_covers_file;
+        for json in window
+            .lines
+            .iter()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        {
+            bounded |= step(&json, &mut open);
+        }
+        // Without a boundary a call may have started before the window.
+        bounded.then(|| match open.is_empty() {
+            true => ToolCalls::Closed,
+            false => ToolCalls::Open,
+        })
+    })
+    .unwrap_or(ToolCalls::Inconclusive)
+}
+
+/// Re-reads a growing tail until `judge` can answer; `None` past the widest tail or on a read error.
+fn widen<T>(path: &Path, mut judge: impl FnMut(&JsonlTailWindow) -> Option<T>) -> Option<T> {
+    let mut bytes = TURN_STATE_TAIL_BYTES;
+    loop {
+        let window = read_recent_jsonl_window(path, bytes).ok()?;
+        if let Some(found) = judge(&window) {
+            return Some(found);
+        }
+        if bytes >= MAX_PROGRESS_TAIL_BYTES {
+            return None;
+        }
+        bytes = (bytes * 4).min(MAX_PROGRESS_TAIL_BYTES);
+    }
+}
+
+/// Folds one Claude record into the open calls; true when the record is a turn boundary.
+fn claude_step(json: &Value, open: &mut HashSet<String>) -> bool {
     if json.get("isSidechain") == Some(&Value::Bool(true)) || json.get("agentId").is_some() {
-        return;
+        return false;
     }
     let blocks = json.pointer("/message/content").and_then(Value::as_array);
     let ids = |kind: &str, field: &str| -> Vec<String> {
@@ -36,34 +85,36 @@ fn claude_step(json: &Value, open: &mut HashSet<String>) {
             .filter_map(|block| block.get(field).and_then(Value::as_str).map(str::to_owned))
             .collect()
     };
-    match json.get("type").and_then(Value::as_str) {
-        Some("assistant") => open.extend(ids("tool_use", "id")),
+    let boundary = match json.get("type").and_then(Value::as_str) {
+        Some("assistant") => {
+            open.extend(ids("tool_use", "id"));
+            false
+        }
         Some("user") => {
             let results = ids("tool_result", "tool_use_id");
-            if results.is_empty() && json.get("isMeta") != Some(&Value::Bool(true)) {
-                // A new prompt or an interrupt marker ends whatever the previous turn left open.
-                open.clear();
+            for id in &results {
+                open.remove(id);
             }
-            for id in results {
-                open.remove(&id);
-            }
+            // A new prompt or an interrupt marker ends whatever the previous turn left open.
+            results.is_empty() && json.get("isMeta") != Some(&Value::Bool(true))
         }
-        Some("result") => open.clear(),
-        Some("system")
-            if matches!(
-                json.get("subtype").and_then(Value::as_str),
-                Some("turn_duration" | "stop_hook_summary")
-            ) =>
-        {
-            open.clear()
-        }
-        _ => {}
+        Some("result") => true,
+        Some("system") => matches!(
+            json.get("subtype").and_then(Value::as_str),
+            Some("turn_duration" | "stop_hook_summary")
+        ),
+        _ => false,
+    };
+    if boundary {
+        open.clear();
     }
+    boundary
 }
 
-fn codex_step(json: &Value, open: &mut HashSet<String>) {
+/// Folds one Codex rollout record into the open calls; true when the record is a turn boundary.
+fn codex_step(json: &Value, open: &mut HashSet<String>) -> bool {
     let Some(payload) = json.get("payload") else {
-        return;
+        return false;
     };
     let kind = payload.get("type").and_then(Value::as_str);
     let call_id = payload
@@ -73,16 +124,21 @@ fn codex_step(json: &Value, open: &mut HashSet<String>) {
     match (json.get("type").and_then(Value::as_str), kind) {
         (
             Some("response_item"),
-            Some("function_call" | "custom_tool_call" | "local_shell_call"),
+            Some("function_call" | "custom_tool_call" | "local_shell_call" | "tool_search_call"),
         ) => open.extend(call_id),
-        (Some("response_item"), Some("function_call_output" | "custom_tool_call_output")) => {
+        (
+            Some("response_item"),
+            Some("function_call_output" | "custom_tool_call_output" | "tool_search_output"),
+        ) => {
             if let Some(id) = call_id {
                 open.remove(&id);
             }
         }
         (Some("event_msg"), Some("task_started" | "task_complete" | "turn_aborted")) => {
-            open.clear()
+            open.clear();
+            return true;
         }
         _ => {}
     }
+    false
 }

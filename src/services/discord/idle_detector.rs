@@ -78,6 +78,9 @@ const MONITORING_DESCRIPTION: &str = "에이전트 15분 이상 응답 없음";
 /// Banner text when the quiet stretch sits inside a tool call that has not returned yet.
 const TOOL_RUNNING_DESCRIPTION: &str = "도구 실행 중 · 15분 이상 새 기록 없음";
 
+/// Banner text when the quiet stretch's tool state cannot be read from the transcript tail.
+const TOOL_UNKNOWN_DESCRIPTION: &str = "15분 이상 새 기록 없음 · 도구 상태 확인 불가";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IdleClassification {
     /// Mailbox has no active turn. If a system-detected entry is registered,
@@ -91,6 +94,19 @@ pub(crate) enum IdleClassification {
     /// Like `Idle`, but the transcript shows a tool call still waiting for its
     /// result; the entry says so instead of "응답 없음".
     ToolRunning,
+    /// Like `Idle`, but the transcript tail cannot show whether a tool call is
+    /// still running; the entry says the tool state is unknown.
+    ToolStateUnknown,
+}
+
+impl IdleClassification {
+    /// Whether the verdict registers the monitoring entry.
+    fn registers(self) -> bool {
+        matches!(
+            self,
+            Self::Idle | Self::ToolRunning | Self::ToolStateUnknown
+        )
+    }
 }
 
 /// What a tui_o channel's provider transcript shows about the open turn.
@@ -98,7 +114,8 @@ pub(crate) enum IdleClassification {
 pub(crate) struct TurnProgress {
     /// Timestamp of the newest provider conversation record.
     pub output_at: Option<DateTime<Utc>>,
-    pub tool_call_open: bool,
+    /// Read only when `output_at` alone cannot keep the turn fresh.
+    pub tool_calls: Option<crate::services::tui_turn_state::ToolCalls>,
 }
 
 /// Records stamped further ahead than this are not progress evidence.
@@ -118,17 +135,25 @@ pub(crate) fn classify_with_progress(
         .and_then(|progress| progress.output_at)
         .filter(|at| *at <= now + FUTURE_RECORD_SKEW);
     let freshness = last_heartbeat.max(output_at);
+    use crate::services::tui_turn_state::ToolCalls;
     match classify(has_active_turn, freshness, turn_started_at, now, threshold) {
-        IdleClassification::Idle if progress.is_some_and(|p| p.tool_call_open) => {
-            IdleClassification::ToolRunning
-        }
+        IdleClassification::Idle => match progress.and_then(|p| p.tool_calls) {
+            Some(ToolCalls::Open) => IdleClassification::ToolRunning,
+            Some(ToolCalls::Inconclusive) => IdleClassification::ToolStateUnknown,
+            Some(ToolCalls::Closed) | None => IdleClassification::Idle,
+        },
         other => other,
     }
 }
 
 /// Transcript progress for a tui_o channel's turn, read from its tmux runtime binding's transcript;
-/// `None` for a channel O does not own.
-pub(crate) fn observe_turn_progress(channel: u64, tmux_session: &str) -> Option<TurnProgress> {
+/// `None` for a channel O does not own. Tool calls are read only when no record is as new as
+/// `quiet_before`.
+pub(crate) fn observe_turn_progress(
+    channel: u64,
+    tmux_session: &str,
+    quiet_before: DateTime<Utc>,
+) -> Option<TurnProgress> {
     use crate::services::agent_protocol::RuntimeHandoffKind;
     if !super::health::o_owns(channel) {
         return None;
@@ -145,10 +170,14 @@ pub(crate) fn observe_turn_progress(channel: u64, tmux_session: &str) -> Option<
     }) else {
         return Some(TurnProgress::default());
     };
-    let state = crate::services::tui_turn_state::latest_provider_record_unix_nanos;
+    let latest = crate::services::tui_turn_state::latest_provider_record_unix_nanos_widening;
+    let output_at = latest(&provider, &path).map(DateTime::from_timestamp_nanos);
+    let tool_calls = output_at
+        .is_none_or(|at| at < quiet_before)
+        .then(|| crate::services::tui_turn_state::provider_tool_calls(&provider, &path));
     Some(TurnProgress {
-        output_at: state(&provider, &path).map(DateTime::from_timestamp_nanos),
-        tool_call_open: crate::services::tui_turn_state::provider_tool_call_open(&provider, &path),
+        output_at,
+        tool_calls,
     })
 }
 
@@ -274,7 +303,7 @@ async fn run_pass(shared: &SharedData, provider: &ProviderKind) {
             None
         };
         let progress = if has_active_turn && !in_recovery {
-            fetch_turn_progress(shared, provider, channel_id).await
+            fetch_turn_progress(shared, provider, channel_id, now).await
         } else {
             None
         };
@@ -299,10 +328,7 @@ async fn run_pass(shared: &SharedData, provider: &ProviderKind) {
         // Downgrading to `ActiveAndFresh` (rather than just skipping) also
         // CLEARS a banner that was registered while the turn was hung but has
         // since transitioned into a committed/background wait.
-        let effective = if matches!(
-            classification,
-            IdleClassification::Idle | IdleClassification::ToolRunning
-        ) {
+        let effective = if classification.registers() {
             let signals =
                 super::inflight::load_inflight_state(provider, channel_id.get()).map(|state| {
                     InflightWaitSignals {
@@ -320,10 +346,7 @@ async fn run_pass(shared: &SharedData, provider: &ProviderKind) {
             classification
         };
         apply_classification(channel_id, effective, health_registry.as_ref()).await;
-        if matches!(
-            effective,
-            IdleClassification::Idle | IdleClassification::ToolRunning
-        ) {
+        if effective.registers() {
             spawn_idle_expiry_reflect_if_needed(shared, provider, channel_id).await;
         }
     }
@@ -383,6 +406,9 @@ async fn apply_classification(
         }
         IdleClassification::ToolRunning => {
             register_idle_entry(channel_id, TOOL_RUNNING_DESCRIPTION, health_registry).await;
+        }
+        IdleClassification::ToolStateUnknown => {
+            register_idle_entry(channel_id, TOOL_UNKNOWN_DESCRIPTION, health_registry).await;
         }
         IdleClassification::ActiveAndFresh | IdleClassification::NoActiveTurn => {
             clear_idle_entry(channel_id, health_registry).await;
@@ -451,6 +477,7 @@ async fn fetch_turn_progress(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
+    now: DateTime<Utc>,
 ) -> Option<TurnProgress> {
     let channel_name = {
         let data = shared.core.lock().await;
@@ -460,7 +487,8 @@ async fn fetch_turn_progress(
     }?;
     let tmux_session = provider.build_tmux_session_name(&channel_name);
     let channel = channel_id.get();
-    tokio::task::spawn_blocking(move || observe_turn_progress(channel, &tmux_session))
+    let quiet_before = now - chrono::Duration::from_std(IDLE_THRESHOLD).ok()?;
+    tokio::task::spawn_blocking(move || observe_turn_progress(channel, &tmux_session, quiet_before))
         .await
         .ok()
         .flatten()
@@ -567,15 +595,11 @@ mod tests {
     }
 
     const CHANNEL: u64 = 8_196_000_001;
+    const CODEX_CHANNEL: u64 = 8_196_000_003;
+    use crate::services::agent_protocol::RuntimeHandoffKind;
 
-    /// A Claude TUI transcript bound to a fresh tmux session; records are `(minutes ago, row)`.
-    fn bound_transcript(
-        dir: &std::path::Path,
-        now: DateTime<Utc>,
-        rows: &[(i64, &str)],
-    ) -> (String, impl Drop) {
-        let tmux = ProviderKind::Claude
-            .build_tmux_session_name(&format!("i8196-{}", uuid::Uuid::new_v4()));
+    /// Writes `(minutes ago, row)` records to `path` with their timestamps.
+    fn write_rows(path: &std::path::Path, now: DateTime<Utc>, rows: &[(i64, &str)]) {
         let lines: Vec<String> = rows
             .iter()
             .map(|(ago, row)| {
@@ -583,12 +607,34 @@ mod tests {
                 format!("{{{row},\"timestamp\":\"{at}\"}}\n")
             })
             .collect();
+        std::fs::write(path, lines.concat()).unwrap();
+    }
+
+    /// A TUI transcript of `kind` bound to a fresh tmux session.
+    fn bound_as(
+        kind: RuntimeHandoffKind,
+        dir: &std::path::Path,
+        now: DateTime<Utc>,
+        rows: &[(i64, &str)],
+    ) -> (String, impl Drop) {
+        let provider = match kind {
+            RuntimeHandoffKind::CodexTui => ProviderKind::Codex,
+            _ => ProviderKind::Claude,
+        };
+        let tmux = provider.build_tmux_session_name(&format!("i8196-{}", uuid::Uuid::new_v4()));
         let path = dir.join(format!("{tmux}.jsonl"));
-        std::fs::write(&path, lines.concat()).unwrap();
-        let path = path.display().to_string();
-        let binding = crate::services::tui_o::cutover::test_override::bind_claude_tui_session;
-        let guard = binding(&tmux, &path);
+        write_rows(&path, now, rows);
+        let bind = crate::services::tui_o::cutover::test_override::bind_tui_session;
+        let guard = bind(&tmux, kind, &path.display().to_string());
         (tmux, guard)
+    }
+
+    fn bound_transcript(
+        dir: &std::path::Path,
+        now: DateTime<Utc>,
+        rows: &[(i64, &str)],
+    ) -> (String, impl Drop) {
+        bound_as(RuntimeHandoffKind::ClaudeTui, dir, now, rows)
     }
 
     const PROMPT: &str = r#""type":"user","message":{"role":"user","content":"go"}"#;
@@ -597,14 +643,23 @@ mod tests {
     const TOOL_B: &str = r#""type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"b","name":"Bash","input":{}}]}"#;
     const TEXT: &str = r#""type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"thinking aloud"}]}"#;
 
+    /// A Claude tool result row whose output is `chars` long.
+    fn big_result(id: &str, chars: usize) -> String {
+        let output = "x".repeat(chars);
+        format!(
+            r#""type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{id}","content":"{output}"}}]}}"#
+        )
+    }
+
     /// Runs the detector's verdict for an O-owned channel's 20-minute-old turn with no heartbeat.
     fn verdict(channel: u64, tmux: &str, now: DateTime<Utc>) -> IdleClassification {
         let started = Some(now - chrono::Duration::minutes(20));
-        let progress = observe_turn_progress(channel, tmux);
+        let quiet_before = now - chrono::Duration::from_std(IDLE_THRESHOLD).unwrap();
+        let progress = observe_turn_progress(channel, tmux, quiet_before);
         classify_with_progress(true, None, started, progress, now, IDLE_THRESHOLD)
     }
 
-    /// Serializes env and binding state, isolates the runtime root and makes `CHANNEL` O-owned.
+    /// Serializes env and binding state, isolates the runtime root and makes the channels O-owned.
     fn o_channel_fixture() -> (
         impl Drop,
         impl Drop,
@@ -618,9 +673,10 @@ mod tests {
         let dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let kind = crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
-        let boot =
-            crate::services::tui_o::cutover::test_override::force_channels(&[(CHANNEL, kind)]);
+        let boot = crate::services::tui_o::cutover::test_override::force_channels(&[
+            (CHANNEL, RuntimeHandoffKind::ClaudeTui),
+            (CODEX_CHANNEL, RuntimeHandoffKind::CodexTui),
+        ]);
         let dir = tempfile::tempdir().unwrap();
         let root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",
@@ -662,6 +718,172 @@ mod tests {
         // A channel O does not own keeps the heartbeat-only verdict even with fresh records.
         let (fresh, _b) = bound_transcript(dir.path(), now, &[(20, PROMPT), (1, TEXT)]);
         assert_eq!(verdict(CHANNEL + 1, &fresh, now), IdleClassification::Idle);
+    }
+
+    #[test]
+    fn tui_o_tool_turn_behind_an_oversized_result_is_read_past_the_tail_window() {
+        let (_env, _dedupe, _boot, _root, dir) = o_channel_fixture();
+        let now = Utc::now();
+        let result_b = big_result("b", 100_000);
+        let mut rows = vec![
+            (20, PROMPT),
+            (19, TOOL_A),
+            (19, TOOL_B),
+            (1, result_b.as_str()),
+        ];
+        let (fresh, _a) = bound_transcript(dir.path(), now, &rows);
+        assert_eq!(
+            verdict(CHANNEL, &fresh, now),
+            IdleClassification::ActiveAndFresh
+        );
+        rows[3].0 = 16;
+        let (running, _b) = bound_transcript(dir.path(), now, &rows);
+        assert_eq!(
+            verdict(CHANNEL, &running, now),
+            IdleClassification::ToolRunning
+        );
+        rows.push((16, RESULT_A));
+        let (done, _c) = bound_transcript(dir.path(), now, &rows);
+        assert_eq!(verdict(CHANNEL, &done, now), IdleClassification::Idle);
+        // No turn boundary within the widest tail: the alarm stays, naming the tool state unknown.
+        let flood: Vec<String> = (0..17)
+            .map(|n| big_result(&format!("x{n}"), 1 << 20))
+            .collect();
+        let mut rows = vec![(20, PROMPT), (19, TOOL_A)];
+        rows.extend(flood.iter().map(|row| (16, row.as_str())));
+        let (unknown, _d) = bound_transcript(dir.path(), now, &rows);
+        assert_eq!(
+            verdict(CHANNEL, &unknown, now),
+            IdleClassification::ToolStateUnknown
+        );
+    }
+
+    #[test]
+    fn tui_o_codex_tool_search_counts_as_progress_and_as_an_open_call() {
+        let (_env, _dedupe, _boot, _root, dir) = o_channel_fixture();
+        let now = Utc::now();
+        let call = r#""type":"response_item","payload":{"type":"tool_search_call","call_id":"s1"}"#;
+        let output =
+            r#""type":"response_item","payload":{"type":"tool_search_output","call_id":"s1"}"#;
+        let codex =
+            |rows: &[(i64, &str)]| bound_as(RuntimeHandoffKind::CodexTui, dir.path(), now, rows);
+        let (fresh, _a) = codex(&[(1, call)]);
+        assert_eq!(
+            verdict(CODEX_CHANNEL, &fresh, now),
+            IdleClassification::ActiveAndFresh
+        );
+        let (running, _b) = codex(&[(16, call)]);
+        assert_eq!(
+            verdict(CODEX_CHANNEL, &running, now),
+            IdleClassification::ToolRunning
+        );
+        let (done, _c) = codex(&[(17, call), (16, output)]);
+        assert_eq!(verdict(CODEX_CHANNEL, &done, now), IdleClassification::Idle);
+    }
+
+    #[test]
+    fn records_stamped_past_the_clock_skew_are_not_progress() {
+        let now = Utc::now();
+        let started = Some(now - chrono::Duration::minutes(20));
+        let ahead = |secs| {
+            let progress = TurnProgress {
+                output_at: Some(now + chrono::Duration::seconds(secs)),
+                tool_calls: None,
+            };
+            classify_with_progress(true, None, started, Some(progress), now, IDLE_THRESHOLD)
+        };
+        assert_eq!(ahead(60), IdleClassification::ActiveAndFresh);
+        assert_eq!(ahead(61), IdleClassification::Idle);
+    }
+
+    /// Runs `name` again in a child process whose every thread sees `CHANNEL` as O-owned, since the
+    /// detector reads ownership on a blocking-pool thread; true inside that child.
+    fn in_o_channel_process(name: &str) -> bool {
+        let env = crate::services::tui_o::cutover::test_override::CHANNELS_ENV;
+        if std::env::var_os(env).is_some() {
+            return true;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(env, format!("[[{CHANNEL},\"claude_tui\"]]"))
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
+        false
+    }
+
+    #[test]
+    fn run_pass_reads_tui_o_progress_of_the_open_turn() {
+        const NAME: &str = "services::discord::idle_detector::tests::run_pass_reads_tui_o_progress_of_the_open_turn";
+        if !in_o_channel_process(NAME) {
+            return;
+        }
+        let (_env, _dedupe, _boot, _root, dir) = o_channel_fixture();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (shared, channel) = (
+                super::super::make_shared_data_for_tests(),
+                ChannelId::new(CHANNEL),
+            );
+            let name = format!("i8196-pass-{}", uuid::Uuid::new_v4());
+            shared.core.lock().await.sessions.insert(
+                channel,
+                super::super::DiscordSession {
+                    session_id: None,
+                    memento_context_loaded: false,
+                    memento_reflected: false,
+                    current_path: None,
+                    history: Vec::new(),
+                    pending_uploads: Vec::new(),
+                    cleared: false,
+                    channel_id: Some(CHANNEL),
+                    channel_name: Some(name.clone()),
+                    category_name: None,
+                    last_active: tokio::time::Instant::now(),
+                    worktree: None,
+                    born_generation: shared.restart.current_generation,
+                },
+            );
+            let token = Arc::new(crate::services::provider::CancelToken::new());
+            let (user, message) = (
+                poise::serenity_prelude::UserId::new(1),
+                poise::serenity_prelude::MessageId::new(11),
+            );
+            assert!(
+                super::super::mailbox_try_start_turn(&shared, channel, token, user, message).await
+            );
+            let mailbox = shared.mailbox_peek(channel).unwrap();
+            mailbox
+                .age_active_turn_for_test(Duration::from_secs(20 * 60))
+                .await;
+            let tmux = ProviderKind::Claude.build_tmux_session_name(&name);
+            let path = dir.path().join("pass.jsonl");
+            let now = Utc::now();
+            write_rows(&path, now, &[(20, PROMPT), (2, TOOL_A)]);
+            let bind = crate::services::tui_o::cutover::test_override::bind_claude_tui_session;
+            let _bound = bind(&tmux, &path.display().to_string());
+            let entry = || async {
+                let store = global_monitoring_store();
+                let guard = store.lock().await;
+                let entries = guard.list(CHANNEL).into_iter();
+                entries
+                    .filter(|e| e.key == MONITORING_KEY)
+                    .map(|e| e.description)
+                    .next()
+            };
+            run_pass(&shared, &ProviderKind::Claude).await;
+            assert_eq!(entry().await, None);
+            write_rows(&path, now, &[(20, PROMPT), (16, TOOL_A)]);
+            run_pass(&shared, &ProviderKind::Claude).await;
+            assert_eq!(entry().await.as_deref(), Some(TOOL_RUNNING_DESCRIPTION));
+        });
     }
 
     #[test]
