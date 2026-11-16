@@ -135,7 +135,7 @@ main `owner_input.rs:1320-1322`는 Claude first-key native-stop gate를 tmux rou
 | `intake_turn.rs` | 두 tmux-only 조건을 공통 owned policy/Busy dispatch 호출로 교체 | -10 |
 | `intake_turn/owned_busy.rs` (신규) | early source resolve+same into_busy_pane, 표시 정책 연결 | +90 |
 | `provider_dispatch.rs` | child helper reexport 최소 glue | +3 |
-| `queue_io/input_owner/effect/herdr.rs` | pre-key capture/transcript cause watch만 기존 held_watch에 연결 | +45 |
+| `queue_io/input_owner/effect/herdr_fixture_tests.rs` | pre-key capture/transcript cause watch만 기존 held_watch에 연결 | +45 |
 | `message_handler/busy_retry.rs` | #8113 공통 표시 policy와 result 정산 연결이 필요하면 작은 call-site 적응 | +20 |
 | 합계/여유 | 예상 +298, 추정 오차 포함 계획값 | **+450** |
 

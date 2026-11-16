@@ -320,7 +320,7 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
         "src/services/discord/tmux.rs": 1,
         "src/services/discord/tmux_watcher.rs": 1,
         "src/services/discord/tmux_watcher/no_result_exits.rs": 1,
-        "src/services/discord/tmux_watcher/terminal_preflight.rs": 2,
+        "src/services/discord/tmux_watcher/terminal_preflight.rs": 1,
         "src/services/discord/turn_finalizer/delivery_lease.rs": 1,
     },
     "advance_watcher_confirmed_end_for_generation": {
@@ -342,7 +342,7 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
     },
     "advance_tmux_relay_confirmed_end": {
         "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
-        "src/services/discord/turn_bridge/terminal_controller_cutover.rs": 2,
+        "src/services/discord/turn_bridge/terminal_controller_cutover.rs": 1,
     },
     # Qualified key: this is a receiver-including TmuxRelayCoord method.
     "TmuxRelayCoord::reset_confirmed_frontier": {
