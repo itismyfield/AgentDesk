@@ -5,6 +5,8 @@ mod agents_crud;
 mod agents_input_result;
 mod agents_setup;
 mod agents_turn_deliver;
+#[cfg(all(test, unix))]
+pub(crate) use agents_turn_deliver::{DELIVERY_PROBE_FOR_TEST, DeliveryProbe};
 mod agents_turn_target;
 pub mod analytics;
 #[cfg(test)]

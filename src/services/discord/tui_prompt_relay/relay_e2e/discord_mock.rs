@@ -138,6 +138,15 @@ impl DiscordMockState {
             .collect()
     }
 
+    pub(in crate::services::discord) fn reply_targets(&self) -> Vec<u64> {
+        self.messages
+            .lock()
+            .expect("messages")
+            .values()
+            .filter_map(|message| message.0)
+            .collect()
+    }
+
     /// A message the bot posted before, as a single-message `GET` answers it.
     pub(in crate::services::discord) fn seed_message(&self, id: u64, content: &str) {
         let mut seeded = self.seeded.lock().expect("seeded");

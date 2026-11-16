@@ -20,6 +20,7 @@ use crate::services::discord::health::{
 use crate::services::imsg_reply;
 
 mod legacy_origin;
+mod origin_admission;
 
 const MAX_ORIGIN_ID_LEN: usize = 256;
 const MAX_SOURCE_LEN: usize = 64;
@@ -42,7 +43,7 @@ type RouteResponse = (StatusCode, Json<Value>);
 
 #[cfg(test)]
 #[derive(Clone, Default)]
-pub(super) struct DeliveryProbe {
+pub(crate) struct DeliveryProbe {
     pub calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub entered: Option<std::sync::Arc<tokio::sync::Notify>>,
     pub release: Option<std::sync::Arc<tokio::sync::Notify>>,
@@ -51,7 +52,7 @@ pub(super) struct DeliveryProbe {
 #[cfg(test)]
 tokio::task_local! {
     pub(super) static ADMISSION_ENABLED_FOR_TEST: bool;
-    pub(super) static DELIVERY_PROBE_FOR_TEST: DeliveryProbe;
+    pub(crate) static DELIVERY_PROBE_FOR_TEST: DeliveryProbe;
 }
 
 fn admission_enabled() -> bool {
@@ -249,44 +250,7 @@ pub async fn deliver_turn_input(
                 .await;
         }
         let reply = imsg_reply::ReplyObligation::new(pool.clone(), origin_id);
-        let identity = format!("guid:{origin_id}");
-        let line = notice.as_deref();
-        let mut executed = false;
-        let ran = &mut executed;
-        let response = imsg_reply::deliver_once(
-            pool,
-            &input,
-            || {
-                preflight_human_input(
-                    registry,
-                    poise::serenity_prelude::ChannelId::new(channel_id),
-                    &provider,
-                    author_id,
-                )
-            },
-            || async {
-                *ran = true;
-                super::imessage_input_notice::delivered(
-                    pool,
-                    channel_id,
-                    &identity,
-                    line,
-                    observed_delivery(registry, request, Some(reply)).await,
-                )
-                .await
-            },
-            |result| delivery_response(channel_id, result),
-        )
-        .await;
-        if !executed {
-            super::imessage_input_notice::not_echoed(
-                line,
-                channel_id,
-                &identity,
-                response.0.as_str(),
-            );
-        }
-        response
+        origin_admission::deliver(pool, registry, &input, request, notice.as_deref(), reply).await
     } else {
         let identity = format!("request:{}", uuid::Uuid::new_v4());
         let result = super::imessage_input_notice::delivered(

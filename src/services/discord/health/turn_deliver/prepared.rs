@@ -1,4 +1,4 @@
-//! Effect-free Legacy delivery preparation with execution deferred until admission.
+//! Effect-free human delivery preparation with execution deferred until admission.
 
 use super::{
     DeliveryPorts, HealthRegistry, HumanInputDelivery, HumanInputError, HumanInputRequest,
@@ -11,6 +11,7 @@ impl HealthRegistry {
     pub(crate) async fn prepare_external_human_input(
         &self,
         request: HumanInputRequest,
+        reply: Option<crate::services::imsg_reply::ReplyObligation>,
     ) -> Result<
         impl std::future::Future<Output = Result<HumanInputDelivery, HumanInputError>> + Send + 'static,
         HumanInputError,
@@ -29,6 +30,8 @@ impl HealthRegistry {
         if !allowed {
             return Err(HumanInputError::AuthorNotAllowed);
         }
+        let prepared_herdr =
+            super::preflight::host(&shared, &request.provider, request.channel_id).await?;
         let runtime = match shared.http.cached_serenity_ctx.get().cloned() {
             None => Err("provider runtime is not ready".to_string()),
             Some(ctx) => shared
@@ -47,7 +50,8 @@ impl HealthRegistry {
             runtime,
             request,
             inject_observed: Default::default(),
-            reply: None,
+            reply,
+            prepared_herdr,
         };
         if let Err(error) = &ports.runtime {
             let can_inject = ports.inject_mode() != InjectMode::Off

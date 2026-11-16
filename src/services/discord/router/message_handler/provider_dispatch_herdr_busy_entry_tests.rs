@@ -13,11 +13,14 @@ use crate::services::tui_o::shadow::{ShadowProvider, binding_reader::source_id_f
 use crate::services::tui_o::writer::adoption::{LegacyCursor, LegacyView};
 use crate::services::tui_o::writer::host::{
     self, HostParts, ManagedWriterHandle,
-    test_io::{Alarms, TestHost},
+    test_io::{Alarms, Posts, TestHost},
 };
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, OwnerFront, PendingQueueItem};
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 use std::os::unix::fs::PermissionsExt;
+
+#[path = "provider_dispatch_herdr_http_start_tests.rs"]
+mod http_start;
 
 const MESSAGE: u64 = 1_570_000_811_403_001_001;
 const INPUT: &str = "join the running Herdr turn now";
@@ -72,6 +75,9 @@ struct Intake {
     runtime: tokio::runtime::Runtime,
     hosts: Vec<ManagedWriterHandle>,
     alarms: Alarms,
+    posts: Arc<Posts>,
+    listener_started: std::sync::atomic::AtomicBool,
+    mock: discord_mock::DiscordMockState,
     server: tokio::task::JoinHandle<()>,
     _api: discord::admin_host_guard::tests::Recorder,
     _config: (
@@ -209,6 +215,15 @@ impl Intake {
     }
 
     fn with_expected_pin(fx: &Fixture, started: &Started, expected: ExpectedPin) -> Self {
+        Self::with_output_gate(fx, started, expected, Arc::default())
+    }
+
+    fn with_output_gate(
+        fx: &Fixture,
+        started: &Started,
+        expected: ExpectedPin,
+        output_gate: Arc<http_start::OutputGate>,
+    ) -> Self {
         let live_guard = crate::config_live_reload::test_live_guard_after_shared_test_env_lock();
         let label = fx.logical().strip_prefix("AgentDesk-claude-").unwrap();
         let config: crate::config::Config = serde_json::from_value(json!({
@@ -273,17 +288,21 @@ impl Intake {
             .build()
             .unwrap();
         let boot_guard = test_override::force_boot(boot);
-        let (shared, mailbox, hosts, server, api, alarms) = runtime.block_on(async {
+        let (shared, mailbox, hosts, server, api, alarms, posts, mock) = runtime.block_on(async {
             let api = discord::admin_host_guard::tests::Recorder::start().await;
             let mock = discord_mock::DiscordMockState::new();
             mock.allow_channel(CHANNEL);
             mock.name_channel(CHANNEL, label);
             mock.park_first_placeholder.store(false, Ordering::SeqCst);
-            let (proxy, gateway, server) = discord_mock::start(mock).await;
+            let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
             let ctx = discord_mock::serenity_context(proxy, gateway).await;
             let mut shared =
                 discord::make_shared_data_for_tests_with_storage(Some(fx.pool.clone()));
             let own = Arc::get_mut(&mut shared).unwrap();
+            own.restart.current_generation = 1;
+            let generation = discord::runtime_store::generation_path().unwrap();
+            std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
+            std::fs::write(generation, "1").unwrap();
             own.provider = ProviderKind::Claude;
             own.token_hash = TOKEN.into();
             own.api_port = api.port;
@@ -324,18 +343,14 @@ impl Intake {
                 .insert(CHANNEL, fx.logical().into());
             let gate = Arc::new(OwnershipGate::default());
             let alarms = io.alarms.clone();
+            let posts = io.posts.clone();
             let parts = HostParts {
                 io,
                 runtime_root: Some(crate::config::runtime_root().unwrap()),
                 gate: gate.clone(),
                 readiness: host::process_readiness(),
             };
-            let hosts = host::start_managed(
-                ShadowProvider::Claude,
-                true,
-                cutover::boot_ownership(),
-                || parts,
-            );
+            let hosts = http_start::start_writer(parts, output_gate);
             assert_eq!(hosts.len(), 1, "the fixture starts a real O writer");
             gate.acquired();
             tokio::time::timeout(LIMIT, async {
@@ -368,7 +383,7 @@ impl Intake {
                 discord::queue_persistence_context(&shared, &ProviderKind::Claude, channel);
             mailbox.v2_ensure_channel(&pending, channel).await.unwrap();
             assert_eq!(mailbox.has_active_turn().await, Ok(false));
-            (shared, mailbox, hosts, server, api, alarms)
+            (shared, mailbox, hosts, server, api, alarms, posts, mock)
         });
         Self {
             shared,
@@ -377,6 +392,9 @@ impl Intake {
             hosts,
             server,
             alarms,
+            posts,
+            listener_started: std::sync::atomic::AtomicBool::new(false),
+            mock,
             _api: api,
             _config: (configured, session_hosts_guard, live_guard),
             _routing: routing,
@@ -471,6 +489,10 @@ impl Drop for Intake {
     fn drop(&mut self) {
         let hosts = std::mem::take(&mut self.hosts);
         self.runtime.block_on(async {
+            if let Some(actor) = self.mailbox.cancel_token().await.unwrap() {
+                actor.mark_completion_cleanup();
+                actor.cancelled.store(true, Ordering::SeqCst);
+            }
             use crate::services::discord::queue_io::input_owner::held_watch;
             held_watch::arm(
                 CHANNEL,
