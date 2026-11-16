@@ -121,6 +121,7 @@ pub struct RolloutTailOptions {
     terminal_range_eligible: bool,
     /// The Codex native turn a direct input's tail answers; its reply ends with that turn.
     own_turn: Option<String>,
+    launch_context: Option<crate::services::tui_prompt_dedupe::binding_context::BindingContext>,
 }
 
 pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux<L: Into<PaneLiveness>>(
@@ -133,6 +134,52 @@ pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux<L: Into<PaneLiveness>>(
     discord_origin_prompt: Option<&str>,
 ) -> Result<CodexTuiTailResult, String> {
     let options = discord_handoff_tail_options(tmux_session_name, discord_origin_prompt);
+    tail_latest_rollout_for_cwd_with_handoff_options(
+        cwd,
+        modified_since,
+        sender,
+        cancel_token,
+        is_alive,
+        options,
+    )
+}
+
+/// The launch retains its pinned sessions root until discovery and source publication finish.
+pub(crate) fn tail_fresh_launch<L: Into<PaneLiveness>>(
+    context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    cwd: &Path,
+    modified_since: SystemTime,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> L,
+    prompt: &str,
+) -> Result<CodexTuiTailResult, String> {
+    let admitted = context.channel_id.is_some_and(|channel| {
+        crate::services::tui_o::cutover::boot_snapshot()
+            .and_then(|boot| boot.output_candidate(channel))
+            .is_some_and(|candidate| {
+                candidate.late_adopt_origin()
+                    && matches!(
+                        candidate.peek(),
+                        crate::services::tui_o::channel_policy::Adoption::Pending
+                            | crate::services::tui_o::channel_policy::Adoption::Deferred
+                    )
+                    && candidate.first_mark().is_some()
+            })
+    });
+    if context.launch_mode != "fresh" || !admitted {
+        return tail_latest_rollout_for_cwd_with_handoff_for_tmux(
+            cwd,
+            modified_since,
+            sender,
+            cancel_token,
+            is_alive,
+            &context.tmux_session,
+            Some(prompt),
+        );
+    }
+    let mut options = discord_handoff_tail_options(&context.tmux_session, Some(prompt));
+    options.launch_context = Some(context.clone());
     tail_latest_rollout_for_cwd_with_handoff_options(
         cwd,
         modified_since,
@@ -222,8 +269,7 @@ pub(crate) use following_source::{
 
 /// Strict idle reader completion carries the opened descriptor, never a later path stat.
 pub(crate) fn tail_idle_rollout_for_tmux<L: Into<PaneLiveness>>(
-    rollout_path: &Path,
-    start_offset: u64,
+    (rollout_path, start_offset): (&Path, u64),
     session_id: Option<String>,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
@@ -416,7 +462,9 @@ fn tail_resumed_rollout_for_session_with_handoff_options<L: Into<PaneLiveness>>(
         );
     }
     let mut death = ConfirmedDeadPane::default();
-    let rollout_path = wait_for_resumed_rollout_for_session(
+    let mut startup =
+        super::startup_dialog::StartupCheck::new(cwd, options.tmux_session_name.as_deref());
+    let discovered = wait_for_resumed_rollout_for_session(
         cwd,
         session_id,
         previous_rollout_path,
@@ -424,9 +472,16 @@ fn tail_resumed_rollout_for_session_with_handoff_options<L: Into<PaneLiveness>>(
         modified_since,
         sessions_dir,
         cancel_token.as_deref(),
-        &mut || !death.observe(is_alive().into(), None),
+        &mut || startup.alive(!death.observe(is_alive().into(), None)),
         options.wait_for_rollout,
-    )?;
+    );
+    let rollout_path = startup.finish(discovered, || {
+        if rollout_file_len(previous_rollout_path).is_some_and(|len| len > previous_start_offset) {
+            Some(previous_rollout_path.to_path_buf())
+        } else {
+            latest_rollout_for_cwd_and_session_since(cwd, session_id, modified_since, sessions_dir)
+        }
+    })?;
     let start_offset = if same_path(&rollout_path, previous_rollout_path) {
         previous_start_offset
     } else {
@@ -1778,6 +1833,7 @@ mod tests {
                 pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
                 terminal_range_eligible: false,
                 own_turn: None,
+                launch_context: None,
             },
         )
         .unwrap();
@@ -1843,6 +1899,7 @@ mod tests {
                 pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
                 terminal_range_eligible: false,
                 own_turn: None,
+                launch_context: None,
             },
         )
         .unwrap();
@@ -3502,6 +3559,13 @@ mod tests {
 
     #[test]
     fn task_complete_synthesizes_composer_ready_for_tmux_session() {
+        // Readiness comes from this test's envelope; another test's tmux must not answer it.
+        let _pane = super::super::host_input::spy::SpyGuard::install(
+            super::super::host_input::spy::SpyState {
+                dead: true,
+                ..Default::default()
+            },
+        );
         let session = format!(
             "agentdesk-codex-rollout-composer-ready-{}",
             uuid::Uuid::new_v4().simple()
@@ -3547,6 +3611,13 @@ mod tests {
 
     #[test]
     fn item_completed_agent_message_synthesizes_composer_ready_without_relaying_text() {
+        // Readiness comes from this test's envelope; another test's tmux must not answer it.
+        let _pane = super::super::host_input::spy::SpyGuard::install(
+            super::super::host_input::spy::SpyState {
+                dead: true,
+                ..Default::default()
+            },
+        );
         let session = format!(
             "agentdesk-codex-rollout-item-ready-{}",
             uuid::Uuid::new_v4().simple()
@@ -4614,3 +4685,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+mod startup_dialog_tests;

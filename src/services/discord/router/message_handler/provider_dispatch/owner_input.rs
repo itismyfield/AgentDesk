@@ -16,7 +16,7 @@ use crate::services::discord::queue_io::input_owner::effect::{
     self, BusyClaude, BusyCodex, BusyCodexHerdr, Clock, CodexInput, Completion, PreparedPayload,
 };
 use crate::services::discord::queue_io::input_owner::origin::{Execution, InputOrigin};
-use crate::services::discord::queue_io::input_owner::{pump, target};
+use crate::services::discord::queue_io::input_owner::{held_watch, pump, target};
 use crate::services::discord::router::intake_dispatch::WRITER_HELD;
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -182,6 +182,10 @@ pub(in crate::services::discord) fn owner_drive(
             .await
             {
                 let id = ChannelId::new(channel);
+                let probe = bootstrap_probe(runtime.as_ref(), &provider, channel, None).await;
+                if let Some(probe) = probe {
+                    held_watch::arm(channel, probe);
+                }
                 hold_start(&mailbox, id, &front).await;
                 #[cfg(test)]
                 crate::services::discord::queue_io::cancel_backstop_test_support::owner_boot_hold_finished(
@@ -261,7 +265,10 @@ pub(in crate::services::discord) fn owner_drive(
             owned_busy::note_drive_result(channel, &result);
             if synthetic
                 && origin != InputOrigin::EffortContinue
-                && result.as_ref().err().map(String::as_str) == Some(START_WAITS)
+                && matches!(
+                    result.as_ref().err().map(String::as_str),
+                    Some(START_WAITS | BOOTSTRAP_WAITS)
+                )
             {
                 let held = original.clone();
                 mailbox
@@ -366,6 +373,15 @@ pub(in crate::services::discord) async fn hand_busy(
     let session = row.tmux_session_name.clone().ok_or_else(unobserved)?;
     let key = row.session_key.as_deref();
     let host = crate::services::turn_host::for_turn(pool.as_ref(), &provider, channel, key).await;
+    let origin = front_origin(&mailbox, &front).await?;
+    let observed = owned_busy::running(
+        runtime.as_ref(),
+        &mailbox,
+        (&provider, origin),
+        (channel, &session, &host),
+        &front,
+    )
+    .await?;
     // Claude's prelaunch row has no transcript until its observer hands it back. Its live pane
     // already has the binding that the idle observer used before submitting the first input.
     let binding = (provider == ProviderKind::Claude
@@ -386,13 +402,11 @@ pub(in crate::services::discord) async fn hand_busy(
         .or(row.session_id.as_deref());
     let live = output.map(|path| (path, native));
     let at = (&host, session.as_str(), live);
-    let kind = (
-        provider.as_str(),
-        front_origin(&mailbox, &front).await?,
-        true,
-    );
-    let owner =
-        Registration::observed(mailbox.clone(), kind, at, &front.1, None).map_err(|error| {
+    let kind = (provider.as_str(), origin, true);
+    let owner = observed
+        .map(Ok)
+        .unwrap_or_else(|| Registration::observed(mailbox.clone(), kind, at, &front.1, None))
+        .map_err(|error| {
             if effect::surely_unsent(&error) {
                 error
             } else {
@@ -864,10 +878,19 @@ fn native_read(provider: &ProviderKind, target: &NativeTarget) -> Screen {
     }
 }
 
-/// A live Codex pane is idle only once its rollout shows its latest turn's own end; a rollout with
-/// no start or with any end it cannot attribute proves no idle.
+/// A live Codex pane is idle only once its bound rollout, its hooks and its process prove the
+/// latest turn's end; with no binding the rollout its session id names is read for that end.
 fn codex_read(target: &NativeTarget) -> Screen {
     use crate::services::codex_tui::busy_inject::NativeEnd;
+    use crate::services::codex_tui::readiness::Verdict;
+    let cwd = crate::services::tmux_diagnostics::tmux_session_pane_cwd(&target.tmux);
+    match super::super::tui_followup::codex_verdict(&target.tmux, cwd.as_deref()) {
+        Some(Verdict::Idle(_)) => return Screen::Ready,
+        Some(Verdict::Busy(_)) => return Screen::Blocked,
+        Some(Verdict::Gone) => return Screen::Gone,
+        Some(Verdict::Unknown(_)) => return Screen::Unknown,
+        None => {}
+    }
     let end = super::super::tui_followup::codex_native_end;
     match end(&target.tmux, target.session_id.as_deref()) {
         NativeEnd::Ended => Screen::Ready,
@@ -952,12 +975,12 @@ async fn start_idle(
     let owner_name = crate::services::discord::queue_dispatch::kickoff::queued_owner_name;
     let name = owner_name(deps.http, intervention.author_id).await;
     let at = (shared.provider.clone(), channel);
-    let started = match (kept, deps.ctx_for_chained_dispatch) {
+    let started = match (&kept, deps.ctx_for_chained_dispatch) {
         // Its session key, role, workspace and fresh boundary resolve as its legacy start's do.
         (Some(context), Some(ctx)) => {
             let start = super::super::headless_turn::start_owner_headless;
             let at = (ctx, &shared, deps.token);
-            let started = start(at, channel, (&intervention.text, &context), owner).await;
+            let started = start(at, channel, (&intervention.text, context), owner).await;
             started.map(drop).map_err(|error| error.to_string())
         }
         (Some(_), None) => {
@@ -971,6 +994,18 @@ async fn start_idle(
         }
     };
     let typed = refusal.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let mut bootstrap = match typed {
+        Some(crate::services::turn_host::HerdrRefusal::OWriterNotReady) => {
+            bootstrap_probe(
+                Some(&shared),
+                &shared.provider,
+                channel.get(),
+                kept.as_ref(),
+            )
+            .await
+        }
+        _ => None,
+    };
     if let Some(refusal) = typed
         && let Some(kind) = super::start_failure::confirmed(&refusal)
     {
@@ -992,6 +1027,11 @@ async fn start_idle(
     let turn_mode = crate::services::discord::router::intake_dispatch::TURN_MODE_AWAITED;
     match (answer.await, started) {
         (_, Err(error)) if error == WRITER_HELD => {
+            if let Some(probe) =
+                bootstrap_probe(Some(&shared), &shared.provider, channel.get(), None).await
+            {
+                held_watch::arm(channel.get(), probe);
+            }
             hold_start(&holder, channel, &held).await;
             if crate::services::tui_o::writer::host::channel_accepts(channel.get())
                 && intake_route::for_input_placement(shared.provider.as_str(), channel.get()).await
@@ -1013,6 +1053,14 @@ async fn start_idle(
             }
             Err(error)
         }
+        // A canary writer the bootstrap could unblock: held until the turn host would plan it.
+        (_, Err(_)) if bootstrap.is_some() => {
+            if let Some(probe) = bootstrap.take() {
+                held_watch::arm(channel.get(), probe);
+            }
+            hold_start(&holder, channel, &held).await;
+            Err(BOOTSTRAP_WAITS.into())
+        }
         // The late read held the claimed start: it waits as an unclaimed start would, watched.
         (Ok(Err(error)), _) if error == START_WAITS => {
             hold_start(&holder, channel, &held).await;
@@ -1026,6 +1074,47 @@ async fn start_idle(
 
 /// A start's settlement while its pane's native turn runs or cannot be read: nothing was sent.
 const START_WAITS: &str = "NotSent(\"synthetic_waits_idle\")";
+
+/// A start the turn host refused while the canary bootstrap may still unblock its writer.
+const BOOTSTRAP_WAITS: &str = "NotSent(\"herdr_bootstrap_waits\")";
+
+/// The turn host's judgement on the key the refusal used: a kept start's own, else the channel's
+/// turn key that writer holds and user inputs are judged on. `None` off the bootstrap path.
+async fn bootstrap_probe(
+    shared: Option<&Shared>,
+    provider: &ProviderKind,
+    channel: u64,
+    kept: Option<&serde_json::Value>,
+) -> Option<held_watch::ScreenProbe> {
+    use crate::services::turn_host::{HeldLook, bootstrap_watched, held_look};
+    if !bootstrap_watched(provider, channel) {
+        return None;
+    }
+    let shared = shared?;
+    let id = ChannelId::new(channel);
+    let key = match kept {
+        Some(context) => {
+            let resolve = super::super::headless_turn::owner_start_session_key;
+            resolve(shared, id, context).await
+        }
+        None => crate::services::discord::adk_session::turn_session_key(shared, id, provider).await,
+    };
+    let (pool, provider) = (shared.pg_pool.clone(), provider.clone());
+    let runtime = tokio::runtime::Handle::current();
+    Some(Box::new(move || {
+        let (pool, provider, key) = (pool.clone(), provider.clone(), key.clone());
+        let (sender, judged) = std::sync::mpsc::sync_channel(1);
+        runtime.spawn(async move {
+            let look = held_look(pool.as_ref(), &provider, channel, key.as_deref()).await;
+            let _ = sender.send(look);
+        });
+        match judged.recv() {
+            Ok(HeldLook::Ready) => Screen::Ready,
+            Ok(HeldLook::Wait) => Screen::Blocked,
+            Ok(HeldLook::Unread) | Err(_) => Screen::Unknown,
+        }
+    }))
+}
 
 /// Marks the start's front held so the drive watches the read a hold armed.
 async fn hold_start(mailbox: &ChannelMailboxHandle, channel: ChannelId, front: &Front) {
@@ -1600,6 +1689,9 @@ fn draft_notice(turn: &StreamingTurn<'_>, sources: &[String]) -> Option<effect::
     }))
 }
 
+#[cfg(test)]
+#[path = "owner_input_bootstrap_tests.rs"]
+mod bootstrap_tests;
 #[cfg(test)]
 #[path = "owner_input_codex_tests.rs"]
 mod codex_tests;

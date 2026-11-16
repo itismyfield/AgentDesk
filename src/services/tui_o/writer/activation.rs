@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 
 use super::adoption::logged;
 use super::binding::BindingEvents;
-use crate::services::tui_o::channel_policy::{Adoption, Candidate};
+use crate::services::session_host::surface_policy::VerifiedSurface;
+use crate::services::tui_o::channel_policy::{Adoption, Candidate, FirstProof};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::capture::same_file;
@@ -79,7 +80,7 @@ pub fn activate_with(
         local_custody,
         candidate,
         sources,
-        origin,
+        (origin, None),
     )
 }
 
@@ -90,7 +91,7 @@ fn activate_as(
     local_custody: impl FnOnce() -> Result<bool, String>,
     candidate: &Candidate,
     sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
-    origin: InitOrigin,
+    (origin, proof): (InitOrigin, Option<&FirstProof>),
 ) -> Result<(), String> {
     #[cfg(test)]
     test_hook::run(channel, test_hook::Step::BeforeLock)?;
@@ -99,15 +100,24 @@ fn activate_as(
     let mut adoption = candidate.lock();
     let locked = Instant::now();
     let mut spent = Spent::default();
-    let result = adopt(
-        &mut adoption,
-        candidate,
-        store,
-        (channel, facts),
-        local_custody,
-        sources,
-        (origin, &mut spent),
-    );
+    let decide = || {
+        adopt(
+            &mut adoption,
+            candidate,
+            store,
+            (channel, facts),
+            local_custody,
+            sources,
+            (origin, &mut spent),
+        )
+    };
+    let result = match proof {
+        Some(proof) => proof.with_current(decide),
+        None => decide(),
+    };
+    if !matches!(*adoption, Adoption::Pending | Adoption::Deferred) {
+        candidate.settle_first();
+    }
     tracing::info!(
         channel,
         adoption = ?*adoption,
@@ -156,6 +166,26 @@ pub fn activate_takeover(
     sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
     origin: InitOrigin,
 ) -> Result<(), String> {
+    activate_takeover_proved(
+        store,
+        channel,
+        (facts, queued_bodies),
+        local_custody,
+        candidate,
+        sources,
+        (origin, None),
+    )
+}
+
+pub(crate) fn activate_takeover_proved(
+    store: &OStore,
+    channel: u64,
+    (facts, queued_bodies): (ActivationFacts, i64),
+    local_custody: impl FnOnce() -> Result<bool, String>,
+    candidate: &Candidate,
+    sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
+    (origin, proof): (InitOrigin, Option<&FirstProof>),
+) -> Result<(), String> {
     let facts = ActivationFacts {
         open_intake: 0,
         ..facts
@@ -171,7 +201,7 @@ pub fn activate_takeover(
         local_custody,
         candidate,
         sources,
-        origin,
+        (origin, proof),
     )
 }
 
@@ -230,9 +260,10 @@ fn adopt(
     #[cfg(test)]
     test_hook::run(channel, test_hook::Step::BeforeWrite)?;
     let at = Instant::now();
-    let created = candidate
-        .init_scope(channel)
-        .and_then(|scope| create(store, channel, sources, origin, &scope));
+    let created = candidate.init_scope(channel).and_then(|scope| {
+        let child = candidate.child_surface();
+        create(store, (channel, child), sources, origin, &scope)
+    });
     #[cfg(test)]
     let created = created.and_then(|()| test_hook::run(channel, test_hook::Step::AfterWrite));
     spent.write = since(at);
@@ -278,9 +309,10 @@ pub(crate) fn settled(store: &OStore, channel: u64) -> Adoption {
     }
 }
 
+/// A thread child's init records its verified parent; the store refuses it until complete activation.
 fn create(
     store: &OStore,
-    channel: u64,
+    (channel, child): (u64, Option<VerifiedSurface>),
     sources: Vec<InitSource>,
     origin: InitOrigin,
     scope: &crate::services::session_host::surface_policy::InitScope,
@@ -289,14 +321,14 @@ fn create(
         return Err("the channel has store files but no init".into());
     }
     let init = Initialized {
-        policy_parent: None,
+        policy_parent: child.as_ref().map(VerifiedSurface::parent),
         channel,
         sources,
         initial_anchor: 0,
         build_digest: env!("CARGO_PKG_VERSION").into(),
         at: Utc::now(),
     };
-    let created = store.begin_era_as(&init, origin, scope);
+    let created = store.begin_era_as(&init, origin, scope, child.as_ref());
     created.map_err(|error| format!("init: {error:?}"))?;
     let count = init.sources.len();
     tracing::info!(

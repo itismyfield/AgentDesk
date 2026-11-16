@@ -50,7 +50,7 @@ pub(super) async fn hold_off_o_gateway(
         let route = if selected {
             intake_route::for_claimed_input(provider, channel_id.get(), row.id, phase).await
         } else {
-            intake_route::route(provider, channel_id.get())
+            intake_route::route_claimed(provider, channel_id.get())
         };
         match route {
             IntakeRoute::Hold(detail) => Some(detail),

@@ -462,9 +462,12 @@ where
         if herdr {
             unsettled.send_replace(actor.unsettled());
         }
-        // A turn-mode carried turn closes on this read too. Read only while a reader waits on it,
-        // so a channel nobody asks about adds no reads.
-        if herdr || crate::services::tui_o::turn_mode::transcript_turns(channel) {
+        // A turn-mode carried turn closes on this read too, and a thread child's store retires on
+        // it. Read only while a reader waits on it, so a channel nobody asks about adds no reads.
+        if herdr
+            || crate::services::tui_o::turn_mode::transcript_turns(channel)
+            || crate::services::tui_o::cutover::thread_child(channel)
+        {
             let asked = owing.demand.asked();
             if owing.demand.wanted() {
                 owing.published.send_replace(actor.undelivered(asked));

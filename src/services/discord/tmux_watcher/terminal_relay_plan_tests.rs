@@ -1335,3 +1335,94 @@ async fn bounded_terminal_cases(cases: &[u8]) {
     pool.close().await;
     db.drop().await;
 }
+
+/// Drive the real custody entry, retaining its relay slot through the common body gate.
+pub(crate) async fn first_terminal_plan(
+    shared: Arc<SharedData>,
+    channel: u64,
+    session: &str,
+    nonce: Option<&str>,
+    path: &std::path::Path,
+    transports: Arc<std::sync::atomic::AtomicUsize>,
+) -> crate::services::tui_o::cutover::BodySend<usize> {
+    let session = session.to_owned();
+    let output_path = path.display().to_string();
+    let channel_id = serenity::ChannelId::new(channel);
+    let http = Arc::new(serenity::Http::new("fixture-no-network"));
+    let provider = ProviderKind::Codex;
+    let mut row = InflightTurnState::new(
+        provider.clone(),
+        channel,
+        None,
+        1,
+        8165,
+        0,
+        "hi".into(),
+        None,
+        Some(session.clone()),
+        Some(output_path.clone()),
+        None,
+        0,
+    );
+    row.turn_nonce = nonce.map(str::to_owned);
+    row.turn_start_offset = Some(0);
+    let inflight = Some(row);
+    let context = TerminalRelayPlanContext {
+        http: &http,
+        shared: &shared,
+        channel_id,
+        watcher_provider: &provider,
+        tmux_session_name: &session,
+        evidence_source: None,
+        output_path: &output_path,
+        inflight_before_relay: &inflight,
+        cached_relay_producer: &None,
+        prompt_anchor_present_before_relay: false,
+        external_input_lease_before_relay: false,
+        session_bound_relay_turn_fully_mirrored: false,
+        session_bound_relay_turn_first_forwarded_sequence: None,
+        split_trailing_turn_follows: false,
+        startup_soft_terminal_authority: tui_direct_binding(),
+    };
+    let locals = TerminalRelayPlanLocals {
+        current_offset: 100,
+        data_start_offset: 0,
+        turn_data_start_offset: 0,
+        all_data: &String::new(),
+        full_response: &"short answer".into(),
+        restored_response_seed: &Default::default(),
+        response_sent_offset: 0,
+        has_assistant_response: true,
+        terminal_kind: Some(WatcherTerminalKind::HardResult),
+        task_notification_kind: None,
+        assistant_text_seen: true,
+        fresh_assistant_text_seen: true,
+        tool_state: &WatcherToolState::new(),
+        placeholder_msg_id: None,
+        status_panel_msg_id: None,
+    };
+    let mut ack = None;
+    let mut claimed = false;
+    let mut finished = false;
+    let mut synthetic = None;
+    let mut ledger_generation = None;
+    let mut state = TerminalRelayPlanState {
+        all_data_session_bound_relay_ack: &mut ack,
+        monitor_auto_turn_claimed: &mut claimed,
+        monitor_auto_turn_finished: &mut finished,
+        monitor_auto_turn_synthetic_msg_id: &mut synthetic,
+        monitor_auto_turn_ledger_generation: &mut ledger_generation,
+    };
+    let plan = run_terminal_relay_plan(&context, locals, &mut state).await;
+    let sent = crate::services::tui_o::cutover::claim_then_send(
+        Some(
+            crate::services::tui_o::cutover::BodyClaim::tmux(channel, Some(&session))
+                .for_turn(nonce),
+        ),
+        || async { transports.fetch_add(1, Ordering::SeqCst) + 1 },
+    )
+    .await
+    .unwrap();
+    drop(plan);
+    sent
+}

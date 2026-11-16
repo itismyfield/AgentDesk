@@ -22,6 +22,9 @@ mod late_cleanup;
 mod late_host;
 #[path = "repair_io_tests.rs"]
 mod repair_io;
+#[cfg(unix)]
+#[path = "thread_child_host_tests.rs"]
+mod thread_child;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
 #[cfg(unix)]
 use chrono::{DateTime, TimeDelta};
@@ -107,6 +110,7 @@ struct TestIo {
     producer: Mutex<Option<ProducerObservation>>,
     custody: Mutex<Result<Custody, String>>,
     queued_bodies: std::sync::atomic::AtomicI64,
+    intake_pool: Mutex<Option<sqlx::PgPool>>,
     fence_error: Mutex<Option<String>>,
     /// Runs once while the next facts are read.
     on_facts: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -115,6 +119,7 @@ struct TestIo {
     legacy: Mutex<Option<Arc<dyn LegacyView>>>,
     busy: std::sync::atomic::AtomicBool,
     relaying: std::sync::atomic::AtomicBool,
+    relay_shared: Mutex<Option<Arc<crate::services::discord::SharedData>>>,
     late_enabled: std::sync::atomic::AtomicBool,
     /// Each lease handed to a new writer: when, how many writers still held one, and how many
     /// piece leases were back by then.
@@ -156,12 +161,14 @@ impl TestIo {
             producer: Mutex::default(),
             custody: Mutex::new(Ok(Custody::Free)),
             queued_bodies: Default::default(),
+            intake_pool: Mutex::default(),
             fence_error: Mutex::default(),
             on_facts: Mutex::default(),
             port_down: Default::default(),
             legacy: Mutex::default(),
             busy: Default::default(),
             relaying: Default::default(),
+            relay_shared: Mutex::default(),
             late_enabled: Default::default(),
             leases: Mutex::default(),
             repost_turns: Arc::default(),
@@ -267,13 +274,27 @@ impl HostIo for TestIo {
         self.calls.lock().unwrap().push(("fence", channel));
         let error = self.fence_error.lock().unwrap().clone();
         let queued_bodies = self.queued_bodies.load(Ordering::SeqCst);
+        let pool = self.intake_pool.lock().unwrap().clone();
         async move {
             if let Some(error) = error {
                 return Err(error);
             }
             let facts = self.activation_facts(channel, provider).await?;
+            let hold = match pool {
+                Some(pool) => {
+                    crate::db::o_channel_activation::fenced_activation_rows(
+                        &pool,
+                        &channel.to_string(),
+                        "first-fixture",
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .0
+                }
+                None => crate::db::o_channel_activation::IntakeFence::empty_for_test(),
+            };
             Ok(crate::services::tui_o::writer::host::FencedFacts {
-                hold: crate::db::o_channel_activation::IntakeFence::empty_for_test(),
+                hold,
                 facts,
                 queued_bodies,
             })
@@ -294,8 +315,17 @@ impl HostIo for TestIo {
         std::future::ready(self.busy.load(Ordering::SeqCst))
     }
 
-    fn relaying(&self, _: u64) -> bool {
+    fn relaying(&self, channel: u64) -> bool {
         self.relaying.load(Ordering::SeqCst)
+            || self
+                .relay_shared
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|shared| {
+                    shared
+                        .relay_emission_in_flight(poise::serenity_prelude::ChannelId::new(channel))
+                })
     }
 
     fn adopted(&self, channel: u64, _: ShadowProvider) {

@@ -359,6 +359,7 @@ use formatting::{format_for_discord, format_tool_input, send_long_message_raw, t
 use inflight::InflightTurnState;
 #[cfg(test)]
 pub(crate) use inflight::lock_inflight_state_path;
+pub(crate) use inflight::open_tui_thread_hints;
 #[cfg(test)]
 use inflight::save_inflight_state;
 pub(crate) use inflight::{clear_inflight_state, policy_op};
@@ -3430,3 +3431,6 @@ pub(crate) async fn revoke_notice_author_for_test(shared: &SharedData) {
 }
 
 pub(super) mod routine_presentation;
+
+#[cfg(all(test, unix))]
+pub(crate) use tmux::first_terminal_plan;

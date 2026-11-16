@@ -104,9 +104,8 @@ pub(super) async fn headless_session_key(
     metadata: Option<&serde_json::Value>,
     label: Option<&str>,
 ) -> Option<String> {
-    let snapshot = scheduled_snapshot_session_label(metadata);
-    let basis = session_key_basis_override(snapshot.as_deref(), metadata, label);
-    build_adk_session_key(shared, channel, provider, basis).await
+    let basis = headless_session_basis(metadata, label);
+    build_adk_session_key(shared, channel, provider, basis.as_deref()).await
 }
 
 /// The session key a kept start's headless turn runs under, built as that turn builds it.

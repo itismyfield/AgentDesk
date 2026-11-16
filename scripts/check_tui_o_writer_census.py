@@ -25,13 +25,13 @@ keeps that cut honest on every intermediate head:
       raw claim (a claiming gate fn, or under tui_o any `.claim(` call or
       `::claim` path) may appear only in the RAW_CLAIM_SITES functions, each
       listed with its reason.
-  (e) TURN_MARK_SITES pins the fresh-turn admission helper and its Candidate
-      mark call. TURN_ADMISSION_ORDER keeps that hook ahead of provider
-      submission and bridge spawn along the production intake path.
+  (e) TURN_MARK_SITES pins fresh-turn admission and Candidate publication.
+      TURN_ADMISSION_ORDER keeps the live admission guard ahead of provider
+      spawn, submission and bridge spawn along the production intake path.
 
 Census PASS is not flip readiness. `flip_ready` is reported on its own line and
 is true only when no census row is deferred and every FLIP_READY_TESTS funnel
-test exists in src/; `--require-flip-ready` turns a false verdict into rc 1.
+test and its CHILD_FLIP_READY_TESTS row exist in src/; `--require-flip-ready` turns a false verdict into rc 1.
 
 TO CHANGE A COUNT: edit the map in this file in the same commit that moves the
 call, and say in the commit message which site moved and why. A new file with a
@@ -97,8 +97,12 @@ GATE_RES = {
 }
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
 TURN_MARK_RES = {
-    "admit": re.compile(r"\bmark_codex_turn_admitted\b"),
-    "mark": re.compile(r"\.\s*mark_turn_admitted\s*\(|::\s*mark_turn_admitted\b"),
+    "admit": re.compile(r"\b(?:mark_codex_turn_admitted|admit_codex_first)\b"),
+    "mark": re.compile(r"\.\s*(?:mark_turn_admitted|admit_first)\s*\(|::\s*(?:mark_turn_admitted|admit_first)\b"),
+}
+TURN_ADMISSION_PATTERNS = {
+    # Distinguish provider launch from the earlier follow-up readiness probe.
+    "provider_spawn": re.compile(r"\bspawn_blocking\s*\(\s*move\s*\|\|\s*\{\s*let\s+mut\s+first_admission\b"),
 }
 DEFN_RE = re.compile(r"\bfn\s+$")
 FN_RE = re.compile(r"\bfn\s+(\w+)")
@@ -493,7 +497,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     "src/services/discord/turn_finalizer/watcher_backstop.rs": (
         "watcher_backstop_turn_is_terminal:peek",
     ),
-    "src/services/herdr_launch.rs": ("o_ready_at:peek",),
+    "src/services/herdr_launch.rs": ("o_owns_seeded:peek",),
     "src/services/tui_o/cutover.rs": (
         "claim_for_placement:claim",
     ),
@@ -519,18 +523,24 @@ RAW_CLAIM_SITES: dict[str, tuple[str, ...]] = {
 }
 # The Candidate's send/seq capture is reachable only through local fresh-turn admission.
 TURN_MARK_SITES: dict[str, tuple[str, ...]] = {
-    "src/services/discord/router/turn_start.rs": ("log_session_strategy_diagnostic:admit",),
-    "src/services/tui_o/cutover.rs": ("mark_codex_turn_admitted:mark",),
+    "src/services/discord/router/message_handler/intake_turn.rs": ("handle_text_message:admit",),
+    "src/services/tui_o/cutover.rs": ("admit_codex_first:mark",),
+    # Original input admission shares the method spelling and remains pinned.
+    "src/services/discord/queue_io/input_owner/ingress.rs": ("admit_raw:mark",),
 }
 # Every token must occur once, in this order, inside its named production function.
 TURN_ADMISSION_ORDER: dict[str, dict[str, tuple[str, ...]]] = {
     "src/services/discord/router/message_handler/intake_turn.rs": {
         "handle_text_message": (
-            "log_session_strategy_diagnostic", "provider_dispatch::execute", "spawn_turn_bridge",
+            "log_session_strategy_diagnostic", "admit_codex_first", "provider_spawn",
+            "provider_dispatch::execute", "spawn_turn_bridge",
         ),
     },
     "src/services/discord/router/turn_start.rs": {
-        "log_session_strategy_diagnostic": ("mark_codex_turn_admitted", "spawn_blocking"),
+        "log_session_strategy_diagnostic": ("spawn_blocking",),
+    },
+    "src/services/tui_o/cutover.rs": {
+        "admit_codex_first": ("with_live_admission", "with_channels", "output_candidate", "admit_first"),
     },
 }
 # Funnel -> tests that drive it with O owning the channel. Each must exist as a
@@ -554,6 +564,24 @@ FLIP_READY_TESTS: dict[str, tuple[str, ...]] = {
     "W34": ("o_delegated_restart_handoff_keeps_only_the_marker",),
     "W35": ("o_delegated_anchor_repost_is_skipped",),
     "backstop": ("o_delegated_done_turn_needs_no_legacy_delivery_confirmation",),
+}
+# Site x child: per funnel, a test re-running it with the channel as a recorded thread child of a
+# selected parent. Every FLIP_READY_TESTS row needs one; the same existence rule applies.
+CHILD_FLIP_READY_TESTS: dict[str, tuple[str, ...]] = {
+    "W01": ("child_w01_watcher_turn_shows_no_body",),
+    "W02": ("child_w02_rollover_tick_writes_no_body",),
+    "W04": ("child_w04_single_message_footer_sends_no_body",),
+    "W10": ("child_w10_tui_body_is_cut_on_direct_gateways",),
+    "W11": ("child_w11_cancelled_partial_body_is_not_replaced",),
+    "W13": ("child_w13_foreign_custody_follows_destination_membership",),
+    "W20": ("child_w20_idle_range_is_consumed_without_transport",),
+    "W21": ("child_w21_task_response_leaves_no_legacy_claim",),
+    "W30": ("child_w30_recovery_body_posts_only_the_marker",),
+    "W31": ("child_w31_captured_recovery_range_is_consumed_without_send",),
+    "W33": ("child_w33_stale_leak_recovery_resends_nothing",),
+    "W34": ("child_w34_restart_handoff_keeps_only_the_marker",),
+    "W35": ("child_w35_anchor_repost_is_skipped",),
+    "backstop": ("child_backstop_done_turn_needs_no_legacy_confirmation",),
 }
 
 
@@ -630,7 +658,9 @@ def _admission_order_problems(rel: str, text: str) -> list[str]:
         body = text[start + 1:end]
         positions = []
         for token in tokens:
-            pattern = r"\b" + r"\s*::\s*".join(map(re.escape, token.split("::"))) + r"\b"
+            pattern = TURN_ADMISSION_PATTERNS.get(token) or (
+                r"\b" + r"\s*::\s*".join(map(re.escape, token.split("::"))) + r"\b"
+            )
             matches = list(re.finditer(pattern, body))
             if len(matches) != 1:
                 problems.append(
@@ -1045,6 +1075,22 @@ def flip_readiness(root: Path) -> tuple[bool, str]:
     empty = sorted(funnel for funnel, tests in FLIP_READY_TESTS.items() if not tests)
     if empty:
         reasons.append(f"funnel test lists empty: {', '.join(empty)}")
+    no_child = sorted(f for f in FLIP_READY_TESTS if not CHILD_FLIP_READY_TESTS.get(f))
+    if no_child:
+        reasons.append(f"funnels without a child test: {', '.join(no_child)}")
+    stray = sorted(set(CHILD_FLIP_READY_TESTS) - set(FLIP_READY_TESTS))
+    if stray:
+        reasons.append(f"child tests for unknown funnels: {', '.join(stray)}")
+    child_names = sorted({n for tests in CHILD_FLIP_READY_TESTS.values() for n in tests})
+    funnel_names = names
+    reused = sorted(set(child_names) & set(funnel_names))
+    if reused:
+        reasons.append(f"child rows name funnel tests: {', '.join(reused)}")
+    rows = Counter(n for tests in CHILD_FLIP_READY_TESTS.values() for n in tests)
+    repeated = sorted(n for n, count in rows.items() if count > 1)
+    if repeated:
+        reasons.append(f"child tests repeated across rows: {', '.join(repeated)}")
+    names = sorted(set(names) | set(child_names))
     defined: set[str] = set()
     src = root / "src"
     if names and src.is_dir():
@@ -1072,7 +1118,8 @@ def flip_readiness(root: Path) -> tuple[bool, str]:
         reasons.append(f"funnel tests missing from src/: {', '.join(missing)}")
     if reasons:
         return False, "flip_ready=false: " + "; ".join(reasons)
-    return True, f"flip_ready=true: {len(names)} funnel tests over {len(FLIP_READY_TESTS)} rows"
+    return True, (f"flip_ready=true: {len(funnel_names)} funnel tests over {len(FLIP_READY_TESTS)} rows, "
+                  f"{len(child_names)} child tests")
 
 
 def _evidence_test_ids(data):

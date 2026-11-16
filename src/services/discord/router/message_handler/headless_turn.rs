@@ -11,8 +11,8 @@ use replay_start::take_session_retry_context;
 mod process_mailbox;
 mod routine_metadata;
 use routine_metadata::{
-    fresh_routine_turn, routine_metadata_agent_id, routine_metadata_role_binding,
-    routine_tmux_session_name, scheduled_snapshot_session_label, session_key_basis_override,
+    fresh_routine_turn, headless_session_basis, routine_metadata_agent_id,
+    routine_metadata_role_binding, routine_tmux_session_name, scheduled_snapshot_session_label,
     valid_routine_metadata,
 };
 
@@ -1219,10 +1219,10 @@ mod recovery_context_take_order_tests;
 
 #[cfg(test)]
 mod fresh_routine_tests {
+    use super::routine_metadata::session_key_basis_override;
     use super::{
         fresh_routine_turn, metadata_parent_channel_id, persist_boundary_before_provider_clear,
         routine_metadata_agent_id, routine_metadata_role_binding, routine_tmux_session_name,
-        session_key_basis_override,
     };
     use crate::services::provider::ProviderKind;
     use serde_json::json;

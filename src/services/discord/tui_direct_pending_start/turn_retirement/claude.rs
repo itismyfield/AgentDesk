@@ -127,7 +127,7 @@ pub(in crate::services::discord) fn confirm_takeover(
     takeover: &SourceBinding,
     herdr_retired: impl FnOnce(&str) -> bool,
 ) -> Confirmation {
-    if !config.selects(channel) {
+    if !config.selects(crate::services::tui_o::cutover::policy_channel(channel)) {
         return Confirmation::Unselected;
     }
     let provider = ProviderKind::Claude;

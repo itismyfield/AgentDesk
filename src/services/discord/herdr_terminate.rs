@@ -221,7 +221,17 @@ pub(super) async fn retire_confirmed(
     record: &HostedExecution,
 ) -> Result<(), TerminationResult> {
     match hosted_execution::retire_pg(pool, row, &record.owner, &record.execution_nonce).await {
-        Ok(HostedCasOutcome::Written) => Ok(()),
+        Ok(HostedCasOutcome::Written) => {
+            // A retired Codex execution stays listed but no longer admitted (Claude's move back
+            // releases its own); a newer listing is kept.
+            if record.owner.provider == "codex" {
+                crate::services::tui_prompt_dedupe::withhold_herdr_execution(
+                    &record.owner.logical_key,
+                    Some(&record.execution_nonce),
+                );
+            }
+            Ok(())
+        }
         Ok(HostedCasOutcome::Stale) => {
             Err(TerminationResult::Indeterminate("retire CAS stale".into()))
         }

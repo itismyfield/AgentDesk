@@ -13,6 +13,11 @@ pub(crate) async fn text_for_input_placement(provider: &str, channel: &str) -> I
 }
 
 async fn placement(provider: &str, channel: Option<u64>) -> IntakeRoute {
+    if let Some(channel) = channel
+        && let Err(detail) = super::super::resolve_reserved_child(channel).await
+    {
+        return IntakeRoute::Hold(detail);
+    }
     if !channel.is_some_and(|channel| selected_codex_input(provider, channel)) {
         return match channel {
             Some(channel) => super::route_for_placement(provider, channel),
@@ -31,7 +36,10 @@ pub(crate) async fn for_claimed_input(
     phase: &'static str,
 ) -> IntakeRoute {
     if !selected_codex_input(provider, channel) {
-        return super::route(provider, channel);
+        return super::route_claimed(provider, channel);
+    }
+    if let Err(detail) = super::super::claimed_child_input(channel) {
+        return IntakeRoute::Hold(detail);
     }
     let provider = provider.to_owned();
     blocking_route(move || {
@@ -103,6 +111,14 @@ fn judge_at(
         if let Some(refusal) = host::initial_fresh_refusal(channel) {
             reason = refusal;
             return super::writer_unready(channel);
+        }
+        // The turn host judges the retired row; placement only sees the pin and the vacant pane.
+        if clear_relaunch::herdr_bootstrap::local_eligible(channel).is_ok() {
+            reason = "herdr_retired_bootstrap";
+            if phase == "placement" {
+                tracing::info!(channel, provider, reason, "[tui_o] input admission passed");
+            }
+            return IntakeRoute::Gateway;
         }
         if clear_relaunch::input_reason_for_channel(channel).is_some() {
             IntakeRoute::Gateway

@@ -372,6 +372,7 @@ pub(super) fn execute_observed(
     .map_err(|error| error.to_string())?;
     let submitted =
         tui_session_launch::first_input::create(tui_session_launch::first_input::Create {
+            turn_nonce: cancel_token.as_deref().and_then(CancelToken::turn_nonce),
             tmux_session_name,
             working_dir,
             prompt,

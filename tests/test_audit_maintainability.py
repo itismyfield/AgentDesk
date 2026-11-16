@@ -100,21 +100,32 @@ def _files(findings: Iterable) -> set[str]:
 
 
 class _LayerSrcTree(_FakeSrcTree):
-    """Give harness fixtures a generated initial debt baseline for their own source."""
+    """Commit the harness fixture as main so the module-layer gate measures it as its own base."""
+    def __init__(self, files: dict[str, str], git_main: bool = True) -> None:
+        super().__init__(files)
+        self.git_main = git_main
+
     def __enter__(self):
         root = super().__enter__()
-        from audit_maintainability.checks import module_layers, module_layer_baseline as snapshots
+        import os
+        from audit_maintainability.checks import module_layer_baseline as snapshots
         if not any((root / "src" / name).exists() for name in ("lib.rs", "main.rs")):
             _write(root, "src/lib.rs", "")
         _write(root, snapshots.MAPPING, 'schema_version=1\n[layers]\nassembly=5\n'
                '[[rules]]\nprefix=""\nlayer="assembly"\nreason="fixture assembly"\n')
-        _write(root, "scripts/audit_maintainability/layer_moves.toml", "schema_version=1\nmoves=[]\n")
-        occurrences = []
-        graph = module_layers.analyze(root, occurrence_projection=occurrences)
-        snapshots.write_baseline(root / snapshots.BASELINE,
-                                 snapshots.baseline(graph, snapshots.load_mapping(root), "fixture", occurrences))
         from audit_maintainability.checks import low_level_accessors, low_level_accessor_baseline
         low_level_accessor_baseline.write_baselines(root, low_level_accessors.scan(root))
+        if not self.git_main:
+            return root
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self._patches.append(environment)
+        for key in [k for k in os.environ if k.startswith(("GITHUB_", "GIT_", "GFP_")) or k == "MODULE_LAYER_BASE_REF"]:
+            del os.environ[key]
+        for command in (["init", "-q"], ["config", "user.name", "Fixture"], ["config", "user.email", "fixture@example.invalid"],
+                        ["config", "commit.gpgsign", "false"], ["add", "-A"], ["commit", "-qm", "fixture main"],
+                        ["update-ref", "refs/remotes/origin/main", "HEAD"]):
+            subprocess.run(["git", "-C", str(root), *command], check=True, capture_output=True)
         return root
 
 class GiantFilesCheck(unittest.TestCase):
@@ -1303,7 +1314,7 @@ class HarnessCli(unittest.TestCase):
             self.assertFalse(any(row["severity"] == "error" for key, value in checks.items()
                                  if key != "module_layers" for row in value["findings"]))
 
-    def test_missing_layer_baseline_cannot_pass_check_mode(self):
+    def test_unresolvable_layer_base_cannot_pass_check_mode(self):
         with _FakeSrcTree({"src/main.rs": "fn main() {}"}):
             stream = io.StringIO()
             with mock.patch.object(sys, "stdout", stream), mock.patch.object(sys, "stderr", io.StringIO()):
@@ -1405,14 +1416,17 @@ class HarnessCli(unittest.TestCase):
 
     def test_check_mode_warns_on_undocumented_new_giant(self) -> None:
         big = "fn x() {}\n" * (giant_files.THRESHOLD + 5)
+        # A git fixture would switch the giant ratchet to its base comparison; this case pins the
+        # frozen-baseline path, so it stays outside git and leaves the git-based layer gate out.
+        specs = [spec for spec in HARNESS.load_check_specs() if spec.key != "module_layers"]
         with _LayerSrcTree({"src/new_giant.rs": big,
                            GiantFileRatchetCheck._BASELINE: "[giant_file_ratchet]\n",
-                           **GiantFileRatchetCheck._HISTORY}) as root:
+                           **GiantFileRatchetCheck._HISTORY}, git_main=False) as root:
             allowlist = root / "empty.toml"
             allowlist.write_text("", encoding="utf-8")
             with mock.patch.object(sys, "stdout", new=mock.MagicMock()), mock.patch.object(
                 sys, "stderr", new=io.StringIO()
-            ):
+            ), mock.patch.object(HARNESS, "load_check_specs", return_value=specs):
                 rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
                 self.assertIn("warning `giant_file_ratchet` src/new_giant.rs", sys.stderr.getvalue())
                 self.assertIn("+1005 production lines", sys.stderr.getvalue())
@@ -2358,7 +2372,7 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
     def test_baseline_writer_allows_identical_replay_and_rejects_replacement(self) -> None:
         payload = self.snapshot(self._graph(), self._mapping(), "a" * 40)
         with TemporaryDirectory() as temporary:
-            target = Path(temporary) / "baselines" / "generated" / "module_layers.json"
+            target = Path(temporary) / "snapshot.json"
             self.baselines.write_baseline(target, payload)
             original = target.read_bytes()
             self.assertEqual(original, self.baselines.encode_baseline(payload).encode("utf-8"))
@@ -2455,7 +2469,10 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
             snapshot = json.loads(first.read_text("utf-8"))
             self.assertEqual(snapshot["input_sha"], revision)
             self.assertIn(revision, snapshot["generation_command"])
-            self.assertIn("baselines/generated/module_layers.json", snapshot["generation_command"])
+            removed = repo / self.baselines.BASELINE
+            resurrect = subprocess.run([*command, "--input-sha", "HEAD", "--output", str(removed)], capture_output=True, text=True)
+            self.assertNotEqual(resurrect.returncode, 0)
+            self.assertFalse(removed.exists())
             replay = subprocess.run([*command, "--input-sha", revision, "--output", str(second)],
                                     capture_output=True, text=True)
             self.assertEqual(replay.returncode, 0, replay.stderr)
@@ -2500,6 +2517,63 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
         row = next(row for row in grouped if row["path"] == "unknown_macro")
         self.assertEqual(row["count"], 2)
         self.assertEqual(set(row["sites"]), {"src/a.rs:15", "src/a.rs:25"})
+
+
+_FAKE_CHECK = """
+import sys, time
+from audit_maintainability.checks import CheckSpec
+from audit_maintainability.common import Finding
+def _run(allowlist):
+    time.sleep(DELAY)
+    print("out", KEY)
+    print("err", KEY, file=sys.stderr)
+    if FAIL:
+        raise ValueError("boom " + KEY)
+    return [Finding(KEY, "warn", f"{KEY}/{n}.rs", None, "m", {"al": sorted(allowlist)}) for n in "ba"]
+CHECK = CheckSpec(key=KEY, title=KEY, description=KEY, hard_gate=False, runner=_run)
+"""
+
+
+class HarnessRunSharingTest(unittest.TestCase):
+    """Worker processes and the run cache must not change what a serial run reports."""
+
+    def _run(self, specs, jobs):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "stdout", out), mock.patch.object(sys, "stderr", err):
+            try:
+                result = HARNESS.run_all(specs, {"module_layers": {"x"}}, jobs=jobs)
+            except ValueError as exc:
+                result = f"raised {exc}"
+        return result, out.getvalue(), err.getvalue()
+
+    def test_workers_replay_findings_output_and_first_failure_in_check_order(self) -> None:
+        # The first check is slowest, so completion order differs from check order.
+        cases = {"order": False, "failure": True}
+        with TemporaryDirectory() as tmp:
+            sys.path.insert(0, tmp)
+            try:
+                for case, fail in cases.items():
+                    specs = []
+                    for index, (key, delay) in enumerate((("giant_files", 0.5), ("module_layers", 0), ("light", 0))):
+                        name = f"_audit_sharing_{case}_{index}"
+                        flags = f"KEY, DELAY, FAIL = {key!r}, {delay}, {fail and key == 'module_layers'}\n"
+                        Path(tmp, f"{name}.py").write_text(flags + _FAKE_CHECK, encoding="utf-8")
+                        specs.append(importlib.import_module(name).CHECK)
+                    with self.subTest(case=case):
+                        self.assertTrue(HARNESS.parallel.can_run(specs))
+                        self.assertEqual(len(HARNESS.parallel.plan(specs)), 3)
+                        self.assertEqual(self._run(specs, jobs=3), self._run(specs, jobs=1))
+            finally:
+                sys.path.remove(tmp)
+
+    def test_run_cache_hands_out_copies_and_expires_with_the_run(self) -> None:
+        big = "fn x() {}\n" * (giant_files.THRESHOLD + 1)
+        with _FakeSrcTree({"src/big.rs": big}) as root:
+            with common.run_cache():
+                giant_files.giant_production_loc()["src/big.rs"] = 0
+                self.assertEqual(giant_files.giant_production_loc(), {"src/big.rs": 1001})
+            (root / "src/big.rs").write_text(big + "fn y() {}\n", encoding="utf-8")
+            self.assertEqual(giant_files.giant_production_loc(), {"src/big.rs": 1002})
 
 
 if __name__ == "__main__":

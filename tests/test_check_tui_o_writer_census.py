@@ -28,21 +28,29 @@ EVID_FILE = """pub fn read_receipt() -> bool { lookup_receipt() }
 """
 CUTOVER_FILE = """pub const O_TUI_WRITER: bool = false;
 pub fn o_owns_tui_output(kind: Kind) -> bool { O_TUI_WRITER && kind.is_tui() }
-pub fn mark_codex_turn_admitted() { candidate.mark_turn_admitted(ch, read_seq); }
+pub fn admit_codex_first() {
+    token.with_live_admission(|| {
+        test_override::with_channels(|boot| boot.output_candidate(ch).admit_first(ch, read_seq))
+    })
+}
 """
 TURN_START_FILE = """pub async fn log_session_strategy_diagnostic() {
-    cutover::mark_codex_turn_admitted(ch, provider, session);
     tokio::task::spawn_blocking(probe);
 }
 """
 INTAKE_FILE = """pub async fn handle_text_message() {
     log_session_strategy_diagnostic().await;
-    provider_dispatch::execute(turn);
+    let first_admission = cutover::admit_codex_first(ch, provider, session);
+    tokio::task::spawn_blocking(move || {
+        let mut first_admission = first_admission;
+        provider_dispatch::execute(turn);
+    });
     spawn_turn_bridge(turn);
 }
 """
 TURN_START = "src/services/discord/router/turn_start.rs"
 INTAKE = "src/services/discord/router/message_handler/intake_turn.rs"
+ORIGINAL_INGRESS = "src/services/discord/queue_io/input_owner/ingress.rs"
 MAPS = {
     "EXPECTED_PRIMITIVES": {"sink.rs": {"send_channel_message*": 1}},
     "CENSUS": {"sink.rs": ("W20", "CUT_D")},
@@ -66,6 +74,7 @@ class CensusGateTests(unittest.TestCase):
         self.write("src/services/tui_o/cutover.rs", CUTOVER_FILE)
         self.write(TURN_START, TURN_START_FILE)
         self.write(INTAKE, INTAKE_FILE)
+        self.write(ORIGINAL_INGRESS, "fn admit_raw() { original.admit_first(handle); }\n")
         self.maps = {key: _copy(value) for key, value in MAPS.items()}
 
     def write(self, rel: str, text: str) -> None:
@@ -252,39 +261,67 @@ class CensusGateTests(unittest.TestCase):
         self.assertTrue(ok, message)
 
     def test_turn_mark_cannot_move_to_a_different_production_function(self) -> None:
-        self.write(TURN_START, TURN_START_FILE.replace(
-            "    cutover::mark_codex_turn_admitted(ch, provider, session);\n", ""
-        ))
-        for boundary in ("provider_dispatch::execute(turn);", "spawn_turn_bridge(turn);"):
-            with self.subTest(boundary=boundary):
-                self.write(INTAKE, INTAKE_FILE.replace(
-                    boundary, boundary + "\n    cutover::mark_codex_turn_admitted(ch, provider, session);"
-                ))
-                self.assert_fails_with(
-                    f"turn mark sites: {INTAKE} has ['handle_text_message:admit'], expected []"
-                )
+        call = "    let first_admission = cutover::admit_codex_first(ch, provider, session);\n"
+        self.write(INTAKE, INTAKE_FILE.replace(call, "") + "fn other() {\n" + call + "}\n")
+        self.assert_fails_with(
+            f"turn mark sites: {INTAKE} has ['other:admit'], expected ['handle_text_message:admit']"
+        )
 
     def test_admission_call_moved_after_submit_or_spawn_fails_with_unchanged_sites(self) -> None:
-        call = "    log_session_strategy_diagnostic().await;\n"
-        for boundary in ("provider_dispatch::execute(turn);", "spawn_turn_bridge(turn);"):
+        call = "    let first_admission = cutover::admit_codex_first(ch, provider, session);\n"
+        for boundary in ("provider_dispatch::execute(turn);", "spawn_turn_bridge(turn);",
+                         "let mut first_admission = first_admission;"):
             with self.subTest(boundary=boundary):
                 moved = INTAKE_FILE.replace(call, "").replace(boundary, boundary + "\n" + call)
                 self.write(INTAKE, moved)
                 self.assert_fails_with(
                     f"turn admission: {INTAKE} handle_text_message must order "
-                    "log_session_strategy_diagnostic -> provider_dispatch::execute -> spawn_turn_bridge"
+                    "log_session_strategy_diagnostic -> admit_codex_first -> provider_spawn -> "
+                    "provider_dispatch::execute -> spawn_turn_bridge"
                 )
 
-    def test_mark_moved_after_diagnostic_probe_fails_with_unchanged_sites(self) -> None:
-        call = "    cutover::mark_codex_turn_admitted(ch, provider, session);\n"
-        self.write(TURN_START, TURN_START_FILE.replace(call, "").replace(
-            "    tokio::task::spawn_blocking(probe);\n",
-            "    tokio::task::spawn_blocking(probe);\n" + call,
-        ))
+    def test_mark_moved_before_live_admission_guard_fails_with_unchanged_sites(self) -> None:
+        self.write("src/services/tui_o/cutover.rs", CUTOVER_FILE.replace(
+            "token.with_live_admission(|| {", "candidate.admit_first(ch, read_seq); token.with_live_admission(|| {"
+        ).replace("boot.output_candidate(ch).admit_first(ch, read_seq)", "boot.output_candidate(ch)"))
         self.assert_fails_with(
-            f"turn admission: {TURN_START} log_session_strategy_diagnostic must order "
-            "mark_codex_turn_admitted -> spawn_blocking"
+            "turn admission: src/services/tui_o/cutover.rs admit_codex_first must order "
+            "with_live_admission -> with_channels -> output_candidate -> admit_first"
         )
+
+    def test_missing_or_duplicate_first_admission_fails(self) -> None:
+        call = "    let first_admission = cutover::admit_codex_first(ch, provider, session);\n"
+        for copies in (0, 2):
+            with self.subTest(copies=copies):
+                self.write(INTAKE, INTAKE_FILE.replace(call, call * copies))
+                self.assert_fails_with(
+                    f"turn admission: {INTAKE} handle_text_message has {copies}x admit_codex_first, expected 1x"
+                )
+
+    def test_missing_live_admission_guard_fails(self) -> None:
+        self.write("src/services/tui_o/cutover.rs", CUTOVER_FILE.replace("with_live_admission", "without_guard"))
+        self.assert_fails_with("admit_codex_first has 0x with_live_admission, expected 1x")
+
+    def test_admission_inside_provider_closure_fails(self) -> None:
+        call = "    let first_admission = cutover::admit_codex_first(ch, provider, session);\n"
+        moved = INTAKE_FILE.replace(call, "").replace(
+            "let mut first_admission = first_admission;",
+            "let mut first_admission = first_admission;\n" + call,
+        )
+        self.write(INTAKE, moved)
+        self.assert_fails_with(f"turn admission: {INTAKE} handle_text_message must order")
+
+    def test_readiness_probe_before_admission_is_not_provider_start(self) -> None:
+        call = "    let first_admission = cutover::admit_codex_first(ch, provider, session);\n"
+        self.write(INTAKE, INTAKE_FILE.replace(call, "    tokio::task::spawn_blocking(readiness);\n" + call))
+        ok, message = self.run_gate()
+        self.assertTrue(ok, message)
+
+    def test_legacy_mark_reintroduced_in_production_fails(self) -> None:
+        self.write(TURN_START, TURN_START_FILE.replace(
+            "tokio::task::spawn_blocking(probe);", "cutover::mark_codex_turn_admitted(ch); tokio::task::spawn_blocking(probe);"
+        ))
+        self.assert_fails_with(f"turn mark sites: {TURN_START} has ['log_session_strategy_diagnostic:admit'], expected []")
 
     def test_missing_or_duplicate_admission_tokens_fail(self) -> None:
         call = "    log_session_strategy_diagnostic().await;\n"
@@ -308,12 +345,12 @@ class CensusGateTests(unittest.TestCase):
         self.assert_fails_with(f"turn mark sites: {rel} has ['early:mark'], expected []")
 
     def test_turn_mark_prose_and_test_code_do_not_satisfy_production_pins(self) -> None:
-        call = "    cutover::mark_codex_turn_admitted(ch, provider, session);"
-        self.write(TURN_START, TURN_START_FILE.replace(call, "    // " + call))
+        call = "    let first_admission = cutover::admit_codex_first(ch, provider, session);"
+        self.write(INTAKE, INTAKE_FILE.replace(call, "    // " + call))
         self.write("src/services/tui_o/mark_test.rs",
                    "#[cfg(test)]\nfn test() { candidate.mark_turn_admitted(ch, read_seq); }\n")
         self.assert_fails_with(
-            f"turn mark sites: {TURN_START} has [], expected ['log_session_strategy_diagnostic:admit']"
+            f"turn mark sites: {INTAKE} has [], expected ['handle_text_message:admit']"
         )
 
     def test_flag_token_outside_cutover_fails(self) -> None:
@@ -349,18 +386,25 @@ class FlipReadinessTests(unittest.TestCase):
         tests = self.root / "src/services/discord/funnel_tests.rs"
         tests.parent.mkdir(parents=True)
         tests.write_text("#[test]\nfn o_delegated_funnel_cut() {}\n", encoding="utf-8")
+        child = self.root / "src/services/tui_o/child_funnel_tests.rs"
+        child.parent.mkdir(parents=True)
+        child.write_text("#[test]\nfn child_funnel_cut() {}\n", encoding="utf-8")
 
     def readiness(self, **overrides) -> tuple[bool, str]:
         maps = {
             "CENSUS": {"sink.rs": ("W20", "CUT_D")},
             "FLIP_READY_TESTS": {"W20": ("o_delegated_funnel_cut",)},
+            "CHILD_FLIP_READY_TESTS": {"W20": ("child_funnel_cut",)},
             **overrides,
         }
         with mock.patch.multiple(census, **maps):
             return census.flip_readiness(self.root)
 
     def test_complete_funnels_are_flip_ready(self) -> None:
-        self.assertEqual(self.readiness(), (True, "flip_ready=true: 1 funnel tests over 1 rows"))
+        self.assertEqual(
+            self.readiness(),
+            (True, "flip_ready=true: 1 funnel tests over 1 rows, 1 child tests"),
+        )
 
     def test_each_gap_keeps_flip_ready_false(self) -> None:
         gaps = {
@@ -369,12 +413,30 @@ class FlipReadinessTests(unittest.TestCase):
             "funnel tests missing from src/: o_delegated_gone": (
                 "FLIP_READY_TESTS", {"W20": ("o_delegated_funnel_cut", "o_delegated_gone")}
             ),
+            "funnels without a child test: W20": ("CHILD_FLIP_READY_TESTS", {}),
+            "funnel tests missing from src/: child_gone": (
+                "CHILD_FLIP_READY_TESTS", {"W20": ("child_gone",)}
+            ),
+            "child rows name funnel tests: o_delegated_funnel_cut": (
+                "CHILD_FLIP_READY_TESTS", {"W20": ("o_delegated_funnel_cut",)}
+            ),
+            "child tests for unknown funnels: W99": (
+                "CHILD_FLIP_READY_TESTS", {"W20": ("child_funnel_cut",), "W99": ("child_funnel_cut",)}
+            ),
         }
         for reason, (key, value) in gaps.items():
             with self.subTest(reason=reason):
                 ready, verdict = self.readiness(**{key: value})
                 self.assertFalse(ready, verdict)
                 self.assertIn(reason, verdict)
+
+    def test_one_child_test_cannot_vouch_for_two_funnels(self) -> None:
+        ready, verdict = self.readiness(
+            FLIP_READY_TESTS={"W20": ("o_delegated_funnel_cut",), "W33": ("o_delegated_funnel_cut",)},
+            CHILD_FLIP_READY_TESTS={"W20": ("child_funnel_cut",), "W33": ("child_funnel_cut",)},
+        )
+        self.assertFalse(ready, verdict)
+        self.assertIn("child tests repeated across rows: child_funnel_cut", verdict)
 
     def test_empty_funnel_blocks_readiness_with_another_funnel_present(self) -> None:
         ready, verdict = self.readiness(FLIP_READY_TESTS={
