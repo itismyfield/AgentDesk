@@ -617,7 +617,7 @@ mod tests {
         dir: &std::path::Path,
         now: DateTime<Utc>,
         rows: &[(i64, &str)],
-    ) -> (String, impl Drop) {
+    ) -> (String, impl Drop + use<>) {
         let provider = match kind {
             CodexTui => ProviderKind::Codex,
             _ => ProviderKind::Claude,
