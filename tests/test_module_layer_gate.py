@@ -212,6 +212,32 @@ class Approvals(GateFixture):
         repo.put("src/lib.rs", moved.format("crate::upper::hit(); crate::upper::hit(); crate::upper::hit();"))
         self.assertEqual(self.codes(self.run_gate(repo)), ["approval-exceeded", "increase"])
 
+    def test_spare_ceiling_is_not_a_reduction_beside_a_kept_glob(self):
+        repo = self.repo(lower_body="use crate::upper::*;")
+        repo.put("src/lib.rs", source("use crate::upper::*; crate::upper::hit();"))
+        row = self.edge(self.run_gate(repo), LOWER, UPPER)
+        self.approval(repo, "8131-glob", increase=[self.increase(row, 2)])
+        self.assertEqual(self.codes(self.run_gate(repo)), [])
+        repo.put("src/lib.rs", source("use crate::upper::*;" + " crate::upper::hit();" * 3))
+        self.assertEqual(self.codes(self.run_gate(repo)), ["approval-exceeded", "new-id"])
+
+    def test_draft_names_the_moved_destination_of_a_blocked_increase(self):
+        repo = self.repo()
+        moved = "mod lower {{ pub mod inner {{ pub fn run() {{ {} }} }} }}\nmod upper {{ pub fn hit() {{}} }}\nmod spare {{ pub fn hit() {{}} }}\n"
+        repo.put("src/lib.rs", moved.format("crate::upper::hit(); crate::upper::hit();"))
+        new = self.edge(self.run_gate(repo), LOWER + "::inner", UPPER)
+        self.approval(repo, "8131-move", move=[{"section": "reverse_dependencies", "old_id": _id("edge", LOWER, UPPER, "path"),
+                                                 "new_id": new["id"], "reason": "split lower"}])
+        result = self.run_gate(repo)
+        self.assertEqual(self.codes(result), ["increase"])
+        text = gate.draft_approval(result, "8131-draft")
+        self.assertIn(f'id = "{new["id"]}", source = "{LOWER}::inner"', text)
+        self.assertIn("max_count = 2", text)
+        repo.put(f"{gate.APPROVALS}/8131-draft.toml", text.replace("TODO: 승인 사유를 리뷰받을 문장으로 쓴다", "reviewed"))
+        self.assertEqual(self.codes(self.run_gate(repo)), [])
+        repo.put("src/lib.rs", moved.format("crate::upper::hit();" * 3))
+        self.assertEqual(self.codes(self.run_gate(repo)), ["approval-exceeded", "increase"])
+
     def test_cross_section_move_is_refused(self):
         repo = self.repo(layers=LAYERS.replace(']\n[layers]', ']\nunclassified = [{prefix="mixed",reason="fixture"}]\n[layers]'),
                          extra="mod mixed { pub fn hit() {} }\n")
@@ -231,6 +257,37 @@ class Approvals(GateFixture):
         self.approval(repo, "8131-hidden", increase=[{"section": "uncertainties", "id": row["id"], "max_count": row["count"],
                                                       "reason": "accepted-debt"} for row in uncertainty])
         self.assertIn("hidden-reverse", self.codes(self.run_gate(repo)))
+
+    def test_moving_a_shrunk_reverse_edge_with_its_glob_stays_hidden_reverse(self):
+        rest = "mod spare { pub fn hit() {} }\n"
+        for name, before, after in (
+                ("source", "mod lower { pub fn run() { use crate::upper::*; crate::upper::hit(); crate::upper::hit(); } }\n"
+                           "mod upper { pub fn hit() {} }\n",
+                 "mod lower { pub mod inner { pub fn run() { use crate::upper::*; crate::upper::hit(); } } }\n"
+                 "mod upper { pub fn hit() {} }\n"),
+                ("target", "mod lower { pub fn run() { use crate::upper::*; crate::upper::hit(); crate::upper::hit(); } }\n"
+                           "mod upper { pub fn hit() {} }\n",
+                 "mod lower { pub fn run() { use crate::upper::inner::*; crate::upper::inner::hit(); } }\n"
+                 "mod upper { pub mod inner { pub fn hit() {} } }\n")):
+            with self.subTest(name):
+                repo = self.repo()
+                repo.put("src/lib.rs", before + rest)
+                repo.commit("main with a glob beside the reverse edge")
+                repo.main()
+                base = self.run_gate(repo)["draft"]["head"]
+                repo.put("src/lib.rs", after + rest)
+                head = self.run_gate(repo)["draft"]["head"]
+                move = [{"section": section, "old_id": base[section][0]["id"], "new_id": head[section][0]["id"], "reason": "moved"}
+                        for section in ("reverse_dependencies", "uncertainties")]
+                self.approval(repo, "8131-move", move=move)
+                self.assertIn("hidden-reverse", self.codes(self.run_gate(repo)))
+        repo = self.repo(lower_body="crate::upper::hit(); crate::upper::hit();")
+        repo.put("src/lib.rs", "mod lower { pub mod inner { pub fn run() { crate::upper::inner::hit(); crate::nowhere::run(); } } }\n"
+                               "mod upper { pub mod inner { pub fn hit() {} } }\n" + rest)
+        new = self.edge(self.run_gate(repo), LOWER + "::inner", UPPER + "::inner")
+        self.approval(repo, "8131-move", move=[{"section": "reverse_dependencies", "old_id": _id("edge", LOWER, UPPER, "path"),
+                                                 "new_id": new["id"], "reason": "moved"}])
+        self.assertEqual(self.codes(self.run_gate(repo)), ["new-id"])
 
     def test_draft_approval_lists_blocking_increases_and_needs_review(self):
         repo, row = self.new_spare_debt()
@@ -430,6 +487,9 @@ class AnalyzerChange(GateFixture):
                     candidate = name + ".py"
                     if (ROOT / candidate).is_file() and candidate not in comparison:
                         self.assertIn(candidate, listed, f"{path} imports {candidate}")
+            for parent in Path(path).parents:
+                if (ROOT / parent / "__init__.py").is_file():
+                    self.assertIn(f"{parent}/__init__.py", listed, f"importing {path} runs {parent}/__init__.py")
 
 
 class RequiredPath(unittest.TestCase):

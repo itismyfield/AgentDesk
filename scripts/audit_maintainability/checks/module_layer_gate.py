@@ -35,6 +35,7 @@ BASE_ENV = "MODULE_LAYER_BASE_REF"
 EDGE_SECTIONS = ("reverse_dependencies", "indeterminate_dependencies")
 # The measurement (analyze/baseline/project) and its local imports. A test pins that this covers them.
 MEASURING_CODE = (
+    "scripts/audit_maintainability/__init__.py",
     "scripts/audit_maintainability/common.py",
     "scripts/audit_maintainability/rust_accessor_scan.py",
     "scripts/audit_maintainability/checks/__init__.py",
@@ -342,7 +343,8 @@ def apply_approvals(base, head, entries, base_layers, head_layers, base_ranks=No
     """Raise base ceilings by this candidate's approvals; moves are validated on the raw measurements.
 
     Returns (accepted payload, moves manifest, errors). Increase limits are judged on the debt after
-    move normalization: an increase naming a move's new_id raises the base record of its old_id."""
+    move normalization: an increase naming a move's new_id raises the base record of its old_id. An
+    approved record holds the measured count, so unused headroom never reads as a later reduction."""
     errors, old, new = [], _tables(base), _tables(head)
     moves, target_of = [], {}
     for row in entries["move"]:
@@ -374,7 +376,7 @@ def apply_approvals(base, head, entries, base_layers, head_layers, base_ranks=No
                 continue
             accepted["indeterminate_dependencies"] = [r for r in accepted["indeterminate_dependencies"] if r["id"] != identity]
             index["indeterminate_dependencies"].pop(identity, None)
-            record = {k: row[k] for k in ("id", "source", "target", "kind")} | {"count": ceiling}
+            record = {k: row[k] for k in ("id", "source", "target", "kind")} | {"count": current}
             accepted["reverse_dependencies"].append(record)
             index["reverse_dependencies"][identity] = record
             continue
@@ -390,10 +392,10 @@ def apply_approvals(base, head, entries, base_layers, head_layers, base_ranks=No
             errors.append(_error("approval-admit", section, f"{row['file']}: {identity[:12]} was indeterminate on the base; "
                                  "use admit-classification"))
         elif resolved in index[section]:
-            index[section][resolved]["count"] = ceiling
+            index[section][resolved]["count"] = current
         else:
             record = ({k: row[k] for k in ("id", "source", "target", "kind")} if section in EDGE_SECTIONS
-                      else {"id": identity}) | {"count": ceiling}
+                      else {"id": identity}) | {"count": current}
             accepted[section].append(record)
             index[section][identity] = record
     for section in SECTIONS:
@@ -401,6 +403,34 @@ def apply_approvals(base, head, entries, base_layers, head_layers, base_ranks=No
     accepted["indeterminate_edges"] = len(accepted["indeterminate_dependencies"])
     accepted["indeterminate_occurrences"] = sum(r["count"] for r in accepted["indeterminate_dependencies"])
     return accepted, {"schema_version": 1, "moves": moves}, errors
+
+
+def moved_hidden_reverse(accepted, head, moves, sources, comparison):
+    """Re-judge shrunk moved reverse debt on its candidate endpoints; compare() keeps the base endpoints.
+
+    Errors when an unresolved reference in the moved source still names the moved target, and promotes
+    uncertainty growth in that source to an error, as compare() does for unmoved shrunk sources."""
+    errors = []
+    limits = {row["id"]: row["count"] for row in accepted["reverse_dependencies"]}
+    rows = {row["id"]: row for row in head["reverse_dependencies"]}
+    moved_uncertainty = {m["old_id"]: m["new_id"] for m in moves["moves"] if m["section"] == "uncertainties"}
+    for move in (m for m in moves["moves"] if m["section"] == "reverse_dependencies"):
+        row = rows.get(move["new_id"])
+        if row is None or row["count"] >= limits.get(move["old_id"], 0):
+            continue
+        for uncertainty in head["uncertainties"]:
+            evidence = sources.get(uncertainty["id"], {})
+            if evidence.get("source") == row["source"] and row["target"] in _path_targets(row["source"], evidence.get("path")):
+                errors.append(_error("hidden-reverse", "reverse_dependencies", f"hidden-reverse: moved reverse_dependencies "
+                                     f"{row['id']} shrank while unresolved {evidence.get('path')} still names its target",
+                                     id=row["id"]))
+                break
+        for warning in list(comparison["warnings"]):
+            if (warning["section"] == "uncertainties"
+                    and sources.get(moved_uncertainty.get(warning.get("id"), warning.get("id")), {}).get("source") == row["source"]):
+                comparison["warnings"].remove(warning)
+                errors.append(warning)
+    return errors
 
 
 def layer_rules(base, head, base_layers, head_layers, ranks, measured_edges, sources, accepted, moves, prefixes):
@@ -521,6 +551,7 @@ def _evaluate(repo, env):
     errors.extend(apply_errors)
     comparison = compare(accepted, head, moves, sources)
     errors.extend(comparison["errors"])
+    errors.extend(moved_hidden_reverse(accepted, head, moves, sources, comparison))
     errors.extend(layer_rules(base, head, base_side["layers_of"], head_layers, ranks, _edges(graph, occurrences),
                               sources, accepted, moves, [e["prefix"] for e in entries["reclassify"]]))
     delta = analyzer_delta(old_side["payload"], base) if old_side else {"digest": None, "reverse_removed": 0, "reverse_added": 0}
@@ -548,7 +579,7 @@ def _evaluate(repo, env):
     extra = {"measurement": graph, "reference_occurrences": occurrences, "layer_analysis": projection,
              "ratchet": comparison, "gate": {"mode": mode, "base": base_sha, "head": head_sha, "dirty": dirty,
                                              "approval_files": approval_files, "analyzer": delta}}
-    draft = {"head": head, "base": base, "errors": errors, "delta": delta}
+    draft = {"head": head, "base": base, "errors": errors, "delta": delta, "moves": moves["moves"]}
     return {"summary": summary, "errors": errors, "warnings": comparison["warnings"], "decreases": decreases,
             "extra": extra, "draft": draft}
 
@@ -563,9 +594,11 @@ def draft_approval(result, name):
         raise GateError("draft name must look like <issue>-<slug>")
     head, base = result["draft"]["head"], result["draft"]["base"]
     rows = _tables(head)
+    destination = {(m["section"], m["old_id"]): m["new_id"] for m in result["draft"].get("moves", [])}
     increases, reclassify, analyzer = [], [], []
     for error in result["errors"]:
         code, section, identity = error.get("code"), error.get("section"), error.get("id")
+        identity = destination.get((section, identity), identity)
         if code in ("new-id", "increase", "zero-rule", "unresolved-reverse") and identity in rows.get(section, {}):
             row = rows[section][identity]
             admit = (section == "reverse_dependencies" and base["mapping_sha256"] != head["mapping_sha256"]
