@@ -1,7 +1,8 @@
 //! PG contention tests for the run-owner guard: each holds a real cancellation (or a raw
 //! lock) uncommitted, proves the writer waits on the exact lock, then checks the outcome.
 
-use std::time::{Duration, Instant};
+use crate::test_support::wait::poll_within;
+use std::time::Duration;
 
 use regex::Regex;
 use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
@@ -197,103 +198,91 @@ async fn observer_pid(observer: &mut PgConnection) -> i32 {
         .expect("observer pid")
 }
 
-/// A waiter only proves the wait when it was observed within the deadline; a late
-/// observation (slow query or delayed poll) fails like no waiter at all.
-fn accept_waiter_within(
-    waiter: i32,
-    observed_at: Instant,
-    deadline: Instant,
-) -> Result<i32, String> {
-    if observed_at > deadline {
-        return Err(format!("waiter {waiter} observed after the 5s deadline"));
-    }
-    Ok(waiter)
-}
-
 /// The single backend waiting on `key` behind exactly `holder_pid`. Zero waiters by the
 /// deadline, extra waiters or holders, a foreign blocker or a finished writer all fail.
-async fn wait_for_exact_advisory_waiter<T>(
+async fn advisory_waiter_sample<T>(
     observer: &mut PgConnection,
     key: AdvisoryKey<'_>,
     holder_pid: i32,
     writer: &JoinHandle<T>,
-) -> Result<i32, String> {
-    let deadline = Instant::now() + WAIT_DEADLINE;
+) -> Result<Result<i32, String>, String> {
     let observer_pid = observer_pid(observer).await;
-    loop {
-        sqlx::query("SELECT pg_stat_clear_snapshot()")
-            .execute(&mut *observer)
-            .await
-            .expect("clear stat snapshot");
-        let base = "SELECT l.pid, l.granted FROM pg_locks l
-             WHERE l.locktype = 'advisory'
-               AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())";
-        let rows: Vec<(i32, bool)> = match key {
-            AdvisoryKey::Run(run_id) => sqlx::query_as(sqlx::AssertSqlSafe(format!(
-                "{base} AND l.objsubid = 1
-                   AND l.classid::bigint = ((hashtext('aq_run:' || $1)::bigint >> 32) & 4294967295)
-                   AND l.objid::bigint = (hashtext('aq_run:' || $1)::bigint & 4294967295)"
-            )))
-            .bind(run_id)
-            .fetch_all(&mut *observer)
-            .await
-            .expect("inspect run-token locks"),
-            AdvisoryKey::Phase(run_id, phase) => sqlx::query_as(sqlx::AssertSqlSafe(format!(
-                "{base} AND l.objsubid = 2
-                   AND l.classid::bigint = (hashtext($1)::bigint & 4294967295)
-                   AND l.objid::bigint = (hashtext($2::bigint::text)::bigint & 4294967295)"
-            )))
-            .bind(run_id)
-            .bind(phase)
-            .fetch_all(&mut *observer)
-            .await
-            .expect("inspect phase-key locks"),
-        };
-        let granted: Vec<i32> = rows.iter().filter(|row| row.1).map(|row| row.0).collect();
-        let waiting: Vec<i32> = rows.iter().filter(|row| !row.1).map(|row| row.0).collect();
-        if granted != [holder_pid] {
-            return Err(format!("key held by {granted:?}, expected [{holder_pid}]"));
+    sqlx::query("SELECT pg_stat_clear_snapshot()")
+        .execute(&mut *observer)
+        .await
+        .expect("clear stat snapshot");
+    let base = "SELECT l.pid, l.granted FROM pg_locks l
+         WHERE l.locktype = 'advisory'
+           AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())";
+    let rows: Vec<(i32, bool)> = match key {
+        AdvisoryKey::Run(run_id) => sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "{base} AND l.objsubid = 1
+               AND l.classid::bigint = ((hashtext('aq_run:' || $1)::bigint >> 32) & 4294967295)
+               AND l.objid::bigint = (hashtext('aq_run:' || $1)::bigint & 4294967295)"
+        )))
+        .bind(run_id)
+        .fetch_all(&mut *observer)
+        .await
+        .expect("inspect run-token locks"),
+        AdvisoryKey::Phase(run_id, phase) => sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "{base} AND l.objsubid = 2
+               AND l.classid::bigint = (hashtext($1)::bigint & 4294967295)
+               AND l.objid::bigint = (hashtext($2::bigint::text)::bigint & 4294967295)"
+        )))
+        .bind(run_id)
+        .bind(phase)
+        .fetch_all(&mut *observer)
+        .await
+        .expect("inspect phase-key locks"),
+    };
+    let granted: Vec<i32> = rows.iter().filter(|row| row.1).map(|row| row.0).collect();
+    let waiting: Vec<i32> = rows.iter().filter(|row| !row.1).map(|row| row.0).collect();
+    if granted != [holder_pid] {
+        return Ok(Err(format!(
+            "key held by {granted:?}, expected [{holder_pid}]"
+        )));
+    }
+    if waiting.len() > 1 {
+        return Ok(Err(format!("extra key waiters {waiting:?}")));
+    }
+    if let [waiter] = waiting[..] {
+        if waiter == holder_pid || waiter == observer_pid {
+            return Ok(Err(format!(
+                "waiter {waiter} is the holder or the observer"
+            )));
         }
-        if waiting.len() > 1 {
-            return Err(format!("extra key waiters {waiting:?}"));
-        }
-        if let [waiter] = waiting[..] {
-            if waiter == holder_pid || waiter == observer_pid {
-                return Err(format!("waiter {waiter} is the holder or the observer"));
-            }
-            let blockers: Vec<i32> = sqlx::query_scalar("SELECT pg_blocking_pids($1)")
-                .bind(waiter)
-                .fetch_one(&mut *observer)
-                .await
-                .expect("load key waiter blockers");
-            if blockers != [holder_pid] {
-                return Err(format!("key waiter {waiter} blocked by {blockers:?}"));
-            }
-            if writer.is_finished() {
-                return Err("writer finished while a key waiter was listed".to_string());
-            }
-            return accept_waiter_within(waiter, Instant::now(), deadline);
+        let blockers: Vec<i32> = sqlx::query_scalar("SELECT pg_blocking_pids($1)")
+            .bind(waiter)
+            .fetch_one(&mut *observer)
+            .await
+            .expect("load key waiter blockers");
+        if blockers != [holder_pid] {
+            return Ok(Err(format!("key waiter {waiter} blocked by {blockers:?}")));
         }
         if writer.is_finished() {
-            return Err("writer finished without waiting on the advisory key".to_string());
+            return Ok(Err(
+                "writer finished while a key waiter was listed".to_string()
+            ));
         }
-        if Instant::now() >= deadline {
-            return Err("no advisory waiter within 5s".to_string());
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        return Ok(Ok(waiter));
     }
+    if writer.is_finished() {
+        return Ok(Err(
+            "writer finished without waiting on the advisory key".to_string()
+        ));
+    }
+    Err("no advisory waiter within 5s".into())
 }
 
 /// The single backend whose statement matches `statement`, blocked by exactly `holder_pid`
 /// and holding the tuple lock on the committed version of `dispatch_id`.
-async fn wait_for_exact_row_waiter<T>(
+async fn row_waiter_sample<T>(
     observer: &mut PgConnection,
     dispatch_id: &str,
     statement: &str,
     holder_pid: i32,
     writer: &JoinHandle<T>,
-) -> Result<i32, String> {
-    let deadline = Instant::now() + WAIT_DEADLINE;
+) -> Result<Result<i32, String>, String> {
     let statement = Regex::new(statement).expect("statement pattern");
     let observer_pid = observer_pid(observer).await;
     let (page, tuple): (i64, i64) = sqlx::query_as(
@@ -304,66 +293,67 @@ async fn wait_for_exact_row_waiter<T>(
     .fetch_one(&mut *observer)
     .await
     .expect("locate dispatch tuple");
-    loop {
-        sqlx::query("SELECT pg_stat_clear_snapshot()")
-            .execute(&mut *observer)
-            .await
-            .expect("clear stat snapshot");
-        let candidates: Vec<(i32, String, Vec<i32>)> = sqlx::query_as(
-            "SELECT a.pid, COALESCE(a.query, ''), pg_blocking_pids(a.pid)
-             FROM pg_stat_activity a
-             WHERE a.datname = current_database()
-               AND a.pid <> pg_backend_pid()
-               AND a.wait_event_type = 'Lock'
-               AND a.wait_event IN ('transactionid', 'tuple')",
-        )
-        .fetch_all(&mut *observer)
+    sqlx::query("SELECT pg_stat_clear_snapshot()")
+        .execute(&mut *observer)
         .await
-        .expect("inspect row waiters");
-        let matching: Vec<_> = candidates
-            .into_iter()
-            .filter(|(_, query, _)| statement.is_match(query))
-            .collect();
-        if matching.len() > 1 {
-            return Err(format!("extra row waiters {matching:?}"));
+        .expect("clear stat snapshot");
+    let candidates: Vec<(i32, String, Vec<i32>)> = sqlx::query_as(
+        "SELECT a.pid, COALESCE(a.query, ''), pg_blocking_pids(a.pid)
+         FROM pg_stat_activity a
+         WHERE a.datname = current_database()
+           AND a.pid <> pg_backend_pid()
+           AND a.wait_event_type = 'Lock'
+           AND a.wait_event IN ('transactionid', 'tuple')",
+    )
+    .fetch_all(&mut *observer)
+    .await
+    .expect("inspect row waiters");
+    let matching: Vec<_> = candidates
+        .into_iter()
+        .filter(|(_, query, _)| statement.is_match(query))
+        .collect();
+    if matching.len() > 1 {
+        return Ok(Err(format!("extra row waiters {matching:?}")));
+    }
+    if let [(waiter, _, blockers)] = &matching[..] {
+        if *waiter == holder_pid || *waiter == observer_pid {
+            return Ok(Err(format!(
+                "row waiter {waiter} is the holder or the observer"
+            )));
         }
-        if let [(waiter, _, blockers)] = &matching[..] {
-            if *waiter == holder_pid || *waiter == observer_pid {
-                return Err(format!("row waiter {waiter} is the holder or the observer"));
-            }
-            if blockers[..] != [holder_pid] {
-                return Err(format!("row waiter {waiter} blocked by {blockers:?}"));
-            }
-            let tuple_locks: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*)::BIGINT FROM pg_locks l
-                 WHERE l.pid = $1 AND l.locktype = 'tuple' AND l.granted
-                   AND l.relation = 'task_dispatches'::regclass
-                   AND l.page = $2 AND l.tuple = $3",
-            )
-            .bind(waiter)
-            .bind(page as i32)
-            .bind(tuple as i16)
-            .fetch_one(&mut *observer)
-            .await
-            .expect("inspect row waiter tuple lock");
-            if tuple_locks != 1 {
-                return Err(format!(
-                    "row waiter {waiter} holds no tuple lock on {dispatch_id}"
-                ));
-            }
-            if writer.is_finished() {
-                return Err("writer finished while a row waiter was listed".to_string());
-            }
-            return accept_waiter_within(*waiter, Instant::now(), deadline);
+        if blockers[..] != [holder_pid] {
+            return Ok(Err(format!("row waiter {waiter} blocked by {blockers:?}")));
+        }
+        let tuple_locks: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM pg_locks l
+             WHERE l.pid = $1 AND l.locktype = 'tuple' AND l.granted
+               AND l.relation = 'task_dispatches'::regclass
+               AND l.page = $2 AND l.tuple = $3",
+        )
+        .bind(waiter)
+        .bind(page as i32)
+        .bind(tuple as i16)
+        .fetch_one(&mut *observer)
+        .await
+        .expect("inspect row waiter tuple lock");
+        if tuple_locks != 1 {
+            return Ok(Err(format!(
+                "row waiter {waiter} holds no tuple lock on {dispatch_id}"
+            )));
         }
         if writer.is_finished() {
-            return Err("writer finished without a matching row wait".to_string());
+            return Ok(Err(
+                "writer finished while a row waiter was listed".to_string()
+            ));
         }
-        if Instant::now() >= deadline {
-            return Err("no matching row waiter within 5s".to_string());
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        return Ok(Ok(*waiter));
     }
+    if writer.is_finished() {
+        return Ok(Err(
+            "writer finished without a matching row wait".to_string()
+        ));
+    }
+    Err("no matching row waiter within 5s".into())
 }
 
 fn gate_state(dispatch_ids: &[&str]) -> PhaseGateStateWrite {
@@ -402,13 +392,21 @@ async fn force_pause_cleanup_waits_for_run_token_pg() {
         )
         .await
     });
-    let waited = wait_for_exact_advisory_waiter(
-        &mut fx.observer,
-        AdvisoryKey::Run(TARGET),
-        holder_pid,
-        &writer,
+    let waited = poll_within(
+        async || {
+            advisory_waiter_sample(
+                &mut fx.observer,
+                AdvisoryKey::Run(TARGET),
+                holder_pid,
+                &writer,
+            )
+            .await
+        },
+        WAIT_DEADLINE,
+        "PostgreSQL lock waiter",
     )
-    .await;
+    .await
+    .and_then(std::convert::identity);
     commit_raw(holder).await;
     let cancelled = writer.await.expect("join cleanup").expect("cleanup cancel");
 
@@ -430,13 +428,21 @@ async fn phase_gate_transfer_target_to_foreign_serializes_with_cancel_pg() {
     let (holder, holder_pid) = fx.hold_cancel(TARGET).await;
 
     let writer = spawn_save(&fx.pool, FOREIGN, "d-move");
-    let waited = wait_for_exact_advisory_waiter(
-        &mut fx.observer,
-        AdvisoryKey::Run(TARGET),
-        holder_pid,
-        &writer,
+    let waited = poll_within(
+        async || {
+            advisory_waiter_sample(
+                &mut fx.observer,
+                AdvisoryKey::Run(TARGET),
+                holder_pid,
+                &writer,
+            )
+            .await
+        },
+        WAIT_DEADLINE,
+        "PostgreSQL lock waiter",
     )
-    .await;
+    .await
+    .and_then(std::convert::identity);
     let foreign_rows_before_commit = fx.gate_rows(FOREIGN, "d-move").await;
     let finished_before_commit = writer.is_finished();
     holder.commit().await.expect("commit cancel holder");
@@ -474,13 +480,21 @@ async fn phase_gate_transfer_foreign_to_target_refused_after_cancel_pg() {
     let (holder, holder_pid) = fx.hold_cancel(TARGET).await;
 
     let writer = spawn_save(&fx.pool, TARGET, "d-steal");
-    let waited = wait_for_exact_advisory_waiter(
-        &mut fx.observer,
-        AdvisoryKey::Run(TARGET),
-        holder_pid,
-        &writer,
+    let waited = poll_within(
+        async || {
+            advisory_waiter_sample(
+                &mut fx.observer,
+                AdvisoryKey::Run(TARGET),
+                holder_pid,
+                &writer,
+            )
+            .await
+        },
+        WAIT_DEADLINE,
+        "PostgreSQL lock waiter",
     )
-    .await;
+    .await
+    .and_then(std::convert::identity);
     holder.commit().await.expect("commit cancel holder");
     let saved = writer.await.expect("join save");
 
@@ -518,13 +532,21 @@ async fn phase_gate_context_create_refused_after_cancel_pg() {
         .await
         .map_err(|error| error.to_string())
     });
-    let waited = wait_for_exact_advisory_waiter(
-        &mut fx.observer,
-        AdvisoryKey::Run(TARGET),
-        holder_pid,
-        &writer,
+    let waited = poll_within(
+        async || {
+            advisory_waiter_sample(
+                &mut fx.observer,
+                AdvisoryKey::Run(TARGET),
+                holder_pid,
+                &writer,
+            )
+            .await
+        },
+        WAIT_DEADLINE,
+        "PostgreSQL lock waiter",
     )
-    .await;
+    .await
+    .and_then(std::convert::identity);
     holder.commit().await.expect("commit cancel holder");
     let created = writer.await.expect("join create");
 
@@ -571,13 +593,21 @@ async fn legacy_context_only_retry_cannot_escape_cancel_pg() {
     let (holder, holder_pid) = fx.hold_cancel(TARGET).await;
 
     let writer = spawn_retry(&fx.pool, "d-origin-veto");
-    let waited = wait_for_exact_advisory_waiter(
-        &mut fx.observer,
-        AdvisoryKey::Run(TARGET),
-        holder_pid,
-        &writer,
+    let waited = poll_within(
+        async || {
+            advisory_waiter_sample(
+                &mut fx.observer,
+                AdvisoryKey::Run(TARGET),
+                holder_pid,
+                &writer,
+            )
+            .await
+        },
+        WAIT_DEADLINE,
+        "PostgreSQL lock waiter",
     )
-    .await;
+    .await
+    .and_then(std::convert::identity);
     holder.commit().await.expect("commit cancel holder");
     let retried = writer.await.expect("join retry");
 
@@ -604,13 +634,21 @@ async fn legacy_context_only_retry_waits_on_run_token_not_origin_row_pg() {
     let (holder, holder_pid) = fx.hold_cancel(TARGET).await;
 
     let writer = spawn_retry(&fx.pool, "d-origin");
-    let waited = wait_for_exact_advisory_waiter(
-        &mut fx.observer,
-        AdvisoryKey::Run(TARGET),
-        holder_pid,
-        &writer,
+    let waited = poll_within(
+        async || {
+            advisory_waiter_sample(
+                &mut fx.observer,
+                AdvisoryKey::Run(TARGET),
+                holder_pid,
+                &writer,
+            )
+            .await
+        },
+        WAIT_DEADLINE,
+        "PostgreSQL lock waiter",
     )
-    .await;
+    .await
+    .and_then(std::convert::identity);
     holder.commit().await.expect("commit cancel holder");
     let retried = writer.await.expect("join retry");
 
@@ -659,14 +697,22 @@ async fn cancel_rereads_dispatch_claimed_mid_cancel_pg() {
         )
         .await
     });
-    let waited = wait_for_exact_row_waiter(
-        &mut fx.observer,
-        "d-claim",
-        CANCEL_ROW_LOCK,
-        holder_pid,
-        &writer,
+    let waited = poll_within(
+        async || {
+            row_waiter_sample(
+                &mut fx.observer,
+                "d-claim",
+                CANCEL_ROW_LOCK,
+                holder_pid,
+                &writer,
+            )
+            .await
+        },
+        WAIT_DEADLINE,
+        "PostgreSQL lock waiter",
     )
-    .await;
+    .await
+    .and_then(std::convert::identity);
     commit_raw(holder).await;
     let response = writer.await.expect("join cancel").expect("cancel run");
 
@@ -689,25 +735,39 @@ async fn concurrent_phase_gate_saves_serialize_on_dispatch_row_pg() {
     let (key_holder, key_holder_pid) = raw_holder(&fx.pg_db.database_url, &[&key]).await;
 
     let target_save = spawn_save(&fx.pool, TARGET, "d-race");
-    let target_pid = wait_for_exact_advisory_waiter(
-        &mut fx.observer,
-        AdvisoryKey::Phase(TARGET, PHASE),
-        key_holder_pid,
-        &target_save,
-    )
-    .await;
-    let foreign_save = spawn_save(&fx.pool, FOREIGN, "d-race");
-    let row_wait = match target_pid {
-        Ok(target_pid) => {
-            wait_for_exact_row_waiter(
+    let target_pid = poll_within(
+        async || {
+            advisory_waiter_sample(
                 &mut fx.observer,
-                "d-race",
-                GUARD_ROW_LOCK,
-                target_pid,
-                &foreign_save,
+                AdvisoryKey::Phase(TARGET, PHASE),
+                key_holder_pid,
+                &target_save,
             )
             .await
-        }
+        },
+        WAIT_DEADLINE,
+        "PostgreSQL lock waiter",
+    )
+    .await
+    .and_then(std::convert::identity);
+    let foreign_save = spawn_save(&fx.pool, FOREIGN, "d-race");
+    let row_wait = match target_pid {
+        Ok(target_pid) => poll_within(
+            async || {
+                row_waiter_sample(
+                    &mut fx.observer,
+                    "d-race",
+                    GUARD_ROW_LOCK,
+                    target_pid,
+                    &foreign_save,
+                )
+                .await
+            },
+            WAIT_DEADLINE,
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .and_then(std::convert::identity),
         Err(ref error) => Err(format!("target save never reached the phase key: {error}")),
     };
     commit_raw(key_holder).await;
@@ -795,13 +855,21 @@ async fn assert_revival_refused_after_cancel(
     let (holder, holder_pid) = fx.hold_cancel(TARGET).await;
 
     let writer = spawn_revival(&fx.pool, dispatch_id, to_status, allowed_from);
-    let waited = wait_for_exact_advisory_waiter(
-        &mut fx.observer,
-        AdvisoryKey::Run(TARGET),
-        holder_pid,
-        &writer,
+    let waited = poll_within(
+        async || {
+            advisory_waiter_sample(
+                &mut fx.observer,
+                AdvisoryKey::Run(TARGET),
+                holder_pid,
+                &writer,
+            )
+            .await
+        },
+        WAIT_DEADLINE,
+        "PostgreSQL lock waiter",
     )
-    .await;
+    .await
+    .and_then(std::convert::identity);
     holder.commit().await.expect("commit cancel holder");
     let revived = writer.await.expect("join revival");
 
@@ -883,13 +951,21 @@ async fn review_recovery_waits_for_run_cancel_and_refuses_pg() {
     let (holder, holder_pid) = fx.hold_cancel(TARGET).await;
 
     let writer = spawn_recovery(&fx.pool, "d-review-live");
-    let waited = wait_for_exact_advisory_waiter(
-        &mut fx.observer,
-        AdvisoryKey::Run(TARGET),
-        holder_pid,
-        &writer,
+    let waited = poll_within(
+        async || {
+            advisory_waiter_sample(
+                &mut fx.observer,
+                AdvisoryKey::Run(TARGET),
+                holder_pid,
+                &writer,
+            )
+            .await
+        },
+        WAIT_DEADLINE,
+        "PostgreSQL lock waiter",
     )
-    .await;
+    .await
+    .and_then(std::convert::identity);
     holder.commit().await.expect("commit cancel holder");
     let recovered = writer.await.expect("join recovery");
 
@@ -932,14 +1008,22 @@ async fn review_recovery_cas_rejects_direct_cancel_pg() {
     assert_eq!(cancelled, 1);
 
     let writer = spawn_recovery(&fx.pool, "d-review-direct");
-    let waited = wait_for_exact_row_waiter(
-        &mut fx.observer,
-        "d-review-direct",
-        GUARD_ROW_LOCK,
-        holder_pid,
-        &writer,
+    let waited = poll_within(
+        async || {
+            row_waiter_sample(
+                &mut fx.observer,
+                "d-review-direct",
+                GUARD_ROW_LOCK,
+                holder_pid,
+                &writer,
+            )
+            .await
+        },
+        WAIT_DEADLINE,
+        "PostgreSQL lock waiter",
     )
-    .await;
+    .await
+    .and_then(std::convert::identity);
     holder.commit().await.expect("commit direct cancel");
     let recovered = writer.await.expect("join recovery");
 
@@ -962,13 +1046,12 @@ async fn review_recovery_cas_rejects_direct_cancel_pg() {
 }
 
 /// A correct waiter seen after the deadline does not count as proof of the wait.
-#[test]
-fn wait_helpers_reject_a_waiter_observed_after_the_deadline() {
-    let observed_at = Instant::now();
-    let late = accept_waiter_within(42, observed_at, observed_at - Duration::from_millis(1));
+#[tokio::test]
+async fn wait_helpers_reject_a_waiter_observed_after_the_deadline() {
+    let late = poll_within(async || Ok(42), Duration::ZERO, "PostgreSQL lock waiter").await;
     assert!(late.is_err(), "late waiter accepted: {late:?}");
     assert_eq!(
-        accept_waiter_within(42, observed_at, observed_at + WAIT_DEADLINE),
+        poll_within(async || Ok(42), WAIT_DEADLINE, "PostgreSQL lock waiter").await,
         Ok(42)
     );
 }
@@ -983,13 +1066,21 @@ async fn revival_refuses_owner_gained_while_waiting_pg() {
     let (holder, holder_pid) = raw_holder(&fx.pg_db.database_url, &[&token]).await;
 
     let writer = spawn_revival(&fx.pool, "d-gained", "pending", None);
-    let waited = wait_for_exact_advisory_waiter(
-        &mut fx.observer,
-        AdvisoryKey::Run(TARGET),
-        holder_pid,
-        &writer,
+    let waited = poll_within(
+        async || {
+            advisory_waiter_sample(
+                &mut fx.observer,
+                AdvisoryKey::Run(TARGET),
+                holder_pid,
+                &writer,
+            )
+            .await
+        },
+        WAIT_DEADLINE,
+        "PostgreSQL lock waiter",
     )
-    .await;
+    .await
+    .and_then(std::convert::identity);
     let saved = spawn_save(&fx.pool, FOREIGN, "d-gained")
         .await
         .expect("join foreign save");

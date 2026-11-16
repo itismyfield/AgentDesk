@@ -1475,6 +1475,7 @@ mod tests {
     use crate::services::auto_queue::transactions::{
         update_entry_status_on_pg, update_entry_status_on_pg_tx,
     };
+    use crate::test_support::wait::poll_within;
     use sqlx::{Connection, PgConnection, PgPool};
 
     async fn setup_entry(pool: &PgPool, run_status: &str, entry_status: &str) {
@@ -1564,33 +1565,27 @@ mod tests {
         conn
     }
 
-    async fn wait_for_run_token_waiter(conn: &mut PgConnection) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            sqlx::query("SELECT pg_stat_clear_snapshot()")
-                .execute(&mut *conn)
-                .await
-                .expect("clear backend-status snapshot");
-            let waiting = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (
-                     SELECT 1
-                     FROM pg_stat_activity
-                     WHERE datname = current_database()
-                       AND wait_event_type = 'Lock'
-                       AND query LIKE '%pg_advisory_xact_lock%aq_run:%'
-                 )",
-            )
-            .fetch_one(&mut *conn)
+    async fn run_token_waiter_sample(conn: &mut PgConnection) -> Result<(), String> {
+        sqlx::query("SELECT pg_stat_clear_snapshot()")
+            .execute(&mut *conn)
             .await
-            .expect("inspect gate run-token waiter");
-            if waiting {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "entry transition did not wait for the run token"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            .expect("clear backend-status snapshot");
+        let waiting = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_stat_activity
+                 WHERE datname = current_database()
+                   AND wait_event_type = 'Lock'
+                   AND query LIKE '%pg_advisory_xact_lock%aq_run:%'
+             )",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .expect("inspect gate run-token waiter");
+        if waiting {
+            Ok(())
+        } else {
+            Err("entry transition did not wait for the run token".into())
         }
     }
 
@@ -1755,7 +1750,13 @@ mod tests {
             )
             .await
         });
-        wait_for_run_token_waiter(&mut token_holder).await;
+        poll_within(
+            async || run_token_waiter_sample(&mut token_holder).await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         sqlx::query(
             "UPDATE auto_queue_entries
              SET status = 'dispatched',
@@ -1813,7 +1814,13 @@ mod tests {
             )
             .await
         });
-        wait_for_run_token_waiter(&mut token_holder).await;
+        poll_within(
+            async || run_token_waiter_sample(&mut token_holder).await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         sqlx::query(
             "UPDATE auto_queue_entries
              SET status = 'dispatched',
@@ -1870,7 +1877,13 @@ mod tests {
             )
             .await
         });
-        wait_for_run_token_waiter(&mut token_holder).await;
+        poll_within(
+            async || run_token_waiter_sample(&mut token_holder).await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         // Only the status moves; the row keeps the NULL dispatch identity this
         // attempt observed, so the retry must converge instead of aborting.
         sqlx::query(
@@ -1958,7 +1971,13 @@ mod tests {
         // Waiting here is the run-token gate itself: the dispatched arm cannot
         // reach its CAS until this holder commits, so the racing `done` is
         // guaranteed to land between the attempt's reload and its write.
-        wait_for_run_token_waiter(&mut token_holder).await;
+        poll_within(
+            async || run_token_waiter_sample(&mut token_holder).await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         sqlx::query(
             "UPDATE auto_queue_entries
              SET status = 'done',
@@ -2089,7 +2108,13 @@ mod tests {
             )
             .await
         });
-        wait_for_run_token_waiter(&mut token_holder).await;
+        poll_within(
+            async || run_token_waiter_sample(&mut token_holder).await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         sqlx::query("COMMIT")
             .execute(&mut token_holder)
             .await
@@ -2152,7 +2177,13 @@ mod tests {
             )
             .await
         });
-        wait_for_run_token_waiter(&mut token_holder).await;
+        poll_within(
+            async || run_token_waiter_sample(&mut token_holder).await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         sqlx::query(
             "UPDATE auto_queue_runs
              SET status = 'active', completed_at = NULL
@@ -2395,7 +2426,13 @@ mod tests {
             )
             .await
         });
-        wait_for_run_token_waiter(&mut token_holder).await;
+        poll_within(
+            async || run_token_waiter_sample(&mut token_holder).await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         sqlx::query(
             "UPDATE auto_queue_runs
              SET status = 'cancelled', completed_at = NOW()
