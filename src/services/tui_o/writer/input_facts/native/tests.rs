@@ -1300,3 +1300,39 @@ fn native_8148_barrier_cold_follower_source_and_receipt_are_reclassified() {
         );
     }
 }
+
+#[test]
+fn native_8148_receipt_current_remove_keeps_the_next_dequeue_with_its_input() {
+    let f = Fixture::new();
+    let next = f.register("next", "second");
+    let mut remove = absorbed("external queued input");
+    remove["commandUuid"] = json!("external-command");
+    remove["deliveryId"] = json!("external-delivery");
+    f.append(&[
+        user("parent", "external parent"),
+        queue("enqueue", "external queued input"),
+        remove,
+        close(),
+        queue("enqueue", "second"),
+        queue("dequeue", ""),
+        user("second", "second"),
+        close(),
+    ]);
+    let evidence = f.read();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].ticket, next);
+    assert_eq!(evidence[0].disposition, Disposition::Executed);
+    assert_eq!(evidence[0].membership_row.as_deref(), Some("second"));
+    let bytes = std::fs::read(&f.binding.source.path).unwrap();
+    let (_, projection) = Projection::reopen(
+        f.binding.clone(),
+        bytes.len() as u64,
+        &hex::encode(sha2::Sha256::digest(&bytes)),
+    )
+    .unwrap();
+    let registrations = f.history.native_classification_registrations().unwrap();
+    let receipts = projection.unwrap().receipts(&registrations);
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].identity().1, &next);
+    assert_eq!(receipts[0].record().1, "second");
+}

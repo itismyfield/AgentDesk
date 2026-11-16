@@ -48,7 +48,7 @@ read-only accessor를 제외하고 임의 생성자를 공개하지 않는다.
 | 묶는 값 | 실제 출처 | transaction의 확인 |
 |---|---|---|
 | namespace + full Ticket | 실제 v3 registration snapshot | key 전체, extra, owning_episode, channel, attempt nonce/provider/target/source 전체 일치 |
-| 계정 domain | 기존 `queue_persistence_context` → `queued_head::v2_queue` (`v2/actor.rs:81-94`) | 수신 Port의 provider/token namespace와 일치. 채널 번호만으로 계정 소유 추론 0 |
+| 계정 domain | 기존 `queue_persistence_context` → `queued_head::v2_queue` (`v2/actor.rs:81-92`) | 수신 Port의 provider/token namespace와 일치. 채널 번호만으로 계정 소유 추론 0 |
 | SourceId와 ticket.source | 인증된 source owner + bound registration | provider/session/path/dev/ino, target owner/root/execution_nonce, pre-write offset 일치. source=None은 확인 불가 |
 | binding seq + generation | ticket별 `native_origin`의 Bound/Resolved와 기존 Observation | N1/N2 각자의 실제 binding. 항상 최초/최신 binding 선택 금지. observer generation으로 old episode generation을 덮지 않음 |
 | UUID + kind + range | 실제 user/queued-command 행과 CapturedRecord 경계 | UUID 비어 있지 않음; `source.offset <= start < end <= through`; newline까지 완전한 행. queue remove/dequeue/closer의 UUID를 user receipt로 사용하지 않음. B1과 같은 outer row UUID만 사용 |
@@ -306,6 +306,9 @@ withdraw e2e는 mac-2112 승인에 따라 기존 지원 popAll로 A 철회 안�
 
 ### Hosted queue 모델의 관측과 guard
 
-기존 Hosted28cfg에 NativePreparationHostedQueue14cfg를 더한다. review.hq는 A/B의 Waiting/Taken/Attached/Removed/member, live FIFO와 제거 잔여 자리, 물리 행별 visible/durable/write, ticket별 outcome/result/cleanup/head/물리 injection을 둔다. actual/lastActual은 안전성 검사 전용 ghost이며 선택 guard가 읽지 않는다. dequeue 선택은 관측 FIFO Head뿐이다. Mode의 현재 흡수/옛 remove/popAll/Waiting/Removed 사건열은 fixture 입력을 표현하며 정상 B를 BadMembership으로 제외하지 않는다.
+기존 Hosted28cfg에 NativePreparationHostedQueue16cfg를 더한다. review.hq는 A/B의 Waiting/Taken/Attached/Removed/member, live FIFO와 제거 잔여 자리, 물리 행별 visible/durable/write, ticket별 outcome/result/cleanup/head/물리 injection을 둔다. actual/lastActual은 안전성 검사 전용 ghost이며 선택 guard가 읽지 않는다. dequeue 선택은 관측 FIFO Head뿐이다. Mode의 현재 흡수/옛 remove/popAll/Waiting/Removed 사건열은 fixture 입력을 표현하며 정상 B를 BadMembership으로 제외하지 않는다.
 
-Current/PopAll Before는 제거된 자리를 남기는 guard mutant(현재 production 결함 주장 아님), Legacy Before는 늦은 자리를 너무 일찍 버리는 mutant, Waiting/Removed Before는 membership 우회, Durable Before는 ACK 우회다. 각각 B dequeue 비흡수·A 늦은 dequeue 격리·외부 동일문 receipt0·durable admission을 검사한다. A와 정상 B의 cleanup/head를 leads-to로 검사한다. 없는 closer를 강제하거나 A 흡수를 철회로 바꾸는 모델 전이는 없다. Fixed의 GREEN은 실제 Rust 시험/e2e를 대신하지 않는다.
+CurrentBare/PopAll Before는 제거된 자리를 남기는 guard mutant(현재 production 결함 주장 아님), Legacy Before는 늦은 자리를 너무 일찍 버리는 mutant, Waiting/Removed Before는 membership 우회, Durable Before는 ACK 우회다. 각각 B dequeue 비흡수·A 늦은 dequeue 격리·외부 동일문 receipt0·durable admission을 검사한다. A와 정상 B의 cleanup/head를 leads-to로 검사한다. 없는 closer를 강제하거나 A 흡수를 철회로 바꾸는 모델 전이는 없다. Fixed의 GREEN은 실제 Rust 시험/e2e를 대신하지 않는다.
+
+Guard mapping 재대조: 실제 B1 command도 FIFO 자리를 제거하므로 모델 HQCommand에도 같은 소비를 넣었다. command가 있는 Current Before는 remove의 FIFO guard만 빼도 GREEN이다(중복 보호를 RED라고 주장하지 않음). CurrentBare는 기존 B1이 허용하는 queued_command 없는 **외부** A의 흡수/closer 뒤, ADK B가 enqueue/dequeue/user로 전달되는 별도 사건열이다. 실제 새 B1 시험도 A는 등록하지 않고 B만 등록한다. 따라서 외부 A에 native 결과/cleanup 의무를 만들지 않으며, 정상 ADK B의 liveness는 그대로 검사한다. 이 Before에서 A 자리를 남기는 단일 guard mutation이 B의 dequeue를 삼켜 RED다. full-ticket A의 실제 command receipt·durable 결과·head는 Current Fixed와 isolated e2e가 계속 검사한다.
+A의 leads-to 진입 조건도 실제 ADK 주입 관측값 `hq.injections["A"] > 0`으로 둔다. 외부 A는0, full-ticket A는1이며 정상 ADK B의 진행성 조건은 두 경로 모두 유지한다.

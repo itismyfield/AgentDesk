@@ -5455,15 +5455,15 @@ async fn native_8148_receipt_actual_o_capture_settles_without_fixture_receipt_pg
     db.drop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_receipt_visible_unconfirmed_live_pending_pg() {
     receipt_visible_unconfirmed(true, false).await;
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_receipt_visible_unconfirmed_barrier_pg() {
     receipt_visible_unconfirmed(false, false).await;
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_receipt_visible_unconfirmed_boot_pg() {
     receipt_visible_unconfirmed(true, true).await;
 }
@@ -5556,6 +5556,70 @@ async fn receipt_visible_unconfirmed(strict: bool, boot: bool) {
             }
             assert!(events.try_recv().is_err());
         }
+    }
+    {
+        use crate::services::discord::runtime_store::durable_publish::flush_probe::Gate;
+        use crate::test_support::wait::{WAIT_CAP, await_within, join_within, recv_within};
+        use futures::FutureExt;
+        let gate = Arc::new(Gate::default());
+        let _fault = Watch::new(
+            path.parent().unwrap(),
+            Plan {
+                fail: vec![Step::ParentSync],
+                block: Some(gate.clone()),
+            },
+        );
+        let (poke, ready) = tokio::sync::oneshot::channel();
+        let (reply, response) = std::sync::mpsc::channel();
+        let worker_port = port.clone();
+        // A blocked receipt flush must leave its source's executor free for another task.
+        let worker = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let peer = tokio::spawn(async move {
+                        ready.await.unwrap();
+                        let _ = reply.send(());
+                    });
+                    capture.sources.offer_native(&worker_port).await;
+                    await_within(peer, WAIT_CAP).await.unwrap();
+                });
+            capture
+        });
+        let entered = gate.clone();
+        let entered = tokio::task::spawn_blocking(move || entered.wait_entered(WAIT_CAP));
+        let responsive = std::panic::AssertUnwindSafe(async {
+            assert!(await_within(entered, WAIT_CAP).await.unwrap());
+            poke.send(()).unwrap();
+            await_within(
+                tokio::task::spawn_blocking(move || recv_within(&response, WAIT_CAP / 4)),
+                WAIT_CAP,
+            )
+            .await
+            .unwrap();
+        })
+        .catch_unwind()
+        .await;
+        gate.release();
+        capture = await_within(
+            tokio::task::spawn_blocking(move || join_within(worker, WAIT_CAP)),
+            WAIT_CAP,
+        )
+        .await
+        .unwrap();
+        assert!(
+            responsive.is_ok(),
+            "unconfirmed receipt flush occupied its executor"
+        );
+        let saved = f
+            .history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap();
+        assert!(saved.outcome.is_none());
+        assert!(saved.barrier("native-fixture").unwrap().is_none());
+        assert!(events.try_recv().is_err());
     }
     capture.sources.offer_native(&port).await;
     let saved = f

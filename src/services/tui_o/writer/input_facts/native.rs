@@ -533,12 +533,14 @@ mod projection {
         b.iter().any(|hash| a.contains(hash))
     }
 
+    type MembershipRecorder<'a> = &'a mut dyn FnMut(&Registration, (u64, u64), Option<&str>);
+
     fn reduce(
         binding: &SourceBinding,
         records: &[Fact],
         registrations: &[Registration],
         through: u64,
-        mut membership: Option<&mut dyn FnMut(&Registration, (u64, u64), Option<&str>)>,
+        mut membership: Option<MembershipRecorder<'_>>,
     ) -> Result<Analysis, String> {
         if binding.provider != super::ShadowProvider::Claude {
             return Ok(Analysis::default());

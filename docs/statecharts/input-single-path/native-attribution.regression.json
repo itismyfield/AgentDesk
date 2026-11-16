@@ -5,8 +5,8 @@
   "original_filter_count": 21,
   "original_id_count": 388,
   "original_ids_sha256": "964a0fdf3357547de1ed7296bb98c5607dc038c2d820e5d5ac5ce8d8e99e8c8d",
-  "expected_unique_tests": 841,
-  "expected_ids_sha256": "7deb19523d36ceee2526e9929c8fa5a531cb6e569c051f76985a5657d8bbc42a",
+  "expected_unique_tests": 843,
+  "expected_ids_sha256": "4ee139e847c33d63b8eacd4d69436061b4593026fe1b1b1a6a6cb44f5a3de0c9",
   "selection": "List each filter, subtract prior selected IDs, run every unique full ID with --exact --test-threads=1; no execution skips.",
   "filters": [
     {
@@ -15,8 +15,8 @@
         "--skip",
         "native_8148_activation_isolated_herdr_"
       ],
-      "listed": 123,
-      "new_unique": 123
+      "listed": 124,
+      "new_unique": 124
     },
     {
       "filter": "services::tui_input::human_frame::history::",
@@ -154,8 +154,8 @@
     {
       "filter": "services::discord::router::message_handler::provider_dispatch::owner_input::",
       "args": [],
-      "listed": 273,
-      "new_unique": 270
+      "listed": 274,
+      "new_unique": 271
     },
     {
       "filter": "services::discord::router::message_handler::provider_dispatch::herdr_tests::busy_entry_tests::",

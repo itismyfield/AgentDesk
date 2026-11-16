@@ -21,6 +21,8 @@ use std::sync::{
 };
 use tokio::sync::watch;
 
+// Up recalls queued input for editing/dropping: https://code.claude.com/docs/en/interactive-mode#take-back-what-you-queued
+// This supported popAll fixture is distinct from absorption: https://github.com/anthropics/claude-code/issues/86980
 const TERMINAL: &str = r#"import os,sys,tty,json,termios
 path,ready,strict,nonce=sys.argv[1:]
 fd=sys.stdin.fileno(); tty.setraw(fd)
@@ -48,11 +50,17 @@ while True:
                          {'type':'assistant','apiBlockIndex':0,'uuid':'f-'+ident+'-'+str(i),'message':{'id':'f-'+ident+'-'+str(i),'content':[{'type':'text','text':'foreign-reply-'+ident+'-'+str(i)}],'stop_reason':'end_turn'}},
                          {'type':'system','subtype':'turn_duration','timestamp':'2026-11-15T00:00:03Z','durationMs':5}])
         withdrawn=strict=='withdraw' and number==1
-        if withdrawn: rows=[{'type':'queue-operation','operation':'enqueue','content':frame},{'type':'queue-operation','operation':'remove','content':frame}]
+        if withdrawn: rows=[{'type':'queue-operation','operation':'enqueue','content':frame},{'type':'queue-operation','operation':'popAll'}]
+        absorbed=strict=='absorb' and number==1
+        if absorbed:
+            rows=[{'type':'user','uuid':'parent-'+ident,'sessionId':'fixture-native','message':{'content':'external parent'}},
+                  {'type':'queue-operation','operation':'enqueue','content':frame},
+                  {'type':'queue-operation','operation':'remove','reason':'absorbed_mid_turn','commandUuid':'command-'+ident,'deliveryId':'delivery-'+ident,'content':frame},
+                  {'type':'attachment','uuid':'command-'+ident,'attachment':{'type':'queued_command','commandMode':'prompt','origin':{'kind':'human'},'prompt':frame}}]+rows[3:]
         with open(path,'a') as f:
             for row in rows: f.write(json.dumps(row,ensure_ascii=False)+'\n')
             f.flush(); os.fsync(f.fileno())
-        open(ready+'.row','w').write(('withdrawn-' if withdrawn else '')+ident)
+        open(ready+'.row','w').write(('withdrawn-'+ident if withdrawn else 'command-'+ident if absorbed else ident))
 "#;
 
 struct Server {
@@ -383,7 +391,13 @@ fn input_leaf(mut host: Command, pane: String, source: SourceId, ready: PathBuf)
                 bytes
                     .lines()
                     .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-                    .any(|v| v["operation"] == "remove" && v["content"] == frame)
+                    .any(|v| v["operation"] == "popAll")
+            );
+            assert!(
+                bytes
+                    .lines()
+                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                    .any(|v| v["operation"] == "enqueue" && v["content"] == frame)
             );
             return Ok(Completion::Submitted);
         }
@@ -392,7 +406,15 @@ fn input_leaf(mut host: Command, pane: String, source: SourceId, ready: PathBuf)
         for line in bytes.split_inclusive('\n') {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
             if v["uuid"] == row {
-                assert_eq!(v["message"]["content"], frame);
+                if row.starts_with("command-") {
+                    assert_eq!(v["type"], "attachment");
+                    assert_eq!(v["attachment"]["type"], "queued_command");
+                    assert_eq!(v["attachment"]["commandMode"], "prompt");
+                    assert_eq!(v["attachment"]["origin"]["kind"], "human");
+                    assert_eq!(v["attachment"]["prompt"], frame);
+                } else {
+                    assert_eq!(v["message"]["content"], frame);
+                }
                 found = Some(offset);
                 break;
             }
@@ -468,9 +490,15 @@ async fn native_8148_activation_isolated_herdr_withdraw_event_wake_pg() {
     isolated("withdraw").await;
 }
 
+#[tokio::test]
+async fn native_8148_activation_isolated_herdr_current_remove_event_fifo_pg() {
+    isolated("absorb").await;
+}
+
 async fn isolated(kind: &str) {
     let strict = kind != "stop";
     let withdrawn = kind == "withdraw";
+    let absorption = kind == "absorb";
     let runtime = crate::config::TestRuntimeRootGuard::new();
     std::fs::create_dir_all(runtime.path().join("runtime")).unwrap();
     let db = TestPostgresDb::create().await;
@@ -483,6 +511,8 @@ async fn isolated(kind: &str) {
         .current_generation = 1;
     let channel = ChannelId::new(if withdrawn {
         81489933
+    } else if absorption {
+        81489934
     } else if strict {
         81489931
     } else {
@@ -508,6 +538,8 @@ async fn isolated(kind: &str) {
             &path,
             if withdrawn {
                 "withdraw"
+            } else if absorption {
+                "absorb"
             } else if strict {
                 "yes"
             } else {
@@ -716,8 +748,20 @@ async fn isolated(kind: &str) {
         assert_eq!(
             original.receipts.len(),
             1,
-            "the O producer confirmed the actual user row after AnyKey ACK"
+            "the O producer confirmed the actual user/command row after AnyKey ACK"
         );
+        if absorption {
+            assert_eq!(original.receipts, vec!["command-N1-1".to_string()]);
+            let settlement = history
+                .native_settlement(&original.namespace, &original.ticket)
+                .unwrap();
+            assert_eq!(
+                settlement.outcome.unwrap().disposition,
+                crate::services::tui_input::human_frame::history::v2::native::Disposition::Executed
+            );
+            let count:i64=sqlx::query_scalar("SELECT count(*) FROM message_outbox WHERE target=$1 AND source='retained_input_notice'").bind(format!("channel:{channel}")).fetch_one(&pool).await.unwrap();
+            assert_eq!(count, 0, "absorption is executed, never withdrawn");
+        }
     }
     if !strict {
         let history =

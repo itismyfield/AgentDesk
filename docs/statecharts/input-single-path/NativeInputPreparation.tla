@@ -14,7 +14,7 @@ Init == /\ phase = "Intent" /\ role \in {"Primary", "Follower"}
           writes |-> [i \in {"A","B"} |-> 0], closed |-> [i \in {"A","B"} |-> FALSE],
           outcome |-> [i \in {"A","B"} |-> "None"], results |-> [i \in {"A","B"} |-> 0],
           cleanup |-> [i \in {"A","B"} |-> FALSE], heads |-> [i \in {"A","B"} |-> 0],
-          injections |-> [i \in {"A","B"} |-> IF i = "A" THEN 1 ELSE 0],
+          injections |-> [i \in {"A","B"} |-> IF i = "A" THEN (IF Mode \in {"HostedQueueCurrentBareBefore","HostedQueueCurrentBareFixed"} THEN 0 ELSE 1) ELSE 0],
           lastActual |-> "None", lastTaken |-> "None", wrongDequeue |-> FALSE,
           flush |-> Mode \notin {"HostedQueueDurableBefore","HostedQueueDurableFixed"}, reads |-> 1]}]
 Prepare == /\ phase = "Intent"
@@ -517,10 +517,11 @@ HostedIdleEventuallySettles ==
 \* A/B are full tickets; actual/lastActual are proof-only physical ownership observations.
 \* Guards use the captured remove kind, the complete FIFO and member stages, never actual.
 HQ == review.hq
-HQCurrent == Mode \in {"HostedQueueCurrentBefore","HostedQueueCurrentFixed", "HostedQueueDurableBefore","HostedQueueDurableFixed"}
+HQBare == Mode \in {"HostedQueueCurrentBareBefore","HostedQueueCurrentBareFixed"}
+HQCurrent == HQBare \/ Mode \in {"HostedQueueCurrentBefore","HostedQueueCurrentFixed", "HostedQueueDurableBefore","HostedQueueDurableFixed"}
 HQLegacy == Mode \in {"HostedQueueLegacyBefore","HostedQueueLegacyFixed", "HostedQueueLegacyForeignBefore","HostedQueueLegacyForeignFixed"}
-HQNormal == Mode \in {"HostedQueueCurrentBefore","HostedQueueCurrentFixed", "HostedQueuePopAllBefore","HostedQueuePopAllFixed", "HostedQueueLegacyBefore","HostedQueueLegacyFixed", "HostedQueueDurableBefore","HostedQueueDurableFixed"}
-HQRetainWrong == Mode \in {"HostedQueueCurrentBefore","HostedQueuePopAllBefore"}
+HQNormal == HQBare \/ Mode \in {"HostedQueueCurrentBefore","HostedQueueCurrentFixed", "HostedQueuePopAllBefore","HostedQueuePopAllFixed", "HostedQueueLegacyBefore","HostedQueueLegacyFixed", "HostedQueueDurableBefore","HostedQueueDurableFixed"}
+HQRetainWrong == Mode \in {"HostedQueueCurrentBefore","HostedQueueCurrentBareBefore","HostedQueuePopAllBefore"}
 HQDropWrong == Mode \in {"HostedQueueLegacyBefore","HostedQueueLegacyForeignBefore"}
 HQMembershipOff == Mode \in {"HostedQueueWaitingBefore","HostedQueueRemovedBefore"}
 HQRemove == /\ HQ.pc = 0
@@ -530,8 +531,9 @@ HQRemove == /\ HQ.pc = 0
             /\ UNCHANGED BaseVars
 HQCommand == /\ HQ.pc = 1
              /\ review' = [review EXCEPT !.hq.pc = 2,
-                  !.hq.seen["A"] = HQCurrent, !.hq.member["A"] = HQCurrent,
-                  !.hq.actual["A"] = IF HQCurrent THEN "A" ELSE "None"]
+                  !.hq.seen["A"] = HQCurrent /\ ~HQBare, !.hq.member["A"] = HQCurrent /\ ~HQBare,
+                  !.hq.actual["A"] = IF HQCurrent /\ ~HQBare THEN "A" ELSE "None",
+                  !.hq.fifo = IF HQCurrent /\ ~HQBare THEN SelectSeq(@, LAMBDA i: i # "A") ELSE @]
              /\ UNCHANGED BaseVars
 HQCloserA == /\ HQ.pc = 2
              /\ review' = [review EXCEPT !.hq.pc = 3, !.hq.closed["A"] = HQCurrent]
@@ -559,7 +561,7 @@ HQCleanup(i) == /\ HQ.outcome[i] # "None" /\ ~HQ.cleanup[i]
 HQHead(i) == /\ HQ.cleanup[i] /\ HQ.heads[i] = 0
              /\ review' = [review EXCEPT !.hq.heads[i] = @ + 1]
              /\ UNCHANGED BaseVars
-HQEnqueueB == /\ HQ.pc = 3 /\ HQ.heads["A"] = 1
+HQEnqueueB == /\ HQ.pc = 3 /\ (HQBare \/ HQ.heads["A"] = 1)
               /\ review' = [review EXCEPT !.hq.pc = 4, !.hq.stage["B"] = "Waiting",
                    !.hq.fifo = Append(@,"B"), !.hq.injections["B"] = @ + 1]
               /\ UNCHANGED BaseVars
@@ -605,7 +607,7 @@ HostedQueueAuthentic == \A i \in {"A","B"}: HQ.visible[i] => HQ.member[i] /\ HQ.
 HostedQueueDurable == \A i \in {"A","B"}: HQ.outcome[i] = "Executed" => HQ.durable[i]
 HostedQueueOnce == \A i \in {"A","B"}: HQ.writes[i] <= 1 /\ HQ.results[i] <= 1 /\ HQ.heads[i] <= 1 /\ HQ.injections[i] <= 1
 HostedQueueNoAddedReads == HQ.reads = 1
-HostedQueueAProgress == TRUE ~> (HQ.cleanup["A"] /\ HQ.heads["A"] = 1)
+HostedQueueAProgress == (HQ.injections["A"] > 0) ~> (HQ.cleanup["A"] /\ HQ.heads["A"] = 1)
 HostedQueueBProgress == (HQNormal /\ HQ.stage["B"] # "Absent") ~> (HQ.cleanup["B"] /\ HQ.heads["B"] = 1)
 
 ====
