@@ -417,8 +417,10 @@ pub(crate) fn modal(capture: &str) -> bool {
     screen::modal(capture)
 }
 
+#[cfg(unix)]
 pub(crate) use screen::HeldRead;
 
+#[cfg(unix)]
 pub(crate) fn held_read(capture: &str) -> HeldRead {
     screen::held_read(capture)
 }
