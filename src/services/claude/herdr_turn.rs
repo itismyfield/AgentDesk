@@ -2,6 +2,8 @@
 //! gated prompt after SessionStart, never resent or relaunched; an unclear send holds later ones.
 
 mod first_input;
+pub(crate) mod hold_record;
+pub(crate) mod hold_resolve;
 mod handoff;
 use handoff::launched_source;
 
@@ -260,12 +262,13 @@ pub(crate) fn execute(
     before_start::observed_execution(turn.cancel.as_deref(), || {
         use crate::services::claude_tui::owner_input::Lineage;
         let (attached, lineage) = match turn.row {
+            // An owner's write judges a hold right before its first key; a legacy writer refuses.
             Some(HostedRecord::Known(record)) if record.state == HostedState::Bound => {
-                not_held(&record.execution_nonce)?;
+                legacy_not_held(&record.execution_nonce)?;
                 (bound_source(&turn, ports, record)?, Lineage::Existing)
             }
             Some(HostedRecord::Known(record)) if record.state == HostedState::Pending => {
-                not_held(&record.execution_nonce)?;
+                legacy_not_held(&record.execution_nonce)?;
                 (
                     pending_source(&turn, &runtime, ports, record)?,
                     Lineage::Pending,
@@ -523,7 +526,7 @@ pub(crate) fn unlink_hold(nonce: &str) -> Result<(PathBuf, bool), String> {
     }
 }
 
-/// Each held nonce and when its hold was recorded; the file holds only that time.
+/// Each held nonce and when its hold was recorded, from a v1 time or a v2 record.
 pub(crate) fn input_holds() -> Result<Vec<(String, Option<String>)>, String> {
     let dir = holds_dir()?;
     let entries = match std::fs::read_dir(&dir) {
@@ -536,8 +539,14 @@ pub(crate) fn input_holds() -> Result<Vec<(String, Option<String>)>, String> {
     for entry in entries {
         let entry =
             entry.map_err(|error| format!("herdr turn: input holds unreadable: {error}"))?;
+        // A record being rewritten is no hold of its own.
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         let recorded = std::fs::read_to_string(entry.path()).ok().and_then(|text| {
-            chrono::DateTime::parse_from_rfc3339(text.trim())
+            let v2 = serde_json::from_str::<serde_json::Value>(&text).ok();
+            let at = v2.as_ref().and_then(|v2| v2["recorded_at"].as_str());
+            chrono::DateTime::parse_from_rfc3339(at.unwrap_or(text.trim()))
                 .ok()
                 .map(|at| at.to_rfc3339())
         });
@@ -568,6 +577,13 @@ pub(crate) fn not_held(nonce: &str) -> Result<(), String> {
     }
 }
 
+fn legacy_not_held(nonce: &str) -> Result<(), String> {
+    match crate::services::claude_tui::owner_input::launch_refuses_live() {
+        Ok(()) => not_held(nonce),
+        Err(_) => Ok(()),
+    }
+}
+
 /// Recorded and synced before the first write, so even a crash mid-send leaves it.
 pub(crate) fn hold(nonce: &str) -> Result<PathBuf, String> {
     use std::io::Write;
@@ -581,14 +597,6 @@ pub(crate) fn hold(nonce: &str) -> Result<PathBuf, String> {
         .and_then(|()| crate::domain::file_sync::fsync_parent_dir(&path));
     written.map_err(|error| format!("herdr turn: input hold not recorded: {error}"))?;
     Ok(path)
-}
-
-/// Whether the composer is as before the run: submitted, or never written.
-fn composer_settled(run: &InputRun) -> bool {
-    matches!(
-        run,
-        InputRun::Applied | InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }
-    )
 }
 
 fn launch(turn: &HerdrTurn<'_>, session_id: Option<String>, resume: bool) -> HerdrLaunch {

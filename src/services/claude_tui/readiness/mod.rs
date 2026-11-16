@@ -359,6 +359,9 @@ pub(crate) struct Reservation {
     clear: Option<clear::Evidence>,
 }
 impl Reservation {
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
     pub(crate) fn current(&self) -> bool {
         Source::current(&self.source.session, Some(&self.source.path)).as_ref()
             == Some(&self.source)

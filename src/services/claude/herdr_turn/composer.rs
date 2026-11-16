@@ -27,6 +27,15 @@ fn composer_ready_wait() -> Duration {
     COMPOSER_READY_WAIT
 }
 
+thread_local! {
+    static TOUCHED: std::cell::RefCell<Option<crate::services::claude_tui::readiness::Reservation>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// The reservation this thread's last `when_idle` left with a touched composer, if any.
+pub(crate) fn take_touched() -> Option<crate::services::claude_tui::readiness::Reservation> {
+    TOUCHED.with(|slot| slot.borrow_mut().take())
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum WaitStop {
     Cancelled,
@@ -156,7 +165,8 @@ pub(crate) fn when_idle(
                 InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 } => {
                     reservation.not_sent()
                 }
-                _ => (),
+                // A touched composer keeps its reservation for the hold that resolves it.
+                _ => TOUCHED.with(|slot| *slot.borrow_mut() = Some(reservation)),
             }
             result
         }

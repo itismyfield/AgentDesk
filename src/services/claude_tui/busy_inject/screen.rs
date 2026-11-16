@@ -193,6 +193,38 @@ pub(super) fn read(capture: &str) -> Screen {
     }
 }
 
+/// A held prompt's composer read whole. A row that may be one wrapped part of a longer line
+/// reads as `Text(None)`: only a lossless body can match a recorded frame.
+pub(super) fn held_read(capture: &str) -> super::HeldRead {
+    use super::HeldRead;
+    let rows: Vec<Row> = capture.lines().map(row).collect();
+    let running = |row: &Row| claude_footer::bypass_interrupt(row.plain.trim_end()) == Some(true);
+    if rows.iter().any(running) {
+        return HeldRead::Busy;
+    }
+    let screen = read(capture);
+    if screen.footer != Footer::Normal
+        || screen.stash != Stash::AbsentInRecognizedLayout
+        || modal(capture)
+    {
+        return HeldRead::Unread;
+    }
+    match screen.composer {
+        Composer::Unknown => HeldRead::Unread,
+        Composer::Empty => HeldRead::Empty,
+        Composer::Text(lines) => {
+            let width = box_bounds(&rows).map_or(0, |(prompt, _)| {
+                rows[prompt - 1].plain.trim_end().chars().count()
+            });
+            let short = |line: &String| {
+                line.as_str() == line.trim_end()
+                    && unicode_width::UnicodeWidthStr::width(line.as_str()) + 4 < width
+            };
+            HeldRead::Text(lines.iter().all(short).then(|| lines.join("\n")))
+        }
+    }
+}
+
 pub(super) fn modal(capture: &str) -> bool {
     use crate::services::tui_input::actor::gate::{PaneVerdict, judge_pane};
     use crate::services::tui_o::shadow::ShadowProvider;

@@ -167,7 +167,7 @@ fn an_idle_source_that_proves_nothing_ends_retained_and_a_running_one_waits() {
                 composer::READY_WAIT_FOR_TESTS.with(|wait| wait.set(budget));
                 let result = guarded_outcome::capture_preparation(|| {
                     let (sender, receiver) = std::sync::mpsc::channel();
-                    let result = write(&session, None, attached, &frame, &sender).map(drop);
+                    let result = write(&session, None, attached, &frame, &sender, None).map(drop);
                     drop(receiver);
                     result
                 });
