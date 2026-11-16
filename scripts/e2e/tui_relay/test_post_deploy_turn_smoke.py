@@ -843,6 +843,7 @@ class CellResetTest(unittest.TestCase):
         self.clear_content = "세션을 초기화했어요. 대기 메시지 0건을 비웠어요."
         self.inspect_override = False
         self.inspect_payload = None
+        self.writers = []
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -866,7 +867,7 @@ class CellResetTest(unittest.TestCase):
                     value = fixture.inspect_payload if fixture.inspect_override else fixture.identities[provider]
                     self.reply(value)
                 elif self.path == "/api/health/detail":
-                    self.reply({"mailboxes": [
+                    self.reply({"tui_o_writer_readiness": fixture.writers, "mailboxes": [
                         {"provider": provider, "channel_id": channel,
                          "agent_turn_status": "active" if fixture.identities[provider] else "idle",
                          "has_cancel_token": fixture.identities[provider] is not None,
@@ -1255,6 +1256,15 @@ exit "$rc"
         self.assertEqual(len(findings), 1, result.stdout)
         self.assertIn("relay E-1: cell-reset refused", findings[0])
         self.assertIn("relay E-50=skipped: blocked by E-1 FAIL", result.stdout)
+
+    def test_unready_codex_writer_skips_e51_with_its_hold_reason(self):
+        hold = "O channel 333 runs only on the gateway with its writer ready"
+        self.writers = [{"provider": "codex", "channel_id": "333", "accepts": False, "hold_reason": hold}]
+        result = self.deploy_round_trip(run_all=True)
+        self.assertEqual((self.root / "injected").read_text().splitlines(), ["E-1", "E-35", "E-50"])
+        self.assertIn("COVERAGE=E-50=pass E-51=skipped", result.stdout)
+        self.assertIn("relay E-51=skipped: codex-tui not proven idle (writer not ready: "
+                      f"target writer codex:333 not accepting: {hold})", result.stdout)
 
     def test_foreign_driver_deploy_logs_existing_skip_without_touching_its_cell(self):
         with driver.lease.acquire("foreign-driver", cell="claude-tui") as path:
