@@ -828,6 +828,8 @@ tui-o-writer/NoticeEvidenceSameSource.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceUnavailable.cfg	NoticeEvidence	-	EveryPendingTerminates
 tui-o-writer/NoticeEvidenceWaitBoundary.cfg	NoticeEvidence	-	EveryPendingTerminates
 tui-o-writer/WriterAdoptionAdvanceOnEnd.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered
+tui-o-writer/WriterAdoptionBootWakeAfter.cfg	WriterAdoptionBootWake	-	-
+tui-o-writer/WriterAdoptionBootWakeBefore.cfg	WriterAdoptionBootWake	WakeAuthority,WakeOnce	-
 tui-o-writer/WriterAdoptionBudgetMut.cfg	WriterAdoption	RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionExemptAll.cfg	WriterAdoption	OtherCustodyBlocks	-
 tui-o-writer/WriterAdoptionGateOnly.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered,AdoptionSettles
@@ -895,8 +897,6 @@ tui-o-writer/WriterAdoptionRelayedByTime.cfg	WriterAdoption	HeldBodyNotSkipped,R
 tui-o-writer/WriterAdoptionRetries4.cfg	WriterAdoption	TriesBound	-
 tui-o-writer/WriterAdoptionStage1.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAdoptionSwallowOwed.cfg	WriterAdoption	NoCommitPastOwed	-
-tui-o-writer/WriterAdoptionBootWakeAfter.cfg	WriterAdoptionBootWake	-	-
-tui-o-writer/WriterAdoptionBootWakeBefore.cfg	WriterAdoptionBootWake	WakeAuthority,WakeOnce	-
 tui-o-writer/WriterAdoptionThreadAfter.cfg	WriterAdoptionThreadComposition	-	-
 tui-o-writer/WriterAdoptionThreadBefore.cfg	WriterAdoptionThreadComposition	NoLegacyBodyOnTui	-
 tui-o-writer/WriterAdoptionThreadLeak.cfg	WriterAdoptionThreadComposition	ConfiguredLegacyZero,NoLegacyBodyOnTui	-
