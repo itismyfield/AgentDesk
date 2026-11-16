@@ -1,13 +1,17 @@
-use super::{inflight, turn_finalizer};
+use super::inflight;
+#[cfg(test)]
+use super::turn_finalizer;
 use poise::serenity_prelude::ChannelId;
 
 pub(in crate::services::discord) use crate::services::engine_runtime::relay_state::lease::DeliveryLeaseKey;
 
 impl DeliveryLeaseKey {
+    #[cfg(test)]
     #[track_caller]
     pub(in crate::services::discord) fn from_turn_key(turn: turn_finalizer::TurnKey) -> Self {
         Self::from_turn_key_for_site(turn, "delivery_lease_key.turn")
     }
+    #[cfg(test)]
     #[track_caller]
     pub(in crate::services::discord) fn from_turn_key_for_site(
         turn: turn_finalizer::TurnKey,
@@ -22,6 +26,7 @@ impl DeliveryLeaseKey {
             site,
         )
     }
+    #[cfg(test)]
     #[track_caller]
     pub(in crate::services::discord) fn from_inflight_state(
         channel_id: ChannelId,
