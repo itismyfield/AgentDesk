@@ -63,7 +63,7 @@ pub(crate) struct HoldRecord {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Held {
     V1 { hold_id: String },
-    V2(HoldRecord),
+    V2(Box<HoldRecord>),
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -88,7 +88,7 @@ pub(crate) fn read(nonce: &str) -> Result<Option<Held>, String> {
     };
     match serde_json::from_slice::<HoldRecord>(&text) {
         Ok(record) if record.schema == 2 && record.execution_nonce == nonce => {
-            Ok(Some(Held::V2(record)))
+            Ok(Some(Held::V2(Box::new(record))))
         }
         Ok(_) => Err("herdr turn: input hold names another execution".into()),
         Err(_) if text.first() == Some(&b'{') => Err("herdr turn: input hold malformed".into()),

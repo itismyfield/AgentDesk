@@ -127,7 +127,7 @@ pub(crate) fn resolve(logical: &str, nonce: &str, ports: &dyn Ports) -> Result<V
     let record = match (held, &read) {
         (_, HeldRead::Busy) => return Ok(Verdict::Kept),
         (Held::V1 { hold_id }, _) => return legacy(nonce, &hold_id, &read, ports),
-        (Held::V2(record), _) => record,
+        (Held::V2(record), _) => *record,
     };
     if delivered(&record) {
         return release(record, Disposition::Delivered);
