@@ -38,6 +38,8 @@ async fn expired_launch_deadline_keeps_backoff_on_a_prepare_refusal() {
     let mut shared = crate::services::discord::make_shared_data_for_tests();
     Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Claude;
     let channel = ChannelId::new(8_146_002);
+    // The journal keeps its custody only while boot config still routes the channel to Herdr.
+    let _hosts = crate::config::session_hosts::force_for_test(Some("n"), &[(channel.get(), "n")]);
     let mailbox = shared.mailbox(channel);
     let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, &shared.token_hash, None);
     let (path, namespace) =
@@ -63,7 +65,7 @@ async fn expired_launch_deadline_keeps_backoff_on_a_prepare_refusal() {
                 .as_mut()
                 .unwrap()
                 .retry_after_ms = 1;
-            owner.handoff_failed(&journal.id).map(drop)
+            Ok(())
         })
         .await
         .unwrap();
@@ -82,7 +84,8 @@ async fn expired_launch_deadline_keeps_backoff_on_a_prepare_refusal() {
             &mailbox,
             &ProviderKind::Claude,
             channel.get(),
-            &front
+            &front,
+            claude_handoff::Start::Person
         )
         .await
         .is_err()
@@ -189,7 +192,8 @@ async fn restored_ended_retired_launch_retries_backoff_then_retains_and_notifies
                 &mailbox,
                 &ProviderKind::Claude,
                 channel.get(),
-                &front
+                &front,
+                claude_handoff::Start::Person
             )
             .await,
             Ok(true)
@@ -268,7 +272,8 @@ async fn restored_ended_retired_launch_retries_backoff_then_retains_and_notifies
                 &mailbox,
                 &ProviderKind::Claude,
                 channel.get(),
-                &front
+                &front,
+                claude_handoff::Start::Person
             )
             .await
             .is_err(),
@@ -344,7 +349,8 @@ async fn restored_ended_retired_launch_retries_backoff_then_retains_and_notifies
             &mailbox,
             &ProviderKind::Claude,
             channel.get(),
-            &front
+            &front,
+            claude_handoff::Start::Person
         )
         .await,
         Ok(false),

@@ -145,7 +145,7 @@ async fn f3_a_changed_pin_holds_the_original_without_launching_or_closing_a_peer
             let owner = slot.as_mut().unwrap();
             let cleared = owner.clear_waiting()?;
             assert_eq!(cleared.queued.len(), 1);
-            assert!(owner.handoff().is_none());
+            assert!(owner.handoff().is_some_and(|journal| !journal.ended));
             Ok(())
         })
         .await
