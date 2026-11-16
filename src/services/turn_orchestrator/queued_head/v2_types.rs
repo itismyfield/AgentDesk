@@ -11,6 +11,9 @@ pub(crate) struct ClaudeHandoffJournal {
     pub(crate) notice_acked: bool,
     #[serde(default)]
     pub(crate) retry_after_ms: u64,
+    /// The front spending the retry budget; absent, the journal's original spends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) spender: Option<QueueIdentity>,
 }
 
 use super::{HeadPhase, PendingQueueItem, QueueIdentity};

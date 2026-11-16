@@ -44,8 +44,9 @@ python3 scripts/audit_maintainability.py --format json
 python3 scripts/audit_maintainability.py --check
 ```
 
-`module_layers`는 baseline에 없는 역방향 부채와 기존 역방향 부채의 증가를 `error`로 보고한다.
-판정 불가·불확실성·미분류 합계의 증가는 기본 `warning`이며 역방향 부채를 숨기면 `error`다.
+`module_layers`는 main(base)과 후보를 같은 실행에서 각각 재고, base에 없던 역방향 부채와
+기존 역방향 부채의 증가를 `error`로 보고한다. 판정 불가·불확실성·미분류 합계의 증가는
+기본 `warning`이며 역방향 부채를 숨기면 `error`다. 커밋된 기준선 파일은 없다.
 `--check`는 이 error가 있으면 실패한다. 다른 감사 검사의 severity는 바꾸지 않는다.
 `checks.module_layers.findings[0].extra.measurement`는 0A의 node·edge·coverage 계약을
 그대로 유지한다. `extra.layer_analysis`가 별도의 분류·층별 edge 집계·역방향 의존·
@@ -57,39 +58,47 @@ python3 scripts/audit_maintainability.py --check
 
 ## 차단 규칙과 실패 해석
 
-| 현재 측정과 baseline 비교 | 판정 | 확인할 내용 |
+| 후보 측정과 base 측정 비교 | 판정 | 확인할 내용 |
 |---|---|---|
-| 새 역방향 ID 또는 기존 ID의 발생 수 증가 | error | 보고된 source·target·kind와 참조 증거를 확인하고 증가를 제거한다. |
+| 새 역방향 ID 또는 기존 ID의 발생 수 증가 | error | 보고된 source·target·kind와 참조 증거를 확인하고 증가를 제거하거나 승인 파일에 적는다. |
 | 새 판정 불가 ID 또는 기존 ID의 발생 수 증가 | warning | 미분류 endpoint를 확인한다. 기존 역방향 부채를 숨기거나 역방향 부채가 줄어든 source에서 늘면 error다. |
 | 미분류 모듈 수·판정 불가 edge/발생 수 증가 | warning | 미분류 endpoint와 변경된 층 규칙을 확인한다. |
 | 새 uncertainty ID 또는 기존 ID의 발생 수 증가 | warning | 미해석·cfg·읽기·모듈 오류를 확인한다. 역방향 부채를 숨기는 참조나 역방향 부채가 줄어든 source의 증가는 error다. |
-| baseline·이동 mapping의 누락/잘못된 형식, 측정 예외·설정 오류 | error | 입력과 측정 실패를 고친다. 현재값으로 baseline을 다시 만들어 숨기지 않는다. |
-| 기존 ID의 발생 수 감소 또는 해소 | info | 감소를 검토한 뒤 아래 명령으로 정본에 반영한다. |
-| baseline 안의 기존 부채 유지 | info | 기존 판정 불가와 coverage의 불완전성은 그대로 남는다. |
+| 상위 층 모듈을 경로로 적은 미해석 참조의 증가 | error(`unresolved-reverse`) | 참조를 해석되게 고치거나 승인 파일의 `increase`로 적는다. |
+| 분류 해제·매핑만으로 사라진 역방향 부채 | error(`declassified`·`mapping-reduction`) | 승인 파일의 `reclassify`로 검토된 prefix를 적는다. |
+| 측정 코드 변경으로 base 측정이 달라짐 | error(`analyzer-change`) | 승인 파일의 `analyzer`에 보고된 digest·개수를 적는다. |
+| base를 정할 수 없음, 승인 파일 형식 오류, 측정 예외·설정 오류 | error | 입력과 측정 실패를 고친다. 비교를 건너뛰지 않는다(`gate-unavailable`). |
+| 기존 ID의 발생 수 감소 또는 해소 | info | 요약에 감소 수치만 남긴다. 다음 PR의 base가 감소를 이미 포함하므로 기록할 파일이 없다. |
 
 모든 ID는 독립적으로 비교한다. 한 ID가 줄어든 양으로 다른 ID의 신규·증가를
-상쇄하지 않는다. 해소된 ID는 갱신 시 `zero_rules`에 0으로 고정하며, 다시 나타나면
-해당 section의 판정 규칙을 따른다. 단순 합계가 같아도 판정 불가 edge의 대상이 바뀌면
-새 ID로 경고한다. 역방향 양수·zero-rule이 판정 불가나 미해석 참조로 숨겨지는 경로는 error다.
+상쇄하지 않는다. 단순 합계가 같아도 판정 불가 edge의 대상이 바뀌면 새 ID로 경고한다.
+base의 역방향 부채가 판정 불가나 미해석 참조로 숨겨지는 경로는 error다.
 
-| baseline section | 기본 증가 판정 | 예외 |
+| 측정 section | 기본 증가 판정 | 예외 |
 |---|---|---|
-| `reverse_dependencies` | error | 신규·증가·zero-rule 재등장을 차단한다. |
+| `reverse_dependencies` | error | 신규·증가를 차단한다. |
 | `indeterminate_dependencies` | warning | 기존 역방향 부채를 숨기거나 역방향 부채가 줄어든 source에서 늘면 error다. |
 | `uncertainties` | warning | 기존 역방향 부채를 숨기거나 역방향 부채가 줄어든 source에서 늘면 error다. |
 
-## baseline 생성과 식별자
+## base 선택과 측정
 
-정본 경로는 [`baselines/generated/module_layers.json`](../../scripts/audit_maintainability/baselines/generated/module_layers.json)이다.
-초기 측정 소스 SHA는 `0aeb8fc5996b790b3dabc1f788ea9a6982dcde1b`이고,
-schema 3 준비 입력 SHA/base `6d7c1851e5a127d153b0193bab54c0a32e7c391e`에서 #7749(`90fe`)의 `src/services/discord/health/recovery/carried_turn_close.rs:293`에 추가된 `discord::schedule_deferred_idle_queue_kickoff_immediate` 참조(`use super::*` 뒤 unknown path root), uncertainty ID `42bf71b862c248fc38e947e6246e23801bcef7d3e8c35815f5c4572576f6b8cf`의 발생 1회를 승인해 기록했다.
-최종 활성화 기준은 착지 직전 main `75726b3b1dfd5ea53aa9164324ed54030194a7cb`이며, 역방향 부채의 신규·증가가 0임을 확인했다.
-생성 명령과 입력 SHA를 생성 JSON에도 기록한다. 소스 입력은 `src/**`와 `Cargo.toml`이며
-생성기는 지정 commit과 추적 소스가 일치하는지, 버전 관리 밖의 소스가 없는지 확인한다.
-층 설정의 의미 기반 SHA256도 기록한다. 같은 입력 SHA·소스·매핑에서 재생성한
-바이트는 같아야 한다. 다른 checkout 경로와 선언/실행 순서는 식별자를 바꾸지 않는다.
+검사 코드는 [`module_layer_gate.py`](../../scripts/audit_maintainability/checks/module_layer_gate.py)다.
+base는 항상 main 이력 위의 commit이며 정하지 못하면 skip 대신 error다.
 
-0A가 제공하는 source 단위는 **논리 모듈**이다. baseline은 source item을 추정하지
+| 실행 맥락 | base |
+|---|---|
+| CI `pull_request` | 병합 commit의 첫 부모. 둘째 부모와 payload의 head SHA, 첫 부모와 payload base SHA의 조상 관계를 확인한다 |
+| CI main `push` | payload의 `before`(HEAD의 엄격한 조상) |
+| CI 기타 | HEAD 자신(형식 검사와 자기 비교) |
+| 로컬 | `MODULE_LAYER_BASE_REF`(origin/main 위의 commit) 또는 `git merge-base HEAD origin/main` |
+
+CI에서 `MODULE_LAYER_BASE_REF`가 있으면 거부한다. base는 `git archive`로 푼 base 트리를
+후보의 측정 코드로 재고, 측정 코드가 바뀐 후보는 base의 측정 코드로도 한 번 더 잰다.
+로컬만 `$(git rev-parse --git-common-dir)/adk-module-layer-cache/`에 base 측정을 캐시한다.
+
+## 측정 식별자
+
+0A가 제공하는 source 단위는 **논리 모듈**이다. 측정은 source item을 추정하지
 않고 `source_grain="module"`을 명시한다. edge 식별자는 source module → canonical
 target module → reference kind의 SHA256이다.
 불확실성은 source·path·reason과 category를 식별자로 삼아 같은 행을 묶고 발생 수를
@@ -101,98 +110,50 @@ grouped import는 leaf마다 세고 같은 줄의 호출도 각각 센다. 줄�
 줄이기 전의 발생 수를 별도 projection으로 제공한다. uncertainty의 `count`는
 0A의 원시 행 발생 수다. 서로 다른 `file:line` site 수는 진단 증거이며 부채 count가 아니다.
 
-schema 3 정본은 역방향 부채·판정 불가 edge·모든 불확실성의 versioned ID와
-발생 수, 미분류·판정 불가 수, 해소된 ID의 zero-rule을 보존한다.
+측정 schema 3은 역방향 부채·판정 불가 edge·모든 불확실성의 versioned ID와
+발생 수, 미분류·판정 불가 수를 담는다.
 `indeterminate_dependencies`도 `id/source/target/kind/count` record로 남겨
 총수가 같은 대상 변경을 비교할 수 있게 한다.
 `unclassified_modules`는 미분류 모듈 수이고, `indeterminate_edges`는 미분류 endpoint로
 판정할 수 없는 정본 edge 수, `indeterminate_occurrences`는 그 참조 발생 수다.
 edge count의 단위는 `count_unit_version=1`과 `edge_count_unit`에 기록한다.
 미분류 또는 known→unknown 전환을 단순 부채 감소로 세지 않는다.
-정렬된 record 하나를 한 줄에 써서 부채 하나의 변경이 그 줄에 드러난다.
-SCC 구성원·전체 sites·미분류 목록 같은 진단 snapshot은 감사 JSON이나 `target/`
-산출물로 생성하며 정본에 커밋하지 않는다.
+층 설정의 의미 기반 SHA256도 기록한다. 같은 소스·매핑에서 잰 바이트는 같아야 하며
+다른 checkout 경로와 선언/실행 순서는 식별자를 바꾸지 않는다.
 
-임의 손편집과 현재값으로의 전면 덮어쓰기는 허용하지 않는다. 일반 생성 명령은 기존 파일을
-바이트로 비교하며, 같은 바이트의 재생성만 허용하고 다른 내용은 거부한다.
-줄끝이 CRLF로 바뀐 파일도 동일 바이트로 인정하지 않는다. 새 파일은 exclusive-create로 쓴다.
-소스/매핑 변경 뒤 초기 파일을 지워 다시 만드는 방식으로 부채를 지우지 않는다.
-
-## 최초 활성화 기록
-
-schema 3 활성화 정본은 착지 직전 main에서 생성했다. 준비 기준 6d7 이후 main에 들어온
-변경은 판정 불가 의존·uncertainty만 늘렸으며 역방향 부채는 130 ID/316회로 같았다.
-다음은 승인된 활성화 생성의 재현 기록이다. 활성화 뒤 변경을 수용하는 방법이 아니다.
+한 commit의 측정을 검토용으로 보려면 진단 스냅숏을 `target/` 등에 쓴다.
+아무 검사도 이 파일을 기준선으로 읽지 않는다. 생성기는 지정 commit과 추적 소스(`src/**`·`Cargo.toml`)가
+일치하는지, 버전 관리 밖의 소스가 없는지 확인하고, 지운 커밋 기준선 경로에는 쓰지 않는다.
 
 ```sh
 python3 scripts/audit_maintainability/checks/module_layer_baseline.py \
-  --input-sha 75726b3b1dfd5ea53aa9164324ed54030194a7cb \
-  --output scripts/audit_maintainability/baselines/generated/module_layers.json
+  --input-sha <commit> --output target/module-layers.json
 ```
 
-기존 정본에 실행하면 동일 bytes replay만 허용하고, 새 output은 exclusive-create로
-쓴다. 활성화 뒤에는 정본을 삭제·재생성하지 않고 아래의 감소 전용 갱신을 사용한다.
+커밋 기준선(schema 3, 활성화 main `75726b3b1dfd5ea53aa9164324ed54030194a7cb`)과 그 감소 전용 갱신·
+분류 편입·record 보강 생성 모드는 결정 B에서 지웠다. 아래 기록 절의 해당 명령은 당시 이력이다.
 
-`--upgrade-records`는 기존 schema 2 정본과 역방향·불확실성 ID/count 및 집계 수가
-모두 같은 경우 판정 불가 record만 보강하는 제한된 기능으로 남아 있다.
-이번 최초 활성화에는 이 옵션을 사용하지 않았고, 해당 equality guard도 유지한다.
+## 증가 승인
 
-## 감소만 반영하는 갱신
+정당한 증가는 [`layer_approvals/`](../../scripts/audit_maintainability/layer_approvals/README.md)에
+PR마다 새 파일 하나(`<이슈>-<slug>.toml`)로 적는다. 효력은 base에 없고 후보에만 있는 파일의
+항목뿐이며, main에 착지한 파일은 다시는 효력이 없다. 착지한 파일의 수정·삭제는 error다.
 
-소스를 commit한 뒤 해당 SHA로 실행한다. 아래 SHA는 현재 활성화 기준점이며,
-이후 감소를 반영할 때는 감소가 들어간 commit의 SHA를 넣는다.
+| 항목 | 효력 조건 | error |
+|---|---|---|
+| `increase`(`accepted-debt`) | 이동 정규화 뒤 같은 부채에서 base count < 후보 count ≤ `max_count` | 상한 초과(`approval-exceeded`), 쓰이지 않음(`approval-unused`) |
+| `increase`(`admit-classification`) | 매핑이 바뀌었고, base에서 같은 ID가 같은 count의 판정 불가 record이며, 모든 known 층과 층 rank가 그대로다 | 조건 불일치(`approval-admit`) |
+| `move` | old_id가 base에 있고 후보에 없음, new_id가 후보에 있고 base에 없음, 같은 section | 조건 불일치(`approval-move`) |
+| `reclassify` | 그 prefix로만 설명되는 매핑 감소 또는 분류 해제가 있음 | 쓰이지 않음 |
+| `analyzer` | 측정 코드가 바뀌었고 base 소스를 두 코드로 잰 차이의 digest·개수가 일치 | 불일치 |
 
-```sh
-python3 scripts/audit_maintainability/checks/module_layer_baseline.py \
-  --input-sha 75726b3b1dfd5ea53aa9164324ed54030194a7cb \
-  --output scripts/audit_maintainability/baselines/generated/module_layers.json \
-  --update-reductions
-```
-
-이 명령은 기존 정본과 비교해 ID별 `min(accepted, current)`로 감소·삭제만 반영한다.
-warning 증가는 흡수하지 않고, 미분류 모듈 합계도 두 값의 최솟값을 유지한다.
-역방향 신규·증가와 숨김, 설정·측정 오류는 쓰기를 막는다.
-매핑이 달라져 역방향에서 사라졌지만 현재 그래프에 같은 source·target·kind가
-남아 있으면 거절한다. 검토된 known 재분류만 `--reclassify <prefix>`로 명시한다.
-prefix는 source 또는 target의 논리 모듈 namespace 경계에 일치해야 하며 생성 명령에도 기록된다.
-삭제된 부채는 zero-rule로 남긴다.
-동시 갱신은 exclusive lock 획득에 실패하면 거부하고, 허용된 변경만 같은 디렉터리의
-임시 파일에서 atomic replace로 반영한다. 일반 생성기의 덮어쓰기 거부는 유지한다.
-
-감소 거래(분류 편입 뒤 일반 감소 포함)는 이번에 역참조가 줄어든 source의 미기록 uncertainty만 역사 증명으로 기록할 수 있다.
-`--previous-mapping-rev`(감소 모드 생략 시 accepted의 input SHA)의 소스 그래프에 같은 ID가 현재 count 이상이고 인자를 포함한 호출 표현의 토큰도 같아야 하며, 증명 rev는 input의 엄격한 조상이자 HEAD의 조상이어야 한다.
-기존 양수 한도·zero-rule·다른 source의 경고는 흡수하지 않고, 역참조 은폐 검사는 기록 뒤에도 적용한다.
-기록한 ID·이전 rev·이전 count·현재 count는 생성기 stderr에, 증명 rev는 생성 명령에 남긴다. 이전 known 층 보존은 이전 소스 그래프의 모듈 집합으로 판정한다.
-
-## 분류 편입
-
-분류 편입은 `--admit-classification`으로만 한다. 허용 범위는 같은 source anchor에서 "판정 불가 → 층 역방향"으로 바뀐 정확한 ID와 그 count다. 기존 역방향 양수 records의 한도 인상과 zero-rule의 한도 인상은 금지한다. 편입 PR 본문에는 보고서 TSV의 `accepted_indeterminate_count`와 `grown_since_accepted` 합계를 적는다.
-
-```sh
-python3 scripts/audit_maintainability/checks/module_layer_baseline.py \
-  --input-sha <source-commit> --admit-classification \
-  --previous-mapping-rev <previous-mapping-commit> \
-  --dry-run --report target/classification.tsv > target/classification-baseline.json
-```
-
-이전 매핑의 의미 기반 해시는 accepted 기준선의 `mapping_sha256`과 같아야 한다.
-현재 `src/**`·`Cargo.toml`은 input SHA와 같아야 하며 이전 known 층과 층 rank는 불변이다.
-같은 그래프의 이전 투영 비교가 error 0이어야 한다. `--reclassify`도 이 known 불변 검사를 면제하지 않는다.
-편입 집합은 투영 후 역방향 ID에서 투영 전 역방향 ID를 뺀 정확한 차집합이다.
-각 ID·count는 이전 투영의 판정 불가 record와 같아야 하며 이동 mapping의 old/new와 충돌할 수 없다.
-기존 판정 불가 양수 record는 zero-rule로 바꾸고 정확한 역방향 record를 추가한 뒤
-일반 감소 갱신을 적용한다. 별도 manifest는 두지 않는다.
-
-TSV는 ID·count와 두 endpoint의 규칙 prefix·사유를 제공해 규칙별 비용을 합산할 수 있다.
-`accepted_indeterminate_count`는 accepted에 없으면 0이고, `grown_since_accepted`는
-`max(0, current count - accepted_indeterminate_count)`다. 현재 count를 편입하되 과거 경고 증가량을 드러낸다.
-`--dry-run`은 기준선을 바꾸지 않고 예상 JSON을 stdout에 쓴다. 이 옵션을 빼면 검증한 결과를 atomic replace한다.
-편입 ID가 없으면 일반 감소 갱신과 동일한 바이트·생성 명령을 사용한다.
-성공 뒤 accepted 매핑 해시가 바뀌므로 같은 이전 매핑으로 재실행하면 거절한다.
-K 같은 known 재분류는 먼저 `--update-reductions --reclassify <prefix>`로 반영하고
-새 accepted 매핑을 anchor로 미분류 편입을 진행한다. 실패하면 기준선 바이트는 보존된다.
+역방향 부채가 줄었는데 같은 source의 미해석 참조가 여전히 대상을 가리키는 숨김은 승인할 수 없다.
+초안은 `module_layer_gate.py --draft-approval <이슈>-<slug>`가 현재 막힌 증가만 담아 만든다.
+`reason`과 `summary`를 검토해 채우기 전에는 error다.
 
 ## 검토된 분류 기록
+
+이 절과 하위 절은 커밋 기준선 시절의 편입·재분류 이력이다. 적힌 생성기 모드와 기준선 갱신은 지금 없다.
 
 `services::discord::tmux_error_detect`는 긴 prefix로 foundation에 분류한다.
 `src/services/discord/tmux_error_detect.rs:1`의 prompt 길이 판독과 :46의 provider 진단 분류,
@@ -459,30 +420,21 @@ routines::migrated → error가 23→22회로 줄어든 것은 PR #7994의
 
 ## 검토된 모듈 이동의 old→new 대응
 
-이동 대응은 [`layer_moves.toml`](../../scripts/audit_maintainability/layer_moves.toml)에 적는다.
-초기 파일은 `schema_version = 1`, `moves = []`이며 대응 항목이 없다.
-전체 모듈 이동으로 ID가 달라지면 이전 baseline ID와 현재 감사에 나온 새 ID를
-검토해 아래 형식의 항목을 추가한다. 각 ID는 64자리 SHA256이다.
+전체 모듈 이동으로 ID가 달라지면 base 측정의 이전 ID와 후보 감사에 나온 새 ID를 검토해
+그 PR의 승인 파일에 `move` 항목으로 적는다. 각 ID는 64자리 SHA256이다.
 
 ```toml
-schema_version = 1
-
-[[moves]]
-section = "reverse_dependencies"
-old_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-new_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+move = [
+  { section = "reverse_dependencies", old_id = "<base id>", new_id = "<후보 id>", reason = "a::x를 b::x로 이동" },
+]
 ```
 
 `section`은 `reverse_dependencies`, `indeterminate_dependencies`, `uncertainties` 중 하나다.
-`old_id`는 지정 section의 기존 양수 부채 또는 zero-rule에 있어야 한다.
-`new_id`는 모든 section의 양수 부채·zero-rule ID와 충돌하면 error이며,
-section이 달라도 같은 목적지를 중복 지정할 수 없다. 같은 ID로의 대응도 error다.
+`old_id`는 base의 같은 section에 있고 후보에 없어야 하며, `new_id`는 후보에 있고 base에 없어야 한다.
+section이 달라도 같은 목적지를 중복 지정할 수 없다. 이동은 원시 base·후보 측정으로 먼저 검증하고,
+`increase`의 효력은 이동 정규화 뒤 같은 부채에 대해 판정한다.
 명시하지 않은 새 ID는 신규 부채로 차단한다. 일부 item 분리의 발생 수를 자동 배분하지 않는다.
-
-갱신 뒤에도 baseline은 이전 ID와 이전 source/target metadata를 유지하고 현재의
-발생 수만 반영한다. 따라서 이동 mapping도 계속 유지한다. 새 경로에서 다시 발생한
-zero-rule 부채 역시 이 대응으로 검사한다. mapping을 지우거나 새 부채에 임의 대응시켜
-기존 한도를 재사용하지 않는다.
+착지 뒤에는 main 측정이 새 ID를 그대로 담으므로 이동 대응을 계속 들고 다니지 않는다.
 
 ## 원감사 418과 목표 209
 

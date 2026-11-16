@@ -90,6 +90,8 @@ pub(super) mod compat;
 mod snapshot;
 mod v2;
 pub(crate) use v2::actor::v2_queue;
+#[cfg(unix)]
+pub(crate) use v2::claude_handoff::Held as HandoffHeld;
 pub(super) use v2::clear::clear_channel as clear_v2_channel;
 pub(crate) use v2::origin::{Waiting, waiting_origin};
 pub(crate) use v2::source_admission::TurnBind;

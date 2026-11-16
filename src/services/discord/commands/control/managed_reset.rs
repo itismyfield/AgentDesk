@@ -139,7 +139,8 @@ fn end_process(
                     session_name,
                     "managed session reset",
                 );
-                let killed = tmux::kill_session(session_name, "managed session reset");
+                let killed = crate::services::session_host::TmuxHost
+                    .kill(session_name, "managed session reset");
                 if killed {
                     let cleaned = if let Some(authority) = authority {
                         crate::services::tmux_common::cleanup_session_temp_files_under_source_authority(authority,session_name,fence)

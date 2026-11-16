@@ -470,7 +470,7 @@ impl PreparedIncarnation {
 
     pub(crate) fn finish_spawn(&self, result: io::Result<String>) -> Result<(), String> {
         result.map(|_| ()).map_err(|error| {
-            crate::services::platform::tmux::kill_session(
+            crate::services::session_host::TmuxHost.kill(
                 &self.context.tmux_session,
                 "binding context publication failed",
             );

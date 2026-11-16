@@ -24,6 +24,8 @@ pub(crate) enum IdentityError {
     },
     #[error("TUI-bound channel is outside the O writer selection")]
     UnselectedTui,
+    #[error("thread child has no resolved parent policy or decided adoption")]
+    ChildHeld,
 }
 
 /// How a caller uses the answer: before a body Legacy would send, or only to read ownership.
@@ -445,10 +447,40 @@ fn decide_with_snapshot(
     if channel_id == 0 {
         return Err(IdentityError::UnknownChannel);
     }
-    // Membership comes before runtime lookup so unrelated Legacy channels stay independent.
-    if !snapshot.channels().contains(&channel_id) {
-        return outside_selection(snapshot, channel_id, ClaimReason::NonMember);
+    // The body and its host share both state and sends.
+    let judged = |candidate: &channel_policy::Candidate| match usage {
+        Use::Body => match origin {
+            Some(origin) => candidate.claim_body_from(channel_id, origin),
+            None => candidate.claim_body(channel_id),
+        },
+        Use::Peek => {
+            let state = candidate.peek();
+            BodyClaimed {
+                owned: state.owned(),
+                send: None,
+                reason: if state == channel_policy::Adoption::Pending {
+                    ClaimReason::NoCandidate
+                } else {
+                    state.claim_reason()
+                },
+            }
+        }
+    };
+    // A boot reservation with no parent read yet stays Legacy's; its sends gate the later handoff.
+    if let Some(reserved) = snapshot.unresolved_child(channel_id) {
+        return Ok(judged(&reserved));
     }
+    // A known thread child is judged under its parent's kind, never as a plain non-member.
+    let child = match snapshot.child(channel_id) {
+        Some(child) => Some(child.map_err(|_| IdentityError::ChildHeld)?),
+        None => {
+            // Membership comes before runtime lookup so unrelated Legacy channels stay independent.
+            if !snapshot.channels().contains(&channel_id) {
+                return outside_selection(snapshot, channel_id, ClaimReason::NonMember);
+            }
+            None
+        }
+    };
     let expected = snapshot.kind(channel_id);
     // A committed member without a configured kind keeps Legacy out until its binding returns.
     if expected.is_none() {
@@ -466,7 +498,13 @@ fn decide_with_snapshot(
         });
     }
     // A member's boot kind is always a TUI kind, so from here the channel is selected.
-    if let Some(execution) = snapshot.execution(channel_id) {
+    // A late child keeps Legacy's open turn, counted, until its own adoption commits.
+    let late_child = child
+        .as_ref()
+        .is_some_and(|child| child.body_owner() == Some(false));
+    if let Some(execution) = snapshot.execution(channel_id)
+        && (execution.permit.is_err() || !late_child)
+    {
         return Ok(BodyClaimed {
             owned: true,
             send: None,
@@ -477,28 +515,15 @@ fn decide_with_snapshot(
             },
         });
     }
-    // The body and its host share both state and sends.
+    // A child has its own adoption; an undecided one is held, as a claim would release it.
+    if let Some(child) = child {
+        child.body_owner().ok_or(IdentityError::ChildHeld)?;
+        return Ok(judged(&child.candidate));
+    }
     let Some(candidate) = snapshot.candidate(channel_id) else {
         return Ok(legacy(ClaimReason::NoCandidate));
     };
-    Ok(match usage {
-        Use::Body => match origin {
-            Some(origin) => candidate.claim_body_from(channel_id, origin),
-            None => candidate.claim_body(channel_id),
-        },
-        Use::Peek => {
-            let state = candidate.peek();
-            BodyClaimed {
-                owned: state.owned(),
-                send: None,
-                reason: if state == channel_policy::Adoption::Pending {
-                    ClaimReason::NoCandidate
-                } else {
-                    state.claim_reason()
-                },
-            }
-        }
-    })
+    Ok(judged(candidate))
 }
 
 #[cfg(test)]

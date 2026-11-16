@@ -4,8 +4,6 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
-import re
-import shlex
 import sys
 import unittest
 
@@ -16,41 +14,6 @@ from audit_maintainability.checks import module_layer_baseline as snapshots
 
 
 class IndeterminateBaselineRecordsTest(unittest.TestCase):
-    def test_canonical_baseline_provenance_matches_generation_command(self):
-        canonical = json.loads((ROOT / snapshots.BASELINE).read_text("utf-8"))
-        self._assert_provenance(canonical)
-
-    def _assert_provenance(self, canonical):
-        self.assertIsNotNone(re.fullmatch(r"[0-9a-f]{40}", canonical["input_sha"]))
-        arguments = shlex.split(canonical["generation_command"])
-        for option, expected in (("--input-sha", canonical["input_sha"]),
-                                 ("--output", snapshots.BASELINE)):
-            self.assertFalse(any(argument.startswith(option + "=") for argument in arguments),
-                             f"equals-form is not generated for {option}")
-            self.assertEqual(arguments.count(option), 1)
-            value_index = arguments.index(option) + 1
-            self.assertLess(value_index, len(arguments))
-            self.assertEqual(arguments[value_index], expected)
-
-    def test_provenance_rejects_mixed_option_spellings(self):
-        canonical = json.loads((ROOT / snapshots.BASELINE).read_text("utf-8"))
-        for extra in ("--input-sha=" + "0" * 40, "--output=other.json"):
-            with self.subTest(extra=extra):
-                with self.assertRaisesRegex(AssertionError, "equals-form"):
-                    self._assert_provenance({**canonical, "generation_command":
-                                             canonical["generation_command"] + " " + extra})
-
-    def test_readme_activation_command_matches_documented_activation(self):
-        readme = (ROOT / snapshots.BASELINE).with_name("README.md").read_text("utf-8")
-        document = (ROOT / "docs/architecture/layers.md").read_text("utf-8")
-        self.assertIn("## 최초 활성화 기록", document)
-        activation = document.split("## 최초 활성화 기록", 1)[1].split("\n## ", 1)[0]
-        command = re.search(r"--input-sha ([0-9a-f]{40})(?=\s|`)", readme)
-        documented = re.search(r"--input-sha ([0-9a-f]{40})(?=\s|`)", activation)
-        self.assertIsNotNone(command)
-        self.assertIsNotNone(documented)
-        self.assertEqual(command.group(1), documented.group(1))
-
     @staticmethod
     def _node(name):
         return "src/lib.rs::crate::" + name

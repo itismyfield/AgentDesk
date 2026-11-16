@@ -217,6 +217,18 @@ impl Pin {
             }
         }
     }
+
+    async fn wait_gone(&self) -> Result<(), String> {
+        // Closing the pane and detaching the control client do not join the provider.
+        // Keep requiring the pinned process's end evidence while it finishes exiting.
+        tokio::time::timeout(WAIT, async {
+            while !self.gone() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| "closed pane; provider end still unobserved".to_string())
+    }
 }
 
 /// Persist and recheck this exact pane before its only destructive command. Reconnects do not
@@ -332,11 +344,7 @@ where
         .command(&format!("kill-pane -t {}", pin.pane))
         .await?;
     control.finish().await;
-    if pin.gone() {
-        Ok(())
-    } else {
-        Err("closed pane; provider end still unobserved".into())
-    }
+    pin.wait_gone().await
 }
 
 #[cfg(test)]
@@ -614,5 +622,46 @@ except ProcessLookupError:
         let names = server.run(&["-N", "list-sessions", "-F", "#{session_name}"]);
         assert_eq!(names.lines().collect::<Vec<_>>(), ["i8177-bystander"]);
         drop(root_guard);
+    }
+
+    #[tokio::test]
+    async fn provider_exit_wait_rechecks_after_a_live_sample_and_never_accepts_timeout_as_end() {
+        let pin_for = |pid| Pin {
+            nonce: "00112233445566778899aabbccddee77".into(),
+            server: 1,
+            session: "$0".into(),
+            window: "@0".into(),
+            pane: "%0".into(),
+            pid,
+            birth: birth(pid).unwrap(),
+        };
+        let mut provider = tokio::process::Command::new("sh")
+            .args(["-c", "read line"])
+            .stdin(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pin = pin_for(provider.id().unwrap());
+        let observed = pin.wait_gone();
+        tokio::pin!(observed);
+        assert!(futures::poll!(observed.as_mut()).is_pending());
+        drop(provider.stdin.take());
+        tokio::time::timeout(WAIT, provider.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.await, Ok(()));
+
+        let live = pin_for(std::process::id());
+        tokio::time::pause();
+        let unobserved = live.wait_gone();
+        tokio::pin!(unobserved);
+        assert!(futures::poll!(unobserved.as_mut()).is_pending());
+        tokio::time::advance(WAIT).await;
+        assert_eq!(
+            unobserved.await,
+            Err("closed pane; provider end still unobserved".into())
+        );
+        assert!(!live.gone(), "a timeout is no provider-end witness");
     }
 }

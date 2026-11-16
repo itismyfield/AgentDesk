@@ -207,11 +207,20 @@ pub(in crate::services::discord) fn owner_drive(
                 }
                 return Err(WRITER_HELD.into());
             }
-            let origin = front_origin(&mailbox, &front).await?;
+            let kept = front_context(&mailbox, &front).await?;
+            let origin = InputOrigin::from_context(kept.as_ref());
             let synthetic = !origin.is_person();
-            if !synthetic
-                && claude_handoff::prepare(runtime.as_ref(), &mailbox, &provider, channel, &front)
+            // Only a person's input opens a handoff; every other start except an effort
+            // continuation is still judged under one that stands, by the session it runs under.
+            let start = match &kept {
+                Some(context) if synthetic => claude_handoff::Start::Kept(context),
+                _ => claude_handoff::Start::Person,
+            };
+            let shared = runtime.as_ref();
+            if origin != InputOrigin::EffortContinue
+                && claude_handoff::prepare(shared, &mailbox, &provider, channel, &front, start)
                     .await?
+                && !synthetic
             {
                 return idle(front).await;
             }
@@ -331,19 +340,27 @@ pub(in crate::services::discord) fn owner_drive(
     })
 }
 
-/// Reads the shared person policy from the exact front's kept context; read failures stay unsent.
-async fn front_origin(
+/// The context kept with the exact front; read failures stay unsent.
+async fn front_context(
     mailbox: &ChannelMailboxHandle,
     (ticket, original): &Front,
-) -> Result<InputOrigin, String> {
-    let context = match ticket {
+) -> Result<Option<serde_json::Value>, String> {
+    match ticket {
         Some(ticket) => {
             mailbox
                 .v2_admission_context(original.clone(), ticket.clone())
-                .await?
+                .await
         }
-        None => None,
-    };
+        None => Ok(None),
+    }
+}
+
+/// Reads the shared person policy from the exact front's kept context.
+async fn front_origin(
+    mailbox: &ChannelMailboxHandle,
+    front: &Front,
+) -> Result<InputOrigin, String> {
+    let context = front_context(mailbox, front).await?;
     Ok(InputOrigin::from_context(context.as_ref()))
 }
 
@@ -360,6 +377,15 @@ pub(in crate::services::discord) async fn hand_busy(
     let session = row.tmux_session_name.clone().ok_or_else(unobserved)?;
     let key = row.session_key.as_deref();
     let host = crate::services::turn_host::for_turn(pool.as_ref(), &provider, channel, key).await;
+    let origin = front_origin(&mailbox, &front).await?;
+    let observed = owned_busy::running(
+        runtime.as_ref(),
+        &mailbox,
+        (&provider, origin),
+        (channel, &session, &host),
+        &front,
+    )
+    .await?;
     // Claude's prelaunch row has no transcript until its observer hands it back. Its live pane
     // already has the binding that the idle observer used before submitting the first input.
     let binding = (provider == ProviderKind::Claude
@@ -380,13 +406,11 @@ pub(in crate::services::discord) async fn hand_busy(
         .or(row.session_id.as_deref());
     let live = output.map(|path| (path, native));
     let at = (&host, session.as_str(), live);
-    let kind = (
-        provider.as_str(),
-        front_origin(&mailbox, &front).await?,
-        true,
-    );
-    let owner =
-        Registration::observed(mailbox.clone(), kind, at, &front.1, None).map_err(|error| {
+    let kind = (provider.as_str(), origin, true);
+    let owner = observed
+        .map(Ok)
+        .unwrap_or_else(|| Registration::observed(mailbox.clone(), kind, at, &front.1, None))
+        .map_err(|error| {
             if effect::surely_unsent(&error) {
                 error
             } else {
@@ -862,10 +886,19 @@ fn native_read(provider: &ProviderKind, target: &NativeTarget) -> Screen {
     }
 }
 
-/// A live Codex pane is idle only once its rollout shows its latest turn's own end; a rollout with
-/// no start or with any end it cannot attribute proves no idle.
+/// A live Codex pane is idle only once its bound rollout, its hooks and its process prove the
+/// latest turn's end; with no binding the rollout its session id names is read for that end.
 fn codex_read(target: &NativeTarget) -> Screen {
     use crate::services::codex_tui::busy_inject::NativeEnd;
+    use crate::services::codex_tui::readiness::Verdict;
+    let cwd = crate::services::tmux_diagnostics::tmux_session_pane_cwd(&target.tmux);
+    match super::super::tui_followup::codex_verdict(&target.tmux, cwd.as_deref()) {
+        Some(Verdict::Idle(_)) => return Screen::Ready,
+        Some(Verdict::Busy(_)) => return Screen::Blocked,
+        Some(Verdict::Gone) => return Screen::Gone,
+        Some(Verdict::Unknown(_)) => return Screen::Unknown,
+        None => {}
+    }
     let end = super::super::tui_followup::codex_native_end;
     match end(&target.tmux, target.session_id.as_deref()) {
         NativeEnd::Ended => Screen::Ready,

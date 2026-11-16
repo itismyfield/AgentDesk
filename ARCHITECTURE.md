@@ -1146,6 +1146,7 @@ src/
 │   │   │   ├── idle.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── readiness_tests.rs
+│   │   │   ├── restart_tests.rs
 │   │   │   ├── source.rs
 │   │   │   └── wait.rs
 │   │   ├── session/
@@ -1395,6 +1396,8 @@ src/
 │   │   ├── host_input.rs
 │   │   ├── input.rs
 │   │   ├── mod.rs
+│   │   ├── readiness.rs
+│   │   ├── readiness_tests.rs
 │   │   ├── rollout_index.rs
 │   │   ├── rollout_tail.rs
 │   │   ├── session.rs
@@ -2066,7 +2069,9 @@ src/
 │   │   │   ├── input_owner/
 │   │   │   │   ├── claude_handoff/
 │   │   │   │   │   └── tests/
-│   │   │   │   │       └── actual_close_tests.rs
+│   │   │   │   │       ├── actual_close_tests.rs
+│   │   │   │   │       ├── custody_tests.rs
+│   │   │   │   │       └── left_herdr_tests.rs
 │   │   │   │   ├── drive_tests/
 │   │   │   │   │   └── claimed_followers_tests.rs
 │   │   │   │   ├── effect/
@@ -2477,6 +2482,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_t14_composed_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_busy_entry_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_busy_late_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_busy_running_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
@@ -2553,6 +2559,8 @@ src/
 │   │   │   │   │   │   ├── park_missing_tests.rs
 │   │   │   │   │   │   ├── park_reply_tests.rs
 │   │   │   │   │   │   ├── refresh_tests.rs
+│   │   │   │   │   │   ├── thread_child_retirement_tests.rs
+│   │   │   │   │   │   ├── thread_child_tests.rs
 │   │   │   │   │   │   └── unbound_gateway_tests.rs
 │   │   │   │   │   └── owner_execution.rs
 │   │   │   │   └── owner_port.rs
@@ -4064,6 +4072,9 @@ src/
 │   │   │   ├── policy_tests.rs
 │   │   │   ├── root_replaced.rs
 │   │   │   └── root_replaced_tests.rs
+│   │   ├── tmux_host/
+│   │   │   ├── fifo.rs
+│   │   │   └── input.rs
 │   │   ├── consumer_guard.rs
 │   │   ├── herdr_gate.rs
 │   │   ├── herdr_gate_tests.rs
@@ -4079,7 +4090,9 @@ src/
 │   │   ├── process_host.rs
 │   │   ├── resolve.rs
 │   │   ├── session_record.rs
+│   │   ├── submit.rs
 │   │   ├── surface_policy.rs
+│   │   ├── termination.rs
 │   │   ├── test_support.rs
 │   │   ├── tmux_host.rs
 │   │   └── traits.rs
@@ -4115,6 +4128,10 @@ src/
 │   │   ├── runner.rs
 │   │   └── session.rs
 │   ├── termination_audit/
+│   │   ├── host_terminate/
+│   │   │   ├── herdr_terminate/
+│   │   │   │   └── contract.rs
+│   │   │   └── contract.rs
 │   │   └── host_terminate.rs
 │   ├── tmux_common/
 │   │   ├── claude_footer.rs
@@ -4187,6 +4204,7 @@ src/
 │   │   │   ├── adoption/
 │   │   │   │   └── body_check.rs
 │   │   │   ├── children/
+│   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── adoption.rs
 │   │   │   ├── children.rs
@@ -4198,7 +4216,9 @@ src/
 │   │   │   ├── intake_route/
 │   │   │   │   └── input.rs
 │   │   │   ├── channel_gate.rs
-│   │   │   └── intake_route.rs
+│   │   │   ├── child_funnel_tests.rs
+│   │   │   ├── intake_route.rs
+│   │   │   └── thread_child_record_tests.rs
 │   │   ├── ownership/
 │   │   │   ├── execution/
 │   │   │   │   └── tests/
@@ -4264,6 +4284,7 @@ src/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── thread_children/
+│   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── retirement_tests.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
@@ -4332,6 +4353,7 @@ src/
 │   │   │   │   └── scan.rs
 │   │   │   ├── host/
 │   │   │   │   ├── activation_io.rs
+│   │   │   │   ├── child_retirement.rs
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── fresh_input.rs
 │   │   │   │   ├── fresh_input_tests.rs
@@ -4508,6 +4530,8 @@ src/
 │   │   │   ├── suspension.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
+│   │   │   ├── thread_child_dormant_tests.rs
+│   │   │   ├── thread_child_host_tests.rs
 │   │   │   ├── tool_card_accuracy_tests.rs
 │   │   │   ├── tool_card_actor_replay_tests.rs
 │   │   │   ├── tool_card_actor_tests.rs

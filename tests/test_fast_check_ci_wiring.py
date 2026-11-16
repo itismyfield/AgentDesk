@@ -1657,6 +1657,33 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 result = self.run_hardening_fixture(mutated)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_pr_swap_exception_rejects_other_inputs_and_overrides_after_repin(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        hardening = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text()
+        baseline = self.run_hardening_fixture(workflow)
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        job = job_block(workflow, "rust_build")
+        swap = step_block(job, "Ensure swap for the lib test build")
+        cases = {
+            "extra input": swap.replace('size-gb: "24"', 'size-gb: "24", CARGO_PROFILE_TEST_DEBUG: "1"'),
+            "different size": swap.replace('size-gb: "24"', 'size-gb: "25"'),
+            "numeric size": swap.replace('size-gb: "24"', 'size-gb: 24'),
+            "debug override": swap + '        env: {CARGO_PROFILE_TEST_DEBUG: "1"}\n',
+            "disabled swap": swap + '        if: false\n',
+        }
+        for label, changed in cases.items():
+            with self.subTest(mutation=label):
+                self.assertNotEqual(changed, swap)
+                mutated = workflow.replace(job, job.replace(swap, changed, 1), 1)
+                gate = self._repin_job_hash(hardening, mutated, "rust_build")
+                mutated = mutated.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest())
+                result = self.run_hardening_fixture(mutated, hardening_script=gate)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("main rust_build must equal the PR job", result.stderr)
+                self.assertNotIn("semantic structure or command inventory changed", result.stderr)
+                if label == "debug override":
+                    self.assertIn("must not set CARGO_PROFILE_TEST_DEBUG", result.stderr)
+
     def test_unregistered_target_step_forbidden_runtime_env_is_rejected(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         relay_job = job_block(workflow, "relay_authority_mutations")
