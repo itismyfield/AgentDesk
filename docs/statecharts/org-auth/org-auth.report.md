@@ -130,7 +130,7 @@ both expected failures and passes; no config was skipped. Raw output: lane `logs
 
 Official module_layers measurement: W445 -> 439, G346 -> 344, physical occurrences 607 -> 601;
 read failures 0, module errors 0. The new org_catalog adapter responsibility is classified in
-layers.toml. layer_moves.toml records the actual org_schema -> org_catalog::document moves:
+layers.toml. layer_moves.toml (removed later; moves are now per-PR approval entries) recorded the actual org_schema -> org_catalog::document moves:
 recovery policy references 8 -> 8 and fallback policy imports 2 -> 2. No accepted baseline grows.
 The existing unrelated main unclassified modules remain warnings, as confirmed by a historical
 source replay; they are not counted as R01 reductions or reclassified here.
