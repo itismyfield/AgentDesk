@@ -121,6 +121,11 @@ pub(crate) struct TurnProgress {
 /// Records stamped further ahead than this are not progress evidence.
 const FUTURE_RECORD_SKEW: chrono::Duration = chrono::Duration::seconds(60);
 
+/// Whether a record stamped `at` may count as progress at `now`.
+fn usable_record_time(at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    at <= now + FUTURE_RECORD_SKEW
+}
+
 /// `classify` with the transcript's newest record as one more freshness anchor. Without
 /// progress evidence the verdict is exactly `classify`'s.
 pub(crate) fn classify_with_progress(
@@ -133,7 +138,7 @@ pub(crate) fn classify_with_progress(
 ) -> IdleClassification {
     let output_at = progress
         .and_then(|progress| progress.output_at)
-        .filter(|at| *at <= now + FUTURE_RECORD_SKEW);
+        .filter(|at| usable_record_time(*at, now));
     let freshness = last_heartbeat.max(output_at);
     use crate::services::tui_turn_state::ToolCalls;
     match classify(has_active_turn, freshness, turn_started_at, now, threshold) {
@@ -147,11 +152,11 @@ pub(crate) fn classify_with_progress(
 }
 
 /// A tui_o turn's progress from its tmux binding's transcript, `None` when O does not own the
-/// channel; tool calls are read only when no record is as new as `quiet_before`.
+/// channel; tool calls are skipped only when a usable record already keeps the turn fresh.
 pub(crate) fn observe_turn_progress(
     channel: u64,
     tmux_session: &str,
-    quiet_before: DateTime<Utc>,
+    now: DateTime<Utc>,
 ) -> Option<TurnProgress> {
     use crate::services::agent_protocol::RuntimeHandoffKind;
     if !super::health::o_owns(channel) {
@@ -171,9 +176,10 @@ pub(crate) fn observe_turn_progress(
     };
     let latest = crate::services::tui_turn_state::latest_provider_record_unix_nanos_widening;
     let output_at = latest(&provider, &path).map(DateTime::from_timestamp_nanos);
-    let tool_calls = output_at
-        .is_none_or(|at| at < quiet_before)
-        .then(|| crate::services::tui_turn_state::provider_tool_calls(&provider, &path));
+    let quiet_before = now - chrono::Duration::from_std(IDLE_THRESHOLD).ok()?;
+    let fresh = output_at.is_some_and(|at| at >= quiet_before && usable_record_time(at, now));
+    let tool_calls =
+        (!fresh).then(|| crate::services::tui_turn_state::provider_tool_calls(&provider, &path));
     Some(TurnProgress {
         output_at,
         tool_calls,
@@ -486,8 +492,7 @@ async fn fetch_turn_progress(
     }?;
     let tmux_session = provider.build_tmux_session_name(&channel_name);
     let channel = channel_id.get();
-    let quiet_before = now - chrono::Duration::from_std(IDLE_THRESHOLD).ok()?;
-    tokio::task::spawn_blocking(move || observe_turn_progress(channel, &tmux_session, quiet_before))
+    tokio::task::spawn_blocking(move || observe_turn_progress(channel, &tmux_session, now))
         .await
         .ok()
         .flatten()
@@ -635,6 +640,25 @@ mod tests {
     const TOOL_B: &str = r#""type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"b","name":"Bash","input":{}}]}"#;
     const TEXT: &str = r#""type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"thinking aloud"}]}"#;
 
+    const SEARCH_CALL: &str =
+        r#""type":"response_item","payload":{"type":"tool_search_call","call_id":"s1"}"#;
+    const SEARCH_OUTPUT: &str =
+        r#""type":"response_item","payload":{"type":"tool_search_output","call_id":"s1"}"#;
+
+    /// Appends raw `text` to the transcript `bound_as` wrote for `tmux`.
+    fn append(dir: &std::path::Path, tmux: &str, text: &str) {
+        use std::io::Write;
+        let path = dir.join(format!("{tmux}.jsonl"));
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+    }
+
+    /// `row` as one whole transcript line stamped `secs` from `now`.
+    fn stamped(row: &str, now: DateTime<Utc>, secs: i64) -> String {
+        let at = (now + chrono::Duration::seconds(secs)).to_rfc3339();
+        format!("{{{row},\"timestamp\":\"{at}\"}}\n")
+    }
+
     /// A Claude tool result row whose output is `chars` long.
     fn big_result(id: &str, chars: usize) -> String {
         let output = "x".repeat(chars);
@@ -646,8 +670,7 @@ mod tests {
     /// Runs the detector's verdict for an O-owned channel's 20-minute-old turn with no heartbeat.
     fn verdict(channel: u64, tmux: &str, now: DateTime<Utc>) -> IdleClassification {
         let started = Some(now - chrono::Duration::minutes(20));
-        let quiet_before = now - chrono::Duration::from_std(IDLE_THRESHOLD).unwrap();
-        let progress = observe_turn_progress(channel, tmux, quiet_before);
+        let progress = observe_turn_progress(channel, tmux, now);
         classify_with_progress(true, None, started, progress, now, IDLE_THRESHOLD)
     }
 
@@ -739,9 +762,7 @@ mod tests {
     fn tui_o_codex_tool_search_counts_as_progress_and_as_an_open_call() {
         let (_env, _dedupe, _boot, _root, dir) = o_channel_fixture();
         let now = Utc::now();
-        let call = r#""type":"response_item","payload":{"type":"tool_search_call","call_id":"s1"}"#;
-        let output =
-            r#""type":"response_item","payload":{"type":"tool_search_output","call_id":"s1"}"#;
+        let (call, output) = (SEARCH_CALL, SEARCH_OUTPUT);
         let codex = |rows: &[(i64, &str)]| bound_as(CodexTui, dir.path(), now, rows);
         let (fresh, _a) = codex(&[(1, call)]);
         assert_eq!(verdict(CODEX_CHANNEL, &fresh, now), ActiveAndFresh);
@@ -752,18 +773,59 @@ mod tests {
     }
 
     #[test]
-    fn records_stamped_past_the_clock_skew_are_not_progress() {
+    fn tui_o_torn_last_record_reads_as_unknown_until_it_completes() {
+        let (_env, _dedupe, _boot, _root, dir) = o_channel_fixture();
         let now = Utc::now();
-        let started = Some(now - chrono::Duration::minutes(20));
-        let ahead = |secs| {
-            let progress = TurnProgress {
-                output_at: Some(now + chrono::Duration::seconds(secs)),
-                tool_calls: None,
-            };
-            classify_with_progress(true, None, started, Some(progress), now, IDLE_THRESHOLD)
-        };
-        assert_eq!(ahead(60), ActiveAndFresh);
-        assert_eq!(ahead(61), Idle);
+        let claude = (big_result("b", 2), TOOL_B);
+        let codex_call =
+            r#""type":"response_item","payload":{"type":"function_call","call_id":"c2"}"#;
+        let codex_out =
+            r#""type":"response_item","payload":{"type":"function_call_output","call_id":"c2"}"#;
+        let cases = [
+            (
+                ClaudeTui,
+                CHANNEL,
+                vec![(20, PROMPT), (17, TOOL_A), (16, RESULT_A)],
+                claude.1,
+                claude.0.as_str(),
+            ),
+            (
+                CodexTui,
+                CODEX_CHANNEL,
+                vec![(17, SEARCH_CALL), (16, SEARCH_OUTPUT)],
+                codex_call,
+                codex_out,
+            ),
+        ];
+        for (kind, channel, rows, call, result) in cases {
+            let (tmux, _g) = bound_as(kind, dir.path(), now, &rows);
+            let line = stamped(call, now, -16 * 60);
+            let (head, tail) = line.split_at(line.len() / 2);
+            append(dir.path(), &tmux, head);
+            assert_eq!(verdict(channel, &tmux, now), ToolStateUnknown);
+            append(dir.path(), &tmux, tail);
+            assert_eq!(verdict(channel, &tmux, now), ToolRunning);
+            // Blank and whitespace-only lines and a CRLF ending are not a torn tail.
+            append(dir.path(), &tmux, "\n  \n");
+            assert_eq!(verdict(channel, &tmux, now), ToolRunning);
+            append(
+                dir.path(),
+                &tmux,
+                &stamped(result, now, -16 * 60).replace('\n', "\r\n"),
+            );
+            assert_eq!(verdict(channel, &tmux, now), Idle);
+        }
+    }
+
+    #[test]
+    fn tui_o_record_past_the_clock_skew_still_lets_an_open_tool_show() {
+        let (_env, _dedupe, _boot, _root, dir) = o_channel_fixture();
+        let now = Utc::now();
+        for (secs, expected) in [(60, ActiveAndFresh), (61, ToolRunning)] {
+            let (tmux, _g) = bound_as(ClaudeTui, dir.path(), now, &[(20, PROMPT), (16, TOOL_A)]);
+            append(dir.path(), &tmux, &stamped(TEXT, now, secs));
+            assert_eq!(verdict(CHANNEL, &tmux, now), expected);
+        }
     }
 
     /// Runs `name` again in a child process whose every thread sees `CHANNEL` as O-owned, since the

@@ -38,6 +38,15 @@ pub(crate) fn provider_tool_calls(provider: &ProviderKind, path: &Path) -> ToolC
         _ => return ToolCalls::Inconclusive,
     };
     widen(path, |window| {
+        // A last record still being written (or cut off) cannot show whether a call is open.
+        let last = window
+            .lines
+            .iter()
+            .rev()
+            .find(|line| !line.trim().is_empty());
+        if last.is_some_and(|line| serde_json::from_str::<Value>(line).is_err()) {
+            return Some(ToolCalls::Inconclusive);
+        }
         let mut open = HashSet::new();
         let mut bounded = window.window_covers_file;
         for json in window
