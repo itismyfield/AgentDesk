@@ -6,28 +6,63 @@ CONSTANTS N, Mode
 VARIABLE r
 Ids == 1..N
 Before == Mode = "ready-before-narrow"
+Dual == Mode \in {"ready-dual-valid", "ready-dual-invalid", "ready-dual-recovery",
+                   "ready-dual-stale-ledger", "ready-dual-bypass", "ready-dual-coupled"}
+DualRecovery == Mode = "ready-dual-recovery"
+DualBypass == Mode = "ready-dual-bypass"
+DualCoupled == Mode = "ready-dual-coupled"
+CurrentClear == Mode \in {"ready-current-clear-valid", "ready-current-clear-invalid",
+    "ready-current-clear-toctou", "ready-current-clear-ignore-cert"}
+CurrentToctou == Mode = "ready-current-clear-toctou"
+CurrentIgnoreCert == Mode = "ready-current-clear-ignore-cert"
+CertificateScenario == Dual \/ CurrentClear
+Clear == Mode \in {"ready-clear", "ready-clear-before", "ready-clear-restart", "ready-clear-forged",
+                    "ready-clear-no-revalidate", "ready-clear-drop-cursor", "ready-clear-split", "ready-clear-consumed",
+                    "ready-clear-volatile", "ready-clear-volatile-before",
+                    "ready-clear-replay", "ready-clear-replay-before", "ready-clear-old-output", "ready-clear-old-output-before", "ready-clear-unread"}
 ClearHeld == Mode \in {"ready-clear-held-before", "ready-clear-held-after"}
-ClearPreSource == ClearHeld \/ Mode \in {"ready-clear-pending-before", "ready-clear-pending-after", "ready-clear-pending-recheck"}
+ClearPreSource == Clear \/ ClearHeld \/ Mode \in {"ready-clear-pending-before", "ready-clear-pending-after", "ready-clear-pending-recheck"}
+InputPreSource == ClearPreSource \/ CertificateScenario
 \* A resumed run starts over its old transcript: a finished turn under exit metadata, or a turn cut short.
 \* The daemon restarts over the resumed session and attaches the same transcript again: the start is
 \* gone and a recovery floor stands at the transcript's end. Only the retaining modes end that wait.
+\* #8161 restart idle: the daemon restarts over a live idle pane of an incarnation launched before it.
+\* Inputs arrive only after the restart. Before: the floor waits for new pane activity and the budget
+\* retains every input. Fixed: an incarnation older than the restart whose transcript ends in a hard
+\* terminal, with no durable unsettled send and an idle empty screen, is ready without new activity.
+RestartIdleBefore == Mode = "ready-restart-idle-before"
+\* Q5 (Claude Code 2.1.325): a prompt whose UserPromptSubmit hook still runs shows the hook spinner;
+\* its rows land only after the hook. "blind" is the counterfactual pane that shows nothing.
+RestartLate == Mode \in {"ready-restart-late-after", "ready-restart-late-blind"}
+LateBlind == Mode = "ready-restart-late-blind"
+RestartRunning == Mode \in {"ready-restart-running-after", "ready-restart-running-ignore-screen"}
+RestartDraft == Mode \in {"ready-restart-draft-after", "ready-restart-draft-no-watch"}
+NoRestoredWatch == Mode = "ready-restart-draft-no-watch"
+RestartHandoff == Mode \in {"ready-restart-handoff-after", "ready-restart-handoff-ignore-incarnation"}
+RestartFixed == RestartLate \/ RestartRunning \/ RestartDraft \/ RestartHandoff \/
+                Mode = "ready-restart-idle-after"
+RestartIdle == RestartIdleBefore \/ RestartFixed
+IgnoreScreen == Mode = "ready-restart-running-ignore-screen"
+IgnoreIncarnation == Mode = "ready-restart-handoff-ignore-incarnation"
 RetainsUnproven == Mode \in {"ready-resume-restart-after", "ready-resume-restart-person",
                              "ready-resume-restart-any-timeout", "ready-resume-restart-cut"}
 ResumeRestart == RetainsUnproven \/ Mode = "ready-resume-restart-before"
+\* Modes whose readiness budget retains an unproven original (#8161 restart modes included).
+Retains == RetainsUnproven \/ RestartIdle
 ResumeAfter == ResumeRestart \/ Mode \in {"ready-resume-meta-after", "ready-resume-cut-after", "ready-resume-person-after"}
 ResumeNoQuiet == Mode = "ready-resume-no-quiet"
 ResumeCut == Mode \in {"ready-resume-cut-before", "ready-resume-cut-after", "ready-resume-restart-cut"}
 ResumeHistory == ResumeAfter \/ ResumeNoQuiet \/ ResumeCut \/ Mode = "ready-resume-meta-before"
 ResumePerson == Mode \in {"ready-resume-person-after", "ready-resume-no-quiet",
                           "ready-resume-restart-person", "ready-resume-restart-any-timeout"}
-Fresh == ClearPreSource \/ ResumeHistory \/ Mode \in {"ready-fresh", "ready-clear", "ready-resume", "ready-late-dialog", "ready-preflight-only"}
+Fresh == InputPreSource \/ ResumeHistory \/ Mode \in {"ready-fresh", "ready-clear", "ready-resume", "ready-late-dialog", "ready-preflight-only"}
 Dialog == Mode \in {"ready-late-dialog", "ready-preflight-only"}
 Permission == Mode \in {"ready-permission-later", "ready-permission-poison"}
 Race == Mode \in {"ready-race", "ready-no-revalidate"}
-Blind == Mode \in {"ready-unread", "ready-permanent-unread", "ready-draft-bypass"}
+Blind == Mode \in {"ready-unread", "ready-permanent-unread", "ready-draft-bypass", "ready-clear-unread"}
 ManagedStash == Mode \in {"ready-stash-before", "ready-stash-after"}
 CanPark == Mode = "ready-stash-after"
-Person == ManagedStash \/ Mode \in {"ready-draft", "ready-draft-bypass"}
+Person == ManagedStash \/ RestartDraft \/ Mode \in {"ready-draft", "ready-draft-bypass"}
 NoWake == Mode = "ready-no-wake"
 ModalWatch == Mode \in {"ready-modal-watch-before", "ready-modal-watch-after"}
 Busy == Mode \in {"ready-busy-active", "ready-busy-native", "ready-block-busy", "ready-busy-finish-before",
@@ -43,14 +78,18 @@ Initial ==
      epoch |-> 1, turn |-> IF Fresh THEN 0 ELSE 1,
      observed |-> "Unknown", seenEpoch |-> 0, seenTurn |-> 0,
      started |-> FALSE, needsStart |-> Fresh, terminal |-> 0,
-     oldBinding |-> ClearPreSource, filePublished |-> ~ClearPreSource,
-     durableClear |-> ClearPreSource, pendingSeq |-> IF ClearPreSource THEN 1 ELSE 0,
+     oldBinding |-> InputPreSource, filePublished |-> ~InputPreSource,
+     durableClear |-> IF Clear THEN Mode \in {"ready-clear-consumed", "ready-clear-volatile", "ready-clear-volatile-before"} ELSE InputPreSource,
+     clearProof |-> Mode \notin {"ready-clear-forged", "ready-clear-no-revalidate"},
+     proofReboots |-> IF Mode \in {"ready-clear-replay", "ready-clear-replay-before"} THEN 1 ELSE 0,
+     clearDone |-> FALSE, clearConsumed |-> Mode = "ready-clear-consumed", oldCursor |-> 7,
+     pendingSeq |-> IF InputPreSource THEN 1 ELSE 0,
      proofPending |-> 0, pendingChanges |-> IF Mode = "ready-clear-pending-recheck" THEN 1 ELSE 0,
      badClear |-> FALSE, heldOnce |-> FALSE,
      modalOpen |-> ModalWatch, modalHeld |-> FALSE, badModalWake |-> FALSE,
      tail |-> "none", continuing |-> FALSE, stopBoundary |-> 0, softStage |-> 0,
-     stop |-> 0, oldStopLeft |-> IF ClearHeld \/ ModalWatch THEN 0 ELSE 1, awake |-> TRUE,
-     idleWakes |-> IF ClearHeld \/ ModalWatch THEN 0 ELSE 2,
+     stop |-> 0, oldStopLeft |-> IF ClearHeld \/ ModalWatch \/ RestartDraft THEN 0 ELSE 1, awake |-> TRUE,
+     idleWakes |-> IF ClearHeld \/ ModalWatch \/ RestartDraft THEN 0 ELSE 2,
      human |-> Person \/ ClearHeld, draft |-> IF Blind THEN "Unread" ELSE IF Person \/ ClearHeld THEN "Person" ELSE "Empty",
      q |-> [i \in Ids |-> "queued"], effects |-> [i \in Ids |-> 0],
      writes |-> [i \in Ids |-> 0], busyWrites |-> [i \in Ids |-> 0],
@@ -58,7 +97,9 @@ Initial ==
      route |-> [i \in Ids |-> IF Busy /\ i = 1 THEN "busy" ELSE "idle"],
      head |-> 0, proofEpoch |-> 0, proofTurn |-> 0,
      nativeStarts |-> IF Race THEN 1 ELSE 0,
-     restarts |-> IF Mode = "ready-restart" \/ ResumeRestart THEN 1 ELSE 0,
+     restarts |-> IF Mode = "ready-restart" \/ ResumeRestart \/ RestartIdle THEN 1 ELSE 0,
+     lag |-> "none", inflight |-> FALSE, preSends |-> IF RestartLate \/ RestartRunning THEN 1 ELSE 0,
+     oldIncarnation |-> TRUE, lostStarts |-> IF RestartHandoff THEN 1 ELSE 0,
      restored |-> "no", notices |-> [i \in Ids |-> 0], badExpire |-> FALSE,
      compactPending |-> Compact, compacts |-> 0,
      compactFence |-> FALSE, compactEvidence |-> FALSE, compactReady |-> FALSE,
@@ -67,6 +108,12 @@ Initial ==
      dialog |-> IF Dialog THEN "Boot" ELSE "None", dialogKeys |-> 0,
      permissionStage |-> 0, poisoned |-> FALSE,
      badCompact |-> FALSE, badContinuation |-> FALSE,
+     ledgerCurrent |-> Mode # "ready-dual-stale-ledger",
+     diskCurrent |-> Mode \in {"ready-dual-valid", "ready-dual-stale-ledger",
+                                "ready-current-clear-valid", "ready-current-clear-toctou"},
+     awaitingAdoption |-> CertificateScenario, adopted |-> FALSE,
+     adoptionRefused |-> FALSE, repairLeft |-> DualRecovery,
+     certificateObserved |-> FALSE, certificateChanged |-> FALSE,
      history |-> IF ResumeCut THEN "cut" ELSE IF ResumeHistory THEN "meta" ELSE "none",
      personTurns |-> IF ResumePerson THEN 1 ELSE 0]
 Init == r = Initial
@@ -84,18 +131,48 @@ CurrentEvidence ==
     /\ ~r.compactFence
     /\ (r.started /\ r.turn = 0 /\ r.history = "none") \/ ResumedStart \/ r.compactReady \/
        (r.terminal = r.turn /\ r.turn > 0 /\ TerminalEligible)
-Ready == CurrentEvidence /\ ~Before /\ ~r.poisoned
-    /\ (~r.oldBinding \/ (ClearPreSource /\ Mode # "ready-clear-pending-before" /\ r.started /\ r.durableClear))
+\* The screen shows a turn unless the provider is idle or the turn left no trace yet ("both").
+ScreenIdle == r.phase = "Idle" \/ r.lag = "both"
+\* #8161 fixed: the restart floor stands in for new activity only on these combined proofs.
+RestoredEvidence ==
+    /\ RestartFixed /\ r.restored = "floor" /\ r.restarts = 0
+    /\ r.oldIncarnation \/ IgnoreIncarnation
+    /\ r.observed = "Idle" /\ r.seenEpoch = r.epoch /\ r.seenTurn = r.turn
+    /\ r.terminal = r.turn /\ r.turn > 0 /\ r.tail = "hard" /\ ~r.continuing /\ ~r.compactFence
+    /\ ~r.inflight
+    /\ ScreenIdle \/ IgnoreScreen
+Evidence == CurrentEvidence \/ RestoredEvidence
+Ready == Evidence /\ ~Before /\ ~r.poisoned
+    /\ (~Dual \/ (r.ledgerCurrent /\ (~DualCoupled \/ r.diskCurrent)))
+    /\ (~CurrentClear \/ (r.ledgerCurrent /\ (r.diskCurrent \/ CurrentIgnoreCert)))
+    /\ (~Clear \/ r.filePublished \/ (r.clearDone /\ (~r.clearConsumed \/ r.head # 0)))
+    /\ (~r.oldBinding \/ (InputPreSource /\ Mode # "ready-clear-pending-before" /\ r.started /\ r.durableClear))
 \* Idle bytes the wait has read, nothing in flight on them, and still no proof: only new activity
 \* in the pane can change that, so no later look does.
-Unproven == r.phase = "Idle" /\ r.observed = "Idle" /\ r.seenEpoch = r.epoch /\ r.seenTurn = r.turn
+\* It reads no screen and no restart proof, and it cannot see the provider's own phase.
+Unproven == r.phase # "Booting" /\ r.observed = "Idle" /\ r.seenEpoch = r.epoch /\ r.seenTurn = r.turn
     /\ ~r.continuing /\ ~r.compactFence /\ ~CurrentEvidence
+\* Restart scenarios: inputs arrive after the restart; a restored in-flight turn owns the channel.
+Arrived == (~RestartIdle \/ r.restarts = 0) /\ ~r.inflight
 First == {i \in Ids : r.q[i] \in {"queued", "held"} /\
           \A j \in 1..(i-1) : r.q[j] \in {"done", "retained"}}
 SessionStart ==
     /\ r.phase = "Booting"
+    /\ Mode \notin {"ready-clear-volatile", "ready-clear-volatile-before"}
     /\ ~Dialog \/ r.dialog = "Dismissed"
-    /\ r' = [r EXCEPT !.phase = "Idle", !.started = TRUE, !.awake = TRUE, !.restored = "no"]
+    /\ r' = [r EXCEPT !.phase = IF Clear THEN @ ELSE "Idle", !.started = TRUE,
+                     !.durableClear = @ \/ (Clear /\ r.clearProof), !.awake = TRUE, !.restored = "no"]
+\* Restoring authenticated Pending retains the durable old source even if its volatile binding cache was lost.
+ClearRetire ==
+    /\ Clear /\ ~r.clearDone /\ ~r.clearConsumed
+    /\ Mode \notin {"ready-clear-before", "ready-clear-volatile-before"}
+    /\ (r.started \/ r.durableClear) /\ r.restarts = 0
+    /\ r.clearProof \/ Mode = "ready-clear-no-revalidate"
+    /\ r' = [r EXCEPT !.clearDone = TRUE, !.durableClear = TRUE, !.turn = 0,
+                     !.phase = "Idle", !.started = TRUE, !.awake = TRUE,
+                     !.oldBinding = IF Mode = "ready-clear-split" THEN FALSE ELSE @,
+                     !.oldCursor = IF Mode = "ready-clear-drop-cursor" THEN 0 ELSE @,
+                     !.badClear = @ \/ ~r.clearProof]
 PollDialog ==
     /\ Dialog /\ r.phase = "Booting"
     /\ r.dialog = "Boot" \/ (r.dialog = "Picker" /\ Mode # "ready-preflight-only")
@@ -108,11 +185,14 @@ PermissionRecord ==
                      !.poisoned = @ \/ Mode = "ready-permission-poison"]
 Finish ==
     /\ r.phase = "Running" /\ ~r.compactFence
+    /\ ~InputPreSource \/ r.filePublished \/ Mode = "ready-clear-old-output-before"
     /\ ~Busy \/ r.q[1] # "queued"
     /\ Mode # "ready-busy-finish-after" \/ r.writes[1] > 0
     /\ ~Suppressed \/ r.softStage >= 4
     /\ ~Permission \/ r.permissionStage = 3
-    /\ r' = [r EXCEPT !.phase = "Idle", !.terminal = r.turn, !.tail = "hard",
+    /\ r.lag = "none"
+    /\ r' = [r EXCEPT !.phase = "Idle", !.terminal = r.turn, !.tail = "hard", !.inflight = FALSE,
+                     !.badClear = @ \/ (InputPreSource /\ ~r.filePublished),
                      !.restored = IF @ = "floor" THEN "passed" ELSE @,
                      !.continuing = FALSE, !.softStage = IF Suppressed THEN 5 ELSE @]
 \* A raw matching Stop boundary is recorded together with continuation disposition.
@@ -125,12 +205,12 @@ SoftSummary ==
     /\ r' = [r EXCEPT !.softStage = 2, !.tail = "summary", !.terminal = r.turn]
 \* Shared observer may report Idle for a summary while the provider is still Running.
 Observe ==
-    /\ r' = [r EXCEPT !.observed = IF r.tail = "summary" THEN "Idle"
+    /\ r' = [r EXCEPT !.observed = IF r.tail = "summary" \/ r.lag # "none" THEN "Idle"
                                   ELSE IF r.phase = "Booting" THEN "Unknown"
                                   ELSE IF r.turn = 0 /\ r.history = "cut" THEN "Running" ELSE r.phase,
                      !.seenEpoch = r.epoch, !.seenTurn = r.turn,
                      !.softStage = IF Suppressed /\ r.softStage = 2 THEN 3 ELSE @,
-                     !.awake = IF NoWake \/ (ClearHeld /\ r.heldOnce) \/ (ModalWatch /\ r.modalHeld) THEN @ ELSE TRUE]
+                     !.awake = IF NoWake \/ ((ClearHeld \/ RestartDraft) /\ r.heldOnce) \/ (ModalWatch /\ r.modalHeld) THEN @ ELSE TRUE]
 LateAssistant ==
     /\ Suppressed /\ r.softStage = 3
     /\ r' = [r EXCEPT !.softStage = 4, !.tail = "assistant", !.terminal = 0]
@@ -149,21 +229,22 @@ HumanClears ==
     /\ ~ManagedStash
     /\ r.human /\ r.draft = "Person" /\ (~ClearHeld \/ r.heldOnce)
     /\ r' = [r EXCEPT !.human = FALSE, !.draft = "Empty",
-                     !.awake = IF ClearHeld THEN @ ELSE TRUE]
-ComposerPrepared == r.draft = "Empty" \/ (CanPark /\ r.draft = "Person")
+                     !.awake = IF ClearHeld \/ RestartDraft THEN @ ELSE TRUE]
+ComposerPrepared == r.draft = "Empty" \/ (~Fresh /\ r.draft = "Unread") \/ (CanPark /\ r.draft = "Person")
 Hold(i) ==
-    /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake
+    /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake /\ Arrived
     /\ ~ClearHeld \/ Ready
     /\ ~Ready \/ ~ComposerPrepared \/ (ModalWatch /\ r.modalOpen)
-    /\ ~(RetainsUnproven /\ Unproven)
+    \* A proof with a person's draft or modal holds; only a wait that found no proof expires.
+    /\ ~(Retains /\ Unproven /\ ~Ready)
     /\ r' = [r EXCEPT !.q[i] = "held", !.awake = FALSE,
-                     !.heldOnce = @ \/ ClearHeld,
+                     !.heldOnce = @ \/ ClearHeld \/ RestartDraft,
                      !.modalHeld = @ \/ (ModalWatch /\ r.modalOpen)]
 \* The readiness budget ends on an unproven source: the owner retains the original with one resend
 \* ask and releases the front. The any-timeout mutant retains whatever the wait was for.
 Expire(i) ==
-    /\ RetainsUnproven /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake
-    /\ Unproven \/ (Mode = "ready-resume-restart-any-timeout" /\ ~Ready)
+    /\ Retains /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake /\ Arrived
+    /\ (Unproven /\ ~Ready) \/ (Mode = "ready-resume-restart-any-timeout" /\ ~Ready)
     /\ r' = [r EXCEPT !.q[i] = "retained", !.notices[i] = @ + 1,
                      !.badExpire = @ \/ ~Unproven]
 \* Source evidence and modal focus are independent; close itself emits no owner wake.
@@ -174,34 +255,58 @@ WatchModal ==
     /\ ModalWatch /\ r.modalHeld /\ ~r.awake /\ Ready
     /\ Mode = "ready-modal-watch-before" \/ ~r.modalOpen
     /\ r' = [r EXCEPT !.awake = TRUE, !.badModalWake = @ \/ r.modalOpen]
+\* The held front's watch: clear certificate, or restart evidence with S1 (Ready holds both).
 WatchHeld ==
-    /\ ClearHeld /\ r.heldOnce /\ r.q[1] = "held" /\ r.draft = "Empty"
+    /\ ClearHeld \/ (RestartDraft /\ ~NoRestoredWatch)
+    /\ r.heldOnce /\ r.draft = "Empty"
+    /\ IF ClearHeld THEN r.q[1] = "held" ELSE \E i \in Ids : r.q[i] = "held"
     /\ Ready /\ (~r.oldBinding \/ Mode # "ready-clear-held-before")
     /\ r' = [r EXCEPT !.awake = TRUE]
 Prepare(i) ==
     /\ ~ModalWatch \/ ~r.modalOpen
     /\ ~CompactCompletion \/ ~r.compactPending
-    /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake /\ Ready
+    /\ i \in First /\ r.route[i] = "idle" /\ r.head = 0 /\ r.awake /\ Ready /\ Arrived
     /\ ComposerPrepared \/ Mode = "ready-draft-bypass"
     /\ r' = [r EXCEPT !.q[i] = "prepared", !.head = i,
-                     !.proofEpoch = r.epoch, !.proofTurn = r.turn, !.proofPending = r.pendingSeq]
+                     !.proofEpoch = r.epoch, !.proofTurn = r.turn, !.proofPending = r.pendingSeq,
+                     !.clearConsumed = IF Clear THEN TRUE ELSE @,
+                     !.certificateObserved = @ \/ CurrentClear]
 NativeStart ==
     /\ Race /\ r.head # 0 /\ r.nativeStarts > 0 /\ r.phase = "Idle"
     /\ r' = [r EXCEPT !.phase = "Running", !.turn = @ + 1, !.nativeStarts = 0,
                      !.tail = "assistant"]
 ProofCurrent == Ready /\ r.proofEpoch = r.epoch /\ r.proofTurn = r.turn
-    /\ (~ClearPreSource \/ r.proofPending = r.pendingSeq)
+    /\ (~InputPreSource \/ r.proofPending = r.pendingSeq)
 ChangeClearPending ==
-    /\ ClearPreSource /\ r.head # 0 /\ r.pendingChanges > 0
+    /\ InputPreSource /\ r.head # 0 /\ r.pendingChanges > 0
     /\ r' = [r EXCEPT !.pendingSeq = @ + 1, !.pendingChanges = 0]
 PublishClearFile ==
-    /\ ClearPreSource /\ r.filePublished /\ r.oldBinding
+    /\ InputPreSource /\ r.filePublished /\ r.oldBinding
     /\ r' = [r EXCEPT !.oldBinding = FALSE]
+\* Historical and current certificates share the last pre-key adoption check, not public readiness.
+AdoptAwaitedClear ==
+    /\ CertificateScenario /\ r.awaitingAdoption /\ r.head # 0 /\ Ready /\ r.diskCurrent
+    /\ ~CurrentToctou \/ r.certificateChanged
+    /\ r' = [r EXCEPT !.oldBinding = FALSE, !.awaitingAdoption = FALSE, !.adopted = TRUE]
+RefuseAwaitedClear ==
+    /\ CertificateScenario /\ ~DualBypass /\ r.awaitingAdoption /\ r.head # 0
+    /\ Ready \/ (CurrentClear /\ r.certificateObserved)
+    /\ ~r.diskCurrent
+    /\ r' = [r EXCEPT !.q[r.head] = "held", !.head = 0,
+                     !.awake = FALSE, !.adoptionRefused = TRUE]
+RepairClearCertificate ==
+    /\ DualRecovery /\ r.adoptionRefused /\ r.repairLeft
+    /\ r' = [r EXCEPT !.diskCurrent = TRUE, !.repairLeft = FALSE, !.awake = TRUE]
+\* The race occurs after proof observation and before adoption or the first key.
+InvalidateObservedCertificate ==
+    /\ CurrentToctou /\ r.head # 0 /\ r.certificateObserved /\ ~r.certificateChanged /\ ~r.adopted
+    /\ r' = [r EXCEPT !.diskCurrent = FALSE, !.certificateChanged = TRUE]
 Revoke ==
     /\ r.head # 0 /\ (~ProofCurrent \/ ~ComposerPrepared)
     /\ r' = [r EXCEPT !.q[r.head] = "held", !.head = 0, !.awake = FALSE]
 Submit ==
-    /\ (~ClearPreSource \/ r.pendingChanges = 0)
+    /\ (~CertificateScenario \/ ~r.awaitingAdoption \/ DualBypass)
+    /\ (~InputPreSource \/ r.pendingChanges = 0)
     /\ r.head # 0 /\ (~Race \/ r.nativeStarts = 0)
     /\ ProofCurrent \/ Mode = "ready-no-revalidate"
     /\ ComposerPrepared \/ Mode = "ready-draft-bypass"
@@ -210,11 +315,11 @@ Submit ==
                      !.phase = "Running", !.turn = @ + 1, !.tail = "assistant",
                      !.compactReady = FALSE, !.awake = FALSE,
                      !.badIdleRunning = @ \/ r.phase = "Running",
-                     !.badDraft = @ \/ (r.human /\ ~CanPark),
+                     !.badDraft = @ \/ (r.human /\ r.draft = "Person" /\ ~CanPark),
                      !.stashRoundTrips = @ + IF CanPark /\ r.human THEN 1 ELSE 0,
                      !.badEarly = @ \/ (r.needsStart /\ ~r.started /\ r.restored # "passed"),
                      !.badClear = @ \/ (r.oldBinding /\ (~r.started \/ ~r.durableClear \/ r.proofPending # r.pendingSeq)),
-                     !.filePublished = IF ClearPreSource THEN TRUE ELSE @,
+                     !.filePublished = IF InputPreSource THEN Mode \notin {"ready-clear-replay", "ready-clear-replay-before", "ready-clear-old-output", "ready-clear-old-output-before"} ELSE @,
                      !.badContinuation = @ \/ (Suppressed /\ r.softStage < 5)]
 \* Selection, first mutation, and publication are separate; AnyTurn can write after Finish.
 SelectBusy(i) ==
@@ -253,9 +358,49 @@ Receipt(i) ==
 \* Only pre-key daemon restart is refined here; post-key Unknown is never replayed.
 Restart ==
     /\ r.restarts > 0 /\ r.head = 0
+    /\ ~Clear \/ (r.durableClear /\ ~r.clearDone)
+    /\ ~RestartIdle \/ r.preSends = 0 \/ RestartRunning
     /\ r' = [r EXCEPT !.epoch = @ + 1, !.observed = "Unknown",
-                     !.restored = IF ResumeRestart THEN "floor" ELSE @,
-                     !.started = FALSE, !.awake = FALSE, !.restarts = 0]
+                     !.restored = IF ResumeRestart \/ RestartIdle THEN "floor" ELSE @,
+                     !.started = FALSE, !.awake = FALSE, !.restarts = 0,
+                     !.preSends = IF RestartRunning THEN @ ELSE 0,
+                     \* herdr server restart or handoff: a new incarnation resumes the same transcript.
+                     !.oldIncarnation = ~RestartHandoff,
+                     !.phase = IF RestartHandoff THEN "Booting" ELSE @,
+                     !.needsStart = IF RestartHandoff THEN TRUE ELSE @]
+\* Keys reached the provider before the restart; neither transcript nor screen shows it yet, but the
+\* durable in-flight record (V2 head, inflight turn, herdr input hold) survives the restart.
+PreRestartSend ==
+    /\ RestartLate /\ r.preSends > 0 /\ r.restarts > 0 /\ r.phase = "Idle" /\ r.head = 0
+    /\ r' = [r EXCEPT !.phase = "Running", !.lag = IF LateBlind THEN "both" ELSE "transcript",
+                     !.inflight = TRUE, !.preSends = 0]
+\* A person's Enter or a provider continuation: no durable record, the screen shows the turn.
+\* Only while the restart floor stands; after a passed floor this is the existing unreported-key window.
+PersonLateSubmit ==
+    /\ RestartRunning /\ r.preSends > 0 /\ r.phase = "Idle" /\ r.head = 0 /\ r.draft = "Empty"
+    /\ r.restored = "floor"
+    /\ r' = [r EXCEPT !.phase = "Running", !.lag = "transcript", !.preSends = 0]
+\* Recovery row end (herdr_row_end.rs idle_read): the screen classifies ready on the same
+\* execution and the transcript's last turn closed; with no row stamped after the input it settles
+\* NoTerminal, removes the inflight row and wakes the owner. The input's own turn is not consulted.
+RowEnd ==
+    /\ r.inflight /\ r.restarts = 0 /\ ScreenIdle /\ r.tail = "hard" /\ r.terminal = r.turn
+    /\ r' = [r EXCEPT !.inflight = FALSE, !.awake = TRUE]
+\* The provider writes the late turn's first record.
+LateRecord ==
+    /\ r.lag # "none"
+    /\ r' = [r EXCEPT !.lag = "none", !.turn = @ + 1, !.tail = "assistant"]
+\* The new incarnation idles but its SessionStart never reached this run.
+LostStart ==
+    /\ RestartHandoff /\ r.lostStarts > 0 /\ r.phase = "Booting" /\ r.restarts = 0
+    /\ r' = [r EXCEPT !.phase = "Idle", !.lostStarts = 0, !.awake = TRUE]
+\* A daemon restart loses local readiness, but keeps the consumed Pending certificate.
+RestartClaimed ==
+    /\ Clear /\ r.clearConsumed /\ r.proofReboots > 0 /\ r.head = 0 /\ r.effects[1] = 1
+    /\ r' = [r EXCEPT !.proofReboots = 0, !.clearDone = FALSE,
+                     !.clearConsumed = Mode # "ready-clear-replay-before",
+                     !.phase = "Booting", !.started = FALSE, !.observed = "Unknown",
+                     !.q[1] = "queued", !.awake = TRUE]
 Replay(i) ==
     /\ Mode = "ready-replay" /\ r.q[i] = "done" /\ r.effects[i] = 1
     /\ r' = [r EXCEPT !.q[i] = "queued", !.awake = TRUE]
@@ -274,23 +419,28 @@ CompactCompletionEvidence ==
 FinishSelfCompactFence ==
     /\ r.compactFence /\ r.compactEvidence /\ Mode # "ready-compact-no-completion"
     /\ r' = [r EXCEPT !.compactFence = FALSE, !.compactReady = TRUE, !.awake = TRUE]
-Next == CloseModal \/ WatchModal \/ WatchHeld \/ ChangeClearPending \/ PublishClearFile \/ CompactCompletionEvidence \/ FinishSelfCompactFence \/ PollDialog \/ PermissionRecord \/ SessionStart \/ Finish \/ Observe \/ Stop \/ OldStop \/ RecoverDraft \/ HumanClears \/
+Next == AdoptAwaitedClear \/ RefuseAwaitedClear \/ RepairClearCertificate \/ InvalidateObservedCertificate \/ RestartClaimed \/ ClearRetire \/ CloseModal \/ WatchModal \/ WatchHeld \/ ChangeClearPending \/ PublishClearFile \/ CompactCompletionEvidence \/ FinishSelfCompactFence \/ PollDialog \/ PermissionRecord \/ SessionStart \/ Finish \/ Observe \/ Stop \/ OldStop \/ RecoverDraft \/ HumanClears \/
         SuppressStop \/ SoftSummary \/ LateAssistant \/
         NativeStart \/ Revoke \/ Submit \/ Restart \/ CompactSubmit \/ IdleWake \/ PersonTurn \/
+        PreRestartSend \/ PersonLateSubmit \/ LateRecord \/ LostStart \/ RowEnd \/
         (\E i \in Ids : Hold(i) \/ Expire(i) \/ Prepare(i) \/ SelectBusy(i) \/ BusyInject(i) \/ BusyPublish(i) \/ ReexposeBusy(i) \/ BusyAbsorb(i) \/ BusyConsume(i) \/ Receipt(i) \/ Replay(i))
-Fairness == WF_r(CloseModal) /\ WF_r(WatchModal) /\ WF_r(WatchHeld) /\ WF_r(ChangeClearPending) /\ WF_r(PublishClearFile) /\ WF_r(CompactCompletionEvidence) /\ WF_r(FinishSelfCompactFence) /\ WF_r(PollDialog) /\ WF_r(PermissionRecord) /\ WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
+Fairness == WF_r(AdoptAwaitedClear) /\ WF_r(RefuseAwaitedClear) /\ WF_r(RepairClearCertificate) /\ WF_r(InvalidateObservedCertificate) /\ WF_r(RestartClaimed) /\ WF_r(ClearRetire) /\ (ResumeHistory \/ WF_r(Restart)) /\ WF_r(CloseModal) /\ WF_r(WatchModal) /\ WF_r(WatchHeld) /\ WF_r(ChangeClearPending) /\ WF_r(PublishClearFile) /\ WF_r(CompactCompletionEvidence) /\ WF_r(FinishSelfCompactFence) /\ WF_r(PollDialog) /\ WF_r(PermissionRecord) /\ WF_r(SessionStart) /\ WF_r(Finish) /\ WF_r(Observe) /\ WF_r(Stop) /\
             WF_r(SuppressStop) /\ WF_r(SoftSummary) /\ WF_r(LateAssistant) /\
             WF_r(RecoverDraft) /\ WF_r(HumanClears) /\ WF_r(NativeStart) /\
-            WF_r(Revoke) /\ WF_r(Submit) /\ WF_r(CompactSubmit) /\
+            WF_r(Revoke) /\ WF_r(Submit) /\ WF_r(CompactSubmit) /\ WF_r(LateRecord) /\ WF_r(PreRestartSend) /\ WF_r(RowEnd) /\
             (\A i \in Ids : WF_r(Hold(i)) /\ WF_r(Expire(i)) /\ WF_r(Prepare(i)) /\
                            WF_r(SelectBusy(i)) /\ WF_r(BusyInject(i)) /\ WF_r(BusyPublish(i)) /\ WF_r(BusyAbsorb(i)) /\ WF_r(BusyConsume(i)) /\ WF_r(Receipt(i)))
 Spec == Init /\ [][Next]_r /\ Fairness
 TypeOK ==
     /\ r.q \in [Ids -> {"queued", "held", "prepared", "busy-selected", "busy-written", "native-queued", "sent", "done", "retained"}]
     /\ r.restored \in {"no", "floor", "passed"} /\ r.notices \in [Ids -> 0..2]
+    /\ r.lag \in {"none", "both", "transcript"} /\ r.inflight \in BOOLEAN
     /\ r.effects \in [Ids -> 0..2] /\ r.writes \in [Ids -> 0..2] /\ r.head \in 0..N
     /\ r.phase \in {"Booting", "Idle", "Running"}
     /\ r.dialogKeys \in 0..1 /\ r.permissionStage \in 0..3
+NoUnsafeClearRetire == ~r.badClear
+ClearCursorPreserved == r.oldCursor = 7
+ClearAtomic == ClearPreSource => (~r.filePublished => r.oldBinding)
 NoModalOpenWake == ~r.badModalWake
 ModalCloseEventuallySends == ModalWatch => ((r.modalHeld /\ ~r.modalOpen) ~> (r.effects[1] = 1))
 NoDuplicate == \A i \in Ids : r.effects[i] <= 1 /\ r.writes[i] <= 1
@@ -311,11 +461,37 @@ PendingEventuallyExecutes == \A i \in Ids : (r.q[i] \in {"queued", "held", "prep
 CompactEventuallyExecutes == r.compactPending ~> (r.compacts = 1)
 SelfCompactEventuallyReleases == (r.compacts = 1 /\ r.compactEvidence) ~> (\E i \in Ids : r.writes[i] > 0)
 BusyEventuallyQueues == Busy => <>(r.busyWrites[1] = 1)
+ClearAdoptionBeforeKey == Dual =>
+    (\A i \in Ids : r.writes[i] > 0 => (r.adopted /\ ~r.awaitingAdoption))
+ClearRefusalKeepsOriginal == (Dual /\ r.adoptionRefused /\ ~r.adopted) =>
+    (r.oldBinding /\ (\A i \in Ids : r.writes[i] = 0 /\ r.q[i] \in {"queued", "held", "prepared"}))
+LedgerRejectedNoKey == (Dual /\ ~r.ledgerCurrent) => (\A i \in Ids : r.writes[i] = 0)
+PublicReadyDoesNotAdopt == (Dual /\ Ready /\ r.awaitingAdoption) => r.oldBinding
+PublicLedgerReadyEventually == (Dual /\ r.ledgerCurrent) => <>Ready
+InvalidCertificateEventuallyHeld == (Dual /\ r.ledgerCurrent /\ ~r.diskCurrent) =>
+    <>(r.adoptionRefused /\ r.q[1] = "held")
+LedgerRejectedEventuallyHeld == (Dual /\ ~r.ledgerCurrent) => <>(r.q[1] = "held")
+CurrentReadyRequiresCertificate == (CurrentClear /\ Ready) => (r.ledgerCurrent /\ r.diskCurrent)
+CurrentNoKeyWithoutCertificate == CurrentClear =>
+    (\A i \in Ids : r.writes[i] > 0 => (r.diskCurrent /\ r.adopted /\ ~r.awaitingAdoption))
+CurrentInvalidKeepsOriginal == (CurrentClear /\ ~r.diskCurrent) =>
+    (r.oldBinding /\ (\A i \in Ids : r.writes[i] = 0))
+CurrentToctouNoKey == (CurrentToctou /\ r.certificateChanged) =>
+    (r.certificateObserved /\ r.oldBinding /\ (\A i \in Ids : r.writes[i] = 0))
+CurrentReadyEventually == (Mode = "ready-current-clear-valid") => <>Ready
+CurrentBlockedEventuallyHeld == (CurrentClear /\ ~r.diskCurrent) => <>(r.q[1] = "held")
+CurrentObservedProofLosesCertificate == CurrentToctou =>
+    <>(r.certificateObserved /\ r.certificateChanged /\ r.q[1] = "held")
 \* A retained original took no key, owes exactly one resend ask, and never leaves custody again.
 RetainedOnce == \A i \in Ids : r.notices[i] <= 1 /\ (r.notices[i] = 1 <=> r.q[i] = "retained")
     /\ (r.q[i] = "retained" => r.writes[i] = 0 /\ r.effects[i] = 0)
 ExpiryOnlyUnproven == ~r.badExpire
 PendingEventuallySettles == \A i \in Ids : (r.q[i] \in {"queued", "held", "prepared"}) ~> (r.effects[i] >= 1 \/ r.q[i] = "retained")
+\* #8161: an idle pane that outlived the daemon restart, with nothing unsettled, eventually takes input.
+RestartIdleEventuallyReceives == RestartIdle =>
+    ((r.restored = "floor" /\ r.restarts = 0 /\ r.phase = "Idle" /\ r.draft = "Empty" /\
+      ~r.inflight /\ r.lag = "none" /\ r.oldIncarnation /\ r.preSends = 0)
+     ~> (\E i \in Ids : r.effects[i] >= 1))
 ResumedIdleEventuallyReceives == ResumeHistory =>
     ((r.started /\ r.phase = "Idle" /\ r.draft = "Empty") ~> (\E i \in Ids : r.effects[i] >= 1))
 =============================================================================

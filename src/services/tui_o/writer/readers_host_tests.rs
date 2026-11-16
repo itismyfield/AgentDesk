@@ -5,6 +5,8 @@ use super::*;
 mod archived_host;
 #[path = "current_host_tests.rs"]
 mod current_host;
+#[path = "thread_child_dormant_tests.rs"]
+mod thread_child_dormant;
 use crate::services::tui_o::channel_policy;
 use crate::services::tui_o::store::fault::{self, Keep, Step as FaultStep};
 use crate::services::tui_o::store::rotation::{Boundary, Rotation, SourceLink, Successor};
@@ -765,6 +767,48 @@ async fn readers_s1b_host_on_real_unlink_retires_one_and_restart_keeps_it_retire
     scene.shutdown().await;
 }
 
+/// A channel store whose old source rotated to a latest one, both open to its writer.
+fn fixture(channel: u64, name: &str) -> (Harness, SourceId, SourceId) {
+    let mut ids = Vec::new();
+    let h = Harness::build_channel(channel, |root| {
+        [
+            ("old", row(&format!("{name}-before"), "before the switch")),
+            ("latest", Vec::new()),
+        ]
+        .into_iter()
+        .map(|(kind, body)| {
+            let session = format!("{name}-{kind}");
+            let path = root.join(format!("{session}.jsonl"));
+            std::fs::write(&path, &body).unwrap();
+            let source_id = source_id_for(&session, &path).unwrap();
+            ids.push(source_id.clone());
+            InitSource {
+                source_id,
+                delivery_start: body.len() as u64,
+                prefix_hash: hex::encode(sha2::Sha256::digest(&body)),
+            }
+        })
+        .collect()
+    });
+    let (old, latest) = (ids.remove(0), ids.remove(0));
+    let mut channel_store = h.channel();
+    let mut rotation = Rotation::default();
+    rotation.successors.insert(
+        source_key(&old),
+        Successor {
+            source: latest.clone(),
+            seq: Some(2),
+            tmux_session: Some("readers-host".into()),
+            drain_to: Some(channel_store.cursor(&old).unwrap().captured_through),
+            proof: None,
+        },
+    );
+    channel_store.write_rotation(&rotation).unwrap();
+    channel_store.set_binding_checkpoint(2).unwrap();
+    drop(channel_store);
+    (h, old, latest)
+}
+
 #[tokio::test(start_paused = true)]
 async fn readers_s1b_host_dormant_membership_is_per_channel() {
     if !child_case(concat!(
@@ -772,46 +816,6 @@ async fn readers_s1b_host_dormant_membership_is_per_channel() {
         "::readers_s1b_host_dormant_membership_is_per_channel"
     )) {
         return;
-    }
-    fn fixture(channel: u64, name: &str) -> (Harness, SourceId, SourceId) {
-        let mut ids = Vec::new();
-        let h = Harness::build_channel(channel, |root| {
-            [
-                ("old", row(&format!("{name}-before"), "before the switch")),
-                ("latest", Vec::new()),
-            ]
-            .into_iter()
-            .map(|(kind, body)| {
-                let session = format!("{name}-{kind}");
-                let path = root.join(format!("{session}.jsonl"));
-                std::fs::write(&path, &body).unwrap();
-                let source_id = source_id_for(&session, &path).unwrap();
-                ids.push(source_id.clone());
-                InitSource {
-                    source_id,
-                    delivery_start: body.len() as u64,
-                    prefix_hash: hex::encode(sha2::Sha256::digest(&body)),
-                }
-            })
-            .collect()
-        });
-        let (old, latest) = (ids.remove(0), ids.remove(0));
-        let mut channel_store = h.channel();
-        let mut rotation = Rotation::default();
-        rotation.successors.insert(
-            source_key(&old),
-            Successor {
-                source: latest.clone(),
-                seq: Some(2),
-                tmux_session: Some("readers-host".into()),
-                drain_to: Some(channel_store.cursor(&old).unwrap().captured_through),
-                proof: None,
-            },
-        );
-        channel_store.write_rotation(&rotation).unwrap();
-        channel_store.set_binding_checkpoint(2).unwrap();
-        drop(channel_store);
-        (h, old, latest)
     }
     fn posted(channel: &ChannelStore, id: &str, text: &str) -> bool {
         let key = UnitKey {

@@ -193,7 +193,9 @@ pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
 pub(crate) use tui_prompt_relay::rehydration::observer_binding_published;
 #[cfg(all(test, unix))]
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
-pub(crate) use tui_prompt_relay::{input_notice_content, input_notice_line};
+pub(crate) use tui_prompt_relay::{
+    input_notice_content, input_notice_line, scheduled_input_notice_content,
+};
 pub(crate) mod replay_policy;
 mod tui_task_card;
 mod turn_bridge;
@@ -255,6 +257,8 @@ pub(crate) use queue_io::input_ingress::{
     ADOPTS as OWNER_ADOPTS_FOR_TEST, execution as owner_execution_for_test,
     installed as input_owner_installed_for_test,
 };
+#[cfg(all(test, unix))]
+pub(crate) use queue_io::input_owner::claude_handoff::observe_busy as observe_owned_claude_busy_for_test;
 #[cfg(all(test, unix))]
 pub(crate) use queue_io::input_owner::origin::Execution as OwnerExecutionForTest;
 #[cfg(all(test, unix))]
@@ -354,6 +358,7 @@ use formatting::{format_for_discord, format_tool_input, send_long_message_raw, t
 use inflight::InflightTurnState;
 #[cfg(test)]
 pub(crate) use inflight::lock_inflight_state_path;
+pub(crate) use inflight::open_tui_thread_hints;
 #[cfg(test)]
 use inflight::save_inflight_state;
 pub(crate) use inflight::{clear_inflight_state, policy_op};

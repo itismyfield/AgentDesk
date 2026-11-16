@@ -2769,8 +2769,6 @@ fn send_followup_to_tmux(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     tmux_session_name: &str,
 ) -> Result<ClaudeFollowupResult, String> {
-    use std::io::Write;
-
     debug_log(&format!(
         "=== send_followup_to_tmux: {} ===",
         tmux_session_name
@@ -2793,17 +2791,13 @@ fn send_followup_to_tmux(
     // Publish before the prompt is reachable; mark only after a successful flush.
     let write_result =
         submit_claude_wrapper_followup(cancel_token.as_deref(), tmux_session_name, || {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(input_fifo_path)
-                .map_err(|e| format!("Failed to open input FIFO: {}", e))
-                .and_then(|mut fifo| {
-                    writeln!(fifo, "{}", msg)
-                        .map_err(|e| format!("Failed to write to input FIFO: {}", e))?;
-                    fifo.flush()
-                        .map_err(|e| format!("Failed to flush input FIFO: {}", e))?;
-                    Ok(())
-                })
+            crate::services::session_host::TmuxHost
+                .submit_wrapper_frame(
+                    input_fifo_path,
+                    crate::services::session_host::WrapperFrame::Line(&msg),
+                    false,
+                )
+                .into_wrapper()
         });
 
     if let Err(e) = write_result {

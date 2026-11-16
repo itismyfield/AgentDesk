@@ -647,6 +647,7 @@ _write_release_source_manifest() {
     AGENTDESK_MANIFEST_O_TUI_WRITER="$(_binary_build_flag "${REL_BINARY:-}" o_tui_writer)" \
     AGENTDESK_MANIFEST_O_LEDGER_OPERATOR_RESUME="$(_binary_build_flag "${REL_BINARY:-}" o_ledger_operator_resume)" \
     AGENTDESK_MANIFEST_O_LEDGER_INPUT_NOTICE="$(_binary_build_flag "${REL_BINARY:-}" o_ledger_input_notice)" \
+    AGENTDESK_MANIFEST_O_LEDGER_SCHEDULED_INPUT_NOTICE="$(_binary_build_flag "${REL_BINARY:-}" o_ledger_scheduled_input_notice)" \
     python3 - "$manifest_tmp" <<PY
 import json
 import os
@@ -674,6 +675,7 @@ payload = {
     "o_tui_writer": os.environ.get("AGENTDESK_MANIFEST_O_TUI_WRITER", "unknown"),
     "o_ledger_operator_resume": os.environ.get("AGENTDESK_MANIFEST_O_LEDGER_OPERATOR_RESUME") == "true",
     "o_ledger_input_notice": os.environ.get("AGENTDESK_MANIFEST_O_LEDGER_INPUT_NOTICE") == "true",
+    "o_ledger_scheduled_input_notice": os.environ.get("AGENTDESK_MANIFEST_O_LEDGER_SCHEDULED_INPUT_NOTICE") == "true",
 }
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
@@ -1016,7 +1018,7 @@ PY
 _rollback_would_revert_o_ledger() {
     # Only first use raises the floor; an unused new build can still roll back after a failed deploy.
     local floor field
-    for field in o_ledger_operator_resume o_ledger_input_notice; do
+    for field in o_ledger_operator_resume o_ledger_input_notice o_ledger_scheduled_input_notice; do
         floor="$ADK_REL/o_store/${field#o_ledger_}.floor"
         [ -e "$floor" ] || [ -L "$floor" ] || continue
         if ! python3 - "$ADK_REL/runtime/release-source.json" "$field" <<'PY' 2>/dev/null
@@ -1039,7 +1041,7 @@ PY
 _binary_would_revert_o_ledger() {
     # Any used ledger format requires a reader this binary explicitly supports.
     local floor field
-    for field in o_ledger_operator_resume o_ledger_input_notice; do
+    for field in o_ledger_operator_resume o_ledger_input_notice o_ledger_scheduled_input_notice; do
         floor="$ADK_REL/o_store/${field#o_ledger_}.floor"
         [ -e "$floor" ] || [ -L "$floor" ] || continue
         [ "$(_binary_build_flag "$1" "$field")" = "true" ] || return 0
@@ -1285,27 +1287,39 @@ _rollback_release_binary() {
         echo "✗ Rollback stop was not confirmed — backup preserved; manual intervention required" >&2
         return 0
     fi
-    # The bad binary is never locked (uchg is deferred to the success path), so
-    # nouchg here is defensive. mv is an atomic same-dir rename: the backup
-    # replaces the bad binary in one step — at no instant are both copies gone.
-    chflags nouchg "$rel_binary" 2>/dev/null || true
-    if ! mv -f "$rel_backup" "$rel_binary"; then
-        echo "✗ Failed to restore previous binary from $rel_backup — manual intervention required"
-        return 0
+    local refused=0
+    # The stopped binary may have created the child floor after the first check: judged again.
+    if _rollback_would_revert_o_child_store; then
+        echo "🛑 ROLLBACK REFUSED — an O child store floor appeared before the swap"
+        echo "   The new binary restarts unswapped; $rel_backup is preserved. Fix forward with a compatible build."
+        refused=1
+    else
+        # The bad binary is never locked (uchg is deferred to the success path), so
+        # nouchg here is defensive. mv is an atomic same-dir rename: the backup
+        # replaces the bad binary in one step — at no instant are both copies gone.
+        chflags nouchg "$rel_binary" 2>/dev/null || true
+        if ! mv -f "$rel_backup" "$rel_binary"; then
+            echo "✗ Failed to restore previous binary from $rel_backup — manual intervention required"
+            return 0
+        fi
+        # #3858 finding 3: re-lock is best-effort and MUST NOT abort the restart
+        # below. A failed chflags can never leave the good binary restored but the
+        # service stopped.
+        chflags uchg "$rel_binary" 2>/dev/null || true
+        _restore_policy_generation "$ADK_REL"
+        echo "↩ Previous binary restored — restarting release..."
     fi
-    # #3858 finding 3: re-lock is best-effort and MUST NOT abort the restart
-    # below. A failed chflags can never leave the good binary restored but the
-    # service stopped.
-    chflags uchg "$rel_binary" 2>/dev/null || true
-    _restore_policy_generation "$ADK_REL"
-    echo "↩ Previous binary restored — restarting release..."
     xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$plist.plist" 2>/dev/null || true
     if ! launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/$plist.plist"; then
         echo "⚠ launchd bootstrap failed during rollback — using tmux fallback"
         start_release_tmux_fallback || true
     fi
     if (unset AGENTDESK_DEPLOY_ALLOW_DEGRADED; wait_for_http_service_health "$plist" "$rel_port" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1 1); then
-        echo "✓ Rollback succeeded — release healthy on :${rel_port} with previous binary"
+        if [ "$refused" = 1 ]; then
+            echo "✓ New binary restarted healthy on :${rel_port} — rollback refused"
+        else
+            echo "✓ Rollback succeeded — release healthy on :${rel_port} with previous binary"
+        fi
     else
         echo "✗ Rollback restart did not reach healthy state — manual intervention required (logs: ${ADK_REL:-}/logs/)"
     fi

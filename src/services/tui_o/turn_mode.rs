@@ -84,18 +84,20 @@ pub(crate) fn confirm(channel: u64) -> bool {
             .insert(channel)
 }
 
-/// Confirms each selected channel of `owned` only after `retire` reports it fully retired. No config
-/// or an explicitly empty selection returns before `owned` or `retire` runs.
+/// Confirms each channel of `owned` whose `policy` channel is selected, only after `retire` reports
+/// it fully retired. No config or an explicitly empty selection returns before `owned` or `retire` runs.
 pub(crate) fn confirm_selected(
     config: Option<&TurnConfig>,
     owned: impl FnOnce() -> Vec<u64>,
+    policy: impl Fn(u64) -> u64,
     mut retire: impl FnMut(u64) -> bool,
 ) -> Vec<u64> {
     let Some(config) = config.filter(|c| c.selects_any()) else {
         return Vec::new();
     };
     let mut confirmed = Vec::new();
-    for channel in owned().into_iter().filter(|&c| config.selects(c)) {
+    let selected = |&c: &u64| config.selects(policy(c));
+    for channel in owned().into_iter().filter(selected) {
         if retire(channel) {
             confirm(channel);
             confirmed.push(channel);

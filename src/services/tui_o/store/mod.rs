@@ -355,15 +355,18 @@ impl OStore {
 
     /// A first activation's `init`: a later channel of a sealed era, or else the channel the era is
     /// sealed over. Opening the store finishes a takeover's seal a crash cut off after its `init`.
+    /// A thread child's `init` also needs its verified relationship to its parent.
     pub(crate) fn begin_era_as(
         &self,
         init: &Initialized,
         origin: InitOrigin,
         scope: &InitScope,
+        child: Option<&crate::services::session_host::surface_policy::VerifiedSurface>,
     ) -> Result<(), StoreError> {
         let _sealing = SEALING.lock().unwrap_or_else(PoisonError::into_inner);
         let sealed = self.read_era()?.is_some();
-        self.init_channel_as(init, origin, scope)?;
+        // This build writes child stores; build-info reports the same switch to the deploy guard.
+        self.init_channel_checked(init, origin, scope, child, true)?;
         if sealed {
             return Ok(());
         }
@@ -509,11 +512,12 @@ impl ChannelStore {
                 if unit_key.kind == super::shadow::UnitKind::InputNotice || notice_origin.is_some())
             || matches!(&entry, LedgerEntry::Excluded { unit_key, .. }
                 if unit_key.kind == super::shadow::UnitKind::InputNotice);
+        let store_root = self.dir.parent().expect("channel has store root");
         if notice_format {
-            input_notice_floor::before_append(
-                self.dir.parent().expect("channel has store root"),
-                true,
-            )?;
+            input_notice_floor::before_append(store_root, true)?;
+        }
+        if matches!(&entry, LedgerEntry::InputNotice { entry } if entry.records_scheduled_fire()) {
+            input_notice_floor::before_scheduled_append(store_root)?;
         }
         ledger::append(&self.dir.join(LEDGER_FILE), at, &entry)?;
         self.ledger.apply(at, entry);

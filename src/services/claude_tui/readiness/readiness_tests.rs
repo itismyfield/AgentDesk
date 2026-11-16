@@ -20,6 +20,12 @@ impl Rig {
     }
     fn for_channel(channel: Option<u64>) -> Self {
         initialize();
+        let rig = Self::launched(channel, Utc::now());
+        rig.hook("startup");
+        rig
+    }
+    /// A launch created at `created_at` that has sent this ledger no Start.
+    fn launched(channel: Option<u64>, created_at: DateTime<Utc>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("projects");
         let project = root.join("project");
@@ -29,7 +35,7 @@ impl Rig {
         let nonce = uuid::Uuid::new_v4().simple().to_string();
         let path = project.join(format!("{native}.jsonl"));
         let ctx: BindingContext = serde_json::from_value(json!({
-            "schema":1,"provider":"claude","created_at":Utc::now(),"execution_nonce":nonce,
+            "schema":1,"provider":"claude","created_at":created_at,"execution_nonce":nonce,
             "tmux_session":session,"channel_id":channel,"owner_runtime_root":"fixture",
             "host":"readiness-test","expected_native_session_id":native,"launch_mode":"fresh",
             "provider_root":root
@@ -54,15 +60,13 @@ impl Rig {
                 relay_last_offset: None,
             },
         );
-        let rig = Self {
+        Self {
             _dir: dir,
             session,
             path,
             root,
             ctx,
-        };
-        rig.hook("startup");
-        rig
+        }
     }
     fn append(&self, mut value: Value) {
         if value["sessionId"].is_null() {
@@ -107,6 +111,8 @@ impl Rig {
 #[cfg(unix)]
 #[path = "clear_tests.rs"]
 pub(crate) mod clear_tests;
+#[path = "restart_tests.rs"]
+mod restart_tests;
 impl Drop for Rig {
     fn drop(&mut self) {
         tui_prompt_dedupe::clear_tmux_runtime_binding(&self.session);
@@ -994,3 +1000,132 @@ fn startup_workspace_caller_uses_home_only_plan_before_every_dialog_key() {
 #[cfg(unix)]
 #[path = "compact_tests.rs"]
 mod compact_tests;
+
+// A process restart forgets volatile readiness without deleting durable hook evidence.
+pub(crate) fn forget_session(session: &str) {
+    let mut state = ledger();
+    state.entries.retain(|source, _| source.session != session);
+    state.starts.retain(|(logical, _), _| logical != session);
+}
+
+// Reproduce the interval after durable certification and before volatile Start publication.
+pub(crate) fn restore_bound_start(session: &str, at: DateTime<Utc>) {
+    let binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(session).unwrap();
+    let nonce = source::nonce(session).flatten().unwrap();
+    let bound = Source {
+        session: session.into(),
+        nonce: Some(nonce.clone()),
+        native: binding.session_id.unwrap(),
+        path: binding.output_path.into(),
+    };
+    let mut state = ledger();
+    state.entries.entry(bound.clone()).or_default();
+    state.starts.insert((session.into(), nonce), (at, bound));
+}
+
+pub(crate) fn retained_sources(session: &str) -> usize {
+    let nonce = source::nonce(session).flatten();
+    ledger()
+        .entries
+        .keys()
+        .filter(|source| source.session == session && source.nonce == nonce)
+        .count()
+}
+
+#[test]
+fn a_closed_managed_attempt_refuses_before_waiting_for_native_readiness() {
+    use crate::services::claude_tui::submission_fence::{self, SubmissionFence};
+    use std::sync::Arc;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fence = Arc::new(submission_fence::test_support::RefusingFence::default());
+    let refused = fence.before_first_payload().unwrap_err().to_string();
+    let result = submission_fence::with_scope(Some(fence.clone()), || {
+        wait::prepare(
+            "closed-without-source",
+            None,
+            None,
+            Duration::ZERO,
+            super::super::input::PromptReadinessKind::ProvenWarmFollowup,
+        )
+    });
+    assert_eq!(result.err().as_deref(), Some(refused.as_str()));
+    let cancel = crate::services::provider::CancelToken::new();
+    cancel
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::Release);
+    let result = submission_fence::with_scope(Some(fence), || {
+        wait::prepare(
+            "closed-without-source",
+            None,
+            Some(&cancel),
+            Duration::ZERO,
+            super::super::input::PromptReadinessKind::ProvenWarmFollowup,
+        )
+    });
+    assert_eq!(
+        result.err().as_deref(),
+        Some(super::super::input::PROMPT_READY_CANCELLED_ERROR)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_stash_holds_when_the_final_composer_capture_is_unreadable() {
+    use super::super::submission_fence::{
+        self, IdleStashContext, PreSubmitPersistenceRefused, SubmissionFence,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    struct Managed;
+    impl SubmissionFence for Managed {
+        fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
+            Ok(())
+        }
+        fn refusal(&self) -> Option<PreSubmitPersistenceRefused> {
+            None
+        }
+        fn idle_stash_context(&self) -> Option<IdleStashContext> {
+            Some(IdleStashContext {
+                channel: 1,
+                target: "unreadable-composer".into(),
+                available: true,
+            })
+        }
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let identity =
+        crate::services::session_identity_metadata::runtime_identity("unreadable-composer")
+            .unwrap()
+            .environment_assignment()
+            .unwrap();
+    fs::write(dir.path().join("identity"), identity).unwrap();
+    let program = dir.path().join("tmux");
+    fs::write(&program, "#!/bin/sh\nd=$(dirname \"$0\")\ncase \"$*\" in *show-environment*) cat \"$d/identity\" ;; *pane_dead*) printf '0\\n' ;; *capture-pane*) [ -f \"$d/capture\" ] && cat \"$d/capture\" ;; *) exit 1 ;; esac\n").unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    let pane =
+        super::super::busy_inject::Pane::with_program("unreadable-composer", program).unwrap();
+    let unread = Err(super::super::busy_inject::Veto::ScreenUnread);
+    assert_eq!(idle::before_paste(&pane, true), Ok(false));
+    assert_eq!(idle::before_paste(&pane, false), Ok(false));
+    fs::write(dir.path().join("capture"), "not a composer").unwrap();
+    assert_eq!(idle::before_paste(&pane, true), Ok(false));
+    fs::write(
+        dir.path().join("capture"),
+        super::super::input::submission::tests::view("person draft", false),
+    )
+    .unwrap();
+    assert_eq!(idle::before_paste(&pane, true), Ok(true));
+    let held = submission_fence::with_scope(Some(std::sync::Arc::new(Managed)), || {
+        idle::before_paste(&pane, false)
+    });
+    assert_eq!(
+        held, unread,
+        "a removed stash permission cannot append to the person's draft"
+    );
+    fs::write(
+        dir.path().join("capture"),
+        super::super::input::submission::tests::view("", false),
+    )
+    .unwrap();
+    assert_eq!(idle::before_paste(&pane, true), Ok(false));
+}

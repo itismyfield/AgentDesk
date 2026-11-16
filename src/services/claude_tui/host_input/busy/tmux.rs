@@ -82,7 +82,12 @@ pub(crate) fn loads(pane: busy_inject::Pane) -> impl FnMut() -> bool + Send + 's
         };
         let (path, buffer) = (file.path().to_string_lossy(), "agentdesk-owner-load-probe");
         let loaded = std::fs::write(file.path(), "probe").is_ok()
-            && pane.ok(&["load-buffer", "-b", buffer, &path]).is_some();
+            && pane
+                .input_ok(crate::services::session_host::SubmitPayload::LoadFile {
+                    buffer,
+                    path: &path,
+                })
+                .is_some();
         if loaded {
             let _ = pane.ok(&["delete-buffer", "-b", buffer]);
         }

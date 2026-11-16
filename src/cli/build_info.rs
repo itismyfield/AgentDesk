@@ -11,14 +11,18 @@ pub(crate) fn build_info_json() -> serde_json::Value {
         // CONSUMED-BY: scripts/deploy-release.sh (`_binary_build_flag … o_tui_writer`).
         // Every build runs the O writer for its boot-selected channels.
         "o_tui_writer": true,
-        // A reader alone cannot restore child gates, writers and source readiness.
-        "o_store_thread_children": false,
+        // CONSUMED-BY: scripts/deploy-release.sh (`_binary_would_revert_o_child_store`).
+        // Every build writes and restores thread child stores; the store admits what this reports.
+        "o_store_thread_children": true,
         // CONSUMED-BY: scripts/deploy-release.sh (`_binary_build_flag … o_ledger_operator_resume`).
         // Every build includes the ledger reader and the guarded writer consumer.
         "o_ledger_operator_resume": true,
         // CONSUMED-BY: scripts/deploy-release.sh (`_binary_build_flag … o_ledger_input_notice`).
         // Every build reads and writes the notice ledger format.
         "o_ledger_input_notice": true,
+        // CONSUMED-BY: scripts/deploy-release.sh (`_binary_build_flag … o_ledger_scheduled_input_notice`).
+        // Every build replays a scheduled fire's notice evidence, which keeps its `isMeta` row.
+        "o_ledger_scheduled_input_notice": true,
         // CONSUMED-BY: scripts/deploy-release.sh (`_rollback_would_revert_o_spool`).
         "o_spool_write_version": crate::services::tui_o::shadow::IDENTITY_VERSION,
         "o_spool_readable_versions":
@@ -54,9 +58,10 @@ mod tests {
             serde_json::json!(crate::services::tui_o::store::spool::READABLE_IDENTITY_VERSIONS)
         );
         assert_eq!(info["o_tui_writer"], true);
-        assert_eq!(info["o_store_thread_children"], false);
+        assert_eq!(info["o_store_thread_children"], true);
         assert_eq!(info["o_ledger_operator_resume"], true);
         assert_eq!(info["o_ledger_input_notice"], true);
+        assert_eq!(info["o_ledger_scheduled_input_notice"], true);
     }
 
     #[test]

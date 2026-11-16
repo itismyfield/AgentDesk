@@ -15,6 +15,8 @@ readonly REQUIRED_CHECKS_JSON='["CI required"]'
 readonly REQUIRED_CHECK_MIRROR_SHA256="57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 readonly RUNNER_MEMORY_STEPS_JSON='{
   "Start runner memory sampler": {"name":"Start runner memory sampler","continue-on-error":true,"shell":"bash","env":{"BASH_ENV":"/dev/null"},"run":"bash scripts/ci/runner-memory.sh start"},
+  "Save runner memory checkpoint": {"name":"Save runner memory checkpoint","continue-on-error":true,"shell":"bash","env":{"BASH_ENV":"/dev/null"},"run":"bash scripts/ci/runner-memory.sh checkpoint"},
+  "Upload runner memory checkpoint": {"name":"Upload runner memory checkpoint","continue-on-error":true,"timeout-minutes":2,"uses":"actions/upload-artifact@v4","with":{"name":"runner-memory-${{ github.job }}-${{ strategy.job-index || 0 }}-attempt-${{ github.run_attempt }}-before-build","path":"${{ runner.temp }}/runner-memory-checkpoint","if-no-files-found":"warn","retention-days":7}},
   "Begin runner memory step": {"name":"Begin runner memory step","continue-on-error":true,"shell":"bash","env":{"BASH_ENV":"/dev/null"},"run":"bash scripts/ci/runner-memory.sh begin \"$MEMORY_STEP\""},
   "End runner memory step": {"name":"End runner memory step","if":"always()","continue-on-error":true,"shell":"bash","env":{"BASH_ENV":"/dev/null"},"run":"bash scripts/ci/runner-memory.sh end"},
   "Summarize runner memory": {"name":"Summarize runner memory","if":"always()","continue-on-error":true,"timeout-minutes":1,"shell":"bash","env":{"BASH_ENV":"/dev/null"},"run":"bash scripts/ci/runner-memory.sh finish"},
@@ -41,6 +43,13 @@ targets.each do |path, jobs_with_memory|
       next
     end
     expected = [specs.fetch("Start runner memory sampler")]
+    if %w[lint pg15_owner_proof].include?(job_id)
+      saved, uploaded = specs.values_at("Save runner memory checkpoint", "Upload runner memory checkpoint")
+      expected.concat([saved, uploaded])
+      index = steps.index(saved)
+      first_build = steps.index { |step| step["name"] == (job_id == "lint" ? "just lint" : "Reuse archived lib test binary") }
+      errors << "#{path}: job #{job_id} must upload its checkpoint before the build" unless index && first_build && steps[index + 1] == uploaded && index + 1 < first_build
+    end
     labels.each do |label|
       begin_step = specs.fetch("Begin runner memory step").merge("env" => {"BASH_ENV" => "/dev/null", "MEMORY_STEP" => label})
       expected.concat([begin_step, specs.fetch("End runner memory step")])
@@ -384,7 +393,7 @@ expected_closure_if = {
   "rust_tests" => built_gate, "test_evidence" => built_gate,
   "lint" => "${{ !github.event.pull_request.draft && (needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true') }}",
   "scripts" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_guards" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_census" => "${{ !github.event.pull_request.draft && !cancelled() }}", "scripts_contracts" => "${{ !github.event.pull_request.draft && !cancelled() }}",
-  "dashboard" => "${{ !github.event.pull_request.draft && needs.changes.outputs.dashboard == 'true' }}", "pg15_owner_proof" => rust_tests_gate,
+  "dashboard" => "${{ !github.event.pull_request.draft && needs.changes.outputs.dashboard == 'true' }}", "pg15_owner_proof" => built_gate,
   "relay_authority_mutations" => relay_gate,
   "check_fast_cross_os" => cross_os_gate, "check_fast_cross_os_targets" => cross_os_gate,
   "required_contexts" => "${{ always() }}",
@@ -741,7 +750,7 @@ expected_uploads = {
 }
 jobs.each do |job_id, job|
   uploads = Array(job["steps"]).select { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/upload-artifact") }
-  uploads = uploads.reject { |step| %w[rust_build base_compare pg15_owner_proof lint scripts].include?(job_id) && step == memory_specs.fetch("Upload runner memory") }
+  uploads = uploads.reject { |step| (%w[rust_build base_compare pg15_owner_proof lint scripts].include?(job_id) && step == memory_specs.fetch("Upload runner memory")) || (%w[pg15_owner_proof lint].include?(job_id) && step == memory_specs.fetch("Upload runner memory checkpoint")) }
   next if job_id == "scripts" || (uploads.empty? && !expected_uploads.key?(job_id))
   unless uploads == expected_uploads[job_id]
     warn "#{path}: artifact uploads must stay in approved jobs with their exact names"
@@ -753,7 +762,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 100, "job_sha256" => "b9a4e7ea687a54e297db3f60c62b7dd607ccaa896b7a74461bbc0e800c8484c5",
+    "job_timeout_minutes" => 100, "job_sha256" => "bf68473d54f1d35e5c9a4d98c9cea97172cd77f9619e17ab9d01e4dd821cc30c",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
@@ -781,7 +790,7 @@ targets = {
   "base_compare" => {
     "label" => "nextest base comparison job", "name" => "Rust tests base comparison",
     "needs" => %w[changes rust_build], "if" => built_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 60, "job_sha256" => "53a1a4957e3c354b92be97fa4911afe91746d33e687c4590b377d29643693a0d",
+    "job_timeout_minutes" => 60, "job_sha256" => "41081e071c6a78b00398c44a1eb991661e448f8f26b5f0a8cd104d3596473adf",
     "cargo_steps" => {
       # Dropping this step or changing its argv (a report-only diff) is rejected here.
       "Compare tests with the comparison base" => {
@@ -874,14 +883,18 @@ targets = {
   "pg15_owner_proof" => {
     "label" => "PostgreSQL 15 owner proof job",
     "name" => "PostgreSQL 15 owner proof",
-    "needs" => "changes",
-    "if" => rust_tests_gate,
+    "needs" => %w[changes rust_build],
+    "if" => built_gate,
     "runs_on" => "ubuntu-latest",
     "job_timeout_minutes" => 50,
-    "job_sha256" => "7e69c5279aafb8b5164fcf2a81a13a4d0852a84f0f1bebc5c6afdd1162e13fc2",
+    "job_sha256" => "66beab7ad0dff73e5013b8eed735d453c65152c568c23a09cd60b292dbc2eee7",
     "cargo_steps" => {
+      "Reuse archived lib test binary" => {
+        "commands" => ['python3 scripts/ci/lib-test-artifact.py prepare-nextest --source "$RUNNER_TEMP/nextest" --directory "$RUNNER_TEMP/lib-test-artifact"'],
+        "timeout_minutes" => 5, "env" => {"BASH_ENV" => "/dev/null"},
+      },
       "PostgreSQL 15 exact owner proof" => {
-        "commands" => ["python3 scripts/run_test_lane.py --lane pg --max-summaries 4 --expected-ids scripts/ci/pg15_required_ids.txt -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- --exact db::auto_queue::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg db::auto_queue::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg db::auto_queue::run_owner_guard_pg_tests::force_pause_cleanup_waits_for_run_token_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_cannot_escape_cancel_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_waits_on_run_token_not_origin_row_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_context_create_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_foreign_to_target_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_target_to_foreign_serializes_with_cancel_pg db::auto_queue::run_owner_guard_pg_tests::rest_revival_refused_for_cancelled_owner_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_cas_rejects_direct_cancel_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_refuses_failed_dispatch_of_cancelled_run_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_waits_for_run_cancel_and_refuses_pg db::auto_queue::run_owner_guard_pg_tests::verdict_rollback_revival_refused_for_cancelled_owner_pg db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_census_failure_rolls_back_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg --test-threads=1"],
+        "commands" => ["python3 scripts/run_test_lane.py --lane pg --max-summaries 4 --expected-ids scripts/ci/pg15_required_ids.txt -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run --require-artifact -- cargo test --lib -- --exact db::auto_queue::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg db::auto_queue::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg db::auto_queue::run_owner_guard_pg_tests::force_pause_cleanup_waits_for_run_token_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_cannot_escape_cancel_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_waits_on_run_token_not_origin_row_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_context_create_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_foreign_to_target_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_target_to_foreign_serializes_with_cancel_pg db::auto_queue::run_owner_guard_pg_tests::rest_revival_refused_for_cancelled_owner_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_cas_rejects_direct_cancel_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_refuses_failed_dispatch_of_cancelled_run_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_waits_for_run_cancel_and_refuses_pg db::auto_queue::run_owner_guard_pg_tests::verdict_rollback_revival_refused_for_cancelled_owner_pg db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_census_failure_rolls_back_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg"],
         "timeout_minutes" => 40,
         "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact", "BASH_ENV" => "/dev/null"},
       },
@@ -893,7 +906,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "4b493dd1746981ce7715b46d680350f84cb514678a48b2688867f4548f80af4d",
+    "job_sha256" => "9092e64de66c3e290612d9a5c5893a4a619414c08290892f0d54aa77b1a93ade",
     "job_timeout_minutes" => 60,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {
@@ -1114,7 +1127,7 @@ end
 clippy_upload = {"name" => "Upload Clippy observation", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "clippy-observation-${{ github.sha }}", "path" => "target/clippy-observation/", "if-no-files-found" => "error"}}
 census_upload = {"name" => "Upload census execution evidence", "if" => "${{ steps.audit.outputs.census_evidence_dir != '' }}", "continue-on-error" => true, "uses" => "actions/upload-artifact@v4", "with" => {"name" => "legacy-body-census-test-evidence-${{ github.run_attempt }}", "path" => "${{ steps.audit.outputs.census_evidence_dir }}", "if-no-files-found" => "warn", "retention-days" => 7}}
 nextest_upload = ->(job_id, step) { %w[rust_build rust_tests].include?(job_id) && step["uses"] == "actions/upload-artifact@v4" && step["with"].to_h["name"].to_s.start_with?("nextest-") }
-errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) || nextest_upload.(job_id, step) || (job_id == "test_evidence" && step == census_upload) || (%w[rust_build lint scripts].include?(job_id) && step == memory_specs.fetch("Upload runner memory")) }
+errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) || nextest_upload.(job_id, step) || (job_id == "test_evidence" && step == census_upload) || (%w[rust_build lint scripts].include?(job_id) && step == memory_specs.fetch("Upload runner memory")) || (job_id == "lint" && step == memory_specs.fetch("Upload runner memory checkpoint")) }
 errors.each { |message| warn "#{path}: #{message}" }
 exit(errors.empty? ? 0 : 1)
 RUBY
@@ -1172,6 +1185,8 @@ if lint.is_a?(Hash)
   errors << "main Clippy observation upload must remain exact" unless lint_steps.select { |step| step["name"] == "Upload Clippy observation" } == [expected_upload]
   {"main" => [lint, expected_lint, 2], "PR" => [pr_jobs["lint"], expected_lint.merge("run" => expected_lint_run.sub("--base-ref HEAD^1", '--base-ref "$CLIPPY_BASE_REF"'), "env" => {"CLIPPY_BASE_REF" => "${{ github.event.pull_request.base.sha }}"}), 0]}.each do |label, (job, expected, depth)|
     steps = Array(job && job["steps"])
+    errors << "#{label} lint must cap concurrent Cargo builds at two" unless job && job.dig("env", "CARGO_BUILD_JOBS") == "2"
+    errors << "#{label} lint steps must not override the Cargo build cap" if steps.any? { |step| step.fetch("env", {}).key?("CARGO_BUILD_JOBS") }
     errors << "#{label} warning ceiling must retain exact fail-closed execution" unless steps.select { |step| step["name"] == "just lint" } == [expected]
     errors << "#{label} warning baseline comparison requires the base commit checkout" unless steps.first == {"uses" => "actions/checkout@v4", "with" => {"fetch-depth" => depth}}
     toolchain = steps.find { |step| step["name"] == "Install Rust toolchain" }
@@ -1182,7 +1197,7 @@ if lint.is_a?(Hash)
     errors << "job lint #{lint_tests_name} must keep #{key}=0" unless tests && (tests["env"] || {})[key] == "0"
   end
 end
-# PR N == main N == nightly N: the jobs differ only in needs and the main baseline upload; base_compare is PR-only.
+# The nextest jobs share execution policy; PR builds use more swap and main uploads a baseline.
 built_gate = "${{ !cancelled() && needs.rust_build.result == 'success' }}"
 baseline_upload = {"name" => "Upload nextest baseline", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-baseline", "path" => "${{ runner.temp }}/nextest/plan/plan.json", "if-no-files-found" => "error", "retention-days" => 14}}
 role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key) }.merge("steps" => Array(job["steps"]).reject { |step| role_step && step.is_a?(Hash) && step["name"] == role_step }) }
@@ -1193,7 +1208,13 @@ role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key
     next
   end
   errors << "main #{job_id} must keep needs #{needs.inspect} and if #{gate.inspect}" unless main_job["needs"] == needs && main_job["if"] == gate
-  errors << "main #{job_id} must equal the PR job apart from needs, if and the role step" unless role_free.(main_job, "Upload nextest baseline") == role_free.(pr_job, nil)
+  pr_shape = role_free.(pr_job, nil)
+  if job_id == "rust_build"
+    # Only this complete PR swap step may differ; extra inputs or step overrides stay visible.
+    approved_swap = {"name" => "Ensure swap for the lib test build", "uses" => "./.github/actions/ensure-swap", "with" => {"size-gb" => "24"}}
+    pr_shape = pr_shape.merge("steps" => pr_shape["steps"].map { |step| step == approved_swap ? step.reject { |key, _| key == "with" } : step })
+  end
+  errors << "main #{job_id} must equal the PR job apart from needs, if, the role step and the exact PR swap size" unless role_free.(main_job, "Upload nextest baseline") == pr_shape
   nightly_job = nightly_jobs[job_id]
   expected_nightly = role_free.(main_job, "Upload nextest baseline").merge(main_job.slice("needs", "if"))
   # Nightly keeps the strict retry policy: its plan differs from main only in that argument.

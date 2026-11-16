@@ -27,6 +27,11 @@ pub(crate) struct TurnRead {
     pub reason: &'static str,
     pub bytes_read: u64,
     pub end: NativeEnd,
+    /// The latest turn's id, the record time of its start, and the record time of its latest
+    /// activity; housekeeping and the end records are no activity.
+    pub turn: Option<String>,
+    pub started_at: Option<String>,
+    pub activity_at: Option<String>,
 }
 
 /// The rollout's latest native turn as a gate that waits for its end reads it; only `Ended` is
@@ -56,6 +61,8 @@ struct Open {
     unnamed: bool,
     /// A malformed record or an unidentified start; only a later identified start clears it.
     invalid: bool,
+    started_at: Option<String>,
+    activity_at: Option<String>,
 }
 
 /// Review mode as the window shows it; an entry without a name proves no review closed.
@@ -96,12 +103,14 @@ pub(crate) fn read_turn_detail(path: &Path) -> Option<TurnRead> {
 
 /// The native end of the rollout's latest turn, read back only to that turn's start.
 pub(crate) fn read_native_end(path: &Path) -> NativeEnd {
-    let read = (|| {
-        let mut file = std::fs::File::open(path).ok()?;
-        let metadata = file.metadata().ok()?;
-        scan(path, &mut file, &metadata, |_| {}, true).ok()
-    })();
-    read.map_or(NativeEnd::Unknown, |read| read.end)
+    read_latest_turn(path).map_or(NativeEnd::Unknown, |read| read.end)
+}
+
+/// The rollout's latest turn with its id and record times, read back only to that turn's start.
+pub(crate) fn read_latest_turn(path: &Path) -> Option<TurnRead> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    scan(path, &mut file, &metadata, |_| {}, true).ok()
 }
 
 fn source_current(path: &Path, before: &std::fs::Metadata) -> bool {
@@ -141,6 +150,9 @@ fn scan(
         reason,
         bytes_read,
         end: NativeEnd::Unknown,
+        turn: None,
+        started_at: None,
+        activity_at: None,
     };
     while at > floor {
         let begin = at.saturating_sub(SCAN_BLOCK_BYTES).max(floor);
@@ -212,6 +224,9 @@ fn scan(
             } else {
                 NativeEnd::Unknown
             },
+            turn: None,
+            started_at: None,
+            activity_at: None,
         });
     };
     // Join each block once; a JSON line spanning many blocks never causes repeated prepends.
@@ -288,6 +303,9 @@ fn scan(
         reason,
         bytes_read,
         end,
+        turn: (!open.turn.is_empty()).then_some(open.turn),
+        started_at: open.started_at,
+        activity_at: open.activity_at,
     })
 }
 
@@ -335,6 +353,25 @@ fn apply(record: &Value, open: &mut Option<Open>, review: &mut Review) {
         return;
     };
     let turn_id = crate::services::agent_protocol::codex_payload_turn_id(payload);
+    let at = text(record, "timestamp");
+    if let Some(open) = open.as_mut()
+        && !matches!(
+            (text(record, "type"), text(payload, "type")),
+            (
+                Some("event_msg"),
+                Some(
+                    "task_started"
+                        | "task_complete"
+                        | "turn_aborted"
+                        | "token_count"
+                        | "thread_settings_applied"
+                )
+            )
+        )
+        && at.is_some()
+    {
+        open.activity_at = at.map(str::to_string);
+    }
     match (text(record, "type"), text(payload, "type")) {
         (Some("event_msg"), Some("task_started")) => {
             // A start that does not name its root cannot prove a model turn of its own.
@@ -342,6 +379,7 @@ fn apply(record: &Value, open: &mut Option<Open>, review: &mut Review) {
             let next = turn_id.zip(root).map(|(turn, root)| Open {
                 turn: turn.to_string(),
                 root: root.to_string(),
+                started_at: at.map(str::to_string),
                 ..Open::default()
             });
             *open = Some(next.unwrap_or(Open {

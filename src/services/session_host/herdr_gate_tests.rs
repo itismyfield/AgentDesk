@@ -839,6 +839,33 @@ fn terminate(target: &InputTarget) -> HerdrTerminateResult {
 }
 
 #[test]
+fn operator_warrant_cannot_cross_to_a_tmux_host() {
+    use crate::services::session_host::{HostRefusal, TmuxHost};
+    use crate::services::termination_audit::host_terminate::{
+        HostTerminateEffect, HostTerminateWarrant, terminate_hosted_session,
+    };
+
+    if run_terminate_child("operator_warrant_cannot_cross_to_a_tmux_host") {
+        return;
+    }
+    let rig = rig();
+    let switch = LiveTerminateSwitch::new();
+    switch.set(Some(true));
+    let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
+    let operator = OperatorTerminateWarrant::issue(herdr(&target).clone());
+    let warrant = HostTerminateWarrant::from_operator(operator);
+    let result = terminate_hosted_session(&TmuxHost, warrant);
+    assert!(
+        matches!(
+            result,
+            HostTerminateEffect::Refused(HostRefusal::Precondition(_))
+        ),
+        "{result:?}"
+    );
+    assert!(rig.server.mutations().is_empty());
+}
+
+#[test]
 fn m0_terminate_off_has_zero_effect() {
     if run_terminate_child("m0_terminate_off_has_zero_effect") {
         return;

@@ -1042,6 +1042,19 @@ src/
 │   │   ├── tui_session_launch.rs
 │   │   └── tui_session_launch_geometry_tests.rs
 │   ├── claude_tui/
+│   │   ├── activity/
+│   │   │   ├── background/
+│   │   │   │   └── child.rs
+│   │   │   ├── background.rs
+│   │   │   ├── events.rs
+│   │   │   ├── hooks.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── poll.rs
+│   │   │   ├── processes.rs
+│   │   │   ├── source.rs
+│   │   │   ├── tools.rs
+│   │   │   ├── transcript.rs
+│   │   │   └── transcript_tests.rs
 │   │   ├── busy_inject/
 │   │   │   ├── screen/
 │   │   │   │   └── paste_footer.rs
@@ -1089,10 +1102,12 @@ src/
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs
 │   │   │   ├── relay_receipts.rs
-│   │   │   └── resume_renumber_tests.rs
+│   │   │   ├── resume_renumber_tests.rs
+│   │   │   └── same_session_source_tests.rs
 │   │   ├── host_input/
 │   │   │   ├── busy/
 │   │   │   │   ├── herdr.rs
+│   │   │   │   ├── herdr_tests.rs
 │   │   │   │   └── tmux.rs
 │   │   │   ├── busy.rs
 │   │   │   └── transport.rs
@@ -1120,6 +1135,8 @@ src/
 │   │   ├── readiness/
 │   │   │   ├── compact/
 │   │   │   │   └── completion.rs
+│   │   │   ├── source/
+│   │   │   │   └── clear.rs
 │   │   │   ├── clear.rs
 │   │   │   ├── clear_tests.rs
 │   │   │   ├── compact.rs
@@ -1129,6 +1146,7 @@ src/
 │   │   │   ├── idle.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── readiness_tests.rs
+│   │   │   ├── restart_tests.rs
 │   │   │   ├── source.rs
 │   │   │   └── wait.rs
 │   │   ├── session/
@@ -1375,6 +1393,8 @@ src/
 │   │   ├── host_input.rs
 │   │   ├── input.rs
 │   │   ├── mod.rs
+│   │   ├── readiness.rs
+│   │   ├── readiness_tests.rs
 │   │   ├── rollout_index.rs
 │   │   ├── rollout_tail.rs
 │   │   ├── session.rs
@@ -2040,7 +2060,9 @@ src/
 │   │   │   ├── input_owner/
 │   │   │   │   ├── claude_handoff/
 │   │   │   │   │   └── tests/
-│   │   │   │   │       └── actual_close_tests.rs
+│   │   │   │   │       ├── actual_close_tests.rs
+│   │   │   │   │       ├── custody_tests.rs
+│   │   │   │   │       └── left_herdr_tests.rs
 │   │   │   │   ├── effect/
 │   │   │   │   │   ├── claude.rs
 │   │   │   │   │   ├── codex.rs
@@ -2350,6 +2372,7 @@ src/
 │   │   │   │   │   ├── host_refusal.rs
 │   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── intake_dispatch.rs
+│   │   │   │   │   ├── owned_busy.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── replay_start.rs
@@ -2434,6 +2457,9 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_actual_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_composed_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_busy_entry_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_busy_late_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_busy_running_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
@@ -2510,6 +2536,8 @@ src/
 │   │   │   │   │   │   ├── park_missing_tests.rs
 │   │   │   │   │   │   ├── park_reply_tests.rs
 │   │   │   │   │   │   ├── refresh_tests.rs
+│   │   │   │   │   │   ├── thread_child_retirement_tests.rs
+│   │   │   │   │   │   ├── thread_child_tests.rs
 │   │   │   │   │   │   └── unbound_gateway_tests.rs
 │   │   │   │   │   └── owner_execution.rs
 │   │   │   │   └── owner_port.rs
@@ -2975,7 +3003,11 @@ src/
 │   │   │   ├── rehydration_pending_tests.rs
 │   │   │   ├── relay_ownership.rs
 │   │   │   ├── restore_after_rehydration_tests.rs
+│   │   │   ├── scheduled_prompt.rs
+│   │   │   ├── scheduled_prompt_tests.rs
 │   │   │   ├── session_rotation_settle.rs
+│   │   │   ├── slash_command_output.rs
+│   │   │   ├── slash_command_output_tests.rs
 │   │   │   ├── source_tick.rs
 │   │   │   ├── synthetic_orphan_reclaim.rs
 │   │   │   ├── synthetic_start.rs
@@ -3285,6 +3317,11 @@ src/
 │   │   │   │   │   ├── superseded_measurement_tests.rs
 │   │   │   │   │   ├── unit_tests.rs
 │   │   │   │   │   └── watcher_runtime_tests.rs
+│   │   │   │   ├── claude_activity.rs
+│   │   │   │   ├── claude_activity_b1_tests.rs
+│   │   │   │   ├── claude_activity_leaf_tests.rs
+│   │   │   │   ├── claude_activity_p2_tests.rs
+│   │   │   │   ├── claude_activity_tests.rs
 │   │   │   │   ├── closed_boundary.rs
 │   │   │   │   ├── effect_reads.rs
 │   │   │   │   ├── effect_reads_tests.rs
@@ -4003,6 +4040,9 @@ src/
 │   │   │   ├── policy_tests.rs
 │   │   │   ├── root_replaced.rs
 │   │   │   └── root_replaced_tests.rs
+│   │   ├── tmux_host/
+│   │   │   ├── fifo.rs
+│   │   │   └── input.rs
 │   │   ├── consumer_guard.rs
 │   │   ├── herdr_gate.rs
 │   │   ├── herdr_gate_tests.rs
@@ -4018,7 +4058,9 @@ src/
 │   │   ├── process_host.rs
 │   │   ├── resolve.rs
 │   │   ├── session_record.rs
+│   │   ├── submit.rs
 │   │   ├── surface_policy.rs
+│   │   ├── termination.rs
 │   │   ├── test_support.rs
 │   │   ├── tmux_host.rs
 │   │   └── traits.rs
@@ -4054,6 +4096,10 @@ src/
 │   │   ├── runner.rs
 │   │   └── session.rs
 │   ├── termination_audit/
+│   │   ├── host_terminate/
+│   │   │   ├── herdr_terminate/
+│   │   │   │   └── contract.rs
+│   │   │   └── contract.rs
 │   │   └── host_terminate.rs
 │   ├── tmux_common/
 │   │   ├── claude_footer.rs
@@ -4061,6 +4107,7 @@ src/
 │   │   ├── runtime_hint_fence.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
+│   │   ├── claude_idle.rs
 │   │   ├── cleanup_host.rs
 │   │   └── tests_pg.rs
 │   ├── tui_input/
@@ -4125,6 +4172,7 @@ src/
 │   │   │   ├── adoption/
 │   │   │   │   └── body_check.rs
 │   │   │   ├── children/
+│   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── adoption.rs
 │   │   │   ├── children.rs
@@ -4136,7 +4184,9 @@ src/
 │   │   │   ├── intake_route/
 │   │   │   │   └── input.rs
 │   │   │   ├── channel_gate.rs
-│   │   │   └── intake_route.rs
+│   │   │   ├── child_funnel_tests.rs
+│   │   │   ├── intake_route.rs
+│   │   │   └── thread_child_record_tests.rs
 │   │   ├── ownership/
 │   │   │   ├── execution/
 │   │   │   │   └── tests/
@@ -4202,6 +4252,7 @@ src/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── thread_children/
+│   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── retirement_tests.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
@@ -4245,6 +4296,7 @@ src/
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── notice_activation_tests.rs
 │   │   │   │   ├── notice_cache_tests.rs
+│   │   │   │   ├── notice_missing_tests.rs
 │   │   │   │   ├── notice_owner_tests.rs
 │   │   │   │   ├── notice_resume_tests.rs
 │   │   │   │   ├── notice_settlement.rs
@@ -4269,6 +4321,7 @@ src/
 │   │   │   │   └── scan.rs
 │   │   │   ├── host/
 │   │   │   │   ├── activation_io.rs
+│   │   │   │   ├── child_retirement.rs
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── fresh_input.rs
 │   │   │   │   ├── fresh_input_tests.rs
@@ -4445,6 +4498,8 @@ src/
 │   │   │   ├── suspension.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
+│   │   │   ├── thread_child_dormant_tests.rs
+│   │   │   ├── thread_child_host_tests.rs
 │   │   │   ├── tool_card_accuracy_tests.rs
 │   │   │   ├── tool_card_actor_replay_tests.rs
 │   │   │   ├── tool_card_actor_tests.rs

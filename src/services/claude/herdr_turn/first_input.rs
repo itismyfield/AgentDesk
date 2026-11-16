@@ -97,6 +97,29 @@ fn write(
     };
     let HerdrInputRun::Ran(run) = observed_input(cancel, start, || {
         crate::services::claude_tui::composer_lock::with_composer_mutation_lock(logical, || {
+            if attached.awaiting_clear {
+                match composer::wait_for(cancel, Duration::from_secs(10), || {
+                    if crate::services::claude_tui::readiness::adopt_awaiting_clear(
+                        logical,
+                        &attached.nonce,
+                        path,
+                    ) {
+                        std::ops::ControlFlow::Break(())
+                    } else {
+                        std::ops::ControlFlow::Continue(())
+                    }
+                }) {
+                    Ok(()) => (),
+                    Err(composer::WaitStop::Cancelled) => {
+                        return InputRun::Cancelled { confirmed: 0 };
+                    }
+                    Err(composer::WaitStop::TimedOut) => {
+                        return InputRun::Refused(
+                            crate::services::claude_tui::host_input::InputRefusal::Unknown,
+                        );
+                    }
+                }
+            }
             composer::run_ready(logical, path, &attached.target, &plan, cancel)
         })
     })?
@@ -118,14 +141,34 @@ fn write(
         stopped @ (InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }) => {
             let pane = attached.target.clone();
             let watched_session = logical.to_owned();
+            let clearing = attached.awaiting_clear;
+            let epoch = attached.nonce.clone();
+            let clear_path = path.to_path_buf();
             let watched_path = attached.transcript.clone();
             crate::services::claude_tui::owner_input::record_preparation_watch(Box::new(
                 move || {
                     use crate::services::claude_tui::busy_inject::Screen;
-                    if crate::services::claude_tui::readiness::observe(&watched_session,Some(&watched_path)).is_some()
+                    // The same restart-aware proof the composer admits, with its screen check.
+                    let restart = (!clearing).then(|| {
+                        crate::services::claude_tui::readiness::observe_restored(
+                            &watched_session,
+                            Some(&watched_path),
+                        )
+                        .map(|proof| proof.restart())
+                    });
+                    let ready = match restart {
+                        None => crate::services::claude_tui::readiness::clear_wakeable(
+                            &watched_session,
+                            &epoch,
+                            &clear_path,
+                        ),
+                        Some(proof) => proof.is_some(),
+                    };
+                    if ready
                         && pane.capture_ansi(-80).as_deref().is_some_and(|capture|
                             crate::services::claude_tui::readiness::empty_draft(capture)
-                            && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(capture)) {
+                            && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(capture)
+                            && (restart != Some(Some(true)) || composer::restored_screen_idle(capture))) {
                         Screen::Ready
                     } else { Screen::Unknown }
                 },
@@ -408,6 +451,7 @@ mod regression_tests {
                 transcript: transcript.to_path_buf(),
                 target: herdr_endpoints().target(&record).unwrap(),
                 bound: true,
+                awaiting_clear: false,
                 physical: None,
             },
         )

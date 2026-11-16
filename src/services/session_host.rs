@@ -37,11 +37,17 @@ mod model;
 mod process_host;
 mod resolve;
 mod session_record;
+mod submit;
+#[cfg(test)]
+pub(crate) use submit::SubmitSpy;
+#[cfg(unix)]
+pub(crate) use submit::WrapperFrame;
 #[cfg(test)]
 pub(crate) mod test_support;
 // The termination service's Herdr fixture, for the discord relay test that drives it end to end.
 #[cfg(all(test, unix))]
 pub(crate) use herdr_gate::tests::p11 as herdr_termination_rig;
+mod termination;
 mod tmux_host;
 mod traits;
 
@@ -81,6 +87,9 @@ pub(crate) use model::{
 pub(crate) use process_host::ProcessHost;
 pub(crate) use resolve::{
     HostEvidence, HostWitness, SessionTargetEvidence, host_for, resolve_host_kind,
+};
+pub(crate) use submit::{
+    AuthorizedHostTarget, InputSource, KeyOutcome, PinnedInput, SubmitOutcome, SubmitPayload,
 };
 pub(crate) use tmux_host::{TmuxHost, tmux_key_name};
 pub(crate) use traits::InteractiveSessionHost;

@@ -145,10 +145,8 @@ pub(super) async fn handle_terminal_abort_exits(
                         None,
                     );
                     record_tmux_exit_reason(&sess, "watcher cleanup: prompt too long");
-                    crate::services::platform::tmux::kill_session(
-                        &sess,
-                        "watcher cleanup: prompt too long",
-                    );
+                    crate::services::session_host::TmuxHost
+                        .kill(&sess, "watcher cleanup: prompt too long");
                 }),
             )
             .await;

@@ -54,7 +54,7 @@ pub(super) fn execute_streaming_local_tmux(
                 tmux_session_name,
                 "forced fresh provider session cleanup before recreate",
             );
-            crate::services::platform::tmux::kill_session(
+            crate::services::session_host::TmuxHost.kill(
                 tmux_session_name,
                 "forced fresh provider session cleanup before recreate",
             );
@@ -80,7 +80,7 @@ pub(super) fn execute_streaming_local_tmux(
                     tmux_session_name,
                     &format!("followup failed, recreating: {}", error),
                 );
-                crate::services::platform::tmux::kill_session(
+                crate::services::session_host::TmuxHost.kill(
                     tmux_session_name,
                     &format!("followup failed, recreating: {}", error),
                 );
@@ -102,7 +102,7 @@ pub(super) fn execute_streaming_local_tmux(
             tmux_session_name,
             "stale local session cleanup before recreate",
         );
-        crate::services::platform::tmux::kill_session(
+        crate::services::session_host::TmuxHost.kill(
             tmux_session_name,
             "stale local session cleanup before recreate",
         );

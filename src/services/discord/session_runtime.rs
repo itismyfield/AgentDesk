@@ -517,6 +517,19 @@ pub(super) async fn bootstrap_thread_session(
     let provider_kind = shared.settings.read().await.provider.clone();
     // Build a short, stable channel_name: "{parent_channel}-t{thread_id}"
     let parent_info = resolve_thread_parent(http, thread_channel_id).await;
+    if let Some((parent_id, _)) = &parent_info {
+        // The best-effort parent only picks the checked read that records an O thread.
+        let channel = thread_channel_id.get();
+        let recorded =
+            crate::services::tui_o::cutover::record_thread_child_by_id(channel, parent_id.get());
+        if let Err(detail) = recorded.await {
+            tracing::warn!(
+                channel,
+                detail,
+                "[tui_o] thread session parent not recorded"
+            );
+        }
+    }
     let ch_name = if let Some((parent_id, parent_name)) = parent_info {
         let parent = parent_name.unwrap_or_else(|| format!("{parent_id}"));
         Some(synthetic_thread_channel_name(&parent, thread_channel_id))

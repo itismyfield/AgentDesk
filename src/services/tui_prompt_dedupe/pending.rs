@@ -353,7 +353,9 @@ fn restored_hook(pending: &BindingEvent, path: Option<&str>) -> HookSignal {
         BindingCause::Clear => Some("clear"),
         BindingCause::Compact => Some("compact"),
         BindingCause::Fork => Some("fork"),
-        BindingCause::Continuation | BindingCause::Unknown => None,
+        BindingCause::Continuation | BindingCause::SameSessionVerified | BindingCause::Unknown => {
+            None
+        }
     };
     HookSignal {
         event: pending.evidence.hook_event.clone().unwrap_or_default(),

@@ -199,6 +199,7 @@ struct Attached {
     transcript: PathBuf,
     target: HerdrTarget,
     bound: bool,
+    awaiting_clear: bool,
     /// The record's socket and pane, which the gate fences as `socket#pane`.
     physical: Option<(String, String)>,
 }
@@ -218,6 +219,7 @@ pub(crate) fn owned_prompt_for_tests(
         transcript,
         target: gate(record)?,
         bound: true,
+        awaiting_clear: false,
         physical: physical(record),
     };
     let (sender, _receiver) = std::sync::mpsc::channel();
@@ -305,6 +307,7 @@ fn bound_source(
         transcript: PathBuf::from(binding.output_path),
         target,
         bound: true,
+        awaiting_clear: false,
         physical: physical(record),
     })
 }
@@ -387,6 +390,7 @@ fn cleared_source(
         transcript,
         target,
         bound: true,
+        awaiting_clear: true,
         physical: physical(record),
     })
 }
@@ -695,6 +699,7 @@ fn attach(
         transcript,
         target,
         bound,
+        awaiting_clear: false,
         physical: physical(&record),
     })
 }
