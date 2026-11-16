@@ -13,27 +13,28 @@ failure retains its input. No pane cleanup authority is added.
 ## Entrypoint census and value bounds
 
 `git grep -n -E 'begin_handoff|finish_handoff|handoff_start_failed|handoff_failed|handoff_ended|unfinished_handoff|claude_handoff::(prepare|recover)' -- src`
-is the exhaustive journal reference census; coordinates below are baseline coordinates.
+is the exhaustive journal reference census; the table coordinates identify the corresponding
+current functions after the main merge. The model and counterexample retain the baseline above.
 Tests are excluded from the production rows. The implementation report records the
 updated coordinates and raw census. No production queue or server was changed.
 
 | Entry / consumer | Code | Reachable journal state and effect |
 |---|---|---|
 | RootReplaced proof / retire | `discord/herdr_terminate/root_replaced.rs:396,536` proof + retirement; `discord/recovery_engine/herdr_server_replaced.rs:200` | Bound → Retired only after existing proof; no input send |
-| Person input before busy/idle selection | `discord/router/message_handler/provider_dispatch/owner_input.rs:196` → `queue_io/input_owner/claude_handoff.rs:27` | Absent, Legacy, Pending, Bound, Retired, opaque rows; existing/new journal judged before dispatch |
-| Begin/reuse | `queued_head/v2/claude_handoff.rs:10` | exact front + grant; UUID, logical/session key, original identity; ended=false, failures=0, notice_acked=false |
-| Pin / old pane ended | same `:47,:74`; prepare `:132-164` | exact original/pane, ended=false→true; pin absent or verified tmux pin |
-| Close failure / retry notice | same `:83,:93`; prepare `:165-188,:310` | durable saturating u32 failures; notice after two close failures, persistent dedupe + acknowledgment |
-| Launch failure before reserve | `provider_dispatch/start_failure.rs:124`; `v2/claude_handoff.rs:116` | BEFORE: hold/revoke only, failures stays 0; AFTER: durable count + deadline, capped at five before retention |
-| Retain and release head | `queued_head/v2/start_failure.rs:58` | existing KnownNotSent retained original + notice intent + bind relocation in one snapshot; new change closes matching journal in same snapshot |
-| Successful reserve (including new execution before Bound) | `queued_head/v2.rs:250-257` | requires herdr target, matching logical, ended=true; consumes journal atomically with attempt; already satisfied on main |
-| Bound prepare / input-free recovery finish | `claude_handoff.rs:73-85,:346-364`; `v2/claude_handoff.rs:101` | finish only after journal's original is no longer queued; id/logical matching |
-| Local completed receipt | `queued_head/v2/control.rs:384-408` | consumes the original without reserve; an input-free ended journal still needs Bound recovery |
-| Timed retry / extra wake | `claude_handoff.rs:270-309` | deduped `(channel,id)` task, rechecks live journal/front; persisted deadline prevents early launch on unrelated wake/reboot |
-| Boot and restart census / adoption | `pending_queue_persistence/queued_recovery.rs:54,88-96`; `queued_head/compat.rs:11`; `owner_input.rs:656-685` | journal alone selects actor; retained notice drains before next wake; deadline defaults to 0 for old snapshots |
-| Cancel one input | `queued_head/v2/control.rs:207-274` | clears journal only if removed original matches; old callbacks lose claim |
-| Queue clear / clear waiting | same `:285-297,:412-422` | clears journal when unattempted waiting items taken; attempted custody preserved |
-| Legacy migration / adoption | `queued_head/v2/migration.rs:52`; `queued_head/v2.rs:171`; `v2_types.rs:39` | no journal on V1 migration/new snapshot; optional journal on V2 restore |
+| Person input before busy/idle selection | `discord/router/message_handler/provider_dispatch/owner_input.rs:202-215` → `queue_io/input_owner/claude_handoff.rs:44-61` | Absent, Legacy, Pending, Bound, Retired, opaque rows; existing/new journal judged before dispatch |
+| Begin/reuse | `queued_head/v2/claude_handoff.rs:65-103` (`begin_handoff`) | exact front + grant; UUID, logical/session key, original identity; ended=false, failures=0, notice_acked=false |
+| Pin / old pane ended | `queued_head/v2/claude_handoff.rs:104-130` / `queued_head/v2/claude_handoff.rs:131-139`; prepare `queue_io/input_owner/claude_handoff.rs:173-203` | exact original/pane, ended=false→true; pin absent or verified tmux pin |
+| Close failure / retry notice | `queued_head/v2/claude_handoff.rs:196-228` / `queued_head/v2/claude_handoff.rs:140-147`; prepare `queue_io/input_owner/claude_handoff.rs:205-214`; notice `queue_io/input_owner/claude_handoff.rs:481-515` | durable saturating u32 failures; notice after two close failures, persistent dedupe + acknowledgment |
+| Launch failure before reserve | `provider_dispatch/start_failure.rs:127-130`; `queued_head/v2/claude_handoff.rs:242-269` (`handoff_start_failed`) | BEFORE: hold/revoke only, failures stays 0; AFTER: durable count + deadline, capped at five before retention |
+| Retain and release head | `queued_head/v2/start_failure.rs:60-149` (`start_failed`) | existing KnownNotSent retained original + notice intent + bind relocation in one snapshot; new change closes matching journal in same snapshot |
+| Successful reserve (including new execution before Bound) | `queued_head/v2.rs:251-259` (`place`) | requires herdr target, matching logical, ended=true; consumes journal atomically with attempt; already satisfied on main |
+| Bound prepare / input-free recovery finish | `queue_io/input_owner/claude_handoff.rs:118-130` / `queue_io/input_owner/claude_handoff.rs:530-541`; `queued_head/v2/claude_handoff.rs:149-161` | finish only after journal's original is no longer queued; id/logical matching |
+| Local completed receipt | `queued_head/v2/control.rs:331-356` (`complete_claimed_locally`) | consumes the original without reserve; an input-free ended journal still needs Bound recovery |
+| Timed retry / extra wake | `queue_io/input_owner/claude_handoff.rs:328-342` / `queue_io/input_owner/claude_handoff.rs:420-480` (`retry_start` / `schedule`) | deduped `(channel,id)` task, rechecks live journal/front; persisted deadline prevents early launch on unrelated wake/reboot |
+| Boot and restart census / adoption | `pending_queue_persistence/queued_recovery.rs:53-59` / `pending_queue_persistence/queued_recovery.rs:88-96`; `queued_head/compat.rs:11`; `provider_dispatch/owner_input.rs:707-729` | journal alone selects actor; retained notice drains before next wake; deadline defaults to 0 for old snapshots |
+| Cancel one input | `queued_head/v2/control.rs:191-258` (`cancel`) → `queued_head/v2/claude_handoff.rs:44-58` (`handoff_input_left`) | clears journal only if removed original matches; old callbacks lose claim |
+| Queue clear / clear waiting | `queued_head/v2/clear.rs:154-240` (`clear_all`); `queued_head/v2/control.rs:359-397` (`clear_waiting`) | clears journal when unattempted waiting items taken; attempted custody preserved |
+| Legacy migration / adoption | `queued_head/v2/migration.rs:52`; `queued_head/v2.rs:172`; `queued_head/v2_types.rs:43-44` | no journal on V1 migration/new snapshot; optional journal on V2 restore |
 | Legacy write and /clear guards | `queued_head/compat.rs:57-79` | V2 remains read-only to legacy save/clear (V2 clear goes through its owner); no new bypass |
 
 `Cap=5` follows the implementation launch budget; backoff uses the existing

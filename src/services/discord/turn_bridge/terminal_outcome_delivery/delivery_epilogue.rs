@@ -17,6 +17,7 @@ pub(super) enum DeliveryEpilogueOutcome {
 pub(super) use super::contracts::DeliveryEpilogueContext;
 
 pub(super) struct DeliveryEpilogueState<'a> {
+    pub(super) input_marked: &'a mut bool,
     pub(super) response_sent_offset: &'a mut usize,
     pub(super) inflight_state: &'a mut InflightTurnState,
     pub(super) terminal_full_replay_cleanup_msg_ids: &'a mut Vec<MessageId>,
@@ -329,9 +330,9 @@ pub(super) async fn handle_delivery_epilogue(
         {
             // A delivered provider failure notice marks the request failed, not done.
             if ctx.provider_failure {
-                tv_fail(&shared_owned, channel_id, user_msg_id, inflight_generation, "fail").await;
+                *state.input_marked = tv_fail(&shared_owned, channel_id, user_msg_id, inflight_generation, "fail").await;
             } else if input_confirmed {
-                tv_done(&shared_owned, channel_id, user_msg_id, inflight_generation, "done").await;
+                *state.input_marked = tv_done(&shared_owned, channel_id, user_msg_id, inflight_generation, "done").await;
             }
         }
 
