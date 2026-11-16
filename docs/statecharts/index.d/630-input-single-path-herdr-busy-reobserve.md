@@ -1,0 +1,2 @@
+key: 630-input-single-path-herdr-busy-reobserve
+| `input-single-path` Slice2 dynamic reobserve (#8114) | `5b99644e2eab6279c31404ba9fbb561bfaecc3cc` (read-only snapshot) | Inactive wake Before and wake/source/observer/identity/resurrection mutants are expected RED | Original30 unchanged + dynamic24 checked; same-front clear wakes existing Idle, UnknownKeep/discard never resurrect; [report](input-single-path/herdr-busy-reobserve.report.md). |

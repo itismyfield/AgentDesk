@@ -112,6 +112,7 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
         transcript: transcript.clone(),
         target,
         bound: true,
+        awaiting_clear: false,
         physical: worker_clear.then(|| (rig.socket().display().to_string(), PANE.into())),
     };
     let (tx, rx) = std::sync::mpsc::channel();

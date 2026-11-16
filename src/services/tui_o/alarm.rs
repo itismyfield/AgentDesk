@@ -227,6 +227,7 @@ fn alarm_kind(alarm: &WriterAlarm) -> Option<&'static str> {
         WriterAlarm::BindingLogUnavailable { .. } => "binding_log_unavailable",
         WriterAlarm::RotationStalled { .. } => "rotation_stalled",
         WriterAlarm::SelectionMissing => "selection_missing",
+        WriterAlarm::BindingMissing => "binding_missing",
         WriterAlarm::WaitingTooLong { .. } => WAITING_TOO_LONG,
         WriterAlarm::NotFound { .. } | WriterAlarm::CleanupRetired { .. } => return None,
     })
@@ -287,7 +288,16 @@ impl AlarmRouter {
         };
         let reason = format!("tui_o:{kind}:{channel}");
         if self.health.latch(&reason) {
-            tracing::warn!(channel, kind, ?alarm, "[tui_o] writer alarm");
+            if matches!(alarm, WriterAlarm::BindingMissing) {
+                tracing::warn!(
+                    channel,
+                    kind,
+                    ?alarm,
+                    "[tui_o] no binding; writer not started"
+                );
+            } else {
+                tracing::warn!(channel, kind, ?alarm, "[tui_o] writer alarm");
+            }
         }
         let (Some(alert_channel), Some(notifier)) = (self.alert_channel, &self.notifier) else {
             return;

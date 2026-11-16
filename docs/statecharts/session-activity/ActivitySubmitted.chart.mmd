@@ -1,0 +1,21 @@
+---
+title: "Claude activity: source evidence, recovery and stop boundary"
+---
+stateDiagram-v2
+  s0: Provider busy: unknown, watcher absent
+  s1: Provider busy: busy, watcher absent
+  s2: Provider busy: unknown after lease expiry, watcher absent
+  s3: Provider busy: busy, watcher attached
+  s4: Provider busy: unknown after one recovery cycle, watcher absent
+  s5: Provider busy: unknown after lease expiry, watcher attached
+  s6: Provider busy: unknown after one recovery cycle, watcher attached
+  [*] --> s0
+  s0 --> s1: read current source activity
+  s0 --> s2: expire hints and recheck
+  s1 --> s3: recover watcher
+  s1 --> s2: expire hints and recheck
+  s2 --> s4: new source progress renews lease
+  s3 --> s5: expire hints and recheck
+  s4 --> s1: read current source activity
+  s5 --> s6: new source progress renews lease
+  s6 --> s3: read current source activity

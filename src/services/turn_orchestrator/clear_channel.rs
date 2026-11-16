@@ -32,7 +32,7 @@ pub(super) fn dispatch(
     let _ = reply.send(clear_and_signal(state, channel_id, persistence, active));
 }
 
-/// Clears the state and, unless a read-only queue refused it, frees turn-finished waiters.
+/// Clears the state and frees turn-finished waiters when the active turn is released.
 fn clear_and_signal(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
@@ -40,7 +40,7 @@ fn clear_and_signal(
     active: ActivePolicy,
 ) -> ClearChannelResult {
     let result = clear_channel_state(state, channel_id, persistence, active);
-    if active == ActivePolicy::Release && !result.persistence.failed.contains(&"queue_read_only") {
+    if active == ActivePolicy::Release {
         super::mark_turn_finished_signal_done(channel_id);
     }
     result
@@ -84,7 +84,7 @@ pub(crate) struct ClearPersistence {
 
 impl ClearPersistence {
     /// Runs `write`, and once more if it fails; every failure is logged under `what`.
-    fn attempt(
+    pub(super) fn attempt(
         &mut self,
         what: &'static str,
         mut write: impl FnMut() -> Result<(), String>,
@@ -113,19 +113,8 @@ pub(super) fn clear_channel_state(
     persistence: QueuePersistenceContext,
     active: ActivePolicy,
 ) -> ClearChannelResult {
-    if let Some(path) =
-        pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel_id)
-        && let Err(error) = queued_head::compat::require_clearable(&path)
-    {
-        tracing::warn!(%channel_id, path = %path.display(), %error, "read-only queue refused clear; preserve the original file and inspect with a V2-capable recovery binary");
-        return ClearChannelResult {
-            persistence: ClearPersistence {
-                failed: vec!["queue_read_only"],
-                count_unknown: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+    if let Some(result) = queued_head::clear_v2_channel(state, channel_id, &persistence, active) {
+        return result;
     }
     state.last_persistence = Some(persistence.clone());
     let namespace = super::remint_fence::namespace(&persistence);

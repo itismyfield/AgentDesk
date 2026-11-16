@@ -83,6 +83,7 @@ class RunnerMemoryTests(unittest.TestCase):
         self.assertEqual(build["max"]["host_used_bytes"], 40 * MIB)
         self.assertEqual(build["max"]["swap_used_bytes"], 12 * MIB)
         self.assertEqual(build["max"]["rss_sum_bytes"], 14 * MIB)
+
         self.assertEqual(build["max"]["largest_rss_bytes"], 8 * MIB)
         self.assertEqual(build["max"]["largest_hwm_bytes"], 10 * MIB)
         self.assertEqual(build["max"]["rustc_processes"], 2)
@@ -91,6 +92,22 @@ class RunnerMemoryTests(unittest.TestCase):
         self.assertEqual(data["cgroup_limit_bytes"], 64 * MIB)
         self.assertEqual(data["lifetime_cgroup_peak_bytes"], 20 * MIB)
         self.assertIn("not a per-step peak", (self.root / "job-summary.md").read_text())
+
+    def test_checkpoint_keeps_an_independent_copy_before_a_lost_build(self):
+        self.env["CARGO_BUILD_JOBS"] = "2"
+        self.run_probe("start")
+        self.run_probe("checkpoint")
+        checkpoint = self.root / "runner-memory-checkpoint"
+        before = (checkpoint / "samples.jsonl").read_bytes()
+        metadata = json.loads((checkpoint / "metadata.json").read_text())
+        self.assertEqual(metadata["cargo_build_jobs"], "2")
+        self.assertTrue(before)
+        self.memory(available=8)
+        self.run_probe("begin", "just lint")
+        self.assertEqual((checkpoint / "samples.jsonl").read_bytes(), before)
+        self.assertNotEqual((self.root / "runner-memory/samples.jsonl").read_bytes(), before)
+        self.assertFalse((self.root / "runner-memory/stop").exists())
+        self.assertNotIn(self.env["MEMORY_TEST_SECRET"], "".join(p.read_text() for p in checkpoint.iterdir()))
 
     def test_detached_sampler_does_not_hold_capture_pipes_and_stops_before_interval(self):
         before = time.monotonic()

@@ -1,3 +1,4 @@
+use crate::services::process::reaping::CommandReapExt;
 use crate::services::process::stream_child::stream_queue;
 use crate::services::process::stream_child::{StreamChild, finish_reader, spawn_reader};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -339,7 +340,7 @@ fn run_turn_once(
         );
     }
     crate::services::process::configure_child_process_group(&mut command);
-    let mut child = command.spawn().map_err(|e| TurnFailure {
+    let mut child = command.spawn_reaping().map_err(|e| TurnFailure {
         message: format!("Failed to start Qwen: {}", e),
         retryable: false,
     })?;

@@ -246,10 +246,12 @@ where
     F: FnMut(Pin) -> Fut,
     Fut: std::future::Future<Output = Result<bool, String>>,
 {
+    // The name is spliced into control-mode command text. Letters and digits of any script, as
+    // AgentDesk builds names from channel names, encode no ASCII byte tmux reads as syntax.
     if logical.is_empty()
         || !logical
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-_:.".contains(&b))
+            .chars()
+            .all(|c| c.is_alphanumeric() || "-_:.".contains(c))
     {
         return Err("logical tmux identity unsupported".into());
     }
@@ -356,6 +358,9 @@ mod tests {
             String::from_utf8(out.stdout).unwrap()
         }
         fn start(&self) {
+            self.start_named("i8077-close-test");
+        }
+        fn start_named(&self, name: &str) {
             let capture = self.dir.path().join("busy-screen");
             std::fs::write(&capture, CAPTURE_46).unwrap();
             let command = format!("cat '{}'; exec sleep 300", capture.display());
@@ -369,7 +374,7 @@ mod tests {
                 "-y",
                 "39",
                 "-s",
-                "i8077-close-test",
+                name,
                 &command,
             ]);
         }
@@ -583,6 +588,31 @@ except ProcessLookupError:
             .await
             .is_ok()
         );
+        drop(root_guard);
+    }
+
+    #[tokio::test]
+    async fn an_agentdesk_name_in_hangul_closes_only_its_exact_pane() {
+        use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
+        let root_guard = crate::config::TestRuntimeRootGuard::new();
+        let server = Server {
+            dir: tempfile::tempdir().unwrap(),
+        };
+        let logical =
+            crate::services::provider::ProviderKind::Claude.build_tmux_session_name("게임-cc");
+        server.start_named(&logical);
+        server.start_named("i8177-bystander");
+        let prepared =
+            PreparedIncarnation::prepare("claude", &logical, Some(8177), Some("argv-a"), true)
+                .unwrap();
+        crate::services::discord::stamp_spawn_markers(&logical, Some(&prepared)).unwrap();
+        let result = end_with(server.command(), &logical, 8177, None, |_| async {
+            Ok(true)
+        })
+        .await;
+        assert_eq!(result, Ok(()));
+        let names = server.run(&["-N", "list-sessions", "-F", "#{session_name}"]);
+        assert_eq!(names.lines().collect::<Vec<_>>(), ["i8177-bystander"]);
         drop(root_guard);
     }
 }

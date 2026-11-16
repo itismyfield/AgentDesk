@@ -1,0 +1,2 @@
+key: 164-session-lifecycle-herdr-restart-b2-plan
+| `session-lifecycle` (Herdr B2 incomplete PLAN, #8128) | canonical `fc4b3dd847` / external candidate `3de2b179` | External candidate: normal28 GREEN, SeedBehind has additional RequestResolves/RestartAvailable violations; expected unchanged | Canonical model/cfg untouched. External63 cfg/615 TLC matched62/63; source/ports remain incomplete, production validation0. [B2 partial report](session-lifecycle/herdr-restart-owner-b2.report.md). |
