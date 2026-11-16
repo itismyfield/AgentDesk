@@ -110,7 +110,7 @@ pub(in crate::services::discord) fn confirm_codex_channel(
         return Confirmation::Confirmed;
     }
     let held = takeover
-        .and_then(|source| ended(source).err())
+        .and_then(|source| takeover_ended(source).err())
         .or_else(|| unfinished(&provider, channel));
     if let Some(detail) = held {
         return Confirmation::Retry(detail);
@@ -130,6 +130,51 @@ pub(in crate::services::discord) fn confirm_codex_channel(
         }
         outcome => Confirmation::Retry(format!("retirement left {outcome:?}")),
     }
+}
+
+/// A compressed or hook-replaced Codex source cannot still hold the takeover turn.
+fn takeover_ended(source: &SourceBinding) -> Result<(), String> {
+    use crate::services::codex_tui::rollout_index::archived_rollout;
+    use crate::services::tui_prompt_dedupe::binding_events::{self as p5, BindingTarget};
+
+    let error = match ended(source) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if source.provider != ShadowProvider::Codex {
+        return Err(error);
+    }
+    let missing = matches!(std::fs::symlink_metadata(&source.source.path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+    if missing && archived_rollout(&source.source.path) {
+        return Ok(());
+    }
+    let events = p5::binding_events_since(source.channel_id, 0).map_err(|e| e.to_string())?;
+    let taken: Vec<_> = events.iter().filter(|event| {
+        event.provider == "codex" && (event.old.as_ref() == Some(&source.source)
+            || matches!(&event.new, BindingTarget::Source(named) | BindingTarget::Resolved { source: named, .. }
+            if *named == source.source))
+    }).collect();
+    let Some(first) = taken.first() else {
+        return Err(error);
+    };
+    let Some(nonce) = first.execution_nonce.as_deref() else {
+        return Err(error);
+    };
+    if taken.iter().any(|event| {
+        event.tmux_session != first.tmux_session || event.execution_nonce.as_deref() != Some(nonce)
+    }) {
+        return Err("the takeover source names more than one execution".into());
+    }
+    let ahead = p5::codex::source_ahead(
+        source.channel_id,
+        &first.tmux_session,
+        nonce,
+        Some(&source.source.session_id),
+        &source.source.path,
+    )
+    .map_err(|e| e.to_string())?;
+    if ahead.is_some() { Ok(()) } else { Err(error) }
 }
 
 /// The whole rollout ends Idle after a turn fact; metadata alone, an open or unknown turn, or a
