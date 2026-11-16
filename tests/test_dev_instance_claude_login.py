@@ -120,6 +120,19 @@ class ClaudeLoginTests(TestCase):
         self.assertEqual(child_environment(m, {})['CLAUDE_CONFIG_DIR'], str(data))
         self.assertEqual(self.login['config_dir'], str(self.fixture.home/'.claude'))
 
+    def test_login_home_comes_from_the_binding_and_must_own_the_pool(self):
+        with patch.object(Path, 'home', return_value=self.fixture.base/'runtime-home'):
+            m = self.fixture.prepare(claude_login=self.login)
+            self.assertEqual(m['claude_login']['login_home'], self.login['login_home'])
+            self.assertEqual(child_environment(m, {})['CLAUDE_CONFIG_DIR'], m['claude_login']['config_dir'])
+        foreign = self.fixture.home/'foreign'
+        changed = {**self.login, 'login_home': str(foreign),
+                   'config_dir': str(foreign/'.claude'), 'cli': str(foreign/'.local/bin/claude')}
+        with self.assertRaises(InstanceError):
+            from scripts.dev_instance.manifest import declared_manifest
+            declared_manifest(self.fixture.base, m['instance_id'], self.fixture.worktree,
+                              m['head'], m['profile'], m['api']['port'], m['postgres']['port'], changed)
+
     def test_legacy_global_binding_can_still_be_removed_without_launch(self):
         from scripts.dev_instance.down import remove
         m = self.fixture.prepare(claude_login=self.login)
