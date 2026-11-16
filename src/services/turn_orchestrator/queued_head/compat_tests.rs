@@ -115,25 +115,13 @@ fn v2_clear_purge_drain_and_restore_preserve_originals_and_marker() {
 
             let after: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert_eq!(after["version"], 2);
-            if cfg!(unix) {
-                assert!(clear.persistence.failed.is_empty());
-                assert!(!clear.persistence.count_unknown);
-                assert_eq!(clear.discarded_message_ids.len(), waiting + 1);
-                assert_eq!(after["items"], json!([]));
-                assert_eq!(after["retained_inputs"], json!([]));
-                assert!(after["head_injection"].is_null());
-            } else {
-                assert!(
-                    !clear.persistence.failed.is_empty(),
-                    "unconfirmed V2 durability is a failure"
-                );
-                assert!(clear.persistence.count_unknown);
-                assert_eq!(after["items"], fixture(channel.get(), waiting)["items"]);
-                assert_eq!(
-                    after["retained_inputs"],
-                    fixture(channel.get(), waiting)["retained_inputs"]
-                );
-            }
+            // Windows accepts visible publication without a directory flush; sync failures remain errors.
+            assert!(clear.persistence.failed.is_empty());
+            assert!(!clear.persistence.count_unknown);
+            assert_eq!(clear.discarded_message_ids.len(), waiting + 1);
+            assert_eq!(after["items"], json!([]));
+            assert_eq!(after["retained_inputs"], json!([]));
+            assert!(after["head_injection"].is_null());
             assert_eq!(
                 after["terminal_identities"],
                 fixture(channel.get(), waiting)["terminal_identities"]
@@ -381,7 +369,7 @@ fn v2_pre_source_inspection_does_not_invent_a_file_identity() {
 #[cfg(unix)]
 const WRITER_V2_GOLDEN: &str = r#"{"version":2,"items":[],"head_injection":null,"retained_inputs":[{"input":{"identity":{"primary":100,"queued_generation":5,"sources":[{"message_id":100,"queued_generation":5}]},"original":{"author_id":7,"author_is_bot":false,"message_id":100,"queued_generation":5,"source_message_ids":[100],"text":"golden original","reply_context":null,"has_reply_boundary":false,"merge_consecutive":false,"channel_id":727290,"channel_name":null,"override_channel_id":null},"phase":"may_have_sent","attempt":{"nonce":"golden-nonce","provider":"codex","target":{"host":"tmux","owner":"golden-pane","root":"/test","execution_nonce":"execution"},"source":{"kind":"existing","session_id":"native","transcript":"/test/rollout","file":[1,2],"offset":20}},"payload":{"frame":"golden frame","digest":"digest","attribution":{}},"confirmation_deadline_ms":30000},"reason":{"kind":"unconfirmed"},"notice":{"kind":"unconfirmed","enqueued":false}}],"terminal_identities":[],"namespace":"golden","admission_sequence":1}"#;
 
-// Producing the writer golden requires confirmed parent directory fsync.
+// Keep the fixed writer golden inspectable when optional fields are absent.
 #[cfg(unix)]
 #[test]
 fn v2_writer_golden_remains_inspectable_as_read_only_and_new_fields_default() {
