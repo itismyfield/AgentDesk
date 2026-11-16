@@ -1321,6 +1321,7 @@ pub(super) fn make_shared_data_for_tests_with_barrier(
     shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
 ) -> Arc<SharedData> {
     let tmux_relay_coords = Arc::new(dashmap::DashMap::new());
+    let mut prepared_bot_state = None;
     let engine_runtime = EngineRuntime::new(
         ProviderKind::Claude,
         9,
@@ -1328,19 +1329,29 @@ pub(super) fn make_shared_data_for_tests_with_barrier(
         PolicyRuntime { engine: None },
         Vec::new(),
         || {
-            (
-                tokio::sync::Mutex::new(CoreState {
-                    sessions: std::collections::HashMap::new(),
-                }),
-                ChannelMailboxRegistry::default(),
-            )
+            let core = tokio::sync::Mutex::new(CoreState {
+                sessions: std::collections::HashMap::new(),
+            });
+            let mailboxes = ChannelMailboxRegistry::default();
+            let settings = tokio::sync::RwLock::new(DiscordBotSettings::default());
+            let api_timestamps = dashmap::DashMap::new();
+            let registry =
+                Arc::new(crate::services::engine_runtime::relay_state::RegistryState::new());
+            prepared_bot_state = Some((settings, api_timestamps));
+            (core, mailboxes, registry)
         },
+    );
+    let (settings, api_timestamps) =
+        prepared_bot_state.expect("bootstrap storage initialized once");
+    let tmux_watchers = TmuxWatcherRegistry::from_storage(
+        Arc::clone(&engine_runtime.watcher_registry),
+        Arc::clone(&tmux_relay_coords),
     );
     Arc::new(SharedData {
         engine: engine_runtime,
-        settings: tokio::sync::RwLock::new(DiscordBotSettings::default()),
-        api_timestamps: dashmap::DashMap::new(),
-        tmux_watchers: TmuxWatcherRegistry::new_with_coords(Arc::clone(&tmux_relay_coords)),
+        settings,
+        api_timestamps,
+        tmux_watchers,
         tmux_relay_coords,
         ui: PlaceholderState {
             placeholder_cleanup: Arc::new(

@@ -84,6 +84,7 @@ pub(super) fn run_bot_build_shared_data(
     } = restored;
     let process_generation = runtime_store::allocate_process_generation();
     let tmux_relay_coords = Arc::new(dashmap::DashMap::new());
+    let mut prepared_bot_state = None;
     let engine_runtime = EngineRuntime::new(
         provider.clone(),
         api_port,
@@ -91,21 +92,29 @@ pub(super) fn run_bot_build_shared_data(
         PolicyRuntime { engine },
         initial_skills,
         || {
-            (
-                Mutex::new(CoreState {
-                    sessions: HashMap::new(),
-                }),
-                ChannelMailboxRegistry::default(),
-            )
+            let core = Mutex::new(CoreState {
+                sessions: HashMap::new(),
+            });
+            let mailboxes = ChannelMailboxRegistry::default();
+            let settings = tokio::sync::RwLock::new(bot_settings);
+            let api_timestamps = dashmap::DashMap::new();
+            let registry =
+                Arc::new(crate::services::engine_runtime::relay_state::RegistryState::new());
+            prepared_bot_state = Some((settings, api_timestamps));
+            (core, mailboxes, registry)
         },
+    );
+    let (settings, api_timestamps) =
+        prepared_bot_state.expect("bootstrap storage initialized once");
+    let tmux_watchers = crate::services::discord::TmuxWatcherRegistry::from_storage(
+        Arc::clone(&engine_runtime.watcher_registry),
+        Arc::clone(&tmux_relay_coords),
     );
     Arc::new(SharedData {
         engine: engine_runtime,
-        settings: tokio::sync::RwLock::new(bot_settings),
-        api_timestamps: dashmap::DashMap::new(),
-        tmux_watchers: crate::services::discord::TmuxWatcherRegistry::new_with_coords(Arc::clone(
-            &tmux_relay_coords,
-        )),
+        settings,
+        api_timestamps,
+        tmux_watchers,
         tmux_relay_coords,
         // #3038 S4: wrapped verbatim at the first-member position
         // (evaluation-order preserved).
@@ -364,6 +373,9 @@ mod tests {
         assert!(std::ptr::eq(&shared.policy, &retained.policy));
         assert!(std::ptr::eq(&shared.core, &retained.core));
         assert!(std::ptr::eq(&shared.mailboxes, &retained.mailboxes));
+        let registry: &crate::services::engine_runtime::relay_state::RegistryState =
+            &shared.tmux_watchers;
+        assert!(std::ptr::eq(registry, retained.watcher_registry.as_ref()));
         assert_eq!(Arc::strong_count(&retained), 2);
     }
 
@@ -655,6 +667,45 @@ mod tests {
             Some(MessageId::new(8192102))
         );
         assert!(engine_view.hard_stop().await.removed_token.is_some());
+        drop(restore);
+        drop(root);
+    }
+    #[tokio::test]
+    async fn watcher_registry_and_lease_keep_one_engine_identity() {
+        let root = crate::config::TestRuntimeRootGuard::new();
+        let restore = RestoreRegistry(crate::engine::ops::turn_ops::health_registry());
+        let shared = make_shared_data_for_tests_with_storage(None);
+        assert_engine_runtime_identity(&shared);
+        let registry: &crate::services::engine_runtime::relay_state::RegistryState =
+            &shared.tmux_watchers;
+        assert!(std::ptr::eq(
+            registry,
+            shared.engine.watcher_registry.as_ref()
+        ));
+        assert_eq!(registry.len(), 0);
+        let channel = ChannelId::new(8_192_301);
+        let lease = shared.delivery_lease(channel);
+        let canonical: &crate::services::engine_runtime::relay_state::lease::DeliveryLeaseCell =
+            &lease;
+        assert!(std::ptr::eq(
+            canonical,
+            shared.delivery_lease(channel).as_ref()
+        ));
+        let key = DeliveryLeaseKey::new(channel, 7, 31, None, None);
+        let holder = LeaseHolder::Watcher { instance_id: 31 };
+        assert!(lease.try_acquire(key.clone(), holder, 10, 20, lease_now_ms() + 1000));
+        assert!(!lease.try_acquire(
+            key.clone(),
+            LeaseHolder::Sink,
+            10,
+            20,
+            lease_now_ms() + 1000
+        ));
+        assert!(lease.release(holder, key, 10, 20));
+        let retained = shared.engine.clone();
+        drop(shared);
+        assert_eq!(retained.watcher_registry.len(), 0);
+        assert_eq!(canonical.channel_id(), channel);
         drop(restore);
         drop(root);
     }
