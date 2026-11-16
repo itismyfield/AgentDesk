@@ -917,9 +917,15 @@ input-single-path/NativePreparationHostedReceiptControlBefore.cfg	NativeInputPre
 input-single-path/NativePreparationHostedReceiptControlFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativePreparationHostedReceiptRestartBefore.cfg	NativeInputPreparation	HostedReceiptSurvivesBoot	HostedIdleEventuallySettles
 input-single-path/NativePreparationHostedReceiptRestartFixed.cfg	NativeInputPreparation	-	-
-input-single-path/NativePreparationHostedReceiptBypassBefore.cfg	NativeInputPreparation	HostedReceiptRequired	-
+input-single-path/NativePreparationHostedReceiptBypassBefore.cfg	NativeInputPreparation	HostedReceiptDurable,HostedReceiptRequired	-
 input-single-path/NativePreparationHostedReceiptBypassFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativePreparationHostedReceiptDurabilityBefore.cfg	NativeInputPreparation	HostedReceiptDurable	-
 input-single-path/NativePreparationHostedReceiptDurabilityFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativePreparationHostedReceiptReadBefore.cfg	NativeInputPreparation	HostedNoAddedReads	-
 input-single-path/NativePreparationHostedReceiptReadFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationHostedReceiptPendingBefore.cfg	NativeInputPreparation	HostedReceiptDurable	-
+input-single-path/NativePreparationHostedReceiptPendingFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationHostedReceiptBarrierBefore.cfg	NativeInputPreparation	HostedReceiptDurable	-
+input-single-path/NativePreparationHostedReceiptBarrierFixed.cfg	NativeInputPreparation	-	-
+input-single-path/NativePreparationHostedReceiptSavedBefore.cfg	NativeInputPreparation	-	HostedIdleEventuallySettles
+input-single-path/NativePreparationHostedReceiptSavedFixed.cfg	NativeInputPreparation	-	-

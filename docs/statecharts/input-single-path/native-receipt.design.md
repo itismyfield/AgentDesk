@@ -259,7 +259,7 @@ WARN/lost-wake/replay는 사용자 축소 그대로 제외다. 새 native checkp
 
 `NativeInputPreparation`의 기존 HostedBefore/Fixed를 metadata → created key → authenticated capture →
 receipt 생산/flush → 새 snapshot → strict closer/result CAS → row/wake/head로 확장했다.
-신규 Hosted receipt 20cfg와 기존 164cfg, 총 184cfg의 기대 집합을 검사한다.
+신규 Hosted receipt 26cfg와 기존 164cfg, 총 190cfg의 기대 집합을 검사한다.
 Idle 입력의 의무는 `~>`로 검사하여 receipt-only crash 뒤 재생긴 의무도 덮는다. physical input/head 및 receipt/result write는
 대입 상수가 아니라 실제 전이마다 카운터를 증가시킨다. receipt write 카운터는 하나의 물리 행(UUID/kind/range)별
 중복 확인을 세며, 한 입력에 서로 다른 command/user 행이 생기는 것까지 금지하는 값이 아니다.
@@ -276,3 +276,16 @@ Pending으로 고착되지 않고 결국 정산/다음 head로 진행해야 한�
 수정 전의 실제 결함은 **live/boot receipt 생산자 없음 → Pending 고착** 2cfg다.
 나머지 Before는 제안한 guard를 뺀 설계 뮤턴트이며 현재 Rust에 그 결함이 있다는 주장이 아니다.
 결과 표와 runner 원문은 설계 보고서에 둔다. TLC의 GREEN은 설계 모델 증거이며 미구현 Rust 시험의 PASS가 아니다.
+
+
+## 설계 리뷰 P2-1 구현 전 모델 보강
+
+`hReceipt`는 파일에 보이는 Event publication, `hDurable`은 별도 flush 확인 ACK다.
+HostedReceipt가 먼저 publication/version을 바꾸고 snapshot은 그 Event를 볼 수 있다.
+HostedReceiptAck 전에 새 submit·기존 pending submit·새 barrier admission을 허용하지 않는다.
+HostedReceiptDurable은 결과 또는 새 barrier가 durable 확인에 의존함을 검사한다.
+기존 durable 결과의 정리에는 unrelated receipt의 미확인 publication을 새로운 전역 guard로 얹지 않는다.
+이 구분은 runtime 저장 형식이나 상태를 추가하지 않는 모델 관측값이다.
+기존 durability 쌍과 pending/barrier/saved 각 Before/Fixed로 검증한다.
+
+P2-1 보강 뒤 Hosted 28cfg는 14 Before RED/14 Fixed GREEN, 관련 전체 190cfg는 expected 위반 집합 일치(rc0)다. pending 재시도와 새 barrier의 durable guard 제거는 각각 HostedReceiptDurable을 깨고, durable 결과 정리에 unrelated flush를 요구하면 HostedIdleEventuallySettles가 깨진다.

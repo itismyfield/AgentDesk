@@ -7,7 +7,7 @@ vars == <<BaseVars, review>>
 Init == /\ phase = "Intent" /\ role \in {"Primary", "Follower"}
         /\ pin = "None" /\ prepared = FALSE /\ anyKey = FALSE /\ original = TRUE
         /\ result = "None" /\ source = "PreSource" /\ restored = FALSE /\ admitted = FALSE
-        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed", "SupplyPrefixBefore", "SupplyPrefixFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {Mode \in {"ClearRouteBefore", "ClearRouteFixed"}}), clearDenied : {Mode \notin {"ClearRouteBefore", "ClearRouteFixed"}}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed", "ClearRouteBefore", "ClearRouteFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}, unwindIdentity : (IF Mode \in {"ActivationForeignBefore", "ActivationForeignFixed"} THEN {"own", "other_message", "old_generation", "other_actor", "rebound"} ELSE {"own"}), available : {TRUE, FALSE}, producerOn : {FALSE}, bridgeOn : {FALSE}, hostOn : {FALSE}, ticketExecution : {"N1", "N2"}, nativeBinding : {0}, supplyTicket : {Mode \notin {"SupplyTicketBefore", "SupplyTicketFixed"}}, supplySource : {Mode \notin {"SupplySourceBefore", "SupplySourceFixed"}}, supplyKey : {Mode \notin {"SupplyKeyBefore", "SupplyKeyFixed"}}, supplyStamp : {Mode \notin {"SupplyStampBefore", "SupplyStampFixed"}}, bStep : {0}, bBatch : {FALSE}, bCompact : {FALSE}, bBatchResult : {"None"}, bCommits : {0}, bOwn : {Mode \in {"BarrierSelfBefore", "BarrierSelfFixed"}}, bOwnFirst : {Mode = "BarrierOwnFirstFixed"}, bAmbiguous : {FALSE}, hCaptured : {FALSE}, hClosed : {FALSE}, hReceipt : {FALSE}, hVersion : {0}, hObserved : {0}, hRead : {FALSE}, hCommitVersion : {0}, hResultVersion : {0}, hWrites : {0}, hResults : {0}, hInjected : {0}, hNext : {0}, hRestarted : {FALSE}, hFlush : {Mode \notin {"HostedDurabilityBefore", "HostedDurabilityFixed"}}, hValid : (IF Mode \in {"HostedGuardBefore", "HostedGuardFixed"} THEN {"Good", "BadSource", "BadNonce", "BadUuid", "BadRange", "BadHash", "Meta", "NoKey"} ELSE {"Good"}), hOtherOwner : {Mode \in {"HostedCollisionBefore", "HostedCollisionFixed"}}, hRace : (IF Mode \in {"HostedControlBefore", "HostedControlFixed"} THEN {"Cancel", "Terminate", "Clear", "Stop", "Release"} ELSE {"None"}), hControl : {FALSE}]
+        /\ review \in [pc:{0}, kind:{"Taken","Attached"}, member:{"None"}, firstProof:{0}, proofs:{{}}, fifo:{TRUE}, taken:{FALSE}, pending:{TRUE}, receipts:{IF Mode \in {"StampBefore","StampFixed"} THEN {} ELSE {"two"}}, version:{0}, readVersion:{0}, stored:{"None"}, prefixStep : {0}, prefixReads : {0}, seed : {"Absent"}, prefixHash : {Mode \notin {"PrefixHashBefore", "PrefixHashFixed", "SupplyPrefixBefore", "SupplyPrefixFixed"}}, prefixFifo : {Mode \notin {"PrefixFifoBefore", "PrefixFifoFixed"}}, prefixLease : {1}, clearStep : {0}, clearOwner : (IF Mode \in {"ClearOwnerBefore", "ClearOwnerFixed"} THEN {FALSE, TRUE} ELSE {Mode \in {"ClearRouteBefore", "ClearRouteFixed"}}), clearDenied : {Mode \notin {"ClearRouteBefore", "ClearRouteFixed"}}, clearReadOnly : {Mode \in {"ClearReadOnlyBefore", "ClearReadOnlyFixed", "ClearRouteBefore", "ClearRouteFixed"}}, clearLease : {1}, clearRows : {1}, clearSignal : {FALSE}, clearIntents : {0}, clearHead : {FALSE}, unwindIdentity : (IF Mode \in {"ActivationForeignBefore", "ActivationForeignFixed"} THEN {"own", "other_message", "old_generation", "other_actor", "rebound"} ELSE {"own"}), available : {TRUE, FALSE}, producerOn : {FALSE}, bridgeOn : {FALSE}, hostOn : {FALSE}, ticketExecution : {"N1", "N2"}, nativeBinding : {0}, supplyTicket : {Mode \notin {"SupplyTicketBefore", "SupplyTicketFixed"}}, supplySource : {Mode \notin {"SupplySourceBefore", "SupplySourceFixed"}}, supplyKey : {Mode \notin {"SupplyKeyBefore", "SupplyKeyFixed"}}, supplyStamp : {Mode \notin {"SupplyStampBefore", "SupplyStampFixed"}}, bStep : {0}, bBatch : {FALSE}, bCompact : {FALSE}, bBatchResult : {"None"}, bCommits : {0}, bOwn : {Mode \in {"BarrierSelfBefore", "BarrierSelfFixed"}}, bOwnFirst : {Mode = "BarrierOwnFirstFixed"}, bAmbiguous : {FALSE}, hCaptured : {FALSE}, hClosed : {FALSE}, hReceipt : {FALSE}, hDurable : {FALSE}, hBarrier : {FALSE}, hUnrelated : {FALSE}, hVersion : {0}, hObserved : {0}, hRead : {FALSE}, hCommitVersion : {0}, hResultVersion : {0}, hWrites : {0}, hResults : {0}, hInjected : {0}, hNext : {0}, hRestarted : {FALSE}, hFlush : {Mode \notin {"HostedDurabilityBefore", "HostedDurabilityFixed", "HostedPendingBefore", "HostedPendingFixed", "HostedBarrierBefore", "HostedBarrierFixed"}}, hValid : (IF Mode \in {"HostedGuardBefore", "HostedGuardFixed"} THEN {"Good", "BadSource", "BadNonce", "BadUuid", "BadRange", "BadHash", "Meta", "NoKey"} ELSE {"Good"}), hOtherOwner : {Mode \in {"HostedCollisionBefore", "HostedCollisionFixed"}}, hRace : (IF Mode \in {"HostedControlBefore", "HostedControlFixed"} THEN {"Cancel", "Terminate", "Clear", "Stop", "Release"} ELSE {"None"}), hControl : {FALSE}]
 Prepare == /\ phase = "Intent"
            /\ phase' = "Prepared" /\ prepared' = TRUE
            /\ pin' = IF role = "Primary" \/ Mode = "BorrowBusy" THEN "Primary" ELSE "None"
@@ -414,11 +414,22 @@ HostedReceipt == /\ review.pc \in {4,5,6} /\ review.hCaptured /\ review.hRead
                  /\ ~(Mode = "HostedRestartBefore" /\ restored)
                  /\ (review.hValid = "Good" \/ Mode = "HostedGuardBefore")
                  /\ (~review.hOtherOwner \/ Mode = "HostedCollisionBefore")
-                 /\ (review.hFlush \/ Mode = "HostedDurabilityBefore")
                  /\ review.hObserved = review.hVersion
                  /\ review' = [review EXCEPT !.hReceipt = TRUE, !.hVersion = @ + 1,
                       !.hWrites = @ + 1]
                  /\ UNCHANGED BaseVars
+HostedReceiptAck == /\ review.hReceipt /\ ~review.hDurable /\ review.hFlush
+                    /\ review' = [review EXCEPT !.hDurable = TRUE]
+                    /\ UNCHANGED BaseVars
+HostedBarrier == /\ review.pc = 5 /\ review.hReceipt /\ ~review.hBarrier
+                 /\ Mode \in {"HostedBarrierBefore", "HostedBarrierFixed"}
+                 /\ (review.hDurable \/ Mode = "HostedBarrierBefore")
+                 /\ review' = [review EXCEPT !.hBarrier = TRUE]
+                 /\ UNCHANGED BaseVars
+HostedUnrelated == /\ review.pc = 6 /\ ~review.hUnrelated
+                   /\ Mode \in {"HostedSavedBefore", "HostedSavedFixed"}
+                   /\ review' = [review EXCEPT !.hUnrelated = TRUE, !.hFlush = FALSE]
+                   /\ UNCHANGED BaseVars
 HostedReobserve == /\ review.pc \in {4,5,6} /\ review.hRead
                    /\ review.hObserved # review.hVersion
                    /\ Mode # "HostedStampBefore"
@@ -431,6 +442,7 @@ HostedClose == /\ review.pc = 4 /\ review.hCaptured
 HostedResult == /\ review.pc = 5 /\ review.hClosed
                 /\ (result = "None" \/ (Mode = "HostedControlBefore" /\ review.hControl /\ result = "Control"))
                 /\ (review.hReceipt \/ Mode = "HostedBypassBefore")
+                /\ (review.hDurable \/ Mode \in {"HostedDurabilityBefore", "HostedPendingBefore", "HostedBypassBefore"})
                 /\ (review.hObserved = review.hVersion \/ Mode = "HostedStampBefore")
                 /\ (Mode \notin {"HostedRestartBefore", "HostedRestartFixed"} \/ restored)
                 /\ result' = "Executed"
@@ -461,15 +473,16 @@ HostedAdvance == /\ review.pc = 5 /\ result # "None"
                  /\ review' = [review EXCEPT !.pc = 6]
                  /\ UNCHANGED BaseVars
 HostedNextHead == /\ review.pc = 6
+                  /\ (Mode # "HostedSavedBefore" \/ review.hFlush)
                   /\ review' = [review EXCEPT !.pc = 7, !.hNext = @ + 1]
                   /\ UNCHANGED BaseVars
 HostedNext == HostedPrepare \/ HostedStamp \/ HostedRefuse \/ HostedKey \/ HostedCapture
-              \/ HostedRead \/ HostedReceipt \/ HostedReobserve \/ HostedClose \/ HostedResult
+              \/ HostedRead \/ HostedReceipt \/ HostedReceiptAck \/ HostedBarrier \/ HostedUnrelated \/ HostedReobserve \/ HostedClose \/ HostedResult
               \/ HostedControl \/ HostedRestart \/ HostedFlush \/ HostedAdvance \/ HostedNextHead
 HostedSpec == Init /\ role = "Primary" /\ [][HostedNext]_vars
               /\ WF_vars(HostedPrepare) /\ WF_vars(HostedStamp) /\ WF_vars(HostedRefuse)
               /\ WF_vars(HostedKey) /\ WF_vars(HostedCapture) /\ WF_vars(HostedRead)
-              /\ WF_vars(HostedReceipt) /\ WF_vars(HostedReobserve) /\ WF_vars(HostedClose)
+              /\ WF_vars(HostedReceipt) /\ WF_vars(HostedReceiptAck) /\ WF_vars(HostedBarrier) /\ WF_vars(HostedUnrelated) /\ WF_vars(HostedReobserve) /\ WF_vars(HostedClose)
               /\ WF_vars(HostedResult) /\ WF_vars(HostedControl) /\ WF_vars(HostedRestart)
               /\ WF_vars(HostedFlush) /\ WF_vars(HostedAdvance) /\ WF_vars(HostedNextHead)
 HostedIdentityBeforeKey == anyKey => review.nativeBinding = (IF review.ticketExecution = "N1" THEN 1 ELSE 2)
@@ -477,7 +490,7 @@ HostedOnlyCloserCompletes == result = "Executed" => source = "Bound" /\ anyKey /
 HostedEventuallyUnblocks == <>(review.clearLease = 0 /\ review.clearRows = 0)
 HostedReceiptRequired == result = "Executed" => review.hReceipt
 HostedReceiptAuthentic == review.hReceipt => (review.hCaptured \/ review.hRestarted) /\ review.hValid = "Good"
-HostedReceiptDurable == review.hReceipt => review.hFlush
+HostedReceiptDurable == (result = "Executed" \/ review.hBarrier) => review.hDurable
 HostedReceiptFresh == result = "Executed" => review.hCommitVersion = review.hResultVersion
 HostedReceiptRowUnique == review.hReceipt => ~review.hOtherOwner
 HostedNoReplay == review.hInjected <= 1 /\ review.hNext <= 1
