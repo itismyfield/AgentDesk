@@ -152,7 +152,14 @@ will recover permanently Refused channels. The silent-refusal mutant is RED.
 ## Model checks and before/after comparison
 
 `WriterAdoptionHerdrRowEnd.tla` keeps NoLegacyBodyOnTui, UnadoptedNotOwned and
-UnknownOwnerKept. New invariants are NoBodyLoss, BodyExactlyOnce,
+UnknownOwnerKept. NoLegacyBodyOnTui has main's narrow late-child exception: a
+parent-unrecorded late-reserved child finishes its pre-init open turn exactly
+once through Legacy, under its own candidate/send counter and checked-parent
+init handoff; configured members and all other nonmember TUI/Deferred/Refused
+paths retain the strict gate. The configured/member and child handoff rules are
+checked together by WriterAdoptionThreadComposition. Converting this exception
+to O processing remains for the later complete Legacy removal stage of #7651.
+New invariants are NoBodyLoss, BodyExactlyOnce,
 BodyIdentityKept, OldBodyBeforeNew and NoSilentRefusal; ClearHasEvidence also
 requires a retained old copy/receipt unless existing owned/notice evidence applies.
 BodyAfterAdoption is conditional on adoption; it is vacuous in the permanently
@@ -816,3 +823,46 @@ registration cannot issue a grant. Before issuing one, C2c must reconcile the
 original saved/native/Legacy visibility and pending attempts against exact effect
 or owning-attempt no-effect evidence; neither source arrival nor an offset of
 zero supplies that proof.
+
+
+### C2c remaining implementation estimate after the main merge
+
+This is a proposed review split, pending the lane's PLAN_READY decision. No
+C2c issuer, sender, receipt, lifecycle or GC production implementation is in
+this planning change. The approved semantics and C1/registry formats stay exact.
+
+The earlier +750 estimate counted insertion points but not the live backend
+operations still hidden behind test-only helpers. At merged main `5c144746da`
+with b2 `a4cdeeedb8`, the existing `deliver.rs:642-664` appends OutputOrigin and
+Prepared before polling `o_writer_io.rs:138-151`, where acquire reserves the
+effect. C2c therefore needs an owned preflight/request handoff to reserve and
+validate before Prepared, while keeping the same lease, ownership gate and
+raw request guard. It cannot be only an actor call to the test issuer.
+
+| Required remaining work | Estimated net production lines |
+|---|---:|
+| Live execution/gateway run installation, replacement, invalidation and exact store/plan-bound issuance (`authority.rs`, `owner_port.rs`, `o_writer_io.rs`) | +300 |
+| Pre-Prepared owned preflight/request handoff, one-use guard and known-unpolled handling (`writer/mod.rs`, `deliver.rs`, `o_writer_io.rs`) | +230 |
+| Pre-metadata reconciliation, serial drain and final ordinary/re-post barrier (`herdr_body_debt/receipts.rs`, `host.rs`, `actor.rs`, `deliver.rs`) | +260 |
+| Strict local/shared receipt backfill and truthful native alias mirrors (`receipt.rs`, `herdr_body_debt/receipts.rs`, `store/ledger.rs`) | +220 |
+| Stop/clear/terminate/rescope hooks and authority-filtered one-time boot wake | +100 |
+| Receipt-only local GC, shared-only manifest/alias loading after GC and crash recovery | +280 |
+| Total (merge resolution and tests excluded) | +1390 |
+
+The estimate exceeds the +1200 planning stop line, even though it fits the
++1500 review maximum. Do not shorten proof checks or combine SQL statements
+merely to fit a line budget.
+
+Proposed C2c-I: P2-2/P2-3 in its first implementation commit, then live
+issuance/preflight, pre-metadata and drain/final barriers, strict receipt
+backfill/local aliases, and lifecycle invalidation (about 18 files/+1110).
+Keep every C1 file; local GC is deliberately absent. Registration remains
+insufficient to send; uncertain/unproved work stays retained. This slice does
+not claim C2 complete.
+
+Proposed C2c-II: receipt-only local GC plus the shared-only manifest/alias
+reader used after that GC, with boot/restart/crash-cut and alias-retention
+acceptance (about 6 files/+280, overlapping the first slice's reader/receipt
+files). Only the combined result can claim C2 complete. All old-before-new,
+conditional liveness and late-child/old-debt exact-once requirements remain.
+The proposed file set stays inside the approved C2c/wake ownership.

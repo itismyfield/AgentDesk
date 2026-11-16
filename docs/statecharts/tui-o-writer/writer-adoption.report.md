@@ -27,7 +27,7 @@ A restart keeps the turn: a running turn's bridge is restored and judges again (
 
 ## Rules
 
-- `NoLegacyBodyOnTui`: Legacy posts no body on the TUI channel.
+- `NoLegacyBodyOnTui`: Legacy posts no body on a configured/nonmember TUI channel. The sole inherited-child exception is main's late reservation: its pre-init open turn is sent once by Legacy on its own candidate/send counter, then handed to O. A configured binding cannot enter that exception.
 - `AnswerAtMostOnce`: O and Legacy together post the turn at most once.
 - `UnadoptedNotOwned`: without an O store the gate never answers that O owns the body.
 - `RowClearedHasEvidence`, `NoEarlyDispatch`: the row and the watcher dispatch settle only after a post, or while the O store owns the turn's range unposted.
@@ -348,3 +348,36 @@ payload transformations. This repair changes no model/config or protocol
 transition; runtime entry tests, rather than the earlier 16G/38R result, verify
 the compatibility change. Periodic/foreign-executor debt wake filtering remains
 an explicit C2c limitation.
+
+## Configured member / late child composition
+
+`WriterAdoptionThreadComposition.tla` extends the actual main
+`WriterThreadActive` transition system with an independent configured member's
+b2 Deferred/Refused/Committed gate. `ConfiguredLegacyZero` checks the configured
+member (including main's bound/non-child case); `LateTurnLegacyOnce`,
+`ExactlyOnce`, `OwnAuthority` and `ReadyNeedsInit` retain main's own handoff rules.
+`MemberUnadoptedNotOwned` prevents a permit from substituting for adoption.
+Both member and child progress properties run in the same state space.
+
+Before checks the formerly universal prohibition against main's late child and
+is expected RED. After scopes that prohibition to configured members while
+preserving the exact late-child exception. Leak deliberately applies the child
+exception to a Deferred/Refused configured member and must be RED.
+
+Entry points at main `5c144746da`: `channel_policy/children.rs:38-44` derives the
+child body owner; `cutover/channel_gate.rs:469-471,500-521` keeps the reserved
+turn on its own counter; `cutover/thread_child_record_tests.rs:134-180` checks
+Legacy once before commit and OwnedByO afterward. The merged b2 member path
+still calls `adopted` before answering owned. Placement records the checked
+child relationship but does not change the member's adoption.
+
+| Composition config | Before/after result | TLC runs |
+|---|---|---:|
+| WriterAdoptionThreadBefore | Expected RED: NoLegacyBodyOnTui | 5 |
+| WriterAdoptionThreadAfter | GREEN, MemberEventuallyAnswered / ChildInputAnswered / HeldResolves included | 4 |
+| WriterAdoptionThreadLeak | Expected RED: ConfiguredLegacyZero / NoLegacyBodyOnTui | 6 |
+
+Plain TLC via `scripts/ci/statecharts_tlc.py`, 2026-11-17: 3 selected / 3
+matched, 15 actual fairness/TLC invocations, mismatch/tool error/skip 0, 55.3 s.
+The composition checks the adoption boundary only. Archived debt replay and
+Legacy/debt evidence reconciliation remain in the C2c acceptance scope.

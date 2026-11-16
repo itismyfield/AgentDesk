@@ -1,0 +1,2 @@
+key: 710-tui-o-writer-adoption-thread-composition
+| `tui-o-writer` adoption / late child composition | `5c144746da` + `a4cdeeedb8` | Before RED: universal Legacy prohibition conflicts with the late child; Leak RED: configured Deferred/Refused member escapes strict adoption | After GREEN with member and child liveness; main child transitions reused. [Report](tui-o-writer/writer-adoption.report.md#configured-member--late-child-composition) |

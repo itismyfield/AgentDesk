@@ -895,6 +895,9 @@ tui-o-writer/WriterAdoptionRelayedByTime.cfg	WriterAdoption	HeldBodyNotSkipped,R
 tui-o-writer/WriterAdoptionRetries4.cfg	WriterAdoption	TriesBound	-
 tui-o-writer/WriterAdoptionStage1.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAdoptionSwallowOwed.cfg	WriterAdoption	NoCommitPastOwed	-
+tui-o-writer/WriterAdoptionThreadAfter.cfg	WriterAdoptionThreadComposition	-	-
+tui-o-writer/WriterAdoptionThreadBefore.cfg	WriterAdoptionThreadComposition	NoLegacyBodyOnTui	-
+tui-o-writer/WriterAdoptionThreadLeak.cfg	WriterAdoptionThreadComposition	ConfiguredLegacyZero,NoLegacyBodyOnTui	-
 tui-o-writer/WriterAdoptionUnadoptedOwned.cfg	WriterAdoption	UnadoptedNotOwned,RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionWatcherNoGuard.cfg	WriterAdoption	NoEarlyDispatch	-
 tui-o-writer/WriterArchivedSourceAfter.cfg	WriterArchivedSource	-
