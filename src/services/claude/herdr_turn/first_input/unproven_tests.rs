@@ -24,6 +24,8 @@ enum Case {
     Running,
     /// Restarted like the first, keeping the start record its accepted resume left.
     Recorded,
+    /// A continuing turn's summary arrives after the restart lost its hook's volatile latch.
+    Continuing,
 }
 
 // The resumed cases restart without the start record a resume accepted before its build lacks.
@@ -40,6 +42,11 @@ fn an_idle_source_that_proves_nothing_ends_retained_and_a_running_one_waits() {
 #[test]
 fn a_restarted_resume_with_its_recorded_start_takes_its_input_once() {
     owner_outcome(&[(Case::Recorded, 816_105)]);
+}
+
+#[test]
+fn a_restart_during_a_continuing_stop_retains_with_one_resend_notice_pg() {
+    owner_outcome(&[(Case::Continuing, 816_106)]);
 }
 
 fn owner_outcome(cases: &[(Case, u64)]) {
@@ -72,7 +79,7 @@ fn owner_outcome(cases: &[(Case, u64)]) {
         let asked = json!({"type":"user","timestamp":old,"message":{"role":"user","content":"earlier prompt"}});
         let said = json!({"type":"assistant","timestamp":old,"message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}});
         match case {
-            Case::Restarted | Case::RestartedOld | Case::Recorded => rows(&[
+            Case::Restarted | Case::RestartedOld | Case::Recorded | Case::Continuing => rows(&[
                 asked,
                 said,
                 json!({"type":"system","subtype":"turn_duration","timestamp":old}),
@@ -138,12 +145,32 @@ fn owner_outcome(cases: &[(Case, u64)]) {
                 readiness::observe(&logical, Some(&path)).is_some() || case == Case::Running,
                 "{case:?}: the resumed start admits its first input before the restart"
             );
+            if case == Case::Continuing {
+                rows(&[
+                    json!({"type":"user","timestamp":chrono::Utc::now(),"message":{"role":"user","content":"current prompt"}}),
+                    json!({"type":"assistant","timestamp":chrono::Utc::now(),"message":{"role":"assistant","content":[{"type":"text","text":"still continuing"}]}}),
+                ]);
+                assert!(readiness::observe(&logical, Some(&path)).is_none());
+            }
             tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
-            if case != Case::Recorded {
+            if !matches!(case, Case::Recorded | Case::Continuing) {
                 readiness::tests::lose_resume_record(NONCE);
             }
             readiness::tests::daemon_restart(&logical);
             attach();
+            if case == Case::Continuing {
+                // This ledger belongs to the restarted daemon; the earlier Stop's latch is gone.
+                rows(&[json!({"type":"system","subtype":"stop_hook_summary",
+                    "hookCount":1,"hookErrors":[],"hookAdditionalContext":["continue"],
+                    "preventedContinuation":false,"hasOutput":true})]);
+                assert_eq!(
+                    crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(
+                        &path
+                    ),
+                    crate::services::tui_turn_state::TuiTurnState::Idle
+                );
+                assert!(readiness::observe_restored(&logical, Some(&path)).is_none());
+            }
         }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -171,6 +198,14 @@ fn owner_outcome(cases: &[(Case, u64)]) {
         rig.answer("pane.read", json!({"type":"pane_read","read":{"pane_id":PANE,
             "source":"recent_unwrapped","text":format!("✻ Baked for 2s\n\n{border}\n❯ \n{border}\n  🤖 Opus(H) │ 7% │ MCP: 2\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"),
             "revision":1,"truncated":false}}));
+        if case == Case::Continuing {
+            rig.answer(
+                "pane.read",
+                json!({"type":"pane_read","read":{"pane_id":PANE,
+                "source":"recent_unwrapped","text":"✻ Working… (esc to interrupt)",
+                "revision":2,"truncated":false}}),
+            );
+        }
         let (_, target) = bound_target(&rig, &logical, 1);
         let attached = Attached {
             nonce: NONCE.into(),
@@ -225,6 +260,11 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             "{case:?}: {result:?}"
         );
         assert!(rig.sends().is_empty(), "{case:?}: no key reaches the pane");
+        if case == Case::Continuing {
+            assert!(
+                matches!(&result, effect::Completion::NotSent(reason) if reason.contains("unproven"))
+            );
+        }
         let snapshot = read();
         assert!(snapshot["head_injection"].is_null(), "{case:?}: {snapshot}");
         let (items, retained) = (
@@ -250,6 +290,29 @@ fn owner_outcome(cases: &[(Case, u64)]) {
                 "{case:?}: one resend ask is owed"
             );
             assert!(!held_watch::armed(channel), "{case:?}: no look resends it");
+            let notice_db = (case == Case::Continuing).then(|| {
+                runtime.block_on(async {
+                    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+                    let pool = db.connect_and_migrate().await;
+                    let namespace = snapshot["namespace"].as_str().unwrap();
+                    let enqueue = crate::services::turn_orchestrator::ChannelMailboxHandle::v2_notice;
+                    let first = enqueue(&pool, "claude", channel, namespace, entry).await.unwrap();
+                    let repeated = enqueue(&pool, "claude", channel, namespace, entry).await.unwrap();
+                    assert_eq!(first, repeated, "replaying an owed notice keeps its identity");
+                    let posts: Vec<(String, String)> = sqlx::query_as(
+                        "SELECT source, content FROM message_outbox WHERE target = $1 ORDER BY id",
+                    )
+                    .bind(format!("channel:{channel}"))
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+                    assert_eq!(posts.len(), 1, "one retained original owes one actual notice: {posts:?}");
+                    assert_eq!(posts[0].0, "retained_input_notice");
+                    assert!(posts[0].1.contains("필요하면 같은 내용을 다시 보내 주세요"));
+                    assert!(crate::services::turn_orchestrator::ChannelMailboxHandle::v2_notice_is_non_turn(&posts[0].1));
+                    (db, pool)
+                })
+            });
             let key =
                 json!({"identity":entry["input"]["identity"],"attempt":entry["input"]["attempt"]});
             let moved = runtime.block_on(mailbox.v2_request(move |slot| {
@@ -262,6 +325,13 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             let told = read();
             assert!(told["items"].as_array().unwrap().is_empty(), "{case:?}");
             assert_eq!(told["retained_inputs"].as_array().unwrap().len(), 1);
+            if let Some((db, pool)) = notice_db {
+                assert_eq!(told["retained_inputs"][0]["notice"]["enqueued"], true);
+                runtime.block_on(async {
+                    pool.close().await;
+                    db.drop().await;
+                });
+            }
             assert!(rig.sends().is_empty(), "{case:?}: still no key");
         }
         drop(entered);
