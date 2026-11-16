@@ -1064,7 +1064,7 @@ fn m0_close_requires_both_stamps() {
         (replaced_provider as Os, HerdrGateRefusal::ProviderReplaced),
         (
             missing_provider_stamp as Os,
-            HerdrGateRefusal::PaneUnverified,
+            HerdrGateRefusal::PaneUnverified { transient: true },
         ),
     ] {
         let target = hosted_target(&rig, vec![SERVER], off_where_dialled, os(&rig));

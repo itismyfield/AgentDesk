@@ -45,8 +45,11 @@ pub(crate) enum HerdrGateRefusal {
     MarkerUnverified,
     /// A pane reading came from another server than the permitted witness.
     ServerChanged,
-    /// The pane did not read as one root shell running one provider.
-    PaneUnverified,
+    /// The pane did not read as one root shell running one provider; `transient` marks a gap
+    /// the next whole judgment may not meet.
+    PaneUnverified {
+        transient: bool,
+    },
     OtherNonce,
     RootReplaced,
     ProviderReplaced,
@@ -280,6 +283,8 @@ struct PaneGate {
     next_id: AtomicU64,
     /// The latest judgment, waiting for the send it admits.
     pinned: Mutex<Option<Judged>>,
+    /// The server the latest write was sent to.
+    last_sent: Mutex<Option<ServerWitness>>,
     fence: Arc<ExecutionFence>,
     /// An operator asked a terminate to stand on the exact pane proof when the marker is absent.
     marker_absent_by_pane: bool,
@@ -376,6 +381,7 @@ impl HerdrTarget {
             os: Arc::new(HostOs),
             next_id: AtomicU64::new(1),
             pinned: Mutex::new(None),
+            last_sent: Mutex::new(None),
             marker_absent_by_pane: false,
         })))
     }
@@ -453,6 +459,25 @@ impl HerdrTarget {
             Err(refusal) => {
                 *pinned = None;
                 Err(refusal)
+            }
+        }
+    }
+
+    /// An input judged again for a write that must reach the server the last write reached;
+    /// a judgment on any other server is dropped unsent.
+    pub(crate) fn pin_on_last_server(&self) -> Result<(), HerdrGateRefusal> {
+        self.pin(Mutation::Input)?;
+        let last = self
+            .0
+            .last_sent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut pinned = self.0.pinned.lock().unwrap_or_else(PoisonError::into_inner);
+        match (pinned.as_ref(), last.as_ref()) {
+            (Some(judged), Some(last)) if judged.witness == *last => Ok(()),
+            _ => {
+                *pinned = None;
+                Err(HerdrGateRefusal::ServerChanged)
             }
         }
     }
@@ -1020,7 +1045,9 @@ impl PaneGate {
                 EvidenceGap::NonceMissing | EvidenceGap::OtherNonce(_) => {
                     HerdrGateRefusal::OtherNonce
                 }
-                _ => HerdrGateRefusal::PaneUnverified,
+                gap => HerdrGateRefusal::PaneUnverified {
+                    transient: gap.transient(),
+                },
             }
         })?;
         if now.root != self.expected.root {
@@ -1051,6 +1078,10 @@ impl PaneGate {
                 })
             });
         }
+        *self
+            .last_sent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(judged.witness.clone());
         let outcome = self.transport.call_with_witness(&call, &judged.witness);
         contract::mutation_result(&call, outcome, &self.pane)
     }
