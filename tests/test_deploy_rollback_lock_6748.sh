@@ -179,6 +179,59 @@ run_rollback
 if [[ "$OUT" == *"stub bootout error=5"* ]]; then pass "bootout diagnostics remain visible"; else fail "bootout diagnostics were swallowed: $OUT"; fi
 assert_event "failed bootout still waits for observed stop" '^launchctl bootstrap .* at=2$'
 
+echo "a child floor created while the rollback waits for the stop refuses the swap"
+# The real guard reads the fixture floor; each read is logged on the fixture clock.
+for fn in _binary_build_flag _binary_would_revert_o_child_store _rollback_would_revert_o_child_store; do
+    body="$(extract_function "$fn")"
+    if [ -z "$body" ] || ! bash -n <<<"$body"; then fail "$fn cannot be extracted"; exit 1; fi
+    eval "$body"
+done
+eval "$(declare -f _rollback_would_revert_o_child_store | sed '1s/.*/real_child_guard ()/')"
+_rollback_would_revert_o_child_store() { event child-guard; real_child_guard; }
+FLOOR="$ADK_REL/o_store/thread_children.floor"
+# The stopping binary creates the floor at tick 2, between the first guard and the stop's end.
+sleep() {
+    event "sleep $*"
+    printf '%s\n' "$(( $(cat "$TMP_ROOT/tick") + $1 ))" >"$TMP_ROOT/tick"
+    if [ "$(cat "$TMP_ROOT/tick")" -ge 2 ] && [ ! -e "$FLOOR" ]; then
+        mkdir -p "$(dirname "$FLOOR")"
+        printf '1\n' >"$FLOOR"
+    fi
+}
+setup_case
+rm -f "$FLOOR"
+OLD_TARGET=$'#!/bin/sh\n# old\nprintf \'{"schema":1,"o_store_thread_children":false}\\n\'\n'
+printf '%s' "$OLD_TARGET" >"$REL_BINARY_BACKUP"
+chmod +x "$REL_BINARY_BACKUP"
+JOB_EXIT_AT=3 PID_EXIT_AT=5
+run_rollback
+guards="$(grep -c '^child-guard ' "$TMP_ROOT/events" || true)"
+assert_eq "the guard reads the floor before the stop and again before the swap" 2 "$guards"
+assert_event "the first read precedes the stop" '^child-guard at=0$'
+assert_event "the second read follows the stop's end" '^child-guard at=5$'
+last_poll="$(grep -nE '^(launchctl print|ps |kill -0 )' "$TMP_ROOT/events" | tail -1 | cut -d: -f1)"
+second="$(grep -n '^child-guard ' "$TMP_ROOT/events" | tail -1 | cut -d: -f1)"
+if [ -n "$last_poll" ] && [ "$second" -gt "$last_poll" ]; then
+    pass "no stop poll runs after the second read"
+else
+    fail "second read at line $second, last stop poll at line $last_poll"
+fi
+assert_eq "the new binary stays in place" new "$(cat "$REL_BINARY")"
+assert_eq "the rollback target is preserved" "$OLD_TARGET" "$(cat "$REL_BINARY_BACKUP")"$'\n'
+assert_event "the new binary is restarted" '^launchctl bootstrap .* at=5$'
+assert_event "the restart is health-checked" '^health at='
+if [[ "$OUT" == *"ROLLBACK REFUSED"*"child store floor"* && "$OUT" != *"Rollback succeeded"* ]]; then
+    pass "the refusal is visible and no rollback success is claimed"
+else
+    fail "refusal output: $OUT"
+fi
+rm -f "$FLOOR"
+sleep() {
+    event "sleep $*"
+    printf '%s\n' "$(( $(cat "$TMP_ROOT/tick") + $1 ))" >"$TMP_ROOT/tick"
+}
+_rollback_would_revert_o_child_store() { return 1; }
+
 echo "the main stop branch narrows every lock-derived signal"
 for command in "/usr/bin/python3 unrelated.py" "/bin/bash -c $REL_BINARY dcserver" \
     "$REL_BINARY codex-tmux-wrapper dcserver" "$REL_BINARY dcserver-extra" \

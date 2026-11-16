@@ -2532,6 +2532,8 @@ src/
 │   │   │   │   │   │   ├── park_missing_tests.rs
 │   │   │   │   │   │   ├── park_reply_tests.rs
 │   │   │   │   │   │   ├── refresh_tests.rs
+│   │   │   │   │   │   ├── thread_child_retirement_tests.rs
+│   │   │   │   │   │   ├── thread_child_tests.rs
 │   │   │   │   │   │   └── unbound_gateway_tests.rs
 │   │   │   │   │   └── owner_execution.rs
 │   │   │   │   └── owner_port.rs
@@ -4166,6 +4168,7 @@ src/
 │   │   │   ├── adoption/
 │   │   │   │   └── body_check.rs
 │   │   │   ├── children/
+│   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── adoption.rs
 │   │   │   ├── children.rs
@@ -4177,7 +4180,9 @@ src/
 │   │   │   ├── intake_route/
 │   │   │   │   └── input.rs
 │   │   │   ├── channel_gate.rs
-│   │   │   └── intake_route.rs
+│   │   │   ├── child_funnel_tests.rs
+│   │   │   ├── intake_route.rs
+│   │   │   └── thread_child_record_tests.rs
 │   │   ├── ownership/
 │   │   │   ├── execution/
 │   │   │   │   └── tests/
@@ -4243,6 +4248,7 @@ src/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── thread_children/
+│   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── retirement_tests.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
@@ -4311,6 +4317,7 @@ src/
 │   │   │   │   └── scan.rs
 │   │   │   ├── host/
 │   │   │   │   ├── activation_io.rs
+│   │   │   │   ├── child_retirement.rs
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── fresh_input.rs
 │   │   │   │   ├── fresh_input_tests.rs
@@ -4487,6 +4494,8 @@ src/
 │   │   │   ├── suspension.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
+│   │   │   ├── thread_child_dormant_tests.rs
+│   │   │   ├── thread_child_host_tests.rs
 │   │   │   ├── tool_card_accuracy_tests.rs
 │   │   │   ├── tool_card_actor_replay_tests.rs
 │   │   │   ├── tool_card_actor_tests.rs
