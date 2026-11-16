@@ -54,7 +54,7 @@ fn kill_and_clean(
     reason: &str,
 ) -> bool {
     crate::services::tmux_diagnostics::record_tmux_exit_reason(session.name(), reason);
-    let killed = crate::services::platform::tmux::kill_session(session.name(), reason);
+    let killed = crate::services::session_host::TmuxHost.kill(session.name(), reason);
     if killed {
         crate::services::tmux_common::cleanup_cleared_session_temp_files(session);
     }

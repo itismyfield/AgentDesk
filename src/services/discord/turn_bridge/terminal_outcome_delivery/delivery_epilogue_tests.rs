@@ -332,6 +332,7 @@ async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
             transcript_terminal_error: false,
         },
         DeliveryEpilogueState {
+            input_marked: &mut false,
             response_sent_offset: &mut response_sent_offset,
             inflight_state: &mut stale,
             terminal_full_replay_cleanup_msg_ids: &mut terminal_full_replay_cleanup_msg_ids,

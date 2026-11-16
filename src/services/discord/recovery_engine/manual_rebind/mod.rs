@@ -293,7 +293,21 @@ async fn rebind_inflight_for_channel_inner(
     )
     .await
     {
-        Ok(Some((pid, pname))) => (pid, pname.or(channel_name.clone())),
+        Ok(Some((pid, pname))) => {
+            // The best-effort parent only picks the checked read that records an O thread.
+            let recorded = crate::services::tui_o::cutover::record_thread_child_by_id(
+                discord_channel_id.get(),
+                pid.get(),
+            );
+            if let Err(detail) = recorded.await {
+                tracing::warn!(
+                    channel_id,
+                    detail,
+                    "[tui_o] rebound thread parent not recorded"
+                );
+            }
+            (pid, pname.or(channel_name.clone()))
+        }
         Ok(None) => (discord_channel_id, channel_name.clone()),
         Err(_) => {
             tracing::warn!(

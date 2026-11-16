@@ -5,23 +5,14 @@ references, unclassified modules) grow with ordinary new code, so their growth i
 reported as warnings unless it hides accepted reverse debt."""
 from __future__ import annotations
 
-from copy import deepcopy
-import json
 import re
-import tomllib
 
-from .module_layer_baseline import BASELINE, _id
+from .module_layer_baseline import _id
 
-MOVES = "scripts/audit_maintainability/layer_moves.toml"
 SECTIONS = ("reverse_dependencies", "indeterminate_dependencies", "uncertainties")
 TOTALS = ("unclassified_modules", "indeterminate_edges", "indeterminate_occurrences")
 BLOCKING_SECTIONS = ("reverse_dependencies",)
 EDGE_KINDS = ("import", "path", "reexport", "macro")
-
-
-def load_inputs(repo):
-    return (json.loads((repo / BASELINE).read_bytes()),
-            tomllib.loads((repo / MOVES).read_text("utf-8")))
 
 
 def _record(row, section, zero=False):
@@ -210,25 +201,3 @@ def compare(accepted, candidate, moves, sources=None):
     return {"errors": sorted(errors, key=order), "warnings": sorted(warnings, key=order),
             "decreases": sorted(decreases, key=lambda r: (r["section"], r["id"]))}
 
-
-def reduced_baseline(accepted, candidate, moves, sources=None):
-    result = compare(accepted, candidate, moves, sources)
-    if result["errors"]:
-        raise ValueError("baseline reduction refused: " + "; ".join(r["message"] for r in result["errors"]))
-    old, zeros, current = _normalized(accepted, candidate, moves)
-    output = deepcopy(candidate)
-    output["zero_rules"] = deepcopy(accepted["zero_rules"])
-    for section in SECTIONS:
-        output[section] = []
-        for identity, row in sorted(old[section].items()):
-            # Accepted counts are ceilings: reductions are recorded, warned growth is not absorbed.
-            count = min(row["count"], current[section].get(identity, {"count": 0})["count"])
-            if count:
-                output[section].append({**row, "count": count})
-            else:
-                output["zero_rules"].append({**row, "section": section, "count": 0})
-    output["zero_rules"].sort(key=lambda r: (r["section"], r["id"]))
-    output["unclassified_modules"] = min(accepted["unclassified_modules"], candidate["unclassified_modules"])
-    output["indeterminate_edges"] = len(output["indeterminate_dependencies"])
-    output["indeterminate_occurrences"] = sum(r["count"] for r in output["indeterminate_dependencies"])
-    return output

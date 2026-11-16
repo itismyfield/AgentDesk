@@ -63,6 +63,7 @@ impl Fixture {
 
 #[test]
 fn an_ungated_submit_loads_pastes_and_enters_once() {
+    let host = crate::services::session_host::SubmitSpy::new();
     let fixture = Fixture::new();
     assert_eq!(
         fixture.pane().with_composer(|p| p.submit("hello")),
@@ -71,4 +72,9 @@ fn an_ungated_submit_loads_pastes_and_enters_once() {
     assert_eq!(fixture.calls("load-buffer"), 1);
     assert_eq!(fixture.calls("paste-buffer"), 1);
     assert_eq!(fixture.calls("send-keys"), 1);
+    assert_eq!(
+        host.calls(),
+        3,
+        "every physical input must cross host submit"
+    );
 }
