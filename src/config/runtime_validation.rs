@@ -78,9 +78,7 @@ mod tests {
 
     // Observe the actual supported driver if strict loading silently accepts a removed alias.
     fn strict_rejection(config: &Config) {
-        let _lock = provider_hosting::TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = provider_hosting::acquire_test_config_lock();
         let _reset = ResetHosting;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("candidate.yaml");
@@ -162,9 +160,7 @@ mod tests {
     #[test]
     fn strict_load_preserves_supported_unknown_and_legacy_selection() {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        let _lock = provider_hosting::TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = provider_hosting::acquire_test_config_lock();
         let _reset = ResetHosting;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("candidate.yaml");
@@ -218,9 +214,7 @@ mod tests {
     #[test]
     fn final_boot_boundary_rejects_retired_before_installing_mirrors() {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        let _lock = provider_hosting::TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = provider_hosting::acquire_test_config_lock();
         let _reset = ResetHosting;
         provider_hosting::install_provider_hosting_config(&fixture(Some("pipe"), false, "claude"));
         let before = provider_hosting::resolve_provider_session_selection(&ProviderKind::Claude);

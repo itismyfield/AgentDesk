@@ -836,9 +836,7 @@ fn actual_local_fresh_direct_dispatch_consumes_ticket_before_safe_cli_failure() 
     assert!(before.is_empty());
     assert!(attempt::ticket(pane.channel, &pane.name).is_some());
     pane.fake.enable_fixture_launch();
-    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
+    let _hosting_lock = crate::services::provider_hosting::acquire_test_config_lock();
     struct Hosting(crate::config::Config);
     impl Drop for Hosting {
         fn drop(&mut self) {

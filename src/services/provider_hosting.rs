@@ -91,8 +91,31 @@ static PROVIDER_RUNTIME_MODE_BY_CHANNEL: LazyLock<RwLock<BTreeMap<(String, u64),
 
 /// Serializes tests that install the process-wide hosting config.
 #[cfg(test)]
-pub(crate) static TEST_CONFIG_LOCK: LazyLock<std::sync::Mutex<()>> =
-    LazyLock::new(Default::default);
+static TEST_CONFIG_LOCK: LazyLock<std::sync::Mutex<()>> = LazyLock::new(Default::default);
+
+#[cfg(test)]
+pub(crate) struct TestConfigLockGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for TestConfigLockGuard {
+    fn drop(&mut self) {
+        crate::test_support::lock_holder::PROVIDER_CONFIG_LOCK.release();
+    }
+}
+
+/// Acquire C after E when both locks are needed, and record its holder until release.
+#[cfg(test)]
+#[track_caller]
+pub(crate) fn acquire_test_config_lock() -> TestConfigLockGuard {
+    let lock = crate::test_support::lock_holder::PROVIDER_CONFIG_LOCK.hold(|| {
+        TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    });
+    TestConfigLockGuard { _lock: lock }
+}
 
 pub fn install_provider_hosting_config(config: &Config) {
     let mut values = BTreeMap::new();
@@ -460,9 +483,7 @@ mod tests {
 
     #[test]
     fn requested_tui_selects_claude_driver_when_available() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
         install_provider_hosting_config(&Config::default());
 
         let selection = resolve_provider_session_selection(&ProviderKind::Claude);
@@ -474,9 +495,7 @@ mod tests {
 
     #[test]
     fn requested_tui_selects_codex_driver_when_available() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
         let mut config = Config::default();
         config.providers.insert(
             "codex".to_string(),
@@ -496,9 +515,7 @@ mod tests {
 
     #[test]
     fn codex_defaults_to_legacy_prompt_driver() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
         install_provider_hosting_config(&Config::default());
 
         let selection = resolve_provider_session_selection(&ProviderKind::Codex);
@@ -510,9 +527,7 @@ mod tests {
 
     #[test]
     fn channel_override_can_enable_tui_when_provider_default_is_disabled() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -548,9 +563,7 @@ mod tests {
 
     #[test]
     fn channel_override_can_disable_tui_when_provider_default_is_enabled() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
         let mut config = Config::default();
         config.agents.push(test_agent_with_claude_channel(
             "1506295332949196840",
@@ -574,9 +587,7 @@ mod tests {
 
     #[test]
     fn unsupported_entrypoint_falls_back_even_when_claude_driver_exists() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
         install_provider_hosting_config(&Config::default());
 
         let selection =
@@ -596,9 +607,7 @@ mod tests {
 
     #[test]
     fn requested_non_claude_tui_still_falls_back_until_driver_exists() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -646,9 +655,7 @@ mod tests {
 
     #[test]
     fn provider_runtime_pipe_overrides_tui_hosting_true() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -671,9 +678,7 @@ mod tests {
 
     #[test]
     fn provider_runtime_tui_overrides_tui_hosting_false() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -696,9 +701,7 @@ mod tests {
 
     #[test]
     fn channel_runtime_overrides_provider_runtime() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -737,9 +740,7 @@ mod tests {
         // Phase 0 counter-review MAJOR-2: an operator who only sets
         // `runtime: tui` (without the legacy `tui_hosting` boolean) must
         // still cause the hook endpoint to be published at boot.
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
         let mut config = Config::default();
         // Wipe the Claude default so we are not relying on the per-provider
         // default returning `true` for Claude.
@@ -766,9 +767,7 @@ mod tests {
         // channel has the legacy `tui_hosting: true` boolean set, because
         // the resolver would route that channel through LegacyPrompt.
         // Without this fix the hook predicate and the resolver disagree.
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -797,9 +796,7 @@ mod tests {
         // a single channel with explicit `runtime: tui` must light up the
         // predicate even when the provider has neither `runtime` nor
         // `tui_hosting` requesting TUI.
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -820,9 +817,7 @@ mod tests {
 
     #[test]
     fn any_requested_tui_hosting_skips_explicit_runtime_pipe() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
 
         let mut pipe_config = Config::default();
         pipe_config.providers.insert(
@@ -841,9 +836,7 @@ mod tests {
 
     #[test]
     fn unknown_runtime_string_falls_back_to_tui_hosting_derivation() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _guard = acquire_test_config_lock();
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -867,9 +860,7 @@ mod tests {
     #[test]
     fn graceful_retired_runtime_uses_supported_mirrors_and_matching_hook_predicates() {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = acquire_test_config_lock();
         for (provider_runtime, channel_runtime, legacy, expected) in [
             (Some("claude-e"), None, true, true),
             (Some(" CLAUDE_E "), None, false, false),

@@ -3,7 +3,9 @@
 use super::*;
 use crate::config::{Config, ProviderConfig, TestEnvVarGuard};
 use crate::services::discord::save_actual_episode_for_tests;
-use crate::services::provider_hosting::{TEST_CONFIG_LOCK, install_provider_hosting_config};
+use crate::services::provider_hosting::{
+    acquire_test_config_lock, install_provider_hosting_config,
+};
 use crate::services::provider_teardown::tests::test_support::FakeTmux;
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
@@ -17,9 +19,7 @@ fn with_scope(run: impl FnOnce(&std::path::Path)) {
     let root = tempfile::tempdir().unwrap();
     let _root =
         TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
-    let _hosting = TEST_CONFIG_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let _hosting = acquire_test_config_lock();
     let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
     let mut config = Config::default();
     config.providers.insert(

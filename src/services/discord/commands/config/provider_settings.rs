@@ -480,10 +480,8 @@ mod truthful_tests {
 
     #[test]
     fn truthful_headless_claude_fast_persists_and_schedules_real_reset() {
-        let _hosting = crate::services::provider_hosting::TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let _hosting = crate::services::provider_hosting::acquire_test_config_lock();
         let root = tempfile::tempdir().unwrap();
         let _env = isolate_persistence(root.path());
         let mut config = crate::config::Config::default();
@@ -532,10 +530,8 @@ mod truthful_tests {
     // of refusing it; only a Herdr channel keeps the refusal.
     #[test]
     fn truthful_local_claude_tui_fast_saves_for_a_same_session_relaunch() {
-        let _hosting = crate::services::provider_hosting::TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let _hosting = crate::services::provider_hosting::acquire_test_config_lock();
         let root = tempfile::tempdir().unwrap();
         let _env = isolate_persistence(root.path());
         let _hosts = crate::config::session_hosts::force_for_test(None, &[]);

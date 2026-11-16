@@ -24,7 +24,7 @@ impl DedupeGuard {
 
 struct ScopeFixture {
     previous: crate::config::Config,
-    _hosting: std::sync::MutexGuard<'static, ()>,
+    _hosting: crate::services::provider_hosting::TestConfigLockGuard,
     _instance: crate::config::TestEnvVarGuard,
 }
 
@@ -34,9 +34,7 @@ impl ScopeFixture {
             "AGENTDESK_INSTANCE_ID",
             std::ffi::OsStr::new("b1b-scoped-writer-test"),
         );
-        let hosting = crate::services::provider_hosting::TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let hosting = crate::services::provider_hosting::acquire_test_config_lock();
         let previous = crate::config_live_reload::current()
             .map(|config| (*config).clone())
             .unwrap_or_default();

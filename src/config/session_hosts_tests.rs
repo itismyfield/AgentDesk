@@ -171,9 +171,7 @@ fn herdr_check_reads_provider_keys_as_the_installed_resolver_does() {
             .insert("mini".into(), herdr_endpoint.clone());
         herdr.channels.insert(channel.to_string(), "mini".into());
         let installed = {
-            let _lock = hosting::TEST_CONFIG_LOCK
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let _lock = hosting::acquire_test_config_lock();
             hosting::install_provider_hosting_config(&config);
             let selection = hosting::resolve_provider_session_selection_with_channel(
                 &provider,

@@ -86,14 +86,12 @@ impl Drop for TurnFailureGuard {
 
 struct Hosting {
     previous: crate::config::Config,
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: crate::services::provider_hosting::TestConfigLockGuard,
 }
 
 impl Hosting {
     fn install(config: &crate::config::Config) -> Self {
-        let lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let lock = crate::services::provider_hosting::acquire_test_config_lock();
         let previous = crate::config_live_reload::current()
             .map(|config| (*config).clone())
             .unwrap_or_default();

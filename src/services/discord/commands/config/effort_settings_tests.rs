@@ -9,10 +9,8 @@ const SOL: &str = "gpt-6.1-sol";
 const LUNA: &str = "gpt-6-luna";
 
 fn fixture(check: impl FnOnce(&Arc<SharedData>, serenity::ChannelId, &Path)) {
-    let _hosting = crate::services::provider_hosting::TEST_CONFIG_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let root = TestRuntimeRootGuard::new();
+    let _hosting = crate::services::provider_hosting::acquire_test_config_lock();
     let set = TestEnvVarGuard::set_path_after_shared_test_env_lock;
     let _config = set("AGENTDESK_CONFIG", &root.path().join("effort-fixture.yaml"));
     let home = root.path().join("codex");

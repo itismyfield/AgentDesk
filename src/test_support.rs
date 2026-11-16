@@ -291,7 +291,7 @@ fn prefixed_literal_end(
 }
 
 pub(crate) mod lock_holder {
-    //! Holder record for the process-wide test mutexes: the shared env lock (E) and the PG lifecycle lock (P).
+    //! Holder record for the process-wide test mutexes: the env (E), provider config (C), and PG lifecycle (P) locks.
     //! A watchdog thread names the holder whenever one holder has kept a waiter parked past `STALL_REPORT_AFTER`.
 
     use std::io::Write;
@@ -306,6 +306,8 @@ pub(crate) mod lock_holder {
     const WATCH_INTERVAL: Duration = Duration::from_secs(5);
 
     pub(crate) static ENV_LOCK: LockSlot = LockSlot::new("config::shared_test_env_lock (E)");
+    pub(crate) static PROVIDER_CONFIG_LOCK: LockSlot =
+        LockSlot::new("provider_hosting::TEST_CONFIG_LOCK (C)");
     pub(crate) static PG_LIFECYCLE_LOCK: LockSlot =
         LockSlot::new("db::postgres::POSTGRES_TEST_LIFECYCLE_LOCK (P)");
 
@@ -316,6 +318,7 @@ pub(crate) mod lock_holder {
 
     #[derive(Clone)]
     struct Party {
+        thread_id: std::thread::ThreadId,
         thread: String,
         at: &'static Location<'static>,
         since: Instant,
@@ -340,6 +343,7 @@ pub(crate) mod lock_holder {
                 .name()
                 .map_or_else(|| format!("{:?}", thread.id()), str::to_string);
             Self {
+                thread_id: thread.id(),
                 thread: name,
                 at,
                 since: Instant::now(),
@@ -368,6 +372,12 @@ pub(crate) mod lock_holder {
             leave_wait(id);
             *self.holder() = Some(Party::current(at));
             guard
+        }
+
+        pub(crate) fn is_held_by_current_thread(&self) -> bool {
+            self.holder()
+                .as_ref()
+                .is_some_and(|held| held.thread_id == std::thread::current().id())
         }
 
         /// Called from the owning guard's `Drop` before its inner `MutexGuard` releases the mutex.

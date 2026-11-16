@@ -222,10 +222,8 @@ fn hosting() -> impl Drop {
 
 #[test]
 fn herdr_effort_applies_and_reports_only_fresh_matching_level_pg() {
-    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let _hosting_lock = crate::services::provider_hosting::acquire_test_config_lock();
     let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_INSTANCE_ID",
         std::ffi::OsStr::new(NODE),
@@ -320,10 +318,8 @@ fn herdr_effort_applies_and_reports_only_fresh_matching_level_pg() {
 
 #[test]
 fn herdr_effort_mismatch_or_stale_record_never_reports_success_pg() {
-    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let _hosting_lock = crate::services::provider_hosting::acquire_test_config_lock();
     let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_INSTANCE_ID",
         std::ffi::OsStr::new(NODE),
@@ -363,10 +359,8 @@ fn herdr_effort_mismatch_or_stale_record_never_reports_success_pg() {
 
 #[test]
 fn herdr_settings_reject_foreign_channel_cwd_or_agent_before_keys_pg() {
-    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let _hosting_lock = crate::services::provider_hosting::acquire_test_config_lock();
     let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_INSTANCE_ID",
         std::ffi::OsStr::new(NODE),
@@ -408,10 +402,8 @@ fn herdr_settings_reject_foreign_channel_cwd_or_agent_before_keys_pg() {
 
 #[test]
 fn herdr_settings_rechecks_draft_under_composer_lock_pg() {
-    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let _hosting_lock = crate::services::provider_hosting::acquire_test_config_lock();
     let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_INSTANCE_ID",
         std::ffi::OsStr::new(NODE),
@@ -471,10 +463,8 @@ fn herdr_settings_rechecks_draft_under_composer_lock_pg() {
 
 #[test]
 fn herdr_effort_waits_for_overlay_before_navigation_pg() {
-    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let _hosting_lock = crate::services::provider_hosting::acquire_test_config_lock();
     let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_INSTANCE_ID",
         std::ffi::OsStr::new(NODE),
@@ -653,10 +643,8 @@ impl Fixture {
 }
 
 fn with_fast_rig(run: impl FnOnce(&HerdrRig, &Arc<AtomicUsize>, &tokio::runtime::Runtime)) {
-    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let _hosting_lock = crate::services::provider_hosting::acquire_test_config_lock();
     let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_INSTANCE_ID",
         std::ffi::OsStr::new(NODE),
@@ -950,10 +938,8 @@ fn herdr_thread_fast_targets_runtime_pane_without_parent_reset_pg() {
 
 #[test]
 fn herdr_first_input_and_effort_never_submit_mixed_content_pg() {
-    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let _hosting_lock = crate::services::provider_hosting::acquire_test_config_lock();
     let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_INSTANCE_ID",
         std::ffi::OsStr::new(NODE),
@@ -1112,10 +1098,8 @@ fn herdr_first_input_and_effort_never_submit_mixed_content_pg() {
 
 #[test]
 fn herdr_effort_rejects_unknown_option_layout_before_navigation_pg() {
-    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let _hosting_lock = crate::services::provider_hosting::acquire_test_config_lock();
     let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_INSTANCE_ID",
         std::ffi::OsStr::new(NODE),
@@ -1159,10 +1143,8 @@ fn long_history(text: &str) -> Value {
 
 #[test]
 fn herdr_effort_on_long_history_names_read_failure_and_closes_selector_pg() {
-    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let _hosting_lock = crate::services::provider_hosting::acquire_test_config_lock();
     let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_INSTANCE_ID",
         std::ffi::OsStr::new(NODE),
@@ -1231,10 +1213,8 @@ fn herdr_effort_on_long_history_names_read_failure_and_closes_selector_pg() {
 
 #[test]
 fn herdr_effort_partial_navigation_failure_sends_no_confirmation_pg() {
-    let _hosting_lock = crate::services::provider_hosting::TEST_CONFIG_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _root = crate::config::TestRuntimeRootGuard::new();
+    let _hosting_lock = crate::services::provider_hosting::acquire_test_config_lock();
     let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_INSTANCE_ID",
         std::ffi::OsStr::new(NODE),

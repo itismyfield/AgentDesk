@@ -2833,22 +2833,30 @@ pub fn load_graceful() -> Config {
 ///
 /// # Lock hierarchy
 ///
-/// This mutex (`E`) is the **outer** lock of the pair it is routinely held
-/// with. `db::postgres::POSTGRES_TEST_LIFECYCLE_LOCK` (`P`) is the inner one,
-/// so the canonical order is `E -> P`: acquire the environment before building
+/// This mutex (`E`) is outside provider hosting's config lock (`C`) and
+/// `db::postgres::POSTGRES_TEST_LIFECYCLE_LOCK` (`P`): `E -> C -> P` when combined.
+/// Acquire the environment before changing hosting config or building
 /// a PostgreSQL test database, never the other way round. Reversing it in even
 /// one test is enough to deadlock the suite, because a concurrently in-flight
 /// `E -> P` test closes the cycle and both locks are plain `std::sync::Mutex`
 /// with no timeout and no deadlock detection.
 ///
 /// The accessor enforces that: it trips before handing out the mutex if the
-/// caller already holds `P`. The check lives here rather than in
+/// caller already holds `C` or `P`. The check lives here rather than in
 /// `test_env_lock::acquire_shared_test_env_lock` so it also covers the direct
 /// `shared_test_env_lock().lock()` sites, which the re-entry tripwire below
 /// cannot reach.
 #[cfg(test)]
 pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
     crate::db::postgres::assert_test_lifecycle_lock_not_held_before_env_lock();
+    assert!(
+        !crate::test_support::lock_holder::PROVIDER_CONFIG_LOCK.is_held_by_current_thread(),
+        "test lock order inversion in `{}`: TEST_CONFIG_LOCK (C) is already held while \
+         acquiring config::shared_test_env_lock. The canonical hierarchy is E -> C -> P",
+        std::thread::current()
+            .name()
+            .unwrap_or("<unnamed test thread>")
+    );
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
@@ -2886,7 +2894,7 @@ pub(crate) mod test_env_lock {
 
     #[track_caller]
     pub(crate) fn acquire_shared_test_env_lock() -> SharedTestEnvLockGuard {
-        // Resolve the mutex first: the accessor carries the `E`-after-`P`
+        // Resolve the mutex first: the accessor carries the `E`-after-`C`/`P`
         // ordering tripwire, and running it before the re-entry flag is armed
         // keeps an ordering panic from stranding `SHARED_TEST_ENV_LOCK_HELD`
         // set on a thread that never got a guard to clear it.
@@ -2963,6 +2971,34 @@ pub(crate) fn pin_runtime_host_for_test() -> PinnedRuntimeHost {
 
 #[cfg(test)]
 mod shared_test_env_lock_tests {
+    #[test]
+    fn env_lock_after_hosting_config_lock_panics_before_waiting() {
+        let holding = crate::services::provider_hosting::acquire_test_config_lock();
+        for acquire in [
+            (|| {
+                let _env = super::test_env_lock::acquire_shared_test_env_lock();
+            }) as fn(),
+            || {
+                let _mutex = super::shared_test_env_lock();
+            },
+        ] {
+            let panic = std::panic::catch_unwind(acquire)
+                .expect_err("C then E must panic before waiting on the environment mutex");
+            let message = panic
+                .downcast_ref::<String>()
+                .expect("lock order diagnostic");
+            assert!(message.contains("TEST_CONFIG_LOCK (C)"), "{message}");
+            assert!(message.contains("E -> C -> P"), "{message}");
+            assert!(
+                message.contains(std::thread::current().name().unwrap()),
+                "{message}"
+            );
+        }
+        drop(holding);
+        let _env = super::test_env_lock::acquire_shared_test_env_lock();
+        let _hosting = crate::services::provider_hosting::acquire_test_config_lock();
+    }
+
     #[test]
     fn acquire_shared_test_env_lock_panics_on_same_thread_reentry_before_deadlock() {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
