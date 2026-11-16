@@ -273,6 +273,31 @@ impl Intake {
     }
 
     fn with_expected_pin(fx: &Fixture, started: &Started, expected: ExpectedPin) -> Self {
+        // The bootstrap transcript has the identities native Claude rows carry before O reopens it.
+        let records = std::fs::read_to_string(&started.path).unwrap();
+        let records: Vec<_> = records
+            .lines()
+            .enumerate()
+            .map(|(index, line)| {
+                let mut row: Value = serde_json::from_str(line).unwrap();
+                let identity = format!("fixture-bootstrap-{}-{index}", started.session);
+                if matches!(row["type"].as_str(), Some("user" | "assistant"))
+                    && row["uuid"].is_null()
+                {
+                    row["uuid"] = json!(identity);
+                }
+                if row["type"] == "assistant" {
+                    if row["apiBlockIndex"].is_null() {
+                        row["apiBlockIndex"] = json!(0);
+                    }
+                    if row["message"]["id"].is_null() {
+                        row["message"]["id"] = json!(identity);
+                    }
+                }
+                serde_json::to_string(&row).unwrap()
+            })
+            .collect();
+        std::fs::write(&started.path, records.join("\n") + "\n").unwrap();
         let live_guard = crate::config_live_reload::test_live_guard_after_shared_test_env_lock();
         let label = fx.logical().strip_prefix("AgentDesk-claude-").unwrap();
         let config: crate::config::Config = serde_json::from_value(json!({
