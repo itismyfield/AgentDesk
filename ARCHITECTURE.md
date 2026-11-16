@@ -1216,6 +1216,7 @@ src/
 │   │   │   │   │   ├── debt_recovery/
 │   │   │   │   │   │   ├── authority.rs
 │   │   │   │   │   │   ├── debt_recovery_tests.rs
+│   │   │   │   │   │   ├── ia_tests.rs
 │   │   │   │   │   │   ├── receipt.rs
 │   │   │   │   │   │   └── registry.rs
 │   │   │   │   │   └── debt_recovery.rs
