@@ -835,42 +835,6 @@ mod tests {
             }
         }
 
-        async fn try_create() -> Option<Self> {
-            let lock = crate::db::postgres::lock_test_lifecycle();
-            let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
-                drop(lock);
-                return None;
-            };
-            let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "postgres".to_string());
-            let admin_url = format!("{base}/{admin_db}");
-            let database_name = format!(
-                "agentdesk_dispatch_route_events_{}",
-                uuid::Uuid::new_v4().simple()
-            );
-            let database_url = format!("{base}/{database_name}");
-            if let Err(error) = crate::db::postgres::create_test_database(
-                &admin_url,
-                &database_name,
-                "dispatch delivery events route test",
-            )
-            .await
-            {
-                eprintln!("skipping postgres-backed dispatch route test: {error}");
-                drop(lock);
-                return None;
-            }
-
-            Some(Self {
-                _lock: lock,
-                admin_url,
-                database_name,
-                database_url,
-            })
-        }
-
         async fn connect_and_migrate(&self) -> sqlx::PgPool {
             crate::db::postgres::connect_test_pool_and_migrate(
                 &self.database_url,
@@ -1098,9 +1062,7 @@ mod tests {
         async fn dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows() {
             let _serial = crate::reconcile::lock_dispatch_delivery_metric_tests();
             crate::reconcile::reset_dispatch_delivery_event_mismatch_metrics_for_tests();
-            let Some(pg_db) = TestPostgresDb::try_create().await else {
-                return;
-            };
+            let pg_db = TestPostgresDb::create().await;
             let pool = pg_db.connect_and_migrate().await;
             let state = test_state_with_pg(pool.clone());
 
