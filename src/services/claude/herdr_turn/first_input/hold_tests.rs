@@ -2,9 +2,8 @@ use super::regression_tests::regression_attached;
 use super::*;
 use crate::services::claude::herdr_turn::hold_record::{self, Held, SendOutcome, UnsentProof};
 
-/// A8, A9: a hold a write left before its first key keeps the owner's front Held with its watch
-/// armed, not start-failed; once its notice row exists it releases unconfirmed and the next input
-/// submits once. The new write's outcome is one rewrite of its own in-flight record.
+/// A8, A9: a hold left before its first key keeps the owner's front Held and watched, then
+/// releases unconfirmed after its notice row; the next input submits once.
 #[test]
 fn hold_resolve_crash_after_hold_before_first_key_holds_front_then_releases_and_submits_once() {
     use crate::services::discord::{
