@@ -120,7 +120,7 @@ class _LayerSrcTree(_FakeSrcTree):
         environment = mock.patch.dict(os.environ)
         environment.start()
         self._patches.append(environment)
-        for key in [k for k in os.environ if k.startswith(("GITHUB_", "GIT_")) or k == "MODULE_LAYER_BASE_REF"]:
+        for key in [k for k in os.environ if k.startswith(("GITHUB_", "GIT_", "GFP_")) or k == "MODULE_LAYER_BASE_REF"]:
             del os.environ[key]
         for command in (["init", "-q"], ["config", "user.name", "Fixture"], ["config", "user.email", "fixture@example.invalid"],
                         ["config", "commit.gpgsign", "false"], ["add", "-A"], ["commit", "-qm", "fixture main"],
