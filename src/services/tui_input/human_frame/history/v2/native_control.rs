@@ -243,7 +243,7 @@ impl Registry {
         })
     }
 
-    fn try_control_transaction<T>(
+    pub(super) fn try_control_transaction<T>(
         &self,
         apply: impl FnOnce(&mut Snapshot) -> Result<T, String>,
     ) -> Result<T, String> {

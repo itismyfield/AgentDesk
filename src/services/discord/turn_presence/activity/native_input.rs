@@ -54,6 +54,7 @@ impl Reader {
             return Ok(None);
         }
         Ok(Some(Observation {
+            receipts: Vec::new(),
             binding: self.binding.clone(),
             generation: 1,
             binding_seq: 0,

@@ -10,6 +10,10 @@ use crate::services::tui_input::human_frame::history::v2::native::frame_hashes;
 #[cfg(unix)]
 use crate::services::tui_input::human_frame::history::v2::native::{Disposition, Ticket};
 use serde_json::Value;
+#[cfg(unix)]
+mod receipt;
+#[cfg(unix)]
+pub(crate) use receipt::MembershipReceipt;
 
 /// What one record says about the queue.
 pub(crate) enum QueueRecord {
@@ -112,6 +116,7 @@ pub(crate) struct Observation {
     pub(crate) through: u64,
     pub(crate) registrations_fingerprint: String,
     pub(crate) evidence: Vec<Evidence>,
+    pub(crate) receipts: Vec<MembershipReceipt>,
 }
 
 #[cfg(all(test, unix))]
@@ -241,6 +246,7 @@ mod projection {
         meta: bool,
         event: Option<Event>,
         boundaries: Vec<Edge>,
+        receipt: Option<receipt::Fact>,
     }
     /// Source-owned input hashes and native ranges, without output bodies or raw JSON records.
     pub(crate) struct Projection {
@@ -294,7 +300,54 @@ mod projection {
             self.analyze(registrations).map(|a| a.evidence)
         }
         pub(crate) fn analyze(&self, registrations: &[Registration]) -> Result<Analysis, String> {
-            reduce(&self.binding, &self.facts, registrations, self.through)
+            reduce(
+                &self.binding,
+                &self.facts,
+                registrations,
+                self.through,
+                None,
+            )
+        }
+        pub(crate) fn receipts(&self, registrations: &[Registration]) -> Vec<MembershipReceipt> {
+            receipt::candidates(
+                &self.binding,
+                &self
+                    .facts
+                    .iter()
+                    .filter_map(|f| f.receipt.as_ref())
+                    .collect::<Vec<_>>(),
+                registrations,
+            )
+            .into_iter()
+            .filter(|receipt| {
+                let (namespace, ticket) = receipt.identity();
+                let (_, row, range, _) = receipt.record();
+                let mut scoped = registrations.to_vec();
+                for registration in &mut scoped {
+                    registration.candidate =
+                        registration.namespace == namespace && registration.ticket == *ticket;
+                    if registration.candidate {
+                        // Confirmation cannot require the receipt being confirmed.
+                        registration.receipts.clear();
+                    }
+                }
+                let mut matched = false;
+                reduce(
+                    &self.binding,
+                    &self.facts,
+                    &scoped,
+                    self.through,
+                    Some(&mut |registration, admitted_range, admitted_row| {
+                        matched |= registration.namespace == namespace
+                            && registration.ticket == *ticket
+                            && admitted_range == range
+                            && admitted_row == Some(row);
+                    }),
+                )
+                .is_ok()
+                    && matched
+            })
+            .collect()
         }
         pub(crate) fn idle(&self) -> bool {
             self.state == super::super::TurnState::Idle
@@ -411,6 +464,7 @@ mod projection {
                 self.facts.push(Fact {
                     range,
                     row: value["uuid"].as_str().map(str::to_string),
+                    receipt: receipt::read(&value, line, range),
                     event,
                     boundaries,
                     meta: value["isMeta"] == true || value["isCompactSummary"] == true,
@@ -484,6 +538,7 @@ mod projection {
         records: &[Fact],
         registrations: &[Registration],
         through: u64,
+        mut membership: Option<&mut dyn FnMut(&Registration, (u64, u64), Option<&str>)>,
     ) -> Result<Analysis, String> {
         if binding.provider != super::ShadowProvider::Claude {
             return Ok(Analysis::default());
@@ -563,6 +618,11 @@ mod projection {
                                     pending.row.clone()
                                 },
                             });
+                            if let (Some(record_member), Some(owned)) =
+                                (membership.as_mut(), &member[owner])
+                            {
+                                record_member(registration, owned.range, owned.row.as_deref());
+                            }
                             input.stage = Stage::Running;
                             opened_members.push(owner);
                         }
@@ -770,6 +830,33 @@ mod projection {
                         } else {
                             Stage::Attached
                         };
+                    }
+                    if let Some(record_member) = membership.as_mut() {
+                        let receipt_owner = owner.or_else(|| {
+                            if !matches!(kind, Some(Event::Prompt(_))) {
+                                return None;
+                            }
+                            let candidates: Vec<_> = inputs
+                                .iter()
+                                .filter(|i| {
+                                    same_body(&i.body, &body)
+                                        && i.stage == Stage::Running
+                                        && i.command
+                                })
+                                .filter_map(|i| i.owner)
+                                .collect();
+                            let [owner] = candidates.as_slice() else {
+                                return None;
+                            };
+                            Some(*owner)
+                        });
+                        if let Some(owner) = receipt_owner
+                            && member[owner]
+                                .as_ref()
+                                .is_none_or(|m| run.as_ref() == Some(&m.run))
+                        {
+                            record_member(registered[owner], record.range, record.row.as_deref());
+                        }
                     }
                     if let (Some(owner), Some(current)) = (owner, &run) {
                         if let Some(old) = &member[owner] {

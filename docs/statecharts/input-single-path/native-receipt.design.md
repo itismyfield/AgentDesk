@@ -289,3 +289,11 @@ HostedReceiptDurable은 결과 또는 새 barrier가 durable 확인에 의존함
 기존 durability 쌍과 pending/barrier/saved 각 Before/Fixed로 검증한다.
 
 P2-1 보강 뒤 Hosted 28cfg는 14 Before RED/14 Fixed GREEN, 관련 전체 190cfg는 expected 위반 집합 일치(rc0)다. pending 재시도와 새 barrier의 durable guard 제거는 각각 HostedReceiptDurable을 깨고, durable 결과 정리에 unrelated flush를 요구하면 HostedIdleEventuallySettles가 깨진다.
+
+## 미승인 구현 실험 — membership 경계 (DESIGN_DELTA)
+
+아래는 구현 중 발견한 반례에 대한 **미승인 실험**이며, 정본의 receipt 권한을 바꾸는 확정 계약이 아니다. raw-row 권한과 B1 FIFO membership 권한의 경계는 `report-receipt-impl-1.md`의 DESIGN_DELTA에서 다시 결정해야 한다.
+
+문자열/hash 일치는 membership 후보 탐색이며 그 자체로 receipt 권한은 아니다. 기존 B1 reducer가 같은 records·full registrations에서 인정한 user/command row의 owner·range·UUID와도 일치해야 한다. Waiting 또는 Removed FIFO 입력 뒤의 동일 텍스트 외부 prompt는 새 receipt가 아니다. 결과/cleanup 뒤 역사적 등록의 판정은 후보 비트를 로컬에서 열어 같은 reducer를 적용하되, 실행 결과를 저장하거나 공개하지 않는다. 기존 analyze/B1 결과·barrier 의미는 바꾸지 않는다.
+
+HostedGuard의 BadMembership 행은 이 차이를 모델링한다. 실제 Projection 시험은 아직 dequeue하지 않은 입력 및 철회된 입력 뒤 같은 텍스트의 human prompt에서 receipt0·Executed0을 확인하며, membership filter 제거 뮤턴트로 재현한다.

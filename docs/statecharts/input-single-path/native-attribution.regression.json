@@ -5,8 +5,8 @@
   "original_filter_count": 21,
   "original_id_count": 388,
   "original_ids_sha256": "964a0fdf3357547de1ed7296bb98c5607dc038c2d820e5d5ac5ce8d8e99e8c8d",
-  "expected_unique_tests": 828,
-  "expected_ids_sha256": "445195d9f78f9aad6283c16809cadef0d668dcb7b50c9c1c313ba9f0c468f166",
+  "expected_unique_tests": 841,
+  "expected_ids_sha256": "7deb19523d36ceee2526e9929c8fa5a531cb6e569c051f76985a5657d8bbc42a",
   "selection": "List each filter, subtract prior selected IDs, run every unique full ID with --exact --test-threads=1; no execution skips.",
   "filters": [
     {
@@ -15,8 +15,8 @@
         "--skip",
         "native_8148_activation_isolated_herdr_"
       ],
-      "listed": 110,
-      "new_unique": 110
+      "listed": 123,
+      "new_unique": 123
     },
     {
       "filter": "services::tui_input::human_frame::history::",
@@ -188,5 +188,6 @@
       "new_unique": 2
     }
   ],
-  "captured_target": "aarch64-apple-darwin"
+  "captured_target": "aarch64-apple-darwin",
+  "isolated_e2e_environment": "On macOS, run native_8148_activation_isolated_herdr_ IDs separately with TMPDIR equal to the configured e2e root parent (e2e-b2b). Other fixtures can use /tmp. All selected IDs still execute exactly once."
 }

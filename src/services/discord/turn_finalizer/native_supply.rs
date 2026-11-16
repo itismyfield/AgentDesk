@@ -155,12 +155,89 @@ impl Port {
             NativeCleanup::capture(admission, input.row_witness.clone(), input.started_before)?;
         Ok(Some(Job::Live(Box::new(work), input.history.clone())))
     }
+    async fn durable(history: Registry, namespace: String, ticket: Ticket) -> Result<(), String> {
+        tokio::task::spawn_blocking(move || {
+            history
+                .try_native_settlement(&namespace, &ticket)
+                .map(|_| ())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    async fn receipt_input(
+        &self,
+        observed: Observation,
+        current: Observation,
+        index: usize,
+        origin: NoticeOrigin,
+    ) -> Result<(), String> {
+        self.origin(&origin)?;
+        if observed != current
+            || current.binding.channel_id != self.channel
+            || current.binding.source != origin.record.source
+            || current.binding_seq != origin.binding_seq
+            || current.generation != self.shared.restart.current_generation
+        {
+            return Err("native receipt observation superseded".into());
+        }
+        let receipt = current
+            .receipts
+            .get(index)
+            .ok_or("native receipt offer missing")?
+            .clone();
+        let (namespace, ticket) = receipt.identity();
+        let source = ticket
+            .source
+            .as_ref()
+            .ok_or("native receipt source missing")?;
+        check_target(&source.target, &origin)?;
+        if !(crate::services::tui_o::writer::input_facts::native::Registration {
+            namespace: namespace.into(),
+            ticket: ticket.clone(),
+            frame_hash: String::new(),
+            exact_frame_hash: String::new(),
+            receipts: Vec::new(),
+            candidate: false,
+        })
+        .matches(&current.binding)
+        {
+            return Err("native receipt source differs".into());
+        }
+        let (live, boot) = self.custody().await?;
+        // Custody carries the queue owner's actual provider/token namespace, including old debt.
+        let history = live
+            .iter()
+            .find(|p| p.namespace == namespace)
+            .map(|p| p.history.clone())
+            .or_else(|| {
+                boot.iter()
+                    .any(|p| p.identity().0 == namespace)
+                    .then(Registry::runtime)
+                    .and_then(Result::ok)
+            })
+            .ok_or("native receipt domain custody missing")?;
+        tokio::task::spawn_blocking(move || {
+            let (namespace, ticket) = receipt.identity();
+            let (kind, row, range, hash) = receipt.record();
+            history.try_native_receipt(
+                namespace,
+                ticket,
+                (kind, row, range, current.through, hash),
+                &current.registrations_fingerprint,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
     async fn submit(&self, id: &str, job: Job) -> Result<bool, String> {
         let done = match job {
             Job::Abstain(_) => return Ok(false),
             Job::Live(work, history) => {
                 let e = &work.admission.evidence;
                 let settlement = history.native_settlement(&e.namespace, &e.ticket)?;
+                if settlement.outcome.is_none() {
+                    Self::durable(history.clone(), e.namespace.clone(), e.ticket.clone()).await?;
+                }
                 if settlement
                     .outcome
                     .as_ref()
@@ -182,6 +259,7 @@ impl Port {
                         .outcome
                         .is_none()
                 {
+                    Self::durable(history.clone(), namespace.into(), ticket.clone()).await?;
                     history.record_native_outcome_at_stamp(
                         namespace,
                         ticket,
@@ -233,6 +311,7 @@ impl Port {
                 namespace: proof.namespace.clone(),
                 ticket: proof.ticket.clone(),
                 frame_hash: String::new(),
+                exact_frame_hash: String::new(),
                 receipts: Vec::new(),
                 candidate: false,
             })
@@ -254,6 +333,18 @@ impl Port {
                         .and_then(|_| Registry::runtime().ok())
                 })
                 .ok_or("abstain custody missing")?;
+            if history
+                .native_settlement(&proof.namespace, &proof.ticket)?
+                .barrier(&proof.namespace)?
+                .is_none()
+            {
+                Self::durable(
+                    history.clone(),
+                    proof.namespace.clone(),
+                    proof.ticket.clone(),
+                )
+                .await?;
+            }
             history.record_native_barrier(proof)?;
         }
         if !idle {
@@ -472,6 +563,15 @@ impl EvidencePort for Port {
         origin: NoticeOrigin,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(Port::abstain(self, observed, current, proofs, idle, origin))
+    }
+    fn receipt(
+        &self,
+        observed: Observation,
+        current: Observation,
+        index: usize,
+        origin: NoticeOrigin,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(self.receipt_input(observed, current, index, origin))
     }
     fn retry(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async move {

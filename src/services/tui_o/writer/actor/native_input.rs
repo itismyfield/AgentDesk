@@ -39,6 +39,15 @@ pub(crate) trait EvidencePort: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(async { Err("native abstention unavailable".into()) })
     }
+    fn receipt(
+        &self,
+        _observed: super::super::input_facts::native::Observation,
+        _current: super::super::input_facts::native::Observation,
+        _index: usize,
+        _origin: super::super::input_notices::NoticeOrigin,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(async { Err("native receipt unavailable".into()) })
+    }
     fn retry(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
 }
 

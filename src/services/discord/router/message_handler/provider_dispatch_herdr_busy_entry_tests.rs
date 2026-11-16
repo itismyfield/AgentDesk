@@ -1045,6 +1045,10 @@ fn assert_idle_tmux_queries(logical: &str) {
 }
 
 async fn idle_turn_unwound(intake: &Intake) {
+    let mut completions =
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+            &intake.shared,
+        );
     let finished = tokio::time::timeout(LIMIT, async {
         while intake.mailbox.has_active_turn().await != Ok(false) {
             tokio::task::yield_now().await;
@@ -1085,7 +1089,10 @@ async fn idle_turn_unwound(intake: &Intake) {
                         break settlement;
                     }
                 }
-                tokio::task::yield_now().await;
+                completions
+                    .recv()
+                    .await
+                    .expect("native completion bus remains open");
             }
         },
         crate::test_support::wait::WAIT_CAP,

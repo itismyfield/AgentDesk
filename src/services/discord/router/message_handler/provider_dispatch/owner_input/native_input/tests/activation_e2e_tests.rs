@@ -375,7 +375,7 @@ fn input_leaf(mut host: Command, pane: String, source: SourceId, ready: PathBuf)
             },
             WAIT_CAP,
         ));
-        let (history, namespace, ticket) =
+        let _prepared =
             crate::services::tui_input::human_frame::history::v2::native::scoped_ticket()?;
         let bytes = std::fs::read_to_string(&source.path).unwrap();
         if row.starts_with("withdrawn-") {
@@ -398,20 +398,7 @@ fn input_leaf(mut host: Command, pane: String, source: SourceId, ready: PathBuf)
             }
             offset += line.len() as u64;
         }
-        assert_eq!(
-            history.receipt(
-                &namespace,
-                &ticket.key,
-                (
-                    &source.path,
-                    found.expect("actual user receipt"),
-                    "user",
-                    Some(&row),
-                    &frame
-                )
-            ),
-            Some(true)
-        );
+        assert!(found.is_some(), "actual user row with the exact frame");
         Ok(Completion::Submitted)
     })
 }
@@ -718,6 +705,20 @@ async fn isolated(kind: &str) {
             .await
             .unwrap()
     );
+    if !withdrawn {
+        let history =
+            crate::services::tui_input::human_frame::history::v2::Registry::runtime().unwrap();
+        let registrations = history.native_classification_registrations().unwrap();
+        let original = registrations
+            .iter()
+            .find(|r| r.ticket.key["identity"]["primary"] == first)
+            .unwrap();
+        assert_eq!(
+            original.receipts.len(),
+            1,
+            "the O producer confirmed the actual user row after AnyKey ACK"
+        );
+    }
     if !strict {
         let history =
             crate::services::tui_input::human_frame::history::v2::Registry::runtime().unwrap();

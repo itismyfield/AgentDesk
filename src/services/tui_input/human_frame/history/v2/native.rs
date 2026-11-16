@@ -6,6 +6,9 @@ pub(crate) mod barrier;
 #[cfg(unix)]
 #[path = "native_control.rs"]
 pub(crate) mod control;
+#[cfg(unix)]
+#[path = "native_receipt.rs"]
+mod receipt;
 
 #[cfg(unix)]
 #[derive(Clone, serde::Serialize)]
@@ -13,6 +16,8 @@ pub(crate) struct EvidenceRegistration {
     pub(crate) namespace: String,
     pub(crate) ticket: Ticket,
     pub(crate) frame_hash: String,
+    #[serde(skip)]
+    pub(crate) exact_frame_hash: String,
     pub(crate) receipts: Vec<String>,
     #[serde(skip)]
     pub(crate) candidate: bool,
@@ -279,6 +284,7 @@ fn evidence_registrations(
                     && !settlement.extra.contains_key("foreign_prompt_barrier"),
                 ticket: settlement.ticket.clone(),
                 frame_hash: registration.frame.class_hash.clone(),
+                exact_frame_hash: registration.frame.hash.clone(),
                 receipts: entry
                     .into_iter()
                     .flat_map(|e| e.events.iter())

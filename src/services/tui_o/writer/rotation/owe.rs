@@ -368,6 +368,7 @@ impl NativeSources {
                 through: projection.through(),
                 registrations_fingerprint: registrations_fingerprint(&registrations)?,
                 evidence: analysis.evidence,
+                receipts: projection.receipts(&registrations),
             },
             analysis.barriers,
         ))
@@ -484,10 +485,48 @@ impl<B: BindingEvents> Sources<B> {
             let Some(native) = self.native.as_ref() else {
                 continue;
             };
-            let Ok((observed, barriers)) = native.observe(self.channel, &source, &origin, snapshot)
+            let Ok((mut observed, mut barriers)) =
+                native.observe(self.channel, &source, &origin, snapshot)
             else {
                 continue;
             };
+            if let Some(receipt) = observed.receipts.first() {
+                let (_, ticket) = receipt.identity();
+                let Some(source_ticket) = &ticket.source else {
+                    continue;
+                };
+                let Ok(origin) = self.native_origin(&source, &record, Some(&source_ticket.target))
+                else {
+                    continue;
+                };
+                observed.binding_seq = origin.binding_seq;
+                let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
+                    continue;
+                };
+                let Ok((current, _)) = native.observe(self.channel, &source, &origin, snapshot)
+                else {
+                    continue;
+                };
+                if let Err(error) = port
+                    .inner
+                    .receipt(observed, current, 0, origin.clone())
+                    .await
+                {
+                    tracing::debug!(channel=self.channel, %error, "native receipt held");
+                    continue;
+                }
+                // The Event changed the fingerprint and self/foreign classification together.
+                let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
+                    continue;
+                };
+                let Ok(fresh) = native.observe(self.channel, &source, &origin, snapshot) else {
+                    continue;
+                };
+                (observed, barriers) = fresh;
+                if !observed.receipts.is_empty() {
+                    continue;
+                }
+            }
             for proof in &barriers {
                 let Some(target) = proof.ticket.source.as_ref().map(|s| &s.target) else {
                     continue;

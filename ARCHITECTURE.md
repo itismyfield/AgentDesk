@@ -4136,6 +4136,7 @@ src/
 │   │   │   │   │   ├── native.rs
 │   │   │   │   │   ├── native_barrier.rs
 │   │   │   │   │   ├── native_control.rs
+│   │   │   │   │   ├── native_receipt.rs
 │   │   │   │   │   ├── native_tests.rs
 │   │   │   │   │   └── s4_tests.rs
 │   │   │   │   ├── append.rs
@@ -4332,6 +4333,7 @@ src/
 │   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
 │   │   │   │   ├── native/
+│   │   │   │   │   ├── receipt.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── native.rs
 │   │   │   │   ├── observation_tests.rs
