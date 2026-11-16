@@ -67,7 +67,7 @@ pub(super) fn plan(
         return (pieces, Vec::new(), None);
     }
     let aliases = terminal
-        .then(|| native(snapshot, provider, body, ledger))
+        .then(|| native(snapshot, provider, &pieces, ledger))
         .and_then(Result::ok);
     match aliases {
         Some(aliases) => (pieces, aliases, None),
@@ -78,7 +78,7 @@ pub(super) fn plan(
 fn native(
     snapshot: &Snapshot,
     provider: ShadowProvider,
-    body: &str,
+    saved: &[PieceWork],
     ledger: Option<&crate::services::tui_o::store::ledger::LedgerState>,
 ) -> Result<Vec<(PieceWork, SourceRange)>, String> {
     let evidence = &snapshot.record.evidence;
@@ -137,11 +137,11 @@ fn native(
     }
     let mut aliases = owed.body_coordinates()?;
     if aliases.is_empty()
+        || aliases.len() != saved.len()
         || aliases
             .iter()
-            .map(|(piece, _)| piece.payload.as_str())
-            .collect::<String>()
-            != body
+            .zip(saved)
+            .any(|((piece, _), saved)| piece.payload.as_bytes() != saved.payload.as_bytes())
     {
         return Err("native text is not exact saved coverage".into());
     }

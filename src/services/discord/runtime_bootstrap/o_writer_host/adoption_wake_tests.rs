@@ -353,9 +353,7 @@ async fn a_c1_archive_is_read_byte_for_byte_and_boot_wakes_only_its_local_channe
         let mut row = kept_row(channel);
         row.born_generation = 1;
         row.turn_nonce = Some("original-c1-row".into());
-        let mut wire = serde_json::to_value(&row).unwrap();
-        wire["host_locator"] = serde_json::json!({"host_kind":"herdr","host_session_id":"original-c1","pane":"%1"});
-        row = serde_json::from_value(wire).unwrap();
+        assert!(row.host_locator.is_none(), "the production C1 constructor has no locator");
         inflight::save_inflight_state(&row).unwrap();
         row = inflight::load_inflight_state(&provider,channel).unwrap();
         let evidence = serde_json::json!({"source":null,"execution_nonce":"original-host","outcome":{"kind":"unknown"}});

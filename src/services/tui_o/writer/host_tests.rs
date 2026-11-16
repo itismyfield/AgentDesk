@@ -1504,3 +1504,87 @@ async fn a_rowless_body_debt_is_read_by_the_real_recovered_host() {
     abort(tasks);
     drop(selected);
 }
+
+fn c1_snapshot_without_locator(root: &Path, channel: u64) -> PathBuf {
+    let mut row = super::herdr_body_debt::tests::row(channel);
+    row.as_object_mut().unwrap().remove("host_locator");
+    row["tmux_session_name"] = serde_json::json!("AgentDesk-claude-original-row");
+    row["request_owner_user_id"] = serde_json::json!(7);
+    row["user_msg_id"] = serde_json::json!(51);
+    row["turn_nonce"] = serde_json::json!("turn-row-end");
+    row["full_response"] = serde_json::json!("retained C1 body");
+    super::herdr_body_debt::tests::seed(root, row, serde_json::json!({"source":null}))
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_locatorless_c1_snapshot_does_not_hold_a_new_host_or_its_ready_actor() {
+    let (harness, path, source) = switched_over(&row("m0", "before the switch"));
+    p5_log(harness._runtime.path(), CHANNEL, &startup(source));
+    harness.gate.acquired();
+    let selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let snapshot = c1_snapshot_without_locator(harness._runtime.path(), CHANNEL);
+    let bytes = std::fs::read(&snapshot).unwrap();
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let tasks = start_host(&harness, &io, &ready);
+    polls(8).await;
+    assert!(
+        ready.accepts(CHANNEL),
+        "a normal C1 row must not prevent host readiness"
+    );
+    assert!(io.calls().contains(&("body_debt", CHANNEL)));
+    assert!(io.port.posts().is_empty(), "debt registration never posts");
+    append(&path, &row("m1", "new input output"));
+    polls(8).await;
+    assert_eq!(io.port.posts(), ["new input output"]);
+    assert_eq!(std::fs::read(snapshot).unwrap(), bytes);
+    abort(tasks);
+    drop(selected);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_locatorless_c1_snapshot_added_before_resume_keeps_the_actor_ready() {
+    use crate::services::tui_o::store::fault::{self, Keep, Step};
+    let (harness, path, source) = switched_over(&row("m0", "before the switch"));
+    p5_log(harness._runtime.path(), CHANNEL, &startup(source));
+    harness.gate.acquired();
+    let selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let tasks = start_host(&harness, &io, &ready);
+    polls(8).await;
+    assert!(ready.accepts(CHANNEL));
+    let spool = harness
+        ._runtime
+        .path()
+        .join("o_store")
+        .join(CHANNEL.to_string())
+        .join("spool");
+    let full = fault::plant(
+        &spool,
+        Step::Append(Keep::Nothing),
+        std::io::ErrorKind::StorageFull,
+        None,
+    );
+    append(&path, &row("m1", "pending through resume"));
+    polls(8).await;
+    assert!(
+        !ready.is_ready(CHANNEL),
+        "the injected store fault stopped the first actor"
+    );
+    let snapshot = c1_snapshot_without_locator(harness._runtime.path(), CHANNEL);
+    let bytes = std::fs::read(&snapshot).unwrap();
+    drop(full);
+    tokio::time::sleep(std::time::Duration::from_secs(35)).await;
+    polls(8).await;
+    assert!(
+        ready.accepts(CHANNEL),
+        "locatorless C1 debt must not stop the resumed actor"
+    );
+    assert!(io.calls().contains(&("body_debt", CHANNEL)));
+    assert_eq!(io.port.posts(), ["pending through resume"]);
+    append(&path, &row("m2", "after resume"));
+    polls(8).await;
+    assert_eq!(io.port.posts(), ["pending through resume", "after resume"]);
+    assert_eq!(std::fs::read(snapshot).unwrap(), bytes);
+    abort(tasks);
+    drop(selected);
+}

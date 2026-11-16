@@ -66,6 +66,19 @@ impl Snapshot {
             ShadowProvider::Claude => "claude_tui",
             ShadowProvider::Codex => "codex_tui",
         };
+        // C1 can pin the old logical session without persisting a physical host locator.
+        let host = match row.get("host_locator").filter(|v| !v.is_null()) {
+            Some(locator) => {
+                locator["host_kind"] == "herdr"
+                    && ["host_session_id", "pane"]
+                        .iter()
+                        .all(|key| locator[key].as_str().is_some_and(|s| !s.trim().is_empty()))
+            }
+            None => row["tmux_session_name"]
+                .as_str()
+                .or_else(|| row["channel_name"].as_str())
+                .is_some_and(|s| !s.trim().is_empty()),
+        };
         if record.version != 1
             || record.disposition != "retained"
             || record.channel_id == 0
@@ -85,12 +98,7 @@ impl Snapshot {
             || row["full_response"].as_str().is_none()
             || row["response_sent_offset"].as_u64().is_none()
             || row["runtime_kind"] != runtime
-            || row.pointer("/host_locator/host_kind") != Some(&json!("herdr"))
-            || ["host_session_id", "pane"].iter().any(|key| {
-                row["host_locator"][key]
-                    .as_str()
-                    .is_none_or(|s| s.trim().is_empty())
-            })
+            || !host
         {
             return Err("invalid C1 body debt identity or immutable digest".into());
         }
@@ -238,14 +246,21 @@ pub(crate) fn read(
     ledger: Option<&crate::services::tui_o::store::ledger::LedgerState>,
 ) -> Result<Vec<Plan>, String> {
     let mut episodes: BTreeMap<String, Plan> = BTreeMap::new();
+    let mut held = std::collections::BTreeSet::new();
+    let prefix = format!("{channel}-");
     let entries = match std::fs::read_dir(directory(root, provider)) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.to_string()),
     };
     for entry in entries {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        let prefix = format!("{channel}-");
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(error) => {
+                tracing::warn!(channel, %error, "herdr debt entry remains unreadable");
+                continue;
+            }
+        };
         if path.extension().is_none_or(|ext| ext != "json")
             || !path
                 .file_name()
@@ -254,13 +269,36 @@ pub(crate) fn read(
         {
             continue;
         }
-        let snapshot = Snapshot::read(&path, provider)?;
+        let snapshot = match Snapshot::read(&path, provider) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if let Some(episode) = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| n.strip_prefix(prefix.as_str()))
+                    .and_then(|n| n.split_once('-').map(|(episode, _)| episode))
+                    .filter(|episode| {
+                        episode.len() == 64 && episode.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
+                {
+                    held.insert(episode.to_owned());
+                }
+                tracing::warn!(channel, %error, path=%path.display(), "herdr debt snapshot remains retained");
+                continue;
+            }
+        };
         let plan = Plan::from(snapshot, provider, ledger);
         match episodes.get_mut(&plan.episode) {
             Some(old) => old.merge(plan),
             None => {
                 episodes.insert(plan.episode.clone(), plan);
             }
+        }
+    }
+    // An unreadable sibling cannot lend a healthy snapshot of that episode a send budget.
+    for (episode, plan) in &mut episodes {
+        if held.contains(episode) {
+            plan.held = Some("unreadable snapshot in original episode");
         }
     }
     Ok(episodes.into_values().collect())

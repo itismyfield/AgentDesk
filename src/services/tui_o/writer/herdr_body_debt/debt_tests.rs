@@ -171,13 +171,51 @@ fn unknown_kind_wrong_provider_and_changed_snapshot_are_not_adopted() {
     let mut unknown = row(7651307);
     unknown["runtime_kind"] = json!("future");
     let path = seed(root.path(), unknown, json!({"source":null}));
-    assert!(read(root.path(), ShadowProvider::Claude, 7651307, None).is_err());
+    assert!(
+        read(root.path(), ShadowProvider::Claude, 7651307, None)
+            .unwrap()
+            .is_empty()
+    );
     let bytes = std::fs::read(&path).unwrap();
     assert!(path.exists());
     let mut encoded: Value = serde_json::from_slice(&bytes).unwrap();
     encoded["provider"] = json!("codex");
     std::fs::write(&path, encoded.to_string()).unwrap();
-    assert!(read(root.path(), ShadowProvider::Claude, 7651307, None).is_err());
+    assert!(
+        read(root.path(), ShadowProvider::Claude, 7651307, None)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(path.exists(), "unknown or corrupted evidence stays on disk");
+    let root = tempfile::tempdir().unwrap();
+    let mut original = row(7651307);
+    original.as_object_mut().unwrap().remove("host_locator");
+    original["tmux_session_name"] = json!("AgentDesk-claude-original");
+    let path = seed(root.path(), original, json!({"source":null}));
+    assert!(
+        read(root.path(), ShadowProvider::Claude, 7651308, None)
+            .unwrap()
+            .is_empty()
+    );
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut changed: Value = serde_json::from_str(record["row_json"].as_str().unwrap()).unwrap();
+    changed["turn_nonce"] = json!("another-original-episode");
+    record["row_json"] = json!(changed.to_string());
+    let encoded = record.to_string();
+    std::fs::remove_file(&path).unwrap();
+    let invalid = path.with_file_name(format!(
+        "7651307-{}-{}.json",
+        record["episode_key"].as_str().unwrap(),
+        sha(encoded.as_bytes())
+    ));
+    std::fs::write(&invalid, &encoded).unwrap();
+    assert!(
+        read(root.path(), ShadowProvider::Claude, 7651307, None)
+            .unwrap()
+            .is_empty(),
+        "a valid file digest never repairs a wrong original episode"
+    );
+    assert_eq!(std::fs::read_to_string(invalid).unwrap(), encoded);
 }
 #[tokio::test]
 async fn shared_coverage_registration_has_one_effect_and_no_grant_pg() {
@@ -422,4 +460,198 @@ async fn split_effects_share_one_durable_manifest_and_keep_every_original_snapsh
     assert_eq!(grants, 0);
     pool.close().await;
     drop(db);
+}
+
+#[test]
+fn an_unreadable_snapshot_keeps_only_its_episode_without_reordering_other_plans() {
+    let root = tempfile::tempdir().unwrap();
+    let channel = 7651314;
+    for nonce in ["first-original", "second-original"] {
+        let mut good = row(channel);
+        good["turn_nonce"] = json!(nonce);
+        seed(root.path(), good, json!({"source":null}));
+    }
+    let expected: Vec<_> = plans(root.path(), channel)
+        .iter()
+        .map(|plan| plan.registration(42).unwrap())
+        .collect();
+    let mut unknown = row(channel);
+    unknown["turn_nonce"] = json!("unknown-original");
+    unknown["runtime_kind"] = json!("future-kind");
+    let invalid = seed(root.path(), unknown, json!({"source":null}));
+    let bytes = std::fs::read(&invalid).unwrap();
+    let actual: Vec<_> = plans(root.path(), channel)
+        .iter()
+        .map(|plan| plan.registration(42).unwrap())
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "a held row does not poison other original episodes or order"
+    );
+    assert_eq!(std::fs::read(&invalid).unwrap(), bytes);
+    let first = &expected[0];
+    let digest = first["snapshots"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap();
+    let path = directory(root.path(), ShadowProvider::Claude).join(format!(
+        "{channel}-{}-{digest}.json",
+        first["episode"].as_str().unwrap()
+    ));
+    let mut corrupt = std::fs::read(&path).unwrap();
+    corrupt.push(b'\n');
+    let copy = path.with_file_name(format!(
+        "{channel}-{}-{}.json",
+        first["episode"].as_str().unwrap(),
+        "0".repeat(64)
+    ));
+    std::fs::write(&copy, &corrupt).unwrap();
+    let actual = plans(root.path(), channel);
+    assert_eq!(actual.len(), 2);
+    assert!(
+        actual[0].registration(42).is_err(),
+        "unreadable evidence retains its own episode"
+    );
+    assert_eq!(actual[1].registration(42).unwrap(), expected[1]);
+    assert_eq!(std::fs::read(copy).unwrap(), corrupt);
+}
+
+async fn split_native_coverage(text: &str, channel: u64) {
+    use crate::services::cluster::intake_router_hook::owner_record::output::tests as original_tests;
+    use crate::services::tui_o::shadow::CapturedRecord;
+    use crate::services::tui_o::store::ledger::LedgerEntry;
+    use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
+    let (db, pool, origin) = original_tests::fixture(&channel.to_string()).await;
+    original_tests::revoke(&pool, &origin).await;
+    let root = tempfile::tempdir().unwrap();
+    let mut original = row(channel);
+    original["full_response"] = json!(text);
+    original["intake_outbox_id"] = serde_json::to_value(&origin).unwrap()["delivery"].clone();
+    let evidence = native(root.path(), &original, text);
+    let source: SourceId = serde_json::from_value(evidence["source"].clone()).unwrap();
+    let bytes = std::fs::read(&source.path).unwrap();
+    let record = CapturedRecord {
+        start: 0,
+        end: bytes.len() as u64,
+        line: bytes[..bytes.len() - 1].to_vec(),
+    };
+    let mut deriver = super::super::pieces::UnitDeriver::new(channel, ShadowProvider::Claude);
+    let pieces: Vec<_> = deriver
+        .derive(&record)
+        .into_iter()
+        .filter_map(|d| match d {
+            super::super::pieces::Derived::Piece(piece) => Some(piece),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        pieces.len() > 1,
+        "the fixture must exercise the real splitter"
+    );
+    let disk = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path())
+        .unwrap()
+        .unwrap();
+    let era = disk
+        .begin_fixture_era(&[channel], chrono::Utc::now(), |channel| {
+            Ok(Initialized {
+                channel,
+                sources: vec![],
+                initial_anchor: 0,
+                build_digest: "fixture".into(),
+                at: chrono::Utc::now(),
+                policy_parent: None,
+            })
+        })
+        .unwrap();
+    let mut store = disk.open_channel(&era, channel).unwrap().unwrap();
+    for (serial, piece) in pieces.iter().enumerate() {
+        store
+            .append_ledger(LedgerEntry::OutputOrigin {
+                serial: serial as u64,
+                artifact: origin.seal(&piece.payload),
+            })
+            .unwrap();
+        store
+            .append_ledger(LedgerEntry::Prepared {
+                serial: serial as u64,
+                unit_key: piece.unit_key.clone(),
+                piece_index: piece.index,
+                payload: piece.payload.clone(),
+                anchor_id: 0,
+                epoch: 1,
+                local_retry: None,
+                notice_origin: None,
+            })
+            .unwrap();
+    }
+    let path = seed(root.path(), original, evidence);
+    let saved = std::fs::read(&path).unwrap();
+    let plans = read(
+        root.path(),
+        ShadowProvider::Claude,
+        channel,
+        Some(store.ledger()),
+    )
+    .unwrap();
+    let plan = &plans[0];
+    let document = plan
+        .registration(42)
+        .expect("equal ordered split payloads are original native coverage");
+    let aliases = document["native"].as_array().unwrap();
+    let effects = document["effects"].as_array().unwrap();
+    assert_eq!(aliases.len(), pieces.len());
+    assert_eq!(
+        aliases.iter().map(|a| &a["payload"]).collect::<Vec<_>>(),
+        effects.iter().map(|e| &e["payload"]).collect::<Vec<_>>()
+    );
+    assert!(
+        aliases
+            .iter()
+            .all(|a| a["output_origin"]["origin"]["delivery"]
+                == serde_json::to_value(&origin).unwrap()["delivery"])
+    );
+    let scope = Scope {
+        pool: pool.clone(),
+        provider: "claude".into(),
+    };
+    assert_eq!(
+        scope.register_herdr_body_debt(plan, 42).await.unwrap(),
+        pieces.len()
+    );
+    assert_eq!(scope.register_herdr_body_debt(plan, 42).await.unwrap(), 0);
+    let grants: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM o_herdr_debt_grants")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM o_herdr_debt_runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!((grants, runs), (0, 0));
+    assert_eq!(std::fs::read(path).unwrap(), saved);
+    pool.close().await;
+    drop(db);
+}
+
+#[tokio::test]
+async fn newline_split_payloads_preserve_original_native_aliases_without_grants_pg() {
+    split_native_coverage(
+        &format!("{}\n{}", "a".repeat(1000), "b".repeat(1000)),
+        7651315,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn fenced_split_payloads_preserve_original_native_aliases_without_grants_pg() {
+    split_native_coverage(
+        &format!(
+            "```rust\n{}\n```",
+            "let original = 123456789;\n".repeat(200)
+        ),
+        7651316,
+    )
+    .await;
 }

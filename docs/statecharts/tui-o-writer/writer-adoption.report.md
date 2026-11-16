@@ -334,3 +334,17 @@ Refused and permanent no-source Deferred body visibility is conditional on
 verified owner/store recovery and eventual exact effect or conclusive no-effect
 proof. There is no unconditional liveness claim. C2c remains required for actual
 replay, old-before-new, receipt reconciliation and GC.
+
+### C2b reader compatibility repair
+
+C1's production rows omit host_locator. The reader accepts their original logical
+session/nonce/episode without creating a current owner locator. Unreadable files
+remain retained and isolate only their own episode; other episode order is
+unchanged. Native overlap compares the ordered saved/native split payload arrays,
+then retains the existing pinned range and original admission checks.
+
+The 54 companion configurations do not encode JSON locator fields or splitter
+payload transformations. This repair changes no model/config or protocol
+transition; runtime entry tests, rather than the earlier 16G/38R result, verify
+the compatibility change. Periodic/foreign-executor debt wake filtering remains
+an explicit C2c limitation.

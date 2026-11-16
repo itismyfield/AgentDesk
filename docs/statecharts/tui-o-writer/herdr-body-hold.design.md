@@ -724,7 +724,9 @@ boxed so ordinary output futures do not carry the complete recovery reference.
 The rowless reader in `writer/herdr_body_debt.rs` opens C1's actual directory,
 `runtime/discord_herdr_body_debt/<provider>`, relative to the host runtime root.
 It validates the v1 filename's exact-byte SHA, provider/channel, original episode,
-known Herdr/TUI identity and typed original input fields. It neither loads nor
+known Herdr/TUI identity and typed original input fields. C1 may omit its physical
+host locator: the original logical session, nonce and episode remain the identity,
+without synthesizing the current owner's host fields. It neither loads nor
 recreates an active row. The manifest retains the exact encoded snapshot and
 raw row JSON, including unknown fields and missing historical input metadata.
 A real C1 archive/guarded-clear fixture checks this directory and byte contract;
@@ -736,11 +738,16 @@ positive native aliases. Missing source/input-origin lists stay missing in their
 original snapshots; a later list does not relabel an earlier accepted input.
 Changed body plans, conflicting known deliveries, uncertain prior visibility,
 unknown policy, and unproved saved/native overlap remain retained.
+An unreadable snapshot remains on disk and holds only its original episode;
+other valid episodes keep their existing order. Returned plans are candidates,
+never proof that no other retained file or unresolved body exists.
 
 Native text equality or a new source is insufficient coverage proof. The reader
 requires an exact pinned source/range, an unambiguous native UnitKey/piece, and
 an existing O ledger Original artifact with the same original intake delivery,
 provider/channel and exact payload. It preserves that old artifact verbatim;
+saved and native coverage compare ordered split payload bytes, including the
+splitter's newline boundaries and fence closing/reopening, rather than unsplit text.
 it never seals the text with the current owner's Origin. A rewritten source
 whose unit belongs to another input therefore cannot adopt the old body even
 when its text matches. Unmanaged or historical inputs without this evidence
@@ -767,16 +774,21 @@ caller in this slice.
 
 Recovered and Fresh hosts validate retired snapshots before the unchanged
 metadata guard. They register after the existing port wait proves the sender,
-and reread for every host actor start/resume. Boot adds a queue wake only for
-validated debt channels whose current output ownership is O; foreign and
-unrelated channels receive no additional debt wake. The existing queue admission
-still judges each wake. First-init fences and ordinary source guards are unchanged.
+and reread for every host actor start/resume. The debt wake currently checks O
+output ownership, which is not a local execution permit, and spawn_execution
+also reaches it from periodic refresh. C2c must move this scan to the actual
+one-time bootstrap boundary and filter execution permits/gateway authority;
+foreign-executor exclusion is not claimed here. Existing queue admission still
+judges every wake. First-init fences and ordinary source guards are unchanged.
 
 C2b supplies the immutable plan/coverage prerequisite of CapIssue. CapRecovery,
 Archive/Detach and CapIdentity/CapUnknownPlan already describe its rowless and
 fail-closed states, so the 54 companion configs and their assumptions are
 unchanged. Runtime tests cover bytes, merge and original native coordinates,
 which the abstract permission model deliberately does not encode.
+Locator decoding and split payload comparison are outside that model too. The
+repair changes no TLA/config assumption or permission transition; actual C1
+publication, host start/resume and long-body PG tests cover these boundaries.
 
 C2b is not completed debt delivery. C2c must add pre-metadata uncertainty
 reconciliation, actual guarded capability issuance, drain/POST barriers,
