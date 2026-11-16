@@ -8,6 +8,9 @@ use crate::domain::file_sync::fsync_parent_dir;
 use crate::services::session_host::surface_policy::InitScope;
 use crate::services::session_host::surface_policy::VerifiedSurface;
 
+mod lifecycle;
+pub(crate) use lifecycle::ChildLifecycle;
+
 const FLOOR: &str = "thread_children.floor";
 const CONTENT: &[u8] = b"1\n";
 
@@ -95,7 +98,7 @@ impl OStore {
         init: &Initialized,
         origin: InitOrigin,
     ) -> Result<(), StoreError> {
-        self.begin_era_as(init, origin, &Self::fixture_scope(&[init.channel]))
+        self.begin_era_as(init, origin, &Self::fixture_scope(&[init.channel]), None)
     }
 
     pub(crate) fn begin_fixture_era(

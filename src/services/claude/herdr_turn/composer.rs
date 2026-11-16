@@ -101,6 +101,21 @@ fn observation(capture: Option<&str>, exit: bool) -> ControlFlow<bool> {
     }
 }
 
+/// S1, a restart proof's screen: the prompt marker, an empty composer, no modal and no live turn.
+/// A stale MCP auth banner is no veto: the pane already finished a turn on this source.
+pub(crate) fn restored_screen_idle(pane: &str) -> bool {
+    let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(pane);
+    let plain =
+        crate::services::claude_tui::prompt_readiness::normalize_prompt_readiness_panel_in_capture(
+            &plain,
+        );
+    use crate::services::tmux_common as screen;
+    composer_owner(pane) == ComposerOwner::Empty
+        && !screen::tmux_capture_indicates_claude_tui_interactive_modal(&plain)
+        && screen::tmux_capture_indicates_claude_tui_ready_for_input(&plain)
+        && !screen::tmux_capture_indicates_claude_tui_busy(&plain)
+}
+
 /// The capture precedes the gated paste; it never clears a draft or confirms a dialog.
 pub(crate) fn run_ready(
     session: &str,
@@ -129,7 +144,7 @@ pub(crate) fn when_idle(
     use crate::services::claude_tui::readiness;
     let watched = readiness::watched(session, Some(path));
     let proof = wait_for(cancel, composer_ready_wait(), || {
-        let Some(proof) = readiness::observe(session, Some(path)) else {
+        let Some(proof) = readiness::observe_restored(session, Some(path)) else {
             return ControlFlow::Continue(());
         };
         let Some(pane) = capture() else {
@@ -147,6 +162,9 @@ pub(crate) fn when_idle(
         if crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(&pane)
         {
             return ControlFlow::Break(None);
+        }
+        if proof.restart() && !restored_screen_idle(&pane) {
+            return ControlFlow::Continue(());
         }
         match readiness::reserve(proof) {
             Some(reservation) => ControlFlow::Break(Some(reservation)),

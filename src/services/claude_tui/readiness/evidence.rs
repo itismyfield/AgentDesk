@@ -87,6 +87,7 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
         from: offset,
         barrier: 0,
     };
+    let mut after_mode = false;
     while reader.read_until(b'\n', &mut line).ok()? > 0 {
         let record_start = offset;
         offset += line.len() as u64;
@@ -162,9 +163,13 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
                     tail.assistant = text;
                 }
             }
+            // Claude writes it right after `mode` in its session-state block; only a resume start
+            // reads that as a turn starting. Alone it is unread and ends what came before.
             "permission-mode" => {
-                tail.end = End::None;
-                tail.terminal = 0;
+                if !after_mode {
+                    tail.end = End::None;
+                    tail.terminal = 0;
+                }
                 tail.empty = false;
                 tail.barrier = offset;
             }
@@ -175,12 +180,24 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
                 tail.activity_at = timestamp(&record);
                 tail.end = End::None;
             }
-            "file-history-snapshot" | "queue-operation" | "last-prompt" => {}
+            // Session metadata a turn writes after its own records: no turn progress.
+            "file-history-snapshot"
+            | "queue-operation"
+            | "last-prompt"
+            | "ai-title"
+            | "mode"
+            | "session-owner"
+            | "atis-latch"
+            | "cost-state"
+            | "tools-used"
+            | "pr-link"
+            | "frame-link" => {}
             _ => {
                 tail.end = End::None;
                 tail.empty = false;
             }
         }
+        after_mode = record["type"] == "mode";
         line.clear();
     }
     if Stamp::read(path).as_ref() != Some(&tail.stamp) {

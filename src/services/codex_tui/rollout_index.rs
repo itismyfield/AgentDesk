@@ -163,6 +163,19 @@ fn is_rollout_jsonl(path: &Path) -> bool {
         .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
 }
 
+/// Whether Codex left a regular compressed sibling for this JSONL rollout.
+pub(crate) fn archived_rollout(path: &Path) -> bool {
+    if !path
+        .extension()
+        .is_some_and(|extension| extension == "jsonl")
+    {
+        return false;
+    }
+    let mut archive = path.as_os_str().to_os_string();
+    archive.push(".zst");
+    std::fs::symlink_metadata(archive).is_ok_and(|metadata| metadata.is_file())
+}
+
 /// Read and parse the `session_meta` header of a single rollout file. Bounded to
 /// the first [`HEADER_SCAN_LINE_LIMIT`] lines (REQ-005). This is the direct
 /// (uncached) read used on the cold path and when the cache is disabled.

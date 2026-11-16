@@ -5,6 +5,50 @@ use crate::services::discord::queue_io::input_owner::{claude_handoff, held_watch
 
 const SOURCE_HELD: &str = "busy_source_unavailable";
 
+/// A managed running turn keeps its inflight cursor while hooks move the verified native source.
+pub(super) async fn running(
+    shared: Option<&Shared>,
+    mailbox: &ChannelMailboxHandle,
+    (provider, origin): (&ProviderKind, InputOrigin),
+    (channel, session, host): (u64, &str, &TurnHost),
+    front: &Front,
+) -> Result<Option<Registration>, String> {
+    if *provider != ProviderKind::Claude || !origin.is_person() || matches!(host, TurnHost::Tmux) {
+        return Ok(None);
+    }
+    let observation = claude_handoff::observe_busy(
+        channel,
+        session,
+        host,
+        shared.map_or("", |shared| shared.token_hash.as_str()),
+    );
+    if observation.state() == BusyState::Busy {
+        let registered = prepare(
+            mailbox.clone(),
+            provider,
+            origin,
+            host,
+            session,
+            front,
+            observation.clone(),
+        );
+        if registered.is_ok() {
+            return registered.map(Some);
+        }
+    }
+    let channel = ChannelId::new(channel);
+    if let Some(shared) = shared {
+        hold(shared, mailbox, channel, front, observation.probe()).await;
+    } else {
+        hold_start(mailbox, channel, front).await;
+        held_watch::arm(
+            channel.get(),
+            held_front(observation.probe(), mailbox.clone(), front.clone()),
+        );
+    }
+    Err(effect::unsent(SOURCE_HELD.into()))
+}
+
 impl OwnerTurn {
     pub(in crate::services::discord) async fn early(
         shared: &Shared,

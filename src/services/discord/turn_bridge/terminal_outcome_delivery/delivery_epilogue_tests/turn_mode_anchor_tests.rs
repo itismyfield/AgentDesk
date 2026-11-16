@@ -300,6 +300,43 @@ async fn o_delegated_tui_body_is_cut_on_direct_gateways_but_not_headless() {
     );
 }
 
+/// W10 again with the driver channel as a recorded thread child of a selected TUI parent.
+#[tokio::test]
+async fn child_w10_tui_body_is_cut_on_direct_gateways() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::child_w10_tui_body_is_cut_on_direct_gateways"
+    )) {
+        return;
+    }
+    let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+        "server": {},
+        "agents": [{"id": "parent", "name": "Parent", "channels":
+            {"claude": {"id": LISTED_CHANNEL_ID.to_string(), "runtime": "tui"}}}],
+        "tui_o": {"writer": {}, "turn": {"all_owned": false}},
+    }))
+    .unwrap();
+    let boot = BootChannels::validate(&config)
+        .unwrap()
+        .adopted(Adoption::Committed);
+    let child = serde_json::json!({"channel": DRIVER_CHANNEL_ID, "policy_parent": LISTED_CHANNEL_ID,
+        "sources": [], "initial_anchor": 0, "build_digest": "fixture", "at": "2026-11-14T00:00:00Z"});
+    boot.record_child_fixture(&serde_json::from_value(child).unwrap());
+    assert!(matches!(boot.child(DRIVER_CHANNEL_ID), Some(Ok(_))));
+    let taking = crate::services::tui_o::cutover::intake_route::test_probe::answer_with(|_| true);
+    let delivered = deliver(boot, ClaudeTui).await;
+    drop(taking);
+    assert!(
+        delivered.body_writes == 0
+            && delivered.consumed
+            && delivered.committed
+            && delivered.alarms.is_empty(),
+        "child: O takes the body with no halted or released alarm: {delivered:?}"
+    );
+}
+
 /// The same split when the writer is explicitly off and the selection is empty.
 #[tokio::test]
 async fn explicitly_off_writer_holds_tui_bodies_and_keeps_legacy_for_other_channels() {

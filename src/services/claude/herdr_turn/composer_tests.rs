@@ -514,3 +514,164 @@ fn a_resumed_execution_takes_its_first_input_before_any_new_turn_ends() {
         tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
     }
 }
+
+/// Q5, isolated Claude Code v2.1.325 pane: a UserPromptSubmit hook still running.
+const HOOK_RUNNING: &str = "❯ reply with the single word pong\n✽ Marinating… (running UserPromptSubmit hooks… 1/2 · 2s)\n                                                    ● high · /effort";
+/// Q5: the turn right after its prompt, before any transcript row can be read back.
+const TURN_STARTING: &str = "❯ reply with the single word pong\n✽ Fiddle-faddling…";
+/// Q6, 게임-cc 2026-11-15 17:22: the turn ended, one background shell still runs.
+const BACKGROUND_SHELL: &str =
+    "  그때 따로 처리할게요.\n\n✻ Worked for 2m 10s · done 5:19 PM · 1 shell\n  still running";
+
+// The daemon restarted under a pane launched before it; nothing after the last hard
+// terminal, no Start of this run. S1 gives it exactly one input on an idle, empty screen only.
+#[test]
+fn a_pane_that_outlived_the_restart_takes_one_input_only_on_an_idle_screen() {
+    use crate::services::claude_tui::readiness;
+    use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding, binding_context};
+    use serde_json::json;
+    let old = chrono::Utc::now() - chrono::Duration::hours(6);
+    let finished = [
+        json!({"type":"user","timestamp":old,"message":{"role":"user","content":"earlier prompt"}}),
+        json!({"type":"assistant","timestamp":old,"message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}}),
+        json!({"type":"system","subtype":"stop_hook_summary","timestamp":old}),
+        json!({"type":"system","subtype":"turn_duration","timestamp":old}),
+    ];
+    let mcp = "✻ Baked for 2s\n\n ⚠ 1 MCP server needs authentication · run /mcp";
+    use crate::services::claude_tui::host_input::InputRefusal::{Unknown, Unproven};
+    // `None` is admitted; a refusal names what the budget's end saw; a running screen over
+    // unchanged idle bytes ends Unproven, as `Watched::unproven` reads no screen.
+    let cases = [
+        ("idle", true, pane("✻ Baked for 2s", ""), None),
+        ("stale MCP auth banner", true, pane(mcp, ""), None),
+        ("background shell", true, pane(BACKGROUND_SHELL, ""), None),
+        (
+            "MCP banner + draft",
+            true,
+            pane(mcp, "a person's draft"),
+            Some(Unknown),
+        ),
+        (
+            "MCP banner + modal",
+            true,
+            pane(
+                &format!("{mcp}\nDo you want to proceed?\n❯ 1. Yes\nEnter to confirm"),
+                "",
+            ),
+            Some(Unknown),
+        ),
+        (
+            "MCP banner + hook running",
+            true,
+            pane(&format!("{mcp}\n{HOOK_RUNNING}"), ""),
+            Some(Unproven),
+        ),
+        (
+            "MCP banner + turn starting",
+            true,
+            pane(&format!("{mcp}\n{TURN_STARTING}"), ""),
+            Some(Unproven),
+        ),
+        (
+            "new incarnation",
+            false,
+            pane("✻ Baked for 2s", ""),
+            Some(Unproven),
+        ),
+    ];
+    for (name, older, screen, refused) in cases {
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        readiness::initialize();
+        // Stamped after the clock starts, as the daemon boots before any launch.
+        let created_at = if older { old } else { chrono::Utc::now() };
+        let rig = HerdrRig::start();
+        let _registry = rig.registry_on_this_thread();
+        let logical = format!("i8161-restored-{}", uuid::Uuid::new_v4().simple());
+        let native = uuid::Uuid::new_v4().to_string();
+        let projects = root.path().join("projects");
+        let path = projects.join("workspace").join(format!("{native}.jsonl"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&path).unwrap();
+            for row in &finished {
+                let mut row = row.clone();
+                row["sessionId"] = json!(native);
+                writeln!(file, "{row}").unwrap();
+            }
+        }
+        let context: binding_context::BindingContext = serde_json::from_value(json!({
+            "schema":1,"provider":"claude","created_at":created_at,"execution_nonce":NONCE,
+            "tmux_session":logical,"channel_id":1,"owner_runtime_root":"test","host":null,
+            "expected_native_session_id":native,"launch_mode":"resume","provider_root":projects
+        }))
+        .unwrap();
+        let launch = binding_context::PreparedIncarnation::create(context).unwrap();
+        rig.run_provider(&launch.path, false);
+        for (marker, value) in [("host_kind", "herdr"), ("spawn_nonce", NONCE)] {
+            let marker = crate::services::tmux_common::session_temp_path(&logical, marker);
+            std::fs::write(marker, value).unwrap();
+        }
+        let (_owner, target) = bound_target(&rig, &logical);
+        tui_prompt_dedupe::register_tmux_runtime_binding(
+            &logical,
+            TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                output_path: path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(native.clone()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        readiness::tests::daemon_restart(&logical);
+        assert!(
+            readiness::observe(&logical, Some(&path)).is_none(),
+            "{name}: the shared observe keeps the restart floor"
+        );
+        rig.answer("pane.read", json!({"type":"pane_read", "read":{"pane_id":PANE,"source":"recent_unwrapped","text":screen,"revision":1,"truncated":false}}));
+        let plan = [
+            TuiInputAction::PasteBuffer("one original".into()),
+            TuiInputAction::Enter,
+        ];
+        READY_WAIT_FOR_TESTS.with(|wait| wait.set(Some(Duration::from_millis(600))));
+        let result = run_ready(&logical, &path, &target, &plan, None);
+        READY_WAIT_FOR_TESTS.with(|wait| wait.set(None));
+        match refused {
+            None => {
+                assert_eq!(result, InputRun::Applied, "{name}");
+                assert_eq!(rig.sends().len(), 2, "{name}: one paste and one Enter");
+            }
+            Some(kind) => {
+                assert_eq!(result, InputRun::Refused(kind), "{name}");
+                assert!(rig.sends().is_empty(), "{name}: no key");
+            }
+        }
+        tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
+    }
+}
+
+#[test]
+fn restored_screen_reads_marker_draft_modal_and_busy_but_not_a_stale_auth_banner() {
+    let mcp = "✻ Baked for 2s\n\n ⚠ 1 MCP server needs authentication · run /mcp";
+    assert!(restored_screen_idle(&pane(mcp, "")));
+    assert!(restored_screen_idle(&pane(BACKGROUND_SHELL, "")));
+    for (name, screen) in [
+        ("draft", pane(mcp, "draft")),
+        ("hook running", pane(HOOK_RUNNING, "")),
+        ("turn starting", pane(TURN_STARTING, "")),
+        (
+            "interrupt chrome",
+            pane("✳ Architecting… (12s · esc to interrupt)", ""),
+        ),
+        (
+            "modal",
+            pane("Do you want to proceed?\n❯ 1. Yes\nEnter to confirm", ""),
+        ),
+        ("no composer", "✻ Baked for 2s".to_string()),
+    ] {
+        assert!(!restored_screen_idle(&screen), "{name}");
+    }
+}

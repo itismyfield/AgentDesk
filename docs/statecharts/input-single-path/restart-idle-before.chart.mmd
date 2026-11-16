@@ -1,0 +1,26 @@
+---
+title: "Daemon restart over an idle herdr Claude pane: first input"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the ReadyRestartIdleEventuallyReceives bug
+    lg1: Repeats forever, so ReadyRestartIdleEventuallyReceives breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: Before restart: turn running
+  s1: Before restart: idle
+  s2: Idle behind the restart floor
+  s3: One input retained, next waits
+  s4: Every input retained (resend asked)
+  [*] --> s0
+  s0 --> s1: ReadinessNext
+  s1 --> s2: ReadinessNext
+  s2 --> s2: ReadinessNext
+  s2 --> s3: ReadinessNext
+  s3 --> s4: ReadinessNext
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 repeats
