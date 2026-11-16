@@ -219,7 +219,7 @@ impl Drop for FallbackCount {
 }
 
 fn idle_endpoint(endpoint: &str) {
-    let fx = Fixture::new(&format!("http-{endpoint}"), None);
+    let mut fx = Fixture::new(&format!("http-{endpoint}"), None);
     let launcher = Arc::new(Launcher::default());
     let (_, started) = reconnect::launch(&fx, &launcher);
     let before = fx.rig.sends().len();
@@ -309,7 +309,12 @@ fn idle_endpoint(endpoint: &str) {
         fallback.assert_none();
         first
     });
+    // Connections opened by the first intake cannot outlive its I/O runtime.
+    intake.runtime.block_on(fx.pool.close());
     drop(intake);
+    fx.pool = fx
+        .rt
+        .block_on(fx.db.as_ref().unwrap().connect_and_migrate());
     let restarted = Intake::new(&fx, &started);
     restarted.runtime.block_on(async {
         let app = app(&fx, &restarted).await;
