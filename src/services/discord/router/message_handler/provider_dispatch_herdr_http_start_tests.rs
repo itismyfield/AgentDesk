@@ -800,8 +800,12 @@ fn execution_gone(terminal: Option<bool>) {
         let notices = intake.mock.written_texts().into_iter().filter(|text| text == &notice).count();
         assert_eq!(notices, usize::from(terminal.is_none()), "a native terminal is left to its reader");
         if terminal.is_none() {
-            assert!(actor.is_completion_cleanup());
-            assert!(actor.cancelled.load(Ordering::SeqCst), "the settled reader is woken");
+            // Captured settlement releases the row and mailbox before publishing reader cleanup.
+            tokio::time::timeout(LIMIT, async {
+                while !actor.is_completion_cleanup() || !actor.cancelled.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("the captured E settlement publishes cleanup and wakes its reader");
         }
         assert_eq!(fx.rig.sends().len(), before + 2);
         fallback.assert_none();
