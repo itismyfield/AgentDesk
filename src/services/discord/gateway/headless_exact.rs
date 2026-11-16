@@ -77,7 +77,7 @@ impl TurnGateway for HeadlessExactGateway {
         channel: ChannelId,
         content: &'a str,
     ) -> GatewayFuture<'a, Result<MessageId, String>> {
-        self.presentation().send_message(channel, content)
+        TurnGateway::send_message(self.presentation(), channel, content)
     }
     fn edit_message<'a>(
         &'a self,
@@ -85,7 +85,7 @@ impl TurnGateway for HeadlessExactGateway {
         message: MessageId,
         content: &'a str,
     ) -> GatewayFuture<'a, Result<(), String>> {
-        self.presentation().edit_message(channel, message, content)
+        TurnGateway::edit_message(self.presentation(), channel, message, content)
     }
     fn delete_message<'a>(
         &'a self,

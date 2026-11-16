@@ -24,43 +24,24 @@ pub(super) async fn observe(shared: &Shared, channel: ChannelId, context: &Value
     let provider = &shared.provider;
     let key =
         crate::services::discord::adk_session::turn_session_key(shared, channel, provider).await;
-    let Some(endpoint) = crate::config::session_hosts::herdr_endpoint(channel.get()) else {
-        let host = crate::services::turn_host::for_turn(
-            shared.pg_pool.as_ref(),
-            provider,
-            channel.get(),
-            key.as_deref(),
-        )
-        .await;
-        return match host {
-            TurnHost::Tmux | TurnHost::Return(_) => Observed::Legacy,
-            _ => Observed::Refused,
-        };
+    use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
+    let host = crate::services::turn_host::for_observation(
+        shared.pg_pool.as_ref(),
+        provider,
+        channel.get(),
+        key.as_deref(),
+    )
+    .await;
+    let plan = match host {
+        TurnHost::Tmux | TurnHost::Return(_) => return Observed::Legacy,
+        TurnHost::Herdr(plan) => plan,
+        TurnHost::Refused(crate::services::turn_host::HerdrRefusal::HostedRowUnreadable {
+            ..
+        }) => {
+            return Observed::Native(Screen::Unknown);
+        }
+        TurnHost::Refused(_) => return Observed::Refused,
     };
-    if crate::config::session_hosts::local_node().as_deref()
-        != Some(endpoint.execution_node.as_str())
-    {
-        return Observed::Refused;
-    }
-    if !matches!(provider, ProviderKind::Claude | ProviderKind::Codex) {
-        return Observed::Refused;
-    }
-    let (Some(pool), Some(key)) = (shared.pg_pool.as_ref(), key) else {
-        return Observed::Native(Screen::Unknown);
-    };
-    use crate::db::dispatched_sessions::hosted_execution::{
-        HostedLookup, HostedLookupKey, HostedRecord, HostedState, load_hosted_execution_pg,
-    };
-    let row = match load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(&key)).await {
-        HostedLookup::Found(row) => Some(row),
-        HostedLookup::Missing => None,
-        _ => return Observed::Native(Screen::Unknown),
-    };
-    // Observation must not wait on execution admission or output-writer readiness.
-    let plan = Box::new(crate::services::turn_host::HerdrTurnPlan {
-        endpoint: crate::services::turn_host::launch_endpoint(endpoint),
-        row,
-    });
     if *provider != ProviderKind::Claude {
         use crate::services::discord::turn_presence::activity::{Activity, activity_now};
         return Observed::Native(
