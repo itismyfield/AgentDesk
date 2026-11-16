@@ -154,11 +154,3 @@ pub(crate) fn summary(nonce: &str) -> Option<serde_json::Value> {
         "notice_enqueued_at": record.notice_enqueued_at,
     }))
 }
-
-/// The execution whose v2 hold names session `logical`, if any.
-pub(crate) fn held_by(logical: &str) -> Option<String> {
-    let holds = super::input_holds().ok()?;
-    holds.into_iter().map(|(nonce, _)| nonce).find(
-        |nonce| matches!(read(nonce), Ok(Some(Held::V2(record))) if record.logical_key == logical),
-    )
-}

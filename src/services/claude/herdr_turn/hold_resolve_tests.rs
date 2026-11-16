@@ -22,6 +22,8 @@ struct Fake {
     keys: Cell<usize>,
     notices: RefCell<Vec<String>>,
     failing_notices: Cell<u32>,
+    /// The screen an enqueue that succeeds leaves behind, as if it recovered meanwhile.
+    after_notice: RefCell<Option<String>>,
 }
 impl Fake {
     fn on(screen: &str) -> Self {
@@ -51,6 +53,9 @@ impl Ports for Fake {
             return Err("outbox down".into());
         }
         self.notices.borrow_mut().push(hold.to_owned());
+        if let Some(screen) = self.after_notice.borrow_mut().take() {
+            self.set(&screen);
+        }
         Ok(1)
     }
 }
@@ -410,12 +415,19 @@ fn hold_resolve_pre_noticed_inflight_then_empty_unconfirmed_once() {
     write(&hold("noticed", SendOutcome::InFlight, root.path())).unwrap();
     let fake = Fake::on("no composer");
     fake.failing_notices.set(1);
-    let screen = std::sync::Arc::new(std::sync::Mutex::new(Some("no composer".to_owned())));
-    let seen = screen.clone();
-    let mut probe = watch("noticed".into(), move || seen.lock().unwrap().clone());
-    for _ in 0..3 {
+    for _ in 0..2 {
         assert_eq!(resolve("hold-session", "noticed", &fake), Ok(Verdict::Kept));
     }
+    let mut seen = None;
+    assert_eq!(
+        judge("hold-session", "noticed", &fake, &mut seen),
+        Ok(Verdict::Kept)
+    );
+    let screen = std::sync::Arc::new(std::sync::Mutex::new(Some("no composer".to_owned())));
+    let shared = screen.clone();
+    let mut probe = watch("noticed".into(), seen, move || {
+        shared.lock().unwrap().clone()
+    });
     let Some(Held::V2(record)) = read("noticed").unwrap() else {
         panic!("v2 hold")
     };
@@ -448,6 +460,70 @@ fn busy_inject_applied_then_resolve_releases_on_digest_receipt() {
     let path = root.path().join("busy.jsonl");
     std::fs::write(&path, user_record(FRAME)).unwrap();
     write(&hold("busy", SendOutcome::EnterSendFailed, &path)).unwrap();
-    after_busy("hold-session", &Fake::on(&shown("")));
+    after_busy("hold-session", "busy", &Fake::on(&shown("")));
     assert_eq!(read("busy"), Ok(None));
+}
+
+/// A busy input judges only the hold of the execution it wrote to, never another of its session.
+#[test]
+fn busy_inject_judges_only_its_own_execution_hold() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    write(&hold("orphan", SendOutcome::EnterRefused, root.path())).unwrap();
+    let before = read("orphan").unwrap();
+    let fake = Fake::on(&shown(FRAME));
+    after_busy("hold-session", "successor", &fake);
+    assert_eq!((read("orphan").unwrap(), fake.keys.get()), (before, 0));
+}
+
+/// A composer that recovers while the pass secures its notice row still wakes the watch the
+/// pass leaves, and the wake survives until taken; the next pass releases and the input goes.
+#[test]
+fn hold_resolve_recovery_during_notice_enqueue_wakes_after_registration() {
+    use crate::services::claude::herdr_turn::composer::when_idle;
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let path = root.path().join("turn.jsonl");
+    crate::services::claude_tui::readiness::tests::pre_source("hold-session", &path);
+    write(&hold("recovered", SendOutcome::InFlight, &path)).unwrap();
+    let fake = Fake::on("no composer");
+    assert_eq!(
+        resolve("hold-session", "recovered", &fake),
+        Ok(Verdict::Kept)
+    );
+    *fake.after_notice.borrow_mut() = Some(shown(""));
+    let mut seen = None;
+    assert_eq!(
+        judge("hold-session", "recovered", &fake, &mut seen),
+        Ok(Verdict::Kept)
+    );
+    let Some(Held::V2(record)) = read("recovered").unwrap() else {
+        panic!("v2 hold")
+    };
+    assert!(record.notice_enqueued_at.is_some());
+    let screen = std::sync::Arc::new(std::sync::Mutex::new(Some(shown(""))));
+    let shared = screen.clone();
+    let mut probe = watch("recovered".into(), seen, move || {
+        shared.lock().unwrap().clone()
+    });
+    assert_eq!(
+        probe(),
+        Screen::Ready,
+        "the recovery before registration wakes"
+    );
+    *screen.lock().unwrap() = Some("no composer".into());
+    assert_eq!(probe(), Screen::Ready, "a wake not yet taken is kept");
+    let released = resolve("hold-session", "recovered", &fake);
+    assert_eq!(released, Ok(Verdict::Clear(Some(Disposition::Unconfirmed))));
+    let sends = Cell::new(0);
+    let send = || {
+        sends.set(sends.get() + 1);
+        InputRun::Applied
+    };
+    let next = when_idle("hold-session", &path, || Some(shown("")), None, send);
+    assert_eq!(next, InputRun::Applied);
+    assert_eq!(
+        (fake.notices.borrow().len(), fake.keys.get(), sends.get()),
+        (1, 0, 1)
+    );
 }

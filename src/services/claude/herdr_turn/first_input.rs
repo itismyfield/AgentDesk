@@ -111,6 +111,7 @@ fn write(
         notice,
     };
     let (kept, failed) = (std::cell::Cell::new(false), std::cell::RefCell::new(None));
+    let seen = std::cell::RefCell::new(None);
     #[cfg(test)]
     before_start::test_input_boundary(cancel);
     let start = || {
@@ -124,7 +125,7 @@ fn write(
             // under one lock, so no pass ever reads a hold whose write still runs.
             let pending = match crate::services::claude_tui::owner_input::active() {
                 true => !matches!(
-                    hold_resolve::resolve(logical, &attached.nonce, &ports),
+                    hold_resolve::judge(logical, &attached.nonce, &ports, &mut seen.borrow_mut()),
                     Ok(hold_resolve::Verdict::Clear(_))
                 ),
                 false => input_held(&attached.nonce).unwrap_or(true),
@@ -177,7 +178,8 @@ fn write(
     };
     if kept.get() {
         let target = attached.target.clone();
-        let probe = hold_resolve::watch(attached.nonce.clone(), move || target.capture_ansi(-80));
+        let (nonce, seen) = (attached.nonce.clone(), seen.into_inner());
+        let probe = hold_resolve::watch(nonce, seen, move || target.capture_ansi(-80));
         crate::services::claude_tui::owner_input::record_preparation_watch(probe);
         return Err(before_payload(logical, "herdr_input_hold_pending", false));
     }

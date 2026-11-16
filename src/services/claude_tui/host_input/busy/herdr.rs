@@ -158,6 +158,7 @@ fn receipt(request: &Request<'_>, text: String, offset: u64, target: HerdrTarget
             let target = &target;
             after_busy(
                 &session,
+                target.execution_nonce(),
                 &LivePorts {
                     target,
                     notice: None,

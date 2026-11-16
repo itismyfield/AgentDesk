@@ -6,6 +6,7 @@
 - 개정 3 (2026-11-16 21시): pro 재리뷰 2 ISSUES(P1 3·P2 4) 반영.
 - 개정 4 (2026-11-16 22시): xh 재리뷰 3(P1 1·P2 2) 반영. 송신 결과를 모르는 `in_flight` 단계, 정리 뒤 receipt 창의 모델화, 알림 의도·enqueue·확보 기록의 분리. 
 - 개정 5 (2026-11-16 22시): xh 재리뷰 4(P1 1·P2 1) 반영. 코디네이터 결정에 따라 이슈 DoD("입력창에 글이 남은 경우에만 보류 유지")에 설계를 맞춘다. 판독 가능한 빈 입력창에서 증거가 없으면 알림 row를 확보한 뒤 "전달 미확인"으로 해제한다. receipt 창은 시간만 보고, 정리 단계 해제의 표시를 바로잡는다. 항목별 대응은 9장에 있다.
+- S1 수리 1 (2026-11-17): pro 리뷰 P1-1·P2-3 반영. 감시의 비교 기준은 판정이 쓴 근거이며 Ready는 Wake나 감시 종료까지 유지한다(3.5). busy 주입 뒤 재판정은 현재 대상 실행 nonce의 보류만 본다. 모델에 판정 끝 → 감시 등록 틈(`Arm`)과 대조 `MutFreshBasis`(RED)를 더했다.
 - S1 구현 첫 커밋 (2026-11-16 23시): xh 재리뷰 5 P1-1 반영. 보류 알림 문구 하나가 보류 지속·전달 불확실·응답이 없으면 다시 보내라는 안내를 함께 담는다(3.5). 모델에 `UnconfirmedNoticeGuides`와 cfg 2개(`PreNoticedInFlight` GREEN, `MutHeldOnlyNotice` RED)를 더했다. 리뷰 5 P2-1(재시작 직전 서버가 받은 Enter의 늦은 적용)은 Herdr 서버 순서 계약 확인이 필요해 S1 범위 밖이다.
 - 운영: 사건 표지 `runtime/herdr_input_holds/bf28830d9ac94338bbe904c8a0c4eb0a`는 사용자 승인(11-16 19:4x)을 받아 메인 세션이 19:41에 치웠다(삭제하지 않고 이동). 그 뒤 같은 보류는 관측되지 않았다.
 
@@ -199,7 +200,7 @@
 
 ### 3.5 깨움과 보류마다 알림 1회 (리뷰 P1-3·P1-C·P2-C)
 
-- **감시 탐침**: 보류를 유지할 때 등록하는 `PreparationWatch` 탐침은 **판정 근거 변화**를 본다. 직전 판정의 지문(판독 가능 관문 결과, 입력창 분류 빈/정확 일치/그 밖, stash 유무, 같은 nonce transcript의 digest 기록 유무와 길이, 정착·receipt 창 경과, 게이트 확인 여부)이 바뀌면 `Screen::Ready`를 돌려 `held_watch`가 owner를 Wake하게 한다. Wake는 판정을 다시 돌릴 뿐 입력 권한이 아니다. 실행이 사라지면 `Screen::Gone`.
+- **감시 탐침**: 보류를 유지할 때 등록하는 `PreparationWatch` 탐침은 **판정 근거 변화**를 본다. 직전 판정의 지문(판독 가능 관문 결과, 입력창 분류 빈/정확 일치/그 밖, stash 유무, 같은 nonce transcript의 digest 기록 유무와 길이, 정착·receipt 창 경과, 게이트 확인 여부)이 바뀌면 `Screen::Ready`를 돌려 `held_watch`가 owner를 Wake하게 한다. 비교 기준은 감시 등록 때 새로 읽은 화면이 아니라 **판정이 실제로 쓴 근거**다. 판정 끝과 등록 사이(알림 enqueue 등)의 변화도 다시 판정하게 하려는 것이다(대조 `MutFreshBasis`). 한 번 Ready면 Wake나 감시 종료까지 Ready로 남는다. Wake는 판정을 다시 돌릴 뿐 입력 권한이 아니다. 실행이 사라지면 `Screen::Gone`.
 - **자체 재시도**: 그 보류의 `notice_enqueued_at`이 없는 동안에는 근거 변화가 없어도 탐침이 재시도 간격(예: 30 s) 뒤 Ready를 돌린다. 종료 조건은 `notice_intent_at`이 아니라 **durable outbox row 확보**(`notice_enqueued_at`)다. 그래서 enqueue만 실패해도 같은 프로세스에서 계속 다시 시도한다(리뷰 P2-C).
 - **알림 순서**: `unclear_passes`가 2에 닿으면 ① 표지에 `notice_intent_at` 기록·fsync → ② outbox enqueue(키 `input-hold:{execution_nonce}:{hold_id}`, LOOPBACK, 영구 dedupe) → ③ 성공(새 row든 같은 키의 기존 row든)이면 `notice_enqueued_at` 기록. ②가 실패하면 ③을 쓰지 않으므로 재시도가 계속된다. ①과 ② 사이에서 crash하면 부팅 뒤 판정이 `notice_intent_at`을 보고 enqueue부터 한다. ②와 ③ 사이에서 crash하면 부팅 뒤 같은 키로 다시 enqueue하고, 영구 dedupe가 기존 row id를 돌려준다. 그래서 보류마다 row는 정확히 하나다. ③을 기록해도 이미 와 있는 근거 변화 Wake는 지우지 않는다. 자체 재시도는 그다음 판정 패스에서 끝난다. 개정 4 모델은 ①(`Bump`가 한도에서 의도 기록) → ②(`EnqueueNotice`) → ③(`RecordEnqueued`)을 따로 전이하고 그 사이 어디서든 재시작이 끼어들 수 있게 했다(`RestartUnreadable`).
 - **보류 단위 키 (리뷰 P1-C)**: 실행 nonce만 키로 쓰면 같은 실행의 두 번째 보류부터 기존 row가 반환되어 알림이 사라진다(대조군 `MutNonceKey`). 기존 `retained_notice.rs`도 입력 identity와 attempt nonce를 키에 넣는다. v1 표지의 `hold_id`는 `sha256(execution_nonce ‖ 파일의 recorded_at 원문)`이다. 파일 내용이 바뀌지 않으므로 그 표지의 생애와 재시작 동안 같다.
@@ -249,6 +250,7 @@
 | 설계(증명 불가, 예상) | PersonStays, Unreadable, RestartUnreadable, EnqueueFail, Legacy | HoldEventuallyReleased, LaterInputStarts(글이 남았거나 판독 불가라 보류 유지. `HoldReleasedOrNoticed`·`NoticeAtMostOnce`는 통과) |
 | 설계(S1, 리뷰 5 P1-1) | PreNoticedInFlight | 없음 (**GREEN**. main 정책으로는 HoldEventuallyReleased·HoldReleasedOrNoticed·ReadableOursCleaned·LaterInputStarts RED) |
 | 대조군(S1) | MutHeldOnlyNotice | UnconfirmedNoticeGuides |
+| 대조군(S1 수리) | MutFreshBasis | HoldEventuallyReleased, HoldReleasedOrNoticed, ReadableOursCleaned, LaterInputStarts |
 | 대조군(개정 5) | MutInFlightKeep | HoldEventuallyReleased, LaterInputStarts |
 | 대조군(개정 5) | MutLateTranscriptAfterClearReceipt | UndeliveredIsTrue |
 | 대조군(개정 5) | MutNoWriteLock | OriginalNotOvertaken, NoPasteOverResidue, NoReleaseOnResidue, LaterInputStarts |
@@ -282,7 +284,7 @@
 | A3 | 붙여넣기 정착 창 ≥ 화면 반영. receipt 창은 transcript 기록 지연보다 길게 잡지만, 늦게 와도 "미전달"을 거짓으로 단정하지 않는다(개정 5. 모델의 창은 transcript 상태를 모름) | `hold_resolve_enter_refused_waits_paste_settle_before_reading_empty`, `hold_resolve_enter_send_failed_waits_receipt_window` |
 | A4 | "우리 글"은 손실 없이 복원한 본문 바이트가 원 프레임과 같을 때뿐이다 | `hold_resolve_v1_prefix_with_person_suffix_sends_no_key`, `hold_resolve_v2_chip_or_same_line_count_other_body_sends_no_key`, `hold_resolve_whitespace_indent_or_newline_edit_sends_no_key`, `hold_resolve_frame_not_screen_exact_never_deletes`, `hold_resolve_v2_exact_body_clears_then_rereads_empty` |
 | A5 | 전달 판정은 v2 digest 일치뿐이다 | `hold_resolve_v1_later_user_record_is_never_delivery`, `hold_resolve_stash_submit_other_then_return_is_not_receipt` |
-| A6 | 근거 변화가 Wake를 만들고, 판정 실패 1회 뒤에도 자체 재시도로 두 번째 판정에 닿는다 | `hold_resolve_unread_then_readable_wakes_without_new_message`, `hold_resolve_persistent_unread_notices_once_retained_zero_keys_zero` |
+| A6 | 근거 변화가 Wake를 만들고, 판정 실패 1회 뒤에도 자체 재시도로 두 번째 판정에 닿는다 | `hold_resolve_unread_then_readable_wakes_without_new_message`, `hold_resolve_persistent_unread_notices_once_retained_zero_keys_zero`, `hold_resolve_recovery_during_notice_enqueue_wakes_after_registration`(판정 뒤 등록 전 변화) |
 | A7 | 알림은 보류마다 정확히 1회이며, enqueue 실패와 재시작에도 row가 하나로 수렴한다 | `hold_resolve_two_holds_same_execution_two_outbox_rows`, `hold_resolve_notice_survives_restart_without_duplicate`, `hold_resolve_enqueue_failure_retries_in_process_until_row`, `hold_resolve_crash_between_enqueue_and_record_reuses_row`, `hold_resolve_crash_after_notice_intent_before_enqueue`(부팅 뒤 enqueue부터 이어 row 1개, 알림 0개도 2개도 아님) |
 | A8 | 보류 유지는 Held front + 감시이지 start failure가 아니다 | `hold_resolve_kept_hold_is_held_front_not_start_failed`, `hold_resolve_watch_registered_inside_owner_scope` |
 | A9 | 정리 단계·해제 단위의 순서와 crash 재개, `Kept`/`NotDurable` 구분 | `hold_resolve_crash_after_clear_keys_before_cleared_releases_after_boot`(원 입력 재전송 0, 후속 입력 1), `..._capture_fails_once_after_boot_then_releases`, `hold_resolve_crash_between_settle_and_unlink_resumes_after_boot`, `hold_resolve_unlink_kept_keeps_file_and_sends_no_key`, `hold_resolve_not_durable_retries_dir_fsync_before_wake`, `hold_resolve_crash_after_hold_before_first_key`, `hold_resolve_crash_after_paste_before_outcome_record`, `hold_resolve_crash_after_enter_before_outcome_record`(세 시험 모두 표지가 `in_flight`로 유효하게 다시 읽히고 지움 키 0·원 입력 재전달 0이다. 첫 키 전 crash → 빈 입력창 → 알림 row 1개 확보 뒤 "전달 미확인" 해제와 후속 입력 1회. Enter 뒤 crash → digest 없음 → 같은 동작. digest나 원문 잔존이 나타나면 기존대로 "전달"이나 정리 뒤 "미전달"로 해제), `hold_resolve_unconfirmed_release_crash_between_notice_and_unlink_no_second_row`, `hold_resolve_unconfirmed_release_after_enter_landed_runs_turn_once`(Enter가 실제로 간 경우 원 입력 턴 1회, 다음 입력은 busy 규칙). 대조: `..._in_flight_empty_is_never_judged_undelivered`, `..._in_flight_empty_kept_forever_fails`(증명 가능한 빈 입력창을 무기한 보류하면 실패) |

@@ -22,6 +22,7 @@ v2 보류는 결과를 모르는 `in_flight`에서 시작한다. `hold()`가 `se
 | `StartBefore` | main R1/R2 `not_held` 거절 → Opaque start failure 2회 → retained |
 | `Paste` / `BusyInject` | `when_idle`(쓰기가 끝났고 표지·예약·잠금이 없으며 기존 분류기에서 빈 입력창) / busy 주입(표지를 읽지 않음) |
 | `Existing` / `Shown` | 기존 분류기 / 판정기: 판독 가능 관문(stash 보이면 Unread)을 지난 본문은 그대로 넘겨 정확 일치 검사까지 감 |
+| `Keep` → `Arm` | 판정이 보류를 유지한 뒤 감시를 등록하기까지의 틈. `missed`는 그 틈(알림 enqueue 등)에 근거가 바뀌었음. `Arm`은 판정이 쓴 근거와 비교해 바뀌었으면 곧바로 다시 판정한다(설계 3.5, A6) |
 | `Resolve` | 설계 3.3 규칙 1~9. 쓰기가 잠금을 놓은 뒤(`~Writing`)에만 돈다. `in_flight`는 Enter가 갔을 수 있는 것으로 본다(`EnterMayNow`) |
 | `Bump` → `EnqueueNotice` → `RecordEnqueued` | 판정 실패 계수, 한도에서 알림 의도 기록(①) → 보류 키로 enqueue(②, 실패 가능 `EnqFail`) → row 확보 기록(③). 셋은 따로 전이하고 그 사이에 재시작이 끼어들 수 있다 |
 | `PersonSubmitsOurs` | 지우기 기록 뒤 키 전에 사람이 우리 글에 Enter(`personSubmits`) |
@@ -267,52 +268,54 @@ stateDiagram-v2
 - `MutInFlightAsRefused`: Enter가 pane에 닿음 → 결과 기록 전 재시작 → `in_flight`를 `enter_refused`처럼 읽어 미전달 판정(UndeliveredIsTrue RED).
 - `MutSightingGate`: 우리 본문이 보이지만 규칙 3이 막아 판정 실패 → 알림 뒤 영구 보류(ReadableOursCleaned·HoldEventuallyReleased RED).
 - `MutNonceKey`: 첫 보류 알림(키 E) → 해제 → 두 번째 보류(판독 불가) → 같은 키 E라 이 보류의 알림 0(HoldReleasedOrNoticed RED).
+- `MutFreshBasis`(S1 수리): 판독 불가 판정 → 알림 enqueue 중(감시 등록 전) 부하가 끝나 판독 회복 → 감시가 등록 시점의 새 화면을 기준으로 잡아 변화 없음 → "근거 변화 대기"에서 영구(HoldEventuallyReleased·HoldReleasedOrNoticed·LaterInputStarts·ReadableOursCleaned RED). 같은 경로에서 판정이 쓴 근거를 감시 기준으로 넘기면(`LoadSpike`) 다시 판정해 해제한다.
 - `MutStopOnIntent`: 판독 불가 → 알림 의도 기록 → enqueue 실패 → 재시도를 멈춤 → 알림 0으로 영구.
 
-## 결과 (기대 집합 = 실제 집합, 40 cfg)
+## 결과 (기대 집합 = 실제 집합, 41 cfg)
 
 | cfg | 시나리오 | 기대 위반 | 실제 위반 | 상태 수 |
 |---|---|---|---|---|
 | `HerdrInputHoldBefore` | main: 사건 재현 | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts, ReadableOursCleaned | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts, ReadableOursCleaned | 28 |
 | `HerdrInputHoldBeforeEnds` | main + 실행 종료(C5~C10) | LaterInputStarts | LaterInputStarts | 56 |
-| `HerdrInputHoldEnqueueFail` | 설계: 판독 불가 + 첫 enqueue 실패(예상) | HoldEventuallyReleased, LaterInputStarts | HoldEventuallyReleased, LaterInputStarts | 70 |
-| `HerdrInputHoldEnterSendFail` | 설계: Enter 송신 실패(transcript 늦으면 전달 미확인 해제) | 없음 | 없음 | 237 |
-| `HerdrInputHoldFixed` | 설계: 사건 재현(enterRefused, Cancelled{1} 포함), in_flight → 결과 기록 | 없음 | 없음 | 59 |
-| `HerdrInputHoldLegacy` | 설계: v1 표지 + 남은 글(예상) | HoldEventuallyReleased, LaterInputStarts | HoldEventuallyReleased, LaterInputStarts | 25 |
-| `HerdrInputHoldLoadSpike` | 설계: 첫 판독 실패 뒤 회복 | 없음 | 없음 | 308 |
-| `HerdrInputHoldMutEmptyOnlyWake` | 대조: 빈 입력창일 때만 깨움 | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts, ReadableOursCleaned | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts, ReadableOursCleaned | 324 |
-| `HerdrInputHoldMutInFlightAsRefused` | 대조: 결과 미기록(in_flight)을 enter_refused로 취급(+in_flight 재시작) | UndeliveredIsTrue | UndeliveredIsTrue | 131 |
-| `HerdrInputHoldMutHeldOnlyNotice` | 대조(S1): 보류 알림 문구에 미확인·재전송 안내 없음(판독 불가로 먼저 알림 → 빈 입력창 미확인 해제, +in_flight 재시작) | UnconfirmedNoticeGuides | UnconfirmedNoticeGuides | 534 |
-| `HerdrInputHoldMutInFlightKeep` | 대조(개정 5): 규칙 7에서 보류 유지(개정 4 동작, +in_flight 재시작) | HoldEventuallyReleased, LaterInputStarts | HoldEventuallyReleased, LaterInputStarts | 238 |
-| `HerdrInputHoldMutLateTranscriptAfterClearReceipt` | 대조(개정 5): 정리 단계 빈 입력창을 미전달로(사람 Enter + 늦은 transcript) | UndeliveredIsTrue | UndeliveredIsTrue | 50 |
-| `HerdrInputHoldMutNoSelfRetry` | 대조: 자체 재시도 없음 | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts | 47 |
-| `HerdrInputHoldMutNoSettleReservation` | 대조: 예약 미정산 해제 | LaterInputStarts | LaterInputStarts | 55 |
-| `HerdrInputHoldMutNoWriteLock` | 대조(개정 5): 판정이 쓰기 잠금을 기다리지 않음(+Enter 송신 실패) | LaterInputStarts, NoPasteOverResidue, NoReleaseOnResidue, OriginalNotOvertaken | LaterInputStarts, NoPasteOverResidue, NoReleaseOnResidue, OriginalNotOvertaken | 653 |
-| `HerdrInputHoldMutNonceKey` | 대조: 실행 nonce 단위 알림 dedupe | HoldReleasedOrNoticed | HoldReleasedOrNoticed | 319 |
-| `HerdrInputHoldMutOpaqueFailure` | 대조: 보류를 start failure로 | LaterInputStarts | LaterInputStarts | 510 |
-| `HerdrInputHoldMutReleaseOnResidue` | 대조: 우리 글을 안 지우고 해제 | LaterInputStarts, NoReleaseOnResidue | LaterInputStarts, NoReleaseOnResidue | 22 |
-| `HerdrInputHoldMutReleaseOnUnread` | 대조: 판독 불가를 빈 것으로 | LaterInputStarts, NoReleaseOnResidue | LaterInputStarts, NoReleaseOnResidue | 60 |
+| `HerdrInputHoldEnqueueFail` | 설계: 판독 불가 + 첫 enqueue 실패(예상) | HoldEventuallyReleased, LaterInputStarts | HoldEventuallyReleased, LaterInputStarts | 169 |
+| `HerdrInputHoldEnterSendFail` | 설계: Enter 송신 실패(transcript 늦으면 전달 미확인 해제) | 없음 | 없음 | 307 |
+| `HerdrInputHoldFixed` | 설계: 사건 재현(enterRefused, Cancelled{1} 포함), in_flight → 결과 기록 | 없음 | 없음 | 73 |
+| `HerdrInputHoldLegacy` | 설계: v1 표지 + 남은 글(예상) | HoldEventuallyReleased, LaterInputStarts | HoldEventuallyReleased, LaterInputStarts | 49 |
+| `HerdrInputHoldLoadSpike` | 설계: 첫 판독 실패 뒤 회복 | 없음 | 없음 | 608 |
+| `HerdrInputHoldMutEmptyOnlyWake` | 대조: 빈 입력창일 때만 깨움 | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts, ReadableOursCleaned | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts, ReadableOursCleaned | 624 |
+| `HerdrInputHoldMutFreshBasis` | 대조(S1 수리): 판정이 쓴 근거 대신 감시 등록 시점의 새 화면을 감시 기준으로(판독 불가 뒤 회복, 알림 enqueue 중 화면 변화) | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts, ReadableOursCleaned | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts, ReadableOursCleaned | 638 |
+| `HerdrInputHoldMutInFlightAsRefused` | 대조: 결과 미기록(in_flight)을 enter_refused로 취급(+in_flight 재시작) | UndeliveredIsTrue | UndeliveredIsTrue | 140 |
+| `HerdrInputHoldMutHeldOnlyNotice` | 대조(S1): 보류 알림 문구에 미확인·재전송 안내 없음(판독 불가로 먼저 알림 → 빈 입력창 미확인 해제, +in_flight 재시작) | UnconfirmedNoticeGuides | UnconfirmedNoticeGuides | 1138 |
+| `HerdrInputHoldMutInFlightKeep` | 대조(개정 5): 규칙 7에서 보류 유지(개정 4 동작, +in_flight 재시작) | HoldEventuallyReleased, LaterInputStarts | HoldEventuallyReleased, LaterInputStarts | 321 |
+| `HerdrInputHoldMutLateTranscriptAfterClearReceipt` | 대조(개정 5): 정리 단계 빈 입력창을 미전달로(사람 Enter + 늦은 transcript) | UndeliveredIsTrue | UndeliveredIsTrue | 56 |
+| `HerdrInputHoldMutNoSelfRetry` | 대조: 자체 재시도 없음 | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts | 74 |
+| `HerdrInputHoldMutNoSettleReservation` | 대조: 예약 미정산 해제 | LaterInputStarts | LaterInputStarts | 69 |
+| `HerdrInputHoldMutNoWriteLock` | 대조(개정 5): 판정이 쓰기 잠금을 기다리지 않음(+Enter 송신 실패) | LaterInputStarts, NoPasteOverResidue, NoReleaseOnResidue, OriginalNotOvertaken | LaterInputStarts, NoPasteOverResidue, NoReleaseOnResidue, OriginalNotOvertaken | 780 |
+| `HerdrInputHoldMutNonceKey` | 대조: 실행 nonce 단위 알림 dedupe | HoldReleasedOrNoticed | HoldReleasedOrNoticed | 628 |
+| `HerdrInputHoldMutOpaqueFailure` | 대조: 보류를 start failure로 | LaterInputStarts | LaterInputStarts | 765 |
+| `HerdrInputHoldMutReleaseOnResidue` | 대조: 우리 글을 안 지우고 해제 | LaterInputStarts, NoReleaseOnResidue | LaterInputStarts, NoReleaseOnResidue | 23 |
+| `HerdrInputHoldMutReleaseOnUnread` | 대조: 판독 불가를 빈 것으로 | LaterInputStarts, NoReleaseOnResidue | LaterInputStarts, NoReleaseOnResidue | 73 |
 | `HerdrInputHoldMutResendNoSettle` | 대조: 창 없이 미전달 판정 + 재전달 | LaterInputStarts, NoPasteOverResidue, NoReleaseOnResidue, OriginalAtMostOnce, UndeliveredIsTrue | LaterInputStarts, NoPasteOverResidue, NoReleaseOnResidue, OriginalAtMostOnce, UndeliveredIsTrue | 25 |
-| `HerdrInputHoldMutShapeDelete` | 대조: 모양·접두어·접은 공백으로 삭제 | NoHumanTextDeleted | NoHumanTextDeleted | 46 |
-| `HerdrInputHoldMutSightingGate` | 대조: 규칙 3이 우리 본문까지 차단 | HoldEventuallyReleased, LaterInputStarts, ReadableOursCleaned | HoldEventuallyReleased, LaterInputStarts, ReadableOursCleaned | 43 |
+| `HerdrInputHoldMutShapeDelete` | 대조: 모양·접두어·접은 공백으로 삭제 | NoHumanTextDeleted | NoHumanTextDeleted | 51 |
+| `HerdrInputHoldMutSightingGate` | 대조: 규칙 3이 우리 본문까지 차단 | HoldEventuallyReleased, LaterInputStarts, ReadableOursCleaned | HoldEventuallyReleased, LaterInputStarts, ReadableOursCleaned | 85 |
 | `HerdrInputHoldMutSkipPasteSettle` | 대조: enterRefused가 정착 창 생략 | LaterInputStarts, NoPasteOverResidue, NoReleaseOnResidue | LaterInputStarts, NoPasteOverResidue, NoReleaseOnResidue | 20 |
-| `HerdrInputHoldMutStopOnIntent` | 대조: 알림 의도만 보고 재시도 중단(+enqueue 실패) | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts | 73 |
-| `HerdrInputHoldMutTimeReceipt` | 대조: 시각 이후 user를 전달 증거로 | DeliveredIsTrue, LaterInputStarts, NoReleaseOnResidue | DeliveredIsTrue, LaterInputStarts, NoReleaseOnResidue | 67 |
-| `HerdrInputHoldPasteSendFail` | 설계: 붙여넣기 송신 실패 | 없음 | 없음 | 86 |
-| `HerdrInputHoldPersonEdits` | 설계: 사람이 우리 글을 고친 뒤 보냄(덧붙임·공백 포함) | 없음 | 없음 | 235 |
-| `HerdrInputHoldPersonLeaves` | 설계: 사람 초안이 결국 비워짐 | 없음 | 없음 | 399 |
-| `HerdrInputHoldPersonStays` | 설계: 사람 초안이 계속 남음(예상) | HoldEventuallyReleased, LaterInputStarts | HoldEventuallyReleased, LaterInputStarts | 186 |
-| `HerdrInputHoldPersonSubmits` | 설계: 지우기 기록 뒤 키 전에 사람이 우리 글에 Enter(transcript가 창보다 늦을 수 있음) | 없음 | 없음 | 257 |
-| `HerdrInputHoldPreNoticedInFlight` | 설계(S1): 판독 불가로 보류 알림이 먼저 나간 뒤 빈 입력창 미확인 해제(+in_flight 재시작). 같은 cfg를 main 정책으로 돌리면 HoldEventuallyReleased·HoldReleasedOrNoticed·ReadableOursCleaned·LaterInputStarts RED | 없음 | 없음 | 835 |
-| `HerdrInputHoldRestart` | 설계 + 결과 기록 뒤 재시작 1회(지우기 기록·키·확인·정산·삭제 사이 어디서나) | 없음 | 없음 | 272 |
-| `HerdrInputHoldRestartInFlight` | 설계: 결과 기록 전 재시작(키 전·붙여넣기 뒤·Enter 뒤) | 없음 | 없음 | 245 |
-| `HerdrInputHoldRestartInFlightPaste` | 설계: pasteSendFail + 결과 기록 전 재시작 | 없음 | 없음 | 322 |
-| `HerdrInputHoldRestartInFlightSend` | 설계: enterSendFail + 결과 기록 전 재시작(Enter가 실제로 간 경우 포함) | 없음 | 없음 | 573 |
-| `HerdrInputHoldRestartInFlightTwice` | 설계: enterSendFail + 결과 기록 전 재시작 + 어디서나 두 번째 재시작(알림·해제 사이 포함) | 없음 | 없음 | 1636 |
-| `HerdrInputHoldRestartUnreadable` | 설계: 판독 불가 + 재시작(알림 의도·enqueue·확보 사이 포함, 예상) | HoldEventuallyReleased, LaterInputStarts | HoldEventuallyReleased, LaterInputStarts | 248 |
-| `HerdrInputHoldSecondHold` | 설계: 같은 실행에서 두 번째 보류(판독 불가) | 없음 | 없음 | 320 |
-| `HerdrInputHoldStashOther` | 설계: C-s → 다른 입력 B → stash 복귀 | 없음 | 없음 | 339 |
-| `HerdrInputHoldUnreadable` | 설계: 판독 계속 불가(예상) | HoldEventuallyReleased, LaterInputStarts | HoldEventuallyReleased, LaterInputStarts | 46 |
+| `HerdrInputHoldMutStopOnIntent` | 대조: 알림 의도만 보고 재시도 중단(+enqueue 실패) | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts | HoldEventuallyReleased, HoldReleasedOrNoticed, LaterInputStarts | 123 |
+| `HerdrInputHoldMutTimeReceipt` | 대조: 시각 이후 user를 전달 증거로 | DeliveredIsTrue, LaterInputStarts, NoReleaseOnResidue | DeliveredIsTrue, LaterInputStarts, NoReleaseOnResidue | 72 |
+| `HerdrInputHoldPasteSendFail` | 설계: 붙여넣기 송신 실패 | 없음 | 없음 | 105 |
+| `HerdrInputHoldPersonEdits` | 설계: 사람이 우리 글을 고친 뒤 보냄(덧붙임·공백 포함) | 없음 | 없음 | 343 |
+| `HerdrInputHoldPersonLeaves` | 설계: 사람 초안이 결국 비워짐 | 없음 | 없음 | 580 |
+| `HerdrInputHoldPersonStays` | 설계: 사람 초안이 계속 남음(예상) | HoldEventuallyReleased, LaterInputStarts | HoldEventuallyReleased, LaterInputStarts | 278 |
+| `HerdrInputHoldPersonSubmits` | 설계: 지우기 기록 뒤 키 전에 사람이 우리 글에 Enter(transcript가 창보다 늦을 수 있음) | 없음 | 없음 | 329 |
+| `HerdrInputHoldPreNoticedInFlight` | 설계(S1): 판독 불가로 보류 알림이 먼저 나간 뒤 빈 입력창 미확인 해제(+in_flight 재시작). 같은 cfg를 main 정책으로 돌리면 HoldEventuallyReleased·HoldReleasedOrNoticed·ReadableOursCleaned·LaterInputStarts RED | 없음 | 없음 | 1669 |
+| `HerdrInputHoldRestart` | 설계 + 결과 기록 뒤 재시작 1회(지우기 기록·키·확인·정산·삭제 사이 어디서나) | 없음 | 없음 | 329 |
+| `HerdrInputHoldRestartInFlight` | 설계: 결과 기록 전 재시작(키 전·붙여넣기 뒤·Enter 뒤) | 없음 | 없음 | 323 |
+| `HerdrInputHoldRestartInFlightPaste` | 설계: pasteSendFail + 결과 기록 전 재시작 | 없음 | 없음 | 417 |
+| `HerdrInputHoldRestartInFlightSend` | 설계: enterSendFail + 결과 기록 전 재시작(Enter가 실제로 간 경우 포함) | 없음 | 없음 | 748 |
+| `HerdrInputHoldRestartInFlightTwice` | 설계: enterSendFail + 결과 기록 전 재시작 + 어디서나 두 번째 재시작(알림·해제 사이 포함) | 없음 | 없음 | 2085 |
+| `HerdrInputHoldRestartUnreadable` | 설계: 판독 불가 + 재시작(알림 의도·enqueue·확보 사이 포함, 예상) | HoldEventuallyReleased, LaterInputStarts | HoldEventuallyReleased, LaterInputStarts | 558 |
+| `HerdrInputHoldSecondHold` | 설계: 같은 실행에서 두 번째 보류(판독 불가) | 없음 | 없음 | 630 |
+| `HerdrInputHoldStashOther` | 설계: C-s → 다른 입력 B → stash 복귀 | 없음 | 없음 | 554 |
+| `HerdrInputHoldUnreadable` | 설계: 판독 계속 불가(예상) | HoldEventuallyReleased, LaterInputStarts | HoldEventuallyReleased, LaterInputStarts | 101 |
 
 - 예상 위반(PersonStays·Unreadable·RestartUnreadable·EnqueueFail·Legacy): 남은 글이 사람 것이거나, 판독할 수 없거나, v1 표지라 증명할 수 없으면 보류를 유지한다. 보류 단위 `HoldReleasedOrNoticed`와 `NoticeAtMostOnce`는 통과한다. 이 경우는 이슈 DoD의 "입력창에 글이 남은 경우"이거나 입력창을 읽을 수 없는 경우다.
 - `RestartInFlight*` 네 cfg는 개정 5에서 GREEN이다. `RestartInFlightSend`·`RestartInFlightTwice`는 Enter가 실제로 pane에 닿은 뒤 결과 기록 전에 재시작한 경로를 포함한다. 거기서도 `OriginalAtMostOnce`(같은 입력 2회 제출 0)와 `OriginalNotOvertaken`(다음 입력이 원 입력을 앞지르지 않음)이 통과한다. `RestartInFlightTwice`는 알림 의도·enqueue·확보 기록·정산·삭제 사이의 두 번째 재시작을 포함하며, `NoticeAtMostOnce`·`UnconfirmedNoticed`가 통과한다.

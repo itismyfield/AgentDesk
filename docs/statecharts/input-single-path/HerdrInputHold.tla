@@ -37,7 +37,8 @@ CONSTANTS Policy,    \* "before" (main 934a49997e) | "fixed" (design rev 5)
           CrashWindow, \* "inFlight" (before the outcome record) | "afterRecord" | "any"
                        \* | "inFlightTwice" (first crash in flight, a second one anywhere)
           Mutant     \* "None" or one removed rule of the design
-                     \* ("HeldOnlyNotice": the text depends on why the row was first written)
+                     \* ("HeldOnlyNotice": the text depends on why the row was first written;
+                     \*  "FreshBasis": the watch takes its basis when armed, not from the pass)
 VARIABLE h
 vars == <<h>>
 
@@ -80,6 +81,8 @@ Recorded(landed, pasted) ==
            rows |-> {},                      \* outbox rows by key (persistent dedupe)
            sentFor |-> [i \in {1, 2} |-> 0],
            trigger |-> TRUE, watch |-> FALSE,
+           arming |-> FALSE,                 \* the pass ended, its watch is not armed yet
+           missed |-> FALSE,                 \* evidence changed since the pass (memory)
            humanDeleted |-> FALSE, merged |-> FALSE, releasedOnResidue |-> FALSE,
            overtaken |-> FALSE,              \* ghost: the original landed after a later input
            ended |-> FALSE, up |-> TRUE, restarts |-> 0]
@@ -113,7 +116,8 @@ PasteOK == h.pasteSettled \/ NoSettleOn \/ (Mutant = "SkipPasteSettle" /\ h.unse
 ReceiptOK == h.receiptSettled \/ NoSettleOn
 
 Wake(r) == [r EXCEPT !.trigger = @ \/ (r.watch /\ (Mutant # "EmptyOnlyWake"
-                                                    \/ Shown(r) = "empty"))]
+                                                    \/ Shown(r) = "empty")),
+                     !.missed = @ \/ r.arming]
 
 \* ---------------- environment ----------------
 Render == /\ h.composer = "ours" /\ ~h.rendered
@@ -175,6 +179,7 @@ SecondUncertain == /\ Scenario = "secondHold" /\ h.holdId = 1 /\ ~h.hold /\ Live
                                      !.unclear = 0, !.intent = FALSE, !.enqueued = FALSE,
                                      !.noticeWhy = "none",
                                      !.trigger = TRUE, !.watch = FALSE,
+                                     !.arming = FALSE, !.missed = FALSE,
                                      !.sendStep = "recorded", !.writer = FALSE,
                                      !.clearReceipt = FALSE,
                                      !.pasteSettled = TRUE, !.receiptSettled = TRUE]
@@ -221,8 +226,15 @@ Crash == /\ Restart /\ h.up
                [] CrashWindow = "afterRecord" -> h.sendStep = "recorded"
                [] OTHER -> TRUE
          /\ h' = [h EXCEPT !.up = FALSE, !.restarts = @ + 1]
+\* The write registers the held front's watch after its pass (first_input.rs). Its basis is the
+\* evidence the pass decided on, so a change in between wakes it (design), or the evidence read
+\* when armed, which loses that change (mutant FreshBasis).
+Arm == /\ h.up /\ h.arming
+       /\ h' = [h EXCEPT !.arming = FALSE, !.watch = TRUE, !.missed = FALSE,
+                         !.trigger = @ \/ (h.missed /\ Mutant # "FreshBasis")]
 Boot == /\ ~h.up
         /\ h' = [h EXCEPT !.up = TRUE, !.reserved = FALSE, !.lock = FALSE, !.watch = FALSE,
+                          !.arming = FALSE, !.missed = FALSE,
                           !.keysSent = FALSE, !.writer = FALSE, !.clearReceipt = FALSE,
                           !.trigger = TRUE]
 
@@ -234,7 +246,7 @@ Keep(r) == [r EXCEPT !.nxt = IF Mutant = "OpaqueFailure"
                              ELSE (IF r.nxt = "queued" THEN "held" ELSE r.nxt),
                      !.refusals = IF Mutant = "OpaqueFailure" /\ r.nxt \in {"queued", "refused"}
                                   THEN @ + 1 ELSE @,
-                     !.trigger = FALSE, !.watch = TRUE]
+                     !.trigger = FALSE, !.watch = FALSE, !.arming = TRUE, !.missed = FALSE]
 \* Self-retry runs until this hold's outbox row is durable (design) or only until the intent
 \* is recorded (mutant StopOnIntent).
 Retry(r) == IF Mutant = "NoSelfRetry" THEN FALSE
@@ -301,7 +313,8 @@ Choices ==
            {[h EXCEPT !.composer = "empty", !.unsentProof = TRUE, !.humanDeleted = TRUE]}
     [] OTHER -> Bump(h)
 
-Resolve == /\ Policy = "fixed" /\ Live /\ h.hold /\ h.trigger /\ ~h.lock /\ ~Writing(h)
+\* The next pass needs the armed watch's wake (or a boot); the pass that armed it has ended.
+Resolve == /\ Policy = "fixed" /\ Live /\ h.hold /\ h.trigger /\ ~h.lock /\ ~Writing(h) /\ ~h.arming
            /\ \E n \in Choices : h' = n
 Unlink == /\ h.lock /\ h.up
           /\ h' = Unhold(h)
@@ -329,7 +342,7 @@ Next == Render \/ PasteWindow \/ ReceiptWindow \/ TranscriptWrite \/ TurnEnd
         \/ PersonSubmitsOurs \/ ClearReceiptWindow
         \/ PasteKey \/ EnterKey \/ RecordOutcome \/ EnqueueNotice \/ RecordEnqueued
         \/ StartBefore \/ Paste \/ BusyInject \/ End \/ Crash \/ Boot
-        \/ Resolve \/ Unlink \/ Stay
+        \/ Resolve \/ Unlink \/ Arm \/ Stay
 
 Fairness == /\ WF_vars(Render) /\ WF_vars(PasteWindow) /\ WF_vars(ReceiptWindow)
             /\ WF_vars(TranscriptWrite) /\ WF_vars(TurnEnd) /\ WF_vars(LoadEnds)
@@ -339,6 +352,7 @@ Fairness == /\ WF_vars(Render) /\ WF_vars(PasteWindow) /\ WF_vars(ReceiptWindow)
             /\ WF_vars(EnqueueNotice) /\ WF_vars(RecordEnqueued)
             /\ WF_vars(StartBefore) /\ WF_vars(Paste) /\ WF_vars(BusyInject)
             /\ WF_vars(End) /\ WF_vars(Boot) /\ WF_vars(Resolve) /\ WF_vars(Unlink)
+            /\ WF_vars(Arm)
 Spec == Init /\ [][Next]_vars /\ Fairness
 
 \* ---------------- rules ----------------

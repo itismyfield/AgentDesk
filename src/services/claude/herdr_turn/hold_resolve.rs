@@ -109,6 +109,16 @@ fn windows(record: &HoldRecord) -> (bool, bool) {
 
 /// One pass over execution `nonce`'s hold; the caller holds the composer lock.
 pub(crate) fn resolve(logical: &str, nonce: &str, ports: &dyn Ports) -> Result<Verdict, String> {
+    judge(logical, nonce, ports, &mut None)
+}
+
+/// [`resolve`], leaving in `seen` the evidence the pass decided on for the held front's watch.
+pub(crate) fn judge(
+    logical: &str,
+    nonce: &str,
+    ports: &dyn Ports,
+    seen: &mut Option<Basis>,
+) -> Result<Verdict, String> {
     if memory().unsynced.contains_key(nonce) {
         hold_record::ensure_absent_durable(nonce).map_err(|error| {
             tracing::warn!(logical, %error, "herdr turn: released hold not yet durable");
@@ -119,11 +129,13 @@ pub(crate) fn resolve(logical: &str, nonce: &str, ports: &dyn Ports) -> Result<V
     let Some(held) = hold_record::read(nonce)? else {
         return Ok(Verdict::Clear(None));
     };
+    let capture = ports.capture();
+    *seen = Some(basis_of(&held, capture.as_deref()));
     let mine = |record: &HoldRecord| record.logical_key == logical;
     if matches!(&held, Held::V2(record) if !mine(record)) || !ports.confirmed() {
         return Ok(Verdict::Kept);
     }
-    let read = ports.capture().map_or(HeldRead::Unread, |c| held_read(&c));
+    let read = capture.map_or(HeldRead::Unread, |c| held_read(&c));
     let record = match (held, &read) {
         (_, HeldRead::Busy) => return Ok(Verdict::Kept),
         (Held::V1 { hold_id }, _) => return legacy(nonce, &hold_id, &read, ports),
@@ -337,7 +349,7 @@ fn prompt_bodies(line: &str) -> impl Iterator<Item = String> {
 
 /// What a pass decided on; a change in it is the only wake besides the notice self-retry.
 #[derive(Clone, PartialEq, Eq)]
-struct Basis {
+pub(crate) struct Basis {
     read: Option<HeldRead>,
     transcript: Option<u64>,
     windows: (bool, bool, bool),
@@ -345,7 +357,11 @@ struct Basis {
 
 fn basis(nonce: &str, capture: Option<String>) -> Option<Basis> {
     let held = hold_record::read(nonce).ok()??;
-    let (transcript, windows) = match &held {
+    Some(basis_of(&held, capture.as_deref()))
+}
+
+fn basis_of(held: &Held, capture: Option<&str>) -> Basis {
+    let (transcript, windows) = match held {
         Held::V2(record) => {
             let (settled, receipt) = windows(record);
             let seen = memory().clear_seen.get(&record.hold_id).copied();
@@ -355,11 +371,11 @@ fn basis(nonce: &str, capture: Option<String>) -> Option<Basis> {
         }
         Held::V1 { .. } => (None, (true, true, true)),
     };
-    Some(Basis {
-        read: capture.map(|capture| held_read(&capture)),
+    Basis {
+        read: capture.map(held_read),
         transcript,
         windows,
-    })
+    }
 }
 
 fn noticed(nonce: &str) -> bool {
@@ -370,35 +386,36 @@ fn noticed(nonce: &str) -> bool {
     }
 }
 
-/// The held front's probe: Ready when the decision's basis changes, or while the hold's notice
-/// row is not yet secured, once per self-retry interval. A wake only re-runs the pass.
+/// The held front's probe against the evidence the pass decided on, so a change while the pass
+/// ran still wakes. Ready also while the notice row is unsecured, once per self-retry interval;
+/// once Ready it stays Ready until the watch wakes or ends. A wake only re-runs the pass.
 pub(crate) fn watch(
     nonce: String,
+    seen: Option<Basis>,
     capture: impl Fn() -> Option<String> + Send + 'static,
 ) -> crate::services::claude_tui::owner_input::PreparationWatch {
-    let mut last = basis(&nonce, capture());
-    let mut retried = Instant::now();
+    let (mut ready, armed) = (false, Instant::now());
     Box::new(move || {
-        let current = basis(&nonce, capture());
-        if current.is_none() || current != last {
-            last = current;
-            return Screen::Ready;
+        if !ready {
+            let current = basis(&nonce, capture());
+            ready = current.is_none()
+                || current != seen
+                || (!noticed(&nonce) && armed.elapsed() >= SELF_RETRY);
         }
-        if !noticed(&nonce) && retried.elapsed() >= SELF_RETRY {
-            retried = Instant::now();
-            return Screen::Ready;
+        match ready {
+            true => Screen::Ready,
+            false => Screen::Unknown,
         }
-        Screen::Unknown
     })
 }
 
-/// After a busy injection's receipt, one pass over the hold its session's execution keeps.
-pub(crate) fn after_busy(logical: &str, ports: &dyn Ports) {
-    let Some(nonce) = hold_record::held_by(logical) else {
+/// After a busy injection's receipt, one pass over the hold of the execution it wrote to.
+pub(crate) fn after_busy(logical: &str, nonce: &str, ports: &dyn Ports) {
+    if !matches!(hold_record::read(nonce), Ok(Some(_))) {
         return;
-    };
+    }
     let lock = crate::services::claude_tui::composer_lock::with_composer_mutation_lock;
-    let verdict = lock(logical, || resolve(logical, &nonce, ports));
+    let verdict = lock(logical, || resolve(logical, nonce, ports));
     tracing::info!(logical, ?verdict, "herdr turn: hold pass after busy input");
 }
 
