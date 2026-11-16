@@ -1,5 +1,5 @@
 ---
-title: "이슈 8201: 불확실 Enter 뒤 남은 입력 보류 표지 (개정 4)"
+title: "이슈 8201: 불확실 Enter 뒤 남은 입력 보류 표지 (개정 5)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -63,13 +63,13 @@ stateDiagram-v2
   s13 --> s18: 쓰기 결과 기록(미전달 증거 포함)
   s11 --> s17: 새 입력 시작이 보류 표지에 거절됨
   s14 --> s18: 붙여넣기 정착 시간이 지남
+  s15 --> s15: 새 입력 시작이 보류 표지에 거절됨
   s15 --> s18: receipt 대기 시간이 지남
   s16 --> s19: 붙여넣기가 화면에 그려짐
   s17 --> s19: receipt 대기 시간이 지남
   s17 --> s20: 붙여넣기 정착 시간이 지남
   s14 --> s19: 새 입력 시작이 보류 표지에 거절됨
   s15 --> s20: 새 입력 시작이 보류 표지에 거절됨
-  s18 --> s18: 새 입력 시작이 보류 표지에 거절됨
   s19 --> s21: 붙여넣기 정착 시간이 지남
   s20 --> s21: receipt 대기 시간이 지남
   s18 --> s21: 새 입력 시작이 보류 표지에 거절됨
@@ -83,8 +83,8 @@ stateDiagram-v2
   class s4 yellow
   class s5 yellow
   class s6 yellow
+  class s6 bugPath
   class s7 yellow
-  class s7 bugPath
   class s8 yellow
   class s9 yellow
   class s10 yellow
@@ -92,14 +92,14 @@ stateDiagram-v2
   class s11 yellow
   class s12 yellow
   class s13 yellow
-  class s13 bugPath
   class s14 yellow
   class s15 yellow
+  class s15 bugPath
   class s16 yellow
   class s17 yellow
   class s18 yellow
-  class s18 bugPath
   class s19 yellow
   class s20 yellow
+  class s20 bugPath
   class s21 yellow
   class s21 repeats

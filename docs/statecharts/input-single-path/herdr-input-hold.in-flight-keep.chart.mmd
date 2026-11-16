@@ -1,0 +1,752 @@
+---
+title: "이슈 8201: 불확실 Enter 뒤 남은 입력 보류 표지 (개정 5)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: held
+    lg1: noticed
+    lg2: released
+    lg3: Path to the HoldEventuallyReleased or LaterInputStarts bug
+    lg4: Repeats forever, so HoldEventuallyReleased or LaterInputStarts breaks
+  }
+  class lg0 yellow
+  class lg1 orange
+  class lg2 teal
+  class lg3 bugPath
+  class lg4 repeats
+  s0: 보류(in_flight, 키 전, 쓰기 진행): 입력창 빔 #183; 정착 창 안 #183; receipt 창 안
+  s1: dcserver 재시작 중
+  s2: 보류(in_flight, 붙여넣기 뒤, 쓰기 진행): 붙여넣기가 아직 안 그려짐 #183; 정착 창 안 #183; receipt 창 안
+  s3: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔, 재시작 뒤 #183; 정착 창 안 #183; receipt 창 안
+  s4: 보류(in_flight, Enter 뒤, 쓰기 진행): 붙여넣기가 아직 안 그려짐 #183; 정착 창 안 #183; receipt 창 안
+  s5: 보류(in_flight, 붙여넣기 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안 #183; receipt 창 안
+  s6: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔, 재시작 뒤 #183; 근거 변화 대기 #183; 정착 창 안 #183; receipt 창 안
+  s7: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔, 재시작 뒤 #183; 정착 창 안
+  s8: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔, 재시작 뒤 #183; receipt 창 안
+  s9: 보류(in_flight, Enter 뒤, 쓰기 진행): 붙여넣기가 아직 안 그려짐 #183; 정착 창 안
+  s10: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 붙여넣기가 아직 안 그려짐, 재시작 뒤 #183; 정착 창 안 #183; receipt 창 안
+  s11: 보류: 붙여넣기가 아직 안 그려짐 #183; 정착 창 안 #183; receipt 창 안
+  s12: 보류(in_flight, Enter 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안 #183; receipt 창 안
+  s13: 보류(in_flight, 붙여넣기 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; receipt 창 안
+  s14: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔, 재시작 뒤 #183; 근거 변화 대기 #183; 정착 창 안
+  s15: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔, 재시작 뒤 #183; 다시 판정 예정 #183; 정착 창 안
+  s16: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔, 재시작 뒤 #183; 근거 변화 대기 #183; receipt 창 안
+  s17: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔, 재시작 뒤 #183; 다시 판정 예정 #183; receipt 창 안
+  s18: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔, 재시작 뒤
+  s19: 보류(in_flight, Enter 뒤, 결과 미기록): 붙여넣기가 아직 안 그려짐, 재시작 뒤 #183; 정착 창 안 #183; receipt 창 안
+  s20: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 붙여넣기가 아직 안 그려짐, 재시작 뒤 #183; 근거 변화 대기 #183; 정착 창 안 #183; receipt 창 안
+  s21: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 붙여넣기가 아직 안 그려짐, 재시작 뒤 #183; 정착 창 안
+  s22: 보류: 붙여넣기가 아직 안 그려짐 #183; 근거 변화 대기 #183; 정착 창 안 #183; receipt 창 안
+  s23: 보류: 붙여넣기가 아직 안 그려짐 #183; 정착 창 안
+  s24: 보류(in_flight, Enter 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안
+  s25: 보류(in_flight, Enter 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; receipt 창 안
+  s26: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 정착 창 안 #183; receipt 창 안
+  s27: 보류: 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안 #183; receipt 창 안
+  s28: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔, 재시작 뒤 #183; 다시 판정 예정
+  s29: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정
+  s30: 보류(in_flight, Enter 뒤, 결과 미기록): 붙여넣기가 아직 안 그려짐, 재시작 뒤 #183; 근거 변화 대기 #183; 정착 창 안 #183; receipt 창 안
+  s31: 보류(in_flight, Enter 뒤, 결과 미기록): 붙여넣기가 아직 안 그려짐, 재시작 뒤 #183; 정착 창 안
+  s32: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 붙여넣기가 아직 안 그려짐, 재시작 뒤 #183; 근거 변화 대기 #183; 정착 창 안
+  s33: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 붙여넣기가 아직 안 그려짐, 재시작 뒤 #183; 다시 판정 예정 #183; 정착 창 안
+  s34: 보류: 붙여넣기가 아직 안 그려짐 #183; 근거 변화 대기 #183; 정착 창 안
+  s35: 보류: 붙여넣기가 아직 안 그려짐 #183; 다시 판정 예정 #183; 정착 창 안
+  s36: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 정착 창 안 #183; receipt 창 안
+  s37: 보류(in_flight, Enter 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음
+  s38: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 근거 변화 대기 #183; 정착 창 안 #183; receipt 창 안
+  s39: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 다시 판정 예정 #183; 정착 창 안 #183; receipt 창 안
+  s40: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 정착 창 안
+  s41: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; receipt 창 안
+  s42: 보류: 우리 붙여넣기가 입력창에 남음 #183; 근거 변화 대기 #183; 정착 창 안 #183; receipt 창 안
+  s43: 보류: 우리 붙여넣기가 입력창에 남음 #183; 다시 판정 예정 #183; 정착 창 안 #183; receipt 창 안
+  s44: 보류: 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안
+  s45: 보류: 우리 붙여넣기가 입력창에 남음 #183; receipt 창 안
+  s46: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s47: 보류(in_flight, Enter 뒤, 결과 미기록): 붙여넣기가 아직 안 그려짐, 재시작 뒤 #183; 근거 변화 대기 #183; 정착 창 안
+  s48: 보류(in_flight, Enter 뒤, 결과 미기록): 붙여넣기가 아직 안 그려짐, 재시작 뒤 #183; 다시 판정 예정 #183; 정착 창 안
+  s49: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 근거 변화 대기 #183; 정착 창 안 #183; receipt 창 안
+  s50: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 다시 판정 예정 #183; 정착 창 안 #183; receipt 창 안
+  s51: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 정착 창 안
+  s52: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; receipt 창 안
+  s53: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 근거 변화 대기 #183; 정착 창 안
+  s54: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 다시 판정 예정 #183; 정착 창 안
+  s55: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 다시 판정 예정 #183; receipt 창 안
+  s56: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정 #183; receipt 창 안
+  s57: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤
+  s58: 보류: 우리 붙여넣기가 입력창에 남음, 지우기 기록됨 #183; receipt 창 안
+  s59: 보류: 우리 붙여넣기가 입력창에 남음 #183; 근거 변화 대기 #183; 정착 창 안
+  s60: 보류: 우리 붙여넣기가 입력창에 남음 #183; 다시 판정 예정 #183; 정착 창 안
+  s61: 보류: 우리 붙여넣기가 입력창에 남음 #183; 다시 판정 예정 #183; receipt 창 안
+  s62: 보류: 우리 붙여넣기가 입력창에 남음
+  s63: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정
+  s64: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안 #183; receipt 창 안
+  s65: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 근거 변화 대기 #183; 정착 창 안
+  s66: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 다시 판정 예정 #183; 정착 창 안
+  s67: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 다시 판정 예정 #183; receipt 창 안
+  s68: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정 #183; receipt 창 안
+  s69: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤
+  s70: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정 #183; receipt 창 안
+  s71: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 다시 판정 예정
+  s72: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정
+  s73: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 지우기 기록됨, 재시작 뒤
+  s74: 보류: 우리 붙여넣기가 입력창에 남음, 지우기 기록됨 #183; 다시 판정 예정 #183; receipt 창 안
+  s75: 보류: 우리 붙여넣기가 입력창에 남음, 지우기 기록됨
+  s76: 보류: 우리 붙여넣기가 입력창에 남음 #183; 다시 판정 예정
+  s77: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s78: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안, 재시작 뒤
+  s79: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 #183; receipt 창 안
+  s80: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안 #183; 다시 판정 예정 #183; receipt 창 안
+  s81: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안
+  s82: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남 #183; receipt 창 안
+  s83: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정 #183; receipt 창 안
+  s84: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 재시작 뒤 #183; 다시 판정 예정
+  s85: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정
+  s86: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 지우기 기록됨, 재시작 뒤
+  s87: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정 #183; receipt 창 안
+  s88: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s89: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 지우기 기록됨, 재시작 뒤 #183; 다시 판정 예정
+  s90: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 지우기 기록됨 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정
+  s91: 보류: 우리 붙여넣기가 입력창에 남음, 지우기 기록됨 #183; 다시 판정 예정
+  s92: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안, 재시작 뒤
+  s93: 보류(in_flight, 키 전, 결과 미기록): 입력창 빔 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 근거 변화 대기
+  s94: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안, 재시작 뒤
+  s95: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안, 재시작 뒤 #183; 다시 판정 예정
+  s96: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정
+  s97: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남, 재시작 뒤
+  s98: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 #183; 근거 변화 대기 #183; receipt 창 안
+  s99: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 #183; 다시 판정 예정 #183; receipt 창 안
+  s100: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안
+  s101: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 #183; receipt 창 안
+  s102: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안 #183; 다시 판정 예정
+  s103: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남 #183; 다시 판정 예정 #183; receipt 창 안
+  s104: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남
+  s105: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정 #183; receipt 창 안
+  s106: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s107: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 지우기 기록됨, 재시작 뒤 #183; 다시 판정 예정
+  s108: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 지우기 기록됨 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정
+  s109: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정 #183; receipt 창 안
+  s110: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정
+  s111: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 지우기 기록됨 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s112: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안, 재시작 뒤
+  s113: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안, 재시작 뒤 #183; 다시 판정 예정
+  s114: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정
+  s115: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남, 재시작 뒤
+  s116: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안, 재시작 뒤 #183; 근거 변화 대기
+  s117: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안, 재시작 뒤 #183; 다시 판정 예정
+  s118: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정
+  s119: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 지남, 재시작 뒤
+  s120: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s121: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남, 재시작 뒤 #183; 다시 판정 예정
+  s122: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정
+  s123: 예약 정산됨, 표지 지우는 중: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 #183; receipt 창 안
+  s124: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 #183; 근거 변화 대기
+  s125: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 #183; 다시 판정 예정
+  s126: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 #183; 다시 판정 예정 #183; receipt 창 안
+  s127: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남
+  s128: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남 #183; 다시 판정 예정
+  s129: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정 #183; receipt 창 안
+  s130: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정
+  s131: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 지우기 기록됨 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s132: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 근거 변화 대기 #183; receipt 창 안
+  s133: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s134: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 지우기 기록됨 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정
+  s135: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안, 재시작 뒤 #183; 근거 변화 대기
+  s136: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안, 재시작 뒤 #183; 다시 판정 예정
+  s137: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정
+  s138: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 지남, 재시작 뒤
+  s139: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s140: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남, 재시작 뒤 #183; 다시 판정 예정
+  s141: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정
+  s142: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (판정 실패 1회), 재시작 뒤 #183; 근거 변화 대기
+  s143: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s144: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 지남, 재시작 뒤 #183; 다시 판정 예정
+  s145: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정
+  s146: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정
+  s147: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s148: 예약 정산됨, 표지 지우는 중: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남, 재시작 뒤
+  s149: 보류 해제, 새 입력 대기
+  s150: 예약 정산됨, 표지 지우는 중: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남
+  s151: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 #183; 다시 판정 예정
+  s152: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 근거 변화 대기 #183; receipt 창 안
+  s153: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s154: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 지우기 기록됨 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정
+  s155: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 지우기 기록됨 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s156: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (판정 실패 1회), 재시작 뒤 #183; 근거 변화 대기
+  s157: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s158: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 지남, 재시작 뒤 #183; 다시 판정 예정
+  s159: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 (판정 실패 1회), 재시작 뒤 #183; 다시 판정 예정
+  s160: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정
+  s161: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s162: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정
+  s163: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 근거 변화 대기
+  s164: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s165: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s166: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정
+  s167: 예약 정산됨, 표지 지우는 중: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 (판정 실패 1회), 재시작 뒤
+  s168: 새 입력 턴 시작
+  s169: 보류(in_flight, Enter 뒤, 결과 미기록): 우리 붙여넣기가 입력창에 남음, 지우기 기록됨 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s170: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정
+  s171: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 근거 변화 대기
+  s172: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s173: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s174: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정
+  s175: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 근거 변화 대기
+  s176: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s177: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정
+  s178: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s179: 예약 정산됨, 표지 지우는 중: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 (알림 의도 기록, enqueue 전) (판정 실패 2회), 재시작 뒤
+  s180: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 근거 변화 대기
+  s181: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s182: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤 #183; 다시 판정 예정
+  s183: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s184: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 근거 변화 대기
+  s185: 보류(in_flight, 붙여넣기 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s186: 예약 정산됨, 표지 지우는 중: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 (이 보류 알림 보냄), 확보 기록 전, 재시작 뒤
+  s187: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 근거 변화 대기
+  s188: 보류(in_flight, Enter 뒤, 결과 미기록): 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤 #183; 다시 판정 예정
+  s189: 예약 정산됨, 표지 지우는 중: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 (이 보류 알림 보냄) (판정 실패 2회), 재시작 뒤
+  [*] --> s0
+  s0 --> s1: dcserver 재시작
+  s0 --> s2: 쓰기: 붙여넣기 키
+  s1 --> s3: 부팅, 소유자가 front를 다시 몬다
+  s2 --> s4: 쓰기: Enter 안 닿음
+  s2 --> s1: dcserver 재시작
+  s2 --> s5: 붙여넣기가 화면에 그려짐
+  s3 --> s6: 판정 못 함, 보류 유지
+  s3 --> s7: receipt 대기 시간이 지남
+  s3 --> s8: 붙여넣기 정착 시간이 지남
+  s4 --> s1: dcserver 재시작
+  s4 --> s9: receipt 대기 시간이 지남
+  s4 --> s11: 쓰기 결과 기록(미전달 증거 포함)
+  s4 --> s12: 붙여넣기가 화면에 그려짐
+  s1 --> s10: 부팅, 소유자가 front를 다시 몬다
+  s5 --> s12: 쓰기: Enter 안 닿음
+  s5 --> s1: dcserver 재시작
+  s5 --> s13: 붙여넣기 정착 시간이 지남
+  s6 --> s15: receipt 대기 시간이 지남
+  s6 --> s17: 붙여넣기 정착 시간이 지남
+  s7 --> s14: 판정 못 함, 보류 유지
+  s7 --> s18: 붙여넣기 정착 시간이 지남
+  s8 --> s16: 판정 못 함, 보류 유지
+  s8 --> s18: receipt 대기 시간이 지남
+  s1 --> s19: 부팅, 소유자가 front를 다시 몬다
+  s9 --> s1: dcserver 재시작
+  s9 --> s23: 쓰기 결과 기록(미전달 증거 포함)
+  s9 --> s24: 붙여넣기가 화면에 그려짐
+  s10 --> s20: 판정 못 함, 보류 유지
+  s10 --> s21: receipt 대기 시간이 지남
+  s10 --> s26: 붙여넣기가 화면에 그려짐
+  s11 --> s22: 판정 못 함, 보류 유지
+  s11 --> s23: receipt 대기 시간이 지남
+  s11 --> s27: 붙여넣기가 화면에 그려짐
+  s12 --> s1: dcserver 재시작
+  s12 --> s24: receipt 대기 시간이 지남
+  s12 --> s25: 붙여넣기 정착 시간이 지남
+  s12 --> s27: 쓰기 결과 기록(미전달 증거 포함)
+  s1 --> s26: 부팅, 소유자가 front를 다시 몬다
+  s13 --> s25: 쓰기: Enter 안 닿음
+  s13 --> s1: dcserver 재시작
+  s14 --> s28: 붙여넣기 정착 시간이 지남
+  s15 --> s14: 판정 못 함, 보류 유지
+  s15 --> s28: 붙여넣기 정착 시간이 지남
+  s16 --> s28: receipt 대기 시간이 지남
+  s17 --> s16: 판정 못 함, 보류 유지
+  s17 --> s28: receipt 대기 시간이 지남
+  s18 --> s29: 판정 못 함, 보류 유지
+  s19 --> s30: 판정 못 함, 보류 유지
+  s19 --> s31: receipt 대기 시간이 지남
+  s19 --> s36: 붙여넣기가 화면에 그려짐
+  s1 --> s31: 부팅, 소유자가 front를 다시 몬다
+  s20 --> s33: receipt 대기 시간이 지남
+  s20 --> s39: 붙여넣기가 화면에 그려짐
+  s21 --> s32: 판정 못 함, 보류 유지
+  s21 --> s40: 붙여넣기가 화면에 그려짐
+  s22 --> s35: receipt 대기 시간이 지남
+  s22 --> s43: 붙여넣기가 화면에 그려짐
+  s23 --> s34: 판정 못 함, 보류 유지
+  s23 --> s44: 붙여넣기가 화면에 그려짐
+  s1 --> s36: 부팅, 소유자가 front를 다시 몬다
+  s24 --> s1: dcserver 재시작
+  s24 --> s37: 붙여넣기 정착 시간이 지남
+  s24 --> s44: 쓰기 결과 기록(미전달 증거 포함)
+  s25 --> s1: dcserver 재시작
+  s25 --> s37: receipt 대기 시간이 지남
+  s25 --> s45: 쓰기 결과 기록(미전달 증거 포함)
+  s26 --> s38: 판정 못 함, 보류 유지
+  s26 --> s40: receipt 대기 시간이 지남
+  s26 --> s41: 붙여넣기 정착 시간이 지남
+  s1 --> s41: 부팅, 소유자가 front를 다시 몬다
+  s27 --> s42: 판정 못 함, 보류 유지
+  s27 --> s44: receipt 대기 시간이 지남
+  s27 --> s45: 붙여넣기 정착 시간이 지남
+  s28 --> s29: 판정 못 함, 보류 유지
+  s29 --> s46: 판정 못 함, 알림 의도 기록
+  s30 --> s48: receipt 대기 시간이 지남
+  s30 --> s50: 붙여넣기가 화면에 그려짐
+  s31 --> s47: 판정 못 함, 보류 유지
+  s31 --> s51: 붙여넣기가 화면에 그려짐
+  s32 --> s54: 붙여넣기가 화면에 그려짐
+  s33 --> s32: 판정 못 함, 보류 유지
+  s33 --> s54: 붙여넣기가 화면에 그려짐
+  s34 --> s60: 붙여넣기가 화면에 그려짐
+  s35 --> s34: 판정 못 함, 보류 유지
+  s35 --> s60: 붙여넣기가 화면에 그려짐
+  s36 --> s49: 판정 못 함, 보류 유지
+  s36 --> s51: receipt 대기 시간이 지남
+  s36 --> s52: 붙여넣기 정착 시간이 지남
+  s1 --> s51: 부팅, 소유자가 front를 다시 몬다
+  s1 --> s52: 부팅, 소유자가 front를 다시 몬다
+  s37 --> s1: dcserver 재시작
+  s37 --> s62: 쓰기 결과 기록(미전달 증거 포함)
+  s38 --> s54: receipt 대기 시간이 지남
+  s38 --> s55: 붙여넣기 정착 시간이 지남
+  s39 --> s38: 판정 못 함, 보류 유지
+  s39 --> s54: receipt 대기 시간이 지남
+  s39 --> s55: 붙여넣기 정착 시간이 지남
+  s40 --> s53: 판정 못 함, 보류 유지
+  s40 --> s57: 붙여넣기 정착 시간이 지남
+  s41 --> s56: 판정 못 함, 보류 유지
+  s41 --> s57: receipt 대기 시간이 지남
+  s42 --> s60: receipt 대기 시간이 지남
+  s42 --> s61: 붙여넣기 정착 시간이 지남
+  s43 --> s42: 판정 못 함, 보류 유지
+  s43 --> s60: receipt 대기 시간이 지남
+  s43 --> s61: 붙여넣기 정착 시간이 지남
+  s44 --> s59: 판정 못 함, 보류 유지
+  s44 --> s62: 붙여넣기 정착 시간이 지남
+  s45 --> s58: 우리 글 정확 일치, 지우기 기록
+  s45 --> s62: receipt 대기 시간이 지남
+  s46 --> s63: 알림 outbox enqueue
+  s47 --> s66: 붙여넣기가 화면에 그려짐
+  s48 --> s47: 판정 못 함, 보류 유지
+  s48 --> s66: 붙여넣기가 화면에 그려짐
+  s49 --> s66: receipt 대기 시간이 지남
+  s49 --> s67: 붙여넣기 정착 시간이 지남
+  s50 --> s49: 판정 못 함, 보류 유지
+  s50 --> s66: receipt 대기 시간이 지남
+  s50 --> s67: 붙여넣기 정착 시간이 지남
+  s51 --> s65: 판정 못 함, 보류 유지
+  s51 --> s69: 붙여넣기 정착 시간이 지남
+  s52 --> s68: 판정 못 함, 보류 유지
+  s52 --> s69: receipt 대기 시간이 지남
+  s1 --> s69: 부팅, 소유자가 front를 다시 몬다
+  s53 --> s71: 붙여넣기 정착 시간이 지남
+  s54 --> s53: 판정 못 함, 보류 유지
+  s54 --> s71: 붙여넣기 정착 시간이 지남
+  s55 --> s56: 판정 못 함, 보류 유지
+  s55 --> s71: receipt 대기 시간이 지남
+  s56 --> s70: 판정 못 함, 알림 의도 기록
+  s56 --> s72: receipt 대기 시간이 지남
+  s57 --> s73: 우리 글 정확 일치, 지우기 기록
+  s58 --> s64: 게이트로 지움 키를 보냄
+  s58 --> s75: receipt 대기 시간이 지남
+  s59 --> s76: 붙여넣기 정착 시간이 지남
+  s60 --> s59: 판정 못 함, 보류 유지
+  s60 --> s76: 붙여넣기 정착 시간이 지남
+  s61 --> s74: 우리 글 정확 일치, 지우기 기록
+  s61 --> s76: receipt 대기 시간이 지남
+  s62 --> s75: 우리 글 정확 일치, 지우기 기록
+  s63 --> s77: 알림 row 확보 기록
+  s64 --> s79: 지움 확인 기록
+  s64 --> s81: receipt 대기 시간이 지남
+  s64 --> s82: 정리 뒤 receipt 시간이 지남
+  s65 --> s84: 붙여넣기 정착 시간이 지남
+  s66 --> s65: 판정 못 함, 보류 유지
+  s66 --> s84: 붙여넣기 정착 시간이 지남
+  s67 --> s68: 판정 못 함, 보류 유지
+  s67 --> s84: receipt 대기 시간이 지남
+  s68 --> s83: 판정 못 함, 알림 의도 기록
+  s68 --> s85: receipt 대기 시간이 지남
+  s69 --> s86: 우리 글 정확 일치, 지우기 기록
+  s70 --> s87: 알림 outbox enqueue
+  s70 --> s88: receipt 대기 시간이 지남
+  s71 --> s89: 우리 글 정확 일치, 지우기 기록
+  s72 --> s90: 우리 글 정확 일치, 지우기 기록
+  s73 --> s78: 게이트로 지움 키를 보냄
+  s74 --> s80: 게이트로 지움 키를 보냄
+  s74 --> s91: receipt 대기 시간이 지남
+  s75 --> s81: 게이트로 지움 키를 보냄
+  s76 --> s91: 우리 글 정확 일치, 지우기 기록
+  s77 --> s93: 판정 못 함, 보류 유지
+  s78 --> s94: 지움 확인 기록
+  s78 --> s97: 정리 뒤 receipt 시간이 지남
+  s79 --> s98: 빈 입력창, 정리 뒤 receipt 대기
+  s79 --> s100: receipt 대기 시간이 지남
+  s79 --> s101: 정리 뒤 receipt 시간이 지남
+  s80 --> s99: 지움 확인 기록
+  s80 --> s102: receipt 대기 시간이 지남
+  s80 --> s103: 정리 뒤 receipt 시간이 지남
+  s81 --> s100: 지움 확인 기록
+  s81 --> s104: 정리 뒤 receipt 시간이 지남
+  s82 --> s101: 지움 확인 기록
+  s82 --> s104: receipt 대기 시간이 지남
+  s83 --> s105: 알림 outbox enqueue
+  s83 --> s106: receipt 대기 시간이 지남
+  s84 --> s107: 우리 글 정확 일치, 지우기 기록
+  s85 --> s108: 우리 글 정확 일치, 지우기 기록
+  s86 --> s92: 게이트로 지움 키를 보냄
+  s87 --> s109: 알림 row 확보 기록
+  s87 --> s110: receipt 대기 시간이 지남
+  s88 --> s110: 알림 outbox enqueue
+  s88 --> s111: 우리 글 정확 일치, 지우기 기록
+  s89 --> s95: 게이트로 지움 키를 보냄
+  s90 --> s96: 게이트로 지움 키를 보냄
+  s91 --> s102: 게이트로 지움 키를 보냄
+  s92 --> s112: 지움 확인 기록
+  s92 --> s115: 정리 뒤 receipt 시간이 지남
+  s94 --> s116: 빈 입력창, 정리 뒤 receipt 대기
+  s94 --> s119: 정리 뒤 receipt 시간이 지남
+  s95 --> s117: 지움 확인 기록
+  s95 --> s121: 정리 뒤 receipt 시간이 지남
+  s96 --> s118: 지움 확인 기록
+  s96 --> s122: 정리 뒤 receipt 시간이 지남
+  s97 --> s119: 지움 확인 기록
+  s98 --> s125: receipt 대기 시간이 지남
+  s98 --> s126: 정리 뒤 receipt 시간이 지남
+  s99 --> s98: 빈 입력창, 정리 뒤 receipt 대기
+  s99 --> s125: receipt 대기 시간이 지남
+  s99 --> s126: 정리 뒤 receipt 시간이 지남
+  s100 --> s124: 빈 입력창, 정리 뒤 receipt 대기
+  s100 --> s127: 정리 뒤 receipt 시간이 지남
+  s101 --> s123: 미전달 증명, 예약 정산
+  s101 --> s127: receipt 대기 시간이 지남
+  s102 --> s125: 지움 확인 기록
+  s102 --> s128: 정리 뒤 receipt 시간이 지남
+  s103 --> s126: 지움 확인 기록
+  s103 --> s128: receipt 대기 시간이 지남
+  s104 --> s127: 지움 확인 기록
+  s105 --> s129: 알림 row 확보 기록
+  s105 --> s130: receipt 대기 시간이 지남
+  s106 --> s130: 알림 outbox enqueue
+  s106 --> s131: 우리 글 정확 일치, 지우기 기록
+  s107 --> s113: 게이트로 지움 키를 보냄
+  s108 --> s114: 게이트로 지움 키를 보냄
+  s109 --> s132: 판정 못 함, 보류 유지
+  s109 --> s133: receipt 대기 시간이 지남
+  s110 --> s133: 알림 row 확보 기록
+  s110 --> s134: 우리 글 정확 일치, 지우기 기록
+  s111 --> s120: 게이트로 지움 키를 보냄
+  s111 --> s134: 알림 outbox enqueue
+  s112 --> s135: 빈 입력창, 정리 뒤 receipt 대기
+  s112 --> s138: 정리 뒤 receipt 시간이 지남
+  s113 --> s136: 지움 확인 기록
+  s113 --> s140: 정리 뒤 receipt 시간이 지남
+  s114 --> s137: 지움 확인 기록
+  s114 --> s141: 정리 뒤 receipt 시간이 지남
+  s115 --> s138: 지움 확인 기록
+  s116 --> s144: 정리 뒤 receipt 시간이 지남
+  s117 --> s116: 빈 입력창, 정리 뒤 receipt 대기
+  s117 --> s144: 정리 뒤 receipt 시간이 지남
+  s118 --> s142: 빈 입력창, 정리 뒤 receipt 대기
+  s118 --> s145: 정리 뒤 receipt 시간이 지남
+  s119 --> s148: 미전달 증명, 예약 정산
+  s120 --> s143: 지움 확인 기록
+  s120 --> s146: 알림 outbox enqueue
+  s120 --> s147: 정리 뒤 receipt 시간이 지남
+  s121 --> s144: 지움 확인 기록
+  s122 --> s145: 지움 확인 기록
+  s123 --> s149: 표지를 지움
+  s123 --> s150: receipt 대기 시간이 지남
+  s124 --> s151: 정리 뒤 receipt 시간이 지남
+  s125 --> s124: 빈 입력창, 정리 뒤 receipt 대기
+  s125 --> s151: 정리 뒤 receipt 시간이 지남
+  s126 --> s123: 미전달 증명, 예약 정산
+  s126 --> s151: receipt 대기 시간이 지남
+  s127 --> s150: 미전달 증명, 예약 정산
+  s128 --> s151: 지움 확인 기록
+  s129 --> s152: 판정 못 함, 보류 유지
+  s129 --> s153: receipt 대기 시간이 지남
+  s130 --> s153: 알림 row 확보 기록
+  s130 --> s154: 우리 글 정확 일치, 지우기 기록
+  s131 --> s139: 게이트로 지움 키를 보냄
+  s131 --> s154: 알림 outbox enqueue
+  s132 --> s133: receipt 대기 시간이 지남
+  s133 --> s155: 우리 글 정확 일치, 지우기 기록
+  s134 --> s146: 게이트로 지움 키를 보냄
+  s134 --> s155: 알림 row 확보 기록
+  s135 --> s158: 정리 뒤 receipt 시간이 지남
+  s136 --> s135: 빈 입력창, 정리 뒤 receipt 대기
+  s136 --> s158: 정리 뒤 receipt 시간이 지남
+  s137 --> s156: 빈 입력창, 정리 뒤 receipt 대기
+  s137 --> s159: 정리 뒤 receipt 시간이 지남
+  s138 --> s148: 미전달 증명, 예약 정산
+  s139 --> s157: 지움 확인 기록
+  s139 --> s160: 알림 outbox enqueue
+  s139 --> s161: 정리 뒤 receipt 시간이 지남
+  s140 --> s158: 지움 확인 기록
+  s141 --> s159: 지움 확인 기록
+  s142 --> s145: 정리 뒤 receipt 시간이 지남
+  s143 --> s162: 알림 outbox enqueue
+  s143 --> s163: 빈 입력창, 정리 뒤 receipt 대기
+  s143 --> s164: 정리 뒤 receipt 시간이 지남
+  s144 --> s148: 미전달 증명, 예약 정산
+  s145 --> s167: 미전달 증명, 예약 정산
+  s146 --> s162: 지움 확인 기록
+  s146 --> s165: 알림 row 확보 기록
+  s146 --> s166: 정리 뒤 receipt 시간이 지남
+  s147 --> s164: 지움 확인 기록
+  s147 --> s166: 알림 outbox enqueue
+  s148 --> s149: 표지를 지움
+  s149 --> s168: 새 입력 붙여넣기와 Enter
+  s150 --> s149: 표지를 지움
+  s151 --> s150: 미전달 증명, 예약 정산
+  s152 --> s153: receipt 대기 시간이 지남
+  s153 --> s169: 우리 글 정확 일치, 지우기 기록
+  s154 --> s160: 게이트로 지움 키를 보냄
+  s154 --> s169: 알림 row 확보 기록
+  s155 --> s165: 게이트로 지움 키를 보냄
+  s156 --> s159: 정리 뒤 receipt 시간이 지남
+  s157 --> s170: 알림 outbox enqueue
+  s157 --> s171: 빈 입력창, 정리 뒤 receipt 대기
+  s157 --> s172: 정리 뒤 receipt 시간이 지남
+  s158 --> s148: 미전달 증명, 예약 정산
+  s159 --> s167: 미전달 증명, 예약 정산
+  s160 --> s170: 지움 확인 기록
+  s160 --> s173: 알림 row 확보 기록
+  s160 --> s174: 정리 뒤 receipt 시간이 지남
+  s161 --> s172: 지움 확인 기록
+  s161 --> s174: 알림 outbox enqueue
+  s162 --> s175: 빈 입력창, 정리 뒤 receipt 대기
+  s162 --> s176: 알림 row 확보 기록
+  s162 --> s177: 정리 뒤 receipt 시간이 지남
+  s163 --> s164: 정리 뒤 receipt 시간이 지남
+  s164 --> s177: 알림 outbox enqueue
+  s164 --> s179: 미전달 증명, 예약 정산
+  s165 --> s176: 지움 확인 기록
+  s165 --> s178: 정리 뒤 receipt 시간이 지남
+  s166 --> s177: 지움 확인 기록
+  s166 --> s178: 알림 row 확보 기록
+  s167 --> s149: 표지를 지움
+  s169 --> s173: 게이트로 지움 키를 보냄
+  s170 --> s180: 빈 입력창, 정리 뒤 receipt 대기
+  s170 --> s181: 알림 row 확보 기록
+  s170 --> s182: 정리 뒤 receipt 시간이 지남
+  s171 --> s172: 정리 뒤 receipt 시간이 지남
+  s172 --> s182: 알림 outbox enqueue
+  s172 --> s179: 미전달 증명, 예약 정산
+  s173 --> s181: 지움 확인 기록
+  s173 --> s183: 정리 뒤 receipt 시간이 지남
+  s174 --> s182: 지움 확인 기록
+  s174 --> s183: 알림 row 확보 기록
+  s175 --> s177: 정리 뒤 receipt 시간이 지남
+  s175 --> s184: 알림 row 확보 기록
+  s176 --> s184: 빈 입력창, 정리 뒤 receipt 대기
+  s176 --> s185: 정리 뒤 receipt 시간이 지남
+  s177 --> s185: 알림 row 확보 기록
+  s177 --> s186: 미전달 증명, 예약 정산
+  s178 --> s185: 지움 확인 기록
+  s179 --> s149: 표지를 지움
+  s179 --> s186: 알림 outbox enqueue
+  s180 --> s182: 정리 뒤 receipt 시간이 지남
+  s180 --> s187: 알림 row 확보 기록
+  s181 --> s187: 빈 입력창, 정리 뒤 receipt 대기
+  s181 --> s188: 정리 뒤 receipt 시간이 지남
+  s182 --> s188: 알림 row 확보 기록
+  s182 --> s186: 미전달 증명, 예약 정산
+  s183 --> s188: 지움 확인 기록
+  s184 --> s185: 정리 뒤 receipt 시간이 지남
+  s185 --> s189: 미전달 증명, 예약 정산
+  s186 --> s149: 표지를 지움
+  s186 --> s189: 알림 row 확보 기록
+  s187 --> s188: 정리 뒤 receipt 시간이 지남
+  s188 --> s189: 미전달 증명, 예약 정산
+  s189 --> s149: 표지를 지움
+  class s0 yellow
+  class s0 bugPath
+  class s1 yellow
+  class s1 bugPath
+  class s2 yellow
+  class s3 yellow
+  class s3 bugPath
+  class s4 yellow
+  class s5 yellow
+  class s6 yellow
+  class s7 yellow
+  class s8 yellow
+  class s8 bugPath
+  class s9 yellow
+  class s10 yellow
+  class s11 yellow
+  class s12 yellow
+  class s13 yellow
+  class s14 yellow
+  class s15 yellow
+  class s16 yellow
+  class s17 yellow
+  class s18 yellow
+  class s18 bugPath
+  class s19 yellow
+  class s20 yellow
+  class s21 yellow
+  class s22 yellow
+  class s23 yellow
+  class s24 yellow
+  class s25 yellow
+  class s26 yellow
+  class s27 yellow
+  class s28 yellow
+  class s29 yellow
+  class s29 bugPath
+  class s30 yellow
+  class s31 yellow
+  class s32 yellow
+  class s33 yellow
+  class s34 yellow
+  class s35 yellow
+  class s36 yellow
+  class s37 yellow
+  class s38 yellow
+  class s39 yellow
+  class s40 yellow
+  class s41 yellow
+  class s42 yellow
+  class s43 yellow
+  class s44 yellow
+  class s45 yellow
+  class s46 yellow
+  class s46 bugPath
+  class s47 yellow
+  class s48 yellow
+  class s49 yellow
+  class s50 yellow
+  class s51 yellow
+  class s52 yellow
+  class s53 yellow
+  class s54 yellow
+  class s55 yellow
+  class s56 yellow
+  class s57 yellow
+  class s58 yellow
+  class s59 yellow
+  class s60 yellow
+  class s61 yellow
+  class s62 yellow
+  class s63 orange
+  class s63 bugPath
+  class s64 yellow
+  class s65 yellow
+  class s66 yellow
+  class s67 yellow
+  class s68 yellow
+  class s69 yellow
+  class s70 yellow
+  class s71 yellow
+  class s72 yellow
+  class s73 yellow
+  class s74 yellow
+  class s75 yellow
+  class s76 yellow
+  class s77 orange
+  class s77 bugPath
+  class s78 yellow
+  class s79 yellow
+  class s80 yellow
+  class s81 yellow
+  class s82 yellow
+  class s83 yellow
+  class s84 yellow
+  class s85 yellow
+  class s86 yellow
+  class s87 orange
+  class s88 yellow
+  class s89 yellow
+  class s90 yellow
+  class s91 yellow
+  class s92 yellow
+  class s93 orange
+  class s93 repeats
+  class s94 yellow
+  class s95 yellow
+  class s96 yellow
+  class s97 yellow
+  class s98 yellow
+  class s99 yellow
+  class s100 yellow
+  class s101 yellow
+  class s102 yellow
+  class s103 yellow
+  class s104 yellow
+  class s105 orange
+  class s106 yellow
+  class s107 yellow
+  class s108 yellow
+  class s109 orange
+  class s110 orange
+  class s111 yellow
+  class s112 yellow
+  class s113 yellow
+  class s114 yellow
+  class s115 yellow
+  class s116 yellow
+  class s117 yellow
+  class s118 yellow
+  class s119 yellow
+  class s120 yellow
+  class s121 yellow
+  class s122 yellow
+  class s123 yellow
+  class s124 yellow
+  class s125 yellow
+  class s126 yellow
+  class s127 yellow
+  class s128 yellow
+  class s129 orange
+  class s130 orange
+  class s131 yellow
+  class s132 orange
+  class s133 orange
+  class s134 orange
+  class s135 yellow
+  class s136 yellow
+  class s137 yellow
+  class s138 yellow
+  class s139 yellow
+  class s140 yellow
+  class s141 yellow
+  class s142 yellow
+  class s143 yellow
+  class s144 yellow
+  class s145 yellow
+  class s146 orange
+  class s147 yellow
+  class s148 yellow
+  class s149 teal
+  class s150 yellow
+  class s151 yellow
+  class s152 orange
+  class s153 orange
+  class s154 orange
+  class s155 orange
+  class s156 yellow
+  class s157 yellow
+  class s158 yellow
+  class s159 yellow
+  class s160 orange
+  class s161 yellow
+  class s162 orange
+  class s163 yellow
+  class s164 yellow
+  class s165 orange
+  class s166 orange
+  class s167 yellow
+  class s168 teal
+  class s169 orange
+  class s170 orange
+  class s171 yellow
+  class s172 yellow
+  class s173 orange
+  class s174 orange
+  class s175 orange
+  class s176 orange
+  class s177 orange
+  class s178 orange
+  class s179 yellow
+  class s180 orange
+  class s181 orange
+  class s182 orange
+  class s183 orange
+  class s184 orange
+  class s185 orange
+  class s186 orange
+  class s187 orange
+  class s188 orange
+  class s189 orange

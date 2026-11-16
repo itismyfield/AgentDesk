@@ -1,5 +1,5 @@
 ---- MODULE HerdrInputHold ----
-\* #8201 projection: held inputs on one live Bound herdr execution (design rev 4).
+\* #8201 projection: held inputs on one live Bound herdr execution (design rev 5).
 \* Refines HerdrBusyInput's "uncertain" phase for the herdr execution-nonce input hold
 \* (runtime/herdr_input_holds/<nonce>) and the readiness reservation the same input consumed.
 \* Value ranges come from the entry-point table in docs/design/8201-herdr-input-hold.design.md.
@@ -21,15 +21,19 @@
 \*   "personSubmits" after our exact read a person presses Enter on our text before our keys.
 \* Rev 4: a v2 hold starts as send_outcome=in_flight before the first key; the write records
 \* the final outcome after InputRun. A crash in between leaves in_flight.
+\* Rev 5: a readable empty composer with no proof either way (rule 7: in_flight or
+\* enter_send_failed) releases as "unconfirmed" after this hold's notice row is secured.
+\* Windows are time only; they do not know whether a transcript record is still coming.
 \* Readers : main `not_held`; design pre-key resolve in `write`. Busy injection reads no hold.
 EXTENDS Naturals
-CONSTANTS Policy,    \* "before" (main 934a49997e) | "fixed" (design rev 4)
+CONSTANTS Policy,    \* "before" (main 934a49997e) | "fixed" (design rev 5)
           Scenario,
           Ends,      \* the execution ends while the later input waits (row end/terminate)
           Restart,   \* one dcserver restart: hold records survive, process memory does not
           Identity,  \* "digest" (hold v2) | "legacy" (v1 file: a time only, written pre-deploy)
           EnqFail,   \* the first notice enqueue fails once
           CrashWindow, \* "inFlight" (before the outcome record) | "afterRecord" | "any"
+                       \* | "inFlightTwice" (first crash in flight, a second one anywhere)
           Mutant     \* "None" or one removed rule of the design
 VARIABLE h
 vars == <<h>>
@@ -72,6 +76,7 @@ Recorded(landed, pasted) ==
            sentFor |-> [i \in {1, 2} |-> 0],
            trigger |-> TRUE, watch |-> FALSE,
            humanDeleted |-> FALSE, merged |-> FALSE, releasedOnResidue |-> FALSE,
+           overtaken |-> FALSE,              \* ghost: the original landed after a later input
            ended |-> FALSE, up |-> TRUE, restarts |-> 0]
 \* v2: hold() persisted in_flight before the first key; the write is still running.
 Init == IF Legacy
@@ -82,7 +87,10 @@ Init == IF Legacy
                                                !.reserved = TRUE]
 
 Live == h.up /\ ~h.ended
-Writing(r) == r.writer /\ r.sendStep # "recorded"
+\* The write holds the composer lock from resolve through the outcome record (A16). Without
+\* it (mutant NoWriteLock) the resolver cannot tell a live write from a dead one, so it
+\* measures the windows from the hold record and may judge while the write still runs.
+Writing(r) == r.writer /\ r.sendStep # "recorded" /\ Mutant # "NoWriteLock"
 InFlight == h.sendStep # "recorded"
 \* Enter may have gone: a recorded enter_send_failed, or an outcome never recorded.
 EnterMayNow == EnterMay \/ InFlight
@@ -108,10 +116,10 @@ Render == /\ h.composer = "ours" /\ ~h.rendered
 \* Both windows start at the write's own key (paste, Enter); once no write runs (recorded, or
 \* the writer died in a restart) nothing more is sent and the windows run from the record.
 PasteWindow == /\ ~h.pasteSettled /\ (h.composer # "ours" \/ h.rendered)
-               /\ (~h.writer \/ h.sendStep # "held")
+               /\ (~h.writer \/ h.sendStep # "held" \/ Mutant = "NoWriteLock")
                /\ h' = Wake([h EXCEPT !.pasteSettled = TRUE])
-ReceiptWindow == /\ ~h.receiptSettled /\ h.landed # "pending"
-                 /\ (~h.writer \/ h.sendStep \in {"entered", "recorded"})
+ReceiptWindow == /\ ~h.receiptSettled
+                 /\ (~h.writer \/ h.sendStep \in {"entered", "recorded"} \/ Mutant = "NoWriteLock")
                  /\ h' = Wake([h EXCEPT !.receiptSettled = TRUE])
 TranscriptWrite == /\ h.landed = "pending"
                    /\ h' = Wake([h EXCEPT !.landed = "yes", !.busy = TRUE])
@@ -144,11 +152,12 @@ OtherTurnEnd == /\ h.otherBusy
 PersonSubmitsOurs == /\ Scenario = "personSubmits" /\ h.person = "none"
                      /\ h.composer = "ours" /\ h.cleanup = "clearing" /\ ~h.keysSent
                      /\ h' = Wake([h EXCEPT !.composer = "empty", !.landed = "pending",
-                                            !.origSubmits = @ + 1, !.person = "used"])
+                                            !.origSubmits = @ + 1, !.person = "used",
+                                            !.overtaken = @ \/ h.nxt = "submitted"])
 \* Rule 5b: the receipt window measured from the first empty read after the clearing record
 \* (our keys, or a person's Enter). Process memory; a restart measures again (only longer).
+\* Time only: it may end before a late transcript record (rev 5, review 4 P2-1).
 ClearReceiptWindow == /\ h.cleanup # "none" /\ ~h.clearReceipt /\ h.composer = "empty"
-                      /\ h.landed # "pending"
                       /\ h' = Wake([h EXCEPT !.clearReceipt = TRUE])
 \* A later input on the same execution meets its own unclear Enter; it never reads.
 SecondUncertain == /\ Scenario = "secondHold" /\ h.holdId = 1 /\ ~h.hold /\ Live
@@ -176,7 +185,8 @@ EnterKey == /\ h.up /\ h.writer /\ h.sendStep = "pasted"
                  h' = [h EXCEPT !.sendStep = "entered", !.landed = landed,
                                 !.composer = IF landed = "pending" THEN "empty" ELSE @,
                                 !.rendered = IF landed = "pending" THEN TRUE ELSE @,
-                                !.origSubmits = IF landed = "pending" THEN 1 ELSE @]
+                                !.origSubmits = IF landed = "pending" THEN 1 ELSE @,
+                                !.overtaken = @ \/ (landed = "pending" /\ h.nxt = "submitted")]
 \* The final send_outcome is written atomically; an unsent outcome carries its proof.
 RecordOutcome == /\ h.up /\ h.writer /\ h.sendStep = "entered"
                  /\ h' = Wake([h EXCEPT !.sendStep = "recorded", !.writer = FALSE,
@@ -197,11 +207,14 @@ BusyInject == /\ Live /\ h.busy /\ h.nxt = "queued" /\ Existing(h) = "empty"
                                 !.merged = @ \/ h.composer \in {"ours", "edited", "person"}]
 End == /\ Ends /\ h.up /\ ~h.ended /\ ~Busy(h)
        /\ h' = [h EXCEPT !.ended = TRUE, !.hold = FALSE]
-Crash == /\ Restart /\ h.up /\ h.restarts = 0
-         /\ CASE CrashWindow = "inFlight" -> h.sendStep # "recorded"
+Crash == /\ Restart /\ h.up
+         /\ h.restarts < (IF CrashWindow = "inFlightTwice" THEN 2 ELSE 1)
+         /\ CASE CrashWindow \in {"inFlight", "inFlightTwice"} /\ h.restarts = 0 ->
+                    h.sendStep # "recorded"
+               [] CrashWindow = "inFlightTwice" -> TRUE
                [] CrashWindow = "afterRecord" -> h.sendStep = "recorded"
                [] OTHER -> TRUE
-         /\ h' = [h EXCEPT !.up = FALSE, !.restarts = 1]
+         /\ h' = [h EXCEPT !.up = FALSE, !.restarts = @ + 1]
 Boot == /\ ~h.up
         /\ h' = [h EXCEPT !.up = TRUE, !.reserved = FALSE, !.lock = FALSE, !.watch = FALSE,
                           !.keysSent = FALSE, !.writer = FALSE, !.clearReceipt = FALSE,
@@ -241,6 +254,10 @@ Settle(disp) == [h EXCEPT !.lock = TRUE,
 \* The old rule 3 gate: any non-empty composer (draft_sighting != Settled) is held.
 Gated == Shown(h) = "unread"
          \/ (Mutant = "SightingGate" /\ Shown(h) \in {"ours", "edited", "person"})
+\* An unconfirmed release: this hold's notice row first (intent -> enqueue -> record), then
+\* the release unit. A crash anywhere keeps the hold file and resumes after boot.
+ReleaseUnconfirmed == IF h.enqueued THEN {Settle("unconfirmed")}
+                      ELSE {[h EXCEPT !.intent = TRUE, !.trigger = TRUE]}
 ExactOurs == Shown(h) = "ours" /\ Identity = "digest" /\ (~EnterMayNow \/ ReceiptOK)
 
 Choices ==
@@ -252,10 +269,18 @@ Choices ==
     [] Shown(h) \in {"empty", "unread"} /\ h.cleanup = "clearing" /\ h.keysSent ->
            {[h EXCEPT !.cleanup = "cleared",
                       !.unsentProof = IF Mutant = "OverwriteProof" THEN TRUE ELSE @]}
-    [] Shown(h) \in {"empty", "unread"} /\ UnsentOK /\ ClearWaitOK -> {Settle("undelivered")}
+    \* 5b label: "undelivered" only when the empty composer is ours to explain (send outcome,
+    \* or our confirmed keys); a clearing-phase empty may be a person's Enter -> unconfirmed.
+    [] Shown(h) \in {"empty", "unread"} /\ UnsentOK /\ ClearWaitOK ->
+           IF h.cleanup = "clearing" /\ Mutant # "LateTranscriptAfterClearReceipt"
+           THEN ReleaseUnconfirmed ELSE {Settle("undelivered")}
     [] Shown(h) = "empty" /\ UnsentOK -> {Keep(h)}
     [] Shown(h) \in {"empty", "unread"} /\ Identity = "legacy" -> {Settle("unknown")}
     [] Shown(h) = "empty" /\ ~ReceiptOK -> {Keep(h)}
+    \* rule 7 (rev 5): readable empty, no digest, no unsent proof, windows over: secure this
+    \* hold's notice row first, then release as "unconfirmed". No resend, no keys.
+    [] Shown(h) = "empty" /\ Identity = "digest" /\ Mutant # "InFlightKeep" ->
+           ReleaseUnconfirmed
     [] Shown(h) = "ours" /\ Mutant = "ReleaseOnResidue" -> {Unhold(h)}
     \* rule 8: exact body; record clearing with the proof, then keys, then cleared
     [] ExactOurs /\ h.cleanup = "none" ->
@@ -317,6 +342,10 @@ NoPasteOverResidue == ~h.merged
 NoHumanTextDeleted == ~h.humanDeleted
 NoReleaseOnResidue == ~h.releasedOnResidue
 UndeliveredIsTrue == h.disposition = "undelivered" => h.landed = "no"
+\* An unconfirmed release carries this hold's notice row (exactly one with NoticeAtMostOnce).
+UnconfirmedNoticed == h.disposition = "unconfirmed" => h.sentFor[h.holdId] >= 1
+\* A later input never goes in ahead of the original (the original never lands after it).
+OriginalNotOvertaken == ~h.overtaken
 DeliveredIsTrue == h.disposition = "delivered" => h.landed = "yes"
 \* Safety: at most one notice row per hold.
 NoticeAtMostOnce == \A i \in {1, 2} : h.sentFor[i] <= 1
