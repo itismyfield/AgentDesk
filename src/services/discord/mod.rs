@@ -1328,13 +1328,13 @@ pub(super) fn make_shared_data_for_tests_with_barrier(
     shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
 ) -> Arc<SharedData> {
     let tmux_relay_coords = Arc::new(dashmap::DashMap::new());
-    let engine_runtime = Arc::new(EngineRuntime::new(
+    let engine_runtime = EngineRuntime::new(
         ProviderKind::Claude,
         9,
         pg_pool,
         PolicyRuntime { engine: None },
         Vec::new(),
-    ));
+    );
     Arc::new(SharedData {
         engine: engine_runtime,
         core: tokio::sync::Mutex::new(CoreState {

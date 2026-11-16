@@ -84,13 +84,13 @@ pub(super) fn run_bot_build_shared_data(
     } = restored;
     let process_generation = runtime_store::allocate_process_generation();
     let tmux_relay_coords = Arc::new(dashmap::DashMap::new());
-    let engine_runtime = Arc::new(EngineRuntime::new(
+    let engine_runtime = EngineRuntime::new(
         provider.clone(),
         api_port,
         pg_pool,
         PolicyRuntime { engine },
         initial_skills,
-    ));
+    );
     Arc::new(SharedData {
         engine: engine_runtime,
         core: Mutex::new(CoreState {
@@ -284,6 +284,7 @@ mod tests {
             .build()
             .unwrap();
         let _entered = runtime.enter();
+        let allocations = EngineRuntime::record_allocations_for_tests();
         let shared = run_bot_build_shared_data(
             DiscordBotSettings::default(),
             &ProviderKind::Claude,
@@ -313,6 +314,7 @@ mod tests {
                 codex_goals_reset_channels: &[],
             },
         );
+        assert_original_engine_allocation(allocations, &shared);
         assert!(shared.policy.engine.is_none());
         let published = crate::engine::ops::turn_ops::health_registry()
             .expect("runtime registry must be published without a policy engine");
@@ -322,6 +324,18 @@ mod tests {
             .upgrade()
             .expect("caller retains its registry while the runtime lives");
         assert!(Arc::ptr_eq(&shared_registry, &registry));
+    }
+
+    fn assert_original_engine_allocation(
+        allocations: crate::services::engine_runtime::AllocationRecorder,
+        shared: &Arc<SharedData>,
+    ) {
+        let recorded = allocations.finish();
+        assert_eq!(recorded.len(), 1, "one runtime allocation per constructor");
+        assert!(std::ptr::eq(
+            recorded[0].as_ptr(),
+            Arc::as_ptr(&shared.engine)
+        ));
     }
 
     fn assert_engine_runtime_identity(shared: &Arc<SharedData>) {
@@ -349,7 +363,9 @@ mod tests {
 
     #[tokio::test]
     async fn engine_runtime_fixture_keeps_one_object_and_none_pool() {
+        let allocations = EngineRuntime::record_allocations_for_tests();
         let shared = make_shared_data_for_tests_with_storage(None);
+        assert_original_engine_allocation(allocations, &shared);
         assert_engine_runtime_identity(&shared);
         assert_eq!(shared.provider, ProviderKind::Claude);
         assert_eq!(shared.api_port, 9);
@@ -460,6 +476,7 @@ mod tests {
             }
             let registry = Arc::new(health::HealthRegistry::new());
             let initial_skills = vec![("retained".into(), "prompt skill".into())];
+            let allocations = EngineRuntime::record_allocations_for_tests();
             let shared = run_bot_build_shared_data(
                 DiscordBotSettings::default(),
                 &ProviderKind::Codex,
@@ -489,7 +506,10 @@ mod tests {
                     codex_goals_reset_channels: &[],
                 },
             );
+            assert_original_engine_allocation(allocations, &shared);
+            let allocations = EngineRuntime::record_allocations_for_tests();
             let fixture = make_shared_data_for_tests_with_storage(configured.clone());
+            assert_original_engine_allocation(allocations, &fixture);
             assert_engine_runtime_identity(&shared);
             assert_engine_runtime_identity(&fixture);
             assert!(!Arc::ptr_eq(&shared.engine, &fixture.engine));
@@ -534,65 +554,5 @@ mod tests {
         pool.close().await;
         drop(restore);
         drop(root);
-    }
-
-    #[test]
-    fn engine_runtime_ownership_layout_has_no_shadow_or_extra_allocation() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let discord = std::fs::read_to_string(root.join("src/services/discord/mod.rs")).unwrap();
-        let bootstrap = std::fs::read_to_string(
-            root.join("src/services/discord/runtime_bootstrap/shared_data.rs"),
-        )
-        .unwrap();
-        let layout = discord
-            .split("pub(crate) struct SharedData {")
-            .nth(1)
-            .unwrap()
-            .split("\n}")
-            .next()
-            .unwrap();
-        for field in [
-            "session_transition_locks",
-            "skills_cache",
-            "last_turn_at",
-            "turn_start_times",
-            "provider",
-            "api_port",
-            "pg_pool",
-            "policy",
-        ] {
-            assert!(
-                !layout
-                    .lines()
-                    .any(|line| line.trim_start().starts_with(&format!("{field}:"))
-                        || line.contains(&format!(") {field}:"))),
-                "shadow field: {field}"
-            );
-        }
-        let fixture = discord
-            .split("pub(super) fn make_shared_data_for_tests_with_barrier(")
-            .nth(1)
-            .unwrap()
-            .split("\nuse queue_dispatch")
-            .next()
-            .unwrap();
-        let production = bootstrap
-            .split("pub(super) fn run_bot_build_shared_data(")
-            .nth(1)
-            .unwrap()
-            .split("\n#[cfg(test)]")
-            .next()
-            .unwrap();
-        for constructor in [fixture, production] {
-            assert_eq!(
-                constructor.matches("Arc::new(EngineRuntime::new(").count(),
-                1,
-                "each constructor allocates one runtime"
-            );
-            assert!(
-                constructor.contains("engine: engine_runtime,"),
-                "constructor must retain its runtime"
-            );
-        }
     }
 }
