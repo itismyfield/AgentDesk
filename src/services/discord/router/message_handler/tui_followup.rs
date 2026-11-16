@@ -201,8 +201,8 @@ pub(super) fn hosted_tui_draft_should_enter_provider_recovery(
 ///          (return `None`) rather than risk false-ready / false-busy.
 // #3034: transcript-path resolver exercised by the session-strategy lifecycle
 // tests; the live followup path resolves transcripts elsewhere. Test contract.
+#[cfg(test)]
 #[cfg(unix)]
-#[allow(dead_code)]
 pub(super) fn resolve_claude_followup_transcript_path(
     current_path: Option<&str>,
     session_id: Option<&str>,

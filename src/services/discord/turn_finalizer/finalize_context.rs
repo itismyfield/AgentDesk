@@ -129,20 +129,6 @@ impl FinalizeContext {
         }
     }
 
-    /// #3041 §3 P1-0 (DORMANT): context for a lease-release-driven finalize once
-    /// the watcher terminal migrates onto the delivery lease (P1-1..). Mirrors
-    /// `watcher()` today (no live caller), but kept as a distinct constructor so
-    /// wired phases can tune the lease-release knobs independently.
-    #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
-    pub(in crate::services::discord) fn delivery_lease() -> Self {
-        Self {
-            clear_inflight: false,
-            allow_completion_cleanup: false,
-            kickoff_queue: false,
-            expected_idempotent_guard_miss: false,
-        }
-    }
-
     pub(in crate::services::discord) fn is_backstop_reconcile_path(self) -> bool {
         self.expected_idempotent_guard_miss
     }

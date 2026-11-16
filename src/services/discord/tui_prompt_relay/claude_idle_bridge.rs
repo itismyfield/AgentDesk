@@ -573,8 +573,8 @@ pub(super) async fn finish_idle_bridge_completion(
 ///
 /// Returns the number of `Text`-content frames forwarded (used by tests to
 /// prove progressive relay: more than one before the terminal `Done`).
+#[cfg(test)]
 #[cfg(unix)]
-#[allow(dead_code)]
 pub(super) fn forward_idle_stream_into_bridge(
     prefix: Vec<StreamMessage>,
     reader_rx: mpsc::Receiver<StreamMessage>,
