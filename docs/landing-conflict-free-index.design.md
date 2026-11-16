@@ -14,7 +14,7 @@
 배선한 뒤 `merge=union`과 정렬을 함께 적용한다. 손수 쓴 색인은 항목별 원본으로 분리한다.
 Rust 선언과 책임 분류 설정에는 일반 텍스트 union을 적용하지 않는다.
 
-사용자 결정대로 형식 전환은 착지 대기가 적은 창에 **단독 PR**로 넣는다. 코디네이터가
+사용자 결정대로 형식 전환은 착지 대기가 적은 창에 **단독 PR**로 넣는다(11-16 결정 2로 변경: 일반 착지 차례의 개별 PR, 머지 직후 모든 레인에 main 병합 알림). 코디네이터가
 #7353 S4-17·S14a·S14b·S14c·S14d의 실제 착지 여부를 확인하고, 전환 직후 모든 활성 레인에
 새 main 병합과 생성 명령을 알린다. 이 설계 레인은 고정 base를 유지하며 main을 병합하지 않는다.
 #8121은 공통 합성 병합 실행기의 정본을 소유하고, 이 이슈는 파일별 정책과 시험을 제공한다.
@@ -28,7 +28,7 @@ Rust 선언과 책임 분류 설정에는 일반 텍스트 union을 적용하지
 
 | 파일 | 부류 | 처방 | 적용 순서·근거 |
 |---|---|---|---|
-| `scripts/audit_maintainability/baselines/generated/module_layers.json` | 생성된 **승인 기준선** | ① 착지 단계에서 승인 상한 합성 → source anchor 확정 → `--update-reductions`; custom 재생성 driver는 채택하지 않음 | C1b. #7353의 매핑·이동 승인과 구별. 양쪽 zero-rule 소실 금지 |
+| `scripts/audit_maintainability/baselines/generated/module_layers.json` | 생성된 **승인 기준선** | **결정 B(11-16)로 대체**: 커밋하지 않고 CI가 main과 PR을 각각 계산, 증가는 PR별 승인 파일 | [module-layer-base-compare.design.md](module-layer-base-compare.design.md). 아래 C1b 서술은 기록으로만 남는다 |
 | `src/domain/mod.rs` | 손수 편집 코드 | ④ 현재 파일 유지, 모듈명 정렬·명시 선언 유지 | 이미 21개 정렬 선언(:1). 빈 glue·하위 파일화만으로 공유 선언점이 없어지지 않음 |
 | `scripts/audit_maintainability/layers.toml` | 손수 편집 책임 설정; rank·prefix 우선순위가 의미를 가짐 | ② 정적 rank는 유지, 책임 기록은 키별 `layers.d`로 이동; 전환 전에는 ④ | C3b. #7353 대기 조각 착지 뒤. 배열 행 순서는 무의미하나 같은 키의 책임 변경은 의미 충돌 |
 | `ARCHITECTURE.md` | 손수 문서 + 생성 구간 | ① 표시된 두 블록만 충돌 해소하고 전체 병합 뒤 공식 생성 | C1a. 기존 해소기 재사용. 블록 밖 충돌은 실패 |
@@ -44,6 +44,10 @@ Rust 선언과 책임 분류 설정에는 일반 텍스트 union을 적용하지
 우선순위에는 의미가 있으므로 이를 배열의 물리 순서와 혼동해 union 가능 목록으로 분류하지 않는다.
 
 ## 생성물과 감소 전용 래칫
+
+> 11-16 결정 B: 이 절의 `module_layers.json` 착지 단계 처리(C1b)는
+> [module-layer-base-compare.design.md](module-layer-base-compare.design.md)가 대체한다.
+> "재생성 diff를 리뷰에서 숨기지 않기"와 "ARCHITECTURE와 수동 문서 경계"는 C1a에 그대로 적용한다.
 
 ### 현재 계약과 결정성
 
@@ -347,7 +351,7 @@ DoD 3의 기록은 5일이 지난 뒤 코디네이터가 채운다. 트래픽·#
 | 조각 | 변경·예상 prod | 착수·완료 조건 |
 |---|---|---|
 | C1a | 공통 후처리 계약, ARCHITECTURE 기존 해소기 배선·표식 검증·diff artifact: 4~7파일, +250~450 | #8121 실행기 경계 확정. E6와 생성기 check, 수동 충돌 RED. 기존 기능 재구현 금지 |
-| C1b | 동일 매핑 감소 seed·source anchor·공식 명령·양쪽 비교: 3~5파일, +300~550 | C1a 뒤, #7353 S14d 등 착지 확인. E5 CLI fixture와 정책 충돌 RED. prod 합계가 +1200 예상이면 분할 |
+| C1b | **결정 B로 대체**: B0(도구 호환 선배포)·B1(base 재계산 검사)·B2(커밋 파일 삭제)를 한 착지로 | [module-layer-base-compare.design.md](module-layer-base-compare.design.md) 8·9절 |
 | C2a | 두 목록 union·키 3-way 검사·정렬·필수 CI/prepush 배선: 4~7파일, +250~450 | 가드 먼저 들어가는 단독 전환. E1/E2·실제 TLC/base-diff, 기존 scope·행 누락 의미 보존 |
 | C2b | README 46행을 원본 fragments로 이동·생성/drift 검사: 3~5 prod파일, +180~320; 문서 약 47개 | C2a와 별도 단독 창. 의미·링크·수동 본문 보존. docs 수를 prod 파일 수로 혼동하지 않음 |
 | C3a | layers 수동 검토 기록 분리·기존 anchor 연결: 0~2 prod파일, +0~180 | #7353 기록 착지 뒤, 문서 생성 범위 오인 제거. 수동 내용은 기존 diff와 대조 |
