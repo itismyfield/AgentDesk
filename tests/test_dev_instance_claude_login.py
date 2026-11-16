@@ -22,19 +22,20 @@ class ClaudeLoginTests(TestCase):
     def test_opt_in_binds_manifest_receipt_and_only_claude_catalog(self):
         m = self.fixture.prepare(claude_login=self.login)
         root = Path(m['root'])
-        self.assertEqual(m['claude_login'], self.login)
-        self.assertEqual(json.loads((root/'receipt.json').read_text())['claude_login'], self.login)
+        expected = {**self.login, 'config_dir': str(root/'home/.adk/profiles/claude/test-claude')}
+        self.assertEqual(m['claude_login'], expected)
+        self.assertEqual(json.loads((root/'receipt.json').read_text())['claude_login'], expected)
         org = json.loads((root/'config/org.yaml').read_text())
-        self.assertEqual(org['provider_auth_profiles']['test-claude']['home'], self.login['config_dir'])
+        self.assertEqual(org['provider_auth_profiles']['test-claude']['home'], expected['config_dir'])
         self.assertEqual(org['provider_auth_profiles']['test-codex']['home'], str(root/'home/.adk/profiles/codex/test-codex'))
         env = child_environment(m, {})
         self.assertEqual(env['HOME'], str(root/'home'))
-        self.assertEqual(env['CLAUDE_CONFIG_DIR'], self.login['config_dir'])
+        self.assertEqual(env['CLAUDE_CONFIG_DIR'], expected['config_dir'])
         self.assertEqual(env['CODEX_HOME'], str(root/'home/.adk/profiles/codex/test-codex'))
         self.assertEqual(env['PATH'], str(self.fixture.worktree/'target/debug')+':/usr/bin:/bin')
         self.assertFalse(any((root/'home').rglob('auth.json')))
         self.assertEqual(list((root/'credential').iterdir()), [])
-        self.assertEqual(validate(self.fixture.base, m['instance_id'], {})['claude_login'], self.login)
+        self.assertEqual(validate(self.fixture.base, m['instance_id'], {})['claude_login'], expected)
 
     def test_no_opt_in_keeps_original_declaration_and_runtime_path(self):
         m = self.fixture.prepare()
@@ -110,3 +111,28 @@ class ClaudeLoginTests(TestCase):
                                capture_output=True, text=True, check=True)
         self.assertEqual(probe.stdout, 'fixture-claude-version\n')
         self.assertFalse((Path(manifest['root'])/'home/.adk/profiles/codex/test-codex/auth.json').exists())
+
+
+    def test_opt_in_data_home_is_inside_instance(self):
+        m = self.fixture.prepare(claude_login=self.login)
+        data = Path(m['root'])/'home/.adk/profiles/claude/test-claude'
+        self.assertEqual(m['claude_login']['config_dir'], str(data))
+        self.assertEqual(child_environment(m, {})['CLAUDE_CONFIG_DIR'], str(data))
+        self.assertEqual(self.login['config_dir'], str(self.fixture.home/'.claude'))
+
+    def test_legacy_global_binding_can_still_be_removed_without_launch(self):
+        from scripts.dev_instance.down import remove
+        m = self.fixture.prepare(claude_login=self.login)
+        root = Path(m['root'])
+        for name in ['manifest.json', 'receipt.json']:
+            path = root/name
+            value = json.loads(path.read_text())
+            value['claude_login']['config_dir'] = self.login['config_dir']
+            path.write_text(json.dumps(value))
+        path = root/'config/org.yaml'
+        org = json.loads(path.read_text())
+        org['provider_auth_profiles']['test-claude']['home'] = self.login['config_dir']
+        path.write_text(json.dumps(org))
+        with patch.object(Path, 'home', return_value=self.fixture.home):
+            self.assertEqual(remove(self.fixture.base, m['instance_id'], {})['status'], 'REMOVED')
+        self.assertFalse(root.exists())

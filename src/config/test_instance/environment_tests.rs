@@ -328,7 +328,7 @@ fn claude_login_fixture(quoted: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
 
 fn bind_claude_login(root: &Path, home: &Path) {
     let login = serde_json::json!({"mode":"default_active","account_slot":3,
-        "login_home":home,"config_dir":home.join(".claude"),"cli":home.join(".local/bin/claude")});
+        "login_home":home,"config_dir":root.join("home/.adk/profiles/claude/test-claude"),"cli":home.join(".local/bin/claude")});
     for name in ["manifest.json", "receipt.json"] {
         let path = root.join(name);
         let mut value = read_json(&path).unwrap();
@@ -337,7 +337,8 @@ fn bind_claude_login(root: &Path, home: &Path) {
     }
     let path = root.join("config/org.yaml");
     let mut org = read_json(&path).unwrap();
-    org["provider_auth_profiles"]["test-claude"]["home"] = serde_json::json!(home.join(".claude"));
+    org["provider_auth_profiles"]["test-claude"]["home"] =
+        serde_json::json!(root.join("home/.adk/profiles/claude/test-claude"));
     std::fs::write(path, org.to_string()).unwrap();
 }
 
@@ -396,7 +397,7 @@ fn claude_login_contract_and_operating_golden() {
             );
             assert_eq!(
                 crate::services::claude_tui::hook_output_guard::configured_claude_projects_root(),
-                Some(home.join(".claude/projects"))
+                Some(root.join("home/.adk/profiles/claude/test-claude/projects"))
             );
             assert!(args.iter().any(|s| s == "--strict-mcp-config"));
             assert!(
@@ -407,7 +408,7 @@ fn claude_login_contract_and_operating_golden() {
             let catalog = crate::services::provider_auth_profile::queries::provider_auth_catalog();
             assert_eq!(
                 catalog.get("test-claude").and_then(|p| p.home.as_deref()),
-                home.join(".claude").to_str()
+                root.join("home/.adk/profiles/claude/test-claude").to_str()
             );
             let mut other = catalog["test-claude"].clone();
             other.home = Some(home.join(".claude").to_string_lossy().into_owned());
@@ -426,7 +427,10 @@ fn claude_login_contract_and_operating_golden() {
                 &std::collections::HashMap::new(),
             )
             .unwrap();
-            assert_eq!(overlay.home, Some(home.join(".claude")));
+            assert_eq!(
+                overlay.home,
+                Some(root.join("home/.adk/profiles/claude/test-claude"))
+            );
             assert_eq!(overlay.env["HOME"], home.to_string_lossy());
             let mut child = Command::new("/usr/bin/env");
             crate::services::provider_auth_profile::apply_overlay_to_command(&mut child, &overlay)
@@ -466,7 +470,7 @@ fn claude_login_contract_and_operating_golden() {
                         .join(own)
                         .join("00000000-0000-4000-8000-000000000001.jsonl")
                 )
-                .is_ok()
+                .is_err()
             );
         } else {
             assert_eq!(args, original);
@@ -1392,5 +1396,162 @@ mod login_admission_tests {
                 .unwrap();
             assert_eq!(marker.exists(), slot == "3", "slot {slot}: {}", out.status);
         }
+    }
+}
+
+fn keychain_case(selector: &str, check: impl FnOnce(&Path, &Path)) {
+    const CASE: &str = "ADK_KEYCHAIN_CONTEXT_CHILD";
+    if std::env::var_os(CASE).is_some() {
+        initialize().unwrap();
+        let root = current().unwrap().unwrap().root.clone();
+        let home = root.ancestors().nth(4).unwrap();
+        let probe = home.join("metadata-probe");
+        std::fs::write(
+            &probe,
+            format!(
+                "#!/bin/sh\n[ \"$HOME\" = {} ]\n",
+                crate::services::process::shell_escape(&home.to_string_lossy())
+            ),
+        )
+        .unwrap();
+        environment::set_metadata_program_for_tests(probe);
+        check(&root, home);
+        return;
+    }
+    let (_temp, root, _) = review_fixture();
+    let out = tests::command(&root)
+        .args(["--exact", selector, "--nocapture"])
+        .env(CASE, "1")
+        .output()
+        .unwrap();
+    tests::assert_single_test_passed(&out, selector);
+}
+
+#[test]
+fn keychain_readiness_uses_login_home_without_changing_core_home() {
+    let name = "config::test_instance::environment_tests::keychain_readiness_uses_login_home_without_changing_core_home";
+    keychain_case(name, |root, home| {
+        assert_eq!(
+            std::env::var("HOME").unwrap(),
+            root.join("home").to_string_lossy()
+        );
+        let command = environment::claude_login_metadata_command();
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "HOME" && value == Some(home.as_os_str()))
+        );
+        assert_eq!(environment::claude_login_presence(), Some(true));
+        assert_eq!(
+            std::env::var("HOME").unwrap(),
+            root.join("home").to_string_lossy()
+        );
+    });
+}
+
+#[test]
+fn keychain_admission_uses_login_home_for_presence() {
+    let name =
+        "config::test_instance::environment_tests::keychain_admission_uses_login_home_for_presence";
+    keychain_case(name, |root, _| {
+        assert!(environment::claude_launch_admission().is_ok());
+        assert_eq!(
+            std::env::var("HOME").unwrap(),
+            root.join("home").to_string_lossy()
+        );
+    });
+}
+
+#[test]
+fn keychain_tui_pre_exec_separates_login_home_and_data() {
+    let name = "config::test_instance::environment_tests::keychain_tui_pre_exec_separates_login_home_and_data";
+    keychain_case(name, |root, home| {
+        let output = root.join("runtime/provider-context");
+        let cli = home.join(".local/bin/claude");
+        std::fs::write(&cli, format!("#!/bin/sh\nprintf '%s\\n%s\\n' \"$HOME\" \"$CLAUDE_CONFIG_DIR\" > {}\nmkdir -p \"$CLAUDE_CONFIG_DIR/projects/fixture\"\nprintf '{{}}\\n' > \"$CLAUDE_CONFIG_DIR/projects/fixture/fixture.jsonl\"\n", crate::services::process::shell_escape(&output.to_string_lossy()))).unwrap();
+        let (binary, _) = crate::services::claude_command::ClaudeBinary::resolve().unwrap();
+        let config = crate::services::claude_tui::session::ClaudeTuiLaunchConfig {
+            tmux_session_name: "keychain-context".into(),
+            working_dir: root.into(),
+            claude_bin: binary,
+            agentdesk_exe: PathBuf::from("/fixture/agentdesk"),
+            hook_endpoint: "http://127.0.0.1:18791".into(),
+            session_id: "00000000-0000-4000-8000-000000000001".into(),
+            system_prompt: None,
+            model: None,
+            resume: false,
+        };
+        let files =
+            crate::services::claude_tui::session::prepare_claude_tui_launch(&config).unwrap();
+        let out = Command::new("/bin/bash")
+            .arg(&files.launch_script_path)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let data = root.join("home/.adk/profiles/claude/test-claude");
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            format!("{}\n{}\n", home.display(), data.display())
+        );
+        assert!(data.join("projects/fixture/fixture.jsonl").is_file());
+        assert!(!home.join(".claude/projects").exists());
+        assert!(
+            environment::validate_path(&home.join(".claude/projects/fixture/fixture.jsonl"))
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn keychain_herdr_overlay_is_scoped_and_global_data_is_refused() {
+    const BAD: &str = "ADK_KEYCHAIN_GLOBAL_DATA_CHILD";
+    let name = "config::test_instance::environment_tests::keychain_herdr_overlay_is_scoped_and_global_data_is_refused";
+    if std::env::var_os(BAD).is_some() {
+        assert!(initialize().is_err());
+        return;
+    }
+    keychain_case(name, |root, home| {
+        let data = root.join("home/.adk/profiles/claude/test-claude");
+        let overlay = environment::resolve_profile("claude", Some("test-claude"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(overlay.home, Some(data.clone()));
+        let shell =
+            crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay).unwrap();
+        let out = Command::new("/bin/bash")
+            .args([
+                "-c",
+                &format!("{shell}\nprintf '%s\\n%s\\n' \"$HOME\" \"$CLAUDE_CONFIG_DIR\""),
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            format!("{}\n{}\n", home.display(), data.display())
+        );
+        assert_eq!(overlay.env["CLAUDE_SECURESTORAGE_CONFIG_DIR"], "");
+    });
+    if std::env::var_os("ADK_KEYCHAIN_CONTEXT_CHILD").is_none() {
+        let (_temp, root, home) = review_fixture();
+        let mut child = tests::command(&root);
+        for file in ["manifest.json", "receipt.json"] {
+            let path = root.join(file);
+            let mut value = read_json(&path).unwrap();
+            value["claude_login"]["config_dir"] = serde_json::json!(home.join(".claude"));
+            std::fs::write(path, value.to_string()).unwrap();
+        }
+        let path = root.join("config/org.yaml");
+        let mut org = read_json(&path).unwrap();
+        org["provider_auth_profiles"]["test-claude"]["home"] =
+            serde_json::json!(home.join(".claude"));
+        std::fs::write(path, org.to_string()).unwrap();
+        let out = child
+            .args(["--exact", name, "--nocapture"])
+            .env(BAD, "1")
+            .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
+            .output()
+            .unwrap();
+        tests::assert_single_test_passed(&out, name);
     }
 }

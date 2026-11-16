@@ -138,7 +138,7 @@ def declared_manifest(base, instance_id, worktree, head, profile, api_port, pg_p
         raise InstanceError("invalid committed head")
     if type(api_port) is not int or api_port not in API_PORTS or type(pg_port) is not int or pg_port not in PG_PORTS:
         raise InstanceError("port is outside the loopback test pool")
-    claude_login = validate_claude_login(claude_login, root.parents[3])
+    claude_login = validate_claude_login(claude_login, root.parents[3], root)
     db_identity = "adktest_" + instance_id.replace("-", "")
     return {
         "schema_version": 1, "status": "DECLARED", "live_ready": False,
@@ -202,6 +202,9 @@ def prepare(base, instance_id, worktree, profile, ambient, api_port=None, pg_por
     reject_database_env(ambient)
     validate_profile(profile)
     root = instance_root(base, instance_id)
+    if claude_login is not None:
+        claude_login = validate_claude_login(claude_login, root.parents[3], root)
+        claude_login["config_dir"] = str(provider_home(root, "claude"))
     head = worktree_identity(worktree)
     manifest = declared_manifest(base, instance_id, worktree, head, profile,
                                  allocate_port(api_port, API_PORTS), allocate_port(pg_port, PG_PORTS), claude_login)

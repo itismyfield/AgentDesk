@@ -19,7 +19,7 @@ def postgres_connections(config: dict, reserve: int) -> int:
     return pool + warmup + gateways + leader + reserve
 
 
-def validate_claude_login(value, home):
+def validate_claude_login(value, home, root=None):
     if value is None:
         return None
     keys = {'mode', 'account_slot', 'login_home', 'config_dir', 'cli'}
@@ -27,8 +27,12 @@ def validate_claude_login(value, home):
             or type(value['account_slot']) is not int or value['account_slot'] not in (2, 3)):
         raise InstanceError('explicit non-company Claude login required')
     home = safe_absolute(home)
+    # Keep old declarations removable; new prepares select the instance data home.
+    allowed_data = {home / '.claude'}
+    if root is not None:
+        allowed_data.add(provider_home(safe_absolute(root), 'claude'))
     if (safe_absolute(value['login_home']) != home
-            or safe_absolute(value['config_dir']) != home / '.claude'
+            or safe_absolute(value['config_dir']) not in allowed_data
             or not safe_absolute(value['cli']).is_relative_to(home / '.local')):
         raise InstanceError('Claude login binding is not the default location')
     return dict(value)

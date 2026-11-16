@@ -387,8 +387,7 @@ pub(crate) fn validate_config(config: &crate::config::Config) -> Result<(), Stri
 pub(crate) fn validate_path(path: &Path) -> Result<(), String> {
     if scope()?.is_some() {
         let instance = current()?.ok_or_else(rejected)?;
-        let shared = snapshot_transcript_path(instance, path);
-        if !path.starts_with(&instance.root) && !shared {
+        if !path.starts_with(&instance.root) {
             return Err(rejected());
         }
         checked_path(path)?;
@@ -424,7 +423,7 @@ impl ClaudeLogin {
         let cli = path("cli")?;
         if root.ancestors().nth(4) != Some(home.as_path())
             || root.parent().and_then(Path::file_name) != Some(std::ffi::OsStr::new("instances"))
-            || config_dir != home.join(".claude")
+            || config_dir != home_at(root, "claude")?
             || !cli.starts_with(home.join(".local"))
         {
             return Err(rejected());
@@ -448,6 +447,7 @@ impl ClaudeLogin {
                 self.config_dir.to_string_lossy().into_owned(),
             ),
             ("CLAUDE_SECURESTORAGE_CONFIG_DIR".into(), String::new()),
+            ("DISABLE_AUTOUPDATER".into(), "1".into()),
             ("AGENTDESK_TEST_CLAUDE_LOGIN".into(), "1".into()),
         ])
     }
@@ -586,6 +586,11 @@ pub(crate) fn claude_login_metadata_command() -> Command {
     let mut command = Command::new(metadata_program());
     // No -w/-g: inspect existence, never request the secret value.
     command.args(["find-generic-password", "-s", "Claude Code-credentials"]);
+    if let Ok(Some(snapshot)) = scope()
+        && let Some(login) = &snapshot.claude_login
+    {
+        command.env("HOME", &login.home);
+    }
     command
 }
 
@@ -615,36 +620,6 @@ fn bounded_success(command: &mut Command, timeout: std::time::Duration) -> bool 
                 return false;
             }
         }
-    }
-}
-
-fn snapshot_transcript_path(instance: &super::TestInstance, path: &Path) -> bool {
-    let Some(login) = instance.environment.claude_login.as_ref() else {
-        return false;
-    };
-    let Ok(relative) = path.strip_prefix(login.config_dir.join("projects")) else {
-        return false;
-    };
-    let mut parts = relative.components();
-    let Some(std::path::Component::Normal(project)) = parts.next() else {
-        return false;
-    };
-    let prefix = crate::services::claude_tui::transcript_tail::encode_project_path(&instance.root);
-    let project = project.to_string_lossy();
-    if project != prefix && !project.starts_with(&(prefix + "-")) {
-        return false;
-    }
-    match (parts.next(), parts.next()) {
-        (None, None) => true,
-        (Some(std::path::Component::Normal(file)), None) => {
-            let file = Path::new(file);
-            file.extension().is_some_and(|v| v == "jsonl")
-                && file
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok())
-        }
-        _ => false,
     }
 }
 
@@ -710,7 +685,8 @@ try:
     slot = json.loads(output)['activeAccountNumber']
     if code or type(slot) is not int or slot not in (2, 3) or slot != int(declared):
         sys.exit(1)
-    code, _ = run([metadata, 'find-generic-password', '-s', 'Claude Code-credentials'], 2)
+    code, _ = run([metadata, 'find-generic-password', '-s', 'Claude Code-credentials'], 2,
+        env={**os.environ, 'HOME': home})
     if code: sys.exit(1)
 except Exception:
     sys.exit(1)
@@ -736,6 +712,22 @@ pub(crate) fn claude_launch_admission() -> Result<(), String> {
         return Err("test instance Claude login admission refused".into());
     }
     Ok(())
+}
+
+pub(crate) fn claude_provider_exports() -> Result<String, String> {
+    let Some(login) = scope()?.and_then(|snapshot| snapshot.claude_login.as_ref()) else {
+        return Ok(String::new());
+    };
+    Ok(login
+        .provider_env()
+        .into_iter()
+        .map(|(key, value)| {
+            format!(
+                "export {key}={}\n",
+                crate::services::process::shell_escape(&value)
+            )
+        })
+        .collect())
 }
 
 pub(crate) fn claude_pre_exec_admission() -> Result<String, String> {
