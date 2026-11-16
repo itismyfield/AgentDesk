@@ -234,23 +234,33 @@ mod tests {
     #[tokio::test]
     async fn invalid_zero_destination_or_reference_fails_before_http() {
         use super::*;
+        use crate::services::discord::outbound::raw_output::tests as fixture;
+        let mock = fixture::Mock::start(vec![fixture::reply(
+            "401 Unauthorized",
+            &[],
+            r#"{"message":"401: Unauthorized","code":0}"#,
+        )])
+        .await;
         let client = SerenityReferenceOutboundClient {
-            http: Arc::new(serenity::Http::new("test-token")),
+            http: Arc::new(fixture::client(&mock)),
             shared: crate::services::discord::make_shared_data_for_tests_with_storage(None),
         };
         assert!(client.post_message("0", "body").await.is_err());
+        assert!(mock.requests().is_empty());
         assert!(
             client
                 .post_message_with_reference("0", "body", "7", "42")
                 .await
                 .is_err()
         );
+        assert!(mock.requests().is_empty());
         assert!(
             client
                 .post_message_with_reference_and_nonce("0", "body", "7", "42", "nonce", true)
                 .await
                 .is_err()
         );
+        assert!(mock.requests().is_empty());
         for (channel, message) in [("0", "42"), ("7", "0"), ("7", "opaque/α")] {
             assert!(
                 client
@@ -258,6 +268,7 @@ mod tests {
                     .await
                     .is_err()
             );
+            assert!(mock.requests().is_empty());
             assert!(
                 client
                     .post_message_with_reference_and_nonce(
@@ -266,6 +277,7 @@ mod tests {
                     .await
                     .is_err()
             );
+            assert!(mock.requests().is_empty());
         }
     }
 
