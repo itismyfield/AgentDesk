@@ -372,6 +372,14 @@ following checked results; implementation must fail closed on every unknown:
 | Ended old execution and plan | The snapshot was created only after C1's nonce/canonical/ended guards (`discord/recovery_engine/herdr_row_end.rs:215-279`). C2 additionally seals a compatible saved/native coverage plan and checks existing strict O/shared evidence; ambiguous overlap holds. A new source does not prove coverage. No new terminate/delete operation is introduced. |
 | Live writer incarnation | `writer/host.rs:855-874`, `writer/host/transition.rs:18-39` and `writer/deliver.rs:330-337,433-450` identify the live run, stop signals and halted writer. A new C2 registry run UUID is replaced under custody on each boot/resume. It is distinct from the old execution nonce, local readiness generation and PG owner generation. |
 
+The C1 reader above is private to Discord; those coordinates fix the validation
+contract, not an already callable public recovery API. C2b's proposed
+writer/herdr_body_debt.rs supplies a read-only v1 decoder and private validated
+snapshot witness, checked against actual C1-produced fixtures byte for byte.
+It preserves unknown raw fields and rejects unknown identity/runtime data. It
+does not export or weaken C1's private Archived clear witness, and it does not
+require an unlisted C1 production-file edit.
+
 A managed authority revision is `(execution, executor, owner_generation)`; an
 unmanaged revision is `(gateway, provider, process_boot, gateway_lease_epoch)`.
 Both also bind the current writer run UUID and store identity. Under the custody
@@ -646,3 +654,9 @@ replace the proof with an age, NotFound or restart heuristic. Historical Legacy
 response offsets are likewise not strict O receipts; ambiguous prior visibility
 stays held rather than being silently counted as O coverage. Unknown original
 runtime/identity data remains unreadable, never a false/unowned cleanup result.
+
+The model projects a qualified provider/channel target, original input/episode,
+snapshot, effect and payload to old/other identities. It checks the permission
+protocol, not JSON decoding, actual SQL constraints or native-prefix alignment.
+Those are explicit C2a/C2b acceptance tests; their runtime guards are not treated
+as already implemented because a model control is GREEN.
