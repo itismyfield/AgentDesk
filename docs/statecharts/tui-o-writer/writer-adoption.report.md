@@ -196,3 +196,75 @@ has the same conditional recovery assumption. These are known conditional
 results; freeing the old row does not claim that O replay has finished. C2 remains
 the next slice. The 21 unchanged configs rerun after merging main d40c06eb47
 retain 9 GREEN / 12 expected RED with no tool errors, mismatches or skips.
+
+## C2 original-output authority counterexample (2026-11-16)
+
+Pinned main `56fad66678` and C2-preparation head `3ac13c9f4` have identical
+`owner_record.rs` and `owner_record/output.rs`. Their original-output effect gate
+requires the old admission's generation to remain active. Owner return increments
+the generation, and recovering its original artifact does not revive it. The
+existing real-PG test
+`output_origin_original_admission_survives_owner_return_and_rejects_old_native_pg`
+confirms both facts in one scenario (output_tests.rs:254-272).
+
+`WriterAdoptionHerdrCRefusedOwnerReturned.cfg` and
+`WriterAdoptionHerdrCNoCandidateOwnerReturned.cfg` add that boolean effect-permit
+boundary to C's abstraction. They retain fair verified current-store/custody
+recovery, NoLegacyBodyOnTui, UnadoptedNotOwned, UnknownOwnerKept, and the old
+execution's row/start progress. The old body remains retained; visibility is
+expected RED because OCreate is refused. A scope-valid original remains covered
+by the existing GREEN controls. Current custody alone must not be described as
+fair recovery of an old debt's output authority.
+
+See the [C2 boundary audit](herdr-body-hold.design.md#c2-boundary-audit-current-custody-does-not-revive-an-old-original-unresolved).
+C2 implementation is paused at DESIGN_DELTA; no new permission, sender, receipt
+or GC behavior has been added. Decision A and C1's v1 storage/key stay unchanged.
+
+
+## C2 selected recovery capability (design review pending)
+
+The coordinator selected a separate debt recovery capability, preserving decision
+A and refusing the scope reduction to still-valid original admissions. The
+[C2 capability section](herdr-body-hold.design.md#c2-debt-recovery-capability)
+specifies current custodian/store verification, immutable original provenance,
+shared effect identity, run-scoped grants, a committed reservation before HTTP,
+one-use guarded admission, receipt consumption, and lifecycle invalidation.
+No production code, schema or runtime store is changed in this design leg.
+
+The historical 23 cfg stay 9 GREEN/14 expected RED. The new 25 capability cfg
+include Before controls, four recovered-owner liveness controls, UnknownKind
+safety, permanently unknown plan/remote-receipt sensitivity controls, and sixteen
+guard mutants. The fair recovery condition includes an accessible original
+snapshot, a certified plan and conclusive effect evidence; a restored owner
+alone is no receipt. Exact unknown Prepared remains pending. Native/unstamped
+output does not obtain a recovery grant. The RefusalAccount action is restricted
+to its historical unselected B controls; the revoked-origin Before cases do not
+select a new per-input failure policy.
+
+Current fields/bounds come from the entry-point table: active owner generation
+plus one successor (owner_record.rs:413-439), per-run replacement (host.rs:855),
+stop/suspension and exact identity/hash fields. Four bounded adverse events
+(transfer, writer restart, stop/clear, proven-no-effect refusal) explore monotone
+run revisions 0 through 4. This is a finite exploration bound, not a runtime
+retry/TTL/delete rule. The successful POST/receipt path is abstracted separately
+from the ReceiptUnproved sensitivity case; the model does not claim a distributed
+DB transaction makes Discord HTTP atomic.
+
+Implementation ownership request: twelve added production files, total union
+27/+2300 estimate; C2a 12/+900, C2b 11/+650, C2c 14/+750. Each delta stays under
+the PLAN +1200 line, with a stop/replan if measurement contradicts the estimate.
+Issuance helpers with no operating caller remain cfg(test) until their consuming
+slice; no new allow, warning baseline, independent sender or legacy repair.
+The source/effect/receipt interfaces must pass independent pro design review
+before those implementation slices start.
+
+Final scoped official TLC run: **48 cfg, 14 GREEN /34 expected RED**, zero
+unexpected failures/tool errors/skips; 324.6 seconds. Historical23 remain9/14;
+new25 are5 GREEN/20 expected RED. All four recovered-body controls (Deferred,
+Refused, NoCandidate, already Committed) satisfy row/start/body/receipt/GC progress;
+UnknownKind is a safety-only GREEN control. Two new Before controls and the
+permanently unproved plan/receipt controls retain their explicit liveness RED.
+Sixteen mutants break their named safety guards. Each cfg was actually executed
+by scripts/ci/statecharts_tlc.py; the source snapshot and per-cfg invocation counts
+are recorded in the lane design report. Modeling plus final fixed-snapshot check
+finished within30 minutes from the first capability model edit.

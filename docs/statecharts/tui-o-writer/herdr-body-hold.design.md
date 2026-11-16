@@ -110,8 +110,8 @@ circuit evidence, not the entire answer.
 6. Keep old debt until O's durable delivery proof. On an uncertain POST, reconcile
    the same effect identity/history before retry; no blind second POST. New-turn
    output cannot overtake unresolved old debt, although its execution/row guard
-   may progress. The explicit Refused decision below can also end that ordering
-   obligation without pretending the body was delivered.
+   may progress. Under decision A, Refused does not end that obligation; only proven delivery
+   or an existing explicit no-visible-result policy can do so.
 
 The model assumes truthful durable effect/receipt reconciliation and an O adapter
 capable of representing old debt. It checks protocol obligations, not a proof that
@@ -302,3 +302,347 @@ The 21 CFG files are unchanged in C1. Before and after merging main d40c06eb47:
 9 GREEN / 12 expected RED, including the deliberately conditional Refused results.
 CRefusedDecision remains an unselected historical comparison, not an implemented
 policy or a claimed unconditional recovery service.
+
+## C2 boundary audit: current custody does not revive an old original (unresolved)
+
+The C2 entry-point audit found a narrower authority boundary than C's abstract
+OCreate assumption. This is present unchanged in pinned main `56fad66678` and
+C1+C2-preparation head `3ac13c9f4`; it is not a b2 gate regression.
+
+| Entry point | Actual authority after owner return |
+|---|---|
+| `cluster/intake_router_hook/owner_record.rs:411-439` | Transfer supersedes the active original generation and inserts generation + 1. |
+| `owner_record/output.rs:174-201` | `source_artifact` can still recover the exact immutable old admission; it does not grant it fresh authority. |
+| `owner_record/output.rs:98-112` | `Scope::acquire` requires that old delivery's executor/generation to join the **active** owner, as well as its original receipt/nonce/incarnation/binding. A returned home owner/store cannot satisfy an old superseded generation. |
+| `discord/outbound/o_writer_io.rs:129-155` | O's actual POST calls that same acquire; an old artifact is Withheld before HTTP. |
+| `owner_record/output_tests.rs:254-272` | The real PG control restores the unchanged old artifact after transfer and expressly asserts that acquire is refused. |
+
+Thus a C1 body can be durable and its row retired, with current O custody/store
+verified at home, but with no admissible OCreate through the existing original
+output port. In the new counter configs, `OldOriginalAdmitted = FALSE` is exactly
+that SQL `valid` result. RefusedRepair and NoCandidate HomeReturns are still fair;
+body visibility nevertheless fails. Row settlement and passing the old row guard
+remain live. The original 21 configurations retain their historical results.
+
+| Counter cfg | Historical abstraction | Actual original-output boundary |
+|---|---|---|
+| `CRefusedOwnerReturned` | CRefusedRepair GREEN assumes recovery also makes OCreate admissible | Expected RED BodyAfterAdoption and RefusedExplicitlySettled |
+| `CNoCandidateOwnerReturned` | CNoCandidate GREEN assumes current home O authority can replay old debt | Expected RED BodyAfterAdoption |
+
+Decision A is unchanged: retain accepted Refused and permanent no-source Deferred
+bodies; no input-specific failure receipt. The fair recovery assumption must now
+state whether it includes **a separately verified authority to replay this exact
+retained debt**, rather than just current owner/store availability. The latter
+alone is insufficient. Neither rewriting an old artifact to the new owner nor
+loosening ordinary source metadata/owner checks is an acceptable implementation.
+
+A possible next design is a distinct recovery capability: keep original
+provenance immutable, bind the immutable debt digest and original episode/input
+to the current custodian, and authorize only its receipted recovery effect under
+the existing gate/lease/stop protocol. Its shared identity/receipt semantics and
+revocation boundary require design review before implementation; this audit does
+not grant it or select a new product policy. Restricting C2 to still-valid original
+admissions would instead leave owner-return cases permanently retained and would
+need an explicit scope/liveness decision. No production code is changed here.
+
+## C2 debt recovery capability
+
+**Selected for independent design review, 2026-11-16; not implemented.** The
+coordinator selected the limited recovery capability. Restricting recovery to a
+still-active original admission is rejected. Decision A keeps accepted bodies
+and eventually publishes them after verified recovery; it adds no per-input
+failure notice. The preceding unresolved audit is the Before case, not the final
+selected design. C1's version-1 record, exact byte digest and episode key stay
+unchanged.
+
+### Issuer and verified recovery
+
+Only the current O custodian's live writer may register a validated debt and
+issue a grant. A path, new source, runtime kind, current owner's name, or an
+artifact deserialized from disk is insufficient. The issuer consumes the
+following checked results; implementation must fail closed on every unknown:
+
+| Check | Existing entry point / planned use |
+|---|---|
+| Current managed custodian | `tui_o/ownership/execution.rs:136-177` reads the active owner in one PG snapshot, compares the local executor and returns OwnerPermit. Bound references additionally pass `execution.rs:189-225` validate_local. Issuance and effect admission re-read the active tuple under the existing custody advisory lock; a boot snapshot alone never authorizes HTTP. |
+| Current unmanaged gateway custodian | `discord/runtime_bootstrap/o_writer_host.rs:501-512,837-867` and `runtime_bootstrap/gateway_lease.rs:742-753,842,897`: only the existing provider gateway gate driven by its real PG lease may supply this authority. The registry uses a distinct gateway authority domain, provider, process/run UUID and lease epoch. It does not pretend a local epoch is an intake owner generation. A newly managed channel or a lost/unknown gate invalidates this domain. No dormant o_channel_homes table is used as authority. |
+| Port and bot | `runtime_bootstrap/o_writer_host/owner_port.rs:49-85` checks permit/local/provider identity, resolves the current runtime and verifies the REST bot. The unmanaged host supplies its existing gateway port and gate. A new debt-specific typed attachment carries this checked custodian into the existing port; an arbitrary local string cannot create it. |
+| Actual O store | `tui_o/store/mod.rs:409-450,473-493` recovers init/ledger; damage, I/O failure or ledger violation holds issuance. Record a stable store identity from the exact era/init bytes, not mutable ledger length. `writer/host.rs:713-736` applies this to Fresh and Recovered::Store. Fresh source-free creation still needs `host/first_init.rs:282-324` fenced activation and Free custody; no metadata guard is weakened. |
+| Authentic retained debt | C1's typed reader validates v1/provider/channel/episode/nonce and exact filename byte digest (`discord/inflight/herdr_body_debt.rs:57-77`, `herdr_body_debt/store.rs:39-48`). The full old row, input identities and evidence are retained. The issuer receives a private validated snapshot/plan witness, never a caller-selected filename or user-supplied JSON. This trusts the same local durable-store boundary as C1, not a new arbitrary-file import API. |
+| Ended old execution and plan | The snapshot was created only after C1's nonce/canonical/ended guards (`discord/recovery_engine/herdr_row_end.rs:215-279`). C2 additionally seals a compatible saved/native coverage plan and checks existing strict O/shared evidence; ambiguous overlap holds. A new source does not prove coverage. No new terminate/delete operation is introduced. |
+| Live writer incarnation | `writer/host.rs:855-874`, `writer/host/transition.rs:18-39` and `writer/deliver.rs:330-337,433-450` identify the live run, stop signals and halted writer. A new C2 registry run UUID is replaced under custody on each boot/resume. It is distinct from the old execution nonce, local readiness generation and PG owner generation. |
+
+A managed authority revision is `(execution, executor, owner_generation)`; an
+unmanaged revision is `(gateway, provider, process_boot, gateway_lease_epoch)`.
+Both also bind the current writer run UUID and store identity. Under the custody
+lock the gateway case must still have no managed intake owner/receipt; it also
+requires the live matching gateway gate at the final local admission. These are
+two existing authority sources, not a RuntimeHandoffKind host split. A foreign
+NoCandidate can issue nothing locally. Home recovery must include access to the
+original retained bytes, as the existing C1 model assumes; files are not assumed
+to migrate automatically.
+
+### Persistent identity and narrow grant
+
+Use a new shared PG registry, leaving the C1 files immutable. Three logical
+records can live in one migration: debt manifests/coverage and effects, writer
+sessions, and issued grants. No clock, TTL or cache eviction grants authority.
+
+| Record | Required binding and durability |
+|---|---|
+| Manifest / coverage | Provider/channel, original C1 episode and complete original input identity, exact snapshot digest(s), original row/evidence, sealed plan/version and payload bytes/hash. Compatible snapshots share coverage; an incompatible plan is held. Preserve bytes needed to reconcile a later native binding even after local snapshot GC. |
+| Shared effect | A stable effect ID allocated once for `(provider, channel, original episode/input, canonical coverage fragment, identity/split version)`. Payload hash and bot are immutable; a key with a different payload is a conflict. Current owner/generation/run and changing snapshot digests are **not** effect-key components. Thus a new custodian or a second compatible snapshot cannot manufacture a second send budget. |
+| Grant | An opaque unique ID referencing one existing effect and one verified snapshot/plan, current authority domain/revision, writer run, store identity, channel/provider, original input/episode, payload hash and sender bot. States issued/revoked/consumed are monotone for that grant ID. A later grant has a new ID; it inherits the effect's pending/confirmed state, not a fresh effect. |
+| Writer session | Current verified authority tuple and current run UUID/version. Replacement invalidates old grants even when a crash prevented physical revocation. Neither a stale row nor its serialized token can reactivate itself. |
+
+Original provenance is an explicit union: an immutable original intake admission
+when present, or an explicit C1-validated accepted snapshot retaining its original input IDs.
+For a managed snapshot retain its original delivery ID and any recoverable exact
+old admission; missing old metadata is never filled from the current input.
+Contradictory historical PG evidence holds issuance. A local older row with no
+PG intake ID does not acquire a fabricated delivery/receipt ID. Neither form is
+relabeled as a current input. Snapshot digests bind which old evidence a
+grant consumed; multiple snapshots of one body remain one reconciliation plan.
+
+The wire `Artifact` gains a **distinct debt-recovery variant**, not a new owner
+seal on the original variant. Preserve the old original artifact JSON exactly
+with a strict, disjoint decoder. Native `Origin::seal` still produces only the
+original variant. A recovery variant carries registry grant/effect references,
+original provenance and payload hash; it cannot overwrite the original
+executor/generation/nonce/incarnation. Its live one-use attachment is never
+serialized. Recovery from disk starts with no attachment and must revalidate
+current custody. Unknown versions/mixed shapes fail closed. Older readers'
+`deny_unknown_fields` (`owner_record/output.rs:23-28`) must continue to reject a
+recovery artifact rather than falling back to original/unstamped output.
+
+### Admission and use through the existing O sender
+
+The debt branch is a separate case inside `owner_record/output.rs` acquire. The
+original JOIN at lines 100-107 stays exact, and managed unstamped denial at
+110-114 stays exact. A debt reference passes only if its registry row, original
+provenance, manifest/plan/payload/bot, current authority revision, store and run
+all match, its grant is issued, and the shared effect is neither confirmed nor
+owned by another pending attempt. A current owner alone satisfies none of the
+old-debt or delivery-proof checks.
+
+1. Acquire the channel's existing delivery lease. Reconcile any previous shared
+   reservation, local Prepared or O receipt before requesting another send.
+2. Under existing PG custody, check all issuance bindings and CAS the shared
+   effect from ready/certainly-not-sent to a unique reserved attempt. Commit
+   that reservation **before any HTTP request**. It survives a crash; another
+   run never interprets it as fresh. This is shared send exclusion, not Posted.
+3. Acquire the existing PG effect guard in a second custody transaction and
+   recheck the grant/current custodian/attempt. This guard is handed to one
+   private runtime attachment; no clone creates another request. If the second
+   check refuses before request construction, only the owning live attempt may
+   record certainly-not-sent. Owner transfer alone cannot make that assertion.
+4. `writer/deliver.rs:475,631-664` checks the debt plan/barrier and live attachment
+   **before** OutputOrigin/Prepared and before its first POST poll. The existing
+   ownership gate, stop receivers and lease remain in force. The registry has a
+   durable reservation even if local Prepared cannot be appended. Normal native
+   work still uses its normal exact/source admission; the recovery permission
+   is scoped to this one old debt piece, never a channel-wide delivery override.
+5. `discord/outbound/o_writer_io.rs:129-155` consumes the exact one-use attachment
+   and runs the same HTTP future under the retained effect guard. Do not create
+   a sender outside ChannelWriter, call raw post to bypass origin, or reacquire
+   an unrelated new grant after Prepared. A token loaded by an outbox/old actor
+   without its live debt preflight cannot send.
+6. Owner transfer and the effect guard serialize on the existing custody lock
+   (`owner_record.rs:413-439`, `output.rs:94-108,139-158`). Transfer before the
+   guard refuses the old grant; transfer after an admitted request waits for its
+   guard. A waiter abort does not release the request's owned guard early; keep
+   the behavior tested by `output_tests.rs:344-406`.
+
+The two PG transactions are deliberate: recording Prepared only in the guard
+transaction would roll it back on process death after HTTP, reopening a duplicate
+send. A committed reservation with an indeterminate outcome remains pending.
+Neither NotFound, a lease deadline nor a new current owner turns it into a
+receipt or an automatic fresh POST. The existing stable re-post nonce can help
+reconciliation (`repost/send.rs:87-98`); nonce retention is not assumed unbounded.
+
+### Receipt, retirement, GC and ordering
+
+- A correct bot/content response produces the existing strict PostConfirmation
+  (`writer/deliver.rs:765-790`, `store/ledger.rs:121-156`). Bind it to the stable
+  shared effect and immutable payload/coverage. History settlement may supply
+  proof only after exact bot/message/payload/identity checks using the existing
+  bounded confirmation path (`writer/confirm.rs:142`, `store/delivery_evidence.rs:85`).
+  A generic Settled outcome is insufficient: ledger.rs:348-375 also calls
+  NotFound/Unresolved settled. A shared LocalPosted receipt that lacks exact
+  content proof must be revalidated, not trusted as exact coverage.
+- Local strict Posted and shared receipt consumption are separate crash cuts.
+  If local Posted is durable first, boot must verify/backfill the same shared
+  effect receipt without another POST. If PG confirmation wins before the local
+  mirror, the next run imports that same proven effect. Once confirmed, the
+  receipt/tombstone survives owner/run changes and consumes **all** grants for
+  that effect. No receipt key includes the current owner/run.
+- A real permanent refusal or a certainly-unsent preflight failure revokes that
+  grant; it does not mark the body delivered, delete it or create a user-visible
+  B receipt. Later verified repair may issue a new grant for the same effect
+  only after a conclusive no-effect outcome. An uncertain previous attempt
+  instead has confirmation-only work, with no new POST permission.
+- clear/stop/terminate close the matching live run immediately at the local
+  admission gate and monotonically revoke its grant/run. PG unavailability does
+  not reopen local admission. Boot replaces the registry run before any debt
+  POST and treats old tokens as read-only evidence. An already admitted owned
+  request is settled with the existing stop/guard lifetime; no new kill or
+  early release authority is added. A future legitimate resumed run reissues
+  from retained debt; it never revives a revoked grant ID.
+- Ordinary Cancel of a different/new input is not evidence about an older
+  archived body and does not delete or settle it. If that cancel actually stops
+  the writer/channel, the same run-revocation rule applies. Terminate's held
+  exclusion remains held for its existing postlude and must inhibit debt
+  admission too; it is not a debt receipt.
+- Grant rows may remain as invalid tombstones; “revoked” means unusable, not
+  physical deletion. Owner generation/run mismatch rejects stale rows even if
+  crash prevented their status update. No TTL/attempt-count cleanup is added.
+- Snapshot GC needs the old body's durable shared exact receipt plus its local
+  durable mirror/coverage proof. Preserve C1's archive while its guarded clear
+  can still need it; an active/unreadable row lookup conservatively retains it.
+  A successor never inherits that archive's clear witness. GC does not delete
+  manifests/receipts needed for later native dedup, nor pending/unknown debt.
+- Actor boot/resume/incarnation drains old debt before ordinary owed work; an
+  additional pre-Prepared barrier catches a newly visible archive. Execution
+  input/gateway holds remain separate: an old debt barrier must not reassert
+  C1's retired-row hold or weaken ordinary input metadata. No new output may
+  overtake an unresolved older accepted body.
+
+Saved/native reconciliation remains part of the permission, not text-only global
+dedup. Bind saved coverage to original episode/input. When later native evidence
+has a unique matching overlap, use one plan with existing confirmed prefix and
+only the proven unpaid suffix. Do not declare a whole native unit Posted merely
+because a prefix was visible. A durable coverage alias may suppress that native
+unit only after every span has exact delivery proof. Unknown/rewritten overlap
+stays retained and unposted. Normal native derivation/admission must consult these
+aliases even after local debt-file GC; owed.rs:18-31 and pieces.rs:24-50 carry the
+source/range/old-input coordinates needed to distinguish it from a new turn.
+
+### Boot, neighbouring consumers and input classes
+
+| Entry / consumer | Planned boundary; existing code coordinate |
+|---|---|
+| C1 restart restore | `discord/recovery_engine/restore_inflight.rs:103` keeps its missing-row queue wake. Debt body registration is independent of active-row presence; no new input hold. |
+| Fresh / recovered boot | `writer/host.rs:713-736`: validate debt/session and reconcile uncertain receipts before metadata. Fresh creation still uses first_init's fence, not a special weaker store. |
+| Actor restart / resume | `writer/host.rs:855-874`, `writer/actor.rs:412`: replace session/run, load shared effects and drain old debt before normal delivery, including verified Codex. |
+| New native source / incarnation | `writer/actor/fresh_resume.rs:24-45`, `writer/suspension.rs:48-76,80-96`: capture the source-selection nonce/run boundary, invalidate the old attachment before rescope, recheck a new grant. A binding change is neither old-body coverage nor a receipt. |
+| Actual final sends / re-post | `writer/deliver.rs:631-664,997-1034`, `repost/dispatch.rs:175-205`: ordinary and re-post sends keep their lease/gate/first-poll path. Only the exact admitted debt piece can use a recovery attachment; unrelated PG re-post pieces cannot pass its barrier. |
+| Writer/host stop | `writer/deliver.rs:433-450`, `writer/host.rs:605-609`: invalidate local run admission before releasing it. Recoverable store failure retains pending effect/receipts. |
+| clear / terminate | `discord/herdr_terminate/http_force.rs:30-83`, `herdr_terminate/retired_exclusion.rs:28-51`; a small new-path invalidation hook and final live-fence check inhibit debt sends under the captured exclusion. No legacy clear/tmux repair. |
+| Cancel / successor row | Existing captured turn token and terminate ownership guard at `discord/herdr_terminate.rs:489-495,545-555` remain exact. Cancel of a new input cannot spend or delete an old effect. C1's guarded exact-row clear is unchanged. |
+| Ordinary source observers | Original acquire/metadata rules stay exact; neither an unverified new source nor a suspension can mint coverage or a current custodian proof. UnknownKind stays held. |
+
+Human/machine/routine are original-input provenance, not issuer roles.
+`discord/inflight/model.rs:138-161` preserves requester/message, absorbed source
+IDs, origin IDs and optional intake delivery. For managed inputs retain their
+original receipt classification; a local accepted input retains its C1 raw row
+and does not fabricate an intake ID. Missing classification is not “human”.
+Routine presentation follows the persisted policy in model.rs:385 and
+`discord/routine_presentation.rs:41-83`: a proven NoVisibleResult can produce a
+policy disposition with no body; missing/ambiguous terminal evidence keeps the
+full body. This is the existing policy, not a new visible failure receipt.
+RuntimeHandoffKind never chooses the permission or turns UnknownKind into false.
+
+### Model guarantees, assumptions and implementation review
+
+The companion now has a capability record separate from old body/receipt state.
+CapRecovery means that the checks in the first table have actually succeeded;
+it does not manufacture authority from current owner text. CapIssue/Reserve/Acquire/Post
+model the narrow grant, PG custody and the first HTTP effect; CapEnd/Confirm/GC
+keep its pending effect and exact receipt across run/owner changes. Transfer,
+stop, writer restart and a proven-no-effect refusal are each allowed once in
+this finite model. Their run/authority revisions are distinct; the finite event
+bound is a model exploration bound, not production TTL, retry limit or cleanup.
+
+With fair verified recovery, a compatible certified plan, a successful O effect
+and eventual truthful receipt evidence, Refused/NoCandidate/Deferred/already-owned
+controls progress. No extra failure receipt is used. The Before configs have the
+same recovery events but no capability and stay liveness RED. Permanent absence
+of store/source/authority is still an external-recovery condition under A.
+The explicit UnknownPlan and ReceiptUnproved controls also stay liveness RED:
+restoring the owner/store cannot prove an ambiguous overlap or an indeterminate
+remote effect. Safety forbids treating either as success. The model does **not**
+claim unconditional HTTP exactly-once delivery from a DB transaction, an unlimited
+Discord nonce, or a fresh retry after an unproven Prepared. These limits must be
+visible to the independent reviewer, not hidden in a GREEN count.
+
+This is a proposal for pro design review. It establishes no production guard
+until the implementation calls and validates the listed boundaries. The
+post-reservation/pre-HTTP crash cut is particularly important: its safe pending
+state and the condition for eventual conclusive evidence must be reviewed before
+C2c can claim end-to-end liveness.
+
+### Implementation slices and one additional ownership request
+
+The previous 15-file/+1050 estimate omitted the new authority, durable shared
+reservation, receipt/coverage bridge and lifecycle invalidation. Plan **27 unique
+production files / approximately +2300 net code lines**, in three sequential
+review slices. Each slice stays below 30 files/+1500 and the +1200 PLAN stop
+line. These are estimates, not a cap exception: measure each slice and stop for
+PLAN_READY if its projected net exceeds +1200. No production code is in this
+design commit. No other lane is merged in advance.
+
+| Slice | Production files | Estimated net | Reviewable result |
+|---|---:|---:|---|
+| C2a: registry / capability boundary | 12 | +900 | New shared schema, strict original/debt artifact split, registration/issue/consume validation and acquire tests. Existing native/unstamped rules stay exact. Issuance/transport helpers without a live caller remain cfg(test) until their consuming slice; no allow or warning-baseline increase. This does not claim body recovery is wired. |
+| C2b: durable plan / native coverage | 11 | +650 | Real rowless debt reader, compatible snapshot/input merge, preserved provenance, shared coverage/effect registration, boot wake and source-coordinate propagation. Promote only helpers actually called by the host; no new sender. Ambiguous overlap remains retained. |
+| C2c: writer / lifecycle / receipt ordering | 14 | +750 | Pre-metadata uncertainty reconciliation, actor drain and final pre-Prepared barrier; one-use guarded POST; strict receipt backfill, GC, old-before-new and clear/stop/restart invalidation. Only this combined result can complete C2. |
+
+C2a files: output.rs and the four proposed debt_recovery modules below, migration,
+owner_port.rs, outbound/o_writer_io.rs, writer/mod.rs, store/ledger.rs,
+store/delivery_evidence.rs and writer/confirm.rs. C2b files:
+runtime_bootstrap/o_writer_host.rs, its adoption_wake.rs, writer/host/first_init.rs,
+writer/host/activation_io.rs, writer/herdr_body_debt.rs, its replay.rs,
+writer/pieces.rs, writer/owed.rs, writer/host.rs, registry.rs and writer/mod.rs.
+C2c files: writer/host.rs, actor.rs, deliver.rs, herdr_body_debt/receipts.rs,
+actor/fresh_resume.rs, suspension.rs, herdr_terminate/retired_exclusion.rs,
+outbound/o_writer_io.rs, runtime_bootstrap/o_writer_host/owner_port.rs,
+writer/mod.rs, writer/herdr_body_debt.rs, authority.rs, receipt.rs and
+store/ledger.rs. Shared files are reviewed as sequential deltas, not parallel
+ownership. The union is the original 15 plus the following **12 additions**.
+
+<!-- doc-path-refs: proposed src/services/cluster/intake_router_hook/owner_record/output/debt_recovery.rs src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/registry.rs src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/authority.rs src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/receipt.rs migrations/postgres/0191_herdr_body_debt_recovery.sql -->
+
+| Additional file (and its tests) | Purpose |
+|---|---|
+| `src/services/cluster/intake_router_hook/owner_record/output.rs` | Disjoint original/recovery artifact dispatch; preserve existing original JOIN and unstamped denial. |
+| `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery.rs` (proposed) | Private validated debt/plan/claim/one-use attachment types. |
+| `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/registry.rs` (proposed) | Shared manifests, coverage aliases, run and effect/attempt CAS; no TTL cleanup. |
+| `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/authority.rs` (proposed) | Custodian verification, issue, guarded acquire and monotone revoke. |
+| `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/receipt.rs` (proposed) | Exact proof bridge and consumption independent of current owner/run. |
+| `migrations/postgres/0191_herdr_body_debt_recovery.sql` (proposed) | Shared schema, immutable key/hash constraints, unique active run and effect/attempt constraints. 0191 is the next number at pinned main; reserve/renumber once with the coordinator before implementation if another lane takes it. |
+| `src/services/discord/runtime_bootstrap/o_writer_host/owner_port.rs` | Attach the validated current custodian/bot to the existing port; no new transport. |
+| `src/services/tui_o/writer/actor/fresh_resume.rs` | Invalidate old run/attachment on an actual rescope before it can be reused. |
+| `src/services/tui_o/writer/suspension.rs` | Expose a scoped live selection/stop witness at debt admission; do not weaken source policy. |
+| `src/services/discord/herdr_terminate/retired_exclusion.rs` | Invalidate only the matching new-path writer run under the existing exclusion. |
+| `src/services/tui_o/writer/pieces.rs` | Carry proven source/input/coverage coordinates; preserve ordinary identity/split rules. |
+| `src/services/tui_o/writer/owed.rs` | Associate later native units with certified old coverage and truthful receipts; no blanket suppression. |
+
+Tests and required generated test-inventory additions travel with each slice.
+Use the official generation commands; no hand-edited checksum/inventory baseline
+or new empty test-support module. The host/actor/deliver edits remain small call
+sites because #8118/#8148 also touch them. #8192 overlaps the transport/bootstrap
+boundaries; record that overlap without modifying its worktree or premerging it.
+
+Acceptance before implementation approval: real PG owner transfer then debt
+recovery while ordinary old native remains denied; wrong owner/provider/channel/
+episode/input/snapshot/effect/payload refusals; same effect across compatible
+snapshots and owner/run changes; concurrent reservation single winner; local
+Posted/shared receipt crash cuts; pre-HTTP reservation crash retains pending;
+old-before-new; rowless boot/restart/incarnation wake; clear/stop/terminate with
+an owned in-flight guard; source-free saved/native-prefix/suffix coverage; exact
+routine NoVisibleResult; UnknownKind and ambiguous overlap remain held.
+Mutants remove the reservation CAS or transfer lock, reuse a revoked run, swap
+any identity/hash, count an uncertain result as a receipt, allow unrelated native
+POST, skip the final barrier or GC an unconfirmed snapshot. Each must be RED at
+the real boundary; no 0-test/ignored count can satisfy it.
+
+Liveness assumes an eventually stable recovered custodian long enough to admit
+and settle a request; unlimited hostile owner churn is not a recovery guarantee.
+The model has an explicit committed CapReserve before CapAcquire/Post. Its
+CapCertainNotSent is an abstract **conclusive owning-attempt proof**, not a rule
+that a changed owner/run implies no HTTP effect. CapReceiptUnproved disables
+that progress by retaining indeterminate Prepared. Implementations must not
+replace the proof with an age, NotFound or restart heuristic. Historical Legacy
+response offsets are likewise not strict O receipts; ambiguous prior visibility
+stays held rather than being silently counted as O coverage. Unknown original
+runtime/identity data remains unreadable, never a false/unowned cleanup result.
