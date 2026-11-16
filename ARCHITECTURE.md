@@ -1529,6 +1529,8 @@ src/
 │   │   │   │   ├── provider_reset.rs
 │   │   │   │   ├── relaunch.rs
 │   │   │   │   ├── relaunch_confirm.rs
+│   │   │   │   ├── relaunch_effort_recovery_tests.rs
+│   │   │   │   ├── relaunch_effort_restart_tests.rs
 │   │   │   │   ├── relaunch_effort_tests.rs
 │   │   │   │   ├── relaunch_model_tests.rs
 │   │   │   │   └── relaunch_tests.rs
@@ -1537,6 +1539,12 @@ src/
 │   │   │   │   ├── recovery_command_tests.rs
 │   │   │   │   ├── reports.rs
 │   │   │   │   └── session_details.rs
+│   │   │   ├── effort_restart/
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── notice.rs
+│   │   │   │   ├── recovery.rs
+│   │   │   │   ├── tmux.rs
+│   │   │   │   └── witness.rs
 │   │   │   ├── inspect/
 │   │   │   │   ├── formatting.rs
 │   │   │   │   ├── mod.rs
@@ -2083,6 +2091,7 @@ src/
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
 │   │   │   │   ├── effect_tests.rs
+│   │   │   │   ├── effort_close_tests.rs
 │   │   │   │   ├── effort_continue.rs
 │   │   │   │   ├── effort_continue_tests.rs
 │   │   │   │   ├── held_watch.rs

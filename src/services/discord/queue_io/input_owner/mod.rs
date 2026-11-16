@@ -17,4 +17,6 @@ pub(crate) mod start;
 pub(crate) mod target;
 
 #[cfg(test)]
+mod effort_close_tests;
+#[cfg(test)]
 mod effort_continue_tests;

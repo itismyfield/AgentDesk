@@ -145,6 +145,9 @@ impl Owner {
             }
             next.items.drain(..members.len());
             next.handoff_fronts_left();
+            // A continuation refused before any key is retained, not retried: its barrier closes.
+            let dropped = super::effort_continue::Dropped::Only(members);
+            super::effort_continue::close_dropped(&mut next, dropped);
         }
         self.commit(next)?;
         for (key, n) in counts {

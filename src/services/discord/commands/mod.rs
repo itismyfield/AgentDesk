@@ -180,3 +180,5 @@ pub(in crate::services::discord) async fn enforce_slash_command_policy(
 }
 
 pub(super) mod effort_capability;
+#[cfg(unix)]
+pub(in crate::services::discord) mod effort_restart;
