@@ -227,6 +227,7 @@ pub(crate) fn pinned() -> Result<Option<(String, String)>, String> {
 }
 pub(crate) fn payload<R>(send: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
     before_payload()?;
+    keyed();
     send()
 }
 #[cfg(unix)]

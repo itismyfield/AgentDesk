@@ -12,7 +12,7 @@ use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, binding_reader::source_id_for};
 use crate::services::tui_o::writer::adoption::{LegacyCursor, LegacyView};
 use crate::services::tui_o::writer::host::{
-    self, HostParts, ManagedWriterHandle,
+    self, Custody, FencedFacts, HostIo, HostParts, ManagedWriterHandle,
     test_io::{Alarms, TestHost},
 };
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, OwnerFront, PendingQueueItem};
@@ -63,6 +63,70 @@ impl Drop for ScopedTmuxPath {
     fn drop(&mut self) {
         drop(self.0.take());
         crate::services::platform::tmux::invalidate_availability_cache();
+    }
+}
+
+struct SourceHost {
+    io: Arc<TestHost>,
+    shared: Arc<SharedData>,
+}
+
+impl HostIo for SourceHost {
+    type Port = <TestHost as HostIo>::Port;
+    type Lease = <TestHost as HostIo>::Lease;
+    type Alarms = <TestHost as HostIo>::Alarms;
+    type Bindings = crate::services::tui_o::writer::binding::ChannelBindingLog;
+
+    fn port(&self) -> impl std::future::Future<Output = Arc<Self::Port>> + Send {
+        self.io.port()
+    }
+    fn lease(&self) -> Self::Lease {
+        self.io.lease()
+    }
+    fn alarms(&self) -> Self::Alarms {
+        self.io.alarms()
+    }
+    fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Self::Bindings> {
+        Arc::new(Self::Bindings::new(channel, provider))
+    }
+    fn native_inputs(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> Option<crate::services::tui_o::writer::actor::native_input::NativePort> {
+        Some(discord::turn_finalizer::native_prepare::supply_port(
+            channel,
+            self.shared.clone(),
+            self.bindings(channel, provider),
+        ))
+    }
+    fn activation_facts(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> impl std::future::Future<
+        Output = Result<crate::services::tui_o::writer::activation::ActivationFacts, String>,
+    > + Send {
+        self.io.activation_facts(channel, provider)
+    }
+    fn intake_fence(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> impl std::future::Future<Output = Result<FencedFacts, String>> + Send {
+        self.io.intake_fence(channel, provider)
+    }
+    fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<Custody, String> {
+        self.io.local_custody(channel, provider)
+    }
+    fn legacy(&self) -> Arc<dyn LegacyView> {
+        self.io.legacy()
+    }
+    fn legacy_busy(&self, channel: u64) -> impl std::future::Future<Output = bool> + Send {
+        self.io.legacy_busy(channel)
+    }
+    fn relaying(&self, channel: u64) -> bool {
+        self.io.relaying(channel)
     }
 }
 
@@ -285,6 +349,7 @@ impl Intake {
                 discord::make_shared_data_for_tests_with_storage(Some(fx.pool.clone()));
             let own = Arc::get_mut(&mut shared).unwrap();
             own.provider = ProviderKind::Claude;
+            own.restart.current_generation = 1;
             own.token_hash = TOKEN.into();
             own.api_port = api.port;
             shared.settings.write().await.provider = ProviderKind::Claude;
@@ -325,7 +390,7 @@ impl Intake {
             let gate = Arc::new(OwnershipGate::default());
             let alarms = io.alarms.clone();
             let parts = HostParts {
-                io,
+                io: Arc::new(SourceHost { io, shared: shared.clone() }),
                 runtime_root: Some(crate::config::runtime_root().unwrap()),
                 gate: gate.clone(),
                 readiness: host::process_readiness(),

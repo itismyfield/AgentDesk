@@ -797,10 +797,13 @@ fn busy_hold_case(
         BUSY,
     );
     let id = ChannelId::new(channel);
-    let (mut shared, mock) = (
-        crate::services::discord::make_shared_data_for_tests(),
-        discord_mock::DiscordMockState::new(),
-    );
+    let (mut shared, mock) = {
+        let _runtime = rig.runtime.enter();
+        (
+            crate::services::discord::make_shared_data_for_tests(),
+            discord_mock::DiscordMockState::new(),
+        )
+    };
     Arc::get_mut(&mut shared).unwrap().mailboxes = rig._registry.clone();
     shared.restart.reconcile_done.store(
         hold != Some(Hold::RestartRecovery),
