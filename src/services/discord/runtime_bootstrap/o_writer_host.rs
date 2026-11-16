@@ -406,6 +406,23 @@ impl HostIo for GatewayHost {
         Some(Box::new(turn))
     }
 
+    async fn retain_body_debt(
+        &self,
+        plan: &crate::services::tui_o::writer::herdr_body_debt::Plan,
+        bot: u64,
+    ) -> Result<usize, String> {
+        let pool = self
+            .shared
+            .pg_pool
+            .as_ref()
+            .ok_or("no PG body debt registry")?;
+        let scope = crate::services::cluster::intake_router_hook::owner_record::output::Scope {
+            pool: pool.clone(),
+            provider: self.shared.provider.as_str().into(),
+        };
+        scope.register_herdr_body_debt(plan, bot).await
+    }
+
     fn input_ready(&self, channel: u64, provider: ShadowProvider) {
         let provider = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
@@ -508,6 +525,7 @@ pub(super) fn spawn(
     let Some(shadow) = shadow_of(provider) else {
         return;
     };
+    adoption_wake::boot(shared, provider, shadow);
     host::start(shadow, pg_gateway, || parts(shared, provider, config));
 }
 
@@ -829,6 +847,7 @@ pub(super) fn spawn_execution(
                 .is_some_and(|snapshot| snapshot.execution(*ch).is_some())
         })
         .collect();
+    adoption_wake::boot(shared, provider, shadow);
     for handle in host::start_managed(shadow, false, owned, || parts(shared, provider, config)) {
         drop(handle.into_detached());
     }

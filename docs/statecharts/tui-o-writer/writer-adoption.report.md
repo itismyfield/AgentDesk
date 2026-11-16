@@ -288,3 +288,49 @@ conditional liveness RED with pending/POST0 safety; proof-supplied reserved and
 Prepared cuts are GREEN; removing proof checking or resetting on run change is
 RED NoResetWithoutProof. The explicit evidence event replaces, rather than
 renames, the lifecycle inference.
+
+
+## C2b rowless plan boundary
+
+The companion model and all 54 configs remain byte-identical to C2a. C2b implements
+validated original plan/coverage inputs, not CapPost/CapConfirm/GC. No fairness
+or recovery assumption changes. A fresh TLC run checks the same 16 GREEN and
+38 expected RED configurations; expected liveness RED is retained as a condition,
+not hidden by removing a property.
+
+| Entry point | Model / concrete boundary |
+|---|---|
+| `src/services/discord/runtime_store.rs:51` | C1 archive directory appends runtime; no live configuration assumption |
+| `src/services/tui_o/writer/herdr_body_debt.rs:24` | Exact C1 v1 path |
+| `src/services/tui_o/writer/herdr_body_debt.rs:47` | Original episode/input and immutable snapshot digest |
+| `src/services/tui_o/writer/herdr_body_debt.rs:182` | Compatible snapshots; ambiguous or conflicting input stays retained |
+| `src/services/tui_o/writer/herdr_body_debt.rs:234` | row=false/copyId=old, no active-row lookup |
+| `src/services/tui_o/writer/herdr_body_debt/replay.rs:78` | Pinned source/range plus old Original admission, not a new source stamp |
+| `src/services/tui_o/writer/owed.rs:52` | Unique original native coordinates |
+| `src/services/tui_o/writer/pieces.rs:56` | Coordinates remain evidence, never an input permit |
+| `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/registry.rs:59` | Shared stable manifest/effect prerequisite; cap/op/oldAck stutter, no grant or phase reset |
+| `src/services/tui_o/writer/host.rs:746` | Fresh and Recovered read before unchanged metadata admission |
+| `src/services/tui_o/writer/host.rs:871` | Host start/resume rereads retained bytes |
+| `src/services/discord/runtime_bootstrap/o_writer_host.rs:409` | Existing runtime PG pool and already-open port bot; no new sender |
+| `src/services/discord/runtime_bootstrap/o_writer_host/adoption_wake.rs:23` | Only locally owned debt channels use existing queue wake |
+
+Boot, restart and host resume reread the immutable copy even when the active row
+is absent. New source/incarnation alone supplies no coverage or current input
+identity. Human, machine and routine inputs retain their original requester,
+primary/absorbed message and origin IDs, original intake delivery and policy;
+missing fields remain unknown. Cancel/Terminate/clear/stop neither delete debt
+nor create grants in C2b; actual session invalidation belongs to C2c. No legacy
+turn_bridge/relay_recovery/watcher behavior is changed.
+
+Native aliases require old O admission evidence in addition to exact pinned
+bytes/range. A newer source with equal text but a different native unit cannot
+borrow that evidence. Snapshot conflicts and unknown evidence stay retained.
+Read/merge/registration stutter with respect to cap/op/oldAck; they establish
+the existing CapIdentity/CapIssue prerequisites without changing the permission
+or receipt state. Registration does not call OCreate/OConfirm or mark a body delivered. The C1
+archive remains unchanged; the C2a issuer/strict-receipt harnesses stay test-only.
+
+Refused and permanent no-source Deferred body visibility is conditional on
+verified owner/store recovery and eventual exact effect or conclusive no-effect
+proof. There is no unconditional liveness claim. C2c remains required for actual
+replay, old-before-new, receipt reconciliation and GC.

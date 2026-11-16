@@ -1,5 +1,6 @@
 //! One shared effect/attempt survives every owner and writer incarnation.
 use super::*;
+use serde_json::json;
 pub(super) async fn structural(
     tx: &mut Transaction<'_, Postgres>,
     r: &Reference,
@@ -51,4 +52,154 @@ pub(super) async fn reserve(
         .execute(&mut **tx)
         .await?;
     Ok(attempt)
+}
+
+impl Scope {
+    /// Registers immutable coverage only; issuance still requires a live custodian and store.
+    pub(crate) async fn register_herdr_body_debt(
+        &self,
+        plan: &crate::services::tui_o::writer::herdr_body_debt::Plan,
+        bot: u64,
+    ) -> Result<usize, String> {
+        let document = plan.registration(bot)?;
+        if document["provider"] != self.provider {
+            return Err("body debt provider mismatch".into());
+        }
+        let channel = document["channel"].as_str().ok_or("body debt channel")?;
+        let episode = document["episode"].as_str().ok_or("body debt episode")?;
+        let input = document["input_key"].as_str().ok_or("body debt input")?;
+        let plan_sha = document["plan_sha"].as_str().ok_or("body debt plan")?;
+        let bot = i64::try_from(bot).map_err(|e| e.to_string())?;
+        let mut tx = begin(&self.pool).await.map_err(|e| e.to_string())?;
+        let id = OwnerIdentity::new(&self.provider, channel);
+        crate::db::channel_custody_lock::lock(&mut tx, &id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let incompatible: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM o_herdr_debt_effects WHERE provider=$1 AND channel_id=$2 AND episode=$3 AND (input_key<>$4 OR plan_sha<>$5 OR bot_id<>$6 OR provenance->>'kind' IS DISTINCT FROM 'c1_accepted_snapshot'))")
+            .bind(&self.provider).bind(channel).bind(episode).bind(input).bind(plan_sha).bind(bot)
+            .fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
+        if incompatible {
+            return Err("body debt has a conflicting shared plan".into());
+        }
+        for alias in document["native"]
+            .as_array()
+            .ok_or("body debt native coverage")?
+        {
+            let claimed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM o_herdr_debt_effects e CROSS JOIN LATERAL jsonb_array_elements(e.provenance->'native') a WHERE e.provider=$1 AND e.channel_id=$2 AND e.episode<>$3 AND a->'unit_key'=$4 AND a->'piece_index'=$5)")
+                .bind(&self.provider).bind(channel).bind(episode).bind(&alias["unit_key"]).bind(&alias["piece_index"])
+                .fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
+            if claimed {
+                return Err("native coverage belongs to another original input".into());
+            }
+        }
+        let manifest = document["effects"][0]["coverage"]
+            .as_str()
+            .ok_or("body debt manifest coverage")?;
+        let mut inserted = 0;
+        for piece in document["effects"].as_array().ok_or("body debt effects")? {
+            let coverage = piece["coverage"].as_str().ok_or("body debt coverage")?;
+            let payload = piece["payload"].as_str().ok_or("body debt payload")?;
+            let payload_sha = piece["payload_sha"]
+                .as_str()
+                .ok_or("body debt payload hash")?;
+            let index = i32::try_from(piece["piece_index"].as_u64().ok_or("body debt piece")?)
+                .map_err(|e| e.to_string())?;
+            let snapshots = document["snapshots"]
+                .as_object()
+                .ok_or("body debt snapshots")?;
+            let digests = json!(snapshots.keys().collect::<Vec<_>>());
+            // One raw manifest per plan, rather than one full body copy per split piece.
+            let provenance = if index == 0 {
+                json!({"kind":"c1_accepted_snapshot", "version":1, "manifest_coverage":manifest,
+                    "snapshots":document["snapshots"], "native":document["native"]})
+            } else {
+                json!({"kind":"c1_accepted_snapshot", "version":1, "manifest_coverage":manifest})
+            };
+            let result = sqlx::query("INSERT INTO o_herdr_debt_effects(id,provider,channel_id,episode,input_key,coverage,plan_sha,snapshots,provenance,payload,payload_sha,unit_key,piece_index,bot_id,state) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'ready') ON CONFLICT(provider,channel_id,episode,input_key,coverage) DO NOTHING")
+                .bind(Uuid::new_v4()).bind(&self.provider).bind(channel).bind(episode).bind(input).bind(coverage).bind(plan_sha).bind(&digests)
+                .bind(&provenance).bind(payload).bind(payload_sha).bind(&piece["unit_key"]).bind(index).bind(bot)
+                .execute(&mut *tx).await.map_err(|e|e.to_string())?;
+            inserted += result.rows_affected() as usize;
+            let (effect, old_payload, old_hash, old_unit, old_index, old_provenance, old_snapshots): (Uuid,String,String,Value,i32,Value,Value) = sqlx::query_as("SELECT id,payload,payload_sha,unit_key,piece_index,provenance,snapshots FROM o_herdr_debt_effects WHERE provider=$1 AND channel_id=$2 AND episode=$3 AND input_key=$4 AND coverage=$5")
+                .bind(&self.provider).bind(channel).bind(episode).bind(input).bind(coverage).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
+            if old_payload != payload
+                || old_hash != payload_sha
+                || old_unit != piece["unit_key"]
+                || old_index != index
+            {
+                return Err("body debt coverage cannot change its payload or identity".into());
+            }
+            if old_provenance["version"] != 1 || old_provenance["manifest_coverage"] != manifest {
+                return Err("body debt manifest identity changed".into());
+            }
+            if index != 0 {
+                if old_provenance != provenance {
+                    return Err("unreadable body debt manifest reference".into());
+                }
+                let mut hashes = std::collections::BTreeSet::new();
+                for value in old_snapshots.as_array().ok_or("original snapshot hashes")? {
+                    hashes.insert(value.as_str().ok_or("original snapshot hash")?.to_owned());
+                }
+                hashes.extend(snapshots.keys().cloned());
+                sqlx::query("UPDATE o_herdr_debt_effects SET snapshots=$2 WHERE id=$1")
+                    .bind(effect)
+                    .bind(json!(hashes))
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                continue;
+            }
+            let mut merged = old_provenance;
+            let kept = merged["snapshots"]
+                .as_object_mut()
+                .ok_or("unreadable original snapshots")?;
+            for (digest, snapshot) in snapshots {
+                if kept.get(digest).is_some_and(|old| old != snapshot) {
+                    return Err("immutable snapshot changed".into());
+                }
+                kept.insert(digest.clone(), snapshot.clone());
+            }
+            let mut original_ids = Vec::new();
+            for snapshot in merged["snapshots"]
+                .as_object()
+                .ok_or("original snapshots")?
+                .values()
+            {
+                let row: Value = serde_json::from_str(
+                    snapshot["row_json"].as_str().ok_or("original row bytes")?,
+                )
+                .map_err(|e| e.to_string())?;
+                if let Some(id) = row.get("intake_outbox_id").filter(|id| !id.is_null()) {
+                    original_ids.push(id.clone());
+                }
+            }
+            if original_ids.windows(2).any(|ids| ids[0] != ids[1]) {
+                return Err("contradictory original intake evidence".into());
+            }
+            let aliases = merged["native"]
+                .as_array_mut()
+                .ok_or("unreadable original native coverage")?;
+            for alias in document["native"].as_array().ok_or("native aliases")? {
+                if !aliases.contains(alias) {
+                    aliases.push(alias.clone());
+                }
+            }
+            let digests = json!(
+                merged["snapshots"]
+                    .as_object()
+                    .ok_or("original snapshots")?
+                    .keys()
+                    .collect::<Vec<_>>()
+            );
+            sqlx::query("UPDATE o_herdr_debt_effects SET snapshots=$2,provenance=$3 WHERE id=$1")
+                .bind(effect)
+                .bind(digests)
+                .bind(merged)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        tx.commit().await.map_err(|e| e.to_string())?;
+        Ok(inserted)
+    }
 }

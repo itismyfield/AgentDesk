@@ -1,6 +1,6 @@
 # Herdr execution retirement and retained body debt
 
-<!-- doc-path-refs: proposed tui_o/writer/herdr_body_debt.rs herdr_body_debt/replay.rs herdr_body_debt/receipts.rs -->
+<!-- doc-path-refs: proposed herdr_body_debt/receipts.rs -->
 
 Design audit on `13355ee75c74ef65b2c5564f0a95efb37f988d26`, containing main
 `ad04f6f3ecc33e86e7dc0968822ce2ce3f087e90`. This note and its model change no
@@ -717,3 +717,90 @@ changed owner/run is only the reason for refusal, never the no-effect evidence.
 A dropped/crashed acquisition has no such in-memory ticket and leaves pending;
 a DB failure that prevents proof commit also leaves pending. Attempt state is
 boxed so ordinary output futures do not carry the complete recovery reference.
+
+
+### C2b implementation boundary
+
+The rowless reader in `writer/herdr_body_debt.rs` opens C1's actual directory,
+`runtime/discord_herdr_body_debt/<provider>`, relative to the host runtime root.
+It validates the v1 filename's exact-byte SHA, provider/channel, original episode,
+known Herdr/TUI identity and typed original input fields. It neither loads nor
+recreates an active row. The manifest retains the exact encoded snapshot and
+raw row JSON, including unknown fields and missing historical input metadata.
+A real C1 archive/guarded-clear fixture checks this directory and byte contract;
+a separately constructed JSON fixture is not its only evidence.
+
+Compatible snapshots have the same original episode/input, sealed body plan and
+noncontradictory known intake delivery. They union immutable snapshot bytes and
+positive native aliases. Missing source/input-origin lists stay missing in their
+original snapshots; a later list does not relabel an earlier accepted input.
+Changed body plans, conflicting known deliveries, uncertain prior visibility,
+unknown policy, and unproved saved/native overlap remain retained.
+
+Native text equality or a new source is insufficient coverage proof. The reader
+requires an exact pinned source/range, an unambiguous native UnitKey/piece, and
+an existing O ledger Original artifact with the same original intake delivery,
+provider/channel and exact payload. It preserves that old artifact verbatim;
+it never seals the text with the current owner's Origin. A rewritten source
+whose unit belongs to another input therefore cannot adopt the old body even
+when its text matches. Unmanaged or historical inputs without this evidence
+keep their native overlap retained. Original admission evidence is not a Posted
+receipt; C2c must still reconcile the actual effect and historical PG evidence.
+
+Shared registration uses C2a's existing tables under the channel custody lock.
+The unique effect key is provider/channel/original episode/input/coverage;
+coverage is `body:v<identity>:s<split>:<piece>` using the existing identity and
+split versions. Plan SHA seals those versions, original synthetic saved-unit
+key, piece indices and exact payload bytes. Snapshot hashes and current owner,
+generation, run or source are not effect-key components. A compatible repeat
+adds evidence and returns zero new effects; it cannot reset a reserved or
+confirmed attempt. Changed payload/plan/bot/input or native coverage claimed by
+another episode is refused atomically.
+
+The shared provenance JSON is version 1, kind `c1_accepted_snapshot`, with
+`snapshots` mapping each exact SHA to bytes/row_json/evidence/recovery_notice and
+`native` retaining old UnitKey, piece index, payload/hash, old output_origin and
+source coordinate. C1's v1 files and C2a's schema remain unchanged. Neither
+registration nor a queue wake creates a run, grant, receipt, settled flag or GC
+right. The issuance and receipt harnesses remain cfg(test): they have no real
+caller in this slice.
+
+Recovered and Fresh hosts validate retired snapshots before the unchanged
+metadata guard. They register after the existing port wait proves the sender,
+and reread for every host actor start/resume. Boot adds a queue wake only for
+validated debt channels whose current output ownership is O; foreign and
+unrelated channels receive no additional debt wake. The existing queue admission
+still judges each wake. First-init fences and ordinary source guards are unchanged.
+
+C2b supplies the immutable plan/coverage prerequisite of CapIssue. CapRecovery,
+Archive/Detach and CapIdentity/CapUnknownPlan already describe its rowless and
+fail-closed states, so the 54 companion configs and their assumptions are
+unchanged. Runtime tests cover bytes, merge and original native coordinates,
+which the abstract permission model deliberately does not encode.
+
+C2b is not completed debt delivery. C2c must add pre-metadata uncertainty
+reconciliation, actual guarded capability issuance, drain/POST barriers,
+old-before-new, strict receipt/GC and lifecycle invalidation. In particular the
+ordinary actor is not given permission to POST a saved PieceWork by registration.
+Refused and permanent no-source Deferred visibility remains conditional on
+verified owner/store recovery and eventual exact-effect or conclusive no-effect
+evidence; unconditional body liveness is not claimed.
+
+
+C2b stores the full manifest once, on the effect for piece zero. Every effect's
+provenance has version 1, kind `c1_accepted_snapshot` and `manifest_coverage`.
+Only the manifest effect also contains `snapshots` (exact SHA to encoded bytes,
+row_json, evidence and recovery_notice) and `native` (original UnitKey/index,
+payload/hash, old Original artifact and source coordinate). Resolve a manifest
+reference using the same provider/channel/episode/input/plan SHA plus its coverage;
+a coverage string by itself is not an identity. Each effect retains the union
+of snapshot SHA references C2a's acquire validates. Registration commits the
+manifest and its references atomically under custody; no shared row is deleted.
+This avoids multiplying the full archived body by the number of split pieces.
+C2c must retain that manifest/alias evidence after local C1 snapshot GC.
+
+An effect's initial `ready` state is not proof of no historical POST. C2b's
+registration cannot issue a grant. Before issuing one, C2c must reconcile the
+original saved/native/Legacy visibility and pending attempts against exact effect
+or owning-attempt no-effect evidence; neither source arrival nor an offset of
+zero supplies that proof.

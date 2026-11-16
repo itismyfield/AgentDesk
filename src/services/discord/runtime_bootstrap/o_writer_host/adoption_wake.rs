@@ -19,6 +19,28 @@ pub(super) enum Held {
     Watched,
 }
 
+/// Retired rowless debts still wake this runtime's existing queue; custody is rechecked there.
+pub(super) fn boot(shared: &Arc<SharedData>, provider: &ProviderKind, shadow: ShadowProvider) {
+    let Some(root) = crate::config::runtime_root() else {
+        return;
+    };
+    let kind = match shadow {
+        ShadowProvider::Claude => crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        ShadowProvider::Codex => crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+    };
+    crate::services::tui_o::writer::herdr_body_debt::wake_channels(&root, shadow, |channel| {
+        if crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(channel, Some(kind))
+            == Ok(true)
+        {
+            crate::services::discord::queue_io::schedule_writer_ready_queue_kick(
+                Arc::clone(shared),
+                provider.clone(),
+                ChannelId::new(channel),
+            );
+        }
+    });
+}
+
 /// Judges `channel`'s kept row on its own task, through the gateway's client once it is cached.
 pub(super) fn spawn(
     shared: &Arc<SharedData>,

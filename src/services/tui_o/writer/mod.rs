@@ -11,6 +11,7 @@ pub(crate) mod codex_snapshot;
 pub mod confirm;
 mod deferred;
 pub mod deliver;
+pub mod herdr_body_debt;
 pub mod host;
 pub mod input_facts;
 pub(crate) mod input_notices;

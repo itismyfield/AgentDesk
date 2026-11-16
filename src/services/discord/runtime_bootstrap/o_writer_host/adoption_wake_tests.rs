@@ -341,3 +341,61 @@ async fn a_wake_whose_sends_keep_failing_ends_after_three_retries_and_keeps_the_
     })
     .await;
 }
+
+/// C1's real publisher and clear produce the rowless bytes the O boot reader consumes.
+#[tokio::test]
+async fn a_c1_archive_is_read_byte_for_byte_and_boot_wakes_only_its_local_channel() {
+    with_isolated_runtime_root(|| async move {
+        let provider = ProviderKind::Claude;
+        let channel = 9_765_131_u64;
+        let selected = test_override::force_channels(&[(channel, ClaudeTui), (channel+1, ClaudeTui)]);
+        let mut row = kept_row(channel);
+        row.born_generation = 1;
+        row.turn_nonce = Some("original-c1-row".into());
+        let mut wire = serde_json::to_value(&row).unwrap();
+        wire["host_locator"] = serde_json::json!({"host_kind":"herdr","host_session_id":"original-c1","pane":"%1"});
+        row = serde_json::from_value(wire).unwrap();
+        inflight::save_inflight_state(&row).unwrap();
+        row = inflight::load_inflight_state(&provider,channel).unwrap();
+        let evidence = serde_json::json!({"source":null,"execution_nonce":"original-host","outcome":{"kind":"unknown"}});
+        let archive = row.archive_restarted_herdr_body(&provider,2,evidence,"restart".into()).unwrap();
+        assert_eq!(row.clear_restarted_herdr_body(&provider,2,&archive),inflight::GuardedClearOutcome::Cleared);
+        assert!(inflight::load_inflight_state(&provider,channel).is_none());
+        let root = crate::config::runtime_root().unwrap();
+        let c1 = crate::services::discord::runtime_store::runtime_root().unwrap().join("discord_herdr_body_debt/claude");
+        let file = std::fs::read_dir(c1).unwrap().next().unwrap().unwrap().path();
+        let bytes = std::fs::read(&file).unwrap();
+        let plans = crate::services::tui_o::writer::herdr_body_debt::read(&root,ShadowProvider::Claude,channel,None).unwrap();
+        assert_eq!(plans.len(),1,"real C1 directory must reach the rowless reader");
+        let document = plans[0].registration(42).unwrap();
+        assert_eq!(document["snapshots"].as_object().unwrap().values().next().unwrap()["bytes"].as_str().unwrap().as_bytes(),bytes);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        // Both channels have real waiting input: only the one with debt gets the extra boot wake.
+        for queued_channel in [channel, channel+1] {
+            use crate::services::turn_orchestrator::{Intervention, InterventionMode, QueuePersistenceContext};
+            let message = serenity::MessageId::new(queued_channel+100);
+            let item = Intervention {
+                author_id: serenity::UserId::new(7), author_is_bot:false, message_id:message,
+                queued_generation:1,source_message_ids:vec![message],source_message_queued_generations:vec![],source_text_segments:vec![],
+                text:"next original input".into(),mode:InterventionMode::Soft,created_at:std::time::Instant::now(),
+                reply_context:None,has_reply_boundary:false,merge_consecutive:false,pending_uploads:vec![],
+            };
+            let persistence = QueuePersistenceContext::new(&provider,&shared.token_hash,None);
+            let queued = shared.mailbox(ChannelId::new(queued_channel)).enqueue(item,persistence).await;
+            assert!(queued.enqueued && queued.persistence_error.is_none());
+        }
+        let kicked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = Arc::clone(&kicked);
+        let hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(move |_,_,ch,_| {
+            let captured = captured.clone();
+            Box::pin(async move { if ch.get()==channel || ch.get()==channel+1 { captured.lock().unwrap().push(ch.get()); Some(Default::default()) } else { None } })
+        }));
+        super::super::spawn_execution(&shared,&provider,None);
+        tokio::time::timeout(Duration::from_secs(5),async {
+            while kicked.lock().unwrap().is_empty() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert_eq!(*kicked.lock().unwrap(),vec![channel]);
+        assert_eq!(std::fs::read(file).unwrap(),bytes,"boot/read do not rewrite C1");
+        drop(hook);drop(selected);
+    }).await;
+}

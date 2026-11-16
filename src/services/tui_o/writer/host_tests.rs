@@ -195,6 +195,19 @@ impl HostIo for TestIo {
         self.lease.writer_unavailable(channel);
     }
 
+    async fn retain_body_debt(
+        &self,
+        plan: &super::herdr_body_debt::Plan,
+        bot: u64,
+    ) -> Result<usize, String> {
+        plan.registration(bot)?;
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("body_debt", plan.channel()));
+        Ok(0)
+    }
+
     fn lease(&self) -> Arc<FakeLease> {
         self.calls.lock().unwrap().push(("lease", 0));
         // This handle and the harness's own are the two that outlive every writer.
@@ -1467,4 +1480,27 @@ async fn an_unregistered_member_starts_no_writer_and_rebinding_resumes_its_store
         abort(tasks);
         polls(2).await;
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rowless_body_debt_is_read_by_the_real_recovered_host() {
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let root = harness._runtime.path();
+    let row = super::herdr_body_debt::tests::row(CHANNEL);
+    super::herdr_body_debt::tests::seed(root, row, serde_json::json!({"source":null}));
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let tasks = start_host(&harness, &io, &ready);
+    polls(8).await;
+    assert!(
+        io.calls().contains(&("body_debt", CHANNEL)),
+        "the real recovered host read its retired rowless body"
+    );
+    assert!(
+        io.port.posts().is_empty(),
+        "plan registration is not a sender"
+    );
+    abort(tasks);
+    drop(selected);
 }

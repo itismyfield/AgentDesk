@@ -96,6 +96,17 @@ pub trait HostIo: Send + Sync + 'static {
     fn legacy_busy(&self, channel: u64) -> impl Future<Output = bool> + Send;
     /// Whether Legacy's watcher is emitting the channel's terminal delivery or its chrome now.
     fn relaying(&self, channel: u64) -> bool;
+    /// Retains a validated plan in the shared registry; this creates no delivery grant.
+    fn retain_body_debt(
+        &self,
+        plan: &super::herdr_body_debt::Plan,
+        bot: u64,
+    ) -> impl Future<Output = Result<usize, String>> + Send {
+        let channel = plan.channel();
+        std::future::ready(Err(format!(
+            "no body debt registry for channel {channel}, bot {bot}"
+        )))
+    }
     /// Called once a first activation committed the channel, before it is ready for intake.
     fn adopted(&self, _channel: u64, _provider: ShadowProvider) {}
     /// The writer can drain retained inputs now; called after publishing readiness.
@@ -731,6 +742,16 @@ async fn host_channel<I: HostIo>(
         }
         Err(error) => return hold(&alarms, channel, &error.detail),
     };
+    // Read retired snapshots independently of active rows, without weakening metadata admission.
+    let debt = match super::herdr_body_debt::read(
+        &runtime_root,
+        provider,
+        channel,
+        Some(store.ledger()),
+    ) {
+        Ok(debt) => debt,
+        Err(error) => return hold(&alarms, channel, &error),
+    };
     // Seeded before the port wait, so a recovered panel tick already knows O's newest post.
     let phase = boot.phase("wait_metadata");
     let metadata = fresh_input::wait_metadata(&store, &alarms, &stopping).await;
@@ -749,6 +770,13 @@ async fn host_channel<I: HostIo>(
         None => return,
     };
     phase.finish("ok");
+    for plan in &debt {
+        if let Some(Err(error)) =
+            unless_stopped(&stopping, io.retain_body_debt(plan, port.bot_id())).await
+        {
+            tracing::warn!(channel, %error, "herdr body debt retained without a delivery grant");
+        }
+    }
     let bindings = bindings.unwrap_or_else(|| io.bindings(channel, provider));
     let hosted = Hosted {
         io: &*io,
@@ -846,6 +874,29 @@ impl<I: HostIo> Hosted<'_, I> {
         attempt: u32,
         producer_absent: bool,
     ) -> Option<(StopCause, bool)> {
+        match super::herdr_body_debt::read(
+            self.runtime_root,
+            self.provider,
+            self.channel,
+            Some(store.ledger()),
+        ) {
+            Ok(plans) => {
+                for plan in &plans {
+                    let registered = unless_stopped(
+                        &self.stopping,
+                        self.io.retain_body_debt(plan, self.port.bot_id()),
+                    )
+                    .await?;
+                    if let Err(error) = registered {
+                        tracing::warn!(channel=self.channel, %error, "herdr body debt remains retained");
+                    }
+                }
+            }
+            Err(error) => {
+                hold(&self.alarms, self.channel, &error);
+                return None;
+            }
+        }
         let boot = self.boot.attempt(attempt);
         let (channel, gate) = (self.channel, self.gate);
         let (port, lease) = (Arc::clone(&self.port), self.io.lease());

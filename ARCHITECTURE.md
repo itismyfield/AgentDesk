@@ -4317,6 +4317,9 @@ src/
 │   │   │   │   ├── probe.rs
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
+│   │   │   ├── herdr_body_debt/
+│   │   │   │   ├── debt_tests.rs
+│   │   │   │   └── replay.rs
 │   │   │   ├── host/
 │   │   │   │   ├── activation_io.rs
 │   │   │   │   ├── first_init.rs
@@ -4419,6 +4422,7 @@ src/
 │   │   │   ├── fresh_obligation_tests.rs
 │   │   │   ├── fresh_resume_tests.rs
 │   │   │   ├── fresh_scope_negative_tests.rs
+│   │   │   ├── herdr_body_debt.rs
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
