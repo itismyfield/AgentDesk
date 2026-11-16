@@ -60,6 +60,12 @@ pub(crate) fn herdr_configured_for_tui_launch(channel_id: Option<u64>) -> bool {
     channel_id.is_some_and(configured)
 }
 
+/// Whether `channel` is the Codex canary and configured for Herdr: the one channel whose retired
+/// execution a blocked writer may bootstrap.
+pub(crate) fn herdr_canary(channel: u64) -> bool {
+    channel == crate::services::codex_tui::canary::CANARY_CHANNEL && configured(channel)
+}
+
 /// Read from the boot `session_hosts` section, never from the live config.
 fn configured(channel: u64) -> bool {
     crate::config::session_hosts::herdr_endpoint(channel).is_some()
@@ -75,12 +81,27 @@ pub(crate) fn o_writer_ready(channel: u64, kind: RuntimeHandoffKind) -> bool {
 fn o_ready_at(runtime_root: Option<&Path>, channel: u64, kind: RuntimeHandoffKind) -> bool {
     #[cfg(test)]
     READINESS_READS.with(|reads| reads.set(reads.get() + 1));
+    o_owns_seeded(runtime_root, channel, kind, || writer_accepts(channel))
+}
+
+/// O ownership and the binding checkpoint without the writer's acceptance, which a blocked writer
+/// gains only from the launch it waits for.
+pub(crate) fn o_bootstrap_base(channel: u64, kind: RuntimeHandoffKind) -> bool {
+    o_owns_seeded(runtime_root().as_deref(), channel, kind, || true)
+}
+
+fn o_owns_seeded(
+    runtime_root: Option<&Path>,
+    channel: u64,
+    kind: RuntimeHandoffKind,
+    accepts: impl FnOnce() -> bool,
+) -> bool {
     let owned = peek_o_owns_tui_output_for_channel(channel, Some(kind));
     let seeded = |root| {
         OStore::existing(root)
             .is_some_and(|store| matches!(store.peek_binding_checkpoint(channel), Ok(Some(_))))
     };
-    owned == Ok(true) && writer_accepts(channel) && runtime_root.is_some_and(seeded)
+    owned == Ok(true) && accepts() && runtime_root.is_some_and(seeded)
 }
 
 fn writer_accepts(channel: u64) -> bool {

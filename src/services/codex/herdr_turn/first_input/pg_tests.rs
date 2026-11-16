@@ -123,6 +123,7 @@ fn run_case(case: Case) {
         goals: None,
         compact_token_limit: None,
         cancel: None,
+        bootstrap: false,
     };
     std::fs::write(
         crate::services::tmux_common::session_temp_path(&turn.owner.logical_key, "host_kind"),
@@ -175,6 +176,7 @@ fn run_case(case: Case) {
                     goals: None,
                     compact_token_limit: None,
                     cancel: None,
+                    bootstrap: false,
                 };
                 let _launching =
                     crate::services::herdr_launch::clear_epoch::Launching::enter(&turn.owner)

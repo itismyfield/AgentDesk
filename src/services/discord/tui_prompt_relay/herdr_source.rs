@@ -16,8 +16,8 @@ use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
 };
 use crate::db::dispatched_sessions::hosted_execution::{
-    HostedCasOutcome, HostedLookup, HostedLookupKey, HostedOwner, HostedRecord, bind_pg,
-    load_hosted_execution_pg,
+    HostedCasOutcome, HostedLookup, HostedLookupKey, HostedOwner, HostedRecord, HostedState,
+    bind_pg, load_hosted_execution_pg,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrExecutionMatch;
@@ -224,10 +224,10 @@ pub(in crate::services::discord) async fn attach_launched_codex_herdr_source(
         HostReconcile::Herdr(HerdrExecutionMatch::Match) => Some(true),
         _ => None,
     };
-    let Some(already) = bound else {
+    if bound.is_none() {
         withhold_herdr_execution(logical, Some(nonce));
         return HerdrSourceAttach::Refused(verdict);
-    };
+    }
     let live = with_tmux_source_authority(logical, |authority| {
         runtime_binding_for_tmux_session_under_source_authority(authority)
     });
@@ -238,16 +238,47 @@ pub(in crate::services::discord) async fn attach_launched_codex_herdr_source(
         return HerdrSourceAttach::NotPublished;
     }
     admit_herdr_execution(logical, nonce);
-    let bound = already
-        || match load(pool, owner).await {
-            HostedLookup::Found(observed) => {
-                bind_pg(pool, &observed, owner, nonce).await == Ok(HostedCasOutcome::Written)
-            }
-            _ => false,
-        };
+    // A retire or another launch since the reconcile read must not leave this execution admitted.
+    if !bound_after_admit(pool, owner, nonce).await {
+        withhold_herdr_execution(logical, Some(nonce));
+        return HerdrSourceAttach::NotPublished;
+    }
     HerdrSourceAttach::Published {
-        bound,
+        bound: true,
         agent_agrees: agent_agrees(agent, baseline.as_ref()),
+    }
+}
+
+/// Whether the row now holds `owner`'s execution `nonce` Bound, binding it from Pending; a stale
+/// bind counts only when another attach bound this same execution first.
+async fn bound_after_admit(pool: &PgPool, owner: &HostedOwner, nonce: &str) -> bool {
+    let current = |lookup: HostedLookup| {
+        let HostedLookup::Found(observed) = lookup else {
+            return None;
+        };
+        let state = match &observed.record {
+            HostedRecord::Known(record)
+                if record.owner == *owner && record.execution_nonce == nonce =>
+            {
+                record.state
+            }
+            _ => return None,
+        };
+        Some((state, observed))
+    };
+    match current(load(pool, owner).await) {
+        Some((HostedState::Bound, _)) => true,
+        Some((HostedState::Pending, observed)) => {
+            match bind_pg(pool, &observed, owner, nonce).await {
+                Ok(HostedCasOutcome::Written) => true,
+                Ok(HostedCasOutcome::Stale) => matches!(
+                    current(load(pool, owner).await),
+                    Some((HostedState::Bound, _))
+                ),
+                Err(_) => false,
+            }
+        }
+        _ => false,
     }
 }
 

@@ -1340,6 +1340,7 @@ fn dispatch(switch: Option<bool>) -> Result<(), String> {
     let host = TurnHost::Herdr(Box::new(HerdrTurnPlan {
         endpoint,
         row: None,
+        bootstrap: false,
     }));
     let provider = ProviderKind::Claude;
     let turn = StreamingTurn {

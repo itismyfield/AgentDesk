@@ -82,6 +82,8 @@ pub(crate) struct CodexHerdrTurn<'a> {
     pub goals: Option<bool>,
     pub compact_token_limit: Option<u64>,
     pub cancel: Option<Arc<CancelToken>>,
+    /// The retired canary's bootstrap launch; its old pane must still be vacant under the fence.
+    pub bootstrap: bool,
 }
 
 /// What a turn takes from its caller: the launch host and the source attach.
@@ -226,6 +228,11 @@ fn fresh_launch(
     let home = codex_herdr_home(&overlay).ok_or("codex herdr launch: no Codex home")?;
     let options = launch_options(turn);
     let prepare = |prepared: &PreparedIncarnation| {
+        if turn.bootstrap {
+            crate::services::tui_prompt_dedupe::clear_relaunch::herdr_bootstrap::vacant_recheck(
+                logical,
+            )?;
+        }
         let command = prepare_codex_herdr_launch(prepared, &launchable, &options, &overlay, &home)?;
         // Kept for this execution before its Pending row, so each later prompt compares with it.
         let nonce = &prepared.context.execution_nonce;
