@@ -1,0 +1,25 @@
+---
+title: "Codex ready, busy, end and /stop judged from the rollout, the hooks and the process"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the CodexPendingEventuallyDelivered bug
+    lg1: Repeats forever, so CodexPendingEventuallyDelivered breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: Booting: wait for this launch's Codex process (tmux launch 1, 0 turn(s) started)
+  s1: Idle: the rollout proves the end (tmux launch 1, 0 turn(s) started)
+  s2: Ready proven: read again before the first key (tmux launch 1, 0 turn(s) started)
+  s3: Turn running: the rollout reads open (tmux launch 1, 1 turn(s) started)
+  s4: Idle, every end signal lost: held with a reason (tmux launch 1, 1 turn(s) started)
+  [*] --> s0
+  s0 --> s1: Codex becomes the pane's running process
+  s1 --> s2: the next input proves ready
+  s2 --> s3: the input is written, or its proof no longer holds
+  s3 --> s4: the turn ends in the TUI
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 repeats

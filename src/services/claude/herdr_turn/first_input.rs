@@ -148,23 +148,27 @@ fn write(
             crate::services::claude_tui::owner_input::record_preparation_watch(Box::new(
                 move || {
                     use crate::services::claude_tui::busy_inject::Screen;
-                    let ready = if clearing {
-                        crate::services::claude_tui::readiness::clear_wakeable(
-                            &watched_session,
-                            &epoch,
-                            &clear_path,
-                        )
-                    } else {
-                        crate::services::claude_tui::readiness::observe(
+                    // The same restart-aware proof the composer admits, with its screen check.
+                    let restart = (!clearing).then(|| {
+                        crate::services::claude_tui::readiness::observe_restored(
                             &watched_session,
                             Some(&watched_path),
                         )
-                        .is_some()
+                        .map(|proof| proof.restart())
+                    });
+                    let ready = match restart {
+                        None => crate::services::claude_tui::readiness::clear_wakeable(
+                            &watched_session,
+                            &epoch,
+                            &clear_path,
+                        ),
+                        Some(proof) => proof.is_some(),
                     };
                     if ready
                         && pane.capture_ansi(-80).as_deref().is_some_and(|capture|
                             crate::services::claude_tui::readiness::empty_draft(capture)
-                            && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(capture)) {
+                            && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(capture)
+                            && (restart != Some(Some(true)) || composer::restored_screen_idle(capture))) {
                         Screen::Ready
                     } else { Screen::Unknown }
                 },

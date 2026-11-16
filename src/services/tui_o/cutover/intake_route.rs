@@ -26,6 +26,14 @@ pub(crate) fn route(provider: &str, channel: u64) -> IntakeRoute {
     route_parsed(provider, || Some(channel))
 }
 
+/// `route` for a claimed input row: unlike a readiness read, it supersedes a retired child store.
+pub(crate) fn route_claimed(provider: &str, channel: u64) -> IntakeRoute {
+    match super::claimed_child_input(channel) {
+        Ok(()) => route(provider, channel),
+        Err(detail) => IntakeRoute::Hold(detail),
+    }
+}
+
 /// For a textual destination; an unparseable one is held once any channel is O-owned.
 pub(crate) fn route_text(provider: &str, channel: &str) -> IntakeRoute {
     route_parsed(provider, || channel.parse().ok())
@@ -71,6 +79,7 @@ fn held_with(
         held.then_some(channel)
     };
     let mut channels: std::collections::BTreeSet<_> = owned.iter().filter_map(held).collect();
+    channels.extend(super::held_children());
     super::test_override::with_channels(|snapshot| {
         if let Some(snapshot) = snapshot {
             channels.extend(
@@ -100,6 +109,12 @@ fn route_parsed_with(
     judge: impl FnOnce(&str, u64, RuntimeHandoffKind) -> IntakeRoute,
 ) -> IntakeRoute {
     match channel() {
+        Some(channel) if super::child_held(channel) => {
+            IntakeRoute::Hold(format!("O thread {channel} has no resolved parent policy"))
+        }
+        Some(channel) if super::child_dormant(channel) => IntakeRoute::Hold(format!(
+            "O thread {channel} store is retired until its next input is placed"
+        )),
         Some(channel) => match super::owned_kind(channel) {
             Some(kind) => judge(provider, channel, kind),
             None if super::test_override::with_channels(|snapshot| {

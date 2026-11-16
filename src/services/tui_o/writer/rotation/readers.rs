@@ -569,14 +569,8 @@ impl<B: BindingEvents> Sources<B> {
     }
 
     fn archived_source(&self, source: &SourceId) -> bool {
-        if self.provider != ShadowProvider::Codex
-            || !source.path.extension().is_some_and(|e| e == "jsonl")
-        {
-            return false;
-        }
-        let mut archive = source.path.as_os_str().to_os_string();
-        archive.push(".zst");
-        std::fs::symlink_metadata(&archive).is_ok_and(|m| m.is_file())
+        self.provider == ShadowProvider::Codex
+            && crate::services::codex_tui::rollout_index::archived_rollout(&source.path)
     }
 
     /// The retained FD proves the cursor reached the actual end, including any partial line.

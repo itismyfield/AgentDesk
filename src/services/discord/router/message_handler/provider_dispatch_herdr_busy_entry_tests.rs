@@ -606,6 +606,9 @@ fn a_managed_herdr_busy_input_observes_early_once_without_a_late_read_pg() {
 #[path = "provider_dispatch_herdr_busy_late_tests.rs"]
 mod late_tests;
 
+#[path = "provider_dispatch_herdr_busy_running_tests.rs"]
+mod running_tests;
+
 #[test]
 fn an_early_new_herdr_execution_cannot_borrow_its_old_global_pin_pg() {
     let fx = Fixture::with_root(

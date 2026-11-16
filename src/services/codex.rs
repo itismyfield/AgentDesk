@@ -1240,7 +1240,7 @@ fn cleanup_existing_codex_tui_session(
     );
     record_tmux_exit_reason(tmux_session_name, reason_text);
     if !pane_already_stopped {
-        crate::services::platform::tmux::kill_session(tmux_session_name, reason_text);
+        crate::services::session_host::TmuxHost.kill(tmux_session_name, reason_text);
     }
 }
 
@@ -1392,10 +1392,8 @@ fn resolve_codex_tui_tail_result(
                 None,
             );
             record_tmux_exit_reason(tmux_session_name, &format!("rollout tail failed: {error}"));
-            crate::services::platform::tmux::kill_session(
-                tmux_session_name,
-                "codex rollout tail failed",
-            );
+            crate::services::session_host::TmuxHost
+                .kill(tmux_session_name, "codex rollout tail failed");
             Err(error)
         }
     }
@@ -1730,63 +1728,14 @@ fn codex_pipe_prompt_buffer_text(prompt: &str) -> String {
 
 #[cfg(unix)]
 fn send_codex_pipe_prompt_to_fifo(input_fifo_path: &str, prompt: &str) -> Result<(), String> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::os::unix::io::AsRawFd;
-
-    // The reused wrapper runs with `--input-mode fifo` and reads followups from
-    // a named FIFO via BufReader::lines(). A FIFO has no terminal line
-    // discipline, so writing the newline-terminated base64 sentinel line(s)
-    // delivers each line unambiguously to the wrapper's decode loop — unlike the
-    // old PTY paste path, which stranded the prompt at "Ready for input"
-    // because the line discipline never submitted the sentinel (issue #3001).
     let encoded = codex_pipe_prompt_buffer_text(prompt);
-
-    // Open the write side with O_NONBLOCK. The reuse gate observed the FIFO path,
-    // but the wrapper (and thus the FIFO reader) can exit between that check and
-    // this write while the FIFO file lingers — wrapper error paths preserve
-    // session files. A *blocking* O_WRONLY open on a reader-less FIFO would hang
-    // forever and never reach the stale-session recreation path below. With
-    // O_NONBLOCK the open instead fails fast with ENXIO, which we surface as a
-    // recoverable error so the caller can recreate/resume the session (#3001).
-    let fifo = match std::fs::OpenOptions::new()
-        .write(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(input_fifo_path)
-    {
-        Ok(fifo) => fifo,
-        Err(e) => {
-            // ENXIO == FIFO has no reader attached (wrapper gone). Normalize the
-            // message so should_recreate_session_after_followup_fifo_error()
-            // classifies it as recoverable on every platform (macOS reports
-            // "Device not configured", Linux "No such device or address").
-            if e.raw_os_error() == Some(libc::ENXIO) {
-                return Err(format!(
-                    "Failed to open input FIFO {input_fifo_path}: No such device (no reader attached: {e})"
-                ));
-            }
-            return Err(format!("Failed to open input FIFO {input_fifo_path}: {e}"));
-        }
-    };
-
-    // A reader is attached. Clear O_NONBLOCK so the subsequent write blocks
-    // normally if the prompt exceeds the kernel pipe buffer (chunked base64 can
-    // exceed 64KiB), instead of returning EAGAIN and dropping bytes.
-    let fd = fifo.as_raw_fd();
-    // SAFETY: fd is a valid, owned descriptor for the lifetime of `fifo`.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags >= 0 {
-        unsafe {
-            let _ = libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
-        }
-    }
-
-    let mut fifo = fifo;
-    fifo.write_all(encoded.as_bytes())
-        .map_err(|e| format!("Failed to write to input FIFO {input_fifo_path}: {e}"))?;
-    fifo.flush()
-        .map_err(|e| format!("Failed to flush input FIFO {input_fifo_path}: {e}"))?;
-    Ok(())
+    crate::services::session_host::TmuxHost
+        .submit_wrapper_frame(
+            input_fifo_path,
+            crate::services::session_host::WrapperFrame::Encoded(&encoded),
+            true,
+        )
+        .into_wrapper()
 }
 
 fn normalize_codex_mcp_segment(value: &str) -> Option<String> {
