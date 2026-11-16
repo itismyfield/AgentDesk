@@ -366,6 +366,15 @@ pub(in crate::services::discord) async fn hand_busy(
     let session = row.tmux_session_name.clone().ok_or_else(unobserved)?;
     let key = row.session_key.as_deref();
     let host = crate::services::turn_host::for_turn(pool.as_ref(), &provider, channel, key).await;
+    let origin = front_origin(&mailbox, &front).await?;
+    let observed = owned_busy::running(
+        runtime.as_ref(),
+        &mailbox,
+        (&provider, origin),
+        (channel, &session, &host),
+        &front,
+    )
+    .await?;
     // Claude's prelaunch row has no transcript until its observer hands it back. Its live pane
     // already has the binding that the idle observer used before submitting the first input.
     let binding = (provider == ProviderKind::Claude
@@ -386,13 +395,11 @@ pub(in crate::services::discord) async fn hand_busy(
         .or(row.session_id.as_deref());
     let live = output.map(|path| (path, native));
     let at = (&host, session.as_str(), live);
-    let kind = (
-        provider.as_str(),
-        front_origin(&mailbox, &front).await?,
-        true,
-    );
-    let owner =
-        Registration::observed(mailbox.clone(), kind, at, &front.1, None).map_err(|error| {
+    let kind = (provider.as_str(), origin, true);
+    let owner = observed
+        .map(Ok)
+        .unwrap_or_else(|| Registration::observed(mailbox.clone(), kind, at, &front.1, None))
+        .map_err(|error| {
             if effect::surely_unsent(&error) {
                 error
             } else {

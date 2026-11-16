@@ -184,6 +184,16 @@ input-single-path/CodexStopAfterLateNoHook.cfg	CodexReadiness	CodexStopKeyOnOpen
 input-single-path/CodexStopAfterNarrow.cfg	CodexReadiness	-	-
 input-single-path/CodexStopBeforeWide.cfg	CodexReadiness	-	-
 input-single-path/CodexStopScreenNarrow.cfg	CodexReadiness	CodexStopNoFalseIdle	-
+input-single-path/HerdrBusyActiveSourceForeignChannelFixed.cfg	HerdrBusyActiveSource	-	-
+input-single-path/HerdrBusyActiveSourceForeignSourceFixed.cfg	HerdrBusyActiveSource	-	-
+input-single-path/HerdrBusyActiveSourceKeepOldSession.cfg	HerdrBusyActiveSource	-	HealthyActiveBusyDelivered
+input-single-path/HerdrBusyActiveSourceMissingBefore.cfg	HerdrBusyActiveSource	-	HealthyActiveBusyDelivered
+input-single-path/HerdrBusyActiveSourceMissingFixed.cfg	HerdrBusyActiveSource	-	-
+input-single-path/HerdrBusyActiveSourceNoBindingCheck.cfg	HerdrBusyActiveSource	NoForeignSourceKey	-
+input-single-path/HerdrBusyActiveSourceOldBefore.cfg	HerdrBusyActiveSource	NoForeignSourceKey	-
+input-single-path/HerdrBusyActiveSourceOldFixed.cfg	HerdrBusyActiveSource	-	-
+input-single-path/HerdrBusyActiveSourceUnknownBusy.cfg	HerdrBusyActiveSource	NoKeyWithoutVerifiedSource	UnknownActiveHeld
+input-single-path/HerdrBusyActiveSourceUnknownFixed.cfg	HerdrBusyActiveSource	-	-
 input-single-path/HerdrBusyInputAwaitedClearBefore.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyInputAwaitedClearBusy.cfg	HerdrBusyInput	VerifiedClearNeverBusy	VerifiedClearEventuallyDelegates
 input-single-path/HerdrBusyInputAwaitedClearFixed.cfg	HerdrBusyInput	-	-
