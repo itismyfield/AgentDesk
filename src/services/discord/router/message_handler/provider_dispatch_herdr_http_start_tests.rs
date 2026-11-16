@@ -1,7 +1,6 @@
 //! External HTTP admission over the existing bound Herdr execution and real O writer.
 use super::*;
 use crate::services::discord::health::HealthRegistry;
-use crate::services::tui_o::writer::DiscordPort;
 use axum::{
     Router,
     body::{Body, to_bytes},
