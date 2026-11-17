@@ -719,7 +719,7 @@ proof explicitly; no code may infer or fabricate the witness from run metadata.
 ### C2a implementation boundary
 
 C2a implements the strict original/debt artifact union in `owner_record/output.rs`
-and the shared tables in `migrations/postgres/0191_herdr_body_debt_recovery.sql`.
+and the shared tables in `migrations/postgres/0195_herdr_body_debt_recovery.sql`.
 Existing original artifact JSON, the original admission JOIN, and managed
 unstamped denial stay unchanged. The recovery branch requires the same custody
 lock plus a nonserialized, one-use live attachment. A deserialized token cannot
