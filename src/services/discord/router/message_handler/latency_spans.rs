@@ -49,6 +49,7 @@ impl IntakeLatencySpans {
     /// claim is confirmed (`started == true`).
     #[must_use]
     pub(super) fn turn_claimed() -> Self {
+        crate::logging::intake_timing::mark(crate::logging::intake_timing::Stage::Claim);
         Self {
             accepted_at: Instant::now(),
             placeholder_at: None,
@@ -64,11 +65,13 @@ impl IntakeLatencySpans {
 
     /// Mark prompt-prep completion (the existing `:1859` measurement point).
     pub(super) fn mark_prep_done(&mut self) {
+        crate::logging::intake_timing::mark(crate::logging::intake_timing::Stage::Prep);
         self.prep_done_at = Some(Instant::now());
     }
 
     /// Mark the provider-input handoff (right before `spawn_turn_bridge`).
     pub(super) fn mark_input_written(&mut self) {
+        crate::logging::intake_timing::mark(crate::logging::intake_timing::Stage::Handoff);
         self.input_written_at = Some(Instant::now());
     }
 

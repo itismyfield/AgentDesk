@@ -11,8 +11,9 @@ struct PromptManifestPgDatabase {
 }
 
 impl PromptManifestPgDatabase {
-    async fn create() -> Option<Self> {
-        let base = crate::db::postgres::postgres_test_database_url_base()?;
+    async fn create() -> Self {
+        let base = crate::db::postgres::postgres_test_database_url_base()
+            .expect("POSTGRES_TEST_DATABASE_URL_BASE required for prompt manifest PG tests"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
         let lifecycle = crate::db::postgres::lock_test_lifecycle();
         let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
             .ok()
@@ -27,12 +28,12 @@ impl PromptManifestPgDatabase {
         crate::db::postgres::create_test_database(&admin_url, &database_name, "prompt manifest pg")
             .await
             .expect("create prompt manifest postgres test db");
-        Some(Self {
+        Self {
             _lifecycle: lifecycle,
             admin_url,
             database_name,
             database_url,
-        })
+        }
     }
 
     async fn migrate(&self) -> sqlx::PgPool {
@@ -138,10 +139,7 @@ fn prompt_manifest_totals_exclude_disabled_layers() {
 
 #[tokio::test]
 async fn prompt_manifest_save_fetch_round_trip_pg() {
-    let Some(test_db) = PromptManifestPgDatabase::create().await else {
-        eprintln!("skipping prompt_manifest_save_fetch_round_trip_pg: postgres unavailable");
-        return;
-    };
+    let test_db = PromptManifestPgDatabase::create().await;
     let pool = test_db.migrate().await;
 
     let manifest = PromptManifestBuilder::new("turn-round-trip", "1499610614904131594")
@@ -208,12 +206,7 @@ async fn prompt_manifest_save_fetch_round_trip_pg() {
 
 #[tokio::test]
 async fn manifest_storage_stats_counts_utf8_bytes_not_chars_pg() {
-    let Some(test_db) = PromptManifestPgDatabase::create().await else {
-        eprintln!(
-            "skipping manifest_storage_stats_counts_utf8_bytes_not_chars_pg: postgres unavailable"
-        );
-        return;
-    };
+    let test_db = PromptManifestPgDatabase::create().await;
     let pool = test_db.migrate().await;
 
     let system_text = "한글🙂";
@@ -378,12 +371,7 @@ fn prompt_manifest_layer_truncation_handles_utf8_boundary() {
 #[tokio::test]
 async fn prompt_manifest_save_applies_write_time_cap_via_global_pg() {
     use sqlx::Row;
-    let Some(test_db) = PromptManifestPgDatabase::create().await else {
-        eprintln!(
-            "skipping prompt_manifest_save_applies_write_time_cap_via_global_pg: postgres unavailable"
-        );
-        return;
-    };
+    let test_db = PromptManifestPgDatabase::create().await;
     let pool = test_db.migrate().await;
 
     // Install a tight global cap so the next save trips it.
@@ -441,12 +429,7 @@ async fn prompt_manifest_save_applies_write_time_cap_via_global_pg() {
 #[tokio::test]
 async fn prompt_manifest_apply_retention_trims_old_full_content_pg() {
     use sqlx::Row;
-    let Some(test_db) = PromptManifestPgDatabase::create().await else {
-        eprintln!(
-            "skipping prompt_manifest_apply_retention_trims_old_full_content_pg: postgres unavailable"
-        );
-        return;
-    };
+    let test_db = PromptManifestPgDatabase::create().await;
     let pool = test_db.migrate().await;
 
     // Seed a manifest with full content, then back-date it past the horizon.

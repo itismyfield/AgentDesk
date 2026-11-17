@@ -116,6 +116,7 @@ mod dispatch_terminal_sync_pg_tests {
     use crate::db::auto_queue::runs::acquire_run_advisory_xact_lock_on_pg_tx;
     use crate::db::auto_queue::runs::{RunCompletionBlockedReason, RunCompletionOutcome};
     use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::test_support::wait::poll_within;
     use chrono::{DateTime, Utc};
     use sqlx::{Connection, PgConnection, PgPool, Row};
 
@@ -286,76 +287,60 @@ mod dispatch_terminal_sync_pg_tests {
         conn
     }
 
-    async fn wait_for_run_advisory_waiter(conn: &mut PgConnection) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            // The observer connection holds an open transaction (it is the
-            // advisory-token holder), and PostgreSQL freezes backend-status
-            // views such as pg_stat_activity at their first in-transaction
-            // access. Without clearing that snapshot each iteration, a first
-            // poll that lands before the spawned task blocks makes every
-            // later poll return the same stale "no waiter" answer until the
-            // deadline panics (reproduced 1-in-10 locally).
-            sqlx::query("SELECT pg_stat_clear_snapshot()")
-                .execute(&mut *conn)
-                .await
-                .expect("clear backend-status snapshot");
-            let waiting = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (
-                     SELECT 1
-                     FROM pg_stat_activity
-                     WHERE datname = current_database()
-                       AND wait_event_type = 'Lock'
-                       AND query LIKE '%pg_advisory_xact_lock%aq_run:%'
-                 )",
-            )
-            .fetch_one(&mut *conn)
+    async fn run_advisory_waiter_sample(conn: &mut PgConnection) -> Result<(), String> {
+        // PostgreSQL freezes backend-status views inside this holder transaction.
+        // Clear the snapshot so every sample sees live waiter state.
+        sqlx::query("SELECT pg_stat_clear_snapshot()")
+            .execute(&mut *conn)
             .await
-            .expect("inspect run-token wait");
-            if waiting {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "transaction did not wait for the run token"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            .expect("clear backend-status snapshot");
+        let waiting = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_stat_activity
+                 WHERE datname = current_database()
+                   AND wait_event_type = 'Lock'
+                   AND query LIKE '%pg_advisory_xact_lock%aq_run:%'
+             )",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .expect("inspect run-token wait");
+        if waiting {
+            Ok(())
+        } else {
+            Err("transaction did not wait for the run token".into())
         }
     }
 
-    async fn wait_for_blocked_slot_update(conn: &mut PgConnection, query_fragment: &str) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            // Same per-transaction backend-status snapshot hazard as
-            // wait_for_run_advisory_waiter: clear it so each poll observes
-            // live waiter state instead of the first poll's frozen view.
-            sqlx::query("SELECT pg_stat_clear_snapshot()")
-                .execute(&mut *conn)
-                .await
-                .expect("clear backend-status snapshot");
-            let blocked = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (
-                     SELECT 1
-                     FROM pg_stat_activity
-                     WHERE datname = current_database()
-                       AND wait_event_type = 'Lock'
-                       AND state = 'active'
-                       AND query LIKE '%UPDATE auto_queue_slots%'
-                       AND query LIKE $1
-                 )",
-            )
-            .bind(format!("%{query_fragment}%"))
-            .fetch_one(&mut *conn)
+    async fn blocked_slot_update_sample(
+        conn: &mut PgConnection,
+        query_fragment: &str,
+    ) -> Result<(), String> {
+        // Clear the holder transaction's snapshot so each sample sees live waiter state.
+        sqlx::query("SELECT pg_stat_clear_snapshot()")
+            .execute(&mut *conn)
             .await
-            .expect("inspect blocked slot update");
-            if blocked {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "allocator did not block on expected slot update"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            .expect("clear backend-status snapshot");
+        let blocked = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_stat_activity
+                 WHERE datname = current_database()
+                   AND wait_event_type = 'Lock'
+                   AND state = 'active'
+                   AND query LIKE '%UPDATE auto_queue_slots%'
+                   AND query LIKE $1
+             )",
+        )
+        .bind(format!("%{query_fragment}%"))
+        .fetch_one(&mut *conn)
+        .await
+        .expect("inspect blocked slot update");
+        if blocked {
+            Ok(())
+        } else {
+            Err("allocator did not block on expected slot update".into())
         }
     }
 
@@ -720,7 +705,13 @@ mod dispatch_terminal_sync_pg_tests {
         let complete_pool = pool.clone();
         let completion =
             tokio::spawn(async move { finalize_run_if_ready_pg(&complete_pool, "run-1").await });
-        wait_for_run_advisory_waiter(&mut attach_conn).await;
+        poll_within(
+            async || run_advisory_waiter_sample(&mut attach_conn).await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
 
         sqlx::query("COMMIT")
             .execute(&mut attach_conn)
@@ -770,7 +761,13 @@ mod dispatch_terminal_sync_pg_tests {
             .await
         });
 
-        wait_for_run_advisory_waiter(&mut lock_conn).await;
+        poll_within(
+            async || run_advisory_waiter_sample(&mut lock_conn).await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
 
         sqlx::query(
             "SELECT 1
@@ -1123,7 +1120,13 @@ mod dispatch_terminal_sync_pg_tests {
         let allocation_task = tokio::spawn(async move {
             allocate_slot_for_group_agent_pg(&pool_for_allocation, "run-1", 1, "agent-1").await
         });
-        wait_for_blocked_slot_update(&mut seed_conn, "SET assigned_thread_group").await;
+        poll_within(
+            async || blocked_slot_update_sample(&mut seed_conn, "SET assigned_thread_group").await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         seed_active_slot_dispatch_on_conn(&mut seed_conn, "dispatch-rebind-race-slot-0", 0).await;
         sqlx::query("COMMIT")
             .execute(&mut lock_conn)
@@ -1361,7 +1364,13 @@ mod dispatch_terminal_sync_pg_tests {
         let allocation_task = tokio::spawn(async move {
             allocate_slot_for_group_agent_pg(&pool_for_allocation, "run-1", 1, "agent-1").await
         });
-        wait_for_blocked_slot_update(&mut seed_conn, "SET assigned_run_id").await;
+        poll_within(
+            async || blocked_slot_update_sample(&mut seed_conn, "SET assigned_run_id").await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         seed_active_slot_dispatch_on_conn(&mut seed_conn, "dispatch-free-claim-race-slot-0", 0)
             .await;
         sqlx::query("COMMIT")

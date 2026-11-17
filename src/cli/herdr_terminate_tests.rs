@@ -220,7 +220,24 @@ fn act_cli_terminate_refuses_remote_api_url() {
     }
     let refused = cli().unwrap_err();
     assert!(refused.contains("NotLoopback"), "{refused}");
-    thread::sleep(Duration::from_millis(200));
+    assert!(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(crate::test_support::wait::poll_within(
+                async || {
+                    let count = mock.connections.load(Ordering::SeqCst);
+                    (count != 0)
+                        .then_some(())
+                        .ok_or_else(|| format!("connection count remains {count}"))
+                },
+                Duration::from_millis(200),
+                "unexpected CLI connection"
+            ))
+            .is_err(),
+        "CLI made an unexpected connection during the observation window"
+    );
     assert_eq!(mock.connections.load(Ordering::SeqCst), 0);
 }
 
@@ -306,7 +323,24 @@ fn act_cli_terminate_never_follows_redirect() {
         let failed = cli().unwrap_err();
         assert!(failed.contains(&format!("Redirect({status})")), "{failed}");
     }
-    thread::sleep(Duration::from_millis(500));
+    assert!(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(crate::test_support::wait::poll_within(
+                async || {
+                    let count = target.connections.load(Ordering::SeqCst);
+                    (count != 0)
+                        .then_some(())
+                        .ok_or_else(|| format!("connection count remains {count}"))
+                },
+                Duration::from_millis(500),
+                "unexpected CLI connection"
+            ))
+            .is_err(),
+        "CLI made an unexpected connection during the observation window"
+    );
     assert_eq!(target.connections.load(Ordering::SeqCst), 0);
     assert_eq!(first.take().len(), 10);
 }
@@ -330,6 +364,23 @@ fn act_cli_terminate_stalled_server_times_out_once() {
         matches!(result, Err(LocalPostError::Transport(_))),
         "{result:?}"
     );
-    thread::sleep(Duration::from_millis(500));
+    assert!(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(crate::test_support::wait::poll_within(
+                async || {
+                    let count = stalled.connections.load(Ordering::SeqCst);
+                    (count != 1)
+                        .then_some(())
+                        .ok_or_else(|| format!("connection count remains {count}"))
+                },
+                Duration::from_millis(500),
+                "unexpected CLI connection"
+            ))
+            .is_err(),
+        "CLI made an unexpected connection during the observation window"
+    );
     assert_eq!(stalled.connections.load(Ordering::SeqCst), 1);
 }

@@ -94,6 +94,25 @@ thread_local! {
     pub(crate) static CENSUS_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// A V2 history shares the kept parse of every reader; a V1 store over 256 KiB is not kept.
+fn read_snapshot(path: &Path) -> Result<std::sync::Arc<compat::Parsed>, String> {
+    let missing = || compat::Parsed::build(br#"{"entries":[]}"#).map(std::sync::Arc::new);
+    let read = match compat::v2_prefix(path) {
+        Ok(true) => match stamped::read(path, compat::Parsed::build) {
+            Ok(parsed) => return parsed,
+            Err(e) => Err(e),
+        },
+        Ok(false) => std::fs::read(path),
+        Err(e) => Err(e),
+    };
+    match read {
+        Ok(bytes) if bytes.len() <= 256 * 1024 => compat::reuse(path, bytes, compat::Parsed::build),
+        Ok(bytes) => compat::Parsed::build(&bytes).map(std::sync::Arc::new),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing(),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn same_scope(a: &NoticeOrigin, b: &NoticeOrigin) -> bool {
     a.record.source == b.record.source
         && a.logical_session == b.logical_session
@@ -152,16 +171,7 @@ impl Batch {
             let snapshot = snapshot.get_or_insert_with(|| {
                 #[cfg(test)]
                 SNAPSHOT_READS.with(|c| c.set(c.get() + 1));
-                path().and_then(|p| match std::fs::read(&p) {
-                    Ok(bytes) if bytes.len() <= 256 * 1024 => {
-                        compat::reuse(&p, bytes, compat::parse)
-                    }
-                    Ok(bytes) => compat::parse(&bytes).map(std::sync::Arc::new),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        Ok(std::sync::Arc::new(serde_json::json!({"entries":[]})))
-                    }
-                    Err(e) => Err(e.to_string()),
-                })
+                path().and_then(|p| read_snapshot(&p))
             });
             let (through, native_stamp, rows) = native
                 .entry(origin.record.source.clone())
@@ -291,11 +301,12 @@ impl Batch {
 type Blocked = Vec<(String, &'static str)>;
 
 fn candidates(
-    value: &serde_json::Value,
+    parsed: &compat::Parsed,
     origin: &NoticeOrigin,
     channel: u64,
     executions: &mut Contexts,
 ) -> Result<(Vec<Entry>, Blocked), String> {
+    let value = parsed.value.as_ref();
     let source = &origin.record.source;
     let same = |e: &Entry| {
         e.provider == "claude"
@@ -315,20 +326,12 @@ fn candidates(
     }
     let mut entries = Vec::new();
     let mut blocked = Vec::new();
-    let bound = value["live"]
+    value["live"].as_array().ok_or("history live missing")?;
+    value["passive"]
         .as_array()
-        .ok_or("history live missing")?
-        .iter()
-        .map(|v| (v, &v["registration"]))
-        .chain(
-            value["passive"]
-                .as_array()
-                .ok_or("history passive missing")?
-                .iter()
-                .filter(|v| v["state"] != "abandoned")
-                .map(|v| (&v["entry"], &v["registration"])),
-        );
-    for (raw, registration) in bound {
+        .ok_or("history passive missing")?;
+    let mut decoded = parsed.bound_entries().iter();
+    for (raw, registration) in compat::bound_rows(value) {
         if raw.is_null() {
             match relevant(registration, origin, channel, executions) {
                 Relevance::Related => {
@@ -341,11 +344,12 @@ fn candidates(
             }
             continue;
         }
-        let mut entry: Entry = serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
+        let decoded = decoded.next().ok_or("history entries changed")?;
+        let entry = decoded.as_ref().map_err(Clone::clone)?;
         if entry.provider != "claude" || entry.session != origin.logical_session {
             continue;
         }
-        if !same(&entry) {
+        if !same(entry) {
             blocked.push((entry.class_hash.clone(), "registration_source_mismatch"));
             continue;
         }
@@ -363,7 +367,8 @@ fn candidates(
             }
         }
         // Migrated V1 evidence has no execution nonce or native-session field to invent.
-        if registration.is_null() || historical_match(registration, &entry, origin)? {
+        if registration.is_null() || historical_match(registration, entry, origin)? {
+            let mut entry = entry.clone();
             // Pair by full registration identity; a nonce can recur in another key or namespace.
             entry.id = if registration.is_null() {
                 format!("legacy:{}", entry.id)
@@ -372,7 +377,7 @@ fn candidates(
             };
             entries.push(entry);
         } else {
-            blocked.push((entry.class_hash, "registration_source_mismatch"));
+            blocked.push((entry.class_hash.clone(), "registration_source_mismatch"));
         }
     }
     let planned = match value.get("planned") {

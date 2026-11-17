@@ -339,7 +339,13 @@ async fn completion_after_writer_waits<T>(
 ) -> (RunCompletionOutcome, T, bool) {
     let (completion, resume) = paused_completion(pool, point).await;
     let writer = start_writer(pool.clone());
-    let waited = super::run_admission_pg_tests::wait_for_lock_waiter(pool, &writer).await;
+    let waited = crate::test_support::wait::poll_within(
+        async || super::run_admission_pg_tests::lock_waiter_sample(pool, &writer).await,
+        std::time::Duration::from_secs(5),
+        "completion writer lock waiter",
+    )
+    .await
+    .expect("writer neither waited nor finished");
     resume.notify_one();
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), completion)
         .await

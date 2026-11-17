@@ -1,4 +1,5 @@
-//! Claude's turn observation, preserving a completed reply through known idle housekeeping.
+//! Claude's standard transcript walk, read past `Unknown` session markers only to a running tool;
+//! a busy writer's walk also reaches a prompt or tool result still owed a reply.
 use super::*;
 
 /// A completed reply survives a non-conversation tail; old terminals across a session marker
@@ -101,6 +102,37 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
                 )
         }
         _ => false,
+    }
+}
+
+/// For a writer that adds input to a running turn: past the markers Claude writes after each
+/// prompt, a typed prompt or tool result is also still running. Never a new Idle.
+pub(super) fn observe_running(path: &Path) -> TuiTurnState {
+    let state = walk(path, claude_envelope_turn_state, claude_partial_turn_state);
+    if state != TuiTurnState::Unknown {
+        return state;
+    }
+    match walk(path, past_marker_running, past_marker_partial) {
+        state if state.is_busy() => state,
+        _ => TuiTurnState::Unknown,
+    }
+}
+
+/// `past_marker_envelope`, which also keeps a user record unless it is a local command, meta or
+/// compaction summary, none of which starts a model reply.
+fn past_marker_running(json: &Value) -> Option<TuiTurnState> {
+    let reply_owed = || {
+        let flag = |key| json.get(key).and_then(Value::as_bool) == Some(true);
+        let text = json.pointer("/message/content").and_then(Value::as_str);
+        !flag("isMeta")
+            && !flag("isCompactSummary")
+            && !text.is_some_and(|text| {
+                text.starts_with("<local-command-") || text.starts_with("<command-")
+            })
+    };
+    match claude_envelope_turn_state(json)? {
+        TuiTurnState::UserSubmitted if reply_owed() => Some(TuiTurnState::UserSubmitted),
+        _ => past_marker_envelope(json),
     }
 }
 

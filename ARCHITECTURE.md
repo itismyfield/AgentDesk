@@ -279,6 +279,7 @@ src/
 │   │   ├── advisory_lock.rs
 │   │   ├── advisory_lock_tests.rs
 │   │   ├── agent_sync.rs
+│   │   ├── intake_timing_pg_tests.rs
 │   │   ├── pool_return.rs
 │   │   ├── pool_return_pg_tests.rs
 │   │   ├── pooled_advisory_lock_pg_tests.rs
@@ -563,7 +564,9 @@ src/
 │   └── transition_core.rs
 ├── logging/
 │   ├── auto_queue.rs
-│   └── auto_queue_tests.rs
+│   ├── auto_queue_tests.rs
+│   ├── intake_timing.rs
+│   └── intake_timing_tests.rs
 ├── runtime_layout/
 │   ├── config_merge.rs
 │   ├── legacy_migration.rs
@@ -2571,7 +2574,8 @@ src/
 │   │   │   │   │   │   ├── thread_child_tests.rs
 │   │   │   │   │   │   └── unbound_gateway_tests.rs
 │   │   │   │   │   └── owner_execution.rs
-│   │   │   │   └── owner_port.rs
+│   │   │   │   ├── owner_port.rs
+│   │   │   │   └── thread_lookup_tests.rs
 │   │   │   ├── owner_execution/
 │   │   │   │   ├── tests/
 │   │   │   │   │   └── mod.rs
@@ -3029,6 +3033,7 @@ src/
 │   │   │   ├── idle_tail_state.rs
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
+│   │   │   ├── input_notice_memo.rs
 │   │   │   ├── launch_script.rs
 │   │   │   ├── local_model_queue_wake_e2e_tests.rs
 │   │   │   ├── observed_prompt_decision.rs
@@ -4177,11 +4182,13 @@ src/
 │   │   │   │   ├── checked_tests.rs
 │   │   │   │   ├── compat.rs
 │   │   │   │   ├── compat_tests.rs
+│   │   │   │   ├── input_notice_memo_tests.rs
 │   │   │   │   ├── native_row.rs
 │   │   │   │   ├── notice_owner.rs
 │   │   │   │   ├── rollback_reader_tests.rs
 │   │   │   │   ├── screen.rs
 │   │   │   │   ├── screen_tests.rs
+│   │   │   │   ├── stamped.rs
 │   │   │   │   ├── v2.rs
 │   │   │   │   ├── v2_compaction_tests.rs
 │   │   │   │   └── v2_tests.rs
@@ -4227,6 +4234,7 @@ src/
 │   │   │   ├── intake_route/
 │   │   │   │   └── input.rs
 │   │   │   ├── channel_gate.rs
+│   │   │   ├── channel_lookup_tests.rs
 │   │   │   ├── child_funnel_tests.rs
 │   │   │   ├── intake_route.rs
 │   │   │   └── thread_child_record_tests.rs

@@ -83,7 +83,13 @@ where
     E: Send + 'static,
     M: Fn(String) -> E + Copy + Send + 'static,
 {
-    match std::thread::spawn(move || build_runtime(map_runtime_error)?.block_on(future)).join() {
+    let timing = crate::logging::intake_timing::carry();
+    match std::thread::spawn(move || {
+        let _timing = timing.entered();
+        build_runtime(map_runtime_error)?.block_on(future)
+    })
+    .join()
+    {
         Ok(result) => result,
         Err(payload) => Err(map_runtime_error(format!(
             "tokio bridge thread panicked: {}",
@@ -181,7 +187,9 @@ where
     B: FnOnce(PgPool) -> F + Send + 'static,
 {
     let source_pool = pool.clone();
+    let timing = crate::logging::intake_timing::carry();
     match std::thread::spawn(move || {
+        let _timing = timing.entered();
         let runtime = build_runtime(map_runtime_error)?;
         let operation = async move {
             let bridge_pool = build_bridge_pg_pool(&source_pool, map_runtime_error).await?;
