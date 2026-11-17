@@ -1,0 +1,32 @@
+---
+title: "Readiness wait after a daemon restart: the transcript moves once, then stops"
+---
+stateDiagram-v2
+  s0: Daemon restarted, evidence lost (turn running)
+  s1: Owner input at the front (turn running)
+  s2: Daemon restarted, evidence lost (pane idle)
+  s3: Owner input at the front (pane idle)
+  s4: Readiness wait (turn running)
+  s5: Held with no wake (turn running)
+  s6: Readiness wait (pane idle)
+  s7: Readiness wait (turn running, transcript moved)
+  s8: Readiness wait (pane idle, transcript moved)
+  s9: Delivered once
+  s10: Held, proof arrived
+  [*] --> s0
+  s0 --> s1: owner takes the input
+  s0 --> s2: turn or fence ends
+  s1 --> s3: turn or fence ends
+  s1 --> s4: wait starts, Stamp kept
+  s2 --> s3: owner takes the input
+  s3 --> s6: wait starts, Stamp kept
+  s4 --> s5: budget ends
+  s4 --> s7: pane appends metadata
+  s4 --> s8: turn or fence ends
+  s5 --> s10: turn or fence ends
+  s6 --> s9: current evidence: keys sent
+  s6 --> s8: pane appends metadata
+  s7 --> s5: budget ends
+  s7 --> s8: turn or fence ends
+  s8 --> s9: current evidence: keys sent
+  s10 --> s3: held watch reads a proof
