@@ -101,24 +101,29 @@ class ReactionWatch:
     # A scenario that raised mid-steps never reaches stop(); the next scenario ends its reads.
     _active: list[ReactionWatch] = []
 
-    def __init__(self, targets, fetch, channel_id, store, *, clock=time.monotonic):
+    def __init__(self, targets, fetch, channel_id, store, *, markers=None, clock=time.monotonic):
         self.targets, self.fetch, self.channel_id, self.store, self.clock = targets, fetch, channel_id, store, clock
+        self.markers = markers or {}
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
 
     @classmethod
-    def for_scenario(cls, scenario, client, channel_id, record):
+    def for_scenario(cls, scenario, client, channel_id, record, *, run_id=""):
         while cls._active:
             cls._active.pop()._stop.set()
         targets: dict[int, set[str]] = {}
+        markers: dict[int, str] = {}
         for spec in scenario.get("assertions") or []:
             for op in REACTION_OPS:
                 if isinstance(spec, dict) and op in spec:
                     settle = set(spec[op].get("final", [])) if op == "reaction_history" else {INJECTED}
                     targets.setdefault(spec[op]["send"], set()).update(settle)
+                    if op == "busy_injection_within":
+                        markers[spec[op]["send"]] = spec[op]["before_marker"].replace("{run_id}", run_id)
         if not targets:
             return None
-        watch = cls(targets, client.fetch_messages, channel_id, record.setdefault("reaction_watch", {}))
+        watch = cls(targets, client.fetch_messages, channel_id, record.setdefault("reaction_watch", {}),
+                    markers=markers)
         cls._active.append(watch)
         return watch
 
@@ -128,6 +133,8 @@ class ReactionWatch:
             return
         row = self.store[str(len(sends))] = {"message_id": sends[-1].get("message_id"),
                                              "acked_at": self.clock(), "polls": []}
+        if len(sends) in self.markers:
+            row["turn_end_marker"] = self.markers[len(sends)]
         if row["message_id"]:
             thread = threading.Thread(target=self._observe, args=(row, self.targets[len(sends)]), daemon=True)
             self._threads.append(thread)
@@ -152,13 +159,18 @@ class ReactionWatch:
 
     def poll(self, row) -> dict[str, Any]:
         mid, start = str(row["message_id"]), row["acked_at"]
+        marker = row.get("turn_end_marker")
         begun = self.clock()
         try:
-            rows = self.fetch(self.channel_id, after_id=str(int(mid) - 1), limit=1)
+            rows = self.fetch(self.channel_id, after_id=str(int(mid) - 1), limit=100 if marker else 1)
             match = [m for m in rows if str(m.get("id")) == mid]
             if len(match) != 1:
                 raise ValueError("input message absent from the Discord read")
             reactions: dict[str, Any] = {"reactions": reaction_names(match[0])}
+            if marker:
+                # One read gives both marks; a full page cannot prove the marker absent.
+                seen = any(marker in (assertions.relay_body(m) or "") for m in rows)
+                reactions["turn_end"] = True if seen else (None if len(rows) >= 100 else False)
         except Exception as error:  # Every read failure is kept as evidence, never as an empty set.
             reactions = {"error": str(error)[:200]}
         return {"t0": round(begun - start, 3), "t": round(self.clock() - start, 3), **reactions}
@@ -212,8 +224,11 @@ def judge_reactions(polls, *, final, forbid=(), max_gap_s=DEFAULT_MAX_GAP_S):
     return history
 
 
-def judge_injection(polls, *, max_seconds, turn_end_at):
-    """➕ (busy injection) showed within `max_seconds` of the send and before the turn-end marker."""
+def judge_injection(polls, *, max_seconds):
+    """➕ (busy injection) showed within `max_seconds` of the send and before the turn-end marker.
+
+    Order is judged inside single Discord reads: ➕ with the marker absent passes, the marker
+    with ➕ absent fails, anything else is unevaluable."""
     history = _changes(polls)
     first = next((i for i, p in enumerate(polls) if INJECTED in (p.get("reactions") or ())), None)
     if first is None:
@@ -225,19 +240,55 @@ def judge_injection(polls, *, max_seconds, turn_end_at):
         raise assertions.AssertionError(f"injection later than {max_seconds}s (absent at +{absent_until}s); history={history}")
     if shown_by > max_seconds:
         raise Unevaluable(f"injection between +{absent_until}s and +{shown_by}s straddles {max_seconds}s; history={history}")
-    if turn_end_at is None:
-        raise Unevaluable("turn-end marker never observed; injection before turn end unproven")
-    if absent_until >= turn_end_at:
-        raise assertions.AssertionError(f"injected after the turn-end marker (+{turn_end_at:.1f}s); history={history}")
-    if shown_by >= turn_end_at:
-        raise Unevaluable(f"injection and turn end (+{turn_end_at:.1f}s) fall in one read gap; history={history}")
-    return {"injected_between_s": [absent_until, shown_by], "turn_end_s": round(turn_end_at, 3), **history}
+    ended_first = next((p for p in polls[:first] if p.get("turn_end") is True), None)
+    if ended_first is not None:
+        raise assertions.AssertionError(f"injected after the turn-end marker (seen at +{ended_first['t']}s without "
+                                        f"{INJECTED}); history={history}")
+    before_end = next((p for p in polls[first:] if INJECTED in (p.get("reactions") or ()) and p.get("turn_end") is False),
+                      None)
+    if before_end is None:
+        raise Unevaluable(f"no read showed {INJECTED} with the turn-end marker still absent; history={history}")
+    return {"injected_between_s": [absent_until, shown_by], "turn_end_absent_at_s": before_end["t0"], **history}
+
+
+# tmux has-session stderr that means a clean "no such session"; any other failure is unknown.
+TMUX_ABSENT = ("can't find session", "no server running")
+# `agentdesk herdr status` pane words (cli/herdr.rs pane_text) that prove no running provider.
+HERDR_PANE_GONE = frozenset({"missing", "provider_exited", "root_replaced", "root_shell_unrecorded"})
 
 
 def surface_context(*, base_url, provider, agent, channel_id, parent_channel_id, thread, herdr_status_bin):
     suffix = f"-t{channel_id}" if thread else ""
     return {"base_url": base_url, "channel_id": str(channel_id), "parent_channel_id": str(parent_channel_id),
-            "tmux_session": f"AgentDesk-{provider}-{agent}{suffix}", "herdr_status_bin": herdr_status_bin}
+            "provider": provider, "tmux_session": f"AgentDesk-{provider}-{agent}{suffix}",
+            "herdr_status_bin": herdr_status_bin}
+
+
+def _tmux_present(proc):
+    if proc.returncode == 0:
+        return True
+    stderr = proc.stderr or ""
+    if proc.returncode == 1 and (any(text in stderr for text in TMUX_ABSENT)
+                                 or ("error connecting to" in stderr and "No such file or directory" in stderr)):
+        return False
+    raise ValueError(f"tmux has-session failed rc={proc.returncode}: {stderr.strip()[:200]}")
+
+
+def _herdr_present(rows, context):
+    if any(not isinstance(r, dict) or r.get("record") == "unreadable" or "channel" not in r for r in rows):
+        raise ValueError("herdr status has an unreadable row")
+    target = [r for r in rows if str(r["channel"]) == context["channel_id"] and r.get("state") != "retired"]
+    if not target:
+        return False
+    if len(target) > 1:
+        raise ValueError(f"herdr status has {len(target)} rows for the target")
+    row = target[0]
+    if (row.get("provider") == context["provider"] and row.get("state") == "bound"
+            and row.get("pane") == "provider_running" and row.get("launch_evidence") == "recorded"):
+        return True
+    if row.get("pane") in HERDR_PANE_GONE:
+        return False
+    raise ValueError(f"herdr target row unverified: state={row.get('state')} pane={row.get('pane')}")
 
 
 def probe_hosts(context, read_api, run=None) -> dict[str, Any]:
@@ -250,15 +301,14 @@ def probe_hosts(context, read_api, run=None) -> dict[str, Any]:
         raise Unevaluable(f"health detail unreadable: HTTP {status}")
     try:
         tmux = run(["tmux", "has-session", "-t", context["tmux_session"]], capture_output=True, text=True, timeout=10)
-        hosts = {"tmux": tmux.returncode == 0, "herdr": False}
+        hosts = {"tmux": _tmux_present(tmux), "herdr": False}
         if detail.get("herdr") is not None:
             proc = run([context["herdr_status_bin"], "herdr", "status"], capture_output=True, text=True,
                        check=True, timeout=30)
             rows = json.loads(proc.stdout).get("executions")
             if not isinstance(rows, list):
                 raise ValueError("herdr status has no executions list")
-            hosts["herdr"] = any(isinstance(r, dict) and str(r.get("channel")) == context["channel_id"]
-                                 and r.get("state") != "retired" for r in rows)
+            hosts["herdr"] = _herdr_present(rows, context)
         configured = "herdr" if herdr.hosts_channel(detail, context["parent_channel_id"]) else "tmux"
     except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as error:
         raise Unevaluable(f"session host probe failed: {error}") from error
@@ -278,14 +328,27 @@ def before_steps(scenario, record, make_context, read_api, run=None) -> None:
             record["session_probe_before"] = {"error": str(error)}
 
 
+def after_answer(record, read_api, run=None) -> None:
+    """Probe hosts once, right after the first awaited answer, before later steps can start a session."""
+    if "session_probe_before" not in record or "session_probe_after_first" in record:
+        return
+    try:
+        record["session_probe_after_first"] = probe_hosts(record["surface_context"], read_api, run)
+    except Unevaluable as error:
+        record["session_probe_after_first"] = {"error": str(error)}
+
+
 def judge_session_started(before, after, first_send):
-    if not first_send or first_send.get("send_state") != "acknowledged":
-        raise Unevaluable("first prompt was not acknowledged by Discord")
+    if (not first_send or first_send.get("step") != "send_discord_prompt"
+            or first_send.get("send_state") != "acknowledged" or not first_send.get("message_id")):
+        raise Unevaluable(f"first input was not an acknowledged Discord message: {first_send}")
     if before is None or "error" in before:
         raise Unevaluable(f"no usable host probe before the first prompt: {before}")
     if any(before["hosts"].values()):
         return {"status": "not_applicable", "passed": None, "details": {"before": before},
                 "reason": "thread already had a session; rerun with a fresh thread or --hard-reset-session-each"}
+    if after is None or "error" in after:
+        raise Unevaluable(f"no usable host probe after the first answer: {after}")
     started = [host for host, present in after["hosts"].items() if present]
     if not started:
         raise assertions.AssertionError(f"first thread message started no session: before={before} after={after}")
@@ -311,15 +374,14 @@ def run(spec, *, record, run_id, read_api: Callable, run_cmd=None) -> dict[str, 
             details = judge_reactions(polls, final=params["final"], forbid=params.get("forbid", []),
                                       max_gap_s=params.get("max_gap_s", DEFAULT_MAX_GAP_S))
         else:
-            marker = params["before_marker"].replace("{run_id}", run_id or "")
-            seen = [at for body, at in (record.get("_body_observations") or {}).items() if marker in body]
-            details = judge_injection(polls, max_seconds=params.get("max_seconds", DEFAULT_INJECTION_MAX_S),
-                                      turn_end_at=min(seen) - row["acked_at"] if seen else None)
+            if row.get("turn_end_marker") != params["before_marker"].replace("{run_id}", run_id or ""):
+                raise Unevaluable(f"send {params['send']} reads did not look for the turn-end marker")
+            details = judge_injection(polls, max_seconds=params.get("max_seconds", DEFAULT_INJECTION_MAX_S))
         return {"status": "pass", "passed": True, "details": details}
     context = record.get("surface_context")
     if context is None:
         raise Unevaluable(f"{op} has no session host context for this runner")
-    probe = probe_hosts(context, read_api, run_cmd)
     if op == "session_host":
-        return judge_session_host(probe, params["expect"])
-    return judge_session_started(record.get("session_probe_before"), probe, (record.get("prompt_sends") or [None])[0])
+        return judge_session_host(probe_hosts(context, read_api, run_cmd), params["expect"])
+    return judge_session_started(record.get("session_probe_before"), record.get("session_probe_after_first"),
+                                 (record.get("prompt_sends") or [None])[0])
