@@ -191,7 +191,6 @@ pub(in crate::services) mod registry {
                 .is_some()
         }
 
-        #[cfg(test)]
         pub(in crate::services) fn get(
             &self,
             channel_id: &ChannelId,
