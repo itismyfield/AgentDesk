@@ -186,6 +186,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "restart_incarnations",
     "prompt_sends",
     "midturn_kill",
+    "reaction_watch",
 )
 
 
@@ -1022,7 +1023,8 @@ def _merge_record_into_result(
     result["assertions"].extend(record.get("assertions") or [])
     for key in REPORT_RECORD_KEYS:
         if key in record:
-            result[key] = record[key]
+            # Reaction reads may still append on a failed run; the report keeps this moment's copy.
+            result[key] = copy.deepcopy(record[key]) if key == "reaction_watch" else record[key]
 
 
 def resolve_output_dir(arg: str | None, cell: str) -> Path:
@@ -3941,7 +3943,7 @@ def run_one_cell(
             first_send_done = True
 
     last_turn_identity: dict[str, str] | None = None
-    reaction_watch = surface_assertions.ReactionWatch.for_scenario(scenario, client, channel_id, record)
+    reaction_watch = surface_assertions.ReactionWatch.for_scenario(scenario, client, channel_id, record, run_id=run_id)
     surface_assertions.before_steps(scenario, record, lambda: surface_assertions.surface_context(
         base_url=client.base_url, provider=cell_provider(cell), agent=cell_default_agent(cell), channel_id=channel_id,
         parent_channel_id=args.channel_id, thread=bool(scenario.get("requires_thread_channel")),
@@ -4151,6 +4153,7 @@ def run_one_cell(
                     f"diagnostic={_payload_summary(diagnostic, max_chars=1400)}",
                     record=record,
                 )
+            surface_assertions.after_answer(record, _read_api_json)
             if scenario.get("durable_delivery_probe"):
                 response_id = str(found.get("id") or "")
                 record["durable_record_probe"] = durable_delivery.poll_records(

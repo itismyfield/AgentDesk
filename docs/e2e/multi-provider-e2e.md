@@ -642,19 +642,28 @@ read carries exactly one lifecycle mark from `final` and no read showed a
 `forbid` mark; `forbid` absence also needs reads no further than `max_gap_s`
 (default 2 s) apart until the final mark first showed. `busy_injection_within`
 passes when `➕` showed within `max_seconds` (default 30 s; healthy injection
-takes about 1 s, the Herdr hold regression about 240 s) and before the first
-relay body containing `before_marker`. A failed last read, a missing
-acknowledgement, a sparse read window or a bound that falls inside one read gap
-is unevaluable, never a pass.
-`thread_session_started: true` probes hosts before the first send and after the
-steps: no session before and one after passes; a session already present is
+takes about 1 s, the Herdr hold regression about 240 s) and before the turn
+ended: for that send each read takes `limit=100` and also records whether a
+relay body containing `before_marker` is present, so a read showing `➕` with
+the marker absent passes and a read showing the marker before any `➕` fails.
+A failed last read, a missing acknowledgement, a sparse read window, a full
+page that cannot prove the marker absent or a bound that falls inside one read
+gap is unevaluable, never a pass. The final JSON report keeps every read
+(`reaction_watch`: message id, ack, each read's `t0`/`t`, reactions or error).
+`thread_session_started: true` needs the first input to be an acknowledged
+`send_discord_prompt` (the direct turn API does not exercise Discord intake);
+it probes hosts before that send and right after the first awaited answer: no
+session before and one after passes; a session already present is
 `not_applicable` (use a fresh thread or `--hard-reset-session-each`).
 `session_host: {expect: configured|tmux|herdr}` requires the session on exactly
 the expected host; `configured` means Herdr when `/api/health/detail` lists the
 channel (for a thread, its parent) under `herdr.configured_channels`. Hosts are
-read from `tmux has-session -t AgentDesk-<provider>-<agent>[-t<thread>]` and the
-target's non-retired row in `agentdesk herdr status`; a failed probe is
-unevaluable. Only the single-cell runner wires these; on the Herdr runner they
+read from `tmux has-session -t AgentDesk-<provider>-<agent>[-t<thread>]` (absent
+only on a clean "can't find session"/"no server running") and the target's
+non-retired row in `agentdesk herdr status` (present only when bound, same
+provider, `pane: provider_running` and `launch_evidence: recorded`; absent only
+with no row or a pane reported missing/exited/replaced). Any other tmux error,
+an unreadable or duplicate row, or an unverified pane is unevaluable. Only the single-cell runner wires these; on the Herdr runner they
 are unevaluable. `E-63` judges input A and `E-14` its thread session with them.
 
 ## Orchestrator (`adk-e2e-orchestrator`)

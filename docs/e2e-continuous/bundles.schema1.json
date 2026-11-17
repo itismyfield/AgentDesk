@@ -501,7 +501,7 @@
     },
     "E-14": {
       "path": "tests/e2e/tui_relay/scenarios/E-14-claude-tui-thread-stale-reattach.yaml",
-      "sha256": "b02bdc9bf79f72adc48cba93b14a3f5d462fa4b1ec69d1fd958a1bee8351be06",
+      "sha256": "942c24b85d9dd0312839077883a9a73f7bdf361e36ff38faf64b666a31098cff",
       "coverage_class": "live",
       "cells": [
         "claude-tui"

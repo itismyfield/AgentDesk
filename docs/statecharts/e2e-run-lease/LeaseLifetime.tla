@@ -98,7 +98,8 @@ Finish(r) ==
 ParentCrash(r) ==
     /\ CrashEnabled /\ parentFd[r] /\ parentFd' = [parentFd EXCEPT ![r] = FALSE]
     /\ phase' = [phase EXCEPT ![r] = IF phase[r] = "Held" THEN "Released" ELSE @]
-    /\ owner' = IF owner = r /\ ((~childFd[r] /\ ~helperFd[r]) \/ Mut = "parent_unlock")
+    /\ owner' = IF owner = r /\ Mut # "crash_no_reclaim"
+                    /\ ((~childFd[r] /\ ~helperFd[r]) \/ Mut = "parent_unlock")
                  THEN None ELSE owner
     /\ UNCHANGED <<childFd, helperFd, seenFree, aged, pending, net,
                    netOwner, ack, twin, badLateSend, foreignCleanup>>
@@ -106,7 +107,8 @@ ChildCrash(r) ==
     /\ CrashEnabled /\ phase[r] \in {"Running", "Prepared", "Draining", "PausedUncertain"}
     /\ phase' = [phase EXCEPT ![r] = "Released"]
     /\ childFd' = [childFd EXCEPT ![r] = FALSE]
-    /\ owner' = IF owner = r /\ ~parentFd[r] /\ ~helperFd[r] THEN None ELSE owner
+    /\ owner' = IF owner = r /\ Mut # "crash_no_reclaim" /\ ~parentFd[r] /\ ~helperFd[r]
+                 THEN None ELSE owner
     /\ twin' = IF twin = r THEN None ELSE twin
     /\ UNCHANGED <<parentFd, helperFd, seenFree, aged, pending, net,
                    netOwner, ack, badLateSend, foreignCleanup>>
@@ -145,8 +147,12 @@ UncertainSendJournaled == net \in {"sent", "accepted"} => pending = netOwner
 NoNewWriterDuringUncertainty == \A r \in Active: pending # None => pending = r
 NoSendAfterRelease == ~badLateSend
 NoForeignCleanup == ~foreignCleanup
+\* The kernel frees the lock when the holder's last FD closes, crash included.
+NoOrphanOwner == \A r \in Runs: owner = r => Holder(r)
 NextRequestProgress == \A r \in Runs:
     (<>[](Clean /\ (\A q \in Runs: ~parentFd[q] /\ ~childFd[q])))
     => <>(phase[r] # "Pending")
 NextRequestStarts == \A r \in Runs: <>(phase[r] = "Running")
+\* A held lease is eventually given up: the run ends and every FD it holds closes.
+HeldEventuallyEnds == \A r \in Runs: (owner = r) ~> (owner # r)
 =============================================================================
