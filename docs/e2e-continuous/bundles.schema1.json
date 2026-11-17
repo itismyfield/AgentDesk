@@ -501,7 +501,7 @@
     },
     "E-14": {
       "path": "tests/e2e/tui_relay/scenarios/E-14-claude-tui-thread-stale-reattach.yaml",
-      "sha256": "8fda307bf9e8cb05cfbb917d2430a370545a15dbeae4bc33cf05e8375cbfe21b",
+      "sha256": "b02bdc9bf79f72adc48cba93b14a3f5d462fa4b1ec69d1fd958a1bee8351be06",
       "coverage_class": "live",
       "cells": [
         "claude-tui"
@@ -820,7 +820,7 @@
     },
     "E-63": {
       "path": "tests/e2e/tui_relay/scenarios/E-63-input-order-across-restart.yaml",
-      "sha256": "02ad3a40f29d2f13a48a4f1fbbd06055e428a5de48cb569e7b61835e994423cc",
+      "sha256": "2d981110f277904f6912611a9ebccb5602c096be9884684b18e5c6b6ddafd2c2",
       "coverage_class": "live",
       "cells": [
         "claude-tui"

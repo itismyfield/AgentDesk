@@ -22,12 +22,12 @@ OPTIONS = {op: ASSERTION_OPTIONS[op] for op in REACTION_OPS + HOST_OPS}
 # Marks the reconciler owns (turn_view_reconciler.rs TURN_VIEW, QUEUE_EXIT and INJECTION sets).
 LIFECYCLE = frozenset("📬📥🔄⏳✅⚠🛑🚫⌛⏏➕❓")
 INJECTED = "➕"
-# #8113 saw the 📬 transient for about 1 s, so reads stay dense until the expected mark shows.
+# A busy-input 📬 transient lasted about 1 s in production, so reads stay dense until the expected mark shows.
 DENSE_INTERVAL_S = 0.5
 SLOW_INTERVAL_S = 5.0
 MAX_OBSERVE_S = 1800.0
 DEFAULT_MAX_GAP_S = 2.0
-# Healthy busy injection lands in about 1 s (#8113); the #8114 hold lasted about 240 s.
+# Healthy busy injection lands in about 1 s; the Herdr hold regression kept input about 240 s.
 DEFAULT_INJECTION_MAX_S = 30.0
 
 
@@ -233,7 +233,8 @@ def surface_context(*, base_url, provider, agent, channel_id, parent_channel_id,
             "tmux_session": f"AgentDesk-{provider}-{agent}{suffix}", "herdr_status_bin": herdr_status_bin}
 
 
-def probe_hosts(context, read_api, run=subprocess.run) -> dict[str, Any]:
+def probe_hosts(context, read_api, run=None) -> dict[str, Any]:
+    run = run or subprocess.run
     try:
         status, detail = read_api(context["base_url"], "/api/health/detail")
     except Exception as error:
@@ -251,17 +252,18 @@ def probe_hosts(context, read_api, run=subprocess.run) -> dict[str, Any]:
                 raise ValueError("herdr status has no executions list")
             hosts["herdr"] = any(isinstance(r, dict) and str(r.get("channel")) == context["channel_id"]
                                  and r.get("state") != "retired" for r in rows)
+        configured = "herdr" if herdr.hosts_channel(detail, context["parent_channel_id"]) else "tmux"
     except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as error:
         raise Unevaluable(f"session host probe failed: {error}") from error
-    configured = "herdr" if herdr.hosts_channel(detail, context["parent_channel_id"]) else "tmux"
     return {"configured": configured, "hosts": hosts}
 
 
-def before_steps(scenario, record, context, read_api, run=subprocess.run) -> None:
+def before_steps(scenario, record, make_context, read_api, run=None) -> None:
+    """Scenarios without host checks return before any context, probe or record write."""
     specs = [spec for spec in scenario.get("assertions") or [] if isinstance(spec, dict)]
     if not any(op in spec for spec in specs for op in HOST_OPS):
         return
-    record["surface_context"] = context
+    record["surface_context"] = context = make_context()
     if any("thread_session_started" in spec for spec in specs):
         try:
             record["session_probe_before"] = probe_hosts(context, read_api, run)
@@ -291,7 +293,7 @@ def judge_session_host(probe, expect):
     return {"status": "pass", "passed": True, "details": probe}
 
 
-def run(spec, *, record, run_id, read_api: Callable, run_cmd=subprocess.run) -> dict[str, Any]:
+def run(spec, *, record, run_id, read_api: Callable, run_cmd=None) -> dict[str, Any]:
     validate(spec)
     op = _op(spec)
     params = spec[op]

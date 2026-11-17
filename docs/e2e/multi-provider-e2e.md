@@ -631,6 +631,32 @@ bound the prompt-to-first-relay phase before the destructive step. Raw-message
 budgets count status chrome but exclude harness-sent control/prompt messages
 unless a scenario opts into `include_our_send`.
 
+Reaction and session-host assertions live in `scripts/e2e/tui_relay/surface_assertions.py`.
+`reaction_history: {send, final, forbid, max_gap_s}` and
+`busy_injection_within: {send, max_seconds, before_marker}` name a 1-based
+`send_discord_prompt` send. From its acknowledgement the runner reads that one
+message (`after=<id-1>&limit=1` on `/api/discord/channels/{id}/messages`) every
+0.5 s until a `final`/`➕` mark shows, then every 5 s until the steps end, plus
+one read after them (at most 1800 s). `reaction_history` passes when the last
+read carries exactly one lifecycle mark from `final` and no read showed a
+`forbid` mark; `forbid` absence also needs reads no further than `max_gap_s`
+(default 2 s) apart until the final mark first showed. `busy_injection_within`
+passes when `➕` showed within `max_seconds` (default 30 s; healthy injection
+takes about 1 s, the Herdr hold regression about 240 s) and before the first
+relay body containing `before_marker`. A failed last read, a missing
+acknowledgement, a sparse read window or a bound that falls inside one read gap
+is unevaluable, never a pass.
+`thread_session_started: true` probes hosts before the first send and after the
+steps: no session before and one after passes; a session already present is
+`not_applicable` (use a fresh thread or `--hard-reset-session-each`).
+`session_host: {expect: configured|tmux|herdr}` requires the session on exactly
+the expected host; `configured` means Herdr when `/api/health/detail` lists the
+channel (for a thread, its parent) under `herdr.configured_channels`. Hosts are
+read from `tmux has-session -t AgentDesk-<provider>-<agent>[-t<thread>]` and the
+target's non-retired row in `agentdesk herdr status`; a failed probe is
+unevaluable. Only the single-cell runner wires these; on the Herdr runner they
+are unevaluable. `E-63` judges input A and `E-14` its thread session with them.
+
 ## Orchestrator (`adk-e2e-orchestrator`)
 
 The orchestrator agent owns the dedicated channel and parses natural-language

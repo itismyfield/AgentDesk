@@ -3942,7 +3942,7 @@ def run_one_cell(
 
     last_turn_identity: dict[str, str] | None = None
     reaction_watch = surface_assertions.ReactionWatch.for_scenario(scenario, client, channel_id, record)
-    surface_assertions.before_steps(scenario, record, surface_assertions.surface_context(
+    surface_assertions.before_steps(scenario, record, lambda: surface_assertions.surface_context(
         base_url=client.base_url, provider=cell_provider(cell), agent=cell_default_agent(cell), channel_id=channel_id,
         parent_channel_id=args.channel_id, thread=bool(scenario.get("requires_thread_channel")),
         herdr_status_bin=getattr(args, "herdr_status_bin", "agentdesk")), _read_api_json)
