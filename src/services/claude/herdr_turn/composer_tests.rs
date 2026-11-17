@@ -168,7 +168,10 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
                 &turn,
                 runtime.handle(),
                 attached,
-                crate::services::claude_tui::owner_input::Lineage::Existing,
+                (
+                    crate::services::claude_tui::owner_input::Lineage::Existing,
+                    None
+                ),
                 sender
             )
             .is_err(),

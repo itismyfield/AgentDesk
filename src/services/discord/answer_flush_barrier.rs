@@ -107,7 +107,7 @@ impl AnswerFlushBarrier {
 
     // #3034: flushing-state probe used only by the unit tests; the live waiter
     // uses `flush_snapshot` (single-lock) instead. Test contract.
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn is_flushing(&self, channel_id: ChannelId) -> bool {
         self.channels
             .lock()

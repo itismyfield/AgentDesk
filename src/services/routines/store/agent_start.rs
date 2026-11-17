@@ -17,6 +17,16 @@ impl RoutineStore {
                 result_json = $3,
                 lease_expires_at = NOW() + ($4::bigint * INTERVAL '1 second'),
                 next_retry_at = NULL,
+                -- The first start pins the backend; retries and fallbacks keep it.
+                run_spec = CASE
+                    WHEN run_spec IS NULL OR jsonb_typeof(run_spec -> 'execution_backend') = 'string'
+                        THEN run_spec
+                    ELSE jsonb_set(
+                        run_spec,
+                        '{execution_backend}',
+                        COALESCE(to_jsonb($3::jsonb ->> 'execution_mode'), 'null'::jsonb)
+                    )
+                END,
                 owned_tmux_session = NULL,
                 attempts = COALESCE(attempts, '[]'::jsonb) || jsonb_build_array(
                     jsonb_build_object(
@@ -80,6 +90,8 @@ impl RoutineStore {
         result: &Value,
     ) -> Result<bool> {
         let updated = sqlx::query("UPDATE routine_runs SET action='agent',turn_id=$3,result_json=$4,
+            run_spec=CASE WHEN run_spec IS NULL OR jsonb_typeof(run_spec->'execution_backend')='string' THEN run_spec
+                ELSE jsonb_set(run_spec,'{execution_backend}',COALESCE(to_jsonb($4->>'execution_mode'),'null'::jsonb)) END,
             next_retry_at=NULL,owned_tmux_session=NULL,lease_expires_at=NOW()+($5::bigint*INTERVAL '1 second'),
             attempts=COALESCE(attempts,'[]'::jsonb)||jsonb_build_array(jsonb_build_object('event','input_pending','agent_id',$4->>'agent_id','kind',$4->>'attempt_kind','turn_id',$3::text,'execution_mode',$4->'execution_mode','provider',$4->'provider','channel_id',$4->'channel_id','owner_input',$4->'owner_input','at',NOW())),updated_at=NOW()
             WHERE id=$1 AND status='running' AND turn_id IS NOT DISTINCT FROM $2

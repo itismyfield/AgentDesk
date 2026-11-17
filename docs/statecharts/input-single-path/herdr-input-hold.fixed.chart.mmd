@@ -1,0 +1,206 @@
+---
+title: "이슈 8201: 불확실 Enter 뒤 남은 입력 보류 표지 (개정 5)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: held
+    lg1: released
+  }
+  class lg0 yellow
+  class lg1 teal
+  s0: 보류(in_flight, 키 전, 쓰기 진행): 입력창 빔 #183; 정착 창 안 #183; receipt 창 안
+  s1: 보류(in_flight, 붙여넣기 뒤, 쓰기 진행): 붙여넣기가 아직 안 그려짐 #183; 정착 창 안 #183; receipt 창 안
+  s2: 보류(in_flight, Enter 뒤, 쓰기 진행): 붙여넣기가 아직 안 그려짐 #183; 정착 창 안 #183; receipt 창 안
+  s3: 보류(in_flight, 붙여넣기 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안 #183; receipt 창 안
+  s4: 보류(in_flight, Enter 뒤, 쓰기 진행): 붙여넣기가 아직 안 그려짐 #183; 정착 창 안
+  s5: 보류: 붙여넣기가 아직 안 그려짐 #183; 정착 창 안 #183; receipt 창 안
+  s6: 보류(in_flight, Enter 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안 #183; receipt 창 안
+  s7: 보류(in_flight, 붙여넣기 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; receipt 창 안
+  s8: 보류: 붙여넣기가 아직 안 그려짐 #183; 근거 변화 대기 #183; 정착 창 안 #183; receipt 창 안
+  s9: 보류: 붙여넣기가 아직 안 그려짐 #183; 정착 창 안
+  s10: 보류(in_flight, Enter 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안
+  s11: 보류(in_flight, Enter 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; receipt 창 안
+  s12: 보류: 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안 #183; receipt 창 안
+  s13: 보류: 붙여넣기가 아직 안 그려짐 #183; 근거 변화 대기 #183; 정착 창 안
+  s14: 보류: 붙여넣기가 아직 안 그려짐 #183; 다시 판정 예정 #183; 정착 창 안
+  s15: 보류(in_flight, Enter 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음
+  s16: 보류: 우리 붙여넣기가 입력창에 남음 #183; 근거 변화 대기 #183; 정착 창 안 #183; receipt 창 안
+  s17: 보류: 우리 붙여넣기가 입력창에 남음 #183; 다시 판정 예정 #183; 정착 창 안 #183; receipt 창 안
+  s18: 보류: 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안
+  s19: 보류: 우리 붙여넣기가 입력창에 남음 #183; receipt 창 안
+  s20: 보류: 우리 붙여넣기가 입력창에 남음, 지우기 기록됨 #183; receipt 창 안
+  s21: 보류: 우리 붙여넣기가 입력창에 남음 #183; 근거 변화 대기 #183; 정착 창 안
+  s22: 보류: 우리 붙여넣기가 입력창에 남음 #183; 다시 판정 예정 #183; 정착 창 안
+  s23: 보류: 우리 붙여넣기가 입력창에 남음 #183; 다시 판정 예정 #183; receipt 창 안
+  s24: 보류: 우리 붙여넣기가 입력창에 남음
+  s25: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안 #183; receipt 창 안
+  s26: 보류: 우리 붙여넣기가 입력창에 남음, 지우기 기록됨 #183; 다시 판정 예정 #183; receipt 창 안
+  s27: 보류: 우리 붙여넣기가 입력창에 남음, 지우기 기록됨
+  s28: 보류: 우리 붙여넣기가 입력창에 남음 #183; 다시 판정 예정
+  s29: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 #183; receipt 창 안
+  s30: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안 #183; 다시 판정 예정 #183; receipt 창 안
+  s31: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안
+  s32: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남 #183; receipt 창 안
+  s33: 보류: 우리 붙여넣기가 입력창에 남음, 지우기 기록됨 #183; 다시 판정 예정
+  s34: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 #183; 근거 변화 대기 #183; receipt 창 안
+  s35: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 #183; 다시 판정 예정 #183; receipt 창 안
+  s36: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안
+  s37: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 #183; receipt 창 안
+  s38: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 창 안 #183; 다시 판정 예정
+  s39: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남 #183; 다시 판정 예정 #183; receipt 창 안
+  s40: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남
+  s41: 예약 정산됨, 표지 지우는 중: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 #183; receipt 창 안
+  s42: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 #183; 근거 변화 대기
+  s43: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 창 안 #183; 다시 판정 예정
+  s44: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 #183; 다시 판정 예정 #183; receipt 창 안
+  s45: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남
+  s46: 보류: 입력창 빔, 지움 키 보냄, 정리 뒤 receipt 지남 #183; 다시 판정 예정
+  s47: 보류 해제, 새 입력 대기
+  s48: 예약 정산됨, 표지 지우는 중: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남
+  s49: 보류: 입력창 빔, 지움 확인, 정리 뒤 receipt 지남 #183; 다시 판정 예정
+  s50: 새 입력 턴 시작
+  [*] --> s0
+  s0 --> s1: 쓰기: 붙여넣기 키
+  s1 --> s2: 쓰기: Enter 안 닿음
+  s1 --> s3: 붙여넣기가 화면에 그려짐
+  s2 --> s4: receipt 대기 시간이 지남
+  s2 --> s5: 쓰기 결과 기록(미전달 증거 포함)
+  s2 --> s6: 붙여넣기가 화면에 그려짐
+  s3 --> s6: 쓰기: Enter 안 닿음
+  s3 --> s7: 붙여넣기 정착 시간이 지남
+  s4 --> s9: 쓰기 결과 기록(미전달 증거 포함)
+  s4 --> s10: 붙여넣기가 화면에 그려짐
+  s5 --> s8: 판정 못 함, 보류 유지
+  s5 --> s9: receipt 대기 시간이 지남
+  s5 --> s12: 붙여넣기가 화면에 그려짐
+  s6 --> s10: receipt 대기 시간이 지남
+  s6 --> s11: 붙여넣기 정착 시간이 지남
+  s6 --> s12: 쓰기 결과 기록(미전달 증거 포함)
+  s7 --> s11: 쓰기: Enter 안 닿음
+  s8 --> s14: receipt 대기 시간이 지남
+  s8 --> s17: 붙여넣기가 화면에 그려짐
+  s9 --> s13: 판정 못 함, 보류 유지
+  s9 --> s18: 붙여넣기가 화면에 그려짐
+  s10 --> s15: 붙여넣기 정착 시간이 지남
+  s10 --> s18: 쓰기 결과 기록(미전달 증거 포함)
+  s11 --> s15: receipt 대기 시간이 지남
+  s11 --> s19: 쓰기 결과 기록(미전달 증거 포함)
+  s12 --> s16: 판정 못 함, 보류 유지
+  s12 --> s18: receipt 대기 시간이 지남
+  s12 --> s19: 붙여넣기 정착 시간이 지남
+  s13 --> s22: 붙여넣기가 화면에 그려짐
+  s14 --> s13: 판정 못 함, 보류 유지
+  s14 --> s22: 붙여넣기가 화면에 그려짐
+  s15 --> s24: 쓰기 결과 기록(미전달 증거 포함)
+  s16 --> s22: receipt 대기 시간이 지남
+  s16 --> s23: 붙여넣기 정착 시간이 지남
+  s17 --> s16: 판정 못 함, 보류 유지
+  s17 --> s22: receipt 대기 시간이 지남
+  s17 --> s23: 붙여넣기 정착 시간이 지남
+  s18 --> s21: 판정 못 함, 보류 유지
+  s18 --> s24: 붙여넣기 정착 시간이 지남
+  s19 --> s20: 우리 글 정확 일치, 지우기 기록
+  s19 --> s24: receipt 대기 시간이 지남
+  s20 --> s25: 게이트로 지움 키를 보냄
+  s20 --> s27: receipt 대기 시간이 지남
+  s21 --> s28: 붙여넣기 정착 시간이 지남
+  s22 --> s21: 판정 못 함, 보류 유지
+  s22 --> s28: 붙여넣기 정착 시간이 지남
+  s23 --> s26: 우리 글 정확 일치, 지우기 기록
+  s23 --> s28: receipt 대기 시간이 지남
+  s24 --> s27: 우리 글 정확 일치, 지우기 기록
+  s25 --> s29: 지움 확인 기록
+  s25 --> s31: receipt 대기 시간이 지남
+  s25 --> s32: 정리 뒤 receipt 시간이 지남
+  s26 --> s30: 게이트로 지움 키를 보냄
+  s26 --> s33: receipt 대기 시간이 지남
+  s27 --> s31: 게이트로 지움 키를 보냄
+  s28 --> s33: 우리 글 정확 일치, 지우기 기록
+  s29 --> s34: 빈 입력창, 정리 뒤 receipt 대기
+  s29 --> s36: receipt 대기 시간이 지남
+  s29 --> s37: 정리 뒤 receipt 시간이 지남
+  s30 --> s35: 지움 확인 기록
+  s30 --> s38: receipt 대기 시간이 지남
+  s30 --> s39: 정리 뒤 receipt 시간이 지남
+  s31 --> s36: 지움 확인 기록
+  s31 --> s40: 정리 뒤 receipt 시간이 지남
+  s32 --> s37: 지움 확인 기록
+  s32 --> s40: receipt 대기 시간이 지남
+  s33 --> s38: 게이트로 지움 키를 보냄
+  s34 --> s43: receipt 대기 시간이 지남
+  s34 --> s44: 정리 뒤 receipt 시간이 지남
+  s35 --> s34: 빈 입력창, 정리 뒤 receipt 대기
+  s35 --> s43: receipt 대기 시간이 지남
+  s35 --> s44: 정리 뒤 receipt 시간이 지남
+  s36 --> s42: 빈 입력창, 정리 뒤 receipt 대기
+  s36 --> s45: 정리 뒤 receipt 시간이 지남
+  s37 --> s41: 미전달 증명, 예약 정산
+  s37 --> s45: receipt 대기 시간이 지남
+  s38 --> s43: 지움 확인 기록
+  s38 --> s46: 정리 뒤 receipt 시간이 지남
+  s39 --> s44: 지움 확인 기록
+  s39 --> s46: receipt 대기 시간이 지남
+  s40 --> s45: 지움 확인 기록
+  s41 --> s47: 표지를 지움
+  s41 --> s48: receipt 대기 시간이 지남
+  s42 --> s49: 정리 뒤 receipt 시간이 지남
+  s43 --> s42: 빈 입력창, 정리 뒤 receipt 대기
+  s43 --> s49: 정리 뒤 receipt 시간이 지남
+  s44 --> s41: 미전달 증명, 예약 정산
+  s44 --> s49: receipt 대기 시간이 지남
+  s45 --> s48: 미전달 증명, 예약 정산
+  s46 --> s49: 지움 확인 기록
+  s47 --> s50: 새 입력 붙여넣기와 Enter
+  s48 --> s47: 표지를 지움
+  s49 --> s48: 미전달 증명, 예약 정산
+  class s0 yellow
+  class s1 yellow
+  class s2 yellow
+  class s3 yellow
+  class s4 yellow
+  class s5 yellow
+  class s6 yellow
+  class s7 yellow
+  class s8 yellow
+  class s9 yellow
+  class s10 yellow
+  class s11 yellow
+  class s12 yellow
+  class s13 yellow
+  class s14 yellow
+  class s15 yellow
+  class s16 yellow
+  class s17 yellow
+  class s18 yellow
+  class s19 yellow
+  class s20 yellow
+  class s21 yellow
+  class s22 yellow
+  class s23 yellow
+  class s24 yellow
+  class s25 yellow
+  class s26 yellow
+  class s27 yellow
+  class s28 yellow
+  class s29 yellow
+  class s30 yellow
+  class s31 yellow
+  class s32 yellow
+  class s33 yellow
+  class s34 yellow
+  class s35 yellow
+  class s36 yellow
+  class s37 yellow
+  class s38 yellow
+  class s39 yellow
+  class s40 yellow
+  class s41 yellow
+  class s42 yellow
+  class s43 yellow
+  class s44 yellow
+  class s45 yellow
+  class s46 yellow
+  class s47 teal
+  class s48 yellow
+  class s49 yellow
+  class s50 teal

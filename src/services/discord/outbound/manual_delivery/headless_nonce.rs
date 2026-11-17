@@ -12,6 +12,7 @@ pub(super) fn headless_delivery_nonce(
     delivery_id: ManualOutboundDeliveryId<'_>,
 ) -> Option<String> {
     resolve_headless_delivery_nonce(enabled, source, delivery_id)
+        .or_else(|| super::routine_incident_nonce::nonce(enabled, source, delivery_id))
 }
 
 pub(super) fn headless_discord_nonce_enabled(authorized_outbox_path: bool) -> bool {
@@ -78,7 +79,10 @@ fn durable_headless_outbox_row_id(
     durable_outbox_row_id(source, delivery_id)
 }
 
-fn durable_outbox_row_id(source: &str, delivery_id: ManualOutboundDeliveryId<'_>) -> Option<i64> {
+pub(super) fn durable_outbox_row_id(
+    source: &str,
+    delivery_id: ManualOutboundDeliveryId<'_>,
+) -> Option<i64> {
     // `PendingMessageOutboxRow::delivery_ids` owns both shapes. The caller
     // authority gate is resolved separately before this shape validation.
     if !delivery_id

@@ -48,7 +48,7 @@ impl Default for OutboundPolicyLimits {
 
 impl OutboundPolicyLimits {
     // #3034: #1006 v3 outbound test-limit helper — used by planner tests.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn for_tests(limit: usize) -> Self {
         assert!(limit > 0, "test outbound limit must be non-zero");
         Self {

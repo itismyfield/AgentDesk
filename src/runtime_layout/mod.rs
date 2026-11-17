@@ -627,10 +627,9 @@ fn remove_link_or_path(path: &Path) -> Result<(), String> {
     if meta.file_type().is_symlink() {
         #[cfg(windows)]
         {
-            if fs::metadata(path)
-                .map(|target| target.is_dir())
-                .unwrap_or(false)
-            {
+            use std::os::windows::fs::FileTypeExt;
+
+            if meta.file_type().is_symlink_dir() {
                 return remove_dir_idempotent(path);
             }
         }

@@ -1,0 +1,105 @@
+---
+title: "이슈 8201: 불확실 Enter 뒤 남은 입력 보류 표지 (개정 5)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: held
+    lg1: Path to the HoldEventuallyReleased or HoldReleasedOrNoticed or LaterInputStarts or ReadableOursCleaned bug
+    lg2: Repeats forever, so HoldEventuallyReleased or HoldReleasedOrNoticed or LaterInputStarts or ReadableOursCleaned breaks
+  }
+  class lg0 yellow
+  class lg1 bugPath
+  class lg2 repeats
+  s0: 보류(in_flight, 키 전, 쓰기 진행): 입력창 빔 #183; 정착 창 안 #183; receipt 창 안
+  s1: 보류(in_flight, 붙여넣기 뒤, 쓰기 진행): 붙여넣기가 아직 안 그려짐 #183; 정착 창 안 #183; receipt 창 안
+  s2: 보류(in_flight, Enter 뒤, 쓰기 진행): 붙여넣기가 아직 안 그려짐 #183; 정착 창 안 #183; receipt 창 안
+  s3: 보류(in_flight, 붙여넣기 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안 #183; receipt 창 안
+  s4: 보류(in_flight, Enter 뒤, 쓰기 진행): 붙여넣기가 아직 안 그려짐 #183; 정착 창 안
+  s5: 보류: 붙여넣기가 아직 안 그려짐 #183; 정착 창 안 #183; receipt 창 안
+  s6: 보류(in_flight, Enter 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안 #183; receipt 창 안
+  s7: 보류(in_flight, 붙여넣기 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; receipt 창 안
+  s8: 보류: 붙여넣기가 아직 안 그려짐 #183; 정착 창 안
+  s9: 보류(in_flight, Enter 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안
+  s10: 보류(in_flight, Enter 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음 #183; receipt 창 안
+  s11: 보류: 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안 #183; receipt 창 안
+  s12: 보류: 붙여넣기가 아직 안 그려짐, 새 입력 retained #183; 정착 창 안 #183; receipt 창 안
+  s13: 보류(in_flight, Enter 뒤, 쓰기 진행): 우리 붙여넣기가 입력창에 남음
+  s14: 보류: 우리 붙여넣기가 입력창에 남음 #183; 정착 창 안
+  s15: 보류: 우리 붙여넣기가 입력창에 남음 #183; receipt 창 안
+  s16: 보류: 붙여넣기가 아직 안 그려짐, 새 입력 retained #183; 정착 창 안
+  s17: 보류: 우리 붙여넣기가 입력창에 남음, 새 입력 retained #183; 정착 창 안 #183; receipt 창 안
+  s18: 보류: 우리 붙여넣기가 입력창에 남음
+  s19: 보류: 우리 붙여넣기가 입력창에 남음, 새 입력 retained #183; 정착 창 안
+  s20: 보류: 우리 붙여넣기가 입력창에 남음, 새 입력 retained #183; receipt 창 안
+  s21: 보류: 우리 붙여넣기가 입력창에 남음, 새 입력 retained
+  [*] --> s0
+  s0 --> s1: 쓰기: 붙여넣기 키
+  s1 --> s2: 쓰기: Enter 안 닿음
+  s1 --> s3: 붙여넣기가 화면에 그려짐
+  s2 --> s4: receipt 대기 시간이 지남
+  s2 --> s5: 쓰기 결과 기록(미전달 증거 포함)
+  s2 --> s6: 붙여넣기가 화면에 그려짐
+  s3 --> s6: 쓰기: Enter 안 닿음
+  s3 --> s7: 붙여넣기 정착 시간이 지남
+  s4 --> s8: 쓰기 결과 기록(미전달 증거 포함)
+  s4 --> s9: 붙여넣기가 화면에 그려짐
+  s5 --> s8: receipt 대기 시간이 지남
+  s5 --> s11: 붙여넣기가 화면에 그려짐
+  s6 --> s9: receipt 대기 시간이 지남
+  s6 --> s10: 붙여넣기 정착 시간이 지남
+  s6 --> s11: 쓰기 결과 기록(미전달 증거 포함)
+  s7 --> s10: 쓰기: Enter 안 닿음
+  s5 --> s12: 새 입력 시작이 보류 표지에 거절됨
+  s8 --> s14: 붙여넣기가 화면에 그려짐
+  s9 --> s13: 붙여넣기 정착 시간이 지남
+  s9 --> s14: 쓰기 결과 기록(미전달 증거 포함)
+  s10 --> s13: receipt 대기 시간이 지남
+  s10 --> s15: 쓰기 결과 기록(미전달 증거 포함)
+  s11 --> s14: receipt 대기 시간이 지남
+  s11 --> s15: 붙여넣기 정착 시간이 지남
+  s12 --> s16: receipt 대기 시간이 지남
+  s12 --> s17: 붙여넣기가 화면에 그려짐
+  s8 --> s16: 새 입력 시작이 보류 표지에 거절됨
+  s13 --> s18: 쓰기 결과 기록(미전달 증거 포함)
+  s11 --> s17: 새 입력 시작이 보류 표지에 거절됨
+  s14 --> s18: 붙여넣기 정착 시간이 지남
+  s15 --> s15: 새 입력 시작이 보류 표지에 거절됨
+  s15 --> s18: receipt 대기 시간이 지남
+  s16 --> s19: 붙여넣기가 화면에 그려짐
+  s17 --> s19: receipt 대기 시간이 지남
+  s17 --> s20: 붙여넣기 정착 시간이 지남
+  s14 --> s19: 새 입력 시작이 보류 표지에 거절됨
+  s15 --> s20: 새 입력 시작이 보류 표지에 거절됨
+  s19 --> s21: 붙여넣기 정착 시간이 지남
+  s20 --> s21: receipt 대기 시간이 지남
+  s18 --> s21: 새 입력 시작이 보류 표지에 거절됨
+  class s0 yellow
+  class s0 bugPath
+  class s1 yellow
+  class s1 bugPath
+  class s2 yellow
+  class s3 yellow
+  class s3 bugPath
+  class s4 yellow
+  class s5 yellow
+  class s6 yellow
+  class s6 bugPath
+  class s7 yellow
+  class s8 yellow
+  class s9 yellow
+  class s10 yellow
+  class s10 bugPath
+  class s11 yellow
+  class s12 yellow
+  class s13 yellow
+  class s14 yellow
+  class s15 yellow
+  class s15 bugPath
+  class s16 yellow
+  class s17 yellow
+  class s18 yellow
+  class s19 yellow
+  class s20 yellow
+  class s20 bugPath
+  class s21 yellow
+  class s21 repeats
