@@ -279,6 +279,7 @@ src/
 │   │   ├── advisory_lock.rs
 │   │   ├── advisory_lock_tests.rs
 │   │   ├── agent_sync.rs
+│   │   ├── intake_timing_pg_tests.rs
 │   │   ├── pool_return.rs
 │   │   ├── pool_return_pg_tests.rs
 │   │   ├── pooled_advisory_lock_pg_tests.rs
@@ -563,7 +564,9 @@ src/
 │   └── transition_core.rs
 ├── logging/
 │   ├── auto_queue.rs
-│   └── auto_queue_tests.rs
+│   ├── auto_queue_tests.rs
+│   ├── intake_timing.rs
+│   └── intake_timing_tests.rs
 ├── runtime_layout/
 │   ├── config_merge.rs
 │   ├── legacy_migration.rs
