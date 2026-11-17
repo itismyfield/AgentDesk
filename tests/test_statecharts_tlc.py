@@ -974,13 +974,13 @@ class LeaseWrapperTest(unittest.TestCase):
              mock.patch.object(self.wrapper.common, 'check_cfg', side_effect=checked) as check, \
              contextlib.redirect_stdout(io.StringIO()):
             status = self.wrapper.main()
-        self.assertEqual(check.call_count, 23)
+        self.assertEqual(check.call_count, len(self.wrapper.EXPECTED_CONFIGS))
         return status, json.loads((out / 'results.json').read_text())
 
     def test_wrapper_delegates_every_config_to_common_checker(self) -> None:
         status, rows = self.run_wrapper()
         self.assertEqual(status, 0)
-        self.assertEqual(len(rows), 23)
+        self.assertEqual(len(rows), len(self.wrapper.EXPECTED_CONFIGS))
         self.assertTrue(all(row['matches_expectation'] for row in rows))
         row = next(row for row in rows if row['config'] == 'run-ttl_takeover.cfg')
         self.assertEqual(set(row['expected_rules']), self.rows['e2e-run-lease/run-ttl_takeover.cfg'])

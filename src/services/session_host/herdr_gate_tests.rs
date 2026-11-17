@@ -2,6 +2,8 @@
 //! in-process server that, like Herdr, answers the one request a connection carries and closes.
 #![cfg(unix)]
 
+#[path = "herdr_gate/enter_readmit_tests.rs"]
+mod enter_readmit_tests;
 #[path = "herdr_gate/notice_fence_tests.rs"]
 mod notice_fence_tests;
 
@@ -11,7 +13,7 @@ use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::Output;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::thread::{self, JoinHandle};
 
 use serde_json::{Value, json};
@@ -63,6 +65,8 @@ struct Server {
     version: Arc<Mutex<String>>,
     close_reply: Scripted,
     process_info: Scripted,
+    /// How many next `pane.process_info` requests get no reply until the caller hangs up.
+    withheld: Arc<AtomicUsize>,
     /// Once set, a close removes the pane from every later snapshot, as a last-pane close does.
     vanish_on_close: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -89,7 +93,8 @@ fn serve() -> Server {
     let (close_reply, process_info) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
     let vanish_on_close = Arc::new(AtomicBool::new(false));
     let gone = Arc::new(AtomicBool::new(false));
-    let (state, stopped) = (conns.clone(), stop.clone());
+    let withheld = Arc::new(AtomicUsize::new(0));
+    let (state, stopped, withhold) = (conns.clone(), stop.clone(), withheld.clone());
     let (hello_version, closed) = (version.clone(), (close_reply.clone(), process_info.clone()));
     let vanish = vanish_on_close.clone();
     let thread = thread::spawn(move || {
@@ -103,7 +108,7 @@ fn serve() -> Server {
             state.lock().unwrap().insert(index, Seen::default());
             let state = state.clone();
             let (version, close_reply) = (hello_version.clone(), closed.clone());
-            let pane = (vanish.clone(), gone.clone());
+            let pane = (vanish.clone(), gone.clone(), withhold.clone());
             handlers.push(thread::spawn(move || {
                 answer(stream, index, &state, &version, &close_reply, &pane)
             }));
@@ -120,6 +125,7 @@ fn serve() -> Server {
         version,
         close_reply,
         process_info,
+        withheld,
         vanish_on_close,
         thread: Some(thread),
     }
@@ -170,7 +176,7 @@ fn answer(
     conns: &Mutex<BTreeMap<usize, Seen>>,
     version: &Mutex<String>,
     (close_reply, process_info): &(Scripted, Scripted),
-    (vanish_on_close, gone): &(Arc<AtomicBool>, Arc<AtomicBool>),
+    (vanish_on_close, gone, withheld): &(Arc<AtomicBool>, Arc<AtomicBool>, Arc<AtomicUsize>),
 ) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
@@ -180,6 +186,16 @@ fn answer(
     let _ = reader.read_line(&mut line);
     let request: Option<Value> = serde_json::from_str(&line).ok();
     conns.lock().unwrap().get_mut(&index).unwrap().request = request.clone();
+    let take = |n: usize| n.checked_sub(1);
+    let info = |r: &Value| r["method"] == "pane.process_info";
+    if request.as_ref().is_some_and(info)
+        && withheld
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, take)
+            .is_ok()
+    {
+        let _ = reader.read_to_end(&mut Vec::new());
+        return;
+    }
     if let Some(request) = request {
         let close = request["method"] == "pane.close";
         let close_reply = close_reply.lock().unwrap().clone().filter(|_| close);
@@ -285,14 +301,24 @@ fn endpoint(server: &Server) -> HerdrEndpoint {
 }
 
 fn transport(server: &Server, pids: Vec<u32>) -> Arc<dyn HerdrTransport> {
+    let timeout = Duration::from_millis(500);
+    transport_with(server, peers(pids), timeout, timeout)
+}
+
+fn transport_with(
+    server: &Server,
+    peers: PeerReader,
+    io_timeout: Duration,
+    read_deadline: Duration,
+) -> Arc<dyn HerdrTransport> {
     let config = HerdrSocketConfig {
-        io_timeout: Duration::from_millis(500),
-        read_deadline: Duration::from_millis(500),
+        io_timeout,
+        read_deadline,
         retry_backoff: Duration::from_millis(50),
         max_frame_bytes: MAX_FRAME_BYTES,
     };
     let socket = HerdrSocketTransport::new(&endpoint(server), config, LineJsonFraming);
-    Arc::new(socket.with_peer_reader(peers(pids)))
+    Arc::new(socket.with_peer_reader(peers))
 }
 
 type Restore = fn(&dyn HerdrTransport, &HerdrEndpoint) -> RestoreResume;
@@ -1064,7 +1090,7 @@ fn m0_close_requires_both_stamps() {
         (replaced_provider as Os, HerdrGateRefusal::ProviderReplaced),
         (
             missing_provider_stamp as Os,
-            HerdrGateRefusal::PaneUnverified,
+            HerdrGateRefusal::PaneUnverified { transient: true },
         ),
     ] {
         let target = hosted_target(&rig, vec![SERVER], off_where_dialled, os(&rig));

@@ -1,0 +1,20 @@
+---
+title: "외부 Herdr 입력의 Idle 위임과 Busy 관측"
+---
+stateDiagram-v2
+  s0: request #183; idle #183; epoch1/proof0 #183; 읽기예약0 #183; 턴0 입력0 답0
+  s1: checked #183; idle #183; epoch1/proof0 #183; 읽기예약0 #183; 턴0 입력0 답0
+  s2: queued #183; idle #183; epoch1/proof0 #183; 읽기예약0 #183; 턴0 입력0 답0
+  s3: probed #183; idle #183; epoch1/proof1 #183; 읽기예약1 #183; 턴0 입력0 답0
+  s4: delegated #183; idle #183; epoch1/proof1 #183; 읽기예약0 #183; 턴0 입력0 답0
+  s5: started #183; busy #183; epoch1/proof1 #183; 읽기예약0 #183; 턴1 입력1 답0
+  s6: submitted #183; busy #183; epoch1/proof1 #183; 읽기예약0 #183; 턴1 입력1 답0
+  s7: done #183; busy #183; epoch1/proof1 #183; 읽기예약0 #183; 턴1 입력1 답1
+  [*] --> s0
+  s0 --> s1: HNext
+  s1 --> s2: HNext
+  s2 --> s3: HNext
+  s3 --> s4: HNext
+  s4 --> s5: HNext
+  s5 --> s6: HNext
+  s6 --> s7: HNext

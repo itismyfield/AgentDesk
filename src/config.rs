@@ -6,6 +6,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 pub(crate) mod decision_gate;
+pub(crate) mod decisions;
 mod runtime_settings;
 mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
@@ -211,6 +212,11 @@ pub struct DiscordConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub scheduled_message_required_mention_user_ids: Vec<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "decisions::DecisionsConfig::is_default"
+    )]
+    pub decisions: decisions::DecisionsConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]

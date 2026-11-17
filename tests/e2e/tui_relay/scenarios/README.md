@@ -97,7 +97,9 @@ message delivery claims from `E-50`/`E-51`. References from `E-18`, `E-19`,
 they do not fill reset/clear acknowledgement and identity, human cancellation
 preservation, Herdr identity checks that are N/A, or actual effort/model
 application. Reaction, busy injection and thread host/output requirements stay
-pending. These counts are generated from the inputs and are not live PASS
+pending. The runner operations `reaction_history`, `busy_injection_within`,
+`thread_session_started` and `session_host` (driver guide) are attached to `E-63`
+and `E-14`, but no claim uses them, so those rows still list pending assertions. These counts are generated from the inputs and are not live PASS
 counts.
 
 The separate S0 catalog is absent from this main baseline. This change does

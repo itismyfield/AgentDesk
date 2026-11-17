@@ -1,5 +1,7 @@
 # TmuxSession
 
+The [#8125 API-thread join projection](../input-single-path/thread-ingress.report.md) adds authorization before the cold/warm launch boundary. The historical model and its known violations below remain unchanged; Herdr parent policy and child readiness belong to #8118.
+
 Model written against AgentDesk `origin/main` `e8d94425a04867279ced4ec967e9d93df0d7ec0a` (2026-10-30). Counterexamples were replayed against the code; see `../README.md` for dispositions.
 
 TLC reached 400 states and 820 steps. The chart draws 13 states and 24 arrows.

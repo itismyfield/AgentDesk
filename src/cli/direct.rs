@@ -799,6 +799,7 @@ pub(crate) async fn cmd_discord_category_create(
 
 pub(crate) async fn cmd_discord_channel_create(
     name: &str,
+    kind: super::discord_channel_create::ChannelKind,
     category_id: Option<&str>,
     topic: Option<&str>,
     guild_id_override: Option<&str>,
@@ -807,6 +808,18 @@ pub(crate) async fn cmd_discord_channel_create(
     let state = build_app_state(true).await?;
     let http = announce_http_for_cli(&state).await?;
     let guild_id = resolve_guild_id(&state, guild_id_override)?;
+    if kind == super::discord_channel_create::ChannelKind::Forum {
+        let forum = super::discord_channel_create::create_forum(
+            &state,
+            &http,
+            guild_id,
+            name,
+            category_id,
+            topic,
+        );
+        print_json(&forum.await?);
+        return Ok(());
+    }
 
     let category = category_id
         .map(|raw| {

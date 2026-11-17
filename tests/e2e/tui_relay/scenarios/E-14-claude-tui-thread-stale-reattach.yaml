@@ -13,8 +13,14 @@ notes: |
   Claude TUI relay offset to a missing transcript, restarts dcserver, then
   verifies the post-restart answer is relayed from the launch-script-derived
   current transcript instead of the stale offset.
+  PRE is a Discord message in the thread, not the direct turn API, so the
+  first-message intake is what starts the session (#8115). The host probe right
+  after PRE's answer must show the session that the probe before PRE did not
+  (with --hard-reset-session-each or a fresh thread; otherwise not_applicable),
+  and the session must run on the host the parent channel is configured for
+  (#8118), read from tmux has-session and herdr status.
 steps:
-  - send_prompt: "응답에 정확히 한 줄로 [E2E:E14:PRE] 만 출력해줘."
+  - send_discord_prompt: "응답에 정확히 한 줄로 [E2E:E14:PRE] 만 출력해줘."
   - wait_for_discord_text: "[E2E:E14:PRE]"
     timeout_s: 240
   - poison_claude_tui_relay_offset: {}
@@ -39,3 +45,6 @@ assertions:
   - text_present: "[E2E:E14:POST]"
   - no_duplicate_content: true
   - no_resume_prompt_chrome: true
+  - thread_session_started: true
+  - session_host:
+      expect: configured

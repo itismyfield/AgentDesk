@@ -31,6 +31,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn_with_owne
         is_dm_hint,
         reservation,
         None,
+        false,
     ))
     .await
 }
@@ -67,6 +68,7 @@ pub(in crate::services::discord) async fn start_owner_headless(
         context["is_dm"].as_bool(),
         reservation,
         Some(owner),
+        false,
     ))
     .await
 }

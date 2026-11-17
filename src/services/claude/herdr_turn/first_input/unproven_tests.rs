@@ -74,8 +74,16 @@ fn a_moved_transcript_under_a_turn_a_fence_or_a_busy_screen_keeps_the_front_wait
 
 fn owner_outcome(cases: &[(Case, u64)]) {
     for &(case, channel) in cases {
+        let env_guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        // Keep shared binding resets out of this readiness observation.
+        let dedupe_guard = tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let root = tempfile::tempdir().unwrap();
-        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
         readiness::initialize();
         let rig = HerdrRig::start();
         let _registry = rig.registry_on_this_thread();
@@ -396,6 +404,11 @@ fn owner_outcome(cases: &[(Case, u64)]) {
         }
         drop(entered);
         tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
+        drop(runtime);
+        drop(root_guard);
+        drop(root);
+        drop(dedupe_guard);
+        drop(env_guard);
     }
 }
 
