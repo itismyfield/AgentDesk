@@ -322,11 +322,17 @@ fn pinned(
             let applied_command =
                 format!("{} ; display-message -p {applied}", args(&pane).join(" "));
             let held_command = format!("display-message -p {held}");
+            let predicate_target =
+                if !codex && crate::config::test_instance::environment::claude_login_enabled() {
+                    target
+                } else {
+                    &pane
+                };
             let args = [
                 "if-shell",
                 "-F",
                 "-t",
-                &pane,
+                predicate_target,
                 &condition,
                 &applied_command,
                 &held_command,

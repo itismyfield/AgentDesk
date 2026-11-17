@@ -1699,3 +1699,147 @@ fn claude_login_tmux_is_visible_and_absent_session_is_not_a_probe_error() {
         .unwrap();
     tests::assert_single_test_passed(&result, name);
 }
+
+#[test]
+fn instance_owner_paste_uses_logical_outer_target_and_preserves_pinned_action() {
+    use crate::services::claude_tui::owner_input;
+    use crate::services::session_host::TmuxHost;
+    use crate::services::session_host::{KeyOutcome, PinnedInput, SubmitPayload};
+    use crate::services::tui_input::submission_tmux::guarded::PaneIdentity;
+    use std::sync::Arc;
+    const CASE: &str = "ADK_LOGICAL_OUTER_CHILD";
+    const NAME: &str = concat!(
+        module_path!(),
+        "::instance_owner_paste_uses_logical_outer_target_and_preserves_pinned_action"
+    );
+    let selector = NAME.strip_prefix("agentdesk::").unwrap_or(NAME);
+    if let Ok(mode) = std::env::var(CASE) {
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        if mode != "operating" {
+            initialize().unwrap();
+        }
+        let root = PathBuf::from(std::env::var("ADK_LOGIN_FIXTURE_ROOT").unwrap());
+        let name = format!(
+            "AdkTest-{}-claude",
+            root.file_name().unwrap().to_str().unwrap()
+        );
+        let program = root.join("fixture-worktree/target/debug/tmux");
+        let nonce = "00112233445566778899aabbccddee31";
+        let runtime = crate::services::tmux_common::current_tmux_owner_marker();
+        let context = serde_json::json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),"execution_nonce":nonce,"tmux_session":name,"channel_id":727432,"owner_runtime_root":runtime,"host":"fixture","expected_native_session_id":null,"launch_mode":"fresh","provider_root":null});
+        crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(
+            serde_json::from_value(context).unwrap(),
+        )
+        .unwrap();
+        let marker = crate::services::tmux_common::session_temp_path(&name, "spawn_nonce");
+        std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
+        std::fs::write(marker, nonce).unwrap();
+        let pin = PaneIdentity::observe(&name).unwrap();
+        let codex = mode == "codex";
+        owner_input::with_scope(
+            "claude".into(),
+            serde_json::json!({"host":"tmux","owner":name,"root":runtime,"execution_nonce":nonce}),
+            727432,
+            Arc::new(|_| Ok(())),
+            Arc::new(|_, _| Ok(())),
+            Arc::new(|_| Ok(())),
+            || {
+                owner_input::observe_pin(&name, &pin).unwrap();
+                for input in [
+                    PinnedInput::Paste {
+                        buffer: "fixture-buffer",
+                    },
+                    PinnedInput::Enter,
+                ] {
+                    let result = TmuxHost
+                        .actor_input(
+                            &program,
+                            &name,
+                            std::time::Duration::from_secs(2),
+                            SubmitPayload::Pinned { input, codex },
+                        )
+                        .into_key();
+                    assert!(
+                        if matches!(mode.as_str(), "operating" | "opt-in") {
+                            matches!(result, KeyOutcome::Applied)
+                        } else {
+                            matches!(result, KeyOutcome::Failed)
+                        },
+                        "{mode}"
+                    );
+                }
+            },
+        );
+        let calls = root.join("outer-target-calls");
+        if matches!(mode.as_str(), "operating" | "opt-in") {
+            let outer = if mode == "opt-in" {
+                format!("={name}:")
+            } else {
+                "%7".into()
+            };
+            assert_eq!(
+                std::fs::read_to_string(calls).unwrap(),
+                format!("{outer}\n{outer}\n")
+            );
+        } else {
+            assert!(!calls.exists(), "{mode} spawned a physical-target command");
+        }
+        assert!(!root.join("default-socket-trap").exists());
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    for mode in ["operating", "legacy", "codex", "opt-in"] {
+        let (_temp, root, _) = claude_login_fixture(false);
+        if matches!(mode, "opt-in" | "codex") {
+            let home = root.ancestors().nth(4).unwrap();
+            bind_claude_login(&root, home);
+        }
+        let program = root.join("fixture-worktree/target/debug/tmux");
+        std::fs::write(&program, r#"#!/bin/sh
+if [ "$ADK_LOGICAL_OUTER_CHILD" != operating ]; then
+  [ "$1" = -S ] && [ "$2" = "$ADK_EXPECT_SOCKET" ] || { touch "$ADK_TRAP"; exit 91; }
+  shift 2
+fi
+[ "$1" = -u ] || exit 92
+shift
+case "$1" in
+  display-message) printf '123 $1 @2 %%7 456\n'; exit 0;;
+esac
+printf '%s\n' "$4" >> "$ADK_OUTER_CALLS"
+[ "$#" = 7 ] && [ "$1" = if-shell ] && [ "$2" = -F ] && [ "$3" = -t ] || exit 93
+[ "$4" = "$ADK_EXPECT_OUTER" ] || exit 94
+[ "$5" = '#{&&:#{&&:#{&&:#{&&:#{&&:1,#{==:#{pid},123}},#{==:#{session_id},$1}},#{==:#{window_id},@2}},#{==:#{pane_id},%7}},#{==:#{pane_pid},456}}' ] || exit 95
+case "$6" in
+  'paste-buffer -p -r -d -b fixture-buffer -t %7 ; display-message -p PINNED_KEY_APPLIED'|'send-keys -t %7 Enter ; display-message -p PINNED_KEY_APPLIED') ;;
+  *) exit 96;;
+esac
+[ "$7" = 'display-message -p PINNED_KEY_HELD' ] || exit 97
+printf 'PINNED_KEY_APPLIED\n'
+"#).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut child = tests::command(&root);
+        child
+            .args(["--exact", selector, "--nocapture"])
+            .env(CASE, mode)
+            .env("ADK_LOGIN_FIXTURE_ROOT", &root)
+            .env("ADK_EXPECT_SOCKET", root.join("runtime/tmux/socket"))
+            .env("ADK_TRAP", root.join("default-socket-trap"))
+            .env("ADK_OUTER_CALLS", root.join("outer-target-calls"))
+            .env(
+                "ADK_EXPECT_OUTER",
+                if mode == "opt-in" {
+                    format!(
+                        "=AdkTest-{}-claude:",
+                        root.file_name().unwrap().to_str().unwrap()
+                    )
+                } else {
+                    "%7".into()
+                },
+            );
+        if mode == "operating" {
+            child.env_remove("AGENTDESK_TEST_MANIFEST");
+        }
+        let out = child.output().unwrap();
+        tests::assert_single_test_passed(&out, selector);
+    }
+}
