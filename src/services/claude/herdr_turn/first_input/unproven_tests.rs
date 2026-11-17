@@ -297,7 +297,7 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             .block_on(effect::run(&mailbox, Arc::new(|| 10_000), leaf))
             .unwrap();
         if let Some(moved) = moved {
-            moved.join().unwrap();
+            crate::test_support::wait::join_within(moved, crate::test_support::wait::WAIT_CAP);
         }
         let read = || {
             runtime

@@ -672,7 +672,7 @@ fn an_owner_input_whose_idle_transcript_moved_once_ends_retained_without_a_key()
     let result = runtime
         .block_on(effect::run(&mailbox, std::sync::Arc::new(|| 10_000), leaf))
         .unwrap();
-    moved.join().unwrap();
+    crate::test_support::wait::join_within(moved, crate::test_support::wait::WAIT_CAP);
     assert!(
         matches!(&result, effect::Completion::NotSent(reason) if reason.contains("unproven")),
         "{result:?}"
@@ -730,7 +730,7 @@ fn evidence_that_lands_inside_a_window_delivers_the_waiting_input() {
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(Some(budget)));
     let sent = r.send();
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(None));
-    moved.join().unwrap();
+    crate::test_support::wait::join_within(moved, crate::test_support::wait::WAIT_CAP);
     assert_eq!(sent, Ok(()));
     assert_eq!(tmux.sends(), ["load", "paste", "Enter"]);
 }
