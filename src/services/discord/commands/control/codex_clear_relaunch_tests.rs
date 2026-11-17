@@ -233,6 +233,7 @@ impl CanaryFixture {
             provider_root: Some(sessions.canonicalize().unwrap()),
             first_prompt_digest: Some(format!("sha256:{:x}", Sha256::digest(PROMPT.as_bytes()))),
             source_policy: Some("verified".into()),
+            resume_start: None,
         };
         if prefix > 0 {
             let directory = root.path().join(p5::BINDING_EVENTS_DIR);
@@ -278,7 +279,7 @@ impl CanaryFixture {
             "source":"cli","originator":"codex_cli_rs"}});
         fs::write(&native, format!("{metadata}\n")).unwrap();
         let envelope = HookBindingEnvelope {
-            context: CapturedContext::Captured(context.clone()),
+            context: CapturedContext::Captured(context.clone().into()),
             observed: ObservedHookProcess::default(),
         };
         let mut headers = axum::http::HeaderMap::new();
@@ -487,7 +488,7 @@ PY
             .unwrap()
             .join(format!("rollout-{NEW_NATIVE_ID}.jsonl"));
         let envelope = HookBindingEnvelope {
-            context: CapturedContext::Captured(context.clone()),
+            context: CapturedContext::Captured(context.clone().into()),
             observed: ObservedHookProcess::default(),
         };
         let mut headers = axum::http::HeaderMap::new();

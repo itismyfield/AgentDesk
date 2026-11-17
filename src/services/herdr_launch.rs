@@ -1,6 +1,9 @@
 //! Herdr launch preparation for one channel's canonical row.
 //! Durable Pending and user-default grants precede create; retries only probe.
 
+pub(crate) mod clear_epoch;
+#[cfg(unix)]
+mod codex_resume;
 pub(crate) mod policy;
 mod prepared;
 #[cfg(unix)]
@@ -221,6 +224,7 @@ pub(crate) struct HerdrLaunch {
     pub channel_id: Option<u64>,
     pub expected_native_session_id: Option<String>,
     pub resume: bool,
+    pub resume_start: Option<crate::services::tui_prompt_dedupe::binding_context::ResumeStart>,
     /// Where the provider's hooks may name a transcript; a Claude launch reads its own setting.
     pub provider_root: Option<PathBuf>,
 }
@@ -404,6 +408,8 @@ pub(crate) async fn launch_herdr_session(
     prepare: impl FnOnce(&PreparedIncarnation) -> Result<HerdrLaunchCommand, String>,
     host: Arc<dyn HerdrLaunchHost>,
 ) -> Result<HerdrLaunchOutcome, HerdrLaunchError> {
+    let launching =
+        clear_epoch::Launching::for_launch(&launch.owner).map_err(HerdrLaunchError::Prepare)?;
     let endpoint = admit(launch.endpoint.as_ref())?.clone();
     let mode = host.mode(&endpoint);
     let admitted = if mode == EndpointMode::LegacyDedicated {
@@ -486,12 +492,25 @@ pub(crate) async fn launch_herdr_session(
         None
     };
     let expected_native = launch.expected_native_session_id.as_deref();
+    #[cfg(unix)]
+    let resume_start = codex_resume::prepare(
+        &owner,
+        &observed,
+        launch.resume,
+        expected_native,
+        launch.provider_root.as_deref(),
+        launch.resume_start.as_ref(),
+    )
+    .map_err(HerdrLaunchError::Prepare)?;
+    #[cfg(not(unix))]
+    let resume_start = None;
     let incarnation = herdr_incarnation(
         &owner,
         launch.channel_id,
         expected_native,
         launch.resume,
         launch.provider_root,
+        resume_start,
     )
     .map_err(HerdrLaunchError::Prepare)?;
     let command = prepare(&incarnation).map_err(HerdrLaunchError::Prepare)?;
@@ -530,6 +549,14 @@ pub(crate) async fn launch_herdr_session(
     if let Err(error) = markers {
         return Err(retire_unsent(pool, &owner, &nonce, error).await);
     }
+    let checked = match launching.scope().check_epoch() {
+        Ok(checked) => checked,
+        Err(detail) => {
+            return Err(
+                retire_unsent(pool, &owner, &nonce, HerdrLaunchError::NotSent(detail)).await,
+            );
+        }
+    };
 
     let prepared::Created {
         witness,
@@ -542,7 +569,7 @@ pub(crate) async fn launch_herdr_session(
         command,
         &host,
         create_permit,
-        &in_flight,
+        (&in_flight, checked),
     )
     .await?;
     let indeterminate = |detail: String| HerdrLaunchOutcome::Indeterminate {
@@ -571,6 +598,8 @@ pub(crate) async fn launch_herdr_session(
         None => return Ok(indeterminate("create call did not return".into())),
     };
     let location = pane_location(&endpoint, pane_id);
+    #[cfg(test)]
+    clear_epoch::tests::before_projection(&owner);
     // The row is read again after the socket call: only this nonce's Pending takes the pane.
     let recorded = match load_row(pool, &owner).await {
         Ok(current) => {
@@ -759,6 +788,7 @@ fn herdr_incarnation(
     expected_native_session_id: Option<&str>,
     resume: bool,
     provider_root: Option<PathBuf>,
+    resume_start: Option<crate::services::tui_prompt_dedupe::binding_context::ResumeStart>,
 ) -> Result<PreparedIncarnation, String> {
     let context = BindingContext {
         schema: 1,
@@ -777,6 +807,7 @@ fn herdr_incarnation(
         },
         first_prompt_digest: None,
         source_policy: None,
+        resume_start,
     };
     PreparedIncarnation::create(context).map_err(|error| format!("create binding context: {error}"))
 }

@@ -1118,7 +1118,7 @@ fn explicit_hook_clear_keeps_zero_start_and_parentless_resume_keeps_pending() {
             .unwrap();
             let context = execution_context("claude", &nonce).unwrap();
             let envelope = HookBindingEnvelope {
-                context: CapturedContext::Captured(context),
+                context: CapturedContext::Captured(context.into()),
                 observed: ObservedHookProcess::default(),
             };
             let mut headers = axum::http::HeaderMap::new();

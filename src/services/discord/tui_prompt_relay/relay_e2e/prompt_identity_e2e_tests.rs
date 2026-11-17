@@ -1002,6 +1002,7 @@ async fn bound_live_hook_without_watcher(
         provider_root: None,
         first_prompt_digest: None,
         source_policy: None,
+        resume_start: None,
     })
     .unwrap();
     rig.run_provider(&incarnation.path, false);

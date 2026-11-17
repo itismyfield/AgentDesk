@@ -38,6 +38,31 @@ impl MissingRecovery {
     }
 }
 
+/// A restart's greeting starts only under its permit; a refusal retains it with its notice.
+pub(super) async fn greeting_permit(
+    shared: &Shared,
+    channel: poise::serenity_prelude::ChannelId,
+    kept: Option<&serde_json::Value>,
+    failed: Failure,
+) -> Result<Failure, String> {
+    use crate::services::discord::queue_io::input_owner::origin::InputOrigin;
+    let Some(context) =
+        kept.filter(|kept| InputOrigin::from_context(Some(kept)) == InputOrigin::RestartSeed)
+    else {
+        return Ok(failed);
+    };
+    let permit = crate::services::discord::commands::herdr_seed_permit;
+    let Err(reason) = permit(shared, channel, context).await else {
+        return Ok(failed);
+    };
+    let detail = format!("restart greeting refused: {reason}");
+    let (kind, shared) = (Kind::ExecutorNotWired, Some(shared.clone()));
+    failed
+        .commit(kind, detail, Ok(None), shared, channel, None)
+        .await?;
+    Err("NotSent(\"owner_start_failed\")".into())
+}
+
 #[derive(Clone)]
 pub(super) struct Failure {
     mailbox: ChannelMailboxHandle,
