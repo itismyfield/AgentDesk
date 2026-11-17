@@ -779,6 +779,7 @@ fn internal_snapshot_start(flavor: &str) {
         assert!(input.confirm_admission(&intake.mailbox).await.unwrap());
         let registry = Arc::new(HealthRegistry::new());
         registry.register("claude".into(), intake.shared.clone()).await;
+        registry.register_http("claude".into(), intake.shared.serenity_http_or_token_fallback()).await;
         ChannelMailboxHandle::owner_input_wake(&registry, "claude", CHANNEL).await;
         let rejected = tokio::time::timeout(LIMIT, async {
             loop {
@@ -947,6 +948,8 @@ fn execution_gone(terminal: Option<bool>) {
             drop(after_refusal);
             intake.mock.refuse_message_writes(false);
             // The shell from the ended execution has gone; the queued owner launches its successor.
+            std::fs::write(fx.cwd.path().join("tmux"),
+                "#!/bin/sh\necho \"can't find session: ended legacy pane\" >&2\nexit 1\n").unwrap();
             fx.rig.show_panes(&[]);
             fx.rig.answer("workspace.create", json!({"type":"workspace_created","root_pane":{
                 "pane_id":PANE,"workspace_id":"w1","tab_id":"w1:1","revision":0,"cwd":fx.cwd.path()}}));
