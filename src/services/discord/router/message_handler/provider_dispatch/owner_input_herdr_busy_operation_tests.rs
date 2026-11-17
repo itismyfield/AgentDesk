@@ -33,6 +33,7 @@ fn an_observed_busy_herdr_front_uses_the_common_operation_once() {
     let host = TurnHost::Herdr(Box::new(HerdrTurnPlan {
         endpoint: owner.endpoint(),
         row: Some(HostedObservation::known_fixture(record)),
+        bootstrap: false,
     }));
     let _entered = owner.runtime.enter();
     let live = (transcript.to_str().unwrap(), Some(native.as_str()));

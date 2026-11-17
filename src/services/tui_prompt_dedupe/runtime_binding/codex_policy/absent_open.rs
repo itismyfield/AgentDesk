@@ -88,10 +88,24 @@ fn local_context(context: &BindingContext, tmux: &str) -> bool {
         && context.host == binding_context::stable_host_identity()
 }
 
-fn target_absent(tmux: &str) -> bool {
+pub(super) fn target_absent(tmux: &str) -> bool {
     tmux::session_presence(tmux) == SessionPresence::Missing
         && crate::services::session_backend::process_session_pid(tmux).is_none()
         && tmux::pane_liveness(tmux) == PaneLiveness::DeadOrAbsent
+}
+
+/// Neither the canonical nor the legacy rollout marker names an owning execution; a marker that
+/// cannot be read or parsed counts as owned.
+pub(super) fn rollout_unowned(tmux: &str) -> bool {
+    marker_paths(tmux, tc::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT).is_some_and(|paths| {
+        paths.iter().all(|path| match read_json(path) {
+            Ok(None) => true,
+            Ok(Some(value)) => value
+                .as_object()
+                .is_some_and(|marker| !marker.contains_key("codex_ownership")),
+            Err(_) => false,
+        })
+    })
 }
 
 fn runtime_markers_match(tmux: &str) -> bool {

@@ -54,6 +54,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct TurnParseState<'a> {
     pub(in crate::services::discord::tmux::tmux_watcher) terminal_rewind_attempt_key:
         &'a mut Option<WatcherRewindAttemptKey>,
     pub(in crate::services::discord::tmux::tmux_watcher) terminal_rewind_attempts: &'a mut u8,
+    pub(in crate::services::discord::tmux::tmux_watcher) watcher_turn_nonce: &'a Option<String>,
     pub(in crate::services::discord::tmux::tmux_watcher) watcher_turn_identity:
         &'a Option<crate::services::discord::inflight::InflightTurnIdentity>,
     pub(in crate::services::discord::tmux::tmux_watcher) last_activity_heartbeat_at:

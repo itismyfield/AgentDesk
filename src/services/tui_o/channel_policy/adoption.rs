@@ -12,6 +12,12 @@ pub(crate) mod body_check;
 
 use crate::services::tui_o::store::OStore;
 
+mod first_turn;
+pub(crate) use first_turn::{
+    FirstAdmission, FirstPause, FirstProof, digest as first_prompt_digest,
+    nonce_id as first_nonce_id,
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Adoption {
     /// Undecided: a Legacy body or placement releases it, a first `init` commits it.
@@ -116,6 +122,8 @@ pub(crate) struct Candidate {
     late_boundary: Arc<OnceLock<LateBoundary>>,
     turn_mark: Arc<Mutex<Option<TurnMark>>>,
     baseline_order: Arc<AtomicU64>,
+    first_turn: tokio::sync::watch::Sender<Option<first_turn::FirstTurn>>,
+    first_pauses: Arc<AtomicU64>,
     /// A thread child's verified relationship, set once and read by its first init.
     child: Arc<OnceLock<crate::services::session_host::surface_policy::VerifiedSurface>>,
     /// Test builds: set when a claim released a pending adoption, cleared once a sink saw a body.
@@ -173,6 +181,8 @@ impl Candidate {
             late_boundary: Arc::default(),
             turn_mark: Arc::default(),
             baseline_order: Arc::default(),
+            first_turn: tokio::sync::watch::channel(None).0,
+            first_pauses: Arc::default(),
             child: Arc::default(),
             #[cfg(test)]
             bodiless: Arc::default(),
@@ -218,6 +228,7 @@ impl Candidate {
     }
 
     /// Admission never waits for adoption; a failed log read leaves the host's baseline in use.
+    #[cfg(test)]
     pub(crate) fn mark_turn_admitted(
         &self,
         channel: u64,
@@ -367,6 +378,7 @@ impl Candidate {
         let mut state = self.lock();
         if matches!(*state, Adoption::Pending | Adoption::Deferred) {
             *state = Adoption::Released;
+            self.settle_first();
             tracing::info!(channel, "[tui_o] adoption released before the first init");
         }
     }
@@ -395,6 +407,7 @@ impl Candidate {
             return false;
         }
         *state = Adoption::Committed;
+        self.settle_first();
         true
     }
 }
@@ -434,6 +447,7 @@ impl Drop for LateReservationGuard {
                 crate::services::tui_o::writer::activation::settled(&store, self.channel)
             });
         *state = settled;
+        self.candidate.settle_first();
         tracing::info!(channel = self.channel, adoption = ?*state, "[tui_o] late reservation settled after host exit");
     }
 }
@@ -496,3 +510,7 @@ pub(crate) fn stored(
     };
     channels.iter().map(judged).collect()
 }
+
+#[cfg(test)]
+#[path = "adoption/first_turn_tests.rs"]
+mod first_turn_tests;

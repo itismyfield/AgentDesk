@@ -571,6 +571,7 @@ async fn soft_ack_cases(cases: &[u64], injected: bool) {
             terminal_rewind_attempt_key: &mut rewind,
             terminal_rewind_attempts: &mut attempts,
             watcher_turn_identity: &identity,
+            watcher_turn_nonce: &None,
             last_activity_heartbeat_at: &mut heartbeat,
             active_stream_inflight_reacquire_logged: &mut reacquire,
         };

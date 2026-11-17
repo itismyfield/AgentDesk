@@ -65,6 +65,7 @@ async fn collect_turn_stream_body(
     let source_authority = io.source_authority;
     let utf8_decoder = &mut *parser.utf8_decoder;
     let watcher_turn_identity = (*parser.watcher_turn_identity).clone();
+    let watcher_turn_nonce = (*parser.watcher_turn_nonce).clone();
     let producer_registry = (*relay.producer_registry).clone();
     let mut current_offset = *parser.current_offset;
     let mut all_data = (*parser.all_data).clone();
@@ -736,6 +737,8 @@ async fn collect_turn_stream_body(
                     tmux_session_name: &tmux_session_name,
                     output_path: &output_path,
                     source_authority,
+                    turn_identity: watcher_turn_identity.as_ref(),
+                    turn_nonce: watcher_turn_nonce.as_deref(),
                     turn_delivered: &turn_delivered,
                     host: &ctx.host,
                 },

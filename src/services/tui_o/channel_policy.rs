@@ -17,7 +17,8 @@ use crate::services::tui_o::writer::WriterAlarm;
 mod adoption;
 mod children;
 pub(crate) use adoption::{
-    Adoption, BodyClaimed, Candidate, ClaimReason, LateBoundary, LegacySend, Site,
+    Adoption, BodyClaimed, Candidate, ClaimReason, FirstAdmission, FirstPause, FirstProof,
+    LateBoundary, LegacySend, Site, first_nonce_id, first_prompt_digest,
 };
 #[cfg(test)]
 pub(crate) use adoption::{

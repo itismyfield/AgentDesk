@@ -183,3 +183,24 @@ async fn an_unmapped_local_claude_row_returns_to_tmux_until_its_move_back_finish
     pool.close().await;
     db.drop().await;
 }
+
+// A live entry put in by a test helper, with no writer host started, is judged by the turn host as
+// the writer itself judges it.
+#[test]
+fn turn_host_writer_judgement_matches_the_writer_for_any_live_entry() {
+    use crate::services::tui_o::writer::actor::Owing;
+    use crate::services::tui_o::writer::host::{
+        OwedView, initial_fresh_refusal, process_readiness,
+    };
+    let channel = 8_181_115_001;
+    let owing = Owing::default();
+    let owed = OwedView {
+        published: owing.published.subscribe(),
+        demand: owing.demand.clone(),
+    };
+    process_readiness().track_owed_for_test(channel, owed);
+    let writer = initial_fresh_refusal(channel);
+    assert_ne!(writer, Some("host_missing"), "the entry is live");
+    assert_eq!(writer_refusal(channel), writer);
+    assert_eq!(writer_refusal(channel + 1), Some("host_missing"));
+}
