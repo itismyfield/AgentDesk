@@ -18,19 +18,16 @@ fn serve(path: &Path, bytes: Vec<u8>) -> impl FnOnce() -> usize {
     next.push(".next");
     let _ = fs::remove_file(&path);
     fifo(&path);
-    let (server_path, server_stop) = (path.clone(), stop.clone());
+    let (served, halted) = (path.clone(), stop.clone());
     let server = std::thread::spawn(move || {
         for opens in 0.. {
-            let mut pipe = fs::OpenOptions::new()
-                .write(true)
-                .open(&server_path)
-                .unwrap();
-            if server_stop.load(SeqCst) {
+            let mut pipe = fs::OpenOptions::new().write(true).open(&served).unwrap();
+            if halted.load(SeqCst) {
                 return opens;
             }
             // A fresh FIFO takes the path before this end closes, so each open is one reader.
             fifo(Path::new(&next));
-            fs::rename(&next, &server_path).unwrap();
+            fs::rename(&next, &served).unwrap();
             pipe.write_all(&bytes).unwrap();
         }
         unreachable!()
@@ -43,7 +40,7 @@ fn serve(path: &Path, bytes: Vec<u8>) -> impl FnOnce() -> usize {
             .custom_flags(libc::O_NONBLOCK)
             .open(&path)
             .unwrap();
-        server.join().unwrap()
+        crate::test_support::wait::join_within(server, crate::test_support::wait::WAIT_CAP)
     }
 }
 

@@ -4669,6 +4669,7 @@ src/
 │   │   │   │   ├── fresh_admission.rs
 │   │   │   │   ├── herdr_bootstrap.rs
 │   │   │   │   ├── hold_detail.rs
+│   │   │   │   ├── observation_tests.rs
 │   │   │   │   └── provenance_tests.rs
 │   │   │   ├── codex_verified/
 │   │   │   │   ├── provenance/
@@ -4682,6 +4683,7 @@ src/
 │   │   │   │   │   ├── live_grant_tests.rs
 │   │   │   │   │   ├── permission.rs
 │   │   │   │   │   └── permission_tests.rs
+│   │   │   │   ├── observation.rs
 │   │   │   │   └── provenance.rs
 │   │   │   ├── pane_registration/
 │   │   │   │   └── codex_launch_cause.rs
