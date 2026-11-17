@@ -3,16 +3,7 @@ use super::restore_cwd::restore_thread_worktree_path_from_db;
 use super::*;
 use crate::services::git::GitCommand;
 
-/// Worktree info for sessions that were auto-redirected to avoid conflicts
-#[derive(Clone, Debug)]
-pub(in crate::services::discord) struct WorktreeInfo {
-    /// The original repo path that was conflicted
-    pub(in crate::services::discord) original_path: String,
-    /// The worktree directory path
-    pub(in crate::services::discord) worktree_path: String,
-    /// The branch name created for this worktree
-    pub(in crate::services::discord) branch_name: String,
-}
+pub(in crate::services::discord) use crate::services::engine_runtime::session::WorktreeInfo;
 
 /// Check if a path is a git repo and if another channel already uses it.
 /// Returns the conflicting channel's name if found.

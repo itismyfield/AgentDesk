@@ -473,6 +473,7 @@ src/
 │   ├── automation_contract.rs
 │   ├── bot_role.rs
 │   ├── cluster_policy.rs
+│   ├── conversation.rs
 │   ├── dispatch_route.rs
 │   ├── file_sync.rs
 │   ├── host_observation.rs
@@ -1633,8 +1634,7 @@ src/
 │   │   │   └── tui_passthrough.rs
 │   │   ├── delivery_lease_cell/
 │   │   │   ├── exact_lease/
-│   │   │   │   ├── tests.rs
-│   │   │   │   └── token_tests.rs
+│   │   │   │   └── tests.rs
 │   │   │   ├── exact_lease_tests.rs
 │   │   │   └── source_epoch_observer.rs
 │   │   ├── execution_identity/
@@ -3502,6 +3502,7 @@ src/
 │   │   ├── host_liveness.rs
 │   │   ├── host_teardown_gate.rs
 │   │   ├── http.rs
+│   │   ├── id_bridge.rs
 │   │   ├── idle_detector.rs
 │   │   ├── idle_relay_drift.rs
 │   │   ├── inflight.rs
@@ -3678,6 +3679,11 @@ src/
 │   │   ├── routing_constraint.rs
 │   │   ├── thread_reuse.rs
 │   │   └── wait_queue.rs
+│   ├── engine_runtime/
+│   │   ├── legacy_state.rs
+│   │   ├── mod.rs
+│   │   ├── relay_state.rs
+│   │   └── session.rs
 │   ├── git/
 │   │   ├── branch_resolver.rs
 │   │   ├── commit_resolver.rs

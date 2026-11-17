@@ -11,6 +11,7 @@ use crate::domain::outbound::ids::{OutboundChannelId, OutboundMessageId, Outboun
 use crate::domain::outbound::intent::OutboundIntent;
 pub(crate) use crate::domain::outbound::key::{OutboundDedupKey, OutboundDeliveryId};
 use crate::domain::outbound::key::{OutboundOperationKey, OutboundTargetKey};
+use crate::services::discord::id_bridge::conversation_from_discord;
 
 /// Where an outbound delivery should land.
 ///
@@ -70,7 +71,7 @@ impl From<OutboundOperation> for OutboundOperationKey {
 
 impl From<ChannelId> for OutboundChannelId {
     fn from(id: ChannelId) -> Self {
-        Self::new(id.get())
+        Self::new(conversation_from_discord(id).get())
     }
 }
 
@@ -297,6 +298,64 @@ impl DiscordOutboundMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sdk_target_and_reference_wire_stays_snowflake_strings() {
+        for raw in [1, 42, u64::MAX] {
+            for (target, expected_wire) in [
+                (
+                    OutboundTarget::Channel(ChannelId::new(raw)),
+                    serde_json::json!({"kind": "channel", "ids": raw.to_string()}),
+                ),
+                (
+                    OutboundTarget::Thread {
+                        parent: ChannelId::new(7),
+                        thread: ChannelId::new(raw),
+                    },
+                    serde_json::json!({"kind": "thread", "ids": {"parent": "7", "thread": raw.to_string()}}),
+                ),
+                (
+                    OutboundTarget::DmUser(UserId::new(raw)),
+                    serde_json::json!({"kind": "dm_user", "ids": raw.to_string()}),
+                ),
+            ] {
+                assert_eq!(serde_json::to_value(target).unwrap(), expected_wire);
+                let intent = OutboundIntent::new(
+                    "correlation",
+                    "event",
+                    "body",
+                    target.into(),
+                    DiscordOutboundPolicy::default(),
+                );
+                let message = DiscordOutboundMessage::from(intent);
+                assert_eq!(message.target, target);
+            }
+            let reference = OutboundMessageReference {
+                channel_id: ChannelId::new(raw),
+                message_id: MessageId::new(raw),
+            };
+            assert_eq!(
+                serde_json::to_value(reference).unwrap(),
+                serde_json::json!({"channel_id": raw.to_string(), "message_id": raw.to_string()})
+            );
+            let integer_fixture = serde_json::json!({"channel_id": raw, "message_id": raw});
+            let restored: OutboundMessageReference =
+                serde_json::from_value(integer_fixture).unwrap();
+            assert_eq!(restored, reference);
+        }
+    }
+
+    #[test]
+    fn legacy_u64_channel_binding_still_builds_postgres_arguments() {
+        use sqlx::{Arguments, Execute};
+        for raw in [1, i64::MAX as u64, u64::MAX] {
+            let channel_id: u64 = ChannelId::new(raw).get();
+            let mut query =
+                sqlx::query::<sqlx::Postgres>("SELECT $1::BIGINT").bind(channel_id as i64);
+            assert_eq!(query.take_arguments().unwrap().unwrap().len(), 1);
+            assert_eq!(channel_id, raw);
+        }
+    }
 
     #[test]
     fn legacy_outbound_envelope_defaults_create_nonce_fields() {
