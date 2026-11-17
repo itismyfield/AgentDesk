@@ -34,11 +34,12 @@ pub(crate) fn focus_modal(capture: &str) -> bool {
     )
 }
 
-/// A readable screen with no live turn on it; the composer's draft is not read.
+/// A screen with something on it and no live turn; the composer's draft is not read.
 pub(crate) fn shows_no_turn(capture: &str) -> bool {
     let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(capture);
     let plain = super::super::prompt_readiness::normalize_prompt_readiness_panel_in_capture(&plain);
-    !crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&plain)
+    !plain.trim().is_empty()
+        && !crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&plain)
 }
 
 #[cfg(unix)]

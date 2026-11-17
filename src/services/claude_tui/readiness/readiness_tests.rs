@@ -559,13 +559,180 @@ fn a_timed_out_hold_tells_an_unmoved_idle_source_from_a_running_turn() {
         other => panic!("the wait must hold: {other:?}"),
     };
     assert!(unproven(), "nothing in flight can supply the evidence");
-    let seen = watched(&r.session, None);
+    // Was "a source that moved waits": that hold had no wake, so a moved idle source now runs
+    // counted windows and then settles on an idle screen.
+    let idle = || Some(view("", false));
+    let mut seen = watched(&r.session, None);
+    for window in 0..3 {
+        r.append(json!({"type":"ai-title"}));
+        assert_eq!(seen.expired(idle), Expiry::Requiet, "window {window}");
+    }
     r.append(json!({"type":"ai-title"}));
-    assert!(!seen.unproven(), "a source that moved waits");
+    assert_eq!(seen.expired(idle), Expiry::Unproven, "the windows end");
+    // A window keeps the wait's first source: a relaunch over the same transcript is not its.
+    let mut seen = watched(&r.session, None);
+    r.append(json!({"type":"ai-title"}));
+    assert_eq!(seen.expired(idle), Expiry::Requiet);
+    let blank = || Some(" \n".to_owned());
+    assert_eq!(
+        seen.expired(blank),
+        Expiry::Waits,
+        "a blank screen is not read"
+    );
+    let mut relaunch = r.ctx.clone();
+    relaunch.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+    let marker = crate::services::tmux_common::session_temp_path(&r.session, "spawn_nonce");
+    fs::write(&marker, &relaunch.execution_nonce).unwrap();
+    tui_prompt_dedupe::binding_context::PreparedIncarnation::create(relaunch).unwrap();
+    assert_eq!(
+        seen.expired(idle),
+        Expiry::Waits,
+        "a relaunched source waits"
+    );
+    fs::write(&marker, &r.ctx.execution_nonce).unwrap();
     r.assistant("still Running");
     assert!(!unproven(), "a running turn ends by itself");
     assert!(tmux.sends().is_empty());
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
+}
+
+/// Runs `act` once the wait on `session` made its first look. That look creates the ledger entry
+/// after the wait kept its Stamp, so `act` lands inside the wait without a hook in the wait.
+pub(crate) fn after_first_look(
+    session: &str,
+    act: impl FnOnce() + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    assert_eq!(retained_sources(session), 0, "no look precedes the wait");
+    let session = session.to_owned();
+    std::thread::spawn(move || {
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        while retained_sources(&session) == 0 {
+            assert!(std::time::Instant::now() < until, "the wait never looked");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        act();
+    })
+}
+
+// A restarted idle pane appends one metadata row while the owner's input waits: no key, the
+// original retained once with its resend ask owed, and the front released.
+#[cfg(unix)]
+#[test]
+fn an_owner_input_whose_idle_transcript_moved_once_ends_retained_without_a_key() {
+    use super::super::input::submission::tests::{ScriptedTmux, view};
+    use crate::services::discord::owner_effect_for_test as effect;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    r.assistant("old answer");
+    r.terminal();
+    daemon_restart(&r.session);
+    let tmux = ScriptedTmux::new(&view("", false));
+    tmux.set_dead(false);
+    let channel = 821_701u64;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
+    let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+    let attempt = json!({"nonce":"moved-once","provider":"claude",
+        "target":{"host":"tmux","owner":r.session,
+            "root":crate::services::tmux_common::current_tmux_owner_marker(),
+            "execution_nonce":r.ctx.execution_nonce},
+        "source":{"kind":"pre_source","expected_session_id":null,
+            "expected_transcript":null,"binding_watermark":null}});
+    let queue = r.root.join("moved-once.json");
+    runtime
+        .block_on(mailbox.v2_cold_fixture(queue, attempt, "one original".into(), channel))
+        .unwrap();
+    let (path, native) = (r.path.clone(), r.ctx.expected_native_session_id.clone());
+    let moved = after_first_look(&r.session, move || {
+        let mut file = OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(file, "{}", json!({"type":"ai-title","sessionId":native})).unwrap();
+    });
+    let pane = super::super::busy_inject::Pane::with_program(
+        &r.session,
+        crate::services::platform::tmux::session_identity_tests::managed_fixture_program(
+            "tmux".into(),
+        ),
+    )
+    .unwrap();
+    let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+    let send = effect::idle_claude(pane, r.session.clone(), channel, token);
+    let leaf: effect::Leaf = Box::new(move |frame| {
+        // The budget and its windows run out on the leaf's own thread.
+        let budget = Some(Duration::from_millis(900));
+        super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(budget));
+        let result = send(frame);
+        super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(None));
+        result
+    });
+    let result = runtime
+        .block_on(effect::run(&mailbox, std::sync::Arc::new(|| 10_000), leaf))
+        .unwrap();
+    moved.join().unwrap();
+    assert!(
+        matches!(&result, effect::Completion::NotSent(reason) if reason.contains("unproven")),
+        "{result:?}"
+    );
+    assert!(tmux.sends().is_empty(), "no key reaches the pane");
+    let snapshot = runtime
+        .block_on(mailbox.v2_request(|slot| slot.as_ref().unwrap().json()))
+        .unwrap();
+    assert!(
+        snapshot["items"].as_array().unwrap().is_empty(),
+        "{snapshot}"
+    );
+    let retained = snapshot["retained_inputs"].as_array().unwrap();
+    assert_eq!(retained.len(), 1, "{snapshot}");
+    assert_eq!(retained[0]["input"]["original"]["text"], "one original");
+    assert_eq!(
+        retained[0]["notice"],
+        json!({"kind":"retained_retry_required","enqueued":false}),
+        "one resend ask is owed"
+    );
+}
+
+// Evidence that lands inside a window is delivered by the same wait, not settled over.
+#[cfg(unix)]
+#[test]
+fn evidence_that_lands_inside_a_window_delivers_the_waiting_input() {
+    use super::super::input::submission::tests::{ScriptedTmux, view};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    r.assistant("old answer");
+    r.terminal();
+    daemon_restart(&r.session);
+    let tmux = ScriptedTmux::new(&view("", false));
+    tmux.set_dead(false);
+    let budget = Duration::from_millis(1200);
+    let (session, path, ctx) = (r.session.clone(), r.path.clone(), r.ctx.clone());
+    let moved = after_first_look(&r.session, move || {
+        let native = &ctx.expected_native_session_id;
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{}", json!({"type":"ai-title","sessionId":native})).unwrap();
+        // Past the budget, half way into its first window.
+        std::thread::sleep(budget * 3 / 2);
+        let start = json!({"session_id":native,"transcript_path":path,"source":"startup"});
+        let at = Some(Utc::now());
+        note_hook(
+            "claude",
+            &HookEventKind::SessionStart,
+            &session,
+            &start,
+            Some(&ctx),
+            at,
+            false,
+        );
+    });
+    super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(Some(budget)));
+    let sent = r.send();
+    super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(None));
+    moved.join().unwrap();
+    assert_eq!(sent, Ok(()));
+    assert_eq!(tmux.sends(), ["load", "paste", "Enter"]);
 }
 
 /// The end of a turn as Claude writes it: the answer, each Stop hook output, the summary, the
@@ -1406,7 +1573,8 @@ fn a_closed_managed_attempt_refuses_before_waiting_for_native_readiness() {
             super::super::input::PromptReadinessKind::ProvenWarmFollowup,
         )
     });
-    assert_eq!(result.err().as_deref(), Some(refused.as_str()));
+    let stopped = result.err().map(|stop| stop.error);
+    assert_eq!(stopped.as_deref(), Some(refused.as_str()));
     let cancel = crate::services::provider::CancelToken::new();
     cancel
         .cancelled
@@ -1421,7 +1589,7 @@ fn a_closed_managed_attempt_refuses_before_waiting_for_native_readiness() {
         )
     });
     assert_eq!(
-        result.err().as_deref(),
+        result.err().map(|stop| stop.error).as_deref(),
         Some(super::super::input::PROMPT_READY_CANCELLED_ERROR)
     );
 }

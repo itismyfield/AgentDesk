@@ -26,7 +26,16 @@ enum Case {
     Recorded,
     /// A continuing turn's summary arrives after the restart lost its hook's volatile latch.
     Continuing,
+    /// Restarted like the first; one metadata row lands while the input waits.
+    Moved,
+    /// The same wait, but what lands is a turn the idle-looking screen does not show.
+    MovedRunning,
+    /// The same wait; a continuation fence closes over the metadata row.
+    MovedFenced,
+    /// The same wait and metadata row under a screen that shows a turn.
+    MovedBusy,
 }
+use Case::{Moved, MovedBusy, MovedFenced, MovedRunning};
 
 // The resumed cases restart without the start record a resume accepted before its build lacks.
 #[test]
@@ -47,6 +56,20 @@ fn a_restarted_resume_with_its_recorded_start_takes_its_input_once() {
 #[test]
 fn a_restart_during_a_continuing_stop_retains_with_one_resend_notice_pg() {
     owner_outcome(&[(Case::Continuing, 816_106)]);
+}
+
+#[test]
+fn a_wait_whose_transcript_moved_once_ends_retained_with_one_resend_notice_pg() {
+    owner_outcome(&[(Moved, 821_711)]);
+}
+
+#[test]
+fn a_moved_transcript_under_a_turn_a_fence_or_a_busy_screen_keeps_the_front_waiting() {
+    owner_outcome(&[
+        (MovedRunning, 821_712),
+        (MovedFenced, 821_713),
+        (MovedBusy, 821_714),
+    ]);
 }
 
 fn owner_outcome(cases: &[(Case, u64)]) {
@@ -79,15 +102,16 @@ fn owner_outcome(cases: &[(Case, u64)]) {
         let asked = json!({"type":"user","timestamp":old,"message":{"role":"user","content":"earlier prompt"}});
         let said = json!({"type":"assistant","timestamp":old,"message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}});
         match case {
-            Case::Restarted | Case::RestartedOld | Case::Recorded | Case::Continuing => rows(&[
-                asked,
-                said,
+            Case::Running => rows(&[asked.clone(), said.clone()]),
+            Case::StartRefused => (),
+            _ => rows(&[
+                asked.clone(),
+                said.clone(),
                 json!({"type":"system","subtype":"turn_duration","timestamp":old}),
                 json!({"type":"last-prompt"}),
             ]),
-            Case::Running => rows(&[asked, said]),
-            Case::StartRefused => (),
         }
+        let moves = matches!(case, Moved | MovedRunning | MovedFenced | MovedBusy);
         let resumed = case != Case::StartRefused;
         let context: binding_context::BindingContext = serde_json::from_value(json!({
             "schema":1,"provider":"claude","execution_nonce":NONCE,
@@ -206,6 +230,42 @@ fn owner_outcome(cases: &[(Case, u64)]) {
                 "revision":2,"truncated":false}}),
             );
         }
+        if case == MovedBusy {
+            rig.answer("pane.read", json!({"type":"pane_read","read":{"pane_id":PANE,
+                "source":"recent_unwrapped","text":format!("✻ Thinking… (3s · esc to interrupt)\n\n{border}\n❯ \n{border}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"),
+                "revision":2,"truncated":false}}));
+        }
+        // What lands inside the wait, after it kept its Stamp.
+        let moved = moves.then(|| {
+            let (path, native, logical) = (path.clone(), native.clone(), logical.clone());
+            let (context, asked, said) = (context.clone(), asked.clone(), said.clone());
+            readiness::tests::after_first_look(&logical.clone(), move || {
+                use std::io::Write;
+                if case == MovedFenced {
+                    readiness::note_hook(
+                        "claude",
+                        &HookEventKind::Stop,
+                        &logical,
+                        &json!({"session_id":native,"transcript_path":path}),
+                        Some(&context),
+                        Some(chrono::Utc::now()),
+                        true,
+                    );
+                }
+                let landed = match case {
+                    MovedRunning => vec![asked, said],
+                    _ => vec![json!({"type":"ai-title"})],
+                };
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap();
+                for mut row in landed {
+                    row["sessionId"] = json!(native);
+                    writeln!(file, "{row}").unwrap();
+                }
+            })
+        });
         let (_, target) = bound_target(&rig, &logical, 1);
         let attached = Attached {
             nonce: NONCE.into(),
@@ -220,7 +280,7 @@ fn owner_outcome(cases: &[(Case, u64)]) {
         let leaf = effect::created(
             Box::new(move |frame: String| {
                 // The readiness budget runs out on the leaf's own thread.
-                let budget = Some(Duration::from_millis(450));
+                let budget = Some(Duration::from_millis(if moves { 900 } else { 450 }));
                 composer::READY_WAIT_FOR_TESTS.with(|wait| wait.set(budget));
                 let result = guarded_outcome::capture_preparation(|| {
                     let (sender, receiver) = std::sync::mpsc::channel();
@@ -236,6 +296,9 @@ fn owner_outcome(cases: &[(Case, u64)]) {
         let result = runtime
             .block_on(effect::run(&mailbox, Arc::new(|| 10_000), leaf))
             .unwrap();
+        if let Some(moved) = moved {
+            moved.join().unwrap();
+        }
         let read = || {
             runtime
                 .block_on(mailbox.v2_request(|slot| slot.as_ref().unwrap().json()))
@@ -271,13 +334,10 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             snapshot["items"].as_array().unwrap(),
             snapshot["retained_inputs"].as_array().unwrap(),
         );
-        if case == Case::Running {
-            assert_eq!(items.len(), 1, "a running turn keeps the original in front");
-            assert!(retained.is_empty(), "a running turn retains nothing");
-            assert!(
-                held_watch::armed(channel),
-                "a running turn leaves its watch"
-            );
+        if matches!(case, Case::Running | MovedRunning | MovedFenced | MovedBusy) {
+            assert_eq!(items.len(), 1, "{case:?}: the original stays in front");
+            assert!(retained.is_empty(), "{case:?}: nothing is retained");
+            assert!(held_watch::armed(channel), "{case:?}: its watch is left");
         } else {
             assert!(items.is_empty(), "{case:?}: the front is released");
             assert_eq!(retained.len(), 1, "{case:?}: {snapshot}");
@@ -290,7 +350,7 @@ fn owner_outcome(cases: &[(Case, u64)]) {
                 "{case:?}: one resend ask is owed"
             );
             assert!(!held_watch::armed(channel), "{case:?}: no look resends it");
-            let notice_db = (case == Case::Continuing).then(|| {
+            let notice_db = matches!(case, Case::Continuing | Moved).then(|| {
                 runtime.block_on(async {
                     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
                     let pool = db.connect_and_migrate().await;
