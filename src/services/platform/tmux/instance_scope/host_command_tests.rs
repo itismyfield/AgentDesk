@@ -348,3 +348,76 @@ fn exercise_instance_entries() {
         "foreign target spawned tmux"
     );
 }
+
+#[test]
+fn instance_if_shell_physical_target_reports_receipt_refusal_for_legacy_and_codex() {
+    const NAME: &str = "services::platform::tmux::instance_scope::tests::instance_if_shell_physical_target_reports_receipt_refusal_for_legacy_and_codex";
+    if let Ok(mode) = std::env::var("ADK_PHYSICAL_REFUSAL_CHILD") {
+        crate::config::test_instance::initialize().unwrap();
+        let scope = crate::config::test_instance::current().unwrap().unwrap();
+        assert_eq!(
+            crate::config::test_instance::environment::claude_login_enabled(),
+            mode == "codex"
+        );
+        let mut command = Command::new(scope.root.join("never-spawn-tmux"));
+        let error = input_command(
+            &mut command,
+            &[
+                "if-shell",
+                "-F",
+                "-t",
+                "%7",
+                "1",
+                "send-keys -t %7 Enter",
+                "true",
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "test pane target has no receipt identity"
+        );
+        return;
+    }
+    for mode in ["legacy", "codex"] {
+        let (temp, previous) = crate::config::test_instance::tests::fixture();
+        let home = temp.path().canonicalize().unwrap();
+        let root = home
+            .join(".adk/dev/instances")
+            .join(previous.file_name().unwrap());
+        std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+        std::fs::rename(&previous, &root).unwrap();
+        for relative in [
+            "manifest.json",
+            "receipt.json",
+            "config/agentdesk.yaml",
+            "config/org.yaml",
+        ] {
+            let path = root.join(relative);
+            let body = std::fs::read_to_string(&path)
+                .unwrap()
+                .replace(previous.to_str().unwrap(), root.to_str().unwrap());
+            std::fs::write(path, body).unwrap();
+        }
+        if mode == "codex" {
+            let cli = home.join(".local/bin/claude");
+            std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+            std::fs::write(&cli, "unused fixture binary").unwrap();
+            let login = serde_json::json!({"mode":"default_active", "account_slot":3,
+                "login_home":home,"config_dir":root.join("home/.adk/profiles/claude/test-claude"),"cli":cli});
+            for relative in ["manifest.json", "receipt.json"] {
+                let path = root.join(relative);
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                value["claude_login"] = login.clone();
+                std::fs::write(path, value.to_string()).unwrap();
+            }
+        }
+        let output = crate::config::test_instance::tests::command(&root)
+            .args(["--exact", NAME, "--nocapture"])
+            .env("ADK_PHYSICAL_REFUSAL_CHILD", mode)
+            .output()
+            .unwrap();
+        crate::config::test_instance::tests::assert_single_test_passed(&output, NAME);
+    }
+}
