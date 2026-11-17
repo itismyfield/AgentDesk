@@ -5,6 +5,8 @@ use super::*;
 use crate::services::tui_o::ownership::execution::OwnerPermit;
 use std::collections::BTreeMap;
 mod owner_port;
+#[cfg(all(test, unix))]
+mod thread_lookup_tests;
 pub(super) use owner_port::prepare as prepare_owner_rest;
 type ExecutionPermits = BTreeMap<u64, Result<Arc<OwnerPermit>, String>>;
 use std::future::Future;
@@ -500,20 +502,23 @@ fn parts_with_rest(
 }
 
 /// O reads a reserved thread's parent the way automatic checks do: a failed read stays an error.
-fn install_thread_lookup(shared: &Arc<SharedData>) {
+fn install_thread_lookup(shared: &Arc<SharedData>, provider: &ProviderKind) {
     let shared = Arc::clone(shared);
-    crate::services::tui_o::cutover::install_channel_lookup(Arc::new(move |channel| {
-        let shared = Arc::clone(&shared);
-        Box::pin(async move {
-            let http = shared.serenity_http_or_token_fallback();
-            let http = http.ok_or_else(|| "Discord REST is not ready".to_string())?;
-            match serenity::ChannelId::new(channel).to_channel(&http).await {
-                Ok(serenity::Channel::Guild(channel)) => Ok(Some(channel)),
-                Ok(_) => Ok(None),
-                Err(error) => Err(error.to_string()),
-            }
-        })
-    }));
+    crate::services::tui_o::cutover::install_channel_lookup(
+        provider.as_str(),
+        Arc::new(move |channel| {
+            let shared = Arc::clone(&shared);
+            Box::pin(async move {
+                let http = shared.serenity_http_or_token_fallback();
+                let http = http.ok_or_else(|| "Discord REST is not ready".to_string())?;
+                match serenity::ChannelId::new(channel).to_channel(&http).await {
+                    Ok(serenity::Channel::Guild(channel)) => Ok(Some(channel)),
+                    Ok(_) => Ok(None),
+                    Err(error) => Err(error.to_string()),
+                }
+            })
+        }),
+    );
 }
 
 /// Starts the ordinary gateway writer under its PG gateway lease.
@@ -523,10 +528,10 @@ pub(super) fn spawn(
     config: Option<&TuiOConfig>,
     pg_gateway: bool,
 ) {
-    install_thread_lookup(shared);
     let Some(shadow) = shadow_of(provider) else {
         return;
     };
+    install_thread_lookup(shared, provider);
     host::start(shadow, pg_gateway, || parts(shared, provider, config));
 }
 
@@ -835,10 +840,10 @@ pub(super) fn spawn_execution(
     provider: &ProviderKind,
     config: Option<&TuiOConfig>,
 ) {
-    install_thread_lookup(shared);
     let Some(shadow) = shadow_of(provider) else {
         return;
     };
+    install_thread_lookup(shared, provider);
     let snapshot = crate::services::tui_o::cutover::boot_snapshot();
     let owned = crate::services::tui_o::cutover::boot_ownership()
         .into_iter()

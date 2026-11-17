@@ -53,7 +53,7 @@
 | `/pwd`·`/system-prompt`·`/skill`·`/sidecar`·`/tool-call`·`/usage`·`/node`·`/adk`·`/help`·`/allowall`·`/cancel-queued` | 일반 handler | 직접 host 분기 없음 | 일반 handler | 일반 handler | 동일 계약 실물은 #8120에서 확인 | #8128 추적·#8123 | host 분기가 없다는 조사이지 E2E 통과 아님. `/adk` 진단 backend literal은 위 D에 포함 |
 | 옛 `!shell`·`!start`·`!sessions`·`!machine-flip`·`!down`·`!meeting`·`!metrics`·`!receipt` | 폐지/교체 안내 | 동일 | 동일 | 동일 | **재구현하지 않음: 이미 main 충족** | #8128 전수 완료 항목 | `D=commands/command_policy.rs:80,88,90,91,92,93,96,99`, `text_commands.rs:76` |
 
-위 공통 명령 행의 실제 handler 좌표는 `commands/session.rs:142`(pwd), `system_prompt.rs:97`, `skill.rs:341`, `sidecar.rs:10`, `tool_call.rs:180`, `receipt.rs:19`(usage), `node.rs:292`, `inspect/mod.rs:61,67`(adk), `help.rs:83`, `config.rs:557`(allowall), `control.rs:715`(cancel-queued)다(모두 `src/services/discord/` 아래). slash 25개의 등록 위험 분류는 `commands/command_policy.rs:193-216`, health/status/inflight/queue handler는 `commands/diagnostics/mod.rs:13,30,47,64`다. `/queue`·`/health` 자체 보고는 공통이며 reports의 host 상태 차이를 실제 소비하는 status/inflight 행과 구분한다.
+위 공통 명령 행의 실제 handler 좌표는 `commands/session.rs:142`(pwd), `system_prompt.rs:97`, `skill.rs:307`, `sidecar.rs:10`, `tool_call.rs:180`, `receipt.rs:19`(usage), `node.rs:292`, `inspect/mod.rs:61,67`(adk), `help.rs:83`, `config.rs:557`(allowall), `control.rs:715`(cancel-queued)다(모두 `src/services/discord/` 아래). slash 25개의 등록 위험 분류는 `commands/command_policy.rs:193-216`, health/status/inflight/queue handler는 `commands/diagnostics/mod.rs:13,30,47,64`다. `/queue`·`/health` 자체 보고는 공통이며 reports의 host 상태 차이를 실제 소비하는 status/inflight 행과 구분한다.
 
 ### 입력 출처와 소유 경계
 
@@ -495,7 +495,7 @@ src/services/discord/tui_prompt_relay.rs:757:            if crate::config::sessi
 src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests.rs:128:        crate::config::session_hosts::herdr_endpoint(super::CHANNEL_ID).is_some(),
 src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests.rs:915:    let endpoint = crate::config::session_hosts::herdr_endpoint(super::CHANNEL_ID).unwrap();
 src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests.rs:972:    let endpoint = crate::config::session_hosts::herdr_endpoint(super::CHANNEL_ID).unwrap();
-src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs:11:use crate::services::discord::admin_host_guard::tests::{Host, ModeTmux, Tmux};
+src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e_tests.rs:11:use crate::services::discord::admin_host_guard::tests::{Host, ModeTmux, Tmux};
 src/services/discord/tui_prompt_relay/synthetic_start/admission_fence.rs:168:        let endpoint = crate::config::session_hosts::herdr_endpoint(self.channel.get());
 src/services/discord/tui_prompt_relay/synthetic_start/claim/admitted/transition_tests.rs:99:    assert!(crate::config::session_hosts::herdr_endpoint(strict_channel).is_some());
 src/services/discord/tui_prompt_relay/synthetic_start/claim/admitted/transition_tests.rs:259:    assert!(crate::config::session_hosts::herdr_endpoint(channel).is_some());

@@ -153,6 +153,8 @@ struct Fixture {
     /// Installs C2a for the next turns whatever the tag says; each strict turn logs its attempts.
     strict: AtomicBool,
     attempts: Mutex<Vec<i64>>,
+    /// The next turns are the retired canary's bootstrap launch.
+    bootstrap: AtomicBool,
     _dirs: (tempfile::TempDir, tempfile::TempDir),
     _endpoint: crate::services::claude_tui::hook_server::HookEndpointGuard,
     _guards: Vec<Guard>,
@@ -234,6 +236,7 @@ impl Fixture {
             cancel: Mutex::new(Arc::new(CancelToken::new())),
             strict: AtomicBool::new(false),
             attempts: Mutex::default(),
+            bootstrap: AtomicBool::new(false),
             _dirs: (dir, cwd),
             _endpoint: endpoint,
             _guards: guards,
@@ -366,6 +369,7 @@ impl Fixture {
         *self.cancel.lock().unwrap() = cancel.clone();
         let token = cancel.clone();
         let (strict, attempts) = (self.strict.load(Ordering::SeqCst), &self.attempts);
+        let bootstrap = self.bootstrap.load(Ordering::SeqCst);
         std::thread::scope(|scope| {
             let executor = scope.spawn(move || {
                 let _runtime = rt.enter();
@@ -391,6 +395,7 @@ impl Fixture {
                     goals: None,
                     compact_token_limit: None,
                     cancel: Some(token),
+                    bootstrap,
                 };
                 let strict_pin = if strict || owner_for_strict.contains("strict-") {
                     use crate::services::tui_o::exact_episode::{EpisodeEvidence, EpisodeMetadata};
@@ -1464,6 +1469,7 @@ fn a_turn_cancelled_before_its_stop_state_writes_nothing_pg() {
         goals: None,
         compact_token_limit: None,
         cancel: Some(token.clone()),
+        bootstrap: false,
     };
     let result = herdr_turn::execute(turn, &ports, sender);
     let cancelled = crate::services::codex_tui::input::PROMPT_READY_CANCELLED_ERROR;
@@ -1546,3 +1552,75 @@ mod live_end;
 
 #[path = "provider_dispatch_codex_herdr_pending_tests.rs"]
 mod pending_registration;
+
+// A target that reappears after the turn host judged it vacant refuses the bootstrap launch under
+// its fence, before any Pending row, create, marker, listing, prompt or input hold.
+#[test]
+fn bootstrap_launch_refuses_before_pending_when_its_target_reappears_pg() {
+    const RETIRED: &str = "0123456789abcdef0123456789abcdef";
+    let fx = Fixture::admitted("bootstrap-recheck");
+    fx.bootstrap.store(true, Ordering::SeqCst);
+    let mut retired = crate::db::dispatched_sessions::hosted_execution::tests::record(
+        &fx.owner,
+        RETIRED,
+        HostedState::Retired,
+    );
+    if let Some(expected) = retired.expected.as_mut() {
+        expected.binding_provider = "codex".into();
+    }
+    fx.rt.block_on(async {
+        sqlx::query("UPDATE sessions SET hosted_execution = $1 WHERE channel_id = $2")
+            .bind(serde_json::to_value(&retired).unwrap())
+            .bind(CHANNEL.to_string())
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+    });
+    let recheck =
+        crate::services::tui_prompt_dedupe::clear_relaunch::herdr_bootstrap::vacant_recheck;
+    assert_eq!(recheck(fx.logical()), Ok(()), "vacant when judged");
+    let alive = Arc::new(AtomicBool::new(true));
+    crate::services::session_backend::insert_process_session(
+        fx.logical(),
+        crate::services::session_backend::SessionHandle::TestProcess {
+            pid: 6_845_053,
+            alive,
+        },
+    );
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    let row = HostedRecord::Known(retired.clone());
+    let (result, messages) = fx.turn(&row, &ports, || {});
+    crate::services::session_backend::remove_process_session(fx.logical());
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.contains("target not vacant")),
+        "{result:?}"
+    );
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 0, "no create");
+    assert!(
+        launcher.nonces.lock().unwrap().is_empty(),
+        "no evidence read"
+    );
+    assert_eq!(fx.record(), row, "the row stays the retired execution");
+    let marker = crate::services::tmux_common::session_temp_path(fx.logical(), "spawn_nonce");
+    assert!(!Path::new(&marker).exists(), "no spawn marker");
+    assert_eq!(
+        crate::services::tui_prompt_dedupe::herdr_listed_execution(fx.logical()),
+        None,
+        "nothing listed"
+    );
+    assert!(fx.rig.sends().is_empty(), "{:?}", fx.rig.sends());
+    assert_eq!(
+        crate::services::claude::herdr_turn::input_holds().unwrap(),
+        Vec::new(),
+        "no input hold"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, StreamMessage::Text { .. } | StreamMessage::Done { .. })),
+        "{messages:?}"
+    );
+}

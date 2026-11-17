@@ -21,6 +21,7 @@ import argparse
 import importlib
 import io
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -31,8 +32,9 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+from audit_maintainability import parallel  # noqa: E402
 from audit_maintainability.checks import CheckSpec  # noqa: E402
-from audit_maintainability.common import REPO_ROOT, Finding  # noqa: E402
+from audit_maintainability.common import REPO_ROOT, Finding, run_cache  # noqa: E402
 
 CHECK_MODULES = (
     "audit_maintainability.checks.giant_files",
@@ -149,9 +151,46 @@ def _strip_toml_comment(line: str) -> str:
     return line
 
 
+def _runner_allowlist(spec: CheckSpec, al: set[str], check_stale: bool) -> set[str]:
+    if check_stale or (spec.key == "service_server_backflow" and al):
+        return set()
+    return al
+
+
+def _collect_findings(
+    specs: list[CheckSpec], runner_allowlists: dict[str, set[str]], jobs: int
+) -> dict[str, list[Finding]]:
+    """Raw runner output per check; worker output is replayed in check order."""
+
+    if jobs <= 1 or len(specs) <= 1 or not parallel.can_run(specs):
+        with run_cache():
+            return {spec.key: list(spec.runner(runner_allowlists[spec.key])) for spec in specs}
+    outcomes = parallel.collect(specs, runner_allowlists, jobs)
+    raw: dict[str, list[Finding]] = {}
+    for spec in specs:
+        outcome = outcomes[spec.key]
+        sys.stdout.write(outcome.stdout)
+        sys.stderr.write(outcome.stderr)
+        if outcome.error is not None:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            outcome.error.add_note(f"raised in audit worker by `{spec.key}`:\n{outcome.error_traceback}")
+            raise outcome.error
+        assert outcome.findings is not None
+        raw[spec.key] = outcome.findings
+    return raw
+
+
 def run_all(
-    specs: list[CheckSpec], allowlist: dict[str, set[str]], check_stale: bool = False
+    specs: list[CheckSpec],
+    allowlist: dict[str, set[str]],
+    check_stale: bool = False,
+    jobs: int = 1,
 ) -> tuple[dict[str, list[Finding]], dict[str, list[str]]]:
+    raw = _collect_findings(specs, {
+        spec.key: _runner_allowlist(spec, allowlist.get(spec.key, set()), check_stale)
+        for spec in specs
+    }, jobs)
     out: dict[str, list[Finding]] = {}
     stale_entries: dict[str, list[str]] = {}
     for spec in specs:
@@ -168,14 +207,14 @@ def run_all(
                         "remove the entries so backflow and alias findings stay visible"
                     ),
                 ),
-                *spec.runner(set()),
+                *raw[spec.key],
             ]
             continue
         if not check_stale:
-            out[spec.key] = list(spec.runner(al))
+            out[spec.key] = raw[spec.key]
             continue
 
-        all_findings = list(spec.runner(set()))
+        all_findings = raw[spec.key]
         used_al = set()
         filtered_findings = []
 
@@ -389,15 +428,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "exit non-zero for error findings or checker failures; warnings are informational."
         ),
     )
+    parser.add_argument(
+        "--jobs",
+        type=_positive_int,
+        default=None,
+        help=(
+            "worker processes for independent checks; output is identical for any value "
+            "(default: CPU count from the command line, 1 when called in-process)"
+        ),
+    )
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _positive_int(value: str) -> int:
+    jobs = int(value)
+    if jobs < 1:
+        raise argparse.ArgumentTypeError("--jobs must be >= 1")
+    return jobs
+
+
+def main(argv: list[str] | None = None, *, default_jobs: int = 1) -> int:
     args = parse_args(argv)
+    jobs = args.jobs if args.jobs is not None else default_jobs
 
     specs = load_check_specs()
     allowlist = load_allowlist(args.allowlist)
-    findings, stale_entries = run_all(specs, allowlist, check_stale=args.check)
+    findings, stale_entries = run_all(specs, allowlist, check_stale=args.check, jobs=jobs)
 
     if args.format == "yaml":
         rendered = render_yaml(specs, findings)
@@ -462,4 +518,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(default_jobs=os.cpu_count() or 1))

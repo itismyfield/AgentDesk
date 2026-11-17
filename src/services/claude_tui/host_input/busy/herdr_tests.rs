@@ -90,6 +90,7 @@ fn host(rig: &HerdrRig) -> crate::services::turn_host::TurnHost {
             herdr_session: SESSION.into(),
         },
         row: Some(HostedObservation::known_fixture(record)),
+        bootstrap: false,
     }))
 }
 

@@ -1351,6 +1351,14 @@ class WaitTimeoutClassification(unittest.TestCase):
             self.classify(*messages, health=self.idle_health()), "turn_not_started_queue_blocked"
         )
 
+    def test_refusing_target_writer_names_the_cause_of_its_held_queue(self):
+        row = {"provider": "codex", "channel_id": E51_TIMEOUT["channel_id"], "accepts": False, "hold_reason": "unready"}
+        for hold, expected in (("unready", "turn_not_started_writer_not_ready"),
+                               ("channel is not owned by O", "turn_not_started_queue_blocked")):
+            with self.subTest(hold=hold):
+                detail = {**_health_detail(_e51_mailbox()), "tui_o_writer_readiness": [{**row, "hold_reason": hold}]}
+                self.assertEqual(self.classify(_e51_message(self.PROMPT), health=(200, detail)), expected)
+
     def test_stall_state_alone_marks_queue_blocked(self):
         mailbox = _e51_mailbox(queue_depth=0)
         self.assertEqual(

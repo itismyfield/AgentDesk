@@ -382,3 +382,6 @@ async fn a_takeover_cut_off_before_its_era_seal_recovers_its_store_on_the_next_s
         io.alarms.halted()
     );
 }
+
+#[path = "host_codex_first_proof_tests.rs"]
+mod first_proof;

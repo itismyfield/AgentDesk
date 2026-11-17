@@ -172,6 +172,7 @@ pub(super) async fn recover(shared: &Shared, channel: ChannelId) {
     match recovered {
         Ok(_) => {
             claude_handoff::recover(shared.clone(), channel);
+            crate::services::discord::commands::effort_restart::resume_owed(shared, channel).await;
             if native_prepare::boot_ready(shared, channel).await {
                 wake(shared, channel);
             }

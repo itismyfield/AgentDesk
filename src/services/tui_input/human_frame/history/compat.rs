@@ -115,20 +115,67 @@ pub(super) fn read_legacy(path: &Path) -> Result<Store, String> {
     }
 }
 
-fn v2_value(path: &Path) -> Option<Arc<serde_json::Value>> {
-    let read = reuse(path, std::fs::read(path).ok()?, |raw| {
+/// One parse of the history file, shared by every reader of the same bytes.
+pub(super) struct Parsed {
+    pub(super) value: Arc<serde_json::Value>,
+    v2: bool,
+    /// The class hashes a V2 history marks as injected; `None` when `live` is not a list.
+    known: Option<std::collections::HashSet<String>>,
+    bound: std::sync::OnceLock<Vec<Result<Entry, String>>>,
+}
+
+impl Parsed {
+    pub(super) fn build(raw: &[u8]) -> Result<Self, String> {
         let value = parse(raw)?;
         let v2 = matches!(
             value.get("version").and_then(serde_json::Value::as_u64),
             Some(2 | 3)
         ) && value.get("entries").is_none();
-        Ok(v2.then(|| Arc::new(value)))
-    });
-    read.ok()?.as_ref().clone()
+        let known = v2.then(|| known_hashes(&value)).flatten();
+        Ok(Self {
+            value: Arc::new(value),
+            v2,
+            known,
+            bound: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// Each non-null bound entry of a V2 history, deserialized once, in `bound_rows` order.
+    pub(super) fn bound_entries(&self) -> &[Result<Entry, String>] {
+        self.bound.get_or_init(|| {
+            bound_rows(&self.value)
+                .filter(|(raw, _)| !raw.is_null())
+                .map(|(raw, _)| Entry::deserialize(raw).map_err(|e| e.to_string()))
+                .collect()
+        })
+    }
 }
 
-pub(super) fn known_v2(path: &Path, hashes: &[String]) -> Option<bool> {
-    let value = v2_value(path)?;
+/// Live rows and unabandoned passive rows, each as (entry, registration).
+pub(super) fn bound_rows(
+    value: &serde_json::Value,
+) -> impl Iterator<Item = (&serde_json::Value, &serde_json::Value)> {
+    let live = value["live"].as_array().into_iter().flatten();
+    let passive = value["passive"].as_array().into_iter().flatten();
+    live.map(|v| (v, &v["registration"])).chain(
+        passive
+            .filter(|v| v["state"] != "abandoned")
+            .map(|v| (&v["entry"], &v["registration"])),
+    )
+}
+
+/// The file's parse, or `None` when it cannot be read or parsed.
+pub(super) fn parsed(path: &Path) -> Option<Arc<Parsed>> {
+    super::stamped::read(path, Parsed::build).ok()?.ok()
+}
+
+fn v2_value(path: &Path) -> Option<Arc<serde_json::Value>> {
+    let parsed = parsed(path)?;
+    parsed.v2.then(|| Arc::clone(&parsed.value))
+}
+
+fn known_hashes(value: &serde_json::Value) -> Option<std::collections::HashSet<String>> {
+    let class = |v: &serde_json::Value| v["class_hash"].as_str().map(str::to_owned);
     // An abandoned frame was proven never pasted, so it marks no native row as injected.
     let passive = || {
         value["passive"]
@@ -137,31 +184,25 @@ pub(super) fn known_v2(path: &Path, hashes: &[String]) -> Option<bool> {
             .flatten()
             .filter(|p| p["state"] != "abandoned")
     };
-    let entries = value["live"]
+    let bound = value["live"]
         .as_array()?
         .iter()
-        .chain(passive().filter_map(|p| p.get("entry")));
-    let bound = entries.into_iter().any(|e| {
-        e["class_hash"]
-            .as_str()
-            .is_some_and(|h| hashes.iter().any(|x| x == h))
-    });
+        .chain(passive().filter_map(|p| p.get("entry")))
+        .filter_map(class);
     let planned = value
         .get("planned")
         .and_then(|p| p.as_array())
-        .is_some_and(|ps| {
-            ps.iter().any(|p| {
-                p["frame"]["class_hash"]
-                    .as_str()
-                    .is_some_and(|h| hashes.iter().any(|x| x == h))
-            })
-        });
-    let unbound = passive().any(|p| {
-        p["registration"]["frame"]["class_hash"]
-            .as_str()
-            .is_some_and(|h| hashes.iter().any(|x| x == h))
-    });
-    Some(bound || planned || unbound)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| class(&p["frame"]));
+    let unbound = passive().filter_map(|p| class(&p["registration"]["frame"]));
+    Some(bound.chain(planned).chain(unbound).collect())
+}
+
+pub(super) fn known_v2(path: &Path, hashes: &[String]) -> Option<bool> {
+    let parsed = parsed(path)?;
+    let known = parsed.v2.then_some(parsed.known.as_ref()).flatten()?;
+    Some(hashes.iter().any(|hash| known.contains(hash)))
 }
 
 pub(super) fn screen_frames_v2(path: &Path) -> Option<Vec<(String, String)>> {

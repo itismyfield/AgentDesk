@@ -70,6 +70,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 chrono-tz = "0.10"
 notify = "7"
 tracing = "0.1"
+log = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"

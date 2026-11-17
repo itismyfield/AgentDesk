@@ -306,6 +306,7 @@ impl HerdrOwner {
             goals: None,
             compact_token_limit: None,
             cancel: None,
+            bootstrap: false,
         }
     }
 

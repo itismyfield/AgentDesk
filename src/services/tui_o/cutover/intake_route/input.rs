@@ -14,7 +14,7 @@ pub(crate) async fn text_for_input_placement(provider: &str, channel: &str) -> I
 
 async fn placement(provider: &str, channel: Option<u64>) -> IntakeRoute {
     if let Some(channel) = channel
-        && let Err(detail) = super::super::resolve_reserved_child(channel).await
+        && let Err(detail) = super::super::resolve_reserved_child(provider, channel).await
     {
         return IntakeRoute::Hold(detail);
     }
@@ -111,6 +111,14 @@ fn judge_at(
         if let Some(refusal) = host::initial_fresh_refusal(channel) {
             reason = refusal;
             return super::writer_unready(channel);
+        }
+        // The turn host judges the retired row; placement only sees the pin and the vacant pane.
+        if clear_relaunch::herdr_bootstrap::local_eligible(channel).is_ok() {
+            reason = "herdr_retired_bootstrap";
+            if phase == "placement" {
+                tracing::info!(channel, provider, reason, "[tui_o] input admission passed");
+            }
+            return IntakeRoute::Gateway;
         }
         if clear_relaunch::input_reason_for_channel(channel).is_some() {
             IntakeRoute::Gateway

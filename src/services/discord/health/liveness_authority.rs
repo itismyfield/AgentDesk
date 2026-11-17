@@ -6,18 +6,22 @@ use dashmap::DashMap;
 use poise::serenity_prelude::ChannelId;
 
 use super::snapshot::WatcherStateSnapshot;
+#[cfg(test)]
 use super::stall_liveness::{
     self, STALL_WATCHDOG_POSITIVE_LIVENESS_SECS, STALL_WATCHDOG_TOOL_PHASE_FRESHNESS_SECS,
 };
+#[cfg(test)]
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::provider::ProviderKind;
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(in crate::services::discord) const VOUCH_TTL_SECS: u64 = 90;
+#[cfg(test)]
 const TRANSIENT_UNKNOWN_SECS: u64 = 60;
 const CAPTURE_GRACE_TICKS: u8 = 3;
 
 static MONO_ANCHOR: LazyLock<Instant> = LazyLock::new(Instant::now);
+#[cfg(test)]
 static VERDICTS: LazyLock<DashMap<(String, u64), ProducerLivenessVerdict>> =
     LazyLock::new(DashMap::new);
 static CAPTURE_COORDINATES: LazyLock<DashMap<LivenessBinding, CaptureCoordinateState>> =
@@ -51,6 +55,7 @@ impl LivenessBinding {
         }
     }
 
+    #[cfg(test)]
     fn matches_inflight(&self, authoritative: &InflightTurnState) -> bool {
         self.user_msg_id == Some(authoritative.user_msg_id)
             && self.started_at.as_deref() == Some(authoritative.started_at.as_str())
@@ -98,12 +103,14 @@ struct CaptureCoordinateState {
 
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct CaptureAssessment {
+    #[cfg(test)]
     pub(in crate::services::discord) observation: CaptureCoordinateObservation,
     pub(in crate::services::discord) advancing: bool,
+    #[cfg(test)]
     pub(in crate::services::discord) transient_unknown: bool,
-    pub(in crate::services::discord) advanced_at_unix_secs: Option<i64>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::services::discord) enum ProducerLivenessClass {
     ProvenAlive,
@@ -111,6 +118,7 @@ pub(in crate::services::discord) enum ProducerLivenessClass {
     TransientUnknown,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(in crate::services::discord) struct LivenessReasons {
     pub(in crate::services::discord) capture_advancing: bool,
@@ -119,6 +127,7 @@ pub(in crate::services::discord) struct LivenessReasons {
     pub(in crate::services::discord) outbound_activity_age_secs: Option<u64>,
 }
 
+#[cfg(test)]
 impl LivenessReasons {
     fn csv(&self) -> String {
         let mut reasons = Vec::new();
@@ -167,6 +176,7 @@ impl LivenessReasons {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct ProducerLivenessVerdict {
     pub(in crate::services::discord) binding: LivenessBinding,
@@ -179,6 +189,7 @@ pub(in crate::services::discord) struct ProducerLivenessVerdict {
     pub(in crate::services::discord) published_at_unix_secs: i64,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::services::discord) enum VouchDenial {
     Missing,
@@ -187,6 +198,7 @@ pub(in crate::services::discord) enum VouchDenial {
     NoEvidence,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::services::discord) enum LivenessVouch {
     Vouched {
@@ -199,34 +211,6 @@ pub(in crate::services::discord) enum LivenessVouch {
     NotVouched {
         reason: VouchDenial,
     },
-}
-
-#[allow(dead_code)]
-pub(in crate::services::discord) trait LivenessAuthorityRead:
-    Send + Sync
-{
-    fn vouch_for_inflight(
-        &self,
-        provider: &ProviderKind,
-        channel_id: ChannelId,
-        authoritative: &InflightTurnState,
-        now_mono_secs: i64,
-    ) -> LivenessVouch;
-}
-
-#[allow(dead_code)]
-pub(in crate::services::discord) struct ProcessLocalLivenessAuthority;
-
-impl LivenessAuthorityRead for ProcessLocalLivenessAuthority {
-    fn vouch_for_inflight(
-        &self,
-        provider: &ProviderKind,
-        channel_id: ChannelId,
-        authoritative: &InflightTurnState,
-        now_mono_secs: i64,
-    ) -> LivenessVouch {
-        vouch_for_inflight(provider, channel_id, authoritative, now_mono_secs)
-    }
 }
 
 pub(in crate::services::discord) fn monotonic_now_secs() -> i64 {
@@ -336,13 +320,15 @@ pub(in crate::services::discord) fn observe_capture_coordinate(
         },
     );
     CaptureAssessment {
+        #[cfg(test)]
         observation,
         advancing,
+        #[cfg(test)]
         transient_unknown,
-        advanced_at_unix_secs,
     }
 }
 
+#[cfg(test)]
 pub(in crate::services::discord) fn observe_and_publish_from_tick(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -365,6 +351,7 @@ pub(in crate::services::discord) fn observe_and_publish_from_tick(
     capture
 }
 
+#[cfg(test)]
 fn publish_from_tick(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -415,6 +402,7 @@ fn publish_from_tick(
     store_verdict((provider.as_str().to_string(), channel_id.get()), verdict);
 }
 
+#[cfg(test)]
 fn store_verdict(key: (String, u64), verdict: ProducerLivenessVerdict) {
     match VERDICTS.entry(key) {
         dashmap::mapref::entry::Entry::Occupied(mut entry) => {
@@ -428,7 +416,7 @@ fn store_verdict(key: (String, u64), verdict: ProducerLivenessVerdict) {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(in crate::services::discord) fn vouch_for_inflight(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -532,6 +520,7 @@ pub(in crate::services::discord) fn capture_advanced_age_secs(
         .map(|advanced| now_unix_secs.saturating_sub(advanced).max(0) as u64)
 }
 
+#[cfg(test)]
 fn recent(age: Option<u64>, budget: u64) -> bool {
     age.is_some_and(|age| age <= budget)
 }

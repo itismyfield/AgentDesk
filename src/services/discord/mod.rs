@@ -189,6 +189,8 @@ mod tui_prompt_relay;
 pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
+#[cfg(test)]
+pub(crate) use tui_prompt_relay::INPUT_NOTICE_RUNS;
 #[cfg(unix)]
 pub(crate) use tui_prompt_relay::rehydration::observer_binding_published;
 #[cfg(all(test, unix))]
@@ -3430,3 +3432,6 @@ pub(crate) async fn revoke_notice_author_for_test(shared: &SharedData) {
 }
 
 pub(super) mod routine_presentation;
+
+#[cfg(all(test, unix))]
+pub(crate) use tmux::first_terminal_plan;

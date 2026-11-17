@@ -52,20 +52,23 @@ def _load_inventory_generator():
 _INVENTORY = _load_inventory_generator()
 
 
-def _test_only_module_files() -> set[Path]:
+def _test_only_module_files() -> frozenset[Path]:
     """Files reached only through a test-gated parent ``mod`` declaration.
 
     Delegates to ``generate_inventory_docs.test_only_module_files`` while
     passing the audit's patchable file iterators. This keeps generator, audit,
     and ratchet on one test-only module graph instead of maintaining a parser
     mirror here (#3036/#4394).
+    Frozen so one harness run can share it.
     """
 
-    return _INVENTORY.test_only_module_files(
-        production_files=production_rust_files(),
-        all_files=common.all_rust_files(),
-        read_text_fn=read_text,
-    )
+    return common.run_cached("test_only_module_files", lambda: frozenset(
+        _INVENTORY.test_only_module_files(
+            production_files=production_rust_files(),
+            all_files=common.all_rust_files(),
+            read_text_fn=read_text,
+        )
+    ))
 
 
 def giant_production_loc() -> dict[str, int]:
@@ -76,6 +79,10 @@ def giant_production_loc() -> dict[str, int]:
     agree on which files are production giants (#3036).
     """
 
+    return dict(common.run_cached("giant_production_loc", _measure_giant_production_loc))
+
+
+def _measure_giant_production_loc() -> dict[str, int]:
     test_only = _test_only_module_files()
     giants: dict[str, int] = {}
     for path in production_rust_files():

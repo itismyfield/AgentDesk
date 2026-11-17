@@ -1,0 +1,591 @@
+---
+title: "Codex canary Herdr 퇴역 뒤 새 실행 시작"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the HeldStarts or WriterReady bug
+    lg1: Repeats forever, so HeldStarts or WriterReady breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 입력 없음
+  s1: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; front 판정 대기
+  s2: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 취소
+  s3: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 입력 통과
+  s4: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 없음 #183; 턴 호스트 통과
+  s5: writer 막힘(옛 pin) #183; 새 실행 Pending #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; Pending CAS
+  s6: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 시작 실패 #183; 실패 1회 뒤
+  s7: writer 막힘(옛 pin) #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 새 실행 시작 중
+  s8: writer 막힘(옛 pin) #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 취소
+  s9: writer 막힘(옛 pin) #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; 턴 시작됨
+  s10: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 시작 실패 #183; 실패 1회 뒤
+  s11: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 새 실행 시작 중
+  s12: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 입력 없음 #183; 실패 1회 뒤
+  s13: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 취소
+  s14: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 취소
+  s15: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; 턴 시작됨
+  s16: writer 준비됨 #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; 턴 시작됨
+  s17: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 시작 실패 #183; 실패 1회 뒤
+  s18: writer 막힘(옛 pin) #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; 입력 없음
+  s19: writer 막힘(옛 pin) #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 입력 없음
+  s20: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 입력 없음 #183; 실패 1회 뒤
+  s21: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; front 판정 대기 #183; 실패 1회 뒤
+  s22: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 취소
+  s23: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 취소
+  s24: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 취소 #183; 실패 1회 뒤
+  s25: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; 턴 시작됨
+  s26: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; 턴 시작됨
+  s27: writer 준비됨 #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; 턴 시작됨
+  s28: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 시작 실패 #183; 실패 1회 뒤
+  s29: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 입력 통과 #183; 실패 1회 뒤
+  s30: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; 입력 없음
+  s31: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 입력 없음
+  s32: writer 준비됨 #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; 입력 없음
+  s33: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 입력 없음
+  s34: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 입력 없음 #183; 실패 1회 뒤
+  s35: writer 막힘(옛 pin) #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; front 판정 대기
+  s36: writer 막힘(옛 pin) #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; front 판정 대기
+  s37: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; front 판정 대기 #183; 실패 1회 뒤
+  s38: writer 막힘(옛 pin) #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; 취소
+  s39: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 취소
+  s40: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 취소 #183; 실패 1회 뒤
+  s41: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; 턴 시작됨
+  s42: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; 턴 시작됨
+  s43: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; 턴 시작됨
+  s44: writer 막힘(옛 pin) #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; front 보관(관측 없음)
+  s45: writer 막힘(옛 pin) #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; front 보관(관측 없음)
+  s46: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; front 보관(관측 없음) #183; 실패 1회 뒤
+  s47: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; front 보관(관측 없음) #183; 실패 1회 뒤
+  s48: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; 입력 없음
+  s49: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; 입력 없음
+  s50: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 입력 없음
+  s51: writer 준비됨 #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; 입력 없음
+  s52: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 입력 없음
+  s53: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 입력 없음 #183; 실패 1회 뒤
+  s54: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; front 판정 대기
+  s55: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; front 판정 대기
+  s56: writer 준비됨 #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; front 판정 대기
+  s57: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; front 판정 대기
+  s58: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; front 판정 대기 #183; 실패 1회 뒤
+  s59: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; 취소
+  s60: writer 준비됨 #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; 취소
+  s61: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 취소 #183; 실패 1회 뒤
+  s62: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; 턴 시작됨
+  s63: writer 준비됨 #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; 입력 통과
+  s64: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 입력 통과
+  s65: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 입력 통과 #183; 실패 1회 뒤
+  s66: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; front 보관(관측 없음)
+  s67: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; front 보관(관측 없음)
+  s68: writer 준비됨 #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; front 보관(관측 없음)
+  s69: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; front 보관(관측 없음)
+  s70: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; front 보관(관측 없음) #183; 실패 1회 뒤
+  s71: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; 입력 없음
+  s72: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; 입력 없음
+  s73: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; 입력 없음
+  s74: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 입력 없음
+  s75: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; front 판정 대기
+  s76: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; front 판정 대기
+  s77: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; front 판정 대기
+  s78: writer 준비됨 #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; front 판정 대기
+  s79: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; front 판정 대기
+  s80: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; front 판정 대기 #183; 실패 1회 뒤
+  s81: writer 준비됨 #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; 턴 호스트 통과
+  s82: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 턴 호스트 통과
+  s83: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 턴 호스트 통과 #183; 실패 1회 뒤
+  s84: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; 취소
+  s85: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; 취소
+  s86: writer 준비됨 #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; 취소
+  s87: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 취소 #183; 실패 1회 뒤
+  s88: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; 입력 통과
+  s89: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 입력 통과
+  s90: writer 준비됨 #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; 입력 통과
+  s91: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 입력 통과
+  s92: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 입력 통과 #183; 실패 1회 뒤
+  s93: writer 막힘(옛 pin) #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; front 보관(관측 없음)
+  s94: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; front 보관(관측 없음)
+  s95: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; front 보관(관측 없음)
+  s96: writer 준비됨 #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; front 보관(관측 없음)
+  s97: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; front 보관(관측 없음)
+  s98: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; front 보관(관측 없음) #183; 실패 1회 뒤
+  s99: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; 입력 없음
+  s100: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; front 판정 대기
+  s101: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; front 판정 대기
+  s102: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; front 판정 대기
+  s103: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; front 판정 대기
+  s104: writer 준비됨 #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; 턴 호스트 통과
+  s105: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 턴 호스트 통과
+  s106: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 턴 호스트 통과 #183; 실패 1회 뒤
+  s107: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; 취소
+  s108: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; 취소
+  s109: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; 취소
+  s110: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; Pending CAS #183; 실패 1회 뒤
+  s111: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; 입력 통과
+  s112: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; 입력 통과
+  s113: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; 입력 통과
+  s114: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 입력 통과
+  s115: writer 막힘(옛 pin) #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; front 보관(관측 없음)
+  s116: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; front 보관(관측 없음)
+  s117: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; front 보관(관측 없음)
+  s118: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; front 보관(관측 없음)
+  s119: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; front 판정 대기
+  s120: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; 턴 호스트 통과
+  s121: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; 턴 호스트 통과
+  s122: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; 턴 호스트 통과
+  s123: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; 취소
+  s124: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; Pending CAS
+  s125: writer 준비됨 #183; 새 실행 Pending #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; Pending CAS #183; 실패 1회 뒤
+  s126: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; 입력 통과
+  s127: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; front 보관(관측 없음)
+  s128: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 새 실행 시작 중 #183; 실패 1회 뒤
+  s129: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; 턴 호스트 통과
+  s130: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 취소 #183; 실패 1회 뒤
+  s131: writer 준비됨 #183; 새 실행 Pending #183; 표식 없음 #183; listing 퇴역 nonce(withheld) #183; Pending CAS
+  s132: writer 준비됨 #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; 턴 시작됨 #183; 실패 1회 뒤
+  s133: writer 준비됨 #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; 턴 시작됨 #183; 실패 1회 뒤
+  s134: writer 준비됨 #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; 입력 없음 #183; 실패 1회 뒤
+  s135: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 입력 없음 #183; 실패 1회 뒤
+  s136: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; 턴 시작됨 #183; 실패 1회 뒤
+  s137: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; 턴 시작됨 #183; 실패 1회 뒤
+  s138: writer 준비됨 #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; 입력 없음 #183; 실패 1회 뒤
+  s139: writer 준비됨 #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; front 판정 대기 #183; 실패 1회 뒤
+  s140: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; front 판정 대기 #183; 실패 1회 뒤
+  s141: writer 준비됨 #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; 취소 #183; 실패 1회 뒤
+  s142: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; 턴 시작됨 #183; 실패 1회 뒤
+  s143: writer 준비됨 #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; 입력 통과 #183; 실패 1회 뒤
+  s144: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 입력 통과 #183; 실패 1회 뒤
+  s145: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; 입력 없음 #183; 실패 1회 뒤
+  s146: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; 입력 없음 #183; 실패 1회 뒤
+  s147: writer 준비됨 #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; front 판정 대기 #183; 실패 1회 뒤
+  s148: writer 준비됨 #183; 새 실행 Bound #183; 새 nonce 표식 #183; listing admitted #183; 턴 호스트 통과 #183; 실패 1회 뒤
+  s149: writer 준비됨 #183; 새 실행 Pending #183; 새 nonce 표식 #183; listing 퇴역 nonce(withheld) #183; 턴 호스트 통과 #183; 실패 1회 뒤
+  s150: writer 준비됨 #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; 취소 #183; 실패 1회 뒤
+  s151: writer 준비됨 #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; 입력 통과 #183; 실패 1회 뒤
+  s152: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; 입력 없음 #183; 실패 1회 뒤
+  s153: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; front 판정 대기 #183; 실패 1회 뒤
+  s154: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; front 판정 대기 #183; 실패 1회 뒤
+  s155: writer 준비됨 #183; 퇴역 정리 중 #183; 새 nonce 표식 #183; listing admitted #183; 턴 호스트 통과 #183; 실패 1회 뒤
+  s156: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; 취소 #183; 실패 1회 뒤
+  s157: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; 취소 #183; 실패 1회 뒤
+  s158: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; 입력 통과 #183; 실패 1회 뒤
+  s159: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; 입력 통과 #183; 실패 1회 뒤
+  s160: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; front 판정 대기 #183; 실패 1회 뒤
+  s161: writer 준비됨 #183; 퇴역 정리 중 #183; 표식 없음 #183; listing admitted #183; 턴 호스트 통과 #183; 실패 1회 뒤
+  s162: writer 준비됨 #183; 퇴역 정리 완료 #183; 새 nonce 표식 #183; listing admitted #183; 턴 호스트 통과 #183; 실패 1회 뒤
+  s163: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; 취소 #183; 실패 1회 뒤
+  s164: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; 입력 통과 #183; 실패 1회 뒤
+  s165: writer 준비됨 #183; 퇴역 정리 완료 #183; 표식 없음 #183; listing admitted #183; 턴 호스트 통과 #183; 실패 1회 뒤
+  [*] --> s0
+  s0 --> s1: 입력 도착
+  s1 --> s2: 취소
+  s1 --> s3: owner front 판정
+  s2 --> s0: 다음 입력 차례
+  s3 --> s2: 취소
+  s3 --> s4: 턴 호스트 판정
+  s4 --> s2: 취소
+  s4 --> s5: Retired#8594;Pending CAS#183;listing
+  s5 --> s6: 표식 쓰기 실패 #8594; 퇴역
+  s5 --> s7: 새 nonce 표식 게시
+  s6 --> s12: 다음 입력 차례
+  s7 --> s8: 취소
+  s7 --> s9: 첫 입력#183;Bound#183;admit
+  s7 --> s10: 생성 미전송 #8594; 퇴역
+  s7 --> s11: source 허용 #8594; resume
+  s8 --> s13: pane 없는 Pending 회수
+  s8 --> s14: source 허용 #8594; resume
+  s8 --> s19: 다음 입력 차례
+  s9 --> s15: Terminate#183;clear#183;stop
+  s9 --> s16: source 허용 #8594; resume
+  s9 --> s18: 다음 입력 차례
+  s10 --> s6: 이름 기준 정리로 표식 삭제
+  s10 --> s17: source 허용 #8594; resume
+  s10 --> s20: 다음 입력 차례
+  s11 --> s14: 취소
+  s11 --> s16: 첫 입력#183;Bound#183;admit
+  s11 --> s17: 생성 미전송 #8594; 퇴역
+  s12 --> s21: 입력 도착
+  s13 --> s22: 이름 기준 정리로 표식 삭제
+  s13 --> s23: source 허용 #8594; resume
+  s13 --> s31: 다음 입력 차례
+  s14 --> s23: pane 없는 Pending 회수
+  s14 --> s33: 다음 입력 차례
+  s15 --> s25: 이름 기준 정리로 표식 삭제
+  s15 --> s26: 퇴역 정리 완료
+  s15 --> s27: source 허용 #8594; resume
+  s15 --> s30: 다음 입력 차례
+  s16 --> s27: Terminate#183;clear#183;stop
+  s16 --> s32: 다음 입력 차례
+  s17 --> s28: 이름 기준 정리로 표식 삭제
+  s17 --> s34: 다음 입력 차례
+  s18 --> s30: Terminate#183;clear#183;stop
+  s18 --> s32: source 허용 #8594; resume
+  s18 --> s35: 입력 도착
+  s19 --> s31: pane 없는 Pending 회수
+  s19 --> s33: source 허용 #8594; resume
+  s19 --> s36: 입력 도착
+  s20 --> s12: 이름 기준 정리로 표식 삭제
+  s20 --> s34: source 허용 #8594; resume
+  s20 --> s37: 입력 도착
+  s21 --> s24: 취소
+  s21 --> s29: owner front 판정
+  s22 --> s50: 다음 입력 차례
+  s23 --> s39: 이름 기준 정리로 표식 삭제
+  s23 --> s52: 다음 입력 차례
+  s24 --> s12: 다음 입력 차례
+  s25 --> s41: 퇴역 정리 완료
+  s25 --> s48: 다음 입력 차례
+  s26 --> s41: 이름 기준 정리로 표식 삭제
+  s26 --> s43: source 허용 #8594; resume
+  s26 --> s49: 다음 입력 차례
+  s27 --> s42: 이름 기준 정리로 표식 삭제
+  s27 --> s43: 퇴역 정리 완료
+  s27 --> s51: 다음 입력 차례
+  s28 --> s53: 다음 입력 차례
+  s29 --> s24: 취소
+  s29 --> s46: 턴 호스트 판정
+  s30 --> s48: 이름 기준 정리로 표식 삭제
+  s30 --> s49: 퇴역 정리 완료
+  s30 --> s51: source 허용 #8594; resume
+  s30 --> s54: 입력 도착
+  s31 --> s50: 이름 기준 정리로 표식 삭제
+  s31 --> s52: source 허용 #8594; resume
+  s31 --> s55: 입력 도착
+  s32 --> s51: Terminate#183;clear#183;stop
+  s32 --> s56: 입력 도착
+  s33 --> s52: pane 없는 Pending 회수
+  s33 --> s57: 입력 도착
+  s34 --> s53: 이름 기준 정리로 표식 삭제
+  s34 --> s58: 입력 도착
+  s35 --> s38: 취소
+  s35 --> s44: owner front 판정
+  s35 --> s54: Terminate#183;clear#183;stop
+  s35 --> s56: source 허용 #8594; resume
+  s36 --> s8: 취소
+  s36 --> s45: owner front 판정
+  s36 --> s55: pane 없는 Pending 회수
+  s36 --> s57: source 허용 #8594; resume
+  s37 --> s21: 이름 기준 정리로 표식 삭제
+  s37 --> s40: 취소
+  s37 --> s47: owner front 판정
+  s37 --> s58: source 허용 #8594; resume
+  s38 --> s18: 다음 입력 차례
+  s38 --> s59: Terminate#183;clear#183;stop
+  s38 --> s60: source 허용 #8594; resume
+  s39 --> s74: 다음 입력 차례
+  s40 --> s20: 다음 입력 차례
+  s40 --> s24: 이름 기준 정리로 표식 삭제
+  s40 --> s61: source 허용 #8594; resume
+  s41 --> s71: 다음 입력 차례
+  s42 --> s62: 퇴역 정리 완료
+  s42 --> s72: 다음 입력 차례
+  s43 --> s62: 이름 기준 정리로 표식 삭제
+  s43 --> s73: 다음 입력 차례
+  s44 --> s38: 취소
+  s44 --> s66: Terminate#183;clear#183;stop
+  s44 --> s68: source 허용 #8594; resume
+  s45 --> s8: 취소
+  s45 --> s67: pane 없는 Pending 회수
+  s45 --> s69: source 허용 #8594; resume
+  s46 --> s24: 취소
+  s47 --> s40: 취소
+  s47 --> s46: 이름 기준 정리로 표식 삭제
+  s47 --> s70: source 허용 #8594; resume
+  s48 --> s71: 퇴역 정리 완료
+  s48 --> s75: 입력 도착
+  s49 --> s71: 이름 기준 정리로 표식 삭제
+  s49 --> s73: source 허용 #8594; resume
+  s49 --> s76: 입력 도착
+  s50 --> s77: 입력 도착
+  s51 --> s72: 이름 기준 정리로 표식 삭제
+  s51 --> s73: 퇴역 정리 완료
+  s51 --> s78: 입력 도착
+  s52 --> s74: 이름 기준 정리로 표식 삭제
+  s52 --> s79: 입력 도착
+  s53 --> s80: 입력 도착
+  s54 --> s59: 취소
+  s54 --> s66: owner front 판정
+  s54 --> s75: 이름 기준 정리로 표식 삭제
+  s54 --> s76: 퇴역 정리 완료
+  s54 --> s78: source 허용 #8594; resume
+  s55 --> s13: 취소
+  s55 --> s67: owner front 판정
+  s55 --> s77: 이름 기준 정리로 표식 삭제
+  s55 --> s79: source 허용 #8594; resume
+  s56 --> s60: 취소
+  s56 --> s63: owner front 판정
+  s56 --> s78: Terminate#183;clear#183;stop
+  s57 --> s14: 취소
+  s57 --> s64: owner front 판정
+  s57 --> s79: pane 없는 Pending 회수
+  s58 --> s61: 취소
+  s58 --> s65: owner front 판정
+  s58 --> s80: 이름 기준 정리로 표식 삭제
+  s59 --> s30: 다음 입력 차례
+  s59 --> s84: 이름 기준 정리로 표식 삭제
+  s59 --> s85: 퇴역 정리 완료
+  s59 --> s86: source 허용 #8594; resume
+  s60 --> s32: 다음 입력 차례
+  s60 --> s86: Terminate#183;clear#183;stop
+  s61 --> s34: 다음 입력 차례
+  s61 --> s87: 이름 기준 정리로 표식 삭제
+  s62 --> s99: 다음 입력 차례
+  s63 --> s60: 취소
+  s63 --> s81: 턴 호스트 판정
+  s63 --> s90: Terminate#183;clear#183;stop
+  s64 --> s14: 취소
+  s64 --> s82: 턴 호스트 판정
+  s64 --> s91: pane 없는 Pending 회수
+  s65 --> s61: 취소
+  s65 --> s83: 턴 호스트 판정
+  s65 --> s92: 이름 기준 정리로 표식 삭제
+  s66 --> s59: 취소
+  s66 --> s93: 이름 기준 정리로 표식 삭제
+  s66 --> s94: 퇴역 정리 완료
+  s66 --> s96: source 허용 #8594; resume
+  s67 --> s13: 취소
+  s67 --> s95: 이름 기준 정리로 표식 삭제
+  s67 --> s97: source 허용 #8594; resume
+  s68 --> s56: writer 준비 wake
+  s68 --> s60: 취소
+  s68 --> s96: Terminate#183;clear#183;stop
+  s69 --> s14: 취소
+  s69 --> s57: writer 준비 wake
+  s69 --> s97: pane 없는 Pending 회수
+  s70 --> s58: writer 준비 wake
+  s70 --> s61: 취소
+  s70 --> s98: 이름 기준 정리로 표식 삭제
+  s71 --> s100: 입력 도착
+  s72 --> s99: 퇴역 정리 완료
+  s72 --> s101: 입력 도착
+  s73 --> s99: 이름 기준 정리로 표식 삭제
+  s73 --> s102: 입력 도착
+  s74 --> s103: 입력 도착
+  s75 --> s84: 취소
+  s75 --> s88: owner front 판정
+  s75 --> s100: 퇴역 정리 완료
+  s76 --> s85: 취소
+  s76 --> s94: owner front 판정
+  s76 --> s100: 이름 기준 정리로 표식 삭제
+  s76 --> s102: source 허용 #8594; resume
+  s77 --> s22: 취소
+  s77 --> s89: owner front 판정
+  s78 --> s86: 취소
+  s78 --> s90: owner front 판정
+  s78 --> s101: 이름 기준 정리로 표식 삭제
+  s78 --> s102: 퇴역 정리 완료
+  s79 --> s23: 취소
+  s79 --> s91: owner front 판정
+  s79 --> s103: 이름 기준 정리로 표식 삭제
+  s80 --> s87: 취소
+  s80 --> s92: owner front 판정
+  s81 --> s104: Terminate#183;clear#183;stop
+  s81 --> s60: 취소
+  s81 --> s16: Bound 후속 입력
+  s82 --> s14: 취소
+  s82 --> s11: Pending 재사용
+  s83 --> s106: 이름 기준 정리로 표식 삭제
+  s83 --> s61: 취소
+  s83 --> s110: Retired#8594;Pending CAS#183;listing
+  s84 --> s48: 다음 입력 차례
+  s84 --> s107: 퇴역 정리 완료
+  s85 --> s49: 다음 입력 차례
+  s85 --> s107: 이름 기준 정리로 표식 삭제
+  s85 --> s109: source 허용 #8594; resume
+  s86 --> s51: 다음 입력 차례
+  s86 --> s108: 이름 기준 정리로 표식 삭제
+  s86 --> s109: 퇴역 정리 완료
+  s87 --> s53: 다음 입력 차례
+  s88 --> s84: 취소
+  s88 --> s111: 퇴역 정리 완료
+  s88 --> s93: 턴 호스트 판정
+  s89 --> s22: 취소
+  s89 --> s95: 턴 호스트 판정
+  s90 --> s86: 취소
+  s90 --> s104: 턴 호스트 판정
+  s90 --> s112: 이름 기준 정리로 표식 삭제
+  s90 --> s113: 퇴역 정리 완료
+  s91 --> s23: 취소
+  s91 --> s105: 턴 호스트 판정
+  s91 --> s114: 이름 기준 정리로 표식 삭제
+  s92 --> s87: 취소
+  s92 --> s106: 턴 호스트 판정
+  s93 --> s84: 취소
+  s93 --> s115: 퇴역 정리 완료
+  s94 --> s85: 취소
+  s94 --> s115: 이름 기준 정리로 표식 삭제
+  s94 --> s117: source 허용 #8594; resume
+  s95 --> s22: 취소
+  s96 --> s78: writer 준비 wake
+  s96 --> s86: 취소
+  s96 --> s116: 이름 기준 정리로 표식 삭제
+  s96 --> s117: 퇴역 정리 완료
+  s97 --> s23: 취소
+  s97 --> s79: writer 준비 wake
+  s97 --> s118: 이름 기준 정리로 표식 삭제
+  s98 --> s80: writer 준비 wake
+  s98 --> s87: 취소
+  s99 --> s119: 입력 도착
+  s100 --> s107: 취소
+  s100 --> s111: owner front 판정
+  s101 --> s108: 취소
+  s101 --> s112: owner front 판정
+  s101 --> s119: 퇴역 정리 완료
+  s102 --> s109: 취소
+  s102 --> s113: owner front 판정
+  s102 --> s119: 이름 기준 정리로 표식 삭제
+  s103 --> s39: 취소
+  s103 --> s114: owner front 판정
+  s104 --> s120: 이름 기준 정리로 표식 삭제
+  s104 --> s121: 퇴역 정리 완료
+  s104 --> s86: 취소
+  s104 --> s124: Retired#8594;Pending CAS#183;listing
+  s105 --> s122: 이름 기준 정리로 표식 삭제
+  s105 --> s23: 취소
+  s105 --> s124: Retired#8594;Pending CAS#183;listing
+  s106 --> s87: 취소
+  s106 --> s125: Retired#8594;Pending CAS#183;listing
+  s107 --> s71: 다음 입력 차례
+  s108 --> s72: 다음 입력 차례
+  s108 --> s123: 퇴역 정리 완료
+  s109 --> s73: 다음 입력 차례
+  s109 --> s123: 이름 기준 정리로 표식 삭제
+  s110 --> s128: 새 nonce 표식 게시
+  s111 --> s107: 취소
+  s111 --> s115: 턴 호스트 판정
+  s112 --> s108: 취소
+  s112 --> s120: 턴 호스트 판정
+  s112 --> s126: 퇴역 정리 완료
+  s113 --> s109: 취소
+  s113 --> s121: 턴 호스트 판정
+  s113 --> s126: 이름 기준 정리로 표식 삭제
+  s114 --> s39: 취소
+  s114 --> s122: 턴 호스트 판정
+  s115 --> s107: 취소
+  s116 --> s101: writer 준비 wake
+  s116 --> s108: 취소
+  s116 --> s127: 퇴역 정리 완료
+  s117 --> s102: writer 준비 wake
+  s117 --> s109: 취소
+  s117 --> s127: 이름 기준 정리로 표식 삭제
+  s118 --> s39: 취소
+  s118 --> s103: writer 준비 wake
+  s119 --> s123: 취소
+  s119 --> s126: owner front 판정
+  s120 --> s129: 퇴역 정리 완료
+  s120 --> s108: 취소
+  s120 --> s131: Retired#8594;Pending CAS#183;listing
+  s121 --> s124: Retired#8594;Pending CAS#183;listing
+  s121 --> s129: 이름 기준 정리로 표식 삭제
+  s121 --> s109: 취소
+  s122 --> s39: 취소
+  s122 --> s131: Retired#8594;Pending CAS#183;listing
+  s123 --> s99: 다음 입력 차례
+  s124 --> s11: 새 nonce 표식 게시
+  s124 --> s17: 표식 쓰기 실패 #8594; 퇴역
+  s125 --> s128: 새 nonce 표식 게시
+  s126 --> s123: 취소
+  s126 --> s129: 턴 호스트 판정
+  s127 --> s119: writer 준비 wake
+  s127 --> s123: 취소
+  s128 --> s130: 취소
+  s128 --> s132: 첫 입력#183;Bound#183;admit
+  s129 --> s131: Retired#8594;Pending CAS#183;listing
+  s129 --> s123: 취소
+  s130 --> s61: pane 없는 Pending 회수
+  s130 --> s135: 다음 입력 차례
+  s131 --> s11: 새 nonce 표식 게시
+  s131 --> s28: 표식 쓰기 실패 #8594; 퇴역
+  s132 --> s133: Terminate#183;clear#183;stop
+  s132 --> s134: 다음 입력 차례
+  s133 --> s136: 이름 기준 정리로 표식 삭제
+  s133 --> s137: 퇴역 정리 완료
+  s133 --> s138: 다음 입력 차례
+  s134 --> s138: Terminate#183;clear#183;stop
+  s134 --> s139: 입력 도착
+  s135 --> s34: pane 없는 Pending 회수
+  s135 --> s140: 입력 도착
+  s136 --> s142: 퇴역 정리 완료
+  s136 --> s145: 다음 입력 차례
+  s137 --> s142: 이름 기준 정리로 표식 삭제
+  s137 --> s146: 다음 입력 차례
+  s138 --> s145: 이름 기준 정리로 표식 삭제
+  s138 --> s146: 퇴역 정리 완료
+  s138 --> s147: 입력 도착
+  s139 --> s141: 취소
+  s139 --> s143: owner front 판정
+  s139 --> s147: Terminate#183;clear#183;stop
+  s140 --> s130: 취소
+  s140 --> s58: pane 없는 Pending 회수
+  s140 --> s144: owner front 판정
+  s141 --> s134: 다음 입력 차례
+  s141 --> s150: Terminate#183;clear#183;stop
+  s142 --> s152: 다음 입력 차례
+  s143 --> s141: 취소
+  s143 --> s148: 턴 호스트 판정
+  s143 --> s151: Terminate#183;clear#183;stop
+  s144 --> s130: 취소
+  s144 --> s65: pane 없는 Pending 회수
+  s144 --> s149: 턴 호스트 판정
+  s145 --> s152: 퇴역 정리 완료
+  s145 --> s153: 입력 도착
+  s146 --> s152: 이름 기준 정리로 표식 삭제
+  s146 --> s154: 입력 도착
+  s147 --> s150: 취소
+  s147 --> s151: owner front 판정
+  s147 --> s153: 이름 기준 정리로 표식 삭제
+  s147 --> s154: 퇴역 정리 완료
+  s148 --> s132: Bound 후속 입력
+  s148 --> s141: 취소
+  s148 --> s155: Terminate#183;clear#183;stop
+  s149 --> s128: Pending 재사용
+  s149 --> s130: 취소
+  s150 --> s138: 다음 입력 차례
+  s150 --> s156: 이름 기준 정리로 표식 삭제
+  s150 --> s157: 퇴역 정리 완료
+  s151 --> s150: 취소
+  s151 --> s155: 턴 호스트 판정
+  s151 --> s158: 이름 기준 정리로 표식 삭제
+  s151 --> s159: 퇴역 정리 완료
+  s152 --> s160: 입력 도착
+  s153 --> s156: 취소
+  s153 --> s158: owner front 판정
+  s153 --> s160: 퇴역 정리 완료
+  s154 --> s157: 취소
+  s154 --> s159: owner front 판정
+  s154 --> s160: 이름 기준 정리로 표식 삭제
+  s155 --> s150: 취소
+  s155 --> s161: 이름 기준 정리로 표식 삭제
+  s155 --> s162: 퇴역 정리 완료
+  s155 --> s110: Retired#8594;Pending CAS#183;listing
+  s156 --> s145: 다음 입력 차례
+  s156 --> s163: 퇴역 정리 완료
+  s157 --> s146: 다음 입력 차례
+  s157 --> s163: 이름 기준 정리로 표식 삭제
+  s158 --> s156: 취소
+  s158 --> s161: 턴 호스트 판정
+  s158 --> s164: 퇴역 정리 완료
+  s159 --> s157: 취소
+  s159 --> s162: 턴 호스트 판정
+  s159 --> s164: 이름 기준 정리로 표식 삭제
+  s160 --> s163: 취소
+  s160 --> s164: owner front 판정
+  s161 --> s156: 취소
+  s161 --> s165: 퇴역 정리 완료
+  s161 --> s125: Retired#8594;Pending CAS#183;listing
+  s162 --> s110: Retired#8594;Pending CAS#183;listing
+  s162 --> s157: 취소
+  s162 --> s165: 이름 기준 정리로 표식 삭제
+  s163 --> s152: 다음 입력 차례
+  s164 --> s163: 취소
+  s164 --> s165: 턴 호스트 판정
+  s165 --> s125: Retired#8594;Pending CAS#183;listing
+  s165 --> s163: 취소
+  class s0 bugPath
+  class s1 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s12 bugPath
+  class s21 bugPath
+  class s29 bugPath
+  class s46 repeats

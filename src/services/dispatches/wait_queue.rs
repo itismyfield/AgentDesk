@@ -457,12 +457,10 @@ mod tests {
     }
 
     impl TestPg {
-        async fn fresh(label: &str) -> Option<Self> {
+        async fn fresh(label: &str) -> Self {
             let lock = crate::db::postgres::lock_test_lifecycle();
-            let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
-                drop(lock);
-                return None;
-            };
+            let base = crate::db::postgres::postgres_test_database_url_base()
+                .expect("POSTGRES_TEST_DATABASE_URL_BASE required for wait queue PG tests"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
             let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
@@ -470,12 +468,9 @@ mod tests {
             let admin_url = format!("{base}/{admin_db}");
             let database_name = format!("agentdesk_wait_queue_{}", uuid::Uuid::new_v4().simple());
             let database_url = format!("{base}/{database_name}");
-            if let Err(error) =
-                crate::db::postgres::create_test_database(&admin_url, &database_name, label).await
-            {
-                eprintln!("skipping {label}: create database failed: {error}");
-                return None;
-            }
+            crate::db::postgres::create_test_database(&admin_url, &database_name, label)
+                .await
+                .unwrap_or_else(|error| panic!("{label}: create test database: {error}")); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
             let pool = match crate::db::postgres::connect_test_pool_and_migrate(
                 &database_url,
                 label,
@@ -484,19 +479,18 @@ mod tests {
             {
                 Ok(pool) => pool,
                 Err(error) => {
-                    eprintln!("skipping {label}: connect/migrate failed: {error}");
                     let _ =
                         crate::db::postgres::drop_test_database(&admin_url, &database_name, label)
                             .await;
-                    return None;
+                    panic!("{label}: connect + migrate: {error}"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
                 }
             };
-            Some(Self {
+            Self {
                 _lock: lock,
                 admin_url,
                 database_name,
                 pool,
-            })
+            }
         }
 
         async fn cleanup(self, label: &str) {
@@ -513,9 +507,7 @@ mod tests {
     #[tokio::test]
     async fn wake_waiting_dispatch_outbox_pg_reassigns_wait_rows_fifo() {
         let label = "wait queue fifo pg";
-        let Some(pg) = TestPg::fresh(label).await else {
-            return;
-        };
+        let pg = TestPg::fresh(label).await;
         let pool = &pg.pool;
 
         sqlx::query(

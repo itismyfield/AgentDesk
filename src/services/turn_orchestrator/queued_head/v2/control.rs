@@ -230,6 +230,11 @@ fn cancel(
                 super::origin::now_ms(),
             );
             let item = next.items.remove(at + first);
+            let dropped = std::slice::from_ref(&item);
+            super::effort_continue::close_dropped(
+                &mut next,
+                super::effort_continue::Dropped::Only(dropped),
+            );
             next.handoff_input_left(&sources::identity(&item));
             next.unbind_item(at + first);
             match owner.commit(next) {
@@ -387,6 +392,7 @@ impl Owner {
         for input in owed {
             next.owe_attempt(&input, TerminalOutcome::Cancelled, at);
         }
+        super::effort_continue::close_dropped(&mut next, super::effort_continue::Dropped::All);
         self.commit(next)?;
         self.project_slots();
         Ok(ClearedWaiting {

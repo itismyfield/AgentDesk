@@ -15,7 +15,7 @@ mod dispatch_runtime;
 mod host_refusal;
 pub(crate) mod inflight_create_log;
 #[cfg(test)]
-#[path = "owned_turn_start.rs"]
+#[path = "owned_turn_start_fixture_tests.rs"]
 pub(in crate::services::discord) mod owned_turn_start;
 mod placeholder_handoff;
 pub(super) mod race_loss;
@@ -2109,6 +2109,7 @@ pub(super) async fn handle_text_message(
             &cancel_token,
         )
         .await;
+        let timing = crate::logging::intake_timing::carry();
         let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
             shared.pg_pool.as_ref(),
             &provider,
@@ -2117,9 +2118,14 @@ pub(super) async fn handle_text_message(
             tmux_session_name.as_deref(),
         )
         .await;
+        let first_admission = matches!(turn_host, crate::services::turn_host::TurnHost::Tmux).then(|| {
+            crate::services::tui_o::cutover::admit_codex_first(channel_id.get(), &provider, session_id.as_deref(), &context_prompt, &cancel_token, tmux_session_name.as_deref())
+        }).flatten();
         tokio::task::spawn_blocking(move || {
+            let mut first_admission = first_admission;
             let _original_registration = producer_registration;
             let _upload_lifetime = materialized_uploads;
+            let _timing = timing.entered();
             let prompt_capture = session_prompt::Scope::enter(&cancel_token_clone);
             let result = crate::services::platform::with_provider_execution_context(
                 provider_execution_context,
@@ -2161,6 +2167,7 @@ pub(super) async fn handle_text_message(
                 },
             );
 
+            if matches!(&result, Ok(Ok(()))) && let Some(admission) = &mut first_admission { admission.completed(); }
             match result {
                 Ok(Ok(())) => prompt_capture.success(),
                 Ok(Err(e)) => {

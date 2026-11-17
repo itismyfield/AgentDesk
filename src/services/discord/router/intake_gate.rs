@@ -122,6 +122,7 @@ pub(in crate::services::discord) async fn handle_event(
     event: &serenity::FullEvent,
     data: &Data,
 ) -> Result<(), Error> {
+    let event_started = std::time::Instant::now();
     maybe_cleanup_sessions(&data.shared).await;
     match event {
         serenity::FullEvent::InteractionCreate { interaction } => {
@@ -1267,6 +1268,7 @@ pub(in crate::services::discord) async fn handle_event(
             let ts = chrono::Local::now().format("%H:%M:%S");
             let preview = truncate_str(text, 60);
             tracing::info!("  [{ts}] ◀ [{user_name}] {preview}");
+            let trace = crate::logging::intake_timing::begin(new_message.id.get(), event_started);
 
             // Checkpoint: message about to be processed as a turn
             // (#2044 F12 — monotonic).
@@ -1362,18 +1364,26 @@ pub(in crate::services::discord) async fn handle_event(
                     owner: None,
                 }
             };
+            use tracing::Instrument as _;
             if let Some(permit) = attachment_local_permit {
-                super::finish_admitted_text_intake(&deps, permit, submission).await?;
+                super::finish_admitted_text_intake(&deps, permit, submission)
+                    .instrument(trace)
+                    .await?;
                 if owner_custody {
                     checkpoint();
                 }
             } else if settle_checkpoint {
-                super::dispatch_live_text_intake(&deps, submission, checkpoint).await?;
+                super::dispatch_live_text_intake(&deps, submission, checkpoint)
+                    .instrument(trace)
+                    .await?;
             } else if o_selected {
                 super::intake_dispatch::dispatch_o_hold_intake(&deps, submission, checkpoint)
+                    .instrument(trace)
                     .await?;
             } else {
-                super::dispatch_text_intake(&deps, submission).await?;
+                super::dispatch_text_intake(&deps, submission)
+                    .instrument(trace)
+                    .await?;
             }
         }
         _ => {}

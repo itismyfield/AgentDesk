@@ -4,7 +4,7 @@
 use std::io::{Read, Seek};
 use std::net::SocketAddr;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::{Db, http_get, reasons};
 
@@ -21,7 +21,7 @@ pub(super) const THREAD_SLACK: usize = 4;
 
 /// In the test's own process, reruns `test` (a full test path) alone in a new process of this
 /// binary and checks that it ran and passed; returns false inside that rerun.
-pub(super) fn rerun_alone(test: &str) -> bool {
+pub(in crate::server::routes::health_api) fn rerun_alone(test: &str) -> bool {
     if std::env::var_os(ALONE).is_some() {
         return false;
     }
@@ -35,17 +35,26 @@ pub(super) fn rerun_alone(test: &str) -> bool {
         .stderr(log.try_clone().unwrap())
         .spawn()
         .expect("rerun the test binary");
-    let deadline = Instant::now() + RERUN_LIMIT;
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break Some(status);
-        }
-        if Instant::now() >= deadline {
+    let status = match tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(crate::test_support::wait::poll_within(
+            async || {
+                child
+                    .try_wait()
+                    .unwrap()
+                    .ok_or_else(|| "rerun process has not exited".into())
+            },
+            RERUN_LIMIT,
+            "isolated test rerun",
+        )) {
+        Ok(status) => Some(status),
+        Err(_) => {
             let _ = child.kill();
             let _ = child.wait();
-            break None;
+            None
         }
-        std::thread::sleep(Duration::from_millis(100));
     };
     let mut output = String::new();
     log.rewind().unwrap();

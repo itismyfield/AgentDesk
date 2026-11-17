@@ -367,7 +367,12 @@ type Watched = (
     watch::Receiver<bool>,
 );
 
-static PROCESS: LazyLock<Arc<Readiness>> = LazyLock::new(Arc::default);
+// Every live entry this process judges goes through this readiness, so the turn host's writer
+// judgement is installed before any entry exists.
+static PROCESS: LazyLock<Arc<Readiness>> = LazyLock::new(|| {
+    crate::services::turn_host::install_writer_refusal(initial_fresh_refusal);
+    Arc::default()
+});
 
 pub(crate) fn process_readiness() -> Arc<Readiness> {
     Arc::clone(&PROCESS)

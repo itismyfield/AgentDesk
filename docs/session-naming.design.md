@@ -1118,7 +1118,7 @@ C=실제 채널/합성 thread/DM hint를 담을 수 있는 저장 문자열; R=r
 | `src/services/routines/session_control.rs:433` | C: 저장 session_key 없을 때 primary-name 또는 parent-tID fallback | 저장 locator 우선; typed Channel/Thread/Dm 경로 |
 | `src/services/routines/session_control.rs:904` | R: fresh teardown의 routine_name/agentID fallback locator | 저장 actual locator 우선; routine name/provider/agentID 경로 |
 
-중앙 정의는 `src/domain/provider/naming.rs:15`. 간접 소비자 `src/cli/run.rs:772`, `cluster/session_matcher.rs:156,170`은 expected_session_name_for→`:426`을 호출한다. parent cfg(test) 아래 `relay_e2e/registered_bootstrap_e2e.rs:108,335`, `relay_e2e/thread_guard_host_e2e.rs:195`, `watchers/lifecycle/watcher_install_fixture.rs:55`는 prod 호출 수에서 뺐다.
+중앙 정의는 `src/domain/provider/naming.rs:15`. 간접 소비자 `src/cli/run.rs:772`, `cluster/session_matcher.rs:156,170`은 expected_session_name_for→`:426`을 호출한다. parent cfg(test) 아래 `relay_e2e/registered_bootstrap_e2e_tests.rs:108,335`, `relay_e2e/thread_guard_host_e2e_tests.rs:195`, `watchers/lifecycle/watcher_install_fixture_tests.rs:55`는 prod 호출 수에서 뺐다.
 
 ## 5. RED 계약·뮤턴트 보강
 

@@ -3,6 +3,9 @@ use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::services::routines::RoutinePatch;
+use crate::services::routines::execution_mode::{
+    ExecutionDefinition, StoredExecutionDefinition, definition_for_patch, notice_limit_for_patch,
+};
 
 const PARALLEL_SAFE_MIGRATED_LAUNCHD_SCRIPT_REF: &str = "migrated-launchd/queue-stability-batch.js";
 
@@ -45,6 +48,9 @@ pub struct AttachRoutineBody {
     pub checkpoint: Option<Value>,
     pub discord_thread_id: Option<String>,
     pub timeout_secs: Option<i32>,
+    pub execution_mode: Option<String>,
+    pub runner: Option<Value>,
+    pub headless_failure_notice_limit: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +70,12 @@ pub struct PatchRoutineBody {
     discord_thread_id: PatchField<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_patch_field")]
     timeout_secs: PatchField<Option<i32>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    execution_mode: PatchField<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    runner: PatchField<Option<Value>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    headless_failure_notice_limit: PatchField<Option<i32>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -122,8 +134,32 @@ where
 }
 
 impl PatchRoutineBody {
-    fn into_patch(self) -> RoutinePatch {
+    /// Omitted fields stay `None`; an explicit null is `Some(None)` and is rejected downstream.
+    fn execution_definition_patch(
+        &self,
+        current: &StoredExecutionDefinition,
+    ) -> Result<(Option<ExecutionDefinition>, Option<i32>), String> {
+        let definition = definition_for_patch(
+            self.execution_mode
+                .as_present()
+                .map(|value| value.as_deref()),
+            self.runner.as_present().map(Option::as_ref),
+            self.execution_strategy.as_deref(),
+            current,
+        )?;
+        let limit =
+            notice_limit_for_patch(self.headless_failure_notice_limit.as_present().copied())?;
+        Ok((definition, limit))
+    }
+
+    fn into_patch(
+        self,
+        execution_definition: Option<ExecutionDefinition>,
+        headless_failure_notice_limit: Option<i32>,
+    ) -> RoutinePatch {
         RoutinePatch {
+            execution_definition,
+            headless_failure_notice_limit,
             name: self.name,
             fallback_agent_id: self.fallback_agent_id.into_option(),
             max_retries: self.max_retries,
@@ -139,6 +175,9 @@ impl PatchRoutineBody {
 
 #[path = "routines/audit.rs"]
 mod audit;
+#[cfg(test)]
+#[path = "routines/execution_mode_http_tests.rs"]
+mod execution_mode_http_tests;
 #[path = "routines/handlers.rs"]
 mod handlers;
 #[path = "routines/helpers.rs"]
@@ -156,12 +195,51 @@ pub use self::handlers::{
 mod tests {
     use serde_json::json;
 
-    use super::{PatchRoutineBody, ResumeRoutineBody};
+    use super::{PatchRoutineBody, ResumeRoutineBody, StoredExecutionDefinition};
+
+    #[test]
+    fn patch_body_keeps_omitted_definition_and_rejects_explicit_null() {
+        let current = StoredExecutionDefinition {
+            id: "routine-1".into(),
+            execution_mode: None,
+            runner: None,
+            execution_strategy: "fresh".into(),
+            script_ref: "daily.js".into(),
+            headless_failure_notice_limit: 3,
+        };
+        let parse = |body| serde_json::from_value::<PatchRoutineBody>(body).unwrap();
+
+        assert_eq!(
+            parse(json!({})).execution_definition_patch(&current),
+            Ok((None, None))
+        );
+        assert_eq!(
+            parse(json!({"headless_failure_notice_limit": 5})).execution_definition_patch(&current),
+            Ok((None, Some(5)))
+        );
+        for (body, expected) in [
+            (json!({"execution_mode": null}), "cannot be cleared"),
+            (json!({"runner": null}), "cannot be cleared"),
+            (json!({"execution_mode": "thread"}), "not available"),
+            (
+                json!({"headless_failure_notice_limit": null}),
+                "cannot be null",
+            ),
+            (
+                json!({"headless_failure_notice_limit": 101}),
+                "between 1 and 100",
+            ),
+        ] {
+            let result = parse(body.clone()).execution_definition_patch(&current);
+            let message = result.expect_err("refused");
+            assert!(message.contains(expected), "{body}: {message}");
+        }
+    }
 
     #[test]
     fn patch_body_preserves_omitted_nullable_fields() {
         let body: PatchRoutineBody = serde_json::from_value(json!({})).unwrap();
-        let patch = body.into_patch();
+        let patch = body.into_patch(None, None);
 
         assert_eq!(patch.schedule, None);
         assert_eq!(patch.next_due_at, None);
@@ -180,7 +258,7 @@ mod tests {
             "timeout_secs": null
         }))
         .unwrap();
-        let patch = body.into_patch();
+        let patch = body.into_patch(None, None);
 
         assert_eq!(patch.schedule, Some(None));
         assert_eq!(patch.next_due_at, Some(None));
@@ -199,7 +277,7 @@ mod tests {
             "timeout_secs": 60
         }))
         .unwrap();
-        let patch = body.into_patch();
+        let patch = body.into_patch(None, None);
 
         assert_eq!(patch.schedule, Some(Some("@every 1h".to_string())));
         assert!(patch.next_due_at.flatten().is_some());

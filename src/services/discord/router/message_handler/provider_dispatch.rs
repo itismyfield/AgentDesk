@@ -560,7 +560,7 @@ fn herdr_turn(
         return herdr::execute(turn, plan, sender);
     }
     let refusal = HerdrRefusal::ExecutorNotWired;
-    tracing::warn!(endpoint = %plan.endpoint.config_key, "{refusal}");
+    tracing::warn!(endpoint = %plan.endpoint.config_key, bootstrap = plan.bootstrap, "{refusal}");
     Err(refusal.to_string())
 }
 
@@ -626,6 +626,7 @@ mod herdr {
                 goals: turn.codex_goals,
                 compact_token_limit: turn.compact_token_limit,
                 cancel: Some(Arc::clone(&turn.cancel)),
+                bootstrap: plan.bootstrap,
             };
             return crate::services::codex::herdr_turn::execute(codex, &ports, sender);
         }
@@ -755,6 +756,14 @@ mod herdr {
 
         fn unplaced_lease(&self, _: &HostedOwner) -> Result<UnplacedLease, String> {
             self.lease()
+        }
+
+        fn hold_notice(&self) -> Option<Arc<herdr_turn::HoldNotice>> {
+            let (pool, channel, runtime) = (self.pool.clone(), self.channel_id, Handle::current());
+            let post = crate::services::discord::queue_io::retained_notice::input_hold;
+            Some(Arc::new(move |nonce: &str, hold: &str| {
+                runtime.block_on(post(&pool, "claude", channel, (nonce, hold)))
+            }))
         }
     }
 

@@ -1,7 +1,8 @@
 //! Auto-queue routes that add entries to an existing run, raced against its completion.
 
+use crate::test_support::wait::poll_within;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::{
     Router,
@@ -168,27 +169,23 @@ async fn uncommitted_completion(pool: &PgPool) -> Transaction<'static, Postgres>
 }
 
 /// True once a backend of this database waits on a lock; false if `task` finished first.
-async fn wait_for_lock_waiter<T>(pool: &PgPool, task: &tokio::task::JoinHandle<T>) -> bool {
-    let deadline = Instant::now() + DEADLINE;
-    loop {
-        let waiting = scalar_i64(
-            pool,
-            "SELECT COUNT(*)::BIGINT FROM pg_stat_activity
-             WHERE datname = current_database() AND wait_event_type = 'Lock'",
-        )
-        .await;
-        if waiting > 0 {
-            return true;
-        }
-        if task.is_finished() {
-            return false;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "request neither waited nor finished"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+async fn lock_waiter_sample<T>(
+    pool: &PgPool,
+    task: &tokio::task::JoinHandle<T>,
+) -> Result<bool, String> {
+    let waiting = scalar_i64(
+        pool,
+        "SELECT COUNT(*)::BIGINT FROM pg_stat_activity
+         WHERE datname = current_database() AND wait_event_type = 'Lock'",
+    )
+    .await;
+    if waiting > 0 {
+        return Ok(true);
     }
+    if task.is_finished() {
+        return Ok(false);
+    }
+    Err("request neither waited nor finished".into())
 }
 
 async fn join<T>(task: tokio::task::JoinHandle<T>) -> T {
@@ -255,7 +252,13 @@ async fn manual_add_waits_for_uncommitted_completion_and_refuses_pg() {
         "/queue/runs/run-1/entries",
         json!({"issue_number": 101}),
     );
-    let waited = wait_for_lock_waiter(&pool, &add).await;
+    let waited = poll_within(
+        async || lock_waiter_sample(&pool, &add).await,
+        DEADLINE,
+        "PostgreSQL lock waiter",
+    )
+    .await
+    .unwrap();
     completion.commit().await.expect("commit completion");
     let (status, body) = join(add).await;
     assert_eq!(run_status(&pool).await, "completed");
@@ -288,7 +291,13 @@ async fn order_callback_waits_for_uncommitted_completion_and_refuses_pg() {
         "/queue/runs/run-1/order",
         json!({"order": [201]}),
     );
-    let waited = wait_for_lock_waiter(&pool, &order).await;
+    let waited = poll_within(
+        async || lock_waiter_sample(&pool, &order).await,
+        DEADLINE,
+        "PostgreSQL lock waiter",
+    )
+    .await
+    .unwrap();
     completion.commit().await.expect("commit completion");
     let (status, body) = join(order).await;
     assert_eq!(run_status(&pool).await, "completed");
@@ -318,7 +327,15 @@ async fn completion_defers_behind_order_callback_holding_the_token_pg() {
         "/queue/runs/run-1/order",
         json!({"order": [202]}),
     );
-    assert!(wait_for_lock_waiter(&pool, &order).await);
+    assert!(
+        poll_within(
+            async || lock_waiter_sample(&pool, &order).await,
+            DEADLINE,
+            "PostgreSQL lock waiter"
+        )
+        .await
+        .unwrap()
+    );
     let mut attempt = pool.begin().await.expect("begin completion attempt");
     let first = finalize_run_if_ready_on_pg_tx(&mut attempt, "run-1")
         .await
@@ -441,7 +458,15 @@ async fn restore_waits_on_the_run_token_before_locking_the_run_row_pg() {
         .await
         .expect("hold run token");
     let restore = spawn_request(&app, Method::POST, "/queue/runs/run-1/restore", json!({}));
-    assert!(wait_for_lock_waiter(&pool, &restore).await);
+    assert!(
+        poll_within(
+            async || lock_waiter_sample(&pool, &restore).await,
+            DEADLINE,
+            "PostgreSQL lock waiter"
+        )
+        .await
+        .unwrap()
+    );
 
     let mut probe = pool.begin().await.expect("begin row probe");
     let row_free =

@@ -20,12 +20,11 @@ struct PgRecoveryTestDatabase {
 }
 
 impl PgRecoveryTestDatabase {
-    async fn create() -> Option<Self> {
+    async fn create() -> Self {
         let lifecycle = crate::db::postgres::lock_test_lifecycle();
-        let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
-            drop(lifecycle);
-            return None;
-        };
+        let base = crate::db::postgres::postgres_test_database_url_base().expect(
+            "POSTGRES_TEST_DATABASE_URL_BASE required for pg-only high_risk_recovery tests",
+        ); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
         let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -33,38 +32,31 @@ impl PgRecoveryTestDatabase {
         let admin_url = format!("{base}/{admin_db}");
         let database_name = format!("agentdesk_pg_recovery_{}", uuid::Uuid::new_v4().simple());
         let database_url = format!("{base}/{database_name}");
-        if let Err(error) = crate::db::postgres::create_test_database(
+        crate::db::postgres::create_test_database(
             &admin_url,
             &database_name,
             "pg-only high_risk_recovery",
         )
         .await
-        {
-            eprintln!("skipping pg-only high_risk_recovery test: {error}");
-            return None;
-        }
+        .unwrap_or_else(|error| {
+            panic!("pg-only high_risk_recovery: create test database: {error}")
+        });
 
-        Some(Self {
+        Self {
             _lifecycle: lifecycle,
             admin_url,
             database_name,
             database_url,
-        })
+        }
     }
 
-    async fn migrate(&self) -> Option<sqlx::PgPool> {
-        match crate::db::postgres::connect_test_pool_and_migrate(
+    async fn migrate(&self) -> sqlx::PgPool {
+        crate::db::postgres::connect_test_pool_and_migrate(
             &self.database_url,
             "pg-only high_risk_recovery",
         )
         .await
-        {
-            Ok(pool) => Some(pool),
-            Err(error) => {
-                eprintln!("skipping pg-only high_risk_recovery test (migrate failed): {error}");
-                None
-            }
-        }
+        .unwrap_or_else(|error| panic!("pg-only high_risk_recovery: connect + migrate: {error}"))
     }
 
     async fn drop(self) {
@@ -299,13 +291,8 @@ impl OutboxNotifier for RestartGuardNotifier {
 
 #[tokio::test]
 async fn boot_reconcile_pg_resets_stale_runtime_rows() {
-    let Some(pg_db) = PgRecoveryTestDatabase::create().await else {
-        return;
-    };
-    let Some(pool) = pg_db.migrate().await else {
-        pg_db.drop().await;
-        return;
-    };
+    let pg_db = PgRecoveryTestDatabase::create().await;
+    let pool = pg_db.migrate().await;
     let engine = test_engine_with_pg(pool.clone());
 
     seed_agent_pg(&pool).await;
@@ -453,13 +440,8 @@ async fn boot_reconcile_pg_resets_stale_runtime_rows() {
 
 #[tokio::test]
 async fn boot_reconcile_terminalizes_cancelled_run_entry_after_partial_legacy_cancel_pg() {
-    let Some(pg_db) = PgRecoveryTestDatabase::create().await else {
-        return;
-    };
-    let Some(pool) = pg_db.migrate().await else {
-        pg_db.drop().await;
-        return;
-    };
+    let pg_db = PgRecoveryTestDatabase::create().await;
+    let pool = pg_db.migrate().await;
     seed_agent_pg(&pool).await;
     seed_card_pg(&pool, "card-cancelled-reconcile", "in_progress").await;
     sqlx::query(
@@ -515,13 +497,8 @@ async fn boot_reconcile_terminalizes_cancelled_run_entry_after_partial_legacy_ca
 
 #[tokio::test]
 async fn restart_recovery_does_not_repost_prior_typed_dispatch_delivery_pg() {
-    let Some(pg_db) = PgRecoveryTestDatabase::create().await else {
-        return;
-    };
-    let Some(pool) = pg_db.migrate().await else {
-        pg_db.drop().await;
-        return;
-    };
+    let pg_db = PgRecoveryTestDatabase::create().await;
+    let pool = pg_db.migrate().await;
     let engine = test_engine_with_pg(pool.clone());
 
     seed_agent_pg(&pool).await;
@@ -671,13 +648,8 @@ async fn restart_recovery_does_not_repost_prior_typed_dispatch_delivery_pg() {
 
 #[tokio::test]
 async fn runtime_reconcile_auto_queue_pending_delivery_orphans_requeues_notify_outbox_pg() {
-    let Some(pg_db) = PgRecoveryTestDatabase::create().await else {
-        return;
-    };
-    let Some(pool) = pg_db.migrate().await else {
-        pg_db.drop().await;
-        return;
-    };
+    let pg_db = PgRecoveryTestDatabase::create().await;
+    let pool = pg_db.migrate().await;
 
     seed_agent_pg(&pool).await;
     for card_id in [
@@ -977,13 +949,8 @@ async fn runtime_reconcile_auto_queue_pending_delivery_orphans_requeues_notify_o
 
 #[tokio::test]
 async fn boot_reconcile_pg_refires_missing_review_dispatch() {
-    let Some(pg_db) = PgRecoveryTestDatabase::create().await else {
-        return;
-    };
-    let Some(pool) = pg_db.migrate().await else {
-        pg_db.drop().await;
-        return;
-    };
+    let pg_db = PgRecoveryTestDatabase::create().await;
+    let pool = pg_db.migrate().await;
     let engine = test_engine_with_pg(pool.clone());
 
     seed_agent_pg(&pool).await;
@@ -1054,13 +1021,8 @@ async fn boot_reconcile_pg_refires_missing_review_dispatch() {
 
 #[tokio::test]
 async fn completed_queue_review_drift_reconcile_promotes_only_stale_done_entries_pg() {
-    let Some(pg_db) = PgRecoveryTestDatabase::create().await else {
-        return;
-    };
-    let Some(pool) = pg_db.migrate().await else {
-        pg_db.drop().await;
-        return;
-    };
+    let pg_db = PgRecoveryTestDatabase::create().await;
+    let pool = pg_db.migrate().await;
     let engine = test_engine_with_pg(pool.clone());
 
     seed_agent_pg(&pool).await;

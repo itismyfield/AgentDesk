@@ -17,6 +17,7 @@ impl<'a, const MAX_BYTES: usize> HeadlessSessionRoutingKey<'a, MAX_BYTES> {
             .then_some(Self(value))
     }
 
+    #[cfg(test)]
     fn as_str(self) -> &'a str {
         self.0
     }

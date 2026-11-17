@@ -399,18 +399,25 @@ async fn image_stale_registry_does_not_block_create_patch_fire_pg() {
             StatusCode::ACCEPTED,
             "{shape} trigger-now: {response}"
         );
-        let mut parent = String::new();
-        for _ in 0..200 {
-            parent = sqlx::query_scalar("SELECT status FROM scheduled_messages WHERE id=$1")
-                .bind(&id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-            if parent != "firing" {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
+        let parent: String = crate::test_support::wait::poll_within(
+            async || {
+                let parent: String =
+                    sqlx::query_scalar("SELECT status FROM scheduled_messages WHERE id=$1")
+                        .bind(&id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                if parent != "firing" {
+                    Ok(parent)
+                } else {
+                    Err(format!("{shape} trigger-now fire is still firing"))
+                }
+            },
+            std::time::Duration::from_secs(5),
+            "trigger-now fire must hand off",
+        )
+        .await
+        .expect("trigger-now fire must hand off");
         assert_eq!(parent, "sent", "{shape} trigger-now fire must hand off");
         assert_eq!(
             outbox_bytes(&pool, &id).await,

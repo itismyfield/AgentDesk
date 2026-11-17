@@ -294,6 +294,13 @@ pub(crate) fn herdr_listed_execution(logical: &str) -> Option<String> {
     executions.get(logical).map(|(nonce, _)| nonce.clone())
 }
 
+/// The execution listed on `logical` and whether a reconcile admitted it; the lock is a leaf.
+pub(crate) fn herdr_listing(logical: &str) -> Option<(String, bool)> {
+    let executions = HERDR_EXECUTIONS.lock();
+    let executions = executions.unwrap_or_else(|poison| poison.into_inner());
+    executions.get(logical).cloned()
+}
+
 /// Whether hooks must leave the pane on its current source; the lock is a leaf.
 fn herdr_execution_withheld(logical: &str) -> bool {
     if !listed(|flag| flag.load(Acquire)) {

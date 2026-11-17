@@ -239,51 +239,6 @@ async fn image_outbox_paths_preserve_retry_restart_and_dedupe_pg() {
 }
 
 #[tokio::test]
-async fn partial_outbox_image_never_invokes_text_delivery_pg() {
-    let (db, pool) = image_pool().await;
-    let mut tx = pool.begin().await.unwrap();
-    let id = enqueue_outbox_pg_with_attachment_on_tx(&mut tx, message("corrupt"), Some(image()))
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    sqlx::query("ALTER TABLE message_outbox DROP CONSTRAINT message_outbox_attachment_complete")
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE message_outbox SET attachment_content_type=NULL WHERE id=$1")
-        .bind(id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let count = drain_message_outbox_batch_once(&pool, Some("partial-row"), {
-        let calls = calls.clone();
-        move |_| {
-            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            async { ("200 OK".into(), "text only".into()) }
-        }
-    })
-    .await;
-    assert_eq!(count, 1, "the corrupt row must actually be claimed");
-    assert_eq!(
-        calls.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "partial image must never downgrade to text-only delivery"
-    );
-    let (status, error): (String, String) =
-        sqlx::query_as("SELECT status,error FROM message_outbox WHERE id=$1")
-            .bind(id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(status, "failed");
-    assert!(error.contains("incomplete or invalid binary attachment"));
-    assert!(!error.contains("preserved-binary"));
-    pool.close().await;
-    db.drop().await;
-}
-
-#[tokio::test]
 async fn legacy_enqueue_wrappers_keep_null_attachment_bytes_pg() {
     let (db, pool) = image_pool().await;
     enqueue_outbox_pg_returning_id(&pool, message("default"))

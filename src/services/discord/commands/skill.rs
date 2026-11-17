@@ -9,6 +9,20 @@ use crate::services::provider::ProviderKind;
 // Keep provider-specific skill wording in one helper so /skill, !skill and
 // !cc stay aligned.
 
+fn format_local_skill_prompt(provider_name: &str, skill: &str, args_str: &str) -> String {
+    if args_str.is_empty() {
+        format!(
+            "Use the local {provider_name} skill `/{skill}` now. \
+             Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
+        )
+    } else {
+        format!(
+            "Use the local {provider_name} skill `/{skill}` now with this user request: {args_str}\n\
+             Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
+        )
+    }
+}
+
 pub(in crate::services::discord) fn build_provider_skill_prompt(
     provider: &ProviderKind,
     skill: &str,
@@ -30,32 +44,8 @@ pub(in crate::services::discord) fn build_provider_skill_prompt(
                 ))
             }
         }
-        ProviderKind::Codex => {
-            if args_str.is_empty() {
-                Ok(format!(
-                    "Use the local Codex skill `/{skill}` now. \
-                     Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
-                ))
-            } else {
-                Ok(format!(
-                    "Use the local Codex skill `/{skill}` now with this user request: {args_str}\n\
-                     Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
-                ))
-            }
-        }
-        ProviderKind::Gemini => {
-            if args_str.is_empty() {
-                Ok(format!(
-                    "Use the local Gemini skill `/{skill}` now. \
-                     Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
-                ))
-            } else {
-                Ok(format!(
-                    "Use the local Gemini skill `/{skill}` now with this user request: {args_str}\n\
-                     Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
-                ))
-            }
-        }
+        ProviderKind::Codex => Ok(format_local_skill_prompt("Codex", skill, args_str)),
+        ProviderKind::Gemini => Ok(format_local_skill_prompt("Gemini", skill, args_str)),
         ProviderKind::Qwen => {
             if args_str.is_empty() {
                 Ok(format!(
@@ -69,32 +59,8 @@ pub(in crate::services::discord) fn build_provider_skill_prompt(
                 ))
             }
         }
-        ProviderKind::OpenCode => {
-            if args_str.is_empty() {
-                Ok(format!(
-                    "Use the local OpenCode skill `/{skill}` now. \
-                     Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
-                ))
-            } else {
-                Ok(format!(
-                    "Use the local OpenCode skill `/{skill}` now with this user request: {args_str}\n\
-                     Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
-                ))
-            }
-        }
-        ProviderKind::Grok => {
-            if args_str.is_empty() {
-                Ok(format!(
-                    "Use the local Grok skill `/{skill}` now. \
-                     Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
-                ))
-            } else {
-                Ok(format!(
-                    "Use the local Grok skill `/{skill}` now with this user request: {args_str}\n\
-                     Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
-                ))
-            }
-        }
+        ProviderKind::OpenCode => Ok(format_local_skill_prompt("OpenCode", skill, args_str)),
+        ProviderKind::Grok => Ok(format_local_skill_prompt("Grok", skill, args_str)),
         ProviderKind::Antigravity => {
             Err("Antigravity native skill invocation is not supported.".to_string())
         }
