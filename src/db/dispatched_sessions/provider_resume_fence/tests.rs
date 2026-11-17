@@ -11,8 +11,8 @@ fn fixture(channel: &str) -> HostedOwner {
 
 async fn seed(pool: &PgPool, owner: &HostedOwner, raw: Option<Value>) -> (i64, String) {
     let key = format!(
-        "claude/{}/fixture:{}",
-        owner.discord_token_hash, owner.logical_key
+        "{}/{}/fixture:{}",
+        owner.provider, owner.discord_token_hash, owner.logical_key
     );
     let id = sqlx::query_scalar(
         "INSERT INTO sessions (session_key, provider, identity_kind, discord_token_hash,
@@ -232,6 +232,40 @@ async fn unreadable_or_missing_fence_rows_fail_closed_pg() {
         .await
         .unwrap();
     assert!(load_for_owner_pg(&pool, &owner).await.is_err());
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn codex_selector_clear_does_not_install_an_unreleasable_claude_fence_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let mut owner = fixture("resume-fence-codex");
+    owner.provider = "codex".into();
+    let bound = record(&owner, "codex-execution", HostedState::Bound);
+    let (id, key) = seed(&pool, &owner, Some(wire(&bound))).await;
+    assert!(set_for_execution_pg(&pool, id, &bound).await.unwrap());
+    assert_eq!(selectors(&pool, id).await, (None, None));
+    assert_eq!(load_by_resolved_key_pg(&pool, &key).await.unwrap(), None);
+    let mut retired = bound.clone();
+    retired.state = HostedState::Retired;
+    sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE id = $1")
+        .bind(id)
+        .bind(wire(&retired))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        http_force::clear_retired_selector_pg(&pool, id, &bound)
+            .await
+            .unwrap()
+    );
+    assert_eq!(load_by_resolved_key_pg(&pool, &key).await.unwrap(), None);
+    assert!(
+        set_for_channel_pg(&pool, &owner.provider, identity(&owner), &key)
+            .await
+            .is_err()
+    );
     pool.close().await;
     db.drop().await;
 }

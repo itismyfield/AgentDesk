@@ -203,7 +203,7 @@ fn verified_fresh_start_releases_the_fence_and_restart_resumes_the_new_session_p
             .unwrap(),
         None
     );
-    super::tmux_launch_tests::read_through(&fx, &fresh.path, &fresh.session);
+    super::tmux_launch_tests::read_through(&fresh.path, &fresh.session);
     let HostedRecord::Known(mut retired) = fx.record() else {
         panic!("fresh execution");
     };
@@ -376,4 +376,41 @@ fn actual_slash_clear_and_restarted_runtime_produce_fresh_launch_argv_pg() {
     *fx.session.lock().unwrap() = None;
     events::forget_channel_for_tests(CHANNEL);
     fresh_turn(&fx, &row, &old, 0);
+}
+
+#[test]
+fn held_bound_clear_refuses_old_pane_then_retirement_launches_fresh_pg() {
+    let fx = Fixture::new("clear-held-bound", None);
+    let (old, row) = native_source(&fx, true);
+    let HostedRecord::Known(mut held) = row else {
+        panic!("native execution");
+    };
+    held.state = HostedState::Bound;
+    held.location = Some(HostedLocation {
+        host: "herdr".into(),
+        execution_node: NODE.into(),
+        endpoint_config_key: KEY.into(),
+        socket_addr: fx.rig.socket().display().to_string(),
+        named_session: SESSION.into(),
+        pane_id: PANE.into(),
+    });
+    fx.store(&held);
+    fx.rig.restart_shell(&context_of(&held.execution_nonce));
+    let bound = HostedRecord::Known(held.clone());
+    let captured = set_clear(&fx, &bound);
+    let launcher = Arc::new(Launcher::default());
+    let (result, _) = fx.turn(&bound, &fx.ports(&launcher), || {});
+    let refused = result.unwrap_err();
+    assert!(refused.to_lowercase().contains("root"), "{refused}");
+    assert!(fx.rig.sends().is_empty());
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fx.rt
+            .block_on(fence::load_for_owner_pg(&fx.pool, &fx.owner))
+            .unwrap(),
+        Some(captured)
+    );
+    held.state = HostedState::Retired;
+    fx.store(&held);
+    fresh_turn(&fx, &HostedRecord::Known(held), &old, 0);
 }

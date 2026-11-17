@@ -263,10 +263,10 @@ mod retired_selector {
 
     // The conversation resets even when the old execution is still admitted and cleanup is held.
     #[test]
-    fn held_clear_forgets_the_selector_and_reports_cleanup_held_pg() {
+    fn held_clear_keeps_the_selector_and_says_so_pg() {
         let path = concat!(
             module_path!(),
-            "::held_clear_forgets_the_selector_and_reports_cleanup_held_pg"
+            "::held_clear_keeps_the_selector_and_says_so_pg"
         );
         if !herdr::in_child(path, HELD) {
             return;

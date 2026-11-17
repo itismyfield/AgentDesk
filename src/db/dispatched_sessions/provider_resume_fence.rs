@@ -78,6 +78,9 @@ pub(crate) async fn set_for_channel_pg(
     identity: CanonicalSessionIdentity<'_>,
     session_key: &str,
 ) -> Result<ResumeFence, String> {
+    if provider != "claude" {
+        return Err("provider resume fence requires Claude".into());
+    }
     if identity.kind != SessionIdentityKind::DiscordChannel {
         return Err("provider resume fence requires a Discord channel identity".into());
     }
@@ -155,7 +158,8 @@ pub(crate) async fn set_for_execution_pg(
     let owner = &record.owner;
     let updated = sqlx::query(
         "UPDATE sessions
-         SET provider_resume_fence = $6, claude_session_id = NULL,
+         SET provider_resume_fence = CASE WHEN $2 = 'claude' THEN $6 ELSE provider_resume_fence END,
+             claude_session_id = NULL,
              raw_provider_session_id = NULL, claude_session_id_recorded_at = NULL,
              raw_provider_transcript_len_watermark = 0,
              raw_provider_transcript_watermark_session_id = NULL,
@@ -232,4 +236,5 @@ pub(crate) async fn release_pg(pool: &PgPool, captured: &ResumeFence) -> Result<
 }
 
 #[cfg(all(test, unix))]
+#[path = "provider_resume_fence/tests.rs"]
 mod tests;

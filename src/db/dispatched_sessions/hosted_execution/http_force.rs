@@ -86,7 +86,7 @@ pub(crate) async fn clear_retired_selector_pg(
              raw_provider_transcript_len_watermark = 0,
              raw_provider_transcript_watermark_session_id = NULL,
              raw_provider_transcript_growth_proven = FALSE,
-             provider_resume_fence = $9
+             provider_resume_fence = CASE WHEN $3 = 'claude' THEN $9 ELSE provider_resume_fence END
          WHERE id = $1
            AND hosted_execution->>'state' = 'retired'
            AND hosted_execution->>'execution_nonce' = $2
