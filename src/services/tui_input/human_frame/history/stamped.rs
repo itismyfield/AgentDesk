@@ -30,6 +30,37 @@ thread_local! {
     pub(crate) static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The history file state a kept answer was computed under; equal only while no write landed.
+#[derive(Clone, PartialEq)]
+pub(crate) struct Token {
+    path: PathBuf,
+    stamp: Fingerprint,
+    generation: u64,
+}
+
+/// The file's current state, or `None` while it is missing, freshly written or carries no
+/// identity and change time to tell a same-length rewrite apart.
+pub(super) fn token(path: &Path) -> Option<Token> {
+    let generation = GENERATION.load(Ordering::SeqCst);
+    let now = SystemTime::now();
+    let stamp = Fingerprint::of(&std::fs::metadata(path).ok()?).ok()?;
+    settled(&stamp, now).then(|| Token {
+        path: path.to_path_buf(),
+        stamp,
+        generation,
+    })
+}
+
+/// Only Unix stamps carry the inode and change time that tell a rewrite with a restored mtime
+/// apart, so other platforms always read.
+fn settled(stamp: &Fingerprint, now: SystemTime) -> bool {
+    cfg!(unix)
+        && stamp
+            .modified
+            .checked_add(SETTLED)
+            .is_some_and(|at| at <= now)
+}
+
 /// Called after every in-process history write, published or not.
 pub(super) fn published() {
     GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -44,10 +75,7 @@ pub(super) fn read<T: Any + Send + Sync>(
     let now = SystemTime::now();
     let mut file = std::fs::File::open(path)?;
     let stamp = Fingerprint::of(&file.metadata()?)?;
-    let settled = stamp
-        .modified
-        .checked_add(SETTLED)
-        .is_some_and(|at| at <= now);
+    let settled = settled(&stamp, now);
     let key = (path.to_path_buf(), TypeId::of::<T>());
     let kept = || KEPT.lock().unwrap_or_else(PoisonError::into_inner);
     if settled

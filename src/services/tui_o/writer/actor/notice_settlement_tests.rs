@@ -215,7 +215,8 @@ async fn pending_scope_rechecks_once_for_each_dependency_change() {
     assert_eq!(actor.notice_debt_extra(), 1);
 }
 
-/// Each native append reopens a pending notice, yet an unchanged history is not read again.
+/// Each native append reopens a pending notice, yet an unchanged history is neither read nor
+/// classified against again.
 #[tokio::test(start_paused = true)]
 async fn native_appends_do_not_reread_an_unchanged_history() {
     let c = Case::new("settle-history-kept");
@@ -234,6 +235,7 @@ async fn native_appends_do_not_reread_an_unchanged_history() {
     let fresh = actor.read_sources();
     actor.prepare_notices(&fresh).await;
     history::HISTORY_READS.with(|reads| reads.set(0));
+    crate::services::discord::INPUT_NOTICE_RUNS.with(|runs| runs.set(0));
     for _ in 0..4 {
         EVALUATIONS.with(|c| c.set((0, 0)));
         append(&c.path, b" ");
@@ -241,6 +243,8 @@ async fn native_appends_do_not_reread_an_unchanged_history() {
         assert_eq!(EVALUATIONS.with(|c| c.get().0), 1, "the append reopens it");
     }
     assert_eq!(history::HISTORY_READS.with(|reads| reads.get()), 0);
+    let runs = crate::services::discord::INPUT_NOTICE_RUNS.with(|runs| runs.get());
+    assert_eq!(runs, 0, "the same prompt is not classified again");
     assert_eq!(actor.notice_debt_extra(), 1);
 }
 

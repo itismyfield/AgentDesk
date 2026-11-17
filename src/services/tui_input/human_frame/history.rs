@@ -18,6 +18,7 @@ mod screen_tests;
 mod stamped;
 #[cfg(test)]
 pub(crate) use stamped::READS as HISTORY_READS;
+pub(crate) use stamped::Token as KnownToken;
 pub(crate) mod v2;
 
 const CAPACITY: usize = 4096;
@@ -356,6 +357,11 @@ pub(crate) fn allows_legacy(id: &str, transcript: &Path) -> bool {
             .iter()
             .any(|entry| entry.id == id && entry.path == transcript)
     })
+}
+
+/// The injection history state [`known`] answers from; `None` when it cannot vouch for one.
+pub(crate) fn known_token() -> Option<KnownToken> {
+    stamped::token(&path().ok()?)
 }
 
 pub(crate) fn known(frame: &str) -> bool {

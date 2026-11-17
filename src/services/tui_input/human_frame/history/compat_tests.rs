@@ -79,7 +79,9 @@ fn history_v2_frames_stay_known_to_the_production_readers() {
     );
 }
 
-/// A kept history parse never outlives a rewrite, by this process or by another writer.
+/// A kept history parse never outlives a rewrite, by this process or by another writer, even one
+/// that keeps the length and restores the mtime.
+#[cfg(unix)]
 #[test]
 fn settled_history_is_not_reread_until_rewritten() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -93,27 +95,29 @@ fn settled_history_is_not_reread_until_rewritten() {
         registry.prepare("stamped", &input).unwrap();
     };
     let path = path().unwrap();
-    let settle = |age| {
-        let at = std::time::SystemTime::now() - std::time::Duration::from_secs(age);
+    let at = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    let settle = || {
         let file = std::fs::File::options().write(true).open(&path).unwrap();
         file.set_modified(at).unwrap();
     };
     plan(1, &first);
-    settle(60);
+    settle();
     assert!(known(&first));
     HISTORY_READS.with(|reads| reads.set(0));
     assert!(known(&first) && !known(&second));
     assert_eq!(HISTORY_READS.with(|reads| reads.get()), 0);
     plan(2, &second);
     assert!(known(&second), "this process's registration is seen");
-    settle(60);
+    settle();
     assert!(known(&second));
     let mut raw = std::fs::read_to_string(&path).unwrap();
     for (old, new) in class_hashes(&second).iter().zip(class_hashes(&third)) {
         raw = raw.replace(old.as_str(), &new);
     }
+    let len = std::fs::metadata(&path).unwrap().len();
     std::fs::write(&path, raw).unwrap();
-    settle(30);
+    settle();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), len);
     assert!(
         known(&third) && !known(&second),
         "an outside same-length rewrite is seen"
