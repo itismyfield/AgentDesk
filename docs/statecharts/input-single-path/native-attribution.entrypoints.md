@@ -21,6 +21,15 @@
 
 아래 표의 `Projection*`는 모델에서 row 집합 변경으로, `Settle`은 durable 결과→lease CAS→row CAS→wake 네 단계로 확장한다. `AdjacentEnd`는 기존 Cancel/Terminate/clear/stop의 명시적 결과이며 남의 native 종료와 구분한다.
 
+## 기준표의 삭제 이력
+
+main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의 15개 참조는 기준 `33d1f4b5a9`의 역사 좌표이며, 현행 진입점이나 현재 시험 실행 증거로 세지 않는다. 기준 mutation 표의 좌표는 그대로 보존한다.
+
+<!-- doc-path-refs: removed src/services/discord/tui_prompt_relay/relay_e2e/mod.rs -->
+<!-- doc-path-refs: removed src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs -->
+<!-- doc-path-refs: removed src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs -->
+<!-- doc-path-refs: removed src/services/discord/tui_prompt_relay/local_model_queue_wake_e2e.rs -->
+
 ## lease: 142행 (시험·주석 제외 723행)
 
 | 코드 좌표 | 포함 함수/진입점 | 모델 행동 |
