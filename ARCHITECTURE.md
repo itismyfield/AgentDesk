@@ -2551,7 +2551,8 @@ src/
 │   │   │   │   │   │   ├── thread_child_tests.rs
 │   │   │   │   │   │   └── unbound_gateway_tests.rs
 │   │   │   │   │   └── owner_execution.rs
-│   │   │   │   └── owner_port.rs
+│   │   │   │   ├── owner_port.rs
+│   │   │   │   └── thread_lookup_tests.rs
 │   │   │   ├── owner_execution/
 │   │   │   │   ├── tests/
 │   │   │   │   │   └── mod.rs
@@ -4202,6 +4203,7 @@ src/
 │   │   │   ├── intake_route/
 │   │   │   │   └── input.rs
 │   │   │   ├── channel_gate.rs
+│   │   │   ├── channel_lookup_tests.rs
 │   │   │   ├── child_funnel_tests.rs
 │   │   │   ├── intake_route.rs
 │   │   │   └── thread_child_record_tests.rs
