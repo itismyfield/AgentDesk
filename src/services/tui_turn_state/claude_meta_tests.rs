@@ -78,7 +78,7 @@ fn a_running_tool_reads_as_streaming_past_trailing_session_metadata() {
 // A marker cannot revive an old terminal or hide active work. A completed reply followed only by
 // known metadata is Idle; strict turn-finalization readers still require their own terminator.
 #[test]
-fn session_metadata_preserves_terminal_barriers_and_completed_replies() {
+fn session_metadata_never_uncovers_an_idle_or_submitted_turn() {
     let cases: [(&str, &[&[&str]], TuiTurnState, bool); 12] = [
         (
             "stop hook and duration",
