@@ -484,8 +484,8 @@ async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
     )
     .await;
     assert_eq!(recovered, Ok(0));
-    let read = |slot: &mut Option<_>| slot.as_ref().ok_or("no owner")?.json();
-    let snapshot = mailbox.v2_request(read).await.unwrap();
+    let snapshot = mailbox.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+    let snapshot = snapshot.await.unwrap();
     assert!(
         snapshot["items"].as_array().unwrap().is_empty(),
         "a refused input never returns to the queue: {snapshot}"
@@ -518,7 +518,8 @@ async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
         Ok("Duplicate".into()),
         "the same ticket admits nothing again"
     );
-    let snapshot = mailbox.v2_request(read).await.unwrap();
+    let snapshot = mailbox.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+    let snapshot = snapshot.await.unwrap();
     assert!(
         snapshot["items"].as_array().unwrap().is_empty(),
         "{snapshot}"

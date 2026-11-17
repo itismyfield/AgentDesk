@@ -67,7 +67,7 @@ pub(super) fn submit_owned(
                 notice,
             )?;
             let submitted = written.ok_or_else(|| {
-                before_payload(&logical, "input cancelled before first key", false)
+                before_payload(&logical, "input cancelled before first key", None)
             })?;
             *ticket.lock().unwrap_or_else(|e| e.into_inner()) = Some(submitted);
             Ok(())
@@ -181,7 +181,7 @@ fn write(
         let (nonce, seen) = (attached.nonce.clone(), seen.into_inner());
         let probe = hold_resolve::watch(nonce, seen, move || target.capture_ansi(-80));
         crate::services::claude_tui::owner_input::record_preparation_watch(probe);
-        return Err(before_payload(logical, "herdr_input_hold_pending", false));
+        return Err(before_payload(logical, "herdr_input_hold_pending", None));
     }
     if let Some(error) = failed.into_inner() {
         return Err(error.into());

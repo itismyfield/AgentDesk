@@ -564,19 +564,19 @@ fn a_pane_that_outlived_the_restart_takes_one_input_only_on_an_idle_screen() {
             "MCP banner + hook running",
             true,
             pane(&format!("{mcp}\n{HOOK_RUNNING}"), ""),
-            Some(Unproven),
+            Some(Unproven(readiness::Unproven::Retained)),
         ),
         (
             "MCP banner + turn starting",
             true,
             pane(&format!("{mcp}\n{TURN_STARTING}"), ""),
-            Some(Unproven),
+            Some(Unproven(readiness::Unproven::Retained)),
         ),
         (
             "new incarnation",
             false,
             pane("✻ Baked for 2s", ""),
-            Some(Unproven),
+            Some(Unproven(readiness::Unproven::Retained)),
         ),
     ];
     for (name, older, screen, refused) in cases {
