@@ -12,7 +12,7 @@
 그래서 입력이 키도 보관도 안내도 없이 다음 활동까지 남는다.
 
 고친 계약: 예산 끝에서 Stamp만 달라졌고 나머지 조건이 모두 "쉬는 중"이면, **같은 시도 안에서** 새 Stamp를 기준으로 같은 대기를 짧게(창 하나 최대 2초, 최대 3번) 더 돈다.
-그 사이 증거가 오면 기존 경로로 전달하고, 조용해지거나 창을 다 쓰면 키 없이 기존 미전송 정산(보관 → 재전송 안내)으로 끝낸다.
+그 사이 증거가 오면 기존 경로로 전달하고, 조용해지거나 창을 다 쓰면 키 없이 최종 미전송 거절(§4.6: 본문 없는 정산 기록 1회 → 사유 안내 1회)로 끝낸다.
 턴이 진행 중이거나 fence가 열려 있거나 화면이 바쁘면 정산하지 않고 지금처럼 보류한다.
 
 ## 1. 경로 확인
@@ -102,7 +102,7 @@ Herdr에서 재시작 증명(`readiness/mod.rs:315-333`)이 서는 pane은 `ai-t
 
 - **같은 원본의 재시도**: ticket이 같은 재시도는 저장된 원본을 generation까지 그대로 다시 쓰고, 내용이 달라진 candidate는 거절한다(`v2.rs:73-104`). 재시도는 새 출처가 아니다.
 - **여러 원본을 실은 한 프레임**: head 하나가 원본과 합쳐진 후속을 members로 갖는다(`v2.rs:550`). 정산은 members 전부를 한 스냅샷에서 큐 앞에서 빼 보관 항목 하나로 옮긴다(`retained.rs:177`, `:183`, `:417-426`). head만 정산하는 경로는 없다.
-- **재시작**: 안내가 아직 나가지 않은 미전송 보관은 안내 drain보다 먼저 다시 큐에 넣는다(`input_owner/recovery.rs:19-25`, `retained.rs:293-306`). 안내가 나간 원본은 자동으로 다시 제출하지 않는다(`retained.rs:231-255`).
+- **재시작**: 안내가 아직 나가지 않은 미전송 보관은 안내 drain보다 먼저 다시 큐에 넣는다(`input_owner/recovery.rs:19-25`, `retained.rs`의 `requeueable`). 안내가 나간 원본은 자동으로 다시 제출하지 않는다(`retained.rs`의 `notice_enqueued`). 재평가 창을 거친 정산은 이 보관에 들지 않는다(§4.6): 재시작은 그 안내만 다시 시도한다.
 - **늦은 정산**: `retain_not_sent`는 미전송 증명과 현재 head의 시도 일치를 확인한다(`retained.rs:171-175`). clear로 사라진 head를 뒤늦게 정산하면 `stale NotSent attempt`로 거절된다.
 
 출처별 안내 문구와 API·루틴 쪽 실패 표시는 이 설계가 바꾸지 않으며, 문구까지 따라가 확인하지는 않았다(§8).
@@ -177,9 +177,23 @@ Herdr에서 재시작 증명(`readiness/mod.rs:315-333`)이 서는 pane은 `ai-t
 | 규칙 | 근거 |
 |---|---|
 | 대기 중 파일이 한 번 바뀌었다는 이유만으로 보류가 무기한 남지 않는다 | §4.1 Requiet, §4.4. 모델 `InputEventuallyResolves` |
-| 현재 실행의 제출 증거 없이 키를 보내지 않는다 | 창은 기존 대기 루프다. 정산은 `retain_not_sent`뿐이다. 모델 `NoKeyWithoutEvidence` |
+| 현재 실행의 제출 증거 없이 키를 보내지 않는다 | 창은 기존 대기 루프다. 정산은 `retain_not_sent`(움직임 없는 분기)와 `refuse_not_sent`(재평가 창을 거친 분기)뿐이고 둘 다 키를 보내지 않는다. 모델 `NoKeyWithoutEvidence` |
 | 실제 Running 중에는 정산하지 않는다 | S5·S6·S7, P. 모델 `NoSettleOverOpenTurn`, `NoRequietSettleOverBusyPane` |
-| 보관 1회·안내 1회·front 해제 | 기존 경로 그대로. 모델 `OneEnd` |
+| 정산 기록 1회·안내 1회·front 해제 | 움직임 없는 분기는 기존 보관 그대로, 재평가 창을 거친 분기는 §4.6. 모델 `OneEnd`, `RefusedDisposition` |
+
+### 4.6 재평가 창을 거친 정산의 처분 (리뷰 뒤 변경)
+
+재평가 창을 거쳐 끝난 입력은 재실행할 수 있는 보관이 아니라 **최종 미전송 거절**이다. "원문 보관 1회"는 이 정산에 한해 "본문 없는 최종 정산 기록 1회"다.
+
+- 정산 시 members를 모두 큐에서 빼고, 그 시도의 ticket 묶음을 지우고, 출처가 있으면 실행 실패 영수증을 빚진다(`queued_head/v2/refused.rs`의 `refuse_not_sent`).
+- 남기는 것은 unit과 시도의 identity, member별 identity와 원문 fingerprint, 미전송 사유, 안내 의도뿐이다(`v2_types.rs`의 `RefusedInput`). 본문·frame·ticket 문맥의 원본 사본은 남기지 않는다.
+- 기록은 재큐 대상이 아니다. 재시작 복구는 안내만 다시 시도한다(`input_owner/notice.rs`의 `owed`가 `refused_inputs`도 읽는다). outbox의 dedupe key가 반복을 한 줄로 묶는다.
+- 같은 출처의 재접수는 기록의 identity가 막고(`sources.rs`의 `fenced`, `v2.rs`의 `holds`), 같은 ticket의 재시도는 남은 receipt가 Duplicate로 답한다. catch-up은 이 출처를 다시 가져가지 않는다(`queued_recovery.rs`의 `v2_held_sources`).
+- 안내는 "준비됐다는 증거를 확보하지 못해 전달하지 않고 종료했다"는 사유를 쓴다(`retained_notice.rs`, reason code `refused.readiness_unproven`). 사람이 같은 내용을 새 메시지로 보내는 것만이 재실행이다.
+- 안내가 나간 기록은 전달된 identity와 같은 24시간 뒤에 지운다(`refused.rs`의 `forget_told_refusals`).
+- 움직임 없는 분기(§4.1 Unproven)와 다른 기존 미전송 보관 경로의 보관·재큐는 바꾸지 않았다.
+
+모델 `RefusedDisposition`(§6): `RefusedStaysOut`(거절된 입력은 큐로 돌아오지 않는다), `NoticeExactlyOnce`(안내 정확히 1회).
 
 ## 5. 두 안 비교
 
@@ -212,6 +226,15 @@ Herdr에서 재시작 증명(`readiness/mod.rs:315-333`)이 서는 pane은 `ai-t
 | 메타가 창마다 붙음 | — | GREEN `TmuxChurnFixed`·`HerdrChurnFixed`, 뮤턴트 `NoRoundCap`·`ExhaustHolds` RED |
 
 수정 전 반례(대기 시작 → 메타 한 줄 → 예산 끝 → 깨움 없는 보류)는 §1의 코드 경로와 단계별로 대조했다.
+
+정산 뒤 처분은 `RefusedDisposition.tla` 5 cfg가 다룬다([보고서](../statecharts/input-single-path/refused-disposition.report.md)).
+
+| 규칙 | 보관·재큐(`Before`) | 최종 거절(`Fixed`) |
+|---|---|---|
+| `RefusedStaysOut` | RED: 안내 전 재시작이 원본을 큐로 되돌린다 | GREEN, 뮤턴트 `RetryAdmits` RED |
+| `NoBodyOnceSettled` | RED | GREEN |
+| `NoKeyAfterEnd` | RED: 되돌아온 원본이 재전송 없이 제출된다 | GREEN |
+| `NoticeAtMostOnce`·`NoticeExactlyOnce` | 안내가 끝내 안 나가는 경로가 있다 | GREEN, 뮤턴트 `NoDedupe`·`DrainSkipsRefused` RED |
 
 ## 7. 구현 계획
 

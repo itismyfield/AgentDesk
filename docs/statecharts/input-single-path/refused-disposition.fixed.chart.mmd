@@ -1,0 +1,12 @@
+---
+title: "An input refused for good: its body, its one notice, a restart and a ticket retry"
+---
+stateDiagram-v2
+  s0: Reserved head, wait ended without evidence
+  s1: Refused for good, no body (notice owed)
+  s2: Refused for good, no body (notice in the outbox, not marked)
+  s3: Refused for good, no body (notice posted and marked)
+  [*] --> s0
+  s0 --> s1: owner settles the head
+  s1 --> s2: drain posts the notice
+  s2 --> s3: owner marks the notice

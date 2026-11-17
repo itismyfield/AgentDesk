@@ -1,0 +1,38 @@
+---
+title: "An input refused for good: its body, its one notice, a restart and a ticket retry"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoBodyOnceSettled or NoKeyAfterEnd or RefusedStaysOut
+    lg1: Path to the NoBodyOnceSettled or NoKeyAfterEnd or NoticeExactlyOnce or RefusedStaysOut bug
+    lg2: Repeats forever, so NoticeExactlyOnce breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  s0: Reserved head, wait ended without evidence
+  s1: Retained with its body (notice owed)
+  s2: RED: the settled input is back in the queue
+  s3: Retained with its body (notice in the outbox, not marked)
+  s4: RED: sent again without a resend
+  s5: Retained with its body (notice posted and marked)
+  [*] --> s0
+  s0 --> s1: owner settles the head
+  s1 --> s2: daemon restarts: requeue, then drain
+  s1 --> s3: drain posts the notice
+  s2 --> s4: drive submits the queue front
+  s3 --> s2: daemon restarts: requeue, then drain
+  s3 --> s5: owner marks the notice
+  s4 --> s4: daemon restarts: requeue, then drain
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 breaks
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath
+  class s3 breaks
+  class s3 bugPath
+  class s4 breaks
+  class s4 bugPath
+  class s4 repeats
+  class s5 breaks

@@ -722,44 +722,61 @@ fn an_owner_input_whose_idle_transcript_moved_once_ends_refused_without_a_key() 
     );
 }
 
-// Evidence that lands inside a window is delivered by the same wait, not settled over.
+// Evidence that lands inside a window is delivered by the same wait, not settled over; a Cancel
+// that lands in the window first ends the wait, and the evidence after it sends no key.
 #[cfg(unix)]
 #[test]
 fn evidence_that_lands_inside_a_window_delivers_the_waiting_input() {
     use super::super::input::submission::tests::{ScriptedTmux, view};
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let r = Rig::new();
-    r.assistant("old answer");
-    r.terminal();
-    daemon_restart(&r.session);
-    let tmux = ScriptedTmux::new(&view("", false));
-    tmux.set_dead(false);
-    let budget = Duration::from_millis(1200);
-    let (session, path, ctx) = (r.session.clone(), r.path.clone(), r.ctx.clone());
-    let moved = after_first_look(&r.session, move || {
-        let native = &ctx.expected_native_session_id;
-        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(file, "{}", json!({"type":"ai-title","sessionId":native})).unwrap();
-        // Past the budget, half way into its first window.
-        std::thread::sleep(budget * 3 / 2);
-        let start = json!({"session_id":native,"transcript_path":path,"source":"startup"});
-        let at = Some(Utc::now());
-        note_hook(
-            "claude",
-            &HookEventKind::SessionStart,
-            &session,
-            &start,
-            Some(&ctx),
-            at,
-            false,
-        );
-    });
-    super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(Some(budget)));
-    let sent = r.send();
-    super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(None));
-    crate::test_support::wait::join_within(moved, crate::test_support::wait::WAIT_CAP);
-    assert_eq!(sent, Ok(()));
-    assert_eq!(tmux.sends(), ["load", "paste", "Enter"]);
+    for cancels in [false, true] {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let r = Rig::new();
+        r.assistant("old answer");
+        r.terminal();
+        daemon_restart(&r.session);
+        let tmux = ScriptedTmux::new(&view("", false));
+        tmux.set_dead(false);
+        let budget = Duration::from_millis(1200);
+        let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+        let (session, path, ctx, stop) = (r.session.clone(), r.path.clone(), r.ctx.clone(), token.clone());
+        let moved = after_first_look(&r.session, move || {
+            let native = &ctx.expected_native_session_id;
+            let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(file, "{}", json!({"type":"ai-title","sessionId":native})).unwrap();
+            // Past the budget, half way into its first window.
+            std::thread::sleep(budget * 3 / 2);
+            if cancels {
+                stop.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                std::thread::sleep(budget / 4);
+            }
+            let start = json!({"session_id":native,"transcript_path":path,"source":"startup"});
+            let at = Some(Utc::now());
+            note_hook(
+                "claude",
+                &HookEventKind::SessionStart,
+                &session,
+                &start,
+                Some(&ctx),
+                at,
+                false,
+            );
+        });
+        super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(Some(budget)));
+        let send = super::super::input::send_warm_followup_owned;
+        let sent = send(&r.session, "one original", Some(&token));
+        super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(None));
+        crate::test_support::wait::join_within(moved, crate::test_support::wait::WAIT_CAP);
+        match cancels {
+            true => {
+                assert!(sent.is_err(), "the Cancel ends the wait: {sent:?}");
+                assert!(tmux.sends().is_empty(), "no key after the Cancel");
+            }
+            false => {
+                assert_eq!(sent, Ok(()));
+                assert_eq!(tmux.sends(), ["load", "paste", "Enter"]);
+            }
+        }
+    }
 }
 
 /// The end of a turn as Claude writes it: the answer, each Stop hook output, the summary, the
