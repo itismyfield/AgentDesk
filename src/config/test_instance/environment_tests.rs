@@ -744,6 +744,17 @@ fn review_simple_onboarding_uses_template_in_opt_in() {
         environment::set_metadata_program_for_tests(
             root.ancestors().nth(4).unwrap().join("metadata-probe"),
         );
+        if mode == "opt-in" {
+            assert!(
+                crate::services::claude::capability_probe::ultracode_available(
+                    Some("claude-opus-4-8"),
+                    None,
+                    Some(&root),
+                )
+                .is_err()
+            );
+            assert!(!root.join("runtime/provider-started").exists());
+        }
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (_, axum::Json(value)) = rt.block_on(crate::services::onboarding::generate_prompt(
             crate::services::onboarding::GeneratePromptBody {
