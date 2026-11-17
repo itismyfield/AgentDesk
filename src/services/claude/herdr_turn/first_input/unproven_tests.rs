@@ -1,7 +1,5 @@
-//! A first input whose idle source proves no boundary by the end of its readiness budget ends at
-//! the owner retained with a resend ask, or refused for good when its transcript moved; one whose
-//! turn still runs waits at the front. A launch older than the daemon restart proves its idle
-//! composer on its last hard terminal.
+//! A first input whose idle source proves no boundary ends retained with a resend ask, or refused
+//! for good once its transcript moved; a running turn waits, an older launch proves its terminal.
 use super::tests::{NONCE, bound_target};
 use super::*;
 use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
