@@ -609,6 +609,7 @@ input-single-path/ReadinessRequietTmuxKnownGapFixed.cfg	ReadinessRequiet	Unmoved
 input-single-path/ReadinessRequietTmuxMarkerBefore.cfg	ReadinessRequiet	-	InputEventuallyResolves
 input-single-path/ReadinessRequietTmuxMarkerFixed.cfg	ReadinessRequiet	-	InputEventuallyResolves
 input-single-path/ReadinessRequietTmuxOnceBefore.cfg	ReadinessRequiet	-	InputEventuallyResolves
+input-single-path/ReadinessRequietTmuxOnceDeliverSkipsEvidence.cfg	ReadinessRequiet	NoKeyWithoutEvidence	-
 input-single-path/ReadinessRequietTmuxOnceFixed.cfg	ReadinessRequiet	-	-
 input-single-path/ReadinessRequietTmuxOnceQuietSendsKey.cfg	ReadinessRequiet	NoKeyWithoutEvidence	-
 input-single-path/ReadinessRequietTmuxOnceStampOnceKeeps.cfg	ReadinessRequiet	-	InputEventuallyResolves

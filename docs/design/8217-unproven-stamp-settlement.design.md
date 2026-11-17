@@ -75,8 +75,10 @@ Herdr에서 재시작 증명(`readiness/mod.rs:315-333`)이 서는 pane은 `ai-t
 
 | 경로 | file:line | 재평가 창과의 관계 |
 |---|---|---|
-| Cancel | `readiness/wait.rs:17-19`, `composer.rs:53-55`, `:66-68` | 창도 같은 루프라 같은 지점에서 끝난다 |
-| stop·Terminate(제출 fence) | `readiness/wait.rs:20-22`, `effect.rs:205-208` | 같음. 창이 새 키 경로를 만들지 않는다 |
+| CancelToken 취소 | `readiness/wait.rs:17-19`, `composer.rs:53-55`, `:66-68`, `src/services/provider.rs:616-618` | `cancel_requested`는 `token.cancelled`만 읽는다. Herdr 첫 입력은 `turn.cancel`을 넘긴다(`first_input.rs:55`, `:170`). tmux owner의 유휴 leaf는 토큰을 넘기지 않으므로(`effect.rs:201-203`) 그 대기는 예산과 제출 fence로만 끝난다. 창도 같은 루프라 같은 지점에서 끝난다 |
+| tmux stop(제출 fence) | `readiness/wait.rs:20-22`, `src/services/claude_tui/submission_fence.rs:90-92`, `effect.rs:205-208` | 창의 매 반복이 같은 fence를 먼저 읽는다. 창이 새 키 경로를 만들지 않는다 |
+| Herdr 사용자 `/stop` | `src/services/turn_orchestrator/herdr_user_stop.rs:53-75` | `user_stop` 의도만 기록하고 `token.cancelled`를 세우지 않는다. 그래서 대기도 창도 `/stop`으로 바로 끝나지 않고 예산과 창(최대 +6초)을 다 쓴다. 키 없이 끝난 입력은 `FinishedUntouched`로 기록되어(`src/services/provider/herdr_before_start.rs:115-128`, `:287-294`) 기존 stop 종결을 탄다. 이 설계는 그 계약을 바꾸지 않고 대기 상한만 늘린다 |
+| Herdr Terminate | `src/services/discord/herdr_terminate.rs:535-540`(물리 실행의 `termination_fence`), `:603-619`(닫기·retire·종결) | tmux의 `submission_fence::refusal()`과 다른 경로이고 대기 루프는 이 fence를 읽지 않는다. 창은 키를 보내지 않으며, 창 안에서 증거가 오면 첫 대기와 같은 예약·현재성 확인(`composer.rs:169-180`)을 지난다. 창 도중 Terminate가 겹치는 순서는 시험하지 않았다(§8) |
 | clear | `readiness/mod.rs:380`(`clear::current`), `queued_head/v2/clear.rs:232` | clear 중이면 정산하지 않는다(§4.1 S2). front가 치워지면 감시는 `held_watch.rs:64`에서 End |
 | 새 incarnation·source 교체 | `readiness/mod.rs:379`, `:598-609` | source가 달라지면 정산하지 않는다(S1). 창은 source를 다시 읽지 않는다(§4.2) |
 | 데몬 재시작·부팅 | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:748-759` (`recover` 뒤 `wake`) | 창 상태는 시도의 스택에만 있다. 재시작 뒤 새 시도가 처음부터 다시 센다 |
@@ -87,16 +89,24 @@ Herdr에서 재시작 증명(`readiness/mod.rs:315-333`)이 서는 pane은 `ai-t
 ## 3. 입력 출처 분류
 
 출처는 `input_owner/origin.rs:4-13`의 `InputOrigin`이고, TUI 실행이면 출처와 무관하게 채널의 V2 input owner가 받는다(`origin.rs:98-100`).
-보관 판정에는 출처 분기가 없다(`retained.rs:166-204`).
+보관 판정에는 출처 분기가 없다(`retained.rs:166-204`). `is_person()`(`origin.rs:26-28`)은 사람 입력 정책을 적용할 출처의 분류이지 작성자 판정이 아니다.
 
-| 출처 | 쓴 주체 | 소유자 | 이 정산이 뜻하는 것 |
-|---|---|---|---|
-| `Discord`, `Imessage` | 사람 (`origin.rs:26-28`) | 채널 V2 owner | 원문 보관, 재전송 안내 1회 |
-| `HttpStart` | API 호출 (`origin.rs:43-46`) | 같은 owner | 같은 보관·안내. 안내 뒤 시도는 실패로 종결(`retained.rs:245-247`) |
-| `Routine` | 루틴·예약 | 같은 owner | 같음 |
-| `EffortContinue` | 데몬의 continuation (`origin.rs:32-34`) | 같은 owner | 같음. 안내 뒤 장벽이 닫혀 다시 제출되지 않는다(`retained.rs:248-253`) |
+| 출처 | 작성 주체·전달 경로 | 저장된 원본 identity | 실행 owner | 정산 단위 |
+|---|---|---|---|---|
+| `Discord` | 사람이 채널에 쓴 메시지. context가 없으면 이 출처다(`origin.rs:35-41`) | 메시지 id와 `queued_generation` | 채널 V2 owner | head의 members 전부 |
+| `Imessage` | 외부 전달: 브리지가 사람 입력을 실어 온다(`src/services/turn_orchestrator/queued_head/v2.rs:61-69`) | 채널과 원본 GUID로 만든 메시지 id·영수증. 재전달에도 같다(`origin.rs:49-73`) | 같은 owner | 같음 |
+| `HttpStart` | API 호출(`origin.rs:43-44`) | 큐에 저장된 원본. ticket이 있으면 그 ticket에 묶인다(`v2.rs:73-104`) | 같은 owner | 같음. 안내 뒤 시도는 실패로 종결(`retained.rs:245-247`) |
+| `Routine` | 루틴·예약(`origin.rs:45`) | 같음 | 같은 owner | 같음 |
+| `EffortContinue` | 데몬의 continuation(`origin.rs:32-34`) | 같음 | 같은 owner | 같음. 안내 뒤 장벽이 닫혀 다시 제출되지 않는다(`retained.rs:248-253`) |
 
-출처별 안내 문구와 API·루틴 쪽 실패 표시는 이 설계가 바꾸지 않으며, 이 레그에서 문구까지 따라가 확인하지는 않았다(§8).
+이 정산이 그대로 따르는 기존 보존 계약:
+
+- **같은 원본의 재시도**: ticket이 같은 재시도는 저장된 원본을 generation까지 그대로 다시 쓰고, 내용이 달라진 candidate는 거절한다(`v2.rs:73-104`). 재시도는 새 출처가 아니다.
+- **여러 원본을 실은 한 프레임**: head 하나가 원본과 합쳐진 후속을 members로 갖는다(`v2.rs:550`). 정산은 members 전부를 한 스냅샷에서 큐 앞에서 빼 보관 항목 하나로 옮긴다(`retained.rs:177`, `:183`, `:417-426`). head만 정산하는 경로는 없다.
+- **재시작**: 안내가 아직 나가지 않은 미전송 보관은 안내 drain보다 먼저 다시 큐에 넣는다(`input_owner/recovery.rs:19-25`, `retained.rs:293-306`). 안내가 나간 원본은 자동으로 다시 제출하지 않는다(`retained.rs:231-255`).
+- **늦은 정산**: `retain_not_sent`는 미전송 증명과 현재 head의 시도 일치를 확인한다(`retained.rs:171-175`). clear로 사라진 head를 뒤늦게 정산하면 `stale NotSent attempt`로 거절된다.
+
+출처별 안내 문구와 API·루틴 쪽 실패 표시는 이 설계가 바꾸지 않으며, 문구까지 따라가 확인하지는 않았다(§8).
 
 ## 4. 계약
 
@@ -182,7 +192,7 @@ Herdr에서 재시작 증명(`readiness/mod.rs:315-333`)이 서는 pane은 `ai-t
 **(b) 예산 끝 뒤에 제한 재평가 단계를 따로 둔다(선택).**
 예산 끝의 판정을 3분류로 나누고, Requiet일 때만 새 기준으로 짧은 창을 돈다.
 - 비용: 판정 3분류, 두 대기 루프에 연장 분기, 화면 조건 하나. 순증 약 +95.
-- 위험: 시도가 최대 6초 더 걸린다. Herdr 첫 입력의 대기는 composer 변경 잠금 안에서 돌므로(`src/services/claude/herdr_turn/first_input.rs:123`) 그 잠금도 그만큼 더 잡힌다. tmux 대기는 잠금 밖이다(`src/services/claude_tui/input/submission.rs:35`). 창을 다 쓴 정산(§4.3)은 Stamp 불변 없이 판정한다.
+- 위험: 시도가 최대 6초 더 걸린다. Herdr 첫 입력의 대기는 composer 변경 잠금(`src/services/claude/herdr_turn/first_input.rs:123`)과 실행의 `state.submission` 잠금(`src/services/provider/herdr_before_start.rs:268-294`) 안에서 돌므로 두 잠금도 그만큼 더 잡힌다. tmux 대기는 잠금 밖이다(`src/services/claude_tui/input/submission.rs:35`). 창을 다 쓴 정산(§4.3)은 Stamp 불변 없이 판정한다.
 
 (b)를 고른 이유: 움직임이 없는 기존 분기를 그대로 두고 결함이 난 분기만 다룬다. 움직인 시점이 예산의 어디든 같은 규칙이 적용된다. 종료가 상수로 묶인다.
 
@@ -263,4 +273,5 @@ M2가 기록된 실행 중 턴에서는 P에 가려진다는 것을 모델이 �
 - **재시작 뒤 메타 한 줄이 실제로 붙는 계기**: 이 레그에서 운영 transcript를 읽어 재현 시각을 확인하지는 않았다. 이슈 본문과 #8168의 기록을 따랐다.
 - **출처별 안내 문구**: §3의 표는 owner 판정까지만 확인했다.
 - **입력창 거절이 먼저인 tmux 대기**: warm이 아닌 tmux 대기는 예산 끝에 입력창 거절(사람 draft 등)을 `unproven`보다 먼저 판정해 보류한다(`src/services/claude_tui/input.rs:420-428`). Stamp와 무관한 기존 동작이라 그대로 둔다.
+- **창 도중의 Herdr `/stop`·Terminate**: 두 경로의 종료 방식은 §2.3에 구분해 적었다. 창이 열린 뒤 `user_stop`만 기록된 경우와 창 도중 Terminate가 물리 실행을 닫는 경우의 진입점 시험은 만들지 않았다. 후속 후보.
 - **owner 밖 호출자**: `warm_followup.rs:248`, `intake_turn.rs:1592`도 같은 내부 함수를 지나므로 Requiet일 때 최대 6초 더 기다린다. 이들은 `unproven`을 읽지 않는다.

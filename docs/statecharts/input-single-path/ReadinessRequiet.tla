@@ -36,7 +36,9 @@ OwnerInput == /\ phase = "restarted" /\ phase' = "queued"
 \* The wait's first look keeps the Stamp it compares at the budget's end.
 StartWait == /\ phase = "queued" /\ phase' = "waiting" /\ moved' = FALSE /\ round' = 0
              /\ UNCHANGED <<Env, Out>>
-Deliver == /\ phase \in {"waiting", "requiet"} /\ Deliverable
+\* Keys go out only on evidence; the mutant drops that guard from the ordinary delivery.
+Deliver == /\ phase \in {"waiting", "requiet"}
+           /\ (Mutant = "DeliverSkipsEvidence" \/ Deliverable)
            /\ phase' = "done" /\ keys' = keys + 1
            /\ UNCHANGED <<Env, moved, round, retains, notices, bad>>
 Retain(origin) ==
@@ -59,8 +61,8 @@ WindowEnds ==
     /\ IF ~SettleableM THEN Hold
        ELSE IF ~moved \/ Exhausted
             THEN IF Mutant = "QuietSendsKey"
-                 THEN /\ phase' = "done" /\ keys' = keys + 1 /\ bad' = bad \cup {"key"}
-                      /\ UNCHANGED <<Env, moved, round, retains, notices>>
+                 THEN /\ phase' = "done" /\ keys' = keys + 1
+                      /\ UNCHANGED <<Env, moved, round, retains, notices, bad>>
                  ELSE IF PaneBusyM \/ (Mutant = "ExhaustHolds" /\ moved) THEN Hold
                  ELSE Retain("moved")
        ELSE /\ round' = (IF Mutant = "NoRoundCap" THEN round ELSE round + 1)
@@ -104,7 +106,9 @@ TypeOK == /\ phase \in {"restarted", "queued", "waiting", "requiet", "held", "re
                         "explained", "done"}
           /\ turn \in {"idle", "unrecorded", "running", "fenced"}
           /\ round \in 0..Rounds /\ keys \in 0..1 /\ retains \in 0..1 /\ notices \in 0..1
-NoKeyWithoutEvidence == "key" \notin bad
+\* Read from the state, not from a mark a faulty branch would have to leave itself; nothing
+\* withdraws the evidence once the input is done.
+NoKeyWithoutEvidence == keys = 0 \/ Deliverable
 NoSettleOverOpenTurn == "open" \notin bad
 NoRequietSettleOverBusyPane == "busy" \notin bad
 \* Existing gap, not widened: the unmoved branch never reads the screen.
