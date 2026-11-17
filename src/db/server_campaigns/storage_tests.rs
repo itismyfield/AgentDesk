@@ -1081,7 +1081,7 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
             ],
         ),
         (193, &["column:session_transcripts.channel_context"]),
-        (194, &["table:decision_forums"]),
+        (197, &["table:decision_forums"]),
     ];
     assert_eq!(
         expected
