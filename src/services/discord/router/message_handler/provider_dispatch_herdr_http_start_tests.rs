@@ -851,6 +851,9 @@ fn execution_gone(terminal: Option<bool>) {
         Some(true) => "flushed",
     };
     let fx = Fixture::new(&format!("http-execution-gone-{tag}"), None);
+    let hooks = terminal
+        .is_none()
+        .then(crate::services::claude_tui::hook_server::hook_receiver_router);
     let launcher = Arc::new(Launcher::default());
     let (_, started) = reconnect::launch(&fx, &launcher);
     let before = fx.rig.sends().len();
@@ -994,10 +997,23 @@ fn execution_gone(terminal: Option<bool>) {
             append(&successor.path, &[json!({"type":"system","subtype":"turn_duration",
                 "sessionId":successor.session,"timestamp":chrono::Utc::now().to_rfc3339()})]);
             let heads = answer_input(&fx, &intake, &successor);
-            // The receiver owns a runtime; keep the binding authority on this thread.
-            let hooked = tokio::task::block_in_place(|| successor.hook(&fx, "SessionStart",
-                &json!({"session_id":successor.session,"source":"resume","transcript_path":successor.path})));
-            assert_eq!(hooked, 202);
+            use crate::services::claude_tui::hook_server::relay_receipts::{
+                RELAY_REQUEST_ID_HEADER, RELAY_PUBLISHED_AT_HEADER, RELAY_DEADLINE_HEADER, RELAY_RESPOND_BY_HEADER,
+            };
+            let now = chrono::Utc::now();
+            let hook = Request::builder().method("POST")
+                .uri(format!("/hooks/claude/SessionStart?session_id={}", successor.session))
+                .header("content-type", "application/json")
+                .header(crate::services::tui_prompt_dedupe::binding_context::BINDING_HEADER, successor.envelope.as_str())
+                .header(RELAY_REQUEST_ID_HEADER, uuid())
+                .header(RELAY_PUBLISHED_AT_HEADER, now.to_rfc3339())
+                .header(RELAY_DEADLINE_HEADER, (now + chrono::Duration::minutes(5)).to_rfc3339())
+                .header(RELAY_RESPOND_BY_HEADER, (now + chrono::Duration::minutes(4)).to_rfc3339())
+                .body(Body::from(json!({"session_id":successor.session,"source":"resume",
+                    "transcript_path":successor.path}).to_string())).unwrap();
+            // The receiver and executor must share the live hook bus.
+            let hooked = hooks.as_ref().unwrap().clone().oneshot(hook).await.unwrap();
+            assert_eq!(hooked.status(), StatusCode::ACCEPTED);
             completed(&intake, 1).await;
             {
                 let heads = heads.lock().unwrap();
