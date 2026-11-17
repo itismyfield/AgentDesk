@@ -994,8 +994,10 @@ fn execution_gone(terminal: Option<bool>) {
             append(&successor.path, &[json!({"type":"system","subtype":"turn_duration",
                 "sessionId":successor.session,"timestamp":chrono::Utc::now().to_rfc3339()})]);
             let heads = answer_input(&fx, &intake, &successor);
-            assert_eq!(successor.hook(&fx, "SessionStart", &json!({"session_id":successor.session,
-                "source":"resume","transcript_path":successor.path})), 202);
+            // The receiver owns a runtime; keep the binding authority on this thread.
+            let hooked = tokio::task::block_in_place(|| successor.hook(&fx, "SessionStart",
+                &json!({"session_id":successor.session,"source":"resume","transcript_path":successor.path})));
+            assert_eq!(hooked, 202);
             completed(&intake, 1).await;
             {
                 let heads = heads.lock().unwrap();
