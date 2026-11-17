@@ -283,8 +283,8 @@ struct PaneGate {
     next_id: AtomicU64,
     /// The latest judgment, waiting for the send it admits.
     pinned: Mutex<Option<Judged>>,
-    /// The server the latest write was sent to.
-    last_sent: Mutex<Option<ServerWitness>>,
+    /// How many writes were sent, and the server the latest one went to.
+    last_sent: Mutex<(u64, Option<ServerWitness>)>,
     fence: Arc<ExecutionFence>,
     /// An operator asked a terminate to stand on the exact pane proof when the marker is absent.
     marker_absent_by_pane: bool,
@@ -381,7 +381,7 @@ impl HerdrTarget {
             os: Arc::new(HostOs),
             next_id: AtomicU64::new(1),
             pinned: Mutex::new(None),
-            last_sent: Mutex::new(None),
+            last_sent: Mutex::new((0, None)),
             marker_absent_by_pane: false,
         })))
     }
@@ -463,9 +463,18 @@ impl HerdrTarget {
         }
     }
 
-    /// An input judged again for a write that must reach the server the last write reached;
-    /// a judgment on any other server is dropped unsent.
-    pub(crate) fn pin_on_last_server(&self) -> Result<(), HerdrGateRefusal> {
+    /// How many writes this gate has sent.
+    pub(crate) fn writes_sent(&self) -> u64 {
+        self.0
+            .last_sent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .0
+    }
+
+    /// An input judged again to follow the `writes`-th write: unless that write is still the
+    /// latest and went to the judged server, the judgment is dropped unsent.
+    pub(crate) fn pin_after_write(&self, writes: u64) -> Result<(), HerdrGateRefusal> {
         self.pin(Mutation::Input)?;
         let last = self
             .0
@@ -473,8 +482,12 @@ impl HerdrTarget {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let mut pinned = self.0.pinned.lock().unwrap_or_else(PoisonError::into_inner);
-        match (pinned.as_ref(), last.as_ref()) {
-            (Some(judged), Some(last)) if judged.witness == *last => Ok(()),
+        match (pinned.as_ref(), &*last) {
+            (Some(judged), (sent, Some(server)))
+                if *sent == writes && judged.witness == *server =>
+            {
+                Ok(())
+            }
             _ => {
                 *pinned = None;
                 Err(HerdrGateRefusal::ServerChanged)
@@ -1078,10 +1091,12 @@ impl PaneGate {
                 })
             });
         }
-        *self
+        let mut last = self
             .last_sent
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(judged.witness.clone());
+            .unwrap_or_else(PoisonError::into_inner);
+        *last = (last.0 + 1, Some(judged.witness.clone()));
+        drop(last);
         let outcome = self.transport.call_with_witness(&call, &judged.witness);
         contract::mutation_result(&call, outcome, &self.pane)
     }

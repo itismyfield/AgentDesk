@@ -127,9 +127,14 @@ pub(crate) trait MutationGate {
     fn admit_cancel(&self, session: &str) -> Result<(), InputRefusal> {
         self.admit(session)
     }
-    /// The whole judgment again for a retried Enter, standing only where the last write went.
-    fn readmit(&self, session: &str) -> Result<(), InputRefusal> {
+    /// The whole judgment again for a retried Enter; it stands only if `writes`, the gate's
+    /// write count the plan's last write made, is still the latest write and went to that server.
+    fn readmit(&self, session: &str, _writes: u64) -> Result<(), InputRefusal> {
         self.admit(session)
+    }
+    /// How many writes this gate has sent; read under an admission, before its send.
+    fn writes(&self) -> u64 {
+        0
     }
     /// Drops an admission no send will use.
     fn discard(&self) {}
@@ -145,12 +150,16 @@ impl MutationGate for HerdrTarget {
         self.admit_as(session, HerdrMutation::Cancel)
     }
 
-    fn readmit(&self, session: &str) -> Result<(), InputRefusal> {
+    fn readmit(&self, session: &str, writes: u64) -> Result<(), InputRefusal> {
         if session != self.pane_id() {
             self.discard_pin();
             return Err(InputRefusal::Conflict);
         }
-        self.pin_on_last_server().map_err(InputRefusal::Herdr)
+        self.pin_after_write(writes).map_err(InputRefusal::Herdr)
+    }
+
+    fn writes(&self) -> u64 {
+        self.writes_sent()
     }
 
     fn discard(&self) {
@@ -407,6 +416,7 @@ pub(crate) fn run_plan(
         transport,
         cancel_token,
         confirmed: 0,
+        written: 0,
     };
     for (index, action) in actions.iter().enumerate() {
         if let Err(stopped) = plan.step(action, actions.get(index + 1)) {
@@ -424,6 +434,8 @@ struct Plan<'a> {
     transport: &'a mut dyn InputTransport,
     cancel_token: Option<&'a CancelToken>,
     confirmed: usize,
+    /// The gate's write count after this plan's latest write.
+    written: u64,
 }
 
 type SendOp<'s> = Box<dyn FnOnce(&mut dyn InputTransport) -> Result<Output, String> + 's>;
@@ -495,17 +507,21 @@ impl Plan<'_> {
 
     fn mutate(&mut self, action: &TuiInputAction, send: SendOp<'_>) -> Result<(), InputRun> {
         self.admit(matches!(action, TuiInputAction::Escape))?;
-        self.send(action, send)?;
-        self.confirmed += 1;
-        Ok(())
+        self.write(action, send)
     }
 
     fn enter(&mut self, action: &TuiInputAction, send: SendOp<'_>) -> Result<(), InputRun> {
         if let Err(refusal) = self.gate.admit(self.session) {
             self.readmit_enter(refusal)?;
         }
+        self.write(action, send)
+    }
+
+    /// An admitted write; the admission excludes other writes, so this send is the next one.
+    fn write(&mut self, action: &TuiInputAction, send: SendOp<'_>) -> Result<(), InputRun> {
+        let written = self.gate.writes() + 1;
         self.send(action, send)?;
-        self.confirmed += 1;
+        (self.confirmed, self.written) = (self.confirmed + 1, written);
         Ok(())
     }
 
@@ -523,9 +539,14 @@ impl Plan<'_> {
             std::thread::sleep(ENTER_READMIT_GAP);
             self.check_cancel()?;
             attempts += 1;
-            if let Err(next) = self.gate.readmit(self.session) {
+            if let Err(next) = self.gate.readmit(self.session, self.written) {
                 refusal = next;
                 continue;
+            }
+            // A judgment that came back past the budget is not used, however it ended.
+            if started.elapsed() > ENTER_READMIT_BUDGET {
+                self.gate.discard();
+                break;
             }
             tracing::info!(session = self.session, ?first, attempts, "enter readmitted");
             return self.check_cancel().inspect_err(|_| self.gate.discard());
