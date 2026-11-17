@@ -1,0 +1,2 @@
+key: 574-routine-run-herdr-start
+| `routine-run` Herdr 채널 시작 판정 (#8125 T2 계획) | `d4e32f2420c8cec4613f94f4d303ad2a24c955d7` | Before: herdr 채널의 루틴·예약 시작(채널 키·자기 키·process)이 모두 `executor_not_wired` 로 닫힘. 판정만 푸는 수리는 사람 턴 끼어들기·채널당 실행 둘·process 의 TUI 실행이 기대 RED | 15cfg: tmux 3·자기 키 거절 1 GREEN, 수정 전 3·판정만 3·후보 5 기대 RED(도달성 표식 포함). 채널 키 TUI 와 process 는 안전 규칙을 지키며 성공에 도달, 자기 키 TUI 시작의 처리는 설계 판정 대상. 생산 코드 변경 없음. [모델 보고서](routine-run/routine-herdr-start.report.md) |
