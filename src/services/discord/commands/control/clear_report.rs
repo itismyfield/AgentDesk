@@ -30,6 +30,8 @@ pub(super) enum ExecutionCleanup {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(in crate::services::discord) struct ClearReport {
     pub(super) execution: Option<ExecutionCleanup>,
+    /// The durable next-launch fence was stored, independently of the old process cleanup.
+    pub(super) conversation_reset: bool,
     /// Writes whose retry landed.
     pub(super) retried: Vec<&'static str>,
     /// Writes that never landed; a restart may restore what they would have removed.
@@ -101,6 +103,14 @@ impl ClearReport {
         } else {
             vec![execution, count]
         };
+        if self.conversation_reset
+            && matches!(
+                self.execution,
+                Some(ExecutionCleanup::Held(_) | ExecutionCleanup::Pending(_))
+            )
+        {
+            lines.insert(0, "대화는 초기화했어요.".into());
+        }
         if let Some(warning) = self.warning() {
             lines.push(warning);
         }

@@ -12,6 +12,8 @@ pub(crate) use listing::{DispatchedSessionSnapshot, list_dispatched_session_snap
 mod force_kill;
 #[path = "dispatched_sessions/hosted_execution.rs"]
 pub(crate) mod hosted_execution;
+#[path = "dispatched_sessions/provider_resume_fence.rs"]
+pub(crate) mod provider_resume_fence;
 #[cfg(unix)]
 pub(crate) use force_kill::{
     ForceKillHosted, load_force_kill_session_hosted_pg, prepare_force_kill_retry_pg,

@@ -11,7 +11,7 @@ import subprocess
 import time
 import urllib.error
 
-from . import assertions, channel_reset, health_readiness, http_auth, known_gap, restart_guard
+from . import assertions, channel_reset, clear_fresh_session, health_readiness, http_auth, known_gap, restart_guard
 
 TMUX_STEPS = {
     "kill_pane", "capture_session_identity", "assert_session_preserved",
@@ -534,6 +534,9 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                         qa = next(s for s in scenario["steps"] if s.get("request_key") == "QA")
                         wait(qa["body_marker"].replace("{run_id}", run_id), 240, author=provider_author(qa))
                     result["herdr_observations"].append(observe(driver, args))
+            elif clear_fresh_session.owns(step):
+                clear_fresh_session.run_step(driver, step, base_url=client.base_url,
+                                             channel_id=args.channel_id, cell=args.cell, record=result)
             elif "wait_for_discord_text" in step:
                 wait(str(step["wait_for_discord_text"]).replace("{run_id}", run_id), float(step.get("timeout_s", 240)),
                      raw=scenario["id"] == "E-12" and step["wait_for_discord_text"] == "session ended",

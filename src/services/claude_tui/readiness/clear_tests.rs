@@ -15,6 +15,10 @@ pub(crate) fn after_reserve() {
     }
 }
 
+pub(crate) fn after_next_reserve(callback: impl FnOnce() + 'static) {
+    AFTER_RESERVE.with(|slot| *slot.borrow_mut() = Some(Box::new(callback)));
+}
+
 struct ClearRig {
     rig: Rig,
     channel: u64,

@@ -1,0 +1,9 @@
+\* EXPECTED_SAFETY=- EXPECTED_LIVENESS=-
+SPECIFICATION Spec
+CONSTANTS Source = "absent"
+          Exact = TRUE
+          ExecutionEnded = TRUE
+          Mutation = "none"
+INVARIANTS TypeOK TerminalReaderOnly UnknownHeld SettlementAfterDelivery DoneNoResidue
+PROPERTIES EligibleEnds NextCanProgress
+CHECK_DEADLOCK FALSE

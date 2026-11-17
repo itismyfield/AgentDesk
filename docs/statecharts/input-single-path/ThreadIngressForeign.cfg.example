@@ -1,0 +1,11 @@
+\* EXPECTED_SAFETY=- EXPECTED_LIVENESS=-
+CONSTANTS
+    Target = "foreignThread"
+    InitialSession = "absent"
+    ActualHost = "tmux"
+    DesiredHost = "herdr"
+    Mutation = "none"
+    CanCrash = TRUE
+SPECIFICATION Spec
+INVARIANT NoDuplicate NoSilentLoss RejectedNoEffects ForeignForbidden ParentFailClosed BoundThreadAdmitted SuccessBacked HttpAcceptanceBacked LiveActualHostPreserved
+PROPERTY AcceptedCompletes DeliveredGetsOutcome

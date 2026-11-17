@@ -8,20 +8,18 @@ fn held_and_partial_herdr_clear_reports_keep_input_discard_and_execution_separat
     ] {
         let report = ClearReport {
             execution: Some(execution),
+            conversation_reset: true,
             transition_busy: true,
             discarded: Some([MessageId::new(7_186_401)].into()),
             ..Default::default()
         };
         let reply = report.reply();
         assert!(
-            reply.starts_with("대기 메시지 1건을 비웠어요.\n"),
+            reply.starts_with("대화는 초기화했어요.\n대기 메시지 1건을 비웠어요.\n"),
             "{reply}"
         );
         assert!(!reply.contains(SESSION_CLEARED_RESPONSE), "{reply}");
-        assert!(
-            !reply.contains("초기화했어요"),
-            "a held or pending execution must not claim it was reset: {reply}"
-        );
+        assert!(reply.contains("대화는 초기화했어요."), "{reply}");
         assert!(reply.contains("이전 Herdr 실행"), "{reply}");
     }
     let partial = ClearReport {

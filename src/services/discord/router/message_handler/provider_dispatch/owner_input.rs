@@ -742,6 +742,9 @@ pub(in crate::services::discord) async fn recover(shared: &Shared, channel: Chan
     native_input::recover(shared, channel).await;
 }
 
+#[path = "owner_input_start_wait.rs"]
+mod start_wait;
+
 /// Why a start waits unclaimed: a later event wakes it, or a read of its pane's native turn does.
 enum Wait {
     Go,
@@ -764,6 +767,26 @@ async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wa
         .is_some_and(|row| row.turn_source != TurnSource::Managed);
     if row || rest(provider, id) {
         return Wait::Event;
+    }
+    let screen = match start_wait::observe(shared, channel, context).await {
+        start_wait::Observed::Legacy => None,
+        // The driver preserves a known host refusal as a typed, confirmed non-send.
+        start_wait::Observed::Refused => return Wait::Go,
+        start_wait::Observed::Native(screen) => Some(screen),
+    };
+    if let Some(screen) = screen {
+        if screen == Screen::Ready {
+            return Wait::Go;
+        }
+        let (shared, context) = (shared.clone(), context.clone());
+        return Wait::Watch(Box::new(move || {
+            tokio::runtime::Handle::current().block_on(async {
+                start_wait::observe(&shared, channel, &context)
+                    .await
+                    .native()
+                    .unwrap_or(Screen::Ready)
+            })
+        }));
     }
     if crate::services::tui_o::turn_mode::transcript_turns(id) {
         let busy = activity_now(shared, provider, channel).await.activity != Activity::Idle;
