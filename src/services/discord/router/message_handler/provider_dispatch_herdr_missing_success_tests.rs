@@ -65,6 +65,16 @@ fn a_missing_idle_front_launches_a_fresh_execution_and_delivers_once_pg() {
         );
     }
     let before = fx.rig.sends().len();
+    let (command_sent, command_seen) = std::sync::mpsc::channel();
+    let (continue_create, create_ready) = std::sync::mpsc::channel();
+    let mut captured = false;
+    fx.rig.on_send(move |_| {
+        if !captured {
+            captured = true;
+            command_sent.send(()).unwrap();
+            crate::test_support::wait::recv_within(&create_ready, LIMIT);
+        }
+    });
     let mut events = fx.ingress.state.subscribe();
     let handle = intake.runtime.handle().clone();
     let shared = intake.shared.clone();
@@ -117,7 +127,6 @@ fn a_missing_idle_front_launches_a_fresh_execution_and_delivers_once_pg() {
                         if let HostedRecord::Known(record) = HostedRecord::decode(Some(&raw))
                             && record.state == HostedState::Pending
                             && record.execution_nonce != old_nonce
-                            && record.location.is_some()
                         {
                             break record;
                         }
@@ -138,9 +147,26 @@ fn a_missing_idle_front_launches_a_fresh_execution_and_delivers_once_pg() {
         .unwrap();
         let session = context.expected_native_session_id.unwrap();
         let context_path = context_of(&pending.execution_nonce);
+        crate::test_support::wait::recv_within(&command_seen, LIMIT);
+        // Publish the created pane before create resumes into its first evidence read.
         fx.rig.run_provider(&context_path, false);
         fx.rig.foreground(&[20]);
         fx.rig.show_panes(&[PANE]);
+        continue_create.send(()).unwrap();
+        fx.rt.block_on(async {
+            tokio::time::timeout(LIMIT, async {
+                loop {
+                    let raw: Value = sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id=$1")
+                        .bind(CHANNEL.to_string()).fetch_one(&fx.pool).await.unwrap();
+                    if matches!(HostedRecord::decode(Some(&raw)), HostedRecord::Known(record)
+                        if record.execution_nonce == pending.execution_nonce && record.location.is_some()) {
+                        break;
+                    }
+                    assert!(!caller.is_finished(), "create ended before its location was recorded");
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+        });
         let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
             fx.cwd.path(),
             &session,
