@@ -19,8 +19,10 @@ Tui == Backend = "tui"
 Close(run, reason) == [s EXCEPT !.run = run, !.reason = reason, !.closes = @ + 1]
 Begin(driver) == [s EXCEPT !.run = "started", !.driver = driver, !.starts = @ + 1]
 
-\* The owner takes a TUI start and runs it on its wake; a process start keeps its launch path.
-Admit == s.run = "claimed" /\ s' = [s EXCEPT !.run = IF Tui THEN "accepted" ELSE "judging"]
+\* The owner takes a TUI start and runs it on its wake; a process start, and a TUI start no owner
+\* holds (Policy "built_unowned"), keep the launch path.
+Owned == Tui /\ Policy # "built_unowned"
+Admit == s.run = "claimed" /\ s' = [s EXCEPT !.run = IF Owned THEN "accepted" ELSE "judging"]
 OwnerWake == s.run = "accepted" /\ s' = [s EXCEPT !.run = "judging"]
 
 \* An unconfigured channel passes with no host read: its tmux pane or the process driver.
@@ -42,9 +44,19 @@ JudgeGateOnly ==
                   !.hostReads = @ + 1, !.execs = IF own THEN @ + 1 ELSE @,
                   !.blind = ~own /\ s.humanBusy]
 
+\* Built: a channel-key TUI start its owner holds waits for the execution's idle and runs there;
+\* every other routine or scheduled start keeps the refusal it had.
+Built == Policy \in {"built", "built_unowned"}
+JudgeBuilt ==
+    /\ s.run = "judging" /\ Host = "herdr" /\ Built
+    /\ IF Owned /\ Identity = "channel"
+       THEN /\ ~s.humanBusy
+            /\ s' = [Begin("herdr_channel") EXCEPT !.hostReads = @ + 1]
+       ELSE s' = [Close("failed", "executor_not_wired") EXCEPT !.hostReads = @ + 1]
+
 \* Routed: backend and identity pick the driver; Policy names what an own-key TUI start gets.
 JudgeRouted ==
-    /\ s.run = "judging" /\ Host = "herdr" /\ Policy \notin {"before", "gate_only"}
+    /\ s.run = "judging" /\ Host = "herdr" /\ ~Built /\ Policy \notin {"before", "gate_only"}
     /\ IF ~Tui THEN s' = Begin("process")
        ELSE IF Identity = "channel" \/ Policy = "own_into_channel"
        THEN /\ ~s.humanBusy
@@ -64,7 +76,7 @@ GiveUp == s.run \in {"accepted", "judging"} /\ s' = Close("failed", "deadline")
 Restart == s.run \in {"accepted", "judging", "started"} /\ s' = Close("interrupted", "restart")
 Done == s.run \in Terminal /\ UNCHANGED s
 
-Judge == JudgeTmux \/ JudgeBefore \/ JudgeGateOnly \/ JudgeRouted
+Judge == JudgeTmux \/ JudgeBefore \/ JudgeGateOnly \/ JudgeBuilt \/ JudgeRouted
 Finish == Complete \/ Fail
 Next == Admit \/ OwnerWake \/ Judge \/ HumanFinish \/ Finish \/ GiveUp \/ Restart \/ Done
 Spec == Init /\ [][Next]_vars /\ WF_vars(Admit) /\ WF_vars(OwnerWake) /\ WF_vars(Judge)

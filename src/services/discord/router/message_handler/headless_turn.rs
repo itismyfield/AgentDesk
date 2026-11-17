@@ -155,15 +155,9 @@ async fn start_reserved_headless_turn_admitted(
     let session_key = || headless_session_key(shared, channel_id, &provider, kept, label);
     let pool = shared.pg_pool.as_ref();
     let host = admission::refusal_before_start;
+    let standing = admission::Standing::of(kept, label, owner.is_some());
     if !prepared_herdr
-        && let Some(refusal) = host(
-            pool,
-            &provider,
-            channel_id.get(),
-            session_key,
-            metadata.as_ref(),
-        )
-        .await
+        && let Some(refusal) = host(pool, &provider, channel_id.get(), session_key, standing).await
     {
         #[cfg(unix)]
         if let Some(owner) = owner.as_ref() {
@@ -241,14 +235,7 @@ async fn start_reserved_headless_turn_admitted(
         return outcome;
     }
     if prepared_herdr
-        && let Some(refusal) = host(
-            pool,
-            &provider,
-            channel_id.get(),
-            session_key,
-            metadata.as_ref(),
-        )
-        .await
+        && let Some(refusal) = host(pool, &provider, channel_id.get(), session_key, standing).await
     {
         return Err(HeadlessTurnStartError::InvalidTarget(refusal.to_string()));
     }
@@ -1003,7 +990,7 @@ async fn start_reserved_headless_turn_admitted(
         &mut inflight_state,
         &pending_uploads,
         &current_path,
-        &turn_host,
+        (&turn_host, standing),
     );
     let submission = crate::services::discord::inflight::install_managed_submission_boundary(
         &mut inflight_state,

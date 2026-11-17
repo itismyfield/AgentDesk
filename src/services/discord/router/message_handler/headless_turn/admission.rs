@@ -1,27 +1,54 @@
-//! Prepared Herdr delivery enters owner custody before a later host refusal.
+//! A headless start's host judgement; a prepared Herdr delivery enters owner custody before a
+//! later host refusal.
 #[cfg(unix)]
 use super::*;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_host::{self, HerdrRefusal};
+
+/// How a headless start meets its channel's host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Standing {
+    /// The channel's own key: an external start, or a routine or scheduled one its owner holds.
+    Channel,
+    /// A routine or scheduled start with a key or pane of its own, or one no owner holds.
+    Apart,
+}
+
+impl Standing {
+    pub(super) fn of(
+        metadata: Option<&serde_json::Value>,
+        label: Option<&str>,
+        owned: bool,
+    ) -> Self {
+        let has = |key| metadata.is_some_and(|metadata| metadata.get(key).is_some());
+        if !has("routine_id") && !has("scheduled_message_id") {
+            return Self::Channel;
+        }
+        let own = label.is_some() || has("scheduled_snapshot_session_label");
+        if owned && !own {
+            Self::Channel
+        } else {
+            Self::Apart
+        }
+    }
+}
 
 pub(super) async fn refusal_before_start<F>(
     pool: Option<&sqlx::PgPool>,
     provider: &ProviderKind,
     channel: u64,
     key: impl FnOnce() -> F,
-    metadata: Option<&serde_json::Value>,
+    standing: Standing,
 ) -> Option<HerdrRefusal>
 where
     F: std::future::Future<Output = Option<String>>,
 {
-    // Routine and scheduled starts retain their existing lifecycle admission.
-    let internal = metadata.is_some_and(|metadata| {
-        metadata.get("routine_id").is_some() || metadata.get("scheduled_message_id").is_some()
-    });
-    if internal {
-        turn_host::refusal_before_turn(pool, provider, channel, key).await
-    } else {
-        turn_host::intake_refusal_before_turn(pool, provider, channel, key).await
+    match standing {
+        Standing::Channel => {
+            turn_host::intake_refusal_before_turn(pool, provider, channel, key).await
+        }
+        // Such a start keeps its typed refusal on a Herdr channel.
+        Standing::Apart => turn_host::refusal_before_turn(pool, provider, channel, key).await,
     }
 }
 

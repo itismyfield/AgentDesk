@@ -663,6 +663,10 @@ routine-run/RoutineHeadlessIsolationSharedWriteback.cfg	RoutineHeadlessIsolation
 routine-run/RoutineHerdrStartBeforeChannel.cfg	RoutineHerdrStart	NotRefusedAsUnwired	-
 routine-run/RoutineHerdrStartBeforeOwn.cfg	RoutineHerdrStart	NotRefusedAsUnwired	-
 routine-run/RoutineHerdrStartBeforeProcess.cfg	RoutineHerdrStart	NotRefusedAsUnwired	-
+routine-run/RoutineHerdrStartBuiltChannel.cfg	RoutineHerdrStart	SuccessUnreachable	-
+routine-run/RoutineHerdrStartBuiltChannelUnowned.cfg	RoutineHerdrStart	NotRefusedAsUnwired	-
+routine-run/RoutineHerdrStartBuiltOwn.cfg	RoutineHerdrStart	NotRefusedAsUnwired	-
+routine-run/RoutineHerdrStartBuiltProcess.cfg	RoutineHerdrStart	NotRefusedAsUnwired	-
 routine-run/RoutineHerdrStartGateOnlyChannel.cfg	RoutineHerdrStart	NoBlindStart,SuccessUnreachable	-
 routine-run/RoutineHerdrStartGateOnlyOwn.cfg	RoutineHerdrStart	OneExecutionPerChannel,SuccessUnreachable	-
 routine-run/RoutineHerdrStartGateOnlyProcess.cfg	RoutineHerdrStart	OneExecutionPerChannel,ProcessStaysProcess,SuccessUnreachable	-
