@@ -1,9 +1,8 @@
 # 준비 대기 중 transcript가 한 번 움직인 뒤 멈춘 입력의 정산 (#8217)
 
-<!-- doc-path-refs: proposed src/services/claude_tui/readiness/watched.rs -->
-
 설계 기준: `origin/main` fdd44b59c7. 코드 좌표는 이 커밋 기준이다. 같은 판정 파일을 바꾸는 #8214 리뷰 head 462046ed0b를 함께 읽었고, 그 위에서 성립하는지는 §7.4에 적었다.
-범위: Claude tmux(claude-tui)와 Herdr 두 경로의 준비 대기 종료 판정. 코드는 이 레그에서 바꾸지 않는다.
+구현 뒤: `Watched`와 예산 끝 판정(이 문서의 `readiness/mod.rs:353-421`)은 `src/services/claude_tui/readiness/watched.rs`로 옮겨졌다. 그 범위와 그 뒤 줄의 좌표는 옮기기 전 기준이며, 구현 좌표는 상태 차트 보고서에 있다.
+범위: Claude tmux(claude-tui)와 Herdr 두 경로의 준비 대기 종료 판정. 설계 레그에서는 코드를 바꾸지 않았다.
 상태 차트: [readiness-requiet.report.md](../statecharts/input-single-path/readiness-requiet.report.md).
 
 ## 0. 요약
@@ -29,7 +28,7 @@ Rust 시험은 이 레그에서 돌리지 않았다. 아래는 코드를 읽어 
 | Stamp 불일치로 false | `readiness/mod.rs:385-389` | 같음 |
 | 보류로 반환 | `input.rs:392-399`(warm), `:429-435` → `Held(idle_evidence_pending, unproven=false)` | `composer.rs:193` `Refused(Unknown)` → `herdr_turn/first_input.rs:232-240`, `:308-318` |
 | owner 정산 선택 | `src/services/discord/queue_io/input_owner/effect.rs:184-189` `held()`가 `Completion::Held` → `:116-117` `hold_not_sent` (`unproven=true`였다면 `:118` `retain_not_sent`) | `effect.rs:233` 같은 `held()` |
-| 보류 감시 | `input_owner/drive.rs:113-115` → `held_watch.rs:88-149`. probe는 `readiness/mod.rs:783-797`: `observe()`가 `Some`이어야 Ready | probe `first_input.rs:204-231`: `observe_restored()`가 `Some`이어야 Ready |
+| 보류 감시 | `input_owner/drive.rs:113-115` → `held_watch.rs:88-149`. probe는 `readiness/mod.rs`의 `watch()`: `observe()`가 `Some`이어야 Ready | probe `first_input.rs:204-231`: `observe_restored()`가 `Some`이어야 Ready |
 | 깨움 없음 | `held_watch.rs:62-68`에서 Unknown은 Keep. owner가 있는 채널에는 시간 기반 깨움이 없다(`src/services/discord/turn_presence/supervisor.rs:688-695`: `due`는 `!owned`일 때만) | 같음 |
 
 다음 활동(새 입력, 턴 경계)이 drive를 깨우면 새 시도가 새 Stamp로 대기하고, 그때는 움직임이 없으므로 `unproven=true`로 정산된다. 즉 결함은 "다음 활동까지 설명 없는 보류"다.
@@ -54,7 +53,7 @@ Herdr에서 재시작 증명(`readiness/mod.rs:315-333`)이 서는 pane은 `ai-t
 | 소비(Herdr) | `composer.rs:192-193`, `first_input.rs:232-240` | 호출 교체 / 그대로 |
 | 판정 운반 | `claude_tui/input/preparation_hold.rs:19`, `:54-59`, `claude_tui/host_input.rs:43` (`InputRefusal::Unproven`) | 주석만 |
 | owner 분기 | `input_owner/effect.rs:184-189`, `:215`, `:233` | 그대로 |
-| held probe 기록 | `readiness/mod.rs:751-802` (`watch_draft`·`watch_modal`·`watch_current`), `first_input.rs:182-183`, `:204-231`, `claude_tui/input/submission.rs:158-180` | 그대로 |
+| held probe 기록 | `readiness/mod.rs`의 `watch_draft`·`watch_modal`·`watch_current`, `first_input.rs:182-183`, `:204-231`, `claude_tui/input/submission.rs:158-180` | 그대로 |
 | held probe 실행 | `input_owner/held_watch.rs:62-68`, `:88-149` (`LOOK` 2초 `:15`) | 그대로 |
 | tmux 대기 호출자 | `claude_tui/input/submission.rs:35`, `claude_tui/hosting/warm_followup.rs:248`, `src/services/discord/router/message_handler/intake_turn.rs:1592`, `claude_tui/input.rs:349-360` ← `effect.rs:201`, `claude_tui/guarded_outcome.rs:319`, `warm_followup.rs:382` | 그대로(같은 내부 함수를 지난다) |
 | Herdr 대기 호출자 | `first_input.rs:170` (`composer::run_ready` `composer.rs:120-134`) | 그대로 |
