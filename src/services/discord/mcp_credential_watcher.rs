@@ -499,7 +499,7 @@ mod tests {
         std::fs::write(&paths[1], r#"{"mcpServers":{"second":{}}}"#).unwrap();
         assert_eq!(
             build_notification_from_changes(&burst.await.unwrap(), &mut snapshots, "restart"),
-            Some("restart (.claude.json: +first; .mcp.json: +second)".into())
+            Some("restart (.mcp.json: +second; .claude.json: +first)".into())
         );
         let mut poller = ConfigFilePoller::new(&paths);
         std::fs::write(root.path().join("unrelated.json"), "{}").unwrap();
