@@ -779,7 +779,7 @@ fn internal_snapshot_start(flavor: &str) {
         assert!(input.confirm_admission(&intake.mailbox).await.unwrap());
         let registry = Arc::new(HealthRegistry::new());
         registry.register("claude".into(), intake.shared.clone()).await;
-        registry.register_http("claude".into(), intake.shared.serenity_http_or_token_fallback()).await;
+        registry.register_http("claude".into(), intake.shared.serenity_http_or_token_fallback().unwrap()).await;
         ChannelMailboxHandle::owner_input_wake(&registry, "claude", CHANNEL).await;
         let rejected = tokio::time::timeout(LIMIT, async {
             loop {
