@@ -123,6 +123,18 @@ pub(in crate::services::discord) async fn owner_start_session_key(
     headless_session_key(shared, channel, &shared.provider, metadata, label).await
 }
 
+/// Whether a kept start runs as the channel's own turn, judged as its headless start judges it.
+#[cfg(unix)]
+pub(in crate::services::discord) async fn owner_start_takes_channel(
+    shared: &Arc<SharedData>,
+    context: &serde_json::Value,
+) -> bool {
+    let context = owner_start_context(shared, context).await;
+    let metadata = Some(&context["metadata"]).filter(|metadata| !metadata.is_null());
+    let label = context["synthetic_label"].as_str();
+    admission::Standing::of(metadata, label, true) == admission::Standing::Channel
+}
+
 /// A start whose pane its channel's name gives, while the lookup of that name failed.
 #[derive(Debug)]
 pub(in crate::services::discord) struct Unnamed;
