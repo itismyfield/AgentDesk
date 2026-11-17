@@ -305,7 +305,10 @@ async fn fresh_runtime(rig: &IntakeRig, pool: &sqlx::PgPool, generation: u64) ->
 /// A recovered daemon marks its remaining row through the real shutdown barrier, then exits.
 async fn restore_then_restart(rig: &IntakeRig, pool: &sqlx::PgPool) -> InflightTurnState {
     discord::runtime_store::set_process_generation_for_tests(Some(5));
-    let shared = fresh_runtime(rig, pool, 5).await;
+    let daemon_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_lazy_with(pool.connect_options().as_ref().clone());
+    let shared = fresh_runtime(rig, &daemon_pool, 5).await;
     let http = rig
         .shared
         .http
@@ -357,6 +360,8 @@ async fn restore_then_restart(rig: &IntakeRig, pool: &sqlx::PgPool) -> InflightT
                 Some(discord::InflightRestartMode::DrainRestart)
             );
             assert_eq!(marked.restart_generation, Some(5));
+            // No connection from this boot can escape into a later boot's dead-reactor lookup.
+            daemon_pool.close().await;
             restored
         });
         daemon.0.take().unwrap().shutdown_timeout(Duration::ZERO);

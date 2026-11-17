@@ -555,39 +555,34 @@ impl Fixture {
         self.run_with_before(rig, before, command).await
     }
 
-    /// Runs `command`, writing `before` as the fresh record once it first reads the pane.
+    /// Publishes the pre-command record before the first pane read returns to its consumer.
     async fn run_with_before(
         &self,
         rig: &HerdrRig,
         before: Option<Value>,
         command: impl std::future::Future<Output = std::io::Result<String>> + Send + 'static,
     ) -> String {
-        let requests = rig.requests().len();
-        let command = tokio::spawn(command);
-        await_within(
-            async {
-                while !command.is_finished()
-                    && !rig.requests()[requests..]
-                        .iter()
-                        .any(|r| r["method"] == "pane.read")
-                {
-                    tokio::task::yield_now().await;
+        use crate::services::session_host::herdr_socket_rig_tests::HerdrRequest;
+        let path = self.record.clone();
+        let written = std::sync::atomic::AtomicBool::new(false);
+        rig.on_reply(move |call| {
+            if matches!(call.request, HerdrRequest::PaneRead { .. })
+                && !written.swap(true, Ordering::SeqCst)
+                && let Some(mut value) = before.clone()
+            {
+                if value["written_at"] == "fresh" {
+                    value["written_at"] = json!(now());
                 }
-            },
-            WAIT_CAP,
-        )
-        .await;
-        if let Some(mut value) = before {
-            if value["written_at"] == "fresh" {
-                value["written_at"] = json!(now());
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, value.to_string()).unwrap();
             }
-            std::fs::create_dir_all(self.record.parent().unwrap()).unwrap();
-            std::fs::write(&self.record, value.to_string()).unwrap();
-        }
-        await_within(command, WAIT_CAP)
+        });
+        let result = await_within(tokio::spawn(command), WAIT_CAP)
             .await
             .unwrap()
-            .unwrap_or_else(|e| e.to_string())
+            .unwrap_or_else(|e| e.to_string());
+        rig.on_reply(|_| {});
+        result
     }
 
     async fn assert_fast_preserved(
