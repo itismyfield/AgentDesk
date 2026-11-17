@@ -21,11 +21,18 @@ pub(crate) enum Reason {
 
 impl Identity {
     pub(crate) fn key(&self) -> String {
+        use serde_json::Value;
         use sha2::{Digest, Sha256};
-        format!(
-            "sha256:{:x}",
-            Sha256::digest(serde_json::to_vec(self).expect("output identity"))
-        )
+        // The same compact JSON bytes `serde_json::to_vec(self)` writes, built without a fallible call.
+        let json = format!(
+            r#"{{"channel":{},"input":{},"nonce":{},"execution":{},"source":{}}}"#,
+            self.channel,
+            self.input,
+            Value::from(self.nonce.as_str()),
+            Value::from(self.execution.as_str()),
+            Value::from(self.source.as_str()),
+        );
+        format!("sha256:{:x}", Sha256::digest(json))
     }
 }
 pub(crate) struct Attempt {
