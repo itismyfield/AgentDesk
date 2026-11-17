@@ -1,0 +1,11 @@
+\* EXPECTED_SAFETY=- EXPECTED_LIVENESS=EachReply,EachEnds,NextProgress,EventuallyDrained
+SPECIFICATION Spec
+CONSTANTS
+    Contract = "headless"
+    BodyOwner = "O"
+    Mutation = "none"
+    CanRestart = FALSE
+INVARIANTS TypeOK ExactlyOneReply NoSilentLoss NoResidueAfterEnd
+           TerminalRequiresPresenter SourcePreserved LiveCustody
+PROPERTIES EachReply EachEnds NextProgress EventuallyDrained
+CHECK_DEADLOCK FALSE

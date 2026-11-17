@@ -1,0 +1,9 @@
+\* EXPECTED_SAFETY=- EXPECTED_LIVENESS=EligibleEnds,NextCanProgress
+SPECIFICATION Spec
+CONSTANTS Source = "absent"
+          Exact = TRUE
+          ExecutionEnded = TRUE
+          Mutation = "noWake"
+INVARIANTS TypeOK TerminalReaderOnly UnknownHeld SettlementAfterDelivery DoneNoResidue
+PROPERTIES EligibleEnds NextCanProgress
+CHECK_DEADLOCK FALSE

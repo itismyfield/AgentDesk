@@ -98,19 +98,124 @@ fn completion_popup(plain: &str) -> bool {
         })
 }
 
+/// A notice needs visible text evidence; an unread screen must not invent a person's draft.
 pub(crate) fn draft_may_be_present(capture: &str) -> bool {
-    use crate::services::codex_tui::input::{
-        ComposerContent, active_composer_content_in_pane, submission_draft_in_pane,
-        submission_readiness_from_ansi_pane,
+    use crate::services::codex_tui::input::submission_draft_in_pane;
+
+    let body = submission_draft_in_pane(capture).or_else(|| match read(capture).composer {
+        Composer::Empty => Some(String::new()),
+        Composer::Text(body) => Some(body),
+        Composer::Unread => None,
+    });
+    let (draft_branch, notify) = match body {
+        Some(body) if body.trim().is_empty() => ("empty", false),
+        Some(body) if current_body_is_dim(capture, &body) => ("dim_placeholder", false),
+        Some(_) => ("readable_text", true),
+        None => ("unread", false),
     };
-    let shown = read(capture);
-    let plain = strip_ansi_escape_sequences(capture);
-    let (_, draft, _) = submission_readiness_from_ansi_pane(capture);
-    draft
-        || shown.attachments
-        || (shown.composer != Composer::Empty
-            && active_composer_content_in_pane(&plain) != ComposerContent::Empty
-            && submission_draft_in_pane(&plain).is_none_or(|body| !body.is_empty()))
+    if notify || draft_branch == "unread" {
+        log_draft_notice_decision(draft_branch, notify);
+    }
+    notify
+}
+
+fn log_draft_notice_decision(draft_branch: &str, notify: bool) {
+    use tracing::{Event, Level, Metadata, callsite, field, metadata};
+
+    static CALLSITE: callsite::DefaultCallsite = callsite::DefaultCallsite::new(&METADATA);
+    static METADATA: Metadata<'static> = Metadata::new(
+        "codex_draft_notice_decision",
+        "agentdesk::services::codex_tui::draft_notice",
+        Level::INFO,
+        None,
+        None,
+        None,
+        field::FieldSet::new(
+            &["message", "draft_branch", "notify"],
+            callsite::Identifier(&CALLSITE),
+        ),
+        metadata::Kind::EVENT,
+    );
+    let _ = CALLSITE.register();
+    tracing::dispatcher::get_default(|dispatch| {
+        if dispatch.enabled(&METADATA) {
+            let message = "Codex draft notice decision";
+            let values: [Option<&dyn field::Value>; 3] =
+                [Some(&message), Some(&draft_branch), Some(&notify)];
+            let fields = METADATA.fields().value_set_all(&values);
+            dispatch.event(&Event::new(&METADATA, &fields));
+        }
+    });
+}
+
+/// Keep SGR state across wrapped suggestion rows, without treating color channels as dim codes.
+fn current_body_is_dim(capture: &str, body: &str) -> bool {
+    let raw: Vec<_> = capture.lines().collect();
+    let plain: Vec<_> = raw
+        .iter()
+        .map(|line| strip_ansi_escape_sequences(line))
+        .collect();
+    let Some(start) = plain.iter().rposition(|line| line.starts_with('›')) else {
+        return false;
+    };
+    let end = start + body.split('\n').count();
+    let Some(rows) = plain.get(start..end) else {
+        return false;
+    };
+    // A historical prompt above a boxed composer is not the current body's style evidence.
+    if plain[end..]
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+        > 1
+    {
+        return false;
+    }
+    let first = rows[0].strip_prefix('›').unwrap_or(&rows[0]);
+    let observed = std::iter::once(first.strip_prefix(' ').unwrap_or(first))
+        .chain(
+            rows[1..]
+                .iter()
+                .map(|row| row.strip_prefix("  ").unwrap_or(row)),
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
+    if observed != body {
+        return false;
+    }
+    let styled = raw[start..end].join("\n");
+    let (mut dim, mut marker, mut visible) = (false, false, false);
+    let mut chars = styled.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.next() != Some('[') {
+                return false;
+            }
+            let mut params = String::new();
+            loop {
+                match chars.next() {
+                    Some('m') => {
+                        dim = sgr_dim(&params, dim);
+                        break;
+                    }
+                    Some(c) if c.is_ascii_digit() || c == ';' => params.push(c),
+                    _ => return false,
+                }
+            }
+        } else if !marker {
+            if c == '›' {
+                marker = true;
+            } else if !c.is_whitespace() {
+                return false;
+            }
+        } else if !c.is_whitespace() {
+            if !dim {
+                return false;
+            }
+            visible = true;
+        }
+    }
+    marker && visible
 }
 
 /// The composer's text and whether image rows sit above it.
@@ -282,3 +387,7 @@ pub(crate) fn append_veto(capture: &str, shown: &Screen) -> Option<super::Veto> 
         Composer::Empty => None,
     }
 }
+
+#[cfg(test)]
+#[path = "draft_notice_tests.rs"]
+mod draft_notice_tests;

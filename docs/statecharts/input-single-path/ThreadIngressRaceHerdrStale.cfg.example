@@ -1,0 +1,5 @@
+\* EXPECTED_SAFETY=HerdrCurrentExecutor EXPECTED_LIVENESS=-
+CONSTANTS N = 3 Mutation = "herdrStaleEpoch"
+SPECIFICATION HerdrSpec
+INVARIANT HNoIdleStartWhileBusy NoDuplicate SuccessBacked HerdrCurrentExecutor HerdrReservationReturned HerdrSourcePreserved
+PROPERTY EachAcceptedStarts EachAcceptedCompletes EachDeliveredGetsOutcome

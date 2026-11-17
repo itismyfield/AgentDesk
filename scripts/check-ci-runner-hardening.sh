@@ -29,7 +29,7 @@ require "yaml"
 require "json"
 specs = JSON.parse(ARGV.shift)
 pr_path, main_path, nightly_path = ARGV
-phases = {"rust_build" => ["Archive, list, compare and plan"], "base_compare" => ["Compare tests with the comparison base"], "pg15_owner_proof" => ["PostgreSQL 15 exact owner proof"], "lint" => ["just lint"], "scripts" => ["Run script checks"]}
+phases = {"rust_build" => ["Archive, list, compare and plan"], "base_compare" => ["Compare tests with the comparison base"], "pg15_owner_proof" => ["PostgreSQL 15 exact owner proof"], "lint" => ["just lint"], "scripts" => ["Run script checks"], "relay_authority_mutations" => ["Require relay-authority mutations to be killed"]}
 targets = {pr_path => phases, main_path => phases.slice("rust_build", "lint", "scripts").merge("lint" => ["just lint", "Non-lib tests and doctests"]), nightly_path => phases.slice("rust_build")}
 errors = []
 targets.each do |path, jobs_with_memory|
@@ -52,6 +52,9 @@ targets.each do |path, jobs_with_memory|
     end
     labels.each do |label|
       begin_step = specs.fetch("Begin runner memory step").merge("env" => {"BASH_ENV" => "/dev/null", "MEMORY_STEP" => label})
+      # A conditional build step keeps its begin marker under the same condition.
+      build_if = steps.find { |step| step.is_a?(Hash) && step["name"] == label }&.fetch("if", nil)
+      begin_step = begin_step.merge("if" => build_if) if build_if
       expected.concat([begin_step, specs.fetch("End runner memory step")])
       index = steps.index(begin_step)
       span_names = path == pr_path && job_id == "scripts" ? ["Protect writer gate aggregate wiring (#5308)", label, "Production PR cap"] : [label]
@@ -750,7 +753,7 @@ expected_uploads = {
 }
 jobs.each do |job_id, job|
   uploads = Array(job["steps"]).select { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/upload-artifact") }
-  uploads = uploads.reject { |step| (%w[rust_build base_compare pg15_owner_proof lint scripts].include?(job_id) && step == memory_specs.fetch("Upload runner memory")) || (%w[pg15_owner_proof lint].include?(job_id) && step == memory_specs.fetch("Upload runner memory checkpoint")) }
+  uploads = uploads.reject { |step| (%w[rust_build base_compare pg15_owner_proof lint scripts relay_authority_mutations].include?(job_id) && step == memory_specs.fetch("Upload runner memory")) || (%w[pg15_owner_proof lint].include?(job_id) && step == memory_specs.fetch("Upload runner memory checkpoint")) }
   next if job_id == "scripts" || (uploads.empty? && !expected_uploads.key?(job_id))
   unless uploads == expected_uploads[job_id]
     warn "#{path}: artifact uploads must stay in approved jobs with their exact names"
@@ -906,7 +909,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "9092e64de66c3e290612d9a5c5893a4a619414c08290892f0d54aa77b1a93ade",
+    "job_sha256" => "ae5797e4fcd5f28663d9eb28ba495823c5b45c7cb36189f31c52cbc2387c873d",
     "job_timeout_minutes" => 60,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {

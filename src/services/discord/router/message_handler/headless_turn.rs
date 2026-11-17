@@ -5,6 +5,9 @@ use crate::services::discord::adk_session::build_namespaced_session_key;
 use crate::services::discord::live_bridge::register_without_requeue as register_headless_original;
 use crate::services::provider::ProviderRuntimeExt;
 
+mod admission;
+#[cfg(unix)]
+use admission::owner_start;
 mod replay_start;
 use replay_start::take_session_retry_context;
 
@@ -51,6 +54,8 @@ async fn start_reserved_headless_turn_admitted(
     reservation: HeadlessTurnReservation,
     // The owner front this start runs as its input, its claim made under the owner's grant.
     owner: Option<super::OwnerTurn>,
+    // A prepared delivery retains later host changes under its existing input owner.
+    prepared_herdr: bool,
 ) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
@@ -145,12 +150,21 @@ async fn start_reserved_headless_turn_admitted(
     if let Some(outcome) = replay_request.early().await? {
         return Ok(outcome);
     }
-    // A Herdr-configured channel is refused before this turn claims, resets or clears anything.
+    // Use intake admission before claiming; the driver rechecks the selected host before spawn.
     let (kept, label) = (metadata.as_ref(), tmux_session_label.as_deref());
     let session_key = || headless_session_key(shared, channel_id, &provider, kept, label);
     let pool = shared.pg_pool.as_ref();
-    let host = crate::services::turn_host::refusal_before_turn;
-    if let Some(refusal) = host(pool, &provider, channel_id.get(), session_key).await {
+    let host = admission::refusal_before_start;
+    if !prepared_herdr
+        && let Some(refusal) = host(
+            pool,
+            &provider,
+            channel_id.get(),
+            session_key,
+            metadata.as_ref(),
+        )
+        .await
+    {
         #[cfg(unix)]
         if let Some(owner) = owner.as_ref() {
             owner.refused(refusal.clone());
@@ -225,6 +239,18 @@ async fn start_reserved_headless_turn_admitted(
         .await
     {
         return outcome;
+    }
+    if prepared_herdr
+        && let Some(refusal) = host(
+            pool,
+            &provider,
+            channel_id.get(),
+            session_key,
+            metadata.as_ref(),
+        )
+        .await
+    {
+        return Err(HeadlessTurnStartError::InvalidTarget(refusal.to_string()));
     }
     let identity = (
         provider.clone(),
@@ -966,7 +992,6 @@ async fn start_reserved_headless_turn_admitted(
             ));
         }
     };
-    let replay_gateway = replay_request.gateway(&inflight_state, &pending_uploads, &current_path);
     let turn_host = crate::services::turn_host::for_turn(
         shared.pg_pool.as_ref(),
         &provider,
@@ -974,6 +999,12 @@ async fn start_reserved_headless_turn_admitted(
         adk_session_key.as_deref(),
     )
     .await;
+    let replay_gateway = replay_request.gateway(
+        &mut inflight_state,
+        &pending_uploads,
+        &current_path,
+        &turn_host,
+    );
     let submission = crate::services::discord::inflight::install_managed_submission_boundary(
         &mut inflight_state,
         &turn_host,
@@ -1192,7 +1223,9 @@ async fn start_reserved_headless_turn_admitted(
             memory_recall_usage: crate::services::memory::TokenUsage::default(),
             context_window_tokens: model_context_window,
             context_compact_percent: compact_percent,
-            current_msg_id: Some(placeholder_msg_id),
+            current_msg_id: crate::services::discord::inflight::optional_message_id(
+                inflight_state.current_msg_id,
+            ),
             response_sent_offset: 0,
             full_response: String::new(),
             tmux_last_offset: Some(inflight_offset),
@@ -1206,47 +1239,6 @@ async fn start_reserved_headless_turn_admitted(
     );
 
     Ok(HeadlessTurnStartOutcome::started(turn_id, receipt))
-}
-
-/// A start whose target the owner takes is admitted as an original with its resolved provenance;
-/// a routine or scheduled start already met its own owner seam and keeps the legacy path here.
-#[cfg(unix)]
-async fn owner_start(
-    (shared, channel, reservation): (&Arc<SharedData>, ChannelId, &HeadlessTurnReservation),
-    prompt: &str,
-    owner: (u64, &str),
-    (source, metadata): (Option<&str>, Option<&serde_json::Value>),
-    (channel_hint, label, dm): (Option<&str>, Option<&str>, Option<bool>),
-) -> Option<Result<HeadlessTurnStartOutcome, HeadlessTurnStartError>> {
-    use crate::services::discord::queue_io::input_ingress::Intake;
-    use crate::services::discord::queue_io::input_owner::start::HeadlessProvenance;
-    let seamed = |key| metadata.is_some_and(|metadata| metadata.get(key).is_some());
-    if seamed("routine_id") || seamed("scheduled_message_id") {
-        return None;
-    }
-    let turn_id = reservation.turn_id(channel);
-    let metadata = metadata.cloned();
-    let provenance = HeadlessProvenance {
-        owner,
-        source,
-        metadata,
-        channel_hint,
-        label,
-        dm,
-    };
-    let admit = super::provider_dispatch::owner_admit_start;
-    let intake = admit(
-        shared,
-        channel,
-        (&turn_id, prompt),
-        provenance.json(&turn_id),
-    )
-    .await?;
-    Some(match intake {
-        Intake::Accepted => Ok(HeadlessTurnStartOutcome::accepted(turn_id)),
-        Intake::Pending(pending) => Err(HeadlessTurnStartError::Conflict(pending.to_string())),
-        Intake::Rejected(reason) => Err(HeadlessTurnStartError::Conflict(reason)),
-    })
 }
 
 #[cfg(test)]

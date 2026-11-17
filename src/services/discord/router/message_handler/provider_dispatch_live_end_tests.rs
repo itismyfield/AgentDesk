@@ -399,7 +399,7 @@ fn claude_live_turn<R>(
 }
 
 /// The pane back at its shell and the provider process gone.
-fn kill(fx: &super::Fixture) {
+pub(super) fn kill(fx: &super::Fixture) {
     let root = crate::config::runtime_root().unwrap();
     let context = root.join(format!(
         "runtime/binding_contexts/claude/{}.json",

@@ -13,7 +13,7 @@ import tempfile
 
 RUN_MUTANTS = {"none", "ttl_takeover", "non_atomic", "parent_unlock", "missing_fd",
                "duplicate_child", "no_pending", "clear_on_idle", "send_after_release",
-               "leak_fd", "foreign_cleanup"}
+               "leak_fd", "foreign_cleanup", "crash_no_reclaim"}
 INSTANCE_MUTANTS = RUN_MUTANTS - {"no_pending", "clear_on_idle", "send_after_release"}
 EXPECTED_CONFIGS = ({f"run-{mut}.cfg" for mut in RUN_MUTANTS}
                     | {f"instance-{mut}.cfg" for mut in INSTANCE_MUTANTS}
@@ -32,11 +32,11 @@ def select_configs(base):
 
 def self_test_selection():
     cases = [
-        ('complete_23', EXPECTED_CONFIGS, True),
+        ('complete', EXPECTED_CONFIGS, True),
         ('empty_0', set(), False),
-        ('missing_22', EXPECTED_CONFIGS - {'run-none.cfg'}, False),
+        ('missing_one', EXPECTED_CONFIGS - {'run-none.cfg'}, False),
         ('unknown_singleton', {'unknown.cfg'}, False),
-        ('additional_unknown_24', EXPECTED_CONFIGS | {'unknown.cfg'}, False),
+        ('additional_unknown', EXPECTED_CONFIGS | {'unknown.cfg'}, False),
     ]
     results = []
     for name, names, accepted in cases:
@@ -46,7 +46,7 @@ def self_test_selection():
                 (base / config).touch()
             try:
                 selected = select_configs(base)
-                actual = len(selected) == 23
+                actual = len(selected) == len(EXPECTED_CONFIGS)
             except ValueError:
                 actual = False
             results.append({'name': name, 'accepted': actual,
@@ -65,7 +65,9 @@ SPEC.loader.exec_module(common)
 
 def load_expectations(root):
     rows = common.read_expected(root / 'expected.tsv')
-    scoped = {cfg: value for cfg, value in rows.items() if cfg.startswith('e2e-run-lease/')}
+    # admission/ is its own model; this adapter owns only the top-level lease configs.
+    scoped = {cfg: value for cfg, value in rows.items()
+              if cfg.startswith('e2e-run-lease/') and cfg.count('/') == 1}
     wanted = {f'e2e-run-lease/{name}' for name in EXPECTED_CONFIGS}
     if set(scoped) != wanted:
         raise ValueError(f'incomplete canonical lease expectations: missing={sorted(wanted - set(scoped))} '

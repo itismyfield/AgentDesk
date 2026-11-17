@@ -26,6 +26,7 @@ pub const FIELDS: &[FieldReload] = &[
     row("discord.bots.*.agent", Restart, "`src/services/discord/settings/read.rs` load_bot_settings (run_bot -> SharedData.settings)"),
     row("discord.bots.*.auth", Restart, "`src/services/discord/settings/read.rs` load_bot_settings (SharedData.settings at run_bot)"),
     row("discord.guild_id", Restart, "`src/services/auto_queue/fsm.rs` AutoQueueActivateDeps::from_state; `src/server/routes/agents.rs` agent_dispatched_sessions and `src/cli/direct.rs` resolve_guild_id (effective_guild_id with onboarding override)"),
+    row("discord.decisions", Live, "`src/cli/discord_channel_create.rs` create_forum (config loaded per CLI run)"),
     row("discord.dm_default_agent", Live, "`src/services/discord/agentdesk_config.rs` resolve_dm_default_agent (validated snapshot per DM)"),
     row("discord.owner_id", Restart, "`src/services/discord/settings/read.rs` load_bot_settings (owner_user_id into SharedData.settings)"),
     row("discord.scheduled_message_required_mention_user_ids", Restart, "`src/server/routes/scheduled_messages/discord_mentions.rs` required_from_state (AppState.config)"),

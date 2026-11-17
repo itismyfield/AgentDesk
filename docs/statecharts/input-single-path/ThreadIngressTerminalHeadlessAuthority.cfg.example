@@ -1,0 +1,11 @@
+\* EXPECTED_SAFETY=TerminalRequiresPresenter EXPECTED_LIVENESS=-
+SPECIFICATION Spec
+CONSTANTS
+    Contract = "headless"
+    BodyOwner = "O"
+    Mutation = "headlessAuthority"
+    CanRestart = FALSE
+INVARIANTS TypeOK ExactlyOneReply NoSilentLoss NoResidueAfterEnd
+           TerminalRequiresPresenter SourcePreserved LiveCustody
+PROPERTIES EachReply EachEnds NextProgress EventuallyDrained
+CHECK_DEADLOCK FALSE

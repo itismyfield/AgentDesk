@@ -8,6 +8,7 @@ pub mod campaigns;
 pub mod cancel_tombstones;
 pub(crate) mod channel_custody_lock;
 pub(crate) mod channel_home_preferences;
+pub(crate) mod decision_forums;
 #[cfg(test)]
 mod discarded_tx_result_scan_tests;
 pub mod dispatch_semaphores;

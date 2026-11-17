@@ -947,6 +947,11 @@
       "version": 193
     },
     {
+      "path": "migrations/postgres/0194_provider_resume_fence.sql",
+      "sha256": "f9704e5d8fd64c218c1df70719adff1c63f1bd3467b0cd53c2f871f3534797e2",
+      "version": 194
+    },
+    {
       "path": "migrations/postgres/0195_herdr_body_debt_recovery.sql",
       "sha256": "1f0a02742a80d2e5972bb0bd97ee9441cdb07775a6faf65b8a4873414c3ce7ef",
       "version": 195
@@ -955,6 +960,11 @@
       "path": "migrations/postgres/0196_tui_output_disposition.sql",
       "sha256": "6969556f9924955f6c8d2740a194c51197c17bfe575e3aa495ffb29673145fe4",
       "version": 196
+    },
+    {
+      "path": "migrations/postgres/0197_decision_forums.sql",
+      "sha256": "95299b336bd48658d3de0cb0e96a469c20028eef6e8b38ef7d4497fb0cc68339",
+      "version": 197
     }
   ],
   "version": 1

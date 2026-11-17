@@ -1,0 +1,36 @@
+---
+title: "동시에 온 입력은 같은 스레드 세션으로 합류"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoStaleBootstrap
+    lg1: Path to the NoStaleBootstrap bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: 세션 없음 #183; 보관3 확인0 준비0 시작0 전달0 답0 실패0
+  s1: 세션 없음 #183; 보관2 확인1 준비0 시작0 전달0 답0 실패0
+  s2: 세션 없음 #183; 보관2 확인0 준비1 시작0 전달0 답0 실패0
+  s3: 세션 없음 #183; 보관1 확인1 준비1 시작0 전달0 답0 실패0
+  s4: 첫 세션 시작 #183; 보관1 확인1 준비0 시작1 전달0 답0 실패0
+  s5: 살아 있는 세션 #183; 보관1 확인1 준비0 시작0 전달1 답0 실패0
+  s6: 살아 있는 세션 #183; 보관1 확인0 준비1 시작0 전달1 답0 실패0
+  s7: 살아 있는 세션 재시작 #183; 보관1 확인0 준비0 시작1 전달1 답0 실패0
+  [*] --> s0
+  s0 --> s1: 세션 존재 관측
+  s1 --> s2: 같은 스레드 전환 확보 후 재확인
+  s2 --> s3: 세션 존재 관측
+  s3 --> s4: 첫 메시지 경로 선택
+  s4 --> s5: 첫 입력 전달과 세션 준비
+  s5 --> s6: 같은 스레드 전환 확보 후 재확인
+  s6 --> s7: 첫 메시지 경로 선택
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s7 breaks
+  class s7 bugPath
