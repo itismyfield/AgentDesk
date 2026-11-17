@@ -1153,6 +1153,7 @@ src/
 │   │   │   ├── dialog.rs
 │   │   │   ├── evidence.rs
 │   │   │   ├── idle.rs
+│   │   │   ├── idle_compaction_safety_tests.rs
 │   │   │   ├── idle_compaction_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── readiness_tests.rs

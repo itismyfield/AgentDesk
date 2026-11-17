@@ -82,3 +82,50 @@ python3 scripts/ci/statecharts_tlc.py --root <11cfg-snapshot-root> --jobs 2 --re
   --out <새-output-folder>
 python3 scripts/ci/statechart_index.py
 ```
+
+## Stop continuation의 늦은 opener 경계
+
+후속 검토는 기존 11cfg에 실제 CLI 저장 순서의 3cfg를 더한다. `StopBefore`는 최초 구현의 넓은 hook_success 중립 목록, `StopFixed`는 **root Stop + stdout JSON의 일치 `hookEventName="Stop"` + 비어있지 않은 `additionalContext`**를 장벽으로 다루는 좁힌 판정이다. `QuietStop`은 정상 quiet Stop 성공을 중립으로 보존한다. 큐 receipt 전체를 금지하거나 새 queue 권위를 추가하지 않는다.
+
+설치된 CLI의 정적 embedded JS만 읽었으며 운영 transcript·설정은 읽지 않았다. `hookName`은 표시 이름이어서 event 판정 근거가 아니며, 실제 event는 `attachment.hookEvent`다. 이전 설치 2.1.325 binary SHA256은 `84590fefe6338be9087f5814b61f9a54c5f21524163a4c127cb5a808e31009f2`다. 다음은 운영 내용 없는 합성 저장형이다.
+
+```json
+{"type":"attachment","attachment":{"type":"hook_success","hookEvent":"Stop","hookName":"synthetic hook","content":"","stdout":"{\"hookSpecificOutput\":{\"hookEventName\":\"Stop\",\"additionalContext\":\"continue\"}}","stderr":"","exitCode":0}}
+```
+
+| 설치 CLI·정적 source 좌표 | 확인한 실제 순서 |
+|---|---|
+| 2.1.326 byte296930475 `Jt` | hook output을 top-level attachment로 감싼다. |
+| 2.1.326 byte297025717, byte297026917 | Stop 추가context를 해석하면서 stdout 원문을 포함한 hook_success를 만든다. decision=block은 별도 hook_blocking_error이므로 이미 장벽이다(byte297021023). |
+| 2.1.326 byte303287938 → byte303290604 | Stop 소비자가 hook_success message를 먼저 yield하고 후속 hook_additional_context opener는 나중에 yield한다. |
+| 2.1.326 byte293625734, byte293627734 | 저장 필터는 progress를 제외하지만 stdout이 비어 있지 않은 hook_success는 보존한다. 앞선 hook_progress가 저장 장벽이라고 가정할 수 없다. |
+| 2.1.325 byte292667333, byte292668504, byte298809181, byte298811675, byte289366319 | 이전 설치 버전도 추가context 해석 → hook_success → 후속 opener, progress 저장 제외라는 같은 순서다. |
+| 2.1.326 byte318957555, byte318957742 | 유휴 압축 informational 알림은 compactConversation 완료와 guard 해제 뒤 append한다. 완료 알림 자체를 진행 중 압축의 opener로 바꾸지 않는다. |
+| 2.1.326 byte296978216, byte308615062 | PreCompact는 outside-REPL hook 결과를 모아 compact 결과의 표시 문자열로 반환한다. root Stop처럼 transcript hook_success를 먼저 yield하는 근거가 없어 PreCompact 전체를 새 장벽으로 좁히지 않는다. |
+
+따라서 마지막 end_turn 뒤 **continuation을 명시한 Stop hook_success만 저장되고 다음 opener는 아직 없는 prefix**는 실제 가능한 경계다. 이전 완료를 그대로 신뢰하면 Idle 증명과 붙여넣기까지 가능하다. 이 경우만 판정을 좁힌다. 정상 UserPromptSubmit은 `readiness/mod.rs:678`의 pending floor와 `:738`의 revision 갱신이 proof를 폐기하고, `:285`의 floor 검사는 새 activity/terminal을 요구한다. AgentDesk가 요청한 Stop continuation은 `:691`의 continuation floor와 `:291`의 새 시각 검사가 막으며, 다른 hook의 출력은 그 ledger가 미리 알 수 없어 위 transcript 장벽이 필요하다.
+
+`ContinuationOpener`는 hook_success 뒤 어느 시점에도 도착할 수 있다. `ContinuationFinishes`는 그 뒤의 새 완료다. 새 opener가 첫 키 준비 뒤 도착하면 `RevalidateIdle`/`RevalidateBusy`가 기존 source·stamp 재검증 거절을 투영한다. 두 새 행동은 기존 첫 키 보호를 모델에 표현하며 새 생산 우회가 아니다.
+
+- `StopBefore`: `IdleNeedsClosedReply`·`NoProofBeforeStopContinuationOpener` 최단 반례0–3은 end_turn → continuation stdout 성공 → owner 입력 → opener 전 Idle 증명이다. `NoIdlePasteDuringStopContinuation` 반례0–6은 probe Wake → owner 재개 → 진행 중 continuation 위 Idle 붙여넣기까지 간다.
+- `StopFixed`: opener 전에는 Idle 증명을 거절한다. 표준 observer의 Streaming/Busy와 검증 source가 있으면 기존 Busy 프레이밍은 유지하며, Idle 붙여넣기는 후속 턴의 새 완료 뒤에만 허가한다. safety와 eventual resolution 모두 GREEN이다. 실제 Idle 제출 입구의 키0은 Rust 준비 시험으로 별도 검증한다.
+- `QuietStop`: 추가context가 없는 quiet 성공은 정상 Idle 전달하며 safety·liveness GREEN이다.
+
+최종 공식 checker **14/14 cfg 기대집합 일치, GREEN11 / expected RED3, 본검사39회·fairness14회, 오류·미검사0**. 기존 11cfg의 위반집합은 그대로다. 새 3cfg의 독립 statechart도 예상 exit1/exit0/exit0이다. Before 40states/59steps(차트12states/18arrows), Fixed21/29(차트9/9), Quiet7/7(차트7/6)이다. [Stop Before](herdr-idle-meta.stop-before.chart.mmd), [Stop Fixed](herdr-idle-meta.stop-fixed.chart.mmd), [Quiet Stop](herdr-idle-meta.quiet-stop.chart.mmd). 새 view도 null로 숨긴 action이 없으며 같은 표시 안의 opener 도착·완료·대기 변화는 내부로 접힌다. 실제 parser/준비 입구 재현은 `idle_compaction_safety_tests::stop_hook_context_before_its_user_record_holds_the_actual_preparation_path`에 연결한다. 큐·UPS·Stop fence·압축 prefix는 같은 모듈의 `queued_receipts_then_user_prompt_submit_fence_the_previous_idle_reply`, `continuing_stop_keeps_idle_metadata_and_late_terminals_fenced_until_a_new_reply`, `each_compaction_attachment_and_notice_preserves_only_an_already_completed_reply`가 다룬다. 해당 Rust 실행과 바뀐 Stop 분기 mutant RED는 구현 시험 증거로 별도 판정한다.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Reply: end_turn
+    Reply --> StopOutput: Stop stdout에 additionalContext
+    StopOutput --> Held: Fixed, opener 전 Idle 증명 거절
+    Held --> Held: Idle 증명 거절
+    Held --> Busy: 기존 검증 Busy 프레임 경로
+    Busy --> Delivered: 기존 Busy 프레임 전달
+    Held --> NextTurn: 후속 opener 도착
+    NextTurn --> Complete: 새 턴 완료
+    Complete --> Delivered: Ready·Wake·첫 키 재검증
+    StopOutput --> EarlyIdle: Before, 이전 답변을 Idle 증명으로 사용
+    EarlyIdle --> UnsafePaste: 후속 opener 도착 전 붙여넣기
+```
+
+새 원시 증거는 레그 로그 `statechart-stop/`의 checker.log/results.json 및 최종 `chart-*-r2/` 세 디렉터리다. 재현 명령은 앞 절과 같고 root에는 최종14cfg snapshot을 쓰며, Stop 차트의 view는 `herdr-idle-meta-stop.view.mjs`로 지정한다. expected.tsv 새3행을 추가하고 index.d 한 행을 수정한 뒤 공식 statechart_index.py를 다시 실행했다.

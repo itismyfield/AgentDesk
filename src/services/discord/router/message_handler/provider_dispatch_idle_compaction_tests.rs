@@ -1,6 +1,4 @@
 use super::*;
-use crate::services::claude_tui::busy_inject::Screen;
-use crate::services::claude_tui::host_input::busy::BusyState;
 use crate::services::claude_tui::readiness;
 use crate::services::discord::queue_io::input_owner::held_watch::{self, Verdict};
 use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
@@ -57,6 +55,9 @@ fn an_idle_compaction_tail_wakes_and_delivers_the_actual_held_front_pg() {
             .unwrap()
             .unwrap();
         assert_eq!(look.verdict, Verdict::Keep);
+        let generation = look.generation;
+        let (_, observed) =
+            held_watch::watch_observed(source_retry_drive(&intake), original.message_id);
 
         let mut end = end_turn();
         end["sessionId"] = json!(started.session);
@@ -70,36 +71,15 @@ fn an_idle_compaction_tail_wakes_and_delivers_the_actual_held_front_pg() {
             })
             .collect();
         append(&started.path, &records);
-        let key = discord::adk_session::turn_session_key(
-            &intake.shared,
-            ChannelId::new(CHANNEL),
-            &ProviderKind::Claude,
-        )
-        .await
-        .unwrap();
-        let hosted = crate::services::turn_host::for_turn(
-            Some(&fx.pool),
-            &ProviderKind::Claude,
-            CHANNEL,
-            Some(&key),
-        )
-        .await;
-        let observation =
-            claude_handoff::observe_busy(CHANNEL, fx.logical(), &hosted, &intake.shared.token_hash);
-        assert_eq!(observation.state(), BusyState::Idle);
-        assert!(matches!(observation.probe()(), Screen::Ready));
-        assert!(
-            readiness::observe(fx.logical(), Some(&started.path)).is_some(),
-            "the same completed source has its public readiness proof despite the metadata tail"
-        );
-        held_watch::arm(CHANNEL, observation.probe());
-        let (_, observed) =
-            held_watch::watch_observed(source_retry_drive(&intake), original.message_id);
         let look = tokio::time::timeout(LIMIT, observed)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(look.verdict, Verdict::Wake);
+        assert_eq!(
+            look.generation, generation,
+            "the first held probe and its custody wrapper stay installed through recovery"
+        );
         source_input_settled(&intake, &original, &heads).await;
         let sends = fx.rig.sends();
         assert_eq!(sends.len() - before, 2, "the same original is sent once");

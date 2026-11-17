@@ -283,6 +283,9 @@ input-single-path/HerdrIdleMetaCompacting.cfg	HerdrIdleMeta	-	-
 input-single-path/HerdrIdleMetaFixed.cfg	HerdrIdleMeta	-	-
 input-single-path/HerdrIdleMetaLegacyResult.cfg	HerdrIdleMeta	-	-
 input-single-path/HerdrIdleMetaNewPrompt.cfg	HerdrIdleMeta	-	-
+input-single-path/HerdrIdleMetaQuietStop.cfg	HerdrIdleMeta	-	-
+input-single-path/HerdrIdleMetaStopBefore.cfg	HerdrIdleMeta	IdleNeedsClosedReply,NoIdlePasteDuringStopContinuation,NoProofBeforeStopContinuationOpener	-
+input-single-path/HerdrIdleMetaStopFixed.cfg	HerdrIdleMeta	-	-
 input-single-path/HerdrIdleMetaStreaming.cfg	HerdrIdleMeta	-	-
 input-single-path/HerdrIdleMetaTool.cfg	HerdrIdleMeta	-	-
 input-single-path/HerdrIdleMetaToolResult.cfg	HerdrIdleMeta	-	-

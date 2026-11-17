@@ -70,20 +70,36 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
             | "frame-link",
         ) => true,
         Some("system") => record["subtype"] == "informational",
-        Some("attachment") => matches!(
-            record["attachment"]["type"].as_str(),
-            Some(
-                "agent_listing_delta"
-                    | "skill_listing"
-                    | "mcp_instructions_delta"
-                    | "environment"
-                    | "model"
-                    | "language"
-                    | "hook_success"
-                    | "todo_reminder"
-                    | "queued_command"
-            )
-        ),
+        Some("attachment") => {
+            let attachment = &record["attachment"];
+            // Stop can persist added context before its next user record reaches the log.
+            let continues = attachment["type"] == "hook_success"
+                && attachment["hookEvent"] == "Stop"
+                && attachment["stdout"]
+                    .as_str()
+                    .and_then(|stdout| serde_json::from_str::<Value>(stdout).ok())
+                    .is_some_and(|output| {
+                        output["hookSpecificOutput"]["hookEventName"] == "Stop"
+                            && output["hookSpecificOutput"]["additionalContext"]
+                                .as_str()
+                                .is_some_and(|context| !context.is_empty())
+                    });
+            !continues
+                && matches!(
+                    attachment["type"].as_str(),
+                    Some(
+                        "agent_listing_delta"
+                            | "skill_listing"
+                            | "mcp_instructions_delta"
+                            | "environment"
+                            | "model"
+                            | "language"
+                            | "hook_success"
+                            | "todo_reminder"
+                            | "queued_command"
+                    )
+                )
+        }
         _ => false,
     }
 }
