@@ -68,6 +68,7 @@ impl Fixture {
             provider_root: Some(root.path().into()),
             first_prompt_digest: None,
             source_policy: Some("verified".into()),
+            resume_start: None,
         };
         let episode = TurnEpisodeRef {
             channel_id: 7,

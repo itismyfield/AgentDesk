@@ -1098,6 +1098,7 @@ fn codex_retention_fixture() -> Fixture {
             provider_root: Some("/o".into()),
             first_prompt_digest: None,
             source_policy: Some("shadow".into()),
+            resume_start: None,
         },
         current: source(OLD),
         held: vec![source(OLD)],

@@ -78,7 +78,7 @@ fn adopt_under_symlinked_home(via_alias: bool) -> IngressOutcome {
         "timestamp":stamp, "cwd":root.path(), "source":"cli", "originator":"codex_cli_rs"}});
     std::fs::write(&rollout, format!("{header}\n")).unwrap();
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(context),
+        context: CapturedContext::Captured(context.into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();

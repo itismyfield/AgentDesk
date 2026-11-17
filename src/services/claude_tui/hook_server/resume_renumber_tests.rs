@@ -81,6 +81,7 @@ impl Reboot {
             provider_root: None,
             first_prompt_digest: None,
             source_policy: None,
+            resume_start: None,
         };
         PreparedIncarnation::create(context.clone()).unwrap();
         let marker = crate::services::tmux_common::session_temp_path(&self.tmux, "spawn_nonce");
@@ -94,7 +95,7 @@ impl Reboot {
 
     fn hook(&self, event: &str, payload: &Value, context: Option<&BindingContext>) -> u16 {
         let envelope = context.map(|context| {
-            let context = CapturedContext::Captured(context.clone());
+            let context = CapturedContext::Captured(context.clone().into());
             let observed = Default::default();
             HookBindingEnvelope { context, observed }.encode().unwrap()
         });

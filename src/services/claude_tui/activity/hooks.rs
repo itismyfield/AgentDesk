@@ -37,7 +37,7 @@ pub(crate) fn note_hook(
     if at > Utc::now()
         || at < ctx.created_at
         || !context::execution_context("claude", &ctx.execution_nonce)
-            .is_ok_and(|canonical| canonical == ctx)
+            .is_ok_and(|canonical| canonical == *ctx)
     {
         return;
     }

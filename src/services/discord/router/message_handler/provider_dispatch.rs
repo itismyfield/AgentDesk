@@ -29,7 +29,8 @@ pub(in crate::services::discord) use owner_input::{
 };
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use owner_input::{
-    owner_drive as owner_drive_for_test, start_idle_for_test,
+    install_root_recovery_launch, owner_drive as owner_drive_for_test, start_idle_for_test,
+    wake_drive_for_test,
 };
 pub(super) mod replay_scope;
 

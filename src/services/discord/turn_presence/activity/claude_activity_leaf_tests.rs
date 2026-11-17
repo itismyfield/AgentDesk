@@ -13,7 +13,7 @@ impl Rig {
     ) {
         let mut headers = HeaderMap::new();
         let envelope = context::HookBindingEnvelope {
-            context: context::CapturedContext::Captured(ctx.clone()),
+            context: context::CapturedContext::Captured(ctx.clone().into()),
             observed: context::ObservedHookProcess::default(),
         };
         headers.insert(

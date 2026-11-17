@@ -307,7 +307,7 @@ async fn retired_herdr_canary_bootstraps_only_on_an_exact_vacant_unheld_retired_
     let mut late = canary.fixture.context.clone();
     late.execution_nonce = RETIRED.into();
     let envelope = dedupe::binding_context::HookBindingEnvelope {
-        context: dedupe::binding_context::CapturedContext::Captured(late),
+        context: dedupe::binding_context::CapturedContext::Captured(Box::new(late)),
         observed: Default::default(),
     };
     let hook = dedupe::binding_events::HookSignal {

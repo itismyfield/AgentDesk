@@ -1,0 +1,2 @@
+key: 165-session-lifecycle-herdr-restart-b2a
+| `session-lifecycle` (Herdr B2a detached end, #8128) | model `0bfe` + source `5b8811fd4e` WIP | Canonical63 expected sets preserved; cache-before-gate/wake, cancelled caller and explicit ended-idle repair added only for seedless cases | 63 cfg/617 TLC matched63/63, 28 GREEN+35 expected RED. Independent model controls8 RED; seed definitions unchanged, no production PASS claim. [B2a report](session-lifecycle/herdr-restart-owner-b2a.report.md). |

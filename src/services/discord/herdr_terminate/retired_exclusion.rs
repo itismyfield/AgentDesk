@@ -1,5 +1,6 @@
 //! What a scoped terminate holds once it retired its execution and settled the captured turn:
-//! only [`super::terminate_scoped`] builds one, and the channel stays excluded until it drops.
+//! [`super::terminate_scoped`] and the restart's ended-execution recovery build one, and the
+//! channel stays excluded until it drops.
 
 use std::sync::Arc;
 

@@ -68,6 +68,7 @@ impl Pane {
             provider_root: None,
             first_prompt_digest: None,
             source_policy: None,
+            resume_start: None,
         })
         .unwrap();
         std::fs::write(tc::session_temp_path(&tmux, "spawn_nonce"), &nonce).unwrap();
@@ -101,7 +102,21 @@ impl Pane {
                 let session = (Some(self.tmux.as_str()), None);
                 let mut report = ClearReport::default();
                 let channel = ChannelId::new(self.channel);
-                end_session(&shared, &provider, channel, session, guard, &mut report).await;
+                let epoch = crate::services::herdr_launch::clear_epoch::begin_clear(
+                    provider.as_str(),
+                    &shared.token_hash,
+                    self.channel,
+                );
+                end_session(
+                    &shared,
+                    &provider,
+                    channel,
+                    session,
+                    guard,
+                    &epoch,
+                    &mut report,
+                )
+                .await;
             })
         })
     }

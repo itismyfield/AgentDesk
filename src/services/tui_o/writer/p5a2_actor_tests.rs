@@ -131,6 +131,7 @@ impl Fixture {
             provider_root: Some(base.clone()),
             first_prompt_digest: Some(format!("sha256:{}", "a".repeat(64))),
             source_policy: Some("verified".into()),
+            resume_start: None,
         };
         PreparedIncarnation::create(context.clone()).unwrap();
         let marker = crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce");
@@ -145,7 +146,7 @@ impl Fixture {
             "id":id,"timestamp":at,"cwd":root.path(),"source":"cli","originator":"codex_cli_rs"}});
         std::fs::write(&path, format!("{meta}\n")).unwrap();
         let envelope = HookBindingEnvelope {
-            context: CapturedContext::Captured(context.clone()),
+            context: CapturedContext::Captured(context.clone().into()),
             observed: ObservedHookProcess::default(),
         };
         let mut headers = axum::http::HeaderMap::new();

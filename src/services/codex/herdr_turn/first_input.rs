@@ -51,7 +51,9 @@ pub(super) fn submit_owned(
         nonce.to_owned(),
     );
     let (pool, owner, runtime) = (turn.pool.clone(), turn.owner.clone(), Handle::current());
+    let epoch_scope = clear_epoch::current();
     let submit = Box::new(move |frame: String| {
+        let _epoch = clear_epoch::install(epoch_scope);
         let at = (logical.as_str(), channel, nonce.as_str());
         let written = write(
             at,
@@ -117,6 +119,12 @@ fn write(
     target: impl FnOnce() -> Result<HerdrTarget, String>,
     restore: impl FnOnce() -> Result<(), String>,
 ) -> Result<Option<Submitted>, SubmissionError> {
+    let epoch_scope = clear_epoch::current();
+    let checked = epoch_scope
+        .as_ref()
+        .map(|scope| scope.check_epoch())
+        .transpose()
+        .map_err(|_| owned_hold("clear_epoch_changed"))?;
     let owned = crate::services::claude_tui::owner_input::active();
     let plan = if owned {
         crate::services::codex_tui::input::owned_prompt_plan(prompt)?
@@ -130,6 +138,14 @@ fn write(
         }
         format!("herdr turn: binding log unavailable: {error}")
     })?;
+    drop(
+        crate::services::tui_prompt_dedupe::binding_context::herdr_resume::pending_start(nonce)
+            .inspect_err(|_| {
+                if owned {
+                    crate::services::claude_tui::owner_input::vetoed("resume_start_unavailable");
+                }
+            })?,
+    );
     let target = target()?;
     let draft = if owned {
         owned_composer(&target, cancel)?
@@ -151,7 +167,40 @@ fn write(
     })?;
     #[cfg(test)]
     crate::services::provider::herdr_before_start::test_input_boundary(cancel);
-    let run = observed_input(cancel, nonce, || None, || run_herdr(&target, &plan, cancel))?;
+    let mut denied = false;
+    let run = observed_input(
+        cancel,
+        nonce,
+        || None,
+        || {
+            let _permit = match checked
+                .as_ref()
+                .map(|checked| checked.begin_effect())
+                .transpose()
+            {
+                Ok(permit) => permit,
+                Err(_) => {
+                    denied = true;
+                    return PlanRun {
+                        run: InputRun::Refused(
+                            crate::services::codex_tui::host_input::InputRefusal::Conflict,
+                        ),
+                        composer_mutated: false,
+                        enter_attempted: false,
+                    };
+                }
+            };
+            run_herdr(&target, &plan, cancel)
+        },
+    );
+    if let Some(scope) = epoch_scope {
+        scope.finish_start();
+    }
+    let run = run?;
+    if denied {
+        release_closed_hold(logical, nonce);
+        return Err(owned_hold("clear_epoch_changed"));
+    }
     let run = match run {
         crate::services::provider::herdr_before_start::InputRun::Ran(run) => run,
         crate::services::provider::herdr_before_start::InputRun::Closed => {
@@ -204,16 +253,21 @@ pub(super) fn observe(
         let poll = left.min(Duration::from_millis(200));
         let _ = runtime.block_on(tokio::time::timeout(poll, logged.changed()));
     };
+    let context =
+        crate::services::tui_prompt_dedupe::binding_context::execution_context("codex", nonce)?;
+    let offset = crate::services::tui_prompt_dedupe::binding_context::herdr_resume::start_offset(
+        &context, &source,
+    )?;
     let record = current_record(turn, runtime, nonce)?;
     if !ports.attach(&turn.owner, &record, &source, &target)? {
         return Err(format!("herdr turn: codex execution {nonce} is not bound"));
     }
-    // The launch's own new rollout begins with this prompt's turn.
+    // A resumed source keeps the boundary recorded before its successor started.
     let start = HerdrTurnStart {
         execution_nonce: nonce.to_owned(),
         source: source.path.clone(),
         file: Some((source.dev, source.ino)),
-        offset: 0,
+        offset,
         submitted_at: None,
     };
     record_turn_start(turn.cancel.as_deref(), start)?;
@@ -222,7 +276,7 @@ pub(super) fn observe(
         turn,
         &target,
         &source.path,
-        0,
+        offset,
         source.session_id.clone(),
         sender,
     )
