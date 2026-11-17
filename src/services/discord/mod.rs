@@ -14,6 +14,7 @@ pub(crate) mod codex_absence;
 mod commands;
 mod compact_turn_authority;
 mod completion_footer_metadata;
+pub(crate) mod decision_forums;
 mod delivery_lease_cell;
 mod delivery_lease_key;
 mod destructive_cancel_gate;
