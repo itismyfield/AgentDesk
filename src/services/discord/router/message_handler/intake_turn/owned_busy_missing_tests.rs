@@ -9,10 +9,21 @@ use crate::services::turn_host::{HerdrRefusal, HerdrTurnPlan};
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 use poise::serenity_prelude::{MessageId, UserId};
 
-#[test]
-fn an_observation_without_a_context_has_no_working_turn_watch() {
+#[tokio::test]
+async fn an_observation_without_a_context_has_no_working_turn_watch() {
     let host = TurnHost::Refused(HerdrRefusal::OWriterNotReady);
-    assert!(recoverable_probe(&host, &BusyObservation::only(BusyState::Held)).is_none());
+    let registry = ChannelMailboxRegistry::default();
+    let mailbox = registry.handle(ChannelId::new(8212203));
+    assert!(
+        recoverable_probe(
+            &host,
+            &BusyObservation::only(BusyState::Held),
+            None,
+            &mailbox,
+            None
+        )
+        .is_none()
+    );
 }
 
 #[tokio::test]
@@ -77,7 +88,6 @@ async fn a_confirmed_missing_working_pane_ends_its_watch_without_dropping_the_fr
         |_| false,
     );
     let host = TurnHost::Herdr(Box::new(plan));
-    let probe = recoverable_probe(&host, &observation).expect("a concrete target has a probe");
     rig.show_panes(&[]);
     let registry = ChannelMailboxRegistry::default();
     let mailbox = registry.handle(channel);
@@ -102,6 +112,12 @@ async fn a_confirmed_missing_working_pane_ends_its_watch_without_dropping_the_fr
             MessageId::new(2),
         )
         .await;
+    let front = mailbox
+        .v2_request(|slot| Ok(slot.as_ref().unwrap().front().unwrap()))
+        .await
+        .unwrap();
+    let probe = recoverable_probe(&host, &observation, None, &mailbox, Some(&front))
+        .expect("a concrete target has a probe");
     let drive = std::sync::Arc::new(Drive {
         mailbox: mailbox.clone(),
         channel: channel.get(),

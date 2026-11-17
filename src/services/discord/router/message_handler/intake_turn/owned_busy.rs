@@ -3,6 +3,10 @@ use super::*;
 use crate::services::claude_tui::host_input::busy::{BusyObservation, BusyState};
 use crate::services::discord::queue_io::input_owner::{claude_handoff, held_watch};
 
+#[path = "owned_busy/missing_watch.rs"]
+mod missing_watch;
+pub(super) use missing_watch::guard as watch_guard;
+
 const SOURCE_HELD: &str = "busy_source_unavailable";
 
 /// A managed running turn keeps its inflight cursor while hooks move the verified native source.
@@ -43,12 +47,18 @@ pub(super) async fn running(
             mailbox,
             channel,
             front,
-            recoverable_probe(host, &observation),
+            recoverable_probe(
+                host,
+                &observation,
+                shared.pg_pool.as_ref(),
+                mailbox,
+                Some(front),
+            ),
         )
         .await;
     } else {
         hold_start(mailbox, channel, front).await;
-        if let Some(probe) = recoverable_probe(host, &observation) {
+        if let Some(probe) = recoverable_probe(host, &observation, None, mailbox, Some(front)) {
             held_watch::arm(
                 channel.get(),
                 held_front(probe, mailbox.clone(), front.clone()),
@@ -116,7 +126,13 @@ impl OwnerTurn {
                 &owner.mailbox,
                 channel,
                 owner.front(),
-                recoverable_probe(&host, &observation),
+                recoverable_probe(
+                    &host,
+                    &observation,
+                    shared.pg_pool.as_ref(),
+                    &owner.mailbox,
+                    Some(owner.front()),
+                ),
             )
             .await;
             owner.defer_before_submit(SOURCE_HELD);
@@ -144,7 +160,13 @@ impl OwnerTurn {
                     &owner.mailbox,
                     channel,
                     owner.front(),
-                    recoverable_probe(&host, &observation),
+                    recoverable_probe(
+                        &host,
+                        &observation,
+                        shared.pg_pool.as_ref(),
+                        &owner.mailbox,
+                        Some(owner.front()),
+                    ),
                 )
                 .await;
                 owner.defer_before_submit(&error);
@@ -359,7 +381,7 @@ fn hold_late(
         turn.channel_id,
         turn.cancel.turn_nonce().map(str::to_string),
     );
-    let probe = recoverable_probe(turn.host, observation)
+    let probe = recoverable_probe(turn.host, observation, turn.pool, mailbox, Some(front))
         .map(|probe| unwound(turn.provider.clone(), probe, mailbox.clone(), at));
     let handle = tokio::runtime::Handle::current();
     if let Some(shared) = turn.shared {
@@ -461,25 +483,12 @@ async fn hold(
 fn recoverable_probe(
     host: &TurnHost,
     observation: &BusyObservation,
+    pool: Option<&sqlx::PgPool>,
+    mailbox: &ChannelMailboxHandle,
+    front: Option<&Front>,
 ) -> Option<crate::services::claude_tui::host_input::busy::BusyProbe> {
-    use crate::db::dispatched_sessions::hosted_execution::HostedRecord;
-    use crate::services::session_host::{PaneReading, herdr_endpoints};
     observation.herdr()?;
-    let TurnHost::Herdr(plan) = host else {
-        return None;
-    };
-    let HostedRecord::Known(record) = &plan.row.as_ref()?.record else {
-        return None;
-    };
-    let view = herdr_endpoints().view(record)?;
-    let mut probe = observation.probe();
-    Some(Box::new(move || {
-        // A missing pane cannot recover; its working turn must release at the normal boundary.
-        match view.read_execution() {
-            PaneReading::Missing => Screen::Gone,
-            _ => probe(),
-        }
-    }))
+    watch_guard(pool, host, mailbox.clone(), front).map(|guard| guard(observation.probe()))
 }
 
 fn same_front(expected: &Front, current: Option<&Front>) -> bool {

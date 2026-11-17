@@ -221,3 +221,6 @@ fn a_front_restored_after_missing_reconnect_uses_the_same_disposal_rule_pg() {
 
 #[path = "provider_dispatch_herdr_missing_success_tests.rs"]
 mod success;
+
+#[path = "provider_dispatch_herdr_missing_race_tests.rs"]
+mod capture_race;

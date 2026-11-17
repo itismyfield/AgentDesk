@@ -45,11 +45,13 @@ pub(super) struct Failure {
     number: u64,
     members: Vec<PendingQueueItem>,
     recovery: MissingRecovery,
+    notice: Arc<tokio::sync::Mutex<Option<String>>>,
 }
 impl Failure {
     pub(super) fn claimed(mailbox: &ChannelMailboxHandle, claim: &FrontClaim) -> Self {
         Self {
             recovery: MissingRecovery::default(),
+            notice: Arc::default(),
             mailbox: mailbox.clone(),
             front: claim.front().clone(),
             number: claim.number(),
@@ -90,6 +92,8 @@ impl Failure {
         channel: poise::serenity_prelude::ChannelId,
         detail: String,
     ) -> Result<Option<bool>, String> {
+        let notice = self.notice.clone();
+        let mut notice = notice.lock().await;
         let anchor = poise::serenity_prelude::MessageId::new(self.front.1.message_id);
         let number = self.number;
         let done = self
@@ -106,28 +110,39 @@ impl Failure {
                 Ok(Some(true))
             })
             .await?;
-        if done.is_some()
-            && let Some(shared) = shared
-        {
+        if done.is_some() {
+            *notice = Some(detail);
+        }
+        if let Some(detail) = notice.as_deref() {
+            let shared = shared.ok_or("recovery refusal notice runtime unavailable")?;
             let message = crate::services::discord::session_notice::subtext(
                 "⚠️",
                 &format!("실행을 복구하지 못해 이 입력을 폐기했습니다. 사유: {detail}"),
             );
-            if let Some(http) = shared.serenity_http_or_token_fallback() {
-                if let Err(error) = crate::services::discord::outbound::serenity_reference::send_referenced_lifecycle_notice(
-                    http,
-                    shared.clone(),
+            let delivered = match shared.serenity_http_or_token_fallback() {
+                Some(http) => crate::services::discord::outbound::serenity_reference::send_referenced_lifecycle_notice(
+                    http, shared.clone(), channel, anchor, &message,
+                    "hosted-recovery-refusal".into(), format!("claim-{number}"),
+                ).await.is_ok_and(|message| message.is_some()),
+                None => false,
+            };
+            if !delivered {
+                let pool = shared
+                    .pg_pool
+                    .as_ref()
+                    .ok_or("recovery refusal notice outbox unavailable")?;
+                let id = crate::services::discord::outbound::recovery_notice::enqueue(
+                    pool,
+                    shared.provider.as_str(),
                     channel,
                     anchor,
+                    number,
                     &message,
-                    "hosted-recovery-refusal".into(),
-                    format!("claim-{number}"),
-                ).await {
-                    tracing::warn!(%error, "recovery refusal notice failed");
-                }
-            } else {
-                tracing::warn!("recovery refusal has no Discord transport");
+                )
+                .await?;
+                tracing::info!(outbox_id = id, "recovery refusal reason handed to outbox");
             }
+            *notice = None;
         }
         Ok(done)
     }

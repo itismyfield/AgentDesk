@@ -556,7 +556,15 @@ mod tests {
             owner: &owner,
             row: None,
         };
-        super::current_session(channel, logical, original, &mut prior).map(|(session, _)| session)
+        super::current_session(channel, logical, original, &mut prior).map(
+            |(session, retired_native)| {
+                assert!(
+                    !retired_native,
+                    "a channel without a hosted row cannot skip legacy close"
+                );
+                session
+            },
+        )
     }
     impl Drop for Log {
         fn drop(&mut self) {
@@ -808,6 +816,60 @@ mod tests {
         HostedRecord::Known(record)
     }
 
+    #[test]
+    fn only_the_same_retired_native_owner_and_nonce_skip_legacy_close() {
+        let _root_guard = crate::config::TestRuntimeRootGuard::new();
+        let mut log = Log::new(8212201);
+        let session = uuid::Uuid::new_v4().to_string();
+        log.push(events::BindingTarget::Source(log.source(&session)));
+        let nonce = "old-execution";
+        let retired = hosted_row(owner(), nonce, HostedState::Retired);
+        let bound = hosted_row(owner(), nonce, HostedState::Bound);
+        let pending = hosted_row(owner(), nonce, HostedState::Pending);
+        let other_nonce = hosted_row(owner(), "another-execution", HostedState::Retired);
+        let mut foreign = owner();
+        foreign.discord_token_hash = "another-bot".into();
+        let other_owner = hosted_row(foreign, nonce, HostedState::Retired);
+        for (label, row, expected) in [
+            ("same retired", Some(&retired), true),
+            ("bound", Some(&bound), false),
+            ("pending", Some(&pending), false),
+            ("other nonce", Some(&other_nonce), false),
+            ("other owner", Some(&other_owner), false),
+            ("no row", None, false),
+        ] {
+            let owner = owner();
+            let mut earlier = Earlier(Liveness::Ended);
+            let mut prior = PriorExecution {
+                earlier: &mut earlier,
+                owner: &owner,
+                row,
+            };
+            assert_eq!(
+                super::current_session(log.channel, log.logical, Some(&session), &mut prior),
+                Ok((Some(session.clone()), expected)),
+                "{label}: the verified native source is otherwise unchanged"
+            );
+        }
+        let mut legacy = log.rows.last().unwrap().clone();
+        legacy["evidence"]["hook_event"] = serde_json::Value::Null;
+        legacy["verified"] = false.into();
+        std::fs::write(log.path(), format!("{legacy}\n")).unwrap();
+        events::forget_channel_for_tests(log.channel);
+        let owner = owner();
+        let mut earlier = Earlier(Liveness::Ended);
+        let mut prior = PriorExecution {
+            earlier: &mut earlier,
+            owner: &owner,
+            row: Some(&retired),
+        };
+        assert_eq!(
+            super::current_session(log.channel, log.logical, Some(&session), &mut prior),
+            Ok((Some(session), false)),
+            "Legacy never bypasses its close policy"
+        );
+    }
+
     /// Rewrites every logged source as if a host reboot after the record renumbered its volume.
     fn reboot_after_record(log: &Log, dev_shift: u64, ino_shift: u64) {
         let text = std::fs::read_to_string(log.path()).unwrap();
@@ -909,8 +971,15 @@ mod tests {
                 owner: &owner,
                 row,
             };
-            super::current_session(log.channel, log.logical, Some(&session), &mut prior)
-                .map(|(session, _)| session)
+            super::current_session(log.channel, log.logical, Some(&session), &mut prior).map(
+                |(session, retired_native)| {
+                    assert!(
+                        !retired_native,
+                        "a legacy stat keeps its close policy even when retirement permits resume"
+                    );
+                    session
+                },
+            )
         };
         let retired = row(owner(), &nonce, HostedState::Retired);
         let changed = Err("handoff transcript identity changed".to_string());
@@ -1036,8 +1105,15 @@ mod tests {
                 owner: &owner,
                 row,
             };
-            let judged = super::current_session(log.channel, log.logical, None, &mut prior)
-                .map(|(session, _)| session);
+            let judged = super::current_session(log.channel, log.logical, None, &mut prior).map(
+                |(session, retired_native)| {
+                    assert!(
+                        retired_native,
+                        "only the matching retired native proof admits this resume"
+                    );
+                    session
+                },
+            );
             mode(0o600).unwrap();
             std::fs::remove_file(own).unwrap();
             judged

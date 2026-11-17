@@ -1588,6 +1588,18 @@ fn run(
         target::Route::ClaudeBusy => (
             busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt),
             BusyClaude {
+                probe_guard: r
+                    .origin
+                    .is_person()
+                    .then(|| {
+                        owned_busy::watch_guard(
+                            turn.pool,
+                            turn.host,
+                            r.mailbox.clone(),
+                            front.as_ref().map(FrontClaim::front),
+                        )
+                    })
+                    .flatten(),
                 operation: match r.observation {
                     Some(observation) => Ok(observation.prepare_busy(
                         r.program,

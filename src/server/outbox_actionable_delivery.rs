@@ -141,6 +141,16 @@ pub(super) async fn deliver(
     if RETIRED_SEND_SOURCES.contains(&row.source.as_str()) {
         return ("retired_source".into(), "retired_source".into());
     }
+    if let Some(result) = crate::services::discord::outbound::recovery_notice::deliver(
+        registry,
+        (&row.source, row.reason_code.as_deref()),
+        (&row.target, &row.bot),
+        (&row.content, row.session_key.as_deref()),
+    )
+    .await
+    {
+        return result;
+    }
     let routing =
         row.source == crate::services::cluster::intake_router_hook::owner_record::event::SOURCE;
     if routing {

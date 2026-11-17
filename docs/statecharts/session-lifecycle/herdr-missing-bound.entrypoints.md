@@ -1,6 +1,6 @@
 # Missing Bound execution entrypoints
 
-Frozen source: `1161162a18c87a0514f53dd7ae5dac3c830149cb`. Coordinates below are for that source, before any production edits.
+Frozen source: `1161162a18c87a0514f53dd7ae5dac3c830149cb`. Coordinates below are for that source, before any production edits. Row 43 is refreshed for the current Busy effect; implementation rows 62 onward use their implementation coordinates.
 
 The search covered the five hosted-record mutation APIs, their callers, direct SQL writes of `hosted_execution`, every reference to `held_watch`, and `BusyState::Held`. Raw `git grep -n` results are retained in the lane's evidence directory. Test-only SQL writers were inspected and excluded from the production table. `session_record.rs:97` is inside `#[cfg(test)]`; the two production SQL write families are the hosted-record CAS and the explicit legacy return.
 
@@ -50,7 +50,7 @@ The search covered the five hosted-record mutation APIs, their callers, direct S
 | 40 | `src/services/discord/queue_io/input_owner/effect.rs:108` preparation watch | `watching`; post-reservation projection | A concrete preparation cause, not the early idle Missing decision |
 | 41 | `src/services/discord/queue_io/input_owner/effect.rs:152` screen watch | `watching`; screen projection | Legacy tmux screen path, unchanged |
 | 42 | `src/services/discord/queue_io/input_owner/effect.rs:166` cause watch | `watching`; cause projection | Lock/buffer/transcript cause; unchanged legacy path |
-| 43 | `src/services/discord/queue_io/input_owner/effect/claude.rs:88` actual busy transaction | `EarlyBusy` → `LosePane` → `BusyEffect` → `EffectWatch` | Capture can fail after Busy admission. Exact Missing rejudges the same idle front once; an active turn preserves it until `Boundary` |
+| 43 | `src/services/discord/queue_io/input_owner/effect/claude.rs:103` actual busy transaction | `EarlyBusy` → `LosePane` → `BusyEffect` → `EffectWatch` | Capture can fail after Busy admission. Exact Missing rejudges the same idle front once; an active turn preserves it until `Boundary` |
 | 44 | `src/services/discord/queue_io/input_owner/effect/codex.rs:71` Codex cause | Outside model: legacy screen | Codex path, unchanged |
 | 45 | `src/services/discord/queue_io/input_owner/effect/codex.rs:182` Codex composer | Outside model: legacy screen | Codex path, unchanged |
 | 46 | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:187` writer boot hold | `Reconnect` / waiting projection | All origins; readiness probe, not a dead exact-pane probe |
@@ -92,3 +92,11 @@ The frozen 61 rows above remain the exhaustive pre-change census. These seven ro
 | 68 | `src/services/claude/herdr_turn/handoff.rs:83`, `:223` proven retired native resume | `Launch` / `Reject` refinement | Only the verified native binding of this exact retired owner/nonce skips legacy close; all resume, cursor and readiness checks remain |
 
 `provider_dispatch/owner_input.rs:1001` passes pre-executor start failures to the scoped failure handler. The existing `start_failure::run` wrapper and `Failure::finish` cover executor/registration errors as well. Its cancellation and native-stop checks remain in place. Ordinary failures keep their existing retry/retained policy. The added marker contains no prompt or queue payload.
+
+| # | Entry / current file:line | Model value / action | Scope and origin |
+|---|---|---|---|
+| 69 | `src/services/discord/router/message_handler/intake_turn/owned_busy/missing_watch.rs:11` exact view/current row/front/active proof | `EffectWatch` | Ready requests the existing drive; the probe never retires, disposes or writes. Active and foreign rows end watching without disposing the original; unreadable reads do not prove Missing. |
+| 70 | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:1591` BusyClaude probe guard field | `EarlyBusy` / `BusyEffect` | Passes the human front and captured host into the common guard; no added Legacy/internal-origin policy. |
+| 71 | `src/services/discord/router/message_handler/provider_dispatch/start_failure.rs:89` notice debt | `Reject`, `FirstNoticeFails` | Same exact claim owns queue settlement; repeated Failure preserves first reason and never removes a later front. |
+| 72 | `src/services/discord/outbound/serenity_reference/recovery_notice.rs:15` persistent enqueue and delivery | `FirstNoticeFails`, `OutboxPost` | Internal outbound reason metadata only; same reference and nonce through the existing lifecycle sender, no retained input. |
+| 73 | `src/server/outbox_actionable_delivery.rs:144` refusal-notice delegate | `RestRecovers`, `OutboxPost` | Existing outbox retry worker calls the same sender; no new REST path or schema. |

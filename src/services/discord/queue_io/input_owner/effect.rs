@@ -252,7 +252,9 @@ mod claude;
 mod codex;
 #[cfg(test)]
 mod herdr;
-pub(crate) use claude::BusyClaude;
+#[cfg(test)]
+pub(crate) use claude::pause_capture as pause_claude_capture;
+pub(crate) use claude::{BusyClaude, ProbeGuard};
 pub(crate) use codex::{BusyCodex, BusyCodexHerdr, CodexInput, idle_codex};
 
 #[cfg(test)]
