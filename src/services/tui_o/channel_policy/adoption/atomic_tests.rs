@@ -182,6 +182,40 @@ fn old_output_rejection_cannot_invalidate_a_successor_first_slot() {
     drop(next);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_successor_proof_ends_the_old_normalization_without_waiting_out_its_deadline() {
+    let f = Fixture::new(8_165_996);
+    // A header that proves the session keeps the old source waiting rather than refused.
+    std::fs::write(
+        &f.source.path,
+        b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"s\",\"cwd\":\"/fixture\"}}\n",
+    )
+    .unwrap();
+    let proof = f.proof();
+    let output = output(&proof, false);
+    let next = f
+        .candidate
+        .admit_first(
+            f.channel,
+            "successor-input",
+            "hi",
+            &proof.context.tmux_session,
+            || Ok(0),
+        )
+        .unwrap();
+    f.candidate
+        .attach_first_execution(&f.prepared.context, "hi", Some("successor-input"));
+    let successor = f.proof();
+    assert_ne!(successor, proof);
+    let result =
+        crate::services::tui_o::writer::normalization::run(&output, &f.candidate, &proof, &f.store)
+            .await;
+    assert_eq!(result, Err(Reason::Invalidated));
+    assert!(!output.remaining().is_zero(), "a stale proof ends at once");
+    assert_eq!(f.proof(), successor);
+    drop(next);
+}
+
 #[test]
 fn a_successor_committed_init_cannot_adopt_the_old_episode() {
     let f = Fixture::new(8_165_998);

@@ -531,5 +531,26 @@ async fn missing_prompt_and_wakes_exhaust_one_normalization_deadline() {
     assert!(output.adopt(&proof, || Ok(())).is_err());
 }
 
+#[tokio::test(start_paused = true)]
+async fn an_unproven_session_header_rejects_the_source_before_the_deadline() {
+    use super::output_disposition::{Identity, Output, Phase, Reason};
+    let fixture = Fixture::new(8_165_983);
+    let proof = fixture.proof();
+    let output = Output::new(Identity::from_proof(&proof, 1), tokio::time::Instant::now());
+    let result = crate::services::tui_o::writer::normalization::run(
+        &output,
+        &fixture.candidate,
+        &proof,
+        &fixture.store,
+    )
+    .await;
+    assert_eq!(result.unwrap_err(), Reason::SourceRejected);
+    assert_eq!(
+        output.phase(),
+        Phase::RejectPendingNotice(Reason::SourceRejected)
+    );
+    assert!(!output.remaining().is_zero());
+}
+
 #[path = "atomic_tests.rs"]
 mod atomic_tests;
