@@ -127,8 +127,6 @@ fn fresh_turn_before_start(
             before,
             "selection must not repin the old source"
         );
-        // Boot registration maps the provider command id before its hooks arrive.
-        dedupe::register_provider_session("claude", &started.session, fx.logical());
         before_start();
         fx.started.store(true, Ordering::SeqCst);
         let payload =
@@ -138,7 +136,11 @@ fn fresh_turn_before_start(
         launched = Some(started);
     });
     assert_eq!(result, Ok(()));
-    launched.expect("fresh launch reached its verified SessionStart")
+    let started = launched.expect("fresh launch reached its verified SessionStart");
+    // The provider's Stop verifies its file after the attach resolved the missing-file Pending.
+    let payload = json!({"session_id":started.session,"transcript_path":started.path});
+    assert_eq!(started.hook(fx, "Stop", &payload), 202);
+    started
 }
 
 #[test]
@@ -400,7 +402,11 @@ fn held_bound_clear_refuses_old_pane_then_retirement_launches_fresh_pg() {
     let launcher = Arc::new(Launcher::default());
     let (result, _) = fx.turn(&bound, &fx.ports(&launcher), || {});
     let refused = result.unwrap_err();
-    assert!(refused.to_lowercase().contains("root"), "{refused}");
+    assert!(
+        refused.starts_with("herdr turn: bound execution not confirmed:"),
+        "{refused}"
+    );
+    assert_eq!(fx.record(), bound, "a refused old pane stays unchanged");
     assert_eq!(fx.rig.sends().len(), 2, "no input after the old turn");
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
     assert_eq!(
