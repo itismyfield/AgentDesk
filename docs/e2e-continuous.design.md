@@ -547,7 +547,7 @@ SDK vendoring이나 외부 소비자 코드를 숨기지 않는다. giant driver
 | 조각 | 범위·예상 prod 파일/순 코드 | 선행·수용 |
 | --- | --- | --- |
 | S0 | 보존 로그/usage 자료 수집·replay 표·묶음 manifest, 0–2 / +0–180 | 94 묶음/188 판정과 원문 수치 일치 창을 분리해 확보. 원인·usage unknown 유지. 근거 없는 0/PASS와 기간 밖 표본 혼합 RED |
-| L0 | run lease와 #8124 FD 수명 작은 모델, 0–1 / +0–100 | #8124 조각0와 통합 검토. TTL 탈취/동시 writer/부모 crash/FD 누락 뮤턴트 RED |
+| L0 | run lease와 #8124 FD 수명 작은 모델, 0–1 / +0–100 | #8124 조각0와 통합 검토. TTL 탈취/동시 writer/부모 crash/FD 누락 뮤턴트 RED. **상태(11-17): 모델 완료, prod 0.** 25 cfg(정상 4 GREEN·뮤턴트 21 RED), 부모 crash 회수 `NoOrphanOwner`·`crash_no_reclaim`과 보유 lease 종료 liveness `HeldEventuallyEnds` 추가([보고서](statecharts/e2e-run-lease/lease.report.md)). S1·S2는 #8124 I3a/I3b 착지 뒤 |
 | E1a | serenity sequence seam spike·Notify observer/example·NDJSON, 3–6 / +400–800 | #8124 I1/I2/I3a의 경계, I3b의 실제 앱 identity. seam 미입증은 다음 조각 진행해도 strict-history claim off. gap/역순/overflow/actor 혼동·actor 없는 bulk 제거 유실 RED |
 | E1-ingress | test-only FullEvent→router adapter·receipt/boot/parent/nonce 검증·원래 bot 이벤트 중복 방지·provenance, 2–4 / +180–350(미실측) | E1b 앞, #8124 I2/I3a 경계 및 I3b 실제 host·E1a 관측 재사용. 경계/옛 boot/nonce 재사용·이중 실행·controlled_ingress를 human Gateway로 합산하는 뮤턴트 RED |
 | E1b | busy trace·reaction/주입 adapter·R-marker/R-inject·human 수용, 4–8 / +600–1100 | I3b + E1a + E1-ingress. 수리 전 #8113/#8114 RED, 수리 후 GREEN 및 원인 뮤턴트. #8114 native-busy 선행/분기 witness 필수·managed 대조군 분리. human Gateway 1회는 코디네이터 agent-desktop; 정기 수동 0 |
