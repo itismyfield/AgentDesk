@@ -1,0 +1,2 @@
+key: 690-input-single-path-herdr-idle-meta
+| `input-single-path` Claude idle compaction metadata (#8214) | `984d802d9f` + implementation | Before: neutral transcript tail keeps admits refused and probe Unknown/Keep forever; any-meta-Idle mutant breaks running-turn safety | Shared closed-reply classification restores Idle readiness and owner Wake; 11 cfg, GREEN9 / expected RED2. [Report](input-single-path/herdr-idle-meta.report.md). |

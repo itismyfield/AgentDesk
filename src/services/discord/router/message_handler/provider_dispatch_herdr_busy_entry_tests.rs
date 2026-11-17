@@ -1524,3 +1524,6 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
     drop(admission);
     drop(registry);
 }
+
+#[path = "provider_dispatch_idle_compaction_tests.rs"]
+mod idle_compaction_tests;

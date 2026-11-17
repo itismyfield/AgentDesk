@@ -277,6 +277,17 @@ input-single-path/HerdrColdIdleStaleReservationFixed.cfg	HerdrColdIdle	-	-
 input-single-path/HerdrColdIdleUnknownFixed.cfg	HerdrColdIdle	-	-
 input-single-path/HerdrColdIdleUnknownKeepFixed.cfg	HerdrColdIdle	-	-
 input-single-path/HerdrColdIdleWrongNonceFixed.cfg	HerdrColdIdle	-	-
+input-single-path/HerdrIdleMetaAnyMetaIdle.cfg	HerdrIdleMeta	IdleNeedsClosedReply,NoIdlePasteOnRunningTurn,NoRunningIdleDelegation	-
+input-single-path/HerdrIdleMetaBefore.cfg	HerdrIdleMeta	-	IdleInputEventuallyResolves
+input-single-path/HerdrIdleMetaCompacting.cfg	HerdrIdleMeta	-	-
+input-single-path/HerdrIdleMetaFixed.cfg	HerdrIdleMeta	-	-
+input-single-path/HerdrIdleMetaLegacyResult.cfg	HerdrIdleMeta	-	-
+input-single-path/HerdrIdleMetaNewPrompt.cfg	HerdrIdleMeta	-	-
+input-single-path/HerdrIdleMetaStreaming.cfg	HerdrIdleMeta	-	-
+input-single-path/HerdrIdleMetaTool.cfg	HerdrIdleMeta	-	-
+input-single-path/HerdrIdleMetaToolResult.cfg	HerdrIdleMeta	-	-
+input-single-path/HerdrIdleMetaTorn.cfg	HerdrIdleMeta	-	-
+input-single-path/HerdrIdleMetaUnknown.cfg	HerdrIdleMeta	-	-
 input-single-path/HerdrInputHoldBefore.cfg	HerdrInputHold	-	HoldEventuallyReleased,HoldReleasedOrNoticed,LaterInputStarts,ReadableOursCleaned
 input-single-path/HerdrInputHoldBeforeEnds.cfg	HerdrInputHold	-	LaterInputStarts
 input-single-path/HerdrInputHoldEnqueueFail.cfg	HerdrInputHold	-	HoldEventuallyReleased,LaterInputStarts
