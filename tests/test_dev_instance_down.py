@@ -610,7 +610,11 @@ with socket.socket(fileno=int(sys.argv[1])) as lifeline:
     root=Path(sys.argv[2]); keeper.serve(lifeline,read_json(root/'manifest.json'),read_json(Path(sys.argv[3])),'fixture')
 '''
         spec = self.fixture.home/'resources.json'
-        spec.write_text(json.dumps(dict(postgres_bin=str(Path(sys.executable).resolve()),initdb_bin=str(Path(sys.executable).resolve()),psql_bin=str(Path(sys.executable).resolve()),herdr_bin=str(Path(sys.executable).resolve()),startup_timeout=5,stop_grace=2,max_aux=2,pg_pool=4,pg_reserve=1)))
+        # The fixture owner never runs these, but the spec gate wants an owner-only executable; host interpreters can be group-writable.
+        binary = self.fixture.home/'fixture-bin'
+        binary.write_text('#!/bin/sh\nexit 0\n')
+        binary.chmod(0o700)
+        spec.write_text(json.dumps(dict(postgres_bin=str(binary),initdb_bin=str(binary),psql_bin=str(binary),herdr_bin=str(binary),startup_timeout=5,stop_grace=2,max_aux=2,pg_pool=4,pg_reserve=1)))
         import socket
         from scripts.dev_instance import keeper
         parent, child = socket.socketpair()
