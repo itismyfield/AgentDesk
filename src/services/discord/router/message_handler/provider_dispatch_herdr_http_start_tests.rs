@@ -1366,15 +1366,15 @@ impl crate::services::tui_o::writer::DiscordPort for GatedPosts {
 }
 
 struct OutputHost {
-    base: Arc<TestHost>,
+    base: Arc<SourceHost>,
     port: Arc<GatedPosts>,
 }
 
 impl host::HostIo for OutputHost {
     type Port = GatedPosts;
-    type Lease = <TestHost as host::HostIo>::Lease;
-    type Alarms = <TestHost as host::HostIo>::Alarms;
-    type Bindings = <TestHost as host::HostIo>::Bindings;
+    type Lease = <SourceHost as host::HostIo>::Lease;
+    type Alarms = <SourceHost as host::HostIo>::Alarms;
+    type Bindings = <SourceHost as host::HostIo>::Bindings;
     fn port(&self) -> impl std::future::Future<Output = Arc<GatedPosts>> + Send {
         std::future::ready(self.port.clone())
     }
@@ -1386,6 +1386,13 @@ impl host::HostIo for OutputHost {
     }
     fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Self::Bindings> {
         self.base.bindings(channel, provider)
+    }
+    fn native_inputs(
+        &self,
+        channel: u64,
+        provider: ShadowProvider,
+    ) -> Option<crate::services::tui_o::writer::actor::native_input::NativePort> {
+        self.base.native_inputs(channel, provider)
     }
     fn activation_facts(
         &self,
@@ -1422,11 +1429,11 @@ impl host::HostIo for OutputHost {
 }
 
 pub(super) fn start_writer(
-    parts: HostParts<TestHost>,
+    parts: HostParts<SourceHost>,
     output_gate: Arc<OutputGate>,
 ) -> Vec<ManagedWriterHandle> {
     let port = Arc::new(GatedPosts {
-        base: parts.io.posts.clone(),
+        base: parts.io.io.posts.clone(),
         gate: output_gate,
     });
     let parts = HostParts {
