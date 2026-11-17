@@ -173,7 +173,7 @@ fn kill_agentdesk_tmux_sessions_local() -> usize {
     let mut count = 0;
     for name in &names {
         // A name whose host marker is not tmux belongs to another host; it is left running.
-        let refusal = crate::services::discord::admin_host_guard::marker_refusal;
+        let refusal = crate::services::session_host::operation_policy::marker_refusal;
         if let Some(reason) = name
             .starts_with("AgentDesk-")
             .then(|| refusal(name))

@@ -236,6 +236,8 @@ src/
 │   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
 │   │   ├── hosted_execution_tests.rs
+│   │   ├── key_promotion.rs
+│   │   ├── key_promotion_pg_tests.rs
 │   │   ├── listing.rs
 │   │   ├── provider_resume_fence.rs
 │   │   ├── rebind_override.rs
@@ -1315,6 +1317,7 @@ src/
 │   │   ├── readiness.rs
 │   │   ├── registry_adapter_sink.rs
 │   │   ├── relay_producer_registry.rs
+│   │   ├── session_directory.rs
 │   │   ├── session_discovery.rs
 │   │   ├── session_matcher.rs
 │   │   ├── session_registry.rs
@@ -2524,6 +2527,7 @@ src/
 │   │   │   │   ├── provider_isolation_seed_save_tests.rs
 │   │   │   │   ├── root_replaced_recovery_tests.rs
 │   │   │   │   ├── s1_entry_tests.rs
+│   │   │   │   ├── session_key_promotion_pipe_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
 │   │   │   │   ├── turn_context.rs
@@ -3569,6 +3573,8 @@ src/
 │   │   ├── session_identity.rs
 │   │   ├── session_idle_cleanup.rs
 │   │   ├── session_idle_cleanup_tests.rs
+│   │   ├── session_locator.rs
+│   │   ├── session_locator_pg_tests.rs
 │   │   ├── session_notice.rs
 │   │   ├── session_notice_delivery.rs
 │   │   ├── session_relay_sink.rs
@@ -4121,6 +4127,7 @@ src/
 │   │   ├── herdr_terminate_real_tests.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
+│   │   ├── operation_policy.rs
 │   │   ├── process_host.rs
 │   │   ├── resolve.rs
 │   │   ├── session_record.rs
@@ -4629,7 +4636,8 @@ src/
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_context/
 │   │   │   ├── inventory.rs
-│   │   │   └── inventory_tests.rs
+│   │   │   ├── inventory_tests.rs
+│   │   │   └── registration.rs
 │   │   ├── binding_events/
 │   │   │   ├── codex/
 │   │   │   │   ├── commit/

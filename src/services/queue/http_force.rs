@@ -11,13 +11,14 @@ use super::cancel_effects::herdr::{HERDR_TERMINATE, HerdrForceEffects, herdr_for
 use crate::db::dispatched_sessions::hosted_execution::http_force::herdr_execution;
 use crate::domain::session_identity::tmux_name_from_session_key;
 use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::herdr_terminate::OperatorTerminate;
 use crate::services::discord::herdr_terminate::http_force::{Expected, terminate_for_http};
-use crate::services::discord::herdr_terminate::{OperatorTerminate, terminate_enabled};
 use crate::services::provider::ProviderKind;
 use crate::services::service_error::{ServiceError, ServiceResult};
 use crate::services::session_forwarding::{
     CancelTurnSessionInfo, load_cancel_turn_hosted, load_cancel_turn_session,
 };
+use crate::services::session_host::operation_policy::terminate_enabled;
 
 const REASON: &str = "queue-api cancel_turn (force)";
 

@@ -296,11 +296,15 @@ async fn restore_selected_tmux_watchers(
             *channel_id,
             Some(channel_name.as_str()),
         );
-        let session_keys = super::super::super::adk_session::build_session_key_candidates(
+        let Ok(session_keys) = super::super::super::session_locator::candidates(
+            shared.pg_pool.as_ref(),
             &shared.token_hash,
             &provider,
             session_name,
-        );
+            Some(channel_id.get()),
+        ) else {
+            continue;
+        };
         let restored_cwd =
             load_restored_session_cwd(shared.pg_pool.as_ref(), &session_keys, channel_id.get());
 

@@ -42,6 +42,9 @@
 //! [`request_discovery_tick`] for that purpose so future PRs can nudge the
 //! loop without changing this module.
 
+#[path = "session_directory.rs"]
+mod session_directory;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -57,9 +60,12 @@ use super::session_matcher::{
     match_session_detailed,
 };
 use super::session_registry::{RegistryChange, SessionRegistry, global_session_registry};
+#[cfg(test)]
 use crate::domain::session_identity::tmux_name_from_session_key;
 use crate::services::platform::tmux::{EnumeratedSession, list_sessions_with_pane_command};
-use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
+use crate::services::provider::ProviderKind;
+#[cfg(test)]
+use crate::services::provider::parse_provider_and_channel_from_tmux_name;
 
 /// Knobs for the discovery loop. Production callers use [`Self::default`].
 /// Kept as a struct (rather than a bare `Duration`) so future tuning (jitter,
@@ -233,19 +239,20 @@ async fn build_channel_directory_from_pg_with_config(
             // `channel_id` preserves legacy bindings without a yaml entry.
             let tmux_segment = name_map
                 .get(&(agent_id.clone(), provider.clone(), channel_id.clone()))
-                .cloned()
-                .or_else(|| {
-                    session_tmux_segments
-                        .get(&(provider.clone(), channel_id.clone()))
-                        .cloned()
-                });
+                .cloned();
             let binding = ChannelBinding {
                 channel_id,
                 agent_id: agent_id.clone(),
                 provider,
                 tmux_segment,
             };
-            if let Err(error) = directory.insert(binding) {
+            let inserted = match session_tmux_segments
+                .get(&(binding.provider.clone(), binding.channel_id.clone()))
+            {
+                Some(actual) => directory.insert_name(actual.clone(), binding),
+                None => directory.insert(binding),
+            };
+            if let Err(error) = inserted {
                 tracing::warn!(
                     ?error,
                     agent_id = %agent_id,
@@ -300,7 +307,7 @@ async fn load_session_tmux_segments_pg(
             continue;
         }
         let Some((provider, tmux_segment)) =
-            live_tmux_segment_from_session_key(session_key, live_session_names)
+            session_directory::live_name(session_key, provider_hint.as_deref(), live_session_names)
         else {
             continue;
         };
@@ -384,6 +391,7 @@ fn normalize_nonempty(value: Option<&str>) -> Option<String> {
         .map(ToString::to_string)
 }
 
+#[cfg(test)]
 fn tmux_name_and_segment_from_session_key(
     session_key: &str,
 ) -> Option<(String, ProviderKind, String)> {
@@ -392,6 +400,7 @@ fn tmux_name_and_segment_from_session_key(
     Some((tmux_name, provider, tmux_segment))
 }
 
+#[cfg(test)]
 fn live_tmux_segment_from_session_key(
     session_key: &str,
     live_session_names: &HashSet<String>,

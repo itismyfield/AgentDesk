@@ -32,7 +32,8 @@ pub(super) struct Prepared<'a> {
 /// The terminate switch decides, before any IO, whether the session read also takes the record.
 fn reads_hosted(entry: Entry) -> bool {
     #[cfg(unix)]
-    return entry == Entry::Http && crate::services::discord::herdr_terminate::terminate_enabled();
+    return entry == Entry::Http
+        && crate::services::session_host::operation_policy::terminate_enabled();
     #[cfg(not(unix))]
     let _ = entry;
     #[cfg(not(unix))]
