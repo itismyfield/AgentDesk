@@ -113,3 +113,22 @@ async fn a_draft_notice_posts_once_per_original_pg() {
     );
     db.drop().await;
 }
+
+/// One row per input hold, returned again after a crash, whose one text asks for a resend.
+#[tokio::test(flavor = "current_thread")]
+async fn input_hold_notice_is_one_row_per_hold_with_resend_guidance_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let post = |hold| super::input_hold(&pool, "claude", CHANNEL, ("execution", hold));
+    let first = post("hold-1").await.unwrap();
+    assert_eq!(post("hold-1").await.unwrap(), first);
+    assert_ne!(post("hold-2").await.unwrap(), first);
+    let texts = posts(&pool, CHANNEL).await;
+    assert_eq!(texts.len(), 2);
+    for text in texts {
+        assert!(text.contains("전달되지 않았을 수") && text.contains("다시 보내 주세요"));
+    }
+    drop(pool);
+    db.drop().await;
+}

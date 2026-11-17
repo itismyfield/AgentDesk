@@ -88,6 +88,19 @@ pub(in crate::services::discord) async fn relaunch_channel_tmux_keeping_session(
     if busy(shared, provider, channel_id).await {
         return Relaunch::Deferred;
     }
+    end_channel_tmux_keeping_session(shared, provider, channel_id, session_name, reset_source).await
+}
+
+/// The same end with no busy deferral, for a restart that itself settles the turn it cuts. The
+/// host guard and the account markers are kept exactly as above.
+#[cfg(unix)]
+pub(in crate::services::discord) async fn end_channel_tmux_keeping_session(
+    shared: &std::sync::Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    session_name: &str,
+    reset_source: &str,
+) -> Relaunch {
     let refusal = crate::services::discord::admin_host_guard::managed_reset_refusal;
     if let Some(reason) = refusal(shared, provider, channel_id, false, true, None).await {
         return Relaunch::Refused(reason);
@@ -111,6 +124,17 @@ pub(in crate::services::discord) async fn relaunch_channel_tmux_keeping_session(
 
 #[cfg(not(unix))]
 pub(in crate::services::discord) async fn relaunch_channel_tmux_keeping_session(
+    _: &std::sync::Arc<SharedData>,
+    _: &ProviderKind,
+    _: serenity::ChannelId,
+    _: &str,
+    _: &str,
+) -> Relaunch {
+    Relaunch::Refused("tmux is unix only".to_string())
+}
+
+#[cfg(not(unix))]
+pub(in crate::services::discord) async fn end_channel_tmux_keeping_session(
     _: &std::sync::Arc<SharedData>,
     _: &ProviderKind,
     _: serenity::ChannelId,

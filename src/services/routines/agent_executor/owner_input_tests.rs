@@ -287,7 +287,7 @@ async fn custody_projection_cut_and_stale_completion_stay_on_the_same_ticket_pg(
         sqlx::query("UPDATE session_transcripts SET assistant_message='actual observed answer',created_at=NOW() WHERE turn_id=$1").bind(&turn).execute(&pool).await.unwrap();
         let completed=executor.poll_agent_runs(&store,10,false).await.unwrap();assert_eq!(completed.len(),1);assert_eq!(completed[0].status,"succeeded");
         assert_eq!(LEGACY_TEARDOWNS.with(|count|count.get()),0,"owner input cannot enter legacy session cleanup");
-        executor.teardown_fresh_agent_session(&store,&run.routine_id,Some(&json!({"execution_mode":"tmux"})),"legacy cleanup control").await;
+        executor.teardown_fresh_agent_session(&store,&run.routine_id,&run.run_id,Some(&json!({"execution_mode":"tmux"})),"legacy cleanup control").await;
         assert_eq!(LEGACY_TEARDOWNS.with(|count|count.get()),1,"the legacy cleanup control reaches the spy");
     })).await;
     let snapshot: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();

@@ -9,13 +9,17 @@ pub(super) struct Submitted {
     started_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Posts the hold's one notice row; keyed by execution and hold, so a repeat returns the row.
+pub(crate) type Notice = dyn Fn(&str) -> Result<i64, String> + Send + Sync;
+
 pub(super) fn submit(
     turn: &HerdrTurn<'_>,
     attached: Attached,
     sender: &Sender<StreamMessage>,
 ) -> Result<Option<Submitted>, String> {
     let (logical, cancel) = (turn.owner.logical_key.as_str(), turn.cancel.as_deref());
-    write(logical, cancel, attached, turn.prompt, sender).map_err(SubmissionError::into_legacy)
+    write(logical, cancel, attached, turn.prompt, sender, None)
+        .map_err(SubmissionError::into_legacy)
 }
 
 /// The prompt through the owner waiting on this thread: it reserves the frame on the execution
@@ -23,7 +27,10 @@ pub(super) fn submit(
 pub(super) fn submit_owned(
     turn: &HerdrTurn<'_>,
     hook: crate::services::claude_tui::owner_input::LaunchHook,
-    lineage: crate::services::claude_tui::owner_input::Lineage,
+    (lineage, post): (
+        crate::services::claude_tui::owner_input::Lineage,
+        Option<Arc<HoldNotice>>,
+    ),
     attached: Attached,
     sender: &Sender<StreamMessage>,
 ) -> Result<Submitted, String> {
@@ -46,9 +53,19 @@ pub(super) fn submit_owned(
     };
     let slot = Arc::new(std::sync::Mutex::new(None));
     let (ticket, cancel, sender) = (slot.clone(), turn.cancel.clone(), sender.clone());
+    let nonce = attached.nonce.clone();
+    let notice = post.map(|post| Arc::new(move |hold: &str| post(&nonce, hold)) as Arc<Notice>);
     let submit = Box::new(move |frame: String| {
         guarded_outcome::capture_preparation(|| {
-            let written = write(&logical, cancel.as_deref(), attached, &frame, &sender)?;
+            let notice = notice.as_deref();
+            let written = write(
+                &logical,
+                cancel.as_deref(),
+                attached,
+                &frame,
+                &sender,
+                notice,
+            )?;
             let submitted = written.ok_or_else(|| {
                 before_payload(&logical, "input cancelled before first key", false)
             })?;
@@ -73,6 +90,7 @@ fn write(
     attached: Attached,
     prompt: &str,
     sender: &Sender<StreamMessage>,
+    notice: Option<&Notice>,
 ) -> Result<Option<Submitted>, SubmissionError> {
     let path = attached.transcript.as_path();
     let transcript = path.display().to_string();
@@ -87,7 +105,13 @@ fn write(
         TuiInputAction::PasteBuffer(prompt.to_owned()),
         TuiInputAction::Enter,
     ];
-    let held = hold(&attached.nonce)?;
+    let record = held_record(logical, &attached, prompt, before, started_at);
+    let ports = hold_resolve::LivePorts {
+        target: &attached.target,
+        notice,
+    };
+    let (kept, failed) = (std::cell::Cell::new(false), std::cell::RefCell::new(None));
+    let seen = std::cell::RefCell::new(None);
     #[cfg(test)]
     before_start::test_input_boundary(cancel);
     let start = || {
@@ -97,45 +121,75 @@ fn write(
     };
     let HerdrInputRun::Ran(run) = observed_input(cancel, start, || {
         crate::services::claude_tui::composer_lock::with_composer_mutation_lock(logical, || {
-            if attached.awaiting_clear {
-                match composer::wait_for(cancel, Duration::from_secs(10), || {
-                    if crate::services::claude_tui::readiness::adopt_awaiting_clear(
-                        logical,
-                        &attached.nonce,
-                        path,
-                    ) {
-                        std::ops::ControlFlow::Break(())
-                    } else {
-                        std::ops::ControlFlow::Continue(())
-                    }
-                }) {
-                    Ok(()) => (),
-                    Err(composer::WaitStop::Cancelled) => {
-                        return InputRun::Cancelled { confirmed: 0 };
-                    }
-                    Err(composer::WaitStop::TimedOut) => {
-                        return InputRun::Refused(
-                            crate::services::claude_tui::host_input::InputRefusal::Unknown,
-                        );
+            // The earlier hold is judged, this hold recorded, keys sent and the outcome recorded
+            // under one lock, so no pass ever reads a hold whose write still runs.
+            let pending = match crate::services::claude_tui::owner_input::active() {
+                true => !matches!(
+                    hold_resolve::judge(logical, &attached.nonce, &ports, &mut seen.borrow_mut()),
+                    Ok(hold_resolve::Verdict::Clear(_))
+                ),
+                false => input_held(&attached.nonce).unwrap_or(true),
+            };
+            if pending {
+                kept.set(true);
+                return InputRun::Refused(
+                    crate::services::claude_tui::host_input::InputRefusal::Unknown,
+                );
+            }
+            if let Err(error) = hold_record::write(&record) {
+                *failed.borrow_mut() = Some(error);
+                return InputRun::Refused(
+                    crate::services::claude_tui::host_input::InputRefusal::Unknown,
+                );
+            }
+            let run = (|| {
+                if attached.awaiting_clear {
+                    match composer::wait_for(cancel, Duration::from_secs(10), || {
+                        if crate::services::claude_tui::readiness::adopt_awaiting_clear(
+                            logical,
+                            &attached.nonce,
+                            path,
+                        ) {
+                            std::ops::ControlFlow::Break(())
+                        } else {
+                            std::ops::ControlFlow::Continue(())
+                        }
+                    }) {
+                        Ok(()) => (),
+                        Err(composer::WaitStop::Cancelled) => {
+                            return InputRun::Cancelled { confirmed: 0 };
+                        }
+                        Err(composer::WaitStop::TimedOut) => {
+                            return InputRun::Refused(
+                                crate::services::claude_tui::host_input::InputRefusal::Unknown,
+                            );
+                        }
                     }
                 }
-            }
-            composer::run_ready(logical, path, &attached.target, &plan, cancel)
+                let _ = composer::take_touched();
+                composer::run_ready(logical, path, &attached.target, &plan, cancel)
+            })();
+            record_outcome(record.clone(), &run);
+            run
         })
     })?
     else {
-        before_start::release_claude_hold(logical, &held);
         return Ok(None);
     };
+    if kept.get() {
+        let target = attached.target.clone();
+        let (nonce, seen) = (attached.nonce.clone(), seen.into_inner());
+        let probe = hold_resolve::watch(nonce, seen, move || target.capture_ansi(-80));
+        crate::services::claude_tui::owner_input::record_preparation_watch(probe);
+        return Err(before_payload(logical, "herdr_input_hold_pending", false));
+    }
+    if let Some(error) = failed.into_inner() {
+        return Err(error.into());
+    }
     crate::services::tui_o::exact_submission::observe_untouched(matches!(
         run,
         InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }
     ));
-    if composer_settled(&run)
-        && let Err(error) = std::fs::remove_file(&held)
-    {
-        tracing::warn!(logical = %logical, %error, "herdr turn: input hold kept");
-    }
     match run {
         InputRun::Applied => (),
         stopped @ (InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }) => {
@@ -191,6 +245,62 @@ fn write(
         before,
         started_at,
     }))
+}
+
+/// The v2 hold this write records before its first key: `in_flight`, no proof, no text.
+fn held_record(
+    logical: &str,
+    attached: &Attached,
+    prompt: &str,
+    before: u64,
+    started_at: chrono::DateTime<chrono::Utc>,
+) -> hold_record::HoldRecord {
+    use std::os::unix::fs::MetadataExt;
+    let file = std::fs::metadata(&attached.transcript).ok();
+    hold_record::HoldRecord {
+        schema: 2,
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+        provider: "claude".into(),
+        logical_key: logical.into(),
+        execution_nonce: attached.nonce.clone(),
+        hold_id: uuid::Uuid::new_v4().simple().to_string(),
+        frame_sha256: hold_record::sha256_hex(prompt.as_bytes()),
+        screen_exact: hold_record::screen_exact(prompt),
+        transcript: attached.transcript.display().to_string(),
+        file: file.map(|meta| (meta.dev(), meta.ino())),
+        offset_before: before,
+        started_at: started_at.to_rfc3339(),
+        send_outcome: hold_record::SendOutcome::InFlight,
+        outcome_at: None,
+        unsent_proof: hold_record::UnsentProof::None,
+        cleanup_phase: hold_record::CleanupPhase::None,
+        cleanup_at: None,
+        reservation: None,
+        unclear_passes: 0,
+        notice_intent_at: None,
+        notice_enqueued_at: None,
+    }
+}
+
+/// Ends the hold of an untouched or submitted composer; otherwise rewrites `in_flight` once with
+/// the final outcome and entrusts the touched reservation to the hold.
+fn record_outcome(mut record: hold_record::HoldRecord, run: &InputRun) {
+    let touched = composer::take_touched();
+    let Some((outcome, proof)) = hold_record::outcome(run) else {
+        if let super::HoldRelease::Kept(error) = super::release_hold(&record.execution_nonce) {
+            tracing::warn!(logical = %record.logical_key, %error, "herdr turn: input hold kept");
+        }
+        return;
+    };
+    (record.send_outcome, record.unsent_proof) = (outcome, proof);
+    record.outcome_at = Some(chrono::Utc::now().to_rfc3339());
+    record.reservation = touched.as_ref().map(|r| r.revision());
+    if let Some(reservation) = touched {
+        hold_resolve::entrust(&record.hold_id, reservation);
+    }
+    if let Err(error) = hold_record::write(&record) {
+        tracing::warn!(logical = %record.logical_key, %error, "herdr turn: outcome not recorded");
+    }
 }
 
 fn before_payload(logical: &str, detail: &str, unproven: bool) -> SubmissionError {
@@ -314,6 +424,8 @@ pub(super) fn observe(
 #[cfg(test)]
 mod clear_held_tests;
 #[cfg(test)]
+mod hold_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod unproven_tests;
@@ -400,7 +512,7 @@ mod regression_tests {
         drop(root_guard);
     }
 
-    fn regression_attached(
+    pub(super) fn regression_attached(
         rig: &crate::services::session_host::herdr_socket_rig_tests::HerdrRig,
         logical: &str,
         transcript: &Path,
@@ -505,7 +617,7 @@ mod regression_tests {
             Box::new(move |frame: String| {
                 guarded_outcome::capture_preparation(|| {
                     let (sender, receiver) = std::sync::mpsc::channel();
-                    let result = write(logical, None, attached, &frame, &sender).map(drop);
+                    let result = write(logical, None, attached, &frame, &sender, None).map(drop);
                     drop(receiver);
                     result
                 })
@@ -560,7 +672,7 @@ mod regression_tests {
             Box::new(move |frame: String| {
                 guarded_outcome::capture_preparation(|| {
                     let (sender, receiver) = std::sync::mpsc::channel();
-                    let result = write(logical, None, attached, &frame, &sender).map(drop);
+                    let result = write(logical, None, attached, &frame, &sender, None).map(drop);
                     drop(receiver);
                     result
                 })

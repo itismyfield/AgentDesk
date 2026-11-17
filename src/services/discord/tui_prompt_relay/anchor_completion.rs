@@ -82,19 +82,15 @@ pub(super) fn decide_deferred_anchor_completion_drain(
     DeferredAnchorCompletionDrain::Complete
 }
 
-pub(in crate::services::discord) async fn complete_tui_direct_prompt_anchor_lifecycle_if_present(
+async fn finish_anchor_completion(
     shared: &std::sync::Arc<super::super::SharedData>,
     provider: &str,
     tmux_session_name: &str,
-    channel_id: ChannelId,
+    anchor: crate::services::tui_prompt_dedupe::TuiPromptAnchor,
     generation: u64,
     reason: &'static str,
+    messages: (&'static str, &'static str),
 ) -> Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor> {
-    let anchor = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
-        provider,
-        tmux_session_name,
-        channel_id.get(),
-    )?;
     let anchor_channel_id = ChannelId::new(anchor.channel_id);
     let anchor_message_id = MessageId::new(anchor.message_id);
     if !super::super::turn_view_reconciler::note_tui_anchor_completed(
@@ -112,7 +108,7 @@ pub(in crate::services::discord) async fn complete_tui_direct_prompt_anchor_life
             tmux_session_name = %tmux_session_name,
             anchor_message_id = anchor.message_id,
             reason,
-            "failed to complete TUI-direct prompt anchor reaction lifecycle; keeping anchor for retry"
+            "{}", messages.0
         );
         return None;
     }
@@ -127,9 +123,28 @@ pub(in crate::services::discord) async fn complete_tui_direct_prompt_anchor_life
         tmux_session_name = %tmux_session_name,
         anchor_message_id = anchor.message_id,
         reason,
-        "completed TUI-direct prompt anchor reaction lifecycle"
+        "{}", messages.1
     );
     Some(anchor)
+}
+
+pub(in crate::services::discord) async fn complete_tui_direct_prompt_anchor_lifecycle_if_present(
+    shared: &std::sync::Arc<super::super::SharedData>,
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    generation: u64,
+    reason: &'static str,
+) -> Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor> {
+    let anchor = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+        provider,
+        tmux_session_name,
+        channel_id.get(),
+    )?;
+    finish_anchor_completion(
+        shared, provider, tmux_session_name, anchor, generation, reason,
+        ("failed to complete TUI-direct prompt anchor reaction lifecycle; keeping anchor for retry", "completed TUI-direct prompt anchor reaction lifecycle"),
+    ).await
 }
 
 /// #3099 codex re-review (P2): complete the `⏳ → ✅` lifecycle for a turn that
@@ -177,43 +192,10 @@ pub(in crate::services::discord) async fn complete_tui_direct_anchor_lifecycle_f
         channel_id: channel_id.get(),
         message_id,
     };
-    let anchor_channel_id = ChannelId::new(anchor.channel_id);
-    let anchor_message_id = MessageId::new(anchor.message_id);
-    if !super::super::turn_view_reconciler::note_tui_anchor_completed(
-        shared,
-        anchor_channel_id,
-        anchor_message_id,
-        generation,
-        reason,
-    )
-    .await
-    {
-        tracing::warn!(
-            provider = %provider,
-            channel_id = anchor.channel_id,
-            tmux_session_name = %tmux_session_name,
-            anchor_message_id = anchor.message_id,
-            reason,
-            "failed to complete pinned TUI-direct injected-message reaction lifecycle; keeping for retry"
-        );
-        return None;
-    }
-    // Only clear the shared slot if it still points at THIS turn's message — a
-    // later injection may already own it and must keep its own `⏳`.
-    crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
-        provider,
-        tmux_session_name,
-        anchor,
-    );
-    tracing::info!(
-        provider = %provider,
-        channel_id = anchor.channel_id,
-        tmux_session_name = %tmux_session_name,
-        anchor_message_id = anchor.message_id,
-        reason,
-        "completed pinned TUI-direct injected-message reaction lifecycle"
-    );
-    Some(anchor)
+    finish_anchor_completion(
+        shared, provider, tmux_session_name, anchor, generation, reason,
+        ("failed to complete pinned TUI-direct injected-message reaction lifecycle; keeping for retry", "completed pinned TUI-direct injected-message reaction lifecycle"),
+    ).await
 }
 
 #[cfg(test)]

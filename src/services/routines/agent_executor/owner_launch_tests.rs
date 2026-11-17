@@ -37,6 +37,13 @@ async fn admitted_context(strategy: &str) -> Value {
         .await
         .unwrap();
     let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
+    // No bot can prepare a routine thread here: the run is one claimed before the fallback pin,
+    // which still starts on the primary channel its owner holds.
+    sqlx::query("UPDATE routine_runs SET run_spec = run_spec - 'primary_fallback' WHERE id = $1")
+        .bind(&claimed.run_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), Some(registry), 60);
     let start = executor.start_agent_run(
         &store,

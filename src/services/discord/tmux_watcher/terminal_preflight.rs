@@ -183,42 +183,25 @@ pub(super) async fn run_terminal_preflight_suppression(
             data_start_offset,
             current_offset
         );
-        if cleanup_committed {
-            let confirmed_end = suppressed_terminal_confirmed_end(current_offset, &all_data);
-            let generation_mtime_ns = read_generation_file_mtime_ns(&tmux_session_name);
-            last_relayed_offset = Some(current_offset);
-            last_observed_generation_mtime_ns = Some(generation_mtime_ns);
-            advance_watcher_confirmed_end(
-                &shared,
-                &watcher_provider,
-                channel_id,
-                &tmux_session_name,
-                confirmed_end,
-                "src/services/discord/tmux.rs:silent_turn_suppressed_terminal_output",
-            );
-        }
-        finish_monitor_auto_turn_if_claimed(
-            &shared,
-            &watcher_provider,
-            channel_id,
-            &mut monitor_auto_turn_claimed,
-            &mut monitor_auto_turn_finished,
-            &mut monitor_auto_turn_synthetic_msg_id,
-            &mut monitor_auto_turn_ledger_generation,
+        return finish_suppressed_terminal(
+            context,
+            state,
+            TerminalPreflightReady {
+                placeholder_from_restored_inflight,
+                last_edit_text,
+                last_relayed_offset,
+                last_observed_generation_mtime_ns,
+                monitor_auto_turn_claimed,
+                monitor_auto_turn_finished,
+                monitor_auto_turn_synthetic_msg_id,
+                monitor_auto_turn_ledger_generation,
+            },
+            cleanup_committed,
+            current_offset,
+            all_data,
+            "src/services/discord/tmux.rs:silent_turn_suppressed_terminal_output",
         )
         .await;
-        write_terminal_preflight_suppression_state(
-            state,
-            placeholder_from_restored_inflight,
-            last_edit_text,
-            last_relayed_offset,
-            last_observed_generation_mtime_ns,
-            monitor_auto_turn_claimed,
-            monitor_auto_turn_finished,
-            monitor_auto_turn_synthetic_msg_id,
-            monitor_auto_turn_ledger_generation,
-        );
-        return TerminalPreflightOutcome::ContinueWatcherLoop;
     }
     if should_suppress_terminal_output_after_recent_stop(
         has_assistant_response,
@@ -261,45 +244,25 @@ pub(super) async fn run_terminal_preflight_suppression(
             data_start_offset,
             current_offset
         );
-        if cleanup_committed {
-            let confirmed_end = suppressed_terminal_confirmed_end(current_offset, &all_data);
-            // #1270 codex P2: snapshot the current `.generation` mtime so
-            // the local regression check has a real baseline (see the
-            // matching snapshot in the rotation path).
-            let generation_mtime_ns = read_generation_file_mtime_ns(&tmux_session_name);
-            last_relayed_offset = Some(current_offset);
-            last_observed_generation_mtime_ns = Some(generation_mtime_ns);
-            advance_watcher_confirmed_end(
-                &shared,
-                &watcher_provider,
-                channel_id,
-                &tmux_session_name,
-                confirmed_end,
-                "src/services/discord/tmux.rs:cancel_tombstone_suppressed_terminal_output",
-            );
-        }
-        finish_monitor_auto_turn_if_claimed(
-            &shared,
-            &watcher_provider,
-            channel_id,
-            &mut monitor_auto_turn_claimed,
-            &mut monitor_auto_turn_finished,
-            &mut monitor_auto_turn_synthetic_msg_id,
-            &mut monitor_auto_turn_ledger_generation,
+        return finish_suppressed_terminal(
+            context,
+            state,
+            TerminalPreflightReady {
+                placeholder_from_restored_inflight,
+                last_edit_text,
+                last_relayed_offset,
+                last_observed_generation_mtime_ns,
+                monitor_auto_turn_claimed,
+                monitor_auto_turn_finished,
+                monitor_auto_turn_synthetic_msg_id,
+                monitor_auto_turn_ledger_generation,
+            },
+            cleanup_committed,
+            current_offset,
+            all_data,
+            "src/services/discord/tmux.rs:cancel_tombstone_suppressed_terminal_output",
         )
         .await;
-        write_terminal_preflight_suppression_state(
-            state,
-            placeholder_from_restored_inflight,
-            last_edit_text,
-            last_relayed_offset,
-            last_observed_generation_mtime_ns,
-            monitor_auto_turn_claimed,
-            monitor_auto_turn_finished,
-            monitor_auto_turn_synthetic_msg_id,
-            monitor_auto_turn_ledger_generation,
-        );
-        return TerminalPreflightOutcome::ContinueWatcherLoop;
     }
 
     // #3017: rowless idle relays may suppress an already delivered range, but a
@@ -675,4 +638,55 @@ pub(super) async fn run_terminal_preflight_prepare(
         inflight_missing_before_relay,
         inflight_silent_turn,
     }
+}
+
+async fn finish_suppressed_terminal(
+    context: &TerminalPreflightContext<'_>,
+    state: &mut TerminalPreflightSuppressionState<'_>,
+    mut ready: TerminalPreflightReady,
+    cleanup_committed: bool,
+    current_offset: u64,
+    all_data: &str,
+    source: &'static str,
+) -> TerminalPreflightOutcome {
+    let shared = context.shared;
+    let watcher_provider = context.watcher_provider;
+    let channel_id = context.channel_id;
+    let tmux_session_name = context.tmux_session_name;
+    if cleanup_committed {
+        let confirmed_end = suppressed_terminal_confirmed_end(current_offset, all_data);
+        let generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
+        ready.last_relayed_offset = Some(current_offset);
+        ready.last_observed_generation_mtime_ns = Some(generation_mtime_ns);
+        advance_watcher_confirmed_end(
+            shared,
+            watcher_provider,
+            channel_id,
+            tmux_session_name,
+            confirmed_end,
+            source,
+        );
+    }
+    finish_monitor_auto_turn_if_claimed(
+        shared,
+        watcher_provider,
+        channel_id,
+        &mut ready.monitor_auto_turn_claimed,
+        &mut ready.monitor_auto_turn_finished,
+        &mut ready.monitor_auto_turn_synthetic_msg_id,
+        &mut ready.monitor_auto_turn_ledger_generation,
+    )
+    .await;
+    write_terminal_preflight_suppression_state(
+        state,
+        ready.placeholder_from_restored_inflight,
+        ready.last_edit_text,
+        ready.last_relayed_offset,
+        ready.last_observed_generation_mtime_ns,
+        ready.monitor_auto_turn_claimed,
+        ready.monitor_auto_turn_finished,
+        ready.monitor_auto_turn_synthetic_msg_id,
+        ready.monitor_auto_turn_ledger_generation,
+    );
+    TerminalPreflightOutcome::ContinueWatcherLoop
 }

@@ -7,9 +7,12 @@ pub(in crate::services::discord) enum ExternalRelayVerdict {
     /// in-band verdict exactly as it was.
     Unknown,
     /// Compatibility no-loss claim, not positive health evidence.
+    #[cfg(test)]
     NoLoss,
     /// Compatibility claim that unmatched blocks are lagging.
+    #[cfg(test)]
     Lagging { lost_blocks: u32 },
     /// Compatibility claim that unmatched blocks exceeded the gap bound.
+    #[cfg(test)]
     Unreachable { lost_blocks: u32 },
 }

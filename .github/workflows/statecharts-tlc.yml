@@ -28,9 +28,13 @@ env:
 
 jobs:
   tlc:
-    name: Statecharts TLC
+    name: Statecharts TLC (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 45 || 45 }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -83,10 +87,60 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SHARD_INDEX: ${{ matrix.shard }}
         shell: bash
         run: |
           set -euo pipefail
           args=(--java java --timeout 300 --jobs 2)
+          args+=(--shard-index "$SHARD_INDEX" --shard-count 4)
+          args+=(--report-json "$RUNNER_TEMP/tlc-${SHARD_INDEX}.json" --summary "$GITHUB_STEP_SUMMARY")
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            args+=(--base "$BASE_SHA" --head "$HEAD_SHA")
+          fi
+          python3 scripts/ci/statecharts_tlc.py "${args[@]}"
+
+      - name: Upload shard timings and coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: statecharts-tlc-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tlc-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  summary:
+    name: Statecharts TLC coverage and timings
+    needs: tlc
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Download all shard reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: statecharts-tlc-*
+          path: ${{ runner.temp }}/tlc-reports
+
+      - name: Verify coverage and summarize all shards
+        id: aggregate
+        if: always()
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TLC_RESULT: ${{ needs.tlc.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--aggregate-reports "$RUNNER_TEMP/tlc-reports" --shard-count 4 --summary "$GITHUB_STEP_SUMMARY")
+          args+=(--upstream-result "$TLC_RESULT")
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             args+=(--base "$BASE_SHA" --head "$HEAD_SHA")
           fi
@@ -94,10 +148,10 @@ jobs:
 
   report:
     name: Statecharts TLC nightly report
-    needs: tlc
+    needs: [tlc, summary]
     if: >-
       always() && github.event_name == 'schedule' &&
-      (needs.tlc.result == 'failure' || needs.tlc.result == 'cancelled')
+      (needs.tlc.result != 'success' || needs.summary.result != 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -109,7 +163,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          RESULT: ${{ needs.tlc.result }}
+          RESULT: ${{ needs.tlc.result }} / coverage=${{ needs.summary.result }}
           SHA: ${{ github.sha }}
         shell: bash
         run: |

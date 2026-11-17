@@ -463,3 +463,42 @@ fn effort_rechecks_the_role_after_waiting_for_settings() {
         })
     });
 }
+
+// A model that changes under a saved level without the save check, as a role's does, never
+// launches with a level it is known to lack; unknown support and the saved value are left alone.
+#[test]
+fn a_launch_drops_a_saved_level_the_current_model_lacks() {
+    fixture(|shared, channel, _| {
+        runtime().block_on(async {
+            let codex = ProviderKind::Codex;
+            let model = |slug: &str| {
+                shared
+                    .overrides
+                    .model_overrides
+                    .insert(channel, slug.into());
+            };
+            model(ASTRA);
+            assert!(
+                update_channel_effort(shared, TOKEN, channel, &codex, "ultra")
+                    .await
+                    .unwrap()
+            );
+            let launched = || channel_effort_level(shared, &codex, channel);
+            assert_eq!(launched().await.as_deref(), Some("ultra"));
+            model(LUNA);
+            assert_eq!(
+                launched().await,
+                None,
+                "luna lists its levels without ultra"
+            );
+            model("unlisted-model");
+            assert_eq!(launched().await.as_deref(), Some("ultra"));
+            model(ASTRA);
+            assert_eq!(launched().await.as_deref(), Some("ultra"));
+            let key = channel.to_string();
+            let saved = shared.settings.read().await;
+            let level = saved.channel_effort_levels.get(&key);
+            assert_eq!(level.map(String::as_str), Some("ultra"));
+        })
+    });
+}

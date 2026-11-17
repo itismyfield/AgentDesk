@@ -15,11 +15,13 @@
 use super::discovery::TranscriptFileId;
 
 /// Versioned encoding header pinned by the golden-corpus fixture test.
+#[cfg(test)]
 pub(in crate::services::discord) const CANONICAL_SCHEMA_HEADER: &str =
     "relay_obligation_canonical_v1";
 
 /// Trailer key. Not a number, so it can never be mistaken for a record row,
 /// every one of which starts with the generation.
+#[cfg(test)]
 pub(in crate::services::discord) const CANONICAL_NEXT_OFFSET_KEY: &str = "next_offset";
 
 /// Harness-authored rows carry this marker; banner text alone is not evidence.
@@ -69,6 +71,7 @@ impl ObligationReason {
     ///
     /// Consumed by the encoding, hence by the golden corpus — see
     /// [`CANONICAL_SCHEMA_HEADER`].
+    #[cfg(test)]
     pub(in crate::services::discord) fn as_canonical_str(self) -> &'static str {
         match self {
             Self::AssistantText => "ASSISTANT_TEXT",
@@ -119,6 +122,7 @@ pub(in crate::services::discord) struct ObligationScan {
 
 impl ObligationScan {
     /// The obligation-producing records, in file order.
+    #[cfg(test)]
     pub(in crate::services::discord) fn obligations(
         &self,
     ) -> impl Iterator<Item = &CanonicalRecord> {
@@ -291,6 +295,7 @@ pub(in crate::services::discord) fn scan_canonical(
 ///
 /// See [`CANONICAL_SCHEMA_HEADER`] for why the encoding is corpus-facing rather
 /// than runtime-facing.
+#[cfg(test)]
 pub(in crate::services::discord) fn encode_canonical(scan: &ObligationScan) -> String {
     let mut out = String::from(CANONICAL_SCHEMA_HEADER);
     out.push('\n');

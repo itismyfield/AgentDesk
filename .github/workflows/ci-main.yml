@@ -62,6 +62,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Ensure swap for the lib test build
         uses: ./.github/actions/ensure-swap
+        # Lib test builds peak near 16G RAM + 19G swap; leave headroom to keep the runner alive.
+        with: {size-gb: "24"}
       - name: Check Rust test source wiring
         shell: bash
         env:

@@ -9,6 +9,7 @@ use std::{
 
 mod effort;
 use effort::LaunchEffort;
+pub(crate) use effort::{expect_owner_first_submit, owner_first_submit};
 
 use crate::services::claude_command::ClaudeBinary;
 #[cfg(test)]

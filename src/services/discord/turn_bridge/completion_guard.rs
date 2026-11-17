@@ -457,14 +457,6 @@ pub(in crate::services::discord) async fn fail_dispatch_tmux_session_died(
     fail_dispatch_with_policy(dispatch_id, error_msg, Some("tmux_session_died"), true).await;
 }
 
-pub(in crate::services::discord) async fn fail_dispatch_auth_expired(
-    _api_port: u16,
-    dispatch_id: Option<&str>,
-    error_msg: &str,
-) {
-    fail_dispatch_with_policy(dispatch_id, error_msg, Some("auth_token_expired"), false).await;
-}
-
 async fn fail_dispatch_with_policy(
     dispatch_id: Option<&str>,
     error_msg: &str,

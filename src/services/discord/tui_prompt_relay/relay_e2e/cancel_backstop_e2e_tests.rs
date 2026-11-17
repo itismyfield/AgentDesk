@@ -1,6 +1,6 @@
 //! Cancelled foreground ownership through real intake, dequeue, provider and relay.
 
-#[path = "cancel_backstop_e2e_tests/autoheal.rs"]
+#[path = "cancel_backstop_e2e_tests/autoheal_tests.rs"]
 mod autoheal;
 #[path = "cold_start_incident_e2e_tests.rs"]
 mod cold_start_incident;
