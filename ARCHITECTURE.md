@@ -3009,6 +3009,7 @@ src/
 │   │   │   ├── idle_tail_state.rs
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
+│   │   │   ├── input_notice_memo.rs
 │   │   │   ├── launch_script.rs
 │   │   │   ├── local_model_queue_wake_e2e.rs
 │   │   │   ├── observed_prompt_decision.rs
@@ -4149,11 +4150,13 @@ src/
 │   │   │   │   ├── checked_tests.rs
 │   │   │   │   ├── compat.rs
 │   │   │   │   ├── compat_tests.rs
+│   │   │   │   ├── input_notice_memo_tests.rs
 │   │   │   │   ├── native_row.rs
 │   │   │   │   ├── notice_owner.rs
 │   │   │   │   ├── rollback_reader_tests.rs
 │   │   │   │   ├── screen.rs
 │   │   │   │   ├── screen_tests.rs
+│   │   │   │   ├── stamped.rs
 │   │   │   │   ├── v2.rs
 │   │   │   │   ├── v2_compaction_tests.rs
 │   │   │   │   └── v2_tests.rs
