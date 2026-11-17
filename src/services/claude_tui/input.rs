@@ -372,14 +372,15 @@ fn wait_for_prompt_ready_inner(
     {
         return Err("claude tui session died before prompt input was ready".into());
     }
-    let watched = super::readiness::watched(session_name, transcript_path);
-    match super::readiness::prepare(
+    let prepared = super::readiness::prepare(
         session_name,
         transcript_path,
         cancel_token,
         readiness.timeout(),
         readiness,
-    ) {
+    );
+    let unproven = prepared.as_ref().is_err_and(|stop| stop.unproven);
+    match prepared.map_err(|stop| stop.error) {
         Ok(_) => Ok(()),
         Err(error) if is_prompt_ready_cancelled_error(&error) => Err(error),
         Err(error) if !is_prompt_ready_timeout_error(&error) => Err(error),
@@ -388,7 +389,6 @@ fn wait_for_prompt_ready_inner(
             if !host_input::legacy_pane_alive(session_name) {
                 return Err("claude tui session died before prompt input was ready".into());
             }
-            let unproven = watched.unproven();
             if readiness == PromptReadinessKind::ProvenWarmFollowup {
                 super::readiness::watch_current(session_name, transcript_path);
                 return Err(SubmissionError::Held(PreparationHold::evidence_pending(

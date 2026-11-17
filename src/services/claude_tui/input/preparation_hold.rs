@@ -15,7 +15,7 @@ pub(crate) struct PreparationHold {
     pub(crate) detail: String,
     /// A modal refused the pane at the capture before any key; legacy callers read the reason.
     pub(crate) modal: bool,
-    /// The readiness budget ended with nothing in flight to supply the evidence: no look clears it.
+    /// The readiness wait, its windows included, ended idle with nothing in flight: no look clears it.
     pub(crate) unproven: bool,
 }
 
@@ -50,7 +50,7 @@ impl PreparationHold {
         }
     }
 
-    /// The readiness wait timed out; `unproven` when the source sat idle and unmoved all along.
+    /// The readiness wait timed out; `unproven` when the source idled with no turn or fence open.
     pub(crate) fn evidence_pending(session: &str, detail: String, unproven: bool) -> Self {
         Self {
             unproven,

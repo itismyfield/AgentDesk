@@ -141,36 +141,49 @@ pub(crate) fn when_idle(
     cancel: Option<&CancelToken>,
     send: impl FnOnce() -> InputRun,
 ) -> InputRun {
-    use crate::services::claude_tui::readiness;
-    let watched = readiness::watched(session, Some(path));
-    let proof = wait_for(cancel, composer_ready_wait(), || {
-        let Some(proof) = readiness::observe_restored(session, Some(path)) else {
-            return ControlFlow::Continue(());
-        };
-        let Some(pane) = capture() else {
-            return ControlFlow::Continue(());
-        };
-        if !readiness::empty_draft(&pane) {
-            match composer_owner(&pane) {
-                ComposerOwner::Person | ComposerOwner::AgentDesk => {
-                    return ControlFlow::Break(None);
+    use crate::services::claude_tui::readiness::{self, Expiry};
+    let mut watched = readiness::watched(session, Some(path));
+    let mut budget = composer_ready_wait();
+    // A budget that ends on a transcript that only moved runs the same wait in short windows.
+    let proof = loop {
+        let stop = wait_for(cancel, budget, || {
+            let Some(proof) = readiness::observe_restored(session, Some(path)) else {
+                return ControlFlow::Continue(());
+            };
+            let Some(pane) = capture() else {
+                return ControlFlow::Continue(());
+            };
+            if !readiness::empty_draft(&pane) {
+                match composer_owner(&pane) {
+                    ComposerOwner::Person | ComposerOwner::AgentDesk => {
+                        return ControlFlow::Break(None);
+                    }
+                    ComposerOwner::Unread => return ControlFlow::Continue(()),
+                    ComposerOwner::Empty => (),
                 }
-                ComposerOwner::Unread => return ControlFlow::Continue(()),
-                ComposerOwner::Empty => (),
             }
+            if crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(
+                &pane,
+            ) {
+                return ControlFlow::Break(None);
+            }
+            if proof.restart() && !restored_screen_idle(&pane) {
+                return ControlFlow::Continue(());
+            }
+            match readiness::reserve(proof) {
+                Some(reservation) => ControlFlow::Break(Some(reservation)),
+                None => ControlFlow::Continue(()),
+            }
+        });
+        if !matches!(stop, Err(WaitStop::TimedOut)) {
+            break stop;
         }
-        if crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(&pane)
-        {
-            return ControlFlow::Break(None);
+        match watched.expired(&mut capture) {
+            Expiry::Requiet => budget = budget.min(readiness::WINDOW),
+            Expiry::Unproven => return InputRun::Refused(InputRefusal::Unproven),
+            Expiry::Waits => return InputRun::Refused(InputRefusal::Unknown),
         }
-        if proof.restart() && !restored_screen_idle(&pane) {
-            return ControlFlow::Continue(());
-        }
-        match readiness::reserve(proof) {
-            Some(reservation) => ControlFlow::Break(Some(reservation)),
-            None => ControlFlow::Continue(()),
-        }
-    });
+    };
     match proof {
         Ok(Some(reservation)) => {
             if !reservation.current() {
@@ -189,7 +202,6 @@ pub(crate) fn when_idle(
             result
         }
         Err(WaitStop::Cancelled) => InputRun::Cancelled { confirmed: 0 },
-        Err(WaitStop::TimedOut) if watched.unproven() => InputRun::Refused(InputRefusal::Unproven),
         _ => InputRun::Refused(InputRefusal::Unknown),
     }
 }
