@@ -1140,6 +1140,7 @@ pub(crate) mod tests {
     #[test]
     fn binding_context_t13_host_uses_only_explicit_sources() {
         let (root, _env) = fixture();
+        let _live = crate::config_live_reload::test_live_guard_after_shared_test_env_lock();
         for (config, env, expected) in [
             ("cluster: {instance_id: cfg}", "env", Some("cfg")),
             ("", "env", Some("env")),
@@ -1147,7 +1148,8 @@ pub(crate) mod tests {
             ("", "", None),
         ] {
             let yaml = format!("server: {{}}\n{config}");
-            fs::write(root.path().join("config.yaml"), yaml).unwrap();
+            fs::write(root.path().join("config.yaml"), &yaml).unwrap();
+            crate::config_live_reload::install(serde_yaml::from_str(&yaml).unwrap());
             let _id =
                 Guard::set_path_after_shared_test_env_lock("AGENTDESK_INSTANCE_ID", Path::new(env));
             assert_eq!(stable_host_identity().as_deref(), expected);
