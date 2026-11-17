@@ -1,0 +1,63 @@
+---
+title: "Herdr clear: one fresh session, token release, then normal restart resume"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Fenced
+    lg1: Normal
+  }
+  class lg0 teal
+  class lg1 blue
+  s0: Prior provider session available
+  s1: Clear committed#59; old execution held
+  s2: Restart before the first launch
+  s3: Clear committed#59; old execution ended
+  s4: Selecting the first post-clear session
+  s5: First provider command prepared
+  s6: Provider starts and rewrites selector
+  s7: Fresh provider session verified
+  s8: Clear fence released by matching token
+  s9: Provider session changed after release
+  s10: Restart after verified provider startup
+  s11: Selecting the session after restart
+  s12: Next provider command prepared
+  s13: Next provider starts
+  s14: Current provider session resumed
+  [*] --> s0
+  s0 --> s1: you clear while teardown is held
+  s0 --> s2: the server restarts before launch
+  s1 --> s3: later recovery confirms the old execution ended
+  s1 --> s2: the server restarts before launch
+  s2 --> s0: the server boots without the volatile clear flag
+  s3 --> s2: the server restarts before launch
+  s3 --> s4: the router consumes its volatile clear flag
+  s2 --> s1: the server boots without the volatile clear flag
+  s2 --> s3: the server boots without the volatile clear flag
+  s4 --> s2: the server restarts before launch
+  s4 --> s5: the launch reads the persistent clear token
+  s5 --> s2: the server restarts before launch
+  s5 --> s4: the first create is not sent#59; input retries
+  s5 --> s6: the provider command starts
+  s6 --> s7: the fresh SessionStart is verified
+  s7 --> s8: the captured token releases the clear fence
+  s8 --> s9: the provider moves to a new session
+  s8 --> s10: the server restarts after verification
+  s9 --> s10: the server restarts after verification
+  s10 --> s11: the next turn reads durable state
+  s11 --> s12: the launch checks the native binding
+  s12 --> s13: the next provider command starts
+  s13 --> s14: provider startup writes the session selector
+  class s0 blue
+  class s1 teal
+  class s3 teal
+  class s4 teal
+  class s5 teal
+  class s6 teal
+  class s7 teal
+  class s8 blue
+  class s9 blue
+  class s10 blue
+  class s11 blue
+  class s12 blue
+  class s13 blue
+  class s14 blue

@@ -1,0 +1,5 @@
+\* EXPECTED_SAFETY=HNoIdleStartWhileBusy EXPECTED_LIVENESS=-
+CONSTANTS N = 3 Mutation = "herdrNoIdleRecheck"
+SPECIFICATION HerdrSpec
+INVARIANT HNoIdleStartWhileBusy NoDuplicate SuccessBacked HerdrCurrentExecutor HerdrReservationReturned HerdrSourcePreserved
+PROPERTY EachAcceptedStarts EachAcceptedCompletes EachDeliveredGetsOutcome

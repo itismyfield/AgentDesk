@@ -21,6 +21,8 @@ mod clear_end_record_tests;
 mod codex_end_record;
 #[cfg(all(test, unix))]
 mod codex_end_tests;
+#[cfg(unix)]
+pub(super) mod resume_fence;
 
 /// Advances the channel's transcript clear boundary, retried once.
 pub(super) async fn write_boundary(
@@ -206,12 +208,19 @@ async fn end_herdr(
 
 /// Records a retired execution's selector the exact clear could not forget.
 #[cfg(unix)]
-pub(super) fn note_retired_selector(cleared: Result<bool, String>, report: &mut ClearReport) {
+pub(super) fn note_retired_selector(
+    cleared: Result<bool, String>,
+    report: &mut ClearReport,
+) -> bool {
     match cleared {
-        Ok(true) => {}
+        Ok(true) => {
+            report.conversation_reset = true;
+            return true;
+        }
         Ok(false) => report.fail("session_selector", "retired execution row moved on"),
         Err(error) => report.fail("session_selector", &error),
     }
+    false
 }
 
 /// Uses the canonical stop ordering; a host refusal leaves the released turn unconfirmed.

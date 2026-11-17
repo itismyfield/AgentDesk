@@ -366,11 +366,13 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             }
             super::args::DiscordAction::ChannelCreate {
                 name,
+                kind,
                 category_id,
                 topic,
                 guild_id,
             } => super::direct::run_async(super::direct::cmd_discord_channel_create(
                 &name,
+                kind,
                 category_id.as_deref(),
                 topic.as_deref(),
                 guild_id.as_deref(),

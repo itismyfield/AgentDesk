@@ -595,6 +595,16 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     report
         .settle_consents(shared, provider, channel_id, &cleared)
         .await;
+    #[cfg(unix)]
+    clear_teardown::resume_fence::set_channel(
+        http,
+        shared,
+        provider,
+        channel_id,
+        explicit_session_key,
+        &mut report,
+    )
+    .await;
     clear_teardown::write_boundary(shared, channel_id, &mut report).await;
     native::clear_session_memory(shared, channel_id).await;
     native::clear_process_reset_pending(shared, channel_id).await;

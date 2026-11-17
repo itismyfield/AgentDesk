@@ -1,0 +1,9 @@
+\* EXPECTED_SAFETY=UnknownHeld EXPECTED_LIVENESS=EligibleEnds,NextCanProgress
+SPECIFICATION Spec
+CONSTANTS Source = "unknown"
+          Exact = TRUE
+          ExecutionEnded = TRUE
+          Mutation = "ignoreUnknown"
+INVARIANTS TypeOK TerminalReaderOnly UnknownHeld SettlementAfterDelivery DoneNoResidue
+PROPERTIES EligibleEnds NextCanProgress
+CHECK_DEADLOCK FALSE

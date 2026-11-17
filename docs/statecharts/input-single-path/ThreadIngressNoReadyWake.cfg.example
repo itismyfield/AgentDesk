@@ -1,0 +1,11 @@
+\* EXPECTED_SAFETY=NoDeadlock EXPECTED_LIVENESS=AcceptedCompletes
+CONSTANTS
+    Target = "boundThread"
+    InitialSession = "booting"
+    ActualHost = "herdr"
+    DesiredHost = "herdr"
+    Mutation = "noReadyWake"
+    CanCrash = FALSE
+SPECIFICATION Spec
+INVARIANT NoDuplicate NoSilentLoss RejectedNoEffects ForeignForbidden ParentFailClosed BoundThreadAdmitted SuccessBacked HttpAcceptanceBacked LiveActualHostPreserved
+PROPERTY AcceptedCompletes DeliveredGetsOutcome

@@ -148,6 +148,25 @@ def is_our_send(message: dict[str, Any]) -> bool:
 
 # The direct-input notice quotes the injected text, so it is never a provider body.
 DIRECT_INPUT_NOTICE = re.compile(r"^(?:터미널에 직접 주입된 입력 \(tmux : `[^`]+`\):|-# ⌨️ )")
+_OPERATIONAL_ALERT_ORIGIN = "[origin=operational_alert]"
+_HIDDEN_OPERATIONAL_ALERT_ORIGIN = "".join(
+    "\u200c" if bit == "1" else "\u200b"
+    for byte in _OPERATIONAL_ALERT_ORIGIN.encode() for bit in f"{byte:08b}"
+)
+
+
+def strip_operational_alert_origin(body: str) -> tuple[str, bool]:
+    """Recognize only the producer's exact prefix, including Discord subtext."""
+    prefix = "-# " if body.startswith("-# ") else ""
+    content = body[len(prefix):]
+    for origin in (_OPERATIONAL_ALERT_ORIGIN, _HIDDEN_OPERATIONAL_ALERT_ORIGIN):
+        if content.startswith(origin):
+            return prefix + content[len(origin):].lstrip(), True
+    return body, False
+
+
+def diagnostic_text(body: str) -> str:
+    return re.sub(r"[\u200b-\u200f\u2060-\u2064\ufeff]", "", body)
 
 
 def provider_bot_id(provider: str) -> str:
@@ -158,7 +177,7 @@ def provider_bot_id(provider: str) -> str:
 
 
 def is_status_chrome(message: dict[str, Any]) -> bool:
-    body = message.get("content") or ""
+    body, _ = strip_operational_alert_origin(message.get("content") or "")
     if not body:
         return True  # empty / reply-only messages are noise
     for pat in _STATUS_PATTERNS:
@@ -178,6 +197,8 @@ def is_relay_response(message: dict[str, Any]) -> bool:
         return False
     author = message.get("author") or {}
     if not author.get("bot"):
+        return False
+    if strip_operational_alert_origin(message.get("content") or "")[1]:
         return False
     if is_status_chrome(message):
         return False
@@ -374,7 +395,7 @@ def _chrome_messages(
 ) -> list[dict[str, Any]]:
     messages = []
     for message in _raw_assertion_messages(window, include_our_send=include_our_send):
-        body = message.get("content") or ""
+        body, _ = strip_operational_alert_origin(message.get("content") or "")
         if text is not None:
             if text in body:
                 messages.append(message)
@@ -424,7 +445,7 @@ def no_duplicate_content(window: Window) -> None:
         key = duplicate_content_key(message, body)
         if key in seen:
             raise AssertionError(
-                f"duplicate Discord relay body: {body[:80]!r} "
+                f"duplicate Discord relay body: {diagnostic_text(body)[:80]!r} "
                 f"(ids {seen[key]}, {message_id})"
             )
         seen[key] = message_id
@@ -750,7 +771,7 @@ def find_status_panels(
     return [
         message
         for message in _raw_assertion_messages(window)
-        if re.search(panel_regex, message.get("content") or "")
+        if re.search(panel_regex, strip_operational_alert_origin(message.get("content") or "")[0])
     ]
 
 
@@ -796,7 +817,7 @@ def completion_chrome_after_body(
         for message in _raw_assertion_messages(window)
         if str(message.get("id") or "") not in window.deleted_ids
         and any(
-            pattern.search(message.get("content") or "")
+            pattern.search(strip_operational_alert_origin(message.get("content") or "")[0])
             for pattern in _COMPLETION_CHROME_PATTERNS
         )
     ]
@@ -1008,7 +1029,7 @@ def edited_completion_candidates(window, observed, after_id=None):
             continue
         if after_id is not None and int(mid) <= after_id:
             continue
-        if any(p.search(update.get(field) or "") for field in ("before", "after")
+        if any(p.search(strip_operational_alert_origin(update.get(field) or "")[0]) for field in ("before", "after")
                for p in _COMPLETION_CHROME_PATTERNS):
             ids.add(mid)
     return ids

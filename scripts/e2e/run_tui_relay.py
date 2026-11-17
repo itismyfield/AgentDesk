@@ -54,7 +54,8 @@ import yaml  # type: ignore[import-untyped]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tui_relay import assertions, discord, durable_delivery, feature_accounting, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
-from tui_relay import channel_reset, health_readiness, herdr_restart, http_auth, midturn_kill, restart_guard, wait_timeout  # noqa: E402
+from tui_relay import channel_reset, health_readiness, herdr_restart, http_auth, midturn_kill, restart_guard, surface_assertions, wait_timeout  # noqa: E402
+from tui_relay import clear_fresh_session  # noqa: E402
 # Share the assertion schema without importing the live driver in static tools.
 from tui_relay.assertion_registry import ASSERTION_OPTIONS  # noqa: E402
 
@@ -149,6 +150,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "marker_counts",
     "input_refusals",
     "clear_refusal",
+    "clear_provider_sessions",
     "tmux_key_sequences",
     "herdr_key_sequences",
     "observed_notices",
@@ -186,6 +188,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "restart_incarnations",
     "prompt_sends",
     "midturn_kill",
+    "reaction_watch",
 )
 
 
@@ -1022,7 +1025,8 @@ def _merge_record_into_result(
     result["assertions"].extend(record.get("assertions") or [])
     for key in REPORT_RECORD_KEYS:
         if key in record:
-            result[key] = record[key]
+            # Reaction reads may still append on a failed run; the report keeps this moment's copy.
+            result[key] = copy.deepcopy(record[key]) if key == "reaction_watch" else record[key]
 
 
 def resolve_output_dir(arg: str | None, cell: str) -> Path:
@@ -1063,6 +1067,7 @@ STEP_OPTIONS = {
     "deliver_prompt": {"text", "source"}, "restart_dcserver": {"target", "require_status", "allowed_degraded_reasons", "allowed_target_queue_depth"},
     "kill_pane": {"reverify_session_name_substring"}, "poison_claude_tui_relay_offset": set(),
     "capture_session_identity": {"label"}, "assert_session_preserved": {"label"},
+    "capture_provider_session": {"label"},
     "send_prompts_concurrent": {"prompts"}, "fixture_followup_probe": {"prompt"}, "replay_fixture": {"kind", "provider", "frames"},
     "local_control_then_prompt": {"control", "notice", "prompt", "notice_timeout_s", "admission_timeout_s", "quiet_s", "poll_interval_s"},
     "send_timed_response_prompt": {"before_marker", "after_marker", "hold_seconds"}, "send_provider_hold_prompt": {"ok_marker", "marker", "late_marker", "hold_seconds"},
@@ -1109,6 +1114,8 @@ def validate_scenario_schema(scenario):
             value, allowed = entry[action], schema[action]
             if isinstance(value, dict) and (allowed is None or set(value) - allowed):
                 raise ValueError(f"unsupported {action} options: {value!r}")
+            if kind == "assertions":
+                surface_assertions.validate(entry)
             scalar_or_mapping = {"deliver_prompt", "assert_session_preserved", "provider_hold_marker_seen", "raw_text_absent", "marker_absent", "relay_latency_within", "completion_chrome_after_body", "single_status_panel"}
             if allowed is not None and action not in scalar_or_mapping and not isinstance(value, dict):
                 raise ValueError(f"{action} requires mapping options")
@@ -1146,6 +1153,7 @@ def load_scenarios(scenarios_dir: Path, *, cell: str) -> list[dict[str, Any]]:
             data = yaml.safe_load(fp)
         if not isinstance(data, dict):
             raise ValueError(f"{yaml_path} did not parse to a mapping")
+        data = clear_fresh_session.plan(data, cell=cell)
         validate_scenario_schema(data)
         cells = data.get("cells") or []
         if not isinstance(cells, list):
@@ -3242,6 +3250,7 @@ def run_scenario(
     client: discord.DiscordClient,
     partial_result_sink: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    scenario = clear_fresh_session.plan(scenario, cell=args.cell)
     scenario = wait_timeout.expand_markers(scenario, run_id)
     scenario_id = str(scenario.get("id"))
     cell = args.cell
@@ -3939,6 +3948,11 @@ def run_one_cell(
             first_send_done = True
 
     last_turn_identity: dict[str, str] | None = None
+    reaction_watch = surface_assertions.ReactionWatch.for_scenario(scenario, client, channel_id, record, run_id=run_id)
+    surface_assertions.before_steps(scenario, record, lambda: surface_assertions.surface_context(
+        base_url=client.base_url, provider=cell_provider(cell), agent=cell_default_agent(cell), channel_id=channel_id,
+        parent_channel_id=args.channel_id, thread=bool(scenario.get("requires_thread_channel")),
+        herdr_status_bin=getattr(args, "herdr_status_bin", "agentdesk")), _read_api_json)
     last_sent_prompt: str | None = None
     clear_after: str | None = None
 
@@ -3985,6 +3999,8 @@ def run_one_cell(
             sent = _record_send(record, "send_discord_prompt", last_sent_prompt)
             response = client.send(channel_id, last_sent_prompt)
             _ack_send(sent, response)
+            if reaction_watch is not None:
+                reaction_watch.on_send(record)
             if scenario_id == "E-50" and last_sent_prompt.startswith("!clear "):
                 clear_after = str(response.get("message_id") or response.get("id") or "")
             if scenario.get("durable_delivery_probe"):
@@ -4142,6 +4158,7 @@ def run_one_cell(
                     f"diagnostic={_payload_summary(diagnostic, max_chars=1400)}",
                     record=record,
                 )
+            surface_assertions.after_answer(record, _read_api_json)
             if scenario.get("durable_delivery_probe"):
                 response_id = str(found.get("id") or "")
                 record["durable_record_probe"] = durable_delivery.poll_records(
@@ -4287,6 +4304,9 @@ def run_one_cell(
                     runtime_root=Path(args.queue_runtime_root),
                 )
             )
+        elif clear_fresh_session.owns(step):
+            clear_fresh_session.run_step(sys.modules[__name__], step, base_url=client.base_url,
+                                         channel_id=channel_id, cell=cell, record=record)
         elif "capture_session_identity" in step:
             params = step["capture_session_identity"] or {}
             label = str(params.get("label") or "default")
@@ -4519,6 +4539,8 @@ def run_one_cell(
             raise assertions.AssertionError(f"unknown step shape: {step!r}")
     if record.get("step_timings"):
         _note_step_start(record, "final_checks")
+    if reaction_watch is not None:
+        reaction_watch.stop()
 
     final_refetches = int(getattr(args, "final_refetches", 2))
     final_refetch_interval_s = float(getattr(args, "final_refetch_interval_s", 1.0))
@@ -5025,7 +5047,14 @@ def run_assertion(
         if required_feature not in enabled_features:
             return feature_accounting.skipped_assertion(required_feature)
         spec = {key: value for key, value in spec.items() if key != "requires_feature"}
-    if "message_count_between_markers" in spec:
+    if surface_assertions.owns(spec):
+        try:
+            return surface_assertions.run(spec, record=record, run_id=run_id, read_api=_read_api_json, window=window)
+        except surface_assertions.Unevaluable as error:
+            raise HarnessEvidenceError(str(error)) from error
+    if "provider_session_changed" in spec:
+        clear_fresh_session.assert_changed(spec["provider_session_changed"], record=record)
+    elif "message_count_between_markers" in spec:
         params = spec["message_count_between_markers"]
         assertions.message_count_between_markers(
             window, low=int(params.get("min", 0)), high=int(params.get("max", 99))

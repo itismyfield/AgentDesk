@@ -1,0 +1,5 @@
+\* EXPECTED_SAFETY=MachineWaits EXPECTED_LIVENESS=-
+CONSTANTS Host = "herdr" InitialRead = "unknown" Mutation = "unknownIdle"
+SPECIFICATION Spec
+INVARIANT MachineWaits NoDuplicates NoSilentLoss
+PROPERTY MachineOwnTurn EachReply

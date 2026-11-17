@@ -1,0 +1,11 @@
+\* EXPECTED_SAFETY=- EXPECTED_LIVENESS=-
+CONSTANTS
+    Target = "boundChannel"
+    InitialSession = "live"
+    ActualHost = "herdr"
+    DesiredHost = "herdr"
+    Mutation = "herdrMachineBusy"
+    CanCrash = FALSE
+SPECIFICATION HerdrSpec
+INVARIANT HNoIdleStartWhileBusy MachineNeverJoinsBusy HerdrExactlyOnce HerdrNoSilentLoss HerdrRejectedNoEffects HerdrExternalWired HerdrReservationReturned HerdrCurrentExecutor HerdrSourcePreserved
+PROPERTY HerdrAcceptedStarts HerdrAcceptedCompletes HerdrDeliveredGetsOutcome

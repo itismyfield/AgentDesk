@@ -1,0 +1,11 @@
+\* EXPECTED_SAFETY=LiveCustody EXPECTED_LIVENESS=EachEnds,EventuallyDrained
+SPECIFICATION Spec
+CONSTANTS
+    Contract = "boundGateway"
+    BodyOwner = "O"
+    Mutation = "staleCleanup"
+    CanRestart = FALSE
+INVARIANTS TypeOK ExactlyOneReply NoSilentLoss NoResidueAfterEnd
+           TerminalRequiresPresenter SourcePreserved LiveCustody
+PROPERTIES EachReply EachEnds NextProgress EventuallyDrained
+CHECK_DEADLOCK FALSE
