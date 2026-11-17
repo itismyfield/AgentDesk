@@ -151,36 +151,6 @@ fn committed_source_identity_is_required_and_ambiguous_effect_never_becomes_reje
 }
 
 #[test]
-fn an_earlier_owed_source_before_the_proved_rollout_still_proves_adoption() {
-    for (earlier, adopted) in [("earlier-session", true), ("s", false)] {
-        let f = Fixture::new(8_165_997);
-        let proof = f.proof();
-        let output = output(&proof, false);
-        f.activate().unwrap();
-        let path = crate::config::runtime_root()
-            .unwrap()
-            .join("o_store")
-            .join(f.channel.to_string())
-            .join("init");
-        let mut init: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let mut owed = init["sources"][0].clone();
-        owed["source_id"]["session_id"] = earlier.into();
-        owed["delivery_start"] = 7.into();
-        init["sources"].as_array_mut().unwrap().insert(0, owed);
-        std::fs::write(&path, serde_json::to_vec(&init).unwrap()).unwrap();
-        let result = output.finish_first(&f.candidate, &proof, &f.store, Reason::Deadline);
-        assert_eq!(result.is_ok(), adopted, "{earlier}");
-        let phase = if adopted {
-            Phase::Adopted
-        } else {
-            Phase::ExistingEffectPending
-        };
-        assert_eq!(output.phase(), phase, "{earlier}");
-    }
-}
-
-#[test]
 fn old_output_rejection_cannot_invalidate_a_successor_first_slot() {
     let f = Fixture::new(8_165_994);
     let proof = f.proof();

@@ -718,10 +718,11 @@ fn bind_fresh(harness: &Harness, name: &str) -> (PathBuf, SourceId) {
     (path, source)
 }
 
-/// An earlier rollout left undelivered while custody held the takeover stays owed when a fresh
-/// admitted rollout is taken: each answer posts once and a restart posts nothing.
+/// As on main, an admitted fresh takeover commits only its own rollout: an earlier rollout left
+/// undelivered while custody held the takeover is not owed to O, its answer is not posted, the
+/// admitted answer posts once and a restart posts nothing.
 #[test]
-fn an_admitted_fresh_rollout_keeps_an_earlier_undelivered_rollout_owed() {
+fn an_admitted_fresh_rollout_takes_only_its_own_rollout_as_main_does() {
     let root = crate::config::TestRuntimeRootGuard::new();
     dedupe::run_serial_test(async {
         dedupe::reset_state_for_tests();
@@ -734,7 +735,7 @@ fn an_admitted_fresh_rollout_keeps_an_earlier_undelivered_rollout_owed() {
         } = hosted_unbound(8_165_301).await;
         let channel = harness.channel_id;
         *io.custody.lock().unwrap() = Ok(Custody::Active);
-        let (a, a_source) = rollout(&harness, "rollout-a.jsonl", &prompted("s-codex"));
+        let (a, _a_source) = rollout(&harness, "rollout-a.jsonl", &prompted("s-codex"));
         bind_late(channel, &a);
         polls(3).await;
         assert_eq!(adoption(channel), Adoption::Deferred, "custody blocks A");
@@ -751,16 +752,13 @@ fn an_admitted_fresh_rollout_keeps_an_earlier_undelivered_rollout_owed() {
             "{:?}",
             io.alarms.halted()
         );
-        assert_eq!(
-            init_sources(&harness, channel),
-            [(a_source, first_opener()), (b_source.clone(), 0)]
-        );
+        assert_eq!(init_sources(&harness, channel), [(b_source.clone(), 0)]);
         append(
             &b,
             &[answer("msg_2", "admitted answer"), turn_end()].concat(),
         );
         polls(3).await;
-        assert_eq!(posted(&harness, "fresh answer"), 1);
+        assert_eq!(posted(&harness, "fresh answer"), 0);
         assert_eq!(posted(&harness, "admitted answer"), 1);
         restart_posts_nothing(&harness, tasks, &b_source).await;
         drop(admission);

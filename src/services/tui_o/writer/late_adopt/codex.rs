@@ -305,11 +305,7 @@ impl<I: HostIo> Takeover<'_, I> {
             })?;
             return match prefix::buffered(&bound.0) {
                 Verdict::Eligible(prefix) if prefix.prompt_end.is_some() => {
-                    // The admission proves only this rollout; earlier undelivered ones stay owed.
-                    let records = self.records(&events)?;
-                    let judged = (&records, sent_from.as_slice(), &mut *unresolved);
-                    let owed = self.owed_unresolved(&events, &bound, (at, since), judged)?;
-                    let taken = self.commit_owed(at, &bound, &prefix, &owed).await;
+                    let taken = self.commit(at, &bound, &prefix).await;
                     self.soon(at, taken)
                 }
                 Verdict::Eligible(_) => Err(Taken::Retry(
@@ -469,42 +465,6 @@ impl<I: HostIo> Takeover<'_, I> {
         let mut walked: Vec<SourceId> = unresolved.clone();
         walked.retain(|source| !records.generation().contains(source));
         walked.extend(records.generation());
-        self.owed_among(
-            walked,
-            events,
-            bound,
-            (at, since),
-            (records, sent_from, unresolved),
-        )
-    }
-
-    /// `owed` for an admitted execution: its launch starts a new generation before the bind, so
-    /// only rollouts this host still holds unresolved stay owed, not ones judged delivered before.
-    fn owed_unresolved(
-        &self,
-        events: &[BindingEvent],
-        bound: &(SourceId, u64),
-        (at, since): (Baseline, Since),
-        (records, sent_from, unresolved): (&Records, &[SourceId], &mut Vec<SourceId>),
-    ) -> Result<Vec<InitSource>, Taken> {
-        let walked = unresolved.clone();
-        self.owed_among(
-            walked,
-            events,
-            bound,
-            (at, since),
-            (records, sent_from, unresolved),
-        )
-    }
-
-    fn owed_among(
-        &self,
-        walked: Vec<SourceId>,
-        events: &[BindingEvent],
-        bound: &(SourceId, u64),
-        (at, since): (Baseline, Since),
-        (records, sent_from, unresolved): (&Records, &[SourceId], &mut Vec<SourceId>),
-    ) -> Result<Vec<InitSource>, Taken> {
         let mut owed = Vec::new();
         for source in walked.into_iter().filter(|source| *source != bound.0) {
             let seq = (events.iter().rev())
@@ -535,17 +495,6 @@ impl<I: HostIo> Takeover<'_, I> {
         at: Baseline,
         bound: &(SourceId, u64),
         prefix: &Prefix,
-    ) -> Result<(), Taken> {
-        self.commit_owed(at, bound, prefix, &[]).await
-    }
-
-    /// `commit` with the earlier sources judged owed before this rollout.
-    async fn commit_owed(
-        &self,
-        at: Baseline,
-        bound: &(SourceId, u64),
-        prefix: &Prefix,
-        owed: &[InitSource],
     ) -> Result<(), Taken> {
         let admission = if self.provider == ShadowProvider::Codex {
             let guard = self.candidate.lock();
@@ -578,7 +527,7 @@ impl<I: HostIo> Takeover<'_, I> {
                 "buffered output has no admitted execution proof".into(),
             ));
         }
-        self.fenced_proved(at, bound, Plan::Fresh(prefix, owed), admission.as_ref())
+        self.fenced_proved(at, bound, Plan::Fresh(prefix, &[]), admission.as_ref())
             .await
     }
 
