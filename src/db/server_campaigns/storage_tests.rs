@@ -1056,6 +1056,31 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
         (188, &["index:idx_review_tuning_outcomes_created_at"]),
         (189, &["index:idx_review_decisions_decided_at"]),
         (190, &["index:idx_arce_at"]),
+        (
+            191,
+            &[
+                "column:routines.execution_mode",
+                "column:routines.runner",
+                "column:routines.headless_failure_notice_limit",
+                "constraint:routines_execution_mode_check",
+                "constraint:routines_runner_shape_check",
+                "constraint:routines_explicit_mode_fresh_check",
+                "constraint:routines_headless_failure_notice_limit_check",
+                "column:routine_runs.run_spec",
+            ],
+        ),
+        (
+            192,
+            &[
+                "column:message_outbox.transport_state",
+                "column:message_outbox.transport_message_id",
+                "constraint:message_outbox_transport_state_check",
+                "constraint:message_outbox_transport_ack_check",
+                "index:idx_message_outbox_routine_incident",
+                "function:agentdesk_guard_outbox_transport_v1",
+            ],
+        ),
+        (193, &["column:session_transcripts.channel_context"]),
     ];
     assert_eq!(
         expected
