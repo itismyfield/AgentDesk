@@ -232,7 +232,10 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
                     submit_owned(
                         &turn,
                         hook,
-                        crate::services::claude_tui::owner_input::Lineage::Created,
+                        (
+                            crate::services::claude_tui::owner_input::Lineage::Created,
+                            None,
+                        ),
                         attached,
                         &tx,
                     )
