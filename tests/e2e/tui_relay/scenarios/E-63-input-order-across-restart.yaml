@@ -27,6 +27,10 @@ notes: |
   HOLD turn. Queued inputs run after that turn, so the order is HOLD, DONE, A, B.
   The restart must kill the busy turn's server, so use the driver's default
   kickstart, not a draining wrapper that waits for live turns to finish.
+  Input A (send 2) is read on Discord from its send on: busy injection shows
+  only one mark, ➕, never 📬 first (#8113), within 30 s and before DONE
+  (#8114). Healthy injection takes about 1 s and the restart lands about 3 s
+  after A. B is not judged; it may still be held when the restart lands.
 report_marker_counts:
   - "[E2E:E63:{run_id}:HOLD]"
   - "[E2E:E63:{run_id}:A]"
@@ -121,3 +125,11 @@ assertions:
       - "[E2E:E63:{run_id}:B]"
   - no_duplicate_content: true
   - no_resume_prompt_chrome: true
+  - reaction_history:
+      send: 2
+      final: ["➕"]
+      forbid: ["📬"]
+  - busy_injection_within:
+      send: 2
+      max_seconds: 30
+      before_marker: "[E2E:E63:{run_id}:DONE]"

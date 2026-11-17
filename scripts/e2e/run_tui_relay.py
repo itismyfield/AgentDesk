@@ -54,7 +54,7 @@ import yaml  # type: ignore[import-untyped]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tui_relay import assertions, discord, durable_delivery, feature_accounting, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
-from tui_relay import channel_reset, health_readiness, herdr_restart, http_auth, midturn_kill, restart_guard, wait_timeout  # noqa: E402
+from tui_relay import channel_reset, health_readiness, herdr_restart, http_auth, midturn_kill, restart_guard, surface_assertions, wait_timeout  # noqa: E402
 # Share the assertion schema without importing the live driver in static tools.
 from tui_relay.assertion_registry import ASSERTION_OPTIONS  # noqa: E402
 
@@ -1109,6 +1109,8 @@ def validate_scenario_schema(scenario):
             value, allowed = entry[action], schema[action]
             if isinstance(value, dict) and (allowed is None or set(value) - allowed):
                 raise ValueError(f"unsupported {action} options: {value!r}")
+            if kind == "assertions":
+                surface_assertions.validate(entry)
             scalar_or_mapping = {"deliver_prompt", "assert_session_preserved", "provider_hold_marker_seen", "raw_text_absent", "marker_absent", "relay_latency_within", "completion_chrome_after_body", "single_status_panel"}
             if allowed is not None and action not in scalar_or_mapping and not isinstance(value, dict):
                 raise ValueError(f"{action} requires mapping options")
@@ -3939,6 +3941,11 @@ def run_one_cell(
             first_send_done = True
 
     last_turn_identity: dict[str, str] | None = None
+    reaction_watch = surface_assertions.ReactionWatch.for_scenario(scenario, client, channel_id, record)
+    surface_assertions.before_steps(scenario, record, lambda: surface_assertions.surface_context(
+        base_url=client.base_url, provider=cell_provider(cell), agent=cell_default_agent(cell), channel_id=channel_id,
+        parent_channel_id=args.channel_id, thread=bool(scenario.get("requires_thread_channel")),
+        herdr_status_bin=getattr(args, "herdr_status_bin", "agentdesk")), _read_api_json)
     last_sent_prompt: str | None = None
     clear_after: str | None = None
 
@@ -3985,6 +3992,8 @@ def run_one_cell(
             sent = _record_send(record, "send_discord_prompt", last_sent_prompt)
             response = client.send(channel_id, last_sent_prompt)
             _ack_send(sent, response)
+            if reaction_watch is not None:
+                reaction_watch.on_send(record)
             if scenario_id == "E-50" and last_sent_prompt.startswith("!clear "):
                 clear_after = str(response.get("message_id") or response.get("id") or "")
             if scenario.get("durable_delivery_probe"):
@@ -4519,6 +4528,8 @@ def run_one_cell(
             raise assertions.AssertionError(f"unknown step shape: {step!r}")
     if record.get("step_timings"):
         _note_step_start(record, "final_checks")
+    if reaction_watch is not None:
+        reaction_watch.stop()
 
     final_refetches = int(getattr(args, "final_refetches", 2))
     final_refetch_interval_s = float(getattr(args, "final_refetch_interval_s", 1.0))
@@ -5025,6 +5036,11 @@ def run_assertion(
         if required_feature not in enabled_features:
             return feature_accounting.skipped_assertion(required_feature)
         spec = {key: value for key, value in spec.items() if key != "requires_feature"}
+    if surface_assertions.owns(spec):
+        try:
+            return surface_assertions.run(spec, record=record, run_id=run_id, read_api=_read_api_json, window=window)
+        except surface_assertions.Unevaluable as error:
+            raise HarnessEvidenceError(str(error)) from error
     if "message_count_between_markers" in spec:
         params = spec["message_count_between_markers"]
         assertions.message_count_between_markers(
