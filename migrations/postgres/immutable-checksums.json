@@ -932,6 +932,21 @@
       "version": 190
     },
     {
+      "path": "migrations/postgres/0191_routine_execution_modes.sql",
+      "sha256": "4fd309ed67c2ba10a6ab877fd5631b46dc9d21d2c20201a225cf980a67ab5d7a",
+      "version": 191
+    },
+    {
+      "path": "migrations/postgres/0192_routine_incident_transport.sql",
+      "sha256": "811e956d9209b6bb67ed8db270231d536a1e0f6d622a1bc9d26ed49995e048d8",
+      "version": 192
+    },
+    {
+      "path": "migrations/postgres/0193_session_transcript_channel_context.sql",
+      "sha256": "0fa786900a8f9f2f8a9264e7189340abd34005ed2d18200ce954a2679c3bdae4",
+      "version": 193
+    },
+    {
       "path": "migrations/postgres/0195_herdr_body_debt_recovery.sql",
       "sha256": "1f0a02742a80d2e5972bb0bd97ee9441cdb07775a6faf65b8a4873414c3ce7ef",
       "version": 195

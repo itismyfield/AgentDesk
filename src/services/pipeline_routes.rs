@@ -916,6 +916,7 @@ fn database_error(error: sqlx::Error) -> PipelineRouteError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::wait::poll_within;
 
     fn stage_with_backoff(backoff: Option<&str>) -> PipelineStageInput {
         PipelineStageInput {
@@ -1199,22 +1200,20 @@ mod tests {
         tx
     }
 
-    async fn wait_for_lock_waiters(pool: &PgPool, waiters: i64) {
-        for _ in 0..400 {
-            let queued = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM pg_locks
-                  WHERE locktype = 'advisory' AND NOT granted
-                    AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
-            )
-            .fetch_one(pool)
-            .await
-            .expect("count lock waiters");
-            if queued >= waiters {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    async fn lock_waiters_sample(pool: &PgPool, waiters: i64) -> Result<(), String> {
+        let queued = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pg_locks
+              WHERE locktype = 'advisory' AND NOT granted
+                AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("count lock waiters");
+        if queued >= waiters {
+            Ok(())
+        } else {
+            Err(format!("{waiters} stage lock waiter(s) never queued"))
         }
-        panic!("{waiters} stage lock waiter(s) never queued");
     }
 
     fn spawn_save(
@@ -1286,9 +1285,21 @@ mod tests {
         // The save queued first reorders qa ahead of e2e; the move then takes qa.
         let hold = hold_stage_lock(&pool, "repo-rt").await;
         let save = spawn_save(&pool, "repo-rt", names(&["lint", "qa", "e2e"]));
-        wait_for_lock_waiters(&pool, 1).await;
+        poll_within(
+            async || lock_waiters_sample(&pool, 1).await,
+            std::time::Duration::from_secs(10),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         let advance = spawn_advance(&pool);
-        wait_for_lock_waiters(&pool, 2).await;
+        poll_within(
+            async || lock_waiters_sample(&pool, 2).await,
+            std::time::Duration::from_secs(10),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         hold.commit().await.expect("release");
         save.await.expect("join").expect("reorder behind the card");
         let moved = advance.await.expect("join").expect("advance");
@@ -1307,9 +1318,21 @@ mod tests {
             .expect("restore order");
         let hold = hold_stage_lock(&pool, "repo-rt").await;
         let advance = spawn_advance(&pool);
-        wait_for_lock_waiters(&pool, 1).await;
+        poll_within(
+            async || lock_waiters_sample(&pool, 1).await,
+            std::time::Duration::from_secs(10),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         let save = spawn_save(&pool, "repo-rt", names(&["lint", "qa", "e2e"]));
-        wait_for_lock_waiters(&pool, 2).await;
+        poll_within(
+            async || lock_waiters_sample(&pool, 2).await,
+            std::time::Duration::from_secs(10),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         hold.commit().await.expect("release");
         let moved = advance.await.expect("join").expect("advance");
         assert_eq!(moved["stage"]["stage_name"], json!("e2e"));
@@ -1355,9 +1378,21 @@ mod tests {
 
         let hold = hold_stage_lock(&pool, "repo-empty").await;
         let first = spawn_save(&pool, "repo-empty", vec![dashboard_stage("e2e")]);
-        wait_for_lock_waiters(&pool, 1).await;
+        poll_within(
+            async || lock_waiters_sample(&pool, 1).await,
+            std::time::Duration::from_secs(10),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         let second = spawn_save(&pool, "repo-empty", vec![dashboard_stage("qa")]);
-        wait_for_lock_waiters(&pool, 2).await;
+        poll_within(
+            async || lock_waiters_sample(&pool, 2).await,
+            std::time::Duration::from_secs(10),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         hold.commit().await.expect("release");
         first.await.expect("join").expect("first save");
         let listed = second.await.expect("join").expect("second save");
@@ -1373,9 +1408,21 @@ mod tests {
                 ..dashboard_stage("qa")
             }],
         );
-        wait_for_lock_waiters(&pool, 1).await;
+        poll_within(
+            async || lock_waiters_sample(&pool, 1).await,
+            std::time::Duration::from_secs(10),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         let second = spawn_save(&pool, "repo-timeout", vec![dashboard_stage("qa")]);
-        wait_for_lock_waiters(&pool, 2).await;
+        poll_within(
+            async || lock_waiters_sample(&pool, 2).await,
+            std::time::Duration::from_secs(10),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         hold.commit().await.expect("release");
         first.await.expect("join").expect("first save");
         let listed = second.await.expect("join").expect("second save");

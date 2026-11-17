@@ -593,6 +593,7 @@ pub(super) fn decide_marker_disposition(
 /// Deliberately NO TTL upper bound (verify r1): the sweep defers to a live
 /// same-session inflight, so a foreign turn streaming past the TTL must still
 /// have its eventual commit accepted.
+#[cfg(test)]
 pub(super) fn terminal_commit_covers_marker(
     now_ms: u64,
     marker: &AbortedAnchorMarker,
@@ -608,6 +609,7 @@ pub(super) fn terminal_commit_covers_marker(
     )
 }
 
+#[cfg(test)]
 fn terminal_commit_covers_marker_with_offset(
     now_ms: u64,
     marker: &AbortedAnchorMarker,

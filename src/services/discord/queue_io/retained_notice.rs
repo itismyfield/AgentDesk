@@ -108,6 +108,32 @@ pub(crate) async fn carried_unverified_closed(
     .map_err(|e| e.to_string())
 }
 
+/// The one notice an input hold owes, keyed by the hold; its one text serves a hold that stays
+/// and one released unconfirmed, since a hold never posts a second row.
+pub(crate) async fn input_hold(
+    pool: &sqlx::PgPool,
+    provider: &str,
+    channel: u64,
+    (nonce, hold): (&str, &str),
+) -> Result<i64, String> {
+    let key = format!("input-hold:{nonce}:{hold}");
+    let body = "⚠️ 앞선 입력이 입력창에 남아 있거나 전달 여부를 확인하지 못해 다음 메시지가 기다리고 있습니다. 입력창이 비거나 다시 읽히면 자동으로 이어집니다. 앞선 입력은 전달되지 않았을 수 있고 자동으로 다시 보내지 않습니다. 이어진 뒤에도 앞선 입력에 응답이 없으면 그 내용을 다시 보내 주세요.";
+    let text = super::super::dispatch_policy::prepend_operational_alert_origin(body);
+    enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+        pool,
+        OutboxMessage {
+            target: &format!("channel:{channel}"),
+            content: &text,
+            bot: provider,
+            source: "retained_input_notice",
+            reason_code: Some("input.hold"),
+            session_key: Some(&key),
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 impl crate::services::turn_orchestrator::ChannelMailboxHandle {
     #[cfg(test)]
     pub(crate) fn v2_notice_is_non_turn(text: &str) -> bool {

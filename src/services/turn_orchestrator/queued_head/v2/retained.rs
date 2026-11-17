@@ -177,9 +177,11 @@ impl Owner {
         remove_members(&mut next, &input)?;
         input.phase = HeadPhase::Reserved;
         // No later look submits a permanent refusal, so its origin's execution has failed.
-        if PERMANENT.contains(&reason.as_str()) {
+        let permanent = PERMANENT.contains(&reason.as_str());
+        if permanent {
             next.owe_attempt(&input, TerminalOutcome::Failed, super::origin::now_ms());
         }
+        let members: Vec<PendingQueueItem> = input.members().cloned().collect();
         next.retained_inputs.push(RetainedInput {
             input,
             reason: RetainedReason::Rejected {
@@ -192,6 +194,10 @@ impl Owner {
                 enqueued: false,
             },
         });
+        if permanent {
+            let dropped = super::effort_continue::Dropped::Only(&members);
+            super::effort_continue::close_dropped(&mut next, dropped);
+        }
         self.commit(next)?;
         self.project_slots();
         Ok(())
@@ -235,9 +241,15 @@ impl Owner {
         entry.notice.enqueued = true;
         // A told retryable proven-unsent input is never resubmitted; a permanent one owed at retain.
         let known = matches!(entry.disposition, Some(RetainedDisposition::KnownNotSent));
+        let input = entry.input.clone();
         if known && !permanently_refused(entry) {
-            let input = entry.input.clone();
             next.owe_attempt(&input, TerminalOutcome::Failed, super::origin::now_ms());
+        }
+        if known {
+            // A told proven-unsent continuation is never resubmitted either: its barrier closes.
+            let members: Vec<PendingQueueItem> = input.members().cloned().collect();
+            let dropped = super::effort_continue::Dropped::Only(&members);
+            super::effort_continue::close_dropped(&mut next, dropped);
         }
         self.commit(next)
     }

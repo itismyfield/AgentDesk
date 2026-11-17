@@ -13,12 +13,10 @@ struct Db {
 }
 
 impl Db {
-    async fn new() -> Option<Self> {
+    async fn new() -> Self {
         let lifecycle = postgres::lock_test_lifecycle();
-        let Some(base) = postgres::postgres_test_database_url_base() else {
-            eprintln!("SKIP: isolated PostgreSQL fixture is not configured");
-            return None;
-        };
+        let base = postgres::postgres_test_database_url_base()
+            .expect("POSTGRES_TEST_DATABASE_URL_BASE required for advisory lock idle expiry tests"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
         let admin = format!(
             "{base}/{}",
             std::env::var("POSTGRES_TEST_ADMIN_DB").unwrap_or_else(|_| "postgres".into())
@@ -30,12 +28,12 @@ impl Db {
         let pool = postgres::connect_test_pool(&format!("{base}/{database}"), LABEL)
             .await
             .unwrap();
-        Some(Self {
+        Self {
             pool,
             admin,
             database,
             _lifecycle: lifecycle,
-        })
+        }
     }
 
     async fn expiring(&self, lock_id: i64, expiry: Option<Duration>) -> Option<AdvisoryLockLease> {
@@ -88,9 +86,7 @@ impl Db {
 
 #[tokio::test]
 async fn keepalive_holds_an_expiring_lease_and_silence_releases_it_pg() {
-    let Some(db) = Db::new().await else {
-        return;
-    };
+    let db = Db::new().await;
     let mut lease = db.expiring(5_631_001, Some(EXPIRY)).await.unwrap();
     let kept_until = Instant::now() + EXPIRY * 3;
     while Instant::now() < kept_until {
@@ -118,9 +114,7 @@ async fn keepalive_holds_an_expiring_lease_and_silence_releases_it_pg() {
 
 #[tokio::test]
 async fn expiry_is_in_force_before_the_lock_is_granted_pg() {
-    let Some(db) = Db::new().await else {
-        return;
-    };
+    let db = Db::new().await;
     test_seam::stall_after_lock_for(5_631_002);
     let pool = db.pool.clone();
     let stalled = tokio::spawn(async move {
@@ -147,9 +141,7 @@ async fn expiry_is_in_force_before_the_lock_is_granted_pg() {
 
 #[tokio::test]
 async fn idle_expiry_ends_only_the_expiring_lease_session_pg() {
-    let Some(db) = Db::new().await else {
-        return;
-    };
+    let db = Db::new().await;
     let mut pooled = db.pool.acquire().await.unwrap();
     let pooled_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *pooled)

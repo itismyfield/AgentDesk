@@ -1197,7 +1197,7 @@ if lint.is_a?(Hash)
     errors << "job lint #{lint_tests_name} must keep #{key}=0" unless tests && (tests["env"] || {})[key] == "0"
   end
 end
-# The nextest jobs share execution policy; PR builds use more swap and main uploads a baseline.
+# PR N == main N == nightly N: the jobs differ only in needs and the main baseline upload; base_compare is PR-only.
 built_gate = "${{ !cancelled() && needs.rust_build.result == 'success' }}"
 baseline_upload = {"name" => "Upload nextest baseline", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-baseline", "path" => "${{ runner.temp }}/nextest/plan/plan.json", "if-no-files-found" => "error", "retention-days" => 14}}
 role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key) }.merge("steps" => Array(job["steps"]).reject { |step| role_step && step.is_a?(Hash) && step["name"] == role_step }) }
@@ -1208,13 +1208,7 @@ role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key
     next
   end
   errors << "main #{job_id} must keep needs #{needs.inspect} and if #{gate.inspect}" unless main_job["needs"] == needs && main_job["if"] == gate
-  pr_shape = role_free.(pr_job, nil)
-  if job_id == "rust_build"
-    # Only this complete PR swap step may differ; extra inputs or step overrides stay visible.
-    approved_swap = {"name" => "Ensure swap for the lib test build", "uses" => "./.github/actions/ensure-swap", "with" => {"size-gb" => "24"}}
-    pr_shape = pr_shape.merge("steps" => pr_shape["steps"].map { |step| step == approved_swap ? step.reject { |key, _| key == "with" } : step })
-  end
-  errors << "main #{job_id} must equal the PR job apart from needs, if, the role step and the exact PR swap size" unless role_free.(main_job, "Upload nextest baseline") == pr_shape
+  errors << "main #{job_id} must equal the PR job apart from needs, if and the role step" unless role_free.(main_job, "Upload nextest baseline") == role_free.(pr_job, nil)
   nightly_job = nightly_jobs[job_id]
   expected_nightly = role_free.(main_job, "Upload nextest baseline").merge(main_job.slice("needs", "if"))
   # Nightly keeps the strict retry policy: its plan differs from main only in that argument.

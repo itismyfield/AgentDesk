@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use poise::serenity_prelude::ChannelId;
 use serde_json::Value;
 
-use super::{EffortLevel, SharedData};
+use super::SharedData;
 use crate::db::dispatched_sessions::hosted_execution::{HostedLookup, HostedRecord, HostedState};
 use crate::services::claude_tui::{composer_lock, hook_bundle::statusline, host_input, input};
 use crate::services::provider::ProviderKind;
@@ -237,8 +237,13 @@ pub(super) async fn effort(
     shared: &Arc<SharedData>,
     token: &str,
     channel: ChannelId,
-    level: EffortLevel,
+    level: &'static str,
 ) -> Result<(), String> {
+    // The overlay lists these left to right.
+    let steps = ["low", "medium", "high", "xhigh", "max"]
+        .into_iter()
+        .position(|listed| listed == level)
+        .ok_or("Herdr effort 선택창에 없는 값입니다")?;
     let apply = move |pane: &HerdrTarget, native: &str, after| {
         use input::TuiInputAction::{Enter, Left, Literal, Right};
         let send =
@@ -255,12 +260,12 @@ pub(super) async fn effort(
                 return Err("effort 옵션 배치 미확인".to_string());
             }
             let mut plan = vec![Left; 4];
-            plan.extend(std::iter::repeat_n(Right, level as usize));
+            plan.extend(std::iter::repeat_n(Right, steps));
             plan.push(Enter);
             send(&plan)?;
             wait(|| {
                 let seen = &record(native, after).map_err(str::to_string)?["effort"]["level"];
-                (seen.as_str() == Some(level.as_str()))
+                (seen.as_str() == Some(level))
                     .then_some(())
                     .ok_or_else(|| format!("effort.level 불일치: `{seen}`"))
             })
@@ -273,8 +278,9 @@ pub(super) async fn effort(
     };
     let key = channel.get().to_string();
     with_ready_pane(shared, (token, channel), apply, |(), settings| {
-        let level = level.as_str().to_string();
-        settings.channel_effort_levels.insert(key, level);
+        settings
+            .channel_effort_levels
+            .insert(key, level.to_string());
     })
     .await
 }

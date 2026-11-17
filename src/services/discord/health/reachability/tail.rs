@@ -59,7 +59,7 @@ impl TailCursor {
     /// the partial line is re-read whole. This helper is the unconditional
     /// advance, correct only where framing cannot defer, and it stays because
     /// this file's own tests read through it.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(in crate::services::discord) fn advanced_to(self, end: u64) -> Self {
         Self {
             file_id: self.file_id,

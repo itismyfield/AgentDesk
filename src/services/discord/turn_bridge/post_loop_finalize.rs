@@ -574,47 +574,15 @@ pub(super) async fn run_post_loop_finalize(
             // dispatch_role_overrides cleanup). The ledger
             // gate makes a transitional double-finalize with a still-direct
             // watcher (phase 3 routes it) a harmless idempotent no-op.
-            let outcome = shared_owned
-                .turn_finalizer
-                .submit_terminal_with_claim_snapshot(
-                    super::super::turn_finalizer::TurnKey::new(
-                        channel_id,
-                        inflight_state.effective_finalizer_turn_id(),
-                        shared_owned.restart.current_generation,
-                    ),
-                    provider.clone(),
-                    if cancelled {
-                        super::super::turn_finalizer::TerminalEvent::Cancel
-                    } else {
-                        super::super::turn_finalizer::TerminalEvent::Complete
-                    },
-                    super::super::turn_finalizer::FinalizeContext::bridge(),
-                    Some(bridge_terminal_claim_snapshot(
-                        &inflight_state,
-                        synthetic_actor.as_ref(),
-                    )),
-                    shared_owned.clone(),
-                )
-                .await;
-            // `finalize_owned` is the real invariant: SOME authority (this
-            // bridge submission OR whoever already finalized — the ledger
-            // guarantees exactly-once) owns the finalize for this turn. All
-            // three outcomes satisfy it, so none is a violation.
-            // `this_finalized` records only whether THIS submission was the
-            // one finalizer; an `AlreadyFinalized` (someone else won, e.g. a
-            // sweeper/watcher race) is the normal/info path and must NOT
-            // emit a false `[invariant]` ERROR.
-            let (this_finalized, finalize_owned, has_pending) = match outcome {
-                super::super::turn_finalizer::FinalizeOutcome::Finalized {
-                    removed_token,
-                    has_pending,
-                    ..
-                } => (removed_token.is_some(), true, has_pending),
-                // Something else finalized first (rare sweeper race).
-                super::super::turn_finalizer::FinalizeOutcome::AlreadyFinalized
-                | super::super::turn_finalizer::FinalizeOutcome::Deferred => (false, true, false),
-            };
-            let _ = this_finalized;
+            let (this_finalized, finalize_owned, has_pending) = finalize_bridge_terminal(
+                &shared_owned,
+                &provider,
+                channel_id,
+                &inflight_state,
+                synthetic_actor.as_ref(),
+                cancelled,
+            )
+            .await;
             record_turn_bridge_invariant(
                 finalize_owned,
                 &provider,
@@ -649,50 +617,15 @@ pub(super) async fn run_post_loop_finalize(
         // gone. The ledger's exactly-once gate already guards the
         // cross-turn hazard the CAS protected against — a watcher surviving
         // into the NEXT turn no longer has a flag to swap.
-        let outcome = shared_owned
-            .turn_finalizer
-            .submit_terminal_with_claim_snapshot(
-                super::super::turn_finalizer::TurnKey::new(
-                    channel_id,
-                    inflight_state.effective_finalizer_turn_id(),
-                    shared_owned.restart.current_generation,
-                ),
-                provider.clone(),
-                if cancelled {
-                    super::super::turn_finalizer::TerminalEvent::Cancel
-                } else {
-                    super::super::turn_finalizer::TerminalEvent::Complete
-                },
-                super::super::turn_finalizer::FinalizeContext::bridge(),
-                Some(bridge_terminal_claim_snapshot(
-                    &inflight_state,
-                    synthetic_actor.as_ref(),
-                )),
-                shared_owned.clone(),
-            )
-            .await;
-        // `finalize_owned` is the actual invariant: SOMEONE (this bridge
-        // submission OR the watcher that won the race OR the deadline-armed
-        // backstop for a deferred gate-timeout) owns the one finalize for
-        // this turn. The single-authority ledger guarantees that, so all
-        // three outcomes are the normal/info path. `this_finalized` only
-        // records whether THIS submission was the one that finalized — it
-        // must NOT be conflated with an invariant violation, otherwise a
-        // watcher-won `AlreadyFinalized` (e.g. the watcher consumed
-        // `mailbox_finalize_owed` before the bridge revoked it) emits a
-        // false `[invariant]` ERROR for completely normal exactly-once
-        // behaviour — the pre-#3016 code treated that as an info path.
-        let (this_finalized, finalize_owned, has_pending) = match outcome {
-            super::super::turn_finalizer::FinalizeOutcome::Finalized {
-                removed_token,
-                has_pending,
-                ..
-            } => (removed_token.is_some(), true, has_pending),
-            // The watcher won the finalize race (or the gate-timeout deferred).
-            super::super::turn_finalizer::FinalizeOutcome::AlreadyFinalized
-            | super::super::turn_finalizer::FinalizeOutcome::Deferred => (false, true, false),
-        };
-        let _ = this_finalized;
+        let (this_finalized, finalize_owned, has_pending) = finalize_bridge_terminal(
+            &shared_owned,
+            &provider,
+            channel_id,
+            &inflight_state,
+            synthetic_actor.as_ref(),
+            cancelled,
+        )
+        .await;
         record_turn_bridge_invariant(
             finalize_owned,
             &provider,
@@ -734,6 +667,48 @@ pub(super) async fn run_post_loop_finalize(
         has_queued_turns,
         #[cfg(unix)]
         bridge_tui_gate_outcome_early,
+    }
+}
+
+async fn finalize_bridge_terminal(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    inflight_state: &InflightTurnState,
+    synthetic_actor: Option<&Arc<CancelToken>>,
+    cancelled: bool,
+) -> (bool, bool, bool) {
+    let outcome = shared
+        .turn_finalizer
+        .submit_terminal_with_claim_snapshot(
+            super::super::turn_finalizer::TurnKey::new(
+                channel_id,
+                inflight_state.effective_finalizer_turn_id(),
+                shared.restart.current_generation,
+            ),
+            provider.clone(),
+            if cancelled {
+                super::super::turn_finalizer::TerminalEvent::Cancel
+            } else {
+                super::super::turn_finalizer::TerminalEvent::Complete
+            },
+            super::super::turn_finalizer::FinalizeContext::bridge(),
+            Some(bridge_terminal_claim_snapshot(
+                inflight_state,
+                synthetic_actor,
+            )),
+            shared.clone(),
+        )
+        .await;
+    // Every outcome retains a finalization owner, including a deferred submission.
+    match outcome {
+        super::super::turn_finalizer::FinalizeOutcome::Finalized {
+            removed_token,
+            has_pending,
+            ..
+        } => (removed_token.is_some(), true, has_pending),
+        super::super::turn_finalizer::FinalizeOutcome::AlreadyFinalized
+        | super::super::turn_finalizer::FinalizeOutcome::Deferred => (false, true, false),
     }
 }
 

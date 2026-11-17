@@ -384,7 +384,7 @@ impl TmuxWatcherRegistry {
 
     // #3034: test-only convenience wrapper (prod code calls `insert_locked`
     // with an explicit registry guard). Used only by `#[cfg(test)]` setup.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(in crate::services::discord) fn insert(
         &self,
         channel_id: ChannelId,

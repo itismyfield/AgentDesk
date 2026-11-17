@@ -534,7 +534,7 @@ async fn busy_active_codex_keeps_mailbox_op() {
     assert_eq!(active_message_ops(&rig, message), [('📬', true)]);
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn busy_active_herdr_keeps_mailbox_op() {
     if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::single_marker::",
@@ -544,11 +544,22 @@ async fn busy_active_herdr_keeps_mailbox_op() {
     }
     let _root = active_root();
     let rig = IntakeRig::new(8_113_107, true).await;
+    // The old pane closes while the running turn still holds the mailbox: the handoff holds.
+    use crate::services::discord::queue_io::input_owner::claude_handoff::tests::herdr_host;
+    let _handoff = herdr_host(rig.channel.get(), "claude/t/h:left", false);
     let _host =
         crate::config::session_hosts::force_for_test(Some("mini"), &[(rig.channel.get(), "mini")]);
     let _gate = discord::router::busy_inject_support::open_gate(rig.channel.get());
     assert!(crate::config::session_hosts::herdr_endpoint(rig.channel.get()).is_some());
     let message = busy_active_arrival(&rig, false).await;
+    assert_eq!(
+        active_message_ops(&rig, message),
+        Vec::<(char, bool)>::new()
+    );
+    let (drive, mut settled) = rig.drive();
+    discord::queue_io::input_owner::drive::wake(drive);
+    let result = await_within(settled.recv(), WAIT_CAP).await.unwrap();
+    assert_eq!(result, Err("NotSent(\"claude_handoff_held\")".into()));
     assert_eq!(active_message_ops(&rig, message), [('📬', true)]);
 }
 
