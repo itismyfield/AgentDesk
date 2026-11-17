@@ -1,6 +1,6 @@
 //! Reevaluate the original execution without renewing its total deadline or resubmitting input.
-use crate::services::tui_o::channel_policy::adoption::output_disposition::{Output, Phase, Reason};
-use crate::services::tui_o::channel_policy::{Candidate, FirstProof};
+use crate::services::tui_o::channel_policy::output_disposition::{Output, Phase, Reason};
+use crate::services::tui_o::channel_policy::{Adoption, Candidate, FirstProof};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::writer::late_adopt::codex::prefix::{self, Verdict};
 
@@ -9,8 +9,9 @@ pub(crate) async fn run(
     candidate: &Candidate,
     source: &SourceId,
 ) -> Result<FirstProof, Reason> {
+    let mut checked: Option<prefix::Prefix> = None;
     loop {
-        if output.expire() {
+        if output.expire() || output.remaining().is_zero() {
             return Err(Reason::Deadline);
         }
         if output.phase() != Phase::Normalizing {
@@ -29,6 +30,13 @@ pub(crate) async fn run(
                 return Err(Reason::Invalidated);
             }
         };
+        if checked
+            .as_ref()
+            .is_some_and(|prefix| prefix.preserved_in(source).is_err())
+        {
+            output.reject(Reason::SourceRejected);
+            return Err(Reason::SourceRejected);
+        }
         match prefix::buffered(source) {
             Verdict::Refuse(_) => {
                 output.reject(Reason::SourceRejected);
@@ -38,7 +46,27 @@ pub(crate) async fn run(
                 if prefix.prompt_digest.as_ref() == Some(&proof.digest)
                     && prefix.prompt_end.is_some() =>
             {
-                if output.adopt(&proof).is_ok() {
+                if checked.is_none() {
+                    checked = Some(prefix.clone());
+                }
+                let guard = candidate.lock();
+                let adopted = output.adopt(&proof, || {
+                    if *guard != Adoption::Committed {
+                        return Err("O activation has not committed this source".into());
+                    }
+                    if candidate.first_proof(source)?.as_ref() != Some(&proof) {
+                        return Err("first admission changed during normalization".into());
+                    }
+                    prefix
+                        .preserved_in(source)
+                        .map_err(|_| "normalization source changed")?;
+                    match prefix::buffered(source) {
+                        Verdict::Eligible(now) if now == prefix => Ok(()),
+                        _ => Err("normalization prefix changed".into()),
+                    }
+                });
+                drop(guard);
+                if adopted.is_ok() {
                     return Ok(proof);
                 }
                 if output.take_repair() {
@@ -50,6 +78,7 @@ pub(crate) async fn run(
                     continue;
                 }
             }
+            Verdict::Eligible(prefix) if prefix.prompt_end.is_none() => {}
             Verdict::Eligible(_) => {
                 output.reject(Reason::SourceRejected);
                 return Err(Reason::SourceRejected);
@@ -62,3 +91,5 @@ pub(crate) async fn run(
         tokio::time::sleep(pause).await;
     }
 }
+
+pub(crate) mod continuation;

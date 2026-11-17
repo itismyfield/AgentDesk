@@ -387,6 +387,7 @@ src/
 │   ├── session_transcripts_retired_boundary_pg_tests.rs
 │   ├── status_check_migration_tests.rs
 │   ├── timestamps.rs
+│   ├── tui_output_disposition.rs
 │   └── turns.rs
 ├── dispatch/
 │   ├── dispatch_status/
@@ -1361,6 +1362,8 @@ src/
 │   │   │   ├── identity.rs
 │   │   │   ├── mod.rs
 │   │   │   └── producer.rs
+│   │   ├── host_input/
+│   │   │   └── trust.rs
 │   │   ├── input/
 │   │   │   ├── tests/
 │   │   │   │   └── startup_update_tests.rs
@@ -1394,6 +1397,9 @@ src/
 │   │   │   ├── checkpoint.rs
 │   │   │   ├── source_observation.rs
 │   │   │   └── source_observation_tests.rs
+│   │   ├── startup_dialog/
+│   │   │   ├── normalize.rs
+│   │   │   └── normalize_tests.rs
 │   │   ├── verified_tail/
 │   │   │   └── diagnostic_tests.rs
 │   │   ├── warm_followup/
@@ -2003,6 +2009,8 @@ src/
 │   │   │   ├── source_registry.rs
 │   │   │   ├── transport.rs
 │   │   │   ├── transport_observation_tests.rs
+│   │   │   ├── tui_rejection_notice.rs
+│   │   │   ├── tui_rejection_notice_tests.rs
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_controller/
 │   │   │   ├── queued_card_gate/
@@ -4199,7 +4207,9 @@ src/
 │   │   │   ├── adoption/
 │   │   │   │   ├── body_check.rs
 │   │   │   │   ├── first_turn.rs
-│   │   │   │   └── first_turn_tests.rs
+│   │   │   │   ├── first_turn_tests.rs
+│   │   │   │   ├── output_disposition.rs
+│   │   │   │   └── output_disposition_tests.rs
 │   │   │   ├── children/
 │   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── tests.rs
@@ -4382,7 +4392,12 @@ src/
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── codex/
+│   │   │   │   │   ├── normalization/
+│   │   │   │   │   │   ├── continuation.rs
+│   │   │   │   │   │   └── continuation_tests.rs
 │   │   │   │   │   ├── buffered_tests.rs
+│   │   │   │   │   ├── delivered.rs
+│   │   │   │   │   ├── normalization.rs
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── claude.rs

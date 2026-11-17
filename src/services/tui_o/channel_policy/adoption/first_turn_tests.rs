@@ -409,3 +409,66 @@ fn a_fenced_queued_body_refuses_the_proved_first_init() {
     assert!(f.store.read_init(f.channel).unwrap().is_none());
     assert_eq!(f.candidate.peek(), Adoption::Deferred);
 }
+
+#[test]
+fn only_new_input_reopens_a_refused_episode_and_old_tokens_cannot_end_it() {
+    use super::output_disposition::{Identity, Output, Phase, Reason};
+    let fixture = Fixture::new(8_165_981);
+    let old_proof = fixture.proof();
+    let old = Output::new(
+        Identity::from_proof(&old_proof, 10),
+        tokio::time::Instant::now(),
+    );
+    assert!(old.reject(Reason::SourceRejected));
+    fixture.candidate.release(fixture.channel);
+    let tmux = old_proof.context.tmux_session.as_str();
+    assert!(
+        fixture
+            .candidate
+            .admit_first(fixture.channel, "new", "hi", tmux, || Ok(0))
+            .is_none()
+    );
+    assert!(
+        fixture
+            .candidate
+            .admit_after_rejection(&old, (10, "new", "hi", tmux), || Ok(0))
+            .is_none()
+    );
+    assert!(
+        fixture
+            .candidate
+            .admit_after_rejection(&old, (11, &old_proof.nonce, "hi", tmux), || Ok(0))
+            .is_none()
+    );
+    let new = fixture
+        .candidate
+        .admit_after_rejection(&old, (11, "new", "hi", tmux), || Ok(0))
+        .unwrap();
+    fixture
+        .candidate
+        .invalidate_first(Some(&old_proof.nonce), Some(tmux));
+    assert!(fixture.candidate.first_mark().is_some());
+    assert_eq!(
+        old.phase(),
+        Phase::RejectPendingNotice(Reason::SourceRejected)
+    );
+    drop(new);
+}
+
+#[tokio::test(start_paused = true)]
+async fn missing_prompt_and_wakes_exhaust_one_normalization_deadline() {
+    use super::output_disposition::{Identity, Output, Phase, Reason};
+    let fixture = Fixture::new(8_165_982);
+    let proof = fixture.proof();
+    let output = Output::new(Identity::from_proof(&proof, 1), tokio::time::Instant::now());
+    let result = crate::services::tui_o::writer::normalization::run(
+        &output,
+        &fixture.candidate,
+        &fixture.source,
+    )
+    .await;
+    assert_eq!(result.unwrap_err(), Reason::Deadline);
+    assert_eq!(output.phase(), Phase::RejectPendingNotice(Reason::Deadline));
+    assert!(output.remaining().is_zero());
+    assert!(output.adopt(&proof, || Ok(())).is_err());
+}

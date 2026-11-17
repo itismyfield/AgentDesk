@@ -9,9 +9,11 @@ impl Identity {
         Self {
             channel: proof.channel,
             input,
-            nonce: super::digest(&proof.nonce),
-            execution: super::digest(&proof.context.execution_nonce),
-            source: super::digest(&serde_json::to_string(&proof.source).expect("source identity")),
+            nonce: super::first_prompt_digest(&proof.nonce),
+            execution: super::first_prompt_digest(&proof.context.execution_nonce),
+            source: super::first_prompt_digest(
+                &serde_json::to_string(&proof.source).expect("source identity"),
+            ),
         }
     }
 }
@@ -48,12 +50,34 @@ pub(crate) struct Output {
 }
 impl Output {
     pub(crate) fn new(id: Identity, admitted_at: Instant) -> Self {
-        // One total budget includes every retry and wake; reserve five seconds for notice delivery.
+        // One total budget includes every retry and wake; notice delivery has a separate metadata-only timeout.
         Self {
             id,
             deadline: admitted_at + Duration::from_secs(25),
             state: Arc::new(Mutex::new((Phase::Normalizing, false))),
         }
+    }
+    pub(crate) async fn restore(
+        pool: &sqlx::PgPool,
+        id: Identity,
+        admitted_at: Instant,
+    ) -> Result<Self, String> {
+        let recorded = crate::db::tui_output_disposition::record(pool, &id).await?;
+        let output = Self::new(id, admitted_at);
+        if let Some((reason, receipt)) = recorded {
+            output.reject(reason);
+            if let Some(receipt) = receipt {
+                output.confirm(&receipt);
+            }
+        }
+        Ok(output)
+    }
+    pub(crate) async fn persist_rejection(&self, pool: &sqlx::PgPool) -> Result<(), String> {
+        let reason = match self.phase() {
+            Phase::RejectPendingNotice(reason) | Phase::Rejected(reason) => reason,
+            _ => return Err("only a terminal rejection may persist a tombstone".into()),
+        };
+        crate::db::tui_output_disposition::persist_intent(pool, &self.id, reason).await
     }
     pub(crate) fn id(&self) -> &Identity {
         &self.id
@@ -78,7 +102,11 @@ impl Output {
         state.0 = Phase::RejectPendingNotice(reason);
         true
     }
-    pub(crate) fn adopt(&self, proof: &FirstProof) -> Result<(), String> {
+    pub(crate) fn adopt(
+        &self,
+        proof: &FirstProof,
+        validate: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         if Self::identity_mismatch(self.id(), proof) {
             return Err("output proof identity changed".into());
         }
@@ -87,6 +115,34 @@ impl Output {
             return Err("output is terminal or expired".into());
         }
         proof.with_current(|| {
+            validate()?;
+            if Instant::now() >= self.deadline {
+                return Err("normalization deadline expired".into());
+            }
+            state.0 = Phase::Adopted;
+            Ok(())
+        })
+    }
+    pub(crate) fn adopt_resumed(
+        &self,
+        proof: &crate::services::tui_o::writer::normalization::continuation::ContinuationProof,
+        candidate: &super::Candidate,
+    ) -> Result<(), String> {
+        let guard = candidate.lock();
+        if *guard != super::Adoption::Committed {
+            return Err("resumed output has no O authority".into());
+        }
+        if &proof.identity() != self.id() {
+            return Err("resumed output proof identity changed".into());
+        }
+        let mut state = self.state.lock().unwrap();
+        if state.0 != Phase::Normalizing || Instant::now() >= self.deadline {
+            return Err("resumed output is terminal or expired".into());
+        }
+        proof.with_current(|| {
+            if Instant::now() >= self.deadline {
+                return Err("normalization deadline expired".into());
+            }
             state.0 = Phase::Adopted;
             Ok(())
         })
@@ -107,7 +163,11 @@ impl Output {
         let Phase::RejectPendingNotice(reason) = state.0 else {
             return false;
         };
-        if receipt.key() != self.id.key() {
+        if receipt.key() != self.id.key()
+            || receipt.reason() != reason
+            || receipt.template_version() != 1
+            || receipt.message() == 0
+        {
             return false;
         }
         state.0 = Phase::Rejected(reason);

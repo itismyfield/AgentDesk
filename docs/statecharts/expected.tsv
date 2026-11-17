@@ -925,13 +925,16 @@ tui-o-writer/WriterAdoptionNoRetry.cfg	WriterAdoption	-	RowEventuallySettled
 tui-o-writer/WriterAdoptionNoSerial.cfg	WriterAdoption	MarkerAtMostOnce	-
 tui-o-writer/WriterAdoptionNormalizeAfter.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAdoptionNormalizeDeadlineMut.cfg	WriterAdoption	-	NormEventuallyEnds,NormNextInputProgresses
+tui-o-writer/WriterAdoptionNormalizeEarlyPublishMut.cfg	WriterAdoption	NormSafeAdoption	-
 tui-o-writer/WriterAdoptionNormalizeLegacyMut.cfg	WriterAdoption	NormNoLegacy	-
 tui-o-writer/WriterAdoptionNormalizeMixedEffectsMut.cfg	WriterAdoption	NormExclusiveEffects	-
 tui-o-writer/WriterAdoptionNormalizeNoRepair.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAdoptionNormalizeNoticeUnavailable.cfg	WriterAdoption	-	NormReasonSettles
 tui-o-writer/WriterAdoptionNormalizeReasonDuplicateMut.cfg	WriterAdoption	NormAtMostOnce	-
 tui-o-writer/WriterAdoptionNormalizeRetainMut.cfg	WriterAdoption	NormNoRetention	-
 tui-o-writer/WriterAdoptionNormalizeReviveMut.cfg	WriterAdoption	NormNoRevival	-
 tui-o-writer/WriterAdoptionNormalizeSilentDropMut.cfg	WriterAdoption	NormSettledEvidence	NormReasonSettles
+tui-o-writer/WriterAdoptionNormalizeUncertainRepostMut.cfg	WriterAdoption	NormAtMostOnce	-
 tui-o-writer/WriterAdoptionOwnedMut.cfg	WriterAdoption	UnadoptedNotOwned,RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionRelayedByTime.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered
 tui-o-writer/WriterAdoptionRetries4.cfg	WriterAdoption	TriesBound	-
@@ -964,7 +967,7 @@ tui-o-writer/WriterArchivedSourceNoDrain.cfg	WriterArchivedSource	NoUnsentTailLo
 tui-o-writer/WriterArchivedSourceRebindAfter.cfg	WriterArchivedSource	-	-
 tui-o-writer/WriterArchivedSourceRebindBefore.cfg	WriterArchivedSource	-	NewBindingProgress
 tui-o-writer/WriterCodexLateBefore.cfg	WriterAdoption	LateBindingPrecedesOutput	LateModalExplained
-tui-o-writer/WriterCodexLateBufferedAdmissionHoldMut.cfg	WriterAdoption	-	LateEligibleCommits
+tui-o-writer/WriterCodexLateBufferedAdmissionHoldMut.cfg	WriterAdoption	LateNoRejectedLegacy	LateEligibleCommits
 tui-o-writer/WriterCodexLateBufferedCheckedRecheckMut.cfg	WriterAdoption	LateNoUnsafeCommit	-
 tui-o-writer/WriterCodexLateBufferedDesign.cfg	WriterAdoption	-	-
 tui-o-writer/WriterCodexLateBufferedIdentityMut.cfg	WriterAdoption	LateNoUnsafeCommit	-
@@ -973,8 +976,9 @@ tui-o-writer/WriterCodexLateBufferedRecheckMut.cfg	WriterAdoption	LateNoUnsafeCo
 tui-o-writer/WriterCodexLateBufferedRestoreMut.cfg	WriterAdoption	LateCommitAtMostOnce	-
 tui-o-writer/WriterCodexLateEarlyBinding.cfg	WriterAdoption	LateBoundBeforeNeverSkipped	LateBoundBeforeCommits
 tui-o-writer/WriterCodexLateFencedDesign.cfg	WriterAdoption	-	-
+tui-o-writer/WriterCodexLateLegacyFallbackBefore.cfg	WriterAdoption	LateNoRejectedLegacy	-
 tui-o-writer/WriterCodexLateTimeoutMut.cfg	WriterAdoption	-	LateModalExplained
-tui-o-writer/WriterCodexLateUnfencedMut.cfg	WriterAdoption	LateNoUnsafeCommit	-
+tui-o-writer/WriterCodexLateUnfencedMut.cfg	WriterAdoption	LateNoUnsafeCommit,LateNoRejectedLegacy	-
 tui-o-writer/WriterMissingHaltBefore.cfg	WriterMissingHalt	NoUnchangedReboot	-
 tui-o-writer/WriterMissingHaltBinding.cfg	WriterMissingHalt	-	-
 tui-o-writer/WriterMissingHaltEarly.cfg	WriterMissingHalt	-	-

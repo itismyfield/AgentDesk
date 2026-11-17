@@ -8,7 +8,15 @@ production behavior. The outer-only ownership mapping is withdrawn. C is selecte
 retained until a verified owner/store recovers. C1 implements storage and execution
 retirement; C2 must implement O replay/receipts. No per-input failure receipt is added.
 
-## What Refused means today
+## Current decision and D1 boundary (2026-11-17)
+
+The user superseded decision A: normalize the original execution first; when that fails or expires, emit its body-free reason and discard the rejected episode. Retention for future owner/store replay is no longer the target policy. The earlier decision-A/C1/C2 sections below record existing behavior and compatibility obligations, not permission to retain newly rejected bodies.
+
+D1 provides typed disposition, one total normalization deadline, constrained trust/binding repair and metadata notice receipts behind the `channel_policy/adoption.rs` test-only installation boundary. Production behavior remains unchanged until D2 connects consumers and stores. D1 makes no claim that all storage paths retain zero rejected bodies. Original, DebtPrepared and DebtReceipt readers remain required to reconcile historical effects without promoting them to a new admission.
+
+D2 must include independent `terminal_outcome_delivery/foreign_terminal_handoff.rs` custody: stop new rejected snapshots before `preserve_or_publish`, identify existing custody by its original episode, bind it to durable body-free reason intent, and retire it before checking HTTP availability. Scrub full_response, local prompt/body, admitted.result and delivery_body. Pending reason receipt cannot retain a raw snapshot or extend `retains_channel()`. Custody cleanup completion is not body Delivered/O Posted/input success; successor rows remain untouched.
+
+## Historical Refused behavior at the audit baseline
 
 Plan r2 section 10 requires visible rejection **before acceptance** for an invalid
 O setup, preservation of accepted input/receipts while O recovers, and no Legacy

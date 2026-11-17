@@ -1344,7 +1344,12 @@ pub(crate) async fn first_terminal_plan(
     nonce: Option<&str>,
     path: &std::path::Path,
     transports: Arc<std::sync::atomic::AtomicUsize>,
-) -> crate::services::tui_o::cutover::BodySend<usize> {
+    policy: Option<(
+        crate::services::tui_o::channel_policy::output_disposition::Output,
+        crate::services::tui_o::channel_policy::Candidate,
+        crate::services::tui_o::shadow::SourceId,
+    )>,
+) -> Result<crate::services::tui_o::cutover::BodySend<usize>, String> {
     let session = session.to_owned();
     let output_path = path.display().to_string();
     let channel_id = serenity::ChannelId::new(channel);
@@ -1422,7 +1427,8 @@ pub(crate) async fn first_terminal_plan(
         || async { transports.fetch_add(1, Ordering::SeqCst) + 1 },
     )
     .await
-    .unwrap();
+    .map_err(|error| error.to_string());
     drop(plan);
+    let _ = policy;
     sent
 }

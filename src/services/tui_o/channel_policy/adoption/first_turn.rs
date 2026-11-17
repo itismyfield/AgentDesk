@@ -227,6 +227,42 @@ impl Candidate {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn admit_after_rejection(
+        &self,
+        previous: &super::output_disposition::Output,
+        next: (u64, &str, &str, &str),
+        read_seq: impl FnOnce() -> Result<u64, String>,
+    ) -> Option<FirstAdmission> {
+        use super::output_disposition::Phase;
+        let (input, nonce, prompt, tmux) = next;
+        if !matches!(
+            previous.phase(),
+            Phase::RejectPendingNotice(_) | Phase::Rejected(_)
+        ) || input == previous.id().input
+            || nonce.is_empty()
+            || digest(nonce) == previous.id().nonce
+        {
+            return None;
+        }
+        {
+            let mut guard = self.lock();
+            let first = self.first_turn.borrow();
+            let old = first.as_ref()?;
+            if old.channel != previous.id().channel
+                || digest(&old.nonce) != previous.id().nonce
+                || old.tmux != tmux
+                || !matches!(*guard, Adoption::Deferred | Adoption::Refused)
+            {
+                return None;
+            }
+            if *guard == Adoption::Refused {
+                *guard = Adoption::Deferred;
+            }
+        }
+        self.admit_first(previous.id().channel, nonce, prompt, tmux, read_seq)
+    }
+
     pub(crate) fn first_mark(&self) -> Option<TurnMark> {
         self.first_turn
             .borrow()

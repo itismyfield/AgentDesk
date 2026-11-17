@@ -1,17 +1,54 @@
 use super::*;
 use crate::services::provider::CancelToken;
 use crate::services::tui_o::channel_policy::first_prompt_digest;
+use crate::services::tui_o::channel_policy::output_disposition::{Identity, Output, Phase};
 use crate::services::tui_o::cutover::BodySend;
 use crate::services::tui_prompt_dedupe::{
     self as dedupe, TuiRuntimeBinding, binding_context::PreparedIncarnation,
 };
 use crate::test_support::wait::{WAIT_CAP, await_within};
 
+struct TrustReady<'a> {
+    cwd: PathBuf,
+    context: &'a crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    path: &'a Path,
+    actions: usize,
+    captures: usize,
+}
+impl crate::services::codex_tui::host_input::trust::TrustTransport for TrustReady<'_> {
+    fn observe(
+        &mut self,
+        _: &str,
+        budget: std::time::Duration,
+    ) -> Option<crate::services::codex_tui::host_input::trust::Pane> {
+        assert!(!budget.is_zero());
+        self.captures += 1;
+        Some(crate::services::codex_tui::host_input::trust::Pane {
+            cwd: self.cwd.clone(),
+            text: if self.captures == 1 {
+                "Do you trust this folder?\n› 1. Yes, proceed\n2. No, exit".into()
+            } else {
+                "ready".into()
+            },
+        })
+    }
+    fn enter(&mut self, session: &str, budget: std::time::Duration) -> bool {
+        assert_eq!(session, self.context.tmux_session);
+        assert!(!budget.is_zero());
+        assert_eq!(self.actions, 0);
+        self.actions += 1;
+        crate::services::codex_tui::session::publish_discovered_launch(self.context, self.path)
+            .unwrap();
+        true
+    }
+}
+
 async fn scenario(
     boundary: Option<Step>,
     invalidator: &str,
     output: Option<&str>,
     pool: Option<&sqlx::PgPool>,
+    installed: bool,
 ) {
     dedupe::reset_state_for_tests();
     tokio::time::pause();
@@ -72,14 +109,54 @@ async fn scenario(
     std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
     std::fs::write(&marker, &prepared.context.execution_nonce).unwrap();
     crate::services::tmux_common::write_tmux_runtime_kind_marker("tmux-codex", CodexTui).unwrap();
-    let mut bytes = prompted("s-codex");
+    let trust = output == Some("trust");
+    let native_id = if trust {
+        uuid::Uuid::new_v4().hyphenated().to_string()
+    } else {
+        "s-codex".into()
+    };
+    let mut bytes = prompted(&native_id);
+    if trust {
+        let mut records: Vec<serde_json::Value> = String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let cwd = crate::config::runtime_root()
+            .unwrap()
+            .join("workspaces/trust-repair");
+        std::fs::create_dir_all(&cwd).unwrap();
+        records[0]["payload"]["cwd"] = serde_json::to_value(&cwd).unwrap();
+        records[0]["payload"]["source"] = "cli".into();
+        records[1]["payload"]["cwd"] = serde_json::to_value(&cwd).unwrap();
+        bytes = records.into_iter().flat_map(codex_line).collect();
+    }
     if invalidator == "wrong-prompt" {
         bytes = String::from_utf8(bytes)
             .unwrap()
             .replace("hi", "different")
             .into_bytes();
     }
-    let (path, source) = rollout(&harness, "proved-first.jsonl", &bytes);
+    let (path, source) = if trust {
+        let path = harness
+            ._runtime
+            .path()
+            .join(format!("rollout-{native_id}.jsonl"));
+        std::fs::write(&path, &bytes).unwrap();
+        let source = source_id_for(&native_id, &path).unwrap();
+        (path, source)
+    } else {
+        rollout(&harness, "proved-first.jsonl", &bytes)
+    };
+    let disposition = {
+        let guard = candidate.lock();
+        let proof = candidate.first_proof(&source).unwrap().unwrap();
+        drop(guard);
+        Output::new(
+            Identity::from_proof(&proof, proof.mark.order),
+            tokio::time::Instant::now(),
+        )
+    };
     let output = output.map(str::to_owned);
     let first = answer("first-output", "short answer");
     let ended = codex_line(
@@ -154,6 +231,41 @@ async fn scenario(
         unkeyed["payload"].as_object_mut().unwrap().remove("id");
         append(&path, &codex_line(unkeyed));
     }
+    if trust {
+        let cwd = crate::config::runtime_root()
+            .unwrap()
+            .join("workspaces/trust-repair");
+        std::fs::create_dir_all(&cwd).unwrap();
+        dedupe::register_tmux_channel("tmux-codex", channel);
+        let mut host = TrustReady {
+            cwd: cwd.clone(),
+            context: &prepared.context,
+            path: &path,
+            actions: 0,
+            captures: 0,
+        };
+        assert_eq!(
+            crate::services::codex_tui::normalize::repair_once(
+                &disposition,
+                &prepared.context,
+                &cwd,
+                &mut host
+            ),
+            Ok("ready".into())
+        );
+        assert_eq!((host.actions, host.captures), (1, 2));
+        assert_eq!(disposition.phase(), Phase::Normalizing);
+        let current = dedupe::runtime_binding_for_tmux_session("tmux-codex").unwrap();
+        assert_eq!(current.session_id.as_deref(), Some(native_id.as_str()));
+        assert_eq!(
+            Path::new(&current.output_path).canonicalize().unwrap(),
+            path.canonicalize().unwrap()
+        );
+        assert!(
+            !disposition.take_repair(),
+            "trust and binding share one repair allowance"
+        );
+    }
     let shared = crate::services::discord::make_shared_data_for_tests();
     *io.relay_shared.lock().unwrap() = Some(shared.clone());
     let transports = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -164,6 +276,7 @@ async fn scenario(
         token.turn_nonce(),
         &path,
         transports.clone(),
+        installed.then(|| (disposition.clone(), candidate.clone(), source.clone())),
     ));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(
@@ -181,18 +294,20 @@ async fn scenario(
     } else if invalidator == "old-bind-nonce" {
         std::fs::write(&marker, "previous-execution").unwrap();
     }
-    dedupe::register_tmux_runtime_binding(
-        "tmux-codex",
-        TuiRuntimeBinding {
-            runtime_kind: CodexTui,
-            output_path: path.display().to_string(),
-            relay_output_path: None,
-            input_fifo_path: None,
-            session_id: Some("s-codex".into()),
-            last_offset: 0,
-            relay_last_offset: None,
-        },
-    );
+    if !trust {
+        dedupe::register_tmux_runtime_binding(
+            "tmux-codex",
+            TuiRuntimeBinding {
+                runtime_kind: CodexTui,
+                output_path: path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("s-codex".into()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+    }
     if matches!(invalidator, "missing-bind-nonce" | "old-bind-nonce") {
         std::fs::write(&marker, &prepared.context.execution_nonce).unwrap();
     }
@@ -248,7 +363,7 @@ async fn scenario(
             io.alarms.halted()
         );
         assert_eq!(init_sources(&harness, channel), [(source.clone(), 0)]);
-        assert!(matches!(sent, BodySend::OwnedByO));
+        assert!(matches!(sent, Ok(BodySend::OwnedByO)));
         assert_eq!(transports.load(Ordering::SeqCst), 0);
         if pool.is_none() {
             tokio::time::resume();
@@ -316,17 +431,62 @@ async fn scenario(
             harness.store.read_init(channel).unwrap().is_none(),
             "{invalidator}"
         );
-        assert!(
-            matches!(sent, BodySend::Sent(1)),
-            "{invalidator}: Legacy must resume exactly once"
-        );
+        if installed {
+            assert!(
+                sent.is_err(),
+                "{invalidator}: rejected output must not reach a body transport"
+            );
+            assert!(matches!(disposition.phase(), Phase::RejectPendingNotice(_)));
+            if pool.is_none() {
+                tokio::time::resume();
+            }
+            let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+                "first_rejection",
+                "first admission typed rejection notice",
+            )
+            .await;
+            let notice_pool = db.connect_and_migrate_with_max_connections(2).await;
+            disposition.persist_rejection(&notice_pool).await.unwrap();
+            let restored = Output::restore(
+                &notice_pool,
+                disposition.id().clone(),
+                tokio::time::Instant::now(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(restored.phase(), disposition.phase());
+            assert!(!restored.take_repair());
+            let (receipt, posts) = crate::services::discord::outbound::tui_rejection_notice::tests::emit_fixture_notice(
+                &notice_pool, &disposition,
+            ).await;
+            assert_eq!(posts, 1);
+            assert!(disposition.confirm(&receipt));
+            assert!(matches!(disposition.phase(), Phase::Rejected(_)));
+            assert!(!disposition.confirm(&receipt));
+            let settled = Output::restore(
+                &notice_pool,
+                disposition.id().clone(),
+                tokio::time::Instant::now(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(settled.phase(), disposition.phase());
+            notice_pool.close().await;
+            db.drop().await;
+        } else {
+            assert!(
+                sent.is_err(),
+                "the existing selected-channel route keeps its adoption hold"
+            );
+            assert_eq!(disposition.phase(), Phase::Normalizing);
+        }
     }
     drop(admission);
     if invalidator == "valid" {
         tokio::time::pause();
         restart_posts_nothing(&harness, tasks, &source).await;
     } else {
-        assert_eq!(transports.load(Ordering::SeqCst), 1);
+        assert_eq!(transports.load(Ordering::SeqCst), 0);
         drop(tasks);
     }
     drop(reserved);
@@ -339,14 +499,14 @@ fn proved_first_prefix_commits_and_releases_legacy_without_a_body_send() {
 }
 
 #[test]
-fn output_free_policy_refuses_output_and_wrong_admitted_prompt_without_losing_legacy() {
+fn output_free_policy_refuses_output_and_wrong_admitted_prompt_without_sending_legacy_pg() {
     for invalid in ["output", "wrong-prompt"] {
         serial_scenario(None, invalid);
     }
 }
 
 #[test]
-fn invalidation_at_each_fence_boundary_prevents_a_stale_first_init() {
+fn invalidation_at_each_fence_boundary_prevents_a_stale_first_init_pg() {
     for step in [Step::BeforeFence, Step::AfterFence, Step::BeforeLock] {
         for invalid in [
             "send",
@@ -363,7 +523,7 @@ fn invalidation_at_each_fence_boundary_prevents_a_stale_first_init() {
 }
 
 #[test]
-fn a_binding_must_name_the_admitted_execution_not_a_legacy_or_old_one() {
+fn a_binding_must_name_the_admitted_execution_not_a_legacy_or_old_one_pg() {
     for invalid in ["missing-bind-nonce", "old-bind-nonce"] {
         serial_scenario(None, invalid);
     }
@@ -372,7 +532,7 @@ fn a_binding_must_name_the_admitted_execution_not_a_legacy_or_old_one() {
 fn serial_scenario(boundary: Option<Step>, invalidator: &str) {
     let root_guard = crate::config::TestRuntimeRootGuard::new();
     dedupe::run_serial_test(async {
-        scenario(boundary, invalidator, None, None).await;
+        scenario(boundary, invalidator, None, None, true).await;
     });
     drop(root_guard);
 }
@@ -391,28 +551,44 @@ fn buffered_first_output_at_every_adoption_boundary_is_replayed_once() {
     ] {
         let root = crate::config::TestRuntimeRootGuard::new();
         dedupe::run_serial_test(async {
-            scenario(boundary, "valid", Some(point), None).await;
+            scenario(boundary, "valid", Some(point), None, true).await;
         });
         drop(root);
     }
 }
 
 #[test]
-fn a_checked_buffered_prefix_rejects_foreign_growth_and_rewritten_known_bytes() {
+fn a_checked_buffered_prefix_rejects_foreign_growth_and_rewritten_known_bytes_pg() {
     for point in ["unsafe", "rewrite"] {
         let root = crate::config::TestRuntimeRootGuard::new();
         dedupe::run_serial_test(async {
-            scenario(Some(Step::BeforeLock), "unsafe-output", Some(point), None).await;
+            scenario(
+                Some(Step::BeforeLock),
+                "unsafe-output",
+                Some(point),
+                None,
+                true,
+            )
+            .await;
         });
         drop(root);
     }
+}
+
+#[test]
+fn managed_trust_repair_publishes_the_same_execution_then_o_posts_once() {
+    let root = crate::config::TestRuntimeRootGuard::new();
+    dedupe::run_serial_test(async {
+        scenario(None, "valid", Some("trust"), None, true).await;
+    });
+    drop(root);
 }
 
 #[test]
 fn a_short_native_turn_binds_before_output_commits_and_posts_once() {
     let root = crate::config::TestRuntimeRootGuard::new();
     dedupe::run_serial_test(async {
-        scenario(None, "valid", Some("short"), None).await;
+        scenario(None, "valid", Some("short"), None, true).await;
     });
     drop(root);
 }
@@ -427,7 +603,7 @@ fn buffered_output_arriving_while_the_real_intake_fence_waits_pg() {
         )
         .await;
         let pool = db.connect_and_migrate_with_max_connections(4).await;
-        scenario(None, "valid", Some("fence-wait"), Some(&pool)).await;
+        scenario(None, "valid", Some("fence-wait"), Some(&pool), true).await;
         tokio::time::resume();
         pool.close().await;
         db.drop().await;
@@ -436,7 +612,7 @@ fn buffered_output_arriving_while_the_real_intake_fence_waits_pg() {
 }
 
 #[test]
-fn buffered_first_proof_is_invalidated_at_every_lifecycle_boundary() {
+fn buffered_first_proof_is_invalidated_at_every_lifecycle_boundary_pg() {
     for step in [Step::BeforeFence, Step::AfterFence, Step::BeforeLock] {
         for invalid in [
             "send",
@@ -449,9 +625,18 @@ fn buffered_first_proof_is_invalidated_at_every_lifecycle_boundary() {
         ] {
             let root = crate::config::TestRuntimeRootGuard::new();
             dedupe::run_serial_test(async {
-                scenario(Some(step), invalid, Some("before-bind"), None).await;
+                scenario(Some(step), invalid, Some("before-bind"), None, true).await;
             });
             drop(root);
         }
     }
+}
+
+#[test]
+fn d1_installation_boundary_keeps_the_existing_route_disabled() {
+    let root = crate::config::TestRuntimeRootGuard::new();
+    dedupe::run_serial_test(async {
+        scenario(None, "wrong-prompt", None, None, false).await;
+    });
+    drop(root);
 }

@@ -4,6 +4,14 @@ Code baseline: `13f9acdd9a0f5e3aa500d20cd1b9a31a91e7ced4`; line numbers below ar
 
 One TUI-bound channel carries one turn; one non-TUI channel in the same config carries a headless turn. The model checks who posts the TUI turn's body, when its row and the watcher dispatch may be settled, and whether a held turn is eventually answered.
 
+## Current disposition contract (2026-11-17)
+
+The current decision first normalizes the same execution, then adopts it or emits one body-free rejection reason and discards that episode. The old Refused-body retention and owner-return replay decision below is historical. `confirm_store` restores channel readiness only; it cannot revive a rejected output. New input receives a different output identity. Normal late-child handoff remains valid for an episode that has not been finally rejected.
+
+D1 installs no production policy: the single installation boundary is the `#[cfg(test)] mod output_disposition` declaration in `channel_policy/adoption.rs`. Its normalization, trust and receipt helpers are compiled for direct policy fixtures. D2 connects every live consumer and body store before enabling that child. Thus D1 checks the new policy's Legacy-body0 and reason receipt without claiming production activation or zero rejected retention across all stores.
+
+`NormSpec` checks one total deadline, old-episode non-revival, a new-input episode, and body/reason effect exclusion. Existing stage-1/Herdr retention tables below remain versioned controls; they do not prove the new discard policy. Rejection notice reservations do not become body Posted/input-success receipts, and an uncertain reservation is metadata-only pending rather than a blind repeat POST.
+
 ## Values and where they come from
 
 | Variable | Values | Code |
@@ -185,7 +193,7 @@ before/after table and limitations are in the design note. The 6-cfg figures
 above belong to the archived resume-2 model, not this expanded model.
 
 
-## User decision A and C1 implementation
+## Historical user decision A and C1 implementation (superseded 2026-11-17)
 
 The user selected C and existing b2 retention for accepted Refused bodies. No new
 per-input failure receipt is introduced. N and CRefusedDecision are not selected.

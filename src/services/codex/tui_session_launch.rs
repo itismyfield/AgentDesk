@@ -11,6 +11,8 @@ pub(super) use launch_policy::{
 };
 #[cfg(unix)]
 pub(crate) use launch_policy::{successor_hooks_ready, validate_herdr_fresh_argv};
+#[cfg(test)]
+pub(crate) use project_trust::override_for as normalization_trust_override;
 
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
