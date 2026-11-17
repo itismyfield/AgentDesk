@@ -4075,6 +4075,7 @@ src/
 │   │   │   ├── unplaced_rig_tests.rs
 │   │   │   └── wire.rs
 │   │   ├── herdr_gate/
+│   │   │   ├── enter_readmit_tests.rs
 │   │   │   ├── legacy_return.rs
 │   │   │   ├── legacy_return_tests.rs
 │   │   │   ├── missing_marker_rig_tests.rs

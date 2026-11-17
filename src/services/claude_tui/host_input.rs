@@ -127,6 +127,17 @@ pub(crate) trait MutationGate {
     fn admit_cancel(&self, session: &str) -> Result<(), InputRefusal> {
         self.admit(session)
     }
+    /// The whole judgment again for a retried Enter; it stands only if `writes`, the gate's
+    /// write count the plan's last write made, is still the latest write and went to that server.
+    fn readmit(&self, session: &str, _writes: u64) -> Result<(), InputRefusal> {
+        self.admit(session)
+    }
+    /// How many writes this gate has sent; read under an admission, before its send.
+    fn writes(&self) -> u64 {
+        0
+    }
+    /// Drops an admission no send will use.
+    fn discard(&self) {}
 }
 
 /// Herdr's gate judges each write and pins the judgment for the send right after it.
@@ -137,6 +148,22 @@ impl MutationGate for HerdrTarget {
 
     fn admit_cancel(&self, session: &str) -> Result<(), InputRefusal> {
         self.admit_as(session, HerdrMutation::Cancel)
+    }
+
+    fn readmit(&self, session: &str, writes: u64) -> Result<(), InputRefusal> {
+        if session != self.pane_id() {
+            self.discard_pin();
+            return Err(InputRefusal::Conflict);
+        }
+        self.pin_after_write(writes).map_err(InputRefusal::Herdr)
+    }
+
+    fn writes(&self) -> u64 {
+        self.writes_sent()
+    }
+
+    fn discard(&self) {
+        self.discard_pin();
     }
 }
 
@@ -389,6 +416,7 @@ pub(crate) fn run_plan(
         transport,
         cancel_token,
         confirmed: 0,
+        written: 0,
     };
     for (index, action) in actions.iter().enumerate() {
         if let Err(stopped) = plan.step(action, actions.get(index + 1)) {
@@ -406,6 +434,8 @@ struct Plan<'a> {
     transport: &'a mut dyn InputTransport,
     cancel_token: Option<&'a CancelToken>,
     confirmed: usize,
+    /// The gate's write count after this plan's latest write.
+    written: u64,
 }
 
 type SendOp<'s> = Box<dyn FnOnce(&mut dyn InputTransport) -> Result<Output, String> + 's>;
@@ -432,7 +462,7 @@ impl Plan<'_> {
                 std::thread::sleep(POST_PASTE_BUFFER_SETTLE);
                 self.check_cancel()?;
             }
-            TuiInputAction::Enter => self.mutate(action, key(HostKey::Enter))?,
+            TuiInputAction::Enter => self.enter(action, key(HostKey::Enter))?,
             TuiInputAction::Escape => self.mutate(action, key(HostKey::Escape))?,
             TuiInputAction::CtrlU => self.mutate(action, key(HostKey::CtrlU))?,
             TuiInputAction::Left => self.mutate(action, key(HostKey::Left))?,
@@ -477,10 +507,71 @@ impl Plan<'_> {
 
     fn mutate(&mut self, action: &TuiInputAction, send: SendOp<'_>) -> Result<(), InputRun> {
         self.admit(matches!(action, TuiInputAction::Escape))?;
+        self.write(action, send)
+    }
+
+    fn enter(&mut self, action: &TuiInputAction, send: SendOp<'_>) -> Result<(), InputRun> {
+        if let Err(refusal) = self.gate.admit(self.session) {
+            self.readmit_enter(refusal)?;
+        }
+        self.write(action, send)
+    }
+
+    /// An admitted write; the admission excludes other writes, so this send is the next one.
+    fn write(&mut self, action: &TuiInputAction, send: SendOp<'_>) -> Result<(), InputRun> {
+        let written = self.gate.writes() + 1;
         self.send(action, send)?;
-        self.confirmed += 1;
+        (self.confirmed, self.written) = (self.confirmed + 1, written);
         Ok(())
     }
+
+    /// After a write, an Enter refused on a transient pane gap is judged whole again a few
+    /// times within a short budget; every earlier attempt was refused unsent.
+    fn readmit_enter(&self, first: InputRefusal) -> Result<(), InputRun> {
+        let started = std::time::Instant::now();
+        let (mut refusal, mut attempts) = (first, 0);
+        while self.confirmed > 0
+            && transient_pane_gap(refusal)
+            && attempts < ENTER_READMITS
+            && started.elapsed() + ENTER_READMIT_GAP < ENTER_READMIT_BUDGET
+        {
+            self.check_cancel()?;
+            std::thread::sleep(ENTER_READMIT_GAP);
+            self.check_cancel()?;
+            attempts += 1;
+            if let Err(next) = self.gate.readmit(self.session, self.written) {
+                refusal = next;
+                continue;
+            }
+            // A judgment that came back past the budget is not used, however it ended.
+            if started.elapsed() > ENTER_READMIT_BUDGET {
+                self.gate.discard();
+                break;
+            }
+            tracing::info!(session = self.session, ?first, attempts, "enter readmitted");
+            return self.check_cancel().inspect_err(|_| self.gate.discard());
+        }
+        tracing::info!(
+            session = self.session,
+            ?first,
+            ?refusal,
+            attempts,
+            "enter refused"
+        );
+        Err(refused_after(refusal, self.confirmed))
+    }
+}
+
+/// Enter re-admission: attempts, the pause before each, and the bound from the first refusal.
+const ENTER_READMITS: usize = 3;
+const ENTER_READMIT_GAP: std::time::Duration = std::time::Duration::from_millis(250);
+const ENTER_READMIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn transient_pane_gap(refusal: InputRefusal) -> bool {
+    matches!(
+        refusal,
+        InputRefusal::Herdr(HerdrGateRefusal::PaneUnverified { transient: true })
+    )
 }
 
 fn admit_after(
@@ -494,13 +585,17 @@ fn admit_after(
     } else {
         gate.admit(session)
     };
-    admitted.map_err(|refusal| match confirmed {
+    admitted.map_err(|refusal| refused_after(refusal, confirmed))
+}
+
+fn refused_after(refusal: InputRefusal, confirmed: usize) -> InputRun {
+    match confirmed {
         0 => InputRun::Refused(refusal),
         confirmed => InputRun::Indeterminate {
             confirmed,
             cause: StopCause::Refused(refusal),
         },
-    })
+    }
 }
 
 /// Gated multi-key sends: each group is one send and keeps its legacy error name.
@@ -716,7 +811,7 @@ pub(crate) fn classify(
         }
         SessionLiveness::Missing => {
             return HostInputOutcome::Refused(InputRefusal::Herdr(
-                HerdrGateRefusal::PaneUnverified,
+                HerdrGateRefusal::PaneUnverified { transient: false },
             ));
         }
         SessionLiveness::Unknown | SessionLiveness::ProbeFailed => {

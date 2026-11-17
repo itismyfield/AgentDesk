@@ -49,6 +49,22 @@ pub(crate) enum EvidenceGap {
     NotRecorded(String),
 }
 
+impl EvidenceGap {
+    /// A gap a slow read or a short-lived pane process leaves; the next whole reading may not
+    /// have it. A changed server, nonce or process never counts.
+    pub(crate) fn transient(&self) -> bool {
+        matches!(
+            self,
+            Self::ReadFailed(_)
+                | Self::Unreported
+                | Self::NoneYet
+                | Self::Ambiguous(_)
+                | Self::ProcessUnreadable(_)
+                | Self::EnvUnreadable
+        )
+    }
+}
+
 /// One `pane.process_info` reading: root shell and foreground pids, and who answered.
 pub(crate) type PaneProcesses = (
     Result<(Option<u32>, ForegroundProcesses), String>,
