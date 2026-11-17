@@ -1,0 +1,50 @@
+---
+title: "Stop continuation 출력 뒤 늦게 도착하는 opener"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks IdleNeedsClosedReply or NoIdlePasteDuringStopContinuation or NoProofBeforeStopContinuationOpener
+    lg1: Path to the IdleNeedsClosedReply or NoIdlePasteDuringStopContinuation or NoProofBeforeStopContinuationOpener bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: 끝답변 end_turn 기록
+  s1: Stop 성공 출력이 continuation을 요청
+  s2: 같은 owner front의 입력 도착
+  s3: 후속 opener 전인데 Idle 증명
+  s4: 후속 Busy 턴의 기존 프레임 경로
+  s5: 후속 턴 미완료인데 Idle 증명
+  s6: 기존 Busy 프레임 한 번 전달
+  s7: 공유 probe Ready, owner 깨움
+  s8: Idle 제출 거절, watch 보존
+  s9: 미완료 continuation 위에 Idle 붙여넣기
+  s10: 후속 완료 증명으로 Idle 제출 준비
+  s11: Idle 입력 한 번 전달
+  [*] --> s0
+  s0 --> s1: Stop hook_success 기록, stdout에 continuation 요청
+  s1 --> s2: owner 입력 도착
+  s2 --> s3: 현재 source와 턴 재독
+  s3 --> s3: 같은 probe로 Keep 또는 Wake or 같은 owner 재개
+  s3 --> s5: 뒤늦은 additional_context와 새 opener 기록
+  s2 --> s4: 현재 source와 턴 재독
+  s4 --> s6: 기존 Busy 프레임 전달
+  s5 --> s7: 같은 probe로 Keep 또는 Wake or 후속 턴의 새 완료 기록
+  s5 --> s8: 후속 턴의 새 완료 기록 or 그 사이 변한 source를 첫 키 전에 거절
+  s2 --> s8: 현재 source와 턴 재독
+  s3 --> s9: 첫 키 전 재검증 후 Idle 붙여넣기
+  s7 --> s8: 같은 owner 재개
+  s4 --> s8: 그 사이 변한 source를 첫 키 전에 거절
+  s8 --> s7: 같은 probe로 Keep 또는 Wake
+  s5 --> s10: 후속 턴의 새 완료 기록
+  s7 --> s10: 같은 owner 재개
+  s9 --> s11: 후속 턴의 새 완료 기록
+  s10 --> s11: 첫 키 전 재검증 후 Idle 붙여넣기
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 breaks
+  class s3 bugPath
+  class s5 breaks
+  class s9 breaks
+  class s9 bugPath
