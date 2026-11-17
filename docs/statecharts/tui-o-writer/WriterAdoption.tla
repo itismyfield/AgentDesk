@@ -8,6 +8,10 @@ lateVars == <<lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
               lateCommits, lateSkips, lateEnd, lateKind, lateCheckedOutput,
               lateLife, lateSends, lateBadCommit, lateRestored,
               lateRevision, lateCheckedRevision>>
+VARIABLES ne, np, ticks, repairs, proof, cause, nb, nr, nl, retained, tomb, ever, reasonPrepared
+normVars == <<ne, np, ticks, repairs, proof, cause, nb, nr, nl, retained, tomb, ever, reasonPrepared>>
+NormDormant == /\ ne = 0 /\ np = 0 /\ ticks = 0 /\ repairs = 0 /\ proof = 0 /\ cause = 0
+               /\ nb = 0 /\ nr = 0 /\ nl = 0 /\ retained = 0 /\ tomb = 0 /\ ever = 0 /\ reasonPrepared = 0
 CONSTANTS Fix, Mut
 VARIABLES sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
           otherCustody, lp, op, rowCleared, dispatchSettled, attempts, restarts,
@@ -101,7 +105,7 @@ MaxSpan == IF Retries = 0 THEN 1 ELSE Retries
 \* Only the configs that check the wake open a claim; the others keep their state space.
 WakeModel == Fix = "stage1" /\ Mut \in {"none", "noRetry", "retries4"}
 
-Init ==
+Init == /\ NormDormant
     /\ lateModal = FALSE /\ lateBound = FALSE /\ lateOutput = FALSE
     /\ lateBoundFirst = FALSE /\ lateJudge = "waiting"
     /\ lateCommits = 0 /\ lateSkips = 0 /\ lateEnd = "waiting"
@@ -345,7 +349,7 @@ LegacyNext == Input \/ TerminalBody \/ ReEval \/ RecoveryBody \/ WatcherDispatch
         \/ LateTakeover \/ OtherIntakeEnds \/ WakeDefer \/ WakeGiveUp \/ ClaimOpens \/ ClaimEnds
         \/ SecondRead \/ SecondPost
         \/ HeadlessInput \/ HeadlessTerminal \/ Rest
-Next == LegacyNext /\ UNCHANGED lateVars
+Next == LegacyNext /\ UNCHANGED <<lateVars, normVars>>
 
 \* Writer, recovery and turn-end actions are fair. Input, Restart, Reject, the stale handoff,
 \* the watcher finalizer and Codex's own turn end are environment.
@@ -378,7 +382,7 @@ TakeoverSettles == [](otherIntake /\ Adoptable /\ adopt \in {"Deferred", "Pendin
 
 \* Cold-launch domain: codex-late-launch.report.md entry census. Native records and Discord
 \* sends are distinct. lateBuffered changes prefix acceptance, not the argv/input protocol.
-LateInit == /\ sel = 0 /\ site = 0 /\ root = 0 /\ exec = 0 /\ bound = 0
+LateCoreInit == /\ sel = 0 /\ site = 0 /\ root = 0 /\ exec = 0 /\ bound = 0
             /\ store = 0 /\ adopt = 0 /\ oStart = 0 /\ turn = 0 /\ waitMark = 0
             /\ otherCustody = 0 /\ lp = 0 /\ op = 0 /\ rowCleared = 0
             /\ dispatchSettled = 0 /\ attempts = 0 /\ restarts = 0 /\ recovered = 0
@@ -494,8 +498,11 @@ LateStartupEnd ==
                     lateLife, lateSends, lateBadCommit, lateRestored,
                     lateRevision, lateCheckedRevision>>
 
-LateNext == LateBind \/ LateNativeOutput \/ LateAppend \/ LateJudge \/ LateCommit
+LateInit == LateCoreInit /\ NormDormant
+
+LateActions == LateBind \/ LateNativeOutput \/ LateAppend \/ LateJudge \/ LateCommit
             \/ LateStartupEnd \/ LateInvalidate \/ LateRestore \/ LateLegacySend
+LateNext == LateActions /\ UNCHANGED normVars
 LateSpec == LateInit /\ [][LateNext]_lateVars
             /\ WF_lateVars(LateBind) /\ WF_lateVars(LateNativeOutput)
             /\ WF_lateVars(LateJudge) /\ WF_lateVars(LateCommit)
@@ -510,4 +517,68 @@ LateNoUnsafeCommit == ~lateBadCommit
 LateEligibleCommits == []((lateBound /\ LateValid /\ lateLife = "live" /\ lateSends = 0)
                           => <>(lateCommits = 1 \/ ~LateValid \/ lateLife # "live"))
 LateRestartRestores == [](lateLife = "restarted" => <>lateRestored)
+
+\* Per-output policy is uninstalled in D1. These actions describe its explicit test port.
+NormInit == /\ LateCoreInit /\ ne = 0 /\ np = "normalizing" /\ ticks = 0
+            /\ repairs = 0 /\ proof = FALSE /\ cause \in {"binding", "trust", "missing", "invalid"}
+            /\ nb = [e \in 0..1 |-> 0] /\ nr = [e \in 0..1 |-> 0]
+            /\ nl = 0 /\ retained = 0 /\ tomb = [e \in 0..1 |-> FALSE]
+            /\ ever = [e \in 0..1 |-> FALSE] /\ reasonPrepared = FALSE
+NormStable == UNCHANGED <<vars, lateVars>>
+NormRepair == /\ np = "normalizing" /\ repairs = 0 /\ ticks < 3
+              /\ repairs' = 1 /\ proof' = (cause \in {"binding", "trust"})
+              /\ UNCHANGED <<ne, np, ticks, cause, nb, nr, nl, retained, tomb, ever, reasonPrepared>>
+NormTick == /\ np = "normalizing" /\ ticks < 3
+            /\ ticks' = IF Mut = "deadlineReset" THEN 0 ELSE ticks + 1
+            /\ UNCHANGED <<ne, np, repairs, proof, cause, nb, nr, nl, retained, tomb, ever, reasonPrepared>>
+NormAdopt == /\ np = "normalizing" /\ proof /\ ticks < 3 /\ ~tomb[ne]
+             /\ np' = "adopted"
+             /\ UNCHANGED <<ne, ticks, repairs, proof, cause, nb, nr, nl, retained, tomb, ever, reasonPrepared>>
+NormReject == /\ ((np = "normalizing" /\ ((~proof /\ cause = "invalid") \/ ticks = 3))
+                 \/ (Mut = "mixed" /\ np = "posted"))
+              /\ np' = "rejectPending" /\ tomb' = [tomb EXCEPT ![ne] = TRUE]
+              /\ ever' = [ever EXCEPT ![ne] = TRUE]
+              /\ nl' = IF Mut = "legacy" THEN 1 ELSE nl
+              /\ retained' = IF Mut = "retain" THEN 1 ELSE retained
+              /\ UNCHANGED <<ne, ticks, repairs, proof, cause, nb, nr, reasonPrepared>>
+\* Adoption/HTTP and reason reservation/HTTP/receipt are separate crash boundaries.
+NormBody == /\ np = "adopted" /\ ~tomb[ne]
+            /\ nb' = [nb EXCEPT ![ne] = @ + 1] /\ np' = "posted"
+            /\ UNCHANGED <<ne, ticks, repairs, proof, cause, nr, nl, retained, tomb, ever, reasonPrepared>>
+NormReserveReason == /\ np = "rejectPending" /\ ~reasonPrepared
+                     /\ reasonPrepared' = TRUE
+                     /\ UNCHANGED <<ne, np, ticks, repairs, proof, cause, nb, nr, nl, retained, tomb, ever>>
+NormReason == /\ np = "rejectPending" /\ reasonPrepared
+              /\ nr' = IF Mut = "silent" THEN nr ELSE [nr EXCEPT ![ne] = @ + 1]
+              /\ np' = "reasonEffect"
+              /\ UNCHANGED <<ne, ticks, repairs, proof, cause, nb, nl, retained, tomb, ever, reasonPrepared>>
+NormConfirm == /\ np = "reasonEffect" /\ np' = "rejected"
+               /\ UNCHANGED <<ne, ticks, repairs, proof, cause, nb, nr, nl, retained, tomb, ever, reasonPrepared>>
+NormRepeatReason == /\ Mut = "reasonDuplicate" /\ np = "rejected" /\ nr[ne] = 1
+                    /\ nr' = [nr EXCEPT ![ne] = 2]
+                    /\ UNCHANGED <<ne, np, ticks, repairs, proof, cause, nb, nl, retained, tomb, ever, reasonPrepared>>
+\* Only a distinct new input B may reenter; A's tombstone is never released by a new store.
+NormNewInput == /\ ne = 0 /\ np \in {"posted", "rejected"}
+                /\ ne' = 1 /\ np' = "normalizing" /\ ticks' = 0 /\ repairs' = 0
+                /\ proof' = TRUE /\ cause' = "binding" /\ reasonPrepared' = FALSE
+                /\ tomb' = IF Mut = "revive" THEN [e \in 0..1 |-> FALSE] ELSE tomb
+                /\ UNCHANGED <<nb, nr, nl, retained, ever>>
+NormNext == /\ NormStable
+            /\ (NormRepair \/ NormTick \/ NormAdopt \/ NormReject \/ NormBody
+                \/ NormReserveReason \/ NormReason \/ NormConfirm \/ NormNewInput \/ NormRepeatReason)
+NormSpec == NormInit /\ [][NormNext]_normVars
+            /\ WF_normVars(NormTick) /\ WF_normVars(NormRepair) /\ WF_normVars(NormAdopt)
+            /\ WF_normVars(NormReject) /\ WF_normVars(NormBody) /\ WF_normVars(NormReserveReason)
+            /\ WF_normVars(NormReason) /\ WF_normVars(NormConfirm) /\ WF_normVars(NormNewInput)
+NormNoLegacy == nl = 0
+NormNoRetention == retained = 0
+NormAtMostOnce == \A e \in 0..1 : nb[e] <= 1 /\ nr[e] <= 1
+NormExclusiveEffects == \A e \in 0..1 : ~(nb[e] > 0 /\ nr[e] > 0)
+NormNoRevival == \A e \in 0..1 : ever[e] => tomb[e]
+NormSettledEvidence == np = "rejected" => nr[ne] = 1
+NormEventuallyEnds == [](np = "normalizing" => <>(np # "normalizing"))
+NormOutputSettles == [](np = "adopted" => <>(nb[ne] = 1))
+NormReasonSettles == [](np = "rejectPending" => <>(nr[ne] = 1))
+NormNextInputProgresses == <>(ne = 1 /\ np = "posted")
+
 =============================================================================

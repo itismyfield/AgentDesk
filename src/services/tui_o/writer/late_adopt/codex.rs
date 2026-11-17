@@ -18,6 +18,9 @@ use crate::services::tui_o::writer::host::{FencedFacts, HostIo, release, until_o
 use crate::services::tui_o::writer::renumbered;
 use crate::services::tui_o::writer::rotation::bound_source;
 
+#[cfg(test)]
+pub(crate) mod normalization;
+
 mod delivered;
 pub(super) mod prefix;
 use delivered::Records;
@@ -593,7 +596,7 @@ impl<I: HostIo> Takeover<'_, I> {
                         local,
                         self.candidate,
                         sources,
-                        (self.origin, checked.admission.as_ref()),
+                        (self.origin, admission),
                     )
                 })
             });
@@ -628,14 +631,6 @@ impl<I: HostIo> Takeover<'_, I> {
                 .map_err(Taken::Skip)?
                 .as_ref()
                 != admission
-        {
-            return Err(Taken::Skip(
-                "first admission changed during the intake fence".into(),
-            ));
-        }
-        let prefix = &checked.prefix;
-        if self.provider == ShadowProvider::Codex
-            && self.candidate.first_proof(source).map_err(Taken::Skip)? != checked.admission
         {
             return Err(Taken::Skip(
                 "first admission changed during the intake fence".into(),

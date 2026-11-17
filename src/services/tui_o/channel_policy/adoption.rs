@@ -12,6 +12,10 @@ pub(crate) mod body_check;
 
 use crate::services::tui_o::store::OStore;
 
+// D2 installs this policy only after all body consumers can terminalize the same episode.
+#[cfg(test)]
+pub(crate) mod output_disposition;
+
 mod first_turn;
 pub(crate) use first_turn::{
     FirstAdmission, FirstPause, FirstProof, digest as first_prompt_digest,

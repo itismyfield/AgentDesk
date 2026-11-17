@@ -923,6 +923,15 @@ tui-o-writer/WriterAdoptionLateExemptIntake.cfg	WriterAdoption	OtherCustodyBlock
 tui-o-writer/WriterAdoptionMain.cfg	WriterAdoption	NoLegacyBodyOnTui,UnadoptedNotOwned,RowClearedHasEvidence,NoEarlyDispatch	AdoptionSettles
 tui-o-writer/WriterAdoptionNoRetry.cfg	WriterAdoption	-	RowEventuallySettled
 tui-o-writer/WriterAdoptionNoSerial.cfg	WriterAdoption	MarkerAtMostOnce	-
+tui-o-writer/WriterAdoptionNormalizeAfter.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAdoptionNormalizeDeadlineMut.cfg	WriterAdoption	-	NormEventuallyEnds,NormNextInputProgresses
+tui-o-writer/WriterAdoptionNormalizeLegacyMut.cfg	WriterAdoption	NormNoLegacy	-
+tui-o-writer/WriterAdoptionNormalizeMixedEffectsMut.cfg	WriterAdoption	NormExclusiveEffects	-
+tui-o-writer/WriterAdoptionNormalizeNoRepair.cfg	WriterAdoption	-	-
+tui-o-writer/WriterAdoptionNormalizeReasonDuplicateMut.cfg	WriterAdoption	NormAtMostOnce	-
+tui-o-writer/WriterAdoptionNormalizeRetainMut.cfg	WriterAdoption	NormNoRetention	-
+tui-o-writer/WriterAdoptionNormalizeReviveMut.cfg	WriterAdoption	NormNoRevival	-
+tui-o-writer/WriterAdoptionNormalizeSilentDropMut.cfg	WriterAdoption	NormSettledEvidence	NormReasonSettles
 tui-o-writer/WriterAdoptionOwnedMut.cfg	WriterAdoption	UnadoptedNotOwned,RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionRelayedByTime.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered
 tui-o-writer/WriterAdoptionRetries4.cfg	WriterAdoption	TriesBound	-
