@@ -699,6 +699,23 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     self.assertGreater(index, installs[0], "nextest consumer must follow its install in this job")
         self.assertEqual(len(consumers), 2)
 
+    def test_engine_runtime_lease_and_frontier_owners_select_windows(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        filters = paths_filter_definitions(workflow)
+        jobs = yaml.safe_load(workflow)["jobs"]
+        for path in (
+            "src/services/engine_runtime/mod.rs",
+            "src/services/engine_runtime/relay_state.rs",
+        ):
+            with self.subTest(path=path):
+                context = {"github.event.pull_request.draft": False}
+                for selector in ("rust_compile", "cross_os_rust"):
+                    selected = selects(filters[selector], path)
+                    self.assertTrue(selected, (selector, path))
+                    context["needs.changes.outputs." + selector] = str(selected).lower()
+                for job in ("check_fast_cross_os", "check_fast_cross_os_targets"):
+                    self.assertTrue(eval_step_if(jobs[job]["if"], context), job)
+
     def test_cross_os_derived_selectors_match_source(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         selectors = paths_filter_definitions(workflow)["cross_os_rust"]

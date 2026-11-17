@@ -251,6 +251,7 @@ jobs:
             # PR-time Windows lane fail closed. Keep the broad positive list in
             # sync with `rust_compile` and document every relay exception.
             cross_os_rust:
+              - 'src/services/engine_runtime/mod.rs'
               - 'src/services/engine_runtime/relay_state.rs'
               - 'src/services/decision_gate/**'
               - 'scripts/ci/run-writer-namespace-windows-targets.sh'
