@@ -14,6 +14,7 @@ Design: [restart-idle-readiness.design.md](restart-idle-readiness.design.md). Vi
 | `PersonLateSubmit`, `lag = "transcript"` | a person's Enter (or a continuation) not yet recorded; the screen shows the turn | screen check S1 (`herdr_turn/composer.rs:97` `restored_screen_idle`) |
 | `WatchHeld` (restart-draft modes) | the held-front watch wakes a front held by a person's draft once the draft clears, on restored evidence + screen; `HumanClears` and `Observe` alone never wake it | `herdr_turn/first_input.rs:153-171` |
 | `Unproven` | what `Watched::unproven` reads: not Booting, shared Idle, current source, no continuation/compact fence, no current evidence; never the screen, the restored proof or the provider phase | `readiness/mod.rs` `Watched::unproven` |
+| Retained input notice | an expired unproven original owes one persistent resend notice; replay keeps its outbox identity | `src/services/turn_orchestrator/queued_head/v2/retained.rs:185`, `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:308`, `src/services/discord/queue_io/input_owner/notice.rs:68`, `src/services/discord/queue_io/retained_notice.rs:39` |
 | `LateRecord` | the provider writes the late turn's first record | transcript |
 | `LostStart` | the new incarnation idles but its SessionStart never reached this run | lost hook |
 | `RestoredEvidence` | the fixed path: restart floor + hard terminal + current Idle observation + no continuation/compact + no durable in-flight + idle screen + old incarnation | `observe_restored` (`readiness/mod.rs:98`) |
@@ -67,3 +68,36 @@ retained `known_not_sent: vetoed … Refused(Unproven)`.
   same check-to-key window as the existing Idle path.
 - The trailing session-metadata fix (design §5.4) does not change what a hard terminal means, so the model has no
   action for it.
+
+## Accepted continuation boundary after a daemon restart
+
+관측 조건: 이어지는 턴 도중 데몬 재시작, 입력은 보류 알림 후 다시 보내야 한다.
+
+`InputPathReadyIdleRestartContinuing.cfg` retains its original rules and transitions. The daemon can
+lose the continuing Stop's in-memory latch, then read a summary as Idle while the provider still runs.
+`Watched::unproven` cannot observe the provider phase. Its budget can therefore retain the pending
+original before the late assistant record and final Stop arrive. A retained original is never retyped
+automatically; its durable `retained_retry_required` notice asks the user to resend it.
+
+The coordinator accepted this rare resend boundary on 2026-11-17: preserving the existing observation
+policy avoids adding new runtime state or guards. The two original delivery properties remain checked
+and explicitly expected RED. Safety and eventual settlement remain GREEN; no other cfg expectation
+or transition is changed.
+
+| Config/rule | Before merge (`da6376ced2`) | Merged observation (`9efad98c06`) | Accepted expectation |
+|---|---|---|---|
+| `InputPathReadyIdleRestartContinuing.cfg` / `ReadyPendingEventuallyExecutes` | GREEN | RED | RED: resend notice, original retained |
+| same / `ReadyRestartedIdleEventuallyReceives` | GREEN | RED | RED: resend notice, original retained |
+| same / `ReadyPendingEventuallySettles` | GREEN | GREEN | GREEN |
+| same / all safety invariants | GREEN | GREEN | GREEN |
+
+The counterexample is `SuppressStop` → `Restart` (latch lost) → `SoftSummary` → `Observe` (shared Idle)
+→ `Expire(1)` → `LateAssistant` → `Expire(2)` → `Finish`: both originals remain retained, each owing its
+notice. The liveness change records that existing outcome; it does not authorize a silent discard.
+
+Notice entry points are the owner's `effect.rs:103` unsent settlement and `retained.rs:185` notice intent,
+then the drive's `owner_input.rs:308` settlement callback, `input_owner/notice.rs:68` outbox handoff,
+and `retained_notice.rs:39` persistent enqueue. The static outbox source is `RetainedInputNotice`
+(`src/domain/outbound/outbox/source.rs:22,77`). The PG regression
+`a_restart_during_a_continuing_stop_retains_with_one_resend_notice_pg` exercises the restarted source,
+unproven timeout, retained intent and actual persistent outbox enqueue with duplicate replay.
