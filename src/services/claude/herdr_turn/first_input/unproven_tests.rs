@@ -472,10 +472,8 @@ async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
     let (registry, mailbox) = restart();
     let recovered = recover(&mailbox, (queue.clone(), "moved".into()), history(), None, at).await;
     assert_eq!(recovered, Ok(0));
-    let read = |mailbox: &ChannelMailboxHandle| {
-        mailbox.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json())
-    };
-    let snapshot = read(&mailbox).await.unwrap();
+    let read = |slot: &mut Option<_>| slot.as_ref().ok_or("no owner")?.json();
+    let snapshot = mailbox.v2_request(read).await.unwrap();
     assert!(
         snapshot["items"].as_array().unwrap().is_empty(),
         "a refused input never returns to the queue: {snapshot}"
@@ -488,8 +486,9 @@ async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
         refused[0]["notice"],
         json!({"kind":"readiness_unproven","enqueued":false})
     );
+    let raw = snapshot.to_string();
     assert!(
-        !snapshot.to_string().contains("original"),
+        MERGED.iter().all(|(_, body)| !raw.contains(body)),
         "no body is kept: {snapshot}"
     );
     // The notice reached the outbox, then the daemon restarted before the owner marked it.
@@ -498,7 +497,8 @@ async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
         .unwrap();
     drop((mailbox, registry));
     let (_registry, mailbox) = restart();
-    let recovered = recover(&mailbox, (queue, "moved".into()), history(), Some(&pool), at).await;
+    let restored = (queue.clone(), "moved".into());
+    let recovered = recover(&mailbox, restored, history(), Some(&pool), at).await;
     assert_eq!(recovered, Ok(1), "the restart retries only the notice");
     let retried = mailbox.v2_admit_ticket(merged(channel, 0), MERGED[0].0.into());
     assert_eq!(
@@ -506,7 +506,7 @@ async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
         Ok("Duplicate".into()),
         "the same ticket admits nothing again"
     );
-    let snapshot = read(&mailbox).await.unwrap();
+    let snapshot = mailbox.v2_request(read).await.unwrap();
     assert!(snapshot["items"].as_array().unwrap().is_empty(), "{snapshot}");
     assert_eq!(snapshot["refused_inputs"][0]["notice"]["enqueued"], true);
     let posts: Vec<(String,)> =

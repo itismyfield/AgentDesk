@@ -763,7 +763,7 @@ fn evidence_that_lands_inside_a_window_delivers_the_waiting_input() {
         });
         super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(Some(budget)));
         let send = super::super::input::send_warm_followup_owned;
-        let sent = send(&r.session, "one original", Some(&token));
+        let sent = send(&r.session, "one original", Some(token.as_ref()));
         super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|slot| slot.set(None));
         crate::test_support::wait::join_within(moved, crate::test_support::wait::WAIT_CAP);
         match cancels {
