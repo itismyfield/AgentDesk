@@ -418,7 +418,10 @@ impl Owner {
 
 /// Removes every member of `input` from the queue front in one snapshot; the tail keeps its
 /// originals and tickets and only moves up.
-pub(super) fn remove_members(snapshot: &mut SnapshotV2, input: &InputAttempt) -> Result<(), String> {
+pub(super) fn remove_members(
+    snapshot: &mut SnapshotV2,
+    input: &InputAttempt,
+) -> Result<(), String> {
     if !super::front_holds(&snapshot.items, input) {
         return Err("queue first item differs from selected head".into());
     }

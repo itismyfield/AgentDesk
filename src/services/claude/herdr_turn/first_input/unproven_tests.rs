@@ -220,7 +220,9 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             "source":{"kind":"pre_source","expected_session_id":null,
                 "expected_transcript":null,"binding_watermark":null}});
         let queue = crate::config::runtime_root().unwrap();
-        let queue = queue.join(format!("runtime/discord_pending_queue/moved/{channel}.json"));
+        let queue = queue.join(format!(
+            "runtime/discord_pending_queue/moved/{channel}.json"
+        ));
         let fixture = match case {
             Moved => runtime.block_on(merged_unit(&mailbox, queue.clone(), attempt, channel)),
             _ => runtime.block_on(mailbox.v2_cold_fixture(
@@ -448,7 +450,10 @@ async fn merged_unit(
             let body = |item: &crate::services::turn_orchestrator::PendingQueueItem| {
                 Some((String::new(), item.text.clone()))
             };
-            slot.as_mut().ok_or("no owner")?.reserve_unit(attempt, body).map(drop)
+            slot.as_mut()
+                .ok_or("no owner")?
+                .reserve_unit(attempt, body)
+                .map(drop)
         })
         .await
 }
@@ -470,7 +475,14 @@ async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
     };
     // Restarted before the notice reached the outbox.
     let (registry, mailbox) = restart();
-    let recovered = recover(&mailbox, (queue.clone(), "moved".into()), history(), None, at).await;
+    let recovered = recover(
+        &mailbox,
+        (queue.clone(), "moved".into()),
+        history(),
+        None,
+        at,
+    )
+    .await;
     assert_eq!(recovered, Ok(0));
     let read = |slot: &mut Option<_>| slot.as_ref().ok_or("no owner")?.json();
     let snapshot = mailbox.v2_request(read).await.unwrap();
@@ -507,7 +519,10 @@ async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
         "the same ticket admits nothing again"
     );
     let snapshot = mailbox.v2_request(read).await.unwrap();
-    assert!(snapshot["items"].as_array().unwrap().is_empty(), "{snapshot}");
+    assert!(
+        snapshot["items"].as_array().unwrap().is_empty(),
+        "{snapshot}"
+    );
     assert_eq!(snapshot["refused_inputs"][0]["notice"]["enqueued"], true);
     let posts: Vec<(String,)> =
         sqlx::query_as("SELECT content FROM message_outbox WHERE target = $1")
@@ -515,7 +530,11 @@ async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(posts.len(), 1, "one merged refusal owes one notice: {posts:?}");
+    assert_eq!(
+        posts.len(),
+        1,
+        "one merged refusal owes one notice: {posts:?}"
+    );
     assert!(posts[0].0.contains("증거를 확보하지 못해"), "{posts:?}");
     assert!(!posts[0].0.contains("원문을 보관했습니다"), "{posts:?}");
     pool.close().await;

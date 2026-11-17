@@ -68,8 +68,7 @@ impl Owner {
 impl SnapshotV2 {
     /// A told refusal is forgotten after the window a delivered identity is kept for.
     pub(super) fn forget_told_refusals(&mut self, now: u64) {
-        self.refused_inputs.retain(|r| {
-            !r.notice.enqueued || now.saturating_sub(r.refused_at_ms) < 86_400_000
-        });
+        self.refused_inputs
+            .retain(|r| !r.notice.enqueued || now.saturating_sub(r.refused_at_ms) < 86_400_000);
     }
 }

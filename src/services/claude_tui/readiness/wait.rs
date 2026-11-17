@@ -49,16 +49,15 @@ pub(crate) fn prepare(
             return Ok(proof);
         }
         if Instant::now() >= deadline {
-            let unproven = match watched
-                .expired(|| super::super::host_input::observe_draft(session))
-            {
-                Expiry::Requiet => {
-                    deadline = Instant::now() + budget.min(super::WINDOW);
-                    continue;
-                }
-                Expiry::Unproven(end) => Some(end),
-                Expiry::Waits => None,
-            };
+            let unproven =
+                match watched.expired(|| super::super::host_input::observe_draft(session)) {
+                    Expiry::Requiet => {
+                        deadline = Instant::now() + budget.min(super::WINDOW);
+                        continue;
+                    }
+                    Expiry::Unproven(end) => Some(end),
+                    Expiry::Waits => None,
+                };
             return Err(Stopped {
                 error: "timeout waiting for claude tui current Idle/SessionStart evidence and empty composer".into(),
                 unproven,

@@ -128,9 +128,9 @@ pub(crate) async fn run(
             .await
             .map_err(unsent)?;
         return Ok(match completion {
-            Completion::Held(reason) | Completion::NotSent(reason) | Completion::Refused(reason) => {
-                Completion::NotSent(reason)
-            }
+            Completion::Held(reason)
+            | Completion::NotSent(reason)
+            | Completion::Refused(reason) => Completion::NotSent(reason),
             other => Completion::NotSent(format!("{other:?}")),
         });
     }

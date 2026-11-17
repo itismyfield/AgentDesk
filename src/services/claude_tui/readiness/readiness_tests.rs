@@ -738,7 +738,12 @@ fn evidence_that_lands_inside_a_window_delivers_the_waiting_input() {
         tmux.set_dead(false);
         let budget = Duration::from_millis(1200);
         let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
-        let (session, path, ctx, stop) = (r.session.clone(), r.path.clone(), r.ctx.clone(), token.clone());
+        let (session, path, ctx, stop) = (
+            r.session.clone(),
+            r.path.clone(),
+            r.ctx.clone(),
+            token.clone(),
+        );
         let moved = after_first_look(&r.session, move || {
             let native = &ctx.expected_native_session_id;
             let mut file = OpenOptions::new().append(true).open(&path).unwrap();
@@ -746,7 +751,8 @@ fn evidence_that_lands_inside_a_window_delivers_the_waiting_input() {
             // Past the budget, half way into its first window.
             std::thread::sleep(budget * 3 / 2);
             if cancels {
-                stop.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                stop.cancelled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 std::thread::sleep(budget / 4);
             }
             let start = json!({"session_id":native,"transcript_path":path,"source":"startup"});
