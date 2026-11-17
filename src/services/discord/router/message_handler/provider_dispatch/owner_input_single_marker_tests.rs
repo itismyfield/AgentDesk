@@ -534,16 +534,17 @@ async fn busy_active_codex_keeps_mailbox_op() {
     assert_eq!(active_message_ops(&rig, message), [('📬', true)]);
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn busy_active_herdr_defers_mailbox_op() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_active_herdr_keeps_mailbox_op() {
     if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::single_marker::",
-        "busy_active_herdr_defers_mailbox_op"
+        "busy_active_herdr_keeps_mailbox_op"
     )) {
         return;
     }
     let _root = active_root();
-    let rig = IntakeRig::new(8_113_107, true).await;
+    let modal = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel\n";
+    let rig = IntakeRig::busy_with_screen(8_113_107, modal.into()).await;
     let _host =
         crate::config::session_hosts::force_for_test(Some("mini"), &[(rig.channel.get(), "mini")]);
     let _gate = discord::router::busy_inject_support::open_gate(rig.channel.get());
@@ -553,6 +554,12 @@ async fn busy_active_herdr_defers_mailbox_op() {
         active_message_ops(&rig, message),
         Vec::<(char, bool)>::new()
     );
+    // The marker waits for the owner's result; a handback shows it once.
+    let (drive, mut settled) = rig.drive();
+    discord::queue_io::input_owner::drive::wake(drive);
+    let result = await_within(settled.recv(), WAIT_CAP).await.unwrap();
+    assert_eq!(result, Err("NotSent(\"Modal\")".into()));
+    assert_eq!(active_message_ops(&rig, message), [('📬', true)]);
 }
 
 fn pause_next_load(rig: &IntakeRig) -> tokio::net::UnixListener {
