@@ -15,6 +15,8 @@ use super::transport::{outbound_fingerprint, post_serenity_message_with_nonce};
 use super::{DiscordOutboundClient, shared_outbound_deduper};
 use crate::services::discord::{SharedData, rate_limit_wait};
 
+pub(crate) mod recovery_notice;
+
 struct SerenityReferenceOutboundClient {
     http: Arc<serenity::Http>,
     shared: Arc<SharedData>,

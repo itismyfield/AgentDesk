@@ -255,6 +255,7 @@ fn verified_restart_leaves_out_sources_earlier_executions_bound_in_the_pane() {
             provider_root: Some(sessions.clone()),
             first_prompt_digest: None,
             source_policy: Some("verified".into()),
+            resume_start: None,
         };
         PreparedIncarnation::create(context.clone()).unwrap();
         std::fs::write(

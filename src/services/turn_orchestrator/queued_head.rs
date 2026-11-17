@@ -95,6 +95,7 @@ pub(crate) use v2::claude_handoff::Held as HandoffHeld;
 pub(super) use v2::clear::clear_channel as clear_v2_channel;
 pub(crate) use v2::origin::{Waiting, waiting_origin};
 pub(crate) use v2::source_admission::TurnBind;
+pub(crate) use v2::source_admission::restart_seed::{SOURCE as RESTART_SEED_SOURCE, SeedStatus};
 pub(crate) use v2_types::OwedDrop;
 mod v2_types;
 pub(super) use snapshot::{parse_snapshot, snapshot_json};

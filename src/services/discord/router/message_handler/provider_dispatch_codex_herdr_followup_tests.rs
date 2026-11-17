@@ -1,6 +1,9 @@
 //! A Bound Codex Herdr pane's later prompts and its restart: each prompt is confirmed before one
 //! write and a refused one writes nothing; a restart restores only the source its log names.
 
+#[path = "provider_dispatch_codex_herdr_followup_tests/clear_execute_tests.rs"]
+mod clear_execute_tests;
+
 use super::*;
 use crate::services::discord::recovery_engine::herdr_reader::{
     ATTACHES, ReconnectCounts, reconnect_counts, reconnect_restarted_herdr_panes,

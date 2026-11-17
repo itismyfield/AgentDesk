@@ -122,7 +122,7 @@ impl Harness {
             .entry(id.to_owned())
             .or_insert_with(|| {
                 let envelope = HookBindingEnvelope {
-                    context: context.map_or_else(
+                    context: context.map(Box::new).map_or_else(
                         || {
                             CapturedContext::Absent(
                                 dedupe::binding_context::AbsentReason::LegacyRequest,

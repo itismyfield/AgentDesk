@@ -1,0 +1,64 @@
+---
+title: "Herdr restart B ports: immediate clear epoch, drain earlier effect grants"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+    lg2: Breaks NoResumeAfterClear
+    lg3: Path to the ClearForgets or NoResumeAfterClear bug
+    lg4: Repeats forever, so ClearForgets breaks
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 breaks
+  class lg3 bugPath
+  class lg4 repeats
+  s0: Old session and a queued input
+  s1: Seed committed#59; gate holds it
+  s2: Restart holds the transition and fence
+  s3: Exact close confirmed#59; retire and settle
+  s4: Clear requested#59; epoch update pending
+  s5: Clear began: epoch bumped#59; restart holds the transition
+  s6: Clear discarded the queue#59; restart holds the transition
+  s7: Old execution retired#59; a clear overtook the restart
+  s8: Exclusion released#59; superseded reply pending
+  s9: A launch resumed the conversation a clear ended
+  s10: Clear gave up on the transition#59; selector still kept
+  [*] --> s0
+  s0 --> s1: Commit the seed original (acceptance)
+  s1 --> s2: Terminate takes transition and fence
+  s2 --> s3: Close only the captured pane
+  s3 --> s4: User requests clear
+  s4 --> s5: Advance epoch and mark clearing, including while old I/O is granted
+  s5 --> s6: Clear discards the queue and the launching input
+  s5 --> s5: Accept an input into the owner queue
+  s6 --> s3: Clear drains earlier grants and tears down their exact session
+  s3 --> s7: Retire CAS and settle the old turn
+  s7 --> s8: Clear epoch ignored: selector kept
+  s8 --> s8: Accept an input into the owner queue
+  s8 --> s10: Reply to the command
+  s8 --> s9: Owner starts the front: register the launch
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 bugPath
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s5 bugPath
+  class s6 blue
+  class s6 bugPath
+  class s7 teal
+  class s7 bugPath
+  class s8 teal
+  class s8 bugPath
+  class s9 teal
+  class s9 breaks
+  class s9 bugPath
+  class s10 teal
+  class s10 repeats

@@ -14,6 +14,8 @@ pub(crate) mod notice;
 pub(crate) mod origin;
 pub(crate) mod pump;
 pub(crate) mod recovery;
+pub(crate) mod restart_gate;
+pub(crate) mod restart_seed;
 pub(crate) mod routine;
 pub(crate) mod start;
 pub(crate) mod target;

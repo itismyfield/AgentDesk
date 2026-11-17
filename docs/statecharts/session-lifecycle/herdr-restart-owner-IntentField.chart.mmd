@@ -1,0 +1,103 @@
+---
+title: "Herdr restart B ports: immediate clear epoch, drain earlier effect grants"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+    lg2: Owner
+    lg3: Path to the RequestResolves bug
+    lg4: Repeats forever, so RequestResolves breaks
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 purple
+  class lg3 bugPath
+  class lg4 repeats
+  s0: Old session and a queued input
+  s1: Seed committed#59; gate holds it
+  s2: Restart holds the transition and fence
+  s3: After boot: seed waits#59; old session lives
+  s4: Restart record vanished without a result
+  s5: Exact close confirmed#59; retire and settle
+  s6: Idle ended execution#59; the seed owner must repair the row
+  s7: Old execution retired#59; exclusion still held
+  s8: Exclusion released#59; reply pending
+  s9: After boot: seed waits
+  s10: Owner turn began a launch
+  s11: Seed waits for the owner
+  s12: Owner turn installed Pending
+  s13: CheckEpoch observed#59; live BeginEffect still required
+  s14: BeginEffect holds create authority
+  s15: Create answered#59; first input not submitted
+  s16: CheckEpoch observed#59; live input authority still required
+  s17: BeginEffect holds input authority
+  s18: First input submitted#59; receipt not committed
+  s19: Receipt committed#59; source not bound
+  s20: Seed submit unproven: kept, never re-sent#59; an input waits
+  s21: One new Ready session#59; inputs await the owner
+  s22: Pending without a launching turn#59; an input waits
+  s23: One new Ready session#59; inputs settled once
+  s24: Seed submit unproven: kept, never re-sent
+  [*] --> s0
+  s0 --> s1: Commit the seed original (acceptance)
+  s1 --> s2: Terminate takes transition and fence
+  s1 --> s3: Daemon dies and boots
+  s2 --> s3: Daemon dies and boots
+  s2 --> s5: Close only the captured pane
+  s3 --> s4: Permit refuses the seed with a notice
+  s4 --> s4: Submit an input to the still-current session
+  s5 --> s6: Daemon dies and boots
+  s5 --> s7: Retire CAS and settle the old turn
+  s6 --> s9: The seed owner or inflight recovery repairs the exact ended row
+  s6 --> s4: Permit refuses the seed with a notice
+  s7 --> s8: Disconnect keeping selector, release, wake
+  s7 --> s9: Daemon dies and boots
+  s8 --> s9: Daemon dies and boots
+  s8 --> s10: Owner starts the front: register the launch
+  s8 --> s11: Reply to the command
+  s9 --> s4: Permit refuses the seed with a notice
+  s10 --> s9: Daemon dies and boots
+  s10 --> s12: Install Pending over the vacant row
+  s11 --> s9: Daemon dies and boots
+  s11 --> s10: Owner starts the front: register the launch
+  s12 --> s9: Daemon dies and boots
+  s12 --> s13: Observe the create epoch
+  s13 --> s9: Daemon dies and boots
+  s13 --> s14: Compare live epoch and retain create permission
+  s14 --> s15: Complete the previously granted create
+  s14 --> s9: Daemon dies and boots
+  s15 --> s16: Observe the input epoch
+  s15 --> s9: Daemon dies and boots
+  s16 --> s9: Daemon dies and boots
+  s16 --> s17: Compare live epoch and retain input permission
+  s17 --> s9: Daemon dies and boots
+  s17 --> s18: Complete the previously granted first input
+  s18 --> s19: Commit the input's receipt
+  s18 --> s20: Daemon dies and boots
+  s19 --> s21: Bind the source
+  s19 --> s22: Daemon dies and boots
+  s21 --> s23: Submit an input to the successor once
+  s22 --> s21: Probe adopts the Pending pane
+  s20 --> s24: Submit an input to the successor once
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s3 purple
+  class s3 bugPath
+  class s4 purple
+  class s4 bugPath
+  class s4 repeats
+  class s5 blue
+  class s6 purple
+  class s7 blue
+  class s8 blue
+  class s9 purple
+  class s11 purple
+  class s20 teal
+  class s21 teal
+  class s22 purple
+  class s23 teal
+  class s24 teal

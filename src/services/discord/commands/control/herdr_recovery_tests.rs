@@ -387,4 +387,181 @@ mod retired_selector {
             seeded.done().await;
         });
     }
+
+    fn start_clear(seeded: &Seeded) -> tokio::task::JoinHandle<ClearReport> {
+        let (shared, channel) = (seeded.shared.clone(), seeded.channel);
+        tokio::spawn(async move {
+            let http = Arc::new(poise::serenity_prelude::Http::new(""));
+            super::super::super::clear_channel_session_state(
+                &http,
+                &shared,
+                &ProviderKind::Claude,
+                channel,
+                "!clear",
+            )
+            .await
+            .unwrap()
+        })
+    }
+
+    async fn wait_for_clear_epoch(
+        record: &crate::db::dispatched_sessions::hosted_execution::HostedExecution,
+        clear: &tokio::task::JoinHandle<ClearReport>,
+    ) {
+        use crate::services::herdr_launch::clear_epoch::Launching;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match Launching::for_launch(&record.owner) {
+                    Err(_) => break,
+                    Ok(probe) => drop(probe),
+                }
+                assert!(
+                    !clear.is_finished(),
+                    "clear completed before fencing the registered startup"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("clear must publish its epoch before teardown");
+    }
+
+    #[test]
+    fn authorized_submit_is_terminated_before_clear_returns_pg() {
+        const CHANNEL: u64 = 5_340_226;
+        let path = concat!(
+            module_path!(),
+            "::authorized_submit_is_terminated_before_clear_returns_pg"
+        );
+        if !herdr::in_child(path, CHANNEL) {
+            return;
+        }
+        let rig = herdr::P11TerminationRig::boot(CHANNEL);
+        runtime(&rig).block_on(async {
+            let _root = crate::config::TestRuntimeRootGuard::new();
+            let seeded = seeded(&rig, CHANNEL, herdr::HostedState::Bound).await;
+            let (_, record) = seeded.record().await;
+            let startup =
+                crate::services::herdr_launch::clear_epoch::Launching::for_launch(&record.owner)
+                    .unwrap();
+            let scope = startup.scope();
+            let permit = scope.check_epoch().unwrap().begin_effect().unwrap();
+            crate::services::tui_prompt_dedupe::admit_herdr_execution(
+                &record.owner.logical_key,
+                &record.execution_nonce,
+            );
+            let target = crate::services::session_host::herdr_endpoints()
+                .target(&record)
+                .unwrap();
+            target
+                .pin(crate::services::session_host::HerdrMutation::Input)
+                .unwrap();
+            let clear = start_clear(&seeded);
+            wait_for_clear_epoch(&record, &clear).await;
+            assert!(
+                !clear.is_finished(),
+                "clear cannot complete while startup owns a possible effect"
+            );
+            assert_eq!(
+                herdr::row(&seeded.pool, &seeded.key).await,
+                Some((herdr::HostedState::Bound, herdr::EXECUTION.to_owned()))
+            );
+            assert_eq!(
+                target
+                    .send_keys(&[crate::services::session_host::HostKey::Enter])
+                    .unwrap(),
+                crate::services::session_host::HostMutation::Confirmed
+            );
+            assert!(
+                !clear.is_finished(),
+                "an issued grant stays live through physical I/O"
+            );
+            let end_check = rig.pause_end_check();
+            drop(permit);
+            scope.finish_start();
+            drop(scope);
+            drop(startup);
+            tokio::time::timeout(std::time::Duration::from_secs(10), end_check.arrived)
+                .await
+                .expect("the exact end must reach its provider-exit check")
+                .unwrap();
+            assert!(
+                !clear.is_finished(),
+                "clear waits for provider-exit confirmation"
+            );
+            let writes = rig.writes();
+            assert_eq!(writes.len(), 2, "one permitted submit and one exact end");
+            assert_eq!(writes[0].0, "pane.send_keys");
+            assert_eq!(
+                writes[0].1, writes[1].1,
+                "both effects target the same pane"
+            );
+            end_check.release.send(()).unwrap();
+            let report = tokio::time::timeout(std::time::Duration::from_secs(10), clear)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!report.end_unconfirmed, "{report:?}");
+            assert_eq!(herdr::row(&seeded.pool, &seeded.key).await, retired());
+            assert_eq!(seeded.selected().await, None);
+            assert_eq!(
+                rig.writes(),
+                writes,
+                "confirmation sends no additional effects"
+            );
+            seeded.done().await;
+        });
+    }
+
+    #[test]
+    fn clear_startup_overlap_stays_sticky_after_submit_returns_pg() {
+        const CHANNEL: u64 = 5_340_227;
+        let path = concat!(
+            module_path!(),
+            "::clear_startup_overlap_stays_sticky_after_submit_returns_pg"
+        );
+        if !herdr::in_child(path, CHANNEL) {
+            return;
+        }
+        let rig = herdr::P11TerminationRig::boot(CHANNEL);
+        runtime(&rig).block_on(async {
+            let _root = crate::config::TestRuntimeRootGuard::new();
+            let seeded = seeded(&rig, CHANNEL, herdr::HostedState::Retired).await;
+            let (_, record) = seeded.record().await;
+            crate::services::tui_prompt_dedupe::admit_herdr_execution(
+                &record.owner.logical_key,
+                &record.execution_nonce,
+            );
+            let startup =
+                crate::services::herdr_launch::clear_epoch::Launching::for_launch(&record.owner)
+                    .unwrap();
+            let transition = seeded
+                .shared
+                .session_transition_lock(seeded.channel)
+                .lock_owned()
+                .await;
+            let clear = start_clear(&seeded);
+            wait_for_clear_epoch(&record, &clear).await;
+            drop(startup);
+            drop(transition);
+            let report = tokio::time::timeout(std::time::Duration::from_secs(10), clear)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                seeded.take_clear_flag().await,
+                "a launching clear must use the ordinary clear: {report:?}"
+            );
+            assert!(
+                !matches!(&report.execution, Some(ExecutionCleanup::Held(_))),
+                "{report:?}"
+            );
+            assert_eq!(
+                seeded.selected().await,
+                None,
+                "drained startup must not restore the Held exception"
+            );
+            seeded.done().await;
+        });
+    }
 }

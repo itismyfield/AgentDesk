@@ -55,6 +55,7 @@ pub(super) struct Registration {
     /// Only a successfully settled write may attach its native input to this birth episode.
     native_pin_submitted: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     observation: Option<BusyObservation>,
+    recovery: super::start_failure::MissingRecovery,
 }
 
 /// Reads an idle submit's AI turn to its end on the turn's sender and returns its outcome.
@@ -141,6 +142,7 @@ impl Registration {
             until_done,
             native_pin_submitted: None,
             observation: None,
+            recovery: Default::default(),
         })
     }
 }
@@ -182,6 +184,17 @@ pub(in crate::services::discord) fn owner_drive(
         Box::pin(async move {
             use crate::services::discord::queue_io::input_ingress as ingress;
             let original = front.clone();
+            #[cfg(unix)]
+            if runtime.as_ref().is_some_and(|shared| {
+                crate::services::discord::queue_io::input_owner::restart_gate::inflight(
+                    provider.as_str(),
+                    &shared.token_hash,
+                    channel,
+                )
+            }) {
+                hold_start(&mailbox, ChannelId::new(channel), &front).await;
+                return Err(WRITER_HELD.into());
+            }
             if crate::services::discord::router::intake_dispatch::writer_boot_held(
                 &provider, channel,
             )
@@ -557,6 +570,7 @@ pub(in crate::services::discord) struct OwnerTurn {
     origin: InputOrigin,
     /// What the start's headless turn knows of its pane for the late native read.
     late: LateRead,
+    pub(super) recovery: super::start_failure::MissingRecovery,
     refusal: std::sync::Arc<Mutex<Option<crate::services::turn_host::HerdrRefusal>>>,
 }
 
@@ -591,6 +605,12 @@ impl OwnerTurn {
 
     pub(in crate::services::discord) fn front(&self) -> &Front {
         self.claim.front()
+    }
+
+    /// Whether this turn starts the greeting an authorized restart queued.
+    #[cfg(test)]
+    pub(in crate::services::discord) fn restart_seed(&self) -> bool {
+        self.origin == InputOrigin::RestartSeed
     }
 
     /// No effect began: leave the original at the owner's front until another real wake.
@@ -953,6 +973,10 @@ async fn start_idle(
     .await?;
     // A start waits unclaimed behind a turn it did not start; that turn's idle wakes the owner.
     let wait = match &kept {
+        // The greeting's permit, not a tmux pane read, decides when it may start.
+        Some(context) if InputOrigin::from_context(Some(context)) == InputOrigin::RestartSeed => {
+            Wait::Go
+        }
         Some(context) if !InputOrigin::from_context(Some(context)).is_person() => {
             start_waits(&shared, channel, context).await
         }
@@ -972,7 +996,11 @@ async fn start_idle(
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
     let (settled, answer) = tokio::sync::oneshot::channel();
     let origin = InputOrigin::from_context(kept.as_ref());
-    let failed = super::start_failure::Failure::claimed(&mailbox, &claim);
+    let recovery = super::start_failure::MissingRecovery::default();
+    let failed =
+        super::start_failure::Failure::claimed(&mailbox, &claim).with_recovery(recovery.clone());
+    let permit = super::start_failure::greeting_permit;
+    let failed = permit(&shared, channel, kept.as_ref(), failed).await?;
     let refusal = std::sync::Arc::new(Mutex::new(None));
     let owner = OwnerTurn {
         mailbox,
@@ -981,6 +1009,7 @@ async fn start_idle(
         settled,
         origin,
         late: LateRead::default(),
+        recovery,
         refusal: refusal.clone(),
     };
     let now = (std::time::SystemTime::now(), std::time::Instant::now());
@@ -1019,6 +1048,9 @@ async fn start_idle(
             started.map(drop).map_err(|error| error.to_string())
         }
     };
+    if failed.discard_recovered(&shared, channel, &started).await? {
+        return Err("NotSent(\"recovery_start_discarded\")".into());
+    }
     let typed = refusal.lock().unwrap_or_else(|e| e.into_inner()).take();
     let mut bootstrap = match typed {
         Some(crate::services::turn_host::HerdrRefusal::OWriterNotReady) => {
@@ -1182,6 +1214,7 @@ pub(super) fn execute_owned(
         settled,
         origin,
         late,
+        recovery,
         ..
     } = owner;
     let turn = StreamingTurn {
@@ -1255,11 +1288,17 @@ pub(super) fn execute_owned(
             }
         }
     });
+    // Only the greeting of an explicit restart carries its operation to a Codex launch.
+    let restart = (origin == InputOrigin::RestartSeed)
+        .then(|| claim.front().0.clone())
+        .flatten();
+    let as_restart = crate::services::codex::herdr_turn::restart_intent::scope;
     match registered {
-        Ok(mut owner) => {
+        Ok(mut owner) => as_restart(restart, || {
             owner.native = native_input::for_front(&turn, &claim, true);
+            owner.recovery = recovery;
             execute_front(turn, sender, claim, owner, settled)
-        }
+        }),
         Err(error) => {
             let _ = settled.send(Err(error.clone()));
             Err(error)
@@ -1412,7 +1451,8 @@ pub(super) fn execute_front(
         owner.native = native_input::for_front(&turn, &claim, false);
     }
     let reply = reply_once(Some(settled));
-    let failure = super::start_failure::Failure::claimed(&owner.mailbox, &claim);
+    let failure = super::start_failure::Failure::claimed(&owner.mailbox, &claim)
+        .with_recovery(owner.recovery.clone());
     let watch =
         crate::services::discord::inflight::row_removed::watch(turn.provider, turn.channel_id);
     let context = turn.clone();
@@ -1597,6 +1637,18 @@ fn run(
         target::Route::ClaudeBusy => (
             busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt),
             BusyClaude {
+                probe_guard: r
+                    .origin
+                    .is_person()
+                    .then(|| {
+                        owned_busy::watch_guard(
+                            turn.pool,
+                            turn.host,
+                            r.mailbox.clone(),
+                            front.as_ref().map(FrontClaim::front),
+                        )
+                    })
+                    .flatten(),
                 operation: match r.observation {
                     Some(observation) => Ok(observation.prepare_busy(
                         r.program,

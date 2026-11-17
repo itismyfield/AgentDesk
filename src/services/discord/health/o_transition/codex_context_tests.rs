@@ -84,6 +84,7 @@ impl Fixture {
             provider_root: Some(native.clone()),
             first_prompt_digest: None,
             source_policy: (!herdr).then(|| "shadow".into()),
+            resume_start: None,
         };
         PreparedIncarnation::create(context.clone()).unwrap();
         let source_path = native.join(format!("rollout-test-{ID}.jsonl"));

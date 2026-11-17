@@ -204,7 +204,7 @@ fn launch_cause(
         _ => return None,
     };
     if context.execution_nonce != nonce
-        || binding_context::pane_context(tmux, &nonce).as_ref() != Some(&context)
+        || binding_context::pane_context(tmux, &nonce).as_ref() != Some(context.as_ref())
         || binding.runtime_kind != RuntimeHandoffKind::ClaudeTui
         || context.channel_id != Some(channel)
         || context.owner_runtime_root != crate::services::tmux_common::current_tmux_owner_marker()

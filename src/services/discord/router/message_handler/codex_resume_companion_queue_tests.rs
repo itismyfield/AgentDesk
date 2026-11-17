@@ -246,7 +246,7 @@ impl Fixture {
     }
     fn hook(&self, event: &str, source: Option<&str>) -> IngressOutcome {
         let envelope = HookBindingEnvelope {
-            context: CapturedContext::Captured(self.context.clone()),
+            context: CapturedContext::Captured(self.context.clone().into()),
             observed: ObservedHookProcess::default(),
         };
         let mut headers = axum::http::HeaderMap::new();

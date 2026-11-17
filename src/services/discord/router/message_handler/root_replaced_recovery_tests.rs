@@ -966,18 +966,21 @@ fn rr_retired_cache_skips_completed_cleanup_and_unknown_or_failed_fsync_retries_
 fn rr_missing_pane_requires_a_prior_root_replaced_candidate_pg() {
     std::thread::spawn(|| {
         let case = Case::launched("rr-initial-missing");
-        let original = case.fx.record();
+        let HostedRecord::Known(mut retired) = case.fx.record() else {
+            panic!("the original execution is Bound");
+        };
+        retired.state = HostedState::Retired;
         let effects = case.effects();
         case.fx.rig.show_panes(&[]);
         case.pass();
         assert!(ATTACHES.with(|count| count.get() > 0));
         assert_eq!(
             case.fx.record(),
-            original,
-            "initial Missing cannot authorize retirement"
+            HostedRecord::Known(retired),
+            "a complete Missing read retires the exact execution without root recovery"
         );
         assert_eq!(case.cleanups(), 0);
-        assert!(case.hold_path().exists());
+        assert!(!case.hold_path().exists());
         assert_eq!(case.effects(), effects);
     })
     .join()

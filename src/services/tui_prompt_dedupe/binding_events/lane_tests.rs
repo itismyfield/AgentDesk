@@ -576,6 +576,7 @@ fn launch_cause_comes_from_the_execution_context_only_once() {
             provider_root: None,
             first_prompt_digest: None,
             source_policy: None,
+            resume_start: None,
         };
         PreparedIncarnation::create(context).unwrap();
         fs::write(tc::session_temp_path(tmux, "spawn_nonce"), &nonce).unwrap();
@@ -1076,6 +1077,7 @@ fn a_herdr_resume_of_the_pane_source_is_logged_once_under_its_new_execution() {
             provider_root: None,
             first_prompt_digest: None,
             source_policy: None,
+            resume_start: None,
         };
         PreparedIncarnation::create(context).unwrap();
         fs::write(tc::session_temp_path(tmux, "spawn_nonce"), &nonce).unwrap();
