@@ -128,8 +128,16 @@ pub(crate) async fn set_for_channel_pg(
     let payload = new_payload();
     let updated = sqlx::query(
         "UPDATE sessions SET provider_resume_fence = $5
-         WHERE id = $1 AND provider = $2 AND identity_kind = 'discord_channel'
-           AND discord_token_hash = $3 AND channel_id = $4
+         WHERE id = $1 AND provider = $2
+           AND ((identity_kind = 'discord_channel'
+                 AND discord_token_hash = $3 AND channel_id = $4)
+             OR (identity_kind IS NULL AND discord_token_hash IS NULL
+                 AND (channel_id IS NULL OR channel_id = $4)
+                 AND starts_with(session_key, $2 || '/' || $3 || '/')
+                 AND starts_with($7, $2 || '/' || $3 || '/')
+                 AND (session_key = $7 OR EXISTS (
+                     SELECT 1 FROM session_key_aliases
+                     WHERE session_key = $7 AND session_id = sessions.id))))
            AND hosted_execution IS NOT DISTINCT FROM $6",
     )
     .bind(session_row_id)
@@ -138,6 +146,7 @@ pub(crate) async fn set_for_channel_pg(
     .bind(identity.channel_id)
     .bind(&payload)
     .bind(raw)
+    .bind(session_key)
     .execute(pool)
     .await
     .map_err(|error| format!("set provider resume fence: {error}"))?;

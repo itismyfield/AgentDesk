@@ -115,6 +115,100 @@ async fn channel_clear_fences_missing_legacy_and_unknown_rows_pg() {
 }
 
 #[tokio::test]
+async fn legacy_locator_clear_fences_without_rewriting_ownership_or_selectors_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let owner = fixture("resume-fence-old-locator");
+    for channel in [None, Some(owner.channel_id.as_str())] {
+        let key = format!(
+            "claude/{}/fixture:legacy-{}",
+            owner.discord_token_hash,
+            channel.is_some()
+        );
+        let alias = format!("{key}-alias");
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO sessions (session_key, provider, channel_id, claude_session_id)
+             VALUES ($1, 'claude', $2, 'old-selector') RETURNING id",
+        )
+        .bind(&key)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO session_key_aliases (session_key, session_id) VALUES ($1, $2)")
+            .bind(&alias)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for locator in [&key, &alias] {
+            let fence = set_for_channel_pg(&pool, &owner.provider, identity(&owner), locator)
+                .await
+                .unwrap();
+            assert_eq!(fence.session_row_id, id);
+            assert_eq!(
+                load_by_resolved_key_pg(&pool, &key).await.unwrap(),
+                Some(fence)
+            );
+            let kept: (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<Value>,
+            ) = sqlx::query_as(
+                "SELECT identity_kind, discord_token_hash, channel_id, hosted_execution
+                     FROM sessions WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(kept, (None, None, channel.map(str::to_owned), None));
+            assert_eq!(
+                selectors(&pool, id).await.0.as_deref(),
+                Some("old-selector")
+            );
+        }
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn legacy_locator_clear_rejects_other_channel_and_namespace_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let owner = fixture("resume-fence-legacy-owner");
+    for (suffix, token, channel) in [
+        (
+            "channel",
+            owner.discord_token_hash.as_str(),
+            Some("another-channel"),
+        ),
+        ("namespace", "another-token", None),
+    ] {
+        let key = format!("claude/{token}/fixture:{suffix}");
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, channel_id, claude_session_id)
+             VALUES ($1, 'claude', $2, 'old-selector')",
+        )
+        .bind(&key)
+        .bind(channel)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            set_for_channel_pg(&pool, &owner.provider, identity(&owner), &key)
+                .await
+                .is_err()
+        );
+        assert_eq!(load_by_resolved_key_pg(&pool, &key).await.unwrap(), None);
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
 async fn held_clear_requires_exact_execution_and_preserves_successor_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
