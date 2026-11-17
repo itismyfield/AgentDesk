@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::tui_o::channel_policy::output_disposition::tests::fenced_fixture;
 use crate::services::tui_o::channel_policy::output_disposition::{Output, Phase};
 use std::sync::Mutex;
 
@@ -195,12 +196,15 @@ async fn strict_notice_evidence_is_bound_to_reserved_effect_pg() {
         .await
         .unwrap()
         .unwrap();
-    let wrong_id = Output::new(identity(2), tokio::time::Instant::now());
-    assert!(wrong_id.reject(Reason::Deadline));
+    let wrong_id = fenced_fixture(identity(2), Reason::Deadline);
     assert!(!wrong_id.confirm(&receipt));
-    let wrong_reason = Output::new(id.clone(), tokio::time::Instant::now());
-    assert!(wrong_reason.reject(Reason::SourceRejected));
+    let wrong_reason = fenced_fixture(id.clone(), Reason::SourceRejected);
     assert!(!wrong_reason.confirm(&receipt));
+    assert!(
+        db::persist_intent(&pool, &id, Reason::SourceRejected)
+            .await
+            .is_err()
+    );
     assert!(
         port.calls.lock().unwrap().is_empty(),
         "history reconciliation never creates a message"
@@ -297,13 +301,24 @@ async fn gateway_adapter_posts_only_reason_and_confirms_real_response_pg() {
     .await;
     let pool = db.connect_and_migrate_with_max_connections(2).await;
     let id = identity(1);
-    let output = Output::new(id.clone(), tokio::time::Instant::now());
-    assert!(output.reject(Reason::Deadline));
+    let requested = Output::new(id.clone(), tokio::time::Instant::now());
+    assert!(requested.reject(Reason::Deadline));
+    assert_eq!(requested.phase(), Phase::RejectRequested(Reason::Deadline));
+    assert!(requested.persist_rejection(&pool).await.is_err());
+    assert!(db::record(&pool, &id).await.unwrap().is_none());
+    assert!(payloads.lock().unwrap().is_empty());
+    db::persist_intent(&pool, &id, Reason::Deadline)
+        .await
+        .unwrap();
+    let output = Output::restore(&pool, id.clone(), tokio::time::Instant::now())
+        .await
+        .unwrap();
     let receipt = deliver(&pool, &id, Reason::Deadline, &port)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(receipt.message(), 30);
+    assert!(!requested.confirm(&receipt));
     assert!(output.confirm(&receipt));
     assert_eq!(output.phase(), Phase::Rejected(Reason::Deadline));
     assert!(!output.confirm(&receipt));

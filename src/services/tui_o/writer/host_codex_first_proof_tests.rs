@@ -364,6 +364,7 @@ async fn scenario(
         await_within(body, WAIT_CAP).await
     };
     if invalidator == "valid" {
+        assert_eq!(disposition.phase(), Phase::Adopted);
         assert_eq!(
             adoption(channel),
             Adoption::Committed,

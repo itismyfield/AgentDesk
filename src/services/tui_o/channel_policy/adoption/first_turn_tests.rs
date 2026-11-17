@@ -416,11 +416,20 @@ fn only_new_input_reopens_a_refused_episode_and_old_tokens_cannot_end_it() {
     let fixture = Fixture::new(8_165_981);
     let old_proof = fixture.proof();
     let old = Output::new(
-        Identity::from_proof(&old_proof, 10),
+        Identity::from_proof(&old_proof, old_proof.mark.order),
         tokio::time::Instant::now(),
     );
     assert!(old.reject(Reason::SourceRejected));
-    fixture.candidate.release(fixture.channel);
+    assert_eq!(old.phase(), Phase::RejectRequested(Reason::SourceRejected));
+    assert_eq!(
+        old.finish_first(
+            &fixture.candidate,
+            &old_proof,
+            &fixture.store,
+            Reason::Deadline
+        ),
+        Err(Reason::SourceRejected)
+    );
     let tmux = old_proof.context.tmux_session.as_str();
     assert!(
         fixture
@@ -428,26 +437,68 @@ fn only_new_input_reopens_a_refused_episode_and_old_tokens_cannot_end_it() {
             .admit_first(fixture.channel, "new", "hi", tmux, || Ok(0))
             .is_none()
     );
+    let prepared = PreparedIncarnation::prepare_pinned(
+        "codex",
+        tmux,
+        Some(fixture.channel),
+        None,
+        false,
+        old_proof.context.provider_root.clone(),
+        (Some(first_prompt_digest("hi")), Some("legacy".into())),
+    )
+    .unwrap();
+    let input = old_proof.mark.order + 1;
     assert!(
         fixture
             .candidate
-            .admit_after_rejection(&old, (10, "new", "hi", tmux), || Ok(0))
+            .admit_after_rejection(
+                &old,
+                (old_proof.mark.order, "new", "hi", &prepared.context),
+                || Ok(0)
+            )
             .is_none()
     );
     assert!(
         fixture
             .candidate
-            .admit_after_rejection(&old, (11, &old_proof.nonce, "hi", tmux), || Ok(0))
+            .admit_after_rejection(
+                &old,
+                (input, &old_proof.nonce, "hi", &prepared.context),
+                || Ok(0)
+            )
+            .is_none()
+    );
+    assert!(
+        fixture
+            .candidate
+            .admit_after_rejection(&old, (input, "new", "hi", &old_proof.context), || Ok(0))
             .is_none()
     );
     let new = fixture
         .candidate
-        .admit_after_rejection(&old, (11, "new", "hi", tmux), || Ok(0))
+        .admit_after_rejection(&old, (input, "new", "hi", &prepared.context), || Ok(0))
         .unwrap();
+    assert!(fixture.candidate.first_proof(&fixture.source).is_err());
+    let path = fixture.source.path.with_file_name("new-execution.jsonl");
+    std::fs::write(
+        &path,
+        b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"new-native\"}}\n",
+    )
+    .unwrap();
+    let source = source_id_for("new-native", &path).unwrap();
+    let proof = fixture.candidate.first_proof(&source).unwrap().unwrap();
+    assert_eq!(proof.context, prepared.context);
     fixture
         .candidate
         .invalidate_first(Some(&old_proof.nonce), Some(tmux));
-    assert!(fixture.candidate.first_mark().is_some());
+    assert_eq!(
+        fixture.candidate.first_proof(&source).unwrap().unwrap(),
+        proof
+    );
+    fixture
+        .candidate
+        .attach_first_execution(&old_proof.context, "hi", Some("new"));
+    assert!(fixture.candidate.first_proof(&source).is_err());
     assert_eq!(
         old.phase(),
         Phase::RejectPendingNotice(Reason::SourceRejected)

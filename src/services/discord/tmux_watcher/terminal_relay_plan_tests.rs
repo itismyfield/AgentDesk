@@ -1420,6 +1420,11 @@ pub(crate) async fn first_terminal_plan(
         monitor_auto_turn_ledger_generation: &mut ledger_generation,
     };
     let plan = run_terminal_relay_plan(&context, locals, &mut state).await;
+    if let Some((output, candidate, original, store)) = policy {
+        crate::services::tui_o::writer::normalization::run(&output, &candidate, &original, store)
+            .await
+            .map_err(|reason| reason.message().to_owned())?;
+    }
     let sent = crate::services::tui_o::cutover::claim_then_send(
         Some(
             crate::services::tui_o::cutover::BodyClaim::tmux(channel, Some(&session))
@@ -1430,6 +1435,5 @@ pub(crate) async fn first_terminal_plan(
     .await
     .map_err(|error| error.to_string());
     drop(plan);
-    let _ = policy;
     sent
 }

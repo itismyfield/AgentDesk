@@ -54,7 +54,7 @@ fn raw_terminal_choice_must_close_the_waiting_first_actor(expire: bool) {
         output.finish_first(&f.candidate, &proof, &f.store, Reason::Deadline),
         Err(Reason::Deadline)
     );
-    let activated = f.activate();
+    let activated = activate(&f.store, f.channel, &f.candidate, &proof);
     assert!(
         f.store.read_init(f.channel).unwrap().is_none(),
         "a terminal rejection permitted a later actor init: {activated:?}"
@@ -233,4 +233,50 @@ fn identity_mismatch_closes_the_attempt_without_touching_the_first_slot() {
     assert_eq!(output.phase(), Phase::ExistingEffectPending);
     assert_eq!(f.proof(), proof);
     assert_eq!(f.candidate.peek(), Adoption::Deferred);
+}
+
+#[test]
+fn actor_publication_and_settling_win_before_waiting_expiry() {
+    let f = Fixture::new(8_165_999);
+    let proof = f.proof();
+    let output = output(&proof, true);
+    let (written_tx, written_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    test_hook::set(f.channel, Step::AfterWrite, move || {
+        written_tx.send(()).unwrap();
+        recv_within(&release_rx, WAIT_CAP);
+        Err("lost init acknowledgement".into())
+    });
+    let (store, candidate, channel, actor_proof) = (
+        f.store.clone(),
+        f.candidate.clone(),
+        f.channel,
+        proof.clone(),
+    );
+    let actor = std::thread::spawn(move || activate(&store, channel, &candidate, &actor_proof));
+    recv_within(&written_rx, WAIT_CAP);
+    assert!(f.candidate.locked_for_test());
+    let init = serde_json::to_vec(&f.store.read_init(f.channel).unwrap().unwrap()).unwrap();
+    let (starting_tx, starting_rx) = mpsc::channel();
+    let (store, candidate, output_copy, finishing_proof) = (
+        f.store.clone(),
+        f.candidate.clone(),
+        output.clone(),
+        proof.clone(),
+    );
+    let finishing = std::thread::spawn(move || {
+        starting_tx.send(()).unwrap();
+        output_copy.finish_first(&candidate, &finishing_proof, &store, Reason::Deadline)
+    });
+    recv_within(&starting_rx, WAIT_CAP);
+    release_tx.send(()).unwrap();
+    join_within(actor, WAIT_CAP).unwrap();
+    assert_eq!(join_within(finishing, WAIT_CAP), Ok(proof));
+    assert_eq!(output.phase(), Phase::Adopted);
+    assert!(!output.reject(Reason::Deadline));
+    assert_eq!(f.candidate.peek(), Adoption::Committed);
+    assert_eq!(
+        serde_json::to_vec(&f.store.read_init(f.channel).unwrap().unwrap()).unwrap(),
+        init
+    );
 }

@@ -11,10 +11,11 @@ impl Identity {
             input,
             nonce: super::first_prompt_digest(&proof.nonce),
             execution: super::first_prompt_digest(&proof.context.execution_nonce),
-            source: super::first_prompt_digest(
-                &serde_json::to_string(&proof.source).expect("source identity"),
-            ),
+            source: Self::source_digest(&proof.source),
         }
+    }
+    pub(crate) fn source_digest(source: &crate::services::tui_o::shadow::SourceId) -> String {
+        super::first_prompt_digest(&serde_json::to_string(source).expect("source identity"))
     }
 }
 impl Reason {
@@ -40,6 +41,7 @@ pub(crate) enum Phase {
     Normalizing,
     Adopted,
     ExistingEffectPending,
+    RejectRequested(Reason),
     RejectPendingNotice(Reason),
     Rejected(Reason),
 }
@@ -66,7 +68,7 @@ impl Output {
         let recorded = crate::db::tui_output_disposition::record(pool, &id).await?;
         let output = Self::new(id, admitted_at);
         if let Some((reason, receipt)) = recorded {
-            output.reject(reason);
+            output.state.lock().unwrap().0 = Phase::RejectPendingNotice(reason);
             if let Some(receipt) = receipt {
                 output.confirm(&receipt);
             }
@@ -100,7 +102,7 @@ impl Output {
         if state.0 != Phase::Normalizing {
             return false;
         }
-        state.0 = Phase::RejectPendingNotice(reason);
+        state.0 = Phase::RejectRequested(reason);
         true
     }
     pub(crate) fn adopt(
@@ -135,20 +137,28 @@ impl Output {
         let mut adoption = candidate.lock();
         let mut state = self.state.lock().unwrap();
         if Self::identity_mismatch(self.id(), proof) || self.id.input != proof.mark.order {
-            if state.0 == Phase::Normalizing {
+            if matches!(state.0, Phase::Normalizing | Phase::RejectRequested(_)) {
                 state.0 = Phase::ExistingEffectPending;
             }
             return Err(Reason::Invalidated);
         }
+        let reason = match state.0 {
+            Phase::RejectRequested(requested) => requested,
+            _ => reason,
+        };
         match state.0 {
             Phase::Adopted => return Ok(proof.clone()),
             Phase::RejectPendingNotice(reason) | Phase::Rejected(reason) => return Err(reason),
             Phase::ExistingEffectPending if *adoption != Adoption::Committed => {
                 return Err(Reason::Invalidated);
             }
-            Phase::Normalizing | Phase::ExistingEffectPending => {}
+            Phase::Normalizing | Phase::RejectRequested(_) | Phase::ExistingEffectPending => {}
         }
         if *adoption == Adoption::Committed {
+            if !candidate.first_names(proof) {
+                state.0 = Phase::ExistingEffectPending;
+                return Err(Reason::Invalidated);
+            }
             let observed = || -> Option<bool> {
                 use crate::services::tui_o::store::InitOrigin;
                 use sha2::{Digest, Sha256};
@@ -218,4 +228,4 @@ impl Output {
 }
 
 #[path = "output_disposition_tests.rs"]
-mod tests;
+pub(crate) mod tests;
