@@ -27,7 +27,7 @@ static KEPT: LazyLock<Mutex<HashMap<(PathBuf, TypeId), Kept>>> =
 #[cfg(test)]
 thread_local! {
     /// History byte reads on this thread, for the cost tests.
-    pub(super) static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Called after every in-process history write, published or not.

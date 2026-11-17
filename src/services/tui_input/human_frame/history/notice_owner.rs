@@ -94,6 +94,25 @@ thread_local! {
     pub(crate) static CENSUS_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// A V2 history shares the kept parse of every reader; a V1 store over 256 KiB is not kept.
+fn read_snapshot(path: &Path) -> Result<std::sync::Arc<compat::Parsed>, String> {
+    let missing = || compat::Parsed::build(br#"{"entries":[]}"#).map(std::sync::Arc::new);
+    let read = match compat::v2_prefix(path) {
+        Ok(true) => match stamped::read(path, compat::Parsed::build) {
+            Ok(parsed) => return parsed,
+            Err(e) => Err(e),
+        },
+        Ok(false) => std::fs::read(path),
+        Err(e) => Err(e),
+    };
+    match read {
+        Ok(bytes) if bytes.len() <= 256 * 1024 => compat::reuse(path, bytes, compat::Parsed::build),
+        Ok(bytes) => compat::Parsed::build(&bytes).map(std::sync::Arc::new),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing(),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn same_scope(a: &NoticeOrigin, b: &NoticeOrigin) -> bool {
     a.record.source == b.record.source
         && a.logical_session == b.logical_session
@@ -152,13 +171,7 @@ impl Batch {
             let snapshot = snapshot.get_or_insert_with(|| {
                 #[cfg(test)]
                 SNAPSHOT_READS.with(|c| c.set(c.get() + 1));
-                path().and_then(|p| match stamped::read(&p, compat::Parsed::build) {
-                    Ok(parsed) => parsed,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        compat::Parsed::build(br#"{"entries":[]}"#).map(std::sync::Arc::new)
-                    }
-                    Err(e) => Err(e.to_string()),
-                })
+                path().and_then(|p| read_snapshot(&p))
             });
             let (through, native_stamp, rows) = native
                 .entry(origin.record.source.clone())

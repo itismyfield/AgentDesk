@@ -78,3 +78,44 @@ fn history_v2_frames_stay_known_to_the_production_readers() {
         "while the V2 file stays read-only"
     );
 }
+
+/// A kept history parse never outlives a rewrite, by this process or by another writer.
+#[test]
+fn settled_history_is_not_reread_until_rewritten() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let session = format!("stamped-{}", uuid::Uuid::new_v4());
+    let [first, second, third] = ["a", "b", "c"].map(|n| super::super::idle(n, "1", &session));
+    let registry = v2::Registry::runtime().unwrap();
+    let plan = |id: u64, frame: &str| {
+        let attempt = serde_json::json!({"nonce": format!("stamped-{id}"), "source": {}});
+        let input = serde_json::json!({"identity": {"sources": [id]}, "attempt": attempt,
+            "original": {"author_id": 1}, "payload": {"frame": frame}});
+        registry.prepare("stamped", &input).unwrap();
+    };
+    let path = path().unwrap();
+    let settle = |age| {
+        let at = std::time::SystemTime::now() - std::time::Duration::from_secs(age);
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(at).unwrap();
+    };
+    plan(1, &first);
+    settle(60);
+    assert!(known(&first));
+    HISTORY_READS.with(|reads| reads.set(0));
+    assert!(known(&first) && !known(&second));
+    assert_eq!(HISTORY_READS.with(|reads| reads.get()), 0);
+    plan(2, &second);
+    assert!(known(&second), "this process's registration is seen");
+    settle(60);
+    assert!(known(&second));
+    let mut raw = std::fs::read_to_string(&path).unwrap();
+    for (old, new) in class_hashes(&second).iter().zip(class_hashes(&third)) {
+        raw = raw.replace(old.as_str(), &new);
+    }
+    std::fs::write(&path, raw).unwrap();
+    settle(30);
+    assert!(
+        known(&third) && !known(&second),
+        "an outside same-length rewrite is seen"
+    );
+}

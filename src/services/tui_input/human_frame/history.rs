@@ -16,6 +16,8 @@ mod screen;
 #[cfg(test)]
 mod screen_tests;
 mod stamped;
+#[cfg(test)]
+pub(crate) use stamped::READS as HISTORY_READS;
 pub(crate) mod v2;
 
 const CAPACITY: usize = 4096;

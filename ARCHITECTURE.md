@@ -4141,6 +4141,7 @@ src/
 │   │   │   │   ├── rollback_reader_tests.rs
 │   │   │   │   ├── screen.rs
 │   │   │   │   ├── screen_tests.rs
+│   │   │   │   ├── stamped.rs
 │   │   │   │   ├── v2.rs
 │   │   │   │   ├── v2_compaction_tests.rs
 │   │   │   │   └── v2_tests.rs
