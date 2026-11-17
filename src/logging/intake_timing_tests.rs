@@ -88,6 +88,7 @@ fn one_line_per_message_follows_the_trace_across_tasks_and_threads() {
                 mark(Stage::Handoff);
                 mark(Stage::Applied);
                 settle(None);
+                settle(Some(Outcome::Failed));
             })
         });
         join_within(driver, WAIT_CAP);
