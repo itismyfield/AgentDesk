@@ -65,6 +65,7 @@ mod retired_selector {
     const HELD: u64 = 5_340_223;
     const EXACT: u64 = 5_340_224;
     const KEPT: u64 = 5_340_225;
+    const GENERAL: u64 = 5_340_226;
 
     fn runtime(rig: &herdr::P11TerminationRig) -> tokio::runtime::Runtime {
         let install = rig.thread_installer();
@@ -260,13 +261,12 @@ mod retired_selector {
         });
     }
 
-    // A retired row whose execution is still admitted holds the clear: the reply says so and the
-    // previous session, its selector and the absent clear flag all stay.
+    // The conversation resets even when the old execution is still admitted and cleanup is held.
     #[test]
-    fn held_clear_keeps_the_selector_and_says_so_pg() {
+    fn held_clear_forgets_the_selector_and_reports_cleanup_held_pg() {
         let path = concat!(
             module_path!(),
-            "::held_clear_keeps_the_selector_and_says_so_pg"
+            "::held_clear_forgets_the_selector_and_reports_cleanup_held_pg"
         );
         if !herdr::in_child(path, HELD) {
             return;
@@ -285,11 +285,59 @@ mod retired_selector {
 
             assert_eq!(
                 reply,
-                "대기 메시지 0건을 비웠어요.\n이전 Herdr 실행은 정리하지 못했어요. Herdr execution is admitted"
+                "대화는 초기화했어요.\n대기 메시지 0건을 비웠어요.\n이전 Herdr 실행은 정리하지 못했어요. Herdr execution is admitted"
             );
-            assert!(!seeded.take_clear_flag().await, "a held clear sets no flag");
-            assert_eq!(seeded.selected().await.as_deref(), Some(SELECTOR));
+            assert!(seeded.take_clear_flag().await, "a held clear resets provider memory");
+            assert_eq!(seeded.selected().await, None);
+            assert!(crate::db::dispatched_sessions::provider_resume_fence::load_by_resolved_key_pg(
+                &seeded.pool, &seeded.key,
+            ).await.unwrap().is_some());
             seeded.done().await;
+        });
+    }
+
+    #[test]
+    fn general_clear_fences_legacy_missing_unknown_and_failed_boundary_pg() {
+        let path = concat!(
+            module_path!(),
+            "::general_clear_fences_legacy_missing_unknown_and_failed_boundary_pg"
+        );
+        if !herdr::in_child(path, GENERAL) {
+            return;
+        }
+        let rig = herdr::P11TerminationRig::boot(GENERAL);
+        runtime(&rig).block_on(async {
+            for case in ["legacy", "missing", "unknown", "boundary_failure"] {
+                let _root = crate::config::TestRuntimeRootGuard::new();
+                let _tmux = gate::ScriptedTmux::install();
+                let seeded = seeded(&rig, GENERAL, herdr::HostedState::Bound).await;
+                if case == "missing" {
+                    sqlx::query("DELETE FROM sessions WHERE session_key = $1")
+                        .bind(&seeded.key).execute(&seeded.pool).await.unwrap();
+                } else {
+                    let raw = (case == "unknown").then(|| serde_json::json!({"schema":99}));
+                    sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1")
+                        .bind(&seeded.key).bind(raw).execute(&seeded.pool).await.unwrap();
+                }
+                if case == "boundary_failure" {
+                    for statement in [
+                        "CREATE FUNCTION refuse_boundary() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'boundary refused'; END $$",
+                        "CREATE TRIGGER refuse_boundary BEFORE INSERT OR UPDATE ON channel_session_clear_boundaries FOR EACH ROW EXECUTE FUNCTION refuse_boundary()",
+                    ] {
+                        sqlx::query(statement).execute(&seeded.pool).await.unwrap();
+                    }
+                }
+                let report = seeded.clear().await;
+                assert!(report.conversation_reset, "{case}: {report:?}");
+                assert!(crate::db::dispatched_sessions::provider_resume_fence::load_by_resolved_key_pg(
+                    &seeded.pool, &seeded.key,
+                ).await.unwrap().is_some(), "{case}");
+                assert!(seeded.take_clear_flag().await, "{case}");
+                if case == "boundary_failure" {
+                    assert!(report.failed.contains(&"pg_boundary"), "{report:?}");
+                }
+                seeded.done().await;
+            }
         });
     }
 

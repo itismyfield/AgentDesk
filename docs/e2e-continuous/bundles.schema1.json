@@ -737,7 +737,7 @@
     },
     "E-50": {
       "path": "tests/e2e/tui_relay/scenarios/E-50-claude-clear-and-turns.yaml",
-      "sha256": "7a01bb27f4ef703f96991de149d406a645871ee1617566f9f74e6a2534a5fde6",
+      "sha256": "bf77485f400f9a6e401771630d25531d5752c6e07b132d7b83fda3886f2df160",
       "coverage_class": "live",
       "cells": [
         "claude-tui",

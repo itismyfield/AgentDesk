@@ -1,3 +1,6 @@
+mod slash_clear;
+pub(in crate::services::discord) use slash_clear::slash_clear_for_test;
+
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

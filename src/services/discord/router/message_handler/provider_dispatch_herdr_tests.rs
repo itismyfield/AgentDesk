@@ -1523,6 +1523,8 @@ mod fresh_notice_tests;
 mod start_offset_tests;
 #[path = "provider_dispatch_herdr_tmux_launch_tests.rs"]
 mod tmux_launch_tests;
+#[path = "provider_dispatch_herdr_clear_fence_tests.rs"]
+mod clear_fence_tests;
 
 impl Fixture {
     /// A tmux-era session of this channel, as a channel moving to Herdr has it: its transcript in

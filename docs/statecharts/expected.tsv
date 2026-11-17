@@ -684,6 +684,16 @@ session-lifecycle/HerdrBusyHandoffReconnectNumber.cfg	HerdrBusyHandoff	NoForeign
 session-lifecycle/HerdrBusyHandoffReplayUnknown.cfg	HerdrBusyHandoff	InputAtMostOnce,NoSilentLoss	MessageProgress,JournalProgress
 session-lifecycle/HerdrBusyHandoffStaleIntake.cfg	HerdrBusyHandoff	NoOldKeys	-
 session-lifecycle/HerdrBusyHandoffUntypedHeld.cfg	HerdrBusyHandoff	NoRetained	-
+session-lifecycle/HerdrClearLaunchBeforeHeld.cfg	HerdrClearLaunch	ApiSelectorDoesNotExposePrior,ClearNeverResumesPrior	-
+session-lifecycle/HerdrClearLaunchBeforeRetired.cfg	HerdrClearLaunch	ApiSelectorDoesNotExposePrior,ClearNeverResumesPrior	-
+session-lifecycle/HerdrClearLaunchBoundaryOnlyHeld.cfg	HerdrClearLaunch	ApiSelectorDoesNotExposePrior,ClearNeverResumesPrior	-
+session-lifecycle/HerdrClearLaunchFilterAfterJudge.cfg	HerdrClearLaunch	NoRepinUnderFence	-
+session-lifecycle/HerdrClearLaunchFixedHeld.cfg	HerdrClearLaunch	-	-
+session-lifecycle/HerdrClearLaunchFixedRaceClear.cfg	HerdrClearLaunch	-	-
+session-lifecycle/HerdrClearLaunchFixedRetired.cfg	HerdrClearLaunch	-	-
+session-lifecycle/HerdrClearLaunchNoRelease.cfg	HerdrClearLaunch	FreshRestartKeepsSession	-
+session-lifecycle/HerdrClearLaunchReleaseWithoutToken.cfg	HerdrClearLaunch	ClearNeverResumesPrior,WrongTokenReleaseNoEffect	-
+session-lifecycle/HerdrClearLaunchUnclearedRestart.cfg	HerdrClearLaunch	-	-
 session-lifecycle/HerdrHandoffFixed.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHandoffHeldAlwaysLeft.cfg	HerdrHandoffHeld	OnlyEndedLeftReleased	-
 session-lifecycle/HerdrHandoffHeldBefore.cfg	HerdrHandoffHeld	BoundedHolds	FrontProgress

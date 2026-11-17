@@ -85,7 +85,8 @@ pub(crate) async fn clear_retired_selector_pg(
              claude_session_id_recorded_at = NULL,
              raw_provider_transcript_len_watermark = 0,
              raw_provider_transcript_watermark_session_id = NULL,
-             raw_provider_transcript_growth_proven = FALSE
+             raw_provider_transcript_growth_proven = FALSE,
+             provider_resume_fence = $9
          WHERE id = $1
            AND hosted_execution->>'state' = 'retired'
            AND hosted_execution->>'execution_nonce' = $2
@@ -104,6 +105,7 @@ pub(crate) async fn clear_retired_selector_pg(
     .bind(&owner.logical_key)
     .bind(&owner.owner_node)
     .bind(&owner.runtime_root)
+    .bind(crate::db::dispatched_sessions::provider_resume_fence::new_payload())
     .execute(pool)
     .await
     .map_err(|error| format!("clear retired session selector: {error}"))?;

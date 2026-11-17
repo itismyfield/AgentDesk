@@ -616,7 +616,7 @@
         {
           "needs_live": true,
           "scenario_id": "E-50",
-          "scope": "Claude의 clear 뒤 첫 provider 응답·중복 부재 명세를 참조한다. ack는 wait step이며 clear_ack/fresh-session assertion은 없다. legacy_automation/unspecified이므로 현재 human/tui_o 수기 계약과 source/output이 다르고 세션 identity를 증명하지 않는다."
+          "scope": "Claude TUI·Herdr 칸은 fresh_session_after_clear의 provider_session_changed와 망각 단언을 실제 평가한다. pipe 칸은 기존 전달 검사만 유지한다. !clear 자동 경로이며 실제 Discord slash 상호작용은 별도 Rust action 시험과 배포 뒤 사람의 /clear로 검증한다."
         },
         {
           "needs_live": true,
@@ -853,6 +853,6 @@
     "unsupported-known-gap": 3
   },
   "schema_version": 1,
-  "source_hash": "4d04af3fcfcca53bbbf0636cfd56a0976ae4b7cf59be72106cd11e6ee9f7055c",
+  "source_hash": "139f4fa997cc4fbc703069a7e39d37e6e9cd51fbd53f64179e8441e77d9c98eb",
   "unsupported": 19
 }

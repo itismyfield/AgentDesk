@@ -13,11 +13,13 @@ import os
 import subprocess
 import threading
 import json
+import re
 import tempfile
 import itertools
 import sys
 import time
 import unittest
+import yaml
 from argparse import Namespace
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,7 +31,7 @@ sys.path.insert(0, str(ROOT / "scripts" / "e2e"))
 
 import post_deploy_turn_smoke as turn_smoke  # noqa: E402
 import run_tui_relay as driver  # noqa: E402
-from tui_relay import assertions  # noqa: E402
+from tui_relay import assertions, clear_fresh_session  # noqa: E402
 
 SCENARIOS = ROOT / "tests/e2e/tui_relay/scenarios"
 FIXTURES = ROOT / "tests/e2e/tui_relay/fixtures/turn_smoke"
@@ -55,6 +57,12 @@ class LiveShapedDiscord:
         self.ids = itertools.count(1_000)
         self.messages: list[dict] = []
         self.channel_id = None
+        self.session_id = "00000000-0000-4000-8000-000000000001"
+        self.secret = None
+
+    def session_evidence(self, base_url, path):  # noqa: ARG002
+        return 200, {"channel_id": self.channel_id, "provider": "claude",
+                     "raw_provider_session_id": self.session_id}
 
     def _post(self, content: str, *, author: str) -> dict:
         message = {
@@ -74,8 +82,13 @@ class LiveShapedDiscord:
     def send(self, channel_id, content):  # noqa: ARG002
         sent = self._post(content, author=assertions.OUR_BOT_ID)
         if content.startswith("!clear"):
+            if self.after_clear != "resume_old":
+                self.session_id = "00000000-0000-4000-8000-000000000002"
             self._post(CLEARED, author=self.provider_bot)
             return sent
+        secret = re.search(r"\[E2E:[^\]]+:PRIOR_SECRET\]", content)
+        if secret:
+            self.secret = secret.group()
         marker = content[content.index("[E2E:") : content.index("]") + 1]
         if marker.endswith(":T1]") and self.after_clear == "refuse_t1":
             self._post(f"O channel {channel_id} runs only on the gateway with its writer ready", author=self.provider_bot)
@@ -84,6 +97,12 @@ class LiveShapedDiscord:
         elif marker.endswith(":AFTER_CLEAR]") and self.after_clear == "duplicate":
             self._post(marker, author=self.provider_bot)
             self._post(f"🆕 새 세션 시작\n\n{marker}", author=self.provider_bot)
+        elif marker.endswith(":AFTER_CLEAR]") and "NO_PRIOR_MEMORY]" in content:
+            forgotten = re.search(r"\[E2E:[^\]]+:NO_PRIOR_MEMORY\]", content).group()
+            answer = self.secret if self.after_clear == "leak_memory" else forgotten
+            if self.after_clear == "leak_with_denial":
+                answer += f"\n{self.secret}"
+            self._post(f"{marker}\n{answer}", author=self.answer_author)
         else:
             self._post(marker, author=self.answer_author)
         return sent
@@ -112,16 +131,18 @@ def run_live_shaped(scenario_id: str, cell: str, *, after_clear: str = "deliver"
     def advance(seconds):
         clock[0] += float(seconds)
 
+    client = LiveShapedDiscord(after_clear=after_clear, provider=driver.cell_provider(cell), answer_author=answer_author)
     with (
         patch("run_tui_relay.time.sleep", side_effect=advance),
         patch("run_tui_relay.time.monotonic", side_effect=lambda: clock[0]),
         patch("run_tui_relay._raise_if_tui_prompt_stuck_while_idle"),
         patch("run_tui_relay._collect_wait_timeout_diagnostics", return_value={}),
         patch("run_tui_relay.assert_cell_idle", return_value={"status": "idle"}),
+        patch("run_tui_relay._read_api_json", side_effect=client.session_evidence),
     ):
         return driver.run_scenario(
             scenario, args=args, run_id=RUN_ID,
-            client=LiveShapedDiscord(after_clear=after_clear, provider=driver.cell_provider(cell), answer_author=answer_author),
+            client=client,
             partial_result_sink=partial_result_sink,
         )
 
@@ -325,9 +346,11 @@ class HerdrTurnSmoke(unittest.TestCase):
         args = Namespace(cell="claude-herdr", channel_id="41", base_url="http://127.0.0.1:8797",
                          dry_run=False, hard_reset_session_each=False, reset_before_each=False,
                          allow_destructive=False, final_refetches=1)
-        with patch.object(driver.herdr, "observe", return_value=self.evidence()), patch.object(driver.herdr.time, "sleep"):
+        client = LiveShapedDiscord(after_clear=after_clear, answer_author=answer_author)
+        with patch.object(driver.herdr, "observe", return_value=self.evidence()), patch.object(driver.herdr.time, "sleep"), \
+             patch.object(driver, "_read_api_json", side_effect=client.session_evidence):
             return driver.run_scenario(scenario, args=args, run_id=RUN_ID,
-                                       client=LiveShapedDiscord(after_clear=after_clear, answer_author=answer_author))
+                                       client=client)
 
     def judge(self, result):
         return turn_smoke.judge(report={"run_id": RUN_ID, "channel_id": "41", "cell": "claude-herdr", "scenarios": [result]},
@@ -1292,6 +1315,138 @@ exit "$rc"
         self.assertEqual(self.preflight(), 1)
         self.assertEqual(self.mutations(), [])
 
+
+
+OLD = "00000000-0000-4000-8000-000000000001"
+NEW = "00000000-0000-4000-8000-000000000002"
+
+
+class ClearFreshSessionTests(unittest.TestCase):
+    def capture(self, record, session, label="before", **changes):
+        payload = {"provider": "claude", "channel_id": "42", "raw_provider_session_id": session}
+        payload.update(changes)
+        return clear_fresh_session.capture(lambda *_: (200, payload), base_url="http://fixture",
+                                           channel_id="42", provider="claude", label=label, record=record)
+
+    def test_distinct_observed_ids_prove_fresh(self):
+        record = {}
+        self.capture(record, OLD)
+        self.capture(record, NEW, "after")
+        clear_fresh_session.assert_changed({"before": "before", "after": "after"}, record=record)
+
+    def test_resumed_old_id_fails(self):
+        record = {}
+        self.capture(record, OLD)
+        self.capture(record, OLD, "after")
+        with self.assertRaisesRegex(assertions.AssertionError, "resumed"):
+            clear_fresh_session.assert_changed({"before": "before", "after": "after"}, record=record)
+
+    def test_absent_capture_is_not_fresh(self):
+        record = {}
+        self.capture(record, OLD)
+        with self.assertRaisesRegex(assertions.AssertionError, "before/after"):
+            clear_fresh_session.assert_changed({"before": "before", "after": "after"}, record=record)
+
+    def test_empty_null_and_non_uuid_id_fail(self):
+        for session in (None, "", "unknown", OLD + " "):
+            with self.subTest(session=session), self.assertRaisesRegex(assertions.AssertionError, "observed"):
+                self.capture({}, session)
+
+    def test_foreign_channel_and_provider_fail(self):
+        for changes in ({"channel_id": "43"}, {"provider": "codex"}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(assertions.AssertionError, "mismatched"):
+                self.capture({}, OLD, **changes)
+
+    def test_http_failure_is_not_identity(self):
+        with self.assertRaisesRegex(assertions.AssertionError, "unavailable"):
+            clear_fresh_session.capture(lambda *_: (503, {}), base_url="http://fixture", channel_id="42",
+                                       provider="claude", label="before", record={})
+
+
+class ScenarioPlanTests(unittest.TestCase):
+    def setUp(self):
+        path = Path(__file__).resolve().parents[3] / "tests/e2e/tui_relay/scenarios/E-50-claude-clear-and-turns.yaml"
+        self.scenario = yaml.safe_load(path.read_text())
+
+    def test_each_target_cell_adds_three_explicit_assertions_and_two_captures(self):
+        for cell in ("claude-tui", "claude-herdr"):
+            with self.subTest(cell=cell):
+                planned = clear_fresh_session.plan(self.scenario, cell=cell)
+                driver.validate_scenario_schema(planned)
+                self.assertEqual(len(planned["assertions"]), len(self.scenario["assertions"]) + 3)
+                self.assertEqual(planned["assertions"][-3:], self.scenario["fresh_session_after_clear"]["assertions"])
+                self.assertEqual(sum(clear_fresh_session.owns(step) for step in planned["steps"]), 2)
+
+    def test_secret_is_private_to_pre_clear_input(self):
+        planned = clear_fresh_session.plan(self.scenario, cell="claude-herdr")
+        secret = self.scenario["fresh_session_after_clear"]["secret"]
+        sends = [step["send_discord_prompt"] for step in planned["steps"] if "send_discord_prompt" in step]
+        self.assertIn(secret, sends[0])
+        self.assertNotIn(secret, sends[-1])
+        self.assertIn("NO_PRIOR_MEMORY", sends[-1])
+        self.assertFalse(any(send.lstrip().startswith("/clear") for send in sends))
+
+    def test_captures_bound_the_clear_and_plan_is_idempotent(self):
+        planned = clear_fresh_session.plan(self.scenario, cell="claude-tui")
+        steps = planned["steps"]
+        clear = next(i for i, step in enumerate(steps) if step.get("send_discord_prompt", "").startswith("!clear "))
+        self.assertEqual(steps[clear - 1], {"capture_provider_session": {"label": "before_clear"}})
+        self.assertEqual(steps[-1], {"capture_provider_session": {"label": "after_clear"}})
+        self.assertEqual(steps[-2]["wait_for_discord_text"], "[E2E:E50:{run_id}:AFTER_CLEAR]")
+        self.assertEqual(clear_fresh_session.plan(planned, cell="claude-tui"), planned)
+
+    def test_pipe_plan_is_unchanged(self):
+        self.assertEqual(clear_fresh_session.plan(self.scenario, cell="claude-pipe"), self.scenario)
+
+    def test_probe_containing_secret_is_rejected_before_any_execution(self):
+        self.scenario["fresh_session_after_clear"]["probe_prompt"] += self.scenario["fresh_session_after_clear"]["secret"]
+        with self.assertRaisesRegex(ValueError, "private pre-clear secret"):
+            clear_fresh_session.plan(self.scenario, cell="claude-tui")
+
+
+class DriverIntegrationTests(unittest.TestCase):
+    def collect(self, cell, behavior="deliver"):
+        if cell == "claude-herdr":
+            return HerdrTurnSmoke().collect(behavior)
+        return run_live_shaped("E-50", cell, after_clear=behavior)
+
+    def test_both_live_drivers_evaluate_the_session_id_assertion(self):
+        for cell in ("claude-tui", "claude-herdr"):
+            with self.subTest(cell=cell), patch.object(clear_fresh_session, "assert_changed", wraps=clear_fresh_session.assert_changed) as observed:
+                result = self.collect(cell)
+                self.assertEqual(result["status"], "pass", result.get("reason"))
+                self.assertGreaterEqual(observed.call_count, 1)
+                self.assertEqual(set(result["clear_provider_sessions"]), {"before_clear", "after_clear"})
+                checks = [next(iter(row["spec"])) for row in result["assertions"]
+                          if "post_scenario_cell_idle" not in row["spec"]]
+                self.assertEqual(checks[-3:], ["provider_session_changed", "provider_text_present", "marker_absent"])
+
+    def test_unchanged_native_id_fails_in_both_driver_paths(self):
+        for cell in ("claude-tui", "claude-herdr"):
+            with self.subTest(cell=cell):
+                result = self.collect(cell, "resume_old")
+                self.assertEqual(result["status"], "fail")
+                self.assertIn("resumed the pre-clear native provider session", result["reason"])
+
+    def test_a_new_id_with_old_memory_still_fails_in_both_driver_paths(self):
+        for cell in ("claude-tui", "claude-herdr"):
+            for behavior, reason in (("leak_memory", "NO_PRIOR_MEMORY"),
+                                     ("leak_with_denial", "unexpected marker")):
+                with self.subTest(cell=cell, behavior=behavior):
+                    result = self.collect(cell, behavior)
+                    self.assertEqual(result["status"], "fail")
+                    self.assertIn(reason, result["reason"])
+                    sessions = result["clear_provider_sessions"]
+                    self.assertNotEqual(sessions["before_clear"], sessions["after_clear"])
+
+    def test_pipe_run_keeps_original_inputs_without_identity_reads(self):
+        with patch.dict(CHANNELS, {"claude-pipe": "42"}), \
+             patch.object(LiveShapedDiscord, "session_evidence", side_effect=AssertionError("pipe identity read")):
+            result = self.collect("claude-pipe")
+        self.assertEqual(result["status"], "pass", result.get("reason"))
+        self.assertNotIn("clear_provider_sessions", result)
+        checks = [row for row in result["assertions"] if "post_scenario_cell_idle" not in row["spec"]]
+        self.assertEqual(len(checks), 7)
 
 
 if __name__ == "__main__":
