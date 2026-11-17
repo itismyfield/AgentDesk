@@ -232,4 +232,6 @@ NormalizeOnce == norms <= 1
 StrictDisplayEquality == view = "none" \/ view = Desired
 EventuallySettled == accepted ~> ((phase = "delivered" /\ view = "delivered")
     \/ (phase = "failed" /\ view = "failed") \/ (phase = "unknown_closed" /\ view = "unknown"))
+\* Contrast configs let writes repeat without end; this bound only stops exploring past two.
+ContrastBound == sent <= 2 /\ writes <= 2
 =============================================================================

@@ -162,4 +162,6 @@ ViewTruth == visible = "closed" => gate = "closed"
 LiteralDisplayEquality == visible = gate
 ClosedEventuallyArchived == (gate = "closed") ~> (archived /\ locked /\ visible = "closed")
 OpinionEventuallyAccounted == \A m \in Items: (kind[m] = "opinion" /\ stage[m] # "ignored") ~> ((stage[m] \in {"failed","unknown_closed"} /\ m \in failureNotes) \/ (stage[m] = "delivered" /\ m \in notes))
+\* Without dedup a message can be claimed again without end; the contrast needs two claims at most.
+ContrastBound == \A m \in Items: claims[m] <= 2
 =============================================================================
