@@ -5,13 +5,15 @@ use sqlx::PgPool;
 
 use crate::config::session_hosts::{self, ChannelEndpoint};
 use crate::db::dispatched_sessions::hosted_execution::{
-    HostedExecution, HostedLookup, HostedLookupKey, HostedObservation, HostedRecord, HostedState,
-    load_hosted_execution_pg,
+    HostedExecution, HostedLookup, HostedLookupKey, HostedObservation, HostedOwner, HostedRecord,
+    HostedState, load_hosted_execution_pg,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::codex_tui::canary::CANARY_TMUX;
 use crate::services::herdr_admission::{self, StopCause};
-use crate::services::herdr_launch::{HerdrLaunchEndpoint, o_writer_ready};
+use crate::services::herdr_launch::{HerdrLaunchEndpoint, o_bootstrap_base, o_writer_ready};
 use crate::services::provider::ProviderKind;
+use crate::services::tui_prompt_dedupe::clear_relaunch::herdr_bootstrap;
 
 #[derive(Debug)]
 pub(crate) enum TurnHost {
@@ -36,6 +38,9 @@ pub(crate) struct HerdrTurnPlan {
     /// `None` while the channel has no sessions row yet.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub row: Option<HostedObservation>,
+    /// The retired canary's launch its blocked writer waits for; the launch reads the old pane's
+    /// vacancy again before its Pending row.
+    pub bootstrap: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,11 +310,148 @@ async fn configured_turn(
     }
     let row = read.map_err(|detail| HerdrRefusal::HostedRowUnreadable { detail })?;
     herdr_admission::check().map_err(|cause| HerdrRefusal::AdmissionStopped { cause })?;
-    if !o_writer_ready(channel_id, kind) {
+    let bootstrap = if o_writer_ready(channel_id, kind) {
+        false
+    } else if kind == RuntimeHandoffKind::CodexTui
+        && bootstrap_eligible(provider, channel_id, session_key, row.as_ref()).is_ok()
+    {
+        true
+    } else {
         return Err(HerdrRefusal::OWriterNotReady);
-    }
+    };
     let endpoint = launch_endpoint(endpoint);
-    Ok(HerdrTurnPlan { endpoint, row })
+    Ok(HerdrTurnPlan {
+        endpoint,
+        row,
+        bootstrap,
+    })
+}
+
+/// Whether the pin-blocked canary writer's Herdr launch may start: a vacant old pane, a live owned
+/// actor, a seeded O store and this owner's Retired row, neither admitted nor held.
+fn bootstrap_eligible(
+    provider: &ProviderKind,
+    channel: u64,
+    session_key: Option<&str>,
+    row: Option<&HostedObservation>,
+) -> Result<(), &'static str> {
+    let pin = herdr_bootstrap::local_eligible(channel)?;
+    if let Some(refusal) = writer_refusal(channel) {
+        return Err(refusal);
+    }
+    let Some(HostedRecord::Known(record)) = row.map(|observed| &observed.record) else {
+        return Err("row_not_known");
+    };
+    if record.state != HostedState::Retired {
+        return Err("row_not_retired");
+    }
+    if record.owner.logical_key != CANARY_TMUX
+        || expected_owner(provider, channel, session_key).as_ref() != Some(&record.owner)
+    {
+        return Err("owner_differs");
+    }
+    if record.execution_nonce == pin {
+        return Err("row_is_pin");
+    }
+    // A withheld listing of this very execution is what a failed marker write leaves behind.
+    match crate::services::tui_prompt_dedupe::herdr_listing(CANARY_TMUX) {
+        None => {}
+        Some((listed, false)) if listed == record.execution_nonce => {}
+        Some(_) => return Err("listing_differs"),
+    }
+    if !hold_released(&record.execution_nonce) {
+        return Err("retired_hold");
+    }
+    if !o_bootstrap_base(channel, RuntimeHandoffKind::CodexTui) {
+        return Err("o_not_seeded");
+    }
+    Ok(())
+}
+
+/// The O writer's refusal of a fresh placement, installed with the process's writer readiness.
+static WRITER_REFUSAL: std::sync::OnceLock<fn(u64) -> Option<&'static str>> =
+    std::sync::OnceLock::new();
+
+/// Installs the writer's own judgement; the first install wins.
+pub(crate) fn install_writer_refusal(judge: fn(u64) -> Option<&'static str>) {
+    let _ = WRITER_REFUSAL.set(judge);
+}
+
+/// Before the writer readiness exists no channel has a live writer, as `host_missing` says.
+fn writer_refusal(channel: u64) -> Option<&'static str> {
+    WRITER_REFUSAL
+        .get()
+        .map_or(Some("host_missing"), |judge| judge(channel))
+}
+
+/// The owner a turn under `session_key` would write, as the Codex Herdr turn builds it.
+fn expected_owner(
+    provider: &ProviderKind,
+    channel: u64,
+    session_key: Option<&str>,
+) -> Option<HostedOwner> {
+    let identity = crate::domain::session_identity::SessionIdentity::parse(session_key?)?;
+    Some(HostedOwner {
+        provider: provider.as_str().into(),
+        discord_token_hash: identity.token_hash?,
+        channel_id: channel.to_string(),
+        logical_key: identity.tmux_name,
+        owner_node: session_hosts::local_node()?,
+        runtime_root: crate::config::runtime_root()?.display().to_string(),
+    })
+}
+
+#[cfg(unix)]
+fn hold_released(nonce: &str) -> bool {
+    crate::services::claude::herdr_turn::input_held(nonce) == Ok(false)
+}
+
+#[cfg(not(unix))]
+fn hold_released(_nonce: &str) -> bool {
+    false
+}
+
+/// Whether a front held on `channel` is watched for the canary bootstrap.
+pub(crate) fn bootstrap_watched(provider: &ProviderKind, channel: u64) -> bool {
+    *provider == ProviderKind::Codex
+        && crate::services::herdr_launch::herdr_canary(channel)
+        && herdr_turn_switched_on_for(provider)
+}
+
+/// One read of a held canary front's cause.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeldLook {
+    /// The turn host would now plan the turn, or the channel left the bootstrap path.
+    Ready,
+    /// The writer is not ready and no bootstrap may start.
+    Wait,
+    /// The row or the admission switch could not be read.
+    Unread,
+}
+
+/// The turn host's own judgement for a held front; the row is not read while the pin, the vacant
+/// pane or the live actor already refuse.
+pub(crate) async fn held_look(
+    pool: Option<&PgPool>,
+    provider: &ProviderKind,
+    channel: u64,
+    session_key: Option<&str>,
+) -> HeldLook {
+    if !bootstrap_watched(provider, channel) {
+        return HeldLook::Ready;
+    }
+    if !o_writer_ready(channel, RuntimeHandoffKind::CodexTui)
+        && (herdr_bootstrap::local_eligible(channel).is_err() || writer_refusal(channel).is_some())
+    {
+        return HeldLook::Wait;
+    }
+    match for_turn(pool, provider, channel, session_key).await {
+        TurnHost::Refused(HerdrRefusal::OWriterNotReady) => HeldLook::Wait,
+        TurnHost::Refused(
+            HerdrRefusal::HostedRowUnreadable { .. } | HerdrRefusal::AdmissionStopped { .. },
+        ) => HeldLook::Unread,
+        _ => HeldLook::Ready,
+    }
 }
 
 /// The launch endpoint a channel's configured Herdr endpoint names.

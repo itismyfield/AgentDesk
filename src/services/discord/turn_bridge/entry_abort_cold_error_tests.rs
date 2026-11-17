@@ -312,6 +312,7 @@ impl Cold {
                     goals: None,
                     compact_token_limit: None,
                     cancel: Some(actor),
+                    bootstrap: false,
                 };
                 crate::services::codex::herdr_turn::execute(turn, ports.as_ref(), sender)
             }
