@@ -9,6 +9,9 @@ mod checked_tests;
 mod compat;
 #[cfg(test)]
 mod compat_tests;
+// The classification memo keys on this history's state; Unix stamps alone can vouch for it.
+#[cfg(all(test, unix))]
+mod input_notice_memo_tests;
 #[cfg(unix)]
 pub(crate) mod native_row;
 pub(crate) mod notice_owner;

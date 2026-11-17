@@ -56,7 +56,3 @@ pub(super) fn content(
     }
     answer
 }
-
-#[cfg(all(test, unix))]
-#[path = "input_notice_memo_tests.rs"]
-mod tests;
