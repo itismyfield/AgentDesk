@@ -2109,6 +2109,7 @@ pub(super) async fn handle_text_message(
             &cancel_token,
         )
         .await;
+        let timing = crate::logging::intake_timing::carry();
         let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
             shared.pg_pool.as_ref(),
             &provider,
@@ -2117,11 +2118,10 @@ pub(super) async fn handle_text_message(
             tmux_session_name.as_deref(),
         )
         .await;
-        let timing = crate::logging::intake_timing::carry();
         tokio::task::spawn_blocking(move || {
-            let _timing = timing.entered();
             let _original_registration = producer_registration;
             let _upload_lifetime = materialized_uploads;
+            let _timing = timing.entered();
             let prompt_capture = session_prompt::Scope::enter(&cancel_token_clone);
             let result = crate::services::platform::with_provider_execution_context(
                 provider_execution_context,
