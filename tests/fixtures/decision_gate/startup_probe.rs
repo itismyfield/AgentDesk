@@ -3,6 +3,8 @@ mod config {
         pub fn requested() -> bool { false }
         pub mod environment {
             pub fn runtime_path() -> Result<Option<&'static str>, String> { Ok(None) }
+            pub fn claude_login_enabled_checked() -> Result<bool, String> { Ok(false) }
+            pub fn admit_claude_wrapper(_: &mut std::process::Command) -> Result<(), String> { Ok(()) }
         }
     }
 }
@@ -47,7 +49,7 @@ fn main() {
     let stub = std::env::args().nth(1).unwrap();
     for mut command in [
         services::platform::runtime_path::runtime_command(&stub).unwrap(),
-        services::claude_command::ClaudeCommandBuilder::for_tmux_wrapper_argv(&stub).into_command(),
+        services::claude_command::ClaudeCommandBuilder::for_tmux_wrapper_argv(&stub).into_command().unwrap(),
     ] {
         let output = command.output().unwrap();
         assert!(output.status.success());

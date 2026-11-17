@@ -404,7 +404,7 @@ pub(in crate::engine::ops) trait SessionTmux {
 }
 
 #[derive(Clone, Copy)]
-struct SystemTmux;
+pub(in crate::engine::ops) struct SystemTmux;
 
 impl SessionTmux for SystemTmux {
     fn send_keys(

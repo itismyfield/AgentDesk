@@ -105,24 +105,62 @@ impl ClaudeBinary {
 /// command through [`ClaudeCommandBuilder::command_mut`] (args, cwd, env,
 /// stdio, process group) and extract it with
 /// [`ClaudeCommandBuilder::into_command`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExecutionPurpose {
+    VersionProbe,
+    TuiWrapper,
+    Simple,
+    Agents,
+    Legacy,
+    #[cfg(test)]
+    Future,
+}
+
+impl ExecutionPurpose {
+    fn allowed_in_opt_in(self) -> bool {
+        matches!(self, Self::VersionProbe | Self::TuiWrapper)
+    }
+}
+
 pub(crate) struct ClaudeCommandBuilder {
     command: Command,
+    purpose: ExecutionPurpose,
 }
 
 impl ClaudeCommandBuilder {
     /// Shared construction path for every builder flavour.
-    fn build(program: impl AsRef<OsStr>, resolution: Option<&BinaryResolution>) -> Self {
+    fn build(
+        program: impl AsRef<OsStr>,
+        resolution: Option<&BinaryResolution>,
+        purpose: ExecutionPurpose,
+    ) -> Self {
         let mut command = Command::new(program);
         if let Some(resolution) = resolution {
             crate::services::platform::apply_binary_resolution(&mut command, resolution);
         }
-        Self { command }
+        Self { command, purpose }
     }
 
     /// Build a command that launches the Claude binary directly. Applies the
     /// binary-resolution PATH by construction.
-    pub(crate) fn for_binary(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
-        Self::build(binary.program(), Some(resolution))
+    pub(crate) fn for_simple(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
+        Self::build(binary.program(), Some(resolution), ExecutionPurpose::Simple)
+    }
+
+    pub(crate) fn for_agents(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
+        Self::build(binary.program(), Some(resolution), ExecutionPurpose::Agents)
+    }
+
+    pub(crate) fn for_legacy(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
+        Self::build(binary.program(), Some(resolution), ExecutionPurpose::Legacy)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_future_for_test(
+        binary: &ClaudeBinary,
+        resolution: &BinaryResolution,
+    ) -> Self {
+        Self::build(binary.program(), Some(resolution), ExecutionPurpose::Future)
     }
 
     /// Build the native Claude `--version` probe from a resolved capability.
@@ -132,7 +170,11 @@ impl ClaudeCommandBuilder {
         binary: &ClaudeBinary,
         resolution: &BinaryResolution,
     ) -> Self {
-        Self::build(binary.program(), Some(resolution))
+        Self::build(
+            binary.program(),
+            Some(resolution),
+            ExecutionPurpose::VersionProbe,
+        )
     }
 
     /// Build the native Claude version-smoke probe. This uses the CLI boundary
@@ -140,7 +182,7 @@ impl ClaudeCommandBuilder {
     pub(crate) fn for_version_smoke(program: &str, canonical_path: &str) -> Self {
         let binary = ClaudeBinary::from_cli_boundary(program);
         let canonical = ClaudeBinary::from_cli_boundary(canonical_path);
-        let mut builder = Self::build(binary.program(), None);
+        let mut builder = Self::build(binary.program(), None, ExecutionPurpose::VersionProbe);
         canonical.augment_exec_path(builder.command_mut());
         builder
     }
@@ -151,7 +193,7 @@ impl ClaudeCommandBuilder {
     /// module. Applies the exec-path PATH by construction.
     pub(crate) fn for_tmux_wrapper_argv(program: &str) -> Self {
         let binary = ClaudeBinary::from_tmux_wrapper_argv(program);
-        let mut builder = Self::build(binary.program(), None);
+        let mut builder = Self::build(binary.program(), None, ExecutionPurpose::TuiWrapper);
         binary.augment_exec_path(builder.command_mut());
         builder
     }
@@ -164,7 +206,34 @@ impl ClaudeCommandBuilder {
     }
 
     /// Consume the builder and return the fully-guarded `Command`.
-    pub(crate) fn into_command(self) -> Command {
-        self.command
+    pub(crate) fn into_command(mut self) -> Result<Command, String> {
+        if crate::config::test_instance::environment::claude_login_enabled_checked()? {
+            if !self.purpose.allowed_in_opt_in() {
+                return Err("test instance Claude execution purpose rejected".into());
+            }
+            if self.purpose == ExecutionPurpose::TuiWrapper {
+                crate::config::test_instance::environment::admit_claude_wrapper(&mut self.command)?;
+            }
+        }
+        Ok(self.command)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExecutionPurpose;
+
+    #[test]
+    fn opt_in_allowlist_denies_a_future_purpose() {
+        assert!(ExecutionPurpose::VersionProbe.allowed_in_opt_in());
+        assert!(ExecutionPurpose::TuiWrapper.allowed_in_opt_in());
+        for purpose in [
+            ExecutionPurpose::Simple,
+            ExecutionPurpose::Agents,
+            ExecutionPurpose::Legacy,
+            ExecutionPurpose::Future,
+        ] {
+            assert!(!purpose.allowed_in_opt_in(), "{purpose:?}");
+        }
     }
 }

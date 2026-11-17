@@ -46,7 +46,7 @@ impl SessionActivityResolver {
         let ready_cache = &mut self.tmux_ready_cache;
         let mut probe_tmux_live = |tmux_name: &str| {
             // Another host's session is never probed by name; its heartbeat decides instead.
-            let refusal = crate::services::discord::admin_host_guard::marker_refusal;
+            let refusal = crate::services::session_host::operation_policy::marker_refusal;
             if refusal(tmux_name).is_some() {
                 return None;
             }

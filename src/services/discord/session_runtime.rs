@@ -29,28 +29,7 @@ pub(super) use self::worktree::{
 };
 use self::worktree::{is_managed_worktree_path, sync_inflight_worktree_context};
 
-/// Per-channel session state
-#[derive(Clone)]
-pub(super) struct DiscordSession {
-    pub(super) session_id: Option<String>,
-    pub(super) memento_context_loaded: bool,
-    pub(super) memento_reflected: bool,
-    pub(super) current_path: Option<String>,
-    pub(super) history: Vec<HistoryItem>,
-    pub(super) pending_uploads:
-        crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-    pub(super) cleared: bool,
-    pub(super) channel_id: Option<u64>,
-    pub(super) channel_name: Option<String>,
-    pub(super) category_name: Option<String>,
-    /// Last time this session was actively used (for TTL cleanup)
-    pub(super) last_active: tokio::time::Instant,
-    /// If this session runs in a git worktree, store the info here
-    pub(super) worktree: Option<WorktreeInfo>,
-    /// Restart generation at which this session was created/restored.
-    #[allow(dead_code)]
-    pub(super) born_generation: u64,
-}
+pub(super) use crate::services::engine_runtime::session::EngineSession as DiscordSession;
 
 impl DiscordSession {
     pub(super) fn clear_provider_session(&mut self) {
@@ -1181,5 +1160,106 @@ mod worktree_reuse_channel_isolation_tests {
 
         pool.close().await;
         pg_db.drop().await;
+    }
+}
+
+#[cfg(test)]
+mod engine_session_value_tests {
+    use super::*;
+    use crate::services::cluster::attachment_transfer::{
+        AttachmentMessageIdentity,
+        uploads::{BundleRef, Upload},
+    };
+
+    fn session_value() -> DiscordSession {
+        DiscordSession {
+            session_id: Some("session-a".into()),
+            memento_context_loaded: true,
+            memento_reflected: true,
+            current_path: Some("worktree".into()),
+            history: vec![HistoryItem {
+                item_type: HistoryType::User,
+                content: "history".into(),
+            }],
+            pending_uploads: vec![
+                Upload::Local("local-upload".into()),
+                Upload::Bundle(BundleRef {
+                    bundle_id: uuid::Uuid::from_u128(8192),
+                    identity: AttachmentMessageIdentity {
+                        provider: "claude".into(),
+                        channel_id: "8192".into(),
+                        user_msg_id: "42".into(),
+                    },
+                    source_count: 1,
+                }),
+            ],
+            cleared: true,
+            channel_id: Some(8192),
+            channel_name: Some("channel".into()),
+            category_name: Some("category".into()),
+            last_active: tokio::time::Instant::now(),
+            worktree: Some(WorktreeInfo {
+                original_path: "original".into(),
+                worktree_path: "worktree".into(),
+                branch_name: "branch".into(),
+            }),
+            born_generation: 81,
+        }
+    }
+
+    #[test]
+    fn restore_and_clear_preserve_pending_uploads_and_session_metadata() {
+        let mut session = session_value();
+        let uploads = session.pending_uploads.clone();
+        let storage = session.pending_uploads.as_ptr();
+        session.restore_provider_session(Some("session-a".into()));
+        assert!(session.memento_context_loaded);
+        assert!(!session.memento_reflected);
+        session.restore_provider_session(Some("session-b".into()));
+        assert!(!session.memento_context_loaded);
+        session.note_memento_context_loaded();
+        session.clear_provider_session();
+        assert!(session.session_id.is_none());
+        assert!(!session.memento_context_loaded);
+        assert!(!session.memento_reflected);
+        assert_eq!(session.pending_uploads, uploads);
+        assert_eq!(session.pending_uploads.as_ptr(), storage);
+        session.restore_provider_session(None);
+        assert!(session.session_id.is_none());
+        assert!(!session.memento_context_loaded);
+        assert_eq!(session.pending_uploads, uploads);
+        assert_eq!(session.current_path.as_deref(), Some("worktree"));
+        assert_eq!(session.history[0].content, "history");
+        assert_eq!(session.worktree.as_ref().unwrap().branch_name, "branch");
+        assert_eq!(session.born_generation, 81);
+        assert!(session.cleared);
+    }
+
+    #[test]
+    fn clone_preserves_all_session_values_and_both_upload_formats() {
+        let session = session_value();
+        let cloned = session.clone();
+        let canonical: &crate::services::engine_runtime::session::EngineSession = &cloned;
+        assert_eq!(canonical.session_id, session.session_id);
+        assert_eq!(
+            canonical.memento_context_loaded,
+            session.memento_context_loaded
+        );
+        assert_eq!(canonical.memento_reflected, session.memento_reflected);
+        assert_eq!(canonical.current_path, session.current_path);
+        assert_eq!(canonical.history[0].item_type, session.history[0].item_type);
+        assert_eq!(canonical.history[0].content, session.history[0].content);
+        assert_eq!(canonical.pending_uploads, session.pending_uploads);
+        assert_eq!(canonical.cleared, session.cleared);
+        assert_eq!(canonical.channel_id, session.channel_id);
+        assert_eq!(canonical.channel_name, session.channel_name);
+        assert_eq!(canonical.category_name, session.category_name);
+        assert_eq!(canonical.last_active, session.last_active);
+        let worktree = canonical.worktree.as_ref().unwrap();
+        let original = session.worktree.as_ref().unwrap();
+        assert_eq!(worktree.original_path, original.original_path);
+        assert_eq!(worktree.worktree_path, original.worktree_path);
+        assert_eq!(worktree.branch_name, original.branch_name);
+        assert_eq!(canonical.born_generation, session.born_generation);
     }
 }

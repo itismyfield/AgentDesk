@@ -251,6 +251,7 @@ jobs:
             # PR-time Windows lane fail closed. Keep the broad positive list in
             # sync with `rust_compile` and document every relay exception.
             cross_os_rust:
+              - 'src/services/engine_runtime/relay_state.rs'
               - 'src/services/decision_gate/**'
               - 'scripts/ci/run-writer-namespace-windows-targets.sh'
               - 'scripts/exact_rust_test_proof.py'
@@ -295,6 +296,7 @@ jobs:
               # session_host/'s TmuxHost has a not(unix) stub Windows compiles.
               - 'src/services/qwen/**'
               - 'src/services/session_host/**'
+              - 'src/services/session_resume/background.rs'
               # The Herdr close owner is unix-gated production code.
               - 'src/services/termination_audit/**'
               - 'src/services/tmux_common/runtime_hint_fence.rs'
@@ -368,6 +370,8 @@ jobs:
               - 'src/services/discord/runtime_bootstrap/**'
               - 'src/services/discord/runtime_store.rs'
               - 'src/services/discord/session_idle_cleanup.rs'
+              - 'src/services/discord/session_locator.rs'
+              - 'src/services/discord/session_runtime/**'
               - 'src/services/discord/session_transition.rs'
               - 'src/services/discord/settings/**'
               - 'src/services/discord/status_panel_orphan_store_tests.rs'
@@ -1072,7 +1076,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh 8b08f701f8939c3f1ab0266e6d737682cdcfb4a10fd2d99047d39dcc4cd22153
+          pin scripts/check-ci-runner-hardening.sh d93e0f5270d801bfcb7324d1fa3f7a3f5559660445d8505ed1ab0d53e6b48b27
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1720,7 +1724,7 @@ jobs:
               - 'src/services/discord/session_relay_sink/terminal_handoff.rs'
               - 'src/services/discord/session_relay_sink/delivery_orchestration_tests.rs'
               - 'src/services/discord/session_relay_sink/tests.rs'
-              - 'src/services/discord/tmux_watcher_registry/fences.rs'
+              - 'src/services/engine_runtime/relay_state.rs'
               - 'src/services/discord/tmux_watcher_registry.rs'
               - 'src/services/discord/tmux_watcher_registry_restore_tests.rs'
               - 'src/services/discord/destructive_cancel_gate.rs'

@@ -1243,6 +1243,7 @@ fn idle_turn(
     let (host, provider) = (TurnHost::Tmux, ProviderKind::Claude);
     let turn = StreamingTurn {
         pool: None,
+        registration_origin: None,
         shared: None,
         provider: &provider,
         prompt: &front.1.text,

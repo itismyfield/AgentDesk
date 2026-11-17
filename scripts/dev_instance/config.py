@@ -1,20 +1,94 @@
 """Build a standalone runtime config from an already validated test profile."""
 
+import json
+import os
+import sys
+import subprocess
 from pathlib import Path
 
+from .files import InstanceError, safe_absolute
+
 HERDR_CONFIG = "[session]\nresume_agents_on_restore = false\n"
+
+
+TMUX_FORMULA_BINS = (Path('/opt/homebrew/opt/tmux/bin'), Path('/usr/local/opt/tmux/bin'))
+
+
+def claude_runtime_path(worktree, enabled):
+    path = str(worktree / 'target/debug') + ':/usr/bin:/bin'
+    if not enabled or sys.platform != 'darwin':
+        return path
+    try:
+        source = next(p for p in TMUX_FORMULA_BINS if p.exists())
+        directory = source.resolve(strict=True)
+        binary = directory / 'tmux'
+        if ({p.name for p in directory.iterdir()} != {'tmux'}
+                or binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK)):
+            raise InstanceError('tmux formula directory must expose only executable tmux')
+    except (OSError, StopIteration):
+        raise InstanceError('isolated tmux formula directory unavailable') from None
+    return path + ':' + str(directory)
+
+
+def postgres_connections(config: dict, reserve: int) -> int:
+    pool = max(config['database']['pool_max'], 1)
+    warmup = max((pool * 3 + 1) // 2, 2)
+    gateways = len(config['discord']['bots'])
+    cluster = config['cluster']
+    leader = int(cluster['enabled'] and cluster['role'] in {'hub', 'auto'})
+    # server::run retains the runtime pool while its native warmup pool is open.
+    return pool + warmup + gateways + leader + reserve
+
+
+def validate_claude_login(value, home, root=None):
+    if value is None:
+        return None
+    keys = {'mode', 'account_slot', 'login_home', 'config_dir', 'cli'}
+    if (type(value) is not dict or set(value) != keys or value['mode'] != 'default_active'
+            or type(value['account_slot']) is not int or value['account_slot'] not in (2, 3)):
+        raise InstanceError('explicit non-company Claude login required')
+    home = safe_absolute(home)
+    # Keep old declarations removable; new prepares select the instance data home.
+    allowed_data = {home / '.claude'}
+    if root is not None:
+        allowed_data.add(provider_home(safe_absolute(root), 'claude'))
+    if (safe_absolute(value['login_home']) != home
+            or safe_absolute(value['config_dir']) not in allowed_data
+            or not safe_absolute(value['cli']).is_relative_to(home / '.local')):
+        raise InstanceError('Claude login binding is not the default location')
+    return dict(value)
+
+
+def active_claude_login(home):
+    home = safe_absolute(home)
+    try:
+        result = subprocess.run([str(home / '.local/bin/cswap'), 'list', '--json'],
+                                env={'HOME': str(home), 'PATH': '/opt/homebrew/bin:/usr/bin:/bin'},
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        raise InstanceError("active Claude slot unavailable") from None
+    try:
+        slot = json.loads(result.stdout)['activeAccountNumber']
+    except (ValueError, KeyError, TypeError):
+        raise InstanceError('active Claude slot unavailable') from None
+    if result.returncode or type(slot) is not int or slot not in (2, 3):
+        raise InstanceError('active Claude slot must be 2 or 3; switching is forbidden')
+    return validate_claude_login({'mode': 'default_active', 'account_slot': slot,
+        'login_home': str(home), 'config_dir': str(home / '.claude'),
+        'cli': str((home / '.local/bin/claude').resolve(strict=True))}, home)
 
 
 def provider_home(root: Path, provider: str) -> Path:
     return root / "home/.adk/profiles" / provider / f"test-{provider}"
 
 
-def build_org(root: Path, profile: dict) -> dict:
+def build_org(root: Path, profile: dict, claude_login=None) -> dict:
     providers = ("claude", "codex")
     return {
         "version": 1, "name": "Isolated test instance",
         "provider_auth_profiles": {
-            f"test-{provider}": {"provider": provider, "home": str(provider_home(root, provider)), "env": {}}
+            f"test-{provider}": {"provider": provider, "home": claude_login["config_dir"] if provider == "claude" and claude_login else str(provider_home(root, provider)), "env": {}}
             for provider in providers
         },
         "provider_auth_primary_profiles": {provider: f"test-{provider}" for provider in providers},

@@ -85,3 +85,32 @@ mod snowflake {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snowflake_string_and_integer_fixtures_keep_legacy_wire() {
+        for raw in [1, 42, u64::MAX] {
+            for wire in [raw.to_string(), format!("\"{raw}\"")] {
+                let channel: OutboundChannelId = serde_json::from_str(&wire).unwrap();
+                let message: OutboundMessageId = serde_json::from_str(&wire).unwrap();
+                let user: OutboundUserId = serde_json::from_str(&wire).unwrap();
+                assert_eq!((channel.get(), message.get(), user.get()), (raw, raw, raw));
+                for encoded in [
+                    serde_json::to_string(&channel).unwrap(),
+                    serde_json::to_string(&message).unwrap(),
+                    serde_json::to_string(&user).unwrap(),
+                ] {
+                    assert_eq!(encoded, format!("\"{raw}\""));
+                }
+            }
+        }
+        for wire in ["0", "\"0\"", "-1", "\"opaque\""] {
+            assert!(serde_json::from_str::<OutboundChannelId>(wire).is_err());
+            assert!(serde_json::from_str::<OutboundMessageId>(wire).is_err());
+            assert!(serde_json::from_str::<OutboundUserId>(wire).is_err());
+        }
+    }
+}

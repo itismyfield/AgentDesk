@@ -15,12 +15,21 @@ struct CheckRunner<'a> {
 
 impl<'a> CheckRunner<'a> {
     fn run_version(&self) -> SmokeCheckStatus {
+        if !crate::config::test_instance::environment::provider_resolution_allowed(self.provider)
+            .unwrap_or(false)
+        {
+            return SmokeCheckStatus::Failed;
+        }
         let mut command = if self.provider == "claude" {
-            crate::services::claude_command::ClaudeCommandBuilder::for_version_smoke(
+            match crate::services::claude_command::ClaudeCommandBuilder::for_version_smoke(
                 self.binary,
                 self.canonical_path,
             )
             .into_command()
+            {
+                Ok(command) => command,
+                Err(_) => return SmokeCheckStatus::Failed,
+            }
         } else {
             let mut command = Command::new(self.binary);
             crate::services::platform::augment_exec_path(&mut command, self.canonical_path);

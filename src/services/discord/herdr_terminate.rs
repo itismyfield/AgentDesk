@@ -4,6 +4,7 @@ pub(crate) mod http_force;
 mod retired_exclusion;
 pub(crate) mod root_replaced;
 
+pub(crate) use crate::services::session_host::operation_policy::terminate_enabled;
 pub(crate) use retired_exclusion::RetiredExclusion;
 
 use super::health::HealthRegistry;
@@ -111,13 +112,6 @@ impl TerminationResult {
             Self::Retired => ("retired", "retired".into()),
         }
     }
-}
-
-/// The one live-switch read the operator route, its adapter, a forced HTTP cancel and the
-/// service share.
-pub(crate) fn terminate_enabled() -> bool {
-    crate::config_live_reload::current()
-        .is_some_and(|config| config.runtime.herdr_terminate_enabled == Some(true))
 }
 
 /// Reopens the fence when the run ends before it could have sent its close, a panic included;

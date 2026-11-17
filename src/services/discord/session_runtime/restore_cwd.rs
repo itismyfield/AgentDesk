@@ -160,7 +160,14 @@ pub(super) fn restore_session_cwd_from_db(
     channel_id: u64,
 ) -> Option<RestoredCwd> {
     let tmux_name = provider.build_tmux_session_name(channel_name);
-    let session_keys = build_session_key_candidates(token_hash, provider, &tmux_name);
+    let session_keys = crate::services::discord::session_locator::candidates(
+        pg_pool,
+        token_hash,
+        provider,
+        &tmux_name,
+        Some(channel_id),
+    )
+    .ok()?;
     let channel_id = channel_id.to_string();
     let pg_pool = pg_pool?;
     crate::utils::async_bridge::block_on_pg_result(
@@ -197,7 +204,15 @@ pub(super) fn correct_session_cwd_to_tmux(
         return;
     };
     let tmux_name = provider.build_tmux_session_name(channel_name);
-    let session_keys = build_session_key_candidates(token_hash, provider, &tmux_name);
+    let Ok(session_keys) = crate::services::discord::session_locator::candidates(
+        pg_pool,
+        token_hash,
+        provider,
+        &tmux_name,
+        Some(channel_id),
+    ) else {
+        return;
+    };
     let channel_id_str = channel_id.to_string();
     let tmux_cwd = tmux_cwd.to_string();
     let result = crate::utils::async_bridge::block_on_pg_result(
@@ -258,7 +273,14 @@ pub(super) fn restore_thread_worktree_path_from_db(
     channel_id: u64,
 ) -> Option<String> {
     let tmux_name = provider.build_tmux_session_name(channel_name);
-    let session_keys = build_session_key_candidates(token_hash, provider, &tmux_name);
+    let session_keys = crate::services::discord::session_locator::candidates(
+        pg_pool,
+        token_hash,
+        provider,
+        &tmux_name,
+        Some(channel_id),
+    )
+    .ok()?;
     let channel_id = channel_id.to_string();
     let pg_pool = pg_pool?;
     crate::utils::async_bridge::block_on_pg_result(
@@ -281,4 +303,26 @@ pub(super) fn restore_thread_worktree_path_from_db(
     )
     .ok()
     .flatten()
+}
+
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn key_promotion_cwd_restore_uses_canonical_actual_locator_pg() {
+    let rig = crate::services::discord::session_locator::tests::PromotionRig::new(81190308).await;
+    sqlx::query("UPDATE sessions SET cwd=$1 WHERE id=$2")
+        .bind(rig.root.path().to_string_lossy().as_ref())
+        .bind(rig.id)
+        .execute(&rig.pool)
+        .await
+        .unwrap();
+    let cwd = restore_session_cwd_from_db(
+        Some(&rig.pool),
+        &rig.shared.token_hash,
+        &crate::services::provider::ProviderKind::Claude,
+        "unrelated-preferred-name",
+        rig.channel.get(),
+    )
+    .unwrap();
+    assert_eq!(cwd.path, rig.root.path().to_string_lossy());
+    rig.finish().await;
 }

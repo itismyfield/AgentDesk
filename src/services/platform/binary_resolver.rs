@@ -287,30 +287,7 @@ enum ProviderResolutionSet {
 }
 
 fn resolve_provider_binary_set(provider: &str) -> ProviderResolutionSet {
-    if let Some(ctx) = active_provider_context(provider) {
-        let provider = normalize_name(provider);
-        let resolution = resolve_provider_binary_for_context(&ctx);
-        if resolution
-            .source
-            .as_deref()
-            .is_some_and(|source| source.starts_with("registry:"))
-        {
-            return ProviderResolutionSet::Candidates(vec![resolution]);
-        }
-        return match resolve_provider_binary_legacy_set(&provider) {
-            LegacyProviderResolution::Candidates(candidates) => {
-                ProviderResolutionSet::Candidates(candidates)
-            }
-            LegacyProviderResolution::Failure(failure) => ProviderResolutionSet::Failure(failure),
-        };
-    }
-
-    match resolve_provider_binary_legacy_set(provider) {
-        LegacyProviderResolution::Candidates(candidates) => {
-            ProviderResolutionSet::Candidates(candidates)
-        }
-        LegacyProviderResolution::Failure(failure) => ProviderResolutionSet::Failure(failure),
-    }
+    resolution::resolve_provider_binary_set(provider)
 }
 
 pub fn probe_provider_binary_version(provider: &str) -> BinaryVersionProbe {
@@ -887,16 +864,27 @@ pub fn probe_resolved_binary_version(
     binary_path: impl AsRef<OsStr>,
     resolution: &BinaryResolution,
 ) -> (Option<String>, Option<String>) {
+    if !crate::config::test_instance::environment::provider_resolution_allowed(
+        &resolution.requested_binary,
+    )
+    .unwrap_or(false)
+    {
+        return (None, Some("test_instance_provider_disabled".into()));
+    }
     let mut command = if resolution.requested_binary == "claude" {
         let Some(binary) =
             crate::services::claude_command::ClaudeBinary::from_resolution(resolution)
         else {
             return (None, Some("version_probe_spawn_failed".to_string()));
         };
-        crate::services::claude_command::ClaudeCommandBuilder::for_resolved_version_probe(
+        match crate::services::claude_command::ClaudeCommandBuilder::for_resolved_version_probe(
             &binary, resolution,
         )
         .into_command()
+        {
+            Ok(command) => command,
+            Err(_) => return (None, Some("test_instance_launch_rejected".into())),
+        }
     } else {
         let mut command = Command::new(binary_path);
         apply_binary_resolution(&mut command, resolution);
