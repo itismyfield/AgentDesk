@@ -1,7 +1,5 @@
-//! Resolves the Decision forum of a Discord category, creating it at most once.
-//!
-//! Callers share one PG advisory lock per (guild, category) and the PG create journal. A create
-//! whose result is unknown is never re-sent: later calls only adopt the forum once it is visible.
+//! Resolves a category's Decision forum under one PG lock per (guild, category); a create
+//! whose result is unknown is never re-sent, and the forum is adopted once it is visible.
 
 use poise::serenity_prelude as serenity;
 use sqlx::PgPool;

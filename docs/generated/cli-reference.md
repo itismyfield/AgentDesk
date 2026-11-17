@@ -63,7 +63,7 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk discord`](#agentdesk-discord) | Discord utility commands without HTTP server dependency |  |
 | [`agentdesk discord read`](#agentdesk-discord-read) | Read channel messages |  |
 | [`agentdesk discord category-create`](#agentdesk-discord-category-create) | Create a guild category. Idempotent (list-then-create): returns the existing category when one with the same name is already present. Not safe under concurrent invocations against the same guild. |  |
-| [`agentdesk discord channel-create`](#agentdesk-discord-channel-create) | Create a text channel under an optional category, idempotent by (name, parent category) via list-then-create but not safe under concurrent invocations. `--kind forum` resolves the category's Decision forum under a PG lock and never re-sends a create whose result is unknown. |  |
+| [`agentdesk discord channel-create`](#agentdesk-discord-channel-create) | Create a text channel (list-then-create, not concurrency safe) or, with `--kind forum`, the category's Decision forum once under a PG lock. |  |
 | [`agentdesk discord thread-create`](#agentdesk-discord-thread-create) | Create a thread under a text/news channel or a post under a forum/media channel. Cross-process safe and idempotent by (parent, normalized name) across active and archived public threads. |  |
 | [`agentdesk card`](#agentdesk-card) | Kanban utility commands without HTTP server dependency |  |
 | [`agentdesk card create`](#agentdesk-card-create) | Create a card from a GitHub issue |  |
@@ -545,7 +545,7 @@ Subcommands:
 
 - `read` — Read channel messages
 - `category-create` — Create a guild category. Idempotent (list-then-create): returns the existing category when one with the same name is already present. Not safe under concurrent invocations against the same guild.
-- `channel-create` — Create a text channel under an optional category, idempotent by (name, parent category) via list-then-create but not safe under concurrent invocations. `--kind forum` resolves the category's Decision forum under a PG lock and never re-sends a create whose result is unknown.
+- `channel-create` — Create a text channel (list-then-create, not concurrency safe) or, with `--kind forum`, the category's Decision forum once under a PG lock.
 - `thread-create` — Create a thread under a text/news channel or a post under a forum/media channel. Cross-process safe and idempotent by (parent, normalized name) across active and archived public threads.
 
 ### `agentdesk discord read`
@@ -574,7 +574,7 @@ Usage: `agentdesk discord category-create [OPTIONS]`
 
 ### `agentdesk discord channel-create`
 
-Create a text channel under an optional category, idempotent by (name, parent category) via list-then-create but not safe under concurrent invocations. `--kind forum` resolves the category's Decision forum under a PG lock and never re-sends a create whose result is unknown.
+Create a text channel (list-then-create, not concurrency safe) or, with `--kind forum`, the category's Decision forum once under a PG lock.
 
 Usage: `agentdesk discord channel-create [OPTIONS]`
 
