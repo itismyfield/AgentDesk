@@ -1,5 +1,5 @@
 //! Trust repair has only bounded observations and a single menu Enter.
-use crate::services::session_host::TmuxHost;
+use crate::services::session_host::{HostKey, SubmitPayload, TmuxHost};
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -39,27 +39,21 @@ impl TrustTransport for TrustHost {
         if alive != "0" || cwd.is_empty() {
             return None;
         }
-        let output = TmuxHost
-            .run_actor(
-                Path::new("tmux"),
-                session,
-                budget / 2,
-                &["capture-pane", "-p", "-e", "-t", &target, "-S", "-80"],
-            )
-            .ok()?;
-        output.status.success().then(|| Pane {
+        let text = TmuxHost.capture_bounded(session, -80, budget / 2)?;
+        Some(Pane {
             cwd: cwd.into(),
-            text: String::from_utf8_lossy(&output.stdout).into_owned(),
+            text,
         })
     }
     fn enter(&mut self, session: &str, budget: Duration) -> bool {
         TmuxHost
-            .run_actor(
+            .actor_input(
                 Path::new("tmux"),
                 session,
                 budget / 2,
-                &["send-keys", "-t", &format!("={session}:"), "Enter"],
+                SubmitPayload::Keys(&[HostKey::Enter]),
             )
+            .into_output()
             .is_ok_and(|output| output.status.success())
     }
 }
