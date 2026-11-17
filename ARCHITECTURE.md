@@ -4198,7 +4198,12 @@ src/
 │   │   │   │   ├── notice_owner/
 │   │   │   │   │   ├── census/
 │   │   │   │   │   │   └── census_tests.rs
+│   │   │   │   │   ├── context_observation/
+│   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   ├── generation/
+│   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── census.rs
+│   │   │   │   │   ├── context_observation.rs
 │   │   │   │   │   └── generation.rs
 │   │   │   │   ├── v2/
 │   │   │   │   │   ├── carried.rs
@@ -4376,6 +4381,7 @@ src/
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── notice_activation_tests.rs
 │   │   │   │   ├── notice_cache_tests.rs
+│   │   │   │   ├── notice_context_tests.rs
 │   │   │   │   ├── notice_missing_tests.rs
 │   │   │   │   ├── notice_owner_tests.rs
 │   │   │   │   ├── notice_resume_tests.rs
