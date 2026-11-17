@@ -41,6 +41,38 @@ fn rejection_wins_the_candidate_lock_and_prevents_the_waiting_actor_init() {
     assert_eq!(output.phase(), Phase::RejectPendingNotice(Reason::Deadline));
 }
 
+fn raw_terminal_choice_must_close_the_waiting_first_actor(expire: bool) {
+    let f = Fixture::new(if expire { 8_165_997 } else { 8_165_996 });
+    let proof = f.proof();
+    let output = output(&proof, true);
+    assert!(if expire {
+        output.expire()
+    } else {
+        output.reject(Reason::Deadline)
+    });
+    assert_eq!(
+        output.finish_first(&f.candidate, &proof, &f.store, Reason::Deadline),
+        Err(Reason::Deadline)
+    );
+    let activated = f.activate();
+    assert!(
+        f.store.read_init(f.channel).unwrap().is_none(),
+        "a terminal rejection permitted a later actor init: {activated:?}"
+    );
+    assert!(activated.is_err());
+    assert_eq!(output.phase(), Phase::RejectPendingNotice(Reason::Deadline));
+}
+
+#[test]
+fn raw_rejection_then_finish_prevents_the_late_actor_init() {
+    raw_terminal_choice_must_close_the_waiting_first_actor(false);
+}
+
+#[test]
+fn raw_expiry_then_finish_prevents_the_late_actor_init() {
+    raw_terminal_choice_must_close_the_waiting_first_actor(true);
+}
+
 #[test]
 fn published_init_wins_expiry_even_after_a_write_error_and_current_nonce_changes() {
     let f = Fixture::new(8_165_992);
@@ -148,6 +180,42 @@ fn old_output_rejection_cannot_invalidate_a_successor_first_slot() {
         Phase::RejectPendingNotice(Reason::Invalidated)
     );
     drop(next);
+}
+
+#[test]
+fn a_successor_committed_init_cannot_adopt_the_old_episode() {
+    let f = Fixture::new(8_165_998);
+    let old = f.proof();
+    let output = output(&old, true);
+    let successor_admission = f
+        .candidate
+        .admit_first(
+            f.channel,
+            "successor-input",
+            "hi",
+            &old.context.tmux_session,
+            || Ok(0),
+        )
+        .unwrap();
+    f.candidate
+        .attach_first_execution(&f.prepared.context, "hi", Some("successor-input"));
+    let successor = f.proof();
+    assert_ne!(successor.mark.order, old.mark.order);
+    f.activate().unwrap();
+    let init = serde_json::to_vec(&f.store.read_init(f.channel).unwrap().unwrap()).unwrap();
+    let result = output.finish_first(&f.candidate, &old, &f.store, Reason::Deadline);
+    assert!(
+        result.is_err(),
+        "a successor's init was credited to the old episode: {result:?}"
+    );
+    assert_ne!(output.phase(), Phase::Adopted);
+    assert_eq!(f.proof(), successor);
+    assert_eq!(f.candidate.peek(), Adoption::Committed);
+    assert_eq!(
+        serde_json::to_vec(&f.store.read_init(f.channel).unwrap().unwrap()).unwrap(),
+        init
+    );
+    drop(successor_admission);
 }
 
 #[test]

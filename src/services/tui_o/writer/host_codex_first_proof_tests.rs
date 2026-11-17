@@ -282,7 +282,7 @@ async fn scenario(
                 disposition.clone(),
                 candidate.clone(),
                 original.clone(),
-                harness.store.clone(),
+                &harness.store,
             )
         }),
     ));

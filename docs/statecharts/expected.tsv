@@ -923,11 +923,12 @@ tui-o-writer/WriterAdoptionLateExemptIntake.cfg	WriterAdoption	OtherCustodyBlock
 tui-o-writer/WriterAdoptionMain.cfg	WriterAdoption	NoLegacyBodyOnTui,UnadoptedNotOwned,RowClearedHasEvidence,NoEarlyDispatch	AdoptionSettles
 tui-o-writer/WriterAdoptionNoRetry.cfg	WriterAdoption	-	RowEventuallySettled
 tui-o-writer/WriterAdoptionNoSerial.cfg	WriterAdoption	MarkerAtMostOnce	-
+tui-o-writer/WriterAdoptionNormalizeActorAfterRejectMut.cfg	WriterAdoption	NormNoActorAfterRejected	-
 tui-o-writer/WriterAdoptionNormalizeAfter.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAdoptionNormalizeDeadlineMut.cfg	WriterAdoption	-	NormEventuallyEnds,NormNextInputProgresses
 tui-o-writer/WriterAdoptionNormalizeEarlyPublishMut.cfg	WriterAdoption	NormSafeAdoption	-
 tui-o-writer/WriterAdoptionNormalizeLegacyMut.cfg	WriterAdoption	NormNoLegacy	-
-tui-o-writer/WriterAdoptionNormalizeMixedEffectsMut.cfg	WriterAdoption	NormExclusiveEffects	-
+tui-o-writer/WriterAdoptionNormalizeMixedEffectsMut.cfg	WriterAdoption	NormExclusiveEffects,NormNoActorAfterRejected	-
 tui-o-writer/WriterAdoptionNormalizeNoRepair.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAdoptionNormalizeNoticeUnavailable.cfg	WriterAdoption	-	NormReasonSettles
 tui-o-writer/WriterAdoptionNormalizeReasonDuplicateMut.cfg	WriterAdoption	NormAtMostOnce	-
