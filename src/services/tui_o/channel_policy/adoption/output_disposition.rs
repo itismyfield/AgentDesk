@@ -123,30 +123,6 @@ impl Output {
             Ok(())
         })
     }
-    pub(crate) fn adopt_resumed(
-        &self,
-        proof: &crate::services::tui_o::writer::normalization::continuation::ContinuationProof,
-        candidate: &super::Candidate,
-    ) -> Result<(), String> {
-        let guard = candidate.lock();
-        if *guard != super::Adoption::Committed {
-            return Err("resumed output has no O authority".into());
-        }
-        if &proof.identity() != self.id() {
-            return Err("resumed output proof identity changed".into());
-        }
-        let mut state = self.state.lock().unwrap();
-        if state.0 != Phase::Normalizing || Instant::now() >= self.deadline {
-            return Err("resumed output is terminal or expired".into());
-        }
-        proof.with_current(|| {
-            if Instant::now() >= self.deadline {
-                return Err("normalization deadline expired".into());
-            }
-            state.0 = Phase::Adopted;
-            Ok(())
-        })
-    }
     fn identity_mismatch(id: &Identity, proof: &FirstProof) -> bool {
         *id != Identity::from_proof(proof, id.input)
     }
