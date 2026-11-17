@@ -18,10 +18,12 @@ const CATEGORY: u64 = 600;
 const OTHER_CATEGORY: u64 = 601;
 const ADMIN_ROLE: u64 = 700;
 
-/// Fake Discord: guild channels as (id, kind, parent, name).
+/// A fake guild channel: (id, kind, parent, name).
+type FakeChannel = (u64, serenity::ChannelType, u64, String);
+
 #[derive(Clone, Default)]
 struct Discord {
-    channels: Arc<Mutex<Vec<(u64, serenity::ChannelType, u64, String)>>>,
+    channels: Arc<Mutex<Vec<FakeChannel>>>,
     lists: Arc<AtomicUsize>,
     posts: Arc<AtomicUsize>,
     admin: Arc<AtomicBool>,
@@ -39,9 +41,7 @@ impl Discord {
     }
 }
 
-fn channel_json(
-    &(id, kind, parent, ref name): &(u64, serenity::ChannelType, u64, String),
-) -> Value {
+fn channel_json(&(id, kind, parent, ref name): &FakeChannel) -> Value {
     let mut channel = serenity::GuildChannel::default();
     channel.id = serenity::ChannelId::new(id);
     channel.guild_id = serenity::GuildId::new(GUILD);
