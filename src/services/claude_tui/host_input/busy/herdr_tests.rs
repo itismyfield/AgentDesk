@@ -95,7 +95,11 @@ fn host(rig: &HerdrRig) -> crate::services::turn_host::TurnHost {
 }
 
 fn pane(rig: &HerdrRig) {
-    rig.run_provider(&rig.context(N1), false);
+    pane_with_context(rig, &rig.context(N1));
+}
+
+fn pane_with_context(rig: &HerdrRig, context: &std::path::Path) {
+    rig.run_provider(context, false);
     let marker = crate::services::tmux_common::session_temp_path(LOGICAL, "host_kind");
     std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
     std::fs::write(marker, "herdr").unwrap();
