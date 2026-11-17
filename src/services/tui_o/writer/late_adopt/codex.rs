@@ -308,7 +308,7 @@ impl<I: HostIo> Takeover<'_, I> {
                     // The admission proves only this rollout; earlier undelivered ones stay owed.
                     let records = self.records(&events)?;
                     let judged = (&records, sent_from.as_slice(), &mut *unresolved);
-                    let owed = self.owed(&events, &bound, (at, since), judged)?;
+                    let owed = self.owed_unresolved(&events, &bound, (at, since), judged)?;
                     let taken = self.commit_owed(at, &bound, &prefix, &owed).await;
                     self.soon(at, taken)
                 }
@@ -469,6 +469,42 @@ impl<I: HostIo> Takeover<'_, I> {
         let mut walked: Vec<SourceId> = unresolved.clone();
         walked.retain(|source| !records.generation().contains(source));
         walked.extend(records.generation());
+        self.owed_among(
+            walked,
+            events,
+            bound,
+            (at, since),
+            (records, sent_from, unresolved),
+        )
+    }
+
+    /// `owed` for an admitted execution: its launch starts a new generation before the bind, so
+    /// only rollouts this host still holds unresolved stay owed, not ones judged delivered before.
+    fn owed_unresolved(
+        &self,
+        events: &[BindingEvent],
+        bound: &(SourceId, u64),
+        (at, since): (Baseline, Since),
+        (records, sent_from, unresolved): (&Records, &[SourceId], &mut Vec<SourceId>),
+    ) -> Result<Vec<InitSource>, Taken> {
+        let walked = unresolved.clone();
+        self.owed_among(
+            walked,
+            events,
+            bound,
+            (at, since),
+            (records, sent_from, unresolved),
+        )
+    }
+
+    fn owed_among(
+        &self,
+        walked: Vec<SourceId>,
+        events: &[BindingEvent],
+        bound: &(SourceId, u64),
+        (at, since): (Baseline, Since),
+        (records, sent_from, unresolved): (&Records, &[SourceId], &mut Vec<SourceId>),
+    ) -> Result<Vec<InitSource>, Taken> {
         let mut owed = Vec::new();
         for source in walked.into_iter().filter(|source| *source != bound.0) {
             let seq = (events.iter().rev())

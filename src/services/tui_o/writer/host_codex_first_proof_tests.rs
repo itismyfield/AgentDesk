@@ -111,6 +111,8 @@ async fn scenario(
     std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
     std::fs::write(&marker, &prepared.context.execution_nonce).unwrap();
     crate::services::tmux_common::write_tmux_runtime_kind_marker("tmux-codex", CodexTui).unwrap();
+    // The launch records its tmux generation with the spawn markers, before discovery binds.
+    recorded_since(&io, Utc::now(), Vec::new());
     let trust = output == Some("trust");
     let native_id = if trust {
         uuid::Uuid::new_v4().hyphenated().to_string()
@@ -324,8 +326,6 @@ async fn scenario(
     if matches!(invalidator, "missing-bind-nonce" | "old-bind-nonce") {
         std::fs::write(&marker, &prepared.context.execution_nonce).unwrap();
     }
-    // The fresh launch's tmux generation begins with this bind, as `bind_new` records it.
-    recorded_since(&io, Utc::now(), Vec::new());
     if invalidator == "evict" && boundary.is_none() {
         dedupe::evict_dead_tmux_mirror("tmux-codex");
     }
@@ -740,8 +740,8 @@ fn an_admitted_fresh_rollout_keeps_an_earlier_undelivered_rollout_owed() {
         assert_eq!(adoption(channel), Adoption::Deferred, "custody blocks A");
         append(&a, &[answer("msg_1", "fresh answer"), turn_end()].concat());
         let admission = admit_fresh(&harness);
-        let (b, b_source) = bind_fresh(&harness, "rollout-b.jsonl");
         recorded_since(&io, Utc::now(), Vec::new());
+        let (b, b_source) = bind_fresh(&harness, "rollout-b.jsonl");
         *io.custody.lock().unwrap() = Ok(Custody::Free);
         tokio::time::sleep(Duration::from_secs(5)).await;
         polls(3).await;
