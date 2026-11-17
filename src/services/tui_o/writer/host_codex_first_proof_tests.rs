@@ -324,6 +324,8 @@ async fn scenario(
     if matches!(invalidator, "missing-bind-nonce" | "old-bind-nonce") {
         std::fs::write(&marker, &prepared.context.execution_nonce).unwrap();
     }
+    // The fresh launch's tmux generation begins with this bind, as `bind_new` records it.
+    recorded_since(&io, Utc::now(), Vec::new());
     if invalidator == "evict" && boundary.is_none() {
         dedupe::evict_dead_tmux_mirror("tmux-codex");
     }
@@ -651,6 +653,165 @@ fn d1_installation_boundary_keeps_the_existing_route_disabled() {
     let root = crate::config::TestRuntimeRootGuard::new();
     dedupe::run_serial_test(async {
         scenario(None, "wrong-prompt", None, None, false).await;
+    });
+    drop(root);
+}
+
+/// A real fresh first admission of the next execution, before Codex binds its rollout.
+fn admit_fresh(harness: &Harness) -> Box<dyn std::any::Any> {
+    let channel = harness.channel_id;
+    let candidate =
+        test_override::with_channels(|boot| boot.unwrap().candidate(channel).unwrap().clone());
+    let token = CancelToken::new();
+    let admission = candidate
+        .admit_first(
+            channel,
+            token.turn_nonce().unwrap(),
+            "hi",
+            "tmux-codex",
+            || {
+                ChannelBindingLog::new(channel, ShadowProvider::Codex)
+                    .binding_events_since(channel, 0)
+                    .map(|events| events.last().map_or(0, |e| e.seq))
+            },
+        )
+        .unwrap();
+    let root = harness._runtime.path().canonicalize().unwrap();
+    let prompt = (Some(first_prompt_digest("hi")), Some("legacy".into()));
+    let prepared = PreparedIncarnation::prepare_pinned(
+        "codex",
+        "tmux-codex",
+        Some(channel),
+        None,
+        false,
+        Some(root),
+        prompt,
+    )
+    .unwrap();
+    candidate.attach_first_execution(&prepared.context, "hi", token.turn_nonce());
+    let marker = PathBuf::from(crate::services::tmux_common::session_temp_path(
+        "tmux-codex",
+        "spawn_nonce",
+    ));
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, &prepared.context.execution_nonce).unwrap();
+    crate::services::tmux_common::write_tmux_runtime_kind_marker("tmux-codex", CodexTui).unwrap();
+    Box::new((admission, token))
+}
+
+/// The admitted execution's rollout `name`, bound through the launch path as Codex binds it.
+fn bind_fresh(harness: &Harness, name: &str) -> (PathBuf, SourceId) {
+    let (path, source) = rollout(harness, name, &prompted("s-codex"));
+    dedupe::register_tmux_channel("tmux-codex", harness.channel_id);
+    dedupe::register_tmux_runtime_binding(
+        "tmux-codex",
+        TuiRuntimeBinding {
+            runtime_kind: CodexTui,
+            output_path: path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some("s-codex".into()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    (path, source)
+}
+
+/// An earlier rollout left undelivered while custody held the takeover stays owed when a fresh
+/// admitted rollout is taken: each answer posts once and a restart posts nothing.
+#[test]
+fn an_admitted_fresh_rollout_keeps_an_earlier_undelivered_rollout_owed() {
+    let root = crate::config::TestRuntimeRootGuard::new();
+    dedupe::run_serial_test(async {
+        dedupe::reset_state_for_tests();
+        tokio::time::pause();
+        let Takeover {
+            harness,
+            io,
+            tasks,
+            _reserved,
+        } = hosted_unbound(8_165_301).await;
+        let channel = harness.channel_id;
+        *io.custody.lock().unwrap() = Ok(Custody::Active);
+        let (a, a_source) = rollout(&harness, "rollout-a.jsonl", &prompted("s-codex"));
+        bind_late(channel, &a);
+        polls(3).await;
+        assert_eq!(adoption(channel), Adoption::Deferred, "custody blocks A");
+        append(&a, &[answer("msg_1", "fresh answer"), turn_end()].concat());
+        let admission = admit_fresh(&harness);
+        let (b, b_source) = bind_fresh(&harness, "rollout-b.jsonl");
+        recorded_since(&io, Utc::now(), Vec::new());
+        *io.custody.lock().unwrap() = Ok(Custody::Free);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        polls(3).await;
+        assert_eq!(
+            adoption(channel),
+            Adoption::Committed,
+            "{:?}",
+            io.alarms.halted()
+        );
+        assert_eq!(
+            init_sources(&harness, channel),
+            [(a_source, first_opener()), (b_source.clone(), 0)]
+        );
+        append(
+            &b,
+            &[answer("msg_2", "admitted answer"), turn_end()].concat(),
+        );
+        polls(3).await;
+        assert_eq!(posted(&harness, "fresh answer"), 1);
+        assert_eq!(posted(&harness, "admitted answer"), 1);
+        restart_posts_nothing(&harness, tasks, &b_source).await;
+        drop(admission);
+    });
+    drop(root);
+}
+
+/// A fresh admitted rollout whose first commit fails once at the intake fence is taken within a
+/// second by the short retry, with no new binding or admission event, not by the five second wake.
+#[test]
+fn an_admitted_fresh_rollout_held_briefly_is_taken_by_the_short_retry() {
+    let root = crate::config::TestRuntimeRootGuard::new();
+    dedupe::run_serial_test(async {
+        dedupe::reset_state_for_tests();
+        tokio::time::pause();
+        let Takeover {
+            harness,
+            io,
+            tasks: _tasks,
+            _reserved,
+        } = hosted_unbound(8_165_302).await;
+        let channel = harness.channel_id;
+        let tried = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&tried);
+        test_hook::set(channel, Step::BeforeFence, move || {
+            observed.store(true, Ordering::SeqCst);
+            Err("one transient intake fence failure".into())
+        });
+        let ready_work = || async {
+            for _ in 0..24 {
+                tokio::task::yield_now().await;
+            }
+        };
+        // The actor reads the admission before the bind, so no admission event is left pending.
+        let admission = admit_fresh(&harness);
+        ready_work().await;
+        assert!(!tried.load(Ordering::SeqCst));
+        let (_b, b_source) = bind_fresh(&harness, "rollout-b.jsonl");
+        ready_work().await;
+        assert!(tried.load(Ordering::SeqCst));
+        assert_eq!(adoption(channel), Adoption::Deferred);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        ready_work().await;
+        assert_eq!(
+            adoption(channel),
+            Adoption::Committed,
+            "{:?}",
+            io.alarms.halted()
+        );
+        assert_eq!(init_sources(&harness, channel), [(b_source, 0)]);
+        drop(admission);
     });
     drop(root);
 }

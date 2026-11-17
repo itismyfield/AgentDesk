@@ -305,7 +305,12 @@ impl<I: HostIo> Takeover<'_, I> {
             })?;
             return match prefix::buffered(&bound.0) {
                 Verdict::Eligible(prefix) if prefix.prompt_end.is_some() => {
-                    self.commit(at, &bound, &prefix).await
+                    // The admission proves only this rollout; earlier undelivered ones stay owed.
+                    let records = self.records(&events)?;
+                    let judged = (&records, sent_from.as_slice(), &mut *unresolved);
+                    let owed = self.owed(&events, &bound, (at, since), judged)?;
+                    let taken = self.commit_owed(at, &bound, &prefix, &owed).await;
+                    self.soon(at, taken)
                 }
                 Verdict::Eligible(_) => Err(Taken::Retry(
                     "the takeover rollout has no first user prompt yet".into(),
@@ -335,20 +340,8 @@ impl<I: HostIo> Takeover<'_, I> {
                     Ok(owed) => owed,
                     Err(taken) => return Err(taken),
                 };
-                self.fenced(at, &bound, Plan::Fresh(&prefix, &owed))
-                    .await
-                    .map_err(|taken| match taken {
-                        Taken::Retry(detail)
-                            if at.turn_mark
-                                && self
-                                    .candidate
-                                    .turn_mark()
-                                    .is_some_and(|mark| mark.order == at.order) =>
-                        {
-                            Taken::Soon(detail)
-                        }
-                        other => other,
-                    })
+                let taken = self.fenced(at, &bound, Plan::Fresh(&prefix, &owed)).await;
+                self.soon(at, taken)
             }
             Some(Verdict::Wait(detail)) => Err(Taken::Retry(detail)),
             // A rollout that holds output, or none bound since the baseline, starts at its frontier.
@@ -362,6 +355,22 @@ impl<I: HostIo> Takeover<'_, I> {
             sent_from.push(bound.0.clone());
         }
         result
+    }
+
+    /// A retry while the turn the baseline marked is still current is taken again after a short wait.
+    fn soon(&self, at: Baseline, taken: Result<(), Taken>) -> Result<(), Taken> {
+        taken.map_err(|taken| match taken {
+            Taken::Retry(detail)
+                if at.turn_mark
+                    && self
+                        .candidate
+                        .turn_mark()
+                        .is_some_and(|mark| mark.order == at.order) =>
+            {
+                Taken::Soon(detail)
+            }
+            other => other,
+        })
     }
 
     /// Whether a Legacy body send started since `at` read the sends.
@@ -491,6 +500,17 @@ impl<I: HostIo> Takeover<'_, I> {
         bound: &(SourceId, u64),
         prefix: &Prefix,
     ) -> Result<(), Taken> {
+        self.commit_owed(at, bound, prefix, &[]).await
+    }
+
+    /// `commit` with the earlier sources judged owed before this rollout.
+    async fn commit_owed(
+        &self,
+        at: Baseline,
+        bound: &(SourceId, u64),
+        prefix: &Prefix,
+        owed: &[InitSource],
+    ) -> Result<(), Taken> {
         let admission = if self.provider == ShadowProvider::Codex {
             let guard = self.candidate.lock();
             let proof = self.candidate.first_proof(&bound.0).map_err(Taken::Skip)?;
@@ -522,7 +542,7 @@ impl<I: HostIo> Takeover<'_, I> {
                 "buffered output has no admitted execution proof".into(),
             ));
         }
-        self.fenced_proved(at, bound, Plan::Fresh(prefix, &[]), admission.as_ref())
+        self.fenced_proved(at, bound, Plan::Fresh(prefix, owed), admission.as_ref())
             .await
     }
 

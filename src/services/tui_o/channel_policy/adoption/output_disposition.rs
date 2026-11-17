@@ -164,12 +164,14 @@ impl Output {
                 use sha2::{Digest, Sha256};
                 store.read_era().ok().flatten()?;
                 let init = store.read_init(proof.channel).ok().flatten()?;
+                // The proved rollout is the fresh tail from byte 0; earlier sources are owed others.
+                let (fresh, owed) = init.sources.split_last()?;
                 Some(
                     store.read_init_origin(proof.channel).ok()? == InitOrigin::LateCodexTakeover
-                        && init.sources.len() == 1
-                        && init.sources[0].source_id == proof.source
-                        && init.sources[0].delivery_start == 0
-                        && init.sources[0].prefix_hash == hex::encode(Sha256::digest(b""))
+                        && fresh.source_id == proof.source
+                        && fresh.delivery_start == 0
+                        && fresh.prefix_hash == hex::encode(Sha256::digest(b""))
+                        && owed.iter().all(|earlier| earlier.source_id != proof.source)
                         && init.policy_parent
                             == candidate.child_surface().map(|child| child.parent()),
                 )
