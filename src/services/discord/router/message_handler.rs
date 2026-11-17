@@ -76,7 +76,9 @@ pub(in crate::services::discord) use self::provider_dispatch::{
     CLAUDE_LEGACY_PROBE, INPUT_EFFECT_PROBE, InputEffectProbe,
 };
 #[cfg(unix)]
-pub(in crate::services::discord) use self::provider_dispatch::{owner_recover, owner_wake};
+pub(in crate::services::discord) use self::provider_dispatch::{
+    owner_admit_start, owner_recover, owner_wake,
+};
 use self::provider_isolation::*;
 
 #[cfg(test)]

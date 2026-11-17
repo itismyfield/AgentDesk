@@ -44,7 +44,6 @@ struct Record {
     witness: RestartEnd,
 }
 
-#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Appended {
     Durable,
@@ -195,7 +194,6 @@ pub(crate) fn read_durable(root: &Path, channel: u64) -> Result<Vec<RestartEnd>,
     Ok(witnesses)
 }
 
-#[cfg(test)]
 fn verify_source_eof(witness: &RestartEnd) -> Result<(), String> {
     use crate::services::tui_o::shadow::capture::Fingerprint;
     use std::io::{Seek, SeekFrom};
@@ -228,8 +226,7 @@ fn verify_source_eof(witness: &RestartEnd) -> Result<(), String> {
     Ok(())
 }
 
-/// The producer is connected when the effort command owns confirmed physical termination.
-#[cfg(test)]
+/// Written by the effort restart once it has confirmed the old process ended.
 pub(crate) fn append(root: &Path, witness: &RestartEnd) -> Result<Appended, String> {
     if !valid(witness, witness.channel) {
         return Err("restart end identity mismatch".into());

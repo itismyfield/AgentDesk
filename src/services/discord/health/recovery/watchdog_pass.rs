@@ -243,6 +243,7 @@ pub(crate) async fn run_stall_watchdog_pass(
         }
         let now_mono_secs = super::super::liveness_authority::monotonic_now_secs();
         let tick_inflight = discord::inflight::load_inflight_state(provider, channel_id.get());
+        #[cfg(test)]
         let capture_assessment = super::super::liveness_authority::observe_and_publish_from_tick(
             provider,
             channel_id,
@@ -251,6 +252,18 @@ pub(crate) async fn run_stall_watchdog_pass(
             now_unix_secs,
             now_mono_secs,
         );
+        #[cfg(not(test))]
+        let capture_assessment = {
+            // Keep the compatibility backfill performed by the load above.
+            drop(tick_inflight);
+            super::super::liveness_authority::observe_capture_coordinate(
+                provider,
+                channel_id,
+                &snapshot,
+                now_unix_secs,
+                now_mono_secs,
+            )
+        };
         let reattach_lane = relay_dead_reattach::try_apply(
             registry,
             shared.clone(),

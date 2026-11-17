@@ -214,7 +214,7 @@ impl Owner {
         next.head_injection = head;
         next.retained_inputs.clear();
         next.unfinished_handoff = None;
-        next.effort_restart = None;
+        effort_continue::close_dropped(&mut next, effort_continue::Dropped::All);
         next.admission_binds.retain(|bind| match &bind.at {
             BindAt::Settled { .. } => true,
             BindAt::Queued { .. } => active == ActivePolicy::Release,

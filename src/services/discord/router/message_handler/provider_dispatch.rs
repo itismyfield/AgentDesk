@@ -761,6 +761,14 @@ mod herdr {
         fn unplaced_lease(&self, _: &HostedOwner) -> Result<UnplacedLease, String> {
             self.lease()
         }
+
+        fn hold_notice(&self) -> Option<Arc<herdr_turn::HoldNotice>> {
+            let (pool, channel, runtime) = (self.pool.clone(), self.channel_id, Handle::current());
+            let post = crate::services::discord::queue_io::retained_notice::input_hold;
+            Some(Arc::new(move |nonce: &str, hold: &str| {
+                runtime.block_on(post(&pool, "claude", channel, (nonce, hold)))
+            }))
+        }
     }
 
     impl BootPorts<'_> {

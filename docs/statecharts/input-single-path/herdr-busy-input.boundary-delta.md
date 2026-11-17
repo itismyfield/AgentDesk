@@ -80,14 +80,14 @@ tmux의 hook-free/legacy source 승인 조건은 이번에 Herdr의 stricter non
 | `message_handler/busy_retry.rs` (이번 변경 제외) | #8113 정책 착지 뒤 별도 델타에서만 적응; 이번에는 결과 계약/겹침 좌표만 보고 | 0 |
 | `input_owner/target.rs` | Claude busy의 host별 route 선택 제거, capability 기반 한 route | 0 |
 | `input_owner/effect.rs` | 공통 ClaudeBusy effect 및 기존 settlement, 두 host leaf 선택 제거 | +90 |
-| `input_owner/effect/herdr.rs` | 별도 Herdr 정책·receipt 중복 제거/host IO adapter 쪽 이동. 필요 없어지면 삭제(삭제 파일도 cap 산정) | -150 |
+| `input_owner/effect/herdr_fixture_tests.rs` | 별도 Herdr 정책·receipt 중복 제거/host IO adapter 쪽 이동. 필요 없어지면 삭제(삭제 파일도 cap 산정) | -150 |
 | `claude_tui/host_input.rs` | existing InputTarget/InputTransport capability 추가와 child glue, 다른 input caller 의미 유지 | +45 |
 | `claude_tui/host_input/interactive_session.rs` 신규 | typed capability 자료/host factory, 현재 두 host adapter의 identity/source/ownership 관측. 독립 parent 책임 추가 없음 | +300 |
 | `claude_tui/busy_inject.rs` | owned busy 공통 preflight/frame ledger/receipt 부분 재사용 가능하게 연결. legacy caller 정책은 유지 | +130 |
 | `claude_tui/busy_inject/stash.rs` | 기존 pinned/server-guarded IO를 adapter에서 재사용하는 최소 노출/연결. guard 조건 완화 0 | +75 |
 | 직접 합계/추정 여유 | 대략 +573, 경계 타입·관측/ownership 이동 오차 포함 | **+850 (두 조각 누적 상한)** |
 
-위 표의 이번 대상은 최대 12개이고, boundary export/factory의 최소 glue가 별도 파일에 필요할 수 있어 계획 상한 13개를 둔다. `busy_retry.rs` 적응은 이번 대상에서 제외하며 #8113 착지 뒤 델타로만 다룬다. `effect/herdr.rs` 삭제를 택해도 삭제 파일은 cap에 센다. 독립 호스트/소스 메서드를 giant parent 본문에 더해 파일 수만 줄이지 않는다. 이 PLAN은 +450 이내라는 원 약속을 철회하고, 추가 4~6 prod/+250~450 비용을 명시한다. 구현 중 13파일/+850 예상 밖 책임이나 guard 재설계가 나오면 다시 DESIGN_DELTA로 멈추며 +1200 PLAN 선을 넘겨 진행하지 않는다.
+위 표의 이번 대상은 최대 12개이고, boundary export/factory의 최소 glue가 별도 파일에 필요할 수 있어 계획 상한 13개를 둔다. `busy_retry.rs` 적응은 이번 대상에서 제외하며 #8113 착지 뒤 델타로만 다룬다. `effect/herdr_fixture_tests.rs` 삭제를 택해도 삭제 파일은 cap에 센다. 독립 호스트/소스 메서드를 giant parent 본문에 더해 파일 수만 줄이지 않는다. 이 PLAN은 +450 이내라는 원 약속을 철회하고, 추가 4~6 prod/+250~450 비용을 명시한다. 구현 중 13파일/+850 예상 밖 책임이나 guard 재설계가 나오면 다시 DESIGN_DELTA로 멈추며 +1200 PLAN 선을 넘겨 진행하지 않는다.
 
 ### tmux safeguard 보존 좌표와 필수 RED
 

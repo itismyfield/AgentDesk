@@ -146,6 +146,34 @@ struct BridgePostHeartbeatGuard {
 
 impl toc::PostHeartbeatGuard for BridgePostHeartbeatGuard {}
 
+fn prepare_bridge_delivery<'a>(
+    shared: &'a SharedData,
+    watcher_owner_channel_id: ChannelId,
+    tmux_session_name: Option<&'a str>,
+    cell: &Arc<DeliveryLeaseCell>,
+    expected_range: (u64, u64),
+) -> (
+    LeaseHolder,
+    BridgePostHeartbeat,
+    impl Fn((u64, u64)) -> bool + 'a,
+) {
+    let holder = super::terminal_delivery::next_bridge_lease_holder();
+    // Reclaim before controller acquisition; the heartbeat retains the same cell.
+    cell.reclaim_if_expired(lease_now_ms());
+    let heartbeat = BridgePostHeartbeat { cell: cell.clone() };
+    let advance = move |range: (u64, u64)| -> bool {
+        debug_assert_eq!(range, expected_range);
+        super::terminal_delivery::advance_tmux_relay_confirmed_end(
+            shared,
+            watcher_owner_channel_id,
+            Some(expected_range.1),
+            tmux_session_name,
+        );
+        true
+    };
+    (holder, heartbeat, advance)
+}
+
 /// #3089 A5: bridge short-replace via the turn-output controller, behaviourally
 /// equal to the legacy site-5 `replace_message_with_outcome` arm (mod.rs
 /// 6160-6245) — SAME transport, SAME per-channel cell as a `LeaseHolder::Bridge { .. }`
@@ -223,28 +251,13 @@ pub(super) async fn deliver_short_replace_via_controller(
     end: u64,
     body_claim: Option<BodyClaim<'_>>,
 ) -> toc::DeliveryOutcome {
-    let holder = super::terminal_delivery::next_bridge_lease_holder();
-    // Self-heal like the legacy acquire (terminal_delivery.rs:516): reclaim an
-    // EXPIRED prior holder before the controller's acquire (a stale dead lease
-    // must not make this acquire lose and B2-skip a deliverable range).
-    cell.reclaim_if_expired(lease_now_ms());
-    let heartbeat = BridgePostHeartbeat { cell: cell.clone() };
-    // Identity-gated advance: INLINE before any post-send await (I1). Site 5's
-    // legacy advance is unconditional on a committed (EditedOriginal) replace, so
-    // the callback runs the REAL `super::terminal_delivery::advance_tmux_relay_confirmed_end` to `end` (the
-    // legacy `tmux_last_offset`) and returns `true` → Delivered. The controller
-    // invokes this ONLY on confirmed transport (never Transient/Unknown, I2), and
-    // the monotonic CAS makes it idempotent.
-    let advance = |range: (u64, u64)| -> bool {
-        debug_assert_eq!(range, (start, end));
-        super::terminal_delivery::advance_tmux_relay_confirmed_end(
-            shared,
-            watcher_owner_channel_id,
-            Some(end),
-            tmux_session_name,
-        );
-        true
-    };
+    let (holder, heartbeat, advance) = prepare_bridge_delivery(
+        shared,
+        watcher_owner_channel_id,
+        tmux_session_name,
+        cell,
+        (start, end),
+    );
     let output_origin =
         match crate::services::cluster::intake_router_hook::owner_record::output::source_artifact(
             shared.pg_pool.as_ref(),
@@ -381,19 +394,13 @@ pub(super) async fn deliver_long_chunks_via_controller(
     end: u64,
     body_claim: Option<BodyClaim<'_>>,
 ) -> toc::DeliveryOutcome {
-    let holder = super::terminal_delivery::next_bridge_lease_holder();
-    cell.reclaim_if_expired(lease_now_ms());
-    let heartbeat = BridgePostHeartbeat { cell: cell.clone() };
-    let advance = |range: (u64, u64)| -> bool {
-        debug_assert_eq!(range, (start, end));
-        super::terminal_delivery::advance_tmux_relay_confirmed_end(
-            shared,
-            watcher_owner_channel_id,
-            Some(end),
-            tmux_session_name,
-        );
-        true
-    };
+    let (holder, heartbeat, advance) = prepare_bridge_delivery(
+        shared,
+        watcher_owner_channel_id,
+        tmux_session_name,
+        cell,
+        (start, end),
+    );
     let chunk_count = super::super::formatting::split_message(relay_text).len();
     let output_origin =
         match crate::services::cluster::intake_router_hook::owner_record::output::source_artifact(

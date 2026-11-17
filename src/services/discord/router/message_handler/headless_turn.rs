@@ -8,6 +8,7 @@ use crate::services::provider::ProviderRuntimeExt;
 mod replay_start;
 use replay_start::take_session_retry_context;
 
+mod isolated_context;
 mod process_mailbox;
 mod routine_metadata;
 use routine_metadata::{
@@ -169,6 +170,22 @@ async fn start_reserved_headless_turn_admitted(
                 channel_id, &provider,
             )
         });
+    let isolated_run = isolated_context::IsolatedRoutineProcess::resolve(
+        (shared, channel_id, &provider),
+        prompt,
+        metadata.as_ref(),
+        tmux_session_label.as_deref(),
+        is_dm_hint,
+        || {
+            resolve_headless_workspace(
+                channel_id,
+                resolved_channel_name_for_session.as_deref(),
+                early_thread_parent.as_ref(),
+                metadata.as_ref(),
+            )
+        },
+    )
+    .await?;
     let early_fast_mode_channel_id =
         feature_key(shared, &provider, channel_id, early_thread_parent.as_ref()).await;
     if let GoalCommandKind::Lifecycle(command) = classify_codex_goal_command_for_provider(
@@ -225,8 +242,18 @@ async fn start_reserved_headless_turn_admitted(
         front,
     )
     .await?;
-    let process_mailbox =
-        process_mailbox::capture((shared, channel_id), &cancel_token, metadata.as_ref()).await;
+    let mailbox_scope = process_mailbox::ProcessMailboxScope::of(
+        isolated_run.is_some(),
+        is_dm_hint == Some(true),
+        early_thread_parent.is_some(),
+    );
+    let process_mailbox = process_mailbox::capture(
+        (shared, channel_id),
+        &cancel_token,
+        metadata.as_ref(),
+        mailbox_scope,
+    )
+    .await;
     crate::services::discord::increment_global_active(shared, "headless_turn_start");
     // Compute the routine continuity policy once at the turn-start boundary.
     // The shared `/goal fresh` machinery below clears every provider restore path
@@ -234,7 +261,9 @@ async fn start_reserved_headless_turn_admitted(
     let fresh_routine = fresh_routine_turn(metadata.as_ref());
     let (mut session_id, mut memento_context_loaded, mut current_path) = {
         let mut data = shared.core.lock().await;
-        if let Some(info) = load_session_runtime_state(&mut data.sessions, channel_id) {
+        if let Some(run) = isolated_run.as_ref() {
+            run.cold_start()
+        } else if let Some(info) = load_session_runtime_state(&mut data.sessions, channel_id) {
             // Existing sessions retain their child-channel runtime identity.
             if let Some(channel_name) = resolved_channel_name_for_session.as_ref()
                 && let Some(session) = data.sessions.get_mut(&channel_id)
@@ -315,6 +344,7 @@ async fn start_reserved_headless_turn_admitted(
         let mut data = shared.core.lock().await;
         data.sessions
             .get_mut(&channel_id)
+            .filter(|_| isolated_run.is_none())
             .map(|session| {
                 let was_cleared = session.cleared;
                 session.cleared = false;
@@ -327,7 +357,10 @@ async fn start_reserved_headless_turn_admitted(
     };
 
     let turn_id = reservation.turn_id(channel_id);
-    let routine_agent_identity_changed = replay_request.identity_changed().await;
+    // An isolated run leaves the channel's identity boundary, worktree and pending reset alone.
+    let shares_channel_session = isolated_run.is_none();
+    let routine_agent_identity_changed =
+        shares_channel_session && replay_request.identity_changed().await;
     if routine_agent_identity_changed {
         if let Err(error) = crate::db::session_transcripts::record_channel_clear_boundary(
             shared.pg_pool.as_ref(),
@@ -349,14 +382,16 @@ async fn start_reserved_headless_turn_admitted(
             session_strategy_reason = "routine_agent_identity_changed";
         }
     }
-    replay_request
-        .isolate(
-            &mut current_path,
-            &mut session_id,
-            &mut memento_context_loaded,
-            &mut session_strategy_reason,
-        )
-        .await;
+    if shares_channel_session {
+        replay_request
+            .isolate(
+                &mut current_path,
+                &mut session_id,
+                &mut memento_context_loaded,
+                &mut session_strategy_reason,
+            )
+            .await;
+    }
     let dispatch_profile = {
         let data = shared.core.lock().await;
         let channel_name = data
@@ -371,14 +406,16 @@ async fn start_reserved_headless_turn_admitted(
 
     let fast_mode_channel_id =
         feature_key(shared, &provider, channel_id, early_thread_parent.as_ref()).await;
-    replay_request
-        .pending_reset(
-            fast_mode_channel_id,
-            &mut session_id,
-            &mut memento_context_loaded,
-            &mut session_strategy_reason,
-        )
-        .await;
+    if shares_channel_session {
+        replay_request
+            .pending_reset(
+                fast_mode_channel_id,
+                &mut session_id,
+                &mut memento_context_loaded,
+                &mut session_strategy_reason,
+            )
+            .await;
+    }
 
     let prompt_prep_started = std::time::Instant::now();
     let (channel_name, tmux_session_name, category_name) = {
@@ -404,10 +441,12 @@ async fn start_reserved_headless_turn_admitted(
     // label so they never share (and thus never overwrite) the channel's live
     // session_key row.
     let scheduled_snapshot_turn = scheduled_snapshot_session_label(metadata.as_ref()).is_some();
+    // Both kinds of turn cold-start under their own session key without touching the channel's.
+    let turn_local_session = scheduled_snapshot_turn || isolated_run.is_some();
     let label = tmux_session_label.as_deref();
     let adk_session_key =
         headless_session_key(shared, channel_id, &provider, metadata.as_ref(), label).await;
-    if !scheduled_snapshot_turn
+    if !turn_local_session
         && valid_routine_metadata(metadata.as_ref()).is_some()
         && let (Some(pool), Some(binding), Some(session_key)) = (
             shared.pg_pool.as_ref(),
@@ -467,7 +506,9 @@ async fn start_reserved_headless_turn_admitted(
             reservation.turn_id(channel_id),
         ));
     }
-    let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
+    let session_retry_context = shares_channel_session
+        .then(|| take_session_retry_context(shared, channel_id, Some(&turn_id)))
+        .flatten();
     let retry_context = session_retry_context.as_ref();
     let reply_context = retry_context.map(|c| c.formatted_context.clone());
     let lead = crate::services::imsg_reply::with_started_contract;
@@ -484,7 +525,8 @@ async fn start_reserved_headless_turn_admitted(
     // writeback is keyed by session_key, so it never touches the channel row.
     // Its cold start + live-context suppression are handled separately below,
     // WITHOUT disturbing the channel (F1: non-disruption is the design contract).
-    let fresh_context_severance = goal_fresh || fresh_routine;
+    // An isolated run is already cold under its own key and severs nothing on the channel.
+    let fresh_context_severance = (goal_fresh || fresh_routine) && shares_channel_session;
     let fresh_context_severance = fresh_context_severance && !replay_start::retrying();
     // Fresh routines use the same provider-severance machinery as `/goal fresh`:
     // clear in-memory, DB, stale IDs, and live-TUI bindings; skip restoration;
@@ -540,10 +582,14 @@ async fn start_reserved_headless_turn_admitted(
     // turn neither resumes the live channel session nor a prior fire's scheduled
     // session (AC-3 per-fire independence). The isolated tmux pane binding is
     // cleared so a warm pane from a previous fire cannot recover resume mode.
-    if scheduled_snapshot_turn {
+    if turn_local_session {
         session_id = None;
         memento_context_loaded = false;
-        session_strategy_reason = "scheduled_snapshot_context";
+        session_strategy_reason = if scheduled_snapshot_turn {
+            "scheduled_snapshot_context"
+        } else {
+            isolated_context::STRATEGY_REASON
+        };
         if let Some(ref tmux_session) = tmux_session_name
             && owner.is_none()
         {
@@ -558,11 +604,11 @@ async fn start_reserved_headless_turn_admitted(
             .as_deref()
             .map(|name| provider.build_tmux_session_name(name));
         let own = channel_pane.is_some() && channel_pane == tmux_session_name;
-        owner.read_late(own, force_fresh_provider_session || scheduled_snapshot_turn);
+        owner.read_late(own, force_fresh_provider_session || turn_local_session);
         owner
     });
     if session_id.is_none() {
-        if force_fresh_provider_session || scheduled_snapshot_turn {
+        if force_fresh_provider_session || turn_local_session {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let reason = if goal_fresh {
                 "/goal fresh session request"
@@ -570,6 +616,8 @@ async fn start_reserved_headless_turn_admitted(
                 "routine agent identity change"
             } else if scheduled_snapshot_turn {
                 "scheduled snapshot turn"
+            } else if isolated_run.is_some() {
+                "isolated routine run"
             } else {
                 "fresh routine turn"
             };
@@ -678,7 +726,7 @@ async fn start_reserved_headless_turn_admitted(
         session_id.as_deref(),
         force_fresh_provider_session,
         session_was_cleared,
-        scheduled_snapshot_turn,
+        turn_local_session,
         dispatch_profile,
         None,
         session_retry_context.as_ref(),
@@ -837,7 +885,7 @@ async fn start_reserved_headless_turn_admitted(
             .as_ref()
             .map(|binding| binding.role_id.as_str()),
         &shared.token_hash,
-        scheduled_snapshot_turn,
+        turn_local_session,
         shared.api_port,
     )
     .await;
@@ -878,6 +926,9 @@ async fn start_reserved_headless_turn_admitted(
             source,
             routine_metadata::routine_process_turn(metadata.as_ref()),
         );
+    if isolated_run.is_some() {
+        inflight_state.routine_presentation = inflight_state.routine_presentation.isolate_run();
+    }
     inflight_state.scheduled =
         crate::services::discord::scheduled_turn::ScheduledTurnMark::at_headless_start(
             metadata.as_ref(),

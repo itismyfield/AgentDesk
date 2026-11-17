@@ -112,6 +112,7 @@ use queue_enqueue::enqueue_behind;
 pub(crate) use queue_enqueue::enqueue_intervention;
 #[cfg(unix)]
 pub(crate) use queued_head::HandoffHeld;
+pub(crate) use queued_head::effort_intent;
 pub(crate) use queued_head::{HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim, prefix};
 pub(crate) use queued_head::{
     OwedDrop, RESTART_SEED_SOURCE, SeedStatus, TurnBind, Waiting, v2_queue, waiting_origin,

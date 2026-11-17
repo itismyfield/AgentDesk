@@ -194,4 +194,4 @@ needs_live: `true`
 - `state_busy_observed` (#8115 / #8118 / #8120; human): fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가.
 - `surface_thread_observed` (#8115 / #8118 / #8120; human): fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가.
 
-source_hash: `9c9cba6a95242093f832e4985038c8999ea33c55c15f494b461293d0a07cbaff`
+source_hash: `722db1275a5b7f518e3e7f6798a6145aef7b965d99a4102a5478d69d13097ce9`

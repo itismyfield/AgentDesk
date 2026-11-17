@@ -159,3 +159,53 @@ export TLA2TOOLS=~/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/opt/homebrew
 per-run exact1 모델의 소스와18cfg는 변경하지 않았다. 연속 실패 N/N+1과 별도 Announce 사고 대응 original은 [별도 모델 보고서](routine-failure-escalation.report.md)에서 검사한다. 원 routine 재실행·두 번째 routine 턴으로 합치지 않으며 Unknown의 eventual remediation 효과를 보장하지 않는다.
 
 후속 PJ는 #8127 공통 gate를 pin하며, **키 없음 ≡ PrejudgeEnabled=FALSE**다. Off(no_key)는 판정 CLI·네트워크 호출0이며 NoAnswer와 구별한다. 기존 per-run 모델 소스/cfg는 변경하지 않는다.
+
+## PR3b D: mailbox 공유·surface 별 actor retire·시작 보류·primary fallback
+
+코드 기준 `061b3d4cc6df3368122146b666db0d63d4593234` 위 PR3b 조각, 2026-11-14 KST. 기존 `RoutineRun.tla` 를 갱신했다(새 모듈 없음). 갱신 전 사본의 SHA256 은 위 `1afd1bc1…`, 갱신 후는 `ccc0ad4cef5787b0af2069f90f4a2ac52f9548b0710fa79d82c52440e4f1f587` 이다. 기존 18cfg 의 기대 위반 집합은 그대로이고 4cfg 를 더해 22cfg 가 expected.tsv 와 일치한다(공식 checker, GREEN 8 + 기대 RED 14).
+
+추가한 상태와 action:
+
+- `scope`: run 의 surface. headless·channel 은 `shared_primary`, thread 는 `owned_thread`/`owned_dm`(구형 동적 DM) 중 하나, script 는 없음.
+- `actor`·`RetireActor`: 턴이 끝난 뒤 idle 이고 queue 가 빈 actor 를 내린다. owned surface 에서만 가능하다.
+- `hArrived`·`hQueued`·`hDone`, `HumanArrive`·`HumanProcess`: headless run 과 같은 mailbox 에 도착하는 사람 입력 둘. routine 턴이 mailbox 를 쥔 동안(`RoutineHolds`) 대기하고 run 이 닫히면 처리된다.
+- `humanBusy`·`DeferStart`·`HumanFinish`: 사람이 먼저 일하는 동안 routine 은 Admit 하지 못하고 시작 보류를 두 번까지 쓴 뒤 `primary_busy` 로 실패한다.
+- `threadFault`·`ThreadRecover`: thread 해석의 일시·영구 실패. 일시 실패는 같은 thread 로 보류 뒤 `thread_unavailable`, 어느 쪽도 primary 로 가지 않는다.
+
+| 규칙 | 뜻 |
+|---|---|
+| `PrimaryActorPreserved` | shared primary surface 의 actor 는 idle·빈 queue 에서도 바뀌지 않는다 |
+| `NoPrimaryFallback` | thread 해석 실패가 primary 에서의 실행으로 바뀌지 않는다 |
+| `HumanInputsConserved` | 사람 입력은 유실·중복 없이 각 한 번 처리되거나 대기 중이다 |
+| `HumanInputsEventuallyProcessed` (liveness) | headless 진행 중 도착한 사람 입력은 결국 처리된다 |
+| `OwnedSurfaceRetires` (liveness) | routine 소유 thread·DM 의 actor 는 턴이 끝나면 내려간다(positive control) |
+
+| cfg | 뜻 | 결과 |
+|---|---|---|
+| `RoutineRunHeadless`·`RoutineRunThread`·`RoutineRunChannel` | 수정 후 | GREEN(새 규칙 5개 포함) |
+| `RoutineRunHeadlessRetireShared` | 수정 전: process 턴이 surface 를 가리지 않고 actor 를 내림 | RED `PrimaryActorPreserved` |
+| `RoutineRunThreadPrimaryFallback` | 현재 main: thread 준비 실패 시 primary 로 실행 | RED `NoPrimaryFallback` |
+| `RoutineRunHeadlessStartedRetry` | 현재 main: 제출 뒤 provider 실패에 새 턴 | RED `NoDuplicateTurn`·`SuccessfulAgentExactlyOne` |
+| `RoutineRunHeadlessNoRelease` | 닫힌 run 이 mailbox 를 놓지 않음(liveness 가 공허하지 않음을 보이는 mutant) | RED `HumanInputsEventuallyProcessed` |
+
+모델 밖: 완료 timeout 의 기준 시각(claim 대 실제 시작)은 `Expire` 한 걸음으로 추상화돼 있어 구별하지 못한다. `primary_busy` 종결의 provider spawn 0 은 `FailBeforeSubmit` 이 `input = "none"` 에서만 가능해 모델에서는 자명하고, 구현 시험이 본다. `HumanInputsConserved` 를 깨는 mutant 는 두지 않았다(queue 가 남은 actor 를 내리지 않는 기존 가드는 이 조각에서 바뀌지 않는다).
+
+## PR3b-2: per-run 세션 행 종료, 구현이 thread GREEN cfg 로 옴
+
+코드 기준 `8752805029e9dfded84791b0a9a79b6a22d511a3` 위 PR3b-2 조각, 2026-11-14 KST. 갱신 전 SHA256 `ccc0ad4c…`, 갱신 후 `8f0b7404a01ef767b10aeddb88c75aee770e1eba9392e94d10c0512799c1e7a7`. 24cfg 가 expected.tsv 와 일치한다(공식 checker, GREEN 8 + 기대 RED 16).
+
+- null-mode 실패 전이(fallback 0·5xx 보류·제출 뒤 재실행 0·`primary_busy` 종결)는 앞 조각에서 목표 동작으로 넣은 그대로다. 이 조각에서 구현이 `RoutineRunThreadPrimaryFallback`·`RoutineRunBeforeRetry`(RED) 쪽에서 `RoutineRunThread`(GREEN) 쪽으로 왔다.
+- 더한 것: headless run 의 세션 행 `runRow`(none → active → removed)와 `primaryRow`, action `CloseRunRow`. 턴의 완료 경로가 run 자신의 행만 종료·삭제한다. 재시작으로 `interrupted` 가 된 run 은 완료 경로에 닿지 않아 행이 남는다(stale 세션 GC 몫, 구현 그대로).
+
+| 규칙 | 뜻 |
+|---|---|
+| `PrimaryRowKept` | run 의 행을 닫을 때 primary 행은 그대로다 |
+| `RunRowRemoved` (liveness) | 끝난 run(interrupted 제외)의 행은 결국 지워진다 |
+
+| cfg | 뜻 | 결과 |
+|---|---|---|
+| `RoutineRunHeadless` | 수정 후 | GREEN |
+| `RoutineRunHeadlessNoRowClose` | 수정 전: 완료가 행을 닫지 않아 `turn_active` 로 남음 | liveness RED `RunRowRemoved` |
+| `RoutineRunHeadlessWideRowClose` | 닫는 대상에 primary 행이 섞임 | RED `PrimaryRowKept` |
+
+검증 범위(리뷰 뒤 좁힘): 이 모델의 thread 보류는 횟수만 세고, 창 소진을 곧바로 terminal 로 둔다. 구현이 그와 같아진 것은 시작 실패 처분(창 소진·영구 거절·응답 없는 생성은 retry·fallback 없이 종결)을 넣은 리뷰 수리부터다. 그 대응은 모델이 아니라 Rust 시험이 본다. 모델에 없는 것: thread 생성 응답이 불명인 상태와 실패 로그의 thread 생성, 대기 입력 kickoff 배선(`HumanProcess` 의 fairness 는 가정이다), `CloseRunRow` 의 실패(내부 API 거절), `interrupted` run 의 행.
