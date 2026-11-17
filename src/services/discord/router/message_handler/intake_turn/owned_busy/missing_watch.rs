@@ -48,32 +48,34 @@ pub(in crate::services::discord) fn guard(
                 Ok(false) => {}
                 Err(_) => return Screen::Unknown,
             }
-            let Some(pool) = pool.as_ref() else {
-                return Screen::Unknown;
-            };
-            let HostedRecord::Known(record) = &row.record else {
-                return Screen::Unknown;
-            };
-            let lookup = HostedLookupKey::Canonical {
-                provider: &record.owner.provider,
-                identity: CanonicalSessionIdentity {
-                    kind: SessionIdentityKind::DiscordChannel,
-                    discord_token_hash: &record.owner.discord_token_hash,
-                    channel_id: &record.owner.channel_id,
-                },
-            };
-            let current = futures::executor::block_on(hosted_execution::load_hosted_execution_pg(
-                pool, lookup,
-            ));
-            let mut retired = record.clone();
-            retired.state = HostedState::Retired;
-            match current {
-                HostedLookup::Found(current)
-                    if current == row
-                        || (current.session_id() == row.session_id()
-                            && current.record == HostedRecord::Known(retired)) => {}
-                HostedLookup::Unknown(_) => return Screen::Unknown,
-                _ => return Screen::Gone,
+            if let Some(pool) = pool.as_ref() {
+                let HostedRecord::Known(record) = &row.record else {
+                    return Screen::Unknown;
+                };
+                let lookup = HostedLookupKey::Canonical {
+                    provider: &record.owner.provider,
+                    identity: CanonicalSessionIdentity {
+                        kind: SessionIdentityKind::DiscordChannel,
+                        discord_token_hash: &record.owner.discord_token_hash,
+                        channel_id: &record.owner.channel_id,
+                    },
+                };
+                let current = futures::executor::block_on(
+                    hosted_execution::load_hosted_execution_pg(pool, lookup),
+                );
+                let mut retired = record.clone();
+                retired.state = HostedState::Retired;
+                match current {
+                    HostedLookup::Found(current)
+                        if current == row
+                            || (current.session_id() == row.session_id()
+                                && current.record == HostedRecord::Known(retired)) => {}
+                    // An unavailable database leaves the decision to the existing owner/CAS path.
+                    HostedLookup::Unknown(_) => {}
+                    HostedLookup::Found(current)
+                        if matches!(current.record, HostedRecord::Unknown(_)) => {}
+                    _ => return Screen::Gone,
+                }
             }
             // Ready wakes the existing claim/CAS path; this probe never retires, disposes or writes.
             match (

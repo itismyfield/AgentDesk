@@ -105,6 +105,39 @@ async fn a_confirmed_missing_working_pane_ends_its_watch_without_dropping_the_fr
         .v2_admit_ticket(item, "working-probe".into())
         .await
         .unwrap();
+    let idle_front = mailbox
+        .v2_request(|slot| Ok(slot.as_ref().unwrap().front().unwrap()))
+        .await
+        .unwrap();
+    let closed = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://fixture@127.0.0.1:1/unavailable")
+        .unwrap();
+    closed.close().await;
+    assert!(closed.is_closed());
+    for pool in [None, Some(&closed)] {
+        let mut idle_probe =
+            recoverable_probe(&host, &observation, pool, &mailbox, Some(&idle_front)).expect(
+                "a captured Missing execution can request judgement without database availability",
+            );
+        assert_eq!(
+            tokio::task::spawn_blocking(move || idle_probe())
+                .await
+                .unwrap(),
+            Screen::Ready,
+            "an absent or closed database must not turn proven Missing into permanent Keep"
+        );
+        assert_eq!(mailbox.has_active_turn().await, Ok(false));
+        let after = mailbox
+            .v2_request(|slot| Ok(slot.as_ref().unwrap().front().unwrap()))
+            .await
+            .unwrap();
+        assert!(same_front(&idle_front, Some(&after)));
+        assert_eq!(
+            serde_json::to_value(&after.1).unwrap(),
+            serde_json::to_value(&idle_front.1).unwrap(),
+            "the probe requests judgement but never disposes the original"
+        );
+    }
     mailbox
         .restore_active_turn(
             std::sync::Arc::new(CancelToken::new()),
