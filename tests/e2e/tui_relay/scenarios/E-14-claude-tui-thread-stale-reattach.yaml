@@ -13,6 +13,10 @@ notes: |
   Claude TUI relay offset to a missing transcript, restarts dcserver, then
   verifies the post-restart answer is relayed from the launch-script-derived
   current transcript instead of the stale offset.
+  The first PRE prompt must start the thread session when none existed
+  (#8115; with --hard-reset-session-each or a fresh thread, otherwise the check
+  is not_applicable), and the session must run on the host the parent channel
+  is configured for (#8118), read from tmux has-session and herdr status.
 steps:
   - send_prompt: "응답에 정확히 한 줄로 [E2E:E14:PRE] 만 출력해줘."
   - wait_for_discord_text: "[E2E:E14:PRE]"
@@ -39,3 +43,6 @@ assertions:
   - text_present: "[E2E:E14:POST]"
   - no_duplicate_content: true
   - no_resume_prompt_chrome: true
+  - thread_session_started: true
+  - session_host:
+      expect: configured
