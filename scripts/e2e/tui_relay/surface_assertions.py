@@ -98,6 +98,9 @@ def reaction_names(message: dict[str, Any]) -> list[str]:
 class ReactionWatch:
     """Reads each targeted input message's reactions on a timer until stopped."""
 
+    # A scenario that raised mid-steps never reaches stop(); the next scenario ends its reads.
+    _active: list[ReactionWatch] = []
+
     def __init__(self, targets, fetch, channel_id, store, *, clock=time.monotonic):
         self.targets, self.fetch, self.channel_id, self.store, self.clock = targets, fetch, channel_id, store, clock
         self._stop = threading.Event()
@@ -105,6 +108,8 @@ class ReactionWatch:
 
     @classmethod
     def for_scenario(cls, scenario, client, channel_id, record):
+        while cls._active:
+            cls._active.pop()._stop.set()
         targets: dict[int, set[str]] = {}
         for spec in scenario.get("assertions") or []:
             for op in REACTION_OPS:
@@ -113,7 +118,9 @@ class ReactionWatch:
                     targets.setdefault(spec[op]["send"], set()).update(settle)
         if not targets:
             return None
-        return cls(targets, client.fetch_messages, channel_id, record.setdefault("reaction_watch", {}))
+        watch = cls(targets, client.fetch_messages, channel_id, record.setdefault("reaction_watch", {}))
+        cls._active.append(watch)
+        return watch
 
     def on_send(self, record) -> None:
         sends = record.get("prompt_sends") or []
