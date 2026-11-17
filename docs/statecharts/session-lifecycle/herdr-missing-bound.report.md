@@ -62,3 +62,11 @@ The implementation report records Rust RED/GREEN tests, mutants, source scans, c
 The official repository manifest check after registration also matched all 19 cfgs (46 rule runs, 44.4 seconds). `list_merge_guard.py --ci --normalize` returned `LIST_MERGE_GUARD_OK` with no manifest diff. The implementation delta in the entrypoint table maps the common proof, idle repair, failure settlement and working probe to the checked actions.
 
 The retired-native launch refinement carries the existing verified native binding and exact owner/Retired/nonce proof to the legacy-close decision. It enables the existing `Launch` action without changing the model's state or fairness assumptions. An unverified or different incarnation remains subject to its existing resume checks and can take `Reject`. The actual idle-to-first-write test and a legacy-close mutant check this refinement; no new native reset or legacy close authority is modeled.
+
+## Busy effect and refusal-notice refinement
+
+`EarlyBusy -> LosePane -> BusyEffect -> EffectWatch` models entry 43, including a failed first capture after admission. The watch requests a fresh owner judgement; it neither retires nor writes. `ActiveOriginalHeld` preserves the original until the existing `Boundary`. Temporary idle watching in `effect-held` is permitted by `NoIdleHeld`; `WatchResolves` rules out an immutable Missing watch. Unknown is not Missing; the Unknown control assumes a later readable observation rather than proving that an unknown read must recover.
+
+`Reject -> FirstNoticeFails -> RestRecovers -> OutboxPost` separates input settlement from notification custody. `NoticeOnce` permits an outstanding durable obligation while `ReasonDelivered` and `InputResolves` require eventual visible delivery. Event retries retain the same identity. Database handoff availability and eventual REST recovery are assumptions; settlement/handoff crash atomicity is outside this model.
+
+The official runner checked 27 configs: the old 19 and eight new controls/counterexamples. BeforeEffectIdle breaks InputResolves and WatchResolves; BeforeNoticeRetry breaks InputResolves, NoticeOnce and ReasonDelivered. The five new fixed configs and BeforeEffectActive preserve all selected rules. Production-path tests are a separate requirement.

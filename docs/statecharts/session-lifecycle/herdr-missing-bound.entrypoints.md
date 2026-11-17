@@ -50,7 +50,7 @@ The search covered the five hosted-record mutation APIs, their callers, direct S
 | 40 | `src/services/discord/queue_io/input_owner/effect.rs:108` preparation watch | `watching`; post-reservation projection | A concrete preparation cause, not the early idle Missing decision |
 | 41 | `src/services/discord/queue_io/input_owner/effect.rs:152` screen watch | `watching`; screen projection | Legacy tmux screen path, unchanged |
 | 42 | `src/services/discord/queue_io/input_owner/effect.rs:166` cause watch | `watching`; cause projection | Lock/buffer/transcript cause; unchanged legacy path |
-| 43 | `src/services/discord/queue_io/input_owner/effect/claude.rs:88` actual busy transaction | `HeldWatch` / `Boundary` projection | Working transaction's concrete returned probe; preserve transient holds |
+| 43 | `src/services/discord/queue_io/input_owner/effect/claude.rs:88` actual busy transaction | `EarlyBusy` → `LosePane` → `BusyEffect` → `EffectWatch` | Capture can fail after Busy admission. Exact Missing rejudges the same idle front once; an active turn preserves it until `Boundary` |
 | 44 | `src/services/discord/queue_io/input_owner/effect/codex.rs:71` Codex cause | Outside model: legacy screen | Codex path, unchanged |
 | 45 | `src/services/discord/queue_io/input_owner/effect/codex.rs:182` Codex composer | Outside model: legacy screen | Codex path, unchanged |
 | 46 | `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs:187` writer boot hold | `Reconnect` / waiting projection | All origins; readiness probe, not a dead exact-pane probe |
