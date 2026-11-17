@@ -15,16 +15,16 @@
 | `/clear` | 없음 | 대상 인자 없음, 소유 레인 착지 뒤 | `commands/control.rs:529` | #6486 |
 | `/stop` | 없음 | 대상 인자 없음, 소유 레인 착지 뒤 | `commands/control.rs:387` | #6486 |
 | `/cancel-queued` | `message_id` | 선택 문자열. 현재 actor가 가진 취소 가능한 대기·보관 입력을 autocomplete로 표시하며, 생략하면 실행 중 턴과 전달 중 head를 남기고 비운다 | `commands/control.rs:715` | #7678-2 |
-| `/skill` | `skill` | 기존 autocomplete 재사용: builtin·runtime cache 이름 / 값 skill 식별자. 권한·25개·이름 100자·값 100자·중복·응답 시간 제한 적용 | `commands/skill.rs:341` | #7678-1 |
-| `/skill` | `args` | 임의 프롬프트 문자열, ID·이름 목록이 아님. 선택지 제외 | `commands/skill.rs:346` | #7678-1 |
+| `/skill` | `skill` | 기존 autocomplete 재사용: builtin·runtime cache 이름 / 값 skill 식별자. 권한·25개·이름 100자·값 100자·중복·응답 시간 제한 적용 | `commands/skill.rs:307` | #7678-1 |
+| `/skill` | `args` | 임의 프롬프트 문자열, ID·이름 목록이 아님. 선택지 제외 | `commands/skill.rs:312` | #7678-1 |
 | `/model` | 없음 | 이미 실행 후 런타임 모델 선택 UI 제공. 문자열 인자 추가 불필요 | `commands/model_picker.rs:194`, `commands/model_ui.rs:220` | #7678-1; 설정 저장 #6486 |
 | `/node` | 없음 | 이미 실행 후 노드 이름·instance ID 선택 UI 제공 | `commands/node.rs:292`, `commands/node.rs:169` | #7678-1 |
 | `/sidecar` | 없음 | 대상 인자 없음 | `commands/sidecar.rs:10` | #7678-1 |
 | `/fast` | 없음 | 토글, 대상 인자 없음 | `commands/fast_mode.rs:40` | #7678-1 |
 | `/tool-call` | `action` | 기존 choices: on / off / status | `commands/tool_call.rs:182` | #7678-1 |
 | `/goals` | 없음 | 토글, 대상 인자 없음 | `commands/goals.rs:24` | #7678-1 |
-| `/effort` | `level` | 기존 choices: low / medium / high / xhigh / max | `commands/tui_passthrough.rs:333` | #7678-1 |
-| `/compact` | 없음 | 대상 인자 없음 | `commands/tui_passthrough.rs:340` | #7678-1 |
+| `/effort` | `level` | autocomplete: 채널의 provider·모델이 지금 지원하는 effort 값 중 입력 prefix로 시작하는 값(Codex는 모델별, Claude ultra는 capability 확인 시). 직접 입력도 같은 검증을 지나며 미지원 값은 설정 변화 없이 거절 | `commands/tui_passthrough.rs:285` | #8109 |
+| `/compact` | 없음 | 대상 인자 없음 | `commands/tui_passthrough.rs:317` | #7678-1 |
 | `/adk` | 하위 명령 | inspect로 분기, 문자열 인자 없음 | `commands/inspect/mod.rs:60` | #7678-1 |
 | `/adk inspect` | `view` | 기존 choices: last / session / prompt / context / recovery | `commands/inspect/mod.rs:68` | #7678-1 |
 | `/queue` | `all` | Discord 기본 boolean UI, ID·이름 인자 아님 | `commands/diagnostics/mod.rs:66` | #7678-1 |

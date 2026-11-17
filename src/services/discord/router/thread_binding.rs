@@ -13,8 +13,6 @@ pub(super) struct DispatchInfo {
     // read by the binding path (which consumes context/card_id/title). Kept as
     // populated diagnostic DTO fields.
     #[allow(dead_code)]
-    pub(super) github_issue_number: Option<i64>,
-    #[allow(dead_code)]
     pub(super) issue_body: Option<String>,
     #[allow(dead_code)]
     pub(super) deferred_dod: Option<serde_json::Value>,
@@ -47,7 +45,6 @@ pub(super) async fn lookup_dispatch_info(api_port: u16, dispatch_id: &str) -> Op
             .get("github_issue_url")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-        github_issue_number: body.get("github_issue_number").and_then(|v| v.as_i64()),
         issue_body: body
             .get("issue_body")
             .and_then(|v| v.as_str())

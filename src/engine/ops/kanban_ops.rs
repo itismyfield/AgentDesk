@@ -1731,33 +1731,33 @@ mod tests {
             }
         });
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            sqlx::query("SELECT pg_stat_clear_snapshot()")
-                .execute(&mut *attacher)
-                .await
-                .expect("clear concurrent-reopen snapshot");
-            let waiting = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (
+        crate::test_support::wait::poll_within(
+            async || {
+                sqlx::query("SELECT pg_stat_clear_snapshot()")
+                    .execute(&mut *attacher)
+                    .await
+                    .expect("clear concurrent-reopen snapshot");
+                let waiting = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
                      SELECT 1
                      FROM pg_stat_activity
                      WHERE datname = current_database()
                        AND wait_event_type = 'Lock'
                        AND query LIKE '%pg_advisory_xact_lock%'
                  )",
-            )
-            .fetch_one(&mut *attacher)
-            .await
-            .expect("inspect concurrent reopen waiter");
-            if waiting {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "reopen did not wait behind the concurrent attacher"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+                )
+                .fetch_one(&mut *attacher)
+                .await
+                .expect("inspect concurrent reopen waiter");
+                waiting
+                    .then_some(())
+                    .ok_or_else(|| "reopen did not wait behind the concurrent attacher".into())
+            },
+            std::time::Duration::from_secs(5),
+            "reopen waiter behind the concurrent attacher",
+        )
+        .await
+        .expect("reopen did not wait behind the concurrent attacher");
 
         sqlx::query(
             "UPDATE auto_queue_runs
@@ -1836,33 +1836,33 @@ mod tests {
             }
         });
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            sqlx::query("SELECT pg_stat_clear_snapshot()")
-                .execute(&mut *attacher)
-                .await
-                .expect("clear competing-reopen snapshot");
-            let waiting = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (
+        crate::test_support::wait::poll_within(
+            async || {
+                sqlx::query("SELECT pg_stat_clear_snapshot()")
+                    .execute(&mut *attacher)
+                    .await
+                    .expect("clear competing-reopen snapshot");
+                let waiting = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
                      SELECT 1
                      FROM pg_stat_activity
                      WHERE datname = current_database()
                        AND wait_event_type = 'Lock'
                        AND query LIKE '%pg_advisory_xact_lock%'
                  )",
-            )
-            .fetch_one(&mut *attacher)
-            .await
-            .expect("inspect competing reopen waiter");
-            if waiting {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "reopen did not wait behind the competing attacher"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+                )
+                .fetch_one(&mut *attacher)
+                .await
+                .expect("inspect competing reopen waiter");
+                waiting
+                    .then_some(())
+                    .ok_or_else(|| "reopen did not wait behind the competing attacher".into())
+            },
+            std::time::Duration::from_secs(5),
+            "reopen waiter behind the competing attacher",
+        )
+        .await
+        .expect("reopen did not wait behind the competing attacher");
 
         sqlx::query(
             "UPDATE auto_queue_runs

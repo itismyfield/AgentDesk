@@ -74,12 +74,24 @@ async fn read_response(response: reqwest::Response) -> Result<Value, String> {
     into_result(status, body)
 }
 
+/// Names the caller's intake trace so the loopback handler's DB work counts toward it.
+fn timing_header() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some((name, value)) = crate::logging::intake_timing::loopback_header()
+        && let Ok(value) = reqwest::header::HeaderValue::from_str(&value)
+    {
+        headers.insert(name, value);
+    }
+    headers
+}
+
 async fn request_json(method: Method, path: &str) -> Result<Value, String> {
     let ctx = load_context()?;
     let response = client()
         .request(method, api_url(&ctx, path))
         .header(reqwest::header::ORIGIN, api_origin(&ctx))
         .header(reqwest::header::REFERER, api_origin(&ctx))
+        .headers(timing_header())
         .send()
         .await
         .map_err(|error| format!("direct runtime API {path}: {error}"))?;
@@ -96,6 +108,7 @@ where
         .query(query)
         .header(reqwest::header::ORIGIN, api_origin(&ctx))
         .header(reqwest::header::REFERER, api_origin(&ctx))
+        .headers(timing_header())
         .send()
         .await
         .map_err(|error| format!("direct runtime API {path}: {error}"))?;
@@ -112,6 +125,7 @@ where
         .json(body)
         .header(reqwest::header::ORIGIN, api_origin(&ctx))
         .header(reqwest::header::REFERER, api_origin(&ctx))
+        .headers(timing_header())
         .send()
         .await
         .map_err(|error| format!("direct runtime API {path}: {error}"))?;
@@ -164,6 +178,7 @@ pub(super) async fn hook_session_terminal(
         .json(&body)
         .header(reqwest::header::ORIGIN, api_origin(&ctx))
         .header(reqwest::header::REFERER, api_origin(&ctx))
+        .headers(timing_header())
         .send()
         .await
         .map_err(|error| format!("terminal session hook: {error}"))?;
@@ -292,7 +307,8 @@ async fn update_dispatch_request(
     let mut request = client()
         .request(Method::PATCH, api_url(&ctx, &path))
         .header(reqwest::header::ORIGIN, api_origin(&ctx))
-        .header(reqwest::header::REFERER, api_origin(&ctx));
+        .header(reqwest::header::REFERER, api_origin(&ctx))
+        .headers(timing_header());
     if let Some(body) = body {
         request = request.json(body);
     }

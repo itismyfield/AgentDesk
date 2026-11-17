@@ -625,12 +625,12 @@ mod leader_takeover_tests {
     /// `drain_with_health_registry_tears_down_provider_runtime_pg` is what proves
     /// the registry does something once it arrives.
     /// `#[tokio::test]` only because `PgPool::connect_lazy` installs a pool
-    /// reaper and therefore needs a runtime handle in scope. Nothing here awaits.
+    /// reaper and therefore needs a runtime handle in scope.
     #[tokio::test]
     async fn policy_tick_thread_captures_the_process_health_registry() {
         let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
 
-        let captured = spawn_policy_tick_and_capture(Some(registry.clone()));
+        let captured = spawn_policy_tick_and_capture(Some(registry.clone())).await;
         assert_eq!(
             captured,
             Some(Some(Arc::as_ptr(&registry) as usize)),
@@ -643,7 +643,7 @@ mod leader_takeover_tests {
         // `server::run`) legitimately has no registry, and must stay `None`
         // rather than fabricate one.
         assert_eq!(
-            spawn_policy_tick_and_capture(None),
+            spawn_policy_tick_and_capture(None).await,
             Some(None),
             "a process with no registry must not invent one for the tick"
         );
@@ -651,7 +651,7 @@ mod leader_takeover_tests {
 
     /// Start the real `policy-tick` worker with `health_registry` and return what
     /// `policy_tick_captured_registry` saw the spawned thread capture.
-    fn spawn_policy_tick_and_capture(
+    async fn spawn_policy_tick_and_capture(
         health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     ) -> Option<Option<usize>> {
         super::reset_policy_tick_captured_registry();
@@ -683,13 +683,17 @@ mod leader_takeover_tests {
             .start_worker(policy_tick_spec(), None)
             .expect("start the policy-tick worker");
 
-        for _ in 0..200 {
-            if let Some(captured) = super::policy_tick_captured_registry() {
-                return Some(captured);
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        None
+        crate::test_support::wait::poll_within(
+            async || {
+                super::policy_tick_captured_registry().ok_or_else(|| {
+                    "policy-tick thread has not captured the process health registry".into()
+                })
+            },
+            Duration::from_secs(2),
+            "policy-tick registry capture",
+        )
+        .await
+        .ok()
     }
 
     fn policy_tick_spec() -> super::WorkerSpec {

@@ -129,7 +129,7 @@ impl Drop for UnsentClose {
         }
     }
 }
-pub(super) struct CapturedTurn {
+pub(in crate::services::discord) struct CapturedTurn {
     key: TurnKey,
     pub(super) token: Arc<CancelToken>,
     /// The actor seen holding `token`; settlement is confirmed on it, never on a re-resolved one.
@@ -137,7 +137,13 @@ pub(super) struct CapturedTurn {
     snapshot: SyntheticClaimSnapshot,
     dispatch_id: Option<String>,
 }
-pub(super) async fn capture_turn(
+impl CapturedTurn {
+    /// The captured turn's nonce, which names its episode.
+    pub(in crate::services::discord) fn nonce(&self) -> Option<&str> {
+        self.snapshot.turn_nonce.as_deref()
+    }
+}
+pub(in crate::services::discord) async fn capture_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
@@ -338,7 +344,7 @@ async fn settle_and_release<E>(
     }
 }
 
-pub(super) async fn settle_captured(
+pub(in crate::services::discord) async fn settle_captured(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     turn: Option<CapturedTurn>,

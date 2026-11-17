@@ -678,7 +678,7 @@ pub(crate) mod tests {
     }
     /// The channel's host takes Herdr turns under `key` with no row; its old pane's close succeeds
     /// unless `close_fails`.
-    fn herdr_host(channel: u64, key: &str, close_fails: bool) -> impl Drop {
+    pub(crate) fn herdr_host(channel: u64, key: &str, close_fails: bool) -> impl Drop {
         let host = (key.to_string(), close_fails);
         ROWLESS.lock().unwrap().insert(channel, host);
         Rowless(channel)

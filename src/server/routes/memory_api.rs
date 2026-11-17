@@ -512,12 +512,10 @@ mod request_body_tests {
     }
 
     impl MemoryApiPostgresDb {
-        async fn try_create() -> Option<Self> {
+        async fn create() -> Self {
             let lock = crate::db::postgres::lock_test_lifecycle();
-            let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
-                drop(lock);
-                return None;
-            };
+            let base = crate::db::postgres::postgres_test_database_url_base()
+                .expect("POSTGRES_TEST_DATABASE_URL_BASE required for memory API PG tests"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
             let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
@@ -525,21 +523,16 @@ mod request_body_tests {
             let admin_url = format!("{base}/{admin_db}");
             let database_name = format!("agentdesk_memory_api_{}", uuid::Uuid::new_v4().simple());
             let database_url = format!("{base}/{database_name}");
-            if let Err(error) =
-                crate::db::postgres::create_test_database(&admin_url, &database_name, PG_TEST_LABEL)
-                    .await
-            {
-                eprintln!("skipping {PG_TEST_LABEL}: {error}");
-                drop(lock);
-                return None;
-            }
+            crate::db::postgres::create_test_database(&admin_url, &database_name, PG_TEST_LABEL)
+                .await
+                .unwrap_or_else(|error| panic!("{PG_TEST_LABEL}: create test database: {error}"));
 
-            Some(Self {
+            Self {
                 _lock: lock,
                 admin_url,
                 database_name,
                 database_url,
-            })
+            }
         }
 
         async fn connect(&self) -> sqlx::PgPool {
@@ -711,9 +704,7 @@ mod request_body_tests {
         env.remove("ADK_FORCE_LOCAL_MEMORY");
         env.remove(TEST_MEMENTO_ACCESS_KEY_ENV);
 
-        let Some(pg_db) = MemoryApiPostgresDb::try_create().await else {
-            return;
-        };
+        let pg_db = MemoryApiPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let state = test_state_with_pg(pool.clone());
 
@@ -761,9 +752,7 @@ mod request_body_tests {
 
     #[tokio::test]
     async fn local_memory_api_uses_migrated_table() {
-        let Some(pg_db) = MemoryApiPostgresDb::try_create().await else {
-            return;
-        };
+        let pg_db = MemoryApiPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let state = test_state_with_pg(pool.clone());
 
@@ -818,9 +807,7 @@ mod request_body_tests {
 
     #[tokio::test]
     async fn local_memory_migration_preserves_preexisting_route_table_rows() {
-        let Some(pg_db) = MemoryApiPostgresDb::try_create().await else {
-            return;
-        };
+        let pg_db = MemoryApiPostgresDb::create().await;
         let pool = pg_db.connect().await;
 
         sqlx::query(

@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::test_support::wait::poll_within;
     use std::sync::Arc;
 
     use axum::{
@@ -173,33 +174,6 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("count run entries")
-    }
-
-    async fn wait_for_rebind_advisory_lock_waiter(pool: &sqlx::PgPool) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let blocked = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (
-                     SELECT 1
-                     FROM pg_stat_activity
-                     WHERE datname = current_database()
-                       AND state = 'active'
-                       AND wait_event_type = 'Lock'
-                       AND query LIKE '%SELECT pg_advisory_lock(hashtext($1), hashtext($2))%'
-                 )",
-            )
-            .fetch_one(pool)
-            .await
-            .expect("inspect blocked slot rebind advisory lock");
-            if blocked {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "slot rebind did not reach its advisory lock after reading run status"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
     }
 
     #[tokio::test]
@@ -492,7 +466,36 @@ mod tests {
             )
             .await
         });
-        wait_for_rebind_advisory_lock_waiter(&pool).await;
+        poll_within(
+            async || {
+                let pool = &pool;
+                let blocked = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_stat_activity
+                 WHERE datname = current_database()
+                   AND state = 'active'
+                   AND wait_event_type = 'Lock'
+                   AND query LIKE '%SELECT pg_advisory_lock(hashtext($1), hashtext($2))%'
+             )",
+                )
+                .fetch_one(pool)
+                .await
+                .expect("inspect blocked slot rebind advisory lock");
+                if blocked {
+                    Ok(())
+                } else {
+                    Err(
+                        "slot rebind did not reach its advisory lock after reading run status"
+                            .into(),
+                    )
+                }
+            },
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
 
         assert!(
             crate::db::auto_queue::finalize_run_if_ready_pg(&pool, "run-stale-rebind")

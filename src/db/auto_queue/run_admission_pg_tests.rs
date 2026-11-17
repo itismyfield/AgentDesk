@@ -1,7 +1,8 @@
 //! Completion against writers that add a new blocker to the same run: whichever takes
 //! `aq_run:<run_id>` first wins, and a writer that loses to a completion refuses.
 
-use std::time::{Duration, Instant};
+use crate::test_support::wait::poll_within;
+use std::time::Duration;
 
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -129,30 +130,23 @@ async fn try_completion(pool: &PgPool) -> RunCompletionOutcome {
 }
 
 /// True once a backend of this database waits on a lock; false if `task` finished first.
-pub(super) async fn wait_for_lock_waiter<T>(
+pub(super) async fn lock_waiter_sample<T>(
     pool: &PgPool,
     task: &tokio::task::JoinHandle<T>,
-) -> bool {
-    let deadline = Instant::now() + DEADLINE;
-    loop {
-        let waiting = scalar_i64(
-            pool,
-            "SELECT COUNT(*)::BIGINT FROM pg_stat_activity
-             WHERE datname = current_database() AND wait_event_type = 'Lock'",
-        )
-        .await;
-        if waiting > 0 {
-            return true;
-        }
-        if task.is_finished() {
-            return false;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "writer neither waited nor finished"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+) -> Result<bool, String> {
+    let waiting = scalar_i64(
+        pool,
+        "SELECT COUNT(*)::BIGINT FROM pg_stat_activity
+         WHERE datname = current_database() AND wait_event_type = 'Lock'",
+    )
+    .await;
+    if waiting > 0 {
+        return Ok(true);
     }
+    if task.is_finished() {
+        return Ok(false);
+    }
+    Err("writer neither waited nor finished".into())
 }
 
 async fn join<T>(task: tokio::task::JoinHandle<T>) -> T {
@@ -229,7 +223,13 @@ async fn entry_reopen_waits_for_uncommitted_completion_and_refuses_pg() {
         seed_entry(&pool, "entry-1", from_status).await;
         let completion = uncommitted_completion(&pool).await;
         let writer = reopen(&pool);
-        let waited = wait_for_lock_waiter(&pool, &writer).await;
+        let waited = poll_within(
+            async || lock_waiter_sample(&pool, &writer).await,
+            DEADLINE,
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         completion.commit().await.expect("commit completion");
 
         let result = join(writer).await;
@@ -262,7 +262,15 @@ async fn completion_defers_behind_entry_reopen_holding_the_token_pg() {
         .await
         .expect("hold entry row");
     let writer = reopen(&pool);
-    assert!(wait_for_lock_waiter(&pool, &writer).await);
+    assert!(
+        poll_within(
+            async || lock_waiter_sample(&pool, &writer).await,
+            DEADLINE,
+            "PostgreSQL lock waiter"
+        )
+        .await
+        .unwrap()
+    );
 
     let first = try_completion(&pool).await;
     row_holder.rollback().await.expect("release entry row");
@@ -327,7 +335,13 @@ async fn entryless_gate_save_waits_for_uncommitted_completion_and_refuses_pg() {
         seed_entry(&pool, "entry-done", "failed").await;
         let completion = uncommitted_completion(&pool).await;
         let writer = save_gate(&pool, gate_status, Vec::new());
-        let waited = wait_for_lock_waiter(&pool, &writer).await;
+        let waited = poll_within(
+            async || lock_waiter_sample(&pool, &writer).await,
+            DEADLINE,
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         completion.commit().await.expect("commit completion");
 
         let result = join(writer).await;
@@ -359,7 +373,15 @@ async fn completion_defers_behind_gate_save_holding_the_token_pg() {
         .await
         .expect("hold phase key");
     let writer = save_gate(&pool, "pending", Vec::new());
-    assert!(wait_for_lock_waiter(&pool, &writer).await);
+    assert!(
+        poll_within(
+            async || lock_waiter_sample(&pool, &writer).await,
+            DEADLINE,
+            "PostgreSQL lock waiter"
+        )
+        .await
+        .unwrap()
+    );
 
     let first = try_completion(&pool).await;
     phase_holder.rollback().await.expect("release phase key");
@@ -450,7 +472,15 @@ async fn gate_save_waiting_on_phase_key_holds_no_run_row_lock_pg() {
         .await
         .expect("hold phase key");
     let writer = save_gate(&pool, "pending", Vec::new());
-    assert!(wait_for_lock_waiter(&pool, &writer).await);
+    assert!(
+        poll_within(
+            async || lock_waiter_sample(&pool, &writer).await,
+            DEADLINE,
+            "PostgreSQL lock waiter"
+        )
+        .await
+        .unwrap()
+    );
     tokio::time::timeout(
         DEADLINE,
         sqlx::query(
@@ -509,7 +539,13 @@ async fn grace_writer_skips_run_completed_meanwhile_pg() {
     let engine = policy_engine(&pool);
     let completion = uncommitted_completion(&pool).await;
     let writer = begin_grace(&engine, "run-1");
-    let waited = wait_for_lock_waiter(&pool, &writer).await;
+    let waited = poll_within(
+        async || lock_waiter_sample(&pool, &writer).await,
+        DEADLINE,
+        "PostgreSQL lock waiter",
+    )
+    .await
+    .unwrap();
     completion.commit().await.expect("commit completion");
     let opened = join(writer).await;
     assert_completed_without_new_blocker(&pool).await;
@@ -565,7 +601,15 @@ async fn new_cli_run_is_published_with_its_first_entry_pg() {
         )
         .await
     });
-    assert!(wait_for_lock_waiter(&pool, &writer).await);
+    assert!(
+        poll_within(
+            async || lock_waiter_sample(&pool, &writer).await,
+            DEADLINE,
+            "PostgreSQL lock waiter"
+        )
+        .await
+        .unwrap()
+    );
 
     let visible = sqlx::query_scalar::<_, String>(
         "SELECT id FROM auto_queue_runs WHERE ai_model = 'manual-cli'",

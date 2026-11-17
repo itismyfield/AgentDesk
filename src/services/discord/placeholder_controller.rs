@@ -5,7 +5,7 @@
 //! goes through the same FSM and the same edit-coalescer.
 //!
 //! Lifecycle FSM:
-//!   `NotCreated` → `Queued | Active` → `Completed | TimedOut | Aborted`
+//!   `NotCreated` → `Queued | Active` → `Completed | Aborted`
 //!   `Queued` → `Active` (when a mailbox-queued turn is dispatched)
 //!
 //! Operating rules:
@@ -13,7 +13,7 @@
 //!     Discord message id (1:1).
 //!   - Repeated `ensure_active` / `ensure_queued` calls with identical content
 //!     collapse into a single Discord PATCH (coalescing).
-//!   - Terminal transitions (`Completed` / `TimedOut` / `Aborted`) are
+//!   - Terminal transitions (`Completed` / `Aborted`) are
 //!     idempotent — the second call only emits a trace, never a PATCH.
 //!   - Once a key has reached a terminal state any further `ensure_active` /
 //!     `ensure_queued` calls are no-ops; `placeholder_sweeper` is responsible
@@ -48,11 +48,6 @@ pub(super) enum PlaceholderLifecycle {
     Queued,
     Active,
     Completed,
-    // #3034: documented terminal state (NotCreated → … → Completed|TimedOut|
-    // Aborted) matched throughout the sweeper but not yet transitioned INTO by
-    // any live path. Kept for state-machine completeness.
-    #[allow(dead_code)]
-    TimedOut,
     Aborted,
 }
 
@@ -309,7 +304,7 @@ impl PlaceholderController {
         });
     }
 
-    /// Sweep entries whose state is terminal (Completed/TimedOut/Aborted) or
+    /// Sweep entries whose state is terminal (Completed/Aborted) or
     /// `NotCreated` (initial edit failed; nobody committed) so the map cannot
     /// grow without bound on a long-running process. `Active` entries are
     /// left in place — they own a live Discord card. Uses `try_lock` to avoid
@@ -322,7 +317,6 @@ impl PlaceholderController {
                     guard.state,
                     PlaceholderLifecycle::NotCreated
                         | PlaceholderLifecycle::Completed
-                        | PlaceholderLifecycle::TimedOut
                         | PlaceholderLifecycle::Aborted
                 ) {
                     to_remove.push(kv.key().clone());
@@ -370,6 +364,7 @@ impl PlaceholderController {
             .await
     }
 
+    #[cfg(test)]
     pub(super) async fn ensure_active_incarnation<G: TurnGateway + ?Sized>(
         &self,
         gateway: &G,
@@ -398,9 +393,7 @@ impl PlaceholderController {
         // back into the Active state.
         if matches!(
             guarded.state,
-            PlaceholderLifecycle::Completed
-                | PlaceholderLifecycle::TimedOut
-                | PlaceholderLifecycle::Aborted
+            PlaceholderLifecycle::Completed | PlaceholderLifecycle::Aborted
         ) {
             return PlaceholderControllerOutcome::Rejected;
         }
@@ -492,7 +485,6 @@ impl PlaceholderController {
             guarded.state,
             PlaceholderLifecycle::Active
                 | PlaceholderLifecycle::Completed
-                | PlaceholderLifecycle::TimedOut
                 | PlaceholderLifecycle::Aborted
         ) {
             return PlaceholderControllerOutcome::Rejected;
@@ -552,9 +544,7 @@ impl PlaceholderController {
         debug_assert!(
             matches!(
                 target,
-                PlaceholderLifecycle::Completed
-                    | PlaceholderLifecycle::TimedOut
-                    | PlaceholderLifecycle::Aborted
+                PlaceholderLifecycle::Completed | PlaceholderLifecycle::Aborted
             ),
             "transition() expects a terminal target, got {:?}",
             target
@@ -564,9 +554,7 @@ impl PlaceholderController {
 
         if matches!(
             guarded.state,
-            PlaceholderLifecycle::Completed
-                | PlaceholderLifecycle::TimedOut
-                | PlaceholderLifecycle::Aborted
+            PlaceholderLifecycle::Completed | PlaceholderLifecycle::Aborted
         ) {
             return PlaceholderControllerOutcome::AlreadyTerminal;
         }
@@ -584,7 +572,6 @@ impl PlaceholderController {
 
         let status = match target {
             PlaceholderLifecycle::Completed => MonitorHandoffStatus::Completed,
-            PlaceholderLifecycle::TimedOut => MonitorHandoffStatus::TimedOut,
             PlaceholderLifecycle::Aborted => MonitorHandoffStatus::Aborted,
             other => unreachable!("non-terminal target {:?}", other),
         };

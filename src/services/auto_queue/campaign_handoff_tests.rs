@@ -1,6 +1,7 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::campaigns::CampaignInput;
+use crate::test_support::wait::poll_within;
 
 const REPO: &str = "Owner/Repo";
 
@@ -240,26 +241,20 @@ async fn postgres_card_terminal_hook_hands_off_opted_in_campaigns_pg() {
     fixture.drop().await;
 }
 
-async fn wait_for_lock_waiter(pool: &sqlx::PgPool, query_like: &str) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let waiting: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-                            WHERE datname = current_database() AND wait_event_type = 'Lock'
-                              AND query LIKE $1)",
-        )
-        .bind(query_like)
-        .fetch_one(pool)
-        .await
-        .expect("inspect lock waits");
-        if waiting {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "handoff never waited on {query_like}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+async fn lock_waiter_sample(pool: &sqlx::PgPool, query_like: &str) -> Result<(), String> {
+    let waiting: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                        WHERE datname = current_database() AND wait_event_type = 'Lock'
+                          AND query LIKE $1)",
+    )
+    .bind(query_like)
+    .fetch_one(pool)
+    .await
+    .expect("inspect lock waits");
+    if waiting {
+        Ok(())
+    } else {
+        Err(format!("handoff never waited on {query_like}"))
     }
 }
 
@@ -292,7 +287,13 @@ async fn run_finishing_mid_handoff_gets_no_entry(final_status: &str) {
         .expect("hold run token");
 
     let task = spawn_handoff(&pool, &engine, &campaign);
-    wait_for_lock_waiter(&pool, "%aq_run:%").await;
+    poll_within(
+        async || lock_waiter_sample(&pool, "%aq_run:%").await,
+        std::time::Duration::from_secs(10),
+        "PostgreSQL lock waiter",
+    )
+    .await
+    .unwrap();
     sqlx::query("UPDATE auto_queue_runs SET status = $1, completed_at = NOW() WHERE id = 'live'")
         .bind(final_status)
         .execute(&mut *holder)
@@ -356,7 +357,13 @@ async fn postgres_handoff_does_not_keep_the_token_of_a_run_that_finished_pg() {
         .expect("old holder pid");
 
     let task = spawn_handoff(&pool, &engine, &campaign);
-    wait_for_lock_waiter(&pool, "%aq_run:%").await;
+    poll_within(
+        async || lock_waiter_sample(&pool, "%aq_run:%").await,
+        std::time::Duration::from_secs(10),
+        "PostgreSQL lock waiter",
+    )
+    .await
+    .unwrap();
     sqlx::query(
         "UPDATE auto_queue_runs SET status = 'completed', completed_at = NOW() WHERE id = 'new'",
     )
@@ -437,7 +444,13 @@ async fn postgres_activate_does_not_complete_a_run_the_handoff_is_filling_pg() {
                 .is_ok()
         })
     };
-    wait_for_lock_waiter(&pool, "%aq_run:%").await;
+    poll_within(
+        async || lock_waiter_sample(&pool, "%aq_run:%").await,
+        std::time::Duration::from_secs(10),
+        "PostgreSQL lock waiter",
+    )
+    .await
+    .unwrap();
     appender.commit().await.expect("commit appended entry");
 
     assert!(
@@ -468,7 +481,13 @@ async fn postgres_campaign_handoff_drops_nodes_when_a_newer_save_lands_first_pg(
         .expect("hold handoff lock");
 
     let task = spawn_handoff(&pool, &engine, &campaign);
-    wait_for_lock_waiter(&pool, "%campaign-handoff%").await;
+    poll_within(
+        async || lock_waiter_sample(&pool, "%campaign-handoff%").await,
+        std::time::Duration::from_secs(10),
+        "PostgreSQL lock waiter",
+    )
+    .await
+    .unwrap();
     let mut paused = serde_json::to_value(&campaign).expect("encode");
     paused["status"] = serde_json::json!("paused");
     let paused: CampaignInput = serde_json::from_value(paused).expect("decode");
@@ -585,7 +604,13 @@ async fn postgres_campaign_handoff_waits_behind_a_queue_generated_meanwhile_pg()
         .expect("hold run creation");
 
     let task = spawn_handoff(&pool, &engine, &campaign);
-    wait_for_lock_waiter(&pool, "%aq_run_create%").await;
+    poll_within(
+        async || lock_waiter_sample(&pool, "%aq_run_create%").await,
+        std::time::Duration::from_secs(10),
+        "PostgreSQL lock waiter",
+    )
+    .await
+    .unwrap();
     sqlx::query(
         "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES ('preview', $1, 'agent-x', 'generated')",
     )

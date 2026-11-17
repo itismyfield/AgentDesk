@@ -27,7 +27,10 @@ impl RoutineAgentExecutor {
         let ownership_token = if let Some(receipt) = receipt {
             receipt.to_owned()
         } else {
-            let routine = match store.get_routine(&claimed.routine_id).await {
+            let routine = match store
+                .routine_as_claimed(&claimed.routine_id, &claimed.run_id)
+                .await
+            {
                 Ok(Some(routine)) => routine,
                 Ok(None) => return,
                 Err(error) => {
