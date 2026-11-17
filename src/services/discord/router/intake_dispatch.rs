@@ -440,6 +440,7 @@ pub(crate) async fn admit_text_intake(
     };
 
     let decision = try_route_intake(pool, &ctx).await;
+    crate::logging::intake_timing::mark(crate::logging::intake_timing::Stage::Route);
     crate::services::cluster::intake_routing_telemetry::record_decision(
         mode,
         &channel_id,

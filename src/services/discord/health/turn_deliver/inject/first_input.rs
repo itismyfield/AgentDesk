@@ -111,7 +111,9 @@ impl ChannelMailboxHandle {
         let identity = serde_json::to_value(&key).map_err(|e| e.to_string())?;
         let fallback = identity.clone();
         let mailbox = self.clone();
+        let timing = crate::logging::intake_timing::carry();
         tokio::task::spawn_blocking(move || {
+            let _timing = timing.entered();
             let outcome = (|| {
                 let lease = Arc::new(Mutex::new((permit.consume(&key)?, None::<String>)));
                 let m = mailbox.clone();

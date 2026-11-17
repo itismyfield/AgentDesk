@@ -492,7 +492,9 @@ async fn paste_busy(
         }
     }
     let payload = bodies.join("\n\n");
+    let timing = crate::logging::intake_timing::carry();
     Some(tokio::task::spawn_blocking(move || {
+        let _timing = timing.entered();
         let turn = StreamingTurn {
             pool: pool.as_ref(),
             shared: runtime.as_ref(),
@@ -1456,6 +1458,9 @@ fn take_owned(
         route,
         target::Route::ClaudeBusy | target::Route::CodexBusy | target::Route::CodexHerdrBusy
     );
+    if busy {
+        crate::logging::intake_timing::note_busy();
+    }
     let originals: Vec<_> = front
         .as_ref()
         .map(|claim| {

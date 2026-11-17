@@ -104,6 +104,9 @@ pub(crate) async fn run(
     let completion = outcome.result.unwrap_or_else(Completion::WriteUncertain);
     if let Some(mut proof) = outcome.not_sent {
         let held = matches!(&completion, Completion::Held(_));
+        if !held {
+            crate::logging::intake_timing::not_sent(&format!("{completion:?}"));
+        }
         if held && let Some((channel, probe)) = proof.take_preparation_watch() {
             super::held_watch::arm(channel, probe);
         }
@@ -130,6 +133,11 @@ pub(crate) async fn run(
             owner.settle(&parse(identity)?, delivered, now)
         })
         .await?;
+    crate::logging::intake_timing::settle(match &completion {
+        Completion::Submitted => None,
+        Completion::Failed(_) => Some(crate::logging::intake_timing::Outcome::Failed),
+        _ => Some(crate::logging::intake_timing::Outcome::Uncertain),
+    });
     Ok(match completion {
         Completion::Held(reason) | Completion::NotSent(reason) => {
             Completion::WriteUncertain(format!("unproven: {reason}"))
