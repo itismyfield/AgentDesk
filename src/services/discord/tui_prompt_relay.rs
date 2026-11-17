@@ -40,6 +40,7 @@ use self::hook_observer::{
     HookObserverProbe, hook_observation_target, spawn_tui_prompt_relay_observer_inner,
 };
 
+mod input_notice_memo;
 mod observed_prompt_decision;
 mod scheduled_prompt;
 mod slash_command_output;
@@ -50,10 +51,14 @@ use self::observed_prompt_decision::{
 
 /// Shares the live human-only policy and renderer with transcript projections.
 pub(crate) fn input_notice_content(prompt: &str) -> Option<String> {
-    let decision = relay_observed_prompt_injected_prompt_decision(prompt);
-    (decision.injected_class.is_human_active_turn() && !decision.local_only_slash)
-        .then(|| input_notice_line(prompt))
+    input_notice_memo::content(prompt, |prompt| {
+        let decision = relay_observed_prompt_injected_prompt_decision(prompt);
+        (decision.injected_class.is_human_active_turn() && !decision.local_only_slash)
+            .then(|| input_notice_line(prompt))
+    })
 }
+#[cfg(test)]
+pub(crate) use input_notice_memo::RUNS as INPUT_NOTICE_RUNS;
 
 /// The same notice for a scheduled-task fire the writer read off its own row.
 pub(crate) fn scheduled_input_notice_content(prompt: &str) -> Option<String> {

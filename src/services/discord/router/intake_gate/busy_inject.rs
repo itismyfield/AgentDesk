@@ -102,10 +102,18 @@ pub(in crate::services::discord::router) fn defer_owned_busy_view(
     channel: ChannelId,
     parent: Option<ChannelId>,
 ) -> bool {
-    owned
-        && *provider == ProviderKind::Claude
-        && !crate::config::session_hosts::has_herdr_endpoint(channel.get())
-        && queued_head_covers(channel, parent)
+    !crate::config::session_hosts::has_herdr_endpoint(channel.get())
+        && owned_busy_result(owned, provider, channel, parent)
+}
+
+/// The owner shows a queued Claude input's busy result on either host, so no marker goes first.
+fn owned_busy_result(
+    owned: bool,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    parent: Option<ChannelId>,
+) -> bool {
+    owned && *provider == ProviderKind::Claude && queued_head_covers(channel, parent)
 }
 
 fn confirmed_owner_adoption(result: Result<bool, String>) -> bool {
@@ -137,7 +145,7 @@ pub(super) async fn queue_commit_options(
     super::super::intake_queue_transaction::IntakeQueueCommitOptions {
         defer_pending_reaction: !live.message.author.bot
             && !live.author_is_allowed_automation
-            && defer_owned_busy_view(
+            && owned_busy_result(
                 next_owned_input(&data.shared, live.channel_id).await,
                 &data.provider,
                 live.channel_id,

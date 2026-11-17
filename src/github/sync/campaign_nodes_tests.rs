@@ -1,3 +1,4 @@
+use crate::test_support::wait::poll_within;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -540,27 +541,6 @@ async fn postgres_post_merge_hold_keeps_a_node_open_when_its_issue_closes_pg() {
     fixture.drop().await;
 }
 
-async fn wait_for_row_lock_waiter(pool: &sqlx::PgPool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let waiting: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-             WHERE wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE%')",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        if waiting {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "sync never waited on the row lock"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_issue_sync_and_a_concurrent_put_keep_every_node_change_pg() {
     let fixture = TestPostgresDb::create().await;
@@ -634,7 +614,27 @@ async fn postgres_issue_sync_and_a_concurrent_put_keep_every_node_change_pg() {
         let (pool, github) = (pool.clone(), github.clone());
         tokio::spawn(async move { sync(&pool, &[], &github).await })
     };
-    wait_for_row_lock_waiter(&pool).await;
+    poll_within(
+        async || {
+            let pool = &pool;
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+         WHERE wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE%')",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting {
+                Ok(())
+            } else {
+                Err("sync never waited on the row lock".into())
+            }
+        },
+        std::time::Duration::from_secs(10),
+        "PostgreSQL lock waiter",
+    )
+    .await
+    .unwrap();
     holder.commit().await.unwrap();
     task.await.unwrap();
     let both = campaigns::get(&pool, "locked-put").await.unwrap();

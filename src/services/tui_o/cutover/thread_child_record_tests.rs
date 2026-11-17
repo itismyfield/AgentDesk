@@ -90,6 +90,7 @@ async fn a_reserved_thread_reads_its_parent_once_before_placement_and_holds_on_f
 #[tokio::test]
 async fn a_placement_on_a_reserved_thread_never_routes_before_its_parent_is_read() {
     use crate::services::tui_o::cutover::intake_route::{IntakeRoute, for_input_placement};
+    let _lookups = test_override::force_channel_lookups();
     let boot = boot();
     let child = PARENT + 7;
     boot.reserve_boot_children(&[(child, PARENT)]);

@@ -6,7 +6,7 @@ use crate::services::tui_prompt_dedupe::{self, binding_events};
 
 #[test]
 fn active_herdr_busy_input_rebinds_the_source_after_session_replacement_pg() {
-    for case in ["missing", "old", "foreign", "unknown"] {
+    for case in ["missing", "old", "foreign", "unknown", "prompt"] {
         let fx = Fixture::with_root(
             &format!("busy-active-rebind-{case}"),
             None,
@@ -53,6 +53,16 @@ fn active_herdr_busy_input_rebinds_the_source_after_session_replacement_pg() {
                 &path,
                 &[json!({"type":"permission-mode","sessionId":native})],
             );
+        } else if case == "prompt" {
+            // What Claude writes after a submitted prompt, before the first reply record.
+            let records = [
+                "user",
+                "file-history-snapshot",
+                "last-prompt",
+                "permission-mode",
+            ]
+            .map(|kind| json!({"type":kind,"sessionId":native,"message":{"content":"next"}}));
+            append(&path, &records);
         }
         let heads = Arc::new(Mutex::new(Vec::<Value>::new()));
         let (seen, mailbox, runtime) = (
@@ -148,7 +158,7 @@ fn active_herdr_busy_input_rebinds_the_source_after_session_replacement_pg() {
                     assert_eq!(head["attempt"]["source"]["file"], json!([pin.dev, pin.ino]));
                 }
                 assert!(
-                    crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&path)
+                    crate::services::tui_turn_state::observe_claude_jsonl_running_turn_state(&path)
                         .is_busy()
                 );
             }
