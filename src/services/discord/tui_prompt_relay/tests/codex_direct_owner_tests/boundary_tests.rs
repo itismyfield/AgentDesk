@@ -105,6 +105,19 @@ impl Fixture {
         channel: u64,
         tmux: &str,
         resume: bool,
+        shared: Arc<SharedData>,
+        automatic: bool,
+    ) -> Self {
+        let fixture = Self::prepare_inner(root, channel, tmux, resume, shared, automatic).await;
+        fixture.start_idle_rollout_relay();
+        fixture
+    }
+
+    async fn prepare_inner(
+        root: &Path,
+        channel: u64,
+        tmux: &str,
+        resume: bool,
         mut shared: Arc<SharedData>,
         automatic: bool,
     ) -> Self {
@@ -162,8 +175,6 @@ impl Fixture {
             },
             Some(hook_probe.clone()),
         );
-        super::super::super::CODEX_IDLE_ROLLOUT_RELAY_STARTED.store(false, Ordering::Release);
-        super::super::super::spawn_codex_idle_rollout_relay(shared.clone());
         Self {
             shared,
             http,
@@ -181,6 +192,11 @@ impl Fixture {
             _server: server,
             _registry: registry,
         }
+    }
+
+    fn start_idle_rollout_relay(&self) {
+        super::super::super::CODEX_IDLE_ROLLOUT_RELAY_STARTED.store(false, Ordering::Release);
+        super::super::super::spawn_codex_idle_rollout_relay(self.shared.clone());
     }
 
     /// The Codex UserPromptSubmit hook for `prompt` in native turn `turn`; a steer names the
