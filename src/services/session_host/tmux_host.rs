@@ -64,6 +64,16 @@ impl TmuxHost {
         tmux::pane_current_path(name)
     }
 
+    /// The live pane's cwd within `budget`; a dead, absent or slow pane is `None`.
+    #[cfg(test)]
+    pub(crate) fn pane_cwd_within(
+        &self,
+        name: &str,
+        budget: std::time::Duration,
+    ) -> Option<PathBuf> {
+        tmux::pane_current_path_within(name, budget).map(PathBuf::from)
+    }
+
     pub(crate) fn list_session_names(&self) -> Result<Vec<String>, String> {
         tmux::list_session_names()
     }

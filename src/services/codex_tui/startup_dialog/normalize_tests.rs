@@ -174,6 +174,13 @@ fn real_trust_adapter_bounds_cwd_and_pane_observation() {
         .unwrap();
     assert_eq!(observed.cwd, PathBuf::from("/fixture/cwd"));
     assert_eq!(observed.text, "fresh pane");
+    std::fs::write(&program, "#!/bin/sh\nprintf '1\\n/fixture/cwd\\n'\n").unwrap();
+    assert!(
+        TrustHost
+            .observe("trust-adapter-fixture", Duration::from_secs(4))
+            .is_none(),
+        "a dead pane has no cwd to trust"
+    );
     std::fs::write(&program, "#!/bin/sh\nwhile :; do :; done\n").unwrap();
     let started = std::time::Instant::now();
     assert!(
