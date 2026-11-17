@@ -27,9 +27,10 @@ impl Owner {
         let attempt = &key.attempt;
         (next.admission_binds)
             .retain(|b| !matches!(&b.at, BindAt::Attempt { attempt: a, .. } if a == attempt));
+        // The fingerprint is the digest a receipt carries for the same original.
         let member = |item: &PendingQueueItem| RefusedMember {
             identity: sources::identity(item),
-            fingerprint: source_admission::fingerprint(item),
+            fingerprint: source_admission::digest(&source_admission::canonical(item)),
         };
         next.refused_inputs.push(RefusedInput {
             input: key.clone(),

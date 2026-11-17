@@ -182,11 +182,18 @@ pub(crate) enum RetainedReason {
     },
 }
 
+/// One attempt of one queued unit, as the owner's callers and a refusal's record name it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AttemptRef {
+    pub(crate) identity: QueueIdentity,
+    pub(crate) attempt: AttemptIdentity,
+}
+
 /// What stays of an input the owner refused for good; nothing here can run again.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct RefusedInput {
     /// The refused unit and its one attempt, as its notice and the history name it.
-    pub(crate) input: super::v2::AttemptRef,
+    pub(crate) input: AttemptRef,
     pub(crate) members: Vec<RefusedMember>,
     pub(crate) reason: String,
     pub(crate) notice: NoticeIntent,

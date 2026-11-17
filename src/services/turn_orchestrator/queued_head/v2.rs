@@ -20,7 +20,7 @@ mod retained;
 pub(crate) mod source_admission;
 mod sources;
 pub(crate) mod start_failure;
-pub(crate) use attempt::AttemptRef;
+pub(crate) use super::v2_types::AttemptRef;
 pub(crate) use commit::Fault;
 #[cfg(test)]
 use source_admission::AdmitError;

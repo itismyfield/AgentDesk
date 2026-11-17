@@ -81,7 +81,7 @@ impl Ticket {
 
 /// The original without retry times, diagnostics or queue notice bookkeeping.
 /// Every other field, including one added later, changes what runs and so names another original.
-fn canonical(original: &PendingQueueItem) -> serde_json::Value {
+pub(super) fn canonical(original: &PendingQueueItem) -> serde_json::Value {
     let mut value = serde_json::to_value(original).expect("queue item serializes");
     if let Some(map) = value.as_object_mut() {
         for field in [
@@ -102,12 +102,7 @@ fn canonical(original: &PendingQueueItem) -> serde_json::Value {
     value
 }
 
-/// The digest a receipt carries for `original`, kept for an input whose body is dropped.
-pub(super) fn fingerprint(original: &PendingQueueItem) -> String {
-    digest(&canonical(original))
-}
-
-fn digest(value: &impl serde::Serialize) -> String {
+pub(super) fn digest(value: &impl serde::Serialize) -> String {
     use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(value).expect("queue identity serializes");
     let hash = Sha256::digest(bytes);
