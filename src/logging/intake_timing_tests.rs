@@ -115,8 +115,7 @@ fn one_line_per_message_follows_the_trace_across_tasks_and_threads() {
 #[test]
 fn unseen_stages_print_null_and_partial_coverage_and_no_layer_prints_nothing() {
     let lines = Lines::default();
-    let dispatch = dispatch(&lines, true);
-    tracing::dispatcher::with_default(&dispatch, || {
+    tracing::dispatcher::with_default(&dispatch(&lines, true), || {
         begin(MESSAGE, Instant::now()).in_scope(|| {
             mark(Stage::Route);
             settle(None);

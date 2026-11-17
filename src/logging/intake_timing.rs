@@ -1,10 +1,5 @@
-//! One anonymous `[intake-timing]` line per Discord message: stage offsets from the gateway event,
-//! SQLx statement/acquire counts seen under the message's trace span, and the terminal outcome.
-//!
-//! Observation only. Without the layer installed every call is a no-op. The layer reads only the
-//! numeric `acquired_after_secs` of acquire events and, of query events, whether the statement
-//! summary is a transaction keyword; SQL text, binds, DSN and message/user identifiers never reach
-//! the line. A stage the trace did not see prints `null`, never 0.
+//! One anonymous `[intake-timing]` line per Discord message: stage offsets, SQLx statement and
+//! acquire counts under its trace (never SQL, binds or ids); an unseen stage prints `null`.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;

@@ -246,6 +246,7 @@ fn init_dcserver_tracing_once() -> Result<()> {
     let writer =
         RotatingLogWriter::new(log_path, dcserver_log_max_bytes(), dcserver_log_max_files())?;
 
+    use tracing_subscriber::Layer as _;
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
     // The fmt layer keeps its own filter; the intake timing layer sees only SQLx events under an
