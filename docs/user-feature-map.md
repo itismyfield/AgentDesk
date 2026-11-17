@@ -152,7 +152,7 @@ needs_live: `true`
 - 기존 시험 정의: `scripts/e2e/tui_relay/test_herdr_observe.py::HerdrTextClear.test_clear_completion_shares_the_refusal_boundary`
 - 기존 시험 정의: `src/services/discord/commands/control/clear_end_tests.rs::a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg`
 - 기존 시험 정의: `src/services/discord/commands/control/herdr_recovery_tests.rs::live_clear_forgets_the_retired_selector_pg`
-- 부분 시나리오 `E-50` (needs_live): Claude의 clear 뒤 첫 provider 응답·중복 부재 명세를 참조한다. ack는 wait step이며 clear_ack/fresh-session assertion은 없다. legacy_automation/unspecified이므로 현재 human/tui_o 수기 계약과 source/output이 다르고 세션 identity를 증명하지 않는다.
+- 부분 시나리오 `E-50` (needs_live): Claude TUI·Herdr 칸은 fresh_session_after_clear의 provider_session_changed와 망각 단언을 실제 평가한다. pipe 칸은 기존 전달 검사만 유지한다. !clear 자동 경로이며 실제 Discord slash 상호작용은 별도 Rust action 시험과 배포 뒤 사람의 /clear로 검증한다.
 - 부분 시나리오 `E-51` (needs_live): Codex의 clear 뒤 첫 provider 응답·중복 부재 명세를 참조한다. ack는 wait step이며 clear_ack/fresh-session assertion은 없다. 현재 Claude/human/tui_o 수기 칸과 provider/source/output이 다르며 실제 새 세션 identity를 증명하지 않는다.
 
 | 적용 조합·qualifier/source | 필수 단언 | live 명세 | 상태 |
@@ -194,4 +194,4 @@ needs_live: `true`
 - `state_busy_observed` (#8115 / #8118 / #8120; human): fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가.
 - `surface_thread_observed` (#8115 / #8118 / #8120; human): fresh node/session·실제 endpoint/pane·출력 binding witness가 미구현이다. E-14의 기존 thread 재부착은 대체 불가.
 
-source_hash: `45e824a7d790a8ac6a1095bc51366b3d43100144f4a40921dfe9f3678fd45e0a`
+source_hash: `41a772be2702f049ac652b85746a640cf421177a9d63942679d09f6b9ba5917b`

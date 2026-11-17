@@ -742,6 +742,9 @@ pub(super) fn api_router_with_dashboard_access(
         .with_state(state)
         .layer(axum::Extension(access))
         .layer(tower_http::compression::CompressionLayer::new())
+        .layer(axum::middleware::from_fn(
+            crate::logging::intake_timing::api_trace_middleware,
+        ))
 }
 
 fn compose_api_router(state: AppState) -> ApiRouter {

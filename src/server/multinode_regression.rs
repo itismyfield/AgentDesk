@@ -29,20 +29,16 @@ mod multinode_regression_pg_tests {
     }
 
     impl TestPostgresDb {
-        /// `None` means one thing only: the shared fixture base is unconfigured,
-        /// so there is no server this fixture is entitled to talk to. It never
-        /// means "Postgres answered and failed" — every call below still panics
-        /// on error, so a reachable-but-broken server cannot be laundered into a
-        /// green run. `postgres_test_database_url_base()` additionally panics
-        /// when `AGENTDESK_REQUIRE_PG=1`, so the PG lanes treat a missing base
-        /// as fatal rather than skippable (#4979 S2 contract).
+        /// A missing fixture base fails the test instead of passing silently,
+        /// and every call below panics on error, so a broken server fails too.
         ///
         /// There is deliberately no host fallback. Inventing an address made
         /// this fixture connect to whatever Postgres happened to listen on the
         /// developer's loopback and create/drop databases there (#5218).
-        async fn create() -> Option<Self> {
+        async fn create() -> Self {
             let lifecycle = crate::db::postgres::lock_test_lifecycle();
-            let base = crate::db::postgres::postgres_test_database_url_base()?;
+            let base = crate::db::postgres::postgres_test_database_url_base()
+                .expect("POSTGRES_TEST_DATABASE_URL_BASE required for multinode regression tests"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
             let database_name = format!("agentdesk_multinode_{}", Uuid::new_v4().simple());
             let admin_url = format!("{base}/postgres");
             crate::db::postgres::create_test_database(
@@ -52,12 +48,12 @@ mod multinode_regression_pg_tests {
             )
             .await
             .expect("create multinode regression postgres test database");
-            Some(Self {
+            Self {
                 _lifecycle: lifecycle,
                 admin_url,
                 database_url: format!("{base}/{database_name}"),
                 database_name,
-            })
+            }
         }
 
         async fn connect_and_migrate(&self) -> sqlx::PgPool {
@@ -90,9 +86,7 @@ mod multinode_regression_pg_tests {
 
     #[tokio::test]
     async fn multinode_single_leader_lock_allows_one_holder() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let leader_pool = pg_db.connect_and_migrate().await;
         let worker_pool = pg_db.connect_pool().await;
 
@@ -127,9 +121,7 @@ mod multinode_regression_pg_tests {
 
     #[tokio::test]
     async fn multinode_dispatch_claims_exactly_once_then_reclaims_expired_lease() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool_a = pg_db.connect_and_migrate().await;
         let pool_b = pg_db.connect_pool().await;
         insert_claim_fixture(&pool_a).await;
@@ -242,9 +234,7 @@ mod multinode_regression_pg_tests {
 
     #[tokio::test]
     async fn multinode_dispatch_claims_prefer_label_but_fallback_when_preferred_node_offline() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         sqlx::query("INSERT INTO agents (id, name) VALUES ('agent-1', 'Agent 1')")
@@ -309,9 +299,7 @@ mod multinode_regression_pg_tests {
 
     #[tokio::test]
     async fn multinode_dispatch_claims_route_mixed_required_and_preferred_to_best_online_node() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         sqlx::query("INSERT INTO agents (id, name) VALUES ('agent-1', 'Agent 1')")
@@ -398,9 +386,7 @@ mod multinode_regression_pg_tests {
 
     #[tokio::test]
     async fn multinode_unreal_resource_lock_is_exclusive() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let lock_key = unreal_project_lock_key("CookingHeart");
 

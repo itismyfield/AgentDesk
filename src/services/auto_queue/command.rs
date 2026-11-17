@@ -499,35 +499,32 @@ pub(super) async fn force_pause_with_pg(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::wait::poll_within;
 
-    async fn wait_for_advisory_waiters(
+    async fn advisory_waiters_sample(
         conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
         expected: i64,
-    ) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            sqlx::query("SELECT pg_stat_clear_snapshot()")
-                .execute(&mut **conn)
-                .await
-                .expect("clear advisory-waiter snapshot");
-            let waiting = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*)::BIGINT
-                 FROM pg_stat_activity
-                 WHERE datname = current_database()
-                   AND wait_event_type = 'Lock'
-                   AND query LIKE '%pg_advisory_xact_lock%'",
-            )
-            .fetch_one(&mut **conn)
+    ) -> Result<(), String> {
+        sqlx::query("SELECT pg_stat_clear_snapshot()")
+            .execute(&mut **conn)
             .await
-            .expect("count advisory-lock waiters");
-            if waiting >= expected {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
+            .expect("clear advisory-waiter snapshot");
+        let waiting = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM pg_stat_activity
+             WHERE datname = current_database()
+               AND wait_event_type = 'Lock'
+               AND query LIKE '%pg_advisory_xact_lock%'",
+        )
+        .fetch_one(&mut **conn)
+        .await
+        .expect("count advisory-lock waiters");
+        if waiting >= expected {
+            Ok(())
+        } else {
+            Err(format!(
                 "expected {expected} advisory-lock waiters, observed {waiting}"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            ))
         }
     }
 
@@ -601,7 +598,13 @@ mod tests {
 
         let pause_pool = pool.clone();
         let pause = tokio::spawn(async move { force_pause_with_pg(None, &pause_pool).await });
-        wait_for_advisory_waiters(&mut holder, 1).await;
+        poll_within(
+            async || advisory_waiters_sample(&mut holder, 1).await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
 
         let reopen_pool = pool.clone();
         let reopen = tokio::spawn(async move {
@@ -620,7 +623,13 @@ mod tests {
                 }
             }
         });
-        wait_for_advisory_waiters(&mut holder, 2).await;
+        poll_within(
+            async || advisory_waiters_sample(&mut holder, 2).await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
 
         sqlx::query("COMMIT")
             .execute(&mut *holder)

@@ -248,20 +248,16 @@ mod resource_locks_pg_tests {
     }
 
     impl TestPostgresDb {
-        /// `None` means one thing only: the shared fixture base is unconfigured,
-        /// so there is no server this fixture is entitled to talk to. It never
-        /// means "Postgres answered and failed" — every call below still panics
-        /// on error, so a reachable-but-broken server cannot be laundered into a
-        /// green run. `postgres_test_database_url_base()` additionally panics
-        /// when `AGENTDESK_REQUIRE_PG=1`, so the PG lanes treat a missing base
-        /// as fatal rather than skippable (#4979 S2 contract).
+        /// A missing fixture base fails the test instead of passing silently,
+        /// and every call below panics on error, so a broken server fails too.
         ///
         /// There is deliberately no host fallback. Inventing an address made
         /// this fixture connect to whatever Postgres happened to listen on the
         /// developer's loopback and create/drop databases there (#5218).
-        async fn create() -> Option<Self> {
+        async fn create() -> Self {
             let lifecycle = crate::db::postgres::lock_test_lifecycle();
-            let base = crate::db::postgres::postgres_test_database_url_base()?;
+            let base = crate::db::postgres::postgres_test_database_url_base()
+                .expect("POSTGRES_TEST_DATABASE_URL_BASE required for resource_locks tests"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
             let database_name = format!("agentdesk_resource_locks_{}", Uuid::new_v4().simple());
             let admin_url = format!("{base}/postgres");
             crate::db::postgres::create_test_database(
@@ -271,12 +267,12 @@ mod resource_locks_pg_tests {
             )
             .await
             .expect("create resource_locks postgres test database");
-            Some(Self {
+            Self {
                 _lifecycle: lifecycle,
                 admin_url,
                 database_url: format!("{base}/{database_name}"),
                 database_name,
-            })
+            }
         }
 
         async fn connect_and_migrate(&self) -> sqlx::PgPool {
@@ -301,9 +297,7 @@ mod resource_locks_pg_tests {
 
     #[tokio::test]
     async fn resource_lock_allows_only_one_active_holder() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let lock_key = unreal_project_lock_key("CookingHeart");
 
@@ -365,9 +359,7 @@ mod resource_locks_pg_tests {
 
     #[tokio::test]
     async fn resource_lock_reclaims_expired_holder() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let lock_key = unreal_project_lock_key("CookingHeart");
 

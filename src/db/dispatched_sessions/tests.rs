@@ -3,6 +3,7 @@ use super::{
     fail_force_killed_dispatch_without_retry_pg, prepare_retry_owner_on_pg_tx,
 };
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::test_support::wait::poll_within;
 use sqlx::{PgPool, Row};
 
 fn dispatch_observability_count(dispatch_id: &str, event_type: &str) -> usize {
@@ -356,13 +357,48 @@ async fn concurrent_retries_for_one_origin_create_exactly_one_replacement_pg() {
         let meta = retry_meta(card_id.clone(), origin_id.clone());
         async move { create_retry_dispatch_pg(&pool, &meta).await }
     });
-    wait_until_retry_blocks_on_origin(&pool).await;
+    poll_within(
+        async || retry_origin_waiter_sample(&pool).await,
+        std::time::Duration::from_secs(2),
+        "PostgreSQL lock waiter",
+    )
+    .await
+    .unwrap();
     let right = tokio::spawn({
         let pool = pool.clone();
         let meta = retry_meta(card_id.clone(), origin_id.clone());
         async move { create_retry_dispatch_pg(&pool, &meta).await }
     });
-    wait_until_retry_blocks_on_retry_token(&pool).await;
+    poll_within(
+        async || {
+            let pool = &pool;
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+             SELECT 1
+             FROM pg_stat_activity a
+             JOIN pg_locks l ON l.pid = a.pid
+             WHERE a.datname = current_database()
+               AND a.pid <> pg_backend_pid()
+               AND a.wait_event_type = 'Lock'
+               AND a.query LIKE 'SELECT pg_advisory_xact_lock%aq_retry%'
+               AND l.locktype = 'advisory'
+               AND NOT l.granted
+         )",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("inspect contended retry token");
+            if blocked {
+                Ok(())
+            } else {
+                Err("second retry did not contend on the origin retry token".into())
+            }
+        },
+        std::time::Duration::from_secs(2),
+        "PostgreSQL lock waiter",
+    )
+    .await
+    .unwrap();
     origin_blocker
         .commit()
         .await
@@ -502,52 +538,24 @@ async fn cancel_first_rejects_retry_and_retry_without_flag_preserves_finalizatio
     finish(database, pool).await;
 }
 
-async fn wait_until_retry_blocks_on_origin(pool: &PgPool) {
-    for _ in 0..100 {
-        let blocked: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                 SELECT 1 FROM pg_stat_activity
-                 WHERE datname = current_database()
-                   AND pid <> pg_backend_pid()
-                   AND wait_event_type = 'Lock'
-                   AND query LIKE 'UPDATE task_dispatches%'
-             )",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("inspect blocked retry");
-        if blocked {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+async fn retry_origin_waiter_sample(pool: &PgPool) -> Result<(), String> {
+    let blocked: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+             WHERE datname = current_database()
+               AND pid <> pg_backend_pid()
+               AND wait_event_type = 'Lock'
+               AND query LIKE 'UPDATE task_dispatches%'
+         )",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("inspect blocked retry");
+    if blocked {
+        Ok(())
+    } else {
+        Err("retry did not block on the origin dispatch row".into())
     }
-    panic!("retry did not block on the origin dispatch row");
-}
-
-async fn wait_until_retry_blocks_on_retry_token(pool: &PgPool) {
-    for _ in 0..100 {
-        let blocked: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                 SELECT 1
-                 FROM pg_stat_activity a
-                 JOIN pg_locks l ON l.pid = a.pid
-                 WHERE a.datname = current_database()
-                   AND a.pid <> pg_backend_pid()
-                   AND a.wait_event_type = 'Lock'
-                   AND a.query LIKE 'SELECT pg_advisory_xact_lock%aq_retry%'
-                   AND l.locktype = 'advisory'
-                   AND NOT l.granted
-             )",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("inspect contended retry token");
-        if blocked {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    panic!("second retry did not contend on the origin retry token");
 }
 
 #[tokio::test]
@@ -580,7 +588,13 @@ async fn zero_owner_revalidation_aborts_on_new_visible_ownership_without_late_ru
         let meta = retry_meta(card_id.clone(), origin_id.clone());
         async move { create_retry_dispatch_pg(&pool, &meta).await }
     });
-    wait_until_retry_blocks_on_origin(&pool).await;
+    poll_within(
+        async || retry_origin_waiter_sample(&pool).await,
+        std::time::Duration::from_secs(2),
+        "PostgreSQL lock waiter",
+    )
+    .await
+    .unwrap();
     sqlx::query(
         "INSERT INTO auto_queue_entry_dispatch_history (entry_id, dispatch_id, trigger_source)
          VALUES ($1, $2, 'late_retry_test')",

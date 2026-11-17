@@ -757,6 +757,8 @@ mod tests {
         let collect_count = Arc::new(AtomicUsize::new(0));
         let now = chrono::Utc::now();
 
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let first_count = Arc::clone(&collect_count);
         let first = collect_token_analytics_with_lock_using(
             &period,
@@ -766,10 +768,20 @@ mod tests {
             false,
             move |_start, _now, _label, period| {
                 first_count.fetch_add(1, Ordering::SeqCst);
-                std::thread::sleep(StdDuration::from_millis(50));
+                started_tx.send(()).expect("collect started");
+                crate::test_support::wait::recv_within(
+                    &release_rx,
+                    crate::test_support::wait::WAIT_CAP,
+                );
                 empty_token_analytics_data(&period)
             },
         );
+
+        tokio::pin!(first);
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        crate::test_support::wait::await_within(started_rx, crate::test_support::wait::WAIT_CAP)
+            .await
+            .expect("collect started");
 
         let second_count = Arc::clone(&collect_count);
         let second = collect_token_analytics_with_lock_using(
@@ -784,6 +796,22 @@ mod tests {
             },
         );
 
+        tokio::pin!(second);
+        assert!(futures::poll!(second.as_mut()).is_pending());
+        assert!(
+            crate::test_support::wait::poll_within(
+                async || futures::poll!(second.as_mut())
+                    .is_ready()
+                    .then_some(())
+                    .ok_or_else(|| "request remains behind the blocked collector".into()),
+                StdDuration::from_millis(50),
+                "request must wait for the first collector",
+            )
+            .await
+            .is_err(),
+            "request finished before the first collector was released"
+        );
+        release_tx.send(()).expect("release first collect");
         let (first_result, second_result) = tokio::join!(first, second);
 
         assert_eq!(
@@ -843,18 +871,17 @@ mod tests {
         assert!(matches!(first.await, Err(error) if error.is_cancelled()));
         release.send(()).expect("release collect");
 
-        let mut cached = false;
-        for _ in 0..500 {
-            if read_cached_token_analytics(&period).is_some() {
-                cached = true;
-                break;
-            }
-            tokio::time::sleep(StdDuration::from_millis(10)).await;
-        }
-        assert!(
-            cached,
-            "the aborted request's scan must still write the cache"
-        );
+        crate::test_support::wait::poll_within(
+            async || {
+                read_cached_token_analytics(&period)
+                    .map(|_| ())
+                    .ok_or_else(|| "the aborted request's scan must still write the cache".into())
+            },
+            StdDuration::from_secs(5),
+            "the aborted request's scan must still write the cache",
+        )
+        .await
+        .expect("the aborted request's scan must still write the cache");
 
         let again = collect_token_analytics_with_lock_using(
             &period,
@@ -882,7 +909,7 @@ mod tests {
 
         let second_count = Arc::clone(&collect_count);
         let second_period = period.clone();
-        let second = tokio::spawn(async move {
+        let second = async move {
             collect_token_analytics_with_lock_using(
                 &second_period,
                 1,
@@ -895,14 +922,27 @@ mod tests {
                 },
             )
             .await
-        });
-        tokio::time::sleep(StdDuration::from_millis(50)).await;
+        };
+        tokio::pin!(second);
+        assert!(futures::poll!(second.as_mut()).is_pending());
+        assert!(
+            crate::test_support::wait::poll_within(
+                async || futures::poll!(second.as_mut())
+                    .is_ready()
+                    .then_some(())
+                    .ok_or_else(|| "request remains behind the blocked collector".into()),
+                StdDuration::from_millis(50),
+                "request must wait for the first collector",
+            )
+            .await
+            .is_err(),
+            "request finished before the first collector was released"
+        );
         release.send(()).expect("release collect");
 
         let second = tokio::time::timeout(StdDuration::from_secs(5), second)
             .await
             .expect("second request finishes")
-            .expect("second task")
             .expect("second result");
         assert_eq!(collect_count.load(Ordering::SeqCst), 1);
         assert_eq!(second.cache_state, CacheState::Hit);
@@ -962,7 +1002,6 @@ mod tests {
 
     fn counting_receipt_collect(
         count: &Arc<AtomicUsize>,
-        delay: StdDuration,
     ) -> impl FnOnce(
         chrono::DateTime<chrono::Utc>,
         chrono::DateTime<chrono::Utc>,
@@ -973,7 +1012,6 @@ mod tests {
         let count = Arc::clone(count);
         move |_start, _now, label| {
             count.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(delay);
             empty_receipt_data(label)
         }
     }
@@ -985,22 +1023,53 @@ mod tests {
         let now = chrono::Utc::now();
         let collect_count = Arc::new(AtomicUsize::new(0));
 
-        let (first, second) = tokio::join!(
-            cached_or_collect_receipt_using(
-                period,
-                start,
-                now,
-                "This Month",
-                counting_receipt_collect(&collect_count, StdDuration::from_millis(50)),
-            ),
-            cached_or_collect_receipt_using(
-                period,
-                start,
-                now,
-                "This Month",
-                counting_receipt_collect(&collect_count, StdDuration::ZERO),
-            ),
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let count = Arc::clone(&collect_count);
+        let first = cached_or_collect_receipt_using(
+            period,
+            start,
+            now,
+            "This Month",
+            move |_, _, label| {
+                count.fetch_add(1, Ordering::SeqCst);
+                started_tx.send(()).expect("collect started");
+                crate::test_support::wait::recv_within(
+                    &release_rx,
+                    crate::test_support::wait::WAIT_CAP,
+                );
+                empty_receipt_data(label)
+            },
         );
+        tokio::pin!(first);
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        crate::test_support::wait::await_within(started_rx, crate::test_support::wait::WAIT_CAP)
+            .await
+            .expect("collect started");
+        let second = cached_or_collect_receipt_using(
+            period,
+            start,
+            now,
+            "This Month",
+            counting_receipt_collect(&collect_count),
+        );
+        tokio::pin!(second);
+        assert!(futures::poll!(second.as_mut()).is_pending());
+        assert!(
+            crate::test_support::wait::poll_within(
+                async || futures::poll!(second.as_mut())
+                    .is_ready()
+                    .then_some(())
+                    .ok_or_else(|| "request remains behind the blocked collector".into()),
+                StdDuration::from_millis(50),
+                "request must wait for the first collector",
+            )
+            .await
+            .is_err(),
+            "request finished before the first collector was released"
+        );
+        release_tx.send(()).expect("release first collect");
+        let (first, second) = tokio::join!(first, second);
 
         assert_eq!(collect_count.load(Ordering::SeqCst), 1);
         let states = [first.expect("first").1, second.expect("second").1];
@@ -1033,25 +1102,26 @@ mod tests {
         release_tx.send(()).expect("release collect");
 
         let window = receipt_window(start);
-        let mut cached = false;
-        for _ in 0..500 {
-            if read_cached_receipt(period, window).is_some() {
-                cached = true;
-                break;
-            }
-            tokio::time::sleep(StdDuration::from_millis(10)).await;
-        }
-        assert!(
-            cached,
-            "the aborted request's collect must still write the cache"
-        );
+        crate::test_support::wait::poll_within(
+            async || {
+                read_cached_receipt(period, window)
+                    .map(|_| ())
+                    .ok_or_else(|| {
+                        "the aborted request's collect must still write the cache".into()
+                    })
+            },
+            StdDuration::from_secs(5),
+            "the aborted request's collect must still write the cache",
+        )
+        .await
+        .expect("the aborted request's collect must still write the cache");
 
         let (_, state) = cached_or_collect_receipt_using(
             period,
             start,
             chrono::Utc::now(),
             "This Week",
-            counting_receipt_collect(&collect_count, StdDuration::ZERO),
+            counting_receipt_collect(&collect_count),
         )
         .await
         .expect("second result");
@@ -1073,7 +1143,7 @@ mod tests {
                 window_start,
                 now,
                 period_id,
-                counting_receipt_collect(&collect_count, StdDuration::ZERO),
+                counting_receipt_collect(&collect_count),
             )
             .await
             .expect("receipt result");
@@ -1126,22 +1196,24 @@ mod tests {
             start,
             now,
             "fresh",
-            counting_receipt_collect(&collect_count, StdDuration::ZERO),
+            counting_receipt_collect(&collect_count),
         )
         .await
         .expect("second stale result");
         assert_eq!(again, CacheState::Stale);
 
         release_tx.send(()).expect("release refresh");
-        let mut refreshed = None;
-        for _ in 0..500 {
-            if let Some((data, true)) = read_cached_receipt(period, window) {
-                refreshed = Some(data);
-                break;
-            }
-            tokio::time::sleep(StdDuration::from_millis(10)).await;
-        }
-        assert_eq!(refreshed.expect("refreshed entry").period_label, "fresh");
+        let refreshed = crate::test_support::wait::poll_within(
+            async || match read_cached_receipt(period, window) {
+                Some((data, true)) => Ok(data),
+                _ => Err("refreshed entry is not yet fresh".into()),
+            },
+            StdDuration::from_secs(5),
+            "refreshed entry",
+        )
+        .await
+        .expect("refreshed entry");
+        assert_eq!(refreshed.period_label, "fresh");
         assert_eq!(collect_count.load(Ordering::SeqCst), 1);
     }
 
@@ -1197,15 +1269,17 @@ mod tests {
         assert_eq!(second.cache_state, CacheState::Stale);
 
         release_tx.send(()).expect("release refresh");
-        let mut refreshed = None;
-        for _ in 0..500 {
-            if let Some((data, true)) = read_cached_token_analytics(&period) {
-                refreshed = Some(data);
-                break;
-            }
-            tokio::time::sleep(StdDuration::from_millis(10)).await;
-        }
-        assert_eq!(refreshed.expect("refreshed entry").generated_at, "fresh");
+        let refreshed = crate::test_support::wait::poll_within(
+            async || match read_cached_token_analytics(&period) {
+                Some((data, true)) => Ok(data),
+                _ => Err("refreshed entry is not yet fresh".into()),
+            },
+            StdDuration::from_secs(5),
+            "refreshed entry",
+        )
+        .await
+        .expect("refreshed entry");
+        assert_eq!(refreshed.generated_at, "fresh");
         assert_eq!(collect_count.load(Ordering::SeqCst), 1);
     }
 
@@ -1269,6 +1343,8 @@ mod tests {
         let collect_count = Arc::new(AtomicUsize::new(0));
         let now = chrono::Utc::now();
 
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let first_count = Arc::clone(&collect_count);
         let normal_miss = collect_token_analytics_with_lock_using(
             &period,
@@ -1278,12 +1354,22 @@ mod tests {
             false,
             move |_start, _now, _label, period| {
                 first_count.fetch_add(1, Ordering::SeqCst);
-                std::thread::sleep(StdDuration::from_millis(50));
+                started_tx.send(()).expect("collect started");
+                crate::test_support::wait::recv_within(
+                    &release_rx,
+                    crate::test_support::wait::WAIT_CAP,
+                );
                 let mut data = empty_token_analytics_data(&period);
                 data.generated_at = "normal-miss".to_string();
                 data
             },
         );
+
+        tokio::pin!(normal_miss);
+        assert!(futures::poll!(normal_miss.as_mut()).is_pending());
+        crate::test_support::wait::await_within(started_rx, crate::test_support::wait::WAIT_CAP)
+            .await
+            .expect("collect started");
 
         let refresh_count = Arc::clone(&collect_count);
         let manual_refresh = collect_token_analytics_with_lock_using(
@@ -1300,6 +1386,22 @@ mod tests {
             },
         );
 
+        tokio::pin!(manual_refresh);
+        assert!(futures::poll!(manual_refresh.as_mut()).is_pending());
+        assert!(
+            crate::test_support::wait::poll_within(
+                async || futures::poll!(manual_refresh.as_mut())
+                    .is_ready()
+                    .then_some(())
+                    .ok_or_else(|| "request remains behind the blocked collector".into()),
+                StdDuration::from_millis(50),
+                "request must wait for the first collector",
+            )
+            .await
+            .is_err(),
+            "request finished before the first collector was released"
+        );
+        release_tx.send(()).expect("release first collect");
         let (normal_result, refresh_result) = tokio::join!(normal_miss, manual_refresh);
 
         assert_eq!(
@@ -1323,6 +1425,8 @@ mod tests {
         let collect_count = Arc::new(AtomicUsize::new(0));
         let now = chrono::Utc::now();
 
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let first_count = Arc::clone(&collect_count);
         let first = collect_token_analytics_with_lock_using(
             &period,
@@ -1332,10 +1436,20 @@ mod tests {
             true,
             move |_start, _now, _label, period| {
                 first_count.fetch_add(1, Ordering::SeqCst);
-                std::thread::sleep(StdDuration::from_millis(50));
+                started_tx.send(()).expect("collect started");
+                crate::test_support::wait::recv_within(
+                    &release_rx,
+                    crate::test_support::wait::WAIT_CAP,
+                );
                 empty_token_analytics_data(&period)
             },
         );
+
+        tokio::pin!(first);
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        crate::test_support::wait::await_within(started_rx, crate::test_support::wait::WAIT_CAP)
+            .await
+            .expect("collect started");
 
         let second_count = Arc::clone(&collect_count);
         let second = collect_token_analytics_with_lock_using(
@@ -1350,6 +1464,22 @@ mod tests {
             },
         );
 
+        tokio::pin!(second);
+        assert!(futures::poll!(second.as_mut()).is_pending());
+        assert!(
+            crate::test_support::wait::poll_within(
+                async || futures::poll!(second.as_mut())
+                    .is_ready()
+                    .then_some(())
+                    .ok_or_else(|| "request remains behind the blocked collector".into()),
+                StdDuration::from_millis(50),
+                "request must wait for the first collector",
+            )
+            .await
+            .is_err(),
+            "request finished before the first collector was released"
+        );
+        release_tx.send(()).expect("release first collect");
         let (first_result, second_result) = tokio::join!(first, second);
 
         assert_eq!(

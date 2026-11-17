@@ -1,6 +1,7 @@
 """Supported assertion operations and their accepted option names."""
 
 ASSERTION_OPTIONS = {
+    "provider_session_changed": {"before", "after"},
     **{k: None for k in ("text_present", "provider_text_present", "raw_text_present", "no_duplicate_marker", "ordered_text_present",
                          "no_duplicate_content", "no_resume_prompt_chrome", "no_suppressed_label_chrome",
                          "no_control_chars", "body_not_overwritten", "fixture_followup_ready",
@@ -17,4 +18,8 @@ ASSERTION_OPTIONS = {
     "deliver_result": {"delivery", "inject_veto"}, "completion_per_turn": {"exact", "marker"},
     "turn_summary_after_body": {"body_marker", "header", "before_marker", "tool_label", "output_owner"}, "autonomous_background_turn": {"armed_marker", "auto_marker"},
     "utf16_chunk_integrity": {"max_units", "min_chunks"},
+    # Discord reaction and session-host surfaces; option values are checked by surface_assertions.validate.
+    "reaction_history": {"send", "final", "forbid", "max_gap_s"}, "busy_injection_within": {"send", "max_seconds", "before_marker"},
+    "thread_session_started": None, "session_host": {"expect"},
+    "no_unexpected_operational_alerts": {"allow"},
 }

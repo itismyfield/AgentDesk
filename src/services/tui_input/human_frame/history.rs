@@ -9,12 +9,19 @@ mod checked_tests;
 mod compat;
 #[cfg(test)]
 mod compat_tests;
+// The classification memo keys on this history's state; Unix stamps alone can vouch for it.
+#[cfg(all(test, unix))]
+mod input_notice_memo_tests;
 #[cfg(unix)]
 pub(crate) mod native_row;
 pub(crate) mod notice_owner;
 mod screen;
 #[cfg(test)]
 mod screen_tests;
+mod stamped;
+#[cfg(test)]
+pub(crate) use stamped::READS as HISTORY_READS;
+pub(crate) use stamped::Token as KnownToken;
 pub(crate) mod v2;
 
 const CAPACITY: usize = 4096;
@@ -119,20 +126,20 @@ fn read(path: &Path) -> Result<Store, String> {
 }
 
 /// What a non-scoped reader matches against: the V1 store, or a V2 history's owned entries.
-fn readable(path: &Path) -> Result<Store, String> {
+fn readable(path: &Path) -> Result<std::sync::Arc<Store>, String> {
     if let Some(store) = v2::unscoped_store(path)? {
         return Ok(store);
     }
-    read(path)
+    read(path).map(std::sync::Arc::new)
 }
 
 /// What the V1 append readers match against: the V1 store, or a V2 history's owned entries when
 /// it holds any migrated append entry.
-fn readable_append(path: &Path) -> Result<Store, String> {
+fn readable_append(path: &Path) -> Result<std::sync::Arc<Store>, String> {
     if let Some(store) = v2::append_store(path)? {
         return Ok(store);
     }
-    read(path)
+    read(path).map(std::sync::Arc::new)
 }
 
 /// A V1 append mutation: on the V1 store, or on a V2 history's migrated append entries.
@@ -182,7 +189,9 @@ fn update<T>(apply: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, S
     let mut store = read(&path)?;
     let result = apply(&mut store)?;
     let raw = serde_json::to_string(&store).map_err(|error| error.to_string())?;
-    crate::services::discord::runtime_store::atomic_write(&path, &raw)?;
+    let written = crate::services::discord::runtime_store::atomic_write(&path, &raw);
+    stamped::published();
+    written?;
     crate::domain::file_sync::fsync_parent_dir(&path).map_err(|error| error.to_string())?;
     Ok(result)
 }
@@ -351,6 +360,11 @@ pub(crate) fn allows_legacy(id: &str, transcript: &Path) -> bool {
             .iter()
             .any(|entry| entry.id == id && entry.path == transcript)
     })
+}
+
+/// The injection history state [`known`] answers from; `None` when it cannot vouch for one.
+pub(crate) fn known_token() -> Option<KnownToken> {
+    stamped::token(&path().ok()?)
 }
 
 pub(crate) fn known(frame: &str) -> bool {

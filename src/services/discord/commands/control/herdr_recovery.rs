@@ -118,15 +118,62 @@ pub(super) async fn clear(
                 record,
             )
             .await;
-            super::clear_teardown::note_retired_selector(cleared, report);
-            native::clear_session_memory(shared, channel).await;
-            native::clear_process_reset_pending(shared, channel).await;
-            super::clear_teardown::write_boundary(shared, channel, report).await;
+            if super::clear_teardown::note_retired_selector(cleared, report) {
+                commit_conversation_reset(shared, channel, report).await;
+            }
         } else {
             report.execution = Some(ExecutionCleanup::Pending(
                 "execution changed after cleanup".into(),
             ));
             return true;
+        }
+    }
+    if result != Recovery::Retired {
+        // Recovery may have retired this execution without finishing cleanup; never fence a successor.
+        let current = hosted_execution::load_hosted_execution_pg(
+            pool,
+            HostedLookupKey::Canonical {
+                provider: provider.as_str(),
+                identity: CanonicalSessionIdentity {
+                    kind: SessionIdentityKind::DiscordChannel,
+                    discord_token_hash: &shared.token_hash,
+                    channel_id: &key,
+                },
+            },
+        )
+        .await;
+        let exact = match current {
+            HostedLookup::Found(current) if current.session_id() == row.session_id() => {
+                match current.record {
+                    HostedRecord::Known(current)
+                        if current.execution_nonce == record.execution_nonce
+                            && current.owner == record.owner =>
+                    {
+                        Some(current)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let fenced = match exact {
+            Some(current) => {
+                crate::db::dispatched_sessions::provider_resume_fence::set_for_execution_pg(
+                    pool,
+                    row.session_id(),
+                    &current,
+                )
+                .await
+            }
+            None => Ok(false),
+        };
+        match fenced {
+            Ok(true) => {
+                report.conversation_reset = true;
+                commit_conversation_reset(shared, channel, report).await;
+            }
+            Ok(false) => report.fail("provider_resume_fence", "clear execution row moved on"),
+            Err(error) => report.fail("provider_resume_fence", &error),
         }
     }
     report.execution = Some(match result {
@@ -135,6 +182,16 @@ pub(super) async fn clear(
         Recovery::Retired => ExecutionCleanup::Retired,
     });
     true
+}
+
+async fn commit_conversation_reset(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    report: &mut ClearReport,
+) {
+    native::clear_session_memory(shared, channel).await;
+    native::clear_process_reset_pending(shared, channel).await;
+    super::clear_teardown::write_boundary(shared, channel, report).await;
 }
 
 async fn original_execution(

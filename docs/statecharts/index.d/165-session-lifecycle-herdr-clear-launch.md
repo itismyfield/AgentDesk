@@ -1,0 +1,2 @@
+key: 165-session-lifecycle-herdr-clear-launch
+| `session-lifecycle` (Herdr clear provider selection, #8208) | `2f32ed6e23` + adopted one-shot token design | Before clears resume the old journal source and may rewrite the selector; NoRelease, ReleaseWithoutToken and FilterAfterJudge are RED | Ten configs / twenty TLC runs: nullable token fence, verified CAS release, second restart, session rollover and new-clear race checked; fixed model passes, production validation remains separate. [Report](session-lifecycle/herdr-clear-launch.report.md). |
