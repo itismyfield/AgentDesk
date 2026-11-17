@@ -50,7 +50,7 @@ async fn migration_keeps_existing_rows_unfenced_pg() {
         .await
         .unwrap();
     sqlx::raw_sql(include_str!(
-        "../../../../migrations/postgres/0191_provider_resume_fence.sql"
+        "../../../../migrations/postgres/0194_provider_resume_fence.sql"
     ))
     .execute(&pool)
     .await
