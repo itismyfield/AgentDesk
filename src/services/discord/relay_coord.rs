@@ -1,9 +1,8 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use poise::serenity_prelude::ChannelId;
 
-use super::{DeliveryLeaseCell, relay_health};
+use crate::services::engine_runtime::relay_state::coord::RelayState;
 
 /// Per-channel coordination for watcher-to-Discord relay emission.
 ///
@@ -12,76 +11,131 @@ use super::{DeliveryLeaseCell, relay_health};
 /// Scope: intra-process only; restart-persistent dedupe remains in
 /// `InflightTurnState::last_watcher_relayed_offset`.
 pub(in crate::services) struct TmuxRelayCoord {
-    /// Non-zero while some watcher instance is actively emitting a relay for
-    /// this channel. Holds the `data_start_offset` of the in-progress emission.
-    /// Acquired via `compare_exchange(0, offset)` — only one watcher can
-    /// hold the slot, so concurrent attempts from outgoing+incoming watchers
-    /// serialize rather than double-fire.
-    pub(in crate::services::discord) relay_slot: Arc<std::sync::atomic::AtomicU64>,
-    /// Cooperative replacement state; never a receipt or shared-frontier writer.
+    relay: RelayState,
+    /// Cooperative replacement custody stays with the Discord wrapper.
     #[cfg(unix)]
     pub(in crate::services::discord) cancel_handoffs:
         super::tmux::tmux_watcher::cancel_handoff::Store,
-    /// End offset (exclusive) of the last relay this process has confirmed
-    /// delivery for; 0 = none yet this process lifetime (#3017).
-    ///
-    /// The single output-offset authority for relay-dedup: read via
-    /// `SharedData::committed_relay_offset`, advanced by
-    /// `advance_watcher_confirmed_end`. For inflight-less turns
-    /// (wake/idle-background/monitor-auto), secondary relay actors consult
-    /// this watermark so an already-committed byte-range relays exactly once
-    /// regardless of observer order (E-13). For a normal Discord-origin turn
-    /// the watcher remains sole relay owner.
-    pub(in crate::services::discord) confirmed_end_offset: Arc<std::sync::atomic::AtomicU64>,
-    pub(in crate::services::discord) reset_state:
-        std::sync::Mutex<relay_health::FrontierResetState>,
-    /// Wall-clock timestamp (ms since epoch) of the most recent confirmed
-    /// relay. 0 = no confirmed relay observed yet. Read by the
-    /// `watcher-state` observability endpoint (#964). Monotonic is NOT
-    /// required — this is a telemetry field only.
-    pub(in crate::services::discord) last_relay_ts_ms: Arc<std::sync::atomic::AtomicI64>,
-    /// Number of watcher reattach/reconnect spawns observed for this channel
-    /// in the current dcserver process. Exposed through watcher-state (#964).
-    pub(in crate::services::discord) reconnect_count: Arc<std::sync::atomic::AtomicU64>,
-    /// `.generation` marker file mtime (ns since epoch) snapshotted the last
-    /// time `confirmed_end_offset` was advanced; 0 = never observed.
-    ///
-    /// `reset_stale_relay_watermark_if_output_regressed` (#1270) uses this to
-    /// tell apart two output-regression scenarios identical at the byte
-    /// level: mid-flight rotation (same `.generation` mtime — pin watermark
-    /// to current EOF) vs. cancel→respawn (`.generation` deleted and
-    /// recreated — new mtime, reset watermark to 0). `.generation` works as
-    /// the wrapper-identity signal because it is written once per spawn and
-    /// never touched by the live wrapper: its mtime survives jsonl rotation
-    /// but flips on a fresh spawn.
-    pub(in crate::services::discord) confirmed_end_generation_mtime_ns:
-        Arc<std::sync::atomic::AtomicI64>,
-    /// The live per-channel delivery lease (#3041 P1-1), added alongside
-    /// `relay_slot` (not yet removed — guard migration is a later step). The
-    /// watcher acquires this before delivering the terminal response and
-    /// commits it after; the commit advances `confirmed_end_offset`
-    /// (replacing the watcher's inline advance). Shared via `Arc` across all
-    /// watcher instances so a replacement watcher observes a live holder's
-    /// lease and skips the duplicate send (§5.2 B2).
-    pub(in crate::services::discord) delivery_lease: Arc<DeliveryLeaseCell>,
 }
 
 impl TmuxRelayCoord {
     pub(in crate::services::discord) fn new(channel_id: ChannelId) -> Self {
+        let relay_slot = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        #[cfg(unix)]
+        let cancel_handoffs = Default::default();
+        let relay = RelayState::new(channel_id, relay_slot);
         Self {
-            relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            relay,
             #[cfg(unix)]
-            cancel_handoffs: Default::default(),
-            confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            reset_state: std::sync::Mutex::new(relay_health::FrontierResetState::default()),
-            last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-            reconnect_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            confirmed_end_generation_mtime_ns: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-            delivery_lease: Arc::new(DeliveryLeaseCell::new(channel_id)),
+            cancel_handoffs,
         }
     }
+}
 
-    pub(in crate::services::discord) fn note_relay_progress_heartbeat(&self, now_ms: i64) {
-        self.last_relay_ts_ms.store(now_ms, Ordering::Release);
+impl std::ops::Deref for TmuxRelayCoord {
+    type Target = RelayState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.relay
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::engine_runtime::relay_state::coord::RelayState;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn mixed_coord_exposes_the_same_relay_state_and_atomics() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(819_202);
+        let coord = shared.tmux_relay_coord(channel);
+        let state: &RelayState = coord.as_ref();
+        assert!(std::ptr::eq(state, &coord.relay));
+        assert!(Arc::ptr_eq(&state.relay_slot, &coord.relay_slot));
+        assert!(Arc::ptr_eq(
+            &state.confirmed_end_offset,
+            &coord.confirmed_end_offset
+        ));
+        assert!(std::ptr::eq(&state.reset_state, &coord.reset_state));
+        assert!(Arc::ptr_eq(
+            &state.last_relay_ts_ms,
+            &coord.last_relay_ts_ms
+        ));
+        assert!(Arc::ptr_eq(&state.reconnect_count, &coord.reconnect_count));
+        assert!(Arc::ptr_eq(
+            &state.confirmed_end_generation_mtime_ns,
+            &coord.confirmed_end_generation_mtime_ns,
+        ));
+        assert!(Arc::ptr_eq(&state.delivery_lease, &coord.delivery_lease));
+        assert_eq!(state.relay_slot.load(Ordering::Acquire), 0);
+        assert_eq!(state.confirmed_end_offset.load(Ordering::Acquire), 0);
+        assert_eq!(state.last_relay_ts_ms.load(Ordering::Acquire), 0);
+        assert_eq!(state.reconnect_count.load(Ordering::Acquire), 0);
+        assert_eq!(
+            state
+                .confirmed_end_generation_mtime_ns
+                .load(Ordering::Acquire),
+            0
+        );
+        assert!(matches!(
+            state.delivery_lease.read(),
+            crate::services::engine_runtime::lease::LeaseSnapshot::Unleased,
+        ));
+        assert!(
+            coord
+                .relay_slot
+                .compare_exchange(0, 17, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        );
+        assert!(
+            state
+                .relay_slot
+                .compare_exchange(0, 18, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        );
+        coord.note_relay_progress_heartbeat(123);
+        assert_eq!(state.last_relay_ts_ms.load(Ordering::Acquire), 123);
+        let again = shared.tmux_relay_coord(channel);
+        assert!(Arc::ptr_eq(&coord, &again));
+        assert!(std::ptr::eq(&coord.relay, &again.relay));
+        assert_eq!(again.relay_slot.load(Ordering::Acquire), 17);
+        let other = shared.tmux_relay_coord(ChannelId::new(819_203));
+        assert!(!Arc::ptr_eq(&state.delivery_lease, &other.delivery_lease));
+        assert_eq!(other.relay_slot.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_lookup_preserves_the_custody_store_and_delivery_lease() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(819_204);
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        shared.tmux_watchers.insert(
+            channel,
+            crate::services::discord::TmuxWatcherHandle {
+                tmux_session_name: format!("relay-state-{}", uuid::Uuid::new_v4()),
+                output_path: String::new(),
+                paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                cancel: Arc::clone(&cancel),
+                pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            },
+        );
+        let original = shared.tmux_relay_coords.get(&channel).unwrap().clone();
+        assert!(original.delivery_lease.watcher_reservation_matches(&cancel));
+        let store = original.cancel_handoffs.clone();
+        let lease = Arc::clone(&original.delivery_lease);
+        let slot = Arc::clone(&original.relay_slot);
+        drop(original);
+        let successor = shared.tmux_relay_coord(channel);
+        assert!(Arc::ptr_eq(&store, &successor.cancel_handoffs));
+        assert!(Arc::ptr_eq(&lease, &successor.delivery_lease));
+        assert!(Arc::ptr_eq(&slot, &successor.relay_slot));
+        let other = shared.tmux_relay_coord(ChannelId::new(819_205));
+        assert!(!Arc::ptr_eq(&store, &other.cancel_handoffs));
     }
 }

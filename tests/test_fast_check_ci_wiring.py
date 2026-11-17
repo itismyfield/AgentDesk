@@ -706,6 +706,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for path in (
             "src/services/engine_runtime/mod.rs",
             "src/services/engine_runtime/relay_state.rs",
+            "src/services/engine_runtime/relay_state/coord.rs",
         ):
             with self.subTest(path=path):
                 context = {"github.event.pull_request.draft": False}

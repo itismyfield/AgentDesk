@@ -253,6 +253,7 @@ jobs:
             cross_os_rust:
               - 'src/services/engine_runtime/mod.rs'
               - 'src/services/engine_runtime/relay_state.rs'
+              - 'src/services/engine_runtime/relay_state/coord.rs'
               - 'src/services/decision_gate/**'
               - 'scripts/ci/run-writer-namespace-windows-targets.sh'
               - 'scripts/exact_rust_test_proof.py'

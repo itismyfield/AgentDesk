@@ -1,5 +1,7 @@
 //! Pure watcher registry, frontier and lease state.
 
+pub(in crate::services) mod coord;
+
 pub(in crate::services) use super::lease;
 pub(in crate::services) use registry::RegistryState;
 
