@@ -426,7 +426,8 @@ fn owner_outcome(cases: &[(Case, u64)]) {
 const MERGED: [(&str, &str); 2] = [("moved-a", "one original"), ("moved-b", "second original")];
 
 fn merged(channel: u64, at: usize) -> crate::services::turn_orchestrator::PendingQueueItem {
-    let id = 8_000_000_000_200_000_000u64 + channel * 10 + at as u64;
+    // Discord-range ids, so the owner fences these sources by identity.
+    let id = 1_490_000_000_200_000_000u64 + channel * 10 + at as u64;
     serde_json::from_value(json!({"author_id":7,"channel_id":channel,"message_id":id,
         "source_message_ids":[id],"queued_generation":1,"text":MERGED[at].1}))
     .unwrap()
@@ -503,6 +504,19 @@ async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
         MERGED.iter().all(|(_, body)| !raw.contains(body)),
         "no body is kept: {snapshot}"
     );
+    // Owed its notice and fenced: no legacy claim takes a source, another ticket admits none.
+    let source = merged(channel, 1).message_id;
+    let fenced = mailbox.v2_request(move |slot| {
+        let owner = slot.as_ref().ok_or("no owner")?;
+        let order = crate::services::turn_orchestrator::TurnAdmissionOrder::Immediate;
+        Ok((
+            owner.snapshot.holds_input(),
+            owner.blocks_claim(source, order),
+        ))
+    });
+    assert_eq!(fenced.await, Ok((true, true)));
+    let other = mailbox.v2_admit_ticket(merged(channel, 1), "moved-other".into());
+    assert_eq!(format!("{:?}", other.await), "Err(SourceAlreadyKnown)");
     // The notice reached the outbox, then the daemon restarted before the owner marked it.
     ChannelMailboxHandle::v2_notice(&pool, "claude", channel, "moved", &refused[0])
         .await
@@ -538,6 +552,15 @@ async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
     );
     assert!(posts[0].0.contains("증거를 확보하지 못해"), "{posts:?}");
     assert!(!posts[0].0.contains("원문을 보관했습니다"), "{posts:?}");
+    // Told, the file owes nothing more; a day later the record is forgotten.
+    let day = chrono::Utc::now().timestamp_millis() as u64 + 86_400_001;
+    let later = mailbox.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let owed = owner.snapshot.holds_input();
+        owner.tick(day)?;
+        Ok((owed, owner.snapshot.refused_inputs.len()))
+    });
+    assert_eq!(later.await, Ok((false, 0)));
     pool.close().await;
     db.drop().await;
 }
