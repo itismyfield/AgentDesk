@@ -108,7 +108,7 @@ mod resume_companion_restore_tests;
 #[path = "lifecycle/n4d2_boundary_tests.rs"]
 mod n4d2_boundary_tests;
 #[cfg(test)]
-#[path = "lifecycle/watcher_install_fixture.rs"]
+#[path = "lifecycle/watcher_install_fixture_tests.rs"]
 pub(in crate::services::discord) mod watcher_install_fixture;
 
 #[path = "lifecycle/restore.rs"]

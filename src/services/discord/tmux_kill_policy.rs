@@ -8,7 +8,7 @@ pub(in crate::services::discord) const RECENT_TURN_STOP_METADATA_FALLBACK_TTL: s
 /// post-cancel teardown bytes that flush into the same jsonl before the
 /// session actually dies. Anything beyond this boundary is treated as
 /// follow-up turn output and disqualifies the death from
-/// `cancel_induced_watcher_death`. Empirically the wrapper writes <2 KB of
+/// `cancel_induced_watcher_death_async`. Empirically the wrapper writes <2 KB of
 /// teardown lines (final stream item, "[stderr] killed", etc.). Keep the
 /// bound below the smallest observed Codex TUI follow-up rollout frame so a
 /// reset/cancel tombstone cannot suppress the next pane-death lifecycle.
@@ -318,7 +318,7 @@ async fn record_recent_turn_stop_with_offset(
 // #3034: per-channel recent-turn-stop query — sibling of the live
 // `recent_turn_stop_for_watcher_range`; no live caller yet. Kept as part of the
 // cancel-suppression query surface.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(in crate::services::discord) fn recent_turn_stop_for_channel(
     channel_id: ChannelId,
 ) -> Option<RecentTurnStop> {
@@ -330,47 +330,6 @@ pub(in crate::services::discord) fn recent_turn_stop_for_channel(
         .rev()
         .find(|entry| entry.channel_id == channel_id)
         .cloned()
-}
-
-/// Returns true if a watcher death for `(channel_id, tmux_session_name)` was
-/// preceded by an explicit user-initiated turn-stop (cancel) within
-/// `RECENT_TURN_STOP_METADATA_FALLBACK_TTL`. The watcher cleanup path that
-/// follows a cancel writes
-/// `record_tmux_exit_reason("watcher cleanup: dead session after turn")`
-/// and tears the session down — surfacing that as a 🔴 lifecycle notification
-/// or as the "대화를 이어붙이지 못했습니다" handoff is misleading because the
-/// death IS the cancel, not a crash.
-///
-/// IMPORTANT: this consumes ALL matching in-window tombstones on a true
-/// return so the suppression is one-shot per cancel (codex P1/P2 on #1277).
-/// A single user cancel commonly records two tombstones —
-/// `mailbox_cancel_active_turn` records one, and
-/// `turn_lifecycle::stop_provider_turn_with_outcome` records another via
-/// `record_turn_stop_tombstone` — so draining only the newest leaves the
-/// duplicate alive to suppress a follow-up turn's real failure that
-/// reuses the same `(channel_id, tmux_session_name)` pair within the 60s
-/// metadata-fallback TTL.
-///
-/// `current_output_offset` is the jsonl size at the moment the watcher
-/// observed the death. When the tombstone was recorded with a known
-/// `stop_output_offset`, this lets us bound the suppression to the
-/// canceled turn's data range (codex P2 round 3 on #1277): for
-/// preserve-session stops the tmux session is reused, the wrapper keeps
-/// writing past the cancel EOF, and a real crash on the follow-up turn
-/// would otherwise be silently swallowed. We allow a small
-/// `CANCEL_TEARDOWN_GRACE_BYTES` to accommodate the wrapper's normal
-/// post-cancel teardown bytes that flush before the session actually dies.
-// #3034: sync cancel-suppression contract (#1277), superseded at live callsites
-// by the PG-aware `cancel_induced_watcher_death_async`. Kept as the documented
-// reference (db::cancel_tombstones points here) and IO-free counterpart.
-#[allow(dead_code)]
-pub(in crate::services::discord) fn cancel_induced_watcher_death(
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    current_output_offset: Option<u64>,
-) -> bool {
-    !drain_cancel_induced_recent_turn_stops(channel_id, tmux_session_name, current_output_offset)
-        .is_empty()
 }
 
 fn drain_cancel_induced_recent_turn_stops(
@@ -443,7 +402,7 @@ fn recent_turn_stop_matches_watcher_death(
     true
 }
 
-/// PG-aware async wrapper around `cancel_induced_watcher_death` (#1309).
+/// Query cancellation suppression using memory and PostgreSQL tombstones.
 ///
 /// In-memory hit handles the same-process attach race, but it waits for the
 /// associated PG insert and deletes that exact durable row by UUID before

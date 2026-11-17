@@ -2,7 +2,11 @@ use axum::{Json, http::StatusCode};
 use serde_json::{Value, json};
 
 use crate::error::{AppError, AppResult, ErrorCode};
-use crate::services::routines::{DeleteRoutineResult, is_resume_routine_requires_next_due_at};
+use crate::services::routines::execution_mode::is_definition_constraint_violation;
+use crate::services::routines::store::RoutineRecord;
+use crate::services::routines::{
+    DeleteRoutineResult, RoutineStore, is_resume_routine_requires_next_due_at,
+};
 
 pub(super) fn delete_routine_response(
     routine_id: &str,
@@ -50,6 +54,39 @@ pub(super) fn delete_routine_response(
             ),
         )),
     }
+}
+
+pub(super) fn unprocessable(message: String) -> AppError {
+    AppError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        ErrorCode::Validation,
+        message,
+    )
+}
+
+/// A concurrent writer can still trip the definition CHECKs after the API checks passed.
+pub(super) fn definition_store_error(error: anyhow::Error) -> AppError {
+    if is_definition_constraint_violation(&error) {
+        return AppError::conflict(error.to_string());
+    }
+    store_error(error)
+}
+
+/// A routine record with its explicit/effective execution definition beside it.
+pub(super) async fn routine_view(store: &RoutineStore, routine: RoutineRecord) -> AppResult<Value> {
+    let execution = store
+        .load_execution_definitions(std::slice::from_ref(&routine.id))
+        .await
+        .map_err(store_error)?
+        .remove(&routine.id)
+        .map(|row| row.projection());
+    let mut view = json!(routine);
+    if let (Some(object), Some(execution)) = (view.as_object_mut(), execution)
+        && let Value::Object(fields) = json!(execution)
+    {
+        object.extend(fields);
+    }
+    Ok(view)
 }
 
 pub(super) fn store_error(error: anyhow::Error) -> AppError {

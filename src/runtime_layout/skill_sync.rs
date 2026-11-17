@@ -472,7 +472,10 @@ fn cleanup_retired_gemini_skills(root: &Path) -> Result<(), String> {
         .map_err(|error| format!("Failed to read '{}': {error}", skills.display()))?;
         if entries.iter().any(|entry| {
             !entry.file_type().is_ok_and(|kind| kind.is_symlink())
-                || resolve_linked_skill_source("gemini", &entry.path()).is_none()
+                || match fs::metadata(entry.path()) {
+                    Ok(_) => resolve_linked_skill_source("gemini", &entry.path()).is_none(),
+                    Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+                }
         }) {
             tracing::warn!(path = %skills.display(), "Preserving Gemini skills directory containing user files or unknown links");
             continue;

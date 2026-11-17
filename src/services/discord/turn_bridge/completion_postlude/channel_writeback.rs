@@ -15,8 +15,8 @@
 //!
 //! # Isolation invariant (single source of truth)
 //!
-//! `run_completion_postlude` combines scheduled-snapshot isolation with a fresh
-//! `ChannelEpisodeScope` decision. A turn whose session key is isolated, whose
+//! `run_completion_postlude` combines scheduled-snapshot isolation and the per-run
+//! pin of a headless routine run with a fresh `ChannelEpisodeScope` decision. A turn whose session key is isolated, whose
 //! mailbox is foreign, whose ownership is unprovable, or whose protected request
 //! is held or unclassified by the replay policy must produce ZERO
 //! channel-scoped side-effects that a LATER LIVE TURN can observe. Every such
@@ -106,6 +106,55 @@ pub(super) async fn resolve_completion_scope(
         )
         .await;
     (isolated, routine)
+}
+
+/// An isolated routine run records only its own transcript, and only when its routine attempt owns
+/// the turn, whatever the channel session holds. `None` leaves a shared turn to the channel's plan.
+pub(super) fn isolated_run_transcript(
+    inflight: &crate::services::discord::inflight::InflightTurnState,
+    routine_attempt_owns_turn: bool,
+    should_record_final_turn: bool,
+) -> Option<bool> {
+    inflight
+        .routine_presentation
+        .isolated_run()
+        .then_some(routine_attempt_owns_turn && should_record_final_turn)
+}
+
+/// A finished isolated run never resumes its session: its own row is marked ended and removed,
+/// so it neither reads as an active turn nor piles up. No other turn's row is ever touched.
+pub(super) async fn close_isolated_run_session(
+    shared: &super::super::super::SharedData,
+    provider: &crate::services::provider::ProviderKind,
+    channel_id: poise::serenity_prelude::ChannelId,
+    session_key: Option<&str>,
+    inflight: &crate::services::discord::inflight::InflightTurnState,
+) {
+    let Some(session_key) = session_key.filter(|_| inflight.routine_presentation.isolated_run())
+    else {
+        return;
+    };
+    crate::services::discord::post_adk_session_status_with_canonical_identity(
+        Some(session_key),
+        None,
+        None,
+        "disconnected",
+        provider,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(channel_id),
+        None,
+        &shared.token_hash,
+        true,
+        shared.api_port,
+    )
+    .await;
+    if let Err(error) = super::super::super::internal_api::delete_session(session_key).await {
+        tracing::warn!(channel_id = channel_id.get(), %error, "isolated run session row not removed");
+    }
 }
 
 /// What this completion proved about its turn, for the scheduled delivery.
@@ -341,6 +390,39 @@ mod tests {
             .iter()
             .map(|item| (item.item_type, item.content.clone()))
             .collect()
+    }
+
+    #[test]
+    fn an_isolated_run_decides_its_transcript_without_the_channel_session() {
+        let shared_row = crate::services::discord::inflight::InflightTurnState::new(
+            crate::services::provider::ProviderKind::Claude,
+            8_117_401,
+            None,
+            7,
+            1,
+            2,
+            "routine prompt".to_string(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        let mut isolated_row = shared_row.clone();
+        isolated_row.routine_presentation = isolated_row.routine_presentation.isolate_run();
+        for (owns, record, persist) in [
+            (true, true, true),
+            (true, false, false),
+            (false, true, false),
+            (false, false, false),
+        ] {
+            // A shared turn is left to the channel session's own plan.
+            assert_eq!(isolated_run_transcript(&shared_row, owns, record), None);
+            assert_eq!(
+                isolated_run_transcript(&isolated_row, owns, record),
+                Some(persist)
+            );
+        }
     }
 
     #[test]

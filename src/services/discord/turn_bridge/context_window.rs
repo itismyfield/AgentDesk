@@ -274,9 +274,3 @@ mod tests {
         assert!(replaced.get(prior_offset..).is_none());
     }
 }
-
-pub(super) async fn compact_lower_bound(pg_pool: Option<&sqlx::PgPool>) -> u64 {
-    crate::services::discord::adk_session::fetch_context_thresholds(pg_pool)
-        .await
-        .compact_lower_bound_tokens
-}

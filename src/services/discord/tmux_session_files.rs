@@ -313,6 +313,7 @@ pub(crate) fn stamp_spawn_markers(
 }
 
 /// Create a fresh nonce for legacy callers; production spawns use the combined gate.
+#[cfg(test)]
 pub(crate) fn write_spawn_nonce(tmux_session_name: &str) -> std::io::Result<String> {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         write_spawn_nonce_value(

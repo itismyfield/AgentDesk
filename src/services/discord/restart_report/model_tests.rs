@@ -120,6 +120,8 @@ fn proven_terminal(state: &RestartReportState) -> bool {
 }
 
 #[cfg(test)]
+#[path = "model/entry_tests.rs"]
 mod entry_tests;
 #[cfg(test)]
+#[path = "model/tests.rs"]
 mod tests;

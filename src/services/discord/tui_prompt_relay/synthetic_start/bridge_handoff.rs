@@ -22,6 +22,7 @@ static DELEGATED: LazyLock<Mutex<std::collections::HashMap<(String, u64), Witnes
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 #[cfg(all(test, unix))]
+#[path = "bridge_handoff/reown_tests.rs"]
 pub(in crate::services::discord::tui_prompt_relay) mod reown;
 
 /// What the claim is, decided from the row read before it takes the slot (I21).
