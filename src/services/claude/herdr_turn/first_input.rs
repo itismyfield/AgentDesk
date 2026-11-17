@@ -99,7 +99,7 @@ fn write(
         .as_ref()
         .map(|scope| scope.check_epoch())
         .transpose()
-        .map_err(|error| before_payload(logical, &error, false))?;
+        .map_err(|error| before_payload(logical, &error, None))?;
     let path = attached.transcript.as_path();
     let transcript = path.display().to_string();
     let length = || std::fs::metadata(path).map_or(0, |meta| meta.len());
@@ -199,7 +199,7 @@ fn write(
         scope.finish_start();
     }
     if let Some(detail) = denied {
-        return Err(before_payload(logical, &detail, false));
+        return Err(before_payload(logical, &detail, None));
     }
     let HerdrInputRun::Ran(run) = result? else {
         return Ok(None);
