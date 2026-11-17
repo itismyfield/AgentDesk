@@ -90,6 +90,8 @@ impl Failure {
         channel: poise::serenity_prelude::ChannelId,
         detail: String,
     ) -> Result<Option<bool>, String> {
+        let anchor = poise::serenity_prelude::MessageId::new(self.front.1.message_id);
+        let number = self.number;
         let done = self
             .mailbox
             .v2_request(move |slot| {
@@ -107,9 +109,20 @@ impl Failure {
         if done.is_some()
             && let Some(shared) = shared
         {
-            let message = format!("⚠️ 실행을 복구하지 못해 이 입력을 폐기했습니다. 사유: {detail}");
+            let message = crate::services::discord::session_notice::subtext(
+                "⚠️",
+                &format!("실행을 복구하지 못해 이 입력을 폐기했습니다. 사유: {detail}"),
+            );
             if let Some(http) = shared.serenity_http_or_token_fallback() {
-                if let Err(error) = channel.say(http, message).await {
+                if let Err(error) = crate::services::discord::outbound::serenity_reference::send_referenced_lifecycle_notice(
+                    http,
+                    shared.clone(),
+                    channel,
+                    anchor,
+                    &message,
+                    "hosted-recovery-refusal".into(),
+                    format!("claim-{number}"),
+                ).await {
                     tracing::warn!(%error, "recovery refusal notice failed");
                 }
             } else {

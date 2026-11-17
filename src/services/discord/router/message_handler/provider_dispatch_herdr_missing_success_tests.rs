@@ -73,8 +73,8 @@ fn a_missing_idle_front_launches_a_fresh_execution_and_delivers_once_pg() {
     let boot = cutover::boot_snapshot().expect("the managed writer's adopted boot snapshot");
     let root = crate::services::tui_prompt_dedupe::binding_events::test_root();
     let http = intake._api.http.clone();
-    std::thread::scope(|scope| {
-        let caller = scope.spawn(move || {
+    {
+        let caller = std::thread::spawn(move || {
             install();
             crate::services::tui_prompt_dedupe::binding_events::set_test_root(root.as_deref());
             let _boot = test_override::force_boot(boot);
@@ -189,11 +189,14 @@ fn a_missing_idle_front_launches_a_fresh_execution_and_delivers_once_pg() {
         while let Ok(event) = events.try_recv() {
             crate::services::claude_tui::hook_server::publish_hook_event_for_tests(event);
         }
-        assert_eq!(caller.join().unwrap(), Ok(()));
+        assert_eq!(
+            crate::test_support::wait::join_within(caller, LIMIT),
+            Ok(())
+        );
         assert!(
             matches!(fx.record(),HostedRecord::Known(record) if record.state==HostedState::Bound && record.execution_nonce==pending.execution_nonce)
         );
-    });
+    }
     let state = intake
         .runtime
         .block_on(
