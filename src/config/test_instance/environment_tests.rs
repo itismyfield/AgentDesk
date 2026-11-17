@@ -1843,3 +1843,74 @@ printf 'PINNED_KEY_APPLIED\n'
         tests::assert_single_test_passed(&out, selector);
     }
 }
+
+#[test]
+fn claude_login_username_comes_from_effective_user_only() {
+    const CASE: &str = "ADK_LOGIN_USERNAME_CHILD";
+    const NAME: &str = "config::test_instance::environment_tests::claude_login_username_comes_from_effective_user_only";
+    if let Ok(mode) = std::env::var(CASE) {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        if mode != "operating" {
+            initialize().unwrap();
+        }
+        let provider = if mode == "codex" { "codex" } else { "claude" };
+        let profile = format!("test-{provider}");
+        let overlay = environment::resolve_profile(provider, Some(&profile)).unwrap();
+        let mut command = std::process::Command::new("/usr/bin/true");
+        command.args(["unchanged", "arguments"]);
+        if let Some(overlay) = overlay {
+            command.envs(overlay.env);
+        }
+        environment::configure_child_command(&mut command).unwrap();
+        let values = command
+            .get_envs()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if mode == "claude" {
+            let actual = std::process::Command::new("/usr/bin/id")
+                .arg("-un")
+                .env_clear()
+                .output()
+                .unwrap();
+            assert!(actual.status.success());
+            let actual = String::from_utf8(actual.stdout).unwrap();
+            let user = std::ffi::OsStr::new(actual.trim());
+            assert_eq!(values.get(std::ffi::OsStr::new("USER")), Some(&Some(user)));
+            assert_eq!(
+                values.get(std::ffi::OsStr::new("LOGNAME")),
+                Some(&Some(user))
+            );
+            let exports = environment::claude_provider_exports().unwrap();
+            let quoted = crate::services::process::shell_escape(actual.trim());
+            assert!(exports.contains(&format!("export USER={quoted}\n")));
+            assert!(exports.contains(&format!("export LOGNAME={quoted}\n")));
+        } else {
+            assert!(!values.contains_key(std::ffi::OsStr::new("USER")));
+            assert!(!values.contains_key(std::ffi::OsStr::new("LOGNAME")));
+            if mode == "operating" {
+                assert!(values.is_empty());
+            }
+        }
+        assert_eq!(command.get_program(), std::ffi::OsStr::new("/usr/bin/true"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["unchanged", "arguments"]
+        );
+        return;
+    }
+    for mode in ["operating", "legacy", "codex", "claude"] {
+        let (_temp, root, home) = claude_login_fixture(false);
+        if matches!(mode, "codex" | "claude") {
+            bind_claude_login(&root, &home);
+        }
+        let mut child = tests::command(&root);
+        child
+            .args(["--exact", NAME, "--nocapture"])
+            .env(CASE, mode)
+            .env("USER", "forged-parent-user")
+            .env("LOGNAME", "forged-parent-logname");
+        if mode == "operating" {
+            child.env_remove("AGENTDESK_TEST_MANIFEST");
+        }
+        tests::assert_single_test_passed(&child.output().unwrap(), NAME);
+    }
+}

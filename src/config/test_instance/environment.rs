@@ -431,6 +431,7 @@ struct ClaudeLogin {
     config_dir: PathBuf,
     cli: PathBuf,
     account_slot: u64,
+    user: String,
 }
 
 impl ClaudeLogin {
@@ -460,11 +461,21 @@ impl ClaudeLogin {
         for p in [&home, &config_dir, &cli] {
             checked_path(p)?;
         }
+        let user = Command::new("/usr/bin/id")
+            .arg("-un")
+            .env_clear()
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(rejected)?;
         Ok(Some(Self {
             home,
             config_dir,
             cli,
             account_slot: value["account_slot"].as_u64().ok_or_else(rejected)?,
+            user: user.trim().to_owned(),
         }))
     }
 
@@ -475,6 +486,8 @@ impl ClaudeLogin {
                 "CLAUDE_CONFIG_DIR".into(),
                 self.config_dir.to_string_lossy().into_owned(),
             ),
+            ("USER".into(), self.user.clone()),
+            ("LOGNAME".into(), self.user.clone()),
             ("CLAUDE_SECURESTORAGE_CONFIG_DIR".into(), String::new()),
             ("DISABLE_AUTOUPDATER".into(), "1".into()),
             ("AGENTDESK_TEST_CLAUDE_LOGIN".into(), "1".into()),
