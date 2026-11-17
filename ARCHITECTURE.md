@@ -2181,6 +2181,7 @@ src/
 │   │   │   ├── herdr_before_start_restart.rs
 │   │   │   ├── herdr_before_start_restart_tests.rs
 │   │   │   ├── herdr_reader.rs
+│   │   │   ├── herdr_reader_missing_tests.rs
 │   │   │   ├── herdr_reader_tests.rs
 │   │   │   ├── herdr_row_end.rs
 │   │   │   ├── herdr_row_end_gate_tests.rs
@@ -2377,6 +2378,7 @@ src/
 │   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── intake_dispatch.rs
 │   │   │   │   │   ├── owned_busy.rs
+│   │   │   │   │   ├── owned_busy_missing_tests.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── replay_start.rs
@@ -2424,6 +2426,7 @@ src/
 │   │   │   │   │   ├── producer_error_test_support.rs
 │   │   │   │   │   ├── replay_scope.rs
 │   │   │   │   │   ├── start_failure.rs
+│   │   │   │   │   ├── start_failure_missing_tests.rs
 │   │   │   │   │   └── start_failure_state_tests.rs
 │   │   │   │   ├── provider_isolation/
 │   │   │   │   │   └── feature_settings.rs
@@ -2467,6 +2470,8 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_busy_running_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_missing_input_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_missing_success_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
@@ -3649,6 +3654,7 @@ src/
 │   │   ├── policy.rs
 │   │   ├── policy_tests.rs
 │   │   ├── prepared.rs
+│   │   ├── retire.rs
 │   │   ├── retired_hold.rs
 │   │   ├── runtime_marker.rs
 │   │   ├── unplaced.rs

@@ -19,6 +19,9 @@ use crate::services::turn_orchestrator::{ChannelMailboxHandle, OwnerFront, Pendi
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 use std::os::unix::fs::PermissionsExt;
 
+#[path = "provider_dispatch_herdr_missing_input_tests.rs"]
+mod missing_input;
+
 const MESSAGE: u64 = 1_570_000_811_403_001_001;
 const INPUT: &str = "join the running Herdr turn now";
 

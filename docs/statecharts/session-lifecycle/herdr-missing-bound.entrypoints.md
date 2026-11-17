@@ -75,3 +75,19 @@ The adjacent-control cfgs project an already acknowledged explicit control to `C
 The frozen early classifier operates on `InputOrigin`, not directly on the author bot flag. This lane should preserve that classification rather than introducing a separate bot policy. Real human test fixtures must carry ordinary Discord admission, and internal-origin regression cases must continue to use their preserved admission context.
 
 The new path must remove early idle watch registration, not turn `Unknown` into a timeout or make `Screen::Gone` silently delete a front. A working-turn watch remains contingent on a real boundary; an empty-context probe is not evidence that a dead idle execution can recover. The actual tests must cover both paths and must not claim the projected running fairness assumption as a product proof.
+
+
+## Implementation delta
+
+The frozen 61 rows above remain the exhaustive pre-change census. These six rows locate the new connections to the same actions; input origin and adjacent controls keep their frozen policy.
+
+| # | Entry / current file:line | Model value / action | Scope and origin |
+|---|---|---|---|
+| 62 | `src/services/herdr_launch/retire.rs:36` exact endpoint read | `Read`, `Proof`, `Retire` | CLI accepts its existing ended-shell proof; automatic callers require complete Missing; raw-row/owner/nonce CAS is shared |
+| 63 | `src/services/discord/recovery_engine/herdr_reader.rs:487` Missing reconnect | `Reconnect`, `Retire` | Existing transition lease/current-row check precedes the common Missing-only proof |
+| 64 | `src/services/discord/router/message_handler/intake_turn/owned_busy.rs:172` idle repair | `Read`, `Retire`, `Launch`, `Reject` | Human origin and no active mailbox turn; same Retired row must be re-judged before normal launch |
+| 65 | `src/services/discord/router/message_handler/provider_dispatch/start_failure.rs:87` exact claim disposal | `Reject`, `NoticeOnce` | Commit once for that claim and its captured merged originals; then one channel reason; a repeated failure cannot discard the next front |
+| 66 | `src/services/herdr_launch/retire.rs:113` restart repair outcome | `Reconnect`, `Restored`, `LaunchFails` | Keeps only exact owner/retired nonce in memory; no input is stored; a new incarnation clears the old outcome |
+| 67 | `src/services/discord/router/message_handler/intake_turn/owned_busy.rs:461` working probe | `HeldWatch`, `Boundary` | No watch for an observation without context; complete Missing ends a working watch, preserving its front until the actual boundary |
+
+`provider_dispatch/owner_input.rs:1001` passes pre-executor start failures to the scoped failure handler. The existing `start_failure::run` wrapper and `Failure::finish` cover executor/registration errors as well. Its cancellation and native-stop checks remain in place. Ordinary failures keep their existing retry/retained policy. The added marker contains no prompt or queue payload.

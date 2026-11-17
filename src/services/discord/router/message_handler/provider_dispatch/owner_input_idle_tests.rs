@@ -1238,6 +1238,7 @@ fn idle_turn(
         settled,
         origin: InputOrigin::Discord,
         late: Default::default(),
+        recovery: Default::default(),
         refusal: Default::default(),
     };
     let (host, provider) = (TurnHost::Tmux, ProviderKind::Claude);
@@ -1252,6 +1253,7 @@ fn idle_turn(
         allowed_tools: &[],
         cancel,
         codex_observation: None,
+
         tmux_session_name: Some(&rig.name),
         teardown: None,
         host: &host,
@@ -2922,6 +2924,7 @@ pub(crate) fn claimed_root_recovery_launch(
         until_done: None,
         native_pin_submitted: None,
         observation: None,
+        recovery: Default::default(),
     };
     created(
         registration,

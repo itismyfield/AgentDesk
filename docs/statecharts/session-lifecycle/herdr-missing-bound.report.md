@@ -4,7 +4,7 @@ Source coordinate: `1161162a18c87a0514f53dd7ae5dac3c830149cb`, fetched and confi
 
 The issue and source confirm two independent gaps: reconnect omits Missing from cleanup (`herdr_reader.rs:486`), and idle admission leaves the front Held (`owned_busy.rs:90`). A third acceptance gap is reached after repairing those: a failed replacement launch goes through `provider_dispatch/start_failure.rs:83` and `queued_head/v2/start_failure.rs:95`, which retries or retains the original. A retire-only fix therefore still violates the requested reason+disposal rule.
 
-Existing models were inspected: `HerdrSession` models Pending/Bound and pane loss, `HerdrRootRecovery` models strict replaced-root recovery, and `HerdrHandoffHeld`/`HerdrHandoffLaunch` model legacy handoff and failure custody. None includes the missing-pane early admission path. The new small model composes just that path. See the [61-row frozen entrypoint table](herdr-missing-bound.entrypoints.md) and [chart](herdr-missing-bound.chart.mmd).
+Existing models were inspected: `HerdrSession` models Pending/Bound and pane loss, `HerdrRootRecovery` models strict replaced-root recovery, and `HerdrHandoffHeld`/`HerdrHandoffLaunch` model legacy handoff and failure custody. None includes the missing-pane early admission path. The new small model composes just that path. See the [67-row entrypoint table](herdr-missing-bound.entrypoints.md) and [chart](herdr-missing-bound.chart.mmd).
 
 ## Rules and limits
 
@@ -57,3 +57,6 @@ The check used TLC 1.7.4 and the repository fairness precheck. Model SHA256: `ec
 The staged model and cfg bytes were copied to a lane-local checker root with its own 19-row expected manifest. The same 19 cfgs are registered in `docs/statecharts/expected.tsv` together with this model. The checker finished successfully in 35.3 seconds. Ten direct raw trace runs separately returned the expected five safety exit codes 12 and five temporal exit codes 13. All processes finished before reporting.
 
 The implementation report records Rust RED/GREEN tests, mutants, source scans, classifier, clippy, Windows cross-check and prepush results separately. The table above reports actual TLC outcomes, including expected negative controls; it does not label those counterexamples as production successes.
+
+
+The official repository manifest check after registration also matched all 19 cfgs (46 rule runs, 44.4 seconds). `list_merge_guard.py --ci --normalize` returned `LIST_MERGE_GUARD_OK` with no manifest diff. The implementation delta in the entrypoint table maps the common proof, idle repair, failure settlement and working probe to the checked actions.

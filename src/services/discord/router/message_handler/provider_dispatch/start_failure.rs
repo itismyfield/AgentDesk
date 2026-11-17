@@ -27,15 +27,29 @@ pub(in crate::services::discord) fn confirmed(refusal: &HerdrRefusal) -> Option<
 }
 type Shared = Arc<crate::services::discord::SharedData>;
 
+#[derive(Clone, Default)]
+pub(super) struct MissingRecovery(Arc<std::sync::atomic::AtomicBool>);
+impl MissingRecovery {
+    pub(super) fn repaired(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub(super) fn mark(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct Failure {
     mailbox: ChannelMailboxHandle,
     front: Front,
     number: u64,
     members: Vec<PendingQueueItem>,
+    recovery: MissingRecovery,
 }
 impl Failure {
     pub(super) fn claimed(mailbox: &ChannelMailboxHandle, claim: &FrontClaim) -> Self {
         Self {
+            recovery: MissingRecovery::default(),
             mailbox: mailbox.clone(),
             front: claim.front().clone(),
             number: claim.number(),
@@ -45,8 +59,66 @@ impl Failure {
         }
     }
     pub(super) fn owner(owner: &OwnerTurn) -> Self {
-        Self::claimed(owner.mailbox(), owner.claim())
+        Self::claimed(owner.mailbox(), owner.claim()).with_recovery(owner.recovery.clone())
     }
+    pub(super) fn with_recovery(mut self, recovery: MissingRecovery) -> Self {
+        self.recovery = recovery;
+        self
+    }
+
+    pub(super) async fn discard_recovered(
+        &self,
+        shared: &Shared,
+        channel: poise::serenity_prelude::ChannelId,
+        started: &Result<(), String>,
+    ) -> Result<bool, String> {
+        if self.recovery.repaired()
+            && let Err(error) = started
+        {
+            self.clone()
+                .discard(Some(shared.clone()), channel, error.clone())
+                .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Only the still unreserved exact claim is disposed; a reserve owns its own settlement.
+    pub(super) async fn discard(
+        self,
+        shared: Option<Shared>,
+        channel: poise::serenity_prelude::ChannelId,
+        detail: String,
+    ) -> Result<Option<bool>, String> {
+        let done = self
+            .mailbox
+            .v2_request(move |slot| {
+                let owner = slot.as_mut().ok_or("missing owner")?;
+                if owner.claim_number() != self.number
+                    || !owner.claimed(self.front.1.message_id, &self.front)
+                {
+                    return Ok(None);
+                }
+                owner
+                    .complete_claimed_locally((&self.front, self.number), self.members.len() - 1)?;
+                Ok(Some(true))
+            })
+            .await?;
+        if done.is_some()
+            && let Some(shared) = shared
+        {
+            let message = format!("⚠️ 실행을 복구하지 못해 이 입력을 폐기했습니다. 사유: {detail}");
+            if let Some(http) = shared.serenity_http_or_token_fallback() {
+                if let Err(error) = channel.say(http, message).await {
+                    tracing::warn!(%error, "recovery refusal notice failed");
+                }
+            } else {
+                tracing::warn!("recovery refusal has no Discord transport");
+            }
+        }
+        Ok(done)
+    }
+
     pub(super) fn guard_reply(
         &self,
         reply: super::owner_input::Reply,
@@ -78,6 +150,9 @@ impl Failure {
         channel: poise::serenity_prelude::ChannelId,
         token: Option<Arc<CancelToken>>,
     ) -> Result<Option<bool>, String> {
+        if self.recovery.repaired() {
+            return self.discard(shared, channel, detail).await;
+        }
         let opaque = matches!(kind, Kind::Opaque);
         let (watch, unreadable) = match watch {
             Ok(watch) => (watch, None),
@@ -250,11 +325,12 @@ impl Failure {
             .cancelled
             .load(std::sync::atomic::Ordering::Acquire)
             || turn.cancel.native_stop.receipt_sink().stopped_before_key()
-            || (!bound && error.starts_with("NotSent("))
+            || (!self.recovery.repaired() && !bound && error.starts_with("NotSent("))
         {
             return Err(error);
         }
         let kind = match turn.host {
+            _ if self.recovery.repaired() => Kind::Opaque,
             TurnHost::Refused(refusal) => match confirmed(refusal) {
                 Some(kind) => kind,
                 None => return Err(error),
@@ -387,3 +463,7 @@ fn fact(channel: poise::serenity_prelude::ChannelId, nonce: &str, event: &'stati
 #[cfg(all(test, unix))]
 #[path = "start_failure_state_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "start_failure_missing_tests.rs"]
+mod missing_tests;

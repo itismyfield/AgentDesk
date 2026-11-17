@@ -120,33 +120,13 @@ mod node {
 
     use super::HerdrCommand;
     use crate::db::dispatched_sessions::hosted_execution::{
-        HostedCasOutcome, HostedExecution, HostedObservation, HostedRecord, HostedState, LIVE,
-        ProcessStamp, list_local_herdr_rows_pg, retire_pg,
+        HostedExecution, HostedObservation, HostedRecord, HostedState, LIVE, ProcessStamp,
+        list_local_herdr_rows_pg,
     };
     use crate::services::claude::herdr_turn::{HoldRelease, input_holds, release_hold};
     use crate::services::session_host::{PaneProvider, PaneReading, herdr_endpoints};
 
-    /// Why a retire changed nothing: the row and every hold are as they were.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(crate) enum RetireRefusal {
-        NoLocalEndpoint,
-        /// No live Herdr row of this channel on this node, or more than one.
-        NoRow(&'static str),
-        ProviderRunning,
-        /// The pane was not read as one its execution has left; it may still run something.
-        Unproven(&'static str),
-        /// The row changed after it was read, or the transition was refused.
-        Changed(String),
-    }
-
-    /// A retired execution and what became of its input hold.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(crate) struct Retired {
-        pub nonce: String,
-        /// This run retired the row; otherwise an earlier one did and only its hold was left.
-        pub now: bool,
-        pub hold: HoldRelease,
-    }
+    use crate::services::herdr_launch::retire::{self as ended, RetireRefusal, Retired, Scope};
 
     pub(super) fn run(command: HerdrCommand) -> Result<(), String> {
         let config = crate::config::load().map_err(|error| format!("load config: {error}"))?;
@@ -214,21 +194,6 @@ mod node {
         Some(read.unwrap_or_else(|error| PaneReading::Unreadable(error.to_string())))
     }
 
-    /// As `read_pane`, with whether that reading shows `record`'s execution ended.
-    async fn read_end(record: &HostedExecution) -> Option<(PaneReading, bool)> {
-        let view = herdr_endpoints().view(record)?;
-        let record = record.clone();
-        let read = tokio::task::spawn_blocking(move || {
-            let reading = view.read_execution();
-            let ended = view.ended(&record, &reading);
-            (reading, ended)
-        });
-        Some(
-            read.await
-                .unwrap_or_else(|error| (PaneReading::Unreadable(error.to_string()), false)),
-        )
-    }
-
     fn known(row: &HostedObservation) -> Option<&HostedExecution> {
         match &row.record {
             HostedRecord::Known(record) => Some(record),
@@ -256,14 +221,7 @@ mod node {
                 ));
             }
         };
-        let record = known(row).ok_or(RetireRefusal::NoRow("unreadable record"))?;
-        let Some((reading, ended)) = read_end(record).await else {
-            return Err(match record.location {
-                None => RetireRefusal::Unproven("no recorded pane"),
-                Some(_) => RetireRefusal::NoLocalEndpoint,
-            });
-        };
-        retire_on_reading(pool, row, record, &reading, ended).await
+        ended::observed(pool, row, Scope::Ended).await
     }
 
     /// The channel's execution an earlier retire already wrote Retired, whose hold that retire
@@ -293,47 +251,6 @@ mod node {
             now: false,
             hold: release_hold(&record.execution_nonce),
         })
-    }
-
-    /// The retire decision on one reading and whether it shows the execution ended; the hold goes
-    /// only after the row's CAS wrote Retired.
-    pub(crate) async fn retire_on_reading(
-        pool: &PgPool,
-        row: &HostedObservation,
-        record: &HostedExecution,
-        reading: &PaneReading,
-        ended: bool,
-    ) -> Result<Retired, RetireRefusal> {
-        if !ended {
-            return Err(match reading {
-                PaneReading::Present {
-                    provider: PaneProvider::Execution(_),
-                    ..
-                } => RetireRefusal::ProviderRunning,
-                PaneReading::Present {
-                    provider: PaneProvider::Exited,
-                    ..
-                } if record.expected.is_none() => RetireRefusal::Unproven("no recorded root shell"),
-                PaneReading::Present {
-                    provider: PaneProvider::Exited,
-                    ..
-                } => RetireRefusal::Unproven("root shell replaced"),
-                PaneReading::Present { .. } => RetireRefusal::Unproven("provider unverified"),
-                _ => RetireRefusal::Unproven("pane unreadable or snapshot incomplete"),
-            });
-        }
-        let nonce = &record.execution_nonce;
-        match retire_pg(pool, row, &record.owner, nonce).await {
-            Ok(HostedCasOutcome::Written) => Ok(Retired {
-                nonce: nonce.clone(),
-                now: true,
-                hold: release_hold(nonce),
-            }),
-            Ok(HostedCasOutcome::Stale) => {
-                Err(RetireRefusal::Changed("row changed since read".into()))
-            }
-            Err(error) => Err(RetireRefusal::Changed(format!("{error:?}"))),
-        }
     }
 
     fn pane_text(reading: Option<&PaneReading>, record: &HostedExecution) -> &'static str {
@@ -400,7 +317,11 @@ mod node {
 }
 
 #[cfg(all(test, unix))]
-pub(crate) use node::{RetireRefusal, Retired, retire, retire_on_reading, status};
+pub(crate) use crate::services::herdr_launch::retire::{
+    RetireRefusal, Retired, on_reading as retire_on_reading,
+};
+#[cfg(all(test, unix))]
+pub(crate) use node::{retire, status};
 
 #[cfg(unix)]
 #[path = "herdr_probe.rs"]
