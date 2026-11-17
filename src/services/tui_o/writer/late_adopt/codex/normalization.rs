@@ -1,21 +1,29 @@
 //! Reevaluate the original execution without renewing its total deadline or resubmitting input.
 use crate::services::tui_o::channel_policy::output_disposition::{Output, Phase, Reason};
 use crate::services::tui_o::channel_policy::{Adoption, Candidate, FirstProof};
-use crate::services::tui_o::shadow::SourceId;
+use crate::services::tui_o::store::OStore;
 use crate::services::tui_o::writer::late_adopt::codex::prefix::{self, Verdict};
 
 pub(crate) async fn run(
     output: &Output,
     candidate: &Candidate,
-    source: &SourceId,
+    original: &FirstProof,
+    store: &OStore,
 ) -> Result<FirstProof, Reason> {
+    let source = &original.source;
+    let finish = |reason| output.finish_first(candidate, original, store, reason);
     let mut checked: Option<prefix::Prefix> = None;
     loop {
-        if output.expire() || output.remaining().is_zero() {
-            return Err(Reason::Deadline);
+        if output.remaining().is_zero() {
+            return finish(Reason::Deadline);
         }
-        if output.phase() != Phase::Normalizing {
-            return Err(Reason::Invalidated);
+        if output.phase() != Phase::Normalizing
+            || matches!(
+                candidate.peek(),
+                Adoption::Committed | Adoption::Held | Adoption::Released
+            )
+        {
+            return finish(Reason::Invalidated);
         }
         let proof = {
             let guard = candidate.lock();
@@ -24,23 +32,18 @@ pub(crate) async fn run(
             proof
         };
         let proof = match proof {
-            Ok(Some(proof)) => proof,
-            _ => {
-                output.reject(Reason::Invalidated);
-                return Err(Reason::Invalidated);
-            }
+            Ok(Some(proof)) if &proof == original => proof,
+            _ => return finish(Reason::Invalidated),
         };
         if checked
             .as_ref()
             .is_some_and(|prefix| prefix.preserved_in(source).is_err())
         {
-            output.reject(Reason::SourceRejected);
-            return Err(Reason::SourceRejected);
+            return finish(Reason::SourceRejected);
         }
         match prefix::buffered(source) {
             Verdict::Refuse(_) => {
-                output.reject(Reason::SourceRejected);
-                return Err(Reason::SourceRejected);
+                return finish(Reason::SourceRejected);
             }
             Verdict::Eligible(prefix)
                 if prefix.prompt_digest.as_ref() == Some(&proof.digest)
@@ -48,26 +51,6 @@ pub(crate) async fn run(
             {
                 if checked.is_none() {
                     checked = Some(prefix.clone());
-                }
-                let guard = candidate.lock();
-                let adopted = output.adopt(&proof, || {
-                    if *guard != Adoption::Committed {
-                        return Err("O activation has not committed this source".into());
-                    }
-                    if candidate.first_proof(source)?.as_ref() != Some(&proof) {
-                        return Err("first admission changed during normalization".into());
-                    }
-                    prefix
-                        .preserved_in(source)
-                        .map_err(|_| "normalization source changed")?;
-                    match prefix::buffered(source) {
-                        Verdict::Eligible(now) if now == prefix => Ok(()),
-                        _ => Err("normalization prefix changed".into()),
-                    }
-                });
-                drop(guard);
-                if adopted.is_ok() {
-                    return Ok(proof);
                 }
                 if output.take_repair() {
                     // This publisher rechecks launch context, owner, nonce, pinned root and source creation.
@@ -80,8 +63,7 @@ pub(crate) async fn run(
             }
             Verdict::Eligible(prefix) if prefix.prompt_end.is_none() => {}
             Verdict::Eligible(_) => {
-                output.reject(Reason::SourceRejected);
-                return Err(Reason::SourceRejected);
+                return finish(Reason::SourceRejected);
             }
             Verdict::Wait(_) => {}
         }

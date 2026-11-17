@@ -371,6 +371,28 @@ impl Candidate {
         drop(guard);
     }
 
+    #[cfg(test)]
+    pub(crate) fn invalidate_first_proved(&self, proof: &FirstProof) -> bool {
+        let mut matched = false;
+        self.first_turn.send_if_modified(|first| {
+            let Some(first) = first.as_mut().filter(|first| {
+                first.channel == proof.channel
+                    && first.mark == proof.mark
+                    && first.nonce == proof.nonce
+                    && first.digest == proof.digest
+                    && first.context.as_ref() == Some(&proof.context)
+            }) else {
+                return false;
+            };
+            matched = true;
+            let changed = first.valid || first.pending;
+            first.valid = false;
+            first.pending = false;
+            changed
+        });
+        matched
+    }
+
     pub(crate) fn first_ended(&self) -> bool {
         self.first_turn
             .borrow()

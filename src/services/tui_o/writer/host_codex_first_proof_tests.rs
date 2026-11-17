@@ -148,15 +148,16 @@ async fn scenario(
     } else {
         rollout(&harness, "proved-first.jsonl", &bytes)
     };
-    let disposition = {
+    let original = {
         let guard = candidate.lock();
         let proof = candidate.first_proof(&source).unwrap().unwrap();
         drop(guard);
-        Output::new(
-            Identity::from_proof(&proof, proof.mark.order),
-            tokio::time::Instant::now(),
-        )
+        proof
     };
+    let disposition = Output::new(
+        Identity::from_proof(&original, original.mark.order),
+        tokio::time::Instant::now(),
+    );
     let output = output.map(str::to_owned);
     let first = answer("first-output", "short answer");
     let ended = codex_line(
@@ -276,7 +277,14 @@ async fn scenario(
         token.turn_nonce(),
         &path,
         transports.clone(),
-        installed.then(|| (disposition.clone(), candidate.clone(), source.clone())),
+        installed.then(|| {
+            (
+                disposition.clone(),
+                candidate.clone(),
+                original.clone(),
+                harness.store.clone(),
+            )
+        }),
     ));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(

@@ -39,6 +39,7 @@ impl Reason {
 pub(crate) enum Phase {
     Normalizing,
     Adopted,
+    ExistingEffectPending,
     RejectPendingNotice(Reason),
     Rejected(Reason),
 }
@@ -123,6 +124,71 @@ impl Output {
             Ok(())
         })
     }
+    pub(crate) fn finish_first(
+        &self,
+        candidate: &super::Candidate,
+        proof: &FirstProof,
+        store: &crate::services::tui_o::store::OStore,
+        reason: Reason,
+    ) -> Result<FirstProof, Reason> {
+        use super::Adoption;
+        let mut adoption = candidate.lock();
+        let mut state = self.state.lock().unwrap();
+        if Self::identity_mismatch(self.id(), proof) || self.id.input != proof.mark.order {
+            if state.0 == Phase::Normalizing {
+                state.0 = Phase::ExistingEffectPending;
+            }
+            return Err(Reason::Invalidated);
+        }
+        match state.0 {
+            Phase::Adopted => return Ok(proof.clone()),
+            Phase::RejectPendingNotice(reason) | Phase::Rejected(reason) => return Err(reason),
+            Phase::ExistingEffectPending if *adoption != Adoption::Committed => {
+                return Err(Reason::Invalidated);
+            }
+            Phase::Normalizing | Phase::ExistingEffectPending => {}
+        }
+        if *adoption == Adoption::Committed {
+            let observed = || -> Option<bool> {
+                use crate::services::tui_o::store::InitOrigin;
+                use sha2::{Digest, Sha256};
+                store.read_era().ok().flatten()?;
+                let init = store.read_init(proof.channel).ok().flatten()?;
+                Some(
+                    store.read_init_origin(proof.channel).ok()? == InitOrigin::LateCodexTakeover
+                        && init.sources.len() == 1
+                        && init.sources[0].source_id == proof.source
+                        && init.sources[0].delivery_start == 0
+                        && init.sources[0].prefix_hash == hex::encode(Sha256::digest(b""))
+                        && init.policy_parent
+                            == candidate.child_surface().map(|child| child.parent()),
+                )
+            };
+            state.0 = if observed() == Some(true) {
+                Phase::Adopted
+            } else {
+                Phase::ExistingEffectPending
+            };
+            return (state.0 == Phase::Adopted)
+                .then(|| proof.clone())
+                .ok_or(Reason::Invalidated);
+        }
+        if matches!(*adoption, Adoption::Held | Adoption::Released)
+            || store.has_channel_dir(proof.channel)
+        {
+            state.0 = Phase::ExistingEffectPending;
+            return Err(Reason::Invalidated);
+        }
+        // The actor's final checks and init publication take this same candidate lock.
+        let matched = candidate.invalidate_first_proved(proof);
+        if matched {
+            *adoption = Adoption::Refused;
+        }
+        let reason = if matched { reason } else { Reason::Invalidated };
+        state.0 = Phase::RejectPendingNotice(reason);
+        Err(reason)
+    }
+
     fn identity_mismatch(id: &Identity, proof: &FirstProof) -> bool {
         *id != Identity::from_proof(proof, id.input)
     }

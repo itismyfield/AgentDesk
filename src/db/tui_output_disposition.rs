@@ -248,10 +248,3 @@ pub(crate) async fn confirmed(
     }
     Ok(receipt)
 }
-pub(crate) async fn is_rejected(pool: &PgPool, id: &Identity) -> Result<bool, String> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tui_output_dispositions WHERE output_key=$1)")
-        .bind(id.key())
-        .fetch_one(pool)
-        .await
-        .map_err(|e| e.to_string())
-}

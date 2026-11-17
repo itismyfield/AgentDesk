@@ -112,7 +112,7 @@ async fn uncertainty_is_metadata_only_and_history_requires_exact_effect_pg() {
             .is_none()
     );
     let reopened = db.connect_and_migrate_with_max_connections(2).await;
-    assert!(db::is_rejected(&reopened, &id).await.unwrap());
+    assert!(db::record(&reopened, &id).await.unwrap().is_some());
     assert!(
         deliver(&reopened, &id, Reason::Deadline, &port)
             .await
@@ -121,34 +121,11 @@ async fn uncertainty_is_metadata_only_and_history_requires_exact_effect_pg() {
     );
     assert_eq!(port.calls.lock().unwrap().len(), 1);
     let nonce = port.calls.lock().unwrap()[0].2.clone();
-    for field in ["channel", "author", "nonce", "body", "id"] {
-        let mut wrong = seen(nonce.clone());
-        match field {
-            "channel" => wrong.channel += 1,
-            "author" => wrong.author += 1,
-            "nonce" => wrong.nonce = None,
-            "body" => wrong.content = "generic stop acknowledgement".into(),
-            _ => wrong.message += 1,
-        }
-        *port.history.lock().unwrap() = Some(wrong);
-        assert!(
-            reconcile(&reopened, &id, Reason::Deadline, 30, &port)
-                .await
-                .is_err(),
-            "{field}"
-        );
-    }
     *port.history.lock().unwrap() = Some(seen(nonce));
     let receipt = reconcile(&reopened, &id, Reason::Deadline, 30, &port)
         .await
         .unwrap()
         .unwrap();
-    let wrong_id = Output::new(identity(2), tokio::time::Instant::now());
-    assert!(wrong_id.reject(Reason::Deadline));
-    assert!(!wrong_id.confirm(&receipt));
-    let wrong_reason = Output::new(id.clone(), tokio::time::Instant::now());
-    assert!(wrong_reason.reject(Reason::SourceRejected));
-    assert!(!wrong_reason.confirm(&receipt));
     assert_eq!(
         (
             receipt.key(),
@@ -175,8 +152,59 @@ async fn uncertainty_is_metadata_only_and_history_requires_exact_effect_pg() {
             .unwrap();
     assert_eq!(stored.as_object().unwrap().len(), 5);
     assert!(stored.get("body").is_none());
-    assert!(!db::is_rejected(&pool, &identity(2)).await.unwrap());
+    assert!(db::record(&pool, &identity(2)).await.unwrap().is_none());
     reopened.close().await;
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn strict_notice_evidence_is_bound_to_reserved_effect_pg() {
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "refusal_evidence",
+        "strict rejection notice evidence",
+    )
+    .await;
+    let pool = db.connect_and_migrate_with_max_connections(2).await;
+    let id = identity(1);
+    let nonce = db::reserve(&pool, &id, Reason::Deadline)
+        .await
+        .unwrap()
+        .unwrap()
+        .nonce();
+    let port = Fake::new(PostResult::Uncertain);
+    for field in ["channel", "author", "nonce", "body", "id"] {
+        let mut wrong = seen(nonce.clone());
+        match field {
+            "channel" => wrong.channel += 1,
+            "author" => wrong.author += 1,
+            "nonce" => wrong.nonce = None,
+            "body" => wrong.content = "generic stop acknowledgement".into(),
+            _ => wrong.message += 1,
+        }
+        *port.history.lock().unwrap() = Some(wrong);
+        assert!(
+            reconcile(&pool, &id, Reason::Deadline, 30, &port)
+                .await
+                .is_err(),
+            "{field}"
+        );
+    }
+    *port.history.lock().unwrap() = Some(seen(nonce));
+    let receipt = reconcile(&pool, &id, Reason::Deadline, 30, &port)
+        .await
+        .unwrap()
+        .unwrap();
+    let wrong_id = Output::new(identity(2), tokio::time::Instant::now());
+    assert!(wrong_id.reject(Reason::Deadline));
+    assert!(!wrong_id.confirm(&receipt));
+    let wrong_reason = Output::new(id.clone(), tokio::time::Instant::now());
+    assert!(wrong_reason.reject(Reason::SourceRejected));
+    assert!(!wrong_reason.confirm(&receipt));
+    assert!(
+        port.calls.lock().unwrap().is_empty(),
+        "history reconciliation never creates a message"
+    );
     pool.close().await;
     db.drop().await;
 }
@@ -197,7 +225,7 @@ async fn only_proven_no_effect_reopens_the_same_notice_nonce_pg() {
             .unwrap()
             .is_none()
     );
-    assert!(db::is_rejected(&pool, &id).await.unwrap());
+    assert!(db::record(&pool, &id).await.unwrap().is_some());
     let nonce = port.calls.lock().unwrap()[0].2.clone();
     assert!(nonce.len() <= 25);
     *port.response.lock().unwrap() = Some(PostResult::Created(seen(nonce.clone())));
@@ -206,10 +234,11 @@ async fn only_proven_no_effect_reopens_the_same_notice_nonce_pg() {
         .unwrap()
         .unwrap();
     assert_eq!(receipt.message(), 30);
-    let calls = port.calls.lock().unwrap();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[1].2, nonce);
-    drop(calls);
+    {
+        let calls = port.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].2, nonce);
+    }
     assert!(
         deliver(&pool, &id, Reason::Invalidated, &port)
             .await
@@ -268,7 +297,6 @@ async fn gateway_adapter_posts_only_reason_and_confirms_real_response_pg() {
     .await;
     let pool = db.connect_and_migrate_with_max_connections(2).await;
     let id = identity(1);
-    use crate::services::tui_o::channel_policy::output_disposition::{Output, Phase};
     let output = Output::new(id.clone(), tokio::time::Instant::now());
     assert!(output.reject(Reason::Deadline));
     let receipt = deliver(&pool, &id, Reason::Deadline, &port)
@@ -287,12 +315,13 @@ async fn gateway_adapter_posts_only_reason_and_confirms_real_response_pg() {
             .message(),
         30
     );
-    let calls = payloads.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0]["content"], Reason::Deadline.message());
-    assert_eq!(calls[0]["enforce_nonce"], true);
-    assert_eq!(calls[0]["allowed_mentions"]["parse"], json!(["users"]));
-    drop(calls);
+    {
+        let calls = payloads.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["content"], Reason::Deadline.message());
+        assert_eq!(calls[0]["enforce_nonce"], true);
+        assert_eq!(calls[0]["allowed_mentions"]["parse"], json!(["users"]));
+    }
     pool.close().await;
     db.drop().await;
     server.abort();

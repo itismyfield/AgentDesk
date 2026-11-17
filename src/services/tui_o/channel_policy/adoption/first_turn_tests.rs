@@ -464,7 +464,8 @@ async fn missing_prompt_and_wakes_exhaust_one_normalization_deadline() {
     let result = crate::services::tui_o::writer::normalization::run(
         &output,
         &fixture.candidate,
-        &fixture.source,
+        &proof,
+        &fixture.store,
     )
     .await;
     assert_eq!(result.unwrap_err(), Reason::Deadline);
@@ -472,3 +473,6 @@ async fn missing_prompt_and_wakes_exhaust_one_normalization_deadline() {
     assert!(output.remaining().is_zero());
     assert!(output.adopt(&proof, || Ok(())).is_err());
 }
+
+#[path = "atomic_tests.rs"]
+mod atomic_tests;

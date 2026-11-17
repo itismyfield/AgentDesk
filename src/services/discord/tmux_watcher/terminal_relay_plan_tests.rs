@@ -1347,7 +1347,8 @@ pub(crate) async fn first_terminal_plan(
     policy: Option<(
         crate::services::tui_o::channel_policy::output_disposition::Output,
         crate::services::tui_o::channel_policy::Candidate,
-        crate::services::tui_o::shadow::SourceId,
+        crate::services::tui_o::channel_policy::FirstProof,
+        Arc<crate::services::tui_o::store::OStore>,
     )>,
 ) -> Result<crate::services::tui_o::cutover::BodySend<usize>, String> {
     let session = session.to_owned();
