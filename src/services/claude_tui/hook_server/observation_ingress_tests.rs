@@ -739,6 +739,7 @@ fn a_herdr_refusal_waits_for_a_hook_already_past_its_check() {
     use crate::services::tui_prompt_dedupe::{AFTER_CHECK, admit_herdr_execution};
     use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
     use std::sync::{Arc, Mutex};
+    let env_guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let ingress = Ingress::new();
     let (channel, tmux) = (7_432, "ingress-herdr-race");
     let (a, b, c) = (uuid(), uuid(), uuid());
@@ -781,4 +782,6 @@ fn a_herdr_refusal_waits_for_a_hook_already_past_its_check() {
     );
     let bound = runtime_binding_for_tmux_session(tmux).unwrap().session_id;
     assert_eq!(bound.as_deref(), Some(b.as_str()));
+    drop(ingress);
+    drop(env_guard);
 }

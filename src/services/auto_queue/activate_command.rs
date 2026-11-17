@@ -1719,6 +1719,7 @@ mod tests {
             resolve_activate_target_run_id,
         };
         use crate::db::auto_queue::test_support::TestPostgresDb;
+        use crate::test_support::wait::poll_within;
         use sqlx::{Connection, PgConnection, PgPool};
         use std::sync::Arc;
 
@@ -1891,35 +1892,6 @@ mod tests {
             .await
             .expect("count activate card dispatches");
             (run, entry, slot, dispatch_count)
-        }
-
-        async fn wait_for_activate_lock_waiter(conn: &mut PgConnection) {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                sqlx::query("SELECT pg_stat_clear_snapshot()")
-                    .execute(&mut *conn)
-                    .await
-                    .expect("clear activate backend-status snapshot");
-                let waiting = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS (
-                         SELECT 1 FROM pg_stat_activity
-                         WHERE datname = current_database()
-                           AND wait_event_type = 'Lock'
-                           AND query LIKE '%pg_advisory_lock(hashtext($1), hashtext($2))%'
-                     )",
-                )
-                .fetch_one(&mut *conn)
-                .await
-                .expect("inspect activate lock waiter");
-                if waiting {
-                    return;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "activate did not wait for its per-run advisory lock"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
         }
 
         #[tokio::test]
@@ -2129,7 +2101,35 @@ mod tests {
             let deps = activate_deps(&pool);
             let activate =
                 tokio::spawn(async move { activate_with_deps_pg(&deps, activate_body()).await });
-            wait_for_activate_lock_waiter(&mut holder).await;
+            poll_within(
+                async || {
+                    let conn = &mut holder;
+                    sqlx::query("SELECT pg_stat_clear_snapshot()")
+                        .execute(&mut *conn)
+                        .await
+                        .expect("clear activate backend-status snapshot");
+                    let waiting = sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS (
+                     SELECT 1 FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND wait_event_type = 'Lock'
+                       AND query LIKE '%pg_advisory_lock(hashtext($1), hashtext($2))%'
+                 )",
+                    )
+                    .fetch_one(&mut *conn)
+                    .await
+                    .expect("inspect activate lock waiter");
+                    if waiting {
+                        Ok(())
+                    } else {
+                        Err("activate did not wait for its per-run advisory lock".into())
+                    }
+                },
+                std::time::Duration::from_secs(5),
+                "PostgreSQL lock waiter",
+            )
+            .await
+            .unwrap();
             sqlx::query(
                 "UPDATE auto_queue_runs
                  SET status = 'completed', completed_at = NOW()

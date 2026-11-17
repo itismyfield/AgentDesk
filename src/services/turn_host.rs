@@ -159,6 +159,27 @@ pub(crate) async fn for_turn(
     channel_id: u64,
     session_key: Option<&str>,
 ) -> TurnHost {
+    resolve(pool, provider, channel_id, session_key, true).await
+}
+
+/// Reads the selected host and its current row without admission or output-writer gates.
+#[cfg(unix)]
+pub(crate) async fn for_observation(
+    pool: Option<&PgPool>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_key: Option<&str>,
+) -> TurnHost {
+    resolve(pool, provider, channel_id, session_key, false).await
+}
+
+async fn resolve(
+    pool: Option<&PgPool>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_key: Option<&str>,
+    execution: bool,
+) -> TurnHost {
     let Some(endpoint) = session_hosts::herdr_endpoint(channel_id) else {
         // An unconfigured channel's unreadable row keeps the existing path; a Herdr row returns
         // to tmux when it is this node's Claude execution, and refuses otherwise.
@@ -171,7 +192,7 @@ pub(crate) async fn for_turn(
             None => TurnHost::Tmux,
         };
     };
-    match configured_turn(pool, provider, channel_id, session_key, endpoint).await {
+    match configured_turn(pool, provider, channel_id, session_key, endpoint, execution).await {
         Ok(plan) => TurnHost::Herdr(Box::new(plan)),
         Err(refusal) => TurnHost::Refused(refusal),
     }
@@ -211,28 +232,6 @@ where
 {
     match refusal_before_turn(pool, provider, channel_id, session_key).await {
         Some(HerdrRefusal::ExecutorNotWired) if herdr_turn_switched_on_for(provider) => None,
-        judged => judged,
-    }
-}
-
-/// A headless start's first judgement: only the greeting an authorized restart queued passes as
-/// the intake does; every other headless start on a configured channel stays refused.
-pub(crate) async fn start_refusal_before_turn<F>(
-    pool: Option<&PgPool>,
-    provider: &ProviderKind,
-    channel_id: u64,
-    session_key: impl FnOnce() -> F,
-    restart_seed: bool,
-) -> Option<HerdrRefusal>
-where
-    F: std::future::Future<Output = Option<String>>,
-{
-    match refusal_before_turn(pool, provider, channel_id, session_key).await {
-        Some(HerdrRefusal::ExecutorNotWired)
-            if restart_seed && herdr_turn_switched_on_for(provider) =>
-        {
-            None
-        }
         judged => judged,
     }
 }
@@ -311,11 +310,14 @@ async fn configured_turn(
     channel_id: u64,
     session_key: Option<&str>,
     endpoint: ChannelEndpoint,
+    execution: bool,
 ) -> Result<HerdrTurnPlan, HerdrRefusal> {
-    // Codex is judged by its own switch alone, before any read; off it stays unsupported.
+    // Execution checks the provider switch before any read; observation never starts a turn.
     let kind = match provider {
         ProviderKind::Claude => RuntimeHandoffKind::ClaudeTui,
-        ProviderKind::Codex if herdr_turn_switched_on_for(provider) => RuntimeHandoffKind::CodexTui,
+        ProviderKind::Codex if !execution || herdr_turn_switched_on_for(provider) => {
+            RuntimeHandoffKind::CodexTui
+        }
         _ => {
             let provider = provider.as_str().to_owned();
             return Err(HerdrRefusal::ProviderUnsupported { provider });
@@ -331,15 +333,19 @@ async fn configured_turn(
         return Err(HerdrRefusal::HostedRowUnreadable { detail });
     }
     let row = read.map_err(|detail| HerdrRefusal::HostedRowUnreadable { detail })?;
-    herdr_admission::check().map_err(|cause| HerdrRefusal::AdmissionStopped { cause })?;
-    let bootstrap = if o_writer_ready(channel_id, kind) {
-        false
-    } else if kind == RuntimeHandoffKind::CodexTui
-        && bootstrap_eligible(provider, channel_id, session_key, row.as_ref()).is_ok()
-    {
-        true
+    let bootstrap = if execution {
+        herdr_admission::check().map_err(|cause| HerdrRefusal::AdmissionStopped { cause })?;
+        if o_writer_ready(channel_id, kind) {
+            false
+        } else if kind == RuntimeHandoffKind::CodexTui
+            && bootstrap_eligible(provider, channel_id, session_key, row.as_ref()).is_ok()
+        {
+            true
+        } else {
+            return Err(HerdrRefusal::OWriterNotReady);
+        }
     } else {
-        return Err(HerdrRefusal::OWriterNotReady);
+        false
     };
     let endpoint = launch_endpoint(endpoint);
     Ok(HerdrTurnPlan {

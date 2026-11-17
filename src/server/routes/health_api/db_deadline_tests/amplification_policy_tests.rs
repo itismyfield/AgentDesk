@@ -128,7 +128,7 @@ pub(super) fn engines(
 }
 
 /// Seeds the read keys through the existing kv write bridge and waits for the expired pair.
-pub(super) fn seed(engine: &crate::engine::PolicyEngine) {
+pub(super) async fn seed(engine: &crate::engine::PolicyEngine) {
     let writes = r#"JSON.stringify([
         JSON.parse(agentdesk.kv.delete("dispatchRateLimitGateDangerPct")),
         JSON.parse(agentdesk.kv.delete("maxEntryRetries")),
@@ -154,14 +154,19 @@ pub(super) fn seed(engine: &crate::engine::PolicyEngine) {
     );
     let expired =
         r#"agentdesk.kv.get("amp_gone_1") === null && agentdesk.kv.get("amp_gone_2") === null"#;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !engine
-        .eval_js::<bool>(expired)
-        .expect("read the expired keys")
-    {
-        assert!(Instant::now() < deadline, "the seeded keys never expired");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    crate::test_support::wait::poll_within(
+        async || {
+            engine
+                .eval_js::<bool>(expired)
+                .expect("read the expired keys")
+                .then_some(())
+                .ok_or_else(|| "the seeded keys never expired".into())
+        },
+        Duration::from_secs(10),
+        "the seeded keys never expired",
+    )
+    .await
+    .expect("the seeded keys never expired");
 }
 
 fn micros_since(origin: Instant) -> u64 {

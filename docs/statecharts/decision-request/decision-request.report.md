@@ -1,0 +1,68 @@
+# Decision request 모델 초안 — design-3 최종
+
+코드 기준 1161162a18c87a0514f53dd7ae5dac3c830149cb.
+최종 설계 요지: [decision-forum.design.md](../../decision-forum.design.md).
+이번 formal 변경·실행 구간: 2026-11-17 10:50~11:13 KST(UTC 01:50~02:13), 30분 이내 종료.
+그 뒤에는 설계·코드 좌표·추정·보고서만 정리했다. 코드/cargo/PG/운영 쓰기 없음.
+
+DecisionRequest.tla의 개정2 single input workflow와 DecisionForum.tla는 바꾸지 않았다.
+이 모델/cfg 20개의 SHA256 바이트가 개정 2 사본과 같아 완료 결과를 재사용했다.
+새 DecisionDiscussion.tla/cfg 15개가 의견/메시지 ID/선택 경합/입력 close fence/requester reply·close/
+scan cursor/수명 flags를 다룬다. 저장소 기대값은 [expected.tsv](../expected.tsv)의 decision-request 행이다.
+
+새 정상 3개:
+- DiscussionFixed: 2,318,891 생성 / 487,184 고유 상태, 안전 규칙 13+진행성 2 PASS.
+- DiscussionMixed: 173,595 고유 상태, 의견+텍스트 선택+버튼 PASS.
+- DiscussionForeign: 79,629 고유 상태, 두 번째 작성자 비운영자일 때 claims/writes/choice 0 PASS.
+
+기대 반례 12개:
+- DiscussionDuplicate: terminal source 재관측 때 원장을 무시하여 같은 의견 effect2.
+- DiscussionClosedAdmission: 닫힘 뒤 새 message를 accepted로 기록.
+- DiscussionClosedWrite: 닫힘 fence와 원본 종결을 지키지 않는 writer 재개.
+- DiscussionRaw: source body를 trim/변형해 raw forwarding 불일치.
+- DiscussionEarlyNotice: effect 증거 전에 “의견 전달됨”.
+- DiscussionOpinionClose: 의견만으로 글 닫음.
+- DiscussionScope: 다른 agent의 requester action 수락.
+- DiscussionReplyState: 닫힌 글의 reply가 논리 Open을 만듦.
+- DiscussionCursor: 높은 gateway ID로 cursor를 올려 낮은 source 누락.
+- DiscussionClassify: opinion 상징 kind를 choice로 오분류.
+- DiscussionNoArchive: ClosedEventuallyArchived 단일 PROPERTY의 temporal CE.
+- DiscussionDisplay: PG lifecycle과 Discord 표시의 즉시 일치 CE.
+
+재사용 20개: 정상4+의도한CE16. 새15: 정상3+의도한CE12.
+총35: 정상7+CE28, 모두 기대 판정 일치. 미해결 제품 결함 28개라는 뜻이 아니다.
+Safety exit12/temporal exit13을 구별하며 parser error와 불완전 trace를 결과로 세지 않았다.
+초안 비ASCII TLA 문자열은 lexer가 거부하여 ASCII 상징 raw 값으로 바꾸고 최종 모델을 검사했다.
+실제 한글/emoji/CR/LF/기존 sanitizer 문구는 구현 fixture·TUI payload 비교 대상이다.
+
+규칙:
+NoDuplicateOpinion / OperatorOnly / ChoiceOne / NoClosedAdmission / NoClosedWrites /
+OpinionRawPreserved / OpinionKeepsOpen / OpinionNoticeTruth / RequesterOnly /
+ReplyNoLifecycleChange / CursorCoversAll / ClassMatches / ViewTruth.
+진행성은 ClosedEventuallyArchived와 OpinionEventuallyAccounted.
+Spec에서 실제 WF(Boot), WF(TurnBoundary), WF(Progress), WF(Repair)를 적용한다.
+
+범위와 추상화:
+- 한 요청, 답글2개와 버튼1개, 한 번의 재시작, 제한된 requester reply/close.
+- 숫자/이름 parser는 BaseKind로 추상화한다. 실제 정규식·label uniqueness는 설계 분류표와 구현 시험으로 확인.
+- source 원장과 cursor는 두 synthetic message ID의 complete-prefix로 추상화한다.
+  실제 Discord pagination/권한/SQL 격리는 별도 시험이다.
+- requester actor는 cap 검증을 마친 추상 역할이다. 모델 PASS가 실제 token authorization 코드의 증명은 아니다.
+- Close 정산은 R2 closing/finalize 프로토콜을 collapse한 것이다. PG/queue 원자 transaction을 주장하지 않는다.
+- R2는 승인 event당 1 workflow로 사용하며, selection은 request당1개, opinion은 source마다1개다.
+  실제 event별 다중 인스턴스/전체 FIFO 구현은 별도 통합 시험이 필요하다.
+- NoClosedWrites는 닫힘 뒤 새 writer 시작 금지다. 이미 나간 원격 write의 늦은 적용을 kill/undo하지 않는다.
+- terminal 실패 원본은 재스캔으로 다시 입력하지 않는다. 정상 busy original만 같은 ticket으로 이어간다.
+- 원문 보존의 기존 장애 좌표(API/headless trim, human_frame newline 정규화, ai_screen sanitizer,
+  non-owner sanitizer, receipt frame 재구성)는 설계 요지의 진입점 E57~E61과 P2-2 행에 있다.
+- 입력 실패는 정상화 뒤 사유 표시·폐기, 선택/ID/hash/결과 사실은 남긴다.
+- 논리 close와 물리 archive/lock을 나눴다. requester reply는 잠시 editable이어도 gate를 재오픈하지 않는다.
+- 영구 PG/Discord/권한 장애·무한 busy/무한 crash 진행성은 보장하지 않는다.
+- 같은 body를 쓴 다른 message ID는 별도 의견이다. 같은 ID edit는 새 입력이 아니다.
+
+실행 환경 Bash, Java21.0.13, TLC1.7.4, workers2, Xmx2g.
+jar SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88.
+모델 폴더에서:
+    java -XX:+UseParallelGC -Xmx2g -cp <jar> tlc2.TLC -workers 2 -config <Discussion*.cfg> -metadir <tmp> DecisionDiscussion.tla
+CI와 같은 기대값 확인은 `python3 scripts/ci/statecharts_tlc.py --jar <tla2tools.jar> --base origin/main`이다.
+.chart.mmd는 수작업 요약이며 전체 상태 공간의 자동 그림이 아니다.

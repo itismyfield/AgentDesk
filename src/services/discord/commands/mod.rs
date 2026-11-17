@@ -19,6 +19,8 @@ macro_rules! log_info_event {
 pub(in crate::services::discord) mod autocomplete;
 #[cfg(all(test, unix))]
 mod cancel_backstop_tests;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use cancel_backstop_tests::slash_clear_for_test;
 mod command_policy;
 mod config;
 pub(in crate::services::discord) mod control;

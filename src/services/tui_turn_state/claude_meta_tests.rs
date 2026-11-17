@@ -186,3 +186,19 @@ fn session_metadata_never_uncovers_an_idle_or_submitted_turn() {
         TuiTurnState::Idle
     );
 }
+
+// A busy writer reads a prompt or tool result past the markers as running; no other record is.
+#[test]
+fn a_busy_writer_reads_only_an_owed_reply_past_session_metadata() {
+    let compact = r#"{"type":"user","isCompactSummary":true,"message":{"content":"continued"}}"#;
+    let running: [&[&str]; 2] = [&[TOOL_USE, RESULT, PROMPT], &[TOOL_USE, TOOL_RESULT]];
+    let other: [&[&str]; 3] = [&[RESULT, LOCAL_COMMAND], &[RESULT, compact], &[INTERRUPTED]];
+    let running = running.map(|records| (records, TuiTurnState::UserSubmitted));
+    for (records, expected) in running
+        .into_iter()
+        .chain(other.map(|r| (r, TuiTurnState::Unknown)))
+    {
+        let file = transcript(&[records, &META]);
+        assert_eq!(observe_running(file.path()), expected, "{records:?}");
+    }
+}

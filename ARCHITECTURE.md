@@ -95,6 +95,7 @@ src/
 │   ├── dev_instance.rs
 │   ├── direct.rs
 │   ├── discord.rs
+│   ├── discord_channel_create.rs
 │   ├── discord_thread_create.rs
 │   ├── discord_thread_create_lock.rs
 │   ├── doctor.rs
@@ -161,6 +162,7 @@ src/
 │   ├── config_path.rs
 │   ├── daemon_snapshot_pg_tests.rs
 │   ├── decision_gate.rs
+│   ├── decisions.rs
 │   ├── disk_write.rs
 │   ├── disk_write_snapshot_tests.rs
 │   ├── late_live_reload_tests.rs
@@ -227,12 +229,15 @@ src/
 │   │   │   ├── http_force.rs
 │   │   │   ├── legacy_return.rs
 │   │   │   └── legacy_return_tests.rs
+│   │   ├── provider_resume_fence/
+│   │   │   └── tests.rs
 │   │   ├── canonical_identity.rs
 │   │   ├── canonical_identity_pg_tests.rs
 │   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
 │   │   ├── hosted_execution_tests.rs
 │   │   ├── listing.rs
+│   │   ├── provider_resume_fence.rs
 │   │   ├── rebind_override.rs
 │   │   ├── tests.rs
 │   │   └── thread_gc.rs
@@ -279,6 +284,7 @@ src/
 │   │   ├── advisory_lock.rs
 │   │   ├── advisory_lock_tests.rs
 │   │   ├── agent_sync.rs
+│   │   ├── intake_timing_pg_tests.rs
 │   │   ├── pool_return.rs
 │   │   ├── pool_return_pg_tests.rs
 │   │   ├── pooled_advisory_lock_pg_tests.rs
@@ -351,6 +357,7 @@ src/
 │   ├── cancel_tombstones.rs
 │   ├── channel_custody_lock.rs
 │   ├── channel_home_preferences.rs
+│   ├── decision_forums.rs
 │   ├── discarded_tx_result_scan_tests.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
@@ -563,7 +570,9 @@ src/
 │   └── transition_core.rs
 ├── logging/
 │   ├── auto_queue.rs
-│   └── auto_queue_tests.rs
+│   ├── auto_queue_tests.rs
+│   ├── intake_timing.rs
+│   └── intake_timing_tests.rs
 ├── runtime_layout/
 │   ├── config_merge.rs
 │   ├── legacy_migration.rs
@@ -605,6 +614,7 @@ src/
 │   │   ├── agents_turn_deliver/
 │   │   │   ├── legacy_origin.rs
 │   │   │   ├── legacy_origin_tests.rs
+│   │   │   ├── origin_admission.rs
 │   │   │   └── pg_tests.rs
 │   │   ├── auth/
 │   │   │   ├── tailnet_peer.rs
@@ -1352,6 +1362,7 @@ src/
 │   │   └── reconnect_tests.rs
 │   ├── codex_tui/
 │   │   ├── busy_inject/
+│   │   │   ├── draft_notice_tests.rs
 │   │   │   ├── expanded_contract_tests.rs
 │   │   │   ├── inject_tests.rs
 │   │   │   ├── rollout.rs
@@ -1485,6 +1496,8 @@ src/
 │   │   │   ├── replacement_tests.rs
 │   │   │   └── test_setup.rs
 │   │   ├── commands/
+│   │   │   ├── cancel_backstop_tests/
+│   │   │   │   └── slash_clear.rs
 │   │   │   ├── config/
 │   │   │   │   ├── provider_settings/
 │   │   │   │   │   └── revision_tests.rs
@@ -1507,7 +1520,8 @@ src/
 │   │   │   │   │   ├── clear_end_record_tests.rs
 │   │   │   │   │   ├── codex_end_record.rs
 │   │   │   │   │   ├── codex_end_tests.rs
-│   │   │   │   │   └── execution_cleanup.rs
+│   │   │   │   │   ├── execution_cleanup.rs
+│   │   │   │   │   └── resume_fence.rs
 │   │   │   │   ├── codex_clear_relaunch_tests/
 │   │   │   │   │   ├── absent_launch_tests/
 │   │   │   │   │   │   ├── auxiliary_tests/
@@ -1759,6 +1773,7 @@ src/
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   ├── inject_codex_v2_tests.rs
 │   │   │   │   ├── inject_tests.rs
+│   │   │   │   ├── preflight.rs
 │   │   │   │   ├── prepared.rs
 │   │   │   │   └── start_outcome_tests.rs
 │   │   │   ├── unbound_owners/
@@ -2372,6 +2387,7 @@ src/
 │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── replay_start_tests/
 │   │   │   │   │   │   └── routine_policy_tests.rs
+│   │   │   │   │   ├── admission.rs
 │   │   │   │   │   ├── entrypoints.rs
 │   │   │   │   │   ├── foreign_row_refusal_tests.rs
 │   │   │   │   │   ├── isolated_context.rs
@@ -2455,6 +2471,7 @@ src/
 │   │   │   │   │   ├── owner_input_rollback_tests.rs
 │   │   │   │   │   ├── owner_input_settled_front_tests.rs
 │   │   │   │   │   ├── owner_input_single_marker_tests.rs
+│   │   │   │   │   ├── owner_input_start_wait.rs
 │   │   │   │   │   ├── owner_input_stop_gate_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
 │   │   │   │   │   ├── owner_input_turn_mode_tests.rs
@@ -2510,8 +2527,10 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_busy_entry_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_busy_late_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_busy_running_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_clear_fence_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_http_start_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
@@ -2590,7 +2609,8 @@ src/
 │   │   │   │   │   │   ├── thread_child_tests.rs
 │   │   │   │   │   │   └── unbound_gateway_tests.rs
 │   │   │   │   │   └── owner_execution.rs
-│   │   │   │   └── owner_port.rs
+│   │   │   │   ├── owner_port.rs
+│   │   │   │   └── thread_lookup_tests.rs
 │   │   │   ├── owner_execution/
 │   │   │   │   ├── tests/
 │   │   │   │   │   └── mod.rs
@@ -3050,6 +3070,7 @@ src/
 │   │   │   ├── idle_tail_state.rs
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
+│   │   │   ├── input_notice_memo.rs
 │   │   │   ├── launch_script.rs
 │   │   │   ├── local_model_queue_wake_e2e_tests.rs
 │   │   │   ├── observed_prompt_decision.rs
@@ -3469,6 +3490,8 @@ src/
 │   │   ├── codex_absence.rs
 │   │   ├── compact_turn_authority.rs
 │   │   ├── completion_footer_metadata.rs
+│   │   ├── decision_forums.rs
+│   │   ├── decision_forums_tests.rs
 │   │   ├── delivery_lease_cell.rs
 │   │   ├── delivery_lease_key.rs
 │   │   ├── destructive_cancel_capture.rs
@@ -3648,6 +3671,7 @@ src/
 │   │   ├── listing.rs
 │   │   ├── listing_tests.rs
 │   │   ├── output.rs
+│   │   ├── resume_fence_api_tests.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
 │   │   ├── discord_delivery/
@@ -4102,6 +4126,7 @@ src/
 │   │   │   ├── unplaced_rig_tests.rs
 │   │   │   └── wire.rs
 │   │   ├── herdr_gate/
+│   │   │   ├── enter_readmit_tests.rs
 │   │   │   ├── legacy_return.rs
 │   │   │   ├── legacy_return_tests.rs
 │   │   │   ├── missing_marker_rig_tests.rs
@@ -4205,11 +4230,13 @@ src/
 │   │   │   │   ├── checked_tests.rs
 │   │   │   │   ├── compat.rs
 │   │   │   │   ├── compat_tests.rs
+│   │   │   │   ├── input_notice_memo_tests.rs
 │   │   │   │   ├── native_row.rs
 │   │   │   │   ├── notice_owner.rs
 │   │   │   │   ├── rollback_reader_tests.rs
 │   │   │   │   ├── screen.rs
 │   │   │   │   ├── screen_tests.rs
+│   │   │   │   ├── stamped.rs
 │   │   │   │   ├── v2.rs
 │   │   │   │   ├── v2_compaction_tests.rs
 │   │   │   │   └── v2_tests.rs
@@ -4255,6 +4282,7 @@ src/
 │   │   │   ├── intake_route/
 │   │   │   │   └── input.rs
 │   │   │   ├── channel_gate.rs
+│   │   │   ├── channel_lookup_tests.rs
 │   │   │   ├── child_funnel_tests.rs
 │   │   │   ├── intake_route.rs
 │   │   │   └── thread_child_record_tests.rs

@@ -1,0 +1,46 @@
+---
+title: "외부 Herdr 입력의 Idle 위임과 Busy 관측"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoDeadlock
+    lg1: Path to the HerdrAcceptedCompletes or HerdrAcceptedStarts or NoDeadlock bug
+    lg2: Repeats forever, so HerdrAcceptedCompletes or HerdrAcceptedStarts breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  s0: request #183; idle #183; epoch1/proof0 #183; 읽기예약0 #183; 턴0 입력0 답0
+  s1: checked #183; idle #183; epoch1/proof0 #183; 읽기예약0 #183; 턴0 입력0 답0
+  s2: queued #183; idle #183; epoch1/proof0 #183; 읽기예약0 #183; 턴0 입력0 답0
+  s3: held #183; booting #183; epoch2/proof0 #183; 읽기예약0 #183; 턴0 입력0 답0
+  s4: probed #183; idle #183; epoch1/proof1 #183; 읽기예약1 #183; 턴0 입력0 답0
+  s5: delegated #183; idle #183; epoch1/proof1 #183; 읽기예약0 #183; 턴0 입력0 답0
+  s6: held #183; idle #183; epoch2/proof0 #183; 읽기예약0 #183; 턴0 입력0 답0
+  s7: started #183; busy #183; epoch1/proof1 #183; 읽기예약0 #183; 턴1 입력1 답0
+  s8: submitted #183; busy #183; epoch1/proof1 #183; 읽기예약0 #183; 턴1 입력1 답0
+  s9: uncertain #183; booting #183; epoch2/proof0 #183; 읽기예약0 #183; 턴1 입력1 답0
+  s10: done #183; busy #183; epoch1/proof1 #183; 읽기예약0 #183; 턴1 입력1 답1
+  s11: failed #183; booting #183; epoch2/proof0 #183; 읽기예약0 #183; 턴1 입력1 답0
+  [*] --> s0
+  s0 --> s1: HNext
+  s1 --> s2: HNext
+  s2 --> s3: HNext
+  s2 --> s4: HNext
+  s3 --> s6: HNext
+  s4 --> s3: HNext
+  s4 --> s5: HNext
+  s5 --> s3: HNext
+  s5 --> s7: HNext
+  s7 --> s8: HNext
+  s7 --> s9: HNext
+  s8 --> s10: HNext
+  s9 --> s11: HNext
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s6 breaks
+  class s6 bugPath
+  class s6 repeats

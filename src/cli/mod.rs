@@ -8,6 +8,7 @@ mod dcserver_restart_wait;
 pub(crate) mod dev_instance;
 pub(crate) mod direct;
 pub(crate) mod discord;
+pub(crate) mod discord_channel_create;
 pub(crate) mod discord_thread_create;
 pub(crate) mod discord_thread_create_lock;
 pub(crate) mod doctor;

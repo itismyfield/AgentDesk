@@ -956,12 +956,11 @@ mod dispatch_delivery_reconcile_tests {
     }
 
     impl TestPostgresDb {
-        async fn try_create() -> Option<Self> {
+        async fn create() -> Self {
             let lock = crate::db::postgres::lock_test_lifecycle();
-            let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
-                drop(lock);
-                return None;
-            };
+            let base = crate::db::postgres::postgres_test_database_url_base().expect(
+                "POSTGRES_TEST_DATABASE_URL_BASE required for dispatch delivery reconcile tests",
+            ); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
             let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
@@ -972,24 +971,22 @@ mod dispatch_delivery_reconcile_tests {
                 uuid::Uuid::new_v4().simple()
             );
             let database_url = format!("{base}/{database_name}");
-            if let Err(error) = crate::db::postgres::create_test_database(
+            crate::db::postgres::create_test_database(
                 &admin_url,
                 &database_name,
                 "dispatch delivery reconcile tests",
             )
             .await
-            {
-                eprintln!("skipping postgres-backed dispatch delivery reconcile test: {error}");
-                drop(lock);
-                return None;
-            }
+            .unwrap_or_else(|error| {
+                panic!("dispatch delivery reconcile tests: create test database: {error}")
+            });
 
-            Some(Self {
+            Self {
                 _lock: lock,
                 admin_url,
                 database_name,
                 database_url,
-            })
+            }
         }
 
         async fn connect_and_migrate(&self) -> PgPool {
@@ -1152,9 +1149,7 @@ mod dispatch_delivery_reconcile_tests {
 
     #[tokio::test]
     async fn boot_reconcile_keeps_non_expired_processing_row_owned_by_peer_pg() {
-        let Some(pg_db) = TestPostgresDb::try_create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         sqlx::query(
@@ -1301,9 +1296,7 @@ mod dispatch_delivery_reconcile_tests {
 
     #[tokio::test]
     async fn dispatch_delivery_reconcile_classifies_three_mismatch_kinds_pg() {
-        let Some(pg_db) = TestPostgresDb::try_create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         seed_dispatch(&pool, "dispatch-missing-typed").await;
@@ -1367,9 +1360,7 @@ mod dispatch_delivery_reconcile_tests {
     async fn dispatch_delivery_reconcile_logs_dispatch_id_and_increments_metric_pg() {
         let _serial = lock_dispatch_delivery_metric_tests();
         reset_dispatch_delivery_event_mismatch_metrics_for_tests();
-        let Some(pg_db) = TestPostgresDb::try_create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         seed_dispatch(&pool, "dispatch-log-missing-typed").await;
@@ -1429,9 +1420,7 @@ mod dispatch_delivery_reconcile_tests {
 
     #[tokio::test]
     async fn dispatch_delivery_reconcile_expires_reserving_but_keeps_active_pg() {
-        let Some(pg_db) = TestPostgresDb::try_create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         // Expired reservation (finalize never ran): kv expires_at AND typed
@@ -1486,9 +1475,7 @@ mod dispatch_delivery_reconcile_tests {
 
     #[tokio::test]
     async fn dispatch_delivery_reconcile_backfills_notified_but_keeps_delivered_pg() {
-        let Some(pg_db) = TestPostgresDb::try_create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         // Orphan #1: notified key with no typed delivery event at all.
@@ -1626,9 +1613,7 @@ mod dispatch_delivery_reconcile_tests {
 
     #[tokio::test]
     async fn dispatch_delivery_reconcile_notified_upgrade_avoids_live_finalizer_race_pg() {
-        let Some(pg_db) = TestPostgresDb::try_create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         // A delivery whose send outlived its reservation: the expiry sweep flipped
@@ -1725,9 +1710,7 @@ mod dispatch_delivery_reconcile_tests {
 
     #[tokio::test]
     async fn dispatch_delivery_reconcile_prunes_notified_for_deleted_dispatch_pg() {
-        let Some(pg_db) = TestPostgresDb::try_create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         // A notified guard whose owning task_dispatches row no longer exists.
@@ -1758,9 +1741,7 @@ mod dispatch_delivery_reconcile_tests {
 
     #[tokio::test]
     async fn dispatch_delivery_reconcile_recovers_guard_less_typed_events_pg() {
-        let Some(pg_db) = TestPostgresDb::try_create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         // missing_kv_meta #1: a completed `sent` event whose dispatch_notified
@@ -1835,9 +1816,7 @@ mod dispatch_delivery_reconcile_tests {
     async fn dispatch_delivery_reconcile_recovers_and_clears_backlog_pg() {
         let _serial = lock_dispatch_delivery_metric_tests();
         reset_dispatch_delivery_event_mismatch_metrics_for_tests();
-        let Some(pg_db) = TestPostgresDb::try_create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         // Orphaned notified key with no typed event => missing_typed mismatch on

@@ -55,6 +55,59 @@ pub(crate) fn await_within<F: Future>(fut: F, cap: Duration) -> impl Future<Outp
     }
 }
 
+/// Polls until `sample` succeeds; each pending sample supplies the failure context.
+/// Wall time bounds cooperative samples even when tokio's clock auto-advances; blocking polls are not cut.
+#[track_caller]
+pub(crate) fn poll_within<T>(
+    mut sample: impl AsyncFnMut() -> Result<T, String>,
+    cap: Duration,
+    what: &str,
+) -> impl Future<Output = Result<T, String>> {
+    let caller = Location::caller();
+    async move {
+        let started = Instant::now();
+        let failed = |reason: &str| {
+            format!(
+                "{what}: {reason} at {caller} did not finish within its cap of {cap:?} (waited {:?})",
+                started.elapsed()
+            )
+        };
+        let mut reason = "sample did not complete".to_owned();
+        loop {
+            let result = {
+                let next = sample();
+                tokio::pin!(next);
+                loop {
+                    if started.elapsed() >= cap {
+                        return Err(failed(&reason));
+                    }
+                    tokio::select! {
+                        result = &mut next => break result,
+                        _ = tokio::time::sleep(cap.saturating_sub(started.elapsed())) => {}
+                    }
+                }
+            };
+            if started.elapsed() >= cap {
+                return Err(failed(
+                    result
+                        .as_ref()
+                        .err()
+                        .map(String::as_str)
+                        .unwrap_or("condition observed after deadline"),
+                ));
+            }
+            match result {
+                Ok(value) => return Ok(value),
+                Err(pending) => reason = pending,
+            }
+            tokio::time::sleep(
+                Duration::from_millis(10).min(cap.saturating_sub(started.elapsed())),
+            )
+            .await;
+        }
+    }
+}
+
 fn overran(what: &str, started: Instant, cap: Duration, caller: &Location<'_>) -> ! {
     panic!(
         "{what} at {caller} did not finish within its cap of {cap:?} (waited {:?})",
@@ -75,6 +128,73 @@ mod tests {
             .cloned()
             .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
             .unwrap_or_default()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn poll_within_waits_for_external_progress_on_a_paused_clock() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ready = Arc::new(AtomicBool::new(false));
+        let published = ready.clone();
+        let producer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            published.store(true, Ordering::Release);
+        });
+        let result = poll_within(
+            async || {
+                ready
+                    .load(Ordering::Acquire)
+                    .then_some(7)
+                    .ok_or_else(|| "external publication is pending".into())
+            },
+            WAIT_CAP,
+            "external publication",
+        )
+        .await;
+        join_within(producer, WAIT_CAP);
+        assert_eq!(result, Ok(7));
+    }
+
+    #[tokio::test]
+    async fn poll_within_observes_delayed_progress_and_reports_a_deadline() {
+        let ready_at = Instant::now() + Duration::from_millis(30);
+        assert_eq!(
+            poll_within(
+                async || (Instant::now() >= ready_at)
+                    .then_some(7)
+                    .ok_or_else(|| "delayed publication is pending".into()),
+                WAIT_CAP,
+                "delayed publication",
+            )
+            .await,
+            Ok(7)
+        );
+        let text = await_within(
+            poll_within(
+                async || Err::<(), _>("PG lock waiter never appeared".into()),
+                Duration::from_millis(20),
+                "PostgreSQL lock waiter",
+            ),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("an always-false condition must reach its deadline");
+        assert!(text.contains("PG lock waiter never appeared"), "{text}");
+        assert!(text.contains("cap of 20ms"), "{text}");
+        assert!(text.contains(file!()), "{text}");
+        let text = await_within(
+            poll_within(
+                async || std::future::pending::<Result<(), String>>().await,
+                Duration::from_millis(20),
+                "unfinished PG sample",
+            ),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("a pending sample must also reach the wall-time deadline");
+        assert!(text.contains("unfinished PG sample"), "{text}");
+        assert!(text.contains("cap of 20ms"), "{text}");
     }
 
     /// A thread parked on a channel never finishes on its own; the capped join must end the wait,

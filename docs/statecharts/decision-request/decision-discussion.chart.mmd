@@ -1,0 +1,26 @@
+stateDiagram-v2
+    [*] --> Open
+    Open --> Open: 운영자 의견 → event별 1회 → 의견 전달됨 / 정상화 실패는 사유·폐기
+    Open --> Selecting: 버튼·번호만·이름 전체 일치 / 최초 choice 선저장
+    Open --> Open: 봇·타인·중복 message ID 무효
+    Selecting --> Closed: 선택 전달 workflow terminal / 표시 뒤 archive+lock
+    Open --> Closed: 요청자 close / 먼저 신규 입력·write 봉쇄
+    Selecting --> Closed: 요청자 close / 미시도 event 종결
+    Closed --> Closed: 새 사용자 답글 무시 / scan·restart도 신규 주입 0
+    Open --> Open: 요청자 reply / 운영자 멘션
+    Selecting --> Selecting: 요청자 reply
+    Closed --> Closed: 요청자 reply / 잠시 editable 후 최신 Closed flags 복원
+    state 수신 {
+        Gateway --> 원장: 같은 observe_once
+        PeriodicScan --> 원장: window anchor·before pagination
+        BootScan --> 원장: 저장된 window·event 재확인
+        원장 --> 분류: thread+message ID UNIQUE
+        분류 --> 의견: 원문 별도 보존
+        분류 --> 선택: 번호·공개 이름 전체 일치
+        분류 --> 무시: 타인·봇·닫힌 글
+    }
+    note right of Closed
+        논리 Closed와 Discord flags는 별개.
+        이미 나간 한 원격 write의 늦은 적용은 새 주입이 아님.
+        reply 중에도 논리 gate는 닫힌 채 유지.
+    end note

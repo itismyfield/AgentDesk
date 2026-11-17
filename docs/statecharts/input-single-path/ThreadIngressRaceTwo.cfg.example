@@ -1,0 +1,7 @@
+\* EXPECTED_SAFETY=- EXPECTED_LIVENESS=-
+CONSTANTS
+    N = 2
+    Mutation = "none"
+SPECIFICATION Spec
+INVARIANT NoDuplicate NoConcurrentStartup NoStaleBootstrap SuccessBacked
+PROPERTY EachAcceptedCompletes EachDeliveredGetsReply

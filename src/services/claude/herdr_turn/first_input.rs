@@ -219,7 +219,9 @@ fn write(
         InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }
     ));
     match run {
-        InputRun::Applied => (),
+        InputRun::Applied => {
+            crate::logging::intake_timing::mark(crate::logging::intake_timing::Stage::Applied)
+        }
         stopped @ (InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }) => {
             let pane = attached.target.clone();
             let watched_session = logical.to_owned();

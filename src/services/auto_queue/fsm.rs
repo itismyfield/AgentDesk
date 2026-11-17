@@ -689,6 +689,7 @@ pub(super) fn load_kv_meta_value_pg(
 mod tests {
     use super::*;
     use crate::services::settings::clamp_retry_limit;
+    use crate::test_support::wait::poll_within;
 
     #[test]
     fn clamp_retry_limit_bounds() {
@@ -816,33 +817,27 @@ mod tests {
         conn
     }
 
-    async fn wait_for_run_token_waiter(conn: &mut PgConnection) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            sqlx::query("SELECT pg_stat_clear_snapshot()")
-                .execute(&mut *conn)
-                .await
-                .expect("clear FSM backend-status snapshot");
-            let waiting = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (
-                     SELECT 1
-                     FROM pg_stat_activity
-                     WHERE datname = current_database()
-                       AND wait_event_type = 'Lock'
-                       AND query LIKE '%pg_advisory_xact_lock%aq_run:%'
-                 )",
-            )
-            .fetch_one(&mut *conn)
+    async fn run_token_waiter_sample(conn: &mut PgConnection) -> Result<(), String> {
+        sqlx::query("SELECT pg_stat_clear_snapshot()")
+            .execute(&mut *conn)
             .await
-            .expect("inspect FSM run-token waiter");
-            if waiting {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "FSM restore path did not wait for the run token"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            .expect("clear FSM backend-status snapshot");
+        let waiting = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_stat_activity
+                 WHERE datname = current_database()
+                   AND wait_event_type = 'Lock'
+                   AND query LIKE '%pg_advisory_xact_lock%aq_run:%'
+             )",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .expect("inspect FSM run-token waiter");
+        if waiting {
+            Ok(())
+        } else {
+            Err("FSM restore path did not wait for the run token".into())
         }
     }
 
@@ -872,7 +867,13 @@ mod tests {
             attempt_restore_dispatch(&deps, "fsm-gate-run", &restore_candidate())
         });
 
-        wait_for_run_token_waiter(&mut token_holder).await;
+        poll_within(
+            async || run_token_waiter_sample(&mut token_holder).await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         cancel_run_and_release_token(&mut token_holder).await;
         let error = tokio::time::timeout(std::time::Duration::from_secs(5), attempt)
             .await
@@ -902,7 +903,13 @@ mod tests {
             attempt_restore_dispatch(&deps, "fsm-gate-run", &restore_candidate())
         });
 
-        wait_for_run_token_waiter(&mut token_holder).await;
+        poll_within(
+            async || run_token_waiter_sample(&mut token_holder).await,
+            std::time::Duration::from_secs(5),
+            "PostgreSQL lock waiter",
+        )
+        .await
+        .unwrap();
         seed_recovered_dispatch(&pool, "fsm-recovered-dispatch").await;
         cancel_run_and_release_token(&mut token_holder).await;
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), attempt)
