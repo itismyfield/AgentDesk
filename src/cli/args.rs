@@ -402,15 +402,19 @@ pub(crate) enum DiscordAction {
         #[arg(long)]
         guild_id: Option<String>,
     },
-    /// Create a text channel under an optional category. Idempotent by
-    /// (name, parent category) via list-then-create. Not safe under
-    /// concurrent invocations against the same guild.
+    /// Create a text channel under an optional category, idempotent by
+    /// (name, parent category) via list-then-create but not safe under
+    /// concurrent invocations. `--kind forum` resolves the category's Decision
+    /// forum under a PG lock and never re-sends a create whose result is unknown.
     ChannelCreate {
         /// Channel display name
         #[arg(long)]
         name: String,
-        /// Parent category channel id
-        #[arg(long)]
+        /// Channel kind
+        #[arg(long, value_enum, default_value_t)]
+        kind: super::discord_channel_create::ChannelKind,
+        /// Parent category channel id (required for forum)
+        #[arg(long, required_if_eq("kind", "forum"))]
         category_id: Option<String>,
         /// Optional channel topic
         #[arg(long)]

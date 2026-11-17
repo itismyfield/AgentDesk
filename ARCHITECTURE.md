@@ -95,6 +95,7 @@ src/
 │   ├── dev_instance.rs
 │   ├── direct.rs
 │   ├── discord.rs
+│   ├── discord_channel_create.rs
 │   ├── discord_thread_create.rs
 │   ├── discord_thread_create_lock.rs
 │   ├── doctor.rs
@@ -161,6 +162,7 @@ src/
 │   ├── config_path.rs
 │   ├── daemon_snapshot_pg_tests.rs
 │   ├── decision_gate.rs
+│   ├── decisions.rs
 │   ├── disk_write.rs
 │   ├── disk_write_snapshot_tests.rs
 │   ├── late_live_reload_tests.rs
@@ -351,6 +353,7 @@ src/
 │   ├── cancel_tombstones.rs
 │   ├── channel_custody_lock.rs
 │   ├── channel_home_preferences.rs
+│   ├── decision_forums.rs
 │   ├── discarded_tx_result_scan_tests.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
@@ -3422,6 +3425,8 @@ src/
 │   │   ├── codex_absence.rs
 │   │   ├── compact_turn_authority.rs
 │   │   ├── completion_footer_metadata.rs
+│   │   ├── decision_forums.rs
+│   │   ├── decision_forums_tests.rs
 │   │   ├── delivery_lease_cell.rs
 │   │   ├── delivery_lease_key.rs
 │   │   ├── destructive_cancel_capture.rs
