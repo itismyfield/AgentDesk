@@ -101,6 +101,33 @@ class RetainedQueueIdle(unittest.TestCase):
             with self.subTest(bind=bind):
                 self.assert_busy({**self.snapshot, "retained_inputs": [blank], "admission_binds": [{"receipt": "r", "at": bind}]}, True)
 
+    def test_told_start_rejected_input_closes_only_its_own_opaque_bind(self):
+        # The 11-16 E-50 queue's start-rejected original and the opaque bind receipt the runtime wrote for it.
+        source = {"message_id": 1570629691600015441, "queued_generation": 553}
+        original = {"author_id": 1479017284805722200, "author_is_bot": True, **source, "created_at_wall_time_ms": 1794537701861,
+                    "source_message_ids": [source["message_id"]],
+                    "source_message_queued_generations": [{**source, "enqueued_at_epoch_us": 1794537701860997}],
+                    "text": "응답에 정확히 한 줄로 [E2E:E50:bd44bdb2e758-20261113T024049Z-18899-E-50-claude-tui:T1] 만 출력해줘.",
+                    "reply_context": '\u001eagentdesk.retry-prompt.v1\n{"version":1,"legacy_rendered":false,"raw":null,'
+                                     '"selected":{"recovery":null,"feedback":null,"wip":null}}',
+                    "has_reply_boundary": False, "merge_consecutive": False, "channel_id": 1559670200419352696,
+                    "channel_name": None, "override_channel_id": None}
+        entry = {"input": {"identity": {"primary": source["message_id"]}, "original": original, "phase": "reserved",
+                           "attempt": None, "payload": None, "confirmation_deadline_ms": None},
+                 "reason": {"kind": "rejected", "reason": "start_rejected: herdr launch current_session: fixture",
+                            "start_failure": {"kind": "opaque", "failures": 5}},
+                 "disposition": "known_not_sent", "notice": {"kind": "retained_retry_required", "enqueued": True}}
+        bind = {"receipt": "tk:discord-c6b8ef3ea53aea3d05b46b770874a707:c41535f56d6a0a187cad6e248731e52a",
+                "at": {"kind": "opaque"}}
+        told = {**self.snapshot, "retained_inputs": [entry], "admission_binds": [bind]}
+        self.assert_busy(told, False)
+        waiting = {"items": [{"message_id": 2}], "head_injection": self.retained["input"], "owed_drop_receipts": [{}],
+                   "admission_binds": [{**bind, "receipt": bind["receipt"][:-1] + "0"}],
+                   "retained_inputs": [{**entry, "input": {**entry["input"], "attempt": self.retained["input"]["attempt"]}}]}
+        for key, value in waiting.items():
+            with self.subTest(key=key):
+                self.assert_busy({**told, key: value}, True)
+
     def test_unknown_dispositions_and_notice_shapes_stay_busy(self):
         for disposition in ("future", [], {}, 1):
             with self.subTest(disposition=disposition):

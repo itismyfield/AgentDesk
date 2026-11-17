@@ -5,9 +5,9 @@ from collections import Counter
 from hashlib import sha256
 import json
 
-from ci.rust_test_sources import Inventory, crate_roots, walk
 from ..rust_accessor_scan import (Token, boot_bindings, call_arguments, exports_for,
-                                imports, pairs, receiver_start, resolve, scopes, tokens)
+                                imports, pairs, production_walk, receiver_start, resolve,
+                                scopes, tokens)
 from .. import common
 from ..common import Finding
 from . import CheckSpec
@@ -85,7 +85,7 @@ def _sites(path, text, production, *, module=(), exports=None):
             kinds = [kind for name, kind, fn, where, lo, hi in bindings
                      if name == values[receiver] and (fn == function or fn == "<module>")
                      and scope[:len(where)] == where and lo <= i <= hi]
-            if (kinds[-1:] == ["BootSessionHosts"] or not kinds and values[receiver] == "boot"):
+            if kinds[-1:] == ["BootSessionHosts"]:
                 rule = "boot_channels"
         if rule is None or owned(path, RULES[rule]["owned_paths"]):
             continue
@@ -110,18 +110,19 @@ def _sites(path, text, production, *, module=(), exports=None):
 def scan(repo):
     """Scan the non-test module graph across all crate roots and cfg targets once per file."""
     repo = repo.resolve()
-    roots = crate_roots(repo)
-    if not roots:
+    scanned = production_walk(repo)
+    if not scanned.roots:
         raise ValueError("no Rust crate roots found")
+    for failures in scanned.failures:
+        if failures:
+            raise ValueError("; ".join(failures))
+    if scanned.error is not None:
+        raise scanned.error
     sources = {}
-    inventory = Inventory()
-    for root in roots:
-        walk(root, repo, inventory, production=True)
-        if inventory.read_failures or inventory.errors:
-            raise ValueError("; ".join(inventory.read_failures + inventory.errors))
-        for path, ts in inventory.source_tokens.items():
-            if ts is not None:
-                sources.setdefault(path, set()).update(t.start for t in ts if t.kind != "string")
+    inventory = scanned.inventory
+    for path, ts in inventory.source_tokens.items():
+        if ts is not None:
+            sources.setdefault(path, set()).update(t.start for t in ts if t.kind != "string")
     exports, views = {}, {}
     for path, production in sorted(sources.items()):
         ts = [Token(t.value, t.start, t.line, "literal" if t.kind == "string" else "code")

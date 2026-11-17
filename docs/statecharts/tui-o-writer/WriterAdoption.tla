@@ -1,5 +1,13 @@
 --------------------------- MODULE WriterAdoption ---------------------------
 EXTENDS Naturals
+VARIABLES lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
+          lateCommits, lateSkips, lateEnd, lateKind, lateCheckedOutput,
+          lateLife, lateSends, lateBadCommit, lateRestored,
+          lateRevision, lateCheckedRevision
+lateVars == <<lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
+              lateCommits, lateSkips, lateEnd, lateKind, lateCheckedOutput,
+              lateLife, lateSends, lateBadCommit, lateRestored,
+              lateRevision, lateCheckedRevision>>
 CONSTANTS Fix, Mut
 VARIABLES sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
           otherCustody, lp, op, rowCleared, dispatchSettled, attempts, restarts,
@@ -94,6 +102,12 @@ MaxSpan == IF Retries = 0 THEN 1 ELSE Retries
 WakeModel == Fix = "stage1" /\ Mut \in {"none", "noRetry", "retries4"}
 
 Init ==
+    /\ lateModal = FALSE /\ lateBound = FALSE /\ lateOutput = FALSE
+    /\ lateBoundFirst = FALSE /\ lateJudge = "waiting"
+    /\ lateCommits = 0 /\ lateSkips = 0 /\ lateEnd = "waiting"
+    /\ lateKind = "clean" /\ lateCheckedOutput = FALSE /\ lateLife = "live"
+    /\ lateSends = 0 /\ lateBadCommit = FALSE /\ lateRestored = FALSE
+    /\ lateRevision = 0 /\ lateCheckedRevision = 0
     /\ sel \in {"default", "explicitOff", "listExcl", "lateOff", "defaultOff"}
     /\ site \in IF sel = "default" THEN {"home", "foreign"} ELSE {"home"}
     /\ root \in IF sel = "default" THEN BOOLEAN ELSE {TRUE}
@@ -326,11 +340,12 @@ SecondPost == /\ wakeRead /\ Answer = "owned" /\ (Serial => ~rowCleared)
                               attempts, restarts, recovered, rejected, commitWithOther, hturn, hp>>
 
 Rest == UNCHANGED vars
-Next == Input \/ TerminalBody \/ ReEval \/ RecoveryBody \/ WatcherDispatch \/ FreshAdopt
+LegacyNext == Input \/ TerminalBody \/ ReEval \/ RecoveryBody \/ WatcherDispatch \/ FreshAdopt
         \/ WarmAdoptF \/ EofHandoff \/ Reject \/ OPost \/ OtherTurnEnds \/ Restart \/ NativeEnd \/ PrevDrains
         \/ LateTakeover \/ OtherIntakeEnds \/ WakeDefer \/ WakeGiveUp \/ ClaimOpens \/ ClaimEnds
         \/ SecondRead \/ SecondPost
         \/ HeadlessInput \/ HeadlessTerminal \/ Rest
+Next == LegacyNext /\ UNCHANGED lateVars
 
 \* Writer, recovery and turn-end actions are fair. Input, Restart, Reject, the stale handoff,
 \* the watcher finalizer and Codex's own turn end are environment.
@@ -360,4 +375,139 @@ RowEventuallySettled == [](op = 1 => <>rowCleared)
 \* A late takeover held by another turn's open intake commits once that input ends.
 TakeoverSettles == [](otherIntake /\ Adoptable /\ adopt \in {"Deferred", "Pending"}
                       => <>(adopt = "Committed" \/ rejected))
+
+\* Cold-launch domain: codex-late-launch.report.md entry census. Native records and Discord
+\* sends are distinct. lateBuffered changes prefix acceptance, not the argv/input protocol.
+LateInit == /\ sel = 0 /\ site = 0 /\ root = 0 /\ exec = 0 /\ bound = 0
+            /\ store = 0 /\ adopt = 0 /\ oStart = 0 /\ turn = 0 /\ waitMark = 0
+            /\ otherCustody = 0 /\ lp = 0 /\ op = 0 /\ rowCleared = 0
+            /\ dispatchSettled = 0 /\ attempts = 0 /\ restarts = 0 /\ recovered = 0
+            /\ rejected = 0 /\ commitWithOther = 0 /\ hturn = 0 /\ hp = 0
+            /\ nativeEnded = 0 /\ endedBeforeBase = 0 /\ prevOwed = 0 /\ commitPastOwed = 0
+            /\ otherIntake = 0 /\ mk = 0 /\ wakeRead = 0 /\ claim = 0 /\ tries = 0 /\ woke = 0 /\ opened = 0
+            /\ lateModal \in BOOLEAN
+            /\ lateBound = FALSE /\ lateOutput = FALSE /\ lateBoundFirst = FALSE
+            /\ lateJudge = "waiting" /\ lateCommits = 0 /\ lateSkips = 0
+            /\ lateEnd = "waiting" /\ lateCheckedOutput = FALSE
+            /\ lateKind \in {"clean", "announced", "identified", "unidentified",
+                              "turnEnd", "secondInput", "otherTurn"}
+            /\ lateLife = "live" /\ lateSends = 0
+            /\ lateBadCommit = FALSE /\ lateRestored = FALSE
+            /\ lateRevision = 0 /\ lateCheckedRevision = 0
+
+LateValid == ~lateOutput \/ lateKind \in {"announced", "identified", "turnEnd"}
+LateAccept == IF Fix = "lateBuffered"
+              THEN LateValid \/ Mut = "identity"
+              ELSE ~lateOutput
+LateCurrent == lateLife = "live" \/ Mut = "incarnation"
+LateQuiet == lateSends = 0 \/ Mut = "unfenced"
+LateRecheck == ~(Mut = "recheck" \/ (Mut = "bufferedRecheck" /\ lateCheckedOutput))
+LateReserved == Fix = "lateBuffered" /\ lateLife = "live"
+                /\ lateJudge \in {"waiting", "checked"}
+
+LateBind == /\ UNCHANGED vars /\ ~lateModal /\ ~lateBound
+            /\ (Fix # "lateBefore" \/ lateOutput)
+            /\ lateBound' = TRUE /\ lateBoundFirst' = ~lateOutput
+            /\ UNCHANGED <<lateModal, lateOutput, lateJudge, lateCommits, lateSkips,
+                            lateEnd, lateKind, lateCheckedOutput, lateLife, lateSends,
+                            lateBadCommit, lateRestored, lateRevision, lateCheckedRevision>>
+
+LateNativeOutput ==
+    /\ UNCHANGED vars /\ ~lateModal /\ ~lateOutput /\ lateKind # "clean"
+    /\ (Fix \in {"lateBefore", "lateBuffered"} \/ lateBound)
+    /\ (Fix # "lateFenced" \/ Mut = "unfenced" \/ lateJudge = "committed")
+    /\ lateOutput' = TRUE
+    /\ lateRevision' = 1
+    /\ UNCHANGED <<lateModal, lateBound, lateBoundFirst, lateJudge, lateCommits,
+                    lateSkips, lateEnd, lateKind, lateCheckedOutput, lateLife,
+                    lateSends, lateBadCommit, lateRestored, lateCheckedRevision>>
+
+\* A checked buffered prefix can grow once more, either safely or with an invalid record.
+LateAppend ==
+    /\ UNCHANGED vars /\ Fix = "lateBuffered" /\ lateJudge = "checked"
+    /\ lateOutput /\ LateValid /\ lateRevision = 1
+    /\ lateRevision' = 2
+    /\ lateKind' \in {"announced", "identified", "turnEnd", "unidentified",
+                      "secondInput", "otherTurn", "rewritten"}
+    /\ UNCHANGED <<lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
+                    lateCommits, lateSkips, lateEnd, lateCheckedOutput, lateLife,
+                    lateSends, lateBadCommit, lateRestored, lateCheckedRevision>>
+
+\* Separate initial judge and final judgment: output can arrive during intake_fence.await.
+LateJudge == /\ UNCHANGED vars /\ lateBound /\ lateJudge = "waiting" /\ LateCurrent
+             /\ lateJudge' = IF LateAccept THEN "checked" ELSE "skipped"
+             /\ lateCheckedOutput' = lateOutput
+             /\ lateCheckedRevision' = lateRevision
+             /\ lateSkips' = IF LateAccept THEN 0 ELSE 1
+             /\ UNCHANGED <<lateModal, lateBound, lateOutput, lateBoundFirst,
+                             lateCommits, lateEnd, lateKind, lateLife, lateSends,
+                             lateBadCommit, lateRestored, lateRevision>>
+
+LateCommit ==
+    /\ UNCHANGED vars /\ lateJudge = "checked" /\ LateCurrent
+    /\ IF (~LateAccept /\ LateRecheck) \/ ~LateQuiet
+       THEN /\ lateJudge' = "skipped" /\ lateSkips' = 1
+            /\ UNCHANGED <<lateCommits, lateBadCommit>>
+       ELSE IF lateCheckedRevision # lateRevision /\ LateRecheck
+            THEN /\ lateJudge' = "waiting"
+                 /\ UNCHANGED <<lateSkips, lateCommits, lateBadCommit>>
+            ELSE /\ lateJudge' = "committed" /\ lateCommits' = lateCommits + 1
+                 /\ lateBadCommit' = (~LateValid \/ lateSends # 0 \/ lateLife # "live"
+                                      \/ lateRevision # lateCheckedRevision)
+                 /\ UNCHANGED lateSkips
+    /\ UNCHANGED <<lateModal, lateBound, lateOutput, lateBoundFirst, lateEnd,
+                    lateKind, lateCheckedOutput, lateLife, lateSends, lateRestored,
+                    lateRevision, lateCheckedRevision>>
+
+\* Lifecycle invalidation is environment, including before/inside/after the commit fence.
+\* A restarted process restores a durable init; it must not recommit an unproved old attempt.
+LateInvalidate ==
+    /\ UNCHANGED vars /\ Fix = "lateBuffered" /\ lateLife = "live" /\ ~lateModal
+    /\ lateLife' \in {"restarted", "cancelled", "terminated", "cleared", "stopped",
+                      "rebound", "evicted"}
+    /\ UNCHANGED <<lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
+                    lateCommits, lateSkips, lateEnd, lateKind, lateCheckedOutput,
+                    lateSends, lateBadCommit, lateRestored, lateRevision, lateCheckedRevision>>
+LateRestore ==
+    /\ UNCHANGED vars /\ lateLife = "restarted" /\ ~lateRestored
+    /\ lateRestored' = TRUE
+    /\ lateCommits' = IF Mut = "restore" /\ lateCommits = 1 THEN 2 ELSE lateCommits
+    /\ UNCHANGED <<lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
+                    lateSkips, lateEnd, lateKind, lateCheckedOutput, lateLife,
+                    lateSends, lateBadCommit, lateRevision, lateCheckedRevision>>
+
+LateLegacySend ==
+    /\ UNCHANGED vars /\ Fix = "lateBuffered" /\ ~lateModal /\ lateSends = 0
+    /\ lateJudge # "committed"
+    /\ (~LateReserved \/ Mut \in {"admissionHold", "unfenced"})
+    /\ lateSends' = 1
+    /\ UNCHANGED <<lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
+                    lateCommits, lateSkips, lateEnd, lateKind, lateCheckedOutput,
+                    lateLife, lateBadCommit, lateRestored, lateRevision, lateCheckedRevision>>
+
+LateStartupEnd ==
+    /\ UNCHANGED vars /\ lateModal /\ lateEnd = "waiting"
+    /\ lateEnd' = IF Fix = "lateBefore" \/ Mut = "timeout"
+                   THEN "timeout" ELSE "reasonedFailure"
+    /\ UNCHANGED <<lateModal, lateBound, lateOutput, lateBoundFirst,
+                    lateJudge, lateCommits, lateSkips, lateKind, lateCheckedOutput,
+                    lateLife, lateSends, lateBadCommit, lateRestored,
+                    lateRevision, lateCheckedRevision>>
+
+LateNext == LateBind \/ LateNativeOutput \/ LateAppend \/ LateJudge \/ LateCommit
+            \/ LateStartupEnd \/ LateInvalidate \/ LateRestore \/ LateLegacySend
+LateSpec == LateInit /\ [][LateNext]_lateVars
+            /\ WF_lateVars(LateBind) /\ WF_lateVars(LateNativeOutput)
+            /\ WF_lateVars(LateJudge) /\ WF_lateVars(LateCommit)
+            /\ WF_lateVars(LateStartupEnd) /\ WF_lateVars(LateRestore)
+
+LateBindingPrecedesOutput == lateOutput => lateBound
+LateCommitAtMostOnce == lateCommits <= 1
+LateBoundBeforeNeverSkipped == lateBoundFirst => lateSkips = 0
+LateBoundBeforeCommits == [](lateBoundFirst => <>(lateCommits = 1))
+LateModalExplained == [](lateModal => <>(lateEnd = "reasonedFailure"))
+LateNoUnsafeCommit == ~lateBadCommit
+LateEligibleCommits == []((lateBound /\ LateValid /\ lateLife = "live" /\ lateSends = 0)
+                          => <>(lateCommits = 1 \/ ~LateValid \/ lateLife # "live"))
+LateRestartRestores == [](lateLife = "restarted" => <>lateRestored)
 =============================================================================

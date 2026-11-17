@@ -1,0 +1,14 @@
+schema_version = 1
+issue = 8165
+summary = "#8165 Codex late adopt: Codex 실행·rollout 경로가 tui_o cutover의 Codex 첫 입력 결속·무효화와 boot snapshot 출력 후보 조회를 호출한다(리뷰 CLEAN, #8131 B 이전 브랜치 기준선 항목)"
+# move = [ { section = "reverse_dependencies", old_id = "<base id>", new_id = "<head id>", reason = "..." } ]
+increase = [
+  { section = "reverse_dependencies", id = "3d5ad1751a7968541a67acf2b11c91213f3f793c132d433d0a0e317c8010e1b7", source = "src/lib.rs::crate::services::codex_tui::rollout_tail", target = "src/lib.rs::crate::services::tui_o::channel_policy::adoption", kind = "path", max_count = 2, reason = "accepted-debt" },
+  { section = "reverse_dependencies", id = "447f97ab6e63f8d8c62f5d86a6f467ce4c39e255a1280a5e9478e3282d551ec6", source = "src/lib.rs::crate::services::codex_tui::rollout_tail::handoff", target = "src/lib.rs::crate::services::tui_o::cutover", kind = "path", max_count = 1, reason = "accepted-debt" },
+  { section = "reverse_dependencies", id = "77033119fc8ef805209f606cdbb41f1a59a0372b1b422e1dec6c7f83e8f0514d", source = "src/lib.rs::crate::services::codex_tui::rollout_tail::handoff", target = "src/lib.rs::crate::services::tui_o::channel_policy::adoption", kind = "path", max_count = 3, reason = "accepted-debt" },
+  { section = "reverse_dependencies", id = "9aee4704fd0150889a06cd6fd645c1e8f67e0d011e3077fc5f375e6f59236aef", source = "src/lib.rs::crate::services::provider", target = "src/lib.rs::crate::services::tui_o::cutover", kind = "path", max_count = 2, reason = "accepted-debt" },
+  { section = "reverse_dependencies", id = "a6b1847bd77542f08332263ffa492e90e23beb0fd24d18a3d54eb7342d159a60", source = "src/lib.rs::crate::services::codex_tui::rollout_tail::handoff", target = "src/lib.rs::crate::services::tui_o::channel_policy::adoption::first_turn", kind = "path", max_count = 1, reason = "accepted-debt" },
+  { section = "reverse_dependencies", id = "cff8d1eaf4e700144791b9a5b2e9a8d4a5d45530f487bb048a039732aa181cdc", source = "src/lib.rs::crate::services::codex_tui::rollout_tail", target = "src/lib.rs::crate::services::tui_o::cutover", kind = "path", max_count = 1, reason = "accepted-debt" },
+  { section = "reverse_dependencies", id = "e6771a250250b0b185887d120f36299aa1addf9198b71df74237575425ae9b06", source = "src/lib.rs::crate::services::provider_teardown", target = "src/lib.rs::crate::services::tui_o::cutover", kind = "path", max_count = 1, reason = "accepted-debt" },
+  { section = "reverse_dependencies", id = "f5fd25deb74aa923b885d80f36f22eb3ae17033979b4553ed904f35713e0daee", source = "src/lib.rs::crate::services::codex::tui_session_launch::first_input", target = "src/lib.rs::crate::services::tui_o::cutover", kind = "path", max_count = 1, reason = "accepted-debt" },
+]

@@ -692,6 +692,7 @@ pub(crate) mod tests {
                 herdr_session: "not-used".into(),
             },
             row,
+            bootstrap: false,
         }))
     }
     pub(super) fn judged(channel: u64) -> Option<(String, TurnHost)> {

@@ -258,6 +258,34 @@ raise SystemExit(HARNESS.main(['--check', '--format', 'json', '--allowlist', str
         self.assertEqual(self.count(rows, "boot_channels"), 0)
         self.assertEqual(rows, [])
 
+    def test_callback_receiver_types_do_not_depend_on_their_names(self):
+        for name in ("boot", "hosts", "snapshot"):
+            with self.subTest(name=name):
+                rows = self.scan(f"""
+                    use crate::config::session_hosts::with_boot as host_view;
+                    use crate::services::tui_o::cutover::test_override::with_channels as output_view;
+                    fn caller() {{
+                        output_view(|{name}| {name}.unwrap().channels());
+                        host_view(|{name}| {name}.unwrap().channels());
+                    }}
+                """)
+                self.assertEqual(self.count(rows, "boot_channels"), 1)
+
+    def test_unknown_receiver_named_boot_is_not_type_evidence(self):
+        self.assertEqual(self.scan("fn caller() { boot.channels(); }"), [])
+
+    def test_output_callback_shadow_preserves_outer_host_binding(self):
+        rows = self.scan("""
+            fn caller(boot: &crate::config::session_hosts::BootSessionHosts) {
+                boot.channels();
+                crate::services::tui_o::cutover::test_override::with_channels(|boot| {
+                    boot.unwrap().channels();
+                });
+                boot.channels();
+            }
+        """)
+        self.assertEqual(self.count(rows, "boot_channels"), 2)
+
     def test_turbofish_qualified_and_imported_accessors_are_detected(self):
         rows = self.scan("""
             use crate::config::session_hosts::with_boot;

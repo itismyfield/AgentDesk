@@ -1693,3 +1693,5 @@ async fn an_open_turn_left_by_a_rotation_is_taken_and_its_late_end_posted_once()
     restart_posts_nothing(&harness, tasks, &a_source).await;
     assert_eq!(posted(&harness, "late part"), 1);
 }
+#[path = "host_codex_first_proof_tests.rs"]
+mod first_proof;
