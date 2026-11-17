@@ -905,7 +905,7 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
     }
     // Each later file leaves (or, with `!`, drops) at least one object of its own,
     // so a partial apply cannot pass.
-    let expected: [(i64, &[&str]); 28] = [
+    let expected: [(i64, &[&str]); 30] = [
         (
             163,
             &["table:channel_home_preferences", "constraint:chp_mode_home"],
@@ -1056,6 +1056,23 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
         (188, &["index:idx_review_tuning_outcomes_created_at"]),
         (189, &["index:idx_review_decisions_decided_at"]),
         (190, &["index:idx_arce_at"]),
+        (
+            195,
+            &[
+                "table:o_herdr_debt_runs",
+                "table:o_herdr_debt_effects",
+                "table:o_herdr_debt_grants",
+                "table:o_herdr_debt_attempts",
+                "constraint:o_herdr_debt_attempt_fk",
+            ],
+        ),
+        (
+            196,
+            &[
+                "table:tui_output_dispositions",
+                "column:tui_output_dispositions.message_id",
+            ],
+        ),
     ];
     assert_eq!(
         expected
