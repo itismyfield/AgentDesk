@@ -1005,6 +1005,7 @@ src/
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/
 │   │   │   │   ├── clear_held_tests.rs
+│   │   │   │   ├── hold_tests.rs
 │   │   │   │   ├── tests.rs
 │   │   │   │   └── unproven_tests.rs
 │   │   │   ├── boot_host_tests.rs
@@ -1013,6 +1014,9 @@ src/
 │   │   │   ├── composer_tests.rs
 │   │   │   ├── first_input.rs
 │   │   │   ├── handoff.rs
+│   │   │   ├── hold_record.rs
+│   │   │   ├── hold_resolve.rs
+│   │   │   ├── hold_resolve_tests.rs
 │   │   │   ├── live_reader.rs
 │   │   │   ├── never_attached.rs
 │   │   │   ├── provider_terminal_tests.rs
@@ -1139,6 +1143,7 @@ src/
 │   │   │   │   └── clear.rs
 │   │   │   ├── clear.rs
 │   │   │   ├── clear_tests.rs
+│   │   │   ├── closed_turn.rs
 │   │   │   ├── compact.rs
 │   │   │   ├── compact_tests.rs
 │   │   │   ├── dialog.rs
@@ -1147,6 +1152,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── readiness_tests.rs
 │   │   │   ├── restart_tests.rs
+│   │   │   ├── resume_record.rs
 │   │   │   ├── source.rs
 │   │   │   └── wait.rs
 │   │   ├── session/
