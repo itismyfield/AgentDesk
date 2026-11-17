@@ -114,11 +114,38 @@ pub(crate) fn draft_may_be_present(capture: &str) -> bool {
         None => ("unread", false),
     };
     if notify || draft_branch == "unread" {
-        tracing::info!(draft_branch, notify, "Codex draft notice decision");
-    } else {
-        tracing::debug!(draft_branch, notify, "Codex draft notice decision");
+        log_draft_notice_decision(draft_branch, notify);
     }
     notify
+}
+
+fn log_draft_notice_decision(draft_branch: &str, notify: bool) {
+    use tracing::{Event, Level, Metadata, callsite, field, metadata};
+
+    static CALLSITE: callsite::DefaultCallsite = callsite::DefaultCallsite::new(&METADATA);
+    static METADATA: Metadata<'static> = Metadata::new(
+        "codex_draft_notice_decision",
+        "agentdesk::services::codex_tui::draft_notice",
+        Level::INFO,
+        None,
+        None,
+        None,
+        field::FieldSet::new(
+            &["message", "draft_branch", "notify"],
+            callsite::Identifier(&CALLSITE),
+        ),
+        metadata::Kind::EVENT,
+    );
+    let _ = CALLSITE.register();
+    tracing::dispatcher::get_default(|dispatch| {
+        if dispatch.enabled(&METADATA) {
+            let message = "Codex draft notice decision";
+            let values: [Option<&dyn field::Value>; 3] =
+                [Some(&message), Some(&draft_branch), Some(&notify)];
+            let fields = METADATA.fields().value_set_all(&values);
+            dispatch.event(&Event::new(&METADATA, &fields));
+        }
+    });
 }
 
 /// Keep SGR state across wrapped suggestion rows, without treating color channels as dim codes.
