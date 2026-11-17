@@ -58,6 +58,8 @@ async fn scenario(
         tasks,
         _reserved: reserved,
     } = hosted_over_old(8_165_201).await;
+    // The old rollout's queued Legacy body went out before the first admission, as `bind_new` assumes.
+    io.queued_bodies.store(0, Ordering::SeqCst);
     let channel = harness.channel_id;
     let blocker = if let Some(pool) = pool {
         tokio::time::resume();
@@ -138,9 +140,12 @@ async fn scenario(
             .into_bytes();
     }
     let (path, source) = if trust {
+        // The launch publisher binds the canonical path, so the proof source names it too.
         let path = harness
             ._runtime
             .path()
+            .canonicalize()
+            .unwrap()
             .join(format!("rollout-{native_id}.jsonl"));
         std::fs::write(&path, &bytes).unwrap();
         let source = source_id_for(&native_id, &path).unwrap();
@@ -383,7 +388,7 @@ async fn scenario(
                 "announced is not sealed or posted"
             );
         }
-        if output.is_none() || output.as_deref() == Some("announced") {
+        if matches!(output.as_deref(), None | Some("announced" | "trust")) {
             append(&path, &first);
         }
         await_within(

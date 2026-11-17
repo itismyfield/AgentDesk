@@ -510,6 +510,12 @@ fn only_new_input_reopens_a_refused_episode_and_old_tokens_cannot_end_it() {
 async fn missing_prompt_and_wakes_exhaust_one_normalization_deadline() {
     use super::output_disposition::{Identity, Output, Phase, Reason};
     let fixture = Fixture::new(8_165_982);
+    // A header that proves the session with no prompt yet waits instead of refusing the source.
+    std::fs::write(
+        &fixture.source.path,
+        b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"s\",\"cwd\":\"/fixture\"}}\n",
+    )
+    .unwrap();
     let proof = fixture.proof();
     let output = Output::new(Identity::from_proof(&proof, 1), tokio::time::Instant::now());
     let result = crate::services::tui_o::writer::normalization::run(

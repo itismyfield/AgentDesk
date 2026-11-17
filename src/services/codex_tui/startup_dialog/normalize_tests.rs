@@ -168,8 +168,9 @@ fn real_trust_adapter_bounds_cwd_and_pane_observation() {
     std::fs::write(&program, "#!/bin/sh\ncase \" $* \" in\n*display-message*) printf '0\\n/fixture/cwd\\n';;\n*capture-pane*) printf 'fresh pane';;\nesac\n").unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
     let _path = Guard::prepend_path_after_shared_test_env_lock(root.path());
+    // A freshly written fixture program can take over 100 ms to start on a loaded macOS host.
     let observed = TrustHost
-        .observe("trust-adapter-fixture", Duration::from_millis(200))
+        .observe("trust-adapter-fixture", Duration::from_secs(4))
         .unwrap();
     assert_eq!(observed.cwd, PathBuf::from("/fixture/cwd"));
     assert_eq!(observed.text, "fresh pane");
