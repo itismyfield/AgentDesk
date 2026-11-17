@@ -34,7 +34,7 @@ pub(super) async fn deliver(
     }
     #[cfg(all(test, unix))]
     super::super::imessage_input_notice_tests::before_legacy_prepare().await;
-    let prepared = match registry.prepare_external_human_input(request).await {
+    let prepared = match registry.prepare_external_human_input(request, None).await {
         Ok(prepared) => prepared,
         Err(error) => {
             // A concurrent winner still owns its response if readiness changed during preparation.

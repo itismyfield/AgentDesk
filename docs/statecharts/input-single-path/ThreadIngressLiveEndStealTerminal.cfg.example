@@ -1,0 +1,9 @@
+\* EXPECTED_SAFETY=TerminalReaderOnly EXPECTED_LIVENESS=-
+SPECIFICATION Spec
+CONSTANTS Source = "terminal"
+          Exact = TRUE
+          ExecutionEnded = TRUE
+          Mutation = "stealTerminal"
+INVARIANTS TypeOK TerminalReaderOnly UnknownHeld SettlementAfterDelivery DoneNoResidue
+PROPERTIES EligibleEnds NextCanProgress
+CHECK_DEADLOCK FALSE

@@ -1,12 +1,33 @@
-//! Headless presentation stays unchanged; only the exact continuation has a start adapter.
+//! Headless execution policy keeps its exact retry while delivery can use a bound channel.
 use super::*;
 use crate::services::discord::replay_policy::{ExactHandoff, ExactRetry};
 
 type Restart = dyn Fn(ChannelId, ExactRetry) -> GatewayFuture<'static, ExactHandoff> + Send + Sync;
 
+#[cfg(all(test, unix))]
+type PresentationHook = Box<dyn FnOnce() + Send>;
+#[cfg(all(test, unix))]
+static BEFORE_PRESENTATION: std::sync::Mutex<Option<PresentationHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(all(test, unix))]
+struct PresentationHookGuard;
+#[cfg(all(test, unix))]
+impl Drop for PresentationHookGuard {
+    fn drop(&mut self) {
+        drop(
+            BEFORE_PRESENTATION
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take(),
+        );
+    }
+}
+
 pub(in crate::services::discord) struct HeadlessExactGateway {
     base: HeadlessGateway,
-    restart: Arc<Restart>,
+    restart: Option<Arc<Restart>>,
+    presentation: Option<Arc<dyn TurnGateway>>,
 }
 
 impl HeadlessExactGateway {
@@ -18,8 +39,35 @@ impl HeadlessExactGateway {
     ) -> Self {
         Self {
             base: HeadlessGateway,
-            restart: Arc::new(restart),
+            restart: Some(Arc::new(restart)),
+            presentation: None,
         }
+    }
+    pub(in crate::services::discord) fn with_presentation(
+        exact: Option<Self>,
+        presentation: Arc<dyn TurnGateway>,
+    ) -> Self {
+        let mut gateway = exact.unwrap_or(Self {
+            base: HeadlessGateway,
+            restart: None,
+            presentation: None,
+        });
+        gateway.presentation = Some(presentation);
+        gateway
+    }
+
+    #[cfg(all(test, unix))]
+    pub(in crate::services::discord) fn before_next_presentation(
+        hook: PresentationHook,
+    ) -> impl Drop {
+        *BEFORE_PRESENTATION
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(hook);
+        PresentationHookGuard
+    }
+
+    fn presentation(&self) -> &dyn TurnGateway {
+        self.presentation.as_deref().unwrap_or(&self.base)
     }
 }
 
@@ -29,7 +77,7 @@ impl TurnGateway for HeadlessExactGateway {
         channel: ChannelId,
         content: &'a str,
     ) -> GatewayFuture<'a, Result<MessageId, String>> {
-        TurnGateway::send_message(&self.base, channel, content)
+        TurnGateway::send_message(self.presentation(), channel, content)
     }
     fn edit_message<'a>(
         &'a self,
@@ -37,14 +85,14 @@ impl TurnGateway for HeadlessExactGateway {
         message: MessageId,
         content: &'a str,
     ) -> GatewayFuture<'a, Result<(), String>> {
-        TurnGateway::edit_message(&self.base, channel, message, content)
+        TurnGateway::edit_message(self.presentation(), channel, message, content)
     }
     fn delete_message<'a>(
         &'a self,
         channel: ChannelId,
         message: MessageId,
     ) -> GatewayFuture<'a, Result<(), String>> {
-        self.base.delete_message(channel, message)
+        self.presentation().delete_message(channel, message)
     }
     fn send_long_message_with_rollback<'a>(
         &'a self,
@@ -52,7 +100,7 @@ impl TurnGateway for HeadlessExactGateway {
         anchor: MessageId,
         content: &'a str,
     ) -> GatewayFuture<'a, Result<Vec<MessageId>, String>> {
-        self.base
+        self.presentation()
             .send_long_message_with_rollback(channel, anchor, content)
     }
     fn replace_message_with_outcome<'a>(
@@ -61,7 +109,7 @@ impl TurnGateway for HeadlessExactGateway {
         message: MessageId,
         content: &'a str,
     ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
-        self.base
+        self.presentation()
             .replace_message_with_outcome(channel, message, content)
     }
     fn schedule_retry_with_history<'a>(
@@ -78,7 +126,10 @@ impl TurnGateway for HeadlessExactGateway {
         channel: ChannelId,
         retry: ExactRetry,
     ) -> GatewayFuture<'a, ExactHandoff> {
-        (self.restart)(channel, retry)
+        match &self.restart {
+            Some(restart) => restart(channel, retry),
+            None => self.base.schedule_exact_retry_with_history(channel, retry),
+        }
     }
     fn dispatch_queued_turn<'a>(
         &'a self,
@@ -102,6 +153,19 @@ impl TurnGateway for HeadlessExactGateway {
     }
     fn can_chain_locally(&self) -> bool {
         self.base.can_chain_locally()
+    }
+    fn can_deliver_directly(&self) -> bool {
+        #[cfg(all(test, unix))]
+        if self.presentation.is_some() {
+            let hook = BEFORE_PRESENTATION
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        self.presentation().can_deliver_directly()
     }
     fn bot_owner_provider(&self) -> Option<ProviderKind> {
         self.base.bot_owner_provider()

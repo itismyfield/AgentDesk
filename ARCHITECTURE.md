@@ -614,6 +614,7 @@ src/
 │   │   ├── agents_turn_deliver/
 │   │   │   ├── legacy_origin.rs
 │   │   │   ├── legacy_origin_tests.rs
+│   │   │   ├── origin_admission.rs
 │   │   │   └── pg_tests.rs
 │   │   ├── auth/
 │   │   │   ├── tailnet_peer.rs
@@ -1768,6 +1769,7 @@ src/
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   ├── inject_codex_v2_tests.rs
 │   │   │   │   ├── inject_tests.rs
+│   │   │   │   ├── preflight.rs
 │   │   │   │   ├── prepared.rs
 │   │   │   │   └── start_outcome_tests.rs
 │   │   │   ├── unbound_owners/
@@ -2370,6 +2372,7 @@ src/
 │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── replay_start_tests/
 │   │   │   │   │   │   └── routine_policy_tests.rs
+│   │   │   │   │   ├── admission.rs
 │   │   │   │   │   ├── entrypoints.rs
 │   │   │   │   │   ├── foreign_row_refusal_tests.rs
 │   │   │   │   │   ├── isolated_context.rs
@@ -2451,6 +2454,7 @@ src/
 │   │   │   │   │   ├── owner_input_rollback_tests.rs
 │   │   │   │   │   ├── owner_input_settled_front_tests.rs
 │   │   │   │   │   ├── owner_input_single_marker_tests.rs
+│   │   │   │   │   ├── owner_input_start_wait.rs
 │   │   │   │   │   ├── owner_input_stop_gate_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
 │   │   │   │   │   ├── owner_input_turn_mode_tests.rs
@@ -2503,6 +2507,7 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_clear_fence_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_http_start_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs

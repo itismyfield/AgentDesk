@@ -1,0 +1,11 @@
+\* EXPECTED_SAFETY=- EXPECTED_LIVENESS=-
+SPECIFICATION Spec
+CONSTANTS
+    Contract = "boundGateway"
+    BodyOwner = "bridge"
+    Mutation = "none"
+    CanRestart = FALSE
+INVARIANTS TypeOK ExactlyOneReply NoSilentLoss NoResidueAfterEnd
+           TerminalRequiresPresenter SourcePreserved LiveCustody
+PROPERTIES EachReply EachEnds NextProgress EventuallyDrained
+CHECK_DEADLOCK FALSE

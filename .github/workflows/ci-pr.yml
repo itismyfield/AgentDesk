@@ -324,6 +324,7 @@ jobs:
               - 'src/services/discord/destructive_cancel_gate.rs'
               - 'src/services/discord/e2e_control.rs'
               - 'src/services/discord/formatting/**'
+              - 'src/services/discord/gateway/**'
               - 'src/services/discord/health.rs'
               - 'src/services/discord/health/**'
               - 'src/services/discord/host_defer_gate.rs'
