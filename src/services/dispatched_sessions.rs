@@ -28,6 +28,8 @@ pub(crate) use listing::list_dispatched_sessions_pg;
 #[cfg(test)]
 mod listing_tests;
 mod output;
+#[cfg(all(test, unix))]
+mod resume_fence_api_tests;
 pub use output::tmux_output;
 
 #[path = "dispatched_sessions/tmux_cleanup.rs"]
@@ -217,6 +219,23 @@ pub async fn get_claude_session_id(
         .await
         {
             Ok(Some(ids)) => {
+                let fenced =
+                    dispatched_sessions_db::provider_resume_fence::load_by_resolved_key_pg(
+                        pool,
+                        &ids.resolved_session_key,
+                    )
+                    .await
+                    .map_err(|error| AppError::internal(error).with_code(ErrorCode::Database))?;
+                if fenced.is_some() {
+                    return Ok((
+                        StatusCode::OK,
+                        Json(json!({
+                            "claude_session_id": null,
+                            "session_id": null,
+                            "raw_provider_session_id": null,
+                        })),
+                    ));
+                }
                 let selected_session_id =
                     selected_provider_resume_selector_for_provider_recording_observation(
                         pool, provider, &ids,

@@ -5,6 +5,8 @@ mod agents_crud;
 mod agents_input_result;
 mod agents_setup;
 mod agents_turn_deliver;
+#[cfg(all(test, unix))]
+pub(crate) use agents_turn_deliver::{DELIVERY_PROBE_FOR_TEST, DeliveryProbe};
 mod agents_turn_target;
 pub mod analytics;
 #[cfg(test)]
@@ -740,6 +742,9 @@ pub(super) fn api_router_with_dashboard_access(
         .with_state(state)
         .layer(axum::Extension(access))
         .layer(tower_http::compression::CompressionLayer::new())
+        .layer(axum::middleware::from_fn(
+            crate::logging::intake_timing::api_trace_middleware,
+        ))
 }
 
 fn compose_api_router(state: AppState) -> ApiRouter {

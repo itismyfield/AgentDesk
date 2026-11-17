@@ -1,0 +1,31 @@
+---
+title: "API 입력을 같은 스레드 세션으로 전달"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoDeadlock
+    lg1: Path to the AcceptedCompletes or NoDeadlock bug
+    lg2: Repeats forever, so AcceptedCompletes breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  s0: 외부 입력 도착
+  s1: 대상 권한 확인
+  s2: 부팅 완료 대기
+  s3: 실패 알림 보관
+  s4: 준비됐지만 보관 입력 미기상
+  s5: 보이는 실패
+  [*] --> s0
+  s0 --> s1: 부모와 에이전트 바인딩 확인
+  s1 --> s2: 검증한 원본 인계
+  s2 --> s3: 부팅 실패를 원본에 돌려줌
+  s2 --> s4: 세션 준비와 보관 입력 깨움
+  s3 --> s5: 실패를 실제로 알림
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s4 breaks
+  class s4 bugPath
+  class s4 repeats

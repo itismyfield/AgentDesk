@@ -201,7 +201,7 @@ pub(in crate::services::discord) async fn update_channel_model_override(
     next_override: Option<String>,
 ) -> io::Result<bool> {
     shared.check_settings_owner(provider, channel_id).await?;
-    let channel_name = super::effort::channel_name(shared, channel_id).await;
+    let (channel_name, cwd) = super::effort::session_facts(shared, channel_id).await;
     let mut settings = shared.settings.write().await;
     let current = shared
         .overrides
@@ -223,7 +223,8 @@ pub(in crate::services::discord) async fn update_channel_model_override(
         dispatch_role,
         next_override.as_deref(),
     );
-    super::effort::check_saved_model(&settings, channel_id, provider, model.as_deref())?;
+    let next = (model.as_deref(), cwd.as_deref());
+    super::effort::check_saved_model(&settings, channel_id, provider, next)?;
     // A local Claude TUI takes the new model by restarting on its session, keeping its context.
     let relaunch = claude_local_tui_relaunch_applies(provider, channel_id);
     let reset = !relaunch

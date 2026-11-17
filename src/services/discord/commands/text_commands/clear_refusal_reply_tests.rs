@@ -48,7 +48,9 @@ impl Rig {
         let root = crate::config::TestRuntimeRootGuard::new();
         let tmux = ScriptedTmux::install();
         let (db, pool) = postgres().await;
-        let shared = shared_on(&pool).await;
+        let mut shared = shared_on(&pool).await;
+        Arc::get_mut(&mut shared).unwrap().token_hash =
+            crate::db::dispatched_sessions::hosted_execution::tests::TOKEN.into();
         let api = Recorder::start().await;
         let (_, gateway_url, gateway) =
             discord_mock::start(discord_mock::DiscordMockState::new()).await;

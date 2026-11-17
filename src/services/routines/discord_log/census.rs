@@ -56,13 +56,18 @@ impl RoutineDiscordLogger {
             Ok(state) => state,
             Err(error) => return RoutineDiscordLogStatus::failed(error),
         };
+        let thread = self.run_thread_target(store, routine, &outcome.run_id);
+        let (thread_store, saved_thread) = match thread.await {
+            Ok(thread) => thread,
+            Err(error) => return RoutineDiscordLogStatus::failed(error),
+        };
         let target = match self
             .resolve_routine_log_target(
-                Some(store),
+                thread_store,
                 Some(&routine.id),
                 Some(&routine.name),
                 routine.agent_id.as_deref(),
-                routine.discord_thread_id.as_deref(),
+                saved_thread,
             )
             .await
         {

@@ -26,14 +26,14 @@
           "source": "src/cli/discord_thread_create.rs",
           "function": "async_os_file_lock_serializes_actual_child_processes",
           "stdout": "null",
-          "sha256": "ceea9c433bf4872c1fba30f9b76eb7a7b25864dabd40059e6d8badc9e67c199e",
+          "sha256": "d1bfe8447d96241b2f21bda96d5db14ccb37eba233c39f9c2606ad720347a21d",
           "ignored_args": 2
         },
         {
           "source": "src/cli/discord_thread_create.rs",
           "function": "windows_async_waiter_recovers_abandoned_owner",
           "stdout": "null",
-          "sha256": "d247004e1fe81a8b333cf67f301740261df6f9c70913fdf0a7c440d82e507fe1",
+          "sha256": "f1f923b0c086c621dd59e6c669cccd074492436cd5a6e21181441157567e7ac2",
           "ignored_args": 2
         },
         {

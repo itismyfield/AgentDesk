@@ -1,0 +1,11 @@
+\* EXPECTED_SAFETY=NoSilentLoss EXPECTED_LIVENESS=-
+SPECIFICATION Spec
+CONSTANTS
+    Contract = "boundGateway"
+    BodyOwner = "O"
+    Mutation = "dropCustody"
+    CanRestart = FALSE
+INVARIANTS TypeOK ExactlyOneReply NoSilentLoss NoResidueAfterEnd
+           TerminalRequiresPresenter SourcePreserved LiveCustody
+PROPERTIES EachReply EachEnds NextProgress EventuallyDrained
+CHECK_DEADLOCK FALSE

@@ -3,7 +3,7 @@ use super::super::provider_dispatch::replay_scope;
 use super::*;
 use crate::db::replay_disposition::write::CanonicalInput;
 use crate::services::cluster::attachment_transfer::uploads::PendingUploads;
-use crate::services::discord::gateway::{HeadlessExactGateway, TurnGateway};
+use crate::services::discord::gateway::{DiscordGateway, HeadlessExactGateway, TurnGateway};
 use crate::services::discord::replay_policy::permit::EffectTarget;
 use crate::services::discord::replay_policy::{self, ExactHandoff, ExactRetry};
 use crate::services::discord::router::intake_dispatch::replay_admission::{
@@ -152,7 +152,11 @@ impl Request<'_> {
         memento_context_loaded: &mut bool,
         session_strategy_reason: &mut &'static str,
     ) {
-        if !retrying() {
+        // The effort continuation resumes the session its restart already relaunched; a pending
+        // reset waits for the next input instead of starting it over.
+        let effort_continuation =
+            self.source == Some(crate::services::turn_orchestrator::effort_intent::SOURCE);
+        if !retrying() && !effort_continuation {
             super::super::super::super::commands::reset_provider_session_if_pending(
                 &self.ctx.http,
                 self.shared,
@@ -419,15 +423,68 @@ impl Request<'_> {
 
     pub(super) fn gateway(
         &self,
+        inflight: &mut InflightTurnState,
+        uploads: &PendingUploads,
+        cwd: &str,
+        host: &crate::services::turn_host::TurnHost,
+    ) -> Arc<dyn TurnGateway> {
+        let external = self.metadata.is_none_or(|metadata| {
+            metadata.get("routine_id").is_none() && metadata.get("scheduled_message_id").is_none()
+        });
+        let presentation = (external
+            && matches!(host, crate::services::turn_host::TurnHost::Herdr(_)))
+        .then(|| {
+            Arc::new(DiscordGateway::new(
+                self.ctx.http.clone(),
+                self.shared.clone(),
+                self.provider.clone(),
+                None,
+            )) as Arc<dyn TurnGateway>
+        });
+        if presentation.is_some() {
+            // A headless reservation names an input, not a Discord response anchor.
+            if crate::services::discord::is_synthetic_headless_message_id_raw(
+                inflight.current_msg_id,
+            ) {
+                inflight.current_msg_id = 0;
+                inflight.current_msg_len = 0;
+            }
+            if inflight.runtime_kind.is_none() {
+                use crate::services::agent_protocol::RuntimeHandoffKind;
+                let kind = match self.provider {
+                    ProviderKind::Claude => Some(RuntimeHandoffKind::ClaudeTui),
+                    ProviderKind::Codex => Some(RuntimeHandoffKind::CodexTui),
+                    _ => None,
+                };
+                apply_prelaunch_runtime_kind(inflight, kind);
+            }
+            if inflight.tmux_session_name.is_none()
+                && let crate::services::turn_host::TurnHost::Herdr(plan) = host
+                && let Some(row) = &plan.row
+                && let crate::db::dispatched_sessions::hosted_execution::HostedRecord::Known(record) =
+                    &row.record
+            {
+                inflight.tmux_session_name = Some(record.owner.logical_key.clone());
+            }
+        }
+        let exact = self.exact_gateway(inflight, uploads, cwd);
+        match (presentation, exact) {
+            (Some(presentation), exact) => {
+                Arc::new(HeadlessExactGateway::with_presentation(exact, presentation))
+            }
+            (None, Some(exact)) => Arc::new(exact),
+            (None, None) => Arc::new(HeadlessGateway),
+        }
+    }
+
+    fn exact_gateway(
+        &self,
         inflight: &InflightTurnState,
         uploads: &PendingUploads,
         cwd: &str,
-    ) -> Arc<dyn TurnGateway> {
-        let (Some(receipt), Some(session_key)) =
-            (inflight.replay_receipt_id, inflight.session_key.as_ref())
-        else {
-            return Arc::new(HeadlessGateway);
-        };
+    ) -> Option<HeadlessExactGateway> {
+        let receipt = inflight.replay_receipt_id?;
+        let session_key = inflight.session_key.as_ref()?;
         let owned = Arc::new(OwnedRequest {
             ctx: self.ctx.clone(),
             shared: self.shared.clone(),
@@ -451,7 +508,7 @@ impl Request<'_> {
             uploads: uploads.clone(),
             sources: inflight.source_message_ids.clone(),
         });
-        Arc::new(HeadlessExactGateway::new(move |channel, retry| {
+        Some(HeadlessExactGateway::new(move |channel, retry| {
             let owned = Arc::clone(&owned);
             Box::pin(async move { owned.retry(channel, retry).await })
         }))

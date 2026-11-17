@@ -27,16 +27,16 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn new() -> Option<Self> {
+    async fn new() -> Self {
         Self::build(tempfile::tempdir().unwrap(), None).await
     }
 
     /// Joins a database another process created; the root sits under `parent` so it can read it.
-    async fn attach(parent: &std::path::Path, database: String) -> Option<Self> {
+    async fn attach(parent: &std::path::Path, database: String) -> Self {
         Self::build(tempfile::tempdir_in(parent).unwrap(), Some(database)).await
     }
 
-    async fn build(root: tempfile::TempDir, existing: Option<String>) -> Option<Self> {
+    async fn build(root: tempfile::TempDir, existing: Option<String>) -> Self {
         let environment = crate::config_live_reload::test_live_guard(
             crate::config::test_env_lock::acquire_shared_test_env_lock(),
         );
@@ -53,10 +53,8 @@ impl Fixture {
             ),
         ];
         let lifecycle = postgres::lock_test_lifecycle();
-        let Some(base) = postgres::postgres_test_database_url_base() else {
-            eprintln!("SKIP: isolated PostgreSQL fixture is not configured");
-            return None;
-        };
+        let base = postgres::postgres_test_database_url_base()
+            .expect("POSTGRES_TEST_DATABASE_URL_BASE required for gateway handback PG tests"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
         let admin = format!(
             "{base}/{}",
             std::env::var("POSTGRES_TEST_ADMIN_DB").unwrap_or_else(|_| "postgres".into())
@@ -87,7 +85,7 @@ impl Fixture {
             sqlx::query("INSERT INTO worker_nodes(instance_id,status,last_heartbeat_at) VALUES ('home','online',NOW())")
                 .execute(&pool).await.unwrap();
         }
-        Some(Self {
+        Self {
             _root: root,
             config,
             pool,
@@ -96,7 +94,7 @@ impl Fixture {
             _paths: paths,
             _lifecycle: lifecycle,
             _environment: environment,
-        })
+        }
     }
 
     fn breaker(&self) -> GatewayHandbackBreaker {
@@ -282,9 +280,7 @@ impl Drop for Running {
 
 #[tokio::test]
 async fn observed_acquisition_settles_each_pending_handback_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     let shared = super::super::make_shared_data_for_tests_with_storage(Some(fixture.pool.clone()));
     let mut breaker = fixture.breaker();
     for _ in 0..3 {
@@ -315,9 +311,7 @@ async fn observed_acquisition_settles_each_pending_handback_pg() {
 
 #[tokio::test]
 async fn empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self_fences_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     let grace_secs = fixture.config.cluster.gateway_yield_grace_secs;
     let mut running = fixture.backup().await;
     fixture.advertise(true).await;
@@ -387,9 +381,7 @@ async fn empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self
 
 #[tokio::test]
 async fn backend_exit_removes_home_waiter_until_live_home_takes_handback_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     let home = try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
         .await
         .unwrap()
@@ -485,9 +477,7 @@ async fn backend_exit_removes_home_waiter_until_live_home_takes_handback_pg() {
 /// A cancelled drain must leave the serving gateway holding its lease.
 #[tokio::test]
 async fn cancelled_deferred_restart_keeps_the_serving_holders_lease_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     fixture.advertise(false).await;
     let backup = fixture.backup().await;
     fixture.ticks(1).await;
@@ -593,9 +583,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn cancelled_deferred_restart_produces_zero_empty_handbacks_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     let (shared, acquired) = fixture.preferred().await;
     assert!(fixture.publish_waiter().await);
     assert!(super::deferred_restart::begin_deferred_restart(&shared).is_some());
@@ -638,9 +626,7 @@ async fn cancelled_deferred_restart_produces_zero_empty_handbacks_pg() {
 
 #[tokio::test]
 async fn concurrent_deferred_rollbacks_preserve_another_live_waiter_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     let (shared, acquired) = fixture.preferred().await;
     let survivor = GatewayWaiterGuard::new("claude");
     assert!(super::deferred_restart::begin_deferred_restart(&shared).is_some());
@@ -671,9 +657,7 @@ async fn concurrent_deferred_rollbacks_preserve_another_live_waiter_pg() {
 
 #[tokio::test]
 async fn deferred_rollback_racing_backend_exit_preserves_another_waiter_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     let (shared, acquired) = fixture.preferred().await;
     let mut running = Running::start(shared.clone(), acquired, Some(fixture.breaker())).await;
     let survivor = GatewayWaiterGuard::new("claude");
@@ -706,9 +690,7 @@ async fn deferred_rollback_racing_backend_exit_preserves_another_waiter_pg() {
 
 #[tokio::test]
 async fn normal_deferred_restart_holds_lease_until_backend_exit_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     let mut running = fixture.backup().await;
     fixture.ticks(1).await;
     let messages = running.events.messages.load(Ordering::SeqCst);
@@ -779,9 +761,7 @@ async fn handback_health_restores_legacy_manual_state_and_clears_after_observed_
         print!("{stdout}");
         return;
     }
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let mut running = fixture.backup().await;
     let shared = &running.shared;
@@ -835,9 +815,7 @@ async fn handback_health_restores_legacy_manual_state_and_clears_after_observed_
 
 #[tokio::test]
 async fn handback_health_omits_disabled_failed_and_stale_standby_observations_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     let shared = super::super::make_shared_data_for_tests_with_storage(Some(fixture.pool.clone()));
     let registry = health::HealthRegistry::new();
     registry
@@ -927,9 +905,7 @@ async fn handback_health_omits_disabled_failed_and_stale_standby_observations_pg
 
 #[tokio::test]
 async fn preferred_node_takes_the_lease_once_a_silent_holder_session_expires_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     fixture.save_config(|config| {
         config.cluster.instance_id = Some("home".into());
         config.cluster.gateway_lease_idle_expiry_secs = 2;
@@ -958,9 +934,7 @@ async fn preferred_node_takes_the_lease_once_a_silent_holder_session_expires_pg(
 
 #[tokio::test]
 async fn configured_idle_expiry_reaches_the_lease_session_and_zero_disables_it_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     for (secs, expected) in [(2, "2s"), (0, "0")] {
         fixture.save_config(|config| config.cluster.gateway_lease_idle_expiry_secs = secs);
         let mut lease =
@@ -984,9 +958,7 @@ async fn configured_idle_expiry_reaches_the_lease_session_and_zero_disables_it_p
 
 #[tokio::test]
 async fn idle_expired_holder_loses_the_lease_to_a_peer_and_self_fences_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     fixture.save_config(|config| config.cluster.gateway_lease_idle_expiry_secs = 2);
     let mut running = fixture.backup().await;
     // The production keepalive ticks every 15s, so a 2s expiry ends the session between ticks.
@@ -1012,10 +984,9 @@ async fn idle_expired_holder_loses_the_lease_to_a_peer_and_self_fences_pg() {
 async fn gateway_snapshot_first_lease_uses_prepared_boot_config_pg() {
     const CHILD: &str = "ADK_TEST_GATEWAY_SNAPSHOT_BOOT_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        if postgres::postgres_test_database_url_base().is_none() {
-            eprintln!("SKIP: isolated PostgreSQL fixture is not configured");
-            return;
-        }
+        postgres::postgres_test_database_url_base().expect(
+            "POSTGRES_TEST_DATABASE_URL_BASE required for the gateway snapshot boot PG test",
+        ); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
         let root = tempfile::tempdir().unwrap();
         let qualified = format!(
             "{}::gateway_snapshot_first_lease_uses_prepared_boot_config_pg",
@@ -1037,9 +1008,7 @@ async fn gateway_snapshot_first_lease_uses_prepared_boot_config_pg() {
         assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
         return;
     }
-    let Some(fixture) = Fixture::new().await else {
-        panic!("PostgreSQL fixture required for gateway snapshot boot test");
-    };
+    let fixture = Fixture::new().await;
     let mut boot = fixture.config.clone();
     boot.config_hot_reload = false;
     boot.cluster.gateway_lease_idle_expiry_secs = 2;
@@ -1080,9 +1049,7 @@ async fn gateway_snapshot_first_lease_uses_prepared_boot_config_pg() {
 async fn preferred_wait_stands_down_to_standby_when_a_restart_is_requested_pg() {
     // The preferred node sat in the unbounded held-lease wait holding its barrier
     // slot, so no marker poller drained it and the deploy request timed out.
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     let holder = try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
         .await
         .unwrap()
@@ -1119,8 +1086,8 @@ const RESTART_PROOF_NONCE: &str = "20261107T022859-restart-proof-request";
 
 /// Runs `restart_proof_child` in its own process (it ends with the final provider's `exit(0)`)
 /// while the codex lease is held elsewhere, and returns the codex proof body it left.
-async fn restart_proof_from_child(yielding: bool) -> Option<String> {
-    let fixture = Fixture::new().await?;
+async fn restart_proof_from_child(yielding: bool) -> String {
+    let fixture = Fixture::new().await;
     let holder = try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Codex)
         .await
         .unwrap()
@@ -1167,14 +1134,12 @@ async fn restart_proof_from_child(yielding: bool) -> Option<String> {
             .any(|line| line == format!("nonce={RESTART_PROOF_NONCE}")),
         "the identity artifact must carry the request nonce: {body}"
     );
-    Some(body)
+    body
 }
 
 #[tokio::test]
 async fn a_restart_requested_during_the_preferred_wait_is_persisted_within_30s_pg() {
-    let Some(body) = restart_proof_from_child(false).await else {
-        return;
-    };
+    let body = restart_proof_from_child(false).await;
     assert!(
         body.lines().any(|line| line == "provider=codex"),
         "the provider that left the preferred wait must be the final one: {body}"
@@ -1185,9 +1150,7 @@ async fn a_restart_requested_during_the_preferred_wait_is_persisted_within_30s_p
 /// restarted itself; the deploy clears an unacknowledged request after 20s.
 #[tokio::test]
 async fn a_restart_requested_during_the_non_preferred_yield_wait_is_persisted_within_20s_pg() {
-    let Some(body) = restart_proof_from_child(true).await else {
-        return;
-    };
+    let body = restart_proof_from_child(true).await;
     assert!(
         body.lines().any(|line| line == "provider=codex"),
         "the provider that left the yield wait must be the final one: {body}"
@@ -1201,9 +1164,7 @@ async fn restart_proof_child() {
     };
     let yielding = std::env::var_os(RESTART_PROOF_YIELD_ENV).is_some();
     let proof_root = std::path::PathBuf::from(std::env::var(RESTART_PROOF_ROOT_ENV).unwrap());
-    let fixture = Fixture::attach(&proof_root, database)
-        .await
-        .expect("the parent configured PostgreSQL");
+    let fixture = Fixture::attach(&proof_root, database).await;
     if yielding {
         // The fixture is the non-preferred "backup"; production yields for 90s.
         fixture.save_config(|config| config.cluster.gateway_yield_grace_secs = 90);
@@ -1298,9 +1259,7 @@ async fn restart_proof_child() {
 
 #[tokio::test]
 async fn held_gateway_yields_on_the_first_keepalive_after_the_timed_hold_ends_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     let mut running = fixture.backup().await;
     let hold_secs = 25;
     let hold_ends = Instant::now() + Duration::from_secs(hold_secs);
@@ -1328,9 +1287,7 @@ async fn held_gateway_yields_on_the_first_keepalive_after_the_timed_hold_ends_pg
 
 #[tokio::test]
 async fn restarted_standby_gives_a_waiting_preferred_node_the_grace_during_a_hold_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     fixture.advertise(true).await;
     fixture.hold_handbacks_for(600);
     let shared = super::super::make_shared_data_for_tests_with_storage(Some(fixture.pool.clone()));
@@ -1369,9 +1326,7 @@ async fn restarted_standby_gives_a_waiting_preferred_node_the_grace_during_a_hol
 
 #[tokio::test]
 async fn operator_release_hands_a_held_gateway_to_the_waiting_preferred_node_once_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     let mut running = fixture.backup().await;
     let state = fixture.hold_handbacks_for(600);
     fixture.advertise(false).await;
@@ -1413,9 +1368,7 @@ async fn operator_release_hands_a_held_gateway_to_the_waiting_preferred_node_onc
 
 #[tokio::test]
 async fn operator_release_reports_a_failed_unlock_and_still_fences_pg() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+    let fixture = Fixture::new().await;
     let mut running = fixture.backup().await;
     fixture.hold_handbacks_for(600);
     fixture.advertise(true).await;

@@ -13,6 +13,8 @@ use crate::config::Config;
 
 mod advisory_lock;
 mod agent_sync;
+#[cfg(test)]
+mod intake_timing_pg_tests;
 mod pool_return;
 #[cfg(test)]
 mod pool_return_pg_tests;
@@ -249,7 +251,9 @@ fn pool_options(settings: PoolConnectSettings) -> PgPoolOptions {
         .acquire_timeout(settings.acquire_timeout)
         .idle_timeout(settings.idle_timeout)
         .max_lifetime(settings.max_lifetime)
-        .test_before_acquire(settings.test_before_acquire);
+        .test_before_acquire(settings.test_before_acquire)
+        // Emitted only when a subscriber enables it: the intake timing layer, under an intake trace.
+        .acquire_time_level(log::LevelFilter::Debug);
     with_return_cleanup(options, RETURN_CLEANUP_BUDGET)
 }
 

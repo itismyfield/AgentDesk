@@ -6,6 +6,7 @@ mod inject;
 mod inject_codex_tests;
 #[cfg(all(test, unix))]
 pub(crate) mod inject_tests;
+mod preflight;
 mod prepared;
 #[cfg(test)]
 mod start_outcome_tests;
@@ -301,6 +302,8 @@ struct LivePorts {
     /// What a pane injection reported, kept apart from the final delivery for its log.
     inject_observed: std::sync::Mutex<InjectObservation>,
     reply: Option<ReplyObligation>,
+    /// Host admission completed before this delivery future acquired origin custody.
+    prepared_herdr: bool,
 }
 
 /// Whether a pane injection was asked for and the veto it answered, whatever came after.
@@ -435,6 +438,15 @@ impl LivePorts {
             Ok(runtime) => runtime,
             Err(error) => return StartAttempt::Unavailable(error.clone()),
         };
+        #[cfg(unix)]
+        if self.prepared_herdr {
+            return reservation
+                .start_prepared_human((ctx, &self.shared, token), request, metadata)
+                .await
+                .into();
+        }
+        #[cfg(not(unix))]
+        debug_assert!(!self.prepared_herdr);
         let result = router::start_reserved_headless_turn_with_owner(
             ctx,
             request.channel_id,
@@ -579,6 +591,11 @@ async fn deliver_resolved(
     if !allowed {
         return (Err(HumanInputError::AuthorNotAllowed), Default::default());
     }
+    let prepared_herdr = match preflight::host(&shared, &request.provider, request.channel_id).await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => return (Err(error), Default::default()),
+    };
     let runtime = match shared.http.cached_serenity_ctx.get().cloned() {
         None => Err("provider runtime is not ready".to_string()),
         Some(ctx) => shared
@@ -596,6 +613,7 @@ async fn deliver_resolved(
         request,
         inject_observed: Default::default(),
         reply,
+        prepared_herdr,
     };
     let result = deliver_with_ports(&ports).await;
     let observed = ports.inject_observed.into_inner();

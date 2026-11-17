@@ -1,0 +1,115 @@
+---
+title: "Herdr clear: one fresh session, token release, then normal restart resume"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Normal
+    lg1: Breaks ApiSelectorDoesNotExposePrior or ClearNeverResumesPrior
+    lg2: Path to the ApiSelectorDoesNotExposePrior or ClearNeverResumesPrior bug
+  }
+  class lg0 blue
+  class lg1 breaks
+  class lg2 bugPath
+  s0: Prior provider session available
+  s1: Clear committed#59; old execution ended
+  s2: Restart before the first launch
+  s3: Selecting the first post-clear session
+  s4: First provider command prepared
+  s5: Provider starts and rewrites selector #8212; pre-clear session resumed
+  s6: Fresh provider session verified #8212; pre-clear session resumed
+  s7: Provider starts and rewrites selector #8212; selector exposed, pre-clear session resumed
+  s8: Fresh provider session verified #8212; selector exposed, pre-clear session resumed
+  s9: Clear fence released by matching token #8212; pre-clear session resumed
+  s10: Clear fence released by matching token #8212; selector exposed, pre-clear session resumed
+  s11: Provider session changed after release #8212; pre-clear session resumed
+  s12: Restart after verified provider startup #8212; pre-clear session resumed
+  s13: Provider session changed after release #8212; selector exposed, pre-clear session resumed
+  s14: Restart after verified provider startup #8212; selector exposed, pre-clear session resumed
+  s15: Selecting the session after restart #8212; pre-clear session resumed
+  s16: Selecting the session after restart #8212; selector exposed, pre-clear session resumed
+  s17: Next provider command prepared #8212; pre-clear session resumed
+  s18: Next provider command prepared #8212; selector exposed, pre-clear session resumed
+  s19: Next provider starts
+  s20: Current provider session resumed
+  s21: Next provider starts #8212; selector exposed
+  s22: Current provider session resumed #8212; selector exposed
+  [*] --> s0
+  s0 --> s1: you clear and the old execution ends
+  s0 --> s2: the server restarts before launch
+  s1 --> s2: the server restarts before launch
+  s1 --> s3: the router consumes its volatile clear flag
+  s2 --> s0: the server boots without the volatile clear flag
+  s2 --> s1: the server boots without the volatile clear flag
+  s3 --> s2: the server restarts before launch
+  s3 --> s3: the launch reads the persistent clear token or the launch checks the native binding
+  s3 --> s4: the launch verifies and rewrites the retired resume binding or the launch checks the native binding
+  s4 --> s2: the server restarts before launch
+  s4 --> s4: the launch selects fresh or resume
+  s4 --> s3: the first create is not sent#59; input retries
+  s4 --> s5: the provider command starts
+  s5 --> s5: provider startup writes the session selector
+  s5 --> s6: the resumed SessionStart is verified
+  s5 --> s7: the session selector API is read
+  s6 --> s9: the captured token releases the clear fence
+  s7 --> s8: the resumed SessionStart is verified
+  s8 --> s10: the captured token releases the clear fence
+  s9 --> s11: the provider moves to a new session
+  s9 --> s12: the server restarts after verification
+  s10 --> s13: the provider moves to a new session
+  s10 --> s14: the server restarts after verification
+  s11 --> s12: the server restarts after verification
+  s12 --> s15: the next turn reads durable state
+  s13 --> s14: the server restarts after verification
+  s14 --> s16: the next turn reads durable state
+  s15 --> s17: the launch checks the native binding
+  s16 --> s18: the launch checks the native binding
+  s17 --> s19: the next provider command starts
+  s18 --> s21: the next provider command starts
+  s19 --> s20: provider startup writes the session selector
+  s21 --> s22: provider startup writes the session selector
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s3 blue
+  class s3 bugPath
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s5 breaks
+  class s5 bugPath
+  class s6 blue
+  class s6 breaks
+  class s7 blue
+  class s7 breaks
+  class s7 bugPath
+  class s8 blue
+  class s8 breaks
+  class s9 blue
+  class s9 breaks
+  class s10 blue
+  class s10 breaks
+  class s11 blue
+  class s11 breaks
+  class s12 blue
+  class s12 breaks
+  class s13 blue
+  class s13 breaks
+  class s14 blue
+  class s14 breaks
+  class s15 blue
+  class s15 breaks
+  class s16 blue
+  class s16 breaks
+  class s17 blue
+  class s17 breaks
+  class s18 blue
+  class s18 breaks
+  class s19 blue
+  class s20 blue
+  class s21 blue
+  class s21 breaks
+  class s22 blue
+  class s22 breaks

@@ -41,6 +41,7 @@ seconds with content comparison, independently of native filesystem notification
 | `discord.bots.*.agent` | restart | `src/services/discord/settings/read.rs` load_bot_settings (run_bot -> SharedData.settings) |
 | `discord.bots.*.auth` | restart | `src/services/discord/settings/read.rs` load_bot_settings (SharedData.settings at run_bot) |
 | `discord.guild_id` | restart | `src/services/auto_queue/fsm.rs` AutoQueueActivateDeps::from_state; `src/server/routes/agents.rs` agent_dispatched_sessions and `src/cli/direct.rs` resolve_guild_id (effective_guild_id with onboarding override) |
+| `discord.decisions` | live | `src/cli/discord_channel_create.rs` create_forum (config loaded per CLI run) |
 | `discord.dm_default_agent` | live | `src/services/discord/agentdesk_config.rs` resolve_dm_default_agent (validated snapshot per DM) |
 | `discord.owner_id` | restart | `src/services/discord/settings/read.rs` load_bot_settings (owner_user_id into SharedData.settings) |
 | `discord.scheduled_message_required_mention_user_ids` | restart | `src/server/routes/scheduled_messages/discord_mentions.rs` required_from_state (AppState.config) |

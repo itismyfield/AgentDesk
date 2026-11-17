@@ -1,0 +1,11 @@
+\* EXPECTED_SAFETY=LiveActualHostPreserved EXPECTED_LIVENESS=-
+CONSTANTS
+    Target = "boundThread"
+    InitialSession = "live"
+    ActualHost = "tmux"
+    DesiredHost = "herdr"
+    Mutation = "policyOverridesLive"
+    CanCrash = FALSE
+SPECIFICATION Spec
+INVARIANT NoDuplicate NoSilentLoss RejectedNoEffects ForeignForbidden ParentFailClosed BoundThreadAdmitted SuccessBacked HttpAcceptanceBacked LiveActualHostPreserved
+PROPERTY AcceptedCompletes DeliveredGetsOutcome

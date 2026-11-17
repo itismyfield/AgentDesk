@@ -501,7 +501,7 @@
     },
     "E-14": {
       "path": "tests/e2e/tui_relay/scenarios/E-14-claude-tui-thread-stale-reattach.yaml",
-      "sha256": "8fda307bf9e8cb05cfbb917d2430a370545a15dbeae4bc33cf05e8375cbfe21b",
+      "sha256": "942c24b85d9dd0312839077883a9a73f7bdf361e36ff38faf64b666a31098cff",
       "coverage_class": "live",
       "cells": [
         "claude-tui"
@@ -737,7 +737,7 @@
     },
     "E-50": {
       "path": "tests/e2e/tui_relay/scenarios/E-50-claude-clear-and-turns.yaml",
-      "sha256": "7a01bb27f4ef703f96991de149d406a645871ee1617566f9f74e6a2534a5fde6",
+      "sha256": "44273f82d2ae19b9c64d96f4d8a284654ddeaa6d5972d5eb118839ae6a17abb6",
       "coverage_class": "live",
       "cells": [
         "claude-tui",
@@ -747,7 +747,7 @@
     },
     "E-51": {
       "path": "tests/e2e/tui_relay/scenarios/E-51-codex-clear-and-turns.yaml",
-      "sha256": "51720731132b87012f575d4ece25e4db47666cd2a60bdcedf33e4d523d9cda43",
+      "sha256": "e644a6d5cc0c568f50403a65a46087aa89e4c752f0594fccef7ac22cbb350f08",
       "coverage_class": "live",
       "cells": [
         "codex-tui",
@@ -820,7 +820,7 @@
     },
     "E-63": {
       "path": "tests/e2e/tui_relay/scenarios/E-63-input-order-across-restart.yaml",
-      "sha256": "02ad3a40f29d2f13a48a4f1fbbd06055e428a5de48cb569e7b61835e994423cc",
+      "sha256": "2d981110f277904f6912611a9ebccb5602c096be9884684b18e5c6b6ddafd2c2",
       "coverage_class": "live",
       "cells": [
         "claude-tui"

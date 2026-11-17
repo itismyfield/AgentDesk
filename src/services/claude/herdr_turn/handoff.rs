@@ -51,6 +51,7 @@ pub(super) fn launched_source(
     runtime: &Handle,
     ports: &dyn HerdrTurnPorts,
 ) -> Result<Attached, String> {
+    use crate::db::dispatched_sessions::provider_resume_fence;
     let host = ports.launch_host().ok_or("herdr turn: no launch host")?;
     let working_dir = Path::new(turn.working_dir);
     let hook_endpoint = turn
@@ -63,6 +64,13 @@ pub(super) fn launched_source(
         .map_err(|e| launch_error("auth_overlay", e))?;
     let auth = crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay)
         .map_err(|e| launch_error("auth_overlay", e))?;
+    let fence = runtime
+        .block_on(provider_resume_fence::load_for_owner_pg(
+            turn.pool,
+            &turn.owner,
+        ))
+        .map_err(|error| launch_error("resume_fence", error))?;
+    let force_fresh = turn.force_fresh || fence.is_some();
     let mut earlier = ports.earlier_tmux(logical);
     let judged = |earlier: &mut dyn EarlierExecution| {
         let (owner, row) = (&turn.owner, turn.row);
@@ -73,7 +81,7 @@ pub(super) fn launched_source(
         };
         current_session(turn.channel_id, logical, turn.session_id, &mut prior)
     };
-    let (requested, retired_native) = if turn.force_fresh {
+    let (requested, retired_native) = if force_fresh {
         (None, false)
     } else {
         judged(earlier.as_mut()).map_err(|e| launch_error("current_session", e))?
@@ -91,7 +99,7 @@ pub(super) fn launched_source(
             ))
             .map_err(|e| launch_error("close_legacy", e))?;
     }
-    let (latest, _) = if turn.force_fresh {
+    let (latest, _) = if force_fresh {
         (None, false)
     } else {
         judged(earlier.as_mut()).map_err(|e| launch_error("current_session", e))?
@@ -136,6 +144,11 @@ pub(super) fn launched_source(
     let cancel = turn.cancel.as_deref();
     session_started(runtime, &mut hooks, (&session_id, resume), cancel)
         .map_err(|e| launch_error("session_start", e))?;
+    if let Some(captured) = fence {
+        runtime
+            .block_on(provider_resume_fence::release_pg(turn.pool, &captured))
+            .map_err(|error| launch_error("release_resume_fence", error))?;
+    }
     attach(turn, runtime, ports, &nonce, &session_id).map_err(|e| launch_error("attach", e))
 }
 

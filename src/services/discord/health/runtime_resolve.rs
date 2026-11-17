@@ -12,8 +12,6 @@ use crate::services::discord::SharedData;
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::provider::ProviderKind;
 
-const CHANNEL_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// Resolve the bot HTTP client by alias.
 /// Utility aliases are parsed into a stable role before provider lookup.
 pub async fn resolve_bot_http(
@@ -125,6 +123,7 @@ fn select_direct_channel_runtime_candidate(
 // lookups on unrelated bots before resolving a configured owner. In particular,
 // health snapshots have a short deadline and would otherwise report a detached
 // watcher when an unrelated bot's channel lookup stalls.
+#[cfg(test)]
 async fn select_candidate_with_live_probe<F, Fut>(
     provider_name: &str,
     channel_id: ChannelId,
@@ -147,104 +146,25 @@ where
     select_direct_channel_runtime_candidate(provider_name, channel_id, &candidates)
 }
 
-async fn resolve_channel_candidate(
+async fn collect_provider_runtimes(
+    registry: &HealthRegistry,
     provider_name: &str,
-    channel_id: ChannelId,
-    owner_provider: &ProviderKind,
-    shared_candidates: &[(usize, Arc<SharedData>)],
-) -> Result<Option<usize>, String> {
-    let mut snapshots = Vec::with_capacity(shared_candidates.len());
-    let mut candidates = Vec::with_capacity(shared_candidates.len());
-    for (index, shared) in shared_candidates {
-        let settings = shared.settings.read().await.clone();
-        candidates.push(DirectChannelRuntimeCandidate {
-            index: *index,
-            explicit_channel_match: settings.allowed_channel_ids.contains(&channel_id.get()),
-            live_channel_match: false,
-        });
-        snapshots.push((*index, shared, settings));
-    }
-    // A worker has no gateway Context. Resolve a thread's authoritative parent
-    // once, then reuse the configured allowlists instead of probing every bot.
-    // Keep explicit child bindings ahead of inherited parent bindings.
-    if !candidates
+) -> Vec<(usize, Arc<SharedData>)> {
+    let providers = registry.providers.lock().await;
+    providers
         .iter()
-        .any(|candidate| candidate.explicit_channel_match)
-        && snapshots.iter().any(|(_, shared, settings)| {
-            shared.http.cached_serenity_ctx.get().is_none()
-                && !settings.allowed_channel_ids.is_empty()
-        })
-    {
-        let lookup = async {
-            for (_, shared, _) in &snapshots {
-                if let Some(http) = shared.serenity_http_or_token_fallback()
-                    && let Ok(channel) = channel_id.to_channel(&http).await
-                {
-                    return Ok(channel);
-                }
-            }
-            Err("no registered bot can resolve the runner channel".to_string())
-        };
-        let channel = tokio::time::timeout(CHANNEL_LOOKUP_TIMEOUT, lookup)
-            .await
-            .map_err(|_| "runner channel ownership lookup timed out".to_string())??;
-        if let serenity::Channel::Guild(channel) = channel
-            && matches!(
-                channel.kind,
-                serenity::ChannelType::PublicThread
-                    | serenity::ChannelType::PrivateThread
-                    | serenity::ChannelType::NewsThread
-            )
-            && let Some(parent) = channel.parent_id
-        {
-            for candidate in &mut candidates {
-                candidate.explicit_channel_match = snapshots.iter().any(|(index, _, settings)| {
-                    *index == candidate.index
-                        && settings.allowed_channel_ids.contains(&parent.get())
-                });
-            }
-        }
-    }
-    select_candidate_with_live_probe(provider_name, channel_id, candidates, |index| {
-        let snapshot = snapshots
-            .iter()
-            .find(|(candidate_index, _, _)| *candidate_index == index);
-        async move {
-            let Some((_, shared, settings)) = snapshot else {
-                return false;
-            };
-            match shared.http.cached_serenity_ctx.get() {
-                Some(ctx) => {
-                    crate::services::discord::provider_handles_channel(
-                        ctx,
-                        owner_provider,
-                        settings,
-                        channel_id,
-                    )
-                    .await
-                }
-                None => false,
-            }
-        }
-    })
-    .await
+        .enumerate()
+        .filter(|(_, entry)| entry.name.eq_ignore_ascii_case(provider_name))
+        .map(|(index, entry)| (index, entry.shared.clone()))
+        .collect::<Vec<_>>()
 }
 
-pub(super) async fn resolve_direct_channel_runtime(
-    registry: &HealthRegistry,
+async fn select_direct_channel_shared(
+    shared_candidates: &[(usize, Arc<SharedData>)],
     channel_id: ChannelId,
     owner_provider: &ProviderKind,
-) -> Result<(Arc<serenity::Http>, Arc<SharedData>), String> {
+) -> Result<(Arc<SharedData>, bool), String> {
     let provider_name = owner_provider.as_str();
-    let shared_candidates = {
-        let providers = registry.providers.lock().await;
-        providers
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.name.eq_ignore_ascii_case(provider_name))
-            .map(|(index, entry)| (index, entry.shared.clone()))
-            .collect::<Vec<_>>()
-    };
 
     if shared_candidates.is_empty() {
         return Err(serde_json::json!({
@@ -255,7 +175,7 @@ pub(super) async fn resolve_direct_channel_runtime(
     }
 
     let mut candidate_matches = Vec::with_capacity(shared_candidates.len());
-    for (index, shared) in &shared_candidates {
+    for (index, shared) in shared_candidates {
         let settings = shared.settings.read().await.clone();
         let explicit_channel_match = settings.allowed_channel_ids.contains(&channel_id.get());
         let live_channel_match = match shared.http.cached_serenity_ctx.get() {
@@ -295,30 +215,12 @@ pub(super) async fn resolve_direct_channel_runtime(
                 })
                 .to_string()
             })?;
-        let http = shared.serenity_http_or_token_fallback().ok_or_else(|| {
-            serde_json::json!({
-                "ok": false,
-                "error": format!(
-                    "matched runtime is not ready for provider {} on channel {}",
-                    provider_name,
-                    channel_id.get()
-                ),
-            })
-            .to_string()
-        })?;
-        return Ok((http, shared));
+        return Ok((shared, false));
     }
 
     if shared_candidates.len() == 1 && unbound_single_runtime_allowed(&shared_candidates[0].1).await
     {
-        let (_, shared) = shared_candidates[0].clone();
-        if let Some(http) = shared.serenity_http_or_token_fallback() {
-            return Ok((http, shared));
-        }
-        let http = resolve_bot_http(registry, provider_name)
-            .await
-            .map_err(|(_, body)| body)?;
-        return Ok((http, shared));
+        return Ok((shared_candidates[0].1.clone(), true));
     }
 
     Err(serde_json::json!({
@@ -330,6 +232,39 @@ pub(super) async fn resolve_direct_channel_runtime(
         ),
     })
     .to_string())
+}
+
+pub(super) async fn resolve_direct_channel_runtime(
+    registry: &HealthRegistry,
+    channel_id: ChannelId,
+    owner_provider: &ProviderKind,
+) -> Result<(Arc<serenity::Http>, Arc<SharedData>), String> {
+    let provider_name = owner_provider.as_str();
+    // Keep every candidate alive through HTTP resolution.
+    let shared_candidates = collect_provider_runtimes(registry, provider_name).await;
+    let (shared, unbound_fallback) =
+        select_direct_channel_shared(&shared_candidates, channel_id, owner_provider).await?;
+    if unbound_fallback {
+        if let Some(http) = shared.serenity_http_or_token_fallback() {
+            return Ok((http, shared));
+        }
+        let http = resolve_bot_http(registry, provider_name)
+            .await
+            .map_err(|(_, body)| body)?;
+        return Ok((http, shared));
+    }
+    let http = shared.serenity_http_or_token_fallback().ok_or_else(|| {
+        serde_json::json!({
+            "ok": false,
+            "error": format!(
+                "matched runtime is not ready for provider {} on channel {}",
+                provider_name,
+                channel_id.get()
+            ),
+        })
+        .to_string()
+    })?;
+    Ok((http, shared))
 }
 
 pub(crate) struct IntakeWorkerRuntime {
@@ -369,83 +304,10 @@ pub(super) async fn resolve_direct_channel_shared(
     channel_id: ChannelId,
     owner_provider: &ProviderKind,
 ) -> Result<Arc<SharedData>, String> {
-    let provider_name = owner_provider.as_str();
-    let shared_candidates = {
-        let providers = registry.providers.lock().await;
-        providers
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.name.eq_ignore_ascii_case(provider_name))
-            .map(|(index, entry)| (index, entry.shared.clone()))
-            .collect::<Vec<_>>()
-    };
-
-    if shared_candidates.is_empty() {
-        return Err(serde_json::json!({
-            "ok": false,
-            "error": format!("provider runtime not registered: {}", provider_name),
-        })
-        .to_string());
-    }
-
-    let mut candidate_matches = Vec::with_capacity(shared_candidates.len());
-    for (index, shared) in &shared_candidates {
-        let settings = shared.settings.read().await.clone();
-        let explicit_channel_match = settings.allowed_channel_ids.contains(&channel_id.get());
-        let live_channel_match = match shared.http.cached_serenity_ctx.get() {
-            Some(ctx) => {
-                crate::services::discord::provider_handles_channel(
-                    ctx,
-                    owner_provider,
-                    &settings,
-                    channel_id,
-                )
-                .await
-            }
-            None => false,
-        };
-        candidate_matches.push(DirectChannelRuntimeCandidate {
-            index: *index,
-            explicit_channel_match,
-            live_channel_match,
-        });
-    }
-
-    if let Some(selected_index) =
-        select_direct_channel_runtime_candidate(provider_name, channel_id, &candidate_matches)?
-    {
-        let (_, shared) = shared_candidates
-            .iter()
-            .find(|(index, _)| *index == selected_index)
-            .cloned()
-            .ok_or_else(|| {
-                serde_json::json!({
-                    "ok": false,
-                    "error": format!(
-                        "selected runtime index vanished for provider {} on channel {}",
-                        provider_name,
-                        channel_id.get()
-                    ),
-                })
-                .to_string()
-            })?;
-        return Ok(shared);
-    }
-
-    if shared_candidates.len() == 1 && unbound_single_runtime_allowed(&shared_candidates[0].1).await
-    {
-        return Ok(shared_candidates[0].1.clone());
-    }
-
-    Err(serde_json::json!({
-        "ok": false,
-        "error": format!(
-            "could not resolve a unique runtime for provider {} on channel {}",
-            provider_name,
-            channel_id.get()
-        ),
-    })
-    .to_string())
+    let shared_candidates = collect_provider_runtimes(registry, owner_provider.as_str()).await;
+    select_direct_channel_shared(&shared_candidates, channel_id, owner_provider)
+        .await
+        .map(|(shared, _)| shared)
 }
 
 async fn unbound_single_runtime_allowed(shared: &SharedData) -> bool {

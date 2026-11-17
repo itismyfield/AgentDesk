@@ -14,6 +14,7 @@ pub(crate) mod codex_absence;
 mod commands;
 mod compact_turn_authority;
 mod completion_footer_metadata;
+pub(crate) mod decision_forums;
 mod delivery_lease_cell;
 mod delivery_lease_key;
 mod destructive_cancel_gate;
@@ -189,6 +190,8 @@ mod tui_prompt_relay;
 pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
+#[cfg(test)]
+pub(crate) use tui_prompt_relay::INPUT_NOTICE_RUNS;
 #[cfg(unix)]
 pub(crate) use tui_prompt_relay::rehydration::observer_binding_published;
 #[cfg(all(test, unix))]

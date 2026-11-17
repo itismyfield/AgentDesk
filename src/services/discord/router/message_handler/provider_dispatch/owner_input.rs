@@ -167,6 +167,8 @@ pub(in crate::services::discord) fn owner_drive(
         (mailbox.clone(), provider.as_str().to_string()),
     );
     let drains = pool.clone();
+    #[cfg(unix)]
+    let restart = runtime.clone();
     let handoff: Handoff = std::sync::Arc::new(move |front| {
         let (mailbox, pool, provider, idle, runtime) = (
             busy.clone(),
@@ -212,56 +214,63 @@ pub(in crate::services::discord) fn owner_drive(
                 _ => claude_handoff::Start::Person,
             };
             let shared = runtime.as_ref();
-            if origin != InputOrigin::EffortContinue
-                && claude_handoff::prepare(shared, &mailbox, &provider, channel, &front, start)
-                    .await?
-                && !synthetic
-            {
-                return idle(front).await;
-            }
-            let active = match mailbox.has_active_turn().await {
-                // Without a registry this read considers only a durable external holder.
-                Ok(false) if !synthetic => Ok(
-                    crate::services::discord::health::external_turn_hold_for_start(
-                        None, &provider, channel,
-                    )
-                    .await
-                    .is_some(),
-                ),
-                active => active,
-            };
-            let result = match active {
-                // A routine, scheduled or HTTP start completes only on its own turn.
-                Ok(true) if synthetic => Err("NotSent(\"synthetic_waits_idle\")".into()),
-                Ok(true) => {
-                    let transition = runtime.as_ref().map(|shared| {
-                        shared
-                            .session_transition_lock(ChannelId::new(channel))
-                            .try_lock_owned()
-                    });
-                    if let Some(hold) = runtime
-                        .as_ref()
-                        .and_then(|shared| ingress::ingress_hold(shared, false))
-                    {
-                        let reason = match hold {
-                            ingress::Hold::RestartRecovery => "restart_recovery",
-                            _ => "upload_materialization_failed",
-                        };
-                        Err(effect::unsent(reason.into()))
-                    } else if matches!(transition, Some(Err(_))) {
-                        Err(effect::unsent("session_transition_busy".into()))
-                    } else {
-                        hand_busy(
-                            (mailbox.clone(), pool),
-                            provider.clone(),
-                            (channel, front),
-                            runtime.clone(),
-                        )
+            // A handoff's own hold and the first start after it settle below like any other result.
+            let handoff = match origin {
+                InputOrigin::EffortContinue => Ok(false),
+                _ => {
+                    claude_handoff::prepare(shared, &mailbox, &provider, channel, &front, start)
                         .await
+                }
+            };
+            let result = match handoff {
+                Err(error) => Err(error),
+                Ok(true) if !synthetic => idle(front).await,
+                Ok(_) => {
+                    let active = match mailbox.has_active_turn().await {
+                        // Without a registry this read considers only a durable external holder.
+                        Ok(false) if !synthetic => Ok(
+                            crate::services::discord::health::external_turn_hold_for_start(
+                                None, &provider, channel,
+                            )
+                            .await
+                            .is_some(),
+                        ),
+                        active => active,
+                    };
+                    match active {
+                        // A routine, scheduled or HTTP start completes only on its own turn.
+                        Ok(true) if synthetic => Err("NotSent(\"synthetic_waits_idle\")".into()),
+                        Ok(true) => {
+                            let transition = runtime.as_ref().map(|shared| {
+                                shared
+                                    .session_transition_lock(ChannelId::new(channel))
+                                    .try_lock_owned()
+                            });
+                            if let Some(hold) = runtime
+                                .as_ref()
+                                .and_then(|shared| ingress::ingress_hold(shared, false))
+                            {
+                                let reason = match hold {
+                                    ingress::Hold::RestartRecovery => "restart_recovery",
+                                    _ => "upload_materialization_failed",
+                                };
+                                Err(effect::unsent(reason.into()))
+                            } else if matches!(transition, Some(Err(_))) {
+                                Err(effect::unsent("session_transition_busy".into()))
+                            } else {
+                                hand_busy(
+                                    (mailbox.clone(), pool),
+                                    provider.clone(),
+                                    (channel, front),
+                                    runtime.clone(),
+                                )
+                                .await
+                            }
+                        }
+                        Ok(false) => idle(front).await,
+                        Err(unreachable) => Err(format!("{unreachable:?}")),
                     }
                 }
-                Ok(false) => idle(front).await,
-                Err(unreachable) => Err(format!("{unreachable:?}")),
             };
             #[cfg(test)]
             owned_busy::note_drive_result(channel, &result);
@@ -317,6 +326,13 @@ pub(in crate::services::discord) fn owner_drive(
     let settled: Option<Owed> = drains.map(|pool| {
         let settled: Owed = std::sync::Arc::new(move || {
             let (pool, (mailbox, provider)) = (pool.clone(), owed.clone());
+            // A restart left unfinished (its end unproven, its continuation unconfirmed) is
+            // carried on whenever the drive runs out of fronts.
+            #[cfg(unix)]
+            if let Some(shared) = &restart {
+                let restart = crate::services::discord::commands::effort_restart::kick;
+                restart(shared, ChannelId::new(channel));
+            }
             Box::pin(async move {
                 let drain = crate::services::discord::queue_io::input_owner::notice::drain;
                 let drain = drain(&pool, &mailbox, &provider, channel).await;
@@ -494,7 +510,9 @@ async fn paste_busy(
         }
     }
     let payload = bodies.join("\n\n");
+    let timing = crate::logging::intake_timing::carry();
     Some(tokio::task::spawn_blocking(move || {
+        let _timing = timing.entered();
         let turn = StreamingTurn {
             pool: pool.as_ref(),
             shared: runtime.as_ref(),
@@ -739,11 +757,15 @@ pub(in crate::services::discord) async fn recover(shared: &Shared, channel: Chan
     match recovered {
         Ok(_) => {
             claude_handoff::recover(shared.clone(), channel);
+            crate::services::discord::commands::effort_restart::resume_owed(shared, channel).await;
             wake(shared, channel);
         }
         Err(error) => tracing::warn!(channel_id = channel.get(), %error, "owner recovery held"),
     }
 }
+
+#[path = "owner_input_start_wait.rs"]
+mod start_wait;
 
 /// Why a start waits unclaimed: a later event wakes it, or a read of its pane's native turn does.
 enum Wait {
@@ -763,6 +785,26 @@ async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wa
         .is_some_and(|row| row.turn_source != TurnSource::Managed);
     if row || rest(provider, id) {
         return Wait::Event;
+    }
+    let screen = match start_wait::observe(shared, channel, context).await {
+        start_wait::Observed::Legacy => None,
+        // The driver preserves a known host refusal as a typed, confirmed non-send.
+        start_wait::Observed::Refused => return Wait::Go,
+        start_wait::Observed::Native(screen) => Some(screen),
+    };
+    if let Some(screen) = screen {
+        if screen == Screen::Ready {
+            return Wait::Go;
+        }
+        let (shared, context) = (shared.clone(), context.clone());
+        return Wait::Watch(Box::new(move || {
+            tokio::runtime::Handle::current().block_on(async {
+                start_wait::observe(&shared, channel, &context)
+                    .await
+                    .native()
+                    .unwrap_or(Screen::Ready)
+            })
+        }));
     }
     if crate::services::tui_o::turn_mode::transcript_turns(id) {
         let busy = activity_now(shared, provider, channel).await.activity != Activity::Idle;
@@ -1470,6 +1512,9 @@ fn take_owned(
         route,
         target::Route::ClaudeBusy | target::Route::CodexBusy | target::Route::CodexHerdrBusy
     );
+    if busy {
+        crate::logging::intake_timing::note_busy();
+    }
     let originals: Vec<_> = front
         .as_ref()
         .map(|claim| {

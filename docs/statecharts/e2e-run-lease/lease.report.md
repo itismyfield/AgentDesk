@@ -2,6 +2,48 @@
 
 2026-11-13 KST, L0. **현재 production lease를 수정하지 않았다.** 아래 GREEN은 제안한 고정 inode flock/상속 FD/전송 journal 계약의 유한 모델 및 임시 파일 OS 실험이다. 현재 제품의 lease 안전성을 GREEN으로 승인하지 않는다.
 
+## L0 확장 (2026-11-17)
+
+코드 기준 `origin/main=1161162a18c87a0514f53dd7ae5dac3c830149cb`. 새 모델을 만들지 않고 이 `LeaseLifetime.tla`를 확장했다. prod 코드 변경 0, production lease 변경 0.
+수용 규칙과 모델 규칙의 대응:
+
+| 수용 규칙 | 모델 규칙 | 원인 뮤턴트(RED) |
+| --- | --- | --- |
+| 채널당 실행 writer 정확히 하나 | `NoDualWriter`·`NoDualGateway` | `duplicate_child`, `non_atomic` |
+| TTL 만료 전 탈취 0 | `NoHolderTheft` | `ttl_takeover` |
+| 부모 crash 뒤 lease 회수 | **새** `NoOrphanOwner`(owner면 그 실행의 FD가 하나 이상 열려 있다 = 마지막 FD가 닫히면 커널이 회수) + `NextRequestProgress` | **새** `crash_no_reclaim`(parent/child crash가 마지막 FD를 닫아도 owner를 비우지 않음) |
+| FD 누락 시 실행 0 | `WriterHasInheritedFd` | `missing_fd` |
+| (liveness) lease를 쥔 실행이 결국 끝나거나 회수 | **새** `HeldEventuallyEnds == \A r: (owner = r) ~> (owner # r)` | `live-leak_fd`(금지된 helper가 FD를 쥐어 회수되지 않음) |
+
+`HeldEventuallyEnds`는 `FairSpec`(no-crash, startup·send·ACK·settlement·finish·parent release weak fairness)에서만 주장한다. crash가 있는 `Spec`에는 Start/Finish fairness가 없어 Held에 영원히 머무는 실행을 배제할 수 없다. crash 뒤 회수는 safety `NoOrphanOwner`와 조건부 liveness `NextRequestProgress`로 본다. liveness가 실제로 돌았다는 근거는 공통 runner의 실행 수다(`run-live-none` 4회 = safety 1 + PROPERTY 3, `HeldEventuallyEnds` 포함). 같은 속성이 `live-leak_fd`에서 RED라서 공허하게 참이 아니다.
+
+바꾼 cfg와 결과(공통 `scripts/ci/statecharts_tlc.py` 판정, expected.tsv와 정확 일치):
+
+| config | 변경 | safety/deadlock 위반 | liveness 위반 |
+| --- | --- | --- | --- |
+| run-none.cfg | INVARIANTS에 `NoOrphanOwner` | - | - |
+| instance-none.cfg | 같음 | - | - |
+| run-live-none.cfg | `NoOrphanOwner`, PROPERTY `HeldEventuallyEnds` | - | - |
+| instance-live-none.cfg | 같음 | - | - |
+| run-live-leak_fd.cfg | PROPERTY `HeldEventuallyEnds` | - | HeldEventuallyEnds,NextRequestStarts |
+| instance-live-leak_fd.cfg | 같음 | - | HeldEventuallyEnds,NextRequestStarts |
+| run-crash_no_reclaim.cfg | 새 뮤턴트 | NoOrphanOwner | NextRequestProgress |
+| instance-crash_no_reclaim.cfg | 새 뮤턴트 | NoOrphanOwner | NextRequestProgress |
+
+나머지 17 cfg는 바이트 변경 없이 같은 결과를 유지한다(전체 25/25 일치). `check_models.py`는 정확한 cfg 집합에 `crash_no_reclaim`을 더했고, 범위 필터가 `admission/` 하위 모델 행까지 세어 기반에서 이미 실패하던 결함을 top-level cfg만 보도록 고쳤다.
+
+값 범위는 원인 가정이 아니라 아래 진입점 전수표에서 왔다. `git grep -n -E 'flock|LOCK_|pass_fds|set_inheritable|O_CLOEXEC|CLOEXEC|fstat|st_ino|os\.close|unlink|ttl|TTL' -- scripts/dev_instance scripts/e2e/tui_relay/lease.py`(시험 제외) 96행을 모델 동작별로 묶었다. #8124 시험 인스턴스의 FD 수명은 `scripts/dev_instance/`에 있고, run lease(`Kind=run`)와 전송 journal은 아직 코드가 없는 설계 좌표다.
+
+| 모델 동작 | 코드 좌표(실제) | 비고 |
+| --- | --- | --- |
+| `Acquire` 원자 flock | `scripts/dev_instance/lease.py:66`, `scripts/dev_instance/keeper.py:48`, `scripts/dev_instance/host.py:36` | `LOCK_EX\|LOCK_NB`, 실패는 busy. TTL 분기 없음 |
+| 고정 inode witness | `scripts/dev_instance/lease.py:31-32`, `:45-52`, `scripts/dev_instance/keeper.py:47` | fstat device/inode·부모 디렉터리 identity 대조 |
+| `Start` FD 상속 | `scripts/dev_instance/lifecycle.py:247`, `:310`, `scripts/dev_instance/keeper.py:134` | `close_fds=True, pass_fds=(lease fd,)` |
+| 자기 FD close만(`Finish`·`ReleaseParent`·crash) | `scripts/dev_instance/lease.py:87`, `:119` | lock leaf unlink 없음(`keeper.py:82`의 unlink는 marker 파일) |
+| `ttl_takeover`·`non_atomic` 원인 | `scripts/e2e/tui_relay/lease.py:28`, `:35`, `:50` | 현재 일반 하네스 lease의 TTL·unlink. S1에서 재사용하지 않음(§6) |
+| `Kind=run` channel lease | 설계 좌표: `docs/e2e-continuous.design.md` §6, S1 runner | 코드 없음 |
+| `Prepare`/journal·`Reconcile` | 설계 좌표: 같은 §6 mutation-pending 기록 | 코드 없음 |
+
 ## 코드 기준과 범위
 
 코드 감사 기준 `origin/main=79bebdd4eaa29b289bf88412825baa7d70a6ac77`, 레인 기반 `21c80274`다.
