@@ -79,7 +79,7 @@ The new path must remove early idle watch registration, not turn `Unknown` into 
 
 ## Implementation delta
 
-The frozen 61 rows above remain the exhaustive pre-change census. These six rows locate the new connections to the same actions; input origin and adjacent controls keep their frozen policy.
+The frozen 61 rows above remain the exhaustive pre-change census. These seven rows locate the new connections to the same actions; input origin and adjacent controls keep their frozen policy.
 
 | # | Entry / current file:line | Model value / action | Scope and origin |
 |---|---|---|---|
@@ -89,5 +89,6 @@ The frozen 61 rows above remain the exhaustive pre-change census. These six rows
 | 65 | `src/services/discord/router/message_handler/provider_dispatch/start_failure.rs:87` exact claim disposal | `Reject`, `NoticeOnce` | Commit once for that claim and its captured merged originals; then one channel reason; a repeated failure cannot discard the next front |
 | 66 | `src/services/herdr_launch/retire.rs:113` restart repair outcome | `Reconnect`, `Restored`, `LaunchFails` | Keeps only exact owner/retired nonce in memory; no input is stored; a new incarnation clears the old outcome |
 | 67 | `src/services/discord/router/message_handler/intake_turn/owned_busy.rs:461` working probe | `HeldWatch`, `Boundary` | No watch for an observation without context; complete Missing ends a working watch, preserving its front until the actual boundary |
+| 68 | `src/services/claude/herdr_turn/handoff.rs:83`, `:223` proven retired native resume | `Launch` / `Reject` refinement | Only the verified native binding of this exact retired owner/nonce skips legacy close; all resume, cursor and readiness checks remain |
 
 `provider_dispatch/owner_input.rs:1001` passes pre-executor start failures to the scoped failure handler. The existing `start_failure::run` wrapper and `Failure::finish` cover executor/registration errors as well. Its cancellation and native-stop checks remain in place. Ordinary failures keep their existing retry/retained policy. The added marker contains no prompt or queue payload.

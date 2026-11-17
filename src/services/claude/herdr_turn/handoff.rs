@@ -73,27 +73,26 @@ pub(super) fn launched_source(
         };
         current_session(turn.channel_id, logical, turn.session_id, &mut prior)
     };
-    let requested = if turn.force_fresh {
-        None
+    let (requested, retired_native) = if turn.force_fresh {
+        (None, false)
     } else {
         judged(earlier.as_mut()).map_err(|e| launch_error("current_session", e))?
     };
     let prior = resumed_session(turn, &overlay, requested.as_deref())
         .map_err(|e| launch_error("resume_source", e))?;
-    if prior.is_some() {
-        if earlier.liveness() != session_handoff::Liveness::Ended {
-            runtime
-                .block_on(session_handoff::pinned_tmux::end(
-                    logical,
-                    turn.channel_id,
-                    None,
-                    |_| async { Ok(!cancel_requested(turn.cancel.as_deref())) },
-                ))
-                .map_err(|e| launch_error("close_legacy", e))?;
-        }
+    if prior.is_some() && !retired_native && earlier.liveness() != session_handoff::Liveness::Ended
+    {
+        runtime
+            .block_on(session_handoff::pinned_tmux::end(
+                logical,
+                turn.channel_id,
+                None,
+                |_| async { Ok(!cancel_requested(turn.cancel.as_deref())) },
+            ))
+            .map_err(|e| launch_error("close_legacy", e))?;
     }
-    let latest = if turn.force_fresh {
-        None
+    let (latest, _) = if turn.force_fresh {
+        (None, false)
     } else {
         judged(earlier.as_mut()).map_err(|e| launch_error("current_session", e))?
     };
@@ -145,7 +144,7 @@ fn current_session(
     logical: &str,
     original: Option<&str>,
     prior: &mut PriorExecution<'_>,
-) -> Result<Option<String>, String> {
+) -> Result<(Option<String>, bool), String> {
     use crate::services::tui_prompt_dedupe::binding_events as events;
     use std::os::unix::fs::MetadataExt;
     let records = events::records_strict(channel)
@@ -156,7 +155,7 @@ fn current_session(
         .rev()
         .find(|record| record.tmux_session == logical && record.provider == "claude")
     else {
-        return Ok(original.map(str::to_string));
+        return Ok((original.map(str::to_string), false));
     };
     // A record without a nonce does not reset the writer's execution fold.
     let nonce = latest.execution_nonce.as_deref().or_else(|| {
@@ -212,7 +211,7 @@ fn current_session(
         Ok(metadata) => metadata,
         // The existing resume check owns the missing-transcript fresh launch and notice.
         Err(error) if legacy && error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(original.map(str::to_string));
+            return Ok((original.map(str::to_string), false));
         }
         Err(error) => return Err(error.to_string()),
     };
@@ -221,11 +220,15 @@ fn current_session(
     {
         return Err("handoff transcript identity changed".into());
     }
-    Ok(if legacy {
-        original.map(str::to_string)
-    } else {
-        Some(source.session_id)
-    })
+    let retired_native = !legacy && nonce.is_some_and(|nonce| prior.retired(nonce));
+    Ok((
+        if legacy {
+            original.map(str::to_string)
+        } else {
+            Some(source.session_id)
+        },
+        retired_native,
+    ))
 }
 
 /// Whether the marker names a tmux execution whose session is proven gone. Herdr writes its own
@@ -553,7 +556,7 @@ mod tests {
             owner: &owner,
             row: None,
         };
-        super::current_session(channel, logical, original, &mut prior)
+        super::current_session(channel, logical, original, &mut prior).map(|(session, _)| session)
     }
     impl Drop for Log {
         fn drop(&mut self) {
@@ -907,6 +910,7 @@ mod tests {
                 row,
             };
             super::current_session(log.channel, log.logical, Some(&session), &mut prior)
+                .map(|(session, _)| session)
         };
         let retired = row(owner(), &nonce, HostedState::Retired);
         let changed = Err("handoff transcript identity changed".to_string());
@@ -1032,7 +1036,8 @@ mod tests {
                 owner: &owner,
                 row,
             };
-            let judged = super::current_session(log.channel, log.logical, None, &mut prior);
+            let judged = super::current_session(log.channel, log.logical, None, &mut prior)
+                .map(|(session, _)| session);
             mode(0o600).unwrap();
             std::fs::remove_file(own).unwrap();
             judged

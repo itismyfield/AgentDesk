@@ -4,7 +4,7 @@ Source coordinate: `1161162a18c87a0514f53dd7ae5dac3c830149cb`, fetched and confi
 
 The issue and source confirm two independent gaps: reconnect omits Missing from cleanup (`herdr_reader.rs:486`), and idle admission leaves the front Held (`owned_busy.rs:90`). A third acceptance gap is reached after repairing those: a failed replacement launch goes through `provider_dispatch/start_failure.rs:83` and `queued_head/v2/start_failure.rs:95`, which retries or retains the original. A retire-only fix therefore still violates the requested reason+disposal rule.
 
-Existing models were inspected: `HerdrSession` models Pending/Bound and pane loss, `HerdrRootRecovery` models strict replaced-root recovery, and `HerdrHandoffHeld`/`HerdrHandoffLaunch` model legacy handoff and failure custody. None includes the missing-pane early admission path. The new small model composes just that path. See the [67-row entrypoint table](herdr-missing-bound.entrypoints.md) and [chart](herdr-missing-bound.chart.mmd).
+Existing models were inspected: `HerdrSession` models Pending/Bound and pane loss, `HerdrRootRecovery` models strict replaced-root recovery, and `HerdrHandoffHeld`/`HerdrHandoffLaunch` model legacy handoff and failure custody. None includes the missing-pane early admission path. The new small model composes just that path. See the [68-row entrypoint table](herdr-missing-bound.entrypoints.md) and [chart](herdr-missing-bound.chart.mmd).
 
 ## Rules and limits
 
@@ -60,3 +60,5 @@ The implementation report records Rust RED/GREEN tests, mutants, source scans, c
 
 
 The official repository manifest check after registration also matched all 19 cfgs (46 rule runs, 44.4 seconds). `list_merge_guard.py --ci --normalize` returned `LIST_MERGE_GUARD_OK` with no manifest diff. The implementation delta in the entrypoint table maps the common proof, idle repair, failure settlement and working probe to the checked actions.
+
+The retired-native launch refinement carries the existing verified native binding and exact owner/Retired/nonce proof to the legacy-close decision. It enables the existing `Launch` action without changing the model's state or fairness assumptions. An unverified or different incarnation remains subject to its existing resume checks and can take `Reject`. The actual idle-to-first-write test and a legacy-close mutant check this refinement; no new native reset or legacy close authority is modeled.
