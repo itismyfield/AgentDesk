@@ -339,13 +339,8 @@ mod tests {
 mod issue_specs_pg_tests {
     use super::*;
 
-    /// `None` means one thing only: the shared fixture base is unconfigured, so
-    /// there is no server this test is entitled to talk to. It never means
-    /// "Postgres answered and failed" — every call below still panics on error,
-    /// so a reachable-but-broken server cannot be laundered into a green run.
-    /// `postgres_test_database_url_base()` additionally panics when
-    /// `AGENTDESK_REQUIRE_PG=1`, so the PG lanes treat a missing base as fatal
-    /// rather than skippable (#4979 S2 contract).
+    /// A missing fixture base fails the test instead of passing silently, and
+    /// every call below panics on error, so a broken server fails too.
     ///
     /// There is deliberately no host fallback. Inventing an address made this
     /// test connect to whatever Postgres happened to listen on the developer's
@@ -353,9 +348,8 @@ mod issue_specs_pg_tests {
     #[tokio::test]
     async fn upsert_issue_spec_persists_parsed_contract() {
         let _lifecycle = crate::db::postgres::lock_test_lifecycle();
-        let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
-            return;
-        };
+        let base = crate::db::postgres::postgres_test_database_url_base()
+            .expect("POSTGRES_TEST_DATABASE_URL_BASE required for issue_specs PG tests"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
         let database_name = format!("agentdesk_issue_specs_{}", uuid::Uuid::new_v4().simple());
         let admin_url = format!("{base}/postgres");
         crate::db::postgres::create_test_database(&admin_url, &database_name, "issue_specs tests")

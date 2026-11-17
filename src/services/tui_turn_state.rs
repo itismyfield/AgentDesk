@@ -17,6 +17,11 @@ pub(crate) use self::completion_scan::{
 };
 #[cfg(test)]
 use self::completion_scan::{is_interactive_mode_housekeeping_type, is_torn_trailing_fragment};
+#[path = "tui_turn_state/tool_open.rs"]
+mod tool_open;
+pub(crate) use self::tool_open::{
+    ToolCalls, latest_provider_record_unix_nanos_widening, provider_tool_calls,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TuiTurnState {
@@ -153,8 +158,12 @@ pub(crate) fn latest_provider_record_unix_nanos(
     path: &Path,
 ) -> Option<i64> {
     let window = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES).ok()?;
-    window
-        .lines
+    latest_record_in(provider, &window.lines)
+}
+
+/// The newest stamped conversation record among `lines`.
+fn latest_record_in(provider: &ProviderKind, lines: &[String]) -> Option<i64> {
+    lines
         .iter()
         .rev()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -338,6 +347,11 @@ pub(crate) fn runtime_binding_turn_state(
 
 pub(crate) fn observe_claude_jsonl_turn_state(path: &Path) -> TuiTurnState {
     claude_meta::observe(path)
+}
+
+/// The busy writer's reading of the same transcript; see [`claude_meta::observe_running`].
+pub(crate) fn observe_claude_jsonl_running_turn_state(path: &Path) -> TuiTurnState {
+    claude_meta::observe_running(path)
 }
 
 pub(crate) fn observe_codex_jsonl_turn_state(path: &Path) -> TuiTurnState {
@@ -745,8 +759,10 @@ fn codex_response_item_turn_state(json: &Value) -> Option<TuiTurnState> {
         },
         "function_call"
         | "custom_tool_call"
+        | "tool_search_call"
         | "function_call_output"
         | "custom_tool_call_output"
+        | "tool_search_output"
         | "reasoning" => Some(TuiTurnState::Streaming),
         _ => None,
     }

@@ -301,6 +301,62 @@ pub(crate) fn install_codex_tui_runtime_binding(
 
 /// The launch path, whose first binding of an execution takes its cause from the launch context.
 /// Returns false when a hook already moved the pane past this tail's source.
+/// A cwd discovery is only a hint; the launch's current context and pinned source authorize it.
+pub(crate) fn publish_discovered_launch(
+    context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    path: &Path,
+) -> Result<(), String> {
+    use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context as bc};
+    crate::services::tmux_common::with_tmux_source_authority(&context.tmux_session, |authority| {
+        let current = bc::execution_context("codex", &context.execution_nonce)?;
+        if &current != context
+            || context.provider != "codex"
+            || context.launch_mode != "fresh"
+            || context.expected_native_session_id.is_some()
+            || context.first_prompt_digest.is_none()
+            || context.owner_runtime_root
+                != crate::services::tmux_common::current_tmux_owner_marker()
+            || bc::observe_spawn_nonce_marker(authority.session())
+                != bc::SpawnNonceMarker::Known(context.execution_nonce.clone())
+            || context.channel_id.is_none()
+            || dedupe::owner_channel_for_tmux_session(authority.session()) != context.channel_id
+        {
+            return Err("Codex discovery no longer names the current fresh execution".into());
+        }
+        let id = super::rollout_index::read_rollout_session_meta(path)
+            .and_then(|meta| meta.id)
+            .ok_or("Codex discovered rollout has no native session")?;
+        let source = source_observation::verify_codex_hook_source(
+            context
+                .provider_root
+                .as_deref()
+                .ok_or("Codex launch has no pinned sessions root")?,
+            &source_observation::CodexHookSourceClaim {
+                session_id: &id,
+                transcript_path: Some(path),
+                expected_source: source_observation::CodexRolloutSource::Cli,
+            },
+        )
+        .map_err(|error| format!("Codex discovery source rejected: {error:?}"))?;
+        if source.created_at.is_none_or(|at| at < context.created_at) {
+            return Err("Codex discovered source predates its fresh execution".into());
+        }
+        let binding = dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+            output_path: source.rollout_path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(source.session_id),
+            last_offset: 0,
+            relay_last_offset: None,
+        };
+        if !install_binding_under_source_authority(authority, Some(0), binding, true, true) {
+            return Err("Codex discovery publication was refused".into());
+        }
+        Ok(())
+    })
+}
+
 pub(crate) fn install_launched_codex_tui_runtime_binding(
     tmux_session_name: &str,
     rollout_start_offset: Option<u64>,
@@ -316,7 +372,13 @@ fn install_binding(
     launched: bool,
 ) -> bool {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-        install_binding_under_source_authority(authority, rollout_start_offset, binding, launched)
+        install_binding_under_source_authority(
+            authority,
+            rollout_start_offset,
+            binding,
+            launched,
+            false,
+        )
     })
 }
 
@@ -325,7 +387,7 @@ pub(crate) fn install_codex_tui_runtime_binding_under_source_authority(
     rollout_start_offset: Option<u64>,
     binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
 ) -> bool {
-    install_binding_under_source_authority(authority, rollout_start_offset, binding, false)
+    install_binding_under_source_authority(authority, rollout_start_offset, binding, false, false)
 }
 
 fn install_binding_under_source_authority(
@@ -333,6 +395,7 @@ fn install_binding_under_source_authority(
     rollout_start_offset: Option<u64>,
     binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
     launched: bool,
+    required: bool,
 ) -> bool {
     use crate::services::tui_prompt_dedupe as dedupe;
     let tmux_session_name = authority.session();
@@ -369,14 +432,14 @@ fn install_binding_under_source_authority(
             error,
             "failed to persist Codex TUI rollout marker; runtime binding unchanged"
         );
-        return !verified;
+        return !required && !verified;
     }
     let registered = if launched {
         dedupe::register_launched_tmux_runtime_binding_under_source_authority(authority, binding)
     } else {
         dedupe::register_tmux_runtime_binding_under_source_authority(authority, binding)
     };
-    !verified || registered
+    (!required && !verified) || registered
 }
 
 #[cfg(test)]

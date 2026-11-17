@@ -1,0 +1,2 @@
+key: 572-routine-run-mailbox-sharing
+| `routine-run` mailbox sharing (#8117 PR3b D) | `061b3d4cc6df3368122146b666db0d63d4593234` | Before: process 턴이 shared primary actor 를 내림, thread 실패 시 primary 실행, 제출 뒤 새 턴이 기대 RED; mailbox 미해제 mutant 는 liveness RED | 기존 RoutineRun 갱신 22cfg: GREEN 8, 기대 RED 14. shared primary actor 보존·primary fallback 0·사람 입력 보존과 처리. [모델 보고서](routine-run/routine-run.report.md) |

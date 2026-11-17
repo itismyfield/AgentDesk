@@ -3,6 +3,8 @@
 
 mod first_input;
 mod handoff;
+pub(crate) mod hold_record;
+pub(crate) mod hold_resolve;
 use handoff::launched_source;
 
 use std::path::{Path, PathBuf};
@@ -190,7 +192,14 @@ pub(crate) trait HerdrTurnPorts {
     fn unplaced_lease(&self, _owner: &HostedOwner) -> Result<UnplacedLease, String> {
         Err("no channel lease".into())
     }
+    /// Posts an input hold's one notice row; without it a hold that needs one is never released.
+    fn hold_notice(&self) -> Option<Arc<HoldNotice>> {
+        None
+    }
 }
+
+/// Enqueues the notice of hold `(execution nonce, hold id)`; a repeat returns the same row.
+pub(crate) type HoldNotice = dyn Fn(&str, &str) -> Result<i64, String> + Send + Sync;
 
 /// The source a prompt goes to.
 struct Attached {
@@ -223,7 +232,7 @@ pub(crate) fn owned_prompt_for_tests(
         physical: physical(record),
     };
     let (sender, _receiver) = std::sync::mpsc::channel();
-    first_input::submit_owned(turn, hook, lineage, attached, &sender).map(drop)
+    first_input::submit_owned(turn, hook, (lineage, None), attached, &sender).map(drop)
 }
 
 /// The socket and pane the gate of `record` writes to.
@@ -261,12 +270,13 @@ pub(crate) fn execute(
     before_start::observed_execution(turn.cancel.as_deref(), || {
         use crate::services::claude_tui::owner_input::Lineage;
         let (attached, lineage) = match turn.row {
+            // An owner's write judges a hold right before its first key; a legacy writer refuses.
             Some(HostedRecord::Known(record)) if record.state == HostedState::Bound => {
-                not_held(&record.execution_nonce)?;
+                legacy_not_held(&record.execution_nonce)?;
                 (bound_source(&turn, ports, record)?, Lineage::Existing)
             }
             Some(HostedRecord::Known(record)) if record.state == HostedState::Pending => {
-                not_held(&record.execution_nonce)?;
+                legacy_not_held(&record.execution_nonce)?;
                 (
                     pending_source(&turn, &runtime, ports, record)?,
                     Lineage::Pending,
@@ -277,7 +287,8 @@ pub(crate) fn execute(
             }
             _ => (launched_source(&turn, &runtime, ports)?, Lineage::Created),
         };
-        prompt_and_read(&turn, &runtime, attached, lineage, sender)
+        let notice = ports.hold_notice();
+        prompt_and_read(&turn, &runtime, attached, (lineage, notice), sender)
     })
 }
 
@@ -524,7 +535,7 @@ pub(crate) fn unlink_hold(nonce: &str) -> Result<(PathBuf, bool), String> {
     }
 }
 
-/// Each held nonce and when its hold was recorded; the file holds only that time.
+/// Each held nonce and when its hold was recorded, from a v1 time or a v2 record.
 pub(crate) fn input_holds() -> Result<Vec<(String, Option<String>)>, String> {
     let dir = holds_dir()?;
     let entries = match std::fs::read_dir(&dir) {
@@ -537,8 +548,14 @@ pub(crate) fn input_holds() -> Result<Vec<(String, Option<String>)>, String> {
     for entry in entries {
         let entry =
             entry.map_err(|error| format!("herdr turn: input holds unreadable: {error}"))?;
+        // A record being rewritten is no hold of its own.
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         let recorded = std::fs::read_to_string(entry.path()).ok().and_then(|text| {
-            chrono::DateTime::parse_from_rfc3339(text.trim())
+            let v2 = serde_json::from_str::<serde_json::Value>(&text).ok();
+            let at = v2.as_ref().and_then(|v2| v2["recorded_at"].as_str());
+            chrono::DateTime::parse_from_rfc3339(at.unwrap_or(text.trim()))
                 .ok()
                 .map(|at| at.to_rfc3339())
         });
@@ -569,6 +586,13 @@ pub(crate) fn not_held(nonce: &str) -> Result<(), String> {
     }
 }
 
+fn legacy_not_held(nonce: &str) -> Result<(), String> {
+    match crate::services::claude_tui::owner_input::launch_refuses_live() {
+        Ok(()) => not_held(nonce),
+        Err(_) => Ok(()),
+    }
+}
+
 /// Recorded and synced before the first write, so even a crash mid-send leaves it.
 pub(crate) fn hold(nonce: &str) -> Result<PathBuf, String> {
     use std::io::Write;
@@ -582,14 +606,6 @@ pub(crate) fn hold(nonce: &str) -> Result<PathBuf, String> {
         .and_then(|()| crate::domain::file_sync::fsync_parent_dir(&path));
     written.map_err(|error| format!("herdr turn: input hold not recorded: {error}"))?;
     Ok(path)
-}
-
-/// Whether the composer is as before the run: submitted, or never written.
-fn composer_settled(run: &InputRun) -> bool {
-    matches!(
-        run,
-        InputRun::Applied | InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }
-    )
 }
 
 fn launch(turn: &HerdrTurn<'_>, session_id: Option<String>, resume: bool) -> HerdrLaunch {
@@ -716,18 +732,22 @@ fn prompt_and_read(
     turn: &HerdrTurn<'_>,
     runtime: &Handle,
     attached: Attached,
-    lineage: crate::services::claude_tui::owner_input::Lineage,
+    (lineage, notice): (
+        crate::services::claude_tui::owner_input::Lineage,
+        Option<Arc<HoldNotice>>,
+    ),
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
-    let submitted =
-        with_input_admission(
-            || match crate::services::claude_tui::owner_input::launch_hook() {
-                Some(hook) => {
-                    first_input::submit_owned(turn, hook, lineage, attached, &sender).map(Some)
-                }
-                None => first_input::submit(turn, attached, &sender),
-            },
-        )?;
+    let submitted = with_input_admission(|| {
+        match crate::services::claude_tui::owner_input::launch_hook() {
+            // The owner waiting on this thread writes the prompt as its own effect.
+            Some(hook) => {
+                first_input::submit_owned(turn, hook, (lineage, notice), attached, &sender)
+                    .map(Some)
+            }
+            None => first_input::submit(turn, attached, &sender),
+        }
+    })?;
     let Some(submitted) = submitted else {
         return Ok(());
     };

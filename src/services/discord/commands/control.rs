@@ -448,6 +448,42 @@ async fn relaunch_pending_for(shared: &SharedData, channel_id: serenity::Channel
         .contains(&channel_id.get().to_string())
 }
 
+/// Drops the pendings an ended TUI's next launch reflects: relaunch, fast reset of the settings it
+/// reads and model reset, under one settings lock, so a save after this keeps its own pending.
+#[cfg(unix)]
+pub(super) async fn consume_reflected(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+) {
+    let mut settings = shared.settings.write().await;
+    let key = channel_id.get().to_string();
+    let mut removed = settings.channel_relaunch_pending.remove(&key);
+    // The launch reads fast mode from the channel's own setting, else from its thread parent's.
+    let own = settings.channel_fast_modes.contains_key(&key)
+        || settings.channel_codex_goals.contains_key(&key);
+    let parent = SharedData::feature_settings_parent(channel_id).filter(|_| !own);
+    let fast_channel = parent.unwrap_or(channel_id);
+    let fast = clear_fast_mode_reset_pending_for_provider(shared, fast_channel, provider);
+    if fast {
+        let marker = fast_mode_reset_pending_key(fast_channel, provider);
+        removed |= settings.channel_fast_mode_reset_pending.remove(&marker);
+        let legacy = fast_channel.get().to_string();
+        removed |= settings.channel_fast_mode_reset_pending.remove(&legacy);
+    }
+    let model = shared
+        .overrides
+        .model_session_reset_pending
+        .remove(&channel_id);
+    if fast || model.is_some() || removed {
+        sync_session_reset_pending(shared, channel_id);
+        sync_session_reset_pending(shared, fast_channel);
+    }
+    if let Some(token) = shared.http.cached_bot_token.get().filter(|_| removed) {
+        save_bot_settings(token, &settings);
+    }
+}
+
 /// Drops the channel's pending relaunch, in memory and on disk.
 pub(super) async fn release_relaunch_pending(
     shared: &Arc<SharedData>,
@@ -516,6 +552,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<ClearReport> {
     let mut report = ClearReport::default();
+    let first_pause = crate::services::tui_o::cutover::pause_codex_first(channel_id.get());
     // A pane effect holding the transition is waited out for the usual window, then overtaken.
     let _completion =
         super::super::session_transition::SessionTransitionCompletion::new(shared, channel_id);
@@ -606,6 +643,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     )
     .await;
 
+    drop(first_pause);
     Ok(report)
 }
 

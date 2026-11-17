@@ -306,7 +306,9 @@ impl Registry {
         if candidate == raw {
             return Ok(result);
         }
-        match critical_publish_status(&self.path, &candidate, context()) {
+        let published = critical_publish_status(&self.path, &candidate, context());
+        super::stamped::published();
+        match published {
             Ok(FlushStatus::Flushed) => {
                 cached.as_mut().ok_or("history cache disappeared")?.0 = candidate;
                 Ok(result)
@@ -858,41 +860,35 @@ fn owned(state: &Snapshot) -> Vec<(Entry, Option<usize>)> {
 
 /// What a non-scoped reader sees in a V2 file, as one store; `None` when the file is not V2.
 /// Read and parse failures stay errors.
-pub(super) fn unscoped_store(path: &Path) -> Result<Option<Store>, String> {
+pub(super) fn unscoped_store(path: &Path) -> Result<Option<Arc<Store>>, String> {
     if !is_v2(path)? {
         return Ok(None);
     }
-    let raw = std::fs::read(path).map_err(|e| e.to_string())?;
-    Ok(Some(owned_store(path, raw)?))
+    let read = super::stamped::read(path, owned_entries).map_err(|e| e.to_string())?;
+    Ok(Some(read?))
 }
 
 /// The V1 append readers' store in a V2 file (`None` if not V2); they match only append entries,
 /// so a file with no `"append":` key is not parsed.
-pub(super) fn append_store(path: &Path) -> Result<Option<Store>, String> {
+pub(super) fn append_store(path: &Path) -> Result<Option<Arc<Store>>, String> {
     if !is_v2(path)? {
         return Ok(None);
     }
     let raw = std::fs::read(path).map_err(|e| e.to_string())?;
     if !raw.windows(9).any(|window| window == b"\"append\":") {
-        return Ok(Some(Store::default()));
+        return Ok(Some(Arc::default()));
     }
-    Ok(Some(owned_store(path, raw)?))
+    Ok(Some(compat::reuse(path, raw, owned_entries)?))
 }
 
-/// The owned entries of the V2 file whose bytes are `raw`, parsed once per distinct content.
-fn owned_store(path: &Path, raw: Vec<u8>) -> Result<Store, String> {
-    let entries = compat::reuse(path, raw, |raw| {
-        let raw = std::str::from_utf8(raw).map_err(|e| e.to_string())?;
-        let migration::Decoded::V2(state) = migration::decode(raw)? else {
-            return Err("frame history envelope changed while reading".into());
-        };
-        Ok(owned(&state)
-            .into_iter()
-            .map(|(entry, _)| entry)
-            .collect::<Vec<Entry>>())
-    })?;
+/// The owned entries of the V2 file whose bytes are `raw`.
+fn owned_entries(raw: &[u8]) -> Result<Store, String> {
+    let raw = std::str::from_utf8(raw).map_err(|e| e.to_string())?;
+    let migration::Decoded::V2(state) = migration::decode(raw)? else {
+        return Err("frame history envelope changed while reading".into());
+    };
     Ok(Store {
-        entries: entries.as_ref().clone(),
+        entries: owned(&state).into_iter().map(|(entry, _)| entry).collect(),
     })
 }
 

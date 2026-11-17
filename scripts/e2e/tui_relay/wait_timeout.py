@@ -11,6 +11,8 @@ from . import assertions
 # Subtext the turn-presence supervisor posts when dequeue is held for an unbound watcher.
 _WATCHER_UNBOUND_NOTICE = "(사유: watcher_unbound)"
 _MARKER = re.compile(r"\[E2E:([^:\]\s]+):([^:\]\s]+):([^:\]\s]+)\]")
+# health_api/writer_readiness.rs: a channel O does not own takes the ordinary intake, which no writer gates.
+_WRITER_UNSELECTED = "channel is not owned by O"
 
 
 def marker_identity(run_id: str) -> str:
@@ -87,12 +89,22 @@ def classify(
         return "marker_mismatch"
     if direct_notice_seen:
         return "direct_input_notified_no_tail_observed"
+    if writer_refusal(health.get("target_writers")):
+        return "turn_not_started_writer_not_ready"
     if _queue_blocked(window, after_id, target_mailboxes):
         return "turn_not_started_queue_blocked"
     if not isinstance(target_mailboxes, list) or not target_mailboxes:
         # An unreadable or missing mailbox snapshot cannot rule out a held queue.
         return "no_relay_evidence_queue_state_unknown"
     return "no_direct_input_or_relay_evidence"
+
+
+def writer_refusal(rows: Any) -> str | None:
+    """The hold reason of a target O writer row that refuses input; None when no row gates it."""
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("accepts") is not True and row.get("hold_reason") != _WRITER_UNSELECTED:
+            return str(row.get("hold_reason") or "unreported")
+    return None
 
 
 def _provider_raw_contains(window: assertions.Window, needle: str) -> bool:

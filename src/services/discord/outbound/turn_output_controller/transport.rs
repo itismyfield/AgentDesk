@@ -278,9 +278,7 @@ where
         // `lifecycle` (e.g. Active) is left untouched here.
         if !matches!(
             lifecycle,
-            PlaceholderLifecycle::Completed
-                | PlaceholderLifecycle::TimedOut
-                | PlaceholderLifecycle::Aborted
+            PlaceholderLifecycle::Completed | PlaceholderLifecycle::Aborted
         ) {
             return;
         }

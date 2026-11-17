@@ -17,6 +17,8 @@ pub(crate) use channel_gate::{
     peek_o_owns_tui_output_for_channel_tmux,
 };
 #[cfg(all(test, unix))]
+mod channel_lookup_tests;
+#[cfg(all(test, unix))]
 mod child_funnel_tests;
 #[cfg(all(test, unix))]
 mod thread_child_record_tests;
@@ -107,8 +109,8 @@ pub(crate) fn thread_child(channel: u64) -> bool {
     test_override::with_channels(|snapshot| snapshot.is_some_and(|s| s.child(channel).is_some()))
 }
 
-/// A checked Discord read of one channel: `Ok(None)` for a channel that is no guild channel, an
-/// error when the read itself failed. The Discord runtime installs it once per process.
+/// A checked Discord read of one channel: `Ok(None)` for a channel that is no guild channel,
+/// and an error when the read itself failed. Each writer runtime installs its provider's client.
 pub(crate) type ChannelLookup = std::sync::Arc<
     dyn Fn(
             u64,
@@ -119,16 +121,27 @@ pub(crate) type ChannelLookup = std::sync::Arc<
         + Sync,
 >;
 
-static CHANNEL_LOOKUP: std::sync::OnceLock<ChannelLookup> = std::sync::OnceLock::new();
+type ChannelLookups = std::collections::BTreeMap<String, ChannelLookup>;
+static CHANNEL_LOOKUPS: std::sync::LazyLock<std::sync::Mutex<ChannelLookups>> =
+    std::sync::LazyLock::new(Default::default);
 
-pub(crate) fn install_channel_lookup(lookup: ChannelLookup) {
-    let _ = CHANNEL_LOOKUP.set(lookup);
+pub(crate) fn install_channel_lookup(provider: &str, lookup: ChannelLookup) {
+    // A restarted provider replaces its old client; other providers keep their own credentials.
+    test_override::with_lookups(|lookups| {
+        lookups.insert(provider.to_owned(), lookup);
+    });
+}
+
+fn channel_lookup(provider: &str) -> Option<ChannelLookup> {
+    test_override::with_lookups(|lookups| lookups.get(provider).cloned())
 }
 
 /// Before an input is placed on a boot reservation, its parent is read once: a failed read holds
 /// the input, and a channel that is no thread of an O parent stays Legacy's for good.
-pub(crate) async fn resolve_reserved_child(channel: u64) -> Result<(), String> {
-    resolve_reserved_with(channel, CHANNEL_LOOKUP.get().cloned()).await
+pub(crate) async fn resolve_reserved_child(provider: &str, channel: u64) -> Result<(), String> {
+    resolve_reserved_with(channel, channel_lookup(provider))
+        .await
+        .map_err(|detail| format!("provider={provider}: {detail}"))
 }
 
 async fn resolve_reserved_with(channel: u64, lookup: Option<ChannelLookup>) -> Result<(), String> {
@@ -162,17 +175,25 @@ pub(crate) async fn record_thread_child_by_id(
     channel: u64,
     hinted_parent: u64,
 ) -> Result<bool, String> {
-    let selected = test_override::with_channels(|snapshot| {
-        snapshot
-            .is_some_and(|s| s.channels().contains(&hinted_parent) && s.child(channel).is_none())
+    let provider = test_override::with_channels(|snapshot| {
+        let snapshot = snapshot?;
+        if !snapshot.channels().contains(&hinted_parent) || snapshot.child(channel).is_some() {
+            return None;
+        }
+        match snapshot.kind(hinted_parent)? {
+            RuntimeHandoffKind::ClaudeTui => Some("claude"),
+            RuntimeHandoffKind::CodexTui => Some("codex"),
+            _ => None,
+        }
     });
-    if !selected {
+    let Some(provider) = provider else {
         return Ok(false);
-    }
-    let lookup = CHANNEL_LOOKUP.get().cloned();
-    let lookup = lookup.ok_or_else(|| "no checked channel read installed".to_string())?;
+    };
+    let lookup = channel_lookup(provider)
+        .ok_or_else(|| format!("provider={provider}: no checked channel read installed"))?;
     Ok(lookup(channel)
-        .await?
+        .await
+        .map_err(|detail| format!("provider={provider}: {detail}"))?
         .is_some_and(|read| record_thread_child(&read, false)))
 }
 
@@ -244,7 +265,8 @@ pub(crate) fn policy_channel(channel: u64) -> u64 {
     test_override::with_channels(|snapshot| snapshot.map_or(channel, |s| s.policy_channel(channel)))
 }
 
-/// Fresh local Codex admission precedes provider effects.
+/// The legacy mark used by output-free adoption fixtures.
+#[cfg(test)]
 pub(crate) fn mark_codex_turn_admitted(
     channel: u64,
     provider: &crate::services::provider::ProviderKind,
@@ -272,6 +294,94 @@ pub(crate) fn mark_codex_turn_admitted(
             });
         }
     });
+}
+
+/// Installs the hold before spawning the provider, only for a fresh local Codex turn.
+pub(crate) fn admit_codex_first(
+    channel: u64,
+    provider: &crate::services::provider::ProviderKind,
+    session: Option<&str>,
+    prompt: &str,
+    token: &crate::services::provider::CancelToken,
+    tmux: Option<&str>,
+) -> Option<channel_policy::FirstAdmission> {
+    use super::writer::binding::{BindingEvents, ChannelBindingLog};
+    if *provider != crate::services::provider::ProviderKind::Codex || session.is_some() {
+        return None;
+    }
+    token
+        .with_live_admission(|| {
+            test_override::with_channels(|boot| {
+                let boot = boot.filter(|b| {
+                    b.late_adopt_capable()
+                        && b.site() == &Site::Home
+                        && b.kind(channel) == Some(RuntimeHandoffKind::CodexTui)
+                })?;
+                boot.output_candidate(channel)?.admit_first(
+                    channel,
+                    token.turn_nonce()?,
+                    prompt,
+                    tmux?,
+                    || {
+                        ChannelBindingLog::new(channel, super::shadow::ShadowProvider::Codex)
+                            .binding_events_since(channel, 0)
+                            .map(|events| events.last().map_or(0, |event| event.seq))
+                    },
+                )
+            })
+        })
+        .flatten()
+}
+
+pub(crate) fn attach_codex_first(
+    context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    prompt: &str,
+    nonce: Option<&str>,
+) {
+    test_override::with_channels(|boot| {
+        if let Some(candidate) = context
+            .channel_id
+            .and_then(|channel| boot?.output_candidate(channel))
+        {
+            candidate.attach_first_execution(context, prompt, nonce);
+        }
+    });
+}
+
+pub(crate) fn pause_codex_first(channel: u64) -> Option<channel_policy::FirstPause> {
+    test_override::with_channels(|boot| {
+        let boot = boot.filter(|b| b.kind(channel) == Some(RuntimeHandoffKind::CodexTui))?;
+        Some(boot.output_candidate(channel)?.pause_first())
+    })
+}
+
+pub(crate) fn invalidate_codex_first(
+    channel: Option<u64>,
+    nonce: Option<&str>,
+    tmux: Option<&str>,
+) {
+    test_override::with_channels(|boot| {
+        if let Some(boot) = boot {
+            for id in boot.channels() {
+                if channel.is_none_or(|channel| channel == *id)
+                    && let Some(candidate) = boot.output_candidate(*id)
+                {
+                    candidate.invalidate_first(nonce, tmux);
+                }
+            }
+        }
+    });
+}
+
+pub(crate) async fn wait_codex_first(channel: u64, nonce: Option<&str>) {
+    wait_codex_first_id(channel, nonce.map(channel_policy::first_nonce_id)).await;
+}
+
+async fn wait_codex_first_id(channel: u64, nonce: Option<[u8; 32]>) {
+    let candidate = test_override::with_channels(|boot| boot?.output_candidate(channel));
+    if let Some(candidate) = candidate {
+        candidate.wait_first(nonce).await;
+    }
 }
 
 /// Before a new placement: a non-home node holds a selected channel, and the home releases a
@@ -319,6 +429,14 @@ mod test_override {
     pub(super) fn with_channels<R>(evaluate: impl FnOnce(Option<&BootChannels>) -> R) -> R {
         evaluate(channel_policy::boot())
     }
+
+    pub(super) fn with_lookups<R>(evaluate: impl FnOnce(&mut super::ChannelLookups) -> R) -> R {
+        evaluate(
+            &mut super::CHANNEL_LOOKUPS
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        )
+    }
 }
 
 /// Test builds force the boot channel snapshot per thread or for a whole child process.
@@ -364,6 +482,41 @@ pub(crate) mod test_override {
     }
     use crate::services::tui_o::channel_policy::{self, Adoption, BootChannels};
     use std::cell::RefCell;
+
+    type Lookups = super::ChannelLookups;
+    thread_local! {
+        static LOOKUPS: RefCell<Option<Lookups>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn channel_lookup_providers() -> Vec<String> {
+        with_lookups(|lookups| lookups.keys().cloned().collect())
+    }
+
+    pub(crate) struct LookupsGuard(Option<Lookups>);
+
+    pub(crate) fn force_channel_lookups() -> LookupsGuard {
+        LookupsGuard(LOOKUPS.with(|cell| cell.replace(Some(Lookups::new()))))
+    }
+
+    impl Drop for LookupsGuard {
+        fn drop(&mut self) {
+            LOOKUPS.with(|cell| cell.replace(self.0.take()));
+        }
+    }
+
+    pub(super) fn with_lookups<R>(read: impl FnOnce(&mut Lookups) -> R) -> R {
+        LOOKUPS.with(|cell| {
+            if let Some(lookups) = cell.borrow_mut().as_mut() {
+                read(lookups)
+            } else {
+                read(
+                    &mut super::CHANNEL_LOOKUPS
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()),
+                )
+            }
+        })
+    }
 
     pub(crate) const CHANNELS_ENV: &str = "ADK_TEST_O_TUI_CHANNELS";
     thread_local! {

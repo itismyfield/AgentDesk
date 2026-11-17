@@ -99,7 +99,12 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
         let mut stalled = false;
         while let Some(front) = grant(&drive, stalled).await {
             let message = front.1.message_id;
-            let result = (drive.handoff)(front).await;
+            let timing = crate::logging::intake_timing::span_for(message);
+            crate::logging::intake_timing::mark_message(
+                message,
+                crate::logging::intake_timing::Stage::Front,
+            );
+            let result = tracing::Instrument::instrument((drive.handoff)(front), timing).await;
             if let Err(error) = &result {
                 tracing::info!(channel_id = drive.channel, %error, "owner front not delivered");
             }
@@ -109,6 +114,7 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
                 super::held_watch::watch(drive.clone(), message);
                 break;
             }
+            crate::logging::intake_timing::finish_message(message, &result);
             stalled = result.is_err();
         }
         if let Some(settled) = &drive.settled {

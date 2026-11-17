@@ -840,12 +840,10 @@ mod tests {
         }
 
         impl TestPostgresDb {
-            async fn create() -> Option<Self> {
+            async fn create() -> Self {
                 let lock = crate::db::postgres::lock_test_lifecycle();
-                let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
-                    drop(lock);
-                    return None;
-                };
+                let base = crate::db::postgres::postgres_test_database_url_base()
+                    .expect("POSTGRES_TEST_DATABASE_URL_BASE required for outbox claiming tests"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
                 let admin_url = if let Ok(url) = std::env::var("POSTGRES_TEST_ADMIN_URL") {
                     let trimmed = url.trim();
                     if trimmed.is_empty() {
@@ -863,23 +861,22 @@ mod tests {
                 let database_name =
                     format!("agentdesk_outbox_claiming_{}", Uuid::new_v4().simple());
                 let database_url = format!("{base}/{database_name}");
-                if let Err(error) = crate::db::postgres::create_test_database(
+                crate::db::postgres::create_test_database(
                     &admin_url,
                     &database_name,
                     "outbox claiming tests",
                 )
                 .await
-                {
-                    eprintln!("skipping outbox claiming postgres test: {error}");
-                    return None;
-                }
+                .unwrap_or_else(|error| {
+                    panic!("outbox claiming tests: create test database: {error}") // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
+                });
 
-                Some(Self {
+                Self {
                     _lock: lock,
                     admin_url,
                     database_name,
                     database_url,
-                })
+                }
             }
 
             async fn connect_and_migrate(&self) -> PgPool {
@@ -1034,9 +1031,7 @@ mod tests {
             crate::config::save_to_path(&path, &config).unwrap();
             config.cluster = cluster_config_capping_node_at("snapshot-owner", 0);
             crate::config_live_reload::install(config.clone());
-            let pg_db = TestPostgresDb::create()
-                .await
-                .expect("test PostgreSQL required");
+            let pg_db = TestPostgresDb::create().await;
             let pool = pg_db.connect_and_migrate().await;
             seed_worker_node(&pool, "snapshot-owner", json!([]), 0).await;
             seed_pending_outbox_row(&pool, "snapshot-dispatch", json!({})).await;
@@ -1070,9 +1065,7 @@ mod tests {
         /// a route-preference story for a node that was simply offline.
         #[tokio::test]
         async fn outbox_skip_reason_reports_offline_claim_owner_beside_route_preference() {
-            let Some(pg_db) = TestPostgresDb::create().await else {
-                return;
-            };
+            let pg_db = TestPostgresDb::create().await;
             let pool = pg_db.connect_and_migrate().await;
             seed_worker_node(&pool, "mac-mini-release", json!(["mac-mini"]), 600).await;
             seed_worker_node(&pool, "mac-book-release", json!(["mac-mini"]), 0).await;
@@ -1141,9 +1134,7 @@ mod tests {
         /// prepending, and this test pins the claim verdicts but not the column.
         #[tokio::test]
         async fn outbox_claim_verdicts_are_unchanged_by_skip_reason_diagnostics() {
-            let Some(pg_db) = TestPostgresDb::create().await else {
-                return;
-            };
+            let pg_db = TestPostgresDb::create().await;
             let pool = pg_db.connect_and_migrate().await;
             let default_config = crate::config::ClusterConfig::default();
 
@@ -1359,9 +1350,7 @@ mod tests {
         // handed out: COMMIT on an aborted transaction rolls everything back.
         #[tokio::test]
         async fn a_failed_statement_in_the_claim_batch_hands_out_no_claims() {
-            let Some(pg_db) = TestPostgresDb::create().await else {
-                return;
-            };
+            let pg_db = TestPostgresDb::create().await;
             let pool = pg_db.connect_and_migrate().await;
             sqlx::raw_sql(
                 "CREATE FUNCTION inject_failure() RETURNS trigger LANGUAGE plpgsql AS
@@ -1411,9 +1400,7 @@ mod tests {
 
         #[tokio::test]
         async fn reassign_stale_claim_owners_moves_100_pending_rows_to_live_label_match() {
-            let Some(pg_db) = TestPostgresDb::create().await else {
-                return;
-            };
+            let pg_db = TestPostgresDb::create().await;
             let pool = pg_db.connect_and_migrate().await;
             seed_worker_node(&pool, "stale-node", json!(["mac-book"]), 45).await;
             seed_worker_node(&pool, "mac-mini-release", json!(["mac-mini"]), 0).await;
@@ -1470,9 +1457,7 @@ mod tests {
 
         #[tokio::test]
         async fn reassign_stale_claim_owner_clears_owner_when_no_live_candidate_matches() {
-            let Some(pg_db) = TestPostgresDb::create().await else {
-                return;
-            };
+            let pg_db = TestPostgresDb::create().await;
             let pool = pg_db.connect_and_migrate().await;
             seed_worker_node(&pool, "stale-node", json!(["mac-book"]), 45).await;
             seed_worker_node(&pool, "mac-mini-release", json!(["mac-mini"]), 0).await;

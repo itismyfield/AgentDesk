@@ -273,24 +273,10 @@ mod tests {
     }
 
     async fn wait_for_queries(hosts: &HostAllowlist, remaining: usize) {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if hosts
-                    .tailscale_responses
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .unwrap()
-                    .len()
-                    == remaining
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("Tailscale query did not run");
+        crate::test_support::wait::poll_within(async || {
+            let count = hosts.tailscale_responses.lock().unwrap().as_ref().unwrap().len();
+            (count == remaining).then_some(()).ok_or_else(|| format!("Tailscale query did not run: {count} responses remain, expected {remaining}"))
+        }, Duration::from_secs(1), "Tailscale query did not run").await.expect("Tailscale query did not run");
     }
 
     async fn recovery_after_initial_failure(origin_only: bool) {

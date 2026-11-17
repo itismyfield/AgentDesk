@@ -53,6 +53,12 @@ impl RoutineDiscordLogger {
         if threshold == 0 {
             return RoutineDiscordLogStatus::skipped();
         }
+        // Headless streaks are reported by the failure-escalation events reserved at close.
+        match store.run_is_headless(&outcome.run_id).await {
+            Ok(false) => {}
+            Ok(true) => return RoutineDiscordLogStatus::skipped(),
+            Err(error) => return RoutineDiscordLogStatus::failed(error),
+        }
         let (streak, stored_error) = match consecutive_failed_runs(
             &self.pool,
             &outcome.routine_id,
@@ -79,13 +85,18 @@ impl RoutineDiscordLogger {
             "routine:{}:consecutive_failures:{}",
             routine.id, outcome.run_id
         );
+        let thread = self.run_thread_target(store, &routine, &outcome.run_id);
+        let (thread_store, saved_thread) = match thread.await {
+            Ok(thread) => thread,
+            Err(error) => return RoutineDiscordLogStatus::failed(error),
+        };
         let status = self
             .log_actionable_to_routine_target_with_ttl(
-                Some(store),
+                thread_store,
                 Some(&routine.id),
                 Some(&routine.name),
                 routine.agent_id.as_deref(),
-                routine.discord_thread_id.as_deref(),
+                saved_thread,
                 CONSECUTIVE_FAILURES_REASON_CODE,
                 &session_key,
                 &message,

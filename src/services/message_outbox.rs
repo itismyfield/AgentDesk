@@ -8,6 +8,7 @@ pub(crate) mod body_census;
 mod diagnostics;
 mod identity;
 mod plain;
+pub(crate) mod routine_incident;
 use diagnostics::{warn_lifecycle_enqueue_failure, warn_outbox_enqueue_failure};
 mod session_notice;
 pub(crate) use attachments::{OutboxAttachment, StoredOutboxAttachment, decode_claimed_attachment};

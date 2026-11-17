@@ -75,6 +75,7 @@ pub(in crate::services::discord) enum ExecutorWitness {
     Unwitnessed,
 }
 
+#[cfg(test)]
 pub(super) async fn probe_tmux_session_within(
     session_name: Option<&str>,
     budget: &mut TmuxObservationBudget,
@@ -85,12 +86,11 @@ pub(super) async fn probe_tmux_session_within(
     )
 }
 
-/// The same probe as [`probe_tmux_session_within`], reported three-valued
-/// (#5942).
+/// Probe session presence with a three-valued result.
 ///
 /// Splitting the causes here rather than at the caller keeps ONE place that
-/// knows why a probe did not say yes; the bool above is derived from this, so
-/// the two can never disagree about presence while differing about absence.
+/// knows why a probe did not say yes. The test-only bool wrapper is derived
+/// from this result so presence and absence stay consistent.
 pub(super) async fn witness_tmux_session_within(
     session_name: Option<&str>,
     budget: &mut TmuxObservationBudget,

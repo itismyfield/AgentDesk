@@ -700,6 +700,209 @@ class SelectionCliTest(unittest.TestCase):
         self.assertCountEqual([call.args[1] for call in checked.call_args_list], ["M.cfg", "N.cfg"])
 
 
+class ShardReportTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "models"
+        self.root.mkdir()
+        self.reports = Path(self.tmp.name) / "reports"
+        self.reports.mkdir()
+        self.jar = Path(self.tmp.name) / "tla2tools.jar"
+        self.jar.touch()
+        self.populate(5)
+
+    def populate(self, count: int) -> list[str]:
+        names = [f"M{i:04}.cfg" for i in range(count)]
+        for name in names:
+            (self.root / name).touch()
+        (self.root / "expected.tsv").write_text("".join(f"{name}\tM\t-\n" for name in names))
+        return names
+
+    def run_main(self, *args: str, checked=None) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+
+        def check(root, cfg, module, rules, java, jar, timeout):
+            return tlc.Result(cfg, rules, rules=list(rules), runs=1, seconds=1.5)
+
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(tlc, "check_cfg", side_effect=checked or check):
+            rc = tlc.main(["--root", str(self.root), "--jar", str(self.jar), *args])
+        return rc, out.getvalue(), err.getvalue()
+
+    def shards(self, count: int = 4) -> None:
+        for index in range(count):
+            rc, _, err = self.run_main("--shard-index", str(index), "--shard-count", str(count),
+                                       "--report-json", str(self.reports / f"tlc-{index}.json"))
+            self.assertEqual((rc, err), (0, ""))
+
+    def aggregate(self) -> tuple[int, str, str]:
+        return self.run_main("--aggregate-reports", str(self.reports), "--shard-count", "4")
+
+    def test_all_current_configs_and_new_cfg_are_checked_exactly_once(self) -> None:
+        expected = tlc.read_expected(tlc.DEFAULT_ROOT / "expected.tsv")
+        selected = tlc.select_configs(tlc.DEFAULT_ROOT, expected, ["scripts/ci/statecharts_tlc.py"])
+        self.assertEqual(set(selected), set(expected))
+        selected.append("new/AutomaticallyIncluded.cfg")
+        checked = []
+        for index in range(4):
+            checked.extend(tlc.shard_configs(selected, index, 4))
+        self.assertCountEqual(checked, selected)
+        self.assertEqual(len(checked), len(set(checked)))
+
+    def test_cli_all_shards_check_each_selected_config_once_with_jobs4(self) -> None:
+        checked = []
+
+        def check(root, cfg, module, rules, java, jar, timeout):
+            checked.append(cfg)
+            return tlc.Result(cfg, rules, runs=1)
+
+        for index in range(4):
+            rc, _, err = self.run_main("--shard-index", str(index), "--shard-count", "4",
+                                       "--jobs", "4", checked=check)
+            self.assertEqual((rc, err), (0, ""))
+        self.assertCountEqual(checked, tlc.read_expected(self.root / "expected.tsv"))
+        self.assertEqual(len(checked), len(set(checked)))
+
+    def test_small_selection_has_successful_empty_shards_and_full_coverage(self) -> None:
+        for path in self.root.glob("*.cfg"):
+            path.unlink()
+        self.populate(1)
+        self.shards()
+        rc, out, err = self.aggregate()
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("1/1 configs", out)
+        reports = [json.loads(p.read_text()) for p in self.reports.glob("*.json")]
+        self.assertEqual(sorted(len(r["results"]) for r in reports), [0, 0, 0, 1])
+        (self.reports / "tlc-3.json").unlink()
+        self.assertEqual(self.aggregate()[0], 1)
+
+    def test_invalid_shard_arguments_are_rejected(self) -> None:
+        for index, count in ((0, 0), (-1, 4), (4, 4)):
+            with self.subTest(index=index, count=count), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as raised:
+                self.run_main("--shard-index", str(index), "--shard-count", str(count))
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_aggregate_missing_duplicate_stale_and_malformed_reports_fail(self) -> None:
+        self.shards()
+        original = {p: p.read_bytes() for p in self.reports.glob("*.json")}
+        first = self.reports / "tlc-0.json"
+        cases = ("missing", "duplicate", "wrong selection", "missing result", "duplicate result",
+                 "wrong shard", "failed shard", "no TLC runs", "malformed")
+        for case in cases:
+            with self.subTest(case=case):
+                for path, data in original.items():
+                    path.write_bytes(data)
+                report = json.loads(first.read_text())
+                if case == "missing":
+                    first.unlink()
+                elif case == "malformed":
+                    first.write_text("{")
+                else:
+                    if case == "duplicate":
+                        report["shard_index"] = 1
+                    elif case == "wrong selection":
+                        report["selected"] = report["selected"][:-1]
+                    elif case == "missing result":
+                        report["results"].pop()
+                    elif case == "duplicate result":
+                        report["results"].append(report["results"][0])
+                    elif case == "wrong shard":
+                        report["results"][0]["cfg"] = "M0001.cfg"
+                    elif case == "failed shard":
+                        report["problems"] = ["a rule newly broke"]
+                    elif case == "no TLC runs":
+                        report["results"][0]["runs"] = 0
+                    first.write_text(json.dumps(report))
+                rc, _, err = self.aggregate()
+                self.assertEqual(rc, 1)
+                self.assertIn("FAIL", err)
+
+    def test_result_loss_or_duplication_cannot_report_success(self) -> None:
+        def duplicate(root, cfg, module, rules, java, jar, timeout):
+            return tlc.Result("M0000.cfg", rules, runs=1)
+
+        rc, _, err = self.run_main(checked=duplicate)
+        self.assertEqual(rc, 1)
+        self.assertIn("coverage", err)
+        with mock.patch.object(tlc.ThreadPoolExecutor, "map",
+                               side_effect=lambda fn, configs: [fn(cfg) for cfg in configs[:-1]]):
+            rc, _, err = self.run_main()
+        self.assertEqual(rc, 1)
+        self.assertIn("coverage", err)
+
+    def test_partial_rerun_uses_latest_per_shard_without_hiding_a_failed_attempt(self) -> None:
+        self.shards()
+        first = self.reports / "tlc-0.json"
+        report = json.loads(first.read_text())
+        report["run_attempt"] += 1
+        report["problems"] = ["rerun found a violation"]
+        retry = self.reports / "attempt-2"
+        retry.mkdir()
+        retried = retry / first.name
+        retried.write_text(json.dumps(report))
+        self.assertEqual(self.aggregate()[0], 1)
+        first_report = json.loads(first.read_text())
+        first_report["problems"] = ["previous attempt failed"]
+        first.write_text(json.dumps(first_report))
+        report["problems"] = []
+        retried.write_text(json.dumps(report))
+        self.assertEqual(self.aggregate()[0], 0)
+        for state in ("failure", "cancelled", "skipped", ""):
+            with self.subTest(state=state):
+                rc, _, err = self.run_main("--aggregate-reports", str(self.reports), "--shard-count", "4",
+                                           "--upstream-result", state)
+                self.assertEqual(rc, 1)
+                self.assertIn("matrix result", err)
+
+    def test_slow_campaign_gets_its_recorded_limit_without_reducing_other_budgets(self) -> None:
+        cfg = "campaign-execution/CampaignVerificationClaimKept.cfg"
+        path = self.root / cfg
+        path.parent.mkdir()
+        path.touch()
+        with (self.root / "expected.tsv").open("a") as out:
+            out.write(f"{cfg}\tM\t-\n")
+        limits = {}
+
+        def check(root, name, module, rules, java, jar, timeout):
+            limits[name] = timeout
+            return tlc.Result(name, rules, runs=1)
+
+        rc, _, err = self.run_main("--timeout", "300", checked=check)
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(limits.pop(cfg), 600)
+        self.assertEqual(set(limits.values()), {300})
+        rc, _, err = self.run_main("--timeout", "900", checked=check)
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(set(limits.values()), {900})
+
+    def test_summary_contains_elapsed_time_and_global_slowest_ten(self) -> None:
+        self.populate(15)
+
+        def check(root, cfg, module, rules, java, jar, timeout):
+            return tlc.Result(cfg, rules, runs=1, seconds=float(cfg[1:5]))
+
+        for index in range(4):
+            rc, _, err = self.run_main("--shard-index", str(index), "--shard-count", "4",
+                                       "--report-json", str(self.reports / f"tlc-{index}.json"),
+                                       checked=check)
+            self.assertEqual((rc, err), (0, ""))
+        summary = Path(self.tmp.name) / "summary.md"
+        rc, out, err = self.run_main("--aggregate-reports", str(self.reports), "--shard-count", "4",
+                                   "--summary", str(summary))
+        self.assertEqual((rc, err), (0, ""))
+        text = summary.read_text()
+        self.assertIn("15/15 configs", text)
+        self.assertIn("elapsed", text)
+        self.assertIn("Slowest 10", text)
+        table = [line for line in text.splitlines() if line.startswith("| M")]
+        self.assertEqual(len(table), 10)
+        self.assertIn("M0014.cfg", table[0])
+        self.assertIn("M0005.cfg", table[-1])
+        self.assertIn("15/15 configs", out)
+
+
 class ProblemsTest(unittest.TestCase):
     def test_new_and_fixed_rules_are_named_per_config(self) -> None:
         result = tlc.Result("a/M.cfg", {"Old"}, broken={"New"}, rules=["Old", "New"])

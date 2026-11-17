@@ -50,7 +50,7 @@ struct PromotionFixture {
 }
 
 impl PromotionFixture {
-    async fn new(label: &str) -> Option<Self> {
+    async fn new(label: &str) -> Self {
         let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("promotion runtime root");
         let root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -58,9 +58,8 @@ impl PromotionFixture {
             root.path(),
         );
         let lifecycle = crate::db::postgres::lock_test_lifecycle();
-        let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
-            return None;
-        };
+        let base = crate::db::postgres::postgres_test_database_url_base()
+            .expect("POSTGRES_TEST_DATABASE_URL_BASE required for gateway promotion PG tests"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
         let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -70,12 +69,9 @@ impl PromotionFixture {
             "agentdesk_gateway_promotion_{}",
             uuid::Uuid::new_v4().simple()
         );
-        if let Err(error) =
-            crate::db::postgres::create_test_database(&admin_url, &database_name, label).await
-        {
-            eprintln!("skipping {label}: {error}");
-            return None;
-        }
+        crate::db::postgres::create_test_database(&admin_url, &database_name, label)
+            .await
+            .unwrap_or_else(|error| panic!("{label}: create test database: {error}"));
         let database_url = format!("{base}/{database_name}");
         let pool = crate::db::postgres::connect_test_pool_and_migrate(&database_url, label)
             .await
@@ -93,7 +89,7 @@ impl PromotionFixture {
                 .await;
             runtimes.push(runtime);
         }
-        Some(Self {
+        Self {
             _root_env: root_env,
             _lifecycle: lifecycle,
             root,
@@ -103,7 +99,7 @@ impl PromotionFixture {
             registry,
             runtimes,
             _env_lock: env_lock,
-        })
+        }
     }
 
     fn shared(&self) -> std::sync::Arc<crate::services::discord::SharedData> {
@@ -170,10 +166,7 @@ impl PromotionFixture {
 async fn committed_existing_handoff_returns_true_and_preserves_every_runtime_fence_pg() {
     let _flag = PROMOTION_FLAG_LOCK.lock().await;
     STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
-    let Some(fixture) = PromotionFixture::new("committed existing promotion handoff pg").await
-    else {
-        return;
-    };
+    let fixture = PromotionFixture::new("committed existing promotion handoff pg").await;
     let existing_nonce = "deploy-existing";
     std::fs::write(
         fixture.root.path().join("restart_pending"),
@@ -228,9 +221,7 @@ async fn committed_existing_handoff_returns_true_and_preserves_every_runtime_fen
 async fn committed_owned_handoff_returns_true_and_preserves_every_runtime_fence_pg() {
     let _flag = PROMOTION_FLAG_LOCK.lock().await;
     STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
-    let Some(fixture) = PromotionFixture::new("committed owned promotion handoff pg").await else {
-        return;
-    };
+    let fixture = PromotionFixture::new("committed owned promotion handoff pg").await;
     let root = fixture.root.path().to_path_buf();
     let acknowledge = tokio::spawn(async move {
         let nonce = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -290,10 +281,7 @@ async fn committed_owned_handoff_returns_true_and_preserves_every_runtime_fence_
 async fn missing_existing_persisted_artifact_returns_false_and_reopens_every_runtime_fence_pg() {
     let _flag = PROMOTION_FLAG_LOCK.lock().await;
     STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
-    let Some(fixture) = PromotionFixture::new("missing existing persisted artifact pg").await
-    else {
-        return;
-    };
+    let fixture = PromotionFixture::new("missing existing persisted artifact pg").await;
     let existing_nonce = "deploy-cancelled";
     std::fs::write(
         fixture.root.path().join("restart_pending"),
@@ -890,25 +878,21 @@ async fn gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_
         &root.path().join("config.yaml"),
     );
     let _lifecycle = crate::db::postgres::lock_test_lifecycle();
-    let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
-        return;
-    };
+    let base = crate::db::postgres::postgres_test_database_url_base()
+        .expect("POSTGRES_TEST_DATABASE_URL_BASE required for the gateway orphan holder PG test"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
     let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "postgres".to_string());
     let admin_url = format!("{base}/{admin_db}");
     let database_name = format!("agentdesk_gateway_reap_{}", uuid::Uuid::new_v4().simple());
-    if let Err(error) = crate::db::postgres::create_test_database(
+    crate::db::postgres::create_test_database(
         &admin_url,
         &database_name,
         "gateway orphan holder pg",
     )
     .await
-    {
-        eprintln!("skipping gateway orphan holder pg test: {error}");
-        return;
-    }
+    .unwrap_or_else(|error| panic!("gateway orphan holder pg: create test database: {error}"));
     let database_url = format!("{base}/{database_name}");
     let pool = crate::db::postgres::connect_test_pool_and_migrate(
         &database_url,
@@ -1174,9 +1158,7 @@ async fn promotion_cancel_keeps_the_writer_incarnation_pg() {
     let _flag = PROMOTION_FLAG_LOCK.lock().await;
     STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
     let label = "promotion cancel keeps the writer pg";
-    let Some(fixture) = PromotionFixture::new(label).await else {
-        return;
-    };
+    let fixture = PromotionFixture::new(label).await;
     let _candidates =
         crate::services::tui_o::cutover::test_override::force_candidates(&[(CH, ClaudeTui)]);
     let hosted = hosted(&[CH], &[]);
@@ -1231,9 +1213,7 @@ mod codex_custody;
 #[tokio::test]
 async fn gateway_observability_rejected_promotion_unlocks_before_record_pg() {
     let _flag = PROMOTION_FLAG_LOCK.lock().await;
-    let fixture = PromotionFixture::new("observed rejected promotion")
-        .await
-        .unwrap();
+    let fixture = PromotionFixture::new("observed rejected promotion").await;
     // Resolve the unqualified unlock through a real PG wrapper that records completion.
     sqlx::raw_sql("CREATE TABLE explicit_unlocks(done BOOL); CREATE FUNCTION public.pg_advisory_unlock(BIGINT) RETURNS BOOL LANGUAGE plpgsql AS 'BEGIN INSERT INTO explicit_unlocks VALUES (true); RETURN pg_catalog.pg_advisory_unlock($1); END';")
         .execute(&fixture.pool).await.unwrap();

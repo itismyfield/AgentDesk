@@ -19,7 +19,6 @@ fn coldstop_claude_closed_never_begins_input_or_mutation() {
         state
             .user_stop
             .store(true, std::sync::atomic::Ordering::Release);
-        let held = hold(kind).unwrap();
         let calls = std::cell::Cell::new(0);
         let run = observed_input(
             Some(&token),
@@ -35,7 +34,6 @@ fn coldstop_claude_closed_never_begins_input_or_mutation() {
         .unwrap();
         assert!(matches!(run, HerdrInputRun::Closed));
         assert_eq!(calls.get(), 0);
-        before_start::release_claude_hold(&owner.logical_key, &held);
         assert!(not_held(kind).is_ok());
     }
     for (run, untouched) in [

@@ -23,6 +23,13 @@ thread_local! {
 /// A resume carries `(rollout_path, start_offset, selected_session_id)`; `None` tails fresh.
 pub(crate) struct ValidatedTail {
     resume: Option<(PathBuf, u64, String)>,
+    context: BindingContext,
+}
+
+impl ValidatedTail {
+    pub(crate) fn context(&self) -> &BindingContext {
+        &self.context
+    }
 }
 
 fn verified(context: &BindingContext) -> bool {
@@ -68,7 +75,10 @@ pub(crate) fn validate_selection(
     {
         return Err("Codex TUI resume selection does not match its verified launch".to_string());
     }
-    Ok(ValidatedTail { resume })
+    Ok(ValidatedTail {
+        resume,
+        context: context.clone(),
+    })
 }
 
 /// A verified resume must own its executed source before the tail starts; failure keeps the pane.
@@ -126,14 +136,14 @@ pub(crate) fn dispatch(
                 Some(prompt),
             )
         }
-        None => rollout_tail::tail_latest_rollout_for_cwd_with_handoff_for_tmux(
+        None => rollout_tail::tail_fresh_launch(
+            &tail.context,
             Path::new(working_dir),
             rollout_modified_since,
             sender,
             cancel_token,
             liveness,
-            tmux_session_name,
-            Some(prompt),
+            prompt,
         ),
     }
 }

@@ -23,8 +23,8 @@ Init == s = [threshold |-> N, allowedBot |-> AllowedBot, cursor |-> 1, count |->
              requests |-> <<>>, requestCounts |-> <<>>, notices |-> 0,
              lastNotice |-> 0, noticeInjected |-> FALSE, badNoticeTurn |-> FALSE,
              duplicateAdded |-> FALSE, relogged |-> FALSE, worker |-> 1, phase |-> "idle",
-             row |-> "none", outcome |-> "none", messages |-> 0,
-             postAttempts |-> 0, maxMessages |-> 0, blindRepost |-> FALSE,
+             row |-> "none", outcome |-> "none", messages |-> 0, wire |-> "none", retried |-> FALSE,
+             postAttempts |-> 0, maxMessages |-> 0, blindRepost |-> FALSE, reopened |-> FALSE,
              intakeAccepted |-> FALSE, nativeKeys |-> <<>>, outcomes |-> <<>>]
 
 UnseenIncident(first) == Policy = "drop_event_key" \/ first \notin Keys(s.requests)
@@ -66,24 +66,55 @@ DuplicateTrigger ==
 
 LoadOutbox ==
     /\ s.phase = "idle" /\ s.worker <= Len(s.requests)
-    /\ s' = [s EXCEPT !.phase = "pending", !.row = "pending", !.outcome = "none",
-                      !.messages = 0, !.postAttempts = 0, !.intakeAccepted = FALSE]
+    /\ s' = [s EXCEPT !.phase = "pending", !.row = "pending", !.outcome = "none", !.wire = "none",
+                      !.messages = 0, !.postAttempts = 0, !.retried = FALSE, !.reopened = FALSE,
+                      !.intakeAccepted = FALSE]
 
-PostOutbox ==
+\* The same row commits posting before the Discord request; its nonce is the row id.
+BeginPosting ==
     /\ s.phase = "pending" /\ s.row = "pending"
-    /\ IF Transport = "unknown" /\ s.postAttempts = 0
-       THEN \E accepted \in {0, 1}:
-              s' = [s EXCEPT !.phase = "posted", !.row = "held",
-                            !.outcome = "completion_unconfirmed", !.messages = accepted,
-                            !.postAttempts = 1, !.maxMessages = IF accepted > s.maxMessages THEN accepted ELSE @]
-       ELSE s' = [s EXCEPT !.phase = "posted", !.row = "sent", !.outcome = "Delivered",
-                          !.messages = @ + 1, !.postAttempts = @ + 1,
-                          !.maxMessages = IF s.messages+1 > @ THEN s.messages+1 ELSE @]
+    /\ s' = [s EXCEPT !.phase = "posting", !.row = "posting"]
+
+WireResults == IF Transport = "unknown"
+               THEN {"ack", "may_have_sent", "ack_lost", "crash"} \cup (IF s.retried THEN {} ELSE {"not_sent"})
+               ELSE {"ack"}
+
+DiscordAttempt ==
+    /\ s.phase = "posting"
+    /\ \E r \in WireResults, maybe \in {0, 1}:
+         LET accepted == IF r \in {"ack", "ack_lost"} THEN 1 ELSE IF r = "not_sent" THEN 0 ELSE maybe
+         IN s' = [s EXCEPT !.phase = "wire", !.wire = r, !.messages = @ + accepted,
+                           !.postAttempts = @ + 1,
+                           !.maxMessages = IF s.messages + accepted > @ THEN s.messages + accepted ELSE @]
+
+Uncertain == [s EXCEPT !.phase = "posted", !.row = IF Policy = "unknown_to_failed" THEN "failed" ELSE "unknown",
+                       !.outcome = "completion_unconfirmed"]
+
+SettleAttempt ==
+    /\ s.phase = "wire"
+    /\ CASE s.wire = "ack" /\ Policy = "drop_ack_retry" /\ s.postAttempts = 1 ->
+              s' = [s EXCEPT !.phase = "pending", !.row = "pending", !.wire = "none", !.reopened = TRUE]
+          [] s.wire = "ack" ->
+              s' = [s EXCEPT !.phase = "posted", !.row = "sent",
+                             !.outcome = IF Policy = "ack_turn_linked" THEN "turn_linked" ELSE "posted_turn_unconfirmed"]
+          [] s.wire = "not_sent" ->
+              s' = [s EXCEPT !.phase = "pending", !.row = "pending", !.wire = "none", !.retried = TRUE]
+          [] s.wire = "crash" -> s' = [s EXCEPT !.phase = "abandoned"]
+          [] OTHER -> s' = Uncertain
+
+\* Restart after the post: the posting row is swept to unknown, never reposted.
+SweepAbandoned ==
+    /\ s.phase = "abandoned" /\ s.row = "posting"
+    /\ s' = Uncertain
 
 BlindUnknownRepost ==
     /\ Policy = "blind_unknown_repost" /\ s.phase = "posted"
     /\ s.outcome = "completion_unconfirmed" /\ s.postAttempts = 1
-    /\ s' = [s EXCEPT !.phase = "pending", !.row = "pending", !.blindRepost = TRUE]
+    /\ s' = [s EXCEPT !.phase = "pending", !.row = "pending", !.wire = "none", !.blindRepost = TRUE]
+
+HeldActivation ==
+    /\ Policy = "held_activation" /\ s.phase = "posted" /\ s.row = "unknown" /\ ~s.reopened
+    /\ s' = [s EXCEPT !.phase = "pending", !.row = "pending", !.wire = "none", !.reopened = TRUE]
 
 ExistingBotIntake ==
     /\ s.phase = "posted" /\ s.messages > 0 /\ (AllowedBot \/ Policy = "bypass_intake_gate")
@@ -95,7 +126,8 @@ NoAcceptedBotInput ==
 
 ExistingOwnerStarts ==
     /\ s.phase = "accepted" /\ s.intakeAccepted
-    /\ s' = [s EXCEPT !.phase = "closed", !.nativeKeys = Append(@, s.requests[s.worker])]
+    /\ s' = [s EXCEPT !.phase = "closed", !.outcome = "turn_linked",
+                      !.nativeKeys = Append(@, s.requests[s.worker])]
 
 RecordAttemptOutcome ==
     /\ s.phase = "closed"
@@ -103,9 +135,10 @@ RecordAttemptOutcome ==
 
 Finished == s.cursor > Len(Program) /\ s.worker > Len(s.requests) /\ s.phase = "idle"
 Done == Finished /\ UNCHANGED s
-Delivery == LoadOutbox \/ PostOutbox \/ ExistingBotIntake \/ NoAcceptedBotInput
-            \/ ExistingOwnerStarts \/ RecordAttemptOutcome
-Next == RecordRun \/ RelogRun \/ NotifyIntakeStarts \/ DuplicateTrigger \/ Delivery \/ BlindUnknownRepost \/ Done
+Delivery == LoadOutbox \/ BeginPosting \/ DiscordAttempt \/ SettleAttempt \/ SweepAbandoned
+            \/ ExistingBotIntake \/ NoAcceptedBotInput \/ ExistingOwnerStarts \/ RecordAttemptOutcome
+Next == RecordRun \/ RelogRun \/ NotifyIntakeStarts \/ DuplicateTrigger \/ Delivery
+        \/ BlindUnknownRepost \/ HeldActivation \/ Done
 Spec == Init /\ [][Next]_vars /\ WF_vars(RecordRun) /\ WF_vars(Delivery)
 
 CounterMatchesHistory == s.count = FailedBefore(s.cursor-1)
@@ -114,6 +147,8 @@ AtMostOneTriggerPerStreak == Len(s.requests) = Cardinality(Keys(s.requests))
 OrdinaryNotifyDoesNotStart == ~s.badNoticeTurn
 NoBlindUnknownRepost == ~s.blindRepost
 NoDuplicateDiscordMessage == s.maxMessages <= 1
+MayHaveSentKeepsFence == s.row # "failed"
+TurnLinkedOnlyAfterOwnerStart == s.outcome = "turn_linked" => s.intakeAccepted
 AtMostOneRemediationPerIncident == Len(s.nativeKeys) = Cardinality(Keys(s.nativeKeys))
 OnlyExistingAcceptedBotIntake == Len(s.nativeKeys) > 0 => AllowedBot
 AllEligibleStreaksOffered == s.cursor > Len(Program) => Len(s.requests) = 2

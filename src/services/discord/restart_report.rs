@@ -10,8 +10,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(test)]
+#[path = "restart_report/capacity_tests.rs"]
 mod capacity;
 #[cfg(test)]
+#[path = "restart_report/model_tests.rs"]
 mod model;
 const RESTART_REPORT_VERSION: u32 = 2;
 const AWAITING_REPORT_MAX_AGE: chrono::Duration = chrono::Duration::minutes(5);

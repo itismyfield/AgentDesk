@@ -19,7 +19,7 @@ mod amplification_policy_tests;
 mod amplification_profile_tests;
 mod amplification_records_tests;
 mod amplification_verdict_tests;
-mod resource_regression_tests;
+pub(super) mod resource_regression_tests;
 
 const RTT: Duration = Duration::from_millis(300);
 const BUDGET: Duration = Duration::from_secs(2);
@@ -103,17 +103,22 @@ impl Db {
                 .await
                 .unwrap();
         }
-        tokio::time::sleep(RTT * 2 + Duration::from_millis(100)).await;
+        self.settle().await;
     }
 
     /// Waits until every pooled connection is idle again: sqlx pings a connection on release,
     /// so for one round trip after a response its connections cannot be reused.
     async fn settle(&self) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while self.pool.num_idle() < self.pool.size() as usize {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
+        crate::test_support::wait::poll_within(
+            async || {
+                let (idle, total) = (self.pool.num_idle(), self.pool.size());
+                (idle >= total as usize).then_some(()).ok_or_else(|| {
+                    format!("every connection returns to the idle queue: {idle}/{total} idle")
+                })
+            },
+            Duration::from_secs(5),
+            "every connection returns to the idle queue",
+        )
         .await
         .expect("every connection returns to the idle queue");
     }
@@ -630,7 +635,22 @@ async fn health_handler_timeout_drops_all_db_guards_body() {
         answered.db_in_flight, before.db_in_flight,
         "a cut read must release its slot"
     );
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        crate::test_support::wait::poll_within(
+            async || {
+                let now = hang_forensics::snapshot();
+                (now.db_probes_started != answered.db_probes_started
+                    || now.db_in_flight != before.db_in_flight)
+                    .then_some(())
+                    .ok_or_else(|| "no probe runs on after the cut read".into())
+            },
+            Duration::from_millis(500),
+            "probe activity after the cut read"
+        )
+        .await
+        .is_err(),
+        "nothing runs on after"
+    );
     let later = hang_forensics::snapshot();
     assert_eq!(
         later.db_probes_started, answered.db_probes_started,

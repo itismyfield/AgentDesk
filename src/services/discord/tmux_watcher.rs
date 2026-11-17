@@ -444,6 +444,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             terminal_rewind_attempt_key: &mut terminal_rewind_attempt_key,
             terminal_rewind_attempts: &mut terminal_rewind_attempts,
             watcher_turn_identity: &watcher_turn_identity,
+            watcher_turn_nonce: &watcher_turn_nonce,
             last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
             active_stream_inflight_reacquire_logged: &mut active_stream_inflight_reacquire_logged,
         };
@@ -1160,7 +1161,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
         } else if watcher_direct_fallback_after_session_bound_ack {
             let claims = watcher_will_direct_send && task_notification_kind.is_none();
-            let body_claim = o_delegated_arm::direct_body_claim(claims, channel_id, &tmux_session_name);
+            let body_claim = o_delegated_arm::direct_body_claim(claims, channel_id, &tmux_session_name).map(|claim| claim.for_turn(inflight_before_relay.as_ref().and_then(|row| row.turn_nonce.as_deref())));
             let sent = Box::pin(terminal_direct_fallback::apply_watcher_direct_fallback_send(
                 &http,
                 &shared,
@@ -2599,3 +2600,6 @@ fn watcher_body_source(
             authority.reset_incarnation,
         )
 }
+
+#[cfg(test)]
+pub(crate) use terminal_relay_plan::first_terminal_plan;
