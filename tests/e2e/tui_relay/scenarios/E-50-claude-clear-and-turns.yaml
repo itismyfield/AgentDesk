@@ -65,3 +65,4 @@ assertions:
   - no_duplicate_marker: "[E2E:E50:{run_id}:T2]"
   - no_duplicate_marker: "[E2E:E50:{run_id}:AFTER_CLEAR]"
   - no_duplicate_content: true
+  - no_unexpected_operational_alerts: {allow: []}

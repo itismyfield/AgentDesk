@@ -18,7 +18,8 @@ from .assertion_registry import ASSERTION_OPTIONS
 
 REACTION_OPS = ("reaction_history", "busy_injection_within")
 HOST_OPS = ("thread_session_started", "session_host")
-OPTIONS = {op: ASSERTION_OPTIONS[op] for op in REACTION_OPS + HOST_OPS}
+ALERT_OP = "no_unexpected_operational_alerts"
+OPTIONS = {op: ASSERTION_OPTIONS[op] for op in REACTION_OPS + HOST_OPS + (ALERT_OP,)}
 # Marks the reconciler owns (turn_view_reconciler.rs TURN_VIEW, QUEUE_EXIT and INJECTION sets).
 LIFECYCLE = frozenset("📬📥🔄⏳✅⚠🛑🚫⌛⏏➕❓")
 INJECTED = "➕"
@@ -55,6 +56,11 @@ def validate(spec: dict[str, Any]) -> None:
         return
     if not isinstance(value, dict):
         raise ValueError(f"{op} requires mapping options")
+    if op == ALERT_OP:
+        allowed = value.get("allow", [])
+        if not isinstance(allowed, list) or any(not isinstance(body, str) or not body.strip() for body in allowed):
+            raise ValueError(f"{op} allow must list exact visible alert sentences")
+        return
     if op == "session_host":
         if value.get("expect") not in {"configured", "tmux", "herdr"}:
             raise ValueError("session_host expect must be configured, tmux or herdr")
@@ -300,11 +306,32 @@ def judge_session_host(probe, expect):
     return {"status": "pass", "passed": True, "details": probe}
 
 
-def run(spec, *, record, run_id, read_api: Callable, run_cmd=None) -> dict[str, Any]:
+def judge_operational_alerts(window, allowed):
+    observed = []
+    for message in window.raw_messages:
+        # Actionable alerts can share the announce author with driver prompts.
+        if not (message.get("author") or {}).get("bot"):
+            continue
+        body, marked = assertions.strip_operational_alert_origin(message.get("content") or "")
+        if marked:
+            observed.append(body.strip())
+    unexpected = [body for body in observed if body not in allowed]
+    if unexpected:
+        sentences = [assertions.diagnostic_text(body) for body in unexpected]
+        raise assertions.AssertionError(f"unexpected operational alert ({len(unexpected)}): {sentences!r}")
+    return {"observed": len(observed), "allowed": len(observed)}
+
+
+def run(spec, *, record, run_id, read_api: Callable, run_cmd=None, window=None) -> dict[str, Any]:
     validate(spec)
     op = _op(spec)
     params = spec[op]
     record = record or {}
+    if op == ALERT_OP:
+        if window is None:
+            raise Unevaluable("operational alerts have no observed message window")
+        allowed = [body.replace("{run_id}", run_id or "") for body in params.get("allow", [])]
+        return {"status": "pass", "passed": True, "details": judge_operational_alerts(window, allowed)}
     if op in REACTION_OPS:
         row, polls = _watched(record, params["send"])
         if op == "reaction_history":

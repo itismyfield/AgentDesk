@@ -5038,7 +5038,7 @@ def run_assertion(
         spec = {key: value for key, value in spec.items() if key != "requires_feature"}
     if surface_assertions.owns(spec):
         try:
-            return surface_assertions.run(spec, record=record, run_id=run_id, read_api=_read_api_json)
+            return surface_assertions.run(spec, record=record, run_id=run_id, read_api=_read_api_json, window=window)
         except surface_assertions.Unevaluable as error:
             raise HarnessEvidenceError(str(error)) from error
     if "message_count_between_markers" in spec:

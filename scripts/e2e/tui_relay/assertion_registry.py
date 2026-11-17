@@ -20,4 +20,5 @@ ASSERTION_OPTIONS = {
     # Discord reaction and session-host surfaces; option values are checked by surface_assertions.validate.
     "reaction_history": {"send", "final", "forbid", "max_gap_s"}, "busy_injection_within": {"send", "max_seconds", "before_marker"},
     "thread_session_started": None, "session_host": {"expect"},
+    "no_unexpected_operational_alerts": {"allow"},
 }
