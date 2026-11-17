@@ -405,7 +405,7 @@ mod tests {
         }
     }
 
-    /// A missing base must stay a `?`/`else` skip and never widen into a
+    /// A missing base must fail the fixture and never widen into a
     /// silently invented value. `unwrap_or_else` on the helper would restore
     /// the defect with different syntax.
     #[test]

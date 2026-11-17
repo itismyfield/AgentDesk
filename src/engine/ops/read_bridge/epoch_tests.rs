@@ -1,7 +1,7 @@
 //! Engine epochs: main, tick and both hot-reload Contexts read, then the engines drop; every
 //! reader's connection and thread go with them, so repeated epochs leave nothing behind.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::FutureExt;
 
@@ -52,7 +52,7 @@ fn process_threads() -> usize {
 
 /// Thread counts need the test alone: outside the rerun this runs it alone in a child of this
 /// binary and requires that rerun to pass; inside the rerun it returns false.
-fn rerun_alone(test: &str) -> bool {
+async fn rerun_alone(test: &str) -> bool {
     if std::env::var_os(RERUN_ENV).is_some() {
         return false;
     }
@@ -65,17 +65,24 @@ fn rerun_alone(test: &str) -> bool {
         .stderr(log.reopen().unwrap())
         .spawn()
         .expect("rerun the test binary");
-    let deadline = Instant::now() + RERUN_LIMIT;
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break Some(status);
-        }
-        if Instant::now() >= deadline {
+    let status = match crate::test_support::wait::poll_within(
+        async || {
+            child
+                .try_wait()
+                .unwrap()
+                .ok_or_else(|| "rerun process has not exited".into())
+        },
+        RERUN_LIMIT,
+        "isolated test rerun",
+    )
+    .await
+    {
+        Ok(status) => Some(status),
+        Err(_) => {
             let _ = child.kill();
             let _ = child.wait();
-            break None;
+            None
         }
-        std::thread::sleep(Duration::from_millis(100));
     };
     let output = std::fs::read_to_string(log.path()).unwrap();
     assert!(
@@ -96,7 +103,8 @@ fn names(engine: &crate::engine::PolicyEngine) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn policy_read_bridge_returns_connections_and_threads_across_engine_epochs() {
-    if rerun_alone("policy_read_bridge_returns_connections_and_threads_across_engine_epochs") {
+    if rerun_alone("policy_read_bridge_returns_connections_and_threads_across_engine_epochs").await
+    {
         return;
     }
     let db = TestPostgresDb::create().await;

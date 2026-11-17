@@ -495,12 +495,10 @@ mod tests {
     }
 
     impl TestPostgresDb {
-        async fn try_create() -> Option<Self> {
+        async fn create() -> Self {
             let lock = crate::db::postgres::lock_test_lifecycle();
-            let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
-                drop(lock);
-                return None;
-            };
+            let base = crate::db::postgres::postgres_test_database_url_base()
+                .expect("POSTGRES_TEST_DATABASE_URL_BASE required for turn_lifecycle tests"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
             let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
@@ -516,16 +514,15 @@ mod tests {
             )
             .await
             {
-                eprintln!("[turn_lifecycle tests] skipping: {error}");
-                return None;
+                panic!("turn_lifecycle tests: create test database: {error}");
             }
 
-            Some(Self {
+            Self {
                 _lock: lock,
                 admin_url,
                 database_name,
                 database_url,
-            })
+            }
         }
 
         async fn connect_and_migrate(&self) -> Result<PgPool> {
@@ -700,9 +697,7 @@ mod tests {
 
         #[tokio::test]
         async fn emit_turn_lifecycle_persists_round_trip() -> Result<()> {
-            let Some(pg_db) = TestPostgresDb::try_create().await else {
-                return Ok(());
-            };
+            let pg_db = TestPostgresDb::create().await;
             let pool = pg_db.connect_and_migrate().await?;
 
             let persisted = emit_turn_lifecycle(
@@ -804,9 +799,7 @@ mod tests {
 
         #[tokio::test]
         async fn emit_turn_lifecycle_enqueues_expected_notifications_and_dedupes() -> Result<()> {
-            let Some(pg_db) = TestPostgresDb::try_create().await else {
-                return Ok(());
-            };
+            let pg_db = TestPostgresDb::create().await;
             let pool = pg_db.connect_and_migrate().await?;
 
             let fresh_first = emit_turn_lifecycle(
