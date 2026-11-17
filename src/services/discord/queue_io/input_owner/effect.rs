@@ -259,6 +259,7 @@ pub(crate) fn cold_claude(
 mod claude;
 mod codex;
 #[cfg(test)]
+#[path = "effect/herdr_fixture_tests.rs"]
 mod herdr;
 pub(crate) use claude::BusyClaude;
 pub(crate) use codex::{BusyCodex, BusyCodexHerdr, CodexInput, idle_codex};

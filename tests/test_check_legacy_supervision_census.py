@@ -230,7 +230,7 @@ class RemovedRetiredPathTests(unittest.TestCase):
             self.assertFalse(path.exists(), relative)
             self.assertNotIn(path, files)
             self.assertNotIn(path, skips)
-        self.assertIn(root / 'src/services/discord/watchers/lifecycle/watcher_install_fixture.rs', skips)
+        self.assertIn(root / 'src/services/discord/watchers/lifecycle/watcher_install_fixture_tests.rs', skips)
         source = (root / 'src/services/discord/watchers/lifecycle/n4d2_boundary_tests.rs').read_text()
         census = re.findall(
             r'fn n4d2_dormant_census_counts_actual_production_callers\(\)\s*\{\s*let script = r#"(.*?)"#;',

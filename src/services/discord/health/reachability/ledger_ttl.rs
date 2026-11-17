@@ -11,6 +11,7 @@
 //! Expiry is recomputed from scratch every tick, so a returning producer
 //! un-expires its channel with no state to undo.
 
+#[cfg(test)]
 use std::path::Path;
 
 use super::super::session_enrichment::ExecutorWitness;
@@ -42,6 +43,7 @@ pub(in crate::services::discord) const LEDGER_OBSERVATION_TTL_SECS: u64 =
 /// added via `/api/routines` faster than this makes it stale silently. The
 /// failure mode is fail-safe — such a channel simply never expires — so this
 /// is a risk tracked in #5942, not a gate.
+#[cfg(test)]
 pub(in crate::services::discord) const SHORTEST_PERIODIC_PRODUCER_PERIOD_SECS: u64 = 1_800;
 
 /// Published `reason` for an expired entry (#5942). Deliberately NOT a
@@ -55,6 +57,7 @@ pub(in crate::services::discord) const EXPIRED_REASON: &str = "ledger_unobserved
 /// via `runtime_store::atomic_write`'s rename, so mtime already means "last
 /// observation tick committed" with no schema field to add or migrate.
 /// An unreadable clock returns `None`, which never expires anything.
+#[cfg(test)]
 pub(in crate::services::discord) fn ledger_committed_at_epoch_ms(path: &Path) -> Option<u64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     let since_epoch = modified.duration_since(std::time::UNIX_EPOCH).ok()?;

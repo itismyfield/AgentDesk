@@ -12,6 +12,7 @@ pub(super) const START_DEFER_WINDOW_SECS: i64 = 600;
 pub(crate) enum TransientStartKind {
     ProviderNotReady,
     MailboxBusy,
+    ThreadUnavailable,
 }
 
 impl TransientStartKind {
@@ -19,6 +20,7 @@ impl TransientStartKind {
         match self {
             Self::ProviderNotReady => "provider_not_ready",
             Self::MailboxBusy => "mailbox_busy",
+            Self::ThreadUnavailable => "thread_unavailable",
         }
     }
 }
@@ -37,6 +39,22 @@ impl std::fmt::Display for TransientStartError {
 }
 
 impl std::error::Error for TransientStartError {}
+
+/// A routine thread this run may not try to prepare again: Discord refused the create, or the
+/// create went unanswered and may have made a thread nobody recorded.
+#[derive(Debug)]
+pub(crate) struct ThreadSetupError {
+    pub(crate) create_unconfirmed: bool,
+    message: String,
+}
+
+impl std::fmt::Display for ThreadSetupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ThreadSetupError {}
 
 /// Checked before any thread, reservation or run-row side effect, so a runtime that has not
 /// registered yet (right after a restart) defers the run instead of failing it.
@@ -96,6 +114,123 @@ fn classified_start_error(message: String, error: &HeadlessTurnStartError) -> an
     }
 }
 
+pub(super) fn is_transient(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<TransientStartError>().is_some()
+}
+
+/// A routine thread call that failed. As for any outbound Discord call, 5xx, 429 and 408 are
+/// transient; so is a read that got no response. A create that fails otherwise is final.
+pub(super) fn thread_error(
+    message: String,
+    error: &poise::serenity_prelude::Error,
+    read_only: bool,
+) -> anyhow::Error {
+    use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
+    use poise::serenity_prelude::{Error, http::HttpError};
+    let status = match error {
+        Error::Http(http) => http.status_code(),
+        _ => None,
+    };
+    let kind = DispatchMessagePostErrorKind::Other;
+    let transient = match (status, error) {
+        (Some(status), _) => {
+            DispatchMessagePostError::http(kind, status, None, String::new()).is_transient()
+        }
+        (None, Error::Http(HttpError::Request(request))) => read_only || request.is_connect(),
+        (None, _) => false,
+    };
+    match (transient, read_only) {
+        (true, _) => thread_unavailable(message),
+        // The caller replaces a saved thread it cannot read.
+        (false, true) => anyhow!(message),
+        (false, false) => {
+            let create_unconfirmed = status.is_none();
+            let error = ThreadSetupError {
+                create_unconfirmed,
+                message,
+            };
+            error.into()
+        }
+    }
+}
+
+/// No bot can reach Discord for the thread yet, as right after a restart.
+pub(super) fn thread_runtime_error(error: anyhow::Error) -> anyhow::Error {
+    thread_unavailable(error.to_string())
+}
+
+fn thread_unavailable(message: String) -> anyhow::Error {
+    let kind = TransientStartKind::ThreadUnavailable;
+    TransientStartError { kind, message }.into()
+}
+
+/// Result key saying why a failed run's routine thread could not be prepared.
+pub(super) const THREAD_FAILURE_KEY: &str = "thread_failure";
+/// Its value for a create nobody could confirm; the outcome log then creates no thread either.
+pub(super) const THREAD_CREATE_UNCONFIRMED: &str = "create_unconfirmed";
+
+/// How a start failure the deferral did not take ends: by the retry policy, or at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StartFailure {
+    /// Retry budget, fallback agent, then failure.
+    Regular,
+    /// The run fails now as `status`, with no retry and no fallback agent.
+    Final {
+        status: &'static str,
+        thread: Option<&'static str>,
+    },
+}
+
+impl StartFailure {
+    /// A transient error gets here only after its deferral window closed.
+    pub(super) fn of(error: &anyhow::Error, shared_primary: bool) -> Self {
+        let thread = |why| Self::Final {
+            status: "thread_unavailable",
+            thread: Some(why),
+        };
+        if let Some(setup) = error.downcast_ref::<ThreadSetupError>() {
+            return thread(match setup.create_unconfirmed {
+                true => THREAD_CREATE_UNCONFIRMED,
+                false => "refused",
+            });
+        }
+        match error
+            .downcast_ref::<TransientStartError>()
+            .map(|error| error.kind)
+        {
+            Some(TransientStartKind::ThreadUnavailable) => thread("unreachable"),
+            Some(TransientStartKind::MailboxBusy) if shared_primary => Self::Final {
+                status: "primary_busy",
+                thread: None,
+            },
+            _ => Self::Regular,
+        }
+    }
+
+    pub(super) fn ends_run(self) -> bool {
+        self != Self::Regular
+    }
+
+    /// The failure class a failed run's result carries.
+    pub(super) fn status(self) -> &'static str {
+        match self {
+            Self::Regular => "failed_to_start",
+            Self::Final { status, .. } => status,
+        }
+    }
+
+    /// Marks a failed run's result with the final failure class and its thread detail.
+    pub(super) fn stamp(self, mut result: Value) -> Value {
+        if let Self::Final { status, thread } = self {
+            result["status"] = json!(status);
+            if let Some(thread) = thread {
+                result[THREAD_FAILURE_KEY] = json!(thread);
+            }
+        }
+        result
+    }
+}
+
 fn deferred(result_json: Option<&Value>) -> Option<&Value> {
     result_json.filter(|result| result.get("status").and_then(Value::as_str) == Some("deferred"))
 }
@@ -139,7 +274,7 @@ pub(super) struct PendingAgentStart<'a> {
 
 impl RoutineAgentExecutor {
     /// Parks the run as `deferred(<reason>)` when `error` is transient and the window is open;
-    /// `None` hands the error to the regular retry/fallback/fail policy.
+    /// `None` leaves the error to [`StartFailure`].
     pub(super) async fn defer_transient_start(
         &self,
         start: PendingAgentStart<'_>,

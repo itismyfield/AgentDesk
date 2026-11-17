@@ -1,0 +1,47 @@
+---
+title: "연속 실패 알림과 한 번의 복구 요청"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: uncertain
+    lg1: normal
+    lg2: Breaks NoDuplicateDiscordMessage
+    lg3: Path to the NoDuplicateDiscordMessage bug
+  }
+  class lg0 orange
+  class lg1 blue
+  class lg2 breaks
+  class lg3 bugPath
+  s0: 예약 실행 이력 대기
+  s1: 실패 누적
+  s2: N+1 복구 요청 저장됨
+  s3: 기존 outbox 전송 대기
+  s4: posting 저장#183;같은 nonce로 게시
+  s5: Discord 응답 정산 대기
+  s6: 전송 불확실#183;재게시 없이 종결
+  s7: Discord 중복 게시
+  [*] --> s0
+  s0 --> s1: 실패 알림만#183;턴 0
+  s1 --> s2: N+1회#183;명령봇 복구 요청
+  s2 --> s3: 기존 outbox가 전송 시작
+  s3 --> s4: 게시 전 posting 저장
+  s4 --> s5: 명령봇으로 게시 시도
+  s5 --> s6: ACK#183;NotSent#183;불확실 정산
+  s6 --> s3: held 행을 다시 활성화
+  s4 --> s7: 명령봇으로 게시 시도
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 blue
+  class s5 bugPath
+  class s6 orange
+  class s6 bugPath
+  class s7 orange
+  class s7 breaks
+  class s7 bugPath

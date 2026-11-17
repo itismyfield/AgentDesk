@@ -216,8 +216,9 @@ async fn owner_review_p2_armed_timeout_waits_for_settlement_pg() {
         .await
         .unwrap();
     assert_eq!(
-        count, 1,
-        "a settled attempt may enter the existing retry policy"
+        (outcomes[0].status.as_str(), count),
+        ("failed", 0),
+        "a settled attempt was submitted: its timeout closes the run without a second turn"
     );
     pool.close().await;
     db.drop().await;

@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 97
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 94
 - Platform and third-party variables: 41
 
 ## AgentDesk variables
@@ -30,7 +30,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_GITHUB_SYNC_ALERT_CHANNEL` | `src/github/sync.rs` |  |
 | `ADK_HERDR_ADMISSION` | `src/services/herdr_admission.rs` | Herdr admission kill switch: `ADK_HERDR_ADMISSION`, read once, and a stop file that, once seen, keeps admission stopped until restart. |
 | `ADK_IMSG_OBLIGATIONS` | `src/services/imsg_reply/mod.rs` |  |
-| `ADK_INTAKE_ROUTING_MODE` | `src/services/cluster/intake_routing_config.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` |  |
+| `ADK_INTAKE_ROUTING_MODE` | `src/services/cluster/intake_routing_config.rs` |  |
 | `ADK_OBSERVABILITY_COUNTER_SNAPSHOT_RETENTION_DAYS` | `src/services/observability/retention.rs` |  |
 | `ADK_OBSERVABILITY_EVENTS_PATH` | `src/services/observability/events.rs` | Honors `ADK_OBSERVABILITY_EVENTS_PATH` for tests. |
 | `ADK_OBSERVABILITY_EVENT_RETENTION_DAYS` | `src/services/observability/retention.rs` |  |
@@ -38,15 +38,12 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_QUEUED_HEAD_INJECT` | `src/services/discord/queue_io/queued_head_inject.rs` | `ADK_QUEUED_HEAD_INJECT=1` opts into queued-head injection; absent values keep it off. |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
-| `ADK_TEST_REGISTERED_SNAPSHOT_RESTORE` | `src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs` |  |
 | `ADK_TURN_PRESENCE_TAIL` | `src/services/discord/turn_presence/activity/tail.rs` |  |
-| `ADK_WATCHER_FIXTURE_CHILD` | `src/services/discord/watchers/lifecycle/watcher_install_fixture.rs` |  |
 | `AGENTDESK_API_URL` | `src/cli/client.rs`, `src/cli/monitoring.rs` | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
 | `AGENTDESK_BINDING_CONTEXT` | `src/services/tui_prompt_dedupe/binding_context.rs` | Hook capture reads this value without consulting mutable markers. |
 | `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs` |  |
 | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` | `src/services/discord/catch_up.rs` | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` overrides the gap (0 disables — used by tests and by operators who want the old unthrottled behaviour). |
 | `AGENTDESK_CLAUDE_LIVE_BRIDGE_GUARD` | `src/services/discord/live_bridge.rs` | Disabling the guard lets watcher respawn take over a live original. |
-| `AGENTDESK_CLAUDE_PATH` | `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` | Dispatched turns must not reach a host `claude` or host config: a real CLI rejects the synthetic resume id and triggers a stale-resume re-dispatch. |
 | `AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS` | `src/config/session_hosts.rs` |  |
 | `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` | `src/services/claude.rs` | Default ON; `0`, `false`, `off` or `no` disables follow-up requeue. |
 | `AGENTDESK_CLUSTER_API_BASE_URL` | `src/services/cluster/session_routing.rs` |  |
@@ -57,7 +54,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex/effort.rs` |  |
 | `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex/command_streaming.rs` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs` |  |
-| `AGENTDESK_CONFIG` | `src/config/config_path/selection.rs`, `src/config/test_env.rs`, `src/config/test_instance.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` | `$AGENTDESK_CONFIG` selects an explicit config path before the normal root search. |
+| `AGENTDESK_CONFIG` | `src/config/config_path/selection.rs`, `src/config/test_env.rs`, `src/config/test_instance.rs` | `$AGENTDESK_CONFIG` selects an explicit config path before the normal root search. |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs` |  |
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs` |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs` |  |
@@ -98,7 +95,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_REPORT_PROVIDER` | `src/services/discord/restart_report.rs` |  |
 | `AGENTDESK_REPO_DIR` | `src/services/git/repo_resolver.rs` | Priority: `AGENTDESK_REPO_DIR` env -> scan all known roots for a git workspace -> `~/AgentDesk`. |
 | `AGENTDESK_REVIEW_MCP_ALLOWLIST` | `src/services/mcp_config.rs` |  |
-| `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/runtime_root_guard.rs`, `src/config/test_env.rs`, `src/config/test_env/teardown_probe.rs`, `src/config/test_instance.rs`, `src/services/campaign_execution/verification_runner.rs`, `src/services/claude.rs`, `src/services/codex.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs`, `src/services/discord/watchers/lifecycle/watcher_install_fixture.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs` | Write a debug message to a specific log file under $AGENTDESK_ROOT_DIR/debug/. |
+| `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/runtime_root_guard.rs`, `src/config/test_env.rs`, `src/config/test_env/teardown_probe.rs`, `src/config/test_instance.rs`, `src/services/campaign_execution/verification_runner.rs`, `src/services/claude.rs`, `src/services/codex.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs` | Write a debug message to a specific log file under $AGENTDESK_ROOT_DIR/debug/. |
 | `AGENTDESK_SCHEMA_AHEAD_HOLD` | `src/cli/dcserver_pg_bootstrap.rs` | Whether the launchd environment leaves the schema-ahead hold on (default on). |
 | `AGENTDESK_SELF_WATCHDOG_MODE` | `src/services/discord/health/recovery/self_watchdog.rs` |  |
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs` | Default ON; standard false tokens disable the live panel. |

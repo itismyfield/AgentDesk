@@ -120,16 +120,15 @@ pub(in crate::services::discord) use store::{
 };
 #[cfg(test)]
 use store::{
-    DELIVERY_OWNER_CONTEXT_DIR, FRESH_SEND_RECORDS_DIR, clear_lease_at,
+    DELIVERY_OWNER_CONTEXT_DIR, DELIVERY_RECORDS_DIR, FRESH_SEND_RECORDS_DIR, clear_lease_at,
     delivery_owner_context_path_in_root, upsert_lease_at,
     write_confirmed_frontier_guarded_at_with_before_lock,
 };
 use store::{
-    DELIVERY_RECORDS_DIR, EqualRangeAnchorPolicy, RECENT_DELIVERED_CONTENT_LIMIT,
-    RECENT_DELIVERED_CONTENT_WINDOW_MS, WatcherFrontierLockAuthority, append_confirmed_receipt,
-    delivery_owner_context_path, fresh_send_record_path, mutate_record_at,
-    owner_context_path_or_err, record_path_or_err, write_confirmed_delivery_at,
-    write_confirmed_delivery_at_with_lock_authority,
+    EqualRangeAnchorPolicy, RECENT_DELIVERED_CONTENT_LIMIT, RECENT_DELIVERED_CONTENT_WINDOW_MS,
+    WatcherFrontierLockAuthority, append_confirmed_receipt, delivery_owner_context_path,
+    fresh_send_record_path, mutate_record_at, owner_context_path_or_err, record_path_or_err,
+    write_confirmed_delivery_at, write_confirmed_delivery_at_with_lock_authority,
     write_confirmed_frontier_guarded_at_with_lock_authority,
     write_delivered_frontier_guarded_at_with_before_lock, write_record_at,
 };
@@ -154,7 +153,7 @@ pub(in crate::services::discord) struct DurableLease {
 /// `<runtime_root>/discord_delivery_records/<provider>/<channel_id>.json`.
 /// Inner form takes the `runtime/` dir explicitly so tests can target an
 /// isolated tempdir without the `AGENTDESK_ROOT_DIR` env dance.
-#[allow(dead_code)] // #3089 B0: exercised by the store tests; B1 uses the env-resolved form.
+#[cfg(test)]
 fn delivery_record_path_in_root(
     runtime_root: &Path,
     provider: &ProviderKind,
@@ -187,6 +186,7 @@ fn write_delivered_frontier_at(path: &Path, frontier: DeliveredCommit) -> Result
 /// Atomically persist the monotonic frontier and the exact Discord receipt.
 /// This is delivery authority, never rollout telemetry, so callers must invoke
 /// it after a confirmed POST regardless of the shadow flag.
+#[cfg(test)]
 pub(in crate::services::discord) fn write_confirmed_delivery(
     provider: &ProviderKind,
     offset_authority_channel_id: u64,

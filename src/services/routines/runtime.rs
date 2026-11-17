@@ -787,8 +787,16 @@ async fn close_action(
             last_result,
             next_due_at,
         } => {
-            let Some(agent_executor) = agent_executor else {
-                let message = "RoutineAction.agent requires RoutineAgentExecutor";
+            let refusal = if agent_executor.is_none() {
+                Some("RoutineAction.agent requires RoutineAgentExecutor")
+            } else if dm_user_id.is_some() && store.run_forbids_dm_override(&claimed.run_id).await?
+            {
+                Some("dmUserId is not accepted for an explicit execution_mode routine")
+            } else {
+                None
+            };
+            let (Some(agent_executor), None) = (agent_executor, refusal) else {
+                let message = refusal.unwrap_or_default();
                 let result_json = Some(json!({
                     "error": message,
                     "fresh_context_guaranteed": pre_provider_fresh_context_guaranteed(),

@@ -871,8 +871,10 @@ fn slash_command_control_turn_is_duplicate_external_replay(
 }
 
 #[cfg(all(test, unix))]
+#[path = "tui_prompt_relay/local_model_queue_wake_e2e_tests.rs"]
 mod local_model_queue_wake_e2e;
 #[cfg(all(test, unix))]
+#[path = "tui_prompt_relay/relay_e2e/relay_e2e_tests.rs"]
 pub(in crate::services::discord) mod relay_e2e;
 #[cfg(test)]
 mod tests;

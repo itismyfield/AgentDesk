@@ -13,6 +13,31 @@ pub(crate) use durable_publish::{
 #[cfg(test)]
 pub(crate) use durable_publish::{critical_atomic_write, flush_probe as durable_probe};
 
+/// Enumerate channel-named files with each store's existing channel loader.
+pub(super) fn collect_pending_channels<T>(
+    dir: &Path,
+    mut load_channel: impl FnMut(u64) -> Vec<T>,
+) -> Vec<(u64, T)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(channel_id) = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        for record in load_channel(channel_id) {
+            out.push((channel_id, record));
+        }
+    }
+    out
+}
+
 pub(super) fn agentdesk_root() -> Option<PathBuf> {
     #[cfg(test)]
     {
