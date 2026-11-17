@@ -1,6 +1,7 @@
 """Supported assertion operations and their accepted option names."""
 
 ASSERTION_OPTIONS = {
+    "provider_session_changed": {"before", "after"},
     **{k: None for k in ("text_present", "provider_text_present", "raw_text_present", "no_duplicate_marker", "ordered_text_present",
                          "no_duplicate_content", "no_resume_prompt_chrome", "no_suppressed_label_chrome",
                          "no_control_chars", "body_not_overwritten", "fixture_followup_ready",

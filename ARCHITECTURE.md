@@ -229,12 +229,15 @@ src/
 │   │   │   ├── http_force.rs
 │   │   │   ├── legacy_return.rs
 │   │   │   └── legacy_return_tests.rs
+│   │   ├── provider_resume_fence/
+│   │   │   └── tests.rs
 │   │   ├── canonical_identity.rs
 │   │   ├── canonical_identity_pg_tests.rs
 │   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
 │   │   ├── hosted_execution_tests.rs
 │   │   ├── listing.rs
+│   │   ├── provider_resume_fence.rs
 │   │   ├── rebind_override.rs
 │   │   ├── tests.rs
 │   │   └── thread_gc.rs
@@ -1489,6 +1492,8 @@ src/
 │   │   │   ├── replacement_tests.rs
 │   │   │   └── test_setup.rs
 │   │   ├── commands/
+│   │   │   ├── cancel_backstop_tests/
+│   │   │   │   └── slash_clear.rs
 │   │   │   ├── config/
 │   │   │   │   ├── provider_settings/
 │   │   │   │   │   └── revision_tests.rs
@@ -1511,7 +1516,8 @@ src/
 │   │   │   │   │   ├── clear_end_record_tests.rs
 │   │   │   │   │   ├── codex_end_record.rs
 │   │   │   │   │   ├── codex_end_tests.rs
-│   │   │   │   │   └── execution_cleanup.rs
+│   │   │   │   │   ├── execution_cleanup.rs
+│   │   │   │   │   └── resume_fence.rs
 │   │   │   │   ├── codex_clear_relaunch_tests/
 │   │   │   │   │   ├── absent_launch_tests/
 │   │   │   │   │   │   ├── auxiliary_tests/
@@ -2494,6 +2500,7 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_busy_entry_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_busy_late_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_busy_running_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_clear_fence_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
@@ -3634,6 +3641,7 @@ src/
 │   │   ├── listing.rs
 │   │   ├── listing_tests.rs
 │   │   ├── output.rs
+│   │   ├── resume_fence_api_tests.rs
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
 │   │   ├── discord_delivery/

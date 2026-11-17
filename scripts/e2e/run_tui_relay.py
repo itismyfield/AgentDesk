@@ -55,6 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tui_relay import assertions, discord, durable_delivery, feature_accounting, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
 from tui_relay import channel_reset, health_readiness, herdr_restart, http_auth, midturn_kill, restart_guard, surface_assertions, wait_timeout  # noqa: E402
+from tui_relay import clear_fresh_session  # noqa: E402
 # Share the assertion schema without importing the live driver in static tools.
 from tui_relay.assertion_registry import ASSERTION_OPTIONS  # noqa: E402
 
@@ -149,6 +150,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "marker_counts",
     "input_refusals",
     "clear_refusal",
+    "clear_provider_sessions",
     "tmux_key_sequences",
     "herdr_key_sequences",
     "observed_notices",
@@ -1065,6 +1067,7 @@ STEP_OPTIONS = {
     "deliver_prompt": {"text", "source"}, "restart_dcserver": {"target", "require_status", "allowed_degraded_reasons", "allowed_target_queue_depth"},
     "kill_pane": {"reverify_session_name_substring"}, "poison_claude_tui_relay_offset": set(),
     "capture_session_identity": {"label"}, "assert_session_preserved": {"label"},
+    "capture_provider_session": {"label"},
     "send_prompts_concurrent": {"prompts"}, "fixture_followup_probe": {"prompt"}, "replay_fixture": {"kind", "provider", "frames"},
     "local_control_then_prompt": {"control", "notice", "prompt", "notice_timeout_s", "admission_timeout_s", "quiet_s", "poll_interval_s"},
     "send_timed_response_prompt": {"before_marker", "after_marker", "hold_seconds"}, "send_provider_hold_prompt": {"ok_marker", "marker", "late_marker", "hold_seconds"},
@@ -1150,6 +1153,7 @@ def load_scenarios(scenarios_dir: Path, *, cell: str) -> list[dict[str, Any]]:
             data = yaml.safe_load(fp)
         if not isinstance(data, dict):
             raise ValueError(f"{yaml_path} did not parse to a mapping")
+        data = clear_fresh_session.plan(data, cell=cell)
         validate_scenario_schema(data)
         cells = data.get("cells") or []
         if not isinstance(cells, list):
@@ -3246,6 +3250,7 @@ def run_scenario(
     client: discord.DiscordClient,
     partial_result_sink: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    scenario = clear_fresh_session.plan(scenario, cell=args.cell)
     scenario = wait_timeout.expand_markers(scenario, run_id)
     scenario_id = str(scenario.get("id"))
     cell = args.cell
@@ -4299,6 +4304,9 @@ def run_one_cell(
                     runtime_root=Path(args.queue_runtime_root),
                 )
             )
+        elif clear_fresh_session.owns(step):
+            clear_fresh_session.run_step(sys.modules[__name__], step, base_url=client.base_url,
+                                         channel_id=channel_id, cell=cell, record=record)
         elif "capture_session_identity" in step:
             params = step["capture_session_identity"] or {}
             label = str(params.get("label") or "default")
@@ -5044,7 +5052,9 @@ def run_assertion(
             return surface_assertions.run(spec, record=record, run_id=run_id, read_api=_read_api_json, window=window)
         except surface_assertions.Unevaluable as error:
             raise HarnessEvidenceError(str(error)) from error
-    if "message_count_between_markers" in spec:
+    if "provider_session_changed" in spec:
+        clear_fresh_session.assert_changed(spec["provider_session_changed"], record=record)
+    elif "message_count_between_markers" in spec:
         params = spec["message_count_between_markers"]
         assertions.message_count_between_markers(
             window, low=int(params.get("min", 0)), high=int(params.get("max", 99))
