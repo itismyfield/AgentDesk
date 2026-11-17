@@ -1,6 +1,7 @@
 //! A first input whose idle source proves no boundary by the end of its readiness budget ends at
-//! the owner retained with a resend ask; one whose turn still runs waits at the front. A launch
-//! older than the daemon restart proves its idle composer on its last hard terminal.
+//! the owner retained with a resend ask, or refused for good when its transcript moved; one whose
+//! turn still runs waits at the front. A launch older than the daemon restart proves its idle
+//! composer on its last hard terminal.
 use super::tests::{NONCE, bound_target};
 use super::*;
 use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
@@ -59,7 +60,7 @@ fn a_restart_during_a_continuing_stop_retains_with_one_resend_notice_pg() {
 }
 
 #[test]
-fn a_wait_whose_transcript_moved_once_ends_retained_with_one_resend_notice_pg() {
+fn a_wait_whose_transcript_moved_once_ends_refused_for_good_with_one_notice_pg() {
     owner_outcome(&[(Moved, 821_711)]);
 }
 
@@ -218,14 +219,18 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             "target":{"host":"herdr","owner":logical,"root":socket,"execution_nonce":NONCE},
             "source":{"kind":"pre_source","expected_session_id":null,
                 "expected_transcript":null,"binding_watermark":null}});
-        runtime
-            .block_on(mailbox.v2_cold_fixture(
+        let queue = crate::config::runtime_root().unwrap();
+        let queue = queue.join(format!("runtime/discord_pending_queue/moved/{channel}.json"));
+        let fixture = match case {
+            Moved => runtime.block_on(merged_unit(&mailbox, queue.clone(), attempt, channel)),
+            _ => runtime.block_on(mailbox.v2_cold_fixture(
                 root.path().join("unproven.json"),
                 attempt,
                 "one original".into(),
                 channel,
-            ))
-            .unwrap();
+            )),
+        };
+        fixture.unwrap();
         let border = "─".repeat(52);
         rig.answer("pane.read", json!({"type":"pane_read","read":{"pane_id":PANE,
             "source":"recent_unwrapped","text":format!("✻ Baked for 2s\n\n{border}\n❯ \n{border}\n  🤖 Opus(H) │ 7% │ MCP: 2\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"),
@@ -346,6 +351,10 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             assert_eq!(items.len(), 1, "{case:?}: the original stays in front");
             assert!(retained.is_empty(), "{case:?}: nothing is retained");
             assert!(held_watch::armed(channel), "{case:?}: its watch is left");
+        } else if case == Moved {
+            drop((mailbox, registry));
+            runtime.block_on(refused_for_good(queue, channel));
+            assert!(rig.sends().is_empty(), "{case:?}: still no key");
         } else {
             assert!(items.is_empty(), "{case:?}: the front is released");
             assert_eq!(retained.len(), 1, "{case:?}: {snapshot}");
@@ -358,7 +367,7 @@ fn owner_outcome(cases: &[(Case, u64)]) {
                 "{case:?}: one resend ask is owed"
             );
             assert!(!held_watch::armed(channel), "{case:?}: no look resends it");
-            let notice_db = matches!(case, Case::Continuing | Moved).then(|| {
+            let notice_db = (case == Case::Continuing).then(|| {
                 runtime.block_on(async {
                     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
                     let pool = db.connect_and_migrate().await;
@@ -410,6 +419,107 @@ fn owner_outcome(cases: &[(Case, u64)]) {
         drop(dedupe_guard);
         drop(env_guard);
     }
+}
+
+const MERGED: [(&str, &str); 2] = [("moved-a", "one original"), ("moved-b", "second original")];
+
+fn merged(channel: u64, at: usize) -> crate::services::turn_orchestrator::PendingQueueItem {
+    let id = 8_000_000_000_200_000_000u64 + channel * 10 + at as u64;
+    serde_json::from_value(json!({"author_id":7,"channel_id":channel,"message_id":id,
+        "source_message_ids":[id],"queued_generation":1,"text":MERGED[at].1}))
+    .unwrap()
+}
+
+/// Two originals admitted under their own tickets and reserved as the one frame carrying both.
+async fn merged_unit(
+    mailbox: &crate::services::turn_orchestrator::ChannelMailboxHandle,
+    queue: std::path::PathBuf,
+    attempt: Value,
+    channel: u64,
+) -> Result<(), String> {
+    mailbox.v2_adopt(queue, "moved".into()).await?;
+    for (at, (ticket, _)) in MERGED.iter().enumerate() {
+        let admitted = mailbox.v2_admit_ticket(merged(channel, at), (*ticket).into());
+        admitted.await.map_err(String::from)?;
+    }
+    mailbox
+        .v2_request(move |slot| {
+            let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
+            let body = |item: &crate::services::turn_orchestrator::PendingQueueItem| {
+                Some((String::new(), item.text.clone()))
+            };
+            slot.as_mut().ok_or("no owner")?.reserve_unit(attempt, body).map(drop)
+        })
+        .await
+}
+
+/// The refusal as a restarted owner finds it: nothing returns to the queue before or after its
+/// notice reached the outbox, no body is kept, a retried ticket admits nothing, one notice posts.
+async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
+    use crate::services::discord::owner_recovery_for_test::recover;
+    use crate::services::tui_input::human_frame::history::v2::Registry;
+    use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let history = || Registry::at(queue.with_extension("history"));
+    let at = ("claude", channel, 20_000);
+    let restart = || {
+        let registry = ChannelMailboxRegistry::default();
+        let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+        (registry, mailbox)
+    };
+    // Restarted before the notice reached the outbox.
+    let (registry, mailbox) = restart();
+    let recovered = recover(&mailbox, (queue.clone(), "moved".into()), history(), None, at).await;
+    assert_eq!(recovered, Ok(0));
+    let read = |mailbox: &ChannelMailboxHandle| {
+        mailbox.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json())
+    };
+    let snapshot = read(&mailbox).await.unwrap();
+    assert!(
+        snapshot["items"].as_array().unwrap().is_empty(),
+        "a refused input never returns to the queue: {snapshot}"
+    );
+    assert!(snapshot["retained_inputs"].as_array().unwrap().is_empty());
+    let refused = snapshot["refused_inputs"].as_array().unwrap();
+    assert_eq!(refused.len(), 1, "{snapshot}");
+    assert_eq!(refused[0]["members"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        refused[0]["notice"],
+        json!({"kind":"readiness_unproven","enqueued":false})
+    );
+    assert!(
+        !snapshot.to_string().contains("original"),
+        "no body is kept: {snapshot}"
+    );
+    // The notice reached the outbox, then the daemon restarted before the owner marked it.
+    ChannelMailboxHandle::v2_notice(&pool, "claude", channel, "moved", &refused[0])
+        .await
+        .unwrap();
+    drop((mailbox, registry));
+    let (_registry, mailbox) = restart();
+    let recovered = recover(&mailbox, (queue, "moved".into()), history(), Some(&pool), at).await;
+    assert_eq!(recovered, Ok(1), "the restart retries only the notice");
+    let retried = mailbox.v2_admit_ticket(merged(channel, 0), MERGED[0].0.into());
+    assert_eq!(
+        retried.await.map(|admitted| format!("{admitted:?}")),
+        Ok("Duplicate".into()),
+        "the same ticket admits nothing again"
+    );
+    let snapshot = read(&mailbox).await.unwrap();
+    assert!(snapshot["items"].as_array().unwrap().is_empty(), "{snapshot}");
+    assert_eq!(snapshot["refused_inputs"][0]["notice"]["enqueued"], true);
+    let posts: Vec<(String,)> =
+        sqlx::query_as("SELECT content FROM message_outbox WHERE target = $1")
+            .bind(format!("channel:{channel}"))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(posts.len(), 1, "one merged refusal owes one notice: {posts:?}");
+    assert!(posts[0].0.contains("증거를 확보하지 못해"), "{posts:?}");
+    assert!(!posts[0].0.contains("원문을 보관했습니다"), "{posts:?}");
+    pool.close().await;
+    db.drop().await;
 }
 
 // A launch older than the restart, held by a person's draft, is woken by the

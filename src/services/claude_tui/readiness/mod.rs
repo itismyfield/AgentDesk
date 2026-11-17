@@ -14,7 +14,7 @@ mod source;
 pub(crate) mod tests;
 mod wait;
 mod watched;
-pub(crate) use watched::{Expiry, WINDOW, watched};
+pub(crate) use watched::{Expiry, Unproven, WINDOW, watched};
 
 use super::hook_server::HookEventKind;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;

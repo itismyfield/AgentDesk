@@ -29,11 +29,20 @@ pub(crate) fn watched(session: &str, path: Option<&Path>) -> Watched {
     }
 }
 
+/// How a wait that no later look can clear ends its input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unproven {
+    /// The source sat idle and unmoved all along: the input is retained with its resend ask.
+    Retained,
+    /// Its transcript moved and the windows ended without evidence: the input is refused for good.
+    Refused,
+}
+
 /// What a budget that ended without a proof says of its source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Expiry {
     /// Idle with no turn, control or fence open: only new activity can make it ready.
-    Unproven,
+    Unproven(Unproven),
     /// The same, but its transcript moved: the same wait runs one more short window.
     Requiet,
     /// A turn, a fence, a clear or another source may still supply the evidence.
@@ -103,7 +112,7 @@ impl Watched {
             return Expiry::Waits;
         }
         if !moved && self.windows == 0 {
-            return Expiry::Unproven;
+            return Expiry::Unproven(Unproven::Retained);
         }
         if moved && self.windows < WINDOWS {
             self.windows += 1;
@@ -114,7 +123,7 @@ impl Watched {
         }
         // A quiet window, or every window spent: the transcript shows no turn, so the screen decides.
         match pane().is_some_and(|capture| super::idle::shows_no_turn(&capture)) {
-            true => Expiry::Unproven,
+            true => Expiry::Unproven(Unproven::Refused),
             false => Expiry::Waits,
         }
     }

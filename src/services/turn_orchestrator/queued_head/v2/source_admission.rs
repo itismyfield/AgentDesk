@@ -102,6 +102,11 @@ fn canonical(original: &PendingQueueItem) -> serde_json::Value {
     value
 }
 
+/// The digest a receipt carries for `original`, kept for an input whose body is dropped.
+pub(super) fn fingerprint(original: &PendingQueueItem) -> String {
+    digest(&canonical(original))
+}
+
 fn digest(value: &impl serde::Serialize) -> String {
     use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(value).expect("queue identity serializes");

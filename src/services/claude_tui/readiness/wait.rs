@@ -1,5 +1,5 @@
 use super::super::input::PromptReadinessKind;
-use super::{CHANGED, Expiry, Proof, ledger, observe};
+use super::{CHANGED, Expiry, Proof, Unproven, ledger, observe};
 use crate::services::provider::{CancelToken, cancel_requested};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -8,13 +8,13 @@ use std::time::{Duration, Instant};
 #[derive(Debug)]
 pub(crate) struct Stopped {
     pub(crate) error: String,
-    pub(crate) unproven: bool,
+    pub(crate) unproven: Option<Unproven>,
 }
 impl From<String> for Stopped {
     fn from(error: String) -> Self {
         Self {
             error,
-            unproven: false,
+            unproven: None,
         }
     }
 }
@@ -49,14 +49,19 @@ pub(crate) fn prepare(
             return Ok(proof);
         }
         if Instant::now() >= deadline {
-            let expiry = watched.expired(|| super::super::host_input::observe_draft(session));
-            if expiry == Expiry::Requiet {
-                deadline = Instant::now() + budget.min(super::WINDOW);
-                continue;
-            }
+            let unproven = match watched
+                .expired(|| super::super::host_input::observe_draft(session))
+            {
+                Expiry::Requiet => {
+                    deadline = Instant::now() + budget.min(super::WINDOW);
+                    continue;
+                }
+                Expiry::Unproven(end) => Some(end),
+                Expiry::Waits => None,
+            };
             return Err(Stopped {
                 error: "timeout waiting for claude tui current Idle/SessionStart evidence and empty composer".into(),
-                unproven: expiry == Expiry::Unproven,
+                unproven,
             });
         }
         let state = ledger();

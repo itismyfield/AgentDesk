@@ -558,7 +558,11 @@ fn a_timed_out_hold_tells_an_unmoved_idle_source_from_a_running_turn() {
         Err(SubmissionError::Held(hold)) => hold.unproven,
         other => panic!("the wait must hold: {other:?}"),
     };
-    assert!(unproven(), "nothing in flight can supply the evidence");
+    assert_eq!(
+        unproven(),
+        Some(Unproven::Retained),
+        "nothing in flight can supply the evidence"
+    );
     // Was "a source that moved waits": that hold had no wake, so a moved idle source now runs
     // counted windows and then settles on an idle screen.
     let idle = || Some(view("", false));
@@ -568,7 +572,11 @@ fn a_timed_out_hold_tells_an_unmoved_idle_source_from_a_running_turn() {
         assert_eq!(seen.expired(idle), Expiry::Requiet, "window {window}");
     }
     r.append(json!({"type":"ai-title"}));
-    assert_eq!(seen.expired(idle), Expiry::Unproven, "the windows end");
+    assert_eq!(
+        seen.expired(idle),
+        Expiry::Unproven(Unproven::Refused),
+        "the windows end"
+    );
     // A window keeps the wait's first source: a relaunch over the same transcript is not its.
     let mut seen = watched(&r.session, None);
     r.append(json!({"type":"ai-title"}));
@@ -591,7 +599,7 @@ fn a_timed_out_hold_tells_an_unmoved_idle_source_from_a_running_turn() {
     );
     fs::write(&marker, &r.ctx.execution_nonce).unwrap();
     r.assistant("still Running");
-    assert!(!unproven(), "a running turn ends by itself");
+    assert_eq!(unproven(), None, "a running turn ends by itself");
     assert!(tmux.sends().is_empty());
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
 }
@@ -615,10 +623,10 @@ pub(crate) fn after_first_look(
 }
 
 // A restarted idle pane appends one metadata row while the owner's input waits: no key, the
-// original retained once with its resend ask owed, and the front released.
+// input refused for good with its notice owed, and a restart brings nothing of it back.
 #[cfg(unix)]
 #[test]
-fn an_owner_input_whose_idle_transcript_moved_once_ends_retained_without_a_key() {
+fn an_owner_input_whose_idle_transcript_moved_once_ends_refused_without_a_key() {
     use super::super::input::submission::tests::{ScriptedTmux, view};
     use crate::services::discord::owner_effect_for_test as effect;
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -643,10 +651,10 @@ fn an_owner_input_whose_idle_transcript_moved_once_ends_retained_without_a_key()
             "execution_nonce":r.ctx.execution_nonce},
         "source":{"kind":"pre_source","expected_session_id":null,
             "expected_transcript":null,"binding_watermark":null}});
-    let queue = r.root.join("moved-once.json");
-    runtime
-        .block_on(mailbox.v2_cold_fixture(queue, attempt, "one original".into(), channel))
-        .unwrap();
+    let queue = crate::config::runtime_root().unwrap();
+    let queue = queue.join("runtime/moved-once.json");
+    let fixture = mailbox.v2_cold_fixture(queue.clone(), attempt, "one original".into(), channel);
+    runtime.block_on(fixture).unwrap();
     let (path, native) = (r.path.clone(), r.ctx.expected_native_session_id.clone());
     let moved = after_first_look(&r.session, move || {
         let mut file = OpenOptions::new().append(true).open(path).unwrap();
@@ -678,20 +686,39 @@ fn an_owner_input_whose_idle_transcript_moved_once_ends_retained_without_a_key()
         "{result:?}"
     );
     assert!(tmux.sends().is_empty(), "no key reaches the pane");
+    // The daemon restarts before the notice went out.
+    drop((mailbox, registry));
+    let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
+    let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+    let history = crate::services::tui_input::human_frame::history::v2::Registry::at(
+        r.root.join("history.json"),
+    );
+    let recovered = crate::services::discord::owner_recovery_for_test::recover(
+        &mailbox,
+        (queue, format!("cold-scope-{channel}")),
+        history,
+        None,
+        ("claude", channel, 20_000),
+    );
+    assert_eq!(runtime.block_on(recovered), Ok(0));
     let snapshot = runtime
         .block_on(mailbox.v2_request(|slot| slot.as_ref().unwrap().json()))
         .unwrap();
     assert!(
         snapshot["items"].as_array().unwrap().is_empty(),
-        "{snapshot}"
+        "a refused input never returns to the queue: {snapshot}"
     );
-    let retained = snapshot["retained_inputs"].as_array().unwrap();
-    assert_eq!(retained.len(), 1, "{snapshot}");
-    assert_eq!(retained[0]["input"]["original"]["text"], "one original");
+    assert!(snapshot["retained_inputs"].as_array().unwrap().is_empty());
+    let refused = snapshot["refused_inputs"].as_array().unwrap();
+    assert_eq!(refused.len(), 1, "{snapshot}");
     assert_eq!(
-        retained[0]["notice"],
-        json!({"kind":"retained_retry_required","enqueued":false}),
-        "one resend ask is owed"
+        refused[0]["notice"],
+        json!({"kind":"readiness_unproven","enqueued":false}),
+        "one notice is owed"
+    );
+    assert!(
+        !snapshot.to_string().contains("one original"),
+        "no body is kept: {snapshot}"
     );
 }
 

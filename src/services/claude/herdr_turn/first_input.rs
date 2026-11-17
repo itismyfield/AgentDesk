@@ -229,10 +229,12 @@ fn write(
                     } else { Screen::Unknown }
                 },
             ));
-            let unproven = matches!(
-                stopped,
-                InputRun::Refused(crate::services::claude_tui::host_input::InputRefusal::Unproven)
-            );
+            let unproven = match stopped {
+                InputRun::Refused(
+                    crate::services::claude_tui::host_input::InputRefusal::Unproven(end),
+                ) => Some(end),
+                _ => None,
+            };
             return Err(before_payload(
                 logical,
                 &format!("Claude composer held before first key: {stopped:?}"),
@@ -305,7 +307,11 @@ fn record_outcome(mut record: hold_record::HoldRecord, run: &InputRun) {
     }
 }
 
-fn before_payload(logical: &str, detail: &str, unproven: bool) -> SubmissionError {
+fn before_payload(
+    logical: &str,
+    detail: &str,
+    unproven: Option<crate::services::claude_tui::readiness::Unproven>,
+) -> SubmissionError {
     crate::services::claude_tui::owner_input::vetoed(detail);
     SubmissionError::Held(crate::services::claude_tui::input::PreparationHold {
         target: logical.into(),

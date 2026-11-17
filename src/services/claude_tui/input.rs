@@ -379,7 +379,7 @@ fn wait_for_prompt_ready_inner(
         readiness.timeout(),
         readiness,
     );
-    let unproven = prepared.as_ref().is_err_and(|stop| stop.unproven);
+    let unproven = prepared.as_ref().err().and_then(|stop| stop.unproven);
     match prepared.map_err(|stop| stop.error) {
         Ok(_) => Ok(()),
         Err(error) if is_prompt_ready_cancelled_error(&error) => Err(error),

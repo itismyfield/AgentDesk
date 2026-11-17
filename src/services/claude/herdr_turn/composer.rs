@@ -180,7 +180,7 @@ pub(crate) fn when_idle(
         }
         match watched.expired(&mut capture) {
             Expiry::Requiet => budget = budget.min(readiness::WINDOW),
-            Expiry::Unproven => return InputRun::Refused(InputRefusal::Unproven),
+            Expiry::Unproven(end) => return InputRun::Refused(InputRefusal::Unproven(end)),
             Expiry::Waits => return InputRun::Refused(InputRefusal::Unknown),
         }
     };

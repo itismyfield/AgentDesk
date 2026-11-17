@@ -654,6 +654,11 @@ input-single-path/ReadinessRequietTmuxPersonFixed.cfg	ReadinessRequiet	-	-
 input-single-path/ReadinessRequietTmuxPersonIgnoreScreen.cfg	ReadinessRequiet	NoRequietSettleOverBusyPane	-
 input-single-path/ReadinessRequietTmuxRunningFixed.cfg	ReadinessRequiet	-	-
 input-single-path/ReadinessRequietTmuxUnmovedBefore.cfg	ReadinessRequiet	-	-
+input-single-path/RefusedDispositionBefore.cfg	RefusedDisposition	RefusedStaysOut,NoBodyOnceSettled,NoKeyAfterEnd	NoticeExactlyOnce
+input-single-path/RefusedDispositionDrainSkipsRefused.cfg	RefusedDisposition	-	NoticeExactlyOnce
+input-single-path/RefusedDispositionFixed.cfg	RefusedDisposition	-	-
+input-single-path/RefusedDispositionNoDedupe.cfg	RefusedDisposition	NoticeAtMostOnce	NoticeExactlyOnce
+input-single-path/RefusedDispositionRetryAdmits.cfg	RefusedDisposition	RefusedStaysOut,NoKeyAfterEnd	NoticeExactlyOnce
 input-single-path/ReservedIdEnqueueBefore.cfg	ReservedIdEnqueue	NoReservationQueueOverlap	-
 input-single-path/ReservedIdEnqueueFixed.cfg	ReservedIdEnqueue	-	-
 input-single-path/ReservedIdEnqueueGuardOnly.cfg	ReservedIdEnqueue	NoLostReturn	EventuallyExecuted
