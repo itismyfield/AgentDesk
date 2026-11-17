@@ -1446,7 +1446,7 @@ class DriverIntegrationTests(unittest.TestCase):
         self.assertEqual(result["status"], "pass", result.get("reason"))
         self.assertNotIn("clear_provider_sessions", result)
         checks = [row for row in result["assertions"] if "post_scenario_cell_idle" not in row["spec"]]
-        self.assertEqual(len(checks), 7)
+        self.assertEqual(len(checks), 8)
 
 
 if __name__ == "__main__":
