@@ -137,7 +137,9 @@ fn write(
         tracing::warn!(logical = %logical, %error, "herdr turn: input hold kept");
     }
     match run {
-        InputRun::Applied => (),
+        InputRun::Applied => {
+            crate::logging::intake_timing::mark(crate::logging::intake_timing::Stage::Applied)
+        }
         stopped @ (InputRun::Refused(_) | InputRun::Cancelled { confirmed: 0 }) => {
             let pane = attached.target.clone();
             let watched_session = logical.to_owned();

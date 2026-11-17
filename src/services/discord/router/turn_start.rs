@@ -614,6 +614,7 @@ pub(super) async fn log_session_strategy_diagnostic(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("-");
+    crate::logging::intake_timing::mark(crate::logging::intake_timing::Stage::Strategy);
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] [session-strategy] channel={} provider={} dispatch={} reason={} provider_session_fp={} adk_key_present={} tmux={} tmux_alive={} recovery_context_present={} memento_context_loaded={}",

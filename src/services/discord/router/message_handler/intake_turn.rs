@@ -2117,7 +2117,9 @@ pub(super) async fn handle_text_message(
             tmux_session_name.as_deref(),
         )
         .await;
+        let timing = crate::logging::intake_timing::carry();
         tokio::task::spawn_blocking(move || {
+            let _timing = timing.entered();
             let _original_registration = producer_registration;
             let _upload_lifetime = materialized_uploads;
             let prompt_capture = session_prompt::Scope::enter(&cancel_token_clone);

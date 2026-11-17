@@ -9,6 +9,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::MakeWriter;
 
 pub(crate) mod auto_queue;
+pub(crate) mod intake_timing;
 
 #[cfg(test)]
 mod auto_queue_tests;
@@ -245,15 +246,38 @@ fn init_dcserver_tracing_once() -> Result<()> {
     let writer =
         RotatingLogWriter::new(log_path, dcserver_log_max_bytes(), dcserver_log_max_files())?;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_env_filter()?)
-        .with_writer(writer)
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    // The fmt layer keeps its own filter; the intake timing layer sees only SQLx events under an
+    // intake trace, and `log` keeps the fmt layer's max level.
+    let filter = tracing_env_filter()?;
+    let log_max = log_level(filter.max_level_hint());
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .with_filter(filter),
+        )
+        .with(intake_timing::layer())
         .try_init()
         .map_err(|error| {
             anyhow::anyhow!("Failed to initialize dcserver tracing subscriber: {error}")
         })?;
+    log::set_max_level(log_max);
     crate::services::resident_loops::install_panic_hook();
     Ok(())
+}
+
+fn log_level(hint: Option<tracing::level_filters::LevelFilter>) -> log::LevelFilter {
+    use tracing::level_filters::LevelFilter;
+    match hint {
+        Some(LevelFilter::OFF) => log::LevelFilter::Off,
+        Some(LevelFilter::ERROR) => log::LevelFilter::Error,
+        Some(LevelFilter::WARN) => log::LevelFilter::Warn,
+        Some(LevelFilter::INFO) => log::LevelFilter::Info,
+        Some(LevelFilter::DEBUG) => log::LevelFilter::Debug,
+        _ => log::LevelFilter::Trace,
+    }
 }
 
 pub(crate) fn init_dcserver_tracing() -> Result<()> {
