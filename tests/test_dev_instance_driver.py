@@ -39,6 +39,8 @@ class DriverTests(unittest.TestCase):
         self.write_record()
         fixture_json(self.root, 'runtime/resources-owner.json', {'sockets':{}})
         self.reads = []
+        self.card_id, self.dispatch_id = str(uuid.uuid4()), str(uuid.uuid4())
+        self.registrations = []
 
     def credential(self,name,value):
         path=self.root/'credential'/name
@@ -54,6 +56,13 @@ class DriverTests(unittest.TestCase):
         return {'test_instance':{k:v for k,v in self.record.items()
                                 if k not in ('verified','supervisor_pid')}}
 
+    def dispatch_request(self, url, body, deadline):
+        self.registrations.append((url, body))
+        if url.endswith('/api/kanban-cards'):return {'card': {'id': self.card_id}}
+        return {'dispatch': {'id': self.dispatch_id, 'kanban_card_id': self.card_id,
+                             'to_agent_id': body['to_agent_id'], 'dispatch_type': 'scope-assessment',
+                             'status': 'pending'}}
+
     def modules(self):
         self.assertIsNotNone(importlib.util.find_spec('scripts.dev_instance.driver'),
                              'instance Driver and pre-import identity gate must exist')
@@ -64,7 +73,7 @@ class DriverTests(unittest.TestCase):
     def execute(self, **kwargs):
         driver, _, _ = self.modules()
         return driver.run(self.fixture.base,self.root.name,'claude',10,
-                          identity_request=self.request, **kwargs)
+                          identity_request=self.request, dispatch_request=kwargs.pop('dispatch_request', self.dispatch_request), **kwargs)
 
     def test_id_gate_precedes_assertion_import_and_first_post(self):
         driver, admission, _ = self.modules()
@@ -154,6 +163,173 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(result['transmissions'],2)
         encoded=json.dumps(result)
         for token in self.tokens.values():self.assertNotIn(token.decode(),encoded)
+
+    def test_run_uses_manifest_observation_window_and_shorter_caller_limit(self):
+        from types import SimpleNamespace
+        driver, _, _ = self.modules()
+        for opt_in, timeout, expected in [(False, 600, 120), (True, 600, 300), (True, 7, 7)]:
+            with self.subTest(opt_in=opt_in, timeout=timeout):
+                now, deadlines = [1000.0], []
+                manifest = copy.deepcopy(self.manifest)
+                if opt_in:manifest['claude_login'] = {}
+                def factory(admitted, deadline):
+                    deadlines.append(deadline)
+                    child = self.client(admitted, deadline)
+                    child.messages = lambda *args: []
+                    return child
+                with mock.patch.object(driver, 'admit', return_value=SimpleNamespace(manifest=manifest, run=self.record)), \
+                     mock.patch.object(driver.time, 'monotonic', side_effect=lambda: now[0]), \
+                     mock.patch.object(driver.time, 'sleep', side_effect=lambda seconds: now.__setitem__(0, now[0]+seconds)), \
+                     mock.patch.object(driver, 'preserve_instance_log', return_value={'status': 'SAVED'}):
+                    result = driver.run(self.fixture.base, self.root.name, 'claude', timeout,
+                                        rest_factory=factory, dispatch_request=self.dispatch_request)
+                self.assertEqual(deadlines, [1000+expected])
+                self.assertEqual(now[0], 1000+expected)
+                self.assertEqual(result['status'], 'UNEVALUABLE(admission)')
+                self.assertEqual(result['transmissions'], 2)
+
+    def test_default_cli_accepts_opt_in_response_after_180_seconds(self):
+        import contextlib, io
+        from types import SimpleNamespace
+        driver, _, _ = self.modules()
+        now, deadlines = [1000.0], []
+        manifest = {**self.manifest, 'claude_login': {}}
+        def factory(admitted, deadline):
+            deadlines.append(deadline)
+            child = self.client(admitted, deadline)
+            messages = child.messages
+            child.messages = lambda *args: messages(*args) if now[0] >= 1210 else []
+            return child
+        output = io.StringIO()
+        with mock.patch.object(driver, 'admit', return_value=SimpleNamespace(manifest=manifest, run=self.record)), \
+             mock.patch.object(driver.time, 'monotonic', side_effect=lambda: now[0]), \
+             mock.patch.object(driver.time, 'sleep', side_effect=lambda seconds: now.__setitem__(0, now[0]+seconds)), \
+             mock.patch.object(driver.driver_dispatch.Client, '_http', side_effect=self.dispatch_request), \
+             mock.patch.object(driver.discord_rest, 'Client', side_effect=factory), \
+             mock.patch.object(driver, 'preserve_instance_log', return_value={'status': 'SAVED'}), \
+             contextlib.redirect_stdout(output):
+            code = driver.main(['--instance', self.root.name, '--provider', 'claude'])
+        self.assertEqual(code, 0)
+        self.assertEqual(deadlines, [1300])
+        self.assertEqual(now[0], 1210)
+        self.assertEqual(json.loads(output.getvalue())['response_ids'], ['900010'])
+
+    def test_non_opt_in_observed_output_golden_is_unchanged(self):
+        import hashlib
+        result = self.execute(rest_factory=self.client)
+        encoded = json.dumps(result, sort_keys=True)
+        for value, label in [(str(self.root), '<root>'), (self.manifest['head'], '<head>'),
+                             (self.root.name, '<uuid>'), (self.record['nonce'], '<nonce>'),
+                             (self.card_id, '<card>'), (self.dispatch_id, '<dispatch>')]:
+            encoded = encoded.replace(value, label)
+        self.assertEqual(hashlib.sha256(encoded.encode()).hexdigest(), '678bb6d1e516baa2d0fe661044e687cd05edea198fb50ff6bbb402366613692e')
+
+    def test_driver_preserves_log_only_after_an_explicit_login_turn(self):
+        from dataclasses import replace
+        driver, admission, _ = self.modules()
+        with mock.patch.object(driver, 'preserve_instance_log') as capture:
+            result = self.execute(rest_factory=self.client)
+        self.assertEqual(result['status'], 'OBSERVED')
+        self.assertNotIn('log_capture', result)
+        capture.assert_not_called()
+        admitted = admission.admit(self.fixture.base, self.root.name, time.monotonic()+10, request=self.request)
+        manifest = copy.deepcopy(admitted.manifest)
+        manifest['claude_login'] = {'mode': 'default_active', 'account_slot': 3,
+            'login_home': str(self.fixture.home), 'config_dir': str(self.root/'home/.adk/profiles/claude/test-claude'),
+            'cli': str(self.fixture.home/'.local/share/claude/fixture')}
+        (self.root/'logs/dcserver.stdout.log').write_text('EARLY_ADMISSION_EVIDENCE\n')
+        with mock.patch.object(driver, 'admit', return_value=replace(admitted, manifest=manifest)):
+            result = self.execute(rest_factory=self.client)
+        self.assertEqual(result['status'], 'OBSERVED')
+        self.assertEqual(result['log_capture']['status'], 'SAVED')
+        self.assertEqual((self.root/result['log_capture']['path']).read_text(), 'EARLY_ADMISSION_EVIDENCE\n')
+
+    def test_dispatch_is_registered_before_discord_send_with_same_id(self):
+        events = []
+        def register(url, body, deadline):
+            events.append(('register', url))
+            return self.dispatch_request(url, body, deadline)
+        def factory(admitted, deadline):
+            child = self.client(admitted, deadline);original = child.send_prompt
+            def send(channel, text):
+                self.assertEqual(len(events), 2)
+                self.assertTrue(text.startswith('DISPATCH:'+self.dispatch_id+'\n'))
+                events.append(('send', text.splitlines()[0]))
+                return original(channel, text)
+            child.send_prompt = send;return child
+        result = self.execute(dispatch_request=register, rest_factory=factory)
+        self.assertEqual(result['status'], 'OBSERVED')
+        self.assertEqual(result['dispatch_id'], self.dispatch_id)
+        self.assertEqual([row[0] for row in events], ['register','register','send'])
+        base = 'http://127.0.0.1:'+str(self.manifest['api']['port'])
+        self.assertEqual([url for url, _ in self.registrations], [base+'/api/kanban-cards', base+'/api/dispatches'])
+        self.assertTrue(self.registrations[1][1]['skip_outbox'])
+        self.assertEqual(self.registrations[1][1]['dispatch_type'], 'scope-assessment')
+
+    def test_registration_failure_or_bad_reply_prevents_all_discord_send(self):
+        for mode in ['card-failure','dispatch-failure','bad-card-shape','bad-dispatch-shape','bad-id','wrong-card','wrong-agent','terminal']:
+            calls = []
+            def register(url, body, deadline):
+                calls.append(url)
+                if mode == 'card-failure' or (mode == 'dispatch-failure' and url.endswith('/dispatches')):
+                    raise ValueError('synthetic registration failure')
+                row = self.dispatch_request(url, body, deadline)
+                if mode == 'bad-card-shape' and 'card' in row:return {'card': None}
+                if mode == 'bad-dispatch-shape' and 'dispatch' in row:return {'dispatch': None}
+                if 'dispatch' in row:
+                    if mode == 'bad-id':row['dispatch']['id'] = 'invalid'
+                    if mode == 'wrong-card':row['dispatch']['kanban_card_id'] = str(uuid.uuid4())
+                    if mode == 'wrong-agent':row['dispatch']['to_agent_id'] = 'foreign'
+                    if mode == 'terminal':row['dispatch']['status'] = 'completed'
+                return row
+            factory = mock.Mock()
+            with self.subTest(mode=mode):
+                result = self.execute(dispatch_request=register, rest_factory=factory)
+                self.assertEqual(result['status'], 'UNEVALUABLE(registration)')
+                self.assertEqual(result['transmissions'], 0)
+                self.assertFalse(result['registration_confirmed'])
+                factory.assert_not_called()
+
+    def test_registration_client_refuses_operating_or_foreign_endpoint_before_request(self):
+        from scripts.dev_instance import driver_dispatch
+        from types import SimpleNamespace
+        admitted = SimpleNamespace(manifest=copy.deepcopy(self.manifest), run=copy.deepcopy(self.record))
+        original = copy.deepcopy(admitted.manifest['api'])
+        for api in [{'host':'127.0.0.1','port':8791,'self_url':'http://127.0.0.1:8791'},
+                    {**original, 'self_url':'http://127.0.0.1:8791'},
+                    {**original, 'host':'example.invalid'},
+                    {**original, 'self_url':'http://example.invalid:'+str(original['port'])}]:
+            admitted.manifest['api'] = api
+            admitted.run['port'] = api['port']
+            request = mock.Mock(side_effect=self.dispatch_request)
+            with self.subTest(api=api), self.assertRaises(ValueError):
+                driver_dispatch.Client(admitted, time.monotonic()+1, request=request).create('claude')
+            request.assert_not_called()
+
+    def test_registration_transport_posts_only_to_instance_without_credentials(self):
+        from contextlib import nullcontext
+        from scripts.dev_instance import driver_dispatch
+        from types import SimpleNamespace
+        calls = []
+        parent = self
+        class Response:
+            status = 201
+            def __init__(self, value):self.value = value
+            def read(self, bound):return json.dumps(self.value).encode()
+            def __enter__(self):return self
+            def __exit__(self, *args):pass
+        class Transport:
+            def open(self, request, timeout):
+                calls.append((request.full_url, request.get_method(), request.headers))
+                return Response(parent.dispatch_request(request.full_url, json.loads(request.data), time.monotonic()+1))
+        admitted = SimpleNamespace(manifest=self.manifest, run=self.record)
+        with mock.patch.object(driver_dispatch, '_transport', side_effect=lambda end: nullcontext(Transport())):
+            result = driver_dispatch.Client(admitted, time.monotonic()+1).create('claude')
+        self.assertEqual(result['dispatch_id'], self.dispatch_id)
+        base = 'http://127.0.0.1:'+str(self.manifest['api']['port'])
+        self.assertEqual([row[:2] for row in calls], [(base+'/api/kanban-cards','POST'),(base+'/api/dispatches','POST')])
+        self.assertTrue(all(not any(key.lower()=='authorization' for key in row[2]) for row in calls))
+        self.assertTrue(all(row[2]['User-agent'] for row in calls))
 
     def test_actual_direct_message_receipt_preserves_empty_source_lineage(self):
         driver,_,_=self.modules()

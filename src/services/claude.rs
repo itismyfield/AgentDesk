@@ -356,9 +356,9 @@ pub fn execute_command_simple_cancellable(
         "text".to_string(),
     ];
 
-    let mut builder = ClaudeCommandBuilder::for_binary(&claude_bin, &resolution);
+    let mut builder = ClaudeCommandBuilder::for_simple(&claude_bin, &resolution);
     configure_execute_command_simple(builder.command_mut(), &args);
-    let mut command = builder.into_command();
+    let mut command = builder.into_command()?;
     let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to start Claude: {}", e))?;
@@ -411,7 +411,7 @@ pub fn execute_command_simple_cancellable(
 
 fn configure_execute_command_simple(command: &mut Command, args: &[String]) {
     // Binary resolution (PATH) and the gateway launch env are applied
-    // by-construction by `ClaudeCommandBuilder::for_binary`; this helper only
+    // by-construction by `ClaudeCommandBuilder::for_simple`; this helper only
     // adds the non-gateway launch config.
     // #2250: put Claude in its own process group so the simple-cancel
     // watcher can terminate any wrapper / grandchild via
@@ -427,7 +427,7 @@ fn configure_execute_command_simple(command: &mut Command, args: &[String]) {
     // Compact-window overlay (#4591): this legacy/simple entrypoint does not
     // receive the authoritative compact policy inputs, so it must never inherit
     // an absolute window from dcserver or a parent Claude process. (The gateway
-    // env is applied by-construction at the `ClaudeCommandBuilder::for_binary`
+    // env is applied by-construction at the `ClaudeCommandBuilder::for_simple`
     // call site, so it is not re-applied here.)
     apply_auto_compact_window_to_command(command, None);
 }
@@ -566,10 +566,11 @@ mod simple_launch_env_tests {
         // Route through the chokepoint exactly as the production simple `-p`
         // spawn site does, then let `configure_execute_command_simple` add the
         // site-specific config.
-        let mut builder = ClaudeCommandBuilder::for_binary(&binary, &resolution);
+        let mut builder = ClaudeCommandBuilder::for_simple(&binary, &resolution);
         configure_execute_command_simple(builder.command_mut(), &[]);
         builder
             .into_command()
+            .unwrap()
             .get_envs()
             .map(|(key, value)| {
                 (
@@ -843,7 +844,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
     }
 
     let spawn_start = std::time::Instant::now();
-    // Use one resolved launch environment for the compact window and gateway guard.
     let auto_compact_window = launch_auto_compact_window_for_session(
         &format!(
             "claude-direct-{}",
@@ -853,7 +853,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
         compact_percent,
         compact_lower_bound_tokens,
     );
-    let mut builder = ClaudeCommandBuilder::for_binary(&claude_bin, &resolution);
+    let mut builder = ClaudeCommandBuilder::for_legacy(&claude_bin, &resolution);
     {
         let command = builder.command_mut();
         command
@@ -876,7 +876,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
         apply_auto_compact_window_to_command(command, auto_compact_window);
         crate::services::process::configure_child_process_group(command);
     }
-    let mut command = builder.into_command();
+    let mut command = builder.into_command()?;
     let overlay = crate::services::discord::org_schema::spawn_auth_overlay(
         ProviderKind::Claude,
         report_channel_id,

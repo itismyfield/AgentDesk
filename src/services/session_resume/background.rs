@@ -56,13 +56,13 @@ fn agents_command(
     let home =
         crate::services::discord::org_schema::predicted_launch_home(claude, channel_id, tmux_name)?;
     let (binary, resolution) = ClaudeBinary::resolve()?;
-    let mut builder = ClaudeCommandBuilder::for_binary(&binary, &resolution);
+    let mut builder = ClaudeCommandBuilder::for_agents(&binary, &resolution);
     let command = builder.command_mut();
     command.args(["agents", "--json"]).stdin(Stdio::null());
     if let Some(home) = home {
         command.env("CLAUDE_CONFIG_DIR", home);
     }
-    Ok(tokio::process::Command::from(builder.into_command()))
+    Ok(tokio::process::Command::from(builder.into_command()?))
 }
 
 /// The list is an array of sessions whose `kind` tells background from foreground
@@ -78,4 +78,36 @@ fn lists_background(list: &serde_json::Value, session_id: &str) -> Result<bool, 
         listed |= kind == "background" && id.trim().eq_ignore_ascii_case(session_id);
     }
     Ok(listed)
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod login_tests {
+    #[test]
+    fn agents_are_unavailable_before_spawn_in_opt_in() {
+        const CASE: &str = "ADK_REVIEW_AGENTS_CHILD";
+        let selector = "services::session_resume::background::login_tests::agents_are_unavailable_before_spawn_in_opt_in";
+        if std::env::var_os(CASE).is_some() {
+            crate::config::test_instance::initialize().unwrap();
+            let root = &crate::config::test_instance::current()
+                .unwrap()
+                .unwrap()
+                .root;
+            assert!(super::agents_command(None, "fixture").is_err());
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            assert_eq!(
+                runtime.block_on(super::listed("fixture", None, "fixture")),
+                None
+            );
+            assert!(!root.join("runtime/provider-started").exists());
+            return;
+        }
+        let (_temp, root, _) = crate::config::test_instance::environment::login_fixture_for_tests();
+        let output = crate::config::test_instance::tests::command(&root)
+            .args(["--exact", selector, "--nocapture"])
+            .env(CASE, "1")
+            .output()
+            .unwrap();
+        crate::config::test_instance::tests::assert_single_test_passed(&output, selector);
+    }
 }

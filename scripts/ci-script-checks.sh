@@ -278,6 +278,10 @@ if run_check guards "Isolated instance declaration tests"; then
 "$PYTHON" -m unittest tests.test_dev_instance_files
 fi
 
+if run_check guards "Claude login binding tests"; then
+"$PYTHON" -m unittest tests.test_dev_instance_claude_login
+fi
+
 if run_check cargo "Isolated instance credential binary tests"; then
 cargo build --bin agentdesk
 instance_test_bin="$(cd "${CARGO_TARGET_DIR:-$PWD/target}/debug" && pwd -P)"
@@ -285,7 +289,7 @@ export PATH="$instance_test_bin:$PATH"
 "$PYTHON" -m unittest tests.test_dev_instance_credential
 "$PYTHON" -m unittest -v tests.test_dev_instance_identity
 "$PYTHON" -m unittest tests.test_dev_instance_lifecycle
-"$PYTHON" -m unittest tests.test_dev_instance_completion
+"$PYTHON" -m unittest tests.test_dev_instance_completion tests.test_dev_instance_down
 "$PYTHON" -m unittest tests.test_dev_instance_driver
 "$PYTHON" -m unittest tests.test_dev_instance_runtime
 fi
