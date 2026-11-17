@@ -748,7 +748,12 @@ fn internal_snapshot_start(flavor: &str) {
     .unwrap();
     intake.runtime.block_on(async {
         let router = app(&fx, &intake).await;
-        let turn = format!("discord:{CHANNEL}:{}", MESSAGE | (1u64 << 63));
+        let reservation = discord::router::reserve_headless_turn();
+        let turn = reservation.turn_id(ChannelId::new(CHANNEL));
+        let outbox_id = i64::try_from(reservation.user_msg_id().get() & 0x7fff_ffff_ffff_ffff).unwrap();
+        // Per-test databases share a process deduper keyed by the outbox row ID.
+        sqlx::query("SELECT setval(pg_get_serial_sequence('message_outbox','id')::regclass,$1,false)")
+            .bind(outbox_id).execute(&fx.pool).await.unwrap();
         let label = format!("scheduled:snapshot-{flavor}");
         let mut metadata = json!({"agent_id":"busy-entry","scheduled_message_id":"smsg-8125",
             "scheduled_snapshot_session_label":label});
@@ -977,7 +982,7 @@ fn execution_gone(terminal: Option<bool>) {
             let context_path = crate::config::runtime_root().unwrap().join(format!("runtime/binding_contexts/claude/{nonce}.json"));
             let launch = &fx.rig.sends()[before + 2];
             assert_eq!(launch["keys"], json!(["enter"]));
-            assert!(launch["text"].as_str().unwrap().contains(nonce), "one shell command launches the successor");
+            assert!(launch["text"].as_str().unwrap().starts_with("bash "), "one shell command launches the successor");
             assert_eq!(fx.rig.sends().len(), before + 3, "no original input before SessionStart");
             fx.rig.run_provider(&context_path, false);
             fx.rig.foreground(&[crate::services::session_host::herdr_socket_rig_tests::PROVIDER]);
