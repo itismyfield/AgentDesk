@@ -652,6 +652,9 @@ fn with_fast_rig(run: impl FnOnce(&HerdrRig, &Arc<AtomicUsize>, &tokio::runtime:
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let _root = crate::config::TestRuntimeRootGuard::new();
+    // Statusline records use temp_dir and must not collide with another worker's fixture.
+    let _temp =
+        crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("TMPDIR", _root.path());
     let _node = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_INSTANCE_ID",
         std::ffi::OsStr::new(NODE),
