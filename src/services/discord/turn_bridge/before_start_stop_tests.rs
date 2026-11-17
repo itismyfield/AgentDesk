@@ -417,6 +417,7 @@ pub(in crate::services::discord::turn_bridge) async fn actual_fresh_exit(
                     goals: None,
                     compact_token_limit: None,
                     cancel: Some(actor.clone()),
+                    bootstrap: false,
                 },
                 &NoLaunch,
                 sender,

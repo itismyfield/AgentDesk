@@ -1315,12 +1315,14 @@ src/
 │   │   │   └── first_input.rs
 │   │   ├── tui_session_launch/
 │   │   │   ├── first_input/
+│   │   │   │   ├── native_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── launch_policy/
 │   │   │   │   ├── fresh_tests.rs
 │   │   │   │   └── symlink_home_tests.rs
 │   │   │   ├── first_input.rs
-│   │   │   └── launch_policy.rs
+│   │   │   ├── launch_policy.rs
+│   │   │   └── project_trust.rs
 │   │   ├── absence_launch.rs
 │   │   ├── actual_submit_tests.rs
 │   │   ├── c1_teardown_tests.rs
@@ -1377,7 +1379,8 @@ src/
 │   │   │   ├── options.rs
 │   │   │   ├── parser.rs
 │   │   │   ├── provenance.rs
-│   │   │   └── provenance_tests.rs
+│   │   │   ├── provenance_tests.rs
+│   │   │   └── startup_dialog_tests.rs
 │   │   ├── session/
 │   │   │   ├── source_observation_tests/
 │   │   │   │   └── codex_launch_cause.rs
@@ -1399,6 +1402,7 @@ src/
 │   │   ├── rollout_index.rs
 │   │   ├── rollout_tail.rs
 │   │   ├── session.rs
+│   │   ├── startup_dialog.rs
 │   │   ├── tail_launch.rs
 │   │   ├── verified_hold.rs
 │   │   ├── verified_tail.rs
@@ -2390,6 +2394,7 @@ src/
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── handoff_retry_tests.rs
 │   │   │   │   │   ├── owner_input.rs
+│   │   │   │   │   ├── owner_input_bootstrap_tests.rs
 │   │   │   │   │   ├── owner_input_busy_gate_tests.rs
 │   │   │   │   │   ├── owner_input_busy_race_tests.rs
 │   │   │   │   │   ├── owner_input_carried_restart_tests.rs
@@ -2605,6 +2610,7 @@ src/
 │   │   │   ├── journal/
 │   │   │   │   └── pg_store.rs
 │   │   │   ├── tests/
+│   │   │   │   ├── first_admission_tests.rs
 │   │   │   │   ├── idle_replace_tests.rs
 │   │   │   │   └── stream_frame_fixtures.rs
 │   │   │   ├── turn_parser/
@@ -2737,6 +2743,7 @@ src/
 │   │   │   ├── streaming_status_tick/
 │   │   │   │   ├── committed_progress_tests.rs
 │   │   │   │   ├── existing_panel_update.rs
+│   │   │   │   ├── first_admission_tests.rs
 │   │   │   │   ├── footer_retirement_raw_tests.rs
 │   │   │   │   ├── legacy_state.rs
 │   │   │   │   ├── native_collector_tests.rs
@@ -4176,7 +4183,9 @@ src/
 │   │   │   └── sink.rs
 │   │   ├── channel_policy/
 │   │   │   ├── adoption/
-│   │   │   │   └── body_check.rs
+│   │   │   │   ├── body_check.rs
+│   │   │   │   ├── first_turn.rs
+│   │   │   │   └── first_turn_tests.rs
 │   │   │   ├── children/
 │   │   │   │   ├── lifecycle.rs
 │   │   │   │   └── tests.rs
@@ -4356,6 +4365,7 @@ src/
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── codex/
+│   │   │   │   │   ├── buffered_tests.rs
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── claude.rs
@@ -4432,6 +4442,7 @@ src/
 │   │   │   ├── host.rs
 │   │   │   ├── host_bo_provider_tests.rs
 │   │   │   ├── host_claude_takeover_tests.rs
+│   │   │   ├── host_codex_first_proof_tests.rs
 │   │   │   ├── host_codex_takeover_tests.rs
 │   │   │   ├── host_codex_turn_mark_tests.rs
 │   │   │   ├── host_first_init_tests.rs
@@ -4590,6 +4601,7 @@ src/
 │   │   │   │   ├── absent_open_tests.rs
 │   │   │   │   ├── clear_relaunch.rs
 │   │   │   │   ├── fresh_admission.rs
+│   │   │   │   ├── herdr_bootstrap.rs
 │   │   │   │   ├── hold_detail.rs
 │   │   │   │   └── provenance_tests.rs
 │   │   │   ├── codex_verified/
@@ -4648,7 +4660,8 @@ src/
 │   ├── tui_turn_state/
 │   │   ├── claude_meta.rs
 │   │   ├── claude_meta_tests.rs
-│   │   └── completion_scan.rs
+│   │   ├── completion_scan.rs
+│   │   └── tool_open.rs
 │   ├── turn_lifecycle/
 │   │   └── stop_result.rs
 │   ├── turn_orchestrator/
