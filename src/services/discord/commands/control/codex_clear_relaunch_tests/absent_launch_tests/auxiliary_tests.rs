@@ -202,7 +202,7 @@ pub(in crate::services::discord) fn publish_named_source(
         .unwrap()
         .join(format!("rollout-{native}.jsonl"));
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(context.clone()),
+        context: CapturedContext::Captured(context.clone().into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();

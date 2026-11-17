@@ -38,6 +38,8 @@ pub(crate) struct Owner {
     front_grant: Option<Front>,
     /// The front a turn claimed from its grant; one reserve takes it.
     front_claim: Option<Front>,
+    /// A claim's unit stays fixed while arrivals extend the queue behind it.
+    claimed_followers: Vec<PendingQueueItem>,
     /// The current claim's process-unique number: another owner's or an earlier claim never reserves.
     claim_number: u64,
     /// The front a refusal before any key returned to wait for a real wake; never persisted.
@@ -127,6 +129,7 @@ impl Owner {
         if self.effort_blocks(None)
             || !self.front().is_some_and(|front| is_front(&front, held))
             || self.person_at(0)
+            || self.seed_front()
         {
             return Ok(false);
         }
@@ -184,6 +187,7 @@ impl Owner {
             unacknowledged: Vec::new(),
             front_grant: None,
             front_claim: None,
+            claimed_followers: Vec::new(),
             held: None,
             claim_number: 0,
             incarnation: uuid::Uuid::new_v4(),
@@ -396,6 +400,13 @@ impl Owner {
     /// The queued originals behind the front that join its one prompt, merged as the legacy queue
     /// merges consecutive input: one author, no reply boundary, one route.
     pub(crate) fn followers(&self) -> Vec<PendingQueueItem> {
+        if self.front_claim.is_some() {
+            return self.claimed_followers.clone();
+        }
+        self.current_followers()
+    }
+
+    fn current_followers(&self) -> Vec<PendingQueueItem> {
         use crate::services::turn_orchestrator::pending_queue_item_to_intervention as soft;
         let (now, instant) = (std::time::SystemTime::now(), std::time::Instant::now());
         let mut items = self.snapshot.items.iter();
@@ -446,6 +457,7 @@ impl Owner {
         }
         static CLAIMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         self.claim_number = CLAIMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.claimed_followers = self.current_followers();
         self.front_claim = self.front_grant.take();
         self.front_claim.clone()
     }
@@ -475,7 +487,13 @@ impl Owner {
         let claimed = number == self.claim_number
             && (self.front_claim.as_ref()).is_some_and(|c| is_front(c, front))
             && self.front().is_some_and(|now| is_front(&now, front));
-        if !claimed {
+        let same_members = payload.followers.len() == self.claimed_followers.len()
+            && payload
+                .followers
+                .iter()
+                .zip(&self.claimed_followers)
+                .all(|(a, b)| same(a, b));
+        if !claimed || !same_members {
             return Err("NotSent(\"front_not_granted\")".into());
         }
         self.reserve(attempt, payload)
@@ -505,6 +523,7 @@ impl Owner {
     /// Withdraws that right; only taking or replacing the queue front itself does.
     fn revoke_front(&mut self) {
         (self.front_grant, self.front_claim) = (None, None);
+        self.claimed_followers.clear();
     }
 
     /// Whether any source the owner holds, queued, attempted, retained, refused or settled, is

@@ -584,7 +584,7 @@ fn executed_resume_companion_late_ups_contends_until_proof_publication() {
                 *slot = Some(Box::new(move || contended.send(()).unwrap()));
             });
             let envelope = HookBindingEnvelope {
-                context: CapturedContext::Captured(context.clone()),
+                context: CapturedContext::Captured(context.clone().into()),
                 observed: ObservedHookProcess::default(),
             };
             let mut headers = axum::http::HeaderMap::new();

@@ -88,6 +88,7 @@ impl Fixture {
             provider_root: Some(sessions.canonicalize().unwrap()),
             first_prompt_digest: Some(digest(PROMPT)),
             source_policy: policy.map(str::to_owned),
+            resume_start: None,
         };
         let prepared = PreparedIncarnation::create(context.clone()).unwrap();
         let marker =
@@ -134,7 +135,9 @@ impl Fixture {
         captured: Option<BindingContext>,
     ) -> IngressOutcome {
         let envelope = HookBindingEnvelope {
-            context: CapturedContext::Captured(captured.unwrap_or_else(|| self.context.clone())),
+            context: CapturedContext::Captured(
+                captured.unwrap_or_else(|| self.context.clone()).into(),
+            ),
             observed: ObservedHookProcess::default(),
         };
         let mut headers = axum::http::HeaderMap::new();
@@ -854,7 +857,7 @@ fn concurrent_start_and_matching_ups_share_one_native_proof() {
             scope.spawn(move || {
                 binding_events::set_test_root(Some(&root));
                 codex_verified::set_permission_for_tests(&context,DeliveryPermission::Allowed);
-                let envelope = HookBindingEnvelope { context:CapturedContext::Captured(context),observed:ObservedHookProcess::default() };
+                let envelope = HookBindingEnvelope { context:CapturedContext::Captured(context.into()),observed:ObservedHookProcess::default() };
                 let mut headers = axum::http::HeaderMap::new();
                 headers.insert(BINDING_HEADER,envelope.encode().unwrap().parse().unwrap());
                 let payload = json!({"session_id":ID,"transcript_path":path,"source":"startup","prompt":PROMPT});
@@ -1281,7 +1284,7 @@ fn same_native_hook_retries_with_optional_path_hints_do_not_append() {
         h.header(ID, false);
         let without_path = |event| {
             let envelope = HookBindingEnvelope {
-                context: CapturedContext::Captured(h.context.clone()),
+                context: CapturedContext::Captured(h.context.clone().into()),
                 observed: ObservedHookProcess::default(),
             };
             let mut headers = axum::http::HeaderMap::new();

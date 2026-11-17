@@ -956,7 +956,11 @@ impl Owner {
         if self.snapshot.admission_receipts.contains(&receipt) {
             return Custody::with_ticket(original, ticket).advance(self);
         }
-        let (next, outcome) = self.fresh_candidate(original, continuation)?;
+        let seed = ChannelMailboxHandle::restart_seed_input(expected.execution.as_ref());
+        if seed && let Some(joined) = self.join_seed(&ticket)? {
+            return Ok(joined);
+        }
+        let (next, outcome) = self.fresh_candidate(original, continuation || seed)?;
         let Some(mut next) = next else {
             return Err(AdmitError::SourceAlreadyKnown);
         };
@@ -970,12 +974,16 @@ impl Owner {
         if continuation {
             super::effort_continue::prepend(&mut next);
         }
+        let placed = seed.then(|| self.place_seed(&mut next));
         match self.admit_commit(next, Some(receipt.clone())) {
             Err(AdmitError::Pending) => {
                 self.unacknowledged.push((receipt, outcome));
                 Err(AdmitError::Pending)
             }
-            Ok(()) => Ok(outcome),
+            Ok(()) => {
+                placed.into_iter().for_each(|at| self.seed_placed(at));
+                Ok(outcome)
+            }
             Err(error) => Err(error),
         }
     }
@@ -1022,6 +1030,7 @@ impl super::super::super::ChannelMailboxHandle {
 
 #[cfg(test)]
 mod context_tests;
+pub(crate) mod restart_seed;
 
 // Admission fixtures require an owner backed by confirmed parent directory fsync.
 #[cfg(all(test, unix))]

@@ -290,6 +290,7 @@ pub(crate) fn unbound(rig: &herdr::P11TerminationRig, node: &Node) -> Expected {
     Expected {
         owner,
         dispatch: None,
+        captured_dispatch: true,
     }
 }
 
@@ -394,6 +395,7 @@ async fn launch_fresh(
         expected_native_session_id: Some(session.clone()),
         resume: false,
         provider_root: None,
+        resume_start: None,
     };
     let outcome = launch_herdr_session(pool, launch, prepare, host).await;
     let Ok(HerdrLaunchOutcome::Launched {

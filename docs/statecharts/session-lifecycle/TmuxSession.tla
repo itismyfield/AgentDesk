@@ -621,4 +621,35 @@ EffortNoSecondRestart == effort.sessionResets <= effort.newerChanges
 \* A change saved after the restart's cut keeps its pending until a user turn applies it.
 EffortNewerChangeKept == (effort.newerChanges > effort.sessionResets) => effort.resetPending
 
+
+\* A bounded projection of the proposed registration transaction; original Init/Next stay unchanged.
+Naming == INSTANCE SessionNaming WITH n <- msg
+NamingInit ==
+    /\ EffortDormant
+    /\ srv = "up" /\ sess = "live" /\ exitKind = "normal" /\ row = "none"
+    /\ turn = "idle" /\ delivered = "none" /\ restored = "no"
+    /\ crashes = 0 /\ deaths = 0 /\ probeFails = 0
+    /\ Naming!Init("tmux")
+NamingNext == Naming!NextWithRestart /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
+NamingWithoutPromotion == Naming!Next("no-promotion") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
+NamingWithoutAbsenceGuard == Naming!Next("no-absence") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
+NamingWithoutNonceCAS == Naming!Next("no-nonce-cas") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
+NamingDuplicateKill == Naming!Next("double-kill") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
+NamingWithoutPromotionNonceGuard == Naming!Next("no-promotion-nonce") /\ UNCHANGED <<srv, sess, exitKind, row, turn, delivered, restored, crashes, deaths, probeFails, effort>>
+PromotionNonceWasCurrent == Naming!PromotionNonceWasCurrent
+PrimaryTailIsCurrentPhysical == Naming!PrimaryTailIsCurrentPhysical
+PrimaryNamesCurrentLogical == Naming!PrimaryNamesCurrentLogical
+HostTargetMatchesCurrent == Naming!HostTargetMatchesCurrent
+LiveOldNotPromoted == Naming!LiveOldNotPromoted
+OldAliasRetained == Naming!OldAliasRetained
+PrimaryNotAlias == Naming!PrimaryNotAlias
+NoDuplicateKill == Naming!NoDuplicateKill
+LateOldHookRejected == Naming!LateOldHookRejected
+
+NamingSpec == NamingInit /\ [][NamingNext]_allVars /\ WF_allVars(NamingNext)
+CanonicalPrimaryEventuallyCurrent == Naming!CanonicalPrimaryEventuallyCurrent
+RollbackHasNoPartialPromotion == Naming!RollbackHasNoPartialPromotion
+RegistrationRefusalDoesNotKill == Naming!RegistrationRefusalDoesNotKill
+SameNameReplacementPreserved == Naming!SameNameReplacementPreserved
+RestartKeepsDurableIdentity == Naming!RestartKeepsDurableIdentity
 ====

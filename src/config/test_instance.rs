@@ -172,7 +172,8 @@ fn load_instance_declaration(
         "preferred_node_seed_required",
     ];
     if manifest.as_object().is_none_or(|object| {
-        object.len() != keys.len() || keys.iter().any(|key| !object.contains_key(*key))
+        object.len() != keys.len() + usize::from(object.contains_key("claude_login"))
+            || keys.iter().any(|key| !object.contains_key(*key))
     }) || manifest["hosts"]
         .as_object()
         .is_none_or(|hosts| hosts.len() != 2)
@@ -236,6 +237,9 @@ fn load_instance_declaration(
         "hosts",
     ] {
         receipt.insert(key.into(), manifest.get(key).ok_or_else(rejected)?.clone());
+    }
+    if let Some(login) = manifest.get("claude_login") {
+        receipt.insert("claude_login".into(), login.clone());
     }
     for key in ["features", "bots", "channels"] {
         receipt.insert(

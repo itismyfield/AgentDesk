@@ -1243,6 +1243,7 @@ fn idle_turn(
     let (host, provider) = (TurnHost::Tmux, ProviderKind::Claude);
     let turn = StreamingTurn {
         pool: None,
+        registration_origin: None,
         shared: None,
         provider: &provider,
         prompt: &front.1.text,
@@ -2933,3 +2934,6 @@ pub(crate) fn claimed_root_recovery_launch(
 
 #[path = "owner_input_busy_gate_tests.rs"]
 mod busy_gate;
+
+#[path = "owner_input_idle_tests/restart_gate_tests.rs"]
+mod restart_gate;

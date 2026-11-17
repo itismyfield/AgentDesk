@@ -236,6 +236,8 @@ src/
 │   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
 │   │   ├── hosted_execution_tests.rs
+│   │   ├── key_promotion.rs
+│   │   ├── key_promotion_pg_tests.rs
 │   │   ├── listing.rs
 │   │   ├── provider_resume_fence.rs
 │   │   ├── rebind_override.rs
@@ -471,6 +473,7 @@ src/
 │   ├── automation_contract.rs
 │   ├── bot_role.rs
 │   ├── cluster_policy.rs
+│   ├── conversation.rs
 │   ├── dispatch_route.rs
 │   ├── file_sync.rs
 │   ├── host_observation.rs
@@ -1316,6 +1319,7 @@ src/
 │   │   ├── readiness.rs
 │   │   ├── registry_adapter_sink.rs
 │   │   ├── relay_producer_registry.rs
+│   │   ├── session_directory.rs
 │   │   ├── session_discovery.rs
 │   │   ├── session_matcher.rs
 │   │   ├── session_registry.rs
@@ -1334,13 +1338,16 @@ src/
 │   │   │   ├── busy.rs
 │   │   │   ├── busy_tests.rs
 │   │   │   ├── composer_tests.rs
-│   │   │   └── first_input.rs
+│   │   │   ├── first_input.rs
+│   │   │   ├── restart_intent.rs
+│   │   │   └── restart_resume_tests.rs
 │   │   ├── tui_session_launch/
 │   │   │   ├── first_input/
 │   │   │   │   ├── native_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── launch_policy/
 │   │   │   │   ├── fresh_tests.rs
+│   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── symlink_home_tests.rs
 │   │   │   ├── first_input.rs
 │   │   │   ├── launch_policy.rs
@@ -1586,6 +1593,7 @@ src/
 │   │   │   ├── node/
 │   │   │   │   └── home_pg_tests.rs
 │   │   │   ├── restart/
+│   │   │   │   ├── herdr.rs
 │   │   │   │   └── seed_tests.rs
 │   │   │   ├── session/
 │   │   │   │   ├── autocomplete.rs
@@ -1631,8 +1639,7 @@ src/
 │   │   │   └── tui_passthrough.rs
 │   │   ├── delivery_lease_cell/
 │   │   │   ├── exact_lease/
-│   │   │   │   ├── tests.rs
-│   │   │   │   └── token_tests.rs
+│   │   │   │   └── tests.rs
 │   │   │   ├── exact_lease_tests.rs
 │   │   │   └── source_epoch_observer.rs
 │   │   ├── execution_identity/
@@ -1816,6 +1823,9 @@ src/
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── herdr_terminate/
+│   │   │   ├── http_force_tests/
+│   │   │   │   ├── restart_channel_tests.rs
+│   │   │   │   └── restart_refusal_tests.rs
 │   │   │   ├── root_replaced/
 │   │   │   │   └── preclaim.rs
 │   │   │   ├── http_force.rs
@@ -1830,6 +1840,8 @@ src/
 │   │   │   ├── http_force_writer_tests.rs
 │   │   │   ├── missing_marker_tests.rs
 │   │   │   ├── missing_marker_turn_tests.rs
+│   │   │   ├── restart_recovery.rs
+│   │   │   ├── restart_recovery_tests.rs
 │   │   │   ├── retired_exclusion.rs
 │   │   │   └── root_replaced.rs
 │   │   ├── host_teardown_gate/
@@ -2104,6 +2116,8 @@ src/
 │   │   │   │   │       ├── actual_close_tests.rs
 │   │   │   │   │       ├── custody_tests.rs
 │   │   │   │   │       └── left_herdr_tests.rs
+│   │   │   │   ├── drive_tests/
+│   │   │   │   │   └── claimed_followers_tests.rs
 │   │   │   │   ├── effect/
 │   │   │   │   │   ├── claude.rs
 │   │   │   │   │   ├── codex.rs
@@ -2135,6 +2149,10 @@ src/
 │   │   │   │   ├── pump.rs
 │   │   │   │   ├── pump_tests.rs
 │   │   │   │   ├── recovery.rs
+│   │   │   │   ├── restart_gate.rs
+│   │   │   │   ├── restart_gate_tests.rs
+│   │   │   │   ├── restart_seed.rs
+│   │   │   │   ├── restart_seed_tests.rs
 │   │   │   │   ├── routine.rs
 │   │   │   │   ├── start.rs
 │   │   │   │   ├── start_tests.rs
@@ -2434,6 +2452,8 @@ src/
 │   │   │   │   │   ├── system_prompt_tests.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
+│   │   │   │   │   ├── owner_input_idle_tests/
+│   │   │   │   │   │   └── restart_gate_tests.rs
 │   │   │   │   │   ├── handoff_retry_tests.rs
 │   │   │   │   │   ├── owner_input.rs
 │   │   │   │   │   ├── owner_input_bootstrap_tests.rs
@@ -2468,6 +2488,12 @@ src/
 │   │   │   │   │   ├── replay_scope.rs
 │   │   │   │   │   ├── start_failure.rs
 │   │   │   │   │   └── start_failure_state_tests.rs
+│   │   │   │   ├── provider_dispatch_codex_herdr_followup_tests/
+│   │   │   │   │   └── clear_execute_tests.rs
+│   │   │   │   ├── provider_dispatch_codex_herdr_tests/
+│   │   │   │   │   └── restart_resume_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_tests/
+│   │   │   │   │   └── clear_execute_tests.rs
 │   │   │   │   ├── provider_isolation/
 │   │   │   │   │   └── feature_settings.rs
 │   │   │   │   ├── root_replaced_recovery_tests/
@@ -2512,6 +2538,7 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_http_start_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_internal_start_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
@@ -2525,6 +2552,7 @@ src/
 │   │   │   │   ├── provider_isolation_seed_save_tests.rs
 │   │   │   │   ├── root_replaced_recovery_tests.rs
 │   │   │   │   ├── s1_entry_tests.rs
+│   │   │   │   ├── session_key_promotion_pipe_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
 │   │   │   │   ├── turn_context.rs
@@ -2941,6 +2969,8 @@ src/
 │   │   │   ├── relay_e2e/
 │   │   │   │   ├── cancel_backstop_e2e_tests/
 │   │   │   │   │   └── autoheal_tests.rs
+│   │   │   │   ├── herdr_terminate_o_e2e_tests/
+│   │   │   │   │   └── late_clear_tests.rs
 │   │   │   │   ├── prompt_identity_e2e_tests/
 │   │   │   │   │   ├── herdr_direct_actual_client_tests.rs
 │   │   │   │   │   └── herdr_direct_roundtrip_tests.rs
@@ -3499,6 +3529,7 @@ src/
 │   │   ├── host_liveness.rs
 │   │   ├── host_teardown_gate.rs
 │   │   ├── http.rs
+│   │   ├── id_bridge.rs
 │   │   ├── idle_detector.rs
 │   │   ├── idle_relay_drift.rs
 │   │   ├── inflight.rs
@@ -3570,6 +3601,8 @@ src/
 │   │   ├── session_identity.rs
 │   │   ├── session_idle_cleanup.rs
 │   │   ├── session_idle_cleanup_tests.rs
+│   │   ├── session_locator.rs
+│   │   ├── session_locator_pg_tests.rs
 │   │   ├── session_notice.rs
 │   │   ├── session_notice_delivery.rs
 │   │   ├── session_relay_sink.rs
@@ -3673,6 +3706,11 @@ src/
 │   │   ├── routing_constraint.rs
 │   │   ├── thread_reuse.rs
 │   │   └── wait_queue.rs
+│   ├── engine_runtime/
+│   │   ├── legacy_state.rs
+│   │   ├── mod.rs
+│   │   ├── relay_state.rs
+│   │   └── session.rs
 │   ├── git/
 │   │   ├── branch_resolver.rs
 │   │   ├── commit_resolver.rs
@@ -3693,13 +3731,20 @@ src/
 │   │   ├── request_batch_tests.rs
 │   │   └── session_state.rs
 │   ├── herdr_launch/
+│   │   ├── clear_epoch/
+│   │   │   ├── launch_pg_tests.rs
+│   │   │   ├── projection_tests.rs
+│   │   │   └── tests.rs
 │   │   ├── retired_hold/
 │   │   │   └── tests.rs
 │   │   ├── runtime_marker/
 │   │   │   └── tests.rs
+│   │   ├── clear_epoch.rs
+│   │   ├── codex_resume.rs
 │   │   ├── policy.rs
 │   │   ├── policy_tests.rs
 │   │   ├── prepared.rs
+│   │   ├── restart_resume_pg_tests.rs
 │   │   ├── retired_hold.rs
 │   │   ├── runtime_marker.rs
 │   │   ├── unplaced.rs
@@ -4122,6 +4167,7 @@ src/
 │   │   ├── herdr_terminate_real_tests.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
+│   │   ├── operation_policy.rs
 │   │   ├── process_host.rs
 │   │   ├── resolve.rs
 │   │   ├── session_record.rs
@@ -4629,8 +4675,10 @@ src/
 │   │   └── turn_mode.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_context/
+│   │   │   ├── herdr_resume.rs
 │   │   │   ├── inventory.rs
-│   │   │   └── inventory_tests.rs
+│   │   │   ├── inventory_tests.rs
+│   │   │   └── registration.rs
 │   │   ├── binding_events/
 │   │   │   ├── codex/
 │   │   │   │   ├── commit/
@@ -4653,6 +4701,9 @@ src/
 │   │   │   ├── observation.rs
 │   │   │   └── source_tests.rs
 │   │   ├── runtime_binding/
+│   │   │   ├── codex_hook/
+│   │   │   │   ├── herdr_resume_cause_tests.rs
+│   │   │   │   └── herdr_resume_tests.rs
 │   │   │   ├── codex_policy/
 │   │   │   │   ├── absent_open.rs
 │   │   │   │   ├── absent_open_tests.rs
@@ -4753,6 +4804,8 @@ src/
 │   │   │   │   │   │   └── pg_tests.rs
 │   │   │   │   │   ├── context_tests.rs
 │   │   │   │   │   ├── front_tests.rs
+│   │   │   │   │   ├── restart_seed.rs
+│   │   │   │   │   ├── restart_seed_tests.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── actor.rs
 │   │   │   │   ├── attempt.rs
@@ -4827,6 +4880,8 @@ src/
 │   │   ├── registry_purge.rs
 │   │   ├── remint_fence.rs
 │   │   ├── reply_results.rs
+│   │   ├── restart_operation.rs
+│   │   ├── restart_operation_tests.rs
 │   │   ├── source_generation.rs
 │   │   ├── source_generation_origin_tests.rs
 │   │   ├── test_support_tests.rs

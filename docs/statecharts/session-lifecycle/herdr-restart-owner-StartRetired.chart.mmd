@@ -1,0 +1,46 @@
+---
+title: "Herdr restart B ports: immediate clear epoch, drain earlier effect grants"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+    lg2: Owner
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 purple
+  s0: Old session and a queued input
+  s1: Exclusion released#59; reply pending
+  s2: Owner turn began a launch
+  s3: Seed waits for the owner
+  s4: Owner turn installed Pending
+  s5: CheckEpoch observed#59; live BeginEffect still required
+  s6: BeginEffect holds create authority
+  s7: Create answered#59; first input not submitted
+  s8: CheckEpoch observed#59; live input authority still required
+  s9: BeginEffect holds input authority
+  s10: First input submitted#59; receipt not committed
+  s11: Receipt committed#59; source not bound
+  s12: One new Ready session#59; inputs await the owner
+  s13: One new Ready session#59; inputs settled once
+  [*] --> s0
+  s0 --> s1: Commit the seed original (acceptance)
+  s1 --> s2: Owner starts the front: register the launch
+  s1 --> s3: Reply to the command
+  s2 --> s4: Install Pending over the vacant row
+  s3 --> s2: Owner starts the front: register the launch
+  s4 --> s5: Observe the create epoch
+  s5 --> s6: Compare live epoch and retain create permission
+  s6 --> s7: Complete the previously granted create
+  s7 --> s8: Observe the input epoch
+  s8 --> s9: Compare live epoch and retain input permission
+  s9 --> s10: Complete the previously granted first input
+  s10 --> s11: Commit the input's receipt
+  s11 --> s12: Bind the source
+  s12 --> s13: Submit an input to the successor once
+  class s0 blue
+  class s1 blue
+  class s3 purple
+  class s12 teal
+  class s13 teal

@@ -28,7 +28,7 @@ fn execution(ingress: &Ingress, channel: u64, session: &str) -> (String, HookBin
     (
         tmux,
         HookBindingEnvelope {
-            context: CapturedContext::Captured(prepared.context),
+            context: CapturedContext::Captured(prepared.context.into()),
             observed: Default::default(),
         },
     )

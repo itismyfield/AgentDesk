@@ -25,6 +25,7 @@ fn context(policy: &str) -> PreparedIncarnation {
         provider_root: Some(sessions.canonicalize().unwrap()),
         first_prompt_digest: None,
         source_policy: Some(policy.into()),
+        resume_start: None,
     })
     .unwrap()
 }

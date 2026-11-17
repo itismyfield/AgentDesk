@@ -513,6 +513,7 @@ class DiscriminationTests(unittest.TestCase):
         bare: dict[str, dict[str, int]] | None = None,
         aliases: dict[str, dict[str, int]] | None = None,
         definitions: dict[str, dict[str, int]] | None = None,
+        calls: dict[str, dict[str, int]] | None = None,
     ) -> tuple[bool, str]:
         """Run only the S8 pins against a small lexical fixture."""
 
@@ -523,7 +524,7 @@ class DiscriminationTests(unittest.TestCase):
             guard.EXPECTED_PINNED_USE_ALIASES,
             guard.EXPECTED_DEFINITION_FILE_COUNTS,
         )
-        guard.EXPECTED_CALL_SITES = self.expected()
+        guard.EXPECTED_CALL_SITES = self.expected() if calls is None else calls
         guard.EXPECTED_RAW_ATOMIC_MUTATIONS = raw or {}
         guard.EXPECTED_BARE_REFERENCES = bare or {}
         guard.EXPECTED_PINNED_USE_ALIASES = aliases or {}
@@ -1406,6 +1407,140 @@ class DiscriminationTests(unittest.TestCase):
         ok, message = self.run_guard(root)
         self.assertTrue(ok, message)
 
+
+    def frontier_fixture(self):
+        root = self.fixture()
+        upper = "src/services/discord/relay_health/frontier.rs"
+        lower = "src/services/engine_runtime/relay_state.rs"
+        write(root, upper, """
+impl TmuxRelayCoord {
+    fn advance_untyped_frontier(&self, end: u64, generation: Option<i64>) {
+        state.advance_untyped_frontier(end, generation,
+            &self.confirmed_end_offset, &self.confirmed_end_generation_mtime_ns,
+            before_generation);
+    }
+    fn reset_confirmed_frontier_with_generation(&self, expected: u64,
+        new: u64, generation: Option<i64>) {
+        state.reset_confirmed_frontier_with_generation(expected, new, generation,
+            &self.confirmed_end_offset, &self.confirmed_end_generation_mtime_ns,
+            before_generation);
+    }
+}
+""")
+        write(root, lower, """
+impl FrontierResetState {
+    fn advance_untyped_frontier(&mut self) {
+        confirmed_end_offset.compare_exchange(old, end, success, failure);
+    }
+    fn reset_confirmed_frontier_with_generation(&mut self) {
+        confirmed_end_offset.store(new, ordering);
+    }
+}
+""")
+        calls = self.expected()
+        definitions = {}
+        for method in ("advance_untyped_frontier", "reset_confirmed_frontier_with_generation"):
+            symbol = "TmuxRelayCoord::" + method
+            calls[symbol] = {upper: 1}
+            definitions[symbol] = {upper: 1, lower: 1}
+        return root, upper, lower, dict(calls=calls, definitions=definitions, raw={lower: 2})
+
+    def test_frontier_delegate_receiver_and_canonical_ufcs_green(self):
+        for receiver in ("state.", "FrontierResetState::", "<crate::runtime::FrontierResetState>::"):
+            with self.subTest(receiver=receiver):
+                root, upper, lower, pins = self.frontier_fixture()
+                path = root / upper
+                if receiver != "state.":
+                    path.write_text(path.read_text().replace("state.", receiver).replace(
+                        "frontier(end,", "frontier(&mut state, end,"
+                    ).replace("generation(expected,", "generation(&mut state, expected,"))
+                ok, message = self.run_extended_gate(root, **pins)
+                self.assertTrue(ok, message)
+
+    def test_frontier_delegate_generation_and_atomic_positions_are_red(self):
+        changes = (
+            ("end, generation,", "end, None,"),
+            ("new, generation,", "new, None,"),
+            ("new, generation,", "new,"),
+            ("end, generation,", "end, Some(7),"),
+            ("new, generation,", "new, before_generation,"),
+            ("&self.confirmed_end_offset", "&other.confirmed_end_offset"),
+            ("&self.confirmed_end_generation_mtime_ns", "&self.other_generation"),
+            ("&self.confirmed_end_offset, &self.confirmed_end_generation_mtime_ns",
+             "&self.confirmed_end_generation_mtime_ns, &self.confirmed_end_offset"),
+            ("before_generation);", "generation);"),
+            ("state.", "other_state."),
+        )
+        for receiver in ("state.", "FrontierResetState::"):
+            for old, new in changes:
+                with self.subTest(receiver=receiver, old=old, new=new):
+                    root, upper, lower, pins = self.frontier_fixture()
+                    path = root / upper
+                    source = path.read_text()
+                    self.assertIn(old, source)
+                    if receiver != "state.":
+                        source = source.replace("state.", receiver).replace(
+                            "frontier(end,", "frontier(&mut state, end,"
+                        ).replace("generation(expected,", "generation(&mut state, expected,")
+                        if old == "state.":
+                            old, new = "&mut state", "&mut other_state"
+                    source = source.replace(old, new)
+                    path.write_text(source)
+                    ok, message = self.run_extended_gate(root, **pins)
+                    self.assertFalse(ok, message)
+                    self.assertIn("delegate must forward", message)
+
+    def test_frontier_extra_definition_raw_mutation_and_call_are_red(self):
+        additions = (
+            ("lower", "fn advance_untyped_frontier() {}", "definition"),
+            ("other", "fn advance_untyped_frontier() {}", "definition"),
+            ("lower", "fn extra() { confirmed_end_offset.store(0, ordering); }", "atomic"),
+            ("other", "fn extra() { state.advance_untyped_frontier(0, None); }", "UNLISTED"),
+        )
+        for target, addition, diagnostic in additions:
+            with self.subTest(target=target, addition=addition):
+                root, upper, lower, pins = self.frontier_fixture()
+                path = root / (lower if target == "lower" else "src/extra.rs")
+                write(root, str(path.relative_to(root)), (path.read_text() if path.exists() else "") + addition)
+                ok, message = self.run_extended_gate(root, **pins)
+                self.assertFalse(ok, message)
+                self.assertIn(diagnostic, message)
+        root, upper, lower, pins = self.frontier_fixture()
+        path = root / lower
+        path.write_text(path.read_text().replace("confirmed_end_offset.store(new, ordering);", ""))
+        ok, message = self.run_extended_gate(root, **pins)
+        self.assertFalse(ok, message)
+        self.assertIn("atomic", message)
+
+    def test_frontier_canonical_bare_references_and_aliases_are_red(self):
+        for statement in (
+            "let writer = FrontierResetState::reset_confirmed_frontier_with_generation;",
+            "use crate::FrontierResetState::advance_untyped_frontier as writer;",
+        ):
+            with self.subTest(statement=statement):
+                root, upper, lower, pins = self.frontier_fixture()
+                write(root, "src/extra.rs", "fn extra() { " + statement + " }")
+                ok, message = self.run_extended_gate(root, **pins)
+                self.assertFalse(ok, message)
+
+    def test_frontier_external_generation_arity_remains_exact(self):
+        for call, valid in (
+            ("coord.reset_confirmed_frontier_with_generation(old, new, generation)", True),
+            ("TmuxRelayCoord::reset_confirmed_frontier_with_generation(coord, old, new, generation)", True),
+            ("Self::reset_confirmed_frontier_with_generation(coord, old, new, generation)", True),
+            ("coord.reset_confirmed_frontier_with_generation(old, new, None)", False),
+            ("coord.reset_confirmed_frontier_with_generation(old, new)", False),
+            ("TmuxRelayCoord::reset_confirmed_frontier_with_generation(coord, old, new, None)", False),
+            ("FrontierResetState::reset_confirmed_frontier_with_generation(&mut state, old, new, generation, offset, atomic, before_generation)", False),
+        ):
+            with self.subTest(call=call):
+                root = self.fixture()
+                path = "src/external.rs"
+                write(root, path, "fn external() { " + call + "; }")
+                calls = self.expected()
+                calls["TmuxRelayCoord::reset_confirmed_frontier_with_generation"] = {path: 1}
+                ok, message = self.run_guard(root, calls)
+                self.assertEqual(ok, valid, message)
 
 if __name__ == "__main__":
     unittest.main()

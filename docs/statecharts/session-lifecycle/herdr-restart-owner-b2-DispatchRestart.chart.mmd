@@ -1,0 +1,111 @@
+---
+title: "Herdr restart B2: preserve the claimed prefix, one greeting and a visible result"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+    lg2: Owner
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 purple
+  s0: Old session and a queued input
+  s1: Seed committed#59; gate holds it#59; input order greeting then original 1
+  s2: Seed committed#59; gate holds it#59; input order greeting then original 1 then original 2
+  s3: Restart holds the transition and fence#59; input order greeting then original 1
+  s4: Restart holds the transition and fence#59; input order greeting then original 1 then original 2
+  s5: Exact close confirmed#59; retire and settle#59; input order greeting then original 1
+  s6: Exact close confirmed#59; retire and settle#59; input order greeting then original 1 then original 2
+  s7: Old execution retired#59; exclusion still held#59; input order greeting then original 1
+  s8: Old execution retired#59; exclusion still held#59; input order greeting then original 1 then original 2
+  s9: Exclusion released#59; reply pending#59; input order greeting then original 1
+  s10: Exclusion released#59; reply pending#59; input order greeting then original 1 then original 2
+  s11: Owner turn began a launch#59; input order greeting then original 1
+  s12: Seed waits for the owner#59; input order greeting then original 1
+  s13: Owner turn began a launch#59; input order greeting then original 1 then original 2
+  s14: Seed waits for the owner#59; input order greeting then original 1 then original 2
+  s15: Owner turn installed Pending#59; input order greeting then original 1
+  s16: Owner turn installed Pending#59; input order greeting then original 1 then original 2
+  s17: CheckEpoch observed#59; live BeginEffect still required#59; input order greeting then original 1
+  s18: CheckEpoch observed#59; live BeginEffect still required#59; input order greeting then original 1 then original 2
+  s19: BeginEffect holds create authority#59; input order greeting then original 1
+  s20: BeginEffect holds create authority#59; input order greeting then original 1 then original 2
+  s21: Create answered#59; first input not submitted#59; input order greeting then original 1
+  s22: Create answered#59; first input not submitted#59; input order greeting then original 1 then original 2
+  s23: CheckEpoch observed#59; live input authority still required#59; input order greeting then original 1
+  s24: CheckEpoch observed#59; live input authority still required#59; input order greeting then original 1 then original 2
+  s25: BeginEffect holds input authority#59; input order greeting then original 1
+  s26: BeginEffect holds input authority#59; input order greeting then original 1 then original 2
+  s27: First input submitted#59; receipt not committed#59; input order greeting then original 1
+  s28: First input submitted#59; receipt not committed#59; input order greeting then original 1 then original 2
+  s29: Receipt committed#59; source not bound
+  s30: One new Ready session#59; inputs await the owner
+  s31: One new Ready session#59; inputs settled once#59; an input may still arrive
+  s32: One new Ready session#59; inputs settled once
+  [*] --> s0
+  s0 --> s1: Commit the seed original (acceptance)
+  s1 --> s2: Accept an input into the owner queue
+  s1 --> s3: Terminate takes transition and fence
+  s2 --> s4: Terminate takes transition and fence
+  s3 --> s4: Accept an input into the owner queue
+  s3 --> s5: Close only the captured pane
+  s4 --> s6: Close only the captured pane
+  s5 --> s6: Accept an input into the owner queue
+  s5 --> s7: Retire CAS and settle the old turn
+  s6 --> s8: Retire CAS and settle the old turn
+  s7 --> s8: Accept an input into the owner queue
+  s7 --> s9: Disconnect keeping selector, release, wake
+  s8 --> s10: Disconnect keeping selector, release, wake
+  s9 --> s10: Accept an input into the owner queue
+  s9 --> s11: Owner starts the front: register the launch
+  s9 --> s12: Reply to the command
+  s10 --> s13: Owner starts the front: register the launch
+  s10 --> s14: Reply to the command
+  s11 --> s13: Accept an input into the owner queue
+  s11 --> s15: Install Pending over the vacant row
+  s12 --> s14: Accept an input into the owner queue
+  s12 --> s11: Owner starts the front: register the launch
+  s13 --> s16: Install Pending over the vacant row
+  s14 --> s13: Owner starts the front: register the launch
+  s15 --> s16: Accept an input into the owner queue
+  s15 --> s17: Observe the create epoch
+  s16 --> s18: Observe the create epoch
+  s17 --> s18: Accept an input into the owner queue
+  s17 --> s19: Compare live epoch and retain create permission
+  s18 --> s20: Compare live epoch and retain create permission
+  s19 --> s20: Accept an input into the owner queue
+  s19 --> s21: Complete the previously granted create
+  s20 --> s22: Complete the previously granted create
+  s21 --> s22: Accept an input into the owner queue
+  s21 --> s23: Observe the input epoch
+  s22 --> s24: Observe the input epoch
+  s23 --> s24: Accept an input into the owner queue
+  s23 --> s25: Compare live epoch and retain input permission
+  s24 --> s26: Compare live epoch and retain input permission
+  s25 --> s26: Accept an input into the owner queue
+  s25 --> s27: Complete the previously granted first input
+  s26 --> s28: Complete the previously granted first input
+  s27 --> s28: Accept an input into the owner queue
+  s27 --> s29: Commit the input's receipt
+  s28 --> s29: Commit the input's receipt
+  s29 --> s30: Bind the source
+  s30 --> s31: Submit an input to the successor once
+  s31 --> s30: Accept an input into the owner queue
+  s30 --> s32: Submit an input to the successor once
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s7 blue
+  class s8 blue
+  class s9 blue
+  class s10 blue
+  class s12 purple
+  class s14 purple
+  class s30 teal
+  class s31 teal
+  class s32 teal

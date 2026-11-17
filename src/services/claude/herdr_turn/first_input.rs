@@ -53,9 +53,11 @@ pub(super) fn submit_owned(
     };
     let slot = Arc::new(std::sync::Mutex::new(None));
     let (ticket, cancel, sender) = (slot.clone(), turn.cancel.clone(), sender.clone());
+    let epoch_scope = clear_epoch::current();
     let nonce = attached.nonce.clone();
     let notice = post.map(|post| Arc::new(move |hold: &str| post(&nonce, hold)) as Arc<Notice>);
     let submit = Box::new(move |frame: String| {
+        let _epoch = clear_epoch::install(epoch_scope);
         guarded_outcome::capture_preparation(|| {
             let notice = notice.as_deref();
             let written = write(
@@ -92,6 +94,12 @@ fn write(
     sender: &Sender<StreamMessage>,
     notice: Option<&Notice>,
 ) -> Result<Option<Submitted>, SubmissionError> {
+    let epoch_scope = clear_epoch::current();
+    let checked = epoch_scope
+        .as_ref()
+        .map(|scope| scope.check_epoch())
+        .transpose()
+        .map_err(|error| before_payload(logical, &error, false))?;
     let path = attached.transcript.as_path();
     let transcript = path.display().to_string();
     let length = || std::fs::metadata(path).map_or(0, |meta| meta.len());
@@ -119,8 +127,22 @@ fn write(
         start.offset = before;
         start
     };
-    let HerdrInputRun::Ran(run) = observed_input(cancel, start, || {
+    let mut denied = None;
+    let result = observed_input(cancel, start, || {
         crate::services::claude_tui::composer_lock::with_composer_mutation_lock(logical, || {
+            let _permit = match checked
+                .as_ref()
+                .map(|checked| checked.begin_effect())
+                .transpose()
+            {
+                Ok(permit) => permit,
+                Err(detail) => {
+                    denied = Some(detail);
+                    return InputRun::Refused(
+                        crate::services::claude_tui::host_input::InputRefusal::Conflict,
+                    );
+                }
+            };
             // The earlier hold is judged, this hold recorded, keys sent and the outcome recorded
             // under one lock, so no pass ever reads a hold whose write still runs.
             let pending = match crate::services::claude_tui::owner_input::active() {
@@ -172,8 +194,14 @@ fn write(
             record_outcome(record.clone(), &run);
             run
         })
-    })?
-    else {
+    });
+    if let Some(scope) = epoch_scope {
+        scope.finish_start();
+    }
+    if let Some(detail) = denied {
+        return Err(before_payload(logical, &detail, false));
+    }
+    let HerdrInputRun::Ran(run) = result? else {
         return Ok(None);
     };
     if kept.get() {

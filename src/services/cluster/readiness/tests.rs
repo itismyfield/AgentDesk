@@ -101,3 +101,25 @@ fn execution_readiness_separates_liveness_freshness_poller_and_credentials() {
             .contains(&"execution_evidence_stale".into())
     );
 }
+
+#[test]
+fn claude_login_presence_is_metadata_only_and_fails_closed() {
+    use crate::config::test_instance::environment::{
+        claude_login_metadata_command, metadata_command_present,
+    };
+    let command = claude_login_metadata_command();
+    assert_eq!(command.get_program(), "/usr/bin/security");
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        ["find-generic-password", "-s", "Claude Code-credentials"]
+    );
+    assert!(metadata_command_present(
+        std::process::Command::new("/bin/sh").args(["-c", "exit 0"])
+    ));
+    assert!(!metadata_command_present(
+        std::process::Command::new("/bin/sh").args(["-c", "exit 1"])
+    ));
+    assert!(!metadata_command_present(&mut std::process::Command::new(
+        "/unavailable/metadata-probe"
+    )));
+}

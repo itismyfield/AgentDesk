@@ -36,7 +36,7 @@ use crate::services::cluster::stream_relay::SourceFileIdentity;
 use crate::services::discord::UnplacedLease;
 use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchEndpoint,
-    HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session,
+    HerdrLaunchHost, HerdrLaunchOutcome, clear_epoch, launch_herdr_session,
     unplaced::{self, Resolution, Unplaced},
 };
 use crate::services::provider::cancel_token_claude_interrupt::{
@@ -247,7 +247,9 @@ pub(crate) fn execute(
     ports: &dyn HerdrTurnPorts,
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
+    crate::config::test_instance::environment::claude_launch_admission()?;
     let runtime = Handle::try_current().map_err(|error| format!("herdr turn: {error}"))?;
+    let _launching = clear_epoch::Launching::enter(&turn.owner)?;
     // The turn takes its stop state before launch, so a stop is recorded whatever the switch says;
     // a stop that cancelled it first, or another turn's state, leaves it to write nothing.
     if (herdr_stop_settlement_available()
@@ -615,6 +617,7 @@ fn launch(turn: &HerdrTurn<'_>, session_id: Option<String>, resume: bool) -> Her
         expected_native_session_id: session_id,
         resume,
         provider_root: None,
+        resume_start: None,
     }
 }
 
@@ -737,17 +740,16 @@ fn prompt_and_read(
     ),
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
-    let submitted = match crate::services::claude_tui::owner_input::launch_hook() {
-        // The owner waiting on this thread writes the prompt as its own effect.
-        Some(hook) => Some(first_input::submit_owned(
-            turn,
-            hook,
-            (lineage, notice),
-            attached,
-            &sender,
-        )?),
-        None => first_input::submit(turn, attached, &sender)?,
-    };
+    let submitted = with_input_admission(|| {
+        match crate::services::claude_tui::owner_input::launch_hook() {
+            // The owner waiting on this thread writes the prompt as its own effect.
+            Some(hook) => {
+                first_input::submit_owned(turn, hook, (lineage, notice), attached, &sender)
+                    .map(Some)
+            }
+            None => first_input::submit(turn, attached, &sender),
+        }
+    })?;
     let Some(submitted) = submitted else {
         return Ok(());
     };
@@ -930,4 +932,15 @@ pub(crate) mod composer;
 thread_local! { static OWNER_BOUND_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 pub(crate) fn take_owner_bound_failure() -> bool {
     OWNER_BOUND_FAILURE.with(|flag| flag.replace(false))
+}
+
+#[cfg(all(test, unix))]
+pub(crate) use super::tui_session_launch::prepare_claude_herdr_launch as prepare_herdr_for_login_test;
+
+/// Admission is checked on every first-input effect, including already attached executions.
+pub(crate) fn with_input_admission<T>(
+    send: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    crate::config::test_instance::environment::claude_launch_admission()?;
+    send()
 }

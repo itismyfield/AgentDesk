@@ -1,5 +1,8 @@
 //! Immutable launch evidence; binding authority remains with the runtime binding.
 
+#[cfg(unix)]
+pub(crate) mod registration;
+
 use crate::services::claude_tui::hook_output_guard::configured_claude_projects_root;
 use crate::services::{platform::tmux::SessionPresence, tmux_common as tc};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -13,7 +16,9 @@ use std::{
 };
 
 pub(crate) const UNSET_CONTEXT: &str = "unset AGENTDESK_BINDING_CONTEXT\n";
+pub(crate) mod herdr_resume;
 mod inventory;
+pub(crate) use herdr_resume::ResumeStart;
 pub(crate) use inventory::inventory;
 use inventory::read_hook_context;
 
@@ -34,6 +39,8 @@ pub(crate) struct BindingContext {
     pub first_prompt_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_start: Option<ResumeStart>,
 }
 
 #[derive(Debug)]
@@ -127,7 +134,7 @@ pub(crate) enum AbsentReason {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum CapturedContext {
-    Captured(BindingContext),
+    Captured(Box<BindingContext>),
     Absent(AbsentReason),
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,7 +168,9 @@ impl HookBindingEnvelope {
                 .filter(|s| s.len() <= 256)
         };
         Self {
-            context: capture().map_or_else(CapturedContext::Absent, CapturedContext::Captured),
+            context: capture()
+                .map(Box::new)
+                .map_or_else(CapturedContext::Absent, CapturedContext::Captured),
             observed: ObservedHookProcess {
                 tmux: observed("TMUX"),
                 tmux_pane: observed("TMUX_PANE"),
@@ -353,6 +362,7 @@ impl PreparedIncarnation {
             provider_root,
             first_prompt_digest: pinned.0,
             source_policy: pinned.1,
+            resume_start: None,
         };
         sweep(
             provider,
@@ -468,7 +478,11 @@ impl PreparedIncarnation {
                 "binding context publication failed",
             );
             format!("publish binding context: {error}")
-        })
+        })?;
+        #[cfg(unix)]
+        registration::complete(&self.context)
+            .map_err(|error| format!("Held(registration_refused): {error}"))?;
+        Ok(())
     }
 
     pub(crate) fn validate(&self, tmux: &str) -> io::Result<()> {
@@ -987,7 +1001,10 @@ pub(crate) mod tests {
             })
         };
         let good = capture();
-        assert_eq!(good.context, CapturedContext::Captured(p.context.clone()));
+        assert_eq!(
+            good.context,
+            CapturedContext::Captured(p.context.clone().into())
+        );
         assert_eq!(
             good.observed,
             ObservedHookProcess {

@@ -11,6 +11,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use super::herdr::BootPorts;
+#[path = "provider_dispatch_herdr_tests/clear_execute_tests.rs"]
+mod clear_execute_tests;
+
 use super::*;
 use crate::config::{TestEnvVarGuard as Guard, TestRuntimeRootGuard};
 use crate::db::dispatched_sessions::hosted_execution::{
@@ -1342,6 +1345,7 @@ fn dispatch(switch: Option<bool>) -> Result<(), String> {
     let provider = ProviderKind::Claude;
     let turn = StreamingTurn {
         pool: None,
+        registration_origin: None,
         shared: None,
         provider: &provider,
         prompt: "question",
