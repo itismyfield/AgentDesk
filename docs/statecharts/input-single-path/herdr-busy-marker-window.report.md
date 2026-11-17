@@ -13,11 +13,13 @@
 | `Commit`·`MarkerFirst` | `src/services/discord/router/intake_gate/busy_inject.rs` `queue_commit_options` | Before는 Herdr 채널이면 커밋 때 📬를 붙인다(07:11:33 RACE). Fixed는 owner 결과로 미룬다. |
 | `Attempt` Unknown → held·📬 | `src/services/discord/router/message_handler/intake_turn/owned_busy.rs` `running`·`hold`, `busy_retry.rs` `note_busy_result` | 키 0 보류와 handback 📬. |
 | `Retry` | `src/services/discord/queue_io/input_owner/held_watch.rs` | 같은 판독이 Busy/Idle이 되면 drive를 한 번 깨운다. |
+| `Scenario="handoff"`·`Prepare`·`tail="closing"` | `src/services/discord/queue_io/input_owner/claude_handoff.rs` `prepare`(:229 old pane close 뒤 mailbox active면 `hold`) | Herdr 매핑 채널의 옛 tmux 턴이 진행 중일 때 첫 입력. pane은 닫혔지만 옛 턴 finalizer가 mailbox를 놓기 전이라 키 0 보류. |
+| `PrepareSettles` (`Policy="Fixed"`) | `provider_dispatch/owner_input.rs owner_drive`: `prepare` 결과와 그 직후 idle 시작을 공통 결과 정산(`note_unsent_front`)으로 합류 | `Fixed1`은 첫 리뷰 head `e9647e3a72`: `prepare(...).await?`가 정산 전에 반환해 📬 0회. |
 
 ## 규칙
 
 - `AnswerAtMostOnce`: 주입·➕ 각 1회 이하. `AnswerDelivered`(liveness): 결국 1회 전달.
-- `NoMailboxWhenObservable`(새 INVARIANT): 도착 때 턴이 관측 가능하게 실행 중이면 📬 추가 0회.
+- `NoMailboxWhenObservable`(새 INVARIANT): 도착 때 턴이 관측 가능하게 실행 중이면 📬 추가 0회. 전환이 필요한 도착(`arrival="handoff"`)은 제외.
 - `NoSilentHold`: 키 전 보류된 입력은 📬를 보인다(조용한 유실 0).
 - `NoBusyKeyWithoutRunningTurn`: busy 붙여넣기는 reply를 아직 빚진 턴에만.
 
@@ -33,8 +35,11 @@
 | AllMarkersBusy | marker 뒤 무엇이든 Busy | NoBusyKeyWithoutRunningTurn | RED |
 | HerdrMarkerFirst | Herdr 커밋 📬 복원 | NoMailboxWhenObservable | RED |
 | NoHandback | 보류 때 📬 생략 | NoSilentHold | RED |
+| HandoffBefore | Before·handoff | - | GREEN (커밋 📬가 이미 보임) |
+| HandoffFixed1 | Fixed1·handoff (리뷰 head) | NoSilentHold | RED (조용한 보류, 리뷰 P1-1) |
+| HandoffFixed | Fixed·handoff | - | GREEN: 보류 📬 1회, 옛 턴 종료 뒤 전달 |
 
-공식 checker: 8/8 기대 일치, GREEN3 / expected RED5, 14.7초, exit0. 원문은 레인 로그 `logs-fix-1/tlc-after.log`.
+공식 checker: 11/11 기대 일치, GREEN5 / expected RED6, 25.2초, exit0(기존 8 cfg 결과 불변). 원문은 레인 로그 `logs-fix-2/tlc-after.log`(첫 판 8 cfg는 `logs-fix-1/tlc-after.log`).
 
 ## 한계
 

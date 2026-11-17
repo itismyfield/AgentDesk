@@ -233,6 +233,9 @@ input-single-path/HerdrBusyInputWriterHeldBefore.cfg	HerdrBusyInput	-	-
 input-single-path/HerdrBusyMarkerWindowAllMarkersBusy.cfg	HerdrBusyMarkerWindow	NoBusyKeyWithoutRunningTurn	-
 input-single-path/HerdrBusyMarkerWindowAssistantBefore.cfg	HerdrBusyMarkerWindow	NoMailboxWhenObservable	-
 input-single-path/HerdrBusyMarkerWindowAssistantFixed.cfg	HerdrBusyMarkerWindow	-	-
+input-single-path/HerdrBusyMarkerWindowHandoffBefore.cfg	HerdrBusyMarkerWindow	-	-
+input-single-path/HerdrBusyMarkerWindowHandoffFixed.cfg	HerdrBusyMarkerWindow	-	-
+input-single-path/HerdrBusyMarkerWindowHandoffFixed1.cfg	HerdrBusyMarkerWindow	NoSilentHold	-
 input-single-path/HerdrBusyMarkerWindowHerdrMarkerFirst.cfg	HerdrBusyMarkerWindow	NoMailboxWhenObservable	-
 input-single-path/HerdrBusyMarkerWindowNoHandback.cfg	HerdrBusyMarkerWindow	NoSilentHold	-
 input-single-path/HerdrBusyMarkerWindowPromptBefore.cfg	HerdrBusyMarkerWindow	NoMailboxWhenObservable	-
