@@ -872,8 +872,7 @@ fn execution_gone(terminal: Option<bool>) {
     let (path, session) = (started.path.clone(), started.session.clone());
     fx.rig.on_send(move |params| {
         // The native Enter writes a user row; the later shell launch command does not.
-        if params["keys"] == json!(["enter"])
-            && params["text"].as_str().is_none_or(str::is_empty) {
+        if params["keys"] == json!(["enter"]) && params["text"].as_str().is_none_or(str::is_empty) {
             append(
                 &path,
                 &[json!({"type":"user","uuid":uuid(),"sessionId":session,
