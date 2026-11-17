@@ -127,6 +127,8 @@ fn fresh_turn_before_start(
             before,
             "selection must not repin the old source"
         );
+        // Boot registration maps the provider command id before its hooks arrive.
+        dedupe::register_provider_session("claude", &started.session, fx.logical());
         before_start();
         fx.started.store(true, Ordering::SeqCst);
         let payload =
@@ -207,6 +209,15 @@ fn verified_fresh_start_releases_the_fence_and_restart_resumes_the_new_session_p
     let HostedRecord::Known(mut retired) = fx.record() else {
         panic!("fresh execution");
     };
+    let pin = events::claude_history_at(CHANNEL, fx.logical(), Some(&retired.execution_nonce))
+        .unwrap()
+        .0
+        .map(|(source, _)| source.session_id);
+    assert_eq!(
+        pin.as_deref(),
+        Some(fresh.session.as_str()),
+        "the provider hook verified the fresh source"
+    );
     retired.state = HostedState::Retired;
     fx.store(&retired);
     dedupe::release_herdr_execution(fx.logical(), &retired.execution_nonce);
@@ -381,28 +392,16 @@ fn actual_slash_clear_and_restarted_runtime_produce_fresh_launch_argv_pg() {
 #[test]
 fn held_bound_clear_refuses_old_pane_then_retirement_launches_fresh_pg() {
     let fx = Fixture::new("clear-held-bound", None);
-    let (old, row) = native_source(&fx, true);
-    let HostedRecord::Known(mut held) = row else {
-        panic!("native execution");
-    };
-    held.state = HostedState::Bound;
-    held.location = Some(HostedLocation {
-        host: "herdr".into(),
-        execution_node: NODE.into(),
-        endpoint_config_key: KEY.into(),
-        socket_addr: fx.rig.socket().display().to_string(),
-        named_session: SESSION.into(),
-        pane_id: PANE.into(),
-    });
-    fx.store(&held);
-    fx.rig.restart_shell(&context_of(&held.execution_nonce));
-    let bound = HostedRecord::Known(held.clone());
+    let first_launcher = Arc::new(Launcher::default());
+    let (nonce, old) = super::reconnect::launch(&fx, &first_launcher);
+    let bound = fx.record();
+    fx.rig.restart_shell(&context_of(&nonce));
     let captured = set_clear(&fx, &bound);
     let launcher = Arc::new(Launcher::default());
     let (result, _) = fx.turn(&bound, &fx.ports(&launcher), || {});
     let refused = result.unwrap_err();
     assert!(refused.to_lowercase().contains("root"), "{refused}");
-    assert!(fx.rig.sends().is_empty());
+    assert_eq!(fx.rig.sends().len(), 2, "no input after the old turn");
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
     assert_eq!(
         fx.rt
@@ -410,7 +409,11 @@ fn held_bound_clear_refuses_old_pane_then_retirement_launches_fresh_pg() {
             .unwrap(),
         Some(captured)
     );
-    held.state = HostedState::Retired;
-    fx.store(&held);
-    fresh_turn(&fx, &HostedRecord::Known(held), &old, 0);
+    let HostedRecord::Known(mut retired) = bound else {
+        panic!("old Bound execution");
+    };
+    retired.state = HostedState::Retired;
+    fx.store(&retired);
+    dedupe::release_herdr_execution(fx.logical(), &nonce);
+    fresh_turn(&fx, &HostedRecord::Known(retired), &old.session, 2);
 }

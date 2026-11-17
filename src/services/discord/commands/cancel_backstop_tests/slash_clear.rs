@@ -76,9 +76,17 @@ async fn seed_legacy(shared: &Arc<SharedData>, pool: &sqlx::PgPool, channel: Cha
     .await
     .expect("mapped slash clear session key");
     sqlx::query(
+        "INSERT INTO agents (id, name, provider, discord_channel_id)
+         VALUES ('slash-clear-agent', 'clear fixture', 'claude', $1)",
+    )
+    .bind(channel.get().to_string())
+    .execute(pool)
+    .await
+    .expect("seed slash channel owner");
+    sqlx::query(
         "INSERT INTO sessions (session_key, provider, status, identity_kind,
-             discord_token_hash, channel_id, claude_session_id, raw_provider_session_id)
-         VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3, $4, $4)",
+             discord_token_hash, channel_id, claude_session_id, raw_provider_session_id, agent_id)
+         VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3, $4, $4, 'slash-clear-agent')",
     )
     .bind(&key)
     .bind(&shared.token_hash)
@@ -132,7 +140,11 @@ fn actual_slash_clear_commits_herdr_resume_fence_pg() {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(selected, None, "clear also forgets the legacy DB selector");
+        assert_eq!(
+            selected.as_deref(),
+            Some(OLD_SELECTOR),
+            "the configured Herdr legacy row keeps its existing selector policy; the fence hides it"
+        );
         assert!(shared.core.lock().await.sessions[&channel].cleared);
         drop(shared);
         pool.close().await;
