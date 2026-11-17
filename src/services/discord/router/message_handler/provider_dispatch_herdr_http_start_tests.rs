@@ -871,7 +871,9 @@ fn execution_gone(terminal: Option<bool>) {
     );
     let (path, session) = (started.path.clone(), started.session.clone());
     fx.rig.on_send(move |params| {
-        if params["keys"] == json!(["enter"]) {
+        // The native Enter writes a user row; the later shell launch command does not.
+        if params["keys"] == json!(["enter"])
+            && params["text"].as_str().is_none_or(str::is_empty) {
             append(
                 &path,
                 &[json!({"type":"user","uuid":uuid(),"sessionId":session,
@@ -972,6 +974,10 @@ fn execution_gone(terminal: Option<bool>) {
             let session = context.expected_native_session_id.unwrap();
             assert_eq!(session, started.session, "the successor resumes the channel's native source");
             let context_path = crate::config::runtime_root().unwrap().join(format!("runtime/binding_contexts/claude/{nonce}.json"));
+            let launch = &fx.rig.sends()[before + 2];
+            assert_eq!(launch["keys"], json!(["enter"]));
+            assert!(launch["text"].as_str().unwrap().contains(nonce), "one shell command launches the successor");
+            assert_eq!(fx.rig.sends().len(), before + 3, "no original input before SessionStart");
             fx.rig.run_provider(&context_path, false);
             fx.rig.foreground(&[crate::services::session_host::herdr_socket_rig_tests::PROVIDER]);
             fx.rig.show_panes(&[PANE]);
@@ -992,7 +998,7 @@ fn execution_gone(terminal: Option<bool>) {
                 assert_eq!(crate::services::claude_tui::host_input::busy::observed(heads[0]["attempt"]["nonce"].as_str().unwrap()), 0);
             }
             assert!(actor.is_completion_cleanup() && actor.cancelled.load(Ordering::SeqCst));
-            assert_eq!(fx.rig.sends().len(), before + 4);
+            assert_eq!(fx.rig.sends().len(), before + 5, "one launch command, then one paste and Enter per original");
             assert_eq!(intake.posts.to(CHANNEL).iter().filter(|text| text.contains("HTTP session answered")).count(), 1);
             assert_eq!(intake.posts.to(CHANNEL).len(), 1);
             assert_eq!(intake.mock.delivered_texts().iter().filter(|text| *text == &notice).count(), 1);
