@@ -75,8 +75,8 @@ fn a_running_tool_reads_as_streaming_past_trailing_session_metadata() {
     }
 }
 
-// A marker cannot revive an old terminal or hide active work. A completed reply followed only by
-// known metadata is Idle; strict turn-finalization readers still require their own terminator.
+// Past the marker nothing but a pending tool call is taken: a finished, interrupted or unstarted
+// turn and a reply awaiting its stop hook stay Unknown, and the strict readers still see them done.
 #[test]
 fn session_metadata_never_uncovers_an_idle_or_submitted_turn() {
     let cases: [(&str, &[&[&str]], TuiTurnState, bool); 12] = [
@@ -126,7 +126,7 @@ fn session_metadata_never_uncovers_an_idle_or_submitted_turn() {
         (
             "reply before its stop hook",
             &[&[PROMPT, TOOL_USE, TOOL_RESULT, END_TURN], &META],
-            TuiTurnState::Idle,
+            TuiTurnState::Unknown,
             false,
         ),
         (

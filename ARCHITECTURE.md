@@ -1128,7 +1128,6 @@ src/
 │   │   │   ├── busy/
 │   │   │   │   ├── herdr.rs
 │   │   │   │   ├── herdr_tests.rs
-│   │   │   │   ├── idle_compaction_tests.rs
 │   │   │   │   └── tmux.rs
 │   │   │   ├── busy.rs
 │   │   │   └── transport.rs
@@ -1166,8 +1165,6 @@ src/
 │   │   │   ├── dialog.rs
 │   │   │   ├── evidence.rs
 │   │   │   ├── idle.rs
-│   │   │   ├── idle_compaction_safety_tests.rs
-│   │   │   ├── idle_compaction_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── readiness_tests.rs
 │   │   │   ├── restart_tests.rs
@@ -2518,7 +2515,6 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tmux_launch_tests.rs
-│   │   │   │   ├── provider_dispatch_idle_compaction_tests.rs
 │   │   │   │   ├── provider_dispatch_idle_stash_tests.rs
 │   │   │   │   ├── provider_dispatch_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
@@ -4731,7 +4727,6 @@ src/
 │   │   ├── claude_meta.rs
 │   │   ├── claude_meta_tests.rs
 │   │   ├── completion_scan.rs
-│   │   ├── idle_compaction_tests.rs
 │   │   └── tool_open.rs
 │   ├── turn_lifecycle/
 │   │   └── stop_result.rs

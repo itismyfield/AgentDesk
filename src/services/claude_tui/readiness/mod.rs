@@ -294,7 +294,7 @@ fn evidence(session: &str, path: Option<&Path>, restart_ok: bool) -> Option<Proo
                             && tail.terminal >= tail.activity
                             && tail.activity_at.is_some_and(|seen| seen > at)
                     });
-                    let terminal = matches!(tail.end, End::Hard | End::Reply)
+                    let terminal = tail.end == End::Hard
                         || (tail.end == End::Summary
                             && final_stop.is_some_and(|floor| tail.activity <= floor));
                     (terminal && recovered && after_pending && after_continuation)

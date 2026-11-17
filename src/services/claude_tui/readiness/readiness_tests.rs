@@ -111,8 +111,6 @@ impl Rig {
 #[cfg(unix)]
 #[path = "clear_tests.rs"]
 pub(crate) mod clear_tests;
-#[path = "idle_compaction_tests.rs"]
-mod idle_compaction_tests;
 #[path = "restart_tests.rs"]
 mod restart_tests;
 impl Drop for Rig {

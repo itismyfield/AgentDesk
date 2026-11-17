@@ -377,6 +377,3 @@ fn an_idle_relay_does_not_delegate_a_busy_input_source() {
     assert!(rig.sends().is_empty());
     drop(registry);
 }
-
-#[path = "idle_compaction_tests.rs"]
-mod idle_compaction_tests;
