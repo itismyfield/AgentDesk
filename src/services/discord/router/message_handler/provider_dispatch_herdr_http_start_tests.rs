@@ -1025,8 +1025,16 @@ fn execution_gone(terminal: Option<bool>) {
             }
             assert!(actor.is_completion_cleanup() && actor.cancelled.load(Ordering::SeqCst));
             assert_eq!(fx.rig.sends().len(), before + 5, "one launch command, then one paste and Enter per original");
-            assert_eq!(intake.posts.to(CHANNEL).iter().filter(|text| text.contains("HTTP session answered")).count(), 1);
-            assert_eq!(intake.posts.to(CHANNEL).len(), 1);
+            // The native writer posts one answer and its existing turn-end tool summary.
+            tokio::time::timeout(LIMIT, async {
+                while !intake.posts.to(CHANNEL).iter().any(|text| text.starts_with("-# ⏱️ ")) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("the next own-turn publishes its tool summary");
+            let posts = intake.posts.to(CHANNEL);
+            assert_eq!(posts.iter().filter(|text| text.contains("HTTP session answered")).count(), 1);
+            assert_eq!(posts.iter().filter(|text| text.starts_with("-# ⏱️ ")).count(), 1);
+            assert_eq!(posts.len(), 2);
             assert_eq!(intake.mock.delivered_texts().iter().filter(|text| *text == &notice).count(), 1);
             let bound: Value = sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id=$1")
                 .bind(CHANNEL.to_string()).fetch_one(&fx.pool).await.unwrap();
