@@ -290,6 +290,8 @@ class ClaudeLoginTests(TestCase):
     def test_opt_in_exposes_only_the_dedicated_tmux_directory(self):
         import shutil
         import subprocess
+        if shutil.which('tmux', path='/usr/bin:/bin'):
+            self.skipTest('host /usr/bin has tmux; the darwin PATH this test models has none there')
         directory = self.fixture.home/'formula/tmux/bin'
         directory.mkdir(parents=True)
         binary = directory/'tmux'
