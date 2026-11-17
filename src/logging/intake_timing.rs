@@ -275,6 +275,8 @@ where
     }
 }
 
+/// SQLx sends `begin()`'s BEGIN without a query event, so `tx_controls` sees COMMIT, ROLLBACK and
+/// explicitly executed transaction statements.
 #[derive(Default)]
 struct SqlxFields {
     transaction_keyword: bool,

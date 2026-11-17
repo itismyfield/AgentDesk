@@ -55,8 +55,9 @@ async fn runtime_pool_work_under_a_trace_counts_without_sql_or_binds_and_timeout
     let found = lines.timing();
     assert_eq!(found.len(), 2, "{found:?}");
     let (ok, timed_out) = (&found[0], &found[1]);
-    assert_eq!(support::field(ok, "db_ops"), "4", "{ok}");
-    assert_eq!(support::field(ok, "tx_controls"), "2", "{ok}");
+    // `pool.begin()` sends BEGIN without a query event: two SELECTs and COMMIT count.
+    assert_eq!(support::field(ok, "db_ops"), "3", "{ok}");
+    assert_eq!(support::field(ok, "tx_controls"), "1", "{ok}");
     assert_eq!(support::field(ok, "acquires"), "2", "{ok}");
     assert_eq!(support::field(ok, "acquire_errors"), "0", "{ok}");
     for secret in ["bind-secret-value", "SELECT", "postgres", &db.database_url] {
