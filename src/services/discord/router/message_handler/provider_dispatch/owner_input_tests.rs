@@ -336,6 +336,7 @@ impl Rig {
             until_done: Some(Box::new(|| Ok(()))),
             native_pin_submitted: None,
             observation: None,
+            recovery: Default::default(),
         }
     }
 
@@ -361,6 +362,7 @@ impl Rig {
             allowed_tools: &[],
             cancel: Arc::new(CancelToken::new()),
             codex_observation: None,
+
             tmux_session_name: pane,
             teardown: None,
             host: &host,
@@ -1049,6 +1051,7 @@ fn prepared_before_launch(rig: &Rig) -> Registration {
         until_done: None,
         native_pin_submitted: None,
         observation: None,
+        recovery: Default::default(),
     }
 }
 
@@ -1720,6 +1723,7 @@ fn an_owner_idle_turn_binds_its_cancel_token_to_its_pane() {
             settled,
             origin: InputOrigin::Discord,
             late: Default::default(),
+            recovery: Default::default(),
             refusal: Default::default(),
         };
         let mut bound = None;
@@ -1844,6 +1848,7 @@ pub(in crate::services::discord) async fn claimed_owner_turn(
         settled,
         origin: InputOrigin::Discord,
         late: Default::default(),
+        recovery: Default::default(),
         refusal: Default::default(),
     };
     (owner, answer)

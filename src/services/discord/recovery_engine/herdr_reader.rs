@@ -484,6 +484,16 @@ fn reconnect_unless_pending(
         #[cfg(test)]
         ATTACHES.with(|attaches| attaches.set(attaches.get() + 1));
         let attached = reconnect(pool, record).await;
+        if matches!(attached, HerdrSourceAttach::Refused(HostReconcile::Missing)) {
+            use crate::services::herdr_launch::retire::{self, Scope};
+            return match retire::observed(pool, row, Scope::Missing).await {
+                Ok(_) => (Reconnect::Retired, None),
+                Err(error) => {
+                    tracing::warn!(?error, "missing herdr execution could not be retired");
+                    (Reconnect::Withheld, None)
+                }
+            };
+        }
         if let Some(candidate) =
             missing_marker::MissingMarkerCandidate::from_refusal(row, &attached)
             && missing_marker::recover(shared, pool, &candidate, &_transition).await

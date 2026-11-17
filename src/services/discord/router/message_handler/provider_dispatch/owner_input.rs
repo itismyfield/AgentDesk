@@ -52,6 +52,7 @@ pub(super) struct Registration {
     /// Only a successfully settled write may attach its native input to this birth episode.
     native_pin_submitted: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     observation: Option<BusyObservation>,
+    recovery: super::start_failure::MissingRecovery,
 }
 
 /// Reads an idle submit's AI turn to its end on the turn's sender and returns its outcome.
@@ -137,6 +138,7 @@ impl Registration {
             until_done,
             native_pin_submitted: None,
             observation: None,
+            recovery: Default::default(),
         })
     }
 }
@@ -565,6 +567,7 @@ pub(in crate::services::discord) struct OwnerTurn {
     origin: InputOrigin,
     /// What the start's headless turn knows of its pane for the late native read.
     late: LateRead,
+    pub(super) recovery: super::start_failure::MissingRecovery,
     refusal: std::sync::Arc<Mutex<Option<crate::services::turn_host::HerdrRefusal>>>,
 }
 
@@ -1009,7 +1012,9 @@ async fn start_idle(
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
     let (settled, answer) = tokio::sync::oneshot::channel();
     let origin = InputOrigin::from_context(kept.as_ref());
-    let failed = super::start_failure::Failure::claimed(&mailbox, &claim);
+    let recovery = super::start_failure::MissingRecovery::default();
+    let failed =
+        super::start_failure::Failure::claimed(&mailbox, &claim).with_recovery(recovery.clone());
     let permit = super::start_failure::greeting_permit;
     let failed = permit(&shared, channel, kept.as_ref(), failed).await?;
     let refusal = std::sync::Arc::new(Mutex::new(None));
@@ -1020,6 +1025,7 @@ async fn start_idle(
         settled,
         origin,
         late: LateRead::default(),
+        recovery,
         refusal: refusal.clone(),
     };
     let now = (std::time::SystemTime::now(), std::time::Instant::now());
@@ -1058,6 +1064,9 @@ async fn start_idle(
             started.map(drop).map_err(|error| error.to_string())
         }
     };
+    if failed.discard_recovered(&shared, channel, &started).await? {
+        return Err("NotSent(\"recovery_start_discarded\")".into());
+    }
     let typed = refusal.lock().unwrap_or_else(|e| e.into_inner()).take();
     let mut bootstrap = match typed {
         Some(crate::services::turn_host::HerdrRefusal::OWriterNotReady) => {
@@ -1221,6 +1230,7 @@ pub(super) fn execute_owned(
         settled,
         origin,
         late,
+        recovery,
         ..
     } = owner;
     let turn = StreamingTurn {
@@ -1300,7 +1310,8 @@ pub(super) fn execute_owned(
         .flatten();
     let as_restart = crate::services::codex::herdr_turn::restart_intent::scope;
     match registered {
-        Ok(owner) => as_restart(restart, || {
+        Ok(mut owner) => as_restart(restart, || {
+            owner.recovery = recovery;
             execute_front(turn, sender, claim, owner, settled)
         }),
         Err(error) => {
@@ -1451,7 +1462,8 @@ pub(super) fn execute_front(
     settled: Settled,
 ) -> Result<(), String> {
     let reply = reply_once(Some(settled));
-    let failure = super::start_failure::Failure::claimed(&owner.mailbox, &claim);
+    let failure = super::start_failure::Failure::claimed(&owner.mailbox, &claim)
+        .with_recovery(owner.recovery.clone());
     let watch =
         crate::services::discord::inflight::row_removed::watch(turn.provider, turn.channel_id);
     let context = turn.clone();
@@ -1650,6 +1662,18 @@ fn run(
         target::Route::ClaudeBusy => (
             busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt),
             BusyClaude {
+                probe_guard: r
+                    .origin
+                    .is_person()
+                    .then(|| {
+                        owned_busy::watch_guard(
+                            turn.pool,
+                            turn.host,
+                            r.mailbox.clone(),
+                            front.as_ref().map(FrontClaim::front),
+                        )
+                    })
+                    .flatten(),
                 operation: match r.observation {
                     Some(observation) => Ok(observation.prepare_busy(
                         r.program,
