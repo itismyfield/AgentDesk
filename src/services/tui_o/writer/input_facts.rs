@@ -385,6 +385,11 @@ impl InputFacts {
     }
 
     /// The turn this reader treats as running, with its native id when one is known.
+    /// Where the open turn started and its native id, as a restart end names them.
+    pub(crate) fn open_window(&self) -> Option<(u64, Option<String>)> {
+        Some((self.open_after?, self.open_turn()?.cloned()))
+    }
+
     fn open_turn(&self) -> Option<Option<&String>> {
         match (&self.state, &self.carried) {
             (TurnState::Open { native_turn_id }, _) => Some(native_turn_id.as_ref()),

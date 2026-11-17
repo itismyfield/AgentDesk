@@ -349,6 +349,11 @@ pub(crate) fn observe_claude_jsonl_turn_state(path: &Path) -> TuiTurnState {
     claude_meta::observe(path)
 }
 
+/// The busy writer's reading of the same transcript; see [`claude_meta::observe_running`].
+pub(crate) fn observe_claude_jsonl_running_turn_state(path: &Path) -> TuiTurnState {
+    claude_meta::observe_running(path)
+}
+
 pub(crate) fn observe_codex_jsonl_turn_state(path: &Path) -> TuiTurnState {
     let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
         return TuiTurnState::Unknown;

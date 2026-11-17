@@ -45,14 +45,11 @@ async fn output_origin_guard_database_error_retries_after_json_read_pg() {
         let task = tokio::spawn(async move {
             drain_message_outbox_once(&draining_pool, &registry, "guard-retry-consumer").await
         });
-        let pid = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            loop {
+        let pid = crate::test_support::wait::poll_within(async || {
                 let pid: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%pg_advisory_xact_lock%' LIMIT 1")
                     .bind(barrier_pid).fetch_optional(pool.as_ref()).await.unwrap();
-                if let Some(pid) = pid { break pid; }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        }).await.expect("consumer must reach guard lock after reading saved JSON");
+                pid.ok_or_else(|| "consumer has not reached guard lock after reading saved JSON".into())
+        }, std::time::Duration::from_secs(15), "consumer guard lock after reading saved JSON").await.expect("consumer must reach guard lock after reading saved JSON");
         assert!(
             sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
                 .bind(pid)

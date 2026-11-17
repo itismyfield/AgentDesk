@@ -424,20 +424,16 @@ pub(crate) mod task_dispatch_claims_pg_tests {
     }
 
     impl TestPostgresDb {
-        /// `None` means one thing only: the shared fixture base is unconfigured,
-        /// so there is no server this fixture is entitled to talk to. It never
-        /// means "Postgres answered and failed" — every call below still panics
-        /// on error, so a reachable-but-broken server cannot be laundered into a
-        /// green run. `postgres_test_database_url_base()` additionally panics
-        /// when `AGENTDESK_REQUIRE_PG=1`, so the PG lanes treat a missing base
-        /// as fatal rather than skippable (#4979 S2 contract).
+        /// A missing fixture base fails the test instead of passing silently,
+        /// and every call below panics on error, so a broken server fails too.
         ///
         /// There is deliberately no host fallback. Inventing an address made
         /// this fixture connect to whatever Postgres happened to listen on the
         /// developer's loopback and create/drop databases there (#5218).
-        async fn create() -> Option<Self> {
+        async fn create() -> Self {
             let lifecycle = crate::db::postgres::lock_test_lifecycle();
-            let base = crate::db::postgres::postgres_test_database_url_base()?;
+            let base = crate::db::postgres::postgres_test_database_url_base()
+                .expect("POSTGRES_TEST_DATABASE_URL_BASE required for task_dispatch_claims tests"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
             let database_name =
                 format!("agentdesk_task_dispatch_claims_{}", Uuid::new_v4().simple());
             let admin_url = format!("{base}/postgres");
@@ -448,12 +444,12 @@ pub(crate) mod task_dispatch_claims_pg_tests {
             )
             .await
             .expect("create task_dispatch_claims postgres test database");
-            Some(Self {
+            Self {
                 _lifecycle: lifecycle,
                 admin_url,
                 database_url: format!("{base}/{database_name}"),
                 database_name,
-            })
+            }
         }
 
         async fn connect_and_migrate(&self) -> sqlx::PgPool {
@@ -478,9 +474,7 @@ pub(crate) mod task_dispatch_claims_pg_tests {
 
     #[tokio::test]
     async fn claim_rejects_capability_mismatch_and_claims_eligible_dispatch() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         sqlx::query(
@@ -566,9 +560,7 @@ pub(crate) mod task_dispatch_claims_pg_tests {
 
     #[tokio::test]
     async fn claim_falls_back_when_preferred_node_semaphore_is_exhausted() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_two_worker_nodes(&pool).await;
         seed_agent_and_card(&pool).await;
@@ -636,9 +628,7 @@ pub(crate) mod task_dispatch_claims_pg_tests {
 
     #[tokio::test]
     async fn claim_acquires_first_per_node_semaphore_on_preferred_node() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_two_worker_nodes(&pool).await;
         seed_agent_and_card(&pool).await;
@@ -690,9 +680,7 @@ pub(crate) mod task_dispatch_claims_pg_tests {
 
     #[tokio::test]
     async fn claim_waits_when_all_per_node_semaphore_slots_are_exhausted() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_two_worker_nodes(&pool).await;
         seed_agent_and_card(&pool).await;
@@ -776,9 +764,7 @@ pub(crate) mod task_dispatch_claims_pg_tests {
 
     #[tokio::test]
     async fn claim_waits_when_per_cluster_semaphore_is_exhausted() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_two_worker_nodes(&pool).await;
         seed_agent_and_card(&pool).await;
@@ -844,9 +830,7 @@ pub(crate) mod task_dispatch_claims_pg_tests {
 
     #[tokio::test]
     async fn claim_reclaims_expired_semaphore_holding_before_acquire() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_two_worker_nodes(&pool).await;
         seed_agent_and_card(&pool).await;
@@ -921,9 +905,7 @@ pub(crate) mod task_dispatch_claims_pg_tests {
 
     #[tokio::test]
     async fn claim_does_not_reclaim_active_null_expiry_semaphore_holder() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_two_worker_nodes(&pool).await;
         seed_agent_and_card(&pool).await;
@@ -1002,9 +984,7 @@ pub(crate) mod task_dispatch_claims_pg_tests {
     /// a cluster that had no online node at all.
     #[tokio::test]
     async fn claim_skip_reason_reports_offline_claim_owner_instead_of_route_preference() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_agent_and_card(&pool).await;
         seed_worker_node(&pool, "mac-mini-release", "mac-mini", 600).await;
@@ -1086,9 +1066,7 @@ pub(crate) mod task_dispatch_claims_pg_tests {
     /// move.
     #[tokio::test]
     async fn claim_selection_verdicts_are_unchanged_by_skip_reason_diagnostics() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_agent_and_card(&pool).await;
 

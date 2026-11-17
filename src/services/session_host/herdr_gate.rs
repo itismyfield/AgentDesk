@@ -429,6 +429,11 @@ impl HerdrTarget {
         &self.0.pane
     }
 
+    /// The execution this target is pinned to.
+    pub(crate) fn execution_nonce(&self) -> &str {
+        &self.0.nonce
+    }
+
     /// Judges the next input and keeps the judgment for the send that follows it.
     pub(crate) fn pin(&self, mutation: Mutation) -> Result<(), HerdrGateRefusal> {
         let mut pinned = self.0.pinned.lock().unwrap_or_else(PoisonError::into_inner);

@@ -49,10 +49,7 @@ static EXECUTION_IDENTITY_MODE_OVERRIDE: std::sync::Mutex<Option<ExecutionIdenti
 /// baseline means reverting the T3-A1 PR.
 pub(in crate::services::discord) fn execution_identity_mode() -> ExecutionIdentityMode {
     #[cfg(test)]
-    if let Some(mode) = *EXECUTION_IDENTITY_MODE_OVERRIDE
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-    {
+    if let Some(mode) = ExecutionIdentityModeGuard::current(&EXECUTION_IDENTITY_MODE_OVERRIDE) {
         return mode;
     }
     crate::config_live_reload::current()
@@ -61,18 +58,8 @@ pub(in crate::services::discord) fn execution_identity_mode() -> ExecutionIdenti
 }
 
 #[cfg(test)]
-pub(in crate::services::discord) struct ExecutionIdentityModeGuard {
-    previous: Option<ExecutionIdentityMode>,
-}
-
-#[cfg(test)]
-impl Drop for ExecutionIdentityModeGuard {
-    fn drop(&mut self) {
-        *EXECUTION_IDENTITY_MODE_OVERRIDE
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = self.previous.take();
-    }
-}
+pub(in crate::services::discord) type ExecutionIdentityModeGuard =
+    crate::services::discord::health::test_support::TestOverrideGuard<ExecutionIdentityMode>;
 
 /// Override [`execution_identity_mode`] for the lifetime of the returned guard.
 /// Process-global, so callers must already hold whichever test lock serializes
@@ -81,11 +68,7 @@ impl Drop for ExecutionIdentityModeGuard {
 pub(in crate::services::discord) fn set_execution_identity_mode_for_tests(
     mode: ExecutionIdentityMode,
 ) -> ExecutionIdentityModeGuard {
-    let previous = EXECUTION_IDENTITY_MODE_OVERRIDE
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .replace(mode);
-    ExecutionIdentityModeGuard { previous }
+    ExecutionIdentityModeGuard::replace(&EXECUTION_IDENTITY_MODE_OVERRIDE, mode)
 }
 
 #[cfg(test)]

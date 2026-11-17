@@ -89,11 +89,17 @@ fn policy_selects(proxy: &PgWireProxy) -> usize {
 
 /// Waits for a condition the database or proxy reaches on its own, failing after `WAIT`.
 pub(super) async fn until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + WAIT;
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    crate::test_support::wait::poll_within(
+        async || {
+            done()
+                .then_some(())
+                .ok_or_else(|| format!("timed out waiting for {what}"))
+        },
+        WAIT,
+        what,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

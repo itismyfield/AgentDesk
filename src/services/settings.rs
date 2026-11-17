@@ -1019,13 +1019,10 @@ mod tests {
     }
 
     impl TestDatabase {
-        async fn create_if_configured() -> Option<Self> {
-            crate::db::postgres::postgres_test_database_url_base()?;
-            let lifecycle = crate::db::postgres::lock_test_lifecycle();
-            Some(Self::create_with_lifecycle(lifecycle).await)
-        }
-
         async fn create() -> Self {
+            crate::db::postgres::postgres_test_database_url_base().expect(
+                "POSTGRES_TEST_DATABASE_URL_BASE required for settings runtime-config PG tests",
+            ); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
             let lifecycle = crate::db::postgres::lock_test_lifecycle();
             Self::create_with_lifecycle(lifecycle).await
         }
@@ -1501,12 +1498,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn metadata_less_put_pg_runtime_config_preserves_explicit_overrides_and_metadata_replaces_them()
      {
-        let Some(database) = TestDatabase::create_if_configured().await else {
-            eprintln!(
-                "skipping metadata_less_put_pg_runtime_config_preserves_explicit_overrides_and_metadata_replaces_them: postgres unavailable"
-            );
-            return;
-        };
+        let database = TestDatabase::create().await;
         let pool = database.connect().await;
         let service = SettingsService::new(
             Some(pool.clone()),

@@ -417,6 +417,14 @@ pub(crate) fn modal(capture: &str) -> bool {
     screen::modal(capture)
 }
 
+#[cfg(unix)]
+pub(crate) use screen::HeldRead;
+
+#[cfg(unix)]
+pub(crate) fn held_read(capture: &str) -> HeldRead {
+    screen::held_read(capture)
+}
+
 /// One read of a held pane by the owned entry's own screen check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Screen {

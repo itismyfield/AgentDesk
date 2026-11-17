@@ -1,0 +1,2 @@
+key: 571-routine-run-headless-isolation
+| `routine-run` headless isolation (#8117 PR3a D0) | `03c3c5e2bfa1ca99d1e304c0e9dd92fdb8717268` | Before: 표식 없는 headless run 이 기존 fresh 경로로 primary 세션·boundary 를 바꿈; shared clear/take/writeback·memory·retry clear·recovery seed·primary key fallback·repin·Started 재실행 mutant 기대 RED, 완료 계획이 primary 를 읽으면 liveness RED | 12cfg: 격리 1 GREEN, 수정 전·mutant 11 기대 RED. 완료·재시도·복구는 turn row 의 pin 을 읽는다. [보고서](routine-run/routine-headless-isolation.report.md) · [차트](routine-run/routine-headless-isolation.chart.mmd) |

@@ -559,12 +559,10 @@ mod pipeline_override_pg_tests {
     }
 
     impl TestPostgresDb {
-        async fn create() -> Option<Self> {
+        async fn create() -> Self {
             let lifecycle = crate::db::postgres::lock_test_lifecycle();
-            let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
-                drop(lifecycle);
-                return None;
-            };
+            let base = crate::db::postgres::postgres_test_database_url_base()
+                .expect("POSTGRES_TEST_DATABASE_URL_BASE required for pipeline_override tests"); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
             let admin_url = if let Ok(url) = std::env::var("POSTGRES_TEST_ADMIN_URL") {
                 let trimmed = url.trim();
                 if trimmed.is_empty() {
@@ -580,48 +578,34 @@ mod pipeline_override_pg_tests {
                 uuid::Uuid::new_v4().simple()
             );
             let database_url = format!("{base}/{database_name}");
-            if let Err(error) = crate::db::postgres::create_test_database(
+            crate::db::postgres::create_test_database(
                 &admin_url,
                 &database_name,
                 "pipeline_override tests",
             )
             .await
-            {
-                eprintln!(
-                    "skipping postgres pipeline_override test: create database failed: {error}"
-                );
-                return None;
-            }
-            Some(Self {
+            .unwrap_or_else(|error| {
+                panic!("pipeline_override tests: create test database: {error}")
+            });
+            Self {
                 _lifecycle: lifecycle,
                 admin_url,
                 database_name,
                 database_url,
-            })
+            }
         }
 
-        async fn connect_with_minimal_schema(&self) -> Option<PgPool> {
-            match crate::db::postgres::connect_test_pool(
+        async fn connect_with_minimal_schema(&self) -> PgPool {
+            let pool = crate::db::postgres::connect_test_pool(
                 &self.database_url,
                 "pipeline_override tests",
             )
             .await
-            {
-                Ok(pool) => {
-                    if let Err(error) = create_minimal_pipeline_override_schema(&pool).await {
-                        eprintln!(
-                            "skipping postgres pipeline_override test: create schema failed: {error}"
-                        );
-                        pool.close().await;
-                        return None;
-                    }
-                    Some(pool)
-                }
-                Err(error) => {
-                    eprintln!("skipping postgres pipeline_override test: connect failed: {error}");
-                    None
-                }
-            }
+            .unwrap_or_else(|error| panic!("pipeline_override tests: connect: {error}"));
+            create_minimal_pipeline_override_schema(&pool)
+                .await
+                .unwrap_or_else(|error| panic!("pipeline_override tests: create schema: {error}"));
+            pool
         }
 
         async fn drop(self) {
@@ -818,13 +802,8 @@ mod pipeline_override_pg_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn repo_write_rejects_state_id_that_would_fail_kanban_status_check() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
-        let Some(pool) = pg_db.connect_with_minimal_schema().await else {
-            pg_db.drop().await;
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_with_minimal_schema().await;
         crate::pipeline::ensure_loaded();
         seed_agent(&pool, "agent-slug-a", None).await;
         seed_repo_with_default_agent(&pool, "repo-slug-a", "agent-slug-a", None).await;
@@ -864,13 +843,8 @@ mod pipeline_override_pg_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn agent_write_rejects_standalone_assigned_card_context_when_repo_pair_valid() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
-        let Some(pool) = pg_db.connect_with_minimal_schema().await else {
-            pg_db.drop().await;
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_with_minimal_schema().await;
         crate::pipeline::ensure_loaded();
         seed_agent(&pool, "agent-standalone-context", None).await;
         seed_repo_with_default_agent(
@@ -937,13 +911,8 @@ mod pipeline_override_pg_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn agent_write_rejects_dangling_repo_assigned_card_context_when_repo_pair_valid() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
-        let Some(pool) = pg_db.connect_with_minimal_schema().await else {
-            pg_db.drop().await;
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_with_minimal_schema().await;
         crate::pipeline::ensure_loaded();
         seed_agent(&pool, "agent-dangling-repo-context", None).await;
         seed_repo_with_default_agent(
@@ -1010,13 +979,8 @@ mod pipeline_override_pg_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn repo_write_accepts_unassigned_repo_card_without_default_agent_fallback() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
-        let Some(pool) = pg_db.connect_with_minimal_schema().await else {
-            pg_db.drop().await;
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_with_minimal_schema().await;
         crate::pipeline::ensure_loaded();
         seed_agent(
             &pool,
@@ -1071,13 +1035,8 @@ mod pipeline_override_pg_tests {
     /// including the `null` that clears the row. Blocking it made the pair
     /// unfixable from either side.
     async fn repo_write_repairs_the_pair_when_the_existing_agent_override_is_unreadable() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
-        let Some(pool) = pg_db.connect_with_minimal_schema().await else {
-            pg_db.drop().await;
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_with_minimal_schema().await;
         crate::pipeline::ensure_loaded();
         seed_agent(&pool, "agent-1720-a", Some(r#"{"states":["broken"]}"#)).await;
         seed_repo_with_default_agent(
@@ -1138,13 +1097,8 @@ mod pipeline_override_pg_tests {
     /// check runs on the sections that survive, and the agent write lands
     /// instead of 400ing on a row the operator cannot reach from here.
     async fn agent_write_is_not_blocked_by_an_undeclared_key_in_the_repo_override() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
-        let Some(pool) = pg_db.connect_with_minimal_schema().await else {
-            pg_db.drop().await;
-            return;
-        };
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_with_minimal_schema().await;
         crate::pipeline::ensure_loaded();
         seed_agent(&pool, "agent-1720-b", None).await;
         seed_repo_with_default_agent(

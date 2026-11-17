@@ -120,7 +120,7 @@ impl Adapter {
         ];
         BusyReport::outcome(match run_herdr(&self.target, &plan, None) {
             InputRun::Applied => {
-                receipt(request, frame, offset);
+                receipt(request, frame, offset, self.target.clone());
                 BusyOutcome::Submitted
             }
             InputRun::Refused(_) if !park => {
@@ -140,8 +140,10 @@ impl Adapter {
     }
 }
 
-fn receipt(request: &Request<'_>, text: String, offset: u64) {
+/// Waits for the frame's transcript record, then judges an earlier input hold of the session once.
+fn receipt(request: &Request<'_>, text: String, offset: u64, target: HerdrTarget) {
     let (path, nonce) = (request.transcript.to_path_buf(), request.nonce.to_string());
+    let session = request.session.to_owned();
     let scope = history::ReceiptScope::capture();
     let timing = &busy_inject::TIMING;
     let _ = std::thread::Builder::new()
@@ -152,6 +154,16 @@ fn receipt(request: &Request<'_>, text: String, offset: u64) {
             let wait = || busy_inject::await_receipt(receipt, deadline, timing.confirm_poll);
             let result = scope.enter(wait);
             tracing::debug!(%nonce, ?result, "Claude Herdr injection receipt diagnostic");
+            use crate::services::claude::herdr_turn::hold_resolve::{LivePorts, after_busy};
+            let target = &target;
+            after_busy(
+                &session,
+                target.execution_nonce(),
+                &LivePorts {
+                    target,
+                    notice: None,
+                },
+            );
         });
 }
 
@@ -236,8 +248,9 @@ impl Context {
                 return Some(Reading::idle());
             }
             let source = self.current_source(authority)?;
-            let state =
-                crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&source.id.path);
+            let state = crate::services::tui_turn_state::observe_claude_jsonl_running_turn_state(
+                &source.id.path,
+            );
             if self
                 .current_source(authority)
                 .is_none_or(|again| again.id != source.id)

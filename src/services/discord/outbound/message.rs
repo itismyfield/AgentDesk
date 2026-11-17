@@ -145,19 +145,6 @@ pub(crate) struct OutboundProducer {
     pub(crate) component: Option<String>,
 }
 
-// #3034: #1006 v3 outbound producer constructor — serde-wire DTO API, not yet
-// adopted by any prod callsite. The `producer` envelope field is retained for
-// wire compatibility with already-persisted outbound payloads.
-#[allow(dead_code)]
-impl OutboundProducer {
-    pub(crate) fn new(source: impl Into<String>) -> Self {
-        Self {
-            source: source.into(),
-            component: None,
-        }
-    }
-}
-
 /// Which Discord bot identity should execute delivery.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -213,51 +200,6 @@ impl OutboundReferenceContext {
             interaction: None,
             thread_name_hint: None,
             metadata: Vec::new(),
-        }
-    }
-
-    // #3034: #1006 v3 serde-wire reference-context builders — not yet wired by
-    // every prod callsite; kept as a coherent builder surface.
-    #[allow(dead_code)]
-    pub(crate) fn interaction(
-        interaction_id: impl Into<String>,
-        token_hint: Option<impl Into<String>>,
-        ephemeral: bool,
-    ) -> Self {
-        Self {
-            message: None,
-            interaction: Some(OutboundInteractionReference {
-                interaction_id: interaction_id.into(),
-                token_hint: token_hint.map(Into::into),
-                ephemeral,
-            }),
-            thread_name_hint: None,
-            metadata: Vec::new(),
-        }
-    }
-}
-
-// #3034: #1006 v3 outbound target accessors — serde-wire DTO helpers not yet
-// consumed by prod delivery (which matches on the target directly).
-#[allow(dead_code)]
-impl OutboundTarget {
-    /// Channel id that should receive the actual HTTP POST. For
-    /// [`OutboundTarget::Thread`] this is the thread id; threads are
-    /// addressed through the same `/channels/{id}/messages` endpoint as
-    /// regular channels in the Discord REST API.
-    pub(crate) fn delivery_channel(&self) -> Option<ChannelId> {
-        match self {
-            Self::Channel(channel) => Some(*channel),
-            Self::Thread { thread, .. } => Some(*thread),
-            Self::DmUser(_) => None,
-        }
-    }
-
-    /// Parent channel id, if any. Returns `Some` only for thread targets.
-    pub(crate) fn parent_channel(&self) -> Option<ChannelId> {
-        match self {
-            Self::Channel(_) | Self::DmUser(_) => None,
-            Self::Thread { parent, .. } => Some(*parent),
         }
     }
 }

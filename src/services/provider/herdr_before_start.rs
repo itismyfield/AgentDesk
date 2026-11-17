@@ -158,13 +158,6 @@ pub(crate) fn observed_execution(
     result
 }
 
-/// Releases a Claude input hold whose turn closed before any input.
-pub(crate) fn release_claude_hold(logical: &str, held: &std::path::Path) {
-    if let Err(error) = std::fs::remove_file(held) {
-        tracing::warn!(logical, %error, "herdr turn: input hold kept");
-    }
-}
-
 pub(crate) fn prelaunch_closed(token: Option<&CancelToken>) -> Result<bool, String> {
     if !super::cancel_token_claude_interrupt::herdr_stop_settlement_available() {
         return Ok(false);

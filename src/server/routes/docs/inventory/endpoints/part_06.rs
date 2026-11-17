@@ -502,16 +502,28 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("next_due_at", body_param("string", false, "Optional RFC3339 due time")),
             ("discord_thread_id", body_param("string", false, "Optional existing Discord thread id")),
             ("timeout_secs", body_param("integer", false, "Optional per-routine agent timeout in seconds")),
+            (
+                "execution_mode",
+                body_param("string", false, "Explicit mode (only thread is available yet; headless/channel/script return 422). Omitted keeps the legacy null-mode contract"),
+            ),
+            (
+                "runner",
+                body_param("object", false, "{\"kind\":\"quickjs\",\"script_ref\":...} matching script_ref; requires execution_mode; command runners return 422"),
+            ),
+            (
+                "headless_failure_notice_limit",
+                body_param("integer", false, "Headless failure notices before escalation, 1..100; default 3"),
+            ),
         ])
         .with_example(
             json!({"body": {"script_ref": "daily-summary.js", "name": "Daily Summary", "agent_id": "codex", "fallback_agent_id": "claude", "max_retries": 1, "execution_strategy": "fresh"}}),
-            json!({"routine": {"id": "routine-1", "script_ref": "daily-summary.js", "status": "enabled"}, "discord_log": {"status": "skipped"}}),
+            json!({"routine": {"id": "routine-1", "script_ref": "daily-summary.js", "status": "enabled", "execution_mode": null, "effective_execution_mode": "thread", "execution_compatibility": "legacy_fresh", "runner": {"kind": "quickjs", "script_ref": "daily-summary.js"}, "headless_failure_notice_limit": 3}, "discord_log": {"status": "skipped"}}),
         ),
         ep(
             "GET",
             "/api/routines/{id}",
             "routines",
-            "Get one durable routine row.",
+            "Get one durable routine row with its explicit/effective execution mode, compatibility state (explicit, legacy_fresh, legacy_persistent), runner and headless_failure_notice_limit.",
         )
         .with_params([("id", path_param("Routine id"))])
         .with_example(
@@ -522,7 +534,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "PATCH",
             "/api/routines/{id}",
             "routines",
-            "Patch routine metadata, scheduling fields, or checkpoint.",
+            "Patch routine metadata, scheduling fields, checkpoint, or execution definition. Definition changes apply from the next claim; an in-flight run keeps its claim-time run_spec.",
         )
         .with_params([
             ("id", path_param("Routine id")),
@@ -559,6 +571,18 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "timeout_secs",
                 body_param("integer|null", false, "Per-routine agent timeout in seconds or null for config default"),
             ),
+            (
+                "execution_mode",
+                body_param("string", false, "Explicit mode (thread only for now); forces execution_strategy fresh. null or a conflicting execution_strategy returns 422"),
+            ),
+            (
+                "runner",
+                body_param("object", false, "quickjs runner matching script_ref; null returns 422"),
+            ),
+            (
+                "headless_failure_notice_limit",
+                body_param("integer", false, "1..100; omitted keeps the value, null or out of range returns 422"),
+            ),
         ]),
         ep(
             "DELETE",
@@ -585,7 +609,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/routines/{id}/runs",
             "routines",
-            "List recent run history for one routine, including best-effort Discord log status and warning detail.",
+            "List recent run history for one routine, including best-effort Discord log status and warning detail. run_spec is the definition pinned at claim (null for runs claimed before execution modes).",
         )
         .with_params([
             ("id", path_param("Routine id")),

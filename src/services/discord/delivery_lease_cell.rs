@@ -24,6 +24,7 @@ impl super::SharedData {
 }
 
 #[cfg(test)]
+#[path = "delivery_lease_cell/exact_lease_tests.rs"]
 mod exact_lease;
 #[cfg(unix)]
 pub(super) mod source_epoch_observer;

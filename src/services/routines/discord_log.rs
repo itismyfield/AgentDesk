@@ -76,6 +76,12 @@ impl RoutineDiscordLogger {
         routine: &RoutineRecord,
         event: RoutineLifecycleEvent,
     ) -> RoutineDiscordLogStatus {
+        // A headless routine has no thread of its own and announces no lifecycle event.
+        match self.headless_routine(store, routine).await {
+            Ok(false) => {}
+            Ok(true) => return RoutineDiscordLogStatus::skipped(),
+            Err(error) => return RoutineDiscordLogStatus::failed(error),
+        }
         self.log_to_routine_target(
             Some(store),
             Some(&routine.id),
@@ -129,6 +135,18 @@ impl RoutineDiscordLogger {
         store: &RoutineStore,
         recovered: &RecoveredRoutineRun,
     ) -> RoutineDiscordLogStatus {
+        // The claim decides: a headless run posts no recovery diagnostic, saved thread or not.
+        let headless = store.run_execution_mode(&recovered.run_id).await;
+        let headless = headless.map(|mode| mode.as_deref() == Some("headless"));
+        if !matches!(headless, Ok(false)) {
+            let status = match headless {
+                Err(error) => RoutineDiscordLogStatus::failed(error),
+                Ok(_) => RoutineDiscordLogStatus::skipped(),
+            };
+            self.persist_run_log_status(store, &recovered.run_id, &status)
+                .await;
+            return status;
+        }
         let message = recovery_message(recovered);
         let status = if recovered
             .discord_thread_id
@@ -183,6 +201,13 @@ impl RoutineDiscordLogger {
     ) -> RoutineDiscordLogStatus {
         let message = stale_paused_message(routine, paused_for_secs);
         let session_key = stale_paused_session_key(&routine.id);
+        // A headless routine never owns a thread; its stall goes to the agent's primary channel.
+        if let Some(status) = self
+            .log_headless_stale_to_primary(store, routine, &session_key, &message, dedupe_ttl_secs)
+            .await
+        {
+            return status;
+        }
 
         if routine
             .discord_thread_id
