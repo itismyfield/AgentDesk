@@ -244,12 +244,13 @@ agents:
                 resolve_workspace(legacy, Some("legacy-name")).unwrap(),
                 fixture
                     .root()
-                    .join("workspaces/legacy-agent")
+                    .join("workspaces")
+                    .join("legacy-agent")
                     .display()
                     .to_string()
             );
             let agents = crate::runtime_layout::managed_agents_root(fixture.root());
-            let canonical = agents.join("legacy-agent/IDENTITY.md");
+            let canonical = agents.join("legacy-agent").join("IDENTITY.md");
             assert_eq!(
                 resolve_role_binding(legacy, Some("legacy-name"))
                     .unwrap()

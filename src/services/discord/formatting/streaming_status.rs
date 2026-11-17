@@ -394,13 +394,10 @@ pub(in crate::services::discord) fn humanize_tool_status(tool_line: &str) -> Str
 /// Reason label shown in the monitor handoff placeholder. Mirrors #1324 wording
 /// so users see what is happening instead of internal mechanism names such as
 /// "async dispatch". `Queued` (#1332) is paired with `MonitorHandoffStatus::Queued`
-/// to render the mailbox-queued placeholder card (앞선 턴 진행 중). `InlineTimeout`
-/// and `ExplicitCall` are exposed for downstream wiring (#1113, #1115 sweeper).
+/// to render the mailbox-queued placeholder card (앞선 턴 진행 중).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum MonitorHandoffReason {
     AsyncDispatch,
-    #[allow(dead_code)] // #3034: matched in label() but not constructed; reserved for #1113 wiring
-    InlineTimeout,
     ExplicitCall,
     Queued,
 }
@@ -409,7 +406,6 @@ impl MonitorHandoffReason {
     fn label(self) -> &'static str {
         match self {
             Self::AsyncDispatch => "응답 스트리밍 중",
-            Self::InlineTimeout => "응답 지연 — watcher 이어받음",
             Self::ExplicitCall => "백그라운드 도구 실행 중",
             Self::Queued => "앞선 턴 진행 중",
         }
@@ -417,22 +413,15 @@ impl MonitorHandoffReason {
 }
 
 /// Lifecycle status of a monitor handoff placeholder. Drives the leading
-/// emoji/title pair shown to the user. Terminal variants (Completed / Failed /
-/// TimedOut / Aborted) are exposed for downstream wiring (#1115 sweeper, watcher
+/// emoji/title pair shown to the user. Terminal variants are Completed and Aborted (watcher
 /// terminal updates). `Queued` (#1332) is the pre-active state used while a user
 /// message waits for the mailbox dequeue.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::services::discord) enum MonitorHandoffStatus<'a> {
+pub(in crate::services::discord) enum MonitorHandoffStatus {
     Queued,
     Active,
     Stalled,
     Completed,
-    // #3034: matched in renderers but not constructed; reserved for #1115 sweeper wiring
-    #[allow(dead_code)]
-    Failed {
-        reason: &'a str,
-    },
-    TimedOut,
     Aborted,
 }
 
@@ -444,10 +433,7 @@ fn monitor_handoff_uses_background_label(reason: MonitorHandoffReason) -> bool {
     matches!(reason, MonitorHandoffReason::ExplicitCall)
 }
 
-fn monitor_handoff_header(
-    status: MonitorHandoffStatus<'_>,
-    reason: MonitorHandoffReason,
-) -> String {
+fn monitor_handoff_header(status: MonitorHandoffStatus, reason: MonitorHandoffReason) -> String {
     let background_label = monitor_handoff_uses_background_label(reason);
     match status {
         MonitorHandoffStatus::Queued => "📬 **메시지 대기 중**".to_string(),
@@ -457,25 +443,6 @@ fn monitor_handoff_header(
         MonitorHandoffStatus::Stalled => "⚠ **응답 정체**".to_string(),
         MonitorHandoffStatus::Completed if background_label => "✅ **백그라운드 완료**".to_string(),
         MonitorHandoffStatus::Completed => "✅ **응답 완료**".to_string(),
-        MonitorHandoffStatus::Failed { reason } => {
-            let trimmed = reason.trim();
-            let label = if background_label {
-                "백그라운드 실패"
-            } else {
-                "응답 실패"
-            };
-            if trimmed.is_empty() {
-                format!("❌ **{label}**")
-            } else {
-                let truncated =
-                    truncate_for_status_bytes(trimmed, MONITOR_HANDOFF_COMMAND_MAX_BYTES);
-                format!("❌ **{label}**: {truncated}")
-            }
-        }
-        MonitorHandoffStatus::TimedOut if background_label => {
-            "⏱ **백그라운드 타임아웃**".to_string()
-        }
-        MonitorHandoffStatus::TimedOut => "⏱ **응답 타임아웃**".to_string(),
         MonitorHandoffStatus::Aborted if background_label => {
             "⚠ **백그라운드 중단** (모니터 연결 끊김)".to_string()
         }
@@ -484,7 +451,7 @@ fn monitor_handoff_header(
 }
 
 fn monitor_handoff_footer(
-    status: MonitorHandoffStatus<'_>,
+    status: MonitorHandoffStatus,
     reason: MonitorHandoffReason,
 ) -> &'static str {
     match status {
@@ -495,8 +462,6 @@ fn monitor_handoff_footer(
         MonitorHandoffStatus::Active => "완료 시 이 채널로 결과를 이어서 표시합니다.",
         MonitorHandoffStatus::Stalled => "스트림 진행이 멈춰 복구 상태를 확인 중입니다.",
         MonitorHandoffStatus::Completed => "결과가 위에 도착했습니다.",
-        MonitorHandoffStatus::Failed { .. } => "자세한 사유는 다음 응답을 확인해 주세요.",
-        MonitorHandoffStatus::TimedOut => "타임아웃 임계를 넘어 종료되었습니다.",
         MonitorHandoffStatus::Aborted => "브릿지 또는 세션이 종료되었습니다.",
     }
 }
@@ -515,7 +480,7 @@ fn monitor_handoff_active_tail(started_at_unix: i64) -> String {
 /// agnostic. The `<t:UNIX:R>` tag renders as a Discord-native relative
 /// timestamp on the client, so we don't need server-side periodic refresh.
 pub(in crate::services::discord) fn build_monitor_handoff_placeholder(
-    status: MonitorHandoffStatus<'_>,
+    status: MonitorHandoffStatus,
     reason: MonitorHandoffReason,
     started_at_unix: i64,
     tool_summary: Option<&str>,
@@ -544,7 +509,7 @@ const MONITOR_HANDOFF_PROGRESS_MAX_BYTES: usize = 200;
 /// without forcing them to scroll back to the streaming body.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn build_monitor_handoff_placeholder_with_context(
-    status: MonitorHandoffStatus<'_>,
+    status: MonitorHandoffStatus,
     reason: MonitorHandoffReason,
     started_at_unix: i64,
     tool_summary: Option<&str>,
@@ -569,7 +534,7 @@ pub(in crate::services::discord) fn build_monitor_handoff_placeholder_with_conte
 }
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn build_monitor_handoff_placeholder_with_live_events(
-    status: MonitorHandoffStatus<'_>,
+    status: MonitorHandoffStatus,
     reason: MonitorHandoffReason,
     started_at_unix: i64,
     tool_summary: Option<&str>,

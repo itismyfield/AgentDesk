@@ -3,6 +3,7 @@ mod admission_fence;
 pub(super) mod bridge_handoff;
 pub(in crate::services::discord) mod claim;
 #[cfg(all(test, unix))]
+#[path = "synthetic_start/non_bridge_claim_tests.rs"]
 pub(super) mod non_bridge_claim;
 mod ownership;
 mod pending_claim;

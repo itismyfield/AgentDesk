@@ -251,6 +251,16 @@ pub(super) async fn run_completion_postlude(
             "turn bridge withheld final idle status because status-panel completion edit did not commit"
         );
     }
+    let run_key = adk_session_key.as_deref();
+    let close = channel_writeback::close_isolated_run_session;
+    close(
+        &shared_owned,
+        &provider,
+        channel_id,
+        run_key,
+        &inflight_state,
+    )
+    .await;
 
     if completion_r1.permits_channel_effects()
         && !bridge_relay_delegated_to_watcher
@@ -306,9 +316,17 @@ pub(super) async fn run_completion_postlude(
     // tool_feedback analysis below, so the transcript is walked a single time.
     let memento_tool_call_observed =
         transcript_contains_explicit_memento_tool_call(&transcript_events);
+    let isolated_run_transcript = channel_writeback::isolated_run_transcript(
+        &inflight_state,
+        routine_attempt_owns_turn,
+        should_record_final_turn,
+    );
     let session_id_to_persist = {
         let mut data = shared_owned.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
+        if let Some(persist_transcript) = isolated_run_transcript {
+            should_persist_transcript = persist_transcript;
+            None
+        } else if let Some(session) = data.sessions.get_mut(&channel_id) {
             if let Some(memory_plan) = plan_turn_end_memory(
                 session,
                 capture_memory_settings.backend,
@@ -543,7 +561,7 @@ pub(super) async fn run_completion_postlude(
             || !should_suppress_headless_delivery_for_cancel(Some(&cancel_token)))
     {
         let channel_id_text = channel_id.get().to_string();
-        if let Err(e) = crate::db::session_transcripts::persist_turn_db_with_clear_fence(
+        if let Err(e) = crate::db::session_transcripts::persist_turn_db_in_context(
             shared_owned.pg_pool.as_ref(),
             crate::db::session_transcripts::PersistSessionTranscript {
                 turn_id: turn_id.as_str(),
@@ -562,6 +580,8 @@ pub(super) async fn run_completion_postlude(
                     crate::db::session_transcripts::discord_message_started_at_millis(user_msg_id),
             },
             routine_attempt_owns_turn.then_some(ctx.clear_fence),
+            // An isolated routine run keeps its evidence out of the channel's conversation.
+            !inflight_state.routine_presentation.isolated_run(),
         )
         .await
         {

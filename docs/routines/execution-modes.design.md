@@ -202,6 +202,14 @@ QuickJS agent action → 기존 provider 준비 확인 → thread/DM resolver를
 
 완료 writeback도 격리한다. 기존 `scheduled_turn::ChannelEffects` 판정(`scheduled_turn.rs:100-143`)에 persisted routine-isolation 관측을 연결해 completion postlude의 같은 suppress 결정을 재사용한다(`turn_bridge/completion_postlude/channel_writeback.rs:84-105,198`, `completion_postlude.rs:322,406,609`). routine을 ScheduledTurnMark로 사칭하지 않고 inflight의 routine run-spec/presentation에 isolation을 pin한다. 복구·provider 재시도·memory/feedback postlude도 이 관측으로 같은 결정을 내린다. process cancel은 기존 exact episode/token을 쓴다. actor retirement는 아래 소유 surface 가드를 추가한다. D0의 RED는 primary session id/history/uploads/clear boundary/runtime binding이 시작·완료·재시작 뒤 보존되고 별도 per-run key에만 새 provider 세션이 기록되는 것이다.
 
+D0 구현 계약(PR3a): launcher는 turn metadata에 `routine_run_mode=headless`를 넣고, 기존 `execution_mode=process`·fresh·agent_id·per-run synthetic label을 함께 준다. 표식이 있는데 process/fresh가 아니거나 label·workspace가 없거나 per-run key가 채널 key와 같으면 claim 전에 거절하며 shared 경로로 내려가지 않는다. 격리 여부는 시작 때 inflight `routine_presentation`에 pin하고 완료·provider 재시도·복구가 그 pin만 읽는다. per-run key의 세션 상태 기록은 채널 소유가 아닌 기존 격리 identity(`scheduled_snapshot` 종류)로 보내 primary의 canonical 세션 행으로 해석되지 않게 한다. 전용 identity 종류를 따로 둘지는 PR3b 전 결정 항목이다. 격리 run은 worktree 분리·pending reset·retry context를 쓰지 않고 `/goal` 명령 prompt를 거절한다.
+
+D 첫 조각 구현 계약(PR3b-1): launcher(`agent_executor/surface.rs`)는 claim 때 pin된 `run_spec.execution_mode=headless`만 보고 thread/DM resolver를 건너뛰어 primary channel을 예약하며, backend를 process로 고정하고 `routine_run_mode=headless`·`silent=true`를 metadata에 넣는다. run_spec 판독 실패는 시작 실패다. `ProcessMailboxScope`는 DM 예약·Discord가 해석한 thread parent·격리 run 여부에서만 만들고 SharedPrimary는 capture 자체를 하지 않는다. 명시 모드 run은 claim 때 `run_spec.retry_after_start=false`가 pin되어 제출 뒤 실패(provider 오류·조기 실패·timeout)에서 retry·fallback agent 없이 failed로 닫히고, 격리 run의 history 재실행도 막힌다. null-mode(현재 7개) claim의 같은 금지, thread 일시 실패의 60/600 보류와 primary fallback 제거, `primary_busy` 사유 표기는 다음 조각(PR3b-2)이다. 격리 run의 transcript는 `session_transcripts.channel_context=false`로 저장되어 완료 증거로만 남는다.
+
+per-run 세션 행 계약(PR3b-2): per-run 행은 provider session ID를 기록하지 않는다(매 run이 fresh 세션이라 이어 쓸 것이 없다). 턴이 끝나면(성공·실패·취소) 완료 경로가 그 run 자신의 key에 종료 상태를 쓰고 행을 지운다. primary 행과 다른 run의 행은 대상이 아니다. 완료 경로에 닿지 못한 run(프로세스 재시작)의 행은 기존 stale 세션 GC를 따른다. launch가 가리키는 run이 headless로 claim됐는데 표식·silent가 맞지 않으면 턴 시작이 admission 전에 거절한다.
+
+실패 경로 계약(PR3b-2, 새 claim부터): run_spec에 `retry_after_start=false`·`primary_fallback=false`를 pin한다. 제출된 턴이 실패하면(provider 오류·조기 실패·timeout) 방식과 무관하게 새 턴·fallback agent 없이 failed로 닫고, 제출 전 실패(NotSent)는 기존 retry 예산을 그대로 쓴다. routine thread 준비가 일시 실패(5xx·429·408·응답 없는 조회·bot 미준비)하면 같은 thread로 60초/600초 보류하고 창이 닫히면 `thread_unavailable`로 실패한다. 영구 실패는 곧바로 실패한다. 어느 경우에도 primary에서 대신 실행하지 않는다. headless의 보류 소진은 `primary_busy`다. 창 소진·영구 거절·응답 없이 끊긴 thread 생성, 그리고 headless의 `primary_busy` 소진은 retry 예산·fallback agent를 거치지 않고 곧바로 failed다(result `thread_failure`는 `unreachable`·`refused`·`create_unconfirmed`). thread 준비 실패로 끝난 run(`thread_failure`가 있는 run)의 실패 알림은 저장된 thread를 믿지도 새 thread를 만들지도 않고 agent의 primary channel로 간다. 이는 알림의 전달 대상일 뿐 실행의 primary fallback이 아니다. headless로 claim된 run은 저장 thread가 남아 있어도 recovery 진단을 게시하지 않는다. pin이 없는 진행 중 run은 옛 정책으로 끝난다.
+
 백엔드 미지원은 명시 실패이며 tmux/채널로 조용히 fallback하지 않는다. 새 headless는 Claude/Codex process 지원 범위부터 제공한다. 기존 thread는 현 지원 provider를 유지한다. 외부 업무 전송은 routine의 명시 도구 호출 범위이며 이 게시 억제가 업무 iMessage 발송까지 막지 않는다. 실패1..N은 primary에 알림만 보내고 정확히N+1에서 기존 명령봇을 통해 별도 대응 턴을 요청한다. paused·stale-paused·classification 알림 자체는 턴을 만들지 않는다. 아래 사건표와 전송 계약을 따른다. 어느 경우에도 routine thread 생성 경로는 호출하지 않는다.
 
 
@@ -211,7 +219,7 @@ QuickJS agent action → 기존 provider 준비 확인 → thread/DM resolver를
 
 ### thread
 
-기존 saved thread를 검증·재사용하고 없으면 한 번 생성/저장한 뒤 같은 스레드를 쓴다. 순차 실행은 기존 in-flight fence로 충분하다. 생성 성공 후 저장 실패는 결과를 실패로 기록하고 **이번 실행은 생성한 thread id를 run snapshot으로 유지**한다. 이후 run의 재조회·재사용에는 기존 thread 복구 증거만 사용하며 이름 검색으로 임의 thread를 채택하지 않는다. PR3b(D) 이후 새 claim은 legacy/명시 모드 모두 본 채널 fallback0이다. resolve/validate/create의 5xx가 provider 제출 전임이 확인되면 positive NotSent의 `thread_unavailable`로 기존 `start_deferral` 60초/최초600초 창에서 같은 run·같은 저장 thread를 재시도한다. 403/invalid parent 등 영구 오류는 명시 실패이고, 창을 소진하면 `thread_unavailable` 실패와 사건 알림1건이다. 생성 응답/저장이 불확실하면 nonce/id 증거 없이 새 스레드를 반복 생성하지 않는다. validate/create5xx→둘째 시도 같은 thread 성공, primary 게시0, 실제 Started 이후 완료예산 전체 보존을 RED로 둔다. 이미 시작된 구형 in-flight만 pin된 구형 정책으로 drain한다.
+기존 saved thread를 검증·재사용하고 없으면 한 번 생성/저장한 뒤 같은 스레드를 쓴다. 순차 실행은 기존 in-flight fence로 충분하다. 생성 성공 후 저장 실패는 결과를 실패로 기록하고 **이번 실행은 생성한 thread id를 run snapshot으로 유지**한다. 이후 run의 재조회·재사용에는 기존 thread 복구 증거만 사용하며 이름 검색으로 임의 thread를 채택하지 않는다. PR3b(D) 이후 새 claim은 legacy/명시 모드 모두 본 채널 fallback0이다. resolve/validate/create의 5xx가 provider 제출 전임이 확인되면 positive NotSent의 `thread_unavailable`로 기존 `start_deferral` 60초/최초600초 창에서 같은 run·같은 저장 thread를 재시도한다. 403/invalid parent 등 영구 오류는 명시 실패이고, 창을 소진하면 `thread_unavailable` 실패와 사건 알림1건이다. 생성 응답/저장이 불확실하면 nonce/id 증거 없이 같은 run 안에서 새 스레드를 반복 생성하지 않는다(그 run의 재시도·fallback·실패 알림 모두). 알려진 한계: 이 불명 상태는 run 사이에 보존되지 않아, 저장된 thread가 없는 다음 run은 다시 생성을 시도하고 thread가 하나 더 생길 수 있다. 루틴 단위 영속 상태와 수동 해제는 두지 않았다. validate/create5xx→둘째 시도 같은 thread 성공, primary 게시0, 실제 Started 이후 완료예산 전체 보존을 RED로 둔다. 이미 시작된 구형 in-flight만 pin된 구형 정책으로 drain한다.
 
 실행마다 fresh provider severance와 확인된 start를 요구한다. UI의 새 세션 진단은 게시하지 않는다. process 또는 interactive fresh backend는 내부 선택이며 지정 스레드/항상 fresh라는 제품 의미는 같다. script의 `dmUserId`가 새 explicit mode를 override하지 못하게 action boundary에서 부작용 전에 거부한다. 구형 null-mode DM 정의만 기존 adapter로 유지한다.
 
@@ -519,12 +527,12 @@ PR1은 P2-C/H의 새 mode/incident 기능을 선행 구현하지 않는다. 현�
 - 기존 결함 범위: 이름 기반 orphan reaper(`fresh_session_reaper.rs:25-153`)와 best-effort session ownership stamp(`launch.rs:273-285`)를 더 넓히지 않는다. channel에는 reset/kill/reap 권한을 주지 않으며 process cancel은 기존 exact turn만 사용한다.
 - 임의 셸 내부 side effect/group을 이탈한 하위 daemon의 exactly-once, 전역 relay replacement-safe 내구성은 이 모델의 보장 밖이다. 사용자의 데이터/세션 삭제·kill 권한을 성공률 명목으로 추가하지 않는다.
 
-<!-- doc-path-refs: proposed src/services/discord/router/message_handler/headless_turn/isolated_context.rs src/services/routines/agent_executor/channel.rs src/services/routines/agent_executor/settlement.rs scripts/report.sh -->
-<!-- doc-path-refs: proposed src/services/routines/execution_mode.rs src/services/routines/store/execution_modes.rs src/services/routines/store/diagnostics.rs -->
-<!-- doc-path-refs: proposed src/services/routines/agent_executor/surface.rs src/services/routines/agent_executor/run_policy.rs src/services/routines/store/recovery.rs src/services/routines/agent_executor/channel_settlement.rs src/services/routines/command_runner.rs src/services/routines/command_runner/output.rs src/services/routines/runner_spec.rs -->
+<!-- doc-path-refs: proposed src/services/routines/agent_executor/channel.rs src/services/routines/agent_executor/settlement.rs scripts/report.sh -->
+<!-- doc-path-refs: proposed src/services/routines/store/diagnostics.rs -->
+<!-- doc-path-refs: proposed src/services/routines/store/recovery.rs src/services/routines/agent_executor/channel_settlement.rs src/services/routines/command_runner.rs src/services/routines/command_runner/output.rs src/services/routines/runner_spec.rs -->
 
 <!-- doc-path-refs: proposed src/services/routines/prejudge.rs -->
 
 <!-- doc-path-refs: proposed src/services/discord/router/message_handler/provider_dispatch/owner_input/busy_target.rs -->
 
-<!-- doc-path-refs: proposed src/services/routines/discord_log/failure_escalation.rs src/services/message_outbox/routine_incident.rs src/server/outbox_actionable_delivery/routine_incident.rs src/services/discord/outbound/manual_delivery/routine_incident_nonce.rs -->
+<!-- doc-path-refs: proposed src/services/routines/discord_log/failure_escalation.rs -->

@@ -93,7 +93,7 @@ pub(in crate::services::discord) fn session_bound_discord_delivery_enabled() -> 
     SESSION_BOUND_DISCORD_DELIVERY_ENABLED.load(Ordering::Acquire)
 }
 
-#[allow(dead_code)] // #3034: #3041 lease-free route-decision pinned by unit tests (prod uses `_with_lease`).
+#[cfg(test)]
 fn session_bound_terminal_delivery_route_decision(
     inflight: Option<&InflightTurnState>,
     tmux_session_name: &str,
