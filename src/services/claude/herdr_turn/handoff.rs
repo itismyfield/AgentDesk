@@ -52,13 +52,6 @@ pub(super) fn launched_source(
     ports: &dyn HerdrTurnPorts,
 ) -> Result<Attached, String> {
     use crate::db::dispatched_sessions::provider_resume_fence;
-    let fence = runtime
-        .block_on(provider_resume_fence::load_for_owner_pg(
-            turn.pool,
-            &turn.owner,
-        ))
-        .map_err(|error| launch_error("resume_fence", error))?;
-    let force_fresh = turn.force_fresh || fence.is_some();
     let host = ports.launch_host().ok_or("herdr turn: no launch host")?;
     let working_dir = Path::new(turn.working_dir);
     let hook_endpoint = turn
@@ -71,6 +64,13 @@ pub(super) fn launched_source(
         .map_err(|e| launch_error("auth_overlay", e))?;
     let auth = crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay)
         .map_err(|e| launch_error("auth_overlay", e))?;
+    let fence = runtime
+        .block_on(provider_resume_fence::load_for_owner_pg(
+            turn.pool,
+            &turn.owner,
+        ))
+        .map_err(|error| launch_error("resume_fence", error))?;
+    let force_fresh = turn.force_fresh || fence.is_some();
     let mut earlier = ports.earlier_tmux(logical);
     let judged = |earlier: &mut dyn EarlierExecution| {
         let (owner, row) = (&turn.owner, turn.row);
