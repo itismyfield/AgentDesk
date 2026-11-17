@@ -921,9 +921,11 @@ fn execution_gone(terminal: Option<bool>) {
             })
         });
         let notice = super::super::live_end::LiveEnd::notice();
+        let mut next_message = None;
         if terminal.is_none() {
             let next = call_source(&app, "start", "after-execution-gone-machine", "api").await;
             assert_eq!(next.0, StatusCode::OK, "{}", next.1);
+            next_message = Some(next.1["turn_id"].as_str().unwrap().rsplit(':').next().unwrap().parse::<u64>().unwrap());
             assert_eq!(fx.rig.sends().len(), before + 2, "the machine waits for its own turn");
             intake.mock.refuse_message_writes(true);
         }
@@ -993,6 +995,8 @@ fn execution_gone(terminal: Option<bool>) {
             {
                 let heads = heads.lock().unwrap();
                 assert_eq!(heads.len(), 2, "the next machine original has one paste and Enter");
+                assert_eq!(heads[0]["original"]["message_id"].as_u64(), next_message);
+                assert_eq!(heads[0]["original"]["author_is_bot"], true);
                 assert_eq!(heads[0]["attempt"]["target"]["execution_nonce"], *nonce);
                 assert_eq!(crate::services::claude_tui::host_input::busy::observed(heads[0]["attempt"]["nonce"].as_str().unwrap()), 0);
             }
