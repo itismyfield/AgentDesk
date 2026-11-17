@@ -12,7 +12,7 @@ fn fence_envelope(
     fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
     fs::write(marker, &prepared.context.execution_nonce).unwrap();
     HookBindingEnvelope {
-        context: CapturedContext::Captured(prepared.context),
+        context: CapturedContext::Captured(prepared.context.into()),
         observed: Default::default(),
     }
 }

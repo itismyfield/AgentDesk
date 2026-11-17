@@ -54,6 +54,7 @@ pub(super) async fn herdr_force_kill(
     let expected = Expected {
         owner: record.owner,
         dispatch: dispatch.clone(),
+        captured_dispatch: true,
     };
     let bound = (request, expected);
     let pool = prepared.pool.clone();

@@ -995,6 +995,7 @@ mod tests {
                 provider_root: None,
                 first_prompt_digest: None,
                 source_policy: None,
+                resume_start: None,
             };
             let own = crate::services::tui_prompt_dedupe::binding_context::context_path(
                 "claude",

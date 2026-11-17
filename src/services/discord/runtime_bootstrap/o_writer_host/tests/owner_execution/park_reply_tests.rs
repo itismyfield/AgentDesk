@@ -126,6 +126,7 @@ async fn reply_scenario(restart: bool, dormant: bool) {
         provider_root: Some(home.join("projects")),
         first_prompt_digest: None,
         source_policy: None,
+        resume_start: None,
     })
     .unwrap();
     let marker = crate::services::tmux_common::session_temp_path(&pane, "spawn_nonce");

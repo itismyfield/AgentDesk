@@ -1,0 +1,93 @@
+---
+title: "Herdr restart B ports: immediate clear epoch, drain earlier effect grants"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Restart
+    lg1: Owner
+    lg2: Path to the AcceptedInputResolves or RequestResolves or RestartAvailable bug
+    lg3: Repeats forever, so AcceptedInputResolves or RequestResolves or RestartAvailable breaks
+  }
+  class lg0 blue
+  class lg1 purple
+  class lg2 bugPath
+  class lg3 repeats
+  s0: Old session and a queued input#59; initial claim claimed
+  s1: Seed committed#59; gate holds it#59; initial claim claimed
+  s2: Old session and a queued input#59; initial claim prepared
+  s3: Restart holds the transition and fence#59; initial claim claimed
+  s4: Seed committed#59; gate holds it#59; initial claim prepared
+  s5: Old session#59; an input is in flight to it#59; initial claim reserved
+  s6: Exact close confirmed#59; retire and settle#59; initial claim claimed
+  s7: Restart holds the transition and fence#59; initial claim prepared
+  s8: Seed committed#59; gate holds it#59; initial claim reserved
+  s9: Old execution retired#59; exclusion still held#59; initial claim claimed
+  s10: Exact close confirmed#59; retire and settle#59; initial claim prepared
+  s11: Restart holds the transition and fence#59; initial claim reserved
+  s12: Exclusion released#59; reply pending#59; initial claim claimed
+  s13: Old execution retired#59; exclusion still held#59; initial claim prepared
+  s14: Exact close confirmed#59; retire and settle#59; initial claim reserved
+  s15: Seed waits for the owner#59; initial claim claimed
+  s16: Exclusion released#59; reply pending#59; initial claim prepared
+  s17: Old execution retired#59; exclusion still held#59; initial claim reserved
+  s18: Seed waits for the owner#59; initial claim prepared
+  s19: Exclusion released#59; reply pending#59; initial claim reserved
+  s20: Seed waits for the owner#59; initial claim reserved
+  [*] --> s0
+  s0 --> s1: Commit the seed original (acceptance)
+  s0 --> s2: Read the fixed head and followers
+  s1 --> s3: Terminate takes transition and fence
+  s1 --> s4: Read the fixed head and followers
+  s2 --> s4: Commit the seed original (acceptance)
+  s2 --> s5: Reserve exactly the claim's ordered originals
+  s3 --> s6: Close only the captured pane
+  s3 --> s7: Read the fixed head and followers
+  s4 --> s7: Terminate takes transition and fence
+  s4 --> s8: Reserve exactly the claim's ordered originals
+  s5 --> s8: Commit the seed original (acceptance)
+  s6 --> s9: Retire CAS and settle the old turn
+  s6 --> s10: Read the fixed head and followers
+  s7 --> s10: Close only the captured pane
+  s7 --> s11: Reserve exactly the claim's ordered originals
+  s8 --> s11: Terminate takes transition and fence
+  s9 --> s12: Disconnect keeping selector, release, wake
+  s9 --> s13: Read the fixed head and followers
+  s10 --> s13: Retire CAS and settle the old turn
+  s11 --> s14: Close only the captured pane
+  s12 --> s15: Reply to the command
+  s12 --> s16: Read the fixed head and followers
+  s13 --> s16: Disconnect keeping selector, release, wake
+  s14 --> s17: Retire CAS and settle the old turn
+  s15 --> s18: Read the fixed head and followers
+  s16 --> s18: Reply to the command
+  s17 --> s19: Disconnect keeping selector, release, wake
+  s19 --> s20: Reply to the command
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s2 blue
+  class s2 bugPath
+  class s3 blue
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s6 blue
+  class s7 blue
+  class s7 bugPath
+  class s8 blue
+  class s9 blue
+  class s10 blue
+  class s10 bugPath
+  class s11 blue
+  class s12 blue
+  class s13 blue
+  class s13 bugPath
+  class s14 blue
+  class s15 purple
+  class s16 blue
+  class s16 bugPath
+  class s17 blue
+  class s18 purple
+  class s18 repeats
+  class s19 blue
+  class s20 purple

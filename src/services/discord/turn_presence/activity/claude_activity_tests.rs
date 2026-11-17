@@ -108,7 +108,7 @@ impl Rig {
     }
     async fn hook_payload(&self, kind: &str, payload: Value) {
         let envelope = context::HookBindingEnvelope {
-            context: context::CapturedContext::Captured(self.ctx.clone()),
+            context: context::CapturedContext::Captured(self.ctx.clone().into()),
             observed: context::ObservedHookProcess::default(),
         };
         let response =

@@ -151,6 +151,7 @@ impl PromotionRig {
             provider_root: None,
             first_prompt_digest: None,
             source_policy: None,
+            resume_start: None,
         })
         .unwrap();
         let marker = prepared
@@ -604,6 +605,7 @@ async fn key_promotion_synthetic_scope_does_not_publish_canonical_registration_p
         provider_root: None,
         first_prompt_digest: None,
         source_policy: None,
+        resume_start: None,
     };
     created(&context).unwrap();
     drop(scope);
@@ -671,6 +673,7 @@ async fn key_promotion_registration_conflict_keeps_replaced_incarnation_pg() {
             provider_root: None,
             first_prompt_digest: None,
             source_policy: None,
+            resume_start: None,
         })
         .unwrap()
     };

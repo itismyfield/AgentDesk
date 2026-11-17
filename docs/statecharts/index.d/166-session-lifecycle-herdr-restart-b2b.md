@@ -1,0 +1,2 @@
+key: 166-session-lifecycle-herdr-restart-b2b
+| `session-lifecycle` (Herdr B2b seed join/greeting, #8128) | B2a `40e9c95b10` + B2b working tree | Seed joins only the successor its own attempt launched, else visible refusal; Ready implies exactly one greeting | 65 cfg matched65/65, 28 GREEN+37 expected RED; 2 new cause cfgs (JoinForeign, JoinHeld), SeedBehind gains RestartAvailable. Model only, production PASS0. [B2b report](session-lifecycle/herdr-restart-owner-b2b.report.md). |

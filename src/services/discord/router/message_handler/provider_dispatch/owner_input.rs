@@ -178,6 +178,17 @@ pub(in crate::services::discord) fn owner_drive(
         Box::pin(async move {
             use crate::services::discord::queue_io::input_ingress as ingress;
             let original = front.clone();
+            #[cfg(unix)]
+            if runtime.as_ref().is_some_and(|shared| {
+                crate::services::discord::queue_io::input_owner::restart_gate::inflight(
+                    provider.as_str(),
+                    &shared.token_hash,
+                    channel,
+                )
+            }) {
+                hold_start(&mailbox, ChannelId::new(channel), &front).await;
+                return Err(WRITER_HELD.into());
+            }
             if crate::services::discord::router::intake_dispatch::writer_boot_held(
                 &provider, channel,
             )
@@ -590,6 +601,12 @@ impl OwnerTurn {
         self.claim.front()
     }
 
+    /// Whether this turn starts the greeting an authorized restart queued.
+    #[cfg(test)]
+    pub(in crate::services::discord) fn restart_seed(&self) -> bool {
+        self.origin == InputOrigin::RestartSeed
+    }
+
     /// No effect began: leave the original at the owner's front until another real wake.
     pub(in crate::services::discord) fn defer_before_submit(self, reason: &str) {
         let _ = self.settled.send(Err(effect::unsent(reason.into())));
@@ -969,6 +986,10 @@ async fn start_idle(
     .await?;
     // A start waits unclaimed behind a turn it did not start; that turn's idle wakes the owner.
     let wait = match &kept {
+        // The greeting's permit, not a tmux pane read, decides when it may start.
+        Some(context) if InputOrigin::from_context(Some(context)) == InputOrigin::RestartSeed => {
+            Wait::Go
+        }
         Some(context) if !InputOrigin::from_context(Some(context)).is_person() => {
             start_waits(&shared, channel, context).await
         }
@@ -989,6 +1010,8 @@ async fn start_idle(
     let (settled, answer) = tokio::sync::oneshot::channel();
     let origin = InputOrigin::from_context(kept.as_ref());
     let failed = super::start_failure::Failure::claimed(&mailbox, &claim);
+    let permit = super::start_failure::greeting_permit;
+    let failed = permit(&shared, channel, kept.as_ref(), failed).await?;
     let refusal = std::sync::Arc::new(Mutex::new(None));
     let owner = OwnerTurn {
         mailbox,
@@ -1271,8 +1294,15 @@ pub(super) fn execute_owned(
             }
         }
     });
+    // Only the greeting of an explicit restart carries its operation to a Codex launch.
+    let restart = (origin == InputOrigin::RestartSeed)
+        .then(|| claim.front().0.clone())
+        .flatten();
+    let as_restart = crate::services::codex::herdr_turn::restart_intent::scope;
     match registered {
-        Ok(owner) => execute_front(turn, sender, claim, owner, settled),
+        Ok(owner) => as_restart(restart, || {
+            execute_front(turn, sender, claim, owner, settled)
+        }),
         Err(error) => {
             let _ = settled.send(Err(error.clone()));
             Err(error)
