@@ -443,7 +443,7 @@ fn relevant(
     if attempt["target"]["execution_nonce"] == origin.execution_nonce {
         return Relevance::Related;
     }
-    context_observation::resumed_execution(
+    resumed_execution(
         &attempt["target"],
         origin,
         channel,
@@ -451,6 +451,55 @@ fn relevant(
         registration["frame"]["class_hash"].as_str(),
         observations,
     )
+}
+
+fn resumed_execution(
+    target: &serde_json::Value,
+    origin: &NoticeOrigin,
+    channel: u64,
+    executions: &mut Contexts,
+    frame: Option<&str>,
+    observations: &mut context_observation::Observations,
+) -> Relevance {
+    use crate::services::tui_prompt_dedupe::binding_context;
+    let Some(nonce) = target["execution_nonce"].as_str() else {
+        return Relevance::Uncertain;
+    };
+    let Ok(path) = binding_context::context_path("claude", nonce) else {
+        return Relevance::Uncertain;
+    };
+    let read = observations.observe(&path, nonce);
+    let observed = executions
+        .entry(path)
+        .or_insert_with(|| ContextObservation {
+            stamp: read.stamp.clone(),
+            unavailable: read.unavailable,
+            changed: false,
+            frames: HashSet::new(),
+        });
+    observed.unavailable |= read.unavailable;
+    if let Some(frame) = frame {
+        observed.frames.insert(frame.into());
+    }
+    if read.unavailable {
+        return Relevance::Uncertain;
+    }
+    let Some(context) = &read.context else {
+        return Relevance::Uncertain;
+    };
+    // The attachment's nonce stays historical; the immutable launch must name this source.
+    if target["host"] == "tmux"
+        && context.tmux_session == origin.logical_session
+        && context.channel_id == Some(channel)
+        && target["root"] == context.owner_runtime_root
+        && matches!(context.launch_mode.as_str(), "resume" | "fresh")
+        && context.expected_native_session_id.as_deref()
+            == Some(origin.record.source.session_id.as_str())
+    {
+        Relevance::Related
+    } else {
+        Relevance::Unrelated
+    }
 }
 
 fn historical_match(
