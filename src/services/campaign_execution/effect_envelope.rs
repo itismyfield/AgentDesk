@@ -3,9 +3,9 @@ use super::host_gate::{
     EffectAuthority, EffectEnvelope, HostNodeFence, HostStop, PhaseBinding, RunFence,
 };
 use super::model::{
-    ActionKind, ActionState, AttemptBinding, CampaignState, Rejection, RejectionCode, Run,
+    ActionKind, ActionState, AttemptBinding, CampaignState, Rejection, RejectionCode, Run, StopMode,
 };
-use super::stage_fsm::validate_verification_start;
+use super::stage_fsm::{provisional_finish_actions, validate_verification_start};
 use super::verification_run::{BoundInput, CurrentFence, Digest, PhaseAdmission, digest_of};
 
 fn reject<T>(code: RejectionCode) -> Result<T, Rejection> {
@@ -161,13 +161,22 @@ pub fn host_fences(
     if !state.nodes.contains_key(node_id) {
         return reject(RejectionCode::StaleBinding);
     }
-    let stop = run.stop.as_ref().map(|stop| HostStop {
-        mode: stop.mode,
-        finish_actions: stop
-            .finish_grants
-            .iter()
-            .flat_map(|g| g.phase_actions.iter().cloned())
-            .collect(),
+    let stop = run.stop.as_ref().map(|stop| {
+        let mut fence = HostStop {
+            mode: stop.mode,
+            finish_actions: stop
+                .finish_grants
+                .iter()
+                .flat_map(|g| g.phase_actions.iter().cloned())
+                .collect(),
+        };
+        // A late launch receipt can confirm candidates at the current stop version.
+        if stop.mode == StopMode::FinishStage {
+            fence
+                .finish_actions
+                .extend(provisional_finish_actions(state, run));
+        }
+        fence
     });
     let fence = run.fences.get(node_id).cloned().unwrap_or_default();
     Ok((

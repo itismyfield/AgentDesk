@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::evidence_gate::{GATE_RULE_VERSION, GateReason};
 use super::model::{AttemptBinding, CampaignState, Role};
 use super::profile::{ObservationTarget, TargetObservation};
-use super::review_gate::{ReviewEvidence, StagePrerequisite};
+use super::review_gate::{ReviewEvidence, ReviewStatus, ScopeTest, StagePrerequisite};
 use super::verification_run::{Digest, VerificationCollection, VerificationRun, digest_of};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,6 +13,7 @@ pub enum EvidenceSource {
     BoundTui,
     ServerRunner,
     ServerObserver,
+    ServerReview,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +83,8 @@ pub enum EvidencePayload {
         requested: ObservationTarget,
         observation: TargetObservation,
     },
+    ReviewResult(Box<ReviewStatus>),
+    ReviewScope(Box<ScopeTest>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +118,23 @@ pub enum EvidenceError {
 }
 
 impl EvidenceEnvelope {
+    pub fn from_review(
+        binding: &AttemptBinding,
+        pin: &str,
+        action_id: &str,
+        payload: EvidencePayload,
+        at: DateTime<Utc>,
+    ) -> Result<Self, EvidenceError> {
+        let id = match &payload {
+            EvidencePayload::ReviewResult(_) => format!("review-result:{action_id}"),
+            EvidencePayload::ReviewScope(_) => {
+                let digest = digest_of(&payload).map_err(|_| EvidenceError::Encoding)?;
+                format!("review-scope:{action_id}:{digest}")
+            }
+            _ => return Err(EvidenceError::Encoding),
+        };
+        Self::new(id, binding, pin, EvidenceSource::ServerReview, payload, at)
+    }
     fn new(
         evidence_id: String,
         binding: &AttemptBinding,
@@ -281,6 +301,35 @@ pub fn admit(
             Ok(()) => decide(EvidenceStatus::Accepted, Vec::new(), Vec::new()),
             Err(_) => reject(GateReason::TargetMismatch),
         },
+        (EvidenceSource::ServerReview, payload) => {
+            let observed = run.reviews.iter().any(|(id, job)| {
+                run.actions
+                    .get(id)
+                    .is_some_and(|action| action.binding == *binding)
+                    && job.request.pin_hash == envelope.pin_hash
+                    && match payload {
+                        EvidencePayload::ReviewResult(status) => {
+                            job.status == **status
+                                && matches!(
+                                    job.status,
+                                    ReviewStatus::Received { .. } | ReviewStatus::Failed { .. }
+                                )
+                                && envelope.evidence_id == format!("review-result:{id}")
+                        }
+                        EvidencePayload::ReviewScope(test) => {
+                            job.scope_tests.get(&test.scope) == Some(test.as_ref())
+                                && envelope.evidence_id
+                                    == format!("review-scope:{id}:{}", envelope.payload_digest)
+                        }
+                        _ => false,
+                    }
+            });
+            if observed {
+                decide(EvidenceStatus::Accepted, Vec::new(), Vec::new())
+            } else {
+                reject(GateReason::ResultMismatch(envelope.evidence_id.clone()))
+            }
+        }
         _ => reject(GateReason::SourceMismatch),
     }
 }
