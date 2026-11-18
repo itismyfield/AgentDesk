@@ -5,7 +5,7 @@ import * as api from "../api/client";
 import type { Agent, CompanySettings, DashboardStats, Department, DispatchedSession } from "../types";
 import type { Notification } from "../components/NotificationCenter";
 import type { AgentManagerTab } from "../components/agent-manager/useAgentManagerController";
-import { DEFAULT_ROUTE_PATH, LEGACY_ROUTE_REDIRECTS, PRIMARY_ROUTES } from "./routes";
+import { APP_ROUTES, DEFAULT_ROUTE_PATH, LEGACY_ROUTE_REDIRECTS } from "./routes";
 import HomeOverviewPage from "./HomeOverviewPage";
 
 export interface AppShellRoutesContext {
@@ -39,6 +39,7 @@ const RoutinesPageView = lazy(() => import("../components/RoutinesPageView"));
 const CampaignsPanel = lazy(() => import("../components/campaigns/CampaignsPanel"));
 const AgentManagerView = lazy(() => import("../components/AgentManagerView"));
 const SettingsView = lazy(() => import("../components/SettingsView"));
+const AuditPageView = lazy(() => import("../components/audit/AuditPageView"));
 
 export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) {
   const {
@@ -121,6 +122,7 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
           </div>
         }
       />
+      <Route path="/audit" element={<AuditPageView isKo={isKo} />} />
       <Route path="/ops" element={<OpsPageView wsConnected={wsConnected} isKo={isKo} />} />
       <Route
         path="/settings"
@@ -136,7 +138,7 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
       {LEGACY_ROUTE_REDIRECTS.map((redirect) => (
         <Route key={redirect.path} path={redirect.path} element={<Navigate replace to={redirect.to} />} />
       ))}
-      {PRIMARY_ROUTES.flatMap((route) =>
+      {APP_ROUTES.flatMap((route) =>
         (route.aliases ?? []).map((alias) => (
           <Route key={`${route.id}:${alias}`} path={alias} element={<Navigate replace to={route.path} />} />
         )),

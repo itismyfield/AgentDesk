@@ -1,12 +1,20 @@
-import { lazy, Suspense } from "react";
+import { createElement, lazy, Suspense } from "react";
 
 import { ToastOverlay } from "../components/NotificationCenter";
 import { AppShortcutHelpModal } from "./AppShortcutHelpModal";
 import { AppTweaksPanel } from "./AppTweaksPanel";
-import { PALETTE_ROUTES } from "./routes";
+import { PRIMARY_ROUTES } from "./routes";
+import { iconForRoute } from "./shellRouteIcons";
 
 const AgentInfoCard = lazy(() => import("../components/agent-manager/AgentInfoCard"));
 const CommandPalette = lazy(() => import("../components/CommandPalette"));
+
+const PALETTE_ROUTES = PRIMARY_ROUTES.map((route) => ({
+  id: route.path,
+  labelKo: route.labelKo,
+  labelEn: route.labelEn,
+  icon: createElement(iconForRoute(route.id), { size: 16, "aria-hidden": true }),
+}));
 
 export default function AppShellOverlays({ ctx }: { ctx: any }) {
   const {

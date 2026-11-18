@@ -299,12 +299,12 @@ export default function AppShell({
           currentRouteId={currentRoute?.id ?? null}
           iconForRoute={iconForRoute}
           isKo={isKo}
-          navigateToRoute={navigateToRoute}
           routeBadge={sidebarBadgeForRoute}
           routes={PRIMARY_ROUTES}
           sections={SIDEBAR_SECTION_ORDER}
           setAgentsPageTab={setAgentsPageTab}
           wsConnected={wsConnected}
+          wsLastEventTs={wsLastEventTs}
         />
       )}
 
