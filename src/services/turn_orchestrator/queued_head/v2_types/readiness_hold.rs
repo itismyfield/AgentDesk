@@ -1,7 +1,6 @@
 //! Durable records of a readiness hold on the owner's unattempted front and of its refusal without
 //! an attempt; neither keeps a body or a readiness proof.
-use super::super::QueueIdentity;
-use super::{NoticeIntent, RefusedMember};
+use super::{NoticeIntent, QueueIdentity, RefusedMember};
 use serde::{Deserialize, Serialize};
 
 /// The one deadline the owner fixed when readiness first held this unstarted original.
