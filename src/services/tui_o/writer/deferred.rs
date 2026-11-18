@@ -231,7 +231,7 @@ fn latest_progress<I: HostIo>(waiting: &Waiting<'_, I>) -> Option<Progress> {
 /// Retries until the channel commits or is left to Legacy; a late reservation whose source moves
 /// rebases. `refused` is the last refusal and `seq` the log entry its read ended at.
 pub(super) async fn retry<I: HostIo>(
-    waiting: Waiting<'_, I>,
+    mut waiting: Waiting<'_, I>,
     refused: Refused,
     seq: u64,
 ) -> Retried {
@@ -299,6 +299,13 @@ pub(super) async fn retry<I: HostIo>(
             }
             Err(_) => continue,
         };
+        if waiting.late {
+            if let Some(rebased) =
+                adoption::ChildDebt::refresh(&mut waiting, &mut sample, &observed).await
+            {
+                return Retried::Rebase(rebased);
+            }
+        }
         if let Some(rebased) = rebased(&waiting, &observed, sample.as_ref()) {
             return Retried::Rebase(rebased);
         }
@@ -319,6 +326,9 @@ pub(super) async fn retry<I: HostIo>(
                 return Retried::Rebase(rebased);
             }
             if let Some(detail) = rotation(&waiting, &observed) {
+                if super::late_adopt::child_run::normalize(&waiting, &observed) {
+                    return Retried::Left;
+                }
                 release(candidate, &alarms, channel, &detail);
                 return Retried::Left;
             }
@@ -474,6 +484,14 @@ async fn commit<I: HostIo>(
     current: Option<&(SourceId, String)>,
 ) -> Result<(), Refused> {
     let (io, channel, provider) = (waiting.io, waiting.channel, waiting.provider);
+    let debts = adoption::ChildDebt::pin(
+        waiting.candidate,
+        waiting.legacy.clone(),
+        io.bindings(channel, provider),
+        channel,
+    )
+    .await
+    .map_err(Refused::retry)?;
     if waiting.late && !io.late_adopt_enabled() {
         return Err(Refused::retry("late adoption disabled before publication"));
     }
@@ -518,8 +536,11 @@ async fn commit<I: HostIo>(
                 if waiting.late {
                     let observed =
                         events(waiting).map_err(|error| Refused::new(Hold::Final, error))?;
+                    debts
+                        .recheck(&observed, waiting.candidate)
+                        .map_err(Refused::retry)?;
                     if let Some(detail) = rotation(waiting, &observed) {
-                        return Err(Refused::new(Hold::Final, detail));
+                        return Err(Refused::new(Hold::Rotation(observed), detail));
                     }
                 }
                 if waiting.candidate.sends() != fence_sends {
@@ -722,6 +743,18 @@ fn leaves<I: HostIo>(waiting: &Waiting<'_, I>, alarms: &I::Alarms, again: &Refus
             alarms,
             waiting.channel,
             &format!("first activation: {again}"),
+        );
+        return true;
+    }
+    if let Hold::Rotation(events) = &again.hold {
+        if super::late_adopt::child_run::normalize(waiting, events) {
+            return true;
+        }
+        release(
+            waiting.candidate,
+            alarms,
+            waiting.channel,
+            &again.to_string(),
         );
         return true;
     }

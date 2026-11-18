@@ -251,6 +251,9 @@ jobs:
             # PR-time Windows lane fail closed. Keep the broad positive list in
             # sync with `rust_compile` and document every relay exception.
             cross_os_rust:
+              - 'src/services/engine_runtime/mod.rs'
+              - 'src/services/engine_runtime/relay_state.rs'
+              - 'src/services/engine_runtime/relay_state/coord.rs'
               - 'src/services/decision_gate/**'
               - 'scripts/ci/run-writer-namespace-windows-targets.sh'
               - 'scripts/exact_rust_test_proof.py'
@@ -295,6 +298,7 @@ jobs:
               # session_host/'s TmuxHost has a not(unix) stub Windows compiles.
               - 'src/services/qwen/**'
               - 'src/services/session_host/**'
+              - 'src/services/session_resume/background.rs'
               # The Herdr close owner is unix-gated production code.
               - 'src/services/termination_audit/**'
               - 'src/services/tmux_common/runtime_hint_fence.rs'
@@ -368,6 +372,8 @@ jobs:
               - 'src/services/discord/runtime_bootstrap/**'
               - 'src/services/discord/runtime_store.rs'
               - 'src/services/discord/session_idle_cleanup.rs'
+              - 'src/services/discord/session_locator.rs'
+              - 'src/services/discord/session_runtime/**'
               - 'src/services/discord/session_transition.rs'
               - 'src/services/discord/settings/**'
               - 'src/services/discord/status_panel_orphan_store_tests.rs'
@@ -470,6 +476,8 @@ jobs:
 
       - name: dashboard build/test
         run: ./scripts/verify-dashboard.sh
+        env:
+          DASHBOARD_AUDIT_WAIVER: "GHSA-fc5q-39xc-vjpf picomatch ReDoS: no patched release; dev-only build tooling (vite/vitest), not in the browser bundle. Remove when patched (#8236)"
 
   # Cross-OS Rust compile lane. The required-context judge makes this
   # conditionally required when `cross_os_rust` is true; unrelated paths may
@@ -662,6 +670,7 @@ jobs:
       actions: read
       contents: read
     env:
+      CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
@@ -1072,7 +1081,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh 8b08f701f8939c3f1ab0266e6d737682cdcfb4a10fd2d99047d39dcc4cd22153
+          pin scripts/check-ci-runner-hardening.sh 86ea8892cf5d3c9bf3bc28e204ebe56e132e6c6ac0dbf2f9bc5abc55c2d8418d
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1720,7 +1729,7 @@ jobs:
               - 'src/services/discord/session_relay_sink/terminal_handoff.rs'
               - 'src/services/discord/session_relay_sink/delivery_orchestration_tests.rs'
               - 'src/services/discord/session_relay_sink/tests.rs'
-              - 'src/services/discord/tmux_watcher_registry/fences.rs'
+              - 'src/services/engine_runtime/relay_state.rs'
               - 'src/services/discord/tmux_watcher_registry.rs'
               - 'src/services/discord/tmux_watcher_registry_restore_tests.rs'
               - 'src/services/discord/destructive_cancel_gate.rs'

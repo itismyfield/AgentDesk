@@ -195,11 +195,17 @@ pub(crate) fn load_restored_provider_session_id(
     token_hash: &str,
     provider: &ProviderKind,
     channel_name: &str,
+    channel_id: u64,
 ) -> Option<String> {
     let tmux_name = provider.build_tmux_session_name(channel_name);
-    let session_keys = super::super::super::adk_session::build_session_key_candidates(
-        token_hash, provider, &tmux_name,
-    );
+    let session_keys = super::super::super::session_locator::candidates(
+        pg_pool,
+        token_hash,
+        provider,
+        &tmux_name,
+        Some(channel_id),
+    )
+    .ok()?;
 
     if let Some(pg_pool) = pg_pool {
         let session_keys = session_keys.clone();

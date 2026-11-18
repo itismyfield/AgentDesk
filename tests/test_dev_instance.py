@@ -39,13 +39,35 @@ def profile():
     }
 
 
+def short_temporary_directory(prefix="d-"):
+    return tempfile.TemporaryDirectory(prefix=prefix, dir="/private/tmp" if sys.platform == "darwin" else "/tmp")
+
+
+def org_yaml_documents(org):
+    import yaml
+    text = yaml.safe_dump(org, sort_keys=False)
+    parts = text.split('peer_agents: false', 2)
+    assert len(parts) == 3
+    return {
+        'writer_mapping': text,
+        'root_duplicate': 'version: 999\n'+text,
+        'nested_duplicate': text.replace('    peer_agents: false', '    peer_agents: true\n    peer_agents: false', 1),
+        'legacy_boolean': text.replace('peer_agents: false', 'peer_agents: off', 1),
+        'explicit_legacy_boolean': text.replace('peer_agents: false', 'peer_agents: !!bool off', 1),
+        'anchor': text.replace('version: 1', 'version: &version 1', 1),
+        'alias': parts[0]+'peer_agents: &peers false'+parts[1]+'peer_agents: *peers'+parts[2],
+        'merge': '<<: {}\n'+text,
+    }
+
+
 class InstanceDeclarationTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="dev-instance-")
+        self.temporary = short_temporary_directory()
         self.addCleanup(self.temporary.cleanup)
         self.home = Path(self.temporary.name).resolve()
         self.base = self.home / ".adk/dev/instances"
-        self.base.mkdir(parents=True)
+        self.base.mkdir(parents=True, mode=0o700)
+        self.base.chmod(0o700)
         self.worktree = self.home / "worktree"
         self.worktree.mkdir()
         self.git("init", "-q")
@@ -81,6 +103,77 @@ class InstanceDeclarationTests(unittest.TestCase):
             "features": copy.deepcopy(manifest["profile"]["features"]),
             "host": "local", "execution_node": manifest["execution_node_id"],
         }
+
+    def test_short_fixture_uses_platform_socket_directory(self):
+        from unittest.mock import patch
+        marker = object()
+        for platform, expected in [('darwin', '/private/tmp'), ('linux', '/tmp')]:
+            with patch.object(sys, 'platform', platform), patch.object(tempfile, 'TemporaryDirectory', return_value=marker) as make:
+                self.assertIs(short_temporary_directory(), marker)
+                make.assert_called_once_with(prefix='d-', dir=expected)
+
+    def test_yaml_org_with_same_mapping_validates_and_down_removes_root(self):
+        import yaml
+        manifest=self.prepare()
+        root=self.base/self.instance_id
+        path=root/'config/org.yaml'
+        org=json.loads(path.read_text())
+        path.write_text(yaml.safe_dump(org,sort_keys=False))
+        try:actual=validate(self.base,self.instance_id,{})
+        except InstanceError as error:self.fail('equivalent YAML org rejected: '+str(error))
+        self.assertEqual(actual,manifest)
+        self.assertEqual(self.cli('validate','--instance',self.instance_id).returncode,0)
+        result=self.cli('down','--instance',self.instance_id)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertFalse(root.exists())
+
+    def test_org_yaml_rejects_duplicate_keys_legacy_booleans_and_references(self):
+        self.prepare()
+        root = self.base/self.instance_id
+        path = root/'config/org.yaml'
+        documents = org_yaml_documents(json.loads(path.read_text()))
+        for name, text in documents.items():
+            if name == 'writer_mapping':continue
+            with self.subTest(name=name):
+                path.write_text(text)
+                self.assertEqual(self.cli('validate','--instance',self.instance_id).returncode, 2)
+                self.assertEqual(self.cli('down','--instance',self.instance_id).returncode, 2)
+                self.assertTrue((root/'manifest.json').exists())
+
+    def test_org_yaml_accepts_native_boolean_spellings(self):
+        self.prepare()
+        root = self.base/self.instance_id
+        path = root/'config/org.yaml'
+        text = org_yaml_documents(json.loads(path.read_text()))['writer_mapping']
+        for spelling in ['false', 'False', 'FALSE']:
+            path.write_text(text.replace('peer_agents: false', 'peer_agents: '+spelling))
+            self.assertEqual(self.cli('validate','--instance',self.instance_id).returncode, 0)
+
+    def test_yaml_org_changed_keys_values_and_types_are_rejected(self):
+        import yaml
+        self.prepare()
+        root=self.base/self.instance_id
+        path=root/'config/org.yaml'
+        original=json.loads(path.read_text())
+        for mutate in [lambda org:org.update(extra='different'),
+                       lambda org:org['agents']['codex'].update(auth_profile='default'),
+                       lambda org:org.update(version='1')]:
+            org=copy.deepcopy(original);mutate(org)
+            path.write_text(yaml.safe_dump(org))
+            with self.assertRaises(InstanceError):validate(self.base,self.instance_id,{})
+            self.assertEqual(self.cli('down','--instance',self.instance_id).returncode,2)
+            self.assertTrue(path.exists())
+
+    def test_other_declaration_files_still_require_json(self):
+        import yaml
+        self.prepare()
+        root=self.base/self.instance_id
+        for name in ['manifest.json','receipt.json','config/agentdesk.yaml']:
+            path=root/name;before=path.read_text();value=json.loads(before)
+            try:
+                path.write_text(yaml.safe_dump(value))
+                with self.subTest(name=name),self.assertRaises(InstanceError):validate(self.base,self.instance_id,{})
+            finally:path.write_text(before)
 
     def test_declaration_records_private_local_targets_and_explicit_features(self):
         manifest = self.prepare()
@@ -172,10 +265,11 @@ class InstanceDeclarationTests(unittest.TestCase):
     def test_manual_herdr_owner_records_only_spawned_daemon_and_rejects_adoption(self):
         import socket
         from scripts.dev_instance.host import start_herdr, OWNER_FILE
-        short = tempfile.TemporaryDirectory(prefix="h-", dir="/private/tmp" if sys.platform == "darwin" else "/tmp")
+        short = short_temporary_directory(prefix="h-")
         self.addCleanup(short.cleanup)
         self.base = Path(short.name).resolve() / ".adk/dev/instances"
-        self.base.mkdir(parents=True)
+        self.base.mkdir(parents=True, mode=0o700)
+        self.base.chmod(0o700)
         manifest = self.prepare()
         root = Path(manifest["root"])
         os.utime(root / "herdr-home/config.toml", (1, 1))

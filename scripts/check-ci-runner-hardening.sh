@@ -765,7 +765,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 100, "job_sha256" => "bf68473d54f1d35e5c9a4d98c9cea97172cd77f9619e17ab9d01e4dd821cc30c",
+    "job_timeout_minutes" => 100, "job_sha256" => "16116225d470e755d37fd2ea628b26981ffbd51f4fd6945f178da22c2187c3b2",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
@@ -909,7 +909,7 @@ targets = {
     "needs" => "changes",
     "if" => "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "ae5797e4fcd5f28663d9eb28ba495823c5b45c7cb36189f31c52cbc2387c873d",
+    "job_sha256" => "908f9b201f7e773cff09cd266edaaa9055f223f3023132462072a4208bf64774",
     "job_timeout_minutes" => 60,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {
@@ -1424,7 +1424,7 @@ unless jobs.is_a?(Hash)
   exit 1
 end
 # Keep this explicit: deriving approval from workflow values would admit custom runners.
-HOSTED_RUNNER_LABELS = %w[ubuntu-latest ubuntu-22.04 macos-15 macos-latest windows-latest].freeze
+HOSTED_RUNNER_LABELS = %w[ubuntu-latest ubuntu-24.04 ubuntu-22.04 macos-15 macos-latest windows-latest].freeze
 
 def retired_runner_reference?(value, implicit_expression = false)
   case value

@@ -155,15 +155,9 @@ async fn start_reserved_headless_turn_admitted(
     let session_key = || headless_session_key(shared, channel_id, &provider, kept, label);
     let pool = shared.pg_pool.as_ref();
     let host = admission::refusal_before_start;
+    let standing = admission::Standing::of(kept, label, owner.is_some());
     if !prepared_herdr
-        && let Some(refusal) = host(
-            pool,
-            &provider,
-            channel_id.get(),
-            session_key,
-            metadata.as_ref(),
-        )
-        .await
+        && let Some(refusal) = host(pool, &provider, channel_id.get(), session_key, standing).await
     {
         #[cfg(unix)]
         if let Some(owner) = owner.as_ref() {
@@ -241,14 +235,7 @@ async fn start_reserved_headless_turn_admitted(
         return outcome;
     }
     if prepared_herdr
-        && let Some(refusal) = host(
-            pool,
-            &provider,
-            channel_id.get(),
-            session_key,
-            metadata.as_ref(),
-        )
-        .await
+        && let Some(refusal) = host(pool, &provider, channel_id.get(), session_key, standing).await
     {
         return Err(HeadlessTurnStartError::InvalidTarget(refusal.to_string()));
     }
@@ -443,7 +430,7 @@ async fn start_reserved_headless_turn_admitted(
     }
 
     let prompt_prep_started = std::time::Instant::now();
-    let (channel_name, tmux_session_name, category_name) = {
+    let (channel_name, mut tmux_session_name, category_name) = {
         let data = shared.core.lock().await;
         let channel_name = data
             .sessions
@@ -471,6 +458,11 @@ async fn start_reserved_headless_turn_admitted(
     let label = tmux_session_label.as_deref();
     let adk_session_key =
         headless_session_key(shared, channel_id, &provider, metadata.as_ref(), label).await;
+    let canonical_registration = super::super::super::session_locator::headless_registration(
+        &mut tmux_session_name,
+        adk_session_key.as_deref(),
+        headless_session_basis(metadata.as_ref(), label).is_none() && label.is_none(),
+    );
     if !turn_local_session
         && valid_routine_metadata(metadata.as_ref()).is_some()
         && let (Some(pool), Some(binding), Some(session_key)) = (
@@ -1003,7 +995,7 @@ async fn start_reserved_headless_turn_admitted(
         &mut inflight_state,
         &pending_uploads,
         &current_path,
-        &turn_host,
+        (&turn_host, standing),
     );
     let submission = crate::services::discord::inflight::install_managed_submission_boundary(
         &mut inflight_state,
@@ -1142,6 +1134,7 @@ async fn start_reserved_headless_turn_admitted(
                         super::provider_dispatch::execute(
                             super::provider_dispatch::StreamingTurn {
                                 pool: execution_pool.as_ref(),
+                                registration_origin: canonical_registration.then_some(false),
                                 shared: Some(&turn_shared),
                                 provider: &provider_for_blocking,
                                 prompt: &context_prompt,

@@ -34,11 +34,24 @@ pub(crate) struct Child {
     pub(crate) candidate: Candidate,
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static OWNER_STATE_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 impl Child {
     /// Who has the child's body now: O (`true`), or Legacy while a late reservation waits for its
     /// open turn. `None` is an undecided adoption, which is held and never handed to Legacy.
     pub(crate) fn body_owner(&self) -> Option<bool> {
-        self.body_owner_in(self.candidate.peek())
+        let state = self.candidate.lock();
+        #[cfg(test)]
+        OWNER_STATE_READ.with(|hook| {
+            let callback = hook.borrow_mut().take();
+            if let Some(callback) = callback {
+                callback();
+            }
+        });
+        self.body_owner_in(*state)
     }
 
     /// [`Self::body_owner`] for a `state` the caller read under the adoption's lock.
@@ -46,6 +59,7 @@ impl Child {
         match state {
             state if state.owned() => Some(true),
             Adoption::Deferred if self.candidate.late_adopt_origin() => Some(false),
+            Adoption::Released if self.candidate.legacy_run().is_some() => Some(false),
             _ => None,
         }
     }

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "37f500a211369d882e885198ccc5b7cd5226a6c1",
+  "measured_at_sha": "f4ddafe40c996270fbbc8d59dc584da71426c70e",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_bounded_runner_outside_adapter": {
@@ -127,7 +127,6 @@
         "src/services/discord/tmux_watcher/placeholder_reclaim.rs": 1,
         "src/services/discord/tmux_watcher/streaming_harness_tests.rs": 1,
         "src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs": 2,
-        "src/services/discord/tmux_watcher_registry.rs": 1,
         "src/services/discord/tmux_watcher_registry_restore_tests.rs": 1,
         "src/services/discord/tui_direct_pending_start/foreign_recovery.rs": 1,
         "src/services/discord/tui_prompt_relay/relay_e2e/n1a_turn_mode_tests.rs": 2,
@@ -138,7 +137,8 @@
         "src/services/discord/turn_presence/activity/unbound/midread_owner_tests.rs": 2,
         "src/services/discord/turn_presence/activity/unbound/watcher_runtime_tests.rs": 1,
         "src/services/discord/watchers/lifecycle/claims.rs": 3,
-        "src/services/discord/watchers/lifecycle/tests.rs": 1
+        "src/services/discord/watchers/lifecycle/tests.rs": 1,
+        "src/services/engine_runtime/relay_state.rs": 1
       }
     },
     "process_kill": {

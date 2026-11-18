@@ -13,7 +13,13 @@ use super::policy::DiscordOutboundPolicy;
 use super::result::DeliveryResult;
 use super::transport::{outbound_fingerprint, post_serenity_message_with_nonce};
 use super::{DiscordOutboundClient, shared_outbound_deduper};
+use crate::domain::conversation::{ConversationId, MessageRef};
+use crate::services::discord::id_bridge::{
+    conversation_from_discord, discord_channel_from_conversation, discord_message_from_ref,
+};
 use crate::services::discord::{SharedData, rate_limit_wait};
+
+pub(crate) mod recovery_notice;
 
 struct SerenityReferenceOutboundClient {
     http: Arc<serenity::Http>,
@@ -123,10 +129,8 @@ impl DiscordOutboundClient for SerenityReferenceOutboundClient {
         reference_message: &str,
     ) -> Result<String, DispatchMessagePostError> {
         let channel_id = parse_channel_id(target_channel)?;
-        let reference_channel_id = parse_channel_id(reference_channel)?;
-        let reference_message_id = parse_message_id(reference_message).map_err(|error| {
-            DispatchMessagePostError::new(DispatchMessagePostErrorKind::Other, error)
-        })?;
+        let (reference_channel_id, reference_message_id) =
+            parse_reference(reference_channel, reference_message)?;
         rate_limit_wait(&self.shared, channel_id).await;
         super::raw_output::request(
             channel_id,
@@ -163,10 +167,8 @@ impl DiscordOutboundClient for SerenityReferenceOutboundClient {
         enforce_nonce: bool,
     ) -> Result<String, DispatchMessagePostError> {
         let channel_id = parse_channel_id(target_channel)?;
-        let reference_channel_id = parse_channel_id(reference_channel)?;
-        let reference_message_id = parse_message_id(reference_message).map_err(|error| {
-            DispatchMessagePostError::new(DispatchMessagePostErrorKind::Other, error)
-        })?;
+        let (reference_channel_id, reference_message_id) =
+            parse_reference(reference_channel, reference_message)?;
         post_serenity_message_with_nonce(
             &self.http,
             &self.shared,
@@ -182,11 +184,27 @@ impl DiscordOutboundClient for SerenityReferenceOutboundClient {
 }
 
 fn parse_channel_id(raw: &str) -> Result<ChannelId, DispatchMessagePostError> {
-    raw.parse::<u64>().map(ChannelId::new).map_err(|error| {
+    let key = raw.parse::<u64>().map_err(|error| {
         DispatchMessagePostError::new(
             DispatchMessagePostErrorKind::Other,
             format!("invalid Discord channel id {raw}: {error}"),
         )
+    })?;
+    discord_channel_from_conversation(ConversationId::new(key)).map_err(|error| {
+        DispatchMessagePostError::new(DispatchMessagePostErrorKind::Other, error.to_string())
+    })
+}
+
+fn parse_reference(
+    raw_channel: &str,
+    raw_message: &str,
+) -> Result<(ChannelId, MessageId), DispatchMessagePostError> {
+    let reference = MessageRef {
+        conversation: conversation_from_discord(parse_channel_id(raw_channel)?),
+        raw: raw_message.to_owned(),
+    };
+    discord_message_from_ref(&reference).map_err(|error| {
+        DispatchMessagePostError::new(DispatchMessagePostErrorKind::Other, error.to_string())
     })
 }
 
@@ -214,6 +232,56 @@ fn dispatch_post_error(error: serenity::Error) -> DispatchMessagePostError {
 mod tests {
     use super::referenced_lifecycle_notice_nonce;
     use poise::serenity_prelude::{ChannelId, MessageId};
+
+    #[tokio::test]
+    async fn invalid_zero_destination_or_reference_fails_before_http() {
+        use super::*;
+        use crate::services::discord::outbound::raw_output::tests as fixture;
+        let mock = fixture::Mock::start(vec![fixture::reply(
+            "401 Unauthorized",
+            &[],
+            r#"{"message":"401: Unauthorized","code":0}"#,
+        )])
+        .await;
+        let client = SerenityReferenceOutboundClient {
+            http: Arc::new(fixture::client(&mock)),
+            shared: crate::services::discord::make_shared_data_for_tests_with_storage(None),
+        };
+        assert!(client.post_message("0", "body").await.is_err());
+        assert!(mock.requests().is_empty());
+        assert!(
+            client
+                .post_message_with_reference("0", "body", "7", "42")
+                .await
+                .is_err()
+        );
+        assert!(mock.requests().is_empty());
+        assert!(
+            client
+                .post_message_with_reference_and_nonce("0", "body", "7", "42", "nonce", true)
+                .await
+                .is_err()
+        );
+        assert!(mock.requests().is_empty());
+        for (channel, message) in [("0", "42"), ("7", "0"), ("7", "opaque/α")] {
+            assert!(
+                client
+                    .post_message_with_reference("7", "body", channel, message)
+                    .await
+                    .is_err()
+            );
+            assert!(mock.requests().is_empty());
+            assert!(
+                client
+                    .post_message_with_reference_and_nonce(
+                        "7", "body", channel, message, "nonce", true
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(mock.requests().is_empty());
+        }
+    }
 
     #[tokio::test]
     async fn common_reference_posts_are_observed_once() {

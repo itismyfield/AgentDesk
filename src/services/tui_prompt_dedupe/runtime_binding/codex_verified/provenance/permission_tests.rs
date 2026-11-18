@@ -61,6 +61,7 @@ impl Fixture {
             provider_root: Some(sessions),
             first_prompt_digest: Some(format!("sha256:{}", "a".repeat(64))),
             source_policy: Some("verified".into()),
+            resume_start: None,
         };
         Self {
             context,

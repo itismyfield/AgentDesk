@@ -14,6 +14,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 struct Log {
+    on_read: Mutex<Option<Box<dyn FnMut() -> bool + Send>>>,
     channel: u64,
     events: Mutex<Vec<BindingEvent>>,
     notice: Option<watch::Sender<u64>>,
@@ -27,6 +28,7 @@ impl Log {
     }
     fn for_channel(closed: bool, channel: u64) -> Arc<Self> {
         Arc::new(Self {
+            on_read: Mutex::default(),
             channel,
             events: Mutex::default(),
             notice: (!closed).then(|| watch::channel(0).0),
@@ -48,6 +50,12 @@ impl BindingEvents for Log {
         assert_eq!(channel, self.channel);
         self.order.lock().unwrap().push("read");
         self.reads.fetch_add(1, Ordering::SeqCst);
+        let callback = self.on_read.lock().unwrap().take();
+        if let Some(mut callback) = callback {
+            if !callback() {
+                *self.on_read.lock().unwrap() = Some(callback);
+            }
+        }
         Ok(self
             .events
             .lock()
@@ -919,3 +927,9 @@ fn late_adopt_binding_baseline_at_boundary_zero_is_the_first_bind_ever_logged() 
     let back = vec![bound(1, a.clone()), bound(2, b), bound(3, a.clone())];
     assert_eq!(baseline(&back, 3), Some((a, 3)));
 }
+
+#[path = "late_adopt_childheld_tests.rs"]
+mod childheld;
+
+#[path = "late_adopt_child_boundary_tests.rs"]
+mod child_boundaries;

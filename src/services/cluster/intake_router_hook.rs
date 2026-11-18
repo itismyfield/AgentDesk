@@ -22,6 +22,10 @@ use crate::db::intake_outbox_status::IntakeOutboxStatus;
 use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use sqlx::PgPool;
 
+mod admission_policy;
+
+#[cfg(test)]
+mod admission_policy_pg_tests;
 #[cfg(test)]
 mod agent_execution_node_tests;
 #[cfg(test)]
@@ -153,25 +157,12 @@ pub(crate) async fn try_route_intake(
 }
 
 async fn route_intake(pool: &PgPool, ctx: &IntakeRouterContext<'_>) -> IntakeRouterDecision {
-    let requirements = match super::execution_requirements::for_channel(pool, ctx.policy_channel_id)
-        .await
-    {
+    let policy = match admission_policy::for_intake(pool, ctx.policy_channel_id, ctx.mode).await {
         Ok(policy) => policy,
-        Err(error) => return required_block(format!("execution policy lookup failed: {error}")),
+        Err(error) => return required_block(error),
     };
-    if !requirements.is_empty() && ctx.mode != IntakeRoutingMode::Enforce {
-        return required_block("hard execution requirements require enforce routing".into());
-    }
-    let agent_default =
-        match super::agent_execution_node::for_channel(pool, ctx.policy_channel_id).await {
-            Ok(node) => node,
-            Err(error) => {
-                return required_block(format!("agent execution node lookup failed: {error}"));
-            }
-        };
-    if agent_default.is_some() && ctx.mode != IntakeRoutingMode::Enforce {
-        return required_block("agent default execution node requires enforce routing".into());
-    }
+    let requirements = policy.requirements;
+    let agent_default = policy.agent_default;
     let explicit_node_override = ctx
         .node_override_instance_id
         .map(str::trim)

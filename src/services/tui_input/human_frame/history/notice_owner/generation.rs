@@ -5,6 +5,8 @@ use crate::services::tui_prompt_dedupe::binding_events;
 use tokio::time::{Duration, Instant};
 
 pub(crate) fn fingerprint(path: &Path) -> Option<Fingerprint> {
+    #[cfg(test)]
+    super::context_observation::tests::stat(path);
     Fingerprint::of(&std::fs::metadata(path).ok()?).ok()
 }
 
@@ -54,6 +56,7 @@ impl WorkCache {
                 .get(id)
                 .is_some_and(|e| !state.terminal(store.ledger(), id, e))
         });
+        let mut fingerprints = super::context_observation::Observations::default();
         let mut sources = HashMap::new();
         let mut selected = HashSet::new();
         for (id, evidence) in &state.evidence {
@@ -62,15 +65,14 @@ impl WorkCache {
             }
             let deps = sources.entry(&id.0).or_insert_with(|| {
                 let cursor = store.cursor(&id.0);
-                let mut contexts: Vec<_> = owners
-                    .scopes
-                    .iter()
-                    .filter(|s| s.origin.record.source == id.0)
-                    .flat_map(|s| s.executions.keys())
-                    .map(|p| (p.clone(), fingerprint(p)))
-                    .collect();
-                contexts.sort_by(|a, b| a.0.cmp(&b.0));
-                contexts.dedup_by(|a, b| a.0 == b.0);
+                let contexts = context_dependencies(
+                    owners
+                        .scopes
+                        .iter()
+                        .filter(|s| s.origin.record.source == id.0)
+                        .flat_map(|s| s.executions.keys()),
+                    &mut fingerprints,
+                );
                 Dependencies {
                     history: history.clone(),
                     native: fingerprint(&id.0.path),
@@ -113,17 +115,17 @@ impl WorkCache {
         selected: &HashSet<RecordId>,
         state: &crate::services::tui_o::store::ledger::input_notices::NoticeState,
     ) {
+        let mut fingerprints = super::context_observation::Observations::default();
         for id in selected {
             if let Some(kept) = self.records.get_mut(id) {
-                let mut contexts: Vec<_> = owners
-                    .scopes
-                    .iter()
-                    .filter(|s| s.origin.record.source == id.0)
-                    .flat_map(|s| s.executions.keys())
-                    .map(|p| (p.clone(), fingerprint(p)))
-                    .collect();
-                contexts.sort_by(|a, b| a.0.cmp(&b.0));
-                contexts.dedup_by(|a, b| a.0 == b.0);
+                let contexts = context_dependencies(
+                    owners
+                        .scopes
+                        .iter()
+                        .filter(|s| s.origin.record.source == id.0)
+                        .flat_map(|s| s.executions.keys()),
+                    &mut fingerprints,
+                );
                 kept.dependencies.contexts = contexts;
                 kept.revision = state.revision(id);
             }
@@ -152,3 +154,19 @@ impl WorkCache {
         }
     }
 }
+
+fn context_dependencies<'a>(
+    paths: impl Iterator<Item = &'a PathBuf>,
+    fingerprints: &mut super::context_observation::Observations,
+) -> Vec<(PathBuf, Option<Fingerprint>)> {
+    let mut paths: Vec<_> = paths.collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(|path| (path.clone(), fingerprints.stamp(path)))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests;

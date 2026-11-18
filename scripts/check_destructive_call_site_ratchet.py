@@ -271,7 +271,7 @@ PROCESS_PATTERN = re.compile(
 )
 REGISTRY_PATTERNS = {
     "direct_channel_remove": re.compile(
-        r"\btmux_watchers\s*\.\s*(?:remove|remove_locked)\s*\("
+        r"\b(?:tmux_watchers|watcher_registry)\s*\.\s*(?:remove|remove_locked)\s*\("
     ),
     "remove_if_current": re.compile(r"\bremove_tmux_session_if_current\s*\("),
     "cancel_and_remove_if_current": re.compile(
@@ -280,6 +280,8 @@ REGISTRY_PATTERNS = {
     "remove_locked_helper": re.compile(r"\bremove_tmux_session_locked\s*\("),
 }
 REGISTRY_OWNER = "src/services/discord/tmux_watcher_registry.rs"
+REGISTRY_STORAGE_OWNER = "src/services/engine_runtime/relay_state.rs"
+REGISTRY_OWNERS = frozenset((REGISTRY_OWNER, REGISTRY_STORAGE_OWNER))
 # #5071 relay-tail S4: the binder for `WatcherIdentityFence`, and (r2) the
 # chained binder for `TerminalDeliveryFence`.  Counted with the registry
 # categories, so the owner file's own definitions are excluded the same way.
@@ -774,8 +776,7 @@ def scan(repo_root: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
         warrant_found = len(DESTRUCTIVE_WARRANT_PATTERN.findall(production))
         if warrant_found:
             counts["destructive_warrant_bind"][rel] = warrant_found
-        # Widest surface first: this category is the only one that looks outside
-        # `src/services/discord/`.
+        # Row destruction and message operations are counted across src.
         if not rel.startswith(INFLIGHT_ROW_CLEAR_OWNER_PREFIX):
             clear_found = len(INFLIGHT_ROW_CLEAR_PATTERN.findall(production))
             if clear_found:
@@ -788,14 +789,13 @@ def scan(repo_root: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
             if message_found:
                 counts[category][rel] = message_found
 
-        if not rel.startswith("src/services/discord/"):
-            continue
-        process_found = len(PROCESS_PATTERN.findall(production))
-        if process_found:
-            counts["process_kill"][rel] = process_found
-        # Definitions and helper-to-helper composition live in this owner file;
-        # the #5071 map deliberately pins external removal consumers only.
-        if rel == REGISTRY_OWNER:
+        if rel.startswith("src/services/discord/"):
+            process_found = len(PROCESS_PATTERN.findall(production))
+            if process_found:
+                counts["process_kill"][rel] = process_found
+        # Registry APIs are services-visible. Count all consumers, excluding
+        # only the exact wrapper and storage owners' internal composition.
+        if rel in REGISTRY_OWNERS:
             continue
         registry_found = 0
         for name, pattern in REGISTRY_PATTERNS.items():

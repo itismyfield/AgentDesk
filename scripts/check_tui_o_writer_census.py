@@ -519,7 +519,7 @@ RAW_CLAIM_SITES: dict[str, tuple[str, ...]] = {
     # Re-exports only; a placement changes no adoption.
     "src/services/tui_o/cutover.rs": ("<module>",),
     # The writer host's once-per-channel actor slot, not an adoption.
-    "src/services/tui_o/writer/host.rs": ("start_managed",),
+    "src/services/tui_o/writer/host/managed_start.rs": ("claim",),
     # Claimed right before the first unconfirmed chunk's edit or post, across a resumable loop.
     "src/services/discord/health/recovery.rs": ("maybe_recover_completed_stale_leak",),
 }

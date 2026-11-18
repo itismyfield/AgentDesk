@@ -65,3 +65,39 @@ pub(crate) fn finalize_fallback_resolution(
         attempts,
     )
 }
+
+pub(super) fn resolve_provider_binary_set(provider: &str) -> ProviderResolutionSet {
+    if !crate::config::test_instance::environment::provider_resolution_allowed(provider)
+        .unwrap_or(false)
+    {
+        return ProviderResolutionSet::Failure(unresolved_provider_binary_with_error(
+            normalize_name(provider),
+            Vec::new(),
+            "test_instance_provider_disabled".into(),
+        ));
+    }
+    if let Some(ctx) = active_provider_context(provider) {
+        let provider = normalize_name(provider);
+        let resolution = resolve_provider_binary_for_context(&ctx);
+        if resolution
+            .source
+            .as_deref()
+            .is_some_and(|source| source.starts_with("registry:"))
+        {
+            return ProviderResolutionSet::Candidates(vec![resolution]);
+        }
+        return match resolve_provider_binary_legacy_set(&provider) {
+            LegacyProviderResolution::Candidates(candidates) => {
+                ProviderResolutionSet::Candidates(candidates)
+            }
+            LegacyProviderResolution::Failure(failure) => ProviderResolutionSet::Failure(failure),
+        };
+    }
+
+    match resolve_provider_binary_legacy_set(provider) {
+        LegacyProviderResolution::Candidates(candidates) => {
+            ProviderResolutionSet::Candidates(candidates)
+        }
+        LegacyProviderResolution::Failure(failure) => ProviderResolutionSet::Failure(failure),
+    }
+}

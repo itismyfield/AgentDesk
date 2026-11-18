@@ -1,6 +1,6 @@
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
 use super::{TmuxHost, tmux_key_name};
@@ -23,13 +23,11 @@ impl TmuxHost {
         timeout: Duration,
     ) -> Option<String> {
         use crate::services::process::{configure_child_process_group, wait_with_output_timeout};
-        let mut command =
-            crate::services::platform::binary_resolver::runtime_command(program).ok()?;
-        let args = ["-u", "capture-pane", "-p", "-e", "-t", session, "-S", "-80"];
-        command.args(args).stdin(std::process::Stdio::null());
-        command
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+        let mut command = runtime_command(program).ok()?;
+        let args = ["capture-pane", "-p", "-e", "-t", session, "-S", "-80"];
+        tmux::input_command(&mut command, &args).ok()?;
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
         configure_child_process_group(&mut command);
         let child = command.spawn().ok()?;
         let output = wait_with_output_timeout(child, timeout, "tmux capture-pane -e").ok()?;
@@ -324,11 +322,17 @@ fn pinned(
             let applied_command =
                 format!("{} ; display-message -p {applied}", args(&pane).join(" "));
             let held_command = format!("display-message -p {held}");
+            let predicate_target =
+                if !codex && crate::config::test_instance::environment::claude_login_enabled() {
+                    target
+                } else {
+                    &pane
+                };
             let args = [
                 "if-shell",
                 "-F",
                 "-t",
-                &pane,
+                predicate_target,
                 &condition,
                 &applied_command,
                 &held_command,

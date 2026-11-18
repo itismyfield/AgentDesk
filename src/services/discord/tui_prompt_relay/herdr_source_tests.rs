@@ -176,6 +176,7 @@ impl Herdr {
             expected_native_session_id: Some(session.to_owned()),
             resume: false,
             provider_root: None,
+            resume_start: None,
         };
         let host: Arc<dyn HerdrLaunchHost> = Arc::new(Launcher);
         let outcome = self

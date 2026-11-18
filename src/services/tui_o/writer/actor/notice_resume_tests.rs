@@ -2,6 +2,9 @@ use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::{BindingContext, PreparedIncarnation};
 use crate::services::tui_prompt_dedupe::binding_events as p5;
 
+#[path = "notice_context_tests.rs"]
+mod context_tests;
+
 fn launch(c: &Case, resume: bool, native: &str) -> PreparedIncarnation {
     let prepared = if resume {
         PreparedIncarnation::prepare_at(
@@ -28,6 +31,7 @@ fn launch(c: &Case, resume: bool, native: &str) -> PreparedIncarnation {
             provider_root: None,
             first_prompt_digest: None,
             source_policy: None,
+            resume_start: None,
         })
         .unwrap()
     };

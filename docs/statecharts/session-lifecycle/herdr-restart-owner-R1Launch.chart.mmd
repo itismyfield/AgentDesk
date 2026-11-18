@@ -1,0 +1,287 @@
+---
+title: "Herdr restart B ports: immediate clear epoch, drain earlier effect grants"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Result
+    lg1: Restart
+    lg2: Breaks EffectHasLivePermission or NoSeedAfterClear or NoSessionAfterClear
+    lg3: Path to the ClearForgets or EffectHasLivePermission or NoSeedAfterClear or NoSessionAfterClear bug
+    lg4: Repeats forever, so ClearForgets breaks
+  }
+  class lg0 teal
+  class lg1 blue
+  class lg2 breaks
+  class lg3 bugPath
+  class lg4 repeats
+  s0: Old session and a queued input
+  s1: Seed committed#59; gate holds it
+  s2: Restart holds the transition and fence
+  s3: Clear requested#59; epoch update pending
+  s4: Exact close confirmed#59; retire and settle
+  s5: Clear began: epoch bumped#59; restart holds the transition
+  s6: Old execution retired#59; exclusion still held
+  s7: One new Ready session#59; inputs await the owner#59; physical effect used no live permission#59; original 1 waiting, original 2 not yet arrived
+  s8: Clear discarded the queue#59; restart holds the transition
+  s9: One new Ready session#59; inputs await the owner#59; physical effect used no live permission#59; original 1 waiting, original 2 waiting
+  s10: One new Ready session#59; inputs settled once#59; an input may still arrive#59; physical effect used no live permission#59; original 1 delivered, original 2 not yet arrived
+  s11: Clear requested#59; epoch update pending#59; physical effect used no live permission#59; original 1 waiting, original 2 not yet arrived
+  s12: One new Ready session#59; inputs await the owner#59; physical effect used no live permission#59; original 1 delivered, original 2 waiting
+  s13: Clear requested#59; epoch update pending#59; physical effect used no live permission#59; original 1 waiting, original 2 waiting
+  s14: Clear requested#59; epoch update pending#59; physical effect used no live permission#59; original 1 delivered, original 2 not yet arrived
+  s15: A new seed grant was issued after clear#59; physical effect used no live permission#59; original 1 waiting, original 2 not yet arrived
+  s16: Clear began: epoch bumped#59; a new session lives#59; physical effect used no live permission#59; original 1 waiting, original 2 not yet arrived
+  s17: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 not yet arrived
+  s18: One new Ready session#59; inputs settled once#59; physical effect used no live permission#59; original 1 delivered, original 2 delivered
+  s19: Clear requested#59; epoch update pending#59; physical effect used no live permission#59; original 1 delivered, original 2 waiting
+  s20: A new seed grant was issued after clear#59; physical effect used no live permission#59; original 1 waiting, original 2 waiting
+  s21: Clear began: epoch bumped#59; a new session lives#59; physical effect used no live permission#59; original 1 waiting, original 2 waiting
+  s22: Clear began: epoch bumped#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered, original 2 not yet arrived
+  s23: A new seed grant was issued after clear#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 not yet arrived
+  s24: Old execution retired#59; a clear overtook the restart
+  s25: Exclusion released#59; superseded reply pending#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 not yet arrived
+  s26: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 explicitly dropped
+  s27: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 waiting
+  s28: Clear requested#59; epoch update pending#59; physical effect used no live permission#59; original 1 delivered, original 2 delivered
+  s29: One new Ready session#59; inputs settled once#59; an input may still arrive#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 not yet arrived
+  s30: Clear began: epoch bumped#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered, original 2 waiting
+  s31: A new seed grant was issued after clear#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 explicitly dropped
+  s32: A new seed grant was issued after clear#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 waiting
+  s33: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered, original 2 not yet arrived
+  s34: Exclusion released#59; superseded reply pending#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 explicitly dropped
+  s35: Exclusion released#59; superseded reply pending#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 waiting
+  s36: One new Ready session#59; inputs settled once#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 explicitly dropped
+  s37: One new Ready session#59; inputs await the owner#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 waiting
+  s38: Clear began: epoch bumped#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered, original 2 delivered
+  s39: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered, original 2 explicitly dropped
+  s40: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered, original 2 waiting
+  s41: Clear ended#59; selector forgotten#59; a new session lives#59; an input may still arrive#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 not yet arrived
+  s42: Clear gave up on the transition#59; selector still kept#59; a new session lives#59; an input may still arrive#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 not yet arrived
+  s43: Clear ended unconfirmed#59; selector still kept#59; a new session lives#59; an input may still arrive#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 not yet arrived
+  s44: Exclusion released#59; superseded reply pending#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 delivered
+  s45: One new Ready session#59; inputs settled once#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 delivered
+  s46: One new Ready session#59; inputs settled once#59; physical effect used no live permission#59; original 1 delivered, original 2 explicitly dropped
+  s47: A new seed grant was issued after clear#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 delivered
+  s48: Clear discarded the queue#59; a new session lives#59; physical effect used no live permission#59; original 1 delivered, original 2 delivered
+  s49: Clear ended#59; selector forgotten#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 explicitly dropped
+  s50: Clear ended#59; selector forgotten#59; a new session lives#59; an input waits#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 waiting
+  s51: Clear gave up on the transition#59; selector still kept#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 explicitly dropped
+  s52: Clear gave up on the transition#59; selector still kept#59; a new session lives#59; an input waits#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 waiting
+  s53: Clear ended unconfirmed#59; selector still kept#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 explicitly dropped
+  s54: Clear ended unconfirmed#59; selector still kept#59; a new session lives#59; an input waits#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 waiting
+  s55: Clear ended#59; selector forgotten#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 delivered
+  s56: Clear gave up on the transition#59; selector still kept#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 delivered
+  s57: Clear ended unconfirmed#59; selector still kept#59; a new session lives#59; physical effect used no live permission#59; original 1 explicitly dropped, original 2 delivered
+  [*] --> s0
+  s0 --> s1: Commit the seed original (acceptance)
+  s1 --> s2: Terminate takes transition and fence
+  s2 --> s3: User requests clear
+  s2 --> s4: Close only the captured pane
+  s3 --> s5: Advance epoch and mark clearing, including while old I/O is granted
+  s3 --> s3: Close only the captured pane or Retire CAS and settle the old turn
+  s4 --> s6: Retire CAS and settle the old turn
+  s4 --> s3: User requests clear
+  s5 --> s8: Clear discards the queue and the launching input
+  s5 --> s5: Close only the captured pane or Retire CAS and settle the old turn
+  s6 --> s7: Launch the successor inside the exclusion
+  s6 --> s6: Accept an input into the owner queue
+  s6 --> s3: User requests clear
+  s7 --> s9: Accept an input into the owner queue
+  s7 --> s10: Submit an input to the successor once
+  s8 --> s2: Clear drains earlier grants and tears down their exact session
+  s6 --> s9: Launch the successor inside the exclusion
+  s3 --> s11: Launch the successor inside the exclusion
+  s9 --> s12: Submit an input to the successor once
+  s10 --> s12: Accept an input into the owner queue
+  s11 --> s13: Accept an input into the owner queue
+  s11 --> s14: Submit an input to the successor once
+  s11 --> s16: Advance epoch and mark clearing, including while old I/O is granted
+  s3 --> s13: Launch the successor inside the exclusion
+  s5 --> s15: Launch the successor inside the exclusion
+  s8 --> s4: Clear drains earlier grants and tears down their exact session
+  s12 --> s18: Submit an input to the successor once
+  s13 --> s19: Submit an input to the successor once
+  s13 --> s21: Advance epoch and mark clearing, including while old I/O is granted
+  s14 --> s19: Accept an input into the owner queue
+  s14 --> s22: Advance epoch and mark clearing, including while old I/O is granted
+  s15 --> s20: Accept an input into the owner queue
+  s15 --> s23: Clear discards the queue and the launching input
+  s16 --> s21: Accept an input into the owner queue
+  s16 --> s17: Clear discards the queue and the launching input
+  s8 --> s17: Launch the successor inside the exclusion
+  s8 --> s24: Clear drains earlier grants and tears down their exact session
+  s5 --> s20: Launch the successor inside the exclusion
+  s4 --> s24: Retire CAS and settle the old turn
+  s17 --> s25: Clear drains earlier grants and tears down their exact session
+  s17 --> s27: Accept an input into the owner queue
+  s19 --> s28: Submit an input to the successor once
+  s19 --> s30: Advance epoch and mark clearing, including while old I/O is granted
+  s20 --> s31: Clear discards the queue and the launching input
+  s21 --> s26: Clear discards the queue and the launching input
+  s22 --> s30: Accept an input into the owner queue
+  s22 --> s33: Clear discards the queue and the launching input
+  s23 --> s32: Accept an input into the owner queue
+  s17 --> s29: Clear drains earlier grants and tears down their exact session
+  s24 --> s25: Launch the successor inside the exclusion
+  s8 --> s26: Launch the successor inside the exclusion
+  s8 --> s27: Launch the successor inside the exclusion
+  s25 --> s35: Accept an input into the owner queue
+  s25 --> s41: Reply to the command
+  s25 --> s42: Reply to the command
+  s25 --> s43: Reply to the command
+  s26 --> s34: Clear drains earlier grants and tears down their exact session
+  s27 --> s35: Clear drains earlier grants and tears down their exact session
+  s28 --> s38: Advance epoch and mark clearing, including while old I/O is granted
+  s29 --> s37: Accept an input into the owner queue
+  s30 --> s39: Clear discards the queue and the launching input
+  s26 --> s36: Clear drains earlier grants and tears down their exact session
+  s27 --> s37: Clear drains earlier grants and tears down their exact session
+  s33 --> s10: Clear drains earlier grants and tears down their exact session
+  s33 --> s40: Accept an input into the owner queue
+  s17 --> s43: Clear drains earlier grants and tears down their exact session
+  s24 --> s34: Launch the successor inside the exclusion
+  s24 --> s35: Launch the successor inside the exclusion
+  s34 --> s49: Reply to the command
+  s35 --> s44: Submit an input to the successor once
+  s35 --> s50: Reply to the command
+  s34 --> s51: Reply to the command
+  s35 --> s52: Reply to the command
+  s34 --> s53: Reply to the command
+  s35 --> s54: Reply to the command
+  s37 --> s45: Submit an input to the successor once
+  s32 --> s47: Submit an input to the successor once
+  s38 --> s48: Clear discards the queue and the launching input
+  s39 --> s46: Clear drains earlier grants and tears down their exact session
+  s40 --> s12: Clear drains earlier grants and tears down their exact session
+  s41 --> s50: Accept an input into the owner queue
+  s42 --> s52: Accept an input into the owner queue
+  s43 --> s54: Accept an input into the owner queue
+  s26 --> s53: Clear drains earlier grants and tears down their exact session
+  s27 --> s54: Clear drains earlier grants and tears down their exact session
+  s44 --> s55: Reply to the command
+  s44 --> s56: Reply to the command
+  s44 --> s57: Reply to the command
+  s48 --> s18: Clear drains earlier grants and tears down their exact session
+  s50 --> s55: Submit an input to the successor once
+  s52 --> s56: Submit an input to the successor once
+  s54 --> s57: Submit an input to the successor once
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 bugPath
+  class s3 blue
+  class s3 bugPath
+  class s4 bugPath
+  class s5 blue
+  class s5 bugPath
+  class s6 blue
+  class s6 bugPath
+  class s7 teal
+  class s7 breaks
+  class s7 bugPath
+  class s8 blue
+  class s8 bugPath
+  class s9 teal
+  class s9 breaks
+  class s10 teal
+  class s10 breaks
+  class s11 teal
+  class s11 breaks
+  class s11 bugPath
+  class s12 teal
+  class s12 breaks
+  class s13 teal
+  class s13 breaks
+  class s14 teal
+  class s14 breaks
+  class s15 teal
+  class s15 breaks
+  class s15 bugPath
+  class s16 teal
+  class s16 breaks
+  class s16 bugPath
+  class s17 breaks
+  class s17 bugPath
+  class s18 teal
+  class s18 breaks
+  class s19 teal
+  class s19 breaks
+  class s20 teal
+  class s20 breaks
+  class s21 teal
+  class s21 breaks
+  class s22 teal
+  class s22 breaks
+  class s23 teal
+  class s23 breaks
+  class s24 teal
+  class s25 teal
+  class s25 breaks
+  class s26 breaks
+  class s26 bugPath
+  class s27 breaks
+  class s28 teal
+  class s28 breaks
+  class s29 teal
+  class s29 breaks
+  class s29 bugPath
+  class s30 teal
+  class s30 breaks
+  class s31 teal
+  class s31 breaks
+  class s32 teal
+  class s32 breaks
+  class s33 teal
+  class s33 breaks
+  class s34 teal
+  class s34 breaks
+  class s34 bugPath
+  class s35 teal
+  class s35 breaks
+  class s36 teal
+  class s36 breaks
+  class s37 teal
+  class s37 breaks
+  class s38 teal
+  class s38 breaks
+  class s39 teal
+  class s39 breaks
+  class s40 teal
+  class s40 breaks
+  class s41 teal
+  class s41 breaks
+  class s42 teal
+  class s42 breaks
+  class s43 teal
+  class s43 breaks
+  class s44 teal
+  class s44 breaks
+  class s45 teal
+  class s45 breaks
+  class s46 teal
+  class s46 breaks
+  class s47 teal
+  class s47 breaks
+  class s48 teal
+  class s48 breaks
+  class s49 teal
+  class s49 breaks
+  class s50 teal
+  class s50 breaks
+  class s51 teal
+  class s51 breaks
+  class s52 teal
+  class s52 breaks
+  class s53 teal
+  class s53 breaks
+  class s53 repeats
+  class s54 teal
+  class s54 breaks
+  class s55 teal
+  class s55 breaks
+  class s56 teal
+  class s56 breaks
+  class s57 teal
+  class s57 breaks

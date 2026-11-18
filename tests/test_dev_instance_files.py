@@ -137,6 +137,15 @@ class InstanceLiveFilesTests(unittest.TestCase):
                                                 api_port=18791, pg_port=25432)
         self.root = Path(self.declaration["root"])
 
+    def test_declaration_and_child_environment_accept_a_shallow_root(self):
+        shallow = Path('/adk-shallow') / self.instance_id
+        self.assertLess(len(shallow.parents), 4)
+        with patch.object(manifest, 'instance_root', return_value=shallow):
+            value = manifest.declared_manifest(self.base, self.instance_id, self.worktree,
+                                               '1' * 40, profile(), 18791, 25432)
+            self.assertNotIn('claude_login', value)
+            self.assertEqual(manifest.child_environment(value, {})['HOME'], str(shallow/'home'))
+
     def bind(self, relative):
         path = self.root / relative
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

@@ -559,6 +559,7 @@ mod verified_watcher_claim_tests {
             provider_root: Some(sessions.canonicalize().unwrap()),
             first_prompt_digest: Some(format!("sha256:{}", "a".repeat(64))),
             source_policy: Some("verified".into()),
+            resume_start: None,
         };
         let _prepared = PreparedIncarnation::create(context.clone()).unwrap();
         let nonce = tmux_common::session_temp_path(&tmux, "spawn_nonce");

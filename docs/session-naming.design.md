@@ -130,7 +130,7 @@ S8c 활성화 시험은 **`env -i` + 승인된 launchd.env 로더 + 실제 provi
 
 ## 상태 모델
 
-기존 `TmuxSession.tla`·`HerdrSession.tla`에 NamingInit/NamingNext와 SessionNaming projection을 추가했다. 기존 Init/Next·cfg는 그대로 유지한다. 새 fixed cfg는 기존 lifecycle 변수를 고정한 **등록 transaction의 bounded projection**이며 기존 세션/턴/입력 전이를 전부 함께 검증한 것은 아니다. tmux는 primary 꼬리=현재 physical name, Herdr는 primary=current logical name + host target=pane ID 불변식을 구별한다. 결과·mutant 반례·명령·한계는 부록 G 및 `logs/r2-statechart/`에 있다. PG/Rust/실제 재시작 결합 검증은 S2 수용 시험으로 남는다.
+기존 `TmuxSession.tla`·`HerdrSession.tla`의 NamingInit/NamingNext와 SessionNaming projection은 설계 ref에서 작성했고 S2에서 저장소에 이식했다. 기존 Init/Next·cfg는 그대로 유지한다. 새 fixed cfg는 기존 lifecycle 변수를 고정한 **등록 transaction의 bounded projection**이며 기존 세션/턴/입력 전이를 전부 함께 검증한 것은 아니다. tmux는 primary 꼬리=현재 physical name, Herdr는 primary=current logical name + host target=pane ID 불변식을 구별한다. 결과·mutant 반례·명령·한계는 부록 G 및 `logs/r2-statechart/`에 있다. PG/Rust/실제 재시작 결합 검증은 S2 수용 시험으로 남는다.
 
 ## 구현 조각과 크기
 
@@ -189,7 +189,7 @@ S8c 활성화 시험은 **`env -i` + 승인된 launchd.env 로더 + 실제 provi
 - 문서로만 선언한 guard: S1 공용 platform 관문과 외부16파일 보호식·외부skill 시험은 S8c 선행. 이 문서는 Rust/skill 구현 완료를 주장하지 않음.
 - 잘못된 0/PASS: 정적 시험 후보 수와 실행 수 구별, 격리 tmux/HTTP fixture와 운영 조건 구별, 모델은 미구현 A 계약의 bounded 검증이며 cargo/PG 통과가 아님.
 
-<!-- doc-path-refs: proposed discord/session_locator.rs domain/provider/session_name.rs services/tmux_common/artifact_paths.rs services/session_name_reservations.rs db/dispatched_sessions/key_promotion.rs -->
+<!-- doc-path-refs: proposed domain/provider/session_name.rs services/tmux_common/artifact_paths.rs services/session_name_reservations.rs -->
 
 
 # 부록 A. 이름 판독 전수표
@@ -405,7 +405,7 @@ Rust 밖 시험 후보: dashboard `AgentDesk-` fixture **7행 / 2파일**, polic
 | `src/services/tui_prompt_dedupe.rs:233`~`:291`, `:328`; `runtime_binding/binding_access.rs:71`, `:97`, `:150`; `state.rs:89` | name keyed pending/observation/channel/runtime/anchor/native-turn/relay lease/steer/handoff/restore maps; provider-session→name reverse map | rename은 pending·relay lease·binding·dedup를 분리, hook context mismatch | 모든 map은 actual name을 유지. new preferred→actual resolver는 map 진입 **앞**에서만; map 자체에 두 키로 복제 금지. 중복 전달·stale capability 방지 |
 | `src/services/tui_prompt_dedupe/binding_context.rs:21`, `:68`, `:98`; `runtime_binding/binding_access.rs:71` | immutable context JSON path는 `<provider>/<nonce>.json` (name 불포함), 내용 tmux_session/owner root/channel/provider/host/expected native ID | live rename은 immutable context.tmux_session과 authority.session 불일치 | context 불변 유지. 새 name은 새 nonce context로만. provider/channel/ownership metadata의 좋은 대체 근거이나 context를 mutable alias registry로 변형하지 않음 |
 | `src/services/tui_prompt_dedupe/binding_events.rs:72`, `:240`, `:480`, `:685`, `:956`; `src/services/tui_o/writer/binding.rs:71` | durable binding log filename channel_id (이름 불포함), record.tmux_session 및 fold panes의 key 이름 | old/new 이름을 같은 pane으로 fold하면 incarnation/seq 오염 | old logs 원문·old pane key 유지. 신규 lifetime 새 record. #8119에서 log rewrite 필요 없음; historical reads는 record 실제 name으로 조회 |
-| `src/services/discord/tmux_watcher_registry.rs:210`~`:227`, `:404`, `:440`; `tmux_watcher_registry/session_binding.rs:20`, `:48`, `:66` | by_name watcher handles·channel reverse map·owner/restored-owner·reservation; live owner 우선 | generator 이름으로 restore하면 old watcher 두 개 생성/owner loss | registry 반환 actual name 우선, live claim > restored 유지. preferred name이 달라도 old watcher 살아 있으면 재사용. metadata mismatch는 소유 이전 허용 아님 |
+| `src/services/discord/tmux_watcher_registry.rs`의 wrapper·목적별 연산; `src/services/engine_runtime/relay_state.rs`의 `RegistryState`·`authoritative_session_bindings`·`owner_channel_for_tmux_session` | by_name watcher handles·channel reverse map·owner/restored-owner·reservation; live owner 우선 | generator 이름으로 restore하면 old watcher 두 개 생성/owner loss | registry 반환 actual name 우선, live claim > restored 유지. preferred name이 달라도 old watcher 살아 있으면 재사용. metadata mismatch는 소유 이전 허용 아님 |
 | `src/services/cluster/session_registry.rs:103`, `:149`, `:191`; `session_discovery.rs:174`, `:280`, `:387` | per-node matched registry 이름 key; expected_session_name과 saved session_key→live name 교집합 | expected name 새 생성만 하면 old live inventory 안 맞아 Removed/Added 이벤트 | discovery 후보를 explicit descriptors + durable actual locators + legacy parse로 확장하고 동일 canonical owner에 old live 우선. 이름 parse 기반 `tmux_name_and_segment_from_session_key`는 row.provider/channel_id로 대체 |
 | `src/services/discord/tmux_session_files.rs:20`, `:227`, `:433`; `tmux_reattach_offsets.rs:13`, `:55` | generation mtime path·panel instance `<name>#<spawn_nonce>`·offset resume에서 name equality | rename하면 panel reset, generation 0, offset 재송신 | old markers/name/nonce/offset 그대로. 새 이름으로 generation/nonce 복사하지 않음; 신규 lifetime만 새 marker |
 | `src/services/session_backend.rs:109`, `:344`, `:368`, `:383`, `:507` | process fallback registry handle·stop marker·active-turn guard도 name key | tmux만 바꾸면 process mode에도 old follow-up miss | host 종류와 관계없이 actual name 불투명. process mode 별도 smoke 계약 포함. host 추상화 확대는 #7583으로 남김 |
@@ -486,6 +486,8 @@ Rust 밖 시험 후보: dashboard `AgentDesk-` fixture **7행 / 2파일**, polic
 | K25 | `services/tmux_turn_liveness/cleanup_host.rs:22` | cleanup row locator key마다 host marker가 absent/tmux인지 확인 | current primary는 **자동(A)**. `locator_keys()`가 갖는 historical/source locator를 무조건 current로 치환하면 host proof를 지우므로 기존 all-locators 검사는 유지. alias 증거가 충돌하면 기존 보존. |
 | K26 | `db/dispatched_sessions/force_kill.rs:68,75` | `resolve_session_locator_pg`가 돌려준 current key로 `WHERE session_key=$1` exact-primary SELECT | **자동(A)**. DB loader는 이미 alias→primary resolve. **S3**의 service층 K15/K19/K24는 이 load 결과 current key를 실제 name 결정에도 사용하도록 전달 적응만 필요. |
 
+S2 거절 경계 델타: registration CAS 거절은 name-only cleanup과 분리해 Refused/Held로 반환한다. 미등록 fresh 슬롯은 다음 정리까지 남을 수 있으며, incarnation 기반 정리는 S3 계약이다. marker-publication 실패의 기존 cleanup 조건은 유지한다.
+
 ## primary 승격의 최소 트랜잭션 계약
 
 1. r1의 “primary=옛 이름 + current descriptor로 모든 곳에서 우회”를 삭제한다. 신규 등록에서만 **primary tail = 현재 물리 이름** 불변식을 유지한다. live old가 있으면 새 요청 이름과 상관없이 기존 primary/실행을 유지한다.
@@ -504,6 +506,7 @@ Rust 밖 시험 후보: dashboard `AgentDesk-` fixture **7행 / 2파일**, polic
 - host 차이: old live·probe error·다른 server witness·Herdr Pending이면 old primary 유지 및 기존 live 대상 무조작. absence 검사를 제거한 뮤턴트 RED.
 - 동시성: old-alias hook와 new registration을 의도적으로 겹쳐 deadlock 없음/한 canonical primary/old hook CAS 거절. 정렬 locator lock을 identity 뒤로 이동한 뮤턴트는 timeout/deadlock 또는 계약 실패 RED.
 - 효과 회귀: queue cancel(K20), force_kill(K15), policy host_repair(K02), hosted thread GC(K16)를 현재 primary와 명시 old alias 양쪽에서 호출. 취소/중지 후 **새 이름 세션이 없음**, 보호해야 할 새 live thread는 GC가 삭제하지 않음, queue 유지. 단순 JSON key 동일 전달을 성공 단언으로 쓰지 않음.
+- S2 실행 범위 델타: 효과 회귀는 current primary 입력으로 검증한다. explicit old-alias force_kill/host_repair 효과 회귀는 S3가 검증하며 raw alias 정규화도 S3에 둔다.
 - 위 항목은 **구현 레그의 수용 시험**이다. 이번 읽기 전용 설계 조사에서는 PG/cargo/운영 tmux를 실행하지 않았다.
 
 
@@ -1144,7 +1147,7 @@ C=실제 채널/합성 thread/DM hint를 담을 수 있는 저장 문자열; R=r
 
 - 한 채널의 옛 실행 하나와 새 successor 하나, old/empty 실행 nonce 2개 initial state, probe failure 최대 1회, 등록 전 nonce 교체 1회, 늦은 old hook 1회와 중지 재요청 1회를 탐색한다.
 - 새 이름 요청 자체는 old live 이름/primary/물리 대상을 바꾸지 않는다. old host의 실제 종료와 부재 관측 뒤에만 successor를 준비한다. 등록은 old-host absence와 row nonce empty/new를 확인해 **primary 새 key + old alias**를 한 행동으로 커밋한다.
-- 등록 직전 nonce가 old로 바뀌면 등록을 거부하고 자기 fresh successor만 정리한다. 자기 생성·서버 witness가 유효하다는 조건과 DB identity/두 locator lock의 원자성은 이 projection의 가정이다. 소유 증거 교체·기본 tmux 서버·실제 SQL 격리는 구현 시험 책임이다.
+- 등록 직전 nonce가 old로 바뀌면 등록을 거부하고 fresh 슬롯은 kill 없이 Held로 남긴다. 정리는 S3의 incarnation 계약으로 넘긴다. 자기 생성·서버 witness가 유효하다는 조건과 DB identity/두 locator lock의 원자성은 이 projection의 가정이다. 소유 증거 교체·기본 tmux 서버·실제 SQL 격리는 구현 시험 책임이다.
 - tmux는 `PrimaryTailIsCurrentPhysical`을 검사한다. Herdr primary는 logical artifact 이름이므로 pane ID와 literal 동등성은 검사하지 않고 `PrimaryNamesCurrentLogical`과 `HostTargetMatchesCurrent`(old/new logical ↔ old/new pane)를 검사한다. pane의 실제 생성/복구 프로토콜은 기존 Herdr 모델에 그대로 남아 있다.
 - `NoDuplicateKill`은 같은 owned successor에 대한 **종료 효과가 1회를 넘지 않음**이다. 호출 횟수나 모든 외부 프로세스에 대한 kill 권한을 증명하지 않는다. retry stop은 효과 0이다.
 
@@ -1185,7 +1188,7 @@ Skill pipeline으로 차트도 추출했다. fixed 각각 52 states/76 steps, �
 
 ## 재현
 
-저장소 모델·관련 cfg·SessionNaming 모듈·view를 새 scratch로 복사한 뒤 직접 TLC를 실행한다. 전체 cfg 실행 명령은 외부 로그의 `run_all.py`에 있고 cfg마다 stdout에 명령 원문이 남아 있다. 차트는 다음과 같이 같은 skill worker로 새 stage에 만든다(stage는 먼저 빈 디렉터리로 생성):
+S2에서 이식한 저장소 모델·관련 cfg·SessionNaming 모듈·view를 새 scratch로 복사한 뒤 직접 TLC를 실행한다. 전체 cfg 실행 명령은 외부 로그의 `run_all.py`에 있고 cfg마다 stdout에 명령 원문이 남아 있다. 차트는 다음과 같이 같은 skill worker로 새 stage에 만든다(stage는 먼저 빈 디렉터리로 생성):
 
 ```sh
 TLA2TOOLS=/tmp/i8119-r2-models/tla2tools.jar JAVA=/opt/homebrew/opt/openjdk@25/bin/java node --disable-warning=ExperimentalWarning /Users/itismyfield/.codex/skills/statechart/scripts/worker.ts /tmp/i8119-new-chart-stage /tmp/i8119-r2-models/TmuxSession.tla /tmp/i8119-r2-models/TmuxSessionNamingFixed.cfg /tmp/i8119-r2-models/session-naming.view.mjs

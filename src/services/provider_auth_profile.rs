@@ -8,6 +8,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::config::test_instance::environment as instance_env;
 use crate::services::provider::ProviderKind;
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
@@ -327,14 +328,13 @@ pub fn resolve(
     agent_auth_profile: Option<&str>,
     catalog: &HashMap<String, ProviderAuthProfileDef>,
 ) -> Result<ProviderAuthOverlay, AuthProfileError> {
-    if crate::config::test_instance::requested() {
-        crate::config::test_instance::environment::provider_home(provider.as_str())
-            .map_err(AuthProfileError::Io)?;
-        if selected_profile_id(channel_auth_profile, agent_auth_profile).is_none() {
-            return Err(AuthProfileError::Io(
-                "test instance requires a named provider profile".into(),
-            ));
-        }
+    if let Some(overlay) = instance_env::resolve_profile(
+        provider.as_str(),
+        selected_profile_id(channel_auth_profile, agent_auth_profile),
+    )
+    .map_err(AuthProfileError::Io)?
+    {
+        return Ok(overlay);
     }
     if selected_profile_id(channel_auth_profile, agent_auth_profile).is_none() {
         return Ok(ProviderAuthOverlay::default_for(provider));
@@ -556,7 +556,7 @@ pub fn validate_managed_profile_home_at(
     crate::config::test_instance::environment::validate_provider_home(provider.as_str(), home)
         .map_err(AuthProfileError::Io)?;
     validate_profile_id(profile_id)?;
-    let expected = extra_account_home_at(root, provider, profile_id);
+    let expected = instance_env::expected_profile_home(root, provider, profile_id);
     if home != expected {
         return Err(AuthProfileError::UnmanagedHomeForbidden {
             profile_id: profile_id.to_string(),
@@ -848,7 +848,7 @@ pub fn overlay_shell_env_lines(overlay: &ProviderAuthOverlay) -> Result<String, 
         body.push_str(&crate::services::process::shell_escape(value));
         body.push('\n');
     }
-    body.push_str(&crate::config::test_instance::environment::shell_environment()?);
+    body.push_str(&instance_env::provider_shell_environment(overlay)?);
     Ok(body)
 }
 

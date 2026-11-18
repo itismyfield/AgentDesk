@@ -82,6 +82,27 @@ impl LegacyView for LegacyRelay {
         ))
     }
 
+    fn historical_frontier(
+        &self,
+        binding: &crate::services::tui_o::writer::binding::BindingEvent,
+        turn: Option<&crate::services::tui_o::writer::adoption::LegacyTurnIdentity>,
+        delivery: Option<&crate::services::tui_o::writer::adoption::LegacyDelivery>,
+        eof: u64,
+    ) -> Option<u64> {
+        let scope = delivery?;
+        let provider = match binding.provider {
+            crate::services::tui_o::shadow::ShadowProvider::Claude => ProviderKind::Claude,
+            crate::services::tui_o::shadow::ShadowProvider::Codex => ProviderKind::Codex,
+        };
+        historical_frontier_in(
+            dr::read_record(&provider, scope.owner)?,
+            binding,
+            turn,
+            delivery,
+            eof,
+        )
+    }
+
     fn tail_running(&self, tmux: &str) -> bool {
         super::super::tui_prompt_relay::claude_idle_tail_running(tmux)
     }
@@ -92,25 +113,27 @@ impl LegacyView for LegacyRelay {
 
     /// What `relay_auto_heal` restarts a redrive episode on, read without writing the inflight row.
     fn epoch(&self, channel: u64) -> LegacyEpoch {
-        let id = ChannelId::new(channel);
         let row =
             super::super::inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel);
-        LegacyEpoch {
-            reset_incarnation: self.shared.relay_frontier_token(id).reset_incarnation,
-            reconnects: (self.shared.tmux_relay_coord(id).reconnect_count)
-                .load(std::sync::atomic::Ordering::Acquire),
-            turn: row.map(|row| {
-                let nonce = row.turn_nonce.filter(|nonce| !nonce.is_empty());
-                let start = row.turn_start_offset;
-                (
-                    row.user_msg_id,
-                    row.started_at,
-                    row.tmux_session_name,
-                    start,
-                    nonce,
-                )
-            }),
+        self.epoch_from_row(channel, row)
+    }
+    fn session_ended(&self, tmux: &str) -> Result<bool, String> {
+        use crate::services::platform::tmux::PaneLiveness;
+        if !super::super::host_liveness::local_tmux(tmux, None) {
+            return Ok(false);
         }
+        match crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux) {
+            PaneLiveness::Live => Ok(false),
+            PaneLiveness::DeadOrAbsent => Ok(true),
+            PaneLiveness::ProbeError => Err("session end could not be observed".into()),
+        }
+    }
+    fn late_epoch(&self, channel: u64) -> Result<LegacyEpoch, String> {
+        let row = super::super::inflight::load_inflight_state_read_only_result(
+            &ProviderKind::Claude,
+            channel,
+        )?;
+        Ok(self.epoch_from_row(channel, row))
     }
 }
 
@@ -211,3 +234,105 @@ mod late_lookup_tests {
         }
     }
 }
+
+impl LegacyRelay {
+    fn epoch_from_row(
+        &self,
+        channel: u64,
+        row: Option<super::super::inflight::InflightTurnState>,
+    ) -> LegacyEpoch {
+        let id = ChannelId::new(channel);
+        let delivery = row.as_ref().and_then(|row| {
+            let tmux = row.tmux_session_name.as_deref()?;
+            let source_path = row.output_path.as_ref()?.into();
+            let generation = row
+                .tui_terminal_generation_mtime_ns
+                .unwrap_or_else(|| dr::current_generation_mtime_ns(tmux));
+            (generation != 0).then(
+                || crate::services::tui_o::writer::adoption::LegacyDelivery {
+                    source_path,
+                    execution_nonce: row.hosted_execution_nonce.clone(),
+                    owner: row.delivery_record_owner_channel_id(),
+                    generation,
+                },
+            )
+        });
+        LegacyEpoch {
+            delivery,
+            reset_incarnation: self.shared.relay_frontier_token(id).reset_incarnation,
+            reconnects: (self.shared.tmux_relay_coord(id).reconnect_count)
+                .load(std::sync::atomic::Ordering::Acquire),
+            turn: row.map(|row| {
+                let nonce = row.turn_nonce.filter(|nonce| !nonce.is_empty());
+                let start = row.turn_start_offset;
+                (
+                    row.user_msg_id,
+                    row.started_at,
+                    row.tmux_session_name,
+                    start,
+                    nonce,
+                )
+            }),
+        }
+    }
+}
+
+fn historical_frontier_in(
+    record: dr::DeliveryRecord,
+    binding: &crate::services::tui_o::writer::binding::BindingEvent,
+    turn: Option<&crate::services::tui_o::writer::adoption::LegacyTurnIdentity>,
+    delivery: Option<&crate::services::tui_o::writer::adoption::LegacyDelivery>,
+    eof: u64,
+) -> Option<u64> {
+    let (scope, turn) = (delivery?, turn?);
+    use crate::services::tui_o::writer::binding::{BindingRecord, BindingTarget};
+    let source = match &binding.record {
+        BindingRecord::Bound {
+            new: BindingTarget::Source(source),
+            ..
+        }
+        | BindingRecord::Resolved { source, .. } => source,
+        _ => return None,
+    };
+    if scope.source_path != source.path
+        || scope
+            .execution_nonce
+            .as_ref()
+            .is_some_and(|nonce| nonce != &binding.execution_nonce)
+    {
+        return None;
+    }
+    let (start, nonce) = (turn.3?, turn.4.as_deref().filter(|n| !n.is_empty())?);
+    if turn.2.as_deref() != Some(binding.tmux_session.as_str())
+        || scope.owner == 0
+        || scope.generation == 0
+    {
+        return None;
+    }
+    let provider = match binding.provider {
+        crate::services::tui_o::shadow::ShadowProvider::Claude => ProviderKind::Claude,
+        crate::services::tui_o::shadow::ShadowProvider::Codex => ProviderKind::Codex,
+    };
+    record
+        .confirmed_deliveries
+        .iter()
+        .filter(|receipt| {
+            let source = &receipt.source;
+            receipt.message_id != 0
+                && receipt.delivery_channel_id == binding.channel_id
+                && source.is_authoritative()
+                && source.provider == provider.as_str()
+                && source.tmux_session_name == binding.tmux_session
+                && source.turn_nonce == nonce
+                && source.generation_mtime_ns == scope.generation
+                && source.offset_authority_channel_id == scope.owner
+                && source.delivery_channel_id == binding.channel_id
+                && source.range.0 == start
+                && source.range.1 <= eof
+        })
+        .map(|receipt| receipt.source.range.1)
+        .max()
+}
+
+#[cfg(test)]
+mod child_debt_tests;

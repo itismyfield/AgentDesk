@@ -515,7 +515,7 @@ fn spawn_login_tmux(
 /// Only an auth-only tmux login session is killed or created here; a session another
 /// host's marker claims is refused before any profile or tmux change.
 fn refuse_non_auth_target(session: &str) -> Result<(), AppError> {
-    let refusal = crate::services::discord::admin_host_guard::auth_login_refusal;
+    let refusal = crate::services::session_host::operation_policy::auth_login_refusal;
     match refusal(session) {
         Some(reason) => Err(AppError::new(
             StatusCode::CONFLICT,

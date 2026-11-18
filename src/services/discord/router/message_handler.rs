@@ -55,7 +55,7 @@ mod provider_dispatch;
 pub(in crate::services::discord) use self::provider_dispatch::hand_busy;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use self::provider_dispatch::{
-    owner_drive_for_test, start_idle_for_test,
+    install_root_recovery_launch, owner_drive_for_test, start_idle_for_test, wake_drive_for_test,
 };
 #[cfg(all(test, unix))]
 pub(crate) use provider_dispatch::herdr_tests::exact_close_tests::OldTmux as PrivateOldTmuxForTest;
@@ -244,10 +244,24 @@ async fn resolve_channel_runtime_for_launch(
             current.3 = "runtime_session_rebound";
         }
     }
+    drop(data);
     let tmux_session_name = if provider.uses_managed_tmux_backend() {
         channel_name
             .as_ref()
             .map(|name| provider.build_tmux_session_name(name))
+    } else {
+        None
+    };
+    let tmux_session_name = if let Some(name) = tmux_session_name {
+        let preferred = super::super::adk_session::build_namespaced_session_key(
+            &shared.token_hash,
+            provider,
+            &name,
+        );
+        super::super::session_locator::channel_key(shared, provider, channel_id.get(), preferred)
+            .await
+            .as_deref()
+            .and_then(super::super::session_identity::tmux_name_from_session_key)
     } else {
         None
     };
@@ -355,6 +369,9 @@ pub(in crate::services::discord) fn hold_input_effect_for_tests(
 
 #[cfg(test)]
 mod session_strategy_lifecycle_tests;
+
+#[cfg(all(test, unix))]
+mod session_key_promotion_pipe_tests;
 
 #[cfg(all(test, unix))]
 mod turn_mark_admission_tests;

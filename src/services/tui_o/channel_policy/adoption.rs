@@ -16,8 +16,10 @@ use crate::services::tui_o::store::OStore;
 #[cfg(any(test, unix))]
 pub(crate) mod output_disposition;
 
+mod child_run;
 #[cfg(unix)]
 pub(crate) mod episode_key;
+pub(crate) use child_run::LegacyRun;
 mod first_turn;
 #[cfg(any(test, unix))]
 pub(crate) use first_turn::FirstHold;
@@ -34,7 +36,7 @@ pub(crate) enum Adoption {
     Committed,
     /// Store state is damaged or may be public unconfirmed: O keeps the output and holds it.
     Held,
-    /// Legacy keeps the channel for the rest of this process.
+    /// Legacy keeps an ordinary channel for this process; a verified late child can retry at a boundary.
     Released,
     /// The writer host waits for a turn to close and retries; the body is held meanwhile, and
     /// only that host sets or leaves it.
@@ -133,6 +135,7 @@ pub(crate) struct Candidate {
     /// Fixed by the reservation's first host's first read and kept for every host that takes the
     /// reservation over.
     late_boundary: Arc<OnceLock<LateBoundary>>,
+    child_run: Arc<Mutex<child_run::RunState>>,
     turn_mark: Arc<Mutex<Option<TurnMark>>>,
     baseline_order: Arc<AtomicU64>,
     first_turn: tokio::sync::watch::Sender<Option<first_turn::FirstTurn>>,
@@ -192,6 +195,7 @@ impl Candidate {
             sends: Arc::default(),
             late_origin: false,
             late_boundary: Arc::default(),
+            child_run: Arc::default(),
             turn_mark: Arc::default(),
             baseline_order: Arc::default(),
             first_turn: tokio::sync::watch::channel(None).0,
@@ -281,12 +285,14 @@ impl Candidate {
 
     /// The late reservation's binding boundary, once fixed.
     pub(crate) fn late_boundary(&self) -> Option<LateBoundary> {
-        self.late_boundary.get().copied()
+        self.child_retry_boundary()
+            .or_else(|| self.late_boundary.get().copied())
     }
 
     /// Fixes the boundary `judge` returns unless one is fixed already, and returns the fixed one.
     pub(crate) fn fix_late_boundary(&self, judge: impl FnOnce() -> LateBoundary) -> LateBoundary {
-        *self.late_boundary.get_or_init(judge)
+        self.child_retry_boundary()
+            .unwrap_or_else(|| *self.late_boundary.get_or_init(judge))
     }
 
     pub(crate) fn late_cleanup_guard(
@@ -298,6 +304,7 @@ impl Candidate {
             candidate: self.clone(),
             channel,
             runtime_root,
+            child_boundary: self.child_boundary_epoch(),
             keep: Arc::default(),
         })
     }
@@ -423,6 +430,7 @@ impl Candidate {
 /// Owned by the sole claimed host before its future is spawned.
 pub(crate) struct LateReservationGuard {
     candidate: Candidate,
+    child_boundary: u64,
     channel: u64,
     runtime_root: Option<PathBuf>,
     /// Set before a stop whose successor host takes the reservation over, so this one keeps it.
@@ -444,7 +452,9 @@ impl Drop for LateReservationGuard {
             return;
         }
         let mut state = self.candidate.lock();
-        if !matches!(*state, Adoption::Pending | Adoption::Deferred) {
+        if !matches!(*state, Adoption::Pending | Adoption::Deferred)
+            || self.child_boundary != self.candidate.child_boundary_epoch()
+        {
             return;
         }
         let settled = self

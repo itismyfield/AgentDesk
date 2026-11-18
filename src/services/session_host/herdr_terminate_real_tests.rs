@@ -615,6 +615,7 @@ pub(crate) async fn launch(
         expected_native_session_id: None,
         resume: false,
         provider_root: None,
+        resume_start: None,
     };
     let work = real.work("providers");
     // macOS keeps a platform binary's environment from other processes; python's is readable.

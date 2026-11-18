@@ -482,7 +482,7 @@ async fn filter_safe_slot_thread_reset_targets(
             .iter()
             .find(|row| row.thread_channel_id == *thread_channel_id);
         // A Herdr-configured thread is kept whatever its rows say, with or without a registry.
-        let configured = crate::services::discord::admin_host_guard::configured_refusal;
+        let configured = crate::services::session_host::operation_policy::configured_refusal;
         let host = match configured(*thread_channel_id) {
             Some(reason) => Some(reason),
             None => slot_thread_host_refusal(pool, &thread_id, selected).await,

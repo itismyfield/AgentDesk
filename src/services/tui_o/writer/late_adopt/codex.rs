@@ -495,10 +495,23 @@ impl<I: HostIo> Takeover<'_, I> {
     /// A fresh rollout from its first byte under the fence; see `fenced`.
     pub(super) async fn commit(
         &self,
-        at: Baseline,
+        mut at: Baseline,
         bound: &(SourceId, u64),
         prefix: &Prefix,
     ) -> Result<(), Taken> {
+        let debts = adoption::ChildDebt::pin(
+            self.candidate,
+            self.io.legacy(),
+            self.io.bindings(self.channel, self.provider),
+            self.channel,
+        )
+        .await
+        .map_err(Taken::Retry)?;
+        if matches!(prefix.class, prefix::PrefixClass::OutputFree) {
+            if let Some(sends) = debts.sends() {
+                at.sends = sends;
+            }
+        }
         let admission = if self.provider == ShadowProvider::Codex {
             let guard = self.candidate.lock();
             let proof = self.candidate.first_proof(&bound.0).map_err(Taken::Skip)?;
@@ -530,7 +543,8 @@ impl<I: HostIo> Takeover<'_, I> {
                 "buffered output has no admitted execution proof".into(),
             ));
         }
-        self.fenced_proved(at, bound, Plan::Fresh(prefix, &[]), admission.as_ref())
+        let plan = Plan::Fresh(prefix, &[]);
+        self.fenced_proved(at, bound, plan, admission.as_ref(), &debts)
             .await
     }
 
@@ -541,7 +555,15 @@ impl<I: HostIo> Takeover<'_, I> {
         bound: &(SourceId, u64),
         plan: Plan<'_>,
     ) -> Result<(), Taken> {
-        self.fenced_proved(at, bound, plan, None).await
+        // A child's old runs owe their delivery before any takeover publishes, as `commit` pins.
+        let (legacy, bindings) = (
+            self.io.legacy(),
+            self.io.bindings(self.channel, self.provider),
+        );
+        let debts = adoption::ChildDebt::pin(self.candidate, legacy, bindings, self.channel)
+            .await
+            .map_err(Taken::Retry)?;
+        self.fenced_proved(at, bound, plan, None, &debts).await
     }
 
     async fn fenced_proved(
@@ -550,6 +572,7 @@ impl<I: HostIo> Takeover<'_, I> {
         bound: &(SourceId, u64),
         plan: Plan<'_>,
         admission: Option<&FirstProof>,
+        debts: &adoption::ChildDebt,
     ) -> Result<(), Taken> {
         let (io, channel) = (self.io, self.channel);
         let Some(expected) = self.gate.current().epoch() else {
@@ -583,7 +606,7 @@ impl<I: HostIo> Takeover<'_, I> {
             }
             let mut why = None;
             let sources = || {
-                self.recheck(at, fence_sends, bound, plan, admission)
+                self.recheck(at, fence_sends, bound, plan, admission, debts)
                     .map_err(|taken| {
                         let detail = taken.detail().to_owned();
                         why = Some(taken);
@@ -631,6 +654,7 @@ impl<I: HostIo> Takeover<'_, I> {
         bound: &(SourceId, u64),
         plan: Plan<'_>,
         admission: Option<&FirstProof>,
+        debts: &adoption::ChildDebt,
     ) -> Result<Vec<InitSource>, Taken> {
         if self.provider == ShadowProvider::Codex
             && self
@@ -664,6 +688,9 @@ impl<I: HostIo> Takeover<'_, I> {
         } else {
             self.events()?
         };
+        debts
+            .recheck(&events, self.candidate)
+            .map_err(Taken::Retry)?;
         if admission.is_some_and(|proof| {
             !events
                 .iter()

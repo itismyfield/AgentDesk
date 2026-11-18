@@ -64,10 +64,8 @@ readonly CRATE_NAME
 
 readonly TERMINAL_HANDOFF="src/services/discord/session_relay_sink/terminal_handoff.rs"
 readonly SESSION_RELAY_SINK="src/services/discord/session_relay_sink.rs"
-# #5457 moved the S4 fence layer out of `tmux_watcher_registry.rs` into this
-# child module. Both S4 fence rows below anchor on text that went with it, so
-# they mutate the child; the registry root no longer carries a mutated anchor.
-readonly WATCHER_FENCES="src/services/discord/tmux_watcher_registry/fences.rs"
+# Both S4 fence mutations target the engine-owned lease critical section.
+readonly WATCHER_FENCES="src/services/engine_runtime/relay_state.rs"
 readonly DESTRUCTIVE_CANCEL_GATE="src/services/discord/destructive_cancel_gate.rs"
 # The path filter selects these sources plus their judges and fixture owners. Other authority paths, e.g. rowless soft-terminal
 # delivery (its mutants die per PR in named target t5-c1), are listed with guard and reason in authority_surface of the targets json.
@@ -428,8 +426,8 @@ register_mutation \
 # Bypass the delivery lease while retaining a compilable commit path.
 register_mutation \
   S4-m5 "$WATCHER_FENCES" \
-  '        Some(fence) => fence.commit_if_permitted(commit),' \
-  '        Some(_fence) => Some(commit()),' \
+  '                Some(fence) => fence.commit_if_permitted(commit),' \
+  '                Some(_fence) => Some(commit()),' \
   'services::discord::relay_recovery::tests::post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel'
 
 # Let the terminal envelope bypass the relay frontier progress check.
@@ -442,8 +440,8 @@ register_mutation \
 # Release the judgment lock before destruction to expose a racing acquire.
 register_mutation \
   S4-m7 "$WATCHER_FENCES" \
-  $'            #[cfg(test)]\n            run_delivery_fence_permitted_hook_for_tests(self.site);\n            Some(commit())\n        })\n    }' \
-  $'            Some(())\n        })?;\n        #[cfg(test)]\n        run_delivery_fence_permitted_hook_for_tests(self.site);\n        Some(commit())\n    }' \
+  $'            #[cfg(test)]\n            run_delivery_fence_permitted_hook_for_tests(self.site);\n            Some(commit())\n        })\n            }' \
+  $'            Some(())\n        })?;\n        #[cfg(test)]\n        run_delivery_fence_permitted_hook_for_tests(self.site);\n        Some(commit())\n            }' \
   'services::discord::tmux_watcher_registry_restore_tests::delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire'
 
 validate_shards

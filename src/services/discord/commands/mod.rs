@@ -184,3 +184,15 @@ pub(in crate::services::discord) async fn enforce_slash_command_policy(
 pub(super) mod effort_capability;
 #[cfg(unix)]
 pub(in crate::services::discord) mod effort_restart;
+
+#[cfg(unix)]
+pub(in crate::services::discord) use restart::herdr_seed_permit;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use restart::restart_channel_for_tests;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use restart::{SayProbe, restart_channel_probed_for_tests};
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use restart::{
+    probe_restart_disconnect_for_tests, probe_restart_seed_admitted_for_tests,
+    probe_restart_seed_for_tests,
+};

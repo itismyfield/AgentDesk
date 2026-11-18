@@ -1,0 +1,491 @@
+---
+title: "Herdr B2a: detached exact end, cache result, release and wake"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Restart
+    lg1: Owner
+  }
+  class lg0 blue
+  class lg1 purple
+  s0: Old session and a queued input#59; stored row was already ended before this request
+  s1: Old session and a queued input
+  s2: No seed admitted#59; restart goes on#59; detached operation working#59; explicit restart found an ended idle execution
+  s3: No seed admitted#59; restart goes on#59; detached operation working
+  s4: Restart holds the transition and fence#59; detached operation working#59; explicit restart found an ended idle execution
+  s5: Restart holds the transition and fence#59; detached operation working
+  s6: No seed admitted#59; restart goes on#59; detached operation working#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s7: No seed admitted#59; restart goes on#59; detached operation working#59; caller cancelled, worker still owns the operation
+  s8: Restart holds the transition and fence#59; detached operation working#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s9: Restart holds the transition and fence#59; detached operation working#59; caller cancelled, worker still owns the operation
+  s10: Old execution retired#59; exclusion still held#59; detached operation working#59; explicit restart found an ended idle execution
+  s11: Exact close confirmed#59; retire and settle#59; detached operation working
+  s12: Exclusion released#59; reply pending#59; detached operation result_ready#59; explicit restart found an ended idle execution
+  s13: Old execution retired#59; exclusion still held#59; detached operation working
+  s14: Old execution retired#59; exclusion still held#59; detached operation working#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s15: Exact close confirmed#59; retire and settle#59; detached operation working#59; caller cancelled, worker still owns the operation
+  s16: Exclusion released#59; reply pending#59; owner not woken#59; detached operation result_ready#59; explicit restart found an ended idle execution
+  s17: Exclusion released#59; reply pending#59; detached operation cached#59; explicit restart found an ended idle execution
+  s18: Exclusion released#59; reply pending#59; detached operation result_ready
+  s19: Exclusion released#59; reply pending#59; detached operation result_ready#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s20: Restart answered#59; inputs wait#59; detached operation result_ready#59; explicit restart found an ended idle execution
+  s21: Old execution retired#59; exclusion still held#59; detached operation working#59; caller cancelled, worker still owns the operation
+  s22: Exclusion released#59; reply pending#59; owner not woken#59; detached operation cached#59; explicit restart found an ended idle execution
+  s23: Exclusion released#59; reply pending#59; owner not woken#59; detached operation result_ready
+  s24: Exclusion released#59; reply pending#59; owner not woken#59; detached operation result_ready#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s25: Exclusion released#59; reply pending#59; detached operation cached
+  s26: Exclusion released#59; reply pending#59; detached operation cached#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s27: Exclusion released#59; reply pending#59; detached operation complete#59; explicit restart found an ended idle execution
+  s28: Exclusion released#59; reply pending#59; detached operation result_ready#59; caller cancelled, worker still owns the operation
+  s29: Restart answered#59; inputs wait#59; owner not woken#59; detached operation result_ready#59; explicit restart found an ended idle execution
+  s30: Restart answered#59; inputs wait#59; detached operation cached#59; explicit restart found an ended idle execution
+  s31: Restart answered#59; inputs wait#59; detached operation result_ready
+  s32: Restart answered#59; inputs wait#59; detached operation result_ready#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s33: Exclusion released#59; reply pending#59; owner not woken#59; detached operation cached
+  s34: Exclusion released#59; reply pending#59; owner not woken#59; detached operation cached#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s35: Exclusion released#59; reply pending#59; owner not woken#59; detached operation result_ready#59; caller cancelled, worker still owns the operation
+  s36: Exclusion released#59; reply pending#59; detached operation cached#59; caller cancelled, worker still owns the operation
+  s37: Exclusion released#59; reply pending#59; detached operation complete
+  s38: Exclusion released#59; reply pending#59; detached operation complete#59; explicit restart found an ended idle execution#59; completed memory result reused
+  s39: Exclusion released#59; reply pending#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s40: Owner turn began a launch#59; detached operation complete#59; explicit restart found an ended idle execution
+  s41: Restart answered#59; inputs wait#59; owner not woken#59; detached operation cached#59; explicit restart found an ended idle execution
+  s42: Restart answered#59; inputs wait#59; owner not woken#59; detached operation result_ready
+  s43: Restart answered#59; inputs wait#59; owner not woken#59; detached operation result_ready#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s44: Restart answered#59; inputs wait#59; detached operation cached
+  s45: Restart answered#59; inputs wait#59; detached operation cached#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s46: Restart answered#59; inputs wait#59; detached operation complete#59; explicit restart found an ended idle execution
+  s47: Restart answered#59; inputs wait#59; detached operation result_ready#59; caller cancelled, worker still owns the operation
+  s48: Owner turn installed Pending#59; detached operation complete#59; explicit restart found an ended idle execution
+  s49: Exclusion released#59; reply pending#59; owner not woken#59; detached operation cached#59; caller cancelled, worker still owns the operation
+  s50: Exclusion released#59; reply pending#59; detached operation complete#59; completed memory result reused
+  s51: Exclusion released#59; reply pending#59; detached operation complete#59; caller cancelled, worker still owns the operation
+  s52: Exclusion released#59; reply pending#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s53: Owner turn began a launch#59; detached operation complete
+  s54: Owner turn began a launch#59; detached operation complete#59; explicit restart found an ended idle execution#59; completed memory result reused
+  s55: Owner turn began a launch#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s56: Restart answered#59; inputs wait#59; owner not woken#59; detached operation cached
+  s57: Restart answered#59; inputs wait#59; owner not woken#59; detached operation cached#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s58: Restart answered#59; inputs wait#59; owner not woken#59; detached operation result_ready#59; caller cancelled, worker still owns the operation
+  s59: Restart answered#59; inputs wait#59; detached operation cached#59; caller cancelled, worker still owns the operation
+  s60: Restart answered#59; inputs wait#59; detached operation complete
+  s61: Restart answered#59; inputs wait#59; detached operation complete#59; explicit restart found an ended idle execution#59; completed memory result reused
+  s62: Restart answered#59; inputs wait#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s63: CheckEpoch observed#59; live BeginEffect still required#59; detached operation complete#59; explicit restart found an ended idle execution
+  s64: Owner turn installed Pending#59; detached operation complete
+  s65: Owner turn installed Pending#59; detached operation complete#59; explicit restart found an ended idle execution#59; completed memory result reused
+  s66: Owner turn installed Pending#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s67: Exclusion released#59; reply pending#59; detached operation complete#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s68: Owner turn began a launch#59; detached operation complete#59; completed memory result reused
+  s69: Owner turn began a launch#59; detached operation complete#59; caller cancelled, worker still owns the operation
+  s70: Owner turn began a launch#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s71: Restart answered#59; inputs wait#59; owner not woken#59; detached operation cached#59; caller cancelled, worker still owns the operation
+  s72: Restart answered#59; inputs wait#59; detached operation complete#59; completed memory result reused
+  s73: Restart answered#59; inputs wait#59; detached operation complete#59; caller cancelled, worker still owns the operation
+  s74: Restart answered#59; inputs wait#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s75: BeginEffect holds create authority#59; detached operation complete#59; explicit restart found an ended idle execution
+  s76: CheckEpoch observed#59; live BeginEffect still required#59; detached operation complete
+  s77: CheckEpoch observed#59; live BeginEffect still required#59; detached operation complete#59; explicit restart found an ended idle execution#59; completed memory result reused
+  s78: Owner turn installed Pending#59; detached operation complete#59; completed memory result reused
+  s79: CheckEpoch observed#59; live BeginEffect still required#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s80: Owner turn installed Pending#59; detached operation complete#59; caller cancelled, worker still owns the operation
+  s81: Owner turn installed Pending#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s82: Owner turn began a launch#59; detached operation complete#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s83: Restart answered#59; inputs wait#59; detached operation complete#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s84: BeginEffect holds create authority#59; detached operation complete
+  s85: BeginEffect holds create authority#59; detached operation complete#59; explicit restart found an ended idle execution#59; completed memory result reused
+  s86: CheckEpoch observed#59; live BeginEffect still required#59; detached operation complete#59; completed memory result reused
+  s87: BeginEffect holds create authority#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s88: CheckEpoch observed#59; live BeginEffect still required#59; detached operation complete#59; caller cancelled, worker still owns the operation
+  s89: CheckEpoch observed#59; live BeginEffect still required#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s90: Owner turn installed Pending#59; detached operation complete#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s91: Create answered#59; first input not submitted#59; detached operation complete#59; explicit restart found an ended idle execution
+  s92: BeginEffect holds create authority#59; detached operation complete#59; completed memory result reused
+  s93: BeginEffect holds create authority#59; detached operation complete#59; caller cancelled, worker still owns the operation
+  s94: BeginEffect holds create authority#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s95: CheckEpoch observed#59; live BeginEffect still required#59; detached operation complete#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s96: CheckEpoch observed#59; live input authority still required#59; detached operation complete#59; explicit restart found an ended idle execution
+  s97: Create answered#59; first input not submitted#59; detached operation complete
+  s98: Create answered#59; first input not submitted#59; detached operation complete#59; explicit restart found an ended idle execution#59; completed memory result reused
+  s99: Create answered#59; first input not submitted#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s100: BeginEffect holds create authority#59; detached operation complete#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s101: BeginEffect holds input authority#59; detached operation complete#59; explicit restart found an ended idle execution
+  s102: CheckEpoch observed#59; live input authority still required#59; detached operation complete
+  s103: CheckEpoch observed#59; live input authority still required#59; detached operation complete#59; explicit restart found an ended idle execution#59; completed memory result reused
+  s104: Create answered#59; first input not submitted#59; detached operation complete#59; completed memory result reused
+  s105: CheckEpoch observed#59; live input authority still required#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s106: Create answered#59; first input not submitted#59; detached operation complete#59; caller cancelled, worker still owns the operation
+  s107: Create answered#59; first input not submitted#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s108: BeginEffect holds input authority#59; detached operation complete
+  s109: BeginEffect holds input authority#59; detached operation complete#59; explicit restart found an ended idle execution#59; completed memory result reused
+  s110: CheckEpoch observed#59; live input authority still required#59; detached operation complete#59; completed memory result reused
+  s111: BeginEffect holds input authority#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s112: CheckEpoch observed#59; live input authority still required#59; detached operation complete#59; caller cancelled, worker still owns the operation
+  s113: CheckEpoch observed#59; live input authority still required#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s114: Create answered#59; first input not submitted#59; detached operation complete#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s115: First input submitted#59; receipt not committed#59; detached operation complete#59; explicit restart found an ended idle execution
+  s116: BeginEffect holds input authority#59; detached operation complete#59; completed memory result reused
+  s117: BeginEffect holds input authority#59; detached operation complete#59; caller cancelled, worker still owns the operation
+  s118: BeginEffect holds input authority#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s119: CheckEpoch observed#59; live input authority still required#59; detached operation complete#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s120: First input submitted#59; receipt not committed#59; detached operation complete
+  s121: First input submitted#59; receipt not committed#59; detached operation complete#59; explicit restart found an ended idle execution#59; completed memory result reused
+  s122: First input submitted#59; receipt not committed#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s123: Receipt committed#59; source not bound#59; detached operation complete#59; explicit restart found an ended idle execution
+  s124: BeginEffect holds input authority#59; detached operation complete#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s125: First input submitted#59; receipt not committed#59; detached operation complete#59; completed memory result reused
+  s126: First input submitted#59; receipt not committed#59; detached operation complete#59; caller cancelled, worker still owns the operation
+  s127: First input submitted#59; receipt not committed#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s128: Receipt committed#59; source not bound#59; detached operation complete
+  s129: Receipt committed#59; source not bound#59; detached operation complete#59; explicit restart found an ended idle execution#59; completed memory result reused
+  s130: Receipt committed#59; source not bound#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s131: First input submitted#59; receipt not committed#59; detached operation complete#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s132: Receipt committed#59; source not bound#59; detached operation complete#59; completed memory result reused
+  s133: Receipt committed#59; source not bound#59; detached operation complete#59; caller cancelled, worker still owns the operation
+  s134: Receipt committed#59; source not bound#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s135: New session without a greeting#59; inputs settled#59; detached operation complete#59; explicit restart found an ended idle execution
+  s136: Receipt committed#59; source not bound#59; detached operation complete#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s137: New session without a greeting#59; inputs settled#59; detached operation complete
+  s138: New session without a greeting#59; inputs settled#59; detached operation complete#59; explicit restart found an ended idle execution#59; completed memory result reused
+  s139: New session without a greeting#59; inputs settled#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation
+  s140: New session without a greeting#59; inputs settled#59; detached operation complete#59; completed memory result reused
+  s141: New session without a greeting#59; inputs settled#59; detached operation complete#59; caller cancelled, worker still owns the operation
+  s142: New session without a greeting#59; inputs settled#59; detached operation complete#59; explicit restart found an ended idle execution#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  s143: New session without a greeting#59; inputs settled#59; detached operation complete#59; caller cancelled, worker still owns the operation#59; completed memory result reused
+  [*] --> s0
+  [*] --> s1
+  s0 --> s2: Seed not admitted: restart anyway
+  s1 --> s3: Seed not admitted: restart anyway
+  s2 --> s4: Terminate takes transition and fence
+  s2 --> s6: The caller cancels#59; the detached worker continues
+  s3 --> s5: Terminate takes transition and fence
+  s3 --> s7: The caller cancels#59; the detached worker continues
+  s4 --> s8: The caller cancels#59; the detached worker continues
+  s4 --> s10: Under the captured fence, retire the already-ended execution without close
+  s5 --> s9: The caller cancels#59; the detached worker continues
+  s5 --> s11: Close only the captured pane
+  s6 --> s8: Terminate takes transition and fence
+  s7 --> s9: Terminate takes transition and fence
+  s8 --> s14: Under the captured fence, retire the already-ended execution without close
+  s9 --> s15: Close only the captured pane
+  s10 --> s12: Disconnect keeping selector, release, wake
+  s10 --> s14: The caller cancels#59; the detached worker continues
+  s11 --> s13: Retire CAS and settle the old turn
+  s11 --> s15: The caller cancels#59; the detached worker continues
+  s12 --> s16: Owner drive parks until a wake
+  s12 --> s17: Remember the completed result in this process
+  s12 --> s19: The caller cancels#59; the detached worker continues
+  s12 --> s20: Reply to the command
+  s13 --> s18: Disconnect keeping selector, release, wake
+  s13 --> s21: The caller cancels#59; the detached worker continues
+  s14 --> s19: Disconnect keeping selector, release, wake
+  s15 --> s21: Retire CAS and settle the old turn
+  s16 --> s22: Remember the completed result in this process
+  s16 --> s24: The caller cancels#59; the detached worker continues
+  s16 --> s29: Reply to the command
+  s17 --> s22: Owner drive parks until a wake
+  s17 --> s26: The caller cancels#59; the detached worker continues
+  s17 --> s27: Release the operation gate and wake the owner
+  s17 --> s30: Reply to the command
+  s18 --> s23: Owner drive parks until a wake
+  s18 --> s25: Remember the completed result in this process
+  s18 --> s28: The caller cancels#59; the detached worker continues
+  s18 --> s31: Reply to the command
+  s19 --> s24: Owner drive parks until a wake
+  s19 --> s26: Remember the completed result in this process
+  s19 --> s32: Reply to the command
+  s20 --> s29: Owner drive parks until a wake
+  s20 --> s30: Remember the completed result in this process
+  s20 --> s32: The caller cancels#59; the detached worker continues
+  s21 --> s28: Disconnect keeping selector, release, wake
+  s22 --> s27: Release the operation gate and wake the owner
+  s22 --> s34: The caller cancels#59; the detached worker continues
+  s22 --> s41: Reply to the command
+  s23 --> s33: Remember the completed result in this process
+  s23 --> s35: The caller cancels#59; the detached worker continues
+  s23 --> s42: Reply to the command
+  s24 --> s34: Remember the completed result in this process
+  s24 --> s43: Reply to the command
+  s25 --> s33: Owner drive parks until a wake
+  s25 --> s36: The caller cancels#59; the detached worker continues
+  s25 --> s37: Release the operation gate and wake the owner
+  s25 --> s44: Reply to the command
+  s26 --> s34: Owner drive parks until a wake
+  s26 --> s39: Release the operation gate and wake the owner
+  s26 --> s45: Reply to the command
+  s27 --> s38: Return the same process's remembered result
+  s27 --> s40: Owner starts the front: register the launch
+  s27 --> s46: Reply to the command
+  s28 --> s35: Owner drive parks until a wake
+  s28 --> s36: Remember the completed result in this process
+  s28 --> s47: Reply to the command
+  s29 --> s41: Remember the completed result in this process
+  s29 --> s43: The caller cancels#59; the detached worker continues
+  s30 --> s41: Owner drive parks until a wake
+  s30 --> s45: The caller cancels#59; the detached worker continues
+  s30 --> s46: Release the operation gate and wake the owner
+  s31 --> s42: Owner drive parks until a wake
+  s31 --> s44: Remember the completed result in this process
+  s31 --> s47: The caller cancels#59; the detached worker continues
+  s32 --> s43: Owner drive parks until a wake
+  s32 --> s45: Remember the completed result in this process
+  s33 --> s37: Release the operation gate and wake the owner
+  s33 --> s49: The caller cancels#59; the detached worker continues
+  s33 --> s56: Reply to the command
+  s34 --> s39: Release the operation gate and wake the owner
+  s34 --> s57: Reply to the command
+  s35 --> s49: Remember the completed result in this process
+  s35 --> s58: Reply to the command
+  s36 --> s49: Owner drive parks until a wake
+  s36 --> s51: Release the operation gate and wake the owner
+  s36 --> s59: Reply to the command
+  s37 --> s50: Return the same process's remembered result
+  s37 --> s53: Owner starts the front: register the launch
+  s37 --> s60: Reply to the command
+  s38 --> s54: Owner starts the front: register the launch
+  s38 --> s61: Reply to the command
+  s39 --> s52: Return the same process's remembered result
+  s39 --> s55: Owner starts the front: register the launch
+  s39 --> s62: Reply to the command
+  s40 --> s48: Install Pending over the vacant row
+  s40 --> s54: Return the same process's remembered result
+  s41 --> s46: Release the operation gate and wake the owner
+  s41 --> s57: The caller cancels#59; the detached worker continues
+  s42 --> s56: Remember the completed result in this process
+  s42 --> s58: The caller cancels#59; the detached worker continues
+  s43 --> s57: Remember the completed result in this process
+  s44 --> s56: Owner drive parks until a wake
+  s44 --> s59: The caller cancels#59; the detached worker continues
+  s44 --> s60: Release the operation gate and wake the owner
+  s45 --> s57: Owner drive parks until a wake
+  s45 --> s62: Release the operation gate and wake the owner
+  s46 --> s61: Return the same process's remembered result
+  s46 --> s40: Owner starts the front: register the launch
+  s47 --> s58: Owner drive parks until a wake
+  s47 --> s59: Remember the completed result in this process
+  s48 --> s63: Observe the create epoch
+  s48 --> s65: Return the same process's remembered result
+  s49 --> s51: Release the operation gate and wake the owner
+  s49 --> s71: Reply to the command
+  s50 --> s68: Owner starts the front: register the launch
+  s50 --> s72: Reply to the command
+  s51 --> s67: Return the same process's remembered result
+  s51 --> s69: Owner starts the front: register the launch
+  s51 --> s73: Reply to the command
+  s52 --> s70: Owner starts the front: register the launch
+  s52 --> s74: Reply to the command
+  s53 --> s64: Install Pending over the vacant row
+  s53 --> s68: Return the same process's remembered result
+  s54 --> s65: Install Pending over the vacant row
+  s55 --> s66: Install Pending over the vacant row
+  s55 --> s70: Return the same process's remembered result
+  s56 --> s60: Release the operation gate and wake the owner
+  s56 --> s71: The caller cancels#59; the detached worker continues
+  s57 --> s62: Release the operation gate and wake the owner
+  s58 --> s71: Remember the completed result in this process
+  s59 --> s71: Owner drive parks until a wake
+  s59 --> s73: Release the operation gate and wake the owner
+  s60 --> s72: Return the same process's remembered result
+  s60 --> s53: Owner starts the front: register the launch
+  s61 --> s54: Owner starts the front: register the launch
+  s62 --> s74: Return the same process's remembered result
+  s62 --> s55: Owner starts the front: register the launch
+  s63 --> s75: Compare live epoch and retain create permission
+  s63 --> s77: Return the same process's remembered result
+  s64 --> s76: Observe the create epoch
+  s64 --> s78: Return the same process's remembered result
+  s65 --> s77: Observe the create epoch
+  s66 --> s79: Observe the create epoch
+  s66 --> s81: Return the same process's remembered result
+  s67 --> s82: Owner starts the front: register the launch
+  s67 --> s83: Reply to the command
+  s68 --> s78: Install Pending over the vacant row
+  s69 --> s80: Install Pending over the vacant row
+  s69 --> s82: Return the same process's remembered result
+  s70 --> s81: Install Pending over the vacant row
+  s71 --> s73: Release the operation gate and wake the owner
+  s72 --> s68: Owner starts the front: register the launch
+  s73 --> s83: Return the same process's remembered result
+  s73 --> s69: Owner starts the front: register the launch
+  s74 --> s70: Owner starts the front: register the launch
+  s75 --> s85: Return the same process's remembered result
+  s75 --> s91: Complete the previously granted create
+  s76 --> s84: Compare live epoch and retain create permission
+  s76 --> s86: Return the same process's remembered result
+  s77 --> s85: Compare live epoch and retain create permission
+  s78 --> s86: Observe the create epoch
+  s79 --> s87: Compare live epoch and retain create permission
+  s79 --> s89: Return the same process's remembered result
+  s80 --> s88: Observe the create epoch
+  s80 --> s90: Return the same process's remembered result
+  s81 --> s89: Observe the create epoch
+  s82 --> s90: Install Pending over the vacant row
+  s83 --> s82: Owner starts the front: register the launch
+  s84 --> s92: Return the same process's remembered result
+  s84 --> s97: Complete the previously granted create
+  s85 --> s98: Complete the previously granted create
+  s86 --> s92: Compare live epoch and retain create permission
+  s87 --> s94: Return the same process's remembered result
+  s87 --> s99: Complete the previously granted create
+  s88 --> s93: Compare live epoch and retain create permission
+  s88 --> s95: Return the same process's remembered result
+  s89 --> s94: Compare live epoch and retain create permission
+  s90 --> s95: Observe the create epoch
+  s91 --> s96: Observe the input epoch
+  s91 --> s98: Return the same process's remembered result
+  s92 --> s104: Complete the previously granted create
+  s93 --> s100: Return the same process's remembered result
+  s93 --> s106: Complete the previously granted create
+  s94 --> s107: Complete the previously granted create
+  s95 --> s100: Compare live epoch and retain create permission
+  s96 --> s101: Compare live epoch and retain input permission
+  s96 --> s103: Return the same process's remembered result
+  s97 --> s102: Observe the input epoch
+  s97 --> s104: Return the same process's remembered result
+  s98 --> s103: Observe the input epoch
+  s99 --> s105: Observe the input epoch
+  s99 --> s107: Return the same process's remembered result
+  s100 --> s114: Complete the previously granted create
+  s101 --> s109: Return the same process's remembered result
+  s101 --> s115: Complete the previously granted first input
+  s102 --> s108: Compare live epoch and retain input permission
+  s102 --> s110: Return the same process's remembered result
+  s103 --> s109: Compare live epoch and retain input permission
+  s104 --> s110: Observe the input epoch
+  s105 --> s111: Compare live epoch and retain input permission
+  s105 --> s113: Return the same process's remembered result
+  s106 --> s112: Observe the input epoch
+  s106 --> s114: Return the same process's remembered result
+  s107 --> s113: Observe the input epoch
+  s108 --> s116: Return the same process's remembered result
+  s108 --> s120: Complete the previously granted first input
+  s109 --> s121: Complete the previously granted first input
+  s110 --> s116: Compare live epoch and retain input permission
+  s111 --> s118: Return the same process's remembered result
+  s111 --> s122: Complete the previously granted first input
+  s112 --> s117: Compare live epoch and retain input permission
+  s112 --> s119: Return the same process's remembered result
+  s113 --> s118: Compare live epoch and retain input permission
+  s114 --> s119: Observe the input epoch
+  s115 --> s121: Return the same process's remembered result
+  s115 --> s123: Commit the input's receipt
+  s116 --> s125: Complete the previously granted first input
+  s117 --> s124: Return the same process's remembered result
+  s117 --> s126: Complete the previously granted first input
+  s118 --> s127: Complete the previously granted first input
+  s119 --> s124: Compare live epoch and retain input permission
+  s120 --> s125: Return the same process's remembered result
+  s120 --> s128: Commit the input's receipt
+  s121 --> s129: Commit the input's receipt
+  s122 --> s127: Return the same process's remembered result
+  s122 --> s130: Commit the input's receipt
+  s123 --> s27: Bind the source
+  s123 --> s129: Return the same process's remembered result
+  s27 --> s135: Reply to the command
+  s124 --> s131: Complete the previously granted first input
+  s125 --> s132: Commit the input's receipt
+  s126 --> s131: Return the same process's remembered result
+  s126 --> s133: Commit the input's receipt
+  s127 --> s134: Commit the input's receipt
+  s128 --> s37: Bind the source
+  s128 --> s132: Return the same process's remembered result
+  s129 --> s38: Bind the source
+  s130 --> s39: Bind the source
+  s130 --> s134: Return the same process's remembered result
+  s123 --> s135: Bind the source
+  s37 --> s137: Reply to the command
+  s38 --> s138: Reply to the command
+  s39 --> s139: Reply to the command
+  s131 --> s136: Commit the input's receipt
+  s132 --> s50: Bind the source
+  s133 --> s51: Bind the source
+  s133 --> s136: Return the same process's remembered result
+  s134 --> s52: Bind the source
+  s135 --> s138: Return the same process's remembered result
+  s128 --> s137: Bind the source
+  s129 --> s138: Bind the source
+  s130 --> s139: Bind the source
+  s50 --> s140: Reply to the command
+  s51 --> s141: Reply to the command
+  s52 --> s142: Reply to the command
+  s136 --> s67: Bind the source
+  s137 --> s140: Return the same process's remembered result
+  s139 --> s142: Return the same process's remembered result
+  s132 --> s140: Bind the source
+  s133 --> s141: Bind the source
+  s134 --> s142: Bind the source
+  s67 --> s143: Reply to the command
+  s141 --> s143: Return the same process's remembered result
+  s136 --> s143: Bind the source
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s7 blue
+  class s8 blue
+  class s9 blue
+  class s10 blue
+  class s11 blue
+  class s12 blue
+  class s13 blue
+  class s14 blue
+  class s15 blue
+  class s16 blue
+  class s17 blue
+  class s18 blue
+  class s19 blue
+  class s20 purple
+  class s21 blue
+  class s22 blue
+  class s23 blue
+  class s24 blue
+  class s25 blue
+  class s26 blue
+  class s27 blue
+  class s28 blue
+  class s29 purple
+  class s30 purple
+  class s31 purple
+  class s32 purple
+  class s33 blue
+  class s34 blue
+  class s35 blue
+  class s36 blue
+  class s37 blue
+  class s38 blue
+  class s39 blue
+  class s41 purple
+  class s42 purple
+  class s43 purple
+  class s44 purple
+  class s45 purple
+  class s46 purple
+  class s47 purple
+  class s49 blue
+  class s50 blue
+  class s51 blue
+  class s52 blue
+  class s56 purple
+  class s57 purple
+  class s58 purple
+  class s59 purple
+  class s60 purple
+  class s61 purple
+  class s62 purple
+  class s67 blue
+  class s71 purple
+  class s72 purple
+  class s73 purple
+  class s74 purple
+  class s83 purple
+  class s135 purple
+  class s137 purple
+  class s138 purple
+  class s139 purple
+  class s140 purple
+  class s141 purple
+  class s142 purple
+  class s143 purple

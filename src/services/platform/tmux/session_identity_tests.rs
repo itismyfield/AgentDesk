@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
 pub(crate) struct Rig {
@@ -14,9 +15,10 @@ impl Rig {
         let binary = crate::services::platform::binary_resolver::runtime_command("tmux").unwrap();
         let binary =
             crate::services::process::shell_escape(&binary.get_program().to_string_lossy());
+        let socket = format!("i8119-s1-{}", uuid::Uuid::new_v4().simple());
         std::fs::write(
             &program,
-            format!("#!/bin/sh\nexec {binary} -L i8119-s1 -f /dev/null \"$@\"\n"),
+            format!("#!/bin/sh\nexec {binary} -L {socket} -f /dev/null \"$@\"\n"),
         )
         .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -48,6 +50,12 @@ impl Rig {
             self.raw(&["display-message", "-p", "-t", &target, "#{pane_pid}"])
                 .stdout,
         )
+    }
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        let _ = self.raw(&["kill-server"]);
     }
 }
 
@@ -247,11 +255,63 @@ fn identity_checked_panes_refuse_unmarked_submission_target() {
         .unwrap_or_else(|e| e.into_inner());
     let rig = Rig::new();
     let name = format!("adk-cc-pane-{}", uuid::Uuid::new_v4());
+    let composer = "printf '────────────────────\\n❯ \\n────────────────────\\n'; exec cat";
     assert!(
-        rig.raw(&["new-session", "-d", "-s", &name, "cat"])
+        rig.raw(&["new-session", "-d", "-s", &name, composer])
             .status
             .success()
     );
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !String::from_utf8_lossy(&rig.snapshot(&name).0).contains('❯') {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture composer ready"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Ready input evidence must not let an unmarked pane cross the identity gate.
+    let transcript = rig.dir.path().join("idle.jsonl");
+    std::fs::write(
+        &transcript,
+        "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+    )
+    .unwrap();
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        &name,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: transcript.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    assert!(crate::services::claude_tui::readiness::observe(&name, None).is_none());
+    // New activity after the restored baseline supplies the current-source Idle proof.
+    let mut tail = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    writeln!(
+        tail,
+        "{}",
+        serde_json::json!({"type":"assistant", "message":{"content":"ready"}})
+    )
+    .unwrap();
+    writeln!(
+        tail,
+        "{}",
+        serde_json::json!({"type":"system", "subtype":"turn_duration"})
+    )
+    .unwrap();
+    crate::services::claude_tui::input::wait_for_prompt_ready(
+        &name,
+        crate::services::claude_tui::input::PromptReadinessKind::ProvenWarmFollowup,
+        None,
+    )
+    .expect("unmarked fixture independently proves readiness");
     let before = rig.snapshot(&name);
     let program = rig.dir.path().join("tmux");
     let busy = crate::services::claude_tui::busy_inject::Pane::with_program(&name, program.clone());
@@ -279,6 +339,7 @@ fn identity_checked_panes_refuse_unmarked_submission_target() {
         crate::services::claude_tui::input::PromptReadinessKind::ProvenWarmFollowup,
         None,
     );
+    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&name);
     let after = rig.snapshot(&name);
     let _ = rig.raw(&["kill-session", "-t", &exact_target(&name)]);
     assert!(

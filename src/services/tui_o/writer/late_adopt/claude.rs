@@ -91,8 +91,8 @@ pub(super) async fn look<I: HostIo>(
     }
 }
 
-/// A transcript Legacy's late pin found delivered through `len` while it was current, with the
-/// Legacy sends read before that look.
+/// A transcript proved delivered through `len`, by its current pin or frozen receipt scope,
+/// with the Legacy sends read before that look.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::services::tui_o::writer) struct Sample {
     pub(in crate::services::tui_o::writer) source: SourceId,
@@ -178,20 +178,41 @@ pub(in crate::services::tui_o::writer) fn old_source_done(
     events: &[BindingEvent],
     candidate: &Candidate,
 ) -> Result<Floor, String> {
+    let sample = checked_sample(sample, old, events)?;
+    let sends = {
+        let _adoption = candidate.lock();
+        candidate.sends()
+    };
+    sampled_floor(sample, old.1, sends)
+}
+
+/// The publication caller already holds the adoption lock.
+pub(in crate::services::tui_o::writer) fn old_source_done_with_sends(
+    sample: Option<&Sample>,
+    old: &(SourceId, u64),
+    events: &[BindingEvent],
+    sends: (u64, u64),
+) -> Result<Floor, String> {
+    sampled_floor(checked_sample(sample, old, events)?, old.1, sends)
+}
+fn checked_sample<'a>(
+    sample: Option<&'a Sample>,
+    old: &(SourceId, u64),
+    events: &[BindingEvent],
+) -> Result<&'a Sample, String> {
     let sample = sample.ok_or("no delivered sample of the old transcript")?;
     if sample.source != old.0 || nonce_of(events, &old.0).as_ref() != Some(&sample.nonce) {
         return Err("the delivered sample is of another transcript or execution".into());
     }
     prefix::metadata_since(&old.0, sample.len)?;
-    let sends = {
-        let _adoption = candidate.lock();
-        candidate.sends()
-    };
+    Ok(sample)
+}
+fn sampled_floor(sample: &Sample, seq: u64, sends: (u64, u64)) -> Result<Floor, String> {
     if sends.0 != sample.sends.0 {
         return Err("a Legacy body send started since the delivered sample".into());
     }
     Ok(Floor {
-        seq: old.1,
+        seq,
         sends: sample.sends,
     })
 }

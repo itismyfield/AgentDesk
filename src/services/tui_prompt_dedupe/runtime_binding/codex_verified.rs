@@ -19,7 +19,10 @@ use crate::services::tmux_common::{self as tc, TmuxSourceAuthority};
 use binding_events::codex::{Claim, ClaimEvidence, Decision, Fold, VerifiedProof};
 use std::{io, path::Path};
 
+mod observation;
 pub(crate) mod provenance;
+
+pub(super) use observation::CanonicalObservation;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VerifiedSourceSnapshot {
@@ -145,32 +148,27 @@ fn validate_context(
     authority: &TmuxSourceAuthority<'_>,
     context: &BindingContext,
 ) -> io::Result<()> {
-    let current = binding_context::observe_spawn_nonce_marker(authority.session());
-    let canonical = binding_context::execution_context("codex", &context.execution_nonce)
-        .map_err(|_| invalid("Codex canonical context unavailable"))?;
-    if current != SpawnNonceMarker::Known(context.execution_nonce.clone())
-        || canonical != *context
-        || context.tmux_session != authority.session()
-        || context.owner_runtime_root != tc::current_tmux_owner_marker()
-        || context.source_policy.as_deref() != Some("verified")
-    {
-        return Err(invalid("Codex execution changed"));
+    CanonicalObservation {
+        marker: binding_context::observe_spawn_nonce_marker(authority.session()),
+        canonical: binding_context::execution_context("codex", &context.execution_nonce).ok(),
     }
-    Ok(())
+    .validate(authority, context)
 }
 
 pub(super) fn current_context(
     authority: &TmuxSourceAuthority<'_>,
 ) -> io::Result<Option<BindingContext>> {
-    let nonce = match binding_context::observe_spawn_nonce_marker(authority.session()) {
-        SpawnNonceMarker::Known(nonce) => Some(nonce),
-        _ => None,
-    };
-    let canonical = nonce
-        .as_deref()
-        .and_then(|nonce| binding_context::execution_context("codex", nonce).ok());
-    let context = if canonical.is_some() {
-        canonical
+    observed_context(authority, &CanonicalObservation::read(authority.session()))
+}
+
+/// [`current_context`] judged from `observed` without reading the marker or context again.
+pub(super) fn observed_context(
+    authority: &TmuxSourceAuthority<'_>,
+    observed: &CanonicalObservation,
+) -> io::Result<Option<BindingContext>> {
+    let nonce = observed.nonce();
+    let context = if observed.canonical.is_some() {
+        observed.canonical.clone()
     } else {
         let channel = with_runtime_binding_state_under_source_authority(authority, |state| {
             state
@@ -180,11 +178,7 @@ pub(super) fn current_context(
         });
         let recovered = channel
             .map(|channel| {
-                binding_events::codex::context_for_nonce(
-                    channel,
-                    authority.session(),
-                    nonce.as_deref(),
-                )
+                binding_events::codex::context_for_nonce(channel, authority.session(), nonce)
             })
             .transpose()?
             .flatten();
@@ -206,7 +200,7 @@ pub(super) fn current_context(
     else {
         return Ok(None);
     };
-    validate_context(authority, &context)?;
+    observed.validate(authority, &context)?;
     Ok(Some(context))
 }
 

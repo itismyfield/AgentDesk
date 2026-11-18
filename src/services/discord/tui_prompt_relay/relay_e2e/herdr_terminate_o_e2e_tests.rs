@@ -1,6 +1,9 @@
 //! A terminated Herdr execution's output stays O's: its sealed tail posts once, a successor bind
 //! keeps it, an announced unit stays unsealed, and the service writes or posts nothing of O's.
 
+#[path = "herdr_terminate_o_e2e_tests/late_clear_tests.rs"]
+mod late_clear_tests;
+
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -253,6 +256,7 @@ impl Terminating {
             provider_root: Some(sessions.clone()),
             first_prompt_digest: None,
             source_policy: None,
+            resume_start: None,
         };
         let prepared = PreparedIncarnation::create(context).unwrap();
         let key = (token_hash.as_str(), session_key.as_str());
@@ -284,6 +288,7 @@ impl Terminating {
             expected_native_session_id: native,
             resume: false,
             provider_root,
+            resume_start: None,
         }
     }
 

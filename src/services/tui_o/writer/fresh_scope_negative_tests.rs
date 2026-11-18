@@ -23,7 +23,7 @@ fn publish_context(next: &BindingContext) {
 
 fn hook(next: &BindingContext, id: &str, path: &Path, event: &str) {
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(next.clone()),
+        context: CapturedContext::Captured(next.clone().into()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();

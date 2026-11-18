@@ -598,11 +598,15 @@ async fn load_db_channel(
     let Some(pool) = shared.pg_pool.as_ref() else {
         return (None, None);
     };
-    let candidates = super::adk_session::build_session_key_candidates(
+    let Ok(candidates) = super::session_locator::candidates(
+        Some(pool),
         &shared.token_hash,
         &ProviderKind::Claude,
         tmux_session_name,
-    );
+        None,
+    ) else {
+        return (None, None);
+    };
     for session_key in candidates {
         match crate::db::dispatched_sessions::load_session_channel_id_pg(pool, &session_key).await {
             Ok(Some((channel_id, instance_id))) => return (Some(channel_id), instance_id),

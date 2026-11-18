@@ -748,7 +748,7 @@ fn unknown_notice(reason: &str) -> String {
     crate::services::discord::session_notice::subtext(
         "⚠️",
         &format!(
-            "{} 터미널 턴 상태를 확인하지 못해 진행 표시를 멈췄습니다 (사유: {reason}). 그 동안 들어온 외부 입력은 대기열에 보관됩니다.",
+            "{} 터미널 턴 상태를 확인하지 못해 진행 표시를 멈췄습니다 (사유: {reason}). 새 외부 입력은 실행 상태를 다시 확인하며, 전달할 수 없으면 사유를 알리고 폐기합니다.",
             clock()
         ),
     )

@@ -278,6 +278,14 @@ if run_check guards "Isolated instance declaration tests"; then
 "$PYTHON" -m unittest tests.test_dev_instance_files
 fi
 
+if run_check guards "Claude login binding tests"; then
+"$PYTHON" -m unittest tests.test_dev_instance_claude_login
+fi
+
+if run_check guards "MCP credential watch scope"; then
+"$PYTHON" -m unittest tests.test_mcp_credential_watch_scope
+fi
+
 if run_check cargo "Isolated instance credential binary tests"; then
 cargo build --bin agentdesk
 instance_test_bin="$(cd "${CARGO_TARGET_DIR:-$PWD/target}/debug" && pwd -P)"
@@ -285,7 +293,7 @@ export PATH="$instance_test_bin:$PATH"
 "$PYTHON" -m unittest tests.test_dev_instance_credential
 "$PYTHON" -m unittest -v tests.test_dev_instance_identity
 "$PYTHON" -m unittest tests.test_dev_instance_lifecycle
-"$PYTHON" -m unittest tests.test_dev_instance_completion
+"$PYTHON" -m unittest tests.test_dev_instance_completion tests.test_dev_instance_down
 "$PYTHON" -m unittest tests.test_dev_instance_driver
 "$PYTHON" -m unittest tests.test_dev_instance_runtime
 fi
@@ -569,6 +577,7 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tui_relay.test_post_deploy_turn_smoke \
   scripts.e2e.tests.test_smoke_replay \
   scripts.e2e.tests.test_continuous_catalog \
+  scripts.e2e.tests.test_continuous_runner \
   tests.test_e2e_continuous_manifest \
   scripts.e2e.tui_relay.test_retained_queue_idle \
   scripts.e2e.tui_relay.test_restart_queued_inputs \

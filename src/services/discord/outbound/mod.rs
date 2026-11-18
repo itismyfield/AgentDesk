@@ -37,6 +37,7 @@ pub(crate) mod send_gate;
 pub(crate) mod send_target;
 pub(crate) mod send_to_agent;
 pub(in crate::services::discord) mod serenity_reference;
+pub(crate) use serenity_reference::recovery_notice;
 pub(crate) mod source_registry;
 mod transport;
 #[cfg(any(test, unix))]

@@ -349,8 +349,10 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
     },
     "TmuxRelayCoord::reset_confirmed_frontier_with_generation": {
         "src/services/discord/tmux_session_files.rs": 2,
+        "src/services/discord/relay_health/frontier.rs": 1,
     },
     "TmuxRelayCoord::advance_untyped_frontier": {
+        "src/services/discord/relay_health/frontier.rs": 1,
         "src/services/discord/tmux.rs": 1,
         "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
     },
@@ -362,11 +364,19 @@ EXPECTED_DEFINITION_FILE_COUNTS: dict[str, dict[str, int]] = {
         "src/services/discord/outbound/delivery_record.rs": 1,
         "src/services/discord/tmux_watcher/terminal_long_chunks.rs": 1,
     },
+    "TmuxRelayCoord::reset_confirmed_frontier_with_generation": {
+        "src/services/discord/relay_health/frontier.rs": 1,
+        "src/services/engine_runtime/relay_state.rs": 1,
+    },
+    "TmuxRelayCoord::advance_untyped_frontier": {
+        "src/services/discord/relay_health/frontier.rs": 1,
+        "src/services/engine_runtime/relay_state.rs": 1,
+    },
 }
 
 # Raw atomic pin by file; totals are derived from the map.
 EXPECTED_RAW_ATOMIC_MUTATIONS: dict[str, int] = {
-    "src/services/discord/relay_health/frontier.rs": 2,
+    "src/services/engine_runtime/relay_state.rs": 2,
 }
 
 # Bare-reference pin by symbol/file; current capture is the `record` binding.
@@ -434,7 +444,8 @@ def _call_re(symbol: str) -> re.Pattern[str]:
         # method is this writer, and `Self` is counted in any impl rather than
         # only an impl of the pinned type.
         type_name, _ = symbol.rsplit("::", 1)
-        terminal_type = rf"(?:{re.escape(type_name)}|Self)"
+        canonical_type = "|FrontierResetState" if type_name == "TmuxRelayCoord" else ""
+        terminal_type = rf"(?:{re.escape(type_name)}|Self{canonical_type})"
         ufcs_type = (
             rf"(?:\b{terminal_type}\b"
             rf"|<\s*(?:(?:\b(?:crate|self|super)\b|[A-Za-z_]\w*)\s*::\s*)*"
@@ -802,30 +813,55 @@ def _definition_collision_problems(
     return problems
 
 
+def _call_arguments(text: str, start: int) -> list[str]:
+    depth = 0
+    arguments = []
+    for index in range(start, len(text)):
+        char = text[index]
+        if char == ")" and depth == 0:
+            if text[start:index].strip():
+                arguments.append(text[start:index].strip())
+            break
+        if char == "," and depth == 0:
+            arguments.append(text[start:index].strip())
+            start = index + 1
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+    return arguments
+
+
 def _reset_generation_argument_problems(root: Path, texts: dict[Path, str]) -> list[str]:
-    symbol = "TmuxRelayCoord::reset_confirmed_frontier_with_generation"
+    reset = "TmuxRelayCoord::reset_confirmed_frontier_with_generation"
+    advance = "TmuxRelayCoord::advance_untyped_frontier"
+    delegate_file = "src/services/discord/relay_health/frontier.rs"
     problems = []
     for path, text in texts.items():
-        for match in CALL_RES[symbol].finditer(text):
-            start = match.end()
-            depth = 0
-            arguments = []
-            for index in range(start, len(text)):
-                char = text[index]
-                if char == ")" and depth == 0:
-                    if text[start:index].strip():
-                        arguments.append(text[start:index].strip())
-                    break
-                if char == "," and depth == 0:
-                    arguments.append(text[start:index].strip())
-                    start = index + 1
-                elif char in "([{":
-                    depth += 1
-                elif char in ")]}":
-                    depth -= 1
-            expected = 3 if "." in match.group() else 4
-            if len(arguments) != expected or arguments[-1] == "None":
-                problems.append(f"{path.relative_to(root).as_posix()}: reset requires the captured generation argument")
+        relative = path.relative_to(root).as_posix()
+        for symbol in (reset, advance):
+            for match in CALL_RES[symbol].finditer(text):
+                arguments = _call_arguments(text, match.end())
+                receiver_call = "." in match.group()
+                if relative == delegate_file:
+                    # Only these two delegates may use the lower operation's
+                    # extra arguments; pin generation and both atomic owners.
+                    expected = (["expected", "new"] if symbol == reset else ["end"]) + [
+                        "generation", "&self.confirmed_end_offset",
+                        "&self.confirmed_end_generation_mtime_ns", "before_generation",
+                    ]
+                    actual = [re.sub(r"\s+", "", argument) for argument in arguments]
+                    receiver_ok = re.fullmatch(r"state\s*\.\s*\w+\s*\(", match.group()) is not None
+                    if not receiver_call:
+                        receiver_ok = bool(actual) and actual.pop(0) in ("&mutstate", "&mut*state")
+                    if not receiver_ok or actual != expected:
+                        problems.append(f"{relative}: delegate must forward the original generation and atomic fields in order ({_symbol_basename(symbol)})")
+                elif symbol == reset:
+                    expected_count = 3 if receiver_call else 4
+                    if len(arguments) != expected_count or arguments[-1] == "None":
+                        problems.append(f"{relative}: reset requires the captured generation argument")
+                elif len(arguments) != (2 if receiver_call else 3):
+                    problems.append(f"{relative}: advance requires only end and generation arguments")
     return problems
 
 

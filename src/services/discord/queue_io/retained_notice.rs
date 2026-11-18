@@ -1,4 +1,5 @@
-//! Durable retention projects one immutable, non-turn event into the existing outbox.
+//! Durable retention, and a refusal for good, each project one immutable, non-turn event into
+//! the existing outbox.
 use crate::services::message_outbox::{
     OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe,
 };
@@ -25,7 +26,13 @@ pub(crate) async fn enqueue(
     );
     // A proven-unsent original asks for a resend; only a true ambiguity warns of a duplicate.
     // A batch some of whose sources were already taken asks only for its new part.
-    let body = match identity["notice"]["kind"].as_str() {
+    // An input refused for good says why it ended and that nothing of it was kept.
+    let kind = identity["notice"]["kind"].as_str();
+    let refused = kind == Some("readiness_unproven");
+    let body = match kind {
+        _ if refused => {
+            "⚠️ 이 입력은 세션이 입력을 받을 준비가 됐다는 증거를 확보하지 못해 전달하지 않고 종료했습니다. 원문은 보관하지 않으며 자동으로 다시 보내지 않습니다. 다음 입력은 계속 처리합니다. 필요하면 같은 내용을 새 메시지로 보내 주세요."
+        }
         _ if identity["disposition"] == "opaque_unsent" => {
             "⚠️ 일부 출처가 이미 접수되어 이 묶음은 추가로 전달하지 않고 보관했습니다. 다음 입력은 계속 처리합니다. 필요한 새 부분을 따로 보내 주세요. 전체를 다시 보내면 중복 실행될 수 있습니다."
         }
@@ -44,7 +51,10 @@ pub(crate) async fn enqueue(
             content: &text,
             bot: provider,
             source: "retained_input_notice",
-            reason_code: Some("retained.unconfirmed"),
+            reason_code: Some(match refused {
+                true => "refused.readiness_unproven",
+                false => "retained.unconfirmed",
+            }),
             session_key: Some(&key),
         },
     )

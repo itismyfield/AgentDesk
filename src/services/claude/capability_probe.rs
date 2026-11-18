@@ -75,7 +75,7 @@ fn probe(model: Option<&str>, home: Option<&Path>, cwd: &Path) -> Result<bool, S
     }
     let (binary, resolution) = super::resolve_claude_binary()?;
     let mut builder =
-        crate::services::claude_command::ClaudeCommandBuilder::for_binary(&binary, &resolution);
+        crate::services::claude_command::ClaudeCommandBuilder::for_simple(&binary, &resolution);
     let command = builder.command_mut();
     crate::services::process::configure_child_process_group(command);
     command.args(["-p", "--input-format", "stream-json"]);
@@ -94,7 +94,7 @@ fn probe(model: Option<&str>, home: Option<&Path>, cwd: &Path) -> Result<bool, S
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let mut child = builder
-        .into_command()
+        .into_command()?
         .spawn()
         .map_err(|error| format!("spawn: {error}"))?;
     // Only control frames are written, and the closed input ends the process: no prompt is sent.

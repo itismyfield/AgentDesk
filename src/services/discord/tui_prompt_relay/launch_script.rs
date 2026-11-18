@@ -336,7 +336,7 @@ mod tests {
         });
         assert_eq!(
             captured.context,
-            CapturedContext::Captured(previous.context.clone())
+            CapturedContext::Captured(previous.context.clone().into())
         );
         assert_eq!(
             observe_spawn_nonce_marker(&previous.context.tmux_session),

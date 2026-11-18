@@ -426,12 +426,14 @@ impl Request<'_> {
         inflight: &mut InflightTurnState,
         uploads: &PendingUploads,
         cwd: &str,
-        host: &crate::services::turn_host::TurnHost,
+        (host, standing): (
+            &crate::services::turn_host::TurnHost,
+            super::admission::Standing,
+        ),
     ) -> Arc<dyn TurnGateway> {
-        let external = self.metadata.is_none_or(|metadata| {
-            metadata.get("routine_id").is_none() && metadata.get("scheduled_message_id").is_none()
-        });
-        let presentation = (external
+        // The channel's Herdr execution runs the start as its own turn.
+        let channel_turn = standing == super::admission::Standing::Channel;
+        let presentation = (channel_turn
             && matches!(host, crate::services::turn_host::TurnHost::Herdr(_)))
         .then(|| {
             Arc::new(DiscordGateway::new(

@@ -1,6 +1,5 @@
-//! A first input whose idle source proves no boundary by the end of its readiness budget ends at
-//! the owner retained with a resend ask; one whose turn still runs waits at the front. A launch
-//! older than the daemon restart proves its idle composer on its last hard terminal.
+//! A first input whose idle source proves no boundary ends retained with a resend ask, or refused
+//! for good once its transcript moved; a running turn waits, an older launch proves its terminal.
 use super::tests::{NONCE, bound_target};
 use super::*;
 use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
@@ -26,7 +25,16 @@ enum Case {
     Recorded,
     /// A continuing turn's summary arrives after the restart lost its hook's volatile latch.
     Continuing,
+    /// Restarted like the first; one metadata row lands while the input waits.
+    Moved,
+    /// The same wait, but what lands is a turn the idle-looking screen does not show.
+    MovedRunning,
+    /// The same wait; a continuation fence closes over the metadata row.
+    MovedFenced,
+    /// The same wait and metadata row under a screen that shows a turn.
+    MovedBusy,
 }
+use Case::{Moved, MovedBusy, MovedFenced, MovedRunning};
 
 // The resumed cases restart without the start record a resume accepted before its build lacks.
 #[test]
@@ -47,6 +55,20 @@ fn a_restarted_resume_with_its_recorded_start_takes_its_input_once() {
 #[test]
 fn a_restart_during_a_continuing_stop_retains_with_one_resend_notice_pg() {
     owner_outcome(&[(Case::Continuing, 816_106)]);
+}
+
+#[test]
+fn a_wait_whose_transcript_moved_once_ends_refused_for_good_with_one_notice_pg() {
+    owner_outcome(&[(Moved, 821_711)]);
+}
+
+#[test]
+fn a_moved_transcript_under_a_turn_a_fence_or_a_busy_screen_keeps_the_front_waiting() {
+    owner_outcome(&[
+        (MovedRunning, 821_712),
+        (MovedFenced, 821_713),
+        (MovedBusy, 821_714),
+    ]);
 }
 
 fn owner_outcome(cases: &[(Case, u64)]) {
@@ -87,15 +109,16 @@ fn owner_outcome(cases: &[(Case, u64)]) {
         let asked = json!({"type":"user","timestamp":old,"message":{"role":"user","content":"earlier prompt"}});
         let said = json!({"type":"assistant","timestamp":old,"message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}});
         match case {
-            Case::Restarted | Case::RestartedOld | Case::Recorded | Case::Continuing => rows(&[
-                asked,
-                said,
+            Case::Running => rows(&[asked.clone(), said.clone()]),
+            Case::StartRefused => (),
+            _ => rows(&[
+                asked.clone(),
+                said.clone(),
                 json!({"type":"system","subtype":"turn_duration","timestamp":old}),
                 json!({"type":"last-prompt"}),
             ]),
-            Case::Running => rows(&[asked, said]),
-            Case::StartRefused => (),
         }
+        let moves = matches!(case, Moved | MovedRunning | MovedFenced | MovedBusy);
         let resumed = case != Case::StartRefused;
         let context: binding_context::BindingContext = serde_json::from_value(json!({
             "schema":1,"provider":"claude","execution_nonce":NONCE,
@@ -194,14 +217,20 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             "target":{"host":"herdr","owner":logical,"root":socket,"execution_nonce":NONCE},
             "source":{"kind":"pre_source","expected_session_id":null,
                 "expected_transcript":null,"binding_watermark":null}});
-        runtime
-            .block_on(mailbox.v2_cold_fixture(
+        let queue = crate::config::runtime_root().unwrap();
+        let queue = queue.join(format!(
+            "runtime/discord_pending_queue/moved/{channel}.json"
+        ));
+        let fixture = match case {
+            Moved => runtime.block_on(merged_unit(&mailbox, queue.clone(), attempt, channel)),
+            _ => runtime.block_on(mailbox.v2_cold_fixture(
                 root.path().join("unproven.json"),
                 attempt,
                 "one original".into(),
                 channel,
-            ))
-            .unwrap();
+            )),
+        };
+        fixture.unwrap();
         let border = "─".repeat(52);
         rig.answer("pane.read", json!({"type":"pane_read","read":{"pane_id":PANE,
             "source":"recent_unwrapped","text":format!("✻ Baked for 2s\n\n{border}\n❯ \n{border}\n  🤖 Opus(H) │ 7% │ MCP: 2\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"),
@@ -214,6 +243,42 @@ fn owner_outcome(cases: &[(Case, u64)]) {
                 "revision":2,"truncated":false}}),
             );
         }
+        if case == MovedBusy {
+            rig.answer("pane.read", json!({"type":"pane_read","read":{"pane_id":PANE,
+                "source":"recent_unwrapped","text":format!("✻ Thinking… (3s · esc to interrupt)\n\n{border}\n❯ \n{border}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"),
+                "revision":2,"truncated":false}}));
+        }
+        // What lands inside the wait, after it kept its Stamp.
+        let moved = moves.then(|| {
+            let (path, native, logical) = (path.clone(), native.clone(), logical.clone());
+            let (context, asked, said) = (context.clone(), asked.clone(), said.clone());
+            readiness::tests::after_first_look(&logical.clone(), move || {
+                use std::io::Write;
+                if case == MovedFenced {
+                    readiness::note_hook(
+                        "claude",
+                        &HookEventKind::Stop,
+                        &logical,
+                        &json!({"session_id":native,"transcript_path":path}),
+                        Some(&context),
+                        Some(chrono::Utc::now()),
+                        true,
+                    );
+                }
+                let landed = match case {
+                    MovedRunning => vec![asked, said],
+                    _ => vec![json!({"type":"ai-title"})],
+                };
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap();
+                for mut row in landed {
+                    row["sessionId"] = json!(native);
+                    writeln!(file, "{row}").unwrap();
+                }
+            })
+        });
         let (_, target) = bound_target(&rig, &logical, 1);
         let attached = Attached {
             nonce: NONCE.into(),
@@ -228,7 +293,7 @@ fn owner_outcome(cases: &[(Case, u64)]) {
         let leaf = effect::created(
             Box::new(move |frame: String| {
                 // The readiness budget runs out on the leaf's own thread.
-                let budget = Some(Duration::from_millis(450));
+                let budget = Some(Duration::from_millis(if moves { 900 } else { 450 }));
                 composer::READY_WAIT_FOR_TESTS.with(|wait| wait.set(budget));
                 let result = guarded_outcome::capture_preparation(|| {
                     let (sender, receiver) = std::sync::mpsc::channel();
@@ -244,6 +309,9 @@ fn owner_outcome(cases: &[(Case, u64)]) {
         let result = runtime
             .block_on(effect::run(&mailbox, Arc::new(|| 10_000), leaf))
             .unwrap();
+        if let Some(moved) = moved {
+            crate::test_support::wait::join_within(moved, crate::test_support::wait::WAIT_CAP);
+        }
         let read = || {
             runtime
                 .block_on(mailbox.v2_request(|slot| slot.as_ref().unwrap().json()))
@@ -279,13 +347,14 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             snapshot["items"].as_array().unwrap(),
             snapshot["retained_inputs"].as_array().unwrap(),
         );
-        if case == Case::Running {
-            assert_eq!(items.len(), 1, "a running turn keeps the original in front");
-            assert!(retained.is_empty(), "a running turn retains nothing");
-            assert!(
-                held_watch::armed(channel),
-                "a running turn leaves its watch"
-            );
+        if matches!(case, Case::Running | MovedRunning | MovedFenced | MovedBusy) {
+            assert_eq!(items.len(), 1, "{case:?}: the original stays in front");
+            assert!(retained.is_empty(), "{case:?}: nothing is retained");
+            assert!(held_watch::armed(channel), "{case:?}: its watch is left");
+        } else if case == Moved {
+            drop((mailbox, registry));
+            runtime.block_on(refused_for_good(queue, channel));
+            assert!(rig.sends().is_empty(), "{case:?}: still no key");
         } else {
             assert!(items.is_empty(), "{case:?}: the front is released");
             assert_eq!(retained.len(), 1, "{case:?}: {snapshot}");
@@ -350,6 +419,148 @@ fn owner_outcome(cases: &[(Case, u64)]) {
         drop(dedupe_guard);
         drop(env_guard);
     }
+}
+
+const MERGED: [(&str, &str); 2] = [("moved-a", "one original"), ("moved-b", "second original")];
+
+fn merged(channel: u64, at: usize) -> crate::services::turn_orchestrator::PendingQueueItem {
+    // Discord-range ids, so the owner fences these sources by identity.
+    let id = 1_490_000_000_200_000_000u64 + channel * 10 + at as u64;
+    serde_json::from_value(json!({"author_id":7,"channel_id":channel,"message_id":id,
+        "source_message_ids":[id],"queued_generation":1,"text":MERGED[at].1}))
+    .unwrap()
+}
+
+/// Two originals admitted under their own tickets and reserved as the one frame carrying both.
+async fn merged_unit(
+    mailbox: &crate::services::turn_orchestrator::ChannelMailboxHandle,
+    queue: std::path::PathBuf,
+    attempt: Value,
+    channel: u64,
+) -> Result<(), String> {
+    mailbox.v2_adopt(queue, "moved".into()).await?;
+    for (at, (ticket, _)) in MERGED.iter().enumerate() {
+        let admitted = mailbox.v2_admit_ticket(merged(channel, at), (*ticket).into());
+        admitted.await.map_err(String::from)?;
+    }
+    mailbox
+        .v2_request(move |slot| {
+            let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
+            let body = |item: &crate::services::turn_orchestrator::PendingQueueItem| {
+                Some((String::new(), item.text.clone()))
+            };
+            slot.as_mut()
+                .ok_or("no owner")?
+                .reserve_unit(attempt, body)
+                .map(drop)
+        })
+        .await
+}
+
+/// The refusal as a restarted owner finds it: nothing returns to the queue before or after its
+/// notice reached the outbox, no body is kept, a retried ticket admits nothing, one notice posts.
+async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
+    use crate::services::discord::owner_recovery_for_test::recover;
+    use crate::services::tui_input::human_frame::history::v2::Registry;
+    use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let history = || Registry::at(queue.with_extension("history"));
+    let at = ("claude", channel, 20_000);
+    let restart = || {
+        let registry = ChannelMailboxRegistry::default();
+        let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+        (registry, mailbox)
+    };
+    // Restarted before the notice reached the outbox.
+    let (registry, mailbox) = restart();
+    let recovered = recover(
+        &mailbox,
+        (queue.clone(), "moved".into()),
+        history(),
+        None,
+        at,
+    )
+    .await;
+    assert_eq!(recovered, Ok(0));
+    let snapshot = mailbox.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+    let snapshot = snapshot.await.unwrap();
+    assert!(
+        snapshot["items"].as_array().unwrap().is_empty(),
+        "a refused input never returns to the queue: {snapshot}"
+    );
+    assert!(snapshot["retained_inputs"].as_array().unwrap().is_empty());
+    let refused = snapshot["refused_inputs"].as_array().unwrap();
+    assert_eq!(refused.len(), 1, "{snapshot}");
+    assert_eq!(refused[0]["members"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        refused[0]["notice"],
+        json!({"kind":"readiness_unproven","enqueued":false})
+    );
+    let raw = snapshot.to_string();
+    assert!(
+        MERGED.iter().all(|(_, body)| !raw.contains(body)),
+        "no body is kept: {snapshot}"
+    );
+    // Owed its notice and fenced: no legacy claim takes a source, another ticket admits none.
+    let source = merged(channel, 1).message_id;
+    let fenced = mailbox.v2_request(move |slot| {
+        let owner = slot.as_ref().ok_or("no owner")?;
+        let order = crate::services::turn_orchestrator::TurnAdmissionOrder::Immediate;
+        Ok((
+            owner.snapshot.holds_input(),
+            owner.blocks_claim(source, order),
+        ))
+    });
+    assert_eq!(fenced.await, Ok((true, true)));
+    let other = mailbox.v2_admit_ticket(merged(channel, 1), "moved-other".into());
+    assert_eq!(format!("{:?}", other.await), "Err(SourceAlreadyKnown)");
+    // The notice reached the outbox, then the daemon restarted before the owner marked it.
+    ChannelMailboxHandle::v2_notice(&pool, "claude", channel, "moved", &refused[0])
+        .await
+        .unwrap();
+    drop((mailbox, registry));
+    let (_registry, mailbox) = restart();
+    let restored = (queue.clone(), "moved".into());
+    let recovered = recover(&mailbox, restored, history(), Some(&pool), at).await;
+    assert_eq!(recovered, Ok(1), "the restart retries only the notice");
+    let retried = mailbox.v2_admit_ticket(merged(channel, 0), MERGED[0].0.into());
+    assert_eq!(
+        retried.await.map(|admitted| format!("{admitted:?}")),
+        Ok("Duplicate".into()),
+        "the same ticket admits nothing again"
+    );
+    let snapshot = mailbox.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+    let snapshot = snapshot.await.unwrap();
+    assert!(
+        snapshot["items"].as_array().unwrap().is_empty(),
+        "{snapshot}"
+    );
+    assert_eq!(snapshot["refused_inputs"][0]["notice"]["enqueued"], true);
+    let posts: Vec<(String,)> =
+        sqlx::query_as("SELECT content FROM message_outbox WHERE target = $1")
+            .bind(format!("channel:{channel}"))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        posts.len(),
+        1,
+        "one merged refusal owes one notice: {posts:?}"
+    );
+    assert!(posts[0].0.contains("증거를 확보하지 못해"), "{posts:?}");
+    assert!(!posts[0].0.contains("원문을 보관했습니다"), "{posts:?}");
+    // Told, the file owes nothing more; a day later the record is forgotten.
+    let day = chrono::Utc::now().timestamp_millis() as u64 + 86_400_001;
+    let later = mailbox.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let owed = owner.snapshot.holds_input();
+        owner.tick(day)?;
+        Ok((owed, owner.snapshot.refused_inputs.len()))
+    });
+    assert_eq!(later.await, Ok((false, 0)));
+    pool.close().await;
+    db.drop().await;
 }
 
 // A launch older than the restart, held by a person's draft, is woken by the

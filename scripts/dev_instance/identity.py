@@ -16,7 +16,10 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+
 import uuid
+
+from .discord_http import USER_AGENT
 
 from .files import InstanceError, LIVE_CREDENTIAL_NAMES, _open_parent, _token_bytes
 
@@ -132,11 +135,18 @@ def _transport(deadline):
             duplicate.close()
 
 
+class HttpStatusError(InstanceError):
+    def __init__(self, status, local_health_port=None):
+        super().__init__('identity or health request was refused')
+        self.status = status
+        self.local_health_port = local_health_port
+
+
 def request_json(url, deadline, token=None):
     remaining = deadline-time.monotonic()
     if remaining <= 0:
         raise InstanceError('identity or health deadline exhausted')
-    headers = {'Accept': 'application/json'}
+    headers = {'Accept': 'application/json', 'User-Agent': USER_AGENT}
     if token is not None:
         try:
             headers['Authorization'] = 'Bot '+token.decode('ascii')
@@ -155,8 +165,10 @@ def request_json(url, deadline, token=None):
                 raise InstanceError('identity or health response is invalid')
             return result
     except urllib.error.HTTPError as error:
+        health = re.fullmatch(r'http://127\.0\.0\.1:([1-9][0-9]{0,4})/api/health', error.geturl()) if error.geturl() == url else None
+        port = int(health.group(1)) if health and int(health.group(1)) <= 65535 else None
         error.close()
-        raise InstanceError('identity or health request was refused') from None
+        raise HttpStatusError(error.code, port) from None
     except (urllib.error.URLError, TimeoutError, OSError):
         raise ConnectionError('identity or health endpoint unavailable') from None
     except (ValueError, UnicodeError, http.client.HTTPException):
@@ -231,7 +243,9 @@ def wait_health(manifest, nonce, pid, digest, observed, deadline, alive=lambda: 
             raise InstanceError('runtime exited before health verification')
         try:
             body = request_json(f"http://127.0.0.1:{manifest['api']['port']}/api/health", deadline)
-        except ConnectionError:
+        except (ConnectionError, HttpStatusError) as error:
+            if isinstance(error, HttpStatusError) and (error.status != 503 or error.local_health_port != manifest['api']['port']):
+                raise
             time.sleep(min(.02, max(0, deadline-time.monotonic())))
             continue
         current = body.get('test_instance')

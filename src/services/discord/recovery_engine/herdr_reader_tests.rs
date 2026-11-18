@@ -11,6 +11,9 @@ use crate::services::session_host::herdr_socket_rig_tests::{
 
 const NONCE: &str = "0123456789abcdef0123456789abcdef";
 
+#[path = "herdr_reader_missing_tests.rs"]
+mod missing;
+
 fn record(rig: &HerdrRig) -> HostedExecution {
     let owner = HostedOwner {
         provider: "claude".into(),

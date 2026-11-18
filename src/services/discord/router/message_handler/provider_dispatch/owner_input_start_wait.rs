@@ -18,12 +18,19 @@ impl Observed {
     }
 }
 
-/// An external Herdr start reads its current execution; a watch never reuses an old host proof.
+/// A Herdr start under the channel's key reads its current execution; a watch never reuses an old
+/// host proof.
 pub(super) async fn observe(shared: &Shared, channel: ChannelId, context: &Value) -> Observed {
     use crate::services::claude_tui::host_input::busy::BusyState;
     let origin = super::InputOrigin::from_context(Some(context));
-    // Internal starts keep their native wait and existing typed refusal order.
-    if !origin.is_person() && origin != super::InputOrigin::HttpStart {
+    // A start apart from the channel's key keeps its native wait and existing typed refusal order.
+    let channel_turn = match origin {
+        super::InputOrigin::Routine => {
+            super::super::super::headless_turn::owner_start_takes_channel(shared, context).await
+        }
+        origin => origin.is_person() || origin == super::InputOrigin::HttpStart,
+    };
+    if !channel_turn {
         return Observed::Legacy;
     }
     let provider = &shared.provider;
