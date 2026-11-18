@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, type ReactNode } from "react";
 import { Command } from "cmdk";
 import { Search } from "lucide-react";
 import type { Agent, Department } from "../types";
@@ -13,7 +13,7 @@ interface PaletteRoute {
   id: string;
   labelKo: string;
   labelEn: string;
-  icon: string;
+  icon: ReactNode;
 }
 
 interface CommandPaletteProps {
@@ -46,7 +46,7 @@ export default function CommandPalette({
 
   const tr = (ko: string, en: string) => (isKo ? ko : en);
 
-  type ResultItem = { type: "agent"; agent: Agent } | { type: "nav"; id: string; label: string; icon: string } | { type: "dept"; dept: Department };
+  type ResultItem = { type: "agent"; agent: Agent } | { type: "nav"; id: string; label: string; icon: ReactNode } | { type: "dept"; dept: Department };
 
   const navItems = useMemo(
     () =>

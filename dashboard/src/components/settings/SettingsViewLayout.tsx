@@ -1,5 +1,6 @@
-import { AlertTriangle, Check, SearchX } from "lucide-react";
+import { Activity, AlertTriangle, Check, SearchX } from "lucide-react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
+import { Link } from "react-router";
 import { Button } from "../../kit/free/button-clean";
 import { Modal } from "../common/overlay/Modal";
 import type { SettingsNavItem } from "./SettingsMetaCatalog";
@@ -48,11 +49,22 @@ export function SettingsViewLayout({
       className="flex h-full w-full min-w-0 flex-col overflow-y-auto text-th-text-primary [overflow-wrap:anywhere]"
     >
       <div className="mx-auto w-full max-w-[72rem] min-w-0 flex-1 px-4 pt-6 pb-10 md:px-8 md:pt-11 md:pb-14">
-        <header className="min-w-0">
-          <h1 className="text-2xl font-medium leading-8 tracking-[-0.01em] text-th-text-primary">{tr("설정", "Settings")}</h1>
-          <p className="mt-1 text-[13px] leading-5 break-keep text-th-text-muted">
-            {tr("대시보드 표시, 작업 흐름, AI 계정과 연결을 관리해요.", "Manage display, workflow, AI accounts and connections.")}
-          </p>
+        <header className="flex min-w-0 flex-wrap items-end justify-between gap-x-6 gap-y-3">
+          <div className="min-w-0">
+            <h1 className="text-2xl font-medium leading-8 tracking-[-0.01em] text-th-text-primary">{tr("설정", "Settings")}</h1>
+            <p className="mt-1 text-[13px] leading-5 break-keep text-th-text-muted">
+              {tr("대시보드 표시, 작업 흐름, AI 계정과 연결을 관리해요.", "Manage display, workflow, AI accounts and connections.")}
+            </p>
+          </div>
+          {/* The ops page left the menu; it stays reachable here until the settings catalog absorbs it. */}
+          <Link
+            to="/ops"
+            data-testid="settings-ops-link"
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-[var(--r-sm)] border border-th-border px-3 text-[13px] font-medium text-th-text-secondary transition-colors hover:bg-surface-subtle sm:min-h-9 pointer-coarse:min-h-11"
+          >
+            <Activity size={14} aria-hidden />
+            {tr("운영 화면 열기", "Open the ops view")}
+          </Link>
         </header>
 
         <div className="mt-6 grid min-w-0 gap-6 md:mt-8 md:grid-cols-[13rem_minmax(0,1fr)] md:gap-10">

@@ -26,7 +26,7 @@ interface AppMobileNavigationProps {
 }
 
 const TAB_CLASS =
-  "relative flex h-full min-h-11 min-w-0 flex-1 flex-col items-center justify-center gap-1 px-1 text-th-text-muted transition-colors data-[active]:text-[var(--th-accent-primary)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--th-accent-primary)]";
+  "relative flex min-h-11 min-w-0 flex-col items-center justify-center gap-[3px] px-1 text-th-text-muted transition-colors data-[active]:text-[var(--th-badge-blue-text)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--th-accent-primary)]";
 const SHEET_ROW_CLASS =
   "flex min-h-12 w-full items-center gap-3 border-b border-th-border-subtle py-3 text-left hover:bg-surface-subtle focus-visible:outline-2 focus-visible:outline-[var(--th-accent-primary)]";
 
@@ -66,7 +66,7 @@ export function AppMobileNavigation({
     <>
       <nav
         data-testid="app-mobile-tabbar"
-        className="fixed inset-x-0 bottom-0 flex items-start justify-around border-t border-th-border-subtle bg-th-bg-surface pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]"
+        className="fixed inset-x-0 bottom-0 grid grid-cols-5 border-t border-th-border-subtle bg-th-bg-surface pb-[max(6px,env(safe-area-inset-bottom))] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]"
         style={{ height: tabbarHeight, zIndex: tabbarZIndex }}
         aria-label={tr("주요 탭", "Primary tabs")}
       >
@@ -83,7 +83,7 @@ export function AppMobileNavigation({
               data-active={isActive || undefined}
               aria-label={label + badgeAriaSuffix(isKo, badge)}
               aria-current={isActive ? "page" : undefined}
-              onClick={() => navigateToRoute(route.path)}
+              onClick={() => navigateToRoute(route.path, route.id === "agents" ? { agentsTab: "agents" } : undefined)}
               className={TAB_CLASS}
             >
               <Icon size={20} aria-hidden />
@@ -103,12 +103,12 @@ export function AppMobileNavigation({
           aria-haspopup="dialog"
           aria-expanded={moreOpen}
           aria-controls={moreOpen ? "app-mobile-more-menu" : undefined}
-          aria-label={tr("더보기", "More") + badgeAriaSuffix(isKo, moreBadge)}
+          aria-label={tr("더 보기", "More") + badgeAriaSuffix(isKo, moreBadge)}
           onClick={() => setMoreOpen((prev) => !prev)}
           className={TAB_CLASS}
         >
           <MoreHorizontal size={20} aria-hidden />
-          <span className="max-w-full truncate text-[11px] font-medium leading-4">{tr("더보기", "More")}</span>
+          <span className="max-w-full truncate text-[11px] font-medium leading-4">{tr("더 보기", "More")}</span>
           {moreBadge > 0 && (
             <span className="pointer-events-none absolute top-1 right-1/4 flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--th-accent-primary)] px-1 text-[9px] font-semibold text-white" aria-hidden>
               {formatBadge(moreBadge)}
@@ -130,9 +130,9 @@ export function AppMobileNavigation({
             data-testid="app-mobile-more-menu"
             role="dialog"
             aria-modal="true"
-            aria-label={tr("더보기", "More")}
+            aria-label={tr("더 보기", "More")}
             tabIndex={-1}
-            className="relative max-h-[84dvh] w-full overflow-y-auto rounded-t-xl border-t border-th-border-subtle bg-th-bg-surface px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))] text-th-text-primary"
+            className="relative max-h-[84dvh] w-full overflow-y-auto rounded-t-[20px] border border-b-0 border-th-border-subtle bg-th-card-bg px-4 pt-2 pb-[max(1rem,env(safe-area-inset-bottom))] text-th-text-primary shadow-[var(--shadow-md)]"
             onKeyDown={(event) => {
               if (event.key === "Escape") {
                 event.preventDefault();
@@ -141,14 +141,14 @@ export function AppMobileNavigation({
             }}
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-th-border" aria-hidden />
+            <div className="mx-auto mb-3 h-1 w-9 rounded-full bg-th-border" aria-hidden />
             <div className="mb-2 flex items-center justify-between gap-3">
-              <div className="text-base font-semibold text-th-text-heading">{tr("더보기", "More")}</div>
+              <div className="text-base font-semibold text-th-text-heading">{tr("더 보기", "More")}</div>
               <button
                 type="button"
                 onClick={() => setMoreOpen(false)}
                 className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-th-border-subtle text-th-text-secondary hover:bg-surface-hover focus-visible:outline-2 focus-visible:outline-[var(--th-accent-primary)]"
-                aria-label={tr("더보기 닫기", "Close")}
+                aria-label={tr("더 보기 닫기", "Close")}
               >
                 <X size={16} aria-hidden />
               </button>

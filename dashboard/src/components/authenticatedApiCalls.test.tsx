@@ -3,6 +3,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { beginAuthentication, getAuthSnapshot, requireAuthentication } from "../api/authState";
 import type { CompanySettings } from "../types";
@@ -197,7 +198,9 @@ describe("settings under token authentication", () => {
     const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = await render(
       <QueryClientProvider client={queries}>
-        <SettingsView settings={settings} onSave={async () => {}} isKo={false} onNotify={notify} />
+        <MemoryRouter>
+          <SettingsView settings={settings} onSave={async () => {}} isKo={false} onNotify={notify} />
+        </MemoryRouter>
       </QueryClientProvider>,
     );
     expectBearer("GET /api/settings/config");
