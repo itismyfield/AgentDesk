@@ -8,6 +8,7 @@ pub mod ci_exception;
 pub(crate) mod commands;
 pub mod control;
 pub mod definition;
+pub mod deploy_observe;
 pub mod effect_envelope;
 pub mod evidence;
 pub mod evidence_gate;

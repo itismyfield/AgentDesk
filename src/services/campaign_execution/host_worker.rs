@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -21,6 +21,7 @@ use super::host_gate::{
     PhaseStart, Recovered, Resolution,
 };
 use super::host_identity;
+use super::host_journal::{JournalDir, OpenError};
 use super::model::*;
 use super::resource_admission::ResourceAdmission;
 use super::scheduler::next_action;
@@ -68,6 +69,7 @@ pub struct HostWorker {
     campaign: String,
     node: String,
     gate: EffectGate,
+    journal_path: PathBuf,
     resources: AdkResources,
 }
 
@@ -103,6 +105,7 @@ impl HostWorker {
             campaign: campaign.into(),
             node: node.into(),
             gate,
+            journal_path: path,
             resources,
         })
     }
@@ -113,6 +116,34 @@ impl HostWorker {
 
     pub(super) fn effect_entry(&self, action_id: &str) -> Option<&JournalEntry> {
         self.gate.entry(action_id)
+    }
+
+    pub(super) fn deployment_entry(
+        &self,
+        state: &CampaignState,
+        id: &str,
+    ) -> Result<&JournalEntry, WorkerError> {
+        let run = state.run.as_ref().ok_or(WorkerError::Binding)?;
+        let entry = self.effect_entry(id).ok_or(WorkerError::Binding)?;
+        let action = self.check_entry(run, entry)?;
+        if action.kind != ActionKind::Deploy
+            || !matches!(
+                action.state,
+                ActionState::StartPending | ActionState::Started | ActionState::Unknown
+            )
+        {
+            return Err(WorkerError::Binding);
+        }
+        Ok(entry)
+    }
+
+    pub(super) fn deployment_observations(&self) -> Result<JournalDir, WorkerError> {
+        JournalDir::open(&self.journal_path.join("deployment-observations")).map_err(
+            |err| match err {
+                OpenError::Busy => WorkerError::Gate(GateError::Busy),
+                OpenError::Io(error) => WorkerError::Host(error),
+            },
+        )
     }
 
     pub(super) fn serves(&self, binding: &AttemptBinding) -> bool {

@@ -997,6 +997,8 @@ src/
 │   │   ├── decision_commands_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
+│   │   ├── deploy_observe.rs
+│   │   ├── deploy_observe_tests.rs
 │   │   ├── effect_envelope.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
@@ -5025,6 +5027,7 @@ src/
 │   ├── resident_loops.rs
 │   ├── retrospectives.rs
 │   ├── review_decision.rs
+│   ├── running_binary.rs
 │   ├── scheduled_messages.rs
 │   ├── scheduling.rs
 │   ├── service_error.rs
