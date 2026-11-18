@@ -164,12 +164,18 @@ class Runner(unittest.TestCase):
             one_turn = {"R1": {"codex": {"turns": 1, "tokens": 1000, "time_s": 300}}}
             self.assertEqual(self.tick(400000.0, reservation=one_turn)["status"], "UNEVALUABLE")
         self.assertEqual(len(self.driven()), 2)
+        self.setUp()
+        token_cap = copy.deepcopy(self.config["budget"])
+        token_cap["claude"]["daily_tokens"] = 999
+        self.assertEqual(self.tick(500000.0, budget=token_cap)["status"], "DEFERRED_BUDGET")
+        self.assertEqual(self.driven(), [])
 
     def test_deploy_inbox_runs_newest_once_and_blocks_missing_capabilities(self):
         self.submit("old")
         self.submit("new", "b" * 40)
         self.submit("new", "c" * 40)
-        (self.state / "inbox" / "bad.json").write_text(json.dumps({"request_id": "bad", "token": "x"}))
+        (self.state / "inbox" / "bad.json").write_text(json.dumps(
+            {"schema_version": 1, "request_id": "bad", "deploy_sha": SHA, "submitted_at": 5000, "token": "x"}))
         self.assertEqual(self.tick(5000.0, rotation_interval_s=None)["status"], "UNEVALUABLE")
         self.assertEqual(self.tick(5001.0, rotation_interval_s=None)["status"], "NOT_DUE")
         self.assertEqual([(r["--scenario"], r["--deploy-sha"]) for r in self.driven()],
