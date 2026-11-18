@@ -337,6 +337,7 @@ src/
 │   │   └── writes.rs
 │   ├── server_campaigns/
 │   │   ├── command_transaction.rs
+│   │   ├── decision_gate_tests.rs
 │   │   ├── evidence_store.rs
 │   │   ├── evidence_store_tests.rs
 │   │   ├── mod.rs
@@ -422,15 +423,19 @@ src/
 │   │   └── tests.rs
 │   ├── campaign/
 │   │   ├── candidate_seal.rs
+│   │   ├── decision_item.rs
 │   │   ├── definition.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
 │   │   ├── execution_pin.rs
+│   │   ├── lifecycle.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
+│   │   ├── pipeline_rules.rs
 │   │   ├── profile.rs
 │   │   ├── review_gate.rs
 │   │   ├── verification_run.rs
+│   │   ├── workflow_options.rs
 │   │   └── workspace.rs
 │   ├── intake_consent/
 │   │   └── decision.rs
@@ -731,6 +736,7 @@ src/
 │   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs
 │   │   ├── server_campaigns/
+│   │   │   ├── decision_tests.rs
 │   │   │   ├── dto.rs
 │   │   │   ├── http_tests.rs
 │   │   │   ├── mod.rs
@@ -968,6 +974,7 @@ src/
 │   │   │   └── ci_tests.rs
 │   │   ├── commands/
 │   │   │   └── transaction_tests.rs
+│   │   ├── adk_adapter.rs
 │   │   ├── adk_observe.rs
 │   │   ├── adk_observe_tests.rs
 │   │   ├── adk_profile.rs
@@ -981,6 +988,8 @@ src/
 │   │   ├── commands.rs
 │   │   ├── control.rs
 │   │   ├── control_tests.rs
+│   │   ├── decision_commands.rs
+│   │   ├── decision_commands_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
 │   │   ├── effect_envelope.rs
@@ -994,23 +1003,42 @@ src/
 │   │   ├── failure_budget_tests.rs
 │   │   ├── host_gate.rs
 │   │   ├── host_gate_tests.rs
+│   │   ├── host_identity.rs
 │   │   ├── host_journal.rs
+│   │   ├── host_worker.rs
+│   │   ├── host_worker_tests.rs
+│   │   ├── lifecycle.rs
+│   │   ├── lifecycle_tests.rs
 │   │   ├── main_integration.rs
 │   │   ├── main_integration_tests.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
 │   │   ├── model_tests.rs
+│   │   ├── pipeline_rules.rs
+│   │   ├── pipeline_rules_tests.rs
 │   │   ├── profile.rs
 │   │   ├── profile_tests.rs
+│   │   ├── resource_admission.rs
+│   │   ├── resource_admission_tests.rs
+│   │   ├── review_dispatch.rs
 │   │   ├── review_gate.rs
 │   │   ├── review_gate_tests.rs
+│   │   ├── review_wait.rs
+│   │   ├── review_wait_tests.rs
+│   │   ├── runtime_profile.rs
+│   │   ├── runtime_profile_tests.rs
+│   │   ├── scheduler.rs
+│   │   ├── scheduler_tests.rs
 │   │   ├── stage_fsm.rs
 │   │   ├── stage_fsm_tests.rs
 │   │   ├── verification_commands.rs
+│   │   ├── verification_driver.rs
+│   │   ├── verification_driver_tests.rs
 │   │   ├── verification_run.rs
 │   │   ├── verification_run_tests.rs
 │   │   ├── verification_runner.rs
 │   │   ├── verification_runner_tests.rs
+│   │   ├── verification_spec.rs
 │   │   ├── view.rs
 │   │   └── view_tests.rs
 │   ├── channel_roles/

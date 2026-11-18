@@ -94,6 +94,24 @@ pub(super) async fn get_in(
         .transpose()
 }
 
+// Host initiation and command decisions serialize on the same campaign row. The caller
+// keeps this transaction until it finishes using the snapshot at the host gate.
+pub(crate) async fn get_for_worker(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &str,
+) -> StoreResult<Option<CampaignState>> {
+    let key = sqlx::query(
+        "SELECT campaign_id FROM server_campaign_keys WHERE campaign_id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if key.is_none() {
+        return Ok(None);
+    }
+    get_in(tx, id).await
+}
+
 pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> StoreResult<Vec<CampaignState>> {
     sqlx::query_as::<_, Projection>(PROJECTION_PAGE)
         .bind(limit.clamp(1, 100))
