@@ -152,19 +152,18 @@ impl InflightTurnState {
                 return Err("body archive episode already holds a reason".into());
             }
             // The last ownership check and the publish share the adoption's lock.
-            let observe = crate::services::tui_o::cutover::with_peeked_o_output;
-            observe(fresh.channel_id, fresh.runtime_kind, |ownership| {
-                if !debt_eligible(ownership) {
-                    return Err("body archive output observation changed".into());
-                }
-                super::super::herdr_body_debt::archive(
-                    provider,
-                    &fresh,
-                    &data,
-                    evidence,
-                    recovery_notice,
-                )
-            })
+            use crate::services::tui_o::cutover::{Observed, with_peeked_o_output as observe};
+            observe(
+                fresh.channel_id,
+                fresh.runtime_kind,
+                |held: &Observed<'_>| {
+                    if !debt_eligible(held.answer()) {
+                        return Err("body archive output observation changed".into());
+                    }
+                    let body = (data.as_str(), evidence, recovery_notice);
+                    super::super::herdr_body_debt::archive(provider, &fresh, body, held)
+                },
+            )
         })();
         drop(lock);
         result

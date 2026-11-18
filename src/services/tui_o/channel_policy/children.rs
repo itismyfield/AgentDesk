@@ -38,7 +38,12 @@ impl Child {
     /// Who has the child's body now: O (`true`), or Legacy while a late reservation waits for its
     /// open turn. `None` is an undecided adoption, which is held and never handed to Legacy.
     pub(crate) fn body_owner(&self) -> Option<bool> {
-        match self.candidate.peek() {
+        self.body_owner_in(self.candidate.peek())
+    }
+
+    /// [`Self::body_owner`] for a `state` the caller read under the adoption's lock.
+    pub(crate) fn body_owner_in(&self, state: Adoption) -> Option<bool> {
+        match state {
             state if state.owned() => Some(true),
             Adoption::Deferred if self.candidate.late_adopt_origin() => Some(false),
             _ => None,

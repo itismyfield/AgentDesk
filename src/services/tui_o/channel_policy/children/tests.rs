@@ -360,6 +360,40 @@ async fn thread_children_gate_never_hands_an_unresolved_or_undecided_child_to_le
     assert_eq!(boot.candidate(42).unwrap().sends(), (0, 0));
 }
 
+// Whichever adoption the gate reads, the guarded observation locks that one and answers as the
+// plain peek does.
+#[cfg(unix)]
+#[test]
+fn thread_children_guarded_observation_locks_the_adoption_each_answer_is_read_from() {
+    use crate::services::tui_o::cutover::{
+        peek_o_owns_tui_output_for_channel, with_peeked_o_output,
+    };
+    let boot = BootChannels::validate(&config())
+        .unwrap()
+        .adopted(Adoption::Committed);
+    boot.children
+        .record(&boot, &init(43, Some(42)), Adoption::Committed);
+    for (channel, boot_discovered) in [(46, true), (47, false), (48, true)] {
+        unresolved(&boot, channel, boot_discovered);
+    }
+    let _forced = test_override::force_boot(boot.clone());
+    let check = |channel: u64, deciding: &Candidate| {
+        let kind = Some(RuntimeHandoffKind::ClaudeTui);
+        let seen = with_peeked_o_output(channel, kind, |seen| {
+            assert!(deciding.locked_for_test(), "{channel} holds its adoption");
+            seen.answer()
+        });
+        assert_eq!(seen, peek_o_owns_tui_output_for_channel(channel, kind));
+    };
+    check(46, &boot.unresolved_child(46).unwrap());
+    boot.children
+        .resolve_legacy(&boot, |channel| Ok(thread(channel, 42)));
+    check(42, boot.candidate(42).unwrap());
+    for child in [43, 47, 48] {
+        check(child, &boot.child(child).unwrap().unwrap().candidate);
+    }
+}
+
 #[test]
 fn thread_children_intake_holds_a_child_until_its_own_writer_is_ready() {
     use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};

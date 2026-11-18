@@ -323,8 +323,8 @@ DiscardCopy == /\ D1bDiscard /\ owner = "Refused" /\ copyId = "old" /\ ~oldAck /
     /\ refusalVisible' = (Mapping # "CDiscardSilent") /\ disposition' = "discarded"
     /\ UNCHANGED <<cap, bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, op, oldAck, attempt, restarted, newPosted, earlyOutput, refusedArchive, reasons, priorFresh, reasonedCopy>>
 
-\* The reason post: a verified created message settles it; an uncertain one is only reconciled.
-\* The durable intent is resumed on its own after the row, body and debt are gone.
+\* The reason post: a verified created message settles it; an uncertain one keeps its attempt and is
+\* never posted again (no reconciliation is installed). The intent resumes without row, body or debt.
 ReasonWorkable == row \/ Mapping # "CDiscardRowBound"
 ReasonCreated == /\ reasonState = "intent" /\ ReasonWorkable
     /\ reasonState' = "posted" /\ reasons' = reasons + 1

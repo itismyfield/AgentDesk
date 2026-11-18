@@ -115,6 +115,9 @@ pub trait HostIo: Send + Sync + 'static {
     fn input_ready(&self, channel: u64, provider: ShadowProvider) {
         let _ = (channel, provider);
     }
+    /// The channel's host ended with its adoption refused: bodies kept while it waited are due
+    /// their discard. Called with no adoption lock held; the work is scheduled, not done here.
+    fn refused(&self, _channel: u64, _provider: ShadowProvider) {}
     /// The channel's re-post turn for one actor start; none leaves the writer as it was.
     fn repost(&self, _channel: u64, _port: &Arc<Self::Port>) -> Option<RepostTurn<Self>> {
         None
@@ -596,6 +599,7 @@ pub fn start_managed<I: HostIo>(
         let io = Arc::clone(&io);
         let host = tokio::spawn(async move {
             let retirement = Arc::clone(&gate);
+            let (ended, refusal) = (candidate.clone(), Arc::clone(&io));
             {
                 let run = host_channel(
                     io,
@@ -616,6 +620,10 @@ pub fn start_managed<I: HostIo>(
                 }
             }
             drop(reservation);
+            // Read after the reservation settled, so a refusal made at this exit is seen too.
+            if matches!(ended.peek(), Adoption::Refused | Adoption::Released) {
+                refusal.refused(channel, provider);
+            }
             if claim.settled.load(Ordering::SeqCst) {
                 claim.release();
             }
@@ -661,15 +669,16 @@ fn hold(alarms: &impl AlarmSink, channel: u64, detail: &str) {
     alarms.raise(channel, WriterAlarm::Halted { detail });
 }
 
-/// A channel not adopted before its first `init` is refused for this process; its body stays held.
+/// A channel not adopted before its first `init` is refused for this process; a held body of it
+/// is discarded with one reason.
 pub(super) fn release(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
     candidate.release(channel);
     let detail = format!("adoption refused: {detail}");
     stop(candidate, alarms, channel, &detail);
 }
 
-/// Names a stop by the adoption it left: a refused or deferred channel raises the refusal alarm
-/// (its body stays held), an owned or undecided one is held.
+/// Names a stop by the adoption it left: a refused or deferred channel raises the refusal alarm,
+/// an owned or undecided one is held.
 pub(super) fn stop(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
     if !matches!(
         candidate.peek(),

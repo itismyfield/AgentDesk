@@ -851,6 +851,184 @@ fn a_reason_landing_before_the_copy_keeps_the_waiting_body_uncopied_pg() {
     );
 }
 
+#[test]
+fn boot_posts_a_rowless_reason_intent_once_and_never_a_held_attempt_pg() {
+    const CHANNEL: u64 = 1_479_671_399_000_174;
+    in_child(
+        concat!(
+            module_path!(),
+            "::boot_posts_a_rowless_reason_intent_once_and_never_a_held_attempt_pg"
+        ),
+        CHANNEL,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            use crate::db::tui_output_disposition as disposition;
+            let run = Run::start(&rig, routed_claude(CHANNEL)).await;
+            let key = crate::services::tui_o::channel_policy::episode_key::identity;
+            let unposted = key("claude", CHANNEL, "rowless-unposted").unwrap();
+            let held = key("claude", CHANNEL, "rowless-held").unwrap();
+            let reason = disposition::Reason::AdoptionRefused;
+            disposition::persist_intent(&run.pool, &unposted, reason)
+                .await
+                .unwrap();
+            let attempt = disposition::reserve(&run.pool, &held, reason).await;
+            assert!(
+                attempt.unwrap().is_some(),
+                "the old process reserved a post"
+            );
+            // The real boot entry: neither intent has a row, a snapshot or debt.
+            let done = &run.shared.restart.reconcile_done;
+            done.store(false, std::sync::atomic::Ordering::Release);
+            crate::services::discord::runtime_bootstrap::complete_active_reconcile(&run.shared)
+                .await;
+            reason_receipted(&run.pool, &unposted).await;
+            assert_eq!(
+                run.mock.delivered_texts(),
+                vec![reason.message().to_string()]
+            );
+            let held = disposition::record(&run.pool, &held).await.unwrap();
+            assert!(held.unwrap().1.is_none(), "a held attempt is never posted");
+            run.close().await;
+        },
+    );
+}
+
+#[test]
+fn a_row_refused_after_its_copy_was_kept_ends_with_the_copy_discarded_pg() {
+    const CHANNEL: u64 = 1_479_671_399_000_176;
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_row_refused_after_its_copy_was_kept_ends_with_the_copy_discarded_pg"
+        ),
+        CHANNEL,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            let run = Run::start(&rig, routed_claude(CHANNEL)).await;
+            run.relay.set(|pane| pane.exited = true);
+            // The waiting pass kept its copy and stopped before the row clear.
+            let cut = super::super::on_while("before_clear", || Box::pin(async { panic!("cut") }));
+            run.pass().await;
+            drop(cut);
+            assert!(run.durable().is_some() && !debts(&run).is_empty());
+            let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+            snapshot.candidate(CHANNEL).unwrap().release(CHANNEL);
+            run.pass().await;
+            assert!(run.durable().is_none(), "the refused row is released");
+            assert!(
+                debts(&run).is_empty(),
+                "the kept copy goes in the same pass"
+            );
+            assert_reason_once(&run, &run.row).await;
+            run.close().await;
+        },
+    );
+}
+
+#[test]
+fn a_refusal_after_the_row_is_gone_sweeps_the_kept_body_with_one_reason_pg() {
+    const CHANNEL: u64 = 1_479_671_399_000_175;
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_refusal_after_the_row_is_gone_sweeps_the_kept_body_with_one_reason_pg"
+        ),
+        CHANNEL,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            use crate::services::discord::recovery_engine::refused_discard;
+            let run = Run::start(&rig, routed_claude(CHANNEL)).await;
+            run.relay.set(|pane| pane.exited = true);
+            run.pass().await;
+            assert!(run.durable().is_none() && !debts(&run).is_empty());
+            let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+            snapshot.candidate(CHANNEL).unwrap().release(CHANNEL);
+            // What the refused host's end schedules, with no row left to end.
+            refused_discard::resume(&run.shared, &run.provider, vec![CHANNEL]);
+            let id = refused_discard::identity(&run.provider, &run.row).unwrap();
+            reason_receipted(&run.pool, &id).await;
+            assert!(debts(&run).is_empty(), "the kept body is gone");
+            assert_reason_once(&run, &run.row).await;
+            run.close().await;
+        },
+    );
+}
+
+// A recovery relay of a held body: a wait keeps it, a refusal discards it with one reason and no
+// body, and a waiting episode that already holds a reason is discarded reusing that reason.
+#[test]
+fn a_recovery_relay_discards_a_refused_or_reasoned_body_with_one_reason_pg() {
+    const CHANNEL: u64 = 1_479_671_399_000_177;
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_recovery_relay_discards_a_refused_or_reasoned_body_with_one_reason_pg"
+        ),
+        CHANNEL,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            use crate::services::discord::recovery_engine::refused_discard;
+            use crate::services::discord::recovery_paths::shared::{
+                RecoveryRelayOutcome as Outcome, RowDisposition, unrecoverable_relay_disposition,
+            };
+            let run = Run::start(&rig, routed_claude(CHANNEL)).await;
+            let http = run.shared.serenity_http_or_token_fallback().unwrap();
+            let relay = |row: inflight::InflightTurnState| {
+                let (http, shared, provider) = (http.clone(), run.shared.clone(), &run.provider);
+                async move {
+                    let body = "the held answer";
+                    let relay =
+                        crate::services::discord::recovery_engine::relay_recovery_body_notice;
+                    relay(&http, &shared, provider, &row, body).await
+                }
+            };
+            let mut other = run.row.clone();
+            other.turn_nonce = Some("another-waiting-turn".into());
+            assert_eq!(relay(other.clone()).await, Outcome::AwaitingAdoption);
+            assert!(
+                run.mock.delivered_texts().is_empty(),
+                "a wait posts nothing"
+            );
+            // Another consumer's reason closes the waiting episode for this one too.
+            let id = refused_discard::identity(&run.provider, &run.row).unwrap();
+            refused_discard::persist(&run.pool, &id).await.unwrap();
+            for _ in 0..2 {
+                let outcome = relay(run.row.clone()).await;
+                assert_eq!(outcome, Outcome::AdoptionRefused);
+                let disposition = unrecoverable_relay_disposition(outcome, 0, 3, true);
+                assert_eq!(disposition, RowDisposition::Discard);
+                reason_receipted(&run.pool, &id).await;
+            }
+            assert_reason_once(&run, &run.row).await;
+            // A refusal discards a body no one reasoned yet, and never sends it.
+            let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+            snapshot.candidate(CHANNEL).unwrap().release(CHANNEL);
+            assert_eq!(relay(other.clone()).await, Outcome::AdoptionRefused);
+            assert_eq!(relay(run.row.clone()).await, Outcome::AdoptionRefused);
+            let other_id = refused_discard::identity(&run.provider, &other).unwrap();
+            reason_receipted(&run.pool, &other_id).await;
+            let reason = crate::db::tui_output_disposition::Reason::AdoptionRefused.message();
+            assert_eq!(run.mock.delivered_texts(), vec![reason.to_string(); 2]);
+            run.close().await;
+        },
+    );
+}
+
+/// Waits until the scheduled reason post for `id` holds its verified receipt.
+async fn reason_receipted(pool: &sqlx::PgPool, id: &crate::db::tui_output_disposition::Identity) {
+    let posted = async {
+        let record = crate::db::tui_output_disposition::record;
+        while !matches!(record(pool, id).await, Ok(Some((_, Some(_))))) {
+            tokio::task::yield_now().await;
+        }
+    };
+    crate::test_support::wait::await_within(posted, crate::test_support::wait::WAIT_CAP).await;
+}
+
 fn routed_claude(channel: u64) -> Setup {
     Setup {
         provider: ProviderKind::Claude,

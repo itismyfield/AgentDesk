@@ -25,7 +25,7 @@ pub(crate) use adoption::{
     body_check::{BodyCheck, SinkOp, racing_legacy_body},
     stored,
 };
-pub(crate) use children::RetirementTicket;
+pub(crate) use children::{Child, RetirementTicket};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct BootChannels {
@@ -713,5 +713,5 @@ mod late_reservation_tests;
 
 #[cfg(unix)]
 pub(crate) use adoption::episode_key;
-#[cfg(test)]
-pub(crate) use adoption::output_disposition;
+#[cfg(any(test, unix))]
+pub(crate) use adoption::{FirstHold, output_disposition};

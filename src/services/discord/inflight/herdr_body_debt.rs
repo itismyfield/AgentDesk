@@ -76,13 +76,13 @@ impl Record {
     }
 }
 
-/// Caller holds the active row lock; different snapshots of an episode never overwrite each other.
+/// Caller holds the active row lock and, as `_held`, the adoption its eligibility was read from;
+/// different snapshots of an episode never overwrite each other.
 pub(super) fn archive(
     provider: &ProviderKind,
     row: &InflightTurnState,
-    row_json: &str,
-    evidence: Value,
-    recovery_notice: String,
+    (row_json, evidence, recovery_notice): (&str, Value, String),
+    _held: &crate::services::tui_o::cutover::Observed<'_>,
 ) -> Result<Archived, String> {
     let record = Record {
         version: 1,

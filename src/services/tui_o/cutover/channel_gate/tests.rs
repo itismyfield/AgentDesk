@@ -103,7 +103,15 @@ fn claim_reason_follows_gate_returns_without_changing_ownership() {
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
     let observed = |channel| {
         test_override::with_channels(|snapshot| {
-            decide_with_snapshot(snapshot, channel, Use::Body, None, || Some(ClaudeTui)).unwrap()
+            decide_with_snapshot(
+                snapshot,
+                channel,
+                Use::Body,
+                None,
+                || Some(ClaudeTui),
+                &mut None,
+            )
+            .unwrap()
         })
     };
     {
@@ -123,7 +131,14 @@ fn claim_reason_follows_gate_returns_without_changing_ownership() {
     }
     let _foreign = test_override::force_foreign(&[(701, ClaudeTui)], "other-node");
     let held = test_override::with_channels(|snapshot| {
-        decide_with_snapshot(snapshot, 701, Use::Body, None, || Some(ClaudeTui))
+        decide_with_snapshot(
+            snapshot,
+            701,
+            Use::Body,
+            None,
+            || Some(ClaudeTui),
+            &mut None,
+        )
     });
     assert_eq!(held.unwrap_err(), IdentityError::AwaitingAdoption);
 }
@@ -274,10 +289,10 @@ fn a_guarded_observation_holds_the_deciding_adoption_and_reads_its_refusal() {
             candidate.locked_for_test(),
             "the adoption is held through the caller's step"
         );
-        seen
+        seen.answer()
     });
     assert_eq!(seen, Err(IdentityError::AwaitingAdoption));
     candidate.release(61);
-    let refused = with_peeked_o_output(61, Some(ClaudeTui), |seen| seen);
+    let refused = with_peeked_o_output(61, Some(ClaudeTui), |seen| seen.answer());
     assert_eq!(refused, Err(IdentityError::AdoptionRefused));
 }
