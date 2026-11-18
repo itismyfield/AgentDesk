@@ -116,9 +116,41 @@ impl Owner {
         })
     }
 
-    /// Whether the readiness due refused `key`'s first key; its leaf's proof then ends it for good.
-    pub(crate) fn take_due_refused(&mut self, key: &AttemptRef) -> bool {
-        self.due_refused.take_if(|refused| refused == key).is_some()
+    /// The readiness due of `key`'s original while `key` is the attempted head.
+    fn attempt_due(&self, key: &AttemptRef) -> Option<u64> {
+        let head = (self.snapshot.head_injection.as_ref()).filter(|head| key.matches(head))?;
+        let (identity, fingerprint) = hold_key(&head.original);
+        (self.snapshot.readiness_holds.iter())
+            .find(|hold| hold.identity == identity && hold.fingerprint == fingerprint)
+            .map(|hold| hold.due_at_ms)
+    }
+
+    /// Approves `key`'s first key (C-s included) unless its original's readiness due came first;
+    /// the clock is read only when that original has a due.
+    pub(crate) fn approve_first_key(
+        &mut self,
+        key: &AttemptRef,
+        now: &dyn Fn() -> u64,
+    ) -> Result<(), String> {
+        let Some(due) = self.attempt_due(key) else {
+            return Ok(());
+        };
+        if self.first_key_approved.as_ref() == Some(key) {
+            return Ok(());
+        }
+        if now() >= due {
+            self.due_refused = Some(key.clone());
+            return Err("readiness_deadline".into());
+        }
+        self.first_key_approved = Some(key.clone());
+        Ok(())
+    }
+
+    /// Whether `key`'s leaf, ended with no key, outlived its original's due: refused at its first
+    /// key, or past the due when it gave up without reaching one.
+    pub(crate) fn leaf_outlived_due(&mut self, key: &AttemptRef, now: &dyn Fn() -> u64) -> bool {
+        let refused = self.due_refused.take_if(|refused| refused == key).is_some();
+        refused || self.attempt_due(key).is_some_and(|due| now() >= due)
     }
 
     /// Marks an attemptless front refusal's notice sent; `None` when none names `identity`.

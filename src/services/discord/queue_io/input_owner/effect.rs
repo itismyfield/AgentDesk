@@ -113,12 +113,13 @@ pub(crate) async fn run(
             crate::logging::intake_timing::not_sent(&format!("{completion:?}"));
         }
         let watch = held.then(|| proof.take_preparation_watch()).flatten();
+        let at = clock.clone();
         let ended = mailbox
             .v2_request(move |slot| {
                 let owner = slot.as_mut().ok_or("V2 not adopted")?;
                 let key = parse(identity)?;
                 // Past its original's readiness due the leaf's own proof ends the input for good.
-                let ended = owner.take_due_refused(&key);
+                let ended = owner.leaf_outlived_due(&key, &*at);
                 match (held && !ended, refused || ended) {
                     (true, _) => owner.hold_not_sent(&key, proof),
                     (_, true) => owner.refuse_not_sent(&key, proof),

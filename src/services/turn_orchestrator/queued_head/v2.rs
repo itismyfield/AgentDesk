@@ -47,6 +47,8 @@ pub(crate) struct Owner {
     held: Option<u64>,
     /// The attempt whose first key its original's readiness due refused; never persisted.
     due_refused: Option<AttemptRef>,
+    /// The attempt whose first key the owner approved before that due; never persisted.
+    first_key_approved: Option<AttemptRef>,
     /// Diagnostic identity and successful commit count for this adoption; neither authorizes writes.
     incarnation: uuid::Uuid,
     last_success_sequence: u64,
@@ -195,6 +197,7 @@ impl Owner {
             claimed_followers: Vec::new(),
             held: None,
             due_refused: None,
+            first_key_approved: None,
             claim_number: 0,
             incarnation: uuid::Uuid::new_v4(),
             last_success_sequence: 0,
