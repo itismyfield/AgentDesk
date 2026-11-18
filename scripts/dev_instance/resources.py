@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 
+from .config import build_config, postgres_connections
 from . import host
 from .files import InstanceError, _open_parent
 from .manifest import child_environment, resource_spec, validate
@@ -169,7 +170,9 @@ class ResourceOwner:
         try:
             self._run("initdb", [self.spec["initdb_bin"], "-D", pg["data_dir"], "-U", pg["role"],
                                  "--auth-local=trust", "--auth-host=trust", "--no-locale"])
-            connections = self.spec["pg_pool"] + self.spec["pg_reserve"]
+            config = build_config(self.root, self.manifest['profile'], self.manifest['api']['port'],
+                                  pg['port'], self.manifest['instance_id'])
+            connections = postgres_connections(config, self.spec['pg_reserve'])
             child = self._spawn("postgres", [self.spec["postgres_bin"], "-D", pg["data_dir"],
                                 "-h", "127.0.0.1", "-p", str(pg["port"]), "-k", "../socket",
                                 "-N", str(connections), "-c", "superuser_reserved_connections=0",

@@ -28,6 +28,9 @@ pub(crate) struct SnapshotV2 {
     pub(crate) items: Vec<PendingQueueItem>,
     pub(crate) head_injection: Option<InputAttempt>,
     pub(crate) retained_inputs: Vec<RetainedInput>,
+    /// Inputs refused for good: no body, only what blocks a second admission and owes a notice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) refused_inputs: Vec<RefusedInput>,
     pub(crate) terminal_identities: Vec<TerminalIdentity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) source_bindings: Vec<cold_source::BindingIntent>,
@@ -180,6 +183,41 @@ pub(crate) enum RetainedReason {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start_failure: Option<StartFailureDetail>,
     },
+}
+
+/// One attempt of one queued unit, as the owner's callers and a refusal's record name it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AttemptRef {
+    pub(crate) identity: QueueIdentity,
+    pub(crate) attempt: AttemptIdentity,
+}
+
+/// What stays of an input the owner refused for good; nothing here can run again.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct RefusedInput {
+    /// The refused unit and its one attempt, as its notice and the history name it.
+    pub(crate) input: AttemptRef,
+    pub(crate) members: Vec<RefusedMember>,
+    pub(crate) reason: String,
+    pub(crate) notice: NoticeIntent,
+    pub(crate) refused_at_ms: u64,
+}
+
+/// One original a refused unit carried: its sources and the digest of its canonical body.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct RefusedMember {
+    pub(crate) identity: QueueIdentity,
+    pub(crate) fingerprint: String,
+}
+
+impl RefusedInput {
+    /// Whether any source of this refusal is `message`.
+    pub(crate) fn names(&self, message: u64) -> bool {
+        let named = |id: &QueueIdentity| {
+            id.primary == message || id.sources.iter().any(|s| s.message_id == message)
+        };
+        self.members.iter().any(|member| named(&member.identity))
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

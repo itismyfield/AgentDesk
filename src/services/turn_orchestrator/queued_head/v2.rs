@@ -16,11 +16,12 @@ mod effort_continue;
 mod migration;
 pub(crate) mod origin;
 pub(crate) mod projection;
+mod refused;
 mod retained;
 pub(crate) mod source_admission;
 mod sources;
 pub(crate) mod start_failure;
-pub(crate) use attempt::AttemptRef;
+pub(crate) use super::v2_types::AttemptRef;
 pub(crate) use commit::Fault;
 #[cfg(test)]
 use source_admission::AdmitError;
@@ -170,6 +171,7 @@ impl Owner {
                 items: vec![],
                 head_injection: None,
                 retained_inputs: vec![],
+                refused_inputs: vec![],
                 terminal_identities: vec![],
                 source_bindings: Vec::new(),
                 namespace: Some(namespace),
@@ -526,7 +528,8 @@ impl Owner {
         self.claimed_followers.clear();
     }
 
-    /// Whether any source the owner holds, queued, attempted, retained or settled, is `message`.
+    /// Whether any source the owner holds, queued, attempted, retained, refused or settled, is
+    /// `message`.
     fn holds(&self, message: u64) -> bool {
         let s = &self.snapshot;
         let attempts = s
@@ -544,7 +547,7 @@ impl Owner {
             t.identity.primary == message
                 || t.identity.sources.iter().any(|x| x.message_id == message)
         });
-        held.any(names) || settled
+        held.any(names) || settled || s.refused_inputs.iter().any(|r| r.names(message))
     }
 
     /// Whether this owner refuses a legacy turn claim for `message`: a source it holds never

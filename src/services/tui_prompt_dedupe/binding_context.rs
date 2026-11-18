@@ -1,5 +1,8 @@
 //! Immutable launch evidence; binding authority remains with the runtime binding.
 
+#[cfg(unix)]
+pub(crate) mod registration;
+
 use crate::services::claude_tui::hook_output_guard::configured_claude_projects_root;
 use crate::services::{platform::tmux::SessionPresence, tmux_common as tc};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -475,7 +478,11 @@ impl PreparedIncarnation {
                 "binding context publication failed",
             );
             format!("publish binding context: {error}")
-        })
+        })?;
+        #[cfg(unix)]
+        registration::complete(&self.context)
+            .map_err(|error| format!("Held(registration_refused): {error}"))?;
+        Ok(())
     }
 
     pub(crate) fn validate(&self, tmux: &str) -> io::Result<()> {

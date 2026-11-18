@@ -501,7 +501,7 @@ class AuthoritySurfaceContract(unittest.TestCase):
             ("new mutation row not declared", add_undeclared_row, "declare every condition3 mutation row"),
             ("new file in the script array only", add_script_only_file, "MUTATION_FILES must equal"),
             ("new active lane not declared", add_undeclared_lane, "does not declare active lanes ['new-lane']"),
-            ("mutation row declaration deleted", drop_entry("src/services/discord/tmux_watcher_registry/fences.rs"),
+            ("mutation row declaration deleted", drop_entry("src/services/engine_runtime/relay_state.rs"),
              "declare every condition3 mutation row"),
             ("named target declaration deleted", drop_entry("src/services/discord/relay_recovery.rs"),
              "does not declare active lanes ['t4-single-actor-recovery-decision']"),

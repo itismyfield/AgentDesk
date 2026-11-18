@@ -123,11 +123,11 @@ fn restored_restore_retain_and_wrapper_clear_mutations_advance_epoch() {
 
     registry.insert(first, handle(name));
     assert!(registry.retain_owner_during_session_rebind(name, first));
-    assert!(registry.restored_owner_by_tmux_session.contains_key(name));
+    assert!(registry.has_restored_owner_for_tests(name));
     let before_shadow_clear = owner_observation_epoch().unwrap();
     assert!(!registry.restore_owner_channel_for_tmux_session(name, second));
     assert_eq!(registry.owner_channel_for_tmux_session(name), Some(first));
-    assert!(!registry.restored_owner_by_tmux_session.contains_key(name));
+    assert!(!registry.has_restored_owner_for_tests(name));
     assert!(owner_observation_epoch().unwrap() > before_shadow_clear);
 }
 

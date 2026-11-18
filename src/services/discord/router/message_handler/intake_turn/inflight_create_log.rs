@@ -4,11 +4,13 @@ use crate::services::discord::inflight::{CreateNewInflightError, InflightTurnSta
 use crate::services::provider::ProviderKind;
 
 pub(crate) async fn record_turn_start_origin(
+    shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     state: &InflightTurnState,
 ) {
     crate::services::discord::adk_session::record_turn_start_origin(
+        shared,
         state.session_key.as_deref(),
         provider,
         channel_id,

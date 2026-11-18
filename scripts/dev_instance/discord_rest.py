@@ -6,6 +6,7 @@ import time
 import urllib.error
 import urllib.request
 
+from .discord_http import USER_AGENT
 from .files import InstanceError
 from .identity import _credential, _transport, recheck_credentials
 from .profile import snowflake
@@ -23,7 +24,7 @@ class Client:
             recheck_credentials(root, self.admission.observed)
             _, token = _credential(root, role+'_bot_token', read=True)
             headers = {'Authorization':'Bot '+token.decode('ascii'), 'Accept':'application/json',
-                       'Content-Type':'application/json', 'User-Agent':'AgentDesk isolated instance Driver'}
+                       'Content-Type':'application/json', 'User-Agent':USER_AGENT}
             request = urllib.request.Request('https://discord.com/api/v10'+path, headers=headers,
                 method=method, data=None if body is None else json.dumps(body).encode())
             remaining = self.deadline-time.monotonic()

@@ -1345,6 +1345,7 @@ fn dispatch(switch: Option<bool>) -> Result<(), String> {
     let provider = ProviderKind::Claude;
     let turn = StreamingTurn {
         pool: None,
+        registration_origin: None,
         shared: None,
         provider: &provider,
         prompt: "question",

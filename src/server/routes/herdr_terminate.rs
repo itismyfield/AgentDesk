@@ -11,9 +11,8 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::api_caller_observability::{AuthStrength, RequestPrincipal};
-use crate::services::discord::herdr_terminate::{
-    OperatorTerminate, terminate_enabled, terminate_registered_herdr,
-};
+use crate::services::discord::herdr_terminate::{OperatorTerminate, terminate_registered_herdr};
+use crate::services::session_host::operation_policy::terminate_enabled;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

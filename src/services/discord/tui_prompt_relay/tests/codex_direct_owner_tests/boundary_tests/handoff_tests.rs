@@ -1291,7 +1291,16 @@ async fn actual_partial_watcher_restore(root: PathBuf, marker: bool) {
     } else {
         "AgentDesk-codex-6903-watcher-markerless-cdx"
     };
-    let mut fx = Fixture::start(&root, 6_903_301 + u64::from(marker), tmux).await;
+    // Restore claims the prepared source before idle discovery can publish a competing binding.
+    let mut fx = Fixture::prepare_inner(
+        &root,
+        6_903_301 + u64::from(marker),
+        tmux,
+        false,
+        make_shared_data_for_tests(),
+        false,
+    )
+    .await;
     let native = PathBuf::from(crate::services::tmux_common::session_temp_path(
         tmux, "jsonl",
     ));
@@ -1348,6 +1357,7 @@ async fn actual_partial_watcher_restore(root: PathBuf, marker: bool) {
     )
     .unwrap();
     dedupe::register_tmux_runtime_binding(tmux, binding);
+    fx.start_idle_rollout_relay();
     fx.polls(3).await;
     assert!(
         fx.observed.try_recv().is_err(),

@@ -475,6 +475,13 @@ impl Registry {
                         "retained"
                     });
                 }
+                // A refusal for good proved no paste, so its candidate is free as well.
+                if snapshot["refused_inputs"]
+                    .as_array()
+                    .is_some_and(|xs| xs.iter().any(|x| same(&x["input"])))
+                {
+                    return Some(collision::ABANDONED);
+                }
                 if snapshot["terminal_identities"]
                     .as_array()
                     .is_some_and(|xs| xs.iter().any(|x| x["identity"] == r.key["identity"]))

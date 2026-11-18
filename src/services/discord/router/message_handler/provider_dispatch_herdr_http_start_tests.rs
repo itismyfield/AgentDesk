@@ -8,6 +8,9 @@ use axum::{
 };
 use tower::ServiceExt;
 
+#[path = "provider_dispatch_herdr_internal_start_tests.rs"]
+mod internal_start;
+
 async fn app(fx: &Fixture, intake: &Intake) -> Router {
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agents WHERE id='busy-entry')")

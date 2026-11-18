@@ -530,6 +530,7 @@ async fn paste_busy(
         let _timing = timing.entered();
         let turn = StreamingTurn {
             pool: pool.as_ref(),
+            registration_origin: None,
             shared: runtime.as_ref(),
             provider: &provider,
             prompt: &payload,

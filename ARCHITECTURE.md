@@ -236,6 +236,8 @@ src/
 │   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
 │   │   ├── hosted_execution_tests.rs
+│   │   ├── key_promotion.rs
+│   │   ├── key_promotion_pg_tests.rs
 │   │   ├── listing.rs
 │   │   ├── provider_resume_fence.rs
 │   │   ├── rebind_override.rs
@@ -471,6 +473,7 @@ src/
 │   ├── automation_contract.rs
 │   ├── bot_role.rs
 │   ├── cluster_policy.rs
+│   ├── conversation.rs
 │   ├── dispatch_route.rs
 │   ├── file_sync.rs
 │   ├── host_observation.rs
@@ -1125,6 +1128,7 @@ src/
 │   │   │   ├── busy/
 │   │   │   │   ├── herdr.rs
 │   │   │   │   ├── herdr_tests.rs
+│   │   │   │   ├── idle_compaction_tests.rs
 │   │   │   │   └── tmux.rs
 │   │   │   ├── busy.rs
 │   │   │   └── transport.rs
@@ -1162,12 +1166,15 @@ src/
 │   │   │   ├── dialog.rs
 │   │   │   ├── evidence.rs
 │   │   │   ├── idle.rs
+│   │   │   ├── idle_compaction_safety_tests.rs
+│   │   │   ├── idle_compaction_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── readiness_tests.rs
 │   │   │   ├── restart_tests.rs
 │   │   │   ├── resume_record.rs
 │   │   │   ├── source.rs
-│   │   │   └── wait.rs
+│   │   │   ├── wait.rs
+│   │   │   └── watched.rs
 │   │   ├── session/
 │   │   │   ├── auto_compact_launch_tests.rs
 │   │   │   ├── effort.rs
@@ -1312,6 +1319,7 @@ src/
 │   │   ├── readiness.rs
 │   │   ├── registry_adapter_sink.rs
 │   │   ├── relay_producer_registry.rs
+│   │   ├── session_directory.rs
 │   │   ├── session_discovery.rs
 │   │   ├── session_matcher.rs
 │   │   ├── session_registry.rs
@@ -1631,8 +1639,7 @@ src/
 │   │   │   └── tui_passthrough.rs
 │   │   ├── delivery_lease_cell/
 │   │   │   ├── exact_lease/
-│   │   │   │   ├── tests.rs
-│   │   │   │   └── token_tests.rs
+│   │   │   │   └── tests.rs
 │   │   │   ├── exact_lease_tests.rs
 │   │   │   └── source_epoch_observer.rs
 │   │   ├── execution_identity/
@@ -2471,6 +2478,7 @@ src/
 │   │   │   │   │   ├── owner_input_codex_native_tests.rs
 │   │   │   │   │   ├── owner_input_codex_tests.rs
 │   │   │   │   │   ├── owner_input_common_operation_tests.rs
+│   │   │   │   │   ├── owner_input_effort_refused_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_busy_operation_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_pending_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
@@ -2547,6 +2555,7 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_http_start_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_internal_start_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_missing_input_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_missing_race_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_missing_success_tests.rs
@@ -2554,6 +2563,7 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tmux_launch_tests.rs
+│   │   │   │   ├── provider_dispatch_idle_compaction_tests.rs
 │   │   │   │   ├── provider_dispatch_idle_stash_tests.rs
 │   │   │   │   ├── provider_dispatch_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
@@ -2562,6 +2572,7 @@ src/
 │   │   │   │   ├── provider_isolation_seed_save_tests.rs
 │   │   │   │   ├── root_replaced_recovery_tests.rs
 │   │   │   │   ├── s1_entry_tests.rs
+│   │   │   │   ├── session_key_promotion_pipe_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
 │   │   │   │   ├── turn_context.rs
@@ -3361,12 +3372,15 @@ src/
 │   │   │   ├── finalize_context.rs
 │   │   │   ├── guarded_finish_residue.rs
 │   │   │   ├── native_abstain.rs
+│   │   │   ├── native_binding.rs
+│   │   │   ├── native_binding_tests.rs
 │   │   │   ├── native_input_tests.rs
 │   │   │   ├── native_policy.rs
 │   │   │   ├── native_prepare.rs
 │   │   │   ├── native_restore.rs
 │   │   │   ├── native_restore_gc_tests.rs
 │   │   │   ├── native_supply.rs
+│   │   │   ├── native_terminal_tests.rs
 │   │   │   ├── policy_commit.rs
 │   │   │   ├── reconcile.rs
 │   │   │   ├── terminal_handler.rs
@@ -3549,6 +3563,7 @@ src/
 │   │   ├── host_liveness.rs
 │   │   ├── host_teardown_gate.rs
 │   │   ├── http.rs
+│   │   ├── id_bridge.rs
 │   │   ├── idle_detector.rs
 │   │   ├── idle_relay_drift.rs
 │   │   ├── inflight.rs
@@ -3620,6 +3635,8 @@ src/
 │   │   ├── session_identity.rs
 │   │   ├── session_idle_cleanup.rs
 │   │   ├── session_idle_cleanup_tests.rs
+│   │   ├── session_locator.rs
+│   │   ├── session_locator_pg_tests.rs
 │   │   ├── session_notice.rs
 │   │   ├── session_notice_delivery.rs
 │   │   ├── session_relay_sink.rs
@@ -3723,6 +3740,11 @@ src/
 │   │   ├── routing_constraint.rs
 │   │   ├── thread_reuse.rs
 │   │   └── wait_queue.rs
+│   ├── engine_runtime/
+│   │   ├── legacy_state.rs
+│   │   ├── mod.rs
+│   │   ├── relay_state.rs
+│   │   └── session.rs
 │   ├── git/
 │   │   ├── branch_resolver.rs
 │   │   ├── commit_resolver.rs
@@ -4180,6 +4202,7 @@ src/
 │   │   ├── herdr_terminate_real_tests.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
+│   │   ├── operation_policy.rs
 │   │   ├── process_host.rs
 │   │   ├── resolve.rs
 │   │   ├── session_record.rs
@@ -4248,7 +4271,12 @@ src/
 │   │   │   │   ├── notice_owner/
 │   │   │   │   │   ├── census/
 │   │   │   │   │   │   └── census_tests.rs
+│   │   │   │   │   ├── context_observation/
+│   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   ├── generation/
+│   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── census.rs
+│   │   │   │   │   ├── context_observation.rs
 │   │   │   │   │   └── generation.rs
 │   │   │   │   ├── v2/
 │   │   │   │   │   ├── carried.rs
@@ -4257,6 +4285,7 @@ src/
 │   │   │   │   │   ├── migration.rs
 │   │   │   │   │   ├── native.rs
 │   │   │   │   │   ├── native_barrier.rs
+│   │   │   │   │   ├── native_binding.rs
 │   │   │   │   │   ├── native_control.rs
 │   │   │   │   │   ├── native_receipt.rs
 │   │   │   │   │   ├── native_tests.rs
@@ -4432,6 +4461,7 @@ src/
 │   │   │   │   ├── native_input.rs
 │   │   │   │   ├── notice_activation_tests.rs
 │   │   │   │   ├── notice_cache_tests.rs
+│   │   │   │   ├── notice_context_tests.rs
 │   │   │   │   ├── notice_missing_tests.rs
 │   │   │   │   ├── notice_owner_tests.rs
 │   │   │   │   ├── notice_resume_tests.rs
@@ -4466,7 +4496,10 @@ src/
 │   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
 │   │   │   │   ├── native/
+│   │   │   │   │   ├── tests/
+│   │   │   │   │   │   └── terminal_tests.rs
 │   │   │   │   │   ├── receipt.rs
+│   │   │   │   │   ├── terminal.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── native.rs
 │   │   │   │   ├── observation_tests.rs
@@ -4699,7 +4732,8 @@ src/
 │   │   ├── binding_context/
 │   │   │   ├── herdr_resume.rs
 │   │   │   ├── inventory.rs
-│   │   │   └── inventory_tests.rs
+│   │   │   ├── inventory_tests.rs
+│   │   │   └── registration.rs
 │   │   ├── binding_events/
 │   │   │   ├── codex/
 │   │   │   │   ├── commit/
@@ -4732,6 +4766,7 @@ src/
 │   │   │   │   ├── fresh_admission.rs
 │   │   │   │   ├── herdr_bootstrap.rs
 │   │   │   │   ├── hold_detail.rs
+│   │   │   │   ├── observation_tests.rs
 │   │   │   │   └── provenance_tests.rs
 │   │   │   ├── codex_verified/
 │   │   │   │   ├── provenance/
@@ -4745,6 +4780,7 @@ src/
 │   │   │   │   │   ├── live_grant_tests.rs
 │   │   │   │   │   ├── permission.rs
 │   │   │   │   │   └── permission_tests.rs
+│   │   │   │   ├── observation.rs
 │   │   │   │   └── provenance.rs
 │   │   │   ├── pane_registration/
 │   │   │   │   └── codex_launch_cause.rs
@@ -4790,6 +4826,7 @@ src/
 │   │   ├── claude_meta.rs
 │   │   ├── claude_meta_tests.rs
 │   │   ├── completion_scan.rs
+│   │   ├── idle_compaction_tests.rs
 │   │   └── tool_open.rs
 │   ├── turn_lifecycle/
 │   │   └── stop_result.rs
@@ -4831,6 +4868,7 @@ src/
 │   │   │   │   ├── attempt.rs
 │   │   │   │   ├── claude_handoff.rs
 │   │   │   │   ├── clear.rs
+│   │   │   │   ├── cold_source.rs
 │   │   │   │   ├── commit.rs
 │   │   │   │   ├── control.rs
 │   │   │   │   ├── control_tests.rs
@@ -4842,6 +4880,7 @@ src/
 │   │   │   │   ├── owner_tests.rs
 │   │   │   │   ├── projection.rs
 │   │   │   │   ├── projection_tests.rs
+│   │   │   │   ├── refused.rs
 │   │   │   │   ├── requeue_tests.rs
 │   │   │   │   ├── retained.rs
 │   │   │   │   ├── source_admission.rs
@@ -4850,6 +4889,7 @@ src/
 │   │   │   │   ├── start_failure_tests.rs
 │   │   │   │   └── unit_tests.rs
 │   │   │   ├── v2_types/
+│   │   │   │   ├── cold_source.rs
 │   │   │   │   └── effort_restart.rs
 │   │   │   ├── compat.rs
 │   │   │   ├── compat_tests.rs

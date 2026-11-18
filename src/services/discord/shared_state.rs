@@ -52,12 +52,7 @@ pub(in crate::services::discord) struct RuntimeHttpCache {
     pub(in crate::services::discord) cached_bot_token: tokio::sync::OnceCell<String>,
 }
 
-/// #3479 — shared policy engine used by direct-dispatch finalization
-/// (`recovery_engine`, `turn_bridge::completion_guard`), reached via
-/// `shared.policy.engine`.
-pub(in crate::services::discord) struct PolicyRuntime {
-    pub(in crate::services::discord) engine: Option<crate::engine::PolicyEngine>,
-}
+pub(in crate::services::discord) use crate::services::engine_runtime::PolicyRuntime;
 
 impl SharedData {
     /// Returns an `Arc<Http>` for posting to Discord outside the gateway

@@ -286,11 +286,15 @@ async fn session_cache_selector_state_for_rebind(
     tmux_session_name: &str,
 ) -> Option<SessionCacheSelectorState> {
     let pool = shared.pg_pool.as_ref()?;
-    for session_key in super::super::adk_session::build_session_key_candidates(
+    for session_key in super::super::session_locator::candidates(
+        Some(pool),
         &shared.token_hash,
         provider,
         tmux_session_name,
-    ) {
+        None,
+    )
+    .ok()?
+    {
         match crate::db::dispatched_sessions::load_provider_session_ids_pg(
             pool,
             &session_key,

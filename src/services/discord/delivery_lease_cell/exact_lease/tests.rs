@@ -64,7 +64,7 @@ fn transitions_are_single_lock_raii_and_keep_owned_identity() {
         .unwrap_or_else(|_| panic!("commit"));
     assert_eq!(super::super::payload_lock_entries_for_test() - before, 1);
     assert_eq!(Arc::strong_count(&cell), 2, "acquired predecessor leaked");
-    assert_eq!(committed.key, lease_key);
+    assert_eq!(committed.key_for_tests(), &lease_key);
     assert!(matches!(
         cell.read(),
         super::super::LeaseSnapshot::Committed {
@@ -84,9 +84,21 @@ fn transitions_are_single_lock_raii_and_keep_owned_identity() {
     assert_unleased(&cell);
 
     let transport_error =
-        PinnedLeaseCell::acquire(Arc::clone(&cell), lease_key, coordinate(41), 300)
+        PinnedLeaseCell::acquire(Arc::clone(&cell), lease_key.clone(), coordinate(41), 300)
             .expect("transport attempt");
     drop(transport_error);
+    assert_unleased(&cell);
+
+    let acquired = PinnedLeaseCell::acquire(Arc::clone(&cell), lease_key, coordinate(41), 400)
+        .expect("uncommitted attempt");
+    let before = super::super::payload_lock_entries_for_test();
+    let released = acquired
+        .release()
+        .unwrap_or_else(|_| panic!("release acquired"));
+    assert_eq!(super::super::payload_lock_entries_for_test() - before, 1);
+    assert_eq!(Arc::strong_count(&cell), 2);
+    drop(released);
+    assert_eq!(Arc::strong_count(&cell), 1);
     assert_unleased(&cell);
 }
 
@@ -162,10 +174,25 @@ fn assert_identity_mismatches(
             .expect("acquire");
     let before = snapshot(&owner);
     for (pinned, candidate_key, token, c) in [
-        (&other, &lease_key, acquired.token, coordinate(60)),
-        (&owner, &wrong_key, acquired.token, coordinate(60)),
+        (
+            &other,
+            &lease_key,
+            acquired.token_for_tests(),
+            coordinate(60),
+        ),
+        (
+            &owner,
+            &wrong_key,
+            acquired.token_for_tests(),
+            coordinate(60),
+        ),
         (&owner, &lease_key, LeaseToken::next(), coordinate(60)),
-        (&owner, &lease_key, acquired.token, coordinate(61)),
+        (
+            &owner,
+            &lease_key,
+            acquired.token_for_tests(),
+            coordinate(61),
+        ),
     ] {
         assert!(!transition(&owner, pinned, candidate_key, token, c));
         assert_eq!(snapshot(&owner), before);
@@ -189,7 +216,7 @@ fn commit_requires_every_exact_identity_field() {
 #[test]
 fn release_requires_every_exact_identity_field() {
     assert_identity_mismatches(|owner, pinned, key, token, c| {
-        owner.release_exact(pinned, key, token, c, |_| true)
+        owner.release_exact_for_tests(pinned, key, token, c)
     });
 }
 
@@ -230,13 +257,14 @@ fn legacy_surface_cannot_mutate_exact_state_or_replacement() {
     assert!(!cell.reclaim_if_expired(10));
     assert_eq!(snapshot(&cell), before);
 
-    let stale_token = acquired.token;
+    let stale_token = acquired.token_for_tests();
     assert!(acquired.reclaim_if_expired(10));
     let replacement =
         PinnedLeaseCell::acquire(Arc::clone(&cell), lease_key.clone(), coordinate(70), 100)
             .expect("replacement");
     assert_ne!(
-        stale_token, replacement.token,
+        stale_token,
+        replacement.token_for_tests(),
         "tokens must never be reused"
     );
     let stale = match acquired.commit(LeaseOutcome::Delivered) {

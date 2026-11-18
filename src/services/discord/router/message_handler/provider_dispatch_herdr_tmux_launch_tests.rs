@@ -339,6 +339,7 @@ fn dispatched_return(owned: bool) {
     let provider = ProviderKind::Claude;
     let turn = StreamingTurn {
         pool: Some(&fx.pool),
+        registration_origin: None,
         shared: None,
         provider: &provider,
         prompt: "질문",

@@ -1,4 +1,5 @@
 //! Complete, bounded transcript evidence; shared turn-state classification stays unchanged.
+use crate::services::tui_turn_state::{claude_completed_reply, claude_idle_metadata};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
@@ -37,6 +38,7 @@ pub(super) enum End {
     None,
     Hard,
     Summary,
+    Reply,
 }
 pub(super) struct Tail {
     pub stamp: Stamp,
@@ -124,11 +126,13 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
                 Some("init") => {
                     tail.end = End::None;
                 }
+                Some("informational") if claude_idle_metadata(&record) => {}
                 _ => {
                     tail.end = End::None;
                     tail.empty = false;
                 }
             },
+            kind if kind != "permission-mode" && claude_idle_metadata(&record) => {}
             "user" | "assistant" => {
                 tail.empty = false;
                 tail.activity = offset;
@@ -146,14 +150,18 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
                     }
                     Some(text)
                 });
-                tail.end = if record["type"] == "user"
+                tail.end = if claude_completed_reply(&record) {
+                    tail.terminal = offset;
+                    End::Reply
+                } else if record["type"] == "user"
                     && text.as_deref().is_some_and(|text| {
                         matches!(
                             text,
                             "[Request interrupted by user]"
                                 | "[Request interrupted by user for tool use]"
                         )
-                    }) {
+                    })
+                {
                     tail.terminal = offset;
                     End::Hard
                 } else {
@@ -166,7 +174,7 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
             // Claude writes it right after `mode` in its session-state block; only a resume start
             // reads that as a turn starting. Alone it is unread and ends what came before.
             "permission-mode" => {
-                if !after_mode {
+                if !after_mode && tail.end != End::Reply {
                     tail.end = End::None;
                     tail.terminal = 0;
                 }
@@ -180,18 +188,6 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
                 tail.activity_at = timestamp(&record);
                 tail.end = End::None;
             }
-            // Session metadata a turn writes after its own records: no turn progress.
-            "file-history-snapshot"
-            | "queue-operation"
-            | "last-prompt"
-            | "ai-title"
-            | "mode"
-            | "session-owner"
-            | "atis-latch"
-            | "cost-state"
-            | "tools-used"
-            | "pr-link"
-            | "frame-link" => {}
             _ => {
                 tail.end = End::None;
                 tail.empty = false;

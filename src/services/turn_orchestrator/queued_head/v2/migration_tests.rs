@@ -332,6 +332,7 @@ fn adoption_forgets_the_ledger_entry_of_a_proven_unsent_paste() {
                     enqueued: false,
                 },
             }],
+            refused_inputs: vec![],
             terminal_identities: vec![],
             source_bindings: Vec::new(),
             namespace: Some(format!("migration-{channel}")),

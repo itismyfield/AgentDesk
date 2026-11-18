@@ -1,0 +1,23 @@
+---
+title: "Stop continuation 출력 뒤 늦게 도착하는 opener"
+---
+stateDiagram-v2
+  s0: 끝답변 end_turn 기록
+  s1: Stop 성공 출력이 continuation을 요청
+  s2: 같은 owner front의 입력 도착
+  s3: 후속 Busy 턴의 기존 프레임 경로
+  s4: 기존 Busy 프레임 한 번 전달
+  s5: Idle 제출 거절, watch 보존
+  s6: 공유 probe Ready, owner 깨움
+  s7: 후속 완료 증명으로 Idle 제출 준비
+  s8: Idle 입력 한 번 전달
+  [*] --> s0
+  s0 --> s1: Stop hook_success 기록, stdout에 continuation 요청
+  s1 --> s2: owner 입력 도착
+  s2 --> s3: 현재 source와 턴 재독
+  s3 --> s4: 기존 Busy 프레임 전달
+  s2 --> s5: 현재 source와 턴 재독
+  s3 --> s5: 그 사이 변한 source를 첫 키 전에 거절
+  s5 --> s6: 같은 probe로 Keep 또는 Wake
+  s6 --> s7: 같은 owner 재개
+  s7 --> s8: 첫 키 전 재검증 후 Idle 붙여넣기
