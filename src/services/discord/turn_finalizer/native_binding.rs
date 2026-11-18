@@ -141,7 +141,11 @@ pub(in crate::services::discord) async fn release_unkeyed_source(
     let mut expected = ticket.clone();
     expected.source = current.source.clone();
     let saved = history.native_settlement(namespace, &current)?;
-    if expected != current || saved.extra.get("not_sent") != Some(&serde_json::Value::Bool(true)) {
+    if expected != current
+        || saved.extra.get("not_sent") != Some(&serde_json::Value::Bool(true))
+        || saved.outcome.is_some()
+        || saved.extra.get("any_key") == Some(&serde_json::Value::Bool(true))
+    {
         return Err("cold source no-key proof missing".into());
     }
     let ticket = ticket.clone();
@@ -207,9 +211,7 @@ impl Port {
         };
         let saved = history
             .native_settlement(namespace, &history.native_ticket(namespace, &ticket.key)?)?;
-        if saved.extra.get("not_sent") == Some(&serde_json::Value::Bool(true))
-            && intent.selected.is_none()
-        {
+        if saved.extra.get("not_sent") == Some(&serde_json::Value::Bool(true)) {
             return release_unkeyed_source(&self.shared, history, namespace, &intent.ticket).await;
         }
         if saved.ticket.source.is_none()

@@ -382,6 +382,64 @@ async fn native_8148_coldsource_terminal_none_refuses_new_source() {
     );
 }
 
+#[tokio::test]
+async fn native_8148_coldsource_selected_intent_retires_on_exact_not_sent() {
+    let f = Fixture::new().await;
+    pin_source(&f.shared, &f.namespace, &f.ticket)
+        .await
+        .unwrap();
+    f.transcript();
+    let intent = f.intent().await;
+    let port = f.port();
+    port.resolve_pending(&f.ticket, &intent.pin).unwrap();
+    let id = bound_source(
+        &port
+            .bindings
+            .binding_events_since(f.ticket.channel_id, 0)
+            .unwrap(),
+        &f.ticket,
+        &intent.pin,
+    )
+    .unwrap();
+    let source = Source {
+        target: f.ticket.key["attempt"]["target"].clone(),
+        provider: "claude".into(),
+        session_id: id.session_id,
+        transcript: id.path,
+        file: [id.dev, id.ino],
+        offset: 0,
+        binding_watermark: None,
+    };
+    let ticket = f.ticket.clone();
+    f.shared
+        .mailbox(ChannelId::new(ticket.channel_id))
+        .v2_request(move |slot| slot.as_mut().unwrap().select_source(&ticket, &source))
+        .await
+        .unwrap();
+    f.history
+        .try_native_not_sent(&f.namespace, &f.ticket)
+        .unwrap();
+    port.bind_source(&f.namespace, &f.ticket, &f.history)
+        .await
+        .unwrap();
+    let ticket = f.ticket.clone();
+    f.shared
+        .mailbox(ChannelId::new(ticket.channel_id))
+        .v2_request(move |slot| {
+            assert!(slot.as_ref().unwrap().source_binding(&ticket)?.is_none());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        f.history
+            .native_ticket(&f.namespace, &f.ticket.key)
+            .unwrap()
+            .source
+            .is_none()
+    );
+}
+
 #[test]
 fn native_8148_coldsource_prekey_boundary_rejects_partial_and_unreadable() {
     let dir = tempfile::tempdir().unwrap();
