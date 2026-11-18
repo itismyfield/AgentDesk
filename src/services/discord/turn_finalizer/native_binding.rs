@@ -153,8 +153,7 @@ pub(in crate::services::discord) async fn release_unkeyed_source(
         .mailbox(ChannelId::new(ticket.channel_id))
         .v2_request(move |slot| {
             let owner = slot.as_mut().ok_or("cold source owner missing")?;
-            let intent = owner.source_binding(&ticket)?;
-            owner.ack_source(&ticket, intent.as_ref().and_then(|i| i.selected.as_ref()))
+            owner.ack_source(&ticket, None)
         })
         .await
 }

@@ -159,12 +159,30 @@ impl Owner {
         let Some(intent) = self.source_binding(ticket)? else {
             return Ok(());
         };
-        if intent.selected.as_ref() != source {
+        if source.is_some() && intent.selected.as_ref() != source {
             return Err("source binding acknowledgement changed".into());
         }
         let mut next = self.snapshot.clone();
         if let Some(source) = source {
             let value = serde_json::to_value(source).map_err(|e| e.to_string())?;
+            let key: AttemptRef =
+                serde_json::from_value(ticket.key.clone()).map_err(|e| e.to_string())?;
+            for input in next
+                .head_injection
+                .iter_mut()
+                .chain(next.retained_inputs.iter_mut().map(|r| &mut r.input))
+            {
+                if key.matches(input) {
+                    if input
+                        .resolved_source
+                        .as_ref()
+                        .is_some_and(|old| *old != value)
+                    {
+                        return Err("source acknowledgement conflicts with active input".into());
+                    }
+                    input.resolved_source = Some(value.clone());
+                }
+            }
             for bind in &mut next.admission_binds {
                 if let BindAt::Settled {
                     attempt, source, ..

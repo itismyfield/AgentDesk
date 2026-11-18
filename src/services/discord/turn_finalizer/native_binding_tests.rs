@@ -214,6 +214,50 @@ async fn native_8148_coldsource_producerless_pending_resolves_from_exact_path() 
 }
 
 #[tokio::test]
+async fn native_8148_coldsource_binding_ack_refines_a_still_live_head_without_any_key() {
+    let f = Fixture::new().await;
+    pin_source(&f.shared, &f.namespace, &f.ticket)
+        .await
+        .unwrap();
+    f.transcript();
+    f.port()
+        .bind_source(&f.namespace, &f.ticket, &f.history)
+        .await
+        .unwrap();
+    let ticket = f.ticket.clone();
+    f.shared
+        .mailbox(ChannelId::new(ticket.channel_id))
+        .v2_request(move |slot| {
+            let owner = slot.as_mut().unwrap();
+            assert!(
+                owner
+                    .snapshot
+                    .head_injection
+                    .as_ref()
+                    .unwrap()
+                    .resolved_source
+                    .is_some()
+            );
+            let key = owner.active_attempt()?;
+            drop(owner.arm(&key, 1)?);
+            owner.settle(&key, true, 2)
+        })
+        .await
+        .unwrap();
+    let current = f
+        .history
+        .native_ticket(&f.namespace, &f.ticket.key)
+        .unwrap();
+    let saved = f.history.native_settlement(&f.namespace, &current).unwrap();
+    assert_ne!(
+        saved.extra.get("any_key"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert!(saved.outcome.is_none() && !saved.cleanup_complete);
+    f.assert_bound().await;
+}
+
+#[tokio::test]
 async fn native_8148_coldsource_empty_owner_boot_without_enqueue() {
     let f = Fixture::new().await;
     f.pin_and_submit().await;
@@ -427,6 +471,16 @@ async fn native_8148_coldsource_selected_intent_retires_on_exact_not_sent() {
         .mailbox(ChannelId::new(ticket.channel_id))
         .v2_request(move |slot| {
             assert!(slot.as_ref().unwrap().source_binding(&ticket)?.is_none());
+            assert!(
+                slot.as_ref()
+                    .unwrap()
+                    .snapshot
+                    .head_injection
+                    .as_ref()
+                    .unwrap()
+                    .resolved_source
+                    .is_none()
+            );
             Ok(())
         })
         .await
