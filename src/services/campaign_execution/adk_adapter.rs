@@ -13,7 +13,7 @@ use super::profile::{
 };
 use super::verification_run::{
     ArtifactRef, ExpectedArtifact, PhaseInput, PhaseKind, Termination, VerificationError,
-    VerificationPhase, VerificationRun, VerificationSpec, digest_of,
+    VerificationPhase, VerificationRun, VerificationSpec, digest_of, execution_id,
 };
 use super::verification_runner::{
     AdkBuildIdentity, AdkPhasePaths, TestHandoff, adk_phase_command, adk_test_handoff,
@@ -61,8 +61,8 @@ impl AdkAdapter<'_> {
             || spec.hash()? != origin.spec_hash
             || !self.repository.is_absolute()
             || !self.workspace_root.is_absolute()
-            || origin.execution_id.len() != 64
-            || !origin.execution_id.bytes().all(|b| b.is_ascii_hexdigit())
+            || origin.execution_id
+                != execution_id(&origin.owner_binding, origin.repair_cycle, &origin.check_id)
             || [&origin.campaign_id, &origin.run_id, &origin.node_id]
                 .into_iter()
                 .any(|id| matches!(id.as_str(), "." | ".."))
