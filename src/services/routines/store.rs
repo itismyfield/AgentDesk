@@ -2094,6 +2094,7 @@ impl RoutineStore {
     }
 
     /// `None` keeps the legacy null-mode contract; an explicit definition stores a fresh routine.
+    #[cfg(test)]
     pub async fn attach_routine_with_execution(
         &self,
         new_routine: NewRoutine,
@@ -3031,6 +3032,7 @@ impl RoutineStore {
         Ok(result.rows_affected() == 1)
     }
 
+    #[cfg(test)]
     pub async fn update_discord_thread_id(
         &self,
         routine_id: &str,
