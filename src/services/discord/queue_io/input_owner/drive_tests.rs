@@ -832,3 +832,66 @@ async fn a_told_inputs_equal_queued_copy_is_never_submitted() {
     let copy = mailbox.v2_exact_turn(original(channel, 1), "t1b".into());
     assert_eq!(format!("{:?}", copy.await.unwrap()), "NotArmed");
 }
+
+/// A later head deadline already awaited never delays a held front's earlier readiness due: the
+/// timer re-arms for it and the owner refuses that front without waiting out the head's window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_earlier_readiness_due_rearms_past_a_later_awaited_deadline() {
+    let _root = TestRuntimeRootGuard::new();
+    let (registry, channel) = (ChannelMailboxRegistry::default(), 7_272_754);
+    let mailbox = owner(&registry, channel, 2).await;
+    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let first = original(channel, 0).message_id;
+    let attempt = serde_json::from_value(prepared(channel, "input 0").attempt).unwrap();
+    let key = mailbox.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let only_first = |item: &PendingQueueItem| {
+            (item.message_id == first).then(|| (String::new(), item.text.clone()))
+        };
+        let key = owner.reserve_unit(attempt, only_first)?;
+        drop(owner.arm(&key, now)?);
+        Ok(key)
+    });
+    let key = key.await.unwrap();
+    let noop: Handoff = Arc::new(|_| Box::pin(async { Ok(()) }));
+    let drive = Arc::new(Drive {
+        mailbox: mailbox.clone(),
+        channel,
+        handoff: noop,
+        settled: None,
+    });
+    arm_deadline(drive.clone());
+    let awaited = || *lane(channel).armed.lock().unwrap();
+    for _ in 0..500 {
+        if awaited().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        awaited(),
+        Some(now + 30_000),
+        "the head's window is awaited"
+    );
+    let held = mailbox.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        owner.settle(&key, true, now)?;
+        let front = owner.front().ok_or("no front")?;
+        owner.hold_readiness(&front, "test", now - 20_000).map(drop)
+    });
+    held.await.unwrap();
+    arm_deadline(drive);
+    for _ in 0..300 {
+        if snapshot(&mailbox).await["refused_fronts"] != serde_json::Value::Null {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let after = snapshot(&mailbox).await;
+    assert_eq!(
+        after["refused_fronts"].as_array().map(Vec::len),
+        Some(1),
+        "{after}"
+    );
+    assert_eq!(after["items"], json!([]), "{after}");
+}

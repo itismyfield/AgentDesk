@@ -11,8 +11,7 @@ fn hold_key(item: &PendingQueueItem) -> (QueueIdentity, String) {
 
 impl Owner {
     /// Records the first hold of the unattempted `front`; a later hold of the same original returns
-    /// the stored one, so its due never moves. Only tests record it until Busy-held intake does.
-    #[cfg(test)]
+    /// the stored one, so its due never moves.
     pub(crate) fn hold_readiness(
         &mut self,
         front: &Front,

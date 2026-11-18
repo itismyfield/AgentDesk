@@ -1523,3 +1523,6 @@ mod idle_compaction_tests;
 
 #[path = "provider_dispatch_restart_reply_tests.rs"]
 mod restored_reply_tests;
+
+#[path = "provider_dispatch_restart_unrestorable_tests.rs"]
+mod unrestorable_tests;
