@@ -59,7 +59,7 @@
 | 재전송 무효 | `stage_fsm.rs` `assign_work`·`begin_review`의 기존 시도 분기, `lifecycle.rs:319` | `PositionGuard`. 같은 시도 ID·같은 위치의 재전송은 무변화 |
 | stop·편집 | `control.rs` `RequestStop`·`EditDefinition` | `Stop`·`Edit`. 기존 코드 그대로. 편집은 revision을 올려 옛 승인을 무효로 만든다 |
 
-`rg`로 `Command::Start|Resume|PrepareRetry`, `stage_fsm::assign_work|begin_review|accept_stage_result`, `lifecycle::`, `scheduler::next_action`의 호출부를 확인했다. `next_action`의 운영 호출자는 아직 없다(M3 host worker가 첫 소비자). 내부 명령은 `commands::execute`로만 들어오며 HTTP route는 닫힌 `PublicCommand`만 변환한다.
+`rg`로 `Command::Start|Resume|PrepareRetry`, `stage_fsm::assign_work|begin_review|accept_stage_result`, `lifecycle::`, `scheduler::next_action`의 호출부를 확인했다. `host_worker.rs`의 `poll`과 `advance`가 잠긴 최신 상태에서 `next_action`을 소비한다. 내부 명령은 `commands::execute`와 `commands::apply_in`의 영수증 트랜잭션을 사용한다. HTTP route는 닫힌 `PublicCommand`로 변환한다.
 
 ## 재실행
 

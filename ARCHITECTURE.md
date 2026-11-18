@@ -1001,7 +1001,10 @@ src/
 │   │   ├── failure_budget_tests.rs
 │   │   ├── host_gate.rs
 │   │   ├── host_gate_tests.rs
+│   │   ├── host_identity.rs
 │   │   ├── host_journal.rs
+│   │   ├── host_worker.rs
+│   │   ├── host_worker_tests.rs
 │   │   ├── lifecycle.rs
 │   │   ├── lifecycle_tests.rs
 │   │   ├── main_integration.rs
@@ -1013,6 +1016,8 @@ src/
 │   │   ├── pipeline_rules_tests.rs
 │   │   ├── profile.rs
 │   │   ├── profile_tests.rs
+│   │   ├── resource_admission.rs
+│   │   ├── resource_admission_tests.rs
 │   │   ├── review_gate.rs
 │   │   ├── review_gate_tests.rs
 │   │   ├── scheduler.rs

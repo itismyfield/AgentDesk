@@ -4,7 +4,6 @@ pub mod definition;
 pub mod evidence;
 pub mod evidence_gate;
 pub mod execution_pin;
-#[cfg(test)]
 pub mod lifecycle;
 pub mod model;
 #[cfg(test)]

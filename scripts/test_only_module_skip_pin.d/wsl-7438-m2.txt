@@ -1,2 +1,0 @@
-resolver | src/domain/campaign/lifecycle.rs
-resolver | src/services/campaign_execution/scheduler.rs

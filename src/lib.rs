@@ -302,10 +302,11 @@ pub mod home_runtime {
 /// Dormant server-campaign ADK adapter contracts; initiation stays behind the final host gate.
 pub mod campaign_adapter {
     pub use crate::db::server_campaigns::evidence_store;
+    pub use crate::domain::campaign::lifecycle::{HoldReason, NextAction, StepKey};
     pub use crate::services::campaign_execution::{
         adk_observe, adk_profile, adk_resources, adk_workspace, candidate_seal, effect_envelope,
-        evidence, evidence_gate, execution_pin, host_gate, main_integration, profile, review_gate,
-        verification_run, verification_runner,
+        evidence, evidence_gate, execution_pin, host_gate, host_worker, main_integration, profile,
+        resource_admission, review_gate, verification_run, verification_runner,
     };
 }
 

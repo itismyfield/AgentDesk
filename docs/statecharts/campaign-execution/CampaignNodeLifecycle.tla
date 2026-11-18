@@ -1,13 +1,14 @@
 ------------------------ MODULE CampaignNodeLifecycle ------------------------
-EXTENDS Naturals
+EXTENDS Naturals, FiniteSets
 CONSTANTS Required, MaxRepairs, MaxStops, MaxCrash,
           CheckGates, TargetBound, PositionGuard, BudgetStops, Recompute
 VARIABLES control, stage, open, result, failed, cycle, rev, epoch, approved, facts,
-          cmd, applied, stops, crashes, blind, badEntry, dup, retried, landingEpoch
-vars == <<control, stage, open, result, failed, cycle, rev, epoch, approved, facts,
+          cmd, applied, stops, crashes, blind, badEntry, dup, retried, landingEpoch, worker
+lifeVars == <<control, stage, open, result, failed, cycle, rev, epoch, approved, facts,
           cmd, applied, stops, crashes, blind, badEntry, dup, retried, landingEpoch>>
+vars == <<lifeVars, worker>>
 node == <<stage, open, result, failed, cycle>>
-flags == <<badEntry, dup, retried, landingEpoch>>
+flags == <<badEntry, dup, retried, landingEpoch, worker>>
 driver == <<cmd, applied, crashes, blind>>
 
 None == [kind |-> "none", epoch |-> 0]
@@ -38,11 +39,13 @@ Wanted ==
       [] stage = "confirm" /\ facts -> "complete"
       [] OTHER -> "none"
 
-Init ==
+LifecycleInit ==
     /\ control = "prepared" /\ stage = "requirements" /\ open = FALSE /\ result = "none"
     /\ failed = FALSE /\ cycle = 0 /\ rev = 0 /\ epoch = 0 /\ approved = {} /\ facts = FALSE
     /\ cmd = None /\ applied = {} /\ stops = 0 /\ crashes = 0 /\ blind = FALSE
     /\ badEntry = FALSE /\ dup = FALSE /\ retried = FALSE /\ landingEpoch = 0
+
+Init == LifecycleInit /\ worker = "inactive"
 
 BeginRun ==
     /\ control = "prepared" /\ control' = "running"
@@ -90,12 +93,12 @@ Apply ==
          [] cmd.kind = "complete" ->
               /\ stage' = "complete" /\ control' = "succeeded"
               /\ UNCHANGED <<open, result, failed, cycle>>
-    /\ UNCHANGED <<rev, approved, facts, cmd, crashes, blind, stops, dup>>
+    /\ UNCHANGED <<rev, approved, facts, cmd, crashes, blind, stops, dup, worker>>
 
 \* Control: without the position guard a retransmitted command takes effect a second time.
 Replay ==
     /\ ~PositionGuard /\ control = "running" /\ cmd \in applied /\ ~dup /\ dup' = TRUE
-    /\ UNCHANGED <<control, node, rev, epoch, approved, facts, driver, stops, badEntry, retried, landingEpoch>>
+    /\ UNCHANGED <<control, node, rev, epoch, approved, facts, driver, stops, badEntry, retried, landingEpoch, worker>>
 
 \* The driver drops a command once it is answered, stale or stopped.
 Ack ==
@@ -157,4 +160,94 @@ Movable ==
     /\ control \in {"prepared", "running"} /\ ~failed /\ stage # "complete"
     /\ \A g \in Boundary : Current(g)
 ApprovedNodeMoves == []<>(~Movable)
-=============================================================================
+
+\* One scoped host journal and two contenders for its writer lock.
+ExclusiveWorker == TRUE
+FenceRequired == TRUE
+ReplayJournal == TRUE
+HeadroomRequired == TRUE
+WithoutGuard == FALSE
+
+HostInit ==
+    /\ LifecycleInit
+    /\ worker = [holders |-> {}, fence |-> FALSE, resource |-> "waiting",
+                  journal |-> "empty", boot |-> 0, journalBoot |-> 0, resets |-> 0, lostHandle |-> FALSE,
+                  starts |-> 0, outcome |-> "pending", unfenced |-> FALSE,
+                  ignoredWait |-> FALSE]
+
+HostAcquire(n) ==
+    /\ n \notin worker.holders /\ (~ExclusiveWorker \/ worker.holders = {})
+    /\ worker' = [worker EXCEPT !.holders = @ \cup {n}]
+    /\ UNCHANGED lifeVars
+
+HostFence ==
+    /\ worker.holders # {} /\ ~worker.fence
+    /\ worker' = [worker EXCEPT !.fence = TRUE]
+    /\ UNCHANGED lifeVars
+
+HostResource ==
+    /\ worker.resource = "waiting"
+    /\ \E res \in {"ready", "unavailable"} : worker' = [worker EXCEPT !.resource = res]
+    /\ UNCHANGED lifeVars
+
+HostStart(n) ==
+    /\ n \in worker.holders /\ worker.outcome = "pending" /\ worker.starts < 2
+    /\ (~FenceRequired \/ worker.fence)
+    /\ (~HeadroomRequired \/ worker.resource = "ready")
+    /\ worker.journal = "empty" \/ (~ReplayJournal /\ worker.journal = "unknown")
+    /\ worker' = [worker EXCEPT !.journal = "intent", !.journalBoot = worker.boot,
+         !.starts = @ + 1, !.unfenced = @ \/ ~worker.fence, !.lostHandle = FALSE,
+         !.ignoredWait = @ \/ worker.resource # "ready"]
+    /\ UNCHANGED lifeVars
+
+\* A server crash drops the writer. Reboot can also invalidate the saved process identity.
+HostCrash ==
+    /\ worker.holders # {} /\ worker.resets < 1
+    /\ \E reboot \in BOOLEAN : worker' = [worker EXCEPT !.holders = {}, !.fence = FALSE,
+         !.boot = IF reboot THEN 1 ELSE @, !.resets = @ + 1,
+         !.journal = IF @ = "intent" THEN "lost" ELSE @, !.lostHandle = TRUE]
+    /\ UNCHANGED lifeVars
+
+HostRecover ==
+    /\ worker.holders # {} /\ worker.journal = "lost"
+    /\ worker' = [worker EXCEPT !.journal = "unknown"]
+    /\ UNCHANGED lifeVars
+
+HostReceipt ==
+    /\ worker.holders # {} /\ worker.journal = "intent"
+    /\ worker' = [worker EXCEPT !.journal = "started"]
+    /\ UNCHANGED lifeVars
+
+HostFinished ==
+    /\ worker.holders # {} /\ worker.journal = "started" /\ worker.boot = worker.journalBoot
+    /\ ~worker.lostHandle
+    /\ worker' = [worker EXCEPT !.journal = "finished"]
+    /\ UNCHANGED lifeVars
+
+\* Observation loss is not an unsent launch. The original action remains spent.
+HostFailure ==
+    /\ worker.holders # {} /\ worker.outcome = "pending"
+    /\ \/ worker.resource = "unavailable" /\ worker.journal = "empty"
+       \/ worker.journal = "started" /\ (worker.boot # worker.journalBoot \/ worker.lostHandle)
+       \/ worker.journal = "unknown"
+    /\ worker' = [worker EXCEPT !.outcome = "failed"]
+    /\ UNCHANGED lifeVars
+
+HostDeliver ==
+    /\ worker.holders # {} /\ worker.outcome = "pending" /\ worker.journal = "finished"
+    /\ worker' = [worker EXCEPT !.outcome = "advanced", !.journal = "delivered"]
+    /\ UNCHANGED lifeVars
+
+HostClaim == \E n \in {1, 2} : HostAcquire(n)
+HostInitiate == \E n \in {1, 2} : HostStart(n)
+HostProgress == HostInitiate \/ HostRecover \/ HostReceipt \/ HostFinished \/ HostFailure \/ HostDeliver
+HostNext == HostClaim \/ HostFence \/ HostResource \/ HostProgress \/ HostCrash \/ UNCHANGED vars
+HostSpec == HostInit /\ [][HostNext]_vars /\ WF_vars(HostClaim) /\ WF_vars(HostFence)
+            /\ WF_vars(HostResource) /\ WF_vars(HostProgress)
+
+SingleHostWorker == Cardinality(worker.holders) <= 1
+HostWritesFenced == ~worker.unfenced
+HostStartsOnce == worker.starts <= 1
+HostRespectsHeadroom == ~worker.ignoredWait
+HostProgresses == <>(worker.outcome # "pending")
+ =============================================================================

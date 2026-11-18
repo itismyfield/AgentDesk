@@ -23,6 +23,11 @@ campaign-execution/CampaignApprovalGateNoTargetHead.cfg	CampaignApprovalGate	NoW
 campaign-execution/CampaignApprovalGateNoTargetIdentity.cfg	CampaignApprovalGate	NoWrongBindingAccepted	-
 campaign-execution/CampaignApprovalGateNoTargetKind.cfg	CampaignApprovalGate	NoWrongBindingAccepted	-
 campaign-execution/CampaignApprovalGateOmitted.cfg	CampaignApprovalGate	OmittedEditNeverClearsGate	-
+campaign-execution/CampaignHostWorker.cfg	CampaignNodeLifecycle	-	-
+campaign-execution/CampaignHostWorkerNoFence.cfg	CampaignNodeLifecycle	HostWritesFenced	-
+campaign-execution/CampaignHostWorkerNoHeadroom.cfg	CampaignNodeLifecycle	HostRespectsHeadroom	-
+campaign-execution/CampaignHostWorkerNoLock.cfg	CampaignNodeLifecycle	SingleHostWorker	-
+campaign-execution/CampaignHostWorkerNoReplay.cfg	CampaignNodeLifecycle	HostStartsOnce	-
 campaign-execution/CampaignNodeLifecycle.cfg	CampaignNodeLifecycle	-	-
 campaign-execution/CampaignNodeLifecycleBefore.cfg	CampaignNodeLifecycle	NoUnapprovedEntry	-
 campaign-execution/CampaignNodeLifecycleBudgetIgnored.cfg	CampaignNodeLifecycle	NoRetryAfterBudget	-
