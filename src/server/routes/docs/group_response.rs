@@ -99,6 +99,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dashboard_v3_settings_catalog_response_examples() {
+        let (status, body) = request_docs_json(&docs_router(), "/api/docs/config/settings").await;
+        assert_eq!(status, StatusCode::OK);
+        let endpoints = body["endpoints"].as_array().unwrap();
+        let response = |path| {
+            &endpoints
+                .iter()
+                .find(|endpoint| endpoint["method"] == "GET" && endpoint["path"] == path)
+                .unwrap()["example"]["response"]
+        };
+        let entry = &response("/api/settings/config")["entries"][0];
+        assert_eq!(entry["category"], "system");
+        assert!(entry["description_ko"].is_string());
+        let runtime = response("/api/settings/runtime-config");
+        assert!(runtime["key_metadata"]["maxRetries"]["label_ko"].is_string());
+        assert!(runtime["current"]["maxRetries"].is_i64());
+    }
+
+    #[tokio::test]
     async fn kanban_category_docs_include_single_card_get() {
         let (status, body) = request_docs_json(&docs_router(), "/api/docs/kanban/kanban").await;
         assert_eq!(status, StatusCode::OK);

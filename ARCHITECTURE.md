@@ -4242,6 +4242,8 @@ src/
 │   ├── settings/
 │   │   ├── resolve/
 │   │   │   └── tests.rs
+│   │   ├── catalog.rs
+│   │   ├── catalog_tests.rs
 │   │   ├── resolve.rs
 │   │   ├── runtime_config_put.rs
 │   │   ├── startup.rs
