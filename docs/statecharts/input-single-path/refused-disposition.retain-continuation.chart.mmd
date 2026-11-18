@@ -1,0 +1,24 @@
+---
+title: "A refused effort continuation: no original copy, one notice, no requeue"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoBodyOnceSettled
+    lg1: Path to the NoBodyOnceSettled bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Reserved head, wait ended without evidence
+  s1: RED: refused, original still in restart intent (notice owed)
+  s2: RED: refused, original still in restart intent (notice in the outbox, not marked)
+  s3: RED: refused, original still in restart intent (notice posted and marked)
+  [*] --> s0
+  s0 --> s1: owner settles the head
+  s1 --> s2: drain posts the notice
+  s2 --> s3: owner marks the notice
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 breaks
+  class s1 bugPath
+  class s2 breaks
+  class s3 breaks

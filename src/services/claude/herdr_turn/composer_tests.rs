@@ -540,7 +540,7 @@ fn a_pane_that_outlived_the_restart_takes_one_input_only_on_an_idle_screen() {
     let mcp = "✻ Baked for 2s\n\n ⚠ 1 MCP server needs authentication · run /mcp";
     use crate::services::claude_tui::host_input::InputRefusal::{Unknown, Unproven};
     // `None` is admitted; a refusal names what the budget's end saw; a running screen over
-    // unchanged idle bytes ends Unproven, as `Watched::unproven` reads no screen.
+    // unchanged idle bytes ends Unproven, as a wait whose transcript never moved reads no screen.
     let cases = [
         ("idle", true, pane("✻ Baked for 2s", ""), None),
         ("stale MCP auth banner", true, pane(mcp, ""), None),
@@ -564,19 +564,19 @@ fn a_pane_that_outlived_the_restart_takes_one_input_only_on_an_idle_screen() {
             "MCP banner + hook running",
             true,
             pane(&format!("{mcp}\n{HOOK_RUNNING}"), ""),
-            Some(Unproven),
+            Some(Unproven(readiness::Unproven::Retained)),
         ),
         (
             "MCP banner + turn starting",
             true,
             pane(&format!("{mcp}\n{TURN_STARTING}"), ""),
-            Some(Unproven),
+            Some(Unproven(readiness::Unproven::Retained)),
         ),
         (
             "new incarnation",
             false,
             pane("✻ Baked for 2s", ""),
-            Some(Unproven),
+            Some(Unproven(readiness::Unproven::Retained)),
         ),
     ];
     for (name, older, screen, refused) in cases {
