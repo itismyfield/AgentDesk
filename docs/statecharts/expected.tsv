@@ -347,9 +347,11 @@ input-single-path/HerdrBusyReobserveRestartLostStart.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveRestartMissing.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveRestartNative.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveRestartNewIncarnation.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveRestartNoArm.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNoDeadline.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNoFirstKeyGate.cfg	HerdrBusyReobserve	RHOneDisposition	RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNoReservedExpire.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
+input-single-path/HerdrBusyReobserveRestartNoWiring.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNonce.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveRestartNoticeCrash.cfg	HerdrBusyReobserve	RHNoCrashReplay	-
 input-single-path/HerdrBusyReobserveRestartOldReply.cfg	HerdrBusyReobserve	-	-
@@ -378,7 +380,9 @@ input-single-path/HerdrBusyReobserveRestartStop.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveRestartStopContext.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveRestartTerminate.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveRestartTool.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveRestartUnwired.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartValid.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveRestartWiredMissing.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveSourceLateBefore.cfg	HerdrBusyReobserve	-	HealthyRecoveryDelivers
 input-single-path/HerdrBusyReobserveSourceLateFixed.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveSourceMismatchFixed.cfg	HerdrBusyReobserve	-	-

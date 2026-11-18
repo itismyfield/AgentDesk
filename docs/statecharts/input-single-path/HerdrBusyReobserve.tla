@@ -117,7 +117,7 @@ RHInit == r = [phase |-> "restart", age |-> 0, elapsed |-> 0, visible |-> FALSE,
     owned |-> TRUE, gate |-> TRUE, proof |-> FALSE, reserved |-> FALSE, permit |-> FALSE,
     keys |-> 0, refusals |-> 0, notices |-> 0, requeues |-> 0, leafRefused |-> FALSE,
     records |-> 0, recordKey |-> 0, pendingAck |-> FALSE, epoch |-> 0,
-    dueStored |-> Scenario # "old-snapshot", other |-> "none", cbFired |-> FALSE,
+    dueStored |-> FALSE, armed |-> FALSE, other |-> "none", cbFired |-> FALSE,
     busyKeys |-> 0, fallbackIdle |-> FALSE, keyValid |-> FALSE,
     changed |-> FALSE, replayed |-> FALSE, reason |-> "none"]
 Inc5(x) == IF x < 5 THEN x + 1 ELSE 5
@@ -135,7 +135,9 @@ RHOwner == r.owned /\ r.front = 1 /\ r.generation = 1
 \* The identity a deadline callback captured (front 1, generation 1) against the current front.
 RHSameFront == /\ (r.front = 1 \/ Mutant = "IgnoreFront")
                /\ (r.generation = 1 \/ Mutant = "IgnoreGeneration")
-RHFixed == Policy = "Fixed"
+\* "Unwired" is S1 restoration and the owner deadline without the Busy-held entry wiring.
+RHFixed == Policy \in {"Fixed", "Unwired"}
+RHWired == Policy = "Fixed"
 RHUnstarted == r.phase \in {"held", "waking", "reserved"}
 RHReason == IF RHExact THEN "deadline" ELSE Scenario
 \* Healthy-delivery premise only: driver steps run before the clock while they are enabled.
@@ -148,9 +150,12 @@ RHEnter == /\ r.phase = "restart"
 RHBusyEntry == /\ r.phase = "queued"
                /\ r' = [r EXCEPT !.phase = "held"]
 \* The first probe also reads Unknown. The fixture then exposes its existing source evidence.
-\* A stored due survives; a hold without one (old snapshot, or none yet) gets it once here.
+\* The wired Busy-held entry records the owner hold (a stored due survives; a hold without one gets
+\* it once here) and arms the drive's deadline timer, which a restart does not keep.
 RHFirstKeep == /\ r.phase = "held" /\ ~r.visible
-               /\ r' = [r EXCEPT !.visible = TRUE, !.dueStored = TRUE,
+               /\ r' = [r EXCEPT !.visible = TRUE,
+                   !.dueStored = r.dueStored \/ (RHWired /\ Mutant # "NoWiring"),
+                   !.armed = r.armed \/ (RHWired /\ Mutant # "NoArm"),
                    !.age = IF r.dueStored /\ r.age > 0 THEN r.age ELSE 1,
                    !.elapsed = IF r.age = 0 THEN Inc10(r.elapsed) ELSE r.elapsed,
                    !.nonce = IF Scenario = "nonce" THEN 2 ELSE 1,
@@ -158,10 +163,10 @@ RHFirstKeep == /\ r.phase = "held" /\ ~r.visible
                    !.inode = IF Scenario = "inode" THEN 2 ELSE 1]
 \* Same captured probe: restore only at the evidence boundary, and wake the Idle driver.
 RHRestoreWake == /\ RHFixed /\ r.phase = "held" /\ r.visible /\ RHOwner /\ RHAdmit
-                 /\ r.age < 5
+                 /\ (r.age < 5 \/ ~r.dueStored)
                  /\ r' = [r EXCEPT !.phase = "waking", !.proof = TRUE]
 RHKeep == /\ r.phase = "held" /\ r.visible
-          /\ ~(RHFixed /\ RHOwner /\ RHAdmit /\ r.age < 5)
+          /\ ~(RHFixed /\ RHOwner /\ RHAdmit /\ (r.age < 5 \/ ~r.dueStored))
           /\ r' = [r EXCEPT !.age = IF Mutant = "ResetDeadline" THEN 1 ELSE Inc5(r.age),
                             !.elapsed = IF r.age < 5 THEN Inc10(r.elapsed) ELSE r.elapsed]
 \* The clock runs in every unstarted phase, Ready or not; a wake or reserve never stops it.
@@ -175,7 +180,8 @@ RHIdleReserve == /\ r.phase = "waking"
                     THEN r' = [r EXCEPT !.phase = "reserved", !.reserved = TRUE]
                     ELSE r' = [r EXCEPT !.phase = "held", !.proof = FALSE]
 \* The leaf's current/first-key check before due hands a writer its permit; the key may lag.
-RHArm == /\ r.phase = "reserved" /\ ~r.permit /\ r.keys = 0 /\ r.age < 5 /\ RHOwner /\ r.gate
+RHArm == /\ r.phase = "reserved" /\ ~r.permit /\ r.keys = 0 /\ (r.age < 5 \/ ~r.dueStored)
+         /\ RHOwner /\ r.gate
          /\ ((RHExact /\ r.proof) \/ Mutant = "SkipDriverRecheck")
          /\ r' = [r EXCEPT !.permit = TRUE,
              !.keyValid = (RHExact /\ r.proof /\ RHOwner /\ r.gate)]
@@ -192,14 +198,14 @@ RHRace == /\ Scenario = "race" /\ r.phase \in {"waking", "reserved"} /\ ~r.permi
           /\ r' = [r EXCEPT !.native = 2, !.proof = FALSE, !.changed = TRUE]
 \* Owner-only atomic pre-key refusal of an attemptless front, not a fabricated NotSentProof.
 \* It revokes the front's grant/claim; it cannot revoke a reserved leaf's writer gate.
-RHExpire == /\ RHFixed /\ Mutant # "NoDeadline" /\ r.dueStored /\ r.age = 5
+RHExpire == /\ RHFixed /\ Mutant # "NoDeadline" /\ r.dueStored /\ r.armed /\ r.age = 5
             /\ (r.phase \in {"held", "waking"} \/ (Mutant = "AttemptlessLeaf" /\ r.phase = "reserved"))
             /\ r.owned /\ RHSameFront /\ r.gate /\ r.keys = 0
             /\ r' = [r EXCEPT !.phase = "refused", !.refusals = @ + 1, !.owned = FALSE,
                 !.gate = r.phase = "reserved", !.reserved = FALSE, !.reason = RHReason]
 \* A reserved attempt at due settles through its own NotSent and closes its writer gate.
 RHLeafExpire == /\ RHFixed /\ Mutant \notin {"NoDeadline", "NoReservedExpire"}
-                /\ r.phase = "reserved" /\ r.age = 5 /\ r.keys = 0 /\ r.gate
+                /\ r.phase = "reserved" /\ r.dueStored /\ r.age = 5 /\ r.keys = 0 /\ r.gate
                 /\ r' = [r EXCEPT !.phase = "refused", !.refusals = @ + 1, !.owned = FALSE,
                     !.gate = FALSE, !.leafRefused = TRUE, !.reason = RHReason]
 NoticeKey == IF Mutant = "EpochNoticeKey" THEN r.epoch ELSE 0
@@ -231,7 +237,7 @@ RHStaleCallback == /\ r.other = "queued" /\ ~r.cbFired
 RHReboot == /\ Scenario \in {"replay", "reboot", "old-snapshot"} /\ ~r.replayed /\ ~r.permit
             /\ r.phase \in {"held", "waking", "refused", "explained"}
             /\ r' = [r EXCEPT !.replayed = TRUE, !.epoch = 1, !.proof = FALSE,
-                !.pendingAck = FALSE,
+                !.pendingAck = FALSE, !.armed = FALSE,
                 !.visible = IF r.phase \in {"held", "waking"} THEN FALSE ELSE r.visible,
                 !.phase = IF r.phase = "waking" THEN "held" ELSE r.phase,
                 !.age = IF Mutant = "RebootResetDue" /\ r.phase \in {"held", "waking"}
