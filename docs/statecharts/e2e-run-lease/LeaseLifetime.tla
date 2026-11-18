@@ -18,7 +18,10 @@ Holder(r) == parentFd[r] \/ childFd[r] \/ helperFd[r]
 OtherHolders(r) == \E q \in Runs \ {r}: Holder(q)
 Active == {r \in Runs: phase[r] \in {"Running", "Prepared", "Draining"}}
 Clean == pending = None /\ net \in {"none", "settled"}
-TxInitial == [stage |-> "Pending", day |-> 0, deferred |-> FALSE, consumed |-> FALSE,
+ConsumerInitial == [stage |-> "Pending", case |-> "none", view |-> "UNREAD",
+    normalized |-> FALSE, heartbeatFresh |-> FALSE, crashed |-> FALSE,
+    alert |-> "none", attempts |-> 0, shown |-> FALSE]
+TxInitial == [consumer |-> ConsumerInitial, stage |-> "Pending", day |-> 0, deferred |-> FALSE, consumed |-> FALSE,
               locked |-> FALSE, budgetReserved |-> FALSE, providerPaused |-> FALSE,
               started |-> 0, used |-> 0, usage |-> "pending",
               durable |-> FALSE, finished |-> FALSE, result |-> "NONE", applied |-> FALSE, index |-> 0,
@@ -285,7 +288,89 @@ CompletedProjectionRecovers == tx.finished ~> tx.applied
 CompletedPublicationRecovers == tx.durable ~>
     (tx.summary /\ tx.status = tx.result /\ (tx.result = "PASS" \/ tx.outbox = "PENDING"))
 
-Next == IF TransactionMode THEN TxNext ELSE LeaseNext
+
+\* A consumer observes one immutable fixture snapshot. It never acquires the run
+\* lease; pending delivery remains observable even when transport cannot confirm.
+ConsumerMutants == {"consumer-good", "consumer-nodata-green", "consumer-off-green",
+    "consumer-stale-green", "consumer-old-head-green", "consumer-zero-green",
+    "consumer-usage-green", "consumer-driver-schema-green", "consumer-qualifier-green",
+    "consumer-usage-crash", "consumer-no-budget-heartbeat", "consumer-hide-pending"}
+ConsumerMode == Mut \in ConsumerMutants
+ConsumerCases == {"good", "no-data", "off", "stale", "old-head", "summary-schema",
+    "status-schema", "future-clock", "heartbeat-stale", "host-unavailable", "zero",
+    "skip", "fixture", "missing-assertion", "usage-unknown", "usage-malformed",
+    "fail-usage-malformed", "driver-schema", "qualifier-unknown", "nullable", "budget-deferred"}
+MalformedCases == {"usage-malformed", "fail-usage-malformed"}
+TroubleCases == {"skip", "fixture", "missing-assertion", "usage-unknown", "usage-malformed",
+    "fail-usage-malformed", "driver-schema", "qualifier-unknown"}
+c == tx.consumer
+ConsumerExpected(k) == CASE k = "off" -> "DISABLED"
+    [] k = "no-data" -> "NO_DATA"
+    [] k = "stale" -> "STALE"
+    [] k = "old-head" -> "STALE_HEAD"
+    [] k \in {"summary-schema", "status-schema", "future-clock", "heartbeat-stale", "host-unavailable"} -> "UNKNOWN"
+    [] k = "fail-usage-malformed" -> "FAIL"
+    [] k \in {"good", "nullable", "budget-deferred"} -> "PASS"
+    [] OTHER -> "UNEVALUABLE"
+ConsumerDecision ==
+    IF c.case = "off" /\ Mut # "consumer-off-green" THEN "DISABLED"
+    ELSE IF c.case = "no-data" /\ Mut # "consumer-nodata-green" THEN "NO_DATA"
+    ELSE IF c.case \in {"summary-schema", "status-schema", "future-clock", "heartbeat-stale", "host-unavailable"}
+        \/ ~c.heartbeatFresh THEN "UNKNOWN"
+    ELSE IF c.case = "old-head" /\ Mut # "consumer-old-head-green" THEN "STALE_HEAD"
+    ELSE IF c.case = "stale" /\ Mut # "consumer-stale-green" THEN "STALE"
+    ELSE IF c.case = "fail-usage-malformed" THEN "FAIL"
+    ELSE IF (c.case = "zero" /\ Mut # "consumer-zero-green")
+        \/ c.case \in {"skip", "fixture", "missing-assertion"}
+        \/ (c.case \in {"usage-unknown", "usage-malformed"} /\ Mut # "consumer-usage-green")
+        \/ (c.case = "driver-schema" /\ Mut # "consumer-driver-schema-green")
+        \/ (c.case = "qualifier-unknown" /\ Mut # "consumer-qualifier-green") THEN "UNEVALUABLE"
+    ELSE "PASS"
+ConsumerSelect(k) ==
+    /\ c.stage = "Pending"
+    /\ tx' = [tx EXCEPT !.consumer = [ConsumerInitial EXCEPT !.stage = "Read", !.case = k,
+        !.heartbeatFresh = (k \notin {"heartbeat-stale", "budget-deferred"}),
+        !.alert = IF k \in TroubleCases THEN "pending" ELSE "none"]]
+    /\ UNCHANGED lease
+ConsumerNormalize ==
+    /\ c.stage = "Read"
+    /\ tx' = [tx EXCEPT !.consumer = [c EXCEPT !.stage = "Ready",
+        !.normalized = (c.case \notin MalformedCases \/ Mut # "consumer-usage-crash"),
+        !.heartbeatFresh = IF c.case = "budget-deferred" /\ Mut # "consumer-no-budget-heartbeat" THEN TRUE ELSE @]]
+    /\ UNCHANGED lease
+ConsumerJudge ==
+    /\ c.stage = "Ready"
+    /\ tx' = [tx EXCEPT !.consumer = [c EXCEPT
+        !.stage = IF c.normalized THEN "Judged" ELSE "Crashed",
+        !.view = IF c.normalized THEN ConsumerDecision ELSE "UNKNOWN",
+        !.crashed = ~c.normalized]]
+    /\ UNCHANGED lease
+ConsumerShow ==
+    /\ c.stage \in {"Judged", "Crashed"}
+    /\ tx' = [tx EXCEPT !.consumer = [c EXCEPT !.stage = "Done",
+        !.shown = (c.alert = "pending" /\ Mut # "consumer-hide-pending")]]
+    /\ UNCHANGED lease
+ConsumerDispatch(confirmed) ==
+    /\ c.alert = "pending" /\ c.attempts = 0
+    /\ tx' = [tx EXCEPT !.consumer = [c EXCEPT !.attempts = 1,
+        !.alert = IF confirmed THEN "sent" ELSE @]]
+    /\ UNCHANGED lease
+ConsumerProgress == (\E k \in ConsumerCases: ConsumerSelect(k)) \/ ConsumerNormalize
+    \/ ConsumerJudge \/ ConsumerShow \/ (\E confirmed \in BOOLEAN: ConsumerDispatch(confirmed))
+ConsumerNext == ConsumerProgress \/ UNCHANGED vars
+ConsumerSpec == Init /\ [][ConsumerNext]_vars /\ WF_vars(ConsumerProgress)
+ConsumerTerminal == c.stage \in {"Judged", "Crashed", "Done"}
+ConsumerStateMapping == ConsumerTerminal => c.view = ConsumerExpected(c.case)
+NoGroundlessPass == c.view = "PASS" => c.case \in {"good", "nullable", "budget-deferred"}
+NoOldHeadGreen == c.case = "old-head" => c.view # "PASS"
+MalformedUsageCompletes == c.case \in MalformedCases => ~c.crashed
+FunctionalFailRetained == ConsumerTerminal /\ c.case = "fail-usage-malformed" => c.view = "FAIL"
+DeferredHeartbeatIsLive == c.case = "budget-deferred" /\ c.stage \in {"Ready", "Judged", "Done"} => c.heartbeatFresh
+ConsumerIsPure == tx = [TxInitial EXCEPT !.consumer = c] /\ owner = None /\ cursor = 0
+    /\ phase = [r \in Runs |-> "Pending"] /\ reserved = [r \in Runs |-> FALSE]
+PendingEventuallySentOrShown == c.alert = "pending" ~> (c.alert = "sent" \/ c.shown)
+
+Next == IF ConsumerMode THEN ConsumerNext ELSE IF TransactionMode THEN TxNext ELSE LeaseNext
 SafetySpec == Init /\ [][Next]_vars
 Spec == SafetySpec /\ (\A r \in Runs: WF_vars(Acquire(r)))
 FairSpec == Spec /\ (\A r \in Runs:

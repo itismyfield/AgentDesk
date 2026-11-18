@@ -207,10 +207,16 @@ def consume(value, status, *, head, now):
     def override(result, reason):
         check.update(result=result, reason=reason)
 
-    if type(state.get("schema_version")) is not int or state.get("schema_version") != 1 or type(state.get("enabled")) is not bool:
+    if value is None and status is None:
+        return {"check": check, "monitor": monitor}
+    if state.get("unavailable") is True or source.get("unavailable") is True:
+        override("UNKNOWN", "HOST_UNAVAILABLE")
+    elif type(state.get("schema_version")) is not int or state.get("schema_version") != 1 or type(state.get("enabled")) is not bool:
         override("UNKNOWN", "UNSUPPORTED_STATUS")
     elif state["enabled"] is False:
         override("DISABLED", "DISABLED")
+    elif not isinstance(head, str) or len(head) != 40 or not set(head) <= set("0123456789abcdef"):
+        override("UNKNOWN", "HEAD_REQUIRED")
     else:
         heartbeat, completed = _stamp(state.get("heartbeat_at")), _stamp(source.get("completed_at"))
         started = _stamp(source.get("started_at"))

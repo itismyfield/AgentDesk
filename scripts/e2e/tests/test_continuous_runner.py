@@ -15,7 +15,7 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
-from scripts.e2e.continuous import __main__ as cli, budget, channel_lock, inbox, outbox, plan, publication, runner, summary  # noqa: E402
+from scripts.e2e.continuous import __main__ as cli, budget, channel_lock, companion, consumer, inbox, outbox, plan, publication, runner, summary  # noqa: E402
 from scripts.e2e.continuous.store import read_json, write_json  # noqa: E402
 
 SHA = "a" * 40
@@ -626,8 +626,9 @@ class ReviewS2(unittest.TestCase):
         self.assertNotEqual(view["check"]["reason"], "HEARTBEAT_STALE")
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+
+
 
 
 class Outbox(unittest.TestCase):
@@ -753,8 +754,9 @@ class Outbox(unittest.TestCase):
         self.assertEqual(outbox.pending(self.state), 0)
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+
+
 
 
 class Publication(unittest.TestCase):
@@ -857,6 +859,92 @@ class Publication(unittest.TestCase):
         self.assertGreaterEqual(len(calls), 3)
         self.assertFalse(any(t.name == "e2e-heartbeat" for t in threading.enumerate()))
 
+
+
+
+class ConsumerAcceptance(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='continuous-consumer-')
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.file = self.root/'status.json'
+        self.report_file = self.root/'summary.json'
+        self.file.write_text(json.dumps(status()))
+        self.report_file.write_text(json.dumps(report()))
+
+    def view(self, head=SHA, now=120):
+        return consumer.view(self.file, head=head, now=now)
+
+    def test_local_mirror_and_explicit_summary_reuse_the_same_pure_decision(self):
+        expected=summary.consume(report(),status(),head=SHA,now=120)
+        self.assertEqual(self.view(),expected)
+        other=self.root/'other.json';self.report_file.rename(other)
+        self.assertEqual(consumer.view(self.file,head=SHA,now=120,summary_file=other),expected)
+        self.file.write_text(json.dumps({'schema_version':1,'status':status(),'summary':report()}))
+        self.assertEqual(self.view(),expected)
+
+    def test_no_data_and_disabled_are_distinct(self):
+        self.report_file.unlink()
+        self.assertEqual(self.view()['check']['result'],'NO_DATA')
+        self.file.unlink()
+        self.assertEqual(self.view()['check']['result'],'NO_DATA')
+        disabled=status();disabled['enabled']=False
+        self.file.write_text(json.dumps(disabled))
+        self.assertEqual(self.view()['check']['result'],'DISABLED')
+
+    def test_head_stale_future_schema_errors_cannot_turn_green(self):
+        self.assertEqual(self.view(head='b'*40)['check']['reason'],'STALE_HEAD')
+        stale=status();stale['heartbeat_at']=300
+        self.file.write_text(json.dumps(stale))
+        self.assertEqual(self.view(now=300)['check']['reason'],'STALE')
+        future=status();future['heartbeat_at']=121
+        self.file.write_text(json.dumps(future))
+        self.assertEqual(self.view()['check']['reason'],'FUTURE_TIMESTAMP')
+        self.file.write_text(json.dumps({'schema_version':2,'status':status(),'summary':report()}))
+        self.assertEqual(self.view()['check']['result'],'UNKNOWN')
+
+    def test_missing_head_host_failure_null_and_malformed_are_explicit(self):
+        self.assertEqual(self.view(head='')['check']['reason'],'HEAD_REQUIRED')
+        with mock.patch.object(consumer,'read_json',side_effect=OSError('host offline')):
+            self.assertEqual(self.view()['check']['reason'],'HOST_UNAVAILABLE')
+        self.report_file.unlink()
+        for raw in ('null','{broken'):
+            self.file.write_text(raw)
+            self.assertEqual(self.view()['check']['result'],'UNKNOWN')
+
+    def test_env_cli_prints_two_lines_and_keeps_read_failures_fail_open(self):
+        with mock.patch.dict(os.environ,{'BC_E2E_STATUS_FILE':str(self.file),'BC_E2E_HEAD':SHA}), \
+             mock.patch.object(consumer.time,'time',return_value=120):
+            output=io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(consumer.main([]),0)
+            lines=output.getvalue().splitlines()
+            self.assertEqual(len(lines),2)
+            self.assertTrue(lines[0].startswith('E2E_CHECK '))
+            self.assertIn('result=PASS',lines[0])
+            self.assertTrue(lines[1].startswith('E2E_MONITOR '))
+            with mock.patch.object(consumer,'read_json',side_effect=PermissionError('no access')), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(consumer.main([]),0)
+
+    def test_companion_writes_only_the_secret_free_idempotent_inbox_request(self):
+        state=self.root/'state'
+        submitted=companion.submit(state,'deploy',SHA,now=120)
+        self.assertEqual(submitted['status'],'SUBMITTED')
+        self.assertEqual(companion.submit(state,'deploy',SHA,now=121),submitted)
+        stored=json.loads((state/'inbox/deploy.json').read_text())
+        self.assertEqual(set(stored),{'schema_version','request_id','deploy_sha','submitted_at'})
+        self.assertEqual(stored['submitted_at'],120)
+        self.assertFalse((state/'runs').exists())
+        self.assertFalse((state/'status.json').exists())
+
+    def test_companion_refusal_and_io_failure_leave_deployment_success_unchanged(self):
+        self.assertEqual(companion.submit('relative','deploy',SHA)['status'],'REJECTED')
+        self.assertEqual(companion.submit(self.root/'state','../unsafe',SHA)['status'],'REJECTED')
+        with mock.patch.object(companion.inbox,'submit',side_effect=PermissionError('no access')):
+            self.assertEqual(companion.submit(self.root/'state','deploy',SHA)['status'],'REJECTED')
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(companion.main(['--state-dir','relative','--request-id','bad','--deploy-sha','invalid']),0)
 
 
 

@@ -143,6 +143,60 @@ view는 `s2-model-view.mjs`다. 원시 로그·matrix JSON은 `/Users/itismyfiel
 직접 TLC 반례는 같은 logs 아래 `s2-model-contract-raw/`에 있다. 모델의 고정 입력 SHA256·상태 수와 짧은
 반례는 구현 보고서의 증거 목록에도 기록한다.
 
+## S3 소비자 사상 (2026-11-18)
+
+S2 head `593399f0880b4991cc13dc265d454ceaf073eaee` 위에 소비자 관측 분기를 추가했다.
+기존 46 cfg의 바이트와 기대 위반 집합은 유지했다. `tx.consumer`는 한 번 수신한 입력 snapshot과
+읽기 결과, 독립 transport의 확인 여부를 담으며, 기존 lease·예산·cursor·실행 상태를 바꾸지 않는다.
+`ConsumerIsPure`가 이를 검사한다. 새 분기는 21개 snapshot 종류 중 하나를 선택하고 형식 정규화 →
+공유 판정 → 표시 순서로 진행한다. transport는 확인 성공 또는 한도 소진 실패를 선택한다.
+
+| 입력 경계 | 모델의 표시 상태 | 실제 소비자 형식 |
+| --- | --- | --- |
+| 활성 supervisor, 첫 완료 전 | `NO_DATA` | result=NO_DATA |
+| 명시적 off | `DISABLED` | result=DISABLED |
+| interval+max_run+grace를 지난 완료 | `STALE` | result=UNKNOWN reason=STALE |
+| coordinator와 다른 배포 SHA | `STALE_HEAD` | result=UNKNOWN reason=STALE_HEAD |
+| schema·future 시각·heartbeat 누락·host 불가 | `UNKNOWN` | result=UNKNOWN와 해당 reason |
+| 0건·skip·fixture·단언 누락·usage 불명·driver schema 미지원·필수 qualifier 미확정 | `UNEVALUABLE` | 비PASS와 해당 reason |
+| 기능 FAIL에 malformed usage 동반 | `FAIL` | FAIL 증거 유지, usage는 unknown 정규화 |
+| 모든 근거 충족, 의미 있는 nullable control 포함 | `PASS` | result=PASS |
+
+`ConsumerStateMapping`·`NoGroundlessPass`·`NoOldHeadGreen`으로 빈 실행·미실행·옛 head·미지원 형식이
+초록으로 바뀌지 않음을 확인한다. `usage-unknown`은 마지막 occurrence의 aggregate 숫자는 있어도
+구성 counter를 확정하지 못한 경우이며, `driver-schema`는 continuous schema1과 별개의 raw schema2
+검사다. `qualifier-unknown`은 필수 origin/surface/operation의 null·빈 값을 추상화하고,
+`nullable` control은 busy_basis/placement의 허용된 null을 유지한다.
+
+리뷰 P2-4는 `MalformedUsageCompletes`·`FunctionalFailRetained`로 정규화 뒤 예외 없이 완료되고
+기존 FAIL을 유지하는 경계를, P2-5는 `DeferredHeartbeatIsLive`로 유효한 한도를 모두 소진해
+새 driver 입력을 보류해도 살아 있는 supervisor의 heartbeat가 갱신되는 경계를 표현한다.
+null 한도·예약이나 off에서 상태를 쓰지 않는 기존 `OffOrNullNoWrites` 규칙은 그대로다.
+
+`PendingEventuallySentOrShown`은 **enabled이고 알림 snapshot을 읽을 수 있는 fair 소비자**의 계약이다.
+transport가 확인하지 못하고 재시도 한도가 소진돼도 pending을 상태 표시로 노출한다.
+새 `consumer-hide-pending`이 이 생존성을 위반하므로 공허하게 참이 아니다. off는 무상태 IO를
+우선하며 새 알림 읽기·전송 actor나 추가 생존성을 요구하지 않는다. 외부 mirror에 이미 보존된
+pending metadata는 읽을 수 있으나, 자료를 얻을 수 없는 off/host-unavailable 경우까지 전송을
+가정하지 않는다. `ConsumerDispatch`는 기존 supervisor transport의 외부 사건이며 소비자의 쓰기
+권한을 늘리는 동작이 아니다.
+
+새 12 cfg = 정상 `consumer-good` 1 GREEN + 원인 뮤턴트 11 RED다. 정상 cfg가 21 snapshot 전체를
+탐색하며 각 뮤턴트의 해당 snapshot도 같은 입력으로 포함한다. 전체는 **58/58 기대집합 일치
+(10 GREEN + 48 expected RED)**다. 실제 Python 수정 전 RED/GREEN은 구현 보고서가 정본이며,
+새 모델 이름이 S2 모델에 없어 생기는 SANY 오류를 행동 RED로 세지 않는다. 뮤턴트는 cfg의 Mut만
+바꾸며 모델 소스는 같다. 원시 전체 위반 집합은 `expected.tsv`와 정확히 일치해야 한다.
+
+정상 차트는 [소비자 상태 사상](run-consumer-good.chart.mmd)에 있다. 실제 시각의 수치 경계,
+복수 오류가 동시에 있는 모든 우선순위 조합, mirror 파일 IO·head 복원·CLI subprocess, transport의
+실제 수신자·재시도 간격과 credential은 Python fixture/배선 시험이 맡는다. snapshot은 불변이며
+여러 파일 사이의 읽기 경쟁과 새 완료가 덮어쓰는 경계도 Python fixture가 맡는다.
+
+원시 증거는 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/s3-model-first/`,
+`s3-model-raw/`, `s3-model-chart/`와 `s3-model-selection.log`에 있다.
+외부 요약 `report-s3-model-summary.md`에 입력 SHA256·전체 위반 집합·실행 환경을 기록한다.
+재현 명령은 S2와 같고 새로운 out 경로를 사용한다. 기존 46 cfg의 결과도 새 모델에서 다시 검사했다.
+
 ## 코드 기준과 범위
 
 코드 감사 기준 `origin/main=79bebdd4eaa29b289bf88412825baa7d70a6ac77`, 레인 기반 `21c80274`다.
@@ -346,6 +400,6 @@ TLA2TOOLS=/Users/itismyfield/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/op
 
 고정 inode와 동일 open-file-description 전달, host 단일성, 정확한 parent/bot-set resource key, 실제 `fstat`/instance witness 검증, startup admission 앞 fail-closed, CLOEXEC 복구, mutation journal의 atomic/durable 쓰기 및 실제 nonce/ACK 대조는 아직 제품 구현으로 증명하지 않았다. 모델은 파일시스템 전원 손실·inode 교체·NFS/SSH 분산 임대·실제 Discord Gateway·provider 내부 상태·receipt 기반 cleanup 알고리즘을 탐색하지 않는다. `foreign_cleanup`은 권한 추가 금지 계약의 mutation assertion이며 PID 소유권 판별 구현의 증명이 아니다. helper FD 전파 금지는 모델과 liveness 반례로 확인했으며 실제 provider/daemon spawn 배선 검증은 #8124 I3a에 남는다.
 
-<!-- doc-path-refs: external /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/s2-model- /tmp/i8120-s2- /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/l0/ /tmp/i8120- -->
+<!-- doc-path-refs: external /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/s3-model- /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/s2-model- /tmp/i8120-s2- /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/l0/ /tmp/i8120- -->
 
 자체 `check_models.py`는 정확한 23 cfg 선택과 JSON 증거 보관용 adapter로 유지한다. 기대 집합은 `docs/statecharts/expected.tsv`에서 읽고, 실행·fairness·전체 위반 판정은 `scripts/ci/statecharts_tlc.py`의 `check_cfg`에 위임해 중복 기대값/판정기를 제거했다. `--timeout 300 --jobs 2`는 공통 CI 기본 실행 인자와 같다.
