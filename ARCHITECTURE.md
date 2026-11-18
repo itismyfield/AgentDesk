@@ -427,6 +427,7 @@ src/
 │   │   ├── execution_pin.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
+│   │   ├── pipeline_rules.rs
 │   │   ├── profile.rs
 │   │   ├── review_gate.rs
 │   │   ├── verification_run.rs
@@ -999,6 +1000,8 @@ src/
 │   │   ├── mod.rs
 │   │   ├── model.rs
 │   │   ├── model_tests.rs
+│   │   ├── pipeline_rules.rs
+│   │   ├── pipeline_rules_tests.rs
 │   │   ├── profile.rs
 │   │   ├── profile_tests.rs
 │   │   ├── review_gate.rs
