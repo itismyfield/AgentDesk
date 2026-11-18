@@ -9,6 +9,8 @@ pub(super) struct Producer {
     actor: Option<std::sync::Arc<CancelToken>>,
     intent: Intent,
     started_before: std::time::Instant,
+    #[cfg(test)]
+    binding_root: Option<std::path::PathBuf>,
 }
 
 impl Producer {
@@ -36,6 +38,8 @@ impl Producer {
             actor,
             intent,
             started_before: std::time::Instant::now(),
+            #[cfg(test)]
+            binding_root: crate::services::tui_prompt_dedupe::binding_events::test_root(),
         }
     }
 
@@ -66,7 +70,10 @@ impl Producer {
 
     pub(super) fn wrap(self, leaf: effect::Leaf) -> effect::Leaf {
         #[cfg(test)]
-        let binding_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
+        let binding_root = self
+            .binding_root
+            .clone()
+            .or_else(crate::services::tui_prompt_dedupe::binding_events::test_root);
         Box::new(move |frame| {
             #[cfg(test)]
             let _binding_root = native_prepare::BindingRoot::enter(binding_root.as_deref());
