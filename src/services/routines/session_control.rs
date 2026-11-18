@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::services::discord::admin_host_guard::ManagedReset;
 use crate::services::discord::health::{HealthRegistry, clear_provider_channel_runtime};
 use crate::services::provider::ProviderKind;
-use crate::services::routines::provider_choice::session_route;
+use crate::services::routines::provider_choice::{owned_session_route, session_route};
 use crate::services::turn_lifecycle::{
     ForceKillRow, TurnLifecycleStopResult, TurnLifecycleTarget, force_kill_turn,
     force_kill_turn_for_row,
@@ -318,14 +318,8 @@ impl RoutineSessionController {
         })
     }
 
-    /// Builds a teardown target pinned to a recovered run's owned session
-    /// (#3022). The provider and primary channel come from the agent bindings
-    /// (for runtime-mailbox routing); the channel is the routine log thread when
-    /// known, otherwise the primary channel. The owned session row is resolved
-    /// namespace-exact from `ownership_token` when it is a full `session_key`,
-    /// or by the bare tmux suffix otherwise, so the disconnect targets only that
-    /// exact row.
-    ///
+    /// Resolves a recovered run's exact owned session; its recorded provider and claimed thread
+    /// route teardown without following a later definition change.
     async fn resolve_fresh_target_for_name(
         &self,
         routine: &RoutineRecord,
@@ -340,7 +334,14 @@ impl RoutineSessionController {
                 anyhow!("load agent bindings for fresh routine session {agent_id}: {error}")
             })?
             .ok_or_else(|| anyhow!("agent {agent_id} not found for fresh routine teardown"))?;
-        let route = session_route(&self.pool, bindings, &agent_id, &routine.id, None).await?;
+        let route = owned_session_route(
+            &self.pool,
+            bindings,
+            &agent_id,
+            &routine.id,
+            ownership_token,
+        )
+        .await?;
         let (provider, primary_channel) = (route.provider, route.channel);
         let primary_channel_id =
             crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&primary_channel)
@@ -1148,3 +1149,6 @@ mod tests {
         assert!(ensure_fresh_routine(&routine).is_err());
     }
 }
+
+#[cfg(test)]
+mod provider_choice_tests;

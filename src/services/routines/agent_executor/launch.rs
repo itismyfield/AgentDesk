@@ -28,7 +28,7 @@ impl RoutineAgentExecutor {
             ));
         };
 
-        // The claim pins the provider; a run never moves to another provider's channel.
+        // The claim pins the explicit choice; an override never falls back to another provider.
         let choice = store.run_provider_choice(&claimed.run_id).await?;
         let route = AgentProviderChannels::load(&self.pool, agent_id)
             .await?
@@ -211,9 +211,8 @@ impl RoutineAgentExecutor {
             )
             .await
         } else {
-            // #5: the agent's REAL primary channel/alias is the workspace hint so
-            // `resolve_workspace` resolves alias/by-name routine agents; the
-            // synthetic session name rides the tmux label (#3463 name-first).
+            // The selected provider channel resolves the workspace; the synthetic label
+            // keeps this routine's session separate.
             start_reserved_headless_agent_turn_with_owner_channel(
                 registry,
                 channel_id,

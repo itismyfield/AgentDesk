@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 mod agent_start;
 mod execution_modes;
+mod thread_choices;
 #[macro_use]
 mod failure_escalation;
 use chrono::{DateTime, Utc};
@@ -22,8 +23,8 @@ use crate::services::automation_candidate_contract::{
 use crate::services::scheduling::{next_due_after, next_due_after_anchor, validate_schedule};
 use crate::utils::api::clamp_api_limit;
 
+use super::execution_mode::ProviderChoice;
 use super::execution_mode::{DEFAULT_HEADLESS_FAILURE_NOTICE_LIMIT, ExecutionDefinition};
-use super::provider_choice::ProviderChoice;
 
 pub const ROUTINE_RUN_LEASE_SECS: u64 = 30 * 60;
 const RUN_LEASE_SECS: i64 = ROUTINE_RUN_LEASE_SECS as i64;

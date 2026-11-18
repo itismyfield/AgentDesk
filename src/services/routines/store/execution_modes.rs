@@ -2,8 +2,8 @@
 use std::collections::HashMap;
 
 use super::*;
+use crate::services::routines::execution_mode::ProviderChoice;
 use crate::services::routines::execution_mode::{ClaimDefinitionRow, StoredExecutionDefinition};
-use crate::services::routines::provider_choice::ProviderChoice;
 
 impl RoutineStore {
     /// Pins the definition the claiming transaction already locked onto the new run.

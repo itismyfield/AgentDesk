@@ -92,15 +92,15 @@ async fn a_chosen_provider_and_model_reach_the_launch_on_that_providers_channel_
         .v2_adopt(queue.join("routine-tests.json"), "routine-tests".into())
         .await
         .unwrap();
-    let (db, pool, store) = setup(&[("pc", "claude", None, Some("7270"), Some("7272"))]).await;
+    let (db, pool, store) = setup(&[("pc", "codex", None, Some("7272"), Some("7270"))]).await;
     let registry = Arc::new(HealthRegistry::new());
-    register_bot_auth_for_tests(&registry, "claude", 7270, None, Vec::new(), false).await;
-    register_bot_auth_for_tests(&registry, "codex", 7272, None, Vec::new(), false).await;
+    register_bot_auth_for_tests(&registry, "claude", 7272, None, Vec::new(), false).await;
+    register_bot_auth_for_tests(&registry, "codex", 7270, None, Vec::new(), false).await;
     let id = attach(
         &store,
         "pc",
         "persistent",
-        choice("codex", Some("gpt-test")),
+        choice("claude", Some("claude-test")),
     )
     .await;
     let claimed = store.claim_run_now(&id).await.unwrap().unwrap();
@@ -136,9 +136,9 @@ async fn a_chosen_provider_and_model_reach_the_launch_on_that_providers_channel_
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(context["provider"], "codex", "{context}");
+    assert_eq!(context["provider"], "claude", "{context}");
     assert_eq!(context["parent_channel_id"], "7272", "{context}");
-    assert_eq!(context["metadata"]["model"], "gpt-test", "{context}");
+    assert_eq!(context["metadata"]["model"], "claude-test", "{context}");
     pool.close().await;
     db.drop().await;
 }
@@ -238,6 +238,49 @@ async fn a_fresh_routine_on_a_provider_without_process_turns_starts_a_channel_se
     assert_eq!(
         result["error"],
         "provider runtime not registered: antigravity"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn a_late_old_run_thread_stays_with_its_claim_after_provider_patch_pg() {
+    let (db, pool, store) = setup(&[("pc", "claude", None, Some("7270"), Some("7271"))]).await;
+    let id = attach(&store, "pc", "persistent", ProviderChoice::default()).await;
+    let claimed = store.claim_run_now(&id).await.unwrap().unwrap();
+    store
+        .patch_routine(
+            &id,
+            RoutinePatch {
+                provider_choice: Some(choice("codex", None)),
+                ..RoutinePatch::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .update_run_discord_thread_id(&claimed.run_id, "7279")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .get_routine(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .discord_thread_id,
+        None
+    );
+    assert_eq!(
+        store
+            .routine_as_claimed(&id, &claimed.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .discord_thread_id
+            .as_deref(),
+        Some("7279")
     );
     pool.close().await;
     db.drop().await;

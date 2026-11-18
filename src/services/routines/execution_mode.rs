@@ -7,6 +7,9 @@ pub const DEFAULT_HEADLESS_FAILURE_NOTICE_LIMIT: i32 = 3;
 const HEADLESS_FAILURE_NOTICE_LIMIT_MAX: i32 = 100;
 const RUN_SPEC_VERSION: i64 = 1;
 
+mod provider_choice;
+pub use provider_choice::ProviderChoice;
+
 /// DB constraints that back the API checks when a concurrent writer races past them.
 const DEFINITION_CONSTRAINTS: [&str; 5] = [
     "routines_execution_mode_check",
@@ -249,7 +252,7 @@ pub struct ClaimDefinitionRow {
     pub discord_thread_id: Option<String>,
     pub timeout_secs: Option<i32>,
     #[sqlx(flatten)]
-    pub choice: crate::services::routines::provider_choice::ProviderChoice,
+    pub choice: ProviderChoice,
 }
 
 impl ClaimDefinitionRow {

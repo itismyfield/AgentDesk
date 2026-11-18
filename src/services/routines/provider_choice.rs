@@ -9,12 +9,7 @@ use crate::domain::provider::ProviderKind;
 
 const MODEL_MAX_CHARS: usize = 128;
 
-/// Stored choice; `None` inherits the agent primary provider and its channel model setting.
-#[derive(Debug, Clone, Default, PartialEq, Eq, sqlx::FromRow)]
-pub struct ProviderChoice {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-}
+pub use super::execution_mode::ProviderChoice;
 
 /// Provider, owning channel and model a routine turn starts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,10 +102,6 @@ impl AgentProviderChannels {
             channel,
             model: choice.model.clone(),
         })
-    }
-
-    pub fn inherited_provider(&self) -> Option<ProviderKind> {
-        self.bindings.resolved_primary_provider_kind()
     }
 }
 
@@ -230,6 +221,33 @@ pub async fn session_route(
                 model: None,
             },
         )
+}
+
+/// Recovery keeps the started attempt's provider, including an inherited choice pinned as null.
+pub async fn owned_session_route(
+    pool: &PgPool,
+    bindings: AgentChannelBindings,
+    agent_id: &str,
+    routine_id: &str,
+    ownership_token: &str,
+) -> Result<ProviderRoute> {
+    let choice: Option<ProviderChoice> = sqlx::query_as(
+        "SELECT COALESCE(result_json ->> 'provider', run_spec ->> 'provider') AS provider,
+                NULL::text AS model
+         FROM routine_runs WHERE routine_id = $1 AND owned_tmux_session = $2
+         ORDER BY started_at DESC, id DESC LIMIT 1",
+    )
+    .bind(routine_id)
+    .bind(ownership_token)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| anyhow!("load routine {routine_id} owned provider: {error}"))?;
+    match choice {
+        Some(choice) => AgentProviderChannels::with_bindings(pool, agent_id, bindings)
+            .await?
+            .route(agent_id, &choice),
+        None => session_route(pool, bindings, agent_id, routine_id, None).await,
+    }
 }
 
 #[cfg(test)]

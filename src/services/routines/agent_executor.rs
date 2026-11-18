@@ -1096,7 +1096,7 @@ impl RoutineAgentExecutor {
                 .await?;
         let thread_id_string = thread_id.get().to_string();
         if let Err(error) = store
-            .update_discord_thread_id(&claimed.routine_id, &thread_id_string)
+            .update_run_discord_thread_id(&claimed.run_id, &thread_id_string)
             .await
         {
             let warning = format!("persist routine discord_thread_id failed: {error}");
