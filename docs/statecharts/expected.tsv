@@ -1476,3 +1476,7 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
+input-single-path/ThreadIngressT2aBoot.cfg	ThreadIngress	-	-
+input-single-path/ThreadIngressT2aCold.cfg	ThreadIngress	-	-
+input-single-path/ThreadIngressT2aLive.cfg	ThreadIngress	-	-
+input-single-path/ThreadIngressT2aRemote.cfg	ThreadIngress	-	-
