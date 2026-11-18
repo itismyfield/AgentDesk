@@ -76,7 +76,7 @@
 | R5 | `src/services/claude/herdr_return.rs:69` | 표지가 있으면 tmux 복귀를 거절 | 변화 없음(후속) |
 | R6 | `src/services/discord/recovery_engine/herdr_reader.rs:249` | 재연결 패스에서 표지 수만 센다 | 변화 없음(키 없음) |
 | R7 | `src/server/routes/health_api/runtime_profile.rs:74` | health 표시 | v1·v2를 모두 읽음 |
-| R8 | `src/cli/herdr.rs:363` `status` | 실행별 `recorded_at` 표시 | `send_outcome`·`cleanup_phase`·`unclear_passes`·알림 기록 추가(원문 없음) |
+| R8 | `src/cli/herdr.rs` `status` | 실행별 `recorded_at` 표시 | `send_outcome`·`cleanup_phase`·`unclear_passes`·알림 기록 추가(원문 없음) |
 
 **표지를 읽지 않는 곳**: Claude busy 주입(`src/services/claude_tui/host_input/busy/herdr.rs` `Adapter::submit`)과 Codex busy 주입. busy 주입은 사람 초안을 C-s로 stash한다. 제출 뒤 Claude가 stash를 입력창에 돌려준다(`busy_inject.rs` `Sent::parked`). 그래서 우리 글도 stash됐다가 돌아올 수 있다.
 
