@@ -922,3 +922,9 @@ fn late_adopt_binding_baseline_at_boundary_zero_is_the_first_bind_ever_logged() 
     let back = vec![bound(1, a.clone()), bound(2, b), bound(3, a.clone())];
     assert_eq!(baseline(&back, 3), Some((a, 3)));
 }
+
+#[path = "late_adopt_childheld_tests.rs"]
+mod childheld;
+
+#[path = "late_adopt_child_boundary_tests.rs"]
+mod child_boundaries;

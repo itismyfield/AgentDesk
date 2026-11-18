@@ -86,25 +86,27 @@ impl LegacyView for LegacyRelay {
 
     /// What `relay_auto_heal` restarts a redrive episode on, read without writing the inflight row.
     fn epoch(&self, channel: u64) -> LegacyEpoch {
-        let id = ChannelId::new(channel);
         let row =
             super::super::inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel);
-        LegacyEpoch {
-            reset_incarnation: self.shared.relay_frontier_token(id).reset_incarnation,
-            reconnects: (self.shared.tmux_relay_coord(id).reconnect_count)
-                .load(std::sync::atomic::Ordering::Acquire),
-            turn: row.map(|row| {
-                let nonce = row.turn_nonce.filter(|nonce| !nonce.is_empty());
-                let start = row.turn_start_offset;
-                (
-                    row.user_msg_id,
-                    row.started_at,
-                    row.tmux_session_name,
-                    start,
-                    nonce,
-                )
-            }),
+        self.epoch_from_row(channel, row)
+    }
+    fn session_ended(&self, tmux: &str) -> Result<bool, String> {
+        use crate::services::platform::tmux::PaneLiveness;
+        if !super::super::host_liveness::local_tmux(tmux, None) {
+            return Ok(false);
         }
+        match crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux) {
+            PaneLiveness::Live => Ok(false),
+            PaneLiveness::DeadOrAbsent => Ok(true),
+            PaneLiveness::ProbeError => Err("session end could not be observed".into()),
+        }
+    }
+    fn late_epoch(&self, channel: u64) -> Result<LegacyEpoch, String> {
+        let row = super::super::inflight::load_inflight_state_read_only_result(
+            &ProviderKind::Claude,
+            channel,
+        )?;
+        Ok(self.epoch_from_row(channel, row))
     }
 }
 
@@ -154,6 +156,32 @@ mod late_lookup_tests {
                 panic!("late source reader blocked while SourceAuthority was held");
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+impl LegacyRelay {
+    fn epoch_from_row(
+        &self,
+        channel: u64,
+        row: Option<super::super::inflight::InflightTurnState>,
+    ) -> LegacyEpoch {
+        let id = ChannelId::new(channel);
+        LegacyEpoch {
+            reset_incarnation: self.shared.relay_frontier_token(id).reset_incarnation,
+            reconnects: (self.shared.tmux_relay_coord(id).reconnect_count)
+                .load(std::sync::atomic::Ordering::Acquire),
+            turn: row.map(|row| {
+                let nonce = row.turn_nonce.filter(|nonce| !nonce.is_empty());
+                let start = row.turn_start_offset;
+                (
+                    row.user_msg_id,
+                    row.started_at,
+                    row.tmux_session_name,
+                    start,
+                    nonce,
+                )
+            }),
         }
     }
 }

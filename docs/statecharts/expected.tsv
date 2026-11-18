@@ -1236,6 +1236,13 @@ tui-o-writer/WriterThreadActivePending.cfg	WriterThreadActive	NoLegacyBody	Child
 tui-o-writer/WriterThreadActiveReadyEarly.cfg	WriterThreadActive	ExactlyOnce,LateTurnLegacyOnce,ReadyNeedsInit	-
 tui-o-writer/WriterThreadActiveReregister.cfg	WriterThreadActive	ExactlyOnce,NoLegacyBody	-
 tui-o-writer/WriterThreadActiveReverse.cfg	WriterThreadActive	FloorBeforeInit,OldReaderBoots	-
+tui-o-writer/WriterThreadChildHeldBeforeBody.cfg	WriterThreadChildHeld	-	CurrentRunAnswered
+tui-o-writer/WriterThreadChildHeldBeforeBoot.cfg	WriterThreadChildHeld	NoBootChurn	-
+tui-o-writer/WriterThreadChildHeldMutantBoot.cfg	WriterThreadChildHeld	NoBootChurn	-
+tui-o-writer/WriterThreadChildHeldMutantBoundary.cfg	WriterThreadChildHeld	-	BoundaryProgress
+tui-o-writer/WriterThreadChildHeldMutantNormalize.cfg	WriterThreadChildHeld	-	CurrentRunAnswered
+tui-o-writer/WriterThreadChildHeldProposedBody.cfg	WriterThreadChildHeld	-	-
+tui-o-writer/WriterThreadChildHeldProposedBoot.cfg	WriterThreadChildHeld	-	-
 tui-o-writer/WriterThreadPrepAlias.cfg	WriterThreadPrep	OwnCandidate	-
 tui-o-writer/WriterThreadPrepBefore.cfg	WriterThreadPrep	SharedSnapshot	-
 tui-o-writer/WriterThreadPrepFixed.cfg	WriterThreadPrep	-	-

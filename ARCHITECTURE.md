@@ -4285,6 +4285,8 @@ src/
 │   │   ├── channel_policy/
 │   │   │   ├── adoption/
 │   │   │   │   ├── body_check.rs
+│   │   │   │   ├── child_run.rs
+│   │   │   │   ├── child_run_tests.rs
 │   │   │   │   ├── first_turn.rs
 │   │   │   │   └── first_turn_tests.rs
 │   │   │   ├── children/
@@ -4442,6 +4444,7 @@ src/
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── fresh_input.rs
 │   │   │   │   ├── fresh_input_tests.rs
+│   │   │   │   ├── managed_start.rs
 │   │   │   │   ├── missing.rs
 │   │   │   │   ├── recover.rs
 │   │   │   │   └── transition.rs
@@ -4470,6 +4473,7 @@ src/
 │   │   │   │   │   ├── buffered_tests.rs
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
+│   │   │   │   ├── child_run.rs
 │   │   │   │   ├── claude.rs
 │   │   │   │   └── codex.rs
 │   │   │   ├── local_retry/
@@ -4559,6 +4563,8 @@ src/
 │   │   │   ├── input_notices.rs
 │   │   │   ├── late_adopt.rs
 │   │   │   ├── late_adopt_binding_tests.rs
+│   │   │   ├── late_adopt_child_boundary_tests.rs
+│   │   │   ├── late_adopt_childheld_tests.rs
 │   │   │   ├── late_adopt_cleanup_tests.rs
 │   │   │   ├── late_adopt_host_tests.rs
 │   │   │   ├── late_pin_tests.rs

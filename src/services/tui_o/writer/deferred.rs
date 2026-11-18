@@ -321,6 +321,9 @@ pub(super) async fn retry<I: HostIo>(
                 return Retried::Rebase(rebased);
             }
             if let Some(detail) = rotation(&waiting, &observed) {
+                if super::late_adopt::child_run::normalize(&waiting, &observed) {
+                    return Retried::Left;
+                }
                 release(candidate, &alarms, channel, &detail);
                 return Retried::Left;
             }
@@ -520,7 +523,7 @@ async fn commit<I: HostIo>(
                     let observed =
                         events(waiting).map_err(|error| Refused::new(Hold::Final, error))?;
                     if let Some(detail) = rotation(waiting, &observed) {
-                        return Err(Refused::new(Hold::Final, detail));
+                        return Err(Refused::new(Hold::Rotation(observed), detail));
                     }
                 }
                 if waiting.candidate.sends() != fence_sends {
@@ -692,6 +695,18 @@ fn leaves<I: HostIo>(waiting: &Waiting<'_, I>, alarms: &I::Alarms, again: &Refus
             alarms,
             waiting.channel,
             &format!("first activation: {again}"),
+        );
+        return true;
+    }
+    if let Hold::Rotation(events) = &again.hold {
+        if super::late_adopt::child_run::normalize(waiting, events) {
+            return true;
+        }
+        release(
+            waiting.candidate,
+            alarms,
+            waiting.channel,
+            &again.to_string(),
         );
         return true;
     }

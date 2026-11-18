@@ -45,9 +45,9 @@ pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, Option<C
                 .execution(channel)
                 .is_some_and(|view| view.permit.is_err());
             // A retired or mid-transition child keeps its adoption and gets no writer.
-            let candidate = snapshot
-                .output_candidate(channel)
-                .filter(|_| hosted && !blocked && !snapshot.child_dormant(channel));
+            let candidate = snapshot.output_candidate(channel).filter(|candidate| {
+                hosted && !blocked && !snapshot.child_dormant(channel) && !candidate.child_parked()
+            });
             (channel, kind, candidate)
         };
         snapshot.output_channels().into_iter().map(judged).collect()

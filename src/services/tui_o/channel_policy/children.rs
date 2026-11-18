@@ -41,6 +41,7 @@ impl Child {
         match self.candidate.peek() {
             state if state.owned() => Some(true),
             Adoption::Deferred if self.candidate.late_adopt_origin() => Some(false),
+            Adoption::Released if self.candidate.legacy_run().is_some() => Some(false),
             _ => None,
         }
     }

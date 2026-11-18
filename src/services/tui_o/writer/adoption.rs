@@ -50,6 +50,14 @@ pub trait LegacyView: Send + Sync + 'static {
     fn frontier(&self, channel: u64, tmux: &str, eof: u64) -> Option<u64>;
     fn tail_running(&self, tmux: &str) -> bool;
     /// What restarts Legacy's own redrive cycle for the channel; unchanged when nothing can say.
+    /// A failed observation must not look like a finished run at a child boundary.
+    fn session_ended(&self, tmux: &str) -> Result<bool, String> {
+        self.late_cursor(tmux)
+            .map(|cursor| cursor == LegacyCursor::NoPane)
+    }
+    fn late_epoch(&self, channel: u64) -> Result<LegacyEpoch, String> {
+        Ok(self.epoch(channel))
+    }
     fn epoch(&self, _channel: u64) -> LegacyEpoch {
         LegacyEpoch::default()
     }
@@ -102,6 +110,8 @@ pub enum Hold {
     },
     /// A read that may pass later, with nothing cheaper to wait on.
     Retry,
+    /// A fenced recheck found a source rotation; its run can remain with Legacy.
+    Rotation(Vec<BindingEvent>),
     /// Refused for the rest of this process.
     Final,
 }
@@ -133,7 +143,7 @@ impl Refused {
                 tmux,
                 frontier,
             } => read.moved() || legacy.frontier(channel, tmux, read.len) != Some(*frontier),
-            Hold::Retry | Hold::Final => true,
+            Hold::Retry | Hold::Final | Hold::Rotation(_) => true,
         }
     }
 }
