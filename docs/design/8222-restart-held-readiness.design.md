@@ -28,7 +28,7 @@
 | E01 daemon 부팅·재시작 | `src/cli/dcserver.rs:969`; `src/services/claude_tui/readiness/mod.rs:45`, `:83`–`:87` | initialize 순서 유지. ledger/proof 유실, 첫 read가 restart floor. `phase=restart`, `proof=false` |
 | E02 SessionStart와 resume 기록 유실 | `readiness/mod.rs:158`–`:175`, `:550`–`:563`; `readiness/resume_record.rs:11`, `:62` | 기존 resume 기록부터 사용. 없으면 새 reply 복원 검사 또는 최종 미전송. `complete/pinned/afterLaunch` boolean |
 | E03 pane 재사용·native/source 재바인딩 | `readiness/source.rs:23`–`:78`; `host_input/busy/herdr.rs:320`–`:362` | nonce/native/dev+ino가 하나라도 바뀌면 이전 증거 사용 금지. `nonce/native/inode=1..2`, `pinned` boolean |
-| E04 Busy 초기 관측 | `host_input/busy/herdr.rs:233`–`:272`, `:276`–`:312` | 일반 proof 다음에 Herdr 제한 복원 시도. 키 없이 Idle 위임. 없으면 Held. `phase=queued,held`, `turn=reply,unknown` |
+| E04 Busy 초기 관측 | `host_input/busy/herdr.rs:233`–`:272`, `:276`–`:312` | 일반 proof 다음에 current-reply 전용 복원 API 시도. 기존 hard-terminal 복원은 새 Busy 진입에 노출하지 않음. 키 없이 Idle 위임. 없으면 Held. `phase=queued,held`, `turn=reply,unknown` |
 | E05 early 사람 입력 | `src/services/discord/router/message_handler/intake_turn/owned_busy.rs:53`–`:100` | 정확한 front에 typed readiness hold/deadline을 owner가 기록. fresh/legacy 분기 유지 |
 | E06 late 사람 입력 | 같은 파일 `:194`–`:264` | 같은 hold helper 사용. `unwound` 검사 뒤 기존 active row가 풀린 front만 owner가 판정 |
 | E07 managed running 재진입 | 같은 파일 `:9`–`:49`, `:304`–`:323` | Busy는 종전 경로. Held는 같은 typed 정책. 다른 row/attempt를 정산할 권한 없음 |
@@ -67,14 +67,16 @@
 
 | 안 | 흐름 | 비용 추정 | 위험·판정 |
 |---|---|---|---|
-| A: evidence 경계의 제한 복원 + typed hold 정산 | `idle_ready`가 current proof 다음 scoped restored proof 확인 → probe Wake → Idle driver 재예약. 실패는 같은 원본의 고정 due에서 owner 최종 거절 | 세 조각 합계 상한 추정 prod 23파일 / 순증 +1020. 별도 proof 저장소 없음; owner snapshot에 deadline/attemptless refusal 추가 | source 증거·Stop audit·actor CAS를 명시해야 함. 정상적으로 쉬는 pane의 원본 전달과 복원 불가의 정산을 모두 만족. **채택** |
+| A: evidence 경계의 제한 복원 + typed hold 정산 | `idle_ready`가 current proof 다음 scoped restored proof 확인 → probe Wake → Idle driver 재예약. 실패는 같은 원본의 고정 due에서 owner 최종 거절 | 세 조각 합계 상한 추정 prod 23파일 / 순증 +1080. 별도 proof 저장소 없음; owner snapshot에 deadline/attemptless refusal 추가 | source 증거·Stop audit·actor CAS를 명시해야 함. 정상적으로 쉬는 pane의 원본 전달과 복원 불가의 정산을 모두 만족. **채택** |
 | B: watcher 유한 정산 우선 | proof 없는 Held를 10초 뒤 일괄 최종 미전송. 이후 별도 레그에서 복원 | 정산/배선 두 조각, prod 약 12파일 / +680 | 무기한 Keep은 없지만 복원 가능한 원본도 거절하므로 #8222의 같은 probe Wake→원본 전달 DoD를 충족하지 못함. 기각 |
 
 일반 watcher의 모든 Unknown에 timeout을 붙이지 않는다. typed readiness hold는 **키를 보내기 전 원본**과 사유를 owner가 식별한 경우에만 생긴다. lock/modal/handoff·boot merge failure 등 다른 hold의 권한과 처분은 유지한다.
 
 ## 4. 복원 조건과 증거 출처
 
-새 child `readiness/restored_reply.rs`에 읽기·판정을 두고 `evidence()`의 Herdr `restart_ok=true` 분기에서만 쓴다. 일반 `observe()`/running observer는 확장하지 않는다. `idle_ready()`는 일반 proof 실패 때 `observe_restored()`도 시도한다. 단순히 None을 Idle로 바꾸지 않는다.
+새 child `readiness/restored_reply.rs`에 읽기·판정을 둔다. `idle_ready()`는 일반 `observe()` 실패 때 **current-reply 전용 `observe_restored_reply()`**를 호출한다. 기존 composer용 `observe_restored()` 전체를 새 Busy fallback으로 노출하지 않는다. 일반 `observe()`/running observer의 계약은 확장하지 않고, None만으로 Idle을 만들지 않는다.
+
+proof에는 내부 `ProofOrigin`(Current/Resume/RestoredHard/RestoredReply)을 붙인다. 새 Busy API는 §4의 전체 조건으로 만들어진 RestoredReply만 추가 허용한다. composer의 기존 API는 기존 RestoredHard와 새 RestoredReply를 다룬다. `reserve(proof)`는 같은 origin의 조건을 다시 평가하고 origin/source/Stamp/revision을 모두 비교한다. 이 구분 없이 기존 bool `restart_ok=true`만 켜면 pin/native 검사가 다른 옛 hard-terminal 복원까지 Busy에 새로 노출될 수 있으므로 금지한다. 이 origin은 메모리 proof의 provenance이며 영속 ready 플래그가 아니다.
 
 | 필수 조건 | main의 증거 출처 file:line | 새 helper의 의무 |
 |---|---|---|
@@ -90,7 +92,7 @@
 
 `claude_meta.rs`는 `src/services/tui_turn_state/claude_meta.rs`다. 새 reply 복원은 `created_at < STARTED`를 필수로 삼지 않는다. SessionStart가 빠졌어도 **현재 launch 이후의** 정확한 응답이 있으면 충분하다. 기존 hard-terminal 복원(`readiness/mod.rs:316`–`:335`)의 launched-before 규칙은 그대로다. 새 incarnation에 옛 응답만 남았으면 timestamp/identity 조건에서 막힌다. 새 nonce의 실행이 실제로 완료한 새 응답은 별개의 유효 증거다.
 
-복원 proof는 기존 `Proof.restart=true`와 동등한 screen 의무를 가진다. recovery floor를 전역 삭제하거나 ready=true를 영속화하지 않는다. `reserve(proof)`가 동일한 restore 분기를 다시 평가하고, 전달자는 `Reservation::current()`와 기존 first-key gate를 거친다. BusyObservation은 `idle_verified` 위임만 하며 `admits()`는 이 결과를 Busy write 권한으로 쓰지 않는다. source authority/ledger 잠금 중 pane IPC나 전체 transcript 읽기를 추가하지 않는다: 읽기 snapshot → 짧은 잠금 비교 → 재확인 순서를 유지한다.
+RestoredReply proof는 기존 RestoredHard의 `Proof.restart()`와 동등한 screen 의무를 가진다. recovery floor를 전역 삭제하거나 ready=true를 영속화하지 않는다. `reserve(proof)`가 동일한 proof origin의 restore 분기를 다시 평가하고, 전달자는 `Reservation::current()`와 기존 first-key gate를 거친다. BusyObservation은 `idle_verified` 위임만 하며 `admits()`는 이 결과를 Busy write 권한으로 쓰지 않는다. source authority/ledger 잠금 중 pane IPC나 전체 transcript 읽기를 추가하지 않는다: 읽기 snapshot → 짧은 잠금 비교 → 재확인 순서를 유지한다.
 
 ## 5. 유한 정산 계약
 
@@ -144,11 +146,11 @@ owner가 (namespace, QueueIdentity, original members, queued_generation)에 붙�
 
 | 조각 | 범위·예상 prod 파일 | prod 추정 / 수용 시험 |
 |---|---|---|
-| S1 제한 reply 복원 | 새 `readiness/restored_reply.rs`, `mod.rs`, `closed_turn.rs`의 작은 Stop 판정 공유, `busy/herdr.rs`, 새 작은 source 검증 child. 기존 generic hard/observe_running 불변 | **5파일 / +220**. restart floor+end_turn+metadata, SessionStart 유실 현재 응답 GREEN. nonce/native/dev+ino 각각 교체, launch 이전 응답, tool result/user/isMeta/progress/Stop 추가 context·찢긴 줄·256KiB 바깥 증거는 복원 차단. 1116h 기존 running observer 시험과 old hard/resume/clear/compact 전부 보존 |
+| S1 제한 reply 복원 | 새 `readiness/restored_reply.rs`, `mod.rs`, `closed_turn.rs`의 작은 Stop 판정 공유, `busy/herdr.rs`, 새 작은 source 검증 child. 기존 generic hard/observe_running 불변 | **5파일 / +280**. restart floor+end_turn+metadata, SessionStart 유실 현재 응답 GREEN. nonce/native/dev+ino 각각 교체, launch 이전 응답, tool result/user/isMeta/progress/Stop 추가 context·찢긴 줄·256KiB 바깥 증거는 복원 차단. 1116h 기존 running observer 시험과 old hard/resume/clear/compact 전부 보존. composer에만 허용되는 기존 RestoredHard fixture가 새 Busy API로 통과하지 않는 부정 control 포함 |
 | S2 owner deadline·body-free 최종 정산 | 새 `v2/readiness_hold.rs`, `v2.rs`/`v2_types.rs`, 새 snapshot projection child, 기존 clear·admission·notice·recovery 연결. 기존 RefusedInput 형식 유지 | **10파일 / +480**. 가짜 attempt/proof 없이 정확한 pre-key front만 정산. CAS·first-key 양쪽 순서, members 복수·origin 실패 영수증, old snapshot serde default, due 재시작/역행/metadata churn 불변, told/untold replay, notice enqueue-ack crash에서 1 record·재큐0. Cancel/clear/Terminate와 경쟁에서 처분1 |
 | S3 실제 경로 배선·수명 통합 | `owned_busy.rs`, `held_watch.rs`+새 typed child, `first_input.rs`, `composer.rs`, `drive.rs`의 호출 교체. S2 회복/안내 helper 재사용. giant `owner_input.rs`는 필요하면 기존 block 이동·호출 교체만 | **8파일 / +320**. **필수 PG**: 실제 early Busy Held → 같은 probe Keep → fixture로 current 완료 증거 제공 → Wake → Idle driver → 원본 payload+Enter1. late/running·routine/API 준비·replay negative control. 복원 불가·probe panic/오류·capture 멎음도 due 정산+사유1·body재큐0. barrier로 Wake↔Cancel/clear/Terminate/stop, native 변경↔reserve, deadline↔first-key 양쪽 경합 고정 |
 
-합계 상한 추정은 **23파일 / +1020**(조각 사이 중복 파일은 중복 계산한 보수적 합계)이다. parent mod/reexport는 `FILES_AUTO`로 보고하며, 생성 목록은 공식 생성기로만 갱신한다. 독립 책임은 새 child에 두고 1,000줄 넘는 기존 파일에는 얹지 않는다. dormant production helper는 만들지 않고 각 조각에서 실제 호출자를 연결한다.
+합계 상한 추정은 **23파일 / +1080**(조각 사이 중복 파일은 중복 계산한 보수적 합계)이다. parent mod/reexport는 `FILES_AUTO`로 보고하며, 생성 목록은 공식 생성기로만 갱신한다. 독립 책임은 새 child에 두고 1,000줄 넘는 기존 파일에는 얹지 않는다. dormant production helper는 만들지 않고 각 조각에서 실제 호출자를 연결한다.
 
 재현/검증 순서: 원래 main에서 proof 없는 **실제** Busy 진입·watch Keep RED를 먼저 고정한다. S1 뒤에는 해당 증거를 노출한 같은 probe가 Wake하고 원본 1회 전달 GREEN. S2/S3 뒤에는 time advance/barrier로 timeout·source 교체·lifecycle를 검증한다. 각 원인 제거 mutant(복원 nonce/native/inode/Stop/launch guard 제거, deadline 제거/재설정, driver 재검사 제거, body 재큐, Busy 직접 전송)는 해당 수용 시험 RED를 확인하고 바이트 동일 복구한다. 시험 등록은 PG lane manifest/non-PG filter/lib inventory를 공식 생성기로 추가하며 required PR job의 실제 선택을 확인한다.
 
