@@ -33,16 +33,14 @@ fn an_unrestorable_busy_hold_ends_at_its_due_with_one_notice_and_no_key_pg() {
     assert!(readiness::observe_restored_reply(fx.logical(), Some(&started.path)).is_none());
     let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
     intake.runtime.block_on(async {
-        let original = intake.front().await.1;
+        let front = intake.front().await;
+        let original = front.1.clone();
         let (entered, resume) =
             discord::router::intake_dispatch::after_upload_take(ChannelId::new(CHANNEL))
                 .await
                 .pause();
-        let start = dispatch::start_idle_for_test(
-            intake.shared.clone(),
-            ChannelId::new(CHANNEL),
-            intake.front().await,
-        );
+        let start =
+            dispatch::start_idle_for_test(intake.shared.clone(), ChannelId::new(CHANNEL), front);
         let holder = async {
             tokio::time::timeout(LIMIT, entered).await.unwrap().unwrap();
             intake.install_holder(&fx, &started).await;
