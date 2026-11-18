@@ -2,7 +2,7 @@
 
 설계 레그만의 제안이다. 제품 코드·운영 상태는 변경하지 않았다. 정본은 [#8222 본문](https://github.com/itismyfield/AgentDesk/issues/8222)이며, 아래 모든 제품 좌표는 조사 기준 main `8e80f9b06ad039a8817641773c5fa1ce2e2d4119`다. #8214와 #8217(1118a)이 모두 포함된다. 구현은 독립 pro 설계 리뷰 뒤 시작한다.
 
-<!-- doc-path-refs: proposed readiness/restored_reply.rs v2/readiness_hold.rs -->
+<!-- doc-path-refs: proposed v2/readiness_hold.rs -->
 
 ## 1. 원인과 이미 충족된 계약
 

@@ -1566,3 +1566,6 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
 
 #[path = "provider_dispatch_idle_compaction_tests.rs"]
 mod idle_compaction_tests;
+
+#[path = "provider_dispatch_restart_reply_tests.rs"]
+mod restored_reply_tests;
