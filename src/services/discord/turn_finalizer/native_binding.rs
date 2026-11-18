@@ -175,7 +175,7 @@ impl Port {
         }
         for (namespace, ticket, history) in inputs {
             if let Err(error) = self.bind_source(&namespace, &ticket, &history).await {
-                tracing::debug!(channel=self.channel, %error, "cold source binding debt pending");
+                tracing::debug!(channel_id=self.channel, %error, "cold source binding debt pending");
             }
         }
     }
