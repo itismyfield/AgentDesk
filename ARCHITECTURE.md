@@ -286,6 +286,7 @@ src/
 │   │   ├── advisory_lock.rs
 │   │   ├── advisory_lock_tests.rs
 │   │   ├── agent_sync.rs
+│   │   ├── backpressure.rs
 │   │   ├── intake_timing_pg_tests.rs
 │   │   ├── pool_return.rs
 │   │   ├── pool_return_pg_tests.rs
@@ -1251,6 +1252,8 @@ src/
 │   │   │   │   ├── plan.rs
 │   │   │   │   ├── snapshot.rs
 │   │   │   │   └── snapshot_tests.rs
+│   │   │   ├── admission_policy.rs
+│   │   │   ├── admission_policy_pg_tests.rs
 │   │   │   ├── agent_execution_node_tests.rs
 │   │   │   ├── attachment_tests.rs
 │   │   │   ├── capacity_tests.rs
@@ -2353,6 +2356,7 @@ src/
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
+│   │   │   │   │   ├── admission_policy_reentry_tests.rs
 │   │   │   │   │   ├── codex_turn_hold.rs
 │   │   │   │   │   ├── fallback_queued_tests.rs
 │   │   │   │   │   ├── final_guards.rs
@@ -3710,6 +3714,8 @@ src/
 │   │   ├── mod.rs
 │   │   ├── notify_recovery.rs
 │   │   ├── outbox_claiming.rs
+│   │   ├── outbox_pressure.rs
+│   │   ├── outbox_pressure_tests.rs
 │   │   ├── outbox_queue.rs
 │   │   ├── outbox_queue_replay_tests.rs
 │   │   ├── outbox_route.rs
