@@ -1249,6 +1249,7 @@ tui-o-writer/WriterThreadChildHeldMutantDebt.cfg	WriterThreadChildHeld	NoLostA	-
 tui-o-writer/WriterThreadChildHeldMutantNormalize.cfg	WriterThreadChildHeld	-	CurrentRunAnswered
 tui-o-writer/WriterThreadChildHeldMutantOwner.cfg	WriterThreadChildHeld	AtomicOwner	-
 tui-o-writer/WriterThreadChildHeldMutantPending.cfg	WriterThreadChildHeld	-	ReleasedResolves
+tui-o-writer/WriterThreadChildHeldMutantRefresh.cfg	WriterThreadChildHeld	-	BoundaryProgress
 tui-o-writer/WriterThreadChildHeldOwnerAfter.cfg	WriterThreadChildHeld	-	-
 tui-o-writer/WriterThreadChildHeldOwnerBefore.cfg	WriterThreadChildHeld	AtomicOwner	-
 tui-o-writer/WriterThreadChildHeldPendingAfter.cfg	WriterThreadChildHeld	-	-

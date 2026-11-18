@@ -13,7 +13,7 @@ and send counter under the adoption lock, using the existing Owed/Sample rules.
 
 The model allows the execution to end before the body reaches its Legacy claim.
 `legacy` counts one native offer of A, `aAck` is A-scoped delivery evidence, and
-`debt` survives the boundary. Bind and fresh cases exercise the shared publication
+`debt` survives the boundary. `proof` records the refreshed Owed/Sample rather than assuming a late receipt automatically changes every waiting state. Bind and fresh cases exercise the shared publication
 contract. The Rust tests distinguish the two real activation paths and append A
 output during the fresh intake fence. The Pending case observes frozen pane end
 without a current source, reopens Deferred, and retains the Pending activation
@@ -29,9 +29,9 @@ state and proof must be read under the same state-to-child lock order.
 | PendingBefore / PendingAfter | ReleasedResolves | GREEN |
 | OwnerBefore / OwnerAfter | AtomicOwner | GREEN |
 
-Seven mutants separately remove normalization, boot exclusion, boundary retry,
+Eight mutants separately remove normalization, boot exclusion, boundary retry,
 debt retention, the A-specific proof requirement, atomic owner reads and Pending
-termination observation. Each breaks its declared invariant or liveness property.
+termination observation, and propagation of a late A receipt into the old sample. Each breaks its declared invariant or liveness property.
 Fairness assumes the single native offer, its A-scoped receipt, run end and Pending
 resolution eventually occur. The repair does not manufacture missing evidence.
 

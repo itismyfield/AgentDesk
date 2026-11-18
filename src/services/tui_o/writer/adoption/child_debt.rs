@@ -104,6 +104,49 @@ impl ChildDebt {
         .await
         .map_err(|error| format!("child delivery proof task: {error}"))?
     }
+    /// A source that rotated while Pending may have entered the ordinary rebase without a sample.
+    /// Refresh only the frozen run's matching debt, then reopen the fresh-prefix path too.
+    pub(in crate::services::tui_o::writer) async fn refresh<I: super::super::host::HostIo>(
+        waiting: &mut super::super::deferred::Waiting<'_, I>,
+        sample: &mut Option<Sample>,
+        events: &[BindingEvent],
+    ) -> Option<super::super::deferred::Rebased> {
+        let debt = Self::pin(
+            waiting.candidate,
+            waiting.legacy.clone(),
+            waiting.io.bindings(waiting.channel, waiting.provider),
+            waiting.channel,
+        )
+        .await
+        .ok()?;
+        if let Some(proven) = debt.owed.iter().find(|owed| owed.old == waiting.bound) {
+            *sample = proven.sample.clone();
+        }
+        let mut changed = false;
+        for owed in &mut waiting.owed {
+            if let Some(proven) = debt.owed.iter().find(|proven| proven.old == owed.old) {
+                if owed.sample != proven.sample {
+                    owed.sample = proven.sample.clone();
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return None;
+        }
+        let floors = waiting
+            .owed
+            .iter()
+            .map(|owed| owed.settled(events, waiting.candidate))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let floor = floors.into_iter().max_by_key(|floor| floor.seq)?;
+        Some(super::super::deferred::Rebased {
+            new: waiting.bound.clone(),
+            floor: Ok(floor),
+            owed: Vec::new(),
+        })
+    }
     pub(in crate::services::tui_o::writer) fn sends(&self) -> Option<(u64, u64)> {
         (!self.runs.is_empty()).then_some(self.sends)
     }

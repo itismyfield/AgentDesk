@@ -233,7 +233,7 @@ fn latest_progress<I: HostIo>(waiting: &Waiting<'_, I>) -> Option<Progress> {
 /// Retries until the channel commits or is left to Legacy; a late reservation whose source moves
 /// rebases. `refused` is the last refusal and `seq` the log entry its read ended at.
 pub(super) async fn retry<I: HostIo>(
-    waiting: Waiting<'_, I>,
+    mut waiting: Waiting<'_, I>,
     refused: Refused,
     seq: u64,
 ) -> Retried {
@@ -301,6 +301,13 @@ pub(super) async fn retry<I: HostIo>(
             }
             Err(_) => continue,
         };
+        if waiting.late {
+            if let Some(rebased) =
+                adoption::ChildDebt::refresh(&mut waiting, &mut sample, &observed).await
+            {
+                return Retried::Rebase(rebased);
+            }
+        }
         if let Some(rebased) = rebased(&waiting, &observed, sample.as_ref()) {
             return Retried::Rebase(rebased);
         }

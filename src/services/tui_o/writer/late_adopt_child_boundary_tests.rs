@@ -644,6 +644,20 @@ async fn ch3fix_pending_does_not_hide_frozen_pane_end() {
     )) {
         return;
     }
+    pending_case(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn ch3fix_pending_then_fresh_b_waits_for_a_ack() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::ch3fix_pending_then_fresh_b_waits_for_a_ack"
+    )) {
+        return;
+    }
+    pending_case(true).await;
+}
+async fn pending_case(fresh: bool) {
     let f = Fixture::new(false);
     let (_boot, candidate) = super::childheld::child_boot(&f);
     let (probe, old) = running(&f);
@@ -680,8 +694,12 @@ async fn ch3fix_pending_does_not_hide_frozen_pane_end() {
     assert_eq!(candidate.peek(), Adoption::Deferred);
     no_init(&f).await;
     let path = f.harness._runtime.path().join("pending.jsonl");
-    std::fs::write(&path, row("pending", "B answer")).unwrap();
-    append(&path, &closed());
+    if fresh {
+        std::fs::write(&path, b"{\"type\":\"user\",\"sessionId\":\"pending\",\"uuid\":\"prompt-b\",\"message\":{\"content\":\"prompt\"}}\n").unwrap();
+    } else {
+        std::fs::write(&path, row("pending", "B answer")).unwrap();
+        append(&path, &closed());
+    }
     *probe.path.lock().unwrap() = path.clone();
     probe
         .frontier
