@@ -874,12 +874,17 @@ async fn start_reserved_headless_turn_admitted(
     // instead of falling back to a stale/default CLI session configuration.
     let model_resolution_channel_id =
         metadata_parent_channel_id(metadata.as_ref()).unwrap_or(channel_id);
-    let model_for_turn = super::super::super::commands::resolve_model_for_turn(
-        shared,
-        model_resolution_channel_id,
-        &provider,
-    )
-    .await;
+    let model_for_turn = match routine_metadata::routine_model(metadata.as_ref()) {
+        Some(model) => Some(model),
+        None => {
+            super::super::super::commands::resolve_model_for_turn(
+                shared,
+                model_resolution_channel_id,
+                &provider,
+            )
+            .await
+        }
+    };
     let adk_session_name = channel_name.clone();
     let adk_session_info =
         derive_adk_session_info(Some(prompt), channel_name.as_deref(), Some(&current_path));

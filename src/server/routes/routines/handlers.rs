@@ -28,6 +28,7 @@ use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::routines::execution_mode::{
     ExecutionProjection, definition_for_create, notice_limit_for_create,
 };
+use crate::services::routines::provider_choice::{self, ProviderChoice, choice_for_request};
 use crate::services::routines::store::{RoutineRecord, RoutineRunRecord};
 use crate::services::routines::{
     NewRoutine, RoutineLifecycleEvent, RoutineScriptLoader, RoutineSessionCommand,
@@ -57,11 +58,27 @@ pub async fn list_routines(
         .load_execution_definitions(&ids)
         .await
         .map_err(store_error)?;
+    let mut choices = store
+        .load_provider_choices(&ids)
+        .await
+        .map_err(store_error)?;
+    let bindings = crate::db::agents::load_all_agent_channel_bindings_pg(store.pool())
+        .await
+        .map_err(|error| store_error(error.into()))?;
     let routines: Vec<RoutineListItem> = routines
         .into_iter()
         .map(|routine| RoutineListItem {
             last_run: last_runs.remove(&routine.id),
             execution: executions.remove(&routine.id).map(|row| row.projection()),
+            provider: provider_choice::projection(
+                &choices.remove(&routine.id).unwrap_or_default(),
+                routine
+                    .agent_id
+                    .as_ref()
+                    .and_then(|agent_id| bindings.get(agent_id))
+                    .and_then(|bindings| bindings.resolved_primary_provider_kind())
+                    .as_ref(),
+            ),
             routine,
         })
         .collect();
@@ -71,6 +88,18 @@ pub async fn list_routines(
     })))
 }
 
+/// A provider choice is stored only when every agent the run may start on owns that channel.
+async fn refuse_unrunnable_choice(
+    store: &crate::services::routines::RoutineStore,
+    choice: &ProviderChoice,
+    agents: &[Option<&str>],
+) -> AppResult<()> {
+    let refusal = provider_choice::refusal_for_agents(store.pool(), choice, agents)
+        .await
+        .map_err(store_error)?;
+    refusal.map_or(Ok(()), |reason| Err(unprocessable(reason)))
+}
+
 /// A listed routine with its newest run (`null` before the first run).
 #[derive(serde::Serialize)]
 struct RoutineListItem {
@@ -78,6 +107,8 @@ struct RoutineListItem {
     routine: RoutineRecord,
     #[serde(flatten)]
     execution: Option<ExecutionProjection>,
+    #[serde(flatten)]
+    provider: Value,
     last_run: Option<RoutineRunRecord>,
 }
 
@@ -114,6 +145,7 @@ mod list_item_tests {
         let listed = RoutineListItem {
             routine,
             execution: None,
+            provider: json!({}),
             last_run: None,
         };
         assert_eq!(json!(listed), expected);
@@ -245,9 +277,17 @@ pub async fn attach_routine(
     .map_err(unprocessable)?;
     let notice_limit =
         notice_limit_for_create(body.headless_failure_notice_limit).map_err(unprocessable)?;
+    let choice = choice_for_request(body.provider.as_deref(), body.model.as_deref())
+        .map_err(unprocessable)?;
+    refuse_unrunnable_choice(
+        &store,
+        &choice,
+        &[agent_id.as_deref(), fallback_agent_id.as_deref()],
+    )
+    .await?;
     let initial_status = initial_attach_status(&script_ref).to_string();
     let routine = store
-        .attach_routine_with_execution(
+        .attach_routine_with_choice(
             NewRoutine {
                 agent_id,
                 fallback_agent_id,
@@ -264,6 +304,7 @@ pub async fn attach_routine(
             },
             execution.as_ref(),
             notice_limit,
+            &choice,
         )
         .await
         .map_err(definition_store_error)?;
@@ -293,19 +334,49 @@ pub async fn patch_routine(
         validate_timeout_request(Some(timeout_secs))?;
     }
     validate_max_retries_request(body.max_retries)?;
-    if let Some(fallback_agent_id) = body.fallback_agent_id.as_present() {
-        let fallback_agent_id =
-            validate_agent_id_request(&state, "fallback_agent_id", fallback_agent_id.as_deref())
-                .await?;
+    let agent_id = match body.agent_id.as_present() {
+        Some(None) => return Err(unprocessable("agent_id cannot be cleared".into())),
+        Some(Some(agent_id)) => {
+            validate_agent_id_request(&state, "agent_id", Some(agent_id)).await?
+        }
+        None => None,
+    };
+    let fallback_agent_id = match body.fallback_agent_id.as_present() {
+        Some(fallback) => {
+            Some(validate_agent_id_request(&state, "fallback_agent_id", fallback.as_deref()).await?)
+        }
+        None => None,
+    };
+    let mut choice = None;
+    if agent_id.is_some()
+        || fallback_agent_id.is_some()
+        || body.provider.as_present().is_some()
+        || body.model.as_present().is_some()
+    {
         let current = store
             .get_routine(&routine_id)
             .await
             .map_err(store_error)?
             .ok_or_else(|| AppError::not_found(format!("routine {routine_id} not found")))?;
-        validate_distinct_fallback_agent(
-            current.agent_id.as_deref(),
-            fallback_agent_id.as_deref(),
-        )?;
+        let agent = agent_id.as_deref().or(current.agent_id.as_deref());
+        let fallback = match &fallback_agent_id {
+            Some(fallback) => fallback.as_deref(),
+            None => current.fallback_agent_id.as_deref(),
+        };
+        if agent_id.is_some() || fallback_agent_id.is_some() {
+            validate_distinct_fallback_agent(agent, fallback)?;
+        }
+        let current_choice = store
+            .load_provider_choices(std::slice::from_ref(&routine_id))
+            .await
+            .map_err(store_error)?
+            .remove(&routine_id)
+            .unwrap_or_default();
+        choice = body
+            .provider_choice_patch(&current_choice)
+            .map_err(unprocessable)?;
+        let effective = choice.as_ref().unwrap_or(&current_choice);
+        refuse_unrunnable_choice(&store, effective, &[agent, fallback]).await?;
     }
     let current = store
         .load_execution_definitions(std::slice::from_ref(&routine_id))
@@ -316,7 +387,9 @@ pub async fn patch_routine(
     let (execution, notice_limit) = body
         .execution_definition_patch(&current)
         .map_err(unprocessable)?;
-    let patch = body.into_patch(execution, notice_limit);
+    let mut patch = body.into_patch(execution, notice_limit);
+    patch.agent_id = agent_id;
+    patch.provider_choice = choice;
     let Some(routine) = store
         .patch_routine(&routine_id, patch)
         .await

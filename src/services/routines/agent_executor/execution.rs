@@ -36,6 +36,14 @@ impl AgentExecutionMode {
         }
     }
 
+    /// A provider without process turns runs a fresh run as a fresh channel session instead.
+    pub(super) fn for_provider(self, provider: &ProviderKind) -> Self {
+        match self {
+            Self::Process if Self::Process.ensure_provider(provider).is_err() => Self::Tmux,
+            mode => mode,
+        }
+    }
+
     pub(super) fn ensure_provider(self, provider: &ProviderKind) -> Result<()> {
         if self == Self::Process && !matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
         {

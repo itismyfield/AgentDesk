@@ -2398,3 +2398,5 @@ mod tests {
 
 #[cfg(test)]
 mod owner_input_tests;
+#[cfg(test)]
+mod provider_choice_tests;

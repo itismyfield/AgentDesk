@@ -1,0 +1,227 @@
+//! A routine's pinned provider and model through the real start: the chosen channel, never
+//! another provider's, and a mid-run PATCH that waits for the next claim.
+use super::owner_input_tests::{OWNER, settled_generation};
+use super::*;
+use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::health::register_bot_auth_for_tests;
+use crate::services::routines::provider_choice::ProviderChoice;
+use crate::services::routines::store::{NewRoutine, RoutinePatch};
+use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
+
+async fn setup(agents: &str) -> (TestPostgresDb, sqlx::PgPool, RoutineStore) {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    sqlx::query(&format!(
+        "INSERT INTO agents(id,name,provider,discord_channel_id,discord_channel_cc,discord_channel_cdx) VALUES {agents}"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let store =
+        RoutineStore::new_with_timezone_and_checkpoint_limit(Arc::new(pool.clone()), "UTC", 262144);
+    (db, pool, store)
+}
+
+async fn attach(
+    store: &RoutineStore,
+    agent: &str,
+    strategy: &str,
+    choice: ProviderChoice,
+) -> String {
+    let routine = NewRoutine {
+        agent_id: Some(agent.into()),
+        fallback_agent_id: None,
+        max_retries: Some(0),
+        script_ref: format!("{strategy}.js"),
+        name: strategy.into(),
+        status: None,
+        execution_strategy: strategy.into(),
+        schedule: None,
+        next_due_at: None,
+        checkpoint: None,
+        discord_thread_id: None,
+        timeout_secs: Some(1),
+    };
+    let routine = store.attach_routine_with_choice(routine, None, 3, &choice);
+    routine.await.unwrap().id
+}
+
+fn choice(provider: &str, model: Option<&str>) -> ProviderChoice {
+    ProviderChoice {
+        provider: Some(provider.into()),
+        model: model.map(str::to_string),
+    }
+}
+
+async fn start(
+    executor: &RoutineAgentExecutor,
+    store: &RoutineStore,
+    id: &str,
+) -> RoutineRunOutcome {
+    let claimed = store.claim_run_now(id).await.unwrap().unwrap();
+    let run =
+        executor.start_agent_run(store, claimed, "work".into(), None, None, None, None, false);
+    run.await.unwrap()
+}
+
+#[tokio::test]
+async fn a_chosen_provider_and_model_reach_the_launch_on_that_providers_channel_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    settled_generation();
+    let handle =
+        ChannelMailboxRegistry::default().handle(poise::serenity_prelude::ChannelId::new(7272));
+    let queue = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    handle
+        .v2_adopt(queue.join("routine-tests.json"), "routine-tests".into())
+        .await
+        .unwrap();
+    let (db, pool, store) = setup("('pc','PC','claude',NULL,'7270','7272')").await;
+    let registry = Arc::new(HealthRegistry::new());
+    register_bot_auth_for_tests(&registry, "claude", 7270, None, Vec::new(), false).await;
+    register_bot_auth_for_tests(&registry, "codex", 7272, None, Vec::new(), false).await;
+    let id = attach(
+        &store,
+        "pc",
+        "persistent",
+        choice("codex", Some("gpt-test")),
+    )
+    .await;
+    let claimed = store.claim_run_now(&id).await.unwrap().unwrap();
+    // No bot can prepare a thread here; a run without the fallback pin starts on the route channel.
+    sqlx::query("UPDATE routine_runs SET run_spec = run_spec - 'primary_fallback'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), Some(registry), 60);
+    let run = executor.start_agent_run(
+        &store,
+        claimed,
+        "work".into(),
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    let result = OWNER.scope(handle.clone(), run).await.unwrap();
+    assert_eq!(result.status, "running", "{result:?}");
+    let run = store
+        .list_running_agent_runs(10)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let stored = run.result_json.unwrap();
+    let saved = ChannelMailboxHandle::restore_owner_input(stored["owner_input"].clone()).unwrap();
+    let original = serde_json::from_value(saved.original.clone()).unwrap();
+    let context = handle
+        .v2_admission_context(original, saved.ticket.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(context["provider"], "codex", "{context}");
+    assert_eq!(context["parent_channel_id"], "7272", "{context}");
+    assert_eq!(context["metadata"]["model"], "gpt-test", "{context}");
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_provider_the_agent_has_no_channel_for_fails_the_run_instead_of_running_elsewhere_pg() {
+    let (db, pool, store) = setup("('solo','Solo','claude',NULL,'7272',NULL)").await;
+    let registry = Arc::new(HealthRegistry::new());
+    register_bot_auth_for_tests(&registry, "claude", 7272, None, Vec::new(), false).await;
+    let id = attach(&store, "solo", "persistent", ProviderChoice::default()).await;
+    // The agent lost its codex channel after the choice was stored.
+    sqlx::query("UPDATE routines SET provider = 'codex'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), Some(registry), 60);
+    let outcome = start(&executor, &store, &id).await;
+    assert_eq!(outcome.status, "failed", "{outcome:?}");
+    let error = outcome.error.unwrap_or_default();
+    assert!(error.contains("has no codex provider channel"), "{error}");
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_patch_applies_from_the_next_claim_and_an_unset_choice_keeps_the_primary_pg() {
+    let agents =
+        "('pc','PC','claude',NULL,'7270','7271'),('other','Other','claude',NULL,'7280','7281')";
+    let (db, pool, store) = setup(agents).await;
+    let executor = RoutineAgentExecutor::new(
+        Arc::new(pool.clone()),
+        Some(Arc::new(HealthRegistry::new())),
+        60,
+    );
+    let id = attach(&store, "pc", "persistent", ProviderChoice::default()).await;
+    let in_flight = store.claim_run_now(&id).await.unwrap().unwrap();
+    let patch = RoutinePatch {
+        agent_id: Some("other".into()),
+        provider_choice: Some(choice("codex", Some("gpt-next"))),
+        ..RoutinePatch::default()
+    };
+    store.patch_routine(&id, patch).await.unwrap().unwrap();
+    let run = executor.start_agent_run(
+        &store,
+        in_flight,
+        "work".into(),
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    let outcome = run.await.unwrap();
+    let result = outcome.result_json.unwrap();
+    assert_eq!(outcome.status, "deferred", "{result}");
+    assert_eq!(result["error"], "provider runtime not registered: claude");
+    assert_eq!(result["agent_id"], "pc");
+    sqlx::query("UPDATE routine_runs SET status = 'succeeded', finished_at = NOW()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE routines SET in_flight_run_id = NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let outcome = start(&executor, &store, &id).await;
+    let result = outcome.result_json.unwrap();
+    assert_eq!(
+        result["error"], "provider runtime not registered: codex",
+        "{result}"
+    );
+    assert_eq!(result["agent_id"], "other");
+    let spec: Value =
+        sqlx::query_scalar("SELECT run_spec FROM routine_runs WHERE status = 'running'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (&spec["provider"], &spec["model"]),
+        (&json!("codex"), &json!("gpt-next"))
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_fresh_routine_on_a_provider_without_process_turns_starts_a_channel_session_pg() {
+    let (db, pool, store) = setup("('ag','AG','antigravity','7290',NULL,NULL)").await;
+    let registry = Some(Arc::new(HealthRegistry::new()));
+    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), registry, 60)
+        .with_headless_fresh_agents(true);
+    let id = attach(&store, "ag", "fresh", ProviderChoice::default()).await;
+    let outcome = start(&executor, &store, &id).await;
+    let result = outcome.result_json.unwrap();
+    // Past the process check: only the unregistered runtime holds it back, as for any provider.
+    assert_eq!(outcome.status, "deferred", "{result}");
+    assert_eq!(
+        result["error"],
+        "provider runtime not registered: antigravity"
+    );
+    pool.close().await;
+    db.drop().await;
+}

@@ -3992,6 +3992,7 @@ src/
 │   │   │   ├── owner_input_tests.rs
 │   │   │   ├── owner_launch_tests.rs
 │   │   │   ├── owner_review_tests.rs
+│   │   │   ├── provider_choice_tests.rs
 │   │   │   ├── reliability.rs
 │   │   │   ├── run_policy.rs
 │   │   │   ├── start_deferral.rs
@@ -4022,6 +4023,7 @@ src/
 │   │   ├── loader.rs
 │   │   ├── migrated.rs
 │   │   ├── mod.rs
+│   │   ├── provider_choice.rs
 │   │   ├── reliability_pg_tests.rs
 │   │   ├── run_diagnostics.rs
 │   │   ├── runtime.rs

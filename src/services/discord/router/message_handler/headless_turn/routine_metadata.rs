@@ -70,6 +70,15 @@ pub(super) fn headless_session_basis(
     let snapshot = scheduled_snapshot_session_label(metadata);
     session_key_basis_override(snapshot.as_deref(), metadata, tmux_session_label).map(str::to_owned)
 }
+/// The model a routine pinned for its run; it outranks the channel model setting.
+pub(super) fn routine_model(metadata: Option<&serde_json::Value>) -> Option<String> {
+    valid_routine_metadata(metadata)?
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
 /// Process mode is explicit and only honored on fresh routine metadata.
 pub(super) fn routine_process_turn(metadata: Option<&serde_json::Value>) -> bool {
     fresh_routine_turn(metadata)

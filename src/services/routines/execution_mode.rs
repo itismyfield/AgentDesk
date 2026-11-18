@@ -8,11 +8,12 @@ const HEADLESS_FAILURE_NOTICE_LIMIT_MAX: i32 = 100;
 const RUN_SPEC_VERSION: i64 = 1;
 
 /// DB constraints that back the API checks when a concurrent writer races past them.
-const DEFINITION_CONSTRAINTS: [&str; 4] = [
+const DEFINITION_CONSTRAINTS: [&str; 5] = [
     "routines_execution_mode_check",
     "routines_runner_shape_check",
     "routines_explicit_mode_fresh_check",
     "routines_headless_failure_notice_limit_check",
+    "routines_model_requires_provider_check",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,6 +248,8 @@ pub struct ClaimDefinitionRow {
     pub max_retries: i32,
     pub discord_thread_id: Option<String>,
     pub timeout_secs: Option<i32>,
+    #[sqlx(flatten)]
+    pub choice: crate::services::routines::provider_choice::ProviderChoice,
 }
 
 impl ClaimDefinitionRow {
@@ -267,6 +270,8 @@ impl ClaimDefinitionRow {
             "discord_thread_id": self.discord_thread_id,
             "timeout_secs": self.timeout_secs,
             "headless_failure_notice_limit": projection.headless_failure_notice_limit,
+            "provider": self.choice.provider,
+            "model": self.choice.model,
             "execution_backend": Value::Null,
             "retry_after_start": false,
             "primary_fallback": false,

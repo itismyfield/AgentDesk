@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::services::discord::admin_host_guard::ManagedReset;
 use crate::services::discord::health::{HealthRegistry, clear_provider_channel_runtime};
 use crate::services::provider::ProviderKind;
+use crate::services::routines::provider_choice::session_route;
 use crate::services::turn_lifecycle::{
     ForceKillRow, TurnLifecycleStopResult, TurnLifecycleTarget, force_kill_turn,
     force_kill_turn_for_row,
@@ -339,12 +340,8 @@ impl RoutineSessionController {
                 anyhow!("load agent bindings for fresh routine session {agent_id}: {error}")
             })?
             .ok_or_else(|| anyhow!("agent {agent_id} not found for fresh routine teardown"))?;
-        let provider = bindings
-            .resolved_primary_provider_kind()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
-        let primary_channel = bindings
-            .primary_channel()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary channel is not configured"))?;
+        let route = session_route(&self.pool, bindings, &agent_id, &routine.id, None).await?;
+        let (provider, primary_channel) = (route.provider, route.channel);
         let primary_channel_id =
             crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&primary_channel)
                 .or_else(|| primary_channel.parse::<u64>().ok())
@@ -392,12 +389,8 @@ impl RoutineSessionController {
                 anyhow!("load agent bindings for routine session {agent_id}: {error}")
             })?
             .ok_or_else(|| anyhow!("agent {agent_id} not found for routine session control"))?;
-        let provider = bindings
-            .resolved_primary_provider_kind()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
-        let primary_channel = bindings
-            .primary_channel()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary channel is not configured"))?;
+        let route = session_route(&self.pool, bindings, &agent_id, &routine.id, None).await?;
+        let (provider, primary_channel) = (route.provider, route.channel);
         let channel_id =
             crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&primary_channel)
                 .or_else(|| primary_channel.parse::<u64>().ok())
@@ -455,9 +448,9 @@ impl RoutineSessionController {
                 anyhow!("load agent bindings for fresh routine session {agent_id}: {error}")
             })?
             .ok_or_else(|| anyhow!("agent {agent_id} not found for fresh routine teardown"))?;
-        let provider = bindings
-            .resolved_primary_provider_kind()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
+        let provider = session_route(&self.pool, bindings, &agent_id, &routine.id, result_json)
+            .await?
+            .provider;
         let routine_thread_channel_id =
             fresh_teardown_thread_channel_id(routine, result_json).ok_or_else(|| {
                 anyhow!(
