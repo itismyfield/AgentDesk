@@ -50,7 +50,7 @@ pub(super) fn closed_since(path: &Path, stamp: &Stamp, native: &str, since: Date
 }
 
 /// The summary of a Stop that asked for nothing: no errors, no added context, no stop reason.
-fn quiet_summary(record: &Value) -> Option<&str> {
+pub(super) fn quiet_summary(record: &Value) -> Option<&str> {
     let empty = |key: &str| record[key].as_array().is_some_and(Vec::is_empty);
     (system(record) == Some("stop_hook_summary")
         && record["preventedContinuation"] == false
@@ -62,7 +62,7 @@ fn quiet_summary(record: &Value) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
-fn quiet_relay_stop(output: &Value, native: &str) -> bool {
+pub(super) fn quiet_relay_stop(output: &Value, native: &str) -> bool {
     let command = output["command"].as_str().unwrap_or_default();
     output["type"] == "hook_success"
         && output["hookEvent"] == "Stop"

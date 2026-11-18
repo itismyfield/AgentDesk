@@ -7,6 +7,7 @@ pub(crate) use source::adopt_awaiting_clear;
 mod dialog;
 mod evidence;
 pub(crate) mod idle;
+mod restored_reply;
 mod resume_record;
 mod source;
 #[cfg(test)]
@@ -94,6 +95,13 @@ fn changed(state: &mut Ledger) {
     CHANGED.notify_all();
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProofOrigin {
+    Current,
+    Resume,
+    RestoredHard,
+    RestoredReply,
+}
 pub(crate) struct Proof {
     source: Source,
     stamp: Option<Stamp>,
@@ -101,21 +109,29 @@ pub(crate) struct Proof {
     clear: Option<clear::Evidence>,
     /// Rests on a resume start alone: the transcript's terminal belongs to an earlier run.
     resumed: bool,
-    /// Rests on the restart floor alone; the caller must also see an idle, empty screen.
-    restart: bool,
+    origin: ProofOrigin,
 }
 impl Proof {
     pub(crate) fn restart(&self) -> bool {
-        self.restart
+        matches!(
+            self.origin,
+            ProofOrigin::RestoredHard | ProofOrigin::RestoredReply
+        )
     }
 }
 pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
-    evidence(session, path, false)
+    evidence(session, path, None)
 }
 /// Herdr only: current evidence, else a pane that outlived the daemon restart idling on its
 /// last hard terminal.
 pub(crate) fn observe_restored(session: &str, path: Option<&Path>) -> Option<Proof> {
-    evidence(session, path, true)
+    evidence(session, path, Some(ProofOrigin::RestoredHard))
+        .or_else(|| observe_restored_reply(session, path))
+}
+/// Only a pinned reply of this launch; never the composer's historical hard-terminal proof.
+pub(crate) fn observe_restored_reply(session: &str, path: Option<&Path>) -> Option<Proof> {
+    evidence(session, path, Some(ProofOrigin::RestoredReply))
+        .filter(|proof| proof.origin == ProofOrigin::RestoredReply)
 }
 /// The shared observer stops at a `permission-mode`; a session-state block after a hard
 /// terminal, with nothing else after it, is still that turn's end.
@@ -134,7 +150,8 @@ fn launched_before_start(source: &Source) -> bool {
             .is_ok_and(|ctx| ctx.created_at < *STARTED)
     })
 }
-fn evidence(session: &str, path: Option<&Path>, restart_ok: bool) -> Option<Proof> {
+fn evidence(session: &str, path: Option<&Path>, origin: Option<ProofOrigin>) -> Option<Proof> {
+    let restart_ok = origin == Some(ProofOrigin::RestoredHard);
     let source = Source::current(session, path)?;
     let clear = clear::current(&source)?;
     let mut tail = evidence::read(&source.path);
@@ -159,6 +176,11 @@ fn evidence(session: &str, path: Option<&Path>, restart_ok: bool) -> Option<Proo
         .as_ref()
         .filter(|_| restorable())
         .and_then(|tail| resume_record::restored(&source, tail));
+    let reply_current = origin == Some(ProofOrigin::RestoredReply)
+        && native_idle
+        && tail
+            .as_ref()
+            .is_some_and(|tail| restored_reply::current(&source, &tail.stamp));
     let mut state = ledger();
     // The restart forgot this execution's resume start; its record restores it, floor kept, ahead
     // of the early return an old cut or permission-marked history would otherwise take.
@@ -333,7 +355,8 @@ fn evidence(session: &str, path: Option<&Path>, restart_ok: bool) -> Option<Proo
             })
         })
         && launched_before;
-    if !settled && !resumed && !restart {
+    let reply = reply_current && !settled && !resumed && entry.restart_floor() && blocked.is_none();
+    if !settled && !resumed && !restart && !reply {
         return None;
     }
     if entry.pending.take().is_some() {
@@ -345,7 +368,15 @@ fn evidence(session: &str, path: Option<&Path>, restart_ok: bool) -> Option<Proo
         revision: entry.revision,
         clear,
         resumed,
-        restart,
+        origin: if settled {
+            ProofOrigin::Current
+        } else if resumed {
+            ProofOrigin::Resume
+        } else if restart {
+            ProofOrigin::RestoredHard
+        } else {
+            ProofOrigin::RestoredReply
+        },
     };
     drop(state);
     (Source::current(session, path).as_ref() == Some(&proof.source)
@@ -356,10 +387,10 @@ pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
     let current = evidence(
         &proof.source.session,
         Some(&proof.source.path),
-        proof.restart,
+        Some(proof.origin),
     )?;
     if current.source != proof.source
-        || current.restart != proof.restart
+        || current.origin != proof.origin
         || current.stamp != proof.stamp
         || current.revision != proof.revision
         || current.clear != proof.clear
@@ -387,6 +418,7 @@ pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
     changed(&mut state);
     let reservation = Reservation {
         source: proof.source,
+        origin: proof.origin,
         stamp: proof.stamp,
         revision,
         recovery,
@@ -399,6 +431,7 @@ pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
 }
 pub(crate) struct Reservation {
     source: Source,
+    origin: ProofOrigin,
     stamp: Option<Stamp>,
     revision: u64,
     recovery: Option<(u64, DateTime<Utc>)>,
@@ -414,6 +447,11 @@ impl Reservation {
             == Some(&self.source)
             && clear::current(&self.source) == Some(self.clear.clone())
             && Stamp::read(&self.source.path) == self.stamp
+            && (self.origin != ProofOrigin::RestoredReply
+                || self
+                    .stamp
+                    .as_ref()
+                    .is_some_and(|stamp| restored_reply::current(&self.source, stamp)))
             && ledger()
                 .entries
                 .get(&self.source)
