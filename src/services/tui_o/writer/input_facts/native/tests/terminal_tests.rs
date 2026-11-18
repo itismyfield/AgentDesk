@@ -139,3 +139,25 @@ fn native_8148_terminal_stored_interrupt_barrier_is_superseded_only_exactly() {
         assert_eq!(projected(&f, 0), Analysis::default());
     }
 }
+
+#[test]
+fn native_8148_terminal_supersession_refuses_an_unknown_or_moved_barrier() {
+    let f = Fixture::new();
+    let ticket = owned(&f, stop(json!([{"type":"text","text":MARK}])));
+    stored(&f, &ticket, |_| {});
+    let proof = outcome(&projected(&f, 1).evidence.remove(0));
+    let saved = f.history.native_settlement("native-b1", &ticket).unwrap();
+    assert!(saved.known_barrier("native-b1").unwrap().is_some());
+    assert_eq!(saved.admits_native("native-b1", &proof), Ok(()));
+    let edits: [fn(&mut serde_json::Map<String, Value>); 3] = [
+        |extra| extra["foreign_prompt_barrier"]["unknown"] = json!(1),
+        |extra| extra["foreign_prompt_barrier"]["through"] = json!(1 << 20),
+        |extra| drop(extra.remove("foreign_prompt_barrier")),
+    ];
+    for edit in edits {
+        let mut moved = saved.clone();
+        edit(&mut moved.extra);
+        let refused = moved.admits_native("native-b1", &proof).unwrap_err();
+        assert_eq!(refused, "native execution crosses foreign prompt barrier");
+    }
+}
