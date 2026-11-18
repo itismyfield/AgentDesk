@@ -5,6 +5,7 @@ import type { Agent, KanbanCard, UiLanguage } from "../../types";
 import { cardTitle, coerceTimestampMs, formatAgeLabel, isManualInterventionCard, labelForStatus, priorityLabel } from "../agent-manager/kanban-utils";
 import type { Tr } from "./campaignPresentation";
 import { StatusMarker, cardMarker } from "./StatusMarker";
+import { TaskRow } from "./TaskListParts";
 
 const PRIORITY_TONE: Record<string, "danger" | "warning"> = { urgent: "danger", high: "warning" };
 
@@ -29,27 +30,16 @@ export default function QueueCardRow({ card, agent, locale, selected, busy, cont
   const needsYou = isManualInterventionCard(card);
   const priorityTone = PRIORITY_TONE[card.priority];
   return <li data-card-id={card.id} className="min-w-0">
-    <div className={`flex min-w-0 items-center gap-1 rounded-[var(--r-sm)] pr-1.5 transition-colors motion-reduce:transition-none ${selected
-      ? "bg-[var(--accent-soft)]" : "hover:bg-[color-mix(in_oklch,var(--fg)_5%,transparent)]"}`}>
-      <button type="button" data-queue-nav onClick={onOpen} aria-current={selected || undefined} aria-controls={controls} title={title}
-        className="!m-0 flex min-w-0 flex-1 items-center gap-3 !rounded-[var(--r-sm)] !border-0 !bg-transparent !px-3 !py-2 text-left !text-[13px] leading-5 text-[var(--fg)] @max-[35rem]/queue:items-start @max-[35rem]/queue:!px-2.5">
-        <StatusMarker {...cardMarker(card.status)} className="@max-[35rem]/queue:mt-[3px]" />
-        <span className="flex min-w-0 flex-1 items-baseline gap-2.5 @max-[35rem]/queue:flex-col @max-[35rem]/queue:gap-0.5">
-          <span className="flex min-w-0 shrink items-baseline gap-2 @max-[35rem]/queue:max-w-full">
-            {card.github_issue_number && <span className="shrink-0 text-xs tabular-nums text-[var(--fg-faint)]">#{card.github_issue_number}</span>}
-            <strong className="min-w-0 truncate font-medium [overflow-wrap:anywhere] [word-break:keep-all] @max-[35rem]/queue:line-clamp-2 @max-[35rem]/queue:whitespace-normal">{title}</strong>
-          </span>
-          <span className="min-w-0 shrink-[100] truncate text-xs text-[var(--fg-muted)] @max-[35rem]/queue:max-w-full">
-            {labelForStatus(card.status, tr)} · {assignee}
-          </span>
-        </span>
+    <TaskRow selected={selected} onClick={onOpen} aria-current={selected || undefined} aria-controls={controls}
+      marker={<StatusMarker {...cardMarker(card.status)} />} number={card.github_issue_number ? `#${card.github_issue_number}` : null} title={title}
+      meta={<>{labelForStatus(card.status, tr)} · {assignee}</>}
+      flags={<>
         {needsYou && <Badge tone="warning" title={card.blocked_reason ?? undefined}>{tr("판단 필요", "Needs you")}</Badge>}
         {priorityTone && <Badge tone={priorityTone}>{priorityLabel(card.priority, tr)}</Badge>}
-        {age !== null && <span className="shrink-0 text-right text-xs tabular-nums text-[var(--fg-faint)]" title={changedAgo(age, tr)}>
-          <span aria-hidden>{age < 60_000 ? tr("방금", "now") : formatAgeLabel(age, tr)}</span><span className="sr-only">{changedAgo(age, tr)}</span>
-        </span>}
-      </button>
-      {card.status === "backlog" && <Button variant="secondary" size="sm" disabled={busy} onClick={onReady} className="shrink-0">{tr("준비됨으로", "To ready")}</Button>}
-    </div>
+      </>}
+      trailing={age !== null && <span className="shrink-0 text-right text-xs tabular-nums text-[var(--fg-faint)]" title={changedAgo(age, tr)}>
+        <span aria-hidden>{age < 60_000 ? tr("방금", "now") : formatAgeLabel(age, tr)}</span><span className="sr-only">{changedAgo(age, tr)}</span>
+      </span>}
+      action={card.status === "backlog" && <Button variant="secondary" size="sm" disabled={busy} onClick={onReady} className="shrink-0">{tr("준비됨으로", "To ready")}</Button>} />
   </li>;
 }

@@ -110,8 +110,8 @@ it("groups the queue by repository, collapses a group from its heading and flags
     card("relay", { blocked_reason: "Needs a product decision on retries" }),
     card("beta-2", { github_repo: "acme/beta", status: "ready", assignee_agent_id: "agent-1" }),
   ]);
-  const headings = [...container.querySelectorAll<HTMLButtonElement>("button[data-queue-nav][aria-expanded]")];
-  expect(headings.map((heading) => heading.textContent)).toEqual(["beta2", "AgentDesk1"]);
+  const headings = [...container.querySelectorAll<HTMLButtonElement>("button[data-list-nav][aria-expanded]")];
+  expect(headings.map((heading) => heading.textContent)).toEqual(["beta 2", "AgentDesk 1"]);
   expect(rowFor("relay")?.textContent).toContain("Needs you");
   expect(rowFor("beta-1")?.textContent).toContain("Urgent");
   expect(rowFor("beta-1")?.textContent).not.toContain("Needs you");
@@ -129,7 +129,7 @@ it("moves between group and card buttons with the arrow keys and opens a card in
   await renderQueue([card("one", { github_issue_number: 21 }), card("two", { github_issue_number: 22 })], onSelectCard);
   const pane = document.querySelector('aside[aria-label="Card details"]');
   expect(pane?.textContent).toContain("No card selected");
-  const nav = [...container.querySelectorAll<HTMLButtonElement>("[data-queue-nav]")];
+  const nav = [...container.querySelectorAll<HTMLButtonElement>("[data-list-nav]")];
   expect(nav).toHaveLength(3);
   nav[0].focus();
   await act(async () => nav[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
