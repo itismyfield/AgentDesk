@@ -130,6 +130,7 @@ def _run(lease, state, config, request, run_id, now):
     record = {"schema_version": 1, "run_id": run_id, "request": request, "bundle": bundle, "profile": profile,
               "cursor_index": cursor["index"], "started_at": now, "budget_day": budget.day(now),
               "lease_key": lease.key, "occurrences": rows}
+    _record(state, record, result="RUNNING")  # Before reserving, so a crash leaves a record to abandon.
     refused = budget.reserve(state, config.get("budget") or {}, amounts, run_id, now) if runnable else None
     if request["kind"] == "scheduled":
         plan.save_cursor(state, {**cursor, "last_scheduled_at": now})
@@ -141,20 +142,21 @@ def _run(lease, state, config, request, run_id, now):
         return _record(state, record, result="DEFERRED_BUDGET")
     if request["kind"] == "deploy":
         inbox.record(state, {request["request_id"]: "RUNNING"})
-    _record(state, record, result="RUNNING")
-    spent = {}
+    spent, turned = {}, {}
     for row in runnable:
         provider = row["cell"].split("-")[0]
-        if spent.get(provider, 0) >= amounts[provider]["time_s"]:
+        if spent.get(provider, 0) >= amounts[provider]["time_s"] or turned.get(provider, 0) >= amounts[provider]["turns"]:
             row.update(status="DEFERRED_BUDGET", reason=f"{provider} run reservation used up")
             continue
         _execute(lease, config, record, row)
         spent[provider] = spent.get(provider, 0) + row["elapsed_s"]
+        turned[provider] = turned.get(provider, 0) + (row["native_turns"] or 0)
     measured = {}
     for provider in amounts:
         mine = [row for row in runnable if row["cell"].startswith(provider + "-") and "elapsed_s" in row]
         turns = [row["native_turns"] for row in mine]
-        measured[provider] = {"time_s": round(spent.get(provider, 0), 3),
+        # Token usage is not read yet, so the token reservation stays charged.
+        measured[provider] = {"time_s": round(spent.get(provider, 0), 3), "tokens": None,
                               "turns": sum(turns) if None not in turns else None}
     budget.settle(state, record["budget_day"], run_id, measured)
     result = _verdict(rows)

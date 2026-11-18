@@ -7,7 +7,7 @@ import time
 
 from .store import read_json, write_json
 
-FIELDS = ("turns", "time_s")
+FIELDS = ("turns", "tokens", "time_s")
 
 
 def day(now):

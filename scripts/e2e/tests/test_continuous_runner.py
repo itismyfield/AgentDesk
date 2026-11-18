@@ -48,8 +48,8 @@ class Runner(unittest.TestCase):
         self.config = {"enabled": True, "state_dir": str(self.state), "rotation_interval_s": 3600,
                        "resource": {"guild": "1", "parents": ["2", "3"], "bot_set": ["4", "5"]},
                        "driver": [sys.executable, str(self.root / "driver.py")],
-                       "budget": {p: {"daily_turns": 10, "daily_time_s": 600} for p in ("claude", "codex")},
-                       "reservation": {b: {p: {"turns": 6, "time_s": 300} for p in ("claude", "codex")}
+                       "budget": {p: {"daily_turns": 10, "daily_tokens": 10**6, "daily_time_s": 600} for p in ("claude", "codex")},
+                       "reservation": {b: {p: {"turns": 6, "tokens": 1000, "time_s": 300} for p in ("claude", "codex")}
                                        for b in ("P", "R1")}}
 
     def tick(self, now, **changes):
@@ -145,12 +145,15 @@ class Runner(unittest.TestCase):
             self.submit("deploy-4", "d" * 40)
             self.assertEqual(self.tick(90001.0, rotation_interval_s=None)["status"], "PARTIAL")
         self.submit("deploy-5", "e" * 40)
-        unset = {"claude": {"daily_turns": None, "daily_time_s": 600}}
+        unset = {p: {"daily_turns": 10, "daily_tokens": None, "daily_time_s": 600} for p in ("claude", "codex")}
         self.assertEqual(self.tick(200000.0, rotation_interval_s=None, budget=unset)["status"], "DEFERRED_BUDGET")
         self.assertEqual(len(self.driven()), 6)
-        tight = {"R1": {"claude": {"turns": 1, "time_s": 0.001}}}
+        tight = {"R1": {"claude": {"turns": 6, "tokens": 1000, "time_s": 0.001}}}
         self.assertEqual(self.tick(300000.0, reservation=tight)["status"], "PARTIAL")
-        self.assertEqual(len(self.driven()), 7)
+        with mock.patch.dict(os.environ, {"FAKE_TURNS": "1"}):
+            one_turn = {"R1": {"codex": {"turns": 1, "tokens": 1000, "time_s": 300}}}
+            self.assertEqual(self.tick(400000.0, reservation=one_turn)["status"], "PARTIAL")
+        self.assertEqual(len(self.driven()), 8)
 
     def test_deploy_inbox_runs_newest_once_and_blocks_missing_capabilities(self):
         self.submit("old")
