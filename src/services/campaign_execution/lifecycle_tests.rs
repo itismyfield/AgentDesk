@@ -286,6 +286,14 @@ fn a_node_runs_from_start_to_success_and_each_step_takes_effect_once() {
     );
     let early = refused(&waiting, landing(&waiting, complete));
     assert_eq!(early.code, RejectionCode::InvalidState);
+    // A candidate reviewed under requirements that were edited since is not admitted.
+    let mut input = serde_json::to_value(waiting.definition.input()).unwrap();
+    input["nodes"][0]["acceptance"][0]["description"] = json!("Prove A again");
+    let mut edited = waiting.clone();
+    edited.definition =
+        definition::validate_definition(serde_json::from_value(input).unwrap()).unwrap();
+    let stale = refused(&edited, landing(&edited, begin_landing));
+    assert_eq!(stale.code, RejectionCode::StaleBinding);
     let admitted = step(&waiting, landing(&waiting, begin_landing));
     assert_eq!(admitted.nodes["a"].disposition, NodeDisposition::Assigned);
     assert_eq!(epoch(&admitted, "a"), epoch(&waiting, "a") + 1);
@@ -388,7 +396,9 @@ fn resume_returns_interrupted_work_to_a_fresh_work_without_spending_the_budget()
     (failed.stage, failed.disposition) = (Stage::Implementation, NodeDisposition::Failed);
     let admitted = running.nodes.get_mut("b").unwrap();
     (admitted.stage, admitted.disposition) = (Stage::Landing, NodeDisposition::Assigned);
-    let early = refused(&running, resume(&running));
+    // A run that is still stopping is not resumed.
+    let stopping = domain::stop(&running, StopMode::Immediate);
+    let early = refused(&stopping, resume(&stopping));
     assert_eq!(early.code, RejectionCode::InvalidState);
     let stopped = stopped(&running, &[&work]);
     assert_eq!(stopped.control, CampaignControl::Stopped);
