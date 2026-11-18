@@ -197,6 +197,18 @@ pending metadata는 읽을 수 있으나, 자료를 얻을 수 없는 off/host-u
 외부 요약 `report-s3-model-summary.md`에 입력 SHA256·전체 위반 집합·실행 환경을 기록한다.
 재현 명령은 S2와 같고 새로운 out 경로를 사용한다. 기존 46 cfg의 결과도 새 모델에서 다시 검사했다.
 
+## 만료된 옛 head 결과 (2026-11-19)
+
+S3 리뷰가 넘긴 우선순위 공백을 모델에 넣었다. 다른 배포 head의 결과가 freshness 한도까지 지나면
+소비자는 `STALE`이 아니라 `STALE_HEAD`를 유지한다(`result=UNKNOWN reason=STALE_HEAD stale=1`).
+감시자는 `STALE_HEAD`만 경보로 삼으므로, 만료가 불일치 표식을 지우면 새 배포의 결과가 없다는 경보가 사라진다.
+
+새 snapshot `old-head-stale`과 뮤턴트 `consumer-stale-masks-head`(만료가 head 불일치를 덮는 수정 전 판정)를
+추가했다. 뮤턴트는 `ConsumerStateMapping`을 위반한다. `NoOldHeadGreen`은 두 옛 head snapshot 모두에 적용한다.
+정상 cfg는 22 snapshot, 161 상태/361 step을 탐색하며 차트의 상태·화살표는 그대로다(만료된 옛 head도
+"다른 배포 head" 상태로 표시). 전체는 59 cfg = 10 GREEN + 49 expected RED다. 기존 58 cfg의 바이트는 그대로다.
+같은 head의 만료 결과는 계속 `STALE`이며, 두 조합의 실제 시각 경계는 Python 소비자 시험이 맡는다.
+
 ## 코드 기준과 범위
 
 코드 감사 기준 `origin/main=79bebdd4eaa29b289bf88412825baa7d70a6ac77`, 레인 기반 `21c80274`다.

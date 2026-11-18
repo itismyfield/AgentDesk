@@ -106,6 +106,7 @@ e2e-run-lease/run-consumer-off-green.cfg	LeaseLifetime	ConsumerStateMapping,NoGr
 e2e-run-lease/run-consumer-old-head-green.cfg	LeaseLifetime	ConsumerStateMapping,NoGroundlessPass,NoOldHeadGreen	-
 e2e-run-lease/run-consumer-qualifier-green.cfg	LeaseLifetime	ConsumerStateMapping,NoGroundlessPass	-
 e2e-run-lease/run-consumer-stale-green.cfg	LeaseLifetime	ConsumerStateMapping,NoGroundlessPass	-
+e2e-run-lease/run-consumer-stale-masks-head.cfg	LeaseLifetime	ConsumerStateMapping	-
 e2e-run-lease/run-consumer-usage-crash.cfg	LeaseLifetime	ConsumerStateMapping,FunctionalFailRetained,MalformedUsageCompletes	-
 e2e-run-lease/run-consumer-usage-green.cfg	LeaseLifetime	ConsumerStateMapping,NoGroundlessPass	-
 e2e-run-lease/run-consumer-zero-green.cfg	LeaseLifetime	ConsumerStateMapping,NoGroundlessPass	-

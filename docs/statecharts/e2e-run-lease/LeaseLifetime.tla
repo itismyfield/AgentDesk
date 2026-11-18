@@ -294,9 +294,10 @@ CompletedPublicationRecovers == tx.durable ~>
 ConsumerMutants == {"consumer-good", "consumer-nodata-green", "consumer-off-green",
     "consumer-stale-green", "consumer-old-head-green", "consumer-zero-green",
     "consumer-usage-green", "consumer-driver-schema-green", "consumer-qualifier-green",
-    "consumer-usage-crash", "consumer-no-budget-heartbeat", "consumer-hide-pending"}
+    "consumer-usage-crash", "consumer-no-budget-heartbeat", "consumer-hide-pending",
+    "consumer-stale-masks-head"}
 ConsumerMode == Mut \in ConsumerMutants
-ConsumerCases == {"good", "no-data", "off", "stale", "old-head", "summary-schema",
+ConsumerCases == {"good", "no-data", "off", "stale", "old-head", "old-head-stale", "summary-schema",
     "status-schema", "future-clock", "heartbeat-stale", "host-unavailable", "zero",
     "skip", "fixture", "missing-assertion", "usage-unknown", "usage-malformed",
     "fail-usage-malformed", "driver-schema", "qualifier-unknown", "nullable", "budget-deferred"}
@@ -307,7 +308,7 @@ c == tx.consumer
 ConsumerExpected(k) == CASE k = "off" -> "DISABLED"
     [] k = "no-data" -> "NO_DATA"
     [] k = "stale" -> "STALE"
-    [] k = "old-head" -> "STALE_HEAD"
+    [] k \in {"old-head", "old-head-stale"} -> "STALE_HEAD"
     [] k \in {"summary-schema", "status-schema", "future-clock", "heartbeat-stale", "host-unavailable"} -> "UNKNOWN"
     [] k = "fail-usage-malformed" -> "FAIL"
     [] k \in {"good", "nullable", "budget-deferred"} -> "PASS"
@@ -317,6 +318,8 @@ ConsumerDecision ==
     ELSE IF c.case = "no-data" /\ Mut # "consumer-nodata-green" THEN "NO_DATA"
     ELSE IF c.case \in {"summary-schema", "status-schema", "future-clock", "heartbeat-stale", "host-unavailable"}
         \/ ~c.heartbeatFresh THEN "UNKNOWN"
+    \* An expired result of another head keeps the head mismatch; expiry must not mask it.
+    ELSE IF c.case = "old-head-stale" THEN (IF Mut = "consumer-stale-masks-head" THEN "STALE" ELSE "STALE_HEAD")
     ELSE IF c.case = "old-head" /\ Mut # "consumer-old-head-green" THEN "STALE_HEAD"
     ELSE IF c.case = "stale" /\ Mut # "consumer-stale-green" THEN "STALE"
     ELSE IF c.case = "fail-usage-malformed" THEN "FAIL"
@@ -362,7 +365,7 @@ ConsumerSpec == Init /\ [][ConsumerNext]_vars /\ WF_vars(ConsumerProgress)
 ConsumerTerminal == c.stage \in {"Judged", "Crashed", "Done"}
 ConsumerStateMapping == ConsumerTerminal => c.view = ConsumerExpected(c.case)
 NoGroundlessPass == c.view = "PASS" => c.case \in {"good", "nullable", "budget-deferred"}
-NoOldHeadGreen == c.case = "old-head" => c.view # "PASS"
+NoOldHeadGreen == c.case \in {"old-head", "old-head-stale"} => c.view # "PASS"
 MalformedUsageCompletes == c.case \in MalformedCases => ~c.crashed
 FunctionalFailRetained == ConsumerTerminal /\ c.case = "fail-usage-malformed" => c.view = "FAIL"
 DeferredHeartbeatIsLive == c.case = "budget-deferred" /\ c.stage \in {"Ready", "Judged", "Done"} => c.heartbeatFresh
