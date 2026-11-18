@@ -1,6 +1,7 @@
 # D1b: refused bodies are reasoned and discarded, and an admitted takeover keeps proven debt (#7651)
 
 <!-- doc-path-refs: proposed src/services/tui_o/writer/late_adopt/codex/prior.rs -->
+<!-- doc-path-refs: removed scripts/test_only_module_skip_pin.d/mac-mini-7651-d1a.txt -->
 
 Design on `6467b53cab3715e4cc096d2693762f3fc4f146ca` (D1a, xh CLEAN). No production code
 changes here. The landing unit is the current stack plus D1b. Revision 2 answers the design review

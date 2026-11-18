@@ -48,9 +48,8 @@ pub(crate) fn repair_once(
     Ok(after.text)
 }
 
-/// One look at the admission's pane: only a selected positive trust menu in the managed `cwd`
-/// spends the admission's repair. `None` leaves the repair for a later look. The pane is read
-/// before any identity check, so a look that finds no menu takes no source authority.
+/// One pane look: only a selected positive trust menu in the managed `cwd` spends the repair, and
+/// a look with no menu takes no source authority. `None` leaves the repair for a later look.
 pub(crate) fn repair_if_shown(
     output: &Output,
     context: &BindingContext,
