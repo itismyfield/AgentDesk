@@ -8,15 +8,32 @@ use crate::services::routines::provider_choice::ProviderChoice;
 use crate::services::routines::store::{NewRoutine, RoutinePatch};
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
 
-async fn setup(agents: &str) -> (TestPostgresDb, sqlx::PgPool, RoutineStore) {
+/// Agents as (id, provider, primary, cc, cdx) channel columns.
+type Agent<'a> = (
+    &'a str,
+    &'a str,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+);
+
+async fn setup(agents: &[Agent<'_>]) -> (TestPostgresDb, sqlx::PgPool, RoutineStore) {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    sqlx::query(&format!(
-        "INSERT INTO agents(id,name,provider,discord_channel_id,discord_channel_cc,discord_channel_cdx) VALUES {agents}"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
+    for (id, provider, primary, cc, cdx) in agents {
+        sqlx::query(
+            "INSERT INTO agents(id,name,provider,discord_channel_id,discord_channel_cc,discord_channel_cdx)
+             VALUES ($1,$1,$2,$3,$4,$5)",
+        )
+        .bind(id)
+        .bind(provider)
+        .bind(primary)
+        .bind(cc)
+        .bind(cdx)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
     let store =
         RoutineStore::new_with_timezone_and_checkpoint_limit(Arc::new(pool.clone()), "UTC", 262144);
     (db, pool, store)
@@ -75,7 +92,7 @@ async fn a_chosen_provider_and_model_reach_the_launch_on_that_providers_channel_
         .v2_adopt(queue.join("routine-tests.json"), "routine-tests".into())
         .await
         .unwrap();
-    let (db, pool, store) = setup("('pc','PC','claude',NULL,'7270','7272')").await;
+    let (db, pool, store) = setup(&[("pc", "claude", None, Some("7270"), Some("7272"))]).await;
     let registry = Arc::new(HealthRegistry::new());
     register_bot_auth_for_tests(&registry, "claude", 7270, None, Vec::new(), false).await;
     register_bot_auth_for_tests(&registry, "codex", 7272, None, Vec::new(), false).await;
@@ -128,7 +145,7 @@ async fn a_chosen_provider_and_model_reach_the_launch_on_that_providers_channel_
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_provider_the_agent_has_no_channel_for_fails_the_run_instead_of_running_elsewhere_pg() {
-    let (db, pool, store) = setup("('solo','Solo','claude',NULL,'7272',NULL)").await;
+    let (db, pool, store) = setup(&[("solo", "claude", None, Some("7272"), None)]).await;
     let registry = Arc::new(HealthRegistry::new());
     register_bot_auth_for_tests(&registry, "claude", 7272, None, Vec::new(), false).await;
     let id = attach(&store, "solo", "persistent", ProviderChoice::default()).await;
@@ -148,9 +165,9 @@ async fn a_provider_the_agent_has_no_channel_for_fails_the_run_instead_of_runnin
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_patch_applies_from_the_next_claim_and_an_unset_choice_keeps_the_primary_pg() {
-    let agents =
-        "('pc','PC','claude',NULL,'7270','7271'),('other','Other','claude',NULL,'7280','7281')";
-    let (db, pool, store) = setup(agents).await;
+    let pc = ("pc", "claude", None, Some("7270"), Some("7271"));
+    let (db, pool, store) =
+        setup(&[pc, ("other", "claude", None, Some("7280"), Some("7281"))]).await;
     let executor = RoutineAgentExecutor::new(
         Arc::new(pool.clone()),
         Some(Arc::new(HealthRegistry::new())),
@@ -209,7 +226,7 @@ async fn a_patch_applies_from_the_next_claim_and_an_unset_choice_keeps_the_prima
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_fresh_routine_on_a_provider_without_process_turns_starts_a_channel_session_pg() {
-    let (db, pool, store) = setup("('ag','AG','antigravity','7290',NULL,NULL)").await;
+    let (db, pool, store) = setup(&[("ag", "antigravity", Some("7290"), None, None)]).await;
     let registry = Some(Arc::new(HealthRegistry::new()));
     let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), registry, 60)
         .with_headless_fresh_agents(true);
