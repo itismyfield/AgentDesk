@@ -1,3 +1,4 @@
+import { ChevronDown } from "lucide-react";
 import type { ServerCampaignSummary } from "../../api/serverCampaigns";
 import { Badge, type Tr } from "./campaignPresentation";
 import { displayText } from "./serverCampaignModel";
@@ -6,7 +7,9 @@ import { displayText } from "./serverCampaignModel";
 export default function ServerCampaignList({ summaries, selectedId, onSelect, tr }: {
   summaries: ServerCampaignSummary[]; selectedId: string | null; onSelect: (id: string) => void; tr: Tr;
 }) {
-  return <details className="rounded-lg border border-th-border-subtle px-3 text-xs"><summary className="cursor-pointer text-th-text-muted">{tr(`서버 캠페인 ${summaries.length}개`, `${summaries.length} server campaigns`)}</summary><ul className="campaign-server-list grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-3" aria-label={tr("서버 캠페인 목록", "Server campaigns")}>
+  return <details className="group rounded-lg border border-[var(--line)] px-3 text-xs"><summary className="flex cursor-pointer list-none items-center gap-1.5 text-[var(--fg-muted)] hover:text-[var(--fg)] [&::-webkit-details-marker]:hidden">
+    <ChevronDown aria-hidden className="size-3.5 -rotate-90 transition-transform group-open:rotate-0 motion-reduce:transition-none" />{tr(`서버 캠페인 ${summaries.length}개`, `${summaries.length} server campaigns`)}
+  </summary><ul className="campaign-server-list grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-3" aria-label={tr("서버 캠페인 목록", "Server campaigns")}>
     {summaries.map(({ definition, view }) => <li key={view.campaign_id}>
       <button type="button" aria-pressed={view.campaign_id === selectedId} onClick={() => onSelect(view.campaign_id)}>
         <strong>{definition.title}</strong>

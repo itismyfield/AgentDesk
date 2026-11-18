@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { serverCampaignFixtures } from "../src/api/serverCampaignsFixtures";
 
 // Set CAMPAIGNS_SHOTS to a directory to also save 390/820/1440 x light/dark screenshots of the campaign tab.
 const SHOTS = process.env.CAMPAIGNS_SHOTS;
@@ -84,6 +85,15 @@ async function openCampaigns(page: Page, theme: "dark" | "light" = "dark") {
   await page.goto("/campaigns");
   await expect(page.locator(".campaign-task-row").first()).toBeVisible({ timeout: 15_000 });
   return calls;
+}
+
+/** A server campaign beside the ledger ones: running, one failed and one blocked task. */
+async function serveServerCampaign(page: Page) {
+  const release = serverCampaignFixtures.failedBlockedComplete;
+  await json(page, /\/api\/server-campaigns\?.*$/, { campaigns: [release] });
+  await json(page, /\/api\/server-campaigns\/release$/, { campaign: release });
+  await json(page, /\/api\/server-campaigns\/release\/events(?:\?.*)?$/, { events: [] });
+  return release;
 }
 
 async function expectNoHorizontalOverflow(page: Page) {
@@ -201,6 +211,30 @@ test("campaign tab: a task opens in the pinned pane on wide screens and in a she
   expect(await page.evaluate(() => window.localStorage.getItem("agentdesk.dashboard.active-campaign"))).toBe(JSON.stringify("release-train"));
 });
 
+test("server campaign: tasks as the same rows, opened in the pinned pane or a sheet", async ({ page }, testInfo) => {
+  await page.clock.install({ time: new Date(NOW) });
+  await mockApi(page);
+  const release = await serveServerCampaign(page);
+  await page.goto("/campaigns?mode=server&campaign=release");
+  const rows = page.locator(".campaign-server-task-row");
+  await expect(rows).toHaveCount(release.definition.nodes.length, { timeout: 15_000 });
+  await expect(page.locator(".campaigns-panel").getByLabel("캠페인 선택")).toHaveValue("server:release");
+  await expect(rows.first()).toContainText(release.definition.nodes[0].title);
+  await expect(rows.first().locator(".aui-badge-clean")).toHaveText("실패");
+  await expectNoHorizontalOverflow(page);
+  await rows.nth(1).click();
+  await expect(page).toHaveURL(/[?&]node=B/);
+  const title = release.definition.nodes[1].title;
+  if (testInfo.project.name === "desktop") {
+    await expect(page.getByRole("complementary", { name: "선택 작업" }).getByRole("heading", { name: title })).toBeVisible();
+  } else {
+    await expect(page.getByRole("dialog", { name: "선택 작업" }).getByRole("heading", { name: title })).toBeVisible();
+  }
+  await page.getByRole("button", { name: "상세 닫기" }).click();
+  await expect(page).not.toHaveURL(/[?&]node=/);
+  await expect(rows.nth(1)).toBeFocused();
+});
+
 test.describe("touch at 390px", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
@@ -260,6 +294,14 @@ test("campaign tab: screenshots at 390, 820 and 1440 in light and dark", async (
       await expect(page.locator(".campaign-node-detail")).toBeVisible();
       await page.waitForTimeout(400);
       await page.screenshot({ path: `${SHOTS}/campaigns-${width}x${height}-${theme}-detail.png` });
+    }
+    await serveServerCampaign(page);
+    for (const [width, height] of [[390, 844], [1440, 900]] as const) {
+      await page.setViewportSize({ width, height });
+      await page.goto("/campaigns?mode=server&campaign=release&node=B");
+      await expect(page.locator(".campaign-inspector h4").first()).toBeVisible({ timeout: 15_000 });
+      await page.waitForTimeout(400);
+      await page.screenshot({ path: `${SHOTS}/campaigns-server-${width}x${height}-${theme}-detail.png` });
     }
   }
 });
