@@ -205,11 +205,8 @@ fn a_restored_reply_ends_the_same_busy_hold_with_one_delivery_and_no_refusal_pg(
     });
 }
 
-/// No active turn, the restarted pane's completed reply and screen as it starts: `idle` decides it.
-fn no_holder(name: &str, idle: bool) -> (Fixture, Arc<Launcher>, Started) {
-    let fx = Fixture::with_root(name, None, crate::config::TestRuntimeRootGuard::new());
-    let launcher = Arc::new(Launcher::default());
-    let (_nonce, started) = reconnect::launch(&fx, &launcher);
+/// After the intake starts: the restarted pane's completed reply, lost proof and its screen.
+fn restored(fx: &Fixture, started: &Started, idle: bool) {
     let mut end = crate::services::tui_turn_state::idle_compaction_tests::end_turn();
     end["sessionId"] = json!(started.session);
     end["timestamp"] = json!(chrono::Utc::now().to_rfc3339());
@@ -233,14 +230,20 @@ fn no_holder(name: &str, idle: bool) -> (Fixture, Arc<Launcher>, Started) {
         json!({"type":"pane_read","read":{
         "pane_id":PANE,"source":"recent_unwrapped","text":text,"revision":2,"truncated":false}}),
     );
-    (fx, launcher, started)
+    readiness::tests::forget_session(fx.logical());
 }
 
 /// With no active turn, a restored current reply and an idle screen at the first read delegate to
 /// the Idle start: the original is pasted and entered once, nothing is requeued or refused.
 #[test]
 fn a_restored_reply_with_no_active_turn_delivers_the_original_once_pg() {
-    let (fx, _launcher, started) = no_holder("restart-no-holder-ready", true);
+    let fx = Fixture::with_root(
+        "restart-no-holder-ready",
+        None,
+        crate::config::TestRuntimeRootGuard::new(),
+    );
+    let launcher = Arc::new(Launcher::default());
+    let (_nonce, started) = reconnect::launch(&fx, &launcher);
     let before = fx.rig.sends().len();
     let _registry = fx.rig.registry_on_this_thread();
     let _admission = open_admission();
@@ -248,7 +251,7 @@ fn a_restored_reply_with_no_active_turn_delivers_the_original_once_pg() {
         CHANNEL,
     );
     let intake = Intake::new(&fx, &started);
-    readiness::tests::forget_session(fx.logical());
+    restored(&fx, &started, true);
     assert!(readiness::observe(fx.logical(), Some(&started.path)).is_none());
     let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
     intake.runtime.block_on(async {
@@ -274,7 +277,13 @@ fn a_restored_reply_with_no_active_turn_delivers_the_original_once_pg() {
 /// settled at once with one reason notice, nothing is sent and no watch stays.
 #[test]
 fn a_restored_reply_on_a_busy_screen_with_no_active_turn_is_settled_unsent_pg() {
-    let (fx, _launcher, started) = no_holder("restart-no-holder-busy", false);
+    let fx = Fixture::with_root(
+        "restart-no-holder-busy",
+        None,
+        crate::config::TestRuntimeRootGuard::new(),
+    );
+    let launcher = Arc::new(Launcher::default());
+    let (_nonce, started) = reconnect::launch(&fx, &launcher);
     let before = fx.rig.sends().len();
     let _registry = fx.rig.registry_on_this_thread();
     let _admission = open_admission();
@@ -282,7 +291,7 @@ fn a_restored_reply_on_a_busy_screen_with_no_active_turn_is_settled_unsent_pg() 
         CHANNEL,
     );
     let intake = Intake::new(&fx, &started);
-    readiness::tests::forget_session(fx.logical());
+    restored(&fx, &started, false);
     let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
     intake.runtime.block_on(async {
         let front = intake.front().await;
