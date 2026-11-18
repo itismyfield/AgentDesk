@@ -102,3 +102,105 @@ fn an_unrestorable_busy_hold_ends_at_its_due_with_one_notice_and_no_key_pg() {
         assert_eq!(notices, 1);
     });
 }
+
+/// The same proofless Busy hold ends by delivery once the turn it waited behind is over and the
+/// restored current reply plus an idle screen prove the pane ready: one send, no refusal.
+#[test]
+fn a_restored_reply_ends_the_same_busy_hold_with_one_delivery_and_no_refusal_pg() {
+    let fx = Fixture::with_root(
+        "restart-restored-held-front",
+        None,
+        crate::config::TestRuntimeRootGuard::new(),
+    );
+    let launcher = Arc::new(Launcher::default());
+    let (_nonce, started) = reconnect::launch(&fx, &launcher);
+    let before = fx.rig.sends().len();
+    let _registry = fx.rig.registry_on_this_thread();
+    let _admission = open_admission();
+    let _gate = crate::services::discord::router::intake_gate::busy_inject::test_support::open_gate(
+        CHANNEL,
+    );
+    let intake = Intake::new(&fx, &started);
+    let mut end = crate::services::tui_turn_state::idle_compaction_tests::end_turn();
+    end["sessionId"] = json!(started.session);
+    end["timestamp"] = json!(chrono::Utc::now().to_rfc3339());
+    append(&started.path, &[end]);
+    let records = crate::services::tui_turn_state::idle_compaction_tests::tail();
+    let records: Vec<_> = (records.into_iter())
+        .map(|mut record| {
+            record["sessionId"] = json!(started.session);
+            record
+        })
+        .collect();
+    append(&started.path, &records);
+    readiness::tests::forget_session(fx.logical());
+    assert!(readiness::observe(fx.logical(), Some(&started.path)).is_none());
+    let idle = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
+    ));
+    let show = |text: &str| {
+        fx.rig.answer(
+            "pane.read",
+            json!({"type":"pane_read","read":{
+        "pane_id":PANE,"source":"recent_unwrapped","text":text,"revision":2,"truncated":false}}),
+        )
+    };
+    show(&format!("✻ Thinking… (12s · esc to interrupt)\n{idle}"));
+    let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
+    intake.runtime.block_on(async {
+        let front = intake.front().await;
+        let original = front.1.clone();
+        let (entered, resume) =
+            discord::router::intake_dispatch::after_upload_take(ChannelId::new(CHANNEL))
+                .await
+                .pause();
+        let start =
+            dispatch::start_idle_for_test(intake.shared.clone(), ChannelId::new(CHANNEL), front);
+        let holder = async {
+            tokio::time::timeout(LIMIT, entered).await.unwrap().unwrap();
+            intake.install_holder(&fx, &started).await;
+            resume.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(tokio::time::timeout(LIMIT, start), holder);
+        assert!(
+            result
+                .expect("the busy admission holds")
+                .is_err_and(|e| e.starts_with("NotSent("))
+        );
+        let (_, observed) =
+            held_watch::watch_observed(source_retry_drive(&intake), original.message_id);
+        let look = tokio::time::timeout(LIMIT, observed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(look.verdict, Verdict::Keep);
+        let (_, observed) =
+            held_watch::watch_observed(source_retry_drive(&intake), original.message_id);
+        let token = intake.mailbox.cancel_token().await.unwrap().unwrap();
+        let persistence = discord::queue_persistence_context(
+            &intake.shared,
+            &ProviderKind::Claude,
+            ChannelId::new(CHANNEL),
+        );
+        let _ = (intake.mailbox)
+            .finish_turn_if_token(Some(token), persistence)
+            .await;
+        assert!(inflight::clear_inflight_state(
+            &ProviderKind::Claude,
+            CHANNEL
+        ));
+        show(idle);
+        let look = tokio::time::timeout(LIMIT, observed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(look.verdict, Verdict::Wake);
+        let snapshot = source_input_settled(&intake, &original, &heads).await;
+        assert!(snapshot["refused_fronts"].is_null() && snapshot["refused_inputs"].is_null());
+        let sends = fx.rig.sends();
+        assert_eq!(sends.len() - before, 2, "the same original is sent once");
+        assert!(sends[before]["text"].as_str().unwrap().contains(INPUT));
+        assert_eq!(sends[before + 1]["keys"], json!(["enter"]));
+    });
+}
