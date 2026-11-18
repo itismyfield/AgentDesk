@@ -1,8 +1,9 @@
 //! An explicit routine model starts Codex before the owner can submit its first prompt.
 use super::*;
 use crate::services::claude_tui::owner_input::{self, CodexPromptWriter, LaunchHook, Lineage};
+use crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence;
 use crate::services::tui_input::routine_model as proof;
-use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
+use crate::services::tui_input::submission_tmux::guarded::PaneIdentity;
 
 pub(super) fn active() -> bool {
     proof::current().is_some()
@@ -52,12 +53,14 @@ fn await_composer(
 
 pub(super) fn submit(
     (hook, writer): (LaunchHook, CodexPromptWriter),
-    context: &BindingContext,
+    prepared: &PreparedIncarnation,
     tail: &crate::services::codex_tui::tail_launch::ValidatedTail,
     cancel: Option<&std::sync::Arc<CancelToken>>,
     selection: &crate::services::codex_tui::session::CodexTuiSessionSelection,
     prompt: &str,
+    fence: RuntimeHintFence,
 ) -> Result<(), String> {
+    let context = &prepared.context;
     let session = &context.tmux_session;
     await_composer(session, cancel)?;
     crate::services::codex_tui::tail_launch::record_resume_proof(context, tail)
@@ -72,7 +75,54 @@ pub(super) fn submit(
     let source = serde_json::json!({"kind":"pre_source",
         "expected_session_id":selection.resume_session_id(),
         "expected_transcript":selection.rollout_path,"binding_watermark":null});
-    proof::spawned("codex", session, &context.execution_nonce).map_err(start_error)?;
+    publish(prepared, &fence)?;
+    drop(fence);
     let submit = writer(session, channel, prompt, cancel.cloned()).map_err(start_error)?;
     hook(Lineage::Created, target, source, None, submit)
+}
+
+fn publish(prepared: &PreparedIncarnation, fence: &RuntimeHintFence) -> Result<(), String> {
+    let context = &prepared.context;
+    let session = &context.tmux_session;
+    let pane = PaneIdentity::observe(session);
+    proof::spawned("codex", session, &context.execution_nonce).map_err(|error| {
+        // The spawn is still fenced, and the owner has not received its writer or first input.
+        if let Some(pane) = pane
+            && !discard_unsubmitted(prepared, fence, pane)
+        {
+            tracing::warn!(
+                tmux_session = session,
+                "kept Codex execution after model publication failed"
+            );
+        }
+        start_error(error)
+    })
+}
+
+fn discard_unsubmitted(
+    prepared: &PreparedIncarnation,
+    fence: &RuntimeHintFence,
+    pane: PaneIdentity,
+) -> bool {
+    use crate::services::codex_tui::input::{
+        prompt_readiness_snapshot, try_with_composer_mutation_lock,
+    };
+    let context = &prepared.context;
+    let session = &context.tmux_session;
+    try_with_composer_mutation_lock(session, || {
+        let screen = prompt_readiness_snapshot(session);
+        screen.capture_available
+            && screen.tmux_pane_alive
+            && screen.composer_marker_detected
+            && !screen.prompt_draft_detected
+            && fence.validate_tmux_publisher(session).is_ok()
+            && owner_input::created_tmux_target("codex", session)
+                .is_ok_and(|target| target["execution_nonce"] == context.execution_nonce)
+            && prepared.tmux_identity().is_ok_and(|identity| {
+                crate::services::platform::tmux::session_identity::matches_launch(&identity)
+            })
+            && PaneIdentity::observe(session) == Some(pane)
+            && prepared.discard_spawn("routine model publication failed before the first input")
+    })
+    .unwrap_or(false)
 }

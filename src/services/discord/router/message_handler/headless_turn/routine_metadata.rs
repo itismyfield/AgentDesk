@@ -71,9 +71,29 @@ pub(super) fn headless_session_basis(
     session_key_basis_override(snapshot.as_deref(), metadata, tmux_session_label).map(str::to_owned)
 }
 #[cfg(unix)]
-pub(super) fn persistent_model_metadata(metadata: Option<&serde_json::Value>) -> bool {
-    routine_model(metadata).is_some()
-        && valid_routine_metadata(metadata).is_some_and(|m| m["execution_strategy"] == "persistent")
+fn persistent_model_metadata(
+    metadata: Option<&serde_json::Value>,
+    tracked: impl FnOnce() -> bool,
+) -> bool {
+    valid_routine_metadata(metadata).is_some_and(|m| m["execution_strategy"] == "persistent")
+        && (routine_model(metadata).is_some() || tracked())
+}
+
+#[cfg(unix)]
+pub(in crate::services::discord) fn persistent_tui_model(
+    metadata: Option<&serde_json::Value>,
+    provider: &crate::services::provider::ProviderKind,
+    channel: u64,
+    tmux: Option<&str>,
+) -> bool {
+    persistent_model_metadata(metadata, || {
+        tmux.is_some_and(|name| {
+            crate::services::tui_input::routine_model::tracks_live_execution(
+                provider.as_str(),
+                name,
+            )
+        })
+    }) && crate::services::discord::commands::routine_model::applies(provider, channel, tmux)
 }
 
 /// The model a routine pinned for its run; it outranks the channel model setting.
@@ -295,12 +315,12 @@ mod strict_model_tests {
             "provider": null, "model": null
         });
         assert!(
-            !persistent_model_metadata(Some(&claim)),
+            !persistent_model_metadata(Some(&claim), || false),
             "an inherited provider default must reach the ordinary launch"
         );
         claim["model"] = serde_json::json!("explicit-model");
-        assert!(persistent_model_metadata(Some(&claim)));
+        assert!(persistent_model_metadata(Some(&claim), || false));
         claim["model"] = serde_json::json!("  ");
-        assert!(!persistent_model_metadata(Some(&claim)));
+        assert!(!persistent_model_metadata(Some(&claim), || false));
     }
 }

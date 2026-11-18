@@ -13,7 +13,7 @@ use replay_start::take_session_retry_context;
 
 mod isolated_context;
 mod process_mailbox;
-mod routine_metadata;
+pub(super) mod routine_metadata;
 use routine_metadata::{
     fresh_routine_turn, headless_session_basis, routine_metadata_agent_id,
     routine_metadata_role_binding, routine_tmux_session_name, scheduled_snapshot_session_label,
@@ -886,12 +886,12 @@ async fn start_reserved_headless_turn_admitted(
         }
     };
     #[cfg(unix)]
-    let persistent_tui_model = routine_metadata::persistent_model_metadata(metadata.as_ref())
-        && super::super::super::commands::routine_model::applies(
-            &provider,
-            channel_id.get(),
-            tmux_session_name.as_deref(),
-        );
+    let persistent_tui_model = routine_metadata::persistent_tui_model(
+        metadata.as_ref(),
+        &provider,
+        channel_id.get(),
+        tmux_session_name.as_deref(),
+    );
     #[cfg(not(unix))]
     let persistent_tui_model = false;
     let adk_session_name = channel_name.clone();

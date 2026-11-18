@@ -58,6 +58,8 @@ pub(in crate::services::discord) use self::provider_dispatch::{
     install_root_recovery_launch, owner_drive_for_test, start_idle_for_test, wake_drive_for_test,
 };
 #[cfg(all(test, unix))]
+pub(in crate::services::discord) use headless_turn::routine_metadata::persistent_tui_model as routine_model_boundary_for_tests;
+#[cfg(all(test, unix))]
 pub(crate) use provider_dispatch::herdr_tests::exact_close_tests::OldTmux as PrivateOldTmuxForTest;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use provider_dispatch::routine_model::test_launch as routine_model_launch_for_tests;

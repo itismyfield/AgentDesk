@@ -6,7 +6,7 @@ use std::cell::RefCell;
 pub(crate) struct Requirement {
     pub provider: String,
     pub tmux: String,
-    pub model: String,
+    pub model: Option<String>,
     pub resume: Option<String>,
 }
 pub(crate) type Publisher = std::sync::Arc<dyn Fn(&Proof) -> Result<(), String> + Send + Sync>;
@@ -58,24 +58,53 @@ pub(crate) struct Proof {
     pub tmux: String,
     pub nonce: String,
     pub session: String,
-    pub model: String,
+    pub model: Option<String>,
     pub argv_sha256: String,
 }
 pub(crate) fn path(tmux: &str) -> std::path::PathBuf {
     crate::services::tmux_common::session_temp_path(tmux, "routine_model.json").into()
 }
-pub(crate) fn matches(provider: &str, tmux: &str, nonce: &str, session: &str, model: &str) -> bool {
-    std::fs::read(path(tmux))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Proof>(&b).ok())
-        .is_some_and(|p| {
-            p.provider == provider
-                && p.tmux == tmux
-                && p.nonce == nonce
-                && p.session == session
-                && p.model == model
-                && !p.argv_sha256.is_empty()
-        })
+fn read(tmux: &str) -> Option<Proof> {
+    serde_json::from_slice(&std::fs::read(path(tmux)).ok()?).ok()
+}
+
+/// A null claim needs the strict boundary when this pane already applied a routine model.
+#[cfg(unix)]
+pub(crate) fn tracks_live_execution(provider: &str, tmux: &str) -> bool {
+    use crate::services::platform::tmux::{PaneLiveness, pane_liveness};
+    use crate::services::tui_prompt_dedupe::binding_context::{
+        SpawnNonceMarker, observe_spawn_nonce_marker,
+    };
+
+    let tracked = match std::fs::read(path(tmux)) {
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        Ok(bytes) => serde_json::from_slice::<Proof>(&bytes).map_or(true, |proof| {
+            proof.provider == provider
+                && proof.tmux == tmux
+                && !matches!(
+                    observe_spawn_nonce_marker(tmux),
+                    SpawnNonceMarker::Known(ref nonce) if nonce != &proof.nonce
+                )
+        }),
+    };
+    tracked && pane_liveness(tmux) != PaneLiveness::DeadOrAbsent
+}
+
+pub(crate) fn matches(
+    provider: &str,
+    tmux: &str,
+    nonce: &str,
+    session: &str,
+    model: Option<&str>,
+) -> bool {
+    read(tmux).is_some_and(|p| {
+        p.provider == provider
+            && p.tmux == tmux
+            && p.nonce == nonce
+            && p.session == session
+            && p.model.as_deref() == model
+            && !p.argv_sha256.is_empty()
+    })
 }
 pub(crate) fn validate_selection(
     provider: &str,
@@ -110,7 +139,11 @@ pub(crate) fn prepared(
         return Ok(());
     };
     validate_selection(provider, tmux, session, resume)?;
-    let model = args
+    let option_end = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    let model = args[..option_end]
         .windows(2)
         .find(|p| matches!(p[0].as_str(), "--model" | "-m"))
         .map(|p| p[1].as_str());
@@ -121,7 +154,7 @@ pub(crate) fn prepared(
         "codex" => codex_resumed(args, session),
         _ => false,
     };
-    if model != Some(wanted.model.as_str()) || (wanted.resume.is_some() && !resumed) {
+    if model != wanted.model.as_deref() || (wanted.resume.is_some() && !resumed) {
         return Err("NotSent(\"routine_model_argv_mismatch\")".into());
     }
     use sha2::{Digest, Sha256};
@@ -200,7 +233,7 @@ pub(crate) fn before_payload(target: &serde_json::Value) -> Result<(), String> {
         &wanted.tmux,
         nonce,
         &proof.session,
-        &wanted.model,
+        wanted.model.as_deref(),
     ) || wanted.resume.as_ref().is_some_and(|s| s != &proof.session)
     {
         return Err("NotSent(\"routine_model_execution_changed\")".into());

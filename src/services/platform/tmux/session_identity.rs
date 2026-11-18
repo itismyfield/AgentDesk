@@ -17,6 +17,32 @@ pub(crate) fn require_managed_with_program(
     if session.starts_with("AgentDesk-") {
         return Ok(());
     }
+    let identity = read_managed(session, program, budget)?;
+    let scope = crate::services::session_identity_metadata::current_owner_scope()?;
+    if identity.owner_scope != scope {
+        return Err(format!(
+            "NotSent(\"unverified tmux session owner: {session}\")"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn matches_launch(expected: &ManagedIdentity) -> bool {
+    read_managed(
+        &expected.display_name,
+        Path::new("tmux"),
+        Duration::from_secs(3),
+    )
+    .is_ok_and(|identity| &identity == expected)
+}
+
+fn read_managed(
+    session: &str,
+    program: &Path,
+    budget: Duration,
+) -> Result<ManagedIdentity, String> {
+    validate_target(session).map_err(|e| e.to_string())?;
     let refused = || format!("NotSent(\"unverified tmux session owner: {session}\")");
     if session.trim().is_empty() {
         return Err(refused());
@@ -32,16 +58,11 @@ pub(crate) fn require_managed_with_program(
     ]);
     let output =
         wait_for_tmux_output(command, budget, "tmux session identity").map_err(|_| refused())?;
-    let identity = output
+    output
         .status
         .success()
         .then(|| std::str::from_utf8(&output.stdout).ok())
         .flatten()
         .and_then(ManagedIdentity::decode_environment)
-        .ok_or_else(refused)?;
-    let scope = crate::services::session_identity_metadata::current_owner_scope()?;
-    if identity.owner_scope != scope {
-        return Err(refused());
-    }
-    Ok(())
+        .ok_or_else(refused)
 }

@@ -223,14 +223,30 @@ async fn a_persistent_model_patch_resumes_the_same_native_session_before_input_p
     )
     .await;
     assert_eq!(parent_model.as_deref(), Some("channel-model"));
-    fx.tmux.mark_missing();
+    let claim = serde_json::json!({
+        "routine_id": routine.id,
+        "execution_strategy": "persistent",
+        "model": null,
+    });
+    assert!(
+        crate::services::discord::router::message_handler::routine_model_boundary_for_tests(
+            Some(&claim),
+            &provider,
+            fx.channel.get(),
+            Some(&fx.name),
+        ),
+        "null claim must check the live execution that applied the pinned model"
+    );
+    let inherited = prepare(prep(parent_model.as_deref())).await.unwrap();
+    assert!(!inherited.reused);
+    assert!(called(&fx.tmux.take_calls(), "kill-session"));
     let (argv, _, _) = fx.launch_required(
         fx.channel,
         &fx.name,
         SESSION,
-        Some("channel-model"),
+        parent_model.as_deref(),
         None,
-        None,
+        Some(inherited.requirement),
     );
     assert!(argv.windows(2).any(|p| p == ["--resume", SESSION]));
     assert!(argv.windows(2).any(|p| p == ["--model", "channel-model"]));

@@ -6,7 +6,7 @@ fn routine_model_requires_actual_argv_and_exact_execution_before_any_payload() {
     let wanted = Requirement {
         provider: "claude".into(),
         tmux: "adk-model-proof-fixture".into(),
-        model: "opus".into(),
+        model: Some("opus".into()),
         resume: Some("same-native".into()),
     };
     let target =
@@ -66,14 +66,14 @@ fn routine_model_requires_actual_argv_and_exact_execution_before_any_payload() {
             &wanted.tmux,
             "execution-old",
             "same-native",
-            "opus"
+            Some("opus")
         ));
         assert!(!matches(
             "claude",
             &wanted.tmux,
             "execution-b",
             "same-native",
-            "sonnet"
+            Some("sonnet")
         ));
     });
     std::fs::write(
@@ -83,7 +83,7 @@ fn routine_model_requires_actual_argv_and_exact_execution_before_any_payload() {
     .unwrap();
     let keys = std::cell::Cell::new(0);
     let mut wrong = wanted.clone();
-    wrong.model = "sonnet".into();
+    wrong.model = Some("sonnet".into());
     scope(wrong, || {
         assert!(
             crate::services::claude_tui::owner_input::payload(|| {
@@ -111,7 +111,7 @@ fn routine_codex_model_never_substitutes_fresh_for_a_required_resume() {
     let wanted = Requirement {
         provider: "codex".into(),
         tmux: "adk-model-codex-fixture".into(),
-        model: "codex-b".into(),
+        model: Some("codex-b".into()),
         resume: Some("native-codex".into()),
     };
     let options = crate::services::codex::CodexLaunchOptions::new("hello")
@@ -139,7 +139,50 @@ fn routine_codex_model_never_substitutes_fresh_for_a_required_resume() {
             &wanted.tmux,
             "nonce",
             "native-codex",
-            "codex-b"
+            Some("codex-b")
+        ));
+    });
+}
+
+#[test]
+fn routine_fix3_native_default_resume_has_its_own_argv_proof() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let session = "same-native";
+    let tmux = "adk-model-default-fixture";
+    let pinned = Requirement {
+        provider: "codex".into(),
+        tmux: tmux.into(),
+        model: Some("pinned-model".into()),
+        resume: Some(session.into()),
+    };
+    let options = crate::services::codex::CodexLaunchOptions::new("hello")
+        .with_resume_session_id(Some(session));
+    let pinned_args = crate::services::codex::build_codex_tui_args(
+        &options.clone().with_model(Some("pinned-model")),
+    );
+    let default_args = crate::services::codex::build_codex_tui_args(&options);
+    scope(pinned.clone(), || {
+        prepared("codex", tmux, session, true, "old", &pinned_args).unwrap();
+        assert!(matches("codex", tmux, "old", session, Some("pinned-model")));
+        assert!(!matches("codex", tmux, "old", session, None));
+    });
+    let inherited = Requirement {
+        model: None,
+        ..pinned
+    };
+    let target = serde_json::json!({"host":"tmux","owner":tmux,"execution_nonce":"new"});
+    scope(inherited, || {
+        assert!(prepared("codex", tmux, session, true, "new", &pinned_args).is_err());
+        assert!(before_payload(&target).is_err());
+        prepared("codex", tmux, session, true, "new", &default_args).unwrap();
+        assert!(before_payload(&target).is_ok());
+        assert!(matches("codex", tmux, "new", session, None));
+        assert!(!matches(
+            "codex",
+            tmux,
+            "old",
+            session,
+            Some("pinned-model")
         ));
     });
 }

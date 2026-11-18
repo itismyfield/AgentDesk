@@ -258,7 +258,7 @@ impl Fixture {
                             crate::services::discord::router::message_handler::routine_model_launch_for_tests(
                                 crate::services::discord::commands::routine_model::Input {
                                     shared: &strict_shared, provider: &ProviderKind::Claude, channel,
-                                    tmux: name, cwd, session: requirement.resume.as_deref(), model: Some(&requirement.model),
+                                    tmux: name, cwd, session: requirement.resume.as_deref(), model: requirement.model.as_deref(),
                                 }, strict_token, &clearance,
                             )
                         }

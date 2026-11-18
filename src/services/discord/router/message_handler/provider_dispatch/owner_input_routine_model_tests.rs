@@ -8,7 +8,7 @@ fn a_persistent_model_guard_reaches_the_owner_idle_effect_before_keys() {
     let applied = Requirement {
         provider: "claude".into(),
         tmux: rig.name.clone(),
-        model: "sonnet".into(),
+        model: Some("sonnet".into()),
         resume: None,
     };
     scope(applied.clone(), || {
@@ -23,7 +23,7 @@ fn a_persistent_model_guard_reaches_the_owner_idle_effect_before_keys() {
         .unwrap();
     });
     let requested = Requirement {
-        model: "opus".into(),
+        model: Some("opus".into()),
         ..applied
     };
     let result = scope(requested, || {
@@ -68,7 +68,7 @@ fn routine_fix2_claude_fallback_is_not_sent_by_the_owner() {
         let requirement = Requirement {
             provider: "claude".into(),
             tmux: rig.name.clone(),
-            model: "opus".into(),
+            model: Some("opus".into()),
             resume: Some("native".into()),
         };
         scope(requirement.clone(), || {
@@ -89,7 +89,11 @@ fn routine_fix2_claude_fallback_is_not_sent_by_the_owner() {
         });
         let applied = || {
             crate::services::tui_input::routine_model::matches(
-                "claude", &rig.name, &rig.nonce, "native", "opus",
+                "claude",
+                &rig.name,
+                &rig.nonce,
+                "native",
+                Some("opus"),
             )
         };
         assert!(applied());

@@ -98,17 +98,18 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
     .map_err(strict_model::start_error)?;
 
     end_observation.spawned(&prepared.context);
-    drop(fence);
-
     if let Some(first) = deferred {
         strict_model::submit(
             first,
-            &prepared.context,
+            &prepared,
             &validated_tail,
             cancel_token,
             session_selection,
             prompt,
+            fence,
         )?;
+    } else {
+        drop(fence);
     }
 
     Ok(Submitted {

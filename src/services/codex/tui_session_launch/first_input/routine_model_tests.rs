@@ -11,10 +11,11 @@ const PROMPT: &str = "strict Codex input";
 
 #[test]
 fn routine_fix2_codex_publisher_failure_precedes_argv_and_owner_submission() {
-    scenario(Some("fixture SQL execution failure"), &[]);
+    scenario(Some("fixture SQL execution failure"), &[], false);
     scenario(
         Some("NotSent(\"routine_model_session_record_changed\")"),
         &[],
+        false,
     );
 }
 
@@ -23,15 +24,27 @@ fn routine_fix2_codex_owner_submits_once_after_spawn_and_publication() {
     scenario(
         None,
         &["spawn", "publish", "load", "commit", "paste", "prompt"],
+        false,
     );
 }
 
 #[test]
 fn routine_fix2_codex_config_without_model_uses_native_default() {
-    scenario(None, &["spawn", "argv-prompt"]);
+    scenario(None, &["spawn", "argv-prompt"], false);
 }
 
-fn scenario(failure: Option<&'static str>, expected: &[&str]) {
+#[test]
+fn routine_fix3_codex_publisher_retry_can_start_without_a_native_turn() {
+    scenario(
+        Some("fixture SQL execution failure"),
+        &[
+            "spawn", "publish", "discard", "spawn", "publish", "load", "commit", "paste", "prompt",
+        ],
+        true,
+    );
+}
+
+fn scenario(failure: Option<&'static str>, expected: &[&str], retry: bool) {
     use std::io::Write;
     let default_model = expected.contains(&"argv-prompt");
     let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -49,10 +62,22 @@ fn scenario(failure: Option<&'static str>, expected: &[&str]) {
 if [ "${1-}" = -u ]; then shift; fi
 log="$AGENTDESK_ROOT_DIR/events"
 case "${1-}" in
-new-session) bash -c "${@: -1}" ;;
-list-panes) printf '0\n' ;;
+new-session)
+  for arg in "$@"; do
+    case "$arg" in AGENTDESK_IDENTITY=*) printf '%s\n' "$arg" > "$AGENTDESK_ROOT_DIR/pane" ;; esac
+  done
+  bash -c "${@: -1}" ;;
+show-environment) cat "$AGENTDESK_ROOT_DIR/pane" ;;
+kill-session) rm "$AGENTDESK_ROOT_DIR/pane"; printf 'discard\n' >> "$log" ;;
+list-panes|has-session)
+  if [ ! -f "$AGENTDESK_ROOT_DIR/pane" ]; then
+    printf "can't find session: fixture\n" >&2
+    exit 1
+  fi
+  printf '0\n' ;;
 capture-pane) cat "$AGENTDESK_ROOT_DIR/composer" ;;
 display-message)
+  [ -f "$AGENTDESK_ROOT_DIR/pane" ] || exit 1
   case "${@: -1}" in
     '#{pid} #{session_id} #{window_id} #{pane_id} #{pane_pid}') printf '123 $1 @1 %%1 234\n' ;;
     '#{pane_id}|#{pane_pid}|#{pane_width}|#{pane_height}|#{cursor_x}|#{cursor_y}|#{pane_in_mode}') printf '%%1|234|80|24|2|22|0\n' ;;
@@ -76,7 +101,6 @@ esac
     )
     .unwrap();
     std::fs::write(root.path().join("composer"), "\n╭──────────────────────────────────────────────────────────────╮\n│ ▌                                                            │\n╰──────────────────────────────────────────────────────────────╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send\n").unwrap();
-    crate::services::platform::tmux::session_identity_tests::mark_fixture_program(tmux);
     let binary = root.path().join("codex");
     std::fs::write(
         &binary,
@@ -106,7 +130,20 @@ done
     )
     .unwrap();
     let rollout = sessions.join(format!("rollout-{NATIVE}.jsonl"));
-    std::fs::write(&rollout, "{}\n").unwrap();
+    if retry {
+        let at = chrono::Utc::now() - chrono::Duration::minutes(1);
+        let record = |kind| {
+            serde_json::json!({"timestamp":at, "type":"event_msg",
+            "payload":{"type":kind,"turn_id":"old-A","root_turn_id":"old-A"}})
+        };
+        std::fs::write(
+            &rollout,
+            format!("{}\n{}\n", record("task_started"), record("task_complete")),
+        )
+        .unwrap();
+    } else {
+        std::fs::write(&rollout, "{}\n").unwrap();
+    }
     let _home = Guard::set_path_after_shared_test_env_lock("CODEX_HOME", &home);
     let _hooks = Guard::set_value_after_shared_test_env_lock(
         "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
@@ -124,7 +161,7 @@ done
         resume: true,
         reason: "fixture".into(),
         candidate_count: 1,
-        rollout_path: Some(rollout),
+        rollout_path: Some(rollout.clone()),
         rollout_start_offset: Some(3),
     };
     let name = "codex-model-publisher";
@@ -134,10 +171,24 @@ done
         ProviderKind::Codex,
     );
     let submitted = Arc::new(AtomicUsize::new(0));
-    let hook_submitted = submitted.clone();
     let launched = root.path().join("native-argv");
     let events = root.path().join("events");
+    if retry {
+        dedupe::register_tmux_runtime_binding(
+            name,
+            dedupe::TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+                output_path: rollout.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(NATIVE.into()),
+                last_offset: std::fs::metadata(&rollout).unwrap().len(),
+                relay_last_offset: None,
+            },
+        );
+    }
     let run = || {
+        let hook_submitted = submitted.clone();
         let options = CodexLaunchOptions::new(PROMPT)
             .with_resume_session_id(Some(NATIVE))
             .with_model((!default_model).then_some("routine-model"));
@@ -207,8 +258,9 @@ done
             provider: "codex".into(),
             tmux: name.into(),
             resume: Some(NATIVE.into()),
-            model: "routine-model".into(),
+            model: Some("routine-model".into()),
         };
+        let publications = AtomicUsize::new(0);
         scope_with_publisher(
             require,
             Some(Arc::new(move |proof| {
@@ -218,7 +270,7 @@ done
                 assert_eq!(argv.first(), Some(&"resume"));
                 assert!(
                     argv.windows(2)
-                        .any(|pair| pair == ["-m", proof.model.as_str()])
+                        .any(|pair| pair == ["-m", proof.model.as_deref().unwrap()])
                 );
                 assert!(argv.windows(2).any(|pair| pair == [NATIVE, "--"]));
                 std::fs::OpenOptions::new()
@@ -227,9 +279,31 @@ done
                     .unwrap()
                     .write_all(b"publish\n")
                     .unwrap();
-                failure.map_or(Ok(()), |failure| Err(failure.into()))
+                if !retry || publications.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return failure.map_or(Ok(()), |failure| Err(failure.into()));
+                }
+                Ok(())
             })),
-            run,
+            || {
+                let first = run();
+                if !retry {
+                    return first;
+                }
+                assert!(
+                    matches!(first, Err(reason) if reason.contains("fixture SQL execution failure"))
+                );
+                assert_eq!(submitted.load(Ordering::SeqCst), 0);
+                assert!(!root.path().join("native-input").exists());
+                let verdict = crate::services::codex_tui::readiness::judge(name);
+                assert!(
+                    matches!(
+                        verdict,
+                        crate::services::codex_tui::readiness::Verdict::Gone
+                    ),
+                    "retry's native gate still sees {verdict:?}"
+                );
+                run()
+            },
         )
     };
     let argv = std::fs::read_to_string(launched).unwrap();
@@ -247,7 +321,7 @@ done
             "native received the prompt before model publication: {argv}"
         );
     }
-    if let Some(failure) = failure {
+    if let Some(failure) = failure.filter(|_| !retry) {
         assert!(
             matches!(&result, Err(reason) if reason.starts_with("NotSent(") && reason.contains(failure)),
             "{:?}",
@@ -255,7 +329,7 @@ done
         );
         assert_eq!(submitted.load(Ordering::SeqCst), 0);
         assert!(!root.path().join("native-input").exists());
-        assert_eq!(side_effects, ["spawn", "publish"]);
+        assert_eq!(side_effects, ["spawn", "publish", "discard"]);
     } else {
         result.unwrap_or_else(|error| panic!("created Codex input failed: {error}"));
         assert_eq!(submitted.load(Ordering::SeqCst), 1);

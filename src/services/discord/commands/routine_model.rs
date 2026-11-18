@@ -57,10 +57,7 @@ pub(in crate::services::discord) async fn prepare(input: Input<'_>) -> Result<Pr
     } else {
         None
     };
-    let model = model
-        .filter(|model| !model.trim().is_empty())
-        .ok_or_else(|| refused("explicit model missing"))?
-        .to_string();
+    let model = model.filter(|model| !model.trim().is_empty());
     let live = match pane_liveness(tmux) {
         PaneLiveness::Live => true,
         PaneLiveness::DeadOrAbsent => false,
@@ -140,7 +137,7 @@ pub(in crate::services::discord) async fn prepare(input: Input<'_>) -> Result<Pr
     let requirement = Requirement {
         provider: provider.as_str().into(),
         tmux: tmux.into(),
-        model: model.clone(),
+        model: model.map(str::to_owned),
         resume: native.map(str::to_string),
     };
     let reused = live
@@ -155,7 +152,7 @@ pub(in crate::services::discord) async fn prepare(input: Input<'_>) -> Result<Pr
                         tmux,
                         &context.execution_nonce,
                         native,
-                        &model,
+                        model,
                     )
             });
     if live {
