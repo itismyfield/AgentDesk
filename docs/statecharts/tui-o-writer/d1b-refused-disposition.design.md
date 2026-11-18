@@ -40,7 +40,7 @@ does not read it.
 | E14 | `src/services/tui_o/channel_policy/adoption.rs:15-17` `#[cfg(test)] mod output_disposition` | fresh disposition, normalization and reason receipts compiled for tests only | installed: first fresh output normalizes, then adopts or posts one reason and discards |
 | E15 | `src/services/tui_o/writer/late_adopt/codex/normalization.rs`, `startup_dialog/normalize.rs`, `codex_tui/host_input/trust.rs`, `session_host/tmux_host.rs:66-74`, `platform/tmux.rs:641-656` | test-only (skip-pin `scripts/test_only_module_skip_pin.d/mac-mini-7651-d1a.txt`) | production; the skip-pin rows are removed by the census sync |
 | E16 | `src/services/discord/outbound/tui_rejection_notice.rs:98-150` `deliver`/`reconcile` | test-only notice | the single reason sender for E4-E14, keyed by `src/db/tui_output_disposition.rs` |
-| E17 | continuation (`d1b-carry.patch`: `normalization/continuation.rs`, `Output::adopt_resumed`) | not on the branch | resumed output under the same normalization and reason contract |
+| E17 | continuation (the D1b carry patch: a `normalization::continuation` child and `Output::adopt_resumed`) | not on the branch | resumed output under the same normalization and reason contract |
 | E18 | `src/services/tui_o/writer/late_adopt/codex.rs:302-316` admitted takeover | commits `[B@0]` only, as main | owes proven-undelivered earlier rollouts; never blocked by a delivered or unprovable one |
 | E19 | `src/services/discord/outbound/o_writer_legacy.rs:117-147` `codex_records` | returns only the current generation's frontier and receipts | also returns earlier generations' receipts (they are already kept in the delivery record) |
 | E20 | `src/services/tui_o/writer/late_adopt/codex/delivered.rs:70-115` `generation`/`owner`/`floor` | a receipt proves a floor only when the current generation has one rollout | an earlier generation's receipts prove the floor of that generation's sole rollout |
@@ -99,7 +99,7 @@ does not read it.
 - (b) the D1a fixtures run with the policy installed (no `cfg(test)` boundary): adopted output
   posts once, rejected output posts one reason and no body on every consumer E4-E6 and E13.
   Mutants: skip normalization, body on rejection, reason twice.
-- Continuation: the carry tests (`continuation_tests.rs`) with the installed policy.
+- Continuation: the carry patch's continuation tests with the installed policy.
 - (a) Records unit tests for earlier-generation attribution (sole rollout proves, two rollouts do
   not); host fixtures for delivered A (B commits, A not reposted), undelivered A (`[A, B]`),
   unprovable A (B alone, alarm), and the late-child path where Legacy delivers A after the actor's
