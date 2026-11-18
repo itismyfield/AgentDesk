@@ -478,22 +478,29 @@ pub async fn step_landing(
         worker.record_landing(tx, &state, fact).await?;
         return Ok(progress);
     }
-    if &job.host != worker.identity() {
+    let identity = worker.identity();
+    if job.host.host != identity.host || job.host.gate != identity.gate {
         return Err(WorkerError::Binding);
     }
-    let position = current(&state, worker.node(), &job, Utc::now());
-    if position.is_err() {
-        let reason = if Utc::now() >= job.deadline {
-            "landing preparation timed out"
-        } else {
-            "landing admission was revoked"
-        };
-        let fact = failed(reason, false);
-        let progress = progress(&fact)?;
-        worker.record_landing(tx, &state, fact).await?;
-        return Ok(progress);
-    }
-    let checkout = position.map_err(WorkerError::Rejected)?;
+    let checkout = match current(&state, worker.node(), &job, Utc::now()) {
+        Ok(checkout) if &job.host == identity => checkout,
+        position => {
+            let fact = if &job.host != identity {
+                failed(
+                    "landing host incarnation changed",
+                    job.preflight.is_some() && worker.effect_entry(&job.action_id).is_none(),
+                )
+            } else if Utc::now() >= job.deadline {
+                failed("landing preparation timed out", false)
+            } else {
+                debug_assert!(position.is_err());
+                failed("landing admission was revoked", false)
+            };
+            let progress = progress(&fact)?;
+            worker.record_landing(tx, &state, fact).await?;
+            return Ok(progress);
+        }
+    };
     drop(tx);
     if job.preflight.is_none() {
         worker.wait_for_headroom(headroom_wait).await?;
