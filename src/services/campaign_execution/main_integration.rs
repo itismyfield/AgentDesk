@@ -184,7 +184,12 @@ pub fn judge_main_adoption(request: &AdoptionRequest<'_>) -> Observation<MainAdo
     {
         return unknown("PR, main observation and integration name different targets".into());
     }
-    let (Some(merge_sha), Some(merged_at)) = (pr.merge_sha.clone(), pr.merged_at) else {
+    let (true, "closed", Some(merge_sha), Some(merged_at)) = (
+        pr.merged,
+        pr.state.as_str(),
+        pr.merge_sha.clone(),
+        pr.merged_at,
+    ) else {
         return Observation::NotYet {
             reason: format!("PR #{} is not merged ({})", pr.number, pr.state),
             observed_at: main.fetched_at,
@@ -343,6 +348,50 @@ pub fn judge_main_adoption(request: &AdoptionRequest<'_>) -> Observation<MainAdo
     observed(MainAdoption {
         evidence: Some(evidence),
         ..base
+    })
+}
+
+pub(super) fn matches_opened(
+    original: &crate::domain::campaign::landing::OpenedPr,
+    observed: &PrObservation,
+) -> bool {
+    observed.repository == Repository::Adk
+        && original.repository == observed.repository_identity
+        && original.number == observed.number
+        && original.head_sha == observed.head_sha
+        && original.head_ref == observed.head_ref
+        && original.base_ref == observed.base_ref
+}
+
+pub(super) fn judge_single_landing(
+    repo: &Path,
+    opened: &crate::domain::campaign::landing::OpenedPr,
+    receipt: &crate::domain::campaign::landing::MergeReceipt,
+    pr: &PrObservation,
+    main: &MainObservation,
+) -> Observation<MainAdoption> {
+    if !matches_opened(opened, pr) || pr.merge_sha.as_ref() != Some(&receipt.merge_sha) {
+        return Observation::Unknown {
+            reason: "PR does not match the merge receipt".into(),
+            last_observed_at: Some(main.fetched_at),
+        };
+    }
+    let requested = std::slice::from_ref(&receipt.artifact);
+    let integration = IntegrationCandidate {
+        repository: receipt.artifact.candidate.repository,
+        base_sha: receipt.artifact.candidate.base_sha.clone(),
+        head_sha: opened.head_sha.clone(),
+        members: requested.to_vec(),
+        integration_review: None,
+        integration_verified_sha: None,
+    };
+    judge_main_adoption(&AdoptionRequest {
+        repo,
+        target_branch: &opened.base_ref,
+        requested,
+        integration: &integration,
+        pr,
+        main,
     })
 }
 

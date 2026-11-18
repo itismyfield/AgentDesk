@@ -975,6 +975,8 @@ src/
 │   │   │   └── ci_tests.rs
 │   │   ├── commands/
 │   │   │   └── transaction_tests.rs
+│   │   ├── host_gate/
+│   │   │   └── authority.rs
 │   │   ├── adk_adapter.rs
 │   │   ├── adk_observe.rs
 │   │   ├── adk_observe_tests.rs
@@ -986,6 +988,8 @@ src/
 │   │   ├── adk_workspace_tests.rs
 │   │   ├── candidate_seal.rs
 │   │   ├── candidate_seal_tests.rs
+│   │   ├── ci_exception.rs
+│   │   ├── ci_exception_tests.rs
 │   │   ├── commands.rs
 │   │   ├── control.rs
 │   │   ├── control_tests.rs
@@ -1010,6 +1014,8 @@ src/
 │   │   ├── host_worker_tests.rs
 │   │   ├── landing_effects.rs
 │   │   ├── landing_effects_tests.rs
+│   │   ├── landing_merge.rs
+│   │   ├── landing_merge_tests.rs
 │   │   ├── landing_prepare.rs
 │   │   ├── landing_prepare_tests.rs
 │   │   ├── lifecycle.rs

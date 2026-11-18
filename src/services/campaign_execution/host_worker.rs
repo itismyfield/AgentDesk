@@ -318,7 +318,7 @@ impl HostWorker {
         self.commit(tx, state.event_sequence, command, now).await
     }
 
-    async fn commit(
+    pub(super) async fn commit(
         &self,
         tx: Transaction<'_, Postgres>,
         sequence: u64,
@@ -344,6 +344,26 @@ impl HostWorker {
             CommandOutcome::Decided(Err(rejection)) => Err(WorkerError::Rejected(rejection)),
             CommandOutcome::NotFound => Err(WorkerError::Binding),
         }
+    }
+
+    pub(super) fn admit_merge(
+        &mut self,
+        state: &CampaignState,
+        envelope: &host_gate::EffectEnvelope,
+        now: DateTime<Utc>,
+        initiate: impl FnOnce(&str) -> io::Result<Initiated<()>>,
+    ) -> Result<Admitted<()>, WorkerError> {
+        if envelope.node_id != self.node
+            || envelope.kind != ActionKind::Merge
+            || !matches!(
+                envelope.authority,
+                host_gate::EffectAuthority::LandingMerge { .. }
+            )
+        {
+            return Err(WorkerError::Binding);
+        }
+        self.fence_start(state, &envelope.action_id)?;
+        Ok(self.gate.admit_and_initiate(envelope, now, initiate)?)
     }
 
     pub(super) async fn record_landing(

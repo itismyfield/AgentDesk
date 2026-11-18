@@ -33,6 +33,12 @@ campaign-execution/CampaignLandingBefore.cfg	CampaignLanding	NoPushDuringCi	-
 campaign-execution/CampaignLandingNoHead.cfg	CampaignLanding	PrHeadVerified	-
 campaign-execution/CampaignLandingNoTimeout.cfg	CampaignLanding	-	PreparationSettles
 campaign-execution/CampaignLandingNoUnique.cfg	CampaignLanding	AtMostOnePr	-
+campaign-execution/CampaignMerge.cfg	CampaignMerge	-	-
+campaign-execution/CampaignMergeBefore.cfg	CampaignMerge	ExactMergedHead	-
+campaign-execution/CampaignMergeNoDeadline.cfg	CampaignMerge	-	OpenedEventuallySettles
+campaign-execution/CampaignMergeNoMain.cfg	CampaignMerge	MainNeedsWitness	-
+campaign-execution/CampaignMergeNoPair.cfg	CampaignMerge	OnlyPairedException	-
+campaign-execution/CampaignMergeNoStop.cfg	CampaignMerge	NoMergeAfterStop	-
 campaign-execution/CampaignNodeLifecycle.cfg	CampaignNodeLifecycle	-	-
 campaign-execution/CampaignNodeLifecycleBefore.cfg	CampaignNodeLifecycle	NoUnapprovedEntry	-
 campaign-execution/CampaignNodeLifecycleBudgetIgnored.cfg	CampaignNodeLifecycle	NoRetryAfterBudget	-
