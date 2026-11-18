@@ -31,6 +31,7 @@ async fn i7441b_custody_o_capture_initial_and_late_takeover_uses_original_input(
         b.turn_nonce = Some("current B".into());
         crate::services::discord::inflight::save_inflight_state(&b).unwrap();
         let outcome = preserve_or_publish(Handoff {
+            shared: &shared,
             provider: &ProviderKind::Claude,
             local: &f.row,
             admitted: None,
@@ -97,4 +98,78 @@ async fn i7441b_custody_o_capture_initial_and_late_takeover_uses_original_input(
         );
         reset_takeover();
     }
+}
+
+// A refused destination's episode is discarded with one durable reason before any custody
+// exists: no raw snapshot is written, so nothing waits for a later resume to scrub it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_refused_episode_keeps_no_custody_and_holds_one_reason_pg() {
+    use crate::db::tui_output_disposition as disposition;
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "i7651_refused_custody",
+        "refused custody",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    let f = Fixture::new(765_141, ProviderKind::Claude, &["refused answer"]).await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let kind = crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    let _boot = crate::services::tui_o::cutover::test_override::force_candidates(&[(
+        f.row.channel_id,
+        kind,
+    )]);
+    let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+    snapshot
+        .candidate(f.row.channel_id)
+        .unwrap()
+        .release(f.row.channel_id);
+    for _ in 0..2 {
+        let outcome = preserve_or_publish(Handoff {
+            shared: &shared,
+            provider: &ProviderKind::Claude,
+            local: &f.row,
+            admitted: None,
+            content: &f.body,
+            delivery_body: None,
+            empty_recovery_notice: None,
+            response_sent_offset: 0,
+            channel_id: ChannelId::new(f.row.channel_id),
+            old_anchor: MessageId::new(f.row.current_msg_id),
+            watcher_owner_channel_id: ChannelId::new(f.row.channel_id),
+            tmux_last_offset: Some(f.row.last_offset),
+            cancelled: false,
+            cancel_source: String::new(),
+            children: &[],
+            dispatch_id: None,
+            adk_cwd: None,
+            should_complete: false,
+            should_fail: false,
+            resume_failure: false,
+            recovery_retry: false,
+        })
+        .await;
+        assert!(matches!(outcome, Outcome::Discarded));
+    }
+    let kept = crate::services::discord::terminal_delivery_custody::drain_for_test(
+        |payload, _| async move { (payload, Ok(true)) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(kept, 0, "no raw custody of the refused episode");
+    assert_eq!(
+        disposition::unposted(&pool).await.unwrap().len(),
+        1,
+        "one reason"
+    );
+    assert_eq!(
+        f.sends.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no body"
+    );
+    pool.close().await;
+    db.drop().await;
 }

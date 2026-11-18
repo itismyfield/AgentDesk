@@ -495,6 +495,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "handle_known_owner:peek",
         "resume_with_gateway:peek",
         "resume_with_gateway:claim",
+        "episode_closed:peek",
     ),
     "src/services/discord/turn_bridge/watcher_handoff.rs": ("o_body_needs_bridge_terminal:peek",),
     "src/services/discord/turn_finalizer/watcher_backstop.rs": (
