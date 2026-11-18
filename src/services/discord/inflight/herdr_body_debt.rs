@@ -105,6 +105,55 @@ pub(super) fn archive(
     })
 }
 
+/// A retained snapshot of a channel whose adoption was refused; its file goes only after the
+/// reason intent and the debt deletion commit.
+pub(in crate::services::discord) struct Retained {
+    path: PathBuf,
+    pub(in crate::services::discord) episode: String,
+    pub(in crate::services::discord) row: InflightTurnState,
+}
+
+/// `channel`'s retained snapshots; an unreadable one stays for a later read.
+pub(in crate::services::discord) fn retained(
+    provider: &ProviderKind,
+    channel: u64,
+) -> Vec<Retained> {
+    let Ok(entries) = directory(provider).and_then(|d| fs::read_dir(d).map_err(|e| e.to_string()))
+    else {
+        return Vec::new();
+    };
+    let mut kept = Vec::new();
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        match store::read(&path, provider).and_then(|record| Ok((record.row()?, record))) {
+            Ok((row, record)) if record.channel_id == channel => kept.push(Retained {
+                path,
+                episode: record.episode_key,
+                row,
+            }),
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "retained body debt needs a later read")
+            }
+        }
+    }
+    kept
+}
+
+impl Retained {
+    /// Removes the snapshot; an already missing file counts as removed.
+    pub(in crate::services::discord) fn remove(self) -> Result<(), String> {
+        match fs::remove_file(&self.path) {
+            Ok(()) => super::super::runtime_store::sync_removed(&self.path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        Ok(())
+    }
+}
+
 impl Archived {
     pub(super) fn verify(&self, provider: &ProviderKind, row_json: &str) -> Result<(), String> {
         if sha(row_json.as_bytes()) != self.row_sha256 {

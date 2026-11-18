@@ -16,6 +16,8 @@ use crate::services::tui_o::store::OStore;
 #[cfg(test)]
 pub(crate) mod output_disposition;
 
+#[cfg(any(test, unix))]
+pub(crate) mod episode_key;
 mod first_turn;
 pub(crate) use first_turn::{
     FirstAdmission, FirstPause, FirstProof, digest as first_prompt_digest,
@@ -35,7 +37,8 @@ pub(crate) enum Adoption {
     /// The writer host waits for a turn to close and retries; the body is held meanwhile, and
     /// only that host sets or leaves it.
     Deferred,
-    /// The adoption was refused: no store is written and the body stays held, never Legacy's.
+    /// The adoption was refused: no store is written and a held body is discarded with one
+    /// reason, never Legacy's.
     Refused,
 }
 

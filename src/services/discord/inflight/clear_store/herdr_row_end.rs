@@ -1,4 +1,5 @@
-//! Exact prior-process Herdr row clear after notice, O evidence, or a durable body archive.
+//! Exact prior-process Herdr row clear after notice, O evidence, a durable body archive, or a
+//! refused adoption's persisted reason intent.
 
 use super::*;
 
@@ -12,7 +13,18 @@ impl InflightTurnState {
         current_generation: u64,
         silent: bool,
     ) -> GuardedClearOutcome {
-        self.clear_restarted_herdr(provider, current_generation, silent, None)
+        let gate = if silent { Gate::Silent } else { Gate::Notice };
+        self.clear_restarted_herdr(provider, current_generation, gate)
+    }
+
+    /// Clears a row whose adoption is still Refused under the row lock, once its reason intent
+    /// is durable; nothing of the body is kept.
+    pub(in crate::services::discord) fn clear_restarted_herdr_refused(
+        &self,
+        provider: &ProviderKind,
+        current_generation: u64,
+    ) -> GuardedClearOutcome {
+        self.clear_restarted_herdr(provider, current_generation, Gate::Refused)
     }
 
     pub(in crate::services::discord) fn clear_restarted_herdr_body(
@@ -21,15 +33,14 @@ impl InflightTurnState {
         current_generation: u64,
         debt: &super::super::herdr_body_debt::Archived,
     ) -> GuardedClearOutcome {
-        self.clear_restarted_herdr(provider, current_generation, false, Some(debt))
+        self.clear_restarted_herdr(provider, current_generation, Gate::Debt(debt))
     }
 
     fn clear_restarted_herdr(
         &self,
         provider: &ProviderKind,
         current_generation: u64,
-        silent: bool,
-        debt: Option<&super::super::herdr_body_debt::Archived>,
+        gate: Gate<'_>,
     ) -> GuardedClearOutcome {
         let Some(root) = inflight_runtime_root() else {
             return GuardedClearOutcome::Missing;
@@ -51,13 +62,19 @@ impl InflightTurnState {
         if !matches_restarted(self, &fresh, current_generation) {
             return GuardedClearOutcome::UserMsgMismatch;
         }
-        if let Some(debt) = debt {
-            if !debt_eligible(&fresh) || debt.verify(provider, &data).is_err() {
-                return GuardedClearOutcome::IoError;
+        match gate {
+            Gate::Debt(debt) => {
+                if !debt_eligible(o_still_owns(&fresh)) || debt.verify(provider, &data).is_err() {
+                    return GuardedClearOutcome::IoError;
+                }
             }
-        }
-        if silent && o_still_owns(&fresh) != Ok(true) {
-            return GuardedClearOutcome::UserMsgMismatch;
+            Gate::Silent if o_still_owns(&fresh) != Ok(true) => {
+                return GuardedClearOutcome::UserMsgMismatch;
+            }
+            Gate::Refused if o_still_owns(&fresh) != Err(refused()) => {
+                return GuardedClearOutcome::UserMsgMismatch;
+            }
+            _ => {}
         }
         // Pending circuit evidence outlives the row, as the plain clear keeps it.
         if handoff_before_discard_locked(&lock).is_err() {
@@ -71,7 +88,7 @@ impl InflightTurnState {
             &path,
         );
         let removed = super::remove_row(&path).unwrap_or(GuardedClearOutcome::IoError);
-        if debt.is_some() && removed == GuardedClearOutcome::Cleared {
+        if matches!(gate, Gate::Debt(_)) && removed == GuardedClearOutcome::Cleared {
             super::super::super::runtime_store::sync_removed(&path);
         }
         removed
@@ -86,12 +103,23 @@ fn o_still_owns(
     peek(fresh.channel_id, fresh.runtime_kind)
 }
 
-fn debt_eligible(row: &InflightTurnState) -> bool {
-    use crate::services::tui_o::cutover::IdentityError::{AdoptionRefused, AwaitingAdoption};
-    matches!(
-        o_still_owns(row),
-        Ok(true) | Err(AwaitingAdoption | AdoptionRefused)
-    )
+/// What a clear must still see under the row lock.
+#[derive(Clone, Copy)]
+enum Gate<'a> {
+    Notice,
+    Silent,
+    Refused,
+    Debt(&'a super::super::herdr_body_debt::Archived),
+}
+
+fn refused() -> crate::services::tui_o::cutover::IdentityError {
+    crate::services::tui_o::cutover::IdentityError::AdoptionRefused
+}
+
+/// Only an owned or still-waiting adoption keeps a body; a refused one is discarded instead.
+fn debt_eligible(ownership: Result<bool, crate::services::tui_o::cutover::IdentityError>) -> bool {
+    use crate::services::tui_o::cutover::IdentityError::AwaitingAdoption;
+    matches!(ownership, Ok(true) | Err(AwaitingAdoption))
 }
 
 impl InflightTurnState {
@@ -110,19 +138,23 @@ impl InflightTurnState {
             let data = fs::read_to_string(&path).map_err(|e| e.to_string())?;
             let fresh: InflightTurnState =
                 serde_json::from_str(&data).map_err(|e| e.to_string())?;
-            if raw_before_start_receipt(&data)
-                || !matches_restarted(self, &fresh, current)
-                || !debt_eligible(&fresh)
-            {
-                return Err("body archive episode or output observation changed".into());
+            if raw_before_start_receipt(&data) || !matches_restarted(self, &fresh, current) {
+                return Err("body archive episode changed".into());
             }
-            super::super::herdr_body_debt::archive(
-                provider,
-                &fresh,
-                &data,
-                evidence,
-                recovery_notice,
-            )
+            // The last ownership check and the publish share the adoption's lock.
+            let observe = crate::services::tui_o::cutover::with_peeked_o_output;
+            observe(fresh.channel_id, fresh.runtime_kind, |ownership| {
+                if !debt_eligible(ownership) {
+                    return Err("body archive output observation changed".into());
+                }
+                super::super::herdr_body_debt::archive(
+                    provider,
+                    &fresh,
+                    &data,
+                    evidence,
+                    recovery_notice,
+                )
+            })
         })();
         drop(lock);
         result

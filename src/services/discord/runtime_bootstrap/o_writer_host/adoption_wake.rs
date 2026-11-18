@@ -20,6 +20,8 @@ pub(super) enum Held {
 }
 
 /// Retired rowless debts still wake this runtime's existing queue; custody is rechecked there.
+/// A refused channel's debt is discarded with one reason instead, and persisted reason intents
+/// resume without their rows.
 pub(super) async fn boot(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -63,7 +65,16 @@ pub(super) async fn boot(
         channels.push(channel)
     });
     let mut woken = Vec::new();
+    let mut refused = Vec::new();
     for channel in channels {
+        let ownership = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+            channel,
+            Some(kind),
+        );
+        if ownership == Err(crate::services::tui_o::cutover::IdentityError::AdoptionRefused) {
+            refused.push(channel);
+            continue;
+        }
         let authorized = match snapshot.execution(channel) {
             Some(view) => match view.permit {
                 Ok(permit) => {
@@ -89,12 +100,7 @@ pub(super) async fn boot(
                     )
             }
         };
-        if authorized
-            && crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
-                channel,
-                Some(kind),
-            ) == Ok(true)
-        {
+        if authorized && ownership == Ok(true) {
             crate::services::discord::queue_io::schedule_writer_ready_queue_kick(
                 Arc::clone(shared),
                 provider.clone(),
@@ -103,6 +109,10 @@ pub(super) async fn boot(
             woken.push(channel);
         }
     }
+    #[cfg(unix)]
+    crate::services::discord::recovery_engine::refused_discard::resume(shared, provider, refused);
+    #[cfg(not(unix))]
+    drop(refused);
     woken
 }
 

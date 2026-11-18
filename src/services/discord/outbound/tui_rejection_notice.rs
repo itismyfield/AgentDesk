@@ -20,6 +20,7 @@ pub(crate) trait NoticePort {
         content: &str,
         nonce: &str,
     ) -> impl Future<Output = PostResult> + Send;
+    #[cfg(test)]
     fn lookup(
         &self,
         channel: u64,
@@ -83,6 +84,7 @@ impl NoticePort for GatewayNoticePort {
             Err(_) => PostResult::Uncertain,
         }
     }
+    #[cfg(test)]
     async fn lookup(&self, channel: u64, message: u64) -> Result<Option<Observation>, String> {
         self.http
             .get_message(
@@ -121,6 +123,8 @@ pub(crate) async fn deliver(
     }
 }
 
+/// History reconciliation needs the posted message id; no production source supplies one yet.
+#[cfg(test)]
 pub(crate) async fn reconcile(
     pool: &PgPool,
     id: &Identity,
@@ -149,5 +153,6 @@ pub(crate) async fn reconcile(
     ))
 }
 
+#[cfg(test)]
 #[path = "tui_rejection_notice_tests.rs"]
 pub(crate) mod tests;

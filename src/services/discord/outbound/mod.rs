@@ -39,7 +39,7 @@ pub(crate) mod send_to_agent;
 pub(in crate::services::discord) mod serenity_reference;
 pub(crate) mod source_registry;
 mod transport;
-#[cfg(test)]
+#[cfg(any(test, unix))]
 pub(crate) mod tui_rejection_notice;
 pub(in crate::services::discord) mod turn_output_controller; // #3089 A1
 

@@ -27,7 +27,7 @@ pub(crate) enum IdentityError {
     /// O has not adopted the channel yet; the body is held until it does.
     #[error("the channel awaits O adoption")]
     AwaitingAdoption,
-    /// O refused the channel's adoption; the body stays held for an operator or a restart.
+    /// O refused or released the channel's adoption; a held body is discarded with one reason.
     #[error("the channel's O adoption was refused")]
     AdoptionRefused,
     #[error("thread child has no resolved parent policy or decided adoption")]
@@ -100,6 +100,51 @@ pub(crate) fn peek_o_owns_tui_output_for_channel_tmux(
     session: Option<&str>,
 ) -> Result<bool, IdentityError> {
     decide(channel_id, Use::Peek, || session_kind(session)).map(|peeked| peeked.owned)
+}
+
+/// Runs `f` on the output observation while the adoption it was read from stays locked, so a
+/// Refused or Released transition of that adoption lands before the read or after `f` returns.
+#[cfg(unix)]
+pub(crate) fn with_peeked_o_output<R>(
+    channel_id: u64,
+    kind: Option<RuntimeHandoffKind>,
+    f: impl FnOnce(Result<bool, IdentityError>) -> R,
+) -> R {
+    let observed = peek_o_owns_tui_output_for_channel(channel_id, kind);
+    let deciding = super::test_override::with_channels(|snapshot| {
+        snapshot.and_then(|snapshot| deciding_candidate(snapshot, channel_id))
+    });
+    let Some(candidate) = deciding else {
+        return f(observed);
+    };
+    let state = candidate.lock();
+    // A refusal between the read and the lock wins; the guard then holds through `f`.
+    let observed = match adopted(*state) {
+        Err(IdentityError::AdoptionRefused) => Err(IdentityError::AdoptionRefused),
+        _ => observed,
+    };
+    f(observed)
+}
+
+/// The adoption `decide_with_snapshot` reads for `channel_id`, in the same order.
+#[cfg(unix)]
+fn deciding_candidate(
+    snapshot: &BootChannels,
+    channel_id: u64,
+) -> Option<channel_policy::Candidate> {
+    if let Some(reserved) = snapshot.unresolved_child(channel_id) {
+        return Some(reserved);
+    }
+    let child = snapshot.child(channel_id).and_then(Result::ok);
+    let late_child = child
+        .as_ref()
+        .is_some_and(|child| child.body_owner() == Some(false));
+    match snapshot.execution(channel_id) {
+        Some(execution) if execution.permit.is_err() || !late_child => Some(execution.candidate),
+        _ => child
+            .map(|child| child.candidate)
+            .or_else(|| snapshot.candidate(channel_id).cloned()),
+    }
 }
 
 /// Where a Legacy body goes, with how the destination's runtime kind is found.

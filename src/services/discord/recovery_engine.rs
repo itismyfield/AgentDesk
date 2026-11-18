@@ -126,6 +126,9 @@ mod herdr_before_start_restart;
 #[cfg(unix)]
 #[path = "recovery_engine/herdr_row_end.rs"]
 pub(in crate::services::discord) mod herdr_row_end;
+#[cfg(unix)]
+#[path = "recovery_engine/refused_discard.rs"]
+pub(in crate::services::discord) mod refused_discard;
 #[cfg(all(test, unix))]
 #[path = "recovery_engine/turn_mode_restart_tests.rs"]
 mod turn_mode_restart_tests;

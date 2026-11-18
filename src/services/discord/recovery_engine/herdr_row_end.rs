@@ -238,14 +238,16 @@ async fn settle_row(
     let seen = observe(pool, &shared.token_hash, provider, &row).await?;
     use crate::services::tui_o::cutover::IdentityError::{AdoptionRefused, AwaitingAdoption};
     let ownership = o_owns_output(&row);
-    let held_body = matches!(ownership, Err(AwaitingAdoption | AdoptionRefused));
-    if ownership.is_err() && !held_body {
+    // A waiting adoption keeps the body as debt; a refused one discards it with one reason.
+    let held_body = ownership == Err(AwaitingAdoption);
+    let refused = ownership == Err(AdoptionRefused);
+    if ownership.is_err() && !held_body && !refused {
         return Err("o_owner_unreadable");
     }
     let o_owned = ownership == Ok(true);
     let settle = outcome::settle(provider, &row, &seen.outcome, seen.idle, o_owned);
     let silent = settle == Settle::Silent;
-    let http = if !silent || held_body {
+    let http = if !silent || held_body || refused {
         let http = shared
             .serenity_http_or_token_fallback()
             .ok_or("http_unavailable")?;
@@ -281,7 +283,7 @@ async fn settle_row(
     tests::hook("after_archive").await;
     diagnostics::phase(provider, channel.get(), "commit");
     commit(pool, &seen).await?;
-    if !silent && !held_body {
+    if !silent && !held_body && !refused {
         let http = http.as_ref().ok_or("http_unavailable")?;
         diagnostics::phase(provider, channel.get(), "notice");
         if notice(http, shared, provider, &row, settle).await != RecoveryRelayOutcome::Delivered {
@@ -289,6 +291,15 @@ async fn settle_row(
             return Err("notice_not_delivered");
         }
     }
+    // The refused body's reason intent is durable before anything of the row is released.
+    let reason = if refused {
+        let id = super::refused_discard::identity(provider, &row).ok_or("reason_unkeyed")?;
+        let persisted = super::refused_discard::persist(pool, &id).await;
+        persisted.map_err(|_| "reason_intent_not_durable")?;
+        Some(id)
+    } else {
+        None
+    };
     let report = super::restart_report::load_restart_report(provider, row.channel_id);
     #[cfg(test)]
     tests::hook("before_clear").await;
@@ -297,8 +308,10 @@ async fn settle_row(
     }
     diagnostics::phase(provider, channel.get(), "clear");
     let (snapshot, owner) = (row.clone(), provider.clone());
+    let discarding = reason.is_some();
     let clear = move || match archived {
         Some(debt) => snapshot.clear_restarted_herdr_body(&owner, current, &debt),
+        None if discarding => snapshot.clear_restarted_herdr_refused(&owner, current),
         None => snapshot.clear_restarted_herdr_row(&owner, current, silent),
     };
     let cleared = tokio::task::spawn_blocking(clear).await;
@@ -313,6 +326,13 @@ async fn settle_row(
     tests::hook("before_closed").await;
     let notice = super::super::queue_io::input_owner::closed::closed;
     notice(shared, provider, channel, "herdr_row_end");
+    if let (Some(id), Some(http)) = (reason, http.as_ref()) {
+        // A snapshot kept while the adoption waited goes with the same reason path.
+        let mut ids = super::refused_discard::discard_retained(pool, provider, channel.get()).await;
+        ids.retain(|kept| kept != &id);
+        ids.insert(0, id);
+        super::refused_discard::post(http, pool, &ids).await;
+    }
     if silent {
         placeholder::spawn_cleanup(shared, provider, &row);
     }

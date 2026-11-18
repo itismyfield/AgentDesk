@@ -717,17 +717,93 @@ fn a_deferred_restarted_herdr_body_releases_its_row_into_durable_debt_pg() {
 }
 
 #[test]
-fn a_refused_restarted_herdr_body_releases_its_row_into_durable_debt_pg() {
+fn a_refused_restarted_herdr_body_posts_one_reason_and_keeps_nothing_pg() {
     in_child(
         concat!(
             module_path!(),
-            "::a_refused_restarted_herdr_body_releases_its_row_into_durable_debt_pg"
+            "::a_refused_restarted_herdr_body_posts_one_reason_and_keeps_nothing_pg"
         ),
         1_479_671_399_000_152,
         ProviderKind::Claude,
         Owner::Refused,
-        |rig| held_body_retires(rig, 1_479_671_399_000_152),
+        |rig| async move {
+            let run = Run::start(&rig, routed_claude(1_479_671_399_000_152)).await;
+            run.relay.set(|pane| pane.exited = true);
+            run.pass().await;
+            assert!(run.durable().is_none(), "the refused row is released");
+            assert!(
+                debts(&run).is_empty(),
+                "nothing of the refused body is kept"
+            );
+            assert_reason_once(&run, &run.row).await;
+            run.pass().await;
+            assert_reason_once(&run, &run.row).await;
+            run.close().await;
+        },
     );
+}
+
+#[test]
+fn a_waiting_body_kept_as_debt_is_discarded_with_one_reason_once_refused_pg() {
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_waiting_body_kept_as_debt_is_discarded_with_one_reason_once_refused_pg"
+        ),
+        1_479_671_399_000_171,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            let channel = 1_479_671_399_000_171;
+            let run = Run::start(&rig, routed_claude(channel)).await;
+            run.relay.set(|pane| pane.exited = true);
+            run.pass().await;
+            assert!(run.durable().is_none() && !debts(&run).is_empty());
+            assert!(
+                run.mock.delivered_texts().is_empty(),
+                "a waiting body posts nothing"
+            );
+            let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+            snapshot.candidate(channel).unwrap().release(channel);
+            let discard =
+                crate::services::discord::recovery_engine::refused_discard::discard_retained;
+            let ids = discard(&run.pool, &run.provider, channel).await;
+            let http = run.shared.serenity_http_or_token_fallback().unwrap();
+            for _ in 0..2 {
+                crate::services::discord::recovery_engine::refused_discard::post(
+                    &http, &run.pool, &ids,
+                )
+                .await;
+            }
+            assert!(debts(&run).is_empty(), "the kept body is gone");
+            assert_reason_once(&run, &run.row).await;
+            run.close().await;
+        },
+    );
+}
+
+fn routed_claude(channel: u64) -> Setup {
+    Setup {
+        provider: ProviderKind::Claude,
+        channel,
+        routed: true,
+    }
+}
+
+/// One posted reason and no body; its intent holds the attempt, so no start posts it again.
+async fn assert_reason_once(run: &Run, row: &inflight::InflightTurnState) {
+    use crate::db::tui_output_disposition as disposition;
+    let reason = disposition::Reason::AdoptionRefused.message();
+    let posted = run.mock.delivered_texts();
+    assert_eq!(posted, vec![reason.to_string()], "one reason and no body");
+    let id =
+        crate::services::discord::recovery_engine::refused_discard::identity(&run.provider, row);
+    let recorded = disposition::record(&run.pool, &id.unwrap()).await.unwrap();
+    assert_eq!(
+        recorded.map(|(reason, _)| reason),
+        Some(disposition::Reason::AdoptionRefused)
+    );
+    assert!(disposition::unposted(&run.pool).await.unwrap().is_empty());
 }
 
 #[test]

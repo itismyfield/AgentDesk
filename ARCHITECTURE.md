@@ -2263,6 +2263,8 @@ src/
 │   │   │   ├── producer_resume.rs
 │   │   │   ├── rebind_runtime.rs
 │   │   │   ├── recovery_completion_outcome_tests.rs
+│   │   │   ├── refused_discard.rs
+│   │   │   ├── refused_discard_tests.rs
 │   │   │   ├── relay_output_replacements.rs
 │   │   │   ├── restore_inflight.rs
 │   │   │   ├── restore_persist_outcome.rs
@@ -4264,6 +4266,7 @@ src/
 │   │   │   ├── adoption/
 │   │   │   │   ├── atomic_tests.rs
 │   │   │   │   ├── body_check.rs
+│   │   │   │   ├── episode_key.rs
 │   │   │   │   ├── first_turn.rs
 │   │   │   │   ├── first_turn_tests.rs
 │   │   │   │   ├── output_disposition.rs
