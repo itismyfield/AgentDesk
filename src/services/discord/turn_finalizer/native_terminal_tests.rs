@@ -23,19 +23,9 @@ async fn stored_interrupt_barrier_replays(boot: bool) {
     barrier_receipt(&f);
     let registrations = f.history.native_classification_registrations().unwrap();
     let (own, end) = (rows[0].len() as u64, rows.concat().len() as u64);
-    let barrier = Barrier {
-        namespace: "native-fixture".into(),
-        ticket: f.ticket.clone(),
-        membership_range: [0, own],
-        membership_row: "own".into(),
-        foreign_range: [own, end],
-        foreign_row: "stop".into(),
-        foreign_hashes: crate::services::tui_input::human_frame::history::v2::native::frame_hashes(
-            mark,
-        ),
-        through: end,
-        registrations_fingerprint: registrations_fingerprint(&registrations).unwrap(),
-    };
+    let hashes = crate::services::tui_input::human_frame::history::v2::native::frame_hashes(mark);
+    let stamp = registrations_fingerprint(&registrations).unwrap();
+    let barrier: Barrier = serde_json::from_value(serde_json::json!({"namespace":"native-fixture","ticket":f.ticket,"membership_range":[0,own],"membership_row":"own","foreign_range":[own,end],"foreign_row":"stop","foreign_hashes":hashes,"through":end,"registrations_fingerprint":stamp})).unwrap();
     assert!(f.history.record_native_barrier(&barrier).unwrap());
     if boot {
         let inputs = super::super::native_prepare::BootInputs::prepare(&root, 2).unwrap();
@@ -82,11 +72,7 @@ async fn stored_interrupt_barrier_replays(boot: bool) {
 }
 
 #[tokio::test]
-async fn native_8148_terminal_stored_interrupt_barrier_replays_to_cancelled_pg() {
+async fn native_8148_terminal_stored_interrupt_barrier_replays_live_and_after_boot_pg() {
     stored_interrupt_barrier_replays(false).await;
-}
-
-#[tokio::test]
-async fn native_8148_terminal_stored_interrupt_barrier_replays_after_boot_pg() {
     stored_interrupt_barrier_replays(true).await;
 }

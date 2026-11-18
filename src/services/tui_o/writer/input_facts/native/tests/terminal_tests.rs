@@ -8,7 +8,6 @@ fn stop(content: Value) -> Value {
     json!({"type":"user","uuid":"stop","sessionId":"parent","message":{"content":content}})
 }
 
-/// One keyed input with its durable receipt, followed by `closer`.
 fn owned(f: &Fixture, closer: Value) -> Ticket {
     let ticket = f.register("ours", "our request");
     f.append(&[user("own", "our request"), closer]);
@@ -17,7 +16,7 @@ fn owned(f: &Fixture, closer: Value) -> Ticket {
     ticket
 }
 
-/// The authenticated prefix analysed with its last `live` rows appended as captured records.
+/// The prefix analysed with its last `live` rows appended as captured records.
 fn projected(f: &Fixture, live: usize) -> Analysis {
     let bytes = std::fs::read(&f.binding.source.path).unwrap();
     let ends = bytes.iter().enumerate().filter(|(_, b)| **b == b'\n');
@@ -39,32 +38,23 @@ fn projected(f: &Fixture, live: usize) -> Analysis {
 /// The barrier the earlier Prompt reading stored for the strict interrupt row, after `edit`.
 fn stored(f: &Fixture, ticket: &Ticket, edit: fn(&mut Barrier)) -> (Barrier, String) {
     let bytes = std::fs::read(&f.binding.source.path).unwrap();
-    let own = bytes.iter().position(|b| *b == b'\n').unwrap() as u64 + 1;
+    let (own, end) = (
+        bytes.iter().position(|b| *b == b'\n').unwrap() + 1,
+        bytes.len(),
+    );
     let registrations = f.history.native_classification_registrations().unwrap();
     let stamp = registrations_fingerprint(&registrations).unwrap();
-    let mut barrier = Barrier {
-        namespace: "native-b1".into(),
-        ticket: ticket.clone(),
-        membership_range: [0, own],
-        membership_row: "own".into(),
-        foreign_range: [own, bytes.len() as u64],
-        foreign_row: "stop".into(),
-        foreign_hashes: frame_hashes(MARK),
-        through: bytes.len() as u64,
-        registrations_fingerprint: stamp.clone(),
-    };
+    let mut barrier: Barrier = serde_json::from_value(json!({"namespace":"native-b1","ticket":ticket,"membership_range":[0,own],"membership_row":"own","foreign_range":[own,end],"foreign_row":"stop","foreign_hashes":frame_hashes(MARK),"through":end,"registrations_fingerprint":stamp})).unwrap();
     edit(&mut barrier);
     assert!(f.history.record_native_barrier(&barrier).unwrap());
     (barrier, stamp)
 }
 
-fn outcome(evidence: &Evidence) -> Outcome {
-    let proof = serde_json::to_value(evidence).unwrap();
-    Outcome {
-        disposition: evidence.disposition.clone(),
-        range: Some([evidence.range.0, evidence.range.1]),
-        extra: serde_json::Map::from_iter([("native_proof".into(), proof)]),
-    }
+fn outcome(e: &Evidence) -> Outcome {
+    serde_json::from_value(
+        json!({"disposition":e.disposition,"range":[e.range.0,e.range.1],"native_proof":e}),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -72,25 +62,23 @@ fn native_8148_terminal_strict_interrupt_cancels_without_a_foreign_barrier() {
     let cases = [
         (json!([{"type":"text","text":MARK}]), true),
         (json!(format!("it printed {MARK} again")), false),
-        (
-            json!([{"type":"text","text":MARK},{"type":"text","text":"and more"}]),
-            false,
-        ),
+        (json!([{"type":"text","text":MARK},{"type":"image"}]), false),
     ];
     for (content, strict) in cases {
         for live in [0, 1] {
             let f = Fixture::new();
             owned(&f, stop(content.clone()));
             let seen = projected(&f, live);
-            let cancelled = |e: &&Evidence| e.disposition == Disposition::Cancelled;
-            let found = (
-                seen.evidence.iter().filter(cancelled).count(),
-                seen.barriers.len(),
-            );
+            let found = (seen.evidence.len(), seen.barriers.len());
             assert_eq!(
                 found,
                 (usize::from(strict), usize::from(!strict)),
                 "{content} {live}"
+            );
+            assert!(
+                seen.evidence
+                    .iter()
+                    .all(|e| e.disposition == Disposition::Cancelled)
             );
         }
     }
@@ -133,24 +121,18 @@ fn native_8148_terminal_stored_interrupt_barrier_is_superseded_only_exactly() {
             let refused = record(&forged, &stamp).unwrap_err();
             assert_eq!(refused, "native execution crosses foreign prompt barrier");
         }
-        assert_eq!(
-            record(&evidence, "stale").unwrap_err(),
-            "native registrations superseded"
-        );
+        let stale = record(&evidence, "stale").unwrap_err();
+        assert_eq!(stale, "native registrations superseded");
         let mut expected = outcome(&evidence);
         if control {
-            expected = Outcome {
-                disposition: Disposition::OperatorReleased,
-                range: None,
-                extra: Default::default(),
-            };
+            expected =
+                serde_json::from_value(json!({"disposition":"operator_released","range":null}))
+                    .unwrap();
             f.history
                 .record_native_outcome("native-b1", &ticket, &expected)
                 .unwrap();
-            assert_eq!(
-                record(&evidence, &stamp).unwrap_err(),
-                "native result already settled"
-            );
+            let settled = record(&evidence, &stamp).unwrap_err();
+            assert_eq!(settled, "native result already settled");
         } else {
             assert_eq!(record(&evidence, &stamp), Ok(true));
         }
