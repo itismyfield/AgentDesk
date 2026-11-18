@@ -1,19 +1,16 @@
+import { useId } from "react";
+import { ChevronDown } from "lucide-react";
 import type * as api from "../../api";
-import type { Agent } from "../../types";
 import type { AgentSkill, CronJob } from "../../api/client";
-import {
-  SurfaceActionButton,
-  SurfaceCard,
-  SurfaceEmptyState,
-  SurfaceNotice,
-  SurfaceSubsection,
-} from "../common/SurfacePrimitives";
+import { Badge } from "../../kit/free/badge-clean";
+import { Button } from "../../kit/free/button-clean";
 import type { Translator } from "./types";
 import {
   formatDuration,
   formatSchedule,
   timeAgo,
 } from "./AgentInfoCardModel";
+import { AgentDetailSection, SectionEmpty, SectionLoading } from "./AgentInfoCardSections";
 
 interface AuditLog {
   id: string;
@@ -25,7 +22,6 @@ interface AuditLog {
 }
 
 interface AgentInfoOperationsSectionsProps {
-  agent: Agent;
   isKo: boolean;
   tr: Translator;
   cronJobs: CronJob[];
@@ -44,8 +40,22 @@ interface AgentInfoOperationsSectionsProps {
   onToggleTimeline: () => void;
 }
 
+const TIMELINE_SOURCE: Record<string, { letter: string; color: string }> = {
+  dispatch: { letter: "D", color: "var(--ok)" },
+  session: { letter: "S", color: "var(--info)" },
+  kanban: { letter: "K", color: "var(--accent)" },
+};
+
+function cronDot(job: CronJob) {
+  if (!job.enabled) return "var(--fg-faint)";
+  return job.state?.lastStatus === "ok" ? "var(--ok)" : "var(--warn)";
+}
+
+const chevron = (open: boolean) => (
+  <ChevronDown aria-hidden size={14} className={`transition-transform motion-reduce:transition-none ${open ? "rotate-180" : ""}`} />
+);
+
 export function AgentInfoOperationsSections({
-  agent,
   isKo,
   tr,
   cronJobs,
@@ -63,246 +73,177 @@ export function AgentInfoOperationsSections({
   timelineOpen,
   onToggleTimeline,
 }: AgentInfoOperationsSectionsProps) {
+  const sharedId = useId();
+  const timelineId = useId();
+  const loadingLabel = tr("불러오는 중...", "Loading...");
+
   return (
     <>
-      <SurfaceSubsection
-        title={`${tr("크론 작업", "Cron Jobs")} ${!loadingCron ? `(${cronJobs.length})` : ""}`}
-        className="md:col-span-2"
-      >
+      <AgentDetailSection title={`${tr("크론 작업", "Cron Jobs")} ${!loadingCron ? `(${cronJobs.length})` : ""}`}>
         {loadingCron ? (
-          <SurfaceNotice tone="neutral" compact>
-            {tr("불러오는 중...", "Loading...")}
-          </SurfaceNotice>
+          <SectionLoading label={loadingLabel} />
         ) : cronJobs.length === 0 ? (
-          <SurfaceEmptyState className="text-xs">
-            {tr("등록된 크론 작업이 없습니다", "No cron jobs")}
-          </SurfaceEmptyState>
+          <SectionEmpty>{tr("등록된 크론 작업이 없습니다", "No cron jobs")}</SectionEmpty>
         ) : (
-          <div className="space-y-1.5">
+          <ul className="m-0 flex list-none flex-col gap-2 p-0">
             {cronJobs.map((job) => (
-              <SurfaceCard
-                key={job.id}
-                className="flex items-start gap-2 px-2.5 py-2"
-                style={{ background: "var(--th-bg-surface)" }}
-              >
-                <span
-                  className={`mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full ${
-                    job.enabled
-                      ? job.state?.lastStatus === "ok"
-                        ? "bg-emerald-400"
-                        : "bg-amber-400"
-                      : "bg-slate-500"
-                  }`}
-                />
+              <li key={job.id} className="flex min-w-0 items-start gap-2.5 text-[13px] leading-5">
+                <span aria-hidden className="mt-1.5 size-2 shrink-0 rounded-full" style={{ background: cronDot(job) }} />
                 <div className="min-w-0 flex-1">
-                  <div
-                    className="truncate text-xs font-medium"
-                    style={{ color: "var(--th-text-primary)" }}
-                    title={job.name}
-                  >
+                  <div className="truncate font-medium text-(--fg)" title={job.name}>
                     {job.name}
                   </div>
-                  <div className="mt-0.5 flex flex-wrap items-center gap-2">
-                    <span className="text-xs font-mono" style={{ color: "var(--th-text-muted)" }}>
-                      {formatSchedule(job.schedule, isKo)}
-                    </span>
+                  <div className="flex flex-wrap items-center gap-x-2 text-xs text-(--fg-muted)">
+                    <span className="font-mono">{formatSchedule(job.schedule, isKo)}</span>
                     {job.state?.lastRunAtMs && (
-                      <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                      <span className="tabular-nums">
                         {tr("최근:", "Last:")} {timeAgo(job.state.lastRunAtMs, isKo)}
-                        {job.state.lastDurationMs != null &&
-                          ` (${formatDuration(job.state.lastDurationMs)})`}
+                        {job.state.lastDurationMs != null && ` (${formatDuration(job.state.lastDurationMs)})`}
                       </span>
                     )}
                   </div>
                 </div>
-                {!job.enabled && (
-                  <span
-                    className="shrink-0 rounded px-1.5 py-0.5 text-xs"
-                    style={{ background: "rgba(100,116,139,0.2)", color: "var(--th-text-secondary)" }}
-                  >
-                    {tr("비활성", "Off")}
-                  </span>
-                )}
-              </SurfaceCard>
+                {!job.enabled && <Badge tone="neutral">{tr("비활성", "Off")}</Badge>}
+              </li>
             ))}
-          </div>
+          </ul>
         )}
-      </SurfaceSubsection>
+      </AgentDetailSection>
 
-      <SurfaceSubsection title={tr("최근 변경", "Recent Changes")} className="md:col-span-2">
+      <AgentDetailSection title={tr("최근 변경", "Recent Changes")}>
         {loadingAudit ? (
-          <SurfaceNotice tone="neutral" compact>
-            {tr("불러오는 중...", "Loading...")}
-          </SurfaceNotice>
+          <SectionLoading label={loadingLabel} />
         ) : auditError ? (
-          <SurfaceNotice tone="warn" compact>
+          <p className="m-0 rounded-(--r-md) bg-[color-mix(in_oklch,var(--warn)_12%,var(--bg-1))] px-3 py-2 text-xs leading-5 text-(--fg-dim)">
             {tr("변경 로그를 불러오지 못했습니다. 상세 화면을 다시 열어 확인해 주세요.", "Could not load changes. Reopen the details to retry.")}
-          </SurfaceNotice>
+          </p>
         ) : auditLogs.length === 0 ? (
-          <SurfaceEmptyState className="text-xs">
-            {tr("관련 변경 로그가 없습니다", "No related audit logs")}
-          </SurfaceEmptyState>
+          <SectionEmpty>{tr("관련 변경 로그가 없습니다", "No related audit logs")}</SectionEmpty>
         ) : (
-          <div className="space-y-1.5">
+          <ul className="m-0 flex list-none flex-col gap-2 p-0">
             {auditLogs.map((log) => (
-              <SurfaceCard key={log.id} className="px-3 py-2" style={{ background: "var(--th-bg-surface)" }}>
-                <div className="text-xs" style={{ color: "var(--th-text-primary)" }}>
-                  {log.summary}
+              <li key={log.id} className="min-w-0 text-[13px] leading-5">
+                <div className="text-(--fg)">{log.summary}</div>
+                <div className="text-xs text-(--fg-muted)">
+                  {log.action} · <span className="tabular-nums">{timeAgo(log.created_at ?? log.ts, isKo)}</span>
                 </div>
-                <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                  {log.action} • {timeAgo(log.created_at ?? log.ts, isKo)}
-                </div>
-              </SurfaceCard>
+              </li>
             ))}
-          </div>
+          </ul>
         )}
-      </SurfaceSubsection>
+      </AgentDetailSection>
 
-      <SurfaceSubsection title={tr("스킬", "Skills")} className="md:col-span-2">
+      <AgentDetailSection title={tr("스킬", "Skills")}>
         {loadingSkills ? (
-          <SurfaceNotice tone="neutral" compact>
-            {tr("불러오는 중...", "Loading...")}
-          </SurfaceNotice>
+          <SectionLoading label={loadingLabel} />
         ) : agentSkills.length === 0 && sharedSkills.length === 0 ? (
-          <SurfaceEmptyState className="text-xs">
-            {tr("등록된 스킬이 없습니다", "No skills")}
-          </SurfaceEmptyState>
+          <SectionEmpty>{tr("등록된 스킬이 없습니다", "No skills")}</SectionEmpty>
         ) : (
-          <div className="space-y-2">
+          <div className="flex flex-col gap-2">
             {agentSkills.length > 0 && (
               <div>
-                <div className="mb-1 text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                  {tr("전용 스킬", "Agent-specific")}
-                </div>
-                <div className="flex flex-wrap gap-1">
+                <div className="mb-1.5 text-xs text-(--fg-muted)">{tr("전용 스킬", "Agent-specific")}</div>
+                <ul className="m-0 flex list-none flex-wrap gap-1.5 p-0">
                   {agentSkills.map((skill) => (
-                    <span
+                    <li
                       key={skill.name}
-                      className="max-w-full rounded-md px-2 py-0.5 text-xs [overflow-wrap:anywhere]"
-                      style={{
-                        background:
-                          "color-mix(in srgb, var(--th-accent-primary-soft) 78%, transparent)",
-                        color: "var(--th-accent-primary)",
-                      }}
                       title={skill.description}
+                      className="max-w-full rounded-(--r-sm) bg-(--accent-soft) px-2 py-0.5 text-xs leading-5 text-(--fg) [overflow-wrap:anywhere]"
                     >
                       {skill.name}
-                    </span>
+                    </li>
                   ))}
-                </div>
+                </ul>
               </div>
             )}
             {sharedSkills.length > 0 && (
-              <div>
-                <SurfaceActionButton onClick={onToggleSharedSkills} tone="neutral" compact>
-                  {tr("공유 스킬", "Shared")} ({sharedSkills.length}) {showSharedSkills ? "▲" : "▼"}
-                </SurfaceActionButton>
+              <div className="flex flex-col items-start gap-1.5">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-expanded={showSharedSkills}
+                  aria-controls={sharedId}
+                  iconRight={chevron(showSharedSkills)}
+                  onClick={onToggleSharedSkills}
+                >
+                  {`${tr("공유 스킬", "Shared")} (${sharedSkills.length})`}
+                </Button>
                 {showSharedSkills && (
-                  <div className="mt-1 flex flex-wrap gap-1">
+                  <ul id={sharedId} className="m-0 flex list-none flex-wrap gap-1.5 p-0">
                     {sharedSkills.map((skill) => (
-                      <span
+                      <li
                         key={skill.name}
-                        className="max-w-full rounded-md px-2 py-0.5 text-xs [overflow-wrap:anywhere]"
-                        style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}
                         title={skill.description}
+                        className="max-w-full rounded-(--r-sm) px-2 py-0.5 text-xs leading-5 text-(--fg-muted) shadow-[inset_0_0_0_1px_var(--line-soft)] [overflow-wrap:anywhere]"
                       >
                         {skill.name}
-                      </span>
+                      </li>
                     ))}
-                  </div>
+                  </ul>
                 )}
               </div>
             )}
           </div>
         )}
-      </SurfaceSubsection>
+      </AgentDetailSection>
 
-      <SurfaceSubsection title={tr("활동", "Activity")} className="md:col-span-2">
-        <div className="space-y-3">
-          <SurfaceCard className="overflow-hidden px-0 py-0" style={{ background: "var(--th-bg-card)" }}>
-            <button
-              onClick={onToggleTimeline}
-              className="flex min-h-11 w-full items-center justify-between px-4 py-3 text-xs font-semibold"
-              style={{ color: "var(--th-text-heading)" }}
-            >
-              <span>{tr("활동 타임라인", "Activity Timeline")}</span>
-              <span style={{ color: "var(--th-text-muted)" }}>{timelineOpen ? "▲" : "▼"}</span>
-            </button>
-            {timelineOpen && (
-              <div className="space-y-1.5 px-4 pb-3">
-                {loadingTimeline ? (
-                  <SurfaceNotice tone="neutral" compact>
-                    …
-                  </SurfaceNotice>
-                ) : timeline.length === 0 ? (
-                  <SurfaceEmptyState className="py-2 text-xs">
-                    {tr("활동 없음", "No activity")}
-                  </SurfaceEmptyState>
-                ) : (
-                  <div className="max-h-64 space-y-1.5 overflow-y-auto">
-                    {timeline.map((event) => {
-                      const sourceColor =
-                        event.source === "dispatch"
-                          ? "#10b981"
-                          : event.source === "session"
-                            ? "#38bdf8"
-                            : "#84cc16";
-                      const sourceLabel =
-                        event.source === "dispatch" ? "D" : event.source === "session" ? "S" : "K";
-                      const durationStr =
-                        event.duration_ms != null
-                          ? event.duration_ms < 60_000
-                            ? `${Math.round(event.duration_ms / 1000)}s`
-                            : `${Math.round(event.duration_ms / 60_000)}m`
-                          : null;
-                      return (
-                        <div key={`${event.source}-${event.id}`} className="flex items-start gap-2 text-xs">
-                          <span
-                            className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-xs font-bold"
-                            style={{ backgroundColor: `${sourceColor}22`, color: sourceColor }}
-                          >
-                            {sourceLabel}
-                          </span>
-                          <div className="min-w-0 flex-1">
-                            <div className="[overflow-wrap:anywhere]" style={{ color: "var(--th-text-primary)" }}>
-                              {event.title}
-                            </div>
-                            <div className="flex flex-wrap gap-2" style={{ color: "var(--th-text-muted)" }}>
-                              <span>{timeAgo(event.timestamp, isKo)}</span>
-                              <span
-                                className="rounded px-1"
-                                style={{ backgroundColor: `${sourceColor}15`, color: sourceColor }}
-                              >
-                                {event.status}
-                              </span>
-                              {durationStr && <span>{durationStr}</span>}
-                              {event.detail && "issue" in event.detail && <span>#{String(event.detail.issue)}</span>}
-                            </div>
-                          </div>
+      <AgentDetailSection
+        title={tr("활동", "Activity")}
+        aside={
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-expanded={timelineOpen}
+            aria-controls={timelineId}
+            iconRight={chevron(timelineOpen)}
+            onClick={onToggleTimeline}
+          >
+            {tr("활동 타임라인", "Activity Timeline")}
+          </Button>
+        }
+      >
+        {timelineOpen ? (
+          <div id={timelineId}>
+            {loadingTimeline ? (
+              <SectionLoading label={loadingLabel} />
+            ) : timeline.length === 0 ? (
+              <SectionEmpty>{tr("활동 없음", "No activity")}</SectionEmpty>
+            ) : (
+              <ul className="m-0 flex max-h-64 list-none flex-col gap-2 overflow-y-auto overscroll-contain p-0">
+                {timeline.map((event) => {
+                  const source = TIMELINE_SOURCE[event.source] ?? TIMELINE_SOURCE.kanban;
+                  const durationStr =
+                    event.duration_ms != null
+                      ? event.duration_ms < 60_000
+                        ? `${Math.round(event.duration_ms / 1000)}s`
+                        : `${Math.round(event.duration_ms / 60_000)}m`
+                      : null;
+                  return (
+                    <li key={`${event.source}-${event.id}`} className="flex items-start gap-2 text-xs">
+                      <span
+                        aria-hidden
+                        className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold"
+                        style={{ background: `color-mix(in oklch, ${source.color} 18%, transparent)`, color: source.color }}
+                      >
+                        {source.letter}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[13px] leading-5 text-(--fg) [overflow-wrap:anywhere]">{event.title}</div>
+                        <div className="flex flex-wrap gap-x-2 text-(--fg-muted)">
+                          <span className="tabular-nums">{timeAgo(event.timestamp, isKo)}</span>
+                          <span>{event.status}</span>
+                          {durationStr && <span className="tabular-nums">{durationStr}</span>}
+                          {event.detail && "issue" in event.detail && <span>#{String(event.detail.issue)}</span>}
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
             )}
-          </SurfaceCard>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {agent.role_id && (
-              <span
-                className="rounded px-1.5 py-0.5 font-mono text-xs"
-                style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}
-              >
-                {agent.role_id}
-              </span>
-            )}
-            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-              {tr("완료", "Done")} {agent.stats_tasks_done}
-            </span>
           </div>
-        </div>
-      </SurfaceSubsection>
+        ) : null}
+      </AgentDetailSection>
     </>
   );
 }

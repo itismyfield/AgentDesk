@@ -1,38 +1,13 @@
-import { createPortal } from "react-dom";
-import { useEffect, useRef, useState } from "react";
-import {
-  getAgentWarnings,
-  getAgentWorkElapsedMs,
-  getAgentWorkSummary,
-} from "../../agent-insights";
-import type {
-  Agent,
-  Department,
-  DispatchedSession,
-} from "../../types";
+import { useId, type ReactNode } from "react";
+import { ArrowLeft, X } from "lucide-react";
+import type { Agent, Department } from "../../types";
 import { localeName } from "../../i18n";
-import AgentPersona from "../AgentPersona";
-import {
-  SurfaceActionButton,
-  SurfaceMetricPill,
-  SurfaceSection,
-} from "../common/SurfacePrimitives";
+import { Button } from "../../kit/free/button-clean";
+import { IconButton } from "../../kit/free/icon-button-clean";
+import { useIsMobile } from "../common/overlay/useBreakpoint";
 import type { Translator } from "./types";
-import * as api from "../../api";
-import type {
-  CronJob,
-  AgentSkill,
-  DiscordBinding,
-} from "../../api/client";
-import { AgentInfoOperationsSections } from "./AgentInfoOperationsSections";
-import { AgentInfoProfileSections } from "./AgentInfoProfileSections";
-import { AgentInfoRoutingSections } from "./AgentInfoRoutingSections";
-import { AgentExecutionNodeSelect } from "./AgentExecutionNodeSelect";
-import { inferBindingSource } from "./AgentInfoCardModel";
-import { getSystemHealthTone } from "../../theme/statusTokens";
-import { isDiscordSnowflake } from "./discord-routing";
-import { catalogLabel, getProviderAuthProfiles, useProviderCatalog } from "../../api/providers";
-import type { ProviderAuthProvider } from "../settings/SettingsProvidersModel";
+import { AgentOverlay } from "./AgentOverlay";
+import { AgentInfoCardContent } from "./AgentInfoCardContent";
 
 interface AgentInfoCardProps {
   agent: Agent;
@@ -42,8 +17,12 @@ interface AgentInfoCardProps {
   departments: Department[];
   onClose: () => void;
   onAgentUpdated?: () => void;
+  /** Label of the phone back button; the agents page says "back to list". */
+  backLabel?: string;
+  actions?: ReactNode;
 }
 
+/** Agent detail as an overlay: a centred card from 900px, a full-screen page with a back button below it. */
 export default function AgentInfoCard({
   agent,
   isKo,
@@ -52,540 +31,47 @@ export default function AgentInfoCard({
   departments,
   onClose,
   onAgentUpdated,
+  backLabel,
+  actions,
 }: AgentInfoCardProps) {
-  const overlayRef = useRef<HTMLDivElement>(null);
-  const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
-  const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
-  const [sharedSkills, setSharedSkills] = useState<AgentSkill[]>([]);
-  const [loadingCron, setLoadingCron] = useState(true);
-  const [loadingSkills, setLoadingSkills] = useState(true);
-  const [loadingClaudeSessions, setLoadingClaudeSessions] = useState(true);
-  const [claudeSessions, setClaudeSessions] = useState<DispatchedSession[]>([]);
-  const [showSharedSkills, setShowSharedSkills] = useState(false);
-  const [discordBindings, setDiscordBindings] = useState<DiscordBinding[]>([]);
-  const [discordChannelInfoById, setDiscordChannelInfoById] = useState<
-    Record<string, api.DiscordChannelInfo>
-  >({});
-  const [loadingBindings, setLoadingBindings] = useState(true);
-  const [auditLogs, setAuditLogs] = useState<Array<{ id: string; action: string; ts: number; detail?: string; summary?: string; created_at?: number }>>([]);
-  const [loadingAudit, setLoadingAudit] = useState(true);
-  const [auditError, setAuditError] = useState(false);
-  const [editingAlias, setEditingAlias] = useState(false);
-  const [aliasValue, setAliasValue] = useState(agent.alias ?? "");
-  const [savingAlias, setSavingAlias] = useState(false);
-  const [selectedDeptId, setSelectedDeptId] = useState(
-    agent.department_id ?? "",
-  );
-  const [savingDept, setSavingDept] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState<string>(
-    agent.cli_provider ?? "claude",
-  );
-  const providerCatalog = useProviderCatalog(selectedProvider);
-  const [savingProvider, setSavingProvider] = useState(false);
-  const [providerAuthProfiles, setProviderAuthProfiles] = useState<ProviderAuthProvider[]>([]);
-  const [selectedAuthProfile, setSelectedAuthProfile] = useState("__primary__");
-  const [savingAuthProfile, setSavingAuthProfile] = useState(false);
-  const [timeline, setTimeline] = useState<api.TimelineEvent[]>([]);
-  const [loadingTimeline, setLoadingTimeline] = useState(true);
-  const [timelineOpen, setTimelineOpen] = useState(false);
-  const [sessionsOpen, setSessionsOpen] = useState(true);
-  const [routingOpen, setRoutingOpen] = useState(false);
-  const [idleSessionsOpen, setIdleSessionsOpen] = useState(false);
-
-  const saveAlias = async () => {
-    const trimmed = aliasValue.trim();
-    const newAlias = trimmed || null;
-    if (newAlias === (agent.alias ?? null)) {
-      setEditingAlias(false);
-      return;
-    }
-    setSavingAlias(true);
-    try {
-      await api.updateAgent(agent.id, { alias: newAlias });
-      setEditingAlias(false);
-      onAgentUpdated?.();
-    } catch (e) {
-      console.error("Alias save failed:", e);
-    } finally {
-      setSavingAlias(false);
-    }
-  };
-
-  useEffect(() => {
-    setAliasValue(agent.alias ?? "");
-    setSelectedDeptId(agent.department_id ?? "");
-    setSelectedProvider(agent.cli_provider ?? "claude");
-    setSelectedAuthProfile("__primary__");
-    setSessionsOpen(true);
-    setRoutingOpen(false);
-    setIdleSessionsOpen(false);
-  }, [agent.alias, agent.department_id, agent.cli_provider, agent.id]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void getProviderAuthProfiles()
-      .then((response) => {
-        if (cancelled) return;
-        const providers = Array.isArray(response.providers) ? response.providers : [];
-        setProviderAuthProfiles(providers);
-        const override = response.agent_profile_overrides?.find(
-          (entry) => entry.agent_id === agent.id,
-        );
-        setSelectedAuthProfile(override?.profile_id ?? "__primary__");
-      })
-      .catch(() => {
-        if (!cancelled) setProviderAuthProfiles([]);
-      });
-    return () => { cancelled = true; };
-  }, [agent.id]);
-
-  const saveDepartment = async (nextDeptId: string) => {
-    const previousDeptId = selectedDeptId;
-    if ((nextDeptId || "") === previousDeptId) return;
-
-    setSelectedDeptId(nextDeptId);
-    setSavingDept(true);
-    try {
-      await api.updateAgent(agent.id, { department_id: nextDeptId || null });
-      onAgentUpdated?.();
-    } catch (e) {
-      setSelectedDeptId(previousDeptId);
-      console.error("Department save failed:", e);
-    } finally {
-      setSavingDept(false);
-    }
-  };
-
-  const saveProvider = async (nextProvider: string) => {
-    if (nextProvider === selectedProvider) return;
-    const previousProvider = selectedProvider;
-    setSelectedProvider(nextProvider);
-    setSavingProvider(true);
-    try {
-      await api.updateAgent(agent.id, {
-        cli_provider: nextProvider as Agent["cli_provider"],
-        auth_profile: null,
-      });
-      setSelectedAuthProfile("__primary__");
-      onAgentUpdated?.();
-    } catch (e) {
-      setSelectedProvider(previousProvider);
-      console.error("Provider save failed:", e);
-    } finally {
-      setSavingProvider(false);
-    }
-  };
-
-  const saveAuthProfile = async (nextProfile: string) => {
-    if (nextProfile === selectedAuthProfile) return;
-    const previousProfile = selectedAuthProfile;
-    setSelectedAuthProfile(nextProfile);
-    setSavingAuthProfile(true);
-    try {
-      await api.updateAgent(agent.id, {
-        auth_profile: nextProfile === "__primary__" ? null : nextProfile,
-      });
-      onAgentUpdated?.();
-    } catch (error) {
-      setSelectedAuthProfile(previousProfile);
-      console.error("Auth profile save failed:", error);
-    } finally {
-      setSavingAuthProfile(false);
-    }
-  };
-
-  const authProfileOptions = [
-    { id: "__primary__", home: "" },
-    ...(providerAuthProfiles
-      .find((provider) => provider.id === selectedProvider)
-      ?.accounts ?? [{ id: "default", home: "" }]),
-  ];
-
-  const dept = departments.find((d) => d.id === selectedDeptId);
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
-
-  useEffect(() => {
-    setLoadingCron(true);
-    api
-      .getAgentCron(agent.id)
-      .then((jobs) => {
-        setCronJobs(jobs);
-        setLoadingCron(false);
-      })
-      .catch(() => setLoadingCron(false));
-
-    setLoadingSkills(true);
-    api
-      .getAgentSkills(agent.id)
-      .then((data) => {
-        setAgentSkills(data.skills);
-        setSharedSkills(data.sharedSkills);
-        setLoadingSkills(false);
-      })
-      .catch(() => setLoadingSkills(false));
-
-    setLoadingClaudeSessions(true);
-    api
-      .getAgentDispatchedSessions(agent.id)
-      .then((rows) => {
-        setClaudeSessions(rows);
-        setLoadingClaudeSessions(false);
-      })
-      .catch(() => setLoadingClaudeSessions(false));
-
-    setLoadingBindings(true);
-    api
-      .getDiscordBindings()
-      .then((bindings) => {
-        setDiscordBindings(bindings.filter((b) => b.agentId === agent.id));
-        setLoadingBindings(false);
-      })
-      .catch(() => {
-        setDiscordBindings([]);
-        setLoadingBindings(false);
-      });
-
-    setLoadingTimeline(true);
-    api
-      .getAgentTimeline(agent.id, 30)
-      .then((events) => {
-        setTimeline(events);
-        setLoadingTimeline(false);
-      })
-      .catch(() => {
-        setTimeline([]);
-        setLoadingTimeline(false);
-      });
-
-    setLoadingAudit(true);
-    setAuditError(false);
-    api.getAuditLogs(20, { agentId: agent.id })
-      .then((logs) => setAuditLogs(logs.map((log) => ({ ...log, ts: log.created_at }))))
-      .catch(() => { setAuditLogs([]); setAuditError(true); })
-      .finally(() => setLoadingAudit(false));
-  }, [agent.id]);
-
-  useEffect(() => {
-    const seedIds = Array.from(
-      new Set(
-        [
-          ...discordBindings.flatMap((binding) => [
-            binding.channelId,
-            binding.counterModelChannelId ?? null,
-          ]),
-          ...claudeSessions.map((session) => session.thread_channel_id ?? null),
-        ].filter((value): value is string => isDiscordSnowflake(value)),
-      ),
-    );
-
-    if (seedIds.length === 0) {
-      setDiscordChannelInfoById({});
-      return;
-    }
-
-    let cancelled = false;
-
-    const loadChannelInfo = async (ids: string[]) => {
-      const entries = await Promise.all(
-        ids.map(async (id) => {
-          try {
-            const info = await api.getDiscordChannelInfo(id);
-            return info?.id ? ([id, info] as const) : null;
-          } catch {
-            return null;
-          }
-        }),
-      );
-      return Object.fromEntries(
-        entries.filter(
-          (entry): entry is readonly [string, api.DiscordChannelInfo] =>
-            entry !== null,
-        ),
-      );
-    };
-
-    void (async () => {
-      const initialInfo = await loadChannelInfo(seedIds);
-      const parentIds = Array.from(
-        new Set(
-          Object.values(initialInfo)
-            .map((info) => info.parent_id ?? null)
-            .filter(
-              (value): value is string =>
-                isDiscordSnowflake(value) && !(value in initialInfo),
-            ),
-        ),
-      );
-      const parentInfo =
-        parentIds.length > 0 ? await loadChannelInfo(parentIds) : {};
-
-      if (!cancelled) {
-        setDiscordChannelInfoById({ ...initialInfo, ...parentInfo });
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [claudeSessions, discordBindings]);
-
-  const statusLabel: Record<string, { ko: string; en: string }> = {
-    working: { ko: "근무 중", en: "Working" },
-    idle: { ko: "대기", en: "Idle" },
-    break: { ko: "휴식", en: "Break" },
-    offline: { ko: "오프라인", en: "Offline" },
-  };
-  const statusTone = getSystemHealthTone(agent.status === "working" ? "healthy" : agent.status === "break" ? "warning" : agent.status === "offline" ? "critical" : "idle");
-
-  const sourceLabel =
-    agent.activity_source === "agentdesk"
-      ? tr("AgentDesk 작업", "AgentDesk")
-      : null;
-
-  const workingLinkedSessions = claudeSessions.filter(
-    (session) => session.status === "working",
-  );
-  const idleLinkedSessions = claudeSessions.filter(
-    (session) => session.status !== "working",
-  );
-  const currentWorkSummary = getAgentWorkSummary(agent, {
-    linkedSessions: workingLinkedSessions,
-  });
-  const currentWorkElapsedMs = getAgentWorkElapsedMs(
-    agent,
-    workingLinkedSessions,
-  );
-  const warnings = getAgentWarnings(agent, {
-    hasDiscordBindings: loadingBindings
-      ? undefined
-      : discordBindings.length > 0,
-    linkedSessions: workingLinkedSessions,
-  });
-  const currentWorkDetails = Array.from(
-    new Set(
-      [
-        agent.session_info,
-        ...workingLinkedSessions.flatMap((session) => [
-          session.session_info,
-          session.name,
-        ]),
-      ].filter((value): value is string => Boolean(value && value.trim())),
-    ),
-  ).slice(0, 3);
-  const roleMapBindings = discordBindings.filter(
-    (binding) => inferBindingSource(binding) === "role-map",
-  );
-  const resolveDiscordChannelInfo = (
-    channelId: string | null | undefined,
-  ): api.DiscordChannelInfo | null =>
-    channelId && isDiscordSnowflake(channelId)
-      ? discordChannelInfoById[channelId] ?? null
-      : null;
-  const resolveDiscordParentInfo = (
-    channelInfo: api.DiscordChannelInfo | null | undefined,
-  ): api.DiscordChannelInfo | null =>
-    channelInfo?.parent_id && isDiscordSnowflake(channelInfo.parent_id)
-      ? discordChannelInfoById[channelInfo.parent_id] ?? null
-      : null;
-  const sourceOfTruthRows: Array<{ label: string; value: string; tone?: string }> = [
-    { label: tr("에이전트 ID", "Agent ID"), value: agent.id },
-    { label: tr("이름", "Name"), value: agent.name },
-  ];
+  const isMobile = useIsMobile();
+  const titleId = useId();
   const primaryName = localeName(locale, agent);
-  const secondaryName = locale === "en" ? agent.name_ko || "" : agent.name;
+  const detailLabel = tr("에이전트 상세", "Agent details");
 
-  return createPortal(
-    <>
-    <div aria-hidden="true" className="fixed inset-0 z-[70]" style={{ background: "var(--th-modal-overlay)" }} />
-    <div
-      ref={overlayRef}
-      className="fixed inset-0 z-[80] flex items-start justify-center overflow-hidden px-3 py-4 sm:items-center sm:p-4"
-      style={{
-        paddingTop: "max(1rem, calc(env(safe-area-inset-top) + 0.75rem))",
-        paddingBottom: "max(1rem, calc(env(safe-area-inset-bottom) + 0.75rem))",
-      }}
-      onClick={(e) => {
-        if (e.target === overlayRef.current) onClose();
-      }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={`${primaryName} — ${tr("에이전트 상세", "Agent details")}`}
-        className="w-full self-start max-h-[calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem)] max-w-[calc(100vw-1.5rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-lg border p-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:my-auto sm:max-h-[90vh] sm:max-w-4xl sm:p-5"
-        style={{
-          borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-          background:
-            "var(--th-bg-surface)",
-          WebkitOverflowScrolling: "touch",
-          touchAction: "pan-y",
-        }}
-      >
-        <div className="space-y-4">
-          <SurfaceSection
-            eyebrow={tr("에이전트 상세", "Agent details")}
-            title={primaryName}
-            description={primaryName !== secondaryName && secondaryName ? secondaryName : undefined}
-            actions={(
-              <SurfaceActionButton onClick={onClose} tone="neutral" aria-label={tr("닫기", "Close")}>
-                {tr("닫기", "Close")}
-              </SurfaceActionButton>
-            )}
-          >
-            <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-start">
-              <AgentPersona agent={agent} size={56} animated />
-              <div className="min-w-0 flex-1 space-y-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  {editingAlias ? (
-                    <input
-                      autoFocus
-                      value={aliasValue}
-                      onChange={(e) => setAliasValue(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") saveAlias(); if (e.key === "Escape") { setEditingAlias(false); setAliasValue(agent.alias ?? ""); } }}
-                      onBlur={saveAlias}
-                      disabled={savingAlias}
-                      placeholder={tr("별명 입력", "Enter alias")}
-                      className="min-h-11 rounded-md border px-2 py-1 text-xs outline-none"
-                      style={{
-                        background: "var(--th-bg-surface)",
-                        borderColor: "var(--th-input-border)",
-                        color: "var(--th-text-primary)",
-                        width: "140px",
-                      }}
-                    />
-                  ) : (
-                    <SurfaceActionButton
-                      onClick={() => { setAliasValue(agent.alias ?? ""); setEditingAlias(true); }}
-                      tone="neutral"
-                      compact
-                      title={tr("별명 편집", "Edit alias")}
-                    >
-                      {agent.alias ? `aka ${agent.alias}` : `+ ${tr("별명", "alias")}`}
-                    </SurfaceActionButton>
-                  )}
-                  <span
-                    className="rounded-full px-2 py-0.5 text-xs font-medium"
-                    style={{
-                      background: statusTone.bg,
-                      color: statusTone.text,
-                    }}
-                  >
-                    {isKo ? statusLabel[agent.status]?.ko : statusLabel[agent.status]?.en}
-                  </span>
-                  {agent.status === "working" && sourceLabel && (
-                    <span
-                      className="rounded-full px-2 py-0.5 text-xs"
-                      style={{
-                        background: "color-mix(in srgb, var(--th-accent-primary-soft) 80%, transparent)",
-                        color: "var(--th-accent-primary)",
-                      }}
-                    >
-                      {sourceLabel}
-                    </span>
-                  )}
-                  <span className="rounded-full px-2 py-0.5 text-xs" style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}>
-                    {dept ? <>{dept.icon} {localeName(locale, dept)}</> : tr("부서 없음", "No department")}
-                  </span>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <SurfaceMetricPill
-                    label={tr("완료", "Done")}
-                    tone="success"
-                    value={`${agent.stats_tasks_done} ${tr("건", "tasks")}`}
-                  />
-                  <SurfaceMetricPill
-                    label={tr("작업 중 세션", "Working sessions")}
-                    tone="info"
-                    value={`${workingLinkedSessions.length}/${claudeSessions.length}`}
-                  />
-                </div>
-              </div>
-            </div>
-          </SurfaceSection>
-
-          <div className="grid min-w-0 gap-4 md:grid-cols-2">
-            <AgentInfoProfileSections
-              agent={agent}
-              departments={departments}
-              locale={locale}
-              isKo={isKo}
-              tr={tr}
-              selectedDeptId={selectedDeptId}
-              savingDept={savingDept}
-              onSaveDepartment={(nextDeptId) => void saveDepartment(nextDeptId)}
-              selectedProvider={selectedProvider}
-              providerOptions={providerCatalog.selectableIds}
-              providerLabels={Object.fromEntries(
-                providerCatalog.selectableIds.map((id) => [
-                  id,
-                  catalogLabel(providerCatalog.entries, id),
-                ]),
-              )}
-              providerSelectDisabled={providerCatalog.loading}
-              providerNotice={
-                providerCatalog.loading
-                  ? tr("프로바이더 목록을 불러오는 중...", "Loading providers...")
-                  : providerCatalog.error
-                    ? tr("카탈로그를 못 불러 로컬 목록을 씁니다.", "Catalog unavailable; using local list.")
-                    : null
-              }
-              savingProvider={savingProvider}
-              onSaveProvider={(nextProvider) => void saveProvider(nextProvider)}
-              selectedAuthProfile={selectedAuthProfile}
-              authProfileOptions={authProfileOptions.map((account) => account.id)}
-              savingAuthProfile={savingAuthProfile}
-              onSaveAuthProfile={(profileId) => void saveAuthProfile(profileId)}
-              currentWorkSummary={currentWorkSummary}
-              currentWorkElapsedMs={currentWorkElapsedMs}
-              currentWorkDetails={currentWorkDetails}
-              discordBindings={discordBindings}
-              warnings={warnings}
-            />
-
-            <AgentExecutionNodeSelect key={agent.id} agentId={agent.id} provider={selectedProvider}
-              tr={tr} onSaved={onAgentUpdated} />
-
-            <AgentInfoRoutingSections
-              tr={tr}
-              discordBindings={discordBindings}
-              roleMapBindings={roleMapBindings}
-              claudeSessions={claudeSessions}
-              loadingClaudeSessions={loadingClaudeSessions}
-              sourceOfTruthRows={sourceOfTruthRows}
-              resolveDiscordChannelInfo={resolveDiscordChannelInfo}
-              resolveDiscordParentInfo={resolveDiscordParentInfo}
-            />
-
-            <AgentInfoOperationsSections
-              agent={agent}
-              isKo={isKo}
-              tr={tr}
-              cronJobs={cronJobs}
-              loadingCron={loadingCron}
-              auditLogs={auditLogs}
-              loadingAudit={loadingAudit}
-              auditError={auditError}
-              agentSkills={agentSkills}
-              sharedSkills={sharedSkills}
-              loadingSkills={loadingSkills}
-              showSharedSkills={showSharedSkills}
-              onToggleSharedSkills={() => setShowSharedSkills((value) => !value)}
-              timeline={timeline}
-              loadingTimeline={loadingTimeline}
-              timelineOpen={timelineOpen}
-              onToggleTimeline={() => setTimelineOpen((value) => !value)}
-            />
+  return (
+    <AgentOverlay
+      variant="drawer"
+      ariaLabel={`${primaryName} — ${detailLabel}`}
+      onClose={onClose}
+      widthClassName="sm:max-w-2xl"
+      testId="agent-detail-overlay"
+      header={
+        isMobile ? (
+          <div className="flex min-h-11 items-center gap-2">
+            <Button variant="secondary" size="md" icon={<ArrowLeft size={15} aria-hidden />} onClick={onClose} data-autofocus>
+              {backLabel ?? tr("돌아가기", "Back")}
+            </Button>
+            <span className="ml-auto truncate text-xs text-(--fg-muted)">{detailLabel}</span>
           </div>
-        </div>
-      </div>
-    </div>
-    </>,
-    document.body,
+        ) : (
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs font-medium text-(--fg-muted)">{detailLabel}</span>
+            <IconButton icon={<X size={15} />} label={tr("닫기", "Close")} onClick={onClose} />
+          </div>
+        )
+      }
+    >
+      <AgentInfoCardContent
+        agent={agent}
+        isKo={isKo}
+        locale={locale}
+        tr={tr}
+        departments={departments}
+        onAgentUpdated={onAgentUpdated}
+        actions={actions}
+        titleId={titleId}
+      />
+    </AgentOverlay>
   );
 }

@@ -2,16 +2,14 @@ import type * as api from "../../api";
 import type { DispatchedSession } from "../../types";
 import type { DiscordBinding } from "../../api/client";
 import { getProviderMeta } from "../../app/providerTheme";
-import {
-  SurfaceCard,
-  SurfaceEmptyState,
-  SurfaceNotice,
-  SurfaceSubsection,
-} from "../common/SurfacePrimitives";
+import { Badge } from "../../kit/free/badge-clean";
 import type { Translator } from "./types";
 import {
+  AgentDetailSection,
   DiscordDeepLinkChip,
   DiscordSummaryLabel,
+  SectionEmpty,
+  SectionLoading,
 } from "./AgentInfoCardSections";
 import { bindingSourceLabel, inferBindingSource } from "./AgentInfoCardModel";
 import {
@@ -40,6 +38,8 @@ interface AgentInfoRoutingSectionsProps {
   ) => api.DiscordChannelInfo | null;
 }
 
+const rowClass = "flex min-w-0 items-start gap-2.5 rounded-(--r-md) px-3 py-2 shadow-[inset_0_0_0_1px_var(--line-soft)]";
+
 export function AgentInfoRoutingSections({
   tr,
   discordBindings,
@@ -52,39 +52,36 @@ export function AgentInfoRoutingSections({
 }: AgentInfoRoutingSectionsProps) {
   return (
     <>
-      <SurfaceSubsection title={tr("정본 연결", "Source of Truth")} className="md:col-span-2">
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      <AgentDetailSection title={tr("정본 연결", "Source of Truth")}>
+        <dl className="m-0 grid min-w-0 gap-1 text-[13px]">
           {sourceOfTruthRows.map((row) => (
-            <SurfaceCard key={row.label} className="p-3" style={{ background: "var(--th-bg-surface)" }}>
-              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                {row.label}
-              </div>
-              <div className="mt-1 break-all text-xs font-medium" style={{ color: row.tone }}>
+            <div key={row.label} className="flex min-w-0 items-start gap-3">
+              <dt className="w-24 shrink-0 leading-6 text-(--fg-muted)">{row.label}</dt>
+              <dd className="m-0 min-w-0 flex-1 break-all font-mono text-xs leading-6" style={{ color: row.tone ?? "var(--fg)" }}>
                 {row.value}
-              </div>
-            </SurfaceCard>
+              </dd>
+            </div>
           ))}
-        </div>
+        </dl>
         {roleMapBindings.length > 0 && (
-          <SurfaceNotice tone="warn" compact className="mt-3">
+          <p className="m-0 rounded-(--r-md) bg-[color-mix(in_oklch,var(--warn)_12%,var(--bg-1))] px-3 py-2 text-xs leading-5 text-(--fg-dim)">
             {tr(
               "RoleMap 경로가 있으면 Discord source-of-truth는 role_map 우선으로 봅니다.",
               "When RoleMap exists, role_map is treated as the Discord source-of-truth.",
             )}
-          </SurfaceNotice>
+          </p>
         )}
-      </SurfaceSubsection>
+      </AgentDetailSection>
 
       {discordBindings.length > 0 && (
-        <SurfaceSubsection
-          title={`${tr("Discord 라우팅", "Discord Routing")} (${discordBindings.length})`}
-          description={tr(
-            "RoleMap/Primary/Alt/Codex는 이 agent에 연결된 Discord 경로의 source다.",
-            "RoleMap/Primary/Alt/Codex indicate how this agent is wired to Discord.",
-          )}
-          className="md:col-span-2"
-        >
-          <div className="space-y-1">
+        <AgentDetailSection title={`${tr("Discord 라우팅", "Discord Routing")} (${discordBindings.length})`}>
+          <p className="m-0 text-xs leading-5 text-(--fg-muted)">
+            {tr(
+              "RoleMap/Primary/Alt/Codex는 이 agent에 연결된 Discord 경로의 source다.",
+              "RoleMap/Primary/Alt/Codex indicate how this agent is wired to Discord.",
+            )}
+          </p>
+          <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
             {discordBindings.map((binding) => {
               const source = inferBindingSource(binding);
               const sourceLabel = bindingSourceLabel(source);
@@ -94,9 +91,7 @@ export function AgentInfoRoutingSections({
                 channelInfo,
                 resolveDiscordParentInfo(channelInfo),
               );
-              const counterChannelInfo = resolveDiscordChannelInfo(
-                binding.counterModelChannelId ?? null,
-              );
+              const counterChannelInfo = resolveDiscordChannelInfo(binding.counterModelChannelId ?? null);
               const counterSummary =
                 binding.counterModelChannelId && binding.counterModelChannelId !== binding.channelId
                   ? describeDiscordTarget(
@@ -107,106 +102,68 @@ export function AgentInfoRoutingSections({
                   : null;
 
               return (
-                <SurfaceCard
-                  key={`${binding.channelId}:${source}`}
-                  className="flex items-center gap-2 px-2.5 py-1.5"
-                  style={{ background: "var(--th-bg-surface)" }}
-                >
-                  <span className="text-sm">💬</span>
+                <li key={`${binding.channelId}:${source}`} className={`${rowClass} items-center`}>
                   <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 items-center gap-2">
+                    <div className="flex min-w-0 items-center gap-1">
                       <DiscordSummaryLabel summary={channelSummary} />
                       <DiscordDeepLinkChip deepLink={channelSummary.deepLink} label={tr("앱", "App")} />
                     </div>
                     {counterSummary && (
-                      <div className="mt-0.5 truncate text-xs" style={{ color: "var(--th-text-muted)" }}>
+                      <div className="mt-0.5 truncate text-xs text-(--fg-muted)">
                         {`counter: ${formatDiscordSummary(counterSummary)}`}
                       </div>
                     )}
                   </div>
-                  <span
-                    className="rounded px-1.5 py-0.5 text-xs"
-                    style={{ background: "rgba(88,101,242,0.15)", color: "var(--th-text-secondary)" }}
-                  >
-                    {sourceLabel}
-                  </span>
-                </SurfaceCard>
+                  <Badge tone="purple">{sourceLabel}</Badge>
+                </li>
               );
             })}
-          </div>
-        </SurfaceSubsection>
+          </ul>
+        </AgentDetailSection>
       )}
 
-      <SurfaceSubsection
+      <AgentDetailSection
         title={`${tr("연결된 AgentDesk 세션", "Linked AgentDesk Sessions")}${!loadingClaudeSessions ? ` (${claudeSessions.length})` : ""}`}
-        className="md:col-span-2"
       >
         {loadingClaudeSessions ? (
-          <SurfaceNotice tone="neutral" compact>
-            {tr("불러오는 중...", "Loading...")}
-          </SurfaceNotice>
+          <SectionLoading label={tr("불러오는 중...", "Loading...")} />
         ) : claudeSessions.length === 0 ? (
-          <SurfaceEmptyState className="text-xs">
-            {tr("연결된 AgentDesk 세션 없음", "No linked AgentDesk sessions")}
-          </SurfaceEmptyState>
+          <SectionEmpty>{tr("연결된 AgentDesk 세션 없음", "No linked AgentDesk sessions")}</SectionEmpty>
         ) : (
-          <div className="space-y-1.5">
+          <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
             {claudeSessions.map((session) => {
               const providerMeta = getProviderMeta(session.provider);
-              const sessionChannelInfo = resolveDiscordChannelInfo(
-                session.thread_channel_id ?? null,
-              );
+              const sessionChannelInfo = resolveDiscordChannelInfo(session.thread_channel_id ?? null);
               const sessionSummary = describeDispatchedSession(
                 session,
                 sessionChannelInfo,
                 resolveDiscordParentInfo(sessionChannelInfo),
               );
+              const working = session.status === "working";
 
               return (
-                <SurfaceCard
-                  key={session.id}
-                  className="flex items-start justify-between gap-2 px-2.5 py-2"
-                  style={{ background: "var(--th-bg-surface)" }}
-                >
-                  <div className="min-w-0">
-                    <div className="flex min-w-0 items-center gap-2">
+                <li key={session.id} className={rowClass}>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 items-center gap-1">
                       <DiscordSummaryLabel summary={sessionSummary} />
                       <DiscordDeepLinkChip deepLink={sessionSummary.deepLink} label={tr("앱", "App")} />
                     </div>
-                    <div className="mt-0.5 truncate text-xs" style={{ color: "var(--th-text-muted)" }}>
+                    <div className="mt-0.5 truncate text-xs text-(--fg-muted)">
                       {session.session_info || session.model || "AgentDesk session"}
                     </div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-1">
-                    <span
-                      className="rounded px-1.5 py-0.5 text-xs"
-                      style={{
-                        background: providerMeta.bg,
-                        color: "var(--th-text-secondary)",
-                        border: `1px solid ${providerMeta.border}`,
-                      }}
-                    >
-                      {providerMeta.label}
-                    </span>
-                    <span
-                      className="rounded px-1.5 py-0.5 text-xs"
-                      style={{
-                        background:
-                          session.status === "working"
-                            ? "rgba(16,185,129,0.15)"
-                            : "rgba(100,116,139,0.15)",
-                        color: session.status === "working" ? "var(--th-badge-emerald-text)" : "var(--th-text-secondary)",
-                      }}
-                    >
-                      {session.status === "working" ? tr("작업중", "Working") : tr("대기", "Idle")}
-                    </span>
+                  <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                    <Badge tone="neutral">{providerMeta.label}</Badge>
+                    <Badge tone={working ? "success" : "neutral"} dot live={working}>
+                      {working ? tr("작업중", "Working") : tr("대기", "Idle")}
+                    </Badge>
                   </div>
-                </SurfaceCard>
+                </li>
               );
             })}
-          </div>
+          </ul>
         )}
-      </SurfaceSubsection>
+      </AgentDetailSection>
     </>
   );
 }
