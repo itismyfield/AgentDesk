@@ -1,6 +1,5 @@
 //! A readiness hold gives the owner's unattempted front one fixed deadline; there the owner refuses
 //! it without an attempt unless a reserve won first. Both are actor turns, so exactly one wins.
-use super::super::v2_types::readiness_hold::{FrontRef, ReadinessHold, RefusedFront};
 use super::*;
 use crate::db::turns::TerminalOutcome;
 
