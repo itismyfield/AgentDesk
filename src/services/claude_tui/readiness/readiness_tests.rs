@@ -722,13 +722,13 @@ fn an_owner_input_whose_idle_transcript_moved_once_ends_refused_without_a_key() 
     );
 }
 
-// Evidence that lands inside a window is delivered by the same wait, not settled over; a Cancel
-// that lands in the window first ends the wait, and the evidence after it sends no key.
+// Evidence inside a window delivers the waiting input; Cancel ends the wait even when no
+// SessionStart follows, before submission can recheck the token.
 #[cfg(unix)]
 #[test]
 fn evidence_that_lands_inside_a_window_delivers_the_waiting_input() {
     use super::super::input::submission::tests::{ScriptedTmux, view};
-    for cancels in [false, true] {
+    for (cancels, evidence_arrives) in [(false, true), (true, true), (true, false)] {
         let _root = crate::config::TestRuntimeRootGuard::new();
         let r = Rig::new();
         r.assistant("old answer");
@@ -755,6 +755,9 @@ fn evidence_that_lands_inside_a_window_delivers_the_waiting_input() {
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 std::thread::sleep(budget / 4);
             }
+            if !evidence_arrives {
+                return;
+            }
             let start = json!({"session_id":native,"transcript_path":path,"source":"startup"});
             let at = Some(Utc::now());
             note_hook(
@@ -775,6 +778,15 @@ fn evidence_that_lands_inside_a_window_delivers_the_waiting_input() {
         match cancels {
             true => {
                 assert!(sent.is_err(), "the Cancel ends the wait: {sent:?}");
+                if !evidence_arrives {
+                    assert_eq!(
+                        sent,
+                        Err(super::super::guarded_outcome::SubmissionError::Legacy(
+                            super::super::input::PROMPT_READY_CANCELLED_ERROR.into()
+                        )),
+                        "Cancel without later evidence must end as cancellation"
+                    );
+                }
                 assert!(tmux.sends().is_empty(), "no key after the Cancel");
             }
             false => {

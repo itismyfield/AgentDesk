@@ -22,7 +22,16 @@ impl Owner {
         let now = origin::now_ms();
         next.owe_attempt(&input, TerminalOutcome::Failed, now);
         let members: Vec<PendingQueueItem> = input.members().cloned().collect();
-        effort_continue::close_dropped(&mut next, effort_continue::Dropped::Only(&members));
+        if let Some(intent) = next.effort_restart.as_mut()
+            && intent.continuation.as_ref().is_some_and(|c| {
+                members
+                    .iter()
+                    .any(|item| source_admission::same_original(item, &c.original))
+            })
+        {
+            intent.cancelled = true;
+            intent.continuation = None;
+        }
         // The attempt's tickets end with it; their receipts keep a retry of them a duplicate.
         let attempt = &key.attempt;
         (next.admission_binds)

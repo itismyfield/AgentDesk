@@ -19,6 +19,8 @@ use std::time::Duration;
 
 #[path = "owner_input_common_operation_tests.rs"]
 mod common_operation_tests;
+#[path = "owner_input_effort_refused_tests.rs"]
+mod effort_refused_tests;
 
 pub(super) const PROMPT: &str = "owner busy question";
 pub(super) const AUTHOR: &str = "7";
