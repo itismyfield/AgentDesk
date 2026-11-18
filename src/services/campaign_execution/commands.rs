@@ -83,6 +83,12 @@ pub(crate) async fn apply_in<'a>(
     };
     let decision = match (prepared.request(), prepared.previous()) {
         _ if unsealed => Some(Err(Rejection::new(RejectionCode::StaleBinding))),
+        (
+            StoreRequest::Command(Command::AcceptStageResult {
+                review: Some(_), ..
+            }),
+            _,
+        ) => Some(Err(Rejection::new(RejectionCode::InvalidState))),
         (StoreRequest::Create(input), None) => Some(control::create_definition(
             prepared.id().to_owned(),
             input.clone(),

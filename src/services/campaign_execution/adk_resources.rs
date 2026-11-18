@@ -1,9 +1,14 @@
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::profile::{Observation, ResourceIdentity, ResourceKind};
+
+use super::resource_admission::{ResourceAdmission, wait_for_headroom};
+use super::verification_run::CommandSpec;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceFact {
@@ -156,6 +161,69 @@ pub fn observe_pg(
     ResourceObservation {
         resource,
         observation,
+    }
+}
+
+// Both paths are trusted host configuration, separate from a candidate's checkout and inputs.
+#[derive(Clone, Debug)]
+pub struct AdkResources {
+    checkout: PathBuf,
+    wait_script: PathBuf,
+    cargo_shim: PathBuf,
+}
+
+impl AdkResources {
+    pub fn new(checkout: &Path, pipeline: &Path) -> io::Result<Self> {
+        if !checkout.is_absolute() || !pipeline.is_absolute() {
+            return Err(io::Error::other("resource roots must be absolute"));
+        }
+        let scripts = pipeline.join("scripts");
+        let cargo_shim = scripts.join("cargo-shim/cargo");
+        if cargo_shim.to_str().is_none() {
+            return Err(io::Error::other("cargo shim path is not UTF-8"));
+        }
+        Ok(Self {
+            checkout: checkout.to_path_buf(),
+            wait_script: scripts.join("wait_headroom.sh"),
+            cargo_shim,
+        })
+    }
+
+    pub(super) async fn admission(&self, wait: Duration) -> ResourceAdmission {
+        if which::which(&self.cargo_shim).is_err() {
+            return ResourceAdmission::Unavailable;
+        }
+        wait_for_headroom(&self.checkout, &self.wait_script, wait).await
+    }
+
+    // Set the explicit shim path before the command becomes part of the verified input digest.
+    pub fn bind_cargo(&self, command: &mut CommandSpec) -> io::Result<()> {
+        if command.program == "cargo" {
+            command.program = self.cargo_shim.to_string_lossy().into_owned();
+        }
+        let program = Path::new(&command.program);
+        if program
+            .file_name()
+            .is_some_and(|name| name == "cargo" || name == "cargo.exe")
+        {
+            self.require_cargo_shim(command)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_cargo_shim(&self, command: &CommandSpec) -> io::Result<()> {
+        if Path::new(&command.program) != self.cargo_shim
+            || command
+                .env_identity
+                .keys()
+                .any(|key| key.starts_with("ADK_CARGO_") || key == "ADK_REAL_CARGO")
+            || std::env::var_os("ADK_CARGO_SLOT_HELD").is_some()
+        {
+            return Err(io::Error::other(
+                "phase cargo command must acquire the host shim slot",
+            ));
+        }
+        Ok(())
     }
 }
 

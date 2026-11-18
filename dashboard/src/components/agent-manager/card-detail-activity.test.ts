@@ -150,3 +150,84 @@ describe("card-detail-activity helpers", () => {
     expect(formatAuditResult("OK", tr)).toBeNull();
   });
 });
+
+import {
+  buildCardActivity,
+  cardActivityDayLabel,
+  countCardActivity,
+  filterCardActivity,
+  groupCardActivityByDay,
+} from "./card-detail-activity";
+import type { CardAuditLogEntry, GitHubComment } from "../../api";
+import type { TaskDispatch } from "../../types";
+
+describe("unified card activity", () => {
+  const base = Date.parse("2026-11-17T10:00:00Z");
+  const dispatch = (id: string, at: number, patch: Partial<TaskDispatch> = {}): TaskDispatch => ({
+    id, kanban_card_id: "card-1", from_agent_id: "pipeline", to_agent_id: "agent-ada", dispatch_type: "implementation", status: "completed",
+    title: "", context_file: null, result_file: null, result_summary: null, parent_dispatch_id: null, chain_depth: 0, created_at: at,
+    dispatched_at: at, completed_at: null, ...patch,
+  });
+  const audit = (id: number, at: number | null, from: string, to: string, result: string | null = null): CardAuditLogEntry => ({
+    id, card_id: "card-1", from_status: from, to_status: to, source: "pipeline", result, created_at: at == null ? null : new Date(at).toISOString(),
+  });
+  const comment = (at: number, body: string, login = "luna"): GitHubComment => ({ author: { login }, body, createdAt: new Date(at).toISOString() });
+  const records = buildCardActivity({
+    card: { id: "card-1", latest_dispatch_id: "d-2" },
+    dispatches: [
+      dispatch("d-1", base - 3 * 3_600_000, { status: "failed", result_summary: " tmux 세션 없음 \n\n 재시도 필요 " }),
+      dispatch("d-2", base - 60_000, { status: "in_progress", title: "[구현] 워처 재부착" }),
+      dispatch("other", base, { kanban_card_id: "card-2" }),
+    ],
+    auditLog: [audit(1, base - 2 * 3_600_000, "in_progress", "blocked", "BLOCKED: tmux 없음"), audit(2, null, "blocked", "in_progress")],
+    ghComments: [
+      comment(base - 30 * 60_000, "리뷰했습니다. blocking finding 1건\n\n1. `src/a.rs:1` 문제"),
+      comment(base - 10 * 60_000, "상태를 review로 변경했습니다", "ada"),
+      comment(base - 9 * 60_000, "우선순위를 high로 변경했습니다", "ada"),
+    ],
+    tr,
+    getAgentLabel: (id) => (id === "agent-ada" ? "Ada" : id ?? ""),
+  });
+
+  it("merges the card's dispatches, transitions and comments newest first, timeless records last", () => {
+    expect(records.map((record) => record.id)).toEqual([
+      "dispatch:d-2", expect.stringMatching(/^comment:ada-/), expect.stringMatching(/^comment:luna-/), "status:1", "dispatch:d-1", "status:2",
+    ]);
+  });
+
+  it("describes each source in one sentence with an actor and a status badge", () => {
+    const latest = records[0];
+    expect(latest).toMatchObject({ source: "dispatch", text: "[구현] 워처 재부착", actor: "Ada", badge: { label: "In progress", tone: "info", live: true } });
+    expect(latest.detail).toMatchObject({ kind: "dispatch", latest: true });
+    const failed = records.find((record) => record.id === "dispatch:d-1")!;
+    expect(failed).toMatchObject({ text: "implementation → Ada", badge: { label: "Failed", tone: "danger" } });
+    expect(failed.detail).toMatchObject({ summary: "tmux 세션 없음\n재시도 필요" });
+    const blocked = records.find((record) => record.id === "status:1")!;
+    expect(blocked).toMatchObject({ text: "In Progress → Blocked", actor: "pipeline", sub: "Blocked: tmux 없음", badge: { tone: "danger" } });
+    const review = records.find((record) => record.source === "review")!;
+    expect(review).toMatchObject({ actor: "luna", badge: { label: "Changes requested", tone: "warning" } });
+    expect(review.text).toMatch(/^리뷰 피드백: /);
+    const coalesced = records.find((record) => record.source === "general")!;
+    expect(coalesced.text).toMatch(/^2 changes · /);
+    expect(coalesced.badge).toMatchObject({ label: "Coalesced" });
+  });
+
+  it("counts before searching and filters by source, then by sentence, actor and second fact", () => {
+    expect(countCardActivity(records)).toEqual({ all: 6, status: 2, dispatch: 2, review: 1, pm: 0, work: 0, general: 1 });
+    expect(filterCardActivity(records, "dispatch", "", tr).map((record) => record.id)).toEqual(["dispatch:d-2", "dispatch:d-1"]);
+    expect(filterCardActivity(records, "all", "  ADA ", tr)).toHaveLength(3);
+    expect(filterCardActivity(records, "status", "tmux", tr).map((record) => record.id)).toEqual(["status:1"]);
+    expect(filterCardActivity(records, "review", "nothing like this", tr)).toEqual([]);
+  });
+
+  it("groups by local day and names today, yesterday and older days", () => {
+    const groups = groupCardActivityByDay(records);
+    expect(groups.at(-1)).toMatchObject({ key: null });
+    expect(groups.reduce((sum, group) => sum + group.items.length, 0)).toBe(records.length);
+    const now = new Date(2026, 10, 17, 9).getTime();
+    expect(cardActivityDayLabel(new Date(2026, 10, 17).getTime(), now, "en", tr)).toBe("Today");
+    expect(cardActivityDayLabel(new Date(2026, 10, 16).getTime(), now, "ko", trKo)).toBe("어제");
+    expect(cardActivityDayLabel(new Date(2026, 10, 12).getTime(), now, "en", tr)).toMatch(/Nov(ember)? 12/);
+    expect(cardActivityDayLabel(null, now, "ko", trKo)).toBe("시각 없음");
+  });
+});

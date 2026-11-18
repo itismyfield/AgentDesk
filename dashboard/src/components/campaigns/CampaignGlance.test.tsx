@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CampaignNode } from "../../api/campaigns";
 import CampaignGlance from "./CampaignGlance";
 import { makeCampaignNode } from "./campaignTestFixtures";
+import { nodeMarker } from "./StatusMarker";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -103,4 +104,18 @@ it("previews a long status list and reveals the rest inline instead of a nested 
   await act(async () => more.click());
   expect(rows()).toHaveLength(12);
   expect(more.getAttribute("aria-expanded")).toBe("true");
+});
+
+
+it("grows a running task's marker with its stage and keeps other statuses on their own marks", async () => {
+  expect(nodeMarker("running", "investigate")).toEqual({ tone: "progress", ratio: 1 / 8 });
+  expect(nodeMarker("running", "review: draft")).toEqual({ tone: "progress", ratio: 4 / 8 });
+  expect(nodeMarker("running", "post-merge deploy check")).toEqual({ tone: "progress", ratio: 7 / 8 });
+  expect(nodeMarker("running", "부분 완료")).toEqual({ tone: "progress", ratio: 0.5 });
+  expect(nodeMarker("blocked", "review")).toEqual({ tone: "warn", ratio: 0 });
+  expect(nodeMarker("completed", "review")).toEqual({ tone: "done", ratio: 1 });
+  await render([makeCampaignNode("early", { status: "running", stage: "design" }), makeCampaignNode("late", { status: "running", stage: "merge" })]);
+  const pie = (id: string) => Number(card(id).querySelector("svg circle + circle")?.getAttribute("stroke-dasharray")?.split(" ")[0]);
+  expect(pie("early")).toBeLessThan(pie("late"));
+  expect(card("late").textContent).toContain("Merge");
 });

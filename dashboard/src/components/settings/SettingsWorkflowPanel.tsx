@@ -16,7 +16,7 @@ const EDITOR_KEYWORDS = "세부 흐름 편집기 고급 편집 파이프라인 �
 
 export function SettingsWorkflowPanel({ ctx, configStatus, runtimeStatus, editorOpen, onToggleEditor, notify }: Props) {
   return (
-    <div className="space-y-5">
+    <div className="space-y-9">
       <SettingsRowSection ctx={ctx} panel="workflow" section="timeouts" status={configStatus} />
       <SettingsRowSection ctx={ctx} panel="workflow" section="retries" status={runtimeStatus} />
       <SettingsRowSection ctx={ctx} panel="workflow" section="autoProgress" status={runtimeStatus} />

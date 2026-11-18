@@ -692,6 +692,41 @@ test.describe("settings", () => {
     await shot(page, testInfo, "machine");
   });
 
+  test("arrow keys move between panels and keep the open tab in view", async ({ page }) => {
+    await mockSettings(page);
+    await openSettings(page);
+    await tabs(page).nth(0).focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(page.locator("#settings-tab-workflow")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("#settings-tab-workflow")).toBeFocused();
+    await expect(page).toHaveURL(/settingsPanel=workflow/);
+    await page.keyboard.press("End");
+    await expect(page.locator("#settings-tab-machine")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("#settings-tab-machine")).toBeInViewport({ ratio: 0.9 });
+    await page.keyboard.press("ArrowRight");
+    await expect(page.locator("#settings-tab-general")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("#settings-tab-general")).toBeFocused();
+  });
+
+  test("a dangerous setting is saved only after confirming", async ({ page }) => {
+    const writes = await mockSettings(page);
+    await openSettings(page, "workflow");
+    await page.getByRole("switch", { name: "리뷰 단계 사용" }).click();
+    const bar = page.getByTestId("settings-save-bar");
+    await expect(bar).toContainText("바뀐 설정 1개");
+    await bar.getByRole("button", { name: "저장" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("리뷰 게이트");
+    expect(writes.filter((write) => write.method === "PATCH")).toHaveLength(0);
+    await dialog.getByRole("button", { name: "취소" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(bar).toContainText("바뀐 설정 1개");
+    await bar.getByRole("button", { name: "저장" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "확인하고 저장" }).click();
+    await expect(bar).toHaveCount(0);
+    expect(Object.keys(writes.find((write) => write.method === "PATCH")?.body as object)).toEqual(["review_enabled"]);
+  });
+
   test("search narrows the tabs and rows", async ({ page }, testInfo) => {
     await mockSettings(page);
     await openSettings(page, "workflow");

@@ -29,7 +29,10 @@ impl From<io::Error> for OpenError {
 
 impl JournalDir {
     pub(super) fn open(root: &Path) -> Result<Self, OpenError> {
-        fs::create_dir_all(root.join(ENTRIES_DIR))?;
+        let entries = root.join(ENTRIES_DIR);
+        fs::create_dir_all(&entries)?;
+        runtime_store::fsync_parent_dir(root)?;
+        runtime_store::fsync_parent_dir(&entries)?;
         let lock = File::options()
             .create(true)
             .truncate(false)
@@ -60,21 +63,41 @@ impl JournalDir {
         write_durable(&self.root, name, value)
     }
 
-    pub(super) fn entries<T: DeserializeOwned>(&self) -> io::Result<Vec<T>> {
+    pub(super) fn entries<T: DeserializeOwned>(
+        &self,
+        key: impl Fn(&T) -> &str,
+    ) -> io::Result<Vec<T>> {
         let mut entries = Vec::new();
         for item in fs::read_dir(self.root.join(ENTRIES_DIR))? {
-            let path = item?.path();
+            let item = item?;
+            let path = item.path();
             if path.extension().is_some_and(|e| e == "json") {
-                entries.push(serde_json::from_slice(&fs::read(&path)?).map_err(io::Error::other)?);
+                if !item.file_type()?.is_file() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid journal entry type",
+                    ));
+                }
+                let entry = serde_json::from_slice(&fs::read(&path)?).map_err(io::Error::other)?;
+                if item.file_name() != entry_name(key(&entry)).as_str() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "journal entry filename does not match its action",
+                    ));
+                }
+                entries.push(entry);
             }
         }
         Ok(entries)
     }
 
     pub(super) fn write_entry<T: Serialize>(&self, key: &str, value: &T) -> io::Result<()> {
-        let name = format!("{}.json", blake3::hash(key.as_bytes()).to_hex());
-        write_durable(&self.root.join(ENTRIES_DIR), &name, value)
+        write_durable(&self.root.join(ENTRIES_DIR), &entry_name(key), value)
     }
+}
+
+fn entry_name(key: &str) -> String {
+    format!("{}.json", blake3::hash(key.as_bytes()).to_hex())
 }
 
 // The new content is synced before the rename and the directory after it, so a crash leaves

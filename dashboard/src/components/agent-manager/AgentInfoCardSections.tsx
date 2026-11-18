@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Loading, Skeleton } from "../../kit/free/skeleton-clean";
 import { formatDiscordSummary } from "./discord-routing";
 
 export function DiscordSummaryLabel({
@@ -16,11 +17,7 @@ export function DiscordSummaryLabel({
 
   if (!href) {
     return (
-      <span
-        className="block min-w-0 flex-1 truncate text-xs font-medium"
-        style={{ color: "var(--th-text-primary)" }}
-        title={label}
-      >
+      <span className="block min-w-0 flex-1 truncate text-[13px] font-medium text-(--fg)" title={label}>
         {label}
       </span>
     );
@@ -29,8 +26,7 @@ export function DiscordSummaryLabel({
   return (
     <a
       href={href}
-      className="block min-w-0 flex-1 truncate text-xs font-medium hover:underline"
-      style={{ color: "var(--th-text-primary)" }}
+      className="block min-w-0 flex-1 truncate rounded-sm text-[13px] font-medium text-(--fg) hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
       title={summary.deepLink ?? summary.webUrl ?? label}
     >
       {label}
@@ -49,8 +45,7 @@ export function DiscordDeepLinkChip({
   return (
     <a
       href={deepLink}
-      className="shrink-0 rounded px-1.5 py-0.5 text-xs"
-      style={{ background: "rgba(88,101,242,0.15)", color: "#7289da" }}
+      className="inline-flex min-h-11 shrink-0 items-center rounded-(--r-sm) px-2 text-xs text-(--fg-muted) hover:bg-(--bg-2) hover:text-(--fg) focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent) sm:min-h-7"
       title={deepLink}
     >
       {label}
@@ -58,74 +53,51 @@ export function DiscordDeepLinkChip({
   );
 }
 
-interface DetailAccordionProps {
-  title: string;
-  subtitle?: string | null;
-  badge?: string | null;
-  open: boolean;
-  onToggle: () => void;
+/** Flat detail section: a quiet heading with an optional action on the right, then the content. */
+export function AgentDetailSection({
+  title,
+  aside,
+  children,
+  className = "",
+  labelledBy,
+}: {
+  title: ReactNode;
+  aside?: ReactNode;
   children: ReactNode;
+  className?: string;
+  labelledBy?: string;
+}) {
+  return (
+    <section className={`flex min-w-0 flex-col gap-2.5 ${className}`.trim()} aria-labelledby={labelledBy}>
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        <h3 id={labelledBy} className="m-0 text-xs font-medium leading-4 text-(--fg-muted)">
+          {title}
+        </h3>
+        {aside}
+      </div>
+      {children}
+    </section>
+  );
 }
 
-export function DetailAccordion({
-  title,
-  subtitle,
-  badge,
-  open,
-  onToggle,
-  children,
-}: DetailAccordionProps) {
+export function SectionLoading({ label }: { label: string }) {
   return (
-    <div
-      className="px-5 py-3"
-      style={{ borderBottom: "1px solid var(--th-card-border)" }}
-    >
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex min-h-11 w-full items-start justify-between gap-3 text-left"
-        aria-expanded={open}
-      >
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <div
-              className="text-xs font-semibold uppercase tracking-widest"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {title}
-            </div>
-            {badge && (
-              <span
-                className="rounded-full px-2 py-0.5 text-[11px] font-medium"
-                style={{
-                  background: "rgba(96,165,250,0.12)",
-                  color: "#93c5fd",
-                }}
-              >
-                {badge}
-              </span>
-            )}
-          </div>
-          {subtitle && (
-            <div
-              className="mt-1 text-xs leading-relaxed"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {subtitle}
-            </div>
-          )}
-        </div>
-        <span
-          className="rounded-full px-2 py-1 text-xs font-medium"
-          style={{
-            background: "rgba(148,163,184,0.12)",
-            color: "var(--th-text-muted)",
-          }}
-        >
-          {open ? "▲" : "▼"}
-        </span>
-      </button>
-      {open && <div className="mt-3">{children}</div>}
+    <Loading label={label} className="flex flex-col gap-2">
+      <Skeleton width="72%" height={10} />
+      <Skeleton width="48%" height={10} />
+    </Loading>
+  );
+}
+
+export function SectionEmpty({ children }: { children: ReactNode }) {
+  return <p className="m-0 text-[13px] leading-5 text-(--fg-muted)">{children}</p>;
+}
+
+/** Tinted well for free text such as the current work or the personality prompt. */
+export function SectionWell({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return (
+    <div className={`rounded-(--r-md) bg-[color-mix(in_oklch,var(--fg)_4%,var(--bg-1))] px-3.5 py-3 ${className}`.trim()}>
+      {children}
     </div>
   );
 }

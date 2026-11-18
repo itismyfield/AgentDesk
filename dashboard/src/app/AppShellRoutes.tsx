@@ -75,7 +75,6 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
         const updated = await api.assignDispatchedSession(id, patch);
         setSessions((prev) => prev.map((session) => (session.id === updated.id ? updated : session)));
       }}
-      onSelectAgent={openDefaultAgentInfo}
       activeTab={agentsPageTab}
       onTabChange={setAgentsPageTab}
       autoOpenCreate={autoOpenCreate}

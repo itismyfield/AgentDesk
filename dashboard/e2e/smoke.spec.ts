@@ -1652,9 +1652,9 @@ test.describe("Dashboard smoke tests", () => {
 
     await expect(page.getByTestId("stats-page")).toBeVisible({ timeout: 15000 });
     await expect(page.getByTestId("stats-range-controls")).toBeVisible();
-    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-pressed", "false");
-    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-checked", "false");
+    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-checked", "false");
 
     await expect(page.getByTestId("stats-summary-total-tokens")).toBeVisible();
     await expect(page.getByTestId("stats-summary-api-spend")).toBeVisible();
@@ -1670,12 +1670,12 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("stats-claude-accounts").getByRole("button", { name: /^(Switch|Active)$/ })).toHaveCount(0);
 
     await page.getByTestId("stats-range-7d").click();
-    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-checked", "false");
 
     await page.getByTestId("stats-range-90d").click();
-    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-checked", "false");
   });
 
   test("stats: weekly chart fits and longer series support horizontal keyboard navigation", async ({ page }, testInfo) => {
@@ -1762,7 +1762,7 @@ test.describe("Dashboard smoke tests", () => {
     await expectNoHorizontalOverflow(page);
   });
 
-  test("routines: page lists jobs chronologically and the detail leads with thread and result", async ({ page }) => {
+  test("routines: page lists jobs chronologically and the detail leads with thread and result", async ({ page }, testInfo) => {
     await page.goto("/routines");
 
     await expect(page.getByTestId("routines-page")).toBeVisible({ timeout: 15000 });
@@ -1784,7 +1784,8 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("routine-row-routine-soon")).toContainText("오부장 프로필 점검");
 
     await page.getByTestId("routine-row-routine-late").click();
-    const drawer = page.getByRole("dialog");
+    // Wide screens show the detail beside the list; below 900px it opens as a sheet.
+    const drawer = testInfo.project.name === "desktop" ? page.getByTestId("routine-detail-pane") : page.getByRole("dialog");
     const threadLink = drawer.getByTestId("routine-thread-link");
     await expect(threadLink).toHaveAttribute("href", "https://discord.com/channels/1469870512812462284/1505086366654926908");
     await expect(drawer.getByTestId("routine-last-result")).toContainText("Profile probe failed");
@@ -1820,9 +1821,12 @@ test.describe("Dashboard smoke tests", () => {
     });
     await page.goto("/agents");
     // Phones always use the list; the grid/list switch exists on desktop only.
-    if (testInfo.project.name === "desktop") await page.getByRole("button", { name: /리스트|List/ }).click();
+    if (testInfo.project.name === "desktop") await page.getByRole("radio", { name: /리스트|List/ }).click();
     await page.getByTestId("agents-card-agent-ada").click();
-    const dialog = page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
+    // Desktop shows the detail beside the list; phones open it as a full-screen dialog.
+    const dialog = testInfo.project.name === "desktop"
+      ? page.getByRole("region", { name: /에이전트 상세|Agent details/ })
+      : page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
     const device = dialog.getByLabel(/우선 실행 장비|Preferred execution device/);
     const save = dialog.getByRole("button", { name: /^(저장|Save)$/ });
     await expect(device).toBeEnabled();
@@ -1834,7 +1838,7 @@ test.describe("Dashboard smoke tests", () => {
     await save.click();
     await expect(dialog.getByRole("status")).toContainText(/새 세션부터|new sessions/);
     expect(writes).toEqual([{ default_node_id: "windows-1" }]);
-    await page.getByRole("button", { name: /닫기|Close/ }).click();
+    await page.getByRole("button", { name: /닫기|Close|목록으로|Back to list/ }).click();
     await page.getByTestId("agents-card-agent-ada").click();
     await expect(device).toHaveValue("windows-1");
     await expect(save).toBeDisabled();
@@ -1862,11 +1866,11 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("agents-view-grid")).toBeVisible();
     await expect(page.getByRole("img", { name: /아다 대시보드|Ada Dashboard/ }).first()).toBeVisible();
 
-    await page.getByRole("button", { name: /리스트|List/ }).click();
+    await page.getByRole("radio", { name: /리스트|List/ }).click();
     await expect(page.getByTestId("agents-view-list")).toBeVisible();
 
     await page.getByTestId("agents-card-agent-ada").click();
-    const agentDetailDialog = page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
+    const agentDetailDialog = page.getByRole("region", { name: /에이전트 상세|Agent details/ });
     await expect(agentDetailDialog).toBeVisible();
     await expect(agentDetailDialog).toContainText("Ada Dashboard");
     await expect(agentDetailDialog.getByText(/Lv\.\s?\d|XP/)).toHaveCount(0);
@@ -2322,14 +2326,23 @@ test.describe("Dashboard smoke tests", () => {
     await expect(runner.getByText("Example CPU", { exact: true })).toBeVisible();
     await expect(runner.getByText("Example GPU", { exact: true })).toBeVisible();
     await expect(runner.getByTestId("machine-trend-cpu").locator("svg")).toBeVisible();
+    // Trend frames sit on the theme chart surface (--bg-1), not a fixed gray.
+    const chartSurface = await page.evaluate(() => {
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = "var(--bg-1)";
+      document.body.append(probe);
+      const color = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return color;
+    });
     for (const kind of ["cpu", "memory", "disk", "gpu"]) {
       const chart = runner.getByTestId(`machine-trend-${kind}`);
-      await expect(chart).toHaveCSS("background-color", "rgb(38, 38, 38)");
+      await expect(chart).toHaveCSS("background-color", chartSurface);
       await expect(chart.locator('[data-layer="line"]')).toHaveCount(1);
       await expect(chart.locator('[data-layer="area"]')).toHaveCount(1);
     }
     const networkChart = runner.getByTestId("machine-trend-network");
-    await expect(networkChart).toHaveCSS("background-color", "rgb(38, 38, 38)");
+    await expect(networkChart).toHaveCSS("background-color", chartSurface);
     await expect(networkChart.locator('[data-layer="line"]')).toHaveCount(2);
     await expect(networkChart.locator('[data-layer="area"]')).toHaveCount(2);
     await expect(networkChart.locator('[data-layer="line"][data-series="primary"]')).toHaveAttribute("stroke", "#f472b6");

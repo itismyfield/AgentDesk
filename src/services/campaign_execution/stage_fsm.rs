@@ -8,6 +8,7 @@ use super::evidence_gate::{
     GateReason, StageAssessment, Verdict, assess_verification, evaluate_stage,
 };
 use super::failure_budget::{FailureDisposition, record_quality_failure};
+use super::lifecycle::{self, GateTarget};
 use super::model::*;
 use super::profile::{Candidate, ProfileLimits, RepositoryProfile};
 use super::review_gate::{StagePrerequisite, evaluate_review_stage};
@@ -141,7 +142,7 @@ pub(super) fn assign_work(
         .is_some_and(|a| a.outcome.is_none());
     let fenced = fence(run, &binding.node_id);
     if busy
-        || current.stage != Stage::Implementation
+        || !matches!(current.stage, Stage::Requirements | Stage::Implementation)
         || fenced.interruption.is_some()
         || matches!(
             current.disposition,
@@ -168,6 +169,7 @@ pub(super) fn assign_work(
     {
         return reject(RejectionCode::InvalidState);
     }
+    lifecycle::admit_work(next, run, binding, current.stage, &pin_hash)?;
     let epoch = fenced.epoch + 1;
     let repair_cycle = current.repair_cycles;
     let mut registered = Vec::new();
@@ -223,6 +225,7 @@ pub(super) fn assign_work(
     }
     run.fences.entry(binding.node_id.clone()).or_default().epoch = epoch;
     let node = next.nodes.get_mut(&binding.node_id).expect("checked above");
+    node.stage = Stage::Implementation;
     node.current_attempt = Some(binding.attempt_id.clone());
     node.disposition = NodeDisposition::Assigned;
     node.wait_reason = None;
@@ -347,6 +350,9 @@ pub(super) fn begin_review(
     if start.verdict != Verdict::Pass {
         return gate_not_passed(&start);
     }
+    let candidate = lifecycle::reviewed(seal);
+    let slot = crate::domain::campaign::workflow_options::ApprovalGate::Review;
+    lifecycle::require_gate(next, run, node_id, slot, &GateTarget::of(&candidate))?;
     let epoch = fenced.epoch + 1;
     let mut prerequisites = Vec::new();
     for id in &execution.finish_executions {
@@ -378,7 +384,9 @@ pub(super) fn begin_review(
             .insert(prerequisite.id.clone(), prerequisite);
     }
     run.actions.insert(launch.id.clone(), launch.clone());
-    run.fences.entry(node_id.into()).or_default().epoch = epoch;
+    let fenced = run.fences.entry(node_id.into()).or_default();
+    fenced.epoch = epoch;
+    fenced.candidate = Some(candidate);
     let node = next.nodes.get_mut(node_id).expect("checked above");
     node.stage = Stage::Review;
     node.current_attempt = Some(review.attempt_id.clone());

@@ -99,3 +99,6 @@ mod stage_store_tests;
 mod tests;
 #[cfg(test)]
 mod verification_store_tests;
+
+#[cfg(test)]
+mod decision_gate_tests;
