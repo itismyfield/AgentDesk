@@ -7,10 +7,12 @@ pub(crate) struct LegacyRun {
     pub(crate) binding: BindingEvent,
     pub(crate) turn: Option<LegacyTurnIdentity>,
     pub(crate) observed_end: u64,
+    pub(crate) delivery: Option<crate::services::tui_o::writer::adoption::LegacyDelivery>,
 }
 #[derive(Debug)]
 pub(super) struct RunState {
     run: Option<LegacyRun>,
+    owed: Vec<LegacyRun>,
     boundary: Option<LateBoundary>,
     epoch: u64,
     changed: tokio::sync::watch::Sender<u64>,
@@ -19,6 +21,7 @@ impl Default for RunState {
     fn default() -> Self {
         Self {
             run: None,
+            owed: Vec::new(),
             boundary: None,
             epoch: 0,
             changed: tokio::sync::watch::channel(0).0,
@@ -26,6 +29,13 @@ impl Default for RunState {
     }
 }
 impl Candidate {
+    pub(crate) fn owed_runs(&self) -> Vec<LegacyRun> {
+        self.child_run
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .owed
+            .clone()
+    }
     pub(crate) fn child_boundary_epoch(&self) -> u64 {
         self.child_run
             .lock()
@@ -129,6 +139,9 @@ impl Candidate {
             takeover_after: seq,
             sends,
         });
+        if !child.owed.contains(expected) {
+            child.owed.push(expected.clone());
+        }
         child.run = None;
         child.epoch += 1;
         child.changed.send_replace(child.epoch);

@@ -16,6 +16,9 @@ use crate::services::tui_o::shadow::identity::{RecordFact, classify};
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId, UnitKind};
 use crate::services::tui_o::store::InitSource;
 
+mod child_debt;
+pub(super) use child_debt::ChildDebt;
+
 /// As long as unmapped hooks are refused after the receiver starts, so a live Legacy pass is seen.
 const LEGACY_START_WAIT: Duration = Duration::from_secs(60);
 const LEGACY_START_POLL: Duration = Duration::from_millis(100);
@@ -49,6 +52,17 @@ pub trait LegacyView: Send + Sync + 'static {
     /// Legacy's delivered frontier within `eof`; `None` from a host that keeps no delivery record.
     fn frontier(&self, channel: u64, tmux: &str, eof: u64) -> Option<u64>;
     fn tail_running(&self, tmux: &str) -> bool;
+    /// An old run's exact receipt; a current channel frontier cannot stand in for this proof.
+    fn historical_frontier(
+        &self,
+        _binding: &BindingEvent,
+        _turn: Option<&LegacyTurnIdentity>,
+        _delivery: Option<&LegacyDelivery>,
+        _eof: u64,
+    ) -> Option<u64> {
+        None
+    }
+
     /// What restarts Legacy's own redrive cycle for the channel; unchanged when nothing can say.
     /// A failed observation must not look like a finished run at a child boundary.
     fn session_ended(&self, tmux: &str) -> Result<bool, String> {
@@ -63,12 +77,21 @@ pub trait LegacyView: Send + Sync + 'static {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegacyDelivery {
+    pub source_path: PathBuf,
+    pub execution_nonce: Option<String>,
+    pub owner: u64,
+    pub generation: i64,
+}
+
 pub type LegacyTurnIdentity = (u64, String, Option<String>, Option<u64>, Option<String>);
 
 /// Legacy's redrive episode as this process can read it: its frontier reset, watcher reattaches,
 /// and the inflight row's identity (user message, start, tmux, turn start) and turn nonce.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LegacyEpoch {
+    pub delivery: Option<LegacyDelivery>,
     pub reset_incarnation: u64,
     pub reconnects: u64,
     pub turn: Option<LegacyTurnIdentity>,

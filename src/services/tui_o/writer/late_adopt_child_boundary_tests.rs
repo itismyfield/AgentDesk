@@ -5,6 +5,8 @@ use crate::services::tui_o::writer::adoption::{LegacyEpoch, LegacyTurnIdentity};
 use std::sync::atomic::AtomicBool;
 
 struct Probe {
+    delivered: Arc<Mutex<Vec<String>>>,
+    initial: PathBuf,
     path: Mutex<PathBuf>,
     frontier: AtomicU64,
     live: AtomicBool,
@@ -32,6 +34,19 @@ impl LegacyView for Probe {
     fn frontier(&self, _: u64, _: &str, _: u64) -> Option<u64> {
         Some(self.frontier.load(Ordering::SeqCst))
     }
+    fn historical_frontier(
+        &self,
+        binding: &BindingEvent,
+        _: Option<&LegacyTurnIdentity>,
+        _: Option<&crate::services::tui_o::writer::adoption::LegacyDelivery>,
+        eof: u64,
+    ) -> Option<u64> {
+        let source = crate::services::tui_o::writer::rotation::bound_source(binding)?;
+        (source.path == self.initial
+            && binding.execution_nonce == "binding-host"
+            && !self.delivered.lock().unwrap().is_empty())
+        .then_some(eof)
+    }
     fn tail_running(&self, _: &str) -> bool {
         false
     }
@@ -54,6 +69,8 @@ fn running(f: &Fixture) -> (Arc<Probe>, PathBuf) {
     let next = f.harness._runtime.path().join("running.jsonl");
     std::fs::write(&next, row("running", "current answer")).unwrap();
     let probe = Arc::new(Probe {
+        delivered: f.old.clone(),
+        initial: next.clone(),
         path: Mutex::new(next.clone()),
         frontier: AtomicU64::new(0),
         live: AtomicBool::new(true),
@@ -425,4 +442,269 @@ async fn childheld_already_closed_answer_retries_after_legacy_delivery_without_n
     assert_eq!(f.harness.port.posts(), ["next O answer"]);
     assert_eq!(*f.old.lock().unwrap(), ["current answer"]);
     handle.stop_and_join().await.unwrap();
+}
+
+struct DebtProbe {
+    base: Arc<Probe>,
+    old: PathBuf,
+    ack: AtomicU64,
+}
+impl LegacyView for DebtProbe {
+    fn started(&self) -> bool {
+        true
+    }
+    fn cursor(&self, tmux: &str) -> LegacyCursor {
+        self.base.cursor(tmux)
+    }
+    fn late_cursor(&self, tmux: &str) -> Result<LegacyCursor, String> {
+        self.base.late_cursor(tmux)
+    }
+    fn frontier(&self, channel: u64, tmux: &str, eof: u64) -> Option<u64> {
+        self.base.frontier(channel, tmux, eof)
+    }
+    fn historical_frontier(
+        &self,
+        binding: &BindingEvent,
+        _: Option<&LegacyTurnIdentity>,
+        _: Option<&crate::services::tui_o::writer::adoption::LegacyDelivery>,
+        _eof: u64,
+    ) -> Option<u64> {
+        let source = crate::services::tui_o::writer::rotation::bound_source(binding)?;
+        (source.path == self.old
+            && binding.execution_nonce == "binding-host"
+            && self.ack.load(Ordering::SeqCst) != 0)
+            .then_some(self.ack.load(Ordering::SeqCst))
+    }
+    fn tail_running(&self, _: &str) -> bool {
+        false
+    }
+    fn epoch(&self, channel: u64) -> LegacyEpoch {
+        self.base.epoch(channel)
+    }
+}
+async fn drive_until(mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !done() && std::time::Instant::now() < deadline {
+        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        spin().await;
+    }
+    assert!(done(), "test completion was not observed");
+}
+async fn no_init(f: &Fixture) {
+    let reads = f.io.log.reads.load(Ordering::SeqCst);
+    drive_until(|| f.ready.accepts(CHANNEL) || f.io.log.reads.load(Ordering::SeqCst) >= reads + 40)
+        .await;
+    assert!(!f.ready.accepts(CHANNEL), "B cannot settle A's body");
+    assert!(
+        !init_path(&f.harness, CHANNEL).exists(),
+        "A still owes its body"
+    );
+    assert!(f.harness.port.posts().is_empty());
+}
+async fn debt_case(boundary: &str) {
+    let f = Fixture::new(false);
+    let (_boot, candidate) = super::childheld::child_boot(&f);
+    let (probe, old) = running(&f);
+    let debt = Arc::new(DebtProbe {
+        base: probe.clone(),
+        old: old.clone(),
+        ack: AtomicU64::new(0),
+    });
+    *f.io.base.legacy.lock().unwrap() = Some(debt.clone());
+    let handle = start_child(&f);
+    released(&f, &candidate).await;
+    append(&old, &closed());
+    let next = f.harness._runtime.path().join("new-execution.jsonl");
+    let fresh = boundary != "bind";
+    let injected = Arc::new(AtomicBool::new(false));
+    if boundary == "fence" {
+        let path = old.clone();
+        let signal = injected.clone();
+        test_hook::set(CHANNEL, Step::AfterFence, move || {
+            append(&path, &row("late-fragment", "late fragment"));
+            signal.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+    }
+    if fresh {
+        std::fs::write(&next, b"{\"type\":\"user\",\"sessionId\":\"next\",\"uuid\":\"prompt\",\"message\":{\"content\":\"next\"}}\n").unwrap();
+    } else {
+        std::fs::copy(&old, &next).unwrap();
+    }
+    let mut event = bound(4, source_id_for("next", &next).unwrap());
+    event.execution_nonce = "new-execution".into();
+    let mut events = f.io.log.events.lock().unwrap().clone();
+    events.push(event);
+    if fresh {
+        let log = Arc::downgrade(&f.io.log);
+        let (state, current, path) = (candidate.clone(), probe.clone(), next.clone());
+        *f.io.log.on_read.lock().unwrap() = Some(Box::new(move || {
+            if state.peek() != Adoption::Deferred {
+                return false;
+            }
+            *current.path.lock().unwrap() = path.clone();
+            current
+                .frontier
+                .store(std::fs::metadata(&path).unwrap().len(), Ordering::SeqCst);
+            log.upgrade().unwrap().replace(events.clone());
+            true
+        }));
+        if boundary == "turn" || boundary == "fence" {
+            *probe.turn.lock().unwrap() = None;
+        } else {
+            probe.live.store(false, Ordering::SeqCst);
+        }
+    } else {
+        *probe.path.lock().unwrap() = next.clone();
+        probe
+            .frontier
+            .store(std::fs::metadata(&next).unwrap().len(), Ordering::SeqCst);
+        f.io.log.replace(events);
+    }
+    drive_until(|| candidate.peek() != Adoption::Released).await;
+    no_init(&f).await;
+    legacy_once(&f).await;
+    debt.ack.store(
+        std::fs::metadata(&debt.old).unwrap().len(),
+        Ordering::SeqCst,
+    );
+    if boundary == "fence" {
+        drive_until(|| injected.load(Ordering::SeqCst)).await;
+        no_init(&f).await;
+        assert_eq!(
+            claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
+                f.old.lock().unwrap()[0].push_str(" + late fragment");
+            })
+            .await,
+            Ok(BodySend::Sent(()))
+        );
+        debt.ack.store(
+            std::fs::metadata(&debt.old).unwrap().len(),
+            Ordering::SeqCst,
+        );
+    }
+    drive_until(|| f.ready.accepts(CHANNEL)).await;
+    let expected = if boundary == "fence" {
+        "current answer + late fragment"
+    } else {
+        "current answer"
+    };
+    assert_eq!(*f.old.lock().unwrap(), [expected]);
+    append(&next, &row("after-ack", "O answer"));
+    polls(3).await;
+    assert_eq!(f.harness.port.posts(), ["O answer"]);
+    handle.stop_and_join().await.unwrap();
+}
+#[tokio::test(start_paused = true)]
+async fn ch3fix_new_bind_keeps_a_owed_until_its_own_ack() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::ch3fix_new_bind_keeps_a_owed_until_its_own_ack"
+    )) {
+        return;
+    }
+    debt_case("bind").await;
+}
+#[tokio::test(start_paused = true)]
+async fn ch3fix_turn_boundary_fresh_takeover_keeps_a_owed() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::ch3fix_turn_boundary_fresh_takeover_keeps_a_owed"
+    )) {
+        return;
+    }
+    debt_case("turn").await;
+}
+#[tokio::test(start_paused = true)]
+async fn ch3fix_session_boundary_fresh_takeover_keeps_a_owed() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::ch3fix_session_boundary_fresh_takeover_keeps_a_owed"
+    )) {
+        return;
+    }
+    debt_case("session").await;
+}
+#[tokio::test(start_paused = true)]
+async fn ch3fix_pending_does_not_hide_frozen_pane_end() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::ch3fix_pending_does_not_hide_frozen_pane_end"
+    )) {
+        return;
+    }
+    let f = Fixture::new(false);
+    let (_boot, candidate) = super::childheld::child_boot(&f);
+    let (probe, old) = running(&f);
+    let debt = Arc::new(DebtProbe {
+        base: probe.clone(),
+        old: old.clone(),
+        ack: AtomicU64::new(0),
+    });
+    *f.io.base.legacy.lock().unwrap() = Some(debt.clone());
+    let handle = start_child(&f);
+    released(&f, &candidate).await;
+    append(&old, &closed());
+    let mut events = f.io.log.events.lock().unwrap().clone();
+    let mut waiting = bound(4, source_id_for("running", &old).unwrap());
+    waiting.record = BindingRecord::Bound {
+        old: None,
+        new: BindingTarget::Pending {
+            payload_session_id: "pending".into(),
+            payload_transcript_path: f.harness._runtime.path().join("pending.jsonl"),
+        },
+        cause: BindingCause::Startup,
+        parent_hint: None,
+        evidence: BindingEvidence {
+            hook_event: "SessionStart".into(),
+            received_at: Utc::now(),
+            reclaims: false,
+        },
+    };
+    waiting.execution_nonce = "pending-execution".into();
+    events.push(waiting);
+    f.io.log.replace(events);
+    probe.live.store(false, Ordering::SeqCst);
+    drive_until(|| candidate.peek() != Adoption::Released).await;
+    assert_eq!(candidate.peek(), Adoption::Deferred);
+    no_init(&f).await;
+    let path = f.harness._runtime.path().join("pending.jsonl");
+    std::fs::write(&path, row("pending", "B answer")).unwrap();
+    append(&path, &closed());
+    *probe.path.lock().unwrap() = path.clone();
+    probe
+        .frontier
+        .store(std::fs::metadata(&path).unwrap().len(), Ordering::SeqCst);
+    let mut events = f.io.log.events.lock().unwrap().clone();
+    let mut resolved = event(
+        5,
+        BindingRecord::Resolved {
+            resolves_seq: 4,
+            source: source_id_for("pending", &path).unwrap(),
+        },
+    );
+    resolved.execution_nonce = "pending-execution".into();
+    events.push(resolved);
+    f.io.log.replace(events);
+    no_init(&f).await;
+    legacy_once(&f).await;
+    debt.ack.store(
+        std::fs::metadata(&debt.old).unwrap().len(),
+        Ordering::SeqCst,
+    );
+    drive_until(|| f.ready.accepts(CHANNEL)).await;
+    assert_eq!(*f.old.lock().unwrap(), ["current answer"]);
+    handle.stop_and_join().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn ch3fix_fresh_takeover_rechecks_a_after_the_fence() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::ch3fix_fresh_takeover_rechecks_a_after_the_fence"
+    )) {
+        return;
+    }
+    debt_case("fence").await;
 }

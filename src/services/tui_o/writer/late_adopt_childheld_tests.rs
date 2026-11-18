@@ -172,6 +172,7 @@ async fn childheld_readiness_rechecks_a_candidate_released_during_host_preparati
                     binding: bound(2, source_id_for("running", &f.path).unwrap()),
                     turn: None,
                     observed_end: std::fs::metadata(&f.path).unwrap().len(),
+                    delivery: None,
                 }
             ));
             HostParts {

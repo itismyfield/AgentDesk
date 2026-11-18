@@ -478,6 +478,14 @@ async fn commit<I: HostIo>(
     current: Option<&(SourceId, String)>,
 ) -> Result<(), Refused> {
     let (io, channel, provider) = (waiting.io, waiting.channel, waiting.provider);
+    let debts = adoption::ChildDebt::pin(
+        waiting.candidate,
+        waiting.legacy.clone(),
+        io.bindings(channel, provider),
+        channel,
+    )
+    .await
+    .map_err(Refused::retry)?;
     if waiting.late && !io.late_adopt_enabled() {
         return Err(Refused::retry("late adoption disabled before publication"));
     }
@@ -522,6 +530,9 @@ async fn commit<I: HostIo>(
                 if waiting.late {
                     let observed =
                         events(waiting).map_err(|error| Refused::new(Hold::Final, error))?;
+                    debts
+                        .recheck(&observed, waiting.candidate)
+                        .map_err(Refused::retry)?;
                     if let Some(detail) = rotation(waiting, &observed) {
                         return Err(Refused::new(Hold::Rotation(observed), detail));
                     }

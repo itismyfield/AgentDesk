@@ -65,6 +65,7 @@ fn fixture() -> (BootChannels, Candidate, LegacyRun) {
                 Some("turn".into()),
             )),
             observed_end: 0,
+            delivery: None,
         },
     )
 }
@@ -126,4 +127,38 @@ fn child_run_arbitrary_refusal_does_not_grant_legacy_body_ownership() {
     candidate.release(42);
     assert_eq!(boot.child(42).unwrap().unwrap().body_owner(), None);
     assert!(boot.output_candidate(42).is_some());
+}
+
+#[test]
+fn ch3fix_owner_snapshot_remains_legacy_across_the_boundary() {
+    use std::sync::{Arc, Barrier};
+    let (boot, candidate, run) = fixture();
+    assert!(candidate.release_child_run(42, run.clone()));
+    let child = boot.child(42).unwrap().unwrap();
+    let (read, changed) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
+    let (on_read, on_changed) = (read.clone(), changed.clone());
+    crate::services::tui_o::channel_policy::children::OWNER_STATE_READ.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            on_read.wait();
+            on_changed.wait();
+        }));
+    });
+    let next = candidate.clone();
+    let worker = std::thread::spawn(move || {
+        read.wait();
+        let locked = next.locked_for_test();
+        if !locked {
+            assert!(next.retry_child_at_boundary(&run, 4));
+        }
+        changed.wait();
+        if locked {
+            assert!(next.retry_child_at_boundary(&run, 4));
+        }
+    });
+    let owner = child.body_owner();
+    worker.join().unwrap();
+    assert_eq!(owner, Some(false));
+    assert_eq!(child.body_owner(), Some(false));
+    *candidate.lock() = Adoption::Committed;
+    assert_eq!(child.body_owner(), Some(true));
 }

@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 struct Log {
+    on_read: Mutex<Option<Box<dyn FnMut() -> bool + Send>>>,
     channel: u64,
     events: Mutex<Vec<BindingEvent>>,
     notice: Option<watch::Sender<u64>>,
@@ -26,6 +27,7 @@ impl Log {
     }
     fn for_channel(closed: bool, channel: u64) -> Arc<Self> {
         Arc::new(Self {
+            on_read: Mutex::default(),
             channel,
             events: Mutex::default(),
             notice: (!closed).then(|| watch::channel(0).0),
@@ -47,6 +49,12 @@ impl BindingEvents for Log {
         assert_eq!(channel, self.channel);
         self.order.lock().unwrap().push("read");
         self.reads.fetch_add(1, Ordering::SeqCst);
+        let callback = self.on_read.lock().unwrap().take();
+        if let Some(mut callback) = callback {
+            if !callback() {
+                *self.on_read.lock().unwrap() = Some(callback);
+            }
+        }
         Ok(self
             .events
             .lock()

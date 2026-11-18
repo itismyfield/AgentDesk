@@ -1998,6 +1998,8 @@ src/
 │   │   │   │   ├── production_nonce_tests.rs
 │   │   │   │   ├── resolved.rs
 │   │   │   │   └── routine_incident_nonce.rs
+│   │   │   ├── o_writer_legacy/
+│   │   │   │   └── child_debt_tests.rs
 │   │   │   ├── o_writer_repost_io_tests/
 │   │   │   │   └── owner_tests.rs
 │   │   │   ├── turn_output_controller/
@@ -4426,6 +4428,8 @@ src/
 │   │   │   │   ├── scoped_transition_tests.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_snapshot.rs
+│   │   │   ├── adoption/
+│   │   │   │   └── child_debt.rs
 │   │   │   ├── binding/
 │   │   │   │   └── terminal_tests.rs
 │   │   │   ├── codex_adoption/

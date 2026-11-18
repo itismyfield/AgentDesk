@@ -42,6 +42,7 @@ pub(in crate::services::tui_o::writer) fn normalize<I: HostIo>(
     let run = LegacyRun {
         binding: binding.clone(),
         turn: epoch.turn,
+        delivery: epoch.delivery,
         observed_end: meta.len(),
     };
     if !waiting
@@ -99,30 +100,36 @@ async fn observe<B: BindingEvents>(
             .binding_events_since(channel, 0)
             .map(crate::services::tui_o::writer::renumbered::first_named);
         if let Ok(events) = events {
-            let Some(now) = current(&events) else {
-                wake.wait().await;
-                continue;
-            };
-            if now.channel_id != channel || now.provider != run.binding.provider {
+            let now = current(&events);
+            if now.is_some_and(|now| {
+                now.channel_id != channel || now.provider != run.binding.provider
+            }) {
                 return;
             }
             if let Ok(epoch) = legacy.late_epoch(channel) {
-                let bind = now.seq > run.binding.seq
-                    && ((!now.execution_nonce.is_empty()
-                        && now.execution_nonce != run.binding.execution_nonce)
-                        || now.tmux_session != run.binding.tmux_session);
+                let bind = now.is_some_and(|now| {
+                    now.seq > run.binding.seq
+                        && ((!now.execution_nonce.is_empty()
+                            && now.execution_nonce != run.binding.execution_nonce)
+                            || now.tmux_session != run.binding.tmux_session)
+                });
                 let turn = observed_turn.is_some() && epoch.turn != observed_turn;
                 let session = legacy
                     .session_ended(&run.binding.tmux_session)
                     .unwrap_or(false);
-                let same = now.tmux_session == run.binding.tmux_session
-                    && (bound_source(now) == Some(&source)
-                        || (!run.binding.execution_nonce.is_empty()
-                            && now.execution_nonce == run.binding.execution_nonce)
-                        || (observed_turn.is_some() && epoch.turn == observed_turn));
+                let same = now.is_some_and(|now| {
+                    now.tmux_session == run.binding.tmux_session
+                        && (bound_source(now) == Some(&source)
+                            || (!run.binding.execution_nonce.is_empty()
+                                && now.execution_nonce == run.binding.execution_nonce)
+                            || (observed_turn.is_some() && epoch.turn == observed_turn))
+                });
                 if same && !bind && !turn {
                     // Compaction keeps the execution owner and fixes the checked source floor.
-                    if let Some(next) = bound_source(now).filter(|next| **next != observed_source) {
+                    if let Some(next) = now
+                        .and_then(bound_source)
+                        .filter(|next| **next != observed_source)
+                    {
                         if let Ok(meta) = std::fs::metadata(&next.path) {
                             if file_match(next, file_identity(&meta)) != FileMatch::Other {
                                 observed_source = next.clone();

@@ -80,6 +80,27 @@ impl LegacyView for LegacyRelay {
         ))
     }
 
+    fn historical_frontier(
+        &self,
+        binding: &crate::services::tui_o::writer::binding::BindingEvent,
+        turn: Option<&crate::services::tui_o::writer::adoption::LegacyTurnIdentity>,
+        delivery: Option<&crate::services::tui_o::writer::adoption::LegacyDelivery>,
+        eof: u64,
+    ) -> Option<u64> {
+        let scope = delivery?;
+        let provider = match binding.provider {
+            crate::services::tui_o::shadow::ShadowProvider::Claude => ProviderKind::Claude,
+            crate::services::tui_o::shadow::ShadowProvider::Codex => ProviderKind::Codex,
+        };
+        historical_frontier_in(
+            dr::read_record(&provider, scope.owner)?,
+            binding,
+            turn,
+            delivery,
+            eof,
+        )
+    }
+
     fn tail_running(&self, tmux: &str) -> bool {
         super::super::tui_prompt_relay::claude_idle_tail_running(tmux)
     }
@@ -167,7 +188,23 @@ impl LegacyRelay {
         row: Option<super::super::inflight::InflightTurnState>,
     ) -> LegacyEpoch {
         let id = ChannelId::new(channel);
+        let delivery = row.as_ref().and_then(|row| {
+            let tmux = row.tmux_session_name.as_deref()?;
+            let source_path = row.output_path.as_ref()?.into();
+            let generation = row
+                .tui_terminal_generation_mtime_ns
+                .unwrap_or_else(|| dr::current_generation_mtime_ns(tmux));
+            (generation != 0).then(
+                || crate::services::tui_o::writer::adoption::LegacyDelivery {
+                    source_path,
+                    execution_nonce: row.hosted_execution_nonce.clone(),
+                    owner: row.delivery_record_owner_channel_id(),
+                    generation,
+                },
+            )
+        });
         LegacyEpoch {
+            delivery,
             reset_incarnation: self.shared.relay_frontier_token(id).reset_incarnation,
             reconnects: (self.shared.tmux_relay_coord(id).reconnect_count)
                 .load(std::sync::atomic::Ordering::Acquire),
@@ -185,3 +222,55 @@ impl LegacyRelay {
         }
     }
 }
+
+fn historical_frontier_in(
+    record: dr::DeliveryRecord,
+    binding: &crate::services::tui_o::writer::binding::BindingEvent,
+    turn: Option<&crate::services::tui_o::writer::adoption::LegacyTurnIdentity>,
+    delivery: Option<&crate::services::tui_o::writer::adoption::LegacyDelivery>,
+    eof: u64,
+) -> Option<u64> {
+    let (scope, turn) = (delivery?, turn?);
+    let source = crate::services::tui_o::writer::rotation::bound_source(binding)?;
+    if scope.source_path != source.path
+        || scope
+            .execution_nonce
+            .as_ref()
+            .is_some_and(|nonce| nonce != &binding.execution_nonce)
+    {
+        return None;
+    }
+    let (start, nonce) = (turn.3?, turn.4.as_deref().filter(|n| !n.is_empty())?);
+    if turn.2.as_deref() != Some(binding.tmux_session.as_str())
+        || scope.owner == 0
+        || scope.generation == 0
+    {
+        return None;
+    }
+    let provider = match binding.provider {
+        crate::services::tui_o::shadow::ShadowProvider::Claude => ProviderKind::Claude,
+        crate::services::tui_o::shadow::ShadowProvider::Codex => ProviderKind::Codex,
+    };
+    record
+        .confirmed_deliveries
+        .iter()
+        .filter(|receipt| {
+            let source = &receipt.source;
+            receipt.message_id != 0
+                && receipt.delivery_channel_id == binding.channel_id
+                && source.is_authoritative()
+                && source.provider == provider.as_str()
+                && source.tmux_session_name == binding.tmux_session
+                && source.turn_nonce == nonce
+                && source.generation_mtime_ns == scope.generation
+                && source.offset_authority_channel_id == scope.owner
+                && source.delivery_channel_id == binding.channel_id
+                && source.range.0 == start
+                && source.range.1 <= eof
+        })
+        .map(|receipt| receipt.source.range.1)
+        .max()
+}
+
+#[cfg(test)]
+mod child_debt_tests;
