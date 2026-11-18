@@ -174,6 +174,43 @@ class SourceContractTests(unittest.TestCase):
 
 
 class RatchetDiscriminationTests(unittest.TestCase):
+    def test_registry_consumers_across_src_require_reviewed_counts(self) -> None:
+        for rel in (
+            "src/services/discord/probe.rs",
+            "src/services/engine_runtime/probe.rs",
+            "src/services/other.rs",
+            "src/domain/probe.rs",
+        ):
+            for receiver in ("shared.tmux_watchers", "engine.watcher_registry"):
+                with self.subTest(path=rel, receiver=receiver), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    write(root, rel, "fn probe() { " + receiver + ".remove_locked(guard, channel); "
+                          + receiver + ".under_identity_fence(identity)"
+                          ".with_terminal_delivery_fence(delivery); }")
+                    actual, subcounts = ratchet.scan(root)
+                    for category in ("registry_remove", "identity_fence_bind", "delivery_fence_bind"):
+                        self.assertEqual(actual[category], {rel: 1})
+                    self.assertEqual(subcounts["direct_channel_remove"], 1)
+                    self.assertEqual(len(ratchet.growth_errors(actual, empty_counts())), 3)
+                    self.assertEqual(ratchet.pairing_errors(actual), [])
+
+    def test_registry_owner_exclusions_are_exact_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            body = ("fn probe() { state.remove_tmux_session_locked(guard, name); "
+                    "state.under_identity_fence(identity).with_terminal_delivery_fence(delivery); }")
+            for owner in (
+                "src/services/discord/tmux_watcher_registry.rs",
+                "src/services/engine_runtime/relay_state.rs",
+            ):
+                write(root, owner, body)
+            child = "src/services/engine_runtime/relay_state/probe.rs"
+            write(root, child, body)
+            actual, subcounts = ratchet.scan(root)
+            for category in ("registry_remove", "identity_fence_bind", "delivery_fence_bind"):
+                self.assertEqual(actual[category], {child: 1})
+            self.assertEqual(subcounts["remove_locked_helper"], 1)
+
     DECLARED_CLOSE_SITES = {
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs": 1,
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs": 2,

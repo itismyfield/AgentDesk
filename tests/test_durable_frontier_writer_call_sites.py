@@ -1523,6 +1523,25 @@ impl FrontierResetState {
                 ok, message = self.run_extended_gate(root, **pins)
                 self.assertFalse(ok, message)
 
+    def test_frontier_external_advance_arity_remains_exact(self):
+        for call, valid in (
+            ("coord.advance_untyped_frontier(end, generation)", True),
+            ("coord.advance_untyped_frontier(end, None)", True),
+            ("TmuxRelayCoord::advance_untyped_frontier(coord, end, generation)", True),
+            ("Self::advance_untyped_frontier(coord, end, None)", True),
+            ("coord.advance_untyped_frontier(end)", False),
+            ("coord.advance_untyped_frontier(end, generation, offset, atomic, before_generation)", False),
+            ("FrontierResetState::advance_untyped_frontier(&mut state, end, generation, offset, atomic, before_generation)", False),
+        ):
+            with self.subTest(call=call):
+                root = self.fixture()
+                path = "src/external.rs"
+                write(root, path, "fn external() { " + call + "; }")
+                calls = self.expected()
+                calls["TmuxRelayCoord::advance_untyped_frontier"] = {path: 1}
+                ok, message = self.run_guard(root, calls)
+                self.assertEqual(ok, valid, message)
+
     def test_frontier_external_generation_arity_remains_exact(self):
         for call, valid in (
             ("coord.reset_confirmed_frontier_with_generation(old, new, generation)", True),
