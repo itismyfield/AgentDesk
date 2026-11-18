@@ -1424,7 +1424,7 @@ unless jobs.is_a?(Hash)
   exit 1
 end
 # Keep this explicit: deriving approval from workflow values would admit custom runners.
-HOSTED_RUNNER_LABELS = %w[ubuntu-latest ubuntu-22.04 macos-15 macos-latest windows-latest].freeze
+HOSTED_RUNNER_LABELS = %w[ubuntu-latest ubuntu-24.04 ubuntu-22.04 macos-15 macos-latest windows-latest].freeze
 
 def retired_runner_reference?(value, implicit_expression = false)
   case value
