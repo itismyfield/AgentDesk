@@ -65,7 +65,7 @@ export default function KanbanCardActivitySections({
           {timedOut}
         </SurfaceNotice>
       )}
-      <dl className="m-0 grid grid-cols-2 gap-2.5 @min-[40rem]/summary:grid-cols-4" data-testid="kanban-state-history">
+      <dl className="m-0 grid grid-cols-2 gap-2.5 @min-[36rem]/summary:grid-cols-4">
         {cells.map((cell) => (
           <div key={cell.name} className="flex min-w-0 flex-col gap-0.5 rounded-xl bg-surface-subtle px-3.5 py-3 shadow-[inset_0_0_0_0.5px_var(--th-border-subtle)]" title={cell.title}>
             <dt className="truncate text-xs leading-4 text-th-text-muted">{cell.name}</dt>

@@ -232,6 +232,8 @@ export default function TurnTranscriptPanel({
 
   useEffect(() => {
     setActiveEventIndex(events.length > 0 ? 0 : null);
+    // A newly chosen turn starts its steps from the top.
+    stepListRef.current?.scrollTo({ top: 0 });
   }, [selectedTranscript?.turn_id]);
 
   useEffect(() => {

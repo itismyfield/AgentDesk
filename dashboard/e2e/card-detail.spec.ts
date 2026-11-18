@@ -202,6 +202,11 @@ test("activity lists dispatches, transitions and comments as dated rows with fil
   // Newest first: the last comment leads today's group.
   await expect(rows(activity).first()).toHaveAttribute("aria-label", /로그 묶음/);
 
+  // Arrow keys walk the rows.
+  await rows(activity).first().focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(rows(activity).nth(1)).toBeFocused();
+
   await activity.getByRole("tab", { name: /디스패치/ }).click();
   await expect(rows(activity)).toHaveCount(3);
   await activity.getByRole("tab", { name: /리뷰/ }).click();
@@ -261,8 +266,11 @@ test("turn transcript puts turns on one time axis and shows each step's input or
   expect(size.height).toBeLessThanOrEqual(240);
   expect(size.scroll).toBeGreaterThan(size.height);
 
-  // Steps: pick the first tool call; its body is the input.
+  // Steps: arrow keys move between rows; pick the first tool call, whose body is the input.
   const steps = panel.getByTestId("turn-transcript-steps");
+  await steps.locator('[data-step="0"]').focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(steps.locator('[data-step="1"]')).toBeFocused();
   await steps.locator('[data-step="1"]').click();
   const stepDetail = panel.getByTestId("turn-transcript-step-detail");
   await expect(stepDetail.getByRole("heading", { name: "Bash" })).toBeVisible();
@@ -365,6 +373,10 @@ test("card detail screenshots at phone, tablet and desktop in light and dark", a
       await activity.evaluate((node) => node.scrollIntoView({ block: "start" }));
       await settle();
       await page.screenshot({ path: `${SHOTS}/${name}-4-activity.png` });
+      await page.goto(`/campaigns?tab=queue&card=card-8002`);
+      await expect(page.getByTestId("kanban-review-suggestions")).toBeVisible({ timeout: 15_000 });
+      await settle();
+      await page.screenshot({ path: `${SHOTS}/${name}-5-review.png` });
     }
   }
 });

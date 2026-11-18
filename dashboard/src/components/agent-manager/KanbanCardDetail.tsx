@@ -364,7 +364,7 @@ export default function KanbanCardDetail({
         />
 
         <section className="flex min-w-0 flex-col gap-3" aria-label={tr("카드 편집", "Edit card")}>
-          <div className="grid gap-3 @min-[40rem]/card:grid-cols-2">
+          <div className="grid gap-3 @min-[36rem]/card:grid-cols-2">
             <TextField
               label={tr("제목", "Title")}
               size="lg"
@@ -391,7 +391,7 @@ export default function KanbanCardDetail({
               </div>
             </div>
           </div>
-          <div className="grid gap-3 @min-[40rem]/card:grid-cols-2 @min-[48rem]/card:grid-cols-3">
+          <div className="grid gap-3 @min-[36rem]/card:grid-cols-2 @min-[48rem]/card:grid-cols-3">
             <label className="flex min-w-0 flex-col gap-1.5">
               <span className="text-[13px] font-medium leading-5 text-th-text-primary">{tr("담당자", "Assignee")}</span>
               <Select
@@ -513,7 +513,7 @@ export default function KanbanCardDetail({
           </section>
         )}
 
-        <dl className="m-0 grid grid-cols-2 gap-2.5 @min-[40rem]/card:grid-cols-4" aria-label={tr("카드 시각", "Card times")}>
+        <dl className="m-0 grid grid-cols-2 gap-2.5 @min-[36rem]/card:grid-cols-4" aria-label={tr("카드 시각", "Card times")}>
           {timestamps.map(([label, value]) => (
             <div key={label} className="flex min-w-0 flex-col gap-0.5 rounded-xl bg-surface-subtle px-3.5 py-3 shadow-[inset_0_0_0_0.5px_var(--th-border-subtle)]">
               <dt className="truncate text-xs leading-4 text-th-text-muted">{label}</dt>
