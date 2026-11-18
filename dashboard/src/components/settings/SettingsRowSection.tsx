@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { SECTION_COPY } from "./SettingsCopy";
-import { SettingsSection, SettingsStatusMessage } from "./SettingsPanels";
+import { SettingsSection, SettingsSkeletonRows } from "./SettingsPrimitives";
 import type { SettingRowMeta, SettingsPanel } from "./SettingsModel";
 import type { SettingsPanelContext, SourceStatus } from "./SettingsPanelTypes";
 
@@ -26,7 +26,7 @@ export function SettingsRowSection({ ctx, panel, section, status = "ready", extr
       testId={`settings-section-${panel}-${section}`}
     >
       {status === "loading" ? (
-        <SettingsStatusMessage>{ctx.tr("불러오는 중…", "Loading…")}</SettingsStatusMessage>
+        <SettingsSkeletonRows label={ctx.tr("불러오는 중…", "Loading…")} />
       ) : (
         rows.map((meta) => ctx.renderRow(meta, { extra: extraFor?.(meta) }))
       )}

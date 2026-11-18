@@ -122,15 +122,6 @@ export const TIMELINE_KIND_TONES = {
   general: { bg: SYSTEM_HEALTH_TONES.idle.bg, text: SYSTEM_HEALTH_TONES.idle.text },
 } satisfies Record<string, Pick<StatusTone, "bg" | "text">>;
 
-export const TIMELINE_STATUS_TONES = {
-  reviewing: TIMELINE_KIND_TONES.review,
-  changes_requested: { bg: KANBAN_STATUS_TONES.qa_failed.bg, text: KANBAN_STATUS_TONES.qa_failed.text },
-  passed: { bg: SYSTEM_HEALTH_TONES.healthy.bg, text: SYSTEM_HEALTH_TONES.healthy.text },
-  decision: TIMELINE_KIND_TONES.pm,
-  completed: TIMELINE_KIND_TONES.work,
-  comment: TIMELINE_KIND_TONES.general,
-} satisfies Record<string, Pick<StatusTone, "bg" | "text">>;
-
 export const QUEUE_ENTRY_STATUS_TONES = {
   pending: {
     bg: KANBAN_STATUS_TONES.backlog.bg,
@@ -227,21 +218,6 @@ export const QUEUE_GROUP_COLORS = [
   "#a3e635",
   KANBAN_STATUS_TONES.blocked.text,
 ] as const;
-
-export const REVIEW_STATUS_TONES = {
-  blocked: {
-    accent: "#eab308",
-    text: "#fde047",
-  },
-  rework: {
-    accent: KANBAN_STATUS_TONES.failed.accent,
-    text: "#fdba74",
-  },
-  review: {
-    accent: KANBAN_STATUS_TONES.review.accent,
-    text: KANBAN_STATUS_TONES.review.text,
-  },
-} satisfies Record<string, Pick<StatusTone, "accent" | "text">>;
 
 export const DELIVERY_EVENT_STATUS_TONES = {
   reserved: { bg: "rgba(156,163,175,0.12)", text: KANBAN_STATUS_TONES.cancelled.text },

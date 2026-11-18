@@ -1,0 +1,2 @@
+key: campaign-host-worker
+| `campaign-execution` fixed host worker (#7438 M3) | `a900a7e142d73989704e09a90068e19e54ce4f6f` + M3 worker | Two holders, start without a fence, start during resource wait, start again after an indeterminate receipt | HostWorker GREEN (147 states), four expected RED controls. Host registration and public execution are deferred. [Report](campaign-execution/host-worker.report.md). |

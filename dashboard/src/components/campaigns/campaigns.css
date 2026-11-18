@@ -1,24 +1,24 @@
 @layer components {
 .campaigns-panel { color: var(--th-text-primary); display: grid; gap: 14px; }
-.campaigns-panel h2 { font-size: 20px; font-weight: 700; }
-.campaigns-panel h3 { font-size: 16px; font-weight: 650; overflow-wrap: anywhere; }
-.campaigns-panel h4 { font-size: 12px; font-weight: 650; margin-bottom: 6px; }
-.campaigns-panel p { font-size: 12px; line-height: 1.6; }
+/* Element rules below skip vendored kit parts (a class token starting with aui-), which style themselves. */
+.campaigns-panel h2:not(:where([class^="aui-"], [class*=" aui-"], [class^="aui-"] *, [class*=" aui-"] *)) { font-size: 20px; font-weight: 700; }
+.campaigns-panel h3:not(:where([class^="aui-"], [class*=" aui-"], [class^="aui-"] *, [class*=" aui-"] *)) { font-size: 16px; font-weight: 650; overflow-wrap: anywhere; }
+.campaigns-panel h4:not(:where([class^="aui-"], [class*=" aui-"], [class^="aui-"] *, [class*=" aui-"] *)) { font-size: 12px; font-weight: 650; margin-bottom: 6px; }
+.campaigns-panel p:not(:where([class^="aui-"], [class*=" aui-"], [class^="aui-"] *, [class*=" aui-"] *)) { font-size: 12px; line-height: 1.6; }
 .campaigns-panel header p, .campaign-muted, .campaigns-panel dt { color: var(--th-text-muted); }
 .campaign-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; align-items: center; }
-.campaigns-panel button, .campaigns-panel input, .campaigns-panel select, .campaigns-panel textarea { border: 1px solid var(--th-border); border-radius: 7px; padding: 8px 10px; background: var(--th-card-bg); color: var(--th-text-primary); font: inherit; font-size: 12px; }
-.campaigns-panel button { cursor: pointer; }
-.campaigns-panel button:hover { border-color: var(--th-badge-sky-text); }
-.campaigns-panel button:disabled { opacity: .55; cursor: wait; }
-.campaigns-panel :is(button, select, input, textarea):focus-visible { outline: 2px solid var(--th-accent-info); outline-offset: -2px; }
-.campaigns-panel label { display: grid; gap: 5px; font-size: 11px; color: var(--th-text-muted); }
-.campaigns-panel :is(input, select, textarea) { min-width: 0; width: 100%; }
+.campaigns-panel :is(button, input, select, textarea):not(:where([class^="aui-"], [class*=" aui-"], [class^="aui-"] *, [class*=" aui-"] *)) { border: 1px solid var(--th-border); border-radius: 7px; padding: 8px 10px; background: var(--th-card-bg); color: var(--th-text-primary); font: inherit; font-size: 12px; }
+.campaigns-panel button:not(:where([class^="aui-"], [class*=" aui-"], [class^="aui-"] *, [class*=" aui-"] *)) { cursor: pointer; }
+.campaigns-panel button:not(:where([class^="aui-"], [class*=" aui-"], [class^="aui-"] *, [class*=" aui-"] *)):hover { border-color: var(--th-badge-sky-text); }
+.campaigns-panel button:not(:where([class^="aui-"], [class*=" aui-"], [class^="aui-"] *, [class*=" aui-"] *)):disabled { opacity: .55; cursor: wait; }
+.campaigns-panel :is(button, select, input, textarea):not(:where([class^="aui-"], [class*=" aui-"], [class^="aui-"] *, [class*=" aui-"] *)):focus-visible { outline: 2px solid var(--th-accent-info); outline-offset: -2px; }
+.campaigns-panel label:not(:where([class^="aui-"], [class*=" aui-"], [class^="aui-"] *, [class*=" aui-"] *)) { display: grid; gap: 5px; font-size: 11px; color: var(--th-text-muted); }
+.campaigns-panel :is(input, select, textarea):not(:where([class^="aui-"], [class*=" aui-"], [class^="aui-"] *, [class*=" aui-"] *)) { min-width: 0; width: 100%; }
 .campaign-main { min-width: 0; display: grid; gap: 12px; padding: 18px; background: var(--th-card-bg); border: 1px solid var(--th-border); border-radius: 8px; }
 .campaign-summary-header { justify-content: flex-start; }
 .campaign-selector { width: min(420px, 100%); margin-right: auto; }
 .campaign-selector select { font-size: 14px; font-weight: 650; }
 .campaign-summary-round, .campaign-freshness { color: var(--th-text-muted); font-size: 11px; }
-.campaigns-panel .campaign-auto-queue[aria-checked="true"] { border-color: #16a34a; color: var(--th-text-primary); }
 .campaign-handoff-result { flex-basis: 100%; color: var(--th-text-muted); }
 .campaign-description, .campaign-next p, .campaign-node-detail li { white-space: pre-wrap; overflow-wrap: anywhere; }
 .campaign-progress { width: 100%; height: 5px; accent-color: #16a34a; }

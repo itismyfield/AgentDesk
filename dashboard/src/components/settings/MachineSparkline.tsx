@@ -62,16 +62,16 @@ export function MachineSparkline({ values, secondary, color, label, stale, tr, n
   const end = now;
   const primaryLines = lines(values, ceiling, start, end);
   const secondaryLines = secondary ? lines(secondary, ceiling, start, end) : [];
-  return <div className={`h-16 overflow-hidden border ${stale ? "opacity-60" : ""}`}
-    style={{ borderColor: "#737373", backgroundColor: "#262626" }} data-testid={`machine-trend-${color}`}>
+  return <div className={`h-16 overflow-hidden rounded-[var(--r-sm)] bg-[var(--bg-1)] shadow-[inset_0_0_0_0.5px_var(--line)] ${stale ? "opacity-60" : ""}`}
+    data-testid={`machine-trend-${color}`}>
     {primaryLines.length || secondaryLines.length ? <svg viewBox={`0 0 100 ${CHART_HEIGHT}`} preserveAspectRatio="none"
       className="h-full w-full" role="img" aria-label={`${label} ${tr("최근 15분 추이", "last 15 minutes trend")}`}>
-      <path d={`M0,${CHART_HEIGHT} L100,${CHART_HEIGHT}`} stroke="#737373" strokeWidth="0.7" />
+      <path d={`M0,${CHART_HEIGHT} L100,${CHART_HEIGHT}`} stroke="var(--line)" strokeWidth="0.7" />
       {primaryLines.map((path, index) => <path key={`primary-area-${index}`} d={path.area} fill={COLORS[color]} fillOpacity="0.22" stroke="none" data-layer="area" data-series="primary" />)}
       {secondaryLines.map((path, index) => <path key={`secondary-area-${index}`} d={path.area} fill={COLORS.networkOut} fillOpacity="0.14" stroke="none" data-layer="area" data-series="secondary" />)}
       {primaryLines.map((path, index) => <path key={`primary-${index}`} d={path.line} fill="none" stroke={COLORS[color]} strokeWidth="1.6" vectorEffect="non-scaling-stroke" data-layer="line" data-series="primary" />)}
       {secondaryLines.map((path, index) => <path key={`secondary-${index}`} d={path.line} fill="none" stroke={COLORS.networkOut} strokeWidth="1.4" strokeDasharray="3 2" vectorEffect="non-scaling-stroke" data-layer="line" data-series="secondary" />)}
-    </svg> : <p className="flex h-full items-center justify-center px-1 text-center text-[10px] text-neutral-400">{tr("측정값 수집 중", "Collecting samples")}</p>}
+    </svg> : <p className="flex h-full items-center justify-center px-1 text-center text-[10px] text-th-text-muted">{tr("측정값 수집 중", "Collecting samples")}</p>}
   </div>;
 }
 

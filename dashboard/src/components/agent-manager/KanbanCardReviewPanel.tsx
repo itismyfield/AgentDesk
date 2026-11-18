@@ -1,19 +1,14 @@
 import { useState } from "react";
+import { Check, X } from "lucide-react";
 import * as api from "../../api";
 import type { KanbanReview } from "../../api";
 import type {
   KanbanCard,
   TaskDispatch,
 } from "../../types";
-import {
-  KANBAN_STATUS_TONES,
-  REVIEW_STATUS_TONES,
-} from "../../theme/statusTokens";
-import {
-  SurfaceActionButton,
-  SurfaceCard,
-  SurfaceNotice,
-} from "../common/SurfacePrimitives";
+import { Badge, type BadgeTone } from "../../kit/free/badge-clean";
+import { Button } from "../../kit/free/button-clean";
+import { DetailHeading, KIT_TOUCH_BUTTON } from "./CardDetailParts";
 
 interface KanbanCardReviewPanelProps {
   card: KanbanCard;
@@ -24,6 +19,25 @@ interface KanbanCardReviewPanelProps {
   setReviewDecisions: React.Dispatch<React.SetStateAction<Record<string, "accept" | "reject">>>;
   setActionError: React.Dispatch<React.SetStateAction<string | null>>;
   tr: (ko: string, en: string) => string;
+}
+
+type ReviewItem = { id: string; category: string; summary: string; detail?: string; suggestion?: string; pros?: string; cons?: string; decision?: string };
+
+const NOTICE_CLASS: Record<"info" | "warning" | "danger" | "success", string> = {
+  info: "bg-[color-mix(in_oklch,var(--info)_12%,transparent)] shadow-[inset_0_0_0_0.5px_color-mix(in_oklch,var(--info)_40%,transparent)]",
+  warning: "bg-[color-mix(in_oklch,var(--warn)_12%,transparent)] shadow-[inset_0_0_0_0.5px_color-mix(in_oklch,var(--warn)_40%,transparent)]",
+  danger: "bg-[color-mix(in_oklch,var(--err)_12%,transparent)] shadow-[inset_0_0_0_0.5px_color-mix(in_oklch,var(--err)_40%,transparent)]",
+  success: "bg-[color-mix(in_oklch,var(--ok)_12%,transparent)] shadow-[inset_0_0_0_0.5px_color-mix(in_oklch,var(--ok)_40%,transparent)]",
+};
+
+function parseItems(itemsJson: string | null): ReviewItem[] {
+  if (!itemsJson) return [];
+  try {
+    const parsed = JSON.parse(itemsJson) as unknown;
+    return Array.isArray(parsed) ? (parsed as ReviewItem[]) : [];
+  } catch {
+    return [];
+  }
 }
 
 export default function KanbanCardReviewPanel({
@@ -37,177 +51,116 @@ export default function KanbanCardReviewPanel({
   tr,
 }: KanbanCardReviewPanelProps) {
   const [reviewBusy, setReviewBusy] = useState(false);
+  const pending = card.review_status === "dilemma_pending" || card.review_status === "suggestion_pending";
+  const tone: "warning" | "danger" | "success" = pending ? "warning" : card.review_status === "improve_rework" ? "danger" : "success";
+
+  const decide = (item: ReviewItem, decision: "accept" | "reject") => {
+    if (!reviewData) return;
+    setReviewDecisions((prev) => ({ ...prev, [item.id]: decision }));
+    void api.saveReviewDecisions(reviewData.id, [{ item_id: item.id, decision }]).catch(() => {});
+  };
+
+  const statusLine = (() => {
+    switch (card.review_status) {
+      case "reviewing": {
+        const reviewDispatch = dispatches.find(
+          (d) => d.parent_dispatch_id === card.latest_dispatch_id && d.dispatch_type === "review",
+        );
+        const verdictStatus = !reviewDispatch
+          ? tr("verdict 대기중", "verdict pending")
+          : reviewDispatch.status === "completed"
+            ? tr("verdict 전달됨", "verdict delivered")
+            : tr("verdict 미전달 — 에이전트가 아직 회신하지 않음", "verdict not delivered — agent hasn't responded");
+        return <>{tr("카운터 모델이 코드를 리뷰하고 있습니다...", "Counter model is reviewing...")} <span className="text-th-text-muted">({verdictStatus})</span></>;
+      }
+      case "improve_rework": return tr("개선 사항이 발견되어 원본 모델에 재작업을 요청했습니다.", "Improvements needed — rework dispatched to original model.");
+      case "suggestion_pending": return tr("카운터 모델이 검토 항목을 추출했습니다. 수용/불수용을 결정해 주세요.", "Counter model extracted review findings. Decide accept/reject for each.");
+      case "dilemma_pending": return tr("판단이 어려운 항목이 있습니다. 수동으로 결정해 주세요.", "Dilemma items found — manual decision needed.");
+      case "decided": return tr("리뷰 결정이 완료되었습니다.", "Review decision completed.");
+      default: return null;
+    }
+  })();
+
+  const actionableItems = pending && reviewData ? parseItems(reviewData.items_json).filter((item) => item.category !== "pass") : [];
+  const decidedCount = actionableItems.filter((item) => reviewDecisions[item.id]).length;
+  const allDecided = actionableItems.length > 0 && decidedCount === actionableItems.length;
 
   return (
     <>
-      {card.status === "review" && card.review_status && (() => {
-        const reviewTone =
-          card.review_status === "dilemma_pending" || card.review_status === "suggestion_pending"
-            ? REVIEW_STATUS_TONES.blocked
-            : card.review_status === "improve_rework"
-              ? REVIEW_STATUS_TONES.rework
-              : REVIEW_STATUS_TONES.review;
-        return (
-          <SurfaceNotice
-            tone={
-              (card.review_status === "dilemma_pending" || card.review_status === "suggestion_pending")
-                ? "warn"
-                : card.review_status === "improve_rework"
-                  ? "danger"
-                  : "success"
-            }
-            className="block"
-          >
-            <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{
-              color: reviewTone.accent,
-            }}>
-              {tr("카운터 모델 리뷰", "Counter-Model Review")}
-            </div>
-            <div className="text-sm" style={{
-              color: reviewTone.text,
-            }}>
-              {card.review_status === "reviewing" && (() => {
-                const reviewDispatch = dispatches.find(
-                  (d) => d.parent_dispatch_id === card.latest_dispatch_id && d.dispatch_type === "review",
-                );
-                const verdictStatus = !reviewDispatch
-                  ? tr("verdict 대기중", "verdict pending")
-                  : reviewDispatch.status === "completed"
-                    ? tr("verdict 전달됨", "verdict delivered")
-                    : tr("verdict 미전달 — 에이전트가 아직 회신하지 않음", "verdict not delivered — agent hasn't responded");
-                return <>{tr("카운터 모델이 코드를 리뷰하고 있습니다...", "Counter model is reviewing...")} <span style={{ opacity: 0.7 }}>({verdictStatus})</span></>;
-              })()}
-              {card.review_status === "improve_rework" && tr("개선 사항이 발견되어 원본 모델에 재작업을 요청했습니다.", "Improvements needed — rework dispatched to original model.")}
-              {card.review_status === "suggestion_pending" && tr("카운터 모델이 검토 항목을 추출했습니다. 수용/불수용을 결정해 주세요.", "Counter model extracted review findings. Decide accept/reject for each.")}
-              {card.review_status === "dilemma_pending" && tr("판단이 어려운 항목이 있습니다. 수동으로 결정해 주세요.", "Dilemma items found — manual decision needed.")}
-              {card.review_status === "decided" && tr("리뷰 결정이 완료되었습니다.", "Review decision completed.")}
-            </div>
-          </SurfaceNotice>
-        );
-      })()}
+      {card.status === "review" && card.review_status && (
+        <section role="status" className={`flex min-w-0 flex-col gap-1.5 rounded-xl px-4 py-3 ${NOTICE_CLASS[tone]}`} data-testid="kanban-review-status">
+          <div className="flex items-center gap-2">
+            <Badge tone={tone as BadgeTone} dot live={card.review_status === "reviewing"}>{tr("카운터 모델 리뷰", "Counter-Model Review")}</Badge>
+          </div>
+          {statusLine && <p className="m-0 text-sm leading-5 text-th-text-primary [word-break:keep-all]">{statusLine}</p>}
+        </section>
+      )}
 
-      {(card.review_status === "suggestion_pending" || card.review_status === "dilemma_pending") && reviewData && (() => {
-        const items: Array<{ id: string; category: string; summary: string; detail?: string; suggestion?: string; pros?: string; cons?: string; decision?: string }> =
-          reviewData.items_json ? JSON.parse(reviewData.items_json) : [];
-        const actionableItems = items.filter((i) => i.category !== "pass");
-        if (actionableItems.length === 0) return null;
-        const allDecided = actionableItems.every((i) => reviewDecisions[i.id]);
-        return (
-          <SurfaceCard
-            className="space-y-4"
-            style={{
-              borderColor: `${REVIEW_STATUS_TONES.blocked.accent}59`,
-              backgroundColor: "rgba(234,179,8,0.06)",
+      {actionableItems.length > 0 && reviewData && (
+        <section className="flex min-w-0 flex-col gap-3" aria-labelledby="kanban-review-suggestions" data-testid="kanban-review-suggestions">
+          <DetailHeading id="kanban-review-suggestions" aside={<Badge tone={allDecided ? "success" : "warning"}>{`${decidedCount}/${actionableItems.length}`}</Badge>}>
+            {tr("리뷰 제안 사항", "Review Suggestions")}
+          </DetailHeading>
+          <ul className="m-0 flex list-none flex-col gap-2.5 p-0">
+            {actionableItems.map((item) => {
+              const decision = reviewDecisions[item.id];
+              return (
+                <li key={item.id} className={`flex min-w-0 flex-col gap-2 rounded-xl px-3.5 py-3 ${decision === "accept" ? NOTICE_CLASS.success : decision === "reject" ? NOTICE_CLASS.danger : "bg-surface-subtle shadow-[inset_0_0_0_0.5px_var(--th-border-subtle)]"}`}>
+                  <p className="m-0 text-sm font-medium text-th-text-heading [overflow-wrap:anywhere]">{item.summary}</p>
+                  {item.detail && <p className="m-0 text-xs leading-5 text-th-text-secondary [overflow-wrap:anywhere]">{item.detail}</p>}
+                  {item.suggestion && (
+                    <p className="m-0 rounded-lg bg-surface-subtle px-2.5 py-1.5 text-xs leading-5 text-th-text-primary [overflow-wrap:anywhere]">
+                      <span className="font-medium">{tr("제안", "Suggestion")}:</span> {item.suggestion}
+                    </p>
+                  )}
+                  {(item.pros || item.cons) && (
+                    <div className="grid gap-2 text-xs sm:grid-cols-2">
+                      {item.pros && <p className={`m-0 rounded-lg px-2.5 py-1.5 leading-5 text-th-text-primary ${NOTICE_CLASS.success}`}>{tr("장점", "Pros")}: {item.pros}</p>}
+                      {item.cons && <p className={`m-0 rounded-lg px-2.5 py-1.5 leading-5 text-th-text-primary ${NOTICE_CLASS.danger}`}>{tr("단점", "Cons")}: {item.cons}</p>}
+                    </div>
+                  )}
+                  <div className="flex gap-2 pt-1">
+                    <Button variant={decision === "accept" ? "primary" : "secondary"} size="lg" className={`flex-1 ${KIT_TOUCH_BUTTON}`} icon={<Check />}
+                      aria-pressed={decision === "accept"} onClick={() => decide(item, "accept")}>
+                      {tr("수용", "Accept")}
+                    </Button>
+                    <Button variant={decision === "reject" ? "destructive" : "secondary"} size="lg" className={`flex-1 ${KIT_TOUCH_BUTTON}`} icon={<X />}
+                      aria-pressed={decision === "reject"} onClick={() => decide(item, "reject")}>
+                      {tr("불수용", "Reject")}
+                    </Button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+          <Button
+            variant="primary"
+            size="lg"
+            className={`w-full ${KIT_TOUCH_BUTTON}`}
+            disabled={!allDecided}
+            loading={reviewBusy}
+            onClick={async () => {
+              setReviewBusy(true);
+              setActionError(null);
+              try {
+                await api.triggerDecidedRework(reviewData.id);
+                setReviewData(null);
+                setReviewDecisions({});
+              } catch (error) {
+                setActionError(error instanceof Error ? error.message : tr("재디스패치에 실패했습니다.", "Failed to trigger rework."));
+              } finally {
+                setReviewBusy(false);
+              }
             }}
           >
-            <div className="flex items-center justify-between gap-2">
-              <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: REVIEW_STATUS_TONES.blocked.accent }}>
-                {tr("리뷰 제안 사항", "Review Suggestions")}
-              </div>
-              <span className="text-xs px-2 py-0.5 rounded-full" style={{
-                backgroundColor: allDecided ? KANBAN_STATUS_TONES.done.bg : "rgba(234,179,8,0.18)",
-                color: allDecided ? KANBAN_STATUS_TONES.done.text : REVIEW_STATUS_TONES.blocked.text,
-              }}>
-                {Object.keys(reviewDecisions).filter((k) => actionableItems.some((d) => d.id === k)).length}/{actionableItems.length}
-              </span>
-            </div>
-            <div className="space-y-3">
-              {actionableItems.map((item) => {
-                const decision = reviewDecisions[item.id];
-                return (
-                  <SurfaceCard key={item.id} className="space-y-2 p-3" style={{
-                    borderColor: decision === "accept" ? "rgba(34,197,94,0.35)" : decision === "reject" ? "rgba(239,68,68,0.35)" : "rgba(148,163,184,0.22)",
-                    backgroundColor: decision === "accept" ? "rgba(34,197,94,0.06)" : decision === "reject" ? "rgba(239,68,68,0.06)" : "rgba(255,255,255,0.03)",
-                  }}>
-                    <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
-                      {item.summary}
-                    </div>
-                    {item.detail && (
-                      <div className="text-xs" style={{ color: "var(--th-text-secondary)" }}>
-                        {item.detail}
-                      </div>
-                    )}
-                    {item.suggestion && (
-                      <div className="text-xs px-2 py-1 rounded-lg" style={{ backgroundColor: "rgba(96,165,250,0.08)", color: "#93c5fd" }}>
-                        {tr("제안", "Suggestion")}: {item.suggestion}
-                      </div>
-                    )}
-                    {(item.pros || item.cons) && (
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        {item.pros && (
-                          <div className="px-2 py-1 rounded-lg" style={{ backgroundColor: "rgba(34,197,94,0.08)", color: "#86efac" }}>
-                            {tr("장점", "Pros")}: {item.pros}
-                          </div>
-                        )}
-                        {item.cons && (
-                          <div className="px-2 py-1 rounded-lg" style={{ backgroundColor: "rgba(239,68,68,0.08)", color: "#fca5a5" }}>
-                            {tr("단점", "Cons")}: {item.cons}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    <div className="flex gap-2 pt-1">
-                      <SurfaceActionButton
-                        onClick={() => {
-                          setReviewDecisions((prev) => ({ ...prev, [item.id]: "accept" }));
-                          void api.saveReviewDecisions(reviewData.id, [{ item_id: item.id, decision: "accept" }]).catch(() => {});
-                        }}
-                        tone={decision === "accept" ? "success" : "neutral"}
-                        className="flex-1"
-                        style={{
-                          color: decision === "accept" ? "#4ade80" : "var(--th-text-secondary)",
-                        }}
-                      >
-                        {tr("수용", "Accept")}
-                      </SurfaceActionButton>
-                      <SurfaceActionButton
-                        onClick={() => {
-                          setReviewDecisions((prev) => ({ ...prev, [item.id]: "reject" }));
-                          void api.saveReviewDecisions(reviewData.id, [{ item_id: item.id, decision: "reject" }]).catch(() => {});
-                        }}
-                        tone={decision === "reject" ? "danger" : "neutral"}
-                        className="flex-1"
-                        style={{
-                          color: decision === "reject" ? "#f87171" : "var(--th-text-secondary)",
-                        }}
-                      >
-                        {tr("불수용", "Reject")}
-                      </SurfaceActionButton>
-                    </div>
-                  </SurfaceCard>
-                );
-              })}
-            </div>
-            <SurfaceActionButton
-              disabled={!allDecided || reviewBusy}
-              onClick={async () => {
-                setReviewBusy(true);
-                setActionError(null);
-                try {
-                  await api.triggerDecidedRework(reviewData.id);
-                  setReviewData(null);
-                  setReviewDecisions({});
-                } catch (error) {
-                  setActionError(error instanceof Error ? error.message : tr("재디스패치에 실패했습니다.", "Failed to trigger rework."));
-                } finally {
-                  setReviewBusy(false);
-                }
-              }}
-              tone="warn"
-              className="w-full py-2.5 text-sm"
-              style={{
-                color: allDecided ? "#fef3c7" : "var(--th-text-muted)",
-              }}
-            >
-              {reviewBusy
-                ? tr("재디스패치 중...", "Dispatching rework...")
-                : allDecided
-                  ? tr("결정 완료 → 재디스패치", "Decisions Complete → Dispatch Rework")
-                  : tr("모든 항목에 결정을 내려주세요", "Decide all items first")}
-            </SurfaceActionButton>
-          </SurfaceCard>
-        );
-      })()}
+            {reviewBusy
+              ? tr("재디스패치 중...", "Dispatching rework...")
+              : allDecided
+                ? tr("결정 완료 → 재디스패치", "Decisions Complete → Dispatch Rework")
+                : tr("모든 항목에 결정을 내려주세요", "Decide all items first")}
+          </Button>
+        </section>
+      )}
     </>
   );
 }

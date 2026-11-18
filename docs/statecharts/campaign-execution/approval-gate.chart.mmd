@@ -1,0 +1,34 @@
+---
+title: "Campaign approval stays bound to its current gate"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: approved
+    lg1: waiting
+    lg2: default
+  }
+  class lg0 teal
+  class lg1 orange
+  class lg2 blue
+  s0: All six approvals default OFF
+  s1: Approvals configured#59; no gate open
+  s2: Gate open for an explicit approval
+  s3: Explicit edit switched approvals OFF
+  s4: Gate approved once#59; duplicates are no-ops
+  s5: Current binding changed#59; old gate cannot approve
+  [*] --> s0
+  s0 --> s1: explicitly configure the approval slots
+  s1 --> s2: the server opens the exact current gate
+  s1 --> s3: edit the definition with explicit approval options
+  s2 --> s4: record the coordinator's explicit approval
+  s2 --> s5: run, node, gate, revision, target or policy changes or edit the definition with explicit approval options
+  s2 --> s3: edit the definition with explicit approval options
+  s4 --> s5: run, node, gate, revision, target or policy changes or edit the definition with explicit approval options
+  s4 --> s3: edit the definition with explicit approval options
+  s5 --> s3: edit the definition with explicit approval options
+  s5 --> s2: reopen the original target and keep its approval record
+  s5 --> s4: reopen the original target and keep its approval record
+  class s0 blue
+  class s1 orange
+  class s2 orange
+  class s4 teal

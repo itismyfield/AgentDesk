@@ -1,8 +1,9 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { getOverlayAccessibleTitle } from "./accessibility";
 import { BottomSheet } from "./BottomSheet";
+import { DrawerDockContext, useDrawerDock } from "./DrawerDock";
 import { useIsMobile } from "./useBreakpoint";
 import { useReturnFocus } from "./useReturnFocus";
 
@@ -36,6 +37,8 @@ export function Drawer({
   closeButtonClassName,
 }: DrawerProps) {
   const isMobile = useIsMobile();
+  const dock = useDrawerDock();
+  const contentRef = useRef<HTMLDivElement>(null);
   const accessibleTitle = getOverlayAccessibleTitle(title, ariaLabel, "Drawer");
   const returnFocus = useReturnFocus(open);
 
@@ -52,6 +55,71 @@ export function Drawer({
       >
         {children}
       </BottomSheet>
+    );
+  }
+
+  const frame = (
+    <>
+      {title ? (
+        <div
+          className="flex items-center justify-between gap-3 border-b px-5 py-4"
+          style={{ borderColor: "var(--th-border, rgba(148,163,184,0.12))" }}
+        >
+          <Dialog.Title className="min-w-0 text-base font-semibold [overflow-wrap:anywhere]">
+            {title}
+          </Dialog.Title>
+          <Dialog.Close asChild>
+            <button
+              type="button"
+              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-white/5 ${closeButtonClassName ?? ""}`}
+              style={{ borderColor: "var(--th-border, rgba(148,163,184,0.16))" }}
+              aria-label="Close"
+            >
+              <X size={14} />
+            </button>
+          </Dialog.Close>
+        </div>
+      ) : (
+        <Dialog.Title className="sr-only">{accessibleTitle}</Dialog.Title>
+      )}
+      <Dialog.Description className="sr-only">
+        Drawer content
+      </Dialog.Description>
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+    </>
+  );
+
+  // Docked: a non-modal pane that fills the page's dock host, so the list beside it stays usable.
+  if (dock) {
+    if (!dock.host) return null;
+    return (
+      <Dialog.Root
+        open={open}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) onClose();
+        }}
+        modal={false}
+      >
+        <Dialog.Portal container={dock.host}>
+          <Dialog.Content
+            ref={contentRef}
+            aria-label={accessibleTitle}
+            data-docked=""
+            onEscapeKeyDown={(event) => {
+              // Escape closes the pane only from inside it; Escape in the list or a menu beside it is theirs.
+              if (!closeOnEsc || !contentRef.current?.contains(event.target as Node)) event.preventDefault();
+            }}
+            onInteractOutside={(event) => event.preventDefault()}
+            // Like a split view, opening keeps focus in the list; the pane follows it in tab order.
+            onOpenAutoFocus={(event) => event.preventDefault()}
+            onCloseAutoFocus={returnFocus}
+            className="flex h-full min-h-0 w-full flex-col bg-[var(--th-card-bg,_#0f172a)] text-[var(--th-text,_#e2e8f0)] outline-none"
+          >
+            {/* Drawers opened from inside the pane overlay as usual. */}
+            <DrawerDockContext.Provider value={null}>{frame}</DrawerDockContext.Provider>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     );
   }
 
@@ -80,32 +148,7 @@ export function Drawer({
             borderColor: "var(--th-border, rgba(148,163,184,0.18))",
           }}
         >
-          {title ? (
-            <div
-              className="flex items-center justify-between gap-3 border-b px-5 py-4"
-              style={{ borderColor: "var(--th-border, rgba(148,163,184,0.12))" }}
-            >
-              <Dialog.Title className="min-w-0 text-base font-semibold [overflow-wrap:anywhere]">
-                {title}
-              </Dialog.Title>
-              <Dialog.Close asChild>
-                <button
-                  type="button"
-                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-white/5 ${closeButtonClassName ?? ""}`}
-                  style={{ borderColor: "var(--th-border, rgba(148,163,184,0.16))" }}
-                  aria-label="Close"
-                >
-                  <X size={14} />
-                </button>
-              </Dialog.Close>
-            </div>
-          ) : (
-            <Dialog.Title className="sr-only">{accessibleTitle}</Dialog.Title>
-          )}
-          <Dialog.Description className="sr-only">
-            Drawer content
-          </Dialog.Description>
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+          {frame}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

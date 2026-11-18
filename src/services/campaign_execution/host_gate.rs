@@ -352,14 +352,22 @@ impl EffectGate {
             host: identity.host.clone(),
             gate: identity.gate.clone(),
         };
+        let fences: Option<FenceBook> = journal.read(FENCES).map_err(journal_error)?;
+        let entries = journal
+            .entries::<JournalEntry>(|entry| &entry.identity.action_id)
+            .map_err(journal_error)?;
         match journal.read::<GateHome>(HOME).map_err(journal_error)? {
             Some(held) if held != home => {
                 return Err(GateError::WrongHost(format!("{}/{}", held.host, held.gate)));
             }
             Some(_) => {}
+            None if fences.is_some() || !entries.is_empty() => {
+                return Err(GateError::Journal(
+                    "journal has no fixed host identity".into(),
+                ));
+            }
             None => journal.write(HOME, &home).map_err(journal_error)?,
         }
-        let fences = journal.read(FENCES).map_err(journal_error)?;
         let mut gate = Self {
             identity,
             fences: fences.unwrap_or_default(),
@@ -367,11 +375,11 @@ impl EffectGate {
             recovery: BTreeSet::new(),
             journal,
         };
-        for entry in gate
-            .journal
-            .entries::<JournalEntry>()
-            .map_err(journal_error)?
-        {
+        for entry in entries {
+            let target = &entry.identity.target;
+            if target.host != home.host || target.gate != home.gate {
+                return Err(GateError::WrongHost(target.host.clone()));
+            }
             gate.entries.insert(entry.identity.action_id.clone(), entry);
         }
         let lost: Vec<String> = gate
@@ -494,6 +502,10 @@ impl EffectGate {
         self.store_fences(book)
     }
 
+    pub(super) fn has_node_fence(&self, fence: &HostNodeFence) -> bool {
+        self.fences.nodes.contains(fence)
+    }
+
     // Checks the authority against the fences this host applied. Revocation (interrupted node, or
     // a stop that does not keep the action) ends every holder; an older holder is only stale.
     fn check(&self, envelope: &EffectEnvelope) -> Check {
@@ -562,7 +574,7 @@ impl EffectGate {
         }
         let previous = self.entries.get(&identity.action_id);
         if let Some(entry) = previous {
-            if entry.identity != identity {
+            if entry.identity != identity || entry.nonce != envelope.execution_nonce {
                 return Err(GateError::Conflict(identity.action_id));
             }
             match &entry.state {
@@ -763,8 +775,22 @@ impl EffectGate {
         probe: impl Fn(&ProcessIdentity) -> TreeState,
         now: DateTime<Utc>,
     ) -> Vec<Recovered> {
+        self.recovery_snapshot_with(None, |_, process| probe(process), now)
+    }
+
+    pub(super) fn recovery_snapshot_with(
+        &self,
+        run: Option<&str>,
+        probe: impl Fn(&JournalEntry, &ProcessIdentity) -> TreeState,
+        now: DateTime<Utc>,
+    ) -> Vec<Recovered> {
         let mut observations = Vec::new();
-        for entry in self.recovery.iter().filter_map(|id| self.entries.get(id)) {
+        for entry in self
+            .recovery
+            .iter()
+            .filter_map(|id| self.entries.get(id))
+            .filter(|entry| run.is_none_or(|run| run == entry.identity.run_id))
+        {
             let action_id = entry.identity.action_id.clone();
             match &entry.state {
                 JournalState::Started {
@@ -774,7 +800,7 @@ impl EffectGate {
                     action_id,
                     receipt: receipt.clone(),
                     process: process.clone(),
-                    tree: probe(process),
+                    tree: probe(entry, process),
                     observed_at: now,
                 }),
                 JournalState::Finished {

@@ -206,3 +206,6 @@ pub(super) async fn events(
 
 #[cfg(test)]
 mod http_tests;
+
+#[cfg(test)]
+mod decision_tests;

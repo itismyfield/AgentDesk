@@ -209,7 +209,7 @@ it("browses 120 tasks through group collapse, issue search and combined filters 
   expect(container.querySelectorAll(".campaign-task-row")).toHaveLength(5);
   await changeSelect(selectFor("Group filter"), "null");
   await changeSelect(selectFor("Status filter"), "all");
-  await act(async () => container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+  await act(async () => container.querySelector<HTMLInputElement>('.campaign-check input[type="checkbox"]')!.click());
   expect(container.querySelectorAll(".campaign-task-row")).toHaveLength(100);
 });
 

@@ -20,3 +20,12 @@ This product includes software derived from the following projects:
   Licensed under the MIT License
   Algorithms and parameter values referenced from VerbalCoding, MIT,
   https://github.com/ca1773130n/VerbalCoding.
+
+- affectUI (https://github.com/flohoeller/affectui)
+  Copyright (c) 2026 Florian Höller (adfects)
+  Licensed under the MIT License
+  (see dashboard/src/kit/free/LICENSE.affectui)
+  Dashboard base controls in dashboard/src/kit/free/ are vendored from
+  agentdesk-ui-kit, adapted from affectUI at commit
+  f83f008bd855433e02caf584853dcd551e0d2ec6. Each file keeps its
+  attribution header and change summary.
