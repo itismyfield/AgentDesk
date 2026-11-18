@@ -26,21 +26,53 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use notify::EventKind;
 use poise::serenity_prelude::ChannelId;
 use serde_json::Value;
-use tokio::sync::mpsc;
 
 use super::SharedData;
+use crate::services::tui_o::shadow::capture::Fingerprint;
 
-#[derive(Debug, Clone)]
-struct CredentialChange {
-    path: PathBuf,
-    kind: EventKind,
-    timestamp: SystemTime,
+const POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+struct ConfigFilePoller {
+    stamps: HashMap<PathBuf, Option<Fingerprint>>,
+}
+
+impl ConfigFilePoller {
+    fn new(paths: &[PathBuf]) -> Self {
+        Self {
+            stamps: paths.iter().map(|p| (p.clone(), file_stamp(p))).collect(),
+        }
+    }
+
+    fn changed_paths(&mut self) -> Vec<PathBuf> {
+        self.stamps
+            .iter_mut()
+            .filter_map(|(path, previous)| {
+                let current = file_stamp(path);
+                // Without Unix file identity, reread content to catch same-mtime replacements.
+                let changed = !cfg!(unix) || *previous != current;
+                *previous = current;
+                changed.then(|| path.clone())
+            })
+            .collect()
+    }
+
+    async fn debounced_changes(&mut self) -> Vec<PathBuf> {
+        let mut changes = self.changed_paths();
+        if !changes.is_empty() {
+            tokio::time::sleep(Duration::from_millis(750)).await;
+            changes.extend(self.changed_paths());
+        }
+        changes
+    }
+}
+
+fn file_stamp(path: &Path) -> Option<Fingerprint> {
+    Fingerprint::of(&std::fs::metadata(path).ok()?).ok()
 }
 
 /// Snapshot of a watched file's MCP-relevant content. Kept as a single-variant
@@ -191,16 +223,11 @@ fn summarize_change(
 }
 
 fn build_notification_from_changes(
-    changes: &[CredentialChange],
+    changes: &[PathBuf],
     snapshots: &mut HashMap<PathBuf, Option<FileSnapshot>>,
     notify_message: &str,
 ) -> Option<String> {
-    let mut changed_paths = BTreeSet::new();
-    for change in changes {
-        let _ = &change.kind;
-        let _ = change.timestamp;
-        changed_paths.insert(change.path.clone());
-    }
+    let changed_paths = changes.iter().cloned().collect::<BTreeSet<_>>();
 
     let mut summaries = Vec::new();
     for path in changed_paths {
@@ -303,130 +330,17 @@ pub(super) fn spawn_watcher(
         );
         return;
     }
-    // Collect every distinct parent directory so we can watch each one non-recursively
-    // (one watch per dir). Some watched files live at $HOME (.claude.json) and others
-    // under $HOME/.claude/, so we may have multiple parents.
-    let watch_dirs: Vec<PathBuf> = {
-        let mut dedup: Vec<PathBuf> = paths
-            .iter()
-            .filter_map(|p| p.parent().map(PathBuf::from))
-            .collect();
-        dedup.sort();
-        dedup.dedup();
-        dedup
-    };
-    if watch_dirs.is_empty() {
-        tracing::warn!(
-            "MCP credential watcher: no parent dirs derived from credential paths; disabled"
-        );
-        return;
-    }
-
-    let (tx, mut rx) = mpsc::unbounded_channel::<CredentialChange>();
-    let watch_dirs_for_thread = watch_dirs.clone();
-    let paths_for_filter = paths.clone();
-    let paths_for_snapshots = paths.clone();
-
-    // Notify watcher runs on its own OS thread (the notify crate uses sync callbacks).
-    std::thread::Builder::new()
-        .name("mcp-credential-watcher".into())
-        .spawn(move || {
-            use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-
-            let watcher_tx = tx.clone();
-            let mut watcher: RecommendedWatcher =
-                match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                    let Ok(event) = res else {
-                        return;
-                    };
-                    if !matches!(
-                        event.kind,
-                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                    ) {
-                        return;
-                    }
-                    let changed_paths = event
-                        .paths
-                        .iter()
-                        .filter_map(|path| {
-                            paths_for_filter.iter().find(|target| {
-                                path.file_name() == target.file_name()
-                                    && path.parent() == target.parent()
-                            })
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    for path in changed_paths {
-                        let _ = watcher_tx.send(CredentialChange {
-                            path,
-                            kind: event.kind.clone(),
-                            timestamp: SystemTime::now(),
-                        });
-                    }
-                }) {
-                    Ok(w) => w,
-                    Err(e) => {
-                        tracing::warn!("MCP credential watcher: failed to create watcher: {e}");
-                        return;
-                    }
-                };
-
-            // Try to attach watches to each parent dir. For dirs that do not yet
-            // exist, retry every 30s until they appear; this avoids the previous
-            // bug where missing-at-startup dirs were silently never watched.
-            let mut pending: Vec<PathBuf> = watch_dirs_for_thread.clone();
-            loop {
-                let mut still_pending = Vec::new();
-                for dir in pending.drain(..) {
-                    if !dir.exists() {
-                        still_pending.push(dir);
-                        continue;
-                    }
-                    match watcher.watch(&dir, RecursiveMode::NonRecursive) {
-                        Ok(()) => {
-                            tracing::info!("MCP credential watcher: watching {}", dir.display())
-                        }
-                        Err(e) => tracing::warn!(
-                            "MCP credential watcher: cannot watch {}: {e}",
-                            dir.display()
-                        ),
-                    }
-                }
-                if still_pending.is_empty() {
-                    break;
-                }
-                pending = still_pending;
-                tracing::debug!(
-                    "MCP credential watcher: {} dir(s) not yet present; retrying in 30s",
-                    pending.len()
-                );
-                std::thread::sleep(Duration::from_secs(30));
-            }
-
-            // Keep the watcher alive forever — it owns its own background thread.
-            std::mem::forget(watcher);
-        })
-        .ok();
-
-    // Async consumer: debounce + dispatch notifications.
     let dedupe = Arc::new(CredentialNotifyDedupe::new());
     tokio::spawn(async move {
-        let mut snapshots = snapshot_existing_files(&paths_for_snapshots);
-        let debounce = Duration::from_millis(750);
+        // Poll only the candidate files, including missing paths; never subscribe to their parents.
+        let mut poller = ConfigFilePoller::new(&paths);
+        let mut snapshots = snapshot_existing_files(&paths);
         loop {
-            // Wait for an event.
-            let Some(first_change) = rx.recv().await else {
-                return;
-            };
-            // Drain any backlog inside the debounce window so we send at most one
-            // notification per burst of file events (e.g. an editor rewriting both
-            // config files in quick succession).
-            tokio::time::sleep(debounce).await;
-            let mut changes = vec![first_change];
-            while let Ok(change) = rx.try_recv() {
-                changes.push(change);
+            tokio::time::sleep(POLL_INTERVAL).await;
+            let changes = poller.debounced_changes().await;
+            if changes.is_empty() {
+                continue;
             }
-
             match build_notification_from_changes(&changes, &mut snapshots, notify_message) {
                 Some(notification) => {
                     tracing::info!(
@@ -510,6 +424,7 @@ mod tests {
         // carries no MCP signal, so it must not be watched.
         let home = PathBuf::from("/home/u");
         let paths = credential_paths_with_overrides(None, Some(home.clone()));
+        assert_eq!(paths.len(), 2);
         assert!(paths.contains(&home.join(".claude.json")), "{paths:?}");
         assert!(
             paths.contains(&home.join(".claude").join(".mcp.json")),
@@ -529,6 +444,81 @@ mod tests {
         );
         assert_eq!(paths.len(), 2);
         assert!(paths.iter().all(|p| p.starts_with("/cfg")), "{paths:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn poll_only_config_files_detects_lifecycle_and_coalesces_edits() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = credential_paths_with_overrides(Some(root.path().into()), None);
+        let mut poller = ConfigFilePoller::new(&paths);
+        let mut targets = poller.stamps.keys().cloned().collect::<Vec<_>>();
+        targets.sort();
+        let mut expected = paths.clone();
+        expected.sort();
+        assert_eq!(targets, expected);
+        let mut snapshots = snapshot_existing_files(&paths);
+        std::fs::create_dir_all(root.path().join(".claude")).unwrap();
+        for path in &paths {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            let original = r#"{"mcpServers":{"memento":{"command":"one"}}}"#;
+            std::fs::write(path, original).unwrap();
+            let changes = poller.debounced_changes().await;
+            assert_eq!(
+                build_notification_from_changes(&changes, &mut snapshots, "restart"),
+                Some(format!("restart ({name}: +memento)"))
+            );
+            let mtime =
+                filetime::FileTime::from_last_modification_time(&std::fs::metadata(path).unwrap());
+            for (command, replace) in [("two", false), ("tri", true)] {
+                let contents = original.replace("one", command);
+                if replace {
+                    let replacement = root.path().join("replacement.json");
+                    std::fs::write(&replacement, &contents).unwrap();
+                    filetime::set_file_mtime(&replacement, mtime).unwrap();
+                    std::fs::rename(replacement, path).unwrap();
+                } else {
+                    std::fs::write(path, &contents).unwrap();
+                    filetime::set_file_mtime(path, mtime).unwrap();
+                }
+                let changes = poller.debounced_changes().await;
+                assert_eq!(
+                    build_notification_from_changes(&changes, &mut snapshots, "restart"),
+                    Some(format!("restart ({name}: 변경 memento)"))
+                );
+            }
+            std::fs::remove_file(path).unwrap();
+            let changes = poller.debounced_changes().await;
+            assert_eq!(
+                build_notification_from_changes(&changes, &mut snapshots, "restart"),
+                Some(format!("restart ({name}: -memento)"))
+            );
+        }
+        std::fs::write(&paths[0], r#"{"mcp_servers":{"first":{}}}"#).unwrap();
+        let burst = tokio::spawn(async move { poller.debounced_changes().await });
+        tokio::task::yield_now().await;
+        std::fs::write(&paths[1], r#"{"mcpServers":{"second":{}}}"#).unwrap();
+        assert_eq!(
+            build_notification_from_changes(&burst.await.unwrap(), &mut snapshots, "restart"),
+            Some("restart (.mcp.json: +second; .claude.json: +first)".into())
+        );
+        let mut poller = ConfigFilePoller::new(&paths);
+        std::fs::write(root.path().join("unrelated.json"), "{}").unwrap();
+        std::fs::write(&paths[0], r#"{"theme":"dark","mcp_servers":{"first":{}}}"#).unwrap();
+        let changes = poller.debounced_changes().await;
+        assert!(build_notification_from_changes(&changes, &mut snapshots, "restart").is_none());
+    }
+
+    #[test]
+    fn dedupe_preserves_channel_scope_and_exact_window_boundary() {
+        let dedupe = CredentialNotifyDedupe::new();
+        let window = Duration::from_secs(300);
+        let now = Instant::now();
+        let first = ChannelId::new(1);
+        assert!(dedupe.try_record_at(first, window, now));
+        assert!(!dedupe.try_record_at(first, window, now + window - Duration::from_nanos(1)));
+        assert!(dedupe.try_record_at(ChannelId::new(2), window, now));
+        assert!(dedupe.try_record_at(first, window, now + window));
+        assert!(!dedupe.try_record_at(first, window, now + window));
     }
 
     #[test]
