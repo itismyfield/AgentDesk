@@ -2265,15 +2265,11 @@ echo \"\$port\"")"'')"; then
     peer_log_path="$peer_adk_rel/logs/deploy-release.cluster-${expected_repo_head}.$$.log"
     peer_manifest_path="$peer_adk_rel/runtime/release-source.json"
 
-    # Operator-private routines are excluded from the repo (.gitignore:50), so the
-    # peer's own `git fetch` above cannot deliver them. Push them before the peer
-    # deploys: leadership can move between nodes, and the routine runtime is a
-    # LeaderOnly worker that resolves `script_ref` against the local disk. A node
-    # missing these files fails every routine row with "routine script ... is not
-    # loaded". No --delete: the peer may hold routines this node does not.
+    # Supply missing operator scripts for leader failover and preserve the peer's
+    # existing files. Its checkout cannot supply operator-private routines.
     if [ -d "$ADK_REL/routines" ]; then
         echo "▸ [peer:$peer] Syncing operator routine scripts..."
-        if ! rsync -a -e "ssh -o ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT" \
+        if ! rsync -a --ignore-existing -e "ssh -o ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT" \
             "$ADK_REL/routines/" "$peer:$peer_adk_rel/routines/"; then
             echo "✗ [peer:$peer] routine script sync failed"
             return 1
@@ -2893,26 +2889,9 @@ rm -rf "$POLICIES_STAGED"
 mkdir -p "$POLICIES_STAGED"
 rsync -a --delete "$REPO/policies/" "$POLICIES_STAGED/"
 
-# Stage routine scripts before stopping release so the runtime never executes a
-# stale JS asset after a binary deploy.
-if [ -d "$REPO/routines" ]; then
-    echo "▸ Staging routines..."
-    ROUTINES_STAGED="$ADK_REL/routines.new"
-    rm -rf "$ROUTINES_STAGED"
-    mkdir -p "$ROUTINES_STAGED"
-    # Operator-private routines (.gitignore:50) live only under $ADK_REL/routines,
-    # never in the repo. Seed the staging dir with them first so the repo overlay
-    # below cannot delete a routine whose row still exists in `routines`; the
-    # runtime would then fail it with "routine script ... is not loaded".
-    if [ -d "$ADK_REL/routines" ]; then
-        rsync -a "$ADK_REL/routines/" "$ROUTINES_STAGED/"
-    fi
-    # Engine-owned routines win on conflict. No --delete: see above.
-    rsync -a "$REPO/routines/" "$ROUTINES_STAGED/"
-else
-    echo "⚠ Routines source missing: $REPO/routines"
-    echo "  Skipping routine staging — existing $ADK_REL/routines/ will be retained."
-fi
+# Stage routine scripts before stopping release when the checkout supplies tracked files.
+. "$SCRIPT_DIR/lib/deploy_routines.sh"
+ROUTINES_STAGED="$(_stage_release_routines "$REPO" "$ADK_REL")"
 
 # Stage launchd-migrated shell entrypoints before stopping release so routines
 # can invoke the same release-owned path on whichever node holds leadership.
