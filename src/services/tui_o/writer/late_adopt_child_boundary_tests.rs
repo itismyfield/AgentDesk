@@ -508,7 +508,7 @@ async fn debt_case(boundary: &str) {
     let (probe, old) = running(&f);
     let silent = boundary == "empty";
     if silent {
-        std::fs::write(&old, b"{\"type\":\"user\",\"sessionId\":\"running\",\"uuid\":\"prompt-a\",\"message\":{\"content\":\"prompt\"}}\n").unwrap();
+        std::fs::write(&old, b"{\"type\":\"file-history-snapshot\"}\n").unwrap();
     }
     let debt = Arc::new(DebtProbe {
         base: probe.clone(),
@@ -738,10 +738,10 @@ async fn ch3fix_fresh_takeover_rechecks_a_after_the_fence() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn ch3fix_output_free_a_needs_no_fabricated_receipt() {
+async fn ch3fix_quiet_a_needs_no_fabricated_receipt() {
     if !test_override::isolated_binding_case(concat!(
         module_path!(),
-        "::ch3fix_output_free_a_needs_no_fabricated_receipt"
+        "::ch3fix_quiet_a_needs_no_fabricated_receipt"
     )) {
         return;
     }
