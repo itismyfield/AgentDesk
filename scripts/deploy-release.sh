@@ -4953,6 +4953,10 @@ fi
 # <<< END smoke-disposition region (#5244)
 echo "▸ [timing] phase=smoke seconds=$((SECONDS - SMOKE_PHASE_STARTED))"
 
+# Continuous E2E companion: dormant without its machine-local config, and never a deploy failure.
+bash "$SCRIPT_DIR/e2e/continuous/after_deploy.sh" "$REPO" "$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" \
+    "$POST_DEPLOY_SMOKE_STAMP" || true
+
 # >>> BEGIN retired-relay-watchdog cleanup
 # Retire an old installation after a successful deploy; an absent job is a no-op.
 WATCHDOG_LABEL="com.agentdesk.relay-watchdog"

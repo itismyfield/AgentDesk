@@ -272,11 +272,12 @@ def _run(lease, state, config, request, run_id, now):
     return record
 
 
-def tick(config_path, now=None):
+def tick(config_path, now=None, overrides=None):
+    """`overrides` carries what a supervisor observed for this tick, such as the server identity."""
     config = load_config(config_path)
     if config.get("enabled") is not True:
         return {"status": "DISABLED"}
-    config = settings(config)
+    config = settings({**config, **(overrides or {})})
     state, now = config["state_dir"], time.time() if now is None else now
     request = _due(state, config, now)
     recovery = any(row.get("result") == "RUNNING" or (row.get("completed_at") is not None and not row.get("applied"))
