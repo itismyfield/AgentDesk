@@ -2001,6 +2001,8 @@ src/
 │   │   │   │   └── routine_incident_nonce.rs
 │   │   │   ├── o_writer_repost_io_tests/
 │   │   │   │   └── owner_tests.rs
+│   │   │   ├── serenity_reference/
+│   │   │   │   └── recovery_notice.rs
 │   │   │   ├── turn_output_controller/
 │   │   │   │   ├── fresh_send.rs
 │   │   │   │   ├── fresh_send_tests.rs
@@ -2237,6 +2239,7 @@ src/
 │   │   │   ├── herdr_before_start_restart.rs
 │   │   │   ├── herdr_before_start_restart_tests.rs
 │   │   │   ├── herdr_reader.rs
+│   │   │   ├── herdr_reader_missing_tests.rs
 │   │   │   ├── herdr_reader_tests.rs
 │   │   │   ├── herdr_row_end.rs
 │   │   │   ├── herdr_row_end_gate_tests.rs
@@ -2411,6 +2414,8 @@ src/
 │   │   │   │   │   │   └── pg_tests.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── intake_turn/
+│   │   │   │   │   ├── owned_busy/
+│   │   │   │   │   │   └── missing_watch.rs
 │   │   │   │   │   ├── race_loss/
 │   │   │   │   │   │   ├── mailbox_reaction.rs
 │   │   │   │   │   │   ├── mailbox_reaction_tests.rs
@@ -2437,6 +2442,7 @@ src/
 │   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── intake_dispatch.rs
 │   │   │   │   │   ├── owned_busy.rs
+│   │   │   │   │   ├── owned_busy_missing_tests.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── replay_start.rs
@@ -2488,6 +2494,7 @@ src/
 │   │   │   │   │   ├── producer_error_test_support.rs
 │   │   │   │   │   ├── replay_scope.rs
 │   │   │   │   │   ├── start_failure.rs
+│   │   │   │   │   ├── start_failure_missing_tests.rs
 │   │   │   │   │   └── start_failure_state_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_followup_tests/
 │   │   │   │   │   └── clear_execute_tests.rs
@@ -2540,6 +2547,9 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_http_start_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_internal_start_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_missing_input_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_missing_race_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_missing_success_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
@@ -3746,6 +3756,7 @@ src/
 │   │   ├── policy_tests.rs
 │   │   ├── prepared.rs
 │   │   ├── restart_resume_pg_tests.rs
+│   │   ├── retire.rs
 │   │   ├── retired_hold.rs
 │   │   ├── runtime_marker.rs
 │   │   ├── unplaced.rs

@@ -259,6 +259,19 @@ async fn state(shared: &Arc<SharedData>, channel: ChannelId) -> Value {
         .unwrap()
 }
 
+async fn test_runtime_pool(
+    db: &crate::db::auto_queue::test_support::TestPostgresDb,
+) -> sqlx::PgPool {
+    let pool = db.connect_and_migrate().await;
+    // Connections stay on the test runtime while its daemon runtimes come and go.
+    let mut connections = Vec::new();
+    for _ in 0..pool.options().get_max_connections() {
+        connections.push(pool.acquire().await.unwrap());
+    }
+    drop(connections);
+    pool
+}
+
 async fn fresh_runtime(rig: &IntakeRig, pool: &sqlx::PgPool, generation: u64) -> Arc<SharedData> {
     let mut shared = discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let target = Arc::get_mut(&mut shared).unwrap();
@@ -305,7 +318,10 @@ async fn fresh_runtime(rig: &IntakeRig, pool: &sqlx::PgPool, generation: u64) ->
 /// A recovered daemon marks its remaining row through the real shutdown barrier, then exits.
 async fn restore_then_restart(rig: &IntakeRig, pool: &sqlx::PgPool) -> InflightTurnState {
     discord::runtime_store::set_process_generation_for_tests(Some(5));
-    let shared = fresh_runtime(rig, pool, 5).await;
+    let daemon_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_lazy_with(pool.connect_options().as_ref().clone());
+    let shared = fresh_runtime(rig, &daemon_pool, 5).await;
     let http = rig
         .shared
         .http
@@ -357,6 +373,8 @@ async fn restore_then_restart(rig: &IntakeRig, pool: &sqlx::PgPool) -> InflightT
                 Some(discord::InflightRestartMode::DrainRestart)
             );
             assert_eq!(marked.restart_generation, Some(5));
+            // No connection from this boot can escape into a later boot's dead-reactor lookup.
+            daemon_pool.close().await;
             restored
         });
         daemon.0.take().unwrap().shutdown_timeout(Duration::ZERO);
@@ -618,7 +636,7 @@ async fn restart_input_case(
     let _root = crate::config::TestRuntimeRootGuard::new();
     discord::runtime_store::set_process_generation_for_tests(Some(4));
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-    let pool = db.connect_and_migrate().await;
+    let pool = test_runtime_pool(&db).await;
     let mut rig =
         IntakeRig::with_storage(channel, false, ProviderKind::Claude, Some(pool.clone())).await;
     let _owned = crate::services::tui_o::cutover::test_override::force_channels(&[(
@@ -1078,7 +1096,7 @@ async fn consumed_busy_input_without_restart_finishes_through_its_original_bridg
     let _root = crate::config::TestRuntimeRootGuard::new();
     discord::runtime_store::set_process_generation_for_tests(Some(4));
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-    let pool = db.connect_and_migrate().await;
+    let pool = test_runtime_pool(&db).await;
     let mut rig =
         IntakeRig::with_storage(7_807_302, false, ProviderKind::Claude, Some(pool.clone())).await;
     let _owned = crate::services::tui_o::cutover::test_override::force_channels(&[(
@@ -1149,7 +1167,7 @@ async fn restore_ownership_case(channel: u64, ownership: RestoreOwnership) {
     let _root = crate::config::TestRuntimeRootGuard::new();
     discord::runtime_store::set_process_generation_for_tests(Some(4));
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-    let pool = db.connect_and_migrate().await;
+    let pool = test_runtime_pool(&db).await;
     let mut rig =
         IntakeRig::with_storage(channel, false, ProviderKind::Claude, Some(pool.clone())).await;
     let channels = [(rig.channel.get(), RuntimeHandoffKind::ClaudeTui)];

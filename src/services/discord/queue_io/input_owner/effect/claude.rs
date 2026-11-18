@@ -6,7 +6,15 @@ use crate::services::claude_tui::busy_inject;
 use crate::services::claude_tui::host_input::{BusyOperation, BusyOutcome};
 use crate::services::claude_tui::owner_input;
 
+pub(crate) type ProbeGuard = Box<
+    dyn FnOnce(
+            crate::services::claude_tui::host_input::busy::BusyProbe,
+        ) -> crate::services::claude_tui::host_input::busy::BusyProbe
+        + Send,
+>;
+
 pub(crate) struct BusyClaude {
+    pub(crate) probe_guard: Option<ProbeGuard>,
     pub(crate) operation: BusyOperation,
     pub(crate) session: String,
     pub(crate) transcript: PathBuf,
@@ -24,6 +32,7 @@ impl BusyClaude {
         Box::new(move |frame| {
             let Self {
                 operation,
+                probe_guard,
                 session,
                 transcript,
                 channel,
@@ -48,6 +57,8 @@ impl BusyClaude {
                 text: &text,
             };
             let host = operation.host_tag();
+            #[cfg(test)]
+            capture_gate(channel);
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 operation.submit(&request)
             }));
@@ -85,6 +96,10 @@ impl BusyClaude {
                     probe,
                 } => {
                     if let Some(probe) = probe {
+                        let probe = match probe_guard {
+                            Some(guard) => guard(probe),
+                            None => probe,
+                        };
                         super::super::held_watch::arm(channel, probe);
                     }
                     refused(reason, waits)
@@ -98,5 +113,43 @@ impl BusyClaude {
                 }
             })
         })
+    }
+}
+
+#[cfg(test)]
+type CaptureGate = (
+    tokio::sync::oneshot::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+#[cfg(test)]
+static CAPTURE_GATES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<u64, CaptureGate>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[cfg(test)]
+pub(crate) fn pause_capture(
+    channel: u64,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let (release, resumed) = std::sync::mpsc::channel();
+    assert!(
+        CAPTURE_GATES
+            .lock()
+            .unwrap()
+            .insert(channel, (entered, resumed))
+            .is_none()
+    );
+    (observed, release)
+}
+
+#[cfg(test)]
+fn capture_gate(channel: u64) {
+    let gate = CAPTURE_GATES.lock().unwrap().remove(&channel);
+    if let Some((entered, resumed)) = gate {
+        let _ = entered.send(());
+        crate::test_support::wait::recv_within(&resumed, std::time::Duration::from_secs(30));
     }
 }

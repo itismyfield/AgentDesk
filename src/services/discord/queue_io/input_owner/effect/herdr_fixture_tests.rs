@@ -22,6 +22,7 @@ struct BusyClaudeHerdr {
 impl BusyClaudeHerdr {
     fn leaf(self) -> Leaf {
         BusyClaude {
+            probe_guard: None,
             operation: BusyOperation::new(
                 InputTarget::Herdr(self.target),
                 "tmux".into(),

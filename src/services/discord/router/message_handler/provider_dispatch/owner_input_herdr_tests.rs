@@ -190,6 +190,7 @@ impl HerdrOwner {
             until_done: None,
             native_pin_submitted: None,
             observation: None,
+            recovery: Default::default(),
         };
         created(
             registration,
