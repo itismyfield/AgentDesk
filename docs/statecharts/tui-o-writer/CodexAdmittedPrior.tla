@@ -12,9 +12,9 @@
 EXTENDS Naturals
 CONSTANTS Mode
 VARIABLES truth, seen, owedEv, everOwed, receiptEv, genMoved, restarted, phase, own, initA,
-          proofOwed, alarm, finish
+          proofOwed, alarm, finish, obsInit
 vars == <<truth, seen, owedEv, everOwed, receiptEv, genMoved, restarted, phase, own, initA,
-          proofOwed, alarm, finish>>
+          proofOwed, alarm, finish, obsInit>>
 
 Design == Mode # "main"
 \* The owed judgement is durable and survives the generation move and a restart.
@@ -28,22 +28,23 @@ Init == /\ truth \in {"delivered", "undelivered", "ambiguous"}
         /\ receiptEv = (truth = "delivered")
         /\ genMoved = FALSE /\ restarted = FALSE /\ phase = "admitted" /\ own = FALSE
         /\ initA = FALSE /\ proofOwed = FALSE /\ alarm = FALSE /\ finish = "none"
+        /\ obsInit = FALSE
 
 \* first_input.rs: the launch stamps the new generation before discovery binds B.
 MoveGeneration == /\ phase = "admitted" /\ ~genMoved
     /\ genMoved' = TRUE /\ phase' = "bound"
     /\ owedEv' = (owedEv /\ ~DropsOnGeneration)
-    /\ UNCHANGED <<truth, seen, everOwed, receiptEv, restarted, own, initA, proofOwed, alarm, finish>>
+    /\ UNCHANGED <<truth, seen, everOwed, receiptEv, restarted, own, initA, proofOwed, alarm, finish, obsInit>>
 
 \* One process restart before the commit; in-memory judgements are gone.
 Restart == /\ phase \in {"admitted", "bound"} /\ ~restarted
     /\ restarted' = TRUE /\ owedEv' = (owedEv /\ ~DropsOnRestart)
-    /\ UNCHANGED <<truth, seen, everOwed, receiptEv, genMoved, phase, own, initA, proofOwed, alarm, finish>>
+    /\ UNCHANGED <<truth, seen, everOwed, receiptEv, genMoved, phase, own, initA, proofOwed, alarm, finish, obsInit>>
 
 \* Legacy finishes A late; its receipt lands in A's (now earlier) generation.
 LateDelivery == /\ phase \in {"admitted", "bound"} /\ truth = "undelivered"
     /\ truth' = "delivered" /\ receiptEv' = TRUE
-    /\ UNCHANGED <<seen, owedEv, everOwed, genMoved, restarted, phase, own, initA, proofOwed, alarm, finish>>
+    /\ UNCHANGED <<seen, owedEv, everOwed, genMoved, restarted, phase, own, initA, proofOwed, alarm, finish, obsInit>>
 
 \* The takeover's judgement of A from the evidence it holds, never from the truth.
 ReceiptSeen == receiptEv /\ (Mode # "ignoreLate" \/ ~genMoved)
@@ -58,27 +59,37 @@ Blocks == Mode = "designBlock" /\ Verdict = "unprovable"
 Commit == /\ phase = "bound" /\ ~Blocks
     /\ phase' = "committed" /\ own' = TRUE
     /\ initA' = (Verdict = "owed") /\ proofOwed' = (Verdict = "owed")
-    /\ alarm' = (Verdict = "unprovable")
+    /\ alarm' = (Verdict = "unprovable") /\ obsInit' = initA'
+    /\ UNCHANGED <<truth, seen, owedEv, everOwed, receiptEv, genMoved, restarted, finish>>
+
+\* Environment: the same takeover's commit (own B proof and identity) whose stored owed list
+\* differs from the proof, e.g. an unproved A source, another frontier or prefix hash.
+SkewedCommit == /\ phase = "bound" /\ ~Blocks
+    /\ phase' = "committed" /\ own' = TRUE
+    /\ initA' = (Verdict = "owed") /\ proofOwed' = (Verdict = "owed")
+    /\ alarm' = (Verdict = "unprovable") /\ obsInit' = ~initA'
     /\ UNCHANGED <<truth, seen, owedEv, everOwed, receiptEv, genMoved, restarted, finish>>
 
 \* Environment: another episode's init that lists an extra source this takeover never proved.
 ForeignCommit == /\ phase = "bound"
     /\ phase' = "committed" /\ own' = FALSE /\ initA' = TRUE /\ proofOwed' = FALSE
+    /\ obsInit' \in BOOLEAN
     /\ UNCHANGED <<truth, seen, owedEv, everOwed, receiptEv, genMoved, restarted, alarm, finish>>
 
-\* Installed normalizer: finish_first adopts only an init that is exactly this takeover's
-\* proved owed list followed by B at byte 0; the current check accepts B alone.
-Accepts == CASE Mode \in {"main", "finishSingleton"} -> ~initA
-          [] Mode = "finishAnyB" -> TRUE
-          [] OTHER -> initA = proofOwed
+\* Installed normalizer: finish_first adopts only this takeover's own init (identity check) whose
+\* stored owed list is exactly the proved one followed by B at byte 0 (list check); the current
+\* check accepts B alone. finishNoOwn drops only the identity check, finishNoList only the list.
+Accepts == CASE Mode \in {"main", "finishSingleton"} -> ~obsInit
+          [] Mode = "finishNoList" -> TRUE
+          [] OTHER -> obsInit = proofOwed
 Finish == /\ phase = "committed" /\ finish = "none"
-    /\ finish' = (IF (own \/ Mode = "finishAnyB") /\ Accepts THEN "adopted" ELSE "existing")
-    /\ UNCHANGED <<truth, seen, owedEv, everOwed, receiptEv, genMoved, restarted, phase, own, initA, proofOwed, alarm>>
+    /\ finish' = (IF (own \/ Mode = "finishNoOwn") /\ Accepts THEN "adopted" ELSE "existing")
+    /\ UNCHANGED <<truth, seen, owedEv, everOwed, receiptEv, genMoved, restarted, phase, own, initA, proofOwed, alarm, obsInit>>
 
 Done == phase = "committed" /\ finish # "none" /\ UNCHANGED vars
 Stuck == phase = "bound" /\ Blocks /\ UNCHANGED vars
 
-Next == MoveGeneration \/ Restart \/ LateDelivery \/ Commit \/ ForeignCommit \/ Finish \/ Done \/ Stuck
+Next == MoveGeneration \/ Restart \/ LateDelivery \/ Commit \/ SkewedCommit \/ ForeignCommit \/ Finish \/ Done \/ Stuck
 Spec == Init /\ [][Next]_vars /\ WF_vars(MoveGeneration) /\ WF_vars(Commit) /\ WF_vars(Finish)
 
 \* A proven-unsent A that was not delivered meanwhile stays owed, whatever moved in between.
@@ -90,9 +101,10 @@ NoAbsenceAsOwed == own /\ initA => everOwed
 \* Taking B without an unprovable A is visible.
 UnprovableAlarmed == Design /\ own /\ ~initA /\ ~ReceiptSeen /\ truth # "delivered" => alarm
 \* The normalizer never adopts an init the takeover did not prove.
-AdoptedMatchesProof == finish = "adopted" => (own /\ initA = proofOwed)
+AdoptedMatchesProof == finish = "adopted" => (own /\ obsInit = proofOwed)
 \* An unprovable A never holds the admitted rollout back.
 AdmittedEventuallyCommitted == <>(phase = "committed")
-\* The takeover's own commit is adopted by the installed normalizer within its budget.
-OwnCommitAdopted == [](own => <>(finish = "adopted"))
+\* The takeover's own commit with its proved list is adopted within its budget; a skewed list
+\* stays ExistingEffectPending.
+OwnCommitAdopted == [](own /\ obsInit = proofOwed => <>(finish = "adopted"))
 =============================================================================

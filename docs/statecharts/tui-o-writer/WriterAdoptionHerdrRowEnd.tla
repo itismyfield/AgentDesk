@@ -8,13 +8,17 @@ vars == <<cap, bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, 
 \* C separates the retired execution from its durable body; NExisting has no pre-adoption copy.
 CapModes == {"CapBefore", "CapFixed", "CapDuplicate", "CapNativeLeak", "CapWrongChannel", "CapWrongOwner", "CapWrongEpisode", "CapWrongSnapshot", "CapWrongEffect", "CapStaleGeneration", "CapRevive", "CapTransferRace", "CapReceiptFalse", "CapGcEarly", "CapEarlyOutput", "CapUnknownPlan", "CapReceiptUnproved", "CapWrongInput", "CapWrongPayload", "CapNoReserve", "CapCrashReservedNoProof", "CapCrashPreparedNoProof", "CapCrashReservedProof", "CapCrashPreparedProof", "CapProofUnchecked", "CapRunReset"}
 CapMode == Mapping \in CapModes
-CMode == CapMode \/ Mapping \in {"CLate", "CDiscard", "CDiscardLate", "CDiscardRetain", "CDiscardNoRecheck", "CDiscardRepost", "CDiscardHoldBody", "CDiscardOwnKey", "CDiscardUncertainDelivered", "CDiscardSilent", "C", "CRepair", "CDecision", "CNoDurable", "CDuplicate", "COverwrite", "CEarlyOutput", "CSilentRefusal", "COwnedShortcut", "CNoSource", "CRefusedRevoked", "CNoCandidateRevoked"}
+CMode == CapMode \/ Mapping \in {"CLate", "CDiscard", "CDiscardLate", "CDiscardRetain", "CDiscardNoRecheck", "CDiscardRepost", "CDiscardHoldBody", "CDiscardOwnKey", "CDiscardUncertainDelivered", "CDiscardSilent", "CDiscardNoGate", "CDiscardRowBound", "C", "CRepair", "CDecision", "CNoDurable", "CDuplicate", "COverwrite", "CEarlyOutput", "CSilentRefusal", "COwnedShortcut", "CNoSource", "CRefusedRevoked", "CNoCandidateRevoked"}
 NStored == Mapping = "NStored"
 \* #7651 D1b design: a Refused body is never archived; it gets one visible reason and is dropped.
-D1bDiscard == Mapping \in {"CDiscard", "CDiscardLate", "CDiscardRetain", "CDiscardNoRecheck", "CDiscardRepost", "CDiscardHoldBody", "CDiscardOwnKey", "CDiscardUncertainDelivered", "CDiscardSilent"}
-LateRefusal == Mapping \in {"CLate", "CDiscardLate", "CDiscardNoRecheck", "CDiscardHoldBody"}
+D1bDiscard == Mapping \in {"CDiscard", "CDiscardLate", "CDiscardRetain", "CDiscardNoRecheck", "CDiscardRepost", "CDiscardHoldBody", "CDiscardOwnKey", "CDiscardUncertainDelivered", "CDiscardSilent", "CDiscardNoGate", "CDiscardRowBound"}
+LateRefusal == Mapping \in {"CLate", "CDiscardLate", "CDiscardNoRecheck", "CDiscardHoldBody", "CDiscardNoGate"}
 \* The archive step re-reads ownership under the row lock and copies nothing for a Refused owner.
+\* Archive is one step: the candidate guard is held from that re-read through the copy publish.
 ArchiveRechecks == D1bDiscard /\ Mapping \notin {"CDiscardRetain", "CDiscardNoRecheck"}
+\* An episode that already holds a reason (intent or receipt) is terminal for its body: it is
+\* discarded reusing that reason and never copied or posted again. New admissions are not gated.
+EpisodeClosed == D1bDiscard /\ Mapping # "CDiscardNoGate" /\ reasonState # "none"
 NMode == Mapping = "NExisting" \/ NStored
 DetachedMode == CMode \/ NMode
 AdoptionHeld == owner \in {"Deferred", "Refused", "NoCandidate"}
@@ -46,12 +50,12 @@ Init == /\ cap = CapInit /\ bound = BoundAtRestart /\ owner \in Owners
 
 \* C/N are proposals; true identity errors still cannot pass Observe.
 Observe == /\ phase = "observe" /\ (Owned \/ (AdoptionHeld /\ Mapping # "before"))
-    /\ phase' = (IF D1bDiscard /\ owner = "Refused" /\ Mapping # "CDiscardRetain" THEN "discard" ELSE IF CapMode THEN "archive" ELSE IF Owned /\ (~DetachedMode \/ storeDuty \/ Mapping = "COwnedShortcut") THEN "clear" ELSE IF CMode \/ NStored THEN "archive" ELSE IF NMode THEN "neutral" ELSE "commit")
+    /\ phase' = (IF EpisodeClosed \/ (D1bDiscard /\ owner = "Refused" /\ Mapping # "CDiscardRetain") THEN "discard" ELSE IF CapMode THEN "archive" ELSE IF Owned /\ (~DetachedMode \/ storeDuty \/ Mapping = "COwnedShortcut") THEN "clear" ELSE IF CMode \/ NStored THEN "archive" ELSE IF NMode THEN "neutral" ELSE "commit")
     /\ UNCHANGED <<cap, bound, owner, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition, refusedArchive, reasons, reasonState, reasonKind, priorFresh>>
 
 \* PROPOSED: identity-keyed fsynced copy before unlink. Existing o_pending cannot capture Deferred/Refused.
 Archive == /\ phase = "archive"
-    /\ (IF ArchiveRechecks /\ owner = "Refused"
+    /\ (IF EpisodeClosed \/ (ArchiveRechecks /\ owner = "Refused")
         THEN /\ phase' = "discard"
              /\ UNCHANGED <<copyId, refusedArchive>>
         ELSE /\ copyId' = (IF oldAck \/ lp = 1 \/ Mapping = "CNoDurable" THEN "none" ELSE "old")
@@ -117,7 +121,7 @@ Repair == /\ Mapping \in {"CRepair", "CRefusedRevoked"} /\ owner = "Refused"
 \* output::Scope::acquire restores the old artifact but refuses it after owner transfer.
 \* A valid current owner/store is distinct from this old original admission remaining valid.
 OldOriginalAdmitted == ~CapMode /\ Mapping \notin {"CRefusedRevoked", "CNoCandidateRevoked"}
-OCreate == /\ OldOriginalAdmitted /\ Owned /\ noticeBody /\ (copyId = "old" \/ storeDuty) /\ ~oldAck /\ lp = 0 /\ (op = 0 \/ (Mapping = "CDuplicate" /\ op = 1))
+OCreate == /\ OldOriginalAdmitted /\ ~EpisodeClosed /\ Owned /\ noticeBody /\ (copyId = "old" \/ storeDuty) /\ ~oldAck /\ lp = 0 /\ (op = 0 \/ (Mapping = "CDuplicate" /\ op = 1))
     /\ op' = (op + 1) /\ attempt' = ("uncertain")
     /\ UNCHANGED <<cap, bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, oldAck, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition, refusedArchive, reasons, reasonState, reasonKind, priorFresh>>
 
@@ -282,14 +286,16 @@ IntentNext == IF Mapping = "CDiscardSilent" THEN reasonState
 KindNext == IF Mapping = "CDiscardSilent" THEN reasonKind
             ELSE IF OwnKey \/ reasonKind = "none" THEN "refused" ELSE reasonKind
 
-\* D1b design: a Refused restarted row gets the reason intent and is released with no body copy.
+\* D1b design: a Refused restarted row, or one whose episode already holds a reason, gets the
+\* reason intent (or reuses it) and is released with no body copy.
 DiscardRow == /\ phase = "discard"
     /\ reasonState' = IntentNext /\ reasonKind' = KindNext
     /\ refusalVisible' = (Mapping # "CDiscardSilent") /\ disposition' = "discarded"
     /\ (IF Mapping = "CDiscardHoldBody"
         THEN /\ phase' = "reasonwait" /\ UNCHANGED <<row, inputHold, gatewayHeld>>
         ELSE /\ row' = FALSE /\ inputHold' = FALSE /\ gatewayHeld' = FALSE /\ phase' = "done")
-    /\ UNCHANGED <<cap, bound, owner, noticeBody, noticeSent, lp, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusedArchive, reasons, priorFresh>>
+    /\ storeDuty' = FALSE
+    /\ UNCHANGED <<cap, bound, owner, noticeBody, noticeSent, lp, nextInput, copyId, op, oldAck, attempt, restarted, newPosted, earlyOutput, refusedArchive, reasons, priorFresh>>
 
 \* Mutant control: the row is released only after a confirmed reason receipt.
 ReleaseAfterReceipt == /\ phase = "reasonwait" /\ reasonState = "posted"
@@ -304,10 +310,12 @@ DiscardCopy == /\ D1bDiscard /\ owner = "Refused" /\ copyId = "old" /\ ~oldAck /
     /\ UNCHANGED <<cap, bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, op, oldAck, attempt, restarted, newPosted, earlyOutput, refusedArchive, reasons, priorFresh>>
 
 \* The reason post: a verified created message settles it; an uncertain one is only reconciled.
-ReasonCreated == /\ reasonState = "intent"
+\* The durable intent is resumed on its own after the row, body and debt are gone.
+ReasonWorkable == row \/ Mapping # "CDiscardRowBound"
+ReasonCreated == /\ reasonState = "intent" /\ ReasonWorkable
     /\ reasonState' = "posted" /\ reasons' = reasons + 1
     /\ UNCHANGED <<cap, bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition, refusedArchive, reasonKind, priorFresh>>
-ReasonUncertain == /\ reasonState = "intent"
+ReasonUncertain == /\ reasonState = "intent" /\ ReasonWorkable
     /\ reasonState' = "uncertain" /\ reasons' = reasons + 1
     /\ oldAck' = (Mapping = "CDiscardUncertainDelivered" \/ oldAck)
     /\ UNCHANGED <<cap, bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition, refusedArchive, reasonKind, priorFresh>>
@@ -334,7 +342,8 @@ OldBodyBeforeNew == ~earlyOutput
 NoSilentRefusal == disposition = "rejected" => refusalVisible
 HerdrRowEventuallySettled == [](row => <>~row)
 NewStartEventuallyPassesRow == [](nextInput = "queued" => <>(nextInput = "pastRowGuard"))
-BodyAfterAdoption == [](Owned /\ noticeBody => <>(oldAck \/ lp = 1))
+\* An explicitly discarded old body is no longer owed.
+BodyAfterAdoption == [](Owned /\ noticeBody => <>(oldAck \/ lp = 1 \/ disposition = "discarded"))
 RefusedExplicitlySettled == [](owner = "Refused" /\ noticeBody /\ ~row
                               => <>(oldAck \/ (disposition \in {"rejected", "discarded"} /\ refusalVisible)))
 \* #7651 D1b rules: no Refused archive, one visible reason per discarded body, waiting copies end.
@@ -343,6 +352,8 @@ ReasonAtMostOnce == reasons <= 1
 DiscardVisible == disposition = "discarded" => reasonState # "none"
 FirstReasonKept == priorFresh => reasonKind = "fresh"
 ReasonNotBodyReceipt == disposition = "discarded" => ~oldAck
+ReasonedBodyNotCopied == reasonState # "none" => copyId # "old"
+ReasonedBodyNotPosted == reasonState # "none" => op = 0
 RefusedCopyDiscarded == [](owner = "Refused" /\ copyId = "old" => <>(copyId # "old"))
 ReasonEventuallySettles == [](reasonState = "intent" => <>(reasonState \in {"posted", "uncertain"}))
 =============================================================================
