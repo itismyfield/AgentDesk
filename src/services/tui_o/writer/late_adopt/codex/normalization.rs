@@ -83,7 +83,8 @@ pub(crate) async fn hold(candidate: &Candidate, nonce: Option<[u8; 32]>) {
         let until = match candidate.first_hold(nonce) {
             None => return,
             Some(FirstHold::Until(deadline)) => deadline,
-            Some(FirstHold::Output(output, proof)) => {
+            Some(FirstHold::Output(held)) => {
+                let (output, proof) = *held;
                 let root = crate::config::runtime_root();
                 if let Some(store) = root.as_deref().and_then(OStore::existing) {
                     let _ = run(&output, candidate, &proof, &store).await;

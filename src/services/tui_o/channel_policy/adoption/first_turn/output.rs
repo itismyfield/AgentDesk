@@ -29,7 +29,7 @@ impl Normalizing {
 /// What a body claim of the admitted first turn waits on.
 pub(crate) enum FirstHold {
     /// A bound rollout proved the admission: its disposition normalizes to a terminal answer.
-    Output(Output, FirstProof),
+    Output(Box<(Output, FirstProof)>),
     /// No rollout proved it yet; the one budget ends at this instant.
     Until(Instant),
 }
@@ -65,7 +65,9 @@ impl Candidate {
         })?;
         match &first.normalizing.output {
             Some((output, _)) if terminal(output.phase()) => None,
-            Some((output, proof)) => Some(FirstHold::Output(output.clone(), proof.clone())),
+            Some((output, proof)) => {
+                Some(FirstHold::Output(Box::new((output.clone(), proof.clone()))))
+            }
             None if first.pending => Some(FirstHold::Until(first.normalizing.admitted_at + BUDGET)),
             None => None,
         }
