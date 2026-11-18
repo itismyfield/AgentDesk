@@ -59,16 +59,20 @@ impl Candidate {
     /// What a body claim of the turn `nonce` names waits on: nothing once its output is adopted
     /// or rejected, or when it is not the admitted first turn.
     pub(crate) fn first_hold(&self, nonce: [u8; 32]) -> Option<FirstHold> {
-        let first = self.first_turn.borrow();
-        let first = first.as_ref().filter(|first| {
-            nonce_id(&first.nonce) == nonce && first.normalizing.refused.is_none()
-        })?;
-        match &first.normalizing.output {
+        // The watch guard is released before the output's own lock is taken: a rejection holds
+        // that lock while it invalidates the admission through this watch.
+        let (output, pending, admitted_at) = {
+            let first = self.first_turn.borrow();
+            let first = first.as_ref().filter(|first| {
+                nonce_id(&first.nonce) == nonce && first.normalizing.refused.is_none()
+            })?;
+            let n = &first.normalizing;
+            (n.output.clone(), first.pending, n.admitted_at)
+        };
+        match output {
             Some((output, _)) if terminal(output.phase()) => None,
-            Some((output, proof)) => {
-                Some(FirstHold::Output(Box::new((output.clone(), proof.clone()))))
-            }
-            None if first.pending => Some(FirstHold::Until(first.normalizing.admitted_at + BUDGET)),
+            Some(held) => Some(FirstHold::Output(Box::new(held))),
+            None if pending => Some(FirstHold::Until(admitted_at + BUDGET)),
             None => None,
         }
     }
@@ -99,18 +103,21 @@ impl Candidate {
 
     /// The reason the admitted first output `nonce` names was rejected with, for its one notice.
     pub(crate) fn first_rejection(&self, nonce: [u8; 32]) -> Option<Reason> {
-        let first = self.first_turn.borrow();
-        let first = first
-            .as_ref()
-            .filter(|first| nonce_id(&first.nonce) == nonce)?;
-        let phase = first
-            .normalizing
-            .output
-            .as_ref()
-            .map(|(output, _)| output.phase());
-        match phase {
+        // As in `first_hold`: copied under the watch guard, judged after it is released.
+        let (output, refused) = {
+            let first = self.first_turn.borrow();
+            let first = first
+                .as_ref()
+                .filter(|first| nonce_id(&first.nonce) == nonce)?;
+            let n = &first.normalizing;
+            (
+                n.output.as_ref().map(|(output, _)| output.clone()),
+                n.refused,
+            )
+        };
+        match output.map(|output| output.phase()) {
             Some(Phase::RejectPendingNotice(reason) | Phase::Rejected(reason)) => Some(reason),
-            _ => first.normalizing.refused,
+            _ => refused,
         }
     }
 }
