@@ -7,8 +7,34 @@ pub(crate) struct Requirement {
     pub provider: String,
     pub tmux: String,
     pub model: Option<String>,
+    pub default_model: Option<String>,
     pub resume: Option<String>,
 }
+
+impl Requirement {
+    pub(crate) fn launch_model(&self) -> Option<&str> {
+        self.model.as_deref().or(self.default_model.as_deref())
+    }
+
+    pub(crate) fn matches(&self, nonce: &str, session: &str) -> bool {
+        read(&self.tmux).is_some_and(|proof| self.verifies(&proof, nonce, session))
+    }
+
+    fn verifies(&self, proof: &Proof, nonce: &str, session: &str) -> bool {
+        proof.provider == self.provider
+            && proof.tmux == self.tmux
+            && proof.nonce == nonce
+            && proof.session == session
+            && proof.model == self.model
+            && proof.default_model == self.default_model
+            && self
+                .resume
+                .as_deref()
+                .is_none_or(|expected| expected == session)
+            && !proof.argv_sha256.is_empty()
+    }
+}
+
 pub(crate) type Publisher = std::sync::Arc<dyn Fn(&Proof) -> Result<(), String> + Send + Sync>;
 #[derive(Clone)]
 struct State {
@@ -59,6 +85,8 @@ pub(crate) struct Proof {
     pub nonce: String,
     pub session: String,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_model: Option<String>,
     pub argv_sha256: String,
 }
 pub(crate) fn path(tmux: &str) -> std::path::PathBuf {
@@ -90,20 +118,11 @@ pub(crate) fn tracks_live_execution(provider: &str, tmux: &str) -> bool {
     tracked && pane_liveness(tmux) != PaneLiveness::DeadOrAbsent
 }
 
-pub(crate) fn matches(
-    provider: &str,
-    tmux: &str,
-    nonce: &str,
-    session: &str,
-    model: Option<&str>,
-) -> bool {
-    read(tmux).is_some_and(|p| {
-        p.provider == provider
-            && p.tmux == tmux
-            && p.nonce == nonce
-            && p.session == session
-            && p.model.as_deref() == model
-            && !p.argv_sha256.is_empty()
+/// The native model can survive a pane's exit with its conversation.
+#[cfg(unix)]
+pub(crate) fn tracks_native_session(provider: &str, tmux: &str, session: &str) -> bool {
+    read(tmux).is_some_and(|proof| {
+        proof.provider == provider && proof.tmux == tmux && proof.session == session
     })
 }
 pub(crate) fn validate_selection(
@@ -154,7 +173,7 @@ pub(crate) fn prepared(
         "codex" => codex_resumed(args, session),
         _ => false,
     };
-    if model != wanted.model.as_deref() || (wanted.resume.is_some() && !resumed) {
+    if model != wanted.launch_model() || (wanted.resume.is_some() && !resumed) {
         return Err("NotSent(\"routine_model_argv_mismatch\")".into());
     }
     use sha2::{Digest, Sha256};
@@ -164,6 +183,7 @@ pub(crate) fn prepared(
         nonce: nonce.into(),
         session: session.into(),
         model: wanted.model,
+        default_model: wanted.default_model,
         argv_sha256: format!(
             "{:x}",
             Sha256::digest(serde_json::to_vec(args).map_err(|e| e.to_string())?)
@@ -228,14 +248,7 @@ pub(crate) fn before_payload(target: &serde_json::Value) -> Result<(), String> {
         .map_err(|_| "NotSent(\"routine_model_launch_unproved\")")?;
     let proof: Proof =
         serde_json::from_slice(&bytes).map_err(|_| "NotSent(\"routine_model_launch_unproved\")")?;
-    if !matches(
-        &wanted.provider,
-        &wanted.tmux,
-        nonce,
-        &proof.session,
-        wanted.model.as_deref(),
-    ) || wanted.resume.as_ref().is_some_and(|s| s != &proof.session)
-    {
+    if !wanted.verifies(&proof, nonce, &proof.session) {
         return Err("NotSent(\"routine_model_execution_changed\")".into());
     }
     Ok(())
@@ -308,15 +321,7 @@ pub(crate) fn spawned(provider: &str, tmux: &str, nonce: &str) -> Result<(), Str
     let proof: Proof = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     if wanted.provider != provider
         || wanted.tmux != tmux
-        || proof.provider != provider
-        || proof.tmux != tmux
-        || proof.nonce != nonce
-        || proof.model != wanted.model
-        || proof.argv_sha256.is_empty()
-        || wanted
-            .resume
-            .as_ref()
-            .is_some_and(|sid| sid != &proof.session)
+        || !wanted.verifies(&proof, nonce, &proof.session)
     {
         return Err("NotSent(\"routine_model_spawn_changed\")".into());
     }

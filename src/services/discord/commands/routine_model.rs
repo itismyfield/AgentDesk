@@ -134,10 +134,16 @@ pub(in crate::services::discord) async fn prepare(input: Input<'_>) -> Result<Pr
             return Err(refused("same-session resume unavailable"));
         }
     }
+    // An unqualified Claude resume would retain the conversation's previous model.
+    let default_model = (*provider == ProviderKind::Claude && model.is_none() && native.is_some())
+        .then(|| {
+            crate::services::claude_tui::session::default_model_for_home(overlay.home.as_deref())
+        });
     let requirement = Requirement {
         provider: provider.as_str().into(),
         tmux: tmux.into(),
         model: model.map(str::to_owned),
+        default_model,
         resume: native.map(str::to_string),
     };
     let reused = live
@@ -147,13 +153,7 @@ pub(in crate::services::discord) async fn prepare(input: Input<'_>) -> Result<Pr
             .is_some_and(|(context, native)| {
                 proof::bind_session(provider.as_str(), tmux, &context.execution_nonce, native)
                     .is_ok()
-                    && proof::matches(
-                        provider.as_str(),
-                        tmux,
-                        &context.execution_nonce,
-                        native,
-                        model,
-                    )
+                    && requirement.matches(&context.execution_nonce, native)
             });
     if live {
         if crate::services::discord::router::hosted_tui_promote_readiness_blocked(

@@ -259,6 +259,7 @@ done
             tmux: name.into(),
             resume: Some(NATIVE.into()),
             model: Some("routine-model".into()),
+            default_model: None,
         };
         let publications = AtomicUsize::new(0);
         scope_with_publisher(

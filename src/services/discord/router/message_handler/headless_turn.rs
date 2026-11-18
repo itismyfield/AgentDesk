@@ -891,6 +891,7 @@ async fn start_reserved_headless_turn_admitted(
         &provider,
         channel_id.get(),
         tmux_session_name.as_deref(),
+        session_id.as_deref(),
     );
     #[cfg(not(unix))]
     let persistent_tui_model = false;

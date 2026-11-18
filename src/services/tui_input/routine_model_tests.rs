@@ -7,6 +7,7 @@ fn routine_model_requires_actual_argv_and_exact_execution_before_any_payload() {
         provider: "claude".into(),
         tmux: "adk-model-proof-fixture".into(),
         model: Some("opus".into()),
+        default_model: None,
         resume: Some("same-native".into()),
     };
     let target =
@@ -61,20 +62,14 @@ fn routine_model_requires_actual_argv_and_exact_execution_before_any_payload() {
         moved = target.clone();
         moved["owner"] = "other-session".into();
         assert!(before_payload(&moved).is_err());
-        assert!(!matches(
-            "claude",
-            &wanted.tmux,
-            "execution-old",
-            "same-native",
-            Some("opus")
-        ));
-        assert!(!matches(
-            "claude",
-            &wanted.tmux,
-            "execution-b",
-            "same-native",
-            Some("sonnet")
-        ));
+        assert!(!wanted.matches("execution-old", "same-native"));
+        assert!(
+            !Requirement {
+                model: Some("sonnet".into()),
+                ..wanted.clone()
+            }
+            .matches("execution-b", "same-native")
+        );
     });
     std::fs::write(
         crate::services::tmux_common::session_temp_path(&wanted.tmux, "spawn_nonce"),
@@ -112,6 +107,7 @@ fn routine_codex_model_never_substitutes_fresh_for_a_required_resume() {
         provider: "codex".into(),
         tmux: "adk-model-codex-fixture".into(),
         model: Some("codex-b".into()),
+        default_model: None,
         resume: Some("native-codex".into()),
     };
     let options = crate::services::codex::CodexLaunchOptions::new("hello")
@@ -134,13 +130,7 @@ fn routine_codex_model_never_substitutes_fresh_for_a_required_resume() {
         prepared("codex", &wanted.tmux, "native-codex", true, "nonce", &args).unwrap();
         assert!(bind_session("codex", &wanted.tmux, "another-nonce", "native-codex").is_err());
         assert!(bind_session("codex", &wanted.tmux, "nonce", "another-native").is_err());
-        assert!(matches(
-            "codex",
-            &wanted.tmux,
-            "nonce",
-            "native-codex",
-            Some("codex-b")
-        ));
+        assert!(wanted.matches("nonce", "native-codex"));
     });
 }
 
@@ -153,6 +143,7 @@ fn routine_fix3_native_default_resume_has_its_own_argv_proof() {
         provider: "codex".into(),
         tmux: tmux.into(),
         model: Some("pinned-model".into()),
+        default_model: None,
         resume: Some(session.into()),
     };
     let options = crate::services::codex::CodexLaunchOptions::new("hello")
@@ -161,28 +152,22 @@ fn routine_fix3_native_default_resume_has_its_own_argv_proof() {
         &options.clone().with_model(Some("pinned-model")),
     );
     let default_args = crate::services::codex::build_codex_tui_args(&options);
-    scope(pinned.clone(), || {
-        prepared("codex", tmux, session, true, "old", &pinned_args).unwrap();
-        assert!(matches("codex", tmux, "old", session, Some("pinned-model")));
-        assert!(!matches("codex", tmux, "old", session, None));
-    });
     let inherited = Requirement {
         model: None,
-        ..pinned
+        ..pinned.clone()
     };
+    scope(pinned.clone(), || {
+        prepared("codex", tmux, session, true, "old", &pinned_args).unwrap();
+        assert!(pinned.matches("old", session));
+        assert!(!inherited.matches("old", session));
+    });
     let target = serde_json::json!({"host":"tmux","owner":tmux,"execution_nonce":"new"});
-    scope(inherited, || {
+    scope(inherited.clone(), || {
         assert!(prepared("codex", tmux, session, true, "new", &pinned_args).is_err());
         assert!(before_payload(&target).is_err());
         prepared("codex", tmux, session, true, "new", &default_args).unwrap();
         assert!(before_payload(&target).is_ok());
-        assert!(matches("codex", tmux, "new", session, None));
-        assert!(!matches(
-            "codex",
-            tmux,
-            "old",
-            session,
-            Some("pinned-model")
-        ));
+        assert!(inherited.matches("new", session));
+        assert!(!pinned.matches("old", session));
     });
 }

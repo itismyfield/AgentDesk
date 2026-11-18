@@ -234,6 +234,7 @@ async fn a_persistent_model_patch_resumes_the_same_native_session_before_input_p
             &provider,
             fx.channel.get(),
             Some(&fx.name),
+            Some(SESSION),
         ),
         "null claim must check the live execution that applied the pinned model"
     );
@@ -316,4 +317,203 @@ async fn a_persistent_model_patch_resumes_the_same_native_session_before_input_p
     assert!(missing.contains("selector unproved"), "{missing}");
     assert!(!called(&fx.tmux.take_calls(), "kill-session"));
     tc::cleanup_session_temp_files(&fx.name);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn routine_fix4_claude_default_replaces_the_live_pinned_model_pg() {
+    default_restore(
+        true,
+        concat!(
+            module_path!(),
+            "::routine_fix4_claude_default_replaces_the_live_pinned_model_pg"
+        ),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn routine_fix4_claude_default_replaces_the_saved_pinned_model_pg() {
+    default_restore(
+        false,
+        concat!(
+            module_path!(),
+            "::routine_fix4_claude_default_replaces_the_saved_pinned_model_pg"
+        ),
+    )
+    .await;
+}
+
+async fn default_restore(live: bool, test: &str) {
+    if !api_child(test.strip_prefix("agentdesk::").unwrap_or(test)) {
+        return;
+    }
+    use crate::services::discord::router::message_handler::routine_model_boundary_for_tests;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fx = Fixture::new(821941 + u64::from(live), RuntimeHandoffKind::ClaudeTui).await;
+    let _idle = crate::services::discord::router::set_hosted_tui_promote_busy_for_tests(false);
+    let pool = fx.shared.pg_pool.as_ref().unwrap();
+    let key = channel_key(&fx.shared, &fx.name);
+    sqlx::query("INSERT INTO agents(id,name,provider,discord_channel_cc) VALUES('default-model','Default model','claude',$1)")
+        .bind(fx.channel.get().to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    let store =
+        RoutineStore::new_with_timezone_and_checkpoint_limit(Arc::new(pool.clone()), "UTC", 4096);
+    let routine = store
+        .attach_routine_with_choice(
+            NewRoutine {
+                agent_id: Some("default-model".into()),
+                fallback_agent_id: None,
+                max_retries: Some(0),
+                script_ref: "provider.js".into(),
+                name: "default model".into(),
+                status: None,
+                execution_strategy: "persistent".into(),
+                schedule: None,
+                next_due_at: None,
+                checkpoint: None,
+                discord_thread_id: None,
+                timeout_secs: None,
+            },
+            None,
+            3,
+            &ProviderChoice {
+                provider: Some("claude".into()),
+                model: Some("opus".into()),
+            },
+        )
+        .await
+        .unwrap();
+    let prep = |session, model| Input {
+        shared: &fx.shared,
+        provider: &ProviderKind::Claude,
+        channel: fx.channel,
+        tmux: &fx.name,
+        cwd: fx.cwd.path().to_str().unwrap(),
+        session,
+        model,
+    };
+    let old = store.claim_run_now(&routine.id).await.unwrap().unwrap();
+    let old_choice = store.run_provider_choice(&old.run_id).await.unwrap();
+    fx.tmux.mark_missing();
+    let a = prepare(prep(Some(SESSION), old_choice.model.as_deref()))
+        .await
+        .unwrap();
+    let (argv, _, _) = fx.launch_required(
+        fx.channel,
+        &fx.name,
+        SESSION,
+        old_choice.model.as_deref(),
+        None,
+        Some(a.requirement),
+    );
+    assert!(argv.windows(2).any(|p| p == ["--model", "opus"]));
+    let applied = || {
+        sqlx::query_scalar::<_, Option<String>>("SELECT model FROM sessions WHERE session_key=$1")
+            .bind(&key)
+            .fetch_one(pool)
+    };
+    assert_eq!(applied().await.unwrap().as_deref(), Some("opus"));
+    sqlx::query("UPDATE routine_runs SET status='succeeded' WHERE id=$1")
+        .bind(&old.run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE routines SET in_flight_run_id=NULL WHERE id=$1")
+        .bind(&routine.id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    let session = if live {
+        fx.tmux.mark_present();
+        fx.session_id().await.unwrap()
+    } else {
+        fx.tmux.mark_missing();
+        std::fs::remove_file(tc::session_temp_path(&fx.name, "spawn_nonce")).unwrap();
+        // Restore the durable native selector with no execution nonce available.
+        sqlx::query("UPDATE sessions SET claude_session_id=$1 WHERE session_key=$2")
+            .bind(SESSION)
+            .bind(&key)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query_scalar::<_, String>(
+            "SELECT claude_session_id FROM sessions WHERE session_key=$1",
+        )
+        .bind(&key)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    };
+    fx.tmux.take_calls();
+    store
+        .patch_routine(
+            &routine.id,
+            RoutinePatch {
+                provider_choice: Some(ProviderChoice {
+                    provider: Some("claude".into()),
+                    model: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let next = store.claim_run_now(&routine.id).await.unwrap().unwrap();
+    let choice = store.run_provider_choice(&next.run_id).await.unwrap();
+    assert!(choice.model.is_none());
+    let model = crate::services::discord::commands::resolve_model_for_turn(
+        &fx.shared,
+        fx.channel,
+        &ProviderKind::Claude,
+    )
+    .await;
+    assert!(
+        model.is_none(),
+        "the parent leaves Claude's model to the account"
+    );
+    let claim = serde_json::json!({"routine_id":routine.id, "execution_strategy":"persistent", "model":choice.model});
+    assert!(
+        routine_model_boundary_for_tests(
+            Some(&claim),
+            &ProviderKind::Claude,
+            fx.channel.get(),
+            Some(&fx.name),
+            Some(&session),
+        ),
+        "the saved Claude conversation still needs model reset"
+    );
+
+    let restored = prepare(prep(Some(&session), model.as_deref()))
+        .await
+        .unwrap();
+    assert!(!restored.reused);
+    assert_eq!(called(&fx.tmux.take_calls(), "kill-session"), live);
+    assert_eq!(applied().await.unwrap().as_deref(), Some("opus"));
+    let (argv, _, _) = fx.launch_required(
+        fx.channel,
+        &fx.name,
+        &session,
+        model.as_deref(),
+        None,
+        Some(restored.requirement),
+    );
+    assert!(argv.windows(2).any(|p| p == ["--resume", SESSION]));
+    assert!(
+        argv.windows(2).any(|p| p == ["--model", "default"]),
+        "Claude would restore the pinned model without an explicit account-default selector: {argv:?}"
+    );
+    assert_eq!(applied().await.unwrap(), None);
+    assert_eq!(fx.session_id().await.as_deref(), Some(SESSION));
+    fx.tmux.mark_present();
+    fx.tmux.take_calls();
+    assert!(
+        prepare(prep(Some(&session), model.as_deref()))
+            .await
+            .unwrap()
+            .reused
+    );
+    assert!(!called(&fx.tmux.take_calls(), "kill-session"));
 }

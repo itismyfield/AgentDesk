@@ -28,7 +28,7 @@ fn execute_inner(
         }
     };
     let turn = StreamingTurn {
-        model: requirement.model.as_deref(),
+        model: requirement.launch_model(),
         session_id: requirement.resume.as_deref(),
         ..turn
     };

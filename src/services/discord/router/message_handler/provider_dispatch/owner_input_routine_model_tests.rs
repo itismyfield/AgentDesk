@@ -9,6 +9,7 @@ fn a_persistent_model_guard_reaches_the_owner_idle_effect_before_keys() {
         provider: "claude".into(),
         tmux: rig.name.clone(),
         model: Some("sonnet".into()),
+        default_model: None,
         resume: None,
     };
     scope(applied.clone(), || {
@@ -69,6 +70,7 @@ fn routine_fix2_claude_fallback_is_not_sent_by_the_owner() {
             provider: "claude".into(),
             tmux: rig.name.clone(),
             model: Some("opus".into()),
+            default_model: None,
             resume: Some("native".into()),
         };
         scope(requirement.clone(), || {
@@ -87,18 +89,10 @@ fn routine_fix2_claude_fallback_is_not_sent_by_the_owner() {
             )
             .unwrap();
         });
-        let applied = || {
-            crate::services::tui_input::routine_model::matches(
-                "claude",
-                &rig.name,
-                &rig.nonce,
-                "native",
-                Some("opus"),
-            )
-        };
+        let applied = || requirement.matches(&rig.nonce, "native");
         assert!(applied());
         let result = if strict {
-            scope(requirement, || created_first_prompt(&rig))
+            scope(requirement.clone(), || created_first_prompt(&rig))
         } else {
             created_first_prompt(&rig)
         };
@@ -136,4 +130,49 @@ fn routine_fix2_claude_fallback_is_not_sent_by_the_owner() {
             );
         }
     }
+}
+
+#[test]
+fn routine_fix4_claude_owner_first_input_requires_the_default_argv_proof() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig(
+        "rm-owner-default",
+        8_219_404,
+        "normal",
+        view("", false),
+        IDLE,
+    );
+    let _driver = rig.trace_driver();
+    let legacy = Requirement {
+        provider: "claude".into(),
+        tmux: rig.name.clone(),
+        model: None,
+        default_model: None,
+        resume: Some("native".into()),
+    };
+    let resume = ["--resume".into(), "native".into()];
+    let save = |args: &[String]| prepared("claude", &rig.name, "native", true, &rig.nonce, args);
+    scope(legacy.clone(), || save(&resume).unwrap());
+    let cleared = Requirement {
+        default_model: Some("sonnet".into()),
+        ..legacy
+    };
+    assert!(
+        !cleared.matches(&rig.nonce, "native"),
+        "the old null proof has no reset evidence"
+    );
+    scope(cleared, || {
+        assert!(save(&resume).is_err());
+        save(&[
+            "--resume".into(),
+            "native".into(),
+            "--model".into(),
+            "sonnet".into(),
+        ])
+        .unwrap();
+        assert_eq!(created_first_prompt(&rig), Ok(()));
+    });
+    rig.assert_hooks_completed();
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    rig.delivered();
 }

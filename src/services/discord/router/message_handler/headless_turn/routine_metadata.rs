@@ -85,13 +85,14 @@ pub(in crate::services::discord) fn persistent_tui_model(
     provider: &crate::services::provider::ProviderKind,
     channel: u64,
     tmux: Option<&str>,
+    session: Option<&str>,
 ) -> bool {
     persistent_model_metadata(metadata, || {
+        use crate::services::tui_input::routine_model as proof;
         tmux.is_some_and(|name| {
-            crate::services::tui_input::routine_model::tracks_live_execution(
-                provider.as_str(),
-                name,
-            )
+            proof::tracks_live_execution(provider.as_str(), name)
+                || (*provider == crate::services::provider::ProviderKind::Claude
+                    && session.is_some_and(|sid| proof::tracks_native_session("claude", name, sid)))
         })
     }) && crate::services::discord::commands::routine_model::applies(provider, channel, tmux)
 }
