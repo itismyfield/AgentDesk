@@ -536,6 +536,9 @@ pub(in crate::services::discord::turn_finalizer) fn validate_record(
     {
         return Err("native boot result proof mismatch".into());
     }
+    record
+        .settlement
+        .admits_native(&record.namespace, outcome)?;
     match outcome.disposition {
         Disposition::Executed | Disposition::Cancelled => {
             let member = evidence

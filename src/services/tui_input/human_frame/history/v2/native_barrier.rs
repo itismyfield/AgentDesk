@@ -54,6 +54,59 @@ impl Settlement {
     }
 }
 
+/// A stored barrier whose foreign row was the strict interrupt that closed the member's own run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Supersession {
+    pub(crate) barrier_digest: String,
+    pub(crate) interrupt_row: String,
+}
+
+impl Barrier {
+    pub(crate) fn digest(&self) -> Result<String, String> {
+        serde_json::to_vec(self)
+            .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+            .map_err(|e| e.to_string())
+    }
+}
+
+impl Settlement {
+    /// The stored barrier, only while its raw value is exactly the known shape.
+    pub(crate) fn known_barrier(&self, namespace: &str) -> Result<Option<Barrier>, String> {
+        let Some(barrier) = self.barrier(namespace)? else {
+            return Ok(None);
+        };
+        let raw = serde_json::to_value(&barrier).map_err(|e| e.to_string())?;
+        Ok((self.extra.get("foreign_prompt_barrier") == Some(&raw)).then_some(barrier))
+    }
+
+    /// A native result crosses the barrier stored now only as its exact interrupt supersession.
+    pub(crate) fn admits_native(&self, namespace: &str, outcome: &Outcome) -> Result<(), String> {
+        let proof = &outcome.extra["native_proof"];
+        let stored = self.extra.contains_key("foreign_prompt_barrier");
+        if !stored && proof["supersedes"].is_null() {
+            return Ok(());
+        }
+        let exact = || -> Option<bool> {
+            let barrier = self.known_barrier(namespace).ok()??;
+            let claim: Supersession = serde_json::from_value(proof["supersedes"].clone()).ok()?;
+            Some(
+                outcome.disposition == Disposition::Cancelled
+                    && claim.barrier_digest == barrier.digest().ok()?
+                    && claim.interrupt_row == barrier.foreign_row
+                    && proof["namespace"] == *namespace
+                    && proof["ticket"] == serde_json::to_value(&self.ticket).ok()?
+                    && proof["membership_row"] == *barrier.membership_row
+                    && proof["membership_range"] == json!(barrier.membership_range)
+                    && proof["closer_range"] == json!(barrier.foreign_range),
+            )
+        };
+        if exact() != Some(true) {
+            return Err("native execution crosses foreign prompt barrier".into());
+        }
+        Ok(())
+    }
+}
+
 impl Registry {
     pub(crate) fn record_native_barrier(&self, proof: &Barrier) -> Result<bool, String> {
         proof.validate(&proof.namespace, &proof.ticket)?;

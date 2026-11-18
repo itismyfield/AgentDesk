@@ -13,6 +13,8 @@ use serde_json::Value;
 #[cfg(unix)]
 mod receipt;
 #[cfg(unix)]
+mod terminal;
+#[cfg(unix)]
 pub(crate) use receipt::MembershipReceipt;
 
 /// What one record says about the queue.
@@ -144,6 +146,8 @@ pub(crate) struct Evidence {
     pub(crate) membership_row: Option<String>,
     pub(crate) closer_range: Option<(u64, u64)>,
     pub(crate) disposition: Disposition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) supersedes: Option<terminal::Supersession>,
 }
 
 #[cfg(unix)]
@@ -153,48 +157,6 @@ pub(crate) use crate::services::tui_input::human_frame::history::v2::native::bar
 pub(crate) struct Analysis {
     pub(crate) evidence: Vec<Evidence>,
     pub(crate) barriers: Vec<Barrier>,
-}
-
-// Receipt identities outlive execution candidacy; unresolved ownership blocks a final decision.
-#[cfg(unix)]
-fn foreign_prompt(
-    registrations: &[Registration],
-    binding: &SourceBinding,
-    owner: &Registration,
-    (membership, member_row): ((u64, u64), Option<&str>),
-    (range, row, hashes): ((u64, u64), Option<&str>, &[String]),
-) -> Result<Option<Barrier>, ()> {
-    let Some(row) = row else { return Err(()) };
-    let Some(member_row) = member_row else {
-        return Err(());
-    };
-    let target = &owner.ticket.source.as_ref().ok_or(())?.target;
-    let same_execution = |r: &&Registration| {
-        r.ticket.channel_id == binding.channel_id && r.ticket.key["attempt"]["target"] == *target
-    };
-    if registrations.iter().filter(same_execution).any(|r| {
-        r.matches(binding)
-            && r.receipts.iter().any(|known| known == row)
-            && hashes.contains(&r.frame_hash)
-    }) {
-        return Ok(None);
-    }
-    if registrations.iter().filter(same_execution).any(|r| {
-        (r.ticket.source.is_none() || r.receipts.is_empty()) && hashes.contains(&r.frame_hash)
-    }) {
-        return Err(());
-    }
-    Ok(Some(Barrier {
-        namespace: owner.namespace.clone(),
-        ticket: owner.ticket.clone(),
-        membership_range: [membership.0, membership.1],
-        membership_row: member_row.into(),
-        foreign_range: [range.0, range.1],
-        foreign_row: row.into(),
-        foreign_hashes: hashes.to_vec(),
-        through: range.1,
-        registrations_fingerprint: String::new(),
-    }))
 }
 
 #[cfg(all(test, unix))]
@@ -247,6 +209,7 @@ mod projection {
         event: Option<Event>,
         boundaries: Vec<Edge>,
         receipt: Option<receipt::Fact>,
+        interrupt: Option<Vec<String>>,
     }
     /// Source-owned input hashes and native ranges, without output bodies or raw JSON records.
     pub(crate) struct Projection {
@@ -326,6 +289,7 @@ mod projection {
                 for registration in &mut scoped {
                     registration.candidate =
                         registration.namespace == namespace && registration.ticket == *ticket;
+                    registration.barrier = None;
                     if registration.candidate {
                         // Confirmation cannot require the receipt being confirmed.
                         registration.receipts.clear();
@@ -394,7 +358,9 @@ mod projection {
             }
             let row = row_key(&value);
             let mut boundaries = Vec::new();
-            for fact in classify(self.binding.provider, &value) {
+            let facts = classify(self.binding.provider, &value);
+            let strict = terminal::strict(&facts);
+            for fact in facts {
                 if let (
                     RecordFact::Idle(Some(close)),
                     super::super::TurnState::Open {
@@ -449,7 +415,8 @@ mod projection {
                     self.state = next;
                 }
             }
-            let event = super::classify(&value).map(|event| match event {
+            let queued = (!strict).then(|| super::classify(&value)).flatten();
+            let event = queued.map(|event| match event {
                 QueueRecord::Enqueue(b) => Event::Enqueue(frame_hashes(&b)),
                 QueueRecord::Withdraw(b) => Event::Withdraw(frame_hashes(&b)),
                 QueueRecord::Delivered(b) => Event::Delivered(frame_hashes(&b)),
@@ -464,7 +431,10 @@ mod projection {
                 self.facts.push(Fact {
                     range,
                     row: value["uuid"].as_str().map(str::to_string),
-                    receipt: receipt::read(&value, line, range),
+                    receipt: (!strict)
+                        .then(|| receipt::read(&value, line, range))
+                        .flatten(),
+                    interrupt: strict.then(|| terminal::interrupt_hashes(&value)).flatten(),
                     event,
                     boundaries,
                     meta: value["isMeta"] == true
@@ -548,9 +518,15 @@ mod projection {
         if binding.provider != super::ShadowProvider::Claude {
             return Ok(Analysis::default());
         }
+        let interrupts: Vec<_> = records
+            .iter()
+            .filter_map(|f| Some((f.range, f.row.as_deref()?, f.interrupt.as_deref()?)))
+            .collect();
         let registered: Vec<_> = registrations
             .iter()
-            .filter(|r| r.candidate && r.matches(binding))
+            .filter(|r| {
+                (r.candidate || terminal::superseding(r, &interrupts)) && r.matches(binding)
+            })
             .collect();
         let mut inputs: Vec<Input> = vec![];
         let mut run: Option<Run> = None;
@@ -570,7 +546,7 @@ mod projection {
                         && barriers[i].is_none()
                         && !ambiguous[i]
                     {
-                        match foreign_prompt(
+                        match terminal::foreign_prompt(
                             registrations,
                             binding,
                             registered[i],
@@ -653,6 +629,7 @@ mod projection {
                                         } else {
                                             Disposition::Executed
                                         },
+                                        supersedes: None,
                                     });
                                 }
                             }
@@ -894,11 +871,13 @@ mod projection {
                     (!ambiguous[i] && barriers[i].is_none())
                         .then_some(result)
                         .flatten()
+                        .and_then(|evidence| terminal::seal(registered[i], evidence))
                 })
                 .collect(),
             barriers: barriers
                 .into_iter()
-                .flatten()
+                .enumerate()
+                .filter_map(|(i, proof)| proof.filter(|_| registered[i].candidate))
                 .map(|mut proof| {
                     proof.through = through;
                     proof.registrations_fingerprint = fingerprint.clone();
@@ -933,6 +912,7 @@ mod projection {
                 membership_row: None,
                 closer_range: None,
                 disposition,
+                supersedes: None,
             });
         }
         input.stage = Stage::Removed;

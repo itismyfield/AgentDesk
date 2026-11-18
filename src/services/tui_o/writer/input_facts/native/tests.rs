@@ -702,7 +702,7 @@ fn analyze_batch(
                     && barriers[i].is_none()
                     && !ambiguous[i]
                 {
-                    match foreign_prompt(
+                    match terminal::foreign_prompt(
                         registrations,
                         binding,
                         registered[i],
@@ -790,6 +790,7 @@ fn analyze_batch(
                                     } else {
                                         Disposition::Executed
                                     },
+                                    supersedes: None,
                                 });
                             }
                         }
@@ -1041,6 +1042,7 @@ fn settle_removed(
             membership_row: None,
             closer_range: None,
             disposition,
+            supersedes: None,
         });
     }
     input.stage = Stage::Removed;

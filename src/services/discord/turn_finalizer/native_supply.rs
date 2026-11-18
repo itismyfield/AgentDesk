@@ -200,6 +200,7 @@ impl Port {
             exact_frame_hash: String::new(),
             receipts: Vec::new(),
             candidate: false,
+            barrier: None,
         })
         .matches(&current.binding)
         {
@@ -316,6 +317,7 @@ impl Port {
                 exact_frame_hash: String::new(),
                 receipts: Vec::new(),
                 candidate: false,
+                barrier: None,
             })
             .matches(&current.binding)
                 || proof.through != current.through

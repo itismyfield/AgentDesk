@@ -21,6 +21,9 @@ pub(crate) struct EvidenceRegistration {
     pub(crate) receipts: Vec<String>,
     #[serde(skip)]
     pub(crate) candidate: bool,
+    /// The unsettled registration's stored barrier, read-only input to a supersession candidate.
+    #[serde(skip)]
+    pub(crate) barrier: Option<barrier::Barrier>,
 }
 
 #[cfg(unix)]
@@ -277,11 +280,14 @@ fn evidence_registrations(
         })
         .map(|(registration, entry, settlement)| {
             settlement.validate(registration)?;
+            let open = settlement.outcome.is_none() && !settlement.cleanup_complete;
             Ok(EvidenceRegistration {
                 namespace: registration.namespace.clone(),
-                candidate: settlement.outcome.is_none()
-                    && !settlement.cleanup_complete
-                    && !settlement.extra.contains_key("foreign_prompt_barrier"),
+                candidate: open && !settlement.extra.contains_key("foreign_prompt_barrier"),
+                barrier: match open {
+                    true => settlement.known_barrier(&registration.namespace)?,
+                    false => None,
+                },
                 ticket: settlement.ticket.clone(),
                 frame_hash: registration.frame.class_hash.clone(),
                 exact_frame_hash: registration.frame.hash.clone(),
@@ -608,11 +614,11 @@ impl Registry {
                 if current.ticket != *ticket {
                     return Err("native result ticket mismatch".into());
                 }
-                if outcome.extra.contains_key("native_proof")
-                    && current.extra.contains_key("foreign_prompt_barrier")
-                {
-                    return Err("native execution crosses foreign prompt barrier".into());
+                let native = outcome.extra.contains_key("native_proof");
+                if native {
+                    current.admits_native(namespace, outcome)?;
                 }
+                let barred = native && current.extra.contains_key("foreign_prompt_barrier");
                 if current.outcome.as_ref() == Some(outcome) {
                     return Ok(());
                 }
@@ -633,7 +639,7 @@ impl Registry {
                 if fingerprint != expected {
                     return Err("native registrations superseded".into());
                 }
-                if outcome.disposition == Disposition::Executed {
+                if outcome.disposition == Disposition::Executed || barred {
                     let row = outcome
                         .extra
                         .get("native_proof")
