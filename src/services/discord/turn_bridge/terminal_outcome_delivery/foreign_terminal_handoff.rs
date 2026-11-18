@@ -528,15 +528,19 @@ pub(super) async fn resume_with_gateway(
         })
     };
     // O posts this destination's TUI body: settle the custody without posting or recording it.
-    // A held destination identity keeps the custody for a later retry.
+    // A held destination identity keeps the custody for a later retry, unless it is discarded.
     let kind = (snapshot.local.channel_id == snapshot.channel_id)
         .then_some(snapshot.local.runtime_kind)
         .flatten();
-    let Ok(o_owns_body) = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+    let o_owns_body = match crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
         snapshot.channel_id,
         kind,
-    ) else {
-        return Ok(false);
+    ) {
+        Ok(owned) => owned,
+        #[cfg(unix)]
+        Err(held) => return Ok(discard_refused(shared, &provider, snapshot, held).await),
+        #[cfg(not(unix))]
+        Err(_) => return Ok(false),
     };
     #[cfg(unix)]
     if o_owns_body {
@@ -700,6 +704,29 @@ pub(super) async fn resume_with_gateway(
         status
             .is_some_and(|status| matches!(status.as_str(), "completed" | "failed" | "cancelled")),
     )
+}
+
+/// A refused destination's custody is retired with one reason: once that reason is durable the
+/// stored body fields are scrubbed, and nothing of it counts as delivered or settles a dispatch.
+#[cfg(unix)]
+async fn discard_refused(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    snapshot: &mut RetrySnapshot,
+    held: crate::services::tui_o::cutover::IdentityError,
+) -> bool {
+    let discard = crate::services::discord::recovery_engine::refused_discard::discard_held;
+    if !discard(shared, provider, &snapshot.local, held).await {
+        return false;
+    }
+    snapshot.full_response.clear();
+    snapshot.delivery_body = None;
+    snapshot.local.full_response.clear();
+    snapshot.local.user_text.clear();
+    if let Some(admitted) = snapshot.admitted.as_mut() {
+        admitted.result.clear();
+    }
+    true
 }
 
 /// Render the existing cancellation/restart terminal body independently of its

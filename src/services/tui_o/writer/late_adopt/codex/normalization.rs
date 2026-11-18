@@ -1,6 +1,6 @@
 //! Reevaluate the original execution without renewing its total deadline or resubmitting input.
 use crate::services::tui_o::channel_policy::output_disposition::{Output, Phase, Reason};
-use crate::services::tui_o::channel_policy::{Adoption, Candidate, FirstProof};
+use crate::services::tui_o::channel_policy::{Adoption, Candidate, FirstHold, FirstProof};
 use crate::services::tui_o::store::OStore;
 use crate::services::tui_o::writer::late_adopt::codex::prefix::{self, Verdict};
 
@@ -71,5 +71,34 @@ pub(crate) async fn run(
             .remaining()
             .min(tokio::time::Duration::from_millis(100));
         tokio::time::sleep(pause).await;
+    }
+}
+
+/// Holds a body claim of the admitted first turn until its output is adopted or rejected: the
+/// takeover's own commit adopts it, and the one budget from the admission ends in a rejection.
+pub(crate) async fn hold(candidate: &Candidate, nonce: Option<[u8; 32]>) {
+    let Some(nonce) = nonce else { return };
+    let mut changes = candidate.first_changes();
+    loop {
+        let until = match candidate.first_hold(nonce) {
+            None => return,
+            Some(FirstHold::Until(deadline)) => deadline,
+            Some(FirstHold::Output(output, proof)) => {
+                let root = crate::config::runtime_root();
+                if let Some(store) = root.as_deref().and_then(OStore::existing) {
+                    let _ = run(&output, candidate, &proof, &store).await;
+                    return;
+                }
+                tokio::time::Instant::now() + output.remaining()
+            }
+        };
+        // No rollout or store can adopt it yet: either may arrive within the same budget.
+        if until <= tokio::time::Instant::now() {
+            return candidate.expire_first(nonce);
+        }
+        tokio::select! {
+            _ = changes.changed() => {}
+            () = tokio::time::sleep_until(until) => {}
+        }
     }
 }

@@ -1,4 +1,2 @@
 resolver | src/services/codex_tui/host_input/trust.rs
 resolver | src/services/codex_tui/startup_dialog/normalize.rs
-resolver | src/services/tui_o/channel_policy/adoption/output_disposition.rs
-resolver | src/services/tui_o/writer/late_adopt/codex/normalization.rs

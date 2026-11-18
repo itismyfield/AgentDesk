@@ -97,7 +97,8 @@ pub(in crate::services::discord) async fn dispose_recovery_relay_outcome(
         inflight::RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET,
         tmux_alive,
     ) {
-        RowDisposition::FinishAndClear => {
+        // A discarded refusal ends like a delivery, with nothing marked delivered.
+        RowDisposition::FinishAndClear | RowDisposition::Discard => {
             let Some(channel_id) = opt_channel_id(state.channel_id) else {
                 tracing::warn!(
                     provider = %provider.as_str(),
@@ -747,7 +748,7 @@ async fn apply_undeliverable_relay_disposition(
     handoff_already_saved: bool,
 ) {
     match disposition {
-        RowDisposition::FinishAndClear | RowDisposition::Preserve => {}
+        RowDisposition::FinishAndClear | RowDisposition::Preserve | RowDisposition::Discard => {}
         RowDisposition::ClearPermanent | RowDisposition::ClearBudgetExhausted => {
             let reason_code = disposition_reason_code(disposition)
                 .expect("clearing dispositions always carry a reason code");

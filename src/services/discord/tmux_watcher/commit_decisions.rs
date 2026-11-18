@@ -2,8 +2,8 @@
 
 use super::*;
 
-/// A terminal whose body O's adoption holds: the watcher retries the range until the adopted
-/// channel ends the turn through O, and finalizes nothing meanwhile.
+/// A terminal whose body O's adoption holds: the watcher retries the range and finalizes nothing
+/// until the adopted channel ends the turn through O, or a refusal's reason intent is durable.
 pub(super) fn held_for_adoption(
     ownership: &Result<bool, crate::services::tui_o::cutover::IdentityError>,
 ) -> bool {

@@ -1127,11 +1127,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 "watcher: refused degenerate-key duplicate terminal response without committing delivery; waiting for fresh in-range output"
             );
             false
-        } else if o_ownership.is_err() {
+        } else if o_ownership.is_err() && !o_delegated_arm::discard_refused(&shared, &watcher_provider, inflight_before_relay.as_ref(), &o_ownership).await {
             retry_terminal_delivery_from_offset = held_for_adoption(&o_ownership);
             false
-        } else if o_delegated_terminal {
+        } else if o_delegated_terminal || o_ownership.is_err() {
             match o_delegated_arm::consume_delegated_terminal(o_delegated_arm::DelegatedTerminal {
+                o_owned: o_ownership.is_ok(),
                 http: &http,
                 shared: &shared,
                 provider: &watcher_provider,
