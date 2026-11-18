@@ -59,6 +59,7 @@ fn codex_context(root: &Path, policy: Option<&str>) -> BindingContext {
         provider_root: Some(root.canonicalize().unwrap()),
         first_prompt_digest: None,
         source_policy: policy.map(str::to_owned),
+        resume_start: None,
     }
 }
 
