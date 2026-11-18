@@ -32,50 +32,54 @@ pub(crate) fn write_tmux_session_auth_profile(
     .map_err(|error| format!("write tmux auth profile marker: {error}"))
 }
 
-/// Persist the account a Claude session launches under beside its id, so a launch that never ran
+/// Persist the account a native session launches under beside its id, so a launch that never ran
 /// leaves a record of its own session only and vouches for no other.
-pub(crate) fn write_claude_session_auth(
+pub(crate) fn write_native_session_auth(
     session_name: &str,
     session_id: &str,
     profile_id: &str,
 ) -> Result<(), String> {
-    std::fs::write(
-        session_temp_path(session_name, CLAUDE_SESSION_AUTH_TEMP_EXT),
-        format!("{session_id}\n{}", profile_id.trim()),
-    )
-    .map_err(|error| format!("write claude session auth marker: {error}"))
+    let path = PathBuf::from(session_temp_path(
+        session_name,
+        CLAUDE_SESSION_AUTH_TEMP_EXT,
+    ));
+    let parent = path
+        .parent()
+        .ok_or("native session auth marker directory missing")?;
+    let write = || -> std::io::Result<()> {
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        write!(file, "{session_id}\n{}", profile_id.trim())?;
+        file.persist(&path)?;
+        Ok(())
+    };
+    write().map_err(|error| format!("write native session auth marker: {error}"))
 }
 
-/// The account markers of a session as written, so a cleanup that must not end its account record
-/// can put them back unchanged.
+/// A bare legacy account marker restored by an explicit relaunch.
 #[derive(Debug, Default)]
-pub(crate) struct AuthMarkers {
-    profile: Option<String>,
-    session: Option<String>,
-}
+pub(crate) struct AuthMarkers(Option<String>);
 
 impl AuthMarkers {
     pub(crate) fn read(session_name: &str) -> Self {
-        let raw = |ext| {
-            resolve_session_temp_path(session_name, ext)
-                .and_then(|path| std::fs::read_to_string(path).ok())
-        };
-        Self {
-            profile: raw(TMUX_AUTH_PROFILE_TEMP_EXT),
-            session: raw(CLAUDE_SESSION_AUTH_TEMP_EXT),
-        }
+        Self(
+            resolve_session_temp_path(session_name, TMUX_AUTH_PROFILE_TEMP_EXT)
+                .filter(|path| !super::session_evidence::survives_pane_cleanup(Path::new(path)))
+                .and_then(|path| std::fs::read_to_string(path).ok()),
+        )
     }
 
-    /// Writes back each marker read; one that was absent stays absent.
     pub(crate) fn restore(&self, session_name: &str) -> Result<(), String> {
-        for (ext, body) in [
-            (TMUX_AUTH_PROFILE_TEMP_EXT, &self.profile),
-            (CLAUDE_SESSION_AUTH_TEMP_EXT, &self.session),
-        ] {
-            if let Some(body) = body {
-                std::fs::write(session_temp_path(session_name, ext), body)
-                    .map_err(|error| format!("restore {ext} marker: {error}"))?;
-            }
+        if let Some(body) = &self.0 {
+            with_tmux_source_authority(session_name, |_| {
+                if resolve_session_temp_path(session_name, TMUX_AUTH_PROFILE_TEMP_EXT).is_none() {
+                    std::fs::write(
+                        session_temp_path(session_name, TMUX_AUTH_PROFILE_TEMP_EXT),
+                        body,
+                    )
+                    .map_err(|error| format!("restore account profile marker: {error}"))?;
+                }
+                Ok(())
+            })?;
         }
         Ok(())
     }
@@ -102,7 +106,7 @@ pub(crate) fn advance_claude_session_auth(
     to: &str,
 ) -> Result<(), String> {
     match claude_session_auth(session_name, from)? {
-        Some(profile) => write_claude_session_auth(session_name, to, &profile),
+        Some(profile) => write_native_session_auth(session_name, to, &profile),
         None => Ok(()),
     }
 }
@@ -117,7 +121,7 @@ pub(crate) fn claude_session_auth(
         return Ok(None);
     };
     let body = std::fs::read_to_string(&path)
-        .map_err(|error| format!("read claude session auth marker: {error}"))?;
+        .map_err(|error| format!("read native session auth marker: {error}"))?;
     let own = body.split_once('\n').filter(|(id, _)| *id == session_id);
     Ok(own.map(|(_, profile)| profile.to_owned()))
 }

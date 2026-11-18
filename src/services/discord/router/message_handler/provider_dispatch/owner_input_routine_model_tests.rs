@@ -179,20 +179,17 @@ fn routine_fix4_claude_owner_first_input_requires_the_default_argv_proof() {
 
 pub(in crate::services::discord) fn assert_routine_owner_delivery(
     tmux: std::path::PathBuf,
-    session: &str,
+    expected: &Requirement,
     args: &[String],
-    default_model: &str,
 ) {
     let fixture = Fixture::after_shared_test_env_lock_with_tmux(tmux);
     let (name, channel) = ("rm-owner-after-sweep", 8_219_505);
     let renderer = renderer_with(&fixture, name, "normal", view("", false), IDLE, PROMPT);
     let rig = owned(fixture, name, channel, renderer, "claude");
+    let session = expected.resume.as_deref().unwrap();
     let requirement = Requirement {
-        provider: "claude".into(),
         tmux: rig.name.clone(),
-        model: None,
-        default_model: Some(default_model.into()),
-        resume: Some(session.into()),
+        ..expected.clone()
     };
     scope(requirement, || {
         prepared("claude", &rig.name, session, true, &rig.nonce, args).unwrap();

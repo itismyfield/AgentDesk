@@ -6,6 +6,26 @@ pub(super) mod prepared;
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 
+/// A cold strict turn proves the saved account before resolving the native transcript.
+#[cfg(unix)]
+pub(super) fn resume_selector<'a>(
+    tmux: &str,
+    selected: Option<&'a str>,
+    profile: &str,
+    pane_live: bool,
+    profile_matches: bool,
+) -> Result<Option<&'a str>, String> {
+    use crate::services::tmux_common::session_evidence::require_native_account;
+    if !pane_live
+        && crate::services::tui_input::routine_model::current().is_some()
+        && let Some(session) = selected
+    {
+        require_native_account(tmux, session, profile)?;
+        return Ok(Some(session));
+    }
+    Ok(profile_matches.then_some(selected).flatten())
+}
+
 /// Prepare durable launch evidence before creating the hosted tmux session.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]

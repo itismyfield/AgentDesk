@@ -17,6 +17,7 @@ pub(in crate::services::codex) struct Create<'a> {
 
 pub(in crate::services::codex) struct Submitted {
     pub prepared: PreparedIncarnation,
+    auth_profile: String,
     pub validated_tail: crate::services::codex_tui::tail_launch::ValidatedTail,
     pub rollout_modified_since: std::time::SystemTime,
     pub handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
@@ -114,6 +115,7 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
 
     Ok(Submitted {
         prepared,
+        auth_profile: auth_profile.to_owned(),
         validated_tail,
         rollout_modified_since,
         handoff,
@@ -223,6 +225,7 @@ pub(in crate::services::codex) fn observe(input: Observe<'_>) -> Result<(), Stri
     } = input;
     let Submitted {
         prepared,
+        auth_profile,
         validated_tail,
         rollout_modified_since,
         handoff: _handoff,
@@ -257,6 +260,22 @@ pub(in crate::services::codex) fn observe(input: Observe<'_>) -> Result<(), Stri
         None => return Ok(()),
     };
 
+    if matches!(tail_result.read_result, ReadOutputResult::Completed { .. })
+        && let Some(session) = tail_result.session_id.as_deref()
+        && crate::services::tui_prompt_dedupe::codex_verified_source_allowed(
+            tmux_session_name,
+            &tail_result.rollout_path.display().to_string(),
+            Some(session),
+        )
+        && let Err(error) = super::native_account::record(
+            &prepared.context,
+            session,
+            &auth_profile,
+            strict_model::active(),
+        )
+    {
+        tracing::warn!(tmux_session_name, %error, "could not record Codex resume account");
+    }
     emit_codex_tui_post_tail_handoff(
         tail_result,
         sender,

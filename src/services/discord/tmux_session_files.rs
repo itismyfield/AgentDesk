@@ -872,8 +872,7 @@ pub(in crate::services::discord) async fn sweep_orphan_session_files() {
 /// Sweeps `dir` given the live tmux session names.
 fn sweep_orphan_session_files_in(dir: &std::path::Path, live: &std::collections::HashSet<String>) {
     const ORPHAN_MIN_AGE_SECS: u64 = 10 * 60; // 10 minutes
-    // Model proof belongs to the native conversation, which can outlive its pane.
-    const ROUTINE_MODEL_PROOF_SUFFIX: &str = ".routine_model.json";
+    use crate::services::tmux_common::session_evidence::survives_pane_cleanup;
 
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -888,7 +887,7 @@ fn sweep_orphan_session_files_in(dir: &std::path::Path, live: &std::collections:
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if !name.starts_with("agentdesk-") || name.ends_with(ROUTINE_MODEL_PROOF_SUFFIX) {
+        if !name.starts_with("agentdesk-") || survives_pane_cleanup(&entry.path()) {
             continue;
         }
         // Strip the complete extension, including the multi-dot source marker.
@@ -944,7 +943,7 @@ fn sweep_orphan_session_files_in(dir: &std::path::Path, live: &std::collections:
             for entry in iter.flatten() {
                 if let Ok(fname) = entry.file_name().into_string() {
                     if fname.starts_with(&format!("{}.", stem))
-                        && !fname.ends_with(ROUTINE_MODEL_PROOF_SUFFIX)
+                        && !survives_pane_cleanup(&entry.path())
                     {
                         crate::services::tmux_common::invalidate_session_temp_source(&stem);
                         let _ = std::fs::remove_file(entry.path());

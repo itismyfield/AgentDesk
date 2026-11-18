@@ -229,6 +229,10 @@ fn prepare_codex_tui_launch_script(
 
 #[cfg(unix)]
 pub(super) use first_input::publish_codex_tui_launch_script;
+#[cfg(unix)]
+mod native_account;
+#[cfg(unix)]
+pub(super) use native_account::select_for_routine_or_legacy;
 /// Why a Codex Herdr launch is refused, judged from reads before its Pending row.
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]

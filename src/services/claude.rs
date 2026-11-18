@@ -1744,9 +1744,16 @@ fn execute_streaming_local_tui_tmux(
         tmux_session_name
     ));
 
-    let session_id = profile_matches.then_some(session_id).flatten();
+    let pane_live = host_gate::live_pane(tmux_session_name, session_exists)?;
+    let session_id = tui_session_launch::resume_selector(
+        tmux_session_name,
+        session_id,
+        &auth_overlay.profile_id,
+        pane_live,
+        profile_matches,
+    )?;
     let working_dir_path = std::path::Path::new(working_dir);
-    let live = || Ok(host_gate::live_pane(tmux_session_name, session_exists)? && profile_matches);
+    let live = || Ok(pane_live && profile_matches);
     let at = (working_dir_path, session_id, claude_home);
     let found = resolve_live_claude_tui_session(tmux_session_name, at, (session_exists, live))?;
     let (session_resolution, substitution, has_live_pane) =

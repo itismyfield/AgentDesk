@@ -170,13 +170,14 @@ pub(super) fn execute_observed(
         tmux_session_name,
         &auth_overlay.profile_id,
     );
-    let session_id = profile_matches.then_some(session_id).flatten();
-    let session_selection = crate::services::codex_tui::session::resolve_codex_tui_session(
-        session_id,
-        std::path::Path::new(working_dir),
-        None,
-        force_fresh_provider_session,
-    );
+    let (session_selection, has_live_pane) =
+        super::tui_session_launch::select_for_routine_or_legacy(
+            tmux_session_name,
+            working_dir,
+            session_id,
+            &auth_overlay,
+            (profile_matches, force_fresh_provider_session),
+        )?;
     let reasoning_effort = effort::resolve(effort, None);
     let launch_options = CodexLaunchOptions::new(prompt)
         .with_resume_session_id(session_selection.resume_session_id())
@@ -225,7 +226,6 @@ pub(super) fn execute_observed(
         );
     }
 
-    let has_live_pane = tmux_live_pane_bool(tmux_session_name) && profile_matches;
     let mut warm_fallback_reason = None;
     let mut warm_fallback_pane_stopped = false;
     let mut replacement = None;
@@ -341,7 +341,7 @@ pub(super) fn execute_observed(
 
     let launch = publish_codex_tui_launch_script(
         tmux_session_name,
-        session_id,
+        session_selection.requested_session_id.as_deref(),
         prompt,
         &launch_options,
         (report_channel_id, report_provider),

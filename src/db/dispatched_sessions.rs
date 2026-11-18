@@ -6,7 +6,9 @@ use crate::db::session_agent_resolution::normalize_thread_channel_id;
 
 #[path = "dispatched_sessions/listing.rs"]
 mod listing;
+mod selector_clear;
 pub(crate) use listing::{DispatchedSessionSnapshot, list_dispatched_session_snapshots_pg};
+pub(crate) use selector_clear::{ClearedSelector, clear_selectors_pg, clear_session_id_by_key_pg};
 
 #[path = "dispatched_sessions/force_kill.rs"]
 mod force_kill;
@@ -2194,49 +2196,6 @@ pub(crate) async fn clear_stale_session_id_pg(
     .await
     .map(|result| result.rows_affected())
     .map_err(|error| format!("{error}"))
-}
-
-pub(crate) async fn clear_session_id_by_key_pg(
-    pool: &PgPool,
-    session_key: &str,
-) -> Result<u64, String> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| format!("begin session selector clear transaction: {error}"))?;
-    let session_id =
-        crate::db::dispatched_session_canonical_identity::resolve_session_id_for_mutation_pg(
-            &mut tx,
-            session_key,
-        )
-        .await
-        .map_err(|error| format!("resolve session selector clear locator: {error:?}"))?;
-    let cleared = match session_id {
-        Some(session_id) => sqlx::query(
-            "UPDATE sessions
-             SET claude_session_id = NULL,
-                 raw_provider_session_id = NULL,
-                 claude_session_id_recorded_at = NULL,
-                 raw_provider_transcript_len_watermark = 0,
-                 raw_provider_transcript_watermark_session_id = NULL,
-                 raw_provider_transcript_growth_proven = FALSE
-             WHERE id = $1
-               AND hosted_execution IS NULL
-               AND COALESCE(channel_id, '') <> ALL($2::TEXT[])
-               AND COALESCE(thread_channel_id, '') <> ALL($2::TEXT[])",
-        )
-        .bind(session_id)
-        .bind(crate::config::session_hosts::configured_channel_ids())
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("clear postgres session selectors: {error}"))?
-        .rows_affected(),
-        None => 0,
-    };
-    tx.commit()
-        .await
-        .map_err(|error| format!("commit session selector clear transaction: {error}"))?;
-    Ok(cleared)
 }
 
 pub(crate) async fn update_session_pg(

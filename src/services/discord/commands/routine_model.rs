@@ -63,60 +63,70 @@ pub(in crate::services::discord) async fn prepare(input: Input<'_>) -> Result<Pr
         PaneLiveness::DeadOrAbsent => false,
         PaneLiveness::ProbeError => return Err(refused("pane unobserved")),
     };
-    let context = match binding_context::observe_spawn_nonce_marker(tmux) {
-        SpawnNonceMarker::Known(ref nonce) => {
-            Some(binding_context::execution_context(provider.as_str(), nonce).map_err(refused)?)
-        }
-        SpawnNonceMarker::Absent if !live => None,
-        _ => return Err(refused("execution selector unproved")),
-    };
-    if live
-        && !crate::services::tmux_common::tmux_session_auth_profile_matches(
+    let (native, context) = if live {
+        if !crate::services::tmux_common::tmux_session_auth_profile_matches(
             tmux,
             &overlay.profile_id,
-        )
-    {
-        return Err(refused("native account changed"));
-    }
-    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux);
-    let bound = binding.as_ref().and_then(|b| b.session_id.as_deref());
-    let native = bound
-        .or_else(|| {
-            context
-                .as_ref()
-                .and_then(|c| c.expected_native_session_id.as_deref())
-        })
-        .or(session);
-    if live && native.is_none() {
-        return Err(refused("native session selector missing"));
-    }
-    if let (Some(requested), Some(actual)) = (session, native)
-        && requested != actual
-    {
-        return Err(refused("native session differs from the claimed selector"));
-    }
-    if let Some(context) = context.as_ref() {
+        ) {
+            return Err(refused("native account changed"));
+        }
+        let SpawnNonceMarker::Known(nonce) = binding_context::observe_spawn_nonce_marker(tmux)
+        else {
+            return Err(refused("execution selector unproved"));
+        };
+        let context =
+            binding_context::execution_context(provider.as_str(), &nonce).map_err(refused)?;
+        let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux);
+        let native = binding
+            .and_then(|binding| binding.session_id)
+            .or_else(|| context.expected_native_session_id.clone())
+            .or_else(|| session.map(str::to_owned))
+            .ok_or_else(|| refused("native session selector missing"))?;
         if context.tmux_session != tmux || context.provider != provider.as_str() {
             return Err(refused("execution belongs to another target"));
         }
-        if let (Some(expected), Some(actual)) =
-            (context.expected_native_session_id.as_deref(), native)
-            && expected != actual
+        if context
+            .expected_native_session_id
+            .as_deref()
+            .is_some_and(|expected| expected != native)
         {
             return Err(refused("native binding changed"));
         }
-    }
+        if session.is_some_and(|requested| requested != native) {
+            return Err(refused("native session differs from the claimed selector"));
+        }
+        (Some(native), Some(context))
+    } else {
+        (session.map(str::to_owned), None)
+    };
+    let native = native.as_deref();
     // Prove the same conversation under the account the real launch will take before ending it.
     if let Some(native) = native {
         let resumed = match provider {
-            ProviderKind::Claude => crate::services::claude::resolve_claude_tui_session_for_launch(
-                Path::new(cwd),
-                Some(native),
-                overlay.home.as_deref(),
-            )
-            .map(|s| s.resume && s.session_id == native)
-            .map_err(refused)?,
+            ProviderKind::Claude => {
+                if !live {
+                    crate::services::tmux_common::session_evidence::require_native_account(
+                        tmux,
+                        native,
+                        &overlay.profile_id,
+                    )?;
+                }
+                crate::services::claude::resolve_claude_tui_session_for_launch(
+                    Path::new(cwd),
+                    Some(native),
+                    overlay.home.as_deref(),
+                )
+                .map(|s| s.resume && s.session_id == native)
+                .map_err(refused)?
+            }
             ProviderKind::Codex => {
+                if !live {
+                    crate::services::tmux_common::session_evidence::require_native_account(
+                        tmux,
+                        native,
+                        &overlay.profile_id,
+                    )?;
+                }
                 let sessions = codex_home.as_ref().map(|h| h.join("sessions"));
                 let selected = crate::services::codex_tui::session::resolve_codex_tui_session(
                     Some(native),

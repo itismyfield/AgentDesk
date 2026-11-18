@@ -624,7 +624,15 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     let session_key = choose_clear_session_key(explicit_session_key, resolved_session_key);
     match session_key.as_deref() {
         Some(session_key) => {
-            clear_teardown::forget_selector(shared, session_key, &mut report).await;
+            let guarded_tmux = transition_guard.as_ref().ok().and(tmux_name.as_deref());
+            clear_teardown::forget_selector(
+                shared,
+                session_key,
+                provider,
+                guarded_tmux,
+                &mut report,
+            )
+            .await;
             super::super::adk_session::post_adk_session_status(
                 Some(session_key),
                 None,

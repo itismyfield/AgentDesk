@@ -90,10 +90,24 @@ pub(crate) struct Proof {
     pub argv_sha256: String,
 }
 pub(crate) fn path(tmux: &str) -> std::path::PathBuf {
-    crate::services::tmux_common::session_temp_path(tmux, "routine_model.json").into()
+    use crate::services::tmux_common::session_evidence::MODEL_PROOF_EXT;
+    crate::services::tmux_common::session_temp_path(tmux, MODEL_PROOF_EXT).into()
 }
 fn read(tmux: &str) -> Option<Proof> {
     serde_json::from_slice(&std::fs::read(path(tmux)).ok()?).ok()
+}
+
+#[cfg(unix)]
+pub(crate) fn retire(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    provider: &str,
+    session: &str,
+) -> Result<(), String> {
+    let tmux = authority.session();
+    if tracks_native_session(provider, tmux, session) {
+        crate::services::tmux_common::session_evidence::remove(&path(tmux))?;
+    }
+    Ok(())
 }
 
 /// A null claim needs the strict boundary when this pane already applied a routine model.
@@ -189,7 +203,7 @@ pub(crate) fn prepared(
             Sha256::digest(serde_json::to_vec(args).map_err(|e| e.to_string())?)
         ),
     };
-    save(&proof)
+    crate::services::tmux_common::with_tmux_source_authority(tmux, |_| save(&proof))
 }
 fn codex_resumed(args: &[String], session: &str) -> bool {
     let Some(end) = args.iter().position(|a| a == "--") else {
@@ -218,6 +232,12 @@ fn save(proof: &Proof) -> Result<(), String> {
 }
 /// An ordinary fallback changes the model without changing the execution nonce.
 pub(crate) fn invalidate(tmux: &str) -> Result<(), String> {
+    crate::services::tmux_common::with_tmux_source_authority(tmux, |_| {
+        invalidate_under_authority(tmux)
+    })
+}
+
+fn invalidate_under_authority(tmux: &str) -> Result<(), String> {
     let bytes = match std::fs::read(path(tmux)) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -261,6 +281,18 @@ pub(crate) fn bind_session(
     nonce: &str,
     session: &str,
 ) -> Result<(), String> {
+    crate::services::tmux_common::with_tmux_source_authority(tmux, |authority| {
+        bind_session_under_authority(authority, provider, nonce, session)
+    })
+}
+
+pub(crate) fn bind_session_under_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    provider: &str,
+    nonce: &str,
+    session: &str,
+) -> Result<(), String> {
+    let tmux = authority.session();
     let p = path(tmux);
     let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
     let mut proof: Proof = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;

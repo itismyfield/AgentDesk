@@ -1,7 +1,10 @@
 pub(crate) mod claude_footer;
 pub(crate) mod host_marker;
 pub(crate) mod runtime_hint_fence;
+pub(crate) mod session_evidence;
 mod session_markers;
+#[cfg(unix)]
+pub(crate) use session_markers::write_native_session_auth as write_claude_session_auth;
 #[cfg(test)]
 pub(crate) use session_markers::write_tmux_runtime_kind_marker;
 pub(crate) use session_markers::{
@@ -10,7 +13,7 @@ pub(crate) use session_markers::{
 };
 #[cfg(unix)]
 pub(crate) use session_markers::{
-    claude_session_auth, claude_session_auth_matches, write_claude_session_auth,
+    claude_session_auth, claude_session_auth_matches, write_native_session_auth,
     write_tmux_runtime_kind_marker_under_fence,
 };
 
@@ -1249,21 +1252,36 @@ pub(crate) fn cleanup_session_temp_files_under_source_authority(
         CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
         CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
     ];
-    if EXTS.iter().chain([&CODEX_TUI_HOME_TEMP_EXT]).any(|ext| {
-        std::fs::symlink_metadata(session_temp_path(session_name, ext)).is_ok()
-            || std::fs::symlink_metadata(legacy_tmp_session_path(session_name, ext)).is_ok()
-    }) {
+    let files: Vec<_> = EXTS
+        .iter()
+        .flat_map(|ext| {
+            [
+                session_temp_path(session_name, ext),
+                legacy_tmp_session_path(session_name, ext),
+            ]
+        })
+        .map(PathBuf::from)
+        .filter(|path| !session_evidence::survives_pane_cleanup(path))
+        .collect();
+    let homes = [
+        session_temp_path(session_name, CODEX_TUI_HOME_TEMP_EXT),
+        legacy_tmp_session_path(session_name, CODEX_TUI_HOME_TEMP_EXT),
+    ];
+    if files
+        .iter()
+        .any(|path| std::fs::symlink_metadata(path).is_ok())
+        || homes
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_ok())
+    {
         authority.invalidate();
     }
-    for ext in EXTS {
-        let _ = std::fs::remove_file(session_temp_path(session_name, ext));
-        let _ = std::fs::remove_file(legacy_tmp_session_path(session_name, ext));
+    for path in files {
+        let _ = std::fs::remove_file(path);
     }
-    let _ = std::fs::remove_dir_all(session_temp_path(session_name, CODEX_TUI_HOME_TEMP_EXT));
-    let _ = std::fs::remove_dir_all(legacy_tmp_session_path(
-        session_name,
-        CODEX_TUI_HOME_TEMP_EXT,
-    ));
+    for path in homes {
+        let _ = std::fs::remove_dir_all(path);
+    }
     Ok(())
 }
 

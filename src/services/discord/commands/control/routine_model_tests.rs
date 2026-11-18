@@ -573,7 +573,7 @@ async fn default_restore(live: bool, named: bool, test: &str) {
         &session,
         model.as_deref(),
         None,
-        Some(restored.requirement),
+        Some(restored.requirement.clone()),
     );
     assert!(argv.windows(2).any(|p| p == ["--resume", SESSION]));
     let applied_model = model.as_deref().unwrap_or("default");
@@ -594,11 +594,54 @@ async fn default_restore(live: bool, named: bool, test: &str) {
     tokio::task::block_in_place(|| {
         crate::services::discord::router::message_handler::assert_routine_owner_delivery(
             native_tmux,
-            &session,
+            &restored.requirement,
             &argv,
-            applied_model,
         )
     });
+
+    if named {
+        fx.tmux.mark_missing();
+        let markers = fx.markers();
+        assert_eq!(markers.0.as_deref(), Some("work"));
+        assert_eq!(
+            markers.1.as_deref(),
+            Some(format!("{session}\nwork").as_str())
+        );
+        tc::cleanup_session_temp_files(&fx.name);
+        assert_eq!(
+            fx.markers(),
+            markers,
+            "normal pane cleanup discarded native account evidence"
+        );
+        assert!(proof::tracks_native_session("claude", &fx.name, &session));
+        assert!(!owner.exists(), "normal cleanup removed the pane owner");
+
+        // Give the newly selected account a usable transcript so only the account check can refuse.
+        let other = crate::services::claude::herdr_return::tests::claude_account("other");
+        let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            fx.cwd.path(),
+            &session,
+            Some(&other.2),
+        )
+        .unwrap();
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            transcript, "{}
+",
+        )
+        .unwrap();
+        let refusal = prepare(prep(Some(&session), Some("sonnet")))
+            .await
+            .err()
+            .unwrap_or_default();
+        assert!(
+            refusal.contains("routine_resume_account_changed_or_unproved"),
+            "{refusal}"
+        );
+        let calls = fx.tmux.take_calls();
+        assert!(!called(&calls, "new-session"));
+        assert!(!called(&calls, "send-keys"));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

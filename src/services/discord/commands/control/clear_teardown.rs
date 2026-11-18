@@ -23,6 +23,8 @@ mod codex_end_record;
 mod codex_end_tests;
 #[cfg(unix)]
 pub(super) mod resume_fence;
+#[cfg(unix)]
+mod selector_evidence;
 
 /// Advances the channel's transcript clear boundary, retried once.
 pub(super) async fn write_boundary(
@@ -44,7 +46,13 @@ pub(super) async fn write_boundary(
 }
 
 /// Forgets the stored provider session so the next launch starts fresh instead of resuming it.
-pub(super) async fn forget_selector(shared: &SharedData, key: &str, report: &mut ClearReport) {
+pub(super) async fn forget_selector(
+    shared: &SharedData,
+    key: &str,
+    provider: &ProviderKind,
+    guarded_tmux: Option<&str>,
+    report: &mut ClearReport,
+) {
     use super::super::super::adk_session;
     let Some(pool) = shared.pg_pool.as_ref() else {
         // Without a pool the API clear stays best-effort; the skipped boundary already warns.
@@ -55,7 +63,13 @@ pub(super) async fn forget_selector(shared: &SharedData, key: &str, report: &mut
         let cleared = adk_session::clear_provider_session_id_pg(pool, key).await;
         cleared.map_err(anyhow::Error::msg)
     };
-    report.attempt("session_selector", forget).await;
+    let cleared = report.attempt("session_selector", forget).await;
+    #[cfg(unix)]
+    if let (Some(cleared), Some(tmux)) = (cleared, guarded_tmux) {
+        selector_evidence::retire(shared, key, provider, tmux, cleared, report).await;
+    }
+    #[cfg(not(unix))]
+    let _ = (cleared, provider, guarded_tmux);
 }
 
 /// Ends a live Herdr execution's provider CLI through the terminate service, otherwise the managed
