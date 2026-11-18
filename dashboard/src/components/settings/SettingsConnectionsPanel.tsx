@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
+import { RotateCcw } from "lucide-react";
 import { getSettingsChannelName } from "../../api/settingsRuntime";
 import type { ConnectionStatusRow } from "./SettingsConnectionsModel";
-import { SETTINGS_SECONDARY_BUTTON, SettingsSection } from "./SettingsPanels";
+import { SETTINGS_ROW_PAD_CLASS, SettingsAction, SettingsSection } from "./SettingsPrimitives";
 import type { SettingRowMeta } from "./SettingsModel";
 import type { SettingsPanelContext, SourceStatus } from "./SettingsPanelTypes";
 import { SettingsOperatorConnectorsPanel } from "./SettingsOperatorConnectorsPanel";
@@ -26,16 +27,16 @@ export function SettingsConnectionsPanel({ ctx, statusRows, connectors, configSt
   const connectorCopy = sectionTitle(ctx, "connections.connectors");
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-9">
       {ctx.matches(status.title, STATUS_KEYWORDS) ? (
         <SettingsSection
           title={status.title}
           description={status.description}
           testId="settings-section-connections-status"
           actions={(
-            <button type="button" onClick={onRerunSetup} className={SETTINGS_SECONDARY_BUTTON}>
+            <SettingsAction icon={<RotateCcw />} onClick={onRerunSetup}>
               {tr("초기 설정 다시 하기", "Run setup again")}
-            </button>
+            </SettingsAction>
           )}
         >
           {statusRows.map((row) => <ConnectionStatusLine key={row.key} row={row} />)}
@@ -49,7 +50,7 @@ export function SettingsConnectionsPanel({ ctx, statusRows, connectors, configSt
         extraFor={(meta) => <ChannelNameHint meta={meta} tr={tr} />}
       />
       {ctx.matches(connectorCopy.title, CONNECTOR_KEYWORDS) ? (
-        <SettingsSection title={connectorCopy.title} description={connectorCopy.description} variant="plain" testId="settings-section-connections-connectors">
+        <SettingsSection title={connectorCopy.title} description={connectorCopy.description} variant="open" testId="settings-section-connections-connectors">
           <SettingsOperatorConnectorsPanel
             connectors={connectors.data}
             error={connectors.isError}
@@ -65,16 +66,22 @@ export function SettingsConnectionsPanel({ ctx, statusRows, connectors, configSt
 }
 
 function ConnectionStatusLine({ row }: { row: ConnectionStatusRow }) {
-  const color = row.tone === "ok" ? "var(--th-badge-emerald-text)" : row.tone === "warn" ? "var(--th-badge-amber-text)" : "var(--th-text-muted)";
+  const tone = row.tone === "ok"
+    ? "text-[var(--th-badge-emerald-text)]"
+    : row.tone === "warn" ? "text-[var(--th-badge-amber-text)]" : "text-th-text-muted";
   return (
-    <div className="flex min-h-14 flex-wrap items-center justify-between gap-x-4 gap-y-1 py-3" data-testid={`settings-connection-${row.key}`} data-tone={row.tone}>
-      <span className="text-sm font-medium text-th-text-primary">{row.label}</span>
+    <div
+      className={`flex min-h-[60px] flex-wrap items-center justify-between gap-x-4 gap-y-1 ${SETTINGS_ROW_PAD_CLASS}`}
+      data-testid={`settings-connection-${row.key}`}
+      data-tone={row.tone}
+    >
+      <span className="text-[13px] font-medium leading-5 text-th-text-primary">{row.label}</span>
       <span className="min-w-0 text-right">
-        <span className="inline-flex items-center gap-1.5 text-sm break-keep" style={{ color }}>
-          <span aria-hidden className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: color }} />
+        <span className={`inline-flex items-center gap-1.5 text-[13px] leading-5 break-keep ${tone}`}>
+          <span aria-hidden className="inline-block size-2 shrink-0 rounded-full bg-current" />
           {row.value}
         </span>
-        {row.detail ? <span className="block text-xs text-th-text-muted [overflow-wrap:anywhere]">{row.detail}</span> : null}
+        {row.detail ? <span className="block text-xs leading-4 text-th-text-muted [overflow-wrap:anywhere]">{row.detail}</span> : null}
       </span>
     </div>
   );
@@ -103,8 +110,7 @@ function ChannelNameHint({ meta, tr }: { meta: SettingRowMeta; tr: SettingsPanel
   } else text = `#${channel.data}`;
   return (
     <p
-      className="mt-1.5 text-xs leading-5 break-keep"
-      style={{ color: warn ? "var(--th-badge-amber-text)" : "var(--th-text-muted)" }}
+      className={`mt-1.5 text-xs leading-4 break-keep ${warn ? "text-[var(--th-badge-amber-text)]" : "text-th-text-muted"}`}
       data-testid={`settings-channel-name-${meta.key}`}
     >
       {text}

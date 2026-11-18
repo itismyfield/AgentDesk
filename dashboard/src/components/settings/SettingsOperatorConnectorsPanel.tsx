@@ -1,7 +1,7 @@
-import { AlertTriangle, CheckCircle2, CircleSlash, RefreshCw } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronRight, CircleSlash, RefreshCw } from "lucide-react";
 import type { OperatorConnectorStatus, OperatorConnectorsResponse } from "../../api";
 import { connectorCopy, connectorReason, connectorSetupSteps } from "./SettingsCopy";
-import { SETTINGS_SECONDARY_BUTTON, SettingsStatusMessage } from "./SettingsPanels";
+import { SETTINGS_ROW_PAD_CLASS, SETTINGS_TRAY_CLASS, SettingsAction, SettingsBadge, SettingsCard, SettingsSkeletonRows, SettingsStatusMessage } from "./SettingsPrimitives";
 
 type Tr = (ko: string, en: string) => string;
 
@@ -22,30 +22,33 @@ export function SettingsOperatorConnectorsPanel({ connectors, error, loading, on
   return (
     <div className="space-y-3" data-testid="settings-operator-connectors-panel">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="min-w-0 flex-1 text-sm break-keep text-th-text-secondary" data-testid="settings-connectors-summary">
+        <p className="min-w-0 flex-1 text-[13px] leading-5 break-keep text-th-text-secondary" data-testid="settings-connectors-summary">
           {rows.length === 0
             ? null
             : needsSetup > 0
               ? tr(`${rows.length}개 중 ${ready}개 준비됐고, ${needsSetup}개는 확인이 필요해요.`, `${ready} of ${rows.length} ready; ${needsSetup} need attention.`)
               : tr(`${rows.length}개 중 ${ready}개 준비됐어요.`, `${ready} of ${rows.length} ready.`)}
         </p>
-        <button type="button" onClick={onReload} disabled={loading} className={SETTINGS_SECONDARY_BUTTON}>
-          <RefreshCw size={13} aria-hidden className={loading ? "animate-spin" : undefined} />
+        <SettingsAction
+          onClick={onReload}
+          disabled={loading}
+          icon={<RefreshCw className={loading ? "animate-spin motion-reduce:animate-none" : undefined} />}
+        >
           {loading ? tr("확인 중…", "Checking…") : tr("다시 확인", "Check again")}
-        </button>
+        </SettingsAction>
       </div>
 
-      {error ? (
-        <SettingsStatusMessage tone="error">{tr("커넥터 상태를 불러오지 못했어요.", "Could not load connector status.")}</SettingsStatusMessage>
-      ) : loading && rows.length === 0 ? (
-        <SettingsStatusMessage>{tr("커넥터 상태를 확인하는 중…", "Checking connectors…")}</SettingsStatusMessage>
-      ) : rows.length === 0 ? (
-        <SettingsStatusMessage>{tr("표시할 커넥터가 없어요.", "No connectors to show.")}</SettingsStatusMessage>
-      ) : (
-        <div className="divide-y divide-th-border-subtle">
-          {rows.map((connector) => <ConnectorRow key={connector.id} connector={connector} isKo={isKo} tr={tr} />)}
-        </div>
-      )}
+      <SettingsCard>
+        {error ? (
+          <SettingsStatusMessage tone="error">{tr("커넥터 상태를 불러오지 못했어요.", "Could not load connector status.")}</SettingsStatusMessage>
+        ) : loading && rows.length === 0 ? (
+          <SettingsSkeletonRows label={tr("커넥터 상태를 확인하는 중…", "Checking connectors…")} />
+        ) : rows.length === 0 ? (
+          <SettingsStatusMessage>{tr("표시할 커넥터가 없어요.", "No connectors to show.")}</SettingsStatusMessage>
+        ) : (
+          rows.map((connector) => <ConnectorRow key={connector.id} connector={connector} isKo={isKo} tr={tr} />)
+        )}
+      </SettingsCard>
     </div>
   );
 }
@@ -72,27 +75,23 @@ function ConnectorRow({ connector, isKo, tr }: { connector: OperatorConnectorSta
   const copy = connectorCopy(connector.id, connector.name);
   const setup = connectorSetupSteps(connector, isKo);
   const Icon = tone === "ready" ? CheckCircle2 : tone === "setup" ? AlertTriangle : CircleSlash;
-  const color = tone === "ready" ? "var(--th-badge-emerald-text)" : tone === "setup" ? "var(--th-badge-amber-text)" : "var(--th-text-muted)";
 
   return (
-    <div className="py-4 first:pt-1 last:pb-1" data-testid={`settings-connector-${connector.id}`}>
+    <div className={SETTINGS_ROW_PAD_CLASS} data-testid={`settings-connector-${connector.id}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium break-keep text-th-text-primary">{isKo ? copy.labelKo : copy.labelEn}</div>
-          {copy.hintKo ? <p className="mt-1 text-xs leading-5 break-keep text-th-text-muted">{isKo ? copy.hintKo : copy.hintEn}</p> : null}
+          <div className="text-[13px] font-medium leading-5 break-keep text-th-text-primary">{isKo ? copy.labelKo : copy.labelEn}</div>
+          {copy.hintKo ? <p className="text-xs leading-4 break-keep text-th-text-muted">{isKo ? copy.hintKo : copy.hintEn}</p> : null}
         </div>
-        <span
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-th-border-subtle px-2.5 py-1 text-xs font-medium"
-          style={{ color, background: "var(--th-overlay-subtle)" }}
-        >
-          <Icon size={12} aria-hidden />
+        <SettingsBadge tone={tone === "ready" ? "ok" : tone === "setup" ? "warn" : "neutral"}>
+          <Icon size={11} aria-hidden className="mr-1" />
           {stateLabel(connector.state, tr)}
-        </span>
+        </SettingsBadge>
       </div>
       {connector.reason && tone !== "ready" ? (
         <p className="mt-2 text-xs leading-5 break-keep text-th-text-secondary">{connectorReason(connector.reason, tr)}</p>
       ) : null}
-      <dl className="mt-2 grid gap-1 text-xs leading-5 text-th-text-muted sm:grid-cols-[7rem_minmax(0,1fr)]">
+      <dl className="mt-2 grid gap-x-3 gap-y-1 text-xs leading-5 text-th-text-muted sm:grid-cols-[7rem_minmax(0,1fr)]">
         <dt>{tr("환경 변수", "Environment variable")}</dt>
         <dd className="min-w-0 font-mono text-th-text-primary [overflow-wrap:anywhere]">{connector.env_var}</dd>
         {connector.source ? <>
@@ -101,13 +100,14 @@ function ConnectorRow({ connector, isKo, tr }: { connector: OperatorConnectorSta
         </> : null}
       </dl>
       {setup.steps.length > 0 ? (
-        <details className="mt-2 text-xs">
-          <summary className="inline-flex min-h-11 cursor-pointer items-center font-medium text-th-text-secondary">
+        <details className="group mt-1 text-xs">
+          <summary className="inline-flex min-h-11 cursor-pointer list-none items-center gap-1 rounded-[var(--r-sm)] font-medium text-th-text-secondary hover:text-th-text-primary [&::-webkit-details-marker]:hidden">
+            <ChevronRight size={14} aria-hidden className="transition-transform group-open:rotate-90 motion-reduce:transition-none" />
             {tr("설정 방법 보기", "How to set up")}
           </summary>
-          <ul className="mt-1 space-y-1.5 leading-5 text-th-text-primary" data-testid={`settings-connector-steps-${connector.id}`}>
+          <ul className="space-y-1.5 leading-5 text-th-text-primary" data-testid={`settings-connector-steps-${connector.id}`}>
             {setup.steps.map((action) => (
-              <li key={action} className={`rounded-md border border-th-border-subtle px-3 py-2 [overflow-wrap:anywhere] ${setup.translated ? "break-keep" : "font-mono"}`}
+              <li key={action} className={`px-3 py-2 [overflow-wrap:anywhere] ${SETTINGS_TRAY_CLASS} ${setup.translated ? "break-keep" : "font-mono"}`}
                 lang={setup.translated ? undefined : "en"}>
                 {action}
               </li>
