@@ -129,7 +129,7 @@ Cancel/Terminate/clear/stop의 기존 control witness는 native strict-closer pr
 | 다음 리뷰 조각 | 비교 base | 보정 추정 | 완료 조건 |
 |---|---|---:|---|
 | T1: 현재 B source 구현 확정 | 기존 repair base 3aea6f63bd | **18파일/+828 실측** | source B 5개 실제 Rust mutant 및 대상/형제/최종 check·Windows·clippy/source scan. 남은 terminal 실패를 숨기지 않고 전체 #8148 착지 허가와 구분 |
-| T2: fresh interrupt + stored barrier supersession | T1 고정 head | raw +120~270 → **+414~932**, 약6 prod파일 | strict/mention/extra-block/다른 barrier/old replay·boot·control 경합 RED→GREEN/원인 제거 RED. candidate→결과 CAS 전체를 함께 구현하며 broad barrier clear 없음 |
+| T2: fresh interrupt + stored barrier supersession | T1 고정 head | raw +120~270 → **+414~932**, 약8 prod파일 | strict/mention/extra-block/다른 barrier/old replay·boot·control 경합 RED→GREEN/원인 제거 RED. candidate→결과 CAS 전체를 함께 구현하며 broad barrier clear 없음 |
 | T3: 검증 raw EOF proof 전체 경로 | T2 고정 head | raw +210~330 → **+725~1139**, 약8 prod파일 | EOF·scope·partial·stamp·crash/boot·control 경합 RED→GREEN/mutants, 원래 HTTP 5/5 및 형제/최종 gates. dormant half-port만 먼저 활성화하는 조각으로 나누지 않음 |
 
 분할은 리뷰 단위다. 코디네이터가 두 조각의 근거를 합쳐 #8148 착지를 판단하며, 남은 두 결함을 착지 후로 미루는 안이 아니다. 각 구현 조각에서 실측/예측 +1200이면 다시 정지한다. cap 정본 상수는 `/home/adk/skills/agentdesk-issue-pipeline/scripts/pr_cap_prod.py`의 FILES=30, NET=1500이고, 매 조각을 그 공식 명령으로 측정한다.
