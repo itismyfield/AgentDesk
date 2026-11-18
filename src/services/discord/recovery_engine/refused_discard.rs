@@ -42,7 +42,10 @@ pub(in crate::services::discord) async fn discard_retained(
     let mut discarded = Vec::new();
     for snapshot in inflight::herdr_body_debt::retained(provider, channel) {
         let Some(id) = identity(provider, &snapshot.row) else {
-            tracing::warn!(channel, "refused body snapshot has no turn nonce and stays");
+            tracing::warn!(
+                channel_id = channel,
+                "refused body snapshot has no turn nonce and stays"
+            );
             continue;
         };
         let committed = discard_episode(pool, provider.as_str(), channel, &snapshot.episode, &id);
@@ -52,7 +55,9 @@ pub(in crate::services::discord) async fn discard_retained(
         };
         match removed {
             Ok(()) => discarded.push(id),
-            Err(error) => tracing::warn!(channel, %error, "refused body snapshot stays"),
+            Err(error) => {
+                tracing::warn!(channel_id = channel, %error, "refused body snapshot stays")
+            }
         }
     }
     discarded
@@ -151,7 +156,7 @@ async fn post_intents(http: &Arc<serenity::Http>, pool: &PgPool, intents: &[(Ide
     for (id, reason) in intents {
         match notice::deliver(pool, id, *reason, &port).await {
             Ok(Some(receipt)) => tracing::info!(
-                channel = id.channel,
+                channel_id = id.channel,
                 message = receipt.message(),
                 reason = ?receipt.reason(),
                 key = receipt.key(),
@@ -160,7 +165,7 @@ async fn post_intents(http: &Arc<serenity::Http>, pool: &PgPool, intents: &[(Ide
             ),
             Ok(None) => {}
             Err(error) => {
-                tracing::warn!(channel = id.channel, %error, "tui rejection notice not confirmed")
+                tracing::warn!(channel_id = id.channel, %error, "tui rejection notice not confirmed")
             }
         }
     }
