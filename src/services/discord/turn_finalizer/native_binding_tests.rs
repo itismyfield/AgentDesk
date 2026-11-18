@@ -3,7 +3,22 @@ use crate::services::tui_input::human_frame::history::v2::native::{Disposition, 
 use crate::services::turn_orchestrator::BindingIntent;
 use serde_json::json;
 
+pub(in crate::services::discord) struct BindingRoot(Option<std::path::PathBuf>);
+impl BindingRoot {
+    pub(in crate::services::discord) fn enter(root: Option<&std::path::Path>) -> Self {
+        let previous = dedupe::binding_events::test_root();
+        dedupe::binding_events::set_test_root(root);
+        Self(previous)
+    }
+}
+impl Drop for BindingRoot {
+    fn drop(&mut self) {
+        dedupe::binding_events::set_test_root(self.0.as_deref());
+    }
+}
+
 struct Fixture {
+    _bindings: BindingRoot,
     _root: crate::config::TestRuntimeRootGuard,
     shared: Arc<SharedData>,
     ticket: Ticket,
@@ -18,6 +33,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
+        let bindings = BindingRoot::enter(Some(root.path()));
         let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
         let channel = 81489971;
         let logical = format!("cold-source-{}", uuid::Uuid::new_v4().simple());
@@ -101,6 +117,7 @@ impl Fixture {
         }).await.unwrap();
         let namespace = format!("claude/{}", shared.token_hash);
         Self {
+            _bindings: bindings,
             _root: root,
             shared,
             ticket,

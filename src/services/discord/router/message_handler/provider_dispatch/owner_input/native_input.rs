@@ -65,7 +65,11 @@ impl Producer {
     }
 
     pub(super) fn wrap(self, leaf: effect::Leaf) -> effect::Leaf {
+        #[cfg(test)]
+        let binding_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
         Box::new(move |frame| {
+            #[cfg(test)]
+            let _binding_root = native_prepare::BindingRoot::enter(binding_root.as_deref());
             let prepared = (|| {
                 let (history, namespace, ticket) =
                     crate::services::tui_input::human_frame::history::v2::native::scoped_ticket()?;

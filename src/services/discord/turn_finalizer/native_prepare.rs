@@ -1,4 +1,6 @@
 //! Pre-key custody belongs to the finalizer actor; a leaf carries only its acknowledged handle.
+#[cfg(test)]
+pub(in crate::services::discord) use super::terminal_handler::native_supply::source_binding::BindingRoot;
 pub(in crate::services::discord) use super::terminal_handler::native_supply::source_binding::{
     pin_source, release_unkeyed_source,
 };

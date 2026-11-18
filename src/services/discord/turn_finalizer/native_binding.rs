@@ -413,3 +413,5 @@ fn bound_source(
 #[cfg(test)]
 #[path = "native_binding_tests.rs"]
 mod tests;
+#[cfg(test)]
+pub(in crate::services::discord) use tests::BindingRoot;

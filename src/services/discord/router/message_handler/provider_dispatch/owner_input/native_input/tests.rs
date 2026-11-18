@@ -69,6 +69,7 @@ fn cold_attempt(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
     let guard = crate::config::TestRuntimeRootGuard::new();
+    let _binding_root = native_prepare::BindingRoot::enter(Some(guard.path()));
     let root = guard.path().join("runtime");
     std::fs::create_dir_all(&root).unwrap();
     for (primary, stale, foreign) in [
@@ -286,6 +287,7 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
     let guard = crate::config::TestRuntimeRootGuard::new();
+    let _binding_root = native_prepare::BindingRoot::enter(Some(guard.path()));
     let root = guard.path().join("runtime");
     std::fs::create_dir_all(&root).unwrap();
     let channel = ChannelId::new(8148963);
