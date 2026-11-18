@@ -694,7 +694,8 @@ async fn invalid_definition_returns_400_and_durable_failure_receipt_pg() {
     for (index, (case, definition, expected)) in cases.iter().enumerate() {
         let post =
             json!({"id":format!("bad-{index}"),"idempotency_key":"bad","definition":definition});
-        let put = json!({"idempotency_key":format!("bad-{index}"),"expected_definition_revision":1,"definition":definition});
+        let mut put = json!({"idempotency_key":format!("bad-{index}"),"expected_definition_revision":1,"definition":definition});
+        put["definition"]["workflow_options"] = json!({"start":false,"implementation":false,"review":false,"landing":false,"merge":false,"deploy":false});
         for (method, path, body) in [
             ("POST", "/server-campaigns", post),
             ("PUT", "/server-campaigns/campaign/definition", put),
