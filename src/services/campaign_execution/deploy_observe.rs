@@ -77,7 +77,7 @@ pub trait DeploymentHealth: Send + Sync {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostWitness {
+pub struct DeploymentHostEvidence {
     pub deployment: DeploymentObservation,
     pub observed_at: DateTime<Utc>,
     pub boot_started_at_ms: i64,
@@ -87,9 +87,15 @@ pub struct HostWitness {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "verdict", rename_all = "snake_case")]
 pub enum DeploymentProgress {
-    Waiting { missing_hosts: Vec<String> },
-    Confirmed { witnesses: Vec<HostWitness> },
-    Failed { missing_hosts: Vec<String> },
+    Waiting {
+        missing_hosts: Vec<String>,
+    },
+    Confirmed {
+        witnesses: Vec<DeploymentHostEvidence>,
+    },
+    Failed {
+        missing_hosts: Vec<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -106,7 +112,7 @@ fn verify_sample(
     not_before: DateTime<Utc>,
     requested_at: DateTime<Utc>,
     received_at: DateTime<Utc>,
-) -> Option<HostWitness> {
+) -> Option<DeploymentHostEvidence> {
     let witness = health.get("running_binary")?;
     let observed_at: DateTime<Utc> = witness.get("observed_at")?.as_str()?.parse().ok()?;
     let boot_started_at_ms = witness.get("boot_started_at_ms")?.as_i64()?;
@@ -123,7 +129,7 @@ fn verify_sample(
     let deployment = observation.observed_evidence()?;
     deployment
         .is_expected_running(target.expected_binary_digest.as_deref())
-        .then(|| HostWitness {
+        .then(|| DeploymentHostEvidence {
             deployment: deployment.clone(),
             observed_at,
             boot_started_at_ms,
@@ -136,7 +142,7 @@ async fn sample(
     target: &DeploymentExpectation,
     not_before: DateTime<Utc>,
     timeout: Duration,
-) -> Option<HostWitness> {
+) -> Option<DeploymentHostEvidence> {
     let started_at = Utc::now();
     let health = tokio::time::timeout(timeout, probe.detail(&target.host))
         .await
@@ -147,7 +153,7 @@ async fn sample(
 
 fn settle(
     watch: &DeploymentWatch,
-    samples: Vec<Option<HostWitness>>,
+    samples: Vec<Option<DeploymentHostEvidence>>,
     now: DateTime<Utc>,
 ) -> DeploymentProgress {
     let missing_hosts = watch
