@@ -141,6 +141,8 @@ pub(in crate::services::discord) async fn bind_hosted_row(
         .ok_or_else(|| format!("native hosted row CAS refused: {outcome:?}"))
 }
 
+const START_MISSING: &str = "native primary Start missing";
+
 pub(in crate::services::discord) struct Handle {
     finalizer: Arc<TurnFinalizer>,
     key: TurnKey,
@@ -163,23 +165,33 @@ impl Handle {
             history.try_native_not_sent(&namespace, &ticket)?;
             return Err(error);
         }
-        let (ack, rx) = oneshot::channel();
-        shared
-            .turn_finalizer
-            .tx
-            .send(FinalizeMsg::NativeRegister {
-                key,
-                actor,
-                history: history.clone(),
-                namespace,
-                ticket: Box::new(ticket),
-                shared: shared.clone(),
-                ack,
-            })
-            .map_err(|_| "native registration actor unavailable")?;
-        let input = rx
-            .await
-            .map_err(|_| "native registration acknowledgement lost")??;
+        // The bridge registers the primary's Start concurrently; a bounded wait covers that race.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let input = loop {
+            let (ack, rx) = oneshot::channel();
+            shared
+                .turn_finalizer
+                .tx
+                .send(FinalizeMsg::NativeRegister {
+                    key,
+                    actor: actor.clone(),
+                    history: history.clone(),
+                    namespace: namespace.clone(),
+                    ticket: Box::new(ticket.clone()),
+                    shared: shared.clone(),
+                    ack,
+                })
+                .map_err(|_| "native registration actor unavailable")?;
+            match rx
+                .await
+                .map_err(|_| "native registration acknowledgement lost")?
+            {
+                Err(e) if e == START_MISSING && tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                result => break result?,
+            }
+        };
         Ok(Self {
             finalizer: shared.turn_finalizer.clone(),
             key,
@@ -329,7 +341,7 @@ pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, Led
                 )
                 .await?;
                 if primary && !ledger.contains_key(&key.exact_key()) {
-                    return Err("native primary Start missing".into());
+                    return Err(START_MISSING.into());
                 }
                 let entry = ledger.entry(key.exact_key()).or_insert_with(|| {
                     LedgerEntry::registered(
