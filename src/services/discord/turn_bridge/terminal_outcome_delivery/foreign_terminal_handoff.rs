@@ -112,6 +112,7 @@ pub(super) async fn prepare_receipt_disposition(
                     TerminalOutcomeDeliveryOutcome::Unresolved { error }
                 }
                 // No delivery was confirmed and no custody holds the body.
+                #[cfg(unix)]
                 Outcome::Discarded => TerminalOutcomeDeliveryOutcome::Unresolved {
                     error: "refused episode discarded after its durable reason".into(),
                 },
@@ -230,6 +231,7 @@ pub(super) enum Outcome {
         error: String,
     },
     /// A closed episode's reason intent is durable; nothing of its body was kept.
+    #[cfg(unix)]
     Discarded,
 }
 
@@ -286,6 +288,8 @@ pub(super) async fn preserve_or_publish(ctx: Handoff<'_>) -> Outcome {
     if episode_closed(ctx.shared, ctx.provider, ctx.local, ctx.channel_id.get()).await {
         return Outcome::Discarded;
     }
+    #[cfg(not(unix))]
+    let _ = ctx.shared;
     let snapshot = RetrySnapshot {
         version: 1,
         provider: ctx.provider.as_str().into(),
@@ -377,6 +381,7 @@ pub(in crate::services::discord) mod custody_test_adapter {
         {
             Outcome::Deferred { key } => Ok(key),
             Outcome::Unresolved { error } => Err(error),
+            #[cfg(unix)]
             Outcome::Discarded => Err("discarded".into()),
         }
     }
