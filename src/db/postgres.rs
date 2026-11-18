@@ -13,6 +13,10 @@ use crate::config::Config;
 
 mod advisory_lock;
 mod agent_sync;
+mod backpressure;
+#[cfg(test)]
+use backpressure::should_yield_for_counters;
+pub(crate) use backpressure::{PressureSnapshot, pressure_snapshot};
 #[cfg(test)]
 mod intake_timing_pg_tests;
 mod pool_return;
@@ -73,25 +77,7 @@ pub(crate) const BACKPRESSURE_LOG_THROTTLE: Duration = Duration::from_secs(30);
 /// boundary is harmless because a false-positive yield self-heals on the next
 /// tick once `in_flight < budget` again.
 pub(crate) fn background_should_yield(pool: &PgPool) -> bool {
-    let reserve = FOREGROUND_RESERVE.load(Ordering::Acquire);
-    should_yield_for_counters(
-        reserve,
-        pool.size(),
-        pool.num_idle() as u32,
-        pool.options().get_max_connections(),
-    )
-}
-
-/// Pure backpressure arithmetic factored out of [`background_should_yield`] so
-/// the threshold logic is unit-testable without a live pool. `reserve == 0`
-/// short-circuits to `false` (backpressure disabled / behaviour-preserving).
-fn should_yield_for_counters(reserve: u32, size: u32, num_idle: u32, max_connections: u32) -> bool {
-    if reserve == 0 {
-        return false;
-    }
-    let in_flight = size.saturating_sub(num_idle);
-    let budget = max_connections.saturating_sub(reserve);
-    in_flight >= budget
+    pressure_snapshot(pool).should_yield()
 }
 
 /// #3651: clamp a configured `foreground_reserve` so the background budget
