@@ -72,6 +72,7 @@ esac
     )
     .unwrap();
     std::fs::write(root.path().join("composer"), "\n╭──────────────────────────────────────────────────────────────╮\n│ ▌                                                            │\n╰──────────────────────────────────────────────────────────────╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send\n").unwrap();
+    crate::services::platform::tmux::session_identity_tests::mark_fixture_program(tmux);
     let binary = root.path().join("codex");
     std::fs::write(
         &binary,
