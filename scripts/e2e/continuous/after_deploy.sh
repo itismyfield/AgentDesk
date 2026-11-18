@@ -22,6 +22,7 @@ plist="$HOME/Library/LaunchAgents/$label.plist"
 rendered=$(sed -e "s|__REPO__|$repo|g" -e "s|__HOME__|$HOME|g" -e "s|__CONFIG__|$config|g" \
     "$repo/scripts/launchd/$label.plist") || exit 0
 if [ "$rendered" != "$(cat "$plist" 2>/dev/null)" ]; then
+    mkdir -p "$(dirname "$plist")" || exit 0
     printf '%s\n' "$rendered" > "$plist.new" && mv "$plist.new" "$plist" || exit 0
     launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
 fi

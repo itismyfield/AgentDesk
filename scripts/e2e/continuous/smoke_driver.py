@@ -29,17 +29,19 @@ def _smoke():
     return post_deploy_turn_smoke, source_compare
 
 
-def observation(outcome, row, log_read):
-    """Map the smoke verdict; a seen duplicate stays FAIL even when an observation was also lost."""
+def observation(outcome, row, only_log_missing):
+    """Map the smoke verdict; a seen duplicate or refusal stays FAIL even when an observation was also lost."""
     if outcome["classification"] == "PASS":
         return "PASS", None
     counts = row.get("marker_counts") if isinstance(row.get("marker_counts"), dict) else {}
-    reason = str(row.get("reason") or "")
-    if not any(type(hits) is int and hits > 1 for hits in counts.values()):
-        if TRANSPORT.search(reason):
-            return "UNEVALUABLE", "UNOBSERVED_TRANSPORT"
-        if not log_read and row.get("status") == "pass":
-            return "UNEVALUABLE", "UNOBSERVED_SERVER_LOG"
+    steps = row.get("step_timings") if isinstance(row.get("step_timings"), list) else []
+    last = steps[-1].get("step") if steps and isinstance(steps[-1], dict) else ""
+    seen = any(type(hits) is int and hits > 1 for hits in counts.values()) or row.get("input_refusals")
+    if not seen and only_log_missing:
+        return "UNEVALUABLE", "UNOBSERVED_SERVER_LOG"
+    # Only a lookup that could not be sent is unobserved; a prompt that could not be sent is not.
+    if not seen and str(last).startswith("wait_for_") and TRANSPORT.search(str(row.get("reason") or "")):
+        return "UNEVALUABLE", "UNOBSERVED_TRANSPORT"
     return "FAIL", outcome["observed_reason"]
 
 
@@ -134,12 +136,17 @@ def run(args, config, spawn=subprocess.run):
             counts = smoke.scan_log(lines, session=smoke.cell_driver.cell_session_name(cell["smoke_cell"]),
                                     channel_id=channel, launch_options=options)
     result = smoke._load_report(out / f"report.{cell['smoke_cell']}.json")  # noqa: SLF001
-    outcome = smoke.classify(report=result, scenario_id=args.scenario, cell=cell["smoke_cell"], channel_id=channel,
-                             run_id=run_id, driver_rc=driver.returncode, markers=markers, log_counts=counts,
-                             launch_options=options)
+    def judged(log_counts):
+        return smoke.classify(report=result, scenario_id=args.scenario, cell=cell["smoke_cell"], channel_id=channel,
+                              run_id=run_id, driver_rc=driver.returncode, markers=markers, log_counts=log_counts,
+                              launch_options=options)
+
+    outcome = judged(counts)
     rows = result.get("scenarios") if isinstance(result, dict) else None
     row = rows[0] if isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict) else {}
-    status, reason = observation(outcome, row, log_read or not needs_log)
+    # The log alone is missing when the same evidence passes with a clean excerpt of this cell.
+    only_log = needs_log and not log_read and judged({"cell_lines": 1})["classification"] == "PASS"
+    status, reason = observation(outcome, row, only_log)
     report.update(status=status, real_provider_contacted=row.get("real_provider_contacted") is True,
                   evidence_paths=[str(out / name) for name in (f"report.{cell['smoke_cell']}.json", "relay.log")],
                   assertions=[{"key": ASSERTION, "status": status, "complete": status != "UNEVALUABLE"}],

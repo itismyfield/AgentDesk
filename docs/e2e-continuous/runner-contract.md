@@ -1,6 +1,6 @@
 # Continuous runner 소비 계약
 
-기본 off와 null 주기·예산은 그대로다. S2는 S1 위의 파일 소비 계약이며 정기 배선·배포 companion·실제 operator 전송은 S3에서 연결한다. 레그의 scheduled 실행과 실패 알림 증거는 모두 fixture이며 운영 실행으로 세지 않는다.
+기본 off와 null 주기·예산은 그대로다. 릴리스 호스트에서 켜는 방법·driver·핵심 묶음 주기는 [릴리스 호스트 프로필](release-host.md)에 있다. 이 문서의 scheduled 실행과 실패 알림 증거는 fixture이며, 실제 실행 기록은 [묶음별 실측](measurements.md)이다.
 
 `python3 -m scripts.e2e.continuous --config <시험 config> inspect --head <배포 SHA>`는 공유 순수 판정의 `E2E_CHECK`와 `E2E_MONITOR`를 출력한다. enabled일 때 `summary.json`·`status.json`만 읽으며 스케줄·inbox·예산을 바꾸지 않는다. off 관측은 상태 읽기·쓰기 없이 DISABLED와 관측 heartbeat를 반환한다. S3 supervisor는 이 관측을 비밀 없는 외부 mirror로 발행할 수 있다. off tick 자체는 잠금·상태·inbox IO가 없다.
 

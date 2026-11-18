@@ -151,6 +151,10 @@ provider별 일일 turn/token/time 한도도 `null`이다. 미지정 한도는 �
 usage를 못 읽으면 `null/unknown`이며 token 0/비용 0이 아니다. 이 경우 token 실측 DoD는 미완료,
 그 provider의 자동 주기는 off다. 일반 작업과 공유하는 계정의 잔여 quota를 보장한다고 주장하지 않는다.
 
+**상태(11-19):** 사용자 결정으로 #8124 시험 인스턴스 대신 릴리스 서버와 기존 로그인 계정을 쓴다
+([릴리스 호스트 프로필](e2e-continuous/release-host.md)). P의 E-50·E-51만 4회씩 실측해 12시간 주기와 예약·하루 한도를 정했다
+([묶음별 실측](e2e-continuous/measurements.md)). R1–R5·F는 n=0이라 회전과 일일 전체는 off다.
+
 ## 3. 빠진 네 단언과 수정 전 RED 계약
 
 ### 3.1 공통 전제, 특히 사람 입력

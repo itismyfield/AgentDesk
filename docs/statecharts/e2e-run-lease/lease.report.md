@@ -209,6 +209,32 @@ S3 리뷰가 넘긴 우선순위 공백을 모델에 넣었다. 다른 배포 he
 "다른 배포 head" 상태로 표시). 전체는 59 cfg = 10 GREEN + 49 expected RED다. 기존 58 cfg의 바이트는 그대로다.
 같은 head의 만료 결과는 계속 `STALE`이며, 두 조합의 실제 시각 경계는 Python 소비자 시험이 맡는다.
 
+## 관측 불가 분류와 핵심 묶음 주기 (2026-11-19)
+
+릴리스 호스트에서 상시 실행을 켜면서 두 행동을 모델에 넣었다.
+
+**관측 불가는 FAIL이 아니다.** 소비자 snapshot에 `unobserved`(조회 전송 타임아웃, 교체된 서버 로그)를 추가했다.
+표시는 `UNEVALUABLE`이고 알림 pending을 남긴다. 새 규칙 `UnobservedNeverFail`과 뮤턴트
+`consumer-unobserved-fail`(관측 실패를 기능 FAIL로 세는 판정)을 더했다. 뮤턴트는 `ConsumerStateMapping`과
+`UnobservedNeverFail`을 위반한다. 정상 cfg는 23 snapshot, 차트의 상태·화살표는 그대로다.
+
+**핵심 묶음 주기.** 새 모델 [CoreSchedule](schedule/CoreSchedule.tla)은 supervisor가 배포 head와 주기 칸마다 넣는
+요청을 다룬다. 배포 시작·끝(끝에서 새 head의 배포 요청 제출), 시간 경과, 다른 묶음 결과가 최신 summary를 바꾸는
+경우, 요청 제출, 실행 시작·완료·crash가 행동이다.
+
+| 규칙 | 뜻 | 깨는 뮤턴트 |
+| --- | --- | --- |
+| `OneCoreRunPerHeadAndSlot` | 같은 head·같은 칸의 주기 실행 기록은 많아야 하나 | `tick_id`: 요청 이름을 tick마다 새로 지음 |
+| `NoStartDuringDeploy` | 배포 lock이 잡힌 동안 실행을 시작하지 않음 | `ignore_deploy` |
+| `DeployRequestKeepsItsRun` | 같은 head의 주기 요청이 기다리던 배포 요청을 밀어내지 않음 | `ignore_waiting` |
+| `StartedRunIsRecorded`(생존성) | 시작한 실행은 결국 결과 또는 abandoned 기록을 남김 | `drop_on_crash` |
+
+정상 1 GREEN + 뮤턴트 4 RED, 기대 위반 집합과 일치한다. 한도는 head 2, 칸 2, 제출 4회다. 실제 시각·예산 보류·
+채널 lease는 기존 LeaseLifetime 모델과 Python 시험이 맡는다. 실행 도중 배포가 시작되는 경우(그 반대 방향)는
+막지 않으며, 이때 배포 스모크가 셀을 idle로 보지 못해 건너뛸 수 있다.
+
+전체는 65 cfg = 11 GREEN + 54 expected RED다.
+
 ## 코드 기준과 범위
 
 코드 감사 기준 `origin/main=79bebdd4eaa29b289bf88412825baa7d70a6ac77`, 레인 기반 `21c80274`다.

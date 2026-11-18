@@ -38,4 +38,6 @@ python3 -m scripts.e2e.continuous.companion --state-dir /test/state --request-id
 이 명령은 `inbox.submit`을 재사용한다. 파일에는 schema version·request ID·deploy SHA·접수 시각만 담는다.
 같은 ID의 재전달은 원래 요청을 보존하며 provider 턴이나 runner를 직접 실행하지 않는다.
 요청 거절·전달 실패·비공개(0700)가 아닌 inbox 디렉터리는 JSON `REJECTED`와 종료 코드 0으로 남겨 기존 배포 결과를 보존한다.
-실제 시험 호스트로의 전달과 배포 후 호출은 coordinator 배선에서 수행한다.
+릴리스 호스트에서는 `deploy-release.sh`가 스모크 뒤 `scripts/e2e/continuous/after_deploy.sh`로 이 요청을 넣는다.
+기기 전용 설정이 없으면 호출은 아무 일도 하지 않는다. 소비자가 읽을 파일은 `~/.adk/e2e-continuous/state/status.json`과
+같은 폴더의 `summary.json`이다. 자세한 구성은 [릴리스 호스트 프로필](release-host.md), 실측은 [묶음별 실측](measurements.md)에 있다.

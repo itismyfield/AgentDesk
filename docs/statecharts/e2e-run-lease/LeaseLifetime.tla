@@ -295,15 +295,15 @@ ConsumerMutants == {"consumer-good", "consumer-nodata-green", "consumer-off-gree
     "consumer-stale-green", "consumer-old-head-green", "consumer-zero-green",
     "consumer-usage-green", "consumer-driver-schema-green", "consumer-qualifier-green",
     "consumer-usage-crash", "consumer-no-budget-heartbeat", "consumer-hide-pending",
-    "consumer-stale-masks-head"}
+    "consumer-stale-masks-head", "consumer-unobserved-fail"}
 ConsumerMode == Mut \in ConsumerMutants
 ConsumerCases == {"good", "no-data", "off", "stale", "old-head", "old-head-stale", "summary-schema",
     "status-schema", "future-clock", "heartbeat-stale", "host-unavailable", "zero",
     "skip", "fixture", "missing-assertion", "usage-unknown", "usage-malformed",
-    "fail-usage-malformed", "driver-schema", "qualifier-unknown", "nullable", "budget-deferred"}
+    "fail-usage-malformed", "driver-schema", "qualifier-unknown", "nullable", "budget-deferred", "unobserved"}
 MalformedCases == {"usage-malformed", "fail-usage-malformed"}
 TroubleCases == {"skip", "fixture", "missing-assertion", "usage-unknown", "usage-malformed",
-    "fail-usage-malformed", "driver-schema", "qualifier-unknown"}
+    "fail-usage-malformed", "driver-schema", "qualifier-unknown", "unobserved"}
 c == tx.consumer
 ConsumerExpected(k) == CASE k = "off" -> "DISABLED"
     [] k = "no-data" -> "NO_DATA"
@@ -323,6 +323,8 @@ ConsumerDecision ==
     ELSE IF c.case = "old-head" /\ Mut # "consumer-old-head-green" THEN "STALE_HEAD"
     ELSE IF c.case = "stale" /\ Mut # "consumer-stale-green" THEN "STALE"
     ELSE IF c.case = "fail-usage-malformed" THEN "FAIL"
+    \* A lost observation (lookup transport timeout, rotated server log) is not a functional failure.
+    ELSE IF c.case = "unobserved" THEN (IF Mut = "consumer-unobserved-fail" THEN "FAIL" ELSE "UNEVALUABLE")
     ELSE IF (c.case = "zero" /\ Mut # "consumer-zero-green")
         \/ c.case \in {"skip", "fixture", "missing-assertion"}
         \/ (c.case \in {"usage-unknown", "usage-malformed"} /\ Mut # "consumer-usage-green")
@@ -367,6 +369,7 @@ ConsumerStateMapping == ConsumerTerminal => c.view = ConsumerExpected(c.case)
 NoGroundlessPass == c.view = "PASS" => c.case \in {"good", "nullable", "budget-deferred"}
 NoOldHeadGreen == c.case \in {"old-head", "old-head-stale"} => c.view # "PASS"
 MalformedUsageCompletes == c.case \in MalformedCases => ~c.crashed
+UnobservedNeverFail == c.case = "unobserved" => c.view # "FAIL"
 FunctionalFailRetained == ConsumerTerminal /\ c.case = "fail-usage-malformed" => c.view = "FAIL"
 DeferredHeartbeatIsLive == c.case = "budget-deferred" /\ c.stage \in {"Ready", "Judged", "Done"} => c.heartbeatFresh
 ConsumerIsPure == tx = [TxInitial EXCEPT !.consumer = c] /\ owner = None /\ cursor = 0
