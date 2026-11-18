@@ -563,8 +563,8 @@ src/config/session_hosts_tests.rs:45:        boot.channels().keys().copied().col
 src/config/session_hosts_tests.rs:94:    assert!(boot.channels().is_empty());
 src/config/writer_channels_tests.rs:172:        boot.channels().iter().copied().collect::<Vec<_>>(),
 src/config/writer_channels_tests.rs:319:    let channels: Vec<u64> = boot.channels().iter().copied().collect();
-src/db/dispatched_sessions.rs:2212:    .bind(crate::config::session_hosts::configured_channel_ids())
-src/db/dispatched_sessions.rs:2249:        .bind(crate::config::session_hosts::configured_channel_ids())
+src/db/dispatched_sessions.rs:2194:    .bind(crate::config::session_hosts::configured_channel_ids())
+src/db/dispatched_sessions/selector_clear.rs:24:    let configured = crate::config::session_hosts::configured_channel_ids();
 src/server/routes/health_api/runtime_profile.rs:20:            let channels: Vec<String> = boot.channels().keys().map(u64::to_string).collect();
 src/server/routes/health_api/runtime_profile.rs:61:        with_boot(|boot| match boot {
 src/server/routes/health_api/runtime_profile.rs:143:        live.session_hosts = with_boot(|b| b.unwrap().config().clone());
