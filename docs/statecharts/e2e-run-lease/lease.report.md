@@ -38,7 +38,8 @@
 | --- | --- | --- |
 | `Acquire` 원자 flock | `scripts/dev_instance/lease.py:66`, `scripts/dev_instance/keeper.py:48`, `scripts/dev_instance/host.py:36` | `LOCK_EX\|LOCK_NB`, 실패는 busy. TTL 분기 없음 |
 | 고정 inode witness | `scripts/dev_instance/lease.py:31-32`, `:45-52`, `scripts/dev_instance/keeper.py:47` | fstat device/inode·부모 디렉터리 identity 대조 |
-| `Start` FD 상속 | `scripts/dev_instance/lifecycle.py:247`, `:310`, `scripts/dev_instance/keeper.py:134` | `close_fds=True, pass_fds=(lease fd,)` |
+| `Start` FD 상속 | `scripts/dev_instance/lifecycle.py:247`, `:310` | `close_fds=True, pass_fds=(lease fd,)`. `:310`은 선택적 verification FD 하나를 더 넘긴다 |
+| keeper spawn(lease 전달 아님) | `scripts/dev_instance/keeper.py:134` | 제어 socketpair의 child FD만 상속한다. lease FD는 넘기지 않는다 |
 | 자기 FD close만(`Finish`·`ReleaseParent`·crash) | `scripts/dev_instance/lease.py:87`, `:119` | lock leaf unlink 없음(`keeper.py:82`의 unlink는 marker 파일) |
 | `ttl_takeover`·`non_atomic` 원인 | `scripts/e2e/tui_relay/lease.py:28`, `:35`, `:50` | 현재 일반 하네스 lease의 TTL·unlink. S1에서 재사용하지 않음(§6) |
 | `Kind=run` channel lease | 설계 좌표: `docs/e2e-continuous.design.md` §6, S1 runner | 코드 없음 |

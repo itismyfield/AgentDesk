@@ -133,14 +133,15 @@ class ReactionWatch:
         cls._active.append(watch)
         return watch
 
-    def on_send(self, record) -> None:
+    def on_send(self, record, read_after=None) -> None:
         sends = record.get("prompt_sends") or []
         if len(sends) not in self.targets:
             return
         row = self.store[str(len(sends))] = {"message_id": sends[-1].get("message_id"),
                                              "acked_at": self.clock(), "polls": []}
         if len(sends) in self.markers:
-            row["turn_end_marker"] = self.markers[len(sends)]
+            # Replies older than the input can be edited to carry the marker, so read from the window start.
+            row["turn_end_marker"], row["read_after"] = self.markers[len(sends)], read_after
         if row["message_id"]:
             thread = threading.Thread(target=self._observe, args=(row, self.targets[len(sends)]), daemon=True)
             self._threads.append(thread)
@@ -168,15 +169,17 @@ class ReactionWatch:
         marker = row.get("turn_end_marker")
         begun = self.clock()
         try:
-            rows = self.fetch(self.channel_id, after_id=str(int(mid) - 1), limit=100 if marker else 1)
+            after = str(row["read_after"]) if marker and row.get("read_after") else str(int(mid) - 1)
+            rows = self.fetch(self.channel_id, after_id=after, limit=100 if marker else 1)
             match = [m for m in rows if str(m.get("id")) == mid]
             if len(match) != 1:
                 raise ValueError("input message absent from the Discord read")
             reactions: dict[str, Any] = {"reactions": reaction_names(match[0])}
             if marker:
-                # One read gives both marks; a full page cannot prove the marker absent.
+                # One read gives both marks; a full page or a range without the earlier replies cannot prove absence.
                 seen = any(marker in (assertions.relay_body(m) or "") for m in rows)
-                reactions["turn_end"] = True if seen else (None if len(rows) >= 100 else False)
+                covered = len(rows) < 100 and row.get("read_after")
+                reactions["turn_end"] = True if seen else (False if covered else None)
         except Exception as error:  # Every read failure is kept as evidence, never as an empty set.
             reactions = {"error": str(error)[:200]}
         return {"t0": round(begun - start, 3), "t": round(self.clock() - start, 3), **reactions}

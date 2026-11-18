@@ -182,11 +182,30 @@ class ReviewFindings(unittest.TestCase):
                 "content": "[E2E:E63:r1:DONE] quoted in our own prompt"}
         done = {"id": str(int(MID) + 1), "author": {"id": "7", "bot": True}, "content": "[E2E:E63:r1:DONE]"}
         other = {"id": str(int(MID) + 2), "author": {"id": "7", "bot": True}, "content": "working"}
-        row = {"message_id": MID, "acked_at": 0.0, "turn_end_marker": "[E2E:E63:r1:DONE]"}
+        row = {"message_id": MID, "acked_at": 0.0, "turn_end_marker": "[E2E:E63:r1:DONE]", "read_after": "1"}
         for rows, expected in (([mine, done], True), ([mine], False), ([mine] + [other] * 99, None)):
             watch = surface.ReactionWatch({}, lambda *_a, rows=rows, **kw: rows if kw["limit"] == 100 else [], "c1", {})
             with self.subTest(expected=expected):
                 self.assertIs(watch.poll(row)["turn_end"], expected)
+
+    def test_marker_edited_into_a_reply_older_than_the_input_is_seen(self):
+        reply = {"id": str(int(MID) - 10), "author": {"id": "7", "bot": True}, "content": "[E2E:E63:r1:HOLD]"}
+        sent = {"id": MID, "author": {"id": assertions.OUR_BOT_ID, "bot": True}, "reactions": []}
+        fetch = lambda _c, after_id, limit: [m for m in (reply, sent) if int(m["id"]) > int(after_id)][:limit]
+        watch, record = surface.ReactionWatch({2: {"➕"}}, fetch, "c1", {}, markers={2: "[E2E:E63:r1:DONE]"}), {}
+        for _ in range(2):
+            driver._ack_send(driver._record_send(record, "send_discord_prompt", "p"), {"message_id": MID})
+            watch.on_send(record, read_after=str(int(MID) - 20))
+        watch.stop()
+        row = watch.store["2"]
+        polls = [watch.poll(row)]
+        reply["content"] += "\n[E2E:E63:r1:DONE]"
+        polls.append(watch.poll(row))
+        sent["reactions"] = [{"emoji": {"name": "➕"}, "count": 1}]
+        polls.append(watch.poll(row))
+        with self.assertRaisesRegex(assertions.AssertionError, "after the turn-end"):
+            judge(INJECT, {"reaction_watch": {"2": {**row, "polls": polls}}})
+        self.assertIsNone(watch.poll({**row, "read_after": None})["turn_end"])
 
     def test_failed_tmux_read_or_non_running_herdr_row_is_not_a_session(self):
         spec, context = {"session_host": {"expect": "configured"}}, host_context()
