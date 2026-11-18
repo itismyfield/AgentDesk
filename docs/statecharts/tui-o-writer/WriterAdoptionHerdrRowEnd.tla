@@ -312,7 +312,7 @@ ReasonUncertain == /\ reasonState = "intent"
     /\ oldAck' = (Mapping = "CDiscardUncertainDelivered" \/ oldAck)
     /\ UNCHANGED <<cap, bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition, refusedArchive, reasonKind, priorFresh>>
 \* Mutant control: an uncertain reason is posted again.
-RepostUncertain == /\ Mapping = "CDiscardRepost" /\ reasonState = "uncertain"
+RepostUncertain == /\ Mapping = "CDiscardRepost" /\ reasonState = "uncertain" /\ reasons < 2
     /\ reasonState' = "intent"
     /\ UNCHANGED <<cap, bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition, refusedArchive, reasons, reasonKind, priorFresh>>
 
