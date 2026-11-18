@@ -180,6 +180,10 @@ def _execute(lease, config, record, row, remaining):
     raw_path = Path(config["state_dir"]) / "outputs" / "e2e" / record["run_id"] / f"{key}.json"
     write_json(raw_path, report)
     row["driver_report_path"] = str(raw_path)
+    supported = isinstance(report, dict) and type(report.get("schema_version")) is int and report["schema_version"] == 2
+    if not supported:
+        report = {}
+        row["reason"] = "UNSUPPORTED_DRIVER_SCHEMA"
     if isinstance(report, dict):
         for key in (*summary.IDENTITY, "assertions", "real_provider_contacted", "evidence_paths", "fixture", "dry_run",
                     "timeout", "dirty_residue", "usage", "actual_occurrence_key"):
@@ -191,7 +195,7 @@ def _execute(lease, config, record, row, remaining):
                driver_rc=proc.returncode, elapsed_s=round(time.monotonic() - started, 3),
                native_turns=turns if type(turns) is int and turns >= 0 else None,
                tokens=report.get("tokens") if isinstance(report, dict) and type(report.get("tokens")) is int and report["tokens"] >= 0 else None)
-    usage = row.get("usage", {})
+    usage = row["usage"] = row.get("usage") if isinstance(row.get("usage"), dict) else {field: None for field in summary.USAGE}
     if (not isinstance(usage, dict) or any(type(usage.get(field)) is not int or usage[field] < 0 for field in summary.USAGE)
             or usage.get("native_turns") != row["native_turns"]
             or sum(usage.get(field, 0) or 0 for field in summary.USAGE[1:]) != row["tokens"]):
@@ -202,6 +206,9 @@ def _execute(lease, config, record, row, remaining):
             or row["native_turns"] > remaining["turns"] or (row["tokens"] is not None and row["tokens"] > remaining["tokens"])):
         row.update(status="FAIL" if row["status"] == "FAIL" else "UNEVALUABLE", native_turns=None,
                    reason="native-turn budget witness missing")
+    if row["native_turns"] is None or row["tokens"] is None:
+        row["status"] = "FAIL" if row["status"] == "FAIL" else "UNEVALUABLE"
+        row.setdefault("reason", "USAGE_UNKNOWN")
 
 
 def _run(lease, state, config, request, run_id, now):
@@ -220,6 +227,7 @@ def _run(lease, state, config, request, run_id, now):
             row.update(status="DEFERRED_BUDGET", reason=refused)
         if request["kind"] == "deploy":
             inbox.record(state, {request["request_id"]: "DEFERRED_BUDGET"})
+        publication.heartbeat(state, config, now)
         return _record(state, record, result="DEFERRED_BUDGET")
     if request["kind"] == "deploy":
         inbox.record(state, {**{rid: "SUPERSEDED" for rid in request["superseded"]},
@@ -257,7 +265,7 @@ def _run(lease, state, config, request, run_id, now):
                           if mine and all(type(row.get("usage", {}).get(field)) is int and row["usage"][field] >= 0 for row in mine)
                           else None for field in summary.USAGE}
     record.update(result=_verdict(rows), completed_at=time.time(), measured=measured, usage=usage,
-                  usage_complete=all(all(value is not None for value in item.values()) for item in usage.values()))
+                  usage_complete=not unknown and all(all(value is not None for value in item.values()) for item in usage.values()))
     result = summary.build(record, config)["result"]
     _record(state, record, result=result, completed_at=record["completed_at"])
     _apply_completed(state, record, config)

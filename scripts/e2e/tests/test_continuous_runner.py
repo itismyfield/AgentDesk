@@ -254,7 +254,7 @@ class Recovery(Runner):
 
     def test_functional_fail_survives_missing_budget_witness(self):
         lease = mock.Mock()
-        lease.spawn.return_value = subprocess.CompletedProcess([], 1, json.dumps({"status": "FAIL", "native_turns": 1}))
+        lease.spawn.return_value = subprocess.CompletedProcess([], 1, json.dumps({"schema_version": 2, "status": "FAIL", "native_turns": 1}))
         row = {"scenario": "E-1", "cell": "claude-tui"}
         runner._execute(lease, self.config, {"profile": "default", "run_id": "test", "request": {}}, row,
                         {"turns": 1, "tokens": 10, "time_s": 10})
@@ -262,7 +262,7 @@ class Recovery(Runner):
 
     def test_unknown_usage_components_do_not_become_zero(self):
         lease = mock.Mock()
-        lease.spawn.return_value = subprocess.CompletedProcess([], 0, json.dumps({"status": "PASS", "native_turns": 1,
+        lease.spawn.return_value = subprocess.CompletedProcess([], 0, json.dumps({"schema_version": 2, "status": "PASS", "native_turns": 1,
                                                                                "tokens": 1, "budget_checked": 1}))
         row = {"scenario": "E-1", "cell": "claude-tui"}
         runner._execute(lease, self.config, {"profile": "default", "run_id": "test", "request": {}}, row,
@@ -519,6 +519,111 @@ class Summary(unittest.TestCase):
             self.assertNotEqual(summary.evaluate(value)["result"], "PASS")
         for value in (None, [], {"schema_version": 2}, {**status(), "schema_version": True}, {**status(), "heartbeat_at": "broken"}):
             self.assertEqual(summary.consume(report(), value, head=SHA, now=120)["check"]["result"], "UNKNOWN")
+
+
+class ReviewS2(unittest.TestCase):
+    setUp, tick, submit = Runner.setUp, Runner.tick, Runner.submit
+
+    def live(self, change=lambda body: None, at="E-15"):
+        scenarios = ("E-1", "E-2", "E-3", "E-5", "E-15")
+        contract = {"surface": "channel", "state": "sequential", "origin": "announce_bot", "busy_basis": None,
+                    "placement": None, "output_profile": "default", "operation": "delivery", "occurrence": 1}
+        self.config.update(**IDENTITY, occurrence_contracts={s: contract for s in scenarios},
+                           required_assertions={s: ["delivery"] for s in scenarios})
+
+        def spawn(argv, run_id, **kwargs):
+            args = dict(zip(argv[len(self.config["driver"])::2], argv[len(self.config["driver"]) + 1::2]))
+            row = {**contract, "scenario": args["--scenario"], "cell": args["--cell"]}
+            body = {"schema_version": 2, "status": "PASS", **IDENTITY, "native_turns": 1, "tokens": 1,
+                    "budget_checked": 1, "usage": {field: int(field in ("native_turns", "input_tokens")) for field in summary.USAGE},
+                    "actual_occurrence_key": summary.occurrence_key(row), "real_provider_contacted": True,
+                    "assertions": [{"key": "delivery", "status": "PASS", "complete": True}], "evidence_paths": ["synthetic.json"]}
+            if row["scenario"] == at:
+                change(body)
+            return subprocess.CompletedProcess(argv, 0, json.dumps(body))
+        return mock.patch.object(channel_lock.ChannelLease, "spawn", side_effect=spawn)
+
+    def completed(self, result):
+        return read_json(self.state / "runs" / f"{result['run_id']}.json", {})
+
+    def test_last_occurrence_unknown_cannot_publish_pass(self):
+        for field, value in (("tokens", 2), ("native_turns", None), ("native_turns", "missing")):
+            with self.subTest(field=field, value=value):
+                self.setUp()
+                def change(body):
+                    body.pop(field) if value == "missing" else body.update({field: value})
+                with self.live(change):
+                    result = self.tick(time.time())
+                record = self.completed(result)
+                self.assertEqual(result["status"], "UNEVALUABLE")
+                self.assertFalse(record["usage_complete"])
+                self.assertIn("claude", read_json(self.state / "budget/paused.json", {}))
+                self.assertEqual(read_json(self.state / f"budget/{record['budget_day']}.json", {})[record["run_id"]]["claude"]["tokens"], 1000)
+                self.assertEqual(outbox.pending(self.state), 1)
+                view = publication.view({**self.config, "state_dir": self.state}, head=SHA, now=time.time())
+                self.assertNotEqual(view["check"]["result"], "PASS")
+
+    def test_driver_schema_is_checked_before_evidence_is_adopted(self):
+        for version in (2, 999, None, True, "missing"):
+            with self.subTest(version=version):
+                self.setUp()
+                def change(body):
+                    body.pop("schema_version") if version == "missing" else body.update(schema_version=version)
+                with self.live(change):
+                    result = self.tick(time.time())
+                self.assertEqual(result["status"], "PASS" if type(version) is int and version == 2 else "UNEVALUABLE")
+                row = self.completed(result)["occurrences"][-1]
+                raw = read_json(row["driver_report_path"], {})
+                self.assertEqual(raw.get("schema_version", "missing"), version)
+                if version != 2:
+                    self.assertNotIn("real_provider_contacted", row)
+
+    def test_required_qualifiers_reject_absent_null_empty_and_wrong_types(self):
+        for field in set(summary.KEY_FIELDS) - {"busy_basis", "placement"}:
+            for invalid in (None, "", " ", [], "missing"):
+                with self.subTest(field=field, invalid=invalid):
+                    value = report(); row = value["occurrences"][0]
+                    row.pop(field) if invalid == "missing" else row.update({field: invalid})
+                    if field == "output_profile" and invalid == "missing":
+                        value["profile"] = None
+                    row["key"] = row["actual_occurrence_key"] = summary.occurrence_key(row, value.get("profile", "default"))
+                    value["expected"] = [row["key"]]
+                    verdict = summary.evaluate(value)
+                    self.assertEqual(verdict["result"], "UNEVALUABLE")
+                    self.assertEqual(verdict["live"], 0)
+        self.assertEqual(summary.evaluate(report())["result"], "PASS")
+
+    def test_malformed_usage_completes_and_keeps_fail_without_recovery(self):
+        for usage in (None, []):
+            for outcome in ("PASS", "FAIL"):
+                with self.subTest(usage=usage, outcome=outcome):
+                    self.setUp()
+                    with self.live(lambda body: body.update(usage=usage, status=outcome), at="E-1") as spawned:
+                        result = self.tick(time.time())
+                    record = self.completed(result)
+                    self.assertEqual(result["status"], "FAIL" if outcome == "FAIL" else "UNEVALUABLE")
+                    self.assertEqual(spawned.call_count, 1)
+                    self.assertTrue(record["completed_at"] and record["applied"])
+                    self.assertEqual(plan.cursor(self.state)["index"], 1)
+                    self.assertIn("claude", read_json(self.state / "budget/paused.json", {}))
+                    self.assertEqual(outbox.pending(self.state), 1)
+                    self.assertEqual(read_json(record["occurrences"][0]["driver_report_path"], {})["usage"], usage)
+
+    def test_daily_budget_deferral_keeps_supervisor_heartbeat(self):
+        now = time.time()
+        with self.live():
+            self.assertEqual(self.tick(now)["status"], "PASS")
+        self.submit("budget-wait")
+        write_json(self.state / f"budget/{budget.day(now)}.json", {"spent": {p: {"turns": 10, "tokens": 10**6, "time_s": 600} for p in ("claude", "codex")}})
+        before = (self.state / f"budget/{budget.day(now)}.json").read_bytes()
+        with self.live() as spawned:
+            self.assertEqual(self.tick(now + 180)["status"], "DEFERRED_BUDGET")
+        self.assertEqual(spawned.call_count, 0)
+        self.assertEqual((self.state / f"budget/{budget.day(now)}.json").read_bytes(), before)
+        self.assertEqual(inbox.ledger(self.state)["budget-wait"], "DEFERRED_BUDGET")
+        self.assertEqual(read_json(self.state / "status.json", {})["heartbeat_at"], now + 180)
+        view = publication.view({**self.config, "state_dir": self.state}, head=SHA, now=now + 180)
+        self.assertNotEqual(view["check"]["reason"], "HEARTBEAT_STALE")
 
 
 if __name__ == "__main__":

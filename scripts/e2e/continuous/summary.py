@@ -46,6 +46,14 @@ def occurrence_key(row, profile="default"):
         data.setdefault("provider", provider)
         data.setdefault("host", "tmux" if host == "tui" else host)
     data.setdefault("output_profile", profile)
+    for key in KEY_FIELDS:
+        value = data.get(key)
+        if value is None and key in {"busy_basis", "placement"}:
+            continue
+        if key == "occurrence" and type(value) is int and value > 0:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            data[key] = "unknown"
     return "/".join("none" if data.get(key, "unknown") is None else quote(str(data.get(key, "unknown")), safe="-_.:")
                     for key in KEY_FIELDS)
 
@@ -104,7 +112,8 @@ def evaluate(value, *, head=None, identity=None):
         return finish("UNKNOWN", "DUPLICATE_OCCURRENCE")
     for row in rows:
         required, assertions = row.get("assertions_expected"), row.get("assertions")
-        matches = row.get("actual_occurrence_key") == row["key"] == occurrence_key(row, value.get("profile", "default"))
+        matches = (row.get("actual_occurrence_key") == row["key"] == occurrence_key(row, value.get("profile", "default"))
+                   and "unknown" not in row["key"].split("/"))
         if _strings(required):
             result["assertions_expected"] += len(required)
             if matches and isinstance(assertions, list):
@@ -128,7 +137,8 @@ def evaluate(value, *, head=None, identity=None):
         if isinstance(assertions, list) and any(isinstance(item, dict) and item.get("status") == "FAIL" for item in assertions):
             return finish("FAIL", "FUNCTIONAL_FAILURE")
         if row.get("status") != "PASS":
-            reasons.append(("PARTIAL", row.get("reason") or row.get("status") or "NOT_EXECUTED"))
+            reasons.append(("UNEVALUABLE" if row.get("status") == "UNEVALUABLE" else "PARTIAL",
+                            row.get("reason") or row.get("status") or "NOT_EXECUTED"))
             continue
         if value.get("fixture") or value.get("dry_run") or row.get("fixture") or row.get("dry_run"):
             reasons.append(("UNEVALUABLE", "FIXTURE"))
