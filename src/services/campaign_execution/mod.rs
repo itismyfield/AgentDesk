@@ -20,6 +20,7 @@ pub mod model;
 pub mod pipeline_rules;
 pub mod profile;
 pub mod review_gate;
+#[cfg(test)]
 pub mod scheduler;
 pub mod stage_fsm;
 mod verification_commands;
