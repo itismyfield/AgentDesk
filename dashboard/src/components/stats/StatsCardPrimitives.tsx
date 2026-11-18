@@ -1,5 +1,6 @@
-import type { CSSProperties, ReactNode } from "react";
-import { Info } from "lucide-react";
+import type { ComponentPropsWithoutRef, CSSProperties, ReactNode } from "react";
+import { Badge } from "../../kit/free/badge-clean";
+import { EmptyState } from "../../kit/free/empty-state-clean";
 import { cx } from "../dashboard/ui";
 import type { MetricDeltaTone } from "./statsModel";
 
@@ -7,99 +8,100 @@ export const NUMERIC_STYLE: CSSProperties = {
   fontVariantNumeric: "tabular-nums",
 };
 
-export function HeadlineMetricCard({
+/** Kit-style section: a quiet 12px heading row (icon, title, actions) above its card. */
+export function StatsSection({
+  id,
   title,
-  value,
-  sub,
-  tip,
-  delta,
-  deltaTone,
+  description,
+  icon,
+  actions,
+  className,
+  children,
+  testId,
 }: {
+  id: string;
   title: string;
-  value: string;
-  sub: string;
-  tip: string;
-  delta?: string;
-  deltaTone?: MetricDeltaTone;
+  description?: string;
+  icon?: ReactNode;
+  actions?: ReactNode;
+  className?: string;
+  children: ReactNode;
+  testId?: string;
 }) {
   return (
-    <article className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface min-h-[128px]">
-      <div className="px-4 py-4 sm:px-5 flex min-w-0 flex-col">
-        <div className="flex items-start justify-between gap-3">
-          <details className="min-w-0 flex-1">
-            <summary className="flex min-h-11 min-w-11 cursor-pointer list-none items-center gap-2 text-xs font-medium text-th-text-muted focus-visible:outline-2 focus-visible:outline-[var(--th-accent-primary)]">
-              <span>{title}</span><Info size={13} className="shrink-0" aria-hidden="true" />
-            </summary>
-            <p className="mt-1 text-xs leading-5 text-th-text-secondary">{tip}</p>
-          </details>
-          {delta ? (
-            <span className={cx("inline-flex rounded px-1.5 py-1 font-mono text-[11px]", deltaTone === "up" ? "text-[var(--th-badge-emerald-text)]" : deltaTone === "down" ? "text-[var(--th-accent-danger)]" : "text-th-text-muted")}>{delta}</span>
-          ) : null}
+    <section aria-labelledby={id} className={cx("flex min-w-0 flex-col gap-2", className)} data-testid={testId}>
+      <div className="flex min-h-7 flex-wrap items-center justify-between gap-x-3 gap-y-2">
+        <div className="min-w-0">
+          <h2 id={id} className="flex min-w-0 items-center gap-1.5 text-xs font-medium text-[var(--fg-dim)] [&_svg]:size-[13px] [&_svg]:shrink-0">
+            {icon ? <span aria-hidden="true" className="inline-flex text-[var(--fg-muted)]">{icon}</span> : null}
+            <span className="min-w-0 [word-break:keep-all]">{title}</span>
+          </h2>
+          {description ? <p className="mt-0.5 text-xs leading-5 text-[var(--fg-muted)] [word-break:keep-all]">{description}</p> : null}
         </div>
-        <div
-          className="min-w-0 text-[28px] font-semibold leading-9 tracking-tight tabular-nums [overflow-wrap:anywhere] mt-3"
-          style={{ ...NUMERIC_STYLE, color: "var(--th-text-heading)" }}
-        >
-          {value}
-        </div>
-        <div
-          className="mt-2 text-xs leading-5 text-th-text-muted"
-          style={{ color: "var(--th-text-muted)" }}
-        >
-          {sub}
-        </div>
+        {actions ? <div className="flex min-w-0 flex-wrap items-center gap-2">{actions}</div> : null}
       </div>
-    </article>
+      {children}
+    </section>
   );
 }
 
-export function CardHead({
-  title,
-  subtitle,
-  actions,
-}: {
-  title: string;
-  subtitle: string;
-  actions?: ReactNode;
-}) {
+/** Card surface shared by the stats sections. */
+export function StatsCard({ className, children, ...rest }: ComponentPropsWithoutRef<"div">) {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-3 border-b border-th-border-subtle px-4 py-4 sm:px-5">
-      <div className="min-w-0">
-        <h2 className="text-base font-semibold text-th-text-heading">{title}</h2>
-        <div
-          className="mt-1 text-[11px] leading-5"
-          style={{ color: "var(--th-text-muted)" }}
-        >
-          {subtitle}
-        </div>
-      </div>
-      {actions ? (
-        <div className="flex shrink-0 flex-wrap gap-2">{actions}</div>
-      ) : null}
+    <div
+      {...rest}
+      className={cx(
+        "min-w-0 overflow-hidden rounded-[var(--r-lg)] border border-[var(--line-soft)] bg-[var(--bg-1)]",
+        className,
+      )}
+    >
+      {children}
     </div>
   );
 }
 
-export function LegendDot({ color, label }: { color: string; label: string }) {
+export function StatsSwatch({ color, className }: { color: string; className?: string }) {
+  return <span aria-hidden="true" className={cx("inline-block size-2 shrink-0 rounded-[2px]", className)} style={{ background: color }} />;
+}
+
+export function DeltaBadge({ tone, children }: { tone?: MetricDeltaTone; children: ReactNode }) {
   return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className="h-2 w-2 rounded-[2px]" style={{ background: color }} />
-      <span>{label}</span>
-    </span>
+    <Badge tone={tone === "up" ? "success" : tone === "down" ? "danger" : "neutral"} style={NUMERIC_STYLE}>
+      {children}
+    </Badge>
   );
 }
 
-export const numericBadgeStyle: CSSProperties = {
-  ...NUMERIC_STYLE,
-  background: "var(--th-overlay-light)",
-  color: "var(--th-text-secondary)",
-  borderColor: "var(--th-border-subtle)",
-};
+/** Empty, zero or loading note inside a card (kit EmptyState without its frame). */
+export function StatsEmpty({
+  icon,
+  title,
+  text,
+  action,
+  testId,
+}: {
+  icon: ReactNode;
+  title: ReactNode;
+  text?: ReactNode;
+  action?: ReactNode;
+  testId?: string;
+}) {
+  return (
+    <div className="px-4 py-8" data-testid={testId}>
+      <EmptyState bare icon={icon} title={title} text={text} action={action} />
+    </div>
+  );
+}
 
-export const positiveChipStyle: CSSProperties = {
-  ...NUMERIC_STYLE,
-  background: "color-mix(in oklch, var(--ok) 10%, transparent)",
-  color: "var(--th-badge-emerald-text)",
-  borderColor:
-    "color-mix(in oklch, var(--ok) 20%, var(--th-border-subtle) 80%)",
-};
+/** Thin share meter: relative width against the largest value. */
+export function StatsMeter({ ratio, color, className }: { ratio: number; color: string; className?: string }) {
+  const width = Math.max(0, Math.min(1, ratio)) * 100;
+  return (
+    <span aria-hidden="true" className={cx("block h-1.5 min-w-10 overflow-hidden rounded-full bg-[var(--line-soft)]", className)}>
+      <span
+        className="block h-full rounded-full transition-[width] duration-500 motion-reduce:transition-none"
+        style={{ width: `${width > 0 ? Math.max(width, 2) : 0}%`, background: color }}
+      />
+    </span>
+  );
+}

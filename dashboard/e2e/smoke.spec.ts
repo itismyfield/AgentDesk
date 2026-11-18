@@ -1652,9 +1652,9 @@ test.describe("Dashboard smoke tests", () => {
 
     await expect(page.getByTestId("stats-page")).toBeVisible({ timeout: 15000 });
     await expect(page.getByTestId("stats-range-controls")).toBeVisible();
-    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-pressed", "false");
-    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-checked", "false");
+    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-checked", "false");
 
     await expect(page.getByTestId("stats-summary-total-tokens")).toBeVisible();
     await expect(page.getByTestId("stats-summary-api-spend")).toBeVisible();
@@ -1670,12 +1670,12 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("stats-claude-accounts").getByRole("button", { name: /^(Switch|Active)$/ })).toHaveCount(0);
 
     await page.getByTestId("stats-range-7d").click();
-    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-checked", "false");
 
     await page.getByTestId("stats-range-90d").click();
-    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-checked", "false");
   });
 
   test("stats: weekly chart fits and longer series support horizontal keyboard navigation", async ({ page }, testInfo) => {
