@@ -356,7 +356,18 @@ async fn default_restore(live: bool, test: &str) {
     let _root = crate::config::TestRuntimeRootGuard::new();
     use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture as Transport;
     let native_tmux = Transport::tmux_program();
-    let fx = Fixture::new(821941 + u64::from(live), RuntimeHandoffKind::ClaudeTui).await;
+    let user = tempfile::tempdir().unwrap();
+    let home = user.path().join(".claude");
+    let set = TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _home = set("HOME", user.path());
+    let config_dir = set("CLAUDE_CONFIG_DIR", &home);
+    let fx = Fixture::with_account(
+        821941 + u64::from(live),
+        RuntimeHandoffKind::ClaudeTui,
+        (config_dir, user, home),
+        crate::services::provider_auth_profile::DEFAULT_PROFILE_ID,
+    )
+    .await;
     let _idle = crate::services::discord::router::set_hosted_tui_promote_busy_for_tests(false);
     let pool = fx.shared.pg_pool.as_ref().unwrap();
     let key = channel_key(&fx.shared, &fx.name);

@@ -63,6 +63,15 @@ impl Drop for HostingConfig {
 impl Fixture {
     async fn new(n: u64, kind: RuntimeHandoffKind) -> Self {
         let account = crate::services::claude::herdr_return::tests::claude_account("work");
+        Self::with_account(n, kind, account, "work").await
+    }
+
+    async fn with_account(
+        n: u64,
+        kind: RuntimeHandoffKind,
+        account: (TestEnvVarGuard, tempfile::TempDir, PathBuf),
+        profile: &str,
+    ) -> Self {
         let provider = ProviderKind::Claude;
         let channel = ChannelId::new(1_486_486_000_000_000_000 + n);
         let channel_name = format!("i6486-relaunch-{n}");
@@ -90,8 +99,8 @@ impl Fixture {
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         std::fs::write(&transcript, "{}\n").unwrap();
         tc::write_tmux_runtime_kind_marker(&name, kind).unwrap();
-        tc::write_tmux_session_auth_profile(&name, "work").unwrap();
-        tc::write_claude_session_auth(&name, SESSION, "work").unwrap();
+        tc::write_tmux_session_auth_profile(&name, profile).unwrap();
+        tc::write_claude_session_auth(&name, SESSION, profile).unwrap();
         Case::Stored(Stored::Legacy)
             .seed(&pool, &channel_key(&shared, &name), &name, channel.get())
             .await;
@@ -272,7 +281,11 @@ impl Fixture {
                 std::thread::sleep(Duration::from_millis(50));
             }
             cancel.cancelled.store(true, Ordering::SeqCst);
-            let _ = turn.join().unwrap();
+            let result = turn.join().unwrap();
+            assert!(
+                argv.exists(),
+                "Claude fixture launch stopped before CLI: {result:?}"
+            );
         });
         let args = std::fs::read_to_string(&argv).expect("the CLI ran");
         let settings = std::fs::read(&settings).expect("the CLI got a settings file");
