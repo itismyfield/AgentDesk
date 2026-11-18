@@ -1,8 +1,8 @@
 # 묶음별 실측과 예산
 
-2026-11-19 07:29–07:41 KST, MacBook 릴리스 서버(head `06e6a85583`), 기존 로그인 계정, 시험 채널
+2026-11-19 07:29–08:01 KST, MacBook 릴리스 서버(head `06e6a85583`), 기존 로그인 계정, 시험 채널
 `adk-claude-tui-2-e2e`·`adk-codex-tui-e2e`. 한 번에 한 시나리오만 돌렸다. 1–3회차는 채널 lock 아래 단발 실행(`hold`),
-4회차는 켠 상태의 runner tick이다. 두 채널 모두 서버가 Herdr로 받는다.
+4·5회차는 켠 상태의 runner tick(4회차는 주기 요청, 5회차는 배포 요청)이다. 두 채널 모두 서버가 Herdr로 받는다.
 
 | 묶음 P의 칸 | 회차 | 결과 | wall(초) | native 턴 | 토큰 합 | input | output | cache read | cache write |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -10,17 +10,19 @@
 | E-50 Claude | 2 | PASS | 66 | 3 | 185,012 | 6 | 711 | 159,786 | 24,509 |
 | E-50 Claude | 3 | PASS | 78 | 3 | 185,761 | 6 | 929 | 160,110 | 24,716 |
 | E-50 Claude | 4 | PASS | 67 | 3 | 186,018 | 6 | 853 | 160,256 | 24,903 |
+| E-50 Claude | 5 | PASS | 64 | 3 | 186,453 | 6 | 1,371 | 160,244 | 24,832 |
 | E-51 Codex | 1 | PASS | 67 | 3 | 77,643 | 37,284 | 167 | 40,192 | 0 |
 | E-51 Codex | 2 | PASS | 68 | 3 | 77,630 | 18,581 | 169 | 58,880 | 0 |
 | E-51 Codex | 3 | PASS | 67 | 3 | 75,874 | 17,859 | 159 | 57,856 | 0 |
 | E-51 Codex | 4 | PASS | 66 | 3 | 85,192 | 6,254 | 218 | 78,720 | 0 |
+| E-51 Codex | 5 | PASS | 64 | 3 | 76,018 | 16,820 | 190 | 59,008 | 0 |
 
 - E-50 1회차는 driver의 marker 계산 오류로 처음에 FAIL로 나왔다. 같은 하네스 보고서를 고친 driver 판정으로 다시 읽어 PASS였다.
   턴 수 3은 전사의 입력 레코드로 확인했다(당시 driver는 5로 잘못 셌다).
-- n=4라 p95는 없다. E-50 wall 66/67/78초(최소/중앙/최대), 토큰 185,012/185,498/186,018.
-  E-51 wall 66/67/68초, 토큰 75,874/77,637/85,192.
-- wall은 1–3회차가 lock·preflight·사용량 읽기를 포함한 값, 4회차가 runner가 잰 driver 실행 시간이다.
-- 묶음 P 전체(4회차)는 133.6초였다. 나머지 네 칸(R-marker·R-inject·R-fresh·R-host)은 `BLOCKED_CAPABILITY`라 실행 0이다.
+- n=5라 p95는 없다. E-50 wall 64/67/78초(최소/중앙/최대), 토큰 185,012/185,761/186,453.
+  E-51 wall 64/67/68초, 토큰 75,874/77,630/85,192.
+- wall은 1–3회차가 lock·preflight·사용량 읽기를 포함한 값, 4·5회차가 runner가 잰 driver 실행 시간이다.
+- 묶음 P 전체는 4회차 133.6초, 5회차 127.7초였다. 나머지 네 칸(R-marker·R-inject·R-fresh·R-host)은 `BLOCKED_CAPABILITY`라 실행 0이다.
 - R1–R5와 F는 실측하지 않았다(n=0).
 
 ## 예산
@@ -40,4 +42,4 @@
 
 manifest의 P는 E-51을 Codex/tmux로 적었지만 이 호스트의 Codex 시험 채널은 Herdr다. 그래서 E-51은 기능 PASS여도
 continuous 결과에서 `OCCURRENCE_WITNESS_MISMATCH`로 남고 PASS로 세지 않는다. 기능 FAIL은 그대로 FAIL로 보인다.
-4회차의 소비자 출력은 `E2E_CHECK suite=P result=UNEVALUABLE live=1/6 assertions=1/2 reason=OCCURRENCE_WITNESS_MISMATCH`였다.
+4·5회차의 소비자 출력은 `E2E_CHECK suite=P result=UNEVALUABLE live=1/6 assertions=1/2 reason=OCCURRENCE_WITNESS_MISMATCH`였다.
