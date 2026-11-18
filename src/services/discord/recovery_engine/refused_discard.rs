@@ -113,9 +113,8 @@ pub(in crate::services::discord) async fn post(
     post_intents(http, pool, &intents).await;
 }
 
-/// Boot: discards the refused channels' retained snapshots, then resumes every persisted intent
-/// that no attempt holds; the row, body and debt may already be gone, so the intent alone drives
-/// its first post.
+/// Boot: discards the refused channels' snapshots, then posts every intent no attempt holds;
+/// the row, body and debt may be gone, so the intent alone drives its first post.
 pub(in crate::services::discord) fn resume(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

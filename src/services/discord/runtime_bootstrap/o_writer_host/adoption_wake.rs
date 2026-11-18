@@ -19,9 +19,8 @@ pub(super) enum Held {
     Watched,
 }
 
-/// Retired rowless debts still wake this runtime's existing queue; custody is rechecked there.
-/// A refused channel's debt is discarded with one reason instead, and persisted reason intents
-/// resume without their rows.
+/// Retired rowless debts wake this runtime's queue, custody rechecked there; a refused channel's
+/// debt is discarded with one reason instead, and reason intents resume without their rows.
 pub(super) async fn boot(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

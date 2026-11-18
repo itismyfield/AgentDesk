@@ -1,6 +1,6 @@
 # D1b: refused bodies are reasoned and discarded, and an admitted takeover keeps proven debt (#7651)
 
-<!-- doc-path-refs: proposed src/services/discord/recovery_engine/refused_discard.rs src/services/tui_o/writer/late_adopt/codex/prior.rs src/services/tui_o/channel_policy/adoption/episode_key.rs -->
+<!-- doc-path-refs: proposed src/services/tui_o/writer/late_adopt/codex/prior.rs -->
 
 Design on `6467b53cab3715e4cc096d2693762f3fc4f146ca` (D1a, xh CLEAN). No production code
 changes here. The landing unit is the current stack plus D1b. Revision 2 answers the design review
