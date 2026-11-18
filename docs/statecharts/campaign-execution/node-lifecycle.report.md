@@ -42,19 +42,19 @@
 
 | 진입점·소비자 | 코드 좌표 | 모델 행동·구현 연결 |
 |---|---|---|
-| 공개 Start·Resume·Retry | @control.rs:public_start@, @control.rs:public_resume@, `view.rs:203`, `dto.rs:38` | 모델 밖. 그대로 `ExecutionUnavailable`. 승인·수명 상태가 공개 실행을 열지 않는다 |
-| 내부 수명 명령 dispatch | @control.rs:dispatch@, @lifecycle.rs:decide@ | `BeginRun`·`Resume`·`Apply(land/complete)`. 변경 없음은 기존 unchanged 경로(event 0) |
-| run 시작 | @lifecycle.rs:begin_run@ | `BeginRun`. Prepared에서만 새 run을 만들고, 같은 ID 재전송은 무변화, 다른 ID는 거절 |
-| Work 진입(첫 Work·수리 Work) | @stage_fsm.rs:admit@, @lifecycle.rs:admit_work@ | `Apply(assign)`. Requirements 또는 Implementation에서만. 선행 노드 main 반영, 착수(첫 Work)·구현 자리의 exact 승인 |
-| 승인 대조 | @lifecycle.rs:gate_status@, @lifecycle.rs:require_gate@ | `Passes`. 현재 pointer의 revision·candidate(base/head)·pin hash·승인 기록을 모두 대조 |
-| Review 진입 | @stage_fsm.rs:review_gate@, @stage_fsm.rs:candidate@ | `Apply(review)`. 봉인된 출력과 pin에 결속한 리뷰 자리 승인. 인계한 candidate를 fence에 기록 |
+| 공개 Start·Resume·Retry | `control.rs:346`, `control.rs:350`, `view.rs:203`, `dto.rs:38` | 모델 밖. 그대로 `ExecutionUnavailable`. 승인·수명 상태가 공개 실행을 열지 않는다 |
+| 내부 수명 명령 dispatch | `control.rs:362`, `lifecycle.rs:379` | `BeginRun`·`Resume`·`Apply(land/complete)`. 변경 없음은 기존 unchanged 경로(event 0) |
+| run 시작 | `lifecycle.rs:182` | `BeginRun`. Prepared에서만 새 run을 만들고, 같은 ID 재전송은 무변화, 다른 ID는 거절 |
+| Work 진입(첫 Work·수리 Work) | `stage_fsm.rs:145,172`, `lifecycle.rs:113,95,102` | `Apply(assign)`. Requirements 또는 Implementation에서만. 선행 노드 main 반영, 착수(첫 Work)·구현 자리의 exact 승인 |
+| 승인 대조 | `lifecycle.rs:43`, `lifecycle.rs:78` | `Passes`. 현재 pointer의 revision·candidate(base/head)·pin hash·승인 기록을 모두 대조 |
+| Review 진입 | `stage_fsm.rs:355`, `stage_fsm.rs:389` | `Apply(review)`. 봉인된 출력과 pin에 결속한 리뷰 자리 승인. 인계한 candidate를 fence에 기록 |
 | 단계 결과·실패 예산 | `stage_fsm.rs` `accept_stage_result`, `failure_budget.rs:13` | `Apply(accept)`. 기존 코드 그대로. 확정 품질 실패만 세고 예산 소진은 Failed |
-| 예산 소진 뒤 재배정 차단 | @stage_fsm.rs:failed@ | `Wanted`의 failed 분기. 기존 거절을 유지 |
-| Landing 승인(admission) | @lifecycle.rs:begin_landing@, @lifecycle.rs:landing_candidate@ | `Apply(land)`. 리뷰를 통과한 그 candidate가 현재 정의에 결속돼 있고 착지 자리 승인이 있어야 한다 |
-| 확인·완료 | @lifecycle.rs:complete_node@, @lifecycle.rs:settled@ | `Apply(complete)`. 세 사실과 노드가 시작한 시도·action·세션의 종결을 요구. 마지막 노드에서 Succeeded |
-| 재개 | @lifecycle.rs:resume_run@, `control.rs:47` | `Resume`. Stopped이고 조용할 때만. fence 세대 전진, 중단된 Work·Review는 새 Work로, 실패 노드는 그대로 |
-| 다음 행동 계산 | @scheduler.rs:next_action@, `domain/campaign/lifecycle.rs` `StepKey` | `Compute`·`Wanted`. 저장 상태만 읽는 순수 함수. 위치(epoch)가 시도·launch ID를 정한다 |
-| 재전송 무효 | `stage_fsm.rs` `assign_work`·`begin_review`의 기존 시도 분기, @lifecycle.rs:retry@ | `PositionGuard`. 같은 시도 ID·같은 위치의 재전송은 무변화 |
+| 예산 소진 뒤 재배정 차단 | `stage_fsm.rs:149` | `Wanted`의 failed 분기. 기존 거절을 유지 |
+| Landing 승인(admission) | `lifecycle.rs:308`, `lifecycle.rs:149` | `Apply(land)`. 리뷰를 통과한 그 candidate가 현재 정의에 결속돼 있고 착지 자리 승인이 있어야 한다 |
+| 확인·완료 | `lifecycle.rs:340`, `lifecycle.rs:160,178` | `Apply(complete)`. 세 사실과 노드가 시작한 시도·action·세션의 종결을 요구. 마지막 노드에서 Succeeded |
+| 재개 | `lifecycle.rs:217`, `control.rs:47` | `Resume`. Stopped이고 조용할 때만. fence 세대 전진, 중단된 Work·Review는 새 Work로, 실패 노드는 그대로 |
+| 다음 행동 계산 | `scheduler.rs:23`, `domain/campaign/lifecycle.rs` `StepKey` | `Compute`·`Wanted`. 저장 상태만 읽는 순수 함수. 위치(epoch)가 시도·launch ID를 정한다 |
+| 재전송 무효 | `stage_fsm.rs` `assign_work`·`begin_review`의 기존 시도 분기, `lifecycle.rs:319` | `PositionGuard`. 같은 시도 ID·같은 위치의 재전송은 무변화 |
 | stop·편집 | `control.rs` `RequestStop`·`EditDefinition` | `Stop`·`Edit`. 기존 코드 그대로. 편집은 revision을 올려 옛 승인을 무효로 만든다 |
 
 `rg`로 `Command::Start|Resume|PrepareRetry`, `stage_fsm::assign_work|begin_review|accept_stage_result`, `lifecycle::`, `scheduler::next_action`의 호출부를 확인했다. `next_action`의 운영 호출자는 아직 없다(M3 host worker가 첫 소비자). 내부 명령은 `commands::execute`로만 들어오며 HTTP route는 닫힌 `PublicCommand`만 변환한다.
