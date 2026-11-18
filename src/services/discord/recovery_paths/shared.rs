@@ -42,6 +42,7 @@ impl RecoveryRelayOutcome {
     }
 
     /// The identity hold behind an adoption wait or refusal, which a durable reason may discard.
+    #[cfg(unix)]
     pub(in crate::services::discord) fn held_by(
         self,
     ) -> Option<crate::services::tui_o::cutover::IdentityError> {
