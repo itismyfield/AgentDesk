@@ -434,7 +434,7 @@ fn authenticated_pending_after_restart_needs_no_volatile_binding_and_sends_once(
     let result = r.run(&native, &sent);
     assert_eq!(sent.get(), 0, "no payload or Enter for a consumed clear");
     assert!(
-        matches!(result, InputRun::Refused(InputRefusal::Unproven)),
+        matches!(result, InputRun::Refused(InputRefusal::Unproven(_))),
         "{result:?}"
     );
 }

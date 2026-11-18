@@ -1,24 +1,41 @@
 use super::super::input::PromptReadinessKind;
-use super::{CHANGED, Proof, ledger, observe};
+use super::{CHANGED, Expiry, Proof, Unproven, ledger, observe};
 use crate::services::provider::{CancelToken, cancel_requested};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// Why a wait ended without a proof; `unproven` when no later look can supply one.
+#[derive(Debug)]
+pub(crate) struct Stopped {
+    pub(crate) error: String,
+    pub(crate) unproven: Option<Unproven>,
+}
+impl From<String> for Stopped {
+    fn from(error: String) -> Self {
+        Self {
+            error,
+            unproven: None,
+        }
+    }
+}
+
+/// A budget that ends on a transcript that only moved runs again in short, counted windows.
 pub(crate) fn prepare(
     session: &str,
     path: Option<&Path>,
     cancel: Option<&CancelToken>,
     budget: Duration,
     readiness: PromptReadinessKind,
-) -> Result<Proof, String> {
-    let deadline = Instant::now() + budget;
+) -> Result<Proof, Stopped> {
+    let mut watched = super::watched(session, path);
+    let mut deadline = Instant::now() + budget;
     let mut dialogs = super::dialog::DialogWait::new(readiness);
     loop {
         if cancel_requested(cancel) {
-            return Err(super::super::input::PROMPT_READY_CANCELLED_ERROR.into());
+            return Err(String::from(super::super::input::PROMPT_READY_CANCELLED_ERROR).into());
         }
         if let Some(refused) = crate::services::claude_tui::submission_fence::refusal() {
-            return Err(refused.to_string());
+            return Err(refused.to_string().into());
         }
         let revision = ledger().revision;
         let dialog_pending = dialogs.poll(session, cancel)?;
@@ -32,7 +49,19 @@ pub(crate) fn prepare(
             return Ok(proof);
         }
         if Instant::now() >= deadline {
-            return Err("timeout waiting for claude tui current Idle/SessionStart evidence and empty composer".into());
+            let unproven =
+                match watched.expired(|| super::super::host_input::observe_draft(session)) {
+                    Expiry::Requiet => {
+                        deadline = Instant::now() + budget.min(super::WINDOW);
+                        continue;
+                    }
+                    Expiry::Unproven(end) => Some(end),
+                    Expiry::Waits => None,
+                };
+            return Err(Stopped {
+                error: "timeout waiting for claude tui current Idle/SessionStart evidence and empty composer".into(),
+                unproven,
+            });
         }
         let state = ledger();
         if state.revision != revision {

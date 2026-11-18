@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect, useRef } from "react";
+import { Button } from "../../kit/free/button-clean";
 
 const OnboardingWizard = lazy(() => import("../OnboardingWizard"));
 
@@ -68,16 +69,11 @@ export function SettingsOnboardingOverlay({
       <div className="flex min-h-screen items-start justify-center pb-8 pt-4">
         <div ref={onboardingDialogRef} className="w-full max-w-3xl">
           <div className="mb-2 flex justify-end px-4">
-            <button
-              ref={onboardingCloseButtonRef}
-              onClick={onClose}
-              className="min-h-[44px] rounded-lg border px-4 py-2.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-accent-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--th-bg-primary)]"
-              style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-muted)" }}
-            >
+            <Button ref={onboardingCloseButtonRef} variant="secondary" size="lg" onClick={onClose}>
               {tr("닫기", "Close")}
-            </button>
+            </Button>
           </div>
-          <Suspense fallback={<div className="py-8 text-center" style={{ color: "var(--th-text-muted)" }}>{tr("불러오는 중…", "Loading…")}</div>}>
+          <Suspense fallback={<div role="status" className="py-8 text-center text-[13px] text-th-text-muted">{tr("불러오는 중…", "Loading…")}</div>}>
             <OnboardingWizard
               isKo={isKo}
               onComplete={() => {

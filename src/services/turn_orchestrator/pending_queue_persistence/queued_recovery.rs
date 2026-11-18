@@ -51,7 +51,9 @@ pub(crate) fn load_pending_queues_checked(
             // Only retained inputs no owner owes leave this file input-free; any other V2 file
             // keeps its quarantine report as before.
             SnapshotRead::ReadOnlyV2(ref v2)
-                if (!v2.retained_inputs.is_empty() || v2.unfinished_handoff.is_some())
+                if (!v2.retained_inputs.is_empty()
+                    || !v2.refused_inputs.is_empty()
+                    || v2.unfinished_handoff.is_some())
                     && !snapshot.v2_holds_input() =>
             {
                 recovery.v2_idle.push(channel);
@@ -101,7 +103,8 @@ pub(crate) fn v2_channels(provider: &ProviderKind, token_hash: &str) -> Vec<Chan
 pub(crate) struct V2HeldSources {
     /// Queued, attempted or retained inputs the owner still owes a delivery.
     pub(crate) owed: Vec<u64>,
-    /// Inputs only the settled history holds: the owner confirmed their delivery.
+    /// Inputs only the settled history holds: the owner confirmed their delivery, or refused them
+    /// for good and never sends them again.
     pub(crate) delivered: Vec<u64>,
 }
 
@@ -136,8 +139,10 @@ pub(crate) fn v2_held_sources(
         .flat_map(ids)
         .collect();
     let settled = snapshot.terminal_identities.iter();
-    let settled =
-        settled.flat_map(|terminal| terminal.identity.sources.iter().map(|s| s.message_id));
+    let refused = snapshot.refused_inputs.iter().flat_map(|r| &r.members);
+    let settled = (settled.map(|terminal| &terminal.identity))
+        .chain(refused.map(|member| &member.identity))
+        .flat_map(|identity| identity.sources.iter().map(|s| s.message_id));
     // An id still owed stays owed even when an earlier delivery of it settled.
     let delivered = settled.filter(|id| !owed.contains(id)).collect();
     V2HeldSources { owed, delivered }
