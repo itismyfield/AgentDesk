@@ -45,6 +45,8 @@ pub(crate) struct Owner {
     claim_number: u64,
     /// The front a refusal before any key returned to wait for a real wake; never persisted.
     held: Option<u64>,
+    /// The attempt whose first key its original's readiness due refused; never persisted.
+    due_refused: Option<AttemptRef>,
     /// Diagnostic identity and successful commit count for this adoption; neither authorizes writes.
     incarnation: uuid::Uuid,
     last_success_sequence: u64,
@@ -192,6 +194,7 @@ impl Owner {
             front_claim: None,
             claimed_followers: Vec::new(),
             held: None,
+            due_refused: None,
             claim_number: 0,
             incarnation: uuid::Uuid::new_v4(),
             last_success_sequence: 0,

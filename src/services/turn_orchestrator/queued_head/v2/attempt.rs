@@ -140,6 +140,7 @@ impl Owner {
             None => return Err("unknown payload phase".into()),
         }
         if self.head_outlived_due(now) {
+            self.due_refused = Some(key.clone());
             return Err("readiness_deadline".into());
         }
         let mut next = self.snapshot.clone();

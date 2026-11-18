@@ -106,7 +106,7 @@ impl Owner {
 
     /// Whether the attempted head's original reached its readiness due; its first key then never
     /// starts and the leaf settles it through its own not-sent proof.
-    pub(crate) fn head_outlived_due(&self, now: u64) -> bool {
+    pub(super) fn head_outlived_due(&self, now: u64) -> bool {
         let Some(head) = &self.snapshot.head_injection else {
             return false;
         };
@@ -114,6 +114,11 @@ impl Owner {
         (self.snapshot.readiness_holds.iter()).any(|hold| {
             hold.identity == identity && hold.fingerprint == fingerprint && now >= hold.due_at_ms
         })
+    }
+
+    /// Whether the readiness due refused `key`'s first key; its leaf's proof then ends it for good.
+    pub(crate) fn take_due_refused(&mut self, key: &AttemptRef) -> bool {
+        self.due_refused.take_if(|refused| refused == key).is_some()
     }
 
     /// Marks an attemptless front refusal's notice sent; `None` when none names `identity`.
