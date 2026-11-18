@@ -2325,14 +2325,23 @@ test.describe("Dashboard smoke tests", () => {
     await expect(runner.getByText("Example CPU", { exact: true })).toBeVisible();
     await expect(runner.getByText("Example GPU", { exact: true })).toBeVisible();
     await expect(runner.getByTestId("machine-trend-cpu").locator("svg")).toBeVisible();
+    // Trend frames sit on the theme chart surface (--bg-1), not a fixed gray.
+    const chartSurface = await page.evaluate(() => {
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = "var(--bg-1)";
+      document.body.append(probe);
+      const color = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return color;
+    });
     for (const kind of ["cpu", "memory", "disk", "gpu"]) {
       const chart = runner.getByTestId(`machine-trend-${kind}`);
-      await expect(chart).toHaveCSS("background-color", "rgb(38, 38, 38)");
+      await expect(chart).toHaveCSS("background-color", chartSurface);
       await expect(chart.locator('[data-layer="line"]')).toHaveCount(1);
       await expect(chart.locator('[data-layer="area"]')).toHaveCount(1);
     }
     const networkChart = runner.getByTestId("machine-trend-network");
-    await expect(networkChart).toHaveCSS("background-color", "rgb(38, 38, 38)");
+    await expect(networkChart).toHaveCSS("background-color", chartSurface);
     await expect(networkChart.locator('[data-layer="line"]')).toHaveCount(2);
     await expect(networkChart.locator('[data-layer="area"]')).toHaveCount(2);
     await expect(networkChart.locator('[data-layer="line"][data-series="primary"]')).toHaveAttribute("stroke", "#f472b6");
