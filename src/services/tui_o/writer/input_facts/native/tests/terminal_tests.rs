@@ -69,17 +69,14 @@ fn native_8148_terminal_strict_interrupt_cancels_without_a_foreign_barrier() {
             let f = Fixture::new();
             owned(&f, stop(content.clone()));
             let seen = projected(&f, live);
-            let found = (seen.evidence.len(), seen.barriers.len());
+            let want = (usize::from(strict), usize::from(!strict));
             assert_eq!(
-                found,
-                (usize::from(strict), usize::from(!strict)),
+                (seen.evidence.len(), seen.barriers.len()),
+                want,
                 "{content} {live}"
             );
-            assert!(
-                seen.evidence
-                    .iter()
-                    .all(|e| e.disposition == Disposition::Cancelled)
-            );
+            let cancelled = |e: &Evidence| e.disposition == Disposition::Cancelled;
+            assert!(seen.evidence.iter().all(cancelled));
         }
     }
 }

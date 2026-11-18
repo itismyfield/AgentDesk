@@ -47,10 +47,8 @@ async fn stored_interrupt_barrier_replays(boot: bool) {
         .as_ref()
         .expect("the stored barrier is superseded");
     assert_eq!(outcome.disposition, Disposition::Cancelled);
-    assert_eq!(
-        outcome.extra["native_proof"]["supersedes"]["interrupt_row"],
-        "stop"
-    );
+    let proof = &outcome.extra["native_proof"];
+    assert_eq!(proof["supersedes"]["interrupt_row"], "stop");
     assert!(saved.cleanup_complete);
     assert_eq!(saved.barrier("native-fixture").unwrap(), Some(barrier));
     let row = crate::services::discord::inflight::load_inflight_state_read_only(
