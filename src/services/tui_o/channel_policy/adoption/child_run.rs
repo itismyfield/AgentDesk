@@ -86,6 +86,11 @@ impl Candidate {
             )
             || run.binding.channel_id != channel
             || run.binding.tmux_session.is_empty()
+            || run
+                .turn
+                .as_ref()
+                .and_then(|turn| turn.2.as_deref())
+                .is_some_and(|tmux| tmux != run.binding.tmux_session)
             || !surface.matches(channel, surface.parent(), Some(kind))
             || !scope.configured(surface.parent())
             || scope.kind(surface.parent()) != Some(kind)

@@ -74,6 +74,9 @@ fn child_run_owner_and_boot_exclusion_require_a_verified_bound_run() {
     let mut wrong = run.clone();
     wrong.binding.channel_id = 43;
     assert!(!candidate.release_child_run(42, wrong));
+    let mut foreign = run.clone();
+    foreign.turn.as_mut().unwrap().2 = Some("foreign-execution".into());
+    assert!(!candidate.release_child_run(42, foreign));
     assert!(candidate.release_child_run(42, run));
     assert_eq!(boot.child(42).unwrap().unwrap().body_owner(), Some(false));
     assert!(boot.output_candidate(42).is_none());
