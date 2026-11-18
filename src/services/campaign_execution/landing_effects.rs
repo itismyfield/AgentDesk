@@ -21,11 +21,10 @@ use super::verification_run::digest_of;
 
 const CI_WAIT: &str = "landing waits for idle CI";
 
-/// Repository-scoped operations. Publication must create a new ref only, and opening must be
-/// unique for the two refs and conditional on the pinned head. The write path owns the final
-/// idle-CI check and must bound I/O. A failed write with an unknown outcome cannot be retried.
+/// Repository-scoped operations with bounded I/O. A write that may have started cannot be retried.
 pub trait LandingRemote: Send + Sync {
     fn observe(&self, target: &LandingTarget) -> io::Result<RemoteLanding>;
+    /// Atomically require an absent ref and idle CI before creating the pinned ref.
     /// False means CI changed and the ref was never written.
     fn push_new_if_idle(
         &self,
@@ -33,6 +32,7 @@ pub trait LandingRemote: Send + Sync {
         checkout: &Path,
         nonce: &str,
     ) -> io::Result<bool>;
+    /// Open once for these refs and require the pinned head.
     fn open_once(&self, target: &LandingTarget, nonce: &str) -> io::Result<OpenedPr>;
 }
 
