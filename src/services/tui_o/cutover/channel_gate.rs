@@ -124,7 +124,7 @@ impl Deciding {
     fn observed(&self, state: channel_policy::Adoption) -> Result<bool, IdentityError> {
         match self {
             Self::Reserved(_) => Ok(state.owned()),
-            Self::Adopted(_) => adopted(state).map(|()| true),
+            Self::Adopted(candidate) => adopted_by(candidate, state).map(|()| true),
             Self::Child(child) => child.body_owner_in(state).ok_or(IdentityError::ChildHeld),
         }
     }
@@ -534,6 +534,19 @@ fn outside_selection(
     Ok(legacy(reason))
 }
 
+/// [`adopted`] for `candidate`: a released late thread child is held, never refused.
+fn adopted_by(
+    candidate: &channel_policy::Candidate,
+    state: channel_policy::Adoption,
+) -> Result<(), IdentityError> {
+    match state {
+        channel_policy::Adoption::Released if candidate.late_thread_child() => {
+            Err(IdentityError::ChildHeld)
+        }
+        state => adopted(state),
+    }
+}
+
 /// A selected TUI channel's body is O's once adopted and held until then; Legacy never sends it.
 fn adopted(state: channel_policy::Adoption) -> Result<(), IdentityError> {
     use channel_policy::Adoption;
@@ -629,7 +642,7 @@ fn decide_with_snapshot(
         && (execution.permit.is_err() || !late_child)
     {
         *read = Some(Deciding::Adopted(execution.candidate.clone()));
-        adopted(execution.candidate.peek())?;
+        adopted_by(&execution.candidate, execution.candidate.peek())?;
         return Ok(BodyClaimed {
             owned: true,
             send: None,
@@ -650,7 +663,7 @@ fn decide_with_snapshot(
         return Err(IdentityError::AwaitingAdoption);
     };
     *read = Some(Deciding::Adopted(candidate.clone()));
-    adopted(candidate.peek())?;
+    adopted_by(candidate, candidate.peek())?;
     Ok(judged(candidate))
 }
 

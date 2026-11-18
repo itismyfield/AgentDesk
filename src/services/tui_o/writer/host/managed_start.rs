@@ -90,7 +90,7 @@ pub fn start_managed<I: HostIo>(
             }
             drop(reservation);
             // Read after the reservation settled, so a refusal made at this exit is seen too.
-            if matches!(ended.peek(), Adoption::Refused | Adoption::Released) {
+            if ended.refused_at_end() {
                 refusal.refused(channel, provider);
             }
             if claim.settled.load(Ordering::SeqCst) {

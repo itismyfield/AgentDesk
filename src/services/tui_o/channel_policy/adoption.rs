@@ -392,9 +392,31 @@ impl Candidate {
     pub(crate) fn release(&self, channel: u64) {
         let mut state = self.lock();
         if matches!(*state, Adoption::Pending | Adoption::Deferred) {
-            *state = Adoption::Refused;
+            // A late thread child is left to its parent's boundary path, not refused: Legacy posts
+            // only with a recorded run, and a body with none stays held until the retry.
+            if self.late_thread_child() {
+                *state = Adoption::Released;
+                tracing::info!(channel, "[tui_o] late child released before the first init");
+            } else {
+                *state = Adoption::Refused;
+                tracing::warn!(channel, "[tui_o] adoption refused before the first init");
+            }
             self.settle_first();
-            tracing::warn!(channel, "[tui_o] adoption refused before the first init");
+        }
+    }
+
+    /// A thread child reserved late: its adoption is decided at the parent's boundary.
+    pub(crate) fn late_thread_child(&self) -> bool {
+        self.late_origin && self.child_surface().is_some()
+    }
+
+    /// Whether a host that ended on this adoption ended refused: a released late thread child
+    /// waits for its boundary instead.
+    pub(crate) fn refused_at_end(&self) -> bool {
+        match self.peek() {
+            Adoption::Refused => true,
+            Adoption::Released => !self.late_thread_child(),
+            _ => false,
         }
     }
 
