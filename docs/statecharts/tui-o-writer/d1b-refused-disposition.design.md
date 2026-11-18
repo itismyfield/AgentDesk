@@ -87,6 +87,19 @@ does not read it.
   debt are gone, the 0196 row alone drives the post, so an intent with no attempt is posted on the
   next start (E12 sweep through E16) and one with an attempt keeps it and is not posted again.**
 
+## E15 call site
+
+The admission owns the normalization budget before any rollout proves it: its deadline starts at
+the admission and it holds one repair. The Codex launch that attaches its prepared execution to the
+admission (`codex/tui_session_launch/first_input.rs`) starts a bounded trust watch
+(`normalization::watch_trust`): while the admission is pending, unproved and unrepaired, it looks at
+the pane every 500 ms and, only for a selected positive trust option in the launch's managed cwd
+under the original execution context, owner, channel and spawn nonce, sends one Enter
+(`startup_dialog::normalize::repair_if_shown`, then `repair_once`). That Enter and the later binding
+repair spend the same repair; the output view the rollout proof creates keeps the admission's
+deadline and repair. The menu action is never adoption evidence: adoption still needs the proved
+rollout and the takeover's commit. Model: `NormProve`, `NormOneRepair`, `NormDeadlineKept`.
+
 ## Lifetimes
 
 - Waiting retention (E7-E12) ends in one of: O adoption and delivery (C2 receipt), or refusal and

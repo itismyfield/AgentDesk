@@ -8,10 +8,13 @@ lateVars == <<lateModal, lateBound, lateOutput, lateBoundFirst, lateJudge,
               lateCommits, lateSkips, lateEnd, lateKind, lateCheckedOutput,
               lateLife, lateSends, lateBadCommit, lateRestored,
               lateRevision, lateCheckedRevision>>
-VARIABLES ne, np, ticks, repairs, proof, cause, nb, nr, nl, retained, tomb, ever, reasonPrepared, noticeRestarts, ni
-normVars == <<ne, np, ticks, repairs, proof, cause, nb, nr, nl, retained, tomb, ever, reasonPrepared, noticeRestarts, ni>>
+VARIABLES ne, np, ticks, repairs, proof, cause, nb, nr, nl, retained, tomb, ever, reasonPrepared, noticeRestarts, ni,
+          views, enters, elapsed
+normVars == <<ne, np, ticks, repairs, proof, cause, nb, nr, nl, retained, tomb, ever, reasonPrepared, noticeRestarts, ni,
+              views, enters, elapsed>>
 NormDormant == /\ ne = 0 /\ np = 0 /\ ticks = 0 /\ repairs = 0 /\ proof = 0 /\ cause = 0
                /\ nb = 0 /\ nr = 0 /\ nl = 0 /\ retained = 0 /\ tomb = 0 /\ ever = 0 /\ reasonPrepared = 0 /\ noticeRestarts = 0 /\ ni = 0
+               /\ views = 0 /\ enters = 0 /\ elapsed = 0
 CONSTANTS Fix, Mut
 VARIABLES sel, site, root, exec, bound, store, adopt, oStart, turn, waitMark,
           otherCustody, lp, op, rowCleared, dispatchSettled, attempts, restarts,
@@ -535,88 +538,106 @@ NormInit == /\ LateCoreInit /\ lateModal = FALSE /\ lateKind = "clean" /\ ne = 0
             /\ reasonPrepared = [e \in 0..1 |-> FALSE]
             /\ noticeRestarts = [e \in 0..1 |-> 0]
             /\ ni = [e \in 0..1 |-> "none"]
+            /\ views = [e \in 0..1 |-> 0] /\ enters = [e \in 0..1 |-> 0] /\ elapsed = [e \in 0..1 |-> 0]
 NormStable == UNCHANGED <<vars, lateVars>>
 NormRepair(e) == /\ np[e] = "normalizing" /\ repairs[e] = 0 /\ ticks[e] < 3
                  /\ Fix # "noRepair"
                  /\ repairs' = [repairs EXCEPT ![e] = 1]
+                 /\ enters' = [enters EXCEPT ![e] = @ + 1]
                  /\ proof' = [proof EXCEPT ![e] = (cause[e] \in {"binding", "trust"})]
                  /\ UNCHANGED <<ne, np, ticks, cause, nb, nr, nl, retained, tomb, ever,
-                                 reasonPrepared, noticeRestarts, ni>>
+                                 reasonPrepared, noticeRestarts, ni, views, elapsed>>
 NormTick(e) == /\ np[e] = "normalizing" /\ ticks[e] < 3
                /\ ticks' = [ticks EXCEPT ![e] = IF Mut = "deadlineReset" THEN 0 ELSE @ + 1]
+               \* Capped past the deadline: one tick beyond it is all a rule needs to see.
+               /\ elapsed' = [elapsed EXCEPT ![e] = IF @ < 4 THEN @ + 1 ELSE @]
                /\ UNCHANGED <<ne, np, repairs, proof, cause, nb, nr, nl, retained, tomb, ever,
-                               reasonPrepared, noticeRestarts, ni>>
+                               reasonPrepared, noticeRestarts, ni, views, enters>>
 \* Init publication and terminal refusal take the same candidate lock; either may win at expiry.
 NormActorInit(e) == /\ ni[e] = "none"
                     /\ ((np[e] = "normalizing" /\ ~tomb[e] /\ (proof[e] \/ Mut = "earlyPublish"))
                         \/ (Mut = "actorAfterReject" /\ tomb[e] /\ proof[e]))
                     /\ ni' = [ni EXCEPT ![e] = IF proof[e] THEN "proved" ELSE "unproved"]
                     /\ UNCHANGED <<ne, np, ticks, repairs, proof, cause, nb, nr, nl, retained,
-                                    tomb, ever, reasonPrepared, noticeRestarts>>
+                                    tomb, ever, reasonPrepared, noticeRestarts, views, enters, elapsed>>
 \* A published init remains adoption evidence after expiry or a new current execution.
 NormAdopt(e) == /\ np[e] = "normalizing" /\ ni[e] # "none" /\ ~tomb[e]
                 /\ np' = [np EXCEPT ![e] = IF nb[e] = 1 THEN "posted" ELSE "adopted"]
                 /\ UNCHANGED <<ne, ticks, repairs, proof, cause, nb, nr, nl, retained, tomb, ever,
-                                reasonPrepared, noticeRestarts, ni>>
+                                reasonPrepared, noticeRestarts, ni, views, enters, elapsed>>
 NormInvalidate(e) == /\ np[e] = "normalizing" /\ cause[e] # "invalid"
                      /\ cause' = [cause EXCEPT ![e] = "invalid"]
                      /\ proof' = [proof EXCEPT ![e] = FALSE]
                      /\ UNCHANGED <<ne, np, ticks, repairs, nb, nr, nl, retained, tomb, ever,
-                                     reasonPrepared, noticeRestarts, ni>>
+                                     reasonPrepared, noticeRestarts, ni, views, enters, elapsed>>
 NormReject(e) == /\ ((np[e] = "normalizing" /\ ni[e] = "none" /\ ((~proof[e] /\ cause[e] = "invalid") \/ ticks[e] = 3))
                     \/ (Mut = "mixed" /\ np[e] = "posted"))
                  /\ np' = [np EXCEPT ![e] = "rejectPending"]
                  /\ tomb' = [tomb EXCEPT ![e] = TRUE] /\ ever' = [ever EXCEPT ![e] = TRUE]
                  /\ nl' = IF Mut = "legacy" THEN 1 ELSE nl
-                 /\ retained' = IF Mut = "retain" THEN [retained EXCEPT !["terminalCustody"] = 1] ELSE retained
-                 /\ UNCHANGED <<ne, ticks, repairs, proof, cause, nb, nr, reasonPrepared, noticeRestarts, ni>>
+                 /\ retained' = IF Mut \in {"retain", "custodyThenScrub"}
+                                 THEN [retained EXCEPT !["terminalCustody"] = 1] ELSE retained
+                 /\ UNCHANGED <<ne, ticks, repairs, proof, cause, nb, nr, reasonPrepared, noticeRestarts, ni, views, enters, elapsed>>
 \* Adoption/HTTP and reason reservation/HTTP/receipt are distinct crash boundaries.
 NormBody(e) == /\ ni[e] # "none" /\ nb[e] = 0
                /\ (~tomb[e] \/ Mut = "actorAfterReject")
                /\ nb' = [nb EXCEPT ![e] = 1]
                /\ np' = [np EXCEPT ![e] = IF np[e] = "adopted" THEN "posted" ELSE @]
                /\ UNCHANGED <<ne, ticks, repairs, proof, cause, nr, nl, retained, tomb, ever,
-                               reasonPrepared, noticeRestarts, ni>>
+                               reasonPrepared, noticeRestarts, ni, views, enters, elapsed>>
 NormReserveReason(e) == /\ np[e] = "rejectPending" /\ ~reasonPrepared[e]
                         /\ reasonPrepared' = [reasonPrepared EXCEPT ![e] = TRUE]
                         /\ UNCHANGED <<ne, np, ticks, repairs, proof, cause, nb, nr, nl, retained,
-                                        tomb, ever, noticeRestarts, ni>>
+                                        tomb, ever, noticeRestarts, ni, views, enters, elapsed>>
 NormReason(e) == /\ np[e] = "rejectPending" /\ reasonPrepared[e] /\ Mut # "noticeUnavailable"
                  /\ nr' = IF Mut = "silent" THEN nr ELSE [nr EXCEPT ![e] = @ + 1]
                  /\ np' = [np EXCEPT ![e] = "reasonEffect"]
                  /\ UNCHANGED <<ne, ticks, repairs, proof, cause, nb, nl, retained, tomb, ever,
-                                 reasonPrepared, noticeRestarts, ni>>
+                                 reasonPrepared, noticeRestarts, ni, views, enters, elapsed>>
 NormConfirm(e) == /\ np[e] = "reasonEffect" /\ np' = [np EXCEPT ![e] = "rejected"]
                   /\ UNCHANGED <<ne, ticks, repairs, proof, cause, nb, nr, nl, retained, tomb, ever,
-                                  reasonPrepared, noticeRestarts, ni>>
+                                  reasonPrepared, noticeRestarts, ni, views, enters, elapsed>>
 NormRestart(e) == /\ np[e] \in {"rejectPending", "reasonEffect", "rejected"}
                   /\ noticeRestarts[e] = 0 /\ noticeRestarts' = [noticeRestarts EXCEPT ![e] = 1]
                   /\ np' = [np EXCEPT ![e] = IF np[e] = "reasonEffect" \/
                               (np[e] = "rejectPending" /\ reasonPrepared[e])
                             THEN "noticeUncertain" ELSE @]
                   /\ UNCHANGED <<ne, ticks, repairs, proof, cause, nb, nr, nl, retained, tomb, ever,
-                                  reasonPrepared, ni>>
+                                  reasonPrepared, ni, views, enters, elapsed>>
 \* Only exact history or no-effect evidence resolves an interrupted reservation.
 NormHistory(e) == /\ np[e] = "noticeUncertain" /\ nr[e] = 1
                   /\ np' = [np EXCEPT ![e] = "reasonEffect"]
                   /\ UNCHANGED <<ne, ticks, repairs, proof, cause, nb, nr, nl, retained, tomb, ever,
-                                  reasonPrepared, noticeRestarts, ni>>
+                                  reasonPrepared, noticeRestarts, ni, views, enters, elapsed>>
 NormNoEffect(e) == /\ np[e] = "noticeUncertain" /\ (nr[e] = 0 \/ Mut = "uncertainRepost")
                    /\ np' = [np EXCEPT ![e] = "rejectPending"]
                    /\ reasonPrepared' = [reasonPrepared EXCEPT ![e] = FALSE]
                    /\ UNCHANGED <<ne, ticks, repairs, proof, cause, nb, nr, nl, retained, tomb, ever,
-                                   noticeRestarts, ni>>
+                                   noticeRestarts, ni, views, enters, elapsed>>
 NormRepeatReason(e) == /\ Mut = "reasonDuplicate" /\ np[e] = "rejected" /\ nr[e] = 1
                        /\ nr' = [nr EXCEPT ![e] = 2]
                        /\ UNCHANGED <<ne, np, ticks, repairs, proof, cause, nb, nl, retained, tomb, ever,
-                                       reasonPrepared, noticeRestarts, ni>>
+                                       reasonPrepared, noticeRestarts, ni, views, enters, elapsed>>
 \* Only NewInput admits B; store/restart never renew A's deadline or clear its tombstone.
 NormNewInput == /\ ne = 0 /\ np[0] # "normalizing"
                 /\ ne' = 1 /\ proof' = [proof EXCEPT ![1] = TRUE]
                 /\ cause' = [cause EXCEPT ![1] = "binding"]
                 /\ tomb' = IF Mut = "revive" THEN [e \in 0..1 |-> FALSE] ELSE tomb
-                /\ UNCHANGED <<np, ticks, repairs, nb, nr, nl, retained, ever, reasonPrepared, noticeRestarts, ni>>
-NormEpisodeNext(e) == NormRepair(e) \/ NormTick(e) \/ NormActorInit(e) \/ NormAdopt(e) \/ NormInvalidate(e) \/ NormReject(e) \/ NormBody(e)
+                /\ UNCHANGED <<np, ticks, repairs, nb, nr, nl, retained, ever, reasonPrepared, noticeRestarts, ni, views, enters, elapsed>>
+\* The rollout proof makes the admission's output view: it keeps the admission's deadline and its
+\* one repair, which a trust or binding repair before or after the proof spends.
+NormProve(e) == /\ np[e] = "normalizing" /\ views[e] = 0
+                /\ views' = [views EXCEPT ![e] = 1]
+                /\ repairs' = IF Mut = "proofRenewsRepair" THEN [repairs EXCEPT ![e] = 0] ELSE repairs
+                /\ ticks' = IF Mut = "proofRestartsDeadline" THEN [ticks EXCEPT ![e] = 0] ELSE ticks
+                /\ UNCHANGED <<ne, np, proof, cause, nb, nr, nl, retained, tomb, ever,
+                                reasonPrepared, noticeRestarts, ni, enters, elapsed>>
+\* A custody kept before its reason and scrubbed after it, as resume once did.
+NormScrub(e) == /\ Mut = "custodyThenScrub" /\ tomb[e] /\ retained["terminalCustody"] = 1
+                /\ retained' = [retained EXCEPT !["terminalCustody"] = 0]
+                /\ UNCHANGED <<ne, np, ticks, repairs, proof, cause, nb, nr, nl, tomb, ever,
+                                reasonPrepared, noticeRestarts, ni, views, enters, elapsed>>
+NormEpisodeNext(e) == NormRepair(e) \/ NormProve(e) \/ NormScrub(e) \/ NormTick(e) \/ NormActorInit(e) \/ NormAdopt(e) \/ NormInvalidate(e) \/ NormReject(e) \/ NormBody(e)
                      \/ NormReserveReason(e) \/ NormReason(e) \/ NormConfirm(e) \/ NormRestart(e)
                      \/ NormRepeatReason(e) \/ NormHistory(e) \/ NormNoEffect(e)
 NormNext == /\ NormStable /\ ((\E e \in 0..ne : NormEpisodeNext(e)) \/ NormNewInput)
@@ -640,6 +661,8 @@ NormExclusiveEffects == \A e \in 0..ne : ~(nb[e] > 0 /\ nr[e] > 0)
 NormNoRevival == \A e \in 0..ne : ever[e] => tomb[e]
 NormSafeAdoption == \A e \in 0..ne : np[e] \in {"adopted", "posted"} => ni[e] = "proved"
 NormNoActorAfterRejected == \A e \in 0..ne : tomb[e] => (ni[e] = "none" /\ nb[e] = 0)
+NormOneRepair == \A e \in 0..ne : enters[e] <= 1
+NormDeadlineKept == \A e \in 0..ne : np[e] = "normalizing" => elapsed[e] <= 3
 NormSettledEvidence == \A e \in 0..ne : np[e] = "rejected" => nr[e] >= 1
 NormEventuallyEnds == \A e \in 0..1 : []((e <= ne /\ np[e] = "normalizing") => <>(np[e] # "normalizing"))
 NormOutputSettles == \A e \in 0..1 : []((e <= ne /\ np[e] = "adopted") => <>(nb[e] = 1))
