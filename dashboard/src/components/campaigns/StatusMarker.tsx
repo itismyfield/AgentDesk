@@ -1,3 +1,5 @@
+import { CAMPAIGN_STAGES, campaignStageStep } from "./campaignModel";
+
 export type MarkerTone = "plan" | "open" | "progress" | "warn" | "err" | "done";
 
 /** Where a kanban status sits on the way to done: a dashed ring before ready, then a growing pie, a full disc at done. */
@@ -19,8 +21,12 @@ const NODE_MARKERS: Record<string, { tone: MarkerTone; ratio: number }> = {
   completed: { tone: "done", ratio: 1 },
   skipped: { tone: "plan", ratio: 0 },
 };
-export function nodeMarker(status: string) {
-  return NODE_MARKERS[status] ?? NODE_MARKERS.pending;
+/** A running task's pie grows with its stage on the way from investigation to the deploy check; it never reads as done. */
+export function nodeMarker(status: string, stage?: string) {
+  const marker = NODE_MARKERS[status] ?? NODE_MARKERS.pending;
+  if (status !== "running" || stage === undefined) return marker;
+  const step = campaignStageStep(stage).index;
+  return step < 0 ? marker : { tone: marker.tone, ratio: (step + 1) / (CAMPAIGN_STAGES.length + 1) };
 }
 
 const TONE_CLASS: Record<MarkerTone, string> = {

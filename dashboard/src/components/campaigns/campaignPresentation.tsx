@@ -1,8 +1,13 @@
 import type { CampaignNodeLive } from "../../api/campaigns";
+import { Badge as KitBadge, type BadgeTone } from "../../kit/free/badge-clean";
 import { COLUMN_DEFS } from "../agent-manager/kanban-utils";
 import { liveIsWorking } from "./campaignModel";
 
 export type Tr = (ko: string, en: string) => string;
+
+/** The campaign page's element styles (campaigns.css) and touch sizes, for the page and for details it opens in a
+ * drawer or sheet outside it. Inputs read at 16px below the mobile boundary so phones do not zoom. */
+export const CAMPAIGN_SCOPE = "campaigns-panel text-th-text-primary [&_[data-widget-state]]:!rounded-lg [&_button:not([class^=aui])]:min-h-11 [&_button:not([class^=aui])]:min-w-11 [&_input:not([type=checkbox]):not([class^=aui])]:min-h-11 [&_select]:min-h-11 [&_summary]:min-h-11 [&_summary]:py-3 [&_label:not([class^=aui]):has(input[type=checkbox])]:min-h-11 max-[899px]:[&_input:not([type=checkbox]):not([class^=aui])]:!text-base max-[899px]:[&_select]:!text-base max-[899px]:[&_textarea:not([class^=aui])]:!text-base [&_h2]:text-2xl [&_h2]:font-semibold [&_h2]:tracking-tight [&_h3]:font-semibold [&_h3]:[word-break:keep-all] [&_h4]:text-xs [&_h4]:font-medium [&_a]:inline-flex [&_a]:min-h-11 [&_a]:max-w-full [&_a]:items-center [&_a]:py-2 [&_a]:[overflow-wrap:anywhere]";
 export const LABELS: Record<string, [string, string]> = {
   planned: ["계획됨", "Planned"],
   active: ["활성", "Active"],
@@ -23,8 +28,16 @@ export const COLORS: Record<string, string> = {
   skipped: "#94a3b8",
   pending: "#94a3b8",
 };
-export function Badge({ status, tr }: { status: string; tr: Tr }) {
-  return <span className={`campaign-badge campaign-status-${status}`}>{LABELS[status] ? tr(...LABELS[status]) : status}</span>;
+// Ledger and server statuses share one tone scale: working, done, waiting on someone, failed.
+const STATUS_TONES: Record<string, BadgeTone> = {
+  active: "info", running: "info", assigned: "info", verifying: "info",
+  completed: "success", succeeded: "success", complete: "success",
+  blocked: "warning", paused: "warning", waiting: "warning", stopping: "warning", unable_to_progress: "warning", needs_inspection: "warning", interrupted: "warning",
+  failed: "danger",
+};
+/** A status as a kit badge: tone and dot by status (a live dot while running), the words given or the ledger label. */
+export function Badge({ status, tr, label, title }: { status: string; tr: Tr; label?: string; title?: string }) {
+  return <KitBadge tone={STATUS_TONES[status] ?? "neutral"} dot live={status === "running"} title={title}>{label ?? (LABELS[status] ? tr(...LABELS[status]) : status)}</KitBadge>;
 }
 
 const DISPATCH_TYPES: Record<string, [string, string]> = {
@@ -101,5 +114,5 @@ export function LiveChip({ live, tr }: { live: CampaignNodeLive | undefined; tr:
       : live.queue_status === "pending"
         ? queueLabel(live, tr)
         : `${tr("카드", "Card")} ${cardStatusLabel(live.card_status, tr)}`;
-  return <span className={`campaign-live${working ? " is-working" : ""}`} title={tr("연결된 이슈 카드의 지금 상태", "What the linked issue card is doing now")}>{text}</span>;
+  return <KitBadge className="campaign-live max-w-full" tone={working ? "info" : "neutral"} live={working} title={tr("연결된 이슈 카드의 지금 상태", "What the linked issue card is doing now")}>{text}</KitBadge>;
 }

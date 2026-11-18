@@ -1,15 +1,17 @@
+import { Plus, RefreshCw } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { CampaignNodeLive } from "../../api/campaigns";
 import {
   isDefinitiveAnswer, sendServerCampaignCommand, serverCampaignRejection,
   type ServerCampaignCommand, type ServerCampaignDocument,
 } from "../../api/serverCampaigns";
+import { Button } from "../../kit/free/button-clean";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import { readLocalStorageValue, writeLocalStorageValue } from "../../lib/useLocalStorage";
 import { Select } from "../common/Select";
 import { WidgetState } from "../common/WidgetState";
 import CampaignPageHeader, { type CampaignTab } from "./CampaignPageHeader";
-import type { Tr } from "./campaignPresentation";
+import { CAMPAIGN_SCOPE, type Tr } from "./campaignPresentation";
 import type { CampaignDraft } from "./CampaignNodeDetails";
 import LegacyCampaignView from "./LegacyCampaignView";
 import type { ControlCommand } from "./ServerCampaignControls";
@@ -225,7 +227,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const holds = useServerCampaignHolds(summaries, listLoaded, tab === "queue");
   const campaign = campaigns.find((value) => value.id === selectedId);
   const selectorTitle = tr("캠페인 선택", "Select campaign");
-  const selector = <label className="campaign-selector"><span>{selectorTitle}</span><Select aria-label={selectorTitle} className="font-semibold" value={mode === "server" ? `${SERVER_OPTION}${serverSelected}` : campaign?.id ?? ""} onChange={(event) => {
+  const selector = <label className="campaign-selector !flex w-full min-w-0 sm:w-[min(26rem,100%)]"><span className="sr-only">{selectorTitle}</span><Select aria-label={selectorTitle} className="!text-sm font-semibold" value={mode === "server" ? `${SERVER_OPTION}${serverSelected}` : campaign?.id ?? ""} onChange={(event) => {
     const { value } = event.target;
     if (value.startsWith(SERVER_OPTION)) selectServer(value.slice(SERVER_OPTION.length));
     else { setMode("legacy"); setSelectedId(value); setNode(null); }
@@ -237,10 +239,10 @@ export default function CampaignsPanel({ language }: { language: string }) {
   </Select></label>;
 
   const actions = tab === "campaigns" && <>
-    <button type="button" disabled={serverDown} onClick={() => openDraft(NEW_DRAFT, () => createDraft(null))}>{tr("새 캠페인", "New campaign")}</button>
-    <button type="button" disabled={loading} onClick={refreshAll}>{loading ? tr("불러오는 중…", "Refreshing…") : tr("새로고침", "Refresh")}</button>
+    <Button variant="secondary" icon={<Plus aria-hidden />} disabled={serverDown} onClick={() => openDraft(NEW_DRAFT, () => createDraft(null))}>{tr("새 캠페인", "New campaign")}</Button>
+    <Button variant="secondary" icon={<RefreshCw aria-hidden />} disabled={loading} onClick={refreshAll}>{loading ? tr("불러오는 중…", "Refreshing…") : tr("새로고침", "Refresh")}</Button>
   </>;
-  return <section className="campaigns-panel [&_[data-widget-state]]:!rounded-lg min-w-0 gap-4 text-sm text-th-text-primary sm:gap-6 [&_button:not([class^=aui])]:min-h-11 [&_button:not([class^=aui])]:min-w-11 [&_input:not([type=checkbox]):not([class^=aui])]:min-h-11 [&_select]:min-h-11 [&_summary]:min-h-11 [&_summary]:py-3 [&_label:not([class^=aui]):has(input[type=checkbox])]:min-h-11 [&_h2]:text-2xl [&_h2]:font-semibold [&_h2]:tracking-tight [&_h3]:font-semibold [&_h4]:text-xs [&_h4]:font-medium [&_a]:inline-flex [&_a]:min-h-11 [&_a]:max-w-full [&_a]:items-center [&_a]:py-2 [&_a]:[overflow-wrap:anywhere]">
+  return <section className={`${CAMPAIGN_SCOPE} min-w-0 gap-4 text-sm sm:gap-6`}>
     <CampaignPageHeader tab={tab} onTab={setTab} actions={actions} tr={tr} />
     {tab === "queue" ? <div id="campaign-panel-queue" role="tabpanel" aria-labelledby="campaign-tab-queue" className="min-w-0">
       <Suspense fallback={<WidgetState kind="loading" title={tr("대기열을 불러오고 있습니다.", "Loading the queue.")} />}>
@@ -258,8 +260,8 @@ export default function CampaignsPanel({ language }: { language: string }) {
       {summaries.length > 0 && <ServerCampaignList summaries={summaries} selectedId={mode === "server" ? serverSelected : null} onSelect={selectServer} tr={tr} />}
       {mode === "legacy" && campaign && <LegacyCampaignView campaign={campaign} live={live[campaign.id] ?? NO_LIVE} selector={selector} refreshedAt={refreshedAt} checkedRead={checkedRead} language={language}
         drafts={drafts} onDraftChange={onDraftChange} node={node} onNode={setNode} onSaved={onSaved} tr={tr} />}
-      {mode === "server" && serverSelected && <div className="campaign-main gap-3 rounded-lg p-3 max-sm:border-0 max-sm:bg-transparent max-sm:p-0 sm:gap-4 sm:p-5">
-        <div className="campaign-row campaign-summary-header">{selector}</div>
+      {mode === "server" && serverSelected && <div className="campaign-main grid min-w-0 gap-3 sm:gap-4">
+        <div className="campaign-summary-header flex min-w-0">{selector}</div>
         {detail?.error && <WidgetState kind={serverDoc ? "stale" : "error"} title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error + (serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
         {serverDoc ? <>
           {renderForm(editKey(serverDoc.view.campaign_id), !commandAvailability(serverDoc.view, "edit_definition", connection).enabled)}

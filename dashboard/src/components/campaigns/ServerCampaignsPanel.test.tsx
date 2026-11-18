@@ -67,8 +67,9 @@ afterEach(async () => {
 async function render() {
   await act(async () => root.render(<CampaignsPanel language="en" />));
 }
+// A selected task's commands sit in the docked detail pane, outside the panel.
 function buttonByText(text: string) {
-  return [...container.querySelectorAll("button")].find((candidate) => candidate.textContent === text);
+  return [...document.querySelectorAll("button")].find((candidate) => candidate.textContent === text);
 }
 async function click(element: Element | undefined | null) {
   if (!element) throw new Error("missing element");
@@ -176,7 +177,8 @@ it("opens a deep link to a server task in a new browser and copies only the feed
   window.history.replaceState(null, "", "/campaigns?mode=server&campaign=release&node=B");
   serve(fixtures.reviewWaiting);
   await render();
-  expect(container.querySelector(".campaign-inspector h4")?.textContent).toBe("Dependent work");
+  // The task opens in the docked pane, outside the panel.
+  expect(document.querySelector('aside[aria-label="Selected task"] .campaign-inspector h4')?.textContent).toBe("Dependent work");
   await click(container.querySelector('[data-node-id="C"]'));
   expect(window.location.search).toBe("?mode=server&campaign=release&node=C");
   const feedback = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Copy for feedback"]')!.value.split("\n");
@@ -565,18 +567,22 @@ it("copies a definition into an untouched create form but never over a draft bei
   expect(container.textContent).toContain("A new campaign is already being written, so nothing was copied.");
 });
 
-it("brings a selected task's details into view on a narrow screen", async () => {
-  const scroll = vi.fn();
-  Object.defineProperty(window, "matchMedia", { configurable: true, value: (query: string) => ({ matches: query === "(max-width: 900px)" }) });
-  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scroll });
-  serve(fixtures.reviewWaiting);
-  await render();
-  await openServer();
-  await click(container.querySelector('[data-node-id="C"]'));
-  expect(scroll).toHaveBeenCalled();
-  expect(scroll.mock.contexts.at(-1)).toBe(container.querySelector(".campaign-inspector"));
-  Reflect.deleteProperty(window, "matchMedia");
-  Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+it("opens a selected task's details as a sheet over the page on a narrow screen", async () => {
+  const query = (text: string) => ({ matches: text === "(max-width: 899px)", media: text, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+  const original = Object.getOwnPropertyDescriptor(window, "matchMedia");
+  Object.defineProperty(window, "matchMedia", { configurable: true, value: query });
+  try {
+    serve(fixtures.reviewWaiting);
+    await render();
+    await openServer();
+    expect(document.querySelector('aside[aria-label="Selected task"]')).toBeNull();
+    await click(container.querySelector('[data-node-id="C"]'));
+    const sheet = document.querySelector('[role="dialog"][aria-label="Selected task"]');
+    expect(sheet?.querySelector(".campaign-inspector h4")?.textContent).toBe(fixtures.reviewWaiting.definition.nodes.find((node) => node.id === "C")!.title);
+    expect(container.querySelector(".campaign-inspector")).toBeNull();
+  } finally {
+    if (original) Object.defineProperty(window, "matchMedia", original); else Reflect.deleteProperty(window, "matchMedia");
+  }
 });
 
 it("keeps both the create's later edits and an edit draft opened meanwhile for the new campaign", async () => {

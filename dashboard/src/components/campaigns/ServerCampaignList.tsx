@@ -1,5 +1,5 @@
 import type { ServerCampaignSummary } from "../../api/serverCampaigns";
-import type { Tr } from "./campaignPresentation";
+import { Badge, type Tr } from "./campaignPresentation";
 import { displayText } from "./serverCampaignModel";
 
 /** Server campaigns with what the server reported for each: no client-side status. */
@@ -10,7 +10,7 @@ export default function ServerCampaignList({ summaries, selectedId, onSelect, tr
     {summaries.map(({ definition, view }) => <li key={view.campaign_id}>
       <button type="button" aria-pressed={view.campaign_id === selectedId} onClick={() => onSelect(view.campaign_id)}>
         <strong>{definition.title}</strong>
-        <span className={`campaign-badge campaign-status-${view.display}`}>{displayText(view, tr)}</span>
+        <span><Badge status={view.display} label={displayText(view, tr)} tr={tr} /></span>
         <small>{definition.repository === "adk" ? "AgentDesk" : "CookingHeart"} · {definition.goal}</small>
         <small>{tr("서버 관측", "Server as of")} {new Date(view.as_of).toLocaleString()}</small>
       </button>
