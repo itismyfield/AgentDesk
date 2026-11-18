@@ -473,6 +473,7 @@ section이 달라도 같은 목적지를 중복 지정할 수 없다. 이동은 
 `domain::tool_text`는 foundation에서 민감값 마스킹과 allowed-tools 정규화의 실제 구현·정적 tool catalog를 소유하며, 기존 Discord formatting 경로는 같은 함수·catalog를 재노출한다.
 `domain::dispatch_summary`가 dispatch result·context JSON의 상태별 요약 문구와 160자 절단을 실제 소유하며 foundation이다. `dispatch`는 재수출하지 않고 DB kanban·dispatch 조회·HTTP 소비자가 정본 경로를 직접 쓴다.
 `utils::bridge_deadline`이 동기 bridge op의 thread-local deadline 저장·중첩 복원·잔여 계산을 소유하며 adapter다. `engine::loader`의 `ArmedDeadline`은 interrupt slot과 무장 순서만 남기고, `utils::async_bridge`와 engine ops는 이 정본을 직접 읽는다.
+`domain::fix_safety`가 FixSafety enum과 6개 wire 값·parse·제한 순위를 실제 소유하며 vocabulary다. `cli::doctor::contract`는 같은 타입을 재노출하고 `services::health_diagnostics`는 정본 경로를 직접 쓴다.
 `domain::human_input`이 HumanInputDelivery·HumanInputError·ExternalHold와 정적 hold 사유를 실제 소유하며 vocabulary다. 기존 health 경로는 같은 타입을 재노출하고 Registry·HumanInputRequest·전달 실행은 기존 Discord owner에 유지한다.
 
 S04에서 정적 catalog helper의 실제 구현은 `domain::provider`로, 문자열 naming 계산은 foundation child `domain::provider::naming`으로 옮겼다. config·auth·cache·runtime registry 조회는 `services::provider::ProviderRuntimeExt` adapter 경계가 소유한다. 기존 서비스 경로는 같은 값·함수·trait의 재수출이며 legacy 소비자는 유지한다. 별도 crate 추출 완료를 선언하지 않는다.

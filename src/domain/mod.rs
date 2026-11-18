@@ -8,6 +8,7 @@ pub(crate) mod conversation;
 pub(crate) mod dispatch_route;
 pub(crate) mod dispatch_summary;
 pub(crate) mod file_sync;
+pub(crate) mod fix_safety;
 pub(crate) mod host_observation;
 pub(crate) mod human_input;
 pub(crate) mod intake_consent;

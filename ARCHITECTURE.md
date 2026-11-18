@@ -482,6 +482,7 @@ src/
 │   ├── dispatch_route.rs
 │   ├── dispatch_summary.rs
 │   ├── file_sync.rs
+│   ├── fix_safety.rs
 │   ├── host_observation.rs
 │   ├── human_input.rs
 │   ├── intake_consent.rs
