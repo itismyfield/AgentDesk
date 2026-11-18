@@ -13,6 +13,29 @@ use crate::services::campaign_execution::{
 
 type Sources = Vec<(String, Vec<u8>)>;
 
+#[test]
+fn unconfirmed_effort_does_not_resolve_minimal_roles() {
+    let inputs = sources();
+    assert!(matches!(
+        resolve(&settings(), scope(), &inputs),
+        ProfileResolution::Resolved { .. }
+    ));
+    for index in 0..2 {
+        for effort in ["unknown", "default", " unknown ", " default "] {
+            let mut observations = settings();
+            observations.roles[index].effort = Some(effort.into());
+            assert!(
+                matches!(
+                    resolve(&observations, scope(), &inputs),
+                    ProfileResolution::Unsupported { role: Some(role), .. }
+                        if role == observations.roles[index].role
+                ),
+                "unconfirmed effort {effort:?} accepted"
+            );
+        }
+    }
+}
+
 fn sources() -> Sources {
     REQUIRED_RULE_SOURCES
         .iter()

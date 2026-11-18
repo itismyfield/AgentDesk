@@ -83,6 +83,7 @@ pub fn resolve_minimal_adk_profile(
             || resolved.source.trim().is_empty()
             || resolved.account_ref.is_some()
             || matches!(resolved.model.as_str(), "unknown" | "default")
+            || matches!(resolved.effort.trim(), "unknown" | "default")
         {
             return ProfileResolution::Unsupported {
                 role: Some(role),
