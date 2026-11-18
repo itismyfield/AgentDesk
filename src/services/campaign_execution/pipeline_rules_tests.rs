@@ -14,16 +14,9 @@ use crate::services::campaign_execution::{
 type Sources = Vec<(String, Vec<u8>)>;
 
 fn sources() -> Sources {
-    let root = std::env::var_os("ADK_PIPELINE_SKILL_ROOT");
     REQUIRED_RULE_SOURCES
         .iter()
-        .map(|id| {
-            let bytes = root.as_ref().map_or_else(
-                || format!("rule:{id}\n").into_bytes(),
-                |root| std::fs::read(std::path::Path::new(root).join(id)).unwrap(),
-            );
-            ((*id).into(), bytes)
-        })
+        .map(|id| ((*id).into(), format!("rule:{id}\n").into_bytes()))
         .collect()
 }
 
