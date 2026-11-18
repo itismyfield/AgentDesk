@@ -44,6 +44,11 @@ class Recovery(Runner):
         self.tick(1000, budget=config)
         self.assertEqual(before, {p.relative_to(self.state): p.read_bytes() for p in self.state.rglob("*") if p.is_file()})
         self.assertEqual(self.tick(1001)["status"], "UNEVALUABLE")
+        self.submit("waiting-with-status")
+        before = {p.relative_to(self.state): p.read_bytes() for p in self.state.rglob("*") if p.is_file()}
+        with mock.patch.object(channel_lock, "acquire", side_effect=AssertionError("lock taken")):
+            self.assertEqual(self.tick(1002, budget=config)["status"], "DEFERRED_BUDGET")
+        self.assertEqual(before, {p.relative_to(self.state): p.read_bytes() for p in self.state.rglob("*") if p.is_file()})
 
     def test_budget_deferred_request_retries_next_day_once_and_can_be_superseded(self):
         self.submit("waiting")

@@ -81,6 +81,16 @@ class Publication(unittest.TestCase):
         state = read_json(self.state / "status.json", {})
         self.assertEqual(state["heartbeat_at"], now + 180)
 
+    def test_usage_paused_tick_refreshes_heartbeat_without_new_turns(self):
+        now = time.time()
+        with mock.patch.dict("os.environ", {"FAKE_TURNS": "null"}):
+            self.tick(now)
+        self.assertEqual(len(self.driven()), 1)
+        self.submit("while-paused")
+        self.assertEqual(self.tick(now + 180)["status"], "DEFERRED_BUDGET")
+        self.assertEqual(len(self.driven()), 1)
+        self.assertEqual(read_json(self.state / "status.json", {})["heartbeat_at"], now + 180)
+
     def test_completed_assertion_contract_is_frozen_during_republication(self):
         value = report()
         value["assertion_contract"] = {"E-1": ["delivery"]}

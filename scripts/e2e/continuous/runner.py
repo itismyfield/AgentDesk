@@ -141,6 +141,15 @@ def _preflight(state, config, request, recovering=False):
     return None
 
 
+def _deferred(state, config, request, now, reason, run_id=None):
+    if (state / "status.json").is_file():
+        amounts = _selection(state, config, request)[-1]
+        if budget.configured(config.get("budget") or {}, amounts) is None:
+            publication.heartbeat(state, config, now)
+    result = {"status": "DEFERRED_BUDGET", "reason": reason}
+    return {**result, "run_id": run_id} if run_id else result
+
+
 def _verdict(rows):
     statuses = {row["status"] for row in rows}
     if "FAIL" in statuses:
@@ -270,7 +279,7 @@ def tick(config_path, now=None):
             publication.heartbeat(state, config, now)
         return {"status": "NOT_DUE"}
     if refused := _preflight(state, config, request or {"kind": "scheduled"}, recovering=recovery):
-        return {"status": "DEFERRED_BUDGET", "reason": refused}
+        return _deferred(state, config, request or {"kind": "scheduled"}, now, refused)
     run_id = str(uuid.uuid4())
     try:
         lease = channel_lock.acquire(state, config["resource"])
@@ -284,7 +293,7 @@ def tick(config_path, now=None):
             publication.heartbeat(state, config, now)
             return {"status": "NOT_DUE"}
         if refused := _preflight(state, config, request):
-            return {"status": "DEFERRED_BUDGET", "reason": refused, "run_id": run_id}
+            return _deferred(state, config, request, now, refused, run_id)
         record = _run(lease, state, config, request, run_id, now)
         return {"status": record["result"], "run_id": run_id}
 
