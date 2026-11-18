@@ -362,7 +362,7 @@ pub(super) async fn relay_recovery_body_to_placeholder(
 ) -> RecoveryRelayOutcome {
     let marker = match o_recovery_marker(state, channel_id) {
         Ok(marker) => marker,
-        Err(error) => return RecoveryRelayOutcome::held(&error),
+        Err(error) => return noted(shared, state, RecoveryRelayOutcome::held(&error)).await,
     };
     #[cfg(unix)]
     if marker.is_some()
@@ -404,6 +404,27 @@ pub(super) async fn relay_recovery_body_to_placeholder(
         Err(error) => RecoveryRelayOutcome::held(&error),
     };
     noted(shared, state, outcome).await
+}
+
+/// A restore relay whose refused body's reason intent is durable: the row and its actor go with
+/// nothing delivered, settled or completed. False for any other outcome.
+pub(super) async fn retire_refused(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    outcome: RecoveryRelayOutcome,
+    branch: &'static str,
+) -> bool {
+    if outcome != RecoveryRelayOutcome::AdoptionRefused {
+        return false;
+    }
+    let dispose = super::recovery_paths::restart::dispose_recovery_relay_outcome;
+    let text = state.full_response.as_str();
+    dispose(
+        shared, provider, state, outcome, false, branch, branch, text, false,
+    )
+    .await;
+    true
 }
 
 /// `relay_recovery_terminal_notice` for notices that carry the recovered body.
