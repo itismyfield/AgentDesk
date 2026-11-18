@@ -16,6 +16,7 @@ import {
   resolveThemePreference,
 } from "./app/themePreferences";
 import "./styles/main.css";
+import "./styles/agentdesk-ui-kit-bridge.css";
 import "./styles/main.components.css";
 
 const prefersDarkScheme = window.matchMedia("(prefers-color-scheme: dark)").matches;

@@ -9,11 +9,12 @@ import {
   machineApiOrigin, machineConnection, machineOnline, machineReadinessReason, machineRole,
 } from "./SettingsMachineModel";
 import type { SettingsTr } from "./SettingsPanelTypes";
+import { SETTINGS_CARD_CLASS, SETTINGS_TRAY_CLASS } from "./SettingsPrimitives";
 
 function Detail({ label, children }: { label: string; children: ReactNode }) {
   return <div className="min-w-0">
-    <dt className="text-xs text-th-text-muted">{label}</dt>
-    <dd className="mt-1 break-words text-sm [overflow-wrap:anywhere]">{children}</dd>
+    <dt className="text-xs leading-4 text-th-text-muted">{label}</dt>
+    <dd className="mt-0.5 break-words text-[13px] leading-5 [overflow-wrap:anywhere]">{children}</dd>
   </div>;
 }
 
@@ -50,13 +51,15 @@ export function SettingsMachineCard({ node, localId, leaseTtlSeconds, stale, ses
   const unknown = tr("미확인", "Unknown");
   const DeviceIcon = role === "Hub" ? Server : Monitor;
 
-  return <article className="min-w-0 rounded-lg border border-th-border bg-th-bg-surface p-4 sm:p-5"
+  return <article className={`${SETTINGS_CARD_CLASS} p-4`}
     data-testid={`machine-node-${node.instance_id}`} aria-label={node.hostname || node.instance_id}>
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="flex min-w-0 items-start gap-3">
-        <DeviceIcon size={22} className="mt-1 shrink-0 text-th-text-muted" aria-hidden />
+        <span aria-hidden className="grid size-9 shrink-0 place-items-center rounded-[var(--r-sm)] bg-[var(--bg-1)] text-th-text-muted shadow-[inset_0_0_0_0.5px_var(--line)]">
+          <DeviceIcon size={18} />
+        </span>
         <div className="min-w-0">
-          <h3 className="break-words font-semibold [overflow-wrap:anywhere]">{node.hostname || node.instance_id}</h3>
+          <h3 className="break-words text-sm font-medium leading-5 [overflow-wrap:anywhere]">{node.hostname || node.instance_id}</h3>
           <div className="mt-2 flex flex-wrap gap-2">
             <StatusBadge tone={role === "Hub" ? "info" : "idle"}>{role || nodeRoleLabel(node.effective_role, tr)}</StatusBadge>
             <StatusBadge tone={online ? "healthy" : "warning"}>
@@ -74,9 +77,9 @@ export function SettingsMachineCard({ node, localId, leaseTtlSeconds, stale, ses
       "저장된 이력을 불러오지 못했어요. 다음에 다시 시도해요.",
       "Saved history is unavailable. It will be retried on the next refresh.",
     )}</p>}
-    <details className="mt-4 rounded-md border border-th-border p-3">
-      <summary className="flex min-h-11 cursor-pointer items-center text-xs font-medium">{tr("장치 및 연결 상세", "Device and connection details")}</summary>
-    <dl className="mt-3 grid min-w-0 grid-cols-1 gap-x-5 gap-y-3 sm:grid-cols-2">
+    <details className={`mt-4 px-3 py-1 ${SETTINGS_TRAY_CLASS}`}>
+      <summary className="flex min-h-11 cursor-pointer items-center text-xs font-medium text-th-text-secondary hover:text-th-text-primary">{tr("장치 및 연결 상세", "Device and connection details")}</summary>
+    <dl className="mb-3 mt-1 grid min-w-0 grid-cols-1 gap-x-5 gap-y-3 @min-[37.5rem]:grid-cols-2">
       <Detail label={tr("장치 ID", "Device ID")}>{node.instance_id}</Detail>
       <Detail label={tr("등록된 API 주소", "Advertised API address")}>{origin || tr("등록 안 됨", "Not advertised")}</Detail>
       <Detail label={tr("프로세스 ID", "Process ID")}>{node.process_id ?? unknown}</Detail>
@@ -86,9 +89,9 @@ export function SettingsMachineCard({ node, localId, leaseTtlSeconds, stale, ses
       <Detail label={tr("장치 라벨", "Device labels")}>{node.labels?.join(", ") || tr("없음", "None")}</Detail>
     </dl>
     </details>
-    <div className="mt-4 border-t border-th-border pt-4">
-      <h4 className="text-sm font-semibold">{tr("실행 준비 상태", "Execution readiness")}</h4>
-      <dl className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+    <div className="mt-4 pt-4 shadow-[inset_0_0.5px_0_var(--line)]">
+      <h4 className="text-[13px] font-medium leading-5">{tr("실행 준비 상태", "Execution readiness")}</h4>
+      <dl className="mt-3 grid grid-cols-2 gap-3 @min-[37.5rem]:grid-cols-4">
         <Detail label={tr("실행 중", "Executing")}>{node.execution_active ?? unknown}</Detail>
         <Detail label={tr("점유 / 용량", "Occupied / capacity")}>{occupied ?? "—"} / {slots ?? "—"}</Detail>
         <Detail label={tr("활성 세션", "Active sessions")}>{sessionCountsUnavailable ? unknown : node.active_session_count ?? unknown}</Detail>
@@ -97,7 +100,7 @@ export function SettingsMachineCard({ node, localId, leaseTtlSeconds, stale, ses
       <p className="mt-3 text-xs text-th-text-muted">{tr("실행 검사 시각", "Execution probe time")}: {machineTimestamp(probe?.observed_at_ms, tr)}</p>
       <div className="mt-3 space-y-2">
         <h5 className="text-xs font-medium">{tr("설치된 프로바이더 CLI", "Installed provider CLIs")} <span className="text-th-text-muted">{installedProviders.length}</span></h5>
-        {installedProviders.length === 0 && <p className="text-sm text-th-text-muted">{probe?.providers
+        {installedProviders.length === 0 && <p className="text-[13px] text-th-text-muted">{probe?.providers
           ? tr("설치가 확인된 프로바이더 CLI가 없습니다.", "No installed provider CLIs were detected.")
           : tr("CLI 설치 정보를 기다리는 중입니다.", "Waiting for CLI installation information.")}</p>}
         {installedProviders.map(([provider, evidence]) => {

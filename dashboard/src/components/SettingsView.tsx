@@ -267,6 +267,7 @@ export default function SettingsView({ settings, onSave, isKo, onNotify }: Setti
       setQuery={setQuery}
       showNoMatches={catalog.queryActive && !catalog.filteredNavItems.some((item) => item.id === activePanel)}
       loadFailed={loadFailed}
+      wide={activePanel === "workflow" && editorOpen}
       saveBar={(
         <SettingsSaveBar
           changeCount={changeCount}
