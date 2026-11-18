@@ -58,6 +58,22 @@ class ReleaseTokenWiringTests(unittest.TestCase):
             with self.subTest(target=target):
                 self.assertEqual(observe(REPO, "build-release.sh", "release", target=target)["errors"], [])
 
+    def test_release_source_is_checked_under_the_token_before_cargo_build(self):
+        for script in ("build-release.sh", "deploy-release.sh"):
+            for profile in ("release", "release-fast"):
+                with self.subTest(script=script, profile=profile):
+                    report = observe(REPO, script, profile)
+                    self.assertEqual(report["errors"], [], report)
+                    events = report["events"]
+                    build = next(i for i, event in enumerate(events)
+                                 if event["command"] == "cargo" and event["argv"][0] == "build")
+                    probes = [(i, event) for i, event in enumerate(events) if event.get("source_probe")]
+                    self.assertTrue(probes)
+                    self.assertTrue(all(i < build and event["held"] for i, event in probes), probes)
+                    self.assertEqual(events[build]["checkout_sha"], "a" * 40)
+                    self.assertTrue(all(event["checkout_sha"] is None for event in report["cargo"]
+                                        if event["argv"][0] != "build"))
+
     def test_config_resolver_stub_accepts_only_its_fixture_path_and_root(self):
         with tempfile.TemporaryDirectory(prefix="release-resolver-stub-") as temp:
             root = Path(temp).resolve()
@@ -180,15 +196,15 @@ from pathlib import Path
 sys.path.insert(0, {str(REPO / 'scripts')!r})
 import build_token as bt
 assert Path(sys.argv[1]).resolve() == Path.cwd() / 'scripts/build_token.py'
-assert sys.argv[2] == '--'
-assert 'cargo' in sys.argv[3:]
+assert sys.argv[2:4] == ['--witness-release-source', '--']
+assert 'cargo' in sys.argv[4:]
 bt._HOMEBREW_BIN = {str(self.brew)!r}
 real_open = os.open
 def sealed_open(path, *args, **kwargs):
     assert 'adk-build-token.lock' not in str(path), 'canonical token forbidden'
     return real_open(path, *args, **kwargs)
 os.open = sealed_open
-raise SystemExit(bt.run(sys.argv[3:], path={str(self.root / 'token')!r}))
+raise SystemExit(bt.run(sys.argv[4:], path={str(self.root / 'token')!r}, witness_release_source=True))
 """)
         self.executable(self.bin / "cargo", f"#!{sys.executable}\n" +
                         "import json,os;json.dump(dict(os.environ),open(os.environ['ENV_OUTPUT'],'w'))\n")
@@ -239,6 +255,7 @@ _binary_would_revert_o_ledger() {{ return 1; }}
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertNotIn("command not found", result.stderr)
                     seen = json.loads(self.output.read_text())
+                    self.assertEqual(seen["ADK_RELEASE_CHECKOUT_SHA"], "")
                     self.assertEqual(seen["PATH"], self.env["PATH"])
                     self.assertEqual(seen["SCCACHE_CACHE_SIZE"], "15G")
                     if installed:

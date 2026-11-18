@@ -390,14 +390,14 @@ class DeployPreflightTokenTests(unittest.TestCase):
             driver = root / "driver.py"
             driver.write_text(_SEAL + """
 assert sys.argv[2] == "scripts/build_token.py"
-assert sys.argv[3] == "--"
-assert sys.argv[4:6] == ["bash", "-c"]
+assert sys.argv[3:5] == ["--witness-release-source", "--"]
+assert sys.argv[5:7] == ["bash", "-c"]
 open(sys.argv[-1] + ".waiter", "w").write(str(os.getpid()))
-command = sys.argv[4:-1]
+command = sys.argv[5:-1]
 idx = command.index("cargo")
 assert command[idx:idx + 2] == ["cargo", "build"]
 command[idx:] = [sys.executable, "-c", "from pathlib import Path; Path(" + repr(sys.argv[-1]) + ").touch()"]
-raise SystemExit(bt.main([sys.argv[2], "--"] + command))
+raise SystemExit(bt.main(sys.argv[2:5] + command))
 """)
             script = root / "scenario.sh"
             script.write_text("""set -eu

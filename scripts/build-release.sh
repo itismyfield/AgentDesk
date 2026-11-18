@@ -76,7 +76,7 @@ fi
 
 echo "[1/3] Building common AgentDesk binary for $TARGET ($BUILD_PROFILE)"
 # Keep the shared build-token contract and its separate contention diagnostics.
-ADK_BUILD_TOKEN_DIAG_FD=3 "$PYTHON" "$SCRIPT_DIR/build_token.py" -- \
+ADK_BUILD_TOKEN_DIAG_FD=3 "$PYTHON" "$SCRIPT_DIR/build_token.py" --witness-release-source -- \
   cargo build --locked --profile "$BUILD_PROFILE" --bin agentdesk "${CARGO_TARGET_ARGS[@]}" 3>&2
 
 echo "[2/3] Dashboard ($DASHBOARD_MODE)"

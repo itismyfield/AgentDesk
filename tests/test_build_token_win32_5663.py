@@ -119,7 +119,9 @@ class PortableWin32BuildTokenContractTests(unittest.TestCase):
                     activate.assert_not_called()
 
     def test_public_api_fails_closed_off_windows_and_has_no_authority_override(self):
-        self.assertEqual(list(inspect.signature(module.supervise_windows).parameters), ["command", "child_env"])
+        parameters = inspect.signature(module.supervise_windows).parameters
+        self.assertEqual(list(parameters), ["command", "child_env", "prepare_env"])
+        self.assertEqual(parameters["prepare_env"].kind, inspect.Parameter.KEYWORD_ONLY)
         if sys.platform != "win32":
             with self.assertRaises(module.BuildTokenWindowsError):
                 module.supervise_windows(["dummy"], {})
@@ -165,6 +167,25 @@ class PortableWin32BuildTokenContractTests(unittest.TestCase):
         cancelled = ["create-suspended"]
         self.assertFalse(module._assign_and_resume(_CoreApi(), object(), mock.Mock(), cancelled, lambda: True))
         self.assertEqual(cancelled, ["create-suspended", "assign-job"])
+    def test_environment_is_prepared_after_mutex_and_before_spawn(self):
+        api, trace = _CoreApi(), []
+        api.waits.insert(0, module.WAIT_TIMEOUT)
+
+        def prepare(env):
+            self.assertEqual(api.waits, [module.WAIT_OBJECT_0])
+            self.assertEqual(api.released, 0)
+            env["ADK_RELEASE_CHECKOUT_SHA"] = "a" * 40
+            trace.append("source-ready")
+
+        with mock.patch.object(module.shutil, "which", return_value="dummy.exe"), \
+                mock.patch.object(api, "create_suspended", wraps=api.create_suspended) as spawn:
+            self.assertEqual(module._supervise_windows(
+                ["dummy"], {}, api, trace=trace, prepare_env=prepare), 37)
+        self.assertEqual(trace[:2], ["source-ready", "create-suspended"])
+        environment = "".join(spawn.call_args.args[2]).split("\0")
+        self.assertIn("ADK_RELEASE_CHECKOUT_SHA=" + "a" * 40, environment)
+        self.assertEqual(api.released, 1)
+
     def test_create_assign_resume_wait_failures_cleanup_every_handle_once(self):
         prepared = ("dummy.exe", object(), object())
         for failure in ("create", "assign", "resume", "wait"):

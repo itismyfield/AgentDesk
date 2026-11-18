@@ -11,6 +11,7 @@ import tempfile
 ROOT = Path(os.environ["DRY_ROOT"]).resolve()
 NAME = Path(sys.argv[0]).name
 ARGS = sys.argv[1:]
+SOURCE_PROBE = ["-c", "core.fsmonitor=false", "-c", "core.trustctime=true", "-c", "core.checkStat=default"]
 
 
 def blocked(reason):
@@ -49,7 +50,10 @@ if NAME == "cargo":
         profile = ARGS[ARGS.index("--profile") + 1]
     marker = os.environ.get("ADK_BUILD_TOKEN_HOLDER", "")
     event.update(holder=marker, held=token_held(marker),
-                 release="--release" in ARGS or "-r" in ARGS or profile.startswith("release"))
+                 release="--release" in ARGS or "-r" in ARGS or profile.startswith("release"),
+                 checkout_sha=os.environ.get("ADK_RELEASE_CHECKOUT_SHA"))
+elif NAME == "git" and ARGS[2:8] == SOURCE_PROBE:
+    event.update(source_probe=True, held=token_held(os.environ.get("ADK_BUILD_TOKEN_HOLDER", "")))
 with (ROOT / "events.jsonl").open("a") as log:
     log.write(json.dumps(event) + "\n")
 
@@ -89,9 +93,20 @@ elif NAME == "git":
     if len(ARGS) < 3 or ARGS[0] != "-C":
         blocked(f"unexpected git: {ARGS}")
     local(ARGS[1])
-    if ARGS[2:] == ["rev-parse", "HEAD"]:
+    tail = ARGS[2:]
+    if tail[:6] == SOURCE_PROBE:
+        tail = tail[6:]
+        if tail == ["rev-parse", "--show-toplevel"]:
+            print(ROOT / "repo")
+        elif tail == ["rev-parse", "--verify", "HEAD^{commit}"]:
+            print("a" * 40)
+        elif tail == ["ls-files", "--stage", "-v", "-z"]:
+            sys.stdout.write("H 100644 " + "b" * 40 + " 0\tbuild.rs\0")
+        elif tail != ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"]:
+            blocked(f"unexpected source probe: {tail}")
+    elif tail == ["rev-parse", "HEAD"]:
         print("0" * 40)
-    elif ARGS[2:4] != ["status", "--porcelain"]:
+    elif tail[:2] != ["status", "--porcelain"]:
         blocked(f"unexpected git: {ARGS}")
 elif NAME == "dirname":
     print(os.path.dirname(ARGS[0]) or ".")

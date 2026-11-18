@@ -41,6 +41,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -59,6 +60,7 @@ LEASE_ENV = "ADK_BUILD_TOKEN_LEASE"
 # "<dev>:<ino>:<pid>:<ps lstart>" of the token-holding wrapper, set in its child's env; the
 # start time rejects a reused pid. Refusal only: a forged marker can refuse, never lock.
 HOLDER_ENV = "ADK_BUILD_TOKEN_HOLDER"
+CHECKOUT_SHA_ENV = "ADK_RELEASE_CHECKOUT_SHA"
 # Opt-out for the sccache activation below: these spellings (trimmed, case-folded)
 # turn it off, anything else -- unset included -- leaves it on.
 SCCACHE_OPT_OUT_ENV = "ADK_BUILD_TOKEN_SCCACHE"
@@ -634,8 +636,48 @@ def apply_sccache_env(env: dict[str, str]) -> None:
     env["RUSTC_WRAPPER"] = sccache
 
 
+def _release_checkout_sha(env: Mapping[str, str]) -> str:
+    root = os.getcwd()
+    git_env = {**env, "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1",
+               "GIT_NO_REPLACE_OBJECTS": "1"}
+    for name in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        git_env.pop(name, None)
+
+    def git(*args: str) -> bytes:
+        return subprocess.run(
+            ["git", "-C", root, "-c", "core.fsmonitor=false", "-c", "core.trustctime=true",
+             "-c", "core.checkStat=default", *args],
+            env=git_env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            check=True, timeout=5,
+        ).stdout
+
+    try:
+        top = os.fsdecode(git("rev-parse", "--show-toplevel").rstrip(b"\r\n"))
+        if not top or not os.path.samefile(top, root):
+            return ""
+        sha = git("rev-parse", "--verify", "HEAD^{commit}").rstrip(b"\r\n")
+        if not re.fullmatch(b"[0-9a-f]{40}", sha):
+            return ""
+        if git("status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"):
+            return ""
+        entries = git("ls-files", "--stage", "-v", "-z").split(b"\0")
+        if len(entries) < 2 or entries[-1] or not all(
+                entry.startswith((b"H 100644 ", b"H 100755 ")) for entry in entries[:-1]):
+            return ""
+        if git("rev-parse", "--verify", "HEAD^{commit}").rstrip(b"\r\n") == sha:
+            return sha.decode("ascii")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return ""
+
+
+def _set_release_checkout_sha(env: dict[str, str]) -> None:
+    env[CHECKOUT_SHA_ENV] = _release_checkout_sha(env)
+
+
 def run(command: Sequence[str], env: Mapping[str, str] | None = None,
-        path: str = CANONICAL_TOKEN_PATH, *, delegate_lease: bool = False) -> int:
+        path: str = CANONICAL_TOKEN_PATH, *, delegate_lease: bool = False,
+        witness_release_source: bool = False) -> int:
     """Run `command` while holding the build token at `path`."""
     child_env = dict(os.environ if env is None else env)
     carrier = os.environ.get(LEASE_ENV)  # Caller env= is never incoming authority.
@@ -646,6 +688,8 @@ def run(command: Sequence[str], env: Mapping[str, str] | None = None,
             return EXIT_TOKEN_UNUSABLE
         from build_token_win32 import BuildTokenWindowsError, supervise_windows
         try:
+            if witness_release_source:
+                return supervise_windows(list(command), child_env, prepare_env=_set_release_checkout_sha)
             return supervise_windows(list(command), child_env)
         except BuildTokenWindowsError as exc:
             print(f"build token: {exc}", file=sys.stderr)
@@ -666,6 +710,8 @@ def run(command: Sequence[str], env: Mapping[str, str] | None = None,
                 assert_live_token(fd, path)
                 held = os.fstat(fd)
                 child_env[HOLDER_ENV] = f"{held.st_dev}:{held.st_ino}:{os.getpid()}:{start}"
+                if witness_release_source:
+                    _set_release_checkout_sha(child_env)
                 rc = run_protected(command, child_env, supervisor, fd if delegate_lease else None)
         except BuildTokenTimeout as exc:
             print(f"build token: {exc}", file=sys.stderr)
@@ -702,7 +748,8 @@ def main(argv: Sequence[str]) -> int:
         print(args[2])
         return 0
     delegate = len(args) > 1 and args[1] == "--delegate-lease"
-    if delegate:  # Only before --; everything after -- remains command argv.
+    witness = args[1:2] == ["--witness-release-source"]
+    if delegate or witness:  # Only before --; everything after -- remains command argv.
         del args[1]
     if args[1:] == ["--refuse-if-nested"]:  # No command: exit status is the verdict.
         return EXIT_NESTED if nested_holder(CANONICAL_TOKEN_PATH, os.environ) is not None else 0
@@ -711,7 +758,7 @@ def main(argv: Sequence[str]) -> int:
     except BuildTokenError as exc:
         print(f"build token: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    return run(command, delegate_lease=delegate)
+    return run(command, delegate_lease=delegate, witness_release_source=witness)
 
 
 if __name__ == "__main__":

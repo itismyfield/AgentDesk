@@ -2773,12 +2773,12 @@ if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ "$PEER_BINARY_ACCEPTED" != 1 ]; th
     if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
         echo "▸ Building release binary..."
         # Recheck under the token: unwrapped/residual builders are still unsafe (#5818).
-        (cd "$REPO" && python3 scripts/build_token.py -- bash -c \
+        (cd "$REPO" && python3 scripts/build_token.py --witness-release-source -- bash -c \
             '. "$1"; shift; _preflight_resource_contention || exit 1; exec "$@"' \
             bash "$SCRIPT_DIR/_defaults.sh" cargo build --release --bin agentdesk)
     else
         echo "▸ Building ${DEPLOY_BUILD_PROFILE} binary (opt-in fast deploy profile)..."
-        (cd "$REPO" && python3 scripts/build_token.py -- bash -c \
+        (cd "$REPO" && python3 scripts/build_token.py --witness-release-source -- bash -c \
             '. "$1"; shift; _preflight_resource_contention || exit 1; exec "$@"' \
             bash "$SCRIPT_DIR/_defaults.sh" cargo build --profile "$DEPLOY_BUILD_PROFILE" --bin agentdesk)
     fi
