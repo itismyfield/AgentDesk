@@ -1,6 +1,5 @@
-//! A readiness hold gives the owner's unattempted front one fixed deadline. At that deadline the
-//! owner refuses the front for good without an attempt, unless a reserve took it first: the
-//! reserve and the refusal are both actor turns, so exactly one of them wins.
+//! A readiness hold gives the owner's unattempted front one fixed deadline; there the owner refuses
+//! it without an attempt unless a reserve won first. Both are actor turns, so exactly one wins.
 use super::super::v2_types::readiness_hold::{FrontRef, ReadinessHold, RefusedFront};
 use super::*;
 use crate::db::turns::TerminalOutcome;
@@ -12,9 +11,8 @@ fn hold_key(item: &PendingQueueItem) -> (QueueIdentity, String) {
 }
 
 impl Owner {
-    /// Records the first readiness hold of the unattempted `front` and returns it; a later hold of
-    /// the same original returns the stored one, so no read, probe or re-grant moves its due.
-    /// Only tests record a hold until the Busy-held intake does.
+    /// Records the first hold of the unattempted `front`; a later hold of the same original returns
+    /// the stored one, so its due never moves. Only tests record it until Busy-held intake does.
     #[cfg(test)]
     pub(crate) fn hold_readiness(
         &mut self,
@@ -54,9 +52,8 @@ impl Owner {
             .find(|hold| hold.identity == identity && hold.fingerprint == fingerprint)
     }
 
-    /// Refuses the front `expected` holds once it expired, in one commit: its unit leaves the
-    /// queue, each origin owes a Failed receipt, and only identities, fingerprints and one notice
-    /// stay. `Ok(false)` when a reserve, another front or generation, or the clock says no.
+    /// Refuses the expired front `expected` holds in one commit: its unit leaves, origins fail,
+    /// and only sources, fingerprints and one notice stay. `Ok(false)` when no longer that front.
     pub(crate) fn refuse_readiness_front(
         &mut self,
         expected: &ReadinessHold,
