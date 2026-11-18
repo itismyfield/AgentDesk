@@ -11,6 +11,7 @@ use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::OStore;
 
+pub(super) mod child_run;
 pub(super) mod claude;
 pub(super) mod codex;
 
@@ -106,6 +107,24 @@ fn reservation_boundary<I: HostIo>(
 }
 
 pub(crate) async fn activate<I: HostIo>(
+    io: &I,
+    channel: u64,
+    provider: ShadowProvider,
+    store: &OStore,
+    log: &I::Bindings,
+    candidate: &Candidate,
+    gate: &OwnershipGate,
+) -> bool {
+    loop {
+        if attempt(io, channel, provider, store, log, candidate, gate).await {
+            return true;
+        }
+        if !child_run::parked(candidate).await {
+            return false;
+        }
+    }
+}
+async fn attempt<I: HostIo>(
     io: &I,
     channel: u64,
     provider: ShadowProvider,

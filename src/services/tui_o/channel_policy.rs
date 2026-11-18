@@ -18,7 +18,7 @@ mod adoption;
 mod children;
 pub(crate) use adoption::{
     Adoption, BodyClaimed, Candidate, ClaimReason, FirstAdmission, FirstPause, FirstProof,
-    LateBoundary, LegacySend, Site, first_nonce_id, first_prompt_digest,
+    LateBoundary, LegacyRun, LegacySend, Site, first_nonce_id, first_prompt_digest,
 };
 #[cfg(test)]
 pub(crate) use adoption::{
@@ -449,6 +449,7 @@ impl BootChannels {
             .map(|view| view.candidate)
             .or_else(|| self.candidate(channel).cloned())
             .or_else(|| Some(self.child(channel)?.ok()?.candidate))
+            .filter(|candidate| !candidate.child_parked())
             .map(|candidate| candidate.with_init_scope(self.init_scope_view()))
     }
 
