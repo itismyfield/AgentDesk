@@ -1,0 +1,2 @@
+key: campaign-approval-gate
+| `campaign-execution` approval gate (#7438 M1 model) | `735880f5d7359e00693476cbfc35d88013363eeb` + planned M1 gate contract | Eight binding omissions, duplicate acceptance and omitted-edit OFF overwrite are expected RED; Before combines the three boundaries | Model only; prod implementation awaits FILES scope approval. Normal full/Chart GREEN, 13/13 cfg expected matched; target A→B→A preserves full-key approval history. [Report and entrypoints](campaign-execution/approval-gate.report.md). |
