@@ -1,30 +1,29 @@
 //! Configured Herdr input prepares before admission; other hosts retain lazy delivery.
 use super::{
-    HealthRegistry, HumanInputRequest, RouteResponse, delivery_response, observed_delivery,
-    observed_execution, preflight_human_input,
+    HealthRegistry, HumanInputRequest, RouteResponse, ThreadTurnRuntime, delivery_response,
+    observed_delivery, observed_execution, preflight_human_input,
 };
 use crate::services::imsg_reply::{AdmissionInput, ReplyObligation, admission};
 use sqlx::PgPool;
 
 pub(super) async fn deliver(
     pool: &PgPool,
-    registry: &HealthRegistry,
+    (registry, thread): (&HealthRegistry, Option<&ThreadTurnRuntime>),
     input: &AdmissionInput<'_>,
     request: HumanInputRequest,
     line: Option<&str>,
     reply: ReplyObligation,
 ) -> RouteResponse {
     let channel = request.channel_id;
-    if !crate::config::session_hosts::has_herdr_endpoint(channel.get())
-        || !crate::services::discord::owner_takes_start(&request.provider, channel.get())
+    if thread.is_none()
+        && (!crate::config::session_hosts::has_herdr_endpoint(channel.get())
+            || !crate::services::discord::owner_takes_start(&request.provider, channel.get()))
     {
         return existing_delivery(pool, registry, input, request, line, reply).await;
     }
     let admission_source = "imessage";
     let identity = format!("guid:{}", input.origin_id);
-    if let Err(error) =
-        preflight_human_input(registry, channel, &request.provider, input.author_id).await
-    {
+    if let Err(error) = super::preflight_delivery(registry, thread, &request).await {
         super::super::imessage_input_notice::not_echoed(
             line,
             channel.get(),
@@ -38,7 +37,7 @@ pub(super) async fn deliver(
         return response;
     }
     let prepared = match registry
-        .prepare_external_human_input(request, Some(reply))
+        .prepare_external_human_input_on(request, Some(reply), thread)
         .await
     {
         Ok(prepared) => prepared,

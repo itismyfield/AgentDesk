@@ -620,6 +620,8 @@ src/
 │   │   │   ├── legacy_origin_tests.rs
 │   │   │   ├── origin_admission.rs
 │   │   │   └── pg_tests.rs
+│   │   ├── agents_turn_target/
+│   │   │   └── thread.rs
 │   │   ├── auth/
 │   │   │   ├── tailnet_peer.rs
 │   │   │   └── tailnet_peer_tests.rs
@@ -1819,6 +1821,7 @@ src/
 │   │   │   ├── stall_verdict.rs
 │   │   │   ├── tail_evidence.rs
 │   │   │   ├── test_support.rs
+│   │   │   ├── thread_turn.rs
 │   │   │   ├── tmux_preflight.rs
 │   │   │   ├── transcript_binding_stall.rs
 │   │   │   ├── turn_deliver.rs
@@ -2506,6 +2509,8 @@ src/
 │   │   │   │   │   └── clear_execute_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests/
 │   │   │   │   │   └── restart_resume_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_http_start_tests/
+│   │   │   │   │   └── thread_ingress_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests/
 │   │   │   │   │   └── clear_execute_tests.rs
 │   │   │   │   ├── provider_isolation/
