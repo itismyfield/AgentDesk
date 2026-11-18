@@ -88,6 +88,7 @@ pub(crate) enum ReadyRefusal {
 pub(crate) fn ready_payload() -> Result<(), ReadyRefusal> {
     #[cfg(unix)]
     crate::services::tui_input::routine_model::before_current_payload()
+        .inspect_err(|reason| vetoed(reason))
         .map_err(ReadyRefusal::Target)?;
     let Some(scope) = current() else {
         return Ok(());
@@ -545,7 +546,8 @@ pub(crate) fn argv_payload<R>(
     #[cfg(unix)]
     crate::services::tui_input::routine_model::before_payload(&serde_json::json!({
         "host":"tmux", "owner":context.tmux_session, "execution_nonce":context.execution_nonce,
-    }))?;
+    }))
+    .inspect_err(|reason| vetoed(reason))?;
     crate::services::tui_input::writer_lease::admits("tmux", &context.tmux_session)?;
     if let Some(scope) = current() {
         if context.provider != "codex"

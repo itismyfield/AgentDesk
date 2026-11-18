@@ -23,6 +23,15 @@ impl Drop for Restore {
         CURRENT.with(|s| *s.borrow_mut() = self.0.take());
     }
 }
+/// The owner's pump executes its leaf on another thread; carry this turn's model requirement too.
+pub(crate) fn carry<T, R>(run: impl FnOnce(T) -> R + Send) -> impl FnOnce(T) -> R + Send {
+    let state = CURRENT.with(|s| s.borrow().clone());
+    move |input| {
+        let _restore = Restore(CURRENT.with(|s| std::mem::replace(&mut *s.borrow_mut(), state)));
+        run(input)
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn scope<R>(requirement: Requirement, run: impl FnOnce() -> R) -> R {
     scope_with_publisher(requirement, None, run)
@@ -109,7 +118,7 @@ pub(crate) fn prepared(
         "claude" => args
             .windows(2)
             .any(|p| p[0] == "--resume" && p[1] == session),
-        "codex" => args.first().is_some_and(|a| a == "resume") && args.iter().any(|a| a == session),
+        "codex" => codex_resumed(args, session),
         _ => false,
     };
     if model != Some(wanted.model.as_str()) || (wanted.resume.is_some() && !resumed) {
@@ -128,6 +137,18 @@ pub(crate) fn prepared(
         ),
     };
     save(&proof)
+}
+fn codex_resumed(args: &[String], session: &str) -> bool {
+    let Some(end) = args.iter().position(|a| a == "--") else {
+        return false;
+    };
+    let mut options = args[..end].iter().map(String::as_str);
+    let first = options.next();
+    let command = match first {
+        Some("--dangerously-bypass-hook-trust") => options.next(),
+        other => other,
+    };
+    command == Some("resume") && options.next_back() == Some(session)
 }
 fn save(proof: &Proof) -> Result<(), String> {
     let path = path(&proof.tmux);

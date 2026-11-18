@@ -2130,3 +2130,6 @@ fn busy_native_pin_submitted_write_arms_before_its_answer_observer() {
 
 #[path = "owner_input_busy_race_tests.rs"]
 mod busy_race_tests;
+
+#[path = "owner_input_routine_model_tests.rs"]
+mod routine_model_effect_tests;

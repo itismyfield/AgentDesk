@@ -1582,6 +1582,7 @@ fn submit(
     prepared: PreparedPayload,
     leaf: effect::Leaf,
 ) -> Result<(), String> {
+    let leaf: effect::Leaf = Box::new(crate::services::tui_input::routine_model::carry(leaf));
     let submitted = pump::submit_front(mailbox, front, prepared, clock, leaf);
     match tokio::runtime::Handle::current().block_on(submitted)? {
         Completion::Submitted => Ok(()),

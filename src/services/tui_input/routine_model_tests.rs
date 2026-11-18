@@ -114,6 +114,11 @@ fn routine_codex_model_never_substitutes_fresh_for_a_required_resume() {
         model: "codex-b".into(),
         resume: Some("native-codex".into()),
     };
+    let options = crate::services::codex::CodexLaunchOptions::new("hello")
+        .with_resume_session_id(Some("native-codex"))
+        .with_model(Some("codex-b"));
+    let mut args = crate::services::codex::build_codex_tui_args(&options);
+    args.insert(0, "--dangerously-bypass-hook-trust".into());
     scope(wanted.clone(), || {
         assert!(
             prepared(
@@ -126,20 +131,7 @@ fn routine_codex_model_never_substitutes_fresh_for_a_required_resume() {
             )
             .is_err()
         );
-        prepared(
-            "codex",
-            &wanted.tmux,
-            "native-codex",
-            true,
-            "nonce",
-            &[
-                "resume".into(),
-                "native-codex".into(),
-                "-m".into(),
-                "codex-b".into(),
-            ],
-        )
-        .unwrap();
+        prepared("codex", &wanted.tmux, "native-codex", true, "nonce", &args).unwrap();
         assert!(bind_session("codex", &wanted.tmux, "another-nonce", "native-codex").is_err());
         assert!(bind_session("codex", &wanted.tmux, "nonce", "another-native").is_err());
         assert!(matches(
