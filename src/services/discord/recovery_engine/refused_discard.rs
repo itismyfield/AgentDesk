@@ -24,6 +24,20 @@ pub(in crate::services::discord) fn identity(
     )
 }
 
+/// The first reason `row`'s episode already holds, as an intent or a receipt. It closes the
+/// episode: the body is discarded reusing it and never copied, whatever the adoption reads now.
+pub(in crate::services::discord) async fn closed(
+    pool: &PgPool,
+    provider: &ProviderKind,
+    row: &inflight::InflightTurnState,
+) -> Result<Option<(Identity, Reason)>, String> {
+    let Some(id) = identity(provider, row) else {
+        return Ok(None);
+    };
+    let stored = disposition::record(pool, &id).await?;
+    Ok(stored.map(|(reason, _)| (id, reason)))
+}
+
 /// Persists a refused row's reason intent; nothing of its body may go before this succeeds.
 pub(in crate::services::discord) async fn persist(
     pool: &PgPool,
@@ -38,7 +52,7 @@ pub(in crate::services::discord) async fn discard_retained(
     pool: &PgPool,
     provider: &ProviderKind,
     channel: u64,
-) -> Vec<Identity> {
+) -> Vec<(Identity, Reason)> {
     let mut discarded = Vec::new();
     for snapshot in inflight::herdr_body_debt::retained(provider, channel) {
         let Some(id) = identity(provider, &snapshot.row) else {
@@ -54,7 +68,7 @@ pub(in crate::services::discord) async fn discard_retained(
             Err(error) => Err(error),
         };
         match removed {
-            Ok(()) => discarded.push(id),
+            Ok(()) => discarded.push((id, Reason::AdoptionRefused)),
             Err(error) => {
                 tracing::warn!(channel_id = channel, %error, "refused body snapshot stays")
             }
@@ -104,20 +118,6 @@ pub(in crate::services::discord) async fn discard_episode(
     tx.commit().await.map_err(error)
 }
 
-/// Posts each refused reason once; an intent that already holds an attempt is left to
-/// reconciliation, and a failed post leaves the intent for the next start.
-pub(in crate::services::discord) async fn post(
-    http: &Arc<serenity::Http>,
-    pool: &PgPool,
-    ids: &[Identity],
-) {
-    let intents: Vec<_> = ids
-        .iter()
-        .map(|id| (id.clone(), Reason::AdoptionRefused))
-        .collect();
-    post_intents(http, pool, &intents).await;
-}
-
 /// Boot: discards the refused channels' snapshots, then posts every intent no attempt holds;
 /// the row, body and debt may be gone, so the intent alone drives its first post.
 pub(in crate::services::discord) fn resume(
@@ -137,13 +137,19 @@ pub(in crate::services::discord) fn resume(
             discard_retained(&pool, &provider, channel).await;
         }
         match disposition::unposted(&pool).await {
-            Ok(intents) => post_intents(&http, &pool, &intents).await,
+            Ok(intents) => post(&http, &pool, &intents).await,
             Err(error) => tracing::warn!(%error, "tui rejection intents stay for the next start"),
         }
     });
 }
 
-async fn post_intents(http: &Arc<serenity::Http>, pool: &PgPool, intents: &[(Identity, Reason)]) {
+/// Posts each stored reason once. An intent that already holds an attempt keeps it and is not
+/// posted again; only a proven no-effect frees it for the next start.
+pub(in crate::services::discord) async fn post(
+    http: &Arc<serenity::Http>,
+    pool: &PgPool,
+    intents: &[(Identity, Reason)],
+) {
     if intents.is_empty() {
         return;
     }

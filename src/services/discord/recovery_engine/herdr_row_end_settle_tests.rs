@@ -782,6 +782,75 @@ fn a_waiting_body_kept_as_debt_is_discarded_with_one_reason_once_refused_pg() {
     );
 }
 
+#[test]
+fn a_reason_stored_before_a_restart_closes_the_waiting_row_without_a_copy_pg() {
+    const CHANNEL: u64 = 1_479_671_399_000_172;
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_reason_stored_before_a_restart_closes_the_waiting_row_without_a_copy_pg"
+        ),
+        CHANNEL,
+        ProviderKind::Claude,
+        Owner::Refused,
+        |rig| async move {
+            let run = Run::start(&rig, routed_claude(CHANNEL)).await;
+            run.relay.set(|pane| pane.exited = true);
+            // The old process stops once its reason intent is durable, before the row clear.
+            let cut = super::super::on_while("before_clear", || Box::pin(async { panic!("cut") }));
+            run.pass().await;
+            drop(cut);
+            assert!(run.durable().is_some(), "the cut left the row");
+            // The next boot restores no refusal: the channel waits on a late adoption again.
+            let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+            *snapshot.candidate(CHANNEL).unwrap().lock() =
+                crate::services::tui_o::channel_policy::Adoption::Deferred;
+            run.pass().await;
+            assert!(run.durable().is_none(), "the closed row is released");
+            assert!(debts(&run).is_empty(), "a reasoned body is never copied");
+            assert_reason_once(&run, &run.row).await;
+            run.close().await;
+        },
+    );
+}
+
+#[test]
+fn a_reason_landing_before_the_copy_keeps_the_waiting_body_uncopied_pg() {
+    const CHANNEL: u64 = 1_479_671_399_000_173;
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_reason_landing_before_the_copy_keeps_the_waiting_body_uncopied_pg"
+        ),
+        CHANNEL,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            use crate::services::discord::recovery_engine::refused_discard;
+            let run = Run::start(&rig, routed_claude(CHANNEL)).await;
+            run.relay.set(|pane| pane.exited = true);
+            let id = refused_discard::identity(&run.provider, &run.row).unwrap();
+            // Another consumer's reason lands after the pass read none, before its copy.
+            let pool = run.pool.clone();
+            let landed = super::super::on_while("before_archive", move || {
+                let (pool, id) = (pool.clone(), id.clone());
+                Box::pin(async move { refused_discard::persist(&pool, &id).await.unwrap() })
+            });
+            run.pass().await;
+            drop(landed);
+            assert!(
+                run.durable().is_some(),
+                "the uncopied row waits for its close"
+            );
+            assert!(debts(&run).is_empty(), "a reasoned body is never copied");
+            run.pass().await;
+            assert!(run.durable().is_none() && debts(&run).is_empty());
+            assert_reason_once(&run, &run.row).await;
+            run.close().await;
+        },
+    );
+}
+
 fn routed_claude(channel: u64) -> Setup {
     Setup {
         provider: ProviderKind::Claude,

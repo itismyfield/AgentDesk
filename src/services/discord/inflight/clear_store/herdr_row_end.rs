@@ -1,5 +1,5 @@
 //! Exact prior-process Herdr row clear after notice, O evidence, a durable body archive, or a
-//! refused adoption's persisted reason intent.
+//! durable reason intent: a refused adoption's new one, or one the episode already held.
 
 use super::*;
 
@@ -17,14 +17,16 @@ impl InflightTurnState {
         self.clear_restarted_herdr(provider, current_generation, gate)
     }
 
-    /// Clears a row whose adoption is still Refused under the row lock, once its reason intent
-    /// is durable; nothing of the body is kept.
+    /// Clears a row once its reason intent is durable; nothing of the body is kept. An intent
+    /// `stored` before this pass closes the episode; a new one still needs Refused under the lock.
     pub(in crate::services::discord) fn clear_restarted_herdr_refused(
         &self,
         provider: &ProviderKind,
         current_generation: u64,
+        stored: bool,
     ) -> GuardedClearOutcome {
-        self.clear_restarted_herdr(provider, current_generation, Gate::Refused)
+        let gate = if stored { Gate::Closed } else { Gate::Refused };
+        self.clear_restarted_herdr(provider, current_generation, gate)
     }
 
     pub(in crate::services::discord) fn clear_restarted_herdr_body(
@@ -109,6 +111,8 @@ enum Gate<'a> {
     Notice,
     Silent,
     Refused,
+    /// The episode held a durable reason before this pass, so no adoption state keeps its row.
+    Closed,
     Debt(&'a super::super::herdr_body_debt::Archived),
 }
 
@@ -124,12 +128,14 @@ fn debt_eligible(ownership: Result<bool, crate::services::tui_o::cutover::Identi
 
 impl InflightTurnState {
     /// Snapshots only this exact restarted row while its canonical file lock remains held.
+    /// A body whose episode `closed` reads as already holding a reason is not copied.
     pub(in crate::services::discord) fn archive_restarted_herdr_body(
         &self,
         provider: &ProviderKind,
         current: u64,
         evidence: serde_json::Value,
         recovery_notice: String,
+        closed: impl FnOnce(&InflightTurnState) -> Result<bool, String>,
     ) -> Result<super::super::herdr_body_debt::Archived, String> {
         let root = inflight_runtime_root().ok_or("body archive has no inflight root")?;
         let path = inflight_state_path(&root, provider, self.channel_id);
@@ -140,6 +146,10 @@ impl InflightTurnState {
                 serde_json::from_str(&data).map_err(|e| e.to_string())?;
             if raw_before_start_receipt(&data) || !matches_restarted(self, &fresh, current) {
                 return Err("body archive episode changed".into());
+            }
+            // Read under the row's lock and before the adoption's, which no database read may hold.
+            if closed(&fresh)? {
+                return Err("body archive episode already holds a reason".into());
             }
             // The last ownership check and the publish share the adoption's lock.
             let observe = crate::services::tui_o::cutover::with_peeked_o_output;

@@ -238,13 +238,17 @@ async fn settle_row(
     let seen = observe(pool, &shared.token_hash, provider, &row).await?;
     use crate::services::tui_o::cutover::IdentityError::{AdoptionRefused, AwaitingAdoption};
     let ownership = o_owns_output(&row);
-    // A waiting adoption keeps the body as debt; a refused one discards it with one reason.
-    let held_body = ownership == Err(AwaitingAdoption);
-    let refused = ownership == Err(AdoptionRefused);
-    if ownership.is_err() && !held_body && !refused {
+    if !matches!(ownership, Ok(_) | Err(AwaitingAdoption | AdoptionRefused)) {
         return Err("o_owner_unreadable");
     }
-    let o_owned = ownership == Ok(true);
+    // A reason the episode already holds closes it: the body is discarded whatever the adoption
+    // reads now, and the stored reason is reused.
+    let closed = super::refused_discard::closed(pool, provider, &row).await;
+    let closed = closed.map_err(|_| "reason_unreadable")?;
+    // A waiting adoption keeps the body as debt; a refused one discards it with one reason.
+    let refused = closed.is_some() || ownership == Err(AdoptionRefused);
+    let held_body = !refused && ownership == Err(AwaitingAdoption);
+    let o_owned = !refused && ownership == Ok(true);
     let settle = outcome::settle(provider, &row, &seen.outcome, seen.idle, o_owned);
     let silent = settle == Settle::Silent;
     let http = if !silent || held_body || refused {
@@ -268,8 +272,15 @@ async fn settle_row(
             return Err("debt_body_unreadable");
         };
         let (snapshot, owner) = (row.clone(), provider.clone());
-        let archive =
-            move || snapshot.archive_restarted_herdr_body(&owner, current, evidence, body);
+        let (runtime, reasons) = (tokio::runtime::Handle::current(), pool.clone());
+        let archive = move || {
+            // The same lookup again among the archive's last checks, under the row's lock.
+            let closed = |fresh: &inflight::InflightTurnState| {
+                let stored = super::refused_discard::closed(&reasons, &owner, fresh);
+                runtime.block_on(stored).map(|reason| reason.is_some())
+            };
+            snapshot.archive_restarted_herdr_body(&owner, current, evidence, body, closed)
+        };
         Some(
             tokio::task::spawn_blocking(archive)
                 .await
@@ -292,13 +303,19 @@ async fn settle_row(
         }
     }
     // The refused body's reason intent is durable before anything of the row is released.
-    let reason = if refused {
-        let id = super::refused_discard::identity(provider, &row).ok_or("reason_unkeyed")?;
-        let persisted = super::refused_discard::persist(pool, &id).await;
-        persisted.map_err(|_| "reason_intent_not_durable")?;
-        Some(id)
-    } else {
-        None
+    let stored = closed.is_some();
+    let reason = match closed {
+        Some(first) => Some(first),
+        None if refused => {
+            let id = super::refused_discard::identity(provider, &row).ok_or("reason_unkeyed")?;
+            let persisted = super::refused_discard::persist(pool, &id).await;
+            persisted.map_err(|_| "reason_intent_not_durable")?;
+            Some((
+                id,
+                crate::db::tui_output_disposition::Reason::AdoptionRefused,
+            ))
+        }
+        None => None,
     };
     let report = super::restart_report::load_restart_report(provider, row.channel_id);
     #[cfg(test)]
@@ -311,7 +328,7 @@ async fn settle_row(
     let discarding = reason.is_some();
     let clear = move || match archived {
         Some(debt) => snapshot.clear_restarted_herdr_body(&owner, current, &debt),
-        None if discarding => snapshot.clear_restarted_herdr_refused(&owner, current),
+        None if discarding => snapshot.clear_restarted_herdr_refused(&owner, current, stored),
         None => snapshot.clear_restarted_herdr_row(&owner, current, silent),
     };
     let cleared = tokio::task::spawn_blocking(clear).await;
@@ -326,12 +343,18 @@ async fn settle_row(
     tests::hook("before_closed").await;
     let notice = super::super::queue_io::input_owner::closed::closed;
     notice(shared, provider, channel, "herdr_row_end");
-    if let (Some(id), Some(http)) = (reason, http.as_ref()) {
-        // A snapshot kept while the adoption waited goes with the same reason path.
-        let mut ids = super::refused_discard::discard_retained(pool, provider, channel.get()).await;
-        ids.retain(|kept| kept != &id);
-        ids.insert(0, id);
-        super::refused_discard::post(http, pool, &ids).await;
+    if let (Some(first), Some(http)) = (reason, http.as_ref()) {
+        // A snapshot kept while the adoption waited goes with the same reason path; a channel
+        // whose adoption is not refused keeps its other bodies.
+        let mut intents = match ownership {
+            Err(AdoptionRefused) => {
+                super::refused_discard::discard_retained(pool, provider, channel.get()).await
+            }
+            _ => Vec::new(),
+        };
+        intents.retain(|(kept, _)| kept != &first.0);
+        intents.insert(0, first);
+        super::refused_discard::post(http, pool, &intents).await;
     }
     if silent {
         placeholder::spawn_cleanup(shared, provider, &row);

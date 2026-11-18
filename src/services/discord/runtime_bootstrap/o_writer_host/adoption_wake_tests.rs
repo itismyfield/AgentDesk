@@ -368,7 +368,7 @@ async fn a_c1_archive_is_read_byte_for_byte_and_boot_wakes_only_its_local_channe
         inflight::save_inflight_state(&row).unwrap();
         row = inflight::load_inflight_state(&provider,channel).unwrap();
         let evidence = serde_json::json!({"source":null,"execution_nonce":"original-host","outcome":{"kind":"unknown"}});
-        let archive = row.archive_restarted_herdr_body(&provider,2,evidence,"restart".into()).unwrap();
+        let archive = row.archive_restarted_herdr_body(&provider,2,evidence,"restart".into(),|_| Ok(false)).unwrap();
         assert_eq!(row.clear_restarted_herdr_body(&provider,2,&archive),inflight::GuardedClearOutcome::Cleared);
         assert!(inflight::load_inflight_state(&provider,channel).is_none());
         let root = crate::config::runtime_root().unwrap();
@@ -457,7 +457,7 @@ async fn debt_boot_wake_requires_this_nodes_current_execution_permit_pg() {
         row = inflight::load_inflight_state(&provider, channel).unwrap();
         let archive = row.archive_restarted_herdr_body(&provider, 2,
             serde_json::json!({"source":null,"execution_nonce":"original-host","outcome":{"kind":"unknown"}}),
-            "restart".into()).unwrap();
+            "restart".into(), |_| Ok(false)).unwrap();
         assert_eq!(row.clear_restarted_herdr_body(&provider, 2, &archive), inflight::GuardedClearOutcome::Cleared);
         let root = crate::config::runtime_root().unwrap();
         crate::test_support::o_store::commit_o_store(&root, &[channel]);
