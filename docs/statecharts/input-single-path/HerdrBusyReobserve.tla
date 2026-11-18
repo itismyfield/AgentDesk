@@ -131,8 +131,12 @@ RHFixed == Policy = "Fixed"
 RHEnter == /\ r.phase = "restart"
            /\ r' = [r EXCEPT !.phase = "queued"]
 \* General observe has no proof; running fallback reads Unknown and cannot create Idle.
-RHBusyEntry == /\ r.phase = "queued"
+RHBusyEntry == /\ r.phase = "queued" /\ Scenario # "no-holder-live"
                /\ r' = [r EXCEPT !.phase = "held"]
+\* A live pane with no active turn reaches the missing-recovery refusal before any watch.
+RHRefuseUnheld == /\ r.phase = "queued" /\ Scenario = "no-holder-live"
+                  /\ r' = [r EXCEPT !.phase = "refused", !.refusals = 1,
+                      !.owned = FALSE, !.reason = Scenario]
 \* The first probe also reads Unknown. The fixture then exposes its existing source evidence.
 RHFirstKeep == /\ r.phase = "held" /\ ~r.visible
                /\ r' = [r EXCEPT !.age = 1, !.visible = TRUE,
@@ -189,11 +193,12 @@ RHTick == /\ r.phase = "held" /\ r.visible /\ r.age < 5
           /\ ~(RHFixed /\ RHExact) /\ Mutant # "ResetDeadline"
           /\ r' = [r EXCEPT !.age = @ + 1]
 RHWait == UNCHANGED vars
-RHNext == RHEnter \/ RHBusyEntry \/ RHFirstKeep \/ RHRestoreWake \/ RHKeep
+RHNext == RHEnter \/ RHBusyEntry \/ RHRefuseUnheld \/ RHFirstKeep \/ RHRestoreWake \/ RHKeep
           \/ RHIdleReserve \/ RHWrite \/ RHRace \/ RHExpire \/ RHNotice
           \/ RHLifecycle \/ RHReplay \/ RHBusyWrite \/ RHFallback \/ RHRequeue \/ RHRepeatNotice \/ RHTick \/ RHWait
 RHSpec == RHInit /\ [][RHNext]_vars
-          /\ WF_vars(RHEnter) /\ WF_vars(RHBusyEntry) /\ WF_vars(RHFirstKeep)
+          /\ WF_vars(RHEnter) /\ WF_vars(RHBusyEntry) /\ WF_vars(RHRefuseUnheld)
+          /\ WF_vars(RHFirstKeep)
           /\ WF_vars(RHRestoreWake) /\ WF_vars(RHKeep) /\ WF_vars(RHIdleReserve)
           /\ WF_vars(RHWrite) /\ WF_vars(RHExpire) /\ WF_vars(RHNotice)
           /\ WF_vars(RHLifecycle) /\ WF_vars(RHReplay) /\ WF_vars(RHTick)
@@ -210,6 +215,7 @@ RHNoBusyDirect == r.busyKeys = 0
 RHRunningContract == ~r.fallbackIdle
 RHProofNeedsEvidence == r.proof => RHExact
 RHKeyNeedsRecheck == r.keys = 0 \/ r.keyValid
+RHNoUnheldKeep == Scenario = "no-holder-live" => r.phase # "held"
 RHReachedKeep == <>(r.phase = "held" /\ r.age = 1)
 RHNoInfiniteKeep == (r.phase = "held") ~> (r.phase \in {"done", "explained"})
 RHEndExactlyOnce == <>((r.keys = 1 /\ r.refusals = 0) \/ (r.keys = 0 /\ r.refusals = 1 /\ r.notices = 1))
