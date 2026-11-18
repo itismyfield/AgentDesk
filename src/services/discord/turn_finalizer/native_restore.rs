@@ -533,6 +533,10 @@ pub(in crate::services::discord::turn_finalizer) fn validate_record(
             .as_str()
             .is_none_or(str::is_empty)
         || record.settlement.extra.get("any_key") != Some(&serde_json::Value::Bool(true))
+        || evidence
+            .raw
+            .as_ref()
+            .is_some_and(|raw| !raw.seals(&evidence))
     {
         return Err("native boot result proof mismatch".into());
     }

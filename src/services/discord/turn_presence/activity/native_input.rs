@@ -61,6 +61,7 @@ impl Reader {
             revision: self.revision,
             through: facts.observation_progress().0,
             registrations_fingerprint: registrations_fingerprint(&registrations)?,
+            terminal: None,
             evidence: facts.native_evidence(&registrations)?,
         }))
     }

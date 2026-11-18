@@ -3380,6 +3380,7 @@ src/
 │   │   │   ├── native_restore.rs
 │   │   │   ├── native_restore_gc_tests.rs
 │   │   │   ├── native_supply.rs
+│   │   │   ├── native_terminal.rs
 │   │   │   ├── native_terminal_tests.rs
 │   │   │   ├── policy_commit.rs
 │   │   │   ├── reconcile.rs

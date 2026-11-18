@@ -332,6 +332,7 @@ impl NativeSources {
         source: &SourceId,
         origin: &super::super::input_notices::NoticeOrigin,
         snapshot: super::super::actor::native_input::Snapshot,
+        raw: Option<&super::super::input_facts::native::terminal::RawWitness>,
     ) -> Result<
         (
             super::super::input_facts::native::Observation,
@@ -358,7 +359,7 @@ impl NativeSources {
                 r.ticket.channel_id == channel && (r.ticket.source.is_none() || r.matches(&binding))
             })
             .collect();
-        let analysis = projection.analyze(&registrations)?;
+        let analysis = projection.analyze_closed(&registrations, raw)?;
         Ok((
             Observation {
                 binding,
@@ -367,6 +368,7 @@ impl NativeSources {
                 revision: self.revision,
                 through: projection.through(),
                 registrations_fingerprint: registrations_fingerprint(&registrations)?,
+                terminal: raw.cloned(),
                 evidence: analysis.evidence,
                 receipts: projection.receipts(&registrations),
             },
@@ -450,6 +452,80 @@ impl<B: BindingEvents> Sources<B> {
             })
     }
 
+    /// The buffered unterminated tail, once the seed has every complete record before it.
+    #[cfg(unix)]
+    fn raw_tail(
+        &self,
+        source: &SourceId,
+    ) -> Option<super::super::input_facts::native::terminal::Tail> {
+        let reader = self.readers.iter().find(|r| &r.source == source)?;
+        let capture = reader
+            .capture
+            .as_ref()
+            .filter(|_| reader.pending.is_none())?;
+        let seed = self.native.as_ref()?.seeds.get(source)?.as_ref().ok()?;
+        let fingerprint = capture.fingerprint().ok()?;
+        let buffered = !capture.tail().is_empty() && fingerprint.len == capture.read_through();
+        (buffered && seed.through() == capture.captured_through()).then(|| {
+            super::super::input_facts::native::terminal::Tail {
+                through: seed.through(),
+                prefix_hash: capture.prefix_hash(),
+                digest: blake3::hash(capture.tail()).to_hex().to_string(),
+                fingerprint,
+            }
+        })
+    }
+
+    /// Asks the port to prove a whole strict closer at EOF for one exact receipted ticket, then
+    /// re-reads the registrations with that closer applied as a terminal-only edge.
+    #[cfg(unix)]
+    async fn raw_closer(
+        &mut self,
+        port: &super::super::actor::native_input::NativePort,
+        source: &SourceId,
+        record: &CapturedRecord,
+        observed: &super::super::input_facts::native::Observation,
+    ) -> Option<(
+        super::super::input_facts::native::Observation,
+        super::super::input_facts::native::terminal::RawWitness,
+    )> {
+        use super::super::input_facts::native::terminal;
+        let tail = self.raw_tail(source)?;
+        let reader = self.readers.iter().find(|r| &r.source == source)?;
+        terminal::raw_closer(&observed.binding, reader.capture.as_ref()?.tail()).ok()?;
+        let native = self.native.as_ref()?;
+        let origin = self.native_origin(source, record, None).ok()?;
+        let snapshot = port.inner.snapshot(origin).await.ok()?;
+        for ticket in snapshot.registrations {
+            let receipted = ticket.candidate && !ticket.receipts.is_empty();
+            let Some(held) = ticket.ticket.source.clone().filter(|_| receipted) else {
+                continue;
+            };
+            if !ticket.matches(&observed.binding) {
+                continue;
+            }
+            let Ok(origin) = self.native_origin(source, record, Some(&held.target)) else {
+                continue;
+            };
+            let mut offered = observed.clone();
+            offered.binding_seq = origin.binding_seq;
+            let proof = port
+                .inner
+                .terminal(offered, ticket, tail.clone(), origin.clone());
+            let raw = match proof.await {
+                Ok(raw) => raw,
+                Err(error) => {
+                    tracing::debug!(channel=self.channel, %error, "native terminal proof held");
+                    continue;
+                }
+            };
+            let snapshot = port.inner.snapshot(origin.clone()).await.ok()?;
+            let closed = native.observe(self.channel, source, &origin, snapshot, Some(&raw));
+            return closed.ok().map(|(closed, _)| (closed, raw));
+        }
+        None
+    }
+
     #[cfg(unix)]
     pub(crate) async fn offer_native(
         &mut self,
@@ -486,7 +562,7 @@ impl<B: BindingEvents> Sources<B> {
                 continue;
             };
             let Ok((mut observed, mut barriers)) =
-                native.observe(self.channel, &source, &origin, snapshot)
+                native.observe(self.channel, &source, &origin, snapshot, None)
             else {
                 continue;
             };
@@ -503,7 +579,8 @@ impl<B: BindingEvents> Sources<B> {
                 let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
                     continue;
                 };
-                let Ok((current, _)) = native.observe(self.channel, &source, &origin, snapshot)
+                let Ok((current, _)) =
+                    native.observe(self.channel, &source, &origin, snapshot, None)
                 else {
                     continue;
                 };
@@ -519,7 +596,8 @@ impl<B: BindingEvents> Sources<B> {
                 let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
                     continue;
                 };
-                let Ok(fresh) = native.observe(self.channel, &source, &origin, snapshot) else {
+                let Ok(fresh) = native.observe(self.channel, &source, &origin, snapshot, None)
+                else {
                     continue;
                 };
                 (observed, barriers) = fresh;
@@ -538,7 +616,7 @@ impl<B: BindingEvents> Sources<B> {
                     continue;
                 };
                 let Ok((mut current, mut current_barriers)) =
-                    native.observe(self.channel, &source, &origin, snapshot)
+                    native.observe(self.channel, &source, &origin, snapshot, None)
                 else {
                     continue;
                 };
@@ -562,6 +640,13 @@ impl<B: BindingEvents> Sources<B> {
                     tracing::debug!(channel=self.channel, %error, "native barrier held");
                 }
             }
+            let raw = self.raw_closer(port, &source, &record, &observed).await;
+            if let Some((closed, _)) = &raw {
+                observed = closed.clone();
+            }
+            let Some(native) = self.native.as_ref() else {
+                continue;
+            };
             for index in 0..observed.evidence.len() {
                 let Some(target) = observed.evidence[index]
                     .ticket
@@ -579,7 +664,11 @@ impl<B: BindingEvents> Sources<B> {
                 let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
                     break;
                 };
-                let Ok((current, _)) = native.observe(self.channel, &source, &origin, snapshot)
+                // A proof holds only while the capture still shows the tail it was read from.
+                let raw = raw.as_ref().map(|(_, raw)| raw);
+                let raw = raw.filter(|raw| self.raw_tail(&source).as_ref() == Some(&raw.tail));
+                let Ok((current, _)) =
+                    native.observe(self.channel, &source, &origin, snapshot, raw)
                 else {
                     break;
                 };
@@ -612,7 +701,8 @@ impl<B: BindingEvents> Sources<B> {
                 let Some(native) = &self.native else {
                     continue;
                 };
-                let Ok((mut current, _)) = native.observe(self.channel, &source, &origin, snapshot)
+                let Ok((mut current, _)) =
+                    native.observe(self.channel, &source, &origin, snapshot, None)
                 else {
                     continue;
                 };

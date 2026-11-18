@@ -14,6 +14,9 @@ pub(crate) struct Snapshot {
 }
 
 #[cfg(unix)]
+pub(crate) type Terminal = Result<super::super::input_facts::native::terminal::RawWitness, String>;
+
+#[cfg(unix)]
 pub(crate) trait EvidencePort: Send + Sync {
     fn snapshot(
         &self,
@@ -47,6 +50,16 @@ pub(crate) trait EvidencePort: Send + Sync {
         _origin: super::super::input_notices::NoticeOrigin,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(async { Err("native receipt unavailable".into()) })
+    }
+    /// Proves the unterminated `tail` is the ended execution's whole strict closer for `ticket`.
+    fn terminal(
+        &self,
+        _observed: super::super::input_facts::native::Observation,
+        _ticket: super::super::input_facts::native::Registration,
+        _tail: super::super::input_facts::native::terminal::Tail,
+        _origin: super::super::input_notices::NoticeOrigin,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Terminal> + Send + '_>> {
+        Box::pin(async { Err("native terminal proof unavailable".into()) })
     }
     fn retry(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
 }

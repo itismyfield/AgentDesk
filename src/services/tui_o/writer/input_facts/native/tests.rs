@@ -791,6 +791,7 @@ fn analyze_batch(
                                         Disposition::Executed
                                     },
                                     supersedes: None,
+                                    raw: None,
                                 });
                             }
                         }
@@ -1043,6 +1044,7 @@ fn settle_removed(
             closer_range: None,
             disposition,
             supersedes: None,
+            raw: None,
         });
     }
     input.stage = Stage::Removed;

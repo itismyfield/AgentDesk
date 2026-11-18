@@ -639,7 +639,9 @@ impl Registry {
                 if fingerprint != expected {
                     return Err("native registrations superseded".into());
                 }
-                if outcome.disposition == Disposition::Executed || barred {
+                // A raw EOF closer never stands in for the member's own durable receipt.
+                let raw = native && !outcome.extra["native_proof"]["raw"].is_null();
+                if outcome.disposition == Disposition::Executed || barred || raw {
                     let row = outcome
                         .extra
                         .get("native_proof")

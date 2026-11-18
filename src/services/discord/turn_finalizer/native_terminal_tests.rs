@@ -1,4 +1,4 @@
-//! A barrier stored for a strict interrupt row settles through the writer poll, live or restored.
+//! Terminal rows through the writer poll: a stored interrupt barrier and a raw EOF closer.
 use super::*;
 
 async fn stored_interrupt_barrier_replays(boot: bool) {
@@ -73,4 +73,107 @@ async fn stored_interrupt_barrier_replays(boot: bool) {
 async fn native_8148_terminal_stored_interrupt_barrier_replays_live_and_after_boot_pg() {
     stored_interrupt_barrier_replays(false).await;
     stored_interrupt_barrier_replays(true).await;
+}
+
+#[tokio::test]
+async fn native_8148_terminal_raw_eof_waits_for_the_execution_end_pg() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::tui_o::shadow::capture::Fingerprint;
+    use crate::services::tui_o::writer::input_facts::native::terminal::{RawWitness, Tail};
+    use std::io::Write;
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let f = Fixture::at(
+        runtime.path().join("runtime/injected_frames.json"),
+        81480482,
+        true,
+    );
+    let source = f.ticket.source.as_ref().unwrap();
+    let own = serde_json::json!({"type":"user","uuid":"own","sessionId":"native","message":{"content":"한국어 원본 입력"}});
+    let closer =
+        serde_json::json!({"type":"system","subtype":"turn_duration","sessionId":"native"});
+    std::fs::write(&source.transcript, format!("{own}\n{closer}")).unwrap();
+    let shared = b2b_shared(Some(pool.clone()));
+    let (key, actor) = b2b_active(&f, &shared).await;
+    b2b_row(&f);
+    supply_register(&f, &shared, key, Some(actor)).await;
+    barrier_receipt(&f);
+    let mut capture = SupplyCapture::new(&f, &runtime.path().join("terminal-store"), true);
+    let settled = || {
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+    };
+    let row = || {
+        let channel = key.channel_id.get();
+        crate::services::discord::inflight::load_inflight_state_read_only(
+            &ProviderKind::Claude,
+            channel,
+        )
+    };
+    capture.poll(&shared).await;
+    assert_eq!(
+        settled().outcome,
+        None,
+        "no execution end, no raw closer result"
+    );
+    assert!(row().is_some());
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&source.transcript)
+        .unwrap();
+    file.write_all(b"\n").unwrap();
+    capture.poll(&shared).await;
+    let saved = settled();
+    let outcome = saved
+        .outcome
+        .as_ref()
+        .expect("the completed record settles");
+    assert_eq!(outcome.disposition, Disposition::Executed);
+    assert!(outcome.extra["native_proof"]["raw"].is_null());
+    assert!(saved.cleanup_complete && row().is_none());
+    let validate = super::super::native_prepare::validate_saved_record;
+    let nonce = source.target["execution_nonce"].as_str().unwrap();
+    for (execution, accepted) in [(nonce, true), ("another-execution", false)] {
+        let mut record = f
+            .history
+            .native_boot_record("native-fixture", &f.ticket)
+            .unwrap();
+        let proof = &mut record.settlement.outcome.as_mut().unwrap().extra["native_proof"];
+        let [through, len] = serde_json::from_value(proof["closer_range"].clone()).unwrap();
+        let (dev, ino) = (source.file[0], source.file[1]);
+        let modified = std::time::SystemTime::UNIX_EPOCH;
+        let fingerprint = Fingerprint {
+            len,
+            dev,
+            ino,
+            modified,
+            change: (0, 0),
+        };
+        let digest = "0".repeat(64);
+        let tail = Tail {
+            through,
+            prefix_hash: String::new(),
+            fingerprint,
+            digest,
+        };
+        let execution_nonce = execution.into();
+        let raw = RawWitness {
+            version: 1,
+            tail,
+            aborted: false,
+            execution_nonce,
+            registrations_fingerprint: String::new(),
+        };
+        proof["raw"] = serde_json::to_value(raw).unwrap();
+        let checked = validate(&record).map_err(|e| e == "native boot result proof mismatch");
+        assert_eq!(
+            checked,
+            if accepted { Ok(()) } else { Err(true) },
+            "{execution}"
+        );
+    }
+    pool.close().await;
+    db.drop().await;
 }

@@ -309,6 +309,11 @@ impl SourceCapture {
         self.captured_through + self.partial.len() as u64
     }
 
+    /// The buffered bytes after `captured_through`, still missing their newline.
+    pub(crate) fn tail(&self) -> &[u8] {
+        &self.partial
+    }
+
     /// Hex sha256 of bytes `0..captured_through`.
     pub fn prefix_hash(&self) -> String {
         hex::encode(self.prefix.clone().finalize())

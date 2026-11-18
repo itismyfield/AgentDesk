@@ -47,6 +47,7 @@ fn native_8148_b2_typed_admission_refuses_stale_stamp_source_and_actor() {
     facts.poll(u64::MAX).unwrap();
     let batch = Observation {
         receipts: Vec::new(),
+        terminal: None,
         binding,
         generation: 3,
         binding_seq: 4,
@@ -262,6 +263,7 @@ fn b2b_batch(f: &Fixture) -> Observation {
     facts.poll(u64::MAX).unwrap();
     Observation {
         receipts: Vec::new(),
+        terminal: None,
         binding,
         generation: 3,
         binding_seq: 4,
@@ -4834,6 +4836,7 @@ async fn barrier_epoch_case(stale_binding: bool) {
                 &registrations,
             )
             .unwrap(),
+        terminal: None,
         evidence: Vec::new(),
     };
     let origin = NoticeOrigin {
@@ -5266,6 +5269,7 @@ async fn native_8148_barrier_ambiguous_follower_supply_rechecks_before_marker_pg
                 assert_eq!(analysis.evidence[index].range.1, first_close);
                 let observation = Observation {
                     receipts: Vec::new(),
+                    terminal: None,
                     binding: binding.clone(),
                     generation: snapshot.generation,
                     binding_seq: 1,

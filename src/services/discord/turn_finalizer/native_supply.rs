@@ -13,6 +13,8 @@ use crate::services::tui_o::writer::{
 use std::sync::Mutex;
 #[path = "native_abstain.rs"]
 pub(in crate::services::discord::turn_finalizer) mod native_abstain;
+#[path = "native_terminal.rs"]
+pub(in crate::services::discord) mod native_terminal;
 #[path = "native_binding.rs"]
 pub(in crate::services::discord) mod source_binding;
 
@@ -577,6 +579,22 @@ impl EvidencePort for Port {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(self.receipt_input(observed, current, index, origin))
     }
+    fn terminal(
+        &self,
+        observed: Observation,
+        ticket: crate::services::tui_o::writer::input_facts::native::Registration,
+        tail: crate::services::tui_o::writer::input_facts::native::terminal::Tail,
+        origin: NoticeOrigin,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = crate::services::tui_o::writer::actor::native_input::Terminal,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(self.terminal_proof(observed, ticket, tail, origin))
+    }
     fn retry(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
             self.retry_source_bindings().await;
@@ -701,6 +719,7 @@ pub(super) fn source_evidence(
         || observed.revision != current.revision
         || observed.through != current.through
         || observed.registrations_fingerprint != current.registrations_fingerprint
+        || observed.terminal != current.terminal
     {
         return Err("native observation superseded".into());
     }
@@ -724,7 +743,9 @@ pub(super) fn source_evidence(
         || source.file != [observed.binding.source.dev, observed.binding.source.ino]
         || evidence.range.0 < source.offset
         || evidence.range.0 >= evidence.range.1
-        || evidence.range.1 > observed.through
+        || !crate::services::tui_o::writer::input_facts::native::terminal::within(
+            observed, evidence,
+        )
     {
         return Err("native proof source/range mismatch".into());
     }

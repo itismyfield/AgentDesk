@@ -48,7 +48,7 @@ read-only native snapshot에 해당 exact ticket의 기존 Barrier를 선택적�
 ### 생성 순서
 
 1. 기존 `Sources::offer_native`/O poll(`rotation/owe.rs:454`, `actor.rs:419`)이 B source ACK와 일반 complete-line capture를 먼저 처리한다. existing reader/seed가 있는 exact native custody만 요청한다. snapshot 메서드는 계속 read-only다. 별도 typed EOF-proof method를 기존 EvidencePort에 둔다.
-2. Discord domain child `turn_finalizer/native_terminal.rs` (proposed)가 live/restored custody, current history ticket/source, 원본 Bound/Resolved event, matching HostedExecution을 확인한다. `herdr_terminate.rs:224`의 read-only `execution_end` 판정을 재사용한다. Ended만 허용하며 ProviderAlive/Unconfirmed/unknown endpoint/다른 nonce·root는 Hold다. boolean `Retired` 자체는 proof가 아니다. Retired라도 남아 있는 같은 execution record/target을 다시 확인한다(`db/dispatched_sessions/hosted_execution.rs:562`는 retire 때 record를 보존). 현재 N2만 남아 N1을 검증할 수 없으면 N2에 기대지 않고 진단 가능한 debt다.
+2. Discord domain child `turn_finalizer/native_terminal.rs`가 live/restored custody, current history ticket/source, 원본 Bound/Resolved event, matching HostedExecution을 확인한다. `herdr_terminate.rs:224`의 read-only `execution_end` 판정을 재사용한다. Ended만 허용하며 ProviderAlive/Unconfirmed/unknown endpoint/다른 nonce·root는 Hold다. boolean `Retired` 자체는 proof가 아니다. Retired라도 남아 있는 같은 execution record/target을 다시 확인한다(`db/dispatched_sessions/hosted_execution.rs:562`는 retire 때 record를 보존). 현재 N2만 남아 N1을 검증할 수 없으면 N2에 기대지 않고 진단 가능한 debt다.
 3. 같은 SourceId를 read-only FD로 열고 path/FD identity와 Fingerprint를 요청의 O capture snapshot과 맞춘다. `C..L`만 읽는다. 기존 `MAX_PARTIAL_BYTES`를 재사용하며, 정확한 길이·UTF-8·하나의 완전한 JSON value·내부 newline 없음·현재 canonical strict terminator를 모두 요구한다. 기존 native projection의 parent/subagent·isSidechain·sessionId 일치 관문도 그대로 적용한다. 반쯤 쓴 JSON, 일반 JSON, assistant end_turn, trailing garbage는 proof가 아니다. dev가 재번호화된 파일은 기존 authenticated reopen을 먼저 거쳐야 하며 새 leaf가 stat-only로 승인하지 않는다.
 4. 읽기 전후 FD/path Fingerprint, C/prefix identity, matching execution-end/nonce를 재확인한다. 크기/metadata/대상/등록 stamp가 변하면 후보를 폐기하고 기존 O retry로 재관측한다. 새 전체 transcript scan이나 native cursor reset을 만들지 않는다. 이미 캡처된 prefix와 durable membership receipt는 O의 기존 인증/재평가 계약을 따른다.
 5. producer/RuntimeReady/추가 hook이 없어도 O의 live/boot supply가 같은 method를 호출한다. watcher/기존 recovery가 먼저 E를 관측했어도 wake 힌트일 뿐이며 그 경로의 legacy Done 또는 retirement bit를 native 증거로 바꾸지 않는다. 새 executor/recovery loop는 없다.
@@ -113,7 +113,7 @@ Cancel/Terminate/clear/stop의 기존 control witness는 native strict-closer pr
 | 예상 production 변경 | raw net code |
 |---|---:|
 | new `tui_o/writer/input_facts/native/terminal.rs`: strict 분류·barrier supersession·raw witness/overlay | +130~180 |
-| new `discord/turn_finalizer/native_terminal.rs` (proposed): custody/host E/유계 tail 검증 | +70~110 |
+| new `discord/turn_finalizer/native_terminal.rs`: custody/host E/유계 tail 검증 | +70~110 |
 | `rotation/owe.rs`: terminal Evidence 이전 exact-ticket 요청/재평가 | +30~55 |
 | `actor/native_input.rs`: typed port와 선택적 barrier snapshot | +16~22 |
 | `input_facts/native.rs`: child/호출/optional witness 연결 | +8~12 |

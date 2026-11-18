@@ -1,6 +1,7 @@
-//! Strict interrupt rows, and the barrier an earlier reading stored for one.
+//! Strict interrupt rows, the barrier an earlier reading stored for one, and raw EOF closers.
 use super::*;
 use crate::services::tui_input::human_frame::history::v2::native::Outcome;
+use crate::services::tui_o::shadow::capture::Fingerprint;
 
 const MARK: &str = "[Request interrupted by user]";
 
@@ -160,4 +161,130 @@ fn native_8148_terminal_supersession_refuses_an_unknown_or_moved_barrier() {
         let refused = moved.admits_native("native-b1", &proof).unwrap_err();
         assert_eq!(refused, "native execution crosses foreign prompt barrier");
     }
+}
+
+#[test]
+fn native_8148_terminal_raw_eof_tail_is_one_whole_strict_parent_record() {
+    let f = Fixture::new();
+    let whole = close().to_string();
+    let mut rows = [
+        close(),
+        close(),
+        json!({"type":"assistant","sessionId":"parent",
+        "message":{"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}),
+    ];
+    rows[0]["isSidechain"] = json!(true);
+    rows[1]["sessionId"] = json!("other");
+    let mut cases = vec![
+        (whole.clone(), Ok(false)),
+        (
+            stop(json!([{"type":"text","text":MARK}])).to_string(),
+            Ok(true),
+        ),
+    ];
+    for tail in [
+        &whole[..whole.len() - 1],
+        &format!("{whole} "),
+        &whole.replacen(',', ",\n", 1),
+    ] {
+        cases.push((tail.to_string(), Err(())));
+    }
+    cases.extend(rows.iter().map(|row| (row.to_string(), Err(()))));
+    for (tail, want) in cases {
+        let read = terminal::raw_closer(&f.binding, tail.as_bytes()).map_err(drop);
+        assert_eq!(read, want, "{tail}");
+    }
+}
+
+#[test]
+fn native_8148_terminal_raw_eof_closes_only_the_open_run_at_the_capture_cursor() {
+    let f = Fixture::new();
+    let ticket = f.register("ours", "our request");
+    f.append(&[user("own", "our request")]);
+    f.receipt(&ticket, "own", "our request");
+    let bytes = std::fs::read(&f.binding.source.path).unwrap();
+    let c = bytes.len() as u64;
+    let hash = hex::encode(sha2::Sha256::digest(&bytes));
+    let seed = Projection::reopen(f.binding.clone(), c, &hash)
+        .unwrap()
+        .1
+        .unwrap();
+    let registrations = f.history.native_classification_registrations().unwrap();
+    let stamp = registrations_fingerprint(&registrations).unwrap();
+    let source = &f.binding.source;
+    let witness = |through: u64| terminal::RawWitness {
+        version: 1,
+        tail: terminal::Tail {
+            through,
+            prefix_hash: hash.clone(),
+            fingerprint: Fingerprint {
+                len: c + 40,
+                dev: source.dev,
+                ino: source.ino,
+                modified: std::time::SystemTime::UNIX_EPOCH,
+                change: (0, 0),
+            },
+            digest: "0".repeat(64),
+        },
+        aborted: false,
+        execution_nonce: "birth-1".into(),
+        registrations_fingerprint: stamp.clone(),
+    };
+    let raw = witness(c);
+    let closed = seed.analyze_closed(&registrations, Some(&raw)).unwrap();
+    let [evidence] = closed.evidence.as_slice() else {
+        panic!("one result: {closed:?}")
+    };
+    assert_eq!(evidence.disposition, Disposition::Executed);
+    assert_eq!(
+        (evidence.closer_range, evidence.raw.as_ref()),
+        (Some(raw.range()), Some(&raw))
+    );
+    let early = seed.analyze_closed(&registrations, Some(&witness(c - 1)));
+    assert_eq!(early.unwrap(), seed.analyze(&registrations).unwrap());
+    let observed = |raw: &terminal::RawWitness, held: bool| {
+        let mut evidence = evidence.clone();
+        evidence.raw = Some(raw.clone());
+        let observed = Observation {
+            binding: f.binding.clone(),
+            generation: 1,
+            binding_seq: 1,
+            revision: 1,
+            through: c,
+            registrations_fingerprint: stamp.clone(),
+            terminal: held.then(|| raw.clone()),
+            evidence: vec![evidence.clone()],
+            receipts: Vec::new(),
+        };
+        terminal::within(&observed, &evidence)
+    };
+    assert!(observed(&raw, true) && !observed(&raw, false));
+    let forgeries: [fn(&mut terminal::RawWitness); 5] = [
+        |r| r.execution_nonce.push('0'),
+        |r| r.aborted = true,
+        |r| r.tail.fingerprint.ino += 1,
+        |r| r.tail.fingerprint.len += 1,
+        |r| r.registrations_fingerprint.push('0'),
+    ];
+    for forge in forgeries {
+        let mut forged = raw.clone();
+        forge(&mut forged);
+        assert!(!observed(&forged, true), "{forged:?}");
+    }
+    f.append(&[close()]);
+    let bytes = std::fs::read(&f.binding.source.path).unwrap();
+    let hash = hex::encode(sha2::Sha256::digest(&bytes));
+    let at = bytes.len() as u64;
+    let seed = Projection::reopen(f.binding.clone(), at, &hash)
+        .unwrap()
+        .1
+        .unwrap();
+    let late = seed
+        .analyze_closed(&registrations, Some(&witness(at)))
+        .unwrap();
+    assert_eq!(
+        late,
+        seed.analyze(&registrations).unwrap(),
+        "a closed run takes no second closer"
+    );
 }

@@ -13,7 +13,7 @@ use serde_json::Value;
 #[cfg(unix)]
 mod receipt;
 #[cfg(unix)]
-mod terminal;
+pub(crate) mod terminal;
 #[cfg(unix)]
 pub(crate) use receipt::MembershipReceipt;
 
@@ -117,6 +117,8 @@ pub(crate) struct Observation {
     pub(crate) revision: u64,
     pub(crate) through: u64,
     pub(crate) registrations_fingerprint: String,
+    /// A verified raw EOF closer at `through`; it never moves `through` itself.
+    pub(crate) terminal: Option<terminal::RawWitness>,
     pub(crate) evidence: Vec<Evidence>,
     pub(crate) receipts: Vec<MembershipReceipt>,
 }
@@ -148,6 +150,8 @@ pub(crate) struct Evidence {
     pub(crate) disposition: Disposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) supersedes: Option<terminal::Supersession>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) raw: Option<terminal::RawWitness>,
 }
 
 #[cfg(unix)]
@@ -263,13 +267,34 @@ mod projection {
             self.analyze(registrations).map(|a| a.evidence)
         }
         pub(crate) fn analyze(&self, registrations: &[Registration]) -> Result<Analysis, String> {
-            reduce(
-                &self.binding,
-                &self.facts,
-                registrations,
-                self.through,
-                None,
-            )
+            self.analyze_closed(registrations, None)
+        }
+        /// `raw` adds one closing edge after the last complete record; it is never a record.
+        pub(crate) fn analyze_closed(
+            &self,
+            registrations: &[Registration],
+            raw: Option<&terminal::RawWitness>,
+        ) -> Result<Analysis, String> {
+            let open = self.state != super::super::TurnState::Idle;
+            let raw = raw.filter(|raw| open && raw.tail.through == self.through);
+            let closer = raw.map(|raw| Fact {
+                range: raw.range(),
+                row: None,
+                meta: false,
+                event: None,
+                boundaries: vec![Edge::Closed {
+                    range: raw.range(),
+                    aborted: raw.aborted,
+                }],
+                receipt: None,
+                interrupt: None,
+            });
+            let facts = (self.facts.as_slice(), closer.as_ref());
+            let mut analysis = reduce(&self.binding, facts, registrations, self.through, None)?;
+            if let Some(raw) = raw {
+                terminal::attach(&mut analysis.evidence, raw);
+            }
+            Ok(analysis)
         }
         pub(crate) fn receipts(&self, registrations: &[Registration]) -> Vec<MembershipReceipt> {
             receipt::candidates(
@@ -298,7 +323,7 @@ mod projection {
                 let mut matched = false;
                 reduce(
                     &self.binding,
-                    &self.facts,
+                    (&self.facts, None),
                     &scoped,
                     self.through,
                     Some(&mut |registration, admitted_range, admitted_row| {
@@ -340,22 +365,7 @@ mod projection {
                 return Ok(());
             }
             let value: Value = serde_json::from_slice(line).map_err(|e| e.to_string())?;
-            if value["isSidechain"] == true
-                || self
-                    .binding
-                    .source
-                    .path
-                    .components()
-                    .any(|p| p.as_os_str() == "subagents")
-            {
-                return Err("native prefix requires a parent source".into());
-            }
-            if value["sessionId"]
-                .as_str()
-                .is_some_and(|s| s != self.binding.source.session_id)
-            {
-                return Err("native record belongs to another source".into());
-            }
+            terminal::gate(&self.binding, &value)?;
             let row = row_key(&value);
             let mut boundaries = Vec::new();
             let facts = classify(self.binding.provider, &value);
@@ -510,7 +520,7 @@ mod projection {
 
     fn reduce(
         binding: &SourceBinding,
-        records: &[Fact],
+        (records, closer): (&[Fact], Option<&Fact>),
         registrations: &[Registration],
         through: u64,
         mut membership: Option<MembershipRecorder<'_>>,
@@ -535,7 +545,7 @@ mod projection {
         let mut ambiguous = vec![false; registered.len()];
         let mut barriers = vec![None; registered.len()];
         let mut unmatched_dequeue = false;
-        for record in records {
+        for record in records.iter().chain(closer) {
             if let Some(Event::Prompt(hashes)) = &record.event
                 && !record.meta
             {
@@ -630,6 +640,7 @@ mod projection {
                                             Disposition::Executed
                                         },
                                         supersedes: None,
+                                        raw: None,
                                     });
                                 }
                             }
@@ -913,6 +924,7 @@ mod projection {
                 closer_range: None,
                 disposition,
                 supersedes: None,
+                raw: None,
             });
         }
         input.stage = Stage::Removed;
