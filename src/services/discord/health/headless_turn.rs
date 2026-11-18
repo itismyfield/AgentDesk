@@ -7,8 +7,8 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 
-use super::HealthRegistry;
 use super::runtime_resolve::{resolve_direct_channel_runtime, resolve_direct_channel_shared};
+use super::{HealthRegistry, ThreadTurnRuntime};
 use crate::services::discord::SharedData;
 use crate::services::discord::router;
 use crate::services::provider::ProviderKind;
@@ -495,5 +495,51 @@ mod dm_reserved_label_tests {
         SHARED_STARTER_SLOTS.with(|slots| {
             *slots.borrow_mut() = Some((channel_name_hint.clone(), tmux_session_label.clone()));
         });
+    }
+}
+
+impl ThreadTurnRuntime {
+    pub(crate) async fn start(
+        self,
+        prompt: String,
+        source: Option<String>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<router::HeadlessTurnStartOutcome, router::HeadlessTurnStartError> {
+        if [
+            "routine_id",
+            "routine_run_id",
+            "routine_run_mode",
+            "scheduled_message_id",
+            "scheduled_snapshot_session_label",
+        ]
+        .iter()
+        .any(|key| {
+            metadata
+                .as_ref()
+                .is_some_and(|value| value.get(*key).is_some())
+        }) {
+            return Err(router::HeadlessTurnStartError::InvalidTarget(
+                "thread input cannot select a separate execution".into(),
+            ));
+        }
+        self.check_live()
+            .await
+            .map_err(|error| router::HeadlessTurnStartError::Internal(error.into()))?;
+        let channel = self.channel;
+        let provider = self.shared.provider.clone();
+        let metadata = Some(self.scope_metadata(metadata));
+        start_reserved_headless_agent_turn_with_shared(
+            self.shared,
+            channel,
+            provider,
+            prompt,
+            source,
+            metadata,
+            None,
+            None,
+            Some(false),
+            reserve_headless_agent_turn(channel),
+        )
+        .await
     }
 }
