@@ -728,7 +728,7 @@ def _claim_guard_problems(root: Path) -> list[str]:
         "ifsnapshot.channels().is_empty(){returnoutside_selection(snapshot,channel_id,ClaimReason::EmptySelection);}",
         "if!snapshot.channels().contains(&channel_id){returnoutside_selection(snapshot,channel_id,ClaimReason::NonMember);}",
         "letSome(candidate)=snapshot.candidate(channel_id)else{returnErr(IdentityError::AwaitingAdoption);};",
-        "adopted(execution.candidate.peek())?;", "adopted(candidate.peek())?;",
+        "adopted_by(&execution.candidate,execution.candidate.peek())?;", "adopted_by(candidate,candidate.peek())?;",
         "execution.permit.is_err(){ClaimReason::OwnedHeld}",
         "Some(origin)=>candidate.claim_body_from(channel_id,origin)",
     )):
