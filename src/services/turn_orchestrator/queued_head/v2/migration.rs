@@ -36,6 +36,7 @@ pub(super) fn legacy(items: Vec<PendingQueueItem>, meta: Option<Box<SnapshotMeta
         items,
         head_injection: head,
         retained_inputs: vec![],
+        refused_inputs: vec![],
         terminal_identities: meta
             .map(|meta| {
                 meta.terminal_identities

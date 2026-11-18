@@ -2,6 +2,7 @@ import { Cpu, Gpu, HardDrive, MemoryStick, Network } from "lucide-react";
 import type { ReactNode } from "react";
 import type { MachineResources } from "../../api/machineResources";
 import type { SettingsTr } from "./SettingsPanelTypes";
+import { SettingsBadge } from "./SettingsPrimitives";
 import { MachineSparkline, metricColors, readings, recentResources, type TrendColor } from "./MachineSparkline";
 
 const BYTES_PER_KIB = 1024;
@@ -29,12 +30,10 @@ function Meter({ value, label, tr }: { value: number | null; label: string; tr: 
     aria-valuenow={value ?? undefined} aria-valuetext={value == null ? undefined : `${value.toFixed(1)}%${high ? tr(" (높음)", " (high)") : ""}`}
     data-level={high ? "high" : "normal"}>
     <span className="sr-only">{label}: </span>
-    <span style={high ? { color: "var(--th-badge-amber-text)", fontWeight: 600 } : undefined}>
+    <span className={high ? "font-semibold text-[var(--th-badge-amber-text)]" : undefined}>
       {value == null ? tr("미확인", "Unknown") : `${value.toFixed(1)}%`}
     </span>
-    {high ? <span className="rounded-full px-1.5 text-[11px] font-medium" style={{ background: "var(--th-badge-amber-bg)", color: "var(--th-badge-amber-text)" }}>
-      {tr("높음", "High")}
-    </span> : null}
+    {high ? <SettingsBadge tone="warn">{tr("높음", "High")}</SettingsBadge> : null}
   </div>;
 }
 
@@ -53,7 +52,7 @@ function Resource({ icon, title, color, trend, children }: {
     data-hardware-kind={color}>
     <div className="min-w-0">{trend}</div>
     <div className="min-w-0 space-y-1">
-      <h5 className="flex items-center gap-2 text-sm font-semibold"><span style={{ color: metricColors[color] }}>{icon}</span>{title}</h5>
+      <h5 className="flex items-center gap-2 text-[13px] font-medium"><span style={{ color: metricColors[color] }}>{icon}</span>{title}</h5>
       {children}
     </div>
   </div>;
@@ -62,7 +61,7 @@ function Resource({ icon, title, color, trend, children }: {
 export function SettingsMachineResources({ resources, history = [], stale, now, tr }: {
   resources: MachineResources | null | undefined; history?: MachineResources[]; stale: boolean; now: number; tr: SettingsTr;
 }) {
-  if (!resources) return <p className="mt-4 rounded-xl border border-th-border p-3 text-sm text-th-text-muted">
+  if (!resources) return <p className="mt-4 rounded-[var(--r-sm)] bg-[var(--bg-1)] p-3 text-[13px] text-th-text-muted shadow-[inset_0_0_0_0.5px_var(--line)]">
     {tr("하드웨어 정보를 기다리는 중입니다.", "Waiting for hardware information.")}
   </p>;
   const current = !stale && resources.observed_at_ms <= now + CLOCK_SKEW_TOLERANCE_MS && resources.expires_at_ms > now;
@@ -72,13 +71,13 @@ export function SettingsMachineResources({ resources, history = [], stale, now, 
     secondary?: (sample: MachineResources) => number | null | undefined) => <MachineSparkline
     values={readings(samples, select)} secondary={secondary && readings(samples, secondary)}
     color={color} label={label} stale={!current} now={now} tr={tr} />;
-  return <section className="mt-4 border-t border-th-border-subtle pt-4 text-th-text-primary" aria-label={tr("하드웨어 및 사용량", "Hardware and utilization")}>
+  return <section className="mt-4 pt-4 text-th-text-primary shadow-[inset_0_0.5px_0_var(--line)]" aria-label={tr("하드웨어 및 사용량", "Hardware and utilization")}>
     <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-xs text-th-text-muted">
-      <h4 className="font-semibold text-th-text-primary">{tr("하드웨어 및 사용량", "Hardware and utilization")}</h4>
+      <h4 className="text-[13px] font-medium text-th-text-primary">{tr("하드웨어 및 사용량", "Hardware and utilization")}</h4>
       <span>{tr("최근 15분 추이", "Last 15 minutes")}</span>
     </div>
     <p className="text-[11px] text-th-text-muted">{current ? tr("측정", "Sampled") : tr("측정 정보 만료", "Sample expired")}: {new Date(resources.observed_at_ms).toLocaleTimeString(tr("ko-KR", "en-US"))}</p>
-    <div className="divide-y divide-th-border-subtle">
+    <div className="[&>*+*]:shadow-[inset_0_0.5px_0_var(--line)]">
       <Resource icon={<Cpu size={15} aria-hidden />} title="CPU" color="cpu"
         trend={trend("cpu", "CPU", sample => sample.cpu.usage_percent)}>
         <p className="break-words text-xs text-th-text-muted">{cpu.model || tr("모델 미확인", "Model unknown")}</p>

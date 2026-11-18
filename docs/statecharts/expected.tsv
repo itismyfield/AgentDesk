@@ -630,6 +630,36 @@ input-single-path/ManagedObserverRebindMetaIsInput.cfg	ManagedObserverRebind	Fix
 input-single-path/ManagedObserverRebindSinglePoll.cfg	ManagedObserverRebind	FixedAOnlyOnEvidenceOrGrace	SubmittedEventuallyCloses
 input-single-path/PersonOriginQueue.cfg	PersonOriginQueue	-
 input-single-path/PersonOriginQueueSplitBinds.cfg	PersonOriginQueue	AtomicBinds
+input-single-path/ReadinessRequietHerdrChurnFixed.cfg	ReadinessRequiet	-	-
+input-single-path/ReadinessRequietHerdrOnceBefore.cfg	ReadinessRequiet	-	InputEventuallyResolves
+input-single-path/ReadinessRequietHerdrOnceFixed.cfg	ReadinessRequiet	-	-
+input-single-path/ReadinessRequietHerdrPersonFixed.cfg	ReadinessRequiet	-	-
+input-single-path/ReadinessRequietHerdrRestoredFixed.cfg	ReadinessRequiet	-	-
+input-single-path/ReadinessRequietHerdrRunningFixed.cfg	ReadinessRequiet	-	-
+input-single-path/ReadinessRequietTmuxChurnExhaustHolds.cfg	ReadinessRequiet	-	InputEventuallyResolves
+input-single-path/ReadinessRequietTmuxChurnFixed.cfg	ReadinessRequiet	-	-
+input-single-path/ReadinessRequietTmuxChurnNoRoundCap.cfg	ReadinessRequiet	-	InputEventuallyResolves
+input-single-path/ReadinessRequietTmuxFencedFixed.cfg	ReadinessRequiet	-	-
+input-single-path/ReadinessRequietTmuxFencedIgnoreRunning.cfg	ReadinessRequiet	NoSettleOverOpenTurn	-
+input-single-path/ReadinessRequietTmuxKnownGapBefore.cfg	ReadinessRequiet	UnmovedSettleSeesPane	-
+input-single-path/ReadinessRequietTmuxKnownGapFixed.cfg	ReadinessRequiet	UnmovedSettleSeesPane	-
+input-single-path/ReadinessRequietTmuxMarkerBefore.cfg	ReadinessRequiet	-	InputEventuallyResolves
+input-single-path/ReadinessRequietTmuxMarkerFixed.cfg	ReadinessRequiet	-	InputEventuallyResolves
+input-single-path/ReadinessRequietTmuxOnceBefore.cfg	ReadinessRequiet	-	InputEventuallyResolves
+input-single-path/ReadinessRequietTmuxOnceDeliverSkipsEvidence.cfg	ReadinessRequiet	NoKeyWithoutEvidence	-
+input-single-path/ReadinessRequietTmuxOnceFixed.cfg	ReadinessRequiet	-	-
+input-single-path/ReadinessRequietTmuxOnceQuietSendsKey.cfg	ReadinessRequiet	NoKeyWithoutEvidence	-
+input-single-path/ReadinessRequietTmuxOnceStampOnceKeeps.cfg	ReadinessRequiet	-	InputEventuallyResolves
+input-single-path/ReadinessRequietTmuxPersonFixed.cfg	ReadinessRequiet	-	-
+input-single-path/ReadinessRequietTmuxPersonIgnoreScreen.cfg	ReadinessRequiet	NoRequietSettleOverBusyPane	-
+input-single-path/ReadinessRequietTmuxRunningFixed.cfg	ReadinessRequiet	-	-
+input-single-path/ReadinessRequietTmuxUnmovedBefore.cfg	ReadinessRequiet	-	-
+input-single-path/RefusedDispositionBefore.cfg	RefusedDisposition	RefusedStaysOut,NoBodyOnceSettled,NoKeyAfterEnd	NoticeExactlyOnce
+input-single-path/RefusedDispositionDrainSkipsRefused.cfg	RefusedDisposition	-	NoticeExactlyOnce
+input-single-path/RefusedDispositionFixed.cfg	RefusedDisposition	-	-
+input-single-path/RefusedDispositionNoDedupe.cfg	RefusedDisposition	NoticeAtMostOnce	NoticeExactlyOnce
+input-single-path/RefusedDispositionRetainContinuation.cfg	RefusedDisposition	NoBodyOnceSettled	-
+input-single-path/RefusedDispositionRetryAdmits.cfg	RefusedDisposition	RefusedStaysOut,NoKeyAfterEnd	NoticeExactlyOnce
 input-single-path/ReservedIdEnqueueBefore.cfg	ReservedIdEnqueue	NoReservationQueueOverlap	-
 input-single-path/ReservedIdEnqueueFixed.cfg	ReservedIdEnqueue	-	-
 input-single-path/ReservedIdEnqueueGuardOnly.cfg	ReservedIdEnqueue	NoLostReturn	EventuallyExecuted
