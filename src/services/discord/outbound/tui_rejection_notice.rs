@@ -1,4 +1,5 @@
-//! Body-free notice delivery; a committed uncertain attempt may only reconcile history.
+//! Body-free notice delivery; an uncertain attempt stays held and is never posted again. No
+//! automatic reconciliation is installed: `reconcile` waits for a path that supplies message ids.
 use std::future::Future;
 use std::sync::Arc;
 
@@ -123,7 +124,8 @@ pub(crate) async fn deliver(
     }
 }
 
-/// History reconciliation needs the posted message id; no production source supplies one yet.
+/// History reconciliation needs the posted message id. No production source supplies one yet,
+/// so this stays test-only and a held attempt is left as it is.
 #[cfg(test)]
 pub(crate) async fn reconcile(
     pool: &PgPool,

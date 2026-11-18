@@ -1084,11 +1084,13 @@ tui-o-writer/WriterAdoptionHerdrD1bCurrentLate.cfg	WriterAdoptionHerdrRowEnd	NoR
 tui-o-writer/WriterAdoptionHerdrD1bCurrentRefused.cfg	WriterAdoptionHerdrRowEnd	NoRefusedArchive	RefusedCopyDiscarded,RefusedExplicitlySettled
 tui-o-writer/WriterAdoptionHerdrD1bDesign.cfg	WriterAdoptionHerdrRowEnd	-	-
 tui-o-writer/WriterAdoptionHerdrD1bDesignLate.cfg	WriterAdoptionHerdrRowEnd	-	-
+tui-o-writer/WriterAdoptionHerdrD1bDesignRestart.cfg	WriterAdoptionHerdrRowEnd	-	-
 tui-o-writer/WriterAdoptionHerdrD1bHoldBodyMut.cfg	WriterAdoptionHerdrRowEnd	-	HerdrRowEventuallySettled,NewStartEventuallyPassesRow
 tui-o-writer/WriterAdoptionHerdrD1bNoGateMut.cfg	WriterAdoptionHerdrRowEnd	ReasonedBodyNotCopied,ReasonedBodyNotPosted	-
 tui-o-writer/WriterAdoptionHerdrD1bNoRecheckMut.cfg	WriterAdoptionHerdrRowEnd	NoRefusedArchive	-
 tui-o-writer/WriterAdoptionHerdrD1bOwnKeyMut.cfg	WriterAdoptionHerdrRowEnd	FirstReasonKept,ReasonAtMostOnce	-
 tui-o-writer/WriterAdoptionHerdrD1bRepostMut.cfg	WriterAdoptionHerdrRowEnd	ReasonAtMostOnce	-
+tui-o-writer/WriterAdoptionHerdrD1bRestartNoGateMut.cfg	WriterAdoptionHerdrRowEnd	ReasonedBodyNotCopied,ReasonedBodyNotPosted	-
 tui-o-writer/WriterAdoptionHerdrD1bRetainMut.cfg	WriterAdoptionHerdrRowEnd	NoRefusedArchive	-
 tui-o-writer/WriterAdoptionHerdrD1bRowBoundMut.cfg	WriterAdoptionHerdrRowEnd	-	ReasonEventuallySettles
 tui-o-writer/WriterAdoptionHerdrD1bSilentMut.cfg	WriterAdoptionHerdrRowEnd	DiscardVisible,NoBodyLoss	RefusedExplicitlySettled
