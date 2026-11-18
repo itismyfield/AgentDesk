@@ -874,7 +874,7 @@ pub async fn observe_completed_jobs(
             if str_at(job, "/status")? != "completed"
                 || job["run_attempt"]
                     .as_u64()
-                    .is_some_and(|attempt| attempt != run_attempt.into())
+                    .is_some_and(|attempt| attempt != u64::from(run_attempt))
                 || job["run_id"].as_u64() != Some(run_id)
                 || sha_at(job, "/head_sha")? != head
             {
