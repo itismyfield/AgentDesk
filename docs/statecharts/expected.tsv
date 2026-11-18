@@ -28,6 +28,11 @@ campaign-execution/CampaignHostWorkerNoFence.cfg	CampaignNodeLifecycle	HostWrite
 campaign-execution/CampaignHostWorkerNoHeadroom.cfg	CampaignNodeLifecycle	HostRespectsHeadroom	-
 campaign-execution/CampaignHostWorkerNoLock.cfg	CampaignNodeLifecycle	SingleHostWorker	-
 campaign-execution/CampaignHostWorkerNoReplay.cfg	CampaignNodeLifecycle	HostStartsOnce	-
+campaign-execution/CampaignLanding.cfg	CampaignLanding	-	-
+campaign-execution/CampaignLandingBefore.cfg	CampaignLanding	NoPushDuringCi	-
+campaign-execution/CampaignLandingNoHead.cfg	CampaignLanding	PrHeadVerified	-
+campaign-execution/CampaignLandingNoTimeout.cfg	CampaignLanding	-	PreparationSettles
+campaign-execution/CampaignLandingNoUnique.cfg	CampaignLanding	AtMostOnePr	-
 campaign-execution/CampaignNodeLifecycle.cfg	CampaignNodeLifecycle	-	-
 campaign-execution/CampaignNodeLifecycleBefore.cfg	CampaignNodeLifecycle	NoUnapprovedEntry	-
 campaign-execution/CampaignNodeLifecycleBudgetIgnored.cfg	CampaignNodeLifecycle	NoRetryAfterBudget	-

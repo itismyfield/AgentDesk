@@ -427,6 +427,8 @@ src/
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
 │   │   ├── execution_pin.rs
+│   │   ├── landing.rs
+│   │   ├── landing_tests.rs
 │   │   ├── lifecycle.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
@@ -1006,6 +1008,10 @@ src/
 │   │   ├── host_journal.rs
 │   │   ├── host_worker.rs
 │   │   ├── host_worker_tests.rs
+│   │   ├── landing_effects.rs
+│   │   ├── landing_effects_tests.rs
+│   │   ├── landing_prepare.rs
+│   │   ├── landing_prepare_tests.rs
 │   │   ├── lifecycle.rs
 │   │   ├── lifecycle_tests.rs
 │   │   ├── main_integration.rs

@@ -31,12 +31,23 @@ pub enum EffectAuthority {
         run_control_version: u64,
     },
     Verification(VerificationStartAuthority),
+    Landing {
+        action_id: String,
+        binding_digest: Digest,
+        node_epoch: u64,
+        run_control_version: u64,
+    },
 }
 
 impl EffectAuthority {
     fn fence(&self) -> (u64, u64) {
         match self {
             Self::CurrentAttempt {
+                run_control_version,
+                node_epoch,
+                ..
+            }
+            | Self::Landing {
                 run_control_version,
                 node_epoch,
                 ..
@@ -53,10 +64,22 @@ impl EffectAuthority {
                 binding_digest,
                 ..
             } => {
-                effect.kind != ActionKind::VerificationPhase
-                    && effect.phase.is_none()
+                !matches!(
+                    effect.kind,
+                    ActionKind::VerificationPhase | ActionKind::CreatePr
+                ) && effect.phase.is_none()
                     && (attempt_id, binding_digest)
                         == (&effect.origin_attempt_id, &effect.origin_binding_digest)
+            }
+            Self::Landing {
+                action_id,
+                binding_digest,
+                ..
+            } => {
+                effect.kind == ActionKind::CreatePr
+                    && effect.phase.is_none()
+                    && (action_id, binding_digest)
+                        == (&effect.action_id, &effect.origin_binding_digest)
             }
             Self::Verification(a) => effect.phase.as_ref().is_some_and(|p| {
                 effect.kind == ActionKind::VerificationPhase

@@ -119,7 +119,11 @@ impl HostWorker {
         self.campaign == binding.campaign_id && self.node == binding.node_id
     }
 
-    async fn locked<'a>(
+    pub(super) fn node(&self) -> &str {
+        &self.node
+    }
+
+    pub(super) async fn locked<'a>(
         &self,
         pool: &'a PgPool,
     ) -> Result<(Transaction<'a, Postgres>, CampaignState), WorkerError> {
@@ -342,6 +346,48 @@ impl HostWorker {
         }
     }
 
+    pub(super) async fn record_landing(
+        &self,
+        tx: Transaction<'_, Postgres>,
+        state: &CampaignState,
+        fact: super::landing_effects::LandingFact,
+    ) -> Result<(), WorkerError> {
+        self.commit(
+            tx,
+            state.event_sequence,
+            Command::RecordLanding {
+                node_id: self.node.clone(),
+                fact: Box::new(fact),
+            },
+            Utc::now(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub(super) async fn start_landing(
+        &mut self,
+        pool: &PgPool,
+        expected_action: &str,
+        initiate: impl FnOnce(
+            &super::landing_effects::Landing,
+            &Path,
+            &str,
+        ) -> io::Result<Initiated<()>>,
+    ) -> Result<Admitted<()>, WorkerError> {
+        let (_lock, state) = self.locked(pool).await?;
+        let now = Utc::now();
+        let (envelope, job, checkout) =
+            super::landing_effects::publication_envelope(&state, &self.node, self.identity(), now)?;
+        if envelope.action_id != expected_action {
+            return Err(WorkerError::StaleStep);
+        }
+        self.fence_start(&state, &envelope.action_id)?;
+        Ok(self
+            .gate
+            .admit_and_initiate(&envelope, now, |nonce| initiate(job, &checkout, nonce))?)
+    }
+
     pub async fn start_action<T>(
         &mut self,
         pool: &PgPool,
@@ -466,7 +512,7 @@ impl HostWorker {
             .resolve_indeterminate(action_id, initiation_id, resolution, now)?)
     }
 
-    async fn wait_for_headroom(&self, wait: Duration) -> Result<(), WorkerError> {
+    pub(super) async fn wait_for_headroom(&self, wait: Duration) -> Result<(), WorkerError> {
         match self.resources.admission(wait).await {
             ResourceAdmission::Ready => Ok(()),
             refusal => Err(WorkerError::Resource(refusal)),

@@ -94,6 +94,7 @@ pub(crate) fn running() -> CampaignState {
         verifications: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
         reviews: BTreeMap::new(),
+        landings: BTreeMap::new(),
         fences: BTreeMap::new(),
         seals: BTreeMap::new(),
         environments: BTreeMap::new(),
