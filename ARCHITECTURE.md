@@ -286,6 +286,7 @@ src/
 │   │   ├── advisory_lock.rs
 │   │   ├── advisory_lock_tests.rs
 │   │   ├── agent_sync.rs
+│   │   ├── backpressure.rs
 │   │   ├── intake_timing_pg_tests.rs
 │   │   ├── pool_return.rs
 │   │   ├── pool_return_pg_tests.rs
@@ -1251,6 +1252,8 @@ src/
 │   │   │   │   ├── plan.rs
 │   │   │   │   ├── snapshot.rs
 │   │   │   │   └── snapshot_tests.rs
+│   │   │   ├── admission_policy.rs
+│   │   │   ├── admission_policy_pg_tests.rs
 │   │   │   ├── agent_execution_node_tests.rs
 │   │   │   ├── attachment_tests.rs
 │   │   │   ├── capacity_tests.rs
@@ -2001,6 +2004,8 @@ src/
 │   │   │   │   ├── production_nonce_tests.rs
 │   │   │   │   ├── resolved.rs
 │   │   │   │   └── routine_incident_nonce.rs
+│   │   │   ├── o_writer_legacy/
+│   │   │   │   └── child_debt_tests.rs
 │   │   │   ├── o_writer_repost_io_tests/
 │   │   │   │   └── owner_tests.rs
 │   │   │   ├── serenity_reference/
@@ -2356,6 +2361,7 @@ src/
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
+│   │   │   │   │   ├── admission_policy_reentry_tests.rs
 │   │   │   │   │   ├── codex_turn_hold.rs
 │   │   │   │   │   ├── fallback_queued_tests.rs
 │   │   │   │   │   ├── final_guards.rs
@@ -3734,6 +3740,8 @@ src/
 │   │   ├── mod.rs
 │   │   ├── notify_recovery.rs
 │   │   ├── outbox_claiming.rs
+│   │   ├── outbox_pressure.rs
+│   │   ├── outbox_pressure_tests.rs
 │   │   ├── outbox_queue.rs
 │   │   ├── outbox_queue_replay_tests.rs
 │   │   ├── outbox_route.rs
@@ -3742,6 +3750,8 @@ src/
 │   │   ├── thread_reuse.rs
 │   │   └── wait_queue.rs
 │   ├── engine_runtime/
+│   │   ├── relay_state/
+│   │   │   └── coord.rs
 │   │   ├── legacy_state.rs
 │   │   ├── mod.rs
 │   │   ├── relay_state.rs
@@ -4333,6 +4343,8 @@ src/
 │   │   ├── channel_policy/
 │   │   │   ├── adoption/
 │   │   │   │   ├── body_check.rs
+│   │   │   │   ├── child_run.rs
+│   │   │   │   ├── child_run_tests.rs
 │   │   │   │   ├── first_turn.rs
 │   │   │   │   └── first_turn_tests.rs
 │   │   │   ├── children/
@@ -4474,6 +4486,8 @@ src/
 │   │   │   │   ├── scoped_transition_tests.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_snapshot.rs
+│   │   │   ├── adoption/
+│   │   │   │   └── child_debt.rs
 │   │   │   ├── binding/
 │   │   │   │   └── terminal_tests.rs
 │   │   │   ├── codex_adoption/
@@ -4492,6 +4506,7 @@ src/
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── fresh_input.rs
 │   │   │   │   ├── fresh_input_tests.rs
+│   │   │   │   ├── managed_start.rs
 │   │   │   │   ├── missing.rs
 │   │   │   │   ├── recover.rs
 │   │   │   │   └── transition.rs
@@ -4527,6 +4542,7 @@ src/
 │   │   │   │   │   ├── buffered_tests.rs
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
+│   │   │   │   ├── child_run.rs
 │   │   │   │   ├── claude.rs
 │   │   │   │   └── codex.rs
 │   │   │   ├── local_retry/
@@ -4616,6 +4632,8 @@ src/
 │   │   │   ├── input_notices.rs
 │   │   │   ├── late_adopt.rs
 │   │   │   ├── late_adopt_binding_tests.rs
+│   │   │   ├── late_adopt_child_boundary_tests.rs
+│   │   │   ├── late_adopt_childheld_tests.rs
 │   │   │   ├── late_adopt_cleanup_tests.rs
 │   │   │   ├── late_adopt_host_tests.rs
 │   │   │   ├── late_pin_tests.rs

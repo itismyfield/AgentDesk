@@ -34,7 +34,7 @@ through one host path. File paths under `writer/` are relative to
 | `unknown_current` | `writer/rotation/current.rs:5` | Unknown is not historical; it needs its own valid archive proof. |
 | `live`, retained FD | `writer/rotation.rs:80`, `writer/rotation/retained_capture.rs:43` | The existing retained-FD EOF path remains represented. |
 | `standby_restart` | `src/services/discord/runtime_bootstrap.rs:388`, `src/services/discord/runtime_bootstrap/gateway_lease_recovery.rs:476` | Promotion supplies a cold actor restart with no retained FD; the model does not assume every standby is promoted. |
-| `gate_reacquire` and `detail.owner` | `writer/actor.rs:629`, `writer/deliver.rs:138`, `writer/host.rs:988` | A source proof and gateway ownership are distinct; posting still requires the existing Owned permit. |
+| `gate_reacquire` and `detail.owner` | `writer/actor.rs:629`, `writer/deliver.rs:138`, `writer/host.rs:881` | A source proof and gateway ownership are distinct; posting still requires the existing Owned permit. |
 | `manual_retired` | `store/spool.rs:29`, `writer/rotation/readers.rs:110` | An already persisted retired cursor can boot without requiring newly invented proof metadata. |
 | `pending`, `detail.real`, `detail.phantom` | `writer/rotation.rs:81`, `writer/pieces.rs:201`, `writer/pieces.rs:266` | Capture/drain debt and the channel-wide replayed registry are available before retirement is chosen. |
 | `detail.original`, `race`, `changed`, `proof` | `writer/rotation/readers.rs:504`, `shadow/capture.rs:280` | FD, archive and preexisting manual retirement are distinct; original return and archive replacement are checked during verification. |
