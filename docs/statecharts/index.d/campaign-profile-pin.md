@@ -1,0 +1,2 @@
+key: campaign-profile-pin
+| `campaign-execution` profile snapshot/pin (#7438 M0) | `ffa099d4f4a6a68c26171fb464f7b5edffca2e5f` + M0 snapshot binding | Before/NoSource/NoScope/NoRole falsely match changed inputs; ReplaceOld silently replaces the pin; Ready opens execution from a snapshot | New bounded model: normal GREEN (110 states), six expected RED controls; official checker 7/7 matched. None/Old/Matching pins, explicit first pin creation and source/scope/role drift preserve public Unavailable. [Report and entrypoints](campaign-execution/profile-pin.report.md). |
