@@ -231,7 +231,15 @@ fn historical_frontier_in(
     eof: u64,
 ) -> Option<u64> {
     let (scope, turn) = (delivery?, turn?);
-    let source = crate::services::tui_o::writer::rotation::bound_source(binding)?;
+    use crate::services::tui_o::writer::binding::{BindingRecord, BindingTarget};
+    let source = match &binding.record {
+        BindingRecord::Bound {
+            new: BindingTarget::Source(source),
+            ..
+        }
+        | BindingRecord::Resolved { source, .. } => source,
+        _ => return None,
+    };
     if scope.source_path != source.path
         || scope
             .execution_nonce
