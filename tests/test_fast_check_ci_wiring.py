@@ -919,7 +919,12 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 steps = [s for s in job["steps"] if "nextest-native.sh" in s.get("run", "")]
                 self.assertEqual([shlex.split(s["run"])[-1] for s in steps], ["prepare", "run"])
                 for step in steps:
-                    self.assertEqual(shlex.split(step["run"])[:-1],
+                    argv = shlex.split(step["run"])
+                    # The macOS build reports its peak RSS through `time -l`, which keeps the build's exit status.
+                    if job_name == "full_macos" and argv[-1] == "prepare":
+                        self.assertEqual(argv[:2], ["/usr/bin/time", "-l"])
+                        argv = argv[2:]
+                    self.assertEqual(argv[:-1],
                                      ["bash", "scripts/ci/nextest-native.sh", platform,
                                       f"{platform}-lib", "pg-classifier"])
                     self.assertEqual(step["shell"], "bash")
