@@ -32,6 +32,7 @@ sys.path.insert(0, str(ROOT / "scripts" / "e2e"))
 import post_deploy_turn_smoke as turn_smoke  # noqa: E402
 import run_tui_relay as driver  # noqa: E402
 from tui_relay import assertions, clear_fresh_session  # noqa: E402
+from tui_relay.tests.clear_fresh_session_cases import AfterClearCaptureTests  # noqa: E402, F401
 
 SCENARIOS = ROOT / "tests/e2e/tui_relay/scenarios"
 FIXTURES = ROOT / "tests/e2e/tui_relay/fixtures/turn_smoke"
