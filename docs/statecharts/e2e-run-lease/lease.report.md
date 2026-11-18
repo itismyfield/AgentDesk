@@ -84,6 +84,65 @@
 
 `non_atomic` 뮤턴트에서는 두 실행이 같은 cursor를 읽어 한 칸을 잃는다. 그 cfg는 새 불변식을 싣지 않아 기대집합이 바뀌지 않는다. 배포 inbox·due 경계는 산술·파일 계약이라 모델 대신 시험(`scripts/e2e/tests/test_continuous_runner.py`)이 맡는다.
 
+## S2 확장 (2026-11-18)
+
+S1 head `405140a73683540b2453bf3c69bd1307abd3d31d`의 리뷰 P2 네 경계를 기존
+`LeaseLifetime.tla`의 트랜잭션 분기로 추가했다. 기존 lease 31 cfg는 바이트를 바꾸지 않았고
+기대 위반 집합도 유지했다. 새 `tx` record는 한 배포 요청, 부족한 첫 예산 창과 사용 가능한 다음 창,
+턴 한도 1, 최대 두 번째 턴 시작 시도, 각 저장 경계의 process crash 최대 1회를 탐색한다.
+`TransactionMode`가 켜진 cfg만 이 분기를 실행한다. 이 격리는 파일 트랜잭션 수명과 커널 FD 수명을
+각각 전수 탐색하려는 경계이며 둘을 하나의 원자 저장으로 가정하는 뜻이 아니다.
+
+| 코드 경계 | 모델 행동 | 지키는 규칙 | 기존 의미/원인 뮤턴트 |
+| --- | --- | --- | --- |
+| `budget.configured`, runner `_preflight` | `TxAcquire` 앞 enabled·known guard | `OffOrNullNoWrites`: off·null이면 lock·request·cursor·result·status·outbox 무변경 | `tx-old-off`, `tx-old-null` |
+| `inbox.pending`, 예산 거절 | `TxDefer` → `TxNextDay` → 재획득 | `DeferredRequestKept`: 실행 전 보류는 소비가 아님 | `tx-consume-deferred` |
+| `budget.TurnGuard`, runner `_execute` | `TxBeginTurn`, `TxUsage` | `UnknownNeverZero`, `EveryTurnWithinBudget`: unknown 보존·각 native 턴 시작 전 상한 검사 | `tx-unknown-zero`, `tx-between-only` |
+| runner `_record` → `_apply_completed` | `TxComplete` → `TxApply`, 각 사이 `TxCrash` | `CursorRequiresDurable`, `ProjectionExactlyOnce`: 정본 완료 전 cursor 금지·멱등 적용 | `tx-apply-first`, `tx-double-apply` |
+| runner 예약 전 RUNNING crash | `TxCrash`(Held) → `TxRecover`(Deferred) | `UnreservedCrashPreservesRequest`: 예약 전이면 실제 입력 0이며 요청을 보존 | `tx-consume-deferred` |
+| runner 예약 후 고아 복구 | `TxReserve` → `TxCrash` → `TxRecover` | `ReservedOrphanPausesProvider`: 예약 유지·ABANDONED·provider pause | `tx-orphan-no-pause` |
+| runner `_abandon_orphans` 완료 정본 복구 | `TxRecover` → `TxApply` | `CompletedResultNeverRegresses`, `CompletedProjectionRecovers` | `tx-result-regress`, `tx-no-recover` |
+| summary·status 및 outbox 발행 | `TxPublish`, `TxStatusFirst` | `StatusRequiresDurable`, `CompletedPublicationRecovers`: 정본에서 발행하며 crash 뒤 회복 | `tx-status-first` |
+| `outbox.dispatch` 전송 실패 | `TxNotifyFails` | `FailedNotifyRemainsPending`: 재시도 실패도 pending 보존 | `tx-alert-drop` |
+
+`TxComplete`는 PASS 또는 FAIL 결과를 내구 기록하고, cursor/request projection과 summary/status/outbox는
+별도 행동이다. `TxApply`는 정본에 저장한 목표 cursor를 대입하므로 crash 복구로 다시 적용해도
++1을 중복하지 않는다. crash가 완료 기록 전에 일어나면 ABANDONED이며 cursor는 그대로이고,
+완료 기록 뒤면 원 결과를 유지하여 누락 projection과 발행만 복구한다. 예약 전 RUNNING 기록의 crash는
+실제 입력이 시작되지 않았음을 알 수 있어 요청을 DEFERRED로 남긴다. 예약 후 고아는 예약을 유지하고
+사용량을 unknown으로 보아 provider를 pause한다.
+`CompletedProjectionRecovers`와 `CompletedPublicationRecovers`는 `TxAdvance` weak fairness 아래 검증한다.
+예약 후 고아도 ABANDONED 정본을 저장하고 summary/status/outbox 발행 생존성을 검증한다.
+전송 성공은 가정하지 않으며 알림 실패의 영구 pending은 허용한다.
+
+새 cfg 15개는 정상 `tx-good`·`tx-off`·`tx-null` 3 GREEN과 원인 뮤턴트 12 RED다.
+기존 31개와 합쳐 **46/46 기대 집합 일치(9 GREEN + 37 expected RED)**를 요구한다.
+원인 뮤턴트는 `Mut` 값만 다르고 모델 소스는 모든 cfg에서 같다. 실제 Python의 수정 전 RED와
+GREEN·바이트 복원 뮤턴트는 구현 보고서가 정본이다. 새 모델에 예전 불변식 이름이 없어서 나는
+SANY 오류를 행동 RED로 세지 않았다.
+
+상태 차트는 [트랜잭션 수명](run-tx-good.chart.mmd)에 있다. 정상 모델 135 상태·338 step을
+22 표시 상태·35 화살표로 그리며, 같은 표시 상태를 유지하는 185 step(usage 판독·FD 해제·
+pending 알림의 전송 실패 등)은 숨긴다. 병렬 region으로 합치면 불가능한 조합을 그릴 수 있어
+공식 생성기가 parent 상태 차트로 전환했다.
+파일 전원 손실·다중 provider 합산·실제 usage parser·실제 native API 전송·알림 transport·outbox
+동시 dispatcher 및 신규 요청으로 supersede되는 정책은 이 유계 모델 밖이며 Python 시험이 맡는다.
+off/null 무변경을 우선하므로 완료 projection 뒤 다음 bundle의 예약값이 null이면 복구는 valid config를
+기다린다. 설정은 모델 상수라 이 지연은 liveness 약속에 넣지 않았다. 프로세스 startup을 포함한
+absolute monotonic deadline의 실제 시계·입출력 경계는 Python 시험이 맡는다.
+
+재현:
+
+```sh
+python3 -B docs/statecharts/e2e-run-lease/check_models.py --self-test-selection
+python3 -B docs/statecharts/e2e-run-lease/check_models.py --java /opt/homebrew/opt/openjdk/bin/java --jar /Users/itismyfield/.local/share/tla2tools/tla2tools-1.7.4.jar --out /tmp/i8120-s2-tlc-recheck
+```
+
+statechart 스킬의 공식 생성기로 만든 차트 원본·TLC 출력은 같은 logs 아래 `s2-model-contract-chart/`이며,
+view는 `s2-model-view.mjs`다. 원시 로그·matrix JSON은 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/s2-model-contract-final/`,
+직접 TLC 반례는 같은 logs 아래 `s2-model-contract-raw/`에 있다. 모델의 고정 입력 SHA256·상태 수와 짧은
+반례는 구현 보고서의 증거 목록에도 기록한다.
+
 ## 코드 기준과 범위
 
 코드 감사 기준 `origin/main=79bebdd4eaa29b289bf88412825baa7d70a6ac77`, 레인 기반 `21c80274`다.
@@ -287,6 +346,6 @@ TLA2TOOLS=/Users/itismyfield/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/op
 
 고정 inode와 동일 open-file-description 전달, host 단일성, 정확한 parent/bot-set resource key, 실제 `fstat`/instance witness 검증, startup admission 앞 fail-closed, CLOEXEC 복구, mutation journal의 atomic/durable 쓰기 및 실제 nonce/ACK 대조는 아직 제품 구현으로 증명하지 않았다. 모델은 파일시스템 전원 손실·inode 교체·NFS/SSH 분산 임대·실제 Discord Gateway·provider 내부 상태·receipt 기반 cleanup 알고리즘을 탐색하지 않는다. `foreign_cleanup`은 권한 추가 금지 계약의 mutation assertion이며 PID 소유권 판별 구현의 증명이 아니다. helper FD 전파 금지는 모델과 liveness 반례로 확인했으며 실제 provider/daemon spawn 배선 검증은 #8124 I3a에 남는다.
 
-<!-- doc-path-refs: external /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/l0/ /tmp/i8120- -->
+<!-- doc-path-refs: external /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/s2-model- /tmp/i8120-s2- /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/l0/ /tmp/i8120- -->
 
 자체 `check_models.py`는 정확한 23 cfg 선택과 JSON 증거 보관용 adapter로 유지한다. 기대 집합은 `docs/statecharts/expected.tsv`에서 읽고, 실행·fairness·전체 위반 판정은 `scripts/ci/statecharts_tlc.py`의 `check_cfg`에 위임해 중복 기대값/판정기를 제거했다. `--timeout 300 --jobs 2`는 공통 CI 기본 실행 인자와 같다.

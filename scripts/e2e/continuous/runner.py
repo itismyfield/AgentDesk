@@ -6,14 +6,16 @@ lease FD, settles budget and advances the cursor once. A crashed run keeps its r
 not advance the cursor and is marked ABANDONED by the next lock holder.
 """
 
+import hashlib
 import json
+import math
 from pathlib import Path
 import os
 import subprocess
 import time
 import uuid
 
-from . import budget, channel_lock, inbox, plan
+from . import budget, channel_lock, inbox, plan, publication, summary
 from .store import read_json, write_json
 
 RESULTS = {"PASS", "FAIL", "UNEVALUABLE"}
@@ -37,6 +39,9 @@ def settings(config):
         raise ValueError("rotation_interval_s must be null or a positive integer")
     if config.get("daily_full_at") is not None:
         raise ValueError("daily_full_at stays null: the full census run is not part of this runner")
+    tick_interval = config.get("tick_interval_s", 60)
+    if type(tick_interval) not in (int, float) or not math.isfinite(tick_interval) or tick_interval <= 0:
+        raise ValueError("tick_interval_s must be positive")
     driver = config.get("driver")
     if not isinstance(driver, list) or not driver or not all(isinstance(arg, str) for arg in driver):
         raise ValueError("driver must be an argv list")
@@ -67,33 +72,39 @@ def _record(state, record, **changes):
     return record
 
 
-def _apply_completed(state, row):
+def _apply_completed(state, row, config=None):
     budget.settle(state, row["budget_day"], row["run_id"], row.get("measured", {}))
     if row["request"]["kind"] == "deploy":
         inbox.record(state, {row["request"]["request_id"]: row["result"]})
-    else:
+    elif row["result"] != "ABANDONED":
         cursor = plan.cursor(state)
         if cursor["index"] <= row["cursor_index"]:
             plan.save_cursor(state, {"index": row["cursor_index"] + 1, "last_scheduled_at": row["started_at"]})
+    if config is not None:
+        publication.finish(state, row, config)
     _record(state, row, applied=True)
 
 
-def _abandon_orphans(state, run_id):
+def _abandon_orphans(state, run_id, config=None):
     """Replay durable completions; an unfinished run is abandoned without re-executing it."""
     rows = [read_json(path, {}) for path in (state / "runs").glob("*.json")]
     for row in sorted(rows, key=lambda row: (row.get("started_at", 0), row.get("run_id", ""))):
         if row.get("completed_at") is not None and not row.get("applied"):
-            _apply_completed(state, row)
+            _apply_completed(state, row, config)
         elif row.get("result") == "RUNNING":
             result = "ABANDONED" if budget.reserved(state, row["budget_day"], row["run_id"]) else "DEFERRED_BUDGET"
             if result == "ABANDONED":
                 charged = read_json(state / "budget" / f"{row['budget_day']}.json", {})[row["run_id"]]
                 budget.settle(state, row["budget_day"], row["run_id"],
                               {provider: {field: None for field in budget.FIELDS} for provider in charged})
-            _record(state, row, result=result, abandoned_by=run_id)
+            changes = {"completed_at": time.time(), "measured": {}} if result == "ABANDONED" else {}
+            _record(state, row, result=result, abandoned_by=run_id, **changes)
             if row.get("request", {}).get("kind") == "deploy":
                 if inbox.ledger(state).get(row["request"]["request_id"]) in (None, "RUNNING"):
                     inbox.record(state, {row["request"]["request_id"]: result})
+            if config is not None and result == "ABANDONED":
+                publication.finish(state, row, config)
+                _record(state, row, applied=True)
 
 
 def _selection(state, config, request):
@@ -106,6 +117,11 @@ def _selection(state, config, request):
         bundle, cell, profile = steps[cursor["index"] % len(steps)]
         rows = plan.step_occurrences(manifest, bundle, cell, profile)
     for row in rows:
+        contract = config.get("occurrence_contracts", {}).get(row["scenario"], {})
+        for key, value in contract.items():
+            row.setdefault(key, value)
+        row["assertions_expected"] = config.get("required_assertions", {}).get(row["scenario"], [])
+        row["key"] = summary.occurrence_key(row, profile)
         blocked = plan.gate(manifest, row, config["capabilities"])
         if blocked:
             row.update(status=blocked[0], reason=blocked[1])
@@ -145,17 +161,34 @@ def _execute(lease, config, record, row, remaining):
                                "--profile", record["profile"], "--budget", json.dumps(remaining)]
     if record["request"].get("deploy_sha"):
         argv += ["--deploy-sha", record["request"]["deploy_sha"]]
-    proc = lease.spawn(argv, record["run_id"], stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    with publication.keepalive(Path(config["state_dir"]), config, record["run_id"]):
+        proc = lease.spawn(argv, record["run_id"], stdin=subprocess.DEVNULL, capture_output=True, text=True)
     try:
         report = json.loads((proc.stdout or "").strip().splitlines()[-1])
     except (IndexError, ValueError):
         report = {}
+    key = hashlib.sha256(row.get("key", row["scenario"]).encode()).hexdigest()
+    raw_path = Path(config["state_dir"]) / "outputs" / "e2e" / record["run_id"] / f"{key}.json"
+    write_json(raw_path, report)
+    row["driver_report_path"] = str(raw_path)
+    if isinstance(report, dict):
+        for key in (*summary.IDENTITY, "assertions", "real_provider_contacted", "evidence_paths", "fixture", "dry_run",
+                    "timeout", "dirty_residue", "usage", "actual_occurrence_key"):
+            if key in report:
+                row[key] = report[key]
     status = report.get("status") if isinstance(report, dict) else None
     turns = report.get("native_turns") if isinstance(report, dict) else None
     row.update(status=status if status in RESULTS and (proc.returncode == 0 or status == "FAIL") else "UNEVALUABLE",
                driver_rc=proc.returncode, elapsed_s=round(time.monotonic() - started, 3),
                native_turns=turns if type(turns) is int and turns >= 0 else None,
                tokens=report.get("tokens") if isinstance(report, dict) and type(report.get("tokens")) is int and report["tokens"] >= 0 else None)
+    usage = row.get("usage", {})
+    if (not isinstance(usage, dict) or any(type(usage.get(field)) is not int or usage[field] < 0 for field in summary.USAGE)
+            or usage.get("native_turns") != row["native_turns"]
+            or sum(usage.get(field, 0) or 0 for field in summary.USAGE[1:]) != row["tokens"]):
+        row["tokens"] = None
+    if row["elapsed_s"] >= remaining["time_s"]:
+        row["timeout"] = True
     if isinstance(report, dict) and row["native_turns"] is not None and (report.get("budget_checked") != row["native_turns"]
             or row["native_turns"] > remaining["turns"] or (row["tokens"] is not None and row["tokens"] > remaining["tokens"])):
         row.update(status="FAIL" if row["status"] == "FAIL" else "UNEVALUABLE", native_turns=None,
@@ -167,7 +200,10 @@ def _run(lease, state, config, request, run_id, now):
     runnable = [row for row in rows if "status" not in row]
     record = {"schema_version": 1, "run_id": run_id, "request": request, "bundle": bundle, "profile": profile,
               "cursor_index": cursor["index"], "started_at": now, "budget_day": budget.day(now),
-              "lease_key": lease.key, "occurrences": rows}
+              "lease_key": lease.key, "occurrences": rows, "expected": [row["key"] for row in rows],
+              "assertion_contract": config.get("required_assertions", {}),
+              **{key: config.get(key) for key in summary.IDENTITY},
+              "head": request.get("deploy_sha", config.get("head"))}
     _record(state, record, result="RUNNING")  # Before reserving, so a crash leaves a record to abandon.
     refused = budget.reserve(state, config.get("budget") or {}, amounts, run_id, now) if runnable else None
     if refused:
@@ -179,6 +215,7 @@ def _run(lease, state, config, request, run_id, now):
     if request["kind"] == "deploy":
         inbox.record(state, {**{rid: "SUPERSEDED" for rid in request["superseded"]},
                              **{stem: "REJECTED" for stem in request["rejected"]}, request["request_id"]: "RUNNING"})
+    publication.heartbeat(state, config, now, run_id)
     spent, turned, tokens, unknown = {}, {}, {}, set()
     for row in runnable:
         provider = row["cell"].split("-")[0]
@@ -196,6 +233,7 @@ def _run(lease, state, config, request, run_id, now):
         else:
             turned[provider] = turned.get(provider, 0) + row["native_turns"]
             tokens[provider] = tokens.get(provider, 0) + row["tokens"]
+        _record(state, record)
     measured = {}
     for provider in amounts:
         mine = [row for row in runnable if row["cell"].startswith(provider + "-") and "elapsed_s" in row]
@@ -203,9 +241,17 @@ def _run(lease, state, config, request, run_id, now):
         measured[provider] = {"time_s": round(spent.get(provider, 0), 3),
                               "tokens": None if provider in unknown else tokens.get(provider, 0),
                               "turns": sum(turns) if None not in turns else None}
-    result = _verdict(rows)
-    _record(state, record, result=result, completed_at=time.time(), measured=measured)
-    _apply_completed(state, record)
+    usage = {}
+    for provider in amounts:
+        mine = [row for row in rows if row.get("cell", "") and row["cell"].startswith(provider + "-") and "elapsed_s" in row]
+        usage[provider] = {field: sum(row["usage"][field] for row in mine)
+                          if mine and all(type(row.get("usage", {}).get(field)) is int and row["usage"][field] >= 0 for row in mine)
+                          else None for field in summary.USAGE}
+    record.update(result=_verdict(rows), completed_at=time.time(), measured=measured, usage=usage,
+                  usage_complete=all(all(value is not None for value in item.values()) for item in usage.values()))
+    result = summary.build(record, config)["result"]
+    _record(state, record, result=result, completed_at=record["completed_at"])
+    _apply_completed(state, record, config)
     return record
 
 
@@ -219,6 +265,9 @@ def tick(config_path, now=None):
     recovery = any(row.get("result") == "RUNNING" or (row.get("completed_at") is not None and not row.get("applied"))
                    for row in (read_json(p, {}) for p in (state / "runs").glob("*.json")))
     if request is None and not recovery:
+        amounts = _selection(state, config, {"kind": "scheduled"})[-1]
+        if budget.configured(config.get("budget") or {}, amounts) is None:
+            publication.heartbeat(state, config, now)
         return {"status": "NOT_DUE"}
     if refused := _preflight(state, config, request or {"kind": "scheduled"}, recovering=recovery):
         return {"status": "DEFERRED_BUDGET", "reason": refused}
@@ -229,9 +278,10 @@ def tick(config_path, now=None):
         return {"status": "DEFERRED_LEASE", "run_id": run_id}
     with lease:
         lease.publish_owner({"kind": "runner", "run_id": run_id, "pid": os.getpid(), "since": now})
-        _abandon_orphans(state, run_id)
+        _abandon_orphans(state, run_id, config)
         request = _due(state, config, now)
         if request is None:
+            publication.heartbeat(state, config, now)
             return {"status": "NOT_DUE"}
         if refused := _preflight(state, config, request):
             return {"status": "DEFERRED_BUDGET", "reason": refused, "run_id": run_id}

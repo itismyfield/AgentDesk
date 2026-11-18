@@ -14,7 +14,7 @@ class Recovery(Runner):
     # Reuse the fixture, without collecting the inherited S1 tests a second time.
     def test_unknown_usage_stops_following_occurrences_and_keeps_reservation(self):
         with mock.patch.dict("os.environ", {"FAKE_TURNS": "null"}):
-            self.assertEqual(self.tick(1000)["status"], "PARTIAL")
+            self.assertEqual(self.tick(1000)["status"], "UNEVALUABLE")
         self.assertEqual(len(self.driven()), 1)
         ledger = read_json(self.state / "budget" / f"{budget.day(1000)}.json", {})
         self.assertEqual(next(iter(ledger.values()))["claude"]["turns"], 6)
@@ -43,14 +43,14 @@ class Recovery(Runner):
         config["claude"]["daily_turns"] = None
         self.tick(1000, budget=config)
         self.assertEqual(before, {p.relative_to(self.state): p.read_bytes() for p in self.state.rglob("*") if p.is_file()})
-        self.assertEqual(self.tick(1001)["status"], "PARTIAL")
+        self.assertEqual(self.tick(1001)["status"], "UNEVALUABLE")
 
     def test_budget_deferred_request_retries_next_day_once_and_can_be_superseded(self):
         self.submit("waiting")
         caps = {p: {"daily_turns": 1, "daily_tokens": 1000, "daily_time_s": 600} for p in ("claude", "codex")}
         self.assertEqual(self.tick(1000, budget=caps)["status"], "DEFERRED_BUDGET")
         self.assertEqual(self.driven(), [])
-        self.assertEqual(self.tick(90000, rotation_interval_s=None)["status"], "PARTIAL")
+        self.assertEqual(self.tick(90000, rotation_interval_s=None)["status"], "UNEVALUABLE")
         count = len(self.driven())
         self.tick(90001, rotation_interval_s=None)
         self.assertEqual(len(self.driven()), count)
@@ -83,6 +83,15 @@ class Recovery(Runner):
                         {"turns": 1, "tokens": 10, "time_s": 10})
         self.assertEqual(row["status"], "FAIL")
 
+    def test_unknown_usage_components_do_not_become_zero(self):
+        lease = mock.Mock()
+        lease.spawn.return_value = subprocess.CompletedProcess([], 0, json.dumps({"status": "PASS", "native_turns": 1,
+                                                                               "tokens": 1, "budget_checked": 1}))
+        row = {"scenario": "E-1", "cell": "claude-tui"}
+        runner._execute(lease, self.config, {"profile": "default", "run_id": "test", "request": {}}, row,
+                        {"turns": 1, "tokens": 10, "time_s": 10})
+        self.assertIsNone(row["tokens"])
+
     def test_crash_before_reservation_or_deferral_does_not_consume_request(self):
         for boundary in ("reservation", "deferral"):
             with self.subTest(boundary=boundary):
@@ -100,7 +109,7 @@ class Recovery(Runner):
                 with patch, self.assertRaises(RuntimeError):
                     self.tick(1000, budget=caps)
                 self.assertEqual(self.driven(), [])
-                self.assertEqual(self.tick(90000, rotation_interval_s=None)["status"], "PARTIAL")
+                self.assertEqual(self.tick(90000, rotation_interval_s=None)["status"], "UNEVALUABLE")
                 self.assertEqual(len(self.driven()), 2)
 
     def test_crash_after_driver_leaves_unknown_provider_paused(self):

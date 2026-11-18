@@ -5,8 +5,8 @@ Runs == {"A", "B"}
 None == "none"
 VARIABLES phase, parentFd, childFd, helperFd, owner, seenFree, aged,
           pending, net, netOwner, ack, twin, badLateSend, foreignCleanup,
-          reserved, cursor, seen, advanced
-runner == <<reserved, cursor, seen, advanced>>
+          reserved, cursor, seen, advanced, tx
+runner == <<reserved, cursor, seen, advanced, tx>>
 vars == <<phase, parentFd, childFd, helperFd, owner, seenFree, aged,
           pending, net, netOwner, ack, twin, badLateSend, foreignCleanup, runner>>
 \* Runner settings ride on Mut so the earlier configs stay unchanged: "off" and
@@ -18,6 +18,12 @@ Holder(r) == parentFd[r] \/ childFd[r] \/ helperFd[r]
 OtherHolders(r) == \E q \in Runs \ {r}: Holder(q)
 Active == {r \in Runs: phase[r] \in {"Running", "Prepared", "Draining"}}
 Clean == pending = None /\ net \in {"none", "settled"}
+TxInitial == [stage |-> "Pending", day |-> 0, deferred |-> FALSE, consumed |-> FALSE,
+              locked |-> FALSE, budgetReserved |-> FALSE, providerPaused |-> FALSE,
+              started |-> 0, used |-> 0, usage |-> "pending",
+              durable |-> FALSE, finished |-> FALSE, result |-> "NONE", applied |-> FALSE, index |-> 0,
+              crashed |-> FALSE, summary |-> FALSE, status |-> "NONE",
+              outbox |-> "NONE", notifyFailed |-> FALSE]
 Init ==
     /\ phase = [r \in Runs |-> "Pending"]
     /\ parentFd = [r \in Runs |-> FALSE]
@@ -28,6 +34,7 @@ Init ==
     /\ twin = None /\ badLateSend = FALSE /\ foreignCleanup = FALSE
     /\ reserved = [r \in Runs |-> FALSE] /\ cursor = 0
     /\ seen = [r \in Runs |-> 0] /\ advanced = [r \in Runs |-> FALSE]
+    /\ tx = TxInitial
 ObserveFree(r) ==
     /\ Mut = "non_atomic" /\ phase[r] = "Pending" /\ owner = None /\ ~seenFree[r]
     /\ seenFree' = [seenFree EXCEPT ![r] = TRUE]
@@ -54,7 +61,7 @@ Start(r) ==
     /\ phase' = [phase EXCEPT ![r] = IF Clean THEN "Running" ELSE "PausedUncertain"]
     /\ twin' = IF Mut = "duplicate_child" /\ Clean THEN r ELSE twin
     /\ UNCHANGED <<parentFd, owner, seenFree, aged, pending, net,
-                   netOwner, ack, badLateSend, foreignCleanup, reserved, cursor, advanced>>
+                   netOwner, ack, badLateSend, foreignCleanup, reserved, cursor, advanced, tx>>
 Resume(r) ==
     /\ phase[r] = "PausedUncertain" /\ Clean /\ owner = r /\ childFd[r]
     /\ phase' = [phase EXCEPT ![r] = "Running"]
@@ -107,7 +114,7 @@ Finish(r) ==
     /\ cursor' = IF Kind = "run" THEN seen[r] + 1 ELSE cursor
     /\ advanced' = IF Kind = "run" THEN [advanced EXCEPT ![r] = TRUE] ELSE advanced
     /\ UNCHANGED <<parentFd, helperFd, seenFree, aged, pending, net,
-                   netOwner, ack, badLateSend, foreignCleanup, reserved, seen>>
+                   netOwner, ack, badLateSend, foreignCleanup, reserved, seen, tx>>
 ParentCrash(r) ==
     /\ CrashEnabled /\ parentFd[r] /\ parentFd' = [parentFd EXCEPT ![r] = FALSE]
     /\ phase' = [phase EXCEPT ![r] = IF phase[r] = "Held" THEN "Released" ELSE @]
@@ -125,7 +132,7 @@ ChildCrash(r) ==
     /\ twin' = IF twin = r THEN None ELSE twin
     /\ cursor' = IF Mut = "advance_on_crash" THEN seen[r] + 1 ELSE cursor
     /\ UNCHANGED <<parentFd, helperFd, seenFree, aged, pending, net,
-                   netOwner, ack, badLateSend, foreignCleanup, reserved, seen, advanced>>
+                   netOwner, ack, badLateSend, foreignCleanup, reserved, seen, advanced, tx>>
 ReleaseParent(r) ==
     /\ phase[r] = "Released" /\ parentFd[r]
     /\ parentFd' = [parentFd EXCEPT ![r] = FALSE]
@@ -143,7 +150,7 @@ Reserve(r) ==
     /\ (Spent < Budget \/ Mut = "over_budget")
     /\ reserved' = [reserved EXCEPT ![r] = TRUE]
     /\ UNCHANGED <<phase, parentFd, childFd, helperFd, owner, seenFree, aged,
-                   pending, net, netOwner, ack, twin, badLateSend, foreignCleanup, cursor, seen, advanced>>
+                   pending, net, netOwner, ack, twin, badLateSend, foreignCleanup, cursor, seen, advanced, tx>>
 Defer(r) ==
     /\ Kind = "run" /\ phase[r] = "Held" /\ owner = r /\ ~reserved[r]
     /\ Spent >= Budget /\ Mut # "over_budget"
@@ -155,11 +162,130 @@ Wait ==
        \/ (\E r \in Runs: phase[r] = "PausedUncertain")
        \/ (owner # None /\ \E r \in Runs: phase[r] = "Pending"))
     /\ UNCHANGED vars
-Next == (\E r \in Runs: ObserveFree(r) \/ Acquire(r) \/ ExpireDiagnostic(r)
+LeaseNext == (\E r \in Runs: ObserveFree(r) \/ Acquire(r) \/ ExpireDiagnostic(r)
          \/ Start(r) \/ Resume(r) \/ Prepare(r) \/ Send(r) \/ Finish(r)
          \/ ParentCrash(r) \/ ChildCrash(r) \/ ReleaseParent(r) \/ Reserve(r) \/ Defer(r))
         \/ ServerAccept \/ AckWitness \/ ProviderSettles \/ Reconcile
         \/ ClearFromIdleSnapshot \/ ForeignCleanup \/ Wait
+
+\* The transaction branch separates durable result, projection and notification
+\* writes so a process crash can occur at every file boundary.
+TransactionMutants == {"tx-good", "tx-off", "tx-null", "tx-old-off", "tx-old-null",
+    "tx-unknown-zero", "tx-between-only", "tx-consume-deferred", "tx-apply-first",
+    "tx-no-recover", "tx-result-regress", "tx-status-first", "tx-alert-drop", "tx-double-apply", "tx-orphan-no-pause"}
+TransactionMode == Mut \in TransactionMutants
+TxEnabled == Mut \notin {"tx-off", "tx-old-off"}
+TxBudgetKnown == Mut \notin {"tx-null", "tx-old-null"}
+lease == <<phase, parentFd, childFd, helperFd, owner, seenFree, aged,
+           pending, net, netOwner, ack, twin, badLateSend, foreignCleanup,
+           reserved, cursor, seen, advanced>>
+TxAcquire ==
+    /\ tx.stage = "Pending" /\ ~tx.consumed
+    /\ ((TxEnabled /\ TxBudgetKnown) \/ Mut \in {"tx-old-off", "tx-old-null"})
+    /\ tx' = [tx EXCEPT !.stage = "Held", !.locked = TRUE]
+    /\ UNCHANGED lease
+TxDefer ==
+    /\ tx.stage = "Held" /\ tx.day = 0
+    /\ tx' = [tx EXCEPT !.stage = "Deferred", !.locked = FALSE,
+                 !.deferred = TRUE, !.consumed = (Mut = "tx-consume-deferred")]
+    /\ UNCHANGED lease
+TxNextDay ==
+    /\ tx.stage = "Deferred" /\ ~tx.consumed
+    /\ tx' = [tx EXCEPT !.stage = "Pending", !.day = 1]
+    /\ UNCHANGED lease
+TxReserve ==
+    /\ tx.stage = "Held" /\ tx.day = 1 /\ ~tx.budgetReserved
+    /\ tx' = [tx EXCEPT !.budgetReserved = TRUE]
+    /\ UNCHANGED lease
+TxBeginTurn ==
+    /\ tx.stage \in {"Held", "Running"} /\ tx.day = 1
+    /\ tx.budgetReserved /\ ~tx.providerPaused
+    /\ tx.started < 2
+    /\ ((tx.used < 1 /\ tx.usage # "unknown")
+        \/ (Mut = "tx-between-only" /\ tx.started = 1)
+        \/ (Mut = "tx-unknown-zero" /\ tx.usage = "unknown"))
+    /\ tx' = [tx EXCEPT !.stage = "Running", !.started = @ + 1,
+                 !.used = @ + 1, !.usage = "pending"]
+    /\ UNCHANGED lease
+TxUsage(value) ==
+    /\ tx.stage = "Running" /\ tx.usage = "pending"
+    /\ tx' = [tx EXCEPT !.usage = value,
+                 !.used = IF value = "unknown" /\ Mut = "tx-unknown-zero" THEN 0 ELSE @]
+    /\ UNCHANGED lease
+TxApplyFirst ==
+    /\ Mut = "tx-apply-first" /\ tx.stage = "Running" /\ tx.usage # "pending"
+    /\ tx' = [tx EXCEPT !.stage = "Precomplete", !.index = 1, !.consumed = TRUE]
+    /\ UNCHANGED lease
+TxComplete(result) ==
+    /\ tx.stage \in {"Running", "Precomplete"} /\ tx.usage # "pending"
+    /\ (Mut # "tx-apply-first" \/ tx.stage = "Precomplete")
+    /\ tx' = [tx EXCEPT !.stage = "Finished", !.durable = TRUE, !.finished = TRUE, !.result = result]
+    /\ UNCHANGED lease
+TxApply ==
+    /\ tx.finished /\ tx.durable /\ tx.stage = "Finished"
+    /\ (~tx.applied \/ (Mut = "tx-double-apply" /\ tx.index < 2))
+    /\ tx' = [tx EXCEPT !.stage = "Done",
+        !.index = IF Mut = "tx-double-apply" THEN @ + 1 ELSE 1,
+        !.consumed = TRUE, !.applied = TRUE]
+    /\ UNCHANGED lease
+TxCrash ==
+    /\ CrashEnabled /\ ~tx.crashed
+    /\ tx.stage \in {"Held", "Running", "Precomplete", "Finished", "Done"}
+    /\ tx' = [tx EXCEPT !.stage = "Crashed", !.locked = FALSE, !.crashed = TRUE]
+    /\ UNCHANGED lease
+TxRecover ==
+    /\ tx.stage = "Crashed"
+    /\ tx' = [tx EXCEPT
+        !.stage = IF ~tx.budgetReserved THEN "Deferred"
+                  ELSE IF tx.durable /\ Mut # "tx-no-recover" THEN "Finished" ELSE "Done",
+        !.result = IF ~tx.budgetReserved THEN "NONE"
+                   ELSE IF Mut = "tx-result-regress" \/ ~tx.durable THEN "ABANDONED" ELSE @,
+        !.consumed = IF ~tx.budgetReserved THEN (Mut = "tx-consume-deferred")
+                     ELSE IF tx.durable THEN @ ELSE TRUE,
+        !.deferred = IF ~tx.budgetReserved THEN TRUE ELSE @,
+        !.providerPaused = IF tx.budgetReserved /\ ~tx.durable THEN (Mut # "tx-orphan-no-pause") ELSE @,
+        !.durable = IF tx.budgetReserved THEN TRUE ELSE @]
+    /\ UNCHANGED lease
+TxStatusFirst ==
+    /\ Mut = "tx-status-first" /\ tx.stage = "Running" /\ ~tx.durable
+    /\ tx' = [tx EXCEPT !.status = "PASS"]
+    /\ UNCHANGED lease
+TxPublish ==
+    /\ tx.durable /\ ~tx.summary
+    /\ tx' = [tx EXCEPT !.summary = TRUE, !.status = tx.result,
+                 !.outbox = IF tx.result # "PASS" THEN "PENDING" ELSE "NONE"]
+    /\ UNCHANGED lease
+TxNotifyFails ==
+    /\ tx.outbox = "PENDING" /\ ~tx.notifyFailed
+    /\ tx' = [tx EXCEPT !.notifyFailed = TRUE,
+                 !.outbox = IF Mut = "tx-alert-drop" THEN "NONE" ELSE @]
+    /\ UNCHANGED lease
+TxRelease ==
+    /\ tx.stage = "Done" /\ tx.locked
+    /\ tx' = [tx EXCEPT !.locked = FALSE]
+    /\ UNCHANGED lease
+TxAdvance == TxAcquire \/ TxDefer \/ TxNextDay \/ TxReserve \/ TxBeginTurn
+    \/ (\E value \in {"known", "unknown"}: TxUsage(value)) \/ TxApplyFirst
+    \/ (\E result \in {"PASS", "FAIL"}: TxComplete(result)) \/ TxApply \/ TxRecover
+    \/ TxPublish \/ TxNotifyFails \/ TxRelease
+TxNext == TxAdvance \/ TxCrash \/ TxStatusFirst \/ UNCHANGED vars
+TxFairSpec == Init /\ [][TxNext]_vars /\ WF_vars(TxAdvance)
+OffOrNullNoWrites == (~TxEnabled \/ ~TxBudgetKnown) => tx = TxInitial
+DeferredRequestKept == tx.deferred /\ tx.day = 0 => ~tx.consumed
+UnreservedCrashPreservesRequest == tx.crashed /\ ~tx.budgetReserved => ~tx.consumed /\ ~tx.durable
+ReservedOrphanPausesProvider == tx.result = "ABANDONED" /\ tx.budgetReserved /\ ~tx.finished => tx.providerPaused
+UnknownNeverZero == tx.usage = "unknown" => tx.used > 0
+EveryTurnWithinBudget == tx.started <= 1
+CursorRequiresDurable == tx.index > 0 => tx.durable /\ tx.finished
+ProjectionExactlyOnce == tx.index <= 1 /\ (tx.applied => tx.index = 1 /\ tx.consumed /\ tx.durable /\ tx.finished)
+CompletedResultNeverRegresses == tx.finished => tx.result \in {"PASS", "FAIL"}
+StatusRequiresDurable == tx.status # "NONE" => tx.durable
+FailedNotifyRemainsPending == tx.notifyFailed => tx.outbox = "PENDING"
+CompletedProjectionRecovers == tx.finished ~> tx.applied
+CompletedPublicationRecovers == tx.durable ~>
+    (tx.summary /\ tx.status = tx.result /\ (tx.result = "PASS" \/ tx.outbox = "PENDING"))
+
+Next == IF TransactionMode THEN TxNext ELSE LeaseNext
 SafetySpec == Init /\ [][Next]_vars
 Spec == SafetySpec /\ (\A r \in Runs: WF_vars(Acquire(r)))
 FairSpec == Spec /\ (\A r \in Runs:

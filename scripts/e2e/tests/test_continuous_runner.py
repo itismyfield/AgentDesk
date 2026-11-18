@@ -35,7 +35,7 @@ if os.environ.get("FAKE_DRIVER_GATE"):
     open(os.environ["FAKE_DRIVER_GATE"]).read()
     os.close(witness["fd"])
     open(os.environ["FAKE_DRIVER_GATE"] + ".done", "w").close()
-print(json.dumps({{"status": "PASS", "native_turns": json.loads(os.environ.get("FAKE_TURNS", str(guard.started))), "tokens": guard.started, "budget_checked": guard.started}}))
+print(json.dumps({{"schema_version": 2, "status": "PASS", "native_turns": json.loads(os.environ.get("FAKE_TURNS", str(guard.started))), "fixture": True, "tokens": guard.started, "usage": {{"native_turns": json.loads(os.environ.get("FAKE_TURNS", str(guard.started))), "input_tokens": guard.started, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}}, "budget_checked": guard.started}}))
 """
 
 
@@ -107,9 +107,9 @@ class Runner(unittest.TestCase):
         channel_lock.acquire(self.state, alias).close()
 
     def test_due_boundary_and_cursor_advance(self):
-        self.assertEqual(self.tick(1000.0)["status"], "PASS")
+        self.assertEqual(self.tick(1000.0)["status"], "UNEVALUABLE")
         self.assertEqual(self.tick(4599.0)["status"], "NOT_DUE")
-        self.assertEqual(self.tick(4600.0)["status"], "PASS")
+        self.assertEqual(self.tick(4600.0)["status"], "UNEVALUABLE")
         self.assertEqual(self.tick(99999.0, rotation_interval_s=None)["status"], "NOT_DUE")
         cells = [row["--cell"] for row in self.driven()]
         self.assertEqual(sorted(set(cells[:5])), ["claude-tui"])
@@ -141,25 +141,25 @@ class Runner(unittest.TestCase):
 
     def test_budget_reservation_refuses_before_any_driver_start(self):
         self.submit("deploy-1")
-        self.assertEqual(self.tick(5000.0, rotation_interval_s=None)["status"], "PARTIAL")
+        self.assertEqual(self.tick(5000.0, rotation_interval_s=None)["status"], "UNEVALUABLE")
         self.submit("deploy-2", "b" * 40)
-        self.assertEqual(self.tick(5001.0, rotation_interval_s=None)["status"], "PARTIAL")
+        self.assertEqual(self.tick(5001.0, rotation_interval_s=None)["status"], "UNEVALUABLE")
         self.assertEqual(len(self.driven()), 4)
         with mock.patch.dict(os.environ, {"FAKE_TURNS": "1"}):
             self.submit("deploy-3", "c" * 40)
-            self.assertEqual(self.tick(90000.0, rotation_interval_s=None)["status"], "PARTIAL")
+            self.assertEqual(self.tick(90000.0, rotation_interval_s=None)["status"], "UNEVALUABLE")
             self.submit("deploy-4", "d" * 40)
-            self.assertEqual(self.tick(90001.0, rotation_interval_s=None)["status"], "PARTIAL")
+            self.assertEqual(self.tick(90001.0, rotation_interval_s=None)["status"], "UNEVALUABLE")
         self.submit("deploy-5", "e" * 40)
         unset = {p: {"daily_turns": 10, "daily_tokens": None, "daily_time_s": 600} for p in ("claude", "codex")}
         self.assertEqual(self.tick(200000.0, rotation_interval_s=None, budget=unset)["status"], "DEFERRED_BUDGET")
         self.assertEqual(len(self.driven()), 8)
         self.setUp()
         tight = {"R1": {"claude": {"turns": 6, "tokens": 1000, "time_s": 0.001}}}
-        self.assertEqual(self.tick(300000.0, reservation=tight)["status"], "PARTIAL")
+        self.assertEqual(self.tick(300000.0, reservation=tight)["status"], "UNEVALUABLE")
         with mock.patch.dict(os.environ, {"FAKE_TURNS": "1"}):
             one_turn = {"R1": {"codex": {"turns": 1, "tokens": 1000, "time_s": 300}}}
-            self.assertEqual(self.tick(400000.0, reservation=one_turn)["status"], "PARTIAL")
+            self.assertEqual(self.tick(400000.0, reservation=one_turn)["status"], "UNEVALUABLE")
         self.assertEqual(len(self.driven()), 2)
 
     def test_deploy_inbox_runs_newest_once_and_blocks_missing_capabilities(self):
@@ -167,15 +167,22 @@ class Runner(unittest.TestCase):
         self.submit("new", "b" * 40)
         self.submit("new", "c" * 40)
         (self.state / "inbox" / "bad.json").write_text(json.dumps({"request_id": "bad", "token": "x"}))
-        self.assertEqual(self.tick(5000.0, rotation_interval_s=None)["status"], "PARTIAL")
+        self.assertEqual(self.tick(5000.0, rotation_interval_s=None)["status"], "UNEVALUABLE")
         self.assertEqual(self.tick(5001.0, rotation_interval_s=None)["status"], "NOT_DUE")
         self.assertEqual([(r["--scenario"], r["--deploy-sha"]) for r in self.driven()],
                          [("E-50", "b" * 40), ("E-51", "b" * 40)])
         requests = json.loads((self.state / "requests.json").read_text())
-        self.assertEqual(requests, {"old": "SUPERSEDED", "new": "PARTIAL", "bad": "REJECTED"})
+        self.assertEqual(requests, {"old": "SUPERSEDED", "new": "UNEVALUABLE", "bad": "REJECTED"})
         record = json.loads(next((self.state / "runs").glob("*.json")).read_text())
         blocked = {r["scenario"]: r["status"] for r in record["occurrences"] if r["status"] != "PASS"}
         self.assertEqual(blocked, dict.fromkeys(["R-marker", "R-inject", "R-fresh", "R-host"], "BLOCKED_CAPABILITY"))
+
+
+def load_tests(loader, tests, pattern):
+    # The required CI entry for this module also selects its independent contract children.
+    for name in ("recovery", "summary", "outbox", "publication"):
+        tests.addTests(loader.loadTestsFromName(f"scripts.e2e.tests.test_continuous_{name}"))
+    return tests
 
 
 if __name__ == "__main__":

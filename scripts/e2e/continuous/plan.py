@@ -56,7 +56,7 @@ def step_occurrences(manifest, name, cell, profile):
 
 
 def deploy_occurrences(manifest):
-    return [{"scenario": row["scenario"], "cell": cell_of(row)} for row in manifest["bundles"]["P"]["occurrences"]]
+    return [{**row, "cell": cell_of(row)} for row in manifest["bundles"]["P"]["occurrences"]]
 
 
 def gate(manifest, row, capabilities):

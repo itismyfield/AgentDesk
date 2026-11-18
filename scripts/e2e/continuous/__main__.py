@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import time
 
-from . import channel_lock, inbox, runner
+from . import channel_lock, inbox, runner, publication, summary
 
 
 def main(argv=None):
@@ -14,6 +14,8 @@ def main(argv=None):
     parser.add_argument("--config", required=True)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("tick")
+    inspect = commands.add_parser("inspect")
+    inspect.add_argument("--head", required=True)
     hold = commands.add_parser("hold")
     hold.add_argument("argv", nargs=argparse.REMAINDER)
     submit = commands.add_parser("submit")
@@ -23,6 +25,13 @@ def main(argv=None):
     try:
         if args.command == "tick":
             result = runner.tick(args.config)
+        elif args.command == "inspect":
+            config = runner.load_config(args.config)
+            if config.get("enabled") is True:
+                config = runner.settings(config)
+            for line in summary.format_lines(publication.view(config, head=args.head, now=time.time())):
+                print(line)
+            return 0
         elif args.command == "hold":
             command = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
             if not command:
