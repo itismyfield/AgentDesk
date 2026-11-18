@@ -14,7 +14,7 @@ use std::{
 
 struct SessionCleanup {
     program: std::path::PathBuf,
-    names: [String; 2],
+    names: Vec<String>,
 }
 impl Drop for SessionCleanup {
     fn drop(&mut self) {
@@ -80,6 +80,7 @@ impl PromotionRig {
         let (shared, registry) =
             crate::services::discord::host_teardown_gate::test_support::runtime(&pool).await;
         let old_name = format!("s2-old-{channel}");
+        let keeper_name = format!("s2-keeper-{channel}");
         let name = format!("스마트홈-cc-{channel}");
         let old = adk_session::build_namespaced_session_key(
             &shared.token_hash,
@@ -104,7 +105,7 @@ impl PromotionRig {
             id,
             _sessions: SessionCleanup {
                 program: program.clone(),
-                names: [old_name.clone(), name.clone()],
+                names: vec![old_name.clone(), name.clone(), keeper_name.clone()],
             },
             root,
             db,
@@ -115,6 +116,14 @@ impl PromotionRig {
             _root: root_guard,
             _env: env,
         };
+        // Keep the isolated server alive while the tested sessions are replaced.
+        let keeper = rig.raw(&["new-session", "-d", "-s", &keeper_name, "cat"]);
+        assert!(
+            keeper.status.success(),
+            "tmux fixture keeper failed: status={} stderr={}",
+            keeper.status,
+            String::from_utf8_lossy(&keeper.stderr)
+        );
         assert!(
             rig.raw(&["new-session", "-d", "-s", &old_name, "cat"])
                 .status
@@ -623,6 +632,12 @@ async fn key_promotion_synthetic_scope_does_not_publish_canonical_registration_p
 #[tokio::test]
 async fn key_promotion_registration_conflict_keeps_replaced_incarnation_pg() {
     let rig = PromotionRig::new(81190309).await;
+    let server_pid = || {
+        let output = rig.raw(&["display-message", "-p", "#{pid}"]);
+        assert!(output.status.success());
+        output.stdout
+    };
+    let original_server_pid = server_pid();
     sqlx::query("UPDATE sessions SET status='idle' WHERE id=$1")
         .bind(rig.id)
         .execute(&rig.pool)
@@ -646,7 +661,7 @@ async fn key_promotion_registration_conflict_keeps_replaced_incarnation_pg() {
     let name = format!("s2-successor-{}", rig.channel.get());
     let _cleanup = SessionCleanup {
         program: rig.program.clone(),
-        names: [name.clone(), name.clone()],
+        names: vec![name.clone()],
     };
     let scope = RegistrationScope::enter(
         Some(&rig.pool),
@@ -677,23 +692,25 @@ async fn key_promotion_registration_conflict_keeps_replaced_incarnation_pg() {
         })
         .unwrap()
     };
-    let launch = |prepared: &PreparedIncarnation| {
+    let launch = |incarnation: &str, prepared: &PreparedIncarnation| {
         let identity = prepared
             .tmux_identity()
             .unwrap()
             .environment_assignment()
             .unwrap();
+        let output = rig.raw(&["new-session", "-d", "-s", &name, "-e", &identity, "cat"]);
         assert!(
-            rig.raw(&["new-session", "-d", "-s", &name, "-e", &identity, "cat"])
-                .status
-                .success()
+            output.status.success(),
+            "tmux new-session launch {incarnation} failed: status={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
         );
         crate::services::tmux_common::write_tmux_owner_marker(&name).unwrap();
         crate::services::tmux_common::host_marker::record_tmux_host_marker(&name);
         crate::services::discord::stamp_spawn_markers(&name, Some(prepared))
     };
     let a = prepare();
-    let stamped_a = launch(&a);
+    let stamped_a = launch("a", &a);
     assert!(stamped_a.is_ok());
     let a_pid = rig
         .raw(&[
@@ -720,7 +737,7 @@ async fn key_promotion_registration_conflict_keeps_replaced_incarnation_pg() {
         None,
     )
     .unwrap();
-    b.finish_spawn(launch(&b)).unwrap();
+    b.finish_spawn(launch("b", &b)).unwrap();
     drop(isolated);
     let b_pid = rig
         .raw(&[
@@ -733,6 +750,11 @@ async fn key_promotion_registration_conflict_keeps_replaced_incarnation_pg() {
         .stdout;
     assert!(!b_pid.is_empty());
     assert_ne!(a_pid, b_pid);
+    assert_eq!(
+        server_pid(),
+        original_server_pid,
+        "the fixture server must survive session replacement"
+    );
     sqlx::query(
         "UPDATE sessions SET active_turn_nonce='replacement', status='turn_active' WHERE id=$1",
     )

@@ -1,0 +1,32 @@
+---
+title: "Readiness wait after a daemon restart: the transcript moves once, then stops"
+---
+stateDiagram-v2
+  s0: Daemon restarted, evidence lost (pane idle)
+  s1: Owner input at the front (pane idle)
+  s2: Readiness wait (pane idle)
+  s3: Retained unsent, no key
+  s4: Readiness wait (pane idle, transcript moved)
+  s5: Resend notice posted, front released
+  s6: Bounded re-evaluation, window 1 (pane idle)
+  s7: Bounded re-evaluation, window 1 (pane idle, transcript moved)
+  s8: Bounded re-evaluation, window 2 (pane idle)
+  s9: Bounded re-evaluation, window 2 (pane idle, transcript moved)
+  s10: Bounded re-evaluation, window 3 (pane idle)
+  s11: Bounded re-evaluation, window 3 (pane idle, transcript moved)
+  [*] --> s0
+  s0 --> s1: owner takes the input
+  s1 --> s2: wait starts, Stamp kept
+  s2 --> s3: budget ends
+  s2 --> s4: pane appends metadata
+  s3 --> s5: resend notice
+  s4 --> s6: budget ends
+  s6 --> s3: window ends
+  s6 --> s7: pane appends metadata
+  s7 --> s8: window ends
+  s8 --> s9: pane appends metadata
+  s8 --> s3: window ends
+  s9 --> s10: window ends
+  s10 --> s11: pane appends metadata
+  s10 --> s3: window ends
+  s11 --> s3: window ends
