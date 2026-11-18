@@ -670,6 +670,7 @@ jobs:
       actions: read
       contents: read
     env:
+      CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
@@ -1080,7 +1081,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh 9f5770c63607c997955f15d28ea1a9e815f0a416e0c3dbaf03d216a470853a8c
+          pin scripts/check-ci-runner-hardening.sh 86ea8892cf5d3c9bf3bc28e204ebe56e132e6c6ac0dbf2f9bc5abc55c2d8418d
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
