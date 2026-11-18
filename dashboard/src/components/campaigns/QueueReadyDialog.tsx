@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { localeName } from "../../i18n";
+import { Button } from "../../kit/free/button-clean";
 import type { Agent, KanbanCard, UiLanguage } from "../../types";
 import { Modal } from "../common/overlay/Modal";
 import { Select } from "../common/Select";
 import type { Tr } from "./campaignPresentation";
 import { cardTitle } from "../agent-manager/kanban-utils";
 
-/** Choose who takes an unassigned card before it moves to ready. */
+/** Choose who takes an unassigned card before it moves to ready. The agent list stays a native select. */
 export default function QueueReadyDialog({ card, agents, locale, tr, onCancel, onConfirm }: {
   card: KanbanCard; agents: Agent[]; locale: UiLanguage; tr: Tr; onCancel: () => void; onConfirm: (agentId: string) => void;
 }) {
@@ -22,11 +23,8 @@ export default function QueueReadyDialog({ card, agents, locale, tr, onCancel, o
         </Select>
       </label>
       <div className="flex flex-wrap justify-end gap-2">
-        <button type="button" onClick={onCancel} className="min-h-11 rounded-md border border-th-border-subtle px-4 text-sm text-th-text-secondary">{tr("취소", "Cancel")}</button>
-        <button type="button" disabled={!agentId} onClick={() => onConfirm(agentId)}
-          className="min-h-11 rounded-md px-4 text-sm font-medium text-white disabled:opacity-50" style={{ background: "var(--th-accent-primary)" }}>
-          {tr("준비됨으로 넘기기", "Move to ready")}
-        </button>
+        <Button variant="secondary" onClick={onCancel}>{tr("취소", "Cancel")}</Button>
+        <Button variant="primary" disabled={!agentId} onClick={() => onConfirm(agentId)}>{tr("준비됨으로 넘기기", "Move to ready")}</Button>
       </div>
     </div>
   </Modal>;
