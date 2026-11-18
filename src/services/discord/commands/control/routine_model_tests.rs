@@ -323,6 +323,7 @@ async fn a_persistent_model_patch_resumes_the_same_native_session_before_input_p
 async fn routine_fix4_claude_default_replaces_the_live_pinned_model_pg() {
     default_restore(
         true,
+        false,
         concat!(
             module_path!(),
             "::routine_fix4_claude_default_replaces_the_live_pinned_model_pg"
@@ -335,6 +336,7 @@ async fn routine_fix4_claude_default_replaces_the_live_pinned_model_pg() {
 async fn routine_fix4_claude_default_replaces_the_saved_pinned_model_pg() {
     default_restore(
         false,
+        false,
         concat!(
             module_path!(),
             "::routine_fix4_claude_default_replaces_the_saved_pinned_model_pg"
@@ -343,7 +345,20 @@ async fn routine_fix4_claude_default_replaces_the_saved_pinned_model_pg() {
     .await;
 }
 
-async fn default_restore(live: bool, test: &str) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn routine_fix6_named_proof_survives_cleanup_pg() {
+    default_restore(
+        false,
+        true,
+        concat!(
+            module_path!(),
+            "::routine_fix6_named_proof_survives_cleanup_pg"
+        ),
+    )
+    .await;
+}
+
+async fn default_restore(live: bool, named: bool, test: &str) {
     let child = {
         // The child needs the normal PATH before either tmux fixture is installed.
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -361,13 +376,17 @@ async fn default_restore(live: bool, test: &str) {
     let set = TestEnvVarGuard::set_path_after_shared_test_env_lock;
     let _home = set("HOME", user.path());
     let config_dir = set("CLAUDE_CONFIG_DIR", &home);
-    let fx = Fixture::with_account(
-        821941 + u64::from(live),
-        RuntimeHandoffKind::ClaudeTui,
-        (config_dir, user, home),
-        crate::services::provider_auth_profile::DEFAULT_PROFILE_ID,
-    )
-    .await;
+    let fx = if named {
+        Fixture::new(821961, RuntimeHandoffKind::ClaudeTui).await
+    } else {
+        Fixture::with_account(
+            821941 + u64::from(live),
+            RuntimeHandoffKind::ClaudeTui,
+            (config_dir, user, home),
+            crate::services::provider_auth_profile::DEFAULT_PROFILE_ID,
+        )
+        .await
+    };
     let _idle = crate::services::discord::router::set_hosted_tui_promote_busy_for_tests(false);
     let pool = fx.shared.pg_pool.as_ref().unwrap();
     let key = channel_key(&fx.shared, &fx.name);
@@ -517,16 +536,19 @@ async fn default_restore(live: bool, test: &str) {
     let next = store.claim_run_now(&routine.id).await.unwrap().unwrap();
     let choice = store.run_provider_choice(&next.run_id).await.unwrap();
     assert!(choice.model.is_none());
+    if named {
+        fx.shared
+            .overrides
+            .model_overrides
+            .insert(fx.channel, "sonnet".into());
+    }
     let model = crate::services::discord::commands::resolve_model_for_turn(
         &fx.shared,
         fx.channel,
         &ProviderKind::Claude,
     )
     .await;
-    assert!(
-        model.is_none(),
-        "the parent leaves Claude's model to the account"
-    );
+    assert_eq!(model.as_deref(), named.then_some("sonnet"));
     let claim = serde_json::json!({"routine_id":routine.id, "execution_strategy":"persistent", "model":choice.model});
     assert!(
         routine_model_boundary_for_tests(
@@ -554,11 +576,9 @@ async fn default_restore(live: bool, test: &str) {
         Some(restored.requirement),
     );
     assert!(argv.windows(2).any(|p| p == ["--resume", SESSION]));
-    assert!(
-        argv.windows(2).any(|p| p == ["--model", "default"]),
-        "Claude would restore the pinned model without an explicit account-default selector: {argv:?}"
-    );
-    assert_eq!(applied().await.unwrap(), None);
+    let applied_model = model.as_deref().unwrap_or("default");
+    assert!(argv.windows(2).any(|p| p == ["--model", applied_model]));
+    assert_eq!(applied().await.unwrap(), model);
     assert_eq!(fx.session_id().await.as_deref(), Some(SESSION));
     fx.tmux.mark_present();
     fx.tmux.take_calls();
@@ -576,7 +596,73 @@ async fn default_restore(live: bool, test: &str) {
             native_tmux,
             &session,
             &argv,
-            "default",
+            applied_model,
         )
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn routine_fix6_clear_retires_only_the_forgotten_evidence_pg() {
+    let test = concat!(
+        module_path!(),
+        "::routine_fix6_clear_retires_only_the_forgotten_evidence_pg"
+    );
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    if !api_child(test.strip_prefix("agentdesk::").unwrap_or(test)) {
+        return;
+    }
+    use crate::services::tui_input::routine_model as proof;
+    let provider = ProviderKind::Claude;
+    let fx = Fixture::new(821962, RuntimeHandoffKind::ClaudeTui).await;
+    let key = channel_key(&fx.shared, &fx.name);
+    let pool = fx.shared.pg_pool.as_ref().unwrap();
+    let set_selector = || {
+        sqlx::query("UPDATE sessions SET claude_session_id=$1 WHERE session_key=$2")
+            .bind(SESSION)
+            .bind(&key)
+            .execute(pool)
+    };
+    let selector = || {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT claude_session_id FROM sessions WHERE session_key=$1",
+        )
+        .bind(&key)
+        .fetch_one(pool)
+    };
+    let clear = || {
+        super::super::clear_channel_session_state_with_session_key(
+            &fx.discord.http,
+            &fx.shared,
+            &provider,
+            fx.channel,
+            "/clear",
+            Some(&key),
+        )
+    };
+
+    let path = proof::path(&fx.name);
+    let mut saved = serde_json::json!({
+        "provider":"claude", "tmux":fx.name, "session":SESSION, "nonce":"old",
+        "model":"opus", "argv_sha256":"old evidence"
+    });
+    std::fs::write(&path, saved.to_string()).unwrap();
+    fx.tmux.mark_missing();
+    assert_eq!(set_selector().await.unwrap().rows_affected(), 1);
+    clear().await.unwrap();
+    assert_eq!(selector().await.unwrap(), None);
+    assert!(!path.exists(), "clear kept the retired proof");
+    assert_eq!(fx.markers(), (None, None));
+
+    const SUCCESSOR: &str = "bbcba6b5-195b-4185-8f12-02f1b1950236";
+    saved["session"] = SUCCESSOR.into();
+    let successor = saved.to_string();
+    std::fs::write(&path, &successor).unwrap();
+    tc::write_tmux_session_auth_profile(&fx.name, "work").unwrap();
+    tc::write_claude_session_auth(&fx.name, SUCCESSOR, "work").unwrap();
+    let markers = fx.markers();
+    assert_eq!(set_selector().await.unwrap().rows_affected(), 1);
+    clear().await.unwrap();
+    assert_eq!(selector().await.unwrap(), None);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), successor);
+    assert_eq!(fx.markers(), markers);
 }
