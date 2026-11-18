@@ -24,7 +24,7 @@ A/B 모두 새 launch·입력 재전송·kill/삭제 권한을 주지 않는다.
 
 Projection이 이미 쓰는 canonical `classify(Claude, value)`/strict terminator 결과를 한 번 계산한다. strict terminator로 확인된 row는 Closed edge만 만들고 Prompt/queue/input membership receipt를 만들지 않는다. native interrupt의 기존 aborted 의미(Cancelled)를 유지한다. 일반 user row, interrupt 문자열을 언급한 문장, 추가 block을 가진 row는 기존 parser의 결과대로 Prompt일 수 있다. 문자열 포함 검사나 별도 느슨한 parser를 만들지 않는다.
 
-수리는 `native.rs`의 barrier 순서를 무조건 뒤집는 방법보다 terminal 분류의 우선권을 공유하는 방법을 쓴다. genuine foreign Prompt는 계속 barrier를 만들며, 여러 input이 공유한 run의 membership·FIFO·중복 closer 처리를 바꾸지 않는다. 새 본체는 child `input_facts/native/terminal.rs` (proposed)에 둔다. 현재 991줄인 native.rs에는 호출 교체/child 선언만 둔다.
+수리는 `native.rs`의 barrier 순서를 무조건 뒤집는 방법보다 terminal 분류의 우선권을 공유하는 방법을 쓴다. genuine foreign Prompt는 계속 barrier를 만들며, 여러 input이 공유한 run의 membership·FIFO·중복 closer 처리를 바꾸지 않는다. 새 본체는 child `input_facts/native/terminal.rs`에 둔다. 현재 991줄인 native.rs에는 호출 교체/child 선언만 둔다.
 
 ### 이미 저장된 잘못된 barrier
 
@@ -112,7 +112,7 @@ Cancel/Terminate/clear/stop의 기존 control witness는 native strict-closer pr
 
 | 예상 production 변경 | raw net code |
 |---|---:|
-| new `tui_o/writer/input_facts/native/terminal.rs` (proposed): strict 분류·barrier supersession·raw witness/overlay | +130~180 |
+| new `tui_o/writer/input_facts/native/terminal.rs`: strict 분류·barrier supersession·raw witness/overlay | +130~180 |
 | new `discord/turn_finalizer/native_terminal.rs` (proposed): custody/host E/유계 tail 검증 | +70~110 |
 | `rotation/owe.rs`: terminal Evidence 이전 exact-ticket 요청/재평가 | +30~55 |
 | `actor/native_input.rs`: typed port와 선택적 barrier snapshot | +16~22 |
