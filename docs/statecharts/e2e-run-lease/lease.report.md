@@ -53,13 +53,13 @@
 
 | 진입점 | 모델 동작 | 코드 좌표 | 모델 값 |
 | --- | --- | --- | --- |
-| `tick`(launchd) off | `Acquire`가 `Enabled`일 때만 | `runner.py:170` | off면 잠금·디렉터리·상태 IO 0 |
+| `tick`(launchd) off | `Acquire`가 `Enabled`일 때만 | `runner.py:172` | off면 잠금·디렉터리·상태 IO 0 |
 | `tick` 잠금 | `Acquire`(원자 nonblocking flock) | `channel_lock.py:91`, 키 `:26` | guild+정렬 parent+bot 집합, TTL·unlink 없음 |
-| `tick` 고아 정리 | `NoOrphanOwner` 뒤 다음 보유자 | `runner.py:183` | 잠금 보유자가 본 RUNNING 기록은 ABANDONED |
-| `tick` 예산 | `Reserve`/`Defer` | `budget.py:21`, `runner.py:133` | 한도·예약값 null이면 거절. crash 뒤 예약 유지 |
+| `tick` 고아 정리 | `NoOrphanOwner` 뒤 다음 보유자 | `runner.py:185` | 잠금 보유자가 본 RUNNING 기록은 ABANDONED |
+| `tick` 예산 | `Reserve`/`Defer` | `budget.py:21`, `runner.py:134` | turn·token·time 한도나 예약값이 null이면 거절. crash 뒤 예약 유지 |
 | `tick` 실행 | `Start`(FD 상속) | `channel_lock.py:66` | `close_fds=True`, `pass_fds=(lease fd,)`, device/inode witness |
-| `tick` cursor | `Finish`의 `cursor' = seen + 1` | `runner.py:164` | 끝난 실행만 한 칸. crash·defer는 그대로 |
-| `hold`(수동 E2E) | `Acquire`·`Start` | `runner.py:191` | 같은 채널 lock. enabled·예산과 무관 |
+| `tick` cursor | `Finish`의 `cursor' = seen + 1` | `runner.py:166` | 끝난 실행만 한 칸. crash·defer는 그대로 |
+| `hold`(수동 E2E) | `Acquire`·`Start` | `runner.py:193` | 같은 채널 lock. enabled·예산과 무관 |
 | `submit`(배포 inbox) | 모델 밖(요청 파일) | `inbox.py:22` | 비밀 없는 키 4개, request id당 1회, 최신만 실행 |
 
 | 수용 규칙 | 모델 규칙 | 정상 cfg | 원인 뮤턴트(RED) |
