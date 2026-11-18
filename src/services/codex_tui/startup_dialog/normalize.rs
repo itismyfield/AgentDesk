@@ -49,16 +49,20 @@ pub(crate) fn repair_once(
 }
 
 /// One look at the admission's pane: only a selected positive trust menu in the managed `cwd`
-/// spends the admission's repair. `None` leaves the repair for a later look.
+/// spends the admission's repair. `None` leaves the repair for a later look. The pane is read
+/// before any identity check, so a look that finds no menu takes no source authority.
 pub(crate) fn repair_if_shown(
     output: &Output,
     context: &BindingContext,
     cwd: &Path,
     transport: &mut dyn TrustTransport,
 ) -> Option<Result<String, Reason>> {
-    current(output, context).ok()?;
     let pane = transport.observe(&context.tmux_session, budget(output).ok()?)?;
-    selected_trust(&pane.text).then(|| repair_once(output, context, cwd, transport))
+    if !selected_trust(&pane.text) {
+        return None;
+    }
+    current(output, context).ok()?;
+    Some(repair_once(output, context, cwd, transport))
 }
 
 fn budget(output: &Output) -> Result<Duration, Reason> {

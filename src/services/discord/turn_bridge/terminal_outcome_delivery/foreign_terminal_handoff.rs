@@ -761,11 +761,14 @@ async fn episode_closed(
     local: &InflightTurnState,
     channel: u64,
 ) -> bool {
-    use crate::services::tui_o::cutover::{IdentityError, peek_o_owns_tui_output_for_channel};
+    use crate::services::tui_o::cutover::{
+        IdentityError, peek_o_owns_tui_output_for_channel_quiet,
+    };
     let kind = (local.channel_id == channel)
         .then_some(local.runtime_kind)
         .flatten();
-    let held = match peek_o_owns_tui_output_for_channel(channel, kind) {
+    // Quiet: an unavailable gate here keeps the custody and raises no identity alarm.
+    let held = match peek_o_owns_tui_output_for_channel_quiet(channel, kind) {
         Err(held) => held,
         // An owned or Legacy destination still closes an episode that already holds a reason.
         Ok(_) => IdentityError::AwaitingAdoption,
