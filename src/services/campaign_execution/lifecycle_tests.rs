@@ -294,6 +294,13 @@ fn a_node_runs_from_start_to_success_and_each_step_takes_effect_once() {
         definition::validate_definition(serde_json::from_value(input).unwrap()).unwrap();
     let stale = refused(&edited, landing(&edited, begin_landing));
     assert_eq!(stale.code, RejectionCode::StaleBinding);
+    // A run saved before the reviewed candidate was recorded still loads and is not admitted.
+    let old = json!({"epoch": epoch(&waiting, "a"), "interruption": null, "counted_failure": null});
+    let mut restored = waiting.clone();
+    let fences = &mut restored.run.as_mut().unwrap().fences;
+    fences.insert("a".into(), serde_json::from_value(old).unwrap());
+    let unknown = refused(&restored, landing(&restored, begin_landing));
+    assert_eq!(unknown.code, RejectionCode::StaleBinding);
     let admitted = step(&waiting, landing(&waiting, begin_landing));
     assert_eq!(admitted.nodes["a"].disposition, NodeDisposition::Assigned);
     assert_eq!(epoch(&admitted, "a"), epoch(&waiting, "a") + 1);
@@ -359,6 +366,10 @@ fn every_configured_gate_blocks_its_boundary_until_the_exact_candidate_is_approv
     let other = approved(&state, "implementation", "other-head");
     blocked(&other, assign(), "approval:Implementation");
     let state = approved(&state, "implementation", "candidate");
+    // An approval of another pin does not cover a Work whose pinned requirements drifted.
+    let mut drifted = fsm::assignment(&work);
+    drifted.pin.requirements_snapshot_hash = "other-requirements".into();
+    blocked(&state, fsm::assign(&work, drifted), "approval:Start");
     // An approval recorded for an earlier definition revision is no longer current.
     let mut edited = state.clone();
     edited.definition_revision += 1;

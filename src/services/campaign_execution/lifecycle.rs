@@ -316,8 +316,8 @@ fn begin_landing(
         return reject(RejectionCode::InvalidState);
     }
     if node.disposition != NodeDisposition::Pending {
-        let retried =
-            node.disposition == NodeDisposition::Assigned && fence.epoch == expected_epoch + 1;
+        let retried = node.disposition == NodeDisposition::Assigned
+            && expected_epoch.checked_add(1) == Some(fence.epoch);
         return if retried {
             Ok(None)
         } else {
