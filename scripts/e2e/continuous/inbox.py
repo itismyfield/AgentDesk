@@ -46,7 +46,7 @@ def pending(state_dir):
         row = read_json(path, None)
         if not valid(row) or row["request_id"] != path.stem:
             invalid.append(path.stem)
-        elif row["request_id"] not in done:
+        elif row["request_id"] not in done or done[row["request_id"]] == "DEFERRED_BUDGET":
             rows.append(row)
     rows.sort(key=lambda row: (row["submitted_at"], row["request_id"]))
     newest = rows[-1] if rows else None

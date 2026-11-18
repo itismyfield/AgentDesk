@@ -19,18 +19,23 @@ SHA = "a" * 40
 DRIVER = f"""
 import json, os, signal, sys
 sys.path.insert(0, {str(REPO)!r})
-from scripts.e2e.continuous import channel_lock
+from scripts.e2e.continuous import channel_lock, budget
 witness = channel_lock.inherited()
 args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+guard = budget.TurnGuard(json.loads(args["--budget"]))
+for i in range(int(os.environ.get("FAKE_REQUEST_TURNS", "1"))):
+    if not guard.start(1):
+        break
+    guard.finish(1)
 with open(os.environ["FAKE_DRIVER_LOG"], "a") as log:
-    log.write(json.dumps({{**args, "lease_run": witness["run_id"]}}) + "\\n")
+    log.write(json.dumps({{**args, "lease_run": witness["run_id"], "granted_turns": guard.started}}) + "\\n")
 if os.environ.get("FAKE_DRIVER_GATE"):
     signal.alarm(120)  # A failed assertion must not leave this driver blocked on the fifo.
     os.kill(os.getppid(), 9)
     open(os.environ["FAKE_DRIVER_GATE"]).read()
     os.close(witness["fd"])
     open(os.environ["FAKE_DRIVER_GATE"] + ".done", "w").close()
-print(json.dumps({{"status": "PASS", "native_turns": json.loads(os.environ.get("FAKE_TURNS", "null"))}}))
+print(json.dumps({{"status": "PASS", "native_turns": json.loads(os.environ.get("FAKE_TURNS", str(guard.started))), "tokens": guard.started, "budget_checked": guard.started}}))
 """
 
 
@@ -46,6 +51,7 @@ class Runner(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.config = {"enabled": True, "state_dir": str(self.state), "rotation_interval_s": 3600,
+                       "capabilities": ["usage:claude", "turn_budget:claude", "usage:codex", "turn_budget:codex"],
                        "resource": {"guild": "1", "parents": ["2", "3"], "bot_set": ["4", "5"]},
                        "driver": [sys.executable, str(self.root / "driver.py")],
                        "budget": {p: {"daily_turns": 10, "daily_tokens": 10**6, "daily_time_s": 600} for p in ("claude", "codex")},
@@ -124,12 +130,12 @@ class Runner(unittest.TestCase):
             pass
         Path(f"{gate}.done").read_text()
         released = self.tick(4e9 + 1)
-        self.assertEqual(released["status"], "PASS")
+        self.assertEqual(released["status"], "DEFERRED_BUDGET")
         records = [json.loads(p.read_text()) for p in (self.state / "runs").glob("*.json")]
         orphan = next(r for r in records if r["run_id"] != released["run_id"])
         self.assertEqual((orphan["result"], orphan["abandoned_by"]), ("ABANDONED", released["run_id"]))
-        rerun = next(r for r in records if r["run_id"] == released["run_id"])
-        self.assertEqual((orphan["cursor_index"], rerun["cursor_index"]), (0, 0))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(orphan["cursor_index"], 0)
         ledger = json.loads((self.state / "budget" / f"{orphan['budget_day']}.json").read_text())
         self.assertEqual(ledger[orphan["run_id"]]["claude"]["turns"], 6)
 
@@ -137,8 +143,8 @@ class Runner(unittest.TestCase):
         self.submit("deploy-1")
         self.assertEqual(self.tick(5000.0, rotation_interval_s=None)["status"], "PARTIAL")
         self.submit("deploy-2", "b" * 40)
-        self.assertEqual(self.tick(5001.0, rotation_interval_s=None)["status"], "DEFERRED_BUDGET")
-        self.assertEqual(len(self.driven()), 2)
+        self.assertEqual(self.tick(5001.0, rotation_interval_s=None)["status"], "PARTIAL")
+        self.assertEqual(len(self.driven()), 4)
         with mock.patch.dict(os.environ, {"FAKE_TURNS": "1"}):
             self.submit("deploy-3", "c" * 40)
             self.assertEqual(self.tick(90000.0, rotation_interval_s=None)["status"], "PARTIAL")
@@ -147,13 +153,14 @@ class Runner(unittest.TestCase):
         self.submit("deploy-5", "e" * 40)
         unset = {p: {"daily_turns": 10, "daily_tokens": None, "daily_time_s": 600} for p in ("claude", "codex")}
         self.assertEqual(self.tick(200000.0, rotation_interval_s=None, budget=unset)["status"], "DEFERRED_BUDGET")
-        self.assertEqual(len(self.driven()), 6)
+        self.assertEqual(len(self.driven()), 8)
+        self.setUp()
         tight = {"R1": {"claude": {"turns": 6, "tokens": 1000, "time_s": 0.001}}}
         self.assertEqual(self.tick(300000.0, reservation=tight)["status"], "PARTIAL")
         with mock.patch.dict(os.environ, {"FAKE_TURNS": "1"}):
             one_turn = {"R1": {"codex": {"turns": 1, "tokens": 1000, "time_s": 300}}}
             self.assertEqual(self.tick(400000.0, reservation=one_turn)["status"], "PARTIAL")
-        self.assertEqual(len(self.driven()), 8)
+        self.assertEqual(len(self.driven()), 2)
 
     def test_deploy_inbox_runs_newest_once_and_blocks_missing_capabilities(self):
         self.submit("old")
