@@ -2136,6 +2136,8 @@ src/
 │   │   │   │   │   ├── herdr_fixture_tests.rs
 │   │   │   │   │   ├── herdr_safety_tests.rs
 │   │   │   │   │   └── herdr_tests.rs
+│   │   │   │   ├── held_watch/
+│   │   │   │   │   └── readiness.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── claude_handoff.rs
@@ -2568,6 +2570,7 @@ src/
 │   │   │   │   ├── provider_dispatch_idle_stash_tests.rs
 │   │   │   │   ├── provider_dispatch_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_restart_reply_tests.rs
+│   │   │   │   ├── provider_dispatch_restart_unrestorable_tests.rs
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
