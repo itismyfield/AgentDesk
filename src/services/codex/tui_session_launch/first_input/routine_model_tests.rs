@@ -37,6 +37,10 @@ fn scenario(failure: Option<&'static str>, expected: &[&str]) {
     let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _state = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (root, _guards) = fixture::fixture_after_shared_test_env_lock();
+    let _instance = Guard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_INSTANCE_ID",
+        "codex-writer-fixture".as_ref(),
+    );
     let _tmux = fixture::fake_tmux(root.path());
     let tmux = root.path().join("tmux");
     std::fs::write(
@@ -147,6 +151,7 @@ done
             &overlay,
         )
         .unwrap();
+        assert!(launch.prepared.context.host.is_some());
         let mut end =
             crate::services::codex_tui::execution_end::producer::LaunchObservation::new(None, name);
         let at_commit = events.clone();
