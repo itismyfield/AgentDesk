@@ -119,8 +119,8 @@ does not read it.
   (`reasonState`) that releases the body and is then posted (`ReasonCreated`) or left uncertain
   (`ReasonUncertain`); an episode that another consumer already gave a reason (`priorFresh`) keeps
   it. Rules: `NoRefusedArchive`, `ReasonAtMostOnce`, `DiscardVisible`, `FirstReasonKept`,
-  `ReasonNotBodyReceipt`, `ReasonedBodyNotPosted`, `ReasonedBodyNotCopied` (no new copy once the
-  episode holds a reason; a copy kept earlier is still discarded), `RefusedCopyDiscarded`,
+  `ReasonNotBodyReceipt`, `ReasonedBodyNotPosted`, `ReasonedBodyNotCopied` (a body whose episode
+  already held a reason when observed is never copied; a copy kept earlier is still discarded), `RefusedCopyDiscarded`,
   `ReasonEventuallySettles`. The current code breaks the no-archive rule and both settlement
   properties; the design keeps all of them; mutants for no recheck, retaining, reposting an
   uncertain reason, holding the body until the receipt, a consumer-local key, reading an uncertain

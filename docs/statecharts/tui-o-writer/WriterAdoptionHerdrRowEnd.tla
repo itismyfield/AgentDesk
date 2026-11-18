@@ -352,9 +352,9 @@ ReasonAtMostOnce == reasons <= 1
 DiscardVisible == disposition = "discarded" => reasonState # "none"
 FirstReasonKept == priorFresh => reasonKind = "fresh"
 ReasonNotBodyReceipt == disposition = "discarded" => ~oldAck
+\* A body whose episode already held a reason when it was observed is never copied.
+ReasonedBodyNotCopied == priorFresh => copyId # "old"
 ReasonedBodyNotPosted == reasonState # "none" => op = 0
 RefusedCopyDiscarded == [](owner = "Refused" /\ copyId = "old" => <>(copyId # "old"))
-\* Once the episode holds a reason no new body copy is made; one kept earlier is still discarded.
-ReasonedBodyNotCopied == [][reasonState # "none" /\ copyId # "old" => copyId' # "old"]_vars
 ReasonEventuallySettles == [](reasonState = "intent" => <>(reasonState \in {"posted", "uncertain"}))
 =============================================================================

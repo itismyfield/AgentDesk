@@ -1085,7 +1085,7 @@ tui-o-writer/WriterAdoptionHerdrD1bCurrentRefused.cfg	WriterAdoptionHerdrRowEnd	
 tui-o-writer/WriterAdoptionHerdrD1bDesign.cfg	WriterAdoptionHerdrRowEnd	-	-
 tui-o-writer/WriterAdoptionHerdrD1bDesignLate.cfg	WriterAdoptionHerdrRowEnd	-	-
 tui-o-writer/WriterAdoptionHerdrD1bHoldBodyMut.cfg	WriterAdoptionHerdrRowEnd	-	HerdrRowEventuallySettled,NewStartEventuallyPassesRow
-tui-o-writer/WriterAdoptionHerdrD1bNoGateMut.cfg	WriterAdoptionHerdrRowEnd	ReasonedBodyNotPosted	ReasonedBodyNotCopied
+tui-o-writer/WriterAdoptionHerdrD1bNoGateMut.cfg	WriterAdoptionHerdrRowEnd	ReasonedBodyNotCopied,ReasonedBodyNotPosted	-
 tui-o-writer/WriterAdoptionHerdrD1bNoRecheckMut.cfg	WriterAdoptionHerdrRowEnd	NoRefusedArchive	-
 tui-o-writer/WriterAdoptionHerdrD1bOwnKeyMut.cfg	WriterAdoptionHerdrRowEnd	FirstReasonKept,ReasonAtMostOnce	-
 tui-o-writer/WriterAdoptionHerdrD1bRepostMut.cfg	WriterAdoptionHerdrRowEnd	ReasonAtMostOnce	-
