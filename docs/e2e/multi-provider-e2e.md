@@ -643,12 +643,13 @@ read carries exactly one lifecycle mark from `final` and no read showed a
 (default 2 s) apart until the final mark first showed. `busy_injection_within`
 passes when `➕` showed within `max_seconds` (default 30 s; healthy injection
 takes about 1 s, the Herdr hold regression about 240 s) and before the turn
-ended: for that send each read takes `limit=100` and also records whether a
-relay body containing `before_marker` is present, so a read showing `➕` with
+ended: for that send each read takes `limit=100` from the scenario window's
+first-prompt cursor, so an older reply edited to carry `before_marker` is seen,
+and also records whether such a relay body is present; a read showing `➕` with
 the marker absent passes and a read showing the marker before any `➕` fails.
 A failed last read, a missing acknowledgement, a sparse read window, a full
-page that cannot prove the marker absent or a bound that falls inside one read
-gap is unevaluable, never a pass. The final JSON report keeps every read
+page or a read without that cursor (marker absence unproven) or a bound that
+falls inside one read gap is unevaluable, never a pass. The final JSON report keeps every read
 (`reaction_watch`: message id, ack, each read's `t0`/`t`, reactions or error).
 `thread_session_started: true` needs the first input to be an acknowledged
 `send_discord_prompt` (the direct turn API does not exercise Discord intake);
