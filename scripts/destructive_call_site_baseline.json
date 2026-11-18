@@ -1,15 +1,101 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "3947bc597900e54ffe1e13abb5845d05447c8887",
+  "measured_at_sha": "37f500a211369d882e885198ccc5b7cd5226a6c1",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
+    "tmux_bounded_runner_outside_adapter": {
+      "files": {}
+    },
+    "tmux_create_outside_adapter": {
+      "files": {
+        "src/cli/dcserver.rs": 1,
+        "src/server/routes/provider_auth_profiles.rs": 1,
+        "src/services/claude.rs": 1,
+        "src/services/claude/tui_session_launch.rs": 2,
+        "src/services/codex.rs": 1,
+        "src/services/codex/tui_session_launch/first_input.rs": 2,
+        "src/services/qwen/session_lifecycle.rs": 1
+      }
+    },
+    "tmux_input_outside_adapter": {
+      "files": {
+        "src/engine/ops/exec_ops.rs": 2,
+        "src/server/routes/provider_auth_profiles.rs": 1,
+        "src/services/claude.rs": 2,
+        "src/services/codex.rs": 1,
+        "src/services/codex/tui_session_launch/first_input.rs": 1,
+        "src/services/qwen/session_lifecycle.rs": 1
+      }
+    },
+    "tmux_observe_outside_adapter": {
+      "files": {
+        "src/cli/dcserver.rs": 2,
+        "src/cli/doctor/orchestrator.rs": 2,
+        "src/server/routes/provider_auth_profiles.rs": 2,
+        "src/services/agents/turn.rs": 1,
+        "src/services/claude.rs": 1,
+        "src/services/cluster/readiness.rs": 1,
+        "src/services/codex.rs": 1,
+        "src/services/codex_tui/execution_end/capture.rs": 2,
+        "src/services/codex_tui/execution_end/confirm.rs": 1,
+        "src/services/codex_tui/execution_end/producer.rs": 2,
+        "src/services/discord/commands/control/clear_teardown/clear_end_record.rs": 3,
+        "src/services/discord/commands/control/clear_teardown/execution_cleanup.rs": 2,
+        "src/services/discord/commands/control/managed_reset.rs": 1,
+        "src/services/discord/commands/tmux_recreate.rs": 2,
+        "src/services/discord/health/o_transition/codex_census.rs": 1,
+        "src/services/discord/relay_recovery/idle_tmux.rs": 1,
+        "src/services/discord/router/message_handler/provider_dispatch/owner_input.rs": 2,
+        "src/services/discord/router/message_handler/tui_followup.rs": 1,
+        "src/services/discord/router/turn_start.rs": 2,
+        "src/services/discord/session_runtime.rs": 1,
+        "src/services/discord/tmux_reaper.rs": 1,
+        "src/services/discord/tmux_watcher/liveness.rs": 1,
+        "src/services/discord/tmux_watcher/post_stream_exit.rs": 1,
+        "src/services/discord/tmux_watcher/prompt_observe.rs": 1,
+        "src/services/discord/tui_prompt_relay/claude_source.rs": 1,
+        "src/services/discord/tui_prompt_relay/rehydration.rs": 3,
+        "src/services/discord/turn_bridge/tmux_runtime/claude_stop_delivery.rs": 2,
+        "src/services/discord/turn_bridge/tmux_runtime/process_table.rs": 2,
+        "src/services/discord/watchers/codex_tui_restore.rs": 1,
+        "src/services/dispatched_sessions/output.rs": 1,
+        "src/services/dispatched_sessions/tmux_cleanup.rs": 1,
+        "src/services/herdr_launch/runtime_marker.rs": 1,
+        "src/services/maintenance/jobs/worktree_orphan_sweep.rs": 2,
+        "src/services/provider.rs": 1,
+        "src/services/routines/agent_executor/reliability.rs": 1,
+        "src/services/termination_audit.rs": 1,
+        "src/services/tmux_common.rs": 1,
+        "src/services/tmux_turn_liveness.rs": 1,
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/absent_open.rs": 2,
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/clear_relaunch.rs": 1,
+        "src/services/turn_lifecycle.rs": 4
+      }
+    },
+    "tmux_command_args_outside_adapter": {
+      "files": {
+        "src/cli/dcserver.rs": 1,
+        "src/cli/doctor/orchestrator.rs": 1,
+        "src/server/routes/docs/inventory/endpoints/part_07.rs": 1,
+        "src/services/claude/session_handoff/pinned_tmux.rs": 1,
+        "src/services/claude_tui/busy_inject.rs": 5,
+        "src/services/claude_tui/input.rs": 1,
+        "src/services/claude_tui/readiness/idle.rs": 1,
+        "src/services/claude_tui/tui_relay.rs": 3,
+        "src/services/codex_tui/busy_inject.rs": 2,
+        "src/services/codex_tui/host_input.rs": 1,
+        "src/services/discord/recovery_engine/restore_inflight/output_paths.rs": 1,
+        "src/services/discord/tmux_reaper.rs": 2,
+        "src/services/discord/turn_bridge/tmux_runtime/claude_stop_delivery.rs": 2,
+        "src/services/tui_input/actor/pane.rs": 1,
+        "src/services/tui_input/submission_tmux.rs": 3,
+        "src/services/tui_input/submission_tmux/guarded.rs": 4
+      }
+    },
     "tmux_kill": {
       "files": {
         "src/cli/dcserver.rs": 1,
-        "src/cli/utils.rs": 1,
         "src/server/routes/provider_auth_profiles.rs": 2,
-        "src/services/codex.rs": 2,
-        "src/services/discord/commands/tmux_recreate.rs": 1,
         "src/services/discord/health/recovery.rs": 4,
         "src/services/discord/health/relay_auto_heal.rs": 2,
         "src/services/discord/health/snapshot.rs": 2,
@@ -19,22 +105,8 @@
         "src/services/discord/relay_recovery/tests.rs": 2,
         "src/services/discord/relay_recovery/tests/circuit_breaker_apply.rs": 2,
         "src/services/discord/relay_recovery/tests/unread_tail_seed.rs": 2,
-        "src/services/discord/router/message_handler/provider_isolation.rs": 1,
-        "src/services/discord/tmux_reaper.rs": 4,
         "src/services/discord/tmux_watcher/placeholder_reclaim.rs": 1,
-        "src/services/discord/tmux_watcher/post_stream_exit.rs": 1,
-        "src/services/discord/tmux_watcher/pre_emit_guard.rs": 1,
-        "src/services/discord/tmux_watcher/terminal_abort_exits.rs": 1,
-        "src/services/discord/turn_bridge/retry_state.rs": 1,
-        "src/services/discord/watchers/lifecycle/restore.rs": 1,
-        "src/services/dispatched_sessions/tmux_cleanup.rs": 1,
-        "src/services/provider/cancel_token_cleanup/executor.rs": 1,
-        "src/services/provider_teardown.rs": 1,
-        "src/services/qwen/session_lifecycle.rs": 3,
-        "src/services/session_resume.rs": 1,
-        "src/services/tmux_turn_liveness.rs": 1,
-        "src/services/tui_prompt_dedupe/binding_context.rs": 1,
-        "src/services/turn_lifecycle.rs": 1
+        "src/services/session_resume.rs": 1
       }
     },
     "watcher_cancel": {
@@ -154,13 +226,12 @@
         "src/runtime_layout/legacy_migration.rs": 4,
         "src/runtime_layout/mod.rs": 5,
         "src/runtime_layout/skill_refresh.rs": 7,
-        "src/runtime_layout/skill_sync.rs": 2,
+        "src/runtime_layout/skill_sync.rs": 1,
         "src/server/dashboard_provision.rs": 1,
         "src/server/routes/agents_setup.rs": 2,
         "src/server/worker_recovery.rs": 1,
         "src/services/claude.rs": 7,
         "src/services/claude/herdr_turn.rs": 1,
-        "src/services/claude/herdr_turn/first_input.rs": 1,
         "src/services/claude/process_session_launch.rs": 2,
         "src/services/claude/tui_session_launch.rs": 2,
         "src/services/claude_tui/hook_relay.rs": 4,
@@ -188,6 +259,7 @@
         "src/services/discord/inflight/clear_store/abandon.rs": 1,
         "src/services/discord/inflight/clear_store/identity.rs": 1,
         "src/services/discord/inflight/clear_store/mod.rs": 7,
+        "src/services/discord/inflight/herdr_body_debt.rs": 1,
         "src/services/discord/inflight/rebind_reap.rs": 2,
         "src/services/discord/inflight/removal.rs": 1,
         "src/services/discord/inflight/removal/boot_reaper.rs": 1,
@@ -216,7 +288,6 @@
         "src/services/mcp_config.rs": 1,
         "src/services/memory/memento_writer_guard.rs": 1,
         "src/services/onboarding/mod.rs": 2,
-        "src/services/provider/herdr_before_start.rs": 1,
         "src/services/provider_cli/upgrade.rs": 2,
         "src/services/qwen.rs": 1,
         "src/services/qwen/session_lifecycle.rs": 8,
@@ -336,95 +407,6 @@
     },
     "host_terminate": {
       "comment": "Herdr close RPC spellings (pane.close, server.stop, workspace.close, tab.close, group.close, worktree_group.close, their method names and aliases). Only src/services/termination_audit/host_terminate.rs uses this baseline map; its growth needs a reviewed diff here. Fixed declaration sites use checker constants, and every other site fails regardless of this map.",
-      "files": {}
-    },
-    "tmux_create_outside_adapter": {
-      "files": {
-        "src/cli/dcserver.rs": 1,
-        "src/server/routes/provider_auth_profiles.rs": 1,
-        "src/services/claude.rs": 1,
-        "src/services/claude/tui_session_launch.rs": 2,
-        "src/services/codex.rs": 1,
-        "src/services/codex/tui_session_launch/first_input.rs": 2,
-        "src/services/qwen/session_lifecycle.rs": 1
-      }
-    },
-    "tmux_input_outside_adapter": {
-      "files": {
-        "src/engine/ops/exec_ops.rs": 2,
-        "src/server/routes/provider_auth_profiles.rs": 1,
-        "src/services/claude.rs": 2,
-        "src/services/codex.rs": 1,
-        "src/services/codex/tui_session_launch/first_input.rs": 1,
-        "src/services/qwen/session_lifecycle.rs": 1
-      }
-    },
-    "tmux_observe_outside_adapter": {
-      "files": {
-        "src/cli/dcserver.rs": 2,
-        "src/cli/doctor/orchestrator.rs": 2,
-        "src/server/routes/provider_auth_profiles.rs": 2,
-        "src/services/agents/turn.rs": 1,
-        "src/services/claude.rs": 1,
-        "src/services/cluster/readiness.rs": 1,
-        "src/services/codex.rs": 1,
-        "src/services/codex_tui/execution_end/capture.rs": 2,
-        "src/services/codex_tui/execution_end/confirm.rs": 1,
-        "src/services/codex_tui/execution_end/producer.rs": 2,
-        "src/services/discord/commands/control/clear_teardown/clear_end_record.rs": 3,
-        "src/services/discord/commands/control/clear_teardown/execution_cleanup.rs": 2,
-        "src/services/discord/commands/control/managed_reset.rs": 1,
-        "src/services/discord/commands/tmux_recreate.rs": 2,
-        "src/services/discord/health/o_transition/codex_census.rs": 1,
-        "src/services/discord/relay_recovery/idle_tmux.rs": 1,
-        "src/services/discord/router/message_handler/provider_dispatch/owner_input.rs": 2,
-        "src/services/discord/router/message_handler/tui_followup.rs": 1,
-        "src/services/discord/router/turn_start.rs": 2,
-        "src/services/discord/session_runtime.rs": 1,
-        "src/services/discord/tmux_reaper.rs": 1,
-        "src/services/discord/tmux_watcher/liveness.rs": 1,
-        "src/services/discord/tmux_watcher/post_stream_exit.rs": 1,
-        "src/services/discord/tmux_watcher/prompt_observe.rs": 1,
-        "src/services/discord/tui_prompt_relay/claude_source.rs": 1,
-        "src/services/discord/tui_prompt_relay/rehydration.rs": 3,
-        "src/services/discord/turn_bridge/tmux_runtime/claude_stop_delivery.rs": 2,
-        "src/services/discord/turn_bridge/tmux_runtime/process_table.rs": 2,
-        "src/services/discord/watchers/codex_tui_restore.rs": 1,
-        "src/services/dispatched_sessions/output.rs": 1,
-        "src/services/dispatched_sessions/tmux_cleanup.rs": 1,
-        "src/services/herdr_launch/runtime_marker.rs": 1,
-        "src/services/maintenance/jobs/worktree_orphan_sweep.rs": 2,
-        "src/services/provider.rs": 1,
-        "src/services/routines/agent_executor/reliability.rs": 1,
-        "src/services/termination_audit.rs": 1,
-        "src/services/tmux_common.rs": 1,
-        "src/services/tmux_turn_liveness.rs": 1,
-        "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/absent_open.rs": 2,
-        "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/clear_relaunch.rs": 1,
-        "src/services/turn_lifecycle.rs": 4
-      }
-    },
-    "tmux_command_args_outside_adapter": {
-      "files": {
-        "src/cli/dcserver.rs": 1,
-        "src/cli/doctor/orchestrator.rs": 1,
-        "src/server/routes/docs/inventory/endpoints/part_07.rs": 1,
-        "src/services/claude/session_handoff/pinned_tmux.rs": 1,
-        "src/services/claude_tui/busy_inject.rs": 5,
-        "src/services/claude_tui/input.rs": 1,
-        "src/services/claude_tui/readiness/idle.rs": 1,
-        "src/services/claude_tui/tui_relay.rs": 3,
-        "src/services/codex_tui/busy_inject.rs": 2,
-        "src/services/codex_tui/host_input.rs": 1,
-        "src/services/discord/recovery_engine/restore_inflight/output_paths.rs": 1,
-        "src/services/discord/tmux_reaper.rs": 2,
-        "src/services/discord/turn_bridge/tmux_runtime/claude_stop_delivery.rs": 2,
-        "src/services/tui_input/actor/pane.rs": 1,
-        "src/services/tui_input/submission_tmux.rs": 3,
-        "src/services/tui_input/submission_tmux/guarded.rs": 4
-      }
-    },
-    "tmux_bounded_runner_outside_adapter": {
       "files": {}
     }
   }

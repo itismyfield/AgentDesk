@@ -173,6 +173,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "outbound/delivery.rs": {".edit_message": 1},
     "outbound/manual_delivery.rs": {"dispatch_channel_message": 3},
     "outbound/o_writer_io.rs": {".send_message": 1},
+    "outbound/tui_rejection_notice.rs": {"send_channel_message*": 1},
     "outbound/serenity_reference.rs": {".send_message": 2},
     "outbound/transport.rs": {".send_message": 1},
     "outbound/turn_output_controller.rs": {"deliver_turn_output*": 3},
@@ -287,6 +288,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "outbound/delivery.rs": ("W19", "KEEP_TRANSPORT"),
     "outbound/manual_delivery.rs": ("W19", "KEEP_TRANSPORT"),
     "outbound/o_writer_io.rs": ("O", "KEEP_TRANSPORT"),
+    "outbound/tui_rejection_notice.rs": ("1-D-notice", "KEEP_NONBODY"),
     "outbound/serenity_reference.rs": ("W19", "KEEP_TRANSPORT"),
     "outbound/transport.rs": ("W19", "KEEP_TRANSPORT"),
     "outbound/turn_output_controller.rs": ("W19", "KEEP_TRANSPORT"),
@@ -500,6 +502,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/herdr_launch.rs": ("o_owns_seeded:peek",),
     "src/services/tui_o/cutover/channel_gate.rs": (
+        "with_peeked_o_output:peek",
         "claim_then_send:claim",
         "claim_then_send_at:claim",
         "decide_with_snapshot:claim",
