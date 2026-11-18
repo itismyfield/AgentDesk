@@ -1,833 +1,50 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { ExternalLink, MessageSquare } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { CalendarDays, RefreshCw, Repeat2 } from "lucide-react";
 import {
   getDiscordChannelInfo,
   getRoutineRuns,
   getRoutines,
   type RoutineRecord,
   type RoutineRunRecord,
-  type RoutineStatus,
 } from "../../api";
-import { SurfaceMetaBadge } from "../common/SurfacePrimitives";
+import { Button } from "../../kit/free/button-clean";
+import { EmptyState } from "../../kit/free/empty-state-clean";
+import { SegmentedControl } from "../../kit/free/segmented-control-clean";
+import { Loading, Skeleton } from "../../kit/free/skeleton-clean";
 import { Drawer } from "../common/overlay/Drawer";
+import { useIsMobile } from "../common/overlay/useBreakpoint";
 import { formatDiscordWebUrl, isDiscordSnowflake } from "../agent-manager/discord-routing";
 import type { TFunction } from "./model";
-import { cx } from "./ui";
+import {
+  describeRoutinePurpose,
+  describeRoutineSchedule,
+  filterLabel,
+  formatRelative,
+  formatScheduleAbsolute,
+  parseTime,
+  ROUTINE_FILTERS,
+  routineTimelineMarkers,
+  runStatusLabel,
+  runStatusTone,
+  sortRoutinesChronologically,
+  statusLabel,
+  statusTone,
+  type RoutineFilter,
+  type RoutineMarker,
+} from "./routineModel";
 import { HomeRoutinesTimeline } from "./HomeRoutinesTimeline";
+import { RoutineDetailBody, RoutineDetailPane, routineDetailTitle } from "./RoutineDetail";
+import { RoutineOverlapList, RoutineRunsTimeline } from "./RoutineRunsTimeline";
+import { RoutineScheduleList, type RoutineRowView } from "./RoutineScheduleRows";
 import { pollWhileVisible } from "../../lib/pollWhileVisible";
 
-type RoutineFilter = "all" | RoutineStatus;
-
-const FILTERS: RoutineFilter[] = ["all", "enabled", "paused", "detached"];
-
-function parseTime(value: string | null | undefined): number | null {
-  if (!value) return null;
-  const time = Date.parse(value);
-  return Number.isFinite(time) ? time : null;
-}
-
-function compareMaybeTime(left: number | null, right: number | null): number {
-  if (left == null && right == null) return 0;
-  if (left == null) return 1;
-  if (right == null) return -1;
-  return left - right;
-}
-
-export function sortRoutinesChronologically(
-  routines: RoutineRecord[],
-): RoutineRecord[] {
-  return [...routines].sort((left, right) => {
-    const dueCompare = compareMaybeTime(
-      parseTime(left.next_due_at),
-      parseTime(right.next_due_at),
-    );
-    if (dueCompare !== 0) return dueCompare;
-
-    const lastRunCompare = compareMaybeTime(
-      parseTime(right.last_run_at),
-      parseTime(left.last_run_at),
-    );
-    if (lastRunCompare !== 0) return lastRunCompare;
-
-    return left.name.localeCompare(right.name);
-  });
-}
-
-function pad2(value: number): string {
-  return value.toString().padStart(2, "0");
-}
-
-function parseNumberList(value: string, min: number, max: number): number[] | null {
-  const numbers = value.split(",").map((part) => Number(part));
-  if (
-    numbers.length === 0 ||
-    numbers.some((number) => !Number.isInteger(number) || number < min || number > max)
-  ) {
-    return null;
-  }
-  return numbers;
-}
-
-function parseNumberRange(value: string, min: number, max: number): [number, number] | null {
-  const match = value.match(/^(\d+)-(\d+)$/);
-  if (!match) return null;
-  const start = Number(match[1]);
-  const end = Number(match[2]);
-  if (
-    !Number.isInteger(start) ||
-    !Number.isInteger(end) ||
-    start < min ||
-    end > max ||
-    start > end
-  ) {
-    return null;
-  }
-  return [start, end];
-}
-
-function weekdayLabel(
-  dayOfWeek: string,
-  language: "ko" | "en" | "ja" | "zh",
-): string | null {
-  const weekday = dayOfWeek === "7" ? 0 : Number(dayOfWeek);
-  if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) return null;
-  const labels = {
-    ko: ["일요일", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일"],
-    en: ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
-    ja: ["日曜日", "月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日"],
-    zh: ["周日", "周一", "周二", "周三", "周四", "周五", "周六"],
-  };
-  return labels[language][weekday];
-}
-
-export function describeRoutineSchedule(
-  schedule: string | null,
-  language: "ko" | "en" | "ja" | "zh",
-): string {
-  const trimmed = schedule?.trim();
-  if (!trimmed) {
-    return language === "ko" ? "수동 실행" : "Manual run";
-  }
-
-  const every = trimmed.match(/^@every\s+(\d+)(ms|s|m|h|d)$/i);
-  if (every) {
-    const value = Number(every[1]);
-    const unit = every[2].toLowerCase();
-    const label =
-      unit === "d"
-        ? language === "ko"
-          ? "일"
-          : "d"
-        : unit === "h"
-          ? language === "ko"
-            ? "시간"
-            : "h"
-          : unit === "m"
-            ? language === "ko"
-              ? "분"
-              : "m"
-            : unit;
-    return language === "ko" ? `${value}${label}마다` : `Every ${value}${label}`;
-  }
-
-  const parts = trimmed.split(/\s+/);
-  if (parts.length === 5) {
-    const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
-    const hourNum = Number(hour);
-    const minuteNum = Number(minute);
-    const hourStep = hour.match(/^\*\/(\d+)$/);
-    const minuteList = parseNumberList(minute, 0, 59);
-    const hourRange = parseNumberRange(hour, 0, 23);
-    if (
-      hourStep &&
-      Number.isInteger(minuteNum) &&
-      minuteNum >= 0 &&
-      minuteNum <= 59 &&
-      dayOfMonth === "*" &&
-      month === "*" &&
-      dayOfWeek === "*"
-    ) {
-      const value = Number(hourStep[1]);
-      if (Number.isInteger(value) && value > 0 && value <= 23) {
-        if (minuteNum === 0) {
-          return language === "ko"
-            ? `${value}시간마다 정각`
-            : language === "ja"
-              ? `${value}時間ごとの正時`
-              : language === "zh"
-                ? `每 ${value} 小时整点`
-                : `Every ${value}h on the hour`;
-        }
-        const minuteLabel = pad2(minuteNum);
-        return language === "ko"
-          ? `${value}시간마다 ${minuteLabel}분`
-          : language === "ja"
-            ? `${value}時間ごと ${minuteLabel}分`
-            : language === "zh"
-              ? `每 ${value} 小时 ${minuteLabel} 分`
-              : `Every ${value}h at :${minuteLabel}`;
-      }
-    }
-    if (
-      minuteList &&
-      minuteList.length > 1 &&
-      hourRange &&
-      dayOfMonth === "*" &&
-      month === "*" &&
-      dayOfWeek === "*"
-    ) {
-      const [startHour, endHour] = hourRange;
-      const sortedMinutes = [...minuteList].sort((left, right) => left - right);
-      const interval =
-        sortedMinutes.length === 2
-          ? sortedMinutes[1] - sortedMinutes[0]
-          : null;
-      const startClock = `${pad2(startHour)}:${pad2(sortedMinutes[0])}`;
-      const endClock = `${pad2(endHour)}:${pad2(sortedMinutes[sortedMinutes.length - 1])}`;
-      const rangeLabel =
-        language === "ko"
-          ? `매일 ${startClock}~${endClock}`
-          : language === "ja"
-            ? `毎日 ${startClock}〜${endClock}`
-            : language === "zh"
-              ? `每天 ${startClock}~${endClock}`
-              : `Daily ${startClock}-${endClock}`;
-      if (interval && interval > 0) {
-        return language === "ko"
-          ? `${rangeLabel}, ${interval}분마다`
-          : language === "ja"
-            ? `${rangeLabel}、${interval}分ごと`
-            : language === "zh"
-              ? `${rangeLabel}，每 ${interval} 分钟`
-              : `${rangeLabel}, every ${interval}m`;
-      }
-      return rangeLabel;
-    }
-    if (
-      Number.isInteger(hourNum) &&
-      Number.isInteger(minuteNum) &&
-      hourNum >= 0 &&
-      hourNum <= 23 &&
-      minuteNum >= 0 &&
-      minuteNum <= 59 &&
-      dayOfMonth === "*" &&
-      month === "*"
-    ) {
-      const clock = `${pad2(hourNum)}:${pad2(minuteNum)}`;
-      if (dayOfWeek === "*") {
-        return language === "ko" ? `매일 ${clock}` : `Daily ${clock}`;
-      }
-      if (dayOfWeek === "1-5") {
-        return language === "ko" ? `평일 ${clock}` : `Weekdays ${clock}`;
-      }
-      const weekday = weekdayLabel(dayOfWeek, language);
-      if (weekday) {
-        return language === "ko"
-          ? `매주 ${weekday} ${clock}`
-          : language === "ja"
-            ? `毎週${weekday} ${clock}`
-            : language === "zh"
-              ? `每${weekday} ${clock}`
-              : `Every ${weekday} ${clock}`;
-      }
-    }
-  }
-
-  return trimmed;
-}
-
-function statusTone(routine: RoutineRecord): "info" | "success" | "warn" | "neutral" | "danger" {
-  if (routine.in_flight_run_id) return "info";
-  if (routine.status === "enabled") return "success";
-  if (routine.status === "paused") return "warn";
-  if (routine.status === "detached") return "neutral";
-  return "danger";
-}
-
-function statusLabel(routine: RoutineRecord, t: TFunction): string {
-  if (routine.in_flight_run_id) {
-    return t({ ko: "진행 중", en: "Running", ja: "実行中", zh: "运行中" });
-  }
-  if (routine.status === "enabled") {
-    return t({ ko: "활성", en: "Active", ja: "有効", zh: "活跃" });
-  }
-  if (routine.status === "paused") {
-    return t({ ko: "일시정지", en: "Paused", ja: "一時停止", zh: "已暂停" });
-  }
-  if (routine.status === "detached") {
-    return t({ ko: "분리됨", en: "Detached", ja: "切り離し", zh: "已分离" });
-  }
-  return routine.status;
-}
-
-function runStatusTone(status: string | null | undefined): "info" | "success" | "warn" | "neutral" | "danger" {
-  if (status === "succeeded") return "success";
-  if (status === "running") return "info";
-  if (status === "failed" || status === "interrupted") return "danger";
-  if (status === "paused") return "warn";
-  return "neutral";
-}
-
-function runStatusLabel(status: string | null | undefined, t: TFunction): string | null {
-  if (!status) return null;
-  switch (status) {
-    case "succeeded":
-      return t({ ko: "최근 성공", en: "Last succeeded", ja: "前回成功", zh: "最近成功" });
-    case "failed":
-      return t({ ko: "최근 실패", en: "Last failed", ja: "前回失敗", zh: "最近失败" });
-    case "skipped":
-      return t({ ko: "최근 스킵", en: "Last skipped", ja: "前回スキップ", zh: "最近跳过" });
-    case "running":
-      return t({ ko: "최근 진행 중", en: "Last running", ja: "前回実行中", zh: "最近运行中" });
-    case "paused":
-      return t({ ko: "최근 일시정지", en: "Last paused", ja: "前回一時停止", zh: "最近暂停" });
-    case "interrupted":
-      return t({ ko: "최근 중단", en: "Last interrupted", ja: "前回中断", zh: "最近中断" });
-    default:
-      return t({
-        ko: `최근 ${status}`,
-        en: `Last ${status}`,
-        ja: `前回${status}`,
-        zh: `最近 ${status}`,
-      });
-  }
-}
-
-function formatDateTime(value: string | null, localeTag: string): string {
-  const time = parseTime(value);
-  if (time == null) return "-";
-  return new Date(time).toLocaleString(localeTag, {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function formatRelative(value: string | null, localeTag: string): string | null {
-  const time = parseTime(value);
-  if (time == null) return null;
-  const diffMs = time - Date.now();
-  const absMs = Math.abs(diffMs);
-  const formatter = new Intl.RelativeTimeFormat(localeTag, { numeric: "auto" });
-  if (absMs < 60_000) return formatter.format(Math.round(diffMs / 1_000), "second");
-  if (absMs < 3_600_000) return formatter.format(Math.round(diffMs / 60_000), "minute");
-  if (absMs < 86_400_000) return formatter.format(Math.round(diffMs / 3_600_000), "hour");
-  return formatter.format(Math.round(diffMs / 86_400_000), "day");
-}
-
-function filterLabel(filter: RoutineFilter, t: TFunction): string {
-  switch (filter) {
-    case "enabled":
-      return t({ ko: "활성", en: "Active", ja: "有効", zh: "活跃" });
-    case "paused":
-      return t({ ko: "일시정지", en: "Paused", ja: "一時停止", zh: "已暂停" });
-    case "detached":
-      return t({ ko: "분리", en: "Detached", ja: "切り離し", zh: "分离" });
-    case "all":
-    default:
-      return t({ ko: "전체", en: "All", ja: "すべて", zh: "全部" });
-  }
-}
-
-function includesAny(value: string, terms: string[]): boolean {
-  return terms.some((term) => value.includes(term));
-}
-
-function humanizeRoutineName(name: string): string {
-  return name
-    .replace(/\.(js|ts|sh)$/i, "")
-    .split(/[-_/]+/)
-    .filter(Boolean)
-    .join(" ");
-}
-
-export function describeRoutinePurpose(routine: RoutineRecord, t: TFunction): string {
-  const haystack = `${routine.name} ${routine.script_ref}`.toLowerCase();
-  if (includesAny(haystack, ["family-morning-briefing"])) {
-    return t({
-      ko: "날씨, 캘린더, 리마인더를 모아 가족 아침 브리핑을 보냅니다.",
-      en: "Sends a family morning briefing from weather, calendar, and reminders.",
-      ja: "天気、カレンダー、リマインダーをまとめて朝のブリーフィングを送信します。",
-      zh: "汇总天气、日历和提醒事项并发送家庭晨报。",
-    });
-  }
-  if (includesAny(haystack, ["family-profile-probe"])) {
-    return t({
-      ko: "가족 프로필의 빈 정보를 찾아 DM 질문으로 보강합니다.",
-      en: "Fills missing family profile details through DM prompts.",
-      ja: "家族プロフィールの不足情報をDM質問で補完します。",
-      zh: "通过 DM 提问补全家庭档案中的缺失信息。",
-    });
-  }
-  if (includesAny(haystack, ["token-daily-report"])) {
-    return t({
-      ko: "토큰 사용량과 비용을 일일 리포트로 정리합니다.",
-      en: "Builds a daily token usage and cost report.",
-      ja: "トークン使用量とコストを日次レポートにまとめます。",
-      zh: "生成每日 token 使用量和成本报告。",
-    });
-  }
-  if (includesAny(haystack, ["memento-daily-report"])) {
-    return t({
-      ko: "Memento 기억 현황을 일일 리포트로 정리합니다.",
-      en: "Summarizes the Memento memory store in a daily report.",
-      ja: "Memento の記憶状況を日次レポートにまとめます。",
-      zh: "将 Memento 记忆状况整理为每日报告。",
-    });
-  }
-  if (includesAny(haystack, ["memento-hygiene"])) {
-    return t({
-      ko: "Memento 기억을 위생 정리하고 오래된 파편을 관리합니다.",
-      en: "Maintains Memento memory hygiene and stale fragments.",
-      ja: "Mementoメモリの衛生管理と古いフラグメント整理を行います。",
-      zh: "维护 Memento 记忆卫生并管理过期片段。",
-    });
-  }
-  if (includesAny(haystack, ["memento-scope-audit"])) {
-    return t({
-      ko: "Memento 파편의 스코프와 고정 상태를 주기적으로 감사합니다.",
-      en: "Audits Memento fragment scope and anchoring on a schedule.",
-      ja: "Mementoフラグメントのスコープと固定状態を定期監査します。",
-      zh: "定期审计 Memento 片段的范围和固定状态。",
-    });
-  }
-  if (includesAny(haystack, ["worktree", "janitor", "local-worktree-gc"])) {
-    return t({
-      ko: "오래된 로컬 worktree와 임시 빌드 캐시를 안전 기준에 맞춰 정리합니다.",
-      en: "Cleans stale local worktrees and temporary build caches with safety gates.",
-      ja: "古いローカルworktreeと一時ビルドキャッシュを安全条件付きで整理します。",
-      zh: "按安全规则清理过期本地 worktree 和临时构建缓存。",
-    });
-  }
-  if (includesAny(haystack, ["dependency-update"])) {
-    return t({
-      ko: "Agent CLI, 핵심 crate, CVE 등 외부 의존성 변경을 추적합니다.",
-      en: "Tracks external dependency updates across Agent CLIs, core crates, and CVEs.",
-      ja: "Agent CLI、主要crate、CVEなど外部依存関係の更新を追跡します。",
-      zh: "跟踪 Agent CLI、核心 crate 和 CVE 等外部依赖更新。",
-    });
-  }
-  if (includesAny(haystack, ["banchan-day-reminder-prep"])) {
-    return t({
-      ko: "반찬데이 전날 장보기와 준비 알림을 보냅니다.",
-      en: "Sends grocery and prep reminders before banchan day.",
-      ja: "惣菜デー前日の買い物と準備リマインダーを送信します。",
-      zh: "在配菜日前发送采购和准备提醒。",
-    });
-  }
-  if (includesAny(haystack, ["banchan-day-reminder-cook"])) {
-    return t({
-      ko: "반찬데이 당일 조리 알림을 보냅니다.",
-      en: "Sends cooking reminders on banchan day.",
-      ja: "惣菜デー当日の調理リマインダーを送信します。",
-      zh: "在配菜日当天发送烹饪提醒。",
-    });
-  }
-  if (includesAny(haystack, ["ai-integrated-briefing"])) {
-    return t({
-      ko: "AI 제품/릴리즈 뉴스를 통합 브리핑으로 정리합니다.",
-      en: "Builds an integrated briefing of AI product and release news.",
-      ja: "AI製品とリリースニュースを統合ブリーフィングにまとめます。",
-      zh: "整理 AI 产品和发布新闻的综合简报。",
-    });
-  }
-  if (includesAny(haystack, ["cookingheart-daily-briefing"])) {
-    return t({
-      ko: "CookingHeart 개발 현황과 다음 액션을 일일 브리핑합니다.",
-      en: "Sends a daily CookingHeart development briefing and next actions.",
-      ja: "CookingHeart開発状況と次のアクションを日次ブリーフィングします。",
-      zh: "发送 CookingHeart 开发状态和下一步行动日报。",
-    });
-  }
-  if (includesAny(haystack, ["queue-stability"])) {
-    return t({
-      ko: "큐 안정성 신호를 점검하고 필요한 복구 작업을 묶어 실행합니다.",
-      en: "Checks queue stability signals and batches needed recovery work.",
-      ja: "キュー安定性シグナルを確認し、必要な復旧作業をまとめます。",
-      zh: "检查队列稳定性信号并批量执行必要恢复工作。",
-    });
-  }
-  if (includesAny(haystack, ["memory-merge"])) {
-    return t({
-      ko: "에이전트 메모리 파일을 정리하고 장기 기억 계층으로 분배합니다.",
-      en: "Cleans agent memory files and distributes them into long-term memory layers.",
-      ja: "エージェントメモリファイルを整理し長期記憶層へ分配します。",
-      zh: "整理智能体记忆文件并分配到长期记忆层。",
-    });
-  }
-  if (includesAny(haystack, ["automation-candidate"])) {
-    return t({
-      ko: "자동화 후보를 감지, 추천, 또는 실행하는 모니터링 루틴입니다.",
-      en: "Detects, recommends, or executes automation candidates.",
-      ja: "自動化候補を検出、推薦、または実行する監視ルーチンです。",
-      zh: "用于检测、推荐或执行自动化候选项的监控例程。",
-    });
-  }
-  if (includesAny(haystack, ["working-watchdog"])) {
-    return t({
-      ko: "작업 중인 에이전트/세션 상태를 감시하고 이상 신호를 찾습니다.",
-      en: "Watches active agent and session health for anomalies.",
-      ja: "稼働中のエージェントとセッション状態を監視します。",
-      zh: "监控运行中的智能体和会话健康状态。",
-    });
-  }
-
-  const owner = routine.agent_id ?? routine.fallback_agent_id;
-  const readableName = humanizeRoutineName(routine.name || routine.script_ref);
-  return owner
-    ? t({
-        ko: `${readableName} 작업을 ${owner}가 정해진 시간에 실행합니다.`,
-        en: `${readableName} is run by ${owner} on its schedule.`,
-        ja: `${readableName} を ${owner} がスケジュールに沿って実行します。`,
-        zh: `${readableName} 由 ${owner} 按计划执行。`,
-      })
-    : t({
-        ko: `${readableName} 작업을 정해진 시간에 실행합니다.`,
-        en: `${readableName} runs on its schedule.`,
-        ja: `${readableName} をスケジュールに沿って実行します。`,
-        zh: `${readableName} 按计划执行。`,
-      });
-}
-
-function previewValue(value: unknown, fallback = "-"): string {
-  if (value === null || value === undefined || value === "") return fallback;
-  const raw = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  if (!raw) return fallback;
-  return raw.length > 520 ? `${raw.slice(0, 520)}...` : raw;
-}
-
-type RoutineRunResultFact = {
-  key: string;
-  value: string;
-  mono?: boolean;
-};
-
-type RoutineRunResultNote = {
-  key: string;
-  value: string;
-};
-
-export interface RoutineRunResultSummary {
-  summary: string | null;
-  assistantPreview: string | null;
-  facts: RoutineRunResultFact[];
-  notes: RoutineRunResultNote[];
-  rawPreview: string | null;
-  structured: boolean;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function compactResultText(value: string, maxChars = 240): string {
-  const trimmed = value.trim().replace(/\r/g, "");
-  if (!trimmed) return "";
-  const text = trimmed.replace(/\n{3,}/g, "\n\n");
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}...`;
-}
-
-function resultString(value: unknown, maxChars = 160): string | null {
-  if (value === null || value === undefined || value === "") return null;
-  if (typeof value === "string") return compactResultText(value, maxChars);
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  const raw = JSON.stringify(value);
-  return raw ? compactResultText(raw, maxChars) : null;
-}
-
-function firstResultString(
-  record: Record<string, unknown>,
-  keys: string[],
-  maxChars?: number,
-): string | null {
-  for (const key of keys) {
-    const text = resultString(record[key], maxChars);
-    if (text) return text;
-  }
-  return null;
-}
-
-function formatDurationMs(value: unknown): string | null {
-  if (typeof value !== "number" || !Number.isFinite(value)) return null;
-  if (value < 1_000) return `${Math.round(value)}ms`;
-  return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}s`;
-}
-
-export function summarizeRoutineRunResult(
-  result: unknown,
-): RoutineRunResultSummary {
-  if (!isRecord(result)) {
-    const text = resultString(result, 360);
-    return {
-      summary: text,
-      assistantPreview: null,
-      facts: [],
-      notes: [],
-      rawPreview: null,
-      structured: Boolean(text),
-    };
-  }
-
-  const facts: RoutineRunResultFact[] = [];
-  const notes: RoutineRunResultNote[] = [];
-  const addFact = (key: string, value: string | null, mono = false) => {
-    if (value) facts.push({ key, value, mono });
-  };
-  const addNote = (key: string, value: string | null) => {
-    if (value) notes.push({ key, value });
-  };
-
-  const summary = firstResultString(
-    result,
-    ["outcome_summary", "summary", "reason", "error"],
-    280,
-  );
-  const assistantPreview = firstResultString(
-    result,
-    ["assistant_message_preview"],
-    420,
-  );
-
-  addFact("status", firstResultString(result, ["status"], 80));
-  addFact("agent", firstResultString(result, ["agent_id"], 80));
-  addFact("failed_agent", firstResultString(result, ["failed_agent_id"], 80));
-  addFact("attempt", firstResultString(result, ["attempt_kind"], 80));
-  addFact("retry_count", firstResultString(result, ["retry_count"], 40));
-  addFact("next_retry", firstResultString(result, ["next_retry_at"], 80));
-  addFact("provider", firstResultString(result, ["provider"], 80));
-  addFact("turn", firstResultString(result, ["turn_id"], 80), true);
-  addFact("duration", formatDurationMs(result.duration_ms));
-  addFact("evidence", firstResultString(result, ["completion_evidence"], 80));
-  addFact("terminal", firstResultString(result, ["turn_terminal_status"], 80));
-  addFact("mode", firstResultString(result, ["mode"], 80));
-  addFact("agent_status", firstResultString(result, ["agentStatus", "agent_status"], 80));
-  addFact("idle", firstResultString(result, ["isIdle", "is_idle"], 40));
-  addFact("heartbeat", firstResultString(result, ["heartbeatCount", "heartbeat_count"], 40));
-  addFact("checked", firstResultString(result, ["checkedAt", "checked_at"], 80));
-  addFact("reviews", firstResultString(result, ["review_count"], 40));
-  addFact("approved", firstResultString(result, ["approved_count"], 40));
-  addFact("skipped", firstResultString(result, ["skipped"], 40));
-  addFact("skipped_approved", firstResultString(result, ["skipped_approved"], 40));
-  addFact("skipped_quality", firstResultString(result, ["skipped_quality_gate"], 40));
-  addFact("observations", firstResultString(result, ["observation_count"], 40));
-  addFact("active_candidates", firstResultString(result, ["active_candidate_count"], 40));
-  addFact("recommendations_today", firstResultString(result, ["recommendations_today"], 40));
-  addFact("reopt", firstResultString(result, ["reopt_count"], 40));
-  addFact("target", firstResultString(result, ["targetKey", "target_key"], 80));
-  addFact("summary_count", firstResultString(result, ["summaryCount", "summary_count"], 40));
-  addFact(
-    "fresh_context",
-    firstResultString(result, ["fresh_context_guaranteed", "freshContextGuaranteed"], 40),
-  );
-
-  addNote("decision", firstResultString(result, ["decision_summary"], 260));
-  addNote("evidence", firstResultString(result, ["top_evidence_summary"], 260));
-  addNote("suppression", firstResultString(result, ["suppression_summary"], 260));
-  addNote("scoring", firstResultString(result, ["scoring_summary"], 260));
-
-  const structured = Boolean(summary || assistantPreview || facts.length || notes.length);
-  return {
-    summary,
-    assistantPreview,
-    facts,
-    notes,
-    rawPreview: previewValue(result, ""),
-    structured,
-  };
-}
-
-function runResultFactLabel(key: string, t: TFunction): string {
-  switch (key) {
-    case "status":
-      return t({ ko: "상태", en: "Status", ja: "状態", zh: "状态" });
-    case "agent":
-      return t({ ko: "agent", en: "Agent", ja: "agent", zh: "agent" });
-    case "failed_agent":
-      return t({ ko: "실패 agent", en: "Failed agent", ja: "失敗agent", zh: "失败 agent" });
-    case "attempt":
-      return t({ ko: "시도", en: "Attempt", ja: "試行", zh: "尝试" });
-    case "retry_count":
-      return t({ ko: "재시도", en: "Retries", ja: "リトライ", zh: "重试" });
-    case "next_retry":
-      return t({ ko: "다음 재시도", en: "Next retry", ja: "次回リトライ", zh: "下次重试" });
-    case "provider":
-      return t({ ko: "provider", en: "Provider", ja: "provider", zh: "provider" });
-    case "turn":
-      return t({ ko: "turn", en: "Turn", ja: "turn", zh: "turn" });
-    case "duration":
-      return t({ ko: "소요", en: "Duration", ja: "所要時間", zh: "耗时" });
-    case "evidence":
-      return t({ ko: "완료 근거", en: "Evidence", ja: "完了根拠", zh: "完成依据" });
-    case "terminal":
-      return t({ ko: "종료 상태", en: "Terminal", ja: "終了状態", zh: "终止状态" });
-    case "mode":
-      return t({ ko: "모드", en: "Mode", ja: "モード", zh: "模式" });
-    case "agent_status":
-      return t({ ko: "agent 상태", en: "Agent status", ja: "agent状態", zh: "agent 状态" });
-    case "idle":
-      return t({ ko: "idle", en: "Idle", ja: "idle", zh: "idle" });
-    case "heartbeat":
-      return t({ ko: "heartbeat", en: "Heartbeat", ja: "heartbeat", zh: "heartbeat" });
-    case "checked":
-      return t({ ko: "확인 시각", en: "Checked", ja: "確認時刻", zh: "检查时间" });
-    case "reviews":
-      return t({ ko: "검토", en: "Reviews", ja: "レビュー", zh: "审查" });
-    case "approved":
-      return t({ ko: "승인", en: "Approved", ja: "承認", zh: "批准" });
-    case "skipped":
-      return t({ ko: "스킵", en: "Skipped", ja: "スキップ", zh: "跳过" });
-    case "skipped_approved":
-      return t({ ko: "이미 승인", en: "Already approved", ja: "承認済み", zh: "已批准" });
-    case "skipped_quality":
-      return t({ ko: "품질 게이트", en: "Quality gate", ja: "品質ゲート", zh: "质量门" });
-    case "observations":
-      return t({ ko: "관찰", en: "Observations", ja: "観察", zh: "观测" });
-    case "active_candidates":
-      return t({ ko: "활성 후보", en: "Active candidates", ja: "有効候補", zh: "活跃候选" });
-    case "recommendations_today":
-      return t({ ko: "오늘 추천", en: "Recommendations today", ja: "今日の推薦", zh: "今日推荐" });
-    case "reopt":
-      return t({ ko: "재최적화", en: "Reopt", ja: "再最適化", zh: "重新优化" });
-    case "target":
-      return t({ ko: "대상", en: "Target", ja: "対象", zh: "目标" });
-    case "summary_count":
-      return t({ ko: "요약 횟수", en: "Summary count", ja: "要約回数", zh: "摘要次数" });
-    case "fresh_context":
-      return t({ ko: "fresh context", en: "Fresh context", ja: "fresh context", zh: "fresh context" });
-    default:
-      return key;
-  }
-}
-
-function runResultNoteLabel(key: string, t: TFunction): string {
-  switch (key) {
-    case "decision":
-      return t({ ko: "판단", en: "Decision", ja: "判断", zh: "判断" });
-    case "evidence":
-      return t({ ko: "근거", en: "Evidence", ja: "根拠", zh: "依据" });
-    case "suppression":
-      return t({ ko: "억제", en: "Suppression", ja: "抑制", zh: "抑制" });
-    case "scoring":
-      return t({ ko: "스코어링", en: "Scoring", ja: "スコアリング", zh: "评分" });
-    default:
-      return key;
-  }
-}
-
-function RoutineRunResultPayload({
-  error,
-  result,
-  t,
-}: {
-  error: string | null;
-  result: unknown | null;
-  t: TFunction;
-}) {
-  const hasError = Boolean(error?.trim());
-  const errorText = hasError ? compactResultText(error ?? "", 520) : null;
-  const summary =
-    result === null || result === undefined
-      ? null
-      : summarizeRoutineRunResult(result);
-  const visibleSummary =
-    summary?.summary && summary.summary !== errorText ? summary.summary : null;
-  if (!hasError && !summary) return null;
-
-  return (
-    <div className="mt-2 space-y-2">
-      {hasError ? (
-        <div
-          className="rounded-lg px-2 py-2 text-xs leading-5"
-          style={{
-            background: "color-mix(in srgb, var(--th-accent-danger) 10%, var(--th-overlay-medium) 90%)",
-            color: "var(--th-text-primary)",
-          }}
-        >
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.12em]" style={{ color: "var(--th-accent-danger)" }}>
-            {t({ ko: "오류", en: "Error", ja: "エラー", zh: "错误" })}
-          </div>
-          <div className="whitespace-pre-wrap break-words">{errorText}</div>
-        </div>
-      ) : null}
-
-      {summary && summary.structured ? (
-        <div
-          className="space-y-2 rounded-lg px-2 py-2"
-          style={{
-            background: "color-mix(in srgb, var(--th-overlay-medium) 62%, transparent)",
-            color: "var(--th-text-primary)",
-          }}
-        >
-          {visibleSummary ? (
-            <p className="text-xs leading-5">{visibleSummary}</p>
-          ) : null}
-          {summary.assistantPreview ? (
-            <div className="space-y-1">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.12em]" style={{ color: "var(--th-text-muted)" }}>
-                {t({ ko: "에이전트 응답", en: "Agent response", ja: "エージェント応答", zh: "智能体回复" })}
-              </div>
-              <p className="whitespace-pre-wrap break-words text-xs leading-5">
-                {summary.assistantPreview}
-              </p>
-            </div>
-          ) : null}
-          {summary.notes.length ? (
-            <div className="space-y-1">
-              {summary.notes.map((note) => (
-                <div key={note.key} className="text-xs leading-5">
-                  <span className="font-medium" style={{ color: "var(--th-text-muted)" }}>
-                    {runResultNoteLabel(note.key, t)}:
-                  </span>{" "}
-                  <span>{note.value}</span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-          {summary.facts.length ? (
-            <div className="flex flex-wrap gap-1.5">
-              {summary.facts.map((fact) => (
-                <span
-                  key={`${fact.key}:${fact.value}`}
-                  className={cx(
-                    "inline-flex min-w-0 max-w-full items-center gap-1 rounded-md px-2 py-1 text-[11px] leading-4",
-                    fact.mono ? "font-mono" : "",
-                  )}
-                  style={{
-                    background: "color-mix(in srgb, var(--th-bg-surface) 74%, transparent)",
-                    color: "var(--th-text-primary)",
-                  }}
-                >
-                  <span className="shrink-0 font-medium" style={{ color: "var(--th-text-muted)" }}>
-                    {runResultFactLabel(fact.key, t)}
-                  </span>
-                  <span className="min-w-0 break-all">{fact.value}</span>
-                </span>
-              ))}
-            </div>
-          ) : null}
-          {summary.rawPreview ? (
-            <details className="text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
-              <summary className="flex min-h-11 min-w-11 cursor-pointer select-none items-center rounded-md text-xs focus-visible:outline-2 focus-visible:outline-[var(--th-accent-primary)]">
-                {t({ ko: "원본 JSON", en: "Raw JSON", ja: "元JSON", zh: "原始 JSON" })}
-              </summary>
-              <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap break-words font-mono" style={{ color: "var(--th-text-primary)" }}>
-                {summary.rawPreview}
-              </pre>
-            </details>
-          ) : null}
-        </div>
-      ) : summary?.rawPreview ? (
-        <pre className="max-h-36 overflow-auto whitespace-pre-wrap rounded-lg px-2 py-2 text-[11px] leading-5" style={{ background: "color-mix(in srgb, var(--th-overlay-medium) 82%, transparent)", color: "var(--th-text-primary)" }}>
-          {summary.rawPreview}
-        </pre>
-      ) : null}
-    </div>
-  );
-}
-
-const MarkdownContent = lazy(() => import("../common/MarkdownContent"));
+export {
+  describeRoutinePurpose,
+  describeRoutineSchedule,
+  sortRoutinesChronologically,
+  summarizeRoutineRunResult,
+} from "./routineModel";
+export type { RoutineRunResultSummary } from "./routineModel";
 
 // All routine threads share one guild, so a single channel lookup serves every row.
 let cachedGuildId: string | null = null;
@@ -851,189 +68,14 @@ function useDiscordGuildId(sampleChannelId: string | null): string | null {
   return guildId;
 }
 
-function strategyLabel(strategy: string, t: TFunction): string {
-  if (strategy === "fresh") return t({ ko: "매번 새 세션", en: "New session each run", ja: "毎回新しいセッション", zh: "每次新会话" });
-  if (strategy === "persistent") return t({ ko: "같은 세션 이어서", en: "Reuse one session", ja: "同じセッションを継続", zh: "沿用同一会话" });
-  return strategy;
-}
-
-function formatTimeout(seconds: number | null, t: TFunction): string {
-  if (!seconds) return "-";
-  if (seconds < 60) return t({ ko: `${seconds}초`, en: `${seconds}s`, ja: `${seconds}秒`, zh: `${seconds}秒` });
-  const minutes = Math.round(seconds / 60);
-  return t({ ko: `${minutes}분`, en: `${minutes} min`, ja: `${minutes}分`, zh: `${minutes}分钟` });
-}
-
-function DetailField({
-  label,
-  value,
-  mono = false,
-}: {
-  label: string;
-  value: string | number | null | undefined;
-  mono?: boolean;
-}) {
-  return (
-    <div className="min-w-0 rounded-lg border border-th-border-subtle px-3 py-2">
-      <div className="text-xs text-th-text-muted">{label}</div>
-      <div className={cx("mt-1 min-w-0 [overflow-wrap:anywhere] text-sm", mono ? "font-mono text-xs leading-5" : "font-medium")} style={{ color: "var(--th-text-primary)" }}>
-        {value ?? "-"}
-      </div>
-    </div>
-  );
-}
-
-const RESULT_PREVIEW_CHARS = 140;
-
-function ExpandableResult({ text, t }: { text: string; t: TFunction }) {
-  const [expanded, setExpanded] = useState(false);
-  const long = text.length > RESULT_PREVIEW_CHARS || text.includes("\n");
-  return (
-    <div data-testid="routine-last-result">
-      <div className={cx("min-w-0 break-words text-sm leading-6 text-th-text-primary", long && !expanded ? "max-h-12 overflow-hidden" : "")}>
-        <Suspense fallback={<p className="whitespace-pre-wrap">{text}</p>}>
-          <MarkdownContent content={text} />
-        </Suspense>
-      </div>
-      {long ? (
-        <button
-          type="button"
-          onClick={() => setExpanded((value) => !value)}
-          aria-expanded={expanded}
-          className="mt-1 min-h-11 text-xs font-medium text-[var(--th-accent-primary)] focus-visible:outline-2 focus-visible:outline-[var(--th-accent-primary)]"
-        >
-          {expanded ? t({ ko: "접기", en: "Show less", ja: "閉じる", zh: "收起" }) : t({ ko: "펼치기", en: "Show more", ja: "もっと見る", zh: "展开" })}
-        </button>
-      ) : null}
-    </div>
-  );
-}
-
-function RoutineDetailDrawer({
-  routine,
-  threadUrl,
-  runs,
-  runsLoading,
-  runsError,
-  t,
-  localeTag,
-  language,
-  onClose,
-}: {
-  routine: RoutineRecord | null;
-  threadUrl: string | null;
-  runs: RoutineRunRecord[];
-  runsLoading: boolean;
-  runsError: boolean;
-  t: TFunction;
-  localeTag: string;
-  language: "ko" | "en" | "ja" | "zh";
-  onClose: () => void;
-}) {
-  const purpose = routine ? describeRoutinePurpose(routine, t) : "";
-  const lastResult = routine?.last_result?.trim() ?? "";
-  const emptyBox = "rounded-lg border border-th-border-subtle px-3 py-4 text-sm text-th-text-muted";
-
-  return (
-    <Drawer
-      open={Boolean(routine)}
-      onClose={onClose}
-      width="min(560px, 100vw)"
-      closeButtonClassName="min-h-11 min-w-11"
-      title={purpose || t({ ko: "루틴 상세", en: "Routine detail", ja: "ルーチン詳細", zh: "例程详情" })}
-    >
-      {routine ? (
-        <div className="space-y-5">
-          <section className="space-y-3">
-            <div className="font-mono text-xs text-th-text-muted [overflow-wrap:anywhere]">{routine.name}</div>
-            <div className="flex flex-wrap items-center gap-2">
-              <SurfaceMetaBadge tone={statusTone(routine)}>{statusLabel(routine, t)}</SurfaceMetaBadge>
-              <SurfaceMetaBadge tone="neutral">{describeRoutineSchedule(routine.schedule, language)}</SurfaceMetaBadge>
-            </div>
-            {threadUrl ? (
-              <a
-                href={threadUrl}
-                target="_blank"
-                rel="noreferrer"
-                data-testid="routine-thread-link"
-                className="inline-flex min-h-11 items-center gap-2 rounded-md border border-th-border-subtle px-4 text-sm font-medium text-th-text-primary hover:bg-surface-subtle focus-visible:outline-2 focus-visible:outline-[var(--th-accent-primary)]"
-              >
-                <MessageSquare size={16} aria-hidden />
-                {t({ ko: "디스코드 스레드 열기", en: "Open Discord thread", ja: "Discord スレッドを開く", zh: "打开 Discord 帖子" })}
-                <ExternalLink size={14} aria-hidden />
-              </a>
-            ) : null}
-          </section>
-
-          {lastResult ? (
-            <section>
-              <h3 className="mb-1 text-sm font-semibold text-th-text-heading">
-                {t({ ko: "최근 결과", en: "Latest result", ja: "前回結果", zh: "最近结果" })}
-              </h3>
-              <ExpandableResult text={lastResult} t={t} />
-            </section>
-          ) : null}
-
-          <section className="grid grid-cols-2 gap-2">
-            <DetailField label={t({ ko: "다음 실행", en: "Next run", ja: "次回実行", zh: "下次运行" })} value={formatDateTime(routine.next_due_at, localeTag)} />
-            <DetailField label={t({ ko: "최근 실행", en: "Last run", ja: "前回実行", zh: "上次运行" })} value={formatDateTime(routine.last_run_at, localeTag)} />
-            <DetailField label={t({ ko: "담당", en: "Agent", ja: "担当", zh: "负责" })} value={routine.agent_id ?? "-"} />
-            <DetailField label={t({ ko: "대체 담당", en: "Backup agent", ja: "代替担当", zh: "备用负责" })} value={routine.fallback_agent_id ?? "-"} />
-            <DetailField label={t({ ko: "실행 방식", en: "Session", ja: "実行方式", zh: "执行方式" })} value={strategyLabel(routine.execution_strategy, t)} />
-            <DetailField label={t({ ko: "제한 시간", en: "Time limit", ja: "制限時間", zh: "时间限制" })} value={formatTimeout(routine.timeout_secs, t)} />
-            <DetailField label={t({ ko: "재시도", en: "Retries", ja: "リトライ", zh: "重试" })} value={routine.max_retries ?? "-"} />
-            {routine.pause_reason ? (
-              <DetailField label={t({ ko: "멈춘 이유", en: "Why paused", ja: "停止理由", zh: "暂停原因" })} value={routine.pause_reason} />
-            ) : null}
-          </section>
-
-          <details className="rounded-lg border border-th-border-subtle px-3">
-            <summary className="flex min-h-11 cursor-pointer select-none items-center text-sm font-medium text-th-text-secondary">
-              {t({ ko: "고급 정보", en: "Advanced", ja: "詳細情報", zh: "高级信息" })}
-            </summary>
-            <div className="space-y-2 pb-3">
-              <DetailField label={t({ ko: "스크립트", en: "Script", ja: "スクリプト", zh: "脚本" })} value={routine.script_ref} mono />
-              <DetailField label={t({ ko: "루틴 ID", en: "Routine ID", ja: "ルーチン ID", zh: "例程 ID" })} value={routine.id} mono />
-              <DetailField label={t({ ko: "스레드 ID", en: "Thread ID", ja: "スレッド ID", zh: "帖子 ID" })} value={routine.discord_thread_id ?? "-"} mono />
-              <DetailField label={t({ ko: "체크포인트", en: "Checkpoint", ja: "チェックポイント", zh: "检查点" })} value={previewValue(routine.checkpoint)} mono />
-            </div>
-          </details>
-
-          <section>
-            <h3 className="text-sm font-semibold text-th-text-heading">
-              {t({ ko: "실행 기록", en: "Run history", ja: "実行履歴", zh: "运行记录" })}
-            </h3>
-            <div className="mt-2 space-y-2">
-              {runsLoading ? (
-                <div className={emptyBox}>{t({ ko: "실행 기록을 불러오는 중…", en: "Loading runs…", ja: "実行履歴を読み込み中…", zh: "正在加载运行记录…" })}</div>
-              ) : runsError ? (
-                <div className={emptyBox}>{t({ ko: "실행 기록을 불러오지 못했어요.", en: "Runs could not be loaded.", ja: "実行履歴を読み込めませんでした。", zh: "无法加载运行记录。" })}</div>
-              ) : runs.length === 0 ? (
-                <div className={emptyBox}>{t({ ko: "아직 실행 기록이 없어요.", en: "No runs yet.", ja: "実行履歴はまだありません。", zh: "还没有运行记录。" })}</div>
-              ) : (
-                runs.slice(0, 8).map((run) => (
-                  <div key={run.id} className="rounded-lg border border-th-border-subtle px-3 py-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <SurfaceMetaBadge tone={runStatusTone(run.status)}>
-                        {runStatusLabel(run.status, t)?.replace(/^(최근|Last|前回|最近)\s?/, "") ?? run.status}
-                      </SurfaceMetaBadge>
-                      <span className="text-xs tabular-nums text-th-text-muted">{formatDateTime(run.started_at, localeTag)}</span>
-                    </div>
-                    {run.finished_at ? (
-                      <div className="mt-2 text-xs leading-5 text-th-text-muted">
-                        {t({ ko: "끝남", en: "Finished", ja: "終了", zh: "结束" })} {formatDateTime(run.finished_at, localeTag)}
-                      </div>
-                    ) : null}
-                    <RoutineRunResultPayload error={run.error} result={run.result_json} t={t} />
-                  </div>
-                ))
-              )}
-            </div>
-          </section>
-        </div>
-      ) : null}
-    </Drawer>
-  );
+/** Wall clock for relative times and the timeline; ticks every 30s. */
+function useNow(intervalMs = 30_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(timer);
+  }, [intervalMs]);
+  return now;
 }
 
 interface RoutinesTimelineWidgetProps {
@@ -1046,21 +88,57 @@ interface RoutinesTimelineWidgetProps {
 
 const COMPACT_ROW_LIMIT = 5;
 
-export function RoutinesTimelineWidget({
-  t,
-  localeTag,
-  language,
-  compact = false,
-}: RoutinesTimelineWidgetProps) {
+type ReturnTarget = { element: HTMLElement | null; routineId: string | null };
+
+function RoutinesListSkeleton({ t }: { t: TFunction }) {
+  return (
+    <Loading
+      label={t({ ko: "루틴 불러오는 중", en: "Loading routines", ja: "ルーチンを読み込み中", zh: "正在加载例程" })}
+      data-testid="routines-loading"
+      className="flex min-w-0 flex-col gap-7"
+    >
+      <div className="flex flex-col gap-2">
+        <Skeleton width={64} height={8} line={16} />
+        <div className="flex flex-col gap-3 rounded-[var(--r-md)] border border-[var(--line-soft)] bg-[var(--bg-2)] px-4 py-3.5">
+          <Skeleton width={96} height={8} line={16} />
+          <Skeleton height={116} radius={6} />
+          <Skeleton width={220} height={10} line={20} />
+        </div>
+      </div>
+      <ul className="m-0 flex list-none flex-col gap-3 p-0">
+        {[132, 104, 148, 116, 124].map((width) => (
+          <li key={width} className="flex items-center gap-3 py-2">
+            <Skeleton width={8} height={8} radius={2} />
+            <span className="flex min-w-0 flex-1 flex-col gap-1">
+              <Skeleton width={width} height={10} line={20} />
+              <Skeleton width={width + 48} height={8} line={16} />
+            </span>
+            <Skeleton width={30} height={18} radius={9} />
+          </li>
+        ))}
+      </ul>
+    </Loading>
+  );
+}
+
+export function RoutinesTimelineWidget({ t, localeTag, language, compact = false }: RoutinesTimelineWidgetProps) {
   const [filter, setFilter] = useState<RoutineFilter>("all");
   const [routines, setRoutines] = useState<RoutineRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [selectedRoutineId, setSelectedRoutineId] = useState<string | null>(null);
+  const [overlap, setOverlap] = useState<RoutineMarker[] | null>(null);
   const [selectedRuns, setSelectedRuns] = useState<RoutineRunRecord[]>([]);
   const [runsLoading, setRunsLoading] = useState(false);
   const [runsError, setRunsError] = useState(false);
+  const now = useNow();
+  const isMobile = useIsMobile();
+  const split = !compact && !isMobile;
+  const listRef = useRef<HTMLUListElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const returnTarget = useRef<ReturnTarget>({ element: null, routineId: null });
+  const pendingFocus = useRef<ReturnTarget | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -1091,14 +169,9 @@ export function RoutinesTimelineWidget({
     const failed = (routine: RoutineRecord) => runStatusTone(routine.last_run?.status) === "danger";
     return [...chronological.filter(failed), ...chronological.filter((routine) => !failed(routine))].slice(0, COMPACT_ROW_LIMIT);
   }, [compact, routines]);
-  const activeCount = useMemo(
-    () => routines.filter((routine) => routine.status === "enabled").length,
-    [routines],
-  );
-  const nextRoutine = sortRoutinesChronologically(routines).find((routine) => routine.next_due_at);
-  const selectedRoutine = selectedRoutineId
-    ? routines.find((routine) => routine.id === selectedRoutineId) ?? null
-    : null;
+  const activeCount = routines.filter((routine) => routine.status === "enabled").length;
+  const markers = useMemo(() => routineTimelineMarkers(routines, now), [routines, now]);
+  const selectedRoutine = selectedRoutineId ? routines.find((routine) => routine.id === selectedRoutineId) ?? null : null;
   const guildId = useDiscordGuildId(
     routines.find((routine) => isDiscordSnowflake(routine.discord_thread_id))?.discord_thread_id ?? null,
   );
@@ -1132,55 +205,282 @@ export function RoutinesTimelineWidget({
     };
   }, [selectedRoutineId]);
 
+  // After the detail closes, focus goes back to what opened it: the row or marker, else that routine's row,
+  // else the list heading. Runs after the sheet's own focus restore so it has the last word.
+  const detailOpen = Boolean(selectedRoutine) || Boolean(overlap);
+  useEffect(() => {
+    if (detailOpen || !pendingFocus.current) return undefined;
+    const target = pendingFocus.current;
+    pendingFocus.current = null;
+    const timer = window.setTimeout(() => {
+      const element = target.element?.isConnected && target.element.getClientRects().length ? target.element : null;
+      const row = target.routineId
+        ? listRef.current?.querySelector<HTMLElement>(`[data-row="${CSS.escape(target.routineId)}"]`)
+        : null;
+      (element ?? row ?? headingRef.current)?.focus();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [detailOpen]);
+
+  // J/K from the page background (nothing focused) enter the list at the selected row, else the first one.
+  useEffect(() => {
+    if (compact) return undefined;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      if ((key !== "j" && key !== "k") || event.altKey || event.ctrlKey || event.metaKey || event.defaultPrevented) return;
+      if (document.activeElement && document.activeElement !== document.body) return;
+      const list = listRef.current;
+      const first = list?.querySelector<HTMLElement>("[data-row]");
+      if (!list || !first) return;
+      event.preventDefault();
+      const selected = selectedRoutineId ? list.querySelector<HTMLElement>(`[data-row="${CSS.escape(selectedRoutineId)}"]`) : null;
+      (selected ?? first).focus();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [compact, selectedRoutineId]);
+
+  const openRoutine = (routineId: string, trigger: HTMLElement) => {
+    returnTarget.current = { element: trigger, routineId };
+    setOverlap(null);
+    setSelectedRoutineId(routineId);
+  };
+  const openCluster = (group: RoutineMarker[], trigger: HTMLElement) => {
+    returnTarget.current = { element: trigger, routineId: null };
+    setSelectedRoutineId(null);
+    setOverlap(group);
+  };
+  const closeDetail = () => {
+    pendingFocus.current = returnTarget.current;
+    setSelectedRoutineId(null);
+    setOverlap(null);
+  };
+
+  const rows: RoutineRowView[] = sortedRoutines.map((routine) => {
+    const enabled = routine.status === "enabled";
+    const due = parseTime(routine.next_due_at);
+    const title = describeRoutinePurpose(routine, t);
+    const schedule = describeRoutineSchedule(routine.schedule, language);
+    const nextText = !enabled
+      ? statusLabel(routine, t)
+      : due != null
+        ? formatScheduleAbsolute(due, now, localeTag, t)
+        : t({ ko: "예정 없음", en: "Not scheduled", ja: "予定なし", zh: "无计划" });
+    const latestStatus = runStatusLabel(routine.last_run?.status, t);
+    const nextPhrase = enabled && due != null ? `${t({ ko: "다음", en: "next", ja: "次回", zh: "下次" })} ${nextText}` : nextText;
+    return {
+      id: routine.id,
+      title,
+      slug: routine.name,
+      schedule,
+      agent: routine.agent_id ?? null,
+      tone: statusTone(routine),
+      paused: !enabled,
+      nextText,
+      relative: enabled && due != null ? formatRelative(due, localeTag, now) : null,
+      latestStatus,
+      latestTone: runStatusTone(routine.last_run?.status),
+      threadUrl: threadUrlFor(routine),
+      enabled,
+      label: `${title} (${routine.name}), ${schedule}, ${nextPhrase}${latestStatus ? `, ${latestStatus}` : ""}`,
+      threadLabel: t({
+        ko: `${routine.name} 디스코드 스레드 열기`,
+        en: `Open ${routine.name} Discord thread`,
+        ja: `${routine.name} の Discord スレッドを開く`,
+        zh: `打开 ${routine.name} 的 Discord 帖子`,
+      }),
+      switchLabel: t({
+        ko: `${routine.name} 자동 실행 ${enabled ? "켜짐" : "꺼짐"}`,
+        en: `${routine.name} automatic runs ${enabled ? "on" : "off"}`,
+        ja: `${routine.name} 自動実行 ${enabled ? "オン" : "オフ"}`,
+        zh: `${routine.name} 自动运行${enabled ? "开启" : "关闭"}`,
+      }),
+      switchHint: t({
+        ko: "대시보드에서는 상태만 보여요",
+        en: "The dashboard only shows this state",
+        ja: "ダッシュボードでは状態のみ表示します",
+        zh: "仪表板仅显示此状态",
+      }),
+    };
+  });
+
+  const detailBody = selectedRoutine ? (
+    <RoutineDetailBody
+      routine={selectedRoutine}
+      threadUrl={threadUrlFor(selectedRoutine)}
+      runs={selectedRuns}
+      runsLoading={runsLoading}
+      runsError={runsError}
+      t={t}
+      localeTag={localeTag}
+      language={language}
+      now={now}
+    />
+  ) : null;
+
+  const drawer = split ? null : (
+    <Drawer
+      open={detailOpen}
+      onClose={closeDetail}
+      width="min(560px, 100vw)"
+      closeButtonClassName="min-h-11 min-w-11"
+      title={
+        selectedRoutine
+          ? routineDetailTitle(selectedRoutine, t)
+          : t({
+              ko: `가까운 실행 ${overlap?.length ?? 0}개`,
+              en: `${overlap?.length ?? 0} nearby runs`,
+              ja: `近い実行 ${overlap?.length ?? 0} 件`,
+              zh: `${overlap?.length ?? 0} 次相近运行`,
+            })
+      }
+    >
+      {detailBody ??
+        (overlap ? (
+          <RoutineOverlapList
+            markers={overlap}
+            now={now}
+            localeTag={localeTag}
+            t={t}
+            onPick={(marker) => {
+              setOverlap(null);
+              setSelectedRoutineId(marker.routine.id);
+              returnTarget.current = { ...returnTarget.current, routineId: marker.routine.id };
+            }}
+          />
+        ) : null)}
+    </Drawer>
+  );
+
+  if (compact) {
+    return (
+      <>
+        <HomeRoutinesTimeline
+          t={t}
+          loading={loading}
+          error={error}
+          rows={rows}
+          listRef={listRef}
+          onOpen={openRoutine}
+          onRefresh={() => setReloadKey((value) => value + 1)}
+        />
+        {drawer}
+      </>
+    );
+  }
+
+  const refreshLabel = t({ ko: "루틴 새로고침", en: "Refresh routines", ja: "ルーチンを再読み込み", zh: "刷新例程" });
+
   return (
-    <>
-      <HomeRoutinesTimeline
-        t={t}
-        compact={compact}
-        loading={loading}
-        error={error}
-        count={routines.length}
-        activeCount={activeCount}
-        nextRun={nextRoutine ? formatDateTime(nextRoutine.next_due_at, localeTag) : "-"}
-        filters={FILTERS.map((item) => ({
-          id: item,
-          label: filterLabel(item, t),
-          active: filter === item,
-          onSelect: () => setFilter(item),
-        }))}
-        rows={sortedRoutines.map((routine) => {
-          const title = describeRoutinePurpose(routine, t);
-          return {
-            id: routine.id,
-            title,
-            slug: routine.name,
-            status: statusLabel(routine, t),
-            tone: statusTone(routine),
-            latestStatus: runStatusLabel(routine.last_run?.status, t),
-            latestTone: runStatusTone(routine.last_run?.status),
-            nextRun: formatDateTime(routine.next_due_at, localeTag),
-            relative: formatRelative(routine.next_due_at, localeTag) ?? t({ ko: "수동", en: "Manual", ja: "手動", zh: "手动" }),
-            schedule: describeRoutineSchedule(routine.schedule, language),
-            agent: routine.agent_id ?? null,
-            lastRun: formatDateTime(routine.last_run_at, localeTag),
-            threadUrl: threadUrlFor(routine),
-            openLabel: t({ ko: `${routine.name} 상세 열기`, en: `Open ${routine.name} details`, ja: `${routine.name} の詳細を開く`, zh: `打开 ${routine.name} 详情` }),
-            onOpen: () => setSelectedRoutineId(routine.id),
-          };
-        })}
-        onRefresh={() => setReloadKey((value) => value + 1)}
-      />
-      <RoutineDetailDrawer
-        routine={selectedRoutine}
-        threadUrl={threadUrlFor(selectedRoutine)}
-        runs={selectedRuns}
-        runsLoading={runsLoading}
-        runsError={runsError}
-        t={t}
-        localeTag={localeTag}
-        language={language}
-        onClose={() => setSelectedRoutineId(null)}
-      />
-    </>
+    <div className="flex min-w-0 flex-col gap-5" data-testid="routines-timeline" aria-busy={loading}>
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0 max-w-full flex-auto" data-testid="routines-filter-controls">
+          <SegmentedControl
+            variant="tray"
+            size="sm"
+            aria-label={t({ ko: "상태로 거르기", en: "Filter by status", ja: "状態で絞り込む", zh: "按状态筛选" })}
+            value={filter}
+            onChange={(value) => setFilter(value)}
+            options={ROUTINE_FILTERS.map((item) => ({ value: item, label: filterLabel(item, t) }))}
+          />
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {loading && routines.length === 0 ? null : (
+            <span className="text-xs tabular-nums text-[var(--fg-muted)]" data-testid="routines-active-count">
+              {t({ ko: "활성", en: "Active", ja: "有効", zh: "活跃" })} {activeCount}/{routines.length}
+            </span>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label={refreshLabel}
+            title={refreshLabel}
+            icon={<RefreshCw size={15} aria-hidden className={loading ? "motion-safe:animate-spin" : ""} />}
+            onClick={() => setReloadKey((value) => value + 1)}
+          />
+        </div>
+      </div>
+
+      <div
+        className={
+          split
+            ? "grid min-w-0 grid-cols-[minmax(0,1fr)_clamp(300px,36%,420px)] items-start gap-6"
+            : "flex min-w-0 flex-col"
+        }
+      >
+        <div className="@container/routines flex min-w-0 flex-col gap-7">
+          {error ? (
+            <div role="alert" className="flex flex-col items-start gap-2 py-8 text-sm text-[var(--fg-muted)]">
+              {t({
+                ko: "루틴 목록을 불러오지 못했어요. 새로고침해 주세요.",
+                en: "Routines could not be loaded. Try refreshing.",
+                ja: "ルーチン一覧を読み込めませんでした。再読み込みしてください。",
+                zh: "无法加载例程列表。请刷新重试。",
+              })}
+              <Button variant="secondary" size="sm" icon={<RefreshCw size={14} aria-hidden />} onClick={() => setReloadKey((value) => value + 1)}>
+                {t({ ko: "다시 불러오기", en: "Try again", ja: "再読み込み", zh: "重试" })}
+              </Button>
+            </div>
+          ) : loading && routines.length === 0 ? (
+            <RoutinesListSkeleton t={t} />
+          ) : routines.length === 0 ? (
+            <EmptyState
+              data-testid="routines-empty"
+              icon={<CalendarDays size={18} aria-hidden />}
+              title={t({ ko: "표시할 루틴이 없어요.", en: "No routines to show.", ja: "表示するルーチンがありません。", zh: "没有可显示的例程。" })}
+              text={
+                filter === "all"
+                  ? t({
+                      ko: "에이전트에게 정기 작업을 맡기면 이곳에 반복 예약이 나타나요.",
+                      en: "Routines appear here once an agent takes on recurring work.",
+                      ja: "エージェントに定期作業を任せるとここに表示されます。",
+                      zh: "让智能体承担定期工作后，例程会显示在这里。",
+                    })
+                  : t({ ko: "이 상태의 루틴이 없어요.", en: "No routines have this status.", ja: "この状態のルーチンはありません。", zh: "没有此状态的例程。" })
+              }
+              action={
+                filter === "all" ? undefined : (
+                  <Button variant="secondary" size="sm" onClick={() => setFilter("all")}>
+                    {filterLabel("all", t)}
+                  </Button>
+                )
+              }
+            />
+          ) : (
+            <>
+              <RoutineRunsTimeline
+                markers={markers}
+                now={now}
+                t={t}
+                localeTag={localeTag}
+                isMobile={isMobile}
+                onOpen={openRoutine}
+                onOpenCluster={openCluster}
+              />
+              <section className="flex min-w-0 flex-col gap-2" aria-labelledby="routines-list-heading">
+                <h2
+                  id="routines-list-heading"
+                  ref={headingRef}
+                  tabIndex={-1}
+                  className="m-0 flex items-center gap-1.5 text-xs font-medium leading-4 text-[var(--fg-muted)] outline-none"
+                >
+                  <Repeat2 size={13} aria-hidden />
+                  {t({ ko: "반복 예약", en: "Recurring schedules", ja: "繰り返し予約", zh: "重复计划" })}
+                </h2>
+                <RoutineScheduleList ref={listRef} rows={rows} selectedId={split ? selectedRoutineId : null} onOpen={openRoutine} />
+              </section>
+            </>
+          )}
+        </div>
+        {split ? (
+          <div className="sticky top-0 flex max-h-[calc(100dvh-9rem)] min-h-[18rem] min-w-0 flex-col">
+            <RoutineDetailPane routine={selectedRoutine} t={t} onClose={closeDetail}>
+              {detailBody}
+            </RoutineDetailPane>
+          </div>
+        ) : null}
+      </div>
+      {drawer}
+    </div>
   );
 }
