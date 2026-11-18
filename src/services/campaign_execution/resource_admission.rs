@@ -2,6 +2,11 @@ use std::path::Path;
 use std::process::{Output, Stdio};
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
+use tokio::process::Child;
+
+use crate::services::process::{configure_child_process_group, kill_pid_tree};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResourceAdmission {
     Ready,
@@ -24,11 +29,53 @@ pub(super) async fn wait_for_headroom(
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
-    match tokio::time::timeout(wait, command.output()).await {
+    configure_child_process_group(command.as_std_mut());
+    let Ok(child) = command.spawn() else {
+        return ResourceAdmission::Unavailable;
+    };
+    let mut probe = HeadroomProbe(child);
+    match tokio::time::timeout(wait, probe.output()).await {
         Ok(Ok(output)) => classify(&output),
         Ok(Err(_)) => ResourceAdmission::Unavailable,
-        Err(_) => ResourceAdmission::WaitingForHeadroom,
+        Err(_) => {
+            probe.terminate();
+            let _ = probe.0.wait().await;
+            ResourceAdmission::WaitingForHeadroom
+        }
+    }
+}
+
+struct HeadroomProbe(Child);
+
+impl HeadroomProbe {
+    async fn output(&mut self) -> std::io::Result<Output> {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let out = self.0.stdout.as_mut().expect("piped headroom stdout");
+        let err = self.0.stderr.as_mut().expect("piped headroom stderr");
+        // Keep the leader unreaped while descendants may still hold its pipes.
+        tokio::try_join!(out.read_to_end(&mut stdout), err.read_to_end(&mut stderr))?;
+        let status = self.0.wait().await?;
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
+    }
+
+    fn terminate(&mut self) {
+        if let Some(pid) = self.0.id() {
+            kill_pid_tree(pid);
+        }
+    }
+}
+
+impl Drop for HeadroomProbe {
+    fn drop(&mut self) {
+        self.terminate();
     }
 }
 

@@ -344,6 +344,122 @@ async fn a_stop_committed_while_the_worker_waits_for_the_campaign_row_blocks_ini
 
 #[cfg(unix)]
 #[tokio::test]
+async fn m4_regression_a_late_launch_keeps_the_finish_fence_at_the_same_version_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    create_run(&pool).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut worker = HostWorker::open_observed(
+        tmp.path(),
+        "campaign",
+        "a",
+        identity(1),
+        fake_resources(tmp.path()),
+        domain::now(),
+    )
+    .unwrap();
+    let (binding, action_id) = pend_launch(&pool, &mut worker).await;
+    let launch = worker
+        .start_action(
+            &pool,
+            &action_id,
+            "payload".into(),
+            Duration::from_secs(4),
+            domain::now(),
+            |_| {
+                Ok(Initiated::Started {
+                    receipt: "late-receipt".into(),
+                    process: None,
+                    handle: (),
+                })
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(launch.handle, Some(()));
+    send(
+        &pool,
+        "finish-stop",
+        Command::RequestStop {
+            expected_revision: 1,
+            expected_run: "run".into(),
+            mode: StopMode::FinishStage,
+        },
+    )
+    .await;
+    let first = worker.poll(&pool, domain::now()).await.unwrap();
+    assert!(
+        matches!(&first.turn, WorkerTurn::Reconcile { action_id: pending } if pending == &action_id)
+    );
+    let version = first.fence.unwrap().acknowledgement.control_version;
+    let stopped = store::get(&pool, "campaign").await.unwrap().unwrap();
+    let run = stopped.run.as_ref().unwrap();
+    assert!(run.stop.as_ref().unwrap().finish_grants.is_empty());
+    let execution = fsm::execution(&stopped, &binding.attempt_id);
+    let verification_id = &execution.start_executions[0];
+    let v = &run.verifications[verification_id];
+    assert!(super::super::stage_fsm::validate_verification_start(&stopped, v, &binding).is_err());
+
+    send(
+        &pool,
+        "late-start",
+        Command::ObserveAction {
+            action_id: action_id.clone(),
+            binding: Box::new(binding.clone()),
+            observation: ActionObservation::Started {
+                receipt: "late-receipt".into(),
+            },
+        },
+    )
+    .await;
+    let after = worker.poll(&pool, domain::now()).await.unwrap();
+    assert_eq!(
+        after.fence.unwrap().acknowledgement.control_version,
+        version
+    );
+    let state = store::get(&pool, "campaign").await.unwrap().unwrap();
+    let run = state.run.as_ref().unwrap();
+    let grants = &run.stop.as_ref().unwrap().finish_grants;
+    assert_eq!(
+        run.actions[&action_id].initiation_receipt.as_deref(),
+        Some("late-receipt")
+    );
+    assert_eq!(
+        run.actions
+            .values()
+            .filter(|a| a.kind == ActionKind::Launch)
+            .count(),
+        1
+    );
+    assert!(
+        grants.iter().any(|g| g.execution_id == *verification_id
+            && g.phase_actions.contains(&v.phases[0].action_id))
+    );
+    send(
+        &pool,
+        "late-session-alive",
+        Command::ObserveSession {
+            identity: binding.session.clone(),
+            observation: SessionObservation::Alive {
+                observed_at: domain::now(),
+            },
+        },
+    )
+    .await;
+    let observed = store::get(&pool, "campaign").await.unwrap().unwrap();
+    let observed_v = &observed.run.as_ref().unwrap().verifications[verification_id];
+    assert!(matches!(
+        super::super::stage_fsm::validate_verification_start(&observed, observed_v, &binding)
+            .unwrap()
+            .source,
+        super::super::verification_run::AuthoritySource::FinishPlan { .. }
+    ));
+    pool.close().await;
+    db.drop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn a_retained_phase_result_is_committed_once_and_then_acknowledged_pg() {
     use crate::services::campaign_execution::{
         evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission},
