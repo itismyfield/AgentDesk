@@ -131,6 +131,7 @@ fn child_run_arbitrary_refusal_does_not_grant_legacy_body_ownership() {
 
 #[test]
 fn ch3fix_owner_snapshot_remains_legacy_across_the_boundary() {
+    use crate::test_support::wait::{WAIT_CAP, join_within};
     use std::sync::{Arc, Barrier};
     let (boot, candidate, run) = fixture();
     assert!(candidate.release_child_run(42, run.clone()));
@@ -156,7 +157,7 @@ fn ch3fix_owner_snapshot_remains_legacy_across_the_boundary() {
         }
     });
     let owner = child.body_owner();
-    worker.join().unwrap();
+    join_within(worker, WAIT_CAP);
     assert_eq!(owner, Some(false));
     assert_eq!(child.body_owner(), Some(false));
     *candidate.lock() = Adoption::Committed;

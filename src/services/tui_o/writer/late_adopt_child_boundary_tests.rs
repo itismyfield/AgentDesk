@@ -136,18 +136,13 @@ async fn legacy_once(f: &Fixture) {
     assert!(f.harness.port.posts().is_empty());
 }
 async fn ready(f: &Fixture) {
-    for _ in 0..24 {
-        tokio::time::advance(Duration::from_secs(5)).await;
-        spin().await;
-        if f.ready.accepts(CHANNEL) {
-            return;
-        }
-    }
-    panic!(
+    assert!(
+        drove_until(|| f.ready.accepts(CHANNEL)).await,
         "boundary did not activate O: {:?}",
         f.io.base.alarms.0.lock().unwrap()
     );
 }
+
 async fn boundary_case(case: &str) {
     let f = Fixture::new(false);
     let (_boot, candidate) = super::childheld::child_boot(&f);
@@ -482,14 +477,17 @@ impl LegacyView for DebtProbe {
         self.base.epoch(channel)
     }
 }
-async fn drive_until(mut done: impl FnMut() -> bool) {
+async fn drove_until(mut done: impl FnMut() -> bool) -> bool {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !done() && std::time::Instant::now() < deadline {
         tokio::time::advance(Duration::from_secs(5)).await;
         tokio::task::spawn_blocking(|| ()).await.unwrap();
         spin().await;
     }
-    assert!(done(), "test completion was not observed");
+    done()
+}
+async fn drive_until(done: impl FnMut() -> bool) {
+    assert!(drove_until(done).await, "test completion was not observed");
 }
 async fn no_init(f: &Fixture) {
     let reads = f.io.log.reads.load(Ordering::SeqCst);
