@@ -896,9 +896,8 @@ async fn an_earlier_readiness_due_rearms_past_a_later_awaited_deadline() {
     assert_eq!(after["items"], json!([]), "{after}");
 }
 
-/// A leaf reserved just before its original's due meets that due at its first key: past it the
-/// payload commit refuses, no key is sent and the leaf's own proof refuses the input for good;
-/// a first key before it delivers once and the due refuses nothing after.
+/// A leaf reserved before its original's due meets it at the first key: past it no key and the
+/// leaf's own proof refuses the input; before it one delivery and no refusal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reserved_leaf_meets_its_originals_due_at_the_first_key() {
     let _root = TestRuntimeRootGuard::new();

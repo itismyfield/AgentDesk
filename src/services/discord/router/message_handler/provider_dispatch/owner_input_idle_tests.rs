@@ -2241,9 +2241,8 @@ async fn a_boot_recovery_hands_the_kept_front_to_the_owner_drive() {
     assert!(handed, "the recovered owner's drive granted its kept front");
 }
 
-/// A boot whose kept front's readiness due passed while the daemon was down refuses it in its
-/// recovery, before the drive it then wakes could hand the front on: the queue empties, one
-/// body-free refusal and one notice stay, and the front's origin gets its Failed receipt.
+/// A boot refuses a kept front whose readiness due passed while down, before its woken drive hands
+/// it on: empty queue, one body-free refusal, one notice and the origin's Failed receipt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_boot_recovery_refuses_an_expired_held_front_before_its_drive_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
