@@ -28,14 +28,14 @@ NextBody == /\ ready /\ nextO = 0 /\ nextO' = 1
             /\ UNCHANGED <<verified, authority, owner, busy, legacy, oldO, boots, boundary, ready, live>>
 OldOBody == /\ owner = "o" /\ busy /\ oldO = 0 /\ oldO' = 1
             /\ UNCHANGED <<verified, authority, owner, busy, legacy, nextO, boots, boundary, ready, live>>
-BootAgain == /\ (Fix = "before" \/ Mut = "boot") /\ boundary = 0 /\ boots < 3
+BootAgain == /\ (Fix = "before" \/ Mut = "boot" \/ ~Eligible) /\ boundary = 0 /\ boots < 3
              /\ boots' = boots + 1
              /\ UNCHANGED <<verified, authority, owner, busy, legacy, oldO, nextO, boundary, ready, live>>
 Next == Normalize \/ LegacyBody \/ StopHost \/ EndRun \/ ObserveBoundary \/ RestartAtBoundary \/ Activate \/ NextBody \/ OldOBody \/ BootAgain
 Spec == Init /\ [][Next]_vars /\ WF_vars(Normalize) /\ WF_vars(LegacyBody)
         /\ WF_vars(EndRun) /\ WF_vars(ObserveBoundary) /\ WF_vars(RestartAtBoundary)
         /\ WF_vars(Activate) /\ WF_vars(NextBody)
-NoBootChurn == boots <= boundary + 1
+NoBootChurn == Eligible => boots <= boundary + 1
 OneOwner == legacy <= 1 /\ oldO = 0 /\ nextO <= 1
 VerifiedOnly == ~Eligible => owner # "legacy"
 CurrentRunAnswered == Eligible => <>(legacy = 1)
