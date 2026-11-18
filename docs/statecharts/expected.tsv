@@ -779,6 +779,10 @@ input-single-path/ReservedIdEnqueueFixed.cfg	ReservedIdEnqueue	-	-
 input-single-path/ReservedIdEnqueueGuardOnly.cfg	ReservedIdEnqueue	NoLostReturn	EventuallyExecuted
 input-single-path/ReservedIdEnqueueLive.cfg	ReservedIdEnqueue	-	-
 input-single-path/ReservedIdEnqueueReleased.cfg	ReservedIdEnqueue	-	-
+input-single-path/ThreadIngressT2aBoot.cfg	ThreadIngress	-	-
+input-single-path/ThreadIngressT2aCold.cfg	ThreadIngress	-	-
+input-single-path/ThreadIngressT2aLive.cfg	ThreadIngress	-	-
+input-single-path/ThreadIngressT2aRemote.cfg	ThreadIngress	-	-
 intake-consent/IntakeConsentBookkeeping.cfg	IntakeConsent	RollbackExactAndBookkeeping	-
 intake-consent/IntakeConsentCurrent.cfg	IntakeConsent	-	-
 intake-consent/IntakeConsentD1Public.cfg	IntakeConsent	NoUnauthorizedIssue,NoEffectsThenRollback	-
@@ -1476,7 +1480,3 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
-input-single-path/ThreadIngressT2aBoot.cfg	ThreadIngress	-	-
-input-single-path/ThreadIngressT2aCold.cfg	ThreadIngress	-	-
-input-single-path/ThreadIngressT2aLive.cfg	ThreadIngress	-	-
-input-single-path/ThreadIngressT2aRemote.cfg	ThreadIngress	-	-
