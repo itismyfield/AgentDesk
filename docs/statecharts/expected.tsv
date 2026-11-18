@@ -1472,3 +1472,7 @@ input-single-path/NativeTerminalNoStampRecheck.cfg	NativeInputTerminal	NoStaleTe
 input-single-path/NativeTerminalNoStoredOverride.cfg	NativeInputTerminal	NoForeignTerminalBarrier	ClosedExecutionEventuallySettles
 input-single-path/NativeTerminalPermanentSavedUnread.cfg	NativeInputTerminal	-	ClosedExecutionEventuallySettles
 input-single-path/NativeTerminalPermanentUnread.cfg	NativeInputTerminal	-	ClosedExecutionEventuallySettles
+input-single-path/NativeTerminalFixedStoredBarrierRace.cfg	NativeInputTerminal	-	-
+input-single-path/NativeTerminalFixedStoredStampRace.cfg	NativeInputTerminal	-	-
+input-single-path/NativeTerminalNoStoredBarrierRecheck.cfg	NativeInputTerminal	NoForeignBarrierBypass,NoTerminalEvidenceFreeDelete	-
+input-single-path/NativeTerminalNoStoredStampRecheck.cfg	NativeInputTerminal	NoStaleTerminalCommit	-

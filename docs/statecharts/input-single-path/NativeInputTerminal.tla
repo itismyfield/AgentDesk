@@ -4,15 +4,22 @@ CONSTANTS Scenario, ControlKind
 VARIABLE terminal
 TerminalVars == <<vars, terminal>>
 StableBase == <<phase, role, pin, prepared, anyKey, original, source, restored, admitted, review>>
-Interrupt == Scenario \in {"Interrupt", "StoredInterrupt", "StoredBarrierMismatch"}
+Stored == Scenario \in {"StoredInterrupt", "StoredBarrierMismatch", "StoredStampRace", "StoredBarrierRace"}
+Interrupt == Scenario = "Interrupt" \/ Stored
+StampRaced == Scenario \in {"StampRace", "StoredStampRace"}
 Partial == Scenario = "Partial"
 Raw == ~Interrupt
 ScopeOK == terminal.scope = "Exact"
 BeforeInterrupt == Mode \in {"BeforeInterrupt", "NoPrecedence"}
 BeforeRaw == Mode = "BeforeRaw"
+\* The result CAS compares the barrier stored now, never the one the candidate observed.
+BarrierOK == IF Mode = "NoStoredBarrierRecheck" THEN terminal.proofBarrierMatch
+             ELSE terminal.barrierRowMatches
 OverridePermitted == Interrupt /\ terminal.proofReady /\ terminal.strict /\ ScopeOK
                      /\ terminal.proofScope = "Exact" /\ Mode # "NoStoredOverride"
-                     /\ (terminal.barrierRowMatches \/ Mode = "BareStoredOverride")
+                     /\ (BarrierOK \/ Mode = "BareStoredOverride")
+BoundaryPolicy == Scenario = "StoredBarrierMismatch"
+                  \/ (Scenario = "StoredBarrierRace" /\ ~terminal.barrierRowMatches)
 EffectiveBarrier == terminal.barrier /\ ~OverridePermitted
 NativeMode == terminal.proofKind \in {"Interrupt", "Raw"}
 TerminalInit == /\ phase = "Unknown" /\ role = "Primary" /\ pin = "Primary"
@@ -24,8 +31,9 @@ TerminalInit == /\ phase = "Unknown" /\ role = "Primary" /\ pin = "Primary"
                      ended |-> Scenario # "Unconfirmed", whole |-> ~Partial,
                      strict |-> Scenario # "Mention" /\ ~Partial,
                      classified |-> FALSE, probed |-> FALSE,
-                     barrier |-> Scenario \in {"StoredInterrupt", "StoredBarrierMismatch"},
+                     barrier |-> Stored,
                      barrierRowMatches |-> Scenario # "StoredBarrierMismatch",
+                     proofBarrierMatch |-> FALSE,
                      proofKind |-> "None", proofReady |-> FALSE, proofScope |-> "None",
                      version |-> 0, proofVersion |-> 0, commitVersion |-> 0,
                      captureCursor |-> 1, terminalEnd |-> 2,
@@ -44,6 +52,7 @@ InterruptTerminalRow == /\ Interrupt /\ terminal.booted /\ ~terminal.classified
                              !.proofKind = IF BeforeInterrupt THEN "None" ELSE "Interrupt",
                              !.proofReady = ~BeforeInterrupt,
                              !.proofScope = terminal.scope,
+                             !.proofBarrierMatch = terminal.barrierRowMatches,
                              !.proofVersion = terminal.version]
                         /\ UNCHANGED result
 
@@ -62,10 +71,15 @@ RawEOFCloser == /\ Raw /\ terminal.booted /\ terminal.readable /\ ~terminal.prob
                         !.captureCursor = IF accepted /\ Mode = "AdvanceCapture" THEN 2 ELSE @]
                 /\ UNCHANGED result
 
-MetadataRace == /\ Scenario = "StampRace" /\ terminal.proofReady /\ ~terminal.changed
+MetadataRace == /\ StampRaced /\ terminal.proofReady /\ ~terminal.changed
                 /\ result = "None"
                 /\ terminal' = [terminal EXCEPT !.version = 1, !.changed = TRUE]
                 /\ UNCHANGED result
+\* The stored barrier stops being the one the supersession candidate matched.
+BarrierRace == /\ Scenario = "StoredBarrierRace" /\ terminal.proofReady /\ ~terminal.changed
+               /\ result = "None"
+               /\ terminal' = [terminal EXCEPT !.barrierRowMatches = FALSE, !.changed = TRUE]
+               /\ UNCHANGED result
 Reobserve == /\ terminal.booted /\ terminal.proofReady
              /\ terminal.proofVersion # terminal.version /\ Mode # "NoStampRecheck"
              /\ result = "None"
@@ -75,7 +89,7 @@ Reobserve == /\ terminal.booted /\ terminal.proofReady
 
 NativeTerminalCommit == /\ terminal.booted /\ terminal.proofReady /\ ~EffectiveBarrier
                         /\ result = "None"
-                        /\ (Scenario # "StampRace" \/ terminal.changed)
+                        /\ ((~StampRaced /\ Scenario # "StoredBarrierRace") \/ terminal.changed)
                         /\ (Scenario # "BootBefore" \/ terminal.crashed)
                         /\ (terminal.proofVersion = terminal.version \/ Mode = "NoStampRecheck")
                         /\ result' = IF terminal.proofKind = "Interrupt" THEN "Cancelled" ELSE "Executed"
@@ -96,11 +110,11 @@ ExistingControl == /\ ControlKind # "None" /\ ScopeOK /\ terminal.booted
                         !.committedAuthority = TRUE, !.commitVersion = terminal.version]
 
 \* An invalid tail is no native close: the existing E/no-terminal notice policy owns this branch.
-ExistingEndNotice == /\ Scenario \in {"Partial", "Mention", "StoredBarrierMismatch"}
+ExistingEndNotice == /\ (Scenario \in {"Partial", "Mention"} \/ BoundaryPolicy)
                      /\ (terminal.probed \/ terminal.classified) /\ terminal.ended /\ ScopeOK
                      /\ terminal.booted /\ terminal.readable /\ result = "None"
-                     /\ (~terminal.proofReady \/ Scenario = "StoredBarrierMismatch")
-                     /\ result' = IF Scenario = "StoredBarrierMismatch" THEN "ExistingBoundaryAck" ELSE "ExistingEndNotice"
+                     /\ (~terminal.proofReady \/ BoundaryPolicy)
+                     /\ result' = IF BoundaryPolicy THEN "ExistingBoundaryAck" ELSE "ExistingEndNotice"
                      /\ terminal' = [terminal EXCEPT !.commits = @ + 1,
                           !.committedKind = "ExistingEndNotice", !.committedScope = "Exact",
                           !.committedAuthority = TRUE, !.commitVersion = terminal.version]
@@ -130,7 +144,7 @@ RepairRead == /\ Scenario \in {"RetryIO", "SavedMissing"} /\ ~terminal.readable
               /\ terminal' = [terminal EXCEPT !.readable = TRUE]
               /\ UNCHANGED result
 
-TerminalNext == /\ (InterruptTerminalRow \/ RawEOFCloser \/ MetadataRace \/ Reobserve
+TerminalNext == /\ (InterruptTerminalRow \/ RawEOFCloser \/ MetadataRace \/ BarrierRace \/ Reobserve
                    \/ NativeTerminalCommit \/ ExistingControl \/ ExistingEndNotice
                    \/ FlushTerminalResult \/ CleanupTerminalRow \/ CrashAtBoundary \/ BootRetry \/ RepairRead)
                 /\ UNCHANGED StableBase
@@ -138,6 +152,7 @@ TerminalSpec == TerminalInit /\ [][TerminalNext]_TerminalVars
                 /\ WF_TerminalVars(InterruptTerminalRow /\ UNCHANGED StableBase)
                 /\ WF_TerminalVars(RawEOFCloser /\ UNCHANGED StableBase)
                 /\ WF_TerminalVars(MetadataRace /\ UNCHANGED StableBase)
+                /\ WF_TerminalVars(BarrierRace /\ UNCHANGED StableBase)
                 /\ WF_TerminalVars(Reobserve /\ UNCHANGED StableBase)
                 /\ WF_TerminalVars(NativeTerminalCommit /\ UNCHANGED StableBase)
                 /\ WF_TerminalVars(ExistingControl /\ UNCHANGED StableBase)

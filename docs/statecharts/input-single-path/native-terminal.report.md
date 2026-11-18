@@ -16,7 +16,8 @@ Code baseline: `200ef5a37f2926f01f7dbcda70ccdb192285b8b8`.
 | scope=Exact/ForeignNonce/ForeignSource/ForeignKey | original full ticket·source·execution nonce와 domain port 대조 |
 | barrier / barrierRowMatches / OverridePermitted | 원본 stored barrier를 보존하며 exact strict interrupt supersession만 같은 결과 CAS에서 인정. UUID/range/foreign_hashes·원본 digest 일치를 하나의 비교 값으로 추상화 |
 | ended, RawEOFCloser | exact ExecutionEnd::Ended와 `[C,L)` strict whole JSON proof의 conjunction |
-| version/proofVersion/commitVersion, MetadataRace/Reobserve | observed/current EOF fingerprint·digest·등록 stamp 변화 재검증; 외부 파일과 history를 한 atomic write로 가정하지 않음 |
+| version/proofVersion/commitVersion, MetadataRace/Reobserve | observed/current EOF fingerprint·digest·등록 stamp 변화 재검증; 외부 파일과 history를 한 atomic write로 가정하지 않음. StoredStampRace는 저장된 interrupt 후보 뒤에도 같은 경합을 허용 |
+| proofBarrierMatch / BarrierRace / BarrierOK | 후보가 관측한 barrier identity와 결과 CAS 시점의 현재 stored barrier digest를 분리. CAS는 현재 값만 비교 |
 | proofKind / committedKind | 후보와 durable 결과 증거를 분리. raw terminal은 membership/본문을 만들지 않음 |
 | ExistingControl(ControlKind), ExistingEndNotice | 기존 exact Cancel/Terminate/clear/stop 또는 E/no-terminal notice ACK/결과 경계. 새 권한을 부여하는 행동이 아님 |
 | FlushTerminalResult → CleanupTerminalRow | 결과 durable 뒤 기존 row/actor CAS cleanup. Control/native 결과가 두 번 commit되지 않음 |
@@ -39,7 +40,7 @@ Code baseline: `200ef5a37f2926f01f7dbcda70ccdb192285b8b8`.
 
 ## cfg별 결과
 
-CI checker가 **31/31 cfg의 예상 broken-rule 집합과 일치**, unexpected 0. **18 GREEN / 13 expected RED**이며 31개가 모두 GREEN이라는 뜻이 아니다. Safety와 temporal PROPERTY를 runner가 분리해서 검사했고 fairness precheck도 수행했다. Before/negative cfg의 expected RED를 PASS로 숨기지 않는다.
+CI checker가 **35/35 cfg의 예상 broken-rule 집합과 일치**, unexpected 0. **20 GREEN / 15 expected RED**이며 35개가 모두 GREEN이라는 뜻이 아니다. 마지막 4개는 저장된 supersession의 결과 CAS 재검증(등록 stamp·현재 barrier)을 검사하려고 구현 조각에서 더했다. Safety와 temporal PROPERTY를 runner가 분리해서 검사했고 fairness precheck도 수행했다. Before/negative cfg의 expected RED를 PASS로 숨기지 않는다.
 
 | cfg | 판정 | 실제 깨진 규칙(예상과 일치) |
 |---|---|---|
@@ -74,8 +75,13 @@ CI checker가 **31/31 cfg의 예상 broken-rule 집합과 일치**, unexpected 0
 | `NativeTerminalFixedStoredOtherBarrier.cfg` | GREEN | 없음 |
 | `NativeTerminalNoStoredOverride.cfg` | RED | NoForeignTerminalBarrier, ClosedExecutionEventuallySettles |
 | `NativeTerminalBareStoredOverride.cfg` | RED | NoForeignBarrierBypass, NoTerminalEvidenceFreeDelete |
-- 모델 SHA256: `8599192c49eac7c89f6c6769d05aa665e080a6fcd799aeec11057ba678a36652`.
-- 동일 소스/31 cfg를 격리한 root로 `python3 scripts/ci/statecharts_tlc.py --root <model-check> --jar /home/adk/.local/share/tla2tools/tla2tools-1.7.4.jar --jobs 2 --report-json <model-check.json>` 실행, rc0, 56.12초. 각 cfg limit 300초 안이다.
+| `NativeTerminalFixedStoredStampRace.cfg` | GREEN | 없음 |
+| `NativeTerminalNoStoredStampRecheck.cfg` | RED | NoStaleTerminalCommit |
+| `NativeTerminalFixedStoredBarrierRace.cfg` | GREEN | 없음 |
+| `NativeTerminalNoStoredBarrierRecheck.cfg` | RED | NoForeignBarrierBypass, NoTerminalEvidenceFreeDelete |
+- 모델 SHA256: `ac8bc9780b6520bd1432f4fdf2d0577f0a2b504585b5f904e7dccb72d7076bda`.
+- 구현 조각의 35 cfg는 `python3 scripts/ci/statecharts_tlc.py --base 200ef5a37f --jobs 4`로 PASS 35/35(25.0초)다. 아래는 설계 레그의 실행 기록이다.
+- 설계 레그: 동일 소스/31 cfg를 격리한 root로 `python3 scripts/ci/statecharts_tlc.py --root <model-check> --jar /home/adk/.local/share/tla2tools/tla2tools-1.7.4.jar --jobs 2 --report-json <model-check.json>` 실행, rc0, 56.12초. 각 cfg limit 300초 안이다.
 - 원시 로그 root: `/home/adk/adk/lane-runs/i8148/logs/termdelta-1/`. CI 전체 출력 `model-check.log`, 결과/시간/coverage `model-check.json`, direct TLC 로그·반례 `tlc/`, SHA/개별 rc/state 수 `tlc-results.json`.
 - `statechart` wrapper는 WSL에 없어 실행하지 않았다. 이 chart는 수동 계약 그림이며 TLC로 생성한 상태 그래프로 표시하지 않는다. 모델 검증은 Java/TLC 1.7.4와 저장소의 CI checker로 수행했다.
 
@@ -87,7 +93,9 @@ CI checker가 **31/31 cfg의 예상 broken-rule 집합과 일치**, unexpected 0
 4. NoLineage/NoStampRecheck: foreign scope 또는 재관측된 version 변화 뒤 old proof를 쓰면 RED. 실제 구현에서는 full ticket/Source/nonce와 observed/current stamp가 담당한다.
 5. NoBootRetry/NoDurableOrdering: 후보 소실 뒤 복구를 부르지 않으면 liveness RED, 결과 flush 전에 지우면 safety RED. 결과 전/후 boot cfg 및 파일 가독성 회복 cfg는 GREEN이다.
 6. NoStoredOverride: 이미 저장된 wrong barrier가 fresh strict 분류 뒤에도 계속 candidate/result를 막는 RED다. FixedStoredInterrupt는 barrier를 지우지 않고 exact Cancelled supersession으로 GREEN. FixedStoredOtherBarrier는 다른 barrier를 native 결과로 넘기지 않고 기존 boundary ACK 정책만 허용한다. BareStoredOverride는 matching 검사를 지워 NoForeignBarrierBypass/삭제 규칙 RED다.
-7. PermanentUnread/PermanentSavedUnread: 실행이 닫혔어도 source를 영구히 읽지 못하면 진행성이 보장되지 않는다. 기존 Source::validate를 완화해 GREEN으로 만들지 않았고, 진단 가능한 debt 한계를 그대로 남겼다.
+7. FixedStoredStampRace/NoStoredStampRecheck: 저장된 barrier로 supersession 후보를 만든 뒤 등록 stamp가 바뀌면 옛 proof를 버리고 재관측해 Cancelled에 도달한다. 결과 CAS의 stamp 재검증을 빼면 NoStaleTerminalCommit RED다. 앞선 31개는 저장된 interrupt cfg의 version이 0으로 고정돼 이 누락을 잡지 못했다.
+8. FixedStoredBarrierRace/NoStoredBarrierRecheck: 후보 생성 뒤 현재 stored barrier가 달라지면 native 결과는 0이고 기존 boundary ACK 정책만 남는다. 결과 CAS가 후보 시점의 일치 판정을 재사용하면 NoForeignBarrierBypass/삭제 규칙 RED다.
+9. PermanentUnread/PermanentSavedUnread: 실행이 닫혔어도 source를 영구히 읽지 못하면 진행성이 보장되지 않는다. 기존 Source::validate를 완화해 GREEN으로 만들지 않았고, 진단 가능한 debt 한계를 그대로 남겼다.
 
 ## 크기와 실행 계획
 
