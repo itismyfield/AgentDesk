@@ -319,10 +319,12 @@ async fn native_8148_coldsource_history_ack_loss_then_control_is_idempotent() {
         .try_native_control(&f.namespace, &f.ticket, Disposition::Cancelled, None)
         .unwrap();
     std::fs::remove_file(&f.path).unwrap();
+    let bytes = std::fs::read(&f.history_path).unwrap();
     let fresh = Registry::at(f.history_path.clone());
     port.bind_source(&f.namespace, &f.ticket, &fresh)
         .await
         .unwrap();
+    assert_eq!(std::fs::read(&f.history_path).unwrap(), bytes);
     f.assert_bound().await;
     let current = fresh.native_ticket(&f.namespace, &f.ticket.key).unwrap();
     assert_eq!(
@@ -357,6 +359,51 @@ async fn native_8148_coldsource_foreign_lineage_is_rejected() {
         )
         .is_err()
     );
+    let id = bound_source(
+        &port
+            .bindings
+            .binding_events_since(f.ticket.channel_id, 0)
+            .unwrap(),
+        &f.ticket,
+        &intent.pin,
+    )
+    .unwrap();
+    let source = Source {
+        target: f.ticket.key["attempt"]["target"].clone(),
+        provider: "claude".into(),
+        session_id: id.session_id,
+        transcript: id.path,
+        file: [id.dev, id.ino],
+        offset: 0,
+        binding_watermark: None,
+    };
+    let mut foreign = Vec::new();
+    for (pointer, value) in [
+        ("/attempt/nonce", json!("stale-attempt")),
+        ("/attempt/target/root", json!("foreign-root")),
+        ("/identity/sources/0/queued_generation", json!(2)),
+        ("/identity/sources/0/message_id", json!(777)),
+    ] {
+        let mut ticket = f.ticket.clone();
+        *ticket.key.pointer_mut(pointer).unwrap() = value;
+        foreign.push(ticket);
+    }
+    let mut ticket = f.ticket.clone();
+    ticket.owning_episode.as_mut().unwrap().generation += 1;
+    foreign.push(ticket);
+    f.shared
+        .mailbox(ChannelId::new(f.ticket.channel_id))
+        .v2_request(move |slot| {
+            let owner = slot.as_mut().unwrap();
+            let before = owner.json()?;
+            for ticket in foreign {
+                assert!(owner.select_source(&ticket, &source).is_err());
+            }
+            assert_eq!(owner.json()?, before);
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -366,13 +413,101 @@ async fn native_8148_coldsource_pending_successor_is_untouched() {
     f.transcript();
     let port = f.port();
     let marker = crate::services::tmux_common::session_temp_path(&f.logical, "spawn_nonce");
-    std::fs::write(&marker, "successor-N2").unwrap();
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let session = uuid::Uuid::new_v4().to_string();
+    let path = f.path.with_file_name(format!("{session}.jsonl"));
+    let mut context = binding_context::execution_context("claude", &f.nonce).unwrap();
+    context.execution_nonce = nonce.clone();
+    context.expected_native_session_id = Some(session.clone());
+    binding_context::PreparedIncarnation::create(context).unwrap();
+    std::fs::write(&marker, &nonce).unwrap();
+    crate::services::tmux_common::with_tmux_source_authority(&f.logical, |authority| {
+        assert!(
+            dedupe::pane_registration::register_claude_pane_under_source_authority(
+                authority,
+                f.ticket.channel_id,
+                dedupe::TuiRuntimeBinding {
+                    runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                    output_path: path.display().to_string(),
+                    session_id: Some(session.clone()),
+                    last_offset: 0,
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    relay_last_offset: None,
+                },
+                dedupe::Record::Stat
+            )
+            .is_some_and(dedupe::Persisted::published)
+        );
+    });
+    let actor = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
+        "successor-episode".into(),
+    )));
+    let id = f.ticket.owning_episode.as_ref().unwrap().user_message_id + 1;
+    f.shared
+        .mailbox(ChannelId::new(f.ticket.channel_id))
+        .restore_active_turn(
+            actor.clone(),
+            poise::serenity_prelude::UserId::new(7),
+            id.into(),
+        )
+        .await;
+    let mut row = crate::services::discord::inflight::InflightTurnState::new(
+        ProviderKind::Claude,
+        f.ticket.channel_id,
+        None,
+        7,
+        id,
+        id,
+        "successor".into(),
+        Some(session.clone()),
+        Some(f.logical.clone()),
+        Some(path.display().to_string()),
+        None,
+        0,
+    );
+    row.born_generation = 2;
+    row.turn_nonce = Some("successor-episode".into());
+    row.hosted_execution_nonce = Some(nonce.clone());
+    crate::services::discord::inflight::save_inflight_state(&row).unwrap();
+    let runtime_before = dedupe::runtime_binding_for_tmux_session(&f.logical)
+        .map(|b| (b.session_id, b.output_path, b.last_offset));
+    let row_before = serde_json::to_value(&row).unwrap();
     assert!(
         port.bind_source(&f.namespace, &f.ticket, &f.history)
             .await
             .is_err()
     );
-    assert_eq!(std::fs::read_to_string(marker).unwrap(), "successor-N2");
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), nonce);
+    assert_eq!(
+        dedupe::runtime_binding_for_tmux_session(&f.logical).map(|b| (
+            b.session_id,
+            b.output_path,
+            b.last_offset
+        )),
+        runtime_before
+    );
+    assert!(Arc::ptr_eq(
+        f.shared
+            .mailbox(ChannelId::new(f.ticket.channel_id))
+            .snapshot()
+            .await
+            .cancel_token
+            .as_ref()
+            .unwrap(),
+        &actor
+    ));
+    assert_eq!(
+        serde_json::to_value(
+            crate::services::discord::inflight::load_inflight_state_read_only(
+                &ProviderKind::Claude,
+                f.ticket.channel_id
+            )
+            .unwrap()
+        )
+        .unwrap(),
+        row_before
+    );
     assert!(
         f.history
             .native_ticket(&f.namespace, &f.ticket.key)
