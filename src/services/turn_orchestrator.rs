@@ -110,15 +110,16 @@ use queue_cancellation::{
 use queue_enqueue::enqueue_behind;
 #[cfg(test)]
 pub(crate) use queue_enqueue::enqueue_intervention;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use queued_head::BindingIntent;
 #[cfg(unix)]
 pub(crate) use queued_head::HandoffHeld;
+#[cfg(unix)]
+pub(crate) use queued_head::PreKeyPin;
 pub(crate) use queued_head::effort_intent;
 pub(crate) use queued_head::{HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim, prefix};
 pub(crate) use queued_head::{
-    OwedDrop, PreKeyPin, RESTART_SEED_SOURCE, SeedStatus, TurnBind, Waiting, v2_queue,
-    waiting_origin,
+    OwedDrop, RESTART_SEED_SOURCE, SeedStatus, TurnBind, Waiting, v2_queue, waiting_origin,
 };
 #[cfg(unix)]
 pub(crate) mod restart_operation;

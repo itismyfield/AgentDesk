@@ -1,9 +1,11 @@
 //! The owner journals only the immutable ticket, its pre-key pin and its selected source.
 use super::*;
-use crate::services::tui_input::human_frame::history::{
-    CAPACITY,
-    v2::{Source, native::Ticket as NativeTicket},
+use crate::services::tui_input::human_frame::history::CAPACITY;
+#[cfg(unix)]
+use crate::services::tui_input::human_frame::history::v2::{
+    Source, native::Ticket as NativeTicket,
 };
+#[cfg(unix)]
 use crate::services::turn_orchestrator::queued_head::v2_types::cold_source::{
     BindingIntent, PreKeyPin,
 };
@@ -38,6 +40,7 @@ pub(super) fn validate(snapshot: &SnapshotV2) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 impl Owner {
     pub(crate) fn pin_source(
         &mut self,

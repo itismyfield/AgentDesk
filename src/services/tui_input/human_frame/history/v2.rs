@@ -8,6 +8,7 @@ pub(crate) mod carried;
 mod collision;
 mod migration;
 pub(crate) mod native;
+#[cfg(unix)]
 mod native_binding;
 #[cfg(all(test, unix))]
 pub(crate) mod native_tests;
