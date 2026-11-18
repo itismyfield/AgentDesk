@@ -1,7 +1,7 @@
-#[path = "routine_model_tests.rs"]
-mod routine_model_tests;
 #[path = "native_tests.rs"]
 mod native_tests;
+#[path = "routine_model_tests.rs"]
+mod routine_model_tests;
 
 use super::*;
 use crate::config::TestEnvVarGuard as Guard;
