@@ -39,10 +39,12 @@ fn checked(source: &Source, stamp: &Stamp) -> Option<()> {
                 .as_str()
                 .and_then(|s| serde_json::from_str::<Value>(s).ok())
                 .is_some_and(|output| output["hookSpecificOutput"]["hookEventName"] == "Stop");
-        let starts_work = matches!(
-            attachment["hookEvent"].as_str(),
-            Some("UserPromptSubmit" | "PreToolUse" | "PostToolUse")
-        );
+        let starts_work = ["hookEvent", "hookName"].iter().any(|key| {
+            matches!(
+                attachment[key].as_str(),
+                Some("UserPromptSubmit" | "PreToolUse" | "PostToolUse")
+            )
+        });
         let has_output = !attachment["stdout"].is_null()
             && !attachment["stdout"]
                 .as_str()

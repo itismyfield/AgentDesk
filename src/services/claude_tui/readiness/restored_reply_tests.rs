@@ -255,6 +255,8 @@ fn restored_reply_refuses_new_prompts_tools_stop_context_and_unreadable_history(
         json!({"type":"attachment","attachment":{"type":"hook_success","hookEvent":"Stop","stdout":"{\"hookSpecificOutput\":{\"hookEventName\":\"Stop\",\"additionalContext\":\"continue\"}}"}}),
         json!({"type":"system","subtype":"stop_hook_summary","preventedContinuation":true,"hookAdditionalContext":["continue"]}),
         json!({"type":"attachment","attachment":{"type":"hook_success","hookEvent":"UserPromptSubmit"}}),
+        json!({"type":"attachment","attachment":{"type":"hook_success","hookName":"PreToolUse"}}),
+        json!({"type":"attachment","attachment":{"type":"hook_success","hookName":"PostToolUse"}}),
         json!({"type":"attachment","attachment":{"type":"hook_success","stdout":"{\"decision\":\"block\",\"reason\":\"continue\"}"}}),
         json!({"type":"future-record"}),
     ] {
@@ -318,15 +320,13 @@ fn restored_reply_refuses_missing_launch_fields_and_future_timestamps() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     for case in ["future", "timestamp"] {
         let r = pinned();
-        {
-            fs::write(&r.path, "").unwrap();
-            if case == "future" {
-                completed(&r, Utc::now() + chrono::Duration::days(1));
-            } else {
-                r.append(end_turn());
-                for record in tail() {
-                    r.append(record);
-                }
+        fs::write(&r.path, "").unwrap();
+        if case == "future" {
+            completed(&r, Utc::now() + chrono::Duration::days(1));
+        } else {
+            r.append(end_turn());
+            for record in tail() {
+                r.append(record);
             }
         }
         assert!(candidate(&r).is_none(), "{case}");
