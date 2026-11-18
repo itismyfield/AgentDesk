@@ -212,6 +212,51 @@ async fn a_restart_retains_an_expired_unsettled_head_and_posts_its_notice_pg() {
     db.drop().await;
 }
 
+/// A live hold whose due passed while the daemon was down is refused by recovery alone, before
+/// any drive could hand its front on.
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_refuses_a_live_expired_hold_before_any_drive() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let file = (root.join("claude").join("live")).join(format!("{CHANNEL}.json"));
+    let before = ChannelMailboxRegistry::default();
+    let handle = before.handle(ChannelId::new(CHANNEL));
+    handle.v2_adopt(file.clone(), "live".into()).await.unwrap();
+    admit(&handle, item(1, &[1], None), "live-1").await;
+    let held = handle.v2_request(|slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let front = owner.front().ok_or("no front")?;
+        owner
+            .hold_readiness(&front, "missing_launch", 1_000)
+            .map(drop)
+    });
+    held.await.unwrap();
+    drop((handle, before));
+    let restarted = ChannelMailboxRegistry::default();
+    let handle = restarted.handle(ChannelId::new(CHANNEL));
+    let history = Registry::at(dir.path().join("history.json"));
+    let recovered = super::super::recovery::recover(
+        &handle,
+        (file, "live".into()),
+        history,
+        None,
+        ("claude", CHANNEL, 12_000),
+    );
+    assert_eq!(recovered.await, Ok(0));
+    let snapshot = handle.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+    let snapshot = snapshot.await.unwrap();
+    assert!(
+        snapshot["items"].as_array().is_none_or(Vec::is_empty),
+        "{snapshot}"
+    );
+    assert_eq!(
+        snapshot["refused_fronts"].as_array().map(Vec::len),
+        Some(1),
+        "{snapshot}"
+    );
+}
+
 /// A restart refuses a held front whose due passed, before any drive: its origin fails, and a
 /// crash after the outbox enqueue but before the ack still leaves one notice record.
 #[tokio::test(flavor = "current_thread")]

@@ -3,8 +3,8 @@ use crate::services::claude_tui::readiness;
 use crate::services::discord::queue_io::input_owner::held_watch::{self, Verdict};
 use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
 
-/// After a restart lost the proof and no current reply can be restored, the actual Busy hold ends
-/// at the owner's due: nothing is sent, the original is refused without its body, one notice owes.
+/// A proofless Busy hold no read can restore ends at the owner's due: nothing reaches the pane, the
+/// original is refused without its body and one notice is posted; the hold never stays kept.
 #[test]
 fn an_unrestorable_busy_hold_ends_at_its_due_with_one_notice_and_no_key_pg() {
     let fx = Fixture::with_root(
@@ -20,26 +20,35 @@ fn an_unrestorable_busy_hold_ends_at_its_due_with_one_notice_and_no_key_pg() {
     let _gate = crate::services::discord::router::intake_gate::busy_inject::test_support::open_gate(
         CHANNEL,
     );
-    let intake = Intake::new(&fx, &started);
-    let idle = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
-    ));
-    let text = format!("✻ Thinking… (12s · esc to interrupt)\n{idle}");
-    fx.rig.answer(
-        "pane.read",
-        json!({"type":"pane_read","read":{
-        "pane_id":PANE,"source":"recent_unwrapped","text":text,"revision":2,"truncated":false}}),
+    let intake = Intake::with_expected_pin(&fx, &started, ExpectedPin::Registered);
+    append(
+        &started.path,
+        &[
+            json!({"type":"user","uuid":uuid(),"sessionId":started.session,
+            "timestamp":chrono::Utc::now().to_rfc3339(),
+            "message":{"role":"user","content":"work that never reports its end"}}),
+        ],
     );
     readiness::tests::forget_session(fx.logical());
     assert!(readiness::observe_restored_reply(fx.logical(), Some(&started.path)).is_none());
     let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
     intake.runtime.block_on(async {
-        let front = intake.front().await;
-        let original = front.1.clone();
-        let start =
-            dispatch::start_idle_for_test(intake.shared.clone(), ChannelId::new(CHANNEL), front);
-        let result = tokio::time::timeout(LIMIT, start).await;
+        let original = intake.front().await.1;
+        let (entered, resume) =
+            discord::router::intake_dispatch::after_upload_take(ChannelId::new(CHANNEL))
+                .await
+                .pause();
+        let start = dispatch::start_idle_for_test(
+            intake.shared.clone(),
+            ChannelId::new(CHANNEL),
+            intake.front().await,
+        );
+        let holder = async {
+            tokio::time::timeout(LIMIT, entered).await.unwrap().unwrap();
+            intake.install_holder(&fx, &started).await;
+            resume.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(tokio::time::timeout(LIMIT, start), holder);
         assert!(
             result
                 .expect("the busy admission holds")
@@ -56,7 +65,7 @@ fn an_unrestorable_busy_hold_ends_at_its_due_with_one_notice_and_no_key_pg() {
             Verdict::Keep,
             "the hold is real before its due"
         );
-        let refused = crate::test_support::wait::poll_within(
+        let settled = crate::test_support::wait::poll_within(
             async || {
                 let snapshot = intake
                     .mailbox
@@ -69,7 +78,7 @@ fn an_unrestorable_busy_hold_ends_at_its_due_with_one_notice_and_no_key_pg() {
             LIMIT,
             "readiness due settlement",
         );
-        let snapshot = refused.await.unwrap();
+        let snapshot = settled.await.unwrap();
         let entry = &snapshot["refused_fronts"][0];
         assert_eq!(
             entry["input"]["identity"]["primary"], original.message_id,

@@ -144,3 +144,28 @@ fn the_first_due_survives_rehold_restart_and_a_clock_set_back_then_tells_once() 
     owner.attemptless_notice_enqueued(identity).unwrap();
     assert!(owner.snapshot.refused_fronts[0].notice.enqueued);
 }
+
+#[test]
+fn a_reserved_leaf_starts_its_first_key_only_before_the_original_due() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (start, started) in [(11_000, false), (10_999, true)] {
+        let dir = queue_dir();
+        let mut owner = owner(&dir, &[(7, 7)]);
+        let claimed = claim(&mut owner);
+        owner
+            .hold_readiness(&claimed.0, "missing_launch", 1_000)
+            .unwrap();
+        let key = reserve(&mut owner, &claimed).unwrap();
+        drop(owner.arm_bootstrap(&key, 2_000).unwrap());
+        assert_eq!(
+            owner.payload_started(&key, start).is_ok(),
+            started,
+            "at {start}"
+        );
+        owner.tick(11_000).unwrap();
+        assert!(
+            owner.snapshot.refused_fronts.is_empty(),
+            "the leaf owns its attempt"
+        );
+    }
+}

@@ -139,6 +139,9 @@ impl Owner {
             Some(PayloadWindow::Bootstrap) => {}
             None => return Err("unknown payload phase".into()),
         }
+        if self.head_outlived_due(now) {
+            return Err("readiness_deadline".into());
+        }
         let mut next = self.snapshot.clone();
         let head = next
             .head_injection
