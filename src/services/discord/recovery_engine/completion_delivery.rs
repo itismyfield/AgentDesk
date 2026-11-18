@@ -420,10 +420,11 @@ pub(super) async fn retire_refused(
     }
     let dispose = super::recovery_paths::restart::dispose_recovery_relay_outcome;
     let text = state.full_response.as_str();
-    dispose(
+    // Boxed: the restore loop awaits this at three sites and must not inline the dispose future.
+    let disposed = dispose(
         shared, provider, state, outcome, false, branch, branch, text, false,
-    )
-    .await;
+    );
+    Box::pin(disposed).await;
     true
 }
 
