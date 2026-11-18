@@ -3,6 +3,8 @@ import type { Campaign } from "../../api/campaigns";
 import { useTaskDispatches } from "../../contexts/KanbanContext";
 import type { Agent, KanbanCard, UiLanguage } from "../../types";
 import KanbanCardDetail from "../agent-manager/KanbanCardDetail";
+import { KIT_TOUCH_BUTTON } from "../agent-manager/CardDetailParts";
+import { Button } from "../../kit/free/button-clean";
 import { EMPTY_EDITOR, coerceEditor, type EditorState } from "../agent-manager/kanban-utils";
 import { reviewDecisionMap, useKanbanCardActivity } from "../agent-manager/useKanbanCardActivity";
 import { Drawer } from "../common/overlay/Drawer";
@@ -115,11 +117,11 @@ function LoadedCardDetail({ card, agents, campaigns, locale, tr, actions, saveLo
       description={card.github_issue_number
         ? tr(`카드를 완료로 닫고, 연결된 GitHub 이슈 #${card.github_issue_number}도 닫습니다.`, `Closes the card as done, together with its GitHub issue #${card.github_issue_number}.`)
         : tr("카드를 완료로 닫습니다.", "Closes the card as done.")}>
-      <div className="flex justify-end gap-2 pt-2">
-        <button type="button" disabled={cancelling === "sending"} onClick={() => setCancelling(null)} className="min-h-11 rounded-md border border-th-border-subtle px-4 text-sm text-th-text-secondary">{tr("돌아가기", "Go back")}</button>
-        <button type="button" disabled={cancelling === "sending"} onClick={() => void cancel()} className="min-h-11 rounded-md px-4 text-sm font-medium text-white disabled:opacity-60" style={{ background: "var(--th-accent-danger)" }}>
+      <div className="flex flex-col-reverse justify-end gap-2 pt-2 sm:flex-row">
+        <Button variant="secondary" size="lg" className={KIT_TOUCH_BUTTON} disabled={cancelling === "sending"} onClick={() => setCancelling(null)}>{tr("돌아가기", "Go back")}</Button>
+        <Button variant="destructive" size="lg" className={KIT_TOUCH_BUTTON} disabled={cancelling === "sending"} onClick={() => void cancel()}>
           {cancelling === "sending" ? tr("처리 중…", "Working…") : tr("카드 취소", "Cancel card")}
-        </button>
+        </Button>
       </div>
     </Modal>}
   </>;
