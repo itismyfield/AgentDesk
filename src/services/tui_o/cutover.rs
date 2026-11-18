@@ -382,6 +382,32 @@ pub(crate) fn watch_codex_first_trust(
     runtime.spawn(watch);
 }
 
+/// Whether a startup folder-trust menu in `tmux` is the admitted launch's to repair rather than
+/// a startup failure: it repairs now with the admission's one repair, or that repair was spent and
+/// the admission's deadline still runs. A launch with no such admission fails as before.
+#[cfg(unix)]
+pub(crate) fn codex_first_trust_holds_startup(tmux: &str, cwd: &std::path::Path) -> bool {
+    use crate::services::codex_tui::{host_input::trust::TrustHost, normalize};
+    let launch = test_override::with_channels(|boot| {
+        let boot = boot?;
+        boot.channels()
+            .iter()
+            .filter_map(|channel| boot.output_candidate(*channel))
+            .find_map(|candidate| candidate.first_trust_launch(tmux))
+    });
+    let Some((context, output, spent)) = launch else {
+        return false;
+    };
+    if output.remaining().is_zero() {
+        return false;
+    }
+    spent
+        || matches!(
+            normalize::repair_if_shown(&output, &context, cwd, &mut TrustHost),
+            Some(Ok(_))
+        )
+}
+
 pub(crate) fn pause_codex_first(channel: u64) -> Option<channel_policy::FirstPause> {
     test_override::with_channels(|boot| {
         let boot = boot.filter(|b| b.kind(channel) == Some(RuntimeHandoffKind::CodexTui))?;

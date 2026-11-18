@@ -85,6 +85,32 @@ impl Candidate {
         Some(Output::admitted(id, n.admitted_at, Arc::clone(&n.repair)))
     }
 
+    /// The pending, unproved admission launched in `tmux`: its execution, a view spending its own
+    /// deadline and repair, and whether that repair is already spent.
+    pub(crate) fn first_trust_launch(&self, tmux: &str) -> Option<(BindingContext, Output, bool)> {
+        let first = self.first_turn.borrow();
+        let first = first.as_ref().filter(|first| {
+            let n = &first.normalizing;
+            first.valid
+                && first.pending
+                && first.tmux == tmux
+                && n.output.is_none()
+                && n.refused.is_none()
+        })?;
+        let context = first.context.clone()?;
+        let id = Identity {
+            channel: first.channel,
+            input: first.mark.order,
+            nonce: digest(&first.nonce),
+            execution: digest(&context.execution_nonce),
+            source: String::new(),
+        };
+        let n = &first.normalizing;
+        let spent = n.repair.load(std::sync::atomic::Ordering::SeqCst);
+        let output = Output::admitted(id, n.admitted_at, Arc::clone(&n.repair));
+        Some((context, output, spent))
+    }
+
     /// What a body claim of the turn `nonce` names waits on: nothing once its output is adopted
     /// or rejected, or when it is not the admitted first turn.
     pub(crate) fn first_hold(&self, nonce: [u8; 32]) -> Option<FirstHold> {

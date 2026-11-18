@@ -223,3 +223,126 @@ fn startup_dialog_rechecks_rollout_created_during_capture() {
         ReadOutputResult::Completed { .. }
     ));
 }
+
+// The admitted launch's startup check sees its trust menu first: it repairs it with the
+// admission's one repair instead of failing, and the rollout the Enter lets through completes.
+// A refused option keeps the startup failure and sends nothing.
+#[test]
+fn an_admitted_launch_repairs_its_trust_menu_before_the_startup_check_fails_it() {
+    use crate::services::tui_o::channel_policy::{Adoption, BootChannels, first_prompt_digest};
+    use crate::services::tui_prompt_dedupe::{
+        self as dedupe, binding_context::PreparedIncarnation,
+    };
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _guards) = fixture();
+    let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let negative = "Do you trust this folder?\n  1. Yes, proceed\n› 2. No, exit";
+    for (channel, pane) in [(8_165_311u64, TRUST), (8_165_312, negative)] {
+        dedupe::reset_state_for_tests();
+        let cwd = root.path().join(format!("workspaces/project-{channel}"));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd = cwd.canonicalize().unwrap();
+        let tmux = "test-i8165-startup";
+        let sessions = root.path().join("home/sessions").canonicalize().unwrap();
+        let config = serde_json::from_value(serde_json::json!({"server":{}, "agents":[{"id":"first", "name":"first", "channels":{"codex":{"id":channel.to_string(), "runtime":"tui"}}}], "tui_o":{"writer":{"channels":[channel], "late_adopt":true}}})).unwrap();
+        let pending = |_: &_, _| {
+            Ok(std::collections::BTreeMap::from([(
+                channel,
+                Adoption::Pending,
+            )]))
+        };
+        let boot = BootChannels::validate(&config)
+            .unwrap()
+            .seeded(&config, pending)
+            .unwrap();
+        let candidate = boot.candidate(channel).unwrap().clone();
+        let _boot = crate::services::tui_o::cutover::test_override::force_boot(boot);
+        let token = CancelToken::new();
+        let nonce = token.turn_nonce().unwrap();
+        let admission = candidate
+            .admit_first(channel, nonce, "hi", tmux, || Ok(0))
+            .unwrap();
+        let digests = (Some(first_prompt_digest("hi")), Some("legacy".into()));
+        let prepared = PreparedIncarnation::prepare_pinned(
+            "codex",
+            tmux,
+            Some(channel),
+            None,
+            false,
+            Some(sessions.clone()),
+            digests,
+        )
+        .unwrap();
+        candidate.attach_first_execution(&prepared.context, "hi", Some(nonce));
+        let marker = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
+        std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
+        std::fs::write(&marker, &prepared.context.execution_nonce).unwrap();
+        dedupe::register_tmux_channel(tmux, channel);
+        // The Enter lets Codex start: its rollout appears and the pane leaves the menu.
+        let staged = root.path().join(format!("staged-{channel}"));
+        std::fs::create_dir_all(&staged).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let meta =
+            serde_json::json!({"type":"session_meta","payload":{"id":id,"cwd":cwd,"source":"cli"}});
+        let answer = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}});
+        let end = serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"hello"}});
+        let rollout = staged.join(format!("rollout-{id}.jsonl"));
+        std::fs::write(&rollout, format!("{meta}\n{answer}\n{end}\n")).unwrap();
+        std::fs::write(root.path().join("pane"), pane).unwrap();
+        let keys = root.path().join(format!("keys-{channel}"));
+        let identity = crate::services::session_identity_metadata::runtime_identity("startup")
+            .unwrap()
+            .environment_assignment()
+            .unwrap();
+        let identity = crate::services::process::shell_escape(&identity);
+        let script = format!(
+            "#!/bin/sh\ncase \" $* \" in\n*show-environment*) printf '%s\\n' {identity};;\n*display-message*) printf '0\\n{}\\n';;\n*send-keys*) echo \"$*\" >> '{}'; cp '{}' '{}/';;\n*capture-pane*) if [ -f '{}' ]; then echo ready; else cat \"$I8165_PANE\"; fi;;\n*) exit 64;;\nesac\n",
+            cwd.display(),
+            keys.display(),
+            rollout.display(),
+            sessions.display(),
+            keys.display(),
+        );
+        std::fs::write(root.path().join("tmux"), script).unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let options = RolloutTailOptions {
+            wait_for_rollout: Duration::from_secs(2),
+            tmux_session_name: Some(tmux.into()),
+            ..Default::default()
+        };
+        let result = tail_latest_rollout_for_cwd_with_handoff_options(
+            &cwd,
+            SystemTime::UNIX_EPOCH,
+            tx,
+            None,
+            || true,
+            options,
+        );
+        let enters = std::fs::read_to_string(&keys).map_or(0, |log| log.lines().count());
+        let spent = candidate
+            .first_trust_launch(tmux)
+            .map(|(_, _, spent)| spent);
+        if pane == TRUST {
+            let result = result.unwrap();
+            assert!(matches!(
+                result.read_result,
+                ReadOutputResult::Completed { .. }
+            ));
+            assert_eq!(
+                enters, 1,
+                "one Enter on the admitted launch's positive menu"
+            );
+            assert_eq!(spent, Some(true), "the admission's one repair is spent");
+        } else {
+            let error = result.unwrap_err();
+            assert!(error.contains("trust"), "{error}");
+            assert_eq!(enters, 0, "a refused option gets no Enter");
+        }
+        assert_eq!(
+            candidate.peek(),
+            Adoption::Deferred,
+            "the menu action adopts nothing"
+        );
+        drop(admission);
+    }
+}
