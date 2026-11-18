@@ -323,4 +323,18 @@ mod tests {
 
         assert_eq!(summary.as_deref(), Some("No-op: spec already satisfied"));
     }
+
+    #[test]
+    fn summarize_dispatch_from_text_truncates_after_160_chars() {
+        let exact = "가".repeat(160);
+        let summarize = |text: &str| {
+            let result = json!({ "summary": text }).to_string();
+            summarize_dispatch_from_text(None, None, Some(&result), None)
+        };
+        assert_eq!(summarize(&exact).as_deref(), Some(exact.as_str()));
+        assert_eq!(
+            summarize(&format!("{exact}나")),
+            Some(format!("{exact}..."))
+        );
+    }
 }

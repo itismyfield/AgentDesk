@@ -471,6 +471,7 @@ section이 달라도 같은 목적지를 중복 지정할 수 없다. 이동은 
 `domain::provider`가 ProviderKind enum과 정적 catalog·이름·별칭·CLI 순서·counterpart·공개 serde 값을 소유한다. 준비 조각, 추출 미완료 — runtime 책임은 S04가 adapter 경계로 전환한다. 기존 services::provider 경로는 같은 타입을 재수출하며 config·auth·cache·registry resolver와 runtime inherent impl은 adapter에 유지한다.
 `domain::file_sync`는 parent directory fsync·flush 판정과 시험 probe의 adapter 소유자이며, Discord runtime_store는 같은 함수를 재수출한다. S07의 13 consumer 파일만 정본 경로를 사용하고 syscall 순서·오류·Windows의 unflushed 성공·상위 ENOSPC 관측은 유지한다.
 `domain::tool_text`는 foundation에서 민감값 마스킹과 allowed-tools 정규화의 실제 구현·정적 tool catalog를 소유하며, 기존 Discord formatting 경로는 같은 함수·catalog를 재노출한다.
+`domain::dispatch_summary`가 dispatch result·context JSON의 상태별 요약 문구와 160자 절단을 실제 소유하며 foundation이다. `dispatch`는 재수출하지 않고 DB kanban·dispatch 조회·HTTP 소비자가 정본 경로를 직접 쓴다.
 `domain::human_input`이 HumanInputDelivery·HumanInputError·ExternalHold와 정적 hold 사유를 실제 소유하며 vocabulary다. 기존 health 경로는 같은 타입을 재노출하고 Registry·HumanInputRequest·전달 실행은 기존 Discord owner에 유지한다.
 
 S04에서 정적 catalog helper의 실제 구현은 `domain::provider`로, 문자열 naming 계산은 foundation child `domain::provider::naming`으로 옮겼다. config·auth·cache·runtime registry 조회는 `services::provider::ProviderRuntimeExt` adapter 경계가 소유한다. 기존 서비스 경로는 같은 값·함수·trait의 재수출이며 legacy 소비자는 유지한다. 별도 crate 추출 완료를 선언하지 않는다.
