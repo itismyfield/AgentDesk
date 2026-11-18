@@ -1,3 +1,5 @@
+#[path = "routine_model_tests.rs"]
+mod routine_model_tests;
 #[path = "native_tests.rs"]
 mod native_tests;
 
@@ -87,7 +89,7 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
                         "actual Codex create requires owner scope"
                     );
                     create(Create {
-                        turn_nonce: None,
+                        cancel_token: None,
                         tmux_session_name: name,
                         working_dir: &working,
                         prompt: &frame,

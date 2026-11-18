@@ -169,9 +169,7 @@ pub const PROMPT_READY_CANCELLED_ERROR: &str = "codex tui prompt readiness wait 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptReadinessKind {
-    // #3034: constructed only by tests now (the fresh-turn send path was
-    // retired); kept for taxonomy completeness — `timeout`/`label` match it.
-    #[allow(dead_code)]
+    /// Promptless TUI startup before an explicit routine model's first input.
     FreshTurn,
     Followup,
     /// Bounded post-turn probe used by the Codex TUI launch frame to

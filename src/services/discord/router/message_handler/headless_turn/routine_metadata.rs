@@ -70,14 +70,19 @@ pub(super) fn headless_session_basis(
     let snapshot = scheduled_snapshot_session_label(metadata);
     session_key_basis_override(snapshot.as_deref(), metadata, tmux_session_label).map(str::to_owned)
 }
+#[cfg(unix)]
+pub(super) fn persistent_model_metadata(metadata: Option<&serde_json::Value>) -> bool {
+    routine_model(metadata).is_some()
+        && valid_routine_metadata(metadata).is_some_and(|m| m["execution_strategy"] == "persistent")
+}
+
 /// The model a routine pinned for its run; it outranks the channel model setting.
-pub(super) fn routine_model(metadata: Option<&serde_json::Value>) -> Option<String> {
+pub(super) fn routine_model(metadata: Option<&serde_json::Value>) -> Option<&str> {
     valid_routine_metadata(metadata)?
         .get("model")
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
 }
 /// Process mode is explicit and only honored on fresh routine metadata.
 pub(super) fn routine_process_turn(metadata: Option<&serde_json::Value>) -> bool {
@@ -276,5 +281,26 @@ mod process_tests {
                 Some(ProviderKind::Claude.build_tmux_session_name("routine label"))
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod strict_model_tests {
+    use super::*;
+
+    #[test]
+    fn routine_fix2_codex_default_does_not_enter_strict_model_guard() {
+        let mut claim = serde_json::json!({
+            "routine_id": "legacy-codex", "execution_strategy": "persistent",
+            "provider": null, "model": null
+        });
+        assert!(
+            !persistent_model_metadata(Some(&claim)),
+            "an inherited provider default must reach the ordinary launch"
+        );
+        claim["model"] = serde_json::json!("explicit-model");
+        assert!(persistent_model_metadata(Some(&claim)));
+        claim["model"] = serde_json::json!("  ");
+        assert!(!persistent_model_metadata(Some(&claim)));
     }
 }

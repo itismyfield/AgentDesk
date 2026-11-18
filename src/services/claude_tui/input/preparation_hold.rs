@@ -64,6 +64,17 @@ impl PreparationHold {
 }
 
 pub(crate) fn readiness_failure(session: &str, error: String) -> SubmissionError {
+    #[cfg(unix)]
+    if error == super::draft_hold::ROUTINE_MODEL_FALLBACK {
+        return SubmissionError::Held(PreparationHold {
+            target: session.into(),
+            reason: "routine_model_fallback",
+            phase: EffectPhase::BeforePayload,
+            detail: error,
+            modal: true,
+            unproven: false,
+        });
+    }
     if !is_prompt_ready_timeout_error(&error) {
         return guarded_outcome::readiness_error(session, error);
     }

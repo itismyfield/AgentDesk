@@ -163,6 +163,23 @@ fn save(proof: &Proof) -> Result<(), String> {
     out.persist(path).map_err(|e| e.to_string())?;
     Ok(())
 }
+/// An ordinary fallback changes the model without changing the execution nonce.
+pub(crate) fn invalidate(tmux: &str) -> Result<(), String> {
+    let bytes = match std::fs::read(path(tmux)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let Ok(mut proof) = serde_json::from_slice::<Proof>(&bytes) else {
+        return Ok(());
+    };
+    if proof.tmux == tmux && !proof.argv_sha256.is_empty() {
+        proof.argv_sha256.clear();
+        save(&proof)?;
+    }
+    Ok(())
+}
+
 /// The existing owner validates the target epoch; this adds the same execution's model proof.
 pub(crate) fn before_payload(target: &serde_json::Value) -> Result<(), String> {
     let Some(wanted) = current() else {
@@ -258,8 +275,15 @@ pub(crate) fn spawned(provider: &str, tmux: &str, nonce: &str) -> Result<(), Str
     let proof: Proof = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     if wanted.provider != provider
         || wanted.tmux != tmux
+        || proof.provider != provider
+        || proof.tmux != tmux
         || proof.nonce != nonce
         || proof.model != wanted.model
+        || proof.argv_sha256.is_empty()
+        || wanted
+            .resume
+            .as_ref()
+            .is_some_and(|sid| sid != &proof.session)
     {
         return Err("NotSent(\"routine_model_spawn_changed\")".into());
     }

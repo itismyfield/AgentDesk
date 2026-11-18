@@ -1344,6 +1344,8 @@ src/
 │   │   ├── tui_session_launch/
 │   │   │   ├── first_input/
 │   │   │   │   ├── native_tests.rs
+│   │   │   │   ├── routine_model_tests.rs
+│   │   │   │   ├── strict_model.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── launch_policy/
 │   │   │   │   ├── fresh_tests.rs

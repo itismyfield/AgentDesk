@@ -471,7 +471,7 @@ impl PreparedIncarnation {
         )
     }
 
-    pub(crate) fn finish_spawn(&self, result: io::Result<String>) -> Result<(), String> {
+    pub(crate) fn finish_binding_spawn(&self, result: io::Result<String>) -> Result<(), String> {
         result.map(|_| ()).map_err(|error| {
             crate::services::session_host::TmuxHost.kill(
                 &self.context.tmux_session,
@@ -482,6 +482,11 @@ impl PreparedIncarnation {
         #[cfg(unix)]
         registration::complete(&self.context)
             .map_err(|error| format!("Held(registration_refused): {error}"))?;
+        Ok(())
+    }
+
+    pub(crate) fn finish_spawn(&self, result: io::Result<String>) -> Result<(), String> {
+        self.finish_binding_spawn(result)?;
         #[cfg(unix)]
         crate::services::tui_input::routine_model::spawned(
             &self.context.provider,

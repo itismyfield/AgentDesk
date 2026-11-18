@@ -222,14 +222,15 @@ async fn a_persistent_model_patch_resumes_the_same_native_session_before_input_p
         &fx.shared, fx.channel, &provider,
     )
     .await;
-    let inherited = prepare(prep(parent_model.as_deref())).await.unwrap();
+    assert_eq!(parent_model.as_deref(), Some("channel-model"));
+    fx.tmux.mark_missing();
     let (argv, _, _) = fx.launch_required(
         fx.channel,
         &fx.name,
         SESSION,
         Some("channel-model"),
         None,
-        Some(inherited.requirement),
+        None,
     );
     assert!(argv.windows(2).any(|p| p == ["--resume", SESSION]));
     assert!(argv.windows(2).any(|p| p == ["--model", "channel-model"]));
@@ -243,12 +244,6 @@ async fn a_persistent_model_patch_resumes_the_same_native_session_before_input_p
         "channel-model"
     );
     assert_eq!(fx.shared.overrides.model_overrides.len(), 1);
-    let applied: String = sqlx::query_scalar("SELECT model FROM sessions WHERE session_key=$1")
-        .bind(channel_key(&fx.shared, &fx.name))
-        .fetch_one(pool)
-        .await
-        .unwrap();
-    assert_eq!(applied, "channel-model");
 
     fx.tmux.mark_present();
     fx.tmux.take_calls();

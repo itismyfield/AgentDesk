@@ -107,6 +107,9 @@ pub(super) fn clear_prompt_draft(session_name: &str) {
     }
 }
 
+#[cfg(unix)]
+pub(super) const ROUTINE_MODEL_FALLBACK: &str = "NotSent(\"routine_model_fallback\")";
+
 /// One Enter under the composer lock, only while the same dialog shows and the pane takes
 /// automatic writes; a pane protecting a person's draft gets no key.
 pub(in crate::services::claude_tui) fn dismiss_startup_dialog(
@@ -121,6 +124,16 @@ pub(in crate::services::claude_tui) fn dismiss_startup_dialog(
             return Ok(());
         }
         let shown = prompt_readiness_snapshot(session_name).pane_tail;
+        #[cfg(unix)]
+        if super::super::startup_dialog::rate_limit_fallback_selected(&shown) {
+            use crate::services::tui_input::routine_model as proof;
+            if proof::current()
+                .is_some_and(|wanted| wanted.provider == "claude" && wanted.tmux == session_name)
+            {
+                return Err(ROUTINE_MODEL_FALLBACK.into());
+            }
+            proof::invalidate(session_name)?;
+        }
         if detect_claude_startup_dialog(&shown).as_ref() != Some(dialog) {
             return Ok(());
         }

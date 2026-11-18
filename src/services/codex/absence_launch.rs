@@ -372,7 +372,7 @@ pub(super) fn execute_observed(
     .map_err(|error| error.to_string())?;
     let submitted =
         tui_session_launch::first_input::create(tui_session_launch::first_input::Create {
-            turn_nonce: cancel_token.as_deref().and_then(CancelToken::turn_nonce),
+            cancel_token: cancel_token.as_ref(),
             tmux_session_name,
             working_dir,
             prompt,
@@ -386,12 +386,13 @@ pub(super) fn execute_observed(
         replacement.complete();
     }
 
-    wire_cancel_token_to_tmux_session(cancel_token.as_ref(), tmux_session_name);
-
-    crate::services::codex_tui::tail_launch::record_resume_proof(
-        &submitted.prepared.context,
-        &submitted.validated_tail,
-    )?;
+    if crate::services::tui_input::routine_model::current().is_none() {
+        wire_cancel_token_to_tmux_session(cancel_token.as_ref(), tmux_session_name);
+        crate::services::codex_tui::tail_launch::record_resume_proof(
+            &submitted.prepared.context,
+            &submitted.validated_tail,
+        )?;
+    }
     tui_session_launch::first_input::observe(tui_session_launch::first_input::Observe {
         submitted,
         working_dir,

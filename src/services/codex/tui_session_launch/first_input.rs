@@ -1,11 +1,13 @@
-//! The argv-bearing create returns a ticket before rollout discovery and response tailing.
+//! The first-input writer returns a ticket before rollout observation.
 use super::*;
+
+mod strict_model;
 
 pub(in crate::services::codex) struct Create<'a> {
     pub tmux_session_name: &'a str,
     pub working_dir: &'a str,
     pub prompt: &'a str,
-    pub turn_nonce: Option<&'a str>,
+    pub cancel_token: Option<&'a std::sync::Arc<CancelToken>>,
     pub auth_profile: &'a str,
     pub launch: CodexTuiLaunchScript,
     pub selection: &'a crate::services::codex_tui::session::CodexTuiSessionSelection,
@@ -25,7 +27,7 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
         tmux_session_name,
         working_dir,
         prompt,
-        turn_nonce,
+        cancel_token,
         auth_profile,
         launch,
         selection: session_selection,
@@ -39,27 +41,25 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
         rollout_modified_since,
         handoff,
     } = launch;
-    fence.validate_tmux_publisher(tmux_session_name)?;
+    fence
+        .validate_tmux_publisher(tmux_session_name)
+        .map_err(strict_model::start_error)?;
     end_observation.prepare(&prepared.context);
+    let turn_nonce = cancel_token
+        .map(std::sync::Arc::as_ref)
+        .and_then(CancelToken::turn_nonce);
     crate::services::tui_o::cutover::attach_codex_first(&prepared.context, prompt, turn_nonce);
     let command = format!("bash {}", shell_escape(&script_path));
-    let tmux_result = match crate::services::claude_tui::owner_input::launch_hook() {
-        // The owner waiting on this thread spawns the argv create as its own effect.
-        Some(hook) => spawn_owned(
-            hook,
-            &prepared.context,
-            (tmux_session_name, working_dir),
-            prompt,
-            command,
-        )?,
-        None => crate::services::claude_tui::owner_input::argv_payload(&prepared.context, || {
-            crate::services::platform::tmux::create_session_with_identity(
-                tmux_session_name,
-                Some(working_dir),
-                &command,
-                &prepared.tmux_identity()?,
-            )
-        })?,
+    let hook = crate::services::claude_tui::owner_input::launch_hook();
+    let (tmux_result, deferred) = if strict_model::active() {
+        let hook = hook.ok_or("NotSent(\"routine_model_owner_missing\")")?;
+        let result = strict_model::spawn(&prepared, working_dir, &command)?;
+        (result, Some(hook))
+    } else {
+        (
+            spawn_with_prompt(hook, &prepared, working_dir, prompt, command)?,
+            None,
+        )
     };
 
     if !tmux_result.status.success() {
@@ -70,10 +70,12 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
             tmux_session_name,
             prompt,
         );
-        return Err(format!("tmux error: {}", stderr));
+        let error = format!("tmux error: {stderr}");
+        return Err(strict_model::start_error(error));
     }
 
-    crate::services::tmux_common::write_tmux_session_auth_profile(tmux_session_name, auth_profile)?;
+    crate::services::tmux_common::write_tmux_session_auth_profile(tmux_session_name, auth_profile)
+        .map_err(strict_model::start_error)?;
 
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
@@ -81,15 +83,32 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
     let validated_tail = crate::services::codex_tui::tail_launch::validate_selection(
         &prepared.context,
         session_selection,
-    )?;
-    fence.validate_tmux_publisher(tmux_session_name)?;
-    prepared.finish_spawn(crate::services::discord::stamp_spawn_markers(
-        tmux_session_name,
-        Some(&prepared),
-    ))?;
+    )
+    .map_err(strict_model::start_error)?;
+    fence
+        .validate_tmux_publisher(tmux_session_name)
+        .map_err(strict_model::start_error)?;
+    let stamped = crate::services::discord::stamp_spawn_markers(tmux_session_name, Some(&prepared));
+    if deferred.is_some() {
+        prepared.finish_binding_spawn(stamped)
+    } else {
+        prepared.finish_spawn(stamped)
+    }
+    .map_err(strict_model::start_error)?;
 
     end_observation.spawned(&prepared.context);
     drop(fence);
+
+    if let Some(hook) = deferred {
+        strict_model::submit(
+            hook,
+            &prepared.context,
+            &validated_tail,
+            cancel_token,
+            session_selection,
+            prompt,
+        )?;
+    }
 
     Ok(Submitted {
         prepared,
@@ -97,6 +116,34 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
         rollout_modified_since,
         handoff,
     })
+}
+
+fn spawn_with_prompt(
+    hook: Option<crate::services::claude_tui::owner_input::LaunchHook>,
+    prepared: &PreparedIncarnation,
+    working_dir: &str,
+    prompt: &str,
+    command: String,
+) -> Result<std::process::Output, String> {
+    let tmux = &prepared.context.tmux_session;
+    match hook {
+        // The owner waiting on this thread spawns the argv create as its own effect.
+        Some(hook) => spawn_owned(
+            hook,
+            &prepared.context,
+            (tmux, working_dir),
+            prompt,
+            command,
+        ),
+        None => crate::services::claude_tui::owner_input::argv_payload(&prepared.context, || {
+            crate::services::platform::tmux::create_session_with_identity(
+                tmux,
+                Some(working_dir),
+                &command,
+                &prepared.tmux_identity()?,
+            )
+        }),
+    }
 }
 
 /// The argv create through the owner waiting on this thread: it reserves the frame on the prepared
@@ -263,7 +310,7 @@ pub(in crate::services::codex) fn publish_codex_tui_launch_script(
         "export AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE={}\n",
         shell_escape(policy)
     ));
-    let mut args = build_codex_tui_args(launch_options);
+    let mut args = strict_model::launch_args(launch_options);
     let hooks_enabled = codex_direct_tui_hook_overrides_enabled();
     let hooks_injected = hooks_enabled
         && {

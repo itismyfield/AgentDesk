@@ -57,13 +57,10 @@ pub(in crate::services::discord) async fn prepare(input: Input<'_>) -> Result<Pr
     } else {
         None
     };
-    let model = match model {
-        Some(model) if !model.trim().is_empty() => model.to_string(),
-        _ if *provider == ProviderKind::Claude => {
-            crate::services::claude_tui::session::default_model_for_home(overlay.home.as_deref())
-        }
-        _ => codex_default(codex_home.as_deref())?,
-    };
+    let model = model
+        .filter(|model| !model.trim().is_empty())
+        .ok_or_else(|| refused("explicit model missing"))?
+        .to_string();
     let live = match pane_liveness(tmux) {
         PaneLiveness::Live => true,
         PaneLiveness::DeadOrAbsent => false,
@@ -197,23 +194,6 @@ pub(in crate::services::discord) async fn prepare(input: Input<'_>) -> Result<Pr
         requirement,
         reused,
     })
-}
-
-fn codex_default(home: Option<&Path>) -> Result<String, String> {
-    let home = home.ok_or_else(|| refused("provider default home unproved"))?;
-    let raw = std::fs::read_to_string(home.join("config.toml"))
-        .map_err(|_| refused("provider default model unavailable"))?;
-    let config = raw
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|_| refused("provider default config invalid"))?;
-    let profile = config.get("profile").and_then(|v| v.as_str());
-    let model = profile
-        .and_then(|p| config.get("profiles")?.get(p)?.get("model")?.as_str())
-        .or_else(|| config.get("model").and_then(|v| v.as_str()));
-    model
-        .filter(|v| !v.trim().is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| refused("provider default model unproved"))
 }
 
 pub(in crate::services::discord) fn applies(

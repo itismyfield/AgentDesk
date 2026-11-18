@@ -258,6 +258,8 @@ pub(in crate::services::discord) use recovery_engine as recovery;
 // declaration and constructor literals reference it without a module-qualified
 // path (surface freeze, #3294/#3295 pattern).
 pub(crate) use queue_io::input_ingress::takes_start as owner_takes_start;
+#[cfg(unix)]
+pub(crate) use queue_io::input_owner::effect::created_codex_prompt;
 #[cfg(all(test, unix))]
 pub(crate) use queue_io::input_ingress::{
     ADOPTS as OWNER_ADOPTS_FOR_TEST, execution as owner_execution_for_test,

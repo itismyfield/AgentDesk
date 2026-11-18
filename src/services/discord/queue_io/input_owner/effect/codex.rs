@@ -245,6 +245,48 @@ pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String, channel: u64)
     })
 }
 
+/// A created Codex pane uses the same pinned writer as any idle Codex pane.
+#[cfg(unix)]
+pub(crate) fn created_codex_prompt(
+    session: &str,
+    channel: u64,
+    prompt: &str,
+    cancel: Option<std::sync::Arc<crate::services::provider::CancelToken>>,
+) -> Result<owner_input::CreatedSubmit, String> {
+    use crate::services::claude_tui::guarded_outcome::SubmissionError;
+    use crate::services::claude_tui::input::{EffectPhase, PreparationHold};
+    let cmd = crate::services::platform::binary_resolver::runtime_command("tmux")
+        .map_err(|error| error.to_string())?;
+    let pane = busy_inject::Pane::with_program(session, cmd.get_program().into())?;
+    let session = session.to_owned();
+    let send = idle_codex(pane, session.clone(), channel);
+    let prompt = prompt.to_owned();
+    Ok(Box::new(move |frame| {
+        if frame != prompt {
+            let reason = "owner frame differs from the prepared Codex prompt";
+            owner_input::vetoed(reason);
+            return Err(reason.to_string().into());
+        }
+        if crate::services::provider::cancel_requested(cancel.as_deref()) {
+            let reason = "routine_model_input_cancelled";
+            owner_input::vetoed(reason);
+            return Err(reason.to_string().into());
+        }
+        match send(frame)? {
+            Completion::Submitted => Ok(()),
+            Completion::Held(detail) => Err(SubmissionError::Held(PreparationHold {
+                target: session,
+                reason: "codex_first_prompt_held",
+                phase: EffectPhase::BeforePayload,
+                detail,
+                modal: false,
+                unproven: false,
+            })),
+            other => Err(format!("{other:?}").into()),
+        }
+    }))
+}
+
 /// Main's `run_codex` mapping: a veto proves nothing reached the pane, a paste or Enter failure
 /// and a panic may have, and a local paste and Enter is the submission.
 fn map(

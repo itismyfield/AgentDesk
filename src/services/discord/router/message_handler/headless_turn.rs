@@ -875,7 +875,7 @@ async fn start_reserved_headless_turn_admitted(
     let model_resolution_channel_id =
         metadata_parent_channel_id(metadata.as_ref()).unwrap_or(channel_id);
     let model_for_turn = match routine_metadata::routine_model(metadata.as_ref()) {
-        Some(model) => Some(model),
+        Some(model) => Some(model.to_owned()),
         None => {
             super::super::super::commands::resolve_model_for_turn(
                 shared,
@@ -886,8 +886,7 @@ async fn start_reserved_headless_turn_admitted(
         }
     };
     #[cfg(unix)]
-    let persistent_tui_model = routine_metadata::valid_routine_metadata(metadata.as_ref())
-        .is_some_and(|m| m["execution_strategy"] == "persistent")
+    let persistent_tui_model = routine_metadata::persistent_model_metadata(metadata.as_ref())
         && super::super::super::commands::routine_model::applies(
             &provider,
             channel_id.get(),

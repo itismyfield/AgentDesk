@@ -62,14 +62,7 @@ pub(crate) fn detect_claude_startup_dialog(pane_tail: &str) -> Option<ClaudeStar
     if pane_tail.contains(RESUME_FROM_SUMMARY_MARKER) {
         return Some(ClaudeStartupDialog::ResumeFromSummary);
     }
-    if pane_tail.contains(RATE_LIMIT_FALLBACK_LIMIT_MARKER)
-        && pane_tail.contains(RATE_LIMIT_FALLBACK_OPTION_MARKER)
-        && pane_tail.lines().any(|line| {
-            line.trim_start()
-                .strip_prefix("❯ 1.")
-                .is_some_and(|option| option.trim() == RATE_LIMIT_FALLBACK_OPTION_MARKER)
-        })
-    {
+    if rate_limit_fallback_selected(pane_tail) {
         return Some(ClaudeStartupDialog::RateLimitFallback);
     }
     if pane_tail.contains(WORKSPACE_TRUST_MARKER) {
@@ -77,6 +70,17 @@ pub(crate) fn detect_claude_startup_dialog(pane_tail: &str) -> Option<ClaudeStar
         return Some(ClaudeStartupDialog::WorkspaceTrust { workspace });
     }
     None
+}
+
+pub(super) fn rate_limit_fallback_selected(pane_tail: &str) -> bool {
+    pane_tail.contains(DIALOG_FOOTER_MARKER)
+        && pane_tail.contains(RATE_LIMIT_FALLBACK_LIMIT_MARKER)
+        && pane_tail.contains(RATE_LIMIT_FALLBACK_OPTION_MARKER)
+        && pane_tail.lines().any(|line| {
+            line.trim_start()
+                .strip_prefix("❯ 1.")
+                .is_some_and(|option| option.trim() == RATE_LIMIT_FALLBACK_OPTION_MARKER)
+        })
 }
 
 pub(crate) fn plan_startup_dialog_response(dialog: &ClaudeStartupDialog) -> StartupDialogPlan {

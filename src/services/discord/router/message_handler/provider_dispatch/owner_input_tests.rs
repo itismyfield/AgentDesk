@@ -1103,15 +1103,7 @@ fn created_first_prompt_reserves_the_created_target_not_the_prepared_one() {
     );
 }
 
-/// A startup dialog's Enter is the attempt's first key: the owner's ready holds before it and no
-/// refusal after it proves the attempt unsent, so the head stays Unknown and nothing is re-held.
-#[test]
-fn startup_enter_is_the_attempts_first_key() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let dialog = "Resume from summary\n❯ 1. Resume from summary\n  2. Resume full session\n\
-        Enter to confirm · Esc to cancel\n";
-    let rig = rig("oc-dialog", 7_272_515, "startup", dialog.into(), IDLE);
-    let _driver = rig.trace_driver();
+fn startup_repaint_fixture(rig: &Rig, marker: &str) {
     fs::write(rig.renderer.join("body"), "").unwrap();
     // A menu confirmation is not a native user turn; keep its renderer record off the transcript.
     fs::write(
@@ -1135,12 +1127,24 @@ fn startup_enter_is_the_attempts_first_key() {
     let repaint = format!(
         "tries=0\nwhile [ \"$tries\" -lt 200 ]; do\n\
         shown=$({tmux} capture-pane -p -t '{pane}')\n\
-        case \"$shown\" in *'Resume from summary'*) ;;\n\
+        case \"$shown\" in *'{marker}'*) ;;\n\
         *) {tmux} clear-history -t '{pane}'; exit $? ;; esac\n\
         tries=$((tries+1)); sleep 0.01\ndone\nexit 1\n"
     );
     rig.mark("after-Enter", &repaint);
     rig.mark("fail-load", "");
+}
+
+/// A startup dialog's Enter is the attempt's first key: the owner's ready holds before it and no
+/// refusal after it proves the attempt unsent, so the head stays Unknown and nothing is re-held.
+#[test]
+fn startup_enter_is_the_attempts_first_key() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dialog = "Resume from summary\n❯ 1. Resume from summary\n  2. Resume full session\n\
+        Enter to confirm · Esc to cancel\n";
+    let rig = rig("oc-dialog", 7_272_515, "startup", dialog.into(), IDLE);
+    let _driver = rig.trace_driver();
+    startup_repaint_fixture(&rig, "Resume from summary");
     let result = created_first_prompt(&rig);
     assert!(result.is_err(), "{result:?}");
     rig.assert_hooks_completed();

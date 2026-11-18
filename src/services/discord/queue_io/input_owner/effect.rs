@@ -262,6 +262,8 @@ mod codex;
 #[path = "effect/herdr_fixture_tests.rs"]
 mod herdr;
 pub(crate) use claude::BusyClaude;
+#[cfg(unix)]
+pub(crate) use codex::created_codex_prompt;
 pub(crate) use codex::{BusyCodex, BusyCodexHerdr, CodexInput, idle_codex};
 
 #[cfg(test)]
