@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Repeat2, Send } from "lucide-react";
 import { ActionMenu } from "../common/ActionMenu";
 import { Select } from "../common/Select";
 import { Drawer } from "../common/overlay/Drawer";
@@ -7,30 +8,30 @@ import type {
   GitHubComment,
   KanbanReview,
 } from "../../api";
+import { Badge, type BadgeTone } from "../../kit/free/badge-clean";
+import { Button } from "../../kit/free/button-clean";
+import { TextField } from "../../kit/free/text-field-clean";
+import { KANBAN_STATUS_TONES } from "../../theme/statusTokens";
 import CardIssueContent from "./CardIssueContent";
 import CardTimeline from "./CardTimeline";
 import TurnTranscriptPanel from "./TurnTranscriptPanel";
 import KanbanCardActivitySections from "./KanbanCardActivitySections";
 import KanbanCardReviewPanel from "./KanbanCardReviewPanel";
+import { KIT_TOUCH_BUTTON, KIT_TOUCH_FIELD } from "./CardDetailParts";
 import { localeName } from "../../i18n";
-import {
-  SurfaceActionButton,
-  SurfaceCard,
-  SurfaceMetricPill,
-  SurfaceNotice,
-} from "../common/SurfacePrimitives";
+import { SurfaceNotice } from "../common/SurfacePrimitives";
 import type {
   Agent,
   KanbanCard,
   KanbanCardMetadata,
   KanbanCardPriority,
+  KanbanCardStatus,
   TaskDispatch,
   UiLanguage,
 } from "../../types";
 import {
   PRIORITY_OPTIONS,
   STATUS_TRANSITIONS,
-  TRANSITION_STYLE,
   buildGitHubIssueUrl,
   cardTitle,
   formatIso,
@@ -40,6 +41,22 @@ import {
   stringifyCardMetadata,
   type EditorState,
 } from "./kanban-utils";
+
+/** Badge tone for the card's own status; running states pulse. */
+function cardStatusBadge(status: KanbanCardStatus): { tone: BadgeTone; live?: boolean } {
+  switch (status) {
+    case "ready":
+    case "requested": return { tone: "info" };
+    case "in_progress":
+    case "qa_in_progress": return { tone: "info", live: true };
+    case "review":
+    case "qa_pending": return { tone: "purple" };
+    case "blocked":
+    case "qa_failed": return { tone: "danger" };
+    case "done": return { tone: "success" };
+    default: return { tone: "neutral" };
+  }
+}
 
 export function canRetryCard(card: KanbanCard | null) {
   return Boolean(card && ["blocked", "requested", "in_progress"].includes(card.status));
@@ -159,11 +176,6 @@ export default function KanbanCardDetail({
 }: KanbanCardDetailProps) {
 
   const agentMap = new Map(agents.map((agent) => [agent.id, agent]));
-  const inputChrome = {
-    borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-    background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
-    color: "var(--th-text-primary)",
-  } as const;
   const githubIssueUrl = buildGitHubIssueUrl(
     selectedCard.github_repo,
     selectedCard.github_issue_number,
@@ -251,17 +263,50 @@ export default function KanbanCardDetail({
     setRedispatching(false);
   };
 
+  const transitionTargets = STATUS_TRANSITIONS[selectedCard.status] ?? [];
+  const changeStatus = async (target: KanbanCardStatus) => {
+    if (target === "done" && editor.review_checklist.some((item) => !item.done)) {
+      setActionError(tr("review checklist를 모두 완료해야 done으로 이동할 수 있습니다.", "Complete the review checklist before moving to done."));
+      return;
+    }
+    if (target === "backlog") {
+      setCancelConfirm({ cardIds: [selectedCard.id], source: "single" });
+      return;
+    }
+    setSavingCard(true);
+    setActionError(null);
+    try {
+      await onUpdateCard(selectedCard.id, { status: target });
+      invalidateCardActivity(selectedCard.id);
+      setEditor((prev) => ({ ...prev, status: target }));
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : tr("상태 전환에 실패했습니다.", "Failed to change status."));
+    } finally {
+      setSavingCard(false);
+    }
+  };
+  const statusBadge = cardStatusBadge(selectedCard.status);
+  const timestamps: Array<[string, string]> = [
+    [tr("생성", "Created"), formatIso(selectedCard.created_at, locale)],
+    [tr("요청", "Requested"), formatIso(selectedCard.requested_at, locale)],
+    [tr("시작", "Started"), formatIso(selectedCard.started_at, locale)],
+    [tr("완료", "Completed"), formatIso(selectedCard.completed_at, locale)],
+  ];
+
   return (
     <Drawer open onClose={onClose} title={tr("카드 상세", "Card details")} ariaLabel={tr("카드 상세", "Card details")} width="min(820px, 100vw)" closeButtonClassName="min-h-11 min-w-11">
-      <div data-testid="kanban-card-drawer" className="min-w-0 space-y-5 pb-4">
-        <div className="flex items-start justify-between gap-3">
+      <div data-testid="kanban-card-drawer" className="@container/card flex min-w-0 flex-col gap-6 pb-4">
+        <header className="flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-th-text-muted">
-              <span>{tr("상태", "Status")} <strong className="ml-1 font-medium text-th-text-primary">{labelForStatus(selectedCard.status, tr)}</strong></span>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-th-text-muted">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="sr-only">{tr("상태", "Status")}</span>
+                <Badge size="md" tone={statusBadge.tone} dot={!statusBadge.live} live={statusBadge.live}>{labelForStatus(selectedCard.status, tr)}</Badge>
+              </span>
               <span>{tr("우선순위", "Priority")} <strong className="ml-1 font-medium text-th-text-primary">{priorityLabel(selectedCard.priority, tr)}</strong></span>
               {selectedCard.github_repo ? <span className="[overflow-wrap:anywhere]">{selectedCard.github_repo}</span> : null}
             </div>
-            <h3 className="mt-3 text-xl font-semibold leading-7 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-heading)" }}>
+            <h3 className="m-0 mt-3 text-xl font-semibold leading-7 text-th-text-heading [overflow-wrap:anywhere]">
               {selectedCard.github_issue_number ? <span className="mr-2 text-base font-normal tabular-nums text-th-text-muted">#{selectedCard.github_issue_number}</span> : null}
               {cardTitle(selectedCard.title)}
             </h3>
@@ -290,7 +335,7 @@ export default function KanbanCardDetail({
               },
             ]}
           />
-        </div>
+        </header>
 
         {extra}
 
@@ -300,110 +345,11 @@ export default function KanbanCardDetail({
           </SurfaceNotice>
         )}
 
-        <div className="grid gap-3 md:grid-cols-2">
-          <label className="space-y-1">
-            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("제목", "Title")}</span>
-            <input
-              value={editor.title}
-              onChange={(event) => setEditor((prev) => ({ ...prev, title: event.target.value }))}
-              className="min-h-11 w-full rounded-md border border-th-border-subtle bg-th-bg-surface px-3 py-2 text-sm"
-              style={inputChrome}
-            />
-          </label>
-          <div className="space-y-1">
-            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("상태 전환", "Status")}</span>
-            <div className="flex flex-wrap gap-1.5">
-              {(STATUS_TRANSITIONS[selectedCard.status] ?? []).map((target) => {
-                const style = TRANSITION_STYLE[target] ?? TRANSITION_STYLE.backlog;
-                return (
-                  <button
-                    key={target}
-                    type="button"
-                    disabled={savingCard}
-                    onClick={async () => {
-                      if (target === "done" && editor.review_checklist.some((item) => !item.done)) {
-                        setActionError(tr("review checklist를 모두 완료해야 done으로 이동할 수 있습니다.", "Complete the review checklist before moving to done."));
-                        return;
-                      }
-                      if (target === "backlog") {
-                        setCancelConfirm({ cardIds: [selectedCard.id], source: "single" });
-                        return;
-                      }
-                      setSavingCard(true);
-                      setActionError(null);
-                      try {
-                        await onUpdateCard(selectedCard.id, { status: target });
-                        invalidateCardActivity(selectedCard.id);
-                        setEditor((prev) => ({ ...prev, status: target }));
-                      } catch (error) {
-                        setActionError(error instanceof Error ? error.message : tr("상태 전환에 실패했습니다.", "Failed to change status."));
-                      } finally {
-                        setSavingCard(false);
-                      }
-                    }}
-                    className="min-h-11 rounded-md border px-3 py-2 text-xs font-medium transition-opacity hover:opacity-80 disabled:opacity-40"
-                    style={{
-                      backgroundColor: style.bg,
-                      borderColor: style.text,
-                      color: style.text,
-                    }}
-                  >
-                    → {labelForStatus(target, tr)}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          <label className="space-y-1">
-            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("담당자", "Assignee")}</span>
-            <Select
-              value={editor.assignee_agent_id}
-              onChange={(event) => setEditor((prev) => ({ ...prev, assignee_agent_id: event.target.value }))}
-            >
-              <option value="">{tr("없음", "None")}</option>
-              {agents.map((agent) => (
-                <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
-              ))}
-            </Select>
-          </label>
-          <label className="space-y-1">
-            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("우선순위", "Priority")}</span>
-            <Select
-              value={editor.priority}
-              onChange={(event) => setEditor((prev) => ({ ...prev, priority: event.target.value as KanbanCardPriority }))}
-            >
-              {PRIORITY_OPTIONS.map((priority) => (
-                <option key={priority} value={priority}>{priorityLabel(priority, tr)}</option>
-              ))}
-            </Select>
-          </label>
-          <SurfaceCard className="p-3" style={{ background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)" }}>
-            <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("GitHub", "GitHub")}</div>
-            <div style={{ color: "var(--th-text-primary)" }}>
-              {githubIssueUrl ? (
-                <a href={githubIssueUrl} target="_blank" rel="noopener noreferrer" className="hover:underline" style={{ color: "#93c5fd" }}>
-                  #{selectedCard.github_issue_number ?? "-"}
-                </a>
-              ) : (
-                selectedCard.github_issue_number ? `#${selectedCard.github_issue_number}` : "-"
-              )}
-            </div>
-          </SurfaceCard>
-        </div>
-
-        {/* Blocked reason */}
         {selectedCard.blocked_reason && (
-          <SurfaceNotice tone="danger" className="block">
-            <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "#ef4444" }}>
-              {tr("수동 개입 사유", "Manual Intervention Reason")}
-            </div>
-            <div className="text-sm" style={{ color: "#fca5a5" }}>
-              {selectedCard.blocked_reason}
-            </div>
-          </SurfaceNotice>
+          <section role="note" className="flex min-w-0 flex-col gap-1.5 rounded-xl bg-[color-mix(in_oklch,var(--err)_12%,transparent)] px-4 py-3 shadow-[inset_0_0_0_0.5px_color-mix(in_oklch,var(--err)_40%,transparent)]">
+            <Badge tone="danger" dot className="self-start">{tr("수동 개입 사유", "Manual Intervention Reason")}</Badge>
+            <p className="m-0 whitespace-pre-wrap text-sm leading-5 text-th-text-primary [overflow-wrap:anywhere]">{selectedCard.blocked_reason}</p>
+          </section>
         )}
 
         <KanbanCardReviewPanel
@@ -417,7 +363,73 @@ export default function KanbanCardDetail({
           tr={tr}
         />
 
-        {/* Description / Issue Sections */}
+        <section className="flex min-w-0 flex-col gap-3" aria-label={tr("카드 편집", "Edit card")}>
+          <div className="grid gap-3 @min-[36rem]/card:grid-cols-2">
+            <TextField
+              label={tr("제목", "Title")}
+              size="lg"
+              className={KIT_TOUCH_FIELD}
+              value={editor.title}
+              onChange={(event) => setEditor((prev) => ({ ...prev, title: event.target.value }))}
+            />
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <span className="text-[13px] font-medium leading-5 text-th-text-primary">{tr("상태 전환", "Status")}</span>
+              <div className="flex flex-wrap gap-1.5">
+                {transitionTargets.map((target) => (
+                  <Button
+                    key={target}
+                    variant="secondary"
+                    size="lg"
+                    className={KIT_TOUCH_BUTTON}
+                    disabled={savingCard}
+                    icon={<i aria-hidden="true" className="block size-2 rounded-full" style={{ background: KANBAN_STATUS_TONES[target as keyof typeof KANBAN_STATUS_TONES]?.accent ?? "var(--th-text-muted)" }} />}
+                    onClick={() => void changeStatus(target)}
+                  >
+                    {`→ ${labelForStatus(target, tr)}`}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="grid gap-3 @min-[36rem]/card:grid-cols-2 @min-[48rem]/card:grid-cols-3">
+            <label className="flex min-w-0 flex-col gap-1.5">
+              <span className="text-[13px] font-medium leading-5 text-th-text-primary">{tr("담당자", "Assignee")}</span>
+              <Select
+                value={editor.assignee_agent_id}
+                onChange={(event) => setEditor((prev) => ({ ...prev, assignee_agent_id: event.target.value }))}
+              >
+                <option value="">{tr("없음", "None")}</option>
+                {agents.map((agent) => (
+                  <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
+                ))}
+              </Select>
+            </label>
+            <label className="flex min-w-0 flex-col gap-1.5">
+              <span className="text-[13px] font-medium leading-5 text-th-text-primary">{tr("우선순위", "Priority")}</span>
+              <Select
+                value={editor.priority}
+                onChange={(event) => setEditor((prev) => ({ ...prev, priority: event.target.value as KanbanCardPriority }))}
+              >
+                {PRIORITY_OPTIONS.map((priority) => (
+                  <option key={priority} value={priority}>{priorityLabel(priority, tr)}</option>
+                ))}
+              </Select>
+            </label>
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <span className="text-[13px] font-medium leading-5 text-th-text-primary">GitHub</span>
+              <div className="flex min-h-11 items-center rounded-lg bg-surface-subtle px-3 text-sm text-th-text-primary shadow-[inset_0_0_0_0.5px_var(--th-border-subtle)]">
+                {githubIssueUrl ? (
+                  <a href={githubIssueUrl} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 min-w-11 items-center tabular-nums text-[var(--info)] hover:underline">
+                    #{selectedCard.github_issue_number ?? "-"}
+                  </a>
+                ) : (
+                  selectedCard.github_issue_number ? `#${selectedCard.github_issue_number}` : "-"
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+
         <CardIssueContent
           card={selectedCard}
           editor={editor}
@@ -425,13 +437,7 @@ export default function KanbanCardDetail({
           tr={tr}
         />
 
-        <div
-          className="rounded-2xl border overflow-hidden"
-          style={{
-            borderColor: "var(--th-border-subtle)",
-            backgroundColor: "rgba(255,255,255,0.02)",
-          }}
-        >
+        <div className="min-w-0 rounded-2xl bg-th-card-bg shadow-[inset_0_0_0_0.5px_var(--th-border-subtle)]">
           <TurnTranscriptPanel
             source={{
               type: "card",
@@ -445,52 +451,47 @@ export default function KanbanCardDetail({
         </div>
 
         {canRedispatchCard(selectedCard) && (
-          <SurfaceCard className="space-y-3">
+          <section className="flex min-w-0 flex-col gap-2.5" aria-labelledby="kanban-card-redispatch">
             <div>
-              <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
+              <h4 id="kanban-card-redispatch" className="m-0 text-sm font-medium text-th-text-heading">
                 {tr("이슈 변경 후 재전송", "Resend with Updated Issue")}
               </h4>
-              <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+              <p className="m-0 mt-0.5 text-xs text-th-text-muted [word-break:keep-all]">
                 {tr(
                   "이슈 본문을 수정한 뒤, 기존 dispatch를 취소하고 새로 전송합니다.",
                   "Cancel current dispatch and resend with the updated issue body.",
                 )}
               </p>
             </div>
-            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-              <input
-                type="text"
+            <div className="grid gap-2.5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+              <TextField
+                size="lg"
+                className={KIT_TOUCH_FIELD}
                 placeholder={tr("사유 (선택)", "Reason (optional)")}
+                aria-label={tr("재전송 사유 (선택)", "Resend reason (optional)")}
                 value={redispatchReason}
                 onChange={(e) => setRedispatchReason(e.target.value)}
-                className="min-h-11 w-full rounded-md border border-th-border-subtle bg-th-bg-surface px-3 py-2 text-sm"
-                style={inputChrome}
               />
-              <SurfaceActionButton
-                type="button"
-                onClick={() => void handleRedispatch()}
-                disabled={redispatching}
-                tone="warn"
-                className="whitespace-nowrap"
-              >
+              <Button variant="secondary" size="lg" className={KIT_TOUCH_BUTTON} icon={<Send />} disabled={redispatching} onClick={() => void handleRedispatch()}>
                 {redispatching ? tr("전송 중...", "Sending...") : tr("재전송", "Resend")}
-              </SurfaceActionButton>
+              </Button>
             </div>
-          </SurfaceCard>
+          </section>
         )}
 
         {canRetryCard(selectedCard) && (
-          <SurfaceCard className="space-y-3">
+          <section className="flex min-w-0 flex-col gap-2.5" aria-labelledby="kanban-card-retry">
             <div>
-              <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
+              <h4 id="kanban-card-retry" className="m-0 text-sm font-medium text-th-text-heading">
                 {tr("재시도 / 담당자 변경", "Retry / Change Assignee")}
               </h4>
-              <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+              <p className="m-0 mt-0.5 text-xs text-th-text-muted [word-break:keep-all]">
                 {tr("동일 내용으로 재전송하거나 다른 에이전트에게 전환합니다.", "Resend as-is or switch to another agent.")}
               </p>
             </div>
-            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <div className="grid gap-2.5 sm:grid-cols-[minmax(0,1fr)_auto]">
               <Select
+                aria-label={tr("재시도 담당자", "Retry assignee")}
                 value={retryAssigneeId}
                 onChange={(event) => setRetryAssigneeId(event.target.value)}
               >
@@ -498,25 +499,28 @@ export default function KanbanCardDetail({
                   <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
                 ))}
               </Select>
-              <SurfaceActionButton
-                type="button"
+              <Button
+                variant="secondary"
+                size="lg"
+                className={KIT_TOUCH_BUTTON}
+                icon={<Repeat2 />}
                 onClick={() => void handleRetryCard()}
                 disabled={retryingCard || !(retryAssigneeId || selectedCard.assignee_agent_id)}
-                tone="accent"
-                className="whitespace-nowrap"
               >
                 {retryingCard ? tr("전송 중...", "Sending...") : tr("재시도", "Retry")}
-              </SurfaceActionButton>
+              </Button>
             </div>
-          </SurfaceCard>
+          </section>
         )}
 
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4 text-sm">
-          <SurfaceMetricPill label={tr("생성", "Created")} value={formatIso(selectedCard.created_at, locale)} />
-          <SurfaceMetricPill label={tr("요청", "Requested")} value={formatIso(selectedCard.requested_at, locale)} />
-          <SurfaceMetricPill label={tr("시작", "Started")} value={formatIso(selectedCard.started_at, locale)} />
-          <SurfaceMetricPill label={tr("완료", "Completed")} value={formatIso(selectedCard.completed_at, locale)} />
-        </div>
+        <dl className="m-0 grid grid-cols-2 gap-2.5 @min-[36rem]/card:grid-cols-4" aria-label={tr("카드 시각", "Card times")}>
+          {timestamps.map(([label, value]) => (
+            <div key={label} className="flex min-w-0 flex-col gap-0.5 rounded-xl bg-surface-subtle px-3.5 py-3 shadow-[inset_0_0_0_0.5px_var(--th-border-subtle)]">
+              <dt className="truncate text-xs leading-4 text-th-text-muted">{label}</dt>
+              <dd className="m-0 truncate text-[13px] font-medium leading-5 text-th-text-primary" title={value}>{value}</dd>
+            </div>
+          ))}
+        </dl>
 
         <KanbanCardActivitySections
           card={selectedCard}
@@ -527,7 +531,6 @@ export default function KanbanCardDetail({
           getAgentLabel={getAgentLabel}
         />
 
-        {/* Unified GitHub comment timeline */}
         <CardTimeline
           ghComments={ghComments}
           timelineFilter={timelineFilter}
@@ -535,38 +538,38 @@ export default function KanbanCardDetail({
           tr={tr}
           locale={locale}
           onRefresh={() => invalidateCardActivity(selectedCard.id)}
+          card={selectedCard}
+          dispatches={dispatches}
+          auditLog={auditLog}
+          getAgentLabel={getAgentLabel}
         />
 
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+        <footer className="flex flex-col gap-3 border-t border-th-border-subtle pt-4 sm:flex-row sm:items-center sm:justify-end">
           {saveLock && (
-            <div role="status" className="flex min-w-0 flex-wrap items-center gap-2 text-xs leading-5 break-keep text-th-text-secondary" data-testid="card-save-lock">
+            <div role="status" className="flex min-w-0 flex-wrap items-center gap-2 text-xs leading-5 text-th-text-secondary [word-break:keep-all]" data-testid="card-save-lock">
               <span>{saveLock.reason}</span>
               {saveLock.onRetry && (
-                <button type="button" onClick={saveLock.onRetry} className="min-h-11 rounded-md border border-th-border-subtle px-3 text-xs font-medium text-th-text-primary">
+                <Button variant="secondary" size="lg" className={KIT_TOUCH_BUTTON} onClick={saveLock.onRetry}>
                   {tr("다시 읽기", "Load again")}
-                </button>
+                </Button>
               )}
             </div>
           )}
           <div className="flex flex-col-reverse gap-2 sm:flex-row">
-            <SurfaceActionButton
-              onClick={onClose}
-              tone="neutral"
-              className="text-sm"
-            >
+            <Button variant="secondary" size="lg" className={KIT_TOUCH_BUTTON} onClick={onClose}>
               {tr("닫기", "Close")}
-            </SurfaceActionButton>
-            <SurfaceActionButton
+            </Button>
+            <Button
+              variant="primary"
+              size="lg"
+              className={KIT_TOUCH_BUTTON}
               onClick={() => void handleSaveCard()}
               disabled={savingCard || !editor.title.trim() || !!saveLock}
-              tone="info"
-              className="text-sm"
-              style={{ color: "var(--th-text-primary)" }}
             >
               {savingCard ? tr("저장 중", "Saving") : tr("저장", "Save")}
-            </SurfaceActionButton>
+            </Button>
           </div>
-        </div>
+        </footer>
       </div>
     </Drawer>
   );
