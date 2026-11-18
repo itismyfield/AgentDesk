@@ -329,7 +329,26 @@ pub(super) async fn preserve_or_publish(ctx: Handoff<'_>) -> Outcome {
         "rowless-terminal:{}",
         outbound::outbound_fingerprint(&[&identity.to_string()])
     );
-    match crate::services::discord::terminal_delivery_custody::persist(&key, &payload).await {
+    #[cfg(unix)]
+    let persisted = match persist_unless_refused(&key, &payload, ctx.local, ctx.channel_id.get())
+        .await
+    {
+        Ok(true) => {
+            let discard = crate::services::discord::recovery_engine::refused_discard::discard_held;
+            let refused = crate::services::tui_o::cutover::IdentityError::AdoptionRefused;
+            if discard(ctx.shared, ctx.provider, ctx.local, refused).await {
+                return Outcome::Discarded;
+            }
+            // A reason that cannot be stored releases nothing: the body stays in custody.
+            crate::services::discord::terminal_delivery_custody::persist(&key, &payload).await
+        }
+        Ok(false) => Ok(()),
+        Err(error) => Err(error),
+    };
+    #[cfg(not(unix))]
+    let persisted =
+        crate::services::discord::terminal_delivery_custody::persist(&key, &payload).await;
+    match persisted {
         Ok(()) => Outcome::Deferred { key },
         // A read/CAS error may mean another retained record exists. A blind
         // fallback POST here would race that record's publisher after restart.
@@ -489,6 +508,12 @@ pub(super) async fn resume_with_gateway(
         return Err("unsupported or invalid terminal custody snapshot".into());
     }
     let provider = ProviderKind::from_str(&snapshot.provider).ok_or("unknown custody provider")?;
+    // A closed episode retires its custody whatever the destination's ownership reads now.
+    #[cfg(unix)]
+    if episode_closed(shared, &provider, &snapshot.local, snapshot.channel_id).await {
+        scrub(snapshot);
+        return Ok(true);
+    }
     let channel = ChannelId::new(snapshot.channel_id);
     let owner_channel = ChannelId::new(snapshot.watcher_owner_channel_id);
     use crate::services::discord::outbound::body_census::BodyOffer;
@@ -757,8 +782,8 @@ async fn discard_refused(
     true
 }
 
-/// Whether the episode `local` names is closed for `channel`: refused, or already holding a
-/// reason whatever the adoption reads now. True once its reason intent is durable.
+/// Whether the episode `local` names is closed for `channel`: its stored reason first, whatever
+/// the gate answers, then a refusal read after that lookup. True once its reason intent is durable.
 #[cfg(unix)]
 async fn episode_closed(
     shared: &Arc<SharedData>,
@@ -766,20 +791,68 @@ async fn episode_closed(
     local: &InflightTurnState,
     channel: u64,
 ) -> bool {
-    use crate::services::tui_o::cutover::{
-        IdentityError, peek_o_owns_tui_output_for_channel_quiet,
-    };
+    use crate::services::tui_o::cutover::IdentityError::{AdoptionRefused, AwaitingAdoption};
+    let discard = crate::services::discord::recovery_engine::refused_discard::discard_held;
+    if discard(shared, provider, local, AwaitingAdoption).await {
+        return true;
+    }
+    match destination_adoption(local, channel) {
+        Err(AdoptionRefused) => discard(shared, provider, local, AdoptionRefused).await,
+        _ => false,
+    }
+}
+
+/// The destination's adoption read quietly: an unavailable gate raises no identity alarm here.
+#[cfg(unix)]
+fn destination_adoption(
+    local: &InflightTurnState,
+    channel: u64,
+) -> Result<bool, crate::services::tui_o::cutover::IdentityError> {
     let kind = (local.channel_id == channel)
         .then_some(local.runtime_kind)
         .flatten();
-    // Quiet: an unavailable gate here keeps the custody and raises no identity alarm.
-    let held = match peek_o_owns_tui_output_for_channel_quiet(channel, kind) {
-        Err(held) => held,
-        // An owned or Legacy destination still closes an episode that already holds a reason.
-        Ok(_) => IdentityError::AwaitingAdoption,
-    };
-    let discard = crate::services::discord::recovery_engine::refused_discard::discard_held;
-    discard(shared, provider, local, held).await
+    crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_quiet(channel, kind)
+}
+
+/// Writes the custody record unless the destination's adoption, read under its lock after the
+/// record lock is held, is refused; true when that refusal kept the record unwritten.
+#[cfg(unix)]
+async fn persist_unless_refused(
+    key: &str,
+    payload: &serde_json::Value,
+    local: &InflightTurnState,
+    channel: u64,
+) -> Result<bool, String> {
+    use crate::services::discord::terminal_delivery_custody::persist_under as custody;
+    use crate::services::tui_o::cutover::IdentityError::{AdoptionRefused, AwaitingAdoption};
+    // Only a channel with an adoption to change takes its lock; others keep the plain write.
+    if !matches!(
+        destination_adoption(local, channel),
+        Ok(_) | Err(AwaitingAdoption)
+    ) {
+        return custody(
+            key,
+            payload,
+            |write: &mut dyn FnMut() -> Result<(), String>| write(),
+        )
+        .await
+        .map(|()| false);
+    }
+    let kind = (local.channel_id == channel)
+        .then_some(local.runtime_kind)
+        .flatten();
+    let mut refused = false;
+    custody(key, payload, |write| {
+        crate::services::tui_o::cutover::with_peeked_o_output(channel, kind, |held| {
+            if held.answer() == Err(AdoptionRefused) {
+                refused = true;
+                return Ok(());
+            }
+            write()
+        })
+    })
+    .await?;
+    Ok(refused)
 }
 
 /// Drops every stored copy of the body; the custody keeps only what retires it.
