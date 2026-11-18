@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Samples resource counters only; the workflow keeps observation failures separate from build results.
+# Samples memory and peak process names; the workflow keeps observation failures separate from build results.
 exec python3 - "$0" "$@" <<'PY'
 import contextlib
 import datetime
@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,7 @@ METRICS = (
     "cgroup_current_bytes", "cgroup_peak_bytes", "rss_sum_bytes",
     "largest_rss_bytes", "largest_hwm_bytes", "rustc_processes",
 )
+CRATE_TYPES = {"bin", "lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
 
 
 def write_json(path, value):
@@ -44,6 +46,36 @@ def read_number(path):
         return int(value) if value.isdigit() else None
     except OSError:
         return None
+
+
+def rustc_details(status, identity):
+    try:
+        executable, *args = os.fsdecode(status.with_name("cmdline").read_bytes()).split("\0")
+        # A reused PID must not attach another process's arguments to this sample.
+        if os.path.basename(executable) != "rustc" or not os.path.samestat(identity, status.stat()):
+            return {}
+    except OSError:
+        return {}
+
+    details = {"test": False}
+    crate_types = []
+    for index, arg in enumerate(args):
+        if arg == "--":
+            break
+        if arg == "--test":
+            details["test"] = True
+        option, separator, value = arg.partition("=")
+        if option not in ("--crate-name", "--crate-type"):
+            continue
+        if not separator and index + 1 < len(args):
+            value = args[index + 1]
+        if option == "--crate-name" and re.fullmatch(r"\w+", value):
+            details["crate_name"] = value
+        if option == "--crate-type" and all(kind in CRATE_TYPES for kind in value.split(",")):
+            crate_types.append(value)
+    if crate_types:
+        details["crate_type"] = ",".join(crate_types)
+    return details
 
 
 def snapshot():
@@ -95,28 +127,42 @@ def snapshot():
     values["cgroup_limit_state"] = "finite" if limits else limit_state
     if limit_state == "unavailable" and not limits:
         errors.append("cgroup_limit_unavailable")
-    rss, hwm, names = [], [], []
+    rss_sum, peaks, names = 0, {}, []
     for status in PROC.glob("[0-9]*/status"):
         try:
-            fields = dict(line.split(":", 1) for line in status.read_text().splitlines() if ":" in line)
+            with status.open(errors="replace") as stream:
+                fields = dict(line.split(":", 1) for line in stream.read().splitlines() if ":" in line)
+                comm = fields.get("Name", "").strip()
+                identity = os.fstat(stream.fileno()) if comm == "rustc" else None
         except FileNotFoundError:
             continue
         except OSError:
             errors.append("process_status_unreadable")
             continue
         if "Name" in fields:
-            names.append(fields["Name"].strip())
-        for field, collection in (("VmRSS", rss), ("VmHWM", hwm)):
+            names.append(comm)
+        for field, metric in (("VmRSS", "rss"), ("VmHWM", "hwm")):
             parts = fields.get(field, "").split()
             if parts and parts[0].isdigit():
-                collection.append(int(parts[0]) * 1024)
+                size = int(parts[0]) * 1024
+                if metric == "rss":
+                    rss_sum += size
+                if metric not in peaks or size > peaks[metric][0]:
+                    peaks[metric] = (size, comm, status, identity)
     if names:
         values["rustc_processes"] = names.count("rustc")
-    if rss:
-        values["rss_sum_bytes"], values["largest_rss_bytes"] = sum(rss), max(rss)
-    if hwm:
-        values["largest_hwm_bytes"] = max(hwm)
-    if not names or not rss or not hwm:
+    if "rss" in peaks:
+        values["rss_sum_bytes"] = rss_sum
+    details = {}
+    for metric, (size, comm, status, identity) in peaks.items():
+        values[f"largest_{metric}_bytes"] = size
+        if comm:
+            if status not in details:
+                details[status] = {"comm": comm}
+                if identity is not None:
+                    details[status].update(rustc_details(status, identity))
+            values[f"largest_{metric}_process"] = details[status]
+    if not names or len(peaks) != 2:
         errors.append("process_memory_unavailable")
     values["errors"] = sorted(set(errors))
     return values
