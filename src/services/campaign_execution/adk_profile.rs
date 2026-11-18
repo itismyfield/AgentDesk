@@ -59,6 +59,9 @@ pub struct ResolvedAdkProfile {
     pub tool_policy_digest: Digest,
     pub verification_spec_hash: Digest,
     pub environment_requirements: Vec<EnvironmentComponent>,
+    #[cfg(test)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_rules: Option<Box<crate::domain::campaign::pipeline_rules::PipelineRulesSnapshot>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,14 +73,19 @@ pub enum ProfileResolution {
 
 impl ResolvedAdkProfile {
     pub fn hash(&self) -> Result<Digest, serde_json::Error> {
-        digest_of(&(
+        let legacy = (
             &self.profile_version,
             &self.profile_hash,
             &self.roles,
             &self.limits,
             &self.tool_policy_digest,
             &self.verification_spec_hash,
-        ))
+        );
+        #[cfg(test)]
+        if let Some(snapshot) = &self.pipeline_rules {
+            return digest_of(&(legacy, snapshot.hash()?));
+        }
+        digest_of(&legacy)
     }
 }
 
@@ -162,6 +170,8 @@ pub fn resolve_adk_profile(
             tool_policy_digest: settings.tool_policy_digest.clone(),
             verification_spec_hash: spec_hash,
             environment_requirements: base.environment_requirements,
+            #[cfg(test)]
+            pipeline_rules: None,
         },
     }
 }

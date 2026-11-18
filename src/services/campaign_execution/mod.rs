@@ -15,6 +15,8 @@ pub mod host_gate;
 mod host_journal;
 pub mod main_integration;
 pub mod model;
+#[cfg(test)]
+pub mod pipeline_rules;
 pub mod profile;
 pub mod review_gate;
 pub mod stage_fsm;

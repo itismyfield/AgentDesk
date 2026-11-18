@@ -10,6 +10,13 @@
 # Applies to: tui-o-writer/WriterAdoptionMain.cfg, tui-o-writer/WriterAdoptionGateOnly.cfg, tui-o-writer/WriterAdoptionStage1.cfg, tui-o-writer/WriterAdoptionOwnedMut.cfg, tui-o-writer/WriterAdoptionUnadoptedOwned.cfg, tui-o-writer/WriterAdoptionExemptAll.cfg, tui-o-writer/WriterAdoptionWatcherNoGuard.cfg, tui-o-writer/WriterAdoptionBudgetMut.cfg, tui-o-writer/WriterAdoptionHeadlessMut.cfg
 atomic-write/AtomicWrite.cfg	AtomicWrite	-	-
 atomic-write/AtomicWriteMissingObservation.cfg	AtomicWrite	DiskObservation	-
+campaign-execution/CampaignProfilePin.cfg	CampaignProfilePin	-	-
+campaign-execution/CampaignProfilePinBefore.cfg	CampaignProfilePin	NoFalseMatch	-
+campaign-execution/CampaignProfilePinNoRole.cfg	CampaignProfilePin	NoFalseMatch	-
+campaign-execution/CampaignProfilePinNoScope.cfg	CampaignProfilePin	NoFalseMatch	-
+campaign-execution/CampaignProfilePinNoSource.cfg	CampaignProfilePin	NoFalseMatch	-
+campaign-execution/CampaignProfilePinReady.cfg	CampaignProfilePin	SnapshotNeverOpensExecution	-
+campaign-execution/CampaignProfilePinReplaceOld.cfg	CampaignProfilePin	NoSilentPinReplacement	-
 campaign-execution/CampaignVerification.cfg	CampaignVerification	-	-
 campaign-execution/CampaignVerificationChart.cfg	CampaignVerification	-	-
 campaign-execution/CampaignVerificationClaimKept.cfg	CampaignVerification	ImmediateRevokes,NoStartWithoutAuthority	-

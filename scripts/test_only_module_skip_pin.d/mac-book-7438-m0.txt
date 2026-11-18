@@ -1,0 +1,2 @@
+resolver | src/domain/campaign/pipeline_rules.rs
+resolver | src/services/campaign_execution/pipeline_rules.rs
