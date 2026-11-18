@@ -765,7 +765,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 100, "job_sha256" => "bf68473d54f1d35e5c9a4d98c9cea97172cd77f9619e17ab9d01e4dd821cc30c",
+    "job_timeout_minutes" => 100, "job_sha256" => "16116225d470e755d37fd2ea628b26981ffbd51f4fd6945f178da22c2187c3b2",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
