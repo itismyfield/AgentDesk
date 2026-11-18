@@ -30,6 +30,9 @@ afterEach(async () => {
   vi.mocked(setCampaignAutoQueue).mockReset(); vi.mocked(getCampaign).mockReset();
 });
 const statusText = () => container.querySelector("[role=status]")?.textContent;
+// The switch is the kit checkbox with role="switch"; an unknown save shows the recheck button instead.
+const control = () => container.querySelector<HTMLElement>(".campaign-auto-queue [role=switch], button.campaign-auto-queue")!;
+const controlText = () => container.querySelector(".campaign-auto-queue")?.textContent;
 
 it("turns auto-run on and says what was sent and why the rest is held back", async () => {
   const campaign = makeLargeCampaign();
@@ -43,7 +46,7 @@ it("turns auto-run on and says what was sent and why the rest is held back", asy
     handoffError: null,
   });
   await act(async () => root.render(<CampaignAutoQueueToggle campaign={campaign} tr={(_, en) => en} onSaved={onSaved} />));
-  const button = container.querySelector("button")!;
+  const button = control();
   expect(button.getAttribute("role")).toBe("switch");
   expect(button.getAttribute("aria-checked")).toBe("false");
   await act(async () => button.click());
@@ -62,10 +65,11 @@ it.each([
   const onSaved = vi.fn();
   vi.mocked(setCampaignAutoQueue).mockRejectedValue(failure);
   await act(async () => root.render(<CampaignAutoQueueToggle campaign={campaign} tr={(_, en) => en} onSaved={onSaved} />));
-  await act(async () => container.querySelector("button")!.click());
+  await act(async () => control().click());
   expect(setCampaignAutoQueue).toHaveBeenCalledWith(campaign, false);
   expect(onSaved).not.toHaveBeenCalled();
-  expect(container.querySelector("button")?.getAttribute("aria-checked")).toBe("true");
+  expect(control().getAttribute("aria-checked")).toBe("true");
+  expect((control() as HTMLInputElement).checked).toBe(true);
   expect(statusText()).toContain(shown);
   expect(getCampaign).not.toHaveBeenCalled();
 });
@@ -74,7 +78,7 @@ it("says turning it off only stops new handoffs", async () => {
   const campaign = { ...makeLargeCampaign(), auto_queue: true };
   vi.mocked(setCampaignAutoQueue).mockResolvedValue({ campaign: { ...campaign, auto_queue: false }, handoff: null, handoffError: null });
   await act(async () => root.render(<CampaignAutoQueueToggle campaign={campaign} tr={(_, en) => en} onSaved={vi.fn()} />));
-  await act(async () => container.querySelector("button")!.click());
+  await act(async () => control().click());
   expect(statusText()).toBe("Stopped sending new tasks. Tasks already sent keep running in auto-queue.");
 });
 
@@ -82,7 +86,7 @@ function Harness({ initial }: { initial: Campaign }) {
   const [value, setValue] = useState(initial);
   return <CampaignAutoQueueToggle campaign={value} tr={(_, en) => en} onSaved={(next) => setValue((current) => (next.revision >= current.revision ? next : current))} />;
 }
-const button = () => container.querySelector("button")!;
+const button = control;
 
 it("after a lost response describes what the server has now, not whether the save ran", async () => {
   const campaign = makeLargeCampaign();
@@ -111,14 +115,14 @@ it("shows the state as unknown until the server is read again", async () => {
   await act(async () => root.render(<Harness initial={campaign} />));
   await act(async () => button().click());
   expect(statusText()).toContain("Could not confirm the save");
-  expect(button().textContent).toBe("Check auto-run");
+  expect(controlText()).toBe("Check auto-run");
   expect(button().getAttribute("data-state")).toBe("unknown");
 
   vi.mocked(getCampaign).mockResolvedValueOnce({ ...campaign, auto_queue: true, revision: campaign.revision + 1 });
   await act(async () => button().click());
   expect(setCampaignAutoQueue).toHaveBeenCalledTimes(1);
   expect(button().getAttribute("aria-checked")).toBe("true");
-  expect(button().textContent).toBe("On");
+  expect(controlText()).toBe("On");
   expect(statusText()).toBe("The server has auto-run on now.");
 });
 
@@ -151,7 +155,7 @@ it("stays unknown through a poll that began before the failure and settles on th
 
     vi.mocked(setCampaignAutoQueue).mockRejectedValue(new Error("Request timeout: /api/campaigns/x"));
     vi.mocked(getCampaign).mockRejectedValueOnce(new Error("offline"));
-    const toggle = () => container.querySelector<HTMLButtonElement>(".campaign-auto-queue")!;
+    const toggle = control;
     await act(async () => toggle().click());
     expect(toggle().getAttribute("data-state")).toBe("unknown");
 
@@ -161,7 +165,7 @@ it("stays unknown through a poll that began before the failure and settles on th
     await act(async () => pending[1](read));
     expect(toggle().getAttribute("data-state")).toBe("unknown");
     await act(async () => pending[2](read));
-    expect(toggle().textContent).toBe("Off");
+    expect(controlText()).toBe("Off");
     expect(toggle().getAttribute("aria-checked")).toBe("false");
   } finally {
     vi.useRealTimers(); vi.unstubAllGlobals();
