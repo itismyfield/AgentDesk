@@ -5,12 +5,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct AttemptRef {
-    pub(crate) identity: QueueIdentity,
-    pub(crate) attempt: AttemptIdentity,
-}
-
 impl AttemptRef {
     pub(super) fn matches(&self, input: &InputAttempt) -> bool {
         self.identity == input.identity && input.attempt.as_ref() == Some(&self.attempt)

@@ -1173,7 +1173,8 @@ src/
 │   │   │   ├── restart_tests.rs
 │   │   │   ├── resume_record.rs
 │   │   │   ├── source.rs
-│   │   │   └── wait.rs
+│   │   │   ├── wait.rs
+│   │   │   └── watched.rs
 │   │   ├── session/
 │   │   │   ├── auto_compact_launch_tests.rs
 │   │   │   ├── effort.rs
@@ -2462,6 +2463,7 @@ src/
 │   │   │   │   │   ├── owner_input_codex_native_tests.rs
 │   │   │   │   │   ├── owner_input_codex_tests.rs
 │   │   │   │   │   ├── owner_input_common_operation_tests.rs
+│   │   │   │   │   ├── owner_input_effort_refused_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_busy_operation_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_pending_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
@@ -4235,7 +4237,12 @@ src/
 │   │   │   │   ├── notice_owner/
 │   │   │   │   │   ├── census/
 │   │   │   │   │   │   └── census_tests.rs
+│   │   │   │   │   ├── context_observation/
+│   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   ├── generation/
+│   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── census.rs
+│   │   │   │   │   ├── context_observation.rs
 │   │   │   │   │   └── generation.rs
 │   │   │   │   ├── v2/
 │   │   │   │   │   ├── carried.rs
@@ -4413,6 +4420,7 @@ src/
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── notice_activation_tests.rs
 │   │   │   │   ├── notice_cache_tests.rs
+│   │   │   │   ├── notice_context_tests.rs
 │   │   │   │   ├── notice_missing_tests.rs
 │   │   │   │   ├── notice_owner_tests.rs
 │   │   │   │   ├── notice_resume_tests.rs
@@ -4710,6 +4718,7 @@ src/
 │   │   │   │   ├── fresh_admission.rs
 │   │   │   │   ├── herdr_bootstrap.rs
 │   │   │   │   ├── hold_detail.rs
+│   │   │   │   ├── observation_tests.rs
 │   │   │   │   └── provenance_tests.rs
 │   │   │   ├── codex_verified/
 │   │   │   │   ├── provenance/
@@ -4723,6 +4732,7 @@ src/
 │   │   │   │   │   ├── live_grant_tests.rs
 │   │   │   │   │   ├── permission.rs
 │   │   │   │   │   └── permission_tests.rs
+│   │   │   │   ├── observation.rs
 │   │   │   │   └── provenance.rs
 │   │   │   ├── pane_registration/
 │   │   │   │   └── codex_launch_cause.rs
@@ -4821,6 +4831,7 @@ src/
 │   │   │   │   ├── owner_tests.rs
 │   │   │   │   ├── projection.rs
 │   │   │   │   ├── projection_tests.rs
+│   │   │   │   ├── refused.rs
 │   │   │   │   ├── requeue_tests.rs
 │   │   │   │   ├── retained.rs
 │   │   │   │   ├── source_admission.rs

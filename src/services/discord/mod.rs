@@ -270,7 +270,7 @@ pub(crate) use queue_io::input_owner::origin::Execution as OwnerExecutionForTest
 #[cfg(all(test, unix))]
 pub(crate) use queue_io::input_owner::{
     drive as owner_drive_for_test, effect as owner_effect_for_test,
-    held_watch as owner_held_watch_for_test,
+    held_watch as owner_held_watch_for_test, recovery as owner_recovery_for_test,
 };
 #[cfg(all(test, unix))]
 pub(crate) fn input_mailbox_for_test(
