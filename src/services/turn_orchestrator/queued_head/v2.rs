@@ -15,6 +15,7 @@ mod effort_continue;
 mod migration;
 pub(crate) mod origin;
 pub(crate) mod projection;
+mod readiness_hold;
 mod refused;
 mod retained;
 pub(crate) mod source_admission;
@@ -171,6 +172,8 @@ impl Owner {
                 head_injection: None,
                 retained_inputs: vec![],
                 refused_inputs: vec![],
+                readiness_holds: vec![],
+                refused_fronts: vec![],
                 terminal_identities: vec![],
                 namespace: Some(namespace),
                 owed_drop_receipts: Vec::new(),
@@ -545,7 +548,9 @@ impl Owner {
             t.identity.primary == message
                 || t.identity.sources.iter().any(|x| x.message_id == message)
         });
-        held.any(names) || settled || s.refused_inputs.iter().any(|r| r.names(message))
+        let refused = (s.refused_inputs.iter()).any(|r| r.names(message))
+            || (s.refused_fronts.iter()).any(|r| r.names(message));
+        held.any(names) || settled || refused
     }
 
     /// Whether this owner refuses a legacy turn claim for `message`: a source it holds never

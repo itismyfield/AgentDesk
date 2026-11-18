@@ -20,6 +20,7 @@ use super::{HeadPhase, PendingQueueItem, QueueIdentity};
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod effort_restart;
+pub(crate) mod readiness_hold;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SnapshotV2 {
@@ -30,6 +31,12 @@ pub(crate) struct SnapshotV2 {
     /// Inputs refused for good: no body, only what blocks a second admission and owes a notice.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) refused_inputs: Vec<RefusedInput>,
+    /// The fixed deadline of each front readiness held before any attempt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) readiness_holds: Vec<readiness_hold::ReadinessHold>,
+    /// Fronts refused for good before any attempt, kept like `refused_inputs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) refused_fronts: Vec<readiness_hold::RefusedFront>,
     pub(crate) terminal_identities: Vec<TerminalIdentity>,
     #[serde(default)]
     pub(crate) namespace: Option<String>,

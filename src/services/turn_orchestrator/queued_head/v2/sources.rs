@@ -36,6 +36,10 @@ impl Owner {
             .chain(
                 (self.snapshot.refused_inputs.iter())
                     .flat_map(|e| e.members.iter().map(|m| m.identity.clone())),
+            )
+            .chain(
+                (self.snapshot.refused_fronts.iter())
+                    .flat_map(|e| e.members.iter().map(|m| m.identity.clone())),
             );
         known.any(|old| {
             old.sources.iter().any(|a| {

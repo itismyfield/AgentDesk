@@ -38,7 +38,7 @@ async fn owed(handle: &ChannelMailboxHandle) -> Result<(String, Vec<Value>), Str
         .v2_request(|slot| {
             let state = slot.as_ref().ok_or("no input owner")?.json()?;
             let namespace = state["namespace"].as_str().ok_or("missing namespace")?;
-            let entries = ["retained_inputs", "refused_inputs"]
+            let entries = ["retained_inputs", "refused_inputs", "refused_fronts"]
                 .into_iter()
                 .flat_map(|kept| state[kept].as_array().into_iter().flatten());
             let owed = entries
