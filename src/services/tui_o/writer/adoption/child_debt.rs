@@ -70,7 +70,8 @@ impl ChildDebt {
                         len,
                     )
                 };
-                let frontier = frontier.ok_or("old child has no source-scoped delivery proof")?;
+                // Without a receipt, only a source containing no output can settle at zero.
+                let frontier = frontier.unwrap_or(0);
                 let mut turns = Turns::new(frontier);
                 let pinned = read(source, len, Some(&mut turns)).map_err(|error| match error {
                     Unread::Short(e) | Unread::Other(e) => e,

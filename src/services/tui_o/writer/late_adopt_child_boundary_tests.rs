@@ -506,6 +506,10 @@ async fn debt_case(boundary: &str) {
     let f = Fixture::new(false);
     let (_boot, candidate) = super::childheld::child_boot(&f);
     let (probe, old) = running(&f);
+    let silent = boundary == "empty";
+    if silent {
+        std::fs::write(&old, b"{\"type\":\"user\",\"sessionId\":\"running\",\"uuid\":\"prompt-a\",\"message\":{\"content\":\"prompt\"}}\n").unwrap();
+    }
     let debt = Arc::new(DebtProbe {
         base: probe.clone(),
         old: old.clone(),
@@ -550,7 +554,7 @@ async fn debt_case(boundary: &str) {
             log.upgrade().unwrap().replace(events.clone());
             true
         }));
-        if boundary == "turn" || boundary == "fence" {
+        if boundary != "session" {
             *probe.turn.lock().unwrap() = None;
         } else {
             probe.live.store(false, Ordering::SeqCst);
@@ -563,12 +567,14 @@ async fn debt_case(boundary: &str) {
         f.io.log.replace(events);
     }
     drive_until(|| candidate.peek() != Adoption::Released).await;
-    no_init(&f).await;
-    legacy_once(&f).await;
-    debt.ack.store(
-        std::fs::metadata(&debt.old).unwrap().len(),
-        Ordering::SeqCst,
-    );
+    if !silent {
+        no_init(&f).await;
+        legacy_once(&f).await;
+        debt.ack.store(
+            std::fs::metadata(&debt.old).unwrap().len(),
+            Ordering::SeqCst,
+        );
+    }
     if boundary == "fence" {
         drive_until(|| injected.load(Ordering::SeqCst)).await;
         no_init(&f).await;
@@ -590,7 +596,11 @@ async fn debt_case(boundary: &str) {
     } else {
         "current answer"
     };
-    assert_eq!(*f.old.lock().unwrap(), [expected]);
+    if silent {
+        assert!(f.old.lock().unwrap().is_empty());
+    } else {
+        assert_eq!(*f.old.lock().unwrap(), [expected]);
+    }
     append(&next, &row("after-ack", "O answer"));
     polls(3).await;
     assert_eq!(f.harness.port.posts(), ["O answer"]);
@@ -707,4 +717,15 @@ async fn ch3fix_fresh_takeover_rechecks_a_after_the_fence() {
         return;
     }
     debt_case("fence").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn ch3fix_output_free_a_needs_no_fabricated_receipt() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::ch3fix_output_free_a_needs_no_fabricated_receipt"
+    )) {
+        return;
+    }
+    debt_case("empty").await;
 }
