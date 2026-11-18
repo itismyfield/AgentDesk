@@ -1856,3 +1856,6 @@ async fn selector_clears_keep_configured_and_hosted_rows_pg() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+#[path = "routines/session_patch_tests.rs"]
+mod session_patch_tests;

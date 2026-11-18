@@ -885,6 +885,16 @@ async fn start_reserved_headless_turn_admitted(
             .await
         }
     };
+    #[cfg(unix)]
+    let persistent_tui_model = routine_metadata::valid_routine_metadata(metadata.as_ref())
+        .is_some_and(|m| m["execution_strategy"] == "persistent")
+        && super::super::super::commands::routine_model::applies(
+            &provider,
+            channel_id.get(),
+            tmux_session_name.as_deref(),
+        );
+    #[cfg(not(unix))]
+    let persistent_tui_model = false;
     let adk_session_name = channel_name.clone();
     let adk_session_info =
         derive_adk_session_info(Some(prompt), channel_name.as_deref(), Some(&current_path));
@@ -894,7 +904,11 @@ async fn start_reserved_headless_turn_admitted(
     post_adk_session_status_with_canonical_identity(
         adk_session_key.as_deref(),
         adk_session_name.as_deref(),
-        model_for_turn.as_deref(),
+        if persistent_tui_model {
+            None
+        } else {
+            model_for_turn.as_deref()
+        },
         "working",
         &provider,
         Some(&adk_session_info),
@@ -1136,39 +1150,44 @@ async fn start_reserved_headless_turn_admitted(
                 provider_execution_context,
                 || {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        super::provider_dispatch::execute(
-                            super::provider_dispatch::StreamingTurn {
-                                pool: execution_pool.as_ref(),
-                                registration_origin: canonical_registration.then_some(false),
-                                shared: Some(&turn_shared),
-                                provider: &provider_for_blocking,
-                                prompt: &context_prompt,
-                                session_id: session_id_clone.as_deref(),
-                                working_dir: &current_path_clone,
-                                system_prompt: Some(&system_prompt_owned),
-                                allowed_tools: &allowed_tools,
-                                cancel: cancel_token_clone,
-                                codex_observation: codex_observation.as_ref(),
-                                tmux_session_name: tmux_session_name.as_deref(),
-                                teardown: teardown_clearance.as_ref(),
-                                host: &turn_host,
-                                channel_id: channel_id.get(),
-                                model: model_for_turn.as_deref(),
-                                native_fast_mode: native_fast_mode_override,
-                                effort: effort_for_turn.as_deref(),
-                                codex_goals: codex_goals_override,
-                                compact_percent: compact_percent_for_claude,
-                                compact_lower_bound_tokens,
-                                compact_token_limit: compact_token_limit_for_codex,
-                                cache_ttl_minutes,
-                                dispatch_type: None,
-                                force_fresh: force_fresh_provider_session,
-                                submission: submission.as_ref(),
-                            },
-                            replay_start,
-                            tx.clone(),
-                            owner,
-                        )
+                        let turn = super::provider_dispatch::StreamingTurn {
+                            pool: execution_pool.as_ref(),
+                            registration_origin: canonical_registration.then_some(false),
+                            shared: Some(&turn_shared),
+                            provider: &provider_for_blocking,
+                            prompt: &context_prompt,
+                            session_id: session_id_clone.as_deref(),
+                            working_dir: &current_path_clone,
+                            system_prompt: Some(&system_prompt_owned),
+                            allowed_tools: &allowed_tools,
+                            cancel: cancel_token_clone,
+                            codex_observation: codex_observation.as_ref(),
+                            tmux_session_name: tmux_session_name.as_deref(),
+                            teardown: teardown_clearance.as_ref(),
+                            host: &turn_host,
+                            channel_id: channel_id.get(),
+                            model: model_for_turn.as_deref(),
+                            native_fast_mode: native_fast_mode_override,
+                            effort: effort_for_turn.as_deref(),
+                            codex_goals: codex_goals_override,
+                            compact_percent: compact_percent_for_claude,
+                            compact_lower_bound_tokens,
+                            compact_token_limit: compact_token_limit_for_codex,
+                            cache_ttl_minutes,
+                            dispatch_type: None,
+                            force_fresh: force_fresh_provider_session,
+                            submission: submission.as_ref(),
+                        };
+                        #[cfg(unix)]
+                        if persistent_tui_model {
+                            return super::provider_dispatch::routine_model::execute(
+                                turn,
+                                replay_start,
+                                tx.clone(),
+                                owner,
+                            );
+                        }
+                        super::provider_dispatch::execute(turn, replay_start, tx.clone(), owner)
                     }))
                 },
             );

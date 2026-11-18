@@ -3043,3 +3043,6 @@ mod verified_admission_tests {
         });
     }
 }
+
+#[cfg(unix)]
+pub(crate) use tui_session_launch::codex_tui_home;

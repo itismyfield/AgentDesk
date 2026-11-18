@@ -144,7 +144,7 @@ fn exact_codex_resume_id(id: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn codex_tui_home(
+pub(crate) fn codex_tui_home(
     overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
 ) -> Result<(Option<PathBuf>, bool), String> {
     crate::config::test_instance::environment::validate_overlay(

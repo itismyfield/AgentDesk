@@ -482,6 +482,12 @@ impl PreparedIncarnation {
         #[cfg(unix)]
         registration::complete(&self.context)
             .map_err(|error| format!("Held(registration_refused): {error}"))?;
+        #[cfg(unix)]
+        crate::services::tui_input::routine_model::spawned(
+            &self.context.provider,
+            &self.context.tmux_session,
+            &self.context.execution_nonce,
+        )?;
         Ok(())
     }
 

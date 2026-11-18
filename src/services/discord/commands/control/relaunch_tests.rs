@@ -186,6 +186,18 @@ impl Fixture {
         model: Option<&str>,
         effort: Option<&str>,
     ) -> (Vec<String>, Value, String) {
+        self.launch_required(channel, name, session, model, effort, None)
+    }
+
+    fn launch_required(
+        &self,
+        channel: ChannelId,
+        name: &str,
+        session: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+        requirement: Option<crate::services::tui_input::routine_model::Requirement>,
+    ) -> (Vec<String>, Value, String) {
         use std::os::unix::fs::PermissionsExt as _;
         let bin = tempfile::tempdir().unwrap();
         let (claude, argv) = (bin.path().join("claude"), bin.path().join("argv"));
@@ -206,32 +218,52 @@ impl Fixture {
             "http://127.0.0.1:9".to_string(),
         );
         let cancel = Arc::new(CancelToken::new());
-        let (cwd, context) = (self.cwd.path().to_str().unwrap(), self.context(channel));
+        let (cwd, mut context) = (self.cwd.path().to_str().unwrap(), self.context(channel));
+        let strict_shared = self.shared.clone();
+        let runtime = tokio::runtime::Handle::current();
+        if requirement.is_some() {
+            context.session_key = Some(channel_key(&self.shared, name));
+        }
         std::thread::scope(|scope| {
             let (token, clearance) = (cancel.clone(), cleared(name));
+            let strict_token = token.clone();
             let turn = scope.spawn(move || {
+                let _entered = runtime.enter();
                 crate::services::platform::with_provider_execution_context(context, || {
                     let (tx, _rx) = std::sync::mpsc::channel();
-                    crate::services::claude::execute_command_streaming(
-                        "hello",
-                        Some(session),
-                        cwd,
-                        tx,
-                        None,
-                        None,
-                        Some(token),
-                        Some(name),
-                        Some(&clearance),
-                        Some(channel.get()),
-                        None,
-                        model,
-                        Some(true),
-                        effort,
-                        None,
-                        0,
-                        None,
-                        None,
-                    )
+                    let run = || {
+                        crate::services::claude::execute_command_streaming(
+                            "hello",
+                            Some(session),
+                            cwd,
+                            tx,
+                            None,
+                            None,
+                            Some(token),
+                            Some(name),
+                            Some(&clearance),
+                            Some(channel.get()),
+                            None,
+                            model,
+                            Some(true),
+                            effort,
+                            None,
+                            0,
+                            None,
+                            None,
+                        )
+                    };
+                    match requirement {
+                        Some(requirement) => {
+                            crate::services::discord::router::message_handler::routine_model_launch_for_tests(
+                                crate::services::discord::commands::routine_model::Input {
+                                    shared: &strict_shared, provider: &ProviderKind::Claude, channel,
+                                    tmux: name, cwd, session: requirement.resume.as_deref(), model: Some(&requirement.model),
+                                }, strict_token, &clearance,
+                            )
+                        }
+                        None => run(),
+                    }
                 })
             });
             let deadline = Instant::now() + Duration::from_secs(60);
@@ -687,3 +719,6 @@ mod effort_tests;
 
 #[path = "relaunch_effort_restart_tests.rs"]
 mod restart_tests;
+
+#[path = "routine_model_tests.rs"]
+mod routine_model_tests;

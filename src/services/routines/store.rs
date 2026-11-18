@@ -3076,6 +3076,7 @@ impl RoutineStore {
     pub async fn interrupt_in_flight_run(
         &self,
         routine_id: &str,
+        expected_run_id: &str,
         error: &str,
         result_json: Option<Value>,
     ) -> Result<Option<String>> {
@@ -3089,10 +3090,12 @@ impl RoutineStore {
             WHERE r.id = $1
               AND rr.routine_id = $1
               AND rr.status = 'running'
+              AND rr.id = $2
             FOR UPDATE OF rr
             "#,
         )
         .bind(routine_id)
+        .bind(expected_run_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| anyhow!("interrupt routine {routine_id}: lock running run: {e}"))?;

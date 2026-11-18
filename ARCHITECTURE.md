@@ -718,7 +718,8 @@ src/
 │   │   │   ├── execution_mode_http_tests.rs
 │   │   │   ├── handlers.rs
 │   │   │   ├── helpers.rs
-│   │   │   └── responses.rs
+│   │   │   ├── responses.rs
+│   │   │   └── session_patch_tests.rs
 │   │   ├── scheduled_messages/
 │   │   │   ├── create.rs
 │   │   │   ├── delivery_render.rs
@@ -1566,7 +1567,8 @@ src/
 │   │   │   │   ├── relaunch_effort_restart_tests.rs
 │   │   │   │   ├── relaunch_effort_tests.rs
 │   │   │   │   ├── relaunch_model_tests.rs
-│   │   │   │   └── relaunch_tests.rs
+│   │   │   │   ├── relaunch_tests.rs
+│   │   │   │   └── routine_model_tests.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── recovery_command_tests.rs
@@ -1626,6 +1628,7 @@ src/
 │   │   │   ├── node_snapshot_tests.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── restart.rs
+│   │   │   ├── routine_model.rs
 │   │   │   ├── session.rs
 │   │   │   ├── sidecar.rs
 │   │   │   ├── skill.rs
@@ -2486,6 +2489,7 @@ src/
 │   │   │   │   │   ├── owner_start_failure_tests.rs
 │   │   │   │   │   ├── producer_error_test_support.rs
 │   │   │   │   │   ├── replay_scope.rs
+│   │   │   │   │   ├── routine_model.rs
 │   │   │   │   │   ├── start_failure.rs
 │   │   │   │   │   └── start_failure_state_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_followup_tests/
@@ -4011,6 +4015,7 @@ src/
 │   │   ├── run_diagnostics/
 │   │   │   └── formatting.rs
 │   │   ├── session_control/
+│   │   │   ├── persistent_target.rs
 │   │   │   └── provider_choice_tests.rs
 │   │   ├── store/
 │   │   │   ├── agent_start.rs
@@ -4282,6 +4287,8 @@ src/
 │   │   ├── input_key.rs
 │   │   ├── input_key_tests.rs
 │   │   ├── mod.rs
+│   │   ├── routine_model.rs
+│   │   ├── routine_model_tests.rs
 │   │   ├── submission.rs
 │   │   ├── submission_tmux.rs
 │   │   ├── target_epoch.rs

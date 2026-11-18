@@ -306,15 +306,30 @@ pub(super) fn run(
     sender: Sender<StreamMessage>,
     owner: Option<OwnerTurn>,
 ) -> Result<(), String> {
+    run_with(turn, start, sender, owner, super::execute_inner)
+}
+
+pub(super) fn run_with(
+    turn: StreamingTurn<'_>,
+    start: ReplayStart,
+    sender: Sender<StreamMessage>,
+    owner: Option<OwnerTurn>,
+    invoke: impl FnOnce(
+        StreamingTurn<'_>,
+        ReplayStart,
+        Sender<StreamMessage>,
+        Option<OwnerTurn>,
+    ) -> Result<(), String>,
+) -> Result<(), String> {
     let failure = owner.as_ref().map(Failure::owner);
     if failure.is_none() {
-        return super::execute_inner(turn, start, sender, owner);
+        return invoke(turn, start, sender, owner);
     }
     crate::services::claude::herdr_turn::take_owner_bound_failure();
     let watch = row_removed::watch(turn.provider, turn.channel_id);
     let context = turn.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        super::execute_inner(turn, start, sender, owner)
+        invoke(turn, start, sender, owner)
     }));
     let result = match result {
         Ok(result) => result,

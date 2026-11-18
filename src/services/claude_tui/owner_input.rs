@@ -86,6 +86,9 @@ pub(crate) enum ReadyRefusal {
 /// Before any C-s: the known execution, the server-side pane identity and the writer lease
 /// still hold. Commits nothing, so a refusal here leaves no key and no payload start.
 pub(crate) fn ready_payload() -> Result<(), ReadyRefusal> {
+    #[cfg(unix)]
+    crate::services::tui_input::routine_model::before_current_payload()
+        .map_err(ReadyRefusal::Target)?;
     let Some(scope) = current() else {
         return Ok(());
     };
@@ -539,6 +542,10 @@ pub(crate) fn argv_payload<R>(
     context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
     send: impl FnOnce() -> Result<R, String>,
 ) -> Result<R, String> {
+    #[cfg(unix)]
+    crate::services::tui_input::routine_model::before_payload(&serde_json::json!({
+        "host":"tmux", "owner":context.tmux_session, "execution_nonce":context.execution_nonce,
+    }))?;
     crate::services::tui_input::writer_lease::admits("tmux", &context.tmux_session)?;
     if let Some(scope) = current() {
         if context.provider != "codex"

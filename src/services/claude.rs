@@ -1755,6 +1755,12 @@ fn execute_streaming_local_tui_tmux(
     let mut transcript_path = session_resolution.transcript_path;
     let mut transcript_path_string = transcript_path.display().to_string();
     let mut resume = session_resolution.resume;
+    crate::services::tui_input::routine_model::validate_selection(
+        "claude",
+        tmux_session_name,
+        &resolved_session_id,
+        resume,
+    )?;
     // Told only when no live binding recovered the session, so the launch really starts fresh.
     if let Some(lost) = substitution.filter(|_| !resume) {
         let pool = crate::db::cancel_tombstones::global_pool();

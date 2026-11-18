@@ -317,6 +317,14 @@ pub(in crate::services::codex) fn publish_codex_tui_launch_script(
             shell_escape(&home.to_string_lossy())
         ));
     }
+    crate::services::tui_input::routine_model::prepared(
+        "codex",
+        tmux_session_name,
+        launch_options.resume_session_id.as_deref().unwrap_or(""),
+        launch_options.resume_session_id.is_some(),
+        &prepared.context.execution_nonce,
+        &args,
+    )?;
     let script_content = render_codex_tui_tmux_script(&env_lines, &codex_bin, &args);
     let rollout_modified_since = std::time::SystemTime::now();
 

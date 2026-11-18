@@ -308,6 +308,23 @@ pub struct ClaudeTuiLaunchConfig {
     pub resume: bool,
 }
 
+#[cfg(any(unix, test))]
+pub(crate) fn default_model_for_home(claude_home: Option<&Path>) -> String {
+    let settings = claude_home
+        .map(Path::to_path_buf)
+        .or_else(super::transcript_tail::default_claude_home)
+        .and_then(|home| {
+            crate::services::provider_auth::read_json_path(&home.join("settings.json"))
+        });
+    settings
+        .as_ref()
+        .and_then(|settings| settings.get("model"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or("default")
+        .to_string()
+}
+
 impl ClaudeTuiLaunchConfig {
     #[cfg(any(unix, test))]
     pub(crate) fn apply_relaunch_model_reset(
@@ -325,21 +342,7 @@ impl ClaudeTuiLaunchConfig {
         {
             return requested;
         }
-        let settings = claude_home
-            .map(Path::to_path_buf)
-            .or_else(super::transcript_tail::default_claude_home)
-            .and_then(|home| {
-                crate::services::provider_auth::read_json_path(&home.join("settings.json"))
-            });
-        self.model = Some(
-            settings
-                .as_ref()
-                .and_then(|settings| settings.get("model"))
-                .and_then(serde_json::Value::as_str)
-                .filter(|model| !model.trim().is_empty())
-                .unwrap_or("default")
-                .to_string(),
-        );
+        self.model = Some(default_model_for_home(claude_home));
         requested
     }
 

@@ -69,6 +69,14 @@ pub(super) fn prepare(
     let owner_first = resume && session::owner_first_submit(resolved_session_id);
     let prepare = session::prepare_claude_tui_launch_with_continuation_owner;
     let session_files = prepare(&launch_config, launch.fast_mode, launch.effort, owner_first)?;
+    crate::services::tui_input::routine_model::prepared(
+        "claude",
+        tmux_session_name,
+        resolved_session_id,
+        resume,
+        &prepared.context.execution_nonce,
+        &session::build_claude_tui_args(&launch_config, &session_files.hook_settings_path),
+    )?;
     session_prompt::record(launch_config.system_prompt.as_deref(), resume);
     let launch_script_path = session_files.launch_script_path.clone();
     *prepared_session_files = Some(session_files);

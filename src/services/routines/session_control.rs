@@ -1,3 +1,4 @@
+mod persistent_target;
 use anyhow::{Result, anyhow};
 use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
@@ -49,6 +50,7 @@ pub struct RoutineSessionControlResult {
     pub queued_remaining: Option<usize>,
     pub queue_preserved: Option<bool>,
     pub disconnected_sessions: u64,
+    pub controlled_run_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -88,8 +90,8 @@ impl RoutineSessionController {
         command: RoutineSessionCommand,
         reason: &str,
     ) -> Result<RoutineSessionControlResult> {
-        ensure_persistent_routine(routine)?;
-        let target = self.resolve_target(routine).await?;
+        let control_guard = self.lock_control_run(routine).await?;
+        let (target, controlled_run_id) = self.resolve_control_target(routine).await?;
         let provider_clear_behavior = provider_clear_behavior(&target.provider);
 
         let mut runtime_cleared = false;
@@ -134,7 +136,11 @@ impl RoutineSessionController {
             }
         }
 
+        if let Some(guard) = control_guard {
+            guard.commit().await?;
+        }
         Ok(RoutineSessionControlResult {
+            controlled_run_id,
             action: command.as_str(),
             routine_id: routine.id.clone(),
             agent_id: target.agent_id,
@@ -173,6 +179,7 @@ impl RoutineSessionController {
         };
 
         Ok(RoutineSessionControlResult {
+            controlled_run_id: None,
             action: "fresh_teardown",
             routine_id: routine.id.clone(),
             agent_id: target.agent_id,
@@ -297,6 +304,7 @@ impl RoutineSessionController {
         };
 
         Ok(RoutineSessionControlResult {
+            controlled_run_id: None,
             action: "fresh_teardown",
             routine_id: routine.id.clone(),
             agent_id: target.agent_id,

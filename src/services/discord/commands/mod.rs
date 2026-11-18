@@ -196,3 +196,6 @@ pub(in crate::services::discord) use restart::{
     probe_restart_disconnect_for_tests, probe_restart_seed_admitted_for_tests,
     probe_restart_seed_for_tests,
 };
+
+#[cfg(unix)]
+pub(in crate::services::discord) mod routine_model;

@@ -19,3 +19,6 @@ mod input_key_tests;
 
 pub(crate) mod target_epoch;
 pub(crate) mod writer_lease;
+
+#[cfg(unix)]
+pub(crate) mod routine_model;
