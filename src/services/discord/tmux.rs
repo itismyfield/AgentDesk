@@ -115,6 +115,8 @@ pub(in crate::services::discord) use self::tmux_session_files::reset_stale_relay
 pub(super) use self::tmux_session_files::session_panel_instance_key;
 pub(crate) use self::tmux_session_files::stamp_spawn_markers;
 #[cfg(test)]
+pub(in crate::services::discord) use self::tmux_session_files::sweep_orphan_session_files as sweep_orphan_session_files_for_tests;
+#[cfg(test)]
 pub(crate) use self::tmux_session_files::write_spawn_nonce;
 use self::tmux_session_files::{
     preserve_session_generation_mtime_after_write,

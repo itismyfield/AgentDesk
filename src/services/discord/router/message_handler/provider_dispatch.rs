@@ -23,11 +23,13 @@ mod owner_input;
 pub(super) mod routine_model;
 #[cfg(unix)]
 pub(in crate::services::discord) mod start_failure;
-#[cfg(all(test, unix))]
-pub(in crate::services::discord) use owner_input::hand_busy;
 #[cfg(unix)]
 pub(in crate::services::discord) use owner_input::{
     OwnerTurn, admit_start as owner_admit_start, recover as owner_recover, wake as owner_wake,
+};
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use owner_input::{
+    hand_busy, tests::assert_routine_owner_delivery,
 };
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use owner_input::{

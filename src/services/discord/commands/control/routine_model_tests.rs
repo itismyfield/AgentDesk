@@ -344,11 +344,18 @@ async fn routine_fix4_claude_default_replaces_the_saved_pinned_model_pg() {
 }
 
 async fn default_restore(live: bool, test: &str) {
-    if !api_child(test.strip_prefix("agentdesk::").unwrap_or(test)) {
+    let child = {
+        // The child needs the normal PATH before either tmux fixture is installed.
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        api_child(test.strip_prefix("agentdesk::").unwrap_or(test))
+    };
+    if !child {
         return;
     }
     use crate::services::discord::router::message_handler::routine_model_boundary_for_tests;
     let _root = crate::config::TestRuntimeRootGuard::new();
+    use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture as Transport;
+    let native_tmux = Transport::tmux_program();
     let fx = Fixture::new(821941 + u64::from(live), RuntimeHandoffKind::ClaudeTui).await;
     let _idle = crate::services::discord::router::set_hosted_tui_promote_busy_for_tests(false);
     let pool = fx.shared.pg_pool.as_ref().unwrap();
@@ -447,6 +454,41 @@ async fn default_restore(live: bool, test: &str) {
         .await
         .unwrap()
     };
+    use crate::services::tui_input::routine_model as proof;
+    let proof_path = proof::path(&fx.name);
+    let old_proof = std::fs::read(&proof_path).unwrap();
+    let aged = std::time::SystemTime::now() - Duration::from_secs(3600);
+    let owner = PathBuf::from(tc::session_temp_path(&fx.name, "owner"));
+    let control = PathBuf::from(tc::session_temp_path(
+        "routine-model-orphan-control",
+        "owner",
+    ));
+    std::fs::write(&control, b"orphan sweep control").unwrap();
+    for path in [&proof_path, &owner, &control] {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(aged)
+            .unwrap();
+    }
+    crate::services::discord::tmux::sweep_orphan_session_files_for_tests().await;
+    assert!(
+        !control.exists(),
+        "production sweep must remove an aged orphan"
+    );
+    assert_eq!(
+        owner.exists(),
+        live,
+        "ordinary files track the pane lifetime"
+    );
+    assert_eq!(
+        std::fs::read(&proof_path).ok().as_deref(),
+        Some(old_proof.as_slice()),
+        "production sweep discarded the aged routine model proof (live={live})"
+    );
+    assert!(proof::tracks_native_session("claude", &fx.name, &session));
+
     fx.tmux.take_calls();
     store
         .patch_routine(
@@ -516,4 +558,14 @@ async fn default_restore(live: bool, test: &str) {
             .reused
     );
     assert!(!called(&fx.tmux.take_calls(), "kill-session"));
+
+    // Replay the actual launch argv through the owner on an isolated renderer.
+    tokio::task::block_in_place(|| {
+        crate::services::discord::router::message_handler::assert_routine_owner_delivery(
+            native_tmux,
+            &session,
+            &argv,
+            "default",
+        )
+    });
 }

@@ -30,15 +30,29 @@ impl Fixture {
         Self::with_lock(None)
     }
 
+    pub(crate) fn tmux_program() -> PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|p| p.join("tmux"))
+            .find(|p| p.is_file())
+            .expect("real tmux required")
+    }
+
+    pub(crate) fn after_shared_test_env_lock_with_tmux(real: PathBuf) -> Self {
+        Self::with_tmux(None, real)
+    }
+
     fn with_lock(lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>) -> Self {
+        Self::with_tmux(lock, Self::tmux_program())
+    }
+
+    fn with_tmux(
+        lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>,
+        real: PathBuf,
+    ) -> Self {
         let root = tempfile::Builder::new()
             .prefix("cgb2-")
             .tempdir_in("/tmp")
             .unwrap();
-        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-            .map(|p| p.join("tmux"))
-            .find(|p| p.is_file())
-            .expect("real tmux required");
         let socket = format!("cgb2-{}", std::process::id());
         let shim = root.path().join("tmux");
         std::fs::write(

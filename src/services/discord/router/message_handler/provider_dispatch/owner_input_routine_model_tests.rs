@@ -176,3 +176,32 @@ fn routine_fix4_claude_owner_first_input_requires_the_default_argv_proof() {
     assert_eq!(rig.events(), ["paste", "Enter"]);
     rig.delivered();
 }
+
+pub(in crate::services::discord) fn assert_routine_owner_delivery(
+    tmux: std::path::PathBuf,
+    session: &str,
+    args: &[String],
+    default_model: &str,
+) {
+    let fixture = Fixture::after_shared_test_env_lock_with_tmux(tmux);
+    let (name, channel) = ("rm-owner-after-sweep", 8_219_505);
+    let renderer = renderer_with(&fixture, name, "normal", view("", false), IDLE, PROMPT);
+    let rig = owned(fixture, name, channel, renderer, "claude");
+    let requirement = Requirement {
+        provider: "claude".into(),
+        tmux: rig.name.clone(),
+        model: None,
+        default_model: Some(default_model.into()),
+        resume: Some(session.into()),
+    };
+    scope(requirement, || {
+        prepared("claude", &rig.name, session, true, &rig.nonce, args).unwrap();
+        assert_eq!(created_first_prompt(&rig), Ok(()));
+    });
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    assert_eq!(
+        fs::read_to_string(rig.renderer.join("body")).unwrap(),
+        PROMPT
+    );
+    rig.delivered();
+}

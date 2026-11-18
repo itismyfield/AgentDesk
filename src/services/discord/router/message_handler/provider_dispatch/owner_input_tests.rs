@@ -2137,3 +2137,4 @@ mod busy_race_tests;
 
 #[path = "owner_input_routine_model_tests.rs"]
 mod routine_model_effect_tests;
+pub(in crate::services::discord) use routine_model_effect_tests::assert_routine_owner_delivery;

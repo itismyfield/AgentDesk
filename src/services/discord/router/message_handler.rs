@@ -52,7 +52,9 @@ mod latency_spans;
 mod pre_admission_control;
 mod provider_dispatch;
 #[cfg(all(test, unix))]
-pub(in crate::services::discord) use self::provider_dispatch::hand_busy;
+pub(in crate::services::discord) use self::provider_dispatch::{
+    assert_routine_owner_delivery, hand_busy,
+};
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use self::provider_dispatch::{
     install_root_recovery_launch, owner_drive_for_test, start_idle_for_test, wake_drive_for_test,
