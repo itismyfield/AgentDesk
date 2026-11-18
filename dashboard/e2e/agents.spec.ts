@@ -294,6 +294,30 @@ test.describe("Agents tab", () => {
   });
 });
 
+test.describe("Shared agent detail overlay", () => {
+  test("opens from the home working list and closes", async ({ page }, testInfo) => {
+    await mockShell(page);
+    await page.goto("/home");
+    const isMobile = testInfo.project.name === "mobile";
+    await page.getByTestId("home-working-agents").getByRole("button").first().click();
+    const overlay = page.getByRole("dialog", { name: /ada — 에이전트 상세/ });
+    await expect(overlay).toBeVisible();
+    await expect(overlay.getByRole("heading", { name: "ada" })).toBeVisible();
+    await expect(overlay.getByLabel(/우선 실행 장비/)).toBeVisible();
+    const box = (await overlay.boundingBox())!;
+    if (isMobile) {
+      expect(box).toMatchObject({ x: 0, y: 0, width: 390, height: 844 });
+      await overlay.getByRole("button", { name: "돌아가기" }).click();
+    } else {
+      expect(box.y).toBeGreaterThan(0);
+      expect(box.width).toBeLessThan(1440);
+      await overlay.getByRole("button", { name: "닫기" }).click();
+    }
+    await expect(overlay).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
+  });
+});
+
 test.describe("Agents tab on a touch phone", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
