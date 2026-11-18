@@ -51,7 +51,7 @@ capture-pane) cat "$AGENTDESK_ROOT_DIR/composer" ;;
 display-message)
   case "${@: -1}" in
     '#{pid} #{session_id} #{window_id} #{pane_id} #{pane_pid}') printf '123 $1 @1 %%1 234\n' ;;
-    *'#{pane_id}|#{pane_pid}|#{pane_width}') printf '%%1|234|80|24|2|22|0\n' ;;
+    '#{pane_id}|#{pane_pid}|#{pane_width}|#{pane_height}|#{cursor_x}|#{cursor_y}|#{pane_in_mode}') printf '%%1|234|80|24|2|22|0\n' ;;
     '#{pane_width} #{pane_height}') printf '80 24\n' ;;
     '#{pane_dead}') printf '0\n' ;;
   esac ;;
@@ -77,6 +77,10 @@ esac
     std::fs::write(
         &binary,
         r#"#!/bin/bash
+if [ "${1-}" = --version ]; then
+    printf 'codex-cli 0.160.0\n'
+    exit
+fi
 printf '%s\n' "$@" > "$AGENTDESK_ROOT_DIR/native-argv"
 printf 'spawn\n' >> "$AGENTDESK_ROOT_DIR/events"
 for arg in "$@"; do
