@@ -973,6 +973,9 @@ class ConsumerAcceptance(unittest.TestCase):
         same,other=self.view(now=300)['check'],self.view(head='b'*40,now=300)['check']
         self.assertEqual((same['result'],same['reason'],same['stale']),('UNKNOWN','STALE',1))
         self.assertEqual((other['result'],other['reason'],other['stale']),('UNKNOWN','STALE_HEAD',1))
+        named=report();named['occurrences'][0].update(status='UNEVALUABLE',reason='STALE_HEAD')
+        self.report_file.write_text(json.dumps(named))
+        self.assertEqual(self.view(now=300)['check']['reason'],'STALE')
 
     def test_wrongly_typed_summary_result_prints_unknown_instead_of_a_traceback(self):
         argv=['--status-file',str(self.file),'--head',SHA]

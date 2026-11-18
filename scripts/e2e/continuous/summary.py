@@ -241,7 +241,7 @@ def consume(value, status, *, head, now):
                 elif interval is not None and now - completed > sum(bounds):
                     # An expired result of another head keeps reporting the head mismatch.
                     check["stale"] = 1
-                    if check["reason"] != "STALE_HEAD":
+                    if (check["result"], check["reason"]) != ("UNKNOWN", "STALE_HEAD"):
                         override("UNKNOWN", "STALE")
     return {"check": check, "monitor": monitor}
 
