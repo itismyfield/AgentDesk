@@ -465,3 +465,46 @@ async fn cancel_and_clear_leave_every_reserved_member_in_custody() {
         .unwrap();
     assert!(left.is_empty());
 }
+
+#[test]
+fn refusing_another_input_keeps_the_unsubmitted_effort_original() {
+    use crate::services::claude_tui::owner_input;
+    use crate::services::turn_orchestrator::queued_head::v2_types::effort_restart::PROMPT;
+    let _root = TestRuntimeRootGuard::new();
+    for ready in [false, true] {
+        let channel = 821_720 + u64::from(ready);
+        let mut owner = owner(channel);
+        admit(&mut owner, 1, "other input refused");
+        let key = owner.reserve_unit(attempt("other-refused"), named).unwrap();
+        let _ = owner.arm(&key, 0).unwrap();
+        let waiting = admit(&mut owner, 2, "still waiting user");
+        let request = serde_json::from_value(json!({"operation":"pending-effort",
+            "native_session":"native-effort","interrupted_episode":"episode-effort",
+            "desired_revision":1,"ready":ready}))
+        .unwrap();
+        let intent = owner.prepare_effort(Some(request), channel, 5).unwrap();
+        let original = serde_json::to_value(intent.continuation.unwrap()).unwrap();
+        let (_, proof) = owner_input::capture_scope(
+            "claude".into(),
+            json!({"host":"none","_attempt":key}),
+            channel,
+            std::sync::Arc::new(|_| Ok(())),
+            std::sync::Arc::new(|_, _| Ok(())),
+            std::sync::Arc::new(|_| Ok(())),
+            || owner_input::vetoed("readiness unproven"),
+        );
+        owner.refuse_not_sent(&key, proof.unwrap()).unwrap();
+        drop(owner);
+        let restored = Owner::adopt(path(channel), "unit".into()).unwrap();
+        let snapshot = restored.json().unwrap();
+        assert_eq!(
+            snapshot["items"],
+            serde_json::to_value(vec![waiting]).unwrap()
+        );
+        assert_eq!(snapshot["effort_restart"]["continuation"], original);
+        assert!(!restored.snapshot.effort_restart.unwrap().cancelled);
+        assert!(snapshot.to_string().contains(PROMPT));
+        assert!(!snapshot.to_string().contains("other input refused"));
+        assert_eq!(snapshot["refused_inputs"].as_array().unwrap().len(), 1);
+    }
+}

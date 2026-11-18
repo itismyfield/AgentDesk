@@ -1,6 +1,7 @@
 import { Suspense, lazy } from "react";
 import { formatPipelineAgentLabel, type SettingsNotificationType } from "./SettingsModel";
-import { SETTINGS_INPUT_STYLE, SettingsDisclosure, SettingsStatusMessage } from "./SettingsPanels";
+import { Select } from "../../kit/free/select-clean";
+import { SettingsDisclosure, SettingsStatusMessage } from "./SettingsPrimitives";
 import type { SettingsPanelContext } from "./SettingsPanelTypes";
 import { sectionTitle } from "./SettingsRowSection";
 import { useSettingsPipelineSelector } from "./useSettingsPipelineSelector";
@@ -45,40 +46,26 @@ export function SettingsPipelineEditorSection({ ctx, open, onToggle, notify }: P
         <SettingsStatusMessage>{tr("편집할 수 있는 저장소가 없어요.", "No repositories can be edited.")}</SettingsStatusMessage>
       ) : (
         <div className="space-y-4">
-          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,16rem)]">
-            <label className="min-w-0 text-sm font-medium text-th-text-primary">
-              {tr("대상 저장소", "Repository")}
-              <span className="mt-0.5 block text-xs font-normal leading-5 break-keep text-th-text-muted">
-                {tr("이 저장소의 작업 흐름을 바꿔요.", "Edit the workflow for this repository.")}
-              </span>
-              <select
-                value={selector.selectedPipelineRepo}
-                onChange={(event) => selector.setSelectedPipelineRepo(event.target.value)}
-                className="mt-2 min-h-11 w-full min-w-0 rounded-md px-3 py-2 text-sm font-normal"
-                style={SETTINGS_INPUT_STYLE}
-              >
-                {selector.pipelineRepos.map((repo) => (
-                  <option key={repo.nameWithOwner} value={repo.nameWithOwner}>{repo.nameWithOwner}</option>
-                ))}
-              </select>
-            </label>
-            <label className="min-w-0 text-sm font-medium text-th-text-primary">
-              {tr("에이전트별 흐름", "Per-agent workflow")}
-              <span className="mt-0.5 block text-xs font-normal leading-5 break-keep text-th-text-muted">
-                {tr("한 에이전트만 다르게 할 때 골라요.", "Pick one only if a single agent needs a different flow.")}
-              </span>
-              <select
-                value={selector.selectedPipelineAgentId ?? ""}
-                onChange={(event) => selector.setSelectedPipelineAgentId(event.target.value || null)}
-                className="mt-2 min-h-11 w-full min-w-0 rounded-md px-3 py-2 text-sm font-normal"
-                style={SETTINGS_INPUT_STYLE}
-              >
-                <option value="">{tr("모든 에이전트 같게", "Same for all agents")}</option>
-                {selector.pipelineAgents.map((agent) => (
-                  <option key={agent.id} value={agent.id}>{formatPipelineAgentLabel(agent, isKo)}</option>
-                ))}
-              </select>
-            </label>
+          <div className="grid gap-4 @min-[37.5rem]:grid-cols-2">
+            <Select
+              label={tr("대상 저장소", "Repository")}
+              hint={tr("이 저장소의 작업 흐름을 바꿔요.", "Edit the workflow for this repository.")}
+              options={selector.pipelineRepos.map((repo) => ({ value: repo.nameWithOwner, label: repo.nameWithOwner }))}
+              value={selector.selectedPipelineRepo}
+              onChange={(value) => selector.setSelectedPipelineRepo(value)}
+              className="min-w-0"
+            />
+            <Select
+              label={tr("에이전트별 흐름", "Per-agent workflow")}
+              hint={tr("한 에이전트만 다르게 할 때 골라요.", "Pick one only if a single agent needs a different flow.")}
+              options={[
+                { value: "", label: tr("모든 에이전트 같게", "Same for all agents") },
+                ...selector.pipelineAgents.map((agent) => ({ value: agent.id, label: formatPipelineAgentLabel(agent, isKo) })),
+              ]}
+              value={selector.selectedPipelineAgentId ?? ""}
+              onChange={(value) => selector.setSelectedPipelineAgentId(value || null)}
+              className="min-w-0"
+            />
           </div>
           {selector.selectedPipelineRepo ? (
             <div data-testid="settings-pipeline-editor">
