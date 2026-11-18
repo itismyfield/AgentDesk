@@ -6,6 +6,9 @@ use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 use std::collections::{HashMap, HashSet};
 
 mod census;
+mod context_observation;
+#[cfg(test)]
+pub(crate) use context_observation::tests as context_observation_tests;
 pub(crate) mod generation;
 #[cfg(all(test, unix))]
 pub(crate) use census::tests::{Stage as CensusStage, fail_once as fail_census_once};
@@ -21,6 +24,7 @@ type Stamp = Fingerprint;
 struct ContextObservation {
     stamp: Option<Stamp>,
     unavailable: bool,
+    changed: bool,
     frames: HashSet<String>,
 }
 
@@ -49,7 +53,12 @@ struct Scope {
 }
 
 impl Scope {
-    fn current(&self, store: &ChannelStore, history: &Option<Stamp>) -> bool {
+    fn current(
+        &self,
+        store: &ChannelStore,
+        history: &Option<Stamp>,
+        observations: &mut context_observation::Observations,
+    ) -> bool {
         let cursor = store.cursor(&self.origin.record.source);
         self.history_stamp == *history
             && self.binding_stamp
@@ -66,7 +75,7 @@ impl Scope {
             && self
                 .executions
                 .iter()
-                .all(|(p, observed)| file_stamp(p) == observed.stamp)
+                .all(|(p, observed)| !observed.changed && observations.stamp(p) == observed.stamp)
             && self
                 .retry_at
                 .is_none_or(|at| tokio::time::Instant::now() < at)
@@ -134,6 +143,7 @@ impl Batch {
         let mut previous = std::mem::take(&mut self.scopes);
         let mut snapshot = None;
         let mut native = HashMap::new();
+        let mut observations = context_observation::Observations::default();
         for evidence in store.ledger().input_notices().evidence.values() {
             if store.ledger().input_notices().settled.contains_key(&(
                 evidence.record.source.clone(),
@@ -161,10 +171,9 @@ impl Batch {
             if self.scopes.iter().any(|s| same_scope(&s.origin, origin)) {
                 continue;
             }
-            if let Some(at) = previous
-                .iter()
-                .position(|s| same_scope(&s.origin, origin) && s.current(store, &before))
-            {
+            if let Some(at) = previous.iter().position(|s| {
+                same_scope(&s.origin, origin) && s.current(store, &before, &mut observations)
+            }) {
                 self.scopes.push(previous.swap_remove(at));
                 continue;
             }
@@ -186,7 +195,16 @@ impl Batch {
             let attributed = snapshot
                 .as_ref()
                 .ok()
-                .and_then(|v| candidates(v, origin, store.init().channel, &mut executions).ok())
+                .and_then(|v| {
+                    candidates(
+                        v,
+                        origin,
+                        store.init().channel,
+                        &mut executions,
+                        &mut observations,
+                    )
+                    .ok()
+                })
                 .map(|(entries, blocked)| {
                     attribute(&entries, &blocked, rows.as_deref().map(Vec::as_slice))
                 });
@@ -223,6 +241,12 @@ impl Batch {
                 exact,
                 census,
             });
+        }
+        let changed = observations.changed();
+        for scope in &mut self.scopes {
+            for (path, observed) in &mut scope.executions {
+                observed.changed = changed.contains(path);
+            }
         }
         if before != stamp() {
             self.scopes.clear();
@@ -267,7 +291,7 @@ impl Batch {
         let hashes = class_hashes(prompt);
         if scope.executions.iter().any(|(path, observed)| {
             observed.frames.iter().any(|h| hashes.contains(h))
-                && file_stamp(path).as_ref() != observed.stamp.as_ref()
+                && (observed.changed || file_stamp(path).as_ref() != observed.stamp.as_ref())
         }) {
             return Decision::Pending("execution_context_changed");
         }
@@ -305,6 +329,7 @@ fn candidates(
     origin: &NoticeOrigin,
     channel: u64,
     executions: &mut Contexts,
+    observations: &mut context_observation::Observations,
 ) -> Result<(Vec<Entry>, Blocked), String> {
     let value = parsed.value.as_ref();
     let source = &origin.record.source;
@@ -333,7 +358,7 @@ fn candidates(
     let mut decoded = parsed.bound_entries().iter();
     for (raw, registration) in compat::bound_rows(value) {
         if raw.is_null() {
-            match relevant(registration, origin, channel, executions) {
+            match relevant(registration, origin, channel, executions, observations) {
                 Relevance::Related => {
                     blocked.push((frame_hash(registration)?, "unbound_pre_source"))
                 }
@@ -354,7 +379,7 @@ fn candidates(
             continue;
         }
         if !registration.is_null() {
-            match relevant(registration, origin, channel, executions) {
+            match relevant(registration, origin, channel, executions, observations) {
                 Relevance::Related => {}
                 Relevance::Unrelated => {
                     blocked.push((entry.class_hash.clone(), "registration_source_mismatch"));
@@ -386,7 +411,7 @@ fn candidates(
         _ => return Err("history planned invalid".into()),
     };
     for registration in planned {
-        match relevant(registration, origin, channel, executions) {
+        match relevant(registration, origin, channel, executions, observations) {
             Relevance::Related => blocked.push((frame_hash(registration)?, "unbound_pre_source")),
             Relevance::Uncertain => {
                 blocked.push((frame_hash(registration)?, "execution_context_unavailable"))
@@ -409,6 +434,7 @@ fn relevant(
     origin: &NoticeOrigin,
     channel: u64,
     executions: &mut Contexts,
+    observations: &mut context_observation::Observations,
 ) -> Relevance {
     let attempt = &registration["key"]["attempt"];
     if attempt["provider"] != "claude" || attempt["target"]["owner"] != origin.logical_session {
@@ -423,6 +449,7 @@ fn relevant(
         channel,
         executions,
         registration["frame"]["class_hash"].as_str(),
+        observations,
     )
 }
 
@@ -432,6 +459,7 @@ fn resumed_execution(
     channel: u64,
     executions: &mut Contexts,
     frame: Option<&str>,
+    observations: &mut context_observation::Observations,
 ) -> Relevance {
     use crate::services::tui_prompt_dedupe::binding_context;
     let Some(nonce) = target["execution_nonce"].as_str() else {
@@ -440,24 +468,23 @@ fn resumed_execution(
     let Ok(path) = binding_context::context_path("claude", nonce) else {
         return Relevance::Uncertain;
     };
-    let before = file_stamp(&path);
-    let context = binding_context::execution_context("claude", nonce);
-    let unstable = context.is_err() || before.is_none() || file_stamp(&path) != before;
+    let read = observations.observe(&path, nonce);
     let observed = executions
         .entry(path)
         .or_insert_with(|| ContextObservation {
-            stamp: before,
-            unavailable: unstable,
+            stamp: read.stamp.clone(),
+            unavailable: read.unavailable,
+            changed: false,
             frames: HashSet::new(),
         });
-    observed.unavailable |= unstable;
+    observed.unavailable |= read.unavailable;
     if let Some(frame) = frame {
         observed.frames.insert(frame.into());
     }
-    if unstable {
+    if read.unavailable {
         return Relevance::Uncertain;
     }
-    let Ok(context) = context else {
+    let Some(context) = &read.context else {
         return Relevance::Uncertain;
     };
     // The attachment's nonce stays historical; the immutable launch must name this source.

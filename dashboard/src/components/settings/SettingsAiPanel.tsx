@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { SettingsDisclosure, SettingsSection } from "./SettingsPanels";
+import { SettingsDisclosure, SettingsSection } from "./SettingsPrimitives";
 import type { SettingsPanelContext, SourceStatus } from "./SettingsPanelTypes";
 import { SettingsProvidersPanel } from "./SettingsProvidersPanel";
 import { SettingsRowSection, sectionTitle } from "./SettingsRowSection";
@@ -24,7 +24,7 @@ export function SettingsAiPanel({ ctx, accounts, configStatus, runtimeStatus, wa
   const showAdvanced = runtimeStatus === "ready" && advancedRows.length > 0;
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-9">
       {ctx.matches(accountsCopy.title, ACCOUNT_KEYWORDS) ? (
         <SettingsSection title={accountsCopy.title} description={accountsCopy.description} variant="open" testId="settings-section-ai-accounts">
           <SettingsProvidersPanel accounts={accounts} warningPct={warningPct} dangerPct={dangerPct} tr={ctx.tr} />
