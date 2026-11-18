@@ -1,0 +1,2 @@
+key: 720-tui-o-writer-d1b-refused-disposition
+| `tui-o-writer` D1b refused-body discard and admitted prior evidence (#7651) | `6467b53cab` + D1b design | Current herdr row end archives a Refused body (NoRefusedArchive) and never settles a kept copy after refusal; the landed admitted takeover drops a proven-undelivered earlier rollout and r10 blocked on a delivered one; retain/second-reason/silent and owe-all/block mutants are expected RED | Twelve cfg: 3 GREEN (two discard designs, admitted design) / 9 expected RED. [design](tui-o-writer/d1b-refused-disposition.design.md) |

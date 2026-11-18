@@ -963,7 +963,7 @@ tui-o-turn-mode/CodexTakeoverRetryAll.cfg	CodexTakeover	NoEarlyConfirmation	-
 tui-o-writer/CodexAdmittedPriorBlockMut.cfg	CodexAdmittedPrior	-	AdmittedEventuallyCommitted
 tui-o-writer/CodexAdmittedPriorDesign.cfg	CodexAdmittedPrior	-	-
 tui-o-writer/CodexAdmittedPriorMain.cfg	CodexAdmittedPrior	ProvenOwedKept	-
-tui-o-writer/CodexAdmittedPriorOwedAllMut.cfg	CodexAdmittedPrior	DeliveredNotReposted	-
+tui-o-writer/CodexAdmittedPriorOwedAllMut.cfg	CodexAdmittedPrior	DeliveredNotReposted,UnprovableAlarmed	-
 tui-o-writer/CodexAdmittedPriorR10.cfg	CodexAdmittedPrior	ProvenOwedKept	AdmittedEventuallyCommitted
 tui-o-writer/CodexLateDeliveryD1Gen.cfg	CodexLateDelivery	NoAdoptionLoss	-
 tui-o-writer/CodexLateDeliveryD1Moved.cfg	CodexLateDelivery	NoAdoptionLoss	-
