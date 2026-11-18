@@ -474,6 +474,8 @@ jobs:
 
       - name: dashboard build/test
         run: ./scripts/verify-dashboard.sh
+        env:
+          DASHBOARD_AUDIT_WAIVER: "GHSA-fc5q-39xc-vjpf picomatch ReDoS: no patched release; dev-only build tooling (vite/vitest), not in the browser bundle. Remove when patched (#8236)"
 
   # Cross-OS Rust compile lane. The required-context judge makes this
   # conditionally required when `cross_os_rust` is true; unrelated paths may
