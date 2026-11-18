@@ -1,0 +1,147 @@
+/* Optional bridge for AgentDesk dashboard/src/styles/main.css.
+ * Import once after the host stylesheet. No host tokens or layout rules change.
+ * The gallery does not import this file. Component fallbacks still paint light
+ * and dark on their own. :where() keeps specificity at zero, so a host
+ * variable wins and a missing host variable uses the fallback in this file.
+ *
+ * Default theme matches the dashboard: :root and [data-theme="dark"] are dark.
+ * [data-theme="light"] is the only light set. .dark is included for hosts that
+ * toggle with a class. data-theme="auto" is not a DOM value; the host resolves
+ * it to light or dark before setting data-theme.
+ */
+:where(:root) {
+  --aui-r-sm: var(--r-sm, 0.625rem);
+  --aui-r-md: var(--r-md, 0.875rem);
+  --aui-r-lg: var(--r-lg, 1rem);
+  --aui-r-xl: var(--r-xl, 1.25rem);
+  --aui-font-sans: var(--font-sans, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Segoe UI", system-ui, sans-serif);
+  --aui-font-display: var(--font-display, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", system-ui, sans-serif);
+  --aui-font-mono: var(--font-mono, "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace);
+  --aui-font: var(--aui-font-sans);
+  --aui-radius: var(--aui-r-md);
+  --aui-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:where(:root, .dark, [data-theme="dark"]) {
+  --aui-bg: var(--bg, #11151e);
+  --aui-bg-1: var(--bg-1, #191e29);
+  --aui-bg-2: var(--bg-2, #222936);
+  --aui-bg-3: var(--bg-3, #2c3545);
+  --aui-fg: var(--fg, #f2f5fa);
+  --aui-fg-dim: var(--fg-dim, #c4cddd);
+  --aui-fg-muted: var(--fg-muted, #9aa8bd);
+  --aui-fg-faint: var(--fg-faint, #738198);
+  --aui-line: var(--line, #3a4558);
+  --aui-line-soft: var(--line-soft, #2d3647);
+  --aui-accent: var(--accent, #9692ff);
+  --aui-accent-soft: var(--accent-soft, #333052);
+  --aui-ok: var(--ok, #62d697);
+  --aui-warn: var(--warn, #e5b75f);
+  --aui-err: var(--err, #f77987);
+  --aui-info: var(--info, #6dc6ed);
+  --aui-shadow-sm: var(--shadow-sm, 0 10px 24px rgb(0 0 0 / 22%));
+  --aui-shadow-md: var(--shadow-md, 0 18px 40px rgb(0 0 0 / 32%));
+
+  --aui-th-bg: var(--th-bg-primary, var(--aui-bg));
+  --aui-th-surface: var(--th-bg-surface, var(--aui-bg-1));
+  --aui-th-card: var(--th-card-bg, var(--aui-bg-2));
+  --aui-th-input: var(--th-input-bg, var(--aui-bg-2));
+  --aui-th-fg: var(--th-text-primary, var(--aui-fg));
+  --aui-th-fg-dim: var(--th-text-secondary, var(--aui-fg-dim));
+  --aui-th-muted: var(--th-text-muted, var(--aui-fg-muted));
+  --aui-th-line: var(--th-border, var(--aui-line));
+  --aui-th-line-soft: var(--th-border-subtle, var(--aui-line-soft));
+  --aui-th-nav: var(--th-nav-bg, var(--aui-bg-1));
+  --aui-th-overlay: var(--th-modal-overlay, rgb(0 0 0 / 50%));
+  --aui-th-focus: var(--th-accent-primary, var(--aui-accent));
+
+  --aui-provider-claude: var(--claude, #e0a15a);
+  --aui-provider-codex: var(--codex, #6ec4d4);
+  --aui-provider-gemini: var(--gemini, #8aa4f0);
+  --aui-provider-qwen: var(--qwen, #d98ad4);
+  --aui-provider-opencode: var(--opencode, #6dccc0);
+  --aui-provider-copilot: var(--copilot, #6dcc9a);
+  --aui-provider-antigravity: var(--antigravity, #e0a06a);
+  --aui-provider-api: var(--api, #a8b0bc);
+  --aui-provider-claude-soft: var(--claude-soft, color-mix(in oklch, var(--aui-provider-claude) 22%, var(--aui-bg-2)));
+  --aui-provider-codex-soft: var(--codex-soft, color-mix(in oklch, var(--aui-provider-codex) 22%, var(--aui-bg-2)));
+  --aui-provider-gemini-soft: var(--gemini-soft, color-mix(in oklch, var(--aui-provider-gemini) 22%, var(--aui-bg-2)));
+  --aui-provider-qwen-soft: var(--qwen-soft, color-mix(in oklch, var(--aui-provider-qwen) 22%, var(--aui-bg-2)));
+  --aui-provider-opencode-soft: var(--opencode-soft, color-mix(in oklch, var(--aui-provider-opencode) 22%, var(--aui-bg-2)));
+  --aui-provider-copilot-soft: var(--copilot-soft, color-mix(in oklch, var(--aui-provider-copilot) 22%, var(--aui-bg-2)));
+  --aui-provider-antigravity-soft: var(--antigravity-soft, color-mix(in oklch, var(--aui-provider-antigravity) 22%, var(--aui-bg-2)));
+  --aui-provider-api-soft: var(--api-soft, color-mix(in oklch, var(--aui-provider-api) 22%, var(--aui-bg-2)));
+
+  --aui-ink: var(--aui-fg);
+  --aui-subtle: var(--aui-bg-1);
+  --aui-surface: var(--aui-bg-2);
+  --aui-muted: var(--aui-fg-muted);
+  --aui-placeholder: var(--aui-fg-faint);
+  --aui-border: var(--aui-line);
+  --aui-danger: var(--aui-err);
+  --aui-success: var(--aui-ok);
+  --aui-warning: var(--aui-warn);
+  --aui-focus: var(--aui-th-focus);
+}
+
+:where([data-theme="light"]) {
+  --aui-bg: var(--bg, #f8fafc);
+  --aui-bg-1: var(--bg-1, #f1f5f9);
+  --aui-bg-2: var(--bg-2, #ffffff);
+  --aui-bg-3: var(--bg-3, #e8edf4);
+  --aui-fg: var(--fg, #182235);
+  --aui-fg-dim: var(--fg-dim, #465269);
+  --aui-fg-muted: var(--fg-muted, #64748b);
+  --aui-fg-faint: var(--fg-faint, #8693a5);
+  --aui-line: var(--line, #d9e1ec);
+  --aui-line-soft: var(--line-soft, #e7ecf3);
+  --aui-accent: var(--accent, #6366f1);
+  --aui-accent-soft: var(--accent-soft, #eeedff);
+  --aui-ok: var(--ok, #16834b);
+  --aui-warn: var(--warn, #9f6508);
+  --aui-err: var(--err, #cc3347);
+  --aui-info: var(--info, #1676a8);
+  --aui-shadow-sm: var(--shadow-sm, 0 10px 24px rgb(15 23 42 / 8%));
+  --aui-shadow-md: var(--shadow-md, 0 18px 40px rgb(15 23 42 / 14%));
+
+  --aui-th-bg: var(--th-bg-primary, var(--aui-bg));
+  --aui-th-surface: var(--th-bg-surface, var(--aui-bg-1));
+  --aui-th-card: var(--th-card-bg, var(--aui-bg-2));
+  --aui-th-input: var(--th-input-bg, var(--aui-bg-2));
+  --aui-th-fg: var(--th-text-primary, var(--aui-fg));
+  --aui-th-fg-dim: var(--th-text-secondary, var(--aui-fg-dim));
+  --aui-th-muted: var(--th-text-muted, var(--aui-fg-muted));
+  --aui-th-line: var(--th-border, var(--aui-line));
+  --aui-th-line-soft: var(--th-border-subtle, var(--aui-line-soft));
+  --aui-th-nav: var(--th-nav-bg, var(--aui-bg-1));
+  --aui-th-overlay: var(--th-modal-overlay, rgb(15 23 42 / 22%));
+  --aui-th-focus: var(--th-accent-primary, var(--aui-accent));
+
+  --aui-provider-claude: var(--claude, #a86b22);
+  --aui-provider-codex: var(--codex, #1d6f86);
+  --aui-provider-gemini: var(--gemini, #3a4ec4);
+  --aui-provider-qwen: var(--qwen, #a23d93);
+  --aui-provider-opencode: var(--opencode, #1d7a72);
+  --aui-provider-copilot: var(--copilot, #1d7a52);
+  --aui-provider-antigravity: var(--antigravity, #a86a28);
+  --aui-provider-api: var(--api, #5c6570);
+  --aui-provider-claude-soft: var(--claude-soft, color-mix(in oklch, var(--aui-provider-claude) 14%, var(--aui-bg-2)));
+  --aui-provider-codex-soft: var(--codex-soft, color-mix(in oklch, var(--aui-provider-codex) 14%, var(--aui-bg-2)));
+  --aui-provider-gemini-soft: var(--gemini-soft, color-mix(in oklch, var(--aui-provider-gemini) 14%, var(--aui-bg-2)));
+  --aui-provider-qwen-soft: var(--qwen-soft, color-mix(in oklch, var(--aui-provider-qwen) 14%, var(--aui-bg-2)));
+  --aui-provider-opencode-soft: var(--opencode-soft, color-mix(in oklch, var(--aui-provider-opencode) 14%, var(--aui-bg-2)));
+  --aui-provider-copilot-soft: var(--copilot-soft, color-mix(in oklch, var(--aui-provider-copilot) 14%, var(--aui-bg-2)));
+  --aui-provider-antigravity-soft: var(--antigravity-soft, color-mix(in oklch, var(--aui-provider-antigravity) 14%, var(--aui-bg-2)));
+  --aui-provider-api-soft: var(--api-soft, color-mix(in oklch, var(--aui-provider-api) 14%, var(--aui-bg-2)));
+
+  --aui-ink: var(--aui-fg);
+  --aui-subtle: var(--aui-bg-1);
+  --aui-surface: var(--aui-bg-2);
+  --aui-muted: var(--aui-fg-muted);
+  --aui-placeholder: var(--aui-fg-faint);
+  --aui-border: var(--aui-line);
+  --aui-danger: var(--aui-err);
+  --aui-success: var(--aui-ok);
+  --aui-warning: var(--aui-warn);
+  --aui-focus: var(--aui-th-focus);
+}
