@@ -237,7 +237,9 @@ test("activity lists dispatches, transitions and comments as dated rows with fil
 
   const sentence = rows(activity).first().locator("[data-activity-sentence]");
   const time = rows(activity).first().locator("time");
-  if (testInfo.project.name === "mobile") {
+  // Rows follow the activity container (35rem), not the viewport: a docked detail pane is narrow on desktop too.
+  const narrowActivity = await activity.evaluate((node) => node.getBoundingClientRect().width <= 560);
+  if (narrowActivity) {
     // Narrow panel: no time column, the sentence wraps to two lines.
     await expect(time).toBeHidden();
     expect(await sentence.evaluate((node) => getComputedStyle(node).webkitLineClamp)).toBe("2");
