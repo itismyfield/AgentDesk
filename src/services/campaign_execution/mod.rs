@@ -13,12 +13,14 @@ pub mod execution_pin;
 pub mod failure_budget;
 pub mod host_gate;
 mod host_journal;
+mod lifecycle;
 pub mod main_integration;
 pub mod model;
 #[cfg(test)]
 pub mod pipeline_rules;
 pub mod profile;
 pub mod review_gate;
+pub mod scheduler;
 pub mod stage_fsm;
 mod verification_commands;
 pub mod verification_run;

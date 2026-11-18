@@ -427,6 +427,7 @@ src/
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
 │   │   ├── execution_pin.rs
+│   │   ├── lifecycle.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
 │   │   ├── pipeline_rules.rs
@@ -1001,6 +1002,8 @@ src/
 │   │   ├── host_gate.rs
 │   │   ├── host_gate_tests.rs
 │   │   ├── host_journal.rs
+│   │   ├── lifecycle.rs
+│   │   ├── lifecycle_tests.rs
 │   │   ├── main_integration.rs
 │   │   ├── main_integration_tests.rs
 │   │   ├── mod.rs
@@ -1012,6 +1015,8 @@ src/
 │   │   ├── profile_tests.rs
 │   │   ├── review_gate.rs
 │   │   ├── review_gate_tests.rs
+│   │   ├── scheduler.rs
+│   │   ├── scheduler_tests.rs
 │   │   ├── stage_fsm.rs
 │   │   ├── stage_fsm_tests.rs
 │   │   ├── verification_commands.rs

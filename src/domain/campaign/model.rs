@@ -322,6 +322,17 @@ pub struct NodeFence {
     pub interruption: Option<NodeInterruption>,
     // The (series, repair cycle) whose quality failure was already counted.
     pub counted_failure: Option<(u32, u32)>,
+    // The sealed output the latest Review handover carried; Landing admits exactly this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<ReviewedCandidate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedCandidate {
+    pub work_attempt: String,
+    pub base_sha: String,
+    pub head_sha: String,
+    pub pin_hash: Digest,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,6 +399,25 @@ pub enum Command {
         expected_revision: u64,
         expected_run: String,
         node_id: String,
+    },
+    // Internal lifecycle steps; the public Start and Resume above stay unavailable.
+    BeginRun {
+        expected_revision: u64,
+        run_id: String,
+    },
+    ResumeRun {
+        expected_revision: u64,
+        expected_run: String,
+    },
+    BeginLanding {
+        expected_run: String,
+        node_id: String,
+        expected_epoch: u64,
+    },
+    CompleteNode {
+        expected_run: String,
+        node_id: String,
+        expected_epoch: u64,
     },
     RequestStop {
         expected_revision: u64,
@@ -548,6 +578,14 @@ pub enum EventKind {
     DefinitionEdited {
         superseded_nodes: Vec<String>,
         change: Option<ChangeReason>,
+    },
+    RunStarted,
+    RunResumed {
+        reset_nodes: Vec<String>,
+    },
+    NodeAdvanced {
+        node_id: String,
+        stage: Stage,
     },
     StopRequested {
         mode: StopMode,

@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use super::{
     decision_commands,
     definition::{self, DefinitionInput, WORKFLOW_VERSION},
+    lifecycle,
     model::*,
     stage_fsm, verification_commands,
 };
@@ -358,6 +359,13 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
             target(state, *expected_revision, expected_run)?;
             return Err(reject(RejectionCode::ExecutionUnavailable));
         }
+        Command::BeginRun { .. }
+        | Command::ResumeRun { .. }
+        | Command::BeginLanding { .. }
+        | Command::CompleteNode { .. } => match lifecycle::decide(&mut next, &envelope.command)? {
+            Some(event) => event,
+            None => return Ok(unchanged(state)),
+        },
         Command::RequestStop {
             expected_revision,
             expected_run,
