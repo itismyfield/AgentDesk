@@ -554,3 +554,5 @@ async fn an_unproven_session_header_rejects_the_source_before_the_deadline() {
 
 #[path = "atomic_tests.rs"]
 mod atomic_tests;
+#[path = "first_turn_trust_tests.rs"]
+mod trust_tests;

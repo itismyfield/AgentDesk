@@ -5,11 +5,14 @@ use super::*;
 use crate::services::tui_o::channel_policy::output_disposition::{
     BUDGET, Identity, Output, Phase, Reason,
 };
+use std::sync::{Arc, atomic::AtomicBool};
 use tokio::time::Instant;
 
 #[derive(Clone, Debug)]
 pub(super) struct Normalizing {
     admitted_at: Instant,
+    /// The admission's one repair, trust or binding, spent at most once across every view.
+    repair: Arc<AtomicBool>,
     /// The disposition and the proof it was made from, once a bound rollout proved the admission.
     output: Option<(Output, FirstProof)>,
     /// Why the admission was refused when no rollout proved it within the budget.
@@ -20,6 +23,7 @@ impl Normalizing {
     pub(super) fn admitted() -> Self {
         Self {
             admitted_at: Instant::now(),
+            repair: Arc::default(),
             output: None,
             refused: None,
         }
@@ -48,12 +52,37 @@ impl Candidate {
                     return false;
                 };
                 let id = Identity::from_proof(&proof, proof.mark.order);
-                let output = Output::new(id, first.normalizing.admitted_at);
+                let n = &first.normalizing;
+                let output = Output::admitted(id, n.admitted_at, Arc::clone(&n.repair));
                 first.normalizing.output = Some((output, proof));
                 true
             });
         }
         drop(guard);
+    }
+
+    /// The admission `context` prepared, before any rollout proves it: a view that spends the
+    /// admission's own deadline and repair. None once proved, ended, refused or repaired.
+    pub(crate) fn first_trust_window(&self, context: &BindingContext) -> Option<Output> {
+        let first = self.first_turn.borrow();
+        let first = first.as_ref().filter(|first| {
+            let n = &first.normalizing;
+            first.valid
+                && first.pending
+                && first.context.as_ref() == Some(context)
+                && n.output.is_none()
+                && n.refused.is_none()
+                && !n.repair.load(std::sync::atomic::Ordering::SeqCst)
+        })?;
+        let id = Identity {
+            channel: first.channel,
+            input: first.mark.order,
+            nonce: digest(&first.nonce),
+            execution: digest(&context.execution_nonce),
+            source: String::new(),
+        };
+        let n = &first.normalizing;
+        Some(Output::admitted(id, n.admitted_at, Arc::clone(&n.repair)))
     }
 
     /// What a body claim of the turn `nonce` names waits on: nothing once its output is adopted

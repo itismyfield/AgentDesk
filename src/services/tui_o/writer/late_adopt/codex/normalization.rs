@@ -74,6 +74,38 @@ pub(crate) async fn run(
     }
 }
 
+/// Looks for the admitted launch's trust menu until a rollout proves the admission, the
+/// admission ends or its one repair is spent; the menu action is never adoption evidence.
+pub(crate) async fn watch_trust(
+    candidate: Candidate,
+    context: crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    cwd: std::path::PathBuf,
+) {
+    use crate::services::codex_tui::{host_input::trust::TrustHost, normalize};
+    while let Some(output) = candidate.first_trust_window(&context) {
+        let (look, view, at) = (output.clone(), context.clone(), cwd.clone());
+        let looked = tokio::task::spawn_blocking(move || {
+            normalize::repair_if_shown(&look, &view, &at, &mut TrustHost)
+        });
+        if let Ok(Some(result)) = looked.await {
+            tracing::info!(
+                channel = output.id().channel,
+                ?result,
+                "codex trust repair ran"
+            );
+            return;
+        }
+        let pause = output.remaining().min(TRUST_LOOK);
+        if pause.is_zero() {
+            return;
+        }
+        tokio::time::sleep(pause).await;
+    }
+}
+
+/// How often the admitted launch's pane is looked at for a trust menu.
+const TRUST_LOOK: tokio::time::Duration = tokio::time::Duration::from_millis(500);
+
 /// Holds a body claim of the admitted first turn until its output is adopted or rejected: the
 /// takeover's own commit adopts it, and the one budget from the admission ends in a rejection.
 pub(crate) async fn hold(candidate: &Candidate, nonce: Option<[u8; 32]>) {

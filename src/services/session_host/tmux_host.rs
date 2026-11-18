@@ -65,7 +65,7 @@ impl TmuxHost {
     }
 
     /// The live pane's cwd within `budget`; a dead, absent or slow pane is `None`.
-    #[cfg(test)]
+    #[cfg(any(test, unix))]
     pub(crate) fn pane_cwd_within(
         &self,
         name: &str,

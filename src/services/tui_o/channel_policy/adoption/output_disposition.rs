@@ -1,5 +1,6 @@
 //! The first output's identity and terminal choice: adopted, or rejected with one reason.
 use super::FirstProof;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::time::{Duration, Instant};
 
@@ -33,15 +34,23 @@ pub(crate) const BUDGET: Duration = Duration::from_secs(25);
 pub(crate) struct Output {
     id: Identity,
     deadline: Instant,
-    state: Arc<Mutex<(Phase, bool)>>,
+    state: Arc<Mutex<(Phase,)>>,
+    /// The one repair the admission may spend, shared by every view of that admission.
+    repair: Arc<AtomicBool>,
 }
 impl Output {
     pub(crate) fn new(id: Identity, admitted_at: Instant) -> Self {
+        Self::admitted(id, admitted_at, Arc::default())
+    }
+    /// A view of the admission that began at `admitted_at` and spends its `repair`; neither the
+    /// deadline nor the repair is renewed by a later view.
+    pub(crate) fn admitted(id: Identity, admitted_at: Instant, repair: Arc<AtomicBool>) -> Self {
         // Notice delivery has a separate metadata-only timeout.
         Self {
             id,
             deadline: admitted_at + BUDGET,
-            state: Arc::new(Mutex::new((Phase::Normalizing, false))),
+            state: Arc::new(Mutex::new((Phase::Normalizing,))),
+            repair,
         }
     }
     pub(crate) async fn restore(
@@ -187,12 +196,11 @@ impl Output {
         *id != Identity::from_proof(proof, id.input)
     }
     pub(crate) fn take_repair(&self) -> bool {
-        let mut state = self.state.lock().unwrap();
-        if state.0 != Phase::Normalizing || state.1 || Instant::now() >= self.deadline {
+        let state = self.state.lock().unwrap();
+        if state.0 != Phase::Normalizing || Instant::now() >= self.deadline {
             return false;
         }
-        state.1 = true;
-        true
+        !self.repair.swap(true, Ordering::SeqCst)
     }
     pub(crate) fn confirm(&self, receipt: &crate::db::tui_output_disposition::Receipt) -> bool {
         let mut state = self.state.lock().unwrap();

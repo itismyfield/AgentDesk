@@ -4271,6 +4271,7 @@ src/
 │   │   │   │   ├── episode_key.rs
 │   │   │   │   ├── first_turn.rs
 │   │   │   │   ├── first_turn_tests.rs
+│   │   │   │   ├── first_turn_trust_tests.rs
 │   │   │   │   ├── output_disposition.rs
 │   │   │   │   └── output_disposition_tests.rs
 │   │   │   ├── children/

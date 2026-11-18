@@ -1,5 +1,5 @@
 //! Startup-only menu detection; pane text is diagnostic evidence, never source authority.
-#[cfg(test)]
+#[cfg(any(test, unix))]
 pub(crate) mod normalize;
 
 use std::path::Path;

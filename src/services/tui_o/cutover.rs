@@ -364,6 +364,24 @@ pub(crate) fn attach_codex_first(
     });
 }
 
+/// Starts the admitted launch's trust watch for `context`, the execution it prepared in `cwd`.
+#[cfg(unix)]
+pub(crate) fn watch_codex_first_trust(
+    context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    cwd: &std::path::Path,
+) {
+    let candidate = test_override::with_channels(|boot| {
+        context
+            .channel_id
+            .and_then(|channel| boot?.output_candidate(channel))
+    });
+    let (Some(candidate), Ok(runtime)) = (candidate, tokio::runtime::Handle::try_current()) else {
+        return;
+    };
+    let watch = super::writer::normalization::watch_trust(candidate, context.clone(), cwd.into());
+    runtime.spawn(watch);
+}
+
 pub(crate) fn pause_codex_first(channel: u64) -> Option<channel_policy::FirstPause> {
     test_override::with_channels(|boot| {
         let boot = boot.filter(|b| b.kind(channel) == Some(RuntimeHandoffKind::CodexTui))?;

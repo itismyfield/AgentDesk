@@ -48,6 +48,19 @@ pub(crate) fn repair_once(
     Ok(after.text)
 }
 
+/// One look at the admission's pane: only a selected positive trust menu in the managed `cwd`
+/// spends the admission's repair. `None` leaves the repair for a later look.
+pub(crate) fn repair_if_shown(
+    output: &Output,
+    context: &BindingContext,
+    cwd: &Path,
+    transport: &mut dyn TrustTransport,
+) -> Option<Result<String, Reason>> {
+    current(output, context).ok()?;
+    let pane = transport.observe(&context.tmux_session, budget(output).ok()?)?;
+    selected_trust(&pane.text).then(|| repair_once(output, context, cwd, transport))
+}
+
 fn budget(output: &Output) -> Result<Duration, Reason> {
     // Each existing host executor may spend two seconds reaping each of two commands.
     output
@@ -104,6 +117,6 @@ fn selected_trust(pane: &str) -> bool {
         })
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 #[path = "normalize_tests.rs"]
 mod tests;

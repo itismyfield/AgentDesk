@@ -639,8 +639,8 @@ pub fn pane_current_path(session_name: &str) -> Option<String> {
 }
 
 /// The live pane's `#{pane_current_path}`, asked once within `budget`; a dead or absent pane is `None`.
-/// Only the inactive trust repair calls it until that path is installed.
-#[cfg(test)]
+/// The first-output trust repair reads it before its one menu action.
+#[cfg(any(test, unix))]
 pub(crate) fn pane_current_path_within(session_name: &str, budget: Duration) -> Option<String> {
     if is_blank_session_name(session_name) {
         return None;
