@@ -43,6 +43,10 @@ Properties: `RHReachedKeep` prevents a vacuous scenario; `RHNoInfiniteKeep` and 
 
 These are cfg-controlled model mutants. No product source was mutated or tested by this leg. No expected rule of a pre-existing cfg was changed. Final observed results and raw logs follow.
 
+## Landing base 765ffc33c4
+
+The #8212 early admission checks for an active turn before installing a watch (`src/services/discord/router/message_handler/intake_turn/owned_busy.rs:118`). A still-live pane that reaches Held without an active turn fails missing-pane retirement (`src/services/herdr_launch/retire.rs:58`). The same front is settled before a key with a reason notice (`owned_busy.rs:264`, `provider_dispatch/start_failure.rs:114`). `RestartNoHolder` covers this entry with `RHNoUnheldKeep` and `RHEndExactlyOnce`. The original model reaches Held and violates the new invariant. The revised model reaches explained with an 8-state generation and 4 distinct states. `RestartValid` still reaches Keep and then delivery, with 14 generated and 7 distinct states.
+
 ## Observed WSL TLC result
 
 The same installed WSL TLC jar used for static statechart checks was used directly and through `scripts/ci/statecharts_tlc.py::check_cfg`, including its fairness validation and separate property runs. Jar: `/home/adk/.cache/tla2tools/tla2tools.jar`, SHA256 `936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`; banner `TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)`. No product build was needed.

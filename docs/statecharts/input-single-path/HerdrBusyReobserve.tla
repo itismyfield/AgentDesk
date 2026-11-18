@@ -147,8 +147,12 @@ RHPromptDriver == Entry = "prompt-driver"
 RHEnter == /\ r.phase = "restart"
            /\ r' = [r EXCEPT !.phase = "queued"]
 \* General observe has no proof; running fallback reads Unknown and cannot create Idle.
-RHBusyEntry == /\ r.phase = "queued"
+RHBusyEntry == /\ r.phase = "queued" /\ Scenario # "no-holder-live"
                /\ r' = [r EXCEPT !.phase = "held"]
+\* A live pane with no active turn reaches the missing-recovery refusal before any watch.
+RHRefuseUnheld == /\ r.phase = "queued" /\ Scenario = "no-holder-live"
+                  /\ r' = [r EXCEPT !.phase = "refused", !.refusals = 1,
+                      !.owned = FALSE, !.reason = Scenario]
 \* The first probe also reads Unknown. The fixture then exposes its existing source evidence.
 \* The wired Busy-held entry records the owner hold (a stored due survives; a hold without one gets
 \* it once here) and arms the drive's deadline timer, which a restart does not keep.
@@ -253,13 +257,14 @@ RHRepeatNotice == /\ Mutant = "RepeatNotice" /\ r.phase = "explained" /\ r.notic
 RHRequeue == /\ Mutant = "RequeueBody" /\ r.phase = "explained" /\ r.requeues = 0
              /\ r' = [r EXCEPT !.requeues = 1]
 RHWait == UNCHANGED vars
-RHNext == RHEnter \/ RHBusyEntry \/ RHFirstKeep \/ RHRestoreWake \/ RHKeep \/ RHTick
+RHNext == RHEnter \/ RHBusyEntry \/ RHRefuseUnheld \/ RHFirstKeep \/ RHRestoreWake \/ RHKeep \/ RHTick
           \/ RHIdleReserve \/ RHArm \/ RHRecheckFail \/ RHWrite \/ RHRace
           \/ RHExpire \/ RHLeafExpire \/ RHNoticeEnqueue \/ RHNoticeAck
           \/ RHLifecycle \/ RHSwap \/ RHStaleCallback \/ RHReboot
           \/ RHBusyWrite \/ RHFallback \/ RHRequeue \/ RHRepeatNotice \/ RHWait
 RHSpec == RHInit /\ [][RHNext]_vars
-          /\ WF_vars(RHEnter) /\ WF_vars(RHBusyEntry) /\ WF_vars(RHFirstKeep)
+          /\ WF_vars(RHEnter) /\ WF_vars(RHBusyEntry) /\ WF_vars(RHRefuseUnheld)
+          /\ WF_vars(RHFirstKeep)
           /\ WF_vars(RHRestoreWake) /\ WF_vars(RHKeep) /\ WF_vars(RHIdleReserve)
           /\ WF_vars(RHArm) /\ WF_vars(RHRecheckFail) /\ WF_vars(RHWrite)
           /\ WF_vars(RHExpire) /\ WF_vars(RHLeafExpire) /\ WF_vars(RHNoticeEnqueue)
@@ -290,6 +295,7 @@ RHNoReservedSwap == ~(r.phase = "reserved" /\ r.changed)
 RHNoStaleCallback == ~(r.cbFired /\ r.other = "queued")
 RHNoRebootMidHold == ~(r.replayed /\ r.phase = "held" /\ ~r.visible /\ r.age >= 2)
 RHNoCrashReplay == ~(r.replayed /\ r.records = 1 /\ r.phase = "refused" /\ ~r.pendingAck)
+RHNoUnheldKeep == Scenario = "no-holder-live" => r.phase # "held"
 RHReachedKeep == <>(r.phase = "held" /\ r.age = 1)
 RHNoInfiniteKeep == (r.phase = "held") ~> (r.phase \in {"done", "explained"})
 RHEndExactlyOnce == <>((r.keys = 1 /\ r.refusals = 0) \/ (r.keys = 0 /\ r.refusals = 1 /\ r.notices = 1))

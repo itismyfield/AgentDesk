@@ -350,6 +350,7 @@ input-single-path/HerdrBusyReobserveRestartNewIncarnation.cfg	HerdrBusyReobserve
 input-single-path/HerdrBusyReobserveRestartNoArm.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNoDeadline.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNoFirstKeyGate.cfg	HerdrBusyReobserve	RHOneDisposition	RHEndExactlyOnce
+input-single-path/HerdrBusyReobserveRestartNoHolder.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveRestartNoReservedExpire.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNoWiring.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartNonce.cfg	HerdrBusyReobserve	-	-

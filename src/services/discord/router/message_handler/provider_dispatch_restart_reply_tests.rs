@@ -52,13 +52,22 @@ fn a_restored_reply_wakes_the_same_busy_hold_and_delivers_once_pg() {
         let counts = dispatch::OwnerTurn::probes(CHANNEL);
         let front = intake.front().await;
         let original = front.1.clone();
-        let result = tokio::time::timeout(
-            LIMIT,
-            dispatch::start_idle_for_test(intake.shared.clone(), ChannelId::new(CHANNEL), front),
-        )
-        .await
-        .expect("the actual busy admission completes its hold");
-        assert!(result.is_err_and(|error| error.starts_with("NotSent(")));
+        let (entered, resume) =
+            discord::router::intake_dispatch::after_upload_take(ChannelId::new(CHANNEL))
+                .await
+                .pause();
+        let start =
+            dispatch::start_idle_for_test(intake.shared.clone(), ChannelId::new(CHANNEL), front);
+        let holder = async {
+            tokio::time::timeout(LIMIT, entered).await.unwrap().unwrap();
+            intake.install_holder(&fx, &started).await;
+            resume.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(tokio::time::timeout(LIMIT, start), holder);
+        assert_eq!(
+            result.expect("the actual busy admission completes its hold"),
+            Err("NotSent(\"busy_source_unavailable\")".into())
+        );
         assert_eq!(fx.rig.sends().len(), before);
         assert!(heads.lock().unwrap().is_empty());
         let (_, observed) =
@@ -68,10 +77,34 @@ fn a_restored_reply_wakes_the_same_busy_hold_and_delivers_once_pg() {
             .unwrap()
             .unwrap();
         assert_eq!(look.verdict, Verdict::Keep);
+        assert_eq!(intake.mailbox.has_active_turn().await, Ok(true));
+        let held = intake
+            .mailbox
+            .v2_request(|slot| slot.as_ref().ok_or("no owner")?.json())
+            .await
+            .unwrap();
+        assert_eq!(held["items"], json!([original.clone()]));
+        assert!(held["head_injection"].is_null());
+        assert_eq!(held["retained_inputs"], json!([]));
         let generation = look.generation;
         let (_, observed) =
             held_watch::watch_observed(source_retry_drive(&intake), original.message_id);
 
+        let token = intake.mailbox.cancel_token().await.unwrap().unwrap();
+        let persistence = discord::queue_persistence_context(
+            &intake.shared,
+            &ProviderKind::Claude,
+            ChannelId::new(CHANNEL),
+        );
+        let _ = intake
+            .mailbox
+            .finish_turn_if_token(Some(token), persistence)
+            .await;
+        assert_eq!(intake.mailbox.has_active_turn().await, Ok(false));
+        assert!(inflight::clear_inflight_state(
+            &ProviderKind::Claude,
+            CHANNEL
+        ));
         show(idle);
         assert!(
             readiness::observe(fx.logical(), Some(&started.path)).is_none(),
