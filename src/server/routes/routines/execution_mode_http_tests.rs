@@ -107,6 +107,7 @@ async fn provider_choices_an_agent_cannot_run_are_refused_and_the_view_marks_inh
         )
     };
     for body in [
+        json!({"script_ref": "a.js", "fallback_agent_id": "duo", "provider": "codex"}),
         json!({"script_ref": "a.js", "agent_id": "solo", "provider": "codex"}),
         json!({"script_ref": "a.js", "agent_id": "duo", "model": "gpt-x"}),
         json!({"script_ref": "a.js", "agent_id": "duo", "provider": "nope"}),

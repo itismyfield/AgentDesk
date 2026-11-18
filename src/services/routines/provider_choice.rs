@@ -152,7 +152,7 @@ pub fn choice_for_patch(
     )
 }
 
-/// The reason a choice cannot run on one of `agents`, which every attempt of the run may use.
+/// The primary agent is required for a choice; primary and fallback must each own its channel.
 pub async fn refusal_for_agents(
     pool: &PgPool,
     choice: &ProviderChoice,
@@ -161,11 +161,10 @@ pub async fn refusal_for_agents(
     if choice.provider.is_none() {
         return Ok(None);
     }
-    let mut agents = agents.iter().flatten().peekable();
-    if agents.peek().is_none() {
+    if agents.first().copied().flatten().is_none() {
         return Ok(Some("provider requires agent_id".into()));
     }
-    for agent_id in agents {
+    for agent_id in agents.iter().flatten() {
         let channels = AgentProviderChannels::load(pool, agent_id).await?;
         if let Err(error) = channels.route(agent_id, choice) {
             return Ok(Some(error.to_string()));

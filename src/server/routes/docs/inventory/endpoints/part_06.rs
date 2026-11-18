@@ -516,7 +516,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ),
             (
                 "provider",
-                body_param("string", false, "Provider channel the agent turn runs on (claude, codex, antigravity, ...); omitted inherits the agent primary. 422 when the agent or fallback agent has no channel for it"),
+                body_param("string", false, "Provider channel the agent turn runs on (claude, codex, antigravity, ...); requires agent_id; omitted inherits the agent primary. 422 when the agent or fallback agent has no channel for it"),
             ),
             (
                 "model",
