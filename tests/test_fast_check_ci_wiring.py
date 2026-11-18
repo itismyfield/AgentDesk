@@ -2252,7 +2252,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
     def test_hardening_accepts_hosted_labels_and_repository_policy_static_matrices(self) -> None:
         variants = {
             label: f"    runs-on: {label}\n"
-            for label in ("ubuntu-latest", "ubuntu-22.04", "macos-15", "macos-latest", "windows-latest")
+            for label in ("ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04", "macos-15", "macos-latest", "windows-latest")
         }
         variants.update({
             "label-list": "    runs-on: [ubuntu-latest]\n",

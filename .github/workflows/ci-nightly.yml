@@ -48,7 +48,9 @@ jobs:
   # PR-required branch protection is never affected by E2E flakiness.
   dashboard_playwright:
     name: Dashboard Playwright smoke (nightly)
-    runs-on: ubuntu-latest
+    # Playwright 1.60.0 has no chromium for the ubuntu-latest 26.04 image;
+    # upgrading Playwright belongs to a dashboard dependency update.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
