@@ -99,6 +99,7 @@ fn create_body() -> Value {
 fn edit_body(key: &str, revision: u64, title: &str) -> Value {
     let mut definition = definition();
     definition["title"] = json!(title);
+    definition["workflow_options"] = json!({"start":false,"implementation":false,"review":false,"landing":false,"merge":false,"deploy":false});
     json!({"idempotency_key":key,"expected_definition_revision":revision,"definition":definition})
 }
 fn command_body(key: &str, command: Value) -> Value {

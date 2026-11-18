@@ -24,3 +24,5 @@ mod verification_commands;
 pub mod verification_run;
 pub mod verification_runner;
 pub mod view;
+
+mod decision_commands;

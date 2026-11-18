@@ -1,3 +1,7 @@
+use crate::domain::campaign::{
+    decision_item::{ApprovalBinding, ApprovalTarget, ForumApproval},
+    workflow_options::ApprovalGate,
+};
 use serde::Deserialize;
 
 use crate::services::campaign_execution::{
@@ -32,6 +36,15 @@ pub(in crate::server::routes) struct CommandRequest {
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub(in crate::server::routes) enum PublicCommand {
+    Approve {
+        expected_definition_revision: u64,
+        expected_run: String,
+        node_id: String,
+        gate: ApprovalGate,
+        target: ApprovalTarget,
+        policy_hash: String,
+        evidence: ForumApproval,
+    },
     Start {
         expected_definition_revision: u64,
     },
@@ -57,6 +70,10 @@ impl PublicCommand {
             Self::Start {
                 expected_definition_revision,
             }
+            | Self::Approve {
+                expected_definition_revision,
+                ..
+            }
             | Self::Stop {
                 expected_definition_revision,
                 ..
@@ -72,6 +89,25 @@ impl PublicCommand {
         };
         super::protocol::revision(revision)?;
         Ok(match self {
+            Self::Approve {
+                expected_definition_revision,
+                expected_run,
+                node_id,
+                gate,
+                target,
+                policy_hash,
+                evidence,
+            } => Command::ApproveGate {
+                binding: Box::new(ApprovalBinding {
+                    run_id: expected_run,
+                    node_id,
+                    gate,
+                    definition_revision: expected_definition_revision,
+                    target,
+                    policy_hash,
+                }),
+                evidence: Box::new(evidence),
+            },
             Self::Start {
                 expected_definition_revision,
             } => Command::Start {

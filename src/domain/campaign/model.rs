@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::candidate_seal::CandidateSeal;
+use super::decision_item::{ApprovalBinding, ApprovalBook, ApprovalRecord, ForumApproval};
 use super::definition::{
     AcceptanceCondition, DefinitionError, DefinitionHashes, DefinitionInput, ValidatedDefinition,
 };
@@ -294,6 +295,8 @@ pub struct Run {
     // The environment observed with a V's first start receipt, keyed by execution ID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub environments: BTreeMap<String, ExecutionEnvironment>,
+    #[serde(default, skip_serializing_if = "ApprovalBook::is_empty")]
+    pub approvals: ApprovalBook,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +365,13 @@ pub struct CampaignState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    OpenApprovalGate {
+        binding: Box<ApprovalBinding>,
+    },
+    ApproveGate {
+        binding: Box<ApprovalBinding>,
+        evidence: Box<ForumApproval>,
+    },
     EditDefinition {
         expected_revision: u64,
         definition: DefinitionInput,
@@ -527,6 +537,13 @@ pub struct CommandEnvelope {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum EventKind {
+    ApprovalGateOpened {
+        binding: Box<ApprovalBinding>,
+    },
+    ApprovalGateApproved {
+        binding: Box<ApprovalBinding>,
+        approval: Box<ApprovalRecord>,
+    },
     DefinitionCreated,
     DefinitionEdited {
         superseded_nodes: Vec<String>,

@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 
 use super::{
+    decision_commands,
     definition::{self, DefinitionInput, WORKFLOW_VERSION},
     model::*,
     stage_fsm, verification_commands,
@@ -289,6 +290,14 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
     }
     let mut next = state.clone();
     let event = match &envelope.command {
+        Command::OpenApprovalGate { .. } | Command::ApproveGate { .. } => {
+            let Some(event) =
+                decision_commands::decide(&mut next, &envelope.command, envelope.observed_at)?
+            else {
+                return Ok(unchanged(state));
+            };
+            event
+        }
         Command::EditDefinition {
             expected_revision,
             definition,
@@ -296,6 +305,7 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
         } => {
             revision(state, *expected_revision)?;
             edit_guard(state)?;
+            decision_commands::validate_edit_input(definition)?;
             let validated = definition::validate_definition(definition.clone())
                 .map_err(Rejection::invalid_definition)?;
             let superseded_nodes = state.definition.superseded_nodes(&validated);

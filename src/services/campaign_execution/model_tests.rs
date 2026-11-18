@@ -49,6 +49,7 @@ fn model_preserves_nonempty_fence_ack_and_action_target_for_canonical_json_stora
         reconciliation: None,
     };
     let run = Run {
+        approvals: Default::default(),
         id: "run".into(),
         control_version: 5,
         stop: Some(StopIntent {

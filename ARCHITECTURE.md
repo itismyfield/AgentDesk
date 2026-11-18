@@ -336,6 +336,7 @@ src/
 │   │   └── writes.rs
 │   ├── server_campaigns/
 │   │   ├── command_transaction.rs
+│   │   ├── decision_gate_tests.rs
 │   │   ├── evidence_store.rs
 │   │   ├── evidence_store_tests.rs
 │   │   ├── mod.rs
@@ -421,6 +422,7 @@ src/
 │   │   └── tests.rs
 │   ├── campaign/
 │   │   ├── candidate_seal.rs
+│   │   ├── decision_item.rs
 │   │   ├── definition.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
@@ -431,6 +433,7 @@ src/
 │   │   ├── profile.rs
 │   │   ├── review_gate.rs
 │   │   ├── verification_run.rs
+│   │   ├── workflow_options.rs
 │   │   └── workspace.rs
 │   ├── intake_consent/
 │   │   └── decision.rs
@@ -731,6 +734,7 @@ src/
 │   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs
 │   │   ├── server_campaigns/
+│   │   │   ├── decision_tests.rs
 │   │   │   ├── dto.rs
 │   │   │   ├── http_tests.rs
 │   │   │   ├── mod.rs
@@ -981,6 +985,8 @@ src/
 │   │   ├── commands.rs
 │   │   ├── control.rs
 │   │   ├── control_tests.rs
+│   │   ├── decision_commands.rs
+│   │   ├── decision_commands_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
 │   │   ├── effect_envelope.rs
