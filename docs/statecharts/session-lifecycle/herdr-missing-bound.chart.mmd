@@ -1,0 +1,18 @@
+stateDiagram-v2
+    [*] --> Bound
+    Bound --> Inspect: Restart reconnect or next idle input
+    Inspect --> Bound: Present / verified reconnect
+    Inspect --> ProveMissing: Complete exact endpoint snapshot lacks pane
+    Inspect --> Reject: Unknown during idle input
+    ProveMissing --> Retired: Same nonce and observed row CAS
+    ProveMissing --> Reject: Proof, row read or CAS fails
+    Retired --> FreshLaunch: Rejudge this input
+    FreshLaunch --> Delivered: New execution accepts input
+    FreshLaunch --> Reject: New launch fails before input
+    Reject --> Discarded: One channel reason, settle exact claim
+    Delivered --> [*]
+    Discarded --> [*]
+    Inspect --> Held: Frozen policy, Missing interpreted as Held
+    Held --> Held: Dead pane probe = Unknown / Keep
+    WorkingTurn --> TemporaryHold: Source not ready
+    TemporaryHold --> Inspect: Existing turn boundary wake

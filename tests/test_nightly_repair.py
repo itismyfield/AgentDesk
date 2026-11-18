@@ -81,7 +81,9 @@ def nightly_contract_problems(text: str) -> list[str]:
              f"{name} changed its canonical non-PG non-lib sweep")
         for step_name, phase in NATIVE_LIB_STEPS:
             lib = step_of(jobs, name, step_name) or {}
-            need(lib.get("run", "").strip() == f"bash scripts/ci/nextest-native.sh {platform} {platform}-lib pg-classifier {phase}",
+            # The macOS build reports its peak RSS through `time -l`, which keeps the build's exit status.
+            wrap = "/usr/bin/time -l " if (name, phase) == ("full_macos", "prepare") else ""
+            need(lib.get("run", "").strip() == f"{wrap}bash scripts/ci/nextest-native.sh {platform} {platform}-lib pg-classifier {phase}",
                  f"{name} stopped running its lib {phase} through the audited native nextest path")
             need("if" not in lib and not lib.get("continue-on-error"), f"{name} made its native lib {phase} conditional")
 

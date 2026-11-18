@@ -860,6 +860,8 @@ def _reset_generation_argument_problems(root: Path, texts: dict[Path, str]) -> l
                     expected_count = 3 if receiver_call else 4
                     if len(arguments) != expected_count or arguments[-1] == "None":
                         problems.append(f"{relative}: reset requires the captured generation argument")
+                elif len(arguments) != (2 if receiver_call else 3):
+                    problems.append(f"{relative}: advance requires only end and generation arguments")
     return problems
 
 

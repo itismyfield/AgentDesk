@@ -699,6 +699,24 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     self.assertGreater(index, installs[0], "nextest consumer must follow its install in this job")
         self.assertEqual(len(consumers), 2)
 
+    def test_engine_runtime_lease_and_frontier_owners_select_windows(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        filters = paths_filter_definitions(workflow)
+        jobs = yaml.safe_load(workflow)["jobs"]
+        for path in (
+            "src/services/engine_runtime/mod.rs",
+            "src/services/engine_runtime/relay_state.rs",
+            "src/services/engine_runtime/relay_state/coord.rs",
+        ):
+            with self.subTest(path=path):
+                context = {"github.event.pull_request.draft": False}
+                for selector in ("rust_compile", "cross_os_rust"):
+                    selected = selects(filters[selector], path)
+                    self.assertTrue(selected, (selector, path))
+                    context["needs.changes.outputs." + selector] = str(selected).lower()
+                for job in ("check_fast_cross_os", "check_fast_cross_os_targets"):
+                    self.assertTrue(eval_step_if(jobs[job]["if"], context), job)
+
     def test_cross_os_derived_selectors_match_source(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         selectors = paths_filter_definitions(workflow)["cross_os_rust"]
@@ -919,7 +937,12 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 steps = [s for s in job["steps"] if "nextest-native.sh" in s.get("run", "")]
                 self.assertEqual([shlex.split(s["run"])[-1] for s in steps], ["prepare", "run"])
                 for step in steps:
-                    self.assertEqual(shlex.split(step["run"])[:-1],
+                    argv = shlex.split(step["run"])
+                    # The macOS build reports its peak RSS through `time -l`, which keeps the build's exit status.
+                    if job_name == "full_macos" and argv[-1] == "prepare":
+                        self.assertEqual(argv[:2], ["/usr/bin/time", "-l"])
+                        argv = argv[2:]
+                    self.assertEqual(argv[:-1],
                                      ["bash", "scripts/ci/nextest-native.sh", platform,
                                       f"{platform}-lib", "pg-classifier"])
                     self.assertEqual(step["shell"], "bash")
@@ -2252,7 +2275,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
     def test_hardening_accepts_hosted_labels_and_repository_policy_static_matrices(self) -> None:
         variants = {
             label: f"    runs-on: {label}\n"
-            for label in ("ubuntu-latest", "ubuntu-22.04", "macos-15", "macos-latest", "windows-latest")
+            for label in ("ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04", "macos-15", "macos-latest", "windows-latest")
         }
         variants.update({
             "label-list": "    runs-on: [ubuntu-latest]\n",
