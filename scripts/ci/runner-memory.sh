@@ -177,6 +177,13 @@ def sample(phase=None):
         stream.write(json.dumps(row, sort_keys=True) + "\n")
 
 
+def runner_scope():
+    environment = os.environ.get("RUNNER_ENVIRONMENT")
+    if environment not in {"github-hosted", "self-hosted"}:
+        return {"runner_environment": None, "shared_host": None}
+    return {"runner_environment": environment, "shared_host": environment == "self-hosted"}
+
+
 def finish():
     started = (STATE / "metadata.json").exists()
     (STATE / "stop").touch()
@@ -193,6 +200,7 @@ def finish():
         if (STATE / "samples.jsonl").exists():
             rows = [json.loads(line) for line in (STATE / "samples.jsonl").read_text().splitlines()]
         metadata = json.loads((STATE / "metadata.json").read_text()) if started else {}
+        scope = {key: metadata.get(key, value) for key, value in runner_scope().items()}
         errors = sorted({error for row in rows for error in row["errors"]})
         phases = {}
         for row in rows:
@@ -207,6 +215,7 @@ def finish():
             available = [row[key] for row in rows if row.get(key) is not None]
             return max(available) if available else None
         summary = {
+            **scope,
             "status": "unavailable" if not rows else ("partial" if errors or sampler_status != "stopped" else "complete"),
             "sampler_status": sampler_status, "samples": len(rows), "errors": errors,
             "interval_seconds": metadata.get("interval_seconds"), "cpu_count": metadata.get("cpu_count"),
@@ -220,6 +229,8 @@ def finish():
         return "unavailable" if value is None else f"{value / 1048576:.1f}"
     limit = "unlimited" if summary["cgroup_limit_state"] == "unlimited" else mib(summary["cgroup_limit_bytes"]) + " MiB"
     lines = ["### Runner memory observation", "", f"Status: {summary['status']}; sampler: {sampler_status}; samples: {len(rows)}.",
+             f"Runner environment: {scope['runner_environment'] or 'unavailable'}."
+             + (" Counters can include activity from other workloads on this shared host." if scope["shared_host"] else ""),
              f"Interval: {summary['interval_seconds']} s; CPUs: {summary['cpu_count']}; host RAM: {mib(summary['host_total_bytes'])} MiB; cgroup limit: {limit}.",
              f"Cgroup lifetime peak: {mib(summary['lifetime_cgroup_peak_bytes'])} MiB (not a per-step peak).", "",
              "| Phase | Samples | Host used MiB | Swap used MiB | RSS sum MiB | Largest RSS MiB | rustc count | Cgroup current MiB |",
@@ -254,7 +265,7 @@ def main():
                 raise ValueError("already_started")
             write_json(STATE / "phase.json", {"phase": IDLE})
             write_json(STATE / "metadata.json", {"interval_seconds": interval, "cpu_count": os.cpu_count(),
-                                                "cargo_build_jobs": os.environ.get("CARGO_BUILD_JOBS")})
+                                                "cargo_build_jobs": os.environ.get("CARGO_BUILD_JOBS"), **runner_scope()})
             sample()
         with (STATE / "sampler.log").open("a") as log:
             subprocess.Popen(["bash", str(SCRIPT), "_sample"], stdin=subprocess.DEVNULL,
