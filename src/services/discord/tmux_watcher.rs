@@ -1012,6 +1012,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         );
 
         let mut retry_terminal_delivery_from_offset = false;
+        let mut terminal_discarded = false;
         // #4194: bound every await in the slot-held terminal relay expression.
         // On timeout, fall into the same failed-undelivered rewind path as a
         // transient send failure; never advance watermarks from this branch.
@@ -1150,7 +1151,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             })
             .await {
                 Ok(()) => {
-                    tui_direct_anchor_terminal_body_visible = true;
+                    // A refused body consumed after its durable reason was never delivered.
+                    terminal_discarded = o_ownership.is_err();
+                    tui_direct_anchor_terminal_body_visible = !terminal_discarded;
                     last_relayed_offset = Some(turn_data_start_offset);
                     true
                 }
@@ -1433,6 +1436,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
         let relay_suppressed = relay_decision.suppressed;
         let terminal_output_committed = relay_ok || relay_suppressed;
+        let has_assistant_response = has_assistant_response && !terminal_discarded;
         if terminal_output_committed {
             cancellation_custody.settled();
             terminal_delivery_observed = true;
@@ -1553,7 +1557,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .as_ref()
                 .filter(|_| terminal_output_committed && !lifecycle_stage_paused),
             (&tmux_session_name, current_offset),
-            crate::services::discord::receipt_settle::watcher_outcome(
+            o_delegated_arm::terminal_outcome(
+                terminal_discarded,
                 summary_was_cancelled,
                 has_assistant_response,
             ),
@@ -2239,6 +2244,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if terminal_output_committed
             && !lifecycle_stage_paused
             && !completion_is_stale_for_newer_turn
+            && !terminal_discarded
             && let Some(record) = path_b_record::PathBRecord::select(
                 inflight_state.as_ref(),
                 inflight_before_relay.as_ref(),

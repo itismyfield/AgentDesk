@@ -47,6 +47,19 @@ pub(super) async fn discard_refused(
     false
 }
 
+/// The terminal receipt of a watcher range: a refused body discarded after its reason failed the
+/// input, never completed it.
+pub(super) fn terminal_outcome(
+    discarded: bool,
+    stopped: bool,
+    has_answer: bool,
+) -> crate::db::turns::TerminalOutcome {
+    if discarded {
+        return crate::db::turns::TerminalOutcome::Failed;
+    }
+    crate::services::discord::receipt_settle::watcher_outcome(stopped, has_answer)
+}
+
 /// Mirrors the delegated-success watermark epilogue; the confirmed end advances later through
 /// the watcher's lease-free commit path.
 pub(super) async fn consume_delegated_terminal(
