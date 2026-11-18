@@ -1083,6 +1083,15 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
         (193, &["column:session_transcripts.channel_context"]),
         (194, &["column:sessions.provider_resume_fence"]),
         (197, &["table:decision_forums"]),
+        (
+            198,
+            &[
+                "column:routines.provider",
+                "column:routines.model",
+                "constraint:routines_model_requires_provider_check",
+                "column:agents.provider_channels",
+            ],
+        ),
     ];
     assert_eq!(
         expected
