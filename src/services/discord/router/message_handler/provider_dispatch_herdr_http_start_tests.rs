@@ -182,8 +182,17 @@ async fn completed(intake: &Intake, answers: usize) {
             ChannelId::new(CHANNEL),
         )
         .await;
+        let history =
+            crate::services::tui_input::human_frame::history::v2::Registry::runtime().unwrap();
+        let native: Vec<_> = history
+            .native_classification_registrations()
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.ticket.channel_id == CHANNEL)
+            .map(|r| history.native_settlement(&r.namespace, &r.ticket))
+            .collect();
         panic!(
-            "{error}: row={:?}, O={:?}, bridge={:?}, state={state}, activity={activity:?}, drives={:?}, {}",
+            "{error}: row={:?}, O={:?}, bridge={:?}, state={state}, activity={activity:?}, native={native:?}, drives={:?}, {}",
             inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL),
             intake.posts.to(CHANNEL),
             intake.mock.written_texts(),
@@ -555,7 +564,18 @@ fn external_herdr_http_person_joins_busy_at_early_and_late_boundaries_pg() {
                 .await
                 .unwrap();
                 if late {
-                    idle_turn_unwound(&intake).await;
+                    idle_turn_unwound(
+                        &intake,
+                        response.1["turn_id"]
+                            .as_str()
+                            .unwrap()
+                            .rsplit(':')
+                            .next()
+                            .unwrap()
+                            .parse()
+                            .unwrap(),
+                    )
+                    .await;
                 }
                 tokio::time::timeout(LIMIT, async {
                     while heads.lock().unwrap().len() != 2 {
@@ -878,14 +898,21 @@ fn execution_gone(terminal: Option<bool>) {
         terminal.is_none(),
     );
     let (path, session) = (started.path.clone(), started.session.clone());
+    let pasted = Mutex::new(String::new());
     fx.rig.on_send(move |params| {
+        if let Some(text) = params["text"].as_str().filter(|text| !text.is_empty()) {
+            *pasted.lock().unwrap() = text
+                .trim_start_matches("\u{1b}[200~")
+                .trim_end_matches("\u{1b}[201~")
+                .into();
+        }
         // The native Enter writes a user row; the later shell launch command does not.
         if params["keys"] == json!(["enter"]) && params["text"].as_str().is_none_or(str::is_empty) {
             append(
                 &path,
                 &[json!({"type":"user","uuid":uuid(),"sessionId":session,
                 "timestamp":chrono::Utc::now().to_rfc3339(),
-                "message":{"role":"user","content":INPUT}})],
+                "message":{"role":"user","content":pasted.lock().unwrap().clone()}})],
             );
         }
     });
@@ -1085,12 +1112,17 @@ fn external_herdr_http_turn_mode_aborted_terminal_settles_without_synthetic_repl
     let confirmed = crate::services::tui_o::turn_mode::TestConfirmation::new(CHANNEL);
     let intake = Intake::new(&fx, &started);
     let (path, session) = (started.path.clone(), started.session.clone());
+    let pasted = Mutex::new(String::new());
     fx.rig.on_send(move |params| {
+        if let Some(text) = params["text"].as_str().filter(|text| !text.is_empty()) {
+            *pasted.lock().unwrap() = text.trim_start_matches("\u{1b}[200~")
+                .trim_end_matches("\u{1b}[201~").into();
+        }
         if params["keys"] == json!(["enter"]) {
             append(&path, &[
                 json!({"type":"user","uuid":uuid(),"sessionId":session,
                     "timestamp":chrono::Utc::now().to_rfc3339(),
-                    "message":{"role":"user","content":INPUT}}),
+                    "message":{"role":"user","content":pasted.lock().unwrap().clone()}}),
                 json!({"type":"user","uuid":uuid(),"sessionId":session,
                     "message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}),
             ]);
@@ -1544,13 +1576,17 @@ fn external_herdr_http_reply_before_and_after_terminal_pg() {
                     {
                         tokio::task::yield_now().await;
                     }
-                    let row =
-                        inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL)
-                            .unwrap();
-                    assert!(
-                        row.tui_terminal_kind.is_none(),
-                        "O publishes before terminal admission"
-                    );
+                    if let Some(row) = inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL) {
+                        assert!(row.tui_terminal_kind.is_none(), "O publishes before terminal admission");
+                    } else {
+                        let history = crate::services::tui_input::human_frame::history::v2::Registry::runtime().unwrap();
+                        let registration = history.native_classification_registrations().unwrap().into_iter()
+                            .find(|r| r.ticket.channel_id == CHANNEL && r.ticket.owning_episode.is_some()).unwrap();
+                        let saved = history.native_settlement(&registration.namespace, &registration.ticket).unwrap();
+                        assert!(saved.cleanup_complete, "native cleanup must account for the missing row: {saved:?}");
+                        assert_eq!(saved.outcome.unwrap().disposition,
+                            crate::services::tui_input::human_frame::history::v2::native::Disposition::Executed);
+                    }
                 })
                 .await;
                 release.send(()).unwrap_or(());

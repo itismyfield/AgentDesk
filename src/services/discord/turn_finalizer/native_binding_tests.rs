@@ -489,7 +489,14 @@ async fn native_8148_coldsource_pending_successor_is_untouched() {
     crate::services::discord::inflight::save_inflight_state(&row).unwrap();
     let runtime_before = dedupe::runtime_binding_for_tmux_session(&f.logical)
         .map(|b| (b.session_id, b.output_path, b.last_offset));
-    let row_before = serde_json::to_value(&row).unwrap();
+    let row_before = serde_json::to_value(
+        crate::services::discord::inflight::load_inflight_state_read_only(
+            &ProviderKind::Claude,
+            f.ticket.channel_id,
+        )
+        .unwrap(),
+    )
+    .unwrap();
     assert!(
         port.bind_source(&f.namespace, &f.ticket, &f.history)
             .await

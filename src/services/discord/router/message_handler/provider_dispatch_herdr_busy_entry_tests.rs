@@ -1088,7 +1088,7 @@ fn assert_idle_tmux_queries(logical: &str) {
     );
 }
 
-async fn idle_turn_unwound(intake: &Intake) {
+async fn idle_turn_unwound(intake: &Intake, message: u64) {
     let mut completions =
         crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
             &intake.shared,
@@ -1123,7 +1123,7 @@ async fn idle_turn_unwound(intake: &Intake) {
                     .into_iter()
                     .find(|r| {
                         r.ticket.channel_id == CHANNEL
-                            && r.ticket.key["identity"]["primary"] == MESSAGE
+                            && r.ticket.key["identity"]["primary"] == message
                     })
                 {
                     let settlement = history
@@ -1536,7 +1536,7 @@ fn a_pinless_idle_input_delegates_without_another_authentic_hook_pg() {
         );
         assert!(history.complete && history.awaiting.is_none());
         assert!(history.current.unwrap().pin.is_none());
-        idle_turn_unwound(&intake).await;
+        idle_turn_unwound(&intake, MESSAGE).await;
         assert_eq!(intake.mailbox.has_active_turn().await, Ok(false));
         assert_eq!(
             crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&started.path),
