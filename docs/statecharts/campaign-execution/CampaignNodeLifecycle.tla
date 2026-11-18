@@ -3,11 +3,11 @@ EXTENDS Naturals
 CONSTANTS Required, MaxRepairs, MaxStops, MaxCrash,
           CheckGates, TargetBound, PositionGuard, BudgetStops, Recompute
 VARIABLES control, stage, open, result, failed, cycle, rev, epoch, approved, facts,
-          cmd, applied, stops, crashes, blind, badEntry, dup, retried
+          cmd, applied, stops, crashes, blind, badEntry, dup, retried, landingEpoch
 vars == <<control, stage, open, result, failed, cycle, rev, epoch, approved, facts,
-          cmd, applied, stops, crashes, blind, badEntry, dup, retried>>
+          cmd, applied, stops, crashes, blind, badEntry, dup, retried, landingEpoch>>
 node == <<stage, open, result, failed, cycle>>
-flags == <<badEntry, dup, retried>>
+flags == <<badEntry, dup, retried, landingEpoch>>
 driver == <<cmd, applied, crashes, blind>>
 
 None == [kind |-> "none", epoch |-> 0]
@@ -42,7 +42,7 @@ Init ==
     /\ control = "prepared" /\ stage = "requirements" /\ open = FALSE /\ result = "none"
     /\ failed = FALSE /\ cycle = 0 /\ rev = 0 /\ epoch = 0 /\ approved = {} /\ facts = FALSE
     /\ cmd = None /\ applied = {} /\ stops = 0 /\ crashes = 0 /\ blind = FALSE
-    /\ badEntry = FALSE /\ dup = FALSE /\ retried = FALSE
+    /\ badEntry = FALSE /\ dup = FALSE /\ retried = FALSE /\ landingEpoch = 0
 
 BeginRun ==
     /\ control = "prepared" /\ control' = "running"
@@ -71,6 +71,7 @@ Apply ==
     /\ control = "running" /\ cmd # None /\ cmd.epoch = epoch /\ cmd.kind = Wanted
     /\ \A g \in Boundary : Passes(g)
     /\ epoch' = epoch + 1 /\ applied' = applied \cup {cmd}
+    /\ landingEpoch' = IF cmd.kind = "land" THEN epoch' ELSE landingEpoch
     /\ badEntry' = (badEntry \/ \E g \in Boundary : ~Current(g))
     /\ retried' = (retried \/ (cmd.kind = "assign" /\ failed))
     /\ CASE cmd.kind = "assign" ->
@@ -94,7 +95,7 @@ Apply ==
 \* Control: without the position guard a retransmitted command takes effect a second time.
 Replay ==
     /\ ~PositionGuard /\ control = "running" /\ cmd \in applied /\ ~dup /\ dup' = TRUE
-    /\ UNCHANGED <<control, node, rev, epoch, approved, facts, driver, stops, badEntry, retried>>
+    /\ UNCHANGED <<control, node, rev, epoch, approved, facts, driver, stops, badEntry, retried, landingEpoch>>
 
 \* The driver drops a command once it is answered, stale or stopped.
 Ack ==
@@ -128,10 +129,13 @@ Edit ==
     /\ control = "stopped" /\ rev = 0 /\ rev' = 1
     /\ UNCHANGED <<control, node, epoch, approved, facts, driver, stops, flags>>
 
-\* Resume returns an interrupted Work or Review to a fresh Work of the same repair cycle.
+KeepLanding == IF stage = "review" THEN "work" ELSE stage
+LandingAfterResume == IF stage = "confirm" /\ ~facts THEN "landing" ELSE KeepLanding
+
+\* Resume rechecks an unused Landing admission and keeps the same Work repair cycle.
 Resume ==
     /\ control = "stopped" /\ control' = "running" /\ epoch' = epoch + 1
-    /\ stage' = IF stage = "review" THEN "work" ELSE stage
+    /\ stage' = LandingAfterResume
     /\ UNCHANGED <<open, result, failed, cycle, rev, approved, facts, driver, stops, flags>>
 
 Done == UNCHANGED vars
@@ -144,6 +148,8 @@ Spec == Init /\ [][Next]_vars /\ WF_vars(BeginRun) /\ WF_vars(Compute) /\ WF_var
 NoUnapprovedEntry == ~badEntry
 NextActionAtMostOnce == ~dup
 NoRetryAfterBudget == ~retried
+LandingAdmissionCurrent ==
+    control = "running" /\ stage = "confirm" /\ ~facts => landingEpoch = epoch
 SucceededOnlyWhenConfirmed == control = "succeeded" => facts /\ stage = "complete"
 
 \* A running node whose boundary is approved must not rest there.

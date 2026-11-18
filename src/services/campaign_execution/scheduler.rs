@@ -72,9 +72,7 @@ pub fn next_action(state: &CampaignState, node_id: &str) -> NextAction {
     };
     match (node.stage, open) {
         (Stage::Requirements | Stage::Implementation, None) => {
-            if node.stage == Stage::Requirements
-                && lifecycle::unmet_dependency(state, node_id).is_some()
-            {
+            if lifecycle::unmet_dependency(state, node_id).is_some() {
                 return hold(HoldReason::PredecessorMain);
             }
             // The Work's candidate is the driver's observation; AssignWork matches it exactly.

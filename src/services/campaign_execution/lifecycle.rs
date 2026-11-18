@@ -108,8 +108,7 @@ pub(super) fn unmet_dependency<'a>(state: &'a CampaignState, node_id: &str) -> O
         .map(String::as_str)
 }
 
-// Entering Work: a first Work waits for its predecessors' main integration, and every Work for
-// the approvals of this exact starting candidate and pin.
+// Every Work waits for its predecessors' main integration and the approvals of its candidate and pin.
 pub(super) fn admit_work(
     state: &CampaignState,
     run: &Run,
@@ -117,9 +116,7 @@ pub(super) fn admit_work(
     stage: Stage,
     pin_hash: &str,
 ) -> Result<(), Rejection> {
-    if stage == Stage::Requirements
-        && let Some(dependency) = unmet_dependency(state, &binding.node_id)
-    {
+    if let Some(dependency) = unmet_dependency(state, &binding.node_id) {
         return Err(Rejection {
             target: Some(format!("predecessor:{dependency}")),
             ..Rejection::new(RejectionCode::GateNotPassed)

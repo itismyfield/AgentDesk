@@ -6,7 +6,7 @@
 
 ## 검사 결과
 
-공식 `scripts/ci/statecharts_tlc.py`로 신규 **8/8 cfg expected 일치**를 확인했다. 정상 3개(기본·Chart·GatesOff)는 4 invariant와 liveness 1개가 모두 GREEN이고, 부정 대조 5개는 지정한 규칙만 RED다. 기본 설정은 **4,608 distinct states**, Chart 설정은 **101 distinct states**다. 기본 설정에서 완료(`stage = "complete"`), 예산 소진 실패, 그리고 "수리 1회 + stop·편집·재개 + driver 재시작 뒤 Landing 승인까지 도달"이 모두 도달 가능함을 임시 부정 invariant로 확인했다(공허한 GREEN이 아님).
+공식 `scripts/ci/statecharts_tlc.py`로 **9 cfg**를 대조한다. 정상 3개(기본·Chart·GatesOff)는 5 invariant와 liveness 1개를 검사하고, 부정 대조 6개는 지정한 규칙을 위반한다. 기본 설정은 **4,716 distinct states**, Chart 설정은 **101 distinct states**다. 기본 설정에서 완료(`stage = "complete"`), 예산 소진 실패, 그리고 "수리 1회 + stop·편집·재개 + driver 재시작 뒤 Landing 승인까지 도달"이 모두 도달 가능함을 임시 부정 invariant로 확인했다(공허한 GREEN이 아님).
 
 | 설정 | 제거한 경계 | 예상·실제 결과 | 반례가 뜻하는 것 |
 |---|---|---|---|
@@ -15,6 +15,7 @@
 | StaleTarget | candidate·revision 결속(`TargetBound = FALSE`) | RED `NoUnapprovedEntry` | 옛 candidate나 옛 정의 revision의 승인으로 수리 뒤 새 candidate가 진입한다 |
 | Replay | 위치 대조(`PositionGuard = FALSE`) | RED `NextActionAtMostOnce` | 응답을 잃고 다시 보낸 같은 행동이 두 번 효과를 낸다 |
 | BudgetIgnored | 실패 예산 정지(`BudgetStops = FALSE`) | RED `NoRetryAfterBudget` | 예산을 다 쓴 노드에 Work가 다시 배정된다 |
+| KeepsLanding | 미개시 Landing admission 취소 | RED `LandingAdmissionCurrent` | stop 뒤 재개하면서 지난 epoch의 admission을 유지한다 |
 | NoRecompute | 재시작 뒤 저장 상태에서 재계산(`Recompute = FALSE`) | RED liveness `ApprovedNodeMoves` | driver가 메모리의 행동만 믿으면 재시작 뒤 승인된 노드가 그 자리에 멈춘다 |
 
 `Before`는 승인 소비가 없던 M1 head의 `stage_fsm` 진입 경로를 추상화한 설계 대조다. M1 head에는 내부 start 자체가 없어 실제 운영에서 그 진입이 일어났다는 재현이 아니다. 수정 전 RED·수정 후 GREEN의 Rust 재현은 레인 보고서에 따로 있다.
@@ -24,6 +25,7 @@
 - `NoUnapprovedEntry` — 승인 없는 다음 단계 진입 0. Work·Review·Landing 진입 순간, 그 경계에 설정된 자리마다 **현재 candidate(수리 회차)와 현재 정의 revision**의 승인이 있어야 한다. 첫 Work는 착수·구현 두 자리를 모두 요구한다.
 - `NextActionAtMostOnce` — 같은 다음 행동 두 번 실행 0. 행동은 계산된 위치(epoch)에서만 적용되고, 적용되면 epoch가 전진하므로 재전송은 효과가 없다.
 - `NoRetryAfterBudget` — 실패 예산 초과 뒤 자동 재시도 0. 실패한 노드는 재개 뒤에도 실패로 남는다.
+- `LandingAdmissionCurrent` — 미개시 Landing admission은 현재 epoch에만 유효하다. 재개는 다시 Landing 경계 앞에 둔다.
 - `SucceededOnlyWhenConfirmed` — main 반영·AC 사실이 기록되기 전에는 완료하지 않는다.
 - liveness `ApprovedNodeMoves` — 실행 중이고 실패·완료가 아니며 눈앞 경계의 승인이 갖춰진 노드는 그 자리에 영원히 머물지 않는다(다음 단계, 명시 실패, 또는 사용자의 stop으로 간다).
 
@@ -32,7 +34,7 @@
 - liveness는 서버 driver(`Compute`·`Apply`·`Ack`)와 외부 응답(`Outcome`·`Confirmed`)에 weak fairness를 둔다. 즉 **시도 결과와 main·AC 사실이 결국 도착한다는 전제**에서만 성립한다. 자원이 영구히 없거나 관측이 Unknown이면 기다리는 것이 맞고, 그 경우는 이 모델의 주장 밖이다. 승인에는 공정성을 두지 않는다. 사용자가 승인을 영원히 보류하면 노드는 정상적으로 기다린다.
 - 승인은 (자리, 수리 회차, 정의 revision) 좌표로만 추상화했다. run·node·gate·target·policy의 여덟 좌표 결속은 [승인 gate 모델](approval-gate.report.md)이 맡는다.
 - `Confirmed`는 main 반영·AC 완료·현재 증거 세 사실을 하나로 묶은 외부 사건이다. 이 사실의 생산자(머지·배포 승인 소비 포함)는 M7·M8이며, M2 코드에는 그 생산자가 없다. 따라서 **M2만으로는 운영에서 완료에 도달할 수 없다.**
-- `Stop`은 열린 시도를 중단시키고 조용해진 상태까지를 한 단계로 접었다. fence·ack·세션 Gone 대사는 기존 모델과 `control.rs`의 quiescent 검사가 맡는다. 재개는 Work·Review에 있던 노드를 같은 수리 회차의 새 Work로 돌린다. 품질 실패 수는 늘지 않는다.
+- `Stop`은 열린 시도를 중단시키고 조용해진 상태까지를 한 단계로 접었다. fence·ack·세션 Gone 대사는 기존 모델과 `control.rs`의 quiescent 검사가 맡는다. 재개는 Work·Review에 있던 노드를 같은 수리 회차의 새 Work로 돌리고 미개시 Landing admission에서는 현재 승인을 다시 확인한다. 품질 실패 수는 늘지 않는다.
 - 노드 하나만 모델링했다. DAG 순서·작업 2개·선택 설계 단계·수동 retry 계열은 범위 밖이다.
 - `statechart` wrapper가 WSL에 없어 차트 그림(`.chart.mmd`)과 도구 보고서는 만들지 않았다(`sc=not-run`). view와 Chart cfg는 맥에서 그릴 수 있게 남겼다.
 

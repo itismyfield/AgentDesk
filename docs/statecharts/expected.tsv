@@ -28,6 +28,7 @@ campaign-execution/CampaignNodeLifecycleBefore.cfg	CampaignNodeLifecycle	NoUnapp
 campaign-execution/CampaignNodeLifecycleBudgetIgnored.cfg	CampaignNodeLifecycle	NoRetryAfterBudget	-
 campaign-execution/CampaignNodeLifecycleChart.cfg	CampaignNodeLifecycle	-	-
 campaign-execution/CampaignNodeLifecycleGatesOff.cfg	CampaignNodeLifecycle	-	-
+campaign-execution/CampaignNodeLifecycleKeepsLanding.cfg	CampaignNodeLifecycle	LandingAdmissionCurrent	-
 campaign-execution/CampaignNodeLifecycleNoRecompute.cfg	CampaignNodeLifecycle	-	ApprovedNodeMoves
 campaign-execution/CampaignNodeLifecycleReplay.cfg	CampaignNodeLifecycle	NextActionAtMostOnce	-
 campaign-execution/CampaignNodeLifecycleStaleTarget.cfg	CampaignNodeLifecycle	NoUnapprovedEntry	-

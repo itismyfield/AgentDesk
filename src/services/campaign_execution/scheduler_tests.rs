@@ -36,6 +36,57 @@ fn work_for(state: &CampaignState, key: &StepKey) -> (AttemptBinding, Command) {
     (work, command)
 }
 
+fn resumed_with_new_predecessor() -> CampaignState {
+    let running = life::started();
+    let work = fsm::work("a", "original-work");
+    let assigned = life::step(&running, fsm::assign(&work, fsm::assignment(&work)));
+    let stopped = life::stopped(&assigned, &[]);
+    let mut definition = stopped.definition.input().clone();
+    definition.nodes[0].dependencies.push("c".into());
+    let edited = life::step(
+        &stopped,
+        Command::EditDefinition {
+            expected_revision: stopped.definition_revision,
+            definition,
+            change: None,
+        },
+    );
+    let resumed = life::step(&edited, life::resume(&edited));
+    assert_eq!(resumed.nodes["a"].stage, Stage::Implementation);
+    resumed
+}
+
+#[test]
+fn resumed_work_admission_waits_for_a_new_predecessor() {
+    let mut resumed = resumed_with_new_predecessor();
+    let mut work = fsm::work("a", "resumed-work");
+    work.control_version = resumed.run.as_ref().unwrap().control_version;
+    let command = fsm::assign(&work, fsm::assignment(&work));
+    let Err(rejection) = decide(&resumed, &domain::envelope(command.clone())) else {
+        panic!("Work was admitted before its new predecessor reached main");
+    };
+    assert_eq!(rejection.code, RejectionCode::GateNotPassed);
+    assert_eq!(rejection.target.as_deref(), Some("predecessor:c"));
+
+    resumed.nodes.get_mut("c").unwrap().main_integrated = true;
+    let assigned = life::step(&resumed, command);
+    assert_eq!(assigned.nodes["a"].current_attempt, Some(work.attempt_id));
+}
+
+#[test]
+fn resumed_work_scheduler_waits_for_a_new_predecessor() {
+    let mut resumed = resumed_with_new_predecessor();
+    assert_eq!(
+        next_action(&resumed, "a"),
+        hold(HoldReason::PredecessorMain)
+    );
+    resumed.nodes.get_mut("c").unwrap().main_integrated = true;
+    assert!(matches!(
+        next_action(&resumed, "a"),
+        NextAction::AssignWork { .. }
+    ));
+}
+
 #[test]
 fn the_next_action_follows_the_saved_state_and_is_never_proposed_after_it_took_effect() {
     let hold = |reason| NextAction::Hold { reason };
