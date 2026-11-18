@@ -1,5 +1,6 @@
 """Continuous E2E runner through its CLI/tick entry with a fake driver; no Discord or provider contact."""
 import contextlib
+import copy
 import io
 import json
 import os
@@ -8,12 +9,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
-from scripts.e2e.continuous import __main__ as cli, channel_lock, runner  # noqa: E402
+from scripts.e2e.continuous import __main__ as cli, budget, channel_lock, inbox, outbox, plan, publication, runner, summary  # noqa: E402
+from scripts.e2e.continuous.store import read_json, write_json  # noqa: E402
 
 SHA = "a" * 40
 DRIVER = f"""
@@ -178,11 +181,578 @@ class Runner(unittest.TestCase):
         self.assertEqual(blocked, dict.fromkeys(["R-marker", "R-inject", "R-fresh", "R-host"], "BLOCKED_CAPABILITY"))
 
 
-def load_tests(loader, tests, pattern):
-    # The required CI entry for this module also selects its independent contract children.
-    for name in ("recovery", "summary", "outbox", "publication"):
-        tests.addTests(loader.loadTestsFromName(f"scripts.e2e.tests.test_continuous_{name}"))
-    return tests
+
+class Recovery(Runner):
+    # Reuse the fixture, without collecting the inherited S1 tests a second time.
+    def test_unknown_usage_stops_following_occurrences_and_keeps_reservation(self):
+        with mock.patch.dict("os.environ", {"FAKE_TURNS": "null"}):
+            self.assertEqual(self.tick(1000)["status"], "UNEVALUABLE")
+        self.assertEqual(len(self.driven()), 1)
+        ledger = read_json(self.state / "budget" / f"{budget.day(1000)}.json", {})
+        self.assertEqual(next(iter(ledger.values()))["claude"]["turns"], 6)
+        self.tick(100000)
+        self.assertEqual(sum(row["--cell"].startswith("claude-") for row in self.driven()), 1)
+
+    def test_missing_usage_capability_never_starts_driver(self):
+        self.assertEqual(self.tick(1000, capabilities=[])["status"], "DEFERRED_BUDGET")
+        self.assertEqual(self.driven(), [])
+        self.assertFalse(self.state.exists())
+
+    def test_null_limits_and_reservations_change_no_files_or_lock(self):
+        for section, fields in (("budget", ["daily_turns", "daily_tokens", "daily_time_s"]),
+                                ("reservation", ["turns", "tokens", "time_s"])):
+            for field in fields:
+                config = copy.deepcopy(self.config)
+                target = config[section]["claude"] if section == "budget" else config[section]["R1"]["claude"]
+                target[field] = None
+                with self.subTest(section=section, field=field), mock.patch.object(
+                        channel_lock, "acquire", side_effect=AssertionError("lock taken")):
+                    self.assertEqual(self.tick(1000, **config)["status"], "DEFERRED_BUDGET")
+                    self.assertFalse(self.state.exists())
+        self.submit("waiting")
+        before = {p.relative_to(self.state): p.read_bytes() for p in self.state.rglob("*") if p.is_file()}
+        config = copy.deepcopy(self.config["budget"])
+        config["claude"]["daily_turns"] = None
+        self.tick(1000, budget=config)
+        self.assertEqual(before, {p.relative_to(self.state): p.read_bytes() for p in self.state.rglob("*") if p.is_file()})
+        self.assertEqual(self.tick(1001)["status"], "UNEVALUABLE")
+        self.submit("waiting-with-status")
+        before = {p.relative_to(self.state): p.read_bytes() for p in self.state.rglob("*") if p.is_file()}
+        with mock.patch.object(channel_lock, "acquire", side_effect=AssertionError("lock taken")):
+            self.assertEqual(self.tick(1002, budget=config)["status"], "DEFERRED_BUDGET")
+        self.assertEqual(before, {p.relative_to(self.state): p.read_bytes() for p in self.state.rglob("*") if p.is_file()})
+
+    def test_budget_deferred_request_retries_next_day_once_and_can_be_superseded(self):
+        self.submit("waiting")
+        caps = {p: {"daily_turns": 1, "daily_tokens": 1000, "daily_time_s": 600} for p in ("claude", "codex")}
+        self.assertEqual(self.tick(1000, budget=caps)["status"], "DEFERRED_BUDGET")
+        self.assertEqual(self.driven(), [])
+        self.assertEqual(self.tick(90000, rotation_interval_s=None)["status"], "UNEVALUABLE")
+        count = len(self.driven())
+        self.tick(90001, rotation_interval_s=None)
+        self.assertEqual(len(self.driven()), count)
+        self.submit("old")
+        self.tick(90002, budget=caps)
+        self.submit("new")
+        self.tick(180000)
+        self.assertEqual(inbox.ledger(self.state)["old"], "SUPERSEDED")
+
+    def test_native_turn_guard_refuses_second_turn_in_one_occurrence(self):
+        with mock.patch.dict("os.environ", {"FAKE_REQUEST_TURNS": "3"}):
+            one = {"R1": {"claude": {"turns": 1, "tokens": 1000, "time_s": 300}}}
+            self.tick(1000, reservation=one)
+        self.assertEqual(len(self.driven()), 1)
+        self.assertEqual(self.driven()[0]["granted_turns"], 1)
+
+    def test_native_guard_counts_startup_and_blocks_unsettled_tokens(self):
+        guard = budget.TurnGuard({"turns": 2, "tokens": 10, "time_s": 100, "deadline": time.monotonic() - 1})
+        self.assertFalse(guard.start(1))
+        guard = budget.TurnGuard({"turns": 2, "tokens": 10, "time_s": 100})
+        self.assertTrue(guard.start(5))
+        guard.finish(None)
+        self.assertFalse(guard.start(1))
+
+    def test_functional_fail_survives_missing_budget_witness(self):
+        lease = mock.Mock()
+        lease.spawn.return_value = subprocess.CompletedProcess([], 1, json.dumps({"status": "FAIL", "native_turns": 1}))
+        row = {"scenario": "E-1", "cell": "claude-tui"}
+        runner._execute(lease, self.config, {"profile": "default", "run_id": "test", "request": {}}, row,
+                        {"turns": 1, "tokens": 10, "time_s": 10})
+        self.assertEqual(row["status"], "FAIL")
+
+    def test_unknown_usage_components_do_not_become_zero(self):
+        lease = mock.Mock()
+        lease.spawn.return_value = subprocess.CompletedProcess([], 0, json.dumps({"status": "PASS", "native_turns": 1,
+                                                                               "tokens": 1, "budget_checked": 1}))
+        row = {"scenario": "E-1", "cell": "claude-tui"}
+        runner._execute(lease, self.config, {"profile": "default", "run_id": "test", "request": {}}, row,
+                        {"turns": 1, "tokens": 10, "time_s": 10})
+        self.assertIsNone(row["tokens"])
+
+    def test_crash_before_reservation_or_deferral_does_not_consume_request(self):
+        for boundary in ("reservation", "deferral"):
+            with self.subTest(boundary=boundary):
+                self.setUp()
+                self.submit("waiting")
+                original = inbox.record
+
+                def record(state, updates):
+                    if "DEFERRED_BUDGET" in updates.values():
+                        raise RuntimeError("deferral crash")
+                    return original(state, updates)
+
+                patch = mock.patch.object(budget, "reserve", side_effect=RuntimeError("reservation crash")) if boundary == "reservation" else mock.patch.object(inbox, "record", side_effect=record)
+                caps = {p: {"daily_turns": 1, "daily_tokens": 1000, "daily_time_s": 600} for p in ("claude", "codex")}
+                with patch, self.assertRaises(RuntimeError):
+                    self.tick(1000, budget=caps)
+                self.assertEqual(self.driven(), [])
+                self.assertEqual(self.tick(90000, rotation_interval_s=None)["status"], "UNEVALUABLE")
+                self.assertEqual(len(self.driven()), 2)
+
+    def test_crash_after_driver_leaves_unknown_provider_paused(self):
+        original = runner._execute
+
+        def execute(*args):
+            original(*args)
+            raise RuntimeError("crash before recording usage")
+
+        with mock.patch.object(runner, "_execute", side_effect=execute), self.assertRaises(RuntimeError):
+            self.tick(1000)
+        self.assertEqual(len(self.driven()), 1)
+        self.assertEqual(self.tick(90000)["status"], "DEFERRED_BUDGET")
+        self.assertEqual(len(self.driven()), 1)
+
+    def test_completion_replay_is_idempotent_at_each_file_boundary(self):
+        for kind in ("scheduled", "deploy"):
+            for boundary in ("settle", "record", "projection", "mark_applied"):
+                with self.subTest(kind=kind, boundary=boundary):
+                    self.setUp()
+                    if kind == "deploy":
+                        self.submit("request")
+                    original = runner._record
+
+                    def crash_record(state, record, **changes):
+                        if boundary == "mark_applied" and changes.get("applied"):
+                            raise RuntimeError("crash before projection acknowledgment")
+                        value = original(state, record, **changes)
+                        if boundary == "record" and "completed_at" in changes:
+                            raise RuntimeError("crash after durable completion")
+                        return value
+
+                    projection_owner = plan if kind == "scheduled" else inbox
+                    projection_name = "save_cursor" if kind == "scheduled" else "record"
+                    projection_fn = getattr(projection_owner, projection_name)
+
+                    def crash_projection(state, value):
+                        if (kind == "scheduled" and value["index"] == 1) or (kind == "deploy" and value.get("request") not in ("RUNNING", "DEFERRED_BUDGET")):
+                            raise RuntimeError("projection crash")
+                        return projection_fn(state, value)
+
+                    patch = mock.patch.object(budget, "settle", side_effect=RuntimeError("settle crash")) if boundary == "settle" else (
+                        mock.patch.object(runner, "_record", side_effect=crash_record) if boundary in ("record", "mark_applied") else
+                        mock.patch.object(projection_owner, projection_name, side_effect=crash_projection))
+                    with patch:
+                        with self.assertRaises(RuntimeError):
+                            self.tick(1000)
+                    before = len(self.driven())
+                    # Recovery precedes deciding whether another run is due.
+                    self.tick(1001, rotation_interval_s=None)
+                    records = [read_json(p, {}) for p in (self.state / "runs").glob("*.json")]
+                    terminal = next(r for r in records if r.get("completed_at"))
+                    self.assertNotEqual(terminal["result"], "ABANDONED")
+                    self.assertEqual(len(self.driven()), before)
+                    if kind == "scheduled":
+                        self.assertEqual(plan.cursor(self.state)["index"], 1)
+                    else:
+                        self.assertEqual(inbox.ledger(self.state)["request"], terminal["result"])
+                    runner._abandon_orphans(self.state, "recovery-again")
+                    self.assertEqual(plan.cursor(self.state)["index"], int(kind == "scheduled"))
+
+
+# unittest otherwise collects imported/inherited tests as well as the new boundary tests.
+for _name in list(Runner.__dict__):
+    if _name.startswith("test_"):
+        setattr(Recovery, _name, None)
+
+
+IDENTITY = {"instance_id": "instance", "boot_id": "boot", "head": SHA,
+            "binary_sha256": "b" * 64, "profile_hash": "c" * 64}
+
+
+KEY = "E-1/claude/tmux/channel/sequential/announce_bot/none/none/default/delivery/1"
+
+
+def report():
+    return {"schema_version": 1, **IDENTITY, "run_id": "run", "suite": "R1", "profile": "default",
+            "started_at": 100, "completed_at": 110, "expected": [KEY],
+            "occurrences": [{"key": KEY, "actual_occurrence_key": KEY, "status": "PASS", "scenario": "E-1", "provider": "claude", "host": "tmux",
+                             "surface": "channel", "state": "sequential", "origin": "announce_bot",
+                             "busy_basis": None, "placement": None, "output_profile": "default",
+                             "operation": "delivery", "occurrence": 1,
+                             "assertions_expected": ["delivery"],
+                             "assertions": [{"key": "delivery", "status": "PASS", "complete": True}],
+                             "real_provider_contacted": True, "evidence_paths": ["raw.json"], **IDENTITY}],
+            "result": "PASS", "usage_complete": True,
+            "usage": {"claude": {"native_turns": 1, "input_tokens": 0, "output_tokens": 1,
+                                 "cache_read_tokens": 0, "cache_write_tokens": 0}}, "attempts": []}
+
+
+def status():
+    return {"schema_version": 1, "enabled": True, "heartbeat_at": 115, "tick_interval_s": 10,
+            "rotation_interval_s": 100, "max_run_s": 30, "tick_grace_s": 5,
+            "last_completed_run": "run", "outbox_pending": 0, "next_due": 200}
+
+
+class Summary(unittest.TestCase):
+    def test_complete_live_report_is_pass_and_formats_counts(self):
+        view = summary.consume(report(), status(), head=SHA, now=120)
+        self.assertEqual(view["check"]["result"], "PASS")
+        self.assertEqual((view["check"]["live"], view["check"]["expected"],
+                          view["check"]["assertions"], view["check"]["assertions_expected"]), (1, 1, 1, 1))
+        check, monitor = summary.format_lines(view)
+        self.assertEqual(check, f"E2E_CHECK suite=R1 head={SHA} result=PASS live=1/1 assertions=1/1 age_s=10 stale=0 reason=none")
+        self.assertIn("E2E_MONITOR enabled=1 heartbeat_age_s=5 last_run=run pending_alerts=0 next_due=200", monitor)
+
+    def test_zero_skip_fixture_missing_assertion_timeout_and_unknown_usage_are_not_pass(self):
+        variants = []
+        zero = report(); zero.update(expected=[], occurrences=[]); variants.append((zero, "NO_LIVE_OCCURRENCES"))
+        for field, value, reason in [("status", "SKIPPED", "SKIPPED"), ("fixture", True, "FIXTURE"),
+                                     ("dry_run", True, "FIXTURE"), ("timeout", True, "TIMEOUT"),
+                                     ("dirty_residue", True, "DIRTY_RESIDUE"),
+                                     ("real_provider_contacted", False, "NO_PROVIDER_CONTACT"),
+                                     ("evidence_paths", [], "MISSING_EVIDENCE")]:
+            value_report = report(); value_report["occurrences"][0][field] = value
+            variants.append((value_report, reason))
+        missing = report(); missing["occurrences"][0]["assertions"] = []; variants.append((missing, "MISSING_ASSERTIONS"))
+        measured = summary.evaluate(missing)
+        self.assertEqual((measured["live"], measured["assertions"], measured["assertions_expected"]), (1, 0, 1))
+        no_required = report(); no_required["occurrences"][0]["assertions_expected"] = []; variants.append((no_required, "MISSING_ASSERTIONS"))
+        incomplete = report(); incomplete["occurrences"][0]["assertions"][0]["complete"] = False
+        variants.append((incomplete, "MISSING_ASSERTIONS"))
+        usage = report(); usage["usage"]["claude"]["native_turns"] = None; variants.append((usage, "USAGE_UNKNOWN"))
+        flag = report(); flag["usage_complete"] = False; variants.append((flag, "USAGE_UNKNOWN"))
+        for counter in (True, -1, 0.5):
+            invalid = report(); invalid["usage"]["claude"]["native_turns"] = counter
+            variants.append((invalid, "USAGE_UNKNOWN"))
+        no_provider = report(); no_provider["usage"] = {}; variants.append((no_provider, "USAGE_UNKNOWN"))
+        for value_report, reason in variants:
+            with self.subTest(reason=reason):
+                result = summary.evaluate(value_report, head=SHA)
+                self.assertNotEqual(result["result"], "PASS")
+                self.assertEqual(result["reason"], reason)
+
+    def test_expected_occurrence_identity_and_duplicate_assertions_cannot_be_forged(self):
+        changed = report(); changed["expected"].append("missing")
+        self.assertEqual(summary.evaluate(changed)["result"], "PARTIAL")
+        for field in IDENTITY:
+            changed = report(); changed["occurrences"][0][field] = "wrong"
+            self.assertEqual(summary.evaluate(changed)["reason"], "IDENTITY_MISMATCH")
+        changed = report(); changed["occurrences"].append(copy.deepcopy(changed["occurrences"][0]))
+        self.assertEqual(summary.evaluate(changed)["reason"], "DUPLICATE_OCCURRENCE")
+        changed = report(); changed["occurrences"][0]["assertions"].append(copy.deepcopy(changed["occurrences"][0]["assertions"][0]))
+        self.assertEqual(summary.evaluate(changed)["reason"], "MISSING_ASSERTIONS")
+        changed = report(); changed["binary_sha256"] = None
+        self.assertEqual(summary.evaluate(changed)["reason"], "MISSING_IDENTITY")
+        changed = report(); changed["head"] = "z" * 40
+        self.assertEqual(summary.evaluate(changed)["reason"], "MISSING_IDENTITY")
+
+    def test_old_head_schema_future_time_stale_and_no_data_are_explicit(self):
+        self.assertEqual(summary.consume(None, status(), head=SHA, now=120)["check"]["result"], "NO_DATA")
+        value = report(); value["schema_version"] = 2
+        self.assertEqual(summary.consume(value, status(), head=SHA, now=120)["check"]["reason"], "UNSUPPORTED_SCHEMA")
+        self.assertEqual(summary.consume(report(), status(), head="d" * 40, now=120)["check"]["reason"], "STALE_HEAD")
+        value = report(); value["completed_at"] = 121
+        self.assertEqual(summary.consume(value, status(), head=SHA, now=120)["check"]["reason"], "FUTURE_TIMESTAMP")
+        value = status(); value["heartbeat_at"] = 121
+        self.assertEqual(summary.consume(report(), value, head=SHA, now=120)["check"]["reason"], "FUTURE_TIMESTAMP")
+        value = status(); value["heartbeat_at"] = 300
+        self.assertEqual(summary.consume(report(), value, head=SHA, now=300)["check"]["reason"], "STALE")
+        value = status(); value["heartbeat_at"] = 100
+        self.assertEqual(summary.consume(report(), value, head=SHA, now=120)["check"]["reason"], "HEARTBEAT_STALE")
+        value = status(); value["enabled"] = False
+        disabled = summary.consume(report(), value, head=SHA, now=120)
+        self.assertEqual(disabled["check"]["result"], "DISABLED")
+        self.assertEqual(disabled["monitor"]["heartbeat_age_s"], 5)
+
+    def test_failures_and_failed_attempts_are_preserved(self):
+        value = report(); value["occurrences"][0]["assertions"][0]["status"] = "FAIL"
+        self.assertEqual(summary.evaluate(value)["result"], "FAIL")
+        value = report(); value["attempts"] = [{"result": "FAIL", "classification": "ENV_SUSPECT"}]
+        self.assertEqual(summary.evaluate(value)["result"], "RECOVERED_ENV")
+        value["attempts"] = [{"result": "FAIL"}]
+        self.assertEqual(summary.evaluate(value)["result"], "FLAKY")
+        value = report(); value["result"] = "FAIL"
+        self.assertEqual(summary.evaluate(value)["result"], "FAIL")
+
+    def test_builder_preserves_input_report_and_unknowns_without_mutation(self):
+        value = report(); before = copy.deepcopy(value)
+        value["bundle"] = value.pop("suite")
+        built = summary.build(value, IDENTITY)
+        self.assertEqual(built["schema_version"], 1)
+        self.assertEqual(built["suite"], "R1")
+        self.assertEqual(summary.evaluate(built)["result"], "PASS")
+        self.assertEqual(value["occurrences"], before["occurrences"])
+        self.assertNotIn("suite", value)
+        value["usage"]["claude"]["native_turns"] = None
+        self.assertIsNone(summary.build(value, IDENTITY)["usage"]["claude"]["native_turns"])
+        value["occurrences"][0]["origin"] = "controlled_ingress"
+        built = summary.build(value, IDENTITY)
+        self.assertEqual(built["result"], "PARTIAL")
+
+    def test_planned_keys_and_required_assertions_cannot_be_replaced_by_driver(self):
+        manifest = json.loads((Path(__file__).resolve().parents[3] / "docs/e2e-continuous/bundles.schema1.json").read_text())
+        self.assertEqual(list(summary.KEY_FIELDS), manifest["execution_contract"]["occurrence_key_fields"])
+        row = report()["occurrences"][0]
+        row["key"] = "forged/driver/key"
+        self.assertEqual(summary.occurrence_key(row), KEY)
+        for field in ("state", "origin", "busy_basis", "placement", "output_profile", "operation", "occurrence"):
+            changed = copy.deepcopy(row); changed[field] = "different"
+            self.assertNotEqual(summary.occurrence_key(changed), KEY)
+        built = summary.build(report(), {**IDENTITY, "required_assertions": {"E-1": ["delivery", "ordering"]}})
+        self.assertEqual(built["result"], "UNEVALUABLE")
+        self.assertEqual(built["occurrences"][0]["assertions_expected"], ["delivery", "ordering"])
+        altered = report(); altered["occurrences"][0]["key"] = "forged/driver/key"; altered["expected"] = ["forged/driver/key"]
+        self.assertEqual(summary.evaluate(altered)["reason"], "OCCURRENCE_KEY_MISMATCH")
+        unknown = report(); unknown["occurrences"][0].pop("origin")
+        unknown["occurrences"][0]["key"] = summary.occurrence_key(unknown["occurrences"][0])
+        unknown["expected"] = [unknown["occurrences"][0]["key"]]
+        self.assertEqual(summary.evaluate(unknown)["reason"], "MISSING_OCCURRENCE_CONTRACT")
+        base = report()["occurrences"][0]
+        base.pop("provider"); base.pop("host"); base.pop("output_profile"); base["cell"] = "claude-tui"
+        self.assertEqual(summary.occurrence_key(base), KEY)
+
+    def test_actual_occurrence_witness_must_match_the_planned_qualifiers(self):
+        value = report()
+        self.assertEqual(summary.evaluate(value)["result"], "PASS")
+        for actual in (None, "E-1/claude/tmux/channel/sequential/controlled_ingress/none/none/default/delivery/1"):
+            value["occurrences"][0]["actual_occurrence_key"] = actual
+            evaluated = summary.evaluate(value)
+            self.assertEqual(evaluated["result"], "UNEVALUABLE")
+            self.assertEqual(evaluated["reason"], "OCCURRENCE_WITNESS_MISMATCH")
+            self.assertEqual((evaluated["live"], evaluated["assertions"]), (0, 0))
+            self.assertEqual(value["occurrences"][0]["key"], KEY)
+
+    def test_malformed_input_is_unknown_without_exceptions_or_claimed_pass(self):
+        malformed = report(); malformed["occurrences"][0]["assertions"][0]["key"] = []
+        for value in ([], malformed, {**report(), "schema_version": True}, {"schema_version": 1}, {**report(), "occurrences": [None]},
+                      {**report(), "expected": [None]}, {**report(), "usage": {"claude": None}}):
+            self.assertNotEqual(summary.evaluate(value)["result"], "PASS")
+        for value in (None, [], {"schema_version": 2}, {**status(), "schema_version": True}, {**status(), "heartbeat_at": "broken"}):
+            self.assertEqual(summary.consume(report(), value, head=SHA, now=120)["check"]["result"], "UNKNOWN")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class Outbox(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="continuous-outbox-")
+        self.addCleanup(temp.cleanup)
+        self.state = Path(temp.name)
+        self.summary = {"schema_version": 1, "run_id": "run-1", "head": "a" * 40,
+                        "suite": "P", "profile_hash": "profile", "result": "FAIL",
+                        "occurrences": [{"key": "one", "status": "FAIL", "reason": "lost_output"}]}
+
+    def test_failed_notification_stays_pending_and_retries_once(self):
+        event_id = outbox.enqueue(self.state, self.summary, 100)
+        calls = []
+
+        def send(event):
+            calls.append(event["event_id"])
+            if len(calls) == 1:
+                raise OSError("fixture failure")
+            return True
+
+        self.assertEqual(outbox.dispatch(self.state, send, 100), {"attempted": 1, "sent": 0, "pending": 1})
+        self.assertEqual(outbox.dispatch(self.state, send, 159)["attempted"], 0)
+        self.assertEqual(outbox.dispatch(self.state, send, 160), {"attempted": 1, "sent": 1, "pending": 0})
+        self.assertEqual(calls, [event_id, event_id])
+        self.assertEqual(outbox.dispatch(self.state, send, 9999)["attempted"], 0)
+
+    def test_unknown_ack_and_exhaustion_preserve_pending(self):
+        outbox.enqueue(self.state, self.summary, 100)
+        for now in (100, 160, 220):
+            self.assertEqual(outbox.dispatch(self.state, lambda event: None, now)["sent"], 0)
+        self.assertEqual(outbox.dispatch(self.state, lambda event: True, 280)["attempted"], 0)
+        self.assertEqual(outbox.pending(self.state), 1)
+        row = next(iter(json.loads((self.state / "outbox.json").read_text())["events"].values()))
+        self.assertEqual(row["attempts"], 3)
+        self.assertTrue(row["exhausted"])
+
+    def test_identical_run_and_known_gap_do_not_repeat_but_state_changes_do(self):
+        first = outbox.enqueue(self.state, self.summary, 100)
+        same = {**self.summary, "run_id": "run-2"}
+        self.assertIsNone(outbox.enqueue(self.state, same, 101))
+        passed = {**same, "result": "PASS", "occurrences": [{"key": "one", "status": "PASS"}]}
+        recovered = outbox.enqueue(self.state, passed, 102)
+        self.assertIsNotNone(recovered)
+        failed_again = outbox.enqueue(self.state, same, 103)
+        self.assertEqual(len({first, recovered, failed_again}), 3)
+        gap = {**same, "result": "PARTIAL", "occurrences": [
+            {"key": "human", "status": "UNEVALUABLE", "reason": "NOT_RUN_HUMAN"}]}
+        self.assertIsNotNone(outbox.enqueue(self.state, gap, 104))
+        self.assertIsNone(outbox.enqueue(self.state, {**gap, "run_id": "run-3"}, 105))
+        self.assertIsNotNone(outbox.enqueue(self.state, {**gap, "profile_hash": "other"}, 106))
+        changed = copy.deepcopy(gap)
+        changed["occurrences"][0]["reason"] = "RUNNER_DIED"
+        self.assertIsNotNone(outbox.enqueue(self.state, changed, 107))
+
+    def test_provenance_and_changed_failed_occurrence_notify_separately(self):
+        claude = {**self.summary, "expected": ["scenario/claude/tmux/human_gateway"], "occurrences": [
+            {"key": "scenario/claude/tmux/human_gateway", "status": "FAIL", "reason": "lost_output"}]}
+        codex = {**claude, "expected": ["scenario/codex/tmux/controlled_ingress"], "occurrences": [
+            {"key": "scenario/codex/tmux/controlled_ingress", "status": "FAIL", "reason": "lost_output"}]}
+        self.assertIsNotNone(outbox.enqueue(self.state, claude, 100))
+        self.assertIsNone(outbox.enqueue(self.state, {**codex, "result": "PASS", "occurrences": [
+            {"key": codex["expected"][0], "status": "PASS"}]}, 100.5))
+        self.assertIsNotNone(outbox.enqueue(self.state, codex, 101))
+        first = {**self.summary, "expected": ["a", "b"], "occurrences": [
+            {"key": "a", "status": "FAIL", "reason": "lost_output"}, {"key": "b", "status": "PASS"}]}
+        second = {**first, "expected": ["b", "a"], "occurrences": [
+            {"key": "a", "status": "PASS"}, {"key": "b", "status": "FAIL", "reason": "lost_output"}]}
+        self.assertIsNotNone(outbox.enqueue(self.state, first, 102))
+        self.assertIsNotNone(outbox.enqueue(self.state, second, 103))
+        self.assertIsNone(outbox.enqueue(self.state, {**second, "expected": ["a", "b"]}, 104))
+
+    def test_top_level_failure_reason_and_assertion_changes_notify(self):
+        value = {**self.summary, "result": "UNEVALUABLE", "reason": "USAGE_UNKNOWN", "occurrences": [
+            {"key": "one", "status": "PASS"}]}
+        self.assertIsNotNone(outbox.enqueue(self.state, value, 100))
+        self.assertIsNotNone(outbox.enqueue(self.state, {**value, "reason": "MISSING_ASSERTIONS"}, 101))
+        first = {**self.summary, "occurrences": [{"key": "one", "status": "PASS", "assertions": [
+            {"key": "delivery", "status": "FAIL"}]}]}
+        second = {**first, "occurrences": [{"key": "one", "status": "PASS", "assertions": [
+            {"key": "host", "status": "FAIL"}]}]}
+        self.assertIsNotNone(outbox.enqueue(self.state, first, 102))
+        self.assertIsNotNone(outbox.enqueue(self.state, second, 103))
+
+    def test_malformed_assertion_evidence_still_queues_an_alert(self):
+        value = {**self.summary, "result": "UNEVALUABLE", "reason": "MISSING_ASSERTIONS", "occurrences": [
+            {"key": "one", "status": "PASS", "assertions": None}]}
+        self.assertIsNotNone(outbox.enqueue(self.state, value, 100))
+        self.assertEqual(outbox.pending(self.state), 1)
+
+    def test_timeout_death_and_partial_summaries_are_deliverable(self):
+        events = []
+        for index, reason in enumerate(("TIMEOUT", "RUNNER_DIED", "USAGE_UNKNOWN")):
+            summary = {**self.summary, "result": "UNEVALUABLE", "occurrences": [
+                {"key": "one", "status": "UNEVALUABLE", "reason": reason}]}
+            self.assertIsNotNone(outbox.enqueue(self.state, summary, 100 + index))
+        result = outbox.dispatch(self.state, lambda event: events.append(event) or True, 200, limit=3)
+        self.assertEqual(result, {"attempted": 3, "sent": 3, "pending": 0})
+        self.assertEqual({e["reasons"][0] for e in events}, {"TIMEOUT", "RUNNER_DIED", "USAGE_UNKNOWN"})
+
+    def test_crashed_sender_charges_attempt_before_transport(self):
+        outbox.enqueue(self.state, self.summary, 100)
+
+        def crash(event):
+            raise KeyboardInterrupt("fixture interruption")
+
+        with self.assertRaises(KeyboardInterrupt):
+            outbox.dispatch(self.state, crash, 100)
+        row = next(iter(json.loads((self.state / "outbox.json").read_text())["events"].values()))
+        self.assertEqual((row["attempts"], row["next_attempt_at"], row["status"]), (1, 160, "pending"))
+        self.assertEqual(outbox.dispatch(self.state, lambda event: True, 159)["attempted"], 0)
+
+    def test_schema_mismatch_does_not_create_state(self):
+        with self.assertRaises(ValueError):
+            outbox.enqueue(self.state, {**self.summary, "schema_version": 2}, 100)
+        self.assertFalse((self.state / "outbox.json").exists())
+
+    def test_initial_pass_and_disabled_budget_tick_never_notify(self):
+        self.assertEqual(outbox.pending(self.state), 0)
+        self.assertFalse((self.state / "outbox.json").exists())
+        for result in ("PASS", "DISABLED", "DEFERRED_BUDGET", "DEFERRED_LEASE", "NOT_DUE"):
+            self.assertIsNone(outbox.enqueue(self.state, {**self.summary, "result": result}, 100))
+        self.assertEqual(outbox.pending(self.state), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class Publication(unittest.TestCase):
+    setUp, tick, driven, submit = Runner.setUp, Runner.tick, Runner.driven, Runner.submit
+
+    def test_scheduled_fixture_and_failed_then_acknowledged_notification(self):
+        now = time.time()
+        self.config.update(head="a" * 40, instance_id="fixture-instance", boot_id="fixture-boot",
+                           binary_sha256="b" * 64, profile_hash="c" * 64)
+        result = self.tick(now)
+        self.assertEqual(result["status"], "UNEVALUABLE")
+        self.assertEqual(len(self.driven()), 5)
+        value = read_json(self.state / "summary.json", {})
+        self.assertEqual(value["run_id"], result["run_id"])
+        self.assertEqual(value["schema_version"], 1)
+        self.assertTrue(all(row.get("fixture") for row in value["occurrences"]))
+        for row in value["occurrences"]:
+            self.assertEqual(read_json(row["driver_report_path"], {})["schema_version"], 2)
+        self.assertEqual(summary.evaluate(value)["live"], 0)
+        delivered = []
+        self.assertEqual(outbox.dispatch(self.state, lambda event: False, now + 1)["pending"], 1)
+        self.assertEqual(outbox.dispatch(self.state, lambda event: delivered.append(event) or True, now + 61)["sent"], 1)
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(delivered[0]["run_id"], result["run_id"])
+        publication.heartbeat(self.state, self.config, now + 61)
+        config = {**self.config, "state_dir": self.state}
+        view = publication.view(config, head=self.config["head"], now=now + 61)
+        self.assertEqual(view["monitor"]["pending_alerts"], 0)
+        self.assertEqual(view["check"]["result"], "UNEVALUABLE")
+        record = read_json(self.state / "runs" / f"{result['run_id']}.json", {})
+        publication.finish(self.state, record, self.config)
+        self.assertEqual(outbox.pending(self.state), 0)
+
+    def test_crash_between_summary_outbox_status_writes_replays_without_driver(self):
+        for boundary in ("outbox", "summary", "status"):
+            with self.subTest(boundary=boundary):
+                self.setUp()
+                original = publication.write_json
+
+                def write(path, value):
+                    if path.name == boundary + ".json" and (boundary != "status" or value.get("running") is None):
+                        raise RuntimeError("publication crash")
+                    return original(path, value)
+
+                patch = mock.patch.object(outbox, "enqueue", side_effect=RuntimeError("outbox crash")) if boundary == "outbox" else mock.patch.object(publication, "write_json", side_effect=write)
+                with patch, self.assertRaises(RuntimeError):
+                    self.tick(1000)
+                count = len(self.driven())
+                self.assertEqual(self.tick(1001)["status"], "NOT_DUE")
+                self.assertEqual(len(self.driven()), count)
+                self.assertEqual(read_json(self.state / "summary.json", {})["result"], "UNEVALUABLE")
+                self.assertEqual(outbox.pending(self.state), 1)
+                self.assertTrue(read_json(self.state / "status.json", {})["last_completed_run"])
+
+    def test_off_observation_reads_no_state_and_does_not_create_it(self):
+        with mock.patch.object(publication, "read_json", side_effect=AssertionError("state read")):
+            view = publication.view({"enabled": False}, head="a" * 40, now=1000)
+        self.assertEqual(view["check"]["result"], "DISABLED")
+        self.assertEqual(view["monitor"]["heartbeat_age_s"], 0)
+        self.assertFalse(self.state.exists())
+
+    def test_not_due_tick_refreshes_heartbeat_without_starting_a_driver(self):
+        now = time.time()
+        self.tick(now)
+        count = len(self.driven())
+        self.assertEqual(self.tick(now + 180)["status"], "NOT_DUE")
+        self.assertEqual(len(self.driven()), count)
+        state = read_json(self.state / "status.json", {})
+        self.assertEqual(state["heartbeat_at"], now + 180)
+
+    def test_usage_paused_tick_refreshes_heartbeat_without_new_turns(self):
+        now = time.time()
+        with mock.patch.dict("os.environ", {"FAKE_TURNS": "null"}):
+            self.tick(now)
+        self.assertEqual(len(self.driven()), 1)
+        self.submit("while-paused")
+        self.assertEqual(self.tick(now + 180)["status"], "DEFERRED_BUDGET")
+        self.assertEqual(len(self.driven()), 1)
+        self.assertEqual(read_json(self.state / "status.json", {})["heartbeat_at"], now + 180)
+
+    def test_completed_assertion_contract_is_frozen_during_republication(self):
+        value = report()
+        value["assertion_contract"] = {"E-1": ["delivery"]}
+        publication.finish(self.state, value, self.config)
+        changed = {**self.config, "required_assertions": {"E-1": ["delivery", "ordering"]}}
+        publication.finish(self.state, value, changed)
+        self.assertEqual(read_json(self.state / "summary.json", {})["result"], "PASS")
+
+    def test_blocking_driver_keeps_running_heartbeat_and_joins_the_writer(self):
+        observed, calls = threading.Event(), []
+
+        def heartbeat(state, config, now, running):
+            calls.append(running)
+            if len(calls) == 3:
+                observed.set()
+
+        with mock.patch.object(publication, "heartbeat", side_effect=heartbeat):
+            with publication.keepalive(self.state, {"tick_interval_s": 0.001}, "running"):
+                self.assertTrue(observed.wait(timeout=5))
+        self.assertGreaterEqual(len(calls), 3)
+        self.assertFalse(any(t.name == "e2e-heartbeat" for t in threading.enumerate()))
+
+
 
 
 if __name__ == "__main__":
