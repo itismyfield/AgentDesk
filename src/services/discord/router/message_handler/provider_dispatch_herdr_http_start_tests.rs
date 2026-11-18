@@ -867,11 +867,13 @@ fn internal_herdr_routine_owner_reaches_its_legacy_refusal_pg() {
     internal_snapshot_start("routine");
 }
 
-fn execution_gone(terminal: Option<bool>) {
-    let tag = match terminal {
-        None => "missing",
-        Some(false) => "raw",
-        Some(true) => "flushed",
+/// `foreign` hands the channel's hosted record to another execution before the raw closer lands.
+fn execution_gone(terminal: Option<bool>, foreign: bool) {
+    let tag = match (terminal, foreign) {
+        (None, _) => "missing",
+        (Some(false), false) => "raw",
+        (Some(false), true) => "foreign",
+        (Some(true), _) => "flushed",
     };
     let fx = Fixture::new(&format!("http-execution-gone-{tag}"), None);
     let hooks = terminal
@@ -942,20 +944,30 @@ fn execution_gone(terminal: Option<bool>) {
         let flush = terminal.map(|newline| {
             let path = started.path.clone();
             let session = started.session.clone();
+            let pool = fx.pool.clone();
             let once = Arc::new(std::sync::atomic::AtomicBool::new(false));
             discord::recovery_engine::herdr_row_end::tests::on_while("live_after_end", move || {
-                if !once.swap(true, Ordering::SeqCst) {
+                let first = !once.swap(true, Ordering::SeqCst);
+                let (path, session, pool) = (path.clone(), session.clone(), pool.clone());
+                Box::pin(async move {
+                    if !first { return; }
+                    if foreign {
+                        sqlx::query("UPDATE sessions SET hosted_execution = jsonb_set(jsonb_set(jsonb_set(hosted_execution,
+                            '{execution_nonce}', '\"successor\"'), '{source_ref,execution_nonce}', '\"successor\"'),
+                            '{expected,binding_nonce}', '\"successor\"') WHERE channel_id=$1")
+                            .bind(CHANNEL.to_string()).execute(&pool).await.unwrap();
+                    }
                     let now = chrono::Utc::now().to_rfc3339();
-                    append(&path, &[json!({"type":"assistant","uuid":uuid(),"sessionId":session,
+                    let answer = json!({"type":"assistant","uuid":uuid(),"sessionId":session,
                         "timestamp":now,"apiBlockIndex":0,"message":{"id":uuid(),"role":"assistant",
-                        "content":[{"type":"text","text":"HTTP session answered after E"}],"stop_reason":"end_turn"}})]);
-                    let record = json!({"type":"system","subtype":"turn_duration","sessionId":session,"timestamp":now}).to_string();
+                        "content":[{"type":"text","text":"HTTP session answered after E"}],"stop_reason":"end_turn"}});
+                    let record = json!({"type":"system","subtype":"turn_duration","sessionId":session,"timestamp":now});
+                    // One write, so the poll that reads the answer also holds the closer.
+                    let end = if newline { "\n" } else { "" };
                     let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
                     use std::io::Write;
-                    file.write_all(record.as_bytes()).unwrap();
-                    if newline { file.write_all(b"\n").unwrap(); }
-                }
-                Box::pin(async {})
+                    file.write_all(format!("{answer}\n{record}{end}").as_bytes()).unwrap();
+                })
             })
         });
         let notice = super::super::live_end::LiveEnd::notice();
@@ -1075,7 +1087,23 @@ fn execution_gone(terminal: Option<bool>) {
             fallback.assert_none();
             return;
         }
+        if foreign {
+            // The poll that posts the answer already offered the closer; another execution's end
+            // proves nothing for this one, so only the completed record settles it.
+            tokio::time::timeout(LIMIT, async {
+                while !intake.posts.to(CHANNEL).iter().any(|text| text.contains("answered after E")) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("the answer is read with its closer");
+            assert!(native_results().is_empty(), "no raw closer result from a foreign end");
+            let mut file = std::fs::OpenOptions::new().append(true).open(&started.path).unwrap();
+            std::io::Write::write_all(&mut file, b"\n").unwrap();
+        }
         completed(&intake, usize::from(terminal.is_some())).await;
+        if foreign {
+            let results = native_results();
+            assert!(results.len() == 1 && results[0]["native_proof"]["raw"].is_null(), "{results:?}");
+        }
         for trial in 0..2 {
             discord::recovery_engine::herdr_row_end::row_end_pass(&intake.shared, &ProviderKind::Claude).await;
             tokio::time::sleep(Duration::from_millis(10 + trial)).await;
@@ -1094,14 +1122,37 @@ fn execution_gone(terminal: Option<bool>) {
 
 #[test]
 fn external_herdr_http_execution_gone_without_terminal_settles_once_pg() {
-    execution_gone(None);
+    execution_gone(None, false);
 }
 
 #[test]
 fn external_herdr_http_execution_gone_yields_a_flushed_terminal_pg() {
     for newline in [false, true] {
-        execution_gone(Some(newline));
+        execution_gone(Some(newline), false);
     }
+}
+
+#[test]
+fn external_herdr_http_raw_closer_needs_its_own_execution_end_pg() {
+    execution_gone(Some(false), true);
+}
+
+/// Native results saved for this channel's inputs.
+fn native_results() -> Vec<serde_json::Map<String, Value>> {
+    let history =
+        crate::services::tui_input::human_frame::history::v2::Registry::runtime().unwrap();
+    let registrations = history.native_classification_registrations().unwrap();
+    registrations
+        .iter()
+        .filter(|r| r.ticket.channel_id == CHANNEL)
+        .filter_map(|r| {
+            history
+                .native_settlement(&r.namespace, &r.ticket)
+                .unwrap()
+                .outcome
+                .map(|o| o.extra)
+        })
+        .collect()
 }
 
 #[test]

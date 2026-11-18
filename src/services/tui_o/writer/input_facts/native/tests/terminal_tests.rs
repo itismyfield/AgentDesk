@@ -163,6 +163,38 @@ fn native_8148_terminal_supersession_refuses_an_unknown_or_moved_barrier() {
     }
 }
 
+/// A raw closer witness for `[through, len)` of the fixture file, as the port would issue it.
+fn witness(
+    f: &Fixture,
+    (through, len): (u64, u64),
+    stamp: &str,
+    aborted: bool,
+) -> terminal::RawWitness {
+    let (dev, ino) = (f.binding.source.dev, f.binding.source.ino);
+    let modified = std::time::SystemTime::UNIX_EPOCH;
+    let fingerprint = Fingerprint {
+        len,
+        dev,
+        ino,
+        modified,
+        change: (0, 0),
+    };
+    let tail = terminal::Tail {
+        through,
+        prefix_hash: String::new(),
+        fingerprint,
+        digest: "0".repeat(64),
+    };
+    let registrations_fingerprint = stamp.into();
+    terminal::RawWitness {
+        version: 1,
+        tail,
+        aborted,
+        execution_nonce: "birth-1".into(),
+        registrations_fingerprint,
+    }
+}
+
 #[test]
 fn native_8148_terminal_raw_eof_tail_is_one_whole_strict_parent_record() {
     let f = Fixture::new();
@@ -211,25 +243,7 @@ fn native_8148_terminal_raw_eof_closes_only_the_open_run_at_the_capture_cursor()
         .unwrap();
     let registrations = f.history.native_classification_registrations().unwrap();
     let stamp = registrations_fingerprint(&registrations).unwrap();
-    let source = &f.binding.source;
-    let witness = |through: u64| terminal::RawWitness {
-        version: 1,
-        tail: terminal::Tail {
-            through,
-            prefix_hash: hash.clone(),
-            fingerprint: Fingerprint {
-                len: c + 40,
-                dev: source.dev,
-                ino: source.ino,
-                modified: std::time::SystemTime::UNIX_EPOCH,
-                change: (0, 0),
-            },
-            digest: "0".repeat(64),
-        },
-        aborted: false,
-        execution_nonce: "birth-1".into(),
-        registrations_fingerprint: stamp.clone(),
-    };
+    let witness = |through: u64| witness(&f, (through, c + 40), &stamp, false);
     let raw = witness(c);
     let closed = seed.analyze_closed(&registrations, Some(&raw)).unwrap();
     let [evidence] = closed.evidence.as_slice() else {
@@ -287,4 +301,53 @@ fn native_8148_terminal_raw_eof_closes_only_the_open_run_at_the_capture_cursor()
         seed.analyze(&registrations).unwrap(),
         "a closed run takes no second closer"
     );
+}
+
+#[test]
+fn native_8148_terminal_raw_eof_closer_settles_no_member_without_its_own_receipt() {
+    let f = Fixture::new();
+    let late = f.register("late", "late input");
+    let ours = f.register("ours", "our request");
+    f.append(&[
+        user("own", "our request"),
+        queue("enqueue", "late input"),
+        absorbed("late input"),
+    ]);
+    f.receipt(&ours, "own", "our request");
+    for ticket in [&late, &ours] {
+        f.history.note_native_any_key("native-b1", ticket).unwrap();
+    }
+    let bytes = std::fs::read(&f.binding.source.path).unwrap();
+    let c = bytes.len() as u64;
+    let hash = hex::encode(sha2::Sha256::digest(&bytes));
+    let seed = Projection::reopen(f.binding.clone(), c, &hash)
+        .unwrap()
+        .1
+        .unwrap();
+    let registrations = f.history.native_classification_registrations().unwrap();
+    let stamp = registrations_fingerprint(&registrations).unwrap();
+    let raw = witness(&f, (c, c + 60), &stamp, true);
+    let closed = seed.analyze_closed(&registrations, Some(&raw)).unwrap();
+    let record = |ticket: &Ticket| {
+        let e = closed
+            .evidence
+            .iter()
+            .find(|e| e.ticket.key == ticket.key)
+            .unwrap();
+        assert_eq!(
+            (e.disposition.clone(), e.raw.as_ref()),
+            (Disposition::Cancelled, Some(&raw))
+        );
+        f.history
+            .record_native_outcome_at_stamp("native-b1", ticket, &outcome(e), &stamp)
+    };
+    assert_eq!(record(&late), Err("native executed receipt missing".into()));
+    assert_eq!(
+        f.history
+            .native_settlement("native-b1", &late)
+            .unwrap()
+            .outcome,
+        None
+    );
+    assert_eq!(record(&ours), Ok(true));
 }

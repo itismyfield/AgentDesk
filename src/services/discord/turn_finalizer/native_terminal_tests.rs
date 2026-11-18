@@ -119,6 +119,24 @@ async fn native_8148_terminal_raw_eof_waits_for_the_execution_end_pg() {
         "no execution end, no raw closer result"
     );
     assert!(row().is_some());
+    let (through, len) = (
+        own.to_string().len() as u64 + 1,
+        file_len(&source.transcript),
+    );
+    let nonce = source.target["execution_nonce"].as_str().unwrap();
+    let (observed, current) = raw_observation(&f, &shared, (through, len), nonce);
+    let offer = super::super::native_supply::source_evidence;
+    let superseded = offer(&observed, &current, 0, &source.target).unwrap_err();
+    assert_eq!(
+        superseded, "native observation superseded",
+        "a changed tail drops its proof"
+    );
+    assert!(
+        offer(&observed, &observed, 0, &source.target)
+            .unwrap()
+            .raw
+            .is_some()
+    );
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(&source.transcript)
@@ -134,7 +152,6 @@ async fn native_8148_terminal_raw_eof_waits_for_the_execution_end_pg() {
     assert!(outcome.extra["native_proof"]["raw"].is_null());
     assert!(saved.cleanup_complete && row().is_none());
     let validate = super::super::native_prepare::validate_saved_record;
-    let nonce = source.target["execution_nonce"].as_str().unwrap();
     for (execution, accepted) in [(nonce, true), ("another-execution", false)] {
         let mut record = f
             .history
@@ -176,4 +193,87 @@ async fn native_8148_terminal_raw_eof_waits_for_the_execution_end_pg() {
     }
     pool.close().await;
     db.drop().await;
+}
+
+fn file_len(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path).unwrap().len()
+}
+
+/// The O observation of a proven raw closer `[through, len)`, and the same observation once the
+/// capture saw the tail change and dropped the witness.
+fn raw_observation(
+    f: &Fixture,
+    shared: &Arc<SharedData>,
+    (through, len): (u64, u64),
+    nonce: &str,
+) -> (Observation, Observation) {
+    use crate::services::tui_o::shadow::capture::Fingerprint;
+    use crate::services::tui_o::writer::input_facts::native::terminal::{RawWitness, Tail};
+    use crate::services::tui_o::writer::input_facts::native::{
+        Projection, registrations_fingerprint,
+    };
+    use sha2::Digest;
+    let source = f.ticket.source.as_ref().unwrap();
+    let bytes = std::fs::read(&source.transcript).unwrap();
+    let hash = hex::encode(sha2::Sha256::digest(&bytes[..through as usize]));
+    let (dev, ino) = (source.file[0], source.file[1]);
+    let path = source.transcript.clone();
+    let id = SourceId {
+        session_id: source.session_id.clone(),
+        path,
+        dev,
+        ino,
+    };
+    let channel_id = f.ticket.channel_id;
+    let binding = SourceBinding {
+        channel_id,
+        provider: ShadowProvider::Claude,
+        source: id,
+    };
+    let seed = Projection::reopen(binding.clone(), through, &hash)
+        .unwrap()
+        .1
+        .unwrap();
+    let registrations = f.history.native_classification_registrations().unwrap();
+    let stamp = registrations_fingerprint(&registrations).unwrap();
+    let modified = std::time::SystemTime::UNIX_EPOCH;
+    let fingerprint = Fingerprint {
+        len,
+        dev,
+        ino,
+        modified,
+        change: (0, 0),
+    };
+    let tail = Tail {
+        through,
+        prefix_hash: hash,
+        fingerprint,
+        digest: "0".repeat(64),
+    };
+    let execution_nonce = nonce.into();
+    let registrations_fingerprint = stamp.clone();
+    let raw = RawWitness {
+        version: 1,
+        tail,
+        aborted: false,
+        execution_nonce,
+        registrations_fingerprint,
+    };
+    let analysis = seed.analyze_closed(&registrations, Some(&raw)).unwrap();
+    let observed = Observation {
+        binding,
+        generation: shared.restart.current_generation,
+        binding_seq: 1,
+        revision: 1,
+        through,
+        registrations_fingerprint: stamp,
+        terminal: Some(raw),
+        evidence: analysis.evidence,
+        receipts: Vec::new(),
+    };
+    let current = Observation {
+        terminal: None,
+        ..observed.clone()
+    };
+    (observed, current)
 }
