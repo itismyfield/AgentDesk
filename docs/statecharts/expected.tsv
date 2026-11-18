@@ -23,6 +23,14 @@ campaign-execution/CampaignApprovalGateNoTargetHead.cfg	CampaignApprovalGate	NoW
 campaign-execution/CampaignApprovalGateNoTargetIdentity.cfg	CampaignApprovalGate	NoWrongBindingAccepted	-
 campaign-execution/CampaignApprovalGateNoTargetKind.cfg	CampaignApprovalGate	NoWrongBindingAccepted	-
 campaign-execution/CampaignApprovalGateOmitted.cfg	CampaignApprovalGate	OmittedEditNeverClearsGate	-
+campaign-execution/CampaignNodeLifecycle.cfg	CampaignNodeLifecycle	-	-
+campaign-execution/CampaignNodeLifecycleBefore.cfg	CampaignNodeLifecycle	NoUnapprovedEntry	-
+campaign-execution/CampaignNodeLifecycleBudgetIgnored.cfg	CampaignNodeLifecycle	NoRetryAfterBudget	-
+campaign-execution/CampaignNodeLifecycleChart.cfg	CampaignNodeLifecycle	-	-
+campaign-execution/CampaignNodeLifecycleGatesOff.cfg	CampaignNodeLifecycle	-	-
+campaign-execution/CampaignNodeLifecycleNoRecompute.cfg	CampaignNodeLifecycle	-	ApprovedNodeMoves
+campaign-execution/CampaignNodeLifecycleReplay.cfg	CampaignNodeLifecycle	NextActionAtMostOnce	-
+campaign-execution/CampaignNodeLifecycleStaleTarget.cfg	CampaignNodeLifecycle	NoUnapprovedEntry	-
 campaign-execution/CampaignProfilePin.cfg	CampaignProfilePin	-	-
 campaign-execution/CampaignProfilePinBefore.cfg	CampaignProfilePin	NoFalseMatch	-
 campaign-execution/CampaignProfilePinNoRole.cfg	CampaignProfilePin	NoFalseMatch	-
