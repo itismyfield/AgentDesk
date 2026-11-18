@@ -4000,7 +4000,7 @@ def run_one_cell(
             response = client.send(channel_id, last_sent_prompt)
             _ack_send(sent, response)
             if reaction_watch is not None:
-                reaction_watch.on_send(record)
+                reaction_watch.on_send(record, read_after=after_id)
             if scenario_id == "E-50" and last_sent_prompt.startswith("!clear "):
                 clear_after = str(response.get("message_id") or response.get("id") or "")
             if scenario.get("durable_delivery_probe"):

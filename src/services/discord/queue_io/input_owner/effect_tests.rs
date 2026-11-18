@@ -158,6 +158,7 @@ fn an_owned_paste_beside_an_unparkable_draft_notices_its_original_once() {
         let counted = raised.clone();
         let nonce = busy_inject::fresh_nonce();
         let leaf = BusyClaude {
+            probe_guard: None,
             operation: crate::services::claude_tui::host_input::BusyOperation::new(
                 crate::services::claude_tui::host_input::InputTarget::legacy_tmux(&session),
                 crate::services::platform::tmux::session_identity_tests::managed_fixture_program(

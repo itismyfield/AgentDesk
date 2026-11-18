@@ -93,7 +93,7 @@ A: placement passes, the turn host refuses on the retired hold (OWriterNotReady 
 `start_failure.rs:16-25`), the front stays; cleanup then releases the hold, but old Retired cleanup wakes no
 owner (`herdr_reader.rs:271-322`, test `rr_wake_old_retired_rows_at_boot_do_not_wake_owner_pg`). B: the first
 drive holds the front before the actor registers (`owner_input.rs:173-191`); registering a blocked actor is not
-a ready edge (`host.rs:998-1012` wakes on `ready && !was_ready`). A V2 owner front is not re-driven by time
+a ready edge (`host.rs:893-907` wakes on `ready && !was_ready`). A V2 owner front is not re-driven by time
 (`drive.rs:96-123`). Confirmed.
 
 ## Design1Listing: the retired nonce's listing refuses forever

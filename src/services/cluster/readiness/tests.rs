@@ -113,11 +113,17 @@ fn claude_login_presence_is_metadata_only_and_fails_closed() {
         command.get_args().collect::<Vec<_>>(),
         ["find-generic-password", "-s", "Claude Code-credentials"]
     );
+    // The host's own shell: Windows has no `/bin/sh` to report an exit status.
+    let (shell, flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("/bin/sh", "-c")
+    };
     assert!(metadata_command_present(
-        std::process::Command::new("/bin/sh").args(["-c", "exit 0"])
+        std::process::Command::new(shell).args([flag, "exit 0"])
     ));
     assert!(!metadata_command_present(
-        std::process::Command::new("/bin/sh").args(["-c", "exit 1"])
+        std::process::Command::new(shell).args([flag, "exit 1"])
     ));
     assert!(!metadata_command_present(&mut std::process::Command::new(
         "/unavailable/metadata-probe"

@@ -42,13 +42,17 @@ jobs:
       # Playwright smoke is intentionally nightly-only — see issue #3316.
       - name: dashboard build/test (PR gate path)
         run: ./scripts/verify-dashboard.sh
+        env:
+          DASHBOARD_AUDIT_WAIVER: "GHSA-fc5q-39xc-vjpf picomatch ReDoS: no patched release; dev-only build tooling (vite/vitest), not in the browser bundle. Remove when patched (#8236)"
 
   # Playwright smoke is a nightly-only lane: it requires a headed Chromium
   # browser and takes longer than the fast PR gate allows.  Kept separate so
   # PR-required branch protection is never affected by E2E flakiness.
   dashboard_playwright:
     name: Dashboard Playwright smoke (nightly)
-    runs-on: ubuntu-latest
+    # Playwright 1.60.0 has no chromium for the ubuntu-latest 26.04 image;
+    # upgrading Playwright belongs to a dashboard dependency update.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -148,14 +152,36 @@ jobs:
         with:
           tool: cargo-nextest@0.9.149
 
+      # Memory evidence for the slow macOS lib build: runner RAM and paging around it.
+      # Diagnostics only; they never change the job result.
+      - name: Report macOS memory before the lib build
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          sysctl hw.memsize hw.ncpu vm.swapusage || true
+          vm_stat || true
+          if command -v memory_pressure >/dev/null; then memory_pressure || true; fi
+
       # Verify the plan before starting the native test execution budget.
+      # `time -l` prints the peak RSS and exits with the build's own status.
       - name: Build and plan non-PG lib tests
         timeout-minutes: 210
         shell: bash
         env:
           BASH_ENV: /dev/null
           RUST_BACKTRACE: 1
-        run: bash scripts/ci/nextest-native.sh macos macos-lib pg-classifier prepare
+        run: /usr/bin/time -l bash scripts/ci/nextest-native.sh macos macos-lib pg-classifier prepare
+
+      # Runs after a failed or timed-out build too; the paging counters are cumulative since boot.
+      - name: Report macOS memory after the lib build
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          sysctl vm.swapusage || true
+          vm_stat || true
 
       - name: Run and audit non-PG lib tests
         timeout-minutes: 130
@@ -258,6 +284,7 @@ jobs:
       actions: read
       contents: read
     env:
+      CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
