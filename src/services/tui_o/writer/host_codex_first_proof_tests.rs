@@ -718,9 +718,8 @@ fn bind_fresh(harness: &Harness, name: &str) -> (PathBuf, SourceId) {
     (path, source)
 }
 
-/// As on main, an admitted fresh takeover commits only its own rollout: an earlier rollout left
-/// undelivered while custody held the takeover is not owed to O, its answer is not posted, the
-/// admitted answer posts once and a restart posts nothing.
+/// As on main, an admitted takeover commits only its own rollout: an earlier undelivered answer is
+/// not posted by O, the admitted answer posts once and a restart posts nothing.
 #[test]
 fn an_admitted_fresh_rollout_takes_only_its_own_rollout_as_main_does() {
     let root = crate::config::TestRuntimeRootGuard::new();
