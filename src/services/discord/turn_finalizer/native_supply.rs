@@ -13,6 +13,8 @@ use crate::services::tui_o::writer::{
 use std::sync::Mutex;
 #[path = "native_abstain.rs"]
 pub(in crate::services::discord::turn_finalizer) mod native_abstain;
+#[path = "native_binding.rs"]
+pub(in crate::services::discord) mod source_binding;
 
 pub(in crate::services::discord::turn_finalizer) type Custody = (
     Vec<NativePrepared>,
@@ -575,6 +577,7 @@ impl EvidencePort for Port {
     }
     fn retry(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
+            self.retry_source_bindings().await;
             let mut jobs: HashMap<_, _> = self
                 .pending
                 .lock()

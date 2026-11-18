@@ -243,7 +243,7 @@ impl Registry {
         })
     }
 
-    pub(super) fn try_control_transaction<T>(
+    pub(in crate::services::tui_input::human_frame::history::v2) fn try_control_transaction<T>(
         &self,
         apply: impl FnOnce(&mut Snapshot) -> Result<T, String>,
     ) -> Result<T, String> {

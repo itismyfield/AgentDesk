@@ -4,6 +4,68 @@ use crate::services::discord::queue_io::input_owner::admission::{AdmissionTicket
 use crate::services::tui_input::human_frame::history::v2::Registry;
 use crate::test_support::wait::{WAIT_CAP, await_within};
 
+fn cold_attempt(
+    root: &std::path::Path,
+    channel: u64,
+) -> (serde_json::Value, std::path::PathBuf, String) {
+    use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context};
+    let session = uuid::Uuid::new_v4().to_string();
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let logical = format!("native-prekey-{channel}");
+    let projects = root.join("projects");
+    let path = projects.join("project").join(format!("{session}.jsonl"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "").unwrap();
+    binding_context::PreparedIncarnation::create(binding_context::BindingContext {
+        schema: 1,
+        provider: "claude".into(),
+        created_at: chrono::Utc::now(),
+        execution_nonce: nonce.clone(),
+        tmux_session: logical.clone(),
+        channel_id: Some(channel),
+        owner_runtime_root: "native-prekey".into(),
+        host: None,
+        expected_native_session_id: Some(session.clone()),
+        launch_mode: "fresh".into(),
+        provider_root: Some(projects),
+        first_prompt_digest: None,
+        source_policy: None,
+        resume_start: None,
+    })
+    .unwrap();
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(&logical, "spawn_nonce"),
+        &nonce,
+    )
+    .unwrap();
+    dedupe::register_tmux_channel(&logical, channel);
+    crate::services::tmux_common::with_tmux_source_authority(&logical, |authority| {
+        assert!(
+            dedupe::pane_registration::register_claude_pane_under_source_authority(
+                authority,
+                channel,
+                dedupe::TuiRuntimeBinding {
+                    runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                    output_path: path.display().to_string(),
+                    session_id: Some(session.clone()),
+                    last_offset: 0,
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    relay_last_offset: None,
+                },
+                dedupe::Record::Stat
+            )
+            .is_some_and(dedupe::Persisted::published)
+        );
+    });
+    (
+        json!({"nonce":format!("native-{channel}"),"provider":"claude","target":{"host":"herdr","owner":logical,"root":"/fixture","execution_nonce":nonce},
+        "source":{"kind":"pre_source","expected_session_id":session,"expected_transcript":path,"binding_watermark":null}}),
+        path,
+        session,
+    )
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
     let guard = crate::config::TestRuntimeRootGuard::new();
@@ -15,8 +77,12 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
         (true, true, 0),
         (true, false, 1),
         (true, false, 2),
+        (true, false, 3),
+        (true, false, 4),
     ] {
-        let channel = ChannelId::new(if foreign == 2 {
+        let channel = ChannelId::new(if foreign >= 3 {
+            81489954 + foreign
+        } else if foreign == 2 {
             81489954
         } else if foreign == 1 {
             81489950
@@ -74,18 +140,22 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
         mailbox
             .v2_adopt(
                 root.as_path().join(format!("owner-{}.json", channel.get())),
-                "native-production".into(),
+                format!("claude/{}", shared.token_hash),
             )
             .await
             .unwrap();
         let item = serde_json::from_value(json!({"author_id":7,"message_id":id,"channel_id":channel.get(),"source_message_ids":[id],"queued_generation":1,"text":"our input"})).unwrap();
         let _ = admit(&mailbox, &item, AdmissionTicket::new()).await;
-        let transcript = root
-            .as_path()
-            .join(format!("source-{}.jsonl", channel.get()));
-        std::fs::write(&transcript, "").unwrap();
+        let (attempt, transcript, session_id) = cold_attempt(&root, channel.get());
         let meta = std::fs::metadata(&transcript).unwrap();
         let file = crate::services::tui_o::shadow::capture::file_identity(&meta);
+        if foreign == 3 {
+            std::fs::write(&transcript, "partial record").unwrap();
+        }
+        if foreign == 4 {
+            std::fs::remove_file(&transcript).unwrap();
+            std::fs::create_dir(&transcript).unwrap();
+        }
         let shared_leaf = shared.clone();
         let mailbox_leaf = mailbox.clone();
         let token_leaf = token.clone();
@@ -109,7 +179,7 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
                     let source = crate::services::tui_input::human_frame::history::v2::Source {
                         target: serde_json::to_value(&key).unwrap()["attempt"]["target"].clone(),
                         provider: "claude".into(),
-                        session_id: "native-created".into(),
+                        session_id,
                         transcript,
                         file: [file.0, file.1],
                         offset: 0,
@@ -127,7 +197,7 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
         let prepared = PreparedPayload {
             frame: "our input".into(),
             sources: vec![id.to_string()],
-            attempt: json!({"nonce":format!("native-{}",channel.get()),"provider":"claude","target":{"host":"herdr","owner":"fixture-pane","root":"/fixture","execution_nonce":"created-birth"},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),
+            attempt,
         };
         let result = await_within(
             pump::submit_native_front(
@@ -141,6 +211,12 @@ async fn native_8148_b2b2_created_primary_and_follower_ack_before_key() {
             WAIT_CAP,
         )
         .await;
+        if foreign >= 3 {
+            assert!(matches!(result, Ok(Completion::NotSent(_))), "{result:?}");
+            assert!(mailbox.snapshot().await.cancel_token.is_none());
+            assert!(token.is_completion_cleanup());
+            continue;
+        }
         if stale || foreign != 0 {
             assert!(matches!(result, Ok(Completion::NotSent(_))), "{result:?}");
             let history = Registry::runtime().unwrap().json().unwrap();
@@ -244,7 +320,7 @@ async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
     mailbox
         .v2_adopt(
             root.as_path().join("no-key-owner.json"),
-            "native-no-key".into(),
+            format!("claude/{}", shared.token_hash),
         )
         .await
         .unwrap();
@@ -255,7 +331,7 @@ async fn native_8148_b2b2_no_key_keeps_original_and_disarms_native_custody() {
     let prepared = PreparedPayload {
         frame: "our input".into(),
         sources: vec![id.to_string()],
-        attempt: json!({"nonce":"no-key-attempt","provider":"claude","target":{"host":"herdr","owner":"no-key-pane","root":"/fixture","execution_nonce":"no-key-birth"},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),
+        attempt: cold_attempt(&root, channel.get()).0,
     };
     let leaf: effect::Leaf = Box::new(|_| {
         assert_eq!(scope::key_attempted(), Some(false));

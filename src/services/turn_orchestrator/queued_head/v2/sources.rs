@@ -97,6 +97,7 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
         ungroup(&mut snapshot, &head)?;
     }
     snapshot.namespace = Some(namespace.into());
+    super::cold_source::validate(&snapshot)?;
     // Released unarmed, every member still holds the queued bind its reserve kept.
     snapshot
         .head_injection

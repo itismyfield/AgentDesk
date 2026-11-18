@@ -1,4 +1,7 @@
 //! Pre-key custody belongs to the finalizer actor; a leaf carries only its acknowledged handle.
+pub(in crate::services::discord) use super::terminal_handler::native_supply::source_binding::{
+    pin_source, release_unkeyed_source,
+};
 use super::*;
 #[path = "native_restore.rs"]
 mod native_restore;

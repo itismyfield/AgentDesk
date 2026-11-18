@@ -9,6 +9,7 @@ pub(crate) mod actor;
 mod attempt;
 pub(crate) mod claude_handoff;
 pub(crate) mod clear;
+mod cold_source;
 mod commit;
 pub(crate) mod control;
 mod effort_continue;
@@ -170,6 +171,7 @@ impl Owner {
                 head_injection: None,
                 retained_inputs: vec![],
                 terminal_identities: vec![],
+                source_bindings: Vec::new(),
                 namespace: Some(namespace),
                 owed_drop_receipts: Vec::new(),
                 unfinished_handoff: None,

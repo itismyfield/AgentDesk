@@ -24,7 +24,7 @@ pub(crate) use stamped::READS as HISTORY_READS;
 pub(crate) use stamped::Token as KnownToken;
 pub(crate) mod v2;
 
-const CAPACITY: usize = 4096;
+pub(crate) const CAPACITY: usize = 4096;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Event {

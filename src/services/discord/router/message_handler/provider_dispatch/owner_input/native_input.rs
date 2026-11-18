@@ -69,16 +69,18 @@ impl Producer {
             let prepared = (|| {
                 let (history, namespace, ticket) =
                     crate::services::tui_input::human_frame::history::v2::native::scoped_ticket()?;
-                tokio::runtime::Handle::current().block_on(native_prepare::Handle::prepare(
-                    &self.shared,
-                    self.key,
-                    self.actor.clone(),
-                    history,
-                    namespace,
-                    ticket,
-                ))
+                let handle =
+                    tokio::runtime::Handle::current().block_on(native_prepare::Handle::prepare(
+                        &self.shared,
+                        self.key,
+                        self.actor.clone(),
+                        history.clone(),
+                        namespace.clone(),
+                        ticket.clone(),
+                    ))?;
+                Ok::<_, String>((handle, history, namespace, ticket))
             })();
-            let handle = match prepared {
+            let (handle, history, namespace, ticket) = match prepared {
                 Ok(handle) => handle,
                 Err(error) => {
                     scope::vetoed(&error);
@@ -86,10 +88,26 @@ impl Producer {
                     return Err(effect::unsent(error));
                 }
             };
-            let result = leaf(frame);
+            let result = match tokio::runtime::Handle::current().block_on(
+                native_prepare::pin_source(&self.shared, &namespace, &ticket),
+            ) {
+                Ok(()) => leaf(frame),
+                Err(error) => {
+                    scope::vetoed(&error);
+                    Err(effect::unsent(error))
+                }
+            };
             let unkeyed = scope::key_attempted() == Some(false);
             handle.finish()?;
             if unkeyed {
+                tokio::runtime::Handle::current().block_on(
+                    native_prepare::release_unkeyed_source(
+                        &self.shared,
+                        &history,
+                        &namespace,
+                        &ticket,
+                    ),
+                )?;
                 self.unwind();
             }
             result

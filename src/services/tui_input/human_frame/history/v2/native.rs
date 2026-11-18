@@ -130,7 +130,7 @@ impl Outcome {
 }
 
 impl Settlement {
-    fn validate(&self, registration: &Registration) -> Result<(), String> {
+    pub(super) fn validate(&self, registration: &Registration) -> Result<(), String> {
         let ticket = &self.ticket;
         if ticket.key != registration.key
             || ticket.source != registration.source
