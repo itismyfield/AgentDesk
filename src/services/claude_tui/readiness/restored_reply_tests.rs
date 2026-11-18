@@ -84,6 +84,39 @@ fn save_context(r: &Rig) {
     fs::write(path, serde_json::to_vec(&r.ctx).unwrap()).unwrap();
 }
 
+fn repin(r: &Rig, native: &str, path: &Path) {
+    let text = path.to_str().unwrap();
+    let hook = HookSignal::from_payload(
+        "session_start",
+        &json!({"source":"clear","session_id":native,"transcript_path":text}),
+    );
+    let meta = fs::metadata(path).unwrap();
+    let id = SourceId {
+        session_id: native.into(),
+        path: path.into(),
+        dev: meta.dev(),
+        ino: meta.ino(),
+    };
+    binding_events::record_verified(
+        &Proposal {
+            channel_id: 8_222_001,
+            provider: "claude",
+            tmux_session: &r.session,
+            session_id: Some(native),
+            path: text,
+            replaced: None,
+            cause: CauseSource::Hook(BindingCause::Clear),
+            hook: Some(&hook),
+        },
+        &id,
+    )
+    .unwrap();
+    assert_eq!(
+        binding_events::pinned_source(8_222_001, &r.session).unwrap(),
+        Some(id)
+    );
+}
+
 #[test]
 fn restored_reply_recovers_without_start_or_new_activity_and_reserves_once() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -122,14 +155,14 @@ fn restored_reply_nonce_guard_rejects_another_incarnations_global_pin() {
 #[test]
 fn restored_reply_native_guard_rejects_a_replaced_launch_session() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let mut r = pinned();
-    r.ctx.expected_native_session_id = Some(uuid::Uuid::new_v4().to_string());
-    save_context(&r);
+    let r = pinned();
+    repin(&r, &uuid::Uuid::new_v4().to_string(), &r.path);
     assert!(
         candidate(&r).is_none(),
-        "the launch and pinned transcript must name the same native"
+        "the current pin and runtime must name the same native"
     );
 }
+
 #[test]
 fn restored_reply_inode_guard_rejects_a_replacement_before_the_first_read() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -187,13 +220,13 @@ fn restored_reply_never_accepts_a_composer_only_hard_restoration() {
 fn restored_reply_rechecks_pin_native_and_stop_before_reserving() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     for change in ["nonce", "native", "inode", "stop"] {
-        let mut r = pinned();
+        let r = pinned();
         let proof = candidate(&r).unwrap();
         match change {
             "nonce" => { let mut ctx = r.ctx.clone(); ctx.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
                 crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(ctx.clone()).unwrap();
                 fs::write(crate::services::tmux_common::session_temp_path(&r.session,"spawn_nonce"), &ctx.execution_nonce).unwrap(); }
-            "native" => { r.ctx.expected_native_session_id = Some(uuid::Uuid::new_v4().to_string()); save_context(&r); }
+            "native" => repin(&r, &uuid::Uuid::new_v4().to_string(), &r.path),
             "inode" => { let copy = r.path.with_extension("copy"); fs::copy(&r.path, &copy).unwrap(); fs::rename(copy, &r.path).unwrap(); }
             _ => r.append(json!({"type":"attachment","attachment":{"type":"hook_success","hookEvent":"Stop","stdout":"{}"}})),
         }
@@ -206,10 +239,9 @@ fn restored_reply_rechecks_pin_native_and_stop_before_reserving() {
 #[test]
 fn restored_reply_reservation_rechecks_a_native_change_without_new_bytes() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let mut r = pinned();
+    let r = pinned();
     let reservation = reserve(candidate(&r).unwrap()).unwrap();
-    r.ctx.expected_native_session_id = Some(uuid::Uuid::new_v4().to_string());
-    save_context(&r);
+    repin(&r, &uuid::Uuid::new_v4().to_string(), &r.path);
     assert!(!reservation.current());
     reservation.not_sent();
 }
@@ -284,12 +316,9 @@ fn restored_reply_reservation_cannot_substitute_a_different_proof_origin() {
 #[test]
 fn restored_reply_refuses_missing_launch_fields_and_future_timestamps() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    for case in ["future", "timestamp", "native"] {
-        let mut r = pinned();
-        if case == "native" {
-            r.ctx.expected_native_session_id = None;
-            save_context(&r);
-        } else {
+    for case in ["future", "timestamp"] {
+        let r = pinned();
+        {
             fs::write(&r.path, "").unwrap();
             if case == "future" {
                 completed(&r, Utc::now() + chrono::Duration::days(1));
@@ -307,5 +336,40 @@ fn restored_reply_refuses_missing_launch_fields_and_future_timestamps() {
     assert!(
         candidate(&r).is_none(),
         "a source without a verified pin is never restored"
+    );
+}
+
+#[test]
+fn restored_reply_tracks_the_current_native_after_clear_in_the_same_execution() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let mut r = pinned();
+    let initial = r.ctx.expected_native_session_id.clone();
+    let native = uuid::Uuid::new_v4().to_string();
+    let path = r.path.with_file_name(format!("{native}.jsonl"));
+    let mut reply = end_turn();
+    reply["sessionId"] = json!(native);
+    reply["timestamp"] = json!(Utc::now());
+    let mut records = vec![reply];
+    records.extend(tail());
+    let text = records
+        .into_iter()
+        .map(|mut record| {
+            record["sessionId"] = json!(native);
+            record.to_string() + "\n"
+        })
+        .collect::<String>();
+    fs::write(&path, text).unwrap();
+    repin(&r, &native, &path);
+    let mut binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(&r.session).unwrap();
+    binding.session_id = Some(native);
+    binding.output_path = path.to_string_lossy().into_owned();
+    tui_prompt_dedupe::register_tmux_runtime_binding(&r.session, binding);
+    assert_eq!(r.ctx.expected_native_session_id, initial);
+    assert!(observe_restored_reply(&r.session, Some(&path)).is_some());
+    r.ctx.expected_native_session_id = None;
+    save_context(&r);
+    assert!(
+        observe_restored_reply(&r.session, Some(&path)).is_some(),
+        "an optional launch hint cannot veto the verified current native"
     );
 }

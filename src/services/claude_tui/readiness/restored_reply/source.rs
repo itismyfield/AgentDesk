@@ -40,7 +40,6 @@ pub(super) fn launched(source: &Source, stamp: &Stamp) -> Option<DateTime<Utc>> 
     };
     let native_matches = pin.session_id == source.native
         && first == source.native
-        && ctx.expected_native_session_id.as_deref() == Some(source.native.as_str())
         && binding.session_id.as_deref() == Some(source.native.as_str());
     if !native_matches {
         return None;
