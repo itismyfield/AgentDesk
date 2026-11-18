@@ -40,16 +40,16 @@ Init == /\ cap = CapInit /\ bound = BoundAtRestart /\ owner \in Owners
 \* C/N are proposals; true identity errors still cannot pass Observe.
 Observe == /\ phase = "observe" /\ (Owned \/ (AdoptionHeld /\ Mapping # "before"))
     /\ phase' = (IF D1bDiscard /\ owner = "Refused" /\ Mapping # "CDiscardRetain" THEN "discard" ELSE IF CapMode THEN "archive" ELSE IF Owned /\ (~DetachedMode \/ storeDuty \/ Mapping = "COwnedShortcut") THEN "clear" ELSE IF CMode \/ NStored THEN "archive" ELSE IF NMode THEN "neutral" ELSE "commit")
-    /\ UNCHANGED <<cap, bound, owner, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition, refusedArchive, reasons>>
+    /\ refusedArchive' = (refusedArchive \/ (owner = "Refused" /\ phase' = "archive"))
+    /\ UNCHANGED <<cap, bound, owner, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition, reasons>>
 
 \* PROPOSED: identity-keyed fsynced copy before unlink. Existing o_pending cannot capture Deferred/Refused.
 Archive == /\ phase = "archive"
     /\ copyId' = (IF oldAck \/ lp = 1 \/ Mapping = "CNoDurable" THEN "none" ELSE "old") /\ phase' = (IF NStored THEN "neutral" ELSE "detach")
-    /\ refusedArchive' = (refusedArchive \/ owner = "Refused")
-    /\ UNCHANGED <<cap, bound, owner, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition, reasons>>
+    /\ UNCHANGED <<cap, bound, owner, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition, refusedArchive, reasons>>
 
 \* Retire only the old execution/row guard. The old body stays in its copy.
-Detach == /\ phase = "detach" /\ (copyId = "old" \/ oldAck \/ Mapping = "CNoDurable")
+Detach == /\ phase = "detach" /\ (copyId = "old" \/ oldAck \/ Mapping = "CNoDurable" \/ disposition = "discarded")
     /\ row' = (FALSE) /\ inputHold' = (FALSE) /\ gatewayHeld' = (FALSE) /\ phase' = ("done")
     /\ UNCHANGED <<cap, bound, owner, noticeBody, noticeSent, lp, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition, refusedArchive, reasons>>
 
@@ -262,9 +262,10 @@ LateRefuse == /\ LateRefusal /\ owner = "Deferred"
     /\ owner' = "Refused"
     /\ UNCHANGED <<cap, bound, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusalVisible, disposition, refusedArchive, reasons>>
 
-\* D1b design: a Refused restarted row posts one reason and is released with no body copy.
+\* D1b design: a Refused restarted row posts one reason (durably keyed, so a restart repeats none)
+\* and is released with no body copy.
 DiscardRow == /\ phase = "discard"
-    /\ reasons' = (IF Mapping = "CDiscardSilent" THEN reasons ELSE reasons + 1)
+    /\ reasons' = (IF Mapping = "CDiscardSilent" \/ reasons > 0 THEN reasons ELSE 1)
     /\ refusalVisible' = (Mapping # "CDiscardSilent") /\ disposition' = "discarded"
     /\ row' = FALSE /\ inputHold' = FALSE /\ gatewayHeld' = FALSE /\ phase' = "done"
     /\ UNCHANGED <<cap, bound, owner, noticeBody, noticeSent, lp, nextInput, copyId, op, oldAck, attempt, restarted, storeDuty, newPosted, earlyOutput, refusedArchive>>
@@ -272,7 +273,7 @@ DiscardRow == /\ phase = "discard"
 \* D1b design: a body kept while adoption waited is dropped with one reason once it is refused.
 DiscardCopy == /\ D1bDiscard /\ owner = "Refused" /\ copyId = "old" /\ ~oldAck /\ op = 0
     /\ copyId' = "none" /\ storeDuty' = FALSE
-    /\ reasons' = (IF Mapping = "CDiscardSilent" THEN reasons ELSE reasons + 1)
+    /\ reasons' = (IF Mapping = "CDiscardSilent" \/ reasons > 0 THEN reasons ELSE 1)
     /\ refusalVisible' = (Mapping # "CDiscardSilent") /\ disposition' = "discarded"
     /\ UNCHANGED <<cap, bound, owner, phase, row, inputHold, noticeBody, noticeSent, lp, gatewayHeld, nextInput, op, oldAck, attempt, restarted, newPosted, earlyOutput, refusedArchive>>
 
