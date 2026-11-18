@@ -1820,9 +1820,12 @@ test.describe("Dashboard smoke tests", () => {
     });
     await page.goto("/agents");
     // Phones always use the list; the grid/list switch exists on desktop only.
-    if (testInfo.project.name === "desktop") await page.getByRole("button", { name: /리스트|List/ }).click();
+    if (testInfo.project.name === "desktop") await page.getByRole("radio", { name: /리스트|List/ }).click();
     await page.getByTestId("agents-card-agent-ada").click();
-    const dialog = page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
+    // Desktop shows the detail beside the list; phones open it as a full-screen dialog.
+    const dialog = testInfo.project.name === "desktop"
+      ? page.getByRole("region", { name: /에이전트 상세|Agent details/ })
+      : page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
     const device = dialog.getByLabel(/우선 실행 장비|Preferred execution device/);
     const save = dialog.getByRole("button", { name: /^(저장|Save)$/ });
     await expect(device).toBeEnabled();
@@ -1834,7 +1837,7 @@ test.describe("Dashboard smoke tests", () => {
     await save.click();
     await expect(dialog.getByRole("status")).toContainText(/새 세션부터|new sessions/);
     expect(writes).toEqual([{ default_node_id: "windows-1" }]);
-    await page.getByRole("button", { name: /닫기|Close/ }).click();
+    await page.getByRole("button", { name: /닫기|Close|목록으로|Back to list/ }).click();
     await page.getByTestId("agents-card-agent-ada").click();
     await expect(device).toHaveValue("windows-1");
     await expect(save).toBeDisabled();
@@ -1862,11 +1865,11 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("agents-view-grid")).toBeVisible();
     await expect(page.getByRole("img", { name: /아다 대시보드|Ada Dashboard/ }).first()).toBeVisible();
 
-    await page.getByRole("button", { name: /리스트|List/ }).click();
+    await page.getByRole("radio", { name: /리스트|List/ }).click();
     await expect(page.getByTestId("agents-view-list")).toBeVisible();
 
     await page.getByTestId("agents-card-agent-ada").click();
-    const agentDetailDialog = page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
+    const agentDetailDialog = page.getByRole("region", { name: /에이전트 상세|Agent details/ });
     await expect(agentDetailDialog).toBeVisible();
     await expect(agentDetailDialog).toContainText("Ada Dashboard");
     await expect(agentDetailDialog.getByText(/Lv\.\s?\d|XP/)).toHaveCount(0);

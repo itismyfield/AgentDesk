@@ -1,4 +1,4 @@
-import { createPortal } from "react-dom";
+import { X } from "lucide-react";
 import type { CliProvider } from "../../types";
 import { localeName } from "../../i18n";
 import { summarizeRollback } from "../../api/agentsSetup";
@@ -10,6 +10,9 @@ import {
   SurfaceSegmentButton,
   SurfaceSubsection,
 } from "../common/SurfacePrimitives";
+import { Button } from "../../kit/free/button-clean";
+import { IconButton } from "../../kit/free/icon-button-clean";
+import { AgentOverlay } from "./AgentOverlay";
 import AgentPromptEditor from "./AgentPromptEditor";
 import {
   parseSkills,
@@ -80,46 +83,80 @@ export default function AgentSetupWizard({
     </label>
   );
 
-  return createPortal(
-    <>
-    <div aria-hidden="true" className="fixed inset-0 z-[70]" style={{ background: "var(--th-modal-overlay)" }} />
-    <div
-      className="fixed inset-0 z-[80] flex items-start justify-center overflow-hidden px-3 py-4 sm:items-center sm:p-4"
-      onClick={(event) => {
-        if (event.currentTarget === event.target) onClose();
-      }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={tr("에이전트 설정 마법사", "Agent setup wizard")}
-        className="flex w-full max-w-5xl flex-col overflow-hidden [overflow-wrap:anywhere] rounded-lg border shadow-2xl"
-        style={{
-          maxHeight: "min(92vh, 860px)",
-          background:
-            "var(--th-bg-surface)",
-          borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-        }}
-      >
-        <div className="flex shrink-0 items-center justify-between gap-3 border-b px-5 py-4" style={{ borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)" }}>
+  const title = mode === "duplicate" ? tr("에이전트 복제", "Duplicate Agent") : tr("에이전트 생성", "Create Agent");
+
+  return (
+    <AgentOverlay
+      variant="sheet"
+      ariaLabel={tr("에이전트 설정 마법사", "Agent setup wizard")}
+      onClose={onClose}
+      widthClassName="sm:max-w-5xl"
+      flushBody
+      testId="agent-setup-wizard"
+      header={
+        <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+            <div className="text-xs font-medium text-(--fg-muted)">
               {mode === "duplicate"
                 ? tr("복제 설정", "Duplicate Setup")
                 : tr("온보딩 설정", "Onboarding Setup")}
             </div>
-            <h3 className="mt-1 text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>
-              {mode === "duplicate"
-                ? tr("에이전트 복제", "Duplicate Agent")
-                : tr("에이전트 생성", "Create Agent")}
-            </h3>
+            <h2 className="m-0 mt-0.5 text-[15px] font-semibold leading-6 text-(--fg)">{title}</h2>
           </div>
-          <SurfaceActionButton onClick={onClose} tone="neutral" compact className="h-11 w-11" style={{ padding: 0 }} aria-label={tr("닫기", "Close")}>
-            x
-          </SurfaceActionButton>
+          <IconButton icon={<X size={15} />} label={tr("닫기", "Close")} onClick={onClose} />
         </div>
-
-        <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto md:grid-cols-[220px_minmax(0,1fr)]">
+      }
+      footer={
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="hidden flex-wrap gap-2 sm:flex">
+            {steps.map((step, index) => (
+              <SurfaceSegmentButton
+                key={step}
+                active={stepIndex === index}
+                tone={validationByStep[index] ? "success" : "neutral"}
+                onClick={() => setStepIndex(index)}
+                aria-label={`${index + 1}. ${labelForStep(step, tr)}`}
+              >
+                {index + 1}
+              </SurfaceSegmentButton>
+            ))}
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button variant="ghost" size="md" onClick={onClose} disabled={busy}>
+              {tr("취소", "Cancel")}
+            </Button>
+            <Button
+              variant="secondary"
+              size="md"
+              onClick={() => setStepIndex((prev) => Math.max(0, prev - 1))}
+              disabled={busy || stepIndex === 0}
+            >
+              {tr("이전", "Back")}
+            </Button>
+            {stepIndex < steps.length - 1 ? (
+              <Button
+                variant="primary"
+                size="md"
+                onClick={() => setStepIndex((prev) => Math.min(steps.length - 1, prev + 1))}
+                disabled={!currentValid || busy}
+              >
+                {tr("다음", "Next")}
+              </Button>
+            ) : (
+              <>
+                <Button variant="secondary" size="md" onClick={runPreview} disabled={!currentValid || busy}>
+                  {busy ? tr("확인 중...", "Checking...") : tr("미리 보기", "Preview")}
+                </Button>
+                <Button variant="primary" size="md" onClick={runConfirm} disabled={!currentValid || busy}>
+                  {busy ? tr("처리 중...", "Working...") : tr("확정", "Confirm")}
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
+      }
+    >
+        <div className="grid min-w-0 grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)]">
           <aside className="border-b p-4 md:border-b-0 md:border-r" style={{ borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)" }}>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-1">
               {steps.map((step, index) => (
@@ -149,7 +186,7 @@ export default function AgentSetupWizard({
             </div>
           </aside>
 
-          <main className="min-w-0 p-4 sm:p-5">
+          <div className="min-w-0 p-4 sm:p-5">
             <div className="space-y-4">
               {currentStep === "role" && (
                 <SurfaceSubsection
@@ -474,55 +511,8 @@ export default function AgentSetupWizard({
                 </SurfaceNotice>
               )}
             </div>
-          </main>
-        </div>
-
-        <div className="flex shrink-0 flex-col gap-2 border-t px-5 py-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)" }}>
-          <div className="flex flex-wrap gap-2">
-            {steps.map((step, index) => (
-              <SurfaceSegmentButton
-                key={step}
-                active={stepIndex === index}
-                tone={validationByStep[index] ? "success" : "neutral"}
-                onClick={() => setStepIndex(index)}
-              >
-                {index + 1}
-              </SurfaceSegmentButton>
-            ))}
-          </div>
-          <div className="flex flex-wrap justify-end gap-2">
-            <SurfaceActionButton tone="neutral" onClick={onClose} disabled={busy}>
-              {tr("취소", "Cancel")}
-            </SurfaceActionButton>
-            <SurfaceActionButton
-              tone="neutral"
-              onClick={() => setStepIndex((prev) => Math.max(0, prev - 1))}
-              disabled={busy || stepIndex === 0}
-            >
-              {tr("이전", "Back")}
-            </SurfaceActionButton>
-            {stepIndex < steps.length - 1 ? (
-              <SurfaceActionButton
-                onClick={() => setStepIndex((prev) => Math.min(steps.length - 1, prev + 1))}
-                disabled={!currentValid || busy}
-              >
-                {tr("다음", "Next")}
-              </SurfaceActionButton>
-            ) : (
-              <>
-                <SurfaceActionButton tone="info" onClick={runPreview} disabled={!currentValid || busy}>
-                  {busy ? tr("확인 중...", "Checking...") : tr("미리 보기", "Preview")}
-                </SurfaceActionButton>
-                <SurfaceActionButton tone="accent" onClick={runConfirm} disabled={!currentValid || busy}>
-                  {busy ? tr("처리 중...", "Working...") : tr("확정", "Confirm")}
-                </SurfaceActionButton>
-              </>
-            )}
           </div>
         </div>
-      </div>
-    </div>
-    </>,
-    document.body,
+    </AgentOverlay>
   );
 }
