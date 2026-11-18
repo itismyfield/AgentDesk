@@ -247,6 +247,8 @@ class Supervisor(Fixture):
         self.assertEqual((published["suite"], [row["head"] for row in published["occurrences"][:2]]), ("P", [HEAD, HEAD]))
         self.assertEqual(read_json(state / "status.json", {})["rotation_interval_s"], 100)
         self.assertEqual(read_json(state / "requests.json", {}), {f"core-{HEAD[:12]}-10": published["result"]})
+        self.assertEqual(release_host.tick(self.path, now=1010), {"status": "NOT_DUE"})
+        self.assertEqual(read_json(state / "status.json", {})["heartbeat_at"], 1010)
 
 
 class AfterDeploy(Fixture):
