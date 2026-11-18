@@ -249,6 +249,7 @@ pub(crate) async fn persist_intent_in(
 
 /// Intents never tried, or freed by a proven no-effect: each may take one more post. An intent
 /// holding an attempt is only reconciled and never listed here.
+#[cfg(unix)]
 pub(crate) async fn unposted(pool: &PgPool) -> Result<Vec<(Identity, Reason)>, String> {
     let rows: Vec<(serde_json::Value, String)> = sqlx::query_as(
         "SELECT identity,reason FROM tui_output_dispositions WHERE attempt IS NULL AND message_id IS NULL ORDER BY output_key")

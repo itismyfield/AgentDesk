@@ -16,7 +16,7 @@ use crate::services::tui_o::store::OStore;
 #[cfg(test)]
 pub(crate) mod output_disposition;
 
-#[cfg(any(test, unix))]
+#[cfg(unix)]
 pub(crate) mod episode_key;
 mod first_turn;
 pub(crate) use first_turn::{
