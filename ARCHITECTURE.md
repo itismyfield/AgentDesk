@@ -1156,6 +1156,8 @@ src/
 │   │   ├── readiness/
 │   │   │   ├── compact/
 │   │   │   │   └── completion.rs
+│   │   │   ├── restored_reply/
+│   │   │   │   └── source.rs
 │   │   │   ├── source/
 │   │   │   │   └── clear.rs
 │   │   │   ├── clear.rs
@@ -1171,6 +1173,8 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── readiness_tests.rs
 │   │   │   ├── restart_tests.rs
+│   │   │   ├── restored_reply.rs
+│   │   │   ├── restored_reply_tests.rs
 │   │   │   ├── resume_record.rs
 │   │   │   ├── source.rs
 │   │   │   ├── wait.rs
@@ -2547,6 +2551,7 @@ src/
 │   │   │   │   ├── provider_dispatch_idle_compaction_tests.rs
 │   │   │   │   ├── provider_dispatch_idle_stash_tests.rs
 │   │   │   │   ├── provider_dispatch_live_end_tests.rs
+│   │   │   │   ├── provider_dispatch_restart_reply_tests.rs
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
