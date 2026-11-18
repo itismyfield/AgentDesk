@@ -895,3 +895,63 @@ async fn an_earlier_readiness_due_rearms_past_a_later_awaited_deadline() {
     );
     assert_eq!(after["items"], json!([]), "{after}");
 }
+
+/// A leaf reserved just before its original's due meets that due at its first key: past it the
+/// payload commit refuses, no key is sent and the leaf's own proof refuses the input for good;
+/// a first key before it delivers once and the due refuses nothing after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reserved_leaf_meets_its_originals_due_at_the_first_key() {
+    let _root = TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    for (channel, at, delivered) in [(7_272_764, 11_000, false), (7_272_774, 10_999, true)] {
+        let mailbox = owner(&registry, channel, 1).await;
+        let front = mailbox.v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let front = owner.front().ok_or("no front")?;
+            owner.hold_readiness(&front, "test", 1_000)?;
+            owner.grant_front(&front)?;
+            Ok(front)
+        });
+        let front = front.await.unwrap();
+        let claim = claim_turn(&mailbox, front.1.message_id, &front)
+            .await
+            .unwrap();
+        let keys = Arc::new(AtomicUsize::new(0));
+        let k = keys.clone();
+        let leaf: Leaf = Box::new(move |_| {
+            if owner_input::start_payload().is_err() {
+                return Ok(Completion::NotSent("readiness_deadline".into()));
+            }
+            owner_input::keyed();
+            k.fetch_add(1, Ordering::SeqCst);
+            Ok(Completion::Submitted)
+        });
+        let prepared = prepared(channel, "input 0");
+        let ran = pump::submit_front(&mailbox, claim, prepared, Arc::new(move || at), leaf).await;
+        assert_eq!(
+            matches!(ran, Ok(Completion::Submitted)),
+            delivered,
+            "{ran:?}"
+        );
+        mailbox
+            .v2_request(|slot| slot.as_mut().ok_or("no owner")?.tick(11_000))
+            .await
+            .unwrap();
+        let after = snapshot(&mailbox).await;
+        assert_eq!(
+            keys.load(Ordering::SeqCst),
+            usize::from(delivered),
+            "{after}"
+        );
+        assert_eq!(after["items"], json!([]), "{after}");
+        assert!(after["head_injection"].is_null() && after["refused_fronts"].is_null());
+        let refused = after["refused_inputs"].as_array().map_or(0, Vec::len);
+        assert_eq!(refused, usize::from(!delivered), "{after}");
+        if !delivered {
+            assert_eq!(
+                after["refused_inputs"][0]["notice"]["enqueued"], false,
+                "{after}"
+            );
+        }
+    }
+}

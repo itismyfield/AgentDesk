@@ -106,7 +106,7 @@ impl Owner {
 
     /// Whether the attempted head's original reached its readiness due; its first key then never
     /// starts and the leaf settles it through its own not-sent proof.
-    pub(super) fn head_outlived_due(&self, now: u64) -> bool {
+    pub(crate) fn head_outlived_due(&self, now: u64) -> bool {
         let Some(head) = &self.snapshot.head_injection else {
             return false;
         };

@@ -257,10 +257,10 @@ async fn recovery_refuses_a_live_expired_hold_before_any_drive() {
     );
 }
 
-/// A restart refuses a held front whose due passed, before any drive: its origin fails, and a
-/// crash after the outbox enqueue but before the ack still leaves one notice record.
+/// A front refused before a crash whose notice reached the outbox but not its ack: the restart
+/// posts the same record again by its key, so one notice stays and no body is kept or requeued.
 #[tokio::test(flavor = "current_thread")]
-async fn a_restart_refuses_an_expired_held_front_and_a_replayed_notice_stays_one_record_pg() {
+async fn a_refusal_notice_enqueued_before_a_crash_is_reused_after_restart_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
