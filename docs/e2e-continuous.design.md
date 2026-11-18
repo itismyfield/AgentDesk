@@ -552,7 +552,7 @@ SDK vendoring이나 외부 소비자 코드를 숨기지 않는다. giant driver
 | E1-ingress | test-only FullEvent→router adapter·receipt/boot/parent/nonce 검증·원래 bot 이벤트 중복 방지·provenance, 2–4 / +180–350(미실측) | E1b 앞, #8124 I2/I3a 경계 및 I3b 실제 host·E1a 관측 재사용. 경계/옛 boot/nonce 재사용·이중 실행·controlled_ingress를 human Gateway로 합산하는 뮤턴트 RED |
 | E1b | busy trace·reaction/주입 adapter·R-marker/R-inject·human 수용, 4–8 / +600–1100 | I3b + E1a + E1-ingress. 수리 전 #8113/#8114 RED, 수리 후 GREEN 및 원인 뮤턴트. #8114 native-busy 선행/분기 witness 필수·managed 대조군 분리. human Gateway 1회는 코디네이터 agent-desktop; 정기 수동 0 |
 | E1c | fresh/thread host/output adapter·R-fresh/R-host, 3–7 / +450–900 | I3b, #8115 fix 재사용, #8118/#8119 parent descriptor 계약. 수리 전/후 및 host/output 개별 상속 제거 뮤턴트 |
-| S1 | 단일 runner·channel flock·budget·manifest/cursor·배포 inbox, 4–8 / +600–1050 | L0 + #8124 I3a/I3b, capability별 E1. 동시 acquire·crash·old owner·due 경계·off·예산 reservation RED |
+| S1 | 단일 runner·channel flock·budget·manifest/cursor·배포 inbox, 4–8 / +600–1050 | L0 + #8124 I3a/I3b, capability별 E1. 동시 acquire·crash·old owner·due 경계·off·예산 reservation RED. **상태(11-18): 구현.** `scripts/e2e/continuous/`(`tick`·`hold`·`submit`), 기본 off·주기/예산 null. E1 없는 칸은 `BLOCKED_CAPABILITY`로 기록하고 실행하지 않는다. 모델에 `OffNoRun`·`RunHasReservation`·`WithinBudget`·`CursorCountsFinishedRuns` 추가([보고서](statecharts/e2e-run-lease/lease.report.md)). mutation-pending 기록·summary/status는 S2 |
 | S2 | summary/status/outbox·공유 순수 소비자, 3–6 / +350–700 | S1. 0건/skip/옛 head/schema/누락 단언/timeout/usage unknown/알림 실패 RED. scheduled 실제1회 + 실패 알림1회 증거 |
 | S3 | briefing_checks·coord monitor 배선 및 deploy companion 요청, 2–5 / +150–400 | S2. 외부 도구 소유 coordinator와 파일 경계 확정 후 별도 리뷰. fixture status 소비·STALE/NO_DATA/disabled/host 불가 검증. deploy는 fail-open 유지 |
 

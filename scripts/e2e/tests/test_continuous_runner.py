@@ -17,7 +17,7 @@ from scripts.e2e.continuous import __main__ as cli, channel_lock, runner  # noqa
 
 SHA = "a" * 40
 DRIVER = f"""
-import json, os, sys
+import json, os, signal, sys
 sys.path.insert(0, {str(REPO)!r})
 from scripts.e2e.continuous import channel_lock
 witness = channel_lock.inherited()
@@ -25,6 +25,7 @@ args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
 with open(os.environ["FAKE_DRIVER_LOG"], "a") as log:
     log.write(json.dumps({{**args, "lease_run": witness["run_id"]}}) + "\\n")
 if os.environ.get("FAKE_DRIVER_GATE"):
+    signal.alarm(120)  # A failed assertion must not leave this driver blocked on the fifo.
     os.kill(os.getppid(), 9)
     open(os.environ["FAKE_DRIVER_GATE"]).read()
     os.close(witness["fd"])
@@ -147,6 +148,9 @@ class Runner(unittest.TestCase):
         unset = {"claude": {"daily_turns": None, "daily_time_s": 600}}
         self.assertEqual(self.tick(200000.0, rotation_interval_s=None, budget=unset)["status"], "DEFERRED_BUDGET")
         self.assertEqual(len(self.driven()), 6)
+        tight = {"R1": {"claude": {"turns": 1, "time_s": 0.001}}}
+        self.assertEqual(self.tick(300000.0, reservation=tight)["status"], "PARTIAL")
+        self.assertEqual(len(self.driven()), 7)
 
     def test_deploy_inbox_runs_newest_once_and_blocks_missing_capabilities(self):
         self.submit("old")

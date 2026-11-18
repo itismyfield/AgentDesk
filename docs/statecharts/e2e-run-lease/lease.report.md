@@ -32,7 +32,7 @@
 
 나머지 17 cfg는 바이트 변경 없이 같은 결과를 유지한다(전체 25/25 일치). `check_models.py`는 정확한 cfg 집합에 `crash_no_reclaim`을 더했고, 범위 필터가 `admission/` 하위 모델 행까지 세어 기반에서 이미 실패하던 결함을 top-level cfg만 보도록 고쳤다.
 
-값 범위는 원인 가정이 아니라 아래 진입점 전수표에서 왔다. `git grep -n -E 'flock|LOCK_|pass_fds|set_inheritable|O_CLOEXEC|CLOEXEC|fstat|st_ino|os\.close|unlink|ttl|TTL' -- scripts/dev_instance scripts/e2e/tui_relay/lease.py`(시험 제외) 96행을 모델 동작별로 묶었다. #8124 시험 인스턴스의 FD 수명은 `scripts/dev_instance/`에 있고, run lease(`Kind=run`)와 전송 journal은 아직 코드가 없는 설계 좌표다.
+값 범위는 원인 가정이 아니라 아래 진입점 전수표에서 왔다. `git grep -n -E 'flock|LOCK_|pass_fds|set_inheritable|O_CLOEXEC|CLOEXEC|fstat|st_ino|os\.close|unlink|ttl|TTL' -- scripts/dev_instance scripts/e2e/tui_relay/lease.py`(시험 제외) 96행을 모델 동작별로 묶었다. #8124 시험 인스턴스의 FD 수명은 `scripts/dev_instance/`에 있고, run lease(`Kind=run`)는 S1에서 `scripts/e2e/continuous/`에 생겼고(아래 S1 절), 전송 journal은 아직 코드가 없는 설계 좌표다.
 
 | 모델 동작 | 코드 좌표(실제) | 비고 |
 | --- | --- | --- |
@@ -42,8 +42,47 @@
 | keeper spawn(lease 전달 아님) | `scripts/dev_instance/keeper.py:134` | 제어 socketpair의 child FD만 상속한다. lease FD는 넘기지 않는다 |
 | 자기 FD close만(`Finish`·`ReleaseParent`·crash) | `scripts/dev_instance/lease.py:87`, `:119` | lock leaf unlink 없음(`keeper.py:82`의 unlink는 marker 파일) |
 | `ttl_takeover`·`non_atomic` 원인 | `scripts/e2e/tui_relay/lease.py:28`, `:35`, `:50` | 현재 일반 하네스 lease의 TTL·unlink. S1에서 재사용하지 않음(§6) |
-| `Kind=run` channel lease | 설계 좌표: `docs/e2e-continuous.design.md` §6, S1 runner | 코드 없음 |
+| `Kind=run` channel lease | `scripts/e2e/continuous/channel_lock.py:80`(S1) | 위 S1 전수표 |
 | `Prepare`/journal·`Reconcile` | 설계 좌표: 같은 §6 mutation-pending 기록 | 코드 없음 |
+
+## S1 확장 (2026-11-18)
+
+코드 기준 `origin/main=ffa099d4f4a6a68c26171fb464f7b5edffca2e5f`. 이 모델에 continuous runner(`scripts/e2e/continuous/`)의 off·예산 reservation·cursor 전진을 더했다. 새 설정과 뮤턴트는 `Mut`로만 켜므로 기존 25 cfg는 바이트 그대로이고 결과도 expected.tsv와 같다. `run-none`·`run-live-none`에는 새 불변식 4개를 더해 정상 GREEN이 그것까지 확인한다.
+
+진입점 전수표(`git grep -n -E 'flock|pass_fds|enabled|budget\.|save_cursor|_abandon_orphans' -- scripts/e2e/continuous`, 시험 제외):
+
+| 진입점 | 모델 동작 | 코드 좌표 | 모델 값 |
+| --- | --- | --- | --- |
+| `tick`(launchd) off | `Acquire`가 `Enabled`일 때만 | `runner.py:170` | off면 잠금·디렉터리·상태 IO 0 |
+| `tick` 잠금 | `Acquire`(원자 nonblocking flock) | `channel_lock.py:91`, 키 `:26` | guild+정렬 parent+bot 집합, TTL·unlink 없음 |
+| `tick` 고아 정리 | `NoOrphanOwner` 뒤 다음 보유자 | `runner.py:183` | 잠금 보유자가 본 RUNNING 기록은 ABANDONED |
+| `tick` 예산 | `Reserve`/`Defer` | `budget.py:21`, `runner.py:133` | 한도·예약값 null이면 거절. crash 뒤 예약 유지 |
+| `tick` 실행 | `Start`(FD 상속) | `channel_lock.py:66` | `close_fds=True`, `pass_fds=(lease fd,)`, device/inode witness |
+| `tick` cursor | `Finish`의 `cursor' = seen + 1` | `runner.py:164` | 끝난 실행만 한 칸. crash·defer는 그대로 |
+| `hold`(수동 E2E) | `Acquire`·`Start` | `runner.py:191` | 같은 채널 lock. enabled·예산과 무관 |
+| `submit`(배포 inbox) | 모델 밖(요청 파일) | `inbox.py:22` | 비밀 없는 키 4개, request id당 1회, 최신만 실행 |
+
+| 수용 규칙 | 모델 규칙 | 정상 cfg | 원인 뮤턴트(RED) |
+| --- | --- | --- | --- |
+| off일 때 runner 실행 0 | **새** `OffNoRun` | **새** `run-off` GREEN | **새** `run-ignore_off` |
+| 예약 없이 provider 턴 0 | **새** `RunHasReservation` | `run-none`·**새** `run-budget_one` GREEN | **새** `run-skip_reserve` |
+| 일일 예산 초과 0 | **새** `WithinBudget` | 같음 | **새** `run-over_budget` |
+| cursor는 끝난 실행마다 한 칸 | **새** `CursorCountsFinishedRuns` | 같음 | **새** `run-advance_on_crash` |
+| 동시 writer 0·crash 뒤 고아 owner 0·보유 lease 종료 | 기존 `NoDualWriter`·`NoOrphanOwner`·`HeldEventuallyEnds` | 기존 정상 cfg | 기존 뮤턴트 |
+
+전/후(공통 `check_cfg`, 기존 25 cfg 결과 불변):
+
+| config | 수정 전 모델 | 수정 후 |
+| --- | --- | --- |
+| run-off.cfg | SANY 실패(`OffNoRun` 없음) | - / - |
+| run-budget_one.cfg | SANY 실패 | - / - |
+| run-ignore_off.cfg | SANY 실패 | OffNoRun / - |
+| run-skip_reserve.cfg | SANY 실패 | RunHasReservation / - |
+| run-over_budget.cfg | SANY 실패 | WithinBudget / - |
+| run-advance_on_crash.cfg | SANY 실패 | CursorCountsFinishedRuns / - |
+| run-none.cfg, run-live-none.cfg | SANY 실패(새 불변식 없음) | - / - |
+
+`non_atomic` 뮤턴트에서는 두 실행이 같은 cursor를 읽어 한 칸을 잃는다. 그 cfg는 새 불변식을 싣지 않아 기대집합이 바뀌지 않는다. 배포 inbox·due 경계는 산술·파일 계약이라 모델 대신 시험(`scripts/e2e/tests/test_continuous_runner.py`)이 맡는다.
 
 ## 코드 기준과 범위
 
