@@ -135,6 +135,8 @@ def run(args, config, spawn=subprocess.run):
         with open(out / "server.log", encoding="utf-8", errors="replace") as lines:
             counts = smoke.scan_log(lines, session=smoke.cell_driver.cell_session_name(cell["smoke_cell"]),
                                     channel_id=channel, launch_options=options)
+    # The excerpt holds every channel's server lines from the run window; only its counters are kept.
+    (out / "server.log").unlink(missing_ok=True)
     result = smoke._load_report(out / f"report.{cell['smoke_cell']}.json")  # noqa: SLF001
     def judged(log_counts):
         return smoke.classify(report=result, scenario_id=args.scenario, cell=cell["smoke_cell"], channel_id=channel,

@@ -44,7 +44,8 @@
 켜진 주기(회전이 null이면 핵심 묶음 주기)를 실어, 소비자가 `주기 + max_run_s + tick_grace_s`로 결과 만료를 판정한다.
 
 배포 lock이 잡혀 있으면 배포 스모크가 같은 셀을 쓰는 중일 수 있으므로 실행하지 않고 heartbeat만 갱신한다(`DEFERRED_DEPLOY`).
-서버를 관측할 수 없을 때도 같다(`HOST_UNAVAILABLE`).
+배포 중이 아닌데 서버를 관측할 수 없으면 실행도 heartbeat도 하지 않는다(`HOST_UNAVAILABLE`). tick 두 번 뒤 소비자가
+`HEARTBEAT_STALE`로 보여 주므로, 죽은 서버 위에 옛 결과가 그대로 남지 않는다.
 
 ## driver 계약
 
@@ -58,6 +59,7 @@
 - host는 서버가 Herdr로 받는 채널 목록에서 읽는다. 계획한 칸의 host와 다르면 `actual_occurrence_key`가 어긋나
   PASS가 되지 않는다.
 - 실행 중 서버 head·boot·binary가 바뀌면 `SERVER_CHANGED_DURING_RUN`이다.
+- 서버 로그 발췌는 판정 계수만 읽고 지운다. 그 구간에는 다른 채널의 로그도 들어 있기 때문이다.
 
 ## 관측 불가와 실패
 

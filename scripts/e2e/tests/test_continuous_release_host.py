@@ -135,6 +135,7 @@ class Driver(Fixture):
         self.assertEqual((report["head"], report["boot_id"], report["instance_id"]), (HEAD, "boot-1", "release@host"))
         self.assertEqual((len(harness), report["real_provider_contacted"]), (1, True))
         self.assertTrue(all(Path(path).is_file() for path in report["evidence_paths"]))
+        self.assertEqual(list((self.root / "state").rglob("server.log")), [])
         self.detail.return_value = {**DETAIL, "herdr": {"configured_channels": []}}
         self.assertEqual(self.drive()[0]["actual_occurrence_key"],
                          summary.occurrence_key({**planned, **CONTRACT, "host": "tmux"}, "default"))
@@ -216,16 +217,17 @@ class Supervisor(Fixture):
             release_host.tick(self.path, now=1050)
             self.assertEqual(self.requests(), [f"core-{HEAD[:12]}-10"])
 
-    def test_deploy_in_progress_or_unobservable_server_starts_no_run_but_stays_visible(self):
+    def test_deploy_in_progress_waits_visibly_and_an_unobservable_server_goes_stale(self):
         write_json(self.root / "state" / "status.json", {"heartbeat_at": 1})
+        self.detail.side_effect = OSError("refused")
         with mock.patch.object(runner, "tick") as ticked, open(self.root / "deploy.lock") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             self.assertEqual(release_host.tick(self.path, now=1000), {"status": "DEFERRED_DEPLOY"})
             fcntl.flock(lock, fcntl.LOCK_UN)
-            self.detail.side_effect = OSError("refused")
+            self.assertEqual(read_json(self.root / "state" / "status.json", {})["heartbeat_at"], 1000)
             self.assertEqual(release_host.tick(self.path, now=2000), {"status": "HOST_UNAVAILABLE"})
             self.assertEqual((ticked.call_count, self.requests()), (0, []))
-        self.assertEqual(read_json(self.root / "state" / "status.json", {})["heartbeat_at"], 2000)
+        self.assertEqual(read_json(self.root / "state" / "status.json", {})["heartbeat_at"], 1000)
 
     def test_supervised_tick_runs_the_core_bundle_under_the_observed_identity(self):
         seen = release_host.identity(self.config["release_host"], DETAIL)

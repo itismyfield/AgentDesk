@@ -68,15 +68,16 @@ def tick(config_path, now=None):
     if interval is not None and (type(interval) is not int or interval <= 0):
         raise ValueError("core_interval_s must be null or a positive integer")
     state, now = Path(runner.settings(config)["state_dir"]), time.time() if now is None else now
+    if deploying(host["deploy_lock"]):
+        # A deploy restarts the server and smokes the same cells; waiting for it is healthy.
+        if (state / "status.json").is_file():
+            publication.heartbeat(state, config, now)
+        return {"status": "DEFERRED_DEPLOY"}
     try:
         seen = identity(host, detail(host["base_url"]))
     except (OSError, ValueError, KeyError, TypeError):
-        seen = None
-    if seen is None or deploying(host["deploy_lock"]):
-        # Keep the supervisor visible; a run would only produce an unobservable or colliding result.
-        if (state / "status.json").is_file():
-            publication.heartbeat(state, config, now)
-        return {"status": "HOST_UNAVAILABLE" if seen is None else "DEFERRED_DEPLOY"}
+        # No heartbeat: an unobservable server must surface as a stale supervisor, not a kept result.
+        return {"status": "HOST_UNAVAILABLE"}
     last, waiting = read_json(state / "summary.json", {}), inbox.pending(state)[0]
     fresh = (last.get("head") == seen["head"] and last.get("suite") == "P"
              and now - (last.get("completed_at") or 0) < interval) if interval is not None else True
