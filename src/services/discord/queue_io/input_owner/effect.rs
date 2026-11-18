@@ -257,7 +257,7 @@ pub(crate) fn cold_claude(
 }
 
 mod claude;
-pub(in crate::services::discord) mod codex;
+pub(crate) mod codex;
 #[cfg(test)]
 #[path = "effect/herdr_fixture_tests.rs"]
 mod herdr;

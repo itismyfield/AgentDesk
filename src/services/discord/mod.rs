@@ -265,8 +265,6 @@ pub(crate) use queue_io::input_ingress::{
 };
 #[cfg(all(test, unix))]
 pub(crate) use queue_io::input_owner::claude_handoff::observe_busy as observe_owned_claude_busy_for_test;
-#[cfg(unix)]
-pub(crate) use queue_io::input_owner::effect::codex::created_codex_prompt;
 #[cfg(all(test, unix))]
 pub(crate) use queue_io::input_owner::origin::Execution as OwnerExecutionForTest;
 #[cfg(all(test, unix))]

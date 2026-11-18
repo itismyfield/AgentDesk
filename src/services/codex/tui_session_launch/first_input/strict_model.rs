@@ -1,6 +1,6 @@
 //! An explicit routine model starts Codex before the owner can submit its first prompt.
 use super::*;
-use crate::services::claude_tui::owner_input::{self, LaunchHook, Lineage};
+use crate::services::claude_tui::owner_input::{self, CodexPromptWriter, LaunchHook, Lineage};
 use crate::services::tui_input::routine_model as proof;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 
@@ -51,7 +51,7 @@ fn await_composer(
 }
 
 pub(super) fn submit(
-    hook: LaunchHook,
+    (hook, writer): (LaunchHook, CodexPromptWriter),
     context: &BindingContext,
     tail: &crate::services::codex_tui::tail_launch::ValidatedTail,
     cancel: Option<&std::sync::Arc<CancelToken>>,
@@ -73,8 +73,6 @@ pub(super) fn submit(
         "expected_session_id":selection.resume_session_id(),
         "expected_transcript":selection.rollout_path,"binding_watermark":null});
     proof::spawned("codex", session, &context.execution_nonce).map_err(start_error)?;
-    let submit =
-        crate::services::discord::created_codex_prompt(session, channel, prompt, cancel.cloned())
-            .map_err(start_error)?;
+    let submit = writer(session, channel, prompt, cancel.cloned()).map_err(start_error)?;
     hook(Lineage::Created, target, source, None, submit)
 }

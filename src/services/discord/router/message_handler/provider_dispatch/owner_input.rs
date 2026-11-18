@@ -1494,7 +1494,10 @@ fn take_owned(
     };
     if let Some(wanted) = wanted {
         let hook = created(registration, turn.prompt.into(), wanted, (front, reply));
-        return Some(Taken::Launch(scope::install_launch(hook)));
+        return Some(Taken::Launch(scope::install_launch_with_writer(
+            hook,
+            Some(effect::codex::created_codex_prompt),
+        )));
     }
     // An idle pane runs a new turn, so it holds the node's execution capacity until that AI turn
     // ends; a busy pane writes into the turn that already holds it.

@@ -155,7 +155,7 @@ done
         let mut end =
             crate::services::codex_tui::execution_end::producer::LaunchObservation::new(None, name);
         let at_commit = events.clone();
-        let _owner = owner_input::install_launch(Box::new(move |lineage, target, _, _, leaf| {
+        let hook: owner_input::LaunchHook = Box::new(move |lineage, target, _, _, leaf| {
             assert_eq!(lineage, Lineage::Created);
             let commit: owner_input::Commit = if default_model {
                 Arc::new(|_| Ok(()))
@@ -182,7 +182,11 @@ done
             .map_err(|error| format!("{error:?}"))?;
             hook_submitted.fetch_add(1, Ordering::SeqCst);
             Ok(())
-        }));
+        });
+        let _owner = owner_input::install_launch_with_writer(
+            hook,
+            Some(crate::services::discord::owner_effect_for_test::codex::created_codex_prompt),
+        );
         create(Create {
             tmux_session_name: name,
             working_dir: working,

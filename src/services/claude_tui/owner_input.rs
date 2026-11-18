@@ -383,13 +383,42 @@ impl From<String> for OwnedLaunch {
     }
 }
 #[cfg(unix)]
-thread_local! { static LAUNCH: RefCell<Option<LaunchHook>> = const { RefCell::new(None) }; }
+pub(crate) type CodexPromptWriter = fn(
+    &str,
+    u64,
+    &str,
+    Option<Arc<crate::services::provider::CancelToken>>,
+) -> Result<CreatedSubmit, String>;
+
+#[cfg(unix)]
+struct Launch {
+    hook: LaunchHook,
+    codex_writer: Option<CodexPromptWriter>,
+}
+
+#[cfg(unix)]
+thread_local! { static LAUNCH: RefCell<Option<Launch>> = const { RefCell::new(None) }; }
 
 /// The owner waiting for the first prompt of the execution this thread's launch creates; `None`
 /// leaves the launch's own first prompt as it is.
 #[cfg(unix)]
 pub(crate) fn launch_hook() -> Option<LaunchHook> {
-    LAUNCH.with(|hook| hook.borrow_mut().take())
+    LAUNCH.with(|slot| slot.borrow_mut().take().map(|launch| launch.hook))
+}
+
+/// A promptless Codex launch needs the physical writer supplied by its input owner.
+#[cfg(unix)]
+pub(crate) fn take_codex_launch() -> Result<(LaunchHook, CodexPromptWriter), String> {
+    LAUNCH.with(|slot| {
+        let launch = slot
+            .borrow_mut()
+            .take()
+            .ok_or("NotSent(\"routine_model_owner_missing\")")?;
+        let writer = launch
+            .codex_writer
+            .ok_or("NotSent(\"routine_model_writer_missing\")")?;
+        Ok((launch.hook, writer))
+    })
 }
 
 /// Refuses a write that is not the created execution's first prompt while an owner waits for it.
@@ -422,9 +451,17 @@ pub(crate) fn created_tmux_target(
 }
 
 /// Hands this thread's next created first prompt to `hook` until the guard drops.
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(crate) fn install_launch(hook: LaunchHook) -> LaunchGuard {
-    LAUNCH.with(|slot| *slot.borrow_mut() = Some(hook));
+    install_launch_with_writer(hook, None)
+}
+
+#[cfg(unix)]
+pub(crate) fn install_launch_with_writer(
+    hook: LaunchHook,
+    codex_writer: Option<CodexPromptWriter>,
+) -> LaunchGuard {
+    LAUNCH.with(|slot| *slot.borrow_mut() = Some(Launch { hook, codex_writer }));
     LaunchGuard
 }
 #[cfg(unix)]

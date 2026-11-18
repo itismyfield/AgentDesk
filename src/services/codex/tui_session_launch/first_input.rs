@@ -50,12 +50,13 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
         .and_then(CancelToken::turn_nonce);
     crate::services::tui_o::cutover::attach_codex_first(&prepared.context, prompt, turn_nonce);
     let command = format!("bash {}", shell_escape(&script_path));
-    let hook = crate::services::claude_tui::owner_input::launch_hook();
+    use crate::services::claude_tui::owner_input;
     let (tmux_result, deferred) = if strict_model::active() {
-        let hook = hook.ok_or("NotSent(\"routine_model_owner_missing\")")?;
+        let first = owner_input::take_codex_launch()?;
         let result = strict_model::spawn(&prepared, working_dir, &command)?;
-        (result, Some(hook))
+        (result, Some(first))
     } else {
+        let hook = owner_input::launch_hook();
         (
             spawn_with_prompt(hook, &prepared, working_dir, prompt, command)?,
             None,
@@ -99,9 +100,9 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
     end_observation.spawned(&prepared.context);
     drop(fence);
 
-    if let Some(hook) = deferred {
+    if let Some(first) = deferred {
         strict_model::submit(
-            hook,
+            first,
             &prepared.context,
             &validated_tail,
             cancel_token,

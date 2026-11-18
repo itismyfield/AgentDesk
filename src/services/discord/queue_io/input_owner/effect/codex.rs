@@ -255,9 +255,7 @@ pub(crate) fn created_codex_prompt(
 ) -> Result<owner_input::CreatedSubmit, String> {
     use crate::services::claude_tui::guarded_outcome::SubmissionError;
     use crate::services::claude_tui::input::{EffectPhase, PreparationHold};
-    let cmd = crate::services::platform::binary_resolver::runtime_command("tmux")
-        .map_err(|error| error.to_string())?;
-    let pane = busy_inject::Pane::with_program(session, cmd.get_program().into())?;
+    let pane = busy_inject::Pane::with_program(session, "tmux".into())?;
     let session = session.to_owned();
     let send = idle_codex(pane, session.clone(), channel);
     let prompt = prompt.to_owned();
