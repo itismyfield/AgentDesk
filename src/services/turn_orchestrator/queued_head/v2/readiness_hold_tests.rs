@@ -5,7 +5,7 @@ use serde_json::json;
 fn item(id: u64, author: u64) -> PendingQueueItem {
     serde_json::from_value(
         json!({"author_id":author,"message_id":id,"source_message_ids":[id],
-        "channel_id":7788001,"text":format!("body {id}"),"queued_generation":1}),
+        "channel_id":7788001,"text":format!("body {id}"),"queued_generation":1,"merge_consecutive":true}),
     )
     .unwrap()
 }
