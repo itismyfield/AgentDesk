@@ -341,6 +341,15 @@ test.describe("Agents tab on a touch phone", () => {
     await expect(form).toBeVisible();
     expect(await smallTargets(form)).toEqual([]);
     expect(await smallInputFonts(form)).toEqual([]);
+
+    await form.getByRole("button", { name: "취소" }).tap();
+    await drawer.getByRole("button", { name: "목록으로" }).tap();
+    await page.getByRole("button", { name: /에이전트 추가/ }).tap();
+    const wizard = page.getByRole("dialog", { name: "에이전트 설정 마법사" });
+    await expect(wizard).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    expect(await smallTargets(wizard)).toEqual([]);
+    expect(await smallInputFonts(wizard)).toEqual([]);
   });
 });
 
