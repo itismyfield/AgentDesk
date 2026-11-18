@@ -69,7 +69,7 @@ pub(super) fn submit_owned(
                 notice,
             )?;
             let submitted = written.ok_or_else(|| {
-                before_payload(&logical, "input cancelled before first key", false)
+                before_payload(&logical, "input cancelled before first key", None)
             })?;
             *ticket.lock().unwrap_or_else(|e| e.into_inner()) = Some(submitted);
             Ok(())
@@ -99,7 +99,7 @@ fn write(
         .as_ref()
         .map(|scope| scope.check_epoch())
         .transpose()
-        .map_err(|error| before_payload(logical, &error, false))?;
+        .map_err(|error| before_payload(logical, &error, None))?;
     let path = attached.transcript.as_path();
     let transcript = path.display().to_string();
     let length = || std::fs::metadata(path).map_or(0, |meta| meta.len());
@@ -199,7 +199,7 @@ fn write(
         scope.finish_start();
     }
     if let Some(detail) = denied {
-        return Err(before_payload(logical, &detail, false));
+        return Err(before_payload(logical, &detail, None));
     }
     let HerdrInputRun::Ran(run) = result? else {
         return Ok(None);
@@ -209,7 +209,7 @@ fn write(
         let (nonce, seen) = (attached.nonce.clone(), seen.into_inner());
         let probe = hold_resolve::watch(nonce, seen, move || target.capture_ansi(-80));
         crate::services::claude_tui::owner_input::record_preparation_watch(probe);
-        return Err(before_payload(logical, "herdr_input_hold_pending", false));
+        return Err(before_payload(logical, "herdr_input_hold_pending", None));
     }
     if let Some(error) = failed.into_inner() {
         return Err(error.into());
@@ -257,10 +257,12 @@ fn write(
                     } else { Screen::Unknown }
                 },
             ));
-            let unproven = matches!(
-                stopped,
-                InputRun::Refused(crate::services::claude_tui::host_input::InputRefusal::Unproven)
-            );
+            let unproven = match stopped {
+                InputRun::Refused(
+                    crate::services::claude_tui::host_input::InputRefusal::Unproven(end),
+                ) => Some(end),
+                _ => None,
+            };
             return Err(before_payload(
                 logical,
                 &format!("Claude composer held before first key: {stopped:?}"),
@@ -333,7 +335,11 @@ fn record_outcome(mut record: hold_record::HoldRecord, run: &InputRun) {
     }
 }
 
-fn before_payload(logical: &str, detail: &str, unproven: bool) -> SubmissionError {
+fn before_payload(
+    logical: &str,
+    detail: &str,
+    unproven: Option<crate::services::claude_tui::readiness::Unproven>,
+) -> SubmissionError {
     crate::services::claude_tui::owner_input::vetoed(detail);
     SubmissionError::Held(crate::services::claude_tui::input::PreparationHold {
         target: logical.into(),

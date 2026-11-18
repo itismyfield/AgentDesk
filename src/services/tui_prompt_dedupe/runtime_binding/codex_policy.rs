@@ -33,34 +33,32 @@ thread_local! {
 pub(super) fn disposition(authority: &TmuxSourceAuthority<'_>) -> SourcePolicyState {
     #[cfg(test)]
     DISPOSITIONS.with(|count| count.set(count.get() + 1));
-    match codex_verified::current_context(authority) {
+    let observed = codex_verified::CanonicalObservation::read(authority.session());
+    match codex_verified::observed_context(authority, &observed) {
         Ok(Some(context)) => {
             return SourcePolicyState::VerifiedCurrent(PinnedIncarnation(context));
         }
         Err(_) => return SourcePolicyState::VerifiedUnavailable,
         Ok(None) => {}
     }
-    let nonce = match binding_context::observe_spawn_nonce_marker(authority.session()) {
-        SpawnNonceMarker::Known(nonce) => nonce,
-        _ => {
-            // Missing launch files cannot erase an already durable canary pin.
-            return if authority.session() == crate::services::codex_tui::canary::CANARY_TMUX
-                && match binding_events::codex::context_for_nonce(
-                    crate::services::codex_tui::canary::CANARY_CHANNEL,
-                    authority.session(),
-                    None,
-                ) {
-                    Ok(Some(context)) => context.source_policy.as_deref() == Some("verified"),
-                    Err(_) => true,
-                    Ok(None) => false,
-                } {
-                SourcePolicyState::VerifiedUnavailable
-            } else {
-                SourcePolicyState::Legacy
-            };
-        }
-    };
-    if let Ok(context) = binding_context::execution_context("codex", &nonce) {
+    if observed.nonce().is_none() {
+        // Missing launch files cannot erase an already durable canary pin.
+        return if authority.session() == crate::services::codex_tui::canary::CANARY_TMUX
+            && match binding_events::codex::context_for_nonce(
+                crate::services::codex_tui::canary::CANARY_CHANNEL,
+                authority.session(),
+                None,
+            ) {
+                Ok(Some(context)) => context.source_policy.as_deref() == Some("verified"),
+                Err(_) => true,
+                Ok(None) => false,
+            } {
+            SourcePolicyState::VerifiedUnavailable
+        } else {
+            SourcePolicyState::Legacy
+        };
+    }
+    if let Some(context) = &observed.canonical {
         if context.source_policy.as_deref() != Some("verified") {
             return SourcePolicyState::Legacy;
         }
@@ -285,6 +283,10 @@ pub(crate) fn historical_execution(
 #[cfg(test)]
 #[path = "codex_policy/provenance_tests.rs"]
 mod provenance_tests;
+
+#[cfg(all(test, unix))]
+#[path = "codex_policy/observation_tests.rs"]
+mod observation_tests;
 
 pub(crate) fn codex_verified_o_source_allowed(
     channel: u64,
