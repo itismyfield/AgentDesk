@@ -160,8 +160,8 @@ owner가 (namespace, QueueIdentity, original members, queued_generation)에 붙�
 
 기존 색인에서 #8161 `ClaudeReadiness`/restart-idle, #8202 `HerdrBusyReobserve`, #8217 `ReadinessRequiet`를 확인했다. #8222는 실제로 composer 전에 Held가 되므로 **기존 `HerdrBusyReobserve.tla`에 `RHSpec`를 추가**한다. 기존 `Spec`/cfg/expected RED를 바꾸지 않는다. 새 모델 파일을 만들지 않는다. readiness의 source/launch/continuation 조건과 watcher deadline을 같은 refinement에서 연결하고 #8217의 대기 안 모델과 구분한다. [상태 차트 결과](../statecharts/input-single-path/restart-held-readiness.report.md)를 참조한다.
 
-- INVARIANT: `RHOneDisposition`(전달0..1 또는 거절0..1, 최종 사유 안내1), `RHNoRequeue`, `RHNoBusyDirect`, `RHRunningContract`, `RHProofNeedsEvidence`, `RHKeyNeedsRecheck`.
-- PROPERTY: `RHReachedKeep`(실제 Held/Keep 도달), `RHNoInfiniteKeep`, `RHEndExactlyOnce`; 유효 복원 cfg는 `RHHealthyDelivers`도 검사한다. 단순히 held notice를 최종 해결로 계산하지 않는다.
+- INVARIANT: `RHOneDisposition`(전달0..1 또는 거절0..1, 최종 사유 안내1), `RHNoRequeue`, `RHNoBusyDirect`, `RHRunningContract`, `RHProofNeedsEvidence`, `RHKeyNeedsRecheck`, `RHBoundedHold`(첫 typed hold의 due 고정), `RHStaleNoop`(옛 callback의 새 front 제거 0), `RHOneNoticeRecord`(enqueue-ack crash 뒤 record 1). 경합 상태 도달은 witness invariant의 예상 RED로 확인한다.
+- PROPERTY: `RHReachedKeep`(실제 Held/Keep 도달), `RHNoInfiniteKeep`, `RHEndExactlyOnce`; 유효 복원 cfg는 `RHHealthyDelivers`도 검사한다(driver 단계가 시계보다 먼저 도는 전제). 시계가 독립인 cfg는 `RHHealthyOrDeadline`(전달 또는 due 경합 패배만)으로 검사한다. 단순히 held notice를 최종 해결로 계산하지 않는다.
 - before는 restart→Busy Held→probe Unknown→Keep 반복의 liveness RED가 나와야 한다. fixed는 source/continuation 실패도 최종 사유 정산으로 GREEN. safety mutant를 예상 RED로 등록하더라도 유효 cfg의 실패를 정상화하지 않는다.
 - 공정성은 owner·watch read·Idle driver·clock·notice 처리가 계속 진행된다는 의미다. 외부 pane/tool turn 종료, 새 사용자 입력, 추가 SessionStart는 가정하지 않는다. 영구 mailbox/disk/PG 장애에서 실시간 정산·안내를 증명하지 않는다. 모델의 lifecycle action은 기존 취소 처분을 접은 것으로 실제 Cancel/clear의 안내 형식을 새로 규정하지 않는다.
 
