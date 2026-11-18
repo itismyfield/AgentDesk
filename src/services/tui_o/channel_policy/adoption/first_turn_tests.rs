@@ -1,40 +1,38 @@
 use super::*;
+use crate::services::agent_protocol::RuntimeHandoffKind::CodexTui;
 use crate::services::provider::CancelToken;
+use crate::services::tui_o::shadow::{SourceId, binding_reader::source_id_for};
+use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
+use crate::services::tui_prompt_dedupe::{self as dedupe, TuiRuntimeBinding};
 use crate::test_support::wait::{WAIT_CAP, await_within};
-// The fixture and its tests need an enabled store, which Windows refuses without a directory
-// fsync; the store's own Windows test holds that refusal.
+// Publication tests need an enabled store, which Windows refuses without a directory fsync;
+// the store's own Windows test holds that refusal.
 #[cfg(unix)]
 use {
-    crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
-    crate::services::tui_o::shadow::{SourceId, binding_reader::source_id_for},
     crate::services::tui_o::store::{InitOrigin, InitSource, OStore, StoreConfig},
     crate::services::tui_o::writer::activation::{
         self, ActivationFacts,
         test_hook::{self, Step},
     },
-    crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation,
-    crate::services::tui_prompt_dedupe::{self as dedupe, TuiRuntimeBinding},
     crate::test_support::wait::{join_within, recv_within},
     sha2::Digest,
     std::sync::mpsc,
 };
 
-#[cfg(unix)]
-struct Fixture {
+/// An admitted first turn with its incarnation, source and binding; it opens no store.
+struct Admitted {
     candidate: Candidate,
     token: CancelToken,
     admission: Option<FirstAdmission>,
     prepared: PreparedIncarnation,
     source: SourceId,
-    store: Arc<OStore>,
     channel: u64,
     // The global lock outlives all source operations; the env guard outlives that lock.
     dedupe_guard: Option<std::sync::MutexGuard<'static, ()>>,
     root: Option<crate::config::TestRuntimeRootGuard>,
 }
 
-#[cfg(unix)]
-impl Fixture {
+impl Admitted {
     fn new(channel: u64) -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
         let dedupe_guard = dedupe::TEST_LOCK
@@ -76,18 +74,12 @@ impl Fixture {
         candidate.attach_first_execution(&prepared.context, "hi", token.turn_nonce());
         dedupe::register_tmux_channel(&tmux, channel);
         dedupe::register_tmux_runtime_binding(&tmux, binding(&source));
-        let store = Arc::new(
-            OStore::open_if_enabled(&StoreConfig { enabled: true }, &runtime)
-                .unwrap()
-                .unwrap(),
-        );
         Self {
             candidate,
             token,
             admission: Some(admission),
             prepared,
             source,
-            store,
             channel,
             dedupe_guard: Some(dedupe_guard),
             root: Some(root),
@@ -99,13 +91,9 @@ impl Fixture {
         drop(guard);
         proof
     }
-    fn activate(&self) -> Result<(), String> {
-        activate(&self.store, self.channel, &self.candidate, &self.proof())
-    }
 }
 
-#[cfg(unix)]
-impl Drop for Fixture {
+impl Drop for Admitted {
     fn drop(&mut self) {
         drop(self.admission.take());
         self.candidate.invalidate_first(None, None);
@@ -115,7 +103,38 @@ impl Drop for Fixture {
     }
 }
 
+/// An admitted first turn plus the enabled store its publication writes to.
 #[cfg(unix)]
+struct Fixture {
+    admitted: Admitted,
+    store: Arc<OStore>,
+}
+
+#[cfg(unix)]
+impl std::ops::Deref for Fixture {
+    type Target = Admitted;
+    fn deref(&self) -> &Admitted {
+        &self.admitted
+    }
+}
+
+#[cfg(unix)]
+impl Fixture {
+    fn new(channel: u64) -> Self {
+        let admitted = Admitted::new(channel);
+        let runtime = crate::config::runtime_root().unwrap();
+        let store = Arc::new(
+            OStore::open_if_enabled(&StoreConfig { enabled: true }, &runtime)
+                .unwrap()
+                .unwrap(),
+        );
+        Self { admitted, store }
+    }
+    fn activate(&self) -> Result<(), String> {
+        activate(&self.store, self.channel, &self.candidate, &self.proof())
+    }
+}
+
 fn binding(source: &SourceId) -> TuiRuntimeBinding {
     TuiRuntimeBinding {
         runtime_kind: CodexTui,
@@ -154,10 +173,9 @@ fn activate(
     )
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn admission_holds_until_refusal_and_old_tokens_do_not_release_a_new_incarnation() {
-    let f = Fixture::new(8_165_101);
+    let f = Admitted::new(8_165_101);
     let mut waiting = Box::pin(
         f.candidate
             .wait_first(f.token.turn_nonce().map(first_nonce_id)),
