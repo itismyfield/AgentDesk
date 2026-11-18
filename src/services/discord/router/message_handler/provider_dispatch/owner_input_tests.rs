@@ -1818,7 +1818,10 @@ pub(in crate::services::discord) async fn claimed_owner_turn(
     let registry = Box::leak(Box::new(ChannelMailboxRegistry::default()));
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
     let dir = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
-    let path = dir.join(format!("claude/claimed-owner/{channel}.json"));
+    let path = dir.join(format!(
+        "claude/claimed-owner/{channel}-{}.json",
+        uuid::Uuid::new_v4()
+    ));
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     mailbox.v2_adopt(path, "input-owner".into()).await.unwrap();
     let original: PendingQueueItem = serde_json::from_value(json!({"author_id":7,

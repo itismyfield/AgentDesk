@@ -59,6 +59,8 @@ pub(in crate::services::discord) use self::provider_dispatch::{
 };
 #[cfg(all(test, unix))]
 pub(crate) use provider_dispatch::herdr_tests::exact_close_tests::OldTmux as PrivateOldTmuxForTest;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use provider_dispatch::routine_model::test_launch as routine_model_launch_for_tests;
 mod provider_isolation;
 mod tui_followup;
 mod turn_lifecycle;
@@ -387,6 +389,3 @@ pub(super) use turn_context::render_input_chunks;
 pub(in crate::services::discord) fn input_result_for_tests(at: (u64, String)) -> impl Drop {
     provider_dispatch::tests::set_result(at.0, at.1)
 }
-
-#[cfg(all(test, unix))]
-pub(in crate::services::discord) use provider_dispatch::routine_model::test_launch as routine_model_launch_for_tests;

@@ -182,6 +182,12 @@ pub(in crate::services::discord) async fn prepare(input: Input<'_>) -> Result<Pr
                 Relaunch::Relaunched => {}
                 other => return Err(refused(format!("same-session relaunch refused: {other:?}"))),
             }
+            if !crate::services::tmux_common::tmux_session_auth_profile_matches(
+                tmux,
+                &overlay.profile_id,
+            ) {
+                return Err(refused("account marker was not preserved"));
+            }
             if pane_liveness(tmux) != PaneLiveness::DeadOrAbsent {
                 return Err(refused("old execution survived relaunch"));
             }

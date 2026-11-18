@@ -20,6 +20,8 @@ use crate::services::{claude, claude_tui, codex, gemini, opencode, qwen};
 #[cfg(unix)]
 mod owner_input;
 #[cfg(unix)]
+pub(super) mod routine_model;
+#[cfg(unix)]
 pub(in crate::services::discord) mod start_failure;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use owner_input::hand_busy;
@@ -1132,6 +1134,3 @@ pub(super) mod tests {
         db.drop().await;
     }
 }
-
-#[cfg(unix)]
-pub(super) mod routine_model;

@@ -76,6 +76,32 @@ fn routine_model_requires_actual_argv_and_exact_execution_before_any_payload() {
             "sonnet"
         ));
     });
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(&wanted.tmux, "spawn_nonce"),
+        "execution-b",
+    )
+    .unwrap();
+    let keys = std::cell::Cell::new(0);
+    let mut wrong = wanted.clone();
+    wrong.model = "sonnet".into();
+    scope(wrong, || {
+        assert!(
+            crate::services::claude_tui::owner_input::payload(|| {
+                keys.set(keys.get() + 1);
+                Ok(())
+            })
+            .is_err()
+        );
+    });
+    assert_eq!(keys.get(), 0);
+    scope(wanted.clone(), || {
+        crate::services::claude_tui::owner_input::payload(|| {
+            keys.set(keys.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+    });
+    assert_eq!(keys.get(), 1);
     assert!(current().is_none());
 }
 

@@ -22,7 +22,9 @@ impl RoutineSessionController {
         .fetch_optional(&mut *tx)
         .await?;
         if found.is_none() {
-            return Err(anyhow!("routine run changed before session control"));
+            return Err(anyhow!(
+                "invalid routine run: changed before session control"
+            ));
         }
         Ok(Some(tx))
     }
@@ -48,7 +50,7 @@ impl RoutineSessionController {
         let turn: Option<String> = row.try_get("turn_id")?;
         if row.try_get::<String, _>("status")? != "running" || turn.is_none() {
             return Err(anyhow!(
-                "routine run {run} has no current started agent turn"
+                "invalid routine run {run} has no current started agent turn"
             ));
         }
         let result: Option<Value> = row.try_get("result_json")?;
@@ -65,18 +67,17 @@ impl RoutineSessionController {
             .filter(|v| v["turn_id"].as_str() == turn.as_deref());
         let read = |key: &str| string_field(result, key).or_else(|| string_field(attempt, key));
         let agent = read("agent_id")
-            .or(claimed.agent_id.as_deref())
-            .ok_or_else(|| anyhow!("routine run {run} has no claimed agent"))?;
-        // A pinned null inherits this claimed agent, never the PATCHed routine provider.
+            .or_else(|| string_field(spec.as_ref(), "agent_id"))
+            .ok_or_else(|| anyhow!("invalid routine run {run} has no claimed agent"))?;
         let provider = read("provider")
-            .map(str::to_string)
-            .or_else(|| string_field(spec.as_ref(), "provider").map(str::to_string));
+            .or_else(|| string_field(spec.as_ref(), "provider"))
+            .ok_or_else(|| anyhow!("invalid routine run {run}: applied provider is unproved"))?;
         let route = AgentProviderChannels::load(&self.pool, agent)
             .await?
             .route(
                 agent,
                 &ProviderChoice {
-                    provider,
+                    provider: Some(provider.to_string()),
                     model: None,
                 },
             )?;
@@ -87,11 +88,7 @@ impl RoutineSessionController {
         let key = read("session_key");
         let actual_thread = read("discord_thread_id")
             .and_then(parse_discord_channel_id)
-            .or_else(|| {
-                read("channel_id")
-                    .and_then(parse_discord_channel_id)
-                    .filter(|c| *c != parent)
-            });
+            .or_else(|| read("channel_id").and_then(parse_discord_channel_id));
         let thread = actual_thread.or_else(|| {
             claimed
                 .discord_thread_id
@@ -100,7 +97,7 @@ impl RoutineSessionController {
         });
         let session = if let Some(key) = key {
             let tmux = tmux_name_from_session_key(key)
-                .ok_or_else(|| anyhow!("run session key is not namespace-exact"))?;
+                .ok_or_else(|| anyhow!("invalid run session key is not namespace-exact"))?;
             self.load_owned_session(agent, &route.provider, key, tmux)
                 .await?
         } else if let Some(thread) = thread.filter(|c| *c != parent) {
@@ -108,17 +105,17 @@ impl RoutineSessionController {
                 .await?
         } else {
             return Err(anyhow!(
-                "routine run {run} has no isolated session evidence; refusing primary session control"
+                "invalid routine run {run} has no isolated session evidence; refusing primary session control"
             ));
         };
         let session =
-            session.ok_or_else(|| anyhow!("routine run {run} session is not provable"))?;
+            session.ok_or_else(|| anyhow!("invalid routine run {run} session is not provable"))?;
         let session_key = session
             .session_key
             .clone()
-            .ok_or_else(|| anyhow!("routine run {run} session has no exact key"))?;
+            .ok_or_else(|| anyhow!("invalid routine run {run} session has no exact key"))?;
         let tmux = tmux_name_from_session_key(&session_key)
-            .ok_or_else(|| anyhow!("routine run {run} session key is invalid"))?
+            .ok_or_else(|| anyhow!("invalid routine run {run} session key is invalid"))?
             .to_string();
         let channel = actual_thread
             .or_else(|| {
@@ -128,7 +125,7 @@ impl RoutineSessionController {
                     .and_then(parse_discord_channel_id)
             })
             .or(thread)
-            .ok_or_else(|| anyhow!("routine run {run} session channel is unproved"))?;
+            .ok_or_else(|| anyhow!("invalid routine run {run} session channel is unproved"))?;
         Ok((
             RoutineSessionTarget {
                 agent_id: agent.to_string(),

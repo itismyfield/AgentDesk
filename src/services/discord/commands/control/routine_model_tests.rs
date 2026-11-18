@@ -3,6 +3,40 @@ use crate::services::discord::commands::routine_model::{Input, prepare};
 use crate::services::routines::provider_choice::ProviderChoice;
 use crate::services::routines::{NewRoutine, RoutinePatch, RoutineStore};
 
+fn dispatch_refusal(fx: &Fixture, model: &str) -> String {
+    let runtime = tokio::runtime::Handle::current();
+    let (shared, channel, name, cwd, model) = (
+        fx.shared.clone(),
+        fx.channel,
+        fx.name.clone(),
+        fx.cwd.path().to_str().unwrap().to_string(),
+        model.to_string(),
+    );
+    let mut context = fx.context(channel);
+    context.session_key = Some(channel_key(&shared, &name));
+    std::thread::spawn(move || {
+        let _entered = runtime.enter();
+        crate::services::platform::with_provider_execution_context(context, || {
+            crate::services::discord::router::message_handler::routine_model_launch_for_tests(
+                Input {
+                    shared: &shared,
+                    provider: &ProviderKind::Claude,
+                    channel,
+                    tmux: &name,
+                    cwd: &cwd,
+                    session: Some(SESSION),
+                    model: Some(&model),
+                },
+                Arc::new(CancelToken::new()),
+                &cleared(&name),
+            )
+            .unwrap_err()
+        })
+    })
+    .join()
+    .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_persistent_model_patch_resumes_the_same_native_session_before_input_pg() {
     let test = concat!(
@@ -36,6 +70,13 @@ async fn a_persistent_model_patch_resumes_the_same_native_session_before_input_p
         Some(a.requirement),
     );
     assert!(argv.windows(2).any(|p| p == ["--model", "sonnet"]));
+    let observed: String = sqlx::query_scalar("SELECT model FROM sessions WHERE session_key=$1")
+        .bind(channel_key(&fx.shared, &fx.name))
+        .fetch_one(fx.shared.pg_pool.as_ref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(observed, "sonnet");
+
     fx.tmux.mark_present();
     fx.tmux.take_calls();
     let pool = fx.shared.pg_pool.as_ref().unwrap();
@@ -102,6 +143,16 @@ async fn a_persistent_model_patch_resumes_the_same_native_session_before_input_p
     let next = store.claim_run_now(&routine.id).await.unwrap().unwrap();
     let choice = store.run_provider_choice(&next.run_id).await.unwrap();
     let b = prepare(prep(choice.model.as_deref())).await.unwrap();
+    let before: String = sqlx::query_scalar("SELECT model FROM sessions WHERE session_key=$1")
+        .bind(channel_key(&fx.shared, &fx.name))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        before, "sonnet",
+        "preparing B cannot publish it before launch"
+    );
+
     assert!(
         called(&fx.tmux.take_calls(), "kill-session"),
         "model B must replace the old native execution before input"
@@ -117,9 +168,17 @@ async fn a_persistent_model_patch_resumes_the_same_native_session_before_input_p
     );
     assert!(argv.windows(2).any(|p| p == ["--resume", SESSION]));
     assert!(argv.windows(2).any(|p| p == ["--model", "opus"]));
+    let applied: String = sqlx::query_scalar("SELECT model FROM sessions WHERE session_key=$1")
+        .bind(channel_key(&fx.shared, &fx.name))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(applied, "opus");
+
     fx.tmux.mark_present();
+    fx.tmux.take_calls();
     let _busy = crate::services::discord::router::set_hosted_tui_promote_busy_for_tests(true);
-    let blocked = prepare(prep(Some("blocked-model"))).await.err().unwrap();
+    let blocked = dispatch_refusal(&fx, "blocked-model");
     assert!(blocked.contains("NotSent"), "{blocked}");
     assert!(!called(&fx.tmux.take_calls(), "kill-session"));
     drop(_busy);
@@ -185,10 +244,17 @@ async fn a_persistent_model_patch_resumes_the_same_native_session_before_input_p
         "channel-model"
     );
     assert_eq!(fx.shared.overrides.model_overrides.len(), 1);
+    let applied: String = sqlx::query_scalar("SELECT model FROM sessions WHERE session_key=$1")
+        .bind(channel_key(&fx.shared, &fx.name))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(applied, "channel-model");
+
     fx.tmux.mark_present();
     fx.tmux.take_calls();
     fx.tmux.fail_kills();
-    let failed = prepare(prep(Some("another-model"))).await.err().unwrap();
+    let failed = dispatch_refusal(&fx, "another-model");
     assert!(failed.contains("NotSent"), "{failed}");
     let calls = fx.tmux.take_calls();
     assert!(called(&calls, "kill-session"));
@@ -198,11 +264,45 @@ async fn a_persistent_model_patch_resumes_the_same_native_session_before_input_p
             && !called(&calls, "send-keys")
     );
     assert_eq!(fx.session_id().await.as_deref(), Some(SESSION));
+    Case::Stored(Stored::Future)
+        .seed(
+            pool,
+            &channel_key(&fx.shared, &fx.name),
+            &fx.name,
+            fx.channel.get(),
+        )
+        .await;
+    let refused = dispatch_refusal(&fx, "host-refused");
+    assert!(refused.contains("NotSent"), "{refused}");
+    assert!(!called(&fx.tmux.take_calls(), "kill-session"));
+    Case::Stored(Stored::Legacy)
+        .seed(
+            pool,
+            &channel_key(&fx.shared, &fx.name),
+            &fx.name,
+            fx.channel.get(),
+        )
+        .await;
+    let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        fx.cwd.path(),
+        SESSION,
+        Some(&fx._account.2),
+    )
+    .unwrap();
+    let bytes = std::fs::read(&transcript).unwrap();
+    std::fs::remove_file(&transcript).unwrap();
+    let unavailable = dispatch_refusal(&fx, "resume-unavailable");
+    assert!(
+        unavailable.contains("same-session resume unavailable"),
+        "{unavailable}"
+    );
+    assert!(!called(&fx.tmux.take_calls(), "kill-session"));
+    std::fs::write(&transcript, bytes).unwrap();
     let proof_path = crate::services::tui_input::routine_model::path(&fx.name);
     let _ = std::fs::remove_file(&proof_path);
     let nonce_path = tc::session_temp_path(&fx.name, "spawn_nonce");
     std::fs::remove_file(nonce_path).unwrap();
-    let missing = prepare(prep(Some("unproved"))).await.err().unwrap();
+    let missing = dispatch_refusal(&fx, "unproved");
     assert!(missing.contains("selector unproved"), "{missing}");
     assert!(!called(&fx.tmux.take_calls(), "kill-session"));
     tc::cleanup_session_temp_files(&fx.name);

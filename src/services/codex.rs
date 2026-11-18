@@ -27,6 +27,8 @@ mod herdr_guard_tests;
 #[cfg(unix)]
 pub(crate) mod herdr_turn;
 mod tui_session_launch;
+#[cfg(unix)]
+pub(crate) use tui_session_launch::codex_tui_home;
 use tui_session_launch::launch_policy::codex_tui_option_args;
 #[cfg(all(test, unix))]
 pub(crate) use tui_session_launch::launch_policy::isolated_herdr_path_for_test;
@@ -3043,6 +3045,3 @@ mod verified_admission_tests {
         });
     }
 }
-
-#[cfg(unix)]
-pub(crate) use tui_session_launch::codex_tui_home;

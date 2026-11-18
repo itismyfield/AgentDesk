@@ -18,6 +18,26 @@ fn execute_inner(
     sender: Sender<StreamMessage>,
     owner: Option<OwnerTurn>,
 ) -> Result<(), String> {
+    let (requirement, publish) = match prepare(&turn) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            if let Some(owner) = owner {
+                owner.defer_before_submit(&error);
+            }
+            return Err(error);
+        }
+    };
+    let turn = StreamingTurn {
+        model: Some(&requirement.model),
+        session_id: requirement.resume.as_deref(),
+        ..turn
+    };
+    proof::scope_with_publisher(requirement.clone(), Some(publish), || {
+        super::execute_inner(turn, start, sender, owner)
+    })
+}
+
+fn prepare(turn: &StreamingTurn<'_>) -> Result<(proof::Requirement, proof::Publisher), String> {
     let shared = turn
         .shared
         .ok_or("NotSent(\"routine_model_runtime_unavailable\")")?;
@@ -71,14 +91,7 @@ fn execute_inner(
         "routine model boundary admitted"
     );
     let requirement = prepared.requirement;
-    let turn = StreamingTurn {
-        model: Some(&requirement.model),
-        session_id: requirement.resume.as_deref(),
-        ..turn
-    };
-    proof::scope_with_publisher(requirement.clone(), Some(publish), || {
-        super::execute_inner(turn, start, sender, owner)
-    })
+    Ok((requirement, publish))
 }
 
 #[cfg(test)]
@@ -120,5 +133,16 @@ pub(in crate::services::discord) fn test_launch(
         crate::services::provider_hosting::ProviderSessionDriver::TuiHosting,
     ).unwrap();
     let (tx, _rx) = std::sync::mpsc::channel();
-    execute(turn, start, tx, None)
+    let (owner, mut answer) = tokio::runtime::Handle::current().block_on(
+        super::owner_input::tests::claimed_owner_turn(input.channel.get(), "hello"),
+    );
+    let result = execute(turn, start, tx, Some(owner));
+    assert!(
+        !matches!(
+            answer.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ),
+        "owner settlement was dropped: {result:?}"
+    );
+    result
 }
