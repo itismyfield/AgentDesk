@@ -373,7 +373,8 @@ fn thread_children_guarded_observation_locks_the_adoption_each_answer_is_read_fr
         .adopted(Adoption::Committed);
     boot.children
         .record(&boot, &init(43, Some(42)), Adoption::Committed);
-    for (channel, boot_discovered) in [(46, true), (47, false), (48, true)] {
+    boot.reserve_boot_children(&[(46, 42)]);
+    for (channel, boot_discovered) in [(47, false), (48, true)] {
         unresolved(&boot, channel, boot_discovered);
     }
     let _forced = test_override::force_boot(boot.clone());

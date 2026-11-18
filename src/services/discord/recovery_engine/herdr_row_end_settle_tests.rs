@@ -882,7 +882,7 @@ fn boot_posts_a_rowless_reason_intent_once_and_never_a_held_attempt_pg() {
             done.store(false, std::sync::atomic::Ordering::Release);
             crate::services::discord::runtime_bootstrap::complete_active_reconcile(&run.shared)
                 .await;
-            reason_receipted(&run.pool, &unposted).await;
+            posted(&run, 1).await;
             assert_eq!(
                 run.mock.delivered_texts(),
                 vec![reason.message().to_string()]
@@ -948,8 +948,7 @@ fn a_refusal_after_the_row_is_gone_sweeps_the_kept_body_with_one_reason_pg() {
             snapshot.candidate(CHANNEL).unwrap().release(CHANNEL);
             // What the refused host's end schedules, with no row left to end.
             refused_discard::resume(&run.shared, &run.provider, vec![CHANNEL]);
-            let id = refused_discard::identity(&run.provider, &run.row).unwrap();
-            reason_receipted(&run.pool, &id).await;
+            posted(&run, 1).await;
             assert!(debts(&run).is_empty(), "the kept body is gone");
             assert_reason_once(&run, &run.row).await;
             run.close().await;
@@ -1001,7 +1000,7 @@ fn a_recovery_relay_discards_a_refused_or_reasoned_body_with_one_reason_pg() {
                 assert_eq!(outcome, Outcome::AdoptionRefused);
                 let disposition = unrecoverable_relay_disposition(outcome, 0, 3, true);
                 assert_eq!(disposition, RowDisposition::Discard);
-                reason_receipted(&run.pool, &id).await;
+                posted(&run, 1).await;
             }
             assert_reason_once(&run, &run.row).await;
             // A refusal discards a body no one reasoned yet, and never sends it.
@@ -1009,8 +1008,7 @@ fn a_recovery_relay_discards_a_refused_or_reasoned_body_with_one_reason_pg() {
             snapshot.candidate(CHANNEL).unwrap().release(CHANNEL);
             assert_eq!(relay(other.clone()).await, Outcome::AdoptionRefused);
             assert_eq!(relay(run.row.clone()).await, Outcome::AdoptionRefused);
-            let other_id = refused_discard::identity(&run.provider, &other).unwrap();
-            reason_receipted(&run.pool, &other_id).await;
+            posted(&run, 2).await;
             let reason = crate::db::tui_output_disposition::Reason::AdoptionRefused.message();
             assert_eq!(run.mock.delivered_texts(), vec![reason.to_string(); 2]);
             run.close().await;
@@ -1018,15 +1016,15 @@ fn a_recovery_relay_discards_a_refused_or_reasoned_body_with_one_reason_pg() {
     );
 }
 
-/// Waits until the scheduled reason post for `id` holds its verified receipt.
-async fn reason_receipted(pool: &sqlx::PgPool, id: &crate::db::tui_output_disposition::Identity) {
-    let posted = async {
-        let record = crate::db::tui_output_disposition::record;
-        while !matches!(record(pool, id).await, Ok(Some((_, Some(_))))) {
+/// Waits until the mock received `n` posts. It answers with no nonce, so a reason's receipt
+/// stays unverified and its attempt held.
+async fn posted(run: &Run, n: usize) {
+    let seen = async {
+        while run.mock.delivered_texts().len() < n {
             tokio::task::yield_now().await;
         }
     };
-    crate::test_support::wait::await_within(posted, crate::test_support::wait::WAIT_CAP).await;
+    crate::test_support::wait::await_within(seen, crate::test_support::wait::WAIT_CAP).await;
 }
 
 fn routed_claude(channel: u64) -> Setup {
