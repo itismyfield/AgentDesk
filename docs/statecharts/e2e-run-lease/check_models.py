@@ -14,7 +14,10 @@ import tempfile
 RUN_MUTANTS = {"none", "ttl_takeover", "non_atomic", "parent_unlock", "missing_fd",
                "duplicate_child", "no_pending", "clear_on_idle", "send_after_release",
                "leak_fd", "foreign_cleanup", "crash_no_reclaim"}
+# Runner settings (off, one-run budget) and their mutants exist only for the run lease.
+RUNNER_CONFIGS = {"off", "ignore_off", "budget_one", "skip_reserve", "over_budget", "advance_on_crash"}
 INSTANCE_MUTANTS = RUN_MUTANTS - {"no_pending", "clear_on_idle", "send_after_release"}
+RUN_MUTANTS |= RUNNER_CONFIGS
 EXPECTED_CONFIGS = ({f"run-{mut}.cfg" for mut in RUN_MUTANTS}
                     | {f"instance-{mut}.cfg" for mut in INSTANCE_MUTANTS}
                     | {f"{kind}-live-{mut}.cfg" for kind in ("run", "instance")
