@@ -1,5 +1,7 @@
 //! Terminal rows through the writer poll: a stored interrupt barrier and a raw EOF closer.
 use super::*;
+use crate::services::tui_o::shadow::capture::Fingerprint;
+use crate::services::tui_o::writer::input_facts::native::terminal::{RawWitness, Tail};
 
 async fn stored_interrupt_barrier_replays(boot: bool) {
     use crate::db::auto_queue::test_support::TestPostgresDb;
@@ -78,8 +80,6 @@ async fn native_8148_terminal_stored_interrupt_barrier_replays_live_and_after_bo
 #[tokio::test]
 async fn native_8148_terminal_raw_eof_waits_for_the_execution_end_pg() {
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use crate::services::tui_o::shadow::capture::Fingerprint;
-    use crate::services::tui_o::writer::input_facts::native::terminal::{RawWitness, Tail};
     use std::io::Write;
     let runtime = crate::config::TestRuntimeRootGuard::new();
     let db = TestPostgresDb::create().await;
@@ -121,7 +121,7 @@ async fn native_8148_terminal_raw_eof_waits_for_the_execution_end_pg() {
     assert!(row().is_some());
     let (through, len) = (
         own.to_string().len() as u64 + 1,
-        file_len(&source.transcript),
+        std::fs::metadata(&source.transcript).unwrap().len(),
     );
     let nonce = source.target["execution_nonce"].as_str().unwrap();
     let (observed, current) = raw_observation(&f, &shared, (through, len), nonce);
@@ -158,31 +158,8 @@ async fn native_8148_terminal_raw_eof_waits_for_the_execution_end_pg() {
             .native_boot_record("native-fixture", &f.ticket)
             .unwrap();
         let proof = &mut record.settlement.outcome.as_mut().unwrap().extra["native_proof"];
-        let [through, len] = serde_json::from_value(proof["closer_range"].clone()).unwrap();
-        let (dev, ino) = (source.file[0], source.file[1]);
-        let modified = std::time::SystemTime::UNIX_EPOCH;
-        let fingerprint = Fingerprint {
-            len,
-            dev,
-            ino,
-            modified,
-            change: (0, 0),
-        };
-        let digest = "0".repeat(64);
-        let tail = Tail {
-            through,
-            prefix_hash: String::new(),
-            fingerprint,
-            digest,
-        };
-        let execution_nonce = execution.into();
-        let raw = RawWitness {
-            version: 1,
-            tail,
-            aborted: false,
-            execution_nonce,
-            registrations_fingerprint: String::new(),
-        };
+        let range = serde_json::from_value::<[u64; 2]>(proof["closer_range"].clone()).unwrap();
+        let raw = witness(&f, range.into(), execution, String::new());
         proof["raw"] = serde_json::to_value(raw).unwrap();
         let checked = validate(&record).map_err(|e| e == "native boot result proof mismatch");
         assert_eq!(
@@ -195,8 +172,35 @@ async fn native_8148_terminal_raw_eof_waits_for_the_execution_end_pg() {
     db.drop().await;
 }
 
-fn file_len(path: &std::path::Path) -> u64 {
-    std::fs::metadata(path).unwrap().len()
+/// A raw closer witness for `[through, len)` of the fixture transcript.
+fn witness(f: &Fixture, (through, len): (u64, u64), nonce: &str, stamp: String) -> RawWitness {
+    let source = f.ticket.source.as_ref().unwrap();
+    let (dev, ino, modified) = (
+        source.file[0],
+        source.file[1],
+        std::time::SystemTime::UNIX_EPOCH,
+    );
+    let fingerprint = Fingerprint {
+        len,
+        dev,
+        ino,
+        modified,
+        change: (0, 0),
+    };
+    let tail = Tail {
+        through,
+        prefix_hash: String::new(),
+        fingerprint,
+        digest: "0".repeat(64),
+    };
+    let (execution_nonce, registrations_fingerprint) = (nonce.into(), stamp);
+    RawWitness {
+        version: 1,
+        tail,
+        aborted: false,
+        execution_nonce,
+        registrations_fingerprint,
+    }
 }
 
 /// The O observation of a proven raw closer `[through, len)`, and the same observation once the
@@ -207,8 +211,6 @@ fn raw_observation(
     (through, len): (u64, u64),
     nonce: &str,
 ) -> (Observation, Observation) {
-    use crate::services::tui_o::shadow::capture::Fingerprint;
-    use crate::services::tui_o::writer::input_facts::native::terminal::{RawWitness, Tail};
     use crate::services::tui_o::writer::input_facts::native::{
         Projection, registrations_fingerprint,
     };
@@ -216,18 +218,17 @@ fn raw_observation(
     let source = f.ticket.source.as_ref().unwrap();
     let bytes = std::fs::read(&source.transcript).unwrap();
     let hash = hex::encode(sha2::Sha256::digest(&bytes[..through as usize]));
-    let (dev, ino) = (source.file[0], source.file[1]);
-    let path = source.transcript.clone();
+    let (session_id, path) = (source.session_id.clone(), source.transcript.clone());
     let id = SourceId {
-        session_id: source.session_id.clone(),
+        session_id,
         path,
-        dev,
-        ino,
+        dev: source.file[0],
+        ino: source.file[1],
     };
-    let channel_id = f.ticket.channel_id;
+    let (channel_id, provider) = (f.ticket.channel_id, ShadowProvider::Claude);
     let binding = SourceBinding {
         channel_id,
-        provider: ShadowProvider::Claude,
+        provider,
         source: id,
     };
     let seed = Projection::reopen(binding.clone(), through, &hash)
@@ -236,29 +237,7 @@ fn raw_observation(
         .unwrap();
     let registrations = f.history.native_classification_registrations().unwrap();
     let stamp = registrations_fingerprint(&registrations).unwrap();
-    let modified = std::time::SystemTime::UNIX_EPOCH;
-    let fingerprint = Fingerprint {
-        len,
-        dev,
-        ino,
-        modified,
-        change: (0, 0),
-    };
-    let tail = Tail {
-        through,
-        prefix_hash: hash,
-        fingerprint,
-        digest: "0".repeat(64),
-    };
-    let execution_nonce = nonce.into();
-    let registrations_fingerprint = stamp.clone();
-    let raw = RawWitness {
-        version: 1,
-        tail,
-        aborted: false,
-        execution_nonce,
-        registrations_fingerprint,
-    };
+    let raw = witness(f, (through, len), nonce, stamp.clone());
     let analysis = seed.analyze_closed(&registrations, Some(&raw)).unwrap();
     let observed = Observation {
         binding,
