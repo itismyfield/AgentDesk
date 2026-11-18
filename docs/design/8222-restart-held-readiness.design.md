@@ -44,6 +44,9 @@
 | E17 사람 draft·화면 불독해 | `composer.rs:104`–`:116`, `:156`–`:171` | 복원/전달 금지. 미전송 정산은 draft를 건드리지 않음. `screen=false` |
 | E18 복구 대기열 재생 | `src/services/discord/runtime_bootstrap/queued_recovery.rs:48`–`:52`; `input_owner/recovery.rs:15`–`:38` | 원본 deadline·refusal 복원 후 drive. body 재큐 0. `replayed` boolean |
 | E19 안내·영수증·중복 억제 | `v2/refused.rs:21`, `:44`; `input_owner/notice.rs:35`–`:99`; `src/services/discord/queue_io/retained_notice.rs:18`–`:57` | 사유·fingerprint·안내만 남기고 origin 실패 정산. `phase=refused,explained`, `notices/requeues/busyKeys=0..1` |
+| E20 probe의 읽기 가용성·교체 관측 | E02/E03/E08의 `busy/herdr.rs:233`, `:324`; `held_watch.rs:118`–`:127` | `visible/changed` boolean은 첫 Unknown 뒤 증거 가용/한 번 source 교체의 모델 projection. 새로운 운영 플래그 아님 |
+| E21 driver의 증명 소비 시점 | E10의 `readiness/mod.rs:355`, `:412`; `composer.rs:173`–`:193`; 1116h `claude_meta.rs:110` | `reserved/keyValid/fallbackIdle` boolean은 예약 여부/키 시점 유효성/running fallback의 Idle 생성 여부. `proof`도 boolean(E01) |
+| E22 거절 사유의 모델 범위 | E03/E12–E19의 실패 분류와 `v2/refused.rs:17`, `:47` | `reason`은 `none` 또는 fixture 조건명: `reply,lost-start,nonce,native,inode,prompt,tool,stop-context,pending,compact,continuation,missing,legacy,new-incarnation,old-reply,draft,pane-unreadable,race,replay,cancel,clear,terminate,stop`. 실제 제품 문자열은 §5.3으로 매핑하며 모델은 비어 있지 않은 사유와 안내 1개를 검사 |
 
 `readiness/…` 단축 경로는 `src/services/claude_tui/readiness/…`, `host_input/…`는 `src/services/claude_tui/host_input/…`, `input_owner/…`는 `src/services/discord/queue_io/input_owner/…`, `v2/…`는 `src/services/turn_orchestrator/queued_head/v2/…`, `owned_busy.rs`는 E05의 경로다. 모델에서 `done`은 전달 1회, `explained`는 미전송 정산+사유 안내 1회다. 중간 `sent`/실제 provider receipt 지연은 기존 모델이 맡고 새 refinement는 전달 완료를 `done` 한 단계로 접는다.
 

@@ -6,7 +6,7 @@ The index's existing `ClaudeReadiness` restart modes, `ReadinessRequiet` (#8217 
 
 ## State and rule mapping
 
-All value domains come from the design's §2 entry table (E01–E19). One original and one immutable source are enough to expose the loop; IDs 1/2 stand for exact/replaced nonce, native ID, inode, front and generation. `age=0..5` projects five 2-second reads of the proposed 10-second deadline. `pinned`, `complete`, `afterLaunch`, `fence`, `screen`, `gate` are the corresponding positive/negative predicates, not new runtime facts. The fixed cfg does not assume another user input, SessionStart, or native turn completion.
+All value domains come from the design's §2 entry table (E01–E22). One original and one immutable source are enough to expose the loop; IDs 1/2 stand for exact/replaced nonce, native ID, inode, front and generation. `age=0..5` projects five 2-second reads of the proposed 10-second deadline. `pinned`, `complete`, `afterLaunch`, `fence`, `screen`, `gate` are the corresponding positive/negative predicates, not new runtime facts. The fixed cfg does not assume another user input, SessionStart, or native turn completion.
 
 `RHEnter` → `RHBusyEntry` → `RHFirstKeep` makes proof loss, Busy Held, probe Unknown and an actual Keep explicit. `RHRestoreWake` restores only current reply evidence and delegates to `RHIdleReserve`/`RHWrite`. `RHRace` replaces the source after wake. `RHKeep`/`RHTick` spend a budget that is never renewed for that original; `RHExpire` is owner pre-key settlement and `RHNotice` the one durable reason notice. Lifecycle settles through its existing owner disposition. `RHReplay` preserves the original deadline and replays no body.
 
