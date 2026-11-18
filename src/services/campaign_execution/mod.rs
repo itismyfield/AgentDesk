@@ -1,3 +1,4 @@
+pub mod adk_adapter;
 pub mod adk_observe;
 pub mod adk_profile;
 pub mod adk_resources;
@@ -18,16 +19,18 @@ pub mod host_worker;
 mod lifecycle;
 pub mod main_integration;
 pub mod model;
-#[cfg(test)]
 pub mod pipeline_rules;
 pub mod profile;
 pub mod resource_admission;
 pub mod review_gate;
+pub mod runtime_profile;
 pub mod scheduler;
 pub mod stage_fsm;
 mod verification_commands;
+pub mod verification_driver;
 pub mod verification_run;
 pub mod verification_runner;
+pub mod verification_spec;
 pub mod view;
 
 mod decision_commands;

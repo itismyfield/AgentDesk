@@ -973,6 +973,7 @@ src/
 │   │   │   └── ci_tests.rs
 │   │   ├── commands/
 │   │   │   └── transaction_tests.rs
+│   │   ├── adk_adapter.rs
 │   │   ├── adk_observe.rs
 │   │   ├── adk_observe_tests.rs
 │   │   ├── adk_profile.rs
@@ -1020,15 +1021,20 @@ src/
 │   │   ├── resource_admission_tests.rs
 │   │   ├── review_gate.rs
 │   │   ├── review_gate_tests.rs
+│   │   ├── runtime_profile.rs
+│   │   ├── runtime_profile_tests.rs
 │   │   ├── scheduler.rs
 │   │   ├── scheduler_tests.rs
 │   │   ├── stage_fsm.rs
 │   │   ├── stage_fsm_tests.rs
 │   │   ├── verification_commands.rs
+│   │   ├── verification_driver.rs
+│   │   ├── verification_driver_tests.rs
 │   │   ├── verification_run.rs
 │   │   ├── verification_run_tests.rs
 │   │   ├── verification_runner.rs
 │   │   ├── verification_runner_tests.rs
+│   │   ├── verification_spec.rs
 │   │   ├── view.rs
 │   │   └── view_tests.rs
 │   ├── channel_roles/

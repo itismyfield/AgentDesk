@@ -6,7 +6,6 @@ pub mod evidence_gate;
 pub mod execution_pin;
 pub mod lifecycle;
 pub mod model;
-#[cfg(test)]
 pub mod pipeline_rules;
 pub mod profile;
 pub mod review_gate;

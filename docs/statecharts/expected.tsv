@@ -44,6 +44,10 @@ campaign-execution/CampaignProfilePinNoScope.cfg	CampaignProfilePin	NoFalseMatch
 campaign-execution/CampaignProfilePinNoSource.cfg	CampaignProfilePin	NoFalseMatch	-
 campaign-execution/CampaignProfilePinReady.cfg	CampaignProfilePin	SnapshotNeverOpensExecution	-
 campaign-execution/CampaignProfilePinReplaceOld.cfg	CampaignProfilePin	NoSilentPinReplacement	-
+campaign-execution/CampaignRuntime.cfg	CampaignProfilePin	-	-
+campaign-execution/CampaignRuntimeNoFence.cfg	CampaignProfilePin	NoForeignInvocation	-
+campaign-execution/CampaignRuntimeNoObservation.cfg	CampaignProfilePin	NoUnobservedInvocation	-
+campaign-execution/CampaignRuntimeStaleObservation.cfg	CampaignProfilePin	NoUnobservedInvocation	-
 campaign-execution/CampaignVerification.cfg	CampaignVerification	-	-
 campaign-execution/CampaignVerificationChart.cfg	CampaignVerification	-	-
 campaign-execution/CampaignVerificationClaimKept.cfg	CampaignVerification	ImmediateRevokes,NoStartWithoutAuthority	-

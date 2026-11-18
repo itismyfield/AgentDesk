@@ -69,3 +69,16 @@ export JAVA=/opt/homebrew/opt/openjdk/bin/java
 ```
 
 각 부정 대조는 `--config`에 해당 cfg를 지정한다. 정상 exit 0 / 부정 대조 exit 1이며 expected.tsv는 그 정확한 위반 집합을 등록한다. CI의 changed-model 선택은 모델을 import하는 기존 검증 FSM cfg를 추가로 선택하지 않는다.
+
+## M4 런타임 관측과 검증 호출
+
+`CampaignRuntime.cfg`는 역할 관측, 한 번의 host 재시작, 검증 어댑터 호출을 모델링한다. `NoForeignInvocation`은 지원 역할쌍 밖의 호출을 막고 `NoUnobservedInvocation`은 현재 부팅에서 관측되지 않은 역할의 호출을 막는다. 다음 부정 대조는 각 가드가 빠졌을 때의 모델 결과다.
+
+| cfg | 가드 변경 | 결과 |
+|---|---|---|
+| CampaignRuntime | provider와 현재 부팅의 관측 확인 | GREEN |
+| CampaignRuntimeNoFence | provider 확인 생략 | RED `NoForeignInvocation` |
+| CampaignRuntimeNoObservation | 관측 요구 생략 | RED `NoUnobservedInvocation` |
+| CampaignRuntimeStaleObservation | 재시작 뒤 boot 확인 생략 | RED `NoUnobservedInvocation` |
+
+두 역할의 검증 결과는 모델에서 하나의 값으로 추상화한다. Rust에서는 `RuntimeProfile::observe`가 각각의 역할을 직접 샘플링하고 provider marker, 세션, tool policy, 관측 시각을 검사한다. `VerificationDriver::step`은 현재 attempt의 세션과 pin을 재검증한 뒤 `AdkAdapter::materialize`로 입력을 준비한다. `HostWorker::start_phase`가 새로 잠근 상태의 최종 권위로 실제 phase를 개시한다. 재시작 뒤 새 phase 입력을 처리할 때 역할을 다시 관측하며, journal에 보관된 결과 전달은 이미 기록된 증거로 처리한다.
