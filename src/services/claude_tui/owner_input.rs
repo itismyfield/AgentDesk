@@ -449,7 +449,7 @@ impl Drop for LaunchGuard {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(crate) fn capture_scope<R>(
     provider: String,
     target: serde_json::Value,
