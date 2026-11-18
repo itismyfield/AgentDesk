@@ -186,7 +186,7 @@ Herdr에서 재시작 증명(`readiness/mod.rs:315-333`)이 서는 pane은 `ai-t
 재평가 창을 거쳐 끝난 입력은 재실행할 수 있는 보관이 아니라 **최종 미전송 거절**이다. "원문 보관 1회"는 이 정산에 한해 "본문 없는 최종 정산 기록 1회"다.
 
 - 정산 시 members를 모두 큐에서 빼고, 그 시도의 ticket 묶음을 지우고, 출처가 있으면 실행 실패 영수증을 빚진다(`queued_head/v2/refused.rs`의 `refuse_not_sent`).
-- 남기는 것은 unit과 시도의 identity, member별 identity와 원문 fingerprint, 미전송 사유, 안내 의도뿐이다(`v2_types.rs`의 `RefusedInput`). 본문·frame·ticket 문맥의 원본 사본은 남기지 않는다.
+- 남기는 것은 unit과 시도의 identity, member별 identity와 원문 fingerprint, 미전송 사유, 안내 의도뿐이다(`v2_types.rs`의 `RefusedInput`). 본문·frame·ticket 문맥의 원본 사본은 남기지 않는다. 거절 members와 원본이 일치하는 effort continuation도 같은 정산에서 비우고 cancelled operation 식별자는 유지한다. 다른 입력의 continuation과 아직 거절되지 않은 원본 사본은 그대로 둔다.
 - 기록은 재큐 대상이 아니다. 재시작 복구는 안내만 다시 시도한다(`input_owner/notice.rs`의 `owed`가 `refused_inputs`도 읽는다). outbox의 dedupe key가 반복을 한 줄로 묶는다.
 - 같은 출처의 재접수는 기록의 identity가 막고(`sources.rs`의 `fenced`, `v2.rs`의 `holds`), 같은 ticket의 재시도는 남은 receipt가 Duplicate로 답한다. catch-up은 이 출처를 다시 가져가지 않는다(`queued_recovery.rs`의 `v2_held_sources`).
 - 안내는 "준비됐다는 증거를 확보하지 못해 전달하지 않고 종료했다"는 사유를 쓴다(`retained_notice.rs`, reason code `refused.readiness_unproven`). 사람이 같은 내용을 새 메시지로 보내는 것만이 재실행이다.
