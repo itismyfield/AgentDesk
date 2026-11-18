@@ -1762,7 +1762,7 @@ test.describe("Dashboard smoke tests", () => {
     await expectNoHorizontalOverflow(page);
   });
 
-  test("routines: page lists jobs chronologically and the detail leads with thread and result", async ({ page }) => {
+  test("routines: page lists jobs chronologically and the detail leads with thread and result", async ({ page }, testInfo) => {
     await page.goto("/routines");
 
     await expect(page.getByTestId("routines-page")).toBeVisible({ timeout: 15000 });
@@ -1784,7 +1784,8 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("routine-row-routine-soon")).toContainText("오부장 프로필 점검");
 
     await page.getByTestId("routine-row-routine-late").click();
-    const drawer = page.getByRole("dialog");
+    // Wide screens show the detail beside the list; below 900px it opens as a sheet.
+    const drawer = testInfo.project.name === "desktop" ? page.getByTestId("routine-detail-pane") : page.getByRole("dialog");
     const threadLink = drawer.getByTestId("routine-thread-link");
     await expect(threadLink).toHaveAttribute("href", "https://discord.com/channels/1469870512812462284/1505086366654926908");
     await expect(drawer.getByTestId("routine-last-result")).toContainText("Profile probe failed");

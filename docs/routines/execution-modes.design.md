@@ -41,7 +41,7 @@
 
 #8114의 `design-1.md`와 후속 `design-boundary-delta-1.md` 계약을 전제로 한다. `InputIdentity`, `CurrentSource::{Ready,AwaitedClear,Unknown}`, `ObserverOwnership`, 공통 ClaudeBusy operation과 기존 adapter의 key-time guard를 재설계하지 않는다. #8115의 기본 실행 노드 지정 에이전트 새 스레드 세션 수리가 완료된다는 것을 thread 방식의 전제로 둔다. 설계·fixture 준비는 병행 가능하고 channel 활성 호출은 #8114 착지 후 통합한다.
 
-이미 main이 충족한 것은 다시 만들지 않는다: 동일 루틴 스레드 재사용(`agent_executor.rs:1010`), JS complete/skip/pause의 턴 0(`runtime.rs:675-785`), claim/in-flight 중복 방지(`store.rs:685-717,3168-3224`), owner original/ticket custody(`agent_executor/owner_input.rs:200-283`), process attempt 백엔드 복원(`agent_executor/execution.rs:19-29`), 실행 결과 API·대시보드 요약(`routes/routines/handlers.rs:178-199`, `RoutinesTimelineWidget.tsx:558-638`). 남은 것은 모드별 라우팅·게시 정책, channel Busy 참여/정산, 직접 command runner, 진단 가시성 및 호환 이전이다.
+이미 main이 충족한 것은 다시 만들지 않는다: 동일 루틴 스레드 재사용(`agent_executor.rs:1010`), JS complete/skip/pause의 턴 0(`runtime.rs:675-785`), claim/in-flight 중복 방지(`store.rs:685-717,3168-3224`), owner original/ticket custody(`agent_executor/owner_input.rs:200-283`), process attempt 백엔드 복원(`agent_executor/execution.rs:19-29`), 실행 결과 API·대시보드 요약(`routes/routines/handlers.rs:178-199`, `dashboard/src/components/dashboard/routineModel.ts`의 `summarizeRoutineRunResult`). 남은 것은 모드별 라우팅·게시 정책, channel Busy 참여/정산, 직접 command runner, 진단 가시성 및 호환 이전이다.
 
 ## 수용 계약과 턴 수의 의미
 
@@ -342,7 +342,7 @@ mode=script만 command runner를 허용하고 다른 셋은 quickjs agent 판단
 
 ### 화면
 
-현재 `RoutinesPageView.tsx:27-29`는 모든 row에 Discord thread가 있다고 설명하고 `RoutinesTimelineWidget.tsx:925-1027`는 결과 drawer를 갖는다. 새 화면은 mode badge/생성·편집 폼, thread/channel만 Discord 링크, headless/script는 이력 링크를 보여 준다. 새 책임은 `RoutineExecutionModeEditor.tsx`, `RoutineRunDiagnostics.tsx`, `RoutineScriptOutput.tsx`로 분리한다. giant widget은 badge/link/open glue만 변경한다.
+현재 `dashboard/src/components/RoutinesPageView.tsx`의 머리 설명 문구는 모든 row에 Discord thread가 있다고 설명하고 `dashboard/src/components/dashboard/RoutineDetail.tsx`의 `RoutineDetailBody`는 결과 drawer를 갖는다. 새 화면은 mode badge/생성·편집 폼, thread/channel만 Discord 링크, headless/script는 이력 링크를 보여 준다. 새 책임은 `RoutineExecutionModeEditor.tsx`, `RoutineRunDiagnostics.tsx`, `RoutineScriptOutput.tsx`로 분리한다. giant widget은 badge/link/open glue만 변경한다.
 
 run drawer는 ‘결과’와 ‘진단’ 탭으로 구분한다. 결과에는 최종 결과·공유 답 링크·exit 및 실패 요약, 진단에는 run id·script/runner·관측 개수·checkpoint/action·prompt 원문·attempt·Held 원인·receipt/O 정산·backend·Discord 배달 상태을 둔다. prompt는 접힌 상세이며 기존 UI가 갖는 데이터 접근 범위를 그대로 따른다. headless/script 실패·paused는 루틴 목록의 붉은 상태/알림 카드와 run deep link로 볼 수 있다. headless mode 설명에는 primary mailbox 공유·N 설정(기본3)·1..N 알림/N+1 별도 대응 턴을 명시한다. thread 알림은 기존 message_outbox로 링크+루틴명+안전 원인 한 줄을 게시한다. channel은 주입 뒤 기존 입력/owner 표시 그대로이며 주입 전 실패 임계/paused/stale만 non-turn primary 알림(thread 생성0)을 사용한다. headless 상세에는 streak N과 notice/command 전송·불확실 상태를 각각 표시한다. P2-H: ACK만 있으면 ‘게시됨 · 대응 턴 미확인’, 기존 owner 수용/합류 증거가 있어야 ‘턴 연결됨’이다. status=failed와 notice delivery 실패를 각각 남겨 알림이 실패했다고 본문을 재실행하지 않는다. 새 모드에서 진단 기록의 실패를 ‘Discord가 조용해서 정상’으로 감추지 않는다.
 
