@@ -14,7 +14,7 @@ fn dispatch_refusal(fx: &Fixture, model: &str) -> String {
     );
     let mut context = fx.context(channel);
     context.session_key = Some(channel_key(&shared, &name));
-    std::thread::spawn(move || {
+    let thread = std::thread::spawn(move || {
         let _entered = runtime.enter();
         crate::services::platform::with_provider_execution_context(context, || {
             crate::services::discord::router::message_handler::routine_model_launch_for_tests(
@@ -32,9 +32,8 @@ fn dispatch_refusal(fx: &Fixture, model: &str) -> String {
             )
             .unwrap_err()
         })
-    })
-    .join()
-    .unwrap()
+    });
+    crate::test_support::wait::join_within(thread, crate::test_support::wait::WAIT_CAP)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

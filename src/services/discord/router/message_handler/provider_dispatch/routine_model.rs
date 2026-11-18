@@ -86,7 +86,7 @@ fn prepare(turn: &StreamingTurn<'_>) -> Result<(proof::Requirement, proof::Publi
     });
     let prepared = tokio::runtime::Handle::current().block_on(policy::prepare(input))?;
     tracing::debug!(
-        channel = turn.channel_id,
+        channel_id = turn.channel_id,
         reused = prepared.reused,
         "routine model boundary admitted"
     );
