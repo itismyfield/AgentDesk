@@ -121,8 +121,7 @@ async fn observe<B: BindingEvents>(
                             && now.execution_nonce == run.binding.execution_nonce)
                         || (observed_turn.is_some() && epoch.turn == observed_turn));
                 if same && !bind && !turn {
-                    // Compaction keeps the execution owner, but its old closed prefix cannot
-                    // prove that the currently running answer has ended.
+                    // Compaction keeps the execution owner and fixes the checked source floor.
                     if let Some(next) = bound_source(now).filter(|next| **next != observed_source) {
                         if let Ok(meta) = std::fs::metadata(&next.path) {
                             if file_match(next, file_identity(&meta)) != FileMatch::Other {
@@ -143,7 +142,7 @@ async fn observe<B: BindingEvents>(
                     })
                     .await
                     {
-                        ended = pin.start() > observed_end;
+                        ended = pin.start() != 0 && pin.start() >= observed_end;
                     }
                 }
                 if bind || turn || session || ended {

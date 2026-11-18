@@ -396,3 +396,33 @@ async fn childheld_same_execution_source_rotation_waits_for_its_own_turn_end() {
     assert_eq!(*f.old.lock().unwrap(), ["current answer"]);
     handle.stop_and_join().await.unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn childheld_already_closed_answer_retries_after_legacy_delivery_without_new_bytes() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::childheld_already_closed_answer_retries_after_legacy_delivery_without_new_bytes"
+    )) {
+        return;
+    }
+    let f = Fixture::new(false);
+    let (_boot, candidate) = super::childheld::child_boot(&f);
+    let (probe, path) = running(&f);
+    append(&path, &closed());
+    let end = std::fs::metadata(&path).unwrap().len();
+    let handle = start_child(&f);
+    released(&f, &candidate).await;
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(5)).await;
+        spin().await;
+    }
+    assert_eq!(candidate.peek(), Adoption::Released);
+    legacy_once(&f).await;
+    probe.frontier.store(end, Ordering::SeqCst);
+    ready(&f).await;
+    append(&path, &row("after-delivery", "next O answer"));
+    polls(3).await;
+    assert_eq!(f.harness.port.posts(), ["next O answer"]);
+    assert_eq!(*f.old.lock().unwrap(), ["current answer"]);
+    handle.stop_and_join().await.unwrap();
+}
