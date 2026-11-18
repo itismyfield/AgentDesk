@@ -1,18 +1,25 @@
 use super::*;
-use crate::services::agent_protocol::RuntimeHandoffKind::CodexTui;
 use crate::services::provider::CancelToken;
-use crate::services::tui_o::shadow::{SourceId, binding_reader::source_id_for};
-use crate::services::tui_o::store::{InitOrigin, InitSource, OStore, StoreConfig};
-use crate::services::tui_o::writer::activation::{
-    self, ActivationFacts,
-    test_hook::{self, Step},
+use crate::test_support::wait::{WAIT_CAP, await_within};
+// The fixture and its tests need an enabled store, which Windows refuses without a directory
+// fsync; the store's own Windows test holds that refusal.
+#[cfg(unix)]
+use {
+    crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+    crate::services::tui_o::shadow::{SourceId, binding_reader::source_id_for},
+    crate::services::tui_o::store::{InitOrigin, InitSource, OStore, StoreConfig},
+    crate::services::tui_o::writer::activation::{
+        self, ActivationFacts,
+        test_hook::{self, Step},
+    },
+    crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation,
+    crate::services::tui_prompt_dedupe::{self as dedupe, TuiRuntimeBinding},
+    crate::test_support::wait::{join_within, recv_within},
+    sha2::Digest,
+    std::sync::mpsc,
 };
-use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
-use crate::services::tui_prompt_dedupe::{self as dedupe, TuiRuntimeBinding};
-use crate::test_support::wait::{WAIT_CAP, await_within, join_within, recv_within};
-use sha2::Digest;
-use std::sync::mpsc;
 
+#[cfg(unix)]
 struct Fixture {
     candidate: Candidate,
     token: CancelToken,
@@ -26,6 +33,7 @@ struct Fixture {
     root: Option<crate::config::TestRuntimeRootGuard>,
 }
 
+#[cfg(unix)]
 impl Fixture {
     fn new(channel: u64) -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
@@ -96,6 +104,7 @@ impl Fixture {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Fixture {
     fn drop(&mut self) {
         drop(self.admission.take());
@@ -106,6 +115,7 @@ impl Drop for Fixture {
     }
 }
 
+#[cfg(unix)]
 fn binding(source: &SourceId) -> TuiRuntimeBinding {
     TuiRuntimeBinding {
         runtime_kind: CodexTui,
@@ -117,6 +127,7 @@ fn binding(source: &SourceId) -> TuiRuntimeBinding {
         relay_last_offset: None,
     }
 }
+#[cfg(unix)]
 fn activate(
     store: &OStore,
     channel: u64,
@@ -143,6 +154,7 @@ fn activate(
     )
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn admission_holds_until_refusal_and_old_tokens_do_not_release_a_new_incarnation() {
     let f = Fixture::new(8_165_101);
@@ -204,6 +216,7 @@ async fn admission_holds_until_refusal_and_old_tokens_do_not_release_a_new_incar
     .await;
 }
 
+#[cfg(unix)]
 #[test]
 fn execution_and_prompt_proof_fail_closed_before_publication() {
     for change in ["prompt", "nonce", "mapping", "source-id", "incarnation"] {
@@ -246,6 +259,7 @@ fn execution_and_prompt_proof_fail_closed_before_publication() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn source_authority_spans_final_check_write_and_committed_for_each_publisher() {
     for publisher in ["rebind", "incarnation", "evict"] {
@@ -321,6 +335,7 @@ fn source_authority_spans_final_check_write_and_committed_for_each_publisher() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn restart_after_publication_restores_the_init_without_a_second_write() {
     for step in [Step::BeforeWrite, Step::AfterWrite] {
@@ -386,6 +401,7 @@ async fn admission_boundary_survives_a_later_host_baseline_and_unknown_bodies_ke
     .await;
 }
 
+#[cfg(unix)]
 #[test]
 fn a_fenced_queued_body_refuses_the_proved_first_init() {
     let f = Fixture::new(8_165_106);
