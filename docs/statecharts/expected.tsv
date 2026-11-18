@@ -44,6 +44,12 @@ campaign-execution/CampaignProfilePinNoScope.cfg	CampaignProfilePin	NoFalseMatch
 campaign-execution/CampaignProfilePinNoSource.cfg	CampaignProfilePin	NoFalseMatch	-
 campaign-execution/CampaignProfilePinReady.cfg	CampaignProfilePin	SnapshotNeverOpensExecution	-
 campaign-execution/CampaignProfilePinReplaceOld.cfg	CampaignProfilePin	NoSilentPinReplacement	-
+campaign-execution/CampaignReview.cfg	CampaignReview	-	-
+campaign-execution/CampaignReviewBefore.cfg	CampaignReview	NoBlockingLanding	-
+campaign-execution/CampaignReviewDeltaNewContract.cfg	CampaignReview	ChangedContractGetsFull	-
+campaign-execution/CampaignReviewEmptyVerdict.cfg	CampaignReview	NoEmptyVerdict	-
+campaign-execution/CampaignReviewNoScope.cfg	CampaignReview	ScopeBeforeLanding	-
+campaign-execution/CampaignReviewNoTimeout.cfg	CampaignReview	-	SentEventuallySettles
 campaign-execution/CampaignRuntime.cfg	CampaignProfilePin	-	-
 campaign-execution/CampaignRuntimeNoFence.cfg	CampaignProfilePin	NoForeignInvocation	-
 campaign-execution/CampaignRuntimeNoObservation.cfg	CampaignProfilePin	NoUnobservedInvocation	-

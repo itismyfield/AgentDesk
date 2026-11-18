@@ -111,6 +111,14 @@ impl HostWorker {
         self.gate.identity()
     }
 
+    pub(super) fn effect_entry(&self, action_id: &str) -> Option<&JournalEntry> {
+        self.gate.entry(action_id)
+    }
+
+    pub(super) fn serves(&self, binding: &AttemptBinding) -> bool {
+        self.campaign == binding.campaign_id && self.node == binding.node_id
+    }
+
     async fn locked<'a>(
         &self,
         pool: &'a PgPool,

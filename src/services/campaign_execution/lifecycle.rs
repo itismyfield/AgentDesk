@@ -200,6 +200,7 @@ fn begin_run(next: &mut CampaignState, expected_revision: u64, run_id: &str) -> 
         sessions: Vec::new(),
         verifications: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
+        reviews: BTreeMap::new(),
         fences: BTreeMap::new(),
         seals: BTreeMap::new(),
         environments: BTreeMap::new(),

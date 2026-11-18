@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::candidate_seal::CandidateSeal;
@@ -18,12 +19,28 @@ pub enum ReviewVerdict {
     Issues,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingSeverity {
+    P0,
+    P1,
+    P2,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Finding {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<FindingSeverity>,
     pub open: bool,
     pub resolution: Option<String>,
+}
+
+impl Finding {
+    fn blocks(&self) -> bool {
+        self.severity != Some(FindingSeverity::P2)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +69,16 @@ pub struct ReviewEvidence {
     pub webgpt: Vec<WebGptResult>,
 }
 
+impl ReviewEvidence {
+    pub fn verdict_by_severity(&self) -> ReviewVerdict {
+        if !self.findings.is_empty() && self.findings.iter().all(|finding| !finding.blocks()) {
+            ReviewVerdict::Clean
+        } else {
+            self.verdict
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActorIdentity {
     pub attempt_id: String,
@@ -68,8 +95,10 @@ pub struct ReviewRecord {
 
 impl ActorIdentity {
     // A renamed session or a fresh nonce on the same native conversation is still the same actor.
-    fn independent_of(&self, other: &ActorIdentity) -> bool {
-        self.attempt_id != other.attempt_id
+    pub fn independent_of(&self, other: &ActorIdentity) -> bool {
+        !self.native_conversation.trim().is_empty()
+            && !other.native_conversation.trim().is_empty()
+            && self.attempt_id != other.attempt_id
             && self.native_conversation != other.native_conversation
             && (&self.session.session, &self.session.incarnation)
                 != (&other.session.session, &other.session.incarnation)
@@ -123,7 +152,16 @@ pub fn evaluate_review(
     for record in &independent {
         let resolves = adopted.contains(&record.evidence_id);
         for finding in &record.review.findings {
-            if finding.open || resolves {
+            let can_replace = findings.get(&finding.id).is_none_or(|prior: &&Finding| {
+                !prior.blocks()
+                    || finding.blocks()
+                    || (!finding.open
+                        && finding
+                            .resolution
+                            .as_deref()
+                            .is_some_and(|reason| !reason.trim().is_empty()))
+            });
+            if (finding.open || resolves) && can_replace {
                 findings.insert(&finding.id, finding);
             }
         }
@@ -152,7 +190,7 @@ pub fn evaluate_review(
                 .map(|w| GateReason::WebGptMismatch(w.result_ref.clone())),
         );
     }
-    for finding in findings.values() {
+    for finding in findings.values().filter(|finding| finding.blocks()) {
         if finding.open {
             reasons.push(GateReason::OpenFinding(finding.id.clone()));
         } else if finding
@@ -163,7 +201,7 @@ pub fn evaluate_review(
             reasons.push(GateReason::UnresolvedFinding(finding.id.clone()));
         }
     }
-    if last.review.verdict == ReviewVerdict::Issues {
+    if last.review.verdict_by_severity() == ReviewVerdict::Issues {
         reasons.push(GateReason::ReviewIssues(last.evidence_id.clone()));
     }
     let verdict = reasons
@@ -180,6 +218,97 @@ pub fn evaluate_review(
         _ => Vec::new(),
     };
     StageAssessment::new(verdict, reasons, adopted)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewRequest {
+    pub range: ReviewRange,
+    pub pin_hash: Digest,
+    pub profile_hash: Digest,
+    pub implementer: ActorIdentity,
+    pub reviewer: ActorIdentity,
+    pub required_scopes: BTreeSet<String>,
+}
+
+impl ReviewRequest {
+    pub fn prompt(&self) -> String {
+        let shape = serde_json::json!({
+            "range": self.range,
+            "verdict": "clean",
+            "findings": [],
+            "unverified": [],
+            "inherited": [],
+            "webgpt": [],
+        });
+        format!(
+            "Review the pinned Git range in the JSON below. Return one JSON object using this shape and a final line VERDICT: CLEAN or VERDICT: ISSUES. No Markdown fences. Each finding has id, severity (p0, p1 or p2), open (boolean), and resolution (string or null). Preserve finding IDs on follow-up. Put unverified scope names in unverified. Leave webgpt empty. P0/P1 block; P2-only findings are CLEAN.\n{shape}"
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ReviewStatus {
+    Planned,
+    WaitingForSlot,
+    Sent {
+        receipt: String,
+        deadline: DateTime<Utc>,
+    },
+    Received {
+        record: Box<ReviewRecord>,
+    },
+    Failed {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewJob {
+    pub request: ReviewRequest,
+    pub ordered_at: u64,
+    pub status: ReviewStatus,
+    pub scope_tests: BTreeMap<String, ScopeTest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeTest {
+    pub scope: String,
+    pub head_sha: String,
+    pub selected: u32,
+    pub executed: u32,
+    pub failed: u32,
+    pub result_ref: String,
+    pub outcome: ScopeOutcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeOutcome {
+    Passed,
+    FeatureFailed,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "fact", rename_all = "snake_case")]
+pub enum ReviewFact {
+    Prepare(Box<ReviewRequest>),
+    WaitingForSlot,
+    Sent {
+        receipt: String,
+        deadline: DateTime<Utc>,
+    },
+    Reply {
+        receipt: String,
+        review: Box<ReviewEvidence>,
+    },
+    Failed {
+        reason: String,
+        uncertain: bool,
+    },
+    Scope(ScopeTest),
+    Finalize,
 }
 
 // Exact reference to one registered V; same SHA, newer IDs or another host/spec never match.

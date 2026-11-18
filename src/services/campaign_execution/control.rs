@@ -7,7 +7,7 @@ use super::{
     definition::{self, DefinitionInput, WORKFLOW_VERSION},
     lifecycle,
     model::*,
-    stage_fsm, verification_commands,
+    review_wait, stage_fsm, verification_commands,
 };
 
 type DecisionResult<T> = Result<T, Rejection>;
@@ -726,12 +726,17 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
         | Command::BindVerificationInput { .. }
         | Command::BindVerificationPlan { .. }
         | Command::RecordVerificationPhase { .. }
-        | Command::SettleVerification { .. } => {
+        | Command::SettleVerification { .. }
+        | Command::RecordReview { .. } => {
             let mut records = Vec::new();
             let at = envelope.observed_at;
-            let Some(event) =
-                verification_commands::decide(&mut next, &envelope.command, at, &mut records)?
-            else {
+            let result = match &envelope.command {
+                Command::RecordReview { action_id, fact } => {
+                    review_wait::decide(&mut next, action_id, fact, at, &mut records)
+                }
+                command => verification_commands::decide(&mut next, command, at, &mut records),
+            };
+            let Some(event) = result? else {
                 return Ok(unchanged(state));
             };
             let mut decision = finish(next, &envelope.idempotency_key, at, event);
@@ -782,7 +787,7 @@ fn action_mut<'a>(
     }
     Ok(action)
 }
-fn observe_action(
+pub(super) fn observe_action(
     state: &mut CampaignState,
     id: &str,
     binding: &AttemptBinding,

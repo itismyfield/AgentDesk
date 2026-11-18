@@ -79,6 +79,7 @@ fn model_preserves_nonempty_fence_ack_and_action_target_for_canonical_json_stora
         sessions: vec![],
         verifications: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
+        reviews: BTreeMap::new(),
         fences: BTreeMap::new(),
         seals: BTreeMap::new(),
         environments: BTreeMap::new(),

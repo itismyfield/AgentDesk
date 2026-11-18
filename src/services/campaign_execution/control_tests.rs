@@ -93,6 +93,7 @@ pub(crate) fn running() -> CampaignState {
         sessions: Vec::new(),
         verifications: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
+        reviews: BTreeMap::new(),
         fences: BTreeMap::new(),
         seals: BTreeMap::new(),
         environments: BTreeMap::new(),
