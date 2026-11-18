@@ -170,6 +170,7 @@ pub const PROMPT_READY_CANCELLED_ERROR: &str = "codex tui prompt readiness wait 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptReadinessKind {
     /// Promptless TUI startup before an explicit routine model's first input.
+    #[allow(dead_code)]
     FreshTurn,
     Followup,
     /// Bounded post-turn probe used by the Codex TUI launch frame to

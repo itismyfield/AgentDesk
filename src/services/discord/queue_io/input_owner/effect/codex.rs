@@ -280,7 +280,7 @@ pub(crate) fn created_codex_prompt(
                 phase: EffectPhase::BeforePayload,
                 detail,
                 modal: false,
-                unproven: false,
+                unproven: Default::default(),
             })),
             other => Err(format!("{other:?}").into()),
         }

@@ -35,13 +35,7 @@ pub(super) fn spawn(
         "execution_nonce":context.execution_nonce});
     proof::before_payload(&target)?;
     crate::services::tui_input::writer_lease::admits("tmux", session).map_err(start_error)?;
-    crate::services::platform::tmux::create_session_with_identity(
-        session,
-        Some(working_dir),
-        command,
-        &prepared.tmux_identity().map_err(start_error)?,
-    )
-    .map_err(start_error)
+    super::spawn_prepared(prepared, working_dir, command).map_err(start_error)
 }
 
 fn await_composer(

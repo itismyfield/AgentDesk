@@ -136,14 +136,22 @@ fn spawn_with_prompt(
             command,
         ),
         None => crate::services::claude_tui::owner_input::argv_payload(&prepared.context, || {
-            crate::services::platform::tmux::create_session_with_identity(
-                tmux,
-                Some(working_dir),
-                &command,
-                &prepared.tmux_identity()?,
-            )
+            spawn_prepared(prepared, working_dir, &command)
         }),
     }
+}
+
+fn spawn_prepared(
+    prepared: &PreparedIncarnation,
+    working_dir: &str,
+    command: &str,
+) -> Result<std::process::Output, String> {
+    crate::services::platform::tmux::create_session_with_identity(
+        &prepared.context.tmux_session,
+        Some(working_dir),
+        command,
+        &prepared.tmux_identity()?,
+    )
 }
 
 /// The argv create through the owner waiting on this thread: it reserves the frame on the prepared

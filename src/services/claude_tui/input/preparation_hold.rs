@@ -72,7 +72,7 @@ pub(crate) fn readiness_failure(session: &str, error: String) -> SubmissionError
             phase: EffectPhase::BeforePayload,
             detail: error,
             modal: true,
-            unproven: false,
+            unproven: Default::default(),
         });
     }
     if !is_prompt_ready_timeout_error(&error) {
