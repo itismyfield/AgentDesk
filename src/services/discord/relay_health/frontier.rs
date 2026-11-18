@@ -1,9 +1,7 @@
 use super::super::{SharedData, TmuxRelayCoord};
 #[cfg(all(test, unix))]
 pub(crate) use crate::services::engine_runtime::relay_state::FrontierPublication;
-pub(in crate::services::discord) use crate::services::engine_runtime::relay_state::{
-    FrontierResetState, RelayFrontierToken,
-};
+pub(in crate::services::discord) use crate::services::engine_runtime::relay_state::RelayFrontierToken;
 use poise::serenity_prelude::ChannelId;
 use std::sync::Arc;
 #[cfg(test)]
