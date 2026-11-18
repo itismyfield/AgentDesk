@@ -70,7 +70,7 @@ impl Fixture {
                 .is_some_and(dedupe::Persisted::published)
             );
         });
-        let history_path = root.path().join("runtime/cold-history.json");
+        let history_path = root.path().join("runtime/injected_frames.json");
         let history = Registry::at(history_path.clone());
         let mailbox = shared.mailbox(ChannelId::new(channel));
         mailbox
@@ -501,4 +501,219 @@ async fn native_8148_coldsource_cap_preserves_debt_and_reclaims_only_after_ack()
         })
         .await
         .unwrap();
+}
+
+async fn actual_o_recovery(boot: bool) {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::discord::{inflight, turn_finalizer as finalizer};
+    use crate::services::tui_o::{
+        ownership::OwnershipGate,
+        store::{Initialized, OStore, StoreConfig},
+        writer::{
+            deliver::ChannelWriter,
+            host::test_io::{Alarms, AnyLease, Posts},
+            pieces::UnitDeriver,
+            rotation::Sources,
+        },
+    };
+    let f = Fixture::new().await;
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    f.pin_and_submit().await;
+    f.transcript();
+    let episode = f.ticket.owning_episode.as_ref().unwrap();
+    let session = f.ticket.key["attempt"]["source"]["expected_session_id"]
+        .as_str()
+        .unwrap();
+    let mut row = inflight::InflightTurnState::new(
+        ProviderKind::Claude,
+        f.ticket.channel_id,
+        None,
+        7,
+        episode.user_message_id,
+        episode.user_message_id,
+        "cold request".into(),
+        Some(session.into()),
+        Some(f.logical.clone()),
+        Some(f.path.display().to_string()),
+        None,
+        0,
+    );
+    row.born_generation = 1;
+    row.turn_nonce = Some(episode.turn_nonce.clone());
+    row.hosted_execution_nonce = Some(f.nonce.clone());
+    inflight::save_inflight_state(&row).unwrap();
+    let mut shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    Arc::get_mut(&mut shared)
+        .unwrap()
+        .restart
+        .current_generation = if boot { 2 } else { 1 };
+    assert_eq!(shared.token_hash, f.shared.token_hash);
+    let channel = ChannelId::new(f.ticket.channel_id);
+    if boot {
+        finalizer::native_prepare::BootInputs::prepare(&f._root.path().join("runtime"), 2)
+            .unwrap()
+            .restore(&shared)
+            .await
+            .unwrap();
+    } else {
+        let actor = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
+            episode.turn_nonce.clone(),
+        )));
+        shared
+            .mailbox(channel)
+            .restore_active_turn(
+                actor.clone(),
+                poise::serenity_prelude::UserId::new(7),
+                episode.user_message_id.into(),
+            )
+            .await;
+        shared
+            .restart
+            .global_active
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let key = TurnKey::new(channel, episode.user_message_id, 1)
+            .with_episode_nonce(Some(&episode.turn_nonce));
+        shared.turn_finalizer.register_start(
+            key,
+            ProviderKind::Claude,
+            crate::services::discord::inflight::RelayOwnerKind::None,
+            &shared,
+        );
+        let (ack, rx) = oneshot::channel();
+        shared
+            .turn_finalizer
+            .tx
+            .send(FinalizeMsg::NativeRegister {
+                key,
+                actor: Some(actor),
+                history: f.history.clone(),
+                namespace: f.namespace.clone(),
+                ticket: Box::new(f.ticket.clone()),
+                shared: shared.clone(),
+                ack,
+            })
+            .unwrap();
+        let input =
+            crate::test_support::wait::await_within(rx, crate::test_support::wait::WAIT_CAP)
+                .await
+                .unwrap()
+                .unwrap();
+        let (ack, rx) = oneshot::channel();
+        shared
+            .turn_finalizer
+            .tx
+            .send(FinalizeMsg::NativeKeyed {
+                key,
+                input,
+                keyed: true,
+                history: f.history.clone(),
+                shared: shared.clone(),
+                ack,
+            })
+            .unwrap();
+        crate::test_support::wait::await_within(rx, crate::test_support::wait::WAIT_CAP)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    // This new runtime has no queue owner, producer or RuntimeReady; its normal O poll must recover.
+    assert!(
+        shared
+            .mailbox(channel)
+            .v2_request(|slot| Ok(slot.is_none()))
+            .await
+            .unwrap()
+    );
+    let root = f._root.path().join("cold-source-test-store");
+    std::fs::create_dir_all(&root).unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &root)
+        .unwrap()
+        .unwrap();
+    let era = store
+        .begin_fixture_era(&[f.ticket.channel_id], chrono::Utc::now(), |channel| {
+            Ok(Initialized {
+                channel,
+                sources: Vec::new(),
+                initial_anchor: 100,
+                build_digest: "cold-source-test".into(),
+                at: chrono::Utc::now(),
+                policy_parent: None,
+            })
+        })
+        .unwrap();
+    let gate = Arc::new(OwnershipGate::default());
+    gate.acquired();
+    let mut writer = ChannelWriter::new(
+        store
+            .open_channel(&era, f.ticket.channel_id)
+            .unwrap()
+            .unwrap(),
+        gate,
+        Arc::new(Posts::default()),
+        AnyLease,
+        Alarms::default(),
+    );
+    let bindings = Arc::new(ChannelBindingLog::new(
+        f.ticket.channel_id,
+        ShadowProvider::Claude,
+    ));
+    let mut sources = Sources::new(
+        f.ticket.channel_id,
+        ShadowProvider::Claude,
+        bindings.clone(),
+    )
+    .with_native_inputs(true);
+    let mut deriver = UnitDeriver::new(f.ticket.channel_id, ShadowProvider::Claude);
+    let mut owed = std::collections::VecDeque::new();
+    let port = super::super::port(f.ticket.channel_id, shared.clone(), bindings);
+    for _ in 0..4 {
+        sources.follow(&mut writer).unwrap();
+        sources
+            .capture(&mut writer, &mut deriver, &mut owed)
+            .unwrap();
+        sources.offer_native(&port).await;
+    }
+    let ticket = f
+        .history
+        .native_ticket(&f.namespace, &f.ticket.key)
+        .unwrap();
+    let saved = f.history.native_settlement(&f.namespace, &ticket).unwrap();
+    assert_eq!(
+        saved.outcome.as_ref().map(|o| &o.disposition),
+        Some(&Disposition::Executed)
+    );
+    assert!(saved.cleanup_complete);
+    assert!(
+        inflight::load_inflight_state_read_only(&ProviderKind::Claude, f.ticket.channel_id)
+            .is_none()
+    );
+    assert!(
+        shared
+            .mailbox(channel)
+            .snapshot()
+            .await
+            .cancel_token
+            .is_none()
+    );
+    assert!(
+        shared
+            .mailbox(channel)
+            .v2_request(move |slot| Ok(slot.as_ref().unwrap().source_binding(&ticket)?.is_none()))
+            .await
+            .unwrap()
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn native_8148_coldsource_actual_o_producerless_live_receipt_cleans_row_pg() {
+    actual_o_recovery(false).await;
+}
+
+#[tokio::test]
+async fn native_8148_coldsource_actual_o_empty_owner_boot_receipt_cleans_row_pg() {
+    actual_o_recovery(true).await;
 }
