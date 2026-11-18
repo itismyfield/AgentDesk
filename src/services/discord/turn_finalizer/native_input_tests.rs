@@ -5673,3 +5673,6 @@ async fn native_8148_receipt_live_and_boot_resume_without_manual_event_pg() {
         }
     }
 }
+
+#[path = "native_terminal_tests.rs"]
+mod terminal;

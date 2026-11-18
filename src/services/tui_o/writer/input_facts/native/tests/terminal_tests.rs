@@ -1,0 +1,162 @@
+//! Strict interrupt rows, and the barrier an earlier reading stored for one.
+use super::*;
+use crate::services::tui_input::human_frame::history::v2::native::Outcome;
+
+const MARK: &str = "[Request interrupted by user]";
+
+fn stop(content: Value) -> Value {
+    json!({"type":"user","uuid":"stop","sessionId":"parent","message":{"content":content}})
+}
+
+/// One keyed input with its durable receipt, followed by `closer`.
+fn owned(f: &Fixture, closer: Value) -> Ticket {
+    let ticket = f.register("ours", "our request");
+    f.append(&[user("own", "our request"), closer]);
+    f.receipt(&ticket, "own", "our request");
+    f.history.note_native_any_key("native-b1", &ticket).unwrap();
+    ticket
+}
+
+/// The authenticated prefix analysed with its last `live` rows appended as captured records.
+fn projected(f: &Fixture, live: usize) -> Analysis {
+    let bytes = std::fs::read(&f.binding.source.path).unwrap();
+    let ends = bytes.iter().enumerate().filter(|(_, b)| **b == b'\n');
+    let ends: Vec<_> = std::iter::once(0).chain(ends.map(|(i, _)| i + 1)).collect();
+    let rows = &ends[ends.len() - 1 - live..];
+    let hash = hex::encode(sha2::Sha256::digest(&bytes[..rows[0]]));
+    let (_, seed) = Projection::reopen(f.binding.clone(), rows[0] as u64, &hash).unwrap();
+    let mut seed = seed.unwrap();
+    for row in rows.windows(2) {
+        let line = bytes[row[0]..row[1] - 1].to_vec();
+        let (start, end) = (row[0] as u64, row[1] as u64);
+        let record = crate::services::tui_o::shadow::CapturedRecord { start, end, line };
+        seed.append(&record).unwrap();
+    }
+    let registrations = f.history.native_classification_registrations().unwrap();
+    seed.analyze(&registrations).unwrap()
+}
+
+/// The barrier the earlier Prompt reading stored for the strict interrupt row, after `edit`.
+fn stored(f: &Fixture, ticket: &Ticket, edit: fn(&mut Barrier)) -> (Barrier, String) {
+    let bytes = std::fs::read(&f.binding.source.path).unwrap();
+    let own = bytes.iter().position(|b| *b == b'\n').unwrap() as u64 + 1;
+    let registrations = f.history.native_classification_registrations().unwrap();
+    let stamp = registrations_fingerprint(&registrations).unwrap();
+    let mut barrier = Barrier {
+        namespace: "native-b1".into(),
+        ticket: ticket.clone(),
+        membership_range: [0, own],
+        membership_row: "own".into(),
+        foreign_range: [own, bytes.len() as u64],
+        foreign_row: "stop".into(),
+        foreign_hashes: frame_hashes(MARK),
+        through: bytes.len() as u64,
+        registrations_fingerprint: stamp.clone(),
+    };
+    edit(&mut barrier);
+    assert!(f.history.record_native_barrier(&barrier).unwrap());
+    (barrier, stamp)
+}
+
+fn outcome(evidence: &Evidence) -> Outcome {
+    let proof = serde_json::to_value(evidence).unwrap();
+    Outcome {
+        disposition: evidence.disposition.clone(),
+        range: Some([evidence.range.0, evidence.range.1]),
+        extra: serde_json::Map::from_iter([("native_proof".into(), proof)]),
+    }
+}
+
+#[test]
+fn native_8148_terminal_strict_interrupt_cancels_without_a_foreign_barrier() {
+    let cases = [
+        (json!([{"type":"text","text":MARK}]), true),
+        (json!(format!("it printed {MARK} again")), false),
+        (
+            json!([{"type":"text","text":MARK},{"type":"text","text":"and more"}]),
+            false,
+        ),
+    ];
+    for (content, strict) in cases {
+        for live in [0, 1] {
+            let f = Fixture::new();
+            owned(&f, stop(content.clone()));
+            let seen = projected(&f, live);
+            let cancelled = |e: &&Evidence| e.disposition == Disposition::Cancelled;
+            let found = (
+                seen.evidence.iter().filter(cancelled).count(),
+                seen.barriers.len(),
+            );
+            assert_eq!(
+                found,
+                (usize::from(strict), usize::from(!strict)),
+                "{content} {live}"
+            );
+        }
+    }
+}
+
+#[test]
+fn native_8148_terminal_stored_interrupt_barrier_is_superseded_only_exactly() {
+    let strict = || stop(json!([{"type":"text","text":MARK}]));
+    let others: [fn(&mut Barrier); 4] = [
+        |b| b.foreign_hashes = frame_hashes("human direct input"),
+        |b| b.foreign_row = "another".into(),
+        |b| b.foreign_range[0] += 1,
+        |b| b.membership_range[0] += 1,
+    ];
+    for other in others {
+        let f = Fixture::new();
+        let ticket = owned(&f, strict());
+        stored(&f, &ticket, other);
+        assert_eq!(projected(&f, 0), Analysis::default());
+    }
+    for control in [false, true] {
+        let f = Fixture::new();
+        let ticket = owned(&f, strict());
+        let (barrier, stamp) = stored(&f, &ticket, |_| {});
+        let evidence = projected(&f, 1).evidence.remove(0);
+        assert_eq!(evidence.disposition, Disposition::Cancelled);
+        let record = |evidence: &Evidence, stamp: &str| {
+            let history = &f.history;
+            history.record_native_outcome_at_stamp("native-b1", &ticket, &outcome(evidence), stamp)
+        };
+        let forgeries: [fn(&mut Evidence); 4] = [
+            |e| e.supersedes = None,
+            |e| e.supersedes.as_mut().unwrap().barrier_digest.push('0'),
+            |e| e.disposition = Disposition::Executed,
+            |e| e.closer_range = e.membership_range,
+        ];
+        for forge in forgeries {
+            let mut forged = evidence.clone();
+            forge(&mut forged);
+            let refused = record(&forged, &stamp).unwrap_err();
+            assert_eq!(refused, "native execution crosses foreign prompt barrier");
+        }
+        assert_eq!(
+            record(&evidence, "stale").unwrap_err(),
+            "native registrations superseded"
+        );
+        let mut expected = outcome(&evidence);
+        if control {
+            expected = Outcome {
+                disposition: Disposition::OperatorReleased,
+                range: None,
+                extra: Default::default(),
+            };
+            f.history
+                .record_native_outcome("native-b1", &ticket, &expected)
+                .unwrap();
+            assert_eq!(
+                record(&evidence, &stamp).unwrap_err(),
+                "native result already settled"
+            );
+        } else {
+            assert_eq!(record(&evidence, &stamp), Ok(true));
+        }
+        let saved = f.history.native_settlement("native-b1", &ticket).unwrap();
+        assert_eq!(saved.outcome, Some(expected));
+        assert_eq!(saved.barrier("native-b1").unwrap(), Some(barrier));
+        assert_eq!(projected(&f, 0), Analysis::default());
+    }
+}

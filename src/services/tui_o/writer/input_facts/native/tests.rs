@@ -1338,3 +1338,5 @@ fn native_8148_receipt_current_remove_keeps_the_next_dequeue_with_its_input() {
     assert_eq!(receipts[0].identity().1, &next);
     assert_eq!(receipts[0].record().1, "second");
 }
+
+mod terminal_tests;
