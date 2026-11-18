@@ -174,7 +174,7 @@ async function expectNoHorizontalOverflow(page: Page) {
 const rowIds = (page: Page) =>
   page.getByTestId("routines-timeline-list").locator("[data-row]").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-row")));
 
-test("routines: rows follow next run with repeat, next time, latest result and a read-only state switch", async ({ page }, testInfo) => {
+test("routines: rows follow next run with repeat, next time, latest result and an on/off switch", async ({ page }, testInfo) => {
   const calls = await openRoutines(page);
   expect(await rowIds(page)).toEqual(["rt-queue", "rt-memory", "rt-relay", "rt-deps", "rt-token", "rt-janitor", "rt-briefing"]);
 
@@ -189,9 +189,12 @@ test("routines: rows follow next run with repeat, next time, latest result and a
   await expect(page.getByTestId("routine-row-rt-janitor")).toContainText("수동 실행");
 
   await expect(page.getByTestId("routine-switch-rt-queue")).toBeChecked();
-  await expect(page.getByTestId("routine-switch-rt-queue")).toBeDisabled();
-  await expect(page.getByTestId("routine-switch-rt-briefing")).not.toBeChecked();
-  await expect(page.getByRole("switch", { name: "family-morning-briefing-obujang 자동 실행 꺼짐" })).toBeVisible();
+  await expect(page.getByTestId("routine-switch-rt-queue")).toBeEnabled();
+  await expect(page.getByRole("switch", { name: "family-morning-briefing-obujang 자동 실행", exact: true })).not.toBeChecked();
+  await expect(page.getByRole("switch", { name: "family-morning-briefing-obujang 자동 실행", exact: true })).toBeEnabled();
+  // Detached routines stay locked, with the reason in the switch's name.
+  await expect(page.getByRole("switch", { name: "local-worktree-gc 자동 실행 · 분리된 루틴이라 켜고 끌 수 없어요" })).toBeDisabled();
+  await expect(page.getByText("대시보드에서는 상태만 보여요")).toHaveCount(0);
   await expect(page.getByTestId("routines-active-count")).toHaveText("활성 5/7");
   await expect(page.getByTestId("routine-thread-rt-relay")).toHaveAttribute("href", "https://discord.com/channels/1469870512812462284/1505086366654926908");
 
@@ -211,8 +214,88 @@ test("routines: rows follow next run with repeat, next time, latest result and a
   await page.getByRole("radio", { name: "일시정지" }).click();
   await expect.poll(() => rowIds(page)).toEqual(["rt-briefing"]);
   expect(calls).toContain("GET /api/routines?status=paused");
-  // No mutation calls: the dashboard only reads routines.
+  // Browsing and filtering never write.
   expect(calls.filter((call) => call.includes("/api/routines") && !call.startsWith("GET "))).toEqual([]);
+  await expectNoHorizontalOverflow(page);
+});
+
+test("routines: the row switch pauses and resumes through the server, and reverts with a toast on failure", async ({ page }, testInfo) => {
+  const routines = ROUTINES.map((item) => ({ ...item }));
+  const writes: string[] = [];
+  let failResume = false;
+  await page.clock.install({ time: NOW });
+  await mockApi(page);
+  // Registered after mockApi, so these answer first.
+  await page.route(/\/api\/routines(?:\?.*)?$/, (route) => {
+    const status = new URL(route.request().url()).searchParams.get("status");
+    return route.fulfill({ json: { routines: status ? routines.filter((item) => item.status === status) : routines } });
+  });
+  await page.route(/\/api\/routines\/[^/]+\/(?:pause|resume)$/, async (route) => {
+    const request = route.request();
+    const [, , , id, action] = new URL(request.url()).pathname.split("/");
+    writes.push(`${request.method()} ${action} ${id} ${request.postData() ?? ""}`.trim());
+    if (action === "resume" && failResume) return route.fulfill({ status: 500, json: { error: "resume failed upstream" } });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const target = routines.find((item) => item.id === id)!;
+    target.status = action === "pause" ? "paused" : "enabled";
+    target.next_due_at = action === "pause" ? null : iso(2 * HOUR);
+    return route.fulfill({ json: { ok: true, routine_id: id, discord_log: null } });
+  });
+  await page.goto("/routines");
+  const toggle = page.getByTestId("routine-switch-rt-queue");
+  await expect(toggle).toBeChecked({ timeout: 15_000 });
+
+  // Open the detail first so it can be seen following the switch.
+  await page.getByTestId("routine-row-rt-queue").click();
+  const detail = testInfo.project.name === "desktop" ? page.getByTestId("routine-detail-pane") : page.getByRole("dialog");
+  await expect(detail.getByTestId("routine-detail")).toContainText("활성");
+  if (testInfo.project.name !== "desktop") {
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  }
+
+  // Pause: flips at once and locks only this switch while the request runs, no confirmation dialog.
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await expect(toggle).toBeDisabled();
+  await expect(page.getByTestId("routine-switch-rt-memory")).toBeEnabled();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await expect(toggle).toBeEnabled();
+  await expect(toggle).not.toBeChecked();
+  await expect(page.getByTestId("routine-row-rt-queue")).toContainText("일시정지");
+  await expect(page.getByTestId("routines-active-count")).toHaveText("활성 4/7");
+  if (testInfo.project.name === "desktop") {
+    await expect(detail.getByTestId("routine-detail")).toContainText("일시정지되어 앞으로의 자동 실행이 멈췄어요");
+  } else {
+    await page.getByTestId("routine-row-rt-queue").click();
+    await expect(page.getByRole("dialog").getByTestId("routine-detail")).toContainText("일시정지되어 앞으로의 자동 실행이 멈췄어요");
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  }
+
+  // Resume: back on, and the reloaded list carries the server's next run.
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+  await expect(toggle).toBeEnabled();
+  await expect(page.getByTestId("routine-row-rt-queue")).toContainText("오늘 14:00");
+  await expect(page.getByTestId("routines-active-count")).toHaveText("활성 5/7");
+
+  // A refused resume puts the switch back and says why.
+  await toggle.click();
+  await expect(toggle).toBeEnabled();
+  await expect(toggle).not.toBeChecked();
+  failResume = true;
+  await toggle.click();
+  await expect(page.getByText("queue-stability-check 다시 켜지 못했어요: resume failed upstream")).toBeVisible();
+  await expect(toggle).not.toBeChecked();
+  await expect(toggle).toBeEnabled();
+
+  expect(writes).toEqual([
+    "POST pause rt-queue",
+    "POST resume rt-queue {}",
+    "POST pause rt-queue",
+    "POST resume rt-queue {}",
+  ]);
   await expectNoHorizontalOverflow(page);
 });
 

@@ -4,6 +4,8 @@ import {
   getDiscordChannelInfo,
   getRoutineRuns,
   getRoutines,
+  pauseRoutine,
+  resumeRoutine,
   type RoutineRecord,
   type RoutineRunRecord,
 } from "../../api";
@@ -12,6 +14,7 @@ import { EmptyState } from "../../kit/free/empty-state-clean";
 import { SegmentedControl } from "../../kit/free/segmented-control-clean";
 import { Loading, Skeleton } from "../../kit/free/skeleton-clean";
 import { Drawer } from "../common/overlay/Drawer";
+import { useToast } from "../common/overlay/ToastProvider";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
 import { formatDiscordWebUrl, isDiscordSnowflake } from "../agent-manager/discord-routing";
 import type { TFunction } from "./model";
@@ -139,6 +142,10 @@ export function RoutinesTimelineWidget({ t, localeTag, language, compact = false
   const headingRef = useRef<HTMLHeadingElement>(null);
   const returnTarget = useRef<ReturnTarget>({ element: null, routineId: null });
   const pendingFocus = useRef<ReturnTarget | null>(null);
+  const toast = useToast();
+  const [pendingIds, setPendingIds] = useState<ReadonlySet<string>>(() => new Set());
+  // Optimistic statuses for in-flight pause/resume; a poll landing meanwhile must not flip the switch back.
+  const optimistic = useRef(new Map<string, string>());
 
   useEffect(() => {
     let mounted = true;
@@ -147,7 +154,8 @@ export function RoutinesTimelineWidget({ t, localeTag, language, compact = false
       setLoading(true);
       try {
         const next = await getRoutines(filter === "all" ? undefined : { status: filter });
-        if (mounted) setRoutines(next);
+        const pending = optimistic.current;
+        if (mounted) setRoutines(pending.size ? next.map((item) => (pending.has(item.id) ? { ...item, status: pending.get(item.id)! } : item)) : next);
       } catch {
         if (mounted) setError(true);
       } finally {
@@ -256,6 +264,55 @@ export function RoutinesTimelineWidget({ t, localeTag, language, compact = false
     setOverlap(null);
   };
 
+  const setStatus = (routineId: string, status: string) =>
+    setRoutines((list) => list.map((item) => (item.id === routineId ? { ...item, status } : item)));
+  const setPending = (routineId: string, pending: boolean) =>
+    setPendingIds((current) => {
+      const next = new Set(current);
+      if (pending) next.add(routineId);
+      else next.delete(routineId);
+      return next;
+    });
+  // Reversible, so no confirmation: flip at once, lock only this switch, revert and toast on failure,
+  // and reload the list on success so the row matches the server (next_due_at, status).
+  const toggleRoutine = async (routineId: string) => {
+    const routine = routines.find((item) => item.id === routineId);
+    if (!routine || pendingIds.has(routineId) || (routine.status !== "enabled" && routine.status !== "paused")) return;
+    const previous = routine.status;
+    const pausing = previous === "enabled";
+    const next = pausing ? "paused" : "enabled";
+    optimistic.current.set(routineId, next);
+    setStatus(routineId, next);
+    setPending(routineId, true);
+    try {
+      await (pausing ? pauseRoutine(routineId) : resumeRoutine(routineId));
+      optimistic.current.delete(routineId);
+      setReloadKey((value) => value + 1);
+    } catch (error) {
+      optimistic.current.delete(routineId);
+      setStatus(routineId, previous);
+      const reason = error instanceof Error ? error.message : String(error);
+      toast.show({
+        variant: "error",
+        message: pausing
+          ? t({
+              ko: `${routine.name} 일시정지하지 못했어요: ${reason}`,
+              en: `Could not pause ${routine.name}: ${reason}`,
+              ja: `${routine.name} を一時停止できませんでした: ${reason}`,
+              zh: `无法暂停 ${routine.name}：${reason}`,
+            })
+          : t({
+              ko: `${routine.name} 다시 켜지 못했어요: ${reason}`,
+              en: `Could not resume ${routine.name}: ${reason}`,
+              ja: `${routine.name} を再開できませんでした: ${reason}`,
+              zh: `无法恢复 ${routine.name}：${reason}`,
+            }),
+      });
+    } finally {
+      setPending(routineId, false);
+    }
+  };
+
   const rows: RoutineRowView[] = sortedRoutines.map((routine) => {
     const enabled = routine.status === "enabled";
     const due = parseTime(routine.next_due_at);
@@ -289,18 +346,17 @@ export function RoutinesTimelineWidget({ t, localeTag, language, compact = false
         ja: `${routine.name} の Discord スレッドを開く`,
         zh: `打开 ${routine.name} 的 Discord 帖子`,
       }),
-      switchLabel: t({
-        ko: `${routine.name} 자동 실행 ${enabled ? "켜짐" : "꺼짐"}`,
-        en: `${routine.name} automatic runs ${enabled ? "on" : "off"}`,
-        ja: `${routine.name} 自動実行 ${enabled ? "オン" : "オフ"}`,
-        zh: `${routine.name} 自动运行${enabled ? "开启" : "关闭"}`,
-      }),
-      switchHint: t({
-        ko: "대시보드에서는 상태만 보여요",
-        en: "The dashboard only shows this state",
-        ja: "ダッシュボードでは状態のみ表示します",
-        zh: "仪表板仅显示此状态",
-      }),
+      switchLabel:
+        routine.status === "detached"
+          ? t({
+              ko: `${routine.name} 자동 실행 · 분리된 루틴이라 켜고 끌 수 없어요`,
+              en: `${routine.name} automatic runs · detached routines cannot be switched`,
+              ja: `${routine.name} 自動実行 · 切り離されたルーチンは切り替えできません`,
+              zh: `${routine.name} 自动运行 · 已分离的例程无法切换`,
+            })
+          : t({ ko: `${routine.name} 자동 실행`, en: `${routine.name} automatic runs`, ja: `${routine.name} 自動実行`, zh: `${routine.name} 自动运行` }),
+      switchLocked: routine.status !== "enabled" && routine.status !== "paused",
+      switchPending: pendingIds.has(routine.id),
     };
   });
 
@@ -467,7 +523,13 @@ export function RoutinesTimelineWidget({ t, localeTag, language, compact = false
                   <Repeat2 size={13} aria-hidden />
                   {t({ ko: "반복 예약", en: "Recurring schedules", ja: "繰り返し予約", zh: "重复计划" })}
                 </h2>
-                <RoutineScheduleList ref={listRef} rows={rows} selectedId={split ? selectedRoutineId : null} onOpen={openRoutine} />
+                <RoutineScheduleList
+                  ref={listRef}
+                  rows={rows}
+                  selectedId={split ? selectedRoutineId : null}
+                  onOpen={openRoutine}
+                  onToggle={(routineId) => void toggleRoutine(routineId)}
+                />
               </section>
             </>
           )}

@@ -92,6 +92,31 @@ export async function getRoutineRuns(
   return data.runs;
 }
 
+export interface RoutineLifecycleResult {
+  ok: boolean;
+  routine_id: string;
+  discord_log?: unknown;
+}
+
+// The caller reverts its optimistic switch and shows its own toast, so the global API-error toast stays quiet.
+const ROUTINE_MUTATION = { method: "POST", maxRetries: 0, suppressErrorToast: true } as const;
+
+/** Stops automatic runs of an enabled routine (404 when it is not enabled). */
+export async function pauseRoutine(routineId: string): Promise<RoutineLifecycleResult> {
+  return request<RoutineLifecycleResult>(
+    `/api/routines/${encodeURIComponent(routineId)}/pause`,
+    ROUTINE_MUTATION,
+  );
+}
+
+/** Resumes a paused routine; an empty body keeps its stored next_due_at. */
+export async function resumeRoutine(routineId: string): Promise<RoutineLifecycleResult> {
+  return request<RoutineLifecycleResult>(
+    `/api/routines/${encodeURIComponent(routineId)}/resume`,
+    { ...ROUTINE_MUTATION, body: "{}" },
+  );
+}
+
 export async function getRoutineMetrics(filters?: {
   agentId?: string;
   since?: string;

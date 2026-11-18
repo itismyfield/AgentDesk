@@ -45,14 +45,18 @@ export interface RoutineRowView {
   enabled: boolean;
   label: string;
   threadLabel: string;
+  /** Accessible name of the on/off switch; carries the reason when it cannot change. */
   switchLabel: string;
-  switchHint: string;
+  /** Detached routines cannot be switched on or off. */
+  switchLocked: boolean;
+  /** A pause/resume request for this row is in flight. */
+  switchPending: boolean;
 }
 
 const focusRing = "focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--accent)]";
 
 /**
- * Kit schedule rows: name and repeat, next run, latest result, then the thread link and the on/off state.
+ * Kit schedule rows: name and repeat, next run, latest result, then the thread link and the on/off switch.
  * The list column is a container: at 640px or less the latest result and relative time hide (the detail has them),
  * at 440px or less name, repeat and next run stack.
  */
@@ -62,7 +66,9 @@ export const RoutineScheduleList = forwardRef<HTMLUListElement, {
   /** Home card: no switch, and the latest result stays visible under the name. */
   compact?: boolean;
   onOpen: (id: string, trigger: HTMLElement) => void;
-}>(function RoutineScheduleList({ rows, selectedId = null, compact = false, onOpen }, ref) {
+  /** Pause or resume the routine (page only). */
+  onToggle?: (id: string) => void;
+}>(function RoutineScheduleList({ rows, selectedId = null, compact = false, onOpen, onToggle }, ref) {
   const onKeyDown = (event: KeyboardEvent<HTMLUListElement>) => {
     const lower = event.key.toLowerCase();
     const down = event.key === "ArrowDown" || lower === "j";
@@ -166,14 +172,15 @@ export const RoutineScheduleList = forwardRef<HTMLUListElement, {
               <span className="w-11 shrink-0" aria-hidden />
             )}
             {compact ? null : (
-              <span className="flex h-11 w-11 shrink-0 items-center justify-center" title={row.switchHint}>
+              <span className="flex h-11 w-11 shrink-0 items-center justify-center">
                 <Switch
                   size="sm"
                   checked={row.enabled}
-                  readOnly
-                  disabled
+                  disabled={row.switchLocked || row.switchPending || !onToggle}
+                  aria-busy={row.switchPending || undefined}
                   aria-label={row.switchLabel}
                   data-testid={`routine-switch-${row.id}`}
+                  onChange={() => onToggle?.(row.id)}
                 />
               </span>
             )}
