@@ -746,3 +746,82 @@ pub(super) async fn handle_no_result_exits(
 
     NoResultExitOutcome::Fallthrough
 }
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) async fn exercise_fresh_idle_with_row(
+    shared: &Arc<SharedData>,
+    row: &InflightTurnState,
+    mut end: u64,
+) {
+    let tmux = row.tmux_session_name.clone().unwrap();
+    let output = row.output_path.clone().unwrap();
+    let channel = serenity::ChannelId::new(row.channel_id);
+    shared
+        .tmux_relay_coord(channel)
+        .confirmed_end_offset
+        .store(end, Ordering::Release);
+    let observed = crate::services::discord::inflight::o_seed_observation::Guard::new(
+        &ProviderKind::Claude,
+        row.channel_id,
+    );
+    let body = "watcher reached fresh idle".to_owned();
+    let outcome = handle_no_result_exits(
+        &NoResultExitContext {
+            http: &Arc::new(serenity::Http::new("")),
+            shared,
+            channel_id: channel,
+            watcher_provider: &ProviderKind::Claude,
+            tmux_session_name: &tmux,
+            output_path: &output,
+            paused: &Arc::default(),
+            pause_epoch: &Arc::default(),
+            cancel: &Arc::default(),
+            turn_delivered: &Arc::default(),
+            watcher_instance_id: 0,
+        },
+        NoResultExitLocals {
+            found_result: false,
+            epoch_snapshot: 0,
+            full_response: &body,
+            turn_is_external_input_for_session: false,
+            finish_mailbox_on_completion: false,
+            prompt_too_long_killed: false,
+            terminal_delivery_observed: false,
+            active_read_state: Some(ActiveReadState {
+                last_output_at: tokio::time::Instant::now(),
+                tmux_death_observed: false,
+                ready_for_input_failure_notice: None,
+                ready_for_input_stall_dispatch_id: None,
+                ready_for_input_stall_inflight_snapshot: None,
+                fresh_ready_for_input_idle: true,
+            }),
+        },
+        &mut NoResultExitState {
+            current_offset: &mut end,
+            all_data: &mut body.clone(),
+            all_data_start_offset: &mut 0,
+            all_data_fully_mirrored_to_session_relay: &mut false,
+            all_data_session_bound_relay_ack: &mut None,
+            all_data_first_forwarded_relay_sequence: &mut None,
+            last_relayed_offset: &mut None,
+            last_observed_generation_mtime_ns: &mut None,
+            placeholder_msg_id: &mut None,
+            placeholder_from_restored_inflight: &mut false,
+            status_panel_msg_id: &mut None,
+            last_edit_text: &mut String::new(),
+            monitor_auto_turn_claimed: &mut false,
+            monitor_auto_turn_finished: &mut false,
+            monitor_auto_turn_synthetic_msg_id: &mut None,
+            monitor_auto_turn_ledger_generation: &mut None,
+            tmux_death: &mut None,
+        },
+    )
+    .await;
+    assert_eq!(outcome, NoResultExitOutcome::ContinueWatcherLoop);
+    assert_eq!(
+        observed
+            .snapshot()
+            .event_count("fresh_idle_legacy_settlement"),
+        1
+    );
+}

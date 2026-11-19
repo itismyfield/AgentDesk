@@ -13,6 +13,7 @@ enum LateRow {
     /// The row is this committed range's turn (the live 07:30:32 shape).
     InRange,
     NativeHeld,
+    LegacyAfterNative,
     /// The row belongs to another tmux session than the committing watcher.
     OtherSession,
     /// The row starts after this committed range (a newer turn).
@@ -201,7 +202,11 @@ fn run(late_row: LateRow, snapshot_has_row: bool) -> (bool, Option<serenity::Mes
             } else {
                 (start + 1, start + 64)
             };
-            let inflight_before_relay = if snapshot_has_row {
+            let inflight_before_relay = if late_row == LateRow::LegacyAfterNative {
+                let mut previous = row.clone();
+                previous.user_msg_id -= 1;
+                Some(previous)
+            } else if snapshot_has_row {
                 late.clone()
             } else {
                 preflight
@@ -221,7 +226,8 @@ fn run(late_row: LateRow, snapshot_has_row: bool) -> (bool, Option<serenity::Mes
                 (
                     crate::services::discord::scheduled_turn::ChannelEffects::Allowed,
                     (
-                        snapshot_has_row && late_row == LateRow::NativeHeld,
+                        late_row == LateRow::LegacyAfterNative
+                            || (snapshot_has_row && late_row == LateRow::NativeHeld),
                         late_row == LateRow::NativeHeld,
                     ),
                 ),
@@ -285,6 +291,12 @@ fn native_held_row_survives_the_watcher_epilogue_with_its_mailbox() {
             Some(1_552_447_036_652_134_502)
         );
     }
+    let (row_on_disk, active, _) = run(LateRow::LegacyAfterNative, true);
+    assert!(
+        !row_on_disk,
+        "the late legacy row has its own cleanup authority"
+    );
+    assert_eq!(active, None);
 }
 
 #[test]

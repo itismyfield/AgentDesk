@@ -312,6 +312,16 @@ pub(in crate::services::discord) async fn finalize_dispatch(
                 },
             )
             .await;
+        #[cfg(test)]
+        if finalization.disposition
+            == crate::services::discord::streaming_finalizer::StreamingFinalDisposition::NonWorkDispatch
+        {
+            crate::services::discord::inflight::o_seed_observation::record_event(
+                watcher_provider,
+                channel_id.get(),
+                "watcher_dispatch_non_work",
+            );
+        }
         if !finalization.completed {
             tracing::debug!(
                 disposition = ?finalization.disposition,

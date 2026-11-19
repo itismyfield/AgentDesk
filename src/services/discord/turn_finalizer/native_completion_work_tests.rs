@@ -172,6 +172,16 @@ async fn native_8148_dispatch_custody_completes_work_once_from_native_body_pg() 
     );
 
     let evidence = proof(&f, Some(&native_sha), Disposition::Executed);
+    crate::services::discord::tmux::tmux_watcher::exercise_fresh_idle_with_row(
+        &shared,
+        &row,
+        evidence.range.1,
+    )
+    .await;
+    assert!(
+        inflight::load_inflight_state_read_only(&ProviderKind::Claude, row.channel_id).is_some(),
+        "fresh idle must preserve the native row before record"
+    );
     durable(&f, &evidence);
     record(&shared, &f.history, &evidence, key, Some(&row), None).await;
     let completed = state(&pool, WORK).await;
@@ -242,9 +252,19 @@ async fn native_8148_watcher_dispatch_fallback_preserves_work_types_pg() {
         let row = b2b_row(&f);
         let shared = b2b_shared(Some(pool.clone()));
         assert!(row.dispatch_id.is_none());
+        assert!(crate::services::discord::adk_session::parse_dispatch_id(&row.user_text).is_none());
+        let observed =
+            inflight::o_seed_observation::Guard::new(&ProviderKind::Claude, row.channel_id);
         assert_eq!(
             watcher(&shared, &row, held, "watcher fallback").await,
-            (Some(id.into()), true)
+            (Some(id.into()), true),
+            "{id}"
+        );
+        let progress = observed.snapshot();
+        assert_eq!(progress.event_count("watcher_dispatch_call"), 1);
+        assert_eq!(
+            progress.event_count("watcher_dispatch_non_work"),
+            usize::from(!completes)
         );
         let calls = api.take();
         assert!(

@@ -109,6 +109,7 @@ pub(crate) fn api_child(test: &str) -> bool {
     if std::env::var_os(CHILD).is_some() {
         return true;
     }
+    let test = test.strip_prefix("agentdesk::").unwrap_or(test);
     let exe = std::env::current_exe().expect("test binary");
     let output = std::process::Command::new(exe)
         .args(["--exact", test, "--nocapture"])

@@ -166,7 +166,8 @@ fn work_at_closer(has_id: bool) {
         let mut fence = crate::db::session_transcripts::begin_channel_clear_boundary_tx(&fx.pool).await.unwrap();
         sqlx::query("SELECT pg_advisory_xact_lock(4533, hashtext($1))")
             .bind(CHANNEL.to_string()).execute(&mut *fence).await.unwrap();
-        answer_with_body(&started.path, &started.session, &format!("HTTP session answered 1\n{sha}"));
+        let answer = format!("HTTP session answered 1\n{sha}");
+        answer_with_body(&started.path, &started.session, &answer);
         let closer_end = std::fs::metadata(&started.path).unwrap().len();
         append(&started.path, &[json!({"type":"system","subtype":PROBE,"sessionId":started.session})]);
         let probe_end = std::fs::metadata(&started.path).unwrap().len();
@@ -206,6 +207,9 @@ fn work_at_closer(has_id: bool) {
         assert_eq!(observed.snapshot().event_count("watcher_dispatch_call"), 0);
         assert!(!discord::terminal_delivery_custody::retains_channel(CHANNEL).unwrap());
         assert_eq!(stored_outcome(&fx.pool, turn_id).await.as_deref(), Some("delivered"));
+        let bodies: Vec<String> = sqlx::query_scalar("SELECT assistant_message FROM session_transcripts WHERE turn_id=$1")
+            .bind(turn_id).fetch_all(&fx.pool).await.unwrap();
+        assert_eq!(bodies.iter().map(|body| body.trim()).collect::<Vec<_>>(), [answer.as_str()]);
         let state = work_state(&fx.pool).await;
         let expected = if has_id { ("completed", Some("turn_bridge_explicit"), 1) } else { ("pending", None, 0) };
         assert_eq!((state.0.as_str(), state.1.as_deref(), state.2), expected);

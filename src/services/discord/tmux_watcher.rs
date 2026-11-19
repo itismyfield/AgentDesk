@@ -162,6 +162,8 @@ mod streaming_status_tick;
 
 #[path = "tmux_watcher/no_result_exits.rs"]
 mod no_result_exits;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use no_result_exits::exercise_fresh_idle_with_row;
 
 #[path = "tmux_watcher/terminal_abort_exits.rs"]
 mod terminal_abort_exits;
