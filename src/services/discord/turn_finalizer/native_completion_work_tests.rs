@@ -30,7 +30,7 @@ async fn state(pool: &sqlx::PgPool, id: &str) -> (String, Option<String>, Option
 }
 
 async fn work_fixture() -> (RuntimeDatabase, CompletionFixture) {
-    let runtime = TestRuntimeRootGuard::new();
+    let runtime = crate::config::TestRuntimeRootGuard::new();
     let live = RuntimeDatabase::after_env_lock();
     let fixture = CompletionFixture::in_runtime(runtime).await;
     live.install(&fixture.db.database_url);
