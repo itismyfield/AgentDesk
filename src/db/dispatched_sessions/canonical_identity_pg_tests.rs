@@ -3458,3 +3458,53 @@ async fn hosted_execution_cleanup_rechecks_candidate_snapshots_before_apply_pg()
     pool.close().await;
     db.drop().await;
 }
+
+/// A late active hook on a row whose execution was retired and disconnected leaves it ended; a turn
+/// start under a new nonce reopens it, and a row whose execution is pending again takes writes.
+#[tokio::test]
+async fn retired_row_refuses_late_active_hooks_until_a_new_turn_pg() {
+    let Some(db) = CanonicalIdentityPgDatabase::create().await else {
+        return;
+    };
+    let pool = db.migrate().await;
+    let (key, channel) = ("claude/retired-revival", "435");
+    let id = insert_session(&pool, key, "turn_active", None).await;
+    set_identity(&pool, key, channel).await;
+    let retired = record(&owner(channel), "n1", HostedState::Retired);
+    set_raw(&pool, key, Some(wire(&retired))).await;
+    let nonce = sqlx::query("UPDATE sessions SET active_turn_nonce = 't1' WHERE id = $1");
+    nonce.bind(id).execute(&pool).await.unwrap();
+    let ended = http_force::disconnect_retired_pg(&pool, id, &retired, None, true).await;
+    assert_eq!(ended, Ok(true));
+    for (status, turn, info, expected) in [
+        ("working", None, "heartbeat", "disconnected/"),
+        ("turn_active", Some("t1"), "same turn", "disconnected/"),
+        (
+            "turn_active",
+            Some("t2"),
+            "new turn",
+            "turn_active/new turn",
+        ),
+        ("working", None, "heartbeat", "turn_active/heartbeat"),
+        ("idle", None, "ended", "idle/ended"),
+        ("working", None, "pending", "turn_active/pending"),
+    ] {
+        if info == "pending" {
+            set_raw(&pool, key, Some(wire(&pending(&owner(channel), "n2")))).await;
+        }
+        let mut p = params(key, channel);
+        (p.status, p.turn_start_nonce, p.session_info) = (status, turn, Some(info));
+        upsert_hook_session_with_identity_pg(&pool, p, None)
+            .await
+            .unwrap();
+        let read = "SELECT status || '/' || COALESCE(session_info, '') FROM sessions WHERE id = $1";
+        let row: String = sqlx::query_scalar(read)
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row, expected, "{status} {turn:?} {info}");
+    }
+    pool.close().await;
+    db.drop().await;
+}

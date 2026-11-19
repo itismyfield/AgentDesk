@@ -468,6 +468,10 @@ fn a_live_claude_turn_whose_provider_died_ends_once_and_frees_its_channel_pg() {
     let fx = super::Fixture::new("liveend", None);
     let (result, messages, seen) = claude_live_turn(&fx, |live, token| {
         let before = handoff(&fx);
+        let active =
+            sqlx::query("UPDATE sessions SET status = 'turn_active' WHERE channel_id = $1");
+        let active = active.bind(super::CHANNEL.to_string()).execute(&fx.pool);
+        fx.rt.block_on(active).unwrap();
         let record = json!({"type": "assistant", "message": {"role": "assistant",
             "content": [{"type": "text", "text": "끊긴"}]}})
         .to_string();
@@ -532,6 +536,16 @@ fn a_live_claude_turn_whose_provider_died_ends_once_and_frees_its_channel_pg() {
         "no pane input after the prompt"
     );
     assert_eq!(fx.row(), Some(HostedState::Retired));
+    let status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE channel_id = $1");
+    let status = fx
+        .rt
+        .block_on(status.bind(super::CHANNEL.to_string()).fetch_one(&fx.pool));
+    assert_eq!(
+        status.unwrap(),
+        "disconnected",
+        "the ended row leaves the cancel selection"
+    );
 }
 
 /// A terminal the dying provider flushed is read after the end is seen, so it stays the reader's:
