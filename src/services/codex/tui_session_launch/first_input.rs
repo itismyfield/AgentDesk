@@ -1,5 +1,6 @@
 //! The first-input writer returns a ticket before rollout observation.
 use super::*;
+use crate::services::provider::ReadOutputResult;
 
 mod strict_model;
 

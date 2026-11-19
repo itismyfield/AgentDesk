@@ -61,9 +61,12 @@ pub(crate) fn retire_account(
         };
         if account_record(&account).is_some_and(|(id, _)| id == session) {
             let profile = auth.with_extension(TMUX_AUTH_PROFILE_TEMP_EXT);
-            if !other_proof && paired_profile(&profile) {
-                let removed = authority.remove_session_file(&profile);
-                result = result.and(removed);
+            if !other_proof
+                && paired_profile(&profile)
+                && let Err(error) = authority.remove_session_file(&profile)
+            {
+                result = result.and(Err(error));
+                continue;
             }
             let removed = authority.remove_session_file(auth);
             result = result.and(removed);
