@@ -194,44 +194,101 @@ async fn a_watcherless_herdr_pane_follows_on_its_own_bot_runtime_pg() {
     let f = Fixture::new(false).await;
     f.set(Some(OLD), false, Some(OLD)).await;
     f.host_on_herdr(&f.key, &f.shared.token_hash).await;
-    let mut first = shared_on(&f.pool).await;
-    let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
-    let own = Arc::get_mut(&mut first).unwrap();
-    (own.token_hash, own.health_registry) =
-        ("discord_1111111111111111".into(), Arc::downgrade(&registry));
-    let first_key = format!("claude/{}/lane-node:{}", first.token_hash, f.tmux);
-    sqlx::query(
-        "INSERT INTO sessions (session_key, provider, status, identity_kind,
-                               discord_token_hash, channel_id, claude_session_id)
-         VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3, $4)",
-    )
-    .bind(&first_key)
-    .bind(&first.token_hash)
-    .bind(f.channel.get().to_string())
-    .bind(OLD)
-    .execute(&f.pool)
-    .await
-    .unwrap();
+    let (first, _registry, first_key) = f.second_bot(Some(OLD)).await;
     f.host_on_herdr(&first_key, &first.token_hash).await;
-    first.settings.write().await.allowed_channel_ids = vec![f.channel.get() + 1];
-    f.shared.settings.write().await.allowed_channel_ids = vec![f.channel.get()];
-    registry.register("claude".to_string(), first.clone()).await;
-    registry
-        .register("claude".to_string(), f.shared.clone())
-        .await;
     dedupe::admit_herdr_execution(&f.tmux, "nonce-8261");
     f.rotate();
     settle_claude_session_rotations(&first).await;
     let new = Some(NEW.to_string());
     assert_eq!(f.stored().await, (new.clone(), new));
     assert_eq!(f.turn_start_session().await, Some(Some(NEW.to_string())));
-    let first_row: Option<String> =
-        sqlx::query_scalar("SELECT claude_session_id FROM sessions WHERE session_key = $1")
-            .bind(&first_key)
-            .fetch_one(&f.pool)
-            .await
-            .unwrap();
-    assert_eq!(first_row.as_deref(), Some(OLD));
+    assert_eq!(f.row(&first_key).await.as_deref(), Some(OLD));
+}
+
+// A watcher owner the idle bot's rehydrate restored for a channel another bot owns moves that
+// bot's cache, row and API value; the idle bot's own row for the channel keeps its selector.
+#[tokio::test]
+async fn a_restored_owner_on_the_idle_bot_follows_on_the_channel_bot_pg() {
+    if !api_child(&format!(
+        "{TEST}a_restored_owner_on_the_idle_bot_follows_on_the_channel_bot_pg"
+    )) {
+        return;
+    }
+    let f = Fixture::new(false).await;
+    f.set(Some(OLD), false, Some(OLD)).await;
+    let chosen = "0e5a7c11-0000-4000-8000-000000008261";
+    let (first, _registry, first_key) = f.second_bot(Some(chosen)).await;
+    let restore = first
+        .tmux_watchers
+        .restore_owner_channel_for_tmux_session(&f.tmux, f.channel);
+    assert!(restore);
+    f.rotate();
+    settle_claude_session_rotations(&first).await;
+    assert!(dedupe::claude_session_rotation_for_tmux(&f.tmux).is_none());
+    let new = Some(NEW.to_string());
+    assert_eq!(f.stored().await, (new.clone(), new));
+    assert_eq!(f.turn_start_session().await, Some(Some(NEW.to_string())));
+    assert_eq!(f.row(&first_key).await.as_deref(), Some(chosen));
+}
+
+// A hook that arrived before its transcript is adopted from the deferred queue; once the
+// watcherless Herdr pane's selector follows it, the next hook is adopted through the real
+// receiver and the selector follows that too, the first frozen transcript kept.
+#[test]
+fn a_queued_herdr_adoption_whose_selector_followed_lets_the_next_hook_adopt_pg() {
+    use super::super::herdr_source::tests::Herdr;
+    use crate::services::claude_tui::hook_server::observation_ingress::tests::uuid;
+    use crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions;
+    let herdr = &mut Herdr::new("selector-queue");
+    let a = uuid();
+    let nonce = herdr.launch(&a);
+    let a_path = herdr.ingress.transcript(&a);
+    let reader = herdr.pane(&nonce, |_| {});
+    let attached = herdr.launched(&nonce, &a, &reader);
+    assert!(matches!(
+        attached,
+        super::super::herdr_source::HerdrSourceAttach::Published { .. }
+    ));
+    let channel = herdr.channel.to_string();
+    let stored = |herdr: &Herdr| -> Option<String> {
+        let row =
+            sqlx::query_scalar("SELECT claude_session_id FROM sessions WHERE channel_id = $1");
+        herdr
+            .rt
+            .block_on(row.bind(&channel).fetch_one(&herdr.pool))
+            .unwrap()
+    };
+    let select = sqlx::query("UPDATE sessions SET claude_session_id = $2 WHERE channel_id = $1");
+    herdr
+        .rt
+        .block_on(select.bind(&channel).bind(&a).execute(&herdr.pool))
+        .unwrap();
+    let shared = herdr.rt.block_on(async {
+        let mut shared = shared_on(&herdr.pool).await;
+        Arc::get_mut(&mut shared).unwrap().token_hash = herdr.owner.discord_token_hash.clone();
+        shared
+    });
+    let bound = |herdr: &Herdr| herdr.bound().and_then(|binding| binding.session_id);
+
+    // B's hook comes before B's first line: it waits as a Pending, then the retry pass adopts it.
+    let b = uuid();
+    herdr.switch_hook(&a, &b, &uuid());
+    herdr.ingress.transcript(&b);
+    retry_deferred_claude_adoptions();
+    assert_eq!(bound(herdr).as_deref(), Some(b.as_str()));
+    herdr.rt.block_on(settle_claude_session_rotations(&shared));
+    assert_eq!(stored(herdr).as_deref(), Some(b.as_str()));
+
+    let c = uuid();
+    herdr.ingress.transcript(&c);
+    herdr.switch_hook(&a, &c, &uuid());
+    retry_deferred_claude_adoptions();
+    assert_eq!(bound(herdr).as_deref(), Some(c.as_str()));
+    herdr.rt.block_on(settle_claude_session_rotations(&shared));
+    assert_eq!(stored(herdr).as_deref(), Some(c.as_str()));
+    let kept = dedupe::claude_session_rotation_for_tmux(&herdr.owner.logical_key).unwrap();
+    assert_eq!(kept.left_session_ids, [a, b]);
+    assert_eq!(kept.old_output_path, a_path.display().to_string());
 }
 
 struct Fixture {
@@ -380,6 +437,50 @@ impl Fixture {
             new_session_id: to.to_string(),
             ..self.rotation()
         });
+    }
+
+    /// A second Claude bot that runs the idle loop and holds its own row for this channel, while
+    /// this fixture's runtime alone is allowed the channel.
+    async fn second_bot(
+        &self,
+        stored: Option<&str>,
+    ) -> (
+        Arc<SharedData>,
+        Arc<crate::services::discord::health::HealthRegistry>,
+        String,
+    ) {
+        let mut first = shared_on(&self.pool).await;
+        let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+        let own = Arc::get_mut(&mut first).unwrap();
+        (own.token_hash, own.health_registry) =
+            ("discord_1111111111111111".into(), Arc::downgrade(&registry));
+        let first_key = format!("claude/{}/lane-node:{}", first.token_hash, self.tmux);
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, identity_kind,
+                                   discord_token_hash, channel_id, claude_session_id)
+             VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3, $4)",
+        )
+        .bind(&first_key)
+        .bind(&first.token_hash)
+        .bind(self.channel.get().to_string())
+        .bind(stored)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        first.settings.write().await.allowed_channel_ids = vec![self.channel.get() + 1];
+        self.shared.settings.write().await.allowed_channel_ids = vec![self.channel.get()];
+        registry.register("claude".to_string(), first.clone()).await;
+        let own_runtime = self.shared.clone();
+        registry.register("claude".to_string(), own_runtime).await;
+        (first, registry, first_key)
+    }
+
+    async fn row(&self, session_key: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT claude_session_id FROM sessions WHERE session_key = $1")
+            .bind(session_key)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
     }
 
     fn rotate(&self) {
