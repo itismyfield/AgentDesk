@@ -791,6 +791,10 @@ if run_check contracts "Build token fairness tests (#5968)"; then
 "$PYTHON" -m unittest tests.test_build_token_fairness_5968
 fi
 
+if run_check cargo "Release Cargo witness cache parity"; then
+"$PYTHON" -m unittest tests.test_release_cargo_freshness
+fi
+
 if run_check cargo "Generate inventory docs (refresh workspace; gate source-of-truth invariants, #3036)"; then
 # Report giant raw growth and planning metadata warnings before refreshing snapshots.
 GFP_REFRESH_DOCS=1 "$PYTHON" scripts/giant_file_progress.py

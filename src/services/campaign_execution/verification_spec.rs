@@ -46,3 +46,13 @@ pub fn adk_verification_spec() -> VerificationSpec {
         },
     }
 }
+
+pub(super) fn landing_prepush_mode(
+    mode: crate::domain::campaign::landing::PreflightMode,
+) -> &'static [&'static str] {
+    use crate::domain::campaign::landing::PreflightMode;
+    match mode {
+        PreflightMode::Full => &[],
+        PreflightMode::PreTlc => &["--static-only"],
+    }
+}

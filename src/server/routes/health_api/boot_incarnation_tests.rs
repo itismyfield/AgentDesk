@@ -44,3 +44,106 @@ fn detail_health_carries_one_boot_incarnation_per_process() {
             }
         });
 }
+
+#[test]
+fn m9_unwitnessed_health_omits_running_binary_on_both_paths() {
+    if super::super::db_deadline_tests::resource_regression_tests::rerun_alone(concat!(
+        module_path!(),
+        "::m9_unwitnessed_health_omits_running_binary_on_both_paths"
+    )) {
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for registry in [Some(Arc::new(HealthRegistry::new())), None] {
+                let detail = health_body("/health/detail", registry.clone()).await;
+                let public = health_body("/health", registry).await;
+                assert!(public.get("running_binary").is_none());
+                assert!(detail.get("running_binary").is_none());
+            }
+        });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn m9_running_health_reports_a_verified_release_pair() {
+    use std::{env, fs, process::Command};
+
+    const CHILD: &str = "ADK_TEST_RELEASE_PAIR_CHILD";
+    let source = "a".repeat(40);
+    let target = "x86_64-unknown-linux-gnu";
+    if env::var_os(CHILD).is_none() {
+        let executable = env::current_exe().unwrap();
+        let release = tempfile::tempdir_in(executable.parent().unwrap()).unwrap();
+        let binary = release.path().join("agentdesk");
+        fs::hard_link(&executable, &binary).unwrap();
+        let image = crate::services::session_host::policy::file::image(&binary).unwrap();
+        fs::write(
+            release.path().join("agentdesk.source.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "source_sha": source,
+                "target": target,
+                "sha256": hex::encode(image.digest()),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let name = concat!(
+            module_path!(),
+            "::m9_running_health_reports_a_verified_release_pair"
+        );
+        let output = Command::new(binary)
+            .args(["--exact", name.split_once("::").unwrap().1])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    crate::services::running_binary::initialize();
+    let exe = env::current_exe().unwrap();
+    let installation = tempfile::tempdir_in(exe.parent().unwrap()).unwrap();
+    let installed = installation.path().join("agentdesk");
+    crate::services::running_binary::copy_current_to(&exe, &installed).unwrap();
+    let metadata = installed.with_file_name("agentdesk.source.json");
+    assert_eq!(
+        fs::read(&metadata)
+            .map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).unwrap())
+            .unwrap(),
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(exe.with_file_name("agentdesk.source.json")).unwrap()
+        )
+        .unwrap()
+    );
+    // Publication is pinned at startup; the service never rereads the pathname.
+    fs::remove_file(exe.with_file_name("agentdesk.source.json")).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for registry in [Some(Arc::new(HealthRegistry::new())), None] {
+                let detail = health_body("/health/detail", registry.clone()).await;
+                let public = health_body("/health", registry).await;
+                let record = &detail["running_binary"];
+                assert_eq!(record["source_sha"], source);
+                assert_eq!(record["target"], target);
+                assert!(record["observed_at"].is_string());
+                assert_eq!(
+                    record["boot_started_at_ms"],
+                    crate::services::process_boot::initialize().started_at_ms
+                );
+                assert!(public.get("running_binary").is_none());
+            }
+        });
+}

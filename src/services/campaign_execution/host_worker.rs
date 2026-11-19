@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -21,6 +21,7 @@ use super::host_gate::{
     PhaseStart, Recovered, Resolution,
 };
 use super::host_identity;
+use super::host_journal::{JournalDir, OpenError};
 use super::model::*;
 use super::resource_admission::ResourceAdmission;
 use super::scheduler::next_action;
@@ -68,6 +69,7 @@ pub struct HostWorker {
     campaign: String,
     node: String,
     gate: EffectGate,
+    journal_path: PathBuf,
     resources: AdkResources,
 }
 
@@ -103,6 +105,7 @@ impl HostWorker {
             campaign: campaign.into(),
             node: node.into(),
             gate,
+            journal_path: path,
             resources,
         })
     }
@@ -115,11 +118,43 @@ impl HostWorker {
         self.gate.entry(action_id)
     }
 
+    pub(super) fn deployment_entry(
+        &self,
+        state: &CampaignState,
+        id: &str,
+    ) -> Result<&JournalEntry, WorkerError> {
+        let run = state.run.as_ref().ok_or(WorkerError::Binding)?;
+        let entry = self.effect_entry(id).ok_or(WorkerError::Binding)?;
+        let action = self.check_entry(run, entry)?;
+        if action.kind != ActionKind::Deploy
+            || !matches!(
+                action.state,
+                ActionState::StartPending | ActionState::Started | ActionState::Unknown
+            )
+        {
+            return Err(WorkerError::Binding);
+        }
+        Ok(entry)
+    }
+
+    pub(super) fn deployment_observations(&self) -> Result<JournalDir, WorkerError> {
+        JournalDir::open(&self.journal_path.join("deployment-observations")).map_err(
+            |err| match err {
+                OpenError::Busy => WorkerError::Gate(GateError::Busy),
+                OpenError::Io(error) => WorkerError::Host(error),
+            },
+        )
+    }
+
     pub(super) fn serves(&self, binding: &AttemptBinding) -> bool {
         self.campaign == binding.campaign_id && self.node == binding.node_id
     }
 
-    async fn locked<'a>(
+    pub(super) fn node(&self) -> &str {
+        &self.node
+    }
+
+    pub(super) async fn locked<'a>(
         &self,
         pool: &'a PgPool,
     ) -> Result<(Transaction<'a, Postgres>, CampaignState), WorkerError> {
@@ -314,7 +349,7 @@ impl HostWorker {
         self.commit(tx, state.event_sequence, command, now).await
     }
 
-    async fn commit(
+    pub(super) async fn commit(
         &self,
         tx: Transaction<'_, Postgres>,
         sequence: u64,
@@ -340,6 +375,68 @@ impl HostWorker {
             CommandOutcome::Decided(Err(rejection)) => Err(WorkerError::Rejected(rejection)),
             CommandOutcome::NotFound => Err(WorkerError::Binding),
         }
+    }
+
+    pub(super) fn admit_merge(
+        &mut self,
+        state: &CampaignState,
+        envelope: &host_gate::EffectEnvelope,
+        now: DateTime<Utc>,
+        initiate: impl FnOnce(&str) -> io::Result<Initiated<()>>,
+    ) -> Result<Admitted<()>, WorkerError> {
+        if envelope.node_id != self.node
+            || envelope.kind != ActionKind::Merge
+            || !matches!(
+                envelope.authority,
+                host_gate::EffectAuthority::LandingMerge { .. }
+            )
+        {
+            return Err(WorkerError::Binding);
+        }
+        self.fence_start(state, &envelope.action_id)?;
+        Ok(self.gate.admit_and_initiate(envelope, now, initiate)?)
+    }
+
+    pub(super) async fn record_landing(
+        &self,
+        tx: Transaction<'_, Postgres>,
+        state: &CampaignState,
+        fact: super::landing_effects::LandingFact,
+    ) -> Result<(), WorkerError> {
+        self.commit(
+            tx,
+            state.event_sequence,
+            Command::RecordLanding {
+                node_id: self.node.clone(),
+                fact: Box::new(fact),
+            },
+            Utc::now(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub(super) async fn start_landing(
+        &mut self,
+        pool: &PgPool,
+        expected_action: &str,
+        initiate: impl FnOnce(
+            &super::landing_effects::Landing,
+            &Path,
+            &str,
+        ) -> io::Result<Initiated<()>>,
+    ) -> Result<Admitted<()>, WorkerError> {
+        let (_lock, state) = self.locked(pool).await?;
+        let now = Utc::now();
+        let (envelope, job, checkout) =
+            super::landing_effects::publication_envelope(&state, &self.node, self.identity(), now)?;
+        if envelope.action_id != expected_action {
+            return Err(WorkerError::StaleStep);
+        }
+        self.fence_start(&state, &envelope.action_id)?;
+        Ok(self
+            .gate
+            .admit_and_initiate(&envelope, now, |nonce| initiate(job, &checkout, nonce))?)
     }
 
     pub async fn start_action<T>(
@@ -466,7 +563,7 @@ impl HostWorker {
             .resolve_indeterminate(action_id, initiation_id, resolution, now)?)
     }
 
-    async fn wait_for_headroom(&self, wait: Duration) -> Result<(), WorkerError> {
+    pub(super) async fn wait_for_headroom(&self, wait: Duration) -> Result<(), WorkerError> {
         match self.resources.admission(wait).await {
             ResourceAdmission::Ready => Ok(()),
             refusal => Err(WorkerError::Resource(refusal)),

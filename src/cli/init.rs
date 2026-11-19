@@ -1099,7 +1099,9 @@ pub fn handle_init(reconfigure: bool) {
         // If no binary installed yet, copy current executable
         if !agentdesk_bin.exists() {
             if let Ok(current_exe) = std::env::current_exe() {
-                if let Err(e) = fs::copy(&current_exe, &agentdesk_bin) {
+                if let Err(e) =
+                    crate::services::running_binary::copy_current_to(&current_exe, &agentdesk_bin)
+                {
                     eprintln!("  [WARN] 바이너리 복사 실패: {} — 수동으로 복사하세요", e);
                 } else {
                     println!("  [OK] {}", agentdesk_bin.display());

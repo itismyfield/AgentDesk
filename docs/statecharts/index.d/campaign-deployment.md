@@ -1,0 +1,2 @@
+key: campaign-deployment
+| `campaign-execution` running binary witness (#7438 M9) | M7 `a3f4bb2a79` | A wrong or missing source, a pre-restart sample, or one of two hosts confirms the deployment | The worker binds the intended source and all hosts to the started action, re-reads detailed health after recovery, and records a confirmation or bounded failure. [Model](campaign-execution/CampaignDeployment.tla). |
