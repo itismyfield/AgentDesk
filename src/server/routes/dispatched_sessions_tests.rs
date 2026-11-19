@@ -1856,3 +1856,53 @@ async fn selector_clears_keep_configured_and_hosted_rows_pg() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+/// A late active hook the retired-row fence skips answers success without touching the row or
+/// running the status-change hook; a turn start under a new nonce still does both.
+#[tokio::test(flavor = "current_thread")]
+async fn fenced_late_hook_skips_the_status_change_hook_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+    let key = format!(
+        "{}:AgentDesk-claude-7335",
+        crate::services::platform::hostname_short()
+    );
+    let seed = "INSERT INTO sessions (session_key, provider, status, active_turn_nonce,
+                  hosted_execution, last_heartbeat)
+                VALUES ($1, 'claude', 'disconnected', 't1', '{\"state\":\"retired\"}',
+                        NOW() - INTERVAL '1 hour')";
+    sqlx::query(seed).bind(&key).execute(&pool).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let count = "agentdesk.registerPolicy({name: 'count', onSessionStatusChange: function() {
+        globalThis.__hits = (globalThis.__hits || 0) + 1; }});";
+    std::fs::write(dir.path().join("count.js"), count).unwrap();
+    let mut config = crate::config::Config::default();
+    config.policies.dir = dir.path().to_path_buf();
+    let mut state = test_state(pool.clone());
+    state.engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
+    let read = "SELECT status || '/' || active_turn_nonce || '/'
+                  || (last_heartbeat < NOW() - INTERVAL '30 minutes')::TEXT
+                FROM sessions WHERE session_key = $1";
+    for (nonce, row, hits) in [
+        (None, "disconnected/t1/true", 0),
+        (Some("t2"), "turn_active/t2/false", 1),
+    ] {
+        let body = serde_json::json!({"session_key": key, "provider": "claude", "status": "working",
+            "turn_start_nonce": nonce});
+        let body = serde_json::from_value(body).unwrap();
+        let answer = super::hook_session(
+            State(state.clone()),
+            axum::extract::Query(Default::default()),
+            Json(body),
+        );
+        assert_eq!(answer.await.unwrap().0, StatusCode::OK);
+        let seen: String = sqlx::query_scalar(read)
+            .bind(&key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let fired: i64 = state.engine.eval_js("globalThis.__hits || 0").unwrap();
+        assert_eq!((seen.as_str(), fired), (row, hits), "{nonce:?}");
+    }
+    pg_db.drop().await;
+}
