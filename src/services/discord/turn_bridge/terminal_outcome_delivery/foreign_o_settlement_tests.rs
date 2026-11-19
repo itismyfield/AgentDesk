@@ -389,25 +389,30 @@ async fn a_refusal_before_the_custody_write_keeps_no_raw_custody() {
     assert_eq!(raw, 0, "no raw custody of the refused episode");
 }
 
-// A kept unplaced child's body is not posted after a restart, old custody shape included; a fully
-// receipted custody settles with no send, and an old one with no parent hint resumes as no child.
+// A kept unplaced child's body is not posted after a restart, old custody shape included even when
+// a failed parent read left the row its own channel; a fully receipted one settles with no send.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_kept_thread_child_is_not_posted_after_a_restart_that_does_not_place_it() {
     use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
     use crate::services::tui_o::cutover::test_override;
     let cases = [(false, "new"), (true, "new"), (false, "old"), (true, "old")];
-    let cases = cases
-        .into_iter()
-        .chain([(false, "sent"), (true, "sent"), (false, "unhinted")]);
+    let cases = cases.into_iter().chain([
+        (false, "sent"),
+        (true, "sent"),
+        (false, "unhinted"),
+        (false, "plain"),
+    ]);
     for (case, (hinted, stored)) in (0_u64..).zip(cases) {
         let root = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(root.path());
         let mut f = Fixture::new(765_150 + case, ProviderKind::Claude, &["child answer"]).await;
-        let (http, _guard) = f.http().await;
+        let (http, rest) = f.http().await;
         let shared = crate::services::discord::make_shared_data_for_tests();
         let (child, parent) = (f.row.channel_id, 765_170 + case);
-        f.row.logical_channel_id = (stored != "unhinted").then_some(parent);
+        // A failed parent read at intake records the channel itself as the logical channel.
+        let unread = matches!(stored, "unhinted" | "plain");
+        f.row.logical_channel_id = Some(if unread { child } else { parent });
         let config =
             serde_json::from_value(serde_json::json!({"server": {}, "agents": [{"id": "a",
             "name": "A", "channels": {"claude": {"id": parent.to_string(), "runtime": "tui"}}}],
@@ -439,7 +444,9 @@ async fn a_kept_thread_child_is_not_posted_after_a_restart_that_does_not_place_i
         // The custody writer itself stores the old shape, or the receipt of a send that landed.
         let rewrite = |mut payload: serde_json::Value, _| async move {
             match stored {
-                "old" | "unhinted" => drop(payload.as_object_mut().unwrap().remove("thread_child")),
+                "old" | "unhinted" | "plain" => {
+                    drop(payload.as_object_mut().unwrap().remove("thread_child"))
+                }
                 "sent" => payload["delivery_receipts"] = serde_json::json!([1_234_567_890_123_u64]),
                 _ => {}
             }
@@ -453,6 +460,10 @@ async fn a_kept_thread_child_is_not_posted_after_a_restart_that_does_not_place_i
             after.reserve_boot_children(&[(child, parent)]);
         }
         let _restarted = test_override::force_boot(after);
+        // Without a REST client the relationship stays unread; with one it reads a parentless channel.
+        if stored == "unhinted" {
+            drop(rest);
+        }
         let retired = drain_for_test(|mut payload, checkpoint| {
             let gateway = crate::services::discord::gateway::DiscordGateway::new(
                 http.clone(),
@@ -471,7 +482,7 @@ async fn a_kept_thread_child_is_not_posted_after_a_restart_that_does_not_place_i
         .unwrap();
         let (settles, posts) = match stored {
             "sent" => (1, 0),
-            "unhinted" => (1, 1),
+            "plain" => (1, 1),
             _ => (0, 0),
         };
         assert_eq!(

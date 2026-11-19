@@ -607,7 +607,9 @@ pub(super) async fn resume_with_gateway(
             &mut snapshot.thread_child,
             snapshot.channel_id,
             &snapshot.local,
+            shared.serenity_http_or_token_fallback(),
         )
+        .await
     {
         return Ok(false);
     }
@@ -878,16 +880,33 @@ async fn persist_unless_refused(
     Ok(refused)
 }
 
-/// Whether a kept body belongs to a thread child the boot has not placed with a decided body; a
-/// custody from before the attribution was kept is judged once from its row's parent hint.
+/// Whether a kept body belongs to a thread child the boot has not placed with a decided body. An
+/// old custody stays kept, its attribution unrecorded, until a placement or a read settles it.
 #[cfg(unix)]
-fn kept_child(stored: &mut Option<bool>, channel: u64, local: &InflightTurnState) -> bool {
+async fn kept_child(
+    stored: &mut Option<bool>,
+    channel: u64,
+    local: &InflightTurnState,
+    http: Option<Arc<serenity::Http>>,
+) -> bool {
     use crate::services::tui_o::cutover::{maybe_thread_child, thread_child_decided};
-    let child = *stored.get_or_insert_with(|| {
+    if stored.is_none() {
         let hint = (local.channel_id == channel).then_some(local.logical_channel_id);
-        maybe_thread_child(channel, hint.flatten())
-    });
-    child && thread_child_decided(channel) != Some(true)
+        // A row's own channel as its hint is what a failed parent read leaves: no evidence.
+        *stored = if maybe_thread_child(channel, hint.flatten()) {
+            Some(true)
+        } else if let Some(http) = http {
+            let parent = crate::services::discord::session_runtime::checked_thread_parent(
+                &http,
+                ChannelId::new(channel),
+            );
+            let parent = parent.await.ok();
+            parent.map(|parent| maybe_thread_child(channel, parent.map(ChannelId::get)))
+        } else {
+            None
+        };
+    }
+    stored.is_none_or(|child| child) && thread_child_decided(channel) != Some(true)
 }
 
 /// Drops every stored copy of the body; the custody keeps only what retires it.
