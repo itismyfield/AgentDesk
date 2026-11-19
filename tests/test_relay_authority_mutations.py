@@ -1013,6 +1013,7 @@ class NightlyMutationBackstopTests(unittest.TestCase):
         self.assertEqual(nightly["strategy"], pr["strategy"])
         for key in ("RELAY_AUTHORITY_MUTATION_SHARD_INDEX", "RELAY_AUTHORITY_MUTATION_SHARD_TOTAL"):
             self.assertEqual(nightly["env"][key], pr["env"][key])
+        self.assertEqual(*([s.get("with") for s in job["steps"] if "ensure-swap" in s.get("uses", "")] for job in (nightly, pr)))
         runs = [step for step in nightly["steps"] if step.get("run", "").strip() == "bash " + MUTATION_SCRIPT.as_posix()]
         self.assertEqual(len(runs), 1)
         for step in nightly["steps"]:
