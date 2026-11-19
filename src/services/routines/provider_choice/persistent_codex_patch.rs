@@ -65,11 +65,14 @@ pub(super) async fn refuses(
         let Some(native) = execution.native.as_deref().or(live_native.as_deref()) else {
             continue;
         };
+        #[cfg(unix)]
         let model_proof = pane.and_then(|tmux| {
             crate::services::tui_input::routine_model::requested_model_for_native(
                 "codex", tmux, native,
             )
         });
+        #[cfg(not(unix))]
+        let model_proof = None;
         let pinned_model = match model_proof {
             Some(model) => model,
             None if execution.previous_native.as_deref() == Some(native)
