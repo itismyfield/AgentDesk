@@ -2,6 +2,7 @@
 //! one body-free notice settles the captured turn and wakes its reader. Every unclear read keeps it.
 
 use super::*;
+use crate::db::dispatched_sessions::hosted_execution::http_force::disconnect_retired_pg;
 use crate::services::discord::herdr_terminate::{TerminationResult, capture_turn, settle_captured};
 use crate::services::provider::CancelToken;
 use crate::services::provider::cancel_token_claude_interrupt::{HerdrInterruptState, herdr_turn};
@@ -51,7 +52,8 @@ pub(super) async fn end_live(
     let nonce = pin(&state.submission.lock().unwrap_or_else(|e| e.into_inner()))?;
     let pool = shared.pg_pool.as_ref()?;
     let http = shared.serenity_http_or_token_fallback()?;
-    let retire = execution_gone(pool, &shared.token_hash, provider, &row, &nonce).await?;
+    let (observation, record, fresh_end) =
+        execution_gone(pool, &shared.token_hash, provider, &row, &nonce).await?;
     #[cfg(test)]
     super::tests::hook("live_after_end").await;
     let (kind, held, actor) = (provider.clone(), state.clone(), turn.token.clone());
@@ -63,8 +65,8 @@ pub(super) async fn end_live(
         Some(true) => return None,
         None => return source_unread(&state, &turn.token),
     }
-    if let Some((observation, record)) = &retire {
-        let retired = retire_confirmed(pool, observation, record).await;
+    if fresh_end {
+        let retired = retire_confirmed(pool, &observation, &record).await;
         retired
             .ok()
             .or_else(|| keep(&row, "the ended execution's retire did not land"))?;
@@ -82,6 +84,8 @@ pub(super) async fn end_live(
     if settled != TerminationResult::Retired {
         return keep(&row, "retired, settlement unconfirmed");
     }
+    // Before the reader wakes, so its late active status finds the row already ended.
+    disconnect_ended(pool, &observation, &record).await;
     // Watchers read the cleanup first, so the cancel below reads as a finished turn.
     token.mark_completion_cleanup();
     token.cancelled.store(true, Ordering::Release);
@@ -93,26 +97,44 @@ fn keep<T>(row: &InflightTurnState, why: &str) -> Option<T> {
     None
 }
 
-/// The pinned execution's end: `Some(None)` once it is already retired, `Some(Some(cas))` on a
-/// fresh E; another execution, or an unconfirmed end, is `None`.
+/// The row disconnects only while it still records this retired execution and no dispatch; the
+/// provider session id stays for a resume. A row that moved on is left as it is.
+async fn disconnect_ended(
+    pool: &sqlx::PgPool,
+    observation: &HostedObservation,
+    record: &HostedExecution,
+) {
+    let id = observation.session_id();
+    match disconnect_retired_pg(pool, id, record, None, true).await {
+        Ok(true) => {}
+        Ok(false) => tracing::info!(
+            session_id = id,
+            "ended Herdr row moved on; not disconnected"
+        ),
+        Err(error) => tracing::warn!(session_id = id, %error, "ended Herdr row disconnect failed"),
+    }
+}
+
+/// The pinned execution's end with whether this pass must still retire it (`false` once it is
+/// already retired); another execution, or an unconfirmed end, is `None`.
 async fn execution_gone(
     pool: &sqlx::PgPool,
     token_hash: &str,
     provider: &ProviderKind,
     row: &InflightTurnState,
     nonce: &str,
-) -> Option<Option<(HostedObservation, HostedExecution)>> {
+) -> Option<(HostedObservation, HostedExecution, bool)> {
     let (found, record) = hosted_record(pool, token_hash, provider, row).await.ok()?;
     if record.execution_nonce != nonce {
         return None;
     }
     if record.state == HostedState::Retired {
         // A retire this pass or an earlier one made; the notice and settlement still follow.
-        return Some(None);
+        return Some((found, record, false));
     }
     let target = herdr_endpoints().target(&record)?;
     let ended = execution_end(target, record.clone()).await == ExecutionEnd::Ended;
-    ended.then_some(Some((found, record)))
+    ended.then_some((found, record, true))
 }
 
 /// After E, whether the turn's own source from its input shows its terminal; `None` while the
