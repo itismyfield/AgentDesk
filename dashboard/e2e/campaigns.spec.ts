@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { serverCampaignFixtures } from "../src/api/serverCampaignsFixtures";
 
-// Set CAMPAIGNS_SHOTS to a directory to also save 390/820/1440 x light/dark screenshots of the campaign tab.
+// Set CAMPAIGNS_SHOTS to a directory to also save 390/1440 x light/dark screenshots, plus dark fixture shots of a server campaign.
 const SHOTS = process.env.CAMPAIGNS_SHOTS;
 const NOW = "2026-11-18T08:00:00.000Z";
 const issue = (number: number) => `https://github.com/itismyfield/AgentDesk/issues/${number}`;
@@ -17,26 +17,47 @@ const campaign = (id: string, title: string, nodes: unknown[], patch: Record<str
 const CAMPAIGNS = [
   campaign("open-issues-dag", "열린 이슈 DAG", [
     node("i7272", "#7272 무중단 재시작 체크포인트를 단계마다 남기고 실패한 단계부터 다시 이어가기", {
-      status: "running", stage: "review: 재시작 프로토콜 리뷰 2회차", issue_url: issue(7272), assignee: "agent-ada", round: 2,
-      summary: "dcserver 재시작 뒤에도 마지막 체크포인트에서 이어 갑니다.", benefit: "배포 중 끊긴 턴을 다시 시작하지 않아도 됩니다.",
+      status: "running", stage: "review: 재시작 프로토콜 리뷰 2회차", issue_url: issue(7272), assignee: "agent-ada", round: 2, session_id: "01a180b1-e645",
+      summary: "dcserver 재시작 뒤에도 마지막 체크포인트에서 이어 갑니다.", benefit: "배포 중 끊긴 턴을 다시 시작하지 않아도 됩니다.", pr_url: "https://github.com/itismyfield/AgentDesk/pull/8240",
+      evidence_records: [
+        { summary: "리뷰 2회차 시작", command: null, result: null, head_sha: null, recorded_at: "2026-11-18T07:40:00.000Z", references: [] },
+        { summary: "설계 리뷰 CLEAN", command: null, result: "P0·P1 없음", head_sha: "60aac7044", recorded_at: "2026-11-18T06:10:00.000Z", references: [] },
+      ],
     }),
     node("i7336", "#7336 꺼진 맥의 채널 메시지를 다른 맥이 이어받기", {
       status: "blocked", stage: "design", issue_url: issue(7336), group: "Cluster", blocker: "mac-book 쪽 tailscale 인증이 만료되어 확인을 기다립니다.",
     }),
-    node("i7340", "#7340 릴레이 재전송 큐 지표", { status: "running", stage: "impl · 테스트 보강", issue_url: issue(7340), group: "Relay", assignee: "agent-luna" }),
+    node("i7340", "#7340 릴레이 재전송 큐 지표", { status: "running", stage: "impl · 테스트 보강", issue_url: issue(7340), group: "Relay", assignee: "agent-luna", updated_at: "2026-11-18T07:00:00.000Z", blocker: " None " }),
     node("i7401", "#7401 게이트웨이 재연결", { status: "completed", stage: "merged", issue_url: issue(7401) }),
-    node("i7402", "#7402 게이트웨이 헬스 체크 간격 조정", { stage: "investigate", issue_url: issue(7402) }),
+    node("i7402", "#7402 게이트웨이 헬스 체크 간격 조정", { stage: "investigate", issue_url: issue(7402), blocker: "선행: #7401 게이트웨이 재연결" }),
     node("i7403", "#7403 Discord 스레드 재생성 시 세션 매핑 유지", { stage: "implement", issue_url: issue(7403), group: "Relay" }),
     node("i7404", "#7404 오래된 실행 로그 압축", { status: "skipped", stage: "dropped", issue_url: issue(7404), group: null }),
     node("cli-update", "Update CLIs on every node", { stage: "verify", group: null }),
   ], { description: "열린 이슈를 의존 순서대로 처리합니다.\n막힌 작업은 담당자 확인 뒤 다시 진행합니다." }),
-  campaign("release-train", "릴리스 트레인", [node("i7500", "#7500 릴리스 노트 정리", { issue_url: issue(7500), group: "Release" })], { round: 1 }),
+  campaign("release-train", "릴리스 트레인", [node("i7500", "#7500 릴리스 노트 정리", { issue_url: issue(7500), group: "Release" })], { round: 1, status: "paused" }),
 ];
 const LIVE = {
   "open-issues-dag": {
     i7272: { card_id: "card-7272", card_status: "review", dispatch_type: "review", dispatch_status: "dispatched", session_status: "turn_active", session_seen_at: NOW, running: true, queue_status: "dispatched" },
   },
 };
+const agent = (id: string, name: string, nameKo: string) => ({
+  id, role_id: id, name, alias: null, name_ko: nameKo, name_ja: null, name_zh: null, department_id: null, cli_provider: "codex",
+  avatar_emoji: "🛠️", sprite_number: 3, personality: null, status: "working", current_task_id: null, workflow_pack_key: "development",
+  stats_tasks_done: 0, stats_tokens: 0, activity_source: "agentdesk", created_at: 1_790_000_000_000,
+});
+
+/** A server campaign with a failed and a blocked task; its events open a landing gate on C. */
+function gatedServerCampaign() {
+  const release = structuredClone(serverCampaignFixtures.failedRunning);
+  release.definition.title = "대시보드 v3 착지";
+  release.definition.goal = "키트로 대시보드를 다시 짜서 main에 올린다";
+  release.definition.nodes[0].title = "설정 카탈로그";
+  release.definition.nodes[1].title = "단계 보드";
+  release.definition.nodes[2].title = "편집기 케이블타이";
+  release.view.nodes[2].runtime.stage = "landing";
+  return release;
+}
 
 const json = (page: Page, pattern: RegExp, body: unknown) => page.route(pattern, (route) => route.fulfill({ json: body }));
 
@@ -62,7 +83,7 @@ async function mockApi(page: Page, theme: "dark" | "light" = "dark") {
   }, theme);
   await json(page, /\/api\/auth\/session$/, { ok: true, authenticated: true, auth_enabled: false, csrf_token: "" });
   await json(page, /\/api\/auth\/ws-ticket$/, { ticket: "s".repeat(64), expires_in: 15 });
-  await json(page, /\/api\/agents(?:\?.*)?$/, { agents: [] });
+  await json(page, /\/api\/agents(?:\?.*)?$/, { agents: [agent("agent-ada", "Ada Dashboard", "아다 대시보드"), agent("agent-luna", "Luna Ops", "루나 옵스")] });
   await json(page, /\/api\/departments(?:\?.*)?$/, { departments: [] });
   await json(page, /\/api\/dispatched-sessions(?:\?.*)?$/, { sessions: [] });
   await json(page, /\/api\/settings$/, { language: "ko", theme });
@@ -83,16 +104,19 @@ async function openCampaigns(page: Page, theme: "dark" | "light" = "dark") {
   await page.clock.install({ time: new Date(NOW) });
   const calls = await mockApi(page, theme);
   await page.goto("/campaigns");
-  await expect(page.locator(".campaign-task-row").first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".campaign-overview")).toBeVisible({ timeout: 15_000 });
   return calls;
 }
 
-/** A server campaign beside the ledger ones: running, one failed and one blocked task. */
 async function serveServerCampaign(page: Page) {
-  const release = serverCampaignFixtures.failedBlockedComplete;
+  const release = gatedServerCampaign();
   await json(page, /\/api\/server-campaigns\?.*$/, { campaigns: [release] });
   await json(page, /\/api\/server-campaigns\/release$/, { campaign: release });
-  await json(page, /\/api\/server-campaigns\/release\/events(?:\?.*)?$/, { events: [] });
+  await json(page, /\/api\/server-campaigns\/release\/events(?:\?.*)?$/, { events: [
+    { sequence: 19, run_id: "run-1", command_id: "c-19", observed_at: "2026-11-18T07:37:00.000Z", kind: { event: "approval_gate_opened", binding: {
+      run_id: "run-1", node_id: "C", gate: "landing", definition_revision: 7, target: { kind: "candidate", base_sha: "a1b2c3d", head_sha: "e4f5a6b" }, policy_hash: "f".repeat(64) } } },
+    { sequence: 20, run_id: "run-1", command_id: "c-20", observed_at: "2026-11-18T07:52:00.000Z", kind: { event: "node_failed" } },
+  ] });
   return release;
 }
 
@@ -100,93 +124,73 @@ async function expectNoHorizontalOverflow(page: Page) {
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
 }
 
-test("campaign tab: the first active campaign with its summary, running work first, then tasks by group", async ({ page }, testInfo) => {
+test("campaign tab: the list or picker, one status sentence, what needs someone, running cards and status lists", async ({ page }, testInfo) => {
   await openCampaigns(page);
   const panel = page.locator(".campaigns-panel");
   await expect(page.getByRole("tab", { name: "캠페인" })).toHaveAttribute("aria-selected", "true");
-  await expect(panel.getByLabel("캠페인 선택")).toHaveValue("open-issues-dag");
   await expect(page).toHaveURL(/[?&]campaign=open-issues-dag/);
-  const summary = panel.locator(".campaign-summary-header");
-  await expect(summary.getByText("활성", { exact: true })).toBeVisible();
-  await expect(summary.getByText("라운드 2")).toBeVisible();
-  await expect(summary.getByText("완료 1/8")).toBeVisible();
-  await expect(panel.getByRole("switch", { name: "자동 진행" })).toHaveAttribute("aria-checked", "false");
-  await expect(panel.locator("progress.campaign-progress")).toHaveAttribute("value", "12");
-
-  // The description stays folded until asked for.
-  const description = panel.getByText("열린 이슈를 의존 순서대로 처리합니다.", { exact: false });
-  await expect(description).toBeHidden();
-  await panel.getByText("캠페인 설명").click();
-  await expect(description).toBeVisible();
-
-  // Running and blocked work lead: blocked first, with its note; the rest are closed status groups.
-  const glance = panel.getByRole("region", { name: "한눈 요약" });
-  await expect(glance.getByRole("heading", { name: /지금 진행 중 2/ })).toBeVisible();
-  await expect(glance.getByText("막힘 1", { exact: true })).toBeVisible();
-  const active = glance.locator("[data-glance-id]");
-  await expect(active.first()).toHaveAttribute("data-glance-id", "i7336");
-  await expect(glance.locator('[data-glance-id="i7336"] .campaign-glance-blocker')).toContainText("tailscale 인증이 만료");
-  await expect(glance.locator('[data-glance-id="i7272"]')).toContainText("리뷰");
-  await expect(glance.locator('[data-glance-id="i7272"] .campaign-live')).toHaveText("리뷰 진행 중");
-  const pending = glance.getByRole("button", { name: /^대기 3$/ });
-  await expect(pending).toHaveAttribute("aria-expanded", "false");
-  await pending.click();
-  await expect(glance.getByRole("list", { name: "대기" }).getByRole("button")).toHaveCount(3);
-
-  // Tasks by group, with the counts in each group row.
-  const groups = panel.getByRole("list", { name: "그룹별 작업" });
-  await expect(groups.locator(".campaign-group-heading")).toHaveText([/^Cluster 1/, /^Gateway 3/, /^Relay 2/, /^미분류 2/]);
-  const row = groups.locator('.campaign-task-row[data-node-id="i7272"]');
-  await expect(row.locator(".campaign-task-id")).toHaveText("#7272");
-  await expect(row.locator(".campaign-task-stage")).toHaveText("review: 재시작 프로토콜 리뷰 2회차");
-  await expect(row.locator(".campaign-task-title")).toContainText("진행 중");
-  expect((await row.locator(".campaign-task-stage").boundingBox())?.height ?? 0).toBeLessThan(24);
-
-  await panel.getByRole("searchbox", { name: "작업 검색" }).fill("#7336");
-  await expect(groups.locator(".campaign-task-row")).toHaveCount(1);
-  await expect(panel.getByText("작업 1/8개 · 그룹 1개")).toBeVisible();
-  await panel.getByRole("searchbox", { name: "작업 검색" }).fill("");
-  await expect(groups.locator(".campaign-task-row")).toHaveCount(8);
-  await expectNoHorizontalOverflow(page);
-  if (testInfo.project.name === "mobile") {
-    // A phone keeps the filters behind one switch.
-    const filters = panel.getByRole("button", { name: "필터" });
-    await expect(panel.getByRole("combobox", { name: "상태 필터" })).toBeHidden();
-    await filters.click();
-    await expect(filters).toHaveAttribute("aria-expanded", "true");
+  if (testInfo.project.name === "desktop") {
+    await expect(panel.locator('[data-campaign-key="legacy:open-issues-dag"]')).toHaveAttribute("aria-current", "true");
+    await expect(panel.getByRole("radio", { name: /진행/ })).toHaveAttribute("aria-checked", "true");
+  } else {
+    await expect(panel.locator(".campaign-picker")).toContainText("열린 이슈 DAG");
+    await expect(panel.locator(".campaign-picker")).toContainText("작업 1/8 완료 · 캠페인 2개 중");
   }
-  await panel.getByRole("combobox", { name: "상태 필터" }).click();
-  await page.getByRole("option", { name: "완료" }).click();
-  await expect(groups.locator(".campaign-task-row")).toHaveCount(1);
-  await expect(groups.locator(".campaign-task-row")).toHaveAttribute("data-node-id", "i7401");
+  await expect(panel.locator(".campaign-detail-status")).toHaveText("진행 중 · 2개 진행, 1개 막힘");
+
+  const attention = panel.getByRole("region", { name: "주의" });
+  await expect(attention.locator('[data-task-id="i7336"] .campaign-blocker')).toContainText("tailscale 인증이 만료");
+  const running = panel.locator('[data-task-id="i7272"]');
+  await expect(running).toContainText("리뷰 진행 중");
+  await expect(running).toContainText("끝나면: 배포 중 끊긴 턴을 다시 시작하지 않아도 됩니다.");
+  await expect(running.getByRole("img", { name: /아다 대시보드/ })).toBeVisible();
+  await expect(panel.getByRole("region", { name: "요약" })).toContainText("PR 연결1 / 2");
+  await expect(panel.getByRole("switch", { name: "자동 진행" })).toHaveAttribute("aria-checked", "false");
+
+  const chips = panel.locator(".campaign-status-chips button:not(.campaign-find)");
+  await expect(chips).toHaveText([/^대기 3$/, /^완료 1$/, /^건너뜀 1$/]);
+  await chips.first().click();
+  await expect(panel.getByRole("list", { name: "대기" }).locator(".campaign-task-row")).toHaveCount(3);
+  await expect(panel.locator('[data-task-id="i7402"] .campaign-reason')).toHaveText("대기 사유: 선행: #7401 게이트웨이 재연결");
+  await expect(panel.locator(".campaign-recent-heading")).toHaveText("최근 바뀐 작업 · 5");
   await expectNoHorizontalOverflow(page);
+
+  // Picking another campaign keeps the choice; a phone picks from a bottom sheet.
+  if (testInfo.project.name === "mobile") {
+    await panel.locator(".campaign-picker").click();
+    const sheet = page.getByRole("dialog", { name: "캠페인 고르기" });
+    await sheet.getByRole("radio", { name: /준비/ }).click();
+    await sheet.locator('[data-campaign-key="legacy:release-train"]').click();
+    await expect(panel.locator(".campaign-picker")).toContainText("릴리스 트레인");
+  } else {
+    await panel.getByRole("radio", { name: /준비/ }).click();
+    await panel.locator('[data-campaign-key="legacy:release-train"]').click();
+  }
+  await expect(panel.locator(".campaign-detail-status")).toHaveText("멈춤 · 진행 중인 작업 없음");
+  await expect(page).toHaveURL(/[?&]campaign=release-train/);
+  expect(await page.evaluate(() => window.localStorage.getItem("agentdesk.dashboard.active-campaign"))).toBe(JSON.stringify("release-train"));
 });
 
 test("campaign tab: a task opens in the pinned pane on wide screens and in a sheet on phones", async ({ page }, testInfo) => {
   await openCampaigns(page);
   const panel = page.locator(".campaigns-panel");
   const pane = page.getByRole("complementary", { name: "선택 작업" });
-  const row = panel.locator('.campaign-task-row[data-node-id="i7403"]');
+  await expect(pane).toHaveCount(0);
+  const card = panel.locator('[data-task-id="i7272"]');
+  await card.click();
+  await expect(page).toHaveURL(/[?&]node=i7272/);
+  await expect(card).toHaveAttribute("aria-current", "true");
+  const detail = page.locator(".campaign-node-detail");
+  await expect(detail.getByRole("heading", { name: /무중단 재시작/ })).toBeVisible();
+  // TaskPhone order: the stage record reads oldest first.
+  await expect(detail.locator("ol > li")).toHaveText([/설계 리뷰 CLEAN/, /리뷰 2회차 시작/]);
   if (testInfo.project.name === "desktop") {
-    await expect(pane).toBeVisible();
-    await expect(pane).toContainText("고른 작업이 없습니다");
     const box = (await pane.boundingBox())!;
     expect(box.x + box.width).toBeGreaterThan(1440 - 4);
-    // The list stays clear of the pane.
-    expect(((await row.boundingBox())!.x + (await row.boundingBox())!.width)).toBeLessThanOrEqual(box.x);
-  } else {
-    await expect(pane).toHaveCount(0);
-  }
-  await row.click();
-  await expect(page).toHaveURL(/[?&]node=i7403/);
-  await expect(row).toHaveAttribute("aria-current", "true");
-  const detail = page.locator(".campaign-node-detail");
-  await expect(detail.getByRole("heading", { name: /Discord 스레드 재생성/ })).toBeVisible();
-  if (testInfo.project.name === "desktop") {
-    await expect(pane.locator(".campaign-node-detail")).toBeVisible();
-    // Non-modal: the list beside it still works.
-    await panel.locator('.campaign-task-row[data-node-id="i7402"]').click();
-    await expect(pane.getByRole("heading", { name: /헬스 체크 간격/ })).toBeVisible();
+    expect((await card.boundingBox())!.x + (await card.boundingBox())!.width).toBeLessThanOrEqual(box.x);
+    // Non-modal: the overview beside it still works.
+    await panel.locator('[data-task-id="i7336"]').click();
+    await expect(pane.getByRole("heading", { name: /꺼진 맥의 채널 메시지/ })).toBeVisible();
   } else {
     const sheet = page.getByRole("dialog", { name: "선택 작업" });
     await expect(sheet).toBeVisible();
@@ -197,52 +201,94 @@ test("campaign tab: a task opens in the pinned pane on wide screens and in a she
   await page.getByRole("button", { name: "상세 닫기" }).click();
   await expect(detail).toHaveCount(0);
   await expect(page).not.toHaveURL(/[?&]node=/);
-  if (testInfo.project.name === "desktop") await expect(pane).toContainText("고른 작업이 없습니다");
-
-  // A glance row opens the same details.
-  await panel.locator('[data-glance-id="i7336"]').click();
-  await expect(detail.getByRole("heading", { name: /꺼진 맥의 채널 메시지/ })).toBeVisible();
-  await page.getByRole("button", { name: "상세 닫기" }).click();
-
-  // Switching campaigns keeps the choice and reads only the shown campaign.
-  await panel.getByLabel("캠페인 선택").selectOption("release-train");
-  await expect(panel.locator('.campaign-task-row[data-node-id="i7500"]')).toBeVisible();
-  await expect(page).toHaveURL(/[?&]campaign=release-train/);
-  expect(await page.evaluate(() => window.localStorage.getItem("agentdesk.dashboard.active-campaign"))).toBe(JSON.stringify("release-train"));
+  await expect(pane).toHaveCount(0);
 });
 
-test("server campaign: tasks as the same rows, opened in the pinned pane or a sheet", async ({ page }, testInfo) => {
+test("campaign tab: closing a task returns focus to the card, list row or connections row that opened it", async ({ page }) => {
+  await openCampaigns(page);
+  const panel = page.locator(".campaigns-panel");
+  const closeButton = page.getByRole("button", { name: "상세 닫기" });
+  const escape = async () => { await closeButton.focus(); await page.keyboard.press("Escape"); }; // a docked pane takes Escape from inside
+  const card = panel.locator('[data-task-id="i7272"]');
+  await card.click();
+  await closeButton.click();
+  await expect(card).toBeFocused();
+  await panel.locator(".campaign-status-chips button").first().click();
+  const row = panel.getByRole("list", { name: "대기" }).locator('[data-task-id="i7402"]');
+  await row.click();
+  await escape();
+  await expect(row).toBeFocused();
+  await panel.getByRole("tab", { name: "관계도" }).click();
+  await panel.locator(".react-flow__node").filter({ hasText: "Relay" }).first().click();
+  const relayRow = panel.locator('.campaign-relations [data-task-id="i7340"]');
+  for (const close of [() => closeButton.click(), escape]) {
+    await relayRow.click();
+    await expect(page.locator(".campaign-node-detail")).toBeVisible();
+    await close();
+    await expect(relayRow).toBeFocused();
+  }
+});
+
+test("campaign tab: below 1280px an open task folds the list into the picker, and the overview beside the pane stays clickable", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "Wide layouts");
+  await openCampaigns(page);
+  const panel = page.locator(".campaigns-panel");
+  const pane = page.getByRole("complementary", { name: "선택 작업" });
+  for (const width of [900, 1024, 1280, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await panel.locator('[data-task-id="i7272"]').click();
+    await expect(panel.locator(".campaign-picker")).toBeVisible({ visible: width < 1280 });
+    await expect(panel.locator("aside .campaign-list")).toBeVisible({ visible: width >= 1280 });
+    const edge = (await pane.boundingBox())!.x;
+    for (const target of [panel.getByRole("switch", { name: "자동 진행" }), panel.locator(".campaign-status-chips button").first(), panel.locator('[data-task-id="i7340"]')]) {
+      const box = (await target.boundingBox())!;
+      expect(box.x + box.width, `${width}px`).toBeLessThanOrEqual(edge);
+      await target.click({ trial: true });
+    }
+    if (width === 1024) {
+      await panel.locator(".campaign-picker").click();
+      await expect(page.getByRole("dialog", { name: "캠페인 고르기" }).locator('[data-campaign-key="legacy:open-issues-dag"]')).toBeVisible();
+      await page.keyboard.press("Escape");
+    }
+    await page.getByRole("button", { name: "상세 닫기" }).click();
+  }
+});
+
+test("server campaign: a waiting approval and blocked work lead, and approving stays off until its API lands", async ({ page }, testInfo) => {
   await page.clock.install({ time: new Date(NOW) });
   await mockApi(page);
-  const release = await serveServerCampaign(page);
+  await serveServerCampaign(page);
   await page.goto("/campaigns?mode=server&campaign=release");
-  const rows = page.locator(".campaign-server-task-row");
-  await expect(rows).toHaveCount(release.definition.nodes.length, { timeout: 15_000 });
-  await expect(page.locator(".campaigns-panel").getByLabel("캠페인 선택")).toHaveValue("server:release");
-  await expect(rows.first()).toContainText(release.definition.nodes[0].title);
-  await expect(rows.first().locator(".aui-badge-clean")).toHaveText("실패");
+  const panel = page.locator(".campaigns-panel");
+  await expect(panel.locator(".campaign-detail-status")).toHaveText("실행 중 · 1개 진행, 1개 승인 대기, 1개 막힘, 1개 실패", { timeout: 15_000 });
+  const gate = panel.locator(".campaign-gate");
+  await expect(gate).toContainText("착지 승인 대기 · 편집기 케이블타이");
+  await expect(gate).toContainText("23분째 기다려요");
+  await expect(gate.getByRole("button", { name: "승인", exact: true })).toBeDisabled();
+  await expect(gate).toContainText("승인 API 준비 중(#8249)");
+  await expect(panel.getByRole("region", { name: "주의" }).locator(".campaign-task-row")).toHaveCount(testInfo.project.name === "desktop" ? 2 : 1);
+  await expect(panel.locator(".campaign-recent-heading")).toHaveText("최근 이벤트 · 2");
   await expectNoHorizontalOverflow(page);
-  await rows.nth(1).click();
-  await expect(page).toHaveURL(/[?&]node=B/);
-  const title = release.definition.nodes[1].title;
-  if (testInfo.project.name === "desktop") {
-    await expect(page.getByRole("complementary", { name: "선택 작업" }).getByRole("heading", { name: title })).toBeVisible();
-  } else {
-    await expect(page.getByRole("dialog", { name: "선택 작업" }).getByRole("heading", { name: title })).toBeVisible();
-  }
-  await page.getByRole("button", { name: "상세 닫기" }).click();
-  await expect(page).not.toHaveURL(/[?&]node=/);
-  await expect(rows.nth(1)).toBeFocused();
+  await gate.locator('[data-task-id="C"]').click();
+  await page.getByRole("button", { name: "승인 검토" }).click();
+  const sheet = page.getByRole("dialog", { name: "착지 승인" });
+  await expect(sheet.getByRole("button", { name: "승인", exact: true })).toBeDisabled();
+  await sheet.getByRole("button", { name: "나중에" }).click();
+  await expect(sheet).toHaveCount(0);
 });
 
 test.describe("touch at 390px", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
-  test("campaign tab: no sideways scroll, 44px targets and 16px inputs", async ({ page }, testInfo) => {
+  test("campaign tab: status, attention and a running task on the first screen; no sideways scroll, 44px targets and 16px inputs", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Phone width check");
     await openCampaigns(page);
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
-    await page.getByRole("button", { name: "필터" }).click();
+    // #6270: the first screen shows the status sentence, what needs someone and a running task without scrolling.
+    for (const target of [".campaign-detail-status", ".campaign-attention", '[data-task-id="i7272"]']) {
+      const box = (await page.locator(target).first().boundingBox())!;
+      expect(box.y + box.height, target).toBeLessThanOrEqual(844 - 64);
+    }
     await expectNoHorizontalOverflow(page);
     const small = (root: HTMLElement | SVGElement) => {
       const selector = "button, a[href], input, select, textarea, summary, [role='switch'], [role='radio'], [role='combobox'], [tabindex='0']";
@@ -255,12 +301,14 @@ test.describe("touch at 390px", () => {
     const tiny = (root: HTMLElement | SVGElement) => Array.from(root.querySelectorAll<HTMLElement>("input:not([type='checkbox']):not([type='radio']), select, textarea"))
       .filter((node) => node.getClientRects().length && parseFloat(getComputedStyle(node).fontSize) < 16)
       .map((node) => node.outerHTML.slice(0, 80));
+    await page.locator(".campaign-find").click(); // the search field it opens follows the same rule
+    await expect(page.getByRole("searchbox", { name: "작업 찾기" })).toBeVisible();
     const tab = page.locator("#campaign-panel-campaigns");
     expect(await tab.evaluate(small)).toEqual([]);
     expect(await tab.evaluate(tiny)).toEqual([]);
 
     // The task sheet and its edit form follow the same rule.
-    await page.locator('.campaign-task-row[data-node-id="i7403"]').click();
+    await page.locator('[data-task-id="i7272"]').click();
     const sheet = page.getByRole("dialog", { name: "선택 작업" });
     await expect(sheet.locator(".campaign-node-detail")).toBeVisible();
     await sheet.getByRole("button", { name: "작업 수정" }).click();
@@ -271,38 +319,50 @@ test.describe("touch at 390px", () => {
   });
 });
 
-test("campaign tab: screenshots at 390, 820 and 1440 in light and dark", async ({ page }, testInfo) => {
+test("phone: the More sheet closes when Back changes only the query", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+  await mockApi(page);
+  await page.goto("/campaigns?tab=queue");
+  await expect(page.getByRole("tab", { name: "대기열" })).toHaveAttribute("aria-selected", "true", { timeout: 15_000 });
+  // The tab bar pushes the same path with another query, so Back stays on /campaigns.
+  await page.getByTestId("app-mobile-tab-campaigns").click();
+  await page.getByTestId("app-mobile-more-button").click();
+  await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/\/campaigns\?tab=queue$/);
+  await expect(page.getByTestId("app-mobile-more-menu")).toHaveCount(0);
+});
+
+test("campaign tab: screenshots at 390 and 1440 in light and dark, and dark fixture shots of a gated server campaign", async ({ page }, testInfo) => {
   test.skip(!SHOTS || testInfo.project.name !== "desktop", "Set CAMPAIGNS_SHOTS to collect screenshots");
   test.setTimeout(180_000);
+  await page.clock.install({ time: new Date(NOW) });
   for (const theme of ["light", "dark"] as const) {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     await mockApi(page, theme);
-    for (const [width, height] of [[390, 844], [820, 1180], [1440, 900]] as const) {
+    for (const [width, height] of [[390, 844], [1440, 900]] as const) {
       await page.setViewportSize({ width, height });
       await page.goto("/campaigns?mode=legacy&campaign=open-issues-dag");
-      await expect(page.locator(".campaign-task-row").first()).toBeVisible({ timeout: 15_000 });
+      await expect(page.locator(".campaign-overview")).toBeVisible({ timeout: 15_000 });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await page.mouse.move(0, 0);
       await page.screenshot({ path: `${SHOTS}/campaigns-${width}x${height}-${theme}.png` });
-      // The page scrolls inside the app shell, so the lower part gets its own shot.
-      await page.locator(".campaign-group-list").scrollIntoViewIfNeeded();
-      await page.waitForTimeout(300);
-      await page.screenshot({ path: `${SHOTS}/campaigns-${width}x${height}-${theme}-list.png` });
-      await page.locator(".campaign-summary-header").scrollIntoViewIfNeeded();
-      await page.waitForTimeout(300);
-      await page.locator('.campaign-task-row[data-node-id="i7272"]').click();
+      await page.locator('[data-task-id="i7272"]').click();
       await expect(page.locator(".campaign-node-detail")).toBeVisible();
       await page.waitForTimeout(400);
       await page.screenshot({ path: `${SHOTS}/campaigns-${width}x${height}-${theme}-detail.png` });
     }
-    await serveServerCampaign(page);
-    for (const [width, height] of [[390, 844], [1440, 900]] as const) {
-      await page.setViewportSize({ width, height });
-      await page.goto("/campaigns?mode=server&campaign=release&node=B");
-      await expect(page.locator(".campaign-inspector h4").first()).toBeVisible({ timeout: 15_000 });
-      await page.waitForTimeout(400);
-      await page.screenshot({ path: `${SHOTS}/campaigns-server-${width}x${height}-${theme}-detail.png` });
-    }
+  }
+  await serveServerCampaign(page);
+  for (const [width, height] of [[390, 844], [1440, 900]] as const) {
+    await page.setViewportSize({ width, height });
+    await page.goto("/campaigns?mode=server&campaign=release");
+    await expect(page.locator(".campaign-gate")).toBeVisible({ timeout: 15_000 });
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: `${SHOTS}/campaigns-fixture-server-${width}x${height}-dark.png` });
+    await page.locator('.campaign-gate [data-task-id="C"]').click();
+    await page.getByRole("button", { name: "승인 검토" }).click();
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: `${SHOTS}/campaigns-fixture-server-${width}x${height}-dark-approval.png` });
   }
 });
-

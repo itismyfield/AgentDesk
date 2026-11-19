@@ -113,14 +113,7 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
         }
       />
       <Route path="/routines" element={<RoutinesPageView />} />
-      <Route
-        path="/campaigns"
-        element={
-          <div className="h-full overflow-auto p-4 pb-36 sm:p-6">
-            <CampaignsPanel language={settings.language} />
-          </div>
-        }
-      />
+      <Route path="/campaigns" element={<CampaignsPanel language={settings.language} />} />
       <Route path="/audit" element={<AuditPageView isKo={isKo} />} />
       <Route path="/settings" element={<SettingsView isKo={isKo} language={settings.language} theme={settings.theme} onSaveSettings={handleSettingsSave} onNotify={pushNotification} />} />
       {LEGACY_ROUTE_REDIRECTS.map((redirect) => (
