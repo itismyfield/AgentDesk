@@ -117,7 +117,7 @@ fn work_at_closer(has_id: bool) {
     let policies = tempfile::tempdir().unwrap();
     std::fs::write(
         policies.path().join("completion.js"),
-        "agentdesk.registerPolicy({name:'NativeRecoveryProbe',onDispatchCompleted:function(){const key='native-recovery-hook';agentdesk.kv.set(key,Number(agentdesk.kv.get(key)||0)+1,0);}});",
+        "agentdesk.registerPolicy({name:'NativeRecoveryProbe',onDispatchCompleted:function(){const key='native-recovery-hook';agentdesk.kv.set(key,String(Number(agentdesk.kv.get(key)||0)+1),0);}});",
     ).unwrap();
     let checkout = tempfile::tempdir().unwrap();
     let sha = fixture_commit(checkout.path());

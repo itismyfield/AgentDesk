@@ -107,7 +107,7 @@ async fn native_8148_dispatch_custody_completes_work_once_from_native_body_pg() 
     crate::services::discord::internal_api::init(api.port, None);
     let policies = tempfile::tempdir().unwrap();
     std::fs::write(policies.path().join("completion.js"),
-        "agentdesk.registerPolicy({name:'NativeCompletionProbe',onDispatchCompleted:function(){const key='native-completion-hook';agentdesk.kv.set(key,Number(agentdesk.kv.get(key)||0)+1,0);}});").unwrap();
+        "agentdesk.registerPolicy({name:'NativeCompletionProbe',onDispatchCompleted:function(){const key='native-completion-hook';agentdesk.kv.set(key,String(Number(agentdesk.kv.get(key)||0)+1),0);}});").unwrap();
     let mut config = crate::config::Config::default();
     config.policies.dir = policies.path().to_path_buf();
     config.policies.hot_reload = false;

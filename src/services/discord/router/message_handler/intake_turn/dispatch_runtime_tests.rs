@@ -56,7 +56,7 @@ async fn check_intake(case: DispatchCase, channel: ChannelId) {
         _ => None,
     });
     let host = host_with_status(&[channel, parent], answer).await;
-    if case.prefix_detail_known {
+    if linked_thread {
         sqlx::query("INSERT INTO task_dispatches (id,status,dispatch_type) VALUES ('dispatch-A','pending','review'), ('dispatch-B','pending','implementation')")
             .execute(&host.pool).await.unwrap();
     }
@@ -73,7 +73,12 @@ async fn check_intake(case: DispatchCase, channel: ChannelId) {
     );
     let (result, started) = start_with_terminal_timing(channel, entry, false).await;
     result.unwrap();
-    let (submitted, release) = started.expect("fixture provider entered before terminal release");
+    let (submitted, release) = started.unwrap_or_else(|| {
+        panic!(
+            "fixture provider did not enter for channel {channel}: {:?}",
+            host.api.take()
+        )
+    });
     let prompt = submitted.system_prompt.expect("system prompt captured");
     assert_eq!(prompt.contains("[Current Task]"), case.task);
     assert_eq!(prompt.contains("Dispatch ID: dispatch-A"), case.task);
