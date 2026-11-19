@@ -206,6 +206,17 @@ fn work_at_closer(has_id: bool) {
         assert_eq!(hook_count().await.unwrap().as_deref(), has_id.then_some("1"));
         let expected_calls = has_id.then_some((Method::GET, StatusCode::OK));
         assert!(loopback.calls.lock().unwrap().iter().cloned().eq(expected_calls));
+        if has_id {
+            discord::turn_bridge::complete_work_dispatch_on_turn_end(
+                &intake.shared,
+                row.dispatch_id.as_deref(),
+                row.worktree_path.as_deref(),
+                Some(&answer),
+            ).await;
+            assert_eq!(work_state(&fx.pool).await, state, "retry changed work completion");
+            assert_eq!(hook_count().await.unwrap().as_deref(), Some("1"));
+            assert_eq!(*loopback.calls.lock().unwrap(), [(Method::GET, StatusCode::OK); 2]);
+        }
         fallback.assert_none();
     });
     drop(intake);
