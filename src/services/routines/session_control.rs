@@ -1,9 +1,9 @@
 mod persistent_target;
 use anyhow::{Result, anyhow};
 #[cfg(test)]
-pub(crate) use persistent_target::{
-    CONTROL_TEST_PAUSE, ControlPause, seed_started_control_session,
-};
+pub(crate) use persistent_target::seed_started_control_session;
+#[cfg(all(test, unix))]
+pub(crate) use persistent_target::{CONTROL_TEST_PAUSE, ControlPause};
 use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
 use serde_json::Value;
