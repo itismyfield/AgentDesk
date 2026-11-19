@@ -45,9 +45,9 @@ afterEach(async () => { await act(async () => root.unmount()); container.remove(
 const rowFor = (id: string) => container.querySelector(`[data-card-id="${id}"]`);
 const buttonIn = (scope: ParentNode | null, text: string) => [...(scope?.querySelectorAll("button") ?? [])].find((button) => button.textContent === text)!;
 
-async function renderQueue(cards: KanbanCard[]) {
+async function renderQueue(cards: KanbanCard[], onSelectCard = vi.fn()) {
   await act(async () => root.render(<KanbanProvider initialCards={cards} initialDispatches={[]}>
-    <CampaignQueueTab language="en" tr={tr} campaigns={[campaign]} campaignsLoaded campaignsError={null} onRetryCampaigns={vi.fn()} heldIssueUrls={[]} serverHoldsIncomplete={false} selectedCardId={null} onSelectCard={vi.fn()} onCampaignSaved={vi.fn()} />
+    <CampaignQueueTab language="en" tr={tr} campaigns={[campaign]} campaignsLoaded campaignsError={null} onRetryCampaigns={vi.fn()} heldIssueUrls={[]} serverHoldsIncomplete={false} selectedCardId={null} onSelectCard={onSelectCard} onCampaignSaved={vi.fn()} />
   </KanbanProvider>));
 }
 
@@ -102,4 +102,43 @@ it("says it cannot tell which cards are free when the campaigns did not load", a
   expect(container.textContent).toContain("Campaigns did not load");
   await act(async () => buttonIn(container, "Retry").click());
   expect(retry).toHaveBeenCalledOnce();
+});
+
+it("groups the queue by repository, collapses a group from its heading and flags cards that need a person", async () => {
+  await renderQueue([
+    card("beta-1", { github_repo: "acme/beta", priority: "urgent" }),
+    card("relay", { blocked_reason: "Needs a product decision on retries" }),
+    card("beta-2", { github_repo: "acme/beta", status: "ready", assignee_agent_id: "agent-1" }),
+  ]);
+  const headings = [...container.querySelectorAll<HTMLButtonElement>("button[data-list-nav][aria-expanded]")];
+  expect(headings.map((heading) => heading.textContent)).toEqual(["beta 2", "AgentDesk 1"]);
+  expect(rowFor("relay")?.textContent).toContain("Needs you");
+  expect(rowFor("beta-1")?.textContent).toContain("Urgent");
+  expect(rowFor("beta-1")?.textContent).not.toContain("Needs you");
+  expect(rowFor("beta-2")?.textContent).toContain("Ready · Builder");
+
+  await act(async () => headings[0].click());
+  expect(headings[0].getAttribute("aria-expanded")).toBe("false");
+  expect(rowFor("beta-1")).toBeNull();
+  expect(rowFor("relay")).not.toBeNull();
+  expect(container.querySelector('[role="status"]')?.textContent).toBe("3 cards outside campaigns");
+});
+
+it("moves between group and card buttons with the arrow keys and opens a card into the docked pane", async () => {
+  const onSelectCard = vi.fn();
+  await renderQueue([card("one", { github_issue_number: 21 }), card("two", { github_issue_number: 22 })], onSelectCard);
+  const pane = document.querySelector('aside[aria-label="Card details"]');
+  expect(pane?.textContent).toContain("No card selected");
+  const nav = [...container.querySelectorAll<HTMLButtonElement>("[data-list-nav]")];
+  expect(nav).toHaveLength(3);
+  nav[0].focus();
+  await act(async () => nav[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
+  expect(document.activeElement).toBe(nav[1]);
+  await act(async () => nav[1].dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true })));
+  expect(document.activeElement).toBe(nav[2]);
+  await act(async () => nav[2].dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true })));
+  expect(document.activeElement).toBe(nav[0]);
+  expect(nav[1].getAttribute("aria-controls")).toBe(pane?.id);
+  await act(async () => nav[2].click());
+  expect(onSelectCard).toHaveBeenCalledWith("two");
 });

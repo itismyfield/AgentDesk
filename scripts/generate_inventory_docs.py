@@ -874,10 +874,9 @@ def test_only_module_files(
         ]
         next_result: set[Path] = set()
         direct_test_only = test_targets - prod_targets
+        test_only_dir_set = set(test_only_dirs)
         for path in prod_files:
-            if path in direct_test_only or any(
-                directory in path.parents for directory in test_only_dirs
-            ):
+            if path in direct_test_only or not test_only_dir_set.isdisjoint(path.parents):
                 next_result.add(path)
 
         if next_result == result:

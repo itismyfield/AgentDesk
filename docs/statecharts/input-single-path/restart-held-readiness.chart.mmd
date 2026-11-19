@@ -1,0 +1,17 @@
+stateDiagram-v2
+    [*] --> Restart: ledger/proof lost
+    Restart --> Queued: owner original
+    Queued --> Held: observe None / running Unknown
+    Held --> Held: probe Unknown / Keep, same original
+    Held --> Wake: scoped source + current completed reply
+    Wake --> Reserved: Idle driver recheck + reserve
+    Wake --> Held: changed source or revoked proof, same deadline
+    Reserved --> Delivered: permit before due + first-key gate / one original
+    Reserved --> Refused: due / leaf NotSent closes writer gate
+    Wake --> Refused: due / owner pre-key CAS revokes grant
+    Reserved --> Held: leaf recheck fails, same due
+    Held --> Refused: fixed original deadline / owner pre-key CAS
+    Refused --> Explained: one reason notice / no body replay
+    Held --> Refused: existing cancel or lifecycle disposition
+    Delivered --> [*]
+    Explained --> [*]

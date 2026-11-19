@@ -32,17 +32,236 @@
 
 나머지 17 cfg는 바이트 변경 없이 같은 결과를 유지한다(전체 25/25 일치). `check_models.py`는 정확한 cfg 집합에 `crash_no_reclaim`을 더했고, 범위 필터가 `admission/` 하위 모델 행까지 세어 기반에서 이미 실패하던 결함을 top-level cfg만 보도록 고쳤다.
 
-값 범위는 원인 가정이 아니라 아래 진입점 전수표에서 왔다. `git grep -n -E 'flock|LOCK_|pass_fds|set_inheritable|O_CLOEXEC|CLOEXEC|fstat|st_ino|os\.close|unlink|ttl|TTL' -- scripts/dev_instance scripts/e2e/tui_relay/lease.py`(시험 제외) 96행을 모델 동작별로 묶었다. #8124 시험 인스턴스의 FD 수명은 `scripts/dev_instance/`에 있고, run lease(`Kind=run`)와 전송 journal은 아직 코드가 없는 설계 좌표다.
+값 범위는 원인 가정이 아니라 아래 진입점 전수표에서 왔다. `git grep -n -E 'flock|LOCK_|pass_fds|set_inheritable|O_CLOEXEC|CLOEXEC|fstat|st_ino|os\.close|unlink|ttl|TTL' -- scripts/dev_instance scripts/e2e/tui_relay/lease.py`(시험 제외) 96행을 모델 동작별로 묶었다. #8124 시험 인스턴스의 FD 수명은 `scripts/dev_instance/`에 있고, run lease(`Kind=run`)는 S1에서 `scripts/e2e/continuous/`에 생겼고(아래 S1 절), 전송 journal은 아직 코드가 없는 설계 좌표다.
 
 | 모델 동작 | 코드 좌표(실제) | 비고 |
 | --- | --- | --- |
 | `Acquire` 원자 flock | `scripts/dev_instance/lease.py:66`, `scripts/dev_instance/keeper.py:48`, `scripts/dev_instance/host.py:36` | `LOCK_EX\|LOCK_NB`, 실패는 busy. TTL 분기 없음 |
 | 고정 inode witness | `scripts/dev_instance/lease.py:31-32`, `:45-52`, `scripts/dev_instance/keeper.py:47` | fstat device/inode·부모 디렉터리 identity 대조 |
-| `Start` FD 상속 | `scripts/dev_instance/lifecycle.py:247`, `:310`, `scripts/dev_instance/keeper.py:134` | `close_fds=True, pass_fds=(lease fd,)` |
+| `Start` FD 상속 | `scripts/dev_instance/lifecycle.py:247`, `:310` | `close_fds=True, pass_fds=(lease fd,)`. `:310`은 선택적 verification FD 하나를 더 넘긴다 |
+| keeper spawn(lease 전달 아님) | `scripts/dev_instance/keeper.py:134` | 제어 socketpair의 child FD만 상속한다. lease FD는 넘기지 않는다 |
 | 자기 FD close만(`Finish`·`ReleaseParent`·crash) | `scripts/dev_instance/lease.py:87`, `:119` | lock leaf unlink 없음(`keeper.py:82`의 unlink는 marker 파일) |
 | `ttl_takeover`·`non_atomic` 원인 | `scripts/e2e/tui_relay/lease.py:28`, `:35`, `:50` | 현재 일반 하네스 lease의 TTL·unlink. S1에서 재사용하지 않음(§6) |
-| `Kind=run` channel lease | 설계 좌표: `docs/e2e-continuous.design.md` §6, S1 runner | 코드 없음 |
+| `Kind=run` channel lease | `scripts/e2e/continuous/channel_lock.py:80`(S1) | 위 S1 전수표 |
 | `Prepare`/journal·`Reconcile` | 설계 좌표: 같은 §6 mutation-pending 기록 | 코드 없음 |
+
+## S1 확장 (2026-11-18)
+
+코드 기준 `origin/main=ffa099d4f4a6a68c26171fb464f7b5edffca2e5f`. 이 모델에 continuous runner(`scripts/e2e/continuous/`)의 off·예산 reservation·cursor 전진을 더했다. 새 설정과 뮤턴트는 `Mut`로만 켜므로 기존 25 cfg는 바이트 그대로이고 결과도 expected.tsv와 같다. `run-none`·`run-live-none`에는 새 불변식 4개를 더해 정상 GREEN이 그것까지 확인한다.
+
+진입점 전수표(`git grep -n -E 'flock|pass_fds|enabled|budget\.|save_cursor|_abandon_orphans' -- scripts/e2e/continuous`, 시험 제외):
+
+| 진입점 | 모델 동작 | 코드 좌표 | 모델 값 |
+| --- | --- | --- | --- |
+| `tick`(launchd) off | `Acquire`가 `Enabled`일 때만 | `runner.py:172` | off면 잠금·디렉터리·상태 IO 0 |
+| `tick` 잠금 | `Acquire`(원자 nonblocking flock) | `channel_lock.py:91`, 키 `:26` | guild+정렬 parent+bot 집합, TTL·unlink 없음 |
+| `tick` 고아 정리 | `NoOrphanOwner` 뒤 다음 보유자 | `runner.py:185` | 잠금 보유자가 본 RUNNING 기록은 ABANDONED |
+| `tick` 예산 | `Reserve`/`Defer` | `budget.py:21`, `runner.py:134` | turn·token·time 한도나 예약값이 null이면 거절. crash 뒤 예약 유지 |
+| `tick` 실행 | `Start`(FD 상속) | `channel_lock.py:66` | `close_fds=True`, `pass_fds=(lease fd,)`, device/inode witness |
+| `tick` cursor | `Finish`의 `cursor' = seen + 1` | `runner.py:166` | 끝난 실행만 한 칸. crash·defer는 그대로 |
+| `hold`(수동 E2E) | `Acquire`·`Start` | `runner.py:193` | 같은 채널 lock. enabled·예산과 무관 |
+| `submit`(배포 inbox) | 모델 밖(요청 파일) | `inbox.py:22` | 비밀 없는 키 4개, request id당 1회, 최신만 실행 |
+
+| 수용 규칙 | 모델 규칙 | 정상 cfg | 원인 뮤턴트(RED) |
+| --- | --- | --- | --- |
+| off일 때 runner 실행 0 | **새** `OffNoRun` | **새** `run-off` GREEN | **새** `run-ignore_off` |
+| 예약 없이 provider 턴 0 | **새** `RunHasReservation` | `run-none`·**새** `run-budget_one` GREEN | **새** `run-skip_reserve` |
+| 일일 예산 초과 0 | **새** `WithinBudget` | 같음 | **새** `run-over_budget` |
+| cursor는 끝난 실행마다 한 칸 | **새** `CursorCountsFinishedRuns` | 같음 | **새** `run-advance_on_crash` |
+| 동시 writer 0·crash 뒤 고아 owner 0·보유 lease 종료 | 기존 `NoDualWriter`·`NoOrphanOwner`·`HeldEventuallyEnds` | 기존 정상 cfg | 기존 뮤턴트 |
+
+전/후(공통 `check_cfg`, 기존 25 cfg 결과 불변):
+
+| config | 수정 전 모델 | 수정 후 |
+| --- | --- | --- |
+| run-off.cfg | SANY 실패(`OffNoRun` 없음) | - / - |
+| run-budget_one.cfg | SANY 실패 | - / - |
+| run-ignore_off.cfg | SANY 실패 | OffNoRun / - |
+| run-skip_reserve.cfg | SANY 실패 | RunHasReservation / - |
+| run-over_budget.cfg | SANY 실패 | WithinBudget / - |
+| run-advance_on_crash.cfg | SANY 실패 | CursorCountsFinishedRuns / - |
+| run-none.cfg, run-live-none.cfg | SANY 실패(새 불변식 없음) | - / - |
+
+`non_atomic` 뮤턴트에서는 두 실행이 같은 cursor를 읽어 한 칸을 잃는다. 그 cfg는 새 불변식을 싣지 않아 기대집합이 바뀌지 않는다. 배포 inbox·due 경계는 산술·파일 계약이라 모델 대신 시험(`scripts/e2e/tests/test_continuous_runner.py`)이 맡는다.
+
+## S2 확장 (2026-11-18)
+
+S1 head `405140a73683540b2453bf3c69bd1307abd3d31d`의 리뷰 P2 네 경계를 기존
+`LeaseLifetime.tla`의 트랜잭션 분기로 추가했다. 기존 lease 31 cfg는 바이트를 바꾸지 않았고
+기대 위반 집합도 유지했다. 새 `tx` record는 한 배포 요청, 부족한 첫 예산 창과 사용 가능한 다음 창,
+턴 한도 1, 최대 두 번째 턴 시작 시도, 각 저장 경계의 process crash 최대 1회를 탐색한다.
+`TransactionMode`가 켜진 cfg만 이 분기를 실행한다. 이 격리는 파일 트랜잭션 수명과 커널 FD 수명을
+각각 전수 탐색하려는 경계이며 둘을 하나의 원자 저장으로 가정하는 뜻이 아니다.
+
+| 코드 경계 | 모델 행동 | 지키는 규칙 | 기존 의미/원인 뮤턴트 |
+| --- | --- | --- | --- |
+| `budget.configured`, runner `_preflight` | `TxAcquire` 앞 enabled·known guard | `OffOrNullNoWrites`: off·null이면 lock·request·cursor·result·status·outbox 무변경 | `tx-old-off`, `tx-old-null` |
+| `inbox.pending`, 예산 거절 | `TxDefer` → `TxNextDay` → 재획득 | `DeferredRequestKept`: 실행 전 보류는 소비가 아님 | `tx-consume-deferred` |
+| `budget.TurnGuard`, runner `_execute` | `TxBeginTurn`, `TxUsage` | `UnknownNeverZero`, `EveryTurnWithinBudget`: unknown 보존·각 native 턴 시작 전 상한 검사 | `tx-unknown-zero`, `tx-between-only` |
+| runner `_record` → `_apply_completed` | `TxComplete` → `TxApply`, 각 사이 `TxCrash` | `CursorRequiresDurable`, `ProjectionExactlyOnce`: 정본 완료 전 cursor 금지·멱등 적용 | `tx-apply-first`, `tx-double-apply` |
+| runner 예약 전 RUNNING crash | `TxCrash`(Held) → `TxRecover`(Deferred) | `UnreservedCrashPreservesRequest`: 예약 전이면 실제 입력 0이며 요청을 보존 | `tx-consume-deferred` |
+| runner 예약 후 고아 복구 | `TxReserve` → `TxCrash` → `TxRecover` | `ReservedOrphanPausesProvider`: 예약 유지·ABANDONED·provider pause | `tx-orphan-no-pause` |
+| runner `_abandon_orphans` 완료 정본 복구 | `TxRecover` → `TxApply` | `CompletedResultNeverRegresses`, `CompletedProjectionRecovers` | `tx-result-regress`, `tx-no-recover` |
+| summary·status 및 outbox 발행 | `TxPublish`, `TxStatusFirst` | `StatusRequiresDurable`, `CompletedPublicationRecovers`: 정본에서 발행하며 crash 뒤 회복 | `tx-status-first` |
+| `outbox.dispatch` 전송 실패 | `TxNotifyFails` | `FailedNotifyRemainsPending`: 재시도 실패도 pending 보존 | `tx-alert-drop` |
+
+`TxComplete`는 PASS 또는 FAIL 결과를 내구 기록하고, cursor/request projection과 summary/status/outbox는
+별도 행동이다. `TxApply`는 정본에 저장한 목표 cursor를 대입하므로 crash 복구로 다시 적용해도
++1을 중복하지 않는다. crash가 완료 기록 전에 일어나면 ABANDONED이며 cursor는 그대로이고,
+완료 기록 뒤면 원 결과를 유지하여 누락 projection과 발행만 복구한다. 예약 전 RUNNING 기록의 crash는
+실제 입력이 시작되지 않았음을 알 수 있어 요청을 DEFERRED로 남긴다. 예약 후 고아는 예약을 유지하고
+사용량을 unknown으로 보아 provider를 pause한다.
+`CompletedProjectionRecovers`와 `CompletedPublicationRecovers`는 `TxAdvance` weak fairness 아래 검증한다.
+예약 후 고아도 ABANDONED 정본을 저장하고 summary/status/outbox 발행 생존성을 검증한다.
+전송 성공은 가정하지 않으며 알림 실패의 영구 pending은 허용한다.
+
+새 cfg 15개는 정상 `tx-good`·`tx-off`·`tx-null` 3 GREEN과 원인 뮤턴트 12 RED다.
+기존 31개와 합쳐 **46/46 기대 집합 일치(9 GREEN + 37 expected RED)**를 요구한다.
+원인 뮤턴트는 `Mut` 값만 다르고 모델 소스는 모든 cfg에서 같다. 실제 Python의 수정 전 RED와
+GREEN·바이트 복원 뮤턴트는 구현 보고서가 정본이다. 새 모델에 예전 불변식 이름이 없어서 나는
+SANY 오류를 행동 RED로 세지 않았다.
+
+상태 차트는 [트랜잭션 수명](run-tx-good.chart.mmd)에 있다. 정상 모델 135 상태·338 step을
+22 표시 상태·35 화살표로 그리며, 같은 표시 상태를 유지하는 185 step(usage 판독·FD 해제·
+pending 알림의 전송 실패 등)은 숨긴다. 병렬 region으로 합치면 불가능한 조합을 그릴 수 있어
+공식 생성기가 parent 상태 차트로 전환했다.
+파일 전원 손실·다중 provider 합산·실제 usage parser·실제 native API 전송·알림 transport·outbox
+동시 dispatcher 및 신규 요청으로 supersede되는 정책은 이 유계 모델 밖이며 Python 시험이 맡는다.
+off/null 무변경을 우선하므로 완료 projection 뒤 다음 bundle의 예약값이 null이면 복구는 valid config를
+기다린다. 설정은 모델 상수라 이 지연은 liveness 약속에 넣지 않았다. 프로세스 startup을 포함한
+absolute monotonic deadline의 실제 시계·입출력 경계는 Python 시험이 맡는다.
+
+재현:
+
+```sh
+python3 -B docs/statecharts/e2e-run-lease/check_models.py --self-test-selection
+python3 -B docs/statecharts/e2e-run-lease/check_models.py --java /opt/homebrew/opt/openjdk/bin/java --jar /Users/itismyfield/.local/share/tla2tools/tla2tools-1.7.4.jar --out /tmp/i8120-s2-tlc-recheck
+```
+
+statechart 스킬의 공식 생성기로 만든 차트 원본·TLC 출력은 같은 logs 아래 `s2-model-contract-chart/`이며,
+view는 `s2-model-view.mjs`다. 원시 로그·matrix JSON은 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/s2-model-contract-final/`,
+직접 TLC 반례는 같은 logs 아래 `s2-model-contract-raw/`에 있다. 모델의 고정 입력 SHA256·상태 수와 짧은
+반례는 구현 보고서의 증거 목록에도 기록한다.
+
+## S3 소비자 사상 (2026-11-18)
+
+S2 head `593399f0880b4991cc13dc265d454ceaf073eaee` 위에 소비자 관측 분기를 추가했다.
+기존 46 cfg의 바이트와 기대 위반 집합은 유지했다. `tx.consumer`는 한 번 수신한 입력 snapshot과
+읽기 결과, 독립 transport의 확인 여부를 담으며, 기존 lease·예산·cursor·실행 상태를 바꾸지 않는다.
+`ConsumerIsPure`가 이를 검사한다. 새 분기는 21개 snapshot 종류 중 하나를 선택하고 형식 정규화 →
+공유 판정 → 표시 순서로 진행한다. transport는 확인 성공 또는 한도 소진 실패를 선택한다.
+
+| 입력 경계 | 모델의 표시 상태 | 실제 소비자 형식 |
+| --- | --- | --- |
+| 활성 supervisor, 첫 완료 전 | `NO_DATA` | result=NO_DATA |
+| 명시적 off | `DISABLED` | result=DISABLED |
+| interval+max_run+grace를 지난 완료 | `STALE` | result=UNKNOWN reason=STALE |
+| coordinator와 다른 배포 SHA | `STALE_HEAD` | result=UNKNOWN reason=STALE_HEAD |
+| schema·future 시각·heartbeat 누락·host 불가 | `UNKNOWN` | result=UNKNOWN와 해당 reason |
+| 0건·skip·fixture·단언 누락·usage 불명·driver schema 미지원·필수 qualifier 미확정 | `UNEVALUABLE` | 비PASS와 해당 reason |
+| 기능 FAIL에 malformed usage 동반 | `FAIL` | FAIL 증거 유지, usage는 unknown 정규화 |
+| 모든 근거 충족, 의미 있는 nullable control 포함 | `PASS` | result=PASS |
+
+`ConsumerStateMapping`·`NoGroundlessPass`·`NoOldHeadGreen`으로 빈 실행·미실행·옛 head·미지원 형식이
+초록으로 바뀌지 않음을 확인한다. `usage-unknown`은 마지막 occurrence의 aggregate 숫자는 있어도
+구성 counter를 확정하지 못한 경우이며, `driver-schema`는 continuous schema1과 별개의 raw schema2
+검사다. `qualifier-unknown`은 필수 origin/surface/operation의 null·빈 값을 추상화하고,
+`nullable` control은 busy_basis/placement의 허용된 null을 유지한다.
+
+리뷰 P2-4는 `MalformedUsageCompletes`·`FunctionalFailRetained`로 정규화 뒤 예외 없이 완료되고
+기존 FAIL을 유지하는 경계를, P2-5는 `DeferredHeartbeatIsLive`로 유효한 한도를 모두 소진해
+새 driver 입력을 보류해도 살아 있는 supervisor의 heartbeat가 갱신되는 경계를 표현한다.
+null 한도·예약이나 off에서 상태를 쓰지 않는 기존 `OffOrNullNoWrites` 규칙은 그대로다.
+
+`PendingEventuallySentOrShown`은 **enabled이고 알림 snapshot을 읽을 수 있는 fair 소비자**의 계약이다.
+transport가 확인하지 못하고 재시도 한도가 소진돼도 pending을 상태 표시로 노출한다.
+새 `consumer-hide-pending`이 이 생존성을 위반하므로 공허하게 참이 아니다. off는 무상태 IO를
+우선하며 새 알림 읽기·전송 actor나 추가 생존성을 요구하지 않는다. 외부 mirror에 이미 보존된
+pending metadata는 읽을 수 있으나, 자료를 얻을 수 없는 off/host-unavailable 경우까지 전송을
+가정하지 않는다. `ConsumerDispatch`는 기존 supervisor transport의 외부 사건이며 소비자의 쓰기
+권한을 늘리는 동작이 아니다.
+
+새 12 cfg = 정상 `consumer-good` 1 GREEN + 원인 뮤턴트 11 RED다. 정상 cfg가 21 snapshot 전체를
+탐색하며 각 뮤턴트의 해당 snapshot도 같은 입력으로 포함한다. 전체는 **58/58 기대집합 일치
+(10 GREEN + 48 expected RED)**다. 실제 Python 수정 전 RED/GREEN은 구현 보고서가 정본이며,
+새 모델 이름이 S2 모델에 없어 생기는 SANY 오류를 행동 RED로 세지 않는다. 뮤턴트는 cfg의 Mut만
+바꾸며 모델 소스는 같다. 원시 전체 위반 집합은 `expected.tsv`와 정확히 일치해야 한다.
+
+정상 차트는 [소비자 상태 사상](run-consumer-good.chart.mmd)에 있다. 실제 시각의 수치 경계,
+복수 오류가 동시에 있는 모든 우선순위 조합, mirror 파일 IO·head 복원·CLI subprocess, transport의
+실제 수신자·재시도 간격과 credential은 Python fixture/배선 시험이 맡는다. snapshot은 불변이며
+여러 파일 사이의 읽기 경쟁과 새 완료가 덮어쓰는 경계도 Python fixture가 맡는다.
+
+원시 증거는 `/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/s3-model-first/`,
+`s3-model-raw/`, `s3-model-chart/`와 `s3-model-selection.log`에 있다.
+외부 요약 `report-s3-model-summary.md`에 입력 SHA256·전체 위반 집합·실행 환경을 기록한다.
+재현 명령은 S2와 같고 새로운 out 경로를 사용한다. 기존 46 cfg의 결과도 새 모델에서 다시 검사했다.
+
+## 만료된 옛 head 결과 (2026-11-19)
+
+S3 리뷰가 넘긴 우선순위 공백을 모델에 넣었다. 다른 배포 head의 결과가 freshness 한도까지 지나면
+소비자는 `STALE`이 아니라 `STALE_HEAD`를 유지한다(`result=UNKNOWN reason=STALE_HEAD stale=1`).
+감시자는 `STALE_HEAD`만 경보로 삼으므로, 만료가 불일치 표식을 지우면 새 배포의 결과가 없다는 경보가 사라진다.
+
+새 snapshot `old-head-stale`과 뮤턴트 `consumer-stale-masks-head`(만료가 head 불일치를 덮는 수정 전 판정)를
+추가했다. 뮤턴트는 `ConsumerStateMapping`을 위반한다. `NoOldHeadGreen`은 두 옛 head snapshot 모두에 적용한다.
+정상 cfg는 22 snapshot, 161 상태/361 step을 탐색하며 차트의 상태·화살표는 그대로다(만료된 옛 head도
+"다른 배포 head" 상태로 표시). 전체는 59 cfg = 10 GREEN + 49 expected RED다. 기존 58 cfg의 바이트는 그대로다.
+같은 head의 만료 결과는 계속 `STALE`이며, 두 조합의 실제 시각 경계는 Python 소비자 시험이 맡는다.
+
+## 관측 불가 분류와 핵심 묶음 주기 (2026-11-19)
+
+릴리스 호스트에서 상시 실행을 켜면서 두 행동을 모델에 넣었다.
+
+**관측 불가는 FAIL이 아니다.** 소비자 snapshot에 `unobserved`(조회 전송 타임아웃, 교체된 서버 로그)를 추가했다.
+표시는 `UNEVALUABLE`이고 알림 pending을 남긴다. 새 규칙 `UnobservedNeverFail`과 뮤턴트
+`consumer-unobserved-fail`(관측 실패를 기능 FAIL로 세는 판정)을 더했다. 뮤턴트는 `ConsumerStateMapping`과
+`UnobservedNeverFail`을 위반한다. 정상 cfg는 23 snapshot, 차트의 상태·화살표는 그대로다.
+
+**핵심 묶음 주기.** 새 모델 [CoreSchedule](schedule/CoreSchedule.tla)은 supervisor가 배포 head와 주기 칸마다 넣는
+요청을 다룬다. 배포 시작·끝(끝에서 새 head의 배포 요청 제출), 시간 경과, 다른 묶음 결과가 최신 summary를 바꾸는
+경우, 요청 제출, 실행 시작·완료·crash가 행동이다.
+
+| 규칙 | 뜻 | 깨는 뮤턴트 |
+| --- | --- | --- |
+| `OneCoreRunPerHeadAndSlot` | 같은 head·같은 칸의 주기 실행 기록은 많아야 하나 | `tick_id`: 요청 이름을 tick마다 새로 지음 |
+| `NoStartDuringDeploy` | 배포 lock이 잡힌 동안 실행을 시작하지 않음 | `ignore_deploy` |
+| `DeployRequestKeepsItsRun` | 같은 head의 주기 요청이 기다리던 배포 요청을 밀어내지 않음 | `ignore_waiting` |
+| `StartedRunIsRecorded`(생존성) | 시작한 실행은 결국 결과 또는 abandoned 기록을 남김 | `drop_on_crash` |
+
+정상 1 GREEN + 뮤턴트 4 RED, 기대 위반 집합과 일치한다. 한도는 head 2, 칸 2, 제출 4회다. 실제 시각·예산 보류·
+채널 lease는 기존 LeaseLifetime 모델과 Python 시험이 맡는다. 실행 도중 배포가 시작되는 경우(그 반대 방향)는
+막지 않으며, 이때 배포 스모크가 셀을 idle로 보지 못해 건너뛸 수 있다.
+
+## 턴별 예산·하네스 수명·끄기 전환 (2026-11-19 수리)
+
+리뷰가 찾은 세 가지를 모델에 넣었다. 뮤턴트는 고치기 전 코드의 행동이다.
+
+새 모델 [TurnBudget](turns/TurnBudget.tla)은 driver 한 번의 실행이다. 입력 전송, 앞 턴 정산(실측·미측정·상한 초과),
+보고, driver 사망이 행동이다. 입력은 driver가 살아 있고 앞 턴이 정산됐고 gate가 멈추지 않았을 때만 나간다.
+
+| 규칙 | 뜻 | 깨는 뮤턴트(고치기 전 행동) |
+| --- | --- | --- |
+| `NoInputBeforeSettlement` | 앞 턴을 정산하기 전에는 다음 입력이 없음 | `presettle`: 예산을 실행 전에 모두 확인하고 턴 사이에는 보지 않음 |
+| `NoInputAfterStop` | 미측정·상한 초과로 멈춘 뒤에는 입력이 없음 | `ignore_stop` |
+| `NoInputAfterDriverDeath` | lease를 가진 driver가 죽은 뒤에는 입력이 없음 | `detached_writer`: 하네스가 별도 프로세스 |
+| `UnmeasuredTurnIsNotReportedAsMeasured` | 미측정 턴이 있으면 토큰을 실측값으로 보고하지 않음 | `partial_usage`: 읽힌 usage만 합산 |
+| `RunEnds`(생존성) | 실행은 보고나 사망으로 끝나거나 정산을 기다림 | — |
+
+[CoreSchedule](schedule/CoreSchedule.tla)에는 끄기 스위치를 더했다. 끄면 요청 제출과 실행 시작이 없고, off tick이
+status를 꺼짐으로 바꾼다. 끌 때 돌던 실행은 끝나면서 켜짐으로 다시 쓰고, 그다음 off tick이 바로잡는다.
+새 규칙 `SwitchedOffIsShown`(실행이 없는 off tick 뒤에는 꺼짐으로 보임)을 뮤턴트 `off_silent`(off tick이 쓰지 않음)가 깬다.
+
+| cfg | 고치기 전 | 고친 뒤 |
+| --- | --- | --- |
+| `schedule/schedule-none.cfg` 외 기존 4개 | `SwitchedOffIsShown` 없음 | 규칙 추가, 기대 위반 집합은 그대로 |
+| `schedule/schedule-off_silent.cfg` | 없음 | 새 RED(`SwitchedOffIsShown`) |
+| `turns/turn-none.cfg` | 없음 | 새 GREEN |
+| `turns/turn-{presettle,ignore_stop,detached_writer,partial_usage}.cfg` | 없음 | 새 RED, 각각 위 표의 규칙 하나 |
+
+배포 lock 확인과 실행 시작 사이에 배포가 들어오는 간격은 이번에도 모델에 넣지 않았다(`Start`가 확인과 시작을 한 행동으로 둔다).
+
+전체는 71 cfg = 12 GREEN + 59 expected RED다.
 
 ## 코드 기준과 범위
 
@@ -247,6 +466,6 @@ TLA2TOOLS=/Users/itismyfield/.local/share/tla2tools/tla2tools-1.7.4.jar JAVA=/op
 
 고정 inode와 동일 open-file-description 전달, host 단일성, 정확한 parent/bot-set resource key, 실제 `fstat`/instance witness 검증, startup admission 앞 fail-closed, CLOEXEC 복구, mutation journal의 atomic/durable 쓰기 및 실제 nonce/ACK 대조는 아직 제품 구현으로 증명하지 않았다. 모델은 파일시스템 전원 손실·inode 교체·NFS/SSH 분산 임대·실제 Discord Gateway·provider 내부 상태·receipt 기반 cleanup 알고리즘을 탐색하지 않는다. `foreign_cleanup`은 권한 추가 금지 계약의 mutation assertion이며 PID 소유권 판별 구현의 증명이 아니다. helper FD 전파 금지는 모델과 liveness 반례로 확인했으며 실제 provider/daemon spawn 배선 검증은 #8124 I3a에 남는다.
 
-<!-- doc-path-refs: external /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/l0/ /tmp/i8120- -->
+<!-- doc-path-refs: external /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/s3-model- /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/s2-model- /tmp/i8120-s2- /Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8120/logs/l0/ /tmp/i8120- -->
 
 자체 `check_models.py`는 정확한 23 cfg 선택과 JSON 증거 보관용 adapter로 유지한다. 기대 집합은 `docs/statecharts/expected.tsv`에서 읽고, 실행·fairness·전체 위반 판정은 `scripts/ci/statecharts_tlc.py`의 `check_cfg`에 위임해 중복 기대값/판정기를 제거했다. `--timeout 300 --jobs 2`는 공통 CI 기본 실행 인자와 같다.

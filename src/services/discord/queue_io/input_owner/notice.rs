@@ -1,4 +1,5 @@
-//! Each retained original owes one outbox notice; a local submit or a missing receipt owes none.
+//! Each retained or refused original owes one outbox notice; a local submit or a missing receipt
+//! owes none.
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 use serde_json::{Value, json};
 
@@ -10,18 +11,7 @@ pub(crate) async fn drain(
     provider: &str,
     channel: u64,
 ) -> Result<usize, String> {
-    let (namespace, owed) = handle
-        .v2_request(|slot| {
-            let state = slot.as_ref().ok_or("no input owner")?.json()?;
-            let namespace = state["namespace"].as_str().ok_or("missing namespace")?;
-            let retained = state["retained_inputs"].as_array().into_iter().flatten();
-            let owed: Vec<Value> = retained
-                .filter(|entry| entry["notice"]["enqueued"] != true)
-                .cloned()
-                .collect();
-            Ok((namespace.to_string(), owed))
-        })
-        .await?;
+    let (namespace, owed) = owed(handle).await?;
     if owed.iter().any(|entry| {
         entry["input"]["attempt"].is_null()
             && entry["reason"]["reason"]
@@ -40,6 +30,24 @@ pub(crate) async fn drain(
         return Ok(count);
     }
     finish(pool, handle, provider, channel, &namespace, &owed).await
+}
+
+/// The namespace and every retained or refused entry whose notice is still owed.
+async fn owed(handle: &ChannelMailboxHandle) -> Result<(String, Vec<Value>), String> {
+    handle
+        .v2_request(|slot| {
+            let state = slot.as_ref().ok_or("no input owner")?.json()?;
+            let namespace = state["namespace"].as_str().ok_or("missing namespace")?;
+            let entries = ["retained_inputs", "refused_inputs", "refused_fronts"]
+                .into_iter()
+                .flat_map(|kept| state[kept].as_array().into_iter().flatten());
+            let owed = entries
+                .filter(|entry| entry["notice"]["enqueued"] != true)
+                .cloned()
+                .collect();
+            Ok((namespace.to_string(), owed))
+        })
+        .await
 }
 
 async fn finish(
@@ -103,20 +111,6 @@ pub(crate) async fn drain_synchronously_for_tests(
     provider: &str,
     channel: u64,
 ) -> Result<usize, String> {
-    let (namespace, owed) = handle
-        .v2_request(|slot| {
-            let state = slot.as_ref().ok_or("no owner")?.json()?;
-            Ok((
-                state["namespace"].as_str().ok_or("namespace")?.to_string(),
-                state["retained_inputs"]
-                    .as_array()
-                    .ok_or("retained")?
-                    .iter()
-                    .filter(|r| r["notice"]["enqueued"] != true)
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            ))
-        })
-        .await?;
+    let (namespace, owed) = owed(handle).await?;
     finish(pool, handle, provider, channel, &namespace, &owed).await
 }

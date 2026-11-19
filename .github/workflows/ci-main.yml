@@ -24,13 +24,18 @@ jobs:
   # The same nextest build, workers and audit as ci-pr.yml; hardening keeps the jobs equal.
   rust_build:
     name: Rust tests build and plan
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) &&
+      '["self-hosted","linux","x64","adk-wsl-rust"]' || '["ubuntu-latest"]') }}
     # Timeout, permissions and checkout depth match ci-pr.yml, whose base comparison needs them.
     timeout-minutes: 100
     permissions:
       actions: read
       contents: read
     env:
+      CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
@@ -52,8 +57,10 @@ jobs:
         with:
           tool: cargo-nextest@0.9.149
       - name: Setup sccache
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/sccache-or-nothing
       - name: Cache Cargo dependencies
+        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
@@ -61,9 +68,16 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Ensure swap for the lib test build
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/ensure-swap
         # Lib test builds peak near 16G RAM + 19G swap; leave headroom to keep the runner alive.
         with: {size-gb: "24"}
+      - name: Disable remote compiler cache
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\n' >> "$GITHUB_ENV"
       - name: Check Rust test source wiring
         shell: bash
         env:

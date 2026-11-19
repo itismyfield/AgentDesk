@@ -116,6 +116,14 @@ impl ChannelMailboxHandle {
             let _timing = timing.entered();
             let outcome = (|| {
                 let lease = Arc::new(Mutex::new((permit.consume(&key)?, None::<String>)));
+                let (m, k, c) = (mailbox.clone(), key.clone(), clock.clone());
+                let approve: owner_input::Approve = Arc::new(move || {
+                    let (key, clock) = (k.clone(), c.clone());
+                    tokio::runtime::Handle::current().block_on(m.v2_request(move |s| {
+                        let owner = s.as_mut().ok_or("owner missing")?;
+                        owner.approve_first_key(&key, &*clock)
+                    }))
+                });
                 let m = mailbox.clone();
                 let k = key.clone();
                 let commit: owner_input::Commit = Arc::new(move |_| {
@@ -164,11 +172,11 @@ impl ChannelMailboxHandle {
                     serde_json::to_value(&key.attempt.target).map_err(|e| e.to_string())?;
                 target["_attempt"] = identity.clone();
                 history::with_attempt(&registry, &namespace, &identity, || {
-                    owner_input::capture_scope(
+                    owner_input::capture_owner_scope(
                         key.attempt.provider.clone(),
                         target,
                         channel,
-                        commit,
+                        (commit, approve),
                         pin,
                         hold,
                         || effect(frame),

@@ -2,15 +2,22 @@ import { describe, expect, it } from "vitest";
 import type { SkillRankingResponse } from "../../api";
 import type { TokenAnalyticsResponse } from "../../types";
 import {
-  buildAgentCacheRows,
+  buildAgentItems,
+  buildAgentSkillRows,
+  buildModelItems,
   buildSavingsDelta,
   buildSkillRows,
   buildWindowDelta,
   computeCacheHitRate,
+  dailyChartMinWidth,
+  dailyColumn,
+  dailyIndexAt,
   formatCurrency,
   formatTokens,
   periodDayCount,
   resolveLocaleTag,
+  skillsForAgent,
+  stepDailySelection,
 } from "./statsModel";
 
 function analyticsFixture(): TokenAnalyticsResponse {
@@ -101,14 +108,76 @@ describe("statsModel", () => {
     ).toEqual({ value: "+100%", tone: "up" });
   });
 
-  it("sorts agent cache rows by prompt volume", () => {
-    expect(buildAgentCacheRows(analyticsFixture()).map((row) => row.id)).toEqual(["pm", "qa"]);
-    expect(buildAgentCacheRows(analyticsFixture())[0]).toMatchObject({
+  it("ranks agents by tokens and keeps their prompt volume, cache hit rate and savings", () => {
+    const items = buildAgentItems(analyticsFixture());
+    expect(items.map((row) => row.id)).toEqual(["pm", "qa"]);
+    expect(items[0]).toMatchObject({
       id: "pm",
       promptTokens: 600,
-      hitRate: 50,
+      cacheHitRate: 50,
       savedCost: 1,
+      share: 70,
+      composition: { input: 200, output: 100, cacheRead: 300, cacheWrite: 100 },
     });
+    // Without a no-cache baseline the saving stays unknown instead of zero.
+    expect(items[1]).toMatchObject({ id: "qa", savedCost: null, share: 30, cacheHitRate: 0 });
+  });
+
+  it("leaves agent prompt detail empty when the receipt has no token split", () => {
+    const data = analyticsFixture();
+    data.receipt.agents = [{ agent: "solo", tokens: 50, cost: 1, percentage: 100 }];
+    expect(buildAgentItems(data)[0]).toMatchObject({ composition: null, promptTokens: null, cacheHitRate: null, share: 100 });
+  });
+
+  it("orders models by tokens with shares of the model total", () => {
+    const data = analyticsFixture();
+    data.receipt.models = [
+      { model: "small", display_name: "Small", input_tokens: 10, output_tokens: 10, cache_read_tokens: 0, cache_creation_tokens: 0, total_tokens: 20, cost: 0.1, cost_without_cache: 0.1, provider: "openai" },
+      { model: "big", display_name: "Big", input_tokens: 20, output_tokens: 20, cache_read_tokens: 30, cache_creation_tokens: 10, total_tokens: 80, cost: 1, cost_without_cache: 1.5, provider: "anthropic" },
+    ];
+    const items = buildModelItems(data);
+    expect(items.map((item) => item.label)).toEqual(["Big", "Small"]);
+    expect(items[0]).toMatchObject({ share: 80, savedCost: 0.5, cacheHitRate: 50, promptTokens: 60 });
+    expect(items[1].share).toBe(20);
+    expect(buildModelItems(null)).toEqual([]);
+  });
+
+  it("matches agent skill pairs by role id or name", () => {
+    const ranking: SkillRankingResponse = {
+      window: "7d",
+      overall: [],
+      byAgent: [
+        { agent_role_id: "pm", agent_name: "PM Bot", skill_name: "plan", skill_desc_ko: "계획", calls: 4, last_used_at: 0 },
+        { agent_role_id: "qa", agent_name: "QA", skill_name: "test", skill_desc_ko: "테스트", calls: 2, last_used_at: 0 },
+      ],
+    };
+    const rows = buildAgentSkillRows(ranking, [], "ko");
+    expect(skillsForAgent(rows, "pm").map((row) => row.skillName)).toEqual(["plan"]);
+    expect(skillsForAgent(rows, "QA").map((row) => row.skillName)).toEqual(["test"]);
+    expect(skillsForAgent(rows, "nobody")).toEqual([]);
+  });
+
+  it("maps chart offsets to day columns and only scrolls long series", () => {
+    // 7 days across a 158px plot (46px axis + 12px right margin).
+    expect(dailyIndexAt(0, 216, 7)).toBe(0);
+    expect(dailyIndexAt(46 + 158 / 7 + 1, 216, 7)).toBe(1);
+    expect(dailyIndexAt(500, 216, 7)).toBe(6);
+    expect(dailyIndexAt(10, 216, 0)).toBe(-1);
+    expect(dailyColumn(2, 216, 7).left).toBeCloseTo(46 + (2 * 158) / 7);
+    expect(dailyChartMinWidth(7)).toBe(0);
+    expect(dailyChartMinWidth(30)).toBe(30 * 11 + 58);
+  });
+
+  it("steps the daily readout from the latest day and clamps at both ends", () => {
+    expect(stepDailySelection(null, "next", 7)).toBe(6);
+    expect(stepDailySelection(null, "prev", 7)).toBe(5);
+    expect(stepDailySelection(0, "prev", 7)).toBe(0);
+    expect(stepDailySelection(6, "next", 7)).toBe(6);
+    expect(stepDailySelection(3, "first", 7)).toBe(0);
+    expect(stepDailySelection(3, "last", 7)).toBe(6);
+    expect(stepDailySelection(3, "clear", 7)).toBeNull();
+    expect(stepDailySelection(12, "prev", 7)).toBe(5);
+    expect(stepDailySelection(null, "next", 0)).toBeNull();
   });
 
   it("prefers catalog descriptions for skill rows", () => {

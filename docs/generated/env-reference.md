@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 94
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 95
 - Platform and third-party variables: 41
 
 ## AgentDesk variables
@@ -24,6 +24,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_BUSY_INJECT_DISCORD_CHANNELS` | `src/services/discord/router/intake_gate/busy_inject.rs` | `ADK_BUSY_INJECT_DISCORD_CHANNELS` opens busy-turn injection of admitted Discord text, read once per process: `*` or channel ids split by commas or spaces, thr… |
 | `ADK_BUSY_INJECT_STASH_CHANNELS` | `src/services/claude_tui/busy_inject.rs` | Channel ids whose panes may take the stash path, comma-separated and read once; unset is none. |
 | `ADK_CAMPAIGN_PHASE_NONCE` | `src/services/campaign_execution/verification_runner.rs` | Set on every phase child so a later observation can match the exact process, not just its PID. |
+| `ADK_CARGO_SLOT_HELD` | `src/services/campaign_execution/adk_resources.rs` |  |
 | `ADK_ENV_PANIC_PROBE_CHILD` | `src/test_env_panic_probe.rs` |  |
 | `ADK_ENV_PROBE_MODE` | `src/test_env_panic_probe.rs` |  |
 | `ADK_FORCE_LOCAL_MEMORY` | `src/server/routes/memory_api.rs` | `ADK_FORCE_LOCAL_MEMORY=1` → always Local (testing / escape hatch). |
@@ -144,7 +145,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `OBSIDIAN_REMOTE_VAULT_ROOT` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
 | `OBSIDIAN_VAULT_ROOT` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
-| `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/config/test_env.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs`, `src/services/platform/tmux/session_inventory.rs`, `src/services/session_host/herdr/autostart.rs` | Put `dir` in front of `PATH` while the caller owns the shared env lock. |
+| `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/config/test_env.rs`, `src/services/campaign_execution/landing_prepare.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs`, `src/services/platform/tmux/session_inventory.rs`, `src/services/session_host/herdr/autostart.rs` | Put `dir` in front of `PATH` while the caller owns the shared env lock. |
 | `PNPM_HOME` | `src/services/platform/binary_resolver.rs` |  |
 | `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs`, `src/dispatch/test_support.rs`, `src/high_risk_recovery.rs` |  |
 | `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs`, `src/services/discord/model_catalog.rs` |  |

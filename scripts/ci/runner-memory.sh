@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Samples resource counters only; the workflow keeps observation failures separate from build results.
+# Samples memory and peak process names; the workflow keeps observation failures separate from build results.
 exec python3 - "$0" "$@" <<'PY'
 import contextlib
 import datetime
@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,7 @@ METRICS = (
     "cgroup_current_bytes", "cgroup_peak_bytes", "rss_sum_bytes",
     "largest_rss_bytes", "largest_hwm_bytes", "rustc_processes",
 )
+CRATE_TYPES = {"bin", "lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
 
 
 def write_json(path, value):
@@ -44,6 +46,36 @@ def read_number(path):
         return int(value) if value.isdigit() else None
     except OSError:
         return None
+
+
+def rustc_details(status, identity):
+    try:
+        executable, *args = os.fsdecode(status.with_name("cmdline").read_bytes()).split("\0")
+        # A reused PID must not attach another process's arguments to this sample.
+        if os.path.basename(executable) != "rustc" or not os.path.samestat(identity, status.stat()):
+            return {}
+    except OSError:
+        return {}
+
+    details = {"test": False}
+    crate_types = []
+    for index, arg in enumerate(args):
+        if arg == "--":
+            break
+        if arg == "--test":
+            details["test"] = True
+        option, separator, value = arg.partition("=")
+        if option not in ("--crate-name", "--crate-type"):
+            continue
+        if not separator and index + 1 < len(args):
+            value = args[index + 1]
+        if option == "--crate-name" and re.fullmatch(r"\w+", value):
+            details["crate_name"] = value
+        if option == "--crate-type" and all(kind in CRATE_TYPES for kind in value.split(",")):
+            crate_types.append(value)
+    if crate_types:
+        details["crate_type"] = ",".join(crate_types)
+    return details
 
 
 def snapshot():
@@ -95,28 +127,42 @@ def snapshot():
     values["cgroup_limit_state"] = "finite" if limits else limit_state
     if limit_state == "unavailable" and not limits:
         errors.append("cgroup_limit_unavailable")
-    rss, hwm, names = [], [], []
+    rss_sum, peaks, names = 0, {}, []
     for status in PROC.glob("[0-9]*/status"):
         try:
-            fields = dict(line.split(":", 1) for line in status.read_text().splitlines() if ":" in line)
+            with status.open(errors="replace") as stream:
+                fields = dict(line.split(":", 1) for line in stream.read().splitlines() if ":" in line)
+                comm = fields.get("Name", "").strip()
+                identity = os.fstat(stream.fileno()) if comm == "rustc" else None
         except FileNotFoundError:
             continue
         except OSError:
             errors.append("process_status_unreadable")
             continue
         if "Name" in fields:
-            names.append(fields["Name"].strip())
-        for field, collection in (("VmRSS", rss), ("VmHWM", hwm)):
+            names.append(comm)
+        for field, metric in (("VmRSS", "rss"), ("VmHWM", "hwm")):
             parts = fields.get(field, "").split()
             if parts and parts[0].isdigit():
-                collection.append(int(parts[0]) * 1024)
+                size = int(parts[0]) * 1024
+                if metric == "rss":
+                    rss_sum += size
+                if metric not in peaks or size > peaks[metric][0]:
+                    peaks[metric] = (size, comm, status, identity)
     if names:
         values["rustc_processes"] = names.count("rustc")
-    if rss:
-        values["rss_sum_bytes"], values["largest_rss_bytes"] = sum(rss), max(rss)
-    if hwm:
-        values["largest_hwm_bytes"] = max(hwm)
-    if not names or not rss or not hwm:
+    if "rss" in peaks:
+        values["rss_sum_bytes"] = rss_sum
+    details = {}
+    for metric, (size, comm, status, identity) in peaks.items():
+        values[f"largest_{metric}_bytes"] = size
+        if comm:
+            if status not in details:
+                details[status] = {"comm": comm}
+                if identity is not None:
+                    details[status].update(rustc_details(status, identity))
+            values[f"largest_{metric}_process"] = details[status]
+    if not names or len(peaks) != 2:
         errors.append("process_memory_unavailable")
     values["errors"] = sorted(set(errors))
     return values
@@ -129,6 +175,13 @@ def sample(phase=None):
     row.update(phase=phase, timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat())
     with (STATE / "samples.jsonl").open("a") as stream:
         stream.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def runner_scope():
+    environment = os.environ.get("RUNNER_ENVIRONMENT")
+    if environment not in {"github-hosted", "self-hosted"}:
+        return {"runner_environment": None, "shared_host": None}
+    return {"runner_environment": environment, "shared_host": environment == "self-hosted"}
 
 
 def finish():
@@ -147,6 +200,7 @@ def finish():
         if (STATE / "samples.jsonl").exists():
             rows = [json.loads(line) for line in (STATE / "samples.jsonl").read_text().splitlines()]
         metadata = json.loads((STATE / "metadata.json").read_text()) if started else {}
+        scope = {key: metadata.get(key, value) for key, value in runner_scope().items()}
         errors = sorted({error for row in rows for error in row["errors"]})
         phases = {}
         for row in rows:
@@ -161,6 +215,7 @@ def finish():
             available = [row[key] for row in rows if row.get(key) is not None]
             return max(available) if available else None
         summary = {
+            **scope,
             "status": "unavailable" if not rows else ("partial" if errors or sampler_status != "stopped" else "complete"),
             "sampler_status": sampler_status, "samples": len(rows), "errors": errors,
             "interval_seconds": metadata.get("interval_seconds"), "cpu_count": metadata.get("cpu_count"),
@@ -174,6 +229,8 @@ def finish():
         return "unavailable" if value is None else f"{value / 1048576:.1f}"
     limit = "unlimited" if summary["cgroup_limit_state"] == "unlimited" else mib(summary["cgroup_limit_bytes"]) + " MiB"
     lines = ["### Runner memory observation", "", f"Status: {summary['status']}; sampler: {sampler_status}; samples: {len(rows)}.",
+             f"Runner environment: {scope['runner_environment'] or 'unavailable'}."
+             + (" Counters can include activity from other workloads on this shared host." if scope["shared_host"] else ""),
              f"Interval: {summary['interval_seconds']} s; CPUs: {summary['cpu_count']}; host RAM: {mib(summary['host_total_bytes'])} MiB; cgroup limit: {limit}.",
              f"Cgroup lifetime peak: {mib(summary['lifetime_cgroup_peak_bytes'])} MiB (not a per-step peak).", "",
              "| Phase | Samples | Host used MiB | Swap used MiB | RSS sum MiB | Largest RSS MiB | rustc count | Cgroup current MiB |",
@@ -208,7 +265,7 @@ def main():
                 raise ValueError("already_started")
             write_json(STATE / "phase.json", {"phase": IDLE})
             write_json(STATE / "metadata.json", {"interval_seconds": interval, "cpu_count": os.cpu_count(),
-                                                "cargo_build_jobs": os.environ.get("CARGO_BUILD_JOBS")})
+                                                "cargo_build_jobs": os.environ.get("CARGO_BUILD_JOBS"), **runner_scope()})
             sample()
         with (STATE / "sampler.log").open("a") as log:
             subprocess.Popen(["bash", str(SCRIPT), "_sample"], stdin=subprocess.DEVNULL,

@@ -8,6 +8,7 @@ on:
       - '.github/workflows/release.yml'
       - 'scripts/build-release.sh'
       - 'scripts/package_release.py'
+      - 'scripts/release_source.py'
       - 'scripts/verify_release_artifacts.py'
       - 'tests/test_package_release.py'
   workflow_dispatch:
@@ -83,6 +84,8 @@ jobs:
           cache-dependency-path: dashboard/package-lock.json
       - name: Verify and build shared dashboard
         run: bash scripts/verify-dashboard.sh
+        env:
+          DASHBOARD_AUDIT_WAIVER: "GHSA-fc5q-39xc-vjpf picomatch ReDoS: no patched release; dev-only build tooling (vite/vitest), not in the browser bundle. Remove when patched (#8236)"
       - uses: actions/upload-artifact@v4
         with:
           name: release-dashboard

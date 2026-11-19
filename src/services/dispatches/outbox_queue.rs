@@ -21,6 +21,9 @@ use crate::services::dispatches::outbox_claiming::claim_pending_dispatch_outbox_
 use sqlx::PgPool;
 use std::sync::Arc;
 
+#[path = "outbox_pressure.rs"]
+mod pressure;
+
 // ── Outbox worker trait ───────────────────────────────────────
 
 /// Trait for outbox side-effects (Discord notifications, followups).
@@ -413,16 +416,12 @@ pub(crate) async fn dispatch_outbox_loop(
     );
 
     let notifier = RealOutboxNotifier::new(pg_pool);
-    let mut poll_interval = Duration::from_millis(500);
-    let max_interval = Duration::from_secs(5);
+    let mut pressure = pressure::OutboxPressure::new(Instant::now());
     let wake_interval =
         Duration::from_secs(cluster_config.dispatch_routing.wake_interval_secs.max(1));
     let mut last_wake = Instant::now() - wake_interval;
-    // #3651: throttle for the backpressure yield log.
-    let mut last_pressure_log = Instant::now() - crate::db::postgres::BACKPRESSURE_LOG_THROTTLE;
-
     loop {
-        tokio::time::sleep(poll_interval).await;
+        tokio::time::sleep(pressure.poll_interval()).await;
 
         // #3651: under foreground pool pressure, back this background drain off
         // to the max poll interval and skip this tick entirely. Outbox claiming
@@ -430,15 +429,8 @@ pub(crate) async fn dispatch_outbox_loop(
         // once in_flight drops below the background budget. Foreground turn
         // ingestion never goes through this loop, so backing off never delays a
         // turn relay.
-        if crate::db::postgres::background_should_yield(notifier.pg_pool.as_ref()) {
-            if last_pressure_log.elapsed() >= crate::db::postgres::BACKPRESSURE_LOG_THROTTLE {
-                tracing::warn!(
-                    claim_owner,
-                    "[dispatch-outbox] yielding drain to foreground under pool pressure"
-                );
-                last_pressure_log = Instant::now();
-            }
-            poll_interval = max_interval;
+        let snapshot = crate::db::postgres::pressure_snapshot(notifier.pg_pool.as_ref());
+        if pressure.yield_tick(snapshot, &claim_owner, Instant::now()) {
             continue;
         }
 
@@ -468,17 +460,16 @@ pub(crate) async fn dispatch_outbox_loop(
             last_wake = Instant::now();
         }
 
-        let processed = process_outbox_batch_with_pg(
-            Some(notifier.pg_pool.as_ref()),
-            &notifier,
-            Some(&claim_owner),
-        )
-        .await;
-        if processed == 0 {
-            poll_interval = (poll_interval.mul_f64(1.5)).min(max_interval);
-        } else {
-            poll_interval = Duration::from_millis(500);
-        }
+        pressure
+            .drain(
+                process_outbox_batch_with_pg(
+                    Some(notifier.pg_pool.as_ref()),
+                    &notifier,
+                    Some(&claim_owner),
+                ),
+                Instant::now,
+            )
+            .await;
     }
 }
 

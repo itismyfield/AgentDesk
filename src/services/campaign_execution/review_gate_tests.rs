@@ -99,6 +99,7 @@ fn clean_text_alone_never_passes_without_full_chain_and_resolved_findings() {
     );
     let finding = |open, resolution: Option<&str>| Finding {
         id: "F1".into(),
+        severity: None,
         open,
         resolution: resolution.map(Into::into),
     };
@@ -322,6 +323,7 @@ fn resume_reuses_collected_replaces_cancelled_and_blocks_unreconciled_runs() {
 fn only_the_adopted_chain_may_resolve_a_finding_an_earlier_review_opened() {
     let finding = |open, resolution: Option<&str>| Finding {
         id: "F1".into(),
+        severity: None,
         open,
         resolution: resolution.map(Into::into),
     };
@@ -343,6 +345,23 @@ fn only_the_adopted_chain_may_resolve_a_finding_an_earlier_review_opened() {
         .findings
         .push(finding(false, Some("mid..out removes the race")));
     assert_eq!(gate(&[first, fix]).verdict, Verdict::Pass);
+}
+
+#[test]
+fn m5_p2_only_does_not_require_repair() {
+    let mut review = full();
+    review.review.verdict = ReviewVerdict::Issues;
+    review.review.findings.push(Finding {
+        id: "follow-up".into(),
+        severity: Some(FindingSeverity::P2),
+        open: true,
+        resolution: None,
+    });
+    assert_eq!(gate(&[review.clone()]).verdict, Verdict::Pass);
+    for severity in [None, Some(FindingSeverity::P0), Some(FindingSeverity::P1)] {
+        review.review.findings[0].severity = severity;
+        assert_eq!(gate(&[review.clone()]).verdict, Verdict::QualityFail);
+    }
 }
 
 #[test]

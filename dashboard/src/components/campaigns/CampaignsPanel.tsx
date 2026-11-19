@@ -1,23 +1,39 @@
+import { ChevronDown } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import type { CampaignNodeLive } from "../../api/campaigns";
 import {
-  isDefinitiveAnswer, sendServerCampaignCommand, serverCampaignRejection,
+  isDefinitiveAnswer, sendServerCampaignCommand, serverCampaignProfile, serverCampaignRejection,
   type ServerCampaignCommand, type ServerCampaignDocument,
 } from "../../api/serverCampaigns";
+import { PageFrame } from "../../app/PageFrame";
+import { Badge as KitBadge } from "../../kit/free/badge-clean";
+import { Button } from "../../kit/free/button-clean";
+import { SegmentedControl } from "../../kit/free/segmented-control-clean";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import { readLocalStorageValue, writeLocalStorageValue } from "../../lib/useLocalStorage";
-import { Select } from "../common/Select";
+import { BottomSheet } from "../common/overlay/BottomSheet";
+import { Modal } from "../common/overlay/Modal";
+import { useIsMobile } from "../common/overlay/useBreakpoint";
 import { WidgetState } from "../common/WidgetState";
-import CampaignPageHeader, { type CampaignTab } from "./CampaignPageHeader";
-import type { Tr } from "./campaignPresentation";
-import type { CampaignDraft } from "./CampaignNodeDetails";
-import LegacyCampaignView from "./LegacyCampaignView";
-import type { ControlCommand } from "./ServerCampaignControls";
-import ServerCampaignDetail from "./ServerCampaignDetail";
-import ServerCampaignForm, { createDraft, editDraft, isUntouchedCreate, type DefinitionDraft } from "./ServerCampaignForm";
-import ServerCampaignList from "./ServerCampaignList";
+import CampaignAutoQueueToggle, { useAutoQueueRequests } from "./CampaignAutoQueueToggle";
+import CampaignBoard from "./CampaignBoard";
+import { legacyBoard, serverBoard } from "./campaignBoardModel";
+import CampaignDetail from "./CampaignDetail";
+import CampaignList from "./CampaignList";
+import { campaignIssueLabel } from "./campaignModel";
+import CampaignNodeDetails, { type CampaignDraft } from "./CampaignNodeDetails";
+import CampaignOverview, { type TaskView } from "./CampaignOverview";
 import {
-  campaignLocationQuery, commandAvailability, newIdempotencyKey, parseCampaignLocation, reconcileStop, rejectionText, stopRequest,
+  LEDGER_STATUS_LABELS, entryKey, legacyEntry, legacyTask, recentServerEvents, recentTaskChanges, serverEntry, serverTasks, statusSentence, type CampaignEntry,
+} from "./campaignOverviewModel";
+import { Badge, CAMPAIGN_SCOPE, type Tr } from "./campaignPresentation";
+import CampaignRelations from "./CampaignRelations";
+import CampaignRelationsEditor from "./CampaignRelationsEditor";
+import type { EditScope } from "./relationsEditorModel";
+import ServerCampaignControls, { type ControlCommand } from "./ServerCampaignControls";
+import ServerCampaignSections, { ServerTaskDetails } from "./ServerCampaignDetail";
+import ServerCampaignForm, { createDraft, editDraft, isUntouchedCreate, type DefinitionDraft } from "./ServerCampaignForm";
+import {
+  DISPLAY_LABELS, campaignLocationQuery, commandAvailability, newIdempotencyKey, parseCampaignLocation, reconcileStop, rejectionText, stopRequest,
   type CampaignLocation, type StopIntent,
 } from "./serverCampaignModel";
 import { queueLocationQuery, parseQueueLocation } from "./campaignQueueModel";
@@ -28,12 +44,12 @@ import "./campaigns.css";
 
 const CampaignQueueTab = lazy(() => import("./CampaignQueueTab"));
 
-const NO_LIVE: Record<string, CampaignNodeLive> = {};
-const SERVER_OPTION = "server:";
+type CampaignTab = "campaigns" | "queue";
 // Disjoint from edit keys, so a campaign named "new" never shares the create draft.
 const NEW_DRAFT = "create";
 const editKey = (id: string) => `edit:${id}`;
 const POLL_MS = 15_000;
+const EDITOR_ENTRY = "campaignRelationsEditor";
 // Both campaign lists are re-read on this slower beat; a failed list read is retried on the next poll.
 const LIST_POLL_MS = 60_000;
 // Route paths match without regard to a trailing slash or case.
@@ -70,6 +86,13 @@ export default function CampaignsPanel({ language }: { language: string }) {
   useEffect(() => { if (selectedPartial && selectedId) void refreshCampaign(selectedId); }, [selectedPartial, selectedId, refreshCampaign]);
   const [serverSelected, setServerSelected] = useState<string | null>(linked?.mode === "server" ? linked.campaign : null);
   const [node, setNode] = useState<string | null>(linked?.node ?? null);
+  // The ledger relations editor's scope while it is open, tied to the campaign it opened on, so picking another campaign
+  // never opens that one on this scope; `leave` is set by the editor while it has unsaved changes.
+  const [edit, setEdit] = useState<{ campaign: string; scope: EditScope } | null>(linked?.mode === "legacy" && linked.edit ? { campaign: linked.campaign, scope: linked.edit } : null);
+  const editing = mode === "legacy" && edit?.campaign === selectedId ? edit.scope : null;
+  const setEditing = (scope: EditScope | null) => setEdit(scope && selectedId ? { campaign: selectedId, scope } : null);
+  const leave = useRef<((proceed: () => void) => void) | null>(null);
+  const leaveEditor = (proceed: () => void) => leave.current ? leave.current(proceed) : proceed();
   const server = useServerCampaignReads(mode === "server" ? serverSelected : null);
   const { summaries, listLoaded, listError, details, detail, events, refreshList, refreshDetail } = server;
   const serverDoc = server.doc;
@@ -133,15 +156,39 @@ export default function CampaignsPanel({ language }: { language: string }) {
 
   const location: CampaignLocation | null = mode === "server"
     ? serverSelected ? { mode, campaign: serverSelected, node } : null
-    : selectedId ? { mode, campaign: selectedId, node } : null;
+    : selectedId ? { mode, campaign: selectedId, node, ...editing ? { edit: editing } : {} } : null;
   const query = tab === "queue" ? queueLocationQuery(queueCard) : location ? campaignLocationQuery(location) : null;
   // Runs after every render, so a navigation that dropped the query while this panel stayed mounted is undone;
   // once the address shows another page, the query is not this panel's to write.
   const [home] = useState(() => window.location.pathname);
+  // The editor's own history entry carries a mark; while the editor is open no other entry is rewritten, so an entry
+  // the browser's back button reached keeps its address even when an effect from before the move runs late.
+  const editorEntry = (mark: boolean) => ({ ...window.history.state, [EDITOR_ENTRY]: mark || undefined });
+  useEffect(() => { if (editing) window.history.replaceState(editorEntry(true), ""); }, []); // eslint-disable-line react-hooks/exhaustive-deps -- a linked editor marks its entry once
   useEffect(() => {
     const { pathname, search, hash } = window.location;
-    if (query && samePage(pathname, home) && search !== query) window.history.replaceState(window.history.state, "", `${pathname}${query}${hash}`);
+    const onEditorEntry = !!window.history.state?.[EDITOR_ENTRY];
+    if (!query || !samePage(pathname, home) || (editing && !onEditorEntry)) return;
+    if (search !== query || onEditorEntry !== !!editing) window.history.replaceState(editorEntry(!!editing), "", `${pathname}${query}${hash}`);
   });
+  // Opening the editor adds a history entry, so the browser's back button leaves the editor first; with unsaved
+  // changes the editor's entry goes back on and the editor asks.
+  const startEdit = (scope: EditScope) => {
+    if (!selectedId) return;
+    window.history.pushState(editorEntry(true), "", `${window.location.pathname}${campaignLocationQuery({ mode: "legacy", campaign: selectedId, node, edit: scope })}`);
+    setEditing(scope);
+  };
+  const editorAddress = useRef("");
+  editorAddress.current = editing && query ? `${window.location.pathname}${query}` : "";
+  useEffect(() => {
+    const onBack = () => {
+      if (!editorAddress.current || window.history.state?.[EDITOR_ENTRY]) return;
+      if (leave.current) window.history.pushState(editorEntry(true), "", editorAddress.current);
+      leaveEditor(() => setEditing(null));
+    };
+    window.addEventListener("popstate", onBack, true);
+    return () => window.removeEventListener("popstate", onBack, true);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- reads the editor's address and guard through refs
 
   const selectServer = (id: string) => { setMode("server"); setServerSelected(id); setNode(null); };
   const runCommand = async (doc: ServerCampaignDocument, name: ControlCommand, nodeId?: string) => {
@@ -223,56 +270,129 @@ export default function CampaignsPanel({ language }: { language: string }) {
     }} />;
 
   const holds = useServerCampaignHolds(summaries, listLoaded, tab === "queue");
-  const campaign = campaigns.find((value) => value.id === selectedId);
-  const selectorTitle = tr("캠페인 선택", "Select campaign");
-  const selector = <label className="campaign-selector"><span>{selectorTitle}</span><Select aria-label={selectorTitle} className="font-semibold" value={mode === "server" ? `${SERVER_OPTION}${serverSelected}` : campaign?.id ?? ""} onChange={(event) => {
-    const { value } = event.target;
-    if (value.startsWith(SERVER_OPTION)) selectServer(value.slice(SERVER_OPTION.length));
-    else { setMode("legacy"); setSelectedId(value); setNode(null); }
-  }}>
-    {campaigns.map((value) => <option key={value.id} value={value.id}>{value.title}</option>)}
-    {summaries.map(({ definition, view }) => <option key={view.campaign_id} value={`${SERVER_OPTION}${view.campaign_id}`}>{definition.title}</option>)}
-    {/* The selection must match an option, or the browser shows another campaign as chosen and it cannot be picked. */}
-    {mode === "server" && serverSelected && !summaries.some((summary) => summary.view.campaign_id === serverSelected) && <option value={`${SERVER_OPTION}${serverSelected}`}>{serverDoc?.definition.title ?? serverSelected}</option>}
-  </Select></label>;
+  const phone = useIsMobile();
+  const [picking, setPicking] = useState(false);
+  const autoRuns = useAutoQueueRequests();
+  const campaign = mode === "legacy" ? campaigns.find((value) => value.id === selectedId) : undefined;
+  const entries: CampaignEntry[] = [
+    ...campaigns.map((value) => legacyEntry(value, live[value.id], tr)),
+    ...summaries.map((summary) => serverEntry(summary, details[summary.view.campaign_id]?.doc ?? null, tr)),
+  ];
+  // A linked campaign past the list's pages stays listed once its own read answers, so it can be picked again.
+  if (serverDoc && !summaries.some((summary) => summary.view.campaign_id === serverDoc.view.campaign_id)) entries.push(serverEntry({ definition: serverDoc.definition, view: serverDoc.view }, serverDoc, tr));
+  const selectedKey = mode === "server" ? serverSelected && entryKey("server", serverSelected) : campaign ? entryKey("legacy", campaign.id) : null;
+  const selectedEntry = entries.find((entry) => entry.key === selectedKey);
+  const select = (entry: CampaignEntry) => {
+    setPicking(false);
+    if (entry.kind === "server") selectServer(entry.id);
+    else { setMode("legacy"); setSelectedId(entry.id); setNode(null); setEdit(null); }
+  };
+  const createNew = () => { setPicking(false); openDraft(NEW_DRAFT, () => createDraft(null)); };
+  const list = <CampaignList entries={entries} selectedKey={selectedKey} onSelect={select} onCreate={createNew} createDisabled={serverDown}
+    onRefresh={refreshAll} refreshing={loading} tr={tr} />;
 
-  const actions = tab === "campaigns" && <>
-    <button type="button" disabled={serverDown} onClick={() => openDraft(NEW_DRAFT, () => createDraft(null))}>{tr("새 캠페인", "New campaign")}</button>
-    <button type="button" disabled={loading} onClick={refreshAll}>{loading ? tr("불러오는 중…", "Refreshing…") : tr("새로고침", "Refresh")}</button>
-  </>;
-  return <section className="campaigns-panel [&_[data-widget-state]]:!rounded-lg min-w-0 gap-4 text-sm text-th-text-primary sm:gap-6 [&_button]:min-h-11 [&_button]:min-w-11 [&_input:not([type=checkbox])]:min-h-11 [&_select]:min-h-11 [&_summary]:min-h-11 [&_summary]:py-3 [&_label:has(input[type=checkbox])]:min-h-11 [&_h2]:text-2xl [&_h2]:font-semibold [&_h2]:tracking-tight [&_h3]:font-semibold [&_h4]:text-xs [&_h4]:font-medium [&_a]:inline-flex [&_a]:min-h-11 [&_a]:max-w-full [&_a]:items-center [&_a]:py-2 [&_a]:[overflow-wrap:anywhere]">
-    <CampaignPageHeader tab={tab} onTab={setTab} actions={actions} tr={tr} />
-    {tab === "queue" ? <div id="campaign-panel-queue" role="tabpanel" aria-labelledby="campaign-tab-queue" className="min-w-0">
+  const legacyTasks: TaskView[] = campaign ? campaign.nodes.map((value) => ({ ...legacyTask(value, live[campaign.id]?.[value.id]), live: live[campaign.id]?.[value.id], hold: value.post_merge_hold })) : [];
+  const serverEvents = server.events?.campaign === serverDoc?.view.campaign_id ? server.events?.events ?? [] : [];
+  const serverTaskViews = serverDoc ? serverTasks(serverDoc, serverEvents, tr) : [];
+  const openNode = node && (campaign?.nodes.find((value) => value.id === node) ?? (mode === "server" ? serverDoc?.definition.nodes.find((value) => value.id === node) : undefined));
+  const legacyDetail = campaign && <CampaignDetail key={`legacy:${campaign.id}`} title={campaign.title} showTitle={!phone} tr={tr}
+    chips={!phone && <span className="flex flex-wrap items-center gap-2 text-xs text-[var(--fg-muted)]">
+      <KitBadge title={tr("작업 기록부로 관리하는 캠페인", "Campaign kept as a task ledger")}>{tr("원장", "Ledger")}</KitBadge>
+      <span className="tabular-nums">{tr("라운드", "Round")} {campaign.round}</span>
+    </span>}
+    sentence={statusSentence(tr(...LEDGER_STATUS_LABELS[campaign.status]), legacyTasks, tr)}
+    notes={editing && phone && <p role="status" className="m-0 rounded-lg border border-[var(--line)] px-3 py-2 text-sm text-[var(--fg-muted)]">{tr("관계도 편집은 900px 넘는 화면에서 열려요. 여기서는 보기만 해요.", "The relations editor opens on screens wider than 900px. This screen only shows them.")}</p>}
+    description={campaign.description && <details className="group min-w-0 text-xs text-[var(--fg-muted)]">
+      <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-[var(--r-sm)] px-1 hover:text-[var(--fg)] [&::-webkit-details-marker]:hidden">
+        <ChevronDown aria-hidden className="size-3.5 -rotate-90 transition-transform group-open:rotate-0 motion-reduce:transition-none" />{tr("캠페인 설명", "Campaign description")}
+      </summary>
+      <p className="campaign-description mt-1 max-w-[72ch] px-1 text-[var(--fg-dim)]">{campaign.description}</p>
+    </details>}
+    overview={(controls) => <CampaignOverview tasks={legacyTasks} limit={null} showPr asOf={refreshedAt ? new Date(refreshedAt).toISOString() : null}
+      summaryExtra={<CampaignAutoQueueToggle key={campaign.id} campaign={campaign} tr={tr} onSaved={onSaved} checkedRead={checkedRead} held={autoRuns(campaign.id)} />}
+      recent={{ title: tr("최근 바뀐 작업", "Recently changed tasks"), entries: recentTaskChanges(legacyTasks) }}
+      selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
+    relations={campaign.nodes.length > 0 && <CampaignRelations campaign={campaign} selectedId={node} onOpen={setNode} onEdit={phone ? undefined : startEdit} tr={tr} />}
+    board={(controls) => <CampaignBoard columns={legacyBoard(campaign.nodes, live[campaign.id])} tasks={legacyTasks} selectedId={node} controls={controls} onOpen={setNode} tr={tr} />}
+    task={openNode && "status" in openNode ? { id: openNode.id, label: campaignIssueLabel(openNode), body: <CampaignNodeDetails key={openNode.id} campaign={campaign} node={openNode} live={live[campaign.id]?.[openNode.id]} tr={tr} onSaved={onSaved}
+      editing={drafts[`${campaign.id}:${openNode.id}`] ?? null} onDraftChange={(draft, expected) => onDraftChange(`${campaign.id}:${openNode.id}`, draft, expected)} /> } : null}
+    onCloseTask={() => setNode(null)} />;
+
+  const serverDetail = serverDoc && (() => {
+    const { definition, view } = serverDoc;
+    const id = view.campaign_id;
+    const edit = commandAvailability(view, "edit_definition", connection);
+    const shown = server.events?.campaign === id ? server.events : null;
+    const profile = serverCampaignProfile(view);
+    const retry = commandAvailability(view, "prepare_retry", connection);
+    const commands = <ServerCampaignControls view={view} connection={connection} stopIntent={stops[id] ?? null} busy={busy.has(id)} error={commandErrors[id] ?? null} onCommand={(name) => void runCommand(serverDoc, name)} tr={tr} />;
+    return <CampaignDetail key={`server:${id}`} title={definition.title} showTitle={!phone} tr={tr}
+      chips={(!phone || view.unknown) && <span className="flex flex-wrap items-center gap-2 text-xs">
+        {!phone && <><KitBadge>{tr("서버", "Server")}</KitBadge><KitBadge className="font-mono">{definition.repository}</KitBadge></>}
+        {view.unknown && <Badge status="blocked" label={tr("확인 불가", "Unknown")} tr={tr} />}
+      </span>}
+      sentence={statusSentence(tr(...DISPLAY_LABELS[view.display]), serverTaskViews, tr)}
+      actions={<>
+        <Button variant="secondary" size="sm" disabled={!edit.enabled} title={edit.reason ? rejectionText(edit.reason, tr) : undefined} onClick={() => openDraft(editKey(id), () => editDraft(serverDoc))}>{tr("정의 편집", "Edit definition")}</Button>
+        {view.control === "succeeded" && <Button variant="secondary" size="sm" onClick={() => copyToCreate(definition)}>{tr("정의를 복사해 새 캠페인", "Copy definition to a new campaign")}</Button>}
+      </>}
+      notes={<>
+        {detail?.error && <WidgetState kind="stale" title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error + tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.")} />}
+        {renderForm(editKey(id), !edit.enabled)}
+        {!phone && commands}
+      </>}
+      overview={(controls) => <CampaignOverview tasks={serverTaskViews} limit={profile?.limits.concurrent_tasks ?? null} showPr={false} asOf={view.as_of}
+        recent={{ title: tr("최근 이벤트", "Recent events"), entries: shown?.events ? recentServerEvents(shown.events) : null, note: shown && shown.failedAfter !== null ? tr("이벤트를 갱신하지 못했습니다", "Could not refresh events") : null }}
+        footer={<>{phone && commands}<ServerCampaignSections document={serverDoc} link={`${window.location.origin}${window.location.pathname}${query ?? ""}`} tr={tr} /></>}
+        selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
+      board={(controls) => <CampaignBoard columns={serverBoard(serverDoc, serverTaskViews, tr)} tasks={serverTaskViews} selectedId={node} controls={controls} onOpen={setNode} tr={tr}
+        retry={{ enabled: retry.enabled && !busy.has(id), reason: retry.reason, onRetry: (nodeId) => runCommand(serverDoc, "prepare_retry", nodeId) }} />}
+      task={openNode && !("status" in openNode) ? { id: openNode.id, label: openNode.id, body: <ServerTaskDetails document={serverDoc} nodeId={openNode.id}
+        gate={serverTaskViews.find((task) => task.id === openNode.id)?.gate ?? null} connection={connection} busy={busy.has(id)} onCommand={(name, nodeId) => void runCommand(serverDoc, name, nodeId)} tr={tr} /> } : null}
+      onCloseTask={() => setNode(null)} />;
+  })();
+
+  // Below 1280px an open task pane leaves too little width beside the list, so the list folds into the picker.
+  const folded = !phone && !!openNode;
+  const pickerTitle = selectedEntry?.title ?? (mode === "server" ? serverDoc?.definition.title ?? serverSelected : null);
+  return <PageFrame title={tr("캠페인", "Campaigns")} testId="campaigns-page" actions={<div className="w-full sm:w-56">
+    <SegmentedControl<CampaignTab> kind="tabs" variant="tray" fullWidth size="sm" aria-label={tr("캠페인 화면", "Campaign views")} value={tab} onChange={(next) => editing ? leaveEditor(() => { setEditing(null); setTab(next); }) : setTab(next)}
+      options={[{ value: "campaigns", label: tr("캠페인", "Campaigns"), controls: "campaign-panel-campaigns" }, { value: "queue", label: tr("대기열", "Queue"), controls: "campaign-panel-queue" }]} />
+  </div>}>
+  <section className={`${CAMPAIGN_SCOPE} min-w-0 text-sm`}>
+    {tab === "queue" ? <div id="campaign-panel-queue" role="tabpanel" aria-label={tr("대기열", "Queue")} className="min-w-0">
       <Suspense fallback={<WidgetState kind="loading" title={tr("대기열을 불러오고 있습니다.", "Loading the queue.")} />}>
         <CampaignQueueTab language={language} tr={tr} campaigns={campaigns} campaignsLoaded={refreshedAt !== null && holds.loaded}
           campaignsError={refreshedAt === null ? error : null} onRetryCampaigns={() => { void legacy.refresh(); void refreshList(); }}
           heldIssueUrls={holds.issueUrls} serverHoldsIncomplete={!!listError || holds.failed > 0}
           selectedCardId={queueCard} onSelectCard={setQueueCard} onCampaignSaved={onSaved} />
       </Suspense>
-    </div> : <div id="campaign-panel-campaigns" role="tabpanel" aria-labelledby="campaign-tab-campaigns" className="grid min-w-0 gap-4 sm:gap-6">
+    </div> : <div id="campaign-panel-campaigns" role="tabpanel" aria-label={tr("캠페인", "Campaigns")} className="grid min-w-0 gap-4">
       {error && <WidgetState kind={campaigns.length ? "stale" : "error"} title={tr("캠페인을 갱신하지 못했습니다.", "Could not refresh campaigns.")} description={error + (campaigns.length ? tr(" · 이전 내용을 표시 중입니다.", " · Showing the previous snapshot.") : "")} action={<button onClick={() => void legacy.refresh()}>{tr("다시 시도", "Retry")}</button>} />}
       {serverDown && <WidgetState kind={summaries.length || serverDoc ? "stale" : "error"} title={tr("서버 캠페인을 갱신하지 못했습니다.", "Could not refresh server campaigns.")} description={(listError ?? tr("서버가 응답하지 않습니다", "The server is not answering")) + (summaries.length || serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
-      {/* Nothing is called empty until both lists have answered without an error. */}
-      {!campaigns.length && !summaries.length && !error && !serverDown && mode === "legacy" && <WidgetState kind={loading || !listLoaded ? "loading" : "empty"} title={loading || !listLoaded ? tr("캠페인을 불러오고 있습니다.", "Loading campaigns.") : tr("등록된 캠페인이 없습니다.", "No campaigns yet.")} description={loading || !listLoaded ? undefined : tr("캠페인이 등록되면 작업 흐름과 진행 상황이 여기에 표시됩니다.", "Registered campaigns and their progress will appear here.")} />}
-      {renderForm(NEW_DRAFT, serverDown)}
-      {summaries.length > 0 && <ServerCampaignList summaries={summaries} selectedId={mode === "server" ? serverSelected : null} onSelect={selectServer} tr={tr} />}
-      {mode === "legacy" && campaign && <LegacyCampaignView campaign={campaign} live={live[campaign.id] ?? NO_LIVE} selector={selector} refreshedAt={refreshedAt} checkedRead={checkedRead} language={language}
-        drafts={drafts} onDraftChange={onDraftChange} node={node} onNode={setNode} onSaved={onSaved} tr={tr} />}
-      {mode === "server" && serverSelected && <div className="campaign-main gap-3 rounded-lg p-3 max-sm:border-0 max-sm:bg-transparent max-sm:p-0 sm:gap-4 sm:p-5">
-        <div className="campaign-row campaign-summary-header">{selector}</div>
-        {detail?.error && <WidgetState kind={serverDoc ? "stale" : "error"} title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error + (serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
-        {serverDoc ? <>
-          {renderForm(editKey(serverDoc.view.campaign_id), !commandAvailability(serverDoc.view, "edit_definition", connection).enabled)}
-          <ServerCampaignDetail document={serverDoc} events={events?.campaign === serverDoc.view.campaign_id ? events.events : null}
-            eventsFailed={events?.campaign === serverDoc.view.campaign_id && events.failedAfter !== null}
-            connection={connection} selectedNode={node} onSelectNode={setNode} stopIntent={stops[serverDoc.view.campaign_id] ?? null}
-            busy={busy.has(serverDoc.view.campaign_id)} commandError={commandErrors[serverDoc.view.campaign_id] ?? null}
-            onCommand={(name, nodeId) => void runCommand(serverDoc, name, nodeId)}
-            onEdit={() => openDraft(editKey(serverDoc.view.campaign_id), () => editDraft(serverDoc))}
-            onCopy={() => copyToCreate(serverDoc.definition)}
-            link={`${window.location.origin}${window.location.pathname}${query ?? ""}`} tr={tr} />
-        </> : detail?.error ? null : <WidgetState kind={detail && !detail.loading ? "empty" : "loading"} title={detail && !detail.loading ? tr("이 서버 캠페인을 찾을 수 없습니다.", "This server campaign was not found.") : tr("서버 캠페인을 불러오고 있습니다.", "Loading server campaigns.")} />}
+      {editing && !phone && campaign ? <CampaignRelationsEditor key={campaign.id} campaign={campaign} scope={editing} onScope={setEditing} onExit={() => setEditing(null)} onSaved={onSaved} leave={leave} tr={tr} />
+        : <div className={`grid min-w-0 gap-4 min-[900px]:gap-6 ${folded ? "min-[1280px]:grid-cols-[17.5rem_minmax(0,1fr)]" : "min-[900px]:grid-cols-[17.5rem_minmax(0,1fr)]"}`}>
+        {(phone || folded) && <button type="button" className={`campaign-picker !m-0 flex w-full min-w-0 items-center gap-3 !rounded-xl !border !border-[var(--line)] !bg-[var(--th-card-bg)] !px-4 !py-3 text-left ${folded ? "min-[1280px]:!hidden" : ""}`} aria-haspopup="dialog" onClick={() => setPicking(true)}>
+            <span className="grid min-w-0 flex-1 gap-0.5">
+              <span className="flex min-w-0 items-center gap-2"><strong className="truncate text-sm font-semibold text-[var(--fg)]">{pickerTitle ?? tr("캠페인 고르기", "Choose a campaign")}</strong>{selectedEntry && <Badge status={selectedEntry.status} label={selectedEntry.statusLabel} tr={tr} />}</span>
+              <span className="truncate text-xs text-[var(--fg-muted)] tabular-nums">{[selectedEntry && (selectedEntry.kind === "legacy" ? tr("원장", "Ledger") : selectedEntry.repo),
+                selectedEntry?.total != null && tr(`작업 ${selectedEntry.done}/${selectedEntry.total} 완료`, `${selectedEntry.done}/${selectedEntry.total} done`), tr(`캠페인 ${entries.length}개 중`, `of ${entries.length} campaigns`)].filter(Boolean).join(" · ")}</span>
+            </span>
+            <ChevronDown aria-hidden className="size-4 shrink-0 text-[var(--fg-muted)]" />
+          </button>}
+        {phone ? <BottomSheet open={picking} onClose={() => setPicking(false)} title={tr("캠페인 고르기", "Choose a campaign")}><div className={CAMPAIGN_SCOPE}>{list}</div></BottomSheet>
+          : <aside className={`min-w-0 ${folded ? "max-[1279px]:hidden" : ""}`}>{list}</aside>}
+        {folded && <Modal open={picking} onClose={() => setPicking(false)} title={tr("캠페인 고르기", "Choose a campaign")} size="sm"><div className={CAMPAIGN_SCOPE}>{list}</div></Modal>}
+        <div className="grid min-w-0 content-start gap-4">
+          {/* Nothing is called empty until both lists have answered without an error. */}
+          {!campaigns.length && !summaries.length && !error && !serverDown && mode === "legacy" && <WidgetState kind={loading || !listLoaded ? "loading" : "empty"} title={loading || !listLoaded ? tr("캠페인을 불러오고 있습니다.", "Loading campaigns.") : tr("등록된 캠페인이 없습니다.", "No campaigns yet.")} description={loading || !listLoaded ? undefined : tr("캠페인이 등록되면 작업 흐름과 진행 상황이 여기에 표시됩니다.", "Registered campaigns and their progress will appear here.")} />}
+          {renderForm(NEW_DRAFT, serverDown)}
+          {mode === "legacy" ? legacyDetail : serverSelected && (serverDetail
+            ?? (detail?.error ? <WidgetState kind="error" title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error} />
+              : <WidgetState kind={detail && !detail.loading ? "empty" : "loading"} title={detail && !detail.loading ? tr("이 서버 캠페인을 찾을 수 없습니다.", "This server campaign was not found.") : tr("서버 캠페인을 불러오고 있습니다.", "Loading server campaigns.")} />))}
+        </div>
       </div>}
     </div>}
-  </section>;
+  </section>
+  </PageFrame>;
 }

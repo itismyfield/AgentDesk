@@ -5,15 +5,21 @@ use serde_json::json;
 
 use crate::services::provider::ProviderKind;
 
+mod thread;
+
+use crate::services::discord::health::{HealthRegistry, ThreadTurnRuntime};
+
 pub(super) struct AgentTurnTarget {
     pub(super) provider: ProviderKind,
     pub(super) primary_channel: String,
     pub(super) channel_id: u64,
+    pub(super) thread: Option<ThreadTurnRuntime>,
 }
 
 /// Resolves the provider and channel an agent turn runs on, honoring the allowed overrides.
 pub(super) async fn resolve_agent_turn_target(
     pool: &sqlx::PgPool,
+    registry: Option<&HealthRegistry>,
     id: &str,
     provider_override: Option<&str>,
     channel_override: Option<&str>,
@@ -46,7 +52,22 @@ pub(super) async fn resolve_agent_turn_target(
         ));
     };
 
-    resolve_bound_target(&bindings, id, provider_override, channel_override)
+    resolve_bound_target(registry, &bindings, id, provider_override, channel_override).await
+}
+
+async fn resolve_bound_target(
+    registry: Option<&HealthRegistry>,
+    bindings: &crate::db::agents::AgentChannelBindings,
+    id: &str,
+    provider_override: Option<&str>,
+    channel_override: Option<&str>,
+) -> Result<AgentTurnTarget, (StatusCode, Json<serde_json::Value>)> {
+    if let Some(raw) = channel_override
+        && !super::agents::channel_override_is_allowed(raw, bindings)
+    {
+        return thread::resolve(registry, bindings, id, provider_override, raw).await;
+    }
+    resolve_direct_bound_target(bindings, id, provider_override, channel_override)
 }
 
 fn target_error(
@@ -56,7 +77,7 @@ fn target_error(
     (status, Json(json!({"ok": false, "error": message.into()})))
 }
 
-fn resolve_bound_target(
+fn resolve_direct_bound_target(
     bindings: &crate::db::agents::AgentChannelBindings,
     id: &str,
     provider_override: Option<&str>,
@@ -132,6 +153,7 @@ fn resolve_bound_target(
         provider,
         primary_channel,
         channel_id,
+        thread: None,
     })
 }
 
@@ -165,9 +187,31 @@ pub(super) async fn external_turn_conflict(
     Some((StatusCode::CONFLICT, Json(body)))
 }
 
+/// Initial availability is checked before the normal start conflict test tries the channel.
+pub(super) async fn check_start_target(
+    registry: Option<&HealthRegistry>,
+    target: &AgentTurnTarget,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    if let Some(thread) = &target.thread
+        && let Err(error) = thread.check_live().await
+    {
+        return Some((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"ok":false,"status":"thread_execution_unavailable",
+                "error":error,"retryable":true})),
+        ));
+    }
+    if crate::services::discord::owner_takes_start(&target.provider, target.channel_id) {
+        return None;
+    }
+    external_turn_conflict(registry, &target.provider, target.channel_id).await
+}
+
 /// The supervised presence of the agent's turn channel; null outside turn mode.
 pub(super) async fn turn_presence(pool: &sqlx::PgPool, id: &str) -> serde_json::Value {
-    let target = resolve_agent_turn_target(pool, id, None, None).await.ok();
+    let target = resolve_agent_turn_target(pool, None, id, None, None)
+        .await
+        .ok();
     let status = crate::services::discord::health::turn_presence_status;
     target
         .and_then(|target| status(target.channel_id))
@@ -182,6 +226,12 @@ pub(super) async fn start_headless_turn_on_target(
     source: Option<String>,
     metadata: Option<serde_json::Value>,
 ) -> Result<(String, &'static str), crate::services::discord::HeadlessTurnStartError> {
+    if let Some(thread) = target.thread {
+        return thread
+            .start(prompt, source, metadata)
+            .await
+            .map(|outcome| (outcome.turn_id, outcome.status.as_str()));
+    }
     let channel_name_hint = (!target.primary_channel.chars().all(|ch| ch.is_ascii_digit()))
         .then_some(target.primary_channel);
     crate::services::discord::health::start_headless_agent_turn(
@@ -219,7 +269,7 @@ mod tests {
             (Some("101"), Some("claude"), ProviderKind::Claude),
             (None, Some("claude"), ProviderKind::Claude),
         ] {
-            let target = resolve_bound_target(&bindings, "dual", explicit, channel)
+            let target = resolve_direct_bound_target(&bindings, "dual", explicit, channel)
                 .ok()
                 .unwrap();
             assert_eq!(
@@ -230,16 +280,16 @@ mod tests {
                 assert_eq!(target.channel_id, channel.parse::<u64>().unwrap());
             }
         }
-        let err = resolve_bound_target(&bindings, "dual", Some("codex"), Some("101"))
+        let err = resolve_direct_bound_target(&bindings, "dual", Some("codex"), Some("101"))
             .err()
             .unwrap();
         assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
-        let err = resolve_bound_target(&bindings, "dual", None, Some("999"))
+        let err = resolve_direct_bound_target(&bindings, "dual", None, Some("999"))
             .err()
             .unwrap();
         assert_eq!(err.0, StatusCode::FORBIDDEN);
         let empty = crate::db::agents::AgentChannelBindings::default();
-        let err = resolve_bound_target(&empty, "unbound", None, None)
+        let err = resolve_direct_bound_target(&empty, "unbound", None, None)
             .err()
             .unwrap();
         assert_eq!(err.0, StatusCode::CONFLICT);
@@ -247,7 +297,7 @@ mod tests {
         let mut ambiguous = bindings.clone();
         ambiguous.discord_channel_cdx = Some("101".into());
         assert_eq!(
-            resolve_bound_target(&ambiguous, "dual", None, Some("101"))
+            resolve_direct_bound_target(&ambiguous, "dual", None, Some("101"))
                 .err()
                 .unwrap()
                 .0,
@@ -259,7 +309,7 @@ mod tests {
                 discord_channel_id: Some("201".into()),
                 ..Default::default()
             };
-            let target = resolve_bound_target(&single, "single", None, Some("201"))
+            let target = resolve_direct_bound_target(&single, "single", None, Some("201"))
                 .ok()
                 .unwrap();
             assert_eq!(target.provider.as_str(), provider);

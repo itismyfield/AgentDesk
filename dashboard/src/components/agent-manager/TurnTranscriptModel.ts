@@ -1,4 +1,5 @@
 import * as api from "../../api";
+import { parseTranscriptDate } from "./turn-transcript-utils";
 
 export type TranscriptSource =
   | { type: "agent"; id: string; refreshSeed?: string | number | null; limit?: number }
@@ -6,48 +7,35 @@ export type TranscriptSource =
 
 export type TranscriptTranslator = (ko: string, en: string) => string;
 
-type TranscriptTone = "assistant" | "thinking" | "tool" | "result" | "error";
+export type TranscriptTone = "assistant" | "thinking" | "tool" | "result" | "error";
 
-export const TONE_STYLE: Record<
-  TranscriptTone,
-  { bar: string; chipBg: string; chipText: string; border: string; text: string }
-> = {
-  assistant: {
-    bar: "#22c55e",
-    chipBg: "rgba(34,197,94,0.16)",
-    chipText: "#86efac",
-    border: "rgba(34,197,94,0.25)",
-    text: "#dcfce7",
-  },
-  thinking: {
-    bar: "#a855f7",
-    chipBg: "rgba(168,85,247,0.16)",
-    chipText: "#d8b4fe",
-    border: "rgba(168,85,247,0.24)",
-    text: "#f3e8ff",
-  },
-  tool: {
-    bar: "#3b82f6",
-    chipBg: "rgba(59,130,246,0.16)",
-    chipText: "#93c5fd",
-    border: "rgba(59,130,246,0.24)",
-    text: "#dbeafe",
-  },
-  result: {
-    bar: "#64748b",
-    chipBg: "rgba(100,116,139,0.2)",
-    chipText: "#cbd5e1",
-    border: "rgba(148,163,184,0.24)",
-    text: "#e2e8f0",
-  },
-  error: {
-    bar: "#ef4444",
-    chipBg: "rgba(239,68,68,0.16)",
-    chipText: "#fca5a5",
-    border: "rgba(239,68,68,0.24)",
-    text: "#fee2e2",
-  },
+const toneFrom = (token: string) => ({
+  bar: `color-mix(in oklch, ${token} 18%, transparent)`,
+  border: `color-mix(in oklch, ${token} 55%, transparent)`,
+  text: `color-mix(in oklch, ${token} 72%, var(--th-text-primary))`,
+  dot: token,
+});
+
+/** Theme-token colors per event tone, so bars and tiles follow light and dark. */
+export const TONE_STYLE: Record<TranscriptTone, { bar: string; border: string; text: string; dot: string }> = {
+  assistant: toneFrom("var(--ok)"),
+  thinking: toneFrom("var(--accent-violet)"),
+  tool: toneFrom("var(--info)"),
+  result: toneFrom("var(--th-text-muted)"),
+  error: toneFrom("var(--err)"),
 };
+
+export const TRANSCRIPT_TONES: TranscriptTone[] = ["assistant", "thinking", "tool", "result", "error"];
+
+export function toneLabel(tone: TranscriptTone, tr: TranscriptTranslator): string {
+  switch (tone) {
+    case "assistant": return tr("에이전트", "Agent");
+    case "thinking": return "Thinking";
+    case "tool": return tr("도구", "Tool");
+    case "result": return tr("결과", "Result");
+    case "error": return tr("오류", "Error");
+  }
+}
 
 export function eventTone(event: api.SessionTranscriptEvent): TranscriptTone {
   if (event.is_error || event.kind === "error") return "error";
@@ -261,4 +249,84 @@ export function shouldRefreshCard(event: Event, cardId: string): boolean {
   }
 
   return false;
+}
+
+/** What the event body is: a tool call carries its input, an error its message, everything else output. */
+export function eventBodyLabel(event: api.SessionTranscriptEvent, tr: TranscriptTranslator): string {
+  if (event.kind === "tool_use") return tr("입력", "Input");
+  if (eventTone(event) === "error") return tr("오류", "Error");
+  return tr("출력", "Output");
+}
+
+export interface TurnSpan {
+  transcript: api.SessionTranscript;
+  /** Seconds from the earliest turn start. */
+  start: number;
+  /** Seconds; null when the server did not record a duration. */
+  duration: number | null;
+}
+
+/**
+ * Places turns on one time axis. A transcript is written when its turn ends, so the start is created_at minus the duration.
+ * Turns without a readable time keep their list order at the axis start.
+ */
+export function turnSpans(transcripts: api.SessionTranscript[]): { spans: TurnSpan[]; total: number } {
+  const timed = transcripts.map((transcript) => {
+    const end = parseTranscriptDate(transcript.created_at)?.getTime() ?? null;
+    const duration = transcript.duration_ms != null && transcript.duration_ms >= 0 ? transcript.duration_ms : null;
+    return { transcript, end, duration, start: end == null ? null : end - (duration ?? 0) };
+  });
+  const starts = timed.flatMap((item) => (item.start == null ? [] : [item.start]));
+  const ends = timed.flatMap((item) => (item.end == null ? [] : [item.end]));
+  const origin = starts.length ? Math.min(...starts) : 0;
+  const last = ends.length ? Math.max(...ends) : origin;
+  return {
+    spans: timed.map((item) => ({
+      transcript: item.transcript,
+      start: item.start == null ? 0 : (item.start - origin) / 1000,
+      duration: item.duration == null ? null : item.duration / 1000,
+    })),
+    total: Math.max(0, (last - origin) / 1000),
+  };
+}
+
+const AXIS_STEPS = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400];
+
+/** About six ticks: the first step at least a sixth of the span, the range rounded up past an 8% margin. */
+export function timeAxis(totalSeconds: number): { range: number; ticks: number[] } {
+  const span = Math.max(1, totalSeconds);
+  const target = span / 6;
+  const step = AXIS_STEPS.find((value) => value >= target) ?? Math.ceil(target / 86400) * 86400;
+  const range = Math.ceil((1.08 * span) / step) * step;
+  const ticks: number[] = [];
+  for (let value = 0; value <= range + 1e-9; value += step) ticks.push(Math.round(value * 100) / 100);
+  return { range, ticks };
+}
+
+/** Offset from the axis start: seconds under a minute, then minutes, hours and days; exact multiples drop the lower unit. */
+export function formatAxisOffset(seconds: number, isKo: boolean): string {
+  const unit = (ko: string, en: string) => (isKo ? ko : en);
+  if (seconds < 60) return `${Number(seconds.toFixed(1))}${unit("초", "s")}`;
+  if (seconds < 3600) {
+    const m = Math.floor(seconds / 60);
+    const s = Math.round(seconds - m * 60);
+    return s ? `${m}${unit("분", "m")} ${s}${unit("초", "s")}` : `${m}${unit("분", "m")}`;
+  }
+  if (seconds < 86400) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.round((seconds - h * 3600) / 60);
+    return m ? `${h}${unit("시간", "h")} ${m}${unit("분", "m")}` : `${h}${unit("시간", "h")}`;
+  }
+  const d = Math.floor(seconds / 86400);
+  const h = Math.round((seconds - d * 86400) / 3600);
+  return h ? `${d}${unit("일", "d")} ${h}${unit("시간", "h")}` : `${d}${unit("일", "d")}`;
+}
+
+/** Event numbers for the order axis: the first, the last and up to three evenly spaced in between. */
+export function orderTicks(count: number): number[] {
+  if (count <= 0) return [];
+  if (count <= 5) return Array.from({ length: count }, (_, index) => index + 1);
+  const ticks = new Set<number>([1, count]);
+  for (let part = 1; part < 4; part += 1) ticks.add(Math.round(1 + ((count - 1) * part) / 4));
+  return Array.from(ticks).sort((a, b) => a - b);
 }

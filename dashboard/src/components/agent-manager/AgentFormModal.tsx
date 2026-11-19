@@ -1,22 +1,22 @@
-import { createPortal } from "react-dom";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { useForm } from "react-hook-form";
+import { X } from "lucide-react";
 import { z } from "zod";
 import { catalogLabel, useProviderCatalog } from "../../api/providers";
 import type { Department } from "../../types";
 import { localeName, useI18n } from "../../i18n";
+import { Button } from "../../kit/free/button-clean";
+import { Checkbox } from "../../kit/free/checkbox-clean";
+import { IconButton } from "../../kit/free/icon-button-clean";
+import { Select } from "../../kit/free/select-clean";
+import { TextArea } from "../../kit/free/text-area-clean";
+import { TextField } from "../../kit/free/text-field-clean";
 import AgentPersona from "../AgentPersona";
 import EmojiPicker from "./EmojiPicker";
 import AgentPromptEditor from "./AgentPromptEditor";
+import { AgentOverlay } from "./AgentOverlay";
 import type { FormData } from "./types";
-import { useFocusTrap } from "../common/overlay/useFocusTrap";
-import { useReturnFocus } from "../common/overlay/useReturnFocus";
-import {
-  SurfaceActionButton,
-  SurfaceCard,
-  SurfaceSubsection,
-} from "../common/SurfacePrimitives";
 
 const agentFormSchema = z.object({
   name: z.string().trim().min(1, "required"),
@@ -32,9 +32,9 @@ const agentFormSchema = z.object({
 });
 
 type AgentFormValues = z.infer<typeof agentFormSchema>;
+type TextKey = "name" | "name_ko" | "name_ja" | "name_zh" | "personality";
 
 export default function AgentFormModal({
-  isKo,
   locale,
   tr,
   form,
@@ -58,10 +58,7 @@ export default function AgentFormModal({
   onClose: () => void;
 }) {
   const { t } = useI18n();
-  const overlayRef = useFocusTrap(true);
-  useReturnFocus(true);
   const {
-    register,
     handleSubmit,
     reset,
     setValue,
@@ -75,298 +72,184 @@ export default function AgentFormModal({
   const formValues = watch();
   const providerCatalog = useProviderCatalog(formValues.cli_provider);
 
-  // ESC 키로 닫기
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
-
   useEffect(() => {
     reset(form);
   }, [form, reset]);
 
-  const inputCls =
-    "w-full min-h-11 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors";
-  const inputStyle = {
-    background: "var(--th-input-bg)",
-    borderColor: "var(--th-input-border)",
-    color: "var(--th-text-primary)",
-  };
+  const text = (key: TextKey) => ({
+    value: formValues[key],
+    onChange: (event: { target: { value: string } }) =>
+      setValue(key, event.target.value, { shouldDirty: true, shouldValidate: true }),
+  });
   const handleSave = handleSubmit(async (values) => {
     await onSave({
       ...values,
       cli_provider: values.cli_provider as FormData["cli_provider"],
     });
   });
+  const title = isEdit ? tr("에이전트 수정", "Edit agent") : tr("새 에이전트", "New agent");
 
-  return createPortal(
-    <>
-    <div aria-hidden="true" className="fixed inset-0 z-[70]" style={{ background: "var(--th-modal-overlay)" }} />
-    <div
-      ref={overlayRef}
-      className="fixed inset-0 z-[80] flex items-start justify-center overflow-hidden px-3 py-4 sm:items-center sm:p-4"
-      style={{
-        paddingTop: "max(1rem, calc(env(safe-area-inset-top) + 0.75rem))",
-        paddingBottom: "max(1rem, calc(env(safe-area-inset-bottom) + 0.75rem))",
-      }}
-      onClick={(e) => {
-        if (e.target === overlayRef.current) onClose();
-      }}
-    >
-      <form
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="agent-modal-title"
-        onSubmit={handleSave}
-        className="w-full self-start max-h-[calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem)] max-w-[calc(100vw-1.5rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-lg border p-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:my-auto sm:max-h-[90vh] sm:max-w-5xl sm:p-6"
-        style={{
-          background:
-            "var(--th-bg-surface)",
-          borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-          paddingBottom: "max(1.25rem, calc(1.25rem + env(safe-area-inset-bottom)))",
-          WebkitOverflowScrolling: "touch",
-          touchAction: "pan-y",
-        }}
-      >
-        {/* Modal header */}
-        <div className="flex items-center justify-between mb-5">
-          <h3 id="agent-modal-title" className="text-base font-bold" style={{ color: "var(--th-text-heading)" }}>
-            {isEdit ? tr("에이전트 수정", "Edit agent") : tr("새 에이전트", "New agent")}
-          </h3>
-          <SurfaceActionButton onClick={onClose} tone="neutral" compact className="h-11 w-11" style={{ padding: 0 }} aria-label={tr("닫기", "Close")}>
-            ✕
-          </SurfaceActionButton>
+  return (
+    <AgentOverlay
+      as="form"
+      variant="sheet"
+      ariaLabelledBy="agent-modal-title"
+      onClose={onClose}
+      onSubmit={handleSave}
+      widthClassName="sm:max-w-4xl"
+      testId="agent-form-overlay"
+      header={
+        <div className="flex items-center gap-3">
+          <AgentPersona
+            agent={{ id: agentId ?? (formValues.name || "new-agent"), name: formValues.name || "Agent" }}
+            state="idle"
+            size={36}
+          />
+          <div className="min-w-0 flex-1">
+            <h2 id="agent-modal-title" className="m-0 text-[15px] font-semibold leading-6 text-(--fg)">
+              {title}
+            </h2>
+            {formValues.name.trim() ? (
+              <p className="m-0 truncate text-xs leading-4 text-(--fg-muted)">{formValues.name.trim()}</p>
+            ) : null}
+          </div>
+          <IconButton icon={<X size={15} />} label={tr("닫기", "Close")} onClick={onClose} />
         </div>
-
-        {/* 2-column layout */}
-        <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
-          {/* ── Left column: 기본 정보 ── */}
-          <SurfaceSubsection
-            className="min-w-0"
-            title={tr("기본 정보", "Basic Info")}
-            description={tr("이름, 이모지, 부서를 먼저 설정합니다.", "Set the identity, emoji, and department first.")}
-          >
-            <div className="space-y-4">
-            <div className="flex min-h-11 items-start gap-3">
-              <AgentPersona
-                agent={{
-                  id: agentId ?? (formValues.name || "new-agent"),
-                  name: formValues.name || "Agent",
-                }}
-                state="idle"
-                size={48}
-                animated
-              />
-              <div className="flex-1 min-w-0">
-                <div>
-                  <label
-                    htmlFor="agent-name"
-                    className="block text-xs mb-1.5 font-medium"
-                    style={{ color: "var(--th-text-secondary)" }}
-                  >
-                    {tr("영문 이름", "Name")} <span className="text-red-400">*</span>
-                  </label>
-                  <input
-                    id="agent-name"
-                    type="text"
-                    {...register("name")}
-                    placeholder="DORO"
-                    aria-invalid={errors.name ? "true" : "false"}
-                    aria-describedby={errors.name ? "agent-name-error" : undefined}
-                    className={inputCls}
-                    style={inputStyle}
-                  />
-                  {errors.name && (
-                    <p id="agent-name-error" className="mt-1 text-xs text-red-400">
-                      {tr("영문 이름을 입력해주세요.", "Enter an agent name.")}
-                    </p>
-                  )}
-                </div>
-              </div>
-            </div>
-            {/* 로캘 기반 현지 이름 필드 */}
-            {locale.startsWith("ko") && (
-              <div>
-                <label htmlFor="agent-name-ko" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                  {tr("한글 이름", "Korean Name")}
-                </label>
-                <input
-                  id="agent-name-ko"
-                  type="text"
-                  {...register("name_ko")}
-                  placeholder="도로롱"
-                  className={inputCls}
-                  style={inputStyle}
-                />
-              </div>
-            )}
-            {locale.startsWith("ja") && (
-              <div>
-                <label htmlFor="agent-name-ja" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                  {t({ ko: "일본어 이름", en: "Japanese Name", ja: "日本語名", zh: "日语名" })}
-                </label>
-                <input
-                  id="agent-name-ja"
-                  type="text"
-                  {...register("name_ja")}
-                  placeholder="ドロロン"
-                  className={inputCls}
-                  style={inputStyle}
-                />
-              </div>
-            )}
-            {locale.startsWith("zh") && (
-              <div>
-                <label htmlFor="agent-name-zh" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                  {t({ ko: "중국어 이름", en: "Chinese Name", ja: "中国語名", zh: "中文名" })}
-                </label>
-                <input
-                  id="agent-name-zh"
-                  type="text"
-                  {...register("name_zh")}
-                  placeholder="多罗隆"
-                  className={inputCls}
-                  style={inputStyle}
-                />
-              </div>
-            )}
-            <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 md:grid-cols-[72px_minmax(0,1fr)_minmax(0,1fr)]">
-              <div>
-                <label htmlFor="agent-emoji" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                  {tr("아이콘", "Icon")}
-                </label>
-                <EmojiPicker
-                  id="agent-emoji"
-                  value={formValues.avatar_emoji}
-                  onChange={(emoji) => setValue("avatar_emoji", emoji, { shouldDirty: true, shouldValidate: true })}
-                />
-              </div>
-              <div>
-                <label htmlFor="agent-department" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                  {tr("소속 부서", "Department")}
-                </label>
-                <select
-                  id="agent-department"
-                  {...register("department_id")}
-                  className={`${inputCls} cursor-pointer`}
-                  style={inputStyle}
-                >
-                  <option value="">{tr("— 미배정 —", "— Unassigned —")}</option>
-                  {departments.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.icon} {localeName(locale, d)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="col-span-2 md:col-span-1">
-                <label htmlFor="agent-provider" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                  {tr("메인 Provider", "Main Provider")}
-                </label>
-                <select
-                  id="agent-provider"
-                  {...register("cli_provider")}
-                  disabled={providerCatalog.loading}
-                  className={`${inputCls} cursor-pointer`}
-                  style={inputStyle}
-                >
-                  {providerCatalog.selectableIds.map((provider) => (
-                    <option key={provider} value={provider}>
-                      {catalogLabel(providerCatalog.entries, provider)}
-                    </option>
-                  ))}
-                </select>
-                {providerCatalog.loading ? (
-                  <span className="mt-1 block text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                    {tr("프로바이더 목록을 불러오는 중...", "Loading providers...")}
-                  </span>
-                ) : providerCatalog.error ? (
-                  <span className="mt-1 block text-[11px]" style={{ color: "var(--th-accent-danger)" }}>
-                    {tr("카탈로그를 못 불러 로컬 목록을 씁니다.", "Catalog unavailable; using local list.")}
-                  </span>
-                ) : null}
-              </div>
-            </div>
-            </div>
-          </SurfaceSubsection>
-
-          {/* ── Right column ── */}
-          <SurfaceSubsection
-            className="min-w-0"
-            title={tr("추가 정보", "Details")}
-            description={tr("프롬프트와 성격을 정리합니다.", "Describe the agent personality and prompt.")}
-          >
-            <div className="space-y-4">
-            {/* 성격/프롬프트 */}
-            <div>
-              <label htmlFor="agent-personality" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                {tr("성격 / 역할 프롬프트", "Personality / Prompt")}
-              </label>
-              <textarea
-                id="agent-personality"
-                {...register("personality")}
-                rows={6}
-                placeholder={tr("전문 분야나 성격 설명...", "Expertise or personality...")}
-                className={`${inputCls} resize-none`}
-                style={inputStyle}
-              />
-            </div>
-            {isEdit && (
-              <div>
-                <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
-                  <label className="text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                    prompt.md
-                  </label>
-                  <label className="flex items-center gap-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    <input
-                      type="checkbox"
-                      {...register("auto_commit")}
-                    />
-                    {tr("자동 커밋", "Auto commit")}
-                  </label>
-                </div>
-                <AgentPromptEditor
-                  label="prompt.md"
-                  value={formValues.prompt_content}
-                  onChange={(prompt_content) => setValue("prompt_content", prompt_content, { shouldDirty: true })}
-                  minHeight={300}
-                />
-              </div>
-            )}
-            </div>
-          </SurfaceSubsection>
-        </div>
-        {/* Actions — full width */}
-        <div
-          className="mt-5 flex flex-col gap-2 pt-4 sm:flex-row"
-          style={{ borderTop: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)" }}
-        >
-          <SurfaceActionButton
-            type="submit"
-            disabled={saving || !formValues.name.trim()}
-            tone="accent"
-            className="flex-1 text-sm"
-          >
+      }
+      footer={
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <Button variant="secondary" size="md" onClick={onClose}>
+            {tr("취소", "Cancel")}
+          </Button>
+          <Button type="submit" variant="primary" size="md" loading={saving} disabled={saving || !formValues.name.trim()}>
             {saving
               ? tr("처리 중...", "Saving...")
               : isEdit
                 ? tr("변경사항 저장", "Save Changes")
                 : tr("채용 확정", "Confirm Hire")}
-          </SurfaceActionButton>
-          <SurfaceActionButton
-            onClick={onClose}
-            tone="neutral"
-            className="text-sm sm:self-auto"
-          >
-            {tr("취소", "Cancel")}
-          </SurfaceActionButton>
+          </Button>
         </div>
-      </form>
-    </div>
-    </>,
-    document.body,
+      }
+    >
+      <div className="grid min-w-0 grid-cols-1 gap-6 sm:grid-cols-2">
+        <section className="flex min-w-0 flex-col gap-4" aria-labelledby="agent-form-basic">
+          <div>
+            <h3 id="agent-form-basic" className="m-0 text-xs font-medium text-(--fg-muted)">
+              {tr("기본 정보", "Basic Info")}
+            </h3>
+            <p className="m-0 mt-0.5 text-xs text-(--fg-faint)">
+              {tr("이름, 이모지, 부서를 먼저 설정합니다.", "Set the identity, emoji, and department first.")}
+            </p>
+          </div>
+          <TextField
+            id="agent-name"
+            label={<>{tr("영문 이름", "Name")} <span className="text-(--err)">*</span></>}
+            placeholder="DORO"
+            data-autofocus
+            error={errors.name ? tr("영문 이름을 입력해주세요.", "Enter an agent name.") : undefined}
+            {...text("name")}
+          />
+          {locale.startsWith("ko") && (
+            <TextField id="agent-name-ko" label={tr("한글 이름", "Korean Name")} placeholder="도로롱" {...text("name_ko")} />
+          )}
+          {locale.startsWith("ja") && (
+            <TextField
+              id="agent-name-ja"
+              label={t({ ko: "일본어 이름", en: "Japanese Name", ja: "日本語名", zh: "日语名" })}
+              placeholder="ドロロン"
+              {...text("name_ja")}
+            />
+          )}
+          {locale.startsWith("zh") && (
+            <TextField
+              id="agent-name-zh"
+              label={t({ ko: "중국어 이름", en: "Chinese Name", ja: "中国語名", zh: "中文名" })}
+              placeholder="多罗隆"
+              {...text("name_zh")}
+            />
+          )}
+          <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-end gap-3">
+            <div>
+              <label htmlFor="agent-emoji" className="mb-1.5 block text-[13px] font-medium text-(--fg)">
+                {tr("아이콘", "Icon")}
+              </label>
+              <EmojiPicker
+                id="agent-emoji"
+                value={formValues.avatar_emoji}
+                onChange={(emoji) => setValue("avatar_emoji", emoji, { shouldDirty: true, shouldValidate: true })}
+              />
+            </div>
+            <Select
+              id="agent-department"
+              label={tr("소속 부서", "Department")}
+              value={formValues.department_id}
+              onChange={(value) => setValue("department_id", value, { shouldDirty: true })}
+              options={[
+                { value: "", label: tr("— 미배정 —", "— Unassigned —") },
+                ...departments.map((department) => ({
+                  value: department.id,
+                  label: [department.icon, localeName(locale, department)].filter(Boolean).join(" "),
+                })),
+              ]}
+            />
+          </div>
+          <Select
+            id="agent-provider"
+            label={tr("메인 Provider", "Main Provider")}
+            value={formValues.cli_provider}
+            onChange={(value) => setValue("cli_provider", value, { shouldDirty: true, shouldValidate: true })}
+            disabled={providerCatalog.loading}
+            hint={
+              providerCatalog.loading
+                ? tr("프로바이더 목록을 불러오는 중...", "Loading providers...")
+                : providerCatalog.error
+                  ? tr("카탈로그를 못 불러 로컬 목록을 씁니다.", "Catalog unavailable; using local list.")
+                  : undefined
+            }
+            options={providerCatalog.selectableIds.map((provider) => ({
+              value: provider,
+              label: catalogLabel(providerCatalog.entries, provider),
+            }))}
+          />
+        </section>
+
+        <section className="flex min-w-0 flex-col gap-4" aria-labelledby="agent-form-details">
+          <div>
+            <h3 id="agent-form-details" className="m-0 text-xs font-medium text-(--fg-muted)">
+              {tr("추가 정보", "Details")}
+            </h3>
+            <p className="m-0 mt-0.5 text-xs text-(--fg-faint)">
+              {tr("프롬프트와 성격을 정리합니다.", "Describe the agent personality and prompt.")}
+            </p>
+          </div>
+          <TextArea
+            id="agent-personality"
+            label={tr("성격 / 역할 프롬프트", "Personality / Prompt")}
+            placeholder={tr("전문 분야나 성격 설명...", "Expertise or personality...")}
+            minRows={5}
+            maxRows={12}
+            {...text("personality")}
+          />
+          {isEdit && (
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[13px] font-medium text-(--fg)">prompt.md</span>
+                <Checkbox
+                  checked={formValues.auto_commit}
+                  onChange={(event) => setValue("auto_commit", event.target.checked, { shouldDirty: true })}
+                  label={tr("자동 커밋", "Auto commit")}
+                />
+              </div>
+              <AgentPromptEditor
+                label="prompt.md"
+                value={formValues.prompt_content}
+                onChange={(prompt_content) => setValue("prompt_content", prompt_content, { shouldDirty: true })}
+                minHeight={300}
+              />
+            </div>
+          )}
+        </section>
+      </div>
+    </AgentOverlay>
   );
 }

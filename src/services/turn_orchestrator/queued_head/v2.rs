@@ -15,11 +15,13 @@ mod effort_continue;
 mod migration;
 pub(crate) mod origin;
 pub(crate) mod projection;
+mod readiness_hold;
+mod refused;
 mod retained;
 pub(crate) mod source_admission;
 mod sources;
 pub(crate) mod start_failure;
-pub(crate) use attempt::AttemptRef;
+pub(crate) use super::v2_types::AttemptRef;
 pub(crate) use commit::Fault;
 #[cfg(test)]
 use source_admission::AdmitError;
@@ -43,6 +45,10 @@ pub(crate) struct Owner {
     claim_number: u64,
     /// The front a refusal before any key returned to wait for a real wake; never persisted.
     held: Option<u64>,
+    /// The attempt whose first key its original's readiness due refused; never persisted.
+    due_refused: Option<AttemptRef>,
+    /// The attempt whose first key the owner approved before that due; never persisted.
+    first_key_approved: Option<AttemptRef>,
     /// Diagnostic identity and successful commit count for this adoption; neither authorizes writes.
     incarnation: uuid::Uuid,
     last_success_sequence: u64,
@@ -169,6 +175,9 @@ impl Owner {
                 items: vec![],
                 head_injection: None,
                 retained_inputs: vec![],
+                refused_inputs: vec![],
+                readiness_holds: vec![],
+                refused_fronts: vec![],
                 terminal_identities: vec![],
                 namespace: Some(namespace),
                 owed_drop_receipts: Vec::new(),
@@ -187,6 +196,8 @@ impl Owner {
             front_claim: None,
             claimed_followers: Vec::new(),
             held: None,
+            due_refused: None,
+            first_key_approved: None,
             claim_number: 0,
             incarnation: uuid::Uuid::new_v4(),
             last_success_sequence: 0,
@@ -524,7 +535,8 @@ impl Owner {
         self.claimed_followers.clear();
     }
 
-    /// Whether any source the owner holds, queued, attempted, retained or settled, is `message`.
+    /// Whether any source the owner holds, queued, attempted, retained, refused or settled, is
+    /// `message`.
     fn holds(&self, message: u64) -> bool {
         let s = &self.snapshot;
         let attempts = s
@@ -542,7 +554,9 @@ impl Owner {
             t.identity.primary == message
                 || t.identity.sources.iter().any(|x| x.message_id == message)
         });
-        held.any(names) || settled
+        let refused = (s.refused_inputs.iter()).any(|r| r.names(message))
+            || (s.refused_fronts.iter()).any(|r| r.names(message));
+        held.any(names) || settled || refused
     }
 
     /// Whether this owner refuses a legacy turn claim for `message`: a source it holds never

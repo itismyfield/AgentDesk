@@ -14,7 +14,14 @@ import tempfile
 RUN_MUTANTS = {"none", "ttl_takeover", "non_atomic", "parent_unlock", "missing_fd",
                "duplicate_child", "no_pending", "clear_on_idle", "send_after_release",
                "leak_fd", "foreign_cleanup", "crash_no_reclaim"}
+# Runner settings (off, one-run budget) and their mutants exist only for the run lease.
+RUNNER_CONFIGS = {"off", "ignore_off", "budget_one", "skip_reserve", "over_budget", "advance_on_crash"}
+TRANSACTION_CONFIGS = {"tx-good", "tx-off", "tx-null", "tx-old-off", "tx-old-null",
+    "tx-unknown-zero", "tx-between-only", "tx-consume-deferred", "tx-apply-first",
+    "tx-no-recover", "tx-result-regress", "tx-status-first", "tx-alert-drop", "tx-double-apply", "tx-orphan-no-pause"}
+CONSUMER_CONFIGS = {"consumer-good", "consumer-nodata-green", "consumer-off-green", "consumer-stale-green", "consumer-old-head-green", "consumer-zero-green", "consumer-usage-green", "consumer-driver-schema-green", "consumer-qualifier-green", "consumer-usage-crash", "consumer-no-budget-heartbeat", "consumer-hide-pending", "consumer-stale-masks-head", "consumer-unobserved-fail"}
 INSTANCE_MUTANTS = RUN_MUTANTS - {"no_pending", "clear_on_idle", "send_after_release"}
+RUN_MUTANTS |= RUNNER_CONFIGS | TRANSACTION_CONFIGS | CONSUMER_CONFIGS
 EXPECTED_CONFIGS = ({f"run-{mut}.cfg" for mut in RUN_MUTANTS}
                     | {f"instance-{mut}.cfg" for mut in INSTANCE_MUTANTS}
                     | {f"{kind}-live-{mut}.cfg" for kind in ("run", "instance")

@@ -18,7 +18,9 @@ use crate::services::campaign_execution::model::{
 use crate::services::campaign_execution::stage_fsm::tests::{
     assigned, begin, execution, review_of, run_v, seal_of,
 };
-use crate::services::campaign_execution::verification_run::{PhaseInput, tests as a1};
+use crate::services::campaign_execution::verification_run::{
+    AuthoritySource, PhaseInput, tests as a1,
+};
 
 const PHASE: &str = "archive";
 
@@ -571,6 +573,52 @@ fn an_initiator_error_without_proof_leaves_the_start_indeterminate() {
         Initiation::Indeterminate { .. }
     ));
     assert_eq!(effects.get(), 1);
+}
+
+#[test]
+fn worker_replay_requires_the_journaled_nonce() {
+    let (state, work, _) = work_pending();
+    let request = phase_envelope(&state, &finish_v(&state), PHASE, &work).unwrap();
+    let (dir, calls) = (tempdir().unwrap(), Cell::new(0));
+    let mut gate = open(&dir, &request.target_host_gate);
+    sync(&mut gate, &state);
+    receipt_of(&admit(&mut gate, &request, &calls));
+    drop(gate);
+
+    let mut conflicting = request.clone();
+    conflicting.execution_nonce.push_str("-foreign");
+    let mut gate = open(&dir, &request.target_host_gate);
+    let replay = gate.admit_and_initiate(&conflicting, now(), |_| -> io::Result<Initiated<()>> {
+        panic!("a conflicting nonce must not start anything")
+    });
+    assert!(matches!(replay, Err(GateError::Conflict(id)) if id == request.action_id));
+    assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn worker_recovery_rejects_a_duplicate_entry_under_a_foreign_filename() {
+    let (state, work, _) = work_pending();
+    let request = phase_envelope(&state, &finish_v(&state), PHASE, &work).unwrap();
+    let (dir, calls) = (tempdir().unwrap(), Cell::new(0));
+    let mut gate = open(&dir, &request.target_host_gate);
+    sync(&mut gate, &state);
+    receipt_of(&admit(&mut gate, &request, &calls));
+    drop(gate);
+
+    let entries = dir.path().join("entries");
+    let name = format!(
+        "{}.json",
+        blake3::hash(request.action_id.as_bytes()).to_hex()
+    );
+    let duplicate = entries.join("unexpected.json");
+    std::fs::copy(entries.join(name), &duplicate).unwrap();
+    assert!(matches!(
+        reopen(dir.path(), &request.target_host_gate),
+        Err(GateError::Journal(_))
+    ));
+    std::fs::remove_file(duplicate).unwrap();
+    let reopened = open(&dir, &request.target_host_gate);
+    assert!(reopened.entry(&request.action_id).is_some());
 }
 
 #[test]

@@ -5,12 +5,8 @@ export type TieCommand =
   | { kind: "create"; edges: readonly RawEdgeKey[]; position: { x: number; y: number } }
   | { kind: "move"; tieId: string; position: { x: number; y: number } }
   | { kind: "remove"; tieId: string }
+  | { kind: "detach"; tieId: string; edge: RawEdgeKey }
   | { kind: "clear" };
-
-/** The committed view and the views before each committed command, oldest first. */
-export type TieHistory = { view: GraphViewSettings; undo: GraphViewSettings[] };
-
-export const UNDO_LIMIT = 50;
 
 /**
  * A fresh random id per tie, never derived from the ties present: a removed tie's id coming back would let
@@ -35,6 +31,11 @@ export function pruneTies(view: GraphViewSettings, present: readonly RawEdgeKey[
   return { ties, routes, showOriginal: view.showOriginal };
 }
 
+/** Takes tie `tieId` out of the routes of `edges` (all routes when null), dropping routes left with no tie. */
+const unroute = (view: GraphViewSettings, tieId: string, edges: ReadonlySet<string> | null) => view.routes
+  .map((route) => edges && !edges.has(rawEdgeId(route.edge)) ? route : { ...route, via: route.via.filter((id) => id !== tieId) })
+  .filter((route) => route.via.length > 0);
+
 /** Applies one command to a view; returns the same view when the command does not apply. */
 export function applyTieCommand(view: GraphViewSettings, command: TieCommand): GraphViewSettings {
   switch (command.kind) {
@@ -55,27 +56,17 @@ export function applyTieCommand(view: GraphViewSettings, command: TieCommand): G
     }
     case "remove":
       if (!view.ties.some((tie) => tie.id === command.tieId)) return view;
-      return {
-        ...view,
-        ties: view.ties.filter((tie) => tie.id !== command.tieId),
-        routes: view.routes
-          .map((route) => ({ ...route, via: route.via.filter((id) => id !== command.tieId) }))
-          .filter((route) => route.via.length > 0),
-      };
+      return { ...view, ties: view.ties.filter((tie) => tie.id !== command.tieId), routes: unroute(view, command.tieId, null) };
+    case "detach": {
+      // One line leaves the tie and takes its own path again; the last line leaving takes the tie with it.
+      const tie = view.ties.find((candidate) => candidate.id === command.tieId);
+      const id = rawEdgeId(command.edge);
+      if (!tie || !tie.strandOrder.some((edge) => rawEdgeId(edge) === id)) return view;
+      const strandOrder = tie.strandOrder.filter((edge) => rawEdgeId(edge) !== id);
+      const ties = strandOrder.length ? view.ties.map((candidate) => candidate === tie ? { ...tie, strandOrder } : candidate) : view.ties.filter((candidate) => candidate !== tie);
+      return { ...view, ties, routes: unroute(view, tie.id, new Set([id])) };
+    }
     case "clear":
       return view.ties.length === 0 && view.routes.length === 0 ? view : { ...NO_TIES, showOriginal: view.showOriginal };
   }
-}
-
-/** Commits a command on `base` (the latest stored view) and keeps the shown view as the undo point. */
-export function commitTie(history: TieHistory, command: TieCommand, base: GraphViewSettings = history.view): TieHistory {
-  const view = applyTieCommand(base, command);
-  if (view === base) return history;
-  return { view, undo: [...history.undo, history.view].slice(-UNDO_LIMIT) };
-}
-
-export function undoTie(history: TieHistory): TieHistory {
-  const previous = history.undo.at(-1);
-  if (!previous) return history;
-  return { view: { ...previous, showOriginal: history.view.showOriginal }, undo: history.undo.slice(0, -1) };
 }

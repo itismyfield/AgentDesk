@@ -10,68 +10,16 @@ pub use super::effect_envelope::VerifiedPhaseLaunch;
 use super::host_journal::{JournalDir, OpenError};
 use super::model::{ActionKind, FenceAcknowledgement, HostGate, StopMode};
 use super::verification_run::{
-    AuthoritySource, BoundInput, Digest, NotSentReason, PhaseInitiation, PhaseKind, PhaseResult,
-    ProcessIdentity, TerminationObservation, TreeState, VerificationRun,
-    VerificationStartAuthority, phase_action_id,
+    BoundInput, Digest, NotSentReason, PhaseInitiation, PhaseKind, PhaseResult, ProcessIdentity,
+    TerminationObservation, TreeState, VerificationRun,
 };
 use super::verification_runner::{self, Launch, LaunchContext, RunningPhase};
 
 const FENCES: &str = "fences.json";
 const HOME: &str = "gate.json";
 
-// Who may start an effect now. It is never part of the effect's identity or payload, so a handover
-// changes the holder without changing the effect or its action ID.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "holder", rename_all = "snake_case")]
-pub enum EffectAuthority {
-    CurrentAttempt {
-        attempt_id: String,
-        binding_digest: Digest,
-        node_epoch: u64,
-        run_control_version: u64,
-    },
-    Verification(VerificationStartAuthority),
-}
-
-impl EffectAuthority {
-    fn fence(&self) -> (u64, u64) {
-        match self {
-            Self::CurrentAttempt {
-                run_control_version,
-                node_epoch,
-                ..
-            } => (*run_control_version, *node_epoch),
-            Self::Verification(a) => (a.run_control_version, a.consumer_node_epoch),
-        }
-    }
-
-    // An authority only ever speaks for the effect it was resolved for.
-    fn names(&self, effect: &EffectIdentity) -> bool {
-        match self {
-            Self::CurrentAttempt {
-                attempt_id,
-                binding_digest,
-                ..
-            } => {
-                effect.kind != ActionKind::VerificationPhase
-                    && effect.phase.is_none()
-                    && (attempt_id, binding_digest)
-                        == (&effect.origin_attempt_id, &effect.origin_binding_digest)
-            }
-            Self::Verification(a) => effect.phase.as_ref().is_some_and(|p| {
-                effect.kind == ActionKind::VerificationPhase
-                    && a.original_binding_digest == effect.origin_binding_digest
-                    && a.execution_id == p.execution_id
-                    && effect.action_id
-                        == phase_action_id(&effect.run_id, &p.execution_id, &p.phase_id)
-            }),
-        }
-    }
-
-    fn finish_plan(&self) -> bool {
-        matches!(self, Self::Verification(a) if matches!(a.source, AuthoritySource::FinishPlan { .. }))
-    }
-}
+mod authority;
+pub use authority::EffectAuthority;
 
 // One effect as the final gate sees it: the identity and payload fixed when the action was
 // registered, and the authority the server resolved from stored state for this request.
@@ -352,14 +300,22 @@ impl EffectGate {
             host: identity.host.clone(),
             gate: identity.gate.clone(),
         };
+        let fences: Option<FenceBook> = journal.read(FENCES).map_err(journal_error)?;
+        let entries = journal
+            .entries::<JournalEntry>(|entry| &entry.identity.action_id)
+            .map_err(journal_error)?;
         match journal.read::<GateHome>(HOME).map_err(journal_error)? {
             Some(held) if held != home => {
                 return Err(GateError::WrongHost(format!("{}/{}", held.host, held.gate)));
             }
             Some(_) => {}
+            None if fences.is_some() || !entries.is_empty() => {
+                return Err(GateError::Journal(
+                    "journal has no fixed host identity".into(),
+                ));
+            }
             None => journal.write(HOME, &home).map_err(journal_error)?,
         }
-        let fences = journal.read(FENCES).map_err(journal_error)?;
         let mut gate = Self {
             identity,
             fences: fences.unwrap_or_default(),
@@ -367,11 +323,11 @@ impl EffectGate {
             recovery: BTreeSet::new(),
             journal,
         };
-        for entry in gate
-            .journal
-            .entries::<JournalEntry>()
-            .map_err(journal_error)?
-        {
+        for entry in entries {
+            let target = &entry.identity.target;
+            if target.host != home.host || target.gate != home.gate {
+                return Err(GateError::WrongHost(target.host.clone()));
+            }
             gate.entries.insert(entry.identity.action_id.clone(), entry);
         }
         let lost: Vec<String> = gate
@@ -494,6 +450,10 @@ impl EffectGate {
         self.store_fences(book)
     }
 
+    pub(super) fn has_node_fence(&self, fence: &HostNodeFence) -> bool {
+        self.fences.nodes.contains(fence)
+    }
+
     // Checks the authority against the fences this host applied. Revocation (interrupted node, or
     // a stop that does not keep the action) ends every holder; an older holder is only stale.
     fn check(&self, envelope: &EffectEnvelope) -> Check {
@@ -562,7 +522,7 @@ impl EffectGate {
         }
         let previous = self.entries.get(&identity.action_id);
         if let Some(entry) = previous {
-            if entry.identity != identity {
+            if entry.identity != identity || entry.nonce != envelope.execution_nonce {
                 return Err(GateError::Conflict(identity.action_id));
             }
             match &entry.state {
@@ -763,8 +723,22 @@ impl EffectGate {
         probe: impl Fn(&ProcessIdentity) -> TreeState,
         now: DateTime<Utc>,
     ) -> Vec<Recovered> {
+        self.recovery_snapshot_with(None, |_, process| probe(process), now)
+    }
+
+    pub(super) fn recovery_snapshot_with(
+        &self,
+        run: Option<&str>,
+        probe: impl Fn(&JournalEntry, &ProcessIdentity) -> TreeState,
+        now: DateTime<Utc>,
+    ) -> Vec<Recovered> {
         let mut observations = Vec::new();
-        for entry in self.recovery.iter().filter_map(|id| self.entries.get(id)) {
+        for entry in self
+            .recovery
+            .iter()
+            .filter_map(|id| self.entries.get(id))
+            .filter(|entry| run.is_none_or(|run| run == entry.identity.run_id))
+        {
             let action_id = entry.identity.action_id.clone();
             match &entry.state {
                 JournalState::Started {
@@ -774,7 +748,7 @@ impl EffectGate {
                     action_id,
                     receipt: receipt.clone(),
                     process: process.clone(),
-                    tree: probe(process),
+                    tree: probe(entry, process),
                     observed_at: now,
                 }),
                 JournalState::Finished {

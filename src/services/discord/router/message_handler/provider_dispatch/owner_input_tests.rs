@@ -19,6 +19,8 @@ use std::time::Duration;
 
 #[path = "owner_input_common_operation_tests.rs"]
 mod common_operation_tests;
+#[path = "owner_input_effort_refused_tests.rs"]
+mod effort_refused_tests;
 
 pub(super) const PROMPT: &str = "owner busy question";
 pub(super) const AUTHOR: &str = "7";
@@ -336,6 +338,7 @@ impl Rig {
             until_done: Some(Box::new(|| Ok(()))),
             native_pin_submitted: None,
             observation: None,
+            recovery: Default::default(),
         }
     }
 
@@ -361,6 +364,7 @@ impl Rig {
             allowed_tools: &[],
             cancel: Arc::new(CancelToken::new()),
             codex_observation: None,
+
             tmux_session_name: pane,
             teardown: None,
             host: &host,
@@ -946,6 +950,33 @@ fn pane_pid_swap_stages_map_to_not_sent_or_write_uncertain() {
     }
 }
 
+/// A busy pane over a person's draft whose original's readiness due passed before C-s gets no key,
+/// C-s included: the leaf's own proof refuses the input for good.
+#[test]
+fn a_due_passed_before_c_s_parks_nothing_and_refuses_the_busy_input() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _listed = StashChannelGuard::new(7_272_512);
+    let rig = rig("due-cs", 7_272_512, "normal", view("js", false), BUSY);
+    // The rig's owner clock reads 10 000: a hold started at 0 is due exactly then.
+    let held = rig.mailbox.v2_request(|slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let front = owner.front().ok_or("no front")?;
+        owner.hold_readiness(&front, "test", 0).map(drop)
+    });
+    rig.runtime.block_on(held).unwrap();
+    let result = rig.dispatch(ProviderKind::Claude, target::Phase::Busy, &rig.transcript());
+    assert!(result.is_err(), "{result:?}");
+    assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
+    let snapshot = rig.snapshot();
+    assert_eq!(
+        snapshot["refused_inputs"].as_array().map(Vec::len),
+        Some(1),
+        "{snapshot}"
+    );
+    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+    assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+}
+
 /// An idle pane takes main's warm submission inside the owner scope, which also admits the
 /// listed channel's stash: one scope, no second install.
 #[test]
@@ -1049,6 +1080,7 @@ fn prepared_before_launch(rig: &Rig) -> Registration {
         until_done: None,
         native_pin_submitted: None,
         observation: None,
+        recovery: Default::default(),
     }
 }
 
@@ -1720,6 +1752,7 @@ fn an_owner_idle_turn_binds_its_cancel_token_to_its_pane() {
             settled,
             origin: InputOrigin::Discord,
             late: Default::default(),
+            recovery: Default::default(),
             refusal: Default::default(),
         };
         let mut bound = None;
@@ -1844,6 +1877,7 @@ pub(in crate::services::discord) async fn claimed_owner_turn(
         settled,
         origin: InputOrigin::Discord,
         late: Default::default(),
+        recovery: Default::default(),
         refusal: Default::default(),
     };
     (owner, answer)

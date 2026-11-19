@@ -10,6 +10,7 @@ pub(crate) fn now() -> DateTime<Utc> {
 pub(crate) fn input() -> DefinitionInput {
     serde_json::from_value(json!({
         "repository": "adk", "title": "Campaign", "goal": "Verified work",
+        "workflow_options": {"start":false,"implementation":false,"review":false,"landing":false,"merge":false,"deploy":false},
         "profile_version": "v1", "nodes": [
             {"id": "a", "title": "A", "issue_url": "https://github.com/itismyfield/AgentDesk/issues/7438",
              "acceptance": [{"id": "ac-a", "description": "Prove A", "verification": "test"}], "dependencies": []},
@@ -73,6 +74,7 @@ pub(crate) fn running() -> CampaignState {
         },
     );
     state.run = Some(Run {
+        approvals: Default::default(),
         id: "run".into(),
         control_version: 1,
         stop: None,
@@ -91,6 +93,9 @@ pub(crate) fn running() -> CampaignState {
         sessions: Vec::new(),
         verifications: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
+        reviews: BTreeMap::new(),
+        landings: BTreeMap::new(),
+        merges: BTreeMap::new(),
         fences: BTreeMap::new(),
         seals: BTreeMap::new(),
         environments: BTreeMap::new(),

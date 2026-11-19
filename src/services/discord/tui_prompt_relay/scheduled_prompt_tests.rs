@@ -35,12 +35,11 @@ impl Fire {
             .path()
             .join("708eaac7-d46f-4c29-837a-84e79c2d811f.jsonl");
         let prompt_id = format!("i8142-{case}");
-        let payload: Value = serde_json::from_str(
-            &HOOK_PAYLOAD
-                .replace("TRANSCRIPT", transcript.to_str().expect("utf-8 path"))
-                .replace(REAL_PROMPT_ID, &prompt_id),
-        )
-        .expect("hook payload");
+        let mut payload: Value =
+            serde_json::from_str(&HOOK_PAYLOAD.replace(REAL_PROMPT_ID, &prompt_id))
+                .expect("hook payload");
+        // Set as a JSON value: a Windows path's backslashes are no valid escapes inside a literal.
+        payload["transcript_path"] = Value::from(transcript.to_str().expect("utf-8 path"));
         let hook_prompt_id = extract_prompt_id_from_hook_payload(&payload);
         assert_eq!(hook_prompt_id.as_deref(), Some(prompt_id.as_str()));
         note_hook_transcript("claude", hook_prompt_id.as_deref(), &payload);

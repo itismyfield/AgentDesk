@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use super::model::Repository;
+use super::workflow_options::WorkflowOptions;
 use crate::utils::dag::{self, DagError};
 
 pub const WORKFLOW_VERSION: &str = "campaign-v1";
@@ -18,6 +19,14 @@ pub struct DefinitionInput {
     pub goal: String,
     pub profile_version: String,
     pub nodes: Vec<NodeDefinition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_options: Option<WorkflowOptions>,
+}
+
+impl DefinitionInput {
+    pub fn effective_workflow_options(&self) -> WorkflowOptions {
+        self.workflow_options.unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

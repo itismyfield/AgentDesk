@@ -57,18 +57,22 @@ fn a_new_incarnation_or_a_moved_source_never_rests_on_the_restart_floor() {
         "launched after this run: its Start decides"
     );
 
-    let r = old_launch();
-    finished(&r);
-    daemon_restart(&r.session);
-    assert_eq!(restored(&r), Some(true));
-    let copy = r.path.with_extension("copy");
-    fs::copy(&r.path, &copy).unwrap();
-    fs::rename(&copy, &r.path).unwrap();
-    assert_eq!(
-        restored(&r),
-        None,
-        "a replaced file's floor is no restart floor"
-    );
+    // A same-length replacement shows only in the file identity, which only a unix stamp carries.
+    #[cfg(unix)]
+    {
+        let r = old_launch();
+        finished(&r);
+        daemon_restart(&r.session);
+        assert_eq!(restored(&r), Some(true));
+        let copy = r.path.with_extension("copy");
+        fs::copy(&r.path, &copy).unwrap();
+        fs::rename(&copy, &r.path).unwrap();
+        assert_eq!(
+            restored(&r),
+            None,
+            "a replaced file's floor is no restart floor"
+        );
+    }
 
     let r = old_launch();
     finished(&r);
@@ -122,13 +126,14 @@ fn anything_after_the_terminal_or_an_open_fence_keeps_the_floor() {
 }
 
 /// A turn's session-state block as Claude writes it after the turn's `turn_duration`.
-const ADK_CC_TAIL: [&str; 8] = [
+const ADK_CC_TAIL: [&str; 9] = [
     "last-prompt",
     "ai-title",
     "mode",
     "permission-mode",
     "session-owner",
     "atis-latch",
+    "repl-mode",
     "pr-link",
     "frame-link",
 ];

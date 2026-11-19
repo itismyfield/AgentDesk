@@ -5,8 +5,13 @@ from __future__ import annotations
 import urllib.parse
 import uuid
 import copy
+import time
 
 from . import assertions
+
+
+AFTER_CLEAR_CAPTURE_TIMEOUT_S = 30.0
+AFTER_CLEAR_CAPTURE_INTERVAL_S = 0.25
 
 
 def plan(scenario, *, cell):
@@ -56,17 +61,30 @@ def run_step(driver, step, *, base_url, channel_id, cell, record):
 def capture(read_json, *, base_url, channel_id, provider, label, record):
     """Capture the channel's observed native ID, refusing incomplete or foreign evidence."""
     selector = urllib.parse.quote(str(channel_id), safe="")
-    status, payload = read_json(base_url, f"/api/agents/{selector}/session-evidence")
-    if (status != 200 or not isinstance(payload, dict)
-            or str(payload.get("channel_id")) != str(channel_id)
-            or payload.get("provider") != provider):
-        raise assertions.AssertionError("clear provider-session evidence unavailable or mismatched")
-    session_id = payload.get("raw_provider_session_id")
-    try:
-        if not isinstance(session_id, str) or str(uuid.UUID(session_id)) != session_id:
-            raise ValueError
-    except ValueError:
-        raise assertions.AssertionError("clear requires an observed native provider session ID") from None
+    deadline = time.monotonic() + AFTER_CLEAR_CAPTURE_TIMEOUT_S if label == "after_clear" else None
+    read_options = {}
+    while True:
+        status, payload = read_json(base_url, f"/api/agents/{selector}/session-evidence", **read_options)
+        if (status != 200 or not isinstance(payload, dict)
+                or str(payload.get("channel_id")) != str(channel_id)
+                or payload.get("provider") != provider):
+            raise assertions.AssertionError("clear provider-session evidence unavailable or mismatched")
+        session_id = payload.get("raw_provider_session_id")
+        try:
+            if (not isinstance(session_id, str) or str(uuid.UUID(session_id)) != session_id
+                    or (deadline is not None and time.monotonic() > deadline)):
+                raise ValueError
+        except ValueError:
+            remaining = deadline - time.monotonic() if deadline is not None else 0
+            # Current-turn completion writes identity after posting the reply.
+            if session_id is None and remaining > 0:
+                time.sleep(min(AFTER_CLEAR_CAPTURE_INTERVAL_S, remaining))
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    read_options = {"timeout": min(5.0, remaining)}
+                    continue
+            raise assertions.AssertionError("clear requires an observed native provider session ID") from None
+        break
     identity = {"provider": provider, "session_id": session_id}
     record.setdefault("clear_provider_sessions", {})[label] = identity
     return identity

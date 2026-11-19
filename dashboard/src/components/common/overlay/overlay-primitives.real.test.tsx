@@ -4,6 +4,8 @@ import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BottomSheet } from "./BottomSheet";
+import { Drawer } from "./Drawer";
+import { DrawerDockContext } from "./DrawerDock";
 import { Modal } from "./Modal";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
@@ -141,5 +143,44 @@ describe("overlay primitives with real dialog libraries", () => {
     expect(document.querySelector("[role='dialog'][data-state='open']")).toBeNull();
     expect(document.activeElement).toBe(trigger);
     expect(warningsMatching(warnSpy, "Missing `Description`")).toHaveLength(0);
+  });
+  it("docks a drawer into the page pane as a non-modal dialog that only closes from inside", async () => {
+    const onClose = vi.fn();
+    function Harness() {
+      const [host, setHost] = useState<HTMLElement | null>(null);
+      return (
+        <>
+          <button type="button">Outside</button>
+          <aside ref={setHost} data-testid="dock" />
+          <DrawerDockContext.Provider value={{ host }}>
+            <Drawer open onClose={onClose} title="Docked card">
+              <button type="button">Inside</button>
+            </Drawer>
+          </DrawerDockContext.Provider>
+        </>
+      );
+    }
+
+    await render(<Harness />);
+    const dialog = document.querySelector("[role='dialog']") as HTMLElement;
+    expect(dialog.closest("[data-testid='dock']")).not.toBeNull();
+    expect(dialog.getAttribute("aria-modal")).toBeNull();
+    expect(document.querySelector(".fixed.inset-0")).toBeNull();
+    expect(dialog.contains(document.activeElement)).toBe(false);
+
+    const outside = Array.from(document.querySelectorAll("button")).find((button) => button.textContent === "Outside")!;
+    await act(async () => {
+      outside.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      outside.focus();
+    });
+    await pressEscape();
+    expect(onClose).not.toHaveBeenCalled();
+
+    const inside = Array.from(dialog.querySelectorAll("button")).find((button) => button.textContent === "Inside")!;
+    await act(async () => {
+      inside.focus();
+      inside.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" }));
+    });
+    expect(onClose).toHaveBeenCalledOnce();
   });
 });

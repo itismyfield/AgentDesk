@@ -4,7 +4,7 @@ import type { KanbanCard } from "../../types";
 import { cardTitle } from "../agent-manager/kanban-utils";
 import { campaignTaskNumber, campaignTaskTitle } from "./campaignModel";
 import {
-  EMPTY_QUEUE_FILTERS, campaignNodeFromCard, cardWithBody, filterQueueCards, parseQueueLocation, queueCards, queueLocationQuery,
+  EMPTY_QUEUE_FILTERS, campaignNodeFromCard, cardWithBody, filterQueueCards, groupQueueCards, parseQueueLocation, queueCards, queueLocationQuery,
   summaryOutdatesFull,
 } from "./campaignQueueModel";
 import { makeCampaignNode } from "./campaignTestFixtures";
@@ -65,6 +65,16 @@ it("sorts by priority then most recent change, and filters by text, status and r
   expect(filterQueueCards(cards, { ...EMPTY_QUEUE_FILTERS, query: "#7" }).map((value) => value.id)).toEqual(["urgent"]);
   expect(filterQueueCards(cards, { ...EMPTY_QUEUE_FILTERS, status: "ready" }).map((value) => value.id)).toEqual(["medium-new"]);
   expect(filterQueueCards(cards, { ...EMPTY_QUEUE_FILTERS, repo: "itismyfield/CookingHeart" }).map((value) => value.id)).toEqual(["medium-old"]);
+});
+
+it("groups sorted cards by repository in the order their first card appears, keeping the order inside", () => {
+  const sorted = [
+    card("b1", { github_repo: "acme/beta" }), card("a1"), card("none", { github_repo: null }), card("b2", { github_repo: "acme/beta" }), card("a2"),
+  ];
+  expect(groupQueueCards(sorted).map(({ repo, cards }) => [repo, cards.map((value) => value.id)])).toEqual([
+    ["acme/beta", ["b1", "b2"]], ["itismyfield/AgentDesk", ["a1", "a2"]], ["", ["none"]],
+  ]);
+  expect(groupQueueCards([])).toEqual([]);
 });
 
 it("adds a card as a pending task numbered like the campaign's own tasks", () => {

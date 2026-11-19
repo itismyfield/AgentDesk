@@ -19,6 +19,8 @@ use crate::services::discord::id_bridge::{
 };
 use crate::services::discord::{SharedData, rate_limit_wait};
 
+pub(crate) mod recovery_notice;
+
 struct SerenityReferenceOutboundClient {
     http: Arc<serenity::Http>,
     shared: Arc<SharedData>,

@@ -3,9 +3,11 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 
 use super::{
+    decision_commands,
     definition::{self, DefinitionInput, WORKFLOW_VERSION},
+    lifecycle,
     model::*,
-    stage_fsm, verification_commands,
+    review_wait, stage_fsm, verification_commands,
 };
 
 type DecisionResult<T> = Result<T, Rejection>;
@@ -289,6 +291,14 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
     }
     let mut next = state.clone();
     let event = match &envelope.command {
+        Command::OpenApprovalGate { .. } | Command::ApproveGate { .. } => {
+            let Some(event) =
+                decision_commands::decide(&mut next, &envelope.command, envelope.observed_at)?
+            else {
+                return Ok(unchanged(state));
+            };
+            event
+        }
         Command::EditDefinition {
             expected_revision,
             definition,
@@ -296,6 +306,7 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
         } => {
             revision(state, *expected_revision)?;
             edit_guard(state)?;
+            decision_commands::validate_edit_input(definition)?;
             let validated = definition::validate_definition(definition.clone())
                 .map_err(Rejection::invalid_definition)?;
             let superseded_nodes = state.definition.superseded_nodes(&validated);
@@ -348,6 +359,13 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
             target(state, *expected_revision, expected_run)?;
             return Err(reject(RejectionCode::ExecutionUnavailable));
         }
+        Command::BeginRun { .. }
+        | Command::ResumeRun { .. }
+        | Command::BeginLanding { .. }
+        | Command::CompleteNode { .. } => match lifecycle::decide(&mut next, &envelope.command)? {
+            Some(event) => event,
+            None => return Ok(unchanged(state)),
+        },
         Command::RequestStop {
             expected_revision,
             expected_run,
@@ -703,17 +721,34 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
             Some(event) => event,
             None => return Ok(unchanged(state)),
         },
+        Command::RecordMerge { node_id, fact } => {
+            match super::landing_merge::decide(&mut next, node_id, fact, envelope.observed_at)? {
+                Some(event) => event,
+                None => return Ok(unchanged(state)),
+            }
+        }
+        Command::RecordLanding { node_id, fact } => {
+            match super::landing_effects::decide(&mut next, node_id, fact, envelope.observed_at)? {
+                Some(event) => event,
+                None => return Ok(unchanged(state)),
+            }
+        }
         Command::SealCandidate { .. }
         | Command::BindVerificationSubject { .. }
         | Command::BindVerificationInput { .. }
         | Command::BindVerificationPlan { .. }
         | Command::RecordVerificationPhase { .. }
-        | Command::SettleVerification { .. } => {
+        | Command::SettleVerification { .. }
+        | Command::RecordReview { .. } => {
             let mut records = Vec::new();
             let at = envelope.observed_at;
-            let Some(event) =
-                verification_commands::decide(&mut next, &envelope.command, at, &mut records)?
-            else {
+            let result = match &envelope.command {
+                Command::RecordReview { action_id, fact } => {
+                    review_wait::decide(&mut next, action_id, fact, at, &mut records)
+                }
+                command => verification_commands::decide(&mut next, command, at, &mut records),
+            };
+            let Some(event) = result? else {
                 return Ok(unchanged(state));
             };
             let mut decision = finish(next, &envelope.idempotency_key, at, event);
@@ -764,7 +799,7 @@ fn action_mut<'a>(
     }
     Ok(action)
 }
-fn observe_action(
+pub(super) fn observe_action(
     state: &mut CampaignState,
     id: &str,
     binding: &AttemptBinding,

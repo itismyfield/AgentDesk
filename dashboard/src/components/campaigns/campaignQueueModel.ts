@@ -99,6 +99,19 @@ export function filterQueueCards(cards: KanbanCard[], filters: QueueFilters): Ka
   return matched.sort(order[filters.sort]);
 }
 
+export interface QueueGroup { repo: string; cards: KanbanCard[] }
+
+/** Sorted cards grouped by repository ("" for none); groups follow the order their first card appears in. */
+export function groupQueueCards(cards: KanbanCard[]): QueueGroup[] {
+  const groups = new Map<string, KanbanCard[]>();
+  for (const card of cards) {
+    const repo = card.github_repo ?? "";
+    const group = groups.get(repo);
+    if (group) group.push(card); else groups.set(repo, [card]);
+  }
+  return Array.from(groups, ([repo, grouped]) => ({ repo, cards: grouped }));
+}
+
 /** A pending task for the card's issue, numbered like the campaign's other tasks ("i123", title "#123 …"). */
 export function campaignNodeFromCard(card: KanbanCard & { github_issue_number: number }, campaign: Campaign, issueUrl: string, stage: string, now: string): CampaignNode {
   const taken = new Set(campaign.nodes.map((node) => node.id));

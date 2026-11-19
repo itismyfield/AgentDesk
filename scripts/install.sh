@@ -242,11 +242,14 @@ finish_install() {
     if [ "$OLD_BINARY_PRESENT" = 1 ]; then
       if [ "$BINARY_REPLACED" = 1 ] && [ ! -f "$INSTALL_STAGE/agentdesk" ]; then
         [ ! -f "$target" ] || chflags nouchg "$target" || status=1
-        if ! mv -f "$INSTALL_STAGE/previous" "$target"; then
+        if ! rm -f "$target.source.json" || ! mv -f "$INSTALL_STAGE/previous" "$target"; then
           [ ! -f "$target" ] || chflags uchg "$target"
           [ "$OLD_BINARY_LOCKED" = 0 ] || chflags uchg "$INSTALL_STAGE/previous"
           warn "Binary recovery failed; previous binary retained at $INSTALL_STAGE/previous"
           exit 1
+        fi
+        if [ -f "$INSTALL_STAGE/previous.source.json" ]; then
+          mv -f "$INSTALL_STAGE/previous.source.json" "$target.source.json" || status=1
         fi
       fi
       if [ "$OLD_BINARY_LOCKED" = 1 ]; then
@@ -259,7 +262,8 @@ finish_install() {
   fi
   if [ -n "$INSTALL_STAGE" ]; then
     # Only installer-created staging files are removed.
-    rm -f "$INSTALL_STAGE/agentdesk" "$INSTALL_STAGE/previous" || status=1
+    rm -f "$INSTALL_STAGE/agentdesk" "$INSTALL_STAGE/agentdesk.source.json" \
+      "$INSTALL_STAGE/previous" "$INSTALL_STAGE/previous.source.json" || status=1
     rmdir "$INSTALL_STAGE" || status=1
   fi
   if [ -n "$INSTALL_SCRATCH" ]; then
@@ -269,8 +273,44 @@ finish_install() {
   exit "$status"
 }
 
+# The installer is also run standalone. Bind a verified archive record to the
+# signed copy without executing code from that archive.
+install_source_record() {
+  python3 - "$@" <<'PY_RECORD'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+operation, binary, record = sys.argv[1:]
+binary = Path(binary)
+digest = hashlib.sha256()
+with binary.open("rb") as stream:
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+sha256 = digest.hexdigest()
+if operation == "read":
+    try:
+        path = Path(record)
+        if path.is_symlink() or not path.is_file():
+            sys.exit(0)
+        with path.open("rb") as stream:
+            raw = stream.read(4097)
+        data = json.loads(raw)
+        if len(raw) <= 4096 and isinstance(data, dict) and data.get("sha256") == sha256:
+            print(json.dumps(data))
+    except (OSError, ValueError):
+        pass
+else:
+    data = json.loads(record)
+    data["sha256"] = sha256
+    binary.with_name(binary.name + ".source.json").write_text(json.dumps(data) + "\n")
+PY_RECORD
+}
+
 install_runtime() {
-  local source="$1" binary="$2" target="$INSTALL_DIR/bin/agentdesk" flags
+  local source="$1" binary="$2" target="$INSTALL_DIR/bin/agentdesk" flags witness=""
+  local source_record="$2.source.json"
   mkdir -p "$INSTALL_DIR"/{bin,config,data,logs}
   INSTALL_STAGE=$(mktemp -d "$INSTALL_DIR/bin/.agentdesk-install.XXXXXX")
   if [ -L "$target" ] || { [ -e "$target" ] && [ ! -f "$target" ]; }; then
@@ -278,7 +318,13 @@ install_runtime() {
   fi
   cp "$binary" "$INSTALL_STAGE/agentdesk"
   chmod +x "$INSTALL_STAGE/agentdesk"
+  if [ -f "$source_record" ]; then
+    witness=$(install_source_record read "$INSTALL_STAGE/agentdesk" "$source_record")
+  fi
   sign_binary_with_fallback "$INSTALL_STAGE/agentdesk"
+  if [ -n "$witness" ]; then
+    install_source_record write "$INSTALL_STAGE/agentdesk" "$witness"
+  fi
   "$INSTALL_STAGE/agentdesk" --version
   python3 "$INSTALL_SUPPORT_DIR/install_runtime_assets.py" "$source" "$INSTALL_DIR" \
     --contract "$INSTALL_SUPPORT_DIR/runtime-assets.txt"
@@ -290,13 +336,20 @@ install_runtime() {
     flags=$(stat -f '%Sf' "$target")
     case ",$flags," in *,uchg,*) OLD_BINARY_LOCKED=1 ;; esac
     cp -p "$target" "$INSTALL_STAGE/previous"
+    if [ -f "$target.source.json" ]; then
+      cp -p "$target.source.json" "$INSTALL_STAGE/previous.source.json"
+    fi
     chflags nouchg "$INSTALL_STAGE/previous"
     OLD_BINARY_PRESENT=1
     chflags nouchg "$target"
   fi
   # Rename replaces the directory entry atomically; the saved binary remains available for rollback.
+  rm -f "$target.source.json"
   BINARY_REPLACED=1
   mv -f "$INSTALL_STAGE/agentdesk" "$target"
+  if [ -f "$INSTALL_STAGE/agentdesk.source.json" ]; then
+    mv -f "$INSTALL_STAGE/agentdesk.source.json" "$target.source.json"
+  fi
   chflags uchg "$target"
 }
 

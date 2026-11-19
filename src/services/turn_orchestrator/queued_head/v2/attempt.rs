@@ -5,12 +5,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct AttemptRef {
-    pub(crate) identity: QueueIdentity,
-    pub(crate) attempt: AttemptIdentity,
-}
-
 impl AttemptRef {
     pub(super) fn matches(&self, input: &InputAttempt) -> bool {
         self.identity == input.identity && input.attempt.as_ref() == Some(&self.attempt)
@@ -144,6 +138,11 @@ impl Owner {
             None if head.confirmation_deadline_ms.is_some() => return Ok(()),
             Some(PayloadWindow::Bootstrap) => {}
             None => return Err("unknown payload phase".into()),
+        }
+        // An approved first key may already have parked a draft; its payload is never refused.
+        if self.first_key_approved.as_ref() != Some(key) && self.head_outlived_due(now) {
+            self.due_refused = Some(key.clone());
+            return Err("readiness_deadline".into());
         }
         let mut next = self.snapshot.clone();
         let head = next

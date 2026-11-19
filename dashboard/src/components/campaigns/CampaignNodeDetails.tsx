@@ -4,6 +4,7 @@ import { ApiRequestError } from "../../api/httpClient";
 import { Select } from "../common/Select";
 import { WidgetState } from "../common/WidgetState";
 import { NODE_STATUSES, safeCampaignLink } from "./campaignModel";
+import { legacyTask } from "./campaignOverviewModel";
 import { Badge, LABELS, cardStatusLabel, dispatchLabel, queueLabel, sessionLabel, type Tr } from "./campaignPresentation";
 
 export interface CampaignDraft {
@@ -30,6 +31,7 @@ export default function CampaignNodeDetails({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const draft = editing?.node;
+  const shown = legacyTask(node, live); // the status and blocker the overview shows
   const patch = (changes: Partial<CampaignNode>) => {
     if (editing) onDraftChange({ ...editing, node: { ...editing.node, ...changes } });
   };
@@ -176,6 +178,37 @@ export default function CampaignNodeDetails({
         </form>
       ) : (
         <>
+          {/* TaskPhone order: where it stands now, its record by time, what it is for, then links and bookkeeping. */}
+          {campaign.nodes_partial && <p role="status" className="campaign-muted">{tr("세부 내용과 검증 기록을 불러오는 중이에요…", "Loading details and verification records…")}</p>}
+          <div className="grid gap-2">
+            <h4>{tr("지금 상태", "Now")}</h4>
+            <p className="campaign-description">{node.stage || "—"} · {tr(`라운드 ${node.round}`, `round ${node.round}`)}</p>
+            {shown.blocker && <WidgetState kind="stale" title={shown.status === "pending" ? tr("대기 사유", "Waiting on") : tr("막힌 이유", "Blocker")} description={shown.blocker} compact />}
+            {node.post_merge_hold && <WidgetState kind="stale" title={tr("보류: 머지 뒤 남은 일", "On hold: post-merge work")} description={node.post_merge_hold} compact />}
+          </div>
+          <div className="campaign-next">
+            <h4>{tr("다음 행동", "Next action")}</h4>
+            <p>{node.next_action || tr("아직 기록된 다음 행동이 없습니다.", "No next action recorded yet.")}</p>
+          </div>
+          {!!node.evidence_records?.length && (
+            <div>
+              <h4>{tr("단계 기록", "Stage record")}</h4>
+              <ol>
+                {[...node.evidence_records].sort((a, b) => (Date.parse(a.recorded_at ?? "") || 0) - (Date.parse(b.recorded_at ?? "") || 0)).map((record, index) => (
+                  <li key={index}>
+                    {record.recorded_at && <time className="campaign-muted" dateTime={record.recorded_at}>{new Date(record.recorded_at).toLocaleString()} · </time>}
+                    <strong>{record.summary}</strong>
+                    {record.result && <p>{record.result}</p>}
+                    {record.command && <code>{record.command}</code>}
+                    {record.head_sha && <p title={record.head_sha}>Commit: {record.head_sha.slice(0, 7)}</p>}
+                    {record.references.map((reference, refIndex) => (
+                      <p key={refIndex}>{reference}</p>
+                    ))}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
           {(node.summary || node.benefit) && (
             <p className="campaign-description">
               {node.summary}
@@ -183,8 +216,50 @@ export default function CampaignNodeDetails({
               {node.benefit && `${tr("기대효과", "Benefit")}: ${node.benefit}`}
             </p>
           )}
-          {campaign.nodes_partial && <p role="status" className="campaign-muted">{tr("세부 내용과 검증 기록을 불러오는 중이에요…", "Loading details and verification records…")}</p>}
+          {!!node.acceptance?.length && (
+            <div>
+              <h4>{tr("완료 조건", "Acceptance criteria")}</h4>
+              <ul>
+                {node.acceptance.map((value, index) => (
+                  <li key={index}>{value}</li>
+                ))}
+              </ul>
+            </div>
+          )}
           {node.details && <p className="campaign-description">{node.details}</p>}
+          {!!node.findings?.length && (
+            <div>
+              <h4>{tr("발견 사항", "Findings")}</h4>
+              <ul>
+                {node.findings.map((value, index) => (
+                  <li key={index}>{value}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {node.evidence.length > 0 && (
+            <div>
+              <h4>{tr("검증 근거", "Evidence")}</h4>
+              <ul>
+                {node.evidence.map((evidence, index) => (
+                  <li key={index}>{evidence}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className="campaign-actions">
+            {safeCampaignLink(node.issue_url) && (
+              <a href={safeCampaignLink(node.issue_url)} target="_blank" rel="noopener noreferrer">
+                {tr("이슈 보기", "View issue")} ↗
+              </a>
+            )}
+            {safeCampaignLink(node.pr_url) && (
+              <a href={safeCampaignLink(node.pr_url)} target="_blank" rel="noopener noreferrer">
+                {tr("PR 보기", "View PR")} ↗
+              </a>
+            )}
+            {node.head_sha && <code className="campaign-muted" title={node.head_sha}>Commit {node.head_sha.slice(0, 7)}</code>}
+          </div>
           {live && (
             <div className="campaign-live-detail">
               <h4>{tr("실제 실행 상태", "Live execution")}</h4>
@@ -211,12 +286,6 @@ export default function CampaignNodeDetails({
             </div>
           )}
           <dl className="campaign-detail-grid grid grid-cols-1 gap-4 text-sm sm:grid-cols-2 [&_dt]:mb-1 [&_dt]:text-xs [&_dd]:[overflow-wrap:anywhere]">
-            <div>
-              <dt>{tr("단계 · 라운드", "Stage · round")}</dt>
-              <dd>
-                {node.stage || "—"} · {node.round}
-              </dd>
-            </div>
             <div>
               <dt>{tr("그룹", "Group")}</dt>
               <dd>{node.group || tr("미분류", "Ungrouped")}</dd>
@@ -245,79 +314,8 @@ export default function CampaignNodeDetails({
                   : tr("없음", "None")}
               </dd>
             </div>
-            {node.head_sha && (
-              <div>
-                <dt>Commit</dt>
-                <dd title={node.head_sha}>{node.head_sha.slice(0, 7)}</dd>
-              </div>
-            )}
           </dl>
-          <div className="campaign-next">
-            <h4>{tr("다음 행동", "Next action")}</h4>
-            <p>{node.next_action || tr("아직 기록된 다음 행동이 없습니다.", "No next action recorded yet.")}</p>
-          </div>
-          {node.blocker && <WidgetState kind="stale" title={tr("막힌 이유", "Blocker")} description={node.blocker} compact />}
-          {node.post_merge_hold && <WidgetState kind="stale" title={tr("보류: 머지 뒤 남은 일", "On hold: post-merge work")} description={node.post_merge_hold} compact />}
-          {node.evidence.length > 0 && (
-            <div>
-              <h4>{tr("검증 근거", "Evidence")}</h4>
-              <ul>
-                {node.evidence.map((evidence, index) => (
-                  <li key={index}>{evidence}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {!!node.acceptance?.length && (
-            <div>
-              <h4>{tr("완료 조건", "Acceptance criteria")}</h4>
-              <ul>
-                {node.acceptance.map((value, index) => (
-                  <li key={index}>{value}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {!!node.findings?.length && (
-            <div>
-              <h4>{tr("발견 사항", "Findings")}</h4>
-              <ul>
-                {node.findings.map((value, index) => (
-                  <li key={index}>{value}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {!!node.evidence_records?.length && (
-            <div>
-              <h4>{tr("검증 기록", "Verification records")}</h4>
-              <ul>
-                {node.evidence_records.map((record, index) => (
-                  <li key={index}>
-                    <strong>{record.summary}</strong>
-                    {record.result && <p>{record.result}</p>}
-                    {record.command && <code>{record.command}</code>}
-                    {record.head_sha && <p title={record.head_sha}>Commit: {record.head_sha.slice(0, 7)}</p>}
-                    {record.recorded_at && <p>{new Date(record.recorded_at).toLocaleString()}</p>}
-                    {record.references.map((reference, refIndex) => (
-                      <p key={refIndex}>{reference}</p>
-                    ))}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
           <div className="campaign-actions">
-            {safeCampaignLink(node.issue_url) && (
-              <a href={safeCampaignLink(node.issue_url)} target="_blank" rel="noopener noreferrer">
-                {tr("이슈 보기", "View issue")} ↗
-              </a>
-            )}
-            {safeCampaignLink(node.pr_url) && (
-              <a href={safeCampaignLink(node.pr_url)} target="_blank" rel="noopener noreferrer">
-                {tr("PR 보기", "View PR")} ↗
-              </a>
-            )}
             <button onClick={() => onDraftChange({ campaign, node: { ...node } })}>{tr("작업 수정", "Edit task")}</button>
           </div>
         </>

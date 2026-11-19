@@ -4,7 +4,7 @@ const ROUTES = [
   { path: "/home", label: /홈|Home/ },
   { path: "/campaigns", label: /캠페인|Campaigns/ },
   { path: "/routines", label: /루틴|Routines/ },
-  { path: "/ops", label: /운영|Ops/ },
+  { path: "/audit", label: /감사|Audit/ },
   { path: "/stats", label: /통계|Stats/ },
   { path: "/agents", label: /에이전트|Agents/ },
   { path: "/settings", label: /설정|Settings/ },
@@ -16,12 +16,12 @@ const LEGACY_REDIRECTS = [
   { path: "/meetings", to: /\/agents$/ },
   { path: "/achievements", to: /\/stats$/ },
   { path: "/voice", to: /\/home$/ },
+  { path: "/ops", to: /\/settings\?category=connections$/ },
+  { path: "/control", to: /\/settings\?category=connections$/ },
 ];
 
-// Mirrors HOME_DEFAULT_WIDGETS in src/app/HomeOverviewConfig.ts.
-const DEFAULT_HOME_WIDGET_ORDER = ["working", "attention", "m_tokens", "m_cost", "m_rate_limit", "routines"];
-const CUSTOM_HOME_WIDGET_ORDER = [...DEFAULT_HOME_WIDGET_ORDER].reverse();
-const DRAGGED_HOME_WIDGET_ORDER = ["routines", "working", "attention", "m_tokens", "m_cost", "m_rate_limit"];
+// v3 home is a fixed order: to-dos, system, agents, campaigns, today's routines, usage.
+const HOME_SECTIONS = ["할 일", "시스템", "에이전트", "캠페인", "오늘 루틴", "사용량"];
 
 async function openAppearancePanel(page: Page, isMobile: boolean) {
   if (isMobile) {
@@ -45,13 +45,15 @@ async function expectNoHorizontalOverflow(page: Page) {
   ).toBeLessThanOrEqual(metrics.viewportWidth + 1);
 }
 
-async function getHomeWidgetOrder(page: Page) {
-  return page.locator('[data-testid^="home-widget-"]').evaluateAll((elements) =>
-    elements
-      .map((element) => element.getAttribute("data-testid") ?? "")
-      .filter(Boolean)
-      .map((value) => value.replace("home-widget-", "")),
-  );
+async function mockHomeSources(page: Page) {
+  await page.route(/\/api\/rate-limits$/, (route) => route.fulfill({ json: { providers: [
+    { provider: "claude", profile_id: "default", stale: false, fetched_at: 1_795_000_000, buckets: [{ name: "7d", limit: 100, used: 83, remaining: 17, reset: 0 }] },
+  ] } }));
+  await page.route(/\/api\/settings\/runtime-config$/, (route) => route.fulfill({ json: {
+    current: { dispatchRateLimitGateEnabled: true, dispatchRateLimitGateDangerPct: 90 }, defaults: {},
+  } }));
+  await page.route(/\/api\/campaigns\?/, (route) => route.fulfill({ json: { campaigns: [], live: {}, limit: 100, offset: 0 } }));
+  await page.route(/\/api\/server-campaigns\?/, (route) => route.fulfill({ json: { campaigns: [] } }));
 }
 
 const MOCK_SKILLS = [
@@ -1359,7 +1361,7 @@ test.describe("Dashboard smoke tests", () => {
     }));
     await page.goto("/home");
 
-    await page.getByLabel(/검색 열기|Open search/).click();
+    await page.getByLabel(/^찾기$|^Search$/).click();
     const palette = page.getByRole("dialog", {
       name: /명령 팔레트|Command Palette/,
     });
@@ -1373,7 +1375,7 @@ test.describe("Dashboard smoke tests", () => {
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/stats$/);
 
-    await page.getByLabel(/검색 열기|Open search/).click();
+    await page.getByLabel(/^찾기$|^Search$/).click();
     await expect(palette).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(palette).toHaveCount(0);
@@ -1386,8 +1388,26 @@ test.describe("Dashboard smoke tests", () => {
     const sidebar = page.getByTestId("app-sidebar-nav");
     await expect(sidebar).toBeVisible();
     const box = await sidebar.boundingBox();
-    expect(box?.width).toBeGreaterThan(210);
-    expect(box?.width).toBeLessThan(225);
+    expect(box?.width).toBeGreaterThan(228);
+    expect(box?.width).toBeLessThan(236);
+    // v3 rail order: settings sits below a divider and ops is off the menu.
+    await expect(sidebar.getByRole("link")).toHaveText([/홈|Home/, /캠페인|Campaigns/, /에이전트|Agents/, /루틴|Routines/, /감사|Audit/, /통계|Stats/, /설정|Settings/]);
+    await expect(sidebar.getByRole("link", { name: /^홈$|^Home$/ })).toHaveAttribute("aria-current", "page");
+  });
+
+  test("desktop: a short window keeps the rail status in view and the menu scrollable", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
+    await mockOpsHealthApi(page, () => MOCK_OPS_HEALTH_BASE);
+    await page.setViewportSize({ width: 950, height: 345 });
+    await page.goto("/home");
+    const sidebar = page.getByTestId("app-sidebar-nav");
+    const menu = page.getByTestId("app-sidebar-menu");
+    expect(await menu.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
+    const status = await page.getByTestId("sidebar-connection-status").boundingBox();
+    expect(status!.y + status!.height).toBeLessThanOrEqual(345);
+    await sidebar.getByRole("link", { name: /^설정$|^Settings$/ }).click();
+    await expect(page).toHaveURL(/\/settings$/);
+    await expect(page.getByTestId("settings-page")).toBeVisible();
   });
 
   test("responsive: 900px switches from mobile tab bar to desktop sidebar", async ({ page }, testInfo) => {
@@ -1413,10 +1433,10 @@ test.describe("Dashboard smoke tests", () => {
     const topbar = page.getByTestId("topbar");
     await expect(bottomNav).toBeVisible();
     await expect(bottomNav.locator("button")).toHaveCount(5);
-    for (const id of ["home", "campaigns", "routines", "ops"]) {
+    for (const id of ["home", "campaigns", "agents", "audit"]) {
       await expect(page.getByTestId(`app-mobile-tab-${id}`)).toBeVisible();
     }
-    await expect(page.getByTestId("app-mobile-more-button")).toContainText(/더보기|More/);
+    await expect(page.getByTestId("app-mobile-more-button")).toContainText(/더 보기|More/);
     await expect(page.getByTestId("app-mobile-tab-home")).toHaveAttribute("aria-current", "page");
 
     const tabMetrics = await bottomNav.locator("button").evaluateAll((buttons) =>
@@ -1452,13 +1472,13 @@ test.describe("Dashboard smoke tests", () => {
 
     const moreMenu = page.getByTestId("app-mobile-more-menu");
     await expect(moreMenu).toBeVisible();
-    await expect(moreMenu.getByRole("button", { name: /더보기 닫기|Close/ })).toBeFocused();
-    for (const id of ["stats", "agents", "settings"]) {
+    await expect(moreMenu.getByRole("button", { name: /더 보기 닫기|Close/ })).toBeFocused();
+    for (const id of ["routines", "stats", "settings"]) {
       await expect(page.getByTestId(`app-mobile-more-${id}`)).toBeVisible();
     }
     await expect(page.getByTestId("app-mobile-more-theme")).toBeVisible();
     await expect(page.getByTestId("app-mobile-more-tweaks")).toBeVisible();
-    await expect(moreMenu.getByRole("button", { name: /회의|Meetings|업적|Achievements|음성|Voice|칸반|Kanban/ })).toHaveCount(0);
+    await expect(moreMenu.getByRole("button", { name: /회의|Meetings|업적|Achievements|음성|Voice|칸반|Kanban|운영|Ops/ })).toHaveCount(0);
 
     const moreMenuBackdropZIndex = await moreMenu.evaluate((element) =>
       Number(window.getComputedStyle(element.parentElement as HTMLElement).zIndex),
@@ -1481,6 +1501,23 @@ test.describe("Dashboard smoke tests", () => {
     await page.keyboard.press("Escape");
     await expect(moreMenu).toHaveCount(0);
     await expect(page.getByTestId("app-mobile-more-button")).toBeFocused();
+  });
+
+  test("responsive: the More sheet closes on back navigation and marks the current page", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+    await page.goto("/home");
+    await page.getByTestId("app-mobile-tab-audit").click();
+    await expect(page).toHaveURL(/\/audit$/);
+    await page.getByTestId("app-mobile-more-button").click();
+    await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(/\/home$/);
+    await expect(page.getByTestId("app-mobile-more-menu")).toHaveCount(0);
+
+    await page.goto("/routines");
+    await page.getByTestId("app-mobile-more-button").click();
+    await expect(page.getByTestId("app-mobile-more-routines")).toHaveAttribute("aria-current", "page");
+    await expect(page.getByTestId("app-mobile-more-stats")).not.toHaveAttribute("aria-current", "page");
   });
 
   test("responsive: mobile topbar is a single row with title and search", async ({ page }, testInfo) => {
@@ -1532,119 +1569,148 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/home");
     await expectNoHorizontalOverflow(page);
 
-    for (const id of ["campaigns", "routines", "ops"]) {
+    for (const id of ["campaigns", "agents", "audit"]) {
       await page.getByTestId(`app-mobile-tab-${id}`).click();
       await expect(page).toHaveURL(new RegExp(`/${id}$`));
       await expect(page.getByTestId(`app-mobile-tab-${id}`)).toHaveAttribute("aria-current", "page");
       await expectNoHorizontalOverflow(page);
     }
 
-    for (const id of ["stats", "agents", "settings"]) {
+    for (const id of ["routines", "stats", "settings"]) {
       await page.getByTestId("app-mobile-more-button").click();
       await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible({ timeout: 15000 });
       await page.getByTestId(`app-mobile-more-${id}`).click();
-      await expect(page).toHaveURL(new RegExp(`/${id}$`));
+      // Settings adds its open panel to the URL once mounted, so the query is allowed.
+      await expect(page).toHaveURL(new RegExp(`/${id}(\\?.*)?$`));
       await expectNoHorizontalOverflow(page);
     }
   });
 
-  test("home: widget order persists from storage and reset restores defaults", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
-
-    await page.addInitScript((order) => {
-      window.localStorage.setItem("agentdesk.home.order", JSON.stringify(order));
-    }, CUSTOM_HOME_WIDGET_ORDER);
-
+  test("home: fixed v3 order with to-dos first and no token cards or layout editing", async ({ page }) => {
+    await mockHomeSources(page);
     await page.goto("/home");
 
-    await expect(page.getByTestId("home-widget-working")).toBeVisible({ timeout: 15000 });
-    await expect(await getHomeWidgetOrder(page)).toEqual(CUSTOM_HOME_WIDGET_ORDER);
+    const home = page.getByTestId("home-page");
+    await expect(page.getByTestId("home-usage")).toContainText("83%", { timeout: 15000 });
+    expect(await home.locator("section[aria-label]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")))).toEqual(HOME_SECTIONS);
+    // Only what the server leaves to a person: the blocked failed card, not the review in progress or new requests.
+    await expect(page.getByTestId("home-todo")).toContainText("판단 필요");
+    await expect(page.getByTestId("home-todo")).not.toContainText(/검토 대기|수락 대기/);
+    await expect(page.getByTestId("home-system-memento")).toContainText("확인 불가");
+    await expect(page.getByTestId("home-usage")).toContainText("Claude 7일");
+    await expect(page.getByTestId("home-usage")).toContainText("90% 이상이면 자동 진행을 멈춰요");
+    await expect(page.getByTestId("home-usage").getByRole("link", { name: "설정" })).toHaveAttribute("href", "/settings?category=usage");
 
-    await page.getByTestId("home-edit-toggle").click();
-    await expect(page.getByTestId("home-reset-order")).toBeVisible();
-    await page.getByTestId("home-reset-order").click();
-
-    await expect.poll(() => getHomeWidgetOrder(page)).toEqual(DEFAULT_HOME_WIDGET_ORDER);
-    await expect
-      .poll(() =>
-        page.evaluate(() => JSON.parse(window.localStorage.getItem("agentdesk.home.order") ?? "[]")),
-      )
-      .toEqual(DEFAULT_HOME_WIDGET_ORDER);
-  });
-
-  test("home: desktop edit mode supports drag reorder and persists layout", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
-
-    await page.goto("/home");
-
-    await expect(page.getByTestId("home-widget-routines")).toBeVisible({ timeout: 15000 });
-    await page.getByTestId("home-edit-toggle").click();
-
-    const sourceBox = await page.getByTestId("home-drag-handle-routines").boundingBox();
-    const sourceWidgetBox = await page.getByTestId("home-widget-routines").boundingBox();
-    const targetBox = await page.getByTestId("home-widget-working").boundingBox();
-    expect(sourceBox).not.toBeNull();
-    expect(sourceWidgetBox).not.toBeNull();
-    expect(targetBox).not.toBeNull();
-
-    // closestCenter compares the dragged widget's centre, so aim that centre (not the handle) at the target.
-    const sourceX = sourceBox!.x + sourceBox!.width / 2;
-    const sourceY = sourceBox!.y + sourceBox!.height / 2;
-    const targetX = targetBox!.x + targetBox!.width / 2 + (sourceX - (sourceWidgetBox!.x + sourceWidgetBox!.width / 2));
-    const targetY = targetBox!.y + targetBox!.height / 2 + (sourceY - (sourceWidgetBox!.y + sourceWidgetBox!.height / 2));
-
-    await page.mouse.move(sourceX, sourceY);
-    await page.mouse.down();
-    await page.mouse.move(sourceX, sourceY - 32, { steps: 6 });
-    await page.mouse.move(targetX, targetY, { steps: 24 });
-    await page.mouse.up();
-
-    await expect.poll(() => getHomeWidgetOrder(page)).toEqual(DRAGGED_HOME_WIDGET_ORDER);
-    await expect
-      .poll(() =>
-        page.evaluate(() => JSON.parse(window.localStorage.getItem("agentdesk.home.order") ?? "[]")),
-      )
-      .toEqual(DRAGGED_HOME_WIDGET_ORDER);
-  });
-
-  test("home: renders working agents, attention and usage without gamification", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
-
-    await page.goto("/home");
-
-    for (const widgetId of DEFAULT_HOME_WIDGET_ORDER) {
-      await expect(page.getByTestId(`home-widget-${widgetId}`)).toBeVisible({ timeout: 15000 });
-    }
-    await expect(await getHomeWidgetOrder(page)).toEqual(DEFAULT_HOME_WIDGET_ORDER);
-    await expect(page.getByTestId("home-widget-attention")).toContainText(/검토|Review/);
-    await expect(page.getByTestId("home-widget-m_rate_limit")).not.toContainText("→");
-
-    for (const removed of ["sidebar-user-level-ring", "home-widget-quality", "home-widget-missions", "home-support-toggle", "home-daily-missions"]) {
+    // Token and cost cards live on the stats page; v3 home has no layout editing or live-connection line.
+    await expect(home.getByText(/오늘 토큰|API 비용|실시간 연결/)).toHaveCount(0);
+    for (const removed of ["home-edit-toggle", "home-reset-order", "home-widget-m_tokens", "sidebar-user-level-ring", "home-daily-missions"]) {
       await expect(page.getByTestId(removed)).toHaveCount(0);
     }
     await expect(page.getByText(/Lv\.\s?\d|XP/)).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
   });
 
-  test("home: mobile pairs usage metrics and disables edit affordance", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
-
+  test("home: agents fold the rest on desktop and list only busy agents on phones", async ({ page }, testInfo) => {
+    const isMobile = testInfo.project.name === "mobile";
+    const extras = Array.from({ length: 9 }, (_, index) => ({ ...MOCK_AGENTS[1], id: `agent-extra-${index}`, name: `Extra ${index}`, name_ko: `추가 ${index}` }));
+    await page.route(/\/api\/agents(?:\?.*)?$/, (route) => route.fulfill({ json: { agents: [...MOCK_AGENTS, ...extras] } }));
+    await mockHomeSources(page);
     await page.goto("/home");
 
-    await expect(page.getByTestId("home-widget-m_tokens")).toBeVisible({ timeout: 15000 });
-    await expect(page.getByTestId("home-widget-m_cost")).toBeVisible();
-    await expect(page.getByTestId("home-widget-working")).toBeVisible();
-    await expect(page.getByTestId("home-edit-toggle")).toHaveCount(0);
-
-    const [tokensBox, costBox] = await Promise.all([
-      page.getByTestId("home-widget-m_tokens").boundingBox(),
-      page.getByTestId("home-widget-m_cost").boundingBox(),
-    ]);
-
-    expect(tokensBox).not.toBeNull();
-    expect(costBox).not.toBeNull();
-    expect(Math.abs(costBox!.y - tokensBox!.y)).toBeLessThanOrEqual(1);
-    expect(costBox!.x).toBeGreaterThan(tokensBox!.x + tokensBox!.width);
+    const card = page.getByTestId("home-agents");
+    const toggle = card.getByRole("button", { name: isMobile ? "10명 더 보기" : "나머지 4명" });
+    await expect(toggle).toBeVisible({ timeout: 15000 });
+    await expect(card.locator("li button")).toHaveCount(isMobile ? 2 : 8);
+    await toggle.click();
+    await expect(card.locator("li button")).toHaveCount(12);
+    await expect(card.getByRole("button", { name: "접기" })).toHaveAttribute("aria-expanded", "true");
     await expectNoHorizontalOverflow(page);
+    if (isMobile) return;
+    // Desktop starts at 900px; the first four agents share a row there too.
+    await page.setViewportSize({ width: 960, height: 900 });
+    await expect.poll(() => card.locator("li").evaluateAll((nodes) => new Set(nodes.slice(0, 4).map((node) => node.getBoundingClientRect().top)).size)).toBe(1);
+  });
+
+  test("home: the server row follows a healthy answer, a 503 status and a lost connection", async ({ page }) => {
+    let mode: "healthy" | "unhealthy" | "down" = "healthy";
+    await page.clock.install();
+    await page.route(/\/api\/health(?:\/detail)?$/, (route) => (mode === "down"
+      ? route.abort()
+      : route.fulfill({ status: mode === "healthy" ? 200 : 503, json: { status: mode, providers: [] } })));
+    await page.goto("/home");
+
+    const server = page.getByTestId("home-system-server");
+    await expect(server).toContainText("정상", { timeout: 15000 });
+    mode = "unhealthy";
+    await page.clock.runFor(30_000);
+    await expect(server).toContainText("장애", { timeout: 15000 });
+    mode = "down";
+    await page.clock.runFor(30_000);
+    await expect(server).toContainText("확인 불가", { timeout: 15000 });
+    await expect(page.getByTestId("home-system")).toContainText("마지막 확인");
+  });
+
+  test("home: usage marks Gemini's limit-only buckets unmeasured and keeps the settings link without the rule", async ({ page }) => {
+    await mockHomeSources(page);
+    await page.route(/\/api\/rate-limits$/, (route) => route.fulfill({ json: { providers: [
+      { provider: "claude", profile_id: "default", stale: false, fetched_at: 1_795_000_000, buckets: [{ name: "5h", limit: 100, used: 0, remaining: 100, reset: 0 }] },
+      { provider: "gemini", profile_id: "default", stale: false, fetched_at: 1_795_000_060, buckets: [
+        { name: "rpm", limit: 15, used: 0, remaining: 15, reset: 0 }, { name: "rpd", limit: 1500, used: 0, remaining: 1500, reset: 0 },
+      ] },
+    ] } }));
+    await page.route(/\/api\/settings\/runtime-config$/, (route) => route.fulfill({ status: 503, json: { error: "unavailable" } }));
+    await page.goto("/home");
+
+    const usage = page.getByTestId("home-usage");
+    await expect(usage.locator("li")).toHaveCount(3, { timeout: 15000 });
+    await expect(usage.locator("li").first()).toContainText("0%");
+    await expect(usage.getByText("측정 안 됨")).toHaveCount(2);
+    await expect(usage).toContainText("자동 진행을 멈추는 기준은 확인 불가예요", { timeout: 15000 });
+    await expect(usage.getByRole("link", { name: "설정" })).toHaveAttribute("href", "/settings?category=usage");
+  });
+
+  test("home: after empty lists a failed campaign poll reads unknown on both cards until it recovers", async ({ page }) => {
+    let down = false;
+    await page.clock.install();
+    await mockHomeSources(page);
+    await page.route(/\/api\/kanban-cards(?:\?.*)?$/, (route) => route.fulfill({ json: { cards: [] } }));
+    for (const [pattern, body] of [[/\/api\/campaigns\?/, { campaigns: [], live: {}, limit: 100, offset: 0 }], [/\/api\/server-campaigns\?/, { campaigns: [] }]] as const) {
+      await page.route(pattern, (route) => (down ? route.fulfill({ status: 503, json: { error: "unavailable" } }) : route.fulfill({ json: body })));
+    }
+    await page.goto("/home");
+
+    const todo = page.getByTestId("home-todo");
+    const campaigns = page.getByTestId("home-campaigns");
+    await expect(todo).toContainText("지금 할 일이 없어요.", { timeout: 15000 });
+    await expect(campaigns).toContainText("진행 중인 캠페인이 없어요.");
+    down = true;
+    await page.clock.runFor(60_000);
+    await expect(todo).toContainText("캠페인 요약을 읽지 못해 할 일 일부는 확인 불가예요.", { timeout: 15000 });
+    await expect(todo).not.toContainText("지금 할 일이 없어요.");
+    await expect(todo.locator("h2")).toHaveText("할 일");
+    await expect(campaigns).toContainText("캠페인 목록을 읽지 못해 확인 불가예요.");
+    await expect(campaigns.locator("h2")).toHaveText("캠페인");
+    down = false;
+    await page.clock.runFor(60_000);
+    await expect(todo).toContainText("지금 할 일이 없어요.", { timeout: 15000 });
+    await expect(campaigns).toContainText("진행 중인 캠페인이 없어요.");
+  });
+
+  test("home: on a phone a failed session list reads unknown where an empty one reads resting", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+    await mockHomeSources(page);
+    await page.route(/\/api\/agents(?:\?.*)?$/, (route) => route.fulfill({ json: { agents: MOCK_AGENTS.map((agent) => ({ ...agent, status: "idle" })) } }));
+    const card = page.getByTestId("home-agents");
+    await page.goto("/home");
+    await expect(card).toContainText("모두 쉬는 중이에요.", { timeout: 15000 });
+    await expect(card).toContainText("세션 없음 2");
+
+    await page.route(/\/api\/dispatched-sessions(?:\?.*)?$/, (route) => route.fulfill({ status: 503, json: { error: "unavailable" } }));
+    await page.reload();
+    await expect(card).toContainText("세션을 읽지 못해 상태는 확인 불가예요.", { timeout: 15000 });
+    await expect(card).toContainText("확인 불가 2");
+    await card.getByRole("button", { name: "2명 더 보기" }).click();
+    await expect(card.locator("li button").first()).toContainText("확인 불가");
   });
 
   test("stats: dedicated route exposes range controls and key widgets", async ({ page }) => {
@@ -1652,9 +1718,9 @@ test.describe("Dashboard smoke tests", () => {
 
     await expect(page.getByTestId("stats-page")).toBeVisible({ timeout: 15000 });
     await expect(page.getByTestId("stats-range-controls")).toBeVisible();
-    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-pressed", "false");
-    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-checked", "false");
+    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-checked", "false");
 
     await expect(page.getByTestId("stats-summary-total-tokens")).toBeVisible();
     await expect(page.getByTestId("stats-summary-api-spend")).toBeVisible();
@@ -1670,12 +1736,12 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("stats-claude-accounts").getByRole("button", { name: /^(Switch|Active)$/ })).toHaveCount(0);
 
     await page.getByTestId("stats-range-7d").click();
-    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-checked", "false");
 
     await page.getByTestId("stats-range-90d").click();
-    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-checked", "false");
   });
 
   test("stats: weekly chart fits and longer series support horizontal keyboard navigation", async ({ page }, testInfo) => {
@@ -1735,34 +1801,35 @@ test.describe("Dashboard smoke tests", () => {
     await expectNoHorizontalOverflow(page);
   });
 
-  test("home: routines card puts recent failures first and links threads", async ({ page }) => {
+  test("home: today's routines show names, run results and later due times only", async ({ page }) => {
+    const noon = new Date();
+    noon.setHours(12, 0, 0, 0);
+    const at = (hours: number, days = 0) => new Date(noon.getTime() + days * 86_400_000 + (hours - 12) * 3_600_000).toISOString();
+    const base = MOCK_ROUTINES[1];
+    await page.clock.setFixedTime(noon);
+    // Same purpose for every routine, so only the names tell the rows apart.
+    await page.route(/\/api\/routines(?:\?.*)?$/, (route) => route.fulfill({ json: { routines: [
+      { ...base, id: "r-fail", name: "fail-check", next_due_at: at(9, 1), last_run: { ...MOCK_ROUTINES[0].last_run, status: "failed", started_at: at(9) } },
+      { ...base, id: "r-sent", name: "sent-brief", next_due_at: at(6, 1), last_run: { ...MOCK_ROUTINES[0].last_run, status: "succeeded", action: "agent", started_at: at(6) } },
+      { ...base, id: "r-twice", name: "twice-a-day", next_due_at: at(13), last_run: { ...MOCK_ROUTINES[0].last_run, status: "succeeded", action: "complete", started_at: at(11) } },
+      { ...base, id: "r-later", name: "evening-run", next_due_at: at(18), last_run: null },
+      { ...base, id: "r-old", name: "old-run", next_due_at: at(9, 1), last_run: { ...MOCK_ROUTINES[0].last_run, status: "succeeded", started_at: at(9, -1) } },
+    ] } }));
     await page.goto("/home");
 
-    const card = page.getByTestId("routines-timeline");
-    await expect(card).toBeVisible({ timeout: 15000 });
-    await expect(page.getByTestId("routines-filter-controls")).toHaveCount(0);
-    await expect(page.getByTestId("routine-row-routine-late")).toBeVisible({ timeout: 15000 });
-
-    const rowIds = await page
-      .getByTestId("routines-timeline-list")
-      .locator("[data-testid^='routine-row-']")
-      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-testid")));
-    expect(rowIds).toEqual([
-      "routine-row-routine-late",
-      "routine-row-routine-soon",
-      "routine-row-routine-manual",
-    ]);
-    await expect(page.getByTestId("routine-row-routine-late")).toContainText(/최근 실패|Last failed/);
-    await expect(page.getByTestId("routine-thread-routine-soon")).toHaveAttribute(
-      "href",
-      "https://discord.com/channels/1469870512812462284/1505086338448363660",
-    );
-    await expect(page.getByTestId("routine-thread-routine-manual")).toHaveCount(0);
-    await expect(card.getByRole("link", { name: /전체 보기|View all/ })).toHaveAttribute("href", "/routines");
+    const card = page.getByTestId("home-routines");
+    await expect(card.locator("[data-testid^='home-routine-']")).toHaveCount(5, { timeout: 15000 });
+    const rows = await card.locator("[data-testid^='home-routine-']").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-testid")));
+    expect(rows).toEqual(["home-routine-r-sent:run", "home-routine-r-fail:run", "home-routine-r-twice:run", "home-routine-r-twice:due", "home-routine-r-later:due"]);
+    await expect(card.getByTestId("home-routine-r-sent:run")).toContainText(/sent-brief.*보냄/);
+    await expect(card.getByTestId("home-routine-r-fail:run")).toContainText(/fail-check.*실패/);
+    await expect(card.getByTestId("home-routine-r-twice:run")).toContainText(/11:00.*twice-a-day.*끝남/);
+    await expect(card.getByTestId("home-routine-r-twice:due")).toContainText(/13:00.*twice-a-day.*예정/);
+    await expect(card).toContainText("5개 중 3개 끝남");
     await expectNoHorizontalOverflow(page);
   });
 
-  test("routines: page lists jobs chronologically and the detail leads with thread and result", async ({ page }) => {
+  test("routines: page lists jobs chronologically and the detail leads with thread and result", async ({ page }, testInfo) => {
     await page.goto("/routines");
 
     await expect(page.getByTestId("routines-page")).toBeVisible({ timeout: 15000 });
@@ -1784,7 +1851,8 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("routine-row-routine-soon")).toContainText("오부장 프로필 점검");
 
     await page.getByTestId("routine-row-routine-late").click();
-    const drawer = page.getByRole("dialog");
+    // Wide screens show the detail beside the list; below 900px it opens as a sheet.
+    const drawer = testInfo.project.name === "desktop" ? page.getByTestId("routine-detail-pane") : page.getByRole("dialog");
     const threadLink = drawer.getByTestId("routine-thread-link");
     await expect(threadLink).toHaveAttribute("href", "https://discord.com/channels/1469870512812462284/1505086366654926908");
     await expect(drawer.getByTestId("routine-last-result")).toContainText("Profile probe failed");
@@ -1820,9 +1888,12 @@ test.describe("Dashboard smoke tests", () => {
     });
     await page.goto("/agents");
     // Phones always use the list; the grid/list switch exists on desktop only.
-    if (testInfo.project.name === "desktop") await page.getByRole("button", { name: /리스트|List/ }).click();
+    if (testInfo.project.name === "desktop") await page.getByRole("radio", { name: /리스트|List/ }).click();
     await page.getByTestId("agents-card-agent-ada").click();
-    const dialog = page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
+    // Desktop shows the detail beside the list; phones open it as a full-screen dialog.
+    const dialog = testInfo.project.name === "desktop"
+      ? page.getByRole("region", { name: /에이전트 상세|Agent details/ })
+      : page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
     const device = dialog.getByLabel(/우선 실행 장비|Preferred execution device/);
     const save = dialog.getByRole("button", { name: /^(저장|Save)$/ });
     await expect(device).toBeEnabled();
@@ -1834,7 +1905,7 @@ test.describe("Dashboard smoke tests", () => {
     await save.click();
     await expect(dialog.getByRole("status")).toContainText(/새 세션부터|new sessions/);
     expect(writes).toEqual([{ default_node_id: "windows-1" }]);
-    await page.getByRole("button", { name: /닫기|Close/ }).click();
+    await page.getByRole("button", { name: /닫기|Close|목록으로|Back to list/ }).click();
     await page.getByTestId("agents-card-agent-ada").click();
     await expect(device).toHaveValue("windows-1");
     await expect(save).toBeDisabled();
@@ -1862,11 +1933,11 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("agents-view-grid")).toBeVisible();
     await expect(page.getByRole("img", { name: /아다 대시보드|Ada Dashboard/ }).first()).toBeVisible();
 
-    await page.getByRole("button", { name: /리스트|List/ }).click();
+    await page.getByRole("radio", { name: /리스트|List/ }).click();
     await expect(page.getByTestId("agents-view-list")).toBeVisible();
 
     await page.getByTestId("agents-card-agent-ada").click();
-    const agentDetailDialog = page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
+    const agentDetailDialog = page.getByRole("region", { name: /에이전트 상세|Agent details/ });
     await expect(agentDetailDialog).toBeVisible();
     await expect(agentDetailDialog).toContainText("Ada Dashboard");
     await expect(agentDetailDialog.getByText(/Lv\.\s?\d|XP/)).toHaveCount(0);
@@ -1894,63 +1965,53 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("agents-tab-button-skills")).toHaveAttribute("aria-selected", "true");
   });
 
-  test("ops: route surfaces signal cards and bottlenecks", async ({ page }) => {
+  test("connections: server status carries the old ops signals and bottlenecks", async ({ page }, testInfo) => {
     await mockOpsHealthApi(page, () => ({
       ...MOCK_OPS_HEALTH_BASE,
       degraded_reasons: [...MOCK_OPS_HEALTH_BASE.degraded_reasons, "tui_o:boundary_pending:1509350778043895902"],
     }));
-    await page.goto("/ops");
+    await page.goto("/settings?category=connections");
 
-    await expect(page.getByTestId("ops-page")).toBeVisible();
-    await expect(page.getByTestId("ops-signal-grid")).toBeVisible();
-    await expect(page.getByTestId("ops-signal-deferred_hooks")).toBeVisible();
-    await expect(page.getByTestId("ops-signal-outbox_age")).toBeVisible();
-    await expect(page.getByTestId("ops-signal-pending_queue")).toBeVisible();
-    await expect(page.getByTestId("ops-signal-active_watchers")).toBeVisible();
-    await expect(page.getByText("복구 4분 0초", { exact: true })).toBeVisible();
-    await expect(page.getByText("가동 4시간 0분", { exact: true })).toBeVisible();
-
-    await expect(page.getByTestId("ops-bottlenecks")).toBeVisible();
-    await expect(page.getByTestId("ops-bottleneck-outbox_age")).toBeVisible();
-    await expect(page.getByTestId("ops-bottleneck-provider_disconnects")).toBeVisible();
-
-    await expect(page.getByTestId("ops-connection-panel")).toBeVisible();
-    await expect(page.getByTestId("ops-websocket-card")).toBeVisible();
-    await expect(page.getByTestId("ops-dispatch-outbox-card")).toBeVisible();
-    await expect(page.getByTestId("ops-providers-card")).toBeVisible();
-    await expect(page.getByTestId("ops-control-handoff")).toBeVisible();
-    await expect(page.getByTestId("ops-handoff-agents")).toHaveAttribute("href", "/agents");
+    await expect(page.getByTestId("setting-row-health.status")).toContainText("주의");
+    await expect(page.getByTestId("setting-row-health.dispatch_outbox")).toContainText("7건");
+    await page.getByTestId("setting-row-health.status").click();
+    const facts = page.getByTestId("settings-facts-health.status");
+    for (const label of ["후처리 대기", "전달 지연", "처리 대기", "감시 중"]) await expect(facts).toContainText(label);
+    await expect(facts).toContainText("복구 시간4분 0초");
+    await expect(facts).toContainText("가동 시간4시간 0분");
+    await expect(facts.getByText("프로바이더 연결 끊김")).toBeVisible();
 
     // Internal keys become readable titles; the raw key stays as a tooltip only.
     const rawKey = "tui_o:boundary_pending:1509350778043895902";
-    const reasonRow = page.getByTestId(`ops-bottleneck-${rawKey}`);
-    await expect(reasonRow.getByRole("heading", { name: "TUI 출력 마무리 대기" })).toHaveAttribute("title", rawKey);
+    await expect(facts.getByText("TUI 출력 마무리 대기")).toHaveAttribute("title", rawKey);
     await expect(page.getByText(/Tui O:|Boundary Pending/)).toHaveCount(0);
     for (const english of [/^LIVE$/, /uptime/, /boot snapshot/, /provider 추적/, /회의 타임라인/]) {
       await expect(page.getByText(english)).toHaveCount(0);
     }
+    if (testInfo.project.name === "mobile") await page.keyboard.press("Escape");
+    await expectNoHorizontalOverflow(page);
   });
 
-  test("ops: a tailnet device without detail access sees the summary, not zeros or error toasts", async ({ page }) => {
+  test("connections: a tailnet device without detail access sees the summary, not zeros or error toasts", async ({ page }) => {
     await mockOpsHealthApi(page, () => ({ status: "healthy", version: "2.4.1", db: true }));
     let detailCalls = 0;
     await page.route(/\/api\/health\/detail$/, (route) => {
       detailCalls += 1;
       return route.fulfill({ status: 403, json: { error: "auth_token required for non-loopback host" } });
     });
-    await page.goto("/ops");
+    await page.goto("/settings?category=connections");
 
-    await expect(page.getByTestId("ops-public-only-note")).toContainText("서버가 도는 맥");
-    await expect(page.getByTestId("ops-providers-card")).toContainText("—");
-    await expect(page.getByTestId("ops-dispatch-outbox-card")).toContainText("—");
-    await page.goto("/settings?settingsPanel=connections");
-    await expect(page.getByText("이 기기에서는 확인할 수 없어요")).toBeVisible();
+    await expect(page.getByTestId("setting-row-health.providers")).toContainText("이 기기에서는 확인할 수 없어요");
+    await expect(page.getByTestId("setting-row-health.dispatch_outbox")).toContainText("—");
+    await page.getByTestId("setting-row-health.status").click();
+    await expect(page.getByTestId("settings-facts-health.status")).toContainText("서버가 도는 맥");
     await expect(page.getByText(/API 오류/)).toHaveCount(0);
     // One probe per page load; polling reuses the public summary after the 403.
-    expect(detailCalls).toBe(2);
+    await page.waitForTimeout(6_000);
+    expect(detailCalls).toBe(1);
   });
 
-  test("ops: cluster controls distinguish readiness, bound output and stale state", async ({ page }, testInfo) => {
+  test("connections: cluster controls distinguish readiness, bound output and stale state", async ({ page }, testInfo) => {
     await page.route(/\/api\/settings$/, route => route.fulfill({ json: {
       language: testInfo.project.name === "desktop" ? "en" : "ko", theme: "dark",
     } }));
@@ -1999,7 +2060,7 @@ test.describe("Dashboard smoke tests", () => {
       stopCount++;
       await route.fulfill({ json: { ok: true } });
     });
-    await page.goto("/ops");
+    await page.goto("/settings?category=connections");
     const panel = page.getByTestId("cluster-nodes-panel");
     await expect(panel.getByText("Windows / x86_64", { exact: false })).toBeVisible();
     await expect(panel.getByText(/(?:실행 노드.*실행 전용|Runner.*Execution only)/)).toBeVisible();
@@ -2027,63 +2088,29 @@ test.describe("Dashboard smoke tests", () => {
     await expect(panel.getByRole("button", { name: /실행 중지|Stop execution/, exact: true })).toHaveCount(0);
   });
 
-  test("ops: ws events resync the health snapshot", async ({ page }) => {
-    let currentHealth = {
+  test("connections: server status refreshes while the category is open", async ({ page }) => {
+    let currentHealth: Record<string, unknown> = {
       ...MOCK_OPS_HEALTH_BASE,
       status: "healthy",
-      deferred_hooks: 0,
-      queue_depth: 0,
-      watcher_count: 2,
-      recovery_duration: 30,
-      outbox_age: 12,
       degraded_reasons: [],
-      dispatch_outbox: {
-        pending: 1,
-        retrying: 0,
-        permanent_failures: 0,
-        oldest_pending_age: 12,
-      },
-      providers: [
-        {
-          name: "codex",
-          connected: true,
-          active_turns: 1,
-          queue_depth: 0,
-          sessions: 2,
-          restart_pending: false,
-          last_turn_at: "2026-04-20T03:20:00Z",
-        },
-      ],
+      dispatch_outbox: { pending: 1, retrying: 0, permanent_failures: 0, oldest_pending_age: 12 },
     };
-
     await mockOpsHealthApi(page, () => currentHealth);
-    await page.goto("/ops");
+    await page.goto("/settings?category=connections");
 
-    const deferredHooksCard = page.getByTestId("ops-signal-deferred_hooks");
-    await expect(deferredHooksCard).toContainText("0");
-    await expect(page.getByTestId("ops-bottlenecks-empty")).toBeVisible();
+    const status = page.getByTestId("setting-row-health.status");
+    await expect(status).toContainText("정상");
+    await expect(page.getByTestId("setting-row-health.dispatch_outbox")).toContainText("1건");
 
     currentHealth = {
       ...currentHealth,
       status: "degraded",
-      deferred_hooks: 22,
-      queue_depth: 4,
-      outbox_age: 45,
       degraded_reasons: ["dispatch_outbox_oldest_pending_age:45"],
-      dispatch_outbox: {
-        pending: 4,
-        retrying: 1,
-        permanent_failures: 0,
-        oldest_pending_age: 45,
-      },
+      dispatch_outbox: { pending: 4, retrying: 1, permanent_failures: 0, oldest_pending_age: 45 },
     };
-
-    await page.evaluate(() => {
-      window.dispatchEvent(new CustomEvent("pcd-ws-event", { detail: { type: "health.updated" } }));
-    });
-
-    await expect(deferredHooksCard).toContainText("22", { timeout: 5000 });
-    await expect(page.getByTestId("ops-bottleneck-outbox_age")).toBeVisible();
+    // The ops page waited for WS events; the open connections category polls instead.
+    await expect(status).toContainText("주의", { timeout: 10_000 });
+    await expect(page.getByTestId("setting-row-health.dispatch_outbox")).toContainText("4건");
   });
 
   test("settings route is reachable from the desktop shell", async ({ page }, testInfo) => {
@@ -2092,38 +2119,87 @@ test.describe("Dashboard smoke tests", () => {
 
     await page
       .getByTestId("app-sidebar-nav")
-      .getByRole("button", { name: /^설정$|^Settings$/ })
+      .getByRole("link", { name: /^설정$|^Settings$/ })
       .click();
     await expect(page).toHaveURL(/\/settings(\?.*)?$/);
     await expect(page.getByTestId("topbar")).toContainText(/설정|Settings/);
+    // Ops left the menu; its status now lives in the connections category.
+    await page.getByTestId("settings-category-connections").click();
+    await expect(page).toHaveURL(/\/settings\?category=connections$/);
+    await expect(page.getByTestId("setting-row-health.status")).toBeVisible();
   });
 
-  test("settings: search feedback and user-facing copy stay stable", async ({ page }) => {
-    await page.route(/\/api\/settings\/runtime-config$/, route => route.fulfill({ json: { current: {}, defaults: {} } }));
+  test("bootstrap: the loading screen shows text without emoji", async ({ page }) => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    await page.route(/\/api\/settings$/, async (route) => { await gate; await route.fallback(); });
+    await page.goto("/home");
+    await expect(page.getByTestId("bootstrap-loading")).toHaveText(/AgentDesk 대시보드 로딩 중|Loading AgentDesk Dashboard/);
+    await expect(page.locator("body")).not.toContainText("🐾");
+    release();
+    await expect(page.getByTestId("topbar")).toBeVisible();
+  });
+
+  test("command palette: departments get an icon instead of their emoji and ops is not offered", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop keyboard shortcut coverage");
+    await page.route(/\/api\/departments(?:\?.*)?$/, (route) => route.fulfill({
+      json: { departments: [{ ...MOCK_AGENT_DEPARTMENTS[0], icon: "📁" }] },
+    }));
+    await page.goto("/home");
+    await expect(page.getByTestId("topbar")).toBeVisible();
+    await page.keyboard.press("ControlOrMeta+k");
+    const palette = page.getByRole("dialog", { name: /명령 팔레트|Command Palette/ });
+    await expect(palette.getByRole("option", { name: /^(통계|Stats)\s*(이동|Go)$/ })).toHaveCount(1);
+    await expect(palette.getByRole("option", { name: /^(운영|Ops)\s*(이동|Go)$/ })).toHaveCount(0);
+
+    await palette.getByPlaceholder(/검색|Search/).fill("플랫폼");
+    const department = palette.getByRole("option", { name: /플랫폼\s*(부서|Dept)$/ });
+    await expect(department).toBeVisible();
+    await expect(palette).not.toContainText("📁");
+    await department.click();
+    await expect(page).toHaveURL(/\/agents$/);
+  });
+
+  test("ops: the /control bookmark lands on the settings connections category", async ({ page }) => {
+    await mockOpsHealthApi(page, () => MOCK_OPS_HEALTH_BASE);
+    await page.goto("/control");
+    await expect(page).toHaveURL(/\/settings\?category=connections$/);
+    await expect(page.getByTestId("setting-row-health.status")).toBeVisible();
+  });
+
+  test("audit: both tabs show the pending-API empty state", async ({ page }) => {
+    await page.goto("/audit");
+    await expect(page.getByTestId("audit-panel-prompts")).toContainText("#8249");
+    await page.getByRole("tab", { name: /메멘토 앵커|Memento anchors/ }).click();
+    await expect(page).toHaveURL(/\/audit\?tab=anchors$/);
+    await expect(page.getByTestId("audit-panel-anchors")).toContainText("#8249");
+    await expectNoHorizontalOverflow(page);
+  });
+
+  test("settings: search narrows the catalog and the copy stays plain", async ({ page }, testInfo) => {
+    const runtime = { maxRetries: 3, maxEntryRetries: 3 };
+    await page.route(/\/api\/settings\/runtime-config$/, route => route.fulfill({ json: { current: runtime, defaults: runtime } }));
     await page.goto("/settings?settingsPanel=runtime");
 
     await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
-    await expect(page.locator("#settings-tab-workflow")).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByText("작업 재시도 횟수", { exact: true })).toBeVisible();
+    if (testInfo.project.name === "desktop") await expect(page.getByTestId("settings-category-workflow")).toHaveAttribute("aria-current", "true");
+    else await expect(page.getByTestId("settings-phone-title")).toHaveText("작업 흐름");
+    await expect(page.getByTestId("setting-row-maxRetries")).toContainText("작업 재시도 횟수");
     await expect(page.getByText(/용어 빠른 정의|Quick term definitions/)).toHaveCount(0);
-    await expect(page.locator(".setting-key-token")).toHaveCount(0);
     await expect(page.getByText("kv_meta")).toHaveCount(0);
 
-    await page.getByTestId("settings-search-input").fill("재시도");
-    await expect(page.getByTestId("settings-search-summary")).toBeVisible();
-    await expect(page.getByTestId("settings-search-summary")).toContainText(/항목이 일치|matches/);
+    await page.getByTestId("settings-search-input").fill("대기열 재시도");
+    await expect(page.locator("[data-testid^=setting-row-]")).toHaveCount(1);
     await expectNoHorizontalOverflow(page);
-
-    await page.getByRole("button", { name: /검색 지우기|Clear search/ }).click();
-    await expect(page.getByTestId("settings-search-summary")).toHaveCount(0);
+    await page.getByTestId("settings-search-input").fill("");
+    await expect(page.locator("[data-testid^=setting-row-]")).toHaveCount(2);
   });
 
   test("settings: runtime fetch errors do not expose empty editable defaults", async ({ page }) => {
     await page.route(/\/api\/settings\/runtime-config$/, route => route.fulfill({ status: 503, json: { error: "unavailable" } }));
     await page.goto("/settings?settingsPanel=runtime");
-    const panel = page.locator("#settings-panel-content");
-    await expect(panel.getByRole("alert")).toContainText(/불러오지 못했어요|could not be loaded/);
-    await expect(panel.locator("input, select, [role='switch']")).toHaveCount(0);
+    await expect(page.getByRole("alert")).toContainText(/불러오지 못했어요|could not be loaded/);
+    await expect(page.locator("[data-testid^=setting-row-]")).toHaveCount(0);
   });
 
   test("settings: mobile page remains scrollable", async ({ page }, testInfo) => {
@@ -2133,28 +2209,10 @@ test.describe("Dashboard smoke tests", () => {
     const settingsPage = page.getByTestId("settings-page");
     await expect(settingsPage).toBeVisible({ timeout: 15000 });
 
-    const navMetrics = await page
-      .getByRole("tablist", { name: /설정 패널|Settings panels/ })
-      .evaluate((node) => {
-        const buttons = Array.from(node.querySelectorAll("button"));
-        return {
-          clientWidth: node.clientWidth,
-          scrollWidth: node.scrollWidth,
-          overflowX: window.getComputedStyle(node).overflowX,
-          columns: new Set(
-            buttons.map((button) => Math.round(button.getBoundingClientRect().left)),
-          ).size,
-          maxButtonHeight: Math.max(
-            0,
-            ...buttons.map((button) => button.getBoundingClientRect().height),
-          ),
-        };
-      });
-    expect(navMetrics.overflowX).toBe("auto");
-    // Chips scroll sideways; counting distinct left edges catches a collapse into one stacked column.
-    expect(navMetrics.columns).toBeGreaterThanOrEqual(2);
-    expect(navMetrics.maxButtonHeight).toBeGreaterThanOrEqual(44);
-    expect(navMetrics.maxButtonHeight).toBeLessThan(64);
+    const heights = await page.getByRole("navigation", { name: /분류|Categories/ }).getByRole("button")
+      .evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().height));
+    expect(heights.length).toBeGreaterThanOrEqual(7);
+    expect(Math.min(...heights)).toBeGreaterThanOrEqual(44);
 
     const before = await settingsPage.evaluate((node) => ({
       clientHeight: node.clientHeight,
@@ -2310,10 +2368,10 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/settings?settingsPanel=machine");
     const panel = page.getByTestId("settings-machine-panel");
     await expect(panel).toBeVisible();
-    await expect(page.locator("#settings-tab-machine")).toHaveAttribute("aria-selected", "true");
+    const desktop = testInfo.project.name === "desktop";
+    if (desktop) await expect(page.getByTestId("settings-category-system")).toHaveAttribute("aria-current", "true");
+    else await expect(page.getByTestId("settings-phone-title")).toHaveText("시스템");
     await expect(panel.getByText(/온라인 2 \/ 전체 2|Online 2 \/ total 2/)).toBeVisible();
-    const order = await page.getByRole("tablist", { name: /설정 패널|Settings panels/ }).getByRole("tab").evaluateAll(tabs => tabs.map(tab => tab.id));
-    expect(order).toEqual(["settings-tab-general", "settings-tab-workflow", "settings-tab-ai", "settings-tab-connections", "settings-tab-machine"]);
     const runner = page.getByTestId("machine-node-runner-example");
     await expect(runner.getByText("Runner", { exact: true }).first()).toBeVisible();
     await expect(runner.getByText(/Windows \/ x86_64/)).toBeVisible();
@@ -2322,14 +2380,23 @@ test.describe("Dashboard smoke tests", () => {
     await expect(runner.getByText("Example CPU", { exact: true })).toBeVisible();
     await expect(runner.getByText("Example GPU", { exact: true })).toBeVisible();
     await expect(runner.getByTestId("machine-trend-cpu").locator("svg")).toBeVisible();
+    // Trend frames sit on the theme chart surface (--bg-1), not a fixed gray.
+    const chartSurface = await page.evaluate(() => {
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = "var(--bg-1)";
+      document.body.append(probe);
+      const color = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return color;
+    });
     for (const kind of ["cpu", "memory", "disk", "gpu"]) {
       const chart = runner.getByTestId(`machine-trend-${kind}`);
-      await expect(chart).toHaveCSS("background-color", "rgb(38, 38, 38)");
+      await expect(chart).toHaveCSS("background-color", chartSurface);
       await expect(chart.locator('[data-layer="line"]')).toHaveCount(1);
       await expect(chart.locator('[data-layer="area"]')).toHaveCount(1);
     }
     const networkChart = runner.getByTestId("machine-trend-network");
-    await expect(networkChart).toHaveCSS("background-color", "rgb(38, 38, 38)");
+    await expect(networkChart).toHaveCSS("background-color", chartSurface);
     await expect(networkChart.locator('[data-layer="line"]')).toHaveCount(2);
     await expect(networkChart.locator('[data-layer="area"]')).toHaveCount(2);
     await expect(networkChart.locator('[data-layer="line"][data-series="primary"]')).toHaveAttribute("stroke", "#f472b6");
@@ -2344,7 +2411,8 @@ test.describe("Dashboard smoke tests", () => {
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: testInfo.outputPath("machine-settings.png"), fullPage: true });
     await runner.getByRole("region", { name: /하드웨어 및 사용량|Hardware and utilization/ }).screenshot({ path: testInfo.outputPath("hardware-utilization.png") });
-    await page.locator("#settings-tab-general").click();
+    if (desktop) await page.getByTestId("settings-category-workflow").click();
+    else await page.getByRole("button", { name: "분류 목록으로" }).click();
     await expect(panel).toHaveCount(0);
     await page.goBack();
     await expect(panel).toBeVisible();

@@ -92,6 +92,8 @@ export {
   getRoutines,
   getRoutineRuns,
   getRoutineMetrics,
+  pauseRoutine,
+  resumeRoutine,
 } from "./client";
 export type {
   AutoQueueThreadLink,
@@ -152,6 +154,7 @@ export type {
   RoutineRecord,
   RoutineRunRecord,
   RoutineStatus,
+  RoutineLifecycleResult,
   RoutineMetrics,
 } from "./client";
 export {

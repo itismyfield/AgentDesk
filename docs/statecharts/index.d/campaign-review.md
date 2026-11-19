@@ -1,0 +1,2 @@
+key: campaign-review
+| `campaign-execution` independent review (#7438 M5) | M4 `a740932aae` | An open blocker reaches Landing, blank or refused output gets a verdict, scope tests are skipped, a sent review never settles, or a changed contract gets a delta | The WebGPT pro review records capacity waits and failures, assesses the separate scope tests, and requires a full review for a changed contract. [Model](campaign-execution/CampaignReview.tla). |

@@ -23,6 +23,9 @@ pub(crate) enum Completion {
     Held(String),
     /// No key reached the pane and the owner holds the proof; the original stays in custody.
     NotSent(String),
+    /// No key reached the pane and no later look can supply its evidence: the owner drops the
+    /// input with one notice. Only the leaf answers this; `run` reports it as a NotSent.
+    Refused(String),
     /// C-s went but no content: a person's draft may be parked.
     Failed(String),
     /// Content may have reached the pane; it is never sent again.
@@ -86,7 +89,8 @@ pub(crate) type Leaf = Box<dyn FnOnce(String) -> Result<Completion, String> + Se
 pub(crate) type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 /// Runs `leaf` on the reserved head and settles it: Submitted delivers, a proven NotSent returns
-/// to custody or, under a modal, to the front, anything else leaves the head Unknown.
+/// to custody or, under a modal, to the front, a proven Refused ends for good, anything else
+/// leaves the head Unknown.
 pub(crate) async fn run(
     mailbox: &ChannelMailboxHandle,
     clock: Clock,
@@ -104,24 +108,34 @@ pub(crate) async fn run(
     let completion = outcome.result.unwrap_or_else(Completion::WriteUncertain);
     if let Some(mut proof) = outcome.not_sent {
         let held = matches!(&completion, Completion::Held(_));
+        let refused = matches!(&completion, Completion::Refused(_));
         if !held {
             crate::logging::intake_timing::not_sent(&format!("{completion:?}"));
         }
-        if held && let Some((channel, probe)) = proof.take_preparation_watch() {
-            super::held_watch::arm(channel, probe);
-        }
-        mailbox
+        let watch = held.then(|| proof.take_preparation_watch()).flatten();
+        let at = clock.clone();
+        let ended = mailbox
             .v2_request(move |slot| {
                 let owner = slot.as_mut().ok_or("V2 not adopted")?;
-                match held {
-                    true => owner.hold_not_sent(&parse(identity)?, proof),
-                    false => owner.retain_not_sent(&parse(identity)?, proof),
+                let key = parse(identity)?;
+                // Past its original's readiness due the leaf's own proof ends the input for good.
+                let ended = owner.leaf_outlived_due(&key, &*at);
+                match (held && !ended, refused || ended) {
+                    (true, _) => owner.hold_not_sent(&key, proof),
+                    (_, true) => owner.refuse_not_sent(&key, proof),
+                    _ => owner.retain_not_sent(&key, proof),
                 }
+                .map(|()| ended)
             })
             .await
             .map_err(unsent)?;
+        if !ended && let Some((channel, probe)) = watch {
+            super::held_watch::arm(channel, probe);
+        }
         return Ok(match completion {
-            Completion::Held(reason) | Completion::NotSent(reason) => Completion::NotSent(reason),
+            Completion::Held(reason)
+            | Completion::NotSent(reason)
+            | Completion::Refused(reason) => Completion::NotSent(reason),
             other => Completion::NotSent(format!("{other:?}")),
         });
     }
@@ -139,7 +153,7 @@ pub(crate) async fn run(
         _ => Some(crate::logging::intake_timing::Outcome::Uncertain),
     });
     Ok(match completion {
-        Completion::Held(reason) | Completion::NotSent(reason) => {
+        Completion::Held(reason) | Completion::NotSent(reason) | Completion::Refused(reason) => {
             Completion::WriteUncertain(format!("unproven: {reason}"))
         }
         other => other,
@@ -180,11 +194,13 @@ pub(super) fn loads(pane: busy_inject::Pane) -> impl FnMut() -> bool + Send + 's
 }
 
 /// A hold waits at the front for the look that clears it; one no look clears is retained with
-/// its resend ask instead.
+/// its resend ask, or refused for good when its readiness windows ended without evidence.
 fn held(hold: &crate::services::claude_tui::input::PreparationHold) -> Completion {
+    use crate::services::claude_tui::readiness::Unproven;
     match hold.unproven {
-        true => Completion::NotSent(format!("unproven: {hold:?}")),
-        false => Completion::Held(format!("held: {hold:?}")),
+        Some(Unproven::Refused) => Completion::Refused(format!("unproven: {hold:?}")),
+        Some(Unproven::Retained) => Completion::NotSent(format!("unproven: {hold:?}")),
+        None => Completion::Held(format!("held: {hold:?}")),
     }
 }
 
@@ -261,7 +277,9 @@ mod codex;
 #[cfg(test)]
 #[path = "effect/herdr_fixture_tests.rs"]
 mod herdr;
-pub(crate) use claude::BusyClaude;
+#[cfg(test)]
+pub(crate) use claude::pause_capture as pause_claude_capture;
+pub(crate) use claude::{BusyClaude, ProbeGuard};
 pub(crate) use codex::{BusyCodex, BusyCodexHerdr, CodexInput, idle_codex};
 
 #[cfg(test)]

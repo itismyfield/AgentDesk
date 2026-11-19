@@ -3,12 +3,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { beginAuthentication, getAuthSnapshot, requireAuthentication } from "../api/authState";
-import type { CompanySettings } from "../types";
 import ClaudeAccountsWidget from "./dashboard/ClaudeAccountsWidget";
-import { MiniRateLimitBar } from "./dashboard/MiniRateLimitBar";
 import ReceiptWidget from "./dashboard/ReceiptWidget";
+import { HomeUsageCard } from "./home/HomeActivityCards";
 import OnboardingWizard from "./OnboardingWizard";
 import SettingsView from "./SettingsView";
 
@@ -127,13 +127,13 @@ const accounts = {
 };
 
 describe("dashboard widgets under token authentication", () => {
-  it("rate limit bar sends the tab token and renders the providers", async () => {
+  it("home usage sends the tab token and renders the providers", async () => {
     serve({
       "GET /api/rate-limits": ok({
         providers: [{ provider: "claude", buckets: [{ name: "5h", limit: 100, used: 40, remaining: 60, reset: 0 }], stale: false }],
       }),
     });
-    const view = await render(<MiniRateLimitBar isKo={false} />);
+    const view = await render(<MemoryRouter><HomeUsageCard tr={(_ko, en) => en} isKo={false} /></MemoryRouter>);
     expectBearer("GET /api/rate-limits");
     expect(view.textContent).toContain("Claude");
     expect(view.textContent).toContain("40%");
@@ -193,15 +193,15 @@ describe("settings under token authentication", () => {
       "GET /api/agents": ok({ agents: [] }),
     });
     const notify = vi.fn();
-    const settings = { companyName: "", ceoName: "", language: "en", theme: "dark" } as unknown as CompanySettings;
     const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = await render(
       <QueryClientProvider client={queries}>
-        <SettingsView settings={settings} onSave={async () => {}} isKo={false} onNotify={notify} />
+        <MemoryRouter>
+          <SettingsView isKo={false} language="en" theme="dark" onSaveSettings={vi.fn()} onNotify={notify} />
+        </MemoryRouter>
       </QueryClientProvider>,
     );
     expectBearer("GET /api/settings/config");
-    await act(async () => { view.querySelector<HTMLButtonElement>("#settings-tab-workflow")!.click(); });
     const input = [...view.querySelectorAll("input")].find((node) => node.value === "before");
     expect(input).toBeDefined();
 

@@ -27,6 +27,15 @@ pub(crate) struct SnapshotV2 {
     pub(crate) items: Vec<PendingQueueItem>,
     pub(crate) head_injection: Option<InputAttempt>,
     pub(crate) retained_inputs: Vec<RetainedInput>,
+    /// Inputs refused for good: no body, only what blocks a second admission and owes a notice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) refused_inputs: Vec<RefusedInput>,
+    /// The fixed deadline of each front readiness held before any attempt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) readiness_holds: Vec<ReadinessHold>,
+    /// Fronts refused for good before any attempt, kept like `refused_inputs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) refused_fronts: Vec<RefusedFront>,
     pub(crate) terminal_identities: Vec<TerminalIdentity>,
     #[serde(default)]
     pub(crate) namespace: Option<String>,
@@ -179,6 +188,41 @@ pub(crate) enum RetainedReason {
     },
 }
 
+/// One attempt of one queued unit, as the owner's callers and a refusal's record name it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AttemptRef {
+    pub(crate) identity: QueueIdentity,
+    pub(crate) attempt: AttemptIdentity,
+}
+
+/// What stays of an input the owner refused for good; nothing here can run again.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct RefusedInput {
+    /// The refused unit and its one attempt, as its notice and the history name it.
+    pub(crate) input: AttemptRef,
+    pub(crate) members: Vec<RefusedMember>,
+    pub(crate) reason: String,
+    pub(crate) notice: NoticeIntent,
+    pub(crate) refused_at_ms: u64,
+}
+
+/// One original a refused unit carried: its sources and the digest of its canonical body.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct RefusedMember {
+    pub(crate) identity: QueueIdentity,
+    pub(crate) fingerprint: String,
+}
+
+impl RefusedInput {
+    /// Whether any source of this refusal is `message`.
+    pub(crate) fn names(&self, message: u64) -> bool {
+        let named = |id: &QueueIdentity| {
+            id.primary == message || id.sources.iter().any(|s| s.message_id == message)
+        };
+        self.members.iter().any(|member| named(&member.identity))
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct NoticeIntent {
     pub(crate) kind: String,
@@ -213,4 +257,48 @@ pub(crate) enum StartFailureKind {
 pub(crate) struct StartFailureDetail {
     pub(crate) kind: StartFailureKind,
     pub(crate) failures: u8,
+}
+
+/// The one deadline the owner fixed when readiness first held this unstarted original.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ReadinessHold {
+    pub(crate) identity: QueueIdentity,
+    /// Digest of the original's canonical body: a changed input under the same identity is another.
+    pub(crate) fingerprint: String,
+    pub(crate) cause: String,
+    pub(crate) started_at_ms: u64,
+    pub(crate) due_at_ms: u64,
+}
+
+impl ReadinessHold {
+    /// Whether the due passed, or the clock went back past the start and cannot be trusted.
+    pub(crate) fn expired(&self, now: u64) -> bool {
+        now >= self.due_at_ms || now < self.started_at_ms
+    }
+}
+
+/// The front original a refusal before any attempt names; it carries no attempt by construction.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FrontRef {
+    pub(crate) identity: QueueIdentity,
+}
+
+/// A front refused for good before any attempt: what blocks its sources and the notice it owes.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct RefusedFront {
+    pub(crate) input: FrontRef,
+    pub(crate) members: Vec<RefusedMember>,
+    pub(crate) reason: String,
+    pub(crate) notice: NoticeIntent,
+    pub(crate) refused_at_ms: u64,
+}
+
+impl RefusedFront {
+    /// Whether any source of this refusal is `message`.
+    pub(crate) fn names(&self, message: u64) -> bool {
+        self.members.iter().any(|member| {
+            let id = &member.identity;
+            id.primary == message || id.sources.iter().any(|s| s.message_id == message)
+        })
+    }
 }

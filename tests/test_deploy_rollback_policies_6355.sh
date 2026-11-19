@@ -274,13 +274,18 @@ assert_absent "policy backup consumed" "$ADK_REL/policies.prev"
 
 echo "a binary backup that survives the success path keeps its paired policy backup"
 setup_release 1 1
+printf 'fixture-record-1\n' >"$ADK_REL/bin/agentdesk.source.json"
 deploy_gen 2 none FIXTURE_FAIL_BINARY_DROP=1
 assert_eq "the healthy deploy exits zero" 0 "$DEPLOY_RC"
 assert_generation "deployed" 2 2
 assert_out "the kept pair is reported" "keeping its paired policy backup"
 assert_eq "paired policy backup kept" 1 "$(prev_policy_gen)"
+assert_absent "unwitnessed promotion cleared the live record" "$ADK_REL/bin/agentdesk.source.json"
+assert_eq "backup record kept" fixture-record-1 "$(cat "$ADK_REL/bin/agentdesk.prev.source.json")"
 deploy_gen 3 3
 assert_generation "a later failed deploy rolls back to the kept pair" 1 1
+assert_eq "rollback restored the record" fixture-record-1 "$(cat "$ADK_REL/bin/agentdesk.source.json")"
+assert_absent "backup record consumed" "$ADK_REL/bin/agentdesk.prev.source.json"
 
 echo "a stale policy backup without its binary backup is never restored"
 setup_release 1 1

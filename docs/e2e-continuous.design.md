@@ -91,7 +91,7 @@ YAML의 timeout 합이나 약 3.3시간이라는 과거 명세 합
 
 | 묶음 | 고정 목록·조합 | 입력/턴/시간 근거와 주기 |
 | --- | --- | --- |
-| P: 배포 SHA 핵심 | E-50(Claude/Herdr/channel), E-51(Codex/tmux/channel), R-marker(Claude/tmux/channel/busy), R-inject(Claude/Herdr/channel/native-busy/no-managed-or-external-holder), R-fresh(Claude/tmux/thread/primary-no-slots), R-host(Claude/Herdr/thread/primary-no-slots, busy 후속·취소 포함) | 기존 둘은 작업 prompt 6개; 신규는 A+B, A+B, 첫 입력, A+B로 **계획상 7개**, 합 13개. busy 합류가 성공하면 계획상 native 턴 10개지만 **실제 턴 미실측**. 기존 둘의 시간 proxy만 있고 전체는 unknown. 배포 완료 이벤트당 중복 제거한 요청 1개, 자동 실행은 실측 활성화 뒤 |
+| P: 배포 SHA 핵심 | E-50(Claude/Herdr/channel), E-51(Codex/Herdr/channel), R-marker(Claude/tmux/channel/busy), R-inject(Claude/Herdr/channel/native-busy/no-managed-or-external-holder), R-fresh(Claude/tmux/thread/primary-no-slots), R-host(Claude/Herdr/thread/primary-no-slots, busy 후속·취소 포함) | 기존 둘은 작업 prompt 6개; 신규는 A+B, A+B, 첫 입력, A+B로 **계획상 7개**, 합 13개. busy 합류가 성공하면 계획상 native 턴 10개지만 **실제 턴 미실측**. 기존 둘의 시간 proxy만 있고 전체는 unknown. 배포 완료 이벤트당 중복 제거한 요청 1개, 자동 실행은 실측 활성화 뒤 |
 | R1: 기본 relay | E-1, E-2, E-3, E-5, E-15; 지원하는 두 TUI provider, host를 회차별 tmux/Herdr 교대 | n=0, 실제 턴/시간/token unknown |
 | R2: 입력·본문·로컬 제어 | E-16, E-20, E-22, E-23, E-52, E-64; YAML cells와 실제 capability의 교집합 | n=0. E-20은 같은 세션에 입력 동시 도착이며 provider 활성 턴 2개를 요구하는 E-11과 다름 |
 | R3: 직접 TUI·압축·모델 | E-4, E-6, E-7, E-10, E-21, E-37; tmux TUI 및 YAML의 provider만 | n=0; Herdr에 tmux-only 키 검사를 N/A로 바꿔 전체 PASS하지 않음 |
@@ -150,6 +150,11 @@ provider별 일일 turn/token/time 한도도 `null`이다. 미지정 한도는 �
 새 턴을 시작하지 않는다. 이미 보낸 입력을 성공으로 꾸미거나 새 kill 권한으로 끊지 않는다.
 usage를 못 읽으면 `null/unknown`이며 token 0/비용 0이 아니다. 이 경우 token 실측 DoD는 미완료,
 그 provider의 자동 주기는 off다. 일반 작업과 공유하는 계정의 잔여 quota를 보장한다고 주장하지 않는다.
+
+**상태(11-19):** 사용자 결정으로 #8124 시험 인스턴스 대신 릴리스 서버와 기존 로그인 계정을 쓴다
+([릴리스 호스트 프로필](e2e-continuous/release-host.md)). P의 E-50·E-51만 5회씩 실측해 12시간 주기와 예약·하루 한도를 정했다
+([묶음별 실측](e2e-continuous/measurements.md)). R1–R5·F는 n=0이라 회전과 일일 전체는 off다.
+driver는 하네스의 모든 입력 직전에 앞 턴을 실제 사용량으로 정산하며, E-51은 운영 경로에 맞춰 Codex/Herdr 칸으로 잰다.
 
 ## 3. 빠진 네 단언과 수정 전 RED 계약
 
@@ -552,7 +557,7 @@ SDK vendoring이나 외부 소비자 코드를 숨기지 않는다. giant driver
 | E1-ingress | test-only FullEvent→router adapter·receipt/boot/parent/nonce 검증·원래 bot 이벤트 중복 방지·provenance, 2–4 / +180–350(미실측) | E1b 앞, #8124 I2/I3a 경계 및 I3b 실제 host·E1a 관측 재사용. 경계/옛 boot/nonce 재사용·이중 실행·controlled_ingress를 human Gateway로 합산하는 뮤턴트 RED |
 | E1b | busy trace·reaction/주입 adapter·R-marker/R-inject·human 수용, 4–8 / +600–1100 | I3b + E1a + E1-ingress. 수리 전 #8113/#8114 RED, 수리 후 GREEN 및 원인 뮤턴트. #8114 native-busy 선행/분기 witness 필수·managed 대조군 분리. human Gateway 1회는 코디네이터 agent-desktop; 정기 수동 0 |
 | E1c | fresh/thread host/output adapter·R-fresh/R-host, 3–7 / +450–900 | I3b, #8115 fix 재사용, #8118/#8119 parent descriptor 계약. 수리 전/후 및 host/output 개별 상속 제거 뮤턴트 |
-| S1 | 단일 runner·channel flock·budget·manifest/cursor·배포 inbox, 4–8 / +600–1050 | L0 + #8124 I3a/I3b, capability별 E1. 동시 acquire·crash·old owner·due 경계·off·예산 reservation RED |
+| S1 | 단일 runner·channel flock·budget·manifest/cursor·배포 inbox, 4–8 / +600–1050 | L0 + #8124 I3a/I3b, capability별 E1. 동시 acquire·crash·old owner·due 경계·off·예산 reservation RED. **상태(11-18): 구현.** `scripts/e2e/continuous/`(`tick`·`hold`·`submit`), 기본 off·주기/예산 null. E1 없는 칸은 `BLOCKED_CAPABILITY`로 기록하고 실행하지 않는다. 모델에 `OffNoRun`·`RunHasReservation`·`WithinBudget`·`CursorCountsFinishedRuns` 추가([보고서](statecharts/e2e-run-lease/lease.report.md)). mutation-pending 기록·summary/status는 S2 |
 | S2 | summary/status/outbox·공유 순수 소비자, 3–6 / +350–700 | S1. 0건/skip/옛 head/schema/누락 단언/timeout/usage unknown/알림 실패 RED. scheduled 실제1회 + 실패 알림1회 증거 |
 | S3 | briefing_checks·coord monitor 배선 및 deploy companion 요청, 2–5 / +150–400 | S2. 외부 도구 소유 coordinator와 파일 경계 확정 후 별도 리뷰. fixture status 소비·STALE/NO_DATA/disabled/host 불가 검증. deploy는 fail-open 유지 |
 

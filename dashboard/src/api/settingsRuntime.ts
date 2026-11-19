@@ -204,6 +204,12 @@ export async function getHealthDetail(): Promise<HealthResponse> {
   return { ...normalizeHealth(await request<unknown>("/api/health")), publicOnly };
 }
 
+/** Server build version from the public health summary, or null when it is unavailable. */
+export async function getServerVersion(): Promise<string | null> {
+  const health = await request<{ version?: unknown }>("/api/health", { suppressErrorToast: true });
+  return typeof health?.version === "string" && health.version ? health.version : null;
+}
+
 export interface PromptManifestRetentionStatus {
   total_stored_bytes: number;
   total_original_bytes: number;

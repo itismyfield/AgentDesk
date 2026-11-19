@@ -295,6 +295,7 @@ fn herdr_loaded_image_macos_self_matches_main_header_region() {
     let image = for_process(pid, &start, Some(&token)).unwrap();
     let exe = dev_ino(&std::env::current_exe().unwrap());
     assert_eq!(image, fixture(exe), "self_loaded_image_is_current_exe");
+    assert_eq!(for_current_release().unwrap(), fixture(exe));
     unsafe extern "C" {
         safe static _mh_execute_header: u8;
     }

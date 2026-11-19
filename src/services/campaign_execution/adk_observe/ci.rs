@@ -773,6 +773,138 @@ pub async fn observe_ci(
     }
 }
 
+impl CiObservation {
+    pub(crate) fn matches_merge(&self, pr: &PrObservation) -> bool {
+        self.repository_identity == pr.repository_identity
+            && self.pr_number == pr.number
+            && self.binds_head(&pr.head_sha)
+            && self.pr_base_ref == pr.base_ref
+            && self.run_id > 0
+            && self.run_attempt > 0
+            && self.workflow.path.split('@').next() == Some(".github/workflows/ci-pr.yml")
+            && self.workflow.event == "pull_request"
+            && self.tests().is_none_or(|test| {
+                !test.workers.is_empty()
+                    && !test.plan_digest.trim().is_empty()
+                    && match test.mode {
+                        CiMode::Head => test.tested_sha == pr.head_sha,
+                        CiMode::MergeRef => test.tested_base.as_ref() == Some(&pr.base_sha),
+                    }
+            })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompletedJob {
+    pub id: u64,
+    pub check_run_id: u64,
+    pub name: String,
+    pub conclusion: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompletedJobs {
+    pub repository: String,
+    pub workflow: WorkflowIdentity,
+    pub head: String,
+    pub run_id: u64,
+    pub run_attempt: u32,
+    pub jobs: Vec<CompletedJob>,
+}
+
+impl CompletedJobs {
+    pub(crate) fn job(&self, id: u64) -> Option<&CompletedJob> {
+        let mut matches = self.jobs.iter().filter(|job| job.id == id);
+        let job = matches.next()?;
+        matches.next().is_none().then_some(job)
+    }
+
+    pub(crate) fn matches(&self, ci: &CiObservation) -> bool {
+        self.repository == ci.repository_identity
+            && self.workflow == ci.workflow
+            && self.head == ci.pr_head_sha
+            && self.run_id == ci.run_id
+            && self.run_attempt == ci.run_attempt
+    }
+}
+
+/// Read a complete finished attempt for job-level exception evidence.
+pub async fn observe_completed_jobs(
+    gh: &dyn GhExec,
+    slug: &str,
+    run_id: u64,
+) -> Result<CompletedJobs, String> {
+    if !valid_slug(slug) || run_id == 0 {
+        return Err("invalid workflow target".into());
+    }
+    let path = format!("repos/{slug}/actions/runs/{run_id}");
+    let run = gh_api(gh, path.clone()).await?;
+    let workflow = WorkflowIdentity {
+        path: str_at(&run, "/path")?.to_owned(),
+        name: str_at(&run, "/name")?.to_owned(),
+        event: str_at(&run, "/event")?.to_owned(),
+    };
+    let repository = str_at(&run, "/repository/full_name")?;
+    let head = sha_at(&run, "/head_sha")?;
+    if run.get("id").and_then(Value::as_u64) != Some(run_id)
+        || !repository.eq_ignore_ascii_case(slug)
+        || str_at(&run, "/status")? != "completed"
+    {
+        return Err("workflow does not identify a completed attempt".into());
+    }
+    let run_attempt = run["run_attempt"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n > 0)
+        .ok_or("missing attempt")?;
+    let result = gh_api(
+        gh,
+        format!("{path}/attempts/{run_attempt}/jobs?per_page={PAGE}"),
+    )
+    .await?;
+    let mut seen = std::collections::BTreeSet::new();
+    let prefix = format!("https://api.github.com/repos/{repository}/check-runs/");
+    let jobs = page(&result, "jobs")?
+        .iter()
+        .map(|job| {
+            let id = job["id"]
+                .as_u64()
+                .filter(|n| *n > 0 && seen.insert(*n))
+                .ok_or("missing or duplicate job ID")?;
+            if str_at(job, "/status")? != "completed"
+                || job["run_attempt"]
+                    .as_u64()
+                    .is_some_and(|attempt| attempt != u64::from(run_attempt))
+                || job["run_id"].as_u64() != Some(run_id)
+                || sha_at(job, "/head_sha")? != head
+            {
+                return Err("job was not in the completed attempt".into());
+            }
+            Ok(CompletedJob {
+                id,
+                check_run_id: str_at(job, "/check_run_url")?
+                    .strip_prefix(&prefix)
+                    .and_then(|id| id.parse().ok())
+                    .filter(|id| *id > 0)
+                    .ok_or("check ID not found")?,
+                name: str_at(job, "/name")?.to_owned(),
+                conclusion: str_at(job, "/conclusion")?.to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if jobs.is_empty() {
+        return Err("empty job list".into());
+    }
+    Ok(CompletedJobs {
+        repository: slug.into(),
+        workflow,
+        head,
+        run_id,
+        run_attempt,
+        jobs,
+    })
+}
+
 #[cfg(test)]
 #[path = "ci_tests.rs"]
 mod tests;

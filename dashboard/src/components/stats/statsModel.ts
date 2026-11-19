@@ -26,14 +26,6 @@ export interface ShareSegment {
   sublabel?: string;
 }
 
-export interface AgentCacheRow {
-  id: string;
-  label: string;
-  promptTokens: number;
-  hitRate: number;
-  savedCost: number | null;
-}
-
 export interface SkillUsageRow {
   id: string;
   name: string;
@@ -43,6 +35,7 @@ export interface SkillUsageRow {
 
 export interface AgentSkillRow {
   id: string;
+  agentId: string;
   agentName: string;
   skillName: string;
   description: string;
@@ -149,14 +142,6 @@ export function computeCacheHitRate(
   const promptTokens = inputTokens + cacheReadTokens + cacheCreationTokens;
   if (promptTokens <= 0) return 0;
   return (cacheReadTokens / promptTokens) * 100;
-}
-
-export function computeDailyHitRate(day: TokenAnalyticsDailyPoint): number {
-  return computeCacheHitRate(
-    day.input_tokens,
-    day.cache_read_tokens,
-    day.cache_creation_tokens,
-  );
 }
 
 export function buildWindowDelta(
@@ -301,6 +286,7 @@ export function buildAgentSkillRows(
 
     return {
       id: `${row.agent_role_id}-${row.skill_name}-${index}`,
+      agentId: row.agent_role_id,
       agentName: row.agent_name,
       skillName: row.skill_name,
       description: plainSkillDescription(description),
@@ -309,32 +295,182 @@ export function buildAgentSkillRows(
   });
 }
 
-export function buildAgentCacheRows(
+export type BreakdownCategory = "models" | "agents";
+
+export interface TokenComposition {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/** One row of the "where tokens went" list: a model or an agent for the selected period. */
+export interface BreakdownItem {
+  id: string;
+  category: BreakdownCategory;
+  label: string;
+  sublabel: string;
+  tokens: number;
+  /** Percent of the category total, 0–100. */
+  share: number;
+  cost: number;
+  costWithoutCache: number | null;
+  savedCost: number | null;
+  color: string;
+  composition: TokenComposition | null;
+  promptTokens: number | null;
+  cacheHitRate: number | null;
+}
+
+function withShares(items: Omit<BreakdownItem, "share">[]): BreakdownItem[] {
+  const total = items.reduce((sum, item) => sum + Math.max(0, item.tokens), 0);
+  return items.map((item) => ({
+    ...item,
+    share: total > 0 ? (Math.max(0, item.tokens) / total) * 100 : 0,
+  }));
+}
+
+/** Models by tokens, colored like the model share bar (provider series by rank). */
+export function buildModelItems(
   data: TokenAnalyticsResponse | null,
-): AgentCacheRow[] {
-  return [...(data?.receipt.agents ?? [])]
-    .map((agent) => {
+): BreakdownItem[] {
+  const sorted = [...(data?.receipt.models ?? [])].sort(
+    (left, right) => right.total_tokens - left.total_tokens,
+  );
+  return withShares(
+    sorted.map((model, index) => {
+      const series = getProviderSeries(model.provider);
       const promptTokens =
-        (agent.input_tokens ?? 0) +
-        (agent.cache_read_tokens ?? 0) +
-        (agent.cache_creation_tokens ?? 0);
+        model.input_tokens + model.cache_read_tokens + model.cache_creation_tokens;
+      return {
+        id: `${model.provider}-${model.model}-${index}`,
+        category: "models" as const,
+        label: model.display_name || model.model,
+        sublabel: getProviderMeta(model.provider).label,
+        tokens: model.total_tokens,
+        cost: model.cost,
+        costWithoutCache: model.cost_without_cache,
+        savedCost: Math.max(0, model.cost_without_cache - model.cost),
+        color: series[index % series.length],
+        composition: {
+          input: model.input_tokens,
+          output: model.output_tokens,
+          cacheRead: model.cache_read_tokens,
+          cacheWrite: model.cache_creation_tokens,
+        },
+        promptTokens,
+        cacheHitRate: computeCacheHitRate(
+          model.input_tokens,
+          model.cache_read_tokens,
+          model.cache_creation_tokens,
+        ),
+      };
+    }),
+  );
+}
+
+/** Agents by tokens with their prompt volume, cache hit rate and cache savings. */
+export function buildAgentItems(
+  data: TokenAnalyticsResponse | null,
+): BreakdownItem[] {
+  const sorted = [...(data?.receipt.agents ?? [])].sort(
+    (left, right) => right.tokens - left.tokens,
+  );
+  return withShares(
+    sorted.map((agent, index) => {
+      const hasPromptDetail =
+        agent.input_tokens != null ||
+        agent.cache_read_tokens != null ||
+        agent.cache_creation_tokens != null;
+      const input = agent.input_tokens ?? 0;
+      const cacheRead = agent.cache_read_tokens ?? 0;
+      const cacheWrite = agent.cache_creation_tokens ?? 0;
+      const promptTokens = input + cacheRead + cacheWrite;
       return {
         id: agent.agent,
+        category: "agents" as const,
         label: agent.agent,
-        promptTokens,
-        hitRate: computeCacheHitRate(
-          agent.input_tokens ?? 0,
-          agent.cache_read_tokens ?? 0,
-          agent.cache_creation_tokens ?? 0,
-        ),
+        sublabel: "",
+        tokens: agent.tokens,
+        cost: agent.cost,
+        costWithoutCache: agent.cost_without_cache ?? null,
         savedCost:
           agent.cost_without_cache != null
             ? Math.max(0, agent.cost_without_cache - agent.cost)
             : null,
+        color: AGENT_BAR_COLORS[index % AGENT_BAR_COLORS.length],
+        composition: hasPromptDetail
+          ? {
+              input,
+              output: Math.max(0, agent.tokens - promptTokens),
+              cacheRead,
+              cacheWrite,
+            }
+          : null,
+        promptTokens: hasPromptDetail ? promptTokens : null,
+        cacheHitRate: hasPromptDetail
+          ? computeCacheHitRate(input, cacheRead, cacheWrite)
+          : null,
       };
-    })
-    .sort((left, right) => right.promptTokens - left.promptTokens)
-    .slice(0, 5);
+    }),
+  );
+}
+
+/** Skill pairs recorded for one agent (matched by role id or display name). */
+export function skillsForAgent(rows: AgentSkillRow[], agent: string): AgentSkillRow[] {
+  return rows.filter((row) => row.agentId === agent || row.agentName === agent);
+}
+
+// Daily chart geometry: the plot sits between the y-axis and the right margin.
+export const DAILY_CHART_Y_AXIS = 46;
+export const DAILY_CHART_RIGHT = 12;
+/** Narrowest day column before the chart scrolls sideways. */
+export const DAILY_CHART_MIN_DAY = 11;
+
+export function dailyChartMinWidth(count: number): number {
+  return count > 7
+    ? count * DAILY_CHART_MIN_DAY + DAILY_CHART_Y_AXIS + DAILY_CHART_RIGHT
+    : 0;
+}
+
+/** Day index under an x offset inside the chart, clamped to the plot. */
+export function dailyIndexAt(x: number, width: number, count: number): number {
+  if (count <= 0) return -1;
+  const plot = Math.max(1, width - DAILY_CHART_Y_AXIS - DAILY_CHART_RIGHT);
+  const index = Math.floor(((x - DAILY_CHART_Y_AXIS) / plot) * count);
+  return Math.min(count - 1, Math.max(0, index));
+}
+
+/** Left edge and width of a day column, for scrolling it into view. */
+export function dailyColumn(index: number, width: number, count: number) {
+  const plot = Math.max(1, width - DAILY_CHART_Y_AXIS - DAILY_CHART_RIGHT);
+  const band = plot / Math.max(1, count);
+  return { left: DAILY_CHART_Y_AXIS + index * band, width: band };
+}
+
+export type DailyStep = "prev" | "next" | "first" | "last" | "clear";
+
+/** Readout stepping: with nothing picked, both directions start from the latest day. */
+export function stepDailySelection(
+  selected: number | null,
+  step: DailyStep,
+  count: number,
+): number | null {
+  if (count <= 0) return null;
+  const last = count - 1;
+  const base = selected === null ? last : Math.min(selected, last);
+  switch (step) {
+    case "prev":
+      return selected === null ? Math.max(0, last - 1) : Math.max(0, base - 1);
+    case "next":
+      return selected === null ? last : Math.min(last, base + 1);
+    case "first":
+      return 0;
+    case "last":
+      return last;
+    default:
+      return null;
+  }
 }
 
 export function dailySeries(t: TFunction): DailySeriesDescriptor[] {

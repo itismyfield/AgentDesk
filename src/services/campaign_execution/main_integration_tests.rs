@@ -345,3 +345,22 @@ fn stacked_base_and_stale_main_do_not_adopt() {
         AdoptionVerdict::Rejected(AdoptionRejection::HeadMismatch { .. })
     ));
 }
+
+#[test]
+fn m7_open_pr_with_a_synthetic_merge_sha_does_not_adopt() {
+    let graph = Graph::new();
+    let head = graph
+        .branch("feature", &graph.base, &["feature.txt"])
+        .pop()
+        .unwrap();
+    let commit = graph.land_squash(&head, None);
+    let members = [artifact("a", &graph.base, &head)];
+    let integration = integration(&graph.base, &head, &members);
+    let mut pr = graph.pr(&head, Some(&commit));
+    pr.state = "open".into();
+    pr.merged = false;
+    assert!(matches!(
+        graph.judge(&members, &integration, &pr),
+        Observation::NotYet { .. }
+    ));
+}

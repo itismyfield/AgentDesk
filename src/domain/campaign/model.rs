@@ -4,14 +4,16 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::candidate_seal::CandidateSeal;
+use super::decision_item::{ApprovalBinding, ApprovalBook, ApprovalRecord, ForumApproval};
 use super::definition::{
     AcceptanceCondition, DefinitionError, DefinitionHashes, DefinitionInput, ValidatedDefinition,
 };
 use super::evidence::{EvidenceDecision, EvidenceEnvelope};
 use super::evidence_gate::{StageAssessment, Verdict};
 use super::execution_pin::ExecutionPin;
+use super::landing::{Landing, LandingFact, MergeFact, MergeJob};
 use super::profile::ExecutionEnvironment;
-use super::review_gate::StagePrerequisite;
+use super::review_gate::{ReviewFact, ReviewJob, StagePrerequisite};
 use super::verification_run::{
     Digest, InitiationObservation, PhaseInput, PhaseResult, ProcessIdentity,
     TerminationObservation, VerificationRun, VerificationSpec,
@@ -287,6 +289,12 @@ pub struct Run {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub prerequisites: BTreeMap<String, StagePrerequisite>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reviews: BTreeMap<String, ReviewJob>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub landings: BTreeMap<String, Landing>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub merges: BTreeMap<String, MergeJob>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fences: BTreeMap<String, NodeFence>,
     // The one seal of each Work attempt's output, keyed by attempt ID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -294,6 +302,8 @@ pub struct Run {
     // The environment observed with a V's first start receipt, keyed by execution ID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub environments: BTreeMap<String, ExecutionEnvironment>,
+    #[serde(default, skip_serializing_if = "ApprovalBook::is_empty")]
+    pub approvals: ApprovalBook,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,6 +329,17 @@ pub struct NodeFence {
     pub interruption: Option<NodeInterruption>,
     // The (series, repair cycle) whose quality failure was already counted.
     pub counted_failure: Option<(u32, u32)>,
+    // The sealed output the latest Review handover carried; Landing admits exactly this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<ReviewedCandidate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedCandidate {
+    pub work_attempt: String,
+    pub base_sha: String,
+    pub head_sha: String,
+    pub pin_hash: Digest,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +383,13 @@ pub struct CampaignState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    OpenApprovalGate {
+        binding: Box<ApprovalBinding>,
+    },
+    ApproveGate {
+        binding: Box<ApprovalBinding>,
+        evidence: Box<ForumApproval>,
+    },
     EditDefinition {
         expected_revision: u64,
         definition: DefinitionInput,
@@ -378,6 +406,25 @@ pub enum Command {
         expected_revision: u64,
         expected_run: String,
         node_id: String,
+    },
+    // Internal lifecycle steps; the public Start and Resume above stay unavailable.
+    BeginRun {
+        expected_revision: u64,
+        run_id: String,
+    },
+    ResumeRun {
+        expected_revision: u64,
+        expected_run: String,
+    },
+    BeginLanding {
+        expected_run: String,
+        node_id: String,
+        expected_epoch: u64,
+    },
+    CompleteNode {
+        expected_run: String,
+        node_id: String,
+        expected_epoch: u64,
     },
     RequestStop {
         expected_revision: u64,
@@ -471,6 +518,18 @@ pub enum Command {
         execution_id: String,
         evidence: String,
     },
+    RecordMerge {
+        node_id: String,
+        fact: Box<MergeFact>,
+    },
+    RecordLanding {
+        node_id: String,
+        fact: Box<LandingFact>,
+    },
+    RecordReview {
+        action_id: String,
+        fact: Box<ReviewFact>,
+    },
 }
 
 // Every start receipt carries the environment its host observed; the first one is kept.
@@ -527,10 +586,25 @@ pub struct CommandEnvelope {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum EventKind {
+    ApprovalGateOpened {
+        binding: Box<ApprovalBinding>,
+    },
+    ApprovalGateApproved {
+        binding: Box<ApprovalBinding>,
+        approval: Box<ApprovalRecord>,
+    },
     DefinitionCreated,
     DefinitionEdited {
         superseded_nodes: Vec<String>,
         change: Option<ChangeReason>,
+    },
+    RunStarted,
+    RunResumed {
+        reset_nodes: Vec<String>,
+    },
+    NodeAdvanced {
+        node_id: String,
+        stage: Stage,
     },
     StopRequested {
         mode: StopMode,

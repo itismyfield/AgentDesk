@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { campaignReadMark, getCampaign, isRejectedSave, setCampaignAutoQueue, type Campaign, type CampaignHandoff } from "../../api/campaigns";
+import { Button } from "../../kit/free/button-clean";
+import { Switch } from "../../kit/free/switch-clean";
 import type { Tr } from "./campaignPresentation";
 
 const WAITING_REASONS: Record<string, [string, string]> = {
@@ -25,27 +27,39 @@ export function handoffSummary(handoff: CampaignHandoff, tr: Tr): string {
   return waiting ? `${queued} ${tr("못 넘긴 작업", "Held back")}: ${waiting}` : queued;
 }
 
-export default function CampaignAutoQueueToggle({ campaign, tr, onSaved, checkedRead = null }: {
+// unknownSince is set when a save's outcome could not be read; a newer revision or a read started later settles it.
+export type AutoQueueRequest = { busy: boolean; message: string | null; unknownSince: { read: number; revision: number } | null };
+type HeldRequest = [AutoQueueRequest, (change: Partial<AutoQueueRequest>) => void];
+const IDLE: AutoQueueRequest = { busy: false, message: null, unknownSince: null };
+
+/** Requests by campaign id; the page holds them so a view switch that unmounts the toggle keeps an unconfirmed save. */
+export function useAutoQueueRequests(): (id: string) => HeldRequest {
+  const [requests, setRequests] = useState<Record<string, AutoQueueRequest>>({});
+  return (id) => [requests[id] ?? IDLE, (change) => setRequests((current) => ({ ...current, [id]: { ...(current[id] ?? IDLE), ...change } }))];
+}
+
+export default function CampaignAutoQueueToggle({ campaign, tr, onSaved, checkedRead = null, held }: {
   campaign: Campaign; tr: Tr; onSaved: (updated: Campaign) => void;
   /** Number of the newest campaign read applied to `campaign` (see campaignReadMark). */
   checkedRead?: number | null;
+  /** The page's request state for this campaign; without it the toggle keeps its own. */
+  held?: HeldRequest;
 }) {
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  // Set when a save's outcome could not be read; a newer revision or a read started later settles it.
-  const [unknownSince, setUnknownSince] = useState<{ read: number; revision: number } | null>(null);
+  const own = useAutoQueueRequests()(campaign.id);
+  const [{ busy, message, unknownSince }, patch] = held ?? own;
   const unknown = unknownSince !== null && unknownSince.revision === campaign.revision && !(checkedRead !== null && checkedRead > unknownSince.read);
   const stateNow = (value: Campaign) =>
     value.auto_queue ? tr("지금 서버에는 자동 진행이 켜져 있습니다.", "The server has auto-run on now.") : tr("지금 서버에는 자동 진행이 꺼져 있습니다.", "The server has auto-run off now.");
   const readBack = async () => {
     const latest = await getCampaign(campaign.id);
     onSaved(latest);
-    setUnknownSince(null);
+    patch({ unknownSince: null });
     return latest;
   };
   const toggle = async () => {
     const enabled = !campaign.auto_queue;
-    setBusy(true); setMessage(null); setUnknownSince(null);
+    patch({ busy: true, message: null, unknownSince: null });
+    const setMessage = (text: string) => patch({ message: text });
     try {
       const result = await setCampaignAutoQueue(campaign, enabled);
       onSaved(result.campaign);
@@ -63,36 +77,32 @@ export default function CampaignAutoQueueToggle({ campaign, tr, onSaved, checked
           ? `${tr(`응답을 받지 못했습니다 (${reason}).`, `No response (${reason}).`)} ${stateNow(latest)} ${tr("넘긴 작업은 노드 상태에서 확인하세요.", "Check the nodes for what was sent.")}`
           : `${tr(`응답을 받지 못했습니다 (${reason}).`, `No response (${reason}).`)} ${stateNow(latest)} ${tr("보낸 요청이 나중에 반영될 수 있습니다.", "The request may still apply later.")}`);
       } catch {
-        setUnknownSince({ read: campaignReadMark(), revision: campaign.revision });
+        patch({ unknownSince: { read: campaignReadMark(), revision: campaign.revision } });
         setMessage(tr(`저장 결과를 확인하지 못했습니다 (${reason}). 자동 진행 상태 확인을 눌러 다시 읽으세요.`, `Could not confirm the save (${reason}). Press Check auto-run to read it again.`));
       }
-    } finally { setBusy(false); }
+    } finally { patch({ busy: false }); }
   };
   const recheck = async () => {
-    setBusy(true); setMessage(null);
+    patch({ busy: true, message: null });
     try {
-      setMessage(stateNow(await readBack()));
+      patch({ message: stateNow(await readBack()) });
     } catch (cause) {
-      setMessage(tr("상태를 읽지 못했습니다: ", "Could not read the state: ") + (cause instanceof Error ? cause.message : String(cause)));
-    } finally { setBusy(false); }
+      patch({ message: tr("상태를 읽지 못했습니다: ", "Could not read the state: ") + (cause instanceof Error ? cause.message : String(cause)) });
+    } finally { patch({ busy: false }); }
   };
   const label = tr("자동 진행", "Auto-run");
   return <>
     {unknown
-      ? <button type="button" className="campaign-auto-queue" data-state="unknown" disabled={busy} onClick={() => void recheck()}
+      ? <Button variant="secondary" className="campaign-auto-queue" data-state="unknown" disabled={busy} onClick={() => void recheck()}
         title={tr("마지막 저장 결과를 모릅니다. 누르면 서버 상태를 다시 읽습니다.", "The last save's outcome is unknown. Press to read the server state again.")}>
         {tr("자동 진행 상태 확인", "Check auto-run")}
-      </button>
+      </Button>
       : <span className="campaign-auto-run inline-flex items-center gap-2"
         title={tr("켜면 선행 작업이 끝난 작업을 차례로 실행합니다. 끄면 새로 넘기는 것만 멈춥니다.", "When on, each task runs as soon as its prerequisites are done. Turning it off only stops sending new tasks.")}>
-        <span className="text-xs text-th-text-muted" aria-hidden>{label}</span>
-        <button type="button" role="switch" aria-checked={campaign.auto_queue} aria-label={label} disabled={busy} onClick={() => void toggle()}
-          className="campaign-auto-queue group inline-flex items-center gap-2 !rounded-full !px-2 !py-1">
-          <span aria-hidden className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${campaign.auto_queue ? "bg-emerald-600" : "bg-th-border"}`}>
-            <span className={`absolute top-0.5 size-4 rounded-full bg-white shadow transition-[left] ${campaign.auto_queue ? "left-[18px]" : "left-0.5"}`} />
-          </span>
-          <span className="min-w-6 text-left text-xs font-medium">{campaign.auto_queue ? tr("켜짐", "On") : tr("꺼짐", "Off")}</span>
-        </button>
+        <span className="text-xs text-[var(--fg-muted)]" aria-hidden>{label}</span>
+        {/* aria-checked mirrors the native state so readers and tests see one value. */}
+        <Switch className="campaign-auto-queue" aria-label={label} aria-checked={campaign.auto_queue} checked={campaign.auto_queue} disabled={busy}
+          onChange={() => void toggle()} label={campaign.auto_queue ? tr("켜짐", "On") : tr("꺼짐", "Off")} />
       </span>}
     {message && (unknown || !unknownSince) && <p className="campaign-handoff-result" role="status">{message}</p>}
   </>;

@@ -8,6 +8,9 @@ use std::time::Duration;
 use super::drive::{Drive, wake};
 use crate::services::claude_tui::busy_inject::Screen;
 
+#[path = "held_watch/readiness.rs"]
+pub(crate) mod readiness;
+
 /// One read of the refusing pane or of the cause that refused it.
 pub(crate) type ScreenProbe = Box<dyn FnMut() -> Screen + Send>;
 
@@ -76,6 +79,13 @@ fn watches() -> MutexGuard<'static, HashMap<u64, Watch>> {
 #[cfg(test)]
 pub(crate) fn armed(channel: u64) -> bool {
     watches().get(&channel).is_some_and(|w| w.armed.is_some())
+}
+
+#[cfg(test)]
+pub(crate) fn has_watch(channel: u64) -> bool {
+    watches()
+        .get(&channel)
+        .is_some_and(|watch| watch.armed.is_some() || watch.probe.is_some() || watch.running)
 }
 
 /// Leaves the probe of the pane that just refused `channel`'s front, for the drive to watch.
