@@ -1,5 +1,6 @@
 //! Only a confirmed local compact reservation can consume its own command output.
 use super::super::{Reservation, evidence::Stamp};
+use crate::services::tui_turn_state::claude_idle_metadata;
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
@@ -79,16 +80,9 @@ pub(in super::super) fn read(
                     return None;
                 }
             }
-            "attachment"
-            | "file-history-snapshot"
-            | "last-prompt"
-            | "ai-title"
-            | "mode"
-            | "permission-mode"
-            | "session-owner"
-            | "atis-latch"
-            | "cost-state"
-            | "queue-operation" => {}
+            // Any attachment is opaque here; other rows pass only as Claude idle metadata.
+            "attachment" => {}
+            _ if claude_idle_metadata(&value) => {}
             _ => return None,
         }
         // Retire the completed control even if a new native turn beat this timer read.
