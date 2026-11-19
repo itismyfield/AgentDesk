@@ -1,4 +1,4 @@
-use poise::serenity_prelude::MessageId;
+use poise::serenity_prelude::{ChannelId, MessageId};
 
 #[derive(Clone, Debug)]
 pub(crate) struct SourceMessageQueuedGeneration {
@@ -9,7 +9,7 @@ pub(crate) struct SourceMessageQueuedGeneration {
     /// genuine user instruction. Unmarked sources retain drop-on-exit.
     pub(crate) preserve_on_cancel: bool,
     /// The route a lost claim resolved; travels with the source through merges and restores.
-    pub(crate) route: Option<super::QueuedRoute>,
+    pub(crate) route: Option<QueuedRoute>,
     /// Original intake origin; queue replay retains each source independently.
     pub(crate) origin: Option<String>,
     pub(crate) origin_id: Option<String>,
@@ -55,11 +55,20 @@ pub(crate) struct PendingQueueSourceGeneration {
     pub(crate) preserve_on_cancel: bool,
     /// Files written before routes were kept read as `None`, and that item resolves again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) route: Option<super::QueuedRoute>,
+    pub(crate) route: Option<QueuedRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) origin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) origin_id: Option<String>,
+}
+
+/// Where a turn resolved to run and the routing its claim publishes, kept with a queued item so
+/// a replay uses this decision instead of resolving again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct QueuedRoute {
+    pub(crate) target: ChannelId,
+    pub(crate) parent: Option<ChannelId>,
+    pub(crate) role: Option<ChannelId>,
 }
 
 #[cfg(test)]

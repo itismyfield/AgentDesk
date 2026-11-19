@@ -1,17 +1,9 @@
-//! Discord button custom-id codec for the manual-steer action handle.
+//! Discord button custom-id codec for the manual-steer action handle, and its random issuance.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-use super::operation::deserialize_fixed_str;
+pub(crate) use super::handle_value::ActionHandle;
 
 const CUSTOM_ID_PREFIX: &str = "msteer:";
 const CUSTOM_ID_VERSION: &str = "v1";
-const HANDLE_BYTES: usize = 16;
-
-/// One-time 128-bit action nonce. A custom-id carries only this opaque handle, and every
-/// new click permit gets a new one so a stale card never matches a re-queued entry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ActionHandle([u8; HANDLE_BYTES]);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CustomIdError {
@@ -30,16 +22,8 @@ impl ActionHandle {
         }
     }
 
-    /// The all-zero value is reserved as invalid so an unset buffer never names a permit.
-    pub(crate) fn from_bytes(bytes: [u8; HANDLE_BYTES]) -> Option<Self> {
-        (bytes != [0; HANDLE_BYTES]).then_some(Self(bytes))
-    }
-
     pub(crate) fn to_custom_id(self) -> String {
-        format!(
-            "{CUSTOM_ID_PREFIX}{CUSTOM_ID_VERSION}:{}",
-            hex::encode(self.0)
-        )
+        format!("{CUSTOM_ID_PREFIX}{CUSTOM_ID_VERSION}:{}", self.to_hex())
     }
 
     pub(crate) fn parse_custom_id(custom_id: &str) -> Result<Self, CustomIdError> {
@@ -52,42 +36,11 @@ impl ActionHandle {
             .ok_or(CustomIdError::UnsupportedVersion)?;
         Self::from_hex(handle).ok_or(CustomIdError::MalformedHandle)
     }
-
-    fn to_hex(self) -> String {
-        hex::encode(self.0)
-    }
-
-    /// Accepts only the canonical lowercase form so one handle has exactly one spelling.
-    fn from_hex(text: &str) -> Option<Self> {
-        if text.len() != HANDLE_BYTES * 2
-            || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        {
-            return None;
-        }
-        let mut bytes = [0; HANDLE_BYTES];
-        hex::decode_to_slice(text, &mut bytes).ok()?;
-        Self::from_bytes(bytes)
-    }
-}
-
-impl Serialize for ActionHandle {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.to_hex())
-    }
-}
-
-impl<'de> Deserialize<'de> for ActionHandle {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserialize_fixed_str(
-            deserializer,
-            "a nonzero 128-bit lowercase hex handle",
-            Self::from_hex,
-        )
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::handle_value::HANDLE_BYTES;
     use super::*;
 
     #[test]
