@@ -19,16 +19,20 @@ fn idle() -> Option<String> {
 }
 
 #[test]
-fn a_lost_source_settles_only_for_a_launch_older_than_this_run() {
+fn a_lost_source_settles_only_for_an_opted_in_launch_older_than_this_run() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let older = restarted();
     tui_prompt_dedupe::clear_tmux_runtime_binding(&older.session);
-    let mut seen = watched(&older.session, None);
+    let mut seen = watched(&older.session, None).settling_lost_source();
     assert_eq!(
         seen.expired(idle),
         Expiry::Unproven(Unproven::Retained),
         "nothing in flight can publish an older launch's source"
     );
+    // A tmux warm follow-up keeps waiting on the same lost source; it never settles it.
+    let kind = crate::services::claude_tui::input::PromptReadinessKind::ProvenWarmFollowup;
+    let stopped = wait::prepare(&older.session, None, None, Duration::ZERO, kind).err();
+    assert_eq!(stopped.map(|stop| stop.unproven), Some(None));
     initialize();
     let fresh = Rig::launched(None, Utc::now());
     tui_prompt_dedupe::clear_tmux_runtime_binding(&fresh.session);

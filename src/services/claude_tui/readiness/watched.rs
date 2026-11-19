@@ -15,6 +15,8 @@ pub(crate) struct Watched {
     seen: Option<(Source, Option<Stamp>)>,
     /// Windows this wait opened after its transcript moved.
     windows: u8,
+    /// Whether an older execution's missing source settles; only the Herdr first input opts in.
+    settle_lost: bool,
 }
 pub(crate) fn watched(session: &str, path: Option<&Path>) -> Watched {
     let seen = Source::current(session, path).map(|source| {
@@ -26,6 +28,7 @@ pub(crate) fn watched(session: &str, path: Option<&Path>) -> Watched {
         path: path.map(Path::to_path_buf),
         seen,
         windows: 0,
+        settle_lost: false,
     }
 }
 
@@ -53,8 +56,8 @@ pub(crate) enum Expiry {
 /// The open cause of a `Waits`, in `expired`'s branch order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WaitCause {
-    /// The wait's first look found no source and its execution is of this run: a launch may
-    /// still publish it.
+    /// The wait's first look found no source and nothing settles it: a launch may still
+    /// publish one.
     NoSource,
     /// The source proves readiness; the caller's screen or reservation refused it.
     Observed,
@@ -77,13 +80,19 @@ pub(crate) enum WaitCause {
 }
 
 impl Watched {
+    /// An older execution's missing source ends retained instead of held.
+    pub(crate) fn settling_lost_source(mut self) -> Self {
+        self.settle_lost = true;
+        self
+    }
+
     /// `pane` is read only to settle a wait whose transcript moved: its screen must show no turn.
     pub(crate) fn expired(&mut self, pane: impl FnOnce() -> Option<String>) -> Expiry {
         let Some((source, stamp)) = &self.seen else {
-            // An execution older than this daemon run that never showed a source has nothing in
-            // flight to publish one: retained with its resend ask instead of held for good.
+            // For an opted-in caller, an execution older than this run has nothing in flight to
+            // publish a source: retained with its resend ask instead of held for good.
             return match super::source::nonce(&self.session) {
-                Some(Some(nonce)) if super::launched_before_run(&nonce) => {
+                Some(Some(nonce)) if self.settle_lost && super::launched_before_run(&nonce) => {
                     Expiry::Unproven(Unproven::Retained)
                 }
                 _ => Expiry::Waits(WaitCause::NoSource),

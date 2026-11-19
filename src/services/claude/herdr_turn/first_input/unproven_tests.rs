@@ -567,17 +567,25 @@ async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
 // restart-aware watch once the draft clears, and submits the original exactly once.
 #[test]
 fn a_restored_front_held_by_a_draft_wakes_once_the_draft_clears() {
-    held_front_wakes_once_cleared(None);
+    held_front_wakes_once_cleared(None, true);
 }
 
 // A permission prompt over the composer holds at once as a dialog; dismissing it wakes the front.
 #[test]
 fn a_front_held_by_a_permission_dialog_wakes_once_it_is_dismissed() {
-    let dialog = " Bash command · from the adk-lane agent\n Recapture shots\n │ node capture.mjs\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend · ctrl+x ctrl+k twice to stop background agen…";
-    held_front_wakes_once_cleared(Some(dialog));
+    held_front_wakes_once_cleared(Some(DIALOG), true);
 }
 
-fn held_front_wakes_once_cleared(dialog: Option<&str>) {
+// With no readiness proof the first look still reads the dialog; the front wakes once a finished
+// turn proves the source and the dialog is gone.
+#[test]
+fn a_dialog_over_an_unproven_front_holds_and_wakes_once_proven_and_dismissed() {
+    held_front_wakes_once_cleared(Some(DIALOG), false);
+}
+
+const DIALOG: &str = " Bash command · from the adk-lane agent\n Recapture shots\n │ node capture.mjs\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend · ctrl+x ctrl+k twice to stop background agen…";
+
+fn held_front_wakes_once_cleared(dialog: Option<&str>, proven: bool) {
     use crate::services::discord::owner_drive_for_test as drive;
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
@@ -585,28 +593,32 @@ fn held_front_wakes_once_cleared(dialog: Option<&str>) {
     let rig = HerdrRig::start();
     let _registry = rig.registry_on_this_thread();
     let logical = format!("i8161-draft-{}", uuid::Uuid::new_v4().simple());
-    let channel = if dialog.is_some() {
-        816_111u64
-    } else {
-        816_110
-    };
+    let channel = 816_110 + u64::from(dialog.is_some()) + u64::from(!proven);
     let native = uuid::Uuid::new_v4().to_string();
     let projects = root.path().join("projects");
     let path = projects.join("workspace").join(format!("{native}.jsonl"));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let old = chrono::Utc::now() - chrono::Duration::hours(6);
-    {
+    let append = |rows: &[serde_json::Value]| {
         use std::io::Write;
-        let mut file = std::fs::File::create(&path).unwrap();
-        for row in [
-            json!({"type":"user","timestamp":old,"message":{"role":"user","content":"earlier prompt"}}),
-            json!({"type":"assistant","timestamp":old,"message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}}),
-            json!({"type":"system","subtype":"turn_duration","timestamp":old}),
-        ] {
-            let mut row = row;
+        let mut file = (std::fs::OpenOptions::new().create(true).append(true))
+            .open(&path)
+            .unwrap();
+        for row in rows {
+            let mut row = row.clone();
             row["sessionId"] = json!(native);
             writeln!(file, "{row}").unwrap();
         }
+    };
+    append(&[
+        json!({"type":"user","timestamp":old,"message":{"role":"user","content":"earlier prompt"}}),
+        json!({"type":"assistant","timestamp":old,"message":{"role":"assistant","content":[{"type":"text","text":"earlier answer"}]}}),
+        json!({"type":"system","subtype":"turn_duration","timestamp":old}),
+    ]);
+    if !proven {
+        append(&[
+            json!({"type":"user","timestamp":chrono::Utc::now(),"message":{"role":"user","content":"current prompt"}}),
+        ]);
     }
     let context: binding_context::BindingContext = serde_json::from_value(json!({
         "schema":1,"provider":"claude","created_at":old,"execution_nonce":NONCE,
@@ -698,7 +710,13 @@ fn held_front_wakes_once_cleared(dialog: Option<&str>) {
         .unwrap();
     assert!(matches!(held, effect::Completion::NotSent(_)), "{held:?}");
     if dialog.is_some() {
-        assert!(format!("{held:?}").contains("Waits(Modal)"), "{held:?}");
+        let refusal = format!("{held:?}");
+        let hold = crate::services::discord::OwnerHoldForTest::from_refusal(&refusal);
+        assert!(refusal.contains("Waits(Modal)") && refusal.contains("modal: true"));
+        assert!(
+            hold.unwrap().notice().contains("승인 창 응답 대기"),
+            "{held:?}"
+        );
     }
     assert!(rig.sends().is_empty(), "the hold takes no key");
     let snapshot = runtime
@@ -711,6 +729,14 @@ fn held_front_wakes_once_cleared(dialog: Option<&str>) {
     );
     assert!(snapshot["retained_inputs"].as_array().unwrap().is_empty());
     let message = snapshot["items"][0]["message_id"].as_u64().unwrap();
+    if !proven {
+        assert!(readiness::observe_restored(&logical, Some(&path)).is_none());
+        let at = chrono::Utc::now();
+        append(&[
+            json!({"type":"assistant","timestamp":at,"message":{"role":"assistant","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}),
+            json!({"type":"system","subtype":"turn_duration","timestamp":at}),
+        ]);
+    }
     rig.answer("pane.read", screen(""));
     let (completed, completion) = tokio::sync::oneshot::channel();
     let completed = Arc::new(std::sync::Mutex::new(Some(completed)));

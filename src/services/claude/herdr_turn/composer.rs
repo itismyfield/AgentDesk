@@ -116,6 +116,37 @@ pub(crate) fn restored_screen_idle(pane: &str) -> bool {
         && !screen::tmux_capture_indicates_claude_tui_busy(&plain)
 }
 
+/// A dialog open at the bottom of the pane, a permission prompt among them: a question, at least
+/// two numbered choices from `1.`, then its `Esc to cancel` footer with no composer below it.
+pub(crate) fn dialog_open(pane: &str) -> bool {
+    let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(pane);
+    let lines: Vec<&str> = (plain.lines().map(str::trim))
+        .filter(|line| !line.is_empty())
+        .collect();
+    let footer = lines
+        .iter()
+        .rposition(|line| line.to_ascii_lowercase().contains("esc to cancel"));
+    let Some(footer) = footer.filter(|at| lines.len() - at <= 2) else {
+        return false;
+    };
+    let above = &lines[footer.saturating_sub(12)..footer];
+    let Some(question) = above.iter().rposition(|line| line.ends_with('?')) else {
+        return false;
+    };
+    // The numbers each choice line opens with, a `❯` cursor aside.
+    let numbers: Vec<&str> = (above[question + 1..].iter())
+        .filter_map(|line| {
+            let line = line.trim_start_matches('\u{276f}').trim_start();
+            let (number, rest) = line.split_once(". ")?;
+            (!number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) && !rest.is_empty())
+                .then_some(number)
+        })
+        .collect();
+    numbers.len() >= 2
+        && numbers[0] == "1"
+        && !(lines[footer + 1..].iter()).any(|line| line.starts_with('\u{276f}'))
+}
+
 /// The capture precedes the gated paste; it never clears a draft or confirms a dialog.
 pub(crate) fn run_ready(
     session: &str,
@@ -142,27 +173,29 @@ pub(crate) fn when_idle(
     send: impl FnOnce() -> InputRun,
 ) -> InputRun {
     use crate::services::claude_tui::readiness::{self, Expiry};
-    let mut watched = readiness::watched(session, Some(path));
+    let mut watched = readiness::watched(session, Some(path)).settling_lost_source();
     let mut budget = composer_ready_wait();
-    let dialog = std::cell::Cell::new(false);
+    let (dialog, mut first) = (std::cell::Cell::new(false), true);
     // A budget that ends on a transcript that only moved runs the same wait in short windows.
     let proof = loop {
         let stop = wait_for(cancel, budget, || {
-            let Some(proof) = readiness::observe_restored(session, Some(path)) else {
+            let proof = readiness::observe_restored(session, Some(path));
+            // Without a proof only the first look reads the screen, for a dialog already open.
+            if proof.is_none() && !std::mem::take(&mut first) {
                 return ControlFlow::Continue(());
-            };
+            }
             let Some(pane) = capture() else {
                 return ControlFlow::Continue(());
             };
-            // A dialog over the composer, a permission prompt among them, holds before the
-            // composer is read: a covered composer reads Unread and would wait out the budget.
-            let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&pane);
-            if crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(
-                &plain,
-            ) {
+            first = false;
+            // A covered composer reads Unread and would wait out the budget.
+            if dialog_open(&pane) {
                 dialog.set(true);
                 return ControlFlow::Break(None);
             }
+            let Some(proof) = proof else {
+                return ControlFlow::Continue(());
+            };
             if !readiness::empty_draft(&pane) {
                 match composer_owner(&pane) {
                     ComposerOwner::Person | ComposerOwner::AgentDesk => {
@@ -171,6 +204,11 @@ pub(crate) fn when_idle(
                     ComposerOwner::Unread => return ControlFlow::Continue(()),
                     ComposerOwner::Empty => (),
                 }
+            }
+            if crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(
+                &pane,
+            ) {
+                return ControlFlow::Break(None);
             }
             if proof.restart() && !restored_screen_idle(&pane) {
                 return ControlFlow::Continue(());
@@ -182,6 +220,11 @@ pub(crate) fn when_idle(
         });
         if !matches!(stop, Err(WaitStop::TimedOut)) {
             break stop;
+        }
+        // A dialog opened during the wait holds before any settlement.
+        if capture().is_some_and(|pane| dialog_open(&pane)) {
+            dialog.set(true);
+            break Ok(None);
         }
         match watched.expired(&mut capture) {
             Expiry::Requiet => budget = budget.min(readiness::WINDOW),

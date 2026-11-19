@@ -310,8 +310,9 @@ fn herdr_claude_composer_waits_from_busy_to_ready_before_exactly_one_submit() {
         .iter()
         .filter(|request| request["method"] == "pane.read")
         .count();
+    // The unproven first look reads once for an open dialog; admission reads once more.
     assert_eq!(
-        reads, 1,
+        reads, 2,
         "terminal_signal_admits_while_old_busy_chrome_is_visible"
     );
 }
@@ -538,8 +539,7 @@ fn a_pane_that_outlived_the_restart_takes_one_input_only_on_an_idle_screen() {
         json!({"type":"system","subtype":"turn_duration","timestamp":old}),
     ];
     let mcp = "✻ Baked for 2s\n\n ⚠ 1 MCP server needs authentication · run /mcp";
-    use crate::services::claude_tui::host_input::InputRefusal::{Unknown, Unproven, Waits};
-    use crate::services::claude_tui::readiness::WaitCause;
+    use crate::services::claude_tui::host_input::InputRefusal::{Unknown, Unproven};
     // `None` is admitted; a refusal names what the budget's end saw; a running screen over
     // unchanged idle bytes ends Unproven, as a wait whose transcript never moved reads no screen.
     let cases = [
@@ -559,7 +559,7 @@ fn a_pane_that_outlived_the_restart_takes_one_input_only_on_an_idle_screen() {
                 &format!("{mcp}\nDo you want to proceed?\n❯ 1. Yes\nEnter to confirm"),
                 "",
             ),
-            Some(Waits(WaitCause::Modal)),
+            Some(Unknown),
         ),
         (
             "MCP banner + hook running",
@@ -694,21 +694,28 @@ fn a_held_first_input_names_its_wait_and_a_lost_older_source_settles() {
             true,
             true,
             dialog.to_string(),
-            Waits(WaitCause::Modal),
+            Some(Waits(WaitCause::Modal)),
+        ),
+        (
+            "an answer naming Esc to cancel over an empty composer",
+            true,
+            true,
+            pane("Press \u{1b}[1mEsc\u{1b}[0m to cancel the operation.", ""),
+            None,
         ),
         (
             "older launch lost its source",
             true,
             false,
             pane("✻ Baked for 2s", ""),
-            Unproven(readiness::Unproven::Retained),
+            Some(Unproven(readiness::Unproven::Retained)),
         ),
         (
             "this run's launch has no source yet",
             false,
             false,
             pane("✻ Baked for 2s", ""),
-            Waits(WaitCause::NoSource),
+            Some(Waits(WaitCause::NoSource)),
         ),
     ];
     for (name, older, bound, screen, refused) in cases {
@@ -791,6 +798,12 @@ fn a_held_first_input_names_its_wait_and_a_lost_older_source_settles() {
         READY_WAIT_FOR_TESTS.with(|wait| wait.set(Some(Duration::from_millis(600))));
         let result = run_ready(&logical, &path, &target, &plan, None);
         READY_WAIT_FOR_TESTS.with(|wait| wait.set(None));
+        let Some(refused) = refused else {
+            assert_eq!(result, InputRun::Applied, "{name}");
+            assert_eq!(rig.sends().len(), 2, "{name}: one paste and one Enter");
+            tui_prompt_dedupe::clear_tmux_runtime_binding(&logical);
+            continue;
+        };
         assert_eq!(result, InputRun::Refused(refused), "{name}");
         assert!(rig.sends().is_empty(), "{name}: no key");
         // The hold detail names the cause the operator log never could.
