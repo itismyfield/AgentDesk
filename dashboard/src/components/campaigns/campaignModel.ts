@@ -3,13 +3,6 @@ import type { RawEdgeKey } from "./campaignGraphRouting";
 
 export const NODE_STATUSES: CampaignNodeStatus[] = ["pending", "running", "blocked", "completed", "failed", "skipped"];
 
-export interface CampaignFilters {
-  query: string;
-  status: CampaignNodeStatus | "all";
-  group: string | null;
-  hideCompleted: boolean;
-}
-export const EMPTY_FILTERS: CampaignFilters = { query: "", status: "all", group: null, hideCompleted: false };
 export function campaignGroup(node: CampaignNode): string { return node.group || ""; }
 export function campaignIssueNumber(node: CampaignNode): string | null {
   const safe = safeCampaignLink(node.issue_url);
@@ -29,13 +22,6 @@ export function campaignTaskTitle(node: CampaignNode): string {
   return stripped || node.title;
 }
 export function campaignIssueLabel(node: CampaignNode): string { return campaignTaskNumber(node) ?? node.id; }
-export function filterCampaignNodes(nodes: CampaignNode[], filters: CampaignFilters): CampaignNode[] {
-  const query = filters.query.trim().toLocaleLowerCase();
-  return nodes.filter((node) => (!filters.hideCompleted || node.status !== "completed")
-    && (filters.status === "all" || node.status === filters.status)
-    && (filters.group === null || campaignGroup(node) === filters.group)
-    && (!query || [node.id, campaignIssueLabel(node), node.title, node.summary, node.stage, node.group, node.assignee, node.session_id].some((value) => value?.toLocaleLowerCase().includes(query))));
-}
 export function groupCampaignNodes(nodes: CampaignNode[]) {
   const groups = new Map<string, CampaignNode[]>();
   for (const node of nodes) {
@@ -114,17 +100,4 @@ export function campaignStageStep(stage: string): { index: number; raw: string }
 /** A session is mid-turn on the node's issue card right now (the server checks its heartbeat). */
 export function liveIsWorking(live: CampaignNodeLive | undefined): boolean {
   return live?.running === true;
-}
-
-/** Running then blocked work leads the first screen; every other status is only counted.
- * Live work makes an open node count as running; a completed or skipped node stays where the ledger put it. */
-export function campaignGlance(nodes: CampaignNode[], live: Record<string, CampaignNodeLive> = {}) {
-  const running = nodes.filter((node) => node.status === "running"
-    || (node.status !== "completed" && node.status !== "skipped" && liveIsWorking(live[node.id])));
-  const runningIds = new Set(running.map((node) => node.id));
-  const blocked = nodes.filter((node) => node.status === "blocked" && !runningIds.has(node.id));
-  const buckets = (["pending", "completed", "skipped", "failed"] as const)
-    .map((status) => ({ status, nodes: nodes.filter((node) => node.status === status && !runningIds.has(node.id)) }))
-    .filter((bucket) => bucket.nodes.length > 0);
-  return { active: [...running, ...blocked], running: running.length, blocked: blocked.length, buckets };
 }

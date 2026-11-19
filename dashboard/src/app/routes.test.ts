@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PRIMARY_ROUTES, findRouteByPath } from "./routes";
+import { LEGACY_ROUTE_REDIRECTS, PRIMARY_ROUTES, findRouteByPath } from "./routes";
 import { MOBILE_PRIMARY_ROUTE_IDS } from "./shellNavigationConfig";
 
 describe("v3 route contract", () => {
@@ -11,9 +11,11 @@ describe("v3 route contract", () => {
     });
   });
 
-  it("keeps ops and its alias reachable by URL", () => {
-    expect(findRouteByPath("/ops")?.id).toBe("ops");
-    expect(findRouteByPath("/control")?.id).toBe("ops");
+  it("sends ops bookmarks to the settings connections category", () => {
+    expect(findRouteByPath("/ops")).toBeNull();
+    for (const path of ["/ops", "/control"]) {
+      expect(LEGACY_ROUTE_REDIRECTS.find((redirect) => redirect.path === path)?.to).toBe("/settings?category=connections");
+    }
     expect(findRouteByPath("/audit/")?.id).toBe("audit");
   });
 });

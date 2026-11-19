@@ -160,7 +160,7 @@ export default function AppShell({
     setShowNotificationPanel(false);
     setShowTweaksPanel(false);
     setShowMobileMoreMenu(false);
-  }, [location.pathname]);
+  }, [location.key]);
 
   useEffect(() => {
     if (!isMobileViewport) {
@@ -176,12 +176,13 @@ export default function AppShell({
 
   const persistSettingsPatch = useCallback(
     async (patch: Record<string, unknown>) => {
-      const mergedSettings = { ...settings, ...patch } as CompanySettings;
-      await api.saveSettings(mergedSettings);
+      // The PUT replaces the stored document; re-read it so another tab's saved fields are not reverted.
+      const latest = await api.getSettings();
+      await api.saveSettings({ ...latest, ...patch } as CompanySettings);
       const refreshed = await api.getSettings();
       setSettings({ ...DEFAULT_SETTINGS, ...refreshed } as CompanySettings);
     },
-    [setSettings, settings],
+    [setSettings],
   );
 
   const navigateToRoute = useCallback(

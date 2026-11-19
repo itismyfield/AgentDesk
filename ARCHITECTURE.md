@@ -413,7 +413,6 @@ src/
 │   ├── dispatch_query.rs
 │   ├── dispatch_snapshot_tests.rs
 │   ├── dispatch_status.rs
-│   ├── dispatch_summary.rs
 │   ├── fresh_worktree_pg_tests.rs
 │   ├── mod.rs
 │   ├── test_support.rs
@@ -481,7 +480,9 @@ src/
 │   ├── cluster_policy.rs
 │   ├── conversation.rs
 │   ├── dispatch_route.rs
+│   ├── dispatch_summary.rs
 │   ├── file_sync.rs
+│   ├── fix_safety.rs
 │   ├── host_observation.rs
 │   ├── human_input.rs
 │   ├── intake_consent.rs
@@ -625,6 +626,8 @@ src/
 │   │   │   ├── legacy_origin_tests.rs
 │   │   │   ├── origin_admission.rs
 │   │   │   └── pg_tests.rs
+│   │   ├── agents_turn_target/
+│   │   │   └── thread.rs
 │   │   ├── auth/
 │   │   │   ├── tailnet_peer.rs
 │   │   │   └── tailnet_peer_tests.rs
@@ -1851,6 +1854,7 @@ src/
 │   │   │   ├── stall_verdict.rs
 │   │   │   ├── tail_evidence.rs
 │   │   │   ├── test_support.rs
+│   │   │   ├── thread_turn.rs
 │   │   │   ├── tmux_preflight.rs
 │   │   │   ├── transcript_binding_stall.rs
 │   │   │   ├── turn_deliver.rs
@@ -2538,6 +2542,8 @@ src/
 │   │   │   │   │   └── clear_execute_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests/
 │   │   │   │   │   └── restart_resume_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_http_start_tests/
+│   │   │   │   │   └── thread_ingress_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests/
 │   │   │   │   │   └── clear_execute_tests.rs
 │   │   │   │   ├── provider_isolation/
@@ -3851,6 +3857,8 @@ src/
 │   ├── manual_steer/
 │   │   ├── action_handle.rs
 │   │   ├── admission_intent.rs
+│   │   ├── fixed_str.rs
+│   │   ├── handle_value.rs
 │   │   ├── operation.rs
 │   │   └── record.rs
 │   ├── mcp_config/
@@ -5099,6 +5107,7 @@ src/
 │   ├── api.rs
 │   ├── async_bridge.rs
 │   ├── auth.rs
+│   ├── bridge_deadline.rs
 │   ├── dag.rs
 │   ├── discord.rs
 │   ├── env_flag.rs

@@ -14,7 +14,6 @@ export const STORAGE_KEYS = {
   dashboardBottleneckThresholds: "agentdesk:dashboard:bottleneck-thresholds",
   dashboardActiveTab: "agentdesk.dashboard.active-tab",
   dashboardActiveCampaign: "agentdesk.dashboard.active-campaign",
-  settingsPanel: "agentdesk.settings.active-panel",
   settingsPipelineRepoCache: "agentdesk.settings.pipeline.repo-cache.v1",
   settingsPipelineAgentCache: "agentdesk.settings.pipeline.agent-cache.v1",
   settingsPipelineVisualCache: "agentdesk.settings.pipeline.visual-cache.v1",

@@ -80,8 +80,8 @@ pub(in crate::services::discord) struct DiscordMockState {
     /// Messages a single-message `GET` answers until deleted; any other id stays unhandled.
     seeded: Arc<Mutex<std::collections::HashMap<u64, String>>>,
     extra_channels: Arc<Mutex<std::collections::HashSet<u64>>>,
-    /// Guild threads the mock answers for, by thread id, with their parent channel.
-    threads: Arc<Mutex<std::collections::HashMap<u64, u64>>>,
+    /// Guild threads by id, with their parent channel and wire kind.
+    threads: Arc<Mutex<std::collections::HashMap<u64, (u64, u8)>>>,
     /// Guild text channels a channel `GET` names, by channel id.
     named: Arc<Mutex<std::collections::HashMap<u64, String>>>,
     /// Channels whose `GET` fails, and how many such `GET`s failed.
@@ -222,7 +222,14 @@ impl DiscordMockState {
 
     /// Answers `thread` as a guild thread under `parent`.
     pub(in crate::services::discord) fn add_thread(&self, thread: u64, parent: u64) {
-        self.threads.lock().expect("threads").insert(thread, parent);
+        self.add_thread_kind(thread, parent, 11);
+    }
+
+    pub(in crate::services::discord) fn add_thread_kind(&self, thread: u64, parent: u64, kind: u8) {
+        self.threads
+            .lock()
+            .expect("threads")
+            .insert(thread, (parent, kind));
         self.allow_channel(thread);
     }
 
@@ -281,10 +288,10 @@ fn private_channel_json() -> Value {
     })
 }
 
-fn thread_channel_json(id: u64, parent: u64) -> Value {
+fn thread_channel_json(id: u64, parent: u64, kind: u8) -> Value {
     json!({
         "id": id.to_string(),
-        "type": 11,
+        "type": kind,
         "guild_id": "940487400000009",
         "parent_id": parent.to_string(),
         "name": "busy-thread"
@@ -503,8 +510,8 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
         && route_channel.is_some_and(|id| path == format!("/api/v10/channels/{id}"))
     {
         let id = route_channel.unwrap();
-        if let Some(parent) = state.threads.lock().expect("threads").get(&id).copied() {
-            return Json(thread_channel_json(id, parent)).into_response();
+        if let Some((parent, kind)) = state.threads.lock().expect("threads").get(&id).copied() {
+            return Json(thread_channel_json(id, parent, kind)).into_response();
         }
         let mut channel = private_channel_json();
         channel["id"] = json!(id.to_string());

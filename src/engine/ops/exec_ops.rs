@@ -55,7 +55,7 @@ fn resolve_exec_timeout_ms(timeout_ms: Option<u64>) -> u64 {
 /// should surface this to JS as an error string so the policy can decide
 /// how to recover.
 fn clamp_exec_timeout_to_bridge_deadline(timeout_ms: u64) -> Result<u64, String> {
-    match crate::engine::loader::bridge_op_deadline_remaining() {
+    match crate::utils::bridge_deadline::remaining() {
         None => Ok(timeout_ms),
         Some(remaining) if remaining.is_zero() => {
             Err("bridge deadline passed before exec started".to_string())
@@ -71,7 +71,7 @@ fn clamp_exec_timeout_to_bridge_deadline(timeout_ms: u64) -> Result<u64, String>
 }
 
 fn bridge_tmux_timeout_for_session_op(op_name: &str) -> Result<Option<Duration>, String> {
-    match crate::engine::loader::bridge_op_deadline_remaining() {
+    match crate::utils::bridge_deadline::remaining() {
         None => Ok(None),
         Some(remaining) if remaining.is_zero() => {
             Err(format!("bridge deadline passed before {op_name} started"))
@@ -141,7 +141,7 @@ fn register_session_liveness_op<'js>(
     session.set(
         "hasLivePane",
         Function::new(ctx.clone(), move |name: String| -> &'static str {
-            let budget = crate::engine::loader::bridge_op_deadline_remaining()
+            let budget = crate::utils::bridge_deadline::remaining()
                 .unwrap_or(Duration::from_secs(2))
                 .min(Duration::from_secs(2));
             if name.trim().is_empty() || budget.is_zero() {
@@ -773,7 +773,7 @@ mod inflight_list_tests {
 #[cfg(test)]
 mod bridge_deadline_tests {
     use super::*;
-    use crate::engine::loader::ScopedBridgeDeadline;
+    use crate::utils::bridge_deadline::ScopedBridgeDeadline;
     use std::time::Duration;
 
     /// #2378: with no deadline armed, the clamp must return the requested

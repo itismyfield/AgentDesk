@@ -3,23 +3,21 @@
 use sqlx::PgPool;
 
 use super::{
-    HealthRegistry, HumanInputRequest, RouteResponse, delivery_response, observed_execution,
-    preflight_human_input,
+    HealthRegistry, HumanInputRequest, RouteResponse, ThreadTurnRuntime, delivery_response,
+    observed_execution,
 };
 use crate::services::imsg_reply::{AdmissionInput, admission};
 
 pub(super) async fn deliver(
     pool: &PgPool,
-    registry: &HealthRegistry,
+    (registry, thread): (&HealthRegistry, Option<&ThreadTurnRuntime>),
     input: &AdmissionInput<'_>,
     request: HumanInputRequest,
     line: Option<&str>,
 ) -> RouteResponse {
     let channel = request.channel_id;
     let identity = format!("guid:{}", input.origin_id);
-    if let Err(error) =
-        preflight_human_input(registry, channel, &request.provider, input.author_id).await
-    {
+    if let Err(error) = super::preflight_delivery(registry, thread, &request).await {
         super::super::imessage_input_notice::not_echoed(
             line,
             channel.get(),
@@ -34,7 +32,10 @@ pub(super) async fn deliver(
     }
     #[cfg(all(test, unix))]
     super::super::imessage_input_notice_tests::before_legacy_prepare().await;
-    let prepared = match registry.prepare_external_human_input(request, None).await {
+    let prepared = match registry
+        .prepare_external_human_input_on(request, None, thread)
+        .await
+    {
         Ok(prepared) => prepared,
         Err(error) => {
             // A concurrent winner still owns its response if readiness changed during preparation.

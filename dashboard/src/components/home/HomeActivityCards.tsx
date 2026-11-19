@@ -115,7 +115,8 @@ export function HomeRoutinesCard({ tr, isKo, className }: { tr: Tr; isKo: boolea
 }
 
 const LEVEL_COLOR = { normal: "var(--accent)", warning: "var(--warn)", danger: "var(--err)" } as const;
-const AUTO_PAUSE_SETTINGS = "/settings?settingsPanel=workflow";
+// The auto-run pause settings sit in the settings catalog's usage category.
+const AUTO_PAUSE_SETTINGS = "/settings?category=usage";
 
 /** Account limits from the limit tracker as bars, when they were measured, and the auto-run pause rule. */
 export function HomeUsageCard({ tr, isKo, className }: { tr: Tr; isKo: boolean; className?: string }) {
