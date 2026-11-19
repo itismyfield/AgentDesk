@@ -3,8 +3,8 @@ import type { ReactNode } from "react";
 import { EmptyState } from "../../kit/free/empty-state-clean";
 import { Switch } from "../../kit/free/switch-clean";
 import type { SettingsCategory } from "./SettingsCopy";
-import { baselineText, formatSettingValue, withRo, type CatalogItem, type CategoryFilter } from "./SettingsModel";
-import { ItemChip, ItemFacts, ItemHeading, InlineControl, RelatedSettings, currentValue, editableItem } from "./SettingsPanels";
+import { baselineText, type CatalogItem, type CategoryFilter } from "./SettingsModel";
+import { ItemChip, ItemFacts, ItemHeading, InlineControl, RelatedSettings, currentValue, editableItem, resetLabel } from "./SettingsPanels";
 import { SETTINGS_CARD_CLASS, SettingsAction, SettingsSkeletonRows } from "./SettingsPrimitives";
 
 type Tr = (ko: string, en: string) => string;
@@ -17,6 +17,8 @@ export interface CatalogGroup {
 
 interface CatalogActions {
   onSelect: (key: string) => void;
+  /** Opens a "함께 보는 설정" target even when the search, a filter or the category hides it. */
+  onRelated: (key: string) => void;
   onChange: (item: CatalogItem, value: string) => void;
   onReset: (item: CatalogItem) => void;
   problemFor: (key: string) => string | null;
@@ -42,9 +44,9 @@ interface SettingsDesktopCatalogProps extends CatalogActions {
   blocks: ReactNode;
 }
 
-/** Whether a row can go back to its default from here. */
+/** Whether a row can go back to its default (or to inheriting) from here. */
 export function resettable(item: CatalogItem): boolean {
-  return editableItem(item) && item.baseline !== null && currentValue(item) !== item.baseline;
+  return editableItem(item) && item.resetTo != null && currentValue(item) !== item.resetTo;
 }
 
 /** Desktop catalog: categories and filters, the grouped list with the pending bar, and the selected row's details. */
@@ -131,7 +133,7 @@ function CatalogRow({ item, selected, onSelect, onChange, problemFor, tr }: Cata
       data-selected={selected || undefined}
       onClick={() => onSelect(item.key)}
       onFocusCapture={() => onSelect(item.key)}
-      className={`flex min-h-[60px] min-w-0 items-center gap-3 px-4 py-2.5 ${selected ? "bg-[color-mix(in_oklab,var(--accent)_8%,transparent)] shadow-[inset_2px_0_0_var(--accent)]" : ""}`}
+      className={`flex min-h-[60px] min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-2.5 ${selected ? "bg-[color-mix(in_oklab,var(--accent)_8%,transparent)] shadow-[inset_2px_0_0_var(--accent)]" : ""}`}
     >
       <button type="button" aria-current={selected ? "true" : undefined} className="min-w-0 flex-1 text-left" onClick={() => onSelect(item.key)}>
         <span className="block text-[13px] leading-5 font-medium break-keep text-th-text-primary">{item.label}</span>
@@ -140,13 +142,16 @@ function CatalogRow({ item, selected, onSelect, onChange, problemFor, tr }: Cata
       <div className="flex shrink-0 justify-end">
         <InlineControl item={item} label={item.label} invalid={Boolean(problemFor(item.key))} onChange={(value) => onChange(item, value)} tr={tr} />
       </div>
-      <span className="hidden w-28 shrink-0 text-xs leading-4 text-th-text-muted break-keep @min-[34rem]:block">{baselineText(item, tr)}</span>
-      <span className="flex w-[76px] shrink-0 justify-center"><ItemChip item={item} tr={tr} /></span>
+      {/* A narrow list moves the default and chips to a second line instead of hiding them. */}
+      <div className="flex w-full min-w-0 items-center gap-2 @min-[34rem]:w-auto" data-testid={`setting-meta-${item.key}`}>
+        <span className="min-w-0 flex-1 text-xs leading-4 text-th-text-muted break-keep @min-[34rem]:w-28 @min-[34rem]:flex-none">{baselineText(item, tr)}</span>
+        <span className="flex shrink-0 flex-wrap justify-end gap-1 @min-[34rem]:w-[84px] @min-[34rem]:flex-col @min-[34rem]:items-center"><ItemChip item={item} tr={tr} all /></span>
+      </div>
     </div>
   );
 }
 
-function Inspector({ item, heading = false, onSelect, onReset, problemFor, allItems, categoryLabel, tr }: CatalogActions & { item: CatalogItem; heading?: boolean }) {
+function Inspector({ item, heading = false, onRelated, onReset, problemFor, allItems, categoryLabel, tr }: CatalogActions & { item: CatalogItem; heading?: boolean }) {
   return (
     <div className="flex min-w-0 flex-col">
       {heading ? <div className="p-4"><ItemHeading item={item} category={categoryLabel(item.category)} /></div> : null}
@@ -155,13 +160,13 @@ function Inspector({ item, heading = false, onSelect, onReset, problemFor, allIt
         <ItemFacts item={item} problem={problemFor(item.key)} tr={tr} />
         {resettable(item) ? (
           <SettingsAction icon={<RotateCcw />} className="self-start" onClick={() => onReset(item)}>
-            {tr(`기본값 ${withRo(formatSettingValue(item.baseline ?? "", item, tr))} 되돌리기`, `Reset to default (${formatSettingValue(item.baseline ?? "", item, tr)})`)}
+            {resetLabel(item, tr)}
           </SettingsAction>
         ) : null}
       </div>
       {item.related.length > 0 ? (
         <div className="border-t border-[var(--line-soft)] p-4">
-          <RelatedSettings item={item} items={allItems} onSelect={onSelect} tr={tr} />
+          <RelatedSettings item={item} items={allItems} onSelect={onRelated} tr={tr} />
         </div>
       ) : null}
     </div>

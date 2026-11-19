@@ -34,6 +34,8 @@ export interface SettingKeyMeta {
   min?: number;
   max?: number;
   related?: RelatedSetting[];
+  /** Saving "" makes the server read this other key instead. */
+  inherits?: string;
 }
 
 // Category and description per known key until the server sends its own meta (#8249). Each description restates
@@ -104,11 +106,12 @@ const SETTING_KEY_META: Record<string, SettingKeyMeta> = {
     descKo: "Claude 대화에 쓰는 압축 기준이에요. 비워 두면 공통 값을 따르고 0이면 자동 압축을 꺼요.",
     descEn: "Compaction threshold for Claude conversations. Empty follows the shared value; 0 turns auto compaction off.",
     related: [{ key: "context_compact_percent" }, { key: "context_compact_lower_bound_tokens" }],
+    inherits: "context_compact_percent",
   },
   context_compact_lower_bound_tokens: {
     category: "context", input: "number", min: 0,
-    descKo: "Claude는 비율로 낸 압축 기준이 이 토큰 수보다 작으면 이 값을 기준으로 써요.",
-    descEn: "Claude never sets its compaction point below this many tokens.",
+    descKo: "Claude는 비율로 낸 압축 기준이 이 토큰 수보다 작으면 이 값을 써요. 그래도 창 크기에서 6만 4천 토큰을 뺀 안전 상한은 넘지 않아요. 20만 토큰 창이면 이 값이 30만이어도 13만 6천 토큰에서 압축해요.",
+    descEn: "Claude uses this many tokens when its percentage lands lower, but never above the window minus a 64K safety reserve. A 200K window compacts at 136K even with a 300K floor.",
   },
   rateLimitWarningPct: {
     category: "usage", labelKo: "사용량 주의 표시 (%)", labelEn: "Usage warning at (%)", input: "number", min: 50, max: 99,
@@ -147,6 +150,11 @@ const SETTING_KEY_META: Record<string, SettingKeyMeta> = {
     category: "system", labelKo: "언어", labelEn: "Language",
     descKo: "대시보드 화면에 쓰는 언어예요. 저장하면 바로 바뀌어요.",
     descEn: "Language of the dashboard. Changes as soon as you save.",
+  },
+  theme: {
+    category: "system", labelKo: "기본 테마", labelEn: "Default theme",
+    descKo: "테마를 고른 적 없는 브라우저가 처음 쓰는 테마예요. 저장하면 이 브라우저에도 바로 적용돼요.",
+    descEn: "Theme a browser uses until it picks its own. Saving also applies it here right away.",
   },
   server_port: {
     category: "system",

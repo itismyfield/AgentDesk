@@ -1,10 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { getSettingsChannelName } from "../../api/settingsRuntime";
-import { SegmentedControl } from "../../kit/free/segmented-control-clean";
+import { RefreshCw } from "lucide-react";
+import { Select } from "../../kit/free/select-clean";
 import { Switch } from "../../kit/free/switch-clean";
-import { applyChip, applyText, defaultText, formatSettingValue, type CatalogItem, type StatusTone } from "./SettingsModel";
-import { SETTINGS_TRAY_CLASS, SettingsBadge, SettingsTextField } from "./SettingsPrimitives";
+import { FreshnessIndicator } from "../common/FreshnessIndicator";
+import { STALE_AFTER_MS } from "../OpsPageModel";
+import { applyChip, applyText, defaultText, formatSettingValue, withRo, type CatalogItem, type StatusTone } from "./SettingsModel";
+import { SETTINGS_TRAY_CLASS, SettingsAction, SettingsBadge, SettingsTextField } from "./SettingsPrimitives";
 
 // Pieces shared by the desktop catalog and the phone sheet: the row control, its chip and the detail lists.
 
@@ -14,13 +17,16 @@ const DISCORD_ID_PATTERN = /^\d{17,20}$/;
 
 export const editableItem = (item: CatalogItem) => ["toggle", "number", "text", "choice"].includes(item.input);
 
-/** Option picker for "choice" rows. The kit control sizes to its container, so the slot sets the width. */
+/** Option picker for "choice" rows: four languages do not fit a row as segments, so rows and the sheet use the kit Select. */
 export function ChoiceControl({ item, value, label, size, className, onChange }: { item: CatalogItem; value: string; label: string; size: "sm" | "lg"; className: string; onChange: (value: string) => void }) {
-  return (
-    <div className={className}>
-      <SegmentedControl variant="tray" fullWidth size={size} aria-label={label} value={value} onChange={onChange} options={item.options ?? []} />
-    </div>
-  );
+  return <Select aria-label={label} size={size} className={className} value={value} onChange={onChange} options={item.options ?? []} />;
+}
+
+/** "기본값 3으로 되돌리기" (short: "기본값 3"), or the inherit wording when reset stores "". */
+export function resetLabel(item: CatalogItem, tr: Tr, short = false): string {
+  if (item.resetTo === "") return short ? tr("공통 값 따르기", "Use shared value") : tr("공통 값을 따르게 되돌리기", "Follow the shared value again");
+  const value = formatSettingValue(item.resetTo ?? "", item, tr);
+  return short ? tr(`기본값 ${value}`, `Default ${value}`) : tr(`기본값 ${withRo(value)} 되돌리기`, `Reset to default (${value})`);
 }
 
 /** The value the page currently holds for a row: its draft, else the stored value. */
@@ -32,12 +38,15 @@ const TONE_TEXT: Record<StatusTone, string> = {
   unknown: "text-th-text-muted",
 };
 
-/** Right-hand chip: an unsaved change, an override, or how the value applies. Status rows show none. */
-export function ItemChip({ item, tr }: { item: CatalogItem; tr: Tr }) {
-  if (item.draft !== null) return <SettingsBadge tone="warn">{tr("바뀜", "Changed")}</SettingsBadge>;
-  if (item.overridden) return <SettingsBadge tone="accent">{tr("덮어씀", "Overridden")}</SettingsBadge>;
+/** Chips for an unsaved change, an override and how the value applies; the phone row keeps only the first. */
+export function ItemChip({ item, tr, all = false }: { item: CatalogItem; tr: Tr; all?: boolean }) {
   const apply = applyChip(item, tr);
-  return apply ? <SettingsBadge>{apply}</SettingsBadge> : null;
+  const chips = [
+    item.draft !== null ? <SettingsBadge key="draft" tone="warn">{tr("바뀜", "Changed")}</SettingsBadge> : null,
+    item.overridden ? <SettingsBadge key="override" tone="accent">{tr("덮어씀", "Overridden")}</SettingsBadge> : null,
+    apply ? <SettingsBadge key="apply">{apply}</SettingsBadge> : null,
+  ].filter(Boolean);
+  return <>{all ? chips : chips.slice(0, 1)}</>;
 }
 
 /** Plain value for read-only and status rows; status rows get their tone dot. */
@@ -87,11 +96,12 @@ export function InlineControl({ item, label, invalid, onChange, tr }: InlineCont
   return <ItemValue item={item} tr={tr} />;
 }
 
-function FactRow({ label, children }: { label: string; children: ReactNode }) {
+function FactRow({ label, note, children }: { label: string; note?: string; children: ReactNode }) {
   return (
-    <div className="flex min-w-0 items-baseline justify-between gap-4 text-[13px] leading-5">
+    <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-4 text-[13px] leading-5">
       <dt className="shrink-0 text-th-text-muted">{label}</dt>
       <dd className="m-0 min-w-0 text-right tabular-nums text-th-text-primary [overflow-wrap:anywhere]">{children}</dd>
+      {note ? <dd className="m-0 basis-full text-right text-xs text-th-text-muted">{note}</dd> : null}
     </div>
   );
 }
@@ -126,7 +136,7 @@ export function ItemFacts({ item, pending = item.draft, problem, tr }: ItemFacts
   return (
     <div className="flex min-w-0 flex-col gap-3" data-testid={`settings-facts-${item.key}`}>
       <dl className="m-0 flex min-w-0 flex-col gap-1.5">
-        {item.source === "status" ? item.status?.facts.map(([label, value]) => <FactRow key={label} label={label}>{value}</FactRow>) : (
+        {item.source === "status" ? item.status?.facts.map(([label, value, note]) => <FactRow key={label} label={label} note={note}>{value}</FactRow>) : (
           <>
             <FactRow label={tr("저장된 값", "Saved")}>{formatSettingValue(item.saved, item, tr)}</FactRow>
             {pending !== null && pending !== item.saved ? (
@@ -143,13 +153,31 @@ export function ItemFacts({ item, pending = item.draft, problem, tr }: ItemFacts
         ) : null}
       </dl>
       {problem ? <p role="alert" className="m-0 text-xs leading-5 text-[var(--err)]">{problem}</p> : null}
+      {item.status?.updatedAt || item.status?.refresh ? (
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+          {item.status.updatedAt ? (
+            <FreshnessIndicator timestamp={item.status.updatedAt} label={tr("업데이트", "Updated")} staleAfterSeconds={STALE_AFTER_MS / 1000} criticalAfterSeconds={(STALE_AFTER_MS * 3) / 1000} />
+          ) : <span />}
+          {item.status.refresh ? (
+            <SettingsAction icon={<RefreshCw />} disabled={item.status.refresh.busy} onClick={item.status.refresh.run}>{tr("다시 확인", "Check again")}</SettingsAction>
+          ) : null}
+        </div>
+      ) : null}
+      {item.status?.failed ? (
+        <p role="alert" className="m-0 text-xs leading-5 text-[var(--th-badge-amber-text)]">
+          {tr("최근 확인이 실패해서 마지막으로 받은 값을 보여 줘요.", "The latest check failed. Showing the last values received.")}
+        </p>
+      ) : null}
       {item.status?.notes?.length ? (
         <ul className="m-0 flex list-none flex-col gap-2 p-0" data-testid="settings-status-notes">
           {item.status.notes.map((note, index, notes) => (
             <li key={`${note.tooltip}-${note.title}`} className="flex min-w-0 gap-2 text-[13px] leading-5">
               <span aria-hidden className={`mt-1.5 size-2 shrink-0 rounded-full ${note.tone === "danger" ? "bg-[var(--err)]" : "bg-[var(--warn)]"}`} />
-              <span className="min-w-0">
-                <span className="block text-th-text-primary" title={note.tooltip}>{note.title}</span>
+              <span className="min-w-0 flex-1">
+                <span className="flex justify-between gap-3">
+                  <span className="text-th-text-primary" title={note.tooltip}>{note.title}</span>
+                  {note.count !== undefined ? <span className="shrink-0 tabular-nums text-th-text-secondary">{note.count.toLocaleString()}</span> : null}
+                </span>
                 {/* Server-reported reasons share one explanation; say it once. */}
                 {note.detail !== notes[index - 1]?.detail ? <span className="block text-xs text-th-text-muted">{note.detail}</span> : null}
               </span>

@@ -54,9 +54,14 @@ export type StatusTone = "ok" | "warn" | "unknown";
 /** Read-only detail for a connection or status row: facts, server signals and setup steps. */
 export interface StatusDetail {
   tone: StatusTone;
-  facts: Array<[string, string]>;
-  notes?: Array<{ title: string; detail: string; tone: "warn" | "danger"; tooltip?: string }>;
+  /** Label, value and an optional note such as "진행 중 3 · 마무리 중 1". */
+  facts: Array<[string, string, string?]>;
+  notes?: Array<{ title: string; detail: string; tone: "warn" | "danger"; tooltip?: string; count?: number }>;
   steps?: { lines: string[]; translated: boolean };
+  /** Last successful fetch; failed means the newest fetch failed and the facts are from then. */
+  updatedAt?: number;
+  failed?: boolean;
+  refresh?: { run: () => void; busy: boolean };
 }
 
 /** One row of the settings catalog: /api/settings/config, /api/settings/runtime-config, /api/settings ("app") or a status source. */
@@ -75,6 +80,9 @@ export interface CatalogItem {
   draft: string | null;
   baseline: string | null;
   baselineSource: string | null;
+  /** Value "되돌리기" writes: the baseline, or "" for a key that then inherits another. */
+  resetTo?: string | null;
+  inherits?: boolean;
   overridden: boolean;
   restartNeeded: boolean;
   /** Server restart_behavior, or "config-file" for a config-file value that reloads live. */
@@ -101,6 +109,7 @@ export const SETTINGS_CATEGORY_QUERY_KEY = "category";
 const LEGACY_PANEL_CATEGORY: Record<string, SettingsCategory> = {
   workflow: "workflow", pipeline: "workflow", runtime: "workflow", ai: "usage", providers: "usage",
   connections: "connections", connectors: "connections", onboarding: "connections", machine: "system",
+  general: "system", voice: "system",
 };
 
 export function resolveCategory(params: URLSearchParams): CategoryFilter {
@@ -118,6 +127,10 @@ export function configItems(entries: ConfigEntry[], edits: Record<string, Config
   return entries.filter((entry) => !HIDDEN_SETTING_KEYS.has(entry.key)).map((entry) => {
     const meta = settingKeyMeta(entry.key);
     const readOnly = entry.editable === false;
+    const saved = entry.value ?? "";
+    const baseline = entry.baseline ?? entry.default ?? null;
+    // A stored "" on an inheriting key means "follow the shared value", which the server still flags as an override.
+    const inherits = Boolean(meta?.inherits);
     return {
       key: entry.key,
       source: "config",
@@ -125,11 +138,13 @@ export function configItems(entries: ConfigEntry[], edits: Record<string, Config
       label: (isKo ? entry.label_ko : entry.label_en) || entry.key,
       description: describe(entry.key, isKo),
       input: readOnly ? "readonly" : meta?.input ?? "text",
-      saved: entry.value ?? "",
+      saved,
       draft: entry.key in edits ? String(edits[entry.key]) : null,
-      baseline: entry.baseline ?? entry.default ?? null,
+      baseline,
       baselineSource: entry.baseline_source ?? null,
-      overridden: Boolean(entry.override_active),
+      resetTo: baseline ?? (inherits && entry.override_active && saved !== "" ? "" : null),
+      inherits,
+      overridden: Boolean(entry.override_active) && !(inherits && saved === ""),
       restartNeeded: entry.restart_behavior === "config-only",
       applies: entry.restart_behavior ?? "persist-live-override",
       min: meta?.min,
@@ -167,7 +182,9 @@ export function runtimeItems(runtime: RuntimeSnapshot, resetOnRestart: boolean, 
       saved,
       draft: runtime.changedKeys.has(key) ? asText(runtime.draft[key]) : null,
       baseline,
-      baselineSource: null,
+      // The API merges code and YAML defaults into one map, so the source is only "the server's default".
+      baselineSource: "server-default",
+      resetTo: baseline,
       overridden: baseline !== null && saved !== baseline,
       restartNeeded: false,
       applies: resetOnRestart ? "reset-to-baseline" : "persist-live-override",
@@ -179,30 +196,35 @@ export function runtimeItems(runtime: RuntimeSnapshot, resetOnRestart: boolean, 
   });
 }
 
-const LANGUAGE_NAMES: Record<string, string> = { ko: "한국어", en: "English", ja: "日本語", zh: "中文" };
-
-/** Dashboard language from /api/settings. Only Korean and English have copy; another saved value still shows. */
-export function languageItem(saved: string, draft: string | null, isKo: boolean): CatalogItem {
-  const values = saved === "ja" || saved === "zh" ? ["ko", "en", saved] : ["ko", "en"];
-  return {
-    key: "language",
-    source: "app",
-    category: "system",
-    label: isKo ? "언어" : "Language",
-    description: describe("language", isKo),
-    input: "choice",
-    options: values.map((value) => ({ value, label: LANGUAGE_NAMES[value] })),
-    saved,
-    draft,
-    // DEFAULT_SETTINGS fills a language the server has not stored.
-    baseline: "ko",
-    baselineSource: "hardcoded",
-    overridden: saved !== "ko",
-    restartNeeded: false,
-    applies: "persist-live-override",
-    related: [],
-    dangerous: false,
+/** Language and default theme from /api/settings; DEFAULT_SETTINGS fills what the server has not stored. */
+export function appItems(saved: { language: string; theme: string }, drafts: Record<string, string>, isKo: boolean): CatalogItem[] {
+  const choices: Record<"language" | "theme", { baseline: string; options: Array<[string, string, string]> }> = {
+    language: { baseline: "ko", options: [["ko", "한국어", "한국어"], ["en", "English", "English"], ["ja", "日本語", "日本語"], ["zh", "中文", "中文"]] },
+    theme: { baseline: "dark", options: [["dark", "어둡게", "Dark"], ["light", "밝게", "Light"], ["auto", "시스템 설정 따르기", "Match system"]] },
   };
+  return (["language", "theme"] as const).map((key) => {
+    const meta = settingKeyMeta(key);
+    const { baseline, options } = choices[key];
+    return {
+      key,
+      source: "app",
+      category: "system",
+      label: (isKo ? meta?.labelKo : meta?.labelEn) ?? key,
+      description: describe(key, isKo),
+      input: "choice",
+      options: options.map(([value, ko, en]) => ({ value, label: isKo ? ko : en })),
+      saved: saved[key],
+      draft: drafts[key] ?? null,
+      baseline,
+      baselineSource: "hardcoded",
+      resetTo: baseline,
+      overridden: saved[key] !== baseline,
+      restartNeeded: false,
+      applies: "persist-live-override",
+      related: [],
+      dangerous: false,
+    };
+  });
 }
 
 /** True when the server wipes live overrides on restart, read from any config entry's restart note. */
@@ -243,8 +265,8 @@ export function catalogCounts(items: CatalogItem[]) {
   };
 }
 
-export function formatSettingValue(value: string, item: Pick<CatalogItem, "input" | "options">, tr: Tr): string {
-  if (value === "") return tr("없음", "None");
+export function formatSettingValue(value: string, item: Pick<CatalogItem, "input" | "options" | "inherits">, tr: Tr): string {
+  if (value === "") return item.inherits ? tr("공통 값 따름", "Follows the shared value") : tr("없음", "None");
   const option = item.options?.find((candidate) => candidate.value === value);
   if (option) return option.label;
   if (item.input === "toggle" && value === "true") return tr("켜짐", "On");
@@ -256,6 +278,7 @@ const SOURCE_LABELS: Record<string, [string, string]> = {
   hardcoded: ["코드", "code"],
   yaml: ["설정 파일", "config file"],
   config: ["설정 파일", "config file"],
+  "server-default": ["서버 기본값", "server default"],
 };
 
 /** Inspector form: "3 · 코드", or "없음". */
@@ -292,20 +315,26 @@ export function applyChip(item: CatalogItem, tr: Tr): string | null {
   return item.source === "status" ? null : tr("바로 적용", "Applies now");
 }
 
-/** Why a draft cannot be saved, or null. Config numbers may be empty (the server then falls back). */
+/** Why a draft cannot be saved, or null. Every number key is an integer on the server; config numbers may be empty. */
 export function draftProblem(item: CatalogItem, text: string, tr: Tr): string | null {
   if (item.input !== "number") return null;
   if (text.trim() === "") return item.source === "runtime" ? tr("숫자를 넣어 주세요.", "Enter a number.") : null;
   const value = Number(text);
+  if (!Number.isSafeInteger(value)) return tr("소수점 없는 정수를 넣어 주세요.", "Enter a whole number.");
   const low = item.min ?? -Infinity;
   const high = item.max ?? Infinity;
-  if (Number.isFinite(value) && value >= low && value <= high) return null;
+  if (value >= low && value <= high) return null;
   if (item.min !== undefined && item.max !== undefined) {
     return tr(`${item.min}~${item.max} 사이 숫자를 넣어 주세요.`, `Enter a number from ${item.min} to ${item.max}.`);
   }
   return item.min !== undefined
     ? tr(`${item.min} 이상인 숫자를 넣어 주세요.`, `Enter a number of at least ${item.min}.`)
     : tr("숫자를 넣어 주세요.", "Enter a number.");
+}
+
+/** Config wire value: numbers go out as plain decimal text ("1e2" → "100"), the way the server parses u64. */
+export function configValue(item: CatalogItem, text: string): string {
+  return item.input === "number" && text.trim() !== "" ? String(Number(text)) : text;
 }
 
 /** Typed runtime value; a half-typed number stays text so the field can be cleared (draftProblem blocks saving it). */

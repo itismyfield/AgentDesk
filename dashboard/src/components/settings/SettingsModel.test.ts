@@ -7,8 +7,9 @@ import {
   configItems,
   draftProblem,
   filterCatalog,
+  appItems,
+  configValue,
   formatSettingValue,
-  languageItem,
   resolveCategory,
   runtimeItems,
   withRo,
@@ -24,7 +25,8 @@ const source = <T,>(data: T | undefined) => ({ data, isError: false, isPending: 
 describe("settings catalog", () => {
   it("reads the category from the URL and maps old tab ids", () => {
     expect(resolveCategory(new URLSearchParams("category=connections"))).toBe("connections");
-    expect(resolveCategory(new URLSearchParams("settingsPanel=machine"))).toBe("system");
+    const old = { general: "system", voice: "system", workflow: "workflow", pipeline: "workflow", runtime: "workflow", ai: "usage", providers: "usage", connections: "connections", connectors: "connections", onboarding: "connections", machine: "system" };
+    for (const [id, category] of Object.entries(old)) expect(resolveCategory(new URLSearchParams(`settingsPanel=${id}`))).toBe(category);
     expect(resolveCategory(new URLSearchParams("category=nope"))).toBe("all");
   });
 
@@ -55,6 +57,16 @@ describe("settings catalog", () => {
     expect(items[0]).toMatchObject({ label: "자동 대기열 재시도 횟수", saved: "5", draft: "7", overridden: true, input: "number" });
     expect(items[1]).toMatchObject({ input: "toggle", overridden: false, draft: null });
     expect(applyText(items[0], ko)).toBe("바로 · 재시작하면 기본값으로");
+    expect(baselineText(items[0], ko)).toBe("기본 3 · 서버 기본값");
+  });
+
+  it("lets the Claude-only compact value go back to following the shared one", () => {
+    const claude = (value: string, override_active: boolean) => configItems([entry("context_compact_percent_claude", { value, baseline: null, override_active })], {}, true)[0];
+    expect(claude("70", true)).toMatchObject({ resetTo: "", overridden: true });
+    expect(claude("", true)).toMatchObject({ resetTo: null, overridden: false });
+    expect(formatSettingValue("", claude("", true), ko)).toBe("공통 값 따름");
+    const [floor] = configItems([entry("context_compact_lower_bound_tokens")], {}, true);
+    expect(floor.description).toContain("20만 토큰 창이면 이 값이 30만이어도 13만 6천 토큰에서 압축해요");
   });
 
   it("counts and filters by difference, restart and search over name, key and description", () => {
@@ -74,9 +86,11 @@ describe("settings catalog", () => {
     const [rounds] = configItems([entry("max_review_rounds")], {}, true);
     expect(draftProblem(rounds, "0", ko)).toBe("1 이상인 숫자를 넣어 주세요.");
     expect(draftProblem(rounds, "", ko)).toBeNull();
+    expect([draftProblem(rounds, "60.5", ko), draftProblem(rounds, "1e2", ko), configValue(rounds, "1e2")]).toEqual(["소수점 없는 정수를 넣어 주세요.", null, "100"]);
     expect(["3", "10", "1", "7", "켜짐", "기본"].map(withRo)).toEqual(["3으로", "10으로", "1로", "7로", "켜짐으로", "기본으로"]);
-    const language = languageItem("en", null, true);
-    expect([formatSettingValue(language.saved, language, ko), language.overridden, baselineText(language, ko)]).toEqual(["English", true, "기본 한국어 · 코드"]);
+    const [language, theme] = appItems({ language: "ja", theme: "auto" }, {}, true);
+    expect(language.options?.map((option) => option.label)).toEqual(["한국어", "English", "日本語", "中文"]);
+    expect([formatSettingValue(theme.saved, theme, ko), theme.overridden, baselineText(language, ko)]).toEqual(["시스템 설정 따르기", true, "기본 한국어 · 코드"]);
   });
 
   it("turns health, retention and connectors into status rows without zero placeholders", () => {

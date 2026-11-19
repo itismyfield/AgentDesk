@@ -29,12 +29,29 @@ export interface ConnectionStatusRow {
   tone: ConnectionTone;
 }
 
-type Source<T> = { data: T | undefined; isError: boolean; isPending: boolean };
+type Source<T> = {
+  data: T | undefined;
+  isError: boolean;
+  isPending: boolean;
+  dataUpdatedAt?: number;
+  isFetching?: boolean;
+  refetch?: () => unknown;
+};
 
-/** "Checking…" or "Could not check" while a source has no data, else null. */
+/** "Checking…" or "Could not check" while a source has no data, else null; a failed refresh keeps the last data. */
 function pendingText(source: Source<unknown>, tr: Tr): string | null {
-  if (source.isPending) return tr("확인 중…", "Checking…");
-  return source.isError || !source.data ? tr("확인하지 못했어요", "Could not check") : null;
+  if (source.data) return null;
+  return source.isPending ? tr("확인 중…", "Checking…") : tr("확인하지 못했어요", "Could not check");
+}
+
+/** When the shown data arrived, whether the newest fetch failed, and a way to fetch again. */
+function freshness(source: Source<unknown>): Pick<StatusDetail, "updatedAt" | "failed" | "refresh"> {
+  const { refetch } = source;
+  return {
+    updatedAt: source.dataUpdatedAt || undefined,
+    failed: source.isError && Boolean(source.data),
+    refresh: refetch ? { run: () => void refetch(), busy: Boolean(source.isFetching) } : undefined,
+  };
 }
 
 function unknownRow(key: ConnectionStatusRow["key"], label: string, source: Source<unknown>, tr: Tr): ConnectionStatusRow | null {
@@ -159,14 +176,15 @@ export function connectionItems({ statusRows, health, retention, connectors }: C
   const data = health.data;
   const limited = publicOnlyHealthNote(data, tr);
   const limitedFacts: Array<[string, string]> = limited ? [[tr("자세한 지표", "Details"), limited]] : [];
-  const healthFacts: Array<[string, string]> = data && !limited
-    ? buildSignalCards(data, isKo).map((signal) => [signal.label, signal.value])
+  const healthFacts: StatusDetail["facts"] = data && !limited
+    ? buildSignalCards(data, isKo).map((signal) => [signal.label, signal.value, signal.note])
     : limitedFacts;
   if (data?.uptime_secs) healthFacts.push([tr("가동 시간", "Uptime"), formatDurationCompact(data.uptime_secs, isKo)]);
   const items = [statusItem("health.status", undefined, pendingText(health, tr) ?? translateStatus(data?.status ?? "", isKo), {
     tone: !data ? "unknown" : data.status === "healthy" ? "ok" : "warn",
     facts: healthFacts,
-    notes: data ? buildBottlenecks(data, isKo).map((row) => ({ title: row.label, detail: row.detail, tone: row.severity === "danger" ? "danger" as const : "warn" as const, tooltip: row.kind })) : [],
+    notes: data ? buildBottlenecks(data, isKo).map((row) => ({ title: row.label, detail: row.detail, tone: row.severity === "danger" ? "danger" as const : "warn" as const, tooltip: row.kind, count: row.count })) : [],
+    ...freshness(health),
   }, isKo)];
 
   for (const row of statusRows) {
@@ -201,6 +219,7 @@ export function connectionItems({ statusRows, health, retention, connectors }: C
         [tr("조각", "Layers"), formatNumber(kept.layer_count)],
         [tr("잘린 조각", "Truncated"), formatNumber(kept.truncated_count)],
       ] : [],
+      ...freshness(retention),
     }, isKo),
     input: "readonly",
     applies: restartNeeded ? "config-only" : "config-file",

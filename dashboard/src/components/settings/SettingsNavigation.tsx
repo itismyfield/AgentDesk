@@ -5,7 +5,7 @@ import { Switch } from "../../kit/free/switch-clean";
 import { BottomSheet } from "../common/overlay/BottomSheet";
 import type { SettingsCategory } from "./SettingsCopy";
 import { baselineText, draftProblem, formatSettingValue, withRo, type CatalogItem, type CategoryFilter } from "./SettingsModel";
-import { ChoiceControl, ItemChip, ItemFacts, ItemHeading, ItemValue, RelatedSettings, currentValue, editableItem } from "./SettingsPanels";
+import { ChoiceControl, ItemChip, ItemFacts, ItemHeading, ItemValue, RelatedSettings, currentValue, editableItem, resetLabel } from "./SettingsPanels";
 import { SETTINGS_CARD_CLASS, SETTINGS_TRAY_CLASS, SettingsSkeletonRows, SettingsTextField } from "./SettingsPrimitives";
 
 type Tr = (ko: string, en: string) => string;
@@ -121,7 +121,7 @@ export function SettingsEditSheet({ item, allItems, saving, onClose, onSave, onS
   };
   const shown = formatSettingValue(value, item, tr);
   // The kit button sizes itself in unlayered CSS, so the 48px sheet buttons set their height inline.
-  const big = { minHeight: 48 };
+  const big = { minHeight: 48, minWidth: 48 };
 
   return (
     <BottomSheet open onClose={onClose} title={item.label}>
@@ -159,9 +159,9 @@ export function SettingsEditSheet({ item, allItems, saving, onClose, onSave, onS
         <RelatedSettings item={item} items={allItems} onSelect={onSelect} tr={tr} />
         {editable ? (
           <div className="flex gap-2">
-            {item.baseline !== null ? (
-              <Button variant="secondary" className="flex-1" style={big} onClick={() => setValue(item.baseline ?? "")}>
-                {tr(`기본값 ${formatSettingValue(item.baseline, item, tr)}`, `Default ${formatSettingValue(item.baseline, item, tr)}`)}
+            {item.resetTo != null ? (
+              <Button variant="secondary" className="flex-1" style={big} onClick={() => setValue(item.resetTo ?? "")}>
+                {resetLabel(item, tr, true)}
               </Button>
             ) : null}
             <Button

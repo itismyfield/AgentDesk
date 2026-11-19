@@ -15,7 +15,9 @@ import {
   configItems,
   draftProblem,
   filterCatalog,
-  languageItem,
+  matchesQuery,
+  appItems,
+  configValue,
   resetsOnRestart,
   resolveCategory,
   runtimeItems,
@@ -39,8 +41,9 @@ import { useConnectionStatus, useOperatorConnectors, usePromptRetention, useProv
 
 interface SettingsViewProps {
   isKo: boolean;
-  /** Saved dashboard language and the shell's /api/settings save path. */
+  /** Saved language and default theme, and the shell's /api/settings save path. */
   language: string;
+  theme: string;
   onSaveSettings: (patch: Record<string, unknown>) => Promise<void>;
   onNotify?: (message: string, type?: SettingsNotificationType) => string | void;
 }
@@ -75,7 +78,7 @@ function useSlashFocus(target: React.RefObject<HTMLInputElement | null>) {
 }
 
 /** Settings catalog: config, runtime-config and connection status in one searchable list (v3 stage 2). */
-export default function SettingsView({ isKo, language, onSaveSettings, onNotify }: SettingsViewProps) {
+export default function SettingsView({ isKo, language, theme, onSaveSettings, onNotify }: SettingsViewProps) {
   const tr = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
   const notify = useCallback(
     (ko: string, en: string, type: SettingsNotificationType = "info") => {
@@ -108,7 +111,7 @@ export default function SettingsView({ isKo, language, onSaveSettings, onNotify 
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [saving, setSaving] = useState(false);
   const [pendingDangerous, setPendingDangerous] = useState<PendingDangerousSave | null>(null);
-  const [languageDraft, setLanguageDraft] = useState<string | null>(null);
+  const [appDrafts, setAppDrafts] = useState<Record<string, string>>({});
 
   const config = useConfigEntriesDraft();
   const runtime = useRuntimeConfigDraft();
@@ -122,13 +125,13 @@ export default function SettingsView({ isKo, language, onSaveSettings, onNotify 
     [connection.health, connection.onboarding, tr],
   );
   const items = useMemo(() => sortCatalog([
-    languageItem(language, languageDraft, isKo),
+    ...appItems({ language, theme }, appDrafts, isKo),
     ...configItems(config.entries, config.edits, isKo),
     ...(runtime.loaded && !runtime.error
       ? runtimeItems({ saved: runtime.saved, draft: runtime.values, defaults: runtime.defaults, changedKeys: runtime.changedKeys }, resetsOnRestart(config.entries), isKo)
       : []),
     ...connectionItems({ statusRows, health: connection.health, retention, connectors }, tr, isKo),
-  ]), [config.edits, config.entries, connection.health, connectors, isKo, language, languageDraft, retention, runtime.changedKeys, runtime.defaults, runtime.error, runtime.loaded, runtime.saved, runtime.values, statusRows, tr]);
+  ]), [config.edits, config.entries, connection.health, connectors, appDrafts, isKo, language, retention, runtime.changedKeys, runtime.defaults, runtime.error, runtime.loaded, runtime.saved, runtime.values, statusRows, theme, tr]);
 
   const counts = useMemo(() => catalogCounts(items), [items]);
   const filtered = useMemo(() => filterCatalog(items, { category, query, ...filters }), [category, filters, items, query]);
@@ -150,17 +153,32 @@ export default function SettingsView({ isKo, language, onSaveSettings, onNotify 
 
   const { edit: editConfig } = config;
   const { change: changeRuntime, resetToDefault } = runtime;
+  const editApp = useCallback((item: CatalogItem, value: string) => setAppDrafts((current) => {
+    const { [item.key]: _dropped, ...rest } = current;
+    return value === item.saved ? rest : { ...rest, [item.key]: value };
+  }), []);
   const handleChange = useCallback((item: CatalogItem, value: string) => {
     if (item.source === "config") editConfig(item.key, value);
     else if (item.source === "runtime") changeRuntime(item.key, runtimeValue(item, value));
-    else if (item.source === "app") setLanguageDraft(value === language ? null : value);
-  }, [changeRuntime, editConfig, language]);
+    else if (item.source === "app") editApp(item, value);
+  }, [changeRuntime, editApp, editConfig]);
   const handleReset = useCallback((item: CatalogItem) => {
-    if (item.baseline === null) return;
+    if (item.resetTo == null) return;
     if (item.source === "runtime") resetToDefault(item.key);
-    else if (item.source === "app") setLanguageDraft(item.baseline === language ? null : item.baseline);
-    else editConfig(item.key, item.baseline);
-  }, [editConfig, language, resetToDefault]);
+    else if (item.source === "app") editApp(item, item.resetTo);
+    else editConfig(item.key, item.resetTo);
+  }, [editApp, editConfig, resetToDefault]);
+
+  // A related row may be hidden: lift only the search, filter or category that hides it, then select it.
+  const openRelated = useCallback((key: string) => {
+    const target = items.find((item) => item.key === key);
+    if (!target) return;
+    if (!matchesQuery(target, query)) setQuery("");
+    setFilters((current) => ({ differs: current.differs && target.overridden, restart: current.restart && target.restartNeeded }));
+    if (category !== "all" && target.category !== category) setCategory(target.category);
+    if (phone) setSheetKey(key);
+    else setSelectedKey(key);
+  }, [category, items, phone, query, setCategory]);
 
   // Dangerous config keys (review gate, context clearing) wait for a confirmation before any save path runs.
   const guarded = (keys: string[], run: () => void) => {
@@ -171,17 +189,18 @@ export default function SettingsView({ isKo, language, onSaveSettings, onNotify 
   const saveAll = async () => {
     setSaving(true);
     let failed = false;
-    if (languageDraft !== null) {
+    if (Object.keys(appDrafts).length > 0) {
       try {
-        await onSaveSettings({ language: languageDraft });
-        setLanguageDraft(null);
+        await onSaveSettings({ ...appDrafts });
+        setAppDrafts({});
       } catch { failed = true; }
     }
     if (runtime.dirty) {
       try { await runtime.save(); } catch { failed = true; }
     }
     if (config.dirty) {
-      try { await config.save({ ...config.edits }); } catch { failed = true; }
+      const wire = Object.fromEntries(changes.filter((item) => item.source === "config").map((item) => [item.key, configValue(item, item.draft ?? "")]));
+      try { await config.save(wire); } catch { failed = true; }
     }
     setSaving(false);
     if (failed) {
@@ -194,10 +213,10 @@ export default function SettingsView({ isKo, language, onSaveSettings, onNotify 
   const saveOne = async (item: CatalogItem, value: string) => {
     setSaving(true);
     try {
-      if (item.source === "config") await config.save({ [item.key]: value });
+      if (item.source === "config") await config.save({ [item.key]: configValue(item, value) });
       else if (item.source === "app") {
-        await onSaveSettings({ language: value });
-        setLanguageDraft(null);
+        await onSaveSettings({ [item.key]: value });
+        editApp(item, item.saved);
       } else await runtime.saveKey(item.key, runtimeValue(item, value), value !== item.baseline);
       setSheetKey(null);
       notify("설정을 저장했어요.", "Saved settings.", "success");
@@ -251,6 +270,7 @@ export default function SettingsView({ isKo, language, onSaveSettings, onNotify 
               void connection.health.refetch();
               void connection.onboarding.refetch();
               void connectors.refetch();
+              void retention.refetch();
             }}
           >
             {tr("상태 다시 확인", "Check status again")}
@@ -271,7 +291,7 @@ export default function SettingsView({ isKo, language, onSaveSettings, onNotify 
       onDiscard={() => {
         runtime.discard();
         config.discard();
-        setLanguageDraft(null);
+        setAppDrafts({});
       }}
       onSave={() => {
         if (!blockedReason) guarded(getDangerousConfigKeys(config.edits), () => void saveAll());
@@ -336,6 +356,7 @@ export default function SettingsView({ isKo, language, onSaveSettings, onNotify 
           saveBar={saveBar}
           blocks={openBlock}
           onSelect={setSelectedKey}
+          onRelated={openRelated}
           onChange={handleChange}
           onReset={handleReset}
           problemFor={problemFor}
@@ -353,7 +374,7 @@ export default function SettingsView({ isKo, language, onSaveSettings, onNotify 
           saving={saving}
           onClose={() => setSheetKey(null)}
           onSave={(item, value) => guarded(item.dangerous ? [item.key] : [], () => void saveOne(item, value))}
-          onSelect={setSheetKey}
+          onSelect={openRelated}
           tr={tr}
         />
       ) : null}

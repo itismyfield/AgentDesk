@@ -122,7 +122,7 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
         }
       />
       <Route path="/audit" element={<AuditPageView isKo={isKo} />} />
-      <Route path="/settings" element={<SettingsView isKo={isKo} language={settings.language} onSaveSettings={handleSettingsSave} onNotify={pushNotification} />} />
+      <Route path="/settings" element={<SettingsView isKo={isKo} language={settings.language} theme={settings.theme} onSaveSettings={handleSettingsSave} onNotify={pushNotification} />} />
       {LEGACY_ROUTE_REDIRECTS.map((redirect) => (
         <Route key={redirect.path} path={redirect.path} element={<Navigate replace to={redirect.to} />} />
       ))}
