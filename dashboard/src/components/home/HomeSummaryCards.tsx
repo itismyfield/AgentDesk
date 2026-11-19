@@ -29,7 +29,7 @@ export function HomeTodoCard({ items, cards, campaigns, tr, className }: {
   return (
     <HomeCard
       title={tr("할 일", "To do")}
-      count={status === "loading" ? null : total}
+      count={status === "loading" || (status === "partial" && total === 0) ? null : total}
       countTone={total > 0 ? "warn" : undefined}
       aside={<HeaderLink to={QUEUE_PATH}>{tr("대기열에서 보기", "Open queue")}</HeaderLink>}
       testId="home-todo"
@@ -78,8 +78,8 @@ export function HomeSystemCard({ campaigns, tr, className }: { campaigns: Loaded
   const rows = buildSystemRows({
     health: current,
     healthFailed: health.failed,
-    legacy: campaigns.data?.legacy ?? null,
-    documents: campaigns.data?.documents ?? [],
+    legacy: campaigns.failed ? null : campaigns.data?.legacy ?? null,
+    documents: campaigns.failed ? [] : campaigns.data?.documents ?? [],
     tr,
   });
   const publicOnly = current?.publicOnly;
@@ -167,7 +167,11 @@ export function HomeAgentsCard({ entries, isMobile, tr, isKo, onOpenAgent }: {
         <p className="m-0 border-t border-[var(--line-soft)] px-4 py-5 text-sm text-[var(--fg-muted)]">{tr("등록된 에이전트가 없어요.", "No agents yet.")}</p>
       ) : isMobile ? (
         <ul className="m-0 list-none border-t border-[var(--line-soft)] p-0">
-          {shown.length === 0 ? <li className="px-4 py-4 text-sm text-[var(--fg-muted)]">{tr("모두 쉬는 중이에요.", "Everyone is resting.")}</li> : null}
+          {shown.length === 0 ? (
+            <li className="px-4 py-4 text-sm text-[var(--fg-muted)]">
+              {counts.unknown > 0 ? tr("세션을 읽지 못해 상태는 확인 불가예요.", "Sessions did not load, so states are unknown.") : tr("모두 쉬는 중이에요.", "Everyone is resting.")}
+            </li>
+          ) : null}
           {shown.map((entry) => (
             <li key={entry.agent.id} className="border-b border-[var(--line-soft)] last:border-b-0">
               <AgentCell entry={entry} tr={tr} isKo={isKo} onOpen={onOpenAgent} />

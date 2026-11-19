@@ -52,10 +52,11 @@ describe("home to-dos", () => {
   const card = (id: string, status: string, extra: Partial<KanbanCard> = {}) =>
     ({ id, title: `card ${id}`, status, github_repo: "o/AgentDesk", github_issue_number: 7, blocked_reason: null, review_status: null, updated_at: "2026-11-18T00:00:00Z", ...extra }) as KanbanCard;
 
-  it("keeps what the server leaves to a person and drops automatic reviews, new requests and benign waits", () => {
+  it("keeps what the server leaves to a person and drops automatic reviews, PR creation, new requests and CI waits", () => {
     const items = buildTodoItems({
       cards: [
-        card("r", "review", { review_status: "reviewing" }), card("q", "requested"), card("ci", "in_progress", { blocked_reason: "ci:waiting" }),
+        card("r", "review", { review_status: "reviewing" }), card("pr", "review", { blocked_reason: "pr:creating" }), card("q", "requested"),
+        card("ci", "in_progress", { blocked_reason: "ci:waiting" }), card("rerun", "in_progress", { blocked_reason: "ci:rerunning" }),
         card("d", "review", { review_status: "dilemma_pending" }), card("b", "in_progress", { blocked_reason: "dependency cycle" }),
         card("f", "qa_failed"), card("x", "done", { blocked_reason: "old" }),
       ],

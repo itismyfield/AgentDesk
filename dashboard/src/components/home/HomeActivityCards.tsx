@@ -20,21 +20,21 @@ export function HomeCampaignsCard({ campaigns, tr, className }: { campaigns: Loa
     tr,
     limit: CAMPAIGN_ROWS,
   });
-  // One list failing leaves the other's rows; an empty answer beside a failure is not "no campaigns".
-  const partial = Boolean(campaigns.data && (!campaigns.data.legacy || !campaigns.data.summaries));
+  // A failed latest poll or one failed list makes the shown rows incomplete, and an empty list is not "no campaigns".
+  const unreadable = campaigns.failed || Boolean(campaigns.data && (!campaigns.data.legacy || !campaigns.data.summaries));
   const rest = rows.length - shown;
   return (
     <HomeCard
       title={tr("캠페인", "Campaigns")}
-      count={campaigns.data && !(partial && rows.length === 0) ? rows.length : null}
+      count={campaigns.data && !(unreadable && rows.length === 0) ? rows.length : null}
       aside={<HeaderLink to="/campaigns">{tr("모두 보기", "See all")}</HeaderLink>}
       testId="home-campaigns"
       className={className}
     >
-      {!campaigns.data ? (
-        campaigns.failed ? <CardNote>{tr("캠페인을 읽지 못했어요.", "Could not read campaigns.")}</CardNote> : <CardSkeleton label={tr("캠페인 불러오는 중", "Loading campaigns")} />
+      {!campaigns.data && !campaigns.failed ? (
+        <CardSkeleton label={tr("캠페인 불러오는 중", "Loading campaigns")} />
       ) : rows.length === 0 ? (
-        <CardNote>{partial ? tr("캠페인 목록 하나를 읽지 못해 확인 불가예요.", "One campaign list did not load, so campaigns are unknown.") : tr("진행 중인 캠페인이 없어요.", "No open campaigns.")}</CardNote>
+        <CardNote>{unreadable ? tr("캠페인 목록을 읽지 못해 확인 불가예요.", "Campaign lists did not load, so campaigns are unknown.") : tr("진행 중인 캠페인이 없어요.", "No open campaigns.")}</CardNote>
       ) : (
         <ul className="m-0 list-none p-0">
           {(expanded ? rows : rows.slice(0, shown)).map((row) => (
@@ -63,7 +63,7 @@ export function HomeCampaignsCard({ campaigns, tr, className }: { campaigns: Loa
           ) : null}
         </ul>
       )}
-      {partial && rows.length > 0 ? <CardNote>{tr("캠페인 목록 하나를 읽지 못해 일부는 확인 불가예요.", "One campaign list did not load, so some campaigns are unknown.")}</CardNote> : null}
+      {unreadable && rows.length > 0 ? <CardNote>{tr("캠페인 목록을 다 읽지 못해 일부는 확인 불가예요.", "Not every campaign list loaded, so some campaigns are unknown.")}</CardNote> : null}
     </HomeCard>
   );
 }

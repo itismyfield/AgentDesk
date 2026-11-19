@@ -533,5 +533,5 @@ test("home campaigns: a failed list beside an empty one reads unknown, not empty
   await page.route(/\/api\/server-campaigns\?.*$/, (route) => route.fulfill({ status: 503, json: { error: "unavailable" } }));
   await json(page, /\/api\/campaigns\?.*$/, { campaigns: [], live: {}, limit: 100, offset: 0 });
   await page.goto("/home");
-  await expect(page.getByTestId("home-campaigns")).toContainText("캠페인 목록 하나를 읽지 못해 확인 불가예요.", { timeout: 15_000 });
+  await expect(page.getByTestId("home-campaigns")).toContainText("캠페인 목록을 읽지 못해 확인 불가예요.", { timeout: 15_000 });
 });

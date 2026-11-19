@@ -32,7 +32,7 @@ export default function HomePageView({ isKo, isMobileViewport, agents, onOpenAge
   );
   // Each to-do source keeps its own read state, so a slow or failed one never reads as nothing to do.
   const cardsSource: SourceState = kanbanCardsState === "error" ? "failed" : kanbanCardsState === "ready" ? "ok" : "loading";
-  const campaignsSource: SourceState = campaigns.data ? (campaigns.data.summaries ? "ok" : "failed") : campaigns.failed ? "failed" : "loading";
+  const campaignsSource: SourceState = campaigns.failed ? "failed" : campaigns.data ? (campaigns.data.summaries ? "ok" : "failed") : "loading";
 
   return (
     <PageFrame

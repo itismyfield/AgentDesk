@@ -4,7 +4,7 @@ import type { ServerCampaignDocument, ServerCampaignSummary, ServerCampaignView 
 import type { HealthResponse, RuntimeConfigResponse } from "../../api/settingsRuntime";
 import { formatRelativeTime } from "../../app/shellFormatting";
 import type { Agent, DispatchedSession, KanbanCard } from "../../types";
-import { cardTitle, coerceTimestampMs, isManualInterventionCard, isOpenKanbanCard } from "../agent-manager/kanban-utils";
+import { cardTitle, coerceTimestampMs, isOpenKanbanCard } from "../agent-manager/kanban-utils";
 import { campaignProgress } from "../campaigns/campaignModel";
 import { queueLocationQuery } from "../campaigns/campaignQueueModel";
 import { DISPLAY_LABELS, REASON_LABELS, STAGE_LABELS, campaignLocationQuery, displayText } from "../campaigns/serverCampaignModel";
@@ -115,6 +115,14 @@ export interface TodoItem {
 }
 
 const FAILED_STATUS = /(^|_)failed$/;
+// `src/manual_intervention.rs`: a dilemma or a blocked reason outside these progress prefixes waits for a person.
+// The queue's shared helper also treats deploy states as benign for its own lanes, so home keeps the server's list.
+const BENIGN_BLOCKED_PREFIXES = ["ci:waiting", "ci:running", "ci:rerunning", "ci:rework", "pr:creating"];
+
+function needsPerson({ review_status, blocked_reason }: KanbanCard): boolean {
+  const reason = blocked_reason ?? "";
+  return review_status === "dilemma_pending" || (reason.trim() !== "" && !BENIGN_BLOCKED_PREFIXES.some((prefix) => reason.startsWith(prefix)));
+}
 
 function repoName(repo: string | null): string | null {
   return repo ? repo.split("/").pop() || repo : null;
@@ -140,7 +148,7 @@ export function buildTodoItems({ cards, campaigns, tr, isKo }: {
       title: `${card.github_issue_number ? `#${card.github_issue_number} ` : ""}${cardTitle(card.title)}`,
       to: `/campaigns${queueLocationQuery(card.id)}`,
     };
-    if (isManualInterventionCard(card)) {
+    if (needsPerson(card)) {
       items.push({ ...base, tone: "err", chip: tr("판단 필요", "Decide"), detail: card.blocked_reason?.trim() || tr("사람 판단을 기다려요", "Waiting for a decision") });
     } else if (FAILED_STATUS.test(card.status)) {
       items.push({ ...base, tone: "err", chip: tr("실패", "Failed"), detail: join(repoName(card.github_repo), card.latest_dispatch_result_summary ?? ago(card.updated_at)) });

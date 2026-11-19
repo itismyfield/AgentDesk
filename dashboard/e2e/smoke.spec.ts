@@ -1669,6 +1669,50 @@ test.describe("Dashboard smoke tests", () => {
     await expect(usage.getByRole("link", { name: "설정" })).toHaveAttribute("href", "/settings?category=usage");
   });
 
+  test("home: after empty lists a failed campaign poll reads unknown on both cards until it recovers", async ({ page }) => {
+    let down = false;
+    await page.clock.install();
+    await mockHomeSources(page);
+    await page.route(/\/api\/kanban-cards(?:\?.*)?$/, (route) => route.fulfill({ json: { cards: [] } }));
+    for (const [pattern, body] of [[/\/api\/campaigns\?/, { campaigns: [], live: {}, limit: 100, offset: 0 }], [/\/api\/server-campaigns\?/, { campaigns: [] }]] as const) {
+      await page.route(pattern, (route) => (down ? route.fulfill({ status: 503, json: { error: "unavailable" } }) : route.fulfill({ json: body })));
+    }
+    await page.goto("/home");
+
+    const todo = page.getByTestId("home-todo");
+    const campaigns = page.getByTestId("home-campaigns");
+    await expect(todo).toContainText("지금 할 일이 없어요.", { timeout: 15000 });
+    await expect(campaigns).toContainText("진행 중인 캠페인이 없어요.");
+    down = true;
+    await page.clock.runFor(60_000);
+    await expect(todo).toContainText("캠페인 요약을 읽지 못해 할 일 일부는 확인 불가예요.", { timeout: 15000 });
+    await expect(todo).not.toContainText("지금 할 일이 없어요.");
+    await expect(todo.locator("h2")).toHaveText("할 일");
+    await expect(campaigns).toContainText("캠페인 목록을 읽지 못해 확인 불가예요.");
+    await expect(campaigns.locator("h2")).toHaveText("캠페인");
+    down = false;
+    await page.clock.runFor(60_000);
+    await expect(todo).toContainText("지금 할 일이 없어요.", { timeout: 15000 });
+    await expect(campaigns).toContainText("진행 중인 캠페인이 없어요.");
+  });
+
+  test("home: on a phone a failed session list reads unknown where an empty one reads resting", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+    await mockHomeSources(page);
+    await page.route(/\/api\/agents(?:\?.*)?$/, (route) => route.fulfill({ json: { agents: MOCK_AGENTS.map((agent) => ({ ...agent, status: "idle" })) } }));
+    const card = page.getByTestId("home-agents");
+    await page.goto("/home");
+    await expect(card).toContainText("모두 쉬는 중이에요.", { timeout: 15000 });
+    await expect(card).toContainText("세션 없음 2");
+
+    await page.route(/\/api\/dispatched-sessions(?:\?.*)?$/, (route) => route.fulfill({ status: 503, json: { error: "unavailable" } }));
+    await page.reload();
+    await expect(card).toContainText("세션을 읽지 못해 상태는 확인 불가예요.", { timeout: 15000 });
+    await expect(card).toContainText("확인 불가 2");
+    await card.getByRole("button", { name: "2명 더 보기" }).click();
+    await expect(card.locator("li button").first()).toContainText("확인 불가");
+  });
+
   test("stats: dedicated route exposes range controls and key widgets", async ({ page }) => {
     await page.goto("/stats");
 
