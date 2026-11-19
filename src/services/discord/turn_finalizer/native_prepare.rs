@@ -304,7 +304,11 @@ pub(in crate::services::discord) async fn holds_row(
         row.born_generation,
     )
     .with_episode_nonce(row.turn_nonce.as_deref());
-    shared.turn_finalizer.native_holds(key).await.unwrap_or(true)
+    shared
+        .turn_finalizer
+        .native_holds(key)
+        .await
+        .unwrap_or(true)
 }
 
 pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, LedgerEntry>) {
@@ -442,24 +446,22 @@ pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, Led
                     && entry
                         .native_inputs
                         .values()
-                        .any(|input| input.owns_bridge(key, actor))
+                        .any(|input| input.owns_bridge(key, Some(actor)))
             });
             let _ = ack.send(settled);
         }
         FinalizeMsg::NativeScope { key, actor, ack } => {
-            let owned = ledger
-                .get(&key.exact_key())
-                .is_some_and(|entry| match actor {
-                    Some(actor) => entry
-                        .native_inputs
-                        .values()
-                        .any(|input| input.owns_bridge(key, actor)),
-                    None => {
-                        !entry.native_inputs.is_empty()
-                            || !entry.native_boot_inputs.is_empty()
-                            || entry.completion_admission.native_input.is_some()
-                    }
-                });
+            let owned = ledger.get(&key.exact_key()).is_some_and(|entry| {
+                entry
+                    .native_inputs
+                    .values()
+                    .any(|input| input.owns_bridge(key, actor))
+                    || (actor.is_none()
+                        && entry
+                            .native_boot_inputs
+                            .values()
+                            .any(|input| input.identity().1.owning_episode.is_some()))
+            });
             let _ = ack.send(owned);
         }
         _ => unreachable!("native custody dispatcher received another message"),

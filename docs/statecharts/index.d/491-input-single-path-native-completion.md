@@ -1,0 +1,2 @@
+key: 491-input-single-path-native-completion
+| `input-single-path` native completion records (#8148 S1) | Native result → recording step → cleanup | Five before modes exercise missing or misordered records, an empty response, a foreign answer, and clear | Nine fixed scenarios cover recording, retry, row ownership and failure. [Entry points and outcomes](input-single-path/native-completion.entrypoints.md) |

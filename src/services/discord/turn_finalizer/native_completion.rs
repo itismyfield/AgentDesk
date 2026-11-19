@@ -19,6 +19,7 @@ pub(in crate::services::discord::turn_finalizer) async fn record(
     evidence: &Evidence,
     key: TurnKey,
     captured: Option<&InflightTurnState>,
+    actor: Option<&CancelToken>,
 ) {
     let (Some(source), Some(captured)) = (evidence.ticket.source.as_ref(), captured) else {
         return;
@@ -48,7 +49,7 @@ pub(in crate::services::discord::turn_finalizer) async fn record(
         return;
     }
     match read_run(evidence, source) {
-        Ok((body, events)) => write(shared, &row, &body, &events).await,
+        Ok((body, events)) => write(shared, &row, &body, &events, actor).await,
         Err(error) => tracing::warn!(
             channel_id = row.channel_id,
             user_msg_id = row.user_msg_id,
@@ -64,13 +65,14 @@ pub(in crate::services::discord::turn_finalizer) async fn record_live(
     history: &crate::services::tui_input::human_frame::history::v2::Registry,
     work: &super::super::NativeCleanup,
 ) {
-    if let Some(key) = work.primary_key() {
+    if let Some((key, actor)) = &work.admission.cleanup {
         record(
             shared,
             history,
             &work.admission.evidence,
-            key,
+            *key,
             work.row.as_ref(),
+            Some(actor),
         )
         .await;
     }
@@ -130,16 +132,17 @@ async fn write(
     row: &InflightTurnState,
     body: &str,
     events: &[SessionTranscriptEvent],
+    actor: Option<&CancelToken>,
 ) {
     let pool = shared.pg_pool.as_ref();
     let channel = ChannelId::new(row.channel_id);
     let turn_id = format!("discord:{}:{}", row.channel_id, row.user_msg_id);
     let answered = !body.trim().is_empty();
-    let dispatch_id = row
-        .dispatch_id
-        .clone()
-        .or_else(|| crate::services::discord::adk_session::parse_dispatch_id(&row.user_text));
     if answered {
+        let dispatch_id = row
+            .dispatch_id
+            .clone()
+            .or_else(|| crate::services::discord::adk_session::parse_dispatch_id(&row.user_text));
         let (isolated, routine) = crate::services::discord::turn_bridge::resolve_completion_scope(
             shared,
             channel,
@@ -150,7 +153,7 @@ async fn write(
         )
         .await;
         let isolated_run = row.routine_presentation.isolated_run();
-        if routine || !(isolated || isolated_run) {
+        if routine || !isolated {
             let binding = crate::services::discord::settings::resolve_role_binding(
                 channel,
                 row.channel_name.as_deref(),
@@ -168,7 +171,7 @@ async fn write(
                     user_message: &row.user_text,
                     assistant_message: body,
                     events,
-                    duration_ms: crate::services::discord::inflight_duration_ms(Some(
+                    duration_ms: crate::services::discord::tmux::inflight_duration_ms(Some(
                         row.started_at.as_str(),
                     )),
                     turn_started_at_millis:
@@ -185,21 +188,35 @@ async fn write(
             }
         }
     }
-    // A replay-protected request is settled by its own policy, never by this ordinary path.
-    if row.replay_receipt_id.is_some() {
+    let dispatch = row.dispatch_id.as_deref().filter(|_| answered);
+    if !row.scheduled.may_settle() && dispatch.is_none() {
+        return;
+    }
+    // Only a live token can classify a protected outcome as ordinary.
+    let ordinary = match actor {
+        Some(actor) => {
+            !crate::services::discord::turn_bridge::should_suppress_headless_delivery_for_cancel(
+                Some(actor),
+            ) && crate::services::discord::replay_policy::ordinary_outcome(pool, actor, row).await
+        }
+        None => row.replay_receipt_id.is_none() && !row.replay_rerun_blocked(),
+    };
+    if !ordinary {
         return;
     }
     if row.scheduled.may_settle() {
-        let outcome = match answered {
-            true => classify(body, terminal_error_event(events), false),
-            false => Some(ScheduledTurnOutcome::EmptyResponse),
+        let outcome = if answered {
+            // Native terminal evidence has no provider failure flag.
+            classify(body, terminal_error_event(events), false)
+        } else {
+            Some(ScheduledTurnOutcome::EmptyResponse)
         };
         crate::services::discord::scheduled_turn::settle(pool, row, outcome).await;
     }
-    if answered && dispatch_id.is_some() {
+    if dispatch.is_some() {
         crate::services::discord::turn_bridge::complete_work_dispatch_on_turn_end(
             shared,
-            dispatch_id.as_deref(),
+            dispatch,
             row.worktree_path.as_deref(),
             Some(body),
         )

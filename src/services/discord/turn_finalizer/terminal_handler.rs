@@ -445,12 +445,12 @@ impl NativePrepared {
         })
     }
 
-    pub(super) fn owns_bridge(&self, key: TurnKey, actor: usize) -> bool {
+    pub(super) fn owns_bridge(&self, key: TurnKey, actor: Option<usize>) -> bool {
         self.key.exact_key() == key.exact_key()
             && self
                 .actor
                 .as_ref()
-                .is_some_and(|a| Arc::as_ptr(a) as usize == actor)
+                .is_some_and(|a| actor.is_none_or(|actor| Arc::as_ptr(a) as usize == actor))
     }
 
     fn bound_ticket(

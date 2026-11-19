@@ -1449,7 +1449,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &watcher_provider,
                 channel_id,
                 &tmux_session_name,
-                inflight_identity_before_relay.as_ref(),
+                (inflight_identity_before_relay.as_ref(), pin_held),
                 &full_response,
                 turn_data_start_offset,
                 last_observed_generation_mtime_ns,
@@ -1460,8 +1460,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         &tool_state.transcript_events,
                     ),
                     false,
-                )
-                .filter(|_| !pin_held),
+                ),
             );
         // Record the scheduled outcome before the pre-panel release can drop the row.
         if terminal_delivery_committed && let Some(pin) = inflight_before_relay.as_ref() {

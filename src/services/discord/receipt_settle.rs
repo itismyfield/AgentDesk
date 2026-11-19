@@ -188,16 +188,17 @@ pub(in crate::services::discord) async fn settle_boot(
     states: Vec<InflightTurnState>,
 ) -> (Vec<InflightTurnState>, BootReceipts) {
     let pool = shared.pg_pool.as_ref();
-    let mut unheld = Vec::with_capacity(states.len());
-    for state in &states {
+    for state in states
+        .iter()
+        .filter(|state| state.terminal_delivery_completed())
+    {
         // A watcher mirror on a native-held row is no outcome; its native completion settles it.
         #[cfg(unix)]
         if super::turn_finalizer::native_prepare::holds_row(shared, state).await {
             continue;
         }
-        unheld.push(state.clone());
+        super::scheduled_turn::settle_loaded(pool, std::slice::from_ref(state)).await;
     }
-    super::scheduled_turn::settle_loaded(pool, &unheld).await;
     let mut kept = Vec::with_capacity(states.len());
     let mut watched = Vec::new();
     for state in states {

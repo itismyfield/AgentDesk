@@ -23,6 +23,10 @@ fn internal_herdr_channel_key_scheduled_start_waits_for_idle_and_runs_once_pg() 
         let _router = app(&fx, &intake).await;
         let channel = ChannelId::new(CHANNEL);
         let turn = discord::router::reserve_headless_turn().turn_id(channel);
+        use crate::services::scheduled_messages::turn_completion::tests::{
+            launch_agent_delivery, stored_outcome,
+        };
+        launch_agent_delivery(&fx.pool, "native-internal", &turn, false, "fail").await;
         // What the scheduled launcher keeps for a delivery with no snapshot: no label of its own.
         let metadata = json!({"agent_id":"busy-entry","scheduled_message_id":"smsg-8125"});
         let context = json!({"origin":"scheduled","provider":"claude","turn_id":turn,
@@ -124,6 +128,18 @@ fn internal_herdr_channel_key_scheduled_start_waits_for_idle_and_runs_once_pg() 
             }
         };
         assert_eq!(await_within(evidence, WAIT_CAP).await, 1);
+        let answer: String = sqlx::query_scalar(
+            "SELECT assistant_message FROM session_transcripts WHERE turn_id = $1",
+        )
+        .bind(&turn)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+        assert_eq!(answer.trim(), "HTTP session answered 1");
+        assert_eq!(
+            stored_outcome(&fx.pool, &turn).await.as_deref(),
+            Some("delivered")
+        );
     });
     drop(intake);
     drop(admission_guard);

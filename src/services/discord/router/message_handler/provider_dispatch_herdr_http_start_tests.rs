@@ -503,6 +503,17 @@ fn external_herdr_http_machine_waits_for_its_own_turn_pg() {
         finish_answer(&started.path, &started.session, 1);
         completed(&intake, 2).await;
         assert_eq!(fx.rig.sends().len(), before + 4);
+        for (response, expected) in [(&first.1, "HTTP session answered 1"), (&response.1, "HTTP session answered 2")] {
+            let turn = response["turn_id"].as_str().unwrap();
+            let answers: Vec<String> = sqlx::query_scalar(
+                "SELECT assistant_message FROM session_transcripts WHERE turn_id = $1",
+            )
+            .bind(turn)
+            .fetch_all(&fx.pool)
+            .await
+            .unwrap();
+            assert_eq!(answers.iter().map(|answer| answer.trim()).collect::<Vec<_>>(), [expected]);
+        }
         let heads = heads.lock().unwrap();
         assert_eq!(heads.len(), 4);
         let nonce = heads[2]["attempt"]["nonce"].as_str().unwrap();

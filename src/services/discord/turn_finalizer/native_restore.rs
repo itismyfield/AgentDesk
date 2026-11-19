@@ -6,6 +6,7 @@ use crate::services::tui_input::human_frame::history::v2::{
     native::{Disposition, RestoredRecord},
 };
 use crate::services::tui_o::writer::input_facts::native::Evidence;
+use serde::Deserialize;
 
 pub(in crate::services::discord) struct BootInputs {
     inputs: Vec<RestoredInput>,
@@ -99,6 +100,9 @@ impl RestoredInput {
         let (namespace, ticket) = self.identity();
         super::super::terminal_handler::prepare_saved_notice(&history, namespace, ticket, shared)
             .await?;
+        self.refreshed(&history)?
+            .record_completion(shared, &history)
+            .await;
         let (ack, rx) = oneshot::channel();
         shared
             .turn_finalizer
@@ -198,12 +202,28 @@ impl RestoredInput {
 
     /// The boot half of the native completion records, before Settle removes the row.
     async fn record_completion(&self, shared: &Arc<SharedData>, history: &Registry) {
-        let proof = self.record.settlement.outcome.as_ref().map(|o| &o.extra["native_proof"]);
-        let Some(Ok(evidence)) = proof.map(|p| serde_json::from_value(p.clone())) else {
+        let Some(proof) = self
+            .record
+            .settlement
+            .outcome
+            .as_ref()
+            .and_then(|outcome| outcome.extra.get("native_proof"))
+        else {
+            return;
+        };
+        let Ok(evidence) = Evidence::deserialize(proof) else {
             return;
         };
         use super::super::terminal_handler::native_supply::native_completion::record;
-        record(shared, history, &evidence, self.key, self.row.as_ref()).await;
+        record(
+            shared,
+            history,
+            &evidence,
+            self.key,
+            self.row.as_ref(),
+            None,
+        )
+        .await;
     }
 
     fn proof(&self) -> Result<(), String> {
