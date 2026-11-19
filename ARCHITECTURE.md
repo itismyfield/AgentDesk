@@ -2417,6 +2417,8 @@ src/
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
+│   │   │   │   │   ├── owner_ingress_tests/
+│   │   │   │   │   │   └── readiness_member_tests.rs
 │   │   │   │   │   ├── admission_policy_reentry_tests.rs
 │   │   │   │   │   ├── codex_turn_hold.rs
 │   │   │   │   │   ├── fallback_queued_tests.rs
@@ -2524,6 +2526,8 @@ src/
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── owner_input_idle_tests/
+│   │   │   │   │   │   ├── metadata_hold/
+│   │   │   │   │   │   │   └── review_tests.rs
 │   │   │   │   │   │   ├── metadata_hold.rs
 │   │   │   │   │   │   └── restart_gate_tests.rs
 │   │   │   │   │   ├── handoff_retry_tests.rs

@@ -869,3 +869,6 @@ async fn automatic_ingress_and_handoff_keep_the_first_hold_reason() {
         tokio::join!(dispatch, overlap);
     }
 }
+
+#[path = "owner_ingress_tests/readiness_member_tests.rs"]
+mod readiness_member_tests;

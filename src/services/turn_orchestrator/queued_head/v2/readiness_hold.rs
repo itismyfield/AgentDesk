@@ -3,10 +3,17 @@
 use super::*;
 use crate::db::turns::TerminalOutcome;
 
-/// The original's identity and body digest, as a hold names it.
-fn hold_key(item: &PendingQueueItem) -> (QueueIdentity, String) {
-    let member = refused::refused_member(item);
-    (member.identity, member.fingerprint)
+impl ReadinessHold {
+    /// Matches only the surviving prefix of the first held unit, excluding its front.
+    pub(super) fn matching_followers<'a>(
+        &'a self,
+        items: impl Iterator<Item = &'a PendingQueueItem>,
+    ) -> impl Iterator<Item = &'a PendingQueueItem> {
+        items
+            .zip(self.members.iter().flatten().skip(1))
+            .take_while(|(item, saved)| refused::refused_member(item) == **saved)
+            .map(|(item, _)| item)
+    }
 }
 
 impl Owner {
@@ -25,7 +32,9 @@ impl Owner {
             return Ok(hold.clone());
         }
         let mut next = self.snapshot.clone();
-        let hold = next.remember_readiness_hold(&front.1, cause, now);
+        let followers = self.followers();
+        let members = std::iter::once(&front.1).chain(followers.iter());
+        let hold = next.remember_readiness_hold(members, cause, now);
         self.commit(next)?;
         Ok(hold)
     }
@@ -35,9 +44,7 @@ impl Owner {
         if self.snapshot.head_injection.is_some() {
             return None;
         }
-        let (identity, fingerprint) = hold_key(self.snapshot.items.first()?);
-        (self.snapshot.readiness_holds.iter())
-            .find(|hold| hold.identity == identity && hold.fingerprint == fingerprint)
+        self.snapshot.readiness_hold(self.snapshot.items.first()?)
     }
 
     /// Refuses the expired front `expected` holds in one commit: its unit leaves, origins fail,
@@ -50,12 +57,9 @@ impl Owner {
         if self.front_hold() != Some(expected) || !expected.expired(now) {
             return Ok(false);
         }
-        // The unit a claim or grant would have sent: the front and the followers it carries.
         let unit: Vec<PendingQueueItem> = std::iter::once(&self.snapshot.items[0])
-            .chain(self.followers().iter())
-            .zip(&self.snapshot.items)
-            .take_while(|(a, b)| same(a, b))
-            .map(|(_, item)| item.clone())
+            .chain(expected.matching_followers(self.snapshot.items.iter().skip(1)))
+            .cloned()
             .collect();
         let mut next = self.snapshot.clone();
         next.owe_queued(0..unit.len(), TerminalOutcome::Failed, now);
@@ -100,19 +104,19 @@ impl Owner {
         let Some(head) = &self.snapshot.head_injection else {
             return false;
         };
-        let (identity, fingerprint) = hold_key(&head.original);
-        (self.snapshot.readiness_holds.iter()).any(|hold| {
-            hold.identity == identity && hold.fingerprint == fingerprint && now >= hold.due_at_ms
-        })
+        self.snapshot
+            .readiness_hold(&head.original)
+            .is_some_and(|hold| now >= hold.due_at_ms)
     }
 
     /// The readiness due of `key`'s original while `key` is the attempted head.
-    fn attempt_due(&self, key: &AttemptRef) -> Option<u64> {
-        let head = (self.snapshot.head_injection.as_ref()).filter(|head| key.matches(head))?;
-        let (identity, fingerprint) = hold_key(&head.original);
-        (self.snapshot.readiness_holds.iter())
-            .find(|hold| hold.identity == identity && hold.fingerprint == fingerprint)
-            .map(|hold| hold.due_at_ms)
+    pub(crate) fn attempt_readiness_hold(&self, key: &AttemptRef) -> Option<&ReadinessHold> {
+        let head = self
+            .snapshot
+            .head_injection
+            .as_ref()
+            .filter(|head| key.matches(head))?;
+        self.snapshot.readiness_hold(&head.original)
     }
 
     /// Approves `key`'s first key (C-s included) unless its original's readiness due came first;
@@ -122,13 +126,13 @@ impl Owner {
         key: &AttemptRef,
         now: &dyn Fn() -> u64,
     ) -> Result<(), String> {
-        let Some(due) = self.attempt_due(key) else {
+        let Some(hold) = self.attempt_readiness_hold(key) else {
             return Ok(());
         };
         if self.first_key_approved.as_ref() == Some(key) {
             return Ok(());
         }
-        if now() >= due {
+        if now() >= hold.due_at_ms {
             self.due_refused = Some(key.clone());
             return Err("readiness_deadline".into());
         }
@@ -140,7 +144,10 @@ impl Owner {
     /// key, or past the due when it gave up without reaching one.
     pub(crate) fn leaf_outlived_due(&mut self, key: &AttemptRef, now: &dyn Fn() -> u64) -> bool {
         let refused = self.due_refused.take_if(|refused| refused == key).is_some();
-        refused || self.attempt_due(key).is_some_and(|due| now() >= due)
+        refused
+            || self
+                .attempt_readiness_hold(key)
+                .is_some_and(|hold| now() >= hold.due_at_ms)
     }
 
     /// Marks an attemptless front refusal's notice sent; `None` when none names `identity`.
@@ -159,25 +166,33 @@ impl Owner {
 }
 
 impl SnapshotV2 {
-    /// A retry of the same input keeps its first deadline.
-    pub(super) fn remember_readiness_hold(
+    pub(super) fn readiness_hold(&self, original: &PendingQueueItem) -> Option<&ReadinessHold> {
+        self.hold_for_member(&refused::refused_member(original))
+    }
+
+    fn hold_for_member(&self, member: &RefusedMember) -> Option<&ReadinessHold> {
+        self.readiness_holds
+            .iter()
+            .find(|hold| hold.identity == member.identity && hold.fingerprint == member.fingerprint)
+    }
+
+    /// A retry keeps the first deadline and the first unit it covers.
+    pub(super) fn remember_readiness_hold<'a>(
         &mut self,
-        original: &PendingQueueItem,
+        members: impl Iterator<Item = &'a PendingQueueItem>,
         cause: &str,
         now: u64,
     ) -> ReadinessHold {
-        let (identity, fingerprint) = hold_key(original);
-        if let Some(hold) = self
-            .readiness_holds
-            .iter()
-            .find(|hold| hold.identity == identity && hold.fingerprint == fingerprint)
-        {
+        let mut members = members.map(refused::refused_member);
+        let original = members.next().expect("held unit has a front");
+        if let Some(hold) = self.hold_for_member(&original) {
             return hold.clone();
         }
         const READINESS_HOLD_MS: u64 = 10_000;
         let hold = ReadinessHold {
-            identity,
-            fingerprint,
+            identity: original.identity.clone(),
+            fingerprint: original.fingerprint.clone(),
+            members: Some(std::iter::once(original).chain(members).collect()),
             cause: cause.into(),
             started_at_ms: now,
             due_at_ms: now.saturating_add(READINESS_HOLD_MS),

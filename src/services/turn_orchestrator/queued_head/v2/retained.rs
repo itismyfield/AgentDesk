@@ -181,7 +181,7 @@ impl Owner {
         let message = head.original.message_id;
         if let Some(now) = now {
             let cause = crate::services::claude_tui::input::PreparationHold::IDLE_EVIDENCE_PENDING;
-            next.remember_readiness_hold(&head.original, cause, now);
+            next.remember_readiness_hold(head.members(), cause, now);
         }
         let attempt = &key.attempt;
         (next.admission_binds)

@@ -2,6 +2,57 @@ use super::*;
 use crate::services::claude_tui::readiness;
 use crate::services::discord::queue_io::input_owner::drive;
 
+const METADATA: &str = concat!(
+    "{\"type\":\"last-prompt\"}\n",
+    "{\"type\":\"ai-title\"}\n",
+    "{\"type\":\"mode\"}\n",
+    "{\"type\":\"permission-mode\"}\n",
+    "{\"type\":\"session-owner\"}\n",
+    "{\"type\":\"atis-latch\"}\n",
+);
+
+#[path = "metadata_hold/review_tests.rs"]
+mod review_tests;
+
+type Handoffs = std::sync::mpsc::Receiver<(Front, Settled)>;
+
+fn notice_drive(
+    rig: &Rig,
+    pool: sqlx::PgPool,
+) -> (Arc<Drive>, Handoffs, std::sync::mpsc::Receiver<()>) {
+    let (fronts, inbox) = std::sync::mpsc::channel::<(Front, Settled)>();
+    let idle: Handoff = Arc::new(move |front| {
+        let (settled, answer) = tokio::sync::oneshot::channel();
+        let sent = fronts.send((front, settled));
+        Box::pin(async move {
+            sent.map_err(|e| e.to_string())?;
+            answer.await.map_err(|e| e.to_string())?
+        })
+    });
+    let mut pump = owner_drive(
+        (rig.mailbox.clone(), Some(pool)),
+        (ProviderKind::Claude, rig.channel),
+        idle,
+        None,
+    );
+    let driver = Arc::get_mut(&mut pump).unwrap();
+    let drain = driver
+        .settled
+        .take()
+        .expect("owner attaches its actual notice drain");
+    let (passed, passes) = std::sync::mpsc::channel();
+    driver.settled = Some(Arc::new(move || {
+        let pending = drain();
+        let passed = passed.clone();
+        Box::pin(async move {
+            pending.await;
+            let _ = passed.send(());
+        })
+    }));
+
+    (pump, inbox, passes)
+}
+
 #[test]
 fn tmux_metadata_only_readiness_hold_refuses_once_without_another_wake_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -9,20 +60,12 @@ fn tmux_metadata_only_readiness_hold_refuses_once_without_another_wake_pg() {
     let mut config = crate::config::Config::default();
     config.runtime.followup_prompt_ready_timeout_secs = Some(1);
     crate::config_live_reload::install(config);
-    let tail = concat!(
-        "{\"type\":\"last-prompt\"}\n",
-        "{\"type\":\"ai-title\"}\n",
-        "{\"type\":\"mode\"}\n",
-        "{\"type\":\"permission-mode\"}\n",
-        "{\"type\":\"session-owner\"}\n",
-        "{\"type\":\"atis-latch\"}\n",
-    );
     let rig = rig(
         "oi-tmux-metadata-held",
         7_272_714,
         "normal",
         view("", false),
-        tail,
+        METADATA,
     );
     let native = uuid::Uuid::new_v4().to_string();
     rehydrate(&rig, &native);
@@ -43,37 +86,9 @@ fn tmux_metadata_only_readiness_hold_refuses_once_without_another_wake_pg() {
         let pool = db.connect_and_migrate().await;
         (db, pool)
     });
-    let (fronts, inbox) = std::sync::mpsc::channel::<(Front, Settled)>();
-    let idle: Handoff = Arc::new(move |front| {
-        let (settled, answer) = tokio::sync::oneshot::channel();
-        let sent = fronts.send((front, settled));
-        Box::pin(async move {
-            sent.map_err(|e| e.to_string())?;
-            answer.await.map_err(|e| e.to_string())?
-        })
-    });
-    let mut pump = owner_drive(
-        (rig.mailbox.clone(), Some(pool.clone())),
-        (ProviderKind::Claude, rig.channel),
-        idle,
-        None,
-    );
-    let driver = Arc::get_mut(&mut pump).unwrap();
-    let drain = driver
-        .settled
-        .take()
-        .expect("owner attaches its actual notice drain");
-    let (passed, passes) = std::sync::mpsc::channel();
-    driver.settled = Some(Arc::new(move || {
-        let pending = drain();
-        let passed = passed.clone();
-        Box::pin(async move {
-            pending.await;
-            let _ = passed.send(());
-        })
-    }));
+    let (pump, inbox, passes) = notice_drive(&rig, pool.clone());
 
-    let mut first_due = None;
+    let mut first_hold = None;
     for attempt in 0..2 {
         if attempt == 1 {
             // The original was already held when volatile readiness was lost.
@@ -101,11 +116,20 @@ fn tmux_metadata_only_readiness_hold_refuses_once_without_another_wake_pg() {
         let snap = rig.snapshot();
         assert_eq!(snap["items"].as_array().map(Vec::len), Some(1), "{snap}");
         assert!(snap["head_injection"].is_null(), "{snap}");
-        let due = snap["readiness_holds"][0]["due_at_ms"].as_u64();
+        let holds = snap["readiness_holds"].as_array().unwrap();
+        assert_eq!(holds.len(), 1);
+        let hold = &holds[0];
+        let start = hold["started_at_ms"].as_u64().unwrap();
+        let due = hold["due_at_ms"].as_u64().unwrap();
+        assert_eq!(due.checked_sub(start), Some(10_000));
         if attempt == 0 {
-            first_due = due;
+            first_hold = Some(hold.clone());
         } else {
-            assert_eq!(due, first_due, "the same original keeps its first due");
+            assert_eq!(
+                Some(hold),
+                first_hold.as_ref(),
+                "the same original keeps its first hold"
+            );
         }
     }
     let observed = passes.recv_timeout(Duration::from_secs(15));

@@ -217,7 +217,9 @@ pub(crate) fn idle_claude(
     channel: u64,
     receipt: Arc<crate::services::provider::CancelToken>,
 ) -> Leaf {
-    use crate::services::claude_tui::guarded_outcome::SubmissionError;
+    use crate::services::claude_tui::{
+        guarded_outcome::SubmissionError, host_input, input::PreparationHold, readiness,
+    };
     Box::new(move |frame| {
         crate::services::claude_tui::guarded_outcome::with_receipt_sink(Some(&receipt), || {
             let sent = crate::services::claude_tui::input::send_warm_followup_owned(
@@ -234,7 +236,20 @@ pub(crate) fn idle_claude(
                     arm_screen(channel, pane.clone());
                     Ok(Completion::Held(MODAL.into()))
                 }
-                Err(SubmissionError::Held(hold)) if hold.waits_for_idle_evidence() => {
+                Err(SubmissionError::Held(hold))
+                    if hold.reason == PreparationHold::OWNER_READINESS_DEADLINE =>
+                {
+                    Ok(Completion::Refused(format!("unproven: {hold:?}")))
+                }
+                Err(SubmissionError::Held(hold))
+                    if hold.waits_for_idle_evidence()
+                        && host_input::observe_draft(&session).as_deref().is_some_and(
+                            |capture| {
+                                !readiness::idle::focus_modal(capture)
+                                    && readiness::empty_draft(capture)
+                            },
+                        ) =>
+                {
                     Ok(Completion::ReadinessHeld(format!("held: {hold:?}")))
                 }
                 Err(SubmissionError::Held(hold)) => Ok(held(&hold)),

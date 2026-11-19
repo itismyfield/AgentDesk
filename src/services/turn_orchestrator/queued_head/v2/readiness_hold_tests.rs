@@ -169,3 +169,28 @@ fn a_reserved_leaf_starts_its_first_key_only_before_the_original_due() {
         );
     }
 }
+
+#[test]
+fn a_legacy_readiness_hold_without_members_can_only_refuse_its_front() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = queue_dir();
+    let mut owner = owner(&dir, &[(8, 7), (9, 7)]);
+    owner
+        .hold_readiness(&owner.front().unwrap(), "idle_evidence_pending", 1_000)
+        .unwrap();
+    let mut old = owner.json().unwrap();
+    old["readiness_holds"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("members")
+        .unwrap();
+    owner.commit(serde_json::from_value(old).unwrap()).unwrap();
+    drop(owner);
+
+    let mut recovered = Owner::adopt(dir.path().join("q.json"), "readiness".into()).unwrap();
+    assert_eq!(recovered.settle_due(), Some(11_000));
+    assert!(recovered.followers().is_empty());
+    recovered.tick(11_000).unwrap();
+    assert_eq!(recovered.front().unwrap().1.message_id, 9);
+    assert_eq!(recovered.snapshot.refused_fronts[0].members.len(), 1);
+}
