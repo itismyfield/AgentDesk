@@ -2507,7 +2507,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/dispatches/discord_delivery/orchestration.rs`
 - `src/services/dispatches/outbox_route.rs`
 - `src/services/engine_runtime/mod.rs`
-- `src/services/gemini.rs`
 - `src/services/onboarding/mod.rs`
 - `src/services/opencode.rs`
 - `src/services/platform/binary_resolver.rs`
