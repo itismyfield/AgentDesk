@@ -60,7 +60,6 @@ export interface ProviderSuffixDetection {
 export const PROVIDER_SUFFIX_MAP: Record<string, CliProvider> = {
   "-cc": "claude",
   "-cdx": "codex",
-  "-gm": "gemini",
   "-qw": "qwen",
   "-oc": "opencode",
   "-ag": "antigravity",
@@ -72,7 +71,7 @@ export const PROVIDER_SUFFIX_MAP: Record<string, CliProvider> = {
  * Rules (case-insensitive):
  *   channel `adk-cc`      → claude
  *   channel `agentdesk-cdx` → codex
- *   channel `my-bot-gm`   → gemini
+ *   channel `my-bot-qw`   → qwen
  *   agent_id `research-cc` → claude (fallback)
  *
  * Returns `{ provider: null, suffix: null, source: null }` when nothing matches.

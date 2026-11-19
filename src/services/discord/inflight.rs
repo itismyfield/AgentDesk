@@ -3925,20 +3925,20 @@ mod stall_recovery_tests {
     #[test]
     fn clear_inflight_state_if_matches_preserves_rebind_origin() {
         let temp = TempDir::new().unwrap();
-        let mut state = build_inflight_for_guard_tests(ProviderKind::Gemini, 901, 444);
+        let mut state = build_inflight_for_guard_tests(ProviderKind::Qwen, 901, 444);
         state.rebind_origin = true;
         let user_msg_id = state.user_msg_id;
         save_inflight_state_in_root(temp.path(), &state).unwrap();
 
         let outcome = clear_inflight_state_if_matches_in_root(
             temp.path(),
-            &ProviderKind::Gemini,
+            &ProviderKind::Qwen,
             901,
             user_msg_id,
         );
         assert_eq!(outcome, GuardedClearOutcome::RebindOriginSkipped);
         assert_eq!(
-            load_inflight_states_from_root(temp.path(), &ProviderKind::Gemini).len(),
+            load_inflight_states_from_root(temp.path(), &ProviderKind::Qwen).len(),
             1
         );
     }
