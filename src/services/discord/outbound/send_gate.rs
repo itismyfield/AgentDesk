@@ -8,14 +8,13 @@ use serenity::ChannelId;
 use sqlx::PgPool;
 
 use super::manual_delivery::{
-    ManualNotification, ResolvedManualMessage, SerenityManualOutboundClient,
-    send_authorized_manual_message,
+    ManualNotification, ManualOutboundDeliveryId, ResolvedManualMessage,
+    SerenityManualOutboundClient, send_authorized_manual_message,
 };
 use super::send_target::{
     SendTargetResolutionError, resolve_send_target_channel_id_with_backends,
     routine_thread_parent_hint,
 };
-use crate::domain::outbound::key::ManualOutboundDeliveryId;
 use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::shared_outbound_deduper;
 use crate::services::provider::ProviderKind;

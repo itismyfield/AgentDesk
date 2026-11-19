@@ -11,7 +11,7 @@ use serenity::{ChannelId, CreateMessage};
 use sqlx::PgPool;
 
 use crate::db::session_transcripts::{PersistSessionTranscript, persist_turn_db};
-use crate::domain::outbound::key::ManualOutboundDeliveryId;
+pub(super) use crate::domain::outbound::key::ManualOutboundDeliveryId;
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::formatting::{build_long_message_attachment, split_message};
 use crate::services::discord::http::dispatch_channel_message;
