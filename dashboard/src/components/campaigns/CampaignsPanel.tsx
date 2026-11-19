@@ -254,7 +254,8 @@ export default function CampaignsPanel({ language }: { language: string }) {
     onRefresh={refreshAll} refreshing={loading} tr={tr} />;
 
   const legacyTasks: TaskView[] = campaign ? campaign.nodes.map((value) => ({ ...legacyTask(value, live[campaign.id]?.[value.id]), live: live[campaign.id]?.[value.id], hold: value.post_merge_hold })) : [];
-  const serverTaskViews = serverDoc ? serverTasks(serverDoc, tr) : [];
+  const serverEvents = server.events?.campaign === serverDoc?.view.campaign_id ? server.events?.events ?? [] : [];
+  const serverTaskViews = serverDoc ? serverTasks(serverDoc, serverEvents, tr) : [];
   const openNode = node && (campaign?.nodes.find((value) => value.id === node) ?? (mode === "server" ? serverDoc?.definition.nodes.find((value) => value.id === node) : undefined));
   const legacyDetail = campaign && <CampaignDetail key={`legacy:${campaign.id}`} title={campaign.title} showTitle={!phone} tr={tr}
     chips={!phone && <span className="flex flex-wrap items-center gap-2 text-xs text-[var(--fg-muted)]">

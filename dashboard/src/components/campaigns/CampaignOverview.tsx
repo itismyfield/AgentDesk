@@ -7,7 +7,6 @@ import { Badge as KitBadge } from "../../kit/free/badge-clean";
 import { Button } from "../../kit/free/button-clean";
 import AgentPersona from "../AgentPersona";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
-import { safeCampaignLink } from "./campaignModel";
 import { GATE_LABELS, findAgent, taskCounts, type OverviewTask, type RecentEntry } from "./campaignOverviewModel";
 import { LABELS, LiveChip, type Tr } from "./campaignPresentation";
 import { StatusMarker, nodeMarker } from "./StatusMarker";
@@ -71,17 +70,12 @@ export default function CampaignOverview({ tasks, limit, showPr, asOf, summaryEx
           <LockKeyhole aria-hidden className="mt-0.5 size-5 shrink-0 text-[var(--warn)]" />
           <span className="grid min-w-0 gap-0.5">
             <strong className="text-sm font-semibold text-[var(--fg)] [word-break:keep-all]">{tr(`${GATE_LABELS[task.gate!.gate][0]} 승인 대기`, `Waiting for ${GATE_LABELS[task.gate!.gate][1].toLowerCase()} approval`)} · {task.title}</strong>
-            <span className="text-xs text-[var(--fg-muted)]">{task.gate!.opened_at ? waited(task.gate!.opened_at, tr) : task.stage}</span>
+            <span className="text-xs text-[var(--fg-muted)]">{waited(task.gate!.openedAt, tr)}</span>
           </span>
         </button>
-        <span className="grid min-w-0 gap-1">
-          <span className="grid grid-cols-2 gap-2 @[36rem]/overview:flex @[36rem]/overview:items-center">
-            {safeCampaignLink(task.gate!.evidence_url ?? null)
-              ? <a href={safeCampaignLink(task.gate!.evidence_url ?? null)} target="_blank" rel="noopener noreferrer" className="justify-center rounded-[var(--r-sm)] border border-[var(--line)] px-3 text-xs text-[var(--fg)]">{tr("근거 보기", "View evidence")}</a>
-              : <span />}
-            <Button variant="primary" size="sm" disabled title={tr("승인 API 준비 중(#8249)", "Approval API in progress (#8249)")}>{tr("승인", "Approve")}</Button>
-          </span>
+        <span className="flex min-w-0 items-center justify-between gap-3">
           <span className="text-[11px] text-[var(--fg-muted)]">{tr("승인 API 준비 중(#8249)", "Approval API in progress (#8249)")}</span>
+          <Button variant="primary" size="sm" disabled title={tr("승인 API 준비 중(#8249)", "Approval API in progress (#8249)")}>{tr("승인", "Approve")}</Button>
         </span>
       </div>)}
       {stuck.length > 0 && <div className="grid min-w-0 gap-0.5 rounded-xl border border-[var(--line)] p-1.5" onKeyDown={moveListFocus}>
@@ -135,7 +129,8 @@ export default function CampaignOverview({ tasks, limit, showPr, asOf, summaryEx
       </div>
       {open && <div className="grid min-w-0 gap-1">
         <div id={listId} role="list" className="grid min-w-0 gap-0.5" aria-label={tr(...LABELS[open.status])}>
-          {(listAll ? open.tasks : open.tasks.slice(0, LIST_PREVIEW)).map((task) => <div key={task.id} role="listitem" className="min-w-0">{row(task)}</div>)}
+          {(listAll ? open.tasks : open.tasks.slice(0, LIST_PREVIEW)).map((task) => <div key={task.id} role="listitem" className="min-w-0">{row(task, task.status === "pending" && task.blocker
+            && <span className="campaign-reason line-clamp-2 text-xs text-[var(--fg-muted)] [overflow-wrap:anywhere]">{tr("대기 사유", "Waiting on")}: {task.blocker}</span>)}</div>)}
         </div>
         {open.tasks.length > LIST_PREVIEW && <div className="px-1"><Button variant="ghost" size="sm" aria-expanded={listAll} onClick={() => setListAll((value) => !value)}>{listAll ? tr("처음 몇 개만 보기", "Show fewer") : tr(`${open.tasks.length - LIST_PREVIEW}개 더 보기`, `Show ${open.tasks.length - LIST_PREVIEW} more`)}</Button></div>}
       </div>}

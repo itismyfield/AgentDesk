@@ -58,12 +58,35 @@ const GATES = ["start", "implementation", "review", "landing", "merge", "deploy"
 export const GATE_LABELS: Record<(typeof GATES)[number], Label> = {
   start: ["착수", "Start"], implementation: ["구현", "Implementation"], review: ["리뷰", "Review"], landing: ["착지", "Landing"], merge: ["머지", "Merge"], deploy: ["배포", "Deploy"],
 };
-// Provisional: the view has no approval field yet (#8249). A node shows as waiting for approval only when its
-// runtime carries this shape; anything else reads as no gate.
-const pendingGateSchema = z.object({
-  gate: z.enum(GATES), opened_at: z.iso.datetime({ offset: true }).nullable().optional(), evidence_url: z.string().nullable().optional(),
+const gateEventSchema = z.looseObject({
+  event: z.enum(["approval_gate_opened", "approval_gate_approved"]),
+  binding: z.looseObject({ run_id: z.string(), node_id: z.string(), gate: z.enum(GATES) }),
 });
-export type PendingGate = z.infer<typeof pendingGateSchema>;
+export interface PendingGate { gate: (typeof GATES)[number]; openedAt: string }
+
+/** Gates the shown run opened and has not approved, by node. Only the read events count, so an older opening is missed. */
+export function openGates(events: ServerCampaignEvent[], runId: string | null): Map<string, PendingGate> {
+  const open = new Map<string, PendingGate & { node: string }>();
+  for (const event of events) {
+    const kind = gateEventSchema.safeParse(event.kind).data;
+    if (!kind || kind.binding.run_id !== runId) continue;
+    const { node_id: node, gate } = kind.binding;
+    if (kind.event === "approval_gate_approved") open.delete(`${node}\n${gate}`);
+    else open.set(`${node}\n${gate}`, { node, gate, openedAt: event.observed_at });
+  }
+  const byNode = new Map<string, PendingGate>();
+  for (const { node, gate, openedAt } of open.values()) if (!byNode.has(node)) byNode.set(node, { gate, openedAt });
+  return byNode;
+}
+
+const PLACEHOLDER_BLOCKERS = /^(none|없음|n\/a|-)$/i;
+/** A blank or placeholder blocker ("none", "없음", "n/a", "-") means nothing blocks the task. */
+export function cleanBlocker(text: string | null | undefined): string | null {
+  const value = text?.trim();
+  return value && !PLACEHOLDER_BLOCKERS.test(value) ? value : null;
+}
+// A pending task's blocker is a precondition, not a block; it shows only as the row's reason.
+const needsSomeone = (status: CampaignNodeStatus, blocker: string | null) => status === "blocked" || status === "failed" || (status === "running" && !!blocker);
 
 /** A task as the overview shows it, read from a ledger node or a server node. Only fields the server gave are set. */
 export interface OverviewTask {
@@ -72,10 +95,10 @@ export interface OverviewTask {
   updatedAt: string | null; session: string | null; agent: string | null; prUrl: string | null; attention: boolean; gate: PendingGate | null;
 }
 
-/** Live work makes an open node running; a pending node with a blocker needs someone like a blocked one. */
+/** Live work makes an open node running. */
 export function legacyTask(node: CampaignNode, live?: CampaignNodeLive): OverviewTask {
   const status = node.status !== "completed" && node.status !== "skipped" && liveIsWorking(live) ? "running" : node.status;
-  const blocker = node.blocker?.trim() || null;
+  const blocker = cleanBlocker(node.blocker);
   const step = campaignStageStep(node.stage).index;
   const title = campaignTaskTitle(node);
   return {
@@ -83,7 +106,7 @@ export function legacyTask(node: CampaignNode, live?: CampaignNodeLive): Overvie
     stage: node.stage.trim(), step: step < 0 ? null : CAMPAIGN_STAGES[step].label,
     summary: node.summary?.trim() && node.summary.trim() !== title ? node.summary.trim() : null, benefit: node.benefit?.trim() || null, blocker,
     updatedAt: node.updated_at, session: node.session_id, agent: node.assignee, prUrl: safeCampaignLink(node.pr_url) ?? null,
-    attention: status === "blocked" || status === "failed" || (status === "pending" && !!blocker), gate: null,
+    attention: needsSomeone(status, blocker), gate: null,
   };
 }
 
@@ -93,24 +116,25 @@ const DISPOSITION_STATUS: Record<keyof typeof DISPOSITION_LABELS, CampaignNodeSt
 const SESSION_STATES: Record<string, Label> = { alive: ["세션 살아 있음", "session alive"], gone: ["세션 끝남", "session gone"], unknown: ["세션 확인 불가", "session unknown"] };
 const SERVER_STAGES = Object.keys(STAGE_LABELS);
 
-export function serverTasks({ definition, view }: ServerCampaignDocument, tr: Tr): OverviewTask[] {
+export function serverTasks({ definition, view }: ServerCampaignDocument, events: ServerCampaignEvent[], tr: Tr): OverviewTask[] {
   const nodes = new Map(view.nodes.map((node) => [node.id, node]));
+  const gates = openGates(events, view.run_id);
   return definition.nodes.map((node) => {
     const nodeView = nodes.get(node.id);
     const runtime = nodeView?.runtime;
     const status = runtime ? DISPOSITION_STATUS[runtime.disposition] : "pending";
     const reasons = nodeView ? nodeReasons(nodeView, view.reasons) : [];
     const session = runtime?.current_attempt ? view.sessions.find((value) => value.attempt_id === runtime.current_attempt) : undefined;
-    const gate = pendingGateSchema.safeParse((runtime as Record<string, unknown> | undefined)?.pending_gate).data ?? null;
+    const blocker = reasons.length ? reasons.map((code) => tr(...REASON_LABELS[code])).join(" · ") : null;
     const issue = safeCampaignLink(node.issue_url) ? new URL(node.issue_url).pathname.match(/\/issues\/(\d+)\/?$/)?.[1] : undefined;
     return {
       id: node.id, title: node.title, number: issue ? `#${issue}` : null, status,
       marker: !runtime ? { tone: "plan", ratio: 0 } : status === "running" ? { tone: "progress", ratio: (SERVER_STAGES.indexOf(runtime.stage) + 1) / (SERVER_STAGES.length + 1) } : nodeMarker(status),
       stage: runtime ? [tr(...DISPOSITION_LABELS[runtime.disposition]), tr(...STAGE_LABELS[runtime.stage]), tr(`계열 ${runtime.series}`, `series ${runtime.series}`)].join(" · ") : tr("서버 상태 없음", "No server state"),
       step: runtime ? STAGE_LABELS[runtime.stage] : null, summary: null, benefit: null,
-      blocker: reasons.length ? reasons.map((code) => tr(...REASON_LABELS[code])).join(" · ") : null,
+      blocker,
       updatedAt: null, session: session ? `${tr(...SESSION_STATES[session.observation.state])} · ${session.identity.gate.host}` : null,
-      agent: null, prUrl: null, attention: status === "blocked" || status === "failed" || !!gate, gate,
+      agent: null, prUrl: null, attention: needsSomeone(status, blocker), gate: gates.get(node.id) ?? null,
     };
   });
 }

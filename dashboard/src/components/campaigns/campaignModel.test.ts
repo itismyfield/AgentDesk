@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CampaignNode } from "../../api/campaigns";
 import { CAMPAIGN_STAGES, campaignIssueLabel, campaignProgress, campaignStageStep, dependencyNeighborhood, groupCampaignNodes, safeCampaignLink } from "./campaignModel";
-import { legacyTask, statusSentence } from "./campaignOverviewModel";
+import { legacyTask, openGates, statusSentence } from "./campaignOverviewModel";
 import { makeCampaignNode, makeLargeCampaign } from "./campaignTestFixtures";
 
 function node(id: string, dependencies: string[] = [], status: CampaignNode["status"] = "pending"): CampaignNode {
@@ -81,10 +81,20 @@ describe("first-screen glance", () => {
     expect(raw.length).toBeLessThanOrEqual(28);
     expect(raw.endsWith("…")).toBe(true);
   });
-  it("treats a pending task with a blocker like a blocked one and says so in the status sentence", () => {
-    const tasks = [node("b", [], "blocked"), node("r", [], "running"), { ...node("p1"), blocker: "waiting on review" }, node("p2"), node("c", [], "completed")].map((value) => legacyTask(value));
-    expect(tasks.filter((task) => task.attention).map((task) => task.id)).toEqual(["b", "p1"]);
-    expect(statusSentence("Running", tasks, (_, en) => en)).toBe("Running · 1 running, 2 blocked");
+  it("counts running work with a real blocker as blocked; a pending blocker is a precondition and a placeholder is none", () => {
+    const blocker = (value: CampaignNode, text: string) => ({ ...value, blocker: text });
+    const tasks = [node("b", [], "blocked"), blocker(node("r1", [], "running"), " waits on deploy "), blocker(node("r2", [], "running"), " N/A "),
+      blocker(node("p1"), "선행: #1"), blocker(node("p2"), "없음"), node("c", [], "completed")].map((value) => legacyTask(value));
+    expect(tasks.filter((task) => task.attention).map((task) => task.id)).toEqual(["b", "r1"]);
+    expect(tasks.map((task) => task.blocker)).toEqual([null, "waits on deploy", null, "선행: #1", null, null]);
+    expect(statusSentence("Running", tasks, (_, en) => en)).toBe("Running · 2 running, 2 blocked");
+  });
+  it("keeps a gate open from its opening event until the same run, node and gate is approved", () => {
+    const event = (sequence: number, event: string, run_id: string, node_id: string, gate: string) =>
+      ({ sequence, run_id, command_id: `c${sequence}`, observed_at: `2026-11-18T07:0${sequence}:00Z`, kind: { event, binding: { run_id, node_id, gate } } });
+    const events = [event(1, "approval_gate_opened", "run-1", "A", "review"), event(2, "approval_gate_opened", "run-1", "B", "merge"),
+      event(3, "approval_gate_approved", "run-1", "A", "review"), event(4, "approval_gate_opened", "run-0", "C", "deploy"), event(5, "node_failed", "run-1", "D", "start")];
+    expect([...openGates(events, "run-1")]).toEqual([["B", { gate: "merge", openedAt: "2026-11-18T07:02:00Z" }]]);
   });
   it("counts open nodes with work running now as running, and leaves closed and quiet ones alone", () => {
     const live = (running: boolean) => ({ card_id: "card", card_status: "in_progress", dispatch_type: "implementation", dispatch_status: "dispatched", session_status: running ? "turn_active" : "idle", session_seen_at: null, running, queue_status: null });

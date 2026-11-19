@@ -27,9 +27,9 @@ const CAMPAIGNS = [
     node("i7336", "#7336 꺼진 맥의 채널 메시지를 다른 맥이 이어받기", {
       status: "blocked", stage: "design", issue_url: issue(7336), group: "Cluster", blocker: "mac-book 쪽 tailscale 인증이 만료되어 확인을 기다립니다.",
     }),
-    node("i7340", "#7340 릴레이 재전송 큐 지표", { status: "running", stage: "impl · 테스트 보강", issue_url: issue(7340), group: "Relay", assignee: "agent-luna", updated_at: "2026-11-18T07:00:00.000Z" }),
+    node("i7340", "#7340 릴레이 재전송 큐 지표", { status: "running", stage: "impl · 테스트 보강", issue_url: issue(7340), group: "Relay", assignee: "agent-luna", updated_at: "2026-11-18T07:00:00.000Z", blocker: " None " }),
     node("i7401", "#7401 게이트웨이 재연결", { status: "completed", stage: "merged", issue_url: issue(7401) }),
-    node("i7402", "#7402 게이트웨이 헬스 체크 간격 조정", { stage: "investigate", issue_url: issue(7402) }),
+    node("i7402", "#7402 게이트웨이 헬스 체크 간격 조정", { stage: "investigate", issue_url: issue(7402), blocker: "선행: #7401 게이트웨이 재연결" }),
     node("i7403", "#7403 Discord 스레드 재생성 시 세션 매핑 유지", { stage: "implement", issue_url: issue(7403), group: "Relay" }),
     node("i7404", "#7404 오래된 실행 로그 압축", { status: "skipped", stage: "dropped", issue_url: issue(7404), group: null }),
     node("cli-update", "Update CLIs on every node", { stage: "verify", group: null }),
@@ -47,7 +47,7 @@ const agent = (id: string, name: string, nameKo: string) => ({
   stats_tasks_done: 0, stats_tokens: 0, activity_source: "agentdesk", created_at: 1_790_000_000_000,
 });
 
-/** A server campaign waiting on a landing approval, with a failed and a blocked task. */
+/** A server campaign with a failed and a blocked task; its events open a landing gate on C. */
 function gatedServerCampaign() {
   const release = structuredClone(serverCampaignFixtures.failedRunning);
   release.definition.title = "대시보드 v3 착지";
@@ -55,8 +55,7 @@ function gatedServerCampaign() {
   release.definition.nodes[0].title = "설정 카탈로그";
   release.definition.nodes[1].title = "단계 보드";
   release.definition.nodes[2].title = "편집기 케이블타이";
-  const gated = release.view.nodes[2].runtime as Record<string, unknown>;
-  Object.assign(gated, { stage: "landing", pending_gate: { gate: "landing", opened_at: "2026-11-18T07:37:00.000Z", evidence_url: "https://github.com/itismyfield/AgentDesk/pull/8252" } });
+  release.view.nodes[2].runtime.stage = "landing";
   return release;
 }
 
@@ -114,7 +113,8 @@ async function serveServerCampaign(page: Page) {
   await json(page, /\/api\/server-campaigns\?.*$/, { campaigns: [release] });
   await json(page, /\/api\/server-campaigns\/release$/, { campaign: release });
   await json(page, /\/api\/server-campaigns\/release\/events(?:\?.*)?$/, { events: [
-    { sequence: 19, run_id: "run-1", command_id: "c-19", observed_at: "2026-11-18T07:37:00.000Z", kind: { event: "approval_gate_opened" } },
+    { sequence: 19, run_id: "run-1", command_id: "c-19", observed_at: "2026-11-18T07:37:00.000Z", kind: { event: "approval_gate_opened", binding: {
+      run_id: "run-1", node_id: "C", gate: "landing", definition_revision: 7, target: { kind: "candidate", base_sha: "a1b2c3d", head_sha: "e4f5a6b" }, policy_hash: "f".repeat(64) } } },
     { sequence: 20, run_id: "run-1", command_id: "c-20", observed_at: "2026-11-18T07:52:00.000Z", kind: { event: "node_failed" } },
   ] });
   return release;
@@ -151,6 +151,7 @@ test("campaign tab: the list or picker, one status sentence, what needs someone,
   await expect(chips).toHaveText([/^대기 3$/, /^완료 1$/, /^건너뜀 1$/]);
   await chips.first().click();
   await expect(panel.getByRole("list", { name: "대기" }).locator(".campaign-task-row")).toHaveCount(3);
+  await expect(panel.locator('[data-task-id="i7402"] .campaign-reason')).toHaveText("대기 사유: 선행: #7401 게이트웨이 재연결");
   await expect(panel.locator(".campaign-recent-heading")).toHaveText("최근 바뀐 작업 · 5");
   await expectNoHorizontalOverflow(page);
 

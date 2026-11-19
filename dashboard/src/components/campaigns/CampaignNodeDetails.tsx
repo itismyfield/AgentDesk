@@ -4,6 +4,7 @@ import { ApiRequestError } from "../../api/httpClient";
 import { Select } from "../common/Select";
 import { WidgetState } from "../common/WidgetState";
 import { NODE_STATUSES, safeCampaignLink } from "./campaignModel";
+import { legacyTask } from "./campaignOverviewModel";
 import { Badge, LABELS, cardStatusLabel, dispatchLabel, queueLabel, sessionLabel, type Tr } from "./campaignPresentation";
 
 export interface CampaignDraft {
@@ -30,6 +31,7 @@ export default function CampaignNodeDetails({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const draft = editing?.node;
+  const shown = legacyTask(node, live); // the status and blocker the overview shows
   const patch = (changes: Partial<CampaignNode>) => {
     if (editing) onDraftChange({ ...editing, node: { ...editing.node, ...changes } });
   };
@@ -181,7 +183,7 @@ export default function CampaignNodeDetails({
           <div className="grid gap-2">
             <h4>{tr("지금 상태", "Now")}</h4>
             <p className="campaign-description">{node.stage || "—"} · {tr(`라운드 ${node.round}`, `round ${node.round}`)}</p>
-            {node.blocker && <WidgetState kind="stale" title={tr("막힌 이유", "Blocker")} description={node.blocker} compact />}
+            {shown.blocker && <WidgetState kind="stale" title={shown.status === "pending" ? tr("대기 사유", "Waiting on") : tr("막힌 이유", "Blocker")} description={shown.blocker} compact />}
             {node.post_merge_hold && <WidgetState kind="stale" title={tr("보류: 머지 뒤 남은 일", "On hold: post-merge work")} description={node.post_merge_hold} compact />}
           </div>
           <div className="campaign-next">

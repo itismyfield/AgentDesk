@@ -66,7 +66,7 @@ export function ServerTaskDetails({ document, nodeId, gate, connection, busy, on
     <ul className="grid gap-1 text-xs">
       {runtime && <li>{tr("단계", "Stage")}: {tr(...STAGE_LABELS[runtime.stage])} · {tr(`리뷰 ${runtime.review_rounds}회 · 수리 ${runtime.repair_cycles}회`, `${runtime.review_rounds} reviews · ${runtime.repair_cycles} repairs`)}</li>}
       <li>{tr("수용조건", "Acceptance")}: {node.acceptance.length}</li>
-      {gate.opened_at && <li>{tr("요청 시각", "Requested")}: {time(gate.opened_at)}</li>}
+      <li>{tr("요청 시각", "Requested")}: {time(gate.openedAt)}</li>
     </ul>
     <div className="grid grid-cols-2 gap-2">
       <Button variant="secondary" onClick={() => setApproving(false)}>{tr("나중에", "Later")}</Button>
