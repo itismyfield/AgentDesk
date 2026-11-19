@@ -142,3 +142,6 @@ pub async fn prune_expired_cancel_tombstones(pool: &PgPool) -> Result<u64, sqlx:
         .await?;
     Ok(result.rows_affected())
 }
+
+#[cfg(test)]
+pub(super) mod tests;
