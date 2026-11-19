@@ -2,29 +2,30 @@ import { Suspense, lazy } from "react";
 import { formatPipelineAgentLabel, type SettingsNotificationType } from "./SettingsModel";
 import { Select } from "../../kit/free/select-clean";
 import { SettingsDisclosure, SettingsStatusMessage } from "./SettingsPrimitives";
-import type { SettingsPanelContext } from "./SettingsPanelTypes";
-import { sectionTitle } from "./SettingsRowSection";
+import type { SettingsTr } from "./SettingsPanelTypes";
 import { useSettingsPipelineSelector } from "./useSettingsPipelineSelector";
 
 const PipelineVisualEditor = lazy(() => import("../agent-manager/PipelineVisualEditor"));
 
 interface Props {
-  ctx: SettingsPanelContext;
+  tr: SettingsTr;
+  isKo: boolean;
   open: boolean;
   onToggle: () => void;
   notify: (ko: string, en: string, type?: SettingsNotificationType) => void;
 }
 
 /** The visual pipeline editor stays behind “고급 편집” and loads its data only once opened. */
-export function SettingsPipelineEditorSection({ ctx, open, onToggle, notify }: Props) {
-  const { tr, isKo } = ctx;
+export function SettingsPipelineEditorSection({ tr, isKo, open, onToggle, notify }: Props) {
   const selector = useSettingsPipelineSelector({ enabled: open, notify, tr });
-  const { title, description } = sectionTitle(ctx, "workflow.editor");
 
   return (
     <SettingsDisclosure
-      title={title}
-      description={description}
+      title={tr("세부 흐름 편집기", "Detailed workflow editor")}
+      description={tr(
+        "카드가 거치는 상태와 전환을 직접 바꿔요. 대부분은 바꿀 필요가 없어요.",
+        "Change the states and transitions cards go through. Most setups never need this.",
+      )}
       openLabel={tr("고급 편집", "Advanced editing")}
       closeLabel={tr("편집기 닫기", "Close editor")}
       open={open}

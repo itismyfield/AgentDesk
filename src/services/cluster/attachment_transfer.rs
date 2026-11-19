@@ -29,14 +29,7 @@ use sha2::{Digest, Sha256};
 /// Envelope version this build understands; any other value is rejected.
 pub(crate) const ATTACHMENT_BUNDLE_V1: u16 = 1;
 
-/// The message a bundle belongs to. Every field is compared, so a bundle can
-/// never be consumed against another bot, channel, or message.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct AttachmentMessageIdentity {
-    pub provider: String,
-    pub channel_id: String,
-    pub user_msg_id: String,
-}
+pub(crate) use uploads::AttachmentMessageIdentity;
 
 /// One attachment. `filename` is untrusted display text: S2 derives the storage
 /// name from ordinal and digest, and a consumer escapes it before echoing it.

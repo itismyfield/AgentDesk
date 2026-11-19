@@ -84,7 +84,7 @@ impl ReadBridge {
 
     /// Runs one read and waits for its own reply; the caller's absolute deadline travels with it.
     pub(super) fn read(&self, command: ReadCommand) -> Result<String, ReadError> {
-        let deadline = crate::engine::loader::bridge_op_deadline();
+        let deadline = crate::utils::bridge_deadline::current();
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             return Err(ReadError::Bridge(DEADLINE_PASSED.to_string()));
         }
