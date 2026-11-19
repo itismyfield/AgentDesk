@@ -14,6 +14,9 @@ hvars == <<hphase, haccepted, hretained, hdelivered, hreply, hfailure,
 vars == <<phase, accepted, retained, delivered, reply, visibleFailure,
           status, session, usedHost, launches, crashes>>
 Authorized == Target \in {"boundThread", "boundChannel"}
+LiveLocalContract == Mutation \in {"liveLocal", "beforeLiveLocal", "skipLiveCheck"}
+ThreadExecutionUnavailable ==
+    Target = "remoteThread" \/ (Target = "boundThread" /\ InitialSession # "live")
 HerdrFields ==
     /\ hphase = "request" /\ haccepted = FALSE /\ hretained = FALSE
     /\ hdelivered = 0 /\ hreply = 0 /\ hfailure = FALSE /\ hstatus = 0
@@ -33,8 +36,13 @@ Init ==
 \* Authorization precedes custody, bootstrap, mapping and host/pane effects.
 Authorize ==
     /\ phase = "request"
-    /\ IF (Authorized /\ ~(Mutation = "before" /\ Target = "boundThread"))
-          \/ (Mutation = "parentOpen" /\ Target = "parentUnavailable")
+    /\ IF Mutation = "beforeLiveLocal" /\ Target \in {"boundThread", "remoteThread"}
+       THEN /\ phase' = "denied" /\ status' = 403
+       ELSE IF LiveLocalContract /\ ThreadExecutionUnavailable /\ Mutation # "skipLiveCheck"
+       THEN /\ phase' = "denied" /\ status' = 503
+       ELSE IF (Authorized /\ ~(Mutation = "before" /\ Target = "boundThread"))
+               \/ (Mutation = "parentOpen" /\ Target = "parentUnavailable")
+               \/ (Mutation = "skipLiveCheck" /\ Target = "remoteThread")
        THEN /\ phase' = "authorized" /\ status' = 0
        ELSE /\ phase' = "denied"
             /\ status' = IF Target \in {"parentUnavailable", "parentMalformed"} THEN 503 ELSE 403
@@ -115,7 +123,12 @@ RejectedNoEffects == phase = "denied" =>
 ForeignForbidden == Target \in {"foreignThread", "foreignChannel"} /\ phase # "request" => status = 403
 ParentFailClosed == Target \in {"parentUnavailable", "parentMalformed"} /\ phase # "request" =>
     status = 503 /\ ~accepted /\ ~retained /\ delivered = 0 /\ reply = 0 /\ launches = 0
-BoundThreadAdmitted == Target = "boundThread" => phase # "denied"
+BoundThreadAdmitted ==
+    Target = "boundThread" /\ ~(LiveLocalContract /\ ThreadExecutionUnavailable) => phase # "denied"
+LiveLocalRefusal ==
+    LiveLocalContract /\ ThreadExecutionUnavailable /\ phase # "request" =>
+      status = 503 /\ phase = "denied" /\ ~accepted /\ ~retained
+      /\ delivered = 0 /\ reply = 0 /\ launches = 0
 SuccessBacked == phase = "done" => delivered = 1 /\ reply = 1
 HttpAcceptanceBacked == status = 200 => accepted
 LiveActualHostPreserved == InitialSession = "live" /\ delivered > 0 => usedHost = ActualHost

@@ -10,6 +10,8 @@ use tower::ServiceExt;
 
 #[path = "provider_dispatch_herdr_internal_start_tests.rs"]
 mod internal_start;
+#[path = "provider_dispatch_herdr_http_start_tests/thread_ingress_tests.rs"]
+mod thread_ingress;
 
 async fn app(fx: &Fixture, intake: &Intake) -> Router {
     let exists: bool =
@@ -71,12 +73,25 @@ async fn call_source(
     origin: &str,
     source: &str,
 ) -> (StatusCode, Value) {
-    let body = match endpoint {
+    call_target(app, endpoint, origin, source, None).await
+}
+
+async fn call_target(
+    app: &Router,
+    endpoint: &str,
+    origin: &str,
+    source: &str,
+    channel: Option<u64>,
+) -> (StatusCode, Value) {
+    let mut body = match endpoint {
         "start" => json!({"prompt":INPUT,"source":source,"origin_id":origin}),
         "deliver" => json!({"text":INPUT,"source":source,"origin_id":origin,
             "author_discord_user_id":"7"}),
         _ => panic!("unknown endpoint"),
     };
+    if let Some(channel) = channel {
+        body["channel_id"] = json!(channel.to_string());
+    }
     let request = Request::builder()
         .method("POST")
         .uri(format!("/agents/busy-entry/turn/{endpoint}"))
@@ -878,7 +893,7 @@ fn execution_gone(terminal: Option<bool>) {
         &started,
         ExpectedPin::Verified,
         Arc::default(),
-        terminal.is_none(),
+        (terminal.is_none(), None),
     );
     let (path, session) = (started.path.clone(), started.session.clone());
     fx.rig.on_send(move |params| {
@@ -1444,7 +1459,10 @@ pub(super) fn start_writer(
     host::start_managed(
         ShadowProvider::Claude,
         true,
-        cutover::boot_ownership(),
+        cutover::boot_ownership()
+            .into_iter()
+            .filter(|(channel, _, _)| *channel == CHANNEL)
+            .collect(),
         || parts,
     )
 }
