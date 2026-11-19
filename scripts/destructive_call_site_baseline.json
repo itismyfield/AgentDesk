@@ -281,7 +281,6 @@
         "src/services/discord/turn_view_reconciler/store.rs": 5,
         "src/services/discord/watchers/lifecycle/liveness.rs": 1,
         "src/services/discord/watchers/lifecycle/restore.rs": 1,
-        "src/services/gemini.rs": 1,
         "src/services/herdr_launch/runtime_marker.rs": 1,
         "src/services/maintenance/jobs/hang_dump_cleanup.rs": 1,
         "src/services/maintenance/jobs/worktree_orphan_sweep.rs": 2,

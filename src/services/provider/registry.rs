@@ -172,14 +172,13 @@ pub(super) fn resolve_kind_runtime_path(kind: &ProviderKind) -> Option<String> {
             crate::services::platform::resolve_provider_binary("claude").resolved_path
         }
         ProviderKind::Codex => crate::services::codex::resolve_codex_path(),
-        ProviderKind::Gemini => crate::services::gemini::resolve_gemini_path(),
         ProviderKind::OpenCode => crate::services::opencode::resolve_opencode_path(),
         ProviderKind::Qwen => crate::services::qwen::resolve_qwen_path(),
         ProviderKind::Grok => crate::services::stream_json_cli::dialects::grok::resolve_grok_path(),
         ProviderKind::Antigravity => {
             crate::services::stream_json_cli::dialects::agy::resolve_agy_path()
         }
-        ProviderKind::Unsupported(_) => None,
+        ProviderKind::Gemini | ProviderKind::Unsupported(_) => None,
     }
 }
 

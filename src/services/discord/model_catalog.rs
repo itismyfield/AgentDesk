@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
-use regex::Regex;
 use serde::Deserialize;
 
 use crate::services::provider::ProviderKind;
@@ -154,65 +153,7 @@ const CODEX_MODEL_CATALOG: &[StaticModelCatalogEntry] = &[
     },
 ];
 
-const GEMINI_MODEL_CATALOG: &[StaticModelCatalogEntry] = &[
-    StaticModelCatalogEntry {
-        value: "auto-gemini-3",
-        label: "Auto (Gemini 3)",
-        primary_summary: "Preview auto routing",
-        secondary_summary: "Pro/Flash preview",
-    },
-    StaticModelCatalogEntry {
-        value: "auto-gemini-2.5",
-        label: "Auto (Gemini 2.5)",
-        primary_summary: "Stable auto routing",
-        secondary_summary: "Pro/Flash stable",
-    },
-    StaticModelCatalogEntry {
-        value: "gemini-3.1-pro-preview",
-        label: "gemini-3.1-pro-preview",
-        primary_summary: "Gemini 3.1 Pro preview",
-        secondary_summary: "Local CLI catalog",
-    },
-    StaticModelCatalogEntry {
-        value: "gemini-3-pro-preview",
-        label: "gemini-3-pro-preview",
-        primary_summary: "Frontier reasoning and coding",
-        secondary_summary: "$2/$12",
-    },
-    StaticModelCatalogEntry {
-        value: "gemini-3-flash-preview",
-        label: "gemini-3-flash-preview",
-        primary_summary: "Low-latency frontier work",
-        secondary_summary: "$0.5/$3",
-    },
-    StaticModelCatalogEntry {
-        value: "gemini-2.5-pro",
-        label: "gemini-2.5-pro",
-        primary_summary: "Stable advanced reasoning",
-        secondary_summary: "$1.25/$10",
-    },
-    StaticModelCatalogEntry {
-        value: "gemini-2.5-flash",
-        label: "gemini-2.5-flash",
-        primary_summary: "Stable fast fallback",
-        secondary_summary: "$0.3/$2.5",
-    },
-    StaticModelCatalogEntry {
-        value: "gemini-2.5-flash-lite",
-        label: "gemini-2.5-flash-lite",
-        primary_summary: "Low-cost flash-lite",
-        secondary_summary: "Local CLI catalog",
-    },
-    StaticModelCatalogEntry {
-        value: "gemini-3.1-flash-lite-preview",
-        label: "gemini-3.1-flash-lite-preview",
-        primary_summary: "Preview flash-lite variant",
-        secondary_summary: "Local CLI catalog",
-    },
-];
-
 static CODEX_MODEL_CATALOG_DYNAMIC: OnceLock<Mutex<FileBackedCatalogCache>> = OnceLock::new();
-static GEMINI_MODEL_CATALOG_DYNAMIC: OnceLock<Mutex<FileBackedCatalogCache>> = OnceLock::new();
 static QWEN_MODEL_CATALOG_CACHE: OnceLock<Mutex<HashMap<String, QwenResolvedCatalog>>> =
     OnceLock::new();
 
@@ -277,22 +218,6 @@ fn codex_model_cache_path() -> Option<PathBuf> {
     model_catalog_home_dir().map(|home| home.join(".codex").join("models_cache.json"))
 }
 
-fn gemini_models_js_path() -> Option<PathBuf> {
-    let gemini_bin = crate::services::gemini::resolve_gemini_path()?;
-    let resolved = fs::canonicalize(gemini_bin).ok()?;
-    let package_root = resolved.parent()?.parent()?;
-    Some(
-        package_root
-            .join("node_modules")
-            .join("@google")
-            .join("gemini-cli-core")
-            .join("dist")
-            .join("src")
-            .join("config")
-            .join("models.js"),
-    )
-}
-
 fn codex_catalog_summary(model: &str) -> CatalogSummary {
     match model {
         "gpt-5.4" => CatalogSummary {
@@ -346,51 +271,6 @@ fn codex_visibility_allows_picker(visibility: Option<&str>) -> bool {
     match visibility {
         Some(raw) => raw.eq_ignore_ascii_case("list"),
         None => true,
-    }
-}
-
-fn gemini_catalog_summary(model: &str) -> CatalogSummary {
-    match model {
-        "auto-gemini-3" => CatalogSummary {
-            primary: "Preview auto routing",
-            secondary: "Pro/Flash preview",
-        },
-        "auto-gemini-2.5" => CatalogSummary {
-            primary: "Stable auto routing",
-            secondary: "Pro/Flash stable",
-        },
-        "gemini-3.1-pro-preview" => CatalogSummary {
-            primary: "Gemini 3.1 Pro preview",
-            secondary: "Local CLI catalog",
-        },
-        "gemini-3-pro-preview" => CatalogSummary {
-            primary: "Frontier reasoning and coding",
-            secondary: "$2/$12",
-        },
-        "gemini-3-flash-preview" => CatalogSummary {
-            primary: "Low-latency frontier work",
-            secondary: "$0.5/$3",
-        },
-        "gemini-2.5-pro" => CatalogSummary {
-            primary: "Stable advanced reasoning",
-            secondary: "$1.25/$10",
-        },
-        "gemini-2.5-flash" => CatalogSummary {
-            primary: "Stable fast fallback",
-            secondary: "$0.3/$2.5",
-        },
-        "gemini-2.5-flash-lite" => CatalogSummary {
-            primary: "Low-cost flash-lite",
-            secondary: "Local CLI catalog",
-        },
-        "gemini-3.1-flash-lite-preview" => CatalogSummary {
-            primary: "Preview flash-lite variant",
-            secondary: "Local CLI catalog",
-        },
-        _ => CatalogSummary {
-            primary: "Installed Gemini model",
-            secondary: "Local CLI catalog",
-        },
     }
 }
 
@@ -483,118 +363,10 @@ fn build_codex_model_catalog_from_cache(raw: &str) -> Option<Vec<ModelCatalogEnt
     (!entries.is_empty()).then_some(entries)
 }
 
-fn parse_gemini_model_exports(raw: &str) -> HashMap<String, String> {
-    static EXPORT_RE: OnceLock<Regex> = OnceLock::new();
-    let export_re =
-        EXPORT_RE.get_or_init(|| Regex::new(r#"export const ([A-Z0-9_]+) = '([^']+)';"#).unwrap());
-
-    export_re
-        .captures_iter(raw)
-        .filter_map(|caps| {
-            Some((
-                caps.get(1)?.as_str().to_string(),
-                caps.get(2)?.as_str().to_string(),
-            ))
-        })
-        .collect()
-}
-
-fn parse_gemini_valid_model_exports(raw: &str) -> HashSet<String> {
-    static VALID_SET_RE: OnceLock<Regex> = OnceLock::new();
-    static EXPORT_NAME_RE: OnceLock<Regex> = OnceLock::new();
-
-    let Some(block) = VALID_SET_RE
-        .get_or_init(|| {
-            Regex::new(r#"VALID_GEMINI_MODELS\s*=\s*new Set\(\[(?s)(.*?)\]\)"#).unwrap()
-        })
-        .captures(raw)
-        .and_then(|caps| caps.get(1).map(|value| value.as_str().to_string()))
-    else {
-        return HashSet::new();
-    };
-
-    let exports = parse_gemini_model_exports(raw);
-    EXPORT_NAME_RE
-        .get_or_init(|| Regex::new(r#"[A-Z0-9_]+"#).unwrap())
-        .find_iter(&block)
-        .filter_map(|name| exports.get(name.as_str()).cloned())
-        .collect()
-}
-
-fn gemini_display_label(model: &str) -> String {
-    match model {
-        "auto-gemini-3" => "Auto (Gemini 3)".to_string(),
-        "auto-gemini-2.5" => "Auto (Gemini 2.5)".to_string(),
-        other => other.to_string(),
-    }
-}
-
-fn build_gemini_model_catalog() -> Vec<ModelCatalogEntry> {
-    build_file_backed_catalog(
-        &GEMINI_MODEL_CATALOG_DYNAMIC,
-        gemini_models_js_path(),
-        GEMINI_MODEL_CATALOG,
-        build_gemini_model_catalog_from_models_js,
-    )
-}
-
-fn build_gemini_model_catalog_from_models_js(raw: &str) -> Option<Vec<ModelCatalogEntry>> {
-    const GEMINI_EXPORT_ORDER: &[&str] = &[
-        "PREVIEW_GEMINI_MODEL_AUTO",
-        "DEFAULT_GEMINI_MODEL_AUTO",
-        "PREVIEW_GEMINI_3_1_MODEL",
-        "PREVIEW_GEMINI_MODEL",
-        "PREVIEW_GEMINI_FLASH_MODEL",
-        "DEFAULT_GEMINI_MODEL",
-        "DEFAULT_GEMINI_FLASH_MODEL",
-        "DEFAULT_GEMINI_FLASH_LITE_MODEL",
-        "PREVIEW_GEMINI_3_1_FLASH_LITE_MODEL",
-    ];
-
-    let exports = parse_gemini_model_exports(raw);
-    let valid_models = parse_gemini_valid_model_exports(raw);
-    let mut seen = HashSet::new();
-    let mut entries = Vec::new();
-
-    for export_name in GEMINI_EXPORT_ORDER {
-        let Some(model) = exports.get(*export_name) else {
-            continue;
-        };
-        let is_auto_model = export_name.ends_with("_AUTO");
-        if !valid_models.is_empty() && !is_auto_model && !valid_models.contains(model) {
-            continue;
-        }
-        if !seen.insert(model.to_ascii_lowercase()) {
-            continue;
-        }
-        let summary = gemini_catalog_summary(model);
-        entries.push(ModelCatalogEntry::owned(
-            model.clone(),
-            gemini_display_label(model),
-            summary.primary.to_string(),
-            summary.secondary.to_string(),
-        ));
-    }
-
-    (!entries.is_empty()).then_some(entries)
-}
-
 const CODEX_MODEL_ALIASES: &[(&str, &str)] = &[
     ("gpt-5-codex", "gpt-5-codex"),
     ("o3", "o3"),
     ("o4-mini", "o4-mini"),
-];
-
-const GEMINI_MODEL_ALIASES: &[(&str, &str)] = &[
-    ("auto", "auto-gemini-3"),
-    ("pro", "gemini-3.1-pro-preview"),
-    ("flash", "gemini-3-flash-preview"),
-    ("flash-lite", "gemini-2.5-flash-lite"),
-    ("gemini-3.1-pro", "gemini-3.1-pro-preview"),
-    ("gemini-3-pro", "gemini-3-pro-preview"),
-    ("gemini-3-flash", "gemini-3-flash-preview"),
-    ("gemini-2.5-pro", "gemini-2.5-pro"),
-    ("gemini-2.5-flash", "gemini-2.5-flash"),
 ];
 
 fn qwen_system_defaults_path() -> Option<PathBuf> {
@@ -815,9 +587,6 @@ pub(in crate::services::discord) fn model_hint(
         ProviderKind::Codex => {
             "default + models resolved from local Codex catalog + custom model id".to_string()
         }
-        ProviderKind::Gemini => {
-            "default + models resolved from local Gemini catalog + custom model id".to_string()
-        }
         ProviderKind::OpenCode => "default + custom providerID/modelID".to_string(),
         ProviderKind::Grok => "default + custom Grok model id".to_string(),
         ProviderKind::Antigravity => "default + custom model id from agy models".to_string(),
@@ -829,7 +598,7 @@ pub(in crate::services::discord) fn model_hint(
                 "default + models resolved from Qwen settings files".to_string()
             }
         }
-        ProviderKind::Unsupported(_) => "모델 이름 또는 default".to_string(),
+        ProviderKind::Gemini | ProviderKind::Unsupported(_) => "모델 이름 또는 default".to_string(),
     }
 }
 
@@ -837,12 +606,11 @@ pub(crate) fn known_models(provider: &ProviderKind) -> Vec<ModelCatalogEntry> {
     match provider {
         ProviderKind::Claude => claude::resolved_models(),
         ProviderKind::Codex => build_codex_model_catalog(),
-        ProviderKind::Gemini => build_gemini_model_catalog(),
         ProviderKind::Grok
         | ProviderKind::Antigravity
         | ProviderKind::OpenCode
         | ProviderKind::Qwen => Vec::new(),
-        ProviderKind::Unsupported(_) => Vec::new(),
+        ProviderKind::Gemini | ProviderKind::Unsupported(_) => Vec::new(),
     }
 }
 
@@ -853,13 +621,12 @@ pub(in crate::services::discord) use claude::with_test_claude_catalog_sources;
 fn model_aliases(provider: &ProviderKind) -> &'static [(&'static str, &'static str)] {
     match provider {
         ProviderKind::Codex => CODEX_MODEL_ALIASES,
-        ProviderKind::Gemini => GEMINI_MODEL_ALIASES,
         ProviderKind::Claude
         | ProviderKind::Grok
         | ProviderKind::Antigravity
         | ProviderKind::OpenCode
         | ProviderKind::Qwen => &[],
-        ProviderKind::Unsupported(_) => &[],
+        ProviderKind::Gemini | ProviderKind::Unsupported(_) => &[],
     }
 }
 

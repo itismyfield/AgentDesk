@@ -352,11 +352,11 @@ fn parse_legacy_skill_target(raw: &str) -> Option<LegacySkillTarget> {
         return None;
     }
     if let Some((provider_raw, root_raw)) = trimmed.split_once('@') {
-        let provider = normalize_skill_provider_name(provider_raw)?;
+        let provider = normalize_provider_name(provider_raw)?;
         let root = expand_user_path(root_raw)?;
         return Some(LegacySkillTarget::Workspace { provider, root });
     }
-    normalize_skill_provider_name(trimmed).map(|provider| LegacySkillTarget::Global { provider })
+    normalize_provider_name(trimmed).map(|provider| LegacySkillTarget::Global { provider })
 }
 
 fn load_skill_manifest(root: &Path) -> Result<SkillManifest, String> {
@@ -420,7 +420,7 @@ pub(super) fn discover_workspaces(root: &Path) -> Result<Vec<String>, String> {
 fn normalize_provider_list(values: &[String]) -> Vec<String> {
     let mut providers = values
         .iter()
-        .filter_map(|value| normalize_skill_provider_name(value))
+        .filter_map(|value| normalize_provider_name(value))
         .collect::<Vec<_>>();
     providers.sort();
     providers.dedup();
@@ -437,10 +437,6 @@ fn normalize_workspace_names(values: &[String]) -> Vec<String> {
     workspaces.sort();
     workspaces.dedup();
     workspaces
-}
-
-fn normalize_skill_provider_name(value: &str) -> Option<String> {
-    normalize_provider_name(value).filter(|name| name != "gemini")
 }
 
 fn cleanup_retired_gemini_skills(root: &Path) -> Result<(), String> {

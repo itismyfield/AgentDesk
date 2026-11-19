@@ -23,20 +23,17 @@ pub struct CheckProviderBody {
 }
 
 /// POST /api/onboarding/check-provider
-/// Checks if a CLI provider (claude/codex/gemini/opencode/qwen) is installed and authenticated.
+/// Checks if a CLI provider (claude/codex/opencode/qwen) is installed and authenticated.
 pub async fn check_provider(body: CheckProviderBody) -> (StatusCode, Json<serde_json::Value>) {
     let cmd = match body.provider.as_str() {
         "claude" => "claude",
         "codex" => "codex",
-        "gemini" => "gemini",
         "opencode" => "opencode",
         "qwen" => "qwen",
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    json!({"error": "provider must be 'claude', 'codex', 'gemini', 'opencode', or 'qwen'"}),
-                ),
+                Json(json!({"error": "provider must be 'claude', 'codex', 'opencode', or 'qwen'"})),
             );
         }
     };
@@ -88,10 +85,8 @@ pub async fn check_provider(body: CheckProviderBody) -> (StatusCode, Json<serde_
                     home.join(".claude")
                 } else if cmd == "codex" {
                     home.join(".codex")
-                } else if cmd == "qwen" {
-                    home.join(".qwen")
                 } else {
-                    home.join(".gemini")
+                    home.join(".qwen")
                 };
                 config_dir.is_dir()
             })
