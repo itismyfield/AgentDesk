@@ -4069,6 +4069,16 @@ async fn supply_busy_followers(seed_receipt: bool) {
                 .await
                 .unwrap();
         assert_eq!(notices, i64::from(withdraw));
+        let transcripts: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM session_transcripts WHERE channel_id = $1")
+                .bind(channel.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            transcripts, 0,
+            "a follower cannot record against its parent"
+        );
         let snapshot = shared.mailbox(parent_key.channel_id).snapshot().await;
         assert!(Arc::ptr_eq(
             snapshot.cancel_token.as_ref().unwrap(),

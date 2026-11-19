@@ -60,26 +60,12 @@ async fn check_intake(case: DispatchCase, channel: ChannelId) {
         sqlx::query("INSERT INTO task_dispatches (id,status,dispatch_type) VALUES ('dispatch-A','pending','review'), ('dispatch-B','pending','implementation')")
             .execute(&host.pool).await.unwrap();
     }
-    let (complete, completed) = tokio::sync::oneshot::channel();
-    *crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
-        .lock()
-        .unwrap() = Some((channel, complete));
-    let entry = execute_intake_turn_core(
-        &host.api.http,
-        &host.shared,
-        "",
-        request(channel, channel.get() + 1_000, case.text),
-        Vec::new(),
-    );
-    let (result, started) = start_with_terminal_timing(channel, entry, false).await;
-    result.unwrap();
-    let (submitted, release) = started.unwrap_or_else(|| {
-        panic!(
-            "fixture provider did not enter for channel {channel}: {:?}",
-            host.api.take()
-        )
-    });
-    let prompt = submitted.system_prompt.expect("system prompt captured");
+    let turn = paused_intake(&host, request(channel, channel.get() + 1_000, case.text)).await;
+    let prompt = turn
+        .prompt
+        .system_prompt
+        .as_deref()
+        .expect("system prompt captured");
     assert_eq!(prompt.contains("[Current Task]"), case.task);
     assert_eq!(prompt.contains("Dispatch ID: dispatch-A"), case.task);
     if case.detail_missing {
@@ -118,11 +104,7 @@ async fn check_intake(case: DispatchCase, channel: ChannelId) {
         case.lookups,
         "pending lookups"
     );
-    release.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(20), completed)
-        .await
-        .unwrap()
-        .unwrap();
+    turn.finish().await;
     host.pool.close().await;
     host.db.drop().await;
 }
@@ -136,73 +118,37 @@ async fn native_8148_intake_first_hit_pins_and_first_miss_keeps_row_lookup_pg() 
         return;
     }
     use StatusCode as S;
-    for (index, (statuses, lookups, task, row)) in [
-        ([S::OK, S::SERVICE_UNAVAILABLE], 1, true, Some("dispatch-A")),
+    const A: Option<&str> = Some("dispatch-A");
+    const B: Option<&str> = Some("dispatch-B");
+    for (index, (statuses, prefix_detail, (lookups, task, row))) in [
+        ([S::OK, S::SERVICE_UNAVAILABLE], None, (1, true, A)),
+        ([S::SERVICE_UNAVAILABLE, S::OK], None, (2, false, A)),
+        ([S::NOT_FOUND; 2], None, (2, false, None)),
+        ([S::SERVICE_UNAVAILABLE; 2], None, (2, false, None)),
+        ([S::OK, S::SERVICE_UNAVAILABLE], Some(true), (1, true, A)),
         (
-            [S::SERVICE_UNAVAILABLE, S::OK],
-            2,
-            false,
-            Some("dispatch-A"),
-        ),
-        ([S::NOT_FOUND, S::NOT_FOUND], 2, false, None),
-        (
-            [S::SERVICE_UNAVAILABLE, S::SERVICE_UNAVAILABLE],
-            2,
-            false,
-            None,
+            [S::SERVICE_UNAVAILABLE, S::NOT_FOUND],
+            Some(false),
+            (2, false, B),
         ),
     ]
     .into_iter()
     .enumerate()
     {
-        check_intake(
-            DispatchCase {
-                statuses,
-                text: "fixture input",
-                detail_missing: false,
-                prefix_detail_known: false,
-                lookups,
-                task,
-                row,
-            },
-            ChannelId::new(81_480_600 + index as u64),
-        )
-        .await;
+        let text = if prefix_detail.is_some() {
+            "DISPATCH: dispatch-B\nfixture input"
+        } else {
+            "fixture input"
+        };
+        let case = DispatchCase {
+            statuses,
+            text,
+            detail_missing: prefix_detail.is_some(),
+            prefix_detail_known: prefix_detail == Some(true),
+            lookups,
+            task,
+            row,
+        };
+        check_intake(case, ChannelId::new(81_480_600 + index as u64)).await;
     }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn native_8148_intake_id_only_context_has_no_unverified_dispatch_contract_pg() {
-    if !api_child(concat!(
-        module_path!(),
-        "::native_8148_intake_id_only_context_has_no_unverified_dispatch_contract_pg"
-    )) {
-        return;
-    }
-    check_intake(
-        DispatchCase {
-            statuses: [StatusCode::OK, StatusCode::SERVICE_UNAVAILABLE],
-            text: "DISPATCH: dispatch-B\nfixture input",
-            detail_missing: true,
-            prefix_detail_known: true,
-            lookups: 1,
-            task: true,
-            row: Some("dispatch-A"),
-        },
-        ChannelId::new(81_480_605),
-    )
-    .await;
-    check_intake(
-        DispatchCase {
-            statuses: [StatusCode::SERVICE_UNAVAILABLE, StatusCode::NOT_FOUND],
-            text: "DISPATCH: dispatch-B\nfixture input",
-            detail_missing: true,
-            prefix_detail_known: false,
-            lookups: 2,
-            task: false,
-            row: Some("dispatch-B"),
-        },
-        ChannelId::new(81_480_606),
-    )
-    .await;
 }

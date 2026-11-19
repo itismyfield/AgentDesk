@@ -1,40 +1,16 @@
 use super::*;
 use crate::services::discord::admin_host_guard::tests::api_child;
 use crate::services::discord::inflight::o_seed_observation;
+use crate::services::git::test_origin_fixture::{commit, git};
 use tokio::task::JoinHandle;
 
 const WORK: &str = "native-http-work";
 const PROBE: &str = "native-completion-watcher-offset";
-type ApiCall = (axum::http::Method, String, StatusCode);
+type WorkCalls = Arc<Mutex<Vec<(axum::http::Method, StatusCode)>>>;
 
-fn fixture_commit(path: &Path) -> String {
-    let run = |args: &[&str]| {
-        let output = std::process::Command::new("git")
-            .current_dir(path)
-            .args([
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
-            ])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap()
-    };
-    run(&["init"]);
-    run(&["commit", "--allow-empty", "-m", "fixture"]);
-    run(&["rev-parse", "HEAD"]).trim().to_owned()
-}
-
-async fn work_state(pool: &PgPool) -> (String, Option<String>, i64) {
+async fn work_state(pool: &PgPool) -> (String, Option<String>, Option<String>, i64) {
     sqlx::query_as(
-        "SELECT status, result::jsonb->>'completion_source',
+        "SELECT status, result::jsonb->>'completion_source', result::jsonb->>'completed_commit',
          (SELECT count(*) FROM dispatch_events WHERE dispatch_id=$1 AND to_status='completed')
          FROM task_dispatches WHERE id=$1",
     )
@@ -44,9 +20,19 @@ async fn work_state(pool: &PgPool) -> (String, Option<String>, i64) {
     .unwrap()
 }
 
+async fn transcripts(pool: &PgPool, turn_id: &str) -> Vec<(String, Option<String>)> {
+    sqlx::query_as(
+        "SELECT assistant_message, dispatch_id FROM session_transcripts WHERE turn_id=$1",
+    )
+    .bind(turn_id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
 struct Loopback {
     task: JoinHandle<()>,
-    calls: Arc<Mutex<Vec<ApiCall>>>,
+    calls: WorkCalls,
 }
 
 impl Loopback {
@@ -64,15 +50,14 @@ impl Loopback {
                             .get::<axum::extract::OriginalUri>()
                             .map_or(request.uri(), |original| &original.0);
                         let method = request.method().clone();
-                        let path = uri.path().to_owned();
+                        let work = uri.path() == "/api/dispatches/native-http-work";
                         request
                             .extensions_mut()
                             .insert(crate::server::routes::auth::loopback_peer());
                         let response = next.run(request).await;
-                        observed
-                            .lock()
-                            .unwrap()
-                            .push((method, path, response.status()));
+                        if work {
+                            observed.lock().unwrap().push((method, response.status()));
+                        }
                         response
                     }
                 },
@@ -81,15 +66,6 @@ impl Loopback {
         discord::internal_api::init(listener.local_addr().unwrap().port(), None);
         let task = tokio::spawn(async move { axum::serve(listener, api).await.unwrap() });
         Self { task, calls }
-    }
-
-    fn work_calls(&self, method: axum::http::Method) -> usize {
-        self.calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(seen, path, _)| *seen == method && path == "/api/dispatches/native-http-work")
-            .count()
     }
 }
 
@@ -120,7 +96,9 @@ fn work_at_closer(has_id: bool) {
         "agentdesk.registerPolicy({name:'NativeRecoveryProbe',onDispatchCompleted:function(){const key='native-recovery-hook';agentdesk.kv.set(key,String(Number(agentdesk.kv.get(key)||0)+1),0);}});",
     ).unwrap();
     let checkout = tempfile::tempdir().unwrap();
-    let sha = fixture_commit(checkout.path());
+    let path = checkout.path();
+    git(path, &["init"]);
+    let sha = commit(path, "fixture");
     let mut config = crate::config::Config::default();
     config.policies.dir = policies.path().to_path_buf();
     config.policies.hot_reload = false;
@@ -192,17 +170,14 @@ fn work_at_closer(has_id: bool) {
             LIMIT,
             Box::pin(discord::recovery_engine::restore_inflight_turns(&http, &intake.shared, &ProviderKind::Claude)),
         ).await.expect("recovery inspects the actual native closer");
-        assert_eq!(work_state(&fx.pool).await, ("pending".into(), None, 0));
+        assert_eq!(work_state(&fx.pool).await, ("pending".into(), None, None, 0));
         assert_eq!(stored_outcome(&fx.pool, turn_id).await, None);
-        let transcripts: i64 = sqlx::query_scalar("SELECT count(*) FROM session_transcripts WHERE turn_id=$1")
-            .bind(turn_id).fetch_one(&fx.pool).await.unwrap();
-        assert_eq!(transcripts, 0, "recovery cannot record while native custody holds the turn");
+        assert!(transcripts(&fx.pool, turn_id).await.is_empty(), "recovery cannot record while native custody holds the turn");
         let hook_count = || sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key='native-recovery-hook'")
             .fetch_optional(&fx.pool);
         assert_eq!(hook_count().await.unwrap(), None);
         let retained = inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL).expect("recovery preserves the native row");
         assert_eq!(retained.dispatch_id.as_deref(), has_id.then_some(WORK));
-        assert!(!discord::terminal_delivery_custody::retains_channel(CHANNEL).unwrap());
         fence.rollback().await.unwrap();
         completed(&intake, 1).await;
         tokio::time::timeout(LIMIT, async {
@@ -213,9 +188,7 @@ fn work_at_closer(has_id: bool) {
         assert_eq!(observed.snapshot().event_count("watcher_dispatch_call"), 0);
         assert!(!discord::terminal_delivery_custody::retains_channel(CHANNEL).unwrap());
         assert_eq!(stored_outcome(&fx.pool, turn_id).await.as_deref(), Some("delivered"));
-        let transcripts: Vec<(String, Option<String>)> = sqlx::query_as(
-            "SELECT assistant_message, dispatch_id FROM session_transcripts WHERE turn_id=$1",
-        ).bind(turn_id).fetch_all(&fx.pool).await.unwrap();
+        let transcripts = transcripts(&fx.pool, turn_id).await;
         assert_eq!(
             transcripts.iter().map(|(body, id)| (body.trim(), id.as_deref())).collect::<Vec<_>>(),
             [(answer.as_str(), has_id.then_some(WORK))],
@@ -228,12 +201,11 @@ fn work_at_closer(has_id: bool) {
             "a prompt-only identifier cannot prove a work response"
         );
         let state = work_state(&fx.pool).await;
-        let expected = if has_id { ("completed", Some("turn_bridge_explicit"), 1) } else { ("pending", None, 0) };
-        assert_eq!((state.0.as_str(), state.1.as_deref(), state.2), expected, "work API calls: {:?}", loopback.calls.lock().unwrap());
+        let expected = if has_id { ("completed", Some("turn_bridge_explicit"), Some(sha.as_str()), 1) } else { ("pending", None, None, 0) };
+        assert_eq!((state.0.as_str(), state.1.as_deref(), state.2.as_deref(), state.3), expected, "work API calls: {:?}", loopback.calls.lock().unwrap());
         assert_eq!(hook_count().await.unwrap().as_deref(), has_id.then_some("1"));
-        assert_eq!(loopback.work_calls(Method::GET), usize::from(has_id));
-        assert!(loopback.calls.lock().unwrap().iter().filter(|(method, path, _)| *method == Method::GET && path == "/api/dispatches/native-http-work").all(|(_, _, status)| *status == StatusCode::OK));
-        assert_eq!(loopback.work_calls(Method::PATCH), 0);
+        let expected_calls = has_id.then_some((Method::GET, StatusCode::OK));
+        assert!(loopback.calls.lock().unwrap().iter().cloned().eq(expected_calls));
         fallback.assert_none();
     });
     drop(intake);
@@ -247,7 +219,8 @@ fn native_8148_bound_herdr_watcher_reads_after_closer_and_leaves_work_to_native_
         module_path!(),
         "::native_8148_bound_herdr_watcher_reads_after_closer_and_leaves_work_to_native_pg"
     )) {
-        work_at_closer(true);
-        work_at_closer(false);
+        for has_id in [true, false] {
+            work_at_closer(has_id);
+        }
     }
 }

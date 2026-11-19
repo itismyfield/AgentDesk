@@ -1992,6 +1992,43 @@ async fn run(host: &Host, request: IntakeRequest) -> Option<SubmittedPrompt> {
     })
 }
 
+struct PausedIntake {
+    prompt: SubmittedPrompt,
+    release: std::sync::mpsc::Sender<()>,
+    completed: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl PausedIntake {
+    async fn finish(self) {
+        self.release.send(()).unwrap();
+        crate::test_support::wait::await_within(self.completed, Duration::from_secs(20))
+            .await
+            .unwrap();
+    }
+}
+
+async fn paused_intake(host: &Host, request: IntakeRequest) -> PausedIntake {
+    let channel = request.channel_id;
+    let (complete, completed) = tokio::sync::oneshot::channel();
+    *crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+        .lock()
+        .unwrap() = Some((channel, complete));
+    let entry = execute_intake_turn_core(&host.api.http, &host.shared, "", request, Vec::new());
+    let (result, started) = start_with_terminal_timing(channel, entry, false).await;
+    result.unwrap();
+    let (prompt, release) = started.unwrap_or_else(|| {
+        panic!(
+            "fixture provider did not enter for channel {channel}: {:?}",
+            host.api.take()
+        )
+    });
+    PausedIntake {
+        prompt,
+        release,
+        completed,
+    }
+}
+
 /// The receipt stored under the Discord request key, and its current attempt and projection.
 async fn receipt(host: &Host, channel: ChannelId, message: u64) -> Option<(i64, String, String)> {
     let key = format!("discord:claude:{channel}:{message}");
@@ -2411,23 +2448,12 @@ fn held_dispatch_is_not_inherited_by_an_active_start_pg() {
         let _active = test_activation::activate(active.get());
         *linked.lock().unwrap() = Some(format!("held-{active}"));
         let text = format!("DISPATCH: held-{active}\nwork");
-        let (completion, completed) = tokio::sync::oneshot::channel();
-        *crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
-            .lock()
-            .unwrap() = Some((active, completion));
-        let entry = execute_intake_turn_core(
-            &host.api.http,
-            &host.shared,
-            "",
-            request(active, 6_008_791, &text),
-            Vec::new(),
-        );
-        let (result, started) = start_with_terminal_timing(active, entry, false).await;
-        result.unwrap();
-        let (prompt, release) = started.expect("the active start runs without the held dispatch");
+        let turn = paused_intake(&host, request(active, 6_008_791, &text)).await;
         assert!(
-            !prompt
+            !turn
+                .prompt
                 .system_prompt
+                .as_ref()
                 .unwrap()
                 .contains(&format!("Dispatch ID: held-{active}"))
         );
@@ -2442,11 +2468,7 @@ fn held_dispatch_is_not_inherited_by_an_active_start_pg() {
             1,
             "protected first hit is pinned"
         );
-        release.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(20), completed)
-            .await
-            .unwrap()
-            .unwrap();
+        turn.finish().await;
         let calls = host.api.take();
         let carried = |channel: ChannelId| {
             let lookup = format!("GET /api/dispatches/held-{channel} ");

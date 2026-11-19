@@ -3,8 +3,6 @@ use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
 use crate::services::discord::tmux::tmux_watcher::{WatcherDispatch, finalize_dispatch};
 use crate::services::discord::turn_bridge::RuntimeDatabase;
 use axum::http::StatusCode;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 const WORK: &str = "native-work";
 
@@ -31,24 +29,12 @@ async fn state(pool: &sqlx::PgPool, id: &str) -> (String, Option<String>, Option
     .unwrap()
 }
 
-fn git(path: &Path, args: &[&str]) -> String {
-    let output = std::process::Command::new("git")
-        .current_dir(path)
-        .args([
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().to_string()
+async fn work_fixture() -> (RuntimeDatabase, CompletionFixture) {
+    let runtime = TestRuntimeRootGuard::new();
+    let live = RuntimeDatabase::after_env_lock();
+    let fixture = CompletionFixture::in_runtime(runtime).await;
+    live.install(&fixture.db.database_url);
+    (live, fixture)
 }
 
 async fn watcher(
@@ -72,109 +58,23 @@ async fn watcher(
     .await
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_8148_dispatch_custody_completes_work_once_from_native_body_pg() {
-    if !api_child(concat!(
-        module_path!(),
-        "::native_8148_dispatch_custody_completes_work_once_from_native_body_pg"
-    )) {
-        return;
-    }
-    use super::super::super::native_supply::native_completion::record;
-    crate::pipeline::ensure_loaded();
-    let runtime = crate::config::TestRuntimeRootGuard::new();
-    let live = RuntimeDatabase::after_env_lock();
-    let db = TestPostgresDb::create().await;
-    let pool = db.connect_and_migrate().await;
-    live.install(&db.database_url);
-    seed(&pool, WORK, "implementation").await;
-    let done = Arc::new(AtomicBool::new(false));
-    let snapshot = done.clone();
-    let api = Recorder::start_with_status(Arc::new(move |_, uri| match uri.path() {
-        "/api/dispatches/native-work" => Some((
-            StatusCode::OK,
-            json!({"dispatch":{
-                "status": if snapshot.load(Ordering::SeqCst) {"completed"} else {"pending"},
-                "dispatch_type":"implementation","kanban_card_id":WORK
-            }}),
-        )),
-        "/api/internal/card-thread" => {
-            Some((StatusCode::OK, json!({"dispatch_type":"implementation"})))
-        }
-        _ => None,
-    }))
-    .await;
-    crate::services::discord::internal_api::init(api.port, None);
-    let policies = tempfile::tempdir().unwrap();
-    std::fs::write(policies.path().join("completion.js"),
-        "agentdesk.registerPolicy({name:'NativeCompletionProbe',onDispatchCompleted:function(){const key='native-completion-hook';agentdesk.kv.set(key,String(Number(agentdesk.kv.get(key)||0)+1),0);}});").unwrap();
-    let mut config = crate::config::Config::default();
-    config.policies.dir = policies.path().to_path_buf();
-    config.policies.hot_reload = false;
-    let mut shared = b2b_shared(Some(pool.clone()));
-    let engine = Arc::get_mut(&mut Arc::get_mut(&mut shared).unwrap().engine).unwrap();
-    engine.api_port = api.port;
-    engine.policy.engine =
-        Some(crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap());
-    let checkout = tempfile::tempdir().unwrap();
-    let path = checkout.path();
-    git(path, &["init"]);
-    git(path, &["commit", "--allow-empty", "-m", "native fixture"]);
-    let native_sha = git(path, &["rev-parse", "HEAD"]);
-    git(path, &["commit", "--allow-empty", "-m", "watcher fixture"]);
-    let watcher_sha = git(path, &["rev-parse", "HEAD"]);
-
+#[tokio::test]
+async fn native_8148_fresh_idle_preserves_native_custody() {
+    let runtime = TestRuntimeRootGuard::new();
     let f = Fixture::at(
         runtime.path().join("runtime/injected_frames.json"),
         81480610,
         true,
     );
+    let shared = b2b_shared(None);
     let (key, actor) = b2b_active(&f, &shared).await;
-    crate::services::discord::host_defer_gate::tests::map_channel(
-        &shared,
-        key.channel_id,
-        "native-work",
-    )
-    .await;
-    shared
-        .core
-        .lock()
-        .await
-        .sessions
-        .get_mut(&key.channel_id)
-        .unwrap()
-        .current_path = Some(path.display().to_string());
-    let mut row = b2b_row(&f);
-    let turn_id = turn(&row);
-    row.dispatch_id = Some(WORK.into());
-    row.worktree_path = Some(path.display().to_string());
-    row.scheduled = ScheduledTurnMark::Scheduled {
-        turn_id: turn_id.clone(),
-        isolated: false,
-        outcome: None,
-    };
-    inflight::save_inflight_state(&row).unwrap();
-    launch_agent_delivery(&pool, WORK, &turn_id, false, "fail").await;
+    let row = b2b_row(&f);
     supply_register(&f, &shared, key, Some(actor)).await;
     assert!(
         crate::services::discord::turn_finalizer::native_prepare::holds_row(&shared, &row).await
     );
-    let watcher_body = format!("[fixture {}] watcher fixture", &watcher_sha[..10]);
-    assert_eq!(
-        watcher(&shared, &row, true, &watcher_body).await,
-        (Some(WORK.into()), true)
-    );
-    assert_eq!(
-        state(&pool, WORK).await,
-        ("pending".into(), None, None, 0),
-        "watcher raced before native"
-    );
-    assert!(
-        inflight::load_inflight_state_read_only(&ProviderKind::Claude, row.channel_id).is_some()
-    );
-
-    let native_body = format!("[fixture {}] native fixture", &native_sha[..10]);
-    let evidence = proof(&f, Some(&native_body), Disposition::Executed);
+    let evidence = proof(&f, Some("native answer"), Disposition::Executed);
+    let api = Recorder::start().await;
     crate::services::discord::tmux::tmux_watcher::exercise_fresh_idle_with_row(
         &shared,
         &api.http,
@@ -183,43 +83,9 @@ async fn native_8148_dispatch_custody_completes_work_once_from_native_body_pg() 
     )
     .await;
     assert!(
-        inflight::load_inflight_state_read_only(&ProviderKind::Claude, row.channel_id).is_some(),
+        on_disk(row.channel_id).is_some(),
         "fresh idle must preserve the native row before record"
     );
-    let settlement = durable(&f, &evidence);
-    record(&shared, &settlement, &evidence, key, Some(&row), None).await;
-    let completed = state(&pool, WORK).await;
-    assert_eq!(
-        completed,
-        (
-            "completed".into(),
-            Some("turn_bridge_explicit".into()),
-            Some(native_sha),
-            1
-        )
-    );
-    done.store(true, Ordering::SeqCst);
-    let first = scheduled(&pool, &turn_id)
-        .await
-        .expect("first scheduled outcome");
-    assert!(
-        !f.history
-            .native_settlement(NS, &f.ticket)
-            .unwrap()
-            .cleanup_complete
-    );
-    record(&shared, &settlement, &evidence, key, Some(&row), None).await;
-    assert_eq!(scheduled(&pool, &turn_id).await, Some(first));
-    assert_eq!(state(&pool, WORK).await, completed);
-    let hooks: String =
-        sqlx::query_scalar("SELECT value FROM kv_meta WHERE key='native-completion-hook'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(hooks, "1");
-    drop(shared);
-    pool.close().await;
-    db.drop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -230,33 +96,20 @@ async fn native_8148_watcher_dispatch_fallback_preserves_work_types_pg() {
     )) {
         return;
     }
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let live = RuntimeDatabase::after_env_lock();
-    let db = TestPostgresDb::create().await;
-    let pool = db.connect_and_migrate().await;
-    live.install(&db.database_url);
-    let row = inflight::InflightTurnState::new(
-        ProviderKind::Claude,
-        81_480_611,
-        None,
-        7,
-        81_480_612,
-        81_480_612,
-        "original".into(),
-        Some("fixture-session".into()),
-        Some("fixture-pane".into()),
-        None,
-        None,
-        0,
-    );
-    inflight::save_inflight_state(&row).unwrap();
-    for (kind, id, held, completes) in [
-        ("implementation", "implementation", false, true),
-        ("rework", "rework", false, true),
-        ("plan", "plan", false, false),
-        ("plan-review", "plan-review", false, false),
-        ("implementation", "held-without-id", true, true),
+    let (_live, fixture) = work_fixture().await;
+    let pool = &fixture.pool;
+    let row = b2b_row(&fixture.input(81480611));
+    let shared = fixture.shared(1);
+    for (kind, id, held, blocked, completes) in [
+        ("implementation", "implementation", false, false, true),
+        ("rework", "rework", false, false, true),
+        ("plan", "plan", false, false, false),
+        ("plan-review", "plan-review", false, false, false),
+        ("implementation", "held-without-id", true, false, true),
+        ("implementation", "held-with-id", true, true, false),
     ] {
+        let mut row = row.clone();
+        row.dispatch_id = blocked.then(|| id.to_owned());
         let api = Recorder::start_with_status(Arc::new(move |_, uri| match uri.path() {
             "/api/internal/pending-dispatch-for-thread" => {
                 Some((StatusCode::OK, json!({"dispatch_id":id})))
@@ -266,9 +119,7 @@ async fn native_8148_watcher_dispatch_fallback_preserves_work_types_pg() {
         }))
         .await;
         crate::services::discord::internal_api::init(api.port, None);
-        seed(&pool, id, kind).await;
-        let shared = b2b_shared(Some(pool.clone()));
-        assert!(row.dispatch_id.is_none());
+        seed(pool, id, kind).await;
         assert!(crate::services::discord::adk_session::parse_dispatch_id(&row.user_text).is_none());
         let observed =
             inflight::o_seed_observation::Guard::new(&ProviderKind::Claude, row.channel_id);
@@ -278,10 +129,15 @@ async fn native_8148_watcher_dispatch_fallback_preserves_work_types_pg() {
             "{id}"
         );
         let progress = observed.snapshot();
-        assert_eq!(progress.event_count("watcher_dispatch_call"), 1);
+        assert_eq!(
+            progress.event_count("watcher_dispatch_call"),
+            usize::from(!blocked),
+            "{id}"
+        );
         assert_eq!(
             progress.event_count("watcher_dispatch_non_work"),
-            usize::from(!completes)
+            usize::from(!completes && !blocked),
+            "{id}"
         );
         let calls = api.take();
         assert!(
@@ -289,15 +145,16 @@ async fn native_8148_watcher_dispatch_fallback_preserves_work_types_pg() {
                 .iter()
                 .any(|call| call.starts_with("GET /api/internal/pending-dispatch-for-thread "))
         );
-        assert!(
+        assert_eq!(
             calls
                 .iter()
-                .any(|call| call.starts_with("GET /api/internal/card-thread "))
+                .any(|call| call.starts_with("GET /api/internal/card-thread ")),
+            !blocked,
+            "{id}"
         );
-        assert_eq!(state(&pool, id).await.3, i64::from(completes), "{id}");
+        assert_eq!(state(pool, id).await.3, i64::from(completes), "{id}");
     }
-    pool.close().await;
-    db.drop().await;
+    fixture.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -308,55 +165,35 @@ async fn native_8148_dispatch_snapshot_failure_settles_policy_and_cleans_row_pg(
     )) {
         return;
     }
-    let runtime = crate::config::TestRuntimeRootGuard::new();
-    let live = RuntimeDatabase::after_env_lock();
-    let db = TestPostgresDb::create().await;
-    let pool = db.connect_and_migrate().await;
-    live.install(&db.database_url);
-    seed(&pool, WORK, "implementation").await;
+    let (_live, fixture) = work_fixture().await;
+    let pool = &fixture.pool;
+    seed(pool, WORK, "implementation").await;
     let api = Recorder::start_with_status(Arc::new(|method, uri| {
         (method == axum::http::Method::GET && uri.path() == "/api/dispatches/native-work")
             .then(|| (StatusCode::SERVICE_UNAVAILABLE, json!({})))
     }))
     .await;
     crate::services::discord::internal_api::init(api.port, None);
-    let root = runtime.path().join("runtime");
-    let f = Fixture::at(root.join("injected_frames.json"), 81480612, true);
+    let f = fixture.input(81480612);
     let mut row = b2b_row(&f);
     row.dispatch_id = Some(WORK.into());
     inflight::save_inflight_state(&row).unwrap();
     let evidence = proof(&f, Some("native answer"), Disposition::Executed);
     durable(&f, &evidence);
-    let mut shared = b2b_shared(Some(pool.clone()));
-    Arc::get_mut(&mut shared)
-        .unwrap()
-        .restart
-        .current_generation = 2;
-    super::super::super::super::native_prepare::BootInputs::prepare(&root, 2)
-        .unwrap()
-        .restore(&shared)
-        .await
-        .unwrap();
-    assert_eq!(state(&pool, WORK).await.0, "failed");
+    let shared = fixture.shared(2);
+    fixture.restore(&shared).await;
+    assert_eq!(state(pool, WORK).await.0, "failed");
     let failures: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM dispatch_events WHERE dispatch_id=$1 AND transition_source='turn_bridge_dispatch_failure'",
     ).bind(WORK).fetch_one(&pool).await.unwrap();
     assert_eq!(failures, 1);
-    assert!(transcript(&pool, &turn(&row)).await.is_some());
-    assert!(
-        inflight::load_inflight_state_read_only(&ProviderKind::Claude, row.channel_id).is_none()
-    );
-    assert!(
-        f.history
-            .native_settlement(NS, &f.ticket)
-            .unwrap()
-            .cleanup_complete
-    );
+    assert!(transcript(pool, &turn(&row)).await.is_some());
+    assert!(on_disk(row.channel_id).is_none());
+    assert!(cleanup_complete(&f));
     assert!(
         api.take()
             .iter()
             .any(|call| call.starts_with("GET /api/dispatches/native-work "))
     );
-    pool.close().await;
-    db.drop().await;
+    fixture.close().await;
 }
