@@ -95,6 +95,16 @@ pub(crate) fn peek_o_owns_tui_output_for_channel_quiet(
     .map(|peeked| peeked.owned)
 }
 
+/// The boot's view of `channel` as a resolved thread child: `None` when it is no such child,
+/// else whether its body is decided now (O's, or Legacy's by the child's own rule).
+#[cfg(unix)]
+pub(crate) fn thread_child_decided(channel_id: u64) -> Option<bool> {
+    super::test_override::with_channels(|snapshot| {
+        let child = snapshot?.child(channel_id)?;
+        Some(child.is_ok_and(|child| child.body_owner().is_some()))
+    })
+}
+
 pub(crate) fn peek_o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,
@@ -657,7 +667,12 @@ fn decide_with_snapshot(
     if let Some(child) = child {
         *read = Some(Deciding::Child(child.clone()));
         child.body_owner().ok_or(IdentityError::ChildHeld)?;
-        return Ok(judged(&child.candidate));
+        // The claim judges the child again under its lock: one released since then is held.
+        let claimed = judged(&child.candidate);
+        if claimed.reason == ClaimReason::ChildHeld {
+            return Err(IdentityError::ChildHeld);
+        }
+        return Ok(claimed);
     }
     let Some(candidate) = snapshot.candidate(channel_id) else {
         return Err(IdentityError::AwaitingAdoption);

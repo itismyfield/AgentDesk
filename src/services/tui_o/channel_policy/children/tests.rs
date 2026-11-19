@@ -899,3 +899,28 @@ async fn thread_children_released_late_child_is_held_and_a_released_member_is_re
     assert!(candidate.refused_at_end());
     pool.close().await;
 }
+
+// A late thread child whose host ends before its first init with no store is released, not
+// refused, and its final body claim holds it with no Legacy send; a late member is refused.
+#[cfg(unix)]
+#[test]
+fn thread_children_late_child_ending_without_a_store_is_released_and_its_claim_holds() {
+    const CHILD: u64 = 4_807;
+    let boot = BootChannels::validate(&config())
+        .unwrap()
+        .adopted(Adoption::Committed);
+    boot.reserve_boot_children(&[(CHILD, 42)]);
+    assert!(boot.resolve_child(CHILD, thread(CHILD, 42), false));
+    let child = boot.output_candidate(CHILD).unwrap();
+    drop(child.late_cleanup_guard(CHILD, None).unwrap());
+    assert_eq!(child.peek(), Adoption::Released);
+    assert!(!child.refused_at_end(), "its host end is no refusal");
+    let claimed = child.claim_body(CHILD);
+    assert_eq!((claimed.owned, claimed.send.is_none()), (false, true));
+    assert_eq!(claimed.reason, super::super::ClaimReason::ChildHeld);
+    assert_eq!(child.sends(), (0, 0), "Legacy sends none of it");
+    let member = Candidate::reserved_late();
+    drop(member.late_cleanup_guard(42, None).unwrap());
+    assert_eq!(member.peek(), Adoption::Refused);
+    assert!(member.refused_at_end());
+}

@@ -84,6 +84,8 @@ pub(crate) enum ClaimReason {
     OwnedByO,
     OwnedHeld,
     IdentityHeld,
+    /// A thread child undecided at its final claim: held, never sent by Legacy.
+    ChildHeld,
 }
 
 impl Adoption {
@@ -231,6 +233,16 @@ impl Candidate {
         self.late_origin
     }
 
+    /// Whether Legacy has a thread child's body in `state`: a late reservation still waiting, or a
+    /// released child whose Legacy run is recorded. Callers hold the adoption lock.
+    pub(crate) fn child_legacy_in(&self, state: Adoption) -> bool {
+        match state {
+            Adoption::Deferred => self.late_origin,
+            Adoption::Released => self.legacy_run().is_some(),
+            _ => false,
+        }
+    }
+
     /// Callers hold the adoption lock, so a body claim and its baseline have a fixed order.
     pub(crate) fn baseline_sends(&self) -> ((u64, u64), u64) {
         let order = self.baseline_order.fetch_add(1, Ordering::SeqCst) + 1;
@@ -347,15 +359,18 @@ impl Candidate {
     ) -> BodyClaimed {
         let (state, reason) = self.take(channel);
         let owned = state.owned();
+        // A thread child's own rule decides under this lock: an undecided child sends nothing.
+        let held = !owned && self.child_surface().is_some() && !self.child_legacy_in(*state);
+        let reason = if held { ClaimReason::ChildHeld } else { reason };
         #[cfg(test)]
-        if !owned {
+        if !owned && !held {
             crate::services::tui_o::writer::activation::test_hook::run(
                 channel,
                 crate::services::tui_o::writer::activation::test_hook::Step::BeforeLegacyStarted,
             )
             .expect("Legacy start hook");
         }
-        let send = (!owned).then(|| {
+        let send = (!owned && !held).then(|| {
             self.sends.started.fetch_add(1, Ordering::SeqCst);
             LegacySend(Arc::clone(&self.sends))
         });
@@ -392,16 +407,23 @@ impl Candidate {
     pub(crate) fn release(&self, channel: u64) {
         let mut state = self.lock();
         if matches!(*state, Adoption::Pending | Adoption::Deferred) {
-            // A late thread child is left to its parent's boundary path, not refused: Legacy posts
-            // only with a recorded run, and a body with none stays held until the retry.
-            if self.late_thread_child() {
-                *state = Adoption::Released;
+            *state = self.refusal();
+            if *state == Adoption::Released {
                 tracing::info!(channel, "[tui_o] late child released before the first init");
             } else {
-                *state = Adoption::Refused;
                 tracing::warn!(channel, "[tui_o] adoption refused before the first init");
             }
             self.settle_first();
+        }
+    }
+
+    /// How an undecided adoption ends without a store: a late thread child is left to its parent's
+    /// boundary path (Legacy posts only with a recorded run), anything else is refused.
+    fn refusal(&self) -> Adoption {
+        if self.late_thread_child() {
+            Adoption::Released
+        } else {
+            Adoption::Refused
         }
     }
 
@@ -486,7 +508,11 @@ impl Drop for LateReservationGuard {
             .map_or(Adoption::Refused, |store| {
                 crate::services::tui_o::writer::activation::settled(&store, self.channel)
             });
-        *state = settled;
+        // A store that decided nothing ends the way a release does; a decided one is kept.
+        *state = match settled {
+            Adoption::Refused => self.candidate.refusal(),
+            decided => decided,
+        };
         self.candidate.settle_first();
         tracing::info!(channel = self.channel, adoption = ?*state, "[tui_o] late reservation settled after host exit");
     }
