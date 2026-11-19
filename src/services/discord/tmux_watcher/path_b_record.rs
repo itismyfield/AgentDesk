@@ -211,6 +211,116 @@ pub(super) async fn record_receipt(
     !crate::services::discord::receipt_settle::record_or_stamp(pool, state, outcome).await
 }
 
+pub(in crate::services::discord) type OwnedRow<'a> = (bool, Option<&'a InflightTurnState>);
+
+pub(super) fn native_owns_work(pin: OwnedRow<'_>, late: OwnedRow<'_>) -> bool {
+    [pin, late]
+        .into_iter()
+        .any(|(held, row)| held && row.is_some_and(|row| row.dispatch_id.is_some()))
+}
+
+pub(in crate::services::discord) struct WatcherDispatch<'a> {
+    pub(in crate::services::discord) shared: &'a SharedData,
+    pub(in crate::services::discord) channel_id: ChannelId,
+    pub(in crate::services::discord) watcher_provider: &'a ProviderKind,
+    pub(in crate::services::discord) tmux_session_name: &'a str,
+    pub(in crate::services::discord) pin: OwnedRow<'a>,
+    pub(in crate::services::discord) late: OwnedRow<'a>,
+    pub(in crate::services::discord) full_response: &'a str,
+    pub(in crate::services::discord) has_assistant_response: bool,
+    pub(in crate::services::discord) lifecycle_stage_paused: bool,
+    pub(in crate::services::discord) completion_is_stale_for_newer_turn: bool,
+}
+
+pub(in crate::services::discord) async fn finalize_dispatch(
+    request: WatcherDispatch<'_>,
+) -> (Option<String>, bool) {
+    let WatcherDispatch {
+        shared,
+        channel_id,
+        watcher_provider,
+        tmux_session_name,
+        pin,
+        late,
+        full_response,
+        has_assistant_response,
+        lifecycle_stage_paused,
+        completion_is_stale_for_newer_turn,
+    } = request;
+    let resolved_did = late
+        .1
+        .and_then(|state| state.dispatch_id.clone())
+        .or_else(|| {
+            late.1.and_then(|state| {
+                crate::services::discord::adk_session::parse_dispatch_id(&state.user_text)
+            })
+        })
+        .or(
+            crate::services::discord::adk_session::lookup_pending_dispatch_for_thread(
+                shared.api_port,
+                channel_id.get(),
+            )
+            .await,
+        )
+        .or_else(|| {
+            resolve_dispatched_thread_dispatch_from_db(shared.pg_pool.as_ref(), channel_id.get())
+        });
+
+    if resolved_did.is_none() && has_assistant_response {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ watcher: no dispatch id resolved for channel {} after terminal success",
+            channel_id.get()
+        );
+    }
+    let current_worktree_path = {
+        let mut data = shared.core.lock().await;
+        data.sessions
+            .get_mut(&channel_id)
+            .and_then(|session| session.validated_path(channel_id.get()))
+    };
+
+    // A paused lifecycle keeps dispatch work queued until terminal delivery is ready.
+    let dispatch_ok = if lifecycle_stage_paused {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            provider = %watcher_provider.as_str(),
+            channel_id = channel_id.get(),
+            tmux_session = %tmux_session_name,
+            "[{ts}] ⚠ watcher: dispatch finalization deferred — TUI quiescence gate timed out (#2161)"
+        );
+        false
+    } else if let Some(did) = resolved_did
+        .as_deref()
+        .filter(|_| !completion_is_stale_for_newer_turn && !native_owns_work(pin, late))
+    {
+        // A stale range cannot complete a newer row’s dispatch.
+        let finalization =
+            crate::services::discord::streaming_finalizer::finalize_watcher_streaming_dispatch(
+                crate::services::discord::streaming_finalizer::WatcherStreamingFinalRequest {
+                    pg_pool: shared.pg_pool.as_ref(),
+                    dispatch_id: did,
+                    adk_cwd: current_worktree_path.as_deref(),
+                    full_response,
+                    has_assistant_response,
+                },
+            )
+            .await;
+        if !finalization.completed {
+            tracing::debug!(
+                disposition = ?finalization.disposition,
+                dispatch_type = ?finalization.dispatch_type,
+                error = ?finalization.error,
+                "watcher streaming finalizer preserved dispatch state"
+            );
+        }
+        finalization.completed
+    } else {
+        true
+    };
+    (resolved_did, dispatch_ok)
+}
+
 #[cfg(test)]
 #[path = "path_b_record_tests.rs"]
 mod tests;

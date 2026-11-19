@@ -6,7 +6,7 @@ use super::super::provider_dispatch::{
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::replay_disposition::write::{self, BeginFrom, CanonicalInput, EffectProjection};
-use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
+use crate::services::discord::admin_host_guard::tests::{Recorder, StatusAnswer, api_child};
 use crate::services::discord::replay_policy::live::{RawObservation, Seen};
 use crate::services::discord::replay_policy::permit::EffectTarget;
 use crate::services::discord::replay_policy::{ExactHandoff, ExactRetry, RetryPermit};
@@ -14,6 +14,9 @@ use crate::services::discord::router::intake_dispatch::replay_admission::{
     input_hash, test_activation,
 };
 use std::time::Duration;
+
+#[path = "dispatch_runtime_tests.rs"]
+mod dispatch_runtime_tests;
 
 const STALE: &str = "stale-resume";
 
@@ -1881,13 +1884,22 @@ async fn host(channels: &[ChannelId]) -> Host {
 type Answer = Arc<dyn Fn(&axum::http::Method, &str) -> Option<serde_json::Value> + Send + Sync>;
 
 async fn host_with(channels: &[ChannelId], answer: Answer) -> Host {
+    let api = Recorder::start_with(answer).await;
+    host_using(channels, api).await
+}
+
+async fn host_with_status(channels: &[ChannelId], answer: StatusAnswer) -> Host {
+    let api = Recorder::start_with_status(answer).await;
+    host_using(channels, api).await
+}
+
+async fn host_using(channels: &[ChannelId], api: Recorder) -> Host {
     let root = crate::config::TestRuntimeRootGuard::new();
     let boot = serde_json::from_value(serde_json::json!({"server": {}, "agents": [], "providers": {"claude": {"runtime": "pipe"}}})).unwrap();
     crate::services::tui_o::channel_policy::install(&boot).unwrap();
     crate::services::provider_hosting::install_provider_hosting_config(&boot);
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let api = Recorder::start_with(answer).await;
     crate::services::discord::internal_api::init(api.port, None);
     let mut shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
@@ -1939,6 +1951,14 @@ async fn start<T>(
     channel: ChannelId,
     entry: impl std::future::Future<Output = T>,
 ) -> (T, Option<(SubmittedPrompt, std::sync::mpsc::Sender<()>)>) {
+    start_with_terminal_timing(channel, entry, true).await
+}
+
+async fn start_with_terminal_timing<T>(
+    channel: ChannelId,
+    entry: impl std::future::Future<Output = T>,
+    terminal_before_release: bool,
+) -> (T, Option<(SubmittedPrompt, std::sync::mpsc::Sender<()>)>) {
     let (capture, prompt) = tokio::sync::oneshot::channel();
     *INPUT_PROMPT_PROBE.lock().unwrap() = Some((channel.get(), capture));
     let (entered, _entered) = tokio::sync::oneshot::channel();
@@ -1947,7 +1967,7 @@ async fn start<T>(
         channel: channel.get(),
         entered,
         release,
-        terminal_before_release: true,
+        terminal_before_release,
     });
     let output = tokio::time::timeout(Duration::from_secs(60), entry)
         .await

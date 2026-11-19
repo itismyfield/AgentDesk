@@ -1,19 +1,25 @@
 use super::*;
 
+type DispatchInfo = super::super::super::thread_binding::DispatchInfo;
+use super::super::super::prompt_builder::CurrentTaskContext;
+
+pub(super) struct DispatchRuntime {
+    pub(super) final_thread_parent: Option<(ChannelId, Option<String>)>,
+    pub(super) authoritative: bool,
+    pub(super) active_dispatch_info: Option<DispatchInfo>,
+    pub(super) active_dispatch_id_for_prompt: Option<String>,
+    pub(super) pinned: Option<Option<String>>,
+}
+
 pub(super) async fn prepare_post_redirect_dispatch_runtime(
     http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     dispatch_id_for_thread: Option<&String>,
-    dispatch_info_cached: Option<super::super::super::thread_binding::DispatchInfo>,
+    dispatch_info_cached: Option<DispatchInfo>,
     dispatch_paths: (Option<&String>, Option<&String>),
     dispatch_runtime: (&mut Option<String>, &mut String),
-) -> (
-    Option<(ChannelId, Option<String>)>,
-    bool,
-    Option<super::super::super::thread_binding::DispatchInfo>,
-    Option<String>,
-) {
+) -> DispatchRuntime {
     let (dispatch_worktree_path, dispatch_target_repo_path) = dispatch_paths;
     let (dispatch_type_str, dispatch_effective_path) = dispatch_runtime;
     let final_thread_parent =
@@ -45,12 +51,13 @@ pub(super) async fn prepare_post_redirect_dispatch_runtime(
             }
         }
     }
-    let looked_up = crate::services::discord::adk_session::lookup_pending_dispatch_for_thread(
+    let first = crate::services::discord::adk_session::lookup_pending_dispatch_for_thread(
         shared.api_port,
         channel_id.get(),
     )
-    .await
-    .or_else(|| dispatch_id_for_thread.cloned());
+    .await;
+    let first_hit = first.is_some();
+    let looked_up = first.or_else(|| dispatch_id_for_thread.cloned());
     let active_dispatch_id_for_prompt = unheld_dispatch(shared, channel_id, looked_up).await;
     let active_dispatch_info = match active_dispatch_id_for_prompt.as_deref() {
         Some(did) if dispatch_id_for_thread.map(String::as_str) == Some(did) => {
@@ -65,12 +72,60 @@ pub(super) async fn prepare_post_redirect_dispatch_runtime(
     {
         *dispatch_type_str = Some(active_dispatch_type);
     }
-    (
+    DispatchRuntime {
         final_thread_parent,
         authoritative,
         active_dispatch_info,
+        pinned: first_hit.then(|| active_dispatch_id_for_prompt.clone()),
         active_dispatch_id_for_prompt,
+    }
+}
+
+pub(super) async fn row_dispatch(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    user_text: &str,
+    pinned: Option<Option<String>>,
+) -> Option<String> {
+    if let Some(dispatch) = pinned {
+        return dispatch;
+    }
+    let looked_up = super::super::super::adk_session::lookup_pending_dispatch_for_thread(
+        shared.api_port,
+        channel_id.get(),
     )
+    .await
+    .or_else(|| super::super::super::adk_session::parse_dispatch_id(user_text));
+    unheld_dispatch(shared, channel_id, looked_up).await
+}
+
+pub(super) fn prompt_task<'a>(
+    id: Option<&'a str>,
+    info: Option<&'a DispatchInfo>,
+    first_hit: bool,
+    routing_type: Option<&'a str>,
+) -> (Option<CurrentTaskContext<'a>>, Option<&'a str>) {
+    let task = match info {
+        Some(info) => CurrentTaskContext {
+            dispatch_id: id,
+            card_id: info.card_id.as_deref(),
+            dispatch_title: info.dispatch_title.as_deref(),
+            dispatch_context: info.context.as_deref(),
+            card_title: info.card_title.as_deref(),
+            github_issue_url: info.github_issue_url.as_deref(),
+        },
+        None if first_hit && id.is_some() => CurrentTaskContext {
+            dispatch_id: id,
+            ..Default::default()
+        },
+        None => return (None, routing_type),
+    };
+    let dispatch_type = if first_hit && task.id_only() {
+        info.and_then(|info| info.dispatch_type.as_deref())
+    } else {
+        routing_type
+    };
+    (Some(task), dispatch_type)
 }
 
 /// A held dispatch stays with its protected request, so a fresh input never inherits it. A dormant

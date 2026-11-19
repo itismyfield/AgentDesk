@@ -60,6 +60,28 @@ fn path_b_records_the_late_row_else_only_the_pin_of_this_committed_range() {
     assert_eq!(select(None, Some(&synthetic)), None);
 }
 
+#[test]
+fn path_b_work_custody_requires_a_structured_id_on_the_held_row() {
+    let mut prefix = row(100, 10);
+    prefix.user_text = "DISPATCH: prefix-only".into();
+    let mut explicit = row(200, 10);
+    explicit.dispatch_id = Some("native-work".into());
+    for (pin_held, late_held) in [(false, false), (false, true), (true, false), (true, true)] {
+        assert!(!native_owns_work(
+            (pin_held, Some(&prefix)),
+            (late_held, Some(&prefix))
+        ));
+        assert_eq!(
+            native_owns_work((pin_held, Some(&explicit)), (late_held, Some(&prefix))),
+            pin_held
+        );
+        assert_eq!(
+            native_owns_work((pin_held, Some(&prefix)), (late_held, Some(&explicit))),
+            late_held
+        );
+    }
+}
+
 async fn create_pool() -> (
     crate::dispatch::test_support::DispatchPostgresTestDb,
     sqlx::PgPool,

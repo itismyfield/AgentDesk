@@ -9,6 +9,8 @@ use completion_context::*;
 use completion_postgres::*;
 
 pub(crate) use completion_context::build_work_dispatch_completion_result;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use completion_postgres::RuntimeDatabase;
 pub(in crate::services::discord) use completion_postgres::{
     queue_dispatch_followup_with_handles, runtime_db_fallback_complete_with_result,
     streaming_final_complete_dispatch_with_result,

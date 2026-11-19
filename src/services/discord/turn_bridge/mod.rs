@@ -101,6 +101,8 @@ pub(super) use cancel_finalize_policy::{
     resolve_bridge_owner_channel, should_finalize_cancel_after_recv,
     should_record_final_turn_transcript, should_suppress_headless_delivery_for_cancel,
 };
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use completion_guard::RuntimeDatabase;
 pub(crate) use completion_guard::build_work_dispatch_completion_result;
 pub(super) use completion_guard::{
     fail_dispatch_tmux_session_died, fail_dispatch_with_retry, guard_review_dispatch_completion,

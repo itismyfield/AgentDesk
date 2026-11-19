@@ -12,6 +12,7 @@ const WATCHER_SESSION: &str = "synthetic-mailbox-release-5704";
 enum LateRow {
     /// The row is this committed range's turn (the live 07:30:32 shape).
     InRange,
+    NativeHeld,
     /// The row belongs to another tmux session than the committing watcher.
     OtherSession,
     /// The row starts after this committed range (a newer turn).
@@ -68,9 +69,11 @@ async fn commit(
     output: &str,
     inflight_before_relay: &Option<InflightTurnState>,
     inflight_state: &Option<InflightTurnState>,
-    data_start_offset: u64,
-    current_offset: u64,
-    channel_effects: crate::services::discord::scheduled_turn::ChannelEffects,
+    (data_start_offset, current_offset): (u64, u64),
+    (channel_effects, native_held): (
+        crate::services::discord::scheduled_turn::ChannelEffects,
+        (bool, bool),
+    ),
 ) {
     let tmux = WATCHER_SESSION.to_string();
     let output = output.to_string();
@@ -105,6 +108,7 @@ async fn commit(
             relay_suppressed: false,
             has_assistant_response: true,
             receipt_kept: false,
+            native_held,
             completion_is_stale_for_newer_turn,
             anchor_cleanup_is_stale_for_newer_turn,
             inflight_state,
@@ -213,9 +217,14 @@ fn run(late_row: LateRow, snapshot_has_row: bool) -> (bool, Option<serenity::Mes
                 output.to_str().unwrap(),
                 &inflight_before_relay,
                 &late,
-                data_start_offset,
-                current_offset,
-                crate::services::discord::scheduled_turn::ChannelEffects::Allowed,
+                (data_start_offset, current_offset),
+                (
+                    crate::services::discord::scheduled_turn::ChannelEffects::Allowed,
+                    (
+                        snapshot_has_row && late_row == LateRow::NativeHeld,
+                        late_row == LateRow::NativeHeld,
+                    ),
+                ),
             )
             .await;
 
@@ -264,6 +273,18 @@ fn synthetic_row_pinned_by_preflight_still_releases_its_mailbox() {
     assert!(!row_on_disk);
     assert_eq!(active, None);
     assert!(follow_up);
+}
+
+#[test]
+fn native_held_row_survives_the_watcher_epilogue_with_its_mailbox() {
+    for pin in [false, true] {
+        let (row_on_disk, active, _) = run(LateRow::NativeHeld, pin);
+        assert!(row_on_disk);
+        assert_eq!(
+            active.map(|anchor| anchor.get()),
+            Some(1_552_447_036_652_134_502)
+        );
+    }
 }
 
 #[test]
@@ -375,9 +396,8 @@ fn an_isolated_scheduled_commit_adds_nothing_to_the_channel_history() {
                     output.to_str().unwrap(),
                     &row,
                     &row,
-                    1,
-                    16,
-                    effects,
+                    (1, 16),
+                    (effects, (false, false)),
                 )
                 .await;
                 shared.core.lock().await.sessions[&channel].history.len()

@@ -1418,6 +1418,8 @@ mod replay_hold_tests;
 #[cfg(test)]
 #[path = "completion_postgres_terminal_sync_tests.rs"]
 mod terminal_sync_tests;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use terminal_sync_tests::RuntimeDatabase;
 
 #[cfg(test)]
 #[path = "completion_postgres_snapshot_tests.rs"]

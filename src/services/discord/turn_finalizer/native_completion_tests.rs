@@ -9,6 +9,9 @@ use serde_json::json;
 
 const NS: &str = "native-fixture";
 
+#[path = "native_completion_work_tests.rs"]
+mod work_dispatch;
+
 fn proof(f: &Fixture, body: Option<&str>, disposition: Disposition) -> Evidence {
     let assistant = |id: &str, text: &str| {
         format!(

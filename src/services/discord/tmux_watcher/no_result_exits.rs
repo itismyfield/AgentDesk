@@ -394,6 +394,12 @@ pub(super) async fn handle_no_result_exits(
                     *state.all_data_first_forwarded_relay_sequence = None;
                     return NoResultExitOutcome::ContinueWatcherLoop;
                 }
+                FreshIdleFinalizeDecision::Finalize { .. }
+                    if path_b_record::native_held(
+                        &shared,
+                        pinned_pre_cleanup_inflight.as_ref(),
+                    )
+                    .await => {}
                 FreshIdleFinalizeDecision::Finalize { user_msg_id } => {
                     // #3016 S3 (the A2 / phase-5 enabler): a structural JSONL
                     // terminator is PROVEN on disk for this turn (Done) AND no

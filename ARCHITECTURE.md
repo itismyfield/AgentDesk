@@ -2477,6 +2477,7 @@ src/
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
 │   │   │   │   │   ├── dispatch_runtime.rs
+│   │   │   │   │   ├── dispatch_runtime_tests.rs
 │   │   │   │   │   ├── feature_settings.rs
 │   │   │   │   │   ├── first_key_gate_paths_tests.rs
 │   │   │   │   │   ├── host_refusal.rs
@@ -3415,6 +3416,7 @@ src/
 │   │   │   ├── native_binding_tests.rs
 │   │   │   ├── native_completion.rs
 │   │   │   ├── native_completion_tests.rs
+│   │   │   ├── native_completion_work_tests.rs
 │   │   │   ├── native_input_tests.rs
 │   │   │   ├── native_policy.rs
 │   │   │   ├── native_prepare.rs

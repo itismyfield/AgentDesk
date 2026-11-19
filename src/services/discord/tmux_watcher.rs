@@ -142,6 +142,8 @@ mod terminal_readiness;
 
 #[path = "tmux_watcher/path_b_record.rs"]
 mod path_b_record;
+#[cfg(test)]
+pub(in crate::services::discord) use path_b_record::{WatcherDispatch, finalize_dispatch};
 
 #[path = "tmux_watcher/utf8_chunk_decoder.rs"]
 mod utf8_chunk_decoder;
@@ -1727,10 +1729,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     );
                     let pre_panel_restored_finalizer_turn_id =
                         terminal_projection_settled_key.map_or(0, |key| key.user_msg_id);
-                    if should_submit_restored_watcher_finalize(
-                        pre_panel_completion_is_stale_for_newer_turn,
-                        pre_panel_restored_finalizer_turn_id,
-                    ) {
+                    if !pin_held
+                        && should_submit_restored_watcher_finalize(
+                            pre_panel_completion_is_stale_for_newer_turn,
+                            pre_panel_restored_finalizer_turn_id,
+                        )
+                    {
                         pre_panel_release_drove_finalize =
                             release_restored_watcher_active_turn_before_panel_edit(
                                 &shared,
@@ -2026,6 +2030,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &provider_kind,
             channel_id.get(),
         );
+        let late_held = path_b_record::native_held(&shared, inflight_state.as_ref()).await;
         let watcher_session_id = state.last_session_id.clone();
         let channel_effects = crate::services::discord::scheduled_turn::channel_effects(
             shared.pg_pool.as_ref(),
@@ -2272,10 +2277,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             channel_effects,
                             completion_range: (&tmux_session_name, current_offset),
                             settle_pin: inflight_before_relay.as_ref(),
-                            native_held: (
-                                pin_held,
-                                path_b_record::native_held(&shared, inflight_state.as_ref()).await,
-                            ),
+                            native_held: (pin_held, late_held),
                         },
                         || async {
                             crate::services::discord::adk_session::lookup_pending_dispatch_for_thread(
@@ -2311,92 +2313,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
         }
 
-        let resolved_did = inflight_state
-            .as_ref()
-            .and_then(|state| state.dispatch_id.clone())
-            .or_else(|| {
-                inflight_state.as_ref().and_then(|state| {
-                    crate::services::discord::adk_session::parse_dispatch_id(&state.user_text)
-                })
+        let (resolved_did, dispatch_ok) =
+            path_b_record::finalize_dispatch(path_b_record::WatcherDispatch {
+                shared: &shared,
+                channel_id,
+                watcher_provider: &watcher_provider,
+                tmux_session_name: &tmux_session_name,
+                pin: (pin_held, inflight_before_relay.as_ref()),
+                late: (late_held, inflight_state.as_ref()),
+                full_response: &full_response,
+                has_assistant_response,
+                lifecycle_stage_paused,
+                completion_is_stale_for_newer_turn,
             })
-            .or(
-                crate::services::discord::adk_session::lookup_pending_dispatch_for_thread(
-                    shared.api_port,
-                    channel_id.get(),
-                )
-                .await,
-            )
-            .or_else(|| {
-                resolve_dispatched_thread_dispatch_from_db(
-                    shared.pg_pool.as_ref(),
-                    channel_id.get(),
-                )
-            });
-
-        if resolved_did.is_none() && has_assistant_response {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] ⚠ watcher: no dispatch id resolved for channel {} after terminal success",
-                channel_id.get()
-            );
-        }
-        let current_worktree_path = {
-            let mut data = shared.core.lock().await;
-            data.sessions
-                .get_mut(&channel_id)
-                .and_then(|session| session.validated_path(channel_id.get()))
-        };
-
-        // #2161 (Codex round-2 H1): if the TUI quiescence gate timed out
-        // before terminal delivery was durably mirrored, treat the watcher
-        // dispatch finalization as "preserved": don't complete the dispatch,
-        // don't kick off queued work, and leave inflight alone so the next
-        // watcher pass / placeholder sweeper observes the still-busy pane and
-        // reconciles. Once delivery is mirrored, match the bridge path and
-        // allow cleanup while still suppressing visible completion.
-        let dispatch_ok = if lifecycle_stage_paused {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                provider = %watcher_provider.as_str(),
-                channel_id = channel_id.get(),
-                tmux_session = %tmux_session_name,
-                "[{ts}] ⚠ watcher: dispatch finalization deferred — TUI quiescence gate timed out (#2161)"
-            );
-            false
-        } else if let Some(did) = resolved_did
-            .as_deref()
-            .filter(|_| !completion_is_stale_for_newer_turn)
-        {
-            // #3142: when stale, the late `inflight_state.dispatch_id` (the first
-            // fallback in `resolved_did`) belongs to the NEWER running turn;
-            // completing it here with the OLDER `full_response` is wrong-turn
-            // corruption. Fall through to the `else => true` no-finalize arm
-            // (dispatch_ok stays true; downstream clear/finalize keep their own
-            // stale gates) — the newer turn finalizes its own dispatch on its later
-            // pass. FALSE in every normal case, so the common finalize is untouched.
-            let finalization =
-                crate::services::discord::streaming_finalizer::finalize_watcher_streaming_dispatch(
-                    crate::services::discord::streaming_finalizer::WatcherStreamingFinalRequest {
-                        pg_pool: shared.pg_pool.as_ref(),
-                        dispatch_id: did,
-                        adk_cwd: current_worktree_path.as_deref(),
-                        full_response: &full_response,
-                        has_assistant_response,
-                    },
-                )
-                .await;
-            if !finalization.completed {
-                tracing::debug!(
-                    disposition = ?finalization.disposition,
-                    dispatch_type = ?finalization.dispatch_type,
-                    error = ?finalization.error,
-                    "watcher streaming finalizer preserved dispatch state"
-                );
-            }
-            finalization.completed
-        } else {
-            true
-        };
+            .await;
 
         // #4229 S7: committed-completion finalize tail moved verbatim to
         // tmux_watcher/terminal_commit_epilogue.rs (TUI history push / tombstone+drain /
@@ -2418,6 +2348,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             relay_suppressed,
             has_assistant_response,
             receipt_kept,
+            native_held: (pin_held, late_held),
             completion_is_stale_for_newer_turn,
             anchor_cleanup_is_stale_for_newer_turn,
             inflight_state: &inflight_state,

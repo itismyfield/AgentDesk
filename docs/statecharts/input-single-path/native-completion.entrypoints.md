@@ -43,16 +43,33 @@ The table covers the completion entry points audited for this slice.
 | C21, C22 | `src/services/discord/turn_bridge/completion_postlude.rs` metrics and restart report | Existing bridge observations and restart handling. |
 | C24 | `src/services/discord/turn_finalizer/completion_admission.rs` rejected handoff | Existing native actor admission and custody checks. |
 
+## Watcher, recovery and dispatch boundaries
+
+| Entry | Coordinate | Custody decision |
+|---|---|---|
+| Watcher pre-panel release | `src/services/discord/tmux_watcher.rs` and `src/services/discord/turn_finalizer/cleanup/terminal_release.rs` | The pinned native row keeps its mailbox and managed inflight file. |
+| Watcher committed cleanup | `src/services/discord/tmux_watcher/terminal_commit_epilogue.rs` | Checks the late row's custody before clearing. An independent legacy late row keeps its usual identity and stale-range checks. |
+| Watcher fresh-idle cleanup | `src/services/discord/tmux_watcher/no_result_exits.rs` | Checks the pinned row's custody before receipt, row clear and finalizer submission. |
+| Watcher stall and boot stale reaping | `src/services/discord/tmux_watcher/stall_exit.rs`, `src/services/discord/inflight/removal/boot_reaper.rs` | Adjacent cleanup retains existing authority and is outside the recording liveness premise. |
+| Recovery completion | `src/services/discord/recovery_engine/restore_inflight.rs:421`, `src/services/discord/recovery_engine/restore_inflight.rs:1088`, `src/services/discord/recovery_engine/restore_inflight.rs:1354`, `src/services/discord/recovery_engine/restore_inflight.rs:1563` | Native reachability remains open for visible completion and ready-at-EOF recovery. |
+| Watcher work dispatch | `src/services/discord/tmux_watcher/path_b_record.rs::finalize_dispatch` | Suppresses a watcher completion if the pin or late row has native custody and a structured dispatch ID. Otherwise the watcher fallback completes implementation and rework. Its existing plan and plan-review branches emit no completion event. |
+| Native work dispatch | `src/services/discord/turn_finalizer/native_completion.rs::write` | Uses the structured row ID. The reused helper covers implementation, rework, plan and plan-review. Exactly-once completion assumes successful lookup, write, and retention of the native row. |
+| Intake dispatch selection | `src/services/discord/router/message_handler/intake_turn/dispatch_runtime.rs` | A first lookup hit pins its protected decision for prompt, row and webhook. A miss preserves the late lookup, prefix fallback and protection check. A verified ID with no details appears in the prompt without a generic completion contract. |
+
 ## TLC configurations
 
-The following pairs exercise the five before modes against the matching fixed mode. The `.tla` and all `.cfg` files retain their reviewed contents.
+All 27 configurations come from the reviewed design. The full list of expected violations, including liveness checked separately from safety, is in `docs/statecharts/expected.tsv`.
 
-| Before suffix | Fixed suffix | Rule violated before |
+| Before suffix | Fixed suffix | Failure before |
 |---|---|---|
-| `Before` | `FixedNormal` | `ScheduledEventuallySettles`, `TranscriptEventuallyRecorded` |
-| `CapturedBefore` | `FixedClearBeforeRecord` | `NoResurrectionAfterClear` |
-| `EmptyGateBefore` | `FixedEmpty` | `ScheduledEventuallySettles` |
-| `ForeignBefore` | `FixedNormal` | `NoForeignBody` |
-| `OrderingBefore` | `FixedNormal` | `NoCleanupBeforeRecordStage`, `ScheduledEventuallySettles`, `TranscriptEventuallyRecorded` |
+| `Before` | `FixedNormal` | Recording progress |
+| `CapturedBefore` | `FixedClearBeforeRecord` | Resurrection after clear |
+| `EmptyGateBefore` | `FixedEmpty` | Scheduled completion progress |
+| `ForeignBefore` | `FixedNormal` | Foreign body |
+| `OrderingBefore`, `WatcherClearBefore` | `FixedNormal`, `FixedWatcherRace` | Cleanup before recording |
+| `WatcherWorkBefore`, `WatcherCountBefore` | `FixedWatcherRace` | Foreign body or duplicate work completion |
+| `GateAllBefore`, `NativeWithoutIdBefore` | `FixedNoDispatchId` | Work progress or duplicate work completion |
+| `TwoLookupsBefore` | `FixedPromptOnlyId` | Work progress after a lost row ID |
+| `SingleDecisionBefore`, `EarlyRetryBefore` | `FixedFirstMissLateHit` | Work progress after a late lookup hit |
 
-`FixedUnreadable`, `FixedWriteFail`, `FixedCrashAfterRecord`, `FixedCrashAfterDelete`, `FixedCancelled`, and `FixedFollower` cover the remaining terminal scenarios.
+`BaseFirstMissLateHit` confirms that the baseline completes work when its second lookup hits after the first miss.
