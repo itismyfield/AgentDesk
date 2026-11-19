@@ -244,6 +244,7 @@ pub fn resolve_provider_session_selection_with_channel(
     entrypoint_supports_tui_hosting: bool,
     channel_id: Option<u64>,
 ) -> ProviderSessionSelection {
+    let channel_id = channel_id.map(crate::services::session_host::surface_policy::policy_channel);
     let provider_id = provider.as_str().to_ascii_lowercase();
     let provider_default = PROVIDER_TUI_HOSTING
         .read()

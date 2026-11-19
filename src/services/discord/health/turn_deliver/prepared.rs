@@ -2,36 +2,43 @@
 
 use super::{
     DeliveryPorts, HealthRegistry, HumanInputDelivery, HumanInputError, HumanInputRequest,
-    InjectMode, LivePorts, author_allowed_for_human_input, deliver_with_ports, inject,
+    InjectMode, LivePorts, authorize_on_shared, deliver_with_ports, inject,
     resolve_direct_channel_shared,
 };
 
+use super::super::ThreadTurnRuntime;
+
 impl HealthRegistry {
     /// Captures delivery state before admission; only awaiting the returned future can deliver.
-    pub(crate) async fn prepare_external_human_input(
+    pub(crate) async fn prepare_external_human_input_on(
         &self,
-        request: HumanInputRequest,
+        mut request: HumanInputRequest,
         reply: Option<crate::services::imsg_reply::ReplyObligation>,
+        thread: Option<&ThreadTurnRuntime>,
     ) -> Result<
         impl std::future::Future<Output = Result<HumanInputDelivery, HumanInputError>> + Send + 'static,
         HumanInputError,
     > {
-        let shared = resolve_direct_channel_shared(self, request.channel_id, &request.provider)
-            .await
-            .map_err(HumanInputError::RuntimeUnavailable)?;
-        let allowed = {
-            let settings = shared.settings.read().await;
-            author_allowed_for_human_input(
-                settings.owner_user_id,
-                &settings.allowed_user_ids,
-                request.author_id,
-            )
+        let shared = match thread {
+            Some(thread) => thread.shared.clone(),
+            None => resolve_direct_channel_shared(self, request.channel_id, &request.provider)
+                .await
+                .map_err(HumanInputError::RuntimeUnavailable)?,
         };
-        if !allowed {
-            return Err(HumanInputError::AuthorNotAllowed);
+        authorize_on_shared(&shared, request.author_id).await?;
+        let prepared_herdr = match thread {
+            Some(thread) => {
+                thread
+                    .check_live()
+                    .await
+                    .map_err(|detail| HumanInputError::RuntimeUnavailable(detail.to_owned()))?
+                    == crate::services::session_host::HostKind::Herdr
+            }
+            None => super::preflight::host(&shared, &request.provider, request.channel_id).await?,
+        };
+        if let Some(thread) = thread {
+            request.metadata = Some(thread.scope_metadata(request.metadata.take()));
         }
-        let prepared_herdr =
-            super::preflight::host(&shared, &request.provider, request.channel_id).await?;
         let runtime = match shared.http.cached_serenity_ctx.get().cloned() {
             None => Err("provider runtime is not ready".to_string()),
             Some(ctx) => shared
