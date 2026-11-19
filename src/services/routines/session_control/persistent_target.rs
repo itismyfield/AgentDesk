@@ -197,12 +197,14 @@ impl RoutineSessionController {
                 ));
             }
         }
-        let lock = format!(
+        let lock = if active.is_some() {
             "SELECT id FROM routines WHERE id=$1 AND in_flight_run_id IS NOT DISTINCT FROM $2
-             AND ($2::text IS NOT NULL OR execution_strategy=$3) FOR NO KEY UPDATE{}",
-            if active.is_some() { " NOWAIT" } else { "" },
-        );
-        let found: Option<String> = sqlx::query_scalar(&lock)
+             AND ($2::text IS NOT NULL OR execution_strategy=$3) FOR NO KEY UPDATE NOWAIT"
+        } else {
+            "SELECT id FROM routines WHERE id=$1 AND in_flight_run_id IS NOT DISTINCT FROM $2
+             AND ($2::text IS NOT NULL OR execution_strategy=$3) FOR NO KEY UPDATE"
+        };
+        let found: Option<String> = sqlx::query_scalar(lock)
             .bind(&routine.id)
             .bind(active)
             .bind(&routine.execution_strategy)
