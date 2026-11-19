@@ -9,6 +9,7 @@ type MobileRouteId = AppRouteId | "more";
 interface AppMobileNavigationProps {
   activeRouteId: MobileRouteId;
   bottomSheetZIndex: number;
+  currentRouteId: AppRouteId | null;
   iconForRoute: (routeId: AppRouteId) => LucideIcon;
   isKo: boolean;
   moreMenuRef: RefObject<HTMLDivElement | null>;
@@ -42,6 +43,7 @@ function badgeAriaSuffix(isKo: boolean, badge: number | undefined): string {
 export function AppMobileNavigation({
   activeRouteId,
   bottomSheetZIndex,
+  currentRouteId,
   iconForRoute,
   isKo,
   moreMenuRef,
@@ -165,6 +167,7 @@ export function AppMobileNavigation({
                     type="button"
                     data-testid={`app-mobile-more-${route.id}`}
                     aria-label={label + badgeAriaSuffix(isKo, badge)}
+                    aria-current={currentRouteId === route.id ? "page" : undefined}
                     onClick={() =>
                       navigateToRoute(route.path, route.id === "agents" ? { agentsTab: "agents" } : undefined)
                     }

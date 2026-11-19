@@ -55,7 +55,7 @@ export function AppSidebar({
       aria-label={tr("주 메뉴", "Main menu")}
       className="flex w-[232px] shrink-0 flex-col gap-1 border-r border-th-border-subtle bg-th-bg-surface p-3"
     >
-      <div className="flex items-center gap-2.5 px-2 pt-1.5 pb-3.5">
+      <div className="flex shrink-0 items-center gap-2.5 px-2 pt-1.5 pb-3.5">
         <span
           aria-hidden
           className="grid h-8 w-8 shrink-0 place-items-center rounded-[var(--r-sm)] bg-[var(--accent-soft)] text-xs font-bold text-[var(--th-badge-blue-text)]"
@@ -68,46 +68,49 @@ export function AppSidebar({
         </div>
       </div>
 
-      {sections.map((sectionId, index) => (
-        <div key={sectionId} className="flex flex-col gap-1">
-          {index > 0 ? <div aria-hidden className="mx-1 my-2 h-px bg-[var(--th-border-subtle)]" /> : null}
-          {routes
-            .filter((route) => route.section === sectionId)
-            .map((route) => {
-              const Icon = iconForRoute(route.id);
-              const badge = routeBadge(route.id);
-              const label = isKo ? route.labelKo : route.labelEn;
-              return (
-                <Link
-                  key={route.id}
-                  to={route.path}
-                  onClick={() => {
-                    if (route.id === "agents") setAgentsPageTab("agents");
-                  }}
-                  className={NAV_CLASS}
-                  title={isKo ? route.descriptionKo : route.descriptionEn}
-                  aria-current={currentRouteId === route.id ? "page" : undefined}
-                  aria-label={badge ? `${label}, ${tr(`확인할 일 ${badge}건`, `${badge} need attention`)}` : undefined}
-                >
-                  <Icon size={18} aria-hidden className="shrink-0" />
-                  <span className="min-w-0 flex-1 truncate">{label}</span>
-                  {badge ? (
-                    <span
-                      aria-hidden
-                      className="grid h-5 min-w-5 place-items-center rounded-full bg-[var(--th-badge-amber-bg)] px-1.5 text-[11px] font-semibold tabular-nums text-[var(--th-badge-amber-text)]"
-                    >
-                      {badge > 99 ? "99+" : badge}
-                    </span>
-                  ) : null}
-                </Link>
-              );
-            })}
-        </div>
-      ))}
+      {/* Only the menu scrolls, so brand and connection status stay in view on short windows. */}
+      <div data-testid="app-sidebar-menu" className="-m-1 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-1">
+        {sections.map((sectionId, index) => (
+          <div key={sectionId} className="flex flex-col gap-1">
+            {index > 0 ? <div aria-hidden className="mx-1 my-2 h-px bg-[var(--th-border-subtle)]" /> : null}
+            {routes
+              .filter((route) => route.section === sectionId)
+              .map((route) => {
+                const Icon = iconForRoute(route.id);
+                const badge = routeBadge(route.id);
+                const label = isKo ? route.labelKo : route.labelEn;
+                return (
+                  <Link
+                    key={route.id}
+                    to={route.path}
+                    onClick={() => {
+                      if (route.id === "agents") setAgentsPageTab("agents");
+                    }}
+                    className={NAV_CLASS}
+                    title={isKo ? route.descriptionKo : route.descriptionEn}
+                    aria-current={currentRouteId === route.id ? "page" : undefined}
+                    aria-label={badge ? `${label}, ${tr(`확인할 일 ${badge}건`, `${badge} need attention`)}` : undefined}
+                  >
+                    <Icon size={18} aria-hidden className="shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">{label}</span>
+                    {badge ? (
+                      <span
+                        aria-hidden
+                        className="grid h-5 min-w-5 place-items-center rounded-full bg-[var(--th-badge-amber-bg)] px-1.5 text-[11px] font-semibold tabular-nums text-[var(--th-badge-amber-text)]"
+                      >
+                        {badge > 99 ? "99+" : badge}
+                      </span>
+                    ) : null}
+                  </Link>
+                );
+              })}
+          </div>
+        ))}
+      </div>
 
       <div
         data-testid="sidebar-connection-status"
-        className="mt-auto flex items-center gap-2 rounded-[var(--r-sm)] border border-th-border-subtle p-2.5 text-xs text-th-text-muted"
+        className="mt-2 flex shrink-0 items-center gap-2 rounded-[var(--r-sm)] border border-th-border-subtle p-2.5 text-xs text-th-text-muted"
       >
         <span
           aria-hidden
