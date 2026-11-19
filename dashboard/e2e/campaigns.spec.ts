@@ -147,7 +147,7 @@ test("campaign tab: the list or picker, one status sentence, what needs someone,
   await expect(panel.getByRole("region", { name: "요약" })).toContainText("PR 연결1 / 2");
   await expect(panel.getByRole("switch", { name: "자동 진행" })).toHaveAttribute("aria-checked", "false");
 
-  const chips = panel.locator(".campaign-status-chips button");
+  const chips = panel.locator(".campaign-status-chips button:not(.campaign-find)");
   await expect(chips).toHaveText([/^대기 3$/, /^완료 1$/, /^건너뜀 1$/]);
   await chips.first().click();
   await expect(panel.getByRole("list", { name: "대기" }).locator(".campaign-task-row")).toHaveCount(3);
@@ -204,6 +204,56 @@ test("campaign tab: a task opens in the pinned pane on wide screens and in a she
   await expect(pane).toHaveCount(0);
 });
 
+test("campaign tab: closing a task returns focus to the card, list row or connections row that opened it", async ({ page }) => {
+  await openCampaigns(page);
+  const panel = page.locator(".campaigns-panel");
+  const closeButton = page.getByRole("button", { name: "상세 닫기" });
+  const escape = async () => { await closeButton.focus(); await page.keyboard.press("Escape"); }; // a docked pane takes Escape from inside
+  const card = panel.locator('[data-task-id="i7272"]');
+  await card.click();
+  await closeButton.click();
+  await expect(card).toBeFocused();
+  await panel.locator(".campaign-status-chips button").first().click();
+  const row = panel.getByRole("list", { name: "대기" }).locator('[data-task-id="i7402"]');
+  await row.click();
+  await escape();
+  await expect(row).toBeFocused();
+  await panel.getByRole("tab", { name: "관계도" }).click();
+  await panel.locator(".react-flow__node").filter({ hasText: "Relay" }).first().click();
+  const relayRow = panel.locator('.campaign-relations [data-task-id="i7340"]');
+  for (const close of [() => closeButton.click(), escape]) {
+    await relayRow.click();
+    await expect(page.locator(".campaign-node-detail")).toBeVisible();
+    await close();
+    await expect(relayRow).toBeFocused();
+  }
+});
+
+test("campaign tab: below 1280px an open task folds the list into the picker, and the overview beside the pane stays clickable", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "Wide layouts");
+  await openCampaigns(page);
+  const panel = page.locator(".campaigns-panel");
+  const pane = page.getByRole("complementary", { name: "선택 작업" });
+  for (const width of [900, 1024, 1280, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await panel.locator('[data-task-id="i7272"]').click();
+    await expect(panel.locator(".campaign-picker")).toBeVisible({ visible: width < 1280 });
+    await expect(panel.locator("aside .campaign-list")).toBeVisible({ visible: width >= 1280 });
+    const edge = (await pane.boundingBox())!.x;
+    for (const target of [panel.getByRole("switch", { name: "자동 진행" }), panel.locator(".campaign-status-chips button").first(), panel.locator('[data-task-id="i7340"]')]) {
+      const box = (await target.boundingBox())!;
+      expect(box.x + box.width, `${width}px`).toBeLessThanOrEqual(edge);
+      await target.click({ trial: true });
+    }
+    if (width === 1024) {
+      await panel.locator(".campaign-picker").click();
+      await expect(page.getByRole("dialog", { name: "캠페인 고르기" }).locator('[data-campaign-key="legacy:open-issues-dag"]')).toBeVisible();
+      await page.keyboard.press("Escape");
+    }
+    await page.getByRole("button", { name: "상세 닫기" }).click();
+  }
+});
+
 test("server campaign: a waiting approval and blocked work lead, and approving stays off until its API lands", async ({ page }, testInfo) => {
   await page.clock.install({ time: new Date(NOW) });
   await mockApi(page);
@@ -251,6 +301,8 @@ test.describe("touch at 390px", () => {
     const tiny = (root: HTMLElement | SVGElement) => Array.from(root.querySelectorAll<HTMLElement>("input:not([type='checkbox']):not([type='radio']), select, textarea"))
       .filter((node) => node.getClientRects().length && parseFloat(getComputedStyle(node).fontSize) < 16)
       .map((node) => node.outerHTML.slice(0, 80));
+    await page.locator(".campaign-find").click(); // the search field it opens follows the same rule
+    await expect(page.getByRole("searchbox", { name: "작업 찾기" })).toBeVisible();
     const tab = page.locator("#campaign-panel-campaigns");
     expect(await tab.evaluate(small)).toEqual([]);
     expect(await tab.evaluate(tiny)).toEqual([]);

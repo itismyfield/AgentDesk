@@ -28,13 +28,14 @@ export interface CampaignEntry {
 }
 export const entryKey = (kind: CampaignEntry["kind"], id: string) => `${kind}:${id}`;
 
-export function legacyEntry(campaign: Campaign, tr: Tr): CampaignEntry {
-  const { counts, total } = campaignProgress(campaign.nodes);
-  const blocked = campaign.nodes.filter((node) => legacyTask(node).attention && node.status !== "failed").length;
+/** Counts with the campaign's live map, the same tasks its overview shows. */
+export function legacyEntry(campaign: Campaign, live: Record<string, CampaignNodeLive> | undefined, tr: Tr): CampaignEntry {
+  const { total } = campaignProgress(campaign.nodes);
+  const counts = taskCounts(campaign.nodes.map((node) => legacyTask(node, live?.[node.id])));
   return {
     key: entryKey("legacy", campaign.id), kind: "legacy", id: campaign.id, title: campaign.title, description: campaign.description, repo: null,
     bucket: LEDGER_BUCKETS[campaign.status], status: campaign.status, statusLabel: tr(...LEDGER_STATUS_LABELS[campaign.status]),
-    done: counts.completed, total, attention: attentionText(blocked, counts.failed, tr),
+    done: counts.done, total, attention: attentionText(counts.blocked, counts.failed, tr),
   };
 }
 
@@ -91,7 +92,7 @@ const needsSomeone = (status: CampaignNodeStatus, blocker: string | null) => sta
 /** A task as the overview shows it, read from a ledger node or a server node. Only fields the server gave are set. */
 export interface OverviewTask {
   id: string; title: string; number: string | null; status: CampaignNodeStatus; marker: { tone: MarkerTone; ratio: number };
-  stage: string; step: Label | null; summary: string | null; benefit: string | null; blocker: string | null;
+  stage: string; step: Label | null; summary: string | null; benefit: string | null; blocker: string | null; group: string | null;
   updatedAt: string | null; session: string | null; agent: string | null; prUrl: string | null; attention: boolean; gate: PendingGate | null;
 }
 
@@ -104,7 +105,7 @@ export function legacyTask(node: CampaignNode, live?: CampaignNodeLive): Overvie
   return {
     id: node.id, title, number: campaignTaskNumber(node), status, marker: nodeMarker(status, node.stage),
     stage: node.stage.trim(), step: step < 0 ? null : CAMPAIGN_STAGES[step].label,
-    summary: node.summary?.trim() && node.summary.trim() !== title ? node.summary.trim() : null, benefit: node.benefit?.trim() || null, blocker,
+    summary: node.summary?.trim() && node.summary.trim() !== title ? node.summary.trim() : null, benefit: node.benefit?.trim() || null, blocker, group: node.group,
     updatedAt: node.updated_at, session: node.session_id, agent: node.assignee, prUrl: safeCampaignLink(node.pr_url) ?? null,
     attention: needsSomeone(status, blocker), gate: null,
   };
@@ -132,7 +133,7 @@ export function serverTasks({ definition, view }: ServerCampaignDocument, events
       marker: !runtime ? { tone: "plan", ratio: 0 } : status === "running" ? { tone: "progress", ratio: (SERVER_STAGES.indexOf(runtime.stage) + 1) / (SERVER_STAGES.length + 1) } : nodeMarker(status),
       stage: runtime ? [tr(...DISPOSITION_LABELS[runtime.disposition]), tr(...STAGE_LABELS[runtime.stage]), tr(`계열 ${runtime.series}`, `series ${runtime.series}`)].join(" · ") : tr("서버 상태 없음", "No server state"),
       step: runtime ? STAGE_LABELS[runtime.stage] : null, summary: null, benefit: null,
-      blocker,
+      blocker, group: null,
       updatedAt: null, session: session ? `${tr(...SESSION_STATES[session.observation.state])} · ${session.identity.gate.host}` : null,
       agent: null, prUrl: null, attention: needsSomeone(status, blocker), gate: gates.get(node.id) ?? null,
     };
@@ -143,6 +144,12 @@ export function serverTasks({ definition, view }: ServerCampaignDocument, events
 export function findAgent(roster: Agent[] | null, name: string | null): Agent | undefined {
   const key = name?.trim().toLowerCase();
   return key ? roster?.find((agent) => [agent.id, agent.name, agent.alias, agent.name_ko].some((value) => value?.toLowerCase() === key)) : undefined;
+}
+
+/** 작업 찾기: every task whose id, number, title, summary, stage, group, assignee or session holds the query. */
+export function findTasks<T extends OverviewTask>(tasks: T[], query: string): T[] {
+  const key = query.trim().toLocaleLowerCase();
+  return key ? tasks.filter((task) => [task.id, task.number, task.title, task.summary, task.stage, task.group, task.agent, task.session].some((value) => value?.toLocaleLowerCase().includes(key))) : [];
 }
 
 export function taskCounts(tasks: OverviewTask[]) {

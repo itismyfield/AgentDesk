@@ -1,13 +1,14 @@
-import { ChevronRight, LockKeyhole, TriangleAlert } from "lucide-react";
+import { ChevronRight, LockKeyhole, Search, TriangleAlert } from "lucide-react";
 import { useId, useState, type ReactNode } from "react";
 import type { CampaignNodeLive, CampaignNodeStatus } from "../../api/campaigns";
 import { useWorkspaceAgents } from "../../contexts/WorkspaceContext";
 import { formatRelativeTime } from "../../app/shellFormatting";
 import { Badge as KitBadge } from "../../kit/free/badge-clean";
 import { Button } from "../../kit/free/button-clean";
+import { TextField } from "../../kit/free/text-field-clean";
 import AgentPersona from "../AgentPersona";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
-import { GATE_LABELS, findAgent, taskCounts, type OverviewTask, type RecentEntry } from "./campaignOverviewModel";
+import { GATE_LABELS, findAgent, findTasks, taskCounts, type OverviewTask, type RecentEntry } from "./campaignOverviewModel";
 import { LABELS, LiveChip, type Tr } from "./campaignPresentation";
 import { StatusMarker, nodeMarker } from "./StatusMarker";
 import { TaskGroupHeading, TaskRow, moveListFocus } from "./TaskListParts";
@@ -44,7 +45,12 @@ export default function CampaignOverview({ tasks, limit, showPr, asOf, summaryEx
   const [allStuck, setAllStuck] = useState(false);
   const [openStatus, setOpenStatus] = useState<CampaignNodeStatus | null>(null);
   const [listAll, setListAll] = useState(false);
+  const [query, setQuery] = useState("");
+  const [finding, setFinding] = useState(false);
+  const [foundAll, setFoundAll] = useState(false);
+  const found = findTasks(tasks, query);
   const listId = useId();
+  const findId = useId();
   const cardLimit = phone ? 2 : 6;
   const stuckLimit = phone ? 1 : 3;
   const buckets = BUCKETS.map((status) => ({ status, tasks: tasks.filter((task) => task.status === status) })).filter((bucket) => bucket.tasks.length > 0);
@@ -54,6 +60,12 @@ export default function CampaignOverview({ tasks, limit, showPr, asOf, summaryEx
     marker={<StatusMarker {...task.marker} />} number={task.number} title={task.title}
     meta={<><span className={STATUS_TEXT[task.status] ?? ""}>{tr(...LABELS[task.status])}</span>{task.stage && <> · <span className="campaign-task-stage" title={task.stage}>{task.stage}</span></>}</>}
     note={note} flags={<>{task.hold && <KitBadge tone="warning" title={task.hold}>{tr("보류: 머지 뒤 남은 일", "On hold: post-merge work")}</KitBadge>}<LiveChip live={task.live} tr={tr} /></>} />;
+  const reason = (task: TaskView) => task.status === "pending" && task.blocker
+    && <span className="campaign-reason line-clamp-2 text-xs text-[var(--fg-muted)] [overflow-wrap:anywhere]">{tr("대기 사유", "Waiting on")}: {task.blocker}</span>;
+  // Phones open the search from a chip so the first screen keeps its height.
+  const search = (!phone || finding) && <TextField type="search" value={query} autoFocus={phone} className={phone ? "" : "col-span-full @[40rem]/overview:ml-auto @[40rem]/overview:w-64"}
+    onChange={(event) => { setFoundAll(false); setQuery(event.target.value); }} aria-label={tr("작업 찾기", "Find a task")} aria-controls={findId}
+    placeholder={tr("제목, 번호, 담당, 세션…", "Title, ID, assignee, session…")} prefix={<Search aria-hidden />} />;
   const stat = (label: string, value: string) => <div className="grid gap-0.5"><span className="text-[11px] text-[var(--fg-muted)]">{label}</span><strong className="text-lg font-semibold tabular-nums text-[var(--fg)]">{value}</strong></div>;
 
   return <div className="campaign-overview @container/overview flex min-w-0 flex-col gap-4">
@@ -119,18 +131,30 @@ export default function CampaignOverview({ tasks, limit, showPr, asOf, summaryEx
       {running.length > cardLimit && <div className="px-1"><Button variant="ghost" size="sm" aria-expanded={allRunning} onClick={() => setAllRunning((value) => !value)}>{allRunning ? tr("접기", "Show fewer") : tr(`진행 중 ${running.length}개 모두 보기`, `Show all ${running.length} running`)}</Button></div>}
     </section>
 
-    {buckets.length > 0 && <section aria-label={tr("나머지 작업", "Other tasks")} className="grid min-w-0 gap-2" onKeyDown={moveListFocus}>
+    {tasks.length > 0 && <section aria-label={tr("나머지 작업", "Other tasks")} className="grid min-w-0 gap-2" onKeyDown={moveListFocus}>
       <div className="campaign-status-chips grid min-w-0 grid-cols-[repeat(auto-fit,minmax(6rem,1fr))] gap-2 @[40rem]/overview:flex @[40rem]/overview:flex-wrap">
         {buckets.map((bucket) => <span key={bucket.status} className="min-w-0 rounded-[var(--r-sm)] border border-[var(--line)]">
-          <TaskGroupHeading className="justify-center !px-3" open={openStatus === bucket.status} controls={listId}
+          {/* A phone row fits three chips only without the chevron, so label and count stay whole. */}
+          <TaskGroupHeading className="justify-center !px-3 max-[899px]:[&>svg:first-child]:hidden" open={openStatus === bucket.status} controls={listId}
             icon={<StatusMarker {...nodeMarker(bucket.status)} />} label={tr(...LABELS[bucket.status])} count={bucket.tasks.length}
             onToggle={() => { setListAll(false); setOpenStatus((current) => current === bucket.status ? null : bucket.status); }} />
         </span>)}
+        {phone ? <span className="col-span-full min-w-0 rounded-[var(--r-sm)] border border-[var(--line)]">
+          <TaskGroupHeading className="campaign-find justify-center !px-3" open={finding} controls={findId} icon={<Search aria-hidden className="size-3.5 shrink-0" />}
+            label={tr("작업 찾기", "Find a task")} count="" onToggle={() => setFinding((value) => !value)} />
+        </span> : search}
       </div>
+      {phone && search}
+      {query.trim() && <div className="grid min-w-0 gap-1">
+        <div id={findId} role="list" className="grid min-w-0 gap-0.5" aria-label={tr("찾은 작업", "Found tasks")}>
+          {(foundAll ? found : found.slice(0, LIST_PREVIEW)).map((task) => <div key={task.id} role="listitem" className="min-w-0">{row(task, reason(task))}</div>)}
+        </div>
+        {found.length === 0 && <p className="px-1 text-xs text-[var(--fg-muted)]">{tr("찾는 작업이 없어요.", "No task matches.")}</p>}
+        {found.length > LIST_PREVIEW && <div className="px-1"><Button variant="ghost" size="sm" aria-expanded={foundAll} onClick={() => setFoundAll((value) => !value)}>{foundAll ? tr("처음 몇 개만 보기", "Show fewer") : tr(`${found.length - LIST_PREVIEW}개 더 보기`, `Show ${found.length - LIST_PREVIEW} more`)}</Button></div>}
+      </div>}
       {open && <div className="grid min-w-0 gap-1">
         <div id={listId} role="list" className="grid min-w-0 gap-0.5" aria-label={tr(...LABELS[open.status])}>
-          {(listAll ? open.tasks : open.tasks.slice(0, LIST_PREVIEW)).map((task) => <div key={task.id} role="listitem" className="min-w-0">{row(task, task.status === "pending" && task.blocker
-            && <span className="campaign-reason line-clamp-2 text-xs text-[var(--fg-muted)] [overflow-wrap:anywhere]">{tr("대기 사유", "Waiting on")}: {task.blocker}</span>)}</div>)}
+          {(listAll ? open.tasks : open.tasks.slice(0, LIST_PREVIEW)).map((task) => <div key={task.id} role="listitem" className="min-w-0">{row(task, reason(task))}</div>)}
         </div>
         {open.tasks.length > LIST_PREVIEW && <div className="px-1"><Button variant="ghost" size="sm" aria-expanded={listAll} onClick={() => setListAll((value) => !value)}>{listAll ? tr("처음 몇 개만 보기", "Show fewer") : tr(`${open.tasks.length - LIST_PREVIEW}개 더 보기`, `Show ${open.tasks.length - LIST_PREVIEW} more`)}</Button></div>}
       </div>}

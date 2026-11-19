@@ -11,9 +11,10 @@ import { SegmentedControl } from "../../kit/free/segmented-control-clean";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import { readLocalStorageValue, writeLocalStorageValue } from "../../lib/useLocalStorage";
 import { BottomSheet } from "../common/overlay/BottomSheet";
+import { Modal } from "../common/overlay/Modal";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
 import { WidgetState } from "../common/WidgetState";
-import CampaignAutoQueueToggle from "./CampaignAutoQueueToggle";
+import CampaignAutoQueueToggle, { useAutoQueueRequests } from "./CampaignAutoQueueToggle";
 import CampaignDetail from "./CampaignDetail";
 import CampaignList from "./CampaignList";
 import { campaignIssueLabel } from "./campaignModel";
@@ -235,9 +236,10 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const holds = useServerCampaignHolds(summaries, listLoaded, tab === "queue");
   const phone = useIsMobile();
   const [picking, setPicking] = useState(false);
+  const autoRuns = useAutoQueueRequests();
   const campaign = mode === "legacy" ? campaigns.find((value) => value.id === selectedId) : undefined;
   const entries: CampaignEntry[] = [
-    ...campaigns.map((value) => legacyEntry(value, tr)),
+    ...campaigns.map((value) => legacyEntry(value, live[value.id], tr)),
     ...summaries.map((summary) => serverEntry(summary, details[summary.view.campaign_id]?.doc ?? null, tr)),
   ];
   // A linked campaign past the list's pages stays listed once its own read answers, so it can be picked again.
@@ -270,7 +272,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       <p className="campaign-description mt-1 max-w-[72ch] px-1 text-[var(--fg-dim)]">{campaign.description}</p>
     </details>}
     overview={(controls) => <CampaignOverview tasks={legacyTasks} limit={null} showPr asOf={refreshedAt ? new Date(refreshedAt).toISOString() : null}
-      summaryExtra={<CampaignAutoQueueToggle key={campaign.id} campaign={campaign} tr={tr} onSaved={onSaved} checkedRead={checkedRead} />}
+      summaryExtra={<CampaignAutoQueueToggle key={campaign.id} campaign={campaign} tr={tr} onSaved={onSaved} checkedRead={checkedRead} held={autoRuns(campaign.id)} />}
       recent={{ title: tr("최근 바뀐 작업", "Recently changed tasks"), entries: recentTaskChanges(legacyTasks) }}
       selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
     relations={campaign.nodes.length > 0 && <CampaignRelations campaign={campaign} selectedId={node} onOpen={setNode} tr={tr} />}
@@ -309,6 +311,8 @@ export default function CampaignsPanel({ language }: { language: string }) {
       onCloseTask={() => setNode(null)} />;
   })();
 
+  // Below 1280px an open task pane leaves too little width beside the list, so the list folds into the picker.
+  const folded = !phone && !!openNode;
   const pickerTitle = selectedEntry?.title ?? (mode === "server" ? serverDoc?.definition.title ?? serverSelected : null);
   return <PageFrame title={tr("캠페인", "Campaigns")} testId="campaigns-page" actions={<div className="w-full sm:w-56">
     <SegmentedControl<CampaignTab> kind="tabs" variant="tray" fullWidth size="sm" aria-label={tr("캠페인 화면", "Campaign views")} value={tab} onChange={setTab}
@@ -325,18 +329,18 @@ export default function CampaignsPanel({ language }: { language: string }) {
     </div> : <div id="campaign-panel-campaigns" role="tabpanel" aria-label={tr("캠페인", "Campaigns")} className="grid min-w-0 gap-4">
       {error && <WidgetState kind={campaigns.length ? "stale" : "error"} title={tr("캠페인을 갱신하지 못했습니다.", "Could not refresh campaigns.")} description={error + (campaigns.length ? tr(" · 이전 내용을 표시 중입니다.", " · Showing the previous snapshot.") : "")} action={<button onClick={() => void legacy.refresh()}>{tr("다시 시도", "Retry")}</button>} />}
       {serverDown && <WidgetState kind={summaries.length || serverDoc ? "stale" : "error"} title={tr("서버 캠페인을 갱신하지 못했습니다.", "Could not refresh server campaigns.")} description={(listError ?? tr("서버가 응답하지 않습니다", "The server is not answering")) + (summaries.length || serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
-      <div className="grid min-w-0 gap-4 min-[900px]:grid-cols-[17.5rem_minmax(0,1fr)] min-[900px]:gap-6">
-        {phone ? <>
-          <button type="button" className="campaign-picker !m-0 flex w-full min-w-0 items-center gap-3 !rounded-xl !border !border-[var(--line)] !bg-[var(--th-card-bg)] !px-4 !py-3 text-left" aria-haspopup="dialog" onClick={() => setPicking(true)}>
+      <div className={`grid min-w-0 gap-4 min-[900px]:gap-6 ${folded ? "min-[1280px]:grid-cols-[17.5rem_minmax(0,1fr)]" : "min-[900px]:grid-cols-[17.5rem_minmax(0,1fr)]"}`}>
+        {(phone || folded) && <button type="button" className={`campaign-picker !m-0 flex w-full min-w-0 items-center gap-3 !rounded-xl !border !border-[var(--line)] !bg-[var(--th-card-bg)] !px-4 !py-3 text-left ${folded ? "min-[1280px]:!hidden" : ""}`} aria-haspopup="dialog" onClick={() => setPicking(true)}>
             <span className="grid min-w-0 flex-1 gap-0.5">
               <span className="flex min-w-0 items-center gap-2"><strong className="truncate text-sm font-semibold text-[var(--fg)]">{pickerTitle ?? tr("캠페인 고르기", "Choose a campaign")}</strong>{selectedEntry && <Badge status={selectedEntry.status} label={selectedEntry.statusLabel} tr={tr} />}</span>
               <span className="truncate text-xs text-[var(--fg-muted)] tabular-nums">{[selectedEntry && (selectedEntry.kind === "legacy" ? tr("원장", "Ledger") : selectedEntry.repo),
                 selectedEntry?.total != null && tr(`작업 ${selectedEntry.done}/${selectedEntry.total} 완료`, `${selectedEntry.done}/${selectedEntry.total} done`), tr(`캠페인 ${entries.length}개 중`, `of ${entries.length} campaigns`)].filter(Boolean).join(" · ")}</span>
             </span>
             <ChevronDown aria-hidden className="size-4 shrink-0 text-[var(--fg-muted)]" />
-          </button>
-          <BottomSheet open={picking} onClose={() => setPicking(false)} title={tr("캠페인 고르기", "Choose a campaign")}><div className={CAMPAIGN_SCOPE}>{list}</div></BottomSheet>
-        </> : <aside className="min-w-0">{list}</aside>}
+          </button>}
+        {phone ? <BottomSheet open={picking} onClose={() => setPicking(false)} title={tr("캠페인 고르기", "Choose a campaign")}><div className={CAMPAIGN_SCOPE}>{list}</div></BottomSheet>
+          : <aside className={`min-w-0 ${folded ? "max-[1279px]:hidden" : ""}`}>{list}</aside>}
+        {folded && <Modal open={picking} onClose={() => setPicking(false)} title={tr("캠페인 고르기", "Choose a campaign")} size="sm"><div className={CAMPAIGN_SCOPE}>{list}</div></Modal>}
         <div className="grid min-w-0 content-start gap-4">
           {/* Nothing is called empty until both lists have answered without an error. */}
           {!campaigns.length && !summaries.length && !error && !serverDown && mode === "legacy" && <WidgetState kind={loading || !listLoaded ? "loading" : "empty"} title={loading || !listLoaded ? tr("캠페인을 불러오고 있습니다.", "Loading campaigns.") : tr("등록된 캠페인이 없습니다.", "No campaigns yet.")} description={loading || !listLoaded ? undefined : tr("캠페인이 등록되면 작업 흐름과 진행 상황이 여기에 표시됩니다.", "Registered campaigns and their progress will appear here.")} />}
