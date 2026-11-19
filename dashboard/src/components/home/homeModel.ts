@@ -172,6 +172,9 @@ export function todoStatus(count: number, sources: SourceState[]): "loading" | "
 
 // ── System ──
 
+/** Health as home reads it. `mailbox_observation_failures` lists mailboxes the queue total leaves out. */
+export type HomeHealth = HealthResponse & { mailbox_observation_failures?: unknown[] };
+
 export interface SystemRow {
   key: "server" | "discord" | "memento" | "campaign" | "queue";
   label: string;
@@ -189,7 +192,7 @@ function uptimeText(seconds: number, tr: Tr): string {
 }
 
 export function buildSystemRows({ health, healthFailed, legacy, documents, tr }: {
-  health: HealthResponse | null;
+  health: HomeHealth | null;
   healthFailed: boolean;
   legacy: Campaign[] | null;
   documents: ServerCampaignDocument[];

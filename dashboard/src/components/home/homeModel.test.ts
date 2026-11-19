@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import type { Campaign } from "../../api/campaigns";
 import type { RoutineRecord } from "../../api/routines";
 import type { ServerCampaignDocument, ServerCampaignSummary } from "../../api/serverCampaigns";
-import type { HealthResponse } from "../../api/settingsRuntime";
 import { mergeAgentStatus } from "../../contexts/session-overlay";
 import type { Agent, DispatchedSession, KanbanCard } from "../../types";
 import {
   agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildUsageRows, classifyAgents, todoStatus,
+  type HomeHealth,
 } from "./homeModel";
 
 const tr = (ko: string) => ko;
@@ -78,7 +78,7 @@ describe("home system", () => {
   it("marks detail-only values unknown on a public summary and reads the server campaign executor", () => {
     const view = { execution_readiness: "unavailable" } as ServerCampaignDocument["view"];
     const rows = buildSystemRows({
-      health: { status: "degraded", publicOnly: "forbidden", queue_depth: 4 } as HealthResponse,
+      health: { status: "degraded", publicOnly: "forbidden", queue_depth: 4 } as HomeHealth,
       healthFailed: false,
       legacy: [{ status: "active", auto_queue: true }] as Campaign[],
       documents: [{ view } as ServerCampaignDocument],
@@ -91,7 +91,7 @@ describe("home system", () => {
   });
 
   it("counts connected bots and the queue from detail health, unless a mailbox went unread", () => {
-    const health = { status: "healthy", uptime_secs: 7_200, queue_depth: 0, providers: [{ connected: true }, { connected: false }] } as HealthResponse;
+    const health = { status: "healthy", uptime_secs: 7_200, queue_depth: 0, providers: [{ connected: true }, { connected: false }] } as HomeHealth;
     const rows = buildSystemRows({ health, healthFailed: false, legacy: null, documents: [], tr });
     expect(rows.map((row) => row.value)).toEqual(["정상 · 2시간째", "1/2개 연결", "확인 불가", "확인 불가", "0건"]);
     const blind = buildSystemRows({ health: { ...health, mailbox_observation_failures: [{ channel_id: "1" }] }, healthFailed: false, legacy: null, documents: [], tr });

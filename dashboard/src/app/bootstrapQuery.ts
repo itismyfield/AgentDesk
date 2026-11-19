@@ -12,9 +12,8 @@ import { DEFAULT_SETTINGS } from "../types";
 export interface BootstrapData {
   agents: Agent[];
   departments: Department[];
-  sessions: DispatchedSession[];
-  /** The session list did not load, so an empty `sessions` proves nothing. */
-  sessionsFailed?: boolean;
+  /** Null when the session list did not load, so an empty list is never mistaken for no sessions. */
+  sessions: DispatchedSession[] | null;
   stats: DashboardStats | null;
   settings: CompanySettings;
 }
@@ -40,8 +39,7 @@ export async function fetchDashboardBootstrap(): Promise<BootstrapData> {
   return {
     agents,
     departments,
-    sessions: sessions ?? [],
-    sessionsFailed: sessions === null,
+    sessions,
     stats,
     settings: { ...DEFAULT_SETTINGS, ...settings } as CompanySettings,
   };

@@ -8,9 +8,9 @@ import {
   type ServerCampaignDocument,
   type ServerCampaignSummary,
 } from "../../api/serverCampaigns";
-import { normalizeHealth, type HealthResponse, type RuntimeConfigResponse } from "../../api/settingsRuntime";
+import type { RuntimeConfigResponse } from "../../api/settingsRuntime";
 import { pollWhileVisible } from "../../lib/pollWhileVisible";
-import { isOpenServerCampaign, type RawUsageProvider } from "./homeModel";
+import { isOpenServerCampaign, type HomeHealth, type RawUsageProvider } from "./homeModel";
 
 export interface Loaded<T> {
   data: T | null;
@@ -66,20 +66,25 @@ export async function loadHomeCampaigns(): Promise<HomeCampaigns> {
 // Without a server auth token, detail answers loopback peers only, so tailnet devices get 403 every time.
 let healthDetailForbidden = false;
 
-async function readHealth(path: string): Promise<HealthResponse> {
+function toHealth(raw: unknown): HomeHealth {
+  const source = (raw ?? {}) as HomeHealth;
+  return { ...source, status: source.status ?? "unhealthy", providers: Array.isArray(source.providers) ? source.providers : [] };
+}
+
+async function readHealth(path: string): Promise<HomeHealth> {
   try {
-    return normalizeHealth(await request<unknown>(path, { suppressErrorToast: true }));
+    return toHealth(await request<unknown>(path, { suppressErrorToast: true }));
   } catch (error) {
     // An unhealthy server answers 503 with its status, which home shows instead of a lost connection.
     const body = error instanceof ApiRequestError && error.status === 503 ? error.body : null;
-    if (typeof (body as { status?: unknown } | null)?.status === "string") return normalizeHealth(body);
+    if (typeof (body as { status?: unknown } | null)?.status === "string") return toHealth(body);
     throw error;
   }
 }
 
 /** Like `getHealthDetail`, but a 503 status body counts as an answer and failures stay quiet; only a read with no
  * status body throws. */
-export async function loadHomeHealth(): Promise<HealthResponse> {
+export async function loadHomeHealth(): Promise<HomeHealth> {
   if (!healthDetailForbidden) {
     try {
       return await readHealth("/api/health/detail");
