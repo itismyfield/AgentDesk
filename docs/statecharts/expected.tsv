@@ -147,7 +147,13 @@ e2e-run-lease/schedule/schedule-drop_on_crash.cfg	CoreSchedule	-	StartedRunIsRec
 e2e-run-lease/schedule/schedule-ignore_deploy.cfg	CoreSchedule	NoStartDuringDeploy	-
 e2e-run-lease/schedule/schedule-ignore_waiting.cfg	CoreSchedule	DeployRequestKeepsItsRun	-
 e2e-run-lease/schedule/schedule-none.cfg	CoreSchedule	-	-
+e2e-run-lease/schedule/schedule-off_silent.cfg	CoreSchedule	SwitchedOffIsShown	-
 e2e-run-lease/schedule/schedule-tick_id.cfg	CoreSchedule	OneCoreRunPerHeadAndSlot	-
+e2e-run-lease/turns/turn-detached_writer.cfg	TurnBudget	NoInputAfterDriverDeath	-
+e2e-run-lease/turns/turn-ignore_stop.cfg	TurnBudget	NoInputAfterStop	-
+e2e-run-lease/turns/turn-none.cfg	TurnBudget	-	-
+e2e-run-lease/turns/turn-partial_usage.cfg	TurnBudget	UnmeasuredTurnIsNotReportedAsMeasured	-
+e2e-run-lease/turns/turn-presettle.cfg	TurnBudget	NoInputBeforeSettlement	-
 execution-authority/ExecutionAuthority.cfg	ExecutionAuthority	-	-
 execution-authority/ExecutionAuthorityAmbiguousGateway.cfg	ExecutionAuthority	-	-
 execution-authority/ExecutionAuthorityBeforeGateway.cfg	ExecutionAuthority	-	-
