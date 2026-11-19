@@ -44,6 +44,25 @@ async fn retired_rotation_moves_the_channel_selector_to_the_rotated_session_pg()
         (new.clone(), "db_provider_session_restored")
     );
 
+    // While a turn start holds the channel transition, between its selector read and its claim,
+    // the settle pass moves nothing; that turn picks the pending rotation itself.
+    f.set(None, false, Some(OLD)).await;
+    f.rotate();
+    let transition = f
+        .shared
+        .session_transition_lock(f.channel)
+        .lock_owned()
+        .await;
+    settle_claude_session_rotations(&f.shared).await;
+    assert!(dedupe::claude_session_rotation_for_tmux(&f.tmux).is_some());
+    assert_eq!(f.stored().await.0.as_deref(), Some(OLD));
+    let followed = (new.clone(), "claude_session_rotation_followed");
+    assert_eq!(f.restore().await, followed);
+    drop(transition);
+    settle_claude_session_rotations(&f.shared).await;
+    assert!(dedupe::claude_session_rotation_for_tmux(&f.tmux).is_none());
+    assert_eq!(f.stored().await, (new.clone(), new.clone()));
+
     // With no row for the channel the rotation stays until a row takes the selector.
     f.set(Some(OLD), false, Some(OLD)).await;
     f.move_row("0").await;
@@ -125,19 +144,9 @@ async fn a_watcherless_herdr_pane_moves_its_channel_selector_pg() {
     )) {
         return;
     }
-    use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests};
     let f = Fixture::new(false).await;
     f.set(Some(OLD), false, Some(OLD)).await;
-    let mut owner = tests::owner(&f.channel.get().to_string());
-    (owner.discord_token_hash, owner.logical_key) = (f.shared.token_hash.clone(), f.tmux.clone());
-    let hosted = tests::wire(&tests::record(&owner, "nonce-8261", HostedState::Bound));
-    sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1")
-        .bind(&f.key)
-        .bind(hosted)
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    dedupe::register_tmux_channel(&f.tmux, f.channel.get());
+    f.host_on_herdr(&f.key, &f.shared.token_hash).await;
     // An admitted execution the channel row does not name moves nothing.
     dedupe::admit_herdr_execution(&f.tmux, "nonce-other");
     f.rotate();
@@ -152,6 +161,77 @@ async fn a_watcherless_herdr_pane_moves_its_channel_selector_pg() {
     assert_eq!(f.turn_start_session().await, Some(Some(NEW.to_string())));
     let kept = dedupe::claude_session_rotation_for_tmux(&f.tmux);
     assert!(kept.is_some_and(|rotation| rotation.selector_followed));
+
+    // A second hop before any Discord turn moves the selector on from the session it reflects now.
+    let third = "c3c3c3c3-0000-4000-8000-000000008261";
+    f.hop(NEW, third);
+    settle_claude_session_rotations(&f.shared).await;
+    let third = Some(third.to_string());
+    assert_eq!(f.stored().await, (third.clone(), third.clone()));
+    assert_eq!(f.turn_start_session().await, Some(third.clone()));
+    // A session the user chose meanwhile stays through the next hop.
+    let chosen = "0e5a7c11-0000-4000-8000-000000008261";
+    f.set(Some(chosen), false, Some(chosen)).await;
+    f.hop(
+        third.as_deref().unwrap(),
+        "d4d4d4d4-0000-4000-8000-000000008261",
+    );
+    settle_claude_session_rotations(&f.shared).await;
+    let chosen = Some(chosen.to_string());
+    assert_eq!(f.stored().await, (chosen.clone(), chosen.clone()));
+    assert_eq!(f.turn_start_session().await, Some(chosen));
+}
+
+// With two Claude bots the idle loop runs on one; a watcherless Herdr pane of the other bot's
+// channel moves that bot's row and cache, and the first bot's row for the channel stays.
+#[tokio::test]
+async fn a_watcherless_herdr_pane_follows_on_its_own_bot_runtime_pg() {
+    if !api_child(&format!(
+        "{TEST}a_watcherless_herdr_pane_follows_on_its_own_bot_runtime_pg"
+    )) {
+        return;
+    }
+    let f = Fixture::new(false).await;
+    f.set(Some(OLD), false, Some(OLD)).await;
+    f.host_on_herdr(&f.key, &f.shared.token_hash).await;
+    let mut first = shared_on(&f.pool).await;
+    let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+    let own = Arc::get_mut(&mut first).unwrap();
+    (own.token_hash, own.health_registry) =
+        ("discord_1111111111111111".into(), Arc::downgrade(&registry));
+    let first_key = format!("claude/{}/lane-node:{}", first.token_hash, f.tmux);
+    sqlx::query(
+        "INSERT INTO sessions (session_key, provider, status, identity_kind,
+                               discord_token_hash, channel_id, claude_session_id)
+         VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3, $4)",
+    )
+    .bind(&first_key)
+    .bind(&first.token_hash)
+    .bind(f.channel.get().to_string())
+    .bind(OLD)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    f.host_on_herdr(&first_key, &first.token_hash).await;
+    first.settings.write().await.allowed_channel_ids = vec![f.channel.get() + 1];
+    f.shared.settings.write().await.allowed_channel_ids = vec![f.channel.get()];
+    registry.register("claude".to_string(), first.clone()).await;
+    registry
+        .register("claude".to_string(), f.shared.clone())
+        .await;
+    dedupe::admit_herdr_execution(&f.tmux, "nonce-8261");
+    f.rotate();
+    settle_claude_session_rotations(&first).await;
+    let new = Some(NEW.to_string());
+    assert_eq!(f.stored().await, (new.clone(), new));
+    assert_eq!(f.turn_start_session().await, Some(Some(NEW.to_string())));
+    let first_row: Option<String> =
+        sqlx::query_scalar("SELECT claude_session_id FROM sessions WHERE session_key = $1")
+            .bind(&first_key)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(first_row.as_deref(), Some(OLD));
 }
 
 struct Fixture {
@@ -278,8 +358,36 @@ impl Fixture {
         (session, reason)
     }
 
-    fn rotate(&self) {
+    /// Binds `session_key`'s row to this pane's admitted Herdr execution, with the channel mirrored.
+    async fn host_on_herdr(&self, session_key: &str, token: &str) {
+        use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests};
+        let mut owner = tests::owner(&self.channel.get().to_string());
+        (owner.discord_token_hash, owner.logical_key) = (token.to_owned(), self.tmux.clone());
+        let hosted = tests::wire(&tests::record(&owner, "nonce-8261", HostedState::Bound));
+        sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1")
+            .bind(session_key)
+            .bind(hosted)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        dedupe::register_tmux_channel(&self.tmux, self.channel.get());
+    }
+
+    /// A later hook adoption on the same pane, as the binding records it.
+    fn hop(&self, from: &str, to: &str) {
         dedupe::record_claude_session_rotation(ClaudeSessionRotation {
+            old_session_id: Some(from.to_string()),
+            new_session_id: to.to_string(),
+            ..self.rotation()
+        });
+    }
+
+    fn rotate(&self) {
+        dedupe::record_claude_session_rotation(self.rotation());
+    }
+
+    fn rotation(&self) -> ClaudeSessionRotation {
+        ClaudeSessionRotation {
             tmux_session_name: self.tmux.clone(),
             old_session_id: Some(OLD.to_string()),
             old_output_path: self.frozen.display().to_string(),
@@ -290,7 +398,7 @@ impl Fixture {
             polls_without_drain_progress: 0,
             selector_followed: false,
             left_session_ids: Vec::new(),
-        });
+        }
     }
 
     /// The row's selector and what the turn-start restore reads through the runtime API.
