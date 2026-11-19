@@ -2363,12 +2363,21 @@ fn held_dispatch_is_not_inherited_by_an_active_start_pg() {
         // Once set, the thread's card link answers with this dispatch, as for a card thread.
         let linked = Arc::new(std::sync::Mutex::new(None::<String>));
         let thread = linked.clone();
-        let answer = Arc::new(move |_: &axum::http::Method, path: &str| {
-            let lookup = path == "/api/internal/pending-dispatch-for-thread";
+        let active_lookups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lookups = active_lookups.clone();
+        let active_query = format!("thread_id={active}");
+        let answer: StatusAnswer = Arc::new(move |_, uri| {
+            let lookup = uri.path() == "/api/internal/pending-dispatch-for-thread";
+            if lookup && uri.query() == Some(active_query.as_str()) {
+                lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             let linked = thread.lock().unwrap().clone().filter(|_| lookup)?;
-            Some(serde_json::json!({ "dispatch_id": linked }))
+            Some((
+                axum::http::StatusCode::OK,
+                serde_json::json!({ "dispatch_id": linked }),
+            ))
         });
-        let host = host_with(&[dormant, active], answer).await;
+        let host = host_with_status(&[dormant, active], answer).await;
         for channel in [dormant, active] {
             let key = format!("held-dispatch-{channel}");
             let sources = vec![channel.to_string()];
@@ -2402,12 +2411,42 @@ fn held_dispatch_is_not_inherited_by_an_active_start_pg() {
         let _active = test_activation::activate(active.get());
         *linked.lock().unwrap() = Some(format!("held-{active}"));
         let text = format!("DISPATCH: held-{active}\nwork");
-        let started = run(&host, request(active, 6_008_791, &text)).await;
-        assert!(
-            started.is_some(),
-            "the active start runs without the dispatch"
+        let (completion, completed) = tokio::sync::oneshot::channel();
+        *crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+            .lock()
+            .unwrap() = Some((active, completion));
+        let entry = execute_intake_turn_core(
+            &host.api.http,
+            &host.shared,
+            "",
+            request(active, 6_008_791, &text),
+            Vec::new(),
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (result, started) = start_with_terminal_timing(active, entry, false).await;
+        result.unwrap();
+        let (prompt, release) = started.expect("the active start runs without the held dispatch");
+        assert!(
+            !prompt
+                .system_prompt
+                .unwrap()
+                .contains(&format!("Dispatch ID: held-{active}"))
+        );
+        let active_row = crate::services::discord::inflight::load_inflight_state_read_only(
+            &ProviderKind::Claude,
+            active.get(),
+        )
+        .unwrap();
+        assert!(active_row.dispatch_id.is_none());
+        assert_eq!(
+            active_lookups.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "protected first hit is pinned"
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(20), completed)
+            .await
+            .unwrap()
+            .unwrap();
         let calls = host.api.take();
         let carried = |channel: ChannelId| {
             let lookup = format!("GET /api/dispatches/held-{channel} ");
