@@ -1,0 +1,53 @@
+---
+title: "One job's free-edit pipeline instance"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: failed
+    lg1: done
+    lg2: running
+    lg3: idle
+  }
+  class lg0 orange
+  class lg1 teal
+  class lg2 blue
+  class lg3 tan
+  s0: Prepared#59; state_id is null
+  s1: Run started#59; job not yet assigned
+  s2: work: entry effect committed, not yet started
+  s3: work: effect running
+  s4: work: waiting for facts
+  s5: work: an exit is decidable
+  s6: review: entry effect committed, not yet started
+  s7: Reached the failure end
+  s8: review: effect running
+  s9: review: waiting for facts
+  s10: review: an exit is decidable
+  s11: Reached the success end
+  [*] --> s0
+  s0 --> s1: Start pins the saved graph
+  s1 --> s2: the real Start assigns the start state
+  s2 --> s3: the started receipt arrives
+  s3 --> s4: the effect finishes
+  s4 --> s5: a fact of this visit arrives
+  s5 --> s2: one exit of this visit is committed with the next intent
+  s5 --> s6: one exit of this visit is committed with the next intent
+  s5 --> s7: one exit of this visit is committed with the next intent
+  s6 --> s8: the started receipt arrives
+  s8 --> s9: the effect finishes
+  s9 --> s10: a fact of this visit arrives
+  s10 --> s2: one exit of this visit is committed with the next intent
+  s10 --> s11: one exit of this visit is committed with the next intent
+  s10 --> s7: one exit of this visit is committed with the next intent
+  class s0 tan
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s7 orange
+  class s8 blue
+  class s9 blue
+  class s10 blue
+  class s11 teal
