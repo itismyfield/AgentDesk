@@ -644,6 +644,9 @@ pub(crate) mod test_override {
     }
 
     fn force_snapshot(snapshot: BootChannels) -> ChannelsGuard {
+        crate::services::session_host::surface_policy::install_policy_channel(
+            super::policy_channel,
+        );
         ChannelsGuard {
             previous: CHANNELS.with(|cell| cell.replace(Some(snapshot))),
         }

@@ -180,22 +180,77 @@ async fn resolve(
     session_key: Option<&str>,
     execution: bool,
 ) -> TurnHost {
-    let Some(endpoint) = session_hosts::herdr_endpoint(channel_id) else {
-        // An unconfigured channel's unreadable row keeps the existing path; a Herdr row returns
-        // to tmux when it is this node's Claude execution, and refuses otherwise.
-        let row = read_row(pool, session_key).await;
-        if let Some(plan) = return_plan(provider, &row) {
-            return TurnHost::Return(Box::new(plan));
+    let configured_endpoint = |channel_id| session_hosts::herdr_endpoint(channel_id);
+    if let Some(endpoint) = configured_endpoint(channel_id) {
+        return configured_turn(
+            pool,
+            provider,
+            channel_id,
+            session_key,
+            (endpoint, execution),
+            None,
+        )
+        .await;
+    }
+    let row = read_row(pool, session_key).await;
+    let policy = crate::services::session_host::surface_policy::policy_channel(channel_id);
+    if policy != channel_id
+        && let Some(endpoint) = configured_endpoint(policy)
+    {
+        if is_live_thread_endpoint(channel_id, provider, session_key, &row, &endpoint) {
+            return configured_turn(
+                pool,
+                provider,
+                channel_id,
+                session_key,
+                (endpoint, execution),
+                Some(row),
+            )
+            .await;
+        }
+        if let Err(detail) = &row {
+            return TurnHost::Refused(HerdrRefusal::HostedRowUnreadable {
+                detail: detail.clone(),
+            });
         }
         return match herdr_trace(&row) {
             Some(state) => TurnHost::Refused(HerdrRefusal::HostedHerdrUnconfigured { state }),
             None => TurnHost::Tmux,
         };
-    };
-    match configured_turn(pool, provider, channel_id, session_key, endpoint, execution).await {
-        Ok(plan) => TurnHost::Herdr(Box::new(plan)),
-        Err(refusal) => TurnHost::Refused(refusal),
     }
+    if let Some(plan) = return_plan(provider, &row) {
+        return TurnHost::Return(Box::new(plan));
+    }
+    match herdr_trace(&row) {
+        Some(state) => TurnHost::Refused(HerdrRefusal::HostedHerdrUnconfigured { state }),
+        None => TurnHost::Tmux,
+    }
+}
+
+/// A checked child can keep its current Herdr pane under its parent's configured endpoint.
+fn is_live_thread_endpoint(
+    channel: u64,
+    provider: &ProviderKind,
+    key: Option<&str>,
+    row: &RowRead,
+    endpoint: &ChannelEndpoint,
+) -> bool {
+    let Some(HostedRecord::Known(record)) = row
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
+        .map(|row| &row.record)
+    else {
+        return false;
+    };
+    record.state == HostedState::Bound
+        && expected_owner(provider, channel, key).as_ref() == Some(&record.owner)
+        && record.location.as_ref().is_some_and(|location| {
+            location.endpoint_config_key == endpoint.key
+                && location.execution_node == endpoint.execution_node
+                && location.socket_addr == endpoint.socket_path.to_string_lossy()
+                && location.named_session == endpoint.herdr_session
+        })
 }
 
 /// Before resetting, reconciling or clearing a turn, refuse a configured Herdr session.
@@ -209,7 +264,12 @@ pub(crate) async fn refusal_before_turn<F>(
 where
     F: std::future::Future<Output = Option<String>>,
 {
-    session_hosts::herdr_endpoint(channel_id)?;
+    let policy = crate::services::session_host::surface_policy::policy_channel(channel_id);
+    if !session_hosts::has_herdr_endpoint(channel_id)
+        && (policy == channel_id || !session_hosts::has_herdr_endpoint(policy))
+    {
+        return None;
+    }
     let session_key = session_key().await;
     match for_turn(pool, provider, channel_id, session_key.as_deref()).await {
         TurnHost::Tmux => None,
@@ -309,8 +369,31 @@ async fn configured_turn(
     provider: &ProviderKind,
     channel_id: u64,
     session_key: Option<&str>,
-    endpoint: ChannelEndpoint,
-    execution: bool,
+    (endpoint, execution): (ChannelEndpoint, bool),
+    observed: Option<RowRead>,
+) -> TurnHost {
+    match configured_plan(
+        pool,
+        provider,
+        channel_id,
+        session_key,
+        (endpoint, execution),
+        observed,
+    )
+    .await
+    {
+        Ok(plan) => TurnHost::Herdr(Box::new(plan)),
+        Err(refusal) => TurnHost::Refused(refusal),
+    }
+}
+
+async fn configured_plan(
+    pool: Option<&PgPool>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_key: Option<&str>,
+    (endpoint, execution): (ChannelEndpoint, bool),
+    observed: Option<RowRead>,
 ) -> Result<HerdrTurnPlan, HerdrRefusal> {
     // Execution checks the provider switch before any read; observation never starts a turn.
     let kind = match provider {
@@ -327,7 +410,10 @@ async fn configured_turn(
         let node = endpoint.execution_node;
         return Err(HerdrRefusal::EndpointNotLocal { node });
     }
-    let read = read_row(pool, session_key).await;
+    let read = match observed {
+        Some(read) => read,
+        None => read_row(pool, session_key).await,
+    };
     if herdr_trace(&read) == Some(None) {
         let detail = "hosted execution record is unreadable".into();
         return Err(HerdrRefusal::HostedRowUnreadable { detail });
