@@ -7,11 +7,14 @@ use crate::services::tui_o::channel_policy::Candidate;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::{InitOrigin, OStore};
-use crate::services::tui_o::writer::binding::BindingEvent;
+use crate::services::tui_o::writer::binding::{
+    BindingCause, BindingEvent, BindingRecord, BindingTarget,
+};
 use crate::services::tui_o::writer::host::HostIo;
 use crate::services::tui_o::writer::rotation::bound_source;
 
 mod prefix;
+pub(in crate::services::tui_o::writer) mod thread;
 
 /// Only a transcript bound above `seq` is taken, and only while no Legacy body send started since
 /// `sends` was read; `sends` is read before the binding log so no bind precedes it.
@@ -45,7 +48,21 @@ pub(super) async fn look<I: HostIo>(
     at: &Channel<'_, I>,
     events: &[BindingEvent],
     floor: Floor,
+    proofs: &[Owed],
 ) -> Look {
+    let protected_parent = at
+        .candidate
+        .child_surface()
+        .filter(|_| thread::is_protected(events))
+        .map(|surface| surface.parent());
+    let bound = if let Some(parent) = protected_parent {
+        thread::binding(events, parent)
+    } else {
+        takeover_binding(events, floor.seq)
+    };
+    let Some(bound) = bound else {
+        return Look::Pass("no unique transcript bound since the floor".into());
+    };
     let takeover = Takeover {
         io: at.io,
         channel: at.channel,
@@ -54,28 +71,26 @@ pub(super) async fn look<I: HostIo>(
         candidate: at.candidate,
         gate: at.gate,
         provider: ShadowProvider::Claude,
-        judge: prefix::judge,
+        judge: if protected_parent.is_some() {
+            thread::source
+        } else {
+            prefix::judge
+        },
         origin: InitOrigin::LateClaudeTakeover,
+        protected_parent,
+        proofs,
     };
-    let Some(bound) = bound_after(events, floor.seq) else {
-        return Look::Pass("no transcript bound since the floor".into());
-    };
-    // Turn confirmation finds the taken execution again as the transcript's only bind; a source
-    // bound after the floor before it may hold output Legacy has not claimed yet.
-    let binds = events.iter().filter(|e| bound_source(e) == Some(&bound.0));
-    let since = events
-        .iter()
-        .filter(|e| e.seq > floor.seq && bound_source(e).is_some());
-    if binds.count() != 1 || since.count() != 1 {
-        return Look::Pass("the transcript is not the only source bound since the floor".into());
-    }
-    let prefix = match prefix::judge(&bound.0) {
+    let prefix = match (takeover.judge)(&bound.0) {
         Verdict::Eligible(prefix) => prefix,
         Verdict::Wait(detail) => return Look::Wait(detail),
         Verdict::Refuse(detail) => return Look::Pass(detail),
     };
     let at = Baseline {
-        sends: floor.sends,
+        sends: if protected_parent.is_some() {
+            at.candidate.sends()
+        } else {
+            floor.sends
+        },
         seq: floor.seq,
         order: 0,
         turn_mark: false,
@@ -88,6 +103,38 @@ pub(super) async fn look<I: HostIo>(
             Look::Wait(detail)
         }
     }
+}
+
+/// Source verification can confirm a bind without introducing another execution.
+pub(super) fn takeover_binding(events: &[BindingEvent], after: u64) -> Option<(SourceId, u64)> {
+    let (source, _) = bound_after(events, after)?;
+    let mut binds = events.iter().filter(|event| {
+        bound_source(event).is_some_and(|bound| bound == &source || event.seq > after)
+    });
+    let root = binds.next()?;
+    (root.seq > after
+        && bound_source(root) == Some(&source)
+        && !matches!(
+            root.record,
+            BindingRecord::Bound {
+                cause: BindingCause::SameSessionVerified,
+                ..
+            }
+        )
+        && binds.all(|event| confirms(root, event, &source)))
+    .then_some((source, root.seq))
+}
+
+fn confirms(root: &BindingEvent, event: &BindingEvent, source: &SourceId) -> bool {
+    !root.execution_nonce.is_empty()
+        && event.execution_nonce == root.execution_nonce
+        && event.tmux_session == root.tmux_session
+        && event.channel_id == root.channel_id
+        && event.provider == root.provider
+        && matches!(&event.record, BindingRecord::Bound {
+            old: Some(old), new: BindingTarget::Source(new), cause: BindingCause::SameSessionVerified,
+            parent_hint: None, evidence,
+        } if old == source && new == source && !evidence.reclaims)
 }
 
 /// A transcript proved delivered through `len`, by its current pin or frozen receipt scope,

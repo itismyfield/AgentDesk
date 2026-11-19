@@ -6,6 +6,18 @@ pub(super) mod prepared;
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 
+type ThreadLaunchPolicy = fn(u64) -> Option<String>;
+type EarlierThreadPending = fn(u64, Option<&str>) -> bool;
+static THREAD_WRITER_POLICY: std::sync::OnceLock<(ThreadLaunchPolicy, EarlierThreadPending)> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn install_thread_writer_policy(
+    launch: ThreadLaunchPolicy,
+    pending: EarlierThreadPending,
+) {
+    let _ = THREAD_WRITER_POLICY.set((launch, pending));
+}
+
 /// Prepare durable launch evidence before creating the hosted tmux session.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
@@ -53,6 +65,7 @@ pub(super) fn prepare_and_create_claude_tui_session(
     if herdr_configured_for_tui_launch(channel_id) {
         return Err(HERDR_NOT_ADMITTED.to_string());
     }
+    check_earlier_thread_body(channel_id, tmux_session_name)?;
     let auth = crate::services::tmux_common::AuthMarkers::read(tmux_session_name);
     crate::services::tmux_common::cleanup_session_temp_files_under_fence(
         &fence,
@@ -123,6 +136,20 @@ pub(super) fn prepare_and_create_claude_tui_session(
     }
     restore.0 = None;
     Ok((owner_path, incarnation, fence))
+}
+
+fn check_earlier_thread_body(channel_id: Option<u64>, tmux: &str) -> Result<(), String> {
+    if let Some((_, pending)) = THREAD_WRITER_POLICY.get()
+        && channel_id.is_some_and(|channel| pending(channel, Some(tmux)))
+    {
+        return Err("the thread writer is still settling an earlier launch".into());
+    }
+    Ok(())
+}
+
+pub(super) fn admit_locked_turn(channel_id: Option<u64>, tmux: &str) -> Result<(), String> {
+    debug_log(&format!("Claude TUI session turn lock acquired: {tmux}"));
+    check_earlier_thread_body(channel_id, tmux)
 }
 
 /// Restores the account markers read before a launch's cleanup unless the launch disarms it.

@@ -13,6 +13,18 @@ pub(in crate::services::tui_o::writer) struct ChildDebt {
     sends: (u64, u64),
 }
 impl ChildDebt {
+    pub(in crate::services::tui_o::writer) fn settles(
+        &self,
+        source: &SourceId,
+        nonce: &str,
+    ) -> bool {
+        self.owed.iter().any(|owed| {
+            owed.sample
+                .as_ref()
+                .is_some_and(|sample| &sample.source == source && sample.nonce == nonce)
+        })
+    }
+
     pub(in crate::services::tui_o::writer) async fn pin<B: BindingEvents>(
         candidate: &Candidate,
         legacy: Arc<dyn LegacyView>,

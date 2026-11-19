@@ -5,9 +5,51 @@ use std::io;
 
 use chrono::{DateTime, Utc};
 
+use super::super::binding_context::BindingContext;
 use super::{BindingEvent, BindingTarget, Logged, Writer, lock_logs, log_path, read_log};
 use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::claude_tui::source_verify::{Left, SourceHistory, Visit};
+
+const THREAD_WRITER_POLICY: &str = "claude_thread_writer:";
+
+impl BindingContext {
+    #[cfg(unix)]
+    pub(crate) fn claude_thread_writer_policy(parent: u64) -> String {
+        format!("{THREAD_WRITER_POLICY}{parent}")
+    }
+
+    pub(crate) fn claude_thread_writer_parent(&self) -> Option<u64> {
+        if self.provider != "claude" || self.launch_mode != "fresh" {
+            return None;
+        }
+        self.source_policy
+            .as_deref()?
+            .strip_prefix(THREAD_WRITER_POLICY)?
+            .parse()
+            .ok()
+    }
+
+    pub(crate) fn retains_delivery_context(&self) -> bool {
+        if self.provider == "codex" {
+            return self.source_policy.as_deref() == Some("verified");
+        }
+        let (Some(channel), Some(parent)) = (self.channel_id, self.claude_thread_writer_parent())
+        else {
+            return false;
+        };
+        let disposition = crate::config::runtime_root()
+            .as_deref()
+            .and_then(crate::services::tui_o::store::OStore::existing)
+            .and_then(|store| store.read_init(channel).ok().flatten());
+        !disposition.is_some_and(|init| {
+            init.policy_parent == Some(parent)
+                && init.sources.iter().any(|source| {
+                    self.expected_native_session_id.as_deref()
+                        == Some(source.source_id.session_id.as_str())
+                })
+        })
+    }
+}
 
 /// Left sessions kept per execution; past it the history is marked incomplete instead.
 const LEFT_LIMIT: usize = 1024;
@@ -137,6 +179,27 @@ pub(crate) fn binding_events_judged_since(
     Ok(records
         .filter(|(record, _)| record.seq > after_seq)
         .collect())
+}
+
+/// A body reserved before launch can be read only from the hook-verified file of that execution.
+pub(crate) fn verifies_claude_source(
+    channel: u64,
+    seq: u64,
+    nonce: &str,
+    source: &super::SourceId,
+) -> io::Result<bool> {
+    let Some(path) = log_path(channel)? else {
+        return Ok(false);
+    };
+    let _logs = lock_logs();
+    let read = read_log::<Logged>(&path)?;
+    Ok(read.lines == read.records.len() as u64 && read.records.iter().any(|record| {
+        let event = &record.event;
+        record.verified && event.seq == seq && event.channel_id == channel && event.provider == "claude"
+            && event.execution_nonce.as_deref() == Some(nonce)
+            && matches!(&event.new, BindingTarget::Source(bound) | BindingTarget::Resolved { source: bound, .. }
+                if bound.session_id == source.session_id && crate::services::tui_o::shadow::capture::same_file(bound, source))
+    }))
 }
 
 /// Observes only a fold already published by the writer; never reloads, repairs or syncs a log.

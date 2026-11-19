@@ -26,6 +26,8 @@ pub(crate) enum IdentityError {
     UnselectedTui,
     #[error("thread child has no resolved parent policy or decided adoption")]
     ChildHeld,
+    #[error("thread writer is waiting for its execution and earlier delivery proofs")]
+    ChildDeliveryHeld,
 }
 
 /// How a caller uses the answer: before a body Legacy would send, or only to read ownership.
@@ -35,6 +37,14 @@ enum Use {
     Body,
     /// A pending adoption reads as Legacy and stays pending.
     Peek,
+}
+
+#[derive(Default, Clone, Copy)]
+struct Evidence<'a> {
+    session: Option<&'a str>,
+    nonce: Option<[u8; 32]>,
+    source: Option<[u8; 32]>,
+    reserved: bool,
 }
 
 /// The raw claim behind [`claim_then_send`]: a pending adoption is released to Legacy, whose send
@@ -48,6 +58,7 @@ pub(crate) fn o_owns_tui_output_for_channel_reserving(
         channel_id,
         Use::Body,
         Some(std::panic::Location::caller()),
+        Evidence::default(),
         || kind,
     )
 }
@@ -66,7 +77,9 @@ pub(crate) fn o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,
 ) -> Result<bool, IdentityError> {
-    decide(channel_id, Use::Body, || session_kind(session)).map(|claimed| claimed.owned)
+    BodyClaim::tmux(channel_id, session)
+        .judge(Use::Body)
+        .map(|claimed| claimed.owned)
 }
 
 /// For diagnostics and lifecycle checks that send no body: a pending adoption stays pending.
@@ -84,7 +97,14 @@ pub(crate) fn peek_o_owns_tui_output_for_channel_quiet(
     kind: Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
     super::test_override::with_channels(|snapshot| {
-        decide_with_snapshot(snapshot, channel_id, Use::Peek, None, || kind)
+        decide_with_snapshot(
+            snapshot,
+            channel_id,
+            Use::Peek,
+            None,
+            Evidence::default(),
+            || kind,
+        )
     })
     .map(|peeked| peeked.owned)
 }
@@ -93,7 +113,7 @@ pub(crate) fn peek_o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,
 ) -> Result<bool, IdentityError> {
-    decide(channel_id, Use::Peek, || session_kind(session)).map(|peeked| peeked.owned)
+    BodyClaim::tmux(channel_id, session).peek()
 }
 
 /// Where a Legacy body goes, with how the destination's runtime kind is found.
@@ -103,6 +123,8 @@ pub(crate) struct BodyClaim<'a> {
     kind: KindOf<'a>,
     direct: bool,
     nonce: Option<[u8; 32]>,
+    source: Option<[u8; 32]>,
+    reserved: bool,
     origin: &'static std::panic::Location<'static>,
 }
 
@@ -121,6 +143,8 @@ impl<'a> BodyClaim<'a> {
             kind,
             direct: true,
             nonce: None,
+            source: None,
+            reserved: false,
             origin: std::panic::Location::caller(),
         }
     }
@@ -133,6 +157,8 @@ impl<'a> BodyClaim<'a> {
             kind,
             direct: true,
             nonce: None,
+            source: None,
+            reserved: false,
             origin: std::panic::Location::caller(),
         }
     }
@@ -144,20 +170,59 @@ impl<'a> BodyClaim<'a> {
         }
     }
 
+    pub(crate) fn for_source(self, path: Option<&str>) -> Self {
+        Self {
+            source: path.map(channel_policy::first_nonce_id),
+            ..self
+        }
+    }
+
+    /// Pin a row's reserved launch before dropping the row used to create this offer.
+    pub(crate) fn for_tmux_session(self, session: Option<&str>) -> Self {
+        let reserved = session
+            .is_some_and(|session| super::claude_thread::holds_tmux_body(self.channel_id, session));
+        Self { reserved, ..self }
+    }
+
+    pub(crate) fn peek(self) -> Result<bool, IdentityError> {
+        self.judge(Use::Peek).map(|claimed| claimed.owned)
+    }
+
+    pub(crate) fn peek_o_owns_tui_output_for_channel(self) -> Result<bool, IdentityError> {
+        self.peek()
+    }
+
     /// A caller without a direct gateway; see [`o_keeps_body`].
     pub(crate) fn direct(self, direct: bool) -> Self {
         Self { direct, ..self }
     }
 
-    fn claim(self) -> Result<BodyClaimed, IdentityError> {
+    fn judge(self, usage: Use) -> Result<BodyClaimed, IdentityError> {
         let channel_id = self.channel_id;
-        let claimed = match self.kind {
-            KindOf::Known(kind) => decide_from(channel_id, Use::Body, Some(self.origin), || kind),
-            KindOf::Tmux(session) => decide_from(channel_id, Use::Body, Some(self.origin), || {
-                session_kind(session)
-            }),
-        }?;
-        let owned = o_keeps_body(channel_id, claimed.owned, self.direct);
+        let session = match self.kind {
+            KindOf::Known(_) => None,
+            KindOf::Tmux(session) => session,
+        };
+        decide_from(
+            channel_id,
+            usage,
+            Some(self.origin),
+            Evidence {
+                session,
+                nonce: self.nonce,
+                source: self.source,
+                reserved: self.reserved,
+            },
+            || match self.kind {
+                KindOf::Known(kind) => kind,
+                KindOf::Tmux(session) => session_kind(channel_id, session),
+            },
+        )
+    }
+
+    fn claim(self) -> Result<BodyClaimed, IdentityError> {
+        let claimed = self.judge(Use::Body)?;
+        let owned = o_keeps_body(self.channel_id, claimed.owned, self.direct);
         Ok(BodyClaimed { owned, ..claimed })
     }
 }
@@ -383,11 +448,15 @@ pub(crate) fn claims_judged(channel: u64) -> Vec<bool> {
     judged.map(|(_, owned)| *owned).collect()
 }
 
-fn session_kind(session: Option<&str>) -> Option<RuntimeHandoffKind> {
+fn session_kind(channel: u64, session: Option<&str>) -> Option<RuntimeHandoffKind> {
     session.and_then(|session| {
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
             .map(|binding| binding.runtime_kind)
             .or_else(|| crate::services::tmux_common::resolve_tmux_runtime_kind_marker(session))
+            .or_else(|| {
+                super::claude_thread::holds_tmux_body(channel, session)
+                    .then_some(RuntimeHandoffKind::ClaudeTui)
+            })
     })
 }
 
@@ -396,17 +465,18 @@ fn decide(
     usage: Use,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<BodyClaimed, IdentityError> {
-    decide_from(channel_id, usage, None, resolve_kind)
+    decide_from(channel_id, usage, None, Evidence::default(), resolve_kind)
 }
 
 fn decide_from(
     channel_id: u64,
     usage: Use,
     origin: Option<&'static std::panic::Location<'static>>,
+    evidence: Evidence<'_>,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<BodyClaimed, IdentityError> {
     let evaluate = |snapshot: Option<&BootChannels>| {
-        decide_with_snapshot(snapshot, channel_id, usage, origin, resolve_kind)
+        decide_with_snapshot(snapshot, channel_id, usage, origin, evidence, resolve_kind)
     };
     #[cfg(test)]
     let result = super::test_override::with_channels(evaluate);
@@ -421,7 +491,9 @@ impl IdentityError {
             detail: self.to_string(),
         };
         AlarmRouter::for_process(None, None).raise_at(channel_id, &alarm, Instant::now());
-        tracing::error!(channel_id, reason = ?ClaimReason::IdentityHeld, error = %self, "tui_o output identity held");
+        if self != Self::ChildDeliveryHeld {
+            tracing::error!(channel_id, reason = ?ClaimReason::IdentityHeld, error = %self, "tui_o output identity held");
+        }
         self
     }
 }
@@ -453,6 +525,7 @@ fn decide_with_snapshot(
     channel_id: u64,
     usage: Use,
     origin: Option<&'static std::panic::Location<'static>>,
+    evidence: Evidence<'_>,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<BodyClaimed, IdentityError> {
     let snapshot = snapshot.ok_or(IdentityError::MissingSnapshot)?;
@@ -484,13 +557,29 @@ fn decide_with_snapshot(
     };
     // A boot reservation with no parent read yet stays Legacy's; its sends gate the later handoff.
     if let Some(reserved) = snapshot.unresolved_child(channel_id) {
+        if evidence.reserved
+            || super::claude_thread::holds_body(snapshot, channel_id, evidence.session)
+        {
+            return Err(IdentityError::ChildDeliveryHeld);
+        }
         return Ok(judged(&reserved));
     }
-    // A known thread child is judged under its parent's kind, never as a plain non-member.
+    // The parent selects the policy. A known thread offers the kind of its own execution.
     let child = match snapshot.child(channel_id) {
         Some(child) => Some(child.map_err(|_| IdentityError::ChildHeld)?),
         None => {
             // Membership comes before runtime lookup so unrelated Legacy channels stay independent.
+            if !snapshot.channels().contains(&channel_id)
+                && (evidence.reserved
+                    || (evidence.session.is_some()
+                        && super::claude_thread::holds_body(
+                            snapshot,
+                            channel_id,
+                            evidence.session,
+                        )))
+            {
+                return Err(IdentityError::ChildDeliveryHeld);
+            }
             if !snapshot.channels().contains(&channel_id) {
                 return outside_selection(snapshot, channel_id, ClaimReason::NonMember);
             }
@@ -498,6 +587,17 @@ fn decide_with_snapshot(
         }
     };
     let expected = snapshot.kind(channel_id);
+    if expected == Some(RuntimeHandoffKind::ClaudeTui)
+        && let Some(child) = child.as_ref()
+        && !child.candidate.peek().owned()
+        && (evidence.reserved
+            || super::claude_thread::holds_body(snapshot, channel_id, evidence.session))
+        && !child
+            .candidate
+            .names_legacy_turn(evidence.nonce, evidence.source)
+    {
+        return Err(IdentityError::ChildDeliveryHeld);
+    }
     // A committed member without a configured kind keeps Legacy out until its binding returns.
     if expected.is_none() {
         return Ok(BodyClaimed {

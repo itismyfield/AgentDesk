@@ -149,6 +149,7 @@ async fn attempt<I: HostIo>(
     };
     // A source bound while a deferred handoff waited, with the floor its old source's proof gave.
     let mut rebased: Option<deferred::Rebased> = None;
+    let mut reserved_proofs = Vec::new();
     let (mut short, mut logged) = (0, None);
     loop {
         if candidate.peek() != Adoption::Deferred {
@@ -192,9 +193,23 @@ async fn attempt<I: HostIo>(
                 }),
                 |rebased| rebased.floor.clone(),
             );
-            let looked = match &floor {
-                Ok(floor) => claude::look(&at, &events, *floor).await,
-                Err(detail) => {
+            let reserved =
+                candidate.child_surface().is_some() && claude::thread::is_protected(&events);
+            let looked = match (&floor, reserved) {
+                (Ok(floor), _) => claude::look(&at, &events, *floor, &reserved_proofs).await,
+                (Err(_), true) => {
+                    claude::look(
+                        &at,
+                        &events,
+                        claude::Floor {
+                            seq: boundary.takeover_after,
+                            sends,
+                        },
+                        &reserved_proofs,
+                    )
+                    .await
+                }
+                (Err(detail), false) => {
                     claude::Look::Pass(format!("old source completion unproven: {detail}"))
                 }
             };
@@ -232,6 +247,10 @@ async fn attempt<I: HostIo>(
                     }
                 }
             }
+            if reserved {
+                wake.wait().await;
+                continue;
+            }
             short = 0;
             let (bound, owed) = match rebased.take() {
                 Some(rebased) => (Some(rebased.new), rebased.owed),
@@ -262,6 +281,10 @@ async fn attempt<I: HostIo>(
                     Retried::Left => return false,
                     Retried::Rebase(next) => {
                         rebased = Some(next);
+                        continue;
+                    }
+                    Retried::ReservedClaude(proofs) => {
+                        reserved_proofs = proofs;
                         continue;
                     }
                 }

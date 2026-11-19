@@ -18,6 +18,33 @@ pub(in crate::services::tui_o::writer) fn normalize<I: HostIo>(
     waiting: &Waiting<'_, I>,
     events: &[BindingEvent],
 ) -> bool {
+    normalize_if(waiting, events, |_, _| true)
+}
+
+/// Capture an active source's delivery scope while its inflight row still names it.
+pub(in crate::services::tui_o::writer) fn preserve_inflight<I: HostIo>(
+    waiting: &Waiting<'_, I>,
+    events: &[BindingEvent],
+) -> bool {
+    normalize_if(waiting, events, |run, source| {
+        run.turn
+            .as_ref()
+            .is_some_and(|turn| turn.3.is_some() && turn.4.is_some())
+            && run.delivery.as_ref().is_some_and(|delivery| {
+                delivery.source_path == source.path
+                    && delivery
+                        .execution_nonce
+                        .as_ref()
+                        .is_none_or(|nonce| nonce == &run.binding.execution_nonce)
+            })
+    })
+}
+
+fn normalize_if<I: HostIo>(
+    waiting: &Waiting<'_, I>,
+    events: &[BindingEvent],
+    admits: impl FnOnce(&LegacyRun, &SourceId) -> bool,
+) -> bool {
     if !waiting.late {
         return false;
     }
@@ -45,6 +72,9 @@ pub(in crate::services::tui_o::writer) fn normalize<I: HostIo>(
         delivery: epoch.delivery,
         observed_end: meta.len(),
     };
+    if !admits(&run, source) {
+        return false;
+    }
     if !waiting
         .candidate
         .release_child_run(waiting.channel, run.clone())

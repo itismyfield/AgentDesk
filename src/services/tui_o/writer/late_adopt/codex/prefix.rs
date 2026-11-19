@@ -36,6 +36,7 @@ pub(in crate::services::tui_o::writer::late_adopt) struct Prefix {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::services::tui_o::writer::late_adopt) enum PrefixClass {
     OutputFree,
+    ReservedClaude,
     Buffered { turn: String, closed: bool },
 }
 

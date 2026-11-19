@@ -1,9 +1,6 @@
 use super::*;
-use crate::services::agent_protocol::RuntimeHandoffKind;
 pub(in crate::services::discord::turn_bridge) use crate::services::tui_o::cutover::BodyClaim;
 use crate::services::tui_o::cutover::{self, IdentityError};
-
-type Gate = fn(u64, Option<RuntimeHandoffKind>) -> Result<bool, IdentityError>;
 
 /// TUI bodies follow destination membership on any gateway; uncertain selected identities are
 /// held. Only read: a pending adoption stays pending, and a body claims at its transport instead.
@@ -12,8 +9,13 @@ pub(in crate::services::discord::turn_bridge) fn bridge_o_body_peek_decision(
     inflight: &InflightTurnState,
     can_deliver_directly: bool,
 ) -> Result<bool, IdentityError> {
-    let gate: Gate = cutover::peek_o_owns_tui_output_for_channel;
-    decision(channel_id, inflight, can_deliver_directly, gate)
+    let owned = bridge_body_claim(channel_id, inflight, can_deliver_directly)
+        .peek_o_owns_tui_output_for_channel()?;
+    Ok(cutover::o_keeps_body(
+        channel_id.get(),
+        owned,
+        can_deliver_directly,
+    ))
 }
 
 /// The claim a bridge body sends under, with the identity these decisions resolve.
@@ -22,29 +24,9 @@ pub(in crate::services::discord::turn_bridge) fn bridge_body_claim(
     inflight: &InflightTurnState,
     can_deliver_directly: bool,
 ) -> BodyClaim<'static> {
-    BodyClaim::new(channel_id.get(), kind(channel_id, inflight))
+    inflight
+        .tui_body_claim(channel_id.get())
         .direct(can_deliver_directly)
-        .for_turn(inflight.turn_nonce.as_deref())
-}
-
-fn kind(channel_id: ChannelId, inflight: &InflightTurnState) -> Option<RuntimeHandoffKind> {
-    (inflight.channel_id == channel_id.get())
-        .then_some(inflight.runtime_kind)
-        .flatten()
-}
-
-fn decision(
-    channel_id: ChannelId,
-    inflight: &InflightTurnState,
-    can_deliver_directly: bool,
-    o_owns: Gate,
-) -> Result<bool, IdentityError> {
-    let owned = o_owns(channel_id.get(), kind(channel_id, inflight))?;
-    Ok(cutover::o_keeps_body(
-        channel_id.get(),
-        owned,
-        can_deliver_directly,
-    ))
 }
 
 /// A bridge body sent under `claim`; O owning the channel or a held identity sent nothing, which
@@ -76,6 +58,7 @@ where
 #[cfg(test)]
 mod first_admission_tests {
     use super::*;
+    use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
     use crate::services::tui_o::cutover::{BodySend, claim_then_send, test_override};
     use crate::test_support::wait::{WAIT_CAP, await_within};

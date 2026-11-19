@@ -583,8 +583,8 @@ fn sweep(
         {
             continue;
         }
-        // Retirement cannot dispose verified delivery evidence before explicit disposition.
-        if ctx.provider == "codex" && ctx.source_policy.as_deref() == Some("verified") {
+        // Retired executions may still own delivery evidence.
+        if ctx.retains_delivery_context() {
             continue;
         }
         let presence = probe(&ctx.tmux_session);
