@@ -416,7 +416,7 @@ fn cold_start_resolves_its_launch_pending_before_the_first_read_ends() {
     // The read's first frame is its start offset; the turn is still being read when it arrives.
     let reading = std::thread::spawn(move || {
         events::set_test_root(Some(&log_root));
-        frames.recv_timeout(Duration::from_secs(30)).unwrap();
+        crate::test_support::wait::recv_within(&frames, crate::test_support::wait::WAIT_CAP);
         let seen = latest(&pane);
         token
             .cancelled
@@ -424,7 +424,7 @@ fn cold_start_resolves_its_launch_pending_before_the_first_read_ends() {
         seen
     });
     observe(&turn, &runtime.handle(), submitted, sender).unwrap();
-    let seen = reading.join().unwrap();
+    let seen = crate::test_support::wait::join_within(reading, crate::test_support::wait::WAIT_CAP);
     assert!(
         matches!(seen, BindingTarget::Resolved { .. }),
         "Pending while the first turn is read: {seen:?}"
