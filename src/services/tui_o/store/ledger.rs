@@ -18,6 +18,7 @@ use crate::services::tui_o::shadow::{SourceId, UnitKey};
 use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 
 pub mod input_notices;
+pub use crate::services::cluster::intake_router_hook::owner_record::output::debt_recovery::PostedReceipt;
 
 /// Discord ids minted on different API nodes can trail creation order by about a second.
 const POST_ORDER_SKEW_MS: u64 = 30_000;
@@ -32,6 +33,18 @@ pub enum LocalRetryMark {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LedgerEntry {
+    DebtPrepared {
+        serial: u64,
+        artifact: Box<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+        unit_key: UnitKey,
+        piece_index: u32,
+        payload: String,
+        anchor_id: u64,
+        epoch: u64,
+    },
+    DebtReceipt {
+        receipt: Box<PostedReceipt>,
+    },
     InputNotice {
         entry: Box<input_notices::NoticeEntry>,
     },
@@ -229,6 +242,11 @@ pub struct LedgerState {
     exact_evidence: Vec<crate::services::tui_o::exact_episode::EpisodeMetadata>,
     approvals: BTreeMap<u64, ResumeApproval>,
     input_notices: input_notices::NoticeState,
+    #[cfg(test)]
+    post_confirmations: BTreeMap<u64, PostConfirmation>,
+    #[cfg(test)]
+    shared_debt: HashSet<(UnitKey, u32)>,
+    debt_receipts: BTreeMap<uuid::Uuid, PostedReceipt>,
 }
 
 impl LedgerState {
@@ -245,6 +263,20 @@ impl LedgerState {
         serial: u64,
     ) -> Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact> {
         self.output_origins.get(&serial)
+    }
+    #[cfg(test)]
+    pub(crate) fn post_confirmation(&self, serial: u64) -> Option<&PostConfirmation> {
+        self.post_confirmations.get(&serial)
+    }
+    #[cfg(test)]
+    pub(crate) fn debt_receipt(&self, receipt: &PostedReceipt) -> bool {
+        self.debt_receipts.get(&receipt.effect()) == Some(receipt)
+    }
+    #[cfg(test)]
+    pub(crate) fn debt_context(&self, channel: u64, provider: &str) -> bool {
+        self.debt_receipts
+            .values()
+            .all(|r| r.context(channel, provider))
     }
 
     pub fn anchor(&self) -> u64 {
@@ -273,7 +305,16 @@ impl LedgerState {
 
     /// Serials from `from` whose piece carries a local-retry budget, in serial order.
     pub(crate) fn budget_roots(&self, from: u64) -> impl Iterator<Item = u64> + '_ {
-        self.budget_roots.range(from..).copied()
+        let serials = self.budget_roots.range(from..).copied();
+        #[cfg(test)]
+        let serials = serials.filter(|serial| {
+            self.pieces.get(serial).is_none_or(|piece| {
+                !self
+                    .shared_debt
+                    .contains(&(piece.unit_key.clone(), piece.piece_index))
+            })
+        });
+        serials
     }
 
     /// Latest attempt for one piece of a unit.
@@ -346,6 +387,10 @@ impl LedgerState {
     }
 
     pub fn disposition(&self, key: &UnitKey, index: u32) -> PieceDisposition {
+        #[cfg(test)]
+        if self.shared_debt.contains(&(key.clone(), index)) {
+            return PieceDisposition::Settled;
+        }
         let Some((serial, piece)) = self.latest_piece(key, index) else {
             return PieceDisposition::Fresh;
         };
@@ -490,6 +535,63 @@ impl LedgerState {
                 }
                 self.exact_evidence.push(*metadata);
             }
+            LedgerEntry::DebtPrepared {
+                serial,
+                artifact,
+                unit_key,
+                piece_index,
+                payload,
+                anchor_id,
+                epoch,
+            } => {
+                if self.violation.is_some()
+                    || serial != self.next_serial
+                    || self.open_serial.is_some()
+                    || anchor_id != self.anchor
+                    || self
+                        .output_origins
+                        .get(&serial)
+                        .is_some_and(|old| old != artifact.as_ref())
+                    || !artifact.debt_piece(&unit_key, piece_index, &payload)
+                {
+                    self.violate("debt prepare identity or sequence changed".into());
+                } else {
+                    self.apply(
+                        at,
+                        LedgerEntry::OutputOrigin {
+                            serial,
+                            artifact: *artifact,
+                        },
+                    );
+                    self.apply(
+                        at,
+                        LedgerEntry::Prepared {
+                            serial,
+                            unit_key,
+                            piece_index,
+                            payload,
+                            anchor_id,
+                            epoch,
+                            local_retry: None,
+                            notice_origin: None,
+                        },
+                    );
+                }
+            }
+            LedgerEntry::DebtReceipt { receipt } => {
+                if !receipt.valid()
+                    || self
+                        .debt_receipts
+                        .get(&receipt.effect())
+                        .is_some_and(|old| old != receipt.as_ref())
+                {
+                    self.violate("conflicting shared debt receipt".into());
+                } else {
+                    self.anchor = self.anchor.max(receipt.message());
+                    self.posted.insert(receipt.message());
+                    self.debt_receipts.insert(receipt.effect(), *receipt);
+                }
+            }
             LedgerEntry::OutputOrigin { serial, artifact } => {
                 if serial != self.next_serial
                     || self.open_serial.is_some()
@@ -575,7 +677,13 @@ impl LedgerState {
                 }
                 self.pieces.insert(serial, piece);
             }
-            LedgerEntry::Posted { serial, msg_id, .. } => {
+            LedgerEntry::Posted {
+                serial,
+                msg_id,
+                confirmation,
+            } => {
+                #[cfg(not(test))]
+                drop(confirmation);
                 if msg_id > self.anchor {
                     self.anchor = msg_id;
                 } else if !self.reordered_post(msg_id) {
@@ -583,6 +691,13 @@ impl LedgerState {
                 }
                 self.posted.insert(msg_id);
                 self.resolve(serial, PieceOutcome::Posted(msg_id), at);
+                #[cfg(test)]
+                if let Some(proof) = confirmation.filter(|proof| {
+                    self.piece(serial)
+                        .is_some_and(|piece| proof.matches_piece(serial, piece))
+                }) {
+                    self.post_confirmations.insert(serial, *proof);
+                }
             }
             LedgerEntry::Rejected { serial, status } => {
                 self.resolve(serial, PieceOutcome::Rejected(status), at)
@@ -739,7 +854,9 @@ impl Unsent {
     /// Only a `Prepared` can be unsent.
     pub(crate) fn new(entry: LedgerEntry) -> Option<Self> {
         match entry {
-            LedgerEntry::Prepared { serial, .. } => Some(Self { serial, entry }),
+            LedgerEntry::Prepared { serial, .. } | LedgerEntry::DebtPrepared { serial, .. } => {
+                Some(Self { serial, entry })
+            }
             _ => None,
         }
     }
@@ -766,8 +883,7 @@ pub(super) fn recover_withdrawing(
 
 /// The last complete line is the one `unsent` names and nothing it follows is still open.
 fn withdrawable(state: &LedgerState, entry: &LedgerEntry, unsent: Option<&Unsent>) -> bool {
-    let next =
-        matches!(entry, LedgerEntry::Prepared { serial, .. } if *serial == state.next_serial);
+    let next = matches!(entry, LedgerEntry::Prepared { serial, .. } | LedgerEntry::DebtPrepared {serial,..} if *serial == state.next_serial);
     unsent.is_some_and(|unsent| unsent.entry == *entry) && next && state.open_serial.is_none()
 }
 
@@ -1154,3 +1270,24 @@ mod tests {
 #[cfg(test)]
 #[path = "ledger_lock_tests.rs"]
 mod lock_tests;
+
+#[cfg(test)]
+impl super::ChannelStore {
+    /// Shared exact receipts cover only the original ledger admission, without inventing Posted.
+    pub(crate) fn cover_herdr_debt(
+        &mut self,
+        coverage:&crate::services::cluster::intake_router_hook::owner_record::output::debt_recovery::Coverage,
+    ) {
+        for (key, index, payload, origin) in coverage.aliases() {
+            if self
+                .ledger
+                .latest_piece(key, *index)
+                .is_some_and(|(serial, piece)| {
+                    piece.payload == *payload && self.ledger.output_origin(serial) == Some(origin)
+                })
+            {
+                self.ledger.shared_debt.insert((key.clone(), *index));
+            }
+        }
+    }
+}

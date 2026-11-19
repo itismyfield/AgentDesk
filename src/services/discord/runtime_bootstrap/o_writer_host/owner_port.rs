@@ -79,13 +79,18 @@ pub(super) async fn open(
         .map_err(|_| "owner REST preparation timed out".to_string())?
 }
 
-pub(super) async fn facts(permit: &OwnerPermit) -> Result<FencedFacts, String> {
+/// `own_turn` is the message of the turn Legacy runs; see `fenced_activation_rows`.
+pub(super) async fn facts(
+    permit: &OwnerPermit,
+    own_turn: Option<&str>,
+) -> Result<FencedFacts, String> {
     let (hold, rows, queued_bodies) = crate::db::o_channel_activation::owner::facts(
         &permit.pool,
         permit.identity.provider(),
         permit.identity.raw_channel_id(),
         &permit.executor,
         permit.generation,
+        own_turn,
     )
     .await
     .map_err(|error| format!("channel execution fence: {error}"))?;
@@ -93,6 +98,7 @@ pub(super) async fn facts(permit: &OwnerPermit) -> Result<FencedFacts, String> {
         hold,
         facts: ActivationFacts {
             open_intake: rows.open_intake,
+            own_turn_intake: rows.own_turn_intake,
             runner_sessions: rows.foreign_sessions,
             node_override: None,
         },

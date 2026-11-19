@@ -12,9 +12,17 @@ pub(crate) mod body_check;
 
 use crate::services::tui_o::store::OStore;
 
+// The fresh first output's disposition; its consumers close a rejected episode with one reason.
+#[cfg(any(test, unix))]
+pub(crate) mod output_disposition;
+
 mod child_run;
+#[cfg(unix)]
+pub(crate) mod episode_key;
 pub(crate) use child_run::LegacyRun;
 mod first_turn;
+#[cfg(any(test, unix))]
+pub(crate) use first_turn::FirstHold;
 pub(crate) use first_turn::{
     FirstAdmission, FirstPause, FirstProof, digest as first_prompt_digest,
     nonce_id as first_nonce_id,
@@ -22,7 +30,7 @@ pub(crate) use first_turn::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Adoption {
-    /// Undecided: a Legacy body or placement releases it, a first `init` commits it.
+    /// Undecided: a first `init` commits it; a Legacy body or placement leaves it as it is.
     Pending,
     /// The channel's store exists, so O owns its output.
     Committed,
@@ -30,9 +38,12 @@ pub(crate) enum Adoption {
     Held,
     /// Legacy keeps an ordinary channel for this process; a verified late child can retry at a boundary.
     Released,
-    /// Legacy keeps the channel while its writer host waits for a turn to close and retries;
-    /// only that host sets or leaves it, and a Legacy body does not.
+    /// The writer host waits for a turn to close and retries; the body is held meanwhile, and
+    /// only that host sets or leaves it.
     Deferred,
+    /// The adoption was refused: no store is written and a held body is discarded with one
+    /// reason, never Legacy's.
+    Refused,
 }
 
 impl Adoption {
@@ -68,10 +79,13 @@ pub(crate) enum ClaimReason {
     PendingReleased,
     Released,
     Deferred,
+    Refused,
     NoClaim,
     OwnedByO,
     OwnedHeld,
     IdentityHeld,
+    /// A thread child undecided at its final claim: held, never sent by Legacy.
+    ChildHeld,
 }
 
 impl Adoption {
@@ -80,6 +94,7 @@ impl Adoption {
             Self::Pending => ClaimReason::PendingReleased,
             Self::Released => ClaimReason::Released,
             Self::Deferred => ClaimReason::Deferred,
+            Self::Refused => ClaimReason::Refused,
             Self::Committed => ClaimReason::OwnedByO,
             Self::Held => ClaimReason::OwnedHeld,
         }
@@ -218,6 +233,16 @@ impl Candidate {
         self.late_origin
     }
 
+    /// Whether Legacy has a thread child's body in `state`: a late reservation still waiting, or a
+    /// released child whose Legacy run is recorded. Callers hold the adoption lock.
+    pub(crate) fn child_legacy_in(&self, state: Adoption) -> bool {
+        match state {
+            Adoption::Deferred => self.late_origin,
+            Adoption::Released => self.legacy_run().is_some(),
+            _ => false,
+        }
+    }
+
     /// Callers hold the adoption lock, so a body claim and its baseline have a fixed order.
     pub(crate) fn baseline_sends(&self) -> ((u64, u64), u64) {
         let order = self.baseline_order.fetch_add(1, Ordering::SeqCst) + 1;
@@ -313,14 +338,15 @@ impl Candidate {
         *self.lock()
     }
 
-    /// Whether O owns the channel for a placement, which carries no body; a pending adoption is
-    /// released first. A placement is not a Legacy send, so it is not counted.
+    /// Whether O owns the channel for a placement, which carries no body and changes no adoption.
+    /// A placement is not a Legacy send, so it is not counted.
+    #[cfg(test)]
     pub(in crate::services::tui_o) fn claim(&self, channel: u64) -> bool {
         self.take(channel).0.owned()
     }
 
-    /// Whether O owns the channel for a body Legacy would otherwise send, releasing a pending
-    /// adoption first; a Legacy send is counted under this lock until its guard drops.
+    /// Whether O owns the channel for a body Legacy would otherwise send; a Legacy send is counted
+    /// under this lock until its guard drops. The adoption itself does not change.
     #[track_caller]
     pub(in crate::services::tui_o) fn claim_body(&self, channel: u64) -> BodyClaimed {
         self.claim_body_from(channel, std::panic::Location::caller())
@@ -333,15 +359,18 @@ impl Candidate {
     ) -> BodyClaimed {
         let (state, reason) = self.take(channel);
         let owned = state.owned();
+        // A thread child's own rule decides under this lock: an undecided child sends nothing.
+        let held = !owned && self.child_surface().is_some() && !self.child_legacy_in(*state);
+        let reason = if held { ClaimReason::ChildHeld } else { reason };
         #[cfg(test)]
-        if !owned {
+        if !owned && !held {
             crate::services::tui_o::writer::activation::test_hook::run(
                 channel,
                 crate::services::tui_o::writer::activation::test_hook::Step::BeforeLegacyStarted,
             )
             .expect("Legacy start hook");
         }
-        let send = (!owned).then(|| {
+        let send = (!owned && !held).then(|| {
             self.sends.started.fetch_add(1, Ordering::SeqCst);
             LegacySend(Arc::clone(&self.sends))
         });
@@ -360,15 +389,9 @@ impl Candidate {
         }
     }
 
-    fn take(&self, channel: u64) -> (MutexGuard<'_, Adoption>, ClaimReason) {
-        let mut state = self.lock();
+    fn take(&self, _channel: u64) -> (MutexGuard<'_, Adoption>, ClaimReason) {
+        let state = self.lock();
         let reason = state.claim_reason();
-        if *state == Adoption::Pending {
-            *state = Adoption::Released;
-            #[cfg(test)]
-            body_check::note_release(self);
-            tracing::info!(channel, "[tui_o] Legacy took the channel before O adoption");
-        }
         (state, reason)
     }
 
@@ -379,18 +402,47 @@ impl Candidate {
         (started, sends.finished.load(Ordering::SeqCst))
     }
 
-    /// Leaves a pending or deferred adoption to Legacy for the rest of this process; a decided
-    /// one is kept.
+    /// Refuses a pending or deferred adoption for the rest of this process: no store is written
+    /// and a held body is discarded with one reason. A decided one is kept.
     pub(crate) fn release(&self, channel: u64) {
         let mut state = self.lock();
         if matches!(*state, Adoption::Pending | Adoption::Deferred) {
-            *state = Adoption::Released;
+            *state = self.refusal();
+            if *state == Adoption::Released {
+                tracing::info!(channel, "[tui_o] late child released before the first init");
+            } else {
+                tracing::warn!(channel, "[tui_o] adoption refused before the first init");
+            }
             self.settle_first();
-            tracing::info!(channel, "[tui_o] adoption released before the first init");
         }
     }
 
-    /// Leaves a pending adoption to Legacy until its host retries; true while it is deferred.
+    /// How an undecided adoption ends without a store: a late thread child is left to its parent's
+    /// boundary path (Legacy posts only with a recorded run), anything else is refused.
+    fn refusal(&self) -> Adoption {
+        if self.late_thread_child() {
+            Adoption::Released
+        } else {
+            Adoption::Refused
+        }
+    }
+
+    /// A thread child reserved late: its adoption is decided at the parent's boundary.
+    pub(crate) fn late_thread_child(&self) -> bool {
+        self.late_origin && self.child_surface().is_some()
+    }
+
+    /// Whether a host that ended on this adoption ended refused: a released late thread child
+    /// waits for its boundary instead.
+    pub(crate) fn refused_at_end(&self) -> bool {
+        match self.peek() {
+            Adoption::Refused => true,
+            Adoption::Released => !self.late_thread_child(),
+            _ => false,
+        }
+    }
+
+    /// Holds a pending adoption's body until its host retries; true while it is deferred.
     pub(crate) fn defer(&self, channel: u64) -> bool {
         let mut state = self.lock();
         match *state {
@@ -403,11 +455,11 @@ impl Candidate {
                 true
             }
             Adoption::Deferred => true,
-            Adoption::Committed | Adoption::Held | Adoption::Released => false,
+            Adoption::Committed | Adoption::Held | Adoption::Released | Adoption::Refused => false,
         }
     }
 
-    /// A recovered store commits the adoption, unless Legacy already took the channel.
+    /// A recovered store commits the adoption, also after a refusal; a Released channel stays.
     pub(crate) fn confirm_store(&self) -> bool {
         let mut state = self.lock();
         if *state == Adoption::Released {
@@ -453,10 +505,14 @@ impl Drop for LateReservationGuard {
             .runtime_root
             .as_deref()
             .and_then(OStore::existing)
-            .map_or(Adoption::Released, |store| {
+            .map_or(Adoption::Refused, |store| {
                 crate::services::tui_o::writer::activation::settled(&store, self.channel)
             });
-        *state = settled;
+        // A store that decided nothing ends the way a release does; a decided one is kept.
+        *state = match settled {
+            Adoption::Refused => self.candidate.refusal(),
+            decided => decided,
+        };
         self.candidate.settle_first();
         tracing::info!(channel = self.channel, adoption = ?*state, "[tui_o] late reservation settled after host exit");
     }
@@ -493,14 +549,15 @@ pub(crate) fn stored_with_committed(
 }
 
 /// The adoption each selected channel starts with, from the local store as it is on disk.
-/// A readable `init` commits; unreadable, orphaned or era-only state holds; absent is pending.
+/// A readable `init` commits; unreadable, orphaned or era-only state holds; absent is pending; no
+/// runtime root to read refuses, since no store can back an owned answer.
 pub(crate) fn stored(
     runtime_root: Option<&Path>,
     channels: &BTreeSet<u64>,
 ) -> BTreeMap<u64, Adoption> {
     let all = |state| channels.iter().map(|&channel| (channel, state)).collect();
     let Some(root) = runtime_root else {
-        return all(Adoption::Held);
+        return all(Adoption::Refused);
     };
     let Some(store) = OStore::existing(root) else {
         return all(Adoption::Pending);

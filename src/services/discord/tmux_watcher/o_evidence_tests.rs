@@ -839,6 +839,7 @@ async fn i7441b_watcher_delegated_capture_survives_foreign_row_clear() {
     let identity = InflightTurnIdentity::from_state(&f.row);
     let mut generation = None;
     super::o_delegated_arm::consume_delegated_terminal(super::o_delegated_arm::DelegatedTerminal {
+        o_owned: true,
         http: &http,
         shared: &shared,
         provider: &ProviderKind::Claude,

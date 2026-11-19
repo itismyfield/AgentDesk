@@ -360,6 +360,41 @@ async fn thread_children_gate_never_hands_an_unresolved_or_undecided_child_to_le
     assert_eq!(boot.candidate(42).unwrap().sends(), (0, 0));
 }
 
+// Whichever adoption the gate reads, the guarded observation locks that one and answers as the
+// plain peek does.
+#[cfg(unix)]
+#[test]
+fn thread_children_guarded_observation_locks_the_adoption_each_answer_is_read_from() {
+    use crate::services::tui_o::cutover::{
+        peek_o_owns_tui_output_for_channel, with_peeked_o_output,
+    };
+    let boot = BootChannels::validate(&config())
+        .unwrap()
+        .adopted(Adoption::Committed);
+    boot.children
+        .record(&boot, &init(43, Some(42)), Adoption::Committed);
+    boot.reserve_boot_children(&[(46, 42)]);
+    for (channel, boot_discovered) in [(47, false), (48, true)] {
+        unresolved(&boot, channel, boot_discovered);
+    }
+    let _forced = test_override::force_boot(boot.clone());
+    let check = |channel: u64, deciding: &Candidate| {
+        let kind = Some(RuntimeHandoffKind::ClaudeTui);
+        let seen = with_peeked_o_output(channel, kind, |seen| {
+            assert!(deciding.locked_for_test(), "{channel} holds its adoption");
+            seen.answer()
+        });
+        assert_eq!(seen, peek_o_owns_tui_output_for_channel(channel, kind));
+    };
+    check(46, &boot.unresolved_child(46).unwrap());
+    boot.children
+        .resolve_legacy(&boot, |channel| Ok(thread(channel, 42)));
+    check(42, boot.candidate(42).unwrap());
+    for child in [43, 47, 48] {
+        check(child, &boot.child(child).unwrap().unwrap().candidate);
+    }
+}
+
 #[test]
 fn thread_children_intake_holds_a_child_until_its_own_writer_is_ready() {
     use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
@@ -610,7 +645,7 @@ async fn thread_child_refused_first_init_is_held_visibly_and_never_handed_to_leg
     );
     assert!(!store.has_channel_dir(CHILD));
     assert!(!root.path().join("o_store/thread_children.floor").exists());
-    assert_eq!(host.peek(), Adoption::Released);
+    assert_eq!(host.peek(), Adoption::Refused);
     let _forced = test_override::force_boot(boot.clone());
     assert_eq!(
         legacy_sent(CHILD, RuntimeHandoffKind::ClaudeTui).await,
@@ -618,6 +653,149 @@ async fn thread_child_refused_first_init_is_held_visibly_and_never_handed_to_leg
     );
     let halted = format!("tui_o:halted:{CHILD}");
     assert!(crate::services::tui_o::alarm::health_reasons().contains(&halted));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn thread_child_refused_recovers_only_a_verified_store_without_legacy_body() {
+    use crate::services::tui_o::ownership::OwnershipGate;
+    use crate::services::tui_o::shadow::{ShadowProvider, SourceId, capture::file_identity};
+    use crate::services::tui_o::store::InitOrigin;
+    use crate::services::tui_o::writer::host::{self, HostParts, Readiness, test_io::TestHost};
+
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::thread_child_refused_recovers_only_a_verified_store_without_legacy_body"
+    )) {
+        return;
+    }
+    let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    const CHILD: u64 = 4_807;
+    for case in ["verified", "other_parent", "other_kind", "no_authority"] {
+        let boot = BootChannels::validate(&config())
+            .unwrap()
+            .adopted(Adoption::Committed);
+        assert!(boot.children.resolve(&boot, CHILD, thread(CHILD, 42), true));
+        let candidate = boot.output_candidate(CHILD).unwrap();
+        let forced = test_override::force_boot(boot.clone());
+        let root = tempfile::tempdir().unwrap();
+        let root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let path = root.path().join("native.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        let (dev, ino) = file_identity(&std::fs::metadata(&path).unwrap());
+        let source = SourceId {
+            session_id: "verified-child".into(),
+            path,
+            dev,
+            ino,
+        };
+        let io = TestHost::new([(CHILD, source)]);
+        io.facts.lock().unwrap().runner_sessions = 1;
+        let gate = Arc::new(OwnershipGate::default());
+        gate.reacquired().unwrap();
+        let readiness = Arc::new(Readiness::default());
+        let parts = || HostParts {
+            io: Arc::clone(&io),
+            runtime_root: Some(root.path().to_owned()),
+            gate: Arc::clone(&gate),
+            readiness: Arc::clone(&readiness),
+        };
+        let owned = |kind| vec![(CHILD, Some(kind), Some(candidate.clone()))];
+        let first = host::start_managed(
+            ShadowProvider::Claude,
+            true,
+            owned(RuntimeHandoffKind::ClaudeTui),
+            parts,
+        );
+        assert_eq!(first.len(), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while first[0].live() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the real host refuses the first init");
+        for handle in first {
+            drop(handle.stop_and_join().await);
+        }
+        assert_eq!(candidate.peek(), Adoption::Refused, "{case}");
+        assert_eq!(
+            legacy_sent(CHILD, RuntimeHandoffKind::ClaudeTui).await,
+            Err(crate::services::tui_o::cutover::IdentityError::ChildHeld)
+        );
+
+        let store = store_at(root.path());
+        let parent = if case == "other_parent" { 44 } else { 42 };
+        let creator_kind = if parent == 44 {
+            RuntimeHandoffKind::CodexTui
+        } else {
+            RuntimeHandoffKind::ClaudeTui
+        };
+        let returned = serde_json::from_value(serde_json::json!({
+            "id":CHILD.to_string(),"parent_id":parent.to_string(),"type":11,"name":"verified"
+        }))
+        .unwrap();
+        let surface = crate::services::session_host::surface_policy::VerifiedSurface::from_discord(
+            &returned,
+            creator_kind,
+        )
+        .unwrap();
+        store
+            .begin_era_as(
+                &init(CHILD, Some(parent)),
+                InitOrigin::Fresh,
+                &boot.init_scope_view(),
+                Some(&surface),
+            )
+            .unwrap();
+        io.facts.lock().unwrap().runner_sessions = 0;
+        let kind = if case == "other_kind" {
+            RuntimeHandoffKind::CodexTui
+        } else {
+            RuntimeHandoffKind::ClaudeTui
+        };
+        let provider = if case == "other_kind" {
+            ShadowProvider::Codex
+        } else {
+            ShadowProvider::Claude
+        };
+        let resumed = host::start_managed(provider, case != "no_authority", owned(kind), parts);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while candidate.peek() == Adoption::Refused
+                && resumed.iter().any(|handle| handle.live())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the recovered host is judged");
+        let observed = candidate.peek();
+        let sent = legacy_sent(CHILD, RuntimeHandoffKind::ClaudeTui).await;
+        for handle in resumed {
+            drop(handle.stop_and_join().await);
+        }
+        assert_eq!(
+            observed,
+            if case == "verified" {
+                Adoption::Committed
+            } else {
+                Adoption::Refused
+            },
+            "{case}"
+        );
+        assert_ne!(
+            sent,
+            Ok(true),
+            "Legacy never receives the refused or recovered body: {case}"
+        );
+        assert!(io.posts.to(CHILD).is_empty());
+        drop(forced);
+        drop(root_env);
+    }
+    drop(env_lock);
 }
 
 #[tokio::test]
@@ -679,4 +857,70 @@ fn thread_child_rebound_to_another_parent_is_held_and_offers_no_init() {
     assert!(matches!(boot.child(CHILD), Some(Err(ChildHeld))));
     assert!(boot.output_candidate(CHILD).is_none());
     assert_eq!(first.child_surface().map(|s| s.parent()), Some(42));
+}
+
+// A late thread child released before its first init is held, never refused, by its gate (even
+// under its own permit) and host end, with no Legacy send; a released member is refused.
+#[cfg(unix)]
+#[tokio::test]
+async fn thread_children_released_late_child_is_held_and_a_released_member_is_refused_pg() {
+    use crate::services::tui_o::cutover::{
+        BodyClaim, IdentityError, claim_then_send, peek_o_owns_tui_output_for_channel as peek,
+    };
+    use crate::services::tui_o::ownership::execution;
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    const CHILD: u64 = 4_806;
+    let kind = Some(RuntimeHandoffKind::ClaudeTui);
+    let boot = BootChannels::validate(&config())
+        .unwrap()
+        .adopted(Adoption::Committed);
+    boot.reserve_boot_children(&[(CHILD, 42)]);
+    assert!(boot.resolve_child(CHILD, thread(CHILD, 42), false));
+    let child = boot.output_candidate(CHILD).unwrap();
+    assert!(child.late_thread_child() && child.legacy_run().is_none());
+    child.release(CHILD);
+    assert_eq!(child.peek(), Adoption::Released);
+    assert!(!child.refused_at_end(), "its host end is no refusal");
+    execution::tests::admission(&pool, "claude", CHILD, "mac-a").await;
+    let permit = execution::read(&pool, "claude", CHILD, "mac-a", || Ok(false)).await;
+    boot.install_execution(CHILD, Some(Ok(permit.unwrap().unwrap())));
+    let _forced = test_override::force_boot(boot.clone());
+    assert_eq!(peek(CHILD, kind), Err(IdentityError::ChildHeld));
+    let claim = claim_then_send(Some(BodyClaim::new(CHILD, kind)), || async {});
+    assert_eq!(claim.await.unwrap_err(), IdentityError::ChildHeld);
+    assert_eq!(child.sends(), (0, 0), "Legacy sends none of it");
+    let member = BootChannels::validate(&config())
+        .unwrap()
+        .adopted(Adoption::Pending);
+    let candidate = member.candidate(42).unwrap();
+    candidate.release(42);
+    assert_eq!(candidate.peek(), Adoption::Refused);
+    assert!(candidate.refused_at_end());
+    pool.close().await;
+}
+
+// A late thread child whose host ends before its first init with no store is released, not
+// refused, and its final body claim holds it with no Legacy send; a late member is refused.
+#[cfg(unix)]
+#[test]
+fn thread_children_late_child_ending_without_a_store_is_released_and_its_claim_holds() {
+    const CHILD: u64 = 4_807;
+    let boot = BootChannels::validate(&config())
+        .unwrap()
+        .adopted(Adoption::Committed);
+    boot.reserve_boot_children(&[(CHILD, 42)]);
+    assert!(boot.resolve_child(CHILD, thread(CHILD, 42), false));
+    let child = boot.output_candidate(CHILD).unwrap();
+    drop(child.late_cleanup_guard(CHILD, None).unwrap());
+    assert_eq!(child.peek(), Adoption::Released);
+    assert!(!child.refused_at_end(), "its host end is no refusal");
+    let claimed = child.claim_body(CHILD);
+    assert_eq!((claimed.owned, claimed.send.is_none()), (false, true));
+    assert_eq!(claimed.reason, super::super::ClaimReason::ChildHeld);
+    assert_eq!(child.sends(), (0, 0), "Legacy sends none of it");
+    let member = Candidate::reserved_late();
+    drop(member.late_cleanup_guard(42, None).unwrap());
+    assert_eq!(member.peek(), Adoption::Refused);
+    assert!(member.refused_at_end());
 }

@@ -83,3 +83,33 @@ fn neutral_with_partial(partial: &str) -> String {
         ),
     }
 }
+
+/// Keeps raw terminal text/ranges beside the saved row; a later O replay must reconcile them.
+pub(super) fn body_debt_evidence(seen: &Seen) -> serde_json::Value {
+    use serde_json::json;
+    let source = seen.source.as_ref().map(|source| {
+        json!({
+            "session_id": source.session_id, "path": source.path,
+            "dev": source.dev, "ino": source.ino,
+        })
+    });
+    let outcome = match &seen.outcome {
+        Outcome::Terminal(terminal) => {
+            let output: Vec<_> = terminal
+                .output
+                .iter()
+                .map(|part| match part {
+                    TurnOutput::Text(text) => json!({"text": text}),
+                    TurnOutput::Tool => json!({"tool": true}),
+                })
+                .collect();
+            json!({"kind": "terminal", "terminal_kind": terminal.kind,
+                "start": terminal.start, "end": terminal.end,
+                "result": terminal.result, "output": output})
+        }
+        Outcome::Mixed { after_prompt } => json!({"kind": "mixed", "after_prompt": after_prompt}),
+        Outcome::NoTerminal => json!({"kind": "no_terminal"}),
+        Outcome::Unknown => json!({"kind": "unknown"}),
+    };
+    json!({"execution_nonce": seen.nonce, "idle": seen.idle, "source": source, "outcome": outcome})
+}

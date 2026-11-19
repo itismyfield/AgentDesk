@@ -638,6 +638,23 @@ pub fn pane_current_path(session_name: &str) -> Option<String> {
     if path.is_empty() { None } else { Some(path) }
 }
 
+/// The live pane's `#{pane_current_path}`, asked once within `budget`; a dead or absent pane is `None`.
+/// The first-output trust repair reads it before its one menu action.
+#[cfg(any(test, unix))]
+pub(crate) fn pane_current_path_within(session_name: &str, budget: Duration) -> Option<String> {
+    if is_blank_session_name(session_name) {
+        return None;
+    }
+    let mut command = tmux_command().ok()?;
+    let target = exact_target(session_name);
+    let format = "#{pane_dead}\n#{pane_current_path}";
+    command.args(["display-message", "-p", "-t", &target, format]);
+    let output = wait_for_tmux_output(command, budget, "tmux display-message").ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    let (dead, path) = text.trim_end().split_once('\n')?;
+    (output.status.success() && dead == "0" && !path.is_empty()).then(|| path.to_owned())
+}
+
 /// Capture pane content from a tmux session.
 ///
 /// `scroll_back` is the number of lines to capture (negative = from bottom).

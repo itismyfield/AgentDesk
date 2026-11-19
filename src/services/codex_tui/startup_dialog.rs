@@ -1,4 +1,7 @@
 //! Startup-only menu detection; pane text is diagnostic evidence, never source authority.
+#[cfg(any(test, unix))]
+pub(crate) mod normalize;
+
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -31,6 +34,13 @@ impl<'a> StartupCheck<'a> {
             Duration::from_millis(100),
         )?;
         let (reason, action) = classify(&pane)?;
+        // The admitted launch repairs its own trust menu first, on its deadline and one repair.
+        #[cfg(unix)]
+        if reason == "folder trust"
+            && crate::services::tui_o::cutover::codex_first_trust_holds_startup(tmux, self.cwd)
+        {
+            return None;
+        }
         Some(format!(
             "Codex startup blocked by {reason} dialog in {}. {action}",
             self.cwd.display()

@@ -28,6 +28,8 @@ impl IntakeFence {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ActivationRows {
     pub(crate) open_intake: i64,
+    /// Of `open_intake`, the rows naming the given turn's message; only fenced reads count them.
+    pub(crate) own_turn_intake: i64,
     pub(crate) foreign_sessions: i64,
 }
 
@@ -58,6 +60,7 @@ pub(crate) async fn activation_rows(
     .await?;
     Ok(ActivationRows {
         open_intake,
+        own_turn_intake: 0,
         foreign_sessions,
     })
 }
@@ -87,15 +90,18 @@ async fn read_activation_rows(
     .await?;
     Ok(ActivationRows {
         open_intake,
+        own_turn_intake: 0,
         foreign_sessions,
     })
 }
 
-/// SHARE conflicts with every intake DML path, including writes made by another node.
+/// SHARE conflicts with every intake DML path, including writes made by another node. Open rows
+/// naming `own_turn`, the message of the turn Legacy runs, are counted apart.
 pub(crate) async fn fenced_activation_rows(
     pool: &PgPool,
     channel_id: &str,
     local_instance: &str,
+    own_turn: Option<&str>,
 ) -> Result<(IntakeFence, ActivationRows, i64), sqlx::Error> {
     let mut transaction = pool.begin().await?;
     sqlx::query("SET LOCAL lock_timeout = '2s'")
@@ -104,7 +110,16 @@ pub(crate) async fn fenced_activation_rows(
     sqlx::query("LOCK TABLE intake_outbox IN SHARE MODE")
         .execute(&mut *transaction)
         .await?;
-    let rows = read_activation_rows(&mut transaction, channel_id, local_instance).await?;
+    let mut rows = read_activation_rows(&mut transaction, channel_id, local_instance).await?;
+    rows.own_turn_intake = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT COUNT(*) FROM intake_outbox
+          WHERE channel_id = $1 AND user_msg_id = $2
+            AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})"
+    )))
+    .bind(channel_id)
+    .bind(own_turn)
+    .fetch_one(&mut *transaction)
+    .await?;
     let queued_bodies = sqlx::query_scalar(
         "SELECT COUNT(*) FROM message_outbox
          WHERE target = $1 AND source = 'headless_turn' AND status IN ('pending', 'processing')",
@@ -183,6 +198,7 @@ mod postgres_tests {
         session(&pool, "runner", "7", "runner", "idle").await;
         let expected = ActivationRows {
             open_intake: 1,
+            own_turn_intake: 0,
             foreign_sessions: 1,
         };
         assert_eq!(rows(&pool, "7").await, expected);

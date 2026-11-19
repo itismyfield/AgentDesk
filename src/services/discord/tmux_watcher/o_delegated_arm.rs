@@ -1,5 +1,6 @@
 //! Watcher terminal arms by O ownership. On O's channel Legacy promotes any task card, consumes the
 //! range with no body transport, lease or evidence and clears its "..."; a Legacy send claims first.
+//! A refused adoption's body is consumed the same way once its one reason is durable.
 
 use std::sync::Arc;
 
@@ -24,6 +25,39 @@ pub(super) struct DelegatedTerminal<'a> {
     pub(super) observed_generation_mtime_ns: &'a mut Option<i64>,
     pub(super) task_card:
         Option<&'a crate::services::discord::task_notification_delivery::TaskNotificationContext>,
+    /// False for a refused body: nothing of it is O's to post or a task card's to announce.
+    pub(super) o_owned: bool,
+}
+
+/// Whether a held terminal body is discarded: a refused adoption's, or a waiting one's whose
+/// episode already holds a reason. True once that reason is durable, so its range is consumed.
+pub(super) async fn discard_refused(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    row: Option<&InflightTurnState>,
+    ownership: &Result<bool, crate::services::tui_o::cutover::IdentityError>,
+) -> bool {
+    #[cfg(unix)]
+    if let (Some(row), Err(held)) = (row, ownership) {
+        let discard = crate::services::discord::recovery_engine::refused_discard::discard_held;
+        return discard(shared, provider, row, *held).await;
+    }
+    #[cfg(not(unix))]
+    let _ = (shared, provider, row, ownership);
+    false
+}
+
+/// The terminal receipt of a watcher range: a refused body discarded after its reason failed the
+/// input, never completed it.
+pub(super) fn terminal_outcome(
+    discarded: bool,
+    stopped: bool,
+    has_answer: bool,
+) -> crate::db::turns::TerminalOutcome {
+    if discarded {
+        return crate::db::turns::TerminalOutcome::Failed;
+    }
+    crate::services::discord::receipt_settle::watcher_outcome(stopped, has_answer)
 }
 
 /// Mirrors the delegated-success watermark epilogue; the confirmed end advances later through
@@ -31,14 +65,14 @@ pub(super) struct DelegatedTerminal<'a> {
 pub(super) async fn consume_delegated_terminal(
     arm: DelegatedTerminal<'_>,
 ) -> Result<(), PrepareWatcherTaskResponseError> {
-    if let Some(row) = arm.inflight_before_relay {
+    if let Some(row) = arm.inflight_before_relay.filter(|_| arm.o_owned) {
         crate::services::discord::outbound::completed_turn_ledger::o_pending::capture(
             arm.provider,
             row,
         )
         .await;
     }
-    if let Some(context) = arm.task_card {
+    if let Some(context) = arm.task_card.filter(|_| arm.o_owned) {
         super::task_response_authority::promote_delegated_task_card(
             arm.http,
             arm.shared,

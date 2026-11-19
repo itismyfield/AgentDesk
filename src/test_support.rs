@@ -505,3 +505,52 @@ pub(crate) mod lock_holder {
         }
     }
 }
+
+pub(crate) mod o_store {
+    //! Rigs whose TUI channel is O's: Legacy sends no TUI body, so a turn there ends only
+    //! through O's delegated delivery, which needs a committed adoption.
+
+    use std::path::Path;
+
+    /// Writes an O store era over `channels` under `root`, so a boot policy installed later
+    /// seeds each channel Committed instead of an adoption no writer host here would finish.
+    pub(crate) fn commit_o_store(root: &Path, channels: &[u64]) {
+        use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
+        let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root)
+            .expect("open the O store")
+            .expect("an enabled O store");
+        let at = chrono::Utc::now();
+        let init = |channel| {
+            let (sources, initial_anchor, build_digest) = (Vec::new(), 0, "test".into());
+            Ok(Initialized {
+                policy_parent: None,
+                channel,
+                sources,
+                initial_anchor,
+                build_digest,
+                at,
+            })
+        };
+        store
+            .begin_fixture_era(channels, at, init)
+            .expect("an O store era");
+    }
+
+    /// Commits the installed adoption of `channel` as O's writer would, for a rig admitted
+    /// unadopted: the store's era and init must read back before the candidate is confirmed.
+    pub(crate) fn adopt_installed(channel: u64) {
+        let root = crate::config::runtime_root().expect("the test runtime root");
+        commit_o_store(&root, &[channel]);
+        let store = crate::services::tui_o::store::OStore::existing(&root).expect("the O store");
+        let era = store.read_era().expect("a readable era");
+        assert!(era.is_some(), "the adoption has its era on disk");
+        let init = store.read_init(channel).expect("a readable init");
+        assert!(init.is_some(), "the adoption has its init on disk");
+        let boot = crate::services::tui_o::channel_policy::boot().expect("the boot policy");
+        let candidate = boot.candidate(channel).expect("the installed candidate");
+        assert!(candidate.confirm_store(), "the adoption commits");
+        let kind = boot.kind(channel);
+        let owned = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel;
+        assert!(matches!(owned(channel, kind), Ok(true)), "O owns the body");
+    }
+}

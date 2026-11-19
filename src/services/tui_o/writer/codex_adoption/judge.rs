@@ -20,7 +20,7 @@ pub enum Verdict {
     Refused,
     /// No refusal, but some evidence could not be confirmed; adoption treats it as a refusal.
     Unknown,
-    /// Not a Fresh, Pending Codex TUI channel with history.
+    /// Not a Fresh, Pending or Deferred Codex TUI channel with history.
     OutOfScope,
 }
 
@@ -80,7 +80,11 @@ pub fn judge(evidence: &Evidence) -> Judgment {
     }
     let mut found = Found::default();
     channel(evidence, &mut found);
-    sources(&evidence.sources, &mut found);
+    let held = evidence
+        .obligations
+        .values()
+        .any(|load| *load == Load::Held);
+    sources(&evidence.sources, held, &mut found);
     let boundary = found.verdict();
     for source in evidence.sources.iter().filter(|s| bound(s)) {
         match source.receipts {
@@ -109,9 +113,10 @@ fn out_of_scope(evidence: &Evidence) -> Option<&'static str> {
     if matches!(evidence.store, StoreState::Store | StoreState::Held) {
         return Some("scope.store_exists");
     }
+    // A late reservation waits Deferred for the same judgement a pending channel gets.
     if !matches!(
         evidence.candidate,
-        CandidateState::Pending | CandidateState::Unknown
+        CandidateState::Pending | CandidateState::Deferred | CandidateState::Unknown
     ) {
         return Some("scope.candidate_decided");
     }
@@ -153,7 +158,7 @@ fn channel(evidence: &Evidence, found: &mut Found) {
     }
     for kind in Obligation::ALL.iter().copied() {
         match evidence.obligations.get(&kind) {
-            Some(Load::Clear) => {}
+            Some(Load::Clear | Load::Held) => {}
             Some(Load::Busy) => found.refuse(format!("busy.{}", snake(&kind))),
             Some(Load::Unknown) | None => found.unknown(format!("obligation.{}", snake(&kind))),
         }
@@ -168,7 +173,7 @@ fn channel(evidence: &Evidence, found: &mut Found) {
     }
 }
 
-fn sources(sources: &[SourceEvidence], found: &mut Found) {
+fn sources(sources: &[SourceEvidence], held: bool, found: &mut Found) {
     // Every native file and every wrapper spool counts against one read budget.
     let spools = sources
         .iter()
@@ -193,7 +198,7 @@ fn sources(sources: &[SourceEvidence], found: &mut Found) {
         match source.role {
             SourceRole::Current => {
                 bound_source("current", source, found);
-                current(source, found);
+                current(source, held, found);
             }
             SourceRole::Retired => {
                 bound_source("retired", source, found);
@@ -233,11 +238,21 @@ fn bound_source(role: &str, source: &SourceEvidence, found: &mut Found) {
     }
 }
 
-fn current(source: &SourceEvidence, found: &mut Found) {
+/// While a turn is held the current source starts at Legacy's delivered end and may end open.
+fn current(source: &SourceEvidence, held: bool, found: &mut Found) {
     match (source.native_cursor, source.bytes) {
         (None, _) => found.unknown("current.cursor"),
         (Some(cursor), Some(eof)) if cursor > eof => found.refuse("current.cursor_past_eof"),
         _ => {}
+    }
+    if held {
+        match (source.frontier, source.native_cursor) {
+            (None, _) => found.unknown("current.frontier"),
+            (Some(frontier), Some(cursor)) if frontier > cursor => {
+                found.refuse("current.frontier_past_cursor");
+            }
+            _ => {}
+        }
     }
     suffix("current", source.suffix, found);
     // A live pane may read a spool; only a confirmed absence lets the current source skip it.
@@ -246,6 +261,7 @@ fn current(source: &SourceEvidence, found: &mut Found) {
     }
     match source.closed {
         Closed::Own => {}
+        Closed::Open if held => {}
         Closed::Open => found.refuse("current.turn_open"),
         Closed::Unknown => found.unknown("current.closed"),
     }
@@ -268,7 +284,7 @@ fn wrapped(wrapper: &WrapperEvidence, found: &mut Found) {
     }
     suffix("wrapper", wrapper.suffix, found);
     match wrapper.backlog {
-        Load::Clear => {}
+        Load::Clear | Load::Held => {}
         Load::Busy => found.refuse("wrapper.backlog"),
         Load::Unknown => found.unknown("wrapper.backlog"),
     }

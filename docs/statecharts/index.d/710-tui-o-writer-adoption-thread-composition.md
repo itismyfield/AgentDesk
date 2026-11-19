@@ -1,0 +1,2 @@
+key: 710-tui-o-writer-adoption-thread-composition
+| `tui-o-writer` adoption / late child composition and debt boot wake | `5c144746da` + b2, Refused repair and one-shot wake | Universal Legacy prohibition, member leak, invalid repair and unauthorized/repeated wake controls are expected RED | Verified child repair only, Legacy 0; authorized boot wake once and ordinary enqueue liveness. Nine cfg: 3 GREEN / 6 expected RED, 45 actual TLC runs. [Report](tui-o-writer/writer-adoption.report.md#configured-member--late-child-composition) |

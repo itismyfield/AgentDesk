@@ -76,6 +76,7 @@ pub(super) async fn prepare_receipt_disposition(
             )
             .await;
             outcome = match preserve_or_publish(Handoff {
+                shared: &state.shared_owned,
                 provider: &state.provider,
                 local: &state.inflight_state,
                 admitted: ctx.codex_tui_terminal_range.as_ref(),
@@ -110,6 +111,11 @@ pub(super) async fn prepare_receipt_disposition(
                 Outcome::Unresolved { error } => {
                     TerminalOutcomeDeliveryOutcome::Unresolved { error }
                 }
+                // No delivery was confirmed and no custody holds the body.
+                #[cfg(unix)]
+                Outcome::Discarded => TerminalOutcomeDeliveryOutcome::Unresolved {
+                    error: "refused episode discarded after its durable reason".into(),
+                },
             };
         }
     }
@@ -191,9 +197,14 @@ pub(super) struct RetrySnapshot {
     resume_failure: bool,
     recovery_retry: bool,
     delivery_receipts: Vec<u64>,
+    /// Whether the destination was a resolved thread child when kept; `None` is a custody from
+    /// before this was recorded, judged once from its stored row on the first resume.
+    #[serde(default)]
+    thread_child: Option<bool>,
 }
 
 pub(super) struct Handoff<'a> {
+    pub shared: &'a Arc<SharedData>,
     pub provider: &'a ProviderKind,
     pub local: &'a InflightTurnState,
     pub admitted: Option<&'a CodexRange>,
@@ -217,8 +228,15 @@ pub(super) struct Handoff<'a> {
 }
 
 pub(super) enum Outcome {
-    Deferred { key: String },
-    Unresolved { error: String },
+    Deferred {
+        key: String,
+    },
+    Unresolved {
+        error: String,
+    },
+    /// A closed episode's reason intent is durable; nothing of its body was kept.
+    #[cfg(unix)]
+    Discarded,
 }
 
 pub(super) fn detached_delivery_body(
@@ -269,6 +287,13 @@ pub(super) fn detached_delivery_body(
 }
 
 pub(super) async fn preserve_or_publish(ctx: Handoff<'_>) -> Outcome {
+    // A closed episode is discarded with its reason before any raw snapshot exists.
+    #[cfg(unix)]
+    if episode_closed(ctx.shared, ctx.provider, ctx.local, ctx.channel_id.get()).await {
+        return Outcome::Discarded;
+    }
+    #[cfg(not(unix))]
+    let _ = ctx.shared;
     let snapshot = RetrySnapshot {
         version: 1,
         provider: ctx.provider.as_str().into(),
@@ -292,6 +317,12 @@ pub(super) async fn preserve_or_publish(ctx: Handoff<'_>) -> Outcome {
         resume_failure: ctx.resume_failure,
         recovery_retry: ctx.recovery_retry,
         delivery_receipts: Vec::new(),
+        #[cfg(unix)]
+        thread_child: Some(
+            crate::services::tui_o::cutover::thread_child_decided(ctx.channel_id.get()).is_some(),
+        ),
+        #[cfg(not(unix))]
+        thread_child: Some(false),
     };
     // Full captured source/episode/body survive a process restart. Do not replace
     // A's identity with the current row or today's source generation.
@@ -308,7 +339,26 @@ pub(super) async fn preserve_or_publish(ctx: Handoff<'_>) -> Outcome {
         "rowless-terminal:{}",
         outbound::outbound_fingerprint(&[&identity.to_string()])
     );
-    match crate::services::discord::terminal_delivery_custody::persist(&key, &payload).await {
+    #[cfg(unix)]
+    let persisted = match persist_unless_refused(&key, &payload, ctx.local, ctx.channel_id.get())
+        .await
+    {
+        Ok(true) => {
+            let discard = crate::services::discord::recovery_engine::refused_discard::discard_held;
+            let refused = crate::services::tui_o::cutover::IdentityError::AdoptionRefused;
+            if discard(ctx.shared, ctx.provider, ctx.local, refused).await {
+                return Outcome::Discarded;
+            }
+            // A reason that cannot be stored releases nothing: the body stays in custody.
+            crate::services::discord::terminal_delivery_custody::persist(&key, &payload).await
+        }
+        Ok(false) => Ok(()),
+        Err(error) => Err(error),
+    };
+    #[cfg(not(unix))]
+    let persisted =
+        crate::services::discord::terminal_delivery_custody::persist(&key, &payload).await;
+    match persisted {
         Ok(()) => Outcome::Deferred { key },
         // A read/CAS error may mean another retained record exists. A blind
         // fallback POST here would race that record's publisher after restart.
@@ -332,7 +382,9 @@ pub(in crate::services::discord) mod custody_test_adapter {
             .trim()
             .is_empty()
             .then(|| empty_response_recovery::empty_response_guidance(false));
+        let shared = crate::services::discord::make_shared_data_for_tests();
         match preserve_or_publish(Handoff {
+            shared: &shared,
             provider: &provider,
             local,
             admitted: Some(admitted),
@@ -358,6 +410,8 @@ pub(in crate::services::discord) mod custody_test_adapter {
         {
             Outcome::Deferred { key } => Ok(key),
             Outcome::Unresolved { error } => Err(error),
+            #[cfg(unix)]
+            Outcome::Discarded => Err("discarded".into()),
         }
     }
 
@@ -414,6 +468,15 @@ pub(in crate::services::discord) async fn resume(
     else {
         return Ok(false);
     };
+    // A closed episode is retired before any HTTP is needed to publish it.
+    #[cfg(unix)]
+    if let Ok(mut snapshot) = serde_json::from_value::<RetrySnapshot>(payload.clone())
+        && episode_closed(&shared, &provider, &snapshot.local, snapshot.channel_id).await
+    {
+        scrub(&mut snapshot);
+        *payload = serde_json::to_value(snapshot).map_err(|e| e.to_string())?;
+        return Ok(true);
+    }
     let Some(http) = shared.serenity_http_or_token_fallback() else {
         return Ok(false);
     };
@@ -455,6 +518,12 @@ pub(super) async fn resume_with_gateway(
         return Err("unsupported or invalid terminal custody snapshot".into());
     }
     let provider = ProviderKind::from_str(&snapshot.provider).ok_or("unknown custody provider")?;
+    // A closed episode retires its custody whatever the destination's ownership reads now.
+    #[cfg(unix)]
+    if episode_closed(shared, &provider, &snapshot.local, snapshot.channel_id).await {
+        scrub(snapshot);
+        return Ok(true);
+    }
     let channel = ChannelId::new(snapshot.channel_id);
     let owner_channel = ChannelId::new(snapshot.watcher_owner_channel_id);
     use crate::services::discord::outbound::body_census::BodyOffer;
@@ -527,16 +596,37 @@ pub(super) async fn resume_with_gateway(
             full_response: &snapshot.full_response,
         })
     };
+    // A transport every chunk of which is receipted, or already delivered, sends nothing more, so
+    // the child guard below does not hold its settlement; the destination's ownership still does.
+    let transported = snapshot.delivery_receipts.len() == chunks.len()
+        || decision() == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
+    // A kept thread child's unsent body waits until the boot places that child with a decided body.
+    #[cfg(unix)]
+    if !transported
+        && kept_child(
+            &mut snapshot.thread_child,
+            snapshot.channel_id,
+            &snapshot.local,
+            shared.serenity_http_or_token_fallback(),
+        )
+        .await
+    {
+        return Ok(false);
+    }
     // O posts this destination's TUI body: settle the custody without posting or recording it.
-    // A held destination identity keeps the custody for a later retry.
+    // A held destination identity keeps the custody for a later retry, unless it is discarded.
     let kind = (snapshot.local.channel_id == snapshot.channel_id)
         .then_some(snapshot.local.runtime_kind)
         .flatten();
-    let Ok(o_owns_body) = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+    let o_owns_body = match crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
         snapshot.channel_id,
         kind,
-    ) else {
-        return Ok(false);
+    ) {
+        Ok(owned) => owned,
+        #[cfg(unix)]
+        Err(held) => return Ok(discard_refused(shared, &provider, snapshot, held).await),
+        #[cfg(not(unix))]
+        Err(_) => return Ok(false),
     };
     #[cfg(unix)]
     if o_owns_body {
@@ -546,9 +636,7 @@ pub(super) async fn resume_with_gateway(
         )
         .await;
     }
-    let mut delivered = o_owns_body
-        || snapshot.delivery_receipts.len() == chunks.len()
-        || decision() == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
+    let mut delivered = o_owns_body || transported;
     let mut held_lease = None;
     if !delivered {
         // Reuse the row's existing owner contract. A foreign row is never A's
@@ -700,6 +788,137 @@ pub(super) async fn resume_with_gateway(
         status
             .is_some_and(|status| matches!(status.as_str(), "completed" | "failed" | "cancelled")),
     )
+}
+
+/// A refused destination's custody is retired with one reason: once that reason is durable the
+/// stored body fields are scrubbed, and nothing of it counts as delivered or settles a dispatch.
+#[cfg(unix)]
+async fn discard_refused(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    snapshot: &mut RetrySnapshot,
+    held: crate::services::tui_o::cutover::IdentityError,
+) -> bool {
+    let discard = crate::services::discord::recovery_engine::refused_discard::discard_held;
+    if !discard(shared, provider, &snapshot.local, held).await {
+        return false;
+    }
+    scrub(snapshot);
+    true
+}
+
+/// Whether the episode `local` names is closed for `channel`: its stored reason first, whatever
+/// the gate answers, then a refusal read after that lookup. True once its reason intent is durable.
+#[cfg(unix)]
+async fn episode_closed(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    local: &InflightTurnState,
+    channel: u64,
+) -> bool {
+    use crate::services::tui_o::cutover::IdentityError::{AdoptionRefused, AwaitingAdoption};
+    let discard = crate::services::discord::recovery_engine::refused_discard::discard_held;
+    if discard(shared, provider, local, AwaitingAdoption).await {
+        return true;
+    }
+    match destination_adoption(local, channel) {
+        Err(AdoptionRefused) => discard(shared, provider, local, AdoptionRefused).await,
+        _ => false,
+    }
+}
+
+/// The destination's adoption read quietly: an unavailable gate raises no identity alarm here.
+#[cfg(unix)]
+fn destination_adoption(
+    local: &InflightTurnState,
+    channel: u64,
+) -> Result<bool, crate::services::tui_o::cutover::IdentityError> {
+    let kind = (local.channel_id == channel)
+        .then_some(local.runtime_kind)
+        .flatten();
+    crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_quiet(channel, kind)
+}
+
+/// Writes the custody record unless the destination's adoption, read under its lock after the
+/// record lock is held, is refused; true when that refusal kept the record unwritten.
+#[cfg(unix)]
+async fn persist_unless_refused(
+    key: &str,
+    payload: &serde_json::Value,
+    local: &InflightTurnState,
+    channel: u64,
+) -> Result<bool, String> {
+    use crate::services::discord::terminal_delivery_custody::persist_under as custody;
+    use crate::services::tui_o::cutover::IdentityError::{AdoptionRefused, AwaitingAdoption};
+    // A channel with an adoption, refused already or not, takes its lock; others write plainly.
+    if !matches!(
+        destination_adoption(local, channel),
+        Ok(_) | Err(AwaitingAdoption | AdoptionRefused)
+    ) {
+        return custody(
+            key,
+            payload,
+            |write: &mut dyn FnMut() -> Result<(), String>| write(),
+        )
+        .await
+        .map(|()| false);
+    }
+    let kind = (local.channel_id == channel)
+        .then_some(local.runtime_kind)
+        .flatten();
+    let mut refused = false;
+    custody(key, payload, |write| {
+        crate::services::tui_o::cutover::with_peeked_o_output(channel, kind, |held| {
+            if held.answer() == Err(AdoptionRefused) {
+                refused = true;
+                return Ok(());
+            }
+            write()
+        })
+    })
+    .await?;
+    Ok(refused)
+}
+
+/// Whether a kept body belongs to a thread child the boot has not placed with a decided body. An
+/// old custody stays kept, its attribution unrecorded, until a placement or a read settles it.
+#[cfg(unix)]
+async fn kept_child(
+    stored: &mut Option<bool>,
+    channel: u64,
+    local: &InflightTurnState,
+    http: Option<Arc<serenity::Http>>,
+) -> bool {
+    use crate::services::tui_o::cutover::{maybe_thread_child, thread_child_decided};
+    if stored.is_none() {
+        let hint = (local.channel_id == channel).then_some(local.logical_channel_id);
+        // A row's own channel as its hint is what a failed parent read leaves: no evidence.
+        *stored = if maybe_thread_child(channel, hint.flatten()) {
+            Some(true)
+        } else if let Some(http) = http {
+            let parent = crate::services::discord::session_runtime::checked_thread_parent(
+                &http,
+                ChannelId::new(channel),
+            );
+            let parent = parent.await.ok();
+            parent.map(|parent| maybe_thread_child(channel, parent.map(ChannelId::get)))
+        } else {
+            None
+        };
+    }
+    stored.is_none_or(|child| child) && thread_child_decided(channel) != Some(true)
+}
+
+/// Drops every stored copy of the body; the custody keeps only what retires it.
+#[cfg(unix)]
+fn scrub(snapshot: &mut RetrySnapshot) {
+    snapshot.full_response.clear();
+    snapshot.delivery_body = None;
+    snapshot.local.full_response.clear();
+    snapshot.local.user_text.clear();
+    if let Some(admitted) = snapshot.admitted.as_mut() {
+        admitted.result.clear();
+    }
 }
 
 /// Render the existing cancellation/restart terminal body independently of its

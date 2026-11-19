@@ -99,12 +99,26 @@ pub trait HostIo: Send + Sync + 'static {
     fn legacy_busy(&self, channel: u64) -> impl Future<Output = bool> + Send;
     /// Whether Legacy's watcher is emitting the channel's terminal delivery or its chrome now.
     fn relaying(&self, channel: u64) -> bool;
+    /// Retains a validated plan in the shared registry; this creates no delivery grant.
+    fn retain_body_debt(
+        &self,
+        plan: &super::herdr_body_debt::Plan,
+        bot: u64,
+    ) -> impl Future<Output = Result<usize, String>> + Send {
+        let channel = plan.channel();
+        std::future::ready(Err(format!(
+            "no body debt registry for channel {channel}, bot {bot}"
+        )))
+    }
     /// Called once a first activation committed the channel, before it is ready for intake.
     fn adopted(&self, _channel: u64, _provider: ShadowProvider) {}
     /// The writer can drain retained inputs now; called after publishing readiness.
     fn input_ready(&self, channel: u64, provider: ShadowProvider) {
         let _ = (channel, provider);
     }
+    /// The channel's host ended with its adoption refused: bodies kept while it waited are due
+    /// their discard. Called with no adoption lock held; the work is scheduled, not done here.
+    fn refused(&self, _channel: u64, _provider: ShadowProvider) {}
     /// The channel's re-post turn for one actor start; none leaves the writer as it was.
     fn repost(&self, _channel: u64, _port: &Arc<Self::Port>) -> Option<RepostTurn<Self>> {
         None
@@ -550,24 +564,24 @@ fn hold(alarms: &impl AlarmSink, channel: u64, detail: &str) {
     alarms.raise(channel, WriterAlarm::Halted { detail });
 }
 
-/// A channel not adopted before its first `init` stays Legacy's for this process.
+/// A channel not adopted before its first `init` is refused for this process; a held body of it
+/// is discarded with one reason.
 pub(super) fn release(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
     candidate.release(channel);
-    let detail = format!("adoption held: {detail}");
+    let detail = format!("adoption refused: {detail}");
     stop(candidate, alarms, channel, &detail);
 }
 
-/// Names a stop by the adoption it left: a released or deferred channel's output is Legacy's, so
-/// only an owned or undecided channel is held.
+/// Names a stop by the adoption it left: a refused or deferred channel raises the refusal alarm,
+/// an owned or undecided one is held.
 pub(super) fn stop(candidate: &Candidate, alarms: &impl AlarmSink, channel: u64, detail: &str) {
-    if !matches!(candidate.peek(), Adoption::Released | Adoption::Deferred) {
+    if !matches!(
+        candidate.peek(),
+        Adoption::Refused | Adoption::Released | Adoption::Deferred
+    ) {
         return hold(alarms, channel, detail);
     }
-    tracing::warn!(
-        channel,
-        detail,
-        "[tui_o] writer host left the channel to Legacy"
-    );
+    tracing::warn!(channel, detail, "[tui_o] writer host refused the adoption");
     let detail = format!("writer host: {detail}");
     alarms.raise(channel, WriterAlarm::Released { detail });
 }
@@ -595,6 +609,21 @@ async fn host_channel<I: HostIo>(
         return;
     };
     let store = match recovered {
+        Ok(Recovered::Store(store))
+            if candidate.child_surface().is_some_and(|surface| {
+                let kind = match provider {
+                    ShadowProvider::Claude => RuntimeHandoffKind::ClaudeTui,
+                    ShadowProvider::Codex => RuntimeHandoffKind::CodexTui,
+                };
+                !surface.matches(channel, store.init().policy_parent.unwrap_or(0), Some(kind))
+            }) =>
+        {
+            return hold(
+                &alarms,
+                channel,
+                "recovered child store does not match its verified surface",
+            );
+        }
         Ok(Recovered::Store(_)) if !candidate.confirm_store() => {
             return hold(
                 &alarms,
@@ -623,6 +652,16 @@ async fn host_channel<I: HostIo>(
         }
         Err(error) => return hold(&alarms, channel, &error.detail),
     };
+    // Read retired snapshots independently of active rows, without weakening metadata admission.
+    let debt = match super::herdr_body_debt::read(
+        &runtime_root,
+        provider,
+        channel,
+        Some(store.ledger()),
+    ) {
+        Ok(debt) => debt,
+        Err(error) => return hold(&alarms, channel, &error),
+    };
     // Seeded before the port wait, so a recovered panel tick already knows O's newest post.
     let phase = boot.phase("wait_metadata");
     let metadata = fresh_input::wait_metadata(&store, &alarms, &stopping).await;
@@ -641,6 +680,13 @@ async fn host_channel<I: HostIo>(
         None => return,
     };
     phase.finish("ok");
+    for plan in &debt {
+        if let Some(Err(error)) =
+            unless_stopped(&stopping, io.retain_body_debt(plan, port.bot_id())).await
+        {
+            tracing::warn!(channel, %error, "herdr body debt retained without a delivery grant");
+        }
+    }
     let bindings = bindings.unwrap_or_else(|| io.bindings(channel, provider));
     let hosted = Hosted {
         io: &*io,
@@ -738,6 +784,29 @@ impl<I: HostIo> Hosted<'_, I> {
         attempt: u32,
         producer_absent: bool,
     ) -> Option<(StopCause, bool)> {
+        match super::herdr_body_debt::read(
+            self.runtime_root,
+            self.provider,
+            self.channel,
+            Some(store.ledger()),
+        ) {
+            Ok(plans) => {
+                for plan in &plans {
+                    let registered = unless_stopped(
+                        &self.stopping,
+                        self.io.retain_body_debt(plan, self.port.bot_id()),
+                    )
+                    .await?;
+                    if let Err(error) = registered {
+                        tracing::warn!(channel=self.channel, %error, "herdr body debt remains retained");
+                    }
+                }
+            }
+            Err(error) => {
+                hold(&self.alarms, self.channel, &error);
+                return None;
+            }
+        }
         let boot = self.boot.attempt(attempt);
         let (channel, gate) = (self.channel, self.gate);
         let (port, lease) = (Arc::clone(&self.port), self.io.lease());

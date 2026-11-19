@@ -10,6 +10,8 @@ pub mod session;
 mod startup_dialog;
 #[cfg(unix)]
 pub(crate) use startup_dialog::is_startup_dialog_error;
+#[cfg(any(test, unix))]
+pub(crate) use startup_dialog::normalize;
 pub(crate) mod tail_launch;
 pub(crate) mod verified_hold;
 pub(crate) mod verified_tail;

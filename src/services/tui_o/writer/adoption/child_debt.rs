@@ -90,6 +90,7 @@ impl ChildDebt {
                         nonce: run.binding.execution_nonce.clone(),
                         len,
                         sends,
+                        hash: pinned.hash.clone(),
                     }),
                 });
             }

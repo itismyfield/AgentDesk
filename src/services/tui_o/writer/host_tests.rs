@@ -202,6 +202,19 @@ impl HostIo for TestIo {
         self.lease.writer_unavailable(channel);
     }
 
+    async fn retain_body_debt(
+        &self,
+        plan: &super::herdr_body_debt::Plan,
+        bot: u64,
+    ) -> Result<usize, String> {
+        plan.registration(bot)?;
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("body_debt", plan.channel()));
+        Ok(0)
+    }
+
     fn lease(&self) -> Arc<FakeLease> {
         self.calls.lock().unwrap().push(("lease", 0));
         // This handle and the harness's own are the two that outlive every writer.
@@ -286,6 +299,7 @@ impl HostIo for TestIo {
                         &pool,
                         &channel.to_string(),
                         "first-fixture",
+                        None,
                     )
                     .await
                     .map_err(|error| error.to_string())?
@@ -330,6 +344,10 @@ impl HostIo for TestIo {
 
     fn adopted(&self, channel: u64, _: ShadowProvider) {
         self.calls.lock().unwrap().push(("adopted", channel));
+    }
+
+    fn refused(&self, channel: u64, _: ShadowProvider) {
+        self.calls.lock().unwrap().push(("refused", channel));
     }
 
     fn repost(&self, _: u64, _: &Arc<FakePort>) -> Option<RepostTurn<Self>> {
@@ -963,9 +981,9 @@ async fn a_channel_that_is_not_new_and_empty_is_held_without_any_store() {
             !ready.is_ready(CHANNEL) && harness.port.posts().is_empty(),
             "{why}"
         );
-        // Nothing was written, so Legacy keeps the channel; without a lease nothing was decided.
+        // Nothing was written, so the adoption is refused; without a lease nothing was decided.
         let left = if pg {
-            Adoption::Released
+            Adoption::Refused
         } else {
             Adoption::Pending
         };
@@ -1109,7 +1127,7 @@ impl LegacyView for Cursor {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_closed_turn_legacy_has_not_delivered_is_given_up_only_after_the_stall() {
+async fn a_closed_turn_legacy_has_not_delivered_is_taken_from_its_frontier_without_a_stall() {
     let closed = serde_json::json!({"type":"system", "subtype":"turn_duration", "durationMs":5});
     let debt = [row("m0", "undelivered"), format!("{closed}\n").into_bytes()].concat();
     for held in [Custody::Row, Custody::Free] {
@@ -1127,30 +1145,13 @@ async fn a_closed_turn_legacy_has_not_delivered_is_given_up_only_after_the_stall
         *io.custody.lock().unwrap() = Ok(held);
         let tasks = start_host(&harness, &io, &ready);
         polls(3).await;
-        // Legacy may still send the turn from its frontier, so nothing is given up at boot.
-        assert_eq!(adoption(CHANNEL), Adoption::Deferred, "{held:?}");
-        assert_eq!(*io.alarms.0.lock().unwrap(), [], "{held:?}");
-        assert!(!harness.store.has_channel_dir(CHANNEL), "{held:?}");
-        assert_eq!(harness.port.posts(), Vec::<String>::new(), "{held:?}");
-        // A Legacy that never delivers it is given up once, only after the stall.
-        let minutes = |n: u64| std::time::Duration::from_secs(n * 60);
-        tokio::time::sleep(minutes(39)).await;
-        assert_eq!(adoption(CHANNEL), Adoption::Deferred, "{held:?}");
-        tokio::time::sleep(minutes(3)).await;
+        // A row only defers the first look; the next retry finds it idle.
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        // Legacy sends no TUI body, so the turn it owes is O's from the frontier, unabandoned.
         assert_eq!(adoption(CHANNEL), Adoption::Committed, "{held:?}");
+        assert_eq!(*io.alarms.0.lock().unwrap(), [], "{held:?}");
         let init = harness.store.read_init(CHANNEL).unwrap().unwrap();
-        let (source, to) = (init.sources[0].source_id.clone(), debt.len() as u64);
-        let abandoned = WriterAlarm::Abandoned {
-            source,
-            from: 0,
-            to,
-        };
-        assert_eq!(
-            *io.alarms.0.lock().unwrap(),
-            [(CHANNEL, abandoned)],
-            "{held:?}"
-        );
-        assert_eq!(harness.port.posts(), Vec::<String>::new(), "{held:?}");
+        assert_eq!(init.sources[0].delivery_start, 0, "{held:?}");
         abort(tasks);
     }
 }
@@ -1514,4 +1515,111 @@ async fn an_unregistered_member_starts_no_writer_and_rebinding_resumes_its_store
         abort(tasks);
         polls(2).await;
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rowless_body_debt_is_read_by_the_real_recovered_host() {
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let root = harness._runtime.path();
+    let row = super::herdr_body_debt::tests::row(CHANNEL);
+    super::herdr_body_debt::tests::seed(root, row, serde_json::json!({"source":null}));
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let tasks = start_host(&harness, &io, &ready);
+    polls(8).await;
+    assert!(
+        io.calls().contains(&("body_debt", CHANNEL)),
+        "the real recovered host read its retired rowless body"
+    );
+    assert!(
+        io.port.posts().is_empty(),
+        "plan registration is not a sender"
+    );
+    abort(tasks);
+    drop(selected);
+}
+
+fn c1_snapshot_without_locator(root: &Path, channel: u64) -> PathBuf {
+    let mut row = super::herdr_body_debt::tests::row(channel);
+    row.as_object_mut().unwrap().remove("host_locator");
+    row["tmux_session_name"] = serde_json::json!("AgentDesk-claude-original-row");
+    row["request_owner_user_id"] = serde_json::json!(7);
+    row["user_msg_id"] = serde_json::json!(51);
+    row["turn_nonce"] = serde_json::json!("turn-row-end");
+    row["full_response"] = serde_json::json!("retained C1 body");
+    super::herdr_body_debt::tests::seed(root, row, serde_json::json!({"source":null}))
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_locatorless_c1_snapshot_does_not_hold_a_new_host_or_its_ready_actor() {
+    let (harness, path, source) = switched_over(&row("m0", "before the switch"));
+    p5_log(harness._runtime.path(), CHANNEL, &startup(source));
+    harness.gate.acquired();
+    let selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let snapshot = c1_snapshot_without_locator(harness._runtime.path(), CHANNEL);
+    let bytes = std::fs::read(&snapshot).unwrap();
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let tasks = start_host(&harness, &io, &ready);
+    polls(8).await;
+    assert!(
+        ready.accepts(CHANNEL),
+        "a normal C1 row must not prevent host readiness"
+    );
+    assert!(io.calls().contains(&("body_debt", CHANNEL)));
+    assert!(io.port.posts().is_empty(), "debt registration never posts");
+    append(&path, &row("m1", "new input output"));
+    polls(8).await;
+    assert_eq!(io.port.posts(), ["new input output"]);
+    assert_eq!(std::fs::read(snapshot).unwrap(), bytes);
+    abort(tasks);
+    drop(selected);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_locatorless_c1_snapshot_added_before_resume_keeps_the_actor_ready() {
+    use crate::services::tui_o::store::fault::{self, Keep, Step};
+    let (harness, path, source) = switched_over(&row("m0", "before the switch"));
+    p5_log(harness._runtime.path(), CHANNEL, &startup(source));
+    harness.gate.acquired();
+    let selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let tasks = start_host(&harness, &io, &ready);
+    polls(8).await;
+    assert!(ready.accepts(CHANNEL));
+    let spool = harness
+        ._runtime
+        .path()
+        .join("o_store")
+        .join(CHANNEL.to_string())
+        .join("spool");
+    let full = fault::plant(
+        &spool,
+        Step::Append(Keep::Nothing),
+        std::io::ErrorKind::StorageFull,
+        None,
+    );
+    append(&path, &row("m1", "pending through resume"));
+    polls(8).await;
+    assert!(
+        !ready.is_ready(CHANNEL),
+        "the injected store fault stopped the first actor"
+    );
+    let snapshot = c1_snapshot_without_locator(harness._runtime.path(), CHANNEL);
+    let bytes = std::fs::read(&snapshot).unwrap();
+    drop(full);
+    tokio::time::sleep(std::time::Duration::from_secs(35)).await;
+    polls(8).await;
+    assert!(
+        ready.accepts(CHANNEL),
+        "locatorless C1 debt must not stop the resumed actor"
+    );
+    assert!(io.calls().contains(&("body_debt", CHANNEL)));
+    assert_eq!(io.port.posts(), ["pending through resume"]);
+    append(&path, &row("m2", "after resume"));
+    polls(8).await;
+    assert_eq!(io.port.posts(), ["pending through resume", "after resume"]);
+    assert_eq!(std::fs::read(snapshot).unwrap(), bytes);
+    abort(tasks);
+    drop(selected);
 }

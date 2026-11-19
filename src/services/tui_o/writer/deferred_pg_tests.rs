@@ -7,6 +7,7 @@ use crate::db::o_channel_activation::{activation_rows, fenced_activation_rows};
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::message_outbox::{OutboxMessage, enqueue_outbox_pg_returning_id_with_ttl};
+use crate::services::tui_o::channel_policy::racing_legacy_body;
 use crate::services::tui_o::writer::host::FencedFacts;
 use sqlx::PgPool;
 
@@ -49,6 +50,7 @@ impl HostIo for PgIo {
             .map_err(|error| error.to_string())?;
         Ok(ActivationFacts {
             open_intake: rows.open_intake,
+            own_turn_intake: 0,
             runner_sessions: rows.foreign_sessions,
             node_override: None,
         })
@@ -56,7 +58,7 @@ impl HostIo for PgIo {
 
     async fn intake_fence(&self, channel: u64, _: ShadowProvider) -> Result<FencedFacts, String> {
         let (hold, rows, queued_bodies) =
-            fenced_activation_rows(&self.pool, &channel.to_string(), "gateway")
+            fenced_activation_rows(&self.pool, &channel.to_string(), "gateway", None)
                 .await
                 .map_err(|error| error.to_string())?;
         self.fenced
@@ -67,6 +69,7 @@ impl HostIo for PgIo {
             hold,
             facts: ActivationFacts {
                 open_intake: rows.open_intake,
+                own_turn_intake: rows.own_turn_intake,
                 runner_sessions: rows.foreign_sessions,
                 node_override: None,
             },
@@ -163,8 +166,11 @@ impl PgCase {
     fn new(pool: PgPool, expired: bool) -> Self {
         let open = Open::new();
         if expired {
+            let before_close = open.len();
             open.close();
             open.legacy.frontier.store(0, Ordering::SeqCst);
+            // The cursor has not read the turn end, so only the expired handoff takes it.
+            open.legacy.cursor.store(before_close, Ordering::SeqCst);
             *open.io.custody.lock().unwrap() = Ok(Custody::Row);
         }
         let io = Arc::new(PgIo {
@@ -236,7 +242,13 @@ impl PgCase {
             .iter()
             .map(|source| source.delivery_start)
             .collect();
-        assert_eq!(starts, [self.open.len()]);
+        // The expired handoff starts at Legacy's frontier 0, posting the turn it never delivered.
+        let owed: &[&str] = if self.expired {
+            &["asked", "-# ✅ 완료"]
+        } else {
+            &[]
+        };
+        assert_eq!(starts, [if self.expired { 0 } else { self.open.len() }]);
         assert!(
             self.samples().contains(&(0, 0)),
             "fresh fence allowed commit"
@@ -247,13 +259,13 @@ impl PgCase {
             .iter()
             .filter(|(_, alarm)| matches!(alarm, WriterAlarm::Abandoned { .. }))
             .count();
-        assert_eq!(abandoned, usize::from(self.expired));
+        assert_eq!(abandoned, 0);
         append(&self.open.path, &row("pg-next", "next"));
         for _ in 0..3 {
             clock.tick().await;
         }
         assert!(self.open.ready.is_ready(CHANNEL));
-        assert_eq!(self.open.harness.port.posts(), ["next"]);
+        assert_eq!(self.open.harness.port.posts(), [owed, &["next"]].concat());
     }
 
     async fn stop(mut self) {
@@ -688,23 +700,22 @@ async fn normal_deferred_rejects_headless_enqueue_completed_after_fence_pg() {
                 .block_on(async move {
                     let independent = independent_pool(&url).await;
                     let target = format!("channel:{CHANNEL}");
-                    let sent =
-                        claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
-                            enqueue_outbox_pg_returning_id_with_ttl(
-                                &independent,
-                                OutboxMessage {
-                                    target: &target,
-                                    content: "headless enqueued after fence",
-                                    bot: "notify",
-                                    source: "headless_turn",
-                                    reason_code: Some("headless.delivery"),
-                                    session_key: None,
-                                },
-                                0,
-                            )
-                            .await
-                        })
-                        .await;
+                    let sent = racing_legacy_body(CHANNEL, || async {
+                        enqueue_outbox_pg_returning_id_with_ttl(
+                            &independent,
+                            OutboxMessage {
+                                target: &target,
+                                content: "headless enqueued after fence",
+                                bot: "notify",
+                                source: "headless_turn",
+                                reason_code: Some("headless.delivery"),
+                                session_key: None,
+                            },
+                            0,
+                        )
+                        .await
+                    })
+                    .await;
                     let id = match sent {
                         Ok(BodySend::Sent(Ok(Some(id)))) => id,
                         other => panic!("post-fence Legacy enqueue must complete: {other:?}"),
@@ -747,9 +758,10 @@ async fn normal_deferred_rejects_headless_enqueue_completed_after_fence_pg() {
     .await
     .unwrap();
     assert_eq!(pending, 1, "one validated headless body remains queued");
+    // The racing send claimed the candidate directly, past the gate's claim log.
     assert_eq!(
         crate::services::tui_o::cutover::claims_judged(CHANNEL),
-        [false]
+        Vec::<bool>::new()
     );
     case.assert_waiting();
     case.stop().await;
@@ -778,7 +790,7 @@ async fn queued_headless_pending_and_processing_block_expired_handoff_until_work
     let clock = Clock::paused();
     case.start().await;
     let target = format!("channel:{CHANNEL}");
-    let enqueued = claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
+    let enqueued = racing_legacy_body(CHANNEL, || async {
         enqueue_outbox_pg_returning_id_with_ttl(
             &pool,
             OutboxMessage {
@@ -854,7 +866,7 @@ async fn queued_headless_pending_and_processing_block_expired_handoff_until_work
     assert_eq!(posts[0].1, "Bot deferred-headless-token");
     assert_eq!(posts[0].2["content"], "legacy headless");
     let second_enqueue = AtomicBool::new(false);
-    let judged = claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
+    let judged = racing_legacy_body(CHANNEL, || async {
         second_enqueue.store(true, Ordering::SeqCst);
     })
     .await;
@@ -910,25 +922,24 @@ async fn normal_deferred_rejects_headless_enqueue_completed_after_fence_from_a_p
                 .block_on(async move {
                     let independent = independent_pool(&url).await;
                     let target = format!("channel:{CHANNEL}");
-                    let sent =
-                        claim_then_send(Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))), || async {
-                            entered.send(()).unwrap();
-                            released.recv_timeout(Duration::from_secs(10)).unwrap();
-                            enqueue_outbox_pg_returning_id_with_ttl(
-                                &independent,
-                                OutboxMessage {
-                                    target: &target,
-                                    content: "preexisting reservation enqueued after fence",
-                                    bot: "notify",
-                                    source: "headless_turn",
-                                    reason_code: Some("headless.delivery"),
-                                    session_key: None,
-                                },
-                                0,
-                            )
-                            .await
-                        })
-                        .await;
+                    let sent = racing_legacy_body(CHANNEL, || async {
+                        entered.send(()).unwrap();
+                        released.recv_timeout(Duration::from_secs(10)).unwrap();
+                        enqueue_outbox_pg_returning_id_with_ttl(
+                            &independent,
+                            OutboxMessage {
+                                target: &target,
+                                content: "preexisting reservation enqueued after fence",
+                                bot: "notify",
+                                source: "headless_turn",
+                                reason_code: Some("headless.delivery"),
+                                session_key: None,
+                            },
+                            0,
+                        )
+                        .await
+                    })
+                    .await;
                     let id = match sent {
                         Ok(BodySend::Sent(Ok(Some(id)))) => id,
                         other => panic!("preexisting Legacy enqueue must complete: {other:?}"),
@@ -1006,9 +1017,10 @@ async fn normal_deferred_rejects_headless_enqueue_completed_after_fence_from_a_p
         pending, 1,
         "one actual queued headless body survives the completed reservation"
     );
+    // The racing send claimed the candidate directly, past the gate's claim log.
     assert_eq!(
         crate::services::tui_o::cutover::claims_judged(CHANNEL),
-        [false]
+        Vec::<bool>::new()
     );
     case.assert_waiting();
     case.stop().await;

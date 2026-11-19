@@ -68,6 +68,7 @@ pub fn start_managed<I: HostIo>(
         let io = Arc::clone(&io);
         let host = tokio::spawn(async move {
             let retirement = Arc::clone(&gate);
+            let (ended, refusal) = (candidate.clone(), Arc::clone(&io));
             {
                 let run = host_channel(
                     io,
@@ -88,6 +89,10 @@ pub fn start_managed<I: HostIo>(
                 }
             }
             drop(reservation);
+            // Read after the reservation settled, so a refusal made at this exit is seen too.
+            if ended.refused_at_end() {
+                refusal.refused(channel, provider);
+            }
             if claim.settled.load(Ordering::SeqCst) {
                 claim.release();
             }

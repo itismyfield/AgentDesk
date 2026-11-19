@@ -74,18 +74,24 @@ impl CapturedReadyDeliveryCommit {
         {
             return None;
         }
-        if matches!(self.delivery.outcome, RecoveryRelayOutcome::Delivered) {
-            self.state.terminal_delivery_committed = true;
-            self.state.response_sent_offset = self.state.full_response.len();
-            // The scheduled outcome is stored with the commit it settles.
-            let outcome = crate::services::discord::scheduled_turn::recovery_delivered_outcome(
-                &self.state,
-                &self.state.full_response,
-            );
-            self.state.scheduled.set_outcome(outcome);
-        } else {
-            self.state.recovery_relay_attempts =
-                self.state.recovery_relay_attempts.saturating_add(1);
+        match self.delivery.outcome {
+            RecoveryRelayOutcome::Delivered => {
+                self.state.terminal_delivery_committed = true;
+                self.state.response_sent_offset = self.state.full_response.len();
+                // The scheduled outcome is stored with the commit it settles.
+                let outcome = crate::services::discord::scheduled_turn::recovery_delivered_outcome(
+                    &self.state,
+                    &self.state.full_response,
+                );
+                self.state.scheduled.set_outcome(outcome);
+            }
+            // A body held for O's adoption was never sent, so it spends no retry budget; a
+            // refused one is released by its caller, with nothing marked delivered here.
+            RecoveryRelayOutcome::AwaitingAdoption | RecoveryRelayOutcome::AdoptionRefused => {}
+            RecoveryRelayOutcome::PermanentFailure | RecoveryRelayOutcome::TransientFailure => {
+                self.state.recovery_relay_attempts =
+                    self.state.recovery_relay_attempts.saturating_add(1);
+            }
         }
         // Row writers still use the existing save-generation CAS. A failed or
         // uncertain transport persists its retry without releasing the obligation.
@@ -123,7 +129,46 @@ pub(super) async fn relay_captured_recovery_terminal_notice(
     .await
 }
 
+/// Leaves `outcome` for an adoption wake waiting on this channel's recovery. A held body is first
+/// discarded with its one reason when due, and reads as refused only once that reason is durable.
+async fn noted(
+    shared: &Arc<SharedData>,
+    state: &super::inflight::InflightTurnState,
+    outcome: RecoveryRelayOutcome,
+) -> RecoveryRelayOutcome {
+    #[cfg(unix)]
+    let outcome = match (outcome.held_by(), state.provider_kind()) {
+        (Some(held), Some(provider)) => {
+            let discard = super::refused_discard::discard_held;
+            if discard(shared, &provider, state, held).await {
+                RecoveryRelayOutcome::AdoptionRefused
+            } else {
+                RecoveryRelayOutcome::AwaitingAdoption
+            }
+        }
+        _ => outcome,
+    };
+    if let Some(mut slot) = shared.restart.wake_outcomes.get_mut(&state.channel_id) {
+        *slot = Some(outcome);
+    }
+    outcome
+}
+
 pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    text: &str,
+    gateway: &dyn super::super::gateway::TurnGateway,
+) -> CapturedRecoveryDelivery {
+    let relay = captured_notice(http, shared, provider, state, text, gateway);
+    let mut delivery = relay.await;
+    delivery.outcome = noted(shared, state, delivery.outcome).await;
+    delivery
+}
+
+async fn captured_notice(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -140,7 +185,7 @@ pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
                 .await;
             return RecoveryRelayOutcome::Delivered.into();
         }
-        Err(_) => return RecoveryRelayOutcome::TransientFailure.into(),
+        Err(error) => return RecoveryRelayOutcome::held(&error).into(),
     }
     #[cfg(all(test, unix))]
     super::o_settlement_tests::before_claim();
@@ -157,7 +202,7 @@ pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
                     .await;
                 RecoveryRelayOutcome::Delivered.into()
             }
-            Err(_) => RecoveryRelayOutcome::TransientFailure.into(),
+            Err(error) => RecoveryRelayOutcome::held(&error).into(),
         };
     }
     #[cfg(unix)]
@@ -188,10 +233,12 @@ pub(super) async fn relay_recovery_terminal_notice(
     let relay = relay_recovery_terminal_notice_with_capture(
         http, shared, provider, state, text, false, None,
     );
-    match relay.await {
+    let outcome = match relay.await {
         Ok(BodySend::Sent(delivery)) => delivery.outcome,
-        Ok(BodySend::OwnedByO) | Err(_) => RecoveryRelayOutcome::TransientFailure,
-    }
+        Ok(BodySend::OwnedByO) => RecoveryRelayOutcome::TransientFailure,
+        Err(error) => RecoveryRelayOutcome::held(&error),
+    };
+    noted(shared, state, outcome).await
 }
 
 async fn relay_recovery_terminal_notice_with_capture(
@@ -313,8 +360,9 @@ pub(super) async fn relay_recovery_body_to_placeholder(
     text: &str,
     recovery_context: Option<&RecoveryDeliveryContext>,
 ) -> RecoveryRelayOutcome {
-    let Ok(marker) = o_recovery_marker(state, channel_id) else {
-        return RecoveryRelayOutcome::TransientFailure;
+    let marker = match o_recovery_marker(state, channel_id) {
+        Ok(marker) => marker,
+        Err(error) => return noted(shared, state, RecoveryRelayOutcome::held(&error)).await,
     };
     #[cfg(unix)]
     if marker.is_some()
@@ -342,7 +390,7 @@ pub(super) async fn relay_recovery_body_to_placeholder(
             claim,
         ),
     );
-    match registered_notice(
+    let outcome = match registered_notice(
         BodySource::from_state(state),
         BodySite::RecoveryNotice,
         text,
@@ -352,12 +400,47 @@ pub(super) async fn relay_recovery_body_to_placeholder(
     {
         Ok(BodySend::Sent(outcome)) => outcome,
         // O took the channel since the peek; the retry shows its marker instead.
-        Ok(BodySend::OwnedByO) | Err(_) => RecoveryRelayOutcome::TransientFailure,
+        Ok(BodySend::OwnedByO) => RecoveryRelayOutcome::TransientFailure,
+        Err(error) => RecoveryRelayOutcome::held(&error),
+    };
+    noted(shared, state, outcome).await
+}
+
+/// A restore relay whose refused body's reason intent is durable: the row and its actor go with
+/// nothing delivered, settled or completed. False for any other outcome.
+pub(super) async fn retire_refused(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    outcome: RecoveryRelayOutcome,
+    branch: &'static str,
+) -> bool {
+    if outcome != RecoveryRelayOutcome::AdoptionRefused {
+        return false;
     }
+    let dispose = super::recovery_paths::restart::dispose_recovery_relay_outcome;
+    let text = state.full_response.as_str();
+    // Boxed: the restore loop awaits this at three sites and must not inline the dispose future.
+    let disposed = dispose(
+        shared, provider, state, outcome, false, branch, branch, text, false,
+    );
+    Box::pin(disposed).await;
+    true
 }
 
 /// `relay_recovery_terminal_notice` for notices that carry the recovered body.
 pub(super) async fn relay_recovery_body_notice(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    text: &str,
+) -> RecoveryRelayOutcome {
+    let relay = body_notice(http, shared, provider, state, text);
+    noted(shared, state, relay.await).await
+}
+
+async fn body_notice(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -370,7 +453,7 @@ pub(super) async fn relay_recovery_body_notice(
     });
     let channel_id = match (owned, channel_id) {
         (Ok(true), Some(channel_id)) => channel_id,
-        (Err(_), _) => return RecoveryRelayOutcome::TransientFailure,
+        (Err(error), _) => return RecoveryRelayOutcome::held(&error),
         (_, channel) => {
             let claim = channel
                 .filter(|_| carries_body(state, text))
@@ -380,7 +463,8 @@ pub(super) async fn relay_recovery_body_notice(
             );
             return match notice.await {
                 Ok(BodySend::Sent(delivery)) => delivery.outcome,
-                Ok(BodySend::OwnedByO) | Err(_) => RecoveryRelayOutcome::TransientFailure,
+                Ok(BodySend::OwnedByO) => RecoveryRelayOutcome::TransientFailure,
+                Err(error) => RecoveryRelayOutcome::held(&error),
             };
         }
     };
@@ -438,7 +522,8 @@ pub(in crate::services::discord) async fn relay_recovered_terminal_text_to_place
     );
     match registered_notice(source, BodySite::RecoveredTerminal, text, relay).await {
         Ok(BodySend::Sent(outcome)) => outcome,
-        Ok(BodySend::OwnedByO) | Err(_) => RecoveryRelayOutcome::TransientFailure,
+        Ok(BodySend::OwnedByO) => RecoveryRelayOutcome::TransientFailure,
+        Err(error) => RecoveryRelayOutcome::held(&error),
     }
 }
 

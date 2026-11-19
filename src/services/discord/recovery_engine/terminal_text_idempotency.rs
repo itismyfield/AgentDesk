@@ -1096,11 +1096,11 @@ mod tests {
         );
     }
 
-    /// A recovered body that posts nothing (another holder has the fresh-send lease, or the range
-    /// is durably delivered) leaves a pending O adoption; the relay that posts it ends it.
+    /// A pending O adoption holds a recovered body before its fresh-send lease or durable check:
+    /// whether another holder has the lease, the range is delivered, or neither, nothing posts.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_recovery_relay_that_posts_nothing_leaves_a_pending_adoption() {
+    async fn a_pending_adoption_holds_a_recovered_body_before_its_lease_or_durable_check() {
         use crate::services::agent_protocol::RuntimeHandoffKind::CodexTui;
         use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -1152,7 +1152,7 @@ mod tests {
             .try_acquire_fresh_send_lease(&shared, "answer")
             .expect("another holder takes the fresh-send lease");
         let busy = relay(&shared, Some(context(&shared))).await;
-        assert_eq!(busy, RecoveryRelayOutcome::TransientFailure);
+        assert_eq!(busy, RecoveryRelayOutcome::AwaitingAdoption);
         drop(held);
         let mut lease = context(&shared)
             .try_acquire_fresh_send_lease(&shared, "answer")
@@ -1162,15 +1162,12 @@ mod tests {
         lease.release();
         let restarted = make_shared_data_for_tests();
         let durable = relay(&restarted, Some(context(&restarted))).await;
-        assert_eq!(durable, RecoveryRelayOutcome::Delivered);
-        assert!(recorder.calls().is_empty(), "{:?}", recorder.contents());
-        assert_eq!(check.adoption(), Adoption::Pending);
-
+        assert_eq!(durable, RecoveryRelayOutcome::AwaitingAdoption);
         let posted = relay(&restarted, None).await;
-        assert_eq!(posted, RecoveryRelayOutcome::Delivered);
-        assert_eq!(recorder.contents(), vec!["answer".to_string()]);
+        assert_eq!(posted, RecoveryRelayOutcome::AwaitingAdoption);
+        assert!(recorder.calls().is_empty(), "{:?}", recorder.contents());
         check.assert_settled();
-        assert_eq!(check.adoption(), Adoption::Released);
+        assert_eq!(check.adoption(), Adoption::Pending);
     }
 
     #[cfg(unix)]
