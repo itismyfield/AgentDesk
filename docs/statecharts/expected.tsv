@@ -1306,6 +1306,13 @@ session-lifecycle/HerdrRestartOwnerStartUnknown.cfg	HerdrRestartOwner	-	-
 session-lifecycle/HerdrRestartOwnerUnboundDispatch.cfg	HerdrRestartOwner	NoInheritedDispatch	-
 session-lifecycle/HerdrRestartOwnerWithdrawFallback.cfg	HerdrRestartOwner	-	-
 session-lifecycle/HerdrRestartOwnerWithdrawFirst.cfg	HerdrRestartOwner	-	RequestResolves
+session-lifecycle/HerdrRetiredRowAfter.cfg	HerdrRetiredRow	-	-
+session-lifecycle/HerdrRetiredRowBefore.cfg	HerdrRetiredRow	NoRevival,EndedTurnNotSelectable	RowSettles
+session-lifecycle/HerdrRetiredRowLiveEndAfter.cfg	HerdrRetiredRow	-	-
+session-lifecycle/HerdrRetiredRowLiveEndBefore.cfg	HerdrRetiredRow	NoRevival,EndedTurnNotSelectable	-
+session-lifecycle/HerdrRetiredRowNewTurn.cfg	HerdrRetiredRow	NoRevival,EndedTurnNotSelectable	RowSettles
+session-lifecycle/HerdrRetiredRowNoNonce.cfg	HerdrRetiredRow	NewTurnNotRefused,NoRevival,EndedTurnNotSelectable	RowSettles
+session-lifecycle/HerdrRetiredRowRestart.cfg	HerdrRetiredRow	NoRevival,EndedTurnNotSelectable	-
 session-lifecycle/HerdrRestartReplayInput.cfg	HerdrRestart	InputAtMostOnce	-
 session-lifecycle/HerdrRestartReplaySeed.cfg	HerdrRestart	ADurableBeforeLaunch,SeedAtMostOnce	AResumeAvailable
 session-lifecycle/HerdrRestartReplayUnknown.cfg	HerdrRestart	ABootOffsetStable,ANoNewPrefixSkip,AOffsetPreserved,NoBlindCreate	-
