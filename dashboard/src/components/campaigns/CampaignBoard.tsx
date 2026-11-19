@@ -12,7 +12,7 @@ import type { BoardCard, BoardColumn } from "./campaignBoardModel";
 import type { TaskView } from "./CampaignOverview";
 import { findAgent, taskCounts } from "./campaignOverviewModel";
 import { LABELS, LiveChip, type Tr } from "./campaignPresentation";
-import { rejectionText } from "./serverCampaignModel";
+import { DISPOSITION_LABELS, rejectionText } from "./serverCampaignModel";
 
 // Cards drawn per step, so a ledger with hundreds of finished tasks never draws them all at once.
 const PAGE = 20;
@@ -21,13 +21,18 @@ const WARN_FRAME = "border-[color-mix(in_srgb,var(--warn)_60%,var(--line))]";
 /** The server's retry command for failed tasks, as the campaign's command list offers it. */
 export interface BoardRetry { enabled: boolean; reason: string | null; onRetry: (id: string) => Promise<void> }
 
-function look(task: TaskView, chip?: [string, string]): { tone: BadgeTone; label: [string, string]; frame: string } {
+const CHIPS: Record<NonNullable<BoardCard["chip"]>, { tone: BadgeTone; label: [string, string] }> = {
+  pending: { tone: "neutral", label: LABELS.pending }, running: { tone: "info", label: LABELS.running }, blocked: { tone: "warning", label: LABELS.blocked },
+  failed: { tone: "danger", label: LABELS.failed }, completed: { tone: "success", label: LABELS.completed }, skipped: { tone: "neutral", label: LABELS.skipped },
+  interrupted: { tone: "warning", label: DISPOSITION_LABELS.interrupted },
+};
+
+/** The frame marks what needs someone; the chip says the card's own status word, or a block when the card names none. */
+function look(task: TaskView, chip?: BoardCard["chip"]): { tone: BadgeTone; label: [string, string]; frame: string } {
   if (task.gate) return { tone: "warning", label: ["승인 대기", "Awaiting approval"], frame: `${WARN_FRAME} bg-[color-mix(in_srgb,var(--warn)_7%,var(--th-card-bg))]` };
-  if (task.status === "failed") return { tone: "danger", label: LABELS.failed, frame: "border-[color-mix(in_srgb,var(--err)_60%,var(--line))] bg-[var(--th-card-bg)]" };
-  if (task.attention) return { tone: "warning", label: LABELS.blocked, frame: `${WARN_FRAME} bg-[var(--th-card-bg)]` };
-  if (chip) return { tone: "warning", label: chip, frame: "border-[var(--line)] bg-[var(--th-card-bg)]" };
-  if (task.status === "running") return { tone: "info", label: LABELS.running, frame: "border-[color-mix(in_srgb,var(--info)_45%,var(--line))] bg-[var(--th-card-bg)]" };
-  return { tone: task.status === "completed" ? "success" : "neutral", label: LABELS[task.status], frame: "border-[var(--line)] bg-[var(--th-card-bg)]" };
+  const frame = task.status === "failed" ? "border-[color-mix(in_srgb,var(--err)_60%,var(--line))]" : task.attention ? WARN_FRAME
+    : task.status === "running" ? "border-[color-mix(in_srgb,var(--info)_45%,var(--line))]" : "border-[var(--line)]";
+  return { ...CHIPS[chip ?? (task.attention && task.status !== "failed" ? "blocked" : task.status)], frame: `${frame} bg-[var(--th-card-bg)]` };
 }
 
 function Card({ card, selected, controls, onOpen, roster, retry, tr }: {

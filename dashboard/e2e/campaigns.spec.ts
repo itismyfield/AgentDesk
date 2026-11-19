@@ -367,8 +367,8 @@ test("campaign tab: screenshots at 390 and 1440 in light and dark, and dark fixt
   }
 });
 
-/** The gated campaign over all nine stages: an approval wait, a failure the server would retry, a block before any work, a
- * repair waiting again, a user stop and an empty main check. */
+/** The gated campaign over all nine stages: an approval wait on a task not running, a failure the server would retry, a block
+ * before any work, a repair waiting again, a user stop and an empty main check. */
 function boardServerCampaign() {
   const release = gatedServerCampaign();
   const base = release.view.nodes[2];
@@ -381,6 +381,7 @@ function boardServerCampaign() {
     release.view.nodes.push({ ...base, id, runtime: { ...base.runtime, current_attempt: null, ...runtime } });
   }
   release.view.commands = release.view.commands.map((entry) => entry.command === "prepare_retry" ? { ...entry, rejection: null } : entry);
+  release.view.nodes[2].runtime.disposition = "pending"; // only the gate makes its stage need someone
   return release;
 }
 /** One ledger campaign in place of the default list, with its live card reads. */
@@ -399,9 +400,10 @@ const workingLive = { ...LIVE["open-issues-dag"].i7272 };
 
 test("stage board: ledger columns keep each task's own status, live work adds a mark, and phones lead with running and stuck groups", async ({ page }, testInfo) => {
   const [ledger] = structuredClone(CAMPAIGNS);
-  ledger.nodes.push(node("i7350", "#7350 실패한 재시작 점검", { status: "failed", stage: "verify", issue_url: issue(7350) }));
+  ledger.nodes.push(node("i7350", "#7350 실패한 재시작 점검", { status: "failed", stage: "verify", issue_url: issue(7350) }),
+    node("i7360", "#7360 배포 확인", { status: "running", stage: "deploy", blocker: "외부 확인", issue_url: issue(7360) }));
   const board = await serveLedger(page, ledger, { ...LIVE["open-issues-dag"], i7336: workingLive, i7350: workingLive });
-  await expect(board).toContainText("9 작업4 진행 중3 대기0 승인 대기0 실패1 막힘");
+  await expect(board).toContainText("10 작업5 진행 중3 대기0 승인 대기0 실패2 막힘");
   const phone = testInfo.project.name === "mobile";
   expect(await columnNames(page)).toEqual(phone ? ["진행 중", "막힘", "실패", "대기", "완료", "건너뜀"] : ["대기", "진행 중", "막힘", "실패", "완료", "건너뜀"]);
   if (phone) expect(await openGroups(page)).toEqual([true, true, true, false, false, false]);
@@ -410,6 +412,10 @@ test("stage board: ledger columns keep each task's own status, live work adds a 
     await expect(card.locator(".aui-badge-clean").first()).toHaveText(chip);
     await expect(card.locator(".campaign-live")).toHaveText("리뷰 진행 중");
   }
+  // A running task with a blocker keeps its own column and word; only its frame and reason say it is stuck.
+  const stuck = board.getByRole("region", { name: "진행 중" }).locator('[data-board-card="i7360"]');
+  await expect(stuck.locator(".aui-badge-clean").first()).toHaveText("진행 중");
+  await expect(stuck).toContainText("막힘: 외부 확인");
   const done = board.getByRole("region", { name: "완료" });
   await done.getByRole("button", phone ? { name: /^완료/ } : { name: "최근 1개 보기" }).click();
   await expect(done.locator('[data-task-id="i7401"]')).toBeVisible();

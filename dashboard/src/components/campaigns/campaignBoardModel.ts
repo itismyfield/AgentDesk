@@ -3,12 +3,12 @@ import { SERVER_CAMPAIGN_STAGES, type ServerCampaignDocument } from "../../api/s
 import type { TaskView } from "./CampaignOverview";
 import { legacyTask } from "./campaignOverviewModel";
 import { LABELS, type Tr } from "./campaignPresentation";
-import { DISPOSITION_LABELS, STAGE_LABELS } from "./serverCampaignModel";
+import { STAGE_LABELS } from "./serverCampaignModel";
 
 type Label = [string, string];
 type Runtime = ServerCampaignDocument["view"]["nodes"][number]["runtime"];
-/** One card: the task, its one-line status, a server state word the task status would hide, and whether retry applies. */
-export interface BoardCard { task: TaskView; line: string | null; chip?: Label; retry: boolean }
+/** One card: the task, its one-line status, the status its chip names when the card's source has one, and whether retry applies. */
+export interface BoardCard { task: TaskView; line: string | null; chip?: CampaignNodeStatus | "interrupted"; retry: boolean }
 export interface BoardColumn { key: string; label: Label; done: boolean; cards: BoardCard[] }
 
 // A ledger keeps only a status per task; its free-text stage stays a sentence inside the card.
@@ -22,12 +22,12 @@ const rank = (task: TaskView) => task.gate ? 0 : task.status === "failed" ? 1 : 
 /** Waiting approvals, failures and blocks lead; then the latest change. Ties keep the read order (server: definition order). */
 const byUrgency = (a: BoardCard, b: BoardCard) => rank(a.task) - rank(b.task) || time(b.task) - time(a.task);
 
-/** Columns and chips read the ledger's own status; work on the linked card only adds its live mark. */
+/** Columns and chips read the ledger's own status (a running task with a blocker still says running); live work only adds its mark. */
 export function legacyBoard(nodes: CampaignNode[], live?: Record<string, CampaignNodeLive>): BoardColumn[] {
   const tasks: TaskView[] = nodes.map((node) => ({ ...legacyTask(node), live: live?.[node.id] }));
   return LEDGER_COLUMNS.map((status) => ({
     key: status, label: LABELS[status], done: LEDGER_DONE.has(status),
-    cards: tasks.filter((task) => task.status === status).map((task) => ({ task, line: task.stage || null, retry: false })).sort(byUrgency),
+    cards: tasks.filter((task) => task.status === status).map((task) => ({ task, line: task.stage || null, chip: task.status, retry: false })).sort(byUrgency),
   })).filter((column) => column.cards.length > 0 || !LEDGER_OPTIONAL.has(column.key));
 }
 
@@ -45,12 +45,13 @@ export function serverBoard({ view }: ServerCampaignDocument, tasks: TaskView[],
     // The same words as the task detail: series, repair cycle and the server's own word for a user stop.
     const line = runtime && [started(runtime) && tr(`계열 ${runtime.series}`, `series ${runtime.series}`),
       runtime.repair_cycles > 0 && tr(`수리 차수 ${runtime.repair_cycles}`, `repair cycle ${runtime.repair_cycles}`)].filter(Boolean).join(" · ");
-    return { task, line: line || null, chip: runtime?.disposition === "interrupted" ? DISPOSITION_LABELS.interrupted : undefined, retry: retryOffered && task.status === "failed" };
+    return { task, line: line || null, chip: runtime?.disposition === "interrupted" ? "interrupted" : undefined, retry: retryOffered && task.status === "failed" };
   };
-  const columns: BoardColumn[] = SERVER_CAMPAIGN_STAGES.map((stage) => ({
-    key: stage, label: STAGE_LABELS[stage], done: stage === "complete",
-    cards: tasks.filter((task) => runtimes.get(task.id)?.stage === stage).map(card).sort(byUrgency),
-  }));
+  const columns: BoardColumn[] = SERVER_CAMPAIGN_STAGES.map((stage) => {
+    const cards = tasks.filter((task) => runtimes.get(task.id)?.stage === stage).map(card);
+    // Finished tasks carry no completion order or time, so they stay in definition order, past gates or not.
+    return { key: stage, label: STAGE_LABELS[stage], done: stage === "complete", cards: stage === "complete" ? cards : cards.sort(byUrgency) };
+  });
   const unplaced = tasks.filter((task) => !runtimes.has(task.id));
   return unplaced.length ? [{ key: "unplaced", label: ["서버 상태 없음", "No server state"], done: false, cards: unplaced.map(card) }, ...columns] : columns;
 }
