@@ -2,6 +2,7 @@ import type {
   ServerCampaignCommand, ServerCampaignDefinition, ServerCampaignEvent, ServerCampaignView,
 } from "../../api/serverCampaigns";
 import type { Tr } from "./campaignPresentation";
+import { parseScope, scopeParams, type EditScope } from "./relationsEditorModel";
 
 type View = ServerCampaignView;
 type NodeView = View["nodes"][number];
@@ -158,11 +159,14 @@ export interface CampaignLocation {
   mode: "legacy" | "server";
   campaign: string;
   node: string | null;
+  /** The relations editor's scope while it is open. */
+  edit?: EditScope;
 }
 
-export function campaignLocationQuery({ mode, campaign, node }: CampaignLocation): string {
+export function campaignLocationQuery({ mode, campaign, node, edit }: CampaignLocation): string {
   const query = new URLSearchParams({ mode, campaign });
   if (node) query.set("node", node);
+  if (edit) for (const [name, value] of Object.entries({ edit: "relations", ...scopeParams(edit) })) query.set(name, value);
   return `?${query}`;
 }
 
@@ -171,7 +175,8 @@ export function parseCampaignLocation(search: string): CampaignLocation | null {
   const mode = query.get("mode");
   const campaign = query.get("campaign");
   if ((mode !== "legacy" && mode !== "server") || !campaign) return null;
-  return { mode, campaign, node: query.get("node") || null };
+  const edit = query.get("edit") === "relations" ? parseScope(query.get("scope"), query.get("depth")) : null;
+  return { mode, campaign, node: query.get("node") || null, ...edit ? { edit } : {} };
 }
 
 /** Feedback carries the link and what the screen showed; no tokens, logs or definitions. */
