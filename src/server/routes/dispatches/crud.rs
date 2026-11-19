@@ -553,7 +553,7 @@ async fn list_dispatches_pg(
             let result = result_raw
                 .as_deref()
                 .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
-            let result_summary = crate::dispatch::summarize_dispatch_result(
+            let result_summary = crate::domain::dispatch_summary::summarize_dispatch_result(
                 dispatch_type.as_deref(),
                 Some(status.as_str()),
                 result.as_ref(),

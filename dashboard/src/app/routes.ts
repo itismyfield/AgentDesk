@@ -7,8 +7,7 @@ export type AppRouteId =
   | "routines"
   | "audit"
   | "stats"
-  | "settings"
-  | "ops";
+  | "settings";
 
 export interface AppRouteEntry {
   id: AppRouteId;
@@ -95,30 +94,20 @@ export const APP_ROUTES: AppRouteEntry[] = [
     section: "system",
     labelKo: "설정",
     labelEn: "Settings",
-    descriptionKo: "개인 설정과 시스템 연결을 바꿔요.",
-    descriptionEn: "Adjust personal settings and system connections.",
+    descriptionKo: "서버·런타임 설정과 연결 상태를 봐요.",
+    descriptionEn: "Review server and runtime settings and connection status.",
     shortcutKey: "9",
-  },
-  // Off the menu until the settings catalog absorbs it; reached from the settings page.
-  {
-    id: "ops",
-    path: "/ops",
-    aliases: ["/control"],
-    section: "system",
-    labelKo: "운영",
-    labelEn: "Ops",
-    descriptionKo: "시스템 상태와 전달 지연을 살펴봐요.",
-    descriptionEn: "Monitor system health and delivery delays.",
-    hiddenFromMenu: true,
   },
 ];
 
-// Removed pages keep their old URLs working.
+// Removed pages keep their old URLs working. The ops page now lives in the settings catalog's connections category.
 export const LEGACY_ROUTE_REDIRECTS: Array<{ path: string; to: string }> = [
   { path: "/kanban", to: "/campaigns?tab=queue" },
   { path: "/meetings", to: "/agents?tab=skills" },
   { path: "/achievements", to: "/stats" },
   { path: "/voice", to: "/home" },
+  { path: "/ops", to: "/settings?category=connections" },
+  { path: "/control", to: "/settings?category=connections" },
 ];
 
 /** Routes shown in the rail, tab bar, palette and shortcut help. */

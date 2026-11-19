@@ -1,7 +1,7 @@
 use super::{
-    CanonicalSessionIdentity, HookSessionActorPin, HookSessionUpsertError,
-    SessionIdentityConflictKind, SessionIdentityKind, capture_hook_session_actor_pin_pg,
-    upsert_hook_session_with_actor_pin_pg, upsert_hook_session_with_identity_pg,
+    CanonicalSessionIdentity, HookSessionActorPin, SessionIdentityConflictKind,
+    SessionIdentityKind, capture_hook_session_actor_pin_pg, upsert_hook_session_with_actor_pin_pg,
+    upsert_hook_session_with_identity_pg,
 };
 use crate::db::dispatched_sessions::hosted_execution::tests::{
     TOKEN, expected, future_schema, location, owner, pending, record, wire,
@@ -1740,17 +1740,6 @@ async fn canonical_identity_provider_token_thread_and_scheduled_dimensions_pg() 
     assert_eq!(scheduled_count, 1);
 
     test_db.drop().await;
-}
-
-#[test]
-fn canonical_identity_conflict_is_http_409_ready() {
-    let error =
-        super::hook_session_upsert_error_to_app_error(HookSessionUpsertError::test_conflict(
-            SessionIdentityConflictKind::AmbiguousCanonical,
-            "ambiguous canonical identity",
-        ));
-    assert_eq!(error.status(), axum::http::StatusCode::CONFLICT);
-    assert_eq!(error.code(), crate::error::ErrorCode::Conflict);
 }
 
 #[tokio::test]

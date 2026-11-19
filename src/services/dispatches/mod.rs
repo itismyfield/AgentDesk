@@ -1,7 +1,6 @@
 use serde_json::{Value, json};
 use sqlx::Row;
 
-use crate::dispatch;
 use crate::engine::PolicyEngine;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
@@ -130,7 +129,7 @@ fn dispatch_row_to_json_pg(row: &sqlx::postgres::PgRow) -> Result<Value, String>
     let result = result_raw
         .as_deref()
         .and_then(|text| serde_json::from_str::<Value>(text).ok());
-    let result_summary = dispatch::summarize_dispatch_result(
+    let result_summary = crate::domain::dispatch_summary::summarize_dispatch_result(
         dispatch_type.as_deref(),
         Some(status.as_str()),
         result.as_ref(),

@@ -5,7 +5,6 @@ mod dispatch_context;
 mod dispatch_create;
 mod dispatch_query;
 mod dispatch_status;
-mod dispatch_summary;
 #[cfg(test)]
 mod fresh_worktree_pg_tests;
 #[cfg(test)]
@@ -65,5 +64,4 @@ pub use dispatch_status::{
     finalize_dispatch_with_backends, load_dispatch_row_with_backends,
     set_dispatch_status_on_pg_async, set_dispatch_status_with_backends,
 };
-pub(crate) use dispatch_summary::{summarize_dispatch_from_text, summarize_dispatch_result};
 pub use types::DispatchCreateOptions;
