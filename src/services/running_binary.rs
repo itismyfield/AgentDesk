@@ -1,20 +1,21 @@
 use std::{
     fs::{self, File},
-    io::Read,
+    io::{self, Read},
     path::{Path, PathBuf},
     sync::OnceLock,
 };
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use super::process_boot;
 
 const MAX_RECORD: u64 = 4096;
 static RUNNING_BINARY: OnceLock<Option<SourceRecord>> = OnceLock::new();
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SourceRecord {
     schema_version: u32,
@@ -28,6 +29,29 @@ pub(crate) fn initialize() {
         let path = std::env::current_exe().ok()?;
         running_source(&path)
     });
+}
+
+/// Preserve a verified package record when `init` copies this running executable.
+pub(crate) fn copy_current_to(source: &Path, destination: &Path) -> io::Result<()> {
+    let record = running_source(source);
+    let metadata = sidecar(destination);
+    match fs::remove_file(&metadata) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    fs::copy(source, destination)?;
+    if let Some(record) = record {
+        let mut digest = Sha256::new();
+        io::copy(&mut File::open(destination)?, &mut digest)?;
+        if format!("{:x}", digest.finalize()) == record.sha256 {
+            let mut staged =
+                tempfile::NamedTempFile::new_in(destination.parent().unwrap_or(Path::new(".")))?;
+            serde_json::to_writer(&mut staged, &record)?;
+            staged.persist(metadata)?;
+        }
+    }
+    Ok(())
 }
 
 fn running_source(path: &Path) -> Option<SourceRecord> {
@@ -118,7 +142,6 @@ fn witness(record: &SourceRecord, boot_started_at_ms: i64, observed_at: DateTime
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
 
     #[test]
     fn running_source_requires_metadata_for_the_open_executable() {

@@ -111,8 +111,21 @@ fn m9_running_health_reports_a_verified_release_pair() {
     }
 
     crate::services::running_binary::initialize();
-    // Publication is pinned at startup; the service never rereads the pathname.
     let exe = env::current_exe().unwrap();
+    let installation = tempfile::tempdir_in(exe.parent().unwrap()).unwrap();
+    let installed = installation.path().join("agentdesk");
+    crate::services::running_binary::copy_current_to(&exe, &installed).unwrap();
+    let metadata = installed.with_file_name("agentdesk.source.json");
+    assert_eq!(
+        fs::read(&metadata)
+            .map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).unwrap())
+            .unwrap(),
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(exe.with_file_name("agentdesk.source.json")).unwrap()
+        )
+        .unwrap()
+    );
+    // Publication is pinned at startup; the service never rereads the pathname.
     fs::remove_file(exe.with_file_name("agentdesk.source.json")).unwrap();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
