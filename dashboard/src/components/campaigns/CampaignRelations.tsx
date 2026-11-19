@@ -6,23 +6,34 @@ import CampaignGroupOverview from "./CampaignGroupOverview";
 import CampaignNeighborhood from "./CampaignNeighborhood";
 import { campaignGroup } from "./campaignModel";
 import type { Tr } from "./campaignPresentation";
+import { keptDraft, type EditScope } from "./relationsEditorModel";
 import { TaskGroupHeading } from "./TaskListParts";
 
 /** 관계도: the group graph, or the open task's direct connections. A chosen group's task list stays while a task is
- * open, so closing the task returns focus to its row. */
-export default function CampaignRelations({ campaign, selectedId, onOpen, tr }: {
-  campaign: Campaign; selectedId: string | null; onOpen: (id: string | null) => void; tr: Tr;
+ * open, so closing the task returns focus to its row. `onEdit` (wide screens only) opens the editor on the open task's
+ * neighbors, else the chosen group, else the group of the first task with a dependency. */
+export default function CampaignRelations({ campaign, selectedId, onOpen, onEdit, tr }: {
+  campaign: Campaign; selectedId: string | null; onOpen: (id: string | null) => void; onEdit?: (scope: EditScope) => void; tr: Tr;
 }) {
   const [group, setGroup] = useState<string | null>(null);
   const listId = useId();
   const selected = campaign.nodes.find((node) => node.id === selectedId);
   const all = new Set(campaign.nodes.map((node) => node.id));
   const members = group === null ? [] : campaign.nodes.filter((node) => campaignGroup(node) === group);
+  const kept = keptDraft(campaign.id) !== null;
+  const editScope = (): EditScope => selected ? { kind: "task", id: selected.id, depth: 1 }
+    : { kind: "group", key: group ?? campaignGroup(campaign.nodes.find((node) => node.dependencies.length) ?? campaign.nodes[0]) };
   return <div className="campaign-relations grid min-w-0 gap-3">
-    <label className="campaign-node-picker">{tr("연결을 볼 작업", "Task to inspect")}<Select value={selectedId ?? ""} onChange={(event) => onOpen(event.target.value || null)}>
-      <option value="" disabled>{tr("작업을 선택하세요", "Select a task")}</option>
-      {campaign.nodes.map((node) => <option key={node.id} value={node.id}>{node.title}</option>)}
-    </Select></label>
+    <div className="flex min-w-0 flex-wrap items-end gap-3">
+      <label className="campaign-node-picker min-w-0 flex-1">{tr("연결을 볼 작업", "Task to inspect")}<Select value={selectedId ?? ""} onChange={(event) => onOpen(event.target.value || null)}>
+        <option value="" disabled>{tr("작업을 선택하세요", "Select a task")}</option>
+        {campaign.nodes.map((node) => <option key={node.id} value={node.id}>{node.title}</option>)}
+      </Select></label>
+      {onEdit && <div className="flex items-center gap-2">
+        {kept && <span className="text-xs text-[var(--warn)]">{tr("저장하지 않은 편집이 있어요", "Unsaved edits are waiting")}</span>}
+        <Button variant="secondary" onClick={() => onEdit(editScope())}>{kept ? tr("이어서 편집", "Continue editing") : tr("편집", "Edit")}</Button>
+      </div>}
+    </div>
     {selected ? <>
       <div><Button variant="secondary" onClick={() => onOpen(null)}>{tr("전체 그룹 관계", "All group connections")}</Button></div>
       <CampaignNeighborhood nodes={campaign.nodes} selectedId={selected.id} visibleIds={all} onSelect={onOpen} tr={tr} />

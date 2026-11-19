@@ -497,3 +497,70 @@ test.describe("board at 390px touch", () => {
     expect(await page.getByRole("alertdialog").evaluate(small)).toBe(0);
   });
 });
+
+test("relations editor: opens from the relations tab, edits dependencies in the inspector, blocks a cycle, saves on the newest copy and asks before leaving", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "The editor is for wide screens");
+  await openCampaigns(page);
+  let current = { ...CAMPAIGNS[0] };
+  const puts: { expected_revision: number; nodes: { id: string; dependencies: string[] }[] }[] = [];
+  await page.route(/\/api\/campaigns\/open-issues-dag$/, (route) => {
+    if (route.request().method() !== "PUT") return route.fulfill({ json: { campaign: current, live: LIVE["open-issues-dag"] } });
+    puts.push(route.request().postDataJSON());
+    // The first write meets a newer revision; the second lands.
+    current = { ...current, revision: current.revision + 1, ...puts.length > 1 ? { nodes: puts.at(-1)!.nodes } : {} };
+    return puts.length > 1 ? route.fulfill({ json: { campaign: current } }) : route.fulfill({ status: 409, json: { error: "revision conflict" } });
+  });
+  const panel = page.locator(".campaigns-panel");
+  await panel.getByRole("tab", { name: "관계도" }).click();
+  await panel.getByRole("button", { name: "편집", exact: true }).click();
+  await expect(page).toHaveURL(/edit=relations&scope=group%3AGateway/);
+  const editor = page.locator(".campaign-relations-editor");
+  const task = (id: string) => editor.locator(`.react-flow__node[data-id="${id}"]`);
+  await expect(editor.locator(".react-flow__node")).toHaveCount(3);
+  await task("i7401").click();
+  await expect(editor.getByRole("complementary")).toContainText("완료 · 바꿀 수 없음");
+  await expect(editor.getByLabel("선행 추가")).toHaveCount(0);
+  for (const [id, dependency] of [["i7402", "i7401"], ["i7272", "i7402"], ["i7402", "i7272"]]) {
+    await task(id).click();
+    await editor.getByLabel("선행 추가").selectOption(dependency);
+  }
+  await expect(editor.getByRole("alert").first()).toContainText("순환: #7272 → #7402 → #7272");
+  const save = editor.getByRole("button", { name: "저장", exact: true });
+  await expect(save).toBeDisabled();
+  await editor.getByRole("button", { name: /^선행 #7272 .+ 빼기$/ }).click();
+  await expect(editor.getByText("저장 안 됨 · 선행 2")).toBeVisible();
+  await save.click();
+  await expect(editor.getByText(/^저장 안 됨/)).toHaveCount(0);
+  expect(puts.map((body) => body.expected_revision)).toEqual([7, 8]);
+  const deps = (id: string) => puts[1].nodes.find((value) => value.id === id)?.dependencies;
+  expect([deps("i7402"), deps("i7272"), deps("i7401")]).toEqual([["i7401"], ["i7402"], []]);
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/relations-editor-fixture-1440x900-dark.png` });
+
+  // Keyboard only: Enter on a focused task opens it, Enter on a chip's button removes that dependency.
+  for (const id of ["i7272", "i7402"]) { await task(id).focus(); await page.keyboard.press("Enter"); }
+  await expect(editor.getByRole("complementary")).toContainText("#7402 · Gateway");
+  await editor.getByRole("button", { name: /^선행 #7401 .+ 빼기$/ }).focus();
+  await page.keyboard.press("Enter");
+  await page.goBack();
+  const dialog = page.getByRole("dialog", { name: "저장하지 않은 변경이 1건 있어요" });
+  await expect(dialog).toBeVisible();
+  await expect(page).toHaveURL(/edit=relations/);
+  await dialog.getByRole("button", { name: "계속 편집" }).click();
+  await page.getByRole("tab", { name: "대기열" }).click();
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "버리고 나가기" }).click();
+  await expect(editor).toHaveCount(0);
+  await expect(page).not.toHaveURL(/edit=relations/);
+});
+
+test("relations editor: phones get no way in, and a direct link says this screen only shows relations", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "Phone width");
+  await openCampaigns(page);
+  await page.locator(".campaigns-panel").getByRole("tab", { name: "관계도" }).click();
+  await expect(page.locator(".campaign-relations")).toBeVisible();
+  await expect(page.getByRole("button", { name: "편집", exact: true })).toHaveCount(0);
+  await page.goto("/campaigns?mode=legacy&campaign=open-issues-dag&edit=relations&scope=group%3AGateway");
+  await expect(page.getByText("관계도 편집은 900px 넘는 화면에서 열려요. 여기서는 보기만 해요.")).toBeVisible();
+  await expect(page.locator(".campaign-relations-editor")).toHaveCount(0);
+  await expectNoHorizontalOverflow(page);
+});

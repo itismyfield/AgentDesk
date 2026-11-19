@@ -1,0 +1,292 @@
+import { ArrowLeft, Cable, LayoutGrid, MousePointer2, Plus, Spline, Undo2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { Background, Controls, ReactFlow, type Edge, type Node } from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { getCampaignDetail, saveCampaignNodes, type Campaign } from "../../api/campaigns";
+import { ApiRequestError } from "../../api/httpClient";
+import { Badge as KitBadge } from "../../kit/free/badge-clean";
+import { Button } from "../../kit/free/button-clean";
+import { Dialog } from "../../kit/free/dialog-clean";
+import { IconButton } from "../../kit/free/icon-button-clean";
+import { SegmentedControl } from "../../kit/free/segmented-control-clean";
+import { Select } from "../common/Select";
+import { campaignTaskTitle, groupCampaignNodes } from "./campaignModel";
+import { LEDGER_STATUS_LABELS } from "./campaignOverviewModel";
+import { Badge, LABELS, type Tr } from "./campaignPresentation";
+import RelationsInspector from "./RelationsInspector";
+import { RelationsTaskNode, type TaskNodeData } from "./RelationsTaskNode";
+import { nodeMarker } from "./StatusMarker";
+import {
+  MAX_DEPTH, adoptLatest, applyEdits, editCounts, editField, fieldErrors, findCycles, isLocked, keepDraft, layoutTasks, parseScope, rebaseEdits,
+  dropKeptDraft, keptDraft, scopeTasks, taskLabel, taskName, type Conflict, type EditScope, type Edits,
+} from "./relationsEditorModel";
+
+const NODE_TYPES = { relationsTask: RelationsTaskNode };
+/** A 409 is sent again this many times, each on a fresh read; the ledger's revision moves every few seconds. */
+const RETRIES = 3;
+const UNDO_LIMIT = 50;
+const PANEL = "rounded-lg border border-[var(--line)] bg-[var(--th-card-bg)] shadow-sm";
+/** React Flow's own controls and credit in the theme's colours, as on the group graph. */
+const FLOW_CHROME = "[&_.react-flow\\_\\_controls]:shadow-none [&_.react-flow\\_\\_controls-button]:!bg-th-bg-surface [&_.react-flow\\_\\_controls-button]:!text-th-text-primary [&_.react-flow\\_\\_controls-button]:!border-th-border-subtle [&_.react-flow\\_\\_attribution]:!bg-th-bg-surface [&_.react-flow\\_\\_attribution_a]:!text-th-text-muted";
+
+type Selection = { kind: "node"; id: string } | { kind: "edge"; source: string; target: string } | null;
+/** Set while there are unsaved changes: asks before running `proceed`. */
+export type LeaveGuard = RefObject<((proceed: () => void) => void) | null>;
+
+/** The full-width relations editor over one scope of a ledger campaign: dependencies, titles and issue links. */
+export default function CampaignRelationsEditor({ campaign, scope, onScope, onExit, onSaved, leave, tr }: {
+  campaign: Campaign; scope: EditScope; onScope: (scope: EditScope) => void; onExit: () => void;
+  onSaved: (campaign: Campaign) => void; leave: LeaveGuard; tr: Tr;
+}) {
+  // Read here, dropped after mount: a kept draft is used once and comes back only if this editor leaves undecided again.
+  const [kept] = useState(() => keptDraft(campaign.id));
+  const [base, setBase] = useState(kept?.base ?? campaign);
+  const [edits, setEdits] = useState<Edits>(kept?.edits ?? {});
+  const [restored, setRestored] = useState(kept !== null);
+  const [undo, setUndo] = useState<Edits[]>([]);
+  /** The field being typed into, so one run of typing is one undo step. */
+  const typing = useRef<string | null>(null);
+  const [selection, setSelection] = useState<Selection>(scope.kind === "task" ? { kind: "node", id: scope.id } : null);
+  const [tool, setTool] = useState<"select" | "connect">("select");
+  const [from, setFrom] = useState<string | null>(null);
+  const [arranged, setArranged] = useState<Campaign["nodes"] | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [problem, setProblem] = useState<{ text: string; conflicts?: Conflict[]; latest?: Campaign } | null>(null);
+  const [leaving, setLeaving] = useState<(() => void) | null>(null);
+
+  const nodes = useMemo(() => applyEdits(base.nodes, edits), [base, edits]);
+  const byId = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+  const baseById = useMemo(() => new Map(base.nodes.map((node) => [node.id, node])), [base]);
+  const groups = useMemo(() => groupCampaignNodes(base.nodes), [base]);
+  const { ids, total } = useMemo(() => scopeTasks(nodes, scope), [nodes, scope]);
+  const inScope = new Set(ids);
+  const positions = useMemo(() => layoutTasks(arranged ?? base.nodes, ids), [arranged, base, ids]);
+  const cycles = useMemo(() => findCycles(nodes), [nodes]);
+  const counts = editCounts(edits);
+  const changed = counts.dependencies + counts.title + counts.issue_url;
+  const dirty = changed > 0;
+  const invalid = Object.keys(edits).flatMap((id) => [...fieldErrors(byId.get(id)!)].map((field) => ({ id, field })));
+  const errors = cycles.length + invalid.length;
+  const label = (id: string) => byId.get(id) ? taskLabel(byId.get(id)!) : id;
+  const cycleText = (path: string[]) => tr(`순환: ${path.map(label).join(" → ")}`, `Cycle: ${path.map(label).join(" → ")}`);
+  const lockOf = (id: string) => !isLocked(baseById.get(id)) ? null
+    : baseById.get(id)!.status === "completed" ? tr("완료 · 바꿀 수 없음", "Completed · cannot change") : tr("건너뜀 · 바꿀 수 없음", "Skipped · cannot change");
+  const parts = [[counts.dependencies, "선행", "dependencies"], [counts.title, "제목", "titles"], [counts.issue_url, "이슈", "issues"]] as const;
+  const summary = parts.filter(([count]) => count > 0).map(([count, ko, en]) => tr(`${ko} ${count}`, `${count} ${en}`)).join(" · ");
+
+  // With nothing unsaved, a newer copy from the page's refresh becomes the base, so the screen stays current.
+  useEffect(() => { if (!dirty && campaign.revision > base.revision) setBase(campaign); }, [campaign, base.revision, dirty]);
+
+  /** Every change goes through here: one undo step, and the save problem it may have answered is cleared. */
+  const commit = (update: (current: Edits) => Edits, run: string | null = null) => {
+    const next = update(edits);
+    if (next === edits) return;
+    if (run === null || run !== typing.current) setUndo((stack) => [...stack, edits].slice(-UNDO_LIMIT));
+    typing.current = run;
+    setEdits(next); setProblem(null); setRestored(false);
+  };
+  /** The one place dependencies change, so a locked task refuses the canvas, the inspector and line removal alike. */
+  const withDeps = (current: Edits, id: string, change: (deps: string[]) => string[]) => {
+    const node = baseById.get(id);
+    if (!node || isLocked(node)) return current;
+    const deps = current[id]?.dependencies ?? node.dependencies;
+    const next = change(deps);
+    return next.join("\n") === deps.join("\n") ? current : editField(current, node, id, "dependencies", next);
+  };
+  const link = (dependency: string, id: string) => commit((current) => withDeps(current, id, (deps) => deps.includes(dependency) ? deps : [...deps, dependency]));
+  const unlink = (pairs: [dependency: string, id: string][]) => commit((current) => pairs.reduce((acc, [dependency, id]) => withDeps(acc, id, (deps) => deps.filter((dep) => dep !== dependency)), current));
+  const setText = (id: string, field: "title" | "issue_url", value: string) => {
+    const node = baseById.get(id);
+    if (node && !isLocked(node)) commit((current) => editField(current, node, id, field, field === "issue_url" ? value.trim() || null : value), `${id}:${field}`);
+  };
+  const stepBack = () => {
+    const previous = undo.at(-1);
+    if (!previous) return;
+    setUndo((stack) => stack.slice(0, -1)); setEdits(previous); typing.current = null;
+  };
+
+  /** Reads the newest copy, puts the edits on it and sends it; a 409 starts over from a fresh read. */
+  const save = async (): Promise<boolean> => {
+    setSaving(true); setProblem(null);
+    try {
+      for (let attempt = 0; ; attempt++) {
+        const { campaign: latest } = await getCampaignDetail(base.id);
+        const merged = rebaseEdits(base.nodes, edits, latest.nodes);
+        if ("conflicts" in merged) {
+          const what = { dependencies: ["선행", "dependencies"], title: ["제목", "title"], issue_url: ["이슈", "issue"], missing: ["사라짐", "gone"], locked: ["잠김", "locked"] } as const;
+          const list = merged.conflicts.map(({ id, field }) => `${label(id)} ${tr(what[field][0], what[field][1])}`).join(" · ");
+          setProblem({ text: tr(`다른 곳에서도 바뀌어 저장하지 않았어요: ${list}`, `Changed elsewhere too, so nothing was saved: ${list}`), conflicts: merged.conflicts, latest });
+          return false;
+        }
+        const loops = findCycles(merged.nodes);
+        if (loops.length) { setProblem({ text: tr(`최신본과 합치면 순환이 생겨요. ${cycleText(loops[0])}`, `Merged with the newest copy this makes a cycle. ${cycleText(loops[0])}`) }); return false; }
+        try {
+          const saved = await saveCampaignNodes(latest, merged.nodes);
+          onSaved(saved); setBase(saved); setEdits({}); setUndo([]); typing.current = null;
+          return true;
+        } catch (cause) {
+          if (!(cause instanceof ApiRequestError && cause.status === 409 && attempt < RETRIES)) throw cause;
+        }
+      }
+    } catch (cause) {
+      const busy = cause instanceof ApiRequestError && cause.status === 409;
+      setProblem({ text: busy ? tr("캠페인이 계속 바뀌고 있어요. 잠시 뒤 다시 저장해 보세요.", "The campaign keeps changing. Try saving again shortly.")
+        : cause instanceof Error ? cause.message : tr("저장하지 못했어요.", "Could not save.") });
+      return false;
+    } finally { setSaving(false); }
+  };
+  const adopt = (latest: Campaign, conflicts: Conflict[]) => { setBase(latest); setEdits(adoptLatest(latest, edits, conflicts)); setUndo([]); setProblem(null); };
+  const discard = () => { setBase(campaign); setEdits({}); setUndo([]); setRestored(false); };
+
+  // Leaving with unsaved changes: the parent asks through `leave`, a reload or close through beforeunload, and an
+  // unmount without a decision (rail, palette) keeps the draft for this tab's session.
+  const keep = useRef<{ base: Campaign; edits: Edits } | null>(null);
+  keep.current = dirty ? { base, edits } : null;
+  const request = useCallback((proceed: () => void) => keep.current ? setLeaving(() => proceed) : proceed(), []);
+  useEffect(() => {
+    leave.current = dirty ? request : null;
+    return () => { leave.current = null; };
+  }, [dirty, request, leave]);
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+  useEffect(() => { dropKeptDraft(campaign.id); return () => { if (keep.current) keepDraft(keep.current); }; }, [campaign.id]);
+  const decide = async (choice: "discard" | "save") => {
+    const proceed = leaving;
+    if (choice === "save" && !(await save())) { setLeaving(null); return; }
+    keep.current = null; setLeaving(null); proceed?.();
+  };
+
+  const pick = (id: string) => {
+    if (tool === "select") return setSelection({ kind: "node", id });
+    if (from && from !== id) link(from, id);
+    setFrom(from ? null : id);
+  };
+  const cycleEdges = new Map<string, string[]>();
+  for (const path of cycles) path.slice(1).forEach((to, index) => cycleEdges.set(`${path[index]}->${to}`, path));
+  const labelled = new Set<string[]>();
+  const graphNodes: Node[] = ids.map((id) => {
+    const node = byId.get(id)!;
+    const outside = node.dependencies.filter((dep) => !inScope.has(dep)).length;
+    const looped = cycles.some((path) => path.includes(id));
+    const bad = invalid.some((entry) => entry.id === id);
+    const lock = lockOf(id);
+    const data: TaskNodeData = {
+      title: campaignTaskTitle(node), meta: `${taskLabel(node)} · ${node.group || tr("미분류", "Ungrouped")}`, ...nodeMarker(node.status, node.stage),
+      pins: [tr("선행", "Needs"), tr("다음", "Next")],
+      summary: [tr(`수용조건 ${node.acceptance.length}`, `${node.acceptance.length} acceptance`), outside > 0 && tr(`범위 밖 선행 ${outside}`, `${outside} outside the scope`)].filter(Boolean).join(" · "),
+      note: looped ? { tone: "err", text: tr("순환 오류", "Cycle") } : bad ? { tone: "err", text: tr("입력 오류", "Invalid field") } : lock ? { tone: "lock", text: lock } : null,
+      locked: lock !== null, error: looped || bad, picked: from === id,
+    };
+    return { id, type: "relationsTask", position: positions.get(id) ?? { x: 0, y: 0 }, data, draggable: false, deletable: false,
+      selected: tool === "select" && selection?.kind === "node" && selection.id === id, ariaLabel: `${taskName(node)}, ${tr(...LABELS[node.status])}` };
+  });
+  const edges: Edge[] = ids.flatMap((id) => byId.get(id)!.dependencies.filter((dep) => inScope.has(dep)).map((dep) => {
+    const path = cycleEdges.get(`${dep}->${id}`);
+    const chosen = selection?.kind === "edge" && selection.source === dep && selection.target === id;
+    const first = path && !labelled.has(path);
+    if (path) labelled.add(path);
+    return {
+      id: `${dep}->${id}`, source: dep, target: id, selected: chosen, deletable: lockOf(id) === null,
+      ariaLabel: tr(`선행 ${label(dep)} → ${label(id)}`, `Dependency ${label(dep)} → ${label(id)}`),
+      style: path ? { stroke: "var(--err)", strokeWidth: 2, strokeDasharray: "6 4" } : { stroke: chosen ? "var(--info)" : "var(--fg-muted)", strokeWidth: chosen ? 2.5 : 1.5 },
+      ...first ? { label: cycleText(path), labelStyle: { fill: "var(--err)", fontSize: 12 }, labelBgStyle: { fill: "var(--th-card-bg)" }, labelBgPadding: [6, 3] as [number, number], labelBgBorderRadius: 6 } : {},
+    };
+  }));
+  const chosen = selection?.kind === "node" ? byId.get(selection.id) ?? null : null;
+  const problems = [...cycles.map(cycleText), ...invalid.map(({ id, field }) => `${label(id)} ${field === "title" ? tr("제목", "title") : tr("이슈 주소", "issue link")}`)];
+  const done = ids.filter((id) => byId.get(id)!.status === "completed").length;
+
+  return <section aria-label={tr("작업 관계도 편집", "Edit task relations")} className="campaign-relations-editor grid h-[calc(100dvh-10rem)] min-h-[34rem] min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--th-bg-primary)]">
+    <header className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--line)] bg-[var(--th-card-bg)] px-3 py-2.5">
+      <Button variant="ghost" size="sm" icon={<ArrowLeft aria-hidden className="size-4" />} onClick={() => request(onExit)}>{tr("캠페인", "Campaign")}</Button>
+      <div className="grid min-w-0 flex-[1_1_14rem] gap-0.5">
+        <span className="flex min-w-0 items-center gap-2"><strong className="truncate text-[15px] text-[var(--fg)]">{base.title}</strong><Badge status={base.status} label={tr(...LEDGER_STATUS_LABELS[base.status])} tr={tr} /></span>
+        <span className="truncate text-xs text-[var(--fg-muted)] tabular-nums">{tr(`원장 · rev ${base.revision} · 범위 작업 ${ids.length}개 · 완료 ${done}`, `Ledger · rev ${base.revision} · ${ids.length} tasks in scope · ${done} done`)}</span>
+      </div>
+      <div className="w-60 shrink-0"><SegmentedControl kind="tabs" variant="tray" size="sm" aria-label={tr("편집할 관계", "Relation to edit")} value="relations"
+        options={[{ value: "relations", label: tr("작업 관계", "Task relations") }, { value: "pipeline", label: tr("파이프라인", "Pipeline"), badge: tr("준비 중", "Coming later"), disabled: true }]} /></div>
+      <div className="ml-auto flex flex-wrap items-center gap-2">
+        <KitBadge tone={errors ? "danger" : "success"}>{errors ? tr(`오류 ${errors}`, `${errors} errors`) : tr("검사 통과", "Checks pass")}</KitBadge>
+        {dirty && <KitBadge tone="warning">{tr(`저장 안 됨 · ${summary}`, `Unsaved · ${summary}`)}</KitBadge>}
+        <Button variant="secondary" size="sm" icon={<Undo2 aria-hidden className="size-4" />} disabled={!undo.length || saving} onClick={stepBack}>{tr("되돌리기", "Undo")}</Button>
+        <Button variant="primary" size="sm" loading={saving} disabled={!dirty || errors > 0}
+          title={errors ? tr("오류를 고쳐야 저장돼요", "Fix the errors to save") : undefined} onClick={() => void save()}>{tr("저장", "Save")}</Button>
+      </div>
+    </header>
+    <div>
+      {problem && <div role="alert" className="flex flex-wrap items-center gap-2 border-b border-[var(--line)] bg-[color-mix(in_oklch,var(--err)_12%,transparent)] px-4 py-2 text-sm text-[var(--fg)]">
+        <span className="min-w-0 flex-1">{problem.text}</span>
+        {problem.latest && problem.conflicts && <Button variant="secondary" size="sm" onClick={() => adopt(problem.latest!, problem.conflicts!)}>{tr("바뀐 칸은 최신값으로 두기", "Keep the newest values there")}</Button>}
+      </div>}
+      {restored && <div role="status" className="flex flex-wrap items-center gap-2 border-b border-[var(--line)] px-4 py-2 text-sm text-[var(--fg)]">
+        <span className="min-w-0 flex-1">{tr("저장하지 않은 편집을 다시 불러왔어요.", "Your unsaved edits are back.")}</span>
+        <Button variant="ghost" size="sm" onClick={discard}>{tr("버리기", "Discard")}</Button>
+      </div>}
+    </div>
+    <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_18rem] xl:grid-cols-[minmax(0,1fr)_20rem]">
+      <div className="relative min-h-0 min-w-0">
+        <ReactFlow className={FLOW_CHROME} key={JSON.stringify(scope)} nodes={graphNodes} edges={edges} nodeTypes={NODE_TYPES} fitView fitViewOptions={{ padding: 0.2, minZoom: 0.55, maxZoom: 1 }}
+          minZoom={0.2} maxZoom={1.5} nodesDraggable={false} panOnScroll zoomOnScroll={false} deleteKeyCode={["Delete", "Backspace"]}
+          onConnect={({ source, target }) => source && target && link(source, target)}
+          isValidConnection={({ target }) => lockOf(target) === null}
+          // Selection arrives as a change for a click and for Enter on a focused task or line alike.
+          onNodesChange={(changes) => { const chosen = changes.find((change) => change.type === "select" && change.selected); if (chosen && "id" in chosen) pick(chosen.id); }}
+          onEdgesChange={(changes) => {
+            const chosen = edges.find((edge) => changes.some((change) => change.type === "select" && change.selected && change.id === edge.id));
+            if (chosen) setSelection({ kind: "edge", source: chosen.source, target: chosen.target });
+          }}
+          onPaneClick={() => { setSelection(null); setFrom(null); }}
+          onEdgesDelete={(deleted) => { unlink(deleted.map((edge) => [edge.source, edge.target])); setSelection(null); }}>
+          <Background /><Controls showInteractive={false} position="top-right" />
+        </ReactFlow>
+        <div className="absolute top-3 left-3 z-10 grid max-w-[calc(100%-5rem)] gap-1.5">
+          <div className={`${PANEL} flex min-w-0 items-center gap-2 p-1.5`}>
+            <Select aria-label={tr("편집 범위", "Scope")} className="!min-h-9 !py-1.5" wrapperClassName="w-60 max-w-full" value={scope.kind === "task" ? `task:${scope.id}` : `group:${scope.key}`}
+              onChange={(event) => { const next = parseScope(event.target.value, "1"); if (next) onScope(next); }}>
+              {scope.kind === "task" && <option value={`task:${scope.id}`}>{tr(`작업 주변 · ${label(scope.id)}`, `Around ${label(scope.id)}`)}</option>}
+              {groups.map((group) => <option key={group.key} value={`group:${group.key}`}>{tr(`그룹 · ${group.key || "미분류"} (${group.nodes.length})`, `Group · ${group.key || "Ungrouped"} (${group.nodes.length})`)}</option>)}
+            </Select>
+            {scope.kind === "task" && <Select aria-label={tr("단계", "Steps")} className="!min-h-9 !py-1.5" wrapperClassName="w-28 shrink-0" value={scope.depth} onChange={(event) => onScope({ ...scope, depth: Number(event.target.value) })}>
+              {Array.from({ length: MAX_DEPTH }, (_, index) => <option key={index} value={index + 1}>{tr(`${index + 1}단계`, `${index + 1} step${index ? "s" : ""}`)}</option>)}
+            </Select>}
+          </div>
+          {total > ids.length && <p role="status" className={`${PANEL} m-0 px-3 py-1.5 text-xs text-[var(--warn)]`}>{tr(`작업 ${total}개 중 ${ids.length}개만 그려요. 작업 주변으로 좁혀 보세요.`, `Drawing ${ids.length} of ${total} tasks. Narrow it to one task's neighbors.`)}</p>}
+          {ids.length === 0 && <p role="status" className={`${PANEL} m-0 px-3 py-1.5 text-xs`}>{tr("이 범위에 작업이 없어요.", "No tasks in this scope.")}</p>}
+          {tool === "connect" && <p role="status" className={`${PANEL} m-0 px-3 py-1.5 text-xs text-[var(--fg)]`}>{from ? tr(`${label(from)} 다음에 올 작업을 누르세요.`, `Choose the task that comes after ${label(from)}.`) : tr("선행이 될 작업을 먼저 누르세요.", "First choose the task to depend on.")}</p>}
+        </div>
+        <div className={`${PANEL} absolute bottom-3 left-3 z-10 flex max-w-[calc(50%-6rem)] flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-xs text-[var(--fg-muted)]`}>
+          <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t border-[var(--fg-muted)]" />{tr("선행", "Dependency")}</span>
+          <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t-2 border-dashed border-[var(--err)]" />{tr("순환 오류", "Cycle")}</span>
+        </div>
+        <div role="toolbar" aria-label={tr("편집 도구", "Editing tools")} className={`${PANEL} absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 gap-1 p-1`}>
+          <IconButton icon={<MousePointer2 aria-hidden />} label={tr("선택", "Select")} pressed={tool === "select"} onClick={() => { setTool("select"); setFrom(null); }} />
+          <IconButton icon={<Plus aria-hidden />} label={tr("작업 추가 · 준비 중", "Add a task · coming later")} disabled />
+          <IconButton icon={<Spline aria-hidden />} label={tr("잇기", "Connect")} pressed={tool === "connect"} onClick={() => setTool("connect")} />
+          <IconButton icon={<Cable aria-hidden />} label={tr("케이블타이 · 준비 중", "Cable ties · coming later")} disabled />
+          <IconButton icon={<LayoutGrid aria-hidden />} label={tr("정렬", "Arrange")} onClick={() => setArranged(nodes)} />
+        </div>
+      </div>
+      <RelationsInspector node={chosen} edge={selection?.kind === "edge" ? selection : null} lock={selection ? lockOf(selection.kind === "node" ? selection.id : selection.target) : null}
+        nodes={byId} cycles={cycles} errors={new Set(invalid.filter((entry) => entry.id === chosen?.id).map((entry) => entry.field))} problems={problems} cycleText={cycleText} tr={tr}
+        act={{
+          field: (field, value) => chosen && setText(chosen.id, field, value),
+          add: (dependency) => chosen && link(dependency, chosen.id),
+          remove: (dependency) => chosen && unlink([[dependency, chosen.id]]),
+          unlink: () => { if (selection?.kind === "edge") { unlink([[selection.source, selection.target]]); setSelection(null); } },
+          focus: () => chosen && onScope({ kind: "task", id: chosen.id, depth: 1 }),
+        }} />
+    </div>
+    <Dialog open={leaving !== null} onOpenChange={(open) => { if (!open) setLeaving(null); }} size="md"
+      title={tr(`저장하지 않은 변경이 ${changed}건 있어요`, `${changed} unsaved changes`)}
+      description={tr(`${summary}. 나가면 이 변경은 사라져요.`, `${summary}. Leaving drops them.`)}
+      footer={<>
+        <Button variant="secondary" onClick={() => void decide("discard")}>{tr("버리고 나가기", "Discard and leave")}</Button>
+        <Button variant="secondary" onClick={() => setLeaving(null)}>{tr("계속 편집", "Keep editing")}</Button>
+        <Button variant="primary" loading={saving} disabled={errors > 0} onClick={() => void decide("save")}>{tr("저장하고 나가기", "Save and leave")}</Button>
+      </>} />
+  </section>;
+}

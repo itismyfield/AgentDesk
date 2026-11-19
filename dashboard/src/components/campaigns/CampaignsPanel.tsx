@@ -27,6 +27,8 @@ import {
 } from "./campaignOverviewModel";
 import { Badge, CAMPAIGN_SCOPE, type Tr } from "./campaignPresentation";
 import CampaignRelations from "./CampaignRelations";
+import CampaignRelationsEditor from "./CampaignRelationsEditor";
+import type { EditScope } from "./relationsEditorModel";
 import ServerCampaignControls, { type ControlCommand } from "./ServerCampaignControls";
 import ServerCampaignSections, { ServerTaskDetails } from "./ServerCampaignDetail";
 import ServerCampaignForm, { createDraft, editDraft, isUntouchedCreate, type DefinitionDraft } from "./ServerCampaignForm";
@@ -47,6 +49,7 @@ type CampaignTab = "campaigns" | "queue";
 const NEW_DRAFT = "create";
 const editKey = (id: string) => `edit:${id}`;
 const POLL_MS = 15_000;
+const EDITOR_ENTRY = "campaignRelationsEditor";
 // Both campaign lists are re-read on this slower beat; a failed list read is retried on the next poll.
 const LIST_POLL_MS = 60_000;
 // Route paths match without regard to a trailing slash or case.
@@ -83,6 +86,10 @@ export default function CampaignsPanel({ language }: { language: string }) {
   useEffect(() => { if (selectedPartial && selectedId) void refreshCampaign(selectedId); }, [selectedPartial, selectedId, refreshCampaign]);
   const [serverSelected, setServerSelected] = useState<string | null>(linked?.mode === "server" ? linked.campaign : null);
   const [node, setNode] = useState<string | null>(linked?.node ?? null);
+  // The ledger relations editor's scope while it is open; `leave` is set by the editor while it has unsaved changes.
+  const [editing, setEditing] = useState<EditScope | null>(linked?.mode === "legacy" ? linked.edit ?? null : null);
+  const leave = useRef<((proceed: () => void) => void) | null>(null);
+  const leaveEditor = (proceed: () => void) => leave.current ? leave.current(proceed) : proceed();
   const server = useServerCampaignReads(mode === "server" ? serverSelected : null);
   const { summaries, listLoaded, listError, details, detail, events, refreshList, refreshDetail } = server;
   const serverDoc = server.doc;
@@ -146,15 +153,39 @@ export default function CampaignsPanel({ language }: { language: string }) {
 
   const location: CampaignLocation | null = mode === "server"
     ? serverSelected ? { mode, campaign: serverSelected, node } : null
-    : selectedId ? { mode, campaign: selectedId, node } : null;
+    : selectedId ? { mode, campaign: selectedId, node, ...editing ? { edit: editing } : {} } : null;
   const query = tab === "queue" ? queueLocationQuery(queueCard) : location ? campaignLocationQuery(location) : null;
   // Runs after every render, so a navigation that dropped the query while this panel stayed mounted is undone;
   // once the address shows another page, the query is not this panel's to write.
   const [home] = useState(() => window.location.pathname);
+  // The editor's own history entry carries a mark; while the editor is open no other entry is rewritten, so an entry
+  // the browser's back button reached keeps its address even when an effect from before the move runs late.
+  const editorEntry = (mark: boolean) => ({ ...window.history.state, [EDITOR_ENTRY]: mark || undefined });
+  useEffect(() => { if (editing) window.history.replaceState(editorEntry(true), ""); }, []); // eslint-disable-line react-hooks/exhaustive-deps -- a linked editor marks its entry once
   useEffect(() => {
     const { pathname, search, hash } = window.location;
-    if (query && samePage(pathname, home) && search !== query) window.history.replaceState(window.history.state, "", `${pathname}${query}${hash}`);
+    const onEditorEntry = !!window.history.state?.[EDITOR_ENTRY];
+    if (!query || !samePage(pathname, home) || (editing && !onEditorEntry)) return;
+    if (search !== query || onEditorEntry !== !!editing) window.history.replaceState(editorEntry(!!editing), "", `${pathname}${query}${hash}`);
   });
+  // Opening the editor adds a history entry, so the browser's back button leaves the editor first; with unsaved
+  // changes the editor's entry goes back on and the editor asks.
+  const startEdit = (scope: EditScope) => {
+    if (!selectedId) return;
+    window.history.pushState(editorEntry(true), "", `${window.location.pathname}${campaignLocationQuery({ mode: "legacy", campaign: selectedId, node, edit: scope })}`);
+    setEditing(scope);
+  };
+  const editorAddress = useRef("");
+  editorAddress.current = editing && query ? `${window.location.pathname}${query}` : "";
+  useEffect(() => {
+    const onBack = () => {
+      if (!editorAddress.current || window.history.state?.[EDITOR_ENTRY]) return;
+      if (leave.current) window.history.pushState(editorEntry(true), "", editorAddress.current);
+      leaveEditor(() => setEditing(null));
+    };
+    window.addEventListener("popstate", onBack, true);
+    return () => window.removeEventListener("popstate", onBack, true);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- reads the editor's address and guard through refs
 
   const selectServer = (id: string) => { setMode("server"); setServerSelected(id); setNode(null); };
   const runCommand = async (doc: ServerCampaignDocument, name: ControlCommand, nodeId?: string) => {
@@ -267,6 +298,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       <span className="tabular-nums">{tr("라운드", "Round")} {campaign.round}</span>
     </span>}
     sentence={statusSentence(tr(...LEDGER_STATUS_LABELS[campaign.status]), legacyTasks, tr)}
+    notes={editing && phone && <p role="status" className="m-0 rounded-lg border border-[var(--line)] px-3 py-2 text-sm text-[var(--fg-muted)]">{tr("관계도 편집은 900px 넘는 화면에서 열려요. 여기서는 보기만 해요.", "The relations editor opens on screens wider than 900px. This screen only shows them.")}</p>}
     description={campaign.description && <details className="group min-w-0 text-xs text-[var(--fg-muted)]">
       <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-[var(--r-sm)] px-1 hover:text-[var(--fg)] [&::-webkit-details-marker]:hidden">
         <ChevronDown aria-hidden className="size-3.5 -rotate-90 transition-transform group-open:rotate-0 motion-reduce:transition-none" />{tr("캠페인 설명", "Campaign description")}
@@ -277,7 +309,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       summaryExtra={<CampaignAutoQueueToggle key={campaign.id} campaign={campaign} tr={tr} onSaved={onSaved} checkedRead={checkedRead} held={autoRuns(campaign.id)} />}
       recent={{ title: tr("최근 바뀐 작업", "Recently changed tasks"), entries: recentTaskChanges(legacyTasks) }}
       selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
-    relations={campaign.nodes.length > 0 && <CampaignRelations campaign={campaign} selectedId={node} onOpen={setNode} tr={tr} />}
+    relations={campaign.nodes.length > 0 && <CampaignRelations campaign={campaign} selectedId={node} onOpen={setNode} onEdit={phone ? undefined : startEdit} tr={tr} />}
     board={(controls) => <CampaignBoard columns={legacyBoard(campaign.nodes, live[campaign.id])} tasks={legacyTasks} selectedId={node} controls={controls} onOpen={setNode} tr={tr} />}
     task={openNode && "status" in openNode ? { id: openNode.id, label: campaignIssueLabel(openNode), body: <CampaignNodeDetails key={openNode.id} campaign={campaign} node={openNode} live={live[campaign.id]?.[openNode.id]} tr={tr} onSaved={onSaved}
       editing={drafts[`${campaign.id}:${openNode.id}`] ?? null} onDraftChange={(draft, expected) => onDraftChange(`${campaign.id}:${openNode.id}`, draft, expected)} /> } : null}
@@ -321,7 +353,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const folded = !phone && !!openNode;
   const pickerTitle = selectedEntry?.title ?? (mode === "server" ? serverDoc?.definition.title ?? serverSelected : null);
   return <PageFrame title={tr("캠페인", "Campaigns")} testId="campaigns-page" actions={<div className="w-full sm:w-56">
-    <SegmentedControl<CampaignTab> kind="tabs" variant="tray" fullWidth size="sm" aria-label={tr("캠페인 화면", "Campaign views")} value={tab} onChange={setTab}
+    <SegmentedControl<CampaignTab> kind="tabs" variant="tray" fullWidth size="sm" aria-label={tr("캠페인 화면", "Campaign views")} value={tab} onChange={(next) => editing ? leaveEditor(() => { setEditing(null); setTab(next); }) : setTab(next)}
       options={[{ value: "campaigns", label: tr("캠페인", "Campaigns"), controls: "campaign-panel-campaigns" }, { value: "queue", label: tr("대기열", "Queue"), controls: "campaign-panel-queue" }]} />
   </div>}>
   <section className={`${CAMPAIGN_SCOPE} min-w-0 text-sm`}>
@@ -335,7 +367,8 @@ export default function CampaignsPanel({ language }: { language: string }) {
     </div> : <div id="campaign-panel-campaigns" role="tabpanel" aria-label={tr("캠페인", "Campaigns")} className="grid min-w-0 gap-4">
       {error && <WidgetState kind={campaigns.length ? "stale" : "error"} title={tr("캠페인을 갱신하지 못했습니다.", "Could not refresh campaigns.")} description={error + (campaigns.length ? tr(" · 이전 내용을 표시 중입니다.", " · Showing the previous snapshot.") : "")} action={<button onClick={() => void legacy.refresh()}>{tr("다시 시도", "Retry")}</button>} />}
       {serverDown && <WidgetState kind={summaries.length || serverDoc ? "stale" : "error"} title={tr("서버 캠페인을 갱신하지 못했습니다.", "Could not refresh server campaigns.")} description={(listError ?? tr("서버가 응답하지 않습니다", "The server is not answering")) + (summaries.length || serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
-      <div className={`grid min-w-0 gap-4 min-[900px]:gap-6 ${folded ? "min-[1280px]:grid-cols-[17.5rem_minmax(0,1fr)]" : "min-[900px]:grid-cols-[17.5rem_minmax(0,1fr)]"}`}>
+      {editing && !phone && campaign ? <CampaignRelationsEditor key={campaign.id} campaign={campaign} scope={editing} onScope={setEditing} onExit={() => setEditing(null)} onSaved={onSaved} leave={leave} tr={tr} />
+        : <div className={`grid min-w-0 gap-4 min-[900px]:gap-6 ${folded ? "min-[1280px]:grid-cols-[17.5rem_minmax(0,1fr)]" : "min-[900px]:grid-cols-[17.5rem_minmax(0,1fr)]"}`}>
         {(phone || folded) && <button type="button" className={`campaign-picker !m-0 flex w-full min-w-0 items-center gap-3 !rounded-xl !border !border-[var(--line)] !bg-[var(--th-card-bg)] !px-4 !py-3 text-left ${folded ? "min-[1280px]:!hidden" : ""}`} aria-haspopup="dialog" onClick={() => setPicking(true)}>
             <span className="grid min-w-0 flex-1 gap-0.5">
               <span className="flex min-w-0 items-center gap-2"><strong className="truncate text-sm font-semibold text-[var(--fg)]">{pickerTitle ?? tr("캠페인 고르기", "Choose a campaign")}</strong>{selectedEntry && <Badge status={selectedEntry.status} label={selectedEntry.statusLabel} tr={tr} />}</span>
@@ -355,7 +388,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
             ?? (detail?.error ? <WidgetState kind="error" title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error} />
               : <WidgetState kind={detail && !detail.loading ? "empty" : "loading"} title={detail && !detail.loading ? tr("이 서버 캠페인을 찾을 수 없습니다.", "This server campaign was not found.") : tr("서버 캠페인을 불러오고 있습니다.", "Loading server campaigns.")} />))}
         </div>
-      </div>
+      </div>}
     </div>}
   </section>
   </PageFrame>;
