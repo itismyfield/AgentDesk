@@ -48,7 +48,7 @@ campaign-execution/CampaignPipelineCrashCommitBug.cfg	CampaignPipeline	-	Instanc
 campaign-execution/CampaignPipelineDeleteRace.cfg	CampaignPipeline	-	-
 campaign-execution/CampaignPipelineDeleteRaceBug.cfg	CampaignPipeline	NoOrphanState	InstanceTerminates
 campaign-execution/CampaignPipelineDuplicateEvent.cfg	CampaignPipeline	-	-
-campaign-execution/CampaignPipelineDuplicateEventBug.cfg	CampaignPipeline	OneCommittedExitPerVisit	-
+campaign-execution/CampaignPipelineDuplicateEventBug.cfg	CampaignPipeline	OneCommittedExitPerVisit,PriorityRespected,TerminalNeedsEvidence	-
 campaign-execution/CampaignPipelineFinishAllowsAllBug.cfg	CampaignPipeline	NoLaunchAfterFence,NoNewIntentAfterStop	-
 campaign-execution/CampaignPipelineFinishBlockedBug.cfg	CampaignPipeline	FinishStageKeepsGrant	-
 campaign-execution/CampaignPipelineLateEventBug.cfg	CampaignPipeline	ConditionFromCurrentVisit	-
@@ -63,6 +63,7 @@ campaign-execution/CampaignPipelineRetryExhaustBug.cfg	CampaignPipeline	RetryWit
 campaign-execution/CampaignPipelineStopRace.cfg	CampaignPipeline	-	-
 campaign-execution/CampaignPipelineStopRaceBug.cfg	CampaignPipeline	NoNewIntentAfterStop	-
 campaign-execution/CampaignPipelineTwoJobs.cfg	CampaignPipeline	-	-
+campaign-execution/CampaignPipelineTwoJobsStop.cfg	CampaignPipeline	-	-
 campaign-execution/CampaignProfilePin.cfg	CampaignProfilePin	-	-
 campaign-execution/CampaignProfilePinBefore.cfg	CampaignProfilePin	NoFalseMatch	-
 campaign-execution/CampaignProfilePinNoRole.cfg	CampaignProfilePin	NoFalseMatch	-
