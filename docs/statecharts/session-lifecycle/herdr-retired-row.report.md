@@ -10,7 +10,7 @@ inflight row is gone or held by a successor stops its heartbeat and post-loop `t
 |---|---|
 | Retire | `herdr_terminate.rs` `retire_confirmed` via `queue.rs` force cancel or `herdr_row_end_live.rs` |
 | ForcePostlude | `cancel_effects.rs` `herdr_force_steps` → `hosted_execution/http_force.rs` `disconnect_retired_pg` |
-| LiveEnd | `herdr_row_end_live.rs` `end_live`: settle, then (After) `disconnect_ended`, then cancel the reader |
+| LiveEnd | `herdr_row_end_live.rs` `end_live`: (After) `disconnect_ended`, then `settle_captured`, then cancel the reader. The model takes these as one step and does not check their order; the live end PG test asserts the row is `disconnected` while the captured token is still held just before settlement |
 | Heartbeat | `turn_bridge/stream_tick.rs` 30 s `working` hook; a force cancel settles the reader mutely (`turn_finalizer/finalize.rs` keeps the token uncancelled), so it keeps posting until `ReaderStops` ends it once `lost` |
 | (lost) | the force cancel clears the reader's inflight row; a live row end settles and clears it; the reader's guarded save then reads `RowAbsent`/`SuccessorOwned` (`stream_tick/runtime.rs`) |
 | BridgeExit / BridgeFinal | `post_loop_finalize.rs` `TURN_ACTIVE`, `completion_postlude.rs` terminal `IDLE` (may be skipped) |
