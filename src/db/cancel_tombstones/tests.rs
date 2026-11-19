@@ -1,5 +1,5 @@
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection};
+use sqlx::{AssertSqlSafe, Connection, PgConnection};
 
 use super::*;
 
@@ -12,7 +12,7 @@ pub(crate) struct StorePgFixture {
 }
 
 impl StorePgFixture {
-    pub(crate) async fn connect_test_pool(migration: &str) -> Self {
+    pub(crate) async fn connect_test_pool(migration: &'static str) -> Self {
         let base = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE")
             .expect("store PG tests require an explicit fixture URL");
         let url = url::Url::parse(&base).expect("parse store test PostgreSQL URL");
@@ -29,8 +29,9 @@ impl StorePgFixture {
         let mut admin = PgConnection::connect_with(&options)
             .await
             .expect("connect to store test PostgreSQL");
+        // The schema identifier contains only the fixed prefix and UUID hex.
         let schema = format!("adk_store_test_{}", Uuid::new_v4().simple());
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
             .execute(&mut admin)
             .await
             .expect("create isolated store test schema");
@@ -54,10 +55,13 @@ impl StorePgFixture {
 
     pub(crate) async fn close(mut self) {
         self.pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
-            .execute(&mut self.admin)
-            .await
-            .expect("drop isolated store test schema");
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP SCHEMA {} CASCADE",
+            self.schema
+        )))
+        .execute(&mut self.admin)
+        .await
+        .expect("drop isolated store test schema");
     }
 }
 
