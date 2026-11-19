@@ -320,11 +320,13 @@ def module_directory(source, *, explicit_path=False, crate_root=False):
     return source.parent if owns_dir else source.parent / source.stem
 
 
-def walk(root, repo_root, inventory=None, *, production=False):
+def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None):
     """Add every test the crate root reaches to the inventory, following mod, #[path] and include!."""
+    root, repo_root = root.resolve(), repo_root.resolve()
     inv = inventory if inventory is not None else Inventory()
-    manifest_dir = next((directory for directory in root.parents
-                         if directory.is_relative_to(repo_root) and (directory / "Cargo.toml").is_file()), repo_root)
+    if manifest_dir is None:
+        manifest_dir = next((directory for directory in root.parents
+                             if directory.is_relative_to(repo_root) and (directory / "Cargo.toml").is_file()), repo_root)
     if production:
         try:
             from rust_cfg import cfg_requires_test
@@ -513,9 +515,10 @@ def workspace_packages(repo_root):
 
 
 def workspace_lib_roots(repo_root):
+    repo_root = repo_root.resolve()
     libraries = {}
     for manifest, cargo in workspace_packages(repo_root):
-        root = manifest.parent / cargo.get("lib", {}).get("path", "src/lib.rs")
+        root = (manifest.parent / cargo.get("lib", {}).get("path", "src/lib.rs")).resolve()
         if "lib" in cargo and not root.is_file():
             raise ValueError(f"library root not found: {root.relative_to(repo_root)}")
         if root.is_file():
@@ -550,12 +553,13 @@ def has_test_attr(path):
 
 def lib_inventory(repo_root):
     """Lib-target tests plus every file any crate root reaches (for the orphan check)."""
-    root = next((root for _, root in workspace_lib_roots(repo_root).values()), repo_root / "src/lib.rs")
-    lib = walk(root, repo_root)
+    manifests = {root: manifest.parent for manifest, root in workspace_lib_roots(repo_root).values()}
+    root = next(iter(manifests), repo_root / "src/lib.rs")
+    lib = walk(root, repo_root, manifest_dir=manifests.get(root))
     reached = Inventory(reached=set(lib.reached))
     for other in crate_roots(repo_root):
         if other != root:
-            walk(other, repo_root, reached)
+            walk(other, repo_root, reached, manifest_dir=manifests.get(other))
     lib.reached = reached.reached
     for path, chains in reached.file_cfgs.items():
         lib.file_cfgs.setdefault(path, set()).update(chains)
@@ -569,7 +573,8 @@ def lib_inventory(repo_root):
 
 def lib_tests_by_binary(repo_root):
     """Binary ID -> (manifest directory, library-local inventory)."""
-    return {binary: (manifest.parent, lib_inventory(repo_root) if index == 0 else walk(root, repo_root))
+    return {binary: (manifest.parent, lib_inventory(repo_root) if index == 0 else
+                     walk(root, repo_root, manifest_dir=manifest.parent))
             for index, (binary, (manifest, root)) in enumerate(workspace_lib_roots(repo_root).items())}
 
 

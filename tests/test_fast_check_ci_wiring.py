@@ -608,6 +608,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
 
     def test_pr_cross_os_lane_allows_only_targeted_writer_runtime(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        filters = paths_filter_definitions(workflow)
+        for name in ("rust_or_policy", "rust_compile", "cross_os_rust"):
+            with self.subTest(filter=name):
+                self.assertTrue(selects(filters[name], "crates/adk-store/Cargo.toml"))
         jobs = yaml.safe_load(workflow)["jobs"]
         check, targets = jobs["check_fast_cross_os"], jobs["check_fast_cross_os_targets"]
         python_step_name = (

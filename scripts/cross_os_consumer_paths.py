@@ -66,6 +66,7 @@ def _child(src: Path, name: str, attr: str | None, chain: tuple[str, ...], owned
 
 def scan(root: Path) -> tuple[dict[str, bool], set[str]]:
     """Return {rust file: compiled on Windows} plus the unix-gated module names."""
+    root = root.resolve()
     queue = [lib for _, lib in workspace_lib_roots(root).values()]
     if (root / "src/main.rs").is_file():
         queue.append(root / "src/main.rs")

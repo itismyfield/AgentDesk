@@ -1780,10 +1780,10 @@ class RustSources(unittest.TestCase):
 
     def test_workspace_compare_does_not_fold_identical_names(self):
         self.tree({
-            "Cargo.toml": '[package]\nname = "x"\n[workspace]\nmembers = ["src/store"]\n',
+            "Cargo.toml": '[package]\nname = "x"\n[workspace]\nmembers = ["crates/adk-store"]\n',
             "src/lib.rs": "#[test]\nfn same() {}\n",
-            "src/store/Cargo.toml": '[package]\nname = "adk-store"\n[lib]\npath = "seed.rs"\n',
-            "src/store/seed.rs": 'include!(concat!(env!("CARGO_MANIFEST_DIR"), "/contract.rs"));\n',
+            "crates/adk-store/Cargo.toml": '[package]\nname = "adk-store"\n[lib]\npath = "../../src/store/seed.rs"\n',
+            "src/store/seed.rs": 'include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../src/store/contract.rs"));\n',
             "src/store/contract.rs": "#[test]\nfn same() {}\n",
         })
         suites = {"x": {"binary-id": "x", "kind": "lib", "testcases": {"same": {"ignored": False}}}}

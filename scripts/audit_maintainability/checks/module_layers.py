@@ -91,8 +91,9 @@ def _call_expressions(source):
     return result
 
 
-def _crate(root, repo, coverage, external, local_crates, occurrences=None, reference_expressions=False):
-    inv = walk(root, repo, production=True)
+def _crate(root, repo, coverage, external, local_crates, occurrences=None, reference_expressions=False,
+           *, manifest_dir=None):
+    inv = walk(root, repo, production=True, manifest_dir=manifest_dir)
     root, repo = root.resolve(), repo.resolve()
     rel_root = root.relative_to(repo).as_posix()
     node = lambda names: "::".join((rel_root, "crate", *names))
@@ -458,7 +459,8 @@ def analyze(repo: Path, *, occurrence_projection: list[dict] | None = None,
         for section in ("dependencies", "dev-dependencies", "build-dependencies"):
             external.update(name.replace("-", "_") for name in cargo.get(section, {}))
         found, crate_edges, references, workspace_refs, resolve_export, reached = _crate(
-            repo / rel_root, repo, coverage, external, aliases, occurrences, reference_expressions)
+            repo / rel_root, repo, coverage, external, aliases, occurrences, reference_expressions,
+            manifest_dir=path.parent)
         if rel_root in targets:
             resolvers[rel_root] = resolve_export
         if rel_root in libraries.values():

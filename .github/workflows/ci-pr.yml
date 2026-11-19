@@ -167,6 +167,7 @@ jobs:
               - 'src/services/session_activity.rs'
             rust_or_policy:
               - 'src/**'
+              - 'crates/*/Cargo.toml'
               - 'tests/**'
               - 'migrations/**'
               - 'justfile'
@@ -224,6 +225,7 @@ jobs:
             # tracked paths.
             rust_compile:
               - 'src/**'
+              - 'crates/*/Cargo.toml'
               - 'tests/**'
               - 'migrations/**'
               - 'Cargo.toml'
@@ -251,6 +253,7 @@ jobs:
             # PR-time Windows lane fail closed. Keep the broad positive list in
             # sync with `rust_compile` and document every relay exception.
             cross_os_rust:
+              - 'crates/*/Cargo.toml'
               - 'src/services/engine_runtime/mod.rs'
               - 'src/services/engine_runtime/relay_state.rs'
               - 'src/services/engine_runtime/relay_state/coord.rs'

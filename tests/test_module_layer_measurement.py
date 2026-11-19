@@ -23,18 +23,18 @@ class ModuleLayerMeasurementTests(unittest.TestCase):
 name = "agentdesk"
 version = "0.1.0"
 [workspace]
-members = ["src/db"]
+members = ["crates/adk-store"]
 [workspace.dependencies]
-store-seed = { path = "src/db", package = "adk-store" }
+store-seed = { path = "crates/adk-store", package = "adk-store" }
 [dependencies]
 store-seed = { workspace = true }
 ''',
-            "src/db/Cargo.toml": '''
+            "crates/adk-store/Cargo.toml": '''
 [package]
 name = "adk-store"
 version = "0.1.0"
 [lib]
-path = "adk_store_lib.rs"
+path = "../../src/db/adk_store_lib.rs"
 [dependencies]
 url = "2"
 ''',
