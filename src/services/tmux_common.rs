@@ -13,8 +13,8 @@ pub(crate) use session_markers::{
 };
 #[cfg(unix)]
 pub(crate) use session_markers::{
-    claude_session_auth, claude_session_auth_matches, write_native_session_auth,
-    write_tmux_runtime_kind_marker_under_fence,
+    claude_session_auth, claude_session_auth_matches, require_native_account,
+    write_native_session_auth, write_tmux_runtime_kind_marker_under_fence,
 };
 
 use sha2::{Digest, Sha256};
@@ -62,6 +62,22 @@ impl<'a> TmuxSourceAuthority<'a> {
 
     pub(crate) fn invalidate(&self) {
         invalidate_session_temp_source(self.1);
+    }
+
+    pub(crate) fn remove_session_file(&self, path: &Path) -> Result<(), String> {
+        let owned = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix(self.1))
+            .is_some_and(|suffix| suffix.starts_with('.'));
+        if !owned {
+            return Err("session file belongs to another source".into());
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     #[cfg(test)]
@@ -1277,7 +1293,7 @@ pub(crate) fn cleanup_session_temp_files_under_source_authority(
         authority.invalidate();
     }
     for path in files {
-        let _ = std::fs::remove_file(path);
+        let _ = authority.remove_session_file(&path);
     }
     for path in homes {
         let _ = std::fs::remove_dir_all(path);

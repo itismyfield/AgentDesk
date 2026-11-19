@@ -15,7 +15,7 @@ pub(super) fn resume_selector<'a>(
     pane_live: bool,
     profile_matches: bool,
 ) -> Result<Option<&'a str>, String> {
-    use crate::services::tmux_common::session_evidence::require_native_account;
+    use crate::services::tmux_common::require_native_account;
     if !pane_live
         && crate::services::tui_input::routine_model::current().is_some()
         && let Some(session) = selected

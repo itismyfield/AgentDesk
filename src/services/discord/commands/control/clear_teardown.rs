@@ -23,7 +23,6 @@ mod codex_end_record;
 mod codex_end_tests;
 #[cfg(unix)]
 pub(super) mod resume_fence;
-#[cfg(unix)]
 mod selector_evidence;
 
 /// Advances the channel's transcript clear boundary, retried once.
@@ -64,12 +63,9 @@ pub(super) async fn forget_selector(
         cleared.map_err(anyhow::Error::msg)
     };
     let cleared = report.attempt("session_selector", forget).await;
-    #[cfg(unix)]
     if let (Some(cleared), Some(tmux)) = (cleared, guarded_tmux) {
         selector_evidence::retire(shared, key, provider, tmux, cleared, report).await;
     }
-    #[cfg(not(unix))]
-    let _ = (cleared, provider, guarded_tmux);
 }
 
 /// Ends a live Herdr execution's provider CLI through the terminate service, otherwise the managed

@@ -241,6 +241,7 @@ src/
 │   │   ├── listing.rs
 │   │   ├── provider_resume_fence.rs
 │   │   ├── rebind_override.rs
+│   │   ├── selector_clear.rs
 │   │   ├── tests.rs
 │   │   └── thread_gc.rs
 │   ├── dispatches/
@@ -1353,6 +1354,7 @@ src/
 │   │   │   │   └── symlink_home_tests.rs
 │   │   │   ├── first_input.rs
 │   │   │   ├── launch_policy.rs
+│   │   │   ├── native_account.rs
 │   │   │   └── project_trust.rs
 │   │   ├── absence_launch.rs
 │   │   ├── actual_submit_tests.rs
@@ -1531,7 +1533,8 @@ src/
 │   │   │   │   │   ├── codex_end_record.rs
 │   │   │   │   │   ├── codex_end_tests.rs
 │   │   │   │   │   ├── execution_cleanup.rs
-│   │   │   │   │   └── resume_fence.rs
+│   │   │   │   │   ├── resume_fence.rs
+│   │   │   │   │   └── selector_evidence.rs
 │   │   │   │   ├── codex_clear_relaunch_tests/
 │   │   │   │   │   ├── absent_launch_tests/
 │   │   │   │   │   │   ├── auxiliary_tests/
@@ -4233,6 +4236,7 @@ src/
 │   │   ├── claude_footer.rs
 │   │   ├── host_marker.rs
 │   │   ├── runtime_hint_fence.rs
+│   │   ├── session_evidence.rs
 │   │   └── session_markers.rs
 │   ├── tmux_turn_liveness/
 │   │   ├── claude_idle.rs

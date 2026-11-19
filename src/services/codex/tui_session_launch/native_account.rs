@@ -3,9 +3,7 @@
 use crate::services::codex_tui::session::{CodexTuiSessionSelection, resolve_codex_tui_session};
 use crate::services::platform::tmux::{PaneLiveness, pane_liveness};
 use crate::services::provider_auth_profile::ProviderAuthOverlay;
-use crate::services::tmux_common::{
-    session_evidence::require_native_account, with_tmux_source_authority,
-};
+use crate::services::tmux_common::{require_native_account, with_tmux_source_authority};
 use crate::services::tui_input::routine_model as proof;
 use crate::services::tui_prompt_dedupe::binding_context::{
     BindingContext, SpawnNonceMarker, observe_spawn_nonce_marker,

@@ -42,7 +42,14 @@ pub(super) async fn retire(
             .map_err(anyhow::Error::msg)?;
         with_tmux_source_authority(tmux, |authority| {
             for selector in &retired {
-                session_evidence::retire(authority, provider, selector)
+                #[cfg(unix)]
+                let other_proof = crate::services::tui_input::routine_model::retire(
+                    authority, provider, selector,
+                )
+                .map_err(anyhow::Error::msg)?;
+                #[cfg(not(unix))]
+                let other_proof = false;
+                session_evidence::retire_account(authority, selector, other_proof)
                     .map_err(anyhow::Error::msg)?;
             }
             Ok(())

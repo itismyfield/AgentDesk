@@ -98,7 +98,6 @@ fn read(tmux: &str) -> Option<Proof> {
 }
 
 /// Retire S and report whether another execution still owns the proof file.
-#[cfg(unix)]
 pub(crate) fn retire(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     provider: &str,
@@ -109,7 +108,7 @@ pub(crate) fn retire(
         if proof.provider != provider || proof.tmux != tmux || proof.session != session {
             return Ok(true);
         }
-        crate::services::tmux_common::session_evidence::remove(&path(tmux))?;
+        authority.remove_session_file(&path(tmux))?;
     }
     Ok(false)
 }

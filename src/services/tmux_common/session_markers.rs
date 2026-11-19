@@ -19,6 +19,26 @@ pub(crate) fn tmux_session_auth_profile_matches(
     }
 }
 
+#[cfg(unix)]
+pub(crate) fn require_native_account(
+    tmux: &str,
+    session: &str,
+    profile: &str,
+) -> Result<(), String> {
+    use super::{
+        claude_session_auth, resolve_session_temp_path, tmux_session_auth_profile_matches,
+    };
+    let account = claude_session_auth(tmux, session)?;
+    if account.as_deref() == Some(profile)
+        || (profile == crate::services::provider_auth_profile::DEFAULT_PROFILE_ID
+            && resolve_session_temp_path(tmux, CLAUDE_SESSION_AUTH_TEMP_EXT).is_none()
+            && tmux_session_auth_profile_matches(tmux, profile))
+    {
+        return Ok(());
+    }
+    Err("NotSent(\"routine_resume_account_changed_or_unproved\")".into())
+}
+
 /// Persist the selected profile beside a newly-created provider wrapper so warm
 /// follow-ups are never routed across account boundaries.
 pub(crate) fn write_tmux_session_auth_profile(
@@ -70,7 +90,7 @@ impl AuthMarkers {
 
     pub(crate) fn restore(&self, session_name: &str) -> Result<(), String> {
         if let Some(body) = &self.0 {
-            with_tmux_source_authority(session_name, |_| {
+            with_tmux_source_authority(session_name, |_| -> Result<(), String> {
                 if resolve_session_temp_path(session_name, TMUX_AUTH_PROFILE_TEMP_EXT).is_none() {
                     std::fs::write(
                         session_temp_path(session_name, TMUX_AUTH_PROFILE_TEMP_EXT),

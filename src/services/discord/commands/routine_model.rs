@@ -105,7 +105,7 @@ pub(in crate::services::discord) async fn prepare(input: Input<'_>) -> Result<Pr
         let resumed = match provider {
             ProviderKind::Claude => {
                 if !live {
-                    crate::services::tmux_common::session_evidence::require_native_account(
+                    crate::services::tmux_common::require_native_account(
                         tmux,
                         native,
                         &overlay.profile_id,
@@ -121,7 +121,7 @@ pub(in crate::services::discord) async fn prepare(input: Input<'_>) -> Result<Pr
             }
             ProviderKind::Codex => {
                 if !live {
-                    crate::services::tmux_common::session_evidence::require_native_account(
+                    crate::services::tmux_common::require_native_account(
                         tmux,
                         native,
                         &overlay.profile_id,

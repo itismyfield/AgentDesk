@@ -38,70 +38,36 @@ pub(crate) fn survives_pane_cleanup(path: &Path) -> bool {
         ) && paired_profile(path))
 }
 
-#[cfg(unix)]
-pub(crate) fn require_native_account(
-    tmux: &str,
-    session: &str,
-    profile: &str,
-) -> Result<(), String> {
-    use super::{
-        claude_session_auth, resolve_session_temp_path, tmux_session_auth_profile_matches,
-    };
-    let account = claude_session_auth(tmux, session)?;
-    if account.as_deref() == Some(profile)
-        || (profile == crate::services::provider_auth_profile::DEFAULT_PROFILE_ID
-            && resolve_session_temp_path(tmux, CLAUDE_SESSION_AUTH_TEMP_EXT).is_none()
-            && tmux_session_auth_profile_matches(tmux, profile))
-    {
-        return Ok(());
-    }
-    Err("NotSent(\"routine_resume_account_changed_or_unproved\")".into())
-}
-
-#[cfg(unix)]
-pub(crate) fn retire(
+pub(crate) fn retire_account(
     authority: &super::TmuxSourceAuthority<'_>,
-    provider: &str,
     session: &str,
+    other_proof: bool,
 ) -> Result<(), String> {
     use super::{legacy_tmp_session_path, session_temp_path};
     let tmux = authority.session();
-    let other_proof =
-        crate::services::tui_input::routine_model::retire(authority, provider, session)?;
     let mut result = Ok(());
-    if matches!(provider, "claude" | "codex") {
-        for path in [
-            session_temp_path(tmux, CLAUDE_SESSION_AUTH_TEMP_EXT),
-            legacy_tmp_session_path(tmux, CLAUDE_SESSION_AUTH_TEMP_EXT),
-        ] {
-            let auth = Path::new(&path);
-            let account = match std::fs::read_to_string(auth) {
-                Ok(account) => account,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    result = result.and(Err(error.to_string()));
-                    continue;
-                }
-            };
-            if account_record(&account).is_some_and(|(id, _)| id == session) {
-                let profile = auth.with_extension(TMUX_AUTH_PROFILE_TEMP_EXT);
-                if !other_proof && paired_profile(&profile) {
-                    let removed = remove(&profile);
-                    result = result.and(removed);
-                }
-                let removed = remove(auth);
+    for path in [
+        session_temp_path(tmux, CLAUDE_SESSION_AUTH_TEMP_EXT),
+        legacy_tmp_session_path(tmux, CLAUDE_SESSION_AUTH_TEMP_EXT),
+    ] {
+        let auth = Path::new(&path);
+        let account = match std::fs::read_to_string(auth) {
+            Ok(account) => account,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                result = result.and(Err(error.to_string()));
+                continue;
+            }
+        };
+        if account_record(&account).is_some_and(|(id, _)| id == session) {
+            let profile = auth.with_extension(TMUX_AUTH_PROFILE_TEMP_EXT);
+            if !other_proof && paired_profile(&profile) {
+                let removed = authority.remove_session_file(&profile);
                 result = result.and(removed);
             }
+            let removed = authority.remove_session_file(auth);
+            result = result.and(removed);
         }
     }
     result
-}
-
-#[cfg(unix)]
-pub(crate) fn remove(path: &Path) -> Result<(), String> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.to_string()),
-    }
 }
