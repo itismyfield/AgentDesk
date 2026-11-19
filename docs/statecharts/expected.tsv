@@ -1491,3 +1491,8 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
+input-single-path/HerdrComposerWaitCauseBeforeDialog.cfg	HerdrComposerWaitCause	DialogNamed	-
+input-single-path/HerdrComposerWaitCauseFixedDialog.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseBeforeDialogStays.cfg	HerdrComposerWaitCause	DialogNamed	Resolution
+input-single-path/HerdrComposerWaitCauseFixedDialogStays.cfg	HerdrComposerWaitCause	-	Resolution
+input-single-path/HerdrComposerWaitCauseMutantNoRewakeDialog.cfg	HerdrComposerWaitCause	-	Resolution

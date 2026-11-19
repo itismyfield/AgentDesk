@@ -72,6 +72,8 @@ pub(crate) enum WaitCause {
     Compact,
     /// The moved transcript's windows ended on a screen that may show a turn.
     Screen,
+    /// A dialog, such as a permission prompt, covers the composer until it is dismissed.
+    Modal,
 }
 
 impl Watched {

@@ -538,7 +538,8 @@ fn a_pane_that_outlived_the_restart_takes_one_input_only_on_an_idle_screen() {
         json!({"type":"system","subtype":"turn_duration","timestamp":old}),
     ];
     let mcp = "✻ Baked for 2s\n\n ⚠ 1 MCP server needs authentication · run /mcp";
-    use crate::services::claude_tui::host_input::InputRefusal::{Unknown, Unproven};
+    use crate::services::claude_tui::host_input::InputRefusal::{Unknown, Unproven, Waits};
+    use crate::services::claude_tui::readiness::WaitCause;
     // `None` is admitted; a refusal names what the budget's end saw; a running screen over
     // unchanged idle bytes ends Unproven, as a wait whose transcript never moved reads no screen.
     let cases = [
@@ -558,7 +559,7 @@ fn a_pane_that_outlived_the_restart_takes_one_input_only_on_an_idle_screen() {
                 &format!("{mcp}\nDo you want to proceed?\n❯ 1. Yes\nEnter to confirm"),
                 "",
             ),
-            Some(Unknown),
+            Some(Waits(WaitCause::Modal)),
         ),
         (
             "MCP banner + hook running",
@@ -677,7 +678,7 @@ fn restored_screen_reads_marker_draft_modal_and_busy_but_not_a_stale_auth_banner
 }
 
 /// A wait that ends names its open cause; an older launch's lost source settles. The dialog, a
-/// background agent's permission prompt over the composer, reads Unread over a proven source.
+/// background agent's permission prompt over the composer, holds at once as a dialog.
 #[test]
 fn a_held_first_input_names_its_wait_and_a_lost_older_source_settles() {
     use crate::services::claude_tui::host_input::InputRefusal::{Unproven, Waits};
@@ -693,7 +694,7 @@ fn a_held_first_input_names_its_wait_and_a_lost_older_source_settles() {
             true,
             true,
             dialog.to_string(),
-            Waits(WaitCause::Observed),
+            Waits(WaitCause::Modal),
         ),
         (
             "older launch lost its source",

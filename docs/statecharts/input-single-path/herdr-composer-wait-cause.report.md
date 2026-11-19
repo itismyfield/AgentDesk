@@ -37,3 +37,23 @@ its source late), `Quiet`.
 | Before/FixedHealthy | - | |
 | Before/FixedLaunching | - | a late source of this run still delivers |
 | MutantSettleAnyLaunching | LaunchDelivers | dropping the launch guard settles an input that would deliver |
+
+## S0b: a permission dialog over the composer
+Code: `composer.rs` `when_idle` read `composer_owner` before its modal check, so a background agent's
+permission prompt that replaces the composer read Unread and waited out the budget (`Waits(Observed)`).
+The modal check now runs first and holds at once as `Waits(Modal)`. The held watch already existed:
+`first_input.rs` records a probe (empty composer, no modal) that `held_watch.rs` reads every 2 s and that
+wakes the drive once; 11-19 14:47 production delivered the 12:10 original that way after the prompt closed.
+
+Added: `screen = dialog`, `DialogShown` (only while held), `DialogDismissed` (wakes unless mutant
+`NoRewake`), invariant `DialogNamed` (a front held under a dialog says Modal).
+
+| cfg | broken | meaning |
+|---|---|---|
+| BeforeDialog | DialogNamed | before: the dialog hold is named an observed wait |
+| FixedDialog | - | named Modal; dismissal wakes and delivers |
+| BeforeDialogStays | DialogNamed, Resolution | |
+| FixedDialogStays | Resolution | expected: a prompt nobody answers keeps the input held |
+| MutantNoRewakeDialog | Resolution | without the held-watch wake the dismissed dialog never delivers |
+
+TLC 16/16 as expected.

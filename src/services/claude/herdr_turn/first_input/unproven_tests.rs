@@ -567,6 +567,17 @@ async fn refused_for_good(queue: std::path::PathBuf, channel: u64) {
 // restart-aware watch once the draft clears, and submits the original exactly once.
 #[test]
 fn a_restored_front_held_by_a_draft_wakes_once_the_draft_clears() {
+    held_front_wakes_once_cleared(None);
+}
+
+// A permission prompt over the composer holds at once as a dialog; dismissing it wakes the front.
+#[test]
+fn a_front_held_by_a_permission_dialog_wakes_once_it_is_dismissed() {
+    let dialog = " Bash command · from the adk-lane agent\n Recapture shots\n │ node capture.mjs\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend · ctrl+x ctrl+k twice to stop background agen…";
+    held_front_wakes_once_cleared(Some(dialog));
+}
+
+fn held_front_wakes_once_cleared(dialog: Option<&str>) {
     use crate::services::discord::owner_drive_for_test as drive;
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
@@ -574,7 +585,11 @@ fn a_restored_front_held_by_a_draft_wakes_once_the_draft_clears() {
     let rig = HerdrRig::start();
     let _registry = rig.registry_on_this_thread();
     let logical = format!("i8161-draft-{}", uuid::Uuid::new_v4().simple());
-    let channel = 816_110u64;
+    let channel = if dialog.is_some() {
+        816_111u64
+    } else {
+        816_110
+    };
     let native = uuid::Uuid::new_v4().to_string();
     let projects = root.path().join("projects");
     let path = projects.join("workspace").join(format!("{native}.jsonl"));
@@ -650,7 +665,12 @@ fn a_restored_front_held_by_a_draft_wakes_once_the_draft_clears() {
         "source":"recent_unwrapped","text":format!("✻ Baked for 2s\n\n{border}\n❯ {draft}\n{border}\n  🤖 Opus(H) │ 7% │ MCP: 2\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"),
         "revision":1,"truncated":false}})
     };
-    rig.answer("pane.read", screen("a person's draft"));
+    let held_screen = match dialog {
+        Some(text) => json!({"type":"pane_read","read":{"pane_id":PANE,
+            "source":"recent_unwrapped","text":text,"revision":1,"truncated":false}}),
+        None => screen("a person's draft"),
+    };
+    rig.answer("pane.read", held_screen);
     let attached = |target: HerdrTarget| Attached {
         nonce: NONCE.into(),
         session_id: native.clone(),
@@ -677,7 +697,10 @@ fn a_restored_front_held_by_a_draft_wakes_once_the_draft_clears() {
         .block_on(effect::run(&mailbox, Arc::new(|| 10_000), leaf))
         .unwrap();
     assert!(matches!(held, effect::Completion::NotSent(_)), "{held:?}");
-    assert!(rig.sends().is_empty(), "the draft takes no key");
+    if dialog.is_some() {
+        assert!(format!("{held:?}").contains("Waits(Modal)"), "{held:?}");
+    }
+    assert!(rig.sends().is_empty(), "the hold takes no key");
     let snapshot = runtime
         .block_on(mailbox.v2_request(|slot| slot.as_ref().unwrap().json()))
         .unwrap();

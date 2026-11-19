@@ -144,6 +144,7 @@ pub(crate) fn when_idle(
     use crate::services::claude_tui::readiness::{self, Expiry};
     let mut watched = readiness::watched(session, Some(path));
     let mut budget = composer_ready_wait();
+    let dialog = std::cell::Cell::new(false);
     // A budget that ends on a transcript that only moved runs the same wait in short windows.
     let proof = loop {
         let stop = wait_for(cancel, budget, || {
@@ -153,6 +154,15 @@ pub(crate) fn when_idle(
             let Some(pane) = capture() else {
                 return ControlFlow::Continue(());
             };
+            // A dialog over the composer, a permission prompt among them, holds before the
+            // composer is read: a covered composer reads Unread and would wait out the budget.
+            let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&pane);
+            if crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(
+                &plain,
+            ) {
+                dialog.set(true);
+                return ControlFlow::Break(None);
+            }
             if !readiness::empty_draft(&pane) {
                 match composer_owner(&pane) {
                     ComposerOwner::Person | ComposerOwner::AgentDesk => {
@@ -161,11 +171,6 @@ pub(crate) fn when_idle(
                     ComposerOwner::Unread => return ControlFlow::Continue(()),
                     ComposerOwner::Empty => (),
                 }
-            }
-            if crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(
-                &pane,
-            ) {
-                return ControlFlow::Break(None);
             }
             if proof.restart() && !restored_screen_idle(&pane) {
                 return ControlFlow::Continue(());
@@ -205,6 +210,11 @@ pub(crate) fn when_idle(
             result
         }
         Err(WaitStop::Cancelled) => InputRun::Cancelled { confirmed: 0 },
+        Ok(None) if dialog.get() => {
+            let cause = readiness::WaitCause::Modal;
+            tracing::info!(session, ?cause, "herdr composer held under a dialog");
+            InputRun::Refused(InputRefusal::Waits(cause))
+        }
         _ => InputRun::Refused(InputRefusal::Unknown),
     }
 }
