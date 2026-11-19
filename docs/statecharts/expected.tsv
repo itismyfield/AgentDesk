@@ -1288,6 +1288,9 @@ session-lifecycle/SessionNameDualReadProbeAbsentNoForeignTouch.cfg	SessionNameDu
 session-lifecycle/SessionNameDualReadProbeAbsentNoLiveCut.cfg	SessionNameDualRead	-	-
 session-lifecycle/SessionRotationSelector.cfg	SessionRotationSelector	-	-
 session-lifecycle/SessionRotationSelectorBefore.cfg	SessionRotationSelector	NoOldResume,NoOverwrite	StoredSelectorFollows
+session-lifecycle/SessionRotationSelectorFix1Empty.cfg	SessionRotationSelector	NoOldResume	StoredSelectorFollows
+session-lifecycle/SessionRotationSelectorFix1Herdr.cfg	SessionRotationSelector	-	StoredSelectorFollows
+session-lifecycle/SessionRotationSelectorFix1Key.cfg	SessionRotationSelector	-	StoredSelectorFollows
 session-lifecycle/SessionRotationSelectorRestart.cfg	SessionRotationSelector	NoOldResume	StoredSelectorFollows
 session-lifecycle/TmuxSession.cfg	TmuxSession	NoDeadlock,RowNamesSession,RowOnlyWithTurn	-
 session-lifecycle/TmuxSessionNamingDuplicateKill.cfg	TmuxSession	NoDuplicateKill	-

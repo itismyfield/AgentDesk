@@ -3,85 +3,118 @@
 \* selector (cache) and the stored selector (db) must follow it before the next turn reads them.
 EXTENDS TLC
 
-CONSTANTS Design,   \* "before" | "fixed"
-          Restarts  \* whether a dcserver restart may happen
+CONSTANTS Design,     \* "before" | "fix1" | "fixed"
+          Restarts,   \* whether a dcserver restart may happen
+          Caches,     \* starting caches: "old", or "none" when the channel holds no session
+          Owners,     \* "watcher", or "herdr" for a reconnected Herdr pane with no watcher
+          KeyMatches  \* whether the pane-name key resolves the channel's canonical row
 
-VARIABLES cache, cleared, db, up, outages, rotation, pinned, held, started, last
+VARIABLES cache, cleared, db, up, outages, rotation, followed, pinned, held, started, last,
+          owner, keyMatch
 
-vars == <<cache, cleared, db, up, outages, rotation, pinned, held, started, last>>
+vars == <<cache, cleared, db, up, outages, rotation, followed, pinned, held, started, last,
+          owner, keyMatch>>
 
 Init ==
-    /\ cache = "old" /\ cleared = FALSE /\ db = "old"
+    /\ cache \in Caches
+    /\ cleared = FALSE /\ db = "old"
     /\ up = TRUE /\ outages = 0
     /\ rotation = "none"          \* none | pending | done | lost
+    /\ followed = FALSE           \* a watcherless pane's selector already followed
     /\ pinned \in BOOLEAN         \* a turn on the frozen transcript still holds the channel
     /\ held = pinned              \* the queued input waits behind a running turn
     /\ started = "-"              \* session the queued input's turn resumed
     /\ last = "none"              \* last outside writer of the stored selector: none | clear | newer
+    /\ owner \in Owners
+    /\ keyMatch \in KeyMatches
 
 \* The cache follows only while it still names the session the pane left.
 Followed == IF ~cleared /\ cache = "old" THEN "new" ELSE cache
 
-\* hook adoption records the rotation (adoption_retry.rs settle -> session_rotation.rs record)
+\* Whether the settle pass writes the stored selector, by design.
+Write == IF Design = "fixed"
+         THEN ~cleared /\ Followed \in {"new", "none"} /\ db = "old"
+         ELSE Followed = "new" /\ cache # "new" /\ db = "old" /\ keyMatch
+\* fixed: a failed write keeps the rotation; fix1 also counts a missed row as done
+Ok == ~Write \/ up
+
+Fixed2(rest) == UNCHANGED <<cleared, up, outages, started, last, owner, keyMatch>> /\ rest
+
+\* hook adoption records the rotation
 Adopt == /\ rotation = "none" /\ rotation' = "pending"
-         /\ UNCHANGED <<cache, cleared, db, up, outages, pinned, held, started, last>>
+         /\ UNCHANGED <<cache, cleared, db, up, outages, followed, pinned, held, started, last,
+                        owner, keyMatch>>
 
 \* the frozen turn finishes from its own transcript; the finalizer releases the queue
 FrozenFinish == /\ pinned /\ pinned' = FALSE /\ held' = FALSE
-                /\ UNCHANGED <<cache, cleared, db, up, outages, rotation, started, last>>
+                /\ UNCHANGED <<cache, cleared, db, up, outages, rotation, followed, started, last,
+                               owner, keyMatch>>
 
-\* fixed: the stored selector moves only off the old session, and a failure keeps the rotation
-FixedSettle ==
-    /\ rotation = "pending"
-    /\ LET c == Followed
-           write == c = "new" /\ db = "old"
-           ok == ~write \/ up
-       IN /\ cache' = c
-          /\ db' = IF write /\ up THEN "new" ELSE db
-          /\ rotation' = IF ok THEN "done" ELSE "pending"
+\* fix1/fixed with a watcher: the selector moves, then the queue is released
+WatcherSettle ==
+    /\ Design # "before" /\ owner = "watcher" /\ rotation = "pending"
+    /\ cache' = Followed
+    /\ db' = IF Write /\ up THEN "new" ELSE db
+    /\ rotation' = IF Design = "fix1" \/ Ok THEN "done" ELSE "pending"
     /\ pinned' = FALSE /\ held' = FALSE
-    /\ UNCHANGED <<cleared, up, outages, started, last>>
+    /\ UNCHANGED followed
+    /\ Fixed2(TRUE)
+
+\* fixed, a Herdr pane with no watcher: only the selector follows, the rotation stays
+HerdrFollow ==
+    /\ Design = "fixed" /\ owner = "herdr" /\ rotation = "pending" /\ ~followed
+    /\ cache' = Followed
+    /\ db' = IF Write /\ up THEN "new" ELSE db
+    /\ followed' = Ok
+    /\ UNCHANGED <<rotation, pinned, held>>
+    /\ Fixed2(TRUE)
 
 \* before: the settle releases the queue first, then moves the selector and always retires
-BeforeRelease == /\ rotation = "pending" /\ pinned
+BeforeRelease == /\ Design = "before" /\ owner = "watcher" /\ rotation = "pending" /\ pinned
                  /\ pinned' = FALSE /\ held' = FALSE
-                 /\ UNCHANGED <<cache, cleared, db, up, outages, rotation, started, last>>
+                 /\ UNCHANGED <<cache, db, rotation, followed>>
+                 /\ Fixed2(TRUE)
 BeforeRetire ==
-    /\ rotation = "pending" /\ ~pinned
+    /\ Design = "before" /\ owner = "watcher" /\ rotation = "pending" /\ ~pinned
     /\ cache' = Followed
-    /\ db' = IF Followed = "new" /\ cache = "old" /\ up THEN "new" ELSE db
-    /\ rotation' = "done"
-    /\ held' = FALSE
-    /\ UNCHANGED <<cleared, up, outages, pinned, started, last>>
+    /\ db' = IF Followed = "new" /\ cache = "old" /\ keyMatch /\ up THEN "new" ELSE db
+    /\ rotation' = "done" /\ held' = FALSE
+    /\ UNCHANGED <<pinned, followed>>
+    /\ Fixed2(TRUE)
 
-Settle == IF Design = "fixed" THEN FixedSettle ELSE BeforeRelease \/ BeforeRetire
+Settle == WatcherSettle \/ HerdrFollow \/ BeforeRelease \/ BeforeRetire
 
 \* the queued input's turn start (session_preparation.rs restore)
 TurnStart ==
     /\ rotation # "none" /\ ~held /\ started = "-"
-    /\ LET c == IF Design = "fixed" /\ rotation = "pending" THEN Followed ELSE cache
+    /\ LET restored == IF cache = "none" /\ ~cleared /\ db # "null" THEN db ELSE cache
+           c == IF Design # "before" /\ rotation = "pending" /\ ~cleared /\ restored = "old"
+                THEN "new" ELSE restored
        IN /\ cache' = c
-          /\ started' = IF c = "none" /\ ~cleared
-                           THEN (IF db = "null" THEN "none" ELSE db) ELSE c
-    /\ UNCHANGED <<cleared, db, up, outages, rotation, pinned, held, last>>
+          /\ started' = c
+    /\ UNCHANGED <<cleared, db, up, outages, rotation, followed, pinned, held, last, owner,
+                   keyMatch>>
 
 \* user !clear empties the cache and the stored selector
 Clear == /\ cache' = "none" /\ cleared' = TRUE /\ db' = "null" /\ last' = "clear"
-         /\ UNCHANGED <<up, outages, rotation, pinned, held, started>>
+         /\ UNCHANGED <<up, outages, rotation, followed, pinned, held, started, owner, keyMatch>>
 
 \* another writer stores a newer selector
 DbNewer == /\ db' = "x" /\ last' = "newer"
-           /\ UNCHANGED <<cache, cleared, up, outages, rotation, pinned, held, started>>
+           /\ UNCHANGED <<cache, cleared, up, outages, rotation, followed, pinned, held, started,
+                          owner, keyMatch>>
 
 StoreDown == /\ up /\ outages = 0 /\ up' = FALSE /\ outages' = 1
-             /\ UNCHANGED <<cache, cleared, db, rotation, pinned, held, started, last>>
+             /\ UNCHANGED <<cache, cleared, db, rotation, followed, pinned, held, started, last,
+                            owner, keyMatch>>
 StoreUp == /\ ~up /\ up' = TRUE
-           /\ UNCHANGED <<cache, cleared, db, outages, rotation, pinned, held, started, last>>
+           /\ UNCHANGED <<cache, cleared, db, outages, rotation, followed, pinned, held, started,
+                          last, owner, keyMatch>>
 
 \* a restart loses the cache and the in-memory rotation record
 Restart == /\ Restarts /\ rotation = "pending"
-           /\ cache' = "none" /\ cleared' = FALSE /\ rotation' = "lost"
-           /\ UNCHANGED <<db, up, outages, pinned, held, started, last>>
+           /\ cache' = "none" /\ cleared' = FALSE /\ rotation' = "lost" /\ followed' = FALSE
+           /\ UNCHANGED <<db, up, outages, pinned, held, started, last, owner, keyMatch>>
 
 Next == Adopt \/ FrozenFinish \/ Settle \/ TurnStart \/ Clear \/ DbNewer
         \/ StoreDown \/ StoreUp \/ Restart
