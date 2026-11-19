@@ -181,7 +181,10 @@ pub(crate) fn when_idle(
         match watched.expired(&mut capture) {
             Expiry::Requiet => budget = budget.min(readiness::WINDOW),
             Expiry::Unproven(end) => return InputRun::Refused(InputRefusal::Unproven(end)),
-            Expiry::Waits => return InputRun::Refused(InputRefusal::Unknown),
+            Expiry::Waits(cause) => {
+                tracing::info!(session, ?cause, "herdr composer readiness wait held");
+                return InputRun::Refused(InputRefusal::Waits(cause));
+            }
         }
     };
     match proof {

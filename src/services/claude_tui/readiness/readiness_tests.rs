@@ -115,6 +115,8 @@ pub(crate) mod clear_tests;
 mod idle_compaction_tests;
 #[path = "restart_tests.rs"]
 mod restart_tests;
+#[path = "wait_cause_tests.rs"]
+mod wait_cause_tests;
 impl Drop for Rig {
     fn drop(&mut self) {
         tui_prompt_dedupe::clear_tmux_runtime_binding(&self.session);
@@ -584,7 +586,7 @@ fn a_timed_out_hold_tells_an_unmoved_idle_source_from_a_running_turn() {
     let blank = || Some(" \n".to_owned());
     assert_eq!(
         seen.expired(blank),
-        Expiry::Waits,
+        Expiry::Waits(WaitCause::Screen),
         "a blank screen is not read"
     );
     let mut relaunch = r.ctx.clone();
@@ -594,7 +596,7 @@ fn a_timed_out_hold_tells_an_unmoved_idle_source_from_a_running_turn() {
     tui_prompt_dedupe::binding_context::PreparedIncarnation::create(relaunch).unwrap();
     assert_eq!(
         seen.expired(idle),
-        Expiry::Waits,
+        Expiry::Waits(WaitCause::SourceMoved),
         "a relaunched source waits"
     );
     fs::write(&marker, &r.ctx.execution_nonce).unwrap();

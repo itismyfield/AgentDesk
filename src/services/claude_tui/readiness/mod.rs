@@ -15,7 +15,7 @@ mod source;
 pub(crate) mod tests;
 mod wait;
 mod watched;
-pub(crate) use watched::{Expiry, Unproven, WINDOW, watched};
+pub(crate) use watched::{Expiry, Unproven, WINDOW, WaitCause, watched};
 
 use super::hook_server::HookEventKind;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
@@ -145,10 +145,11 @@ fn idle_reading(path: &Path, tail: &evidence::Tail) -> bool {
 }
 /// The incarnation was launched before this daemon run, so it never sent this run a Start.
 fn launched_before_start(source: &Source) -> bool {
-    source.nonce.as_deref().is_some_and(|nonce| {
-        crate::services::tui_prompt_dedupe::binding_context::execution_context("claude", nonce)
-            .is_ok_and(|ctx| ctx.created_at < *STARTED)
-    })
+    source.nonce.as_deref().is_some_and(launched_before_run)
+}
+fn launched_before_run(nonce: &str) -> bool {
+    crate::services::tui_prompt_dedupe::binding_context::execution_context("claude", nonce)
+        .is_ok_and(|ctx| ctx.created_at < *STARTED)
 }
 fn evidence(session: &str, path: Option<&Path>, origin: Option<ProofOrigin>) -> Option<Proof> {
     let restart_ok = origin == Some(ProofOrigin::RestoredHard);

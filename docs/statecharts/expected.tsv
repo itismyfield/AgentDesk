@@ -1480,3 +1480,14 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
+input-single-path/HerdrComposerWaitCauseBeforeSourceNone.cfg	HerdrComposerWaitCause	-	Resolution
+input-single-path/HerdrComposerWaitCauseFixedSourceNone.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseBeforeFence.cfg	HerdrComposerWaitCause	-	Resolution
+input-single-path/HerdrComposerWaitCauseFixedFence.cfg	HerdrComposerWaitCause	-	Resolution
+input-single-path/HerdrComposerWaitCauseBeforeUnread.cfg	HerdrComposerWaitCause	-	Resolution
+input-single-path/HerdrComposerWaitCauseFixedUnread.cfg	HerdrComposerWaitCause	-	Resolution
+input-single-path/HerdrComposerWaitCauseBeforeHealthy.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseFixedHealthy.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseBeforeLaunching.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseFixedLaunching.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseMutantSettleAnyLaunching.cfg	HerdrComposerWaitCause	-	LaunchDelivers
