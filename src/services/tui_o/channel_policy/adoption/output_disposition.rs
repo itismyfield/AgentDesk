@@ -195,6 +195,10 @@ impl Output {
     fn identity_mismatch(id: &Identity, proof: &FirstProof) -> bool {
         *id != Identity::from_proof(proof, id.input)
     }
+    /// Whether any view of this admission has spent its one repair.
+    pub(crate) fn repair_spent(&self) -> bool {
+        self.repair.load(Ordering::SeqCst)
+    }
     pub(crate) fn take_repair(&self) -> bool {
         let state = self.state.lock().unwrap();
         if state.0 != Phase::Normalizing || Instant::now() >= self.deadline {

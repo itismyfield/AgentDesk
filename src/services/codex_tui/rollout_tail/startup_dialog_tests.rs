@@ -225,7 +225,7 @@ fn startup_dialog_rechecks_rollout_created_during_capture() {
 }
 
 // An admitted launch's startup check repairs its trust menu with the admission's one repair and
-// completes; a refused option keeps the startup failure and sends nothing.
+// completes; a refused option fails with no Enter; a watch taking that repair first is waited on.
 #[test]
 fn an_admitted_launch_repairs_its_trust_menu_before_the_startup_check_fails_it() {
     use crate::services::tui_o::channel_policy::{Adoption, BootChannels, first_prompt_digest};
@@ -236,7 +236,11 @@ fn an_admitted_launch_repairs_its_trust_menu_before_the_startup_check_fails_it()
     let (root, _guards) = fixture();
     let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let negative = "Do you trust this folder?\n  1. Yes, proceed\n› 2. No, exit";
-    for (channel, pane) in [(8_165_311u64, TRUST), (8_165_312, negative)] {
+    for (channel, pane, raced) in [
+        (8_165_311u64, TRUST, false),
+        (8_165_312, negative, false),
+        (8_165_313, TRUST, true),
+    ] {
         dedupe::reset_state_for_tests();
         let cwd = root.path().join(format!("workspaces/project-{channel}"));
         std::fs::create_dir_all(&cwd).unwrap();
@@ -294,8 +298,20 @@ fn an_admitted_launch_repairs_its_trust_menu_before_the_startup_check_fails_it()
             .environment_assignment()
             .unwrap();
         let identity = crate::services::process::shell_escape(&identity);
+        // Raced: the repair's own pane look waits while the trust watch takes the repair.
+        let (gate, count) = (root.path().join("race"), root.path().join("looks"));
+        let block = if raced {
+            let made = std::process::Command::new("mkfifo").arg(&gate).status();
+            assert!(made.unwrap().success());
+            let (gate, count) = (gate.display(), count.display());
+            format!(
+                "n=$(($(cat '{count}' 2>/dev/null || echo 0)+1)); echo $n > '{count}'; [ $n -eq 2 ] && read _ < '{gate}'; "
+            )
+        } else {
+            String::new()
+        };
         let script = format!(
-            "#!/bin/sh\ncase \" $* \" in\n*show-environment*) printf '%s\\n' {identity};;\n*display-message*) printf '0\\n{}\\n';;\n*send-keys*) echo \"$*\" >> '{}'; cp '{}' '{}/';;\n*capture-pane*) if [ -f '{}' ]; then echo ready; else cat \"$I8165_PANE\"; fi;;\n*) exit 64;;\nesac\n",
+            "#!/bin/sh\ncase \" $* \" in\n*show-environment*) printf '%s\\n' {identity};;\n*display-message*) printf '0\\n{}\\n';;\n*send-keys*) echo \"$*\" >> '{}'; cp '{}' '{}/';;\n*capture-pane*) {block}if [ -f '{}' ]; then echo ready; else cat \"$I8165_PANE\"; fi;;\n*) exit 64;;\nesac\n",
             cwd.display(),
             keys.display(),
             rollout.display(),
@@ -303,6 +319,18 @@ fn an_admitted_launch_repairs_its_trust_menu_before_the_startup_check_fails_it()
             keys.display(),
         );
         std::fs::write(root.path().join("tmux"), script).unwrap();
+        let watch = raced.then(|| {
+            let (candidate, keys, rollout) = (candidate.clone(), keys.clone(), rollout.clone());
+            let landed = sessions.join(rollout.file_name().unwrap());
+            std::thread::spawn(move || {
+                let mut gate = std::fs::OpenOptions::new().write(true).open(&gate).unwrap();
+                let (_, view) = candidate.first_trust_launch(tmux).unwrap();
+                assert!(view.take_repair(), "the trust watch takes the repair first");
+                std::fs::write(&keys, "send-keys Enter\n").unwrap();
+                std::fs::copy(&rollout, landed).unwrap();
+                std::io::Write::write_all(&mut gate, b"\n").unwrap();
+            })
+        });
         let (tx, _rx) = std::sync::mpsc::channel();
         let options = RolloutTailOptions {
             wait_for_rollout: Duration::from_secs(2),
@@ -317,10 +345,13 @@ fn an_admitted_launch_repairs_its_trust_menu_before_the_startup_check_fails_it()
             || true,
             options,
         );
+        if let Some(watch) = watch {
+            crate::test_support::wait::join_within(watch, Duration::from_secs(2));
+        }
         let enters = std::fs::read_to_string(&keys).map_or(0, |log| log.lines().count());
         let spent = candidate
             .first_trust_launch(tmux)
-            .map(|(_, _, spent)| spent);
+            .map(|(_, view)| view.repair_spent());
         if pane == TRUST {
             let result = result.unwrap();
             assert!(matches!(

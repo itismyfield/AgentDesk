@@ -16,7 +16,7 @@ pub(crate) use channel_gate::{
 };
 #[cfg(unix)]
 pub(crate) use channel_gate::{
-    Observed, peek_o_owns_tui_output_for_channel_quiet, with_peeked_o_output,
+    Observed, peek_o_owns_tui_output_for_channel_quiet, thread_child_decided, with_peeked_o_output,
 };
 #[cfg(all(test, unix))]
 mod channel_lookup_tests;
@@ -387,24 +387,34 @@ pub(crate) fn watch_codex_first_trust(
 #[cfg(unix)]
 pub(crate) fn codex_first_trust_holds_startup(tmux: &str, cwd: &std::path::Path) -> bool {
     use crate::services::codex_tui::{host_input::trust::TrustHost, normalize};
-    let launch = test_override::with_channels(|boot| {
-        let boot = boot?;
-        boot.channels()
-            .iter()
-            .filter_map(|channel| boot.output_candidate(*channel))
-            .find_map(|candidate| candidate.first_trust_launch(tmux))
-    });
-    let Some((context, output, spent)) = launch else {
+    let launch = || {
+        test_override::with_channels(|boot| {
+            let boot = boot?;
+            boot.channels()
+                .iter()
+                .filter_map(|channel| boot.output_candidate(*channel))
+                .find_map(|candidate| candidate.first_trust_launch(tmux))
+        })
+    };
+    let Some((context, output)) = launch() else {
         return false;
     };
     if output.remaining().is_zero() {
         return false;
     }
-    spent
-        || matches!(
+    let repaired = !output.repair_spent()
+        && matches!(
             normalize::repair_if_shown(&output, &context, cwd, &mut TrustHost),
             Some(Ok(_))
-        )
+        );
+    // The repair is shared with the launch's trust watch: one either spent, for the same pending
+    // admission and within its first deadline, is waited on rather than failed.
+    repaired
+        || launch().is_some_and(|(now, view)| {
+            now.execution_nonce == context.execution_nonce
+                && view.repair_spent()
+                && !view.remaining().is_zero()
+        })
 }
 
 pub(crate) fn pause_codex_first(channel: u64) -> Option<channel_policy::FirstPause> {
