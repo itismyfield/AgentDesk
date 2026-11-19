@@ -3,40 +3,34 @@
 
 use super::*;
 
-/// Moves the channel's cached session onto `rotation`'s new session while it still names a
-/// session this pane left. A cleared, empty or unrelated cache stays as it is. Returns the
-/// sessions the stored selector may move off when the cache now names the new session.
+/// Moves the channel's cached session onto `rotation`'s new session while it still names the
+/// session the pane left. A cleared, empty or unrelated cache stays as it is. Returns the left
+/// session when the cache now names the new one, so the stored selector may move off it.
 async fn follow_cached_selector(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     rotation: &crate::services::tui_prompt_dedupe::ClaudeSessionRotation,
-) -> Option<Vec<String>> {
-    let new = rotation.new_session_id.as_str();
-    let tmux = rotation.tmux_session_name.as_str();
+) -> Option<String> {
+    let (old, new) = (rotation.old_session_id.clone()?, &rotation.new_session_id);
     let mut data = shared.core.lock().await;
     let session = data.sessions.get_mut(&channel_id)?;
     let cached = session.session_id.clone().filter(|_| !session.cleared)?;
-    let mut left: Vec<String> = rotation.old_session_id.iter().cloned().collect();
-    if cached == new {
-        return Some(left);
+    if cached == *new {
+        return Some(old);
     }
-    let resolve = crate::services::tui_prompt_dedupe::resolve_tmux_session_name;
-    let left_by_pane =
-        left.contains(&cached) || resolve("claude", &cached).as_deref() == Some(tmux);
-    if !left_by_pane {
+    if cached != old {
         return None;
     }
-    session.restore_provider_session(Some(new.to_string()));
+    session.restore_provider_session(Some(new.clone()));
     tracing::info!(
         provider = "claude",
         channel_id = channel_id.get(),
-        tmux_session_name = tmux,
-        old_session_id = %cached,
-        new_session_id = new,
+        tmux_session_name = %rotation.tmux_session_name,
+        old_session_id = %old,
+        new_session_id = %new,
         "moved the channel's cached provider session to the rotated Claude session"
     );
-    left.push(cached);
-    Some(left)
+    Some(old)
 }
 
 /// Moves the cache and then the stored selector. Returns false only when the stored selector
@@ -46,7 +40,7 @@ pub(super) async fn follow_rotation_selector(
     channel_id: ChannelId,
     rotation: &crate::services::tui_prompt_dedupe::ClaudeSessionRotation,
 ) -> bool {
-    let Some(left) = follow_cached_selector(shared, channel_id, rotation).await else {
+    let Some(old) = follow_cached_selector(shared, channel_id, rotation).await else {
         return true;
     };
     let provider = ProviderKind::Claude;
@@ -72,7 +66,7 @@ pub(super) async fn follow_rotation_selector(
     let moved = crate::db::dispatched_sessions::rotation_selector::move_provider_selector_pg(
         pool,
         &session_key,
-        &left,
+        &old,
         new,
     )
     .await;
