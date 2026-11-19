@@ -100,6 +100,15 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) {
+    #[cfg(unix)]
+    for channel in inflight::herdr_body_debt::reconcile(provider) {
+        super::super::queue_io::input_owner::closed::closed(
+            shared,
+            provider,
+            ChannelId::new(channel),
+            "herdr_body_debt_restore",
+        );
+    }
     let states = inflight::load_inflight_states(provider);
     let (states, boot) = super::receipt_settle::settle_boot(shared, states).await;
     observe_restore_inflight_snapshot(
@@ -112,7 +121,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         return;
     }
 
-    Box::pin(restore_inflight_states(http, shared, provider, states)).await;
+    Box::pin(super::restore_serially(http, shared, provider, states)).await;
     boot.settle_cleared(shared, provider).await;
     replay_decision::spawn_pg_only(shared.pg_pool.as_ref(), provider.as_str());
 }
@@ -387,7 +396,7 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                         .map(|confirmed_end| (state.last_offset, confirmed_end)),
                     shared.restart.current_generation,
                 );
-                let relay_ok = relay_recovery_body_to_placeholder(
+                let outcome = relay_recovery_body_to_placeholder(
                     http,
                     shared,
                     &state,
@@ -396,8 +405,20 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     &final_text,
                     recovery_context.as_ref(),
                 )
+                .await;
+                // A refused body whose reason intent is durable ends here, with nothing delivered.
+                if super::completion_delivery::retire_refused(
+                    shared,
+                    provider,
+                    &state,
+                    outcome,
+                    "recovery_completed_during_downtime",
+                )
                 .await
-                .delivered();
+                {
+                    continue;
+                }
+                let relay_ok = outcome.delivered();
                 if !should_advance_recovery_dispatch_after_relay(relay_ok) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
@@ -1059,7 +1080,7 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                 terminal_success_end.map(|confirmed_end| (state.last_offset, confirmed_end)),
                 shared.restart.current_generation,
             );
-            let relay_ok = relay_recovery_body_to_placeholder(
+            let outcome = relay_recovery_body_to_placeholder(
                 http,
                 shared,
                 &state,
@@ -1068,8 +1089,20 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                 &final_text,
                 recovery_context.as_ref(),
             )
+            .await;
+            // A refused body whose reason intent is durable ends here, with nothing delivered.
+            if super::completion_delivery::retire_refused(
+                shared,
+                provider,
+                &state,
+                outcome,
+                "recovery_captured_full_response",
+            )
             .await
-            .delivered();
+            {
+                continue;
+            }
+            let relay_ok = outcome.delivered();
 
             if !should_advance_recovery_dispatch_after_relay(relay_ok) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1324,7 +1357,7 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                 terminal_success_end.map(|confirmed_end| (state.last_offset, confirmed_end)),
                 shared.restart.current_generation,
             );
-            let relay_ok = relay_recovery_body_to_placeholder(
+            let outcome = relay_recovery_body_to_placeholder(
                 http,
                 shared,
                 &state,
@@ -1333,8 +1366,20 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                 &final_text,
                 recovery_context.as_ref(),
             )
+            .await;
+            // A refused body whose reason intent is durable ends here, with nothing delivered.
+            if super::completion_delivery::retire_refused(
+                shared,
+                provider,
+                &state,
+                outcome,
+                "recovery_output_completed",
+            )
             .await
-            .delivered();
+            {
+                continue;
+            }
+            let relay_ok = outcome.delivered();
 
             if !should_advance_recovery_dispatch_after_relay(relay_ok) {
                 let ts = chrono::Local::now().format("%H:%M:%S");

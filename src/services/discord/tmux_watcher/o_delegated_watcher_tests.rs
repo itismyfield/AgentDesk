@@ -61,6 +61,128 @@ async fn o_delegated_watcher_turn_shows_no_body_and_records_no_frontier() {
     );
 }
 
+/// A held watcher terminal is retried, never finalized, and shows nothing; once O adopts, the next
+/// retry ends the turn through O with no new input, and Legacy still shows nothing.
+#[tokio::test(flavor = "current_thread")]
+async fn a_held_watcher_terminal_retries_until_o_adopts_and_then_ends_through_o() {
+    if !isolated_in(
+        "o_delegated_watcher_tests",
+        "a_held_watcher_terminal_retries_until_o_adopts_and_then_ends_through_o",
+        &[],
+    ) {
+        return;
+    }
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::cutover::test_override;
+    let seed = turn("T0", T0);
+    let mut h = Harness::new(25, &seed).await;
+    let f = seed.len() as u64;
+    h.commit(0, f);
+    let _bound = test_override::bind_claude_tui_session(&h.tmux, &h.path);
+    // A thread-local candidate: this runtime runs the watcher on the test's own thread.
+    let _pending = test_override::force_candidates(&[(h.channel.get(), ClaudeTui)]);
+    h.row_at(f);
+    h.spawn(f);
+    h.append(turn("T1", BODY).as_bytes());
+    let held = || Harness::logged("tui_o output held for adoption").len();
+    // Past the three rewinds a failing send gets before the watcher gives up on its turn.
+    h.until("the held terminal retried past the rewind cap", |_| {
+        held() >= 20
+    })
+    .await;
+    let gave_up = Harness::logged("rewind cap exceeded");
+    assert!(
+        gave_up.is_empty(),
+        "a held turn is never given up: {gave_up:?}"
+    );
+    let waiting = h.observe(&[BODY]);
+    assert_eq!(
+        waiting.copies,
+        vec![Vec::<u64>::new()],
+        "nothing shows the held body"
+    );
+    assert_eq!(
+        waiting.row,
+        Some((f, false)),
+        "the held turn's row stays open"
+    );
+
+    let candidate = test_override::with_channels(|boot| boot?.candidate(h.channel.get()).cloned());
+    assert!(candidate.unwrap().confirm_store(), "the adoption commits");
+    h.until("the turn ends through O", |h| {
+        h.row().is_none_or(|row| row.terminal_delivery_committed)
+    })
+    .await;
+    let ended = h.observe(&[BODY]);
+    assert_eq!(
+        ended.copies,
+        vec![Vec::<u64>::new()],
+        "O, not Legacy, owns the body"
+    );
+    assert_eq!(ended.overwritten, 0, "and Legacy never showed it");
+    assert_eq!(
+        ended.frontier,
+        Some((0, f)),
+        "no Legacy frontier for the range"
+    );
+}
+
+/// A refused adoption holds the watcher terminal as well: the gate answers refused from the start,
+/// the watcher reads the same range again instead of finalizing it, and the turn's row stays open.
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_watcher_terminal_is_read_again_and_never_finalized() {
+    if !isolated_in(
+        "o_delegated_watcher_tests",
+        "a_refused_watcher_terminal_is_read_again_and_never_finalized",
+        &[],
+    ) {
+        return;
+    }
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::cutover::{
+        IdentityError, peek_o_owns_tui_output_for_channel_tmux, test_override,
+    };
+    let seed = turn("T0", T0);
+    let mut h = Harness::new(26, &seed).await;
+    let f = seed.len() as u64;
+    h.commit(0, f);
+    let _bound = test_override::bind_claude_tui_session(&h.tmux, &h.path);
+    let _refused = test_override::force_candidates(&[(h.channel.get(), ClaudeTui)]);
+    let candidate = test_override::with_channels(|boot| boot?.candidate(h.channel.get()).cloned());
+    candidate.unwrap().release(h.channel.get());
+    let gate = peek_o_owns_tui_output_for_channel_tmux(h.channel.get(), Some(&h.tmux));
+    assert_eq!(gate, Err(IdentityError::AdoptionRefused));
+    h.row_at(f);
+    h.spawn(f);
+    h.append(turn("T1", BODY).as_bytes());
+    let end = h.len();
+    let reads = |h: &Harness| {
+        let frames = h.frames().into_iter();
+        frames
+            .filter(|frame| (frame.0, frame.1) == (f, end))
+            .count()
+    };
+    // Past the rewind cap (3) by two, so a refused retry counted as a rewind would give up first.
+    h.until("the refused terminal's range read again", |h| reads(h) >= 5)
+        .await;
+    let gave_up = Harness::logged("rewind cap exceeded");
+    assert!(
+        gave_up.is_empty(),
+        "a refused turn is not given up: {gave_up:?}"
+    );
+    let seen = h.observe(&[BODY]);
+    assert_eq!(
+        seen.copies,
+        vec![Vec::<u64>::new()],
+        "nothing shows the refused body"
+    );
+    assert_eq!(
+        seen.row,
+        Some((f, false)),
+        "the refused turn's row stays open"
+    );
+}
+
 const TASK_SUMMARY: &str = "ADK-O background task finished";
 
 fn task_value() -> serde_json::Value {

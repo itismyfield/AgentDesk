@@ -367,3 +367,29 @@ fn every_wrapper_spool_counts_against_the_file_budget() {
     let over = sized(33);
     assert!(over.refused.contains("budget_sources"), "{over:?}");
 }
+
+/// A Deferred late reservation is judged like a pending channel. A held turn keeps its obligation
+/// busy without refusing, and lets the current source end open, only with a delivered end set.
+#[test]
+fn a_deferred_reservation_is_judged_and_a_held_turn_needs_a_delivered_end() {
+    let deferred = judged(&with("/candidate", json!("deferred")));
+    assert_eq!(deferred.boundary, Verdict::Eligible, "{deferred:?}");
+    let held = |frontier: Value| {
+        let mut evidence = with("/obligations/custody", json!("held"));
+        evidence["sources"][0]["closed"] = json!("open");
+        if !frontier.is_null() {
+            evidence["sources"][0]["frontier"] = frontier;
+        }
+        judged(&evidence)
+    };
+    let taken = held(json!(3000));
+    assert_eq!(taken.boundary, Verdict::Eligible, "{taken:?}");
+    assert!(held(Value::Null).unknown.contains("current.frontier"));
+    let past = held(json!(4001));
+    assert!(
+        past.refused.contains("current.frontier_past_cursor"),
+        "{past:?}"
+    );
+    let open = judged(&with("/sources/0/closed", json!("open")));
+    assert!(open.refused.contains("current.turn_open"), "{open:?}");
+}

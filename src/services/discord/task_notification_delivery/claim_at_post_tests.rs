@@ -5,7 +5,7 @@ use super::super::{ResponseDeliveryClaimOutcome, ResponseDeliveryOwner};
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
 use crate::services::tui_o::channel_policy::{Adoption, BodyCheck, SinkOp};
-use crate::services::tui_o::cutover::test_override;
+use crate::services::tui_o::cutover::{IdentityError, test_override};
 
 const BODY: &str = "ADK-C1A-claim-at-post-body";
 const BOT: u64 = 77_6325;
@@ -89,7 +89,7 @@ async fn posting(claim: &ResponseDeliveryClaim) -> PreparedResponseChunk {
 }
 
 /// Every no-post decision (identity lookup, journal conflict, confirmed or quarantined chunk,
-/// history that cannot prove absence) leaves a pending adoption; only a real post releases it.
+/// history that cannot prove absence) leaves a pending adoption; a real post is held at the claim.
 #[tokio::test]
 async fn a_task_response_claims_its_channel_only_at_a_chunk_post() {
     let cases = [
@@ -139,15 +139,17 @@ async fn a_task_response_claims_its_channel_only_at_a_chunk_post() {
         let posts = sink.posts.load(Ordering::Acquire);
         let sent = transport.settle(sent);
         check.assert_settled();
+        if case == "sent" {
+            let held = matches!(sent, Err(IdentityError::AwaitingAdoption));
+            assert!(held, "{case}: {sent:?}");
+            assert_eq!((posts, check.adoption()), (0, Adoption::Pending), "{case}");
+            continue;
+        }
         let result = match sent {
             Ok(BodySend::Sent(result)) => result,
             other => panic!("{case}: Legacy owns a pending channel: {other:?}"),
         };
         match case {
-            "sent" => {
-                assert_eq!((posts, check.adoption()), (1, Adoption::Released), "{case}");
-                assert_eq!(result.map(|ids| ids.len()).ok(), Some(1), "{case}");
-            }
             "confirmed" => {
                 assert_eq!((posts, check.adoption()), (0, Adoption::Pending), "{case}");
                 assert_eq!(result.ok(), Some(vec![MessageId::new(55)]), "{case}");
@@ -192,11 +194,10 @@ async fn a_task_response_posts_nothing_on_a_channel_o_committed() {
     assert_eq!(check.adoption(), Adoption::Committed);
 }
 
-/// A chunk sink that notes the channel's Legacy sends as each post lands; history is empty.
+/// A chunk sink that counts each post as it lands; history is empty.
 struct Counting<'a> {
     inner: DiscordResponseChunkTransport<'a>,
-    candidate: crate::services::tui_o::channel_policy::Candidate,
-    seen: std::sync::Mutex<Vec<(u64, u64)>>,
+    posts: AtomicUsize,
 }
 
 impl ResponseChunkTransport for Counting<'_> {
@@ -211,7 +212,7 @@ impl ResponseChunkTransport for Counting<'_> {
         reference_message_id: Option<u64>,
         nonce: &str,
     ) -> Result<u64, ResponseChunkPostError> {
-        self.seen.lock().unwrap().push(self.candidate.sends());
+        self.posts.fetch_add(1, Ordering::AcqRel);
         self.inner
             .post_chunk(channel_id, content, reference_message_id, nonce)
             .await
@@ -227,16 +228,16 @@ impl ResponseChunkTransport for Counting<'_> {
     }
 }
 
-/// A response's claimed send stays counted from its first chunk post through its last and until
-/// the transport drops, so no adoption lands between two chunks of one Legacy body.
+/// A Legacy response's census source tags its first chunk post and every later one, also after
+/// the source scope that sent the first has ended.
 #[tokio::test]
-async fn a_task_response_stays_counted_across_its_chunks_until_the_transport_drops() {
+async fn a_task_response_keeps_its_census_source_on_every_chunk_post() {
     use crate::services::discord::outbound::{census_scope, raw_output::tests as recording};
     use serde_json::{Value, json};
     if recording::isolated(
         concat!(
             module_path!(),
-            "::a_task_response_stays_counted_across_its_chunks_until_the_transport_drops"
+            "::a_task_response_keeps_its_census_source_on_every_chunk_post"
         )
         .trim_start_matches("agentdesk::"),
     ) {
@@ -248,9 +249,7 @@ async fn a_task_response_stays_counted_across_its_chunks_until_the_transport_dro
         .enumerate()
     {
         let channel = 4_325_427 + index as u64;
-        let _candidates = test_override::force_candidates(&[(channel, ClaudeTui)]);
-        let candidate =
-            test_override::with_channels(|boot| boot?.candidate(channel).cloned()).unwrap();
+        let _legacy = test_override::force_channels(&[]);
         let claim = owned(channel).await;
         let replies = (0..16)
             .map(|n| {
@@ -268,8 +267,7 @@ async fn a_task_response_stays_counted_across_its_chunks_until_the_transport_dro
         let shared = crate::services::discord::make_shared_data_for_tests();
         let sink = Counting {
             inner: DiscordResponseChunkTransport::new(&http, &shared),
-            candidate: candidate.clone(),
-            seen: Default::default(),
+            posts: AtomicUsize::new(0),
         };
         let transport = claim_at_post(&sink, BodyClaim::new(channel, Some(ClaudeTui)));
         let tag = json!({"case":case,"site":"W21","output_class":"LegacyBody","binding_mode":"TUI", "actual_runtime":"claude_tui","body_owner":"Legacy"});
@@ -306,15 +304,9 @@ async fn a_task_response_stays_counted_across_its_chunks_until_the_transport_dro
         .await
         .expect("actual chunk POSTs cannot wait for the journal writer");
         blocker.unlock().unwrap();
-        let seen = sink.seen.lock().unwrap().clone();
-        assert!(seen.len() > 1, "a multi-chunk body: {seen:?}");
-        assert!(seen.iter().all(|&sends| sends == (1, 0)), "{seen:?}");
-        assert_eq!(mock.requests().len(), seen.len());
-        assert_eq!(
-            candidate.sends(),
-            (1, 0),
-            "still counted after the last chunk"
-        );
+        let posts = sink.posts.load(Ordering::Acquire);
+        assert!(posts > 1, "a multi-chunk body: {posts}");
+        assert_eq!(mock.requests().len(), posts);
         recording::flushed().await;
         let rows: Vec<Value> = std::fs::read_to_string(&log)
             .unwrap()
@@ -324,7 +316,7 @@ async fn a_task_response_stays_counted_across_its_chunks_until_the_transport_dro
             .collect();
         assert_eq!(
             rows.len(),
-            2 * seen.len(),
+            2 * posts,
             "every actual first/later POST is observed: {case}"
         );
         assert!(
@@ -334,6 +326,5 @@ async fn a_task_response_stays_counted_across_its_chunks_until_the_transport_dro
             "original source remains through later posts: {rows:?}"
         );
         drop(transport);
-        assert_eq!(candidate.sends(), (1, 1));
     }
 }

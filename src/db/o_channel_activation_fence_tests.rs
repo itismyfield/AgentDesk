@@ -125,7 +125,7 @@ async fn fenced_rows_preserve_all_open_status_and_legacy_session_predicates_pg()
     for status in ["pending", "claimed", "accepted", "spawned", "dispatched"] {
         intake(&pool, status, status).await?;
         let expected = activation_rows(&pool, status, "gateway").await?;
-        let (hold, actual, queued) = fenced_activation_rows(&pool, status, "gateway").await?;
+        let (hold, actual, queued) = fenced_activation_rows(&pool, status, "gateway", None).await?;
         assert_eq!(actual, expected);
         assert_eq!(actual.open_intake, 1, "{status} is open intake");
         assert_eq!(queued, 0);
@@ -133,7 +133,7 @@ async fn fenced_rows_preserve_all_open_status_and_legacy_session_predicates_pg()
     }
     for status in ["done", "unknown", "failed_pre_accept", "failed_post_accept"] {
         intake(&pool, status, status).await?;
-        let (hold, actual, _) = fenced_activation_rows(&pool, status, "gateway").await?;
+        let (hold, actual, _) = fenced_activation_rows(&pool, status, "gateway", None).await?;
         assert_eq!(actual.open_intake, 0, "{status} is terminal");
         hold.release().await?;
     }
@@ -145,7 +145,7 @@ async fn fenced_rows_preserve_all_open_status_and_legacy_session_predicates_pg()
     session(&pool, "other", "8", Some("runner"), "turn_active").await?;
     session(&pool, "foreign", "7", Some(" runner "), "idle").await?;
     let expected = activation_rows(&pool, "7", "gateway").await?;
-    let (hold, actual, _) = fenced_activation_rows(&pool, "7", "gateway").await?;
+    let (hold, actual, _) = fenced_activation_rows(&pool, "7", "gateway", None).await?;
     assert_eq!(actual, expected);
     assert_eq!(actual.foreign_sessions, 1);
     hold.release().await?;
@@ -165,7 +165,7 @@ async fn fenced_rows_count_pending_and_processing_headless_bodies_only_pg()
     message(&pool, "channel:8", "headless_turn", "pending").await?;
     message(&pool, "channel:7", "system", "pending").await?;
     message(&pool, "7", "headless_turn", "processing").await?;
-    let (hold, rows, queued) = fenced_activation_rows(&pool, "7", "gateway").await?;
+    let (hold, rows, queued) = fenced_activation_rows(&pool, "7", "gateway", None).await?;
     assert_eq!(rows, ActivationRows::default());
     assert_eq!(queued, 2);
     hold.release().await?;
@@ -176,7 +176,7 @@ async fn fenced_rows_count_pending_and_processing_headless_bodies_only_pg()
     )
     .execute(&pool)
     .await?;
-    let (hold, _, queued) = fenced_activation_rows(&pool, "7", "gateway").await?;
+    let (hold, _, queued) = fenced_activation_rows(&pool, "7", "gateway", None).await?;
     assert_eq!(queued, 0);
     hold.release().await?;
     pool.close().await;
@@ -195,7 +195,7 @@ async fn sweep_committed_before_fence_is_visible_in_fresh_facts_pg() -> Result<(
     assert!(
         matches!(outcome, FailedPreAcceptSweepOutcome::Retried { source_id, .. } if source_id == parent)
     );
-    let (hold, rows, _) = fenced_activation_rows(&pool, "7", "gateway").await?;
+    let (hold, rows, _) = fenced_activation_rows(&pool, "7", "gateway", None).await?;
     assert_eq!(
         rows.open_intake, 1,
         "the committed retry must block activation"
@@ -218,7 +218,7 @@ async fn fence_blocks_actual_sweep_backend_until_release_or_drop_pg() -> Result<
         let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&sweep_pool)
             .await?;
-        let (hold, rows, _) = fenced_activation_rows(&pool, "7", "gateway").await?;
+        let (hold, rows, _) = fenced_activation_rows(&pool, "7", "gateway", None).await?;
         assert_eq!(rows.open_intake, 0);
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let task_pool = sweep_pool.clone();
@@ -305,7 +305,7 @@ async fn intake_fence_uses_app_role_update_privilege_and_rejects_select_only_pg(
     .fetch_one(&app_pool)
     .await?;
     assert_eq!(identity, (role.clone(), false));
-    let (hold, rows, queued) = fenced_activation_rows(&app_pool, "7", "gateway").await?;
+    let (hold, rows, queued) = fenced_activation_rows(&app_pool, "7", "gateway", None).await?;
     assert_eq!(rows, ActivationRows::default());
     assert_eq!(queued, 0);
     hold.release().await?;
@@ -314,7 +314,7 @@ async fn intake_fence_uses_app_role_update_privilege_and_rejects_select_only_pg(
     )))
     .execute(&pool)
     .await?;
-    let result = fenced_activation_rows(&app_pool, "7", "gateway").await;
+    let result = fenced_activation_rows(&app_pool, "7", "gateway", None).await;
     match result {
         Err(sqlx::Error::Database(error)) => assert_eq!(error.code().as_deref(), Some("42501")),
         Err(error) => panic!("expected LOCK permission denial, got {error}"),

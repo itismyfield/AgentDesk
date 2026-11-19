@@ -11,6 +11,7 @@ pub(crate) mod codex_snapshot;
 pub mod confirm;
 mod deferred;
 pub mod deliver;
+pub mod herdr_body_debt;
 pub mod host;
 pub mod input_facts;
 pub(crate) mod input_notices;
@@ -162,7 +163,8 @@ pub enum WriterAlarm {
         source: SourceId,
         detail: String,
     },
-    /// The writer host stopped before any store write, so Legacy keeps the channel's output.
+    /// The writer host refused the adoption before any store write; a held body of the channel
+    /// is discarded with one reason.
     Released {
         detail: String,
     },
@@ -276,3 +278,6 @@ pub(crate) mod tests;
 
 #[cfg(test)]
 mod source_read_tests;
+
+#[cfg(any(test, unix))]
+pub(crate) use late_adopt::codex::normalization;

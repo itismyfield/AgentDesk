@@ -22,9 +22,16 @@ pub(crate) struct Origin {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Artifact {
+pub(crate) struct OriginalArtifact {
     origin: Box<Origin>,
     payload_hash: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum Artifact {
+    Original(OriginalArtifact),
+    Debt(Box<debt_recovery::Artifact>),
 }
 
 pub(crate) fn hash(payload: &str) -> String {
@@ -34,10 +41,10 @@ pub(crate) fn hash(payload: &str) -> String {
 impl Origin {
     /// Called when the output artifact is created, never by a recovery sender.
     pub(crate) fn seal(&self, payload: &str) -> Artifact {
-        Artifact {
+        Artifact::Original(OriginalArtifact {
             origin: Box::new(self.clone()),
             payload_hash: hash(payload),
-        }
+        })
     }
 }
 
@@ -56,7 +63,10 @@ pub(crate) enum AcquireError {
 }
 
 #[must_use]
-pub(crate) struct EffectGuard(Option<Transaction<'static, Postgres>>);
+pub(crate) struct EffectGuard(
+    Option<Transaction<'static, Postgres>>,
+    Option<Box<debt_recovery::Attempt>>,
+);
 
 async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
     let mut tx = pool.begin().await?;
@@ -73,6 +83,13 @@ impl Scope {
         payload: &str,
         artifact: Option<&Artifact>,
     ) -> Result<EffectGuard, AcquireError> {
+        let artifact = match artifact {
+            Some(Artifact::Original(original)) => Some(original),
+            Some(Artifact::Debt(debt)) => {
+                return debt_recovery::acquire(self, channel, payload, debt).await;
+            }
+            None => None,
+        };
         let id = OwnerIdentity::new(&self.provider, channel);
         if let Some(artifact) = artifact {
             let o = &artifact.origin;
@@ -115,13 +132,16 @@ impl Scope {
                 }
             }
         }
-        Ok(EffectGuard(Some(tx)))
+        Ok(EffectGuard(Some(tx), None))
     }
 }
 
 impl Artifact {
     pub(crate) fn provider(&self) -> &str {
-        &self.origin.provider
+        match self {
+            Self::Original(original) => &original.origin.provider,
+            Self::Debt(debt) => debt.provider(),
+        }
     }
 }
 
@@ -142,6 +162,16 @@ pub(crate) async fn enqueue_on_tx(
 impl EffectGuard {
     /// Move this future, including its guard, into any task that owns the raw request.
     pub(crate) async fn run<T>(mut self, request: impl Future<Output = T>) -> Result<T, String> {
+        if let Some(attempt) = self.1.as_mut()
+            && !attempt.start()
+        {
+            let tx = self
+                .0
+                .take()
+                .ok_or_else(|| "debt effect guard missing".to_string())?;
+            debt_recovery::no_request(tx, attempt).await?;
+            return Err("debt writer stopped before the request was polled".into());
+        }
         if self.0.is_none() {
             return Ok(request.await);
         }
@@ -166,7 +196,7 @@ pub(crate) async fn acquire(
     match scope {
         Some(scope) => scope.acquire(channel, payload, artifact).await,
         None if artifact.is_some() => Err(AcquireError::Database(sqlx::Error::PoolClosed)),
-        None => Ok(EffectGuard(None)),
+        None => Ok(EffectGuard(None, None)),
     }
 }
 
@@ -221,10 +251,13 @@ pub(crate) async fn acquire_unstamped(
     if managed {
         Err(AcquireError::Withheld("managed output has no origin stamp"))
     } else {
-        Ok(EffectGuard(Some(tx)))
+        Ok(EffectGuard(Some(tx), None))
     }
 }
 
 #[cfg(test)]
 #[path = "output_tests.rs"]
 pub(crate) mod tests;
+
+pub(crate) mod debt_recovery;
+pub(crate) use debt_recovery::Registration;

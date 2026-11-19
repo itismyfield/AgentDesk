@@ -173,6 +173,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "outbound/delivery.rs": {".edit_message": 1},
     "outbound/manual_delivery.rs": {"dispatch_channel_message": 3},
     "outbound/o_writer_io.rs": {".send_message": 1},
+    "outbound/tui_rejection_notice.rs": {"send_channel_message*": 1},
     "outbound/serenity_reference.rs": {".send_message": 2},
     "outbound/transport.rs": {".send_message": 1},
     "outbound/turn_output_controller.rs": {"deliver_turn_output*": 3},
@@ -287,6 +288,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "outbound/delivery.rs": ("W19", "KEEP_TRANSPORT"),
     "outbound/manual_delivery.rs": ("W19", "KEEP_TRANSPORT"),
     "outbound/o_writer_io.rs": ("O", "KEEP_TRANSPORT"),
+    "outbound/tui_rejection_notice.rs": ("1-D-notice", "KEEP_NONBODY"),
     "outbound/serenity_reference.rs": ("W19", "KEEP_TRANSPORT"),
     "outbound/transport.rs": ("W19", "KEEP_TRANSPORT"),
     "outbound/turn_output_controller.rs": ("W19", "KEEP_TRANSPORT"),
@@ -373,6 +375,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
 # Each file's cutover gates as `enclosing fn:kind`, in source order.
 # claim: a body is sent here (`claim_then_send`, or a RAW_CLAIM_SITES claim). peek: only read.
 EXPECTED_GATES: dict[str, tuple[str, ...]] = {
+    "src/services/discord/runtime_bootstrap/o_writer_host/adoption_wake.rs": ("boot:peek",),
     "src/services/discord/queue_io/input_owner/claude_handoff.rs": ("busy_output_ready:peek",),
     "src/services/discord/tmux_watcher/terminal_relay_plan.rs": ("run_terminal_relay_plan:peek",),
     "src/services/discord/inflight/clear_store/herdr_row_end.rs": ("o_still_owns:peek",),
@@ -492,16 +495,15 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "handle_known_owner:peek",
         "resume_with_gateway:peek",
         "resume_with_gateway:claim",
+        "destination_adoption:peek",
     ),
     "src/services/discord/turn_bridge/watcher_handoff.rs": ("o_body_needs_bridge_terminal:peek",),
     "src/services/discord/turn_finalizer/watcher_backstop.rs": (
         "watcher_backstop_turn_is_terminal:peek",
     ),
     "src/services/herdr_launch.rs": ("o_owns_seeded:peek",),
-    "src/services/tui_o/cutover.rs": (
-        "claim_for_placement:claim",
-    ),
     "src/services/tui_o/cutover/channel_gate.rs": (
+        "with_peeked_o_output:peek",
         "claim_then_send:claim",
         "claim_then_send_at:claim",
         "decide_with_snapshot:claim",
@@ -514,8 +516,8 @@ RAW_CLAIM_SITES: dict[str, tuple[str, ...]] = {
     "src/services/tui_o/cutover/channel_gate.rs": ("reserve_body", "decide_with_snapshot"),
     # The caller-location wrapper forwards to the same locked body claim and origin log.
     "src/services/tui_o/channel_policy/adoption.rs": ("claim_body",),
-    # Re-exports; a placement releases a pending adoption by design, with no body.
-    "src/services/tui_o/cutover.rs": ("<module>", "claim_for_placement"),
+    # Re-exports only; a placement changes no adoption.
+    "src/services/tui_o/cutover.rs": ("<module>",),
     # The writer host's once-per-channel actor slot, not an adoption.
     "src/services/tui_o/writer/host/managed_start.rs": ("claim",),
     # Claimed right before the first unconfirmed chunk's edit or post, across a resumable loop.
@@ -725,7 +727,8 @@ def _claim_guard_problems(root: Path) -> list[str]:
     if "CLAIM_GATE_REASON" in active and not all(token in decide for token in (
         "ifsnapshot.channels().is_empty(){returnoutside_selection(snapshot,channel_id,ClaimReason::EmptySelection);}",
         "if!snapshot.channels().contains(&channel_id){returnoutside_selection(snapshot,channel_id,ClaimReason::NonMember);}",
-        "letSome(candidate)=snapshot.candidate(channel_id)else{returnOk(legacy(ClaimReason::NoCandidate));};",
+        "letSome(candidate)=snapshot.candidate(channel_id)else{returnErr(IdentityError::AwaitingAdoption);};",
+        "adopted_by(&execution.candidate,execution.candidate.peek())?;", "adopted_by(candidate,candidate.peek())?;",
         "execution.permit.is_err(){ClaimReason::OwnedHeld}",
         "Some(origin)=>candidate.claim_body_from(channel_id,origin)",
     )):
@@ -734,14 +737,13 @@ def _claim_guard_problems(root: Path) -> list[str]:
     claim = body(adoption_path, "claim_body_from")
     reason = body(adoption_path, "claim_reason")
     locked = all(token in take for token in (
-        "letmutstate=self.lock();letreason=state.claim_reason();",
-        "if*state==Adoption::Pending{*state=Adoption::Released;", "(state,reason)",
-    )) and all(token in claim for token in (
+        "letstate=self.lock();letreason=state.claim_reason();(state,reason)",
+    )) and "*state=" not in take and all(token in claim for token in (
         "let(state,reason)=self.take(channel);letowned=state.owned();",
         "self.sends.started.fetch_add(1,Ordering::SeqCst)",
         "drop(state);BodyClaimed{owned,send,reason,}",
     )) and all(f"Self::{state}=>ClaimReason::{value}" in reason for state, value in (
-        ("Pending", "PendingReleased"), ("Released", "Released"), ("Deferred", "Deferred"),
+        ("Pending", "PendingReleased"), ("Released", "Released"), ("Deferred", "Deferred"), ("Refused", "Refused"),
         ("Committed", "OwnedByO"), ("Held", "OwnedHeld"),
     ))
     if "CLAIM_ADOPTION_REASON" in active and not locked:

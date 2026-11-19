@@ -35,5 +35,6 @@ pub(super) mod controller_cutover;
 // The anchor fixture keys its record by a tmux generation marker, which exists only on unix.
 #[cfg(all(test, unix))]
 mod o_anchor_repost_tests;
+pub(super) mod o_duty;
 pub(super) mod restart;
 pub(super) mod shared;

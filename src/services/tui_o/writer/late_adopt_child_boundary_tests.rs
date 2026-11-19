@@ -1,6 +1,7 @@
 //! Exercise lifecycle boundaries through the actual managed host, retaining its generation.
 use super::*;
 use crate::services::tui_o::channel_policy;
+use crate::services::tui_o::cutover::{BodyClaim, claim_then_send};
 use crate::services::tui_o::writer::adoption::{LegacyEpoch, LegacyTurnIdentity};
 use std::sync::atomic::AtomicBool;
 

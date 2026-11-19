@@ -74,7 +74,7 @@ async fn a_file_logged_before_and_after_a_renumber_is_adopted_as_one_source() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_renumbered_source_legacy_stays_behind_is_given_up_only_after_the_stall() {
+async fn a_renumbered_source_legacy_stays_behind_is_taken_from_its_frontier_at_boot() {
     let (harness, path) = fresh(startup);
     let logged = source_id_for("s1", &path).unwrap();
     let debt = closed_turn("m0", "undelivered");
@@ -91,15 +91,11 @@ async fn a_renumbered_source_legacy_stays_behind_is_given_up_only_after_the_stal
     *io.legacy.lock().unwrap() = Some(Arc::new(legacy));
     let tasks = start_host(&harness, &io, &ready);
     polls(3).await;
-    assert_eq!(adoption(CHANNEL), Adoption::Deferred);
-    let minutes = |n: u64| std::time::Duration::from_secs(n * 60);
-    tokio::time::sleep(minutes(39)).await;
-    assert_eq!(adoption(CHANNEL), Adoption::Deferred);
-    // A renumbered file that stays still keeps the stall clock running to its end.
-    tokio::time::sleep(minutes(3)).await;
+    // The renumbered file is still the logged source, and what Legacy owes is O's from 0.
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
     let init = harness.store.read_init(CHANNEL).unwrap().unwrap();
     assert_eq!(init.sources[0].source_id, logged);
+    assert_eq!(init.sources[0].delivery_start, 0);
     assert_eq!(io.alarms.halted(), []);
     abort(tasks);
 }

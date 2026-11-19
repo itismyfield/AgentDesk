@@ -443,3 +443,292 @@ fn a_fenced_queued_body_refuses_the_proved_first_init() {
     assert!(f.store.read_init(f.channel).unwrap().is_none());
     assert_eq!(f.candidate.peek(), Adoption::Deferred);
 }
+
+#[cfg(unix)]
+#[test]
+fn only_new_input_reopens_a_refused_episode_and_old_tokens_cannot_end_it() {
+    use super::output_disposition::{Identity, Output, Phase, Reason};
+    let fixture = Fixture::new(8_165_981);
+    let old_proof = fixture.proof();
+    let old = Output::new(
+        Identity::from_proof(&old_proof, old_proof.mark.order),
+        tokio::time::Instant::now(),
+    );
+    assert!(old.reject(Reason::SourceRejected));
+    assert_eq!(old.phase(), Phase::RejectRequested(Reason::SourceRejected));
+    assert_eq!(
+        old.finish_first(
+            &fixture.candidate,
+            &old_proof,
+            &fixture.store,
+            Reason::Deadline
+        ),
+        Err(Reason::SourceRejected)
+    );
+    let tmux = old_proof.context.tmux_session.as_str();
+    assert!(
+        fixture
+            .candidate
+            .admit_first(fixture.channel, "new", "hi", tmux, || Ok(0))
+            .is_none()
+    );
+    let prepared = PreparedIncarnation::prepare_pinned(
+        "codex",
+        tmux,
+        Some(fixture.channel),
+        None,
+        false,
+        old_proof.context.provider_root.clone(),
+        (Some(first_prompt_digest("hi")), Some("legacy".into())),
+    )
+    .unwrap();
+    let input = old_proof.mark.order + 1;
+    assert!(
+        fixture
+            .candidate
+            .admit_after_rejection(
+                &old,
+                (old_proof.mark.order, "new", "hi", &prepared.context),
+                || Ok(0)
+            )
+            .is_none()
+    );
+    assert!(
+        fixture
+            .candidate
+            .admit_after_rejection(
+                &old,
+                (input, &old_proof.nonce, "hi", &prepared.context),
+                || Ok(0)
+            )
+            .is_none()
+    );
+    assert!(
+        fixture
+            .candidate
+            .admit_after_rejection(&old, (input, "new", "hi", &old_proof.context), || Ok(0))
+            .is_none()
+    );
+    let new = fixture
+        .candidate
+        .admit_after_rejection(&old, (input, "new", "hi", &prepared.context), || Ok(0))
+        .unwrap();
+    assert!(fixture.candidate.first_proof(&fixture.source).is_err());
+    let path = fixture.source.path.with_file_name("new-execution.jsonl");
+    std::fs::write(
+        &path,
+        b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"new-native\"}}\n",
+    )
+    .unwrap();
+    let source = source_id_for("new-native", &path).unwrap();
+    let proof = fixture.candidate.first_proof(&source).unwrap().unwrap();
+    assert_eq!(proof.context, prepared.context);
+    fixture
+        .candidate
+        .invalidate_first(Some(&old_proof.nonce), Some(tmux));
+    assert_eq!(
+        fixture.candidate.first_proof(&source).unwrap().unwrap(),
+        proof
+    );
+    fixture
+        .candidate
+        .attach_first_execution(&old_proof.context, "hi", Some("new"));
+    assert!(fixture.candidate.first_proof(&source).is_err());
+    assert_eq!(
+        old.phase(),
+        Phase::RejectPendingNotice(Reason::SourceRejected)
+    );
+    drop(new);
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn missing_prompt_and_wakes_exhaust_one_normalization_deadline() {
+    use super::output_disposition::{Identity, Output, Phase, Reason};
+    let fixture = Fixture::new(8_165_982);
+    // A header that proves the session with no prompt yet waits instead of refusing the source.
+    std::fs::write(
+        &fixture.source.path,
+        b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"s\",\"cwd\":\"/fixture\"}}\n",
+    )
+    .unwrap();
+    let proof = fixture.proof();
+    let output = Output::new(Identity::from_proof(&proof, 1), tokio::time::Instant::now());
+    let result = crate::services::tui_o::writer::normalization::run(
+        &output,
+        &fixture.candidate,
+        &proof,
+        &fixture.store,
+    )
+    .await;
+    assert_eq!(result.unwrap_err(), Reason::Deadline);
+    assert_eq!(output.phase(), Phase::RejectPendingNotice(Reason::Deadline));
+    assert!(output.remaining().is_zero());
+    assert!(output.adopt(&proof, || Ok(())).is_err());
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn an_unproven_session_header_rejects_the_source_before_the_deadline() {
+    use super::output_disposition::{Identity, Output, Phase, Reason};
+    let fixture = Fixture::new(8_165_983);
+    let proof = fixture.proof();
+    let output = Output::new(Identity::from_proof(&proof, 1), tokio::time::Instant::now());
+    let result = crate::services::tui_o::writer::normalization::run(
+        &output,
+        &fixture.candidate,
+        &proof,
+        &fixture.store,
+    )
+    .await;
+    assert_eq!(result.unwrap_err(), Reason::SourceRejected);
+    assert_eq!(
+        output.phase(),
+        Phase::RejectPendingNotice(Reason::SourceRejected)
+    );
+    assert!(!output.remaining().is_zero());
+}
+
+#[cfg(unix)]
+#[path = "atomic_tests.rs"]
+mod atomic_tests;
+
+/// The admitted launch's trust watch: one Enter on a selected positive menu in the managed cwd,
+/// spent from the admission's own deadline and repair, never adoption evidence.
+#[cfg(unix)]
+mod trust_tests {
+    use super::*;
+    use crate::services::tui_o::channel_policy::FirstHold;
+    use crate::services::tui_o::channel_policy::output_disposition::BUDGET;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    const TRUST: &str = "Do you trust this folder?\n› 1. Yes, proceed\n  2. No, exit";
+    const NEGATIVE: &str = "Do you trust this folder?\n  1. Yes, proceed\n› 2. No, exit";
+
+    /// A tmux on PATH that shows `pane` in `cwd` and logs every key it is sent.
+    struct FakeTmux {
+        dir: tempfile::TempDir,
+        _path: crate::config::TestEnvVarGuard,
+    }
+
+    impl FakeTmux {
+        fn new(cwd: &Path, pane: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let (program, log) = (dir.path().join("tmux"), dir.path().join("keys.log"));
+            // The managed-session check reads this runtime's identity before a key is sent.
+            let identity = crate::services::session_identity_metadata::runtime_identity("trust")
+                .unwrap()
+                .environment_assignment()
+                .unwrap();
+            let identity = crate::services::process::shell_escape(&identity);
+            let script = format!(
+                "#!/bin/sh\ncase \" $* \" in\n*show-environment*) printf '%s\\n' {identity};;\n*display-message*) printf '0\\n{}\\n';;\n*capture-pane*) printf '%s' '{pane}';;\n*send-keys*) echo \"$*\" >> '{}';;\nesac\n",
+                cwd.display(),
+                log.display()
+            );
+            std::fs::write(&program, script).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let path =
+                crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(dir.path());
+            Self { dir, _path: path }
+        }
+
+        fn enters(&self) -> usize {
+            let log = std::fs::read_to_string(self.dir.path().join("keys.log"));
+            log.map_or(0, |log| log.lines().count())
+        }
+    }
+
+    fn managed_cwd() -> PathBuf {
+        let cwd = crate::config::runtime_root()
+            .unwrap()
+            .join("workspaces/project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        cwd
+    }
+
+    /// Runs the watch on paused time with no other timer, so the clock moves only by its own looks
+    /// and the admission's deadline bounds it.
+    async fn watch(fixture: &Fixture, cwd: &Path) {
+        let context = fixture.prepared.context.clone();
+        let watch = crate::services::tui_o::writer::normalization::watch_trust(
+            fixture.candidate.clone(),
+            context,
+            cwd.to_path_buf(),
+        );
+        watch.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_trust_menu_gets_one_enter_and_the_proof_keeps_that_budget() {
+        let fixture = Fixture::new(7_651_401);
+        let admitted = tokio::time::Instant::now();
+        let cwd = managed_cwd();
+        let tmux = FakeTmux::new(&cwd, TRUST);
+        watch(&fixture, &cwd).await;
+        assert_eq!(
+            tmux.enters(),
+            1,
+            "one Enter on the selected positive option"
+        );
+        assert_eq!(
+            fixture.candidate.peek(),
+            Adoption::Deferred,
+            "the action adopts nothing"
+        );
+        let context = &fixture.prepared.context;
+        assert!(
+            fixture.candidate.first_trust_window(context).is_none(),
+            "the repair is spent"
+        );
+        // The rollout proves the admission later: its output keeps the admission's budget.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        fixture.candidate.normalize_first(&fixture.source);
+        let nonce = first_nonce_id(fixture.token.turn_nonce().unwrap());
+        let Some(FirstHold::Output(held)) = fixture.candidate.first_hold(nonce) else {
+            panic!("the proved rollout starts the normalization");
+        };
+        let (output, proof) = *held;
+        assert!(
+            !output.take_repair(),
+            "the binding repair is the spent trust repair"
+        );
+        assert_eq!(
+            output.remaining(),
+            BUDGET.saturating_sub(admitted.elapsed())
+        );
+        assert!(
+            output.adopt(&proof, || Ok(())).is_ok(),
+            "the proved output is adopted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_unmanaged_changed_or_late_trust_menu_gets_no_enter() {
+        for (channel, case) in (7_651_402..).zip(["negative", "outside", "changed", "late"]) {
+            let fixture = Fixture::new(channel);
+            let cwd = managed_cwd();
+            let elsewhere = tempfile::tempdir().unwrap();
+            let tmux = match case {
+                "negative" => FakeTmux::new(&cwd, NEGATIVE),
+                "outside" => FakeTmux::new(elsewhere.path(), TRUST),
+                _ => FakeTmux::new(&cwd, TRUST),
+            };
+            match case {
+                "changed" => {
+                    let tmux = &fixture.prepared.context.tmux_session;
+                    let marker =
+                        crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
+                    std::fs::write(marker, "another-execution").unwrap();
+                }
+                "late" => tokio::time::advance(BUDGET).await,
+                _ => {}
+            }
+            watch(&fixture, &cwd).await;
+            assert_eq!(tmux.enters(), 0, "{case}: no Enter");
+            assert_eq!(fixture.candidate.peek(), Adoption::Deferred, "{case}");
+        }
+    }
+}

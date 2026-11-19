@@ -48,6 +48,36 @@ impl OwedLog {
         }
     }
 
+    /// Every native body must have one exact coordinate; repeated or unplaceable records stay held.
+    pub(super) fn body_coordinates(
+        &self,
+    ) -> Result<
+        Vec<(
+            super::pieces::PieceWork,
+            crate::services::tui_o::shadow::SourceRange,
+        )>,
+        String,
+    > {
+        let mut bodies = Vec::new();
+        for work in &self.work {
+            if matches!(work.derived, Derived::Blocked { .. }) {
+                return Err("blocked native identity".into());
+            }
+            if let Some((piece, coordinate)) = work.body_coordinate() {
+                let expected = (coordinate.source.clone(), coordinate.start..coordinate.end);
+                if self
+                    .associations
+                    .get(&piece.unit_key)
+                    .is_none_or(|found| found.is_empty() || found.iter().any(|at| at != &expected))
+                {
+                    return Err("ambiguous native coordinates".into());
+                }
+                bodies.push((piece.clone(), coordinate));
+            }
+        }
+        Ok(bodies)
+    }
+
     fn card_coordinates(&self, key: &UnitKey) -> Vec<Coordinate> {
         let Some(members) = self.card_members.get(key) else {
             return Vec::new();

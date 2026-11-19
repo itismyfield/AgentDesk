@@ -1344,7 +1344,13 @@ pub(crate) async fn first_terminal_plan(
     nonce: Option<&str>,
     path: &std::path::Path,
     transports: Arc<std::sync::atomic::AtomicUsize>,
-) -> crate::services::tui_o::cutover::BodySend<usize> {
+    policy: Option<(
+        crate::services::tui_o::channel_policy::output_disposition::Output,
+        crate::services::tui_o::channel_policy::Candidate,
+        crate::services::tui_o::channel_policy::FirstProof,
+        &crate::services::tui_o::store::OStore,
+    )>,
+) -> Result<crate::services::tui_o::cutover::BodySend<usize>, String> {
     let session = session.to_owned();
     let output_path = path.display().to_string();
     let channel_id = serenity::ChannelId::new(channel);
@@ -1414,6 +1420,11 @@ pub(crate) async fn first_terminal_plan(
         monitor_auto_turn_ledger_generation: &mut ledger_generation,
     };
     let plan = run_terminal_relay_plan(&context, locals, &mut state).await;
+    if let Some((output, candidate, original, store)) = policy {
+        crate::services::tui_o::writer::normalization::run(&output, &candidate, &original, store)
+            .await
+            .map_err(|reason| reason.message().to_owned())?;
+    }
     let sent = crate::services::tui_o::cutover::claim_then_send(
         Some(
             crate::services::tui_o::cutover::BodyClaim::tmux(channel, Some(&session))
@@ -1422,7 +1433,7 @@ pub(crate) async fn first_terminal_plan(
         || async { transports.fetch_add(1, Ordering::SeqCst) + 1 },
     )
     .await
-    .unwrap();
+    .map_err(|error| error.to_string());
     drop(plan);
     sent
 }

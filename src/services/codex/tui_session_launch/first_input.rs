@@ -42,6 +42,11 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
     fence.validate_tmux_publisher(tmux_session_name)?;
     end_observation.prepare(&prepared.context);
     crate::services::tui_o::cutover::attach_codex_first(&prepared.context, prompt, turn_nonce);
+    #[cfg(unix)]
+    crate::services::tui_o::cutover::watch_codex_first_trust(
+        &prepared.context,
+        working_dir.as_ref(),
+    );
     let command = format!("bash {}", shell_escape(&script_path));
     let tmux_result = match crate::services::claude_tui::owner_input::launch_hook() {
         // The owner waiting on this thread spawns the argv create as its own effect.

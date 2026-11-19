@@ -1,7 +1,7 @@
 //! Trust only the exact managed cwd for this invocation, without persisting user config.
 use std::path::Path;
 
-pub(super) fn override_for(root: &Path, cwd: &Path) -> Option<String> {
+pub(crate) fn override_for(root: &Path, cwd: &Path) -> Option<String> {
     if !cwd.is_absolute() {
         return None;
     }

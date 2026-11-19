@@ -549,3 +549,1057 @@ fn the_sweep_wakes_a_stalled_end_pass_pg() {
         },
     );
 }
+
+fn debts(run: &Run) -> Vec<Value> {
+    let dir = super::super::super::super::runtime_store::runtime_root()
+        .unwrap()
+        .join("discord_herdr_body_debt")
+        .join(run.provider.as_str());
+    let mut records = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                records.push(serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap());
+            }
+        }
+    }
+    records
+}
+
+async fn held_body_retires(rig: herdr::P11TerminationRig, channel: u64) {
+    retire_held_body(rig, channel, false).await;
+}
+
+fn remove_source_log(channel: u64) {
+    let log = crate::services::tui_prompt_dedupe::binding_events::log_path(channel)
+        .unwrap()
+        .unwrap();
+    std::fs::remove_file(log).unwrap();
+}
+
+async fn retire_held_body(rig: herdr::P11TerminationRig, channel: u64, no_source: bool) {
+    let run = Run::start(
+        &rig,
+        Setup {
+            provider: ProviderKind::Claude,
+            channel,
+            routed: true,
+        },
+    )
+    .await;
+    if no_source {
+        remove_source_log(channel);
+        assert!(
+            super::super::super::logged_source(channel, &run.logical, herdr::EXECUTION).is_err()
+        );
+    }
+    let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+    let expected = if snapshot
+        .candidate(channel)
+        .is_some_and(|c| c.peek() == crate::services::tui_o::channel_policy::Adoption::Refused)
+    {
+        crate::services::tui_o::cutover::IdentityError::AdoptionRefused
+    } else {
+        crate::services::tui_o::cutover::IdentityError::AwaitingAdoption
+    };
+    assert_eq!(
+        crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+            channel,
+            run.row.runtime_kind
+        ),
+        Err(expected)
+    );
+    run.relay.set(|pane| pane.exited = true);
+    let (taken, taking) = run.sentinel().await;
+    let http = run.shared.serenity_http_or_token_fallback().unwrap();
+    restore_inflight_turns(&http, &run.shared, &run.provider).await;
+    run.pass().await;
+    assert!(
+        run.durable().is_none(),
+        "an ended execution no longer holds the channel"
+    );
+    assert!(!herdr::held(), "the old execution input hold is released");
+    assert!(
+        run.texts().is_empty(),
+        "no Legacy body or invented failure receipt"
+    );
+    let archived = debts(&run);
+    assert!(
+        !archived.is_empty(),
+        "the old body is durable before its active row disappears"
+    );
+    let saved = archived
+        .iter()
+        .find(|record| {
+            let row: Value = serde_json::from_str(record["row_json"].as_str().unwrap()).unwrap();
+            row["turn_nonce"] == NONCE && row["full_response"] == PARTIAL
+        })
+        .expect("the old input and complete saved partial survive");
+    assert_eq!(saved["disposition"], "retained");
+    assert!(saved["recovery_notice"].as_str().unwrap().contains(PARTIAL));
+    assert!(
+        wait(Duration::from_secs(15), || !taken
+            .lock()
+            .unwrap()
+            .is_empty())
+        .await
+    );
+    assert_eq!(
+        *taken.lock().unwrap(),
+        vec![false],
+        "one input after row removal"
+    );
+    drop(taking);
+    let guard = crate::services::discord::router::thread_guard_test_api::queue_guard_active;
+    assert!(!guard(&run.shared, &run.provider, run.channel).await);
+    assert_eq!(
+        crate::services::discord::health::external_turn_hold_for_start(
+            None,
+            &run.provider,
+            channel
+        )
+        .await,
+        None
+    );
+    let before = debts(&run);
+    let mut successor = run.row.clone();
+    successor.turn_nonce = Some("new-turn-after-debt".into());
+    successor.user_msg_id += 100;
+    successor.born_generation = CURRENT;
+    inflight::save_inflight_state(&successor).unwrap();
+    assert_eq!(
+        debts(&run),
+        before,
+        "a new active row does not overwrite the old body"
+    );
+    let path = inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &run.provider,
+        channel,
+    );
+    let mut next: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    next["born_generation"] = PRIOR.into();
+    next["full_response"] = "다음 실행의 다른 본문".into();
+    next["started_at"] = (chrono::Utc::now() + chrono::Duration::seconds(60))
+        .to_rfc3339()
+        .into();
+    std::fs::write(&path, serde_json::to_vec(&next).unwrap()).unwrap();
+    run.pass().await;
+    assert!(run.durable().is_none(), "the later ended row also detaches");
+    let after = debts(&run);
+    assert!(
+        after.iter().any(|record| before.contains(record)),
+        "the original immutable snapshot remains"
+    );
+    assert!(
+        after.iter().any(|record| {
+            let row: Value = serde_json::from_str(record["row_json"].as_str().unwrap()).unwrap();
+            row["full_response"] == "다음 실행의 다른 본문"
+        }),
+        "the successor body has its own snapshot"
+    );
+    run.close().await;
+}
+
+#[test]
+fn a_deferred_restarted_herdr_body_releases_its_row_into_durable_debt_pg() {
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_deferred_restarted_herdr_body_releases_its_row_into_durable_debt_pg"
+        ),
+        1_479_671_399_000_151,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| held_body_retires(rig, 1_479_671_399_000_151),
+    );
+}
+
+#[test]
+fn a_refused_restarted_herdr_body_posts_one_reason_and_keeps_nothing_pg() {
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_refused_restarted_herdr_body_posts_one_reason_and_keeps_nothing_pg"
+        ),
+        1_479_671_399_000_152,
+        ProviderKind::Claude,
+        Owner::Refused,
+        |rig| async move {
+            let run = Run::start(&rig, routed_claude(1_479_671_399_000_152)).await;
+            run.relay.set(|pane| pane.exited = true);
+            run.pass().await;
+            assert!(run.durable().is_none(), "the refused row is released");
+            assert!(
+                debts(&run).is_empty(),
+                "nothing of the refused body is kept"
+            );
+            assert_reason_once(&run, &run.row).await;
+            run.pass().await;
+            assert_reason_once(&run, &run.row).await;
+            run.close().await;
+        },
+    );
+}
+
+#[test]
+fn a_waiting_body_kept_as_debt_is_discarded_with_one_reason_once_refused_pg() {
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_waiting_body_kept_as_debt_is_discarded_with_one_reason_once_refused_pg"
+        ),
+        1_479_671_399_000_171,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            let channel = 1_479_671_399_000_171;
+            let run = Run::start(&rig, routed_claude(channel)).await;
+            run.relay.set(|pane| pane.exited = true);
+            run.pass().await;
+            assert!(run.durable().is_none() && !debts(&run).is_empty());
+            assert!(
+                run.mock.delivered_texts().is_empty(),
+                "a waiting body posts nothing"
+            );
+            let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+            snapshot.candidate(channel).unwrap().release(channel);
+            let discard =
+                crate::services::discord::recovery_engine::refused_discard::discard_retained;
+            let ids = discard(&run.pool, &run.provider, channel).await;
+            let http = run.shared.serenity_http_or_token_fallback().unwrap();
+            for _ in 0..2 {
+                crate::services::discord::recovery_engine::refused_discard::post(
+                    &http, &run.pool, &ids,
+                )
+                .await;
+            }
+            assert!(debts(&run).is_empty(), "the kept body is gone");
+            assert_reason_once(&run, &run.row).await;
+            run.close().await;
+        },
+    );
+}
+
+#[test]
+fn a_reason_stored_before_a_restart_closes_the_waiting_row_without_a_copy_pg() {
+    const CHANNEL: u64 = 1_479_671_399_000_172;
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_reason_stored_before_a_restart_closes_the_waiting_row_without_a_copy_pg"
+        ),
+        CHANNEL,
+        ProviderKind::Claude,
+        Owner::Refused,
+        |rig| async move {
+            let run = Run::start(&rig, routed_claude(CHANNEL)).await;
+            run.relay.set(|pane| pane.exited = true);
+            // The old process stops once its reason intent is durable, before the row clear.
+            let cut = super::super::on_while("before_clear", || Box::pin(async { panic!("cut") }));
+            run.pass().await;
+            drop(cut);
+            assert!(run.durable().is_some(), "the cut left the row");
+            // The next boot restores no refusal: the channel waits on a late adoption again.
+            let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+            *snapshot.candidate(CHANNEL).unwrap().lock() =
+                crate::services::tui_o::channel_policy::Adoption::Deferred;
+            run.pass().await;
+            assert!(run.durable().is_none(), "the closed row is released");
+            assert!(debts(&run).is_empty(), "a reasoned body is never copied");
+            assert_reason_once(&run, &run.row).await;
+            run.close().await;
+        },
+    );
+}
+
+#[test]
+fn a_reason_landing_before_the_copy_keeps_the_waiting_body_uncopied_pg() {
+    const CHANNEL: u64 = 1_479_671_399_000_173;
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_reason_landing_before_the_copy_keeps_the_waiting_body_uncopied_pg"
+        ),
+        CHANNEL,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            use crate::services::discord::recovery_engine::refused_discard;
+            let run = Run::start(&rig, routed_claude(CHANNEL)).await;
+            run.relay.set(|pane| pane.exited = true);
+            let id = refused_discard::identity(&run.provider, &run.row).unwrap();
+            // Another consumer's reason lands after the pass read none, before its copy.
+            let pool = run.pool.clone();
+            let landed = super::super::on_while("before_archive", move || {
+                let (pool, id) = (pool.clone(), id.clone());
+                Box::pin(async move { refused_discard::persist(&pool, &id).await.unwrap() })
+            });
+            run.pass().await;
+            drop(landed);
+            assert!(
+                run.durable().is_some(),
+                "the uncopied row waits for its close"
+            );
+            assert!(debts(&run).is_empty(), "a reasoned body is never copied");
+            run.pass().await;
+            assert!(run.durable().is_none() && debts(&run).is_empty());
+            assert_reason_once(&run, &run.row).await;
+            run.close().await;
+        },
+    );
+}
+
+#[test]
+fn boot_posts_a_rowless_reason_intent_once_and_never_a_held_attempt_pg() {
+    const CHANNEL: u64 = 1_479_671_399_000_174;
+    in_child(
+        concat!(
+            module_path!(),
+            "::boot_posts_a_rowless_reason_intent_once_and_never_a_held_attempt_pg"
+        ),
+        CHANNEL,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            use crate::db::tui_output_disposition as disposition;
+            let run = Run::start(&rig, routed_claude(CHANNEL)).await;
+            let key = crate::services::tui_o::channel_policy::episode_key::identity;
+            let unposted = key("claude", CHANNEL, "rowless-unposted").unwrap();
+            let held = key("claude", CHANNEL, "rowless-held").unwrap();
+            let reason = disposition::Reason::AdoptionRefused;
+            disposition::persist_intent(&run.pool, &unposted, reason)
+                .await
+                .unwrap();
+            let attempt = disposition::reserve(&run.pool, &held, reason).await;
+            assert!(
+                attempt.unwrap().is_some(),
+                "the old process reserved a post"
+            );
+            // The real boot entry: neither intent has a row, a snapshot or debt.
+            let done = &run.shared.restart.reconcile_done;
+            done.store(false, std::sync::atomic::Ordering::Release);
+            crate::services::discord::runtime_bootstrap::complete_active_reconcile(&run.shared)
+                .await;
+            posted(&run, 1).await;
+            assert_eq!(
+                run.mock.delivered_texts(),
+                vec![reason.message().to_string()]
+            );
+            let held = disposition::record(&run.pool, &held).await.unwrap();
+            assert!(held.unwrap().1.is_none(), "a held attempt is never posted");
+            run.close().await;
+        },
+    );
+}
+
+#[test]
+fn a_row_refused_after_its_copy_was_kept_ends_with_the_copy_discarded_pg() {
+    const CHANNEL: u64 = 1_479_671_399_000_176;
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_row_refused_after_its_copy_was_kept_ends_with_the_copy_discarded_pg"
+        ),
+        CHANNEL,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            let run = Run::start(&rig, routed_claude(CHANNEL)).await;
+            run.relay.set(|pane| pane.exited = true);
+            // The waiting pass kept its copy and stopped before the row clear.
+            let cut = super::super::on_while("before_clear", || Box::pin(async { panic!("cut") }));
+            run.pass().await;
+            drop(cut);
+            assert!(run.durable().is_some() && !debts(&run).is_empty());
+            let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+            snapshot.candidate(CHANNEL).unwrap().release(CHANNEL);
+            run.pass().await;
+            assert!(run.durable().is_none(), "the refused row is released");
+            assert!(
+                debts(&run).is_empty(),
+                "the kept copy goes in the same pass"
+            );
+            assert_reason_once(&run, &run.row).await;
+            run.close().await;
+        },
+    );
+}
+
+#[test]
+fn a_refusal_after_the_row_is_gone_sweeps_the_kept_body_with_one_reason_pg() {
+    const CHANNEL: u64 = 1_479_671_399_000_175;
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_refusal_after_the_row_is_gone_sweeps_the_kept_body_with_one_reason_pg"
+        ),
+        CHANNEL,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            use crate::services::discord::recovery_engine::refused_discard;
+            let run = Run::start(&rig, routed_claude(CHANNEL)).await;
+            run.relay.set(|pane| pane.exited = true);
+            run.pass().await;
+            assert!(run.durable().is_none() && !debts(&run).is_empty());
+            let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+            snapshot.candidate(CHANNEL).unwrap().release(CHANNEL);
+            // What the refused host's end schedules, with no row left to end.
+            refused_discard::resume(&run.shared, &run.provider, vec![CHANNEL]);
+            posted(&run, 1).await;
+            assert!(debts(&run).is_empty(), "the kept body is gone");
+            assert_reason_once(&run, &run.row).await;
+            run.close().await;
+        },
+    );
+}
+
+// A recovery relay of a held body: a wait keeps it, a refusal discards it with one reason and no
+// body, and a waiting episode that already holds a reason is discarded reusing that reason.
+#[test]
+fn a_recovery_relay_discards_a_refused_or_reasoned_body_with_one_reason_pg() {
+    const CHANNEL: u64 = 1_479_671_399_000_177;
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_recovery_relay_discards_a_refused_or_reasoned_body_with_one_reason_pg"
+        ),
+        CHANNEL,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            use crate::services::discord::recovery_engine::refused_discard;
+            use crate::services::discord::recovery_paths::shared::{
+                RecoveryRelayOutcome as Outcome, RowDisposition, unrecoverable_relay_disposition,
+            };
+            let run = Run::start(&rig, routed_claude(CHANNEL)).await;
+            let http = run.shared.serenity_http_or_token_fallback().unwrap();
+            let relay = |row: inflight::InflightTurnState| {
+                let (http, shared, provider) = (http.clone(), run.shared.clone(), &run.provider);
+                async move {
+                    let body = "the held answer";
+                    let relay =
+                        crate::services::discord::recovery_engine::relay_recovery_body_notice;
+                    relay(&http, &shared, provider, &row, body).await
+                }
+            };
+            let mut other = run.row.clone();
+            other.turn_nonce = Some("another-waiting-turn".into());
+            assert_eq!(relay(other.clone()).await, Outcome::AwaitingAdoption);
+            assert!(
+                run.mock.delivered_texts().is_empty(),
+                "a wait posts nothing"
+            );
+            // Another consumer's reason closes the waiting episode for this one too.
+            let id = refused_discard::identity(&run.provider, &run.row).unwrap();
+            refused_discard::persist(&run.pool, &id).await.unwrap();
+            for _ in 0..2 {
+                let outcome = relay(run.row.clone()).await;
+                assert_eq!(outcome, Outcome::AdoptionRefused);
+                let disposition = unrecoverable_relay_disposition(outcome, 0, 3, true);
+                assert_eq!(disposition, RowDisposition::Discard);
+                posted(&run, 1).await;
+            }
+            assert_reason_once(&run, &run.row).await;
+            // A refusal discards a body no one reasoned yet, and never sends it.
+            let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+            snapshot.candidate(CHANNEL).unwrap().release(CHANNEL);
+            assert_eq!(relay(other.clone()).await, Outcome::AdoptionRefused);
+            assert_eq!(relay(run.row.clone()).await, Outcome::AdoptionRefused);
+            posted(&run, 2).await;
+            let reason = crate::db::tui_output_disposition::Reason::AdoptionRefused.message();
+            assert_eq!(run.mock.delivered_texts(), vec![reason.to_string(); 2]);
+            run.close().await;
+        },
+    );
+}
+
+/// Waits until the mock received `n` posts. It answers with no nonce, so a reason's receipt
+/// stays unverified and its attempt held.
+async fn posted(run: &Run, n: usize) {
+    let seen = async {
+        while run.mock.delivered_texts().len() < n {
+            tokio::task::yield_now().await;
+        }
+    };
+    crate::test_support::wait::await_within(seen, crate::test_support::wait::WAIT_CAP).await;
+}
+
+fn routed_claude(channel: u64) -> Setup {
+    Setup {
+        provider: ProviderKind::Claude,
+        channel,
+        routed: true,
+    }
+}
+
+/// One posted reason and no body; its intent holds the attempt, so no start posts it again.
+async fn assert_reason_once(run: &Run, row: &inflight::InflightTurnState) {
+    use crate::db::tui_output_disposition as disposition;
+    let reason = disposition::Reason::AdoptionRefused.message();
+    let posted = run.mock.delivered_texts();
+    assert_eq!(posted, vec![reason.to_string()], "one reason and no body");
+    let id =
+        crate::services::discord::recovery_engine::refused_discard::identity(&run.provider, row);
+    let recorded = disposition::record(&run.pool, &id.unwrap()).await.unwrap();
+    assert_eq!(
+        recorded.map(|(reason, _)| reason),
+        Some(disposition::Reason::AdoptionRefused)
+    );
+    assert!(disposition::unposted(&run.pool).await.unwrap().is_empty());
+}
+
+#[test]
+fn a_foreign_restarted_herdr_body_releases_its_row_into_durable_debt_pg() {
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_foreign_restarted_herdr_body_releases_its_row_into_durable_debt_pg"
+        ),
+        1_479_671_399_000_153,
+        ProviderKind::Claude,
+        Owner::Foreign,
+        |rig| held_body_retires(rig, 1_479_671_399_000_153),
+    );
+}
+
+#[test]
+fn an_unknown_restarted_herdr_owner_keeps_its_body_row_and_hold_pg() {
+    in_child(
+        concat!(
+            module_path!(),
+            "::an_unknown_restarted_herdr_owner_keeps_its_body_row_and_hold_pg"
+        ),
+        1_479_671_399_000_154,
+        ProviderKind::Claude,
+        Owner::Unknown,
+        |rig| async move {
+            let mut run = Run::start(
+                &rig,
+                Setup {
+                    provider: ProviderKind::Claude,
+                    channel: 1_479_671_399_000_154,
+                    routed: true,
+                },
+            )
+            .await;
+            run.row.runtime_kind = None;
+            inflight::save_inflight_state(&run.row).unwrap();
+            run.row = run.durable().unwrap();
+            run.relay.set(|pane| pane.exited = true);
+            run.pass().await;
+            assert_kept(&run, &run.row, "unknown output identity").await;
+            assert!(debts(&run).is_empty());
+            run.close().await;
+        },
+    );
+}
+
+#[test]
+fn a_sourceless_restarted_herdr_body_releases_only_its_execution_hold_pg() {
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_sourceless_restarted_herdr_body_releases_only_its_execution_hold_pg"
+        ),
+        1_479_671_399_000_155,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| retire_held_body(rig, 1_479_671_399_000_155, true),
+    );
+}
+
+#[test]
+fn every_body_copy_and_directory_flush_failure_keeps_the_herdr_row_pg() {
+    use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
+    in_child(
+        concat!(
+            module_path!(),
+            "::every_body_copy_and_directory_flush_failure_keeps_the_herdr_row_pg"
+        ),
+        1_479_671_399_000_156,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            let run = Run::start(
+                &rig,
+                Setup {
+                    provider: ProviderKind::Claude,
+                    channel: 1_479_671_399_000_156,
+                    routed: true,
+                },
+            )
+            .await;
+            run.relay.set(|pane| pane.exited = true);
+            let directory = super::super::super::super::runtime_store::runtime_root()
+                .unwrap()
+                .join("discord_herdr_body_debt");
+            for step in [
+                Step::CreateTemp,
+                Step::Write,
+                Step::FileSync,
+                Step::ParentOpen,
+                Step::ParentSync,
+                Step::Ancestors,
+            ] {
+                let watch = Watch::new(
+                    &directory,
+                    Plan {
+                        fail: vec![step],
+                        block: None,
+                    },
+                );
+                run.pass().await;
+                assert!(
+                    watch.count(step) > 0,
+                    "the real I/O stage {step:?} was reached"
+                );
+                assert_kept(&run, &run.row, &format!("{step:?}")).await;
+                drop(watch);
+            }
+            run.pass().await;
+            assert!(
+                run.durable().is_none(),
+                "retry after flush recovery detaches the same row"
+            );
+            assert!(!debts(&run).is_empty());
+            assert!(run.texts().is_empty());
+            run.close().await;
+        },
+    );
+}
+
+#[test]
+fn a_successor_after_the_body_archive_is_never_cleared_pg() {
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_successor_after_the_body_archive_is_never_cleared_pg"
+        ),
+        1_479_671_399_000_157,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            let run = Run::start(
+                &rig,
+                Setup {
+                    provider: ProviderKind::Claude,
+                    channel: 1_479_671_399_000_157,
+                    routed: true,
+                },
+            )
+            .await;
+            run.relay.set(|pane| pane.exited = true);
+            let mut successor = run.row.clone();
+            successor.turn_nonce = Some("after-archive-successor".into());
+            successor.born_generation = CURRENT;
+            let next = successor.clone();
+            on("after_archive", move || {
+                let next = next.clone();
+                Box::pin(async move {
+                    inflight::save_inflight_state(&next).unwrap();
+                })
+            });
+            run.pass().await;
+            assert_eq!(run.durable().unwrap().turn_nonce, successor.turn_nonce);
+            assert!(!debts(&run).is_empty(), "the old body is still retained");
+            assert!(run.texts().is_empty());
+            run.close().await;
+        },
+    );
+}
+
+#[test]
+fn an_o_owner_without_old_range_proof_still_archives_the_herdr_body_pg() {
+    in_child(
+        concat!(
+            module_path!(),
+            "::an_o_owner_without_old_range_proof_still_archives_the_herdr_body_pg"
+        ),
+        1_479_671_399_000_158,
+        ProviderKind::Claude,
+        Owner::O,
+        |rig| async move {
+            let run = Run::start(
+                &rig,
+                Setup {
+                    provider: ProviderKind::Claude,
+                    channel: 1_479_671_399_000_158,
+                    routed: true,
+                },
+            )
+            .await;
+            assert_eq!(
+                crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+                    run.channel.get(),
+                    run.row.runtime_kind
+                ),
+                Ok(true)
+            );
+            remove_source_log(run.channel.get());
+            run.relay.set(|pane| pane.exited = true);
+            run.pass().await;
+            assert!(run.durable().is_none());
+            assert!(
+                debts(&run).iter().any(|record| {
+                    let row: Value =
+                        serde_json::from_str(record["row_json"].as_str().unwrap()).unwrap();
+                    row["full_response"] == PARTIAL
+                }),
+                "new ownership is not old-body range evidence"
+            );
+            assert!(!run.texts().iter().any(|text| text.contains(PARTIAL)));
+            run.close().await;
+        },
+    );
+}
+
+/// Restores the prior process's queue in a fresh gateway with no active row.
+async fn restore_unlinked_body_debt(root: &Path, channel: u64) {
+    let snapshot = || {
+        std::fs::read_dir(root.join("runtime/discord_herdr_body_debt/claude"))
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                (
+                    path.file_name().unwrap().to_owned(),
+                    std::fs::read(path).unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = snapshot();
+    assert!(!before.is_empty());
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let mock = DiscordMockState::new();
+    let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
+    let ctx = discord_mock::serenity_context(proxy, gateway).await;
+    let mut shared =
+        super::super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    Arc::get_mut(&mut shared)
+        .unwrap()
+        .restart
+        .current_generation = CURRENT;
+    shared.http.cached_serenity_ctx.set(ctx).unwrap();
+    generation(CURRENT);
+    let provider = ProviderKind::Claude;
+    let id = ChannelId::new(channel);
+    let context = crate::services::discord::queue_persistence_context(&shared, &provider, id);
+    let mailbox = shared.mailbox(id);
+    let hydrated = mailbox
+        .try_hydrate_pending_queue_from_disk(context)
+        .await
+        .unwrap();
+    assert!(hydrated.persistence_error.is_none());
+    assert_eq!(
+        mailbox
+            .snapshot()
+            .await
+            .intervention_queue
+            .iter()
+            .map(|item| item.message_id.get())
+            .collect::<Vec<_>>(),
+        vec![SENTINEL],
+        "the prior process persisted its waiting input"
+    );
+    assert!(inflight::load_inflight_state_read_only(&provider, channel).is_none());
+    let taken = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (seen, called) = (taken.clone(), calls.clone());
+    let hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
+        move |shared, provider, kicked, reason| {
+            let (seen, called) = (seen.clone(), called.clone());
+            Box::pin(async move {
+                if kicked != id || reason != "herdr_body_debt_restore" {
+                    return None;
+                }
+                let present = inflight::load_inflight_state_read_only(&provider, channel).is_some();
+                let next = crate::services::discord::mailbox_take_next_automatic_intervention(
+                    &shared, &provider, id,
+                )
+                .await;
+                if let Some(item) = next.intervention.as_ref() {
+                    seen.lock().unwrap().push((item.message_id.get(), present));
+                    crate::services::discord::mailbox_abandon_unclaimed_dispatch_after_success(
+                        &shared,
+                        &provider,
+                        id,
+                        item.message_id,
+                        next.dispatch_lease.as_ref().unwrap().clone(),
+                    )
+                    .await;
+                }
+                called.fetch_add(1, Ordering::SeqCst);
+                Some(crate::services::discord::IdleQueueKickoffChannelOutcome {
+                    started: next.intervention.is_some(),
+                })
+            })
+        },
+    ));
+    let completion = crate::services::discord::queue_io::cancel_backstop_test_support::KickoffCompletion::install(id);
+    let http = shared.serenity_http_or_token_fallback().unwrap();
+    restore_inflight_turns(&http, &shared, &provider).await;
+    assert!(
+        wait(Duration::from_secs(15), || calls.load(Ordering::SeqCst)
+            >= 1)
+        .await,
+        "boot restore wakes the durable waiting input"
+    );
+    assert_eq!(*taken.lock().unwrap(), vec![(SENTINEL, false)]);
+    completion.processed(0, Duration::from_secs(15)).await;
+    restore_inflight_turns(&http, &shared, &provider).await;
+    assert_eq!(completion.started_requests(), 2);
+    completion.processed(0, Duration::from_secs(15)).await;
+    assert_eq!(
+        *taken.lock().unwrap(),
+        vec![(SENTINEL, false)],
+        "repeated boot never takes the input twice"
+    );
+    assert!(
+        shared
+            .mailbox(id)
+            .snapshot()
+            .await
+            .intervention_queue
+            .is_empty()
+    );
+    assert!(inflight::load_inflight_state_read_only(&provider, channel).is_none());
+    assert_eq!(
+        snapshot(),
+        before,
+        "old body and identity stay byte-for-byte retained"
+    );
+    assert_eq!(
+        crate::services::discord::health::external_turn_hold_for_start(None, &provider, channel)
+            .await,
+        None
+    );
+    assert!(mock.written_texts().is_empty());
+    drop(hook);
+    server.abort();
+    pool.close().await;
+    db.drop().await;
+}
+
+#[test]
+fn a_restarted_herdr_debt_survives_each_copy_clear_closed_crash_cut_pg() {
+    const CHANNEL: u64 = 1_479_671_399_000_159;
+    if herdr::is_child() {
+        let phase = std::env::var(PHASE).unwrap();
+        let root = PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
+        if phase == "after"
+            && !root
+                .join("runtime/discord_inflight/claude")
+                .join(format!("{CHANNEL}.json"))
+                .exists()
+        {
+            let env = crate::config::set_agentdesk_root_for_test(&root);
+            assert_eq!(
+                inflight::herdr_body_debt::reconcile(&ProviderKind::Claude),
+                vec![CHANNEL]
+            );
+            let directory = root.join("runtime/discord_herdr_body_debt/claude");
+            assert!(std::fs::read_dir(directory).unwrap().any(|entry| {
+                let path = entry.unwrap().path();
+                path.extension().is_some_and(|ext| ext == "json")
+                    && std::fs::read_to_string(path).unwrap().contains(PARTIAL)
+            }));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            assert_eq!(
+                std::env::var("ADK_TEST_HERDR_DEBT_CUT").unwrap(),
+                "before_closed"
+            );
+            runtime.block_on(restore_unlinked_body_debt(&root, CHANNEL));
+            drop(env);
+            return;
+        }
+        return child(
+            CHANNEL,
+            ProviderKind::Claude,
+            Owner::Deferred,
+            |rig| async move {
+                let run = Run::start(
+                    &rig,
+                    Setup {
+                        provider: ProviderKind::Claude,
+                        channel: CHANNEL,
+                        routed: true,
+                    },
+                )
+                .await;
+                run.relay.set(|pane| pane.exited = true);
+                if phase == "before" {
+                    let point = match std::env::var("ADK_TEST_HERDR_DEBT_CUT").unwrap().as_str() {
+                        "before_archive" => "before_archive",
+                        "after_archive" => "after_archive",
+                        "before_clear" => "before_clear",
+                        "before_closed" => "before_closed",
+                        _ => panic!("a named crash cut"),
+                    };
+                    if point == "before_closed" {
+                        let (queued, hook) = run.sentinel().await;
+                        assert!(queued.lock().unwrap().is_empty());
+                        std::mem::forget(hook);
+                    }
+                    on(point, || Box::pin(async { std::process::exit(73) }));
+                    run.pass().await;
+                    panic!("the selected crash cut was not reached");
+                }
+                run.pass().await;
+                assert!(run.durable().is_none());
+                assert!(
+                    debts(&run)
+                        .iter()
+                        .any(|record| record["row_json"].as_str().unwrap().contains(PARTIAL))
+                );
+                assert!(run.texts().is_empty());
+                run.close().await;
+            },
+        );
+    }
+    let path = concat!(
+        module_path!(),
+        "::a_restarted_herdr_debt_survives_each_copy_clear_closed_crash_cut_pg"
+    );
+    for point in [
+        "before_archive",
+        "after_archive",
+        "before_clear",
+        "before_closed",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        for phase in ["before", "after"] {
+            let home = tempfile::tempdir().unwrap();
+            let output = herdr::child_command(path, CHANNEL, home.path())
+                .env(PHASE, phase)
+                .env("ADK_TEST_HERDR_DEBT_CUT", point)
+                .env("AGENTDESK_ROOT_DIR", root.path())
+                .output()
+                .unwrap();
+            let expected = if phase == "before" { Some(73) } else { Some(0) };
+            assert_eq!(
+                output.status.code(),
+                expected,
+                "{point}/{phase}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+fn a_native_herdr_answer_survives_source_rotation_in_its_body_debt_pg() {
+    in_child(
+        concat!(
+            module_path!(),
+            "::a_native_herdr_answer_survives_source_rotation_in_its_body_debt_pg"
+        ),
+        1_479_671_399_000_160,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            let run = Run::start(
+                &rig,
+                Setup {
+                    provider: ProviderKind::Claude,
+                    channel: 1_479_671_399_000_160,
+                    routed: true,
+                },
+            )
+            .await;
+            append(&run.source, &terminal(&run.provider, &run.row));
+            run.relay.set(|pane| pane.screen = Some(READY.into()));
+            run.pass().await;
+            assert!(run.durable().is_none());
+            assert!(run.texts().is_empty());
+            std::fs::rename(&run.source, run.source.with_extension("rotated")).unwrap();
+            let records = debts(&run);
+            let record = records
+                .iter()
+                .find(|record| record["evidence"]["outcome"]["kind"] == "terminal")
+                .expect("the native answer, rather than only the older saved partial, is retained");
+            let native = &record["evidence"]["outcome"];
+            let text = native["output"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|part| part["text"].as_str())
+                .collect::<String>();
+            assert!(text.contains(ANSWER) || native["result"].as_str().unwrap().contains(ANSWER));
+            assert!(native["end"].as_u64().unwrap() > native["start"].as_u64().unwrap());
+            assert!(record["recovery_notice"].as_str().unwrap().contains(ANSWER));
+            assert_eq!(record["disposition"], "retained");
+            run.close().await;
+        },
+    );
+}
+
+#[test]
+fn an_unconfirmed_row_removal_flush_still_wakes_its_waiting_input_pg() {
+    use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
+    in_child(
+        concat!(
+            module_path!(),
+            "::an_unconfirmed_row_removal_flush_still_wakes_its_waiting_input_pg"
+        ),
+        1_479_671_399_000_161,
+        ProviderKind::Claude,
+        Owner::Deferred,
+        |rig| async move {
+            let run = Run::start(
+                &rig,
+                Setup {
+                    provider: ProviderKind::Claude,
+                    channel: 1_479_671_399_000_161,
+                    routed: true,
+                },
+            )
+            .await;
+            run.relay.set(|pane| pane.exited = true);
+            let (taken, taking) = run.sentinel().await;
+            let dir = inflight::inflight_runtime_root()
+                .unwrap()
+                .join(run.provider.as_str());
+            let watch = Watch::new(
+                &dir,
+                Plan {
+                    fail: vec![Step::ParentSync],
+                    block: None,
+                },
+            );
+            run.pass().await;
+            assert!(
+                watch
+                    .events()
+                    .iter()
+                    .any(|event| event.step == Step::ParentSync && !event.ok),
+                "the removal directory flush really failed"
+            );
+            assert!(run.durable().is_none());
+            assert!(
+                !debts(&run).is_empty(),
+                "body durability preceded the row removal"
+            );
+            assert!(
+                wait(Duration::from_secs(15), || !taken
+                    .lock()
+                    .unwrap()
+                    .is_empty())
+                .await,
+                "the removed row still wakes the waiting input after a flush failure"
+            );
+            assert_eq!(*taken.lock().unwrap(), vec![false]);
+            assert!(run.texts().is_empty());
+            drop(taking);
+            drop(watch);
+            run.close().await;
+        },
+    );
+}

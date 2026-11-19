@@ -529,3 +529,62 @@ async fn a_prior_turns_stop_leaves_the_next_turns_pane_death_failed_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// A refused channel's terminal on the real watcher loop: the range is consumed after one durable
+/// reason, the row goes, and the turn ends failed with no body shown or marked delivered.
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_terminal_is_discarded_and_ends_failed_without_a_delivery_pg() {
+    let test = "a_refused_terminal_is_discarded_and_ends_failed_without_a_delivery_pg";
+    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+        return;
+    }
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let seed = format!("{}{}{}", user("T0"), said(T0), stop());
+    let mut h = Harness::on(77, &seed, Some(pool.clone())).await;
+    // The current-thread runtime keeps every watcher task on this thread's forced channels.
+    let kind = crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    let _boot = crate::services::tui_o::cutover::test_override::force_candidates(&[(
+        h.channel.get(),
+        kind,
+    )]);
+    let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+    snapshot
+        .candidate(h.channel.get())
+        .unwrap()
+        .release(h.channel.get());
+    let f = seed.len() as u64;
+    h.commit(0, f);
+    let mut row = h.row_at(f);
+    row.turn_source = TurnSource::Managed;
+    row.user_msg_id = 7_340_000_103;
+    row.runtime_kind = Some(kind);
+    row.input_origin_ids = vec![ORIGIN.to_string()];
+    h.save(&row);
+    // The gate reads the pane's runtime kind from its marker, as a launched TUI leaves it.
+    let marker = crate::services::tmux_common::session_temp_path(
+        &h.tmux,
+        crate::services::tmux_common::TMUX_RUNTIME_KIND_TEMP_EXT,
+    );
+    std::fs::write(marker, kind.as_str()).unwrap();
+    let restored =
+        crate::services::discord::tmux::restored_watcher_turn_from_inflight(&row, &h.tmux, true);
+    h.spawn_restoring(f, restored);
+    h.append(format!("{}{}{}", user("T1"), said(BODY), stop()).as_bytes());
+    h.drained("terminal frame").await;
+    assert!(!h.showing(BODY), "the refused body is never shown");
+    assert!(h.row().is_none(), "the discarded range releases the row");
+    assert_eq!(
+        receipt(&pool, row.user_msg_id, h.channel).await,
+        Some((vec![ORIGIN.to_string()], "failed".to_string())),
+        "a discarded body fails the input, never completes it"
+    );
+    let reasons = crate::db::tui_output_disposition::unposted(&pool)
+        .await
+        .unwrap();
+    assert_eq!(reasons.len(), 1, "one durable reason");
+    h.cancel();
+    h.exited("watcher exit").await;
+    pool.close().await;
+    db.drop().await;
+}

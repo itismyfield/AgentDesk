@@ -185,6 +185,7 @@ struct Seen {
     nonce: String,
     /// The live execution an E retires.
     retire: Option<(HostedObservation, HostedExecution)>,
+    source: Option<SourceId>,
 }
 
 async fn end_row(
@@ -235,29 +236,87 @@ async fn settle_row(
     let pool = shared.pg_pool.as_ref().ok_or("pool_unavailable")?;
     diagnostics::phase(provider, channel.get(), "observe");
     let seen = observe(pool, &shared.token_hash, provider, &row).await?;
-    let o_owned = o_owns_output(&row).ok_or("o_owner_unreadable")?;
+    use crate::services::tui_o::cutover::IdentityError::{AdoptionRefused, AwaitingAdoption};
+    let ownership = o_owns_output(&row);
+    if !matches!(ownership, Ok(_) | Err(AwaitingAdoption | AdoptionRefused)) {
+        return Err("o_owner_unreadable");
+    }
+    // A reason the episode already holds closes it: the body is discarded whatever the adoption
+    // reads now, and the stored reason is reused.
+    let closed = super::refused_discard::closed(pool, provider, &row).await;
+    let closed = closed.map_err(|_| "reason_unreadable")?;
+    // A waiting adoption keeps the body as debt; a refused one discards it with one reason.
+    let refused = closed.is_some() || ownership == Err(AdoptionRefused);
+    let held_body = !refused && ownership == Err(AwaitingAdoption);
+    let o_owned = !refused && ownership == Ok(true);
     let settle = outcome::settle(provider, &row, &seen.outcome, seen.idle, o_owned);
     let silent = settle == Settle::Silent;
-    if silent {
-        diagnostics::phase(provider, channel.get(), "commit");
-        commit(pool, &seen).await?;
-    } else {
+    let http = if !silent || held_body || refused {
         let http = shared
             .serenity_http_or_token_fallback()
             .ok_or("http_unavailable")?;
-        // Routing gates every write, as it gates boot restore's notice.
         diagnostics::phase(provider, channel.get(), "routing");
         if !routed(&http, shared, provider, channel, &row).await {
             return Err("routed_false");
         }
-        diagnostics::phase(provider, channel.get(), "commit");
-        commit(pool, &seen).await?;
+        Some(http)
+    } else {
+        None
+    };
+    #[cfg(test)]
+    tests::hook("before_archive").await;
+    let archived = if o_owned || held_body {
+        let evidence = outcome::body_debt_evidence(&seen);
+        let snapshot = outcome::settle(provider, &row, &seen.outcome, seen.idle, false);
+        let Settle::Notice(body) = snapshot else {
+            return Err("debt_body_unreadable");
+        };
+        let (snapshot, owner) = (row.clone(), provider.clone());
+        let (runtime, reasons) = (tokio::runtime::Handle::current(), pool.clone());
+        let archive = move || {
+            // The same lookup again among the archive's last checks, under the row's lock.
+            let closed = |fresh: &inflight::InflightTurnState| {
+                let stored = super::refused_discard::closed(&reasons, &owner, fresh);
+                runtime.block_on(stored).map(|reason| reason.is_some())
+            };
+            snapshot.archive_restarted_herdr_body(&owner, current, evidence, body, closed)
+        };
+        Some(
+            tokio::task::spawn_blocking(archive)
+                .await
+                .map_err(|_| "body_archive_task_failed")?
+                .map_err(|_| "body_archive_not_durable")?,
+        )
+    } else {
+        None
+    };
+    #[cfg(test)]
+    tests::hook("after_archive").await;
+    diagnostics::phase(provider, channel.get(), "commit");
+    commit(pool, &seen).await?;
+    if !silent && !held_body && !refused {
+        let http = http.as_ref().ok_or("http_unavailable")?;
         diagnostics::phase(provider, channel.get(), "notice");
-        if notice(&http, shared, provider, &row, settle).await != RecoveryRelayOutcome::Delivered {
+        if notice(http, shared, provider, &row, settle).await != RecoveryRelayOutcome::Delivered {
             kept(&row, "notice not delivered");
             return Err("notice_not_delivered");
         }
     }
+    // The refused body's reason intent is durable before anything of the row is released.
+    let stored = closed.is_some();
+    let reason = match closed {
+        Some(first) => Some(first),
+        None if refused => {
+            let id = super::refused_discard::identity(provider, &row).ok_or("reason_unkeyed")?;
+            let persisted = super::refused_discard::persist(pool, &id).await;
+            persisted.map_err(|_| "reason_intent_not_durable")?;
+            Some((
+                id,
+                crate::db::tui_output_disposition::Reason::AdoptionRefused,
+            ))
+        }
+        None => None,
+    };
     let report = super::restart_report::load_restart_report(provider, row.channel_id);
     #[cfg(test)]
     tests::hook("before_clear").await;
@@ -266,7 +325,12 @@ async fn settle_row(
     }
     diagnostics::phase(provider, channel.get(), "clear");
     let (snapshot, owner) = (row.clone(), provider.clone());
-    let clear = move || snapshot.clear_restarted_herdr_row(&owner, current, silent);
+    let discarding = reason.is_some();
+    let clear = move || match archived {
+        Some(debt) => snapshot.clear_restarted_herdr_body(&owner, current, &debt),
+        None if discarding => snapshot.clear_restarted_herdr_refused(&owner, current, stored),
+        None => snapshot.clear_restarted_herdr_row(&owner, current, silent),
+    };
     let cleared = tokio::task::spawn_blocking(clear).await;
     if !matches!(cleared, Ok(inflight::GuardedClearOutcome::Cleared)) {
         kept(&row, "the fresh row is not this turn");
@@ -275,8 +339,23 @@ async fn settle_row(
     super::restart_report::clear_loaded_restart_report(report.as_ref());
     diagnostics::settled(provider, &row);
     drop(transition);
+    #[cfg(test)]
+    tests::hook("before_closed").await;
     let notice = super::super::queue_io::input_owner::closed::closed;
     notice(shared, provider, channel, "herdr_row_end");
+    if let (Some(first), Some(http)) = (reason, http.as_ref()) {
+        // A snapshot kept while the adoption waited goes with the same reason path; a channel
+        // whose adoption is not refused keeps its other bodies.
+        let mut intents = match ownership {
+            Err(AdoptionRefused) => {
+                super::refused_discard::discard_retained(pool, provider, channel.get()).await
+            }
+            _ => Vec::new(),
+        };
+        intents.retain(|(kept, _)| kept != &first.0);
+        intents.insert(0, first);
+        super::refused_discard::post(http, pool, &intents).await;
+    }
     if silent {
         placeholder::spawn_cleanup(shared, provider, &row);
     }
@@ -291,10 +370,12 @@ fn kept(row: &inflight::InflightTurnState, why: &str) {
     );
 }
 
-/// Whether O owns the row channel's output, for the kind the row recorded; `None` when unread.
-fn o_owns_output(row: &inflight::InflightTurnState) -> Option<bool> {
+/// The shared output observation, preserving adoption holds and genuine identity errors.
+fn o_owns_output(
+    row: &inflight::InflightTurnState,
+) -> Result<bool, crate::services::tui_o::cutover::IdentityError> {
     let peek = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel;
-    peek(row.channel_id, row.runtime_kind).ok()
+    peek(row.channel_id, row.runtime_kind)
 }
 
 /// The recovery notice, or the neutral one through transport alone: on the turn's own card, else as
@@ -404,12 +485,13 @@ async fn observe(
                 }
                 ExecutionEnd::Ended => Some((observation, record)),
                 ExecutionEnd::Unconfirmed => {
-                    let outcome = idle(provider, row, &record, target, &nonce).await?;
+                    let (outcome, source) = idle(provider, row, &record, target, &nonce).await?;
                     return Ok(Seen {
                         idle: true,
                         outcome,
                         nonce,
                         retire: None,
+                        source: Some(source),
                     });
                 }
             }
@@ -417,6 +499,7 @@ async fn observe(
     };
     let source = logged_source(row.channel_id, &logical, &nonce).ok();
     let source = source.filter(|source| same_session(row, source));
+    let retained_source = source.clone();
     let (kind, submitted) = (provider.clone(), submitted_at(row));
     let read = move || ended_read(&kind, source.as_ref(), submitted);
     let outcome = tokio::task::spawn_blocking(read)
@@ -427,6 +510,7 @@ async fn observe(
         outcome,
         nonce,
         retire,
+        source: retained_source,
     })
 }
 
@@ -437,7 +521,7 @@ async fn idle(
     record: &HostedExecution,
     target: HerdrTarget,
     nonce: &str,
-) -> Result<Outcome, Held> {
+) -> Result<(Outcome, SourceId), Held> {
     let view = herdr_endpoints()
         .view(record)
         .ok_or("endpoint_unavailable")?;
@@ -446,11 +530,13 @@ async fn idle(
         return Err("session_mismatch");
     }
     let expected = record.expected.clone().ok_or("execution_unpinned")?;
+    let retained_source = source.clone();
     let (kind, submitted) = (provider.clone(), submitted_at(row));
     let read = move || idle_read(&kind, &view, &target, &expected, &source, submitted);
-    tokio::task::spawn_blocking(read)
+    let outcome = tokio::task::spawn_blocking(read)
         .await
-        .map_err(|_| "source_unreadable")?
+        .map_err(|_| "source_unreadable")??;
+    Ok((outcome, retained_source))
 }
 
 fn same_session(row: &inflight::InflightTurnState, source: &SourceId) -> bool {

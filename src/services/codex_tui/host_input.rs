@@ -1,6 +1,9 @@
 //! Host executor for Codex TUI input: pane reads, key plans and the legacy kill
 //! barrier run through one transport, and only a confirmed tmux session takes them.
 
+#[cfg(any(test, unix))]
+pub(crate) mod trust;
+
 use std::process::Output;
 use std::time::Duration;
 

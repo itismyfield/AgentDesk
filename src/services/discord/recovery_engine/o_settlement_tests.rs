@@ -210,3 +210,81 @@ async fn i7441b_recovery_early_o_return_preserves_context_without_marker_receipt
         TAKEOVER.with(|held| drop(held.borrow_mut().take()));
     }
 }
+
+// A completed restore of a refused body: once its reason intent is durable the row goes with no
+// body posted or ledgered. A waiting body, and a refused one with no database, keep the row.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_restored_refused_body_releases_its_row_only_after_its_reason_pg() {
+    use crate::db::tui_output_disposition as disposition;
+    for (channel, case) in (765_151..).zip(["refused", "waiting", "no database"]) {
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "i7651_restore_refused",
+            "refused restore",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        let f = Fixture::new(
+            channel,
+            ProviderKind::Claude,
+            &["restored prefix. ", "tail"],
+        )
+        .await;
+        let (http, _http) = f.http().await;
+        let storage = (case != "no database").then(|| pool.clone());
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(storage);
+        {
+            let mut settings = shared.settings.write().await;
+            settings.allow_all_users = true;
+            settings.owner_user_id = Some(7);
+        }
+        let kind = crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+        let _boot =
+            crate::services::tui_o::cutover::test_override::force_candidates(&[(channel, kind)]);
+        if case != "waiting" {
+            let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+            snapshot.candidate(channel).unwrap().release(channel);
+        }
+        let mut row = f.row.clone();
+        row.last_offset = 0;
+        use std::io::Write;
+        let terminal = serde_json::json!({"type":"result","subtype":"success","is_error":false,"result":f.body,"session_id":"native-session"});
+        let mut source = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&f.source.path)
+            .unwrap();
+        writeln!(source, "{terminal}").unwrap();
+        inflight::save_inflight_state(&row).unwrap();
+        let session = HostSessionRef::tmux(row.tmux_session_name.as_ref().unwrap());
+        let _live = InjectedLivenessGuard::set(session.clone(), HostLiveness::Live);
+        let _present = InjectedPresenceGuard::set(session, HostPresence::Present);
+        let rows = vec![row.clone()];
+        super::restore_inflight::restore_inflight_states(
+            &http,
+            &shared,
+            &ProviderKind::Claude,
+            rows,
+        )
+        .await;
+        let kept = inflight::load_inflight_state(&ProviderKind::Claude, channel).is_some();
+        assert_eq!(
+            kept,
+            case != "refused",
+            "{case}: only a durable reason releases the row"
+        );
+        assert!(
+            completed_turn_ledger::read_ledger(&ProviderKind::Claude, channel).is_none(),
+            "{case}: nothing is ledgered as delivered"
+        );
+        let reasons = disposition::unposted(&pool).await.unwrap().len();
+        assert_eq!(
+            reasons,
+            usize::from(case == "refused"),
+            "{case}: one reason"
+        );
+        pool.close().await;
+        db.drop().await;
+    }
+}

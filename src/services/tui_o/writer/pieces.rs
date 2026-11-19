@@ -51,6 +51,25 @@ pub(crate) struct OwedWork {
         Option<crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::OwedOrigin>,
 }
 
+impl OwedWork {
+    /// Coordinates are evidence about the original record, never a current input permit.
+    pub(super) fn body_coordinate(
+        &self,
+    ) -> Option<(&PieceWork, crate::services::tui_o::shadow::SourceRange)> {
+        match &self.derived {
+            Derived::Piece(piece) if piece.unit_key.kind == UnitKind::Body => Some((
+                piece,
+                crate::services::tui_o::shadow::SourceRange {
+                    source: self.source.clone(),
+                    start: self.range.start,
+                    end: self.range.end,
+                },
+            )),
+            _ => None,
+        }
+    }
+}
+
 pub struct UnitDeriver {
     channel: u64,
     provider: ShadowProvider,

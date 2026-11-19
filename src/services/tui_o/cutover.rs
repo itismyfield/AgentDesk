@@ -8,13 +8,16 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 
 mod channel_gate;
 pub(crate) mod intake_route;
-#[cfg(unix)]
-pub(crate) use channel_gate::peek_o_owns_tui_output_for_channel_quiet;
 pub(crate) use channel_gate::{
     BodyClaim, BodySend, BodySite, BodyTransport, IdentityError, claim_then_send,
     claim_then_send_at, claim_then_send_held_at, o_keeps_body,
     o_owns_tui_output_for_channel_reserving, peek_o_owns_tui_output_for_channel,
     peek_o_owns_tui_output_for_channel_tmux,
+};
+#[cfg(unix)]
+pub(crate) use channel_gate::{
+    Observed, maybe_thread_child, peek_o_owns_tui_output_for_channel_quiet, thread_child_decided,
+    with_peeked_o_output,
 };
 #[cfg(all(test, unix))]
 mod channel_lookup_tests;
@@ -240,17 +243,31 @@ fn held_children() -> Vec<u64> {
     })
 }
 
-/// The boot turn selection while a selected Codex channel O owns has not confirmed turn mode.
+/// The boot turn selection while a selected Codex channel O adopted has not confirmed turn mode.
 pub(crate) fn codex_turn_awaited(
     channel: u64,
 ) -> Option<crate::services::tui_o::turn_mode::TurnConfig> {
     if owned_kind(channel) != Some(RuntimeHandoffKind::CodexTui)
+        || !adopted(channel)
         || super::turn_mode::transcript_turns(channel)
     {
         return None;
     }
     let turn = test_override::with_channels(|snapshot| snapshot.map(|s| s.turn().clone()));
     turn.filter(|turn| turn.selects(policy_channel(channel)))
+}
+
+/// Whether the channel's adoption, an execution view's included, is store-backed.
+fn adopted(channel: u64) -> bool {
+    test_override::with_channels(|snapshot| {
+        let snapshot = snapshot?;
+        let candidate = (snapshot
+            .execution(channel)
+            .map(|view| view.candidate.clone()))
+        .or_else(|| snapshot.output_candidate(channel))?;
+        Some(candidate.peek().owned())
+    })
+    .unwrap_or(false)
 }
 
 /// Whether the boot turn selection names `channel`, so a Codex input there may wait for turn mode.
@@ -348,6 +365,59 @@ pub(crate) fn attach_codex_first(
     });
 }
 
+/// Starts the admitted launch's trust watch for `context`, the execution it prepared in `cwd`.
+#[cfg(unix)]
+pub(crate) fn watch_codex_first_trust(
+    context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    cwd: &std::path::Path,
+) {
+    let candidate = test_override::with_channels(|boot| {
+        context
+            .channel_id
+            .and_then(|channel| boot?.output_candidate(channel))
+    });
+    let (Some(candidate), Ok(runtime)) = (candidate, tokio::runtime::Handle::try_current()) else {
+        return;
+    };
+    let watch = super::writer::normalization::watch_trust(candidate, context.clone(), cwd.into());
+    runtime.spawn(watch);
+}
+
+/// Whether a startup trust menu in `tmux` is the admitted launch's to repair (now, or already spent
+/// within its deadline) rather than a startup failure; a launch with no admission fails as before.
+#[cfg(unix)]
+pub(crate) fn codex_first_trust_holds_startup(tmux: &str, cwd: &std::path::Path) -> bool {
+    use crate::services::codex_tui::{host_input::trust::TrustHost, normalize};
+    let launch = || {
+        test_override::with_channels(|boot| {
+            let boot = boot?;
+            boot.channels()
+                .iter()
+                .filter_map(|channel| boot.output_candidate(*channel))
+                .find_map(|candidate| candidate.first_trust_launch(tmux))
+        })
+    };
+    let Some((context, output)) = launch() else {
+        return false;
+    };
+    if output.remaining().is_zero() {
+        return false;
+    }
+    let repaired = !output.repair_spent()
+        && matches!(
+            normalize::repair_if_shown(&output, &context, cwd, &mut TrustHost),
+            Some(Ok(_))
+        );
+    // The repair is shared with the launch's trust watch: one either spent, for the same pending
+    // admission and within its first deadline, is waited on rather than failed.
+    repaired
+        || launch().is_some_and(|(now, view)| {
+            now.execution_nonce == context.execution_nonce
+                && view.repair_spent()
+                && !view.remaining().is_zero()
+        })
+}
+
 pub(crate) fn pause_codex_first(channel: u64) -> Option<channel_policy::FirstPause> {
     test_override::with_channels(|boot| {
         let boot = boot.filter(|b| b.kind(channel) == Some(RuntimeHandoffKind::CodexTui))?;
@@ -377,15 +447,29 @@ pub(crate) async fn wait_codex_first(channel: u64, nonce: Option<&str>) {
     wait_codex_first_id(channel, nonce.map(channel_policy::first_nonce_id)).await;
 }
 
+/// A body claim of the admitted first turn waits for its output's one normalization to end.
 async fn wait_codex_first_id(channel: u64, nonce: Option<[u8; 32]>) {
     let candidate = test_override::with_channels(|boot| boot?.output_candidate(channel));
     if let Some(candidate) = candidate {
+        #[cfg(any(test, unix))]
+        super::writer::normalization::hold(&candidate, nonce).await;
+        #[cfg(not(any(test, unix)))]
         candidate.wait_first(nonce).await;
     }
 }
 
-/// Before a new placement: a non-home node holds a selected channel, and the home releases a
-/// pending adoption so the placed Legacy turn never shares the channel with O.
+/// The reason the fresh normalization rejected `turn_nonce`'s first output with, if it did.
+#[cfg(unix)]
+pub(crate) fn codex_first_rejection(
+    channel: u64,
+    turn_nonce: &str,
+) -> Option<crate::db::tui_output_disposition::Reason> {
+    let candidate = test_override::with_channels(|boot| boot?.output_candidate(channel))?;
+    candidate.first_rejection(channel_policy::first_nonce_id(turn_nonce))
+}
+
+/// Before a new placement: a non-home node holds a selected channel. A placement changes no
+/// adoption; the placed turn's body is held until O adopts the channel.
 fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
     test_override::with_channels(|snapshot| {
         let Some(snapshot) = snapshot.filter(|s| !s.channels().is_empty()) else {
@@ -411,12 +495,6 @@ fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
             return Err(format!(
                 "O channel {channel} is served only on O home {home}"
             ));
-        }
-        // A placement never releases a child's adoption to Legacy.
-        if let Some(channel) = channel.filter(|_| child.is_none())
-            && let Some(candidate) = snapshot.candidate(channel)
-        {
-            candidate.claim(channel);
         }
         Ok(())
     })
