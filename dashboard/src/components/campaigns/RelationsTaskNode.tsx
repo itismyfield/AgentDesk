@@ -19,7 +19,7 @@ export function RelationsTaskNode({ data, selected }: NodeProps) {
   return <div className={`grid w-60 rounded-xl border bg-[var(--th-card-bg)] text-left text-xs text-[var(--fg-muted)] ${ring} ${selected ? "outline-2 outline-offset-2 outline-[var(--info)]" : ""}`}>
     <div className="flex min-w-0 items-start gap-2 px-3 pt-3 pb-2">
       <StatusMarker tone={task.tone} ratio={task.ratio} className="mt-0.5" />
-      <span className="grid min-w-0"><strong className="truncate text-[13px] font-semibold text-[var(--fg)]">{task.title}</strong><span className="truncate tabular-nums">{task.meta}</span></span>
+      <span className="grid min-w-0"><strong className="truncate text-sm font-semibold text-[var(--fg)]">{task.title}</strong><span className="truncate tabular-nums">{task.meta}</span></span>
     </div>
     <div className="relative flex items-center justify-between border-t border-[var(--line)] px-3 py-1.5">
       <Handle type="target" position={Position.Left} isConnectable={!task.locked} style={pin(task.locked)} />

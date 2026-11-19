@@ -18,7 +18,7 @@ vi.mock("@xyflow/react", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@xyflow/react")>()),
   ReactFlow: (props: FlowProps) => {
     flow.props = props;
-    return <div>{props.nodes.map((value) => <button key={value.id} data-node={value.id} onClick={() => props.onNodesChange([{ type: "select", id: value.id, selected: true }])}>{value.ariaLabel}</button>)}</div>;
+    return <div>{props.nodes.map((value) => <button key={value.id} className="react-flow__node" data-node={value.id} data-id={value.id} onClick={() => props.onNodesChange([{ type: "select", id: value.id, selected: true }])}>{value.ariaLabel}</button>)}</div>;
   },
   Background: () => null, Controls: () => null,
 }));
@@ -151,6 +151,20 @@ it("asks before leaving with changes, warns on reload, and keeps an undecided dr
   await render();
   expect(text()).toContain("Your unsaved edits are back.");
   expect(text()).toContain("Unsaved · 1 dependencies");
+});
+
+it("below 1280px opens the inspector over the canvas only for a choice, and Escape or the close button returns focus to it", async () => {
+  await render();
+  expect(container.querySelector("aside")).toBeNull();
+  for (const close of [() => click(named("Close the inspector")), () => act(async () => {
+    container.querySelector("aside")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  })]) {
+    await pick("C");
+    expect(container.querySelector("aside")?.getAttribute("aria-label")).toBe("Selected task");
+    await close();
+    expect(container.querySelector("aside")).toBeNull();
+    expect(document.activeElement).toBe(container.querySelector('[data-node="C"]'));
+  }
 });
 
 it("draws at most 120 tasks of a scope and says how many were left out", async () => {

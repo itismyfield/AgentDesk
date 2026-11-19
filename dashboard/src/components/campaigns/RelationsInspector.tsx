@@ -27,14 +27,14 @@ export default function RelationsInspector({ node, edge, lock, nodes, cycles, er
 }) {
   const name = (id: string) => nodes.get(id) ? taskName(nodes.get(id)!) : id;
   const lockNote = lock && <p className="m-0 flex items-center gap-1.5 text-xs text-[var(--fg-muted)]"><Lock aria-hidden className="size-3.5" />{lock}</p>;
-  if (edge) return <aside aria-label={tr("선행 연결", "Dependency line")} className="min-h-0 overflow-y-auto border-l border-[var(--line)]">
+  if (edge) return <aside aria-label={tr("선행 연결", "Dependency line")} className="min-h-0 flex-1 overflow-y-auto border-l border-[var(--line)]">
     <div className={SECTION}>
       <h3 className={HEADING}>{tr("선행 연결", "Dependency line")}</h3>
       <p className="m-0 text-sm text-[var(--fg)]">{name(edge.source)} → {name(edge.target)}</p>
       {lockNote ?? <div><Button variant="secondary" size="sm" onClick={act.unlink}>{tr("선 끊기", "Remove line")}</Button></div>}
     </div>
   </aside>;
-  if (!node) return <aside aria-label={tr("검사", "Checks")} className="min-h-0 overflow-y-auto border-l border-[var(--line)]">
+  if (!node) return <aside aria-label={tr("검사", "Checks")} className="min-h-0 flex-1 overflow-y-auto border-l border-[var(--line)]">
     <div className={SECTION}>
       <h3 className={HEADING}>{tr("검사", "Checks")}</h3>
       {problems.length ? <ul className="m-0 grid list-none gap-1.5 p-0 text-sm text-[var(--err)]">{problems.map((text) => <li key={text}>{text}</li>)}</ul>
@@ -45,7 +45,7 @@ export default function RelationsInspector({ node, edge, lock, nodes, cycles, er
 
   const locked = lock !== null;
   const candidates = [...nodes.values()].filter((other) => other.id !== node.id && !node.dependencies.includes(other.id));
-  return <aside aria-label={tr("선택 작업", "Selected task")} className="min-h-0 overflow-y-auto border-l border-[var(--line)]">
+  return <aside aria-label={tr("선택 작업", "Selected task")} className="min-h-0 flex-1 overflow-y-auto border-l border-[var(--line)]">
     <div className={SECTION}>
       <span className="text-xs text-[var(--fg-muted)] tabular-nums">{taskLabel(node)} · {node.group || tr("미분류", "Ungrouped")}</span>
       <h3 className="m-0 text-base text-[var(--fg)] [overflow-wrap:anywhere]">{node.title}</h3>

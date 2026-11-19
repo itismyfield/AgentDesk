@@ -53,7 +53,8 @@ export const NODE_WIDTH = 240;
 const COLUMN = NODE_WIDTH + 90;
 const ROW = 160;
 
-/** Columns by dependency depth inside the scope, wrapped into sub-columns so a flat group stays near square. */
+/** Columns by dependency depth inside the scope, wrapped into sub-columns so a flat group stays near square. Each sub-column
+ * is centred on one line, so a chosen task alone in its column sits level with the middle of its neighbours. */
 export function layoutTasks(nodes: CampaignNode[], ids: string[]): Map<string, { x: number; y: number }> {
   const inScope = new Set(ids);
   const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -72,7 +73,10 @@ export function layoutTasks(nodes: CampaignNode[], ids: string[]): Map<string, {
   let column = 0;
   for (const layer of layers) {
     const members = ids.filter((id) => depth.get(id) === layer);
-    members.forEach((id, index) => placed.set(id, { x: (column + Math.floor(index / rows)) * COLUMN, y: (index % rows) * ROW }));
+    members.forEach((id, index) => {
+      const sub = Math.floor(index / rows), height = Math.min(rows, members.length - sub * rows);
+      placed.set(id, { x: (column + sub) * COLUMN, y: (index % rows - (height - 1) / 2) * ROW });
+    });
     column += Math.ceil(members.length / rows);
   }
   return placed;

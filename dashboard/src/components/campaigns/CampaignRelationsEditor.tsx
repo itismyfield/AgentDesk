@@ -1,6 +1,6 @@
-import { ArrowLeft, Cable, LayoutGrid, MousePointer2, Plus, Spline, Undo2 } from "lucide-react";
+import { ArrowLeft, Cable, LayoutGrid, Maximize, MousePointer2, Plus, Spline, Undo2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { Background, Controls, ReactFlow, type Edge, type Node } from "@xyflow/react";
+import { Background, ReactFlow, getViewportForBounds, type Edge, type Node, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { getCampaignDetail, saveCampaignNodes, type Campaign } from "../../api/campaigns";
 import { ApiRequestError } from "../../api/httpClient";
@@ -18,16 +18,29 @@ import { RelationsTaskNode, type TaskNodeData } from "./RelationsTaskNode";
 import { nodeMarker } from "./StatusMarker";
 import {
   MAX_DEPTH, adoptLatest, applyEdits, editCounts, editField, fieldErrors, findCycles, isLocked, keepDraft, layoutTasks, parseScope, rebaseEdits,
-  dropKeptDraft, keptDraft, scopeTasks, taskLabel, taskName, type Conflict, type EditScope, type Edits,
+  NODE_WIDTH, dropKeptDraft, keptDraft, scopeTasks, taskLabel, taskName, type Conflict, type EditScope, type Edits,
 } from "./relationsEditorModel";
 
 const NODE_TYPES = { relationsTask: RelationsTaskNode };
 /** A 409 is sent again this many times, each on a fresh read; the ledger's revision moves every few seconds. */
 const RETRIES = 3;
 const UNDO_LIMIT = 50;
-const PANEL = "rounded-lg border border-[var(--line)] bg-[var(--th-card-bg)] shadow-sm";
-/** React Flow's own controls and credit in the theme's colours, as on the group graph. */
-const FLOW_CHROME = "[&_.react-flow\\_\\_controls]:shadow-none [&_.react-flow\\_\\_controls-button]:!bg-th-bg-surface [&_.react-flow\\_\\_controls-button]:!text-th-text-primary [&_.react-flow\\_\\_controls-button]:!border-th-border-subtle [&_.react-flow\\_\\_attribution]:!bg-th-bg-surface [&_.react-flow\\_\\_attribution_a]:!text-th-text-muted";
+/** Below this the first view stops fitting every task and centres the chosen one instead: smaller text is not legible. */
+const READABLE_ZOOM = 0.8;
+const NODE_HEIGHT = 150;
+const WIDE = "(min-width: 1280px)";
+
+/** True at 1280px and up, where the inspector stays docked beside the canvas. */
+function useWide() {
+  const [wide, setWide] = useState(() => window.matchMedia(WIDE).matches);
+  useEffect(() => {
+    const query = window.matchMedia(WIDE);
+    const change = () => setWide(query.matches);
+    query.addEventListener("change", change);
+    return () => query.removeEventListener("change", change);
+  }, []);
+  return wide;
+}
 
 type Selection = { kind: "node"; id: string } | { kind: "edge"; source: string; target: string } | null;
 /** Set while there are unsaved changes: asks before running `proceed`. */
@@ -46,7 +59,13 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   const [undo, setUndo] = useState<Edits[]>([]);
   /** The field being typed into, so one run of typing is one undo step. */
   const typing = useRef<string | null>(null);
-  const [selection, setSelection] = useState<Selection>(scope.kind === "task" ? { kind: "node", id: scope.id } : null);
+  const wide = useWide();
+  // Docked, the chosen task starts selected; as an overlay the inspector waits for a choice.
+  const [selection, setSelection] = useState<Selection>(scope.kind === "task" && wide ? { kind: "node", id: scope.id } : null);
+  const root = useRef<HTMLElement>(null);
+  const canvas = useRef<HTMLDivElement>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  const flow = useRef<ReactFlowInstance | null>(null);
   const [tool, setTool] = useState<"select" | "connect">("select");
   const [from, setFrom] = useState<string | null>(null);
   const [arranged, setArranged] = useState<Campaign["nodes"] | null>(null);
@@ -199,15 +218,58 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   const chosen = selection?.kind === "node" ? byId.get(selection.id) ?? null : null;
   const problems = [...cycles.map(cycleText), ...invalid.map(({ id, field }) => `${label(id)} ${field === "title" ? tr("제목", "title") : tr("이슈 주소", "issue link")}`)];
   const done = ids.filter((id) => byId.get(id)!.status === "completed").length;
+  /** First view: every task while that stays legible, else the chosen task (or the scope's start) at a legible zoom. */
+  const firstView = (instance: ReactFlowInstance) => {
+    flow.current = instance;
+    const box = canvas.current?.getBoundingClientRect();
+    const placed = ids.flatMap((id) => positions.get(id) ?? []);
+    if (!box || placed.length === 0) return;
+    const left = Math.min(...placed.map((point) => point.x)), top = Math.min(...placed.map((point) => point.y));
+    const bounds = { x: left, y: top, width: Math.max(...placed.map((point) => point.x)) + NODE_WIDTH - left, height: Math.max(...placed.map((point) => point.y)) + NODE_HEIGHT - top };
+    const all = getViewportForBounds(bounds, box.width, box.height, 0.1, 1, 0.08);
+    const focus = scope.kind === "task" ? positions.get(scope.id) : undefined;
+    if (all.zoom >= READABLE_ZOOM) void instance.setViewport(all);
+    else if (focus) void instance.setCenter(focus.x + NODE_WIDTH / 2, focus.y + NODE_HEIGHT / 2, { zoom: READABLE_ZOOM });
+    else void instance.setViewport({ x: 24 - left * READABLE_ZOOM, y: 24 - top * READABLE_ZOOM, zoom: READABLE_ZOOM });
+  };
+  /** Closing the overlay inspector drops the choice and puts the focus back on the task or line it showed. */
+  const closeInspector = () => {
+    const target = selection?.kind === "node" ? `.react-flow__node[data-id="${selection.id}"]`
+      : selection ? `.react-flow__edge[data-id="${selection.source}->${selection.target}"]` : null;
+    setSelection(null);
+    const element = target ? root.current?.querySelector<HTMLElement>(target) : null;
+    // React Flow blurs a task on the frame after Escape unselects it, so the focus is set again after that.
+    element?.focus();
+    requestAnimationFrame(() => requestAnimationFrame(() => element?.focus()));
+  };
+  // The overlay covers the canvas's right side, so a chosen task under it slides left into view.
+  useEffect(() => {
+    if (wide || selection?.kind !== "node" || !flow.current) return;
+    const task = root.current?.querySelector(`.react-flow__node[data-id="${selection.id}"]`)?.getBoundingClientRect();
+    const hidden = task && panel.current ? task.right + 16 - panel.current.getBoundingClientRect().left : 0;
+    const view = flow.current.getViewport();
+    if (hidden > 0) void flow.current.setViewport({ ...view, x: view.x - hidden }, { duration: 200 });
+  }, [selection, wide]);
+  const inspector =<RelationsInspector node={chosen} edge={selection?.kind === "edge" ? selection : null} lock={selection ? lockOf(selection.kind === "node" ? selection.id : selection.target) : null}
+    nodes={byId} cycles={cycles} errors={new Set(invalid.filter((entry) => entry.id === chosen?.id).map((entry) => entry.field))} problems={problems} cycleText={cycleText} tr={tr}
+    act={{
+      field: (field, value) => chosen && setText(chosen.id, field, value),
+      add: (dependency) => chosen && link(dependency, chosen.id),
+      remove: (dependency) => chosen && unlink([[dependency, chosen.id]]),
+      unlink: () => { if (selection?.kind === "edge") { unlink([[selection.source, selection.target]]); setSelection(null); } },
+      focus: () => chosen && onScope({ kind: "task", id: chosen.id, depth: 1 }),
+    }} />;
 
-  return <section aria-label={tr("작업 관계도 편집", "Edit task relations")} className="campaign-relations-editor grid h-[calc(100dvh-10rem)] min-h-[34rem] min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--th-bg-primary)]">
+  return <section ref={root} aria-label={tr("작업 관계도 편집", "Edit task relations")}
+    className="campaign-relations-editor grid h-[calc(100dvh-10rem)] min-h-[34rem] min-w-0 grid-rows-[auto_auto_auto_minmax(0,1fr)_auto] overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--th-bg-primary)]"
+    onKeyDown={(event) => { if (event.key === "Escape" && !wide && selection && event.currentTarget.contains(event.target as HTMLElement)) { event.stopPropagation(); closeInspector(); } }}>
     <header className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--line)] bg-[var(--th-card-bg)] px-3 py-2.5">
       <Button variant="ghost" size="sm" icon={<ArrowLeft aria-hidden className="size-4" />} onClick={() => request(onExit)}>{tr("캠페인", "Campaign")}</Button>
-      <div className="grid min-w-0 flex-[1_1_14rem] gap-0.5">
+      <div className="grid min-w-0 flex-[1_1_12rem] gap-0.5">
         <span className="flex min-w-0 items-center gap-2"><strong className="truncate text-[15px] text-[var(--fg)]">{base.title}</strong><Badge status={base.status} label={tr(...LEDGER_STATUS_LABELS[base.status])} tr={tr} /></span>
         <span className="truncate text-xs text-[var(--fg-muted)] tabular-nums">{tr(`원장 · rev ${base.revision} · 범위 작업 ${ids.length}개 · 완료 ${done}`, `Ledger · rev ${base.revision} · ${ids.length} tasks in scope · ${done} done`)}</span>
       </div>
-      <div className="w-60 shrink-0"><SegmentedControl kind="tabs" variant="tray" size="sm" aria-label={tr("편집할 관계", "Relation to edit")} value="relations"
+      <div className="w-52 shrink-0"><SegmentedControl kind="tabs" variant="tray" size="sm" aria-label={tr("편집할 관계", "Relation to edit")} value="relations"
         options={[{ value: "relations", label: tr("작업 관계", "Task relations") }, { value: "pipeline", label: tr("파이프라인", "Pipeline"), badge: tr("준비 중", "Coming later"), disabled: true }]} /></div>
       <div className="ml-auto flex flex-wrap items-center gap-2">
         <KitBadge tone={errors ? "danger" : "success"}>{errors ? tr(`오류 ${errors}`, `${errors} errors`) : tr("검사 통과", "Checks pass")}</KitBadge>
@@ -227,59 +289,60 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
         <Button variant="ghost" size="sm" onClick={discard}>{tr("버리기", "Discard")}</Button>
       </div>}
     </div>
-    <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_18rem] xl:grid-cols-[minmax(0,1fr)_20rem]">
-      <div className="relative min-h-0 min-w-0">
-        <ReactFlow className={FLOW_CHROME} key={JSON.stringify(scope)} nodes={graphNodes} edges={edges} nodeTypes={NODE_TYPES} fitView fitViewOptions={{ padding: 0.2, minZoom: 0.55, maxZoom: 1 }}
-          minZoom={0.2} maxZoom={1.5} nodesDraggable={false} panOnScroll zoomOnScroll={false} deleteKeyCode={["Delete", "Backspace"]}
+    <div data-editor-chrome="scope" className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-[var(--line)] bg-[var(--th-card-bg)] px-3 py-2">
+      <Select aria-label={tr("편집 범위", "Scope")} className="!min-h-9 !py-1.5" wrapperClassName="w-64 max-w-full" value={scope.kind === "task" ? `task:${scope.id}` : `group:${scope.key}`}
+        onChange={(event) => { const next = parseScope(event.target.value, "1"); if (next) onScope(next); }}>
+        {scope.kind === "task" && <option value={`task:${scope.id}`}>{tr(`작업 주변 · ${label(scope.id)}`, `Around ${label(scope.id)}`)}</option>}
+        {groups.map((group) => <option key={group.key} value={`group:${group.key}`}>{tr(`그룹 · ${group.key || "미분류"} (${group.nodes.length})`, `Group · ${group.key || "Ungrouped"} (${group.nodes.length})`)}</option>)}
+      </Select>
+      {scope.kind === "task" && <Select aria-label={tr("단계", "Steps")} className="!min-h-9 !py-1.5" wrapperClassName="w-28 shrink-0" value={scope.depth} onChange={(event) => onScope({ ...scope, depth: Number(event.target.value) })}>
+        {Array.from({ length: MAX_DEPTH }, (_, index) => <option key={index} value={index + 1}>{tr(`${index + 1}단계`, `${index + 1} step${index ? "s" : ""}`)}</option>)}
+      </Select>}
+      {total > ids.length && <span role="status" className="text-xs text-[var(--warn)]">{tr(`작업 ${total}개 중 ${ids.length}개만 그려요. 작업 주변으로 좁혀 보세요.`, `Drawing ${ids.length} of ${total} tasks. Narrow it to one task's neighbors.`)}</span>}
+      {ids.length === 0 && <span role="status" className="text-xs text-[var(--fg-muted)]">{tr("이 범위에 작업이 없어요.", "No tasks in this scope.")}</span>}
+      {tool === "connect" && <span role="status" className="text-xs text-[var(--fg)]">{from ? tr(`${label(from)} 다음에 올 작업을 누르세요.`, `Choose the task that comes after ${label(from)}.`) : tr("선행이 될 작업을 먼저 누르세요.", "First choose the task to depend on.")}</span>}
+    </div>
+    <div className={`relative grid min-h-0 ${wide ? "grid-cols-[minmax(0,1fr)_20rem]" : ""}`}>
+      <div ref={canvas} data-editor-canvas className="relative min-h-0 min-w-0">
+        <ReactFlow key={JSON.stringify(scope)} nodes={graphNodes} edges={edges} nodeTypes={NODE_TYPES} onInit={firstView} proOptions={{ hideAttribution: true }}
+          minZoom={0.1} maxZoom={1.5} nodesDraggable={false} panOnScroll zoomOnScroll={false} deleteKeyCode={["Delete", "Backspace"]}
           onConnect={({ source, target }) => source && target && link(source, target)}
           isValidConnection={({ target }) => lockOf(target) === null}
           // Selection arrives as a change for a click and for Enter on a focused task or line alike.
-          onNodesChange={(changes) => { const chosen = changes.find((change) => change.type === "select" && change.selected); if (chosen && "id" in chosen) pick(chosen.id); }}
+          onNodesChange={(changes) => { const picked = changes.find((change) => change.type === "select" && change.selected); if (picked && "id" in picked) pick(picked.id); }}
           onEdgesChange={(changes) => {
-            const chosen = edges.find((edge) => changes.some((change) => change.type === "select" && change.selected && change.id === edge.id));
-            if (chosen) setSelection({ kind: "edge", source: chosen.source, target: chosen.target });
+            const picked = edges.find((edge) => changes.some((change) => change.type === "select" && change.selected && change.id === edge.id));
+            if (picked) setSelection({ kind: "edge", source: picked.source, target: picked.target });
           }}
           onPaneClick={() => { setSelection(null); setFrom(null); }}
           onEdgesDelete={(deleted) => { unlink(deleted.map((edge) => [edge.source, edge.target])); setSelection(null); }}>
-          <Background /><Controls showInteractive={false} position="top-right" />
+          <Background />
         </ReactFlow>
-        <div className="absolute top-3 left-3 z-10 grid max-w-[calc(100%-5rem)] gap-1.5">
-          <div className={`${PANEL} flex min-w-0 items-center gap-2 p-1.5`}>
-            <Select aria-label={tr("편집 범위", "Scope")} className="!min-h-9 !py-1.5" wrapperClassName="w-60 max-w-full" value={scope.kind === "task" ? `task:${scope.id}` : `group:${scope.key}`}
-              onChange={(event) => { const next = parseScope(event.target.value, "1"); if (next) onScope(next); }}>
-              {scope.kind === "task" && <option value={`task:${scope.id}`}>{tr(`작업 주변 · ${label(scope.id)}`, `Around ${label(scope.id)}`)}</option>}
-              {groups.map((group) => <option key={group.key} value={`group:${group.key}`}>{tr(`그룹 · ${group.key || "미분류"} (${group.nodes.length})`, `Group · ${group.key || "Ungrouped"} (${group.nodes.length})`)}</option>)}
-            </Select>
-            {scope.kind === "task" && <Select aria-label={tr("단계", "Steps")} className="!min-h-9 !py-1.5" wrapperClassName="w-28 shrink-0" value={scope.depth} onChange={(event) => onScope({ ...scope, depth: Number(event.target.value) })}>
-              {Array.from({ length: MAX_DEPTH }, (_, index) => <option key={index} value={index + 1}>{tr(`${index + 1}단계`, `${index + 1} step${index ? "s" : ""}`)}</option>)}
-            </Select>}
-          </div>
-          {total > ids.length && <p role="status" className={`${PANEL} m-0 px-3 py-1.5 text-xs text-[var(--warn)]`}>{tr(`작업 ${total}개 중 ${ids.length}개만 그려요. 작업 주변으로 좁혀 보세요.`, `Drawing ${ids.length} of ${total} tasks. Narrow it to one task's neighbors.`)}</p>}
-          {ids.length === 0 && <p role="status" className={`${PANEL} m-0 px-3 py-1.5 text-xs`}>{tr("이 범위에 작업이 없어요.", "No tasks in this scope.")}</p>}
-          {tool === "connect" && <p role="status" className={`${PANEL} m-0 px-3 py-1.5 text-xs text-[var(--fg)]`}>{from ? tr(`${label(from)} 다음에 올 작업을 누르세요.`, `Choose the task that comes after ${label(from)}.`) : tr("선행이 될 작업을 먼저 누르세요.", "First choose the task to depend on.")}</p>}
-        </div>
-        <div className={`${PANEL} absolute bottom-3 left-3 z-10 flex max-w-[calc(50%-6rem)] flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-xs text-[var(--fg-muted)]`}>
-          <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t border-[var(--fg-muted)]" />{tr("선행", "Dependency")}</span>
-          <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t-2 border-dashed border-[var(--err)]" />{tr("순환 오류", "Cycle")}</span>
-        </div>
-        <div role="toolbar" aria-label={tr("편집 도구", "Editing tools")} className={`${PANEL} absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 gap-1 p-1`}>
-          <IconButton icon={<MousePointer2 aria-hidden />} label={tr("선택", "Select")} pressed={tool === "select"} onClick={() => { setTool("select"); setFrom(null); }} />
-          <IconButton icon={<Plus aria-hidden />} label={tr("작업 추가 · 준비 중", "Add a task · coming later")} disabled />
-          <IconButton icon={<Spline aria-hidden />} label={tr("잇기", "Connect")} pressed={tool === "connect"} onClick={() => setTool("connect")} />
-          <IconButton icon={<Cable aria-hidden />} label={tr("케이블타이 · 준비 중", "Cable ties · coming later")} disabled />
-          <IconButton icon={<LayoutGrid aria-hidden />} label={tr("정렬", "Arrange")} onClick={() => setArranged(nodes)} />
-        </div>
       </div>
-      <RelationsInspector node={chosen} edge={selection?.kind === "edge" ? selection : null} lock={selection ? lockOf(selection.kind === "node" ? selection.id : selection.target) : null}
-        nodes={byId} cycles={cycles} errors={new Set(invalid.filter((entry) => entry.id === chosen?.id).map((entry) => entry.field))} problems={problems} cycleText={cycleText} tr={tr}
-        act={{
-          field: (field, value) => chosen && setText(chosen.id, field, value),
-          add: (dependency) => chosen && link(dependency, chosen.id),
-          remove: (dependency) => chosen && unlink([[dependency, chosen.id]]),
-          unlink: () => { if (selection?.kind === "edge") { unlink([[selection.source, selection.target]]); setSelection(null); } },
-          focus: () => chosen && onScope({ kind: "task", id: chosen.id, depth: 1 }),
-        }} />
+      {/* Docked from 1280px; narrower, it opens over the canvas's right side only while a task or line is chosen. */}
+      {wide ? <div className="flex min-h-0 flex-col">{inspector}</div> : selection && <div ref={panel} className="absolute inset-y-0 right-0 z-20 flex w-80 max-w-[85%] flex-col bg-[var(--th-card-bg)] shadow-xl">
+        <div className="flex justify-end border-b border-l border-[var(--line)] px-2 py-1"><IconButton icon={<X aria-hidden />} label={tr("검사기 닫기", "Close the inspector")} onClick={closeInspector} /></div>
+        {inspector}
+      </div>}
     </div>
+    <footer className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 border-t border-[var(--line)] bg-[var(--th-card-bg)] px-3 py-1.5">
+      <div data-editor-chrome="legend" className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--fg-muted)]">
+        <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t border-[var(--fg-muted)]" />{tr("선행", "Dependency")}</span>
+        <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t-2 border-dashed border-[var(--err)]" />{tr("순환 오류", "Cycle")}</span>
+      </div>
+      <div data-editor-chrome="tools" role="toolbar" aria-label={tr("편집 도구", "Editing tools")} className="flex gap-1">
+        <IconButton icon={<MousePointer2 aria-hidden />} label={tr("선택", "Select")} pressed={tool === "select"} onClick={() => { setTool("select"); setFrom(null); }} />
+        <IconButton icon={<Plus aria-hidden />} label={tr("작업 추가 · 준비 중", "Add a task · coming later")} disabled />
+        <IconButton icon={<Spline aria-hidden />} label={tr("잇기", "Connect")} pressed={tool === "connect"} onClick={() => setTool("connect")} />
+        <IconButton icon={<Cable aria-hidden />} label={tr("케이블타이 · 준비 중", "Cable ties · coming later")} disabled />
+        <IconButton icon={<LayoutGrid aria-hidden />} label={tr("정렬", "Arrange")} onClick={() => setArranged(nodes)} />
+      </div>
+      <div data-editor-chrome="zoom" role="group" aria-label={tr("보기 크기", "Zoom")} className="flex gap-1 justify-self-end">
+        <IconButton icon={<ZoomOut aria-hidden />} label={tr("축소", "Zoom out")} onClick={() => void flow.current?.zoomOut()} />
+        <IconButton icon={<ZoomIn aria-hidden />} label={tr("확대", "Zoom in")} onClick={() => void flow.current?.zoomIn()} />
+        <IconButton icon={<Maximize aria-hidden />} label={tr("전체 보기", "Show every task")} onClick={() => void flow.current?.fitView({ padding: 0.08, minZoom: 0.1, maxZoom: 1 })} />
+      </div>
+    </footer>
     <Dialog open={leaving !== null} onOpenChange={(open) => { if (!open) setLeaving(null); }} size="md"
       title={tr(`저장하지 않은 변경이 ${changed}건 있어요`, `${changed} unsaved changes`)}
       description={tr(`${summary}. 나가면 이 변경은 사라져요.`, `${summary}. Leaving drops them.`)}
