@@ -138,13 +138,32 @@ async fn follow_channel_selector(
     Followed::Retry
 }
 
-/// Follows the rotation on the settle pass's own channel.
+/// The bot runtime that owns `channel_id`: the idle loop runs on one bot's runtime, while the
+/// channel's own bot holds its row, cache and transition. None when no runtime owns it alone.
+async fn channel_runtime(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+) -> Option<Arc<SharedData>> {
+    match shared.health_registry.upgrade() {
+        Some(registry) => {
+            registry
+                .shared_for_provider_on_channel(&ProviderKind::Claude, channel_id)
+                .await
+        }
+        None => Some(shared.clone()),
+    }
+}
+
+/// Follows the rotation on the settle pass's channel, on the bot runtime that owns it.
 pub(super) async fn follow_rotation_selector(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     rotation: &crate::services::tui_prompt_dedupe::ClaudeSessionRotation,
 ) -> Followed {
-    follow_channel_selector(shared, channel_id, rotation, None).await
+    let Some(runtime) = channel_runtime(shared, channel_id).await else {
+        return Followed::Retry;
+    };
+    follow_channel_selector(&runtime, channel_id, rotation, None).await
 }
 
 /// A Herdr pane without a watcher keeps its rotation; only its channel's selector follows, on the
@@ -163,16 +182,7 @@ pub(super) async fn follow_herdr_rotation_selector(
         return;
     };
     let channel_id = ChannelId::new(channel);
-    // The idle loop runs on one bot's runtime; the channel's own bot holds its row and cache.
-    let runtime = match shared.health_registry.upgrade() {
-        Some(registry) => {
-            registry
-                .shared_for_provider_on_channel(&ProviderKind::Claude, channel_id)
-                .await
-        }
-        None => Some(shared.clone()),
-    };
-    let Some(runtime) = runtime else {
+    let Some(runtime) = channel_runtime(shared, channel_id).await else {
         return;
     };
     let followed = follow_channel_selector(&runtime, channel_id, rotation, Some(&nonce)).await;

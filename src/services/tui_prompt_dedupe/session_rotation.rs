@@ -160,6 +160,14 @@ pub(crate) fn mark_claude_rotation_selector_followed(
     }
 }
 
+/// Whether `tmux_session_name`'s rotation still holds later queued adoptions: a rotation whose
+/// channel selector already followed its target keeps its history but no longer holds them.
+pub(crate) fn claude_rotation_blocks_adoption(tmux_session_name: &str) -> bool {
+    lock_rotations()
+        .get(tmux_session_name.trim())
+        .is_some_and(|entry| !entry.rotation.selector_followed)
+}
+
 /// The unsettled rotation for `tmux_session_name`, if any.
 pub(crate) fn claude_session_rotation_for_tmux(
     tmux_session_name: &str,
