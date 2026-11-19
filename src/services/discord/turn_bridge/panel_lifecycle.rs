@@ -21,7 +21,7 @@ pub(super) async fn refresh_session_panel_line_from_lifecycle(
     shared: &SharedData,
     channel_id: ChannelId,
     turn_id: &str,
-    tmux_session_name: Option<&str>,
+    inflight: &InflightTurnState,
 ) -> bool {
     let Some(pg_pool) = shared.pg_pool.as_ref() else {
         return false;
@@ -29,15 +29,14 @@ pub(super) async fn refresh_session_panel_line_from_lifecycle(
     // `session_panel_instance_key` lives in the unix-only `tmux` module; on
     // non-unix targets there is no tmux session, so the instance key is None.
     #[cfg(unix)]
-    let session_instance_key = tmux_session_name
+    let session_instance_key = inflight
+        .tmux_session_name
+        .as_deref()
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .and_then(super::super::tmux::session_panel_instance_key);
     #[cfg(not(unix))]
-    let session_instance_key = {
-        let _ = tmux_session_name;
-        Option::<String>::None
-    };
+    let session_instance_key = Option::<String>::None;
     let channel_id_text = channel_id.get().to_string();
     let dirty =
         match crate::services::observability::turn_lifecycle::load_latest_session_lifecycle_event(
@@ -50,11 +49,12 @@ pub(super) async fn refresh_session_panel_line_from_lifecycle(
             Ok(Some(event)) => shared
                 .ui
                 .placeholder_live_events
-                .set_session_panel_lifecycle_event(
+                .set_session_panel_lifecycle_event_with_start(
                     channel_id,
                     session_instance_key.as_deref(),
                     &event.kind,
                     &event.details_json,
+                    inflight.headless_process_start,
                 ),
             Ok(None) => shared
                 .ui

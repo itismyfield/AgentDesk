@@ -53,7 +53,7 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
             command,
         )?,
         None => crate::services::claude_tui::owner_input::argv_payload(&prepared.context, || {
-            crate::services::platform::tmux::create_session_with_identity(
+            crate::services::session_host::TmuxHost.create_session(
                 tmux_session_name,
                 Some(working_dir),
                 &command,
@@ -127,7 +127,7 @@ pub(in crate::services::codex) fn spawn_owned(
                 .into());
         }
         let output = argv_payload(&context, || {
-            crate::services::platform::tmux::create_session_with_identity(
+            crate::services::session_host::TmuxHost.create_session(
                 &session,
                 Some(&working_dir),
                 &command,

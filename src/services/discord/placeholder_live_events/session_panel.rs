@@ -42,6 +42,7 @@ impl TmuxPanelState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SessionPanelSnapshot {
     kind: SessionPanelKind,
+    pub(super) suppress_banner: bool,
     provider_session_id: Option<String>,
     tmux: Option<TmuxPanelState>,
     recovery_message_count: Option<usize>,
@@ -76,6 +77,7 @@ impl SessionPanelSnapshot {
         session_instance_key: Option<&str>,
         kind: &str,
         details: &Value,
+        headless_process_start: bool,
     ) -> Option<Self> {
         if !details.as_object().is_some_and(|object| !object.is_empty()) {
             return None;
@@ -105,6 +107,7 @@ impl SessionPanelSnapshot {
 
         Some(Self {
             kind,
+            suppress_banner: headless_process_start && kind == SessionPanelKind::Resumed,
             provider_session_id,
             tmux,
             recovery_message_count,

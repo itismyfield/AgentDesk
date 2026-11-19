@@ -169,9 +169,37 @@ class SwapStepWiring(unittest.TestCase):
                     for step in hosted_steps:
                         self.assertEqual(eval_step_if(step.get("if"), context), hosted, step["name"])
                     self.assertEqual(eval_step_if(uncached.get("if"), context), not hosted)
+                    if not hosted:
+                        self.assertIn('ADK_CARGO_PRIORITY=1\\n\' >> "$GITHUB_ENV"', uncached["run"])
             self.assertLess(job["steps"].index(uncached),
                             next(i for i, step in enumerate(job["steps"]) if needs_swap(step, job)))
             self.assertIn("RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\n", uncached["run"])
+
+    def test_rust_build_bypasses_cargo_slot_only_for_self_hosted_nextest_queries(self):
+        slot = "ADK_CARGO_SLOT_HELD"
+        query = re.compile(
+            r"(?P<prefix>\$\{\{ [^{}\n]+ \}\})?"
+            r"(?P<command>cargo nextest (?:--version\b|(?:list|run) [^|)\n]*?--archive-file\b))"
+        )
+        for workflow in DUAL_RUNNER_WORKFLOWS:
+            with self.subTest(workflow=workflow):
+                document = yaml.safe_load((REPO_ROOT / workflow).read_text("utf-8"))
+                job = document["jobs"]["rust_build"]
+                steps = job["steps"]
+                for scope in (document, job, *steps):
+                    self.assertNotIn(slot, scope.get("env", {}))
+                run = "\n".join(step.get("run", "") for step in steps)
+                self.assertIn("cargo nextest archive ", run)
+                calls = list(query.finditer(run.replace("\\\n", "")))
+                commands = {call["command"] for call in calls}
+                self.assertIn("cargo nextest list --archive-file", commands)
+                self.assertIn("cargo nextest --version", commands)
+                for call in calls:
+                    prefix = call["prefix"]
+                    self.assertIsNotNone(prefix, call["command"])
+                    for environment, expected in (("self-hosted", f"{slot}=1 "), ("github-hosted", "")):
+                        self.assertEqual(eval_expression(prefix, {"runner.environment": environment}), expected)
+                self.assertEqual(run.count(slot), len(calls))
 
     def test_every_ubuntu_lib_build_job_adds_swap_before_its_first_cargo_step(self) -> None:
         for relative, expected in EXPECTED_SWAP_JOBS.items():
