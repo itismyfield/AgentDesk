@@ -185,7 +185,7 @@ async fn native_8148_dispatch_snapshot_failure_settles_policy_and_cleans_row_pg(
     assert_eq!(state(pool, WORK).await.0, "failed");
     let failures: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM dispatch_events WHERE dispatch_id=$1 AND transition_source='turn_bridge_dispatch_failure'",
-    ).bind(WORK).fetch_one(&pool).await.unwrap();
+    ).bind(WORK).fetch_one(pool).await.unwrap();
     assert_eq!(failures, 1);
     assert!(transcript(pool, &turn(&row)).await.is_some());
     assert!(on_disk(row.channel_id).is_none());
