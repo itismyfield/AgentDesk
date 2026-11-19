@@ -28,6 +28,12 @@ export function deriveDispatchedAsAgents(sessions: DispatchedSession[]): Agent[]
     }));
 }
 
+/** The server sends agent_status after each of the agent's session changes, without its visual status, so the
+ * agent list's snapshot of that status is dropped rather than kept stale. */
+export function mergeAgentStatus(agents: Agent[], update: Agent): Agent[] {
+  return agents.map((agent) => (agent.id === update.id ? { ...agent, ...update, visual_status_code: undefined } : agent));
+}
+
 export function applySessionOverlay(baseAgents: Agent[], sessions: DispatchedSession[]): Agent[] {
   const overlay = new Map<string, {
     workingCount: number;

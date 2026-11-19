@@ -677,3 +677,41 @@ test("relations editor: a draft kept while another page shows asks before a relo
   await reload();
   expect(asked).toEqual(["beforeunload", "beforeunload"]);
 });
+
+test("home campaigns: campaigns under way lead, unread stages say so, and a row opens its campaign", async ({ page }, testInfo) => {
+  await mockApi(page);
+  const prepared = ["p1", "p2", "p3", "p4"].map((id) => {
+    const value = structuredClone(serverCampaignFixtures.prepared);
+    Object.assign(value.view, { campaign_id: id });
+    value.definition.title = `준비 ${id}`;
+    return value;
+  });
+  await json(page, /\/api\/server-campaigns\?.*$/, { campaigns: prepared });
+  await page.route(/\/api\/server-campaigns\/p\d$/, (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").pop();
+    const found = prepared.find((value) => value.view.campaign_id === id);
+    return id === "p1" ? route.fulfill({ status: 503, json: { error: "unavailable" } }) : route.fulfill({ json: { campaign: found } });
+  });
+  await json(page, /\/api\/campaigns\?.*$/, { campaigns: [CAMPAIGNS[0]], live: LIVE, limit: 100, offset: 0 });
+  await page.goto("/home");
+
+  const rows = page.getByTestId("home-campaigns").locator("li a");
+  await expect(rows.first()).toContainText("열린 이슈 DAG", { timeout: 15_000 });
+  await expect(rows).toHaveCount(4);
+  await expect(page.getByTestId("home-campaigns").getByRole("button", { name: "1개 더 보기" })).toBeVisible();
+  await expect(rows.filter({ hasText: "준비 p1" })).toContainText("단계 확인 불가", { timeout: 15_000 });
+  await rows.first().click();
+  await expect(page).toHaveURL(/[?&]campaign=open-issues-dag/);
+  // The opened campaign: the current list row on desktop, the picker on phones.
+  const panel = page.locator(".campaigns-panel");
+  const opened = testInfo.project.name === "desktop" ? panel.locator('[data-campaign-key][aria-current="true"]') : panel.locator(".campaign-picker");
+  await expect(opened).toContainText("열린 이슈 DAG");
+});
+
+test("home campaigns: a failed list beside an empty one reads unknown, not empty", async ({ page }) => {
+  await mockApi(page);
+  await page.route(/\/api\/server-campaigns\?.*$/, (route) => route.fulfill({ status: 503, json: { error: "unavailable" } }));
+  await json(page, /\/api\/campaigns\?.*$/, { campaigns: [], live: {}, limit: 100, offset: 0 });
+  await page.goto("/home");
+  await expect(page.getByTestId("home-campaigns")).toContainText("캠페인 목록을 읽지 못해 확인 불가예요.", { timeout: 15_000 });
+});
