@@ -96,7 +96,8 @@ def evaluate(value, *, head=None, identity=None):
     if not isinstance(value, dict) or type(value.get("schema_version")) is not int or value.get("schema_version") != 1:
         return result
     expected, rows = value.get("expected"), value.get("occurrences")
-    if not _strings(expected) or not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+    if (not _strings(expected) or not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows)
+            or not isinstance(value.get("result"), (str, type(None)))):
         return finish("UNKNOWN", "MALFORMED_SUMMARY")
     result["expected"] = len(expected)
     if head is not None and value.get("head") != head:
@@ -238,8 +239,10 @@ def consume(value, status, *, head, now):
                 if interval is not None and (not all(_number(bound) for bound in bounds) or interval == 0):
                     override("UNKNOWN", "INVALID_FRESHNESS")
                 elif interval is not None and now - completed > sum(bounds):
+                    # An expired result of another head keeps reporting the head mismatch.
                     check["stale"] = 1
-                    override("UNKNOWN", "STALE")
+                    if (check["result"], check["reason"]) != ("UNKNOWN", "STALE_HEAD"):
+                        override("UNKNOWN", "STALE")
     return {"check": check, "monitor": monitor}
 
 

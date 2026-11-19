@@ -77,6 +77,13 @@ pub(crate) async fn preflight_human_input(
     let shared = resolve_direct_channel_shared(registry, channel_id, provider)
         .await
         .map_err(HumanInputError::RuntimeUnavailable)?;
+    authorize_on_shared(&shared, author_id).await
+}
+
+pub(super) async fn authorize_on_shared(
+    shared: &SharedData,
+    author_id: u64,
+) -> Result<(), HumanInputError> {
     let settings = shared.settings.read().await;
     if author_allowed_for_human_input(
         settings.owner_user_id,

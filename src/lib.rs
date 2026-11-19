@@ -305,10 +305,10 @@ pub mod campaign_adapter {
     pub use crate::domain::campaign::lifecycle::{HoldReason, NextAction, StepKey};
     pub use crate::services::campaign_execution::{
         adk_adapter, adk_observe, adk_profile, adk_resources, adk_workspace, candidate_seal,
-        effect_envelope, evidence, evidence_gate, execution_pin, host_gate, host_worker,
-        main_integration, pipeline_rules, profile, resource_admission, review_dispatch,
-        review_gate, runtime_profile, verification_driver, verification_run, verification_runner,
-        verification_spec,
+        ci_exception, deploy_observe, effect_envelope, evidence, evidence_gate, execution_pin,
+        host_gate, host_worker, landing_effects, landing_merge, landing_prepare, main_integration,
+        pipeline_rules, profile, resource_admission, review_dispatch, review_gate, runtime_profile,
+        verification_driver, verification_run, verification_runner, verification_spec,
     };
 }
 

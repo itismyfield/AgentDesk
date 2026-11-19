@@ -110,10 +110,4 @@ describe("RoutineScheduleList", () => {
     await press("k");
     expect(document.activeElement).toBe(button("b"));
   });
-
-  it("keeps the latest result under the name on the home card and drops the switch", async () => {
-    const view = await render(<RoutineScheduleList compact rows={[row("a", { latestStatus: "최근 실패", latestTone: "danger" })]} onOpen={() => {}} />);
-    expect(view.querySelector("input[role='switch']")).toBeNull();
-    expect(view.querySelector("[data-row='a']")!.textContent).toContain("최근 실패");
-  });
 });

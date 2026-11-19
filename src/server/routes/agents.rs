@@ -778,12 +778,9 @@ pub async fn start_agent_turn(
             Json(json!({"ok": false, "error": "postgres pool unavailable"})),
         );
     };
-    let super::agents_turn_target::AgentTurnTarget {
-        provider,
-        primary_channel,
-        channel_id: channel_id_num,
-    } = match super::agents_turn_target::resolve_agent_turn_target(
+    let target = match super::agents_turn_target::resolve_agent_turn_target(
         pool,
+        state.health_registry.as_deref(),
         &id,
         provider_override.as_deref(),
         channel_override.as_deref(),
@@ -801,15 +798,12 @@ pub async fn start_agent_turn(
             return response;
         }
     };
+    let channel_id_num = target.channel_id;
     // A start the owner takes queues behind an external turn instead of refusing it.
     if dm_user_id_num.is_none()
-        && !crate::services::discord::owner_takes_start(&provider, channel_id_num)
-        && let Some(conflict) = super::agents_turn_target::external_turn_conflict(
-            state.health_registry.as_deref(),
-            &provider,
-            channel_id_num,
-        )
-        .await
+        && let Some(conflict) =
+            super::agents_turn_target::check_start_target(state.health_registry.as_deref(), &target)
+                .await
     {
         super::imessage_input_notice::not_echoed(
             notice.as_deref(),
@@ -839,7 +833,7 @@ pub async fn start_agent_turn(
             registry,
             poise::serenity_prelude::ChannelId::new(channel_id_num),
             dm_user_id_num,
-            provider,
+            target.provider,
             prompt.to_string(),
             body.source,
             metadata,
@@ -849,11 +843,7 @@ pub async fn start_agent_turn(
     } else {
         super::agents_turn_target::start_headless_turn_on_target(
             registry,
-            super::agents_turn_target::AgentTurnTarget {
-                provider,
-                primary_channel,
-                channel_id: channel_id_num,
-            },
+            target,
             prompt.to_string(),
             body.source,
             metadata,

@@ -41,9 +41,15 @@ impl Owner {
         Ok(successor)
     }
 
+    /// When `tick` next settles: the head's retention or the front's readiness deadline.
+    pub(crate) fn settle_due(&self) -> Option<u64> {
+        let front = self.front_hold().map(|hold| hold.due_at_ms);
+        self.head_due().or(front)
+    }
+
     /// When `tick` next retains the head: its confirmation deadline, at once (0) for a head it
     /// retains without one, `None` while the head is reserved, bootstrapping or absent.
-    pub(crate) fn settle_due(&self) -> Option<u64> {
+    fn head_due(&self) -> Option<u64> {
         let head = self.snapshot.head_injection.as_ref()?;
         if head.phase == HeadPhase::Reserved {
             return None;
@@ -56,8 +62,9 @@ impl Owner {
     }
 
     pub(crate) fn tick(&mut self, now: u64) -> Result<(), String> {
+        self.refuse_expired_front(now)?;
         let mut next = self.snapshot.clone();
-        if self.settle_due().is_some_and(|due| now >= due) {
+        if self.head_due().is_some_and(|due| now >= due) {
             let input = next
                 .head_injection
                 .take()
@@ -74,6 +81,7 @@ impl Owner {
             });
         }
         next.forget_told_refusals(now);
+        next.prune_readiness_holds();
         super::migration::anchor_terminals(&mut next, now);
         super::source_admission::expire_binds(&mut next, now);
         next.terminal_identities

@@ -466,12 +466,12 @@ test("routines: screenshots at 390, 820 and 1440 in light and dark", async ({ pa
         await page.screenshot({ path: `${SHOTS}/routines-${width}x${height}-${theme}-overlap.png` });
       }
     }
-    // Home keeps its card; only the rows follow the routines page.
+    // Home has its own today's-routines card.
     for (const [width, height] of [[390, 844], [1440, 900]] as const) {
       await page.setViewportSize({ width, height });
       await page.goto("/home");
-      const card = page.getByTestId("routines-timeline");
-      await expect(card.getByTestId("routine-row-rt-relay")).toBeVisible({ timeout: 15_000 });
+      const card = page.getByTestId("home-routines");
+      await expect(card).toBeVisible({ timeout: 15_000 });
       await card.scrollIntoViewIfNeeded();
       await card.screenshot({ path: `${SHOTS}/home-routines-${width}x${height}-${theme}.png` });
     }

@@ -209,6 +209,11 @@ async function saveCampaign(campaign: Campaign, patch: Partial<Pick<Campaign, "n
   );
 }
 
+/** Replaces the node list in one write; `campaign` is the full copy whose revision the save expects. */
+export async function saveCampaignNodes(campaign: Campaign, nodes: CampaignNode[]): Promise<Campaign> {
+  return (await saveCampaign(campaign, { nodes })).campaign;
+}
+
 export async function updateCampaignNode(campaign: Campaign, updated: CampaignNode): Promise<Campaign> {
   const result = await saveCampaign(campaign, { nodes: campaign.nodes.map((node) => (node.id === updated.id ? updated : node)) });
   return result.campaign;

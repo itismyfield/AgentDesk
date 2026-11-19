@@ -209,6 +209,31 @@ class RunnerMemoryTests(unittest.TestCase):
         self.assertEqual(data["phases"], {})
         self.assertIsNone(data["host_total_bytes"])
 
+    def test_self_hosted_scope_is_in_metadata_and_summary(self):
+        self.env["RUNNER_ENVIRONMENT"] = "self-hosted"
+        self.run_probe("start")
+        self.run_probe("checkpoint")
+        self.run_probe("finish")
+        for folder, name in (
+            ("runner-memory", "metadata.json"),
+            ("runner-memory-checkpoint", "metadata.json"),
+            ("runner-memory", "summary.json"),
+        ):
+            data = json.loads((self.root / folder / name).read_text())
+            self.assertEqual(data["runner_environment"], "self-hosted")
+            self.assertIs(data["shared_host"], True)
+        self.assertIn("shared host", (self.root / "runner-memory/summary.md").read_text())
+
+    def test_runner_scope_is_available_even_without_samples(self):
+        for environment, expected in (("github-hosted", False), ("unrecognized", None)):
+            with self.subTest(environment=environment):
+                self.env["RUNNER_ENVIRONMENT"] = environment
+                self.run_probe("finish")
+                data = self.summary()
+                self.assertEqual(data["status"], "unavailable")
+                self.assertIs(data["shared_host"], expected)
+                self.assertEqual(data["runner_environment"], environment if expected is not None else None)
+
     def test_artifacts_exclude_environment_unselected_names_and_cmdline_paths(self):
         secret = self.env["MEMORY_TEST_SECRET"]
         self.process("999", secret, 1, 1)

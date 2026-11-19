@@ -662,6 +662,9 @@ fn site(config: &Config, selects: bool) -> Result<(Site, Option<String>)> {
 }
 
 pub(crate) fn install(config: &Config) -> Result<()> {
+    crate::services::session_host::surface_policy::install_policy_channel(
+        super::cutover::policy_channel,
+    );
     let candidate = BootChannels::validate(config)?;
     let installed = match BOOT.get() {
         Some(installed) => installed,

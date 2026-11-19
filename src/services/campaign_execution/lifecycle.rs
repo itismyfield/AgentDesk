@@ -201,6 +201,8 @@ fn begin_run(next: &mut CampaignState, expected_revision: u64, run_id: &str) -> 
         verifications: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
         reviews: BTreeMap::new(),
+        landings: BTreeMap::new(),
+        merges: BTreeMap::new(),
         fences: BTreeMap::new(),
         seals: BTreeMap::new(),
         environments: BTreeMap::new(),
@@ -395,6 +397,99 @@ pub(super) fn decide(next: &mut CampaignState, command: &Command) -> Transition 
             expected_epoch,
         } => complete_node(next, expected_run, node_id, *expected_epoch),
         _ => reject(RejectionCode::InvalidState),
+    }
+}
+
+pub(super) fn merge_position(
+    state: &CampaignState,
+    run: &Run,
+    node_id: &str,
+    landing: &super::landing_effects::Landing,
+) -> bool {
+    state.control == CampaignControl::Running
+        && run.stop.is_none()
+        && state.nodes.get(node_id).is_some_and(|node| {
+            node.stage == Stage::Landing
+                && node.disposition == NodeDisposition::Assigned
+                && node.current_attempt.is_none()
+        })
+        && run.control_version == landing.control_version
+        && run
+            .fences
+            .get(node_id)
+            .is_some_and(|fence| fence.epoch == landing.epoch && fence.interruption.is_none())
+        && landing_candidate(state, run, node_id).is_some_and(|candidate| {
+            candidate.head_sha == landing.target.head_sha
+                && candidate.pin_hash == landing.target.pin_hash
+                && require_gate(
+                    state,
+                    run,
+                    node_id,
+                    ApprovalGate::Landing,
+                    &GateTarget::of(candidate),
+                )
+                .is_ok()
+        })
+}
+
+pub(super) fn merge_approval(
+    state: &CampaignState,
+    run: &Run,
+    node_id: &str,
+    landing: &super::landing_effects::Landing,
+    pr: &super::landing_effects::OpenedPr,
+) -> Option<(
+    crate::domain::campaign::decision_item::ApprovalBinding,
+    bool,
+)> {
+    use crate::domain::campaign::decision_item::ApprovalBinding;
+    let gate = ApprovalGate::Merge;
+    if !state
+        .definition
+        .input()
+        .effective_workflow_options()
+        .required(gate)
+    {
+        return None;
+    }
+    let binding = ApprovalBinding {
+        run_id: run.id.clone(),
+        node_id: node_id.into(),
+        gate,
+        definition_revision: state.definition_revision,
+        policy_hash: landing.target.pin_hash.clone(),
+        target: ApprovalTarget::PullRequest {
+            number: pr.number,
+            head_sha: pr.head_sha.clone(),
+        },
+    };
+    let approved = binding
+        .slot_id()
+        .ok()
+        .and_then(|slot| run.approvals.current.get(&slot))
+        .and_then(|id| run.approvals.items.get(id))
+        .is_some_and(|item| item.binding == binding && item.approval.is_some());
+    Some((binding, approved))
+}
+
+pub(super) fn main_observed(state: &mut CampaignState, node_id: &str, active: bool) -> Transition {
+    let node = state
+        .nodes
+        .get_mut(node_id)
+        .ok_or_else(|| Rejection::new(RejectionCode::StaleBinding))?;
+    node.main_integrated = true;
+    if active {
+        advance(
+            state,
+            node_id,
+            Stage::MainVerification,
+            NodeDisposition::Verifying,
+        )
+    } else {
+        Ok(Some(EventKind::NodeAdvanced {
+            node_id: node_id.into(),
+            stage: node.stage,
+        }))
     }
 }
 

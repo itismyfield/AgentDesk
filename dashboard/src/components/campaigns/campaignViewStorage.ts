@@ -12,8 +12,10 @@ const KEY_PREFIX = "agentdesk.campaign-graph-view.v1:";
 export type StoredView = { view: GraphViewSettings; raw: string | null; recovered: boolean; revision: number | null };
 export type SaveResult = { ok: true; raw: string } | { ok: false; reason: string };
 
-/** The legacy campaign's all-task group graph, the one drawing that has ties today. */
+/** The legacy campaign's all-task group graph, whose ties are now only drawn. */
 export const groupViewScope = (campaignId: string): ViewScope => ({ mode: "legacy", campaignId, projection: "groups", taskScope: "all" });
+/** One editing scope of the relations editor (`group:<key>` or `task:<id>:<depth>`), where ties are made. */
+export const editorViewScope = (campaignId: string, scopeKey: string): ViewScope => ({ mode: "legacy", campaignId, projection: "tasks", taskScope: scopeKey });
 
 export function campaignViewKey(scope: ViewScope): string {
   return KEY_PREFIX + JSON.stringify([scope.mode, scope.campaignId, scope.projection, scope.taskScope]);
@@ -134,22 +136,30 @@ export function pruneStoredView(scope: ViewScope, present: readonly RawEdgeKey[]
   if (JSON.stringify(view) !== JSON.stringify(stored.view) || (revision === null && stored.revision !== null)) saveCampaignView(scope, view, revision);
 }
 
-/** Campaign ids that have a saved group-graph layout in this browser. */
-export function storedGroupViewCampaigns(): string[] {
+/** Scopes that have a saved layout in this browser, read from the key names alone. */
+function storedScopes(): ViewScope[] {
   const target = storage();
-  const ids: string[] = [];
+  const scopes: ViewScope[] = [];
   try {
     for (let index = 0; target && index < target.length; index++) {
       const name = target.key(index);
       if (!name?.startsWith(KEY_PREFIX)) continue;
       const [mode, campaignId, projection, taskScope] = JSON.parse(name.slice(KEY_PREFIX.length)) as unknown[];
-      if (typeof campaignId === "string" && campaignViewKey(groupViewScope(campaignId)) === campaignViewKey({ mode, campaignId, projection, taskScope } as ViewScope)) ids.push(campaignId);
+      if (typeof campaignId === "string" && typeof taskScope === "string") scopes.push({ mode, campaignId, projection, taskScope } as ViewScope);
     }
   } catch {
     // An unreadable storage or a foreign key under the prefix leaves the list as found so far.
   }
-  return ids;
+  return scopes;
 }
+
+/** Campaign ids that have a saved group-graph layout in this browser. */
+export const storedGroupViewCampaigns = () => storedScopes()
+  .filter((scope) => campaignViewKey(groupViewScope(scope.campaignId)) === campaignViewKey(scope)).map((scope) => scope.campaignId);
+
+/** The relations editor scopes of one ledger campaign that have saved ties in this browser. */
+export const storedEditorScopes = (campaignId: string) => storedScopes()
+  .filter((scope) => campaignViewKey(editorViewScope(campaignId, scope.taskScope)) === campaignViewKey(scope));
 
 /** Fires when another tab changes this scope's value. */
 export function subscribeCampaignView(scope: ViewScope, listener: () => void): () => void {

@@ -12,6 +12,8 @@ use std::{
 pub(crate) type Commit = Arc<dyn Fn(Option<PaneEpoch>) -> Result<(), String> + Send + Sync>;
 pub(crate) type Pin = Arc<dyn Fn(Option<PaneEpoch>, String) -> Result<(), String> + Send + Sync>;
 pub(crate) type Hold = Arc<dyn Fn(serde_json::Value) -> Result<(), String> + Send + Sync>;
+/// The owner's consent to the attempt's first key, asked before any C-s.
+pub(crate) type Approve = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 #[cfg(unix)]
 pub(crate) type PreparationWatch = Box<dyn FnMut() -> super::busy_inject::Screen + Send>;
 struct Scope {
@@ -19,6 +21,7 @@ struct Scope {
     target: serde_json::Value,
     channel: u64,
     commit: Commit,
+    approve: Approve,
     pin: Pin,
     hold: Hold,
     allowed: AtomicBool,
@@ -87,13 +90,15 @@ pub(crate) enum ReadyRefusal {
     Lease(String),
 }
 
-/// Before any C-s: the known execution, the server-side pane identity and the writer lease
-/// still hold. Commits nothing, so a refusal here leaves no key and no payload start.
+/// Before any C-s: the owner consents to the first key, and the known execution, the server-side
+/// pane identity and the writer lease still hold. A refusal here leaves no key and no payload start.
 pub(crate) fn ready_payload() -> Result<(), ReadyRefusal> {
     let Some(scope) = current() else {
         return Ok(());
     };
-    let result = scope.ready();
+    let result = (scope.approve)()
+        .map_err(ReadyRefusal::Lease)
+        .and_then(|()| scope.ready());
     if let Err(refusal) = &result {
         let (ReadyRefusal::Target(reason) | ReadyRefusal::Lease(reason)) = refusal;
         scope.refuse(format!("owner_refused: {reason}"));
@@ -449,12 +454,27 @@ impl Drop for LaunchGuard {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(crate) fn capture_scope<R>(
     provider: String,
     target: serde_json::Value,
     channel: u64,
     commit: Commit,
+    pin: Pin,
+    hold: Hold,
+    run: impl FnOnce() -> R,
+) -> (R, Option<NotSentProof>) {
+    let approve: Approve = Arc::new(|| Ok(()));
+    capture_owner_scope(provider, target, channel, (commit, approve), pin, hold, run)
+}
+
+/// As `capture_scope`, with the owner asked to approve the first key before any C-s.
+#[cfg(unix)]
+pub(crate) fn capture_owner_scope<R>(
+    provider: String,
+    target: serde_json::Value,
+    channel: u64,
+    (commit, approve): (Commit, Approve),
     pin: Pin,
     hold: Hold,
     run: impl FnOnce() -> R,
@@ -470,6 +490,7 @@ pub(crate) fn capture_scope<R>(
         target,
         channel,
         commit,
+        approve,
         pin,
         hold,
         allowed: AtomicBool::new(false),

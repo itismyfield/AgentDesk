@@ -65,7 +65,7 @@ pub(super) async fn enrich_with<F: Future<Output = Result<Option<ChannelSessionS
             Err(error) => {
                 let mut unavailable = serde_json::json!({
                     "safety_gate": "measurement_unavailable",
-                    "fix_safety": crate::cli::doctor::contract::FixSafety::NotFixable,
+                    "fix_safety": crate::domain::fix_safety::FixSafety::NotFixable,
                     "message": error,
                 });
                 if let Some(cause) = cause {

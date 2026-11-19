@@ -11,6 +11,7 @@ use super::definition::{
 use super::evidence::{EvidenceDecision, EvidenceEnvelope};
 use super::evidence_gate::{StageAssessment, Verdict};
 use super::execution_pin::ExecutionPin;
+use super::landing::{Landing, LandingFact, MergeFact, MergeJob};
 use super::profile::ExecutionEnvironment;
 use super::review_gate::{ReviewFact, ReviewJob, StagePrerequisite};
 use super::verification_run::{
@@ -290,6 +291,10 @@ pub struct Run {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub reviews: BTreeMap<String, ReviewJob>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub landings: BTreeMap<String, Landing>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub merges: BTreeMap<String, MergeJob>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fences: BTreeMap<String, NodeFence>,
     // The one seal of each Work attempt's output, keyed by attempt ID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -512,6 +517,14 @@ pub enum Command {
     SettleVerification {
         execution_id: String,
         evidence: String,
+    },
+    RecordMerge {
+        node_id: String,
+        fact: Box<MergeFact>,
+    },
+    RecordLanding {
+        node_id: String,
+        fact: Box<LandingFact>,
     },
     RecordReview {
         action_id: String,

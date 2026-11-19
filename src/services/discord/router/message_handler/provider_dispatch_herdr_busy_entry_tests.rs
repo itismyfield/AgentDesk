@@ -26,6 +26,7 @@ mod missing_input;
 
 const MESSAGE: u64 = 1_570_000_811_403_001_001;
 const INPUT: &str = "join the running Herdr turn now";
+const THREAD_PARENT_NAME: &str = "thread-http-parent";
 
 struct DeliveredLegacy {
     logical: String,
@@ -290,8 +291,27 @@ impl Intake {
             started,
             ExpectedPin::Verified,
             Arc::default(),
-            false,
+            (false, None),
             engine,
+        )
+    }
+
+    fn new_thread(fx: &Fixture, started: &Started, parent: u64) -> Self {
+        assert_eq!(
+            started.hook(
+                fx,
+                "Stop",
+                &json!({"session_id":started.session,"transcript_path":started.path}),
+            ),
+            202,
+        );
+        Self::with_launch(
+            fx,
+            started,
+            ExpectedPin::Verified,
+            Arc::default(),
+            (false, Some(parent)),
+            None,
         )
     }
 
@@ -305,7 +325,7 @@ impl Intake {
         expected: ExpectedPin,
         output_gate: Arc<http_start::OutputGate>,
     ) -> Self {
-        Self::with_launch(fx, started, expected, output_gate, false, None)
+        Self::with_launch(fx, started, expected, output_gate, (false, None), None)
     }
 
     fn with_launch(
@@ -313,7 +333,7 @@ impl Intake {
         started: &Started,
         expected: ExpectedPin,
         output_gate: Arc<http_start::OutputGate>,
-        launch: bool,
+        (launch, thread_parent): (bool, Option<u64>),
         engine: Option<crate::engine::PolicyEngine>,
     ) -> Self {
         let generation = discord::runtime_store::generation_path().unwrap();
@@ -346,16 +366,23 @@ impl Intake {
         std::fs::write(&started.path, records.join("\n") + "\n").unwrap();
         let live_guard = crate::config_live_reload::test_live_guard_after_shared_test_env_lock();
         let label = fx.logical().strip_prefix("AgentDesk-claude-").unwrap();
+        let configured_channel = thread_parent.unwrap_or(CHANNEL);
+        let configured_name = thread_parent.map_or(label, |_| THREAD_PARENT_NAME);
+        let provider_default = if thread_parent.is_some() {
+            "legacy"
+        } else {
+            "tui"
+        };
         let config: crate::config::Config = serde_json::from_value(json!({
-            "server": {}, "providers": {"claude": {"runtime": "tui"}},
+            "server": {}, "providers": {"claude": {"runtime": provider_default}},
             "agents": [{"id": "busy-entry", "name": "Busy entry", "provider": "claude",
-                "channels": {"claude": {"id": CHANNEL.to_string(), "name": label, "runtime": "tui"}}}],
+                "channels": {"claude": {"id": configured_channel.to_string(), "name": configured_name, "runtime": "tui"}}}],
             "cluster": {"instance_id": NODE}, "runtime": {"herdr_turn_enabled": true},
             "session_hosts": {"herdr": {
                 "endpoints": {(KEY): {"execution_node": NODE, "socket_path": fx.rig.socket(),
                     "herdr_home": "/adk/herdr", "herdr_session": SESSION}},
-                "channels": {(CHANNEL.to_string()): KEY}}},
-            "tui_o": {"writer": {"channels": [CHANNEL]}, "turn": {"all_owned": false}}
+                "channels": {(configured_channel.to_string()): KEY}}},
+            "tui_o": {"writer": {"channels": [configured_channel]}, "turn": {"all_owned": false}}
         }))
         .unwrap();
         let path = fx.cwd.path().join("i8114-entry-fixture.yml");
@@ -419,10 +446,24 @@ impl Intake {
             let api = discord::admin_host_guard::tests::Recorder::start().await;
             let mock = discord_mock::DiscordMockState::new();
             mock.allow_channel(CHANNEL);
-            mock.name_channel(CHANNEL, label);
+            if let Some(parent) = thread_parent {
+                mock.allow_channel(parent);
+                mock.name_channel(parent, THREAD_PARENT_NAME);
+                mock.add_thread(CHANNEL, parent);
+            } else {
+                mock.name_channel(CHANNEL, label);
+            }
             mock.park_first_placeholder.store(false, Ordering::SeqCst);
             let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
             let ctx = discord_mock::serenity_context(proxy, gateway).await;
+            if thread_parent.is_some() {
+                let channel = ChannelId::new(CHANNEL).to_channel(&ctx.http).await.unwrap();
+                let poise::serenity_prelude::Channel::Guild(child) = channel else {
+                    panic!("expected a Discord thread");
+                };
+                // The fixture has just created the Discord thread with no Legacy body offers.
+                assert!(cutover::record_thread_child(&child, true));
+            }
             let mut shared =
                 discord::make_shared_data_for_tests_with_storage(Some(fx.pool.clone()));
             let own = Arc::get_mut(&mut shared).unwrap();
@@ -1676,3 +1717,6 @@ mod idle_compaction_tests;
 
 #[path = "provider_dispatch_restart_reply_tests.rs"]
 mod restored_reply_tests;
+
+#[path = "provider_dispatch_restart_unrestorable_tests.rs"]
+mod unrestorable_tests;

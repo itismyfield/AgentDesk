@@ -35,7 +35,6 @@ import {
   type RoutineFilter,
   type RoutineMarker,
 } from "./routineModel";
-import { HomeRoutinesTimeline } from "./HomeRoutinesTimeline";
 import { RoutineDetailBody, RoutineDetailPane, routineDetailTitle } from "./RoutineDetail";
 import { RoutineOverlapList, RoutineRunsTimeline } from "./RoutineRunsTimeline";
 import { RoutineScheduleList, type RoutineRowView } from "./RoutineScheduleRows";
@@ -85,11 +84,7 @@ interface RoutinesTimelineWidgetProps {
   t: TFunction;
   localeTag: string;
   language: "ko" | "en" | "ja" | "zh";
-  /** Home card: no filters, failures first, at most five rows. */
-  compact?: boolean;
 }
-
-const COMPACT_ROW_LIMIT = 5;
 
 type ReturnTarget = { element: HTMLElement | null; routineId: string | null };
 
@@ -124,7 +119,7 @@ function RoutinesListSkeleton({ t }: { t: TFunction }) {
   );
 }
 
-export function RoutinesTimelineWidget({ t, localeTag, language, compact = false }: RoutinesTimelineWidgetProps) {
+export function RoutinesTimelineWidget({ t, localeTag, language }: RoutinesTimelineWidgetProps) {
   const [filter, setFilter] = useState<RoutineFilter>("all");
   const [routines, setRoutines] = useState<RoutineRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -137,7 +132,7 @@ export function RoutinesTimelineWidget({ t, localeTag, language, compact = false
   const [runsError, setRunsError] = useState(false);
   const now = useNow();
   const isMobile = useIsMobile();
-  const split = !compact && !isMobile;
+  const split = !isMobile;
   const listRef = useRef<HTMLUListElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const returnTarget = useRef<ReturnTarget>({ element: null, routineId: null });
@@ -171,12 +166,7 @@ export function RoutinesTimelineWidget({ t, localeTag, language, compact = false
     };
   }, [filter, reloadKey]);
 
-  const sortedRoutines = useMemo(() => {
-    const chronological = sortRoutinesChronologically(routines);
-    if (!compact) return chronological;
-    const failed = (routine: RoutineRecord) => runStatusTone(routine.last_run?.status) === "danger";
-    return [...chronological.filter(failed), ...chronological.filter((routine) => !failed(routine))].slice(0, COMPACT_ROW_LIMIT);
-  }, [compact, routines]);
+  const sortedRoutines = useMemo(() => sortRoutinesChronologically(routines), [routines]);
   const activeCount = routines.filter((routine) => routine.status === "enabled").length;
   const markers = useMemo(() => routineTimelineMarkers(routines, now), [routines, now]);
   const selectedRoutine = selectedRoutineId ? routines.find((routine) => routine.id === selectedRoutineId) ?? null : null;
@@ -232,7 +222,6 @@ export function RoutinesTimelineWidget({ t, localeTag, language, compact = false
 
   // J/K from the page background (nothing focused) enter the list at the selected row, else the first one.
   useEffect(() => {
-    if (compact) return undefined;
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       const key = event.key.toLowerCase();
       if ((key !== "j" && key !== "k") || event.altKey || event.ctrlKey || event.metaKey || event.defaultPrevented) return;
@@ -246,7 +235,7 @@ export function RoutinesTimelineWidget({ t, localeTag, language, compact = false
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [compact, selectedRoutineId]);
+  }, [selectedRoutineId]);
 
   const openRoutine = (routineId: string, trigger: HTMLElement) => {
     returnTarget.current = { element: trigger, routineId };
@@ -407,23 +396,6 @@ export function RoutinesTimelineWidget({ t, localeTag, language, compact = false
         ) : null)}
     </Drawer>
   );
-
-  if (compact) {
-    return (
-      <>
-        <HomeRoutinesTimeline
-          t={t}
-          loading={loading}
-          error={error}
-          rows={rows}
-          listRef={listRef}
-          onOpen={openRoutine}
-          onRefresh={() => setReloadKey((value) => value + 1)}
-        />
-        {drawer}
-      </>
-    );
-  }
 
   const refreshLabel = t({ ko: "루틴 새로고침", en: "Refresh routines", ja: "ルーチンを再読み込み", zh: "刷新例程" });
 

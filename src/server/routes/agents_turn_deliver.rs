@@ -14,7 +14,7 @@ use super::agents_turn_target::{AgentTurnTarget, resolve_agent_turn_target};
 use super::auth::HumanInputCaller;
 use crate::domain::human_input::{HumanInputDelivery, HumanInputError};
 use crate::services::discord::health::{
-    HealthRegistry, HumanInputRequest, deliver_human_input, deliver_with_reply,
+    HealthRegistry, HumanInputRequest, ThreadTurnRuntime, deliver_human_input, deliver_with_reply,
     preflight_human_input,
 };
 use crate::services::imsg_reply;
@@ -190,8 +190,10 @@ pub async fn deliver_turn_input(
         provider,
         primary_channel,
         channel_id,
+        thread,
     } = match resolve_agent_turn_target(
         pool,
+        state.health_registry.as_deref(),
         &id,
         provider_override.as_deref(),
         channel_override.as_deref(),
@@ -219,8 +221,9 @@ pub async fn deliver_turn_input(
         return failure(StatusCode::SERVICE_UNAVAILABLE, "runtime_unavailable");
     };
 
-    let channel_name_hint =
-        (!primary_channel.chars().all(|ch| ch.is_ascii_digit())).then_some(primary_channel);
+    let channel_name_hint = (thread.is_none()
+        && !primary_channel.chars().all(|ch| ch.is_ascii_digit()))
+    .then_some(primary_channel);
     let request = HumanInputRequest {
         channel_id: poise::serenity_prelude::ChannelId::new(channel_id),
         provider,
@@ -246,11 +249,25 @@ pub async fn deliver_turn_input(
             text,
         };
         if !obligations_enabled {
-            return legacy_origin::deliver(pool, registry, &input, request, notice.as_deref())
-                .await;
+            return legacy_origin::deliver(
+                pool,
+                (registry, thread.as_ref()),
+                &input,
+                request,
+                notice.as_deref(),
+            )
+            .await;
         }
         let reply = imsg_reply::ReplyObligation::new(pool.clone(), origin_id);
-        origin_admission::deliver(pool, registry, &input, request, notice.as_deref(), reply).await
+        origin_admission::deliver(
+            pool,
+            (registry, thread.as_ref()),
+            &input,
+            request,
+            notice.as_deref(),
+            reply,
+        )
+        .await
     } else {
         let identity = format!("request:{}", uuid::Uuid::new_v4());
         let result = super::imessage_input_notice::delivered(
@@ -258,10 +275,43 @@ pub async fn deliver_turn_input(
             channel_id,
             &identity,
             notice.as_deref(),
-            observed_delivery(registry, request, None).await,
+            deliver_without_origin(registry, thread.as_ref(), request).await,
         )
         .await;
         delivery_response(channel_id, result)
+    }
+}
+
+async fn preflight_delivery(
+    registry: &HealthRegistry,
+    thread: Option<&ThreadTurnRuntime>,
+    request: &HumanInputRequest,
+) -> Result<(), HumanInputError> {
+    if let Some(thread) = thread {
+        thread.author_allowed(request.author_id).await
+    } else {
+        preflight_human_input(
+            registry,
+            request.channel_id,
+            &request.provider,
+            request.author_id,
+        )
+        .await
+    }
+}
+
+async fn deliver_without_origin(
+    registry: &HealthRegistry,
+    thread: Option<&ThreadTurnRuntime>,
+    request: HumanInputRequest,
+) -> Result<HumanInputDelivery, HumanInputError> {
+    if let Some(thread) = thread {
+        let prepared = registry
+            .prepare_external_human_input_on(request, None, Some(thread))
+            .await?;
+        observed_execution(prepared).await
+    } else {
+        observed_delivery(registry, request, None).await
     }
 }
 

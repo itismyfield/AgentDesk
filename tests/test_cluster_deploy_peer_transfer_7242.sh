@@ -5,6 +5,7 @@ DEPLOY_SH="${AGENTDESK_TEST_DEPLOY_SH:-$ROOT/scripts/deploy-release.sh}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/peer-transfer-test.XXXXXX")"
 trap 'rm -r "$WORK"' EXIT
 export WORK DEPLOY_SH
+export TMPDIR="$WORK"
 export PATH="$WORK/tools:$PATH"
 mkdir -p "$WORK/tools" "$WORK/leader/bin" "$WORK/peer/bin" "$WORK/repo"
 export TRACE="$WORK/trace" PEER_ROOT="$WORK/peer"
@@ -33,6 +34,7 @@ STUB
 cat >"$WORK/tools/rustc" <<'STUB'
 #!/usr/bin/env bash
 echo "rustc ${FAKE_RUSTC:-1.92.0}"
+echo "host: aarch64-apple-darwin"
 STUB
 cat >"$WORK/tools/sw_vers" <<'STUB'
 #!/usr/bin/env bash
@@ -97,17 +99,20 @@ cp "$source" "$destination"
 case "$destination" in
     */manifest.json)
         case "${CORRUPT:-}" in
-            format|source|profile|signature-meta)
+            format|source|profile|signature-meta|witness-mismatch)
                 python3 - "$destination" "$CORRUPT" <<'PY'
 import json
 import sys
 from pathlib import Path
 p = Path(sys.argv[1])
 m = json.loads(p.read_text())
-field, value = {'format': ('format', 0), 'source': ('source_sha', 'old'),
-                'profile': ('profile', 'release-fast'),
-                'signature-meta': ('signature', 'old-signature')}[sys.argv[2]]
-m[field] = value
+if sys.argv[2] == 'witness-mismatch':
+    m['running_source']['sha256'] = '0' * 64
+else:
+    field, value = {'format': ('format', 0), 'source': ('source_sha', 'old'),
+                    'profile': ('profile', 'release-fast'),
+                    'signature-meta': ('signature', 'old-signature')}[sys.argv[2]]
+    m[field] = value
 p.write_text(json.dumps(m))
 PY
                 ;;
@@ -145,24 +150,32 @@ work = Path(sys.argv[2])
 build = source.split('# Build the release binary from HEAD by default;', 1)[1]
 build = '# Build the release binary from HEAD by default;' + build.split('# The binary itself reports its O ledger reader;', 1)[0]
 (work / 'build-block').write_text(build)
-stage = source.split('STAGED_BINARY="$(_staged_deploy_binary_path)"', 1)[1]
-stage = 'STAGED_BINARY="$(_staged_deploy_binary_path)"' + stage.split('sign_binary_with_fallback "$STAGED_BINARY"', 1)[0] + 'sign_binary_with_fallback "$STAGED_BINARY"\n'
-(work / 'stage-block').write_text(stage)
-leader_stage = source.split('STAGED_BINARY="$(_staged_deploy_binary_path)"', 1)[1]
-leader_stage = 'STAGED_BINARY="$(_staged_deploy_binary_path)"' + leader_stage.split('_clean_release_build_cache_after_staging', 1)[0]
-(work / 'leader-stage-block').write_text(leader_stage)
-promote = source.split('mv -f "$STAGED_BINARY" "$REL_BINARY"', 1)[1]
-promote = 'mv -f "$STAGED_BINARY" "$REL_BINARY"' + promote.split('# Swap policies with nothing fallible', 1)[0]
-(work / 'leader-promote-block').write_text(promote)
+stage_start = 'STAGED_BINARY="$(_staged_deploy_binary_path)"'
+stage = stage_start + source.split(stage_start, 1)[1]
+(work / 'stage-block').write_text(stage.split('_cleanup_peer_binary', 1)[0])
+(work / 'leader-stage-block').write_text(stage.split('_clean_release_build_cache_after_staging', 1)[0])
+promote_start = 'rm -f "$REL_BINARY.source.json"'
+promote = promote_start + source.split(promote_start, 1)[1]
+(work / 'leader-promote-block').write_text(promote.split('# Swap policies with nothing fallible', 1)[0])
 smoke = source.split('# >>> BEGIN smoke-disposition region', 1)[1].split('\n', 1)[1]
 (work / 'smoke-block').write_text(smoke.split('# <<< END smoke-disposition region', 1)[0])
 PY
 mkdir -p "$WORK/repo/scripts"
 cat >"$WORK/repo/scripts/build_token.py" <<'PY'
+import os
+from pathlib import Path
 import subprocess
 import sys
-sys.exit(subprocess.call(sys.argv[sys.argv.index('--') + 1:]))
+
+from release_source import record, write
+
+rc = subprocess.call(sys.argv[sys.argv.index('--') + 1:])
+if rc == 0 and sys.argv[1] == '--release-source':
+    binary, metadata, target = sys.argv[2:5]
+    write(Path(metadata), record(Path(binary), os.environ['EXPECTED_SHA'], target))
+sys.exit(rc)
 PY
+cp "$ROOT/scripts/release_source.py" "$WORK/repo/scripts/"
 cat >"$WORK/defaults.sh" <<'STUB'
 _preflight_resource_contention() { :; }
 STUB
@@ -174,6 +187,7 @@ set -euo pipefail
 REPO="$WORK/repo" ADK_REL="$PEER_ROOT" SCRIPT_DIR="$WORK/repo/scripts"
 DEPLOY_PEER_INVOCATION=1 DEPLOY_TARGET_SHA="$EXPECTED_SHA" DEPLOY_BUILD_PROFILE=release
 DEPLOY_LOCK_TIMEOUT_SECS=1 DEPLOY_BUILT_SOURCE_SHA="" DEPLOY_RUN_STARTED="$SECONDS"
+SOURCE_RECORD=""
 if declare -F _cleanup_peer_binary >/dev/null; then trap _cleanup_peer_binary EXIT; fi
 _ensure_dashboard_dependencies() { :; }
 _check_repo_remote_freshness() { :; }
@@ -186,7 +200,8 @@ xattr() { :; }
 git() { echo "${PEER_RUNTIME_HEAD:-$EXPECTED_SHA}"; }
 . "$WORK/build-block"
 . "$WORK/stage-block"
-mv "$STAGED_BINARY" "$PEER_ROOT/bin/agentdesk"
+REL_BINARY="$PEER_ROOT/bin/agentdesk"
+. "$WORK/leader-promote-block"
 echo activate >>"$TRACE"
 _run_post_deploy_functional_smoke() { echo peer-smoke >>"$TRACE"; }
 POST_DEPLOY_SMOKE_WEDGE_COVERAGE=clean POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE=clean
@@ -202,6 +217,7 @@ set -euo pipefail
 REPO="$WORK/repo" ADK_REL="$WORK/leader" SCRIPT_DIR="$WORK/repo/scripts"
 DEPLOY_PEER_INVOCATION=0 DEPLOY_TARGET_SHA="$EXPECTED_SHA" DEPLOY_BUILD_PROFILE=release
 DEPLOY_LOCK_TIMEOUT_SECS=1 DEPLOY_BUILT_SOURCE_SHA="" DEPLOY_RUN_STARTED="$SECONDS"
+SOURCE_RECORD=""
 DEPLOY_SSH_CONNECT_TIMEOUT=1
 export BUILD_NODE=leader-build
 unset DEPLOY_BINARY_PLATFORM DEPLOY_PEER_BINARY_SOURCE
@@ -249,7 +265,7 @@ run_case() (
         launch-fail) export LAUNCH_FAIL=1 ;;
         peer-platform) export PEER_RUNTIME_MACOS=14.0 ;;
         head-target) export PEER_RUNTIME_HEAD=old-head ;;
-        hash|size|execute|runtime|format|source|profile|signature-meta) export CORRUPT="$scenario" ;;
+        hash|size|execute|runtime|format|source|profile|signature-meta|witness-mismatch) export CORRUPT="$scenario" ;;
         optimized-hash) export CORRUPT=hash PYTHONOPTIMIZE=1 ;;
         arch) export PEER_ARCH=x86_64 ;;
         toolchain) export PEER_RUSTC=1.91.0 ;;
@@ -260,8 +276,10 @@ run_case() (
     esac
     : >"$TRACE"
     cp "$WORK/good-binary" "$WORK/leader/bin/signed"
-    REPO="$WORK/repo" ADK_REL="$WORK/leader"
+    REPO="$WORK/repo" ADK_REL="$WORK/leader" SCRIPT_DIR="$WORK/repo/scripts"
     DEPLOY_PEER_BINARY_SOURCE="$ADK_REL/bin/signed"
+    python3 "$SCRIPT_DIR/release_source.py" seal "$DEPLOY_PEER_BINARY_SOURCE" \
+        "$EXPECTED_SHA" aarch64-apple-darwin
     DEPLOY_BUILT_SOURCE_SHA="$EXPECTED_SHA" DEPLOY_TARGET_SHA="$EXPECTED_SHA"
     DEPLOY_BUILD_PROFILE=release DEPLOY_SSH_CONNECT_TIMEOUT=1
     if [ "$scenario" = codesign-verbosity ]; then
@@ -345,7 +363,7 @@ PROBE
     grep -qx activate "$TRACE" || fail "$scenario did not activate"
     grep -qx peer-smoke "$TRACE" || fail "$scenario skipped peer smoke"
     grep -qx peer-health "$TRACE" || fail "$scenario skipped peer health"
-    if [ "$scenario" = success ] || [ "$scenario" = codesign-verbosity ] || [ "$scenario" = stages ] || [[ "$scenario" == leader-* ]]; then
+    if [ "$scenario" = success ] || [ "$scenario" = codesign-verbosity ] || [ "$scenario" = stages ] || [ "$scenario" = witness-mismatch ] || [[ "$scenario" == leader-* ]]; then
         grep -qx transfer "$TRACE" || fail "$scenario did not transfer"
         ! grep -qx build "$TRACE" || fail "$scenario rebuilt on peer"
         cmp -s "$WORK/good-binary" "$PEER_ROOT/bin/agentdesk" || fail "$scenario activated different bytes"
@@ -377,6 +395,13 @@ PROBE
             grep -E 'fallback:.*artifact unavailable' "$WORK/$scenario.log" >/dev/null || fail "$scenario missing artifact reason"
             ;;
     esac
+    if [ "$scenario" = witness-mismatch ]; then
+        [ ! -e "$PEER_ROOT/bin/agentdesk.source.json" ] || fail "mismatched witness was promoted"
+    else
+        source_id="$(python3 "$SCRIPT_DIR/release_source.py" inspect \
+            "$PEER_ROOT/bin/agentdesk.source.json" "$PEER_ROOT/bin/agentdesk")"
+        [ "$source_id" = "$EXPECTED_SHA aarch64-apple-darwin" ] || fail "installed witness missing or mismatched"
+    fi
     python3 - "$TRACE" "$scenario" <<'PY'
 import sys
 from pathlib import Path
@@ -397,7 +422,7 @@ if [ "$#" -gt 0 ]; then
     run_case "$1"
 else
     count=0
-    for scenario in success codesign-verbosity hash arch transfer stages size signature execute runtime toolchain os format source profile signature-meta optimized-hash concurrency detach leader-staged leader-live unavailable launch-fail peer-platform head-target; do
+    for scenario in success codesign-verbosity hash arch transfer stages size signature execute runtime toolchain os format source profile signature-meta optimized-hash concurrency detach leader-staged leader-live witness-mismatch unavailable launch-fail peer-platform head-target; do
         run_case "$scenario"
         count=$((count + 1))
     done

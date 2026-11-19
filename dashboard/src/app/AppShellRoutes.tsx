@@ -5,8 +5,8 @@ import * as api from "../api/client";
 import type { Agent, CompanySettings, DashboardStats, Department, DispatchedSession } from "../types";
 import type { Notification } from "../components/NotificationCenter";
 import type { AgentManagerTab } from "../components/agent-manager/useAgentManagerController";
-import { DEFAULT_ROUTE_PATH, LEGACY_ROUTE_REDIRECTS, PRIMARY_ROUTES } from "./routes";
-import HomeOverviewPage from "./HomeOverviewPage";
+import { APP_ROUTES, DEFAULT_ROUTE_PATH, LEGACY_ROUTE_REDIRECTS } from "./routes";
+import HomePageView from "../components/home/HomePageView";
 
 export interface AppShellRoutesContext {
   agents: Agent[];
@@ -34,11 +34,11 @@ export interface AppShellRoutesContext {
 }
 
 const StatsPageView = lazy(() => import("../components/StatsPageView"));
-const OpsPageView = lazy(() => import("../components/OpsPageView"));
 const RoutinesPageView = lazy(() => import("../components/RoutinesPageView"));
 const CampaignsPanel = lazy(() => import("../components/campaigns/CampaignsPanel"));
 const AgentManagerView = lazy(() => import("../components/AgentManagerView"));
 const SettingsView = lazy(() => import("../components/SettingsView"));
+const AuditPageView = lazy(() => import("../components/audit/AuditPageView"));
 
 export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) {
   const {
@@ -58,7 +58,6 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
     stats,
     visibleDispatchedSessions,
     wsConnected,
-    wsLastEventTs,
     refreshAgents,
     refreshDepartments,
   } = ctx;
@@ -88,12 +87,9 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
       <Route
         path="/home"
         element={
-          <HomeOverviewPage
+          <HomePageView
             isMobileViewport={isMobileViewport}
             isKo={isKo}
-            wsConnected={wsConnected}
-            wsLastEventTs={wsLastEventTs}
-            stats={stats}
             agents={agentsWithDispatched}
             onOpenAgent={openDefaultAgentInfo}
           />
@@ -113,30 +109,13 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
         }
       />
       <Route path="/routines" element={<RoutinesPageView />} />
-      <Route
-        path="/campaigns"
-        element={
-          <div className="h-full overflow-auto p-4 pb-36 sm:p-6">
-            <CampaignsPanel language={settings.language} />
-          </div>
-        }
-      />
-      <Route path="/ops" element={<OpsPageView wsConnected={wsConnected} isKo={isKo} />} />
-      <Route
-        path="/settings"
-        element={
-          <SettingsView
-            settings={settings}
-            onSave={handleSettingsSave}
-            isKo={isKo}
-            onNotify={pushNotification}
-          />
-        }
-      />
+      <Route path="/campaigns" element={<CampaignsPanel language={settings.language} />} />
+      <Route path="/audit" element={<AuditPageView isKo={isKo} />} />
+      <Route path="/settings" element={<SettingsView isKo={isKo} language={settings.language} theme={settings.theme} onSaveSettings={handleSettingsSave} onNotify={pushNotification} />} />
       {LEGACY_ROUTE_REDIRECTS.map((redirect) => (
         <Route key={redirect.path} path={redirect.path} element={<Navigate replace to={redirect.to} />} />
       ))}
-      {PRIMARY_ROUTES.flatMap((route) =>
+      {APP_ROUTES.flatMap((route) =>
         (route.aliases ?? []).map((alias) => (
           <Route key={`${route.id}:${alias}`} path={alias} element={<Navigate replace to={route.path} />} />
         )),

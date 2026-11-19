@@ -11,6 +11,8 @@ const stageSchema = z.enum([
   "requirements", "design", "design_review", "implementation", "review",
   "landing", "main_verification", "final_verification", "complete",
 ]);
+/** Pipeline order of `Stage` in src/domain/campaign/model.rs; the view does not send its own list. */
+export const SERVER_CAMPAIGN_STAGES = stageSchema.options;
 const reasonSchema = z.enum([
   "execution_unavailable", "review_resources", "host_resources", "owned_elsewhere",
   "predecessor_main", "predecessor_failed", "observation_unknown", "state_needs_inspection",

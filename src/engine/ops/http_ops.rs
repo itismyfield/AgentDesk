@@ -52,7 +52,7 @@ const HTTP_POST_DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// passed so the policy can short-circuit instead of issuing a doomed
 /// request that would block the runtime lock past the deadline.
 fn resolve_http_post_timeout() -> Result<std::time::Duration, String> {
-    match crate::engine::loader::bridge_op_deadline_remaining() {
+    match crate::utils::bridge_deadline::remaining() {
         None => Ok(HTTP_POST_DEFAULT_TIMEOUT),
         Some(remaining) if remaining.is_zero() => {
             Err("bridge deadline passed before http.post started".to_string())
@@ -973,8 +973,9 @@ mod tests {
     /// deadline.
     #[test]
     fn resolve_http_post_timeout_clamps_under_tight_deadline() {
-        let _scope =
-            crate::engine::loader::ScopedBridgeDeadline::new(std::time::Duration::from_millis(150));
+        let _scope = crate::utils::bridge_deadline::ScopedBridgeDeadline::new(
+            std::time::Duration::from_millis(150),
+        );
         let resolved = resolve_http_post_timeout().expect("deadline still in the future");
         assert!(
             resolved <= std::time::Duration::from_millis(150),
@@ -987,8 +988,9 @@ mod tests {
     /// the runtime past the deadline.
     #[tokio::test]
     async fn resolve_http_post_timeout_errors_after_deadline_elapses() {
-        let _scope =
-            crate::engine::loader::ScopedBridgeDeadline::new(std::time::Duration::from_millis(20));
+        let _scope = crate::utils::bridge_deadline::ScopedBridgeDeadline::new(
+            std::time::Duration::from_millis(20),
+        );
         let observe_at = std::time::Instant::now() + std::time::Duration::from_millis(40);
         crate::test_support::wait::poll_within(
             async || {

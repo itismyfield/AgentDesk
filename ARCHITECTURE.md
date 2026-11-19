@@ -413,7 +413,6 @@ src/
 │   ├── dispatch_query.rs
 │   ├── dispatch_snapshot_tests.rs
 │   ├── dispatch_status.rs
-│   ├── dispatch_summary.rs
 │   ├── fresh_worktree_pg_tests.rs
 │   ├── mod.rs
 │   ├── test_support.rs
@@ -428,6 +427,8 @@ src/
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
 │   │   ├── execution_pin.rs
+│   │   ├── landing.rs
+│   │   ├── landing_tests.rs
 │   │   ├── lifecycle.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
@@ -481,7 +482,9 @@ src/
 │   ├── cluster_policy.rs
 │   ├── conversation.rs
 │   ├── dispatch_route.rs
+│   ├── dispatch_summary.rs
 │   ├── file_sync.rs
+│   ├── fix_safety.rs
 │   ├── host_observation.rs
 │   ├── human_input.rs
 │   ├── intake_consent.rs
@@ -625,6 +628,8 @@ src/
 │   │   │   ├── legacy_origin_tests.rs
 │   │   │   ├── origin_admission.rs
 │   │   │   └── pg_tests.rs
+│   │   ├── agents_turn_target/
+│   │   │   └── thread.rs
 │   │   ├── auth/
 │   │   │   ├── tailnet_peer.rs
 │   │   │   └── tailnet_peer_tests.rs
@@ -974,6 +979,8 @@ src/
 │   │   │   └── ci_tests.rs
 │   │   ├── commands/
 │   │   │   └── transaction_tests.rs
+│   │   ├── host_gate/
+│   │   │   └── authority.rs
 │   │   ├── adk_adapter.rs
 │   │   ├── adk_observe.rs
 │   │   ├── adk_observe_tests.rs
@@ -985,6 +992,8 @@ src/
 │   │   ├── adk_workspace_tests.rs
 │   │   ├── candidate_seal.rs
 │   │   ├── candidate_seal_tests.rs
+│   │   ├── ci_exception.rs
+│   │   ├── ci_exception_tests.rs
 │   │   ├── commands.rs
 │   │   ├── control.rs
 │   │   ├── control_tests.rs
@@ -992,6 +1001,8 @@ src/
 │   │   ├── decision_commands_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
+│   │   ├── deploy_observe.rs
+│   │   ├── deploy_observe_tests.rs
 │   │   ├── effect_envelope.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
@@ -1007,6 +1018,12 @@ src/
 │   │   ├── host_journal.rs
 │   │   ├── host_worker.rs
 │   │   ├── host_worker_tests.rs
+│   │   ├── landing_effects.rs
+│   │   ├── landing_effects_tests.rs
+│   │   ├── landing_merge.rs
+│   │   ├── landing_merge_tests.rs
+│   │   ├── landing_prepare.rs
+│   │   ├── landing_prepare_tests.rs
 │   │   ├── lifecycle.rs
 │   │   ├── lifecycle_tests.rs
 │   │   ├── main_integration.rs
@@ -1851,6 +1868,7 @@ src/
 │   │   │   ├── stall_verdict.rs
 │   │   │   ├── tail_evidence.rs
 │   │   │   ├── test_support.rs
+│   │   │   ├── thread_turn.rs
 │   │   │   ├── tmux_preflight.rs
 │   │   │   ├── transcript_binding_stall.rs
 │   │   │   ├── turn_deliver.rs
@@ -2166,6 +2184,8 @@ src/
 │   │   │   │   │   ├── herdr_fixture_tests.rs
 │   │   │   │   │   ├── herdr_safety_tests.rs
 │   │   │   │   │   └── herdr_tests.rs
+│   │   │   │   ├── held_watch/
+│   │   │   │   │   └── readiness.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── claude_handoff.rs
@@ -2548,6 +2568,8 @@ src/
 │   │   │   │   │   └── clear_execute_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests/
 │   │   │   │   │   └── restart_resume_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_http_start_tests/
+│   │   │   │   │   └── thread_ingress_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests/
 │   │   │   │   │   └── clear_execute_tests.rs
 │   │   │   │   ├── provider_isolation/
@@ -2607,6 +2629,7 @@ src/
 │   │   │   │   ├── provider_dispatch_idle_stash_tests.rs
 │   │   │   │   ├── provider_dispatch_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_restart_reply_tests.rs
+│   │   │   │   ├── provider_dispatch_restart_unrestorable_tests.rs
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
@@ -3880,6 +3903,8 @@ src/
 │   ├── manual_steer/
 │   │   ├── action_handle.rs
 │   │   ├── admission_intent.rs
+│   │   ├── fixed_str.rs
+│   │   ├── handle_value.rs
 │   │   ├── operation.rs
 │   │   └── record.rs
 │   ├── mcp_config/
@@ -4114,6 +4139,8 @@ src/
 │   │   ├── script_refs.rs
 │   │   ├── session_control.rs
 │   │   └── store.rs
+│   ├── running_binary/
+│   │   └── windows_image.rs
 │   ├── scheduled_messages/
 │   │   ├── context_snapshot.rs
 │   │   ├── evidence.rs
@@ -4937,6 +4964,8 @@ src/
 │   │   │   │   ├── owner_tests.rs
 │   │   │   │   ├── projection.rs
 │   │   │   │   ├── projection_tests.rs
+│   │   │   │   ├── readiness_hold.rs
+│   │   │   │   ├── readiness_hold_tests.rs
 │   │   │   │   ├── refused.rs
 │   │   │   │   ├── requeue_tests.rs
 │   │   │   │   ├── retained.rs
@@ -5092,6 +5121,7 @@ src/
 │   ├── resident_loops.rs
 │   ├── retrospectives.rs
 │   ├── review_decision.rs
+│   ├── running_binary.rs
 │   ├── scheduled_messages.rs
 │   ├── scheduling.rs
 │   ├── service_error.rs
@@ -5144,6 +5174,7 @@ src/
 │   ├── api.rs
 │   ├── async_bridge.rs
 │   ├── auth.rs
+│   ├── bridge_deadline.rs
 │   ├── dag.rs
 │   ├── discord.rs
 │   ├── env_flag.rs

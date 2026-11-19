@@ -75,9 +75,7 @@ use inbound_order::{claim_yields, pause_inbound_stall_for_turn};
 pub(crate) use injected_inputs::{
     ExpectedClaim, HANDBACK_NOT_WRITTEN, InjectionSettlement, ReserveOutcome,
 };
-pub(crate) use intervention::{
-    Intervention, InterventionMode, QueuedRoute, SourceMessageTextSegment,
-};
+pub(crate) use intervention::{Intervention, InterventionMode, SourceMessageTextSegment};
 use lease_release::release_active_turn_anchor;
 pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
@@ -137,7 +135,7 @@ pub(crate) use reply_results::{
     HasPendingSoftQueueResult, QueuePersistenceFailure, RestartDrainAllResult, RestartDrainResult,
     TryStartTurnResult,
 };
-pub(crate) use source_generation::SourceMessageQueuedGeneration;
+pub(crate) use source_generation::{QueuedRoute, SourceMessageQueuedGeneration};
 pub(crate) use turn_finished_signal::TurnFinishedSignal;
 use turn_finished_signal::{
     GLOBAL_TURN_FINISHED_SIGNALS, mark_turn_finished_signal_done, reset_turn_finished_signal,

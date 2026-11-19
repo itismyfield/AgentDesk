@@ -12,7 +12,8 @@ import { DEFAULT_SETTINGS } from "../types";
 export interface BootstrapData {
   agents: Agent[];
   departments: Department[];
-  sessions: DispatchedSession[];
+  /** Null when the session list did not load, so an empty list is never mistaken for no sessions. */
+  sessions: DispatchedSession[] | null;
   stats: DashboardStats | null;
   settings: CompanySettings;
 }
@@ -31,7 +32,7 @@ export async function fetchDashboardBootstrap(): Promise<BootstrapData> {
   const [agents, departments, sessions, stats, settings] = await Promise.all([
     safe(api.getAgents(), [] as Agent[]),
     safe(api.getDepartments(), [] as Department[]),
-    safe(api.getDispatchedSessions(true), [] as DispatchedSession[]),
+    safe(api.getDispatchedSessions(true), null as DispatchedSession[] | null),
     safe(api.getStats(), null as DashboardStats | null),
     safe(api.getSettings(), DEFAULT_SETTINGS as Partial<CompanySettings>),
   ]);

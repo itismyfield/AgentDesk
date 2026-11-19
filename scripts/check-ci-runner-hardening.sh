@@ -13,6 +13,10 @@ python3 scripts/ci/cargo_test_filters.py || error "main, nightly and Windows war
 
 readonly REQUIRED_CHECKS_JSON='["CI required"]'
 readonly REQUIRED_CHECK_MIRROR_SHA256="57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
+read -r WSL_RUST_BUILD_RUNNER <<'EXPR'
+${{ fromJSON(((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","adk-wsl-rust"]' || '["ubuntu-latest"]') }}
+EXPR
+readonly WSL_RUST_BUILD_RUNNER
 readonly RUNNER_MEMORY_STEPS_JSON='{
   "Start runner memory sampler": {"name":"Start runner memory sampler","continue-on-error":true,"shell":"bash","env":{"BASH_ENV":"/dev/null"},"run":"bash scripts/ci/runner-memory.sh start"},
   "Save runner memory checkpoint": {"name":"Save runner memory checkpoint","continue-on-error":true,"shell":"bash","env":{"BASH_ENV":"/dev/null"},"run":"bash scripts/ci/runner-memory.sh checkpoint"},
@@ -99,7 +103,7 @@ validate_pr_debug_envs() {
     return
   fi
 
-  if ! ruby - "$pr_workflow" "$RUNNER_MEMORY_STEPS_JSON" <<'RUBY'
+  if ! ruby - "$pr_workflow" "$RUNNER_MEMORY_STEPS_JSON" "$WSL_RUST_BUILD_RUNNER" <<'RUBY'
 require "yaml"
 require "json"
 require "digest"
@@ -764,9 +768,13 @@ end
 targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
-    "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 100, "job_sha256" => "16116225d470e755d37fd2ea628b26981ffbd51f4fd6945f178da22c2187c3b2",
+    "needs" => "changes", "if" => rust_tests_gate, "runs_on" => ARGV.fetch(2),
+    "job_timeout_minutes" => 100, "job_sha256" => "2c905a4135beeab0087a85e86e9d37ea4d704b72b1f59c1593ddd6798d017cec",
     "cargo_steps" => {
+      "Disable remote compiler cache" => {
+        "commands" => [%q{printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\n' >> "$GITHUB_ENV"}], "timeout_minutes" => nil,
+        "if_condition" => "runner.environment == 'self-hosted'", "env" => {"BASH_ENV" => "/dev/null"},
+      },
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
         "commands" => [
@@ -1200,7 +1208,7 @@ if lint.is_a?(Hash)
     errors << "job lint #{lint_tests_name} must keep #{key}=0" unless tests && (tests["env"] || {})[key] == "0"
   end
 end
-# PR N == main N == nightly N: the jobs differ only in needs and the main baseline upload; base_compare is PR-only.
+# PR and main share the producer; nightly keeps the hosted setup and strict retry policy.
 built_gate = "${{ !cancelled() && needs.rust_build.result == 'success' }}"
 baseline_upload = {"name" => "Upload nextest baseline", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-baseline", "path" => "${{ runner.temp }}/nextest/plan/plan.json", "if-no-files-found" => "error", "retention-days" => 14}}
 role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key) }.merge("steps" => Array(job["steps"]).reject { |step| role_step && step.is_a?(Hash) && step["name"] == role_step }) }
@@ -1214,9 +1222,18 @@ role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key
   errors << "main #{job_id} must equal the PR job apart from needs, if and the role step" unless role_free.(main_job, "Upload nextest baseline") == role_free.(pr_job, nil)
   nightly_job = nightly_jobs[job_id]
   expected_nightly = role_free.(main_job, "Upload nextest baseline").merge(main_job.slice("needs", "if"))
+  if job_id == "rust_build"
+    hosted_actions = %w[./.github/actions/sccache-or-nothing Swatinem/rust-cache@v2 ./.github/actions/ensure-swap]
+    expected_nightly["runs-on"] = "ubuntu-latest"
+    expected_nightly["steps"] = expected_nightly["steps"].filter_map do |step|
+      next if step.is_a?(Hash) && step["name"] == "Disable remote compiler cache"
+
+      step.is_a?(Hash) && hosted_actions.include?(step["uses"]) ? step.reject { |key, _| key == "if" } : step
+    end
+  end
   # Nightly keeps the strict retry policy: its plan differs from main only in that argument.
   expected_nightly = JSON.parse(JSON.generate(expected_nightly).gsub("--retry-mode all-once", "--retry-mode policy"))
-  errors << "nightly #{job_id} must equal the main job apart from the baseline upload and --retry-mode policy" unless nightly_job.is_a?(Hash) && nightly_job == expected_nightly
+  errors << "nightly #{job_id} must equal the main job with hosted setup, no baseline upload and --retry-mode policy" unless nightly_job.is_a?(Hash) && nightly_job == expected_nightly
 end
 main_baseline = Array(main_jobs.dig("rust_build", "steps")).select { |step| step.is_a?(Hash) && step["name"] == "Upload nextest baseline" }
 errors << "main rust_build must upload the plan as nextest-baseline for 14 days, exactly once" unless main_baseline == [baseline_upload]
@@ -1405,11 +1422,11 @@ validate_workflow_job_policy() {
   fi
 
   while IFS= read -r -d '' workflow; do
-    if ! ruby - "$workflow" <<'RUBY'
+    if ! ruby - "$workflow" "$main_workflow" "$pr_workflow" "$WSL_RUST_BUILD_RUNNER" <<'RUBY'
 require "yaml"
 require "json"
 
-path = ARGV.fetch(0)
+path, main_path, pr_path, wsl_rust_build_runner = ARGV
 begin
   # Workflow aliases are intentionally unsupported. Rejecting them keeps every
   # audited job definition local and explicit instead of expanding YAML graphs.
@@ -1513,7 +1530,10 @@ if retired_runner_reference?(document) || implicit_retired_reference
   exit 1
 end
 jobs.each do |job_id, job|
-  unless job.is_a?(Hash) && hosted_runner?(job["runs-on"], job)
+  wsl_build = job_id == "rust_build" && [main_path, pr_path].include?(path)
+  next if job.is_a?(Hash) && wsl_build && job["runs-on"] == wsl_rust_build_runner
+
+  unless job.is_a?(Hash) && !wsl_build && hosted_runner?(job["runs-on"], job)
     warn "#{path}: jobs.#{job_id}.runs-on violates repository hosted runner policy: use one approved label (scalar or singleton array), optionally under labels, or an explicitly enumerated static matrix runner axis; every include row must specify that axis and exclude cannot approve forbidden candidates; each matrix runner value must be an approved scalar label (#{HOSTED_RUNNER_LABELS.join(', ')})"
     exit 1
   end

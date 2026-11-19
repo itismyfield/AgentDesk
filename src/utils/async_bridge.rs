@@ -23,7 +23,7 @@ fn current_bridge_deadline_budget<E, M>(map_runtime_error: M) -> Result<Option<D
 where
     M: Fn(String) -> E + Copy,
 {
-    match crate::engine::loader::bridge_op_deadline_remaining() {
+    match super::bridge_deadline::remaining() {
         Some(remaining) if remaining.is_zero() => Err(map_runtime_error(
             "bridge deadline passed before async bridge started".to_string(),
         )),
@@ -219,7 +219,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::loader::ScopedBridgeDeadline;
+    use crate::utils::bridge_deadline::ScopedBridgeDeadline;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::time::Instant;
 

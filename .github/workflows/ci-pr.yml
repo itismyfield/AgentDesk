@@ -664,7 +664,11 @@ jobs:
     name: Rust tests build and plan
     needs: changes
     if: ${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) &&
+      '["self-hosted","linux","x64","adk-wsl-rust"]' || '["ubuntu-latest"]') }}
     # Timeout, permissions and checkout depth stay equal to CI Main's rust_build, which hardening compares.
     timeout-minutes: 100
     permissions:
@@ -693,8 +697,10 @@ jobs:
         with:
           tool: cargo-nextest@0.9.149
       - name: Setup sccache
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/sccache-or-nothing
       - name: Cache Cargo dependencies
+        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
@@ -702,9 +708,16 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Ensure swap for the lib test build
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/ensure-swap
         # Lib test builds peak near 16G RAM + 19G swap; leave headroom to keep the runner alive.
         with: {size-gb: "24"}
+      - name: Disable remote compiler cache
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\n' >> "$GITHUB_ENV"
       - name: Check Rust test source wiring
         shell: bash
         env:
@@ -1082,7 +1095,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh 86ea8892cf5d3c9bf3bc28e204ebe56e132e6c6ac0dbf2f9bc5abc55c2d8418d
+          pin scripts/check-ci-runner-hardening.sh c15b85a898f294e155cb3f6bfc764dcd3e71c8de030321b57bb2b74e613ec013
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks

@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, type ReactNode } from "react";
 import { Command } from "cmdk";
-import { Search } from "lucide-react";
+import { Folder, Search } from "lucide-react";
 import type { Agent, Department } from "../types";
 import { SurfaceEmptyState } from "./common/SurfacePrimitives";
 import AgentPersona from "./AgentPersona";
@@ -13,7 +13,7 @@ interface PaletteRoute {
   id: string;
   labelKo: string;
   labelEn: string;
-  icon: string;
+  icon: ReactNode;
 }
 
 interface CommandPaletteProps {
@@ -46,7 +46,7 @@ export default function CommandPalette({
 
   const tr = (ko: string, en: string) => (isKo ? ko : en);
 
-  type ResultItem = { type: "agent"; agent: Agent } | { type: "nav"; id: string; label: string; icon: string } | { type: "dept"; dept: Department };
+  type ResultItem = { type: "agent"; agent: Agent } | { type: "nav"; id: string; label: string; icon: ReactNode } | { type: "dept"; dept: Department };
 
   const navItems = useMemo(
     () =>
@@ -186,8 +186,9 @@ export default function CommandPalette({
                 className="flex min-h-11 w-full cursor-pointer items-center gap-3 px-4 py-2 text-left text-sm text-th-text-primary data-[selected=true]:bg-surface-medium"
                 onSelect={() => handleSelect({ type: "dept", dept })}
               >
-                <span className="flex w-6 items-center justify-center text-base text-center">
-                  {dept.icon}
+                {/* Department emoji stays searchable but is not drawn (no decorative emoji). */}
+                <span className="flex w-6 items-center justify-center text-th-text-muted">
+                  <Folder size={16} aria-hidden />
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="truncate">{dept.name_ko || dept.name}</div>

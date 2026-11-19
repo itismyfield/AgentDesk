@@ -618,7 +618,7 @@ async fn session_command_api_reaches_tmux_only_for_legacy_rows_pg() {
 
     // The kill audit outlasts the bridge budget, so the tmux kill must not start.
     let budget = std::time::Duration::from_millis(1500);
-    let _deadline = crate::engine::loader::ScopedBridgeDeadline::new(budget);
+    let _deadline = crate::utils::bridge_deadline::ScopedBridgeDeadline::new(budget);
     let tmux = RecordingTmux {
         audit_delay: budget * 2,
         ..RecordingTmux::default()

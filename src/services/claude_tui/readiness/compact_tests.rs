@@ -432,6 +432,25 @@ fn compact_failure_output_releases_only_the_submitted_control_without_claiming_s
     );
 }
 
+// Code Mode's `repl-mode` and the link, tool and notice rows after a compact output are metadata.
+#[test]
+fn compact_completion_reads_past_idle_metadata_after_its_output() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let r = Rig::new();
+    r.assistant("done");
+    r.terminal();
+    let _tmux = pane();
+    let mut pending = Pending::capture(&r.session).unwrap();
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Submitted);
+    compact_records(&r, false);
+    for kind in ["repl-mode", "tools-used", "pr-link", "frame-link"] {
+        r.append(json!({"type":kind}));
+    }
+    r.append(json!({"type":"system","subtype":"informational"}));
+    assert_eq!(poll(&mut pending, &r.session), Outcome::Completed);
+    assert!(r.ready());
+}
+
 #[test]
 fn compact_completion_does_not_release_unknown_foreign_source_or_newer_reservation() {
     let _root = crate::config::TestRuntimeRootGuard::new();

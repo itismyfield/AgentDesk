@@ -5,9 +5,8 @@
 while holding it, and releases only after that direct child is reaped, so a
 second wrapper blocks while a first wrapper's build is still alive.
 
-Wiring is scoped, not universal: build-release.sh and deploy-release.sh route
-through this wrapper; `Makefile`'s signing target and install.sh's source
-install do not, and the #5663 owner test pins that list by scanning the repo.
+build-release.sh, deploy-release.sh and Makefile release builds use this
+wrapper. install.sh's source installation remains a separate build path.
 
 Signal supervision is *derived*, not enumerated. Earlier revisions carried a
 hand-written list of terminating signals; it missed eight, then missed SIGEMT,
@@ -635,9 +634,14 @@ def apply_sccache_env(env: dict[str, str]) -> None:
 
 
 def run(command: Sequence[str], env: Mapping[str, str] | None = None,
-        path: str = CANONICAL_TOKEN_PATH, *, delegate_lease: bool = False) -> int:
+        path: str = CANONICAL_TOKEN_PATH, *, delegate_lease: bool = False,
+        release_source: tuple[str, str, str] | None = None) -> int:
     """Run `command` while holding the build token at `path`."""
     child_env = dict(os.environ if env is None else env)
+    witness = None
+    if release_source is not None:
+        from release_source import BuildWitness
+        witness = BuildWitness(*release_source)
     carrier = os.environ.get(LEASE_ENV)  # Caller env= is never incoming authority.
     child_env.pop(LEASE_ENV, None)
     if sys.platform == "win32":
@@ -646,8 +650,11 @@ def run(command: Sequence[str], env: Mapping[str, str] | None = None,
             return EXIT_TOKEN_UNUSABLE
         from build_token_win32 import BuildTokenWindowsError, supervise_windows
         try:
+            if witness is not None:
+                return supervise_windows(list(command), child_env,
+                                         prepare_env=witness.begin, finish=witness.finish)
             return supervise_windows(list(command), child_env)
-        except BuildTokenWindowsError as exc:
+        except (BuildTokenWindowsError, OSError) as exc:
             print(f"build token: {exc}", file=sys.stderr)
             return EXIT_TOKEN_UNUSABLE
     apply_sccache_env(child_env)
@@ -666,11 +673,15 @@ def run(command: Sequence[str], env: Mapping[str, str] | None = None,
                 assert_live_token(fd, path)
                 held = os.fstat(fd)
                 child_env[HOLDER_ENV] = f"{held.st_dev}:{held.st_ino}:{os.getpid()}:{start}"
+                if witness is not None:
+                    witness.begin(child_env)
                 rc = run_protected(command, child_env, supervisor, fd if delegate_lease else None)
+                if witness is not None and rc == 0 and supervisor.pending is None:
+                    witness.finish()
         except BuildTokenTimeout as exc:
             print(f"build token: {exc}", file=sys.stderr)
             rc = EXIT_TOKEN_TIMEOUT
-        except BuildTokenError as exc:
+        except (BuildTokenError, OSError) as exc:
             print(f"build token: {exc}", file=sys.stderr)
             rc = EXIT_TOKEN_UNUSABLE
         except _Cancelled:
@@ -702,7 +713,14 @@ def main(argv: Sequence[str]) -> int:
         print(args[2])
         return 0
     delegate = len(args) > 1 and args[1] == "--delegate-lease"
-    if delegate:  # Only before --; everything after -- remains command argv.
+    release_source = None
+    if args[1:2] == ["--release-source"]:
+        if args[5:6] != ["--"]:
+            print("usage: build_token.py --release-source BINARY METADATA TARGET -- COMMAND", file=sys.stderr)
+            return EXIT_USAGE
+        release_source = (args[2], args[3], args[4])
+        del args[1:5]
+    if delegate:
         del args[1]
     if args[1:] == ["--refuse-if-nested"]:  # No command: exit status is the verdict.
         return EXIT_NESTED if nested_holder(CANONICAL_TOKEN_PATH, os.environ) is not None else 0
@@ -711,7 +729,7 @@ def main(argv: Sequence[str]) -> int:
     except BuildTokenError as exc:
         print(f"build token: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    return run(command, delegate_lease=delegate)
+    return run(command, delegate_lease=delegate, release_source=release_source)
 
 
 if __name__ == "__main__":

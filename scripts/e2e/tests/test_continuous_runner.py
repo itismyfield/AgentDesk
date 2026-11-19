@@ -54,7 +54,7 @@ class Runner(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.config = {"enabled": True, "state_dir": str(self.state), "rotation_interval_s": 3600,
-                       "capabilities": ["usage:claude", "turn_budget:claude", "usage:codex", "turn_budget:codex"],
+                       "capabilities": ["usage:claude", "turn_budget:claude", "usage:codex", "turn_budget:codex", "E-51/herdr"],
                        "resource": {"guild": "1", "parents": ["2", "3"], "bot_set": ["4", "5"]},
                        "driver": [sys.executable, str(self.root / "driver.py")],
                        "budget": {p: {"daily_turns": 10, "daily_tokens": 10**6, "daily_time_s": 600} for p in ("claude", "codex")},
@@ -952,6 +952,43 @@ class ConsumerAcceptance(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(companion.main(['--state-dir','relative','--request-id','bad','--deploy-sha','invalid']),0)
 
+    def cli(self, main, argv):
+        output=io.StringIO()
+        with contextlib.redirect_stdout(output), mock.patch.object(consumer.time,'time',return_value=120):
+            self.assertEqual(main(argv),0)
+        return output.getvalue().splitlines()
+
+    def test_companion_reports_a_non_private_inbox_as_rejected_with_exit_zero(self):
+        state=self.root/'state';inbox_dir=state/'inbox'
+        state.mkdir(mode=0o700);inbox_dir.mkdir();inbox_dir.chmod(0o755)
+        argv=['--state-dir',str(state),'--request-id','deploy','--deploy-sha',SHA]
+        self.assertEqual(json.loads(self.cli(companion.main,argv)[0])['status'],'REJECTED')
+        self.assertEqual(sorted(path.name for path in state.rglob('*')),['inbox'])
+        inbox_dir.chmod(0o700)
+        self.assertEqual(json.loads(self.cli(companion.main,argv)[0])['status'],'SUBMITTED')
+
+    def test_expired_result_of_another_head_still_reports_the_head_mismatch(self):
+        late=status();late['heartbeat_at']=300
+        self.file.write_text(json.dumps(late))
+        same,other=self.view(now=300)['check'],self.view(head='b'*40,now=300)['check']
+        self.assertEqual((same['result'],same['reason'],same['stale']),('UNKNOWN','STALE',1))
+        self.assertEqual((other['result'],other['reason'],other['stale']),('UNKNOWN','STALE_HEAD',1))
+        named=report();named['occurrences'][0].update(status='UNEVALUABLE',reason='STALE_HEAD')
+        self.report_file.write_text(json.dumps(named))
+        self.assertEqual(self.view(now=300)['check']['reason'],'STALE')
+
+    def test_wrongly_typed_summary_result_prints_unknown_instead_of_a_traceback(self):
+        argv=['--status-file',str(self.file),'--head',SHA]
+        self.assertIn('result=PASS',self.cli(consumer.main,argv)[0])
+        for wrong in ([],{}):
+            broken=report();broken['result']=wrong
+            for mirror in (False,True):
+                with self.subTest(wrong=wrong,mirror=mirror):
+                    self.report_file.write_text(json.dumps(broken))
+                    self.file.write_text(json.dumps({'schema_version':1,'status':status(),'summary':broken} if mirror else status()))
+                    lines=self.cli(consumer.main,argv)
+                    self.assertEqual([line.split()[0] for line in lines],['E2E_CHECK','E2E_MONITOR'])
+                    self.assertIn('result=UNKNOWN',lines[0]);self.assertIn('reason=MALFORMED_SUMMARY',lines[0])
 
 
 if __name__ == "__main__":

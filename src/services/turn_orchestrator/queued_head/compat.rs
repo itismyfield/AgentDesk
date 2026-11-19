@@ -39,6 +39,7 @@ impl SnapshotV2 {
             || self.head_injection.is_some()
             || (self.retained_inputs.iter()).any(|entry| entry.owed_to_owner())
             || (self.refused_inputs.iter()).any(|entry| !entry.notice.enqueued)
+            || (self.refused_fronts.iter()).any(|entry| !entry.notice.enqueued)
             || self.admission_binds.iter().any(bound)
     }
 }

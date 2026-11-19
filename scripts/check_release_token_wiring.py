@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,7 @@ REPO = Path(__file__).resolve().parents[1]
 DEPLOY_END = "\n_clean_release_build_cache_after_staging\n"
 # Shell files deploy-release.sh sources, copied verbatim into the dry repo.
 HELPERS = ("_deploy_policy_generation.sh", "lib/deploy_allow_degraded.sh",
-           "lib/dashboard_build_commit.sh")
+           "lib/dashboard_build_commit.sh", "lib/deploy_routines.sh")
 DEFAULTS = """
 ADK_DEFAULT_PORT=1
 setup_sccache_env() { return 1; }
@@ -50,6 +51,7 @@ def prepare(root: Path, repo: Path, script: str) -> dict[str, str]:
     scripts = root / "repo/scripts"
     (scripts / script).write_text(source + '\nprintf complete > "$DRY_ROOT/completed"\n')
     (scripts / "_defaults.sh").write_text(DEFAULTS)
+    shutil.copyfile(repo / "scripts/release_source.py", scripts / "release_source.py")
     for helper in HELPERS:
         (scripts / helper).write_text((repo / "scripts" / helper).read_text())
     (root / "shell-env").write_text(SHELL_ENV)
@@ -79,16 +81,34 @@ def prepare(root: Path, repo: Path, script: str) -> dict[str, str]:
 
 
 def observe(repo: Path, script: str, profile: str, *, evidence: Path | None = None,
-            target: str | None = None) -> dict:
+            target: str | None = None, legacy_checkout: bool = False) -> dict:
     with tempfile.TemporaryDirectory(prefix="adk-release-dry-") as temp:
         root = Path(temp).resolve()
         env = prepare(root, repo, script)
+        script_dir = root / "repo/scripts"
+        if legacy_checkout:
+            if script != "deploy-release.sh":
+                raise ValueError("legacy checkout fixture requires deploy-release.sh")
+            tool_dir = root / "tools/scripts"
+            shutil.copytree(script_dir, tool_dir)
+            script_dir = tool_dir
+            env["AGENTDESK_REPO_DIR"] = str(root / "repo")
+            legacy_token = root / "repo/scripts/build_token.py"
+            token = legacy_token.read_text()
+            entry = "def main(argv: Sequence[str]) -> int:\n"
+            if token.count(entry) != 1:
+                raise ValueError("legacy checkout fixture requires exactly one token entrypoint")
+            legacy_token.write_text(token.replace(
+                entry, entry + "    if argv[1:2] == ['--release-source']:\n"
+                "        raise FileNotFoundError('--release-source')\n",
+            ))
+            (root / "repo/scripts/release_source.py").unlink()
         args = ["--fast"] if profile == "release-fast" else []
         if script == "build-release.sh":
             target = target or "aarch64-apple-darwin"
             args = ["--profile", profile, "--target", target]
-        result = subprocess.run(["/bin/bash", str(root / "repo/scripts" / script), *args],
-                                cwd=root / "repo", env=env, text=True,
+        result = subprocess.run(["/bin/bash", str(script_dir / script), *args],
+                                cwd=script_dir.parent, env=env, text=True,
                                 capture_output=True, timeout=30)
         log = root / "events.jsonl"
         events = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
@@ -105,7 +125,9 @@ def observe(repo: Path, script: str, profile: str, *, evidence: Path | None = No
         required = {"build", "clean"} if script == "deploy-release.sh" else {"build"}
         if not required <= phases:
             errors.append(f"dry coverage: missing Cargo phases {sorted(required - phases)}")
+        records = [json.loads(path.read_text()) for path in (root / "release/bin").glob("*.source.json")]
         report = {"script": script, "profile": profile, "target": target, "errors": errors,
+                  "staged_records": records,
                   "cargo": cargo, "events": events, "stdout": result.stdout, "stderr": result.stderr}
         if evidence:
             evidence.mkdir(parents=True, exist_ok=True)

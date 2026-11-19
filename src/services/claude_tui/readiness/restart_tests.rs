@@ -126,13 +126,14 @@ fn anything_after_the_terminal_or_an_open_fence_keeps_the_floor() {
 }
 
 /// A turn's session-state block as Claude writes it after the turn's `turn_duration`.
-const ADK_CC_TAIL: [&str; 8] = [
+const ADK_CC_TAIL: [&str; 9] = [
     "last-prompt",
     "ai-title",
     "mode",
     "permission-mode",
     "session-owner",
     "atis-latch",
+    "repl-mode",
     "pr-link",
     "frame-link",
 ];

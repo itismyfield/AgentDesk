@@ -69,15 +69,25 @@ async function render() {
 }
 // A selected task's commands sit in the docked detail pane, outside the panel.
 function buttonByText(text: string) {
-  return [...document.querySelectorAll("button")].find((candidate) => candidate.textContent === text);
+  return [...document.querySelectorAll("button")].find((candidate) => candidate.textContent === text || candidate.getAttribute("aria-label") === text);
 }
 async function click(element: Element | undefined | null) {
   if (!element) throw new Error("missing element");
   await act(async () => { (element as HTMLElement).click(); });
 }
+/** Picks a campaign card from the list, switching its running · ready · done tab when the card sits in another. */
 async function openServer(title = "Release") {
-  await click([...container.querySelectorAll(".campaign-server-list button")].find((button) => button.querySelector("strong")?.textContent === title));
+  const find = () => [...container.querySelectorAll(".campaign-list button")].find((button) => button.querySelector("strong")?.textContent === title);
+  for (const tab of [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Campaign status"] [role="radio"]')]) if (!find()) await click(tab);
+  await click(find());
 }
+/** A task the overview keeps in a closed status list opens after its chip. */
+async function openTask(id: string) {
+  const find = () => container.querySelector(`[data-task-id="${id}"]`);
+  for (const chip of [...container.querySelectorAll<HTMLButtonElement>(".campaign-status-chips button")]) if (!find()) await click(chip);
+  await click(find());
+}
+const detailText = () => container.querySelector(".campaign-detail")?.textContent ?? "";
 /** The immediate stop sits in the stop menu, behind a confirmation. */
 async function stopNow() {
   const menu = container.querySelector<HTMLButtonElement>('button[aria-label="More ways to stop"]');
@@ -90,11 +100,11 @@ function controlText() {
 
 it("keeps legacy campaigns on their existing controls and gives server campaigns only server commands", async () => {
   await render();
-  expect(container.textContent).toContain("Legacy mode");
+  expect(detailText()).toContain("Ledger");
   expect(container.querySelector(".campaign-auto-queue")).not.toBeNull();
   await openServer();
   expect(container.querySelector(".campaign-auto-queue")).toBeNull();
-  expect(container.textContent).not.toContain("Legacy mode");
+  expect(detailText()).not.toContain("Ledger");
   expect(buttonByText("Start")?.disabled).toBe(true);
   expect(controlText()).toContain("Execution is not available yet");
   expect(buttonByText("Edit definition")?.disabled).toBe(false);
@@ -110,7 +120,7 @@ it("keeps the last server snapshot when a refresh fails and then allows only sto
   list.mockRejectedValue(new Error("Offline"));
   await click(buttonByText("Refresh"));
   expect(container.textContent).toContain("Could not refresh server campaigns.");
-  expect(container.textContent).toContain("Running · 1 failed · 1 blocked");
+  expect(container.textContent).toContain("Running · 1 running, 1 blocked, 1 failed");
   expect((await stopNow())?.disabled).toBe(false);
   expect(buttonByText("Stop after current stage")?.disabled).toBe(false);
   for (const label of ["Start", "Resume", "Edit definition"]) expect(buttonByText(label)?.disabled, label).toBe(true);
@@ -142,9 +152,9 @@ it("never lets an older campaign read replace a newer one", async () => {
   await click(buttonByText("Refresh"));
   detail.mockResolvedValueOnce(fixtures.failedRunning);
   await click(buttonByText("Refresh"));
-  expect(container.textContent).toContain("Running · 1 failed · 1 blocked");
+  expect(container.textContent).toContain("Running · 1 running, 1 blocked, 1 failed");
   await act(async () => resolveOld(fixtures.prepared));
-  expect(container.textContent).toContain("Running · 1 failed · 1 blocked");
+  expect(container.textContent).toContain("Running · 1 running, 1 blocked, 1 failed");
 });
 
 it("keeps an edit draft, its focus and its base revision across polls", async () => {
@@ -179,7 +189,7 @@ it("opens a deep link to a server task in a new browser and copies only the feed
   await render();
   // The task opens in the docked pane, outside the panel.
   expect(document.querySelector('aside[aria-label="Selected task"] .campaign-inspector h4')?.textContent).toBe("Dependent work");
-  await click(container.querySelector('[data-node-id="C"]'));
+  await openTask("C");
   expect(window.location.search).toBe("?mode=server&campaign=release&node=C");
   const feedback = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Copy for feedback"]')!.value.split("\n");
   expect(feedback).toEqual([
@@ -196,7 +206,7 @@ it("opens a deep-linked server campaign that is not in the first list page", asy
   vi.mocked(getServerCampaign).mockResolvedValue(elsewhere);
   await render();
   expect(vi.mocked(getServerCampaign)).toHaveBeenCalledWith("elsewhere");
-  expect(container.querySelector(".campaign-server-title h3")?.textContent).toBe("Linked campaign");
+  expect(container.querySelector(".campaign-detail-title")?.textContent).toBe("Linked campaign");
 });
 
 it("marks a campaign past the first list page stale when only its own read fails", async () => {
@@ -214,8 +224,8 @@ it("marks a campaign past the first list page stale when only its own read fails
   expect(vi.mocked(getServerCampaign)).toHaveBeenCalledTimes(2);
   expect(container.textContent).not.toContain("Could not refresh server campaigns.");
   expect(container.textContent).toContain("Could not refresh this server campaign.");
-  expect(container.querySelector(".campaign-server-title h3")?.textContent).toBe("Linked campaign");
-  expect(container.textContent).toContain("Running · 1 failed · 1 blocked");
+  expect(container.querySelector(".campaign-detail-title")?.textContent).toBe("Linked campaign");
+  expect(container.textContent).toContain("Running · 1 running, 1 blocked, 1 failed");
   for (const label of ["Start", "Resume", "Edit definition", "Prepare retry"]) expect(buttonByText(label)?.disabled, label).toBe(true);
   expect((await stopNow())?.disabled).toBe(false);
 });
@@ -388,13 +398,13 @@ it("shows an off-list campaign as stale when its read fails, and as missing only
   expect(buttonByText("Edit definition")?.disabled).toBe(false);
   vi.mocked(getServerCampaign).mockRejectedValueOnce(new TypeError("Failed to fetch"));
   await click(buttonByText("Refresh"));
-  expect(container.querySelector(".campaign-server-title h3")?.textContent).toBe("Linked campaign");
+  expect(container.querySelector(".campaign-detail-title")?.textContent).toBe("Linked campaign");
   expect(container.textContent).toContain("Could not refresh this server campaign.");
   expect(buttonByText("Edit definition")?.disabled).toBe(true);
   // After a snapshot a 404 leaves it shown as stale; only a campaign never read is missing.
   vi.mocked(getServerCampaign).mockRejectedValueOnce(notFound());
   await click(buttonByText("Refresh"));
-  expect(container.querySelector(".campaign-server-title h3")?.textContent).toBe("Linked campaign");
+  expect(container.querySelector(".campaign-detail-title")?.textContent).toBe("Linked campaign");
   expect(container.textContent).not.toContain("This server campaign was not found.");
 });
 
@@ -409,15 +419,14 @@ it("keeps the create draft apart from the edit draft of a campaign named new", a
   expect([...container.querySelectorAll("button")].filter((button) => button.textContent === "Save")).toHaveLength(1);
 });
 
-it("selects a missing linked campaign in the selector so every listed campaign stays selectable", async () => {
+it("keeps every listed campaign selectable while a linked campaign is missing", async () => {
   window.history.replaceState(null, "", "/campaigns?mode=server&campaign=gone");
   vi.mocked(getServerCampaign).mockRejectedValue(notFound());
   await render();
-  const select = container.querySelector<HTMLSelectElement>('select[aria-label="Select campaign"]')!;
-  expect(select.value).toBe("server:gone");
   expect(container.textContent).toContain("This server campaign was not found.");
-  await act(async () => { select.value = "legacy-1"; select.dispatchEvent(new Event("change", { bubbles: true })); });
-  expect(container.textContent).toContain("Legacy mode");
+  expect(container.querySelector(".campaign-list [aria-current]")).toBeNull();
+  await click(container.querySelector('[data-campaign-key="legacy:legacy-1"]'));
+  expect(detailText()).toContain("Ledger");
 });
 
 it("puts the selection back into the URL after a navigation drops the query, but never onto another page", async () => {
@@ -460,10 +469,10 @@ it("marks the event list when it could not be read, keeps its count unknown, and
   vi.mocked(getServerCampaignEvents).mockRejectedValueOnce(new TypeError("Failed to fetch"));
   await render();
   await openServer();
-  const summary = () => container.querySelector(".campaign-connections summary")?.textContent;
-  expect(summary()).toBe("Events · — · Could not refresh events");
+  const summary = () => container.querySelector(".campaign-recent-heading")?.textContent;
+  expect(summary()).toBe("Recent events · — · Could not refresh events");
   await click(buttonByText("Refresh"));
-  expect(summary()).toBe("Events · 0");
+  expect(summary()).toBe("Recent events · 0");
   // A good read is not repeated while nothing moved.
   await click(buttonByText("Refresh"));
   expect(vi.mocked(getServerCampaignEvents)).toHaveBeenCalledTimes(2);
@@ -474,20 +483,20 @@ it("shows each campaign's own events when reads for several campaigns overlap or
   serve(fixtures.prepared, copyOf(fixtures.prepared, "other", "Other"));
   await render();
   await openServer("Release");
-  const summary = () => container.querySelector(".campaign-connections summary")?.textContent;
-  expect(summary()).toBe("Events · 0");
+  const summary = () => container.querySelector(".campaign-recent-heading")?.textContent;
+  expect(summary()).toBe("Recent events · 0");
   let fail: (reason: unknown) => void = () => {};
   events.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
   await openServer("Other");
   await openServer("Release");
   // Other's late failure belongs to a read nobody is waiting for any more.
   await act(async () => fail(new TypeError("Failed to fetch")));
-  expect(summary()).toBe("Events · 0");
+  expect(summary()).toBe("Recent events · 0");
   events.mockRejectedValueOnce(new TypeError("Failed to fetch"));
   await openServer("Other");
-  expect(summary()).toBe("Events · — · Could not refresh events");
+  expect(summary()).toBe("Recent events · — · Could not refresh events");
   await openServer("Release");
-  expect(summary()).toBe("Events · 0");
+  expect(summary()).toBe("Recent events · 0");
 });
 
 it("retries a failing events read once per campaign read, not more", async () => {
@@ -512,20 +521,20 @@ it("lets a slow events read or retry finish instead of restarting it on every ca
   await click(buttonByText("Refresh"));
   expect(events).toHaveBeenCalledTimes(1);
   await act(async () => answer([]));
-  const summary = () => container.querySelector(".campaign-connections summary")?.textContent;
-  expect(summary()).toBe("Events · 0");
+  const summary = () => container.querySelector(".campaign-recent-heading")?.textContent;
+  expect(summary()).toBe("Recent events · 0");
   // The same holds for a retry after a failed read.
   const moved = structuredClone(fixtures.prepared);
   moved.view.last_event_sequence += 1;
   serve(moved);
   events.mockRejectedValueOnce(new TypeError("Failed to fetch")).mockImplementationOnce(slow);
   await click(buttonByText("Refresh"));
-  expect(summary()).toBe("Events · 0 · Could not refresh events");
+  expect(summary()).toBe("Recent events · 0 · Could not refresh events");
   await click(buttonByText("Refresh"));
   await click(buttonByText("Refresh"));
   expect(events).toHaveBeenCalledTimes(3);
   await act(async () => answer([]));
-  expect(summary()).toBe("Events · 0");
+  expect(summary()).toBe("Recent events · 0");
 });
 
 it("moves focus into a form only when it is opened, not each time its campaign is shown again", async () => {
@@ -572,11 +581,11 @@ it("opens a selected task's details as a sheet over the page on a narrow screen"
   const original = Object.getOwnPropertyDescriptor(window, "matchMedia");
   Object.defineProperty(window, "matchMedia", { configurable: true, value: query });
   try {
+    window.history.replaceState(null, "", "/campaigns?mode=server&campaign=release");
     serve(fixtures.reviewWaiting);
     await render();
-    await openServer();
     expect(document.querySelector('aside[aria-label="Selected task"]')).toBeNull();
-    await click(container.querySelector('[data-node-id="C"]'));
+    await openTask("C");
     const sheet = document.querySelector('[role="dialog"][aria-label="Selected task"]');
     expect(sheet?.querySelector(".campaign-inspector h4")?.textContent).toBe(fixtures.reviewWaiting.definition.nodes.find((node) => node.id === "C")!.title);
     expect(container.querySelector(".campaign-inspector")).toBeNull();
