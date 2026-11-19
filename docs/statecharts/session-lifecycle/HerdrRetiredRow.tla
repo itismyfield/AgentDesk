@@ -55,7 +55,7 @@ ForcePostlude ==
     /\ phase = "postlude" /\ phase' = "done" /\ row' = "disconnected" /\ ended' = TRUE
     /\ UNCHANGED <<exec, nonce, fresh, bridge, refused, turns, restarts, pres, readerVars>>
 
-\* herdr_row_end_live.rs:82-93: (fix) disconnect_ended, then settle_captured, then cancel the reader.
+\* herdr_row_end_live.rs:83-93: (fix) disconnect_ended, then settle_captured, then cancel the reader.
 \* One atomic step: the model does not check the order inside it; a PG test pins disconnect first.
 LiveEnd ==
     /\ phase = "liveend" /\ phase' = "done"
