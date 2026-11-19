@@ -1,10 +1,5 @@
-//! A pane's source policy is judged again only after one of its inputs moves.
-//!
-//! The judgement reads the pane's spawn markers, its execution's canonical context, its
-//! channel's binding log and its rollout marker. A kept answer stands while each of those files
-//! keeps its fingerprint and the pane keeps its source revision, channel and owner root. Only
-//! files whose last change is older than [`SETTLED`] are kept, so a write under one coarse clock
-//! tick, or one that restores its mtime, cannot hide behind an equal stamp.
+//! A pane's source policy is judged again only when a file it read, its source revision, channel
+//! or owner root moves; files changed within [`SETTLED`] are never kept, so no write hides.
 
 use super::SourcePolicyState;
 use crate::services::tmux_common::{self as tc, TmuxSourceAuthority};

@@ -1,6 +1,5 @@
-//! The recovery owner only backs up the enqueue path, which starts its own worker: it rescans
-//! briskly while a queue still holds work, otherwise once a second, and collects queue garbage
-//! at most every ten seconds.
+//! Recovery only backs up the enqueue path's own worker start: brisk while a queue holds work,
+//! else once a second, with queue garbage collected at most every ten seconds.
 
 use std::time::{Duration, Instant};
 
