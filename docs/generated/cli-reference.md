@@ -197,7 +197,7 @@ Usage: `agentdesk restart-dcserver [OPTIONS]`
 | Argument | Value | Default | Description |
 |---|---|---|---|
 | `--report-channel-id <REPORT_CHANNEL_ID>` | `u64` |  | Discord channel ID for restart completion report |
-| `--report-provider <REPORT_PROVIDER>` | `claude`, `codex`, `gemini`, `opencode`, `qwen` |  | Provider for restart report (claude, codex, gemini, opencode, or qwen) |
+| `--report-provider <REPORT_PROVIDER>` | `claude`, `codex`, `opencode`, `qwen` |  | Provider for restart report (claude, codex, opencode, or qwen) |
 | `--report-message-id <REPORT_MESSAGE_ID>` | `u64` |  | Existing message ID to edit for restart report |
 
 ## `agentdesk discord-sendfile`

@@ -73,28 +73,20 @@ fn migrate_plan_refuses_gemini_agents_without_remapping_them() {
         {"id": "model", "model": "google/gemini-2.5-pro"}
     ]}});
     std::fs::write(source.join("openclaw.json"), openclaw.to_string()).unwrap();
-    let args = OpenClawMigrateArgs {
-        root_path: Some(source.display().to_string()),
-        agentdesk_root: None,
-        agent_ids: Vec::new(),
-        all_agents: true,
-        dry_run: true,
-        resume: None,
-        fallback_provider: None,
-        workspace_root_rewrite: Vec::new(),
-        write_org: false,
-        write_bot_settings: false,
-        write_db: false,
-        overwrite: false,
-        with_channel_bindings: false,
-        with_sessions: false,
-        snapshot_source: false,
-        no_workspace: true,
-        no_memory: true,
-        no_prompts: true,
-        tool_policy_mode: "report".to_string(),
-        discord_token_mode: "report".to_string(),
-    };
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        args: OpenClawMigrateArgs,
+    }
+    let root = source.display().to_string();
+    let flags = [
+        "migrate",
+        root.as_str(),
+        "--all-agents",
+        "--dry-run",
+        "--no-workspace",
+    ];
+    let args = <Cli as clap::Parser>::parse_from(flags).args;
     let resolved = resolve_source_root(args.root_path.as_deref(), temp.path(), None).unwrap();
     let error = build_import_plan(&resolved, &args, None).unwrap_err();
     assert!(
