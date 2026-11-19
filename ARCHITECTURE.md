@@ -432,7 +432,10 @@ src/
 │   │   ├── lifecycle.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
+│   │   ├── pipeline.rs
+│   │   ├── pipeline_fields.rs
 │   │   ├── pipeline_rules.rs
+│   │   ├── pipeline_tests.rs
 │   │   ├── profile.rs
 │   │   ├── review_gate.rs
 │   │   ├── verification_run.rs
@@ -741,6 +744,7 @@ src/
 │   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs
 │   │   ├── server_campaigns/
+│   │   │   ├── dashboard_wait_tests.rs
 │   │   │   ├── decision_tests.rs
 │   │   │   ├── dto.rs
 │   │   │   ├── http_tests.rs
@@ -981,6 +985,8 @@ src/
 │   │   │   └── transaction_tests.rs
 │   │   ├── host_gate/
 │   │   │   └── authority.rs
+│   │   ├── view/
+│   │   │   └── dashboard_wait.rs
 │   │   ├── adk_adapter.rs
 │   │   ├── adk_observe.rs
 │   │   ├── adk_observe_tests.rs
@@ -4269,6 +4275,8 @@ src/
 │   ├── settings/
 │   │   ├── resolve/
 │   │   │   └── tests.rs
+│   │   ├── catalog.rs
+│   │   ├── catalog_tests.rs
 │   │   ├── resolve.rs
 │   │   ├── runtime_config_put.rs
 │   │   ├── startup.rs
