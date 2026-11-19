@@ -6,6 +6,7 @@ struct DispatchCase {
     statuses: [StatusCode; 2],
     text: &'static str,
     detail_missing: bool,
+    prefix_detail_known: bool,
     lookups: usize,
     task: bool,
     row: Option<&'static str>,
@@ -24,17 +25,19 @@ async fn check_intake(case: DispatchCase, channel: ChannelId) {
             let prefix = uri
                 .query()
                 .is_some_and(|query| query == "dispatch_id=dispatch-B");
-            Some(if case.detail_missing && !prefix {
-                (StatusCode::NOT_FOUND, serde_json::json!({}))
-            } else {
-                (
-                    StatusCode::OK,
-                    serde_json::json!({
-                        "dispatch_type":"implementation",
-                        "dispatch_title":"Fixture work"
-                    }),
-                )
-            })
+            Some(
+                if case.detail_missing && !(prefix && case.prefix_detail_known) {
+                    (StatusCode::NOT_FOUND, serde_json::json!({}))
+                } else {
+                    (
+                        StatusCode::OK,
+                        serde_json::json!({
+                            "dispatch_type":"implementation",
+                            "dispatch_title":"Fixture work"
+                        }),
+                    )
+                },
+            )
         }
         _ => None,
     });
@@ -134,6 +137,7 @@ async fn native_8148_intake_first_hit_pins_and_first_miss_keeps_row_lookup_pg() 
                 statuses,
                 text: "fixture input",
                 detail_missing: false,
+                prefix_detail_known: false,
                 lookups,
                 task,
                 row,
@@ -157,11 +161,25 @@ async fn native_8148_intake_id_only_context_has_no_unverified_dispatch_contract_
             statuses: [StatusCode::OK, StatusCode::SERVICE_UNAVAILABLE],
             text: "DISPATCH: dispatch-B\nfixture input",
             detail_missing: true,
+            prefix_detail_known: true,
             lookups: 1,
             task: true,
             row: Some("dispatch-A"),
         },
         ChannelId::new(81_480_605),
+    )
+    .await;
+    check_intake(
+        DispatchCase {
+            statuses: [StatusCode::SERVICE_UNAVAILABLE, StatusCode::NOT_FOUND],
+            text: "DISPATCH: dispatch-B\nfixture input",
+            detail_missing: true,
+            prefix_detail_known: false,
+            lookups: 2,
+            task: false,
+            row: Some("dispatch-B"),
+        },
+        ChannelId::new(81_480_606),
     )
     .await;
 }

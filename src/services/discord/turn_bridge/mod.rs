@@ -680,6 +680,10 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         match stream_loop_output.outcome {
             stream_loop::StreamLoopOutcome::Completed if !native_input::enabled() || !native_input::neutral_exit(&shared_owned, &provider, &inflight_state, &cancel_token).await => {}
             _ => {
+                #[cfg(all(test, unix))]
+                if stream_loop_output.outcome != stream_loop::StreamLoopOutcome::AuthorityLost {
+                    inflight::o_seed_observation::record_event(&provider, channel_id.get(), "bridge_native_exit");
+                }
                 completion_guard.relinquish_bridge_authority();
                 inflight_guard.defuse();
                 return;

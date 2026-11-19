@@ -129,6 +129,20 @@ async fn native_8148_dispatch_custody_completes_work_once_from_native_body_pg() 
         true,
     );
     let (key, actor) = b2b_active(&f, &shared).await;
+    crate::services::discord::host_defer_gate::tests::map_channel(
+        &shared,
+        key.channel_id,
+        "native-work",
+    )
+    .await;
+    shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .get_mut(&key.channel_id)
+        .unwrap()
+        .current_path = Some(path.display().to_string());
     let mut row = b2b_row(&f);
     let turn_id = turn(&row);
     row.dispatch_id = Some(WORK.into());
@@ -207,33 +221,30 @@ async fn native_8148_watcher_dispatch_fallback_preserves_work_types_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     live.install(&db.database_url);
-    for (kind, completes) in [
-        ("implementation", true),
-        ("rework", true),
-        ("plan", false),
-        ("plan-review", false),
+    for (kind, id, held, completes) in [
+        ("implementation", "implementation", false, true),
+        ("rework", "rework", false, true),
+        ("plan", "plan", false, false),
+        ("plan-review", "plan-review", false, false),
+        ("implementation", "held-without-id", true, true),
     ] {
         let api = Recorder::start_with_status(Arc::new(move |_, uri| match uri.path() {
             "/api/internal/pending-dispatch-for-thread" => {
-                Some((StatusCode::OK, json!({"dispatch_id":kind})))
+                Some((StatusCode::OK, json!({"dispatch_id":id})))
             }
             "/api/internal/card-thread" => Some((StatusCode::OK, json!({"dispatch_type":kind}))),
             _ => None,
         }))
         .await;
         crate::services::discord::internal_api::init(api.port, None);
-        seed(&pool, kind, kind).await;
-        let f = Fixture::at(
-            runtime.path().join(kind).join("frames.json"),
-            81480611,
-            true,
-        );
+        seed(&pool, id, kind).await;
+        let f = Fixture::at(runtime.path().join(id).join("frames.json"), 81480611, true);
         let row = b2b_row(&f);
         let shared = b2b_shared(Some(pool.clone()));
         assert!(row.dispatch_id.is_none());
         assert_eq!(
-            watcher(&shared, &row, false, "watcher fallback").await,
-            (Some(kind.into()), true)
+            watcher(&shared, &row, held, "watcher fallback").await,
+            (Some(id.into()), true)
         );
         let calls = api.take();
         assert!(
@@ -246,7 +257,7 @@ async fn native_8148_watcher_dispatch_fallback_preserves_work_types_pg() {
                 .iter()
                 .any(|call| call.starts_with("GET /api/internal/card-thread "))
         );
-        assert_eq!(state(&pool, kind).await.3, i64::from(completes), "{kind}");
+        assert_eq!(state(&pool, id).await.3, i64::from(completes), "{id}");
     }
     pool.close().await;
     db.drop().await;

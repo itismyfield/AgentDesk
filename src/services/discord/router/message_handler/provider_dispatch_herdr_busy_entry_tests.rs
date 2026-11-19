@@ -268,6 +268,14 @@ fn assert_idle_source(
 
 impl Intake {
     fn new(fx: &Fixture, started: &Started) -> Self {
+        Self::with_engine(fx, started, None)
+    }
+
+    fn with_engine(
+        fx: &Fixture,
+        started: &Started,
+        engine: Option<crate::engine::PolicyEngine>,
+    ) -> Self {
         assert_eq!(
             started.hook(
                 fx,
@@ -277,7 +285,14 @@ impl Intake {
             202,
             "the first native terminal's authentic Stop verifies the completed registration"
         );
-        Self::with_expected_pin(fx, started, ExpectedPin::Verified)
+        Self::with_launch(
+            fx,
+            started,
+            ExpectedPin::Verified,
+            Arc::default(),
+            false,
+            engine,
+        )
     }
 
     fn with_expected_pin(fx: &Fixture, started: &Started, expected: ExpectedPin) -> Self {
@@ -290,7 +305,7 @@ impl Intake {
         expected: ExpectedPin,
         output_gate: Arc<http_start::OutputGate>,
     ) -> Self {
-        Self::with_launch(fx, started, expected, output_gate, false)
+        Self::with_launch(fx, started, expected, output_gate, false, None)
     }
 
     fn with_launch(
@@ -299,6 +314,7 @@ impl Intake {
         expected: ExpectedPin,
         output_gate: Arc<http_start::OutputGate>,
         launch: bool,
+        engine: Option<crate::engine::PolicyEngine>,
     ) -> Self {
         let generation = discord::runtime_store::generation_path().unwrap();
         std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
@@ -418,6 +434,7 @@ impl Intake {
             own.restart.current_generation = discord::runtime_store::process_generation();
             own.token_hash = TOKEN.into();
             own.api_port = api.port;
+            own.policy.engine = engine;
             shared.settings.write().await.provider = ProviderKind::Claude;
             shared.restart.reconcile_done.store(true, Ordering::Release);
             shared.http.cached_serenity_ctx.set(ctx).unwrap();

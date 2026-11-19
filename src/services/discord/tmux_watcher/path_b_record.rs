@@ -295,6 +295,12 @@ pub(in crate::services::discord) async fn finalize_dispatch(
         .filter(|_| !completion_is_stale_for_newer_turn && !native_owns_work(pin, late))
     {
         // A stale range cannot complete a newer row’s dispatch.
+        #[cfg(test)]
+        crate::services::discord::inflight::o_seed_observation::record_event(
+            watcher_provider,
+            channel_id.get(),
+            "watcher_dispatch_call",
+        );
         let finalization =
             crate::services::discord::streaming_finalizer::finalize_watcher_streaming_dispatch(
                 crate::services::discord::streaming_finalizer::WatcherStreamingFinalRequest {

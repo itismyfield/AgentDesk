@@ -10,6 +10,8 @@ use tower::ServiceExt;
 
 #[path = "provider_dispatch_herdr_internal_start_tests.rs"]
 mod internal_start;
+#[path = "provider_dispatch_herdr_native_work_tests.rs"]
+mod native_work;
 
 async fn app(fx: &Fixture, intake: &Intake) -> Router {
     let exists: bool =
@@ -94,13 +96,17 @@ async fn call_source(
 }
 
 fn finish_answer(path: &Path, session: &str, n: usize) {
+    answer_with_body(path, session, &format!("HTTP session answered {n}"));
+}
+
+fn answer_with_body(path: &Path, session: &str, body: &str) {
     let now = chrono::Utc::now().to_rfc3339();
     append(
         path,
         &[
             json!({"type":"assistant","uuid":uuid(),"sessionId":session,"timestamp":now,
             "apiBlockIndex":0,"message":{"id":uuid(),"role":"assistant",
-            "content":[{"type":"text","text":format!("HTTP session answered {n}")}],"stop_reason":"end_turn"}}),
+            "content":[{"type":"text","text":body}],"stop_reason":"end_turn"}}),
             json!({"type":"system","subtype":"turn_duration","sessionId":session,"timestamp":now}),
         ],
     );
@@ -921,6 +927,7 @@ fn execution_gone(terminal: Option<bool>, foreign: bool) {
         ExpectedPin::Verified,
         Arc::default(),
         terminal.is_none(),
+        None,
     );
     let (path, session) = (started.path.clone(), started.session.clone());
     let pasted = Mutex::new(String::new());
