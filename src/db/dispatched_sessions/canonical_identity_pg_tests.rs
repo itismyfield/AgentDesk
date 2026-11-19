@@ -3461,6 +3461,7 @@ async fn hosted_execution_cleanup_rechecks_candidate_snapshots_before_apply_pg()
 
 /// A late active hook on a row whose execution was retired and disconnected leaves it ended; a turn
 /// start under a new nonce reopens it, and a row whose execution is pending again takes writes.
+#[cfg(unix)]
 #[tokio::test]
 async fn retired_row_refuses_late_active_hooks_until_a_new_turn_pg() {
     let Some(db) = CanonicalIdentityPgDatabase::create().await else {
