@@ -5,9 +5,9 @@
 /// Binds it reads: `$2` the incoming status, `$17` the incoming turn-start nonce.
 macro_rules! retired_revival_fence {
     () => {
-        "NOT (lower($2) IN ('turn_active', 'working')
+        "NOT (lower($2) = 'turn_active'
               AND hosted_execution->>'state' = 'retired'
-              AND COALESCE(lower(status), '') NOT IN ('turn_active', 'working')
+              AND status IS DISTINCT FROM 'turn_active'
               AND ($17::TEXT IS NULL OR $17 IS NOT DISTINCT FROM active_turn_nonce))"
     };
 }

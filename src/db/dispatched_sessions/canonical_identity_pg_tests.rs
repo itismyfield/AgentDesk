@@ -3477,7 +3477,7 @@ async fn retired_row_refuses_late_active_hooks_until_a_new_turn_pg() {
     let ended = http_force::disconnect_retired_pg(&pool, id, &retired, None, true).await;
     assert_eq!(ended, Ok(true));
     for (status, turn, info, expected) in [
-        ("working", None, "heartbeat", "disconnected/"),
+        ("turn_active", None, "heartbeat", "disconnected/"),
         ("turn_active", Some("t1"), "same turn", "disconnected/"),
         (
             "turn_active",
@@ -3485,9 +3485,9 @@ async fn retired_row_refuses_late_active_hooks_until_a_new_turn_pg() {
             "new turn",
             "turn_active/new turn",
         ),
-        ("working", None, "heartbeat", "turn_active/heartbeat"),
+        ("turn_active", None, "heartbeat", "turn_active/heartbeat"),
         ("idle", None, "ended", "idle/ended"),
-        ("working", None, "pending", "turn_active/pending"),
+        ("turn_active", None, "pending", "turn_active/pending"),
     ] {
         if info == "pending" {
             set_raw(&pool, key, Some(wire(&pending(&owner(channel), "n2")))).await;
