@@ -444,6 +444,7 @@ fn a_fenced_queued_body_refuses_the_proved_first_init() {
     assert_eq!(f.candidate.peek(), Adoption::Deferred);
 }
 
+#[cfg(unix)]
 #[test]
 fn only_new_input_reopens_a_refused_episode_and_old_tokens_cannot_end_it() {
     use super::output_disposition::{Identity, Output, Phase, Reason};
@@ -540,6 +541,7 @@ fn only_new_input_reopens_a_refused_episode_and_old_tokens_cannot_end_it() {
     drop(new);
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn missing_prompt_and_wakes_exhaust_one_normalization_deadline() {
     use super::output_disposition::{Identity, Output, Phase, Reason};
@@ -565,6 +567,7 @@ async fn missing_prompt_and_wakes_exhaust_one_normalization_deadline() {
     assert!(output.adopt(&proof, || Ok(())).is_err());
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn an_unproven_session_header_rejects_the_source_before_the_deadline() {
     use super::output_disposition::{Identity, Output, Phase, Reason};
@@ -586,6 +589,7 @@ async fn an_unproven_session_header_rejects_the_source_before_the_deadline() {
     assert!(!output.remaining().is_zero());
 }
 
+#[cfg(unix)]
 #[path = "atomic_tests.rs"]
 mod atomic_tests;
 
