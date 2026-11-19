@@ -3985,7 +3985,10 @@ fi
 # healthy serving binary must not fail the deploy.
 chflags uchg "$REL_BINARY" 2>/dev/null || true
 chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
-rm -f "$REL_BINARY_BACKUP" "$REL_BINARY_BACKUP.source.json" 2>/dev/null || true
+rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
+if [ ! -e "$REL_BINARY_BACKUP" ]; then
+    rm -f "$REL_BINARY_BACKUP.source.json" 2>/dev/null || true
+fi
 # Also drop a stray atomic-backup temp, then the policy backup paired with .prev.
 rm -f "$REL_BINARY_BACKUP.tmp" 2>/dev/null || true
 _drop_policy_generation_backup "$ADK_REL" "$REL_BINARY_BACKUP"

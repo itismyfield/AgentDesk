@@ -4073,6 +4073,8 @@ src/
 │   │   ├── script_refs.rs
 │   │   ├── session_control.rs
 │   │   └── store.rs
+│   ├── running_binary/
+│   │   └── windows_image.rs
 │   ├── scheduled_messages/
 │   │   ├── context_snapshot.rs
 │   │   ├── evidence.rs

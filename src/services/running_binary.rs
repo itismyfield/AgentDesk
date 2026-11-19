@@ -35,8 +35,12 @@ pub(crate) fn initialize() {
 pub(crate) fn copy_current_to(source: &Path, destination: &Path) -> io::Result<()> {
     let record = running_source(source);
     let metadata = sidecar(destination);
-    match fs::remove_file(&metadata) {
-        Ok(()) => {}
+    let directory = destination.parent().unwrap_or(Path::new("."));
+    match fs::symlink_metadata(&metadata) {
+        Ok(_) => {
+            // Invalidate an orphaned record before publishing any executable bytes.
+            tempfile::NamedTempFile::new_in(directory)?.persist(&metadata)?;
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
@@ -45,8 +49,7 @@ pub(crate) fn copy_current_to(source: &Path, destination: &Path) -> io::Result<(
         let mut digest = Sha256::new();
         io::copy(&mut File::open(destination)?, &mut digest)?;
         if format!("{:x}", digest.finalize()) == record.sha256 {
-            let mut staged =
-                tempfile::NamedTempFile::new_in(destination.parent().unwrap_or(Path::new(".")))?;
+            let mut staged = tempfile::NamedTempFile::new_in(directory)?;
             serde_json::to_writer(&mut staged, &record)?;
             staged.persist(metadata)?;
         }
@@ -174,5 +177,12 @@ mod tests {
         assert!(verified(&metadata, image_digest).is_none());
         fs::write(&metadata, vec![b' '; MAX_RECORD as usize + 1]).unwrap();
         assert!(verified(&metadata, image_digest).is_none());
+
+        let install = directory.path().join("installed");
+        let orphan = sidecar(&install);
+        fs::write(&orphan, data.to_string()).unwrap();
+        copy_current_to(&binary, &install).unwrap();
+        assert_eq!(fs::read(&install).unwrap(), fs::read(&binary).unwrap());
+        assert!(fs::read(&orphan).unwrap().is_empty());
     }
 }
