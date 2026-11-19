@@ -336,6 +336,7 @@ impl RawCapture {
         let analysis = projection
             .analyze_closed(&snapshot.registrations, Some(&raw))
             .unwrap();
+        assert_eq!(analysis.evidence.len(), 1, "one original at this EOF");
         Observation {
             evidence: analysis.evidence,
             terminal: Some(raw),
@@ -478,7 +479,7 @@ async fn check_file_change(
         "{case}: refusal preserves custody"
     );
     assert!(
-        super::super::super::inflight::load_inflight_state_read_only(
+        crate::services::discord::inflight::load_inflight_state_read_only(
             &ProviderKind::Claude,
             key.channel_id.get(),
         )
