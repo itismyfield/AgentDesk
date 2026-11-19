@@ -965,6 +965,11 @@
       "path": "migrations/postgres/0197_decision_forums.sql",
       "sha256": "95299b336bd48658d3de0cb0e96a469c20028eef6e8b38ef7d4497fb0cc68339",
       "version": 197
+    },
+    {
+      "path": "migrations/postgres/0199_tui_output_disposition_closure.sql",
+      "sha256": "951b3f72d0f58581aaa0b588200a7ec9b152c9ec241ddd2d0fb9a0505e6fa7eb",
+      "version": 199
     }
   ],
   "version": 1

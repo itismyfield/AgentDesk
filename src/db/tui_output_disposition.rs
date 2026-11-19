@@ -1,6 +1,9 @@
 //! A rejection reservation survives restart; only its exact receipt or no-effect proof settles it.
 use sqlx::PgPool;
 use uuid::Uuid;
+
+pub(crate) mod closure;
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Identity {
     pub(crate) channel: u64,
