@@ -1103,7 +1103,7 @@ Usage: `agentdesk provider-cli status [OPTIONS] [PROVIDER]`
 
 | Argument | Value | Default | Description |
 |---|---|---|---|
-| `[PROVIDER]` | `String` |  | Restrict output to a single provider (codex, claude, gemini, opencode, qwen) |
+| `[PROVIDER]` | `String` |  | Restrict output to a single provider (codex, claude, opencode, qwen) |
 | `--json` | flag |  | Output raw JSON instead of the default table |
 
 ### `agentdesk provider-cli plan`
@@ -1114,7 +1114,7 @@ Usage: `agentdesk provider-cli plan <PROVIDER>`
 
 | Argument | Value | Default | Description |
 |---|---|---|---|
-| `<PROVIDER>` | `String` |  | Provider to plan (codex, claude, gemini, opencode, qwen) |
+| `<PROVIDER>` | `String` |  | Provider to plan (codex, claude, opencode, qwen) |
 
 ### `agentdesk provider-cli upgrade`
 
