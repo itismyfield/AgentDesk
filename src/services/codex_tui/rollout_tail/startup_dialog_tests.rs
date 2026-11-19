@@ -298,14 +298,16 @@ fn an_admitted_launch_repairs_its_trust_menu_before_the_startup_check_fails_it()
             .environment_assignment()
             .unwrap();
         let identity = crate::services::process::shell_escape(&identity);
-        // Raced: the repair's own pane look waits while the trust watch takes the repair.
+        // Raced: the repair's own look waits while the watch takes the repair and enters; the
+        // rollout lands on the look after, which only a startup check that held still makes.
         let (gate, count) = (root.path().join("race"), root.path().join("looks"));
         let block = if raced {
             let made = std::process::Command::new("mkfifo").arg(&gate).status();
             assert!(made.unwrap().success());
             let (gate, count) = (gate.display(), count.display());
+            let (staged, sessions) = (rollout.display(), sessions.display());
             format!(
-                "n=$(($(cat '{count}' 2>/dev/null || echo 0)+1)); echo $n > '{count}'; [ $n -eq 2 ] && read _ < '{gate}'; "
+                "n=$(($(cat '{count}' 2>/dev/null || echo 0)+1)); echo $n > '{count}'; [ $n -eq 2 ] && read _ < '{gate}'; [ $n -eq 3 ] && cp '{staged}' '{sessions}/'; "
             )
         } else {
             String::new()
@@ -320,14 +322,12 @@ fn an_admitted_launch_repairs_its_trust_menu_before_the_startup_check_fails_it()
         );
         std::fs::write(root.path().join("tmux"), script).unwrap();
         let watch = raced.then(|| {
-            let (candidate, keys, rollout) = (candidate.clone(), keys.clone(), rollout.clone());
-            let landed = sessions.join(rollout.file_name().unwrap());
+            let (candidate, keys) = (candidate.clone(), keys.clone());
             std::thread::spawn(move || {
                 let mut gate = std::fs::OpenOptions::new().write(true).open(&gate).unwrap();
                 let (_, view) = candidate.first_trust_launch(tmux).unwrap();
                 assert!(view.take_repair(), "the trust watch takes the repair first");
                 std::fs::write(&keys, "send-keys Enter\n").unwrap();
-                std::fs::copy(&rollout, landed).unwrap();
                 std::io::Write::write_all(&mut gate, b"\n").unwrap();
             })
         });
