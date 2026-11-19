@@ -1,5 +1,182 @@
 use super::*;
+use crate::services::routines::session_control::{CONTROL_TEST_PAUSE, ControlPause};
 use crate::services::routines::store::{NewRoutine, NextDueAtUpdate, RoutineStore};
+
+#[tokio::test(flavor = "current_thread")]
+async fn persistent_kill_blocks_fallback_during_its_physical_effect_pg() {
+    persistent_kill_fences_turn(ControlPause::BeforeEffect).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn persistent_kill_interrupts_before_the_retry_can_replace_its_turn_pg() {
+    persistent_kill_fences_turn(ControlPause::AfterCommit).await;
+}
+
+async fn persistent_kill_fences_turn(stage: ControlPause) {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = TmuxEnv::install(LiveServer);
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let writer_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::query("SET lock_timeout = '500ms'")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let store =
+        RoutineStore::new_with_timezone_and_checkpoint_limit(Arc::new(pool.clone()), "UTC", 4096);
+    let writer = RoutineStore::new_with_timezone_and_checkpoint_limit(
+        Arc::new(writer_pool.clone()),
+        "UTC",
+        4096,
+    );
+    sqlx::query("INSERT INTO agents(id,name,provider,discord_channel_cc) VALUES('actor','Actor','claude','8219101')")
+        .execute(&pool).await.unwrap();
+    let host = crate::services::platform::hostname_short();
+    let mut keys = Vec::new();
+    for (name, channel) in [
+        ("adk-i8219-turn-one", "8219191"),
+        ("adk-i8219-turn-two", "8219192"),
+    ] {
+        tmux.start(name);
+        let key = format!("{host}:{name}");
+        sqlx::query("INSERT INTO sessions(session_key,agent_id,provider,status,thread_channel_id) VALUES($1,'actor','claude','turn_active',$2)")
+            .bind(&key).bind(channel).execute(&pool).await.unwrap();
+        keys.push(key);
+    }
+    let routine = store
+        .attach_routine(NewRoutine {
+            agent_id: Some("actor".into()),
+            fallback_agent_id: None,
+            max_retries: Some(1),
+            script_ref: "provider.js".into(),
+            name: "turn fence".into(),
+            status: None,
+            execution_strategy: "persistent".into(),
+            schedule: None,
+            next_due_at: None,
+            checkpoint: None,
+            discord_thread_id: Some("8219191".into()),
+            timeout_secs: None,
+        })
+        .await
+        .unwrap();
+    let run = store.claim_run_now(&routine.id).await.unwrap().unwrap();
+    let routing = |turn, channel, key: &str| {
+        serde_json::json!({
+            "status": "started", "turn_id": turn, "agent_id": "actor",
+            "provider": "claude", "channel_id": channel, "session_key": key,
+        })
+    };
+    assert!(
+        store
+            .mark_agent_turn_started(
+                &run.run_id,
+                "turn-one",
+                Some(routing("turn-one", "8219191", &keys[0])),
+                "actor",
+                "primary",
+            )
+            .await
+            .unwrap()
+    );
+
+    let gate = Arc::new(tokio::sync::Barrier::new(2));
+    let kill = CONTROL_TEST_PAUSE.scope(
+        (stage, gate.clone()),
+        crate::server::routes::routines::kill_routine_session(
+            State(test_state(pool.clone())),
+            Path(routine.id.clone()),
+        ),
+    );
+    let retry = async {
+        gate.wait().await;
+        let changed = async {
+            if stage == ControlPause::AfterCommit
+                && !writer
+                    .schedule_agent_retry(
+                        &run.run_id,
+                        chrono::Utc::now(),
+                        None,
+                        "retry",
+                        Some("actor"),
+                        "primary",
+                    )
+                    .await?
+            {
+                return Ok(false);
+            }
+            writer
+                .mark_agent_turn_started(
+                    &run.run_id,
+                    "turn-two",
+                    Some(routing("turn-two", "8219192", &keys[1])),
+                    "actor",
+                    "fallback",
+                )
+                .await
+        }
+        .await;
+        gate.wait().await;
+        changed
+    };
+    let (kill, retry) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::join!(kill, retry)
+    })
+    .await
+    .expect("session control and retry must finish");
+    let terminal: (String, Option<String>) =
+        sqlx::query_as("SELECT status,turn_id FROM routine_runs WHERE id=$1")
+            .bind(&run.run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    match stage {
+        ControlPause::BeforeEffect => {
+            assert!(
+                retry
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.to_string().contains("due to lock timeout")),
+                "fallback advanced during physical control: {retry:?}, run={terminal:?}",
+            );
+        }
+        ControlPause::AfterCommit => {
+            assert!(
+                !retry.unwrap(),
+                "retry advanced after commit before interruption: run={terminal:?}"
+            );
+        }
+    }
+    let Json(kill) = kill.unwrap();
+    assert_eq!(kill["interrupted_run_id"], run.run_id);
+    assert_eq!(terminal, ("interrupted".into(), Some("turn-one".into())));
+    assert!(
+        store
+            .get_routine(&routine.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .in_flight_run_id
+            .is_none()
+    );
+    assert!(!tmux.alive("adk-i8219-turn-one"));
+    assert!(tmux.alive("adk-i8219-turn-two"));
+    assert_eq!(
+        field(&pool, "sessions", &keys[1], "status").await,
+        "turn_active"
+    );
+    writer_pool.close().await;
+    pool.close().await;
+    db.drop().await;
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_persistent_kill_after_provider_or_agent_patch_keeps_the_other_session_pg() {
@@ -206,13 +383,21 @@ async fn persistent_kill_after_patch(idle_case: Option<&str>) {
             .unwrap();
         assert_eq!(status, if idle { "succeeded" } else { "interrupted" });
         let next = store.claim_run_now(&routine.id).await.unwrap().unwrap();
+        let mut tx = pool.begin().await.unwrap();
         assert!(
-            store
-                .interrupt_in_flight_run(&routine.id, &run.run_id, "old control", None)
-                .await
-                .unwrap()
-                .is_none()
+            RoutineStore::interrupt_controlled_turn(
+                &mut tx,
+                &routine.id,
+                &run.run_id,
+                "claimed-turn",
+                "old control",
+                None,
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
+        tx.commit().await.unwrap();
         let current = store.get_routine(&routine.id).await.unwrap().unwrap();
         assert_eq!(
             current.in_flight_run_id.as_deref(),

@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 mod agent_start;
 mod execution_modes;
+mod session_interrupt;
 mod thread_choices;
 #[macro_use]
 mod failure_escalation;
@@ -3069,94 +3070,6 @@ impl RoutineStore {
         .map_err(|e| anyhow!("update routine {routine_id} discord_thread_id: {e}"))?;
 
         Ok(result.is_some())
-    }
-
-    /// Interrupt the current in-flight run for a routine after an explicit
-    /// session reset/kill invalidates the provider context.
-    pub async fn interrupt_in_flight_run(
-        &self,
-        routine_id: &str,
-        expected_run_id: &str,
-        error: &str,
-        result_json: Option<Value>,
-    ) -> Result<Option<String>> {
-        let mut tx = self.pool.begin().await?;
-
-        let run_id: Option<String> = sqlx::query_scalar(
-            r#"
-            SELECT rr.id
-            FROM routine_runs rr
-            JOIN routines r ON r.in_flight_run_id = rr.id
-            WHERE r.id = $1
-              AND rr.routine_id = $1
-              AND rr.status = 'running'
-              AND rr.id = $2
-            FOR UPDATE OF rr
-            "#,
-        )
-        .bind(routine_id)
-        .bind(expected_run_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| anyhow!("interrupt routine {routine_id}: lock running run: {e}"))?;
-
-        let Some(run_id) = run_id else {
-            tx.commit().await?;
-            return Ok(None);
-        };
-
-        let routine_updated = sqlx::query(
-            r#"
-            UPDATE routines
-            SET in_flight_run_id = NULL,
-                last_result = $2,
-                updated_at = NOW()
-            WHERE id = $1
-              AND in_flight_run_id = $3
-            "#,
-        )
-        .bind(routine_id)
-        .bind(error)
-        .bind(&run_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| anyhow!("interrupt routine {routine_id}: clear in-flight: {e}"))?;
-
-        if routine_updated.rows_affected() != 1 {
-            tx.commit().await?;
-            return Ok(None);
-        }
-
-        let run_updated = sqlx::query(
-            r#"
-            UPDATE routine_runs
-            SET status = 'interrupted',
-                result_json = COALESCE($3, result_json),
-                error = $2,
-                finished_at = NOW(),
-                lease_expires_at = NULL,
-                updated_at = NOW()
-            WHERE id = $1
-              AND routine_id = $4
-              AND status = 'running'
-            "#,
-        )
-        .bind(&run_id)
-        .bind(error)
-        .bind(result_json)
-        .bind(routine_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| anyhow!("interrupt routine run {run_id}: {e}"))?;
-
-        if run_updated.rows_affected() != 1 {
-            return Err(anyhow!(
-                "interrupt routine run {run_id}: running run guard lost row"
-            ));
-        }
-
-        tx.commit().await?;
-        Ok(Some(run_id))
     }
 
     /// Boot recovery: mark expired-lease `running` runs as `interrupted`, clear

@@ -1,25 +1,214 @@
 //! Session control targets the execution the routine actually started.
 use super::*;
+use crate::services::discord::admin_host_guard::ManagedReset;
+use crate::services::discord::health::clear_provider_channel_runtime;
 use crate::services::routines::execution_mode::ProviderChoice;
 use crate::services::routines::provider_choice::AgentProviderChannels;
 use crate::services::routines::store::RoutineStore;
 
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlPause {
+    BeforeEffect,
+    AfterCommit,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static CONTROL_TEST_PAUSE: (ControlPause, Arc<tokio::sync::Barrier>);
+}
+
+#[cfg(test)]
+pub(super) async fn pause_control_for_test(stage: ControlPause) {
+    let barrier = CONTROL_TEST_PAUSE
+        .try_with(|(at, barrier)| (*at == stage).then(|| barrier.clone()))
+        .ok()
+        .flatten();
+    if let Some(barrier) = barrier {
+        barrier.wait().await;
+        barrier.wait().await;
+    }
+}
+
+fn ensure_persistent_routine(routine_id: &str, strategy: &str) -> Result<()> {
+    if strategy == "persistent" {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "routine {} requires execution_strategy=persistent for session control",
+            routine_id
+        ))
+    }
+}
+
+struct ControlledTurn {
+    run_id: String,
+    turn_id: String,
+}
+
+fn control_lock_error(error: sqlx::Error) -> anyhow::Error {
+    if error
+        .as_database_error()
+        .and_then(|db| db.code())
+        .as_deref()
+        == Some("55P03")
+    {
+        anyhow!("invalid routine run: session control is busy; retry")
+    } else {
+        error.into()
+    }
+}
+
 impl RoutineSessionController {
-    pub(super) async fn lock_control_run(
+    pub async fn control_persistent_session(
+        &self,
+        routine: &RoutineRecord,
+        command: RoutineSessionCommand,
+        reason: &str,
+    ) -> Result<RoutineSessionControlResult> {
+        let mut control_guard = self.lock_control_run(routine).await?;
+        let (target, controlled_turn) = self
+            .resolve_control_target(routine, &mut control_guard)
+            .await?;
+        #[cfg(test)]
+        pause_control_for_test(ControlPause::BeforeEffect).await;
+        let provider_clear_behavior = provider_clear_behavior(&target.provider);
+
+        let mut runtime_cleared = false;
+        let mut tmux_killed = false;
+        let mut inflight_cleared = false;
+        let mut lifecycle_path = "registry-unavailable";
+        let mut queued_remaining = None;
+        let mut queue_preserved = None;
+        let mut disconnected_sessions = 0;
+
+        match command {
+            RoutineSessionCommand::Reset => {
+                if let Some(registry) = self.health_registry.as_deref() {
+                    let reset = clear_provider_channel_runtime(
+                        registry,
+                        target.provider.as_str(),
+                        target.channel_id,
+                        target.session_key.as_deref(),
+                    )
+                    .await;
+                    runtime_cleared = matches!(reset, Some(ManagedReset::Applied(_)));
+                    lifecycle_path = match reset {
+                        Some(ManagedReset::Applied(_)) => "runtime-clear",
+                        Some(ManagedReset::Refused(_)) => "runtime-clear-refused",
+                        None => "runtime-clear-unavailable",
+                    };
+                }
+            }
+            RoutineSessionCommand::Kill => {
+                let lifecycle = self
+                    .force_kill(&target, reason, "routine_session_kill")
+                    .await;
+                tmux_killed = lifecycle.tmux_killed;
+                inflight_cleared = lifecycle.inflight_cleared;
+                lifecycle_path = lifecycle.lifecycle_path;
+                queued_remaining = lifecycle.queue_depth;
+                queue_preserved = lifecycle.queue_preserved;
+                // A kill the host guard keeps changed nothing, so the session rows stay too.
+                if !lifecycle.host_guard_kept() {
+                    disconnected_sessions = if controlled_turn.is_some() {
+                        Self::disconnect_matching_sessions(&target, &mut *control_guard).await?
+                    } else {
+                        Self::disconnect_matching_sessions(&target, &*self.pool).await?
+                    };
+                }
+            }
+        }
+
+        let changed =
+            runtime_cleared || tmux_killed || inflight_cleared || disconnected_sessions > 0;
+        let interrupted_run_id = if let Some(turn) = controlled_turn.as_ref().filter(|_| changed) {
+            let result = serde_json::json!({
+                "status": "interrupted_by_session_control",
+                "routine_id": routine.id,
+                "action": command.as_str(),
+                "provider": target.provider.as_str(),
+                "channel_id": target.channel_id.get().to_string(),
+                "session_key": target.session_key,
+                "tmux_session": target.tmux_session,
+            });
+            let interrupted = RoutineStore::interrupt_controlled_turn(
+                &mut control_guard,
+                &routine.id,
+                &turn.run_id,
+                &turn.turn_id,
+                reason,
+                Some(result),
+            )
+            .await?;
+            if interrupted.is_none() {
+                return Err(anyhow!(
+                    "invalid routine run: turn changed before interruption"
+                ));
+            }
+            interrupted
+        } else {
+            None
+        };
+        control_guard.commit().await?;
+        #[cfg(test)]
+        pause_control_for_test(ControlPause::AfterCommit).await;
+        Ok(RoutineSessionControlResult {
+            controlled_run_id: controlled_turn.map(|turn| turn.run_id),
+            interrupted_run_id,
+            action: command.as_str(),
+            routine_id: routine.id.clone(),
+            agent_id: target.agent_id,
+            provider: target.provider.as_str().to_string(),
+            channel_id: target.channel_id.get().to_string(),
+            session_key: target.session_key,
+            tmux_session: target.tmux_session,
+            provider_clear_behavior,
+            runtime_cleared,
+            tmux_killed,
+            inflight_cleared,
+            lifecycle_path,
+            queued_remaining,
+            queue_preserved,
+            disconnected_sessions,
+        })
+    }
+
+    async fn lock_control_run(
         &self,
         routine: &RoutineRecord,
     ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
         let mut tx = self.pool.begin().await?;
-        // Fence physical control against another claim or completion. Release before interrupting.
-        let found: Option<String> = sqlx::query_scalar(
+        let active = routine.in_flight_run_id.as_deref();
+        if let Some(run) = active {
+            // Match close_run's run-before-routine order. NOWAIT covers reverse-order thread writes.
+            let locked: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM routine_runs WHERE id=$1 AND routine_id=$2 AND status='running'
+                 FOR UPDATE NOWAIT",
+            )
+            .bind(run)
+            .bind(&routine.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(control_lock_error)?;
+            if locked.is_none() {
+                return Err(anyhow!(
+                    "invalid routine run: changed before session control"
+                ));
+            }
+        }
+        let lock = format!(
             "SELECT id FROM routines WHERE id=$1 AND in_flight_run_id IS NOT DISTINCT FROM $2
-             AND ($2::text IS NOT NULL OR execution_strategy=$3) FOR NO KEY UPDATE",
-        )
-        .bind(&routine.id)
-        .bind(&routine.in_flight_run_id)
-        .bind(&routine.execution_strategy)
-        .fetch_optional(&mut *tx)
-        .await?;
+             AND ($2::text IS NOT NULL OR execution_strategy=$3) FOR NO KEY UPDATE{}",
+            if active.is_some() { " NOWAIT" } else { "" },
+        );
+        let found: Option<String> = sqlx::query_scalar(&lock)
+            .bind(&routine.id)
+            .bind(active)
+            .bind(&routine.execution_strategy)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(control_lock_error)?;
         if found.is_none() {
             return Err(anyhow!(
                 "invalid routine run: changed before session control"
@@ -28,54 +217,65 @@ impl RoutineSessionController {
         Ok(tx)
     }
 
-    pub(super) async fn resolve_control_target(
+    async fn resolve_control_target(
         &self,
         live: &RoutineRecord,
-    ) -> Result<(RoutineSessionTarget, Option<String>)> {
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(RoutineSessionTarget, Option<ControlledTurn>)> {
         let active_run = live.in_flight_run_id.as_deref();
         if active_run.is_none() {
-            ensure_persistent_routine(live)?;
+            ensure_persistent_routine(&live.id, &live.execution_strategy)?;
         }
         let row = sqlx::query(
             r#"
-            SELECT id, status, turn_id, result_json, attempts, run_spec
-            FROM routine_runs
-            WHERE routine_id = $1
-              AND (id = $2 OR (
-                $2::text IS NULL AND action = 'agent'
+            SELECT rr.id, rr.status, rr.turn_id, rr.result_json, rr.attempts, rr.run_spec,
+                   r.execution_strategy
+            FROM routine_runs rr JOIN routines r ON r.id = rr.routine_id
+            WHERE rr.routine_id = $1
+              AND (rr.id = $2 OR (
+                $2::text IS NULL AND rr.action = 'agent'
                 AND (
-                  attempts @> '[{"event":"started"}]'::jsonb
-                  OR (turn_id IS NOT NULL AND result_json->>'status' IN ('started', 'completed'))
+                  rr.attempts @> '[{"event":"started"}]'::jsonb
+                  OR (rr.turn_id IS NOT NULL AND rr.result_json->>'status' IN ('started', 'completed'))
                 )
               ))
-            ORDER BY started_at DESC, id DESC
+            ORDER BY rr.started_at DESC, rr.id DESC
             LIMIT 1
             "#,
         )
         .bind(&live.id)
         .bind(active_run)
-        .fetch_optional(&*self.pool)
+        .fetch_optional(&mut **tx)
         .await?
         .ok_or_else(|| anyhow!("invalid routine run: no started execution for session control"))?;
         let run: String = row.try_get("id")?;
-        let store =
-            RoutineStore::new_with_timezone_and_checkpoint_limit(self.pool.clone(), "UTC", 4096);
-        let claimed = store
-            .routine_as_claimed(&live.id, &run)
-            .await?
-            .ok_or_else(|| anyhow!("routine {} vanished before control", live.id))?;
-        ensure_persistent_routine(&claimed)?;
+        let spec: Option<Value> = row.try_get("run_spec")?;
+        let strategy = spec
+            .as_ref()
+            .and_then(|spec| spec["execution_strategy"].as_str())
+            .unwrap_or(row.try_get::<&str, _>("execution_strategy")?);
+        ensure_persistent_routine(&live.id, strategy)?;
 
         let current_turn: Option<String> = row.try_get("turn_id")?;
         let running = active_run.is_some();
-        if running && (row.try_get::<String, _>("status")? != "running" || current_turn.is_none()) {
-            return Err(anyhow!(
-                "invalid routine run {run} has no current started agent turn"
-            ));
-        }
+        let controlled_turn = match (
+            running,
+            row.try_get::<&str, _>("status")?,
+            current_turn.as_ref(),
+        ) {
+            (false, _, _) => None,
+            (true, "running", Some(turn_id)) => Some(ControlledTurn {
+                run_id: run.clone(),
+                turn_id: turn_id.clone(),
+            }),
+            _ => {
+                return Err(anyhow!(
+                    "invalid routine run {run} has no current started agent turn"
+                ));
+            }
+        };
         let result: Option<Value> = row.try_get("result_json")?;
         let attempts: Value = row.try_get("attempts")?;
-        let spec: Option<Value> = row.try_get("run_spec")?;
         let attempt = attempts.as_array().and_then(|all| {
             all.iter().rev().find(|a| {
                 let event = a["event"].as_str();
@@ -162,7 +362,7 @@ impl RoutineSessionController {
                 session_key: Some(session_key),
                 tmux_session: tmux,
             },
-            running.then_some(run),
+            controlled_turn,
         ))
     }
 }

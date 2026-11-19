@@ -637,33 +637,7 @@ async fn control_routine_session(
         .control_persistent_session(&routine, command, &reason)
         .await
         .map_err(session_control_error)?;
-    let session_changed = session.runtime_cleared
-        || session.tmux_killed
-        || session.inflight_cleared
-        || session.disconnected_sessions > 0;
-    let interrupted_run_id = if let (true, Some(expected_run)) =
-        (session_changed, session.controlled_run_id.as_deref())
-    {
-        store
-            .interrupt_in_flight_run(
-                &routine_id,
-                expected_run,
-                &reason,
-                Some(json!({
-                    "status": "interrupted_by_session_control",
-                    "routine_id": routine_id,
-                    "action": command.as_str(),
-                    "provider": session.provider.clone(),
-                    "channel_id": session.channel_id.clone(),
-                    "session_key": session.session_key.clone(),
-                    "tmux_session": session.tmux_session.clone(),
-                })),
-            )
-            .await
-            .map_err(store_error)?
-    } else {
-        None
-    };
+    let interrupted_run_id = session.interrupted_run_id.as_deref();
 
     Ok(Json(json!({
         "ok": true,

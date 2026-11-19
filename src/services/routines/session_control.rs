@@ -1,15 +1,16 @@
 mod persistent_target;
 use anyhow::{Result, anyhow};
 #[cfg(test)]
-pub(crate) use persistent_target::seed_started_control_session;
+pub(crate) use persistent_target::{
+    CONTROL_TEST_PAUSE, ControlPause, seed_started_control_session,
+};
 use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
 
-use crate::services::discord::admin_host_guard::ManagedReset;
-use crate::services::discord::health::{HealthRegistry, clear_provider_channel_runtime};
+use crate::services::discord::health::HealthRegistry;
 use crate::services::provider::ProviderKind;
 use crate::services::routines::provider_choice::{owned_session_route, session_route};
 use crate::services::turn_lifecycle::{
@@ -53,6 +54,8 @@ pub struct RoutineSessionControlResult {
     pub queue_preserved: Option<bool>,
     pub disconnected_sessions: u64,
     pub controlled_run_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) interrupted_run_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -86,79 +89,6 @@ impl RoutineSessionController {
         }
     }
 
-    pub async fn control_persistent_session(
-        &self,
-        routine: &RoutineRecord,
-        command: RoutineSessionCommand,
-        reason: &str,
-    ) -> Result<RoutineSessionControlResult> {
-        let control_guard = self.lock_control_run(routine).await?;
-        let (target, controlled_run_id) = self.resolve_control_target(routine).await?;
-        let provider_clear_behavior = provider_clear_behavior(&target.provider);
-
-        let mut runtime_cleared = false;
-        let mut tmux_killed = false;
-        let mut inflight_cleared = false;
-        let mut lifecycle_path = "registry-unavailable";
-        let mut queued_remaining = None;
-        let mut queue_preserved = None;
-        let mut disconnected_sessions = 0;
-
-        match command {
-            RoutineSessionCommand::Reset => {
-                if let Some(registry) = self.health_registry.as_deref() {
-                    let reset = clear_provider_channel_runtime(
-                        registry,
-                        target.provider.as_str(),
-                        target.channel_id,
-                        target.session_key.as_deref(),
-                    )
-                    .await;
-                    runtime_cleared = matches!(reset, Some(ManagedReset::Applied(_)));
-                    lifecycle_path = match reset {
-                        Some(ManagedReset::Applied(_)) => "runtime-clear",
-                        Some(ManagedReset::Refused(_)) => "runtime-clear-refused",
-                        None => "runtime-clear-unavailable",
-                    };
-                }
-            }
-            RoutineSessionCommand::Kill => {
-                let lifecycle = self
-                    .force_kill(&target, reason, "routine_session_kill")
-                    .await;
-                tmux_killed = lifecycle.tmux_killed;
-                inflight_cleared = lifecycle.inflight_cleared;
-                lifecycle_path = lifecycle.lifecycle_path;
-                queued_remaining = lifecycle.queue_depth;
-                queue_preserved = lifecycle.queue_preserved;
-                // A kill the host guard keeps changed nothing, so the session rows stay too.
-                if !lifecycle.host_guard_kept() {
-                    disconnected_sessions = self.disconnect_matching_sessions(&target).await?;
-                }
-            }
-        }
-
-        control_guard.commit().await?;
-        Ok(RoutineSessionControlResult {
-            controlled_run_id,
-            action: command.as_str(),
-            routine_id: routine.id.clone(),
-            agent_id: target.agent_id,
-            provider: target.provider.as_str().to_string(),
-            channel_id: target.channel_id.get().to_string(),
-            session_key: target.session_key,
-            tmux_session: target.tmux_session,
-            provider_clear_behavior,
-            runtime_cleared,
-            tmux_killed,
-            inflight_cleared,
-            lifecycle_path,
-            queued_remaining,
-            queue_preserved,
-            disconnected_sessions,
-        })
-    }
-
     pub async fn teardown_fresh_session(
         &self,
         routine: &RoutineRecord,
@@ -175,11 +105,12 @@ impl RoutineSessionController {
         let disconnected_sessions = if lifecycle.host_guard_kept() {
             0
         } else {
-            self.disconnect_matching_sessions(&target).await?
+            Self::disconnect_matching_sessions(&target, &*self.pool).await?
         };
 
         Ok(RoutineSessionControlResult {
             controlled_run_id: None,
+            interrupted_run_id: None,
             action: "fresh_teardown",
             routine_id: routine.id.clone(),
             agent_id: target.agent_id,
@@ -305,6 +236,7 @@ impl RoutineSessionController {
 
         Ok(RoutineSessionControlResult {
             controlled_run_id: None,
+            interrupted_run_id: None,
             action: "fresh_teardown",
             routine_id: routine.id.clone(),
             agent_id: target.agent_id,
@@ -606,7 +538,10 @@ impl RoutineSessionController {
         Ok(result.rows_affected())
     }
 
-    async fn disconnect_matching_sessions(&self, target: &RoutineSessionTarget) -> Result<u64> {
+    async fn disconnect_matching_sessions<'e>(
+        target: &RoutineSessionTarget,
+        executor: impl sqlx::PgExecutor<'e>,
+    ) -> Result<u64> {
         let session_key = target.session_key.as_deref();
         let target_channel_id = target.channel_id.get().to_string();
         let result = sqlx::query(
@@ -631,7 +566,7 @@ impl RoutineSessionController {
         .bind(target.session_id)
         .bind(target_channel_id)
         .bind(session_key)
-        .execute(&*self.pool)
+        .execute(executor)
         .await
         .map_err(|error| {
             anyhow!(
@@ -641,17 +576,6 @@ impl RoutineSessionController {
         })?;
 
         Ok(result.rows_affected())
-    }
-}
-
-fn ensure_persistent_routine(routine: &RoutineRecord) -> Result<()> {
-    if routine.execution_strategy == "persistent" {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "routine {} requires execution_strategy=persistent for session control",
-            routine.id
-        ))
     }
 }
 
