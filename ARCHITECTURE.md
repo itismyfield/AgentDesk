@@ -3067,6 +3067,8 @@ src/
 │   │   │   │   └── thread_guard_host_e2e_tests.rs
 │   │   │   ├── relay_ownership/
 │   │   │   │   └── hosted_source_tests.rs
+│   │   │   ├── session_rotation_settle/
+│   │   │   │   └── selector_tests.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff/
 │   │   │   │   │   ├── reown/
