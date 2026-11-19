@@ -93,6 +93,13 @@ fn pipeline_kinds_and_typed_conditions_round_trip() {
     );
     let encoded = serde_json::to_value(&original).unwrap();
     assert_eq!(graph(encoded), original);
+    let mut sparse = graph_wire();
+    for key in ["events", "policy"] {
+        sparse.as_object_mut().unwrap().remove(key);
+    }
+    let sparse = graph(sparse);
+    assert!(sparse.events.is_empty());
+    assert_eq!(sparse.policy, PipelinePolicy::default());
     for (field, value, expected) in [
         (
             "work.seal_valid",
