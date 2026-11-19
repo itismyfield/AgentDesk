@@ -84,6 +84,9 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   const [previewing, setPreviewing] = useState(false);
   const [drag, setDrag] = useState<{ id: string; position: { x: number; y: number } } | null>(null);
   const [tieReads, setTieReads] = useState(0);
+  // Sizes React Flow measured, handed back on each node: without them every render re-measures and redraws the lines,
+  // which drops the focus from a line just chosen with the keyboard or the mouse.
+  const [measured, setMeasured] = useState<Record<string, { width: number; height: number }>>({});
   const [arranged, setArranged] = useState<Campaign["nodes"] | null>(null);
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState<{ text: string; conflicts?: Conflict[]; latest?: Campaign } | null>(null);
@@ -269,7 +272,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
       note: looped ? { tone: "err", text: tr("순환 오류", "Cycle") } : bad ? { tone: "err", text: tr("입력 오류", "Invalid field") } : lock ? { tone: "lock", text: lock } : null,
       locked: lock !== null, error: looped || bad, picked: from === id,
     };
-    return { id, type: "relationsTask", position: positions.get(id) ?? { x: 0, y: 0 }, data, draggable: false, deletable: false,
+    return { id, type: "relationsTask", position: positions.get(id) ?? { x: 0, y: 0 }, measured: measured[id], data, draggable: false, deletable: false,
       selected: tool === "select" && selection?.kind === "node" && selection.id === id, ariaLabel: `${taskName(node)}, ${tr(...LABELS[node.status])}` };
   });
   // A tied line runs through its ties in stored order; its first piece keeps the plain id, so focus and checks find it.
@@ -281,7 +284,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
     via.forEach((tie) => through.set(tie, [...through.get(tie) ?? [], [dep, id]]));
     const path = cycleEdges.get(`${dep}->${id}`);
     const chosen = tool !== "tie" && selection?.kind === "edge" && selection.source === dep && selection.target === id;
-    const lit = chosen || (tool === "tie" && bundle.includes(rawEdgeId([dep, id])));
+    const lit = chosen || (tool === "tie" && bundle.includes(rawEdgeId([dep, id]))) || (chosenTie !== null && via.includes(chosenTie));
     const first = path && !labelled.has(path);
     if (path) labelled.add(path);
     const chain = [dep, ...via.map((tie) => TIE + tie), id];
@@ -295,7 +298,13 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   const chosenLines = bundle.map((edge) => JSON.parse(edge) as RawEdgeKey).filter(([dep, id]) => inScope.has(dep) && !!byId.get(id)?.dependencies.includes(dep) && inScope.has(id));
   const activeTie = chosenTie && through.has(chosenTie) ? chosenTie : null;
   const untie = (tieId: string) => { tieCommit({ kind: "remove", tieId }); setChosenTie(null); setPreviewing(false); };
-  const made = (view: ReturnType<typeof tieCommit>) => { if (view) { setChosenTie(view.ties.at(-1)!.id); setSelection(null); setBundle([]); } };
+  const made = (view: ReturnType<typeof tieCommit>) => {
+    if (!view) return;
+    const id = view.ties.at(-1)!.id;
+    setChosenTie(id); setSelection(null); setBundle([]);
+    // The new tie takes the focus so its menu keys answer at once; it is drawn a frame or two after this change.
+    requestAnimationFrame(() => requestAnimationFrame(() => root.current?.querySelector<HTMLElement>(`.react-flow__node[data-id="${TIE + id}"]`)?.focus()));
+  };
   /** Ties the chosen lines where their middles meet; a line's middle is halfway between its two pins. */
   const tieBundle = () => {
     const middles = chosenLines.map(([dep, id]) => ({ x: (positions.get(dep)!.x + NODE_WIDTH + positions.get(id)!.x) / 2, y: (positions.get(dep)!.y + positions.get(id)!.y + NODE_HEIGHT) / 2 }));
@@ -306,12 +315,12 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   // Original-line preview: the chosen tie's lines also drawn on their own paths, dashed.
   if (activeTie && previewing) edges.push(...through.get(activeTie)!.map(([dep, id]) => ({ id: `preview:${dep}->${id}`, source: dep, target: id, selectable: false, focusable: false, deletable: false, style: { stroke: "var(--fg-muted)", strokeDasharray: "4 4" } })));
   for (const [tieId, lines] of through) {
-    const menu: TieMenu | null = tieId !== activeTie ? null : {
+    const menu: TieMenu | null = tieId !== activeTie || drag ? null : {
       labels: { menu: tr("케이블타이 메뉴", "Cable tie menu"), remove: tr("타이 풀기", "Untie"), detach: tr("선 하나만 빼기", "Take one line out"), preview: tr("원래 선 미리 보기", "Preview original lines") },
       strands: lines.map(([dep, id]) => ({ key: rawEdgeId([dep, id]), label: `${label(dep)} → ${label(id)}` })), previewing,
       act: { remove: () => untie(tieId), detach: (edge) => tieCommit({ kind: "detach", tieId, edge: JSON.parse(edge) as RawEdgeKey }), preview: () => setPreviewing(!previewing) },
     };
-    graphNodes.push({ id: TIE + tieId, type: "relationsTie", position: drag?.id === tieId ? drag.position : tieById.get(tieId)!.position, draggable: !saving, deletable: false,
+    graphNodes.push({ id: TIE + tieId, type: "relationsTie", position: drag?.id === tieId ? drag.position : tieById.get(tieId)!.position, measured: measured[TIE + tieId], draggable: !saving, deletable: false,
       selected: tieId === activeTie, ariaLabel: tr(`케이블타이, 선 ${lines.length}개`, `Cable tie, ${lines.length} lines`), data: { count: lines.length, menu } satisfies TieNodeData });
   }
   const chosen = selection?.kind === "node" ? byId.get(selection.id) ?? null : null;
@@ -421,7 +430,11 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
           onConnect={({ source, target }) => source && target && link(source, target)}
           isValidConnection={({ target }) => lockOf(target) === null}
           // Selection arrives as a change for a click and for Enter on a focused task, tie or line alike.
-          onNodesChange={(changes) => { const picked = changes.find((change) => change.type === "select" && change.selected); if (picked && "id" in picked) pick(picked.id); }}
+          onNodesChange={(changes) => {
+            const sized = changes.flatMap((change) => change.type === "dimensions" && change.dimensions ? [[change.id, change.dimensions] as const] : []);
+            if (sized.length) setMeasured((current) => ({ ...current, ...Object.fromEntries(sized) }));
+            const picked = changes.find((change) => change.type === "select" && change.selected); if (picked && "id" in picked) pick(picked.id);
+          }}
           onEdgesChange={(changes) => {
             const line = edges.find((edge) => changes.some((change) => change.type === "select" && change.selected && change.id === edge.id))?.data as Line | undefined;
             if (!line) return;
