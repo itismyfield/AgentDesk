@@ -1,8 +1,23 @@
 use super::*;
-use crate::services::routines::store::{NewRoutine, RoutineStore};
+use crate::services::routines::store::{NewRoutine, NextDueAtUpdate, RoutineStore};
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_persistent_kill_after_provider_or_agent_patch_keeps_the_other_session_pg() {
+    persistent_kill_after_patch(None).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_idle_persistent_kill_after_provider_patch_keeps_the_other_session_pg() {
+    persistent_kill_after_patch(Some("provider")).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_idle_persistent_kill_after_agent_patch_keeps_the_other_session_pg() {
+    persistent_kill_after_patch(Some("agent")).await;
+}
+
+async fn persistent_kill_after_patch(idle_case: Option<&str>) {
+    let idle = idle_case.is_some();
     let _root = crate::config::TestRuntimeRootGuard::new();
     let tmux = TmuxEnv::install(LiveServer);
     let db = TestPostgresDb::create().await;
@@ -54,6 +69,9 @@ async fn a_persistent_kill_after_provider_or_agent_patch_keeps_the_other_session
             "codex",
         ),
     ] {
+        if idle_case.is_some_and(|selected| selected != case) {
+            continue;
+        }
         let thread = (case != "primary-evidence").then_some("8219199");
         let actual_channel = thread.unwrap_or("8219101");
         let old_name = format!("adk-i8219-old-{case}");
@@ -91,9 +109,40 @@ async fn a_persistent_kill_after_provider_or_agent_patch_keeps_the_other_session
             .await
             .unwrap();
         let run = store.claim_run_now(&routine.id).await.unwrap().unwrap();
-        let started = serde_json::json!({"agent_id":actual_agent,"provider":actual_provider,"channel_id":actual_channel,"discord_thread_id":thread,"session_key":old_key,"turn_id":"claimed-turn"});
-        sqlx::query("UPDATE routine_runs SET action='agent',turn_id='claimed-turn',result_json=$2 WHERE id=$1")
-            .bind(&run.run_id).bind(started).execute(&pool).await.unwrap();
+        let mut started = serde_json::json!({"status":"started","agent_id":actual_agent,"provider":actual_provider,"channel_id":actual_channel,"discord_thread_id":thread,"session_key":old_key,"turn_id":"claimed-turn"});
+        if idle {
+            assert!(
+                store
+                    .mark_agent_turn_started(
+                        &run.run_id,
+                        "claimed-turn",
+                        Some(started.clone()),
+                        actual_agent,
+                        "primary",
+                    )
+                    .await
+                    .unwrap()
+            );
+            started["status"] = serde_json::json!("completed");
+            if case == "agent" {
+                started.as_object_mut().unwrap().remove("session_key");
+            }
+            assert!(
+                store
+                    .complete_agent_run(
+                        &run.run_id,
+                        Some(started),
+                        None,
+                        None,
+                        NextDueAtUpdate::Preserve
+                    )
+                    .await
+                    .unwrap()
+            );
+        } else {
+            sqlx::query("UPDATE routine_runs SET action='agent',turn_id='claimed-turn',result_json=$2 WHERE id=$1")
+                .bind(&run.run_id).bind(&started).execute(&pool).await.unwrap();
+        }
         if case.ends_with("attempt") {
             let attempt = serde_json::json!([{"event":"started", "agent_id":actual_agent,"provider":actual_provider,"channel_id":actual_channel,"turn_id":"claimed-turn"}]);
             sqlx::query(
@@ -114,16 +163,18 @@ async fn a_persistent_kill_after_provider_or_agent_patch_keeps_the_other_session
         .await
         .unwrap();
         assert_eq!(patched.0["routine"]["id"], routine.id);
-        let Json(reset) = crate::server::routes::routines::reset_routine_session(
-            State(state.clone()),
-            Path(routine.id.clone()),
-        )
-        .await
-        .unwrap();
-        assert_eq!(reset["session"]["provider"], actual_provider);
-        assert_eq!(reset["session"]["agent_id"], actual_agent);
-        assert_eq!(reset["session"]["session_key"], old_key);
-        assert_eq!(reset["session"]["channel_id"], actual_channel);
+        if !idle {
+            let Json(reset) = crate::server::routes::routines::reset_routine_session(
+                State(state.clone()),
+                Path(routine.id.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reset["session"]["provider"], actual_provider);
+            assert_eq!(reset["session"]["agent_id"], actual_agent);
+            assert_eq!(reset["session"]["session_key"], old_key);
+            assert_eq!(reset["session"]["channel_id"], actual_channel);
+        }
         let Json(result) = crate::server::routes::routines::kill_routine_session(
             State(state.clone()),
             Path(routine.id.clone()),
@@ -143,13 +194,17 @@ async fn a_persistent_kill_after_provider_or_agent_patch_keeps_the_other_session
             !tmux.alive(&old_name),
             "{case}: claimed session survived: {result}"
         );
-        assert_eq!(result["interrupted_run_id"], run.run_id);
+        if idle {
+            assert!(result["interrupted_run_id"].is_null());
+        } else {
+            assert_eq!(result["interrupted_run_id"], run.run_id);
+        }
         let status: String = sqlx::query_scalar("SELECT status FROM routine_runs WHERE id=$1")
             .bind(&run.run_id)
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(status, "interrupted");
+        assert_eq!(status, if idle { "succeeded" } else { "interrupted" });
         let next = store.claim_run_now(&routine.id).await.unwrap().unwrap();
         assert!(
             store

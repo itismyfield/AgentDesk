@@ -31,6 +31,10 @@ impl Host {
     }
 
     async fn with_storage(channels: &[ChannelId], storage: bool) -> Self {
+        Self::with_provider(channels, storage, ProviderKind::Claude).await
+    }
+
+    async fn with_provider(channels: &[ChannelId], storage: bool, provider: ProviderKind) -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
         let _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::INFO)
@@ -96,8 +100,17 @@ sys.exit(result.returncode)
             health_registry: None,
             cluster_instance_id: None,
         };
+        let router = axum::Router::new();
+        let router = if provider == ProviderKind::Antigravity {
+            router.route(
+                "/api/dispatched-sessions/claude-session-id",
+                axum::routing::get(crate::services::dispatched_sessions::get_claude_session_id),
+            )
+        } else {
+            router
+        };
         let app =
-            axum::Router::new()
+            router
                 .route(
                     "/api/dispatched-sessions/webhook",
                     axum::routing::post(
@@ -139,7 +152,7 @@ sys.exit(result.returncode)
         let ctx = discord_mock::serenity_context(proxy, gateway).await;
         let registry = Arc::new(health::HealthRegistry::new());
         registry
-            .register_http("claude".into(), ctx.http.clone())
+            .register_http(provider.as_str().into(), ctx.http.clone())
             .await;
         registry
             .set_utility_bot_http_for_tests(
@@ -152,6 +165,8 @@ sys.exit(result.returncode)
         );
         {
             let inner = Arc::get_mut(&mut shared).unwrap();
+            inner.provider = provider.clone();
+            inner.settings.get_mut().provider = provider.clone();
             inner.api_port = port;
             inner.token_hash = crate::services::discord::settings::discord_token_hash("test-token");
             inner.health_registry = Arc::downgrade(&registry);
@@ -174,7 +189,9 @@ sys.exit(result.returncode)
             session.channel_name = Some(format!("headless-fixture-{channel}"));
             session.current_path = Some(workspace.path().display().to_string());
         }
-        registry.register("claude".into(), shared.clone()).await;
+        registry
+            .register(provider.as_str().into(), shared.clone())
+            .await;
         Self {
             shared,
             registry,
@@ -201,7 +218,7 @@ sys.exit(result.returncode)
             &self.registry,
             channel,
             channel,
-            ProviderKind::Claude,
+            self.shared.provider.clone(),
             "caller rendered original".into(),
             Some(source.into()),
             metadata,
@@ -240,7 +257,7 @@ sys.exit(result.returncode)
                     .cancel_token
                     .is_none()
                 && !crate::services::discord::live_bridge::is_live(
-                    &ProviderKind::Claude,
+                    &self.shared.provider,
                     channel.get(),
                 )
             {
@@ -261,13 +278,13 @@ sys.exit(result.returncode)
                     .cancel_token
                     .is_some(),
                 crate::services::discord::live_bridge::is_live(
-                    &ProviderKind::Claude,
+                    &self.shared.provider,
                     channel.get()
                 ),
                 std::fs::read_to_string(
                     crate::services::discord::runtime_store::agentdesk_root()
                         .unwrap()
-                        .join("debug/claude.log")
+                        .join(format!("debug/{}.log", self.shared.provider.as_str()))
                 )
                 .unwrap_or_default()
             );

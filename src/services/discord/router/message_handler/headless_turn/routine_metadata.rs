@@ -1,5 +1,7 @@
 //! Routine metadata and session identity helpers for headless turns.
 use super::*;
+use crate::db::dispatched_sessions::load_provider_session_ids_pg;
+use crate::services::discord::adk_session::legacy_session_key_from_namespaced;
 
 pub(super) fn valid_routine_metadata(
     metadata: Option<&serde_json::Value>,
@@ -71,7 +73,7 @@ pub(super) fn headless_session_basis(
     session_key_basis_override(snapshot.as_deref(), metadata, tmux_session_label).map(str::to_owned)
 }
 /// The model a routine pinned for its run; it outranks the channel model setting.
-pub(super) fn routine_model(metadata: Option<&serde_json::Value>) -> Option<String> {
+fn routine_model(metadata: Option<&serde_json::Value>) -> Option<String> {
     valid_routine_metadata(metadata)?
         .get("model")
         .and_then(|value| value.as_str())
@@ -79,6 +81,77 @@ pub(super) fn routine_model(metadata: Option<&serde_json::Value>) -> Option<Stri
         .filter(|value| !value.is_empty())
         .map(str::to_string)
 }
+
+pub(super) async fn models_for_turn(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    provider: &ProviderKind,
+    metadata: Option<&serde_json::Value>,
+    session_key: Option<&str>,
+    native_session: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let persistent = valid_routine_metadata(metadata).is_some() && !fresh_routine_turn(metadata);
+    if let Some(session) = native_session.filter(|_| persistent) {
+        // Claude keeps its own resumed model. Other resumes reuse a recorded model
+        // from the matching conversation when available.
+        let model = if *provider == ProviderKind::Claude {
+            None
+        } else {
+            resumed_model(shared, provider, session_key, session).await
+        };
+        return (model, None);
+    }
+
+    let requested = match routine_model(metadata) {
+        Some(model) => Some(model),
+        None => {
+            // Routine model inheritance starts at the agent's parent channel.
+            let model_channel = metadata_parent_channel_id(metadata).unwrap_or(channel);
+            super::super::super::super::commands::resolve_model_for_turn(
+                shared,
+                model_channel,
+                provider,
+            )
+            .await
+        }
+    };
+    // A new default-model conversation can occupy the previous conversation's row.
+    let published = requested
+        .clone()
+        .or_else(|| persistent.then(|| "default".to_string()));
+    (requested, published)
+}
+
+async fn resumed_model(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    session_key: Option<&str>,
+    native_session: &str,
+) -> Option<String> {
+    let (Some(pool), Some(key)) = (shared.pg_pool.as_ref(), session_key) else {
+        return None;
+    };
+    let legacy = legacy_session_key_from_namespaced(key);
+    for key in std::iter::once(key).chain(legacy.as_deref()) {
+        match load_provider_session_ids_pg(pool, key, Some(provider.as_str())).await {
+            Ok(Some(row))
+                if row.claude_session_id.as_deref() == Some(native_session)
+                    || row.raw_provider_session_id.as_deref() == Some(native_session) =>
+            {
+                return row.model.filter(|model| {
+                    !model.trim().is_empty() && !model.eq_ignore_ascii_case("default")
+                });
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(session_key = key, %error, "could not read resumed session model");
+                return None;
+            }
+        }
+    }
+    None
+}
+
 /// Process mode is explicit and only honored on fresh routine metadata.
 pub(super) fn routine_process_turn(metadata: Option<&serde_json::Value>) -> bool {
     fresh_routine_turn(metadata)

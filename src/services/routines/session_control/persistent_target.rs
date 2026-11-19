@@ -1,4 +1,4 @@
-//! A running routine controls only its claimed execution, fenced against another claim.
+//! Session control targets the execution the routine actually started.
 use super::*;
 use crate::services::routines::execution_mode::ProviderChoice;
 use crate::services::routines::provider_choice::AgentProviderChannels;
@@ -8,17 +8,16 @@ impl RoutineSessionController {
     pub(super) async fn lock_control_run(
         &self,
         routine: &RoutineRecord,
-    ) -> Result<Option<sqlx::Transaction<'static, sqlx::Postgres>>> {
-        let Some(run) = routine.in_flight_run_id.as_deref() else {
-            return Ok(None);
-        };
+    ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
         let mut tx = self.pool.begin().await?;
-        // Finish and the next claim wait for physical control; release this before interrupting.
+        // Fence physical control against another claim or completion. Release before interrupting.
         let found: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM routines WHERE id=$1 AND in_flight_run_id=$2 FOR KEY SHARE",
+            "SELECT id FROM routines WHERE id=$1 AND in_flight_run_id IS NOT DISTINCT FROM $2
+             AND ($2::text IS NOT NULL OR execution_strategy=$3) FOR NO KEY UPDATE",
         )
         .bind(&routine.id)
-        .bind(run)
+        .bind(&routine.in_flight_run_id)
+        .bind(&routine.execution_strategy)
         .fetch_optional(&mut *tx)
         .await?;
         if found.is_none() {
@@ -26,29 +25,50 @@ impl RoutineSessionController {
                 "invalid routine run: changed before session control"
             ));
         }
-        Ok(Some(tx))
+        Ok(tx)
     }
 
     pub(super) async fn resolve_control_target(
         &self,
         live: &RoutineRecord,
     ) -> Result<(RoutineSessionTarget, Option<String>)> {
-        let Some(run) = live.in_flight_run_id.as_deref() else {
+        let active_run = live.in_flight_run_id.as_deref();
+        if active_run.is_none() {
             ensure_persistent_routine(live)?;
-            return Ok((self.resolve_target(live).await?, None));
-        };
+        }
+        let row = sqlx::query(
+            r#"
+            SELECT id, status, turn_id, result_json, attempts, run_spec
+            FROM routine_runs
+            WHERE routine_id = $1
+              AND (id = $2 OR (
+                $2::text IS NULL AND action = 'agent'
+                AND (
+                  attempts @> '[{"event":"started"}]'::jsonb
+                  OR (turn_id IS NOT NULL AND result_json->>'status' IN ('started', 'completed'))
+                )
+              ))
+            ORDER BY started_at DESC, id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(&live.id)
+        .bind(active_run)
+        .fetch_optional(&*self.pool)
+        .await?
+        .ok_or_else(|| anyhow!("invalid routine run: no started execution for session control"))?;
+        let run: String = row.try_get("id")?;
         let store =
             RoutineStore::new_with_timezone_and_checkpoint_limit(self.pool.clone(), "UTC", 4096);
         let claimed = store
-            .routine_as_claimed(&live.id, run)
+            .routine_as_claimed(&live.id, &run)
             .await?
             .ok_or_else(|| anyhow!("routine {} vanished before control", live.id))?;
         ensure_persistent_routine(&claimed)?;
-        let row = sqlx::query("SELECT status,turn_id,result_json,attempts,run_spec FROM routine_runs WHERE id=$1 AND routine_id=$2")
-            .bind(run).bind(&live.id).fetch_optional(&*self.pool).await?
-            .ok_or_else(|| anyhow!("routine run {run} not found for session control"))?;
-        let turn: Option<String> = row.try_get("turn_id")?;
-        if row.try_get::<String, _>("status")? != "running" || turn.is_none() {
+
+        let current_turn: Option<String> = row.try_get("turn_id")?;
+        let running = active_run.is_some();
+        if running && (row.try_get::<String, _>("status")? != "running" || current_turn.is_none()) {
             return Err(anyhow!(
                 "invalid routine run {run} has no current started agent turn"
             ));
@@ -58,13 +78,21 @@ impl RoutineSessionController {
         let spec: Option<Value> = row.try_get("run_spec")?;
         let attempt = attempts.as_array().and_then(|all| {
             all.iter().rev().find(|a| {
-                matches!(a["event"].as_str(), Some("started" | "input_pending"))
-                    && a["turn_id"].as_str() == turn.as_deref()
+                let event = a["event"].as_str();
+                if running {
+                    matches!(event, Some("started" | "input_pending"))
+                        && a["turn_id"].as_str() == current_turn.as_deref()
+                } else {
+                    event == Some("started")
+                }
             })
         });
+        let turn = string_field(attempt, "turn_id")
+            .or(current_turn.as_deref())
+            .ok_or_else(|| anyhow!("invalid routine run {run} has no started turn ID"))?;
         let result = result
             .as_ref()
-            .filter(|v| v["turn_id"].as_str() == turn.as_deref());
+            .filter(|v| v["turn_id"].as_str() == Some(turn));
         let read = |key: &str| string_field(result, key).or_else(|| string_field(attempt, key));
         let agent = read("agent_id")
             .or_else(|| string_field(spec.as_ref(), "agent_id"))
@@ -85,22 +113,21 @@ impl RoutineSessionController {
             crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&route.channel)
                 .or_else(|| route.channel.parse::<u64>().ok())
                 .ok_or_else(|| anyhow!("claimed provider channel is invalid"))?;
+        let recorded_parent = read("parent_channel_id").and_then(parse_discord_channel_id);
         let key = read("session_key");
         let actual_thread = read("discord_thread_id")
             .and_then(parse_discord_channel_id)
             .or_else(|| read("channel_id").and_then(parse_discord_channel_id));
         let thread = actual_thread.or_else(|| {
-            claimed
-                .discord_thread_id
-                .as_deref()
-                .and_then(parse_discord_channel_id)
+            string_field(spec.as_ref(), "discord_thread_id").and_then(parse_discord_channel_id)
         });
         let session = if let Some(key) = key {
             let tmux = tmux_name_from_session_key(key)
                 .ok_or_else(|| anyhow!("invalid run session key is not namespace-exact"))?;
             self.load_owned_session(agent, &route.provider, key, tmux)
                 .await?
-        } else if let Some(thread) = thread.filter(|c| *c != parent) {
+        } else if let Some(thread) = thread.filter(|c| *c != parent && Some(*c) != recorded_parent)
+        {
             self.load_latest_thread_session(agent, &route.provider, thread)
                 .await?
         } else {
@@ -135,7 +162,7 @@ impl RoutineSessionController {
                 session_key: Some(session_key),
                 tmux_session: tmux,
             },
-            Some(run.to_string()),
+            running.then_some(run),
         ))
     }
 }

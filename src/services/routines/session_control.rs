@@ -136,9 +136,7 @@ impl RoutineSessionController {
             }
         }
 
-        if let Some(guard) = control_guard {
-            guard.commit().await?;
-        }
+        control_guard.commit().await?;
         Ok(RoutineSessionControlResult {
             controlled_run_id,
             action: command.as_str(),
@@ -378,72 +376,6 @@ impl RoutineSessionController {
         })
     }
 
-    async fn resolve_target(&self, routine: &RoutineRecord) -> Result<RoutineSessionTarget> {
-        let agent_id = routine
-            .agent_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                anyhow!(
-                    "persistent routine {} is not attached to an agent",
-                    routine.id
-                )
-            })?
-            .to_string();
-
-        let bindings = crate::db::agents::load_agent_channel_bindings_pg(&self.pool, &agent_id)
-            .await
-            .map_err(|error| {
-                anyhow!("load agent bindings for routine session {agent_id}: {error}")
-            })?
-            .ok_or_else(|| anyhow!("agent {agent_id} not found for routine session control"))?;
-        let route = session_route(&self.pool, bindings, &agent_id, &routine.id, None).await?;
-        let (provider, primary_channel) = (route.provider, route.channel);
-        let channel_id =
-            crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&primary_channel)
-                .or_else(|| primary_channel.parse::<u64>().ok())
-                .ok_or_else(|| {
-                    anyhow!("agent {agent_id} primary channel is invalid: {primary_channel}")
-                })?;
-        let routine_thread_channel_id = routine
-            .discord_thread_id
-            .as_deref()
-            .and_then(parse_discord_channel_id);
-
-        let session = self
-            .load_latest_session(&agent_id, &provider, channel_id, routine_thread_channel_id)
-            .await?;
-        let session_thread_channel_id = session
-            .as_ref()
-            .and_then(|row| row.thread_channel_id.as_deref())
-            .and_then(parse_discord_channel_id);
-        let target_channel_id = target_channel_id(
-            channel_id,
-            routine_thread_channel_id,
-            session_thread_channel_id,
-        );
-        let channel = ChannelId::new(target_channel_id);
-        let fallback_channel_name =
-            fallback_tmux_channel_name(&primary_channel, channel_id, target_channel_id);
-        let session_id = session.as_ref().map(|row| row.id);
-        let session_key = session.as_ref().and_then(|row| row.session_key.clone());
-        let tmux_session = session_key
-            .as_deref()
-            .and_then(tmux_name_from_session_key)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| provider.build_tmux_session_name(&fallback_channel_name));
-
-        Ok(RoutineSessionTarget {
-            agent_id,
-            provider,
-            channel_id: channel,
-            session_id,
-            session_key,
-            tmux_session,
-        })
-    }
-
     async fn resolve_fresh_target(
         &self,
         routine: &RoutineRecord,
@@ -489,71 +421,6 @@ impl RoutineSessionController {
             session_key,
             tmux_session,
         })
-    }
-
-    async fn load_latest_session(
-        &self,
-        agent_id: &str,
-        provider: &ProviderKind,
-        primary_channel_id: u64,
-        routine_thread_channel_id: Option<u64>,
-    ) -> Result<Option<RoutineSessionRow>> {
-        let primary_channel_id = primary_channel_id.to_string();
-        let routine_thread_channel_id = routine_thread_channel_id.map(|value| value.to_string());
-        let row = sqlx::query(
-            r#"
-            SELECT id, session_key, thread_channel_id
-            FROM sessions
-            WHERE agent_id = $1
-              AND LOWER(COALESCE(provider, '')) = LOWER($2)
-              AND status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working', 'idle', 'connected')
-              AND (
-                thread_channel_id = $3
-                OR ($4::text IS NOT NULL AND thread_channel_id = $4)
-                OR thread_channel_id IS NULL
-              )
-            ORDER BY
-              CASE
-                WHEN $4::text IS NOT NULL AND thread_channel_id = $4 THEN 0
-                WHEN thread_channel_id = $3 THEN 1
-                ELSE 2
-              END,
-              CASE status
-                WHEN 'turn_active' THEN 0
-                WHEN 'working' THEN 0
-                WHEN 'awaiting_bg' THEN 1
-                WHEN 'awaiting_user' THEN 2
-                WHEN 'idle' THEN 3
-                WHEN 'connected' THEN 4
-                ELSE 5
-              END,
-              last_heartbeat DESC NULLS LAST,
-              created_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(agent_id)
-        .bind(provider.as_str())
-        .bind(primary_channel_id)
-        .bind(routine_thread_channel_id)
-        .fetch_optional(&*self.pool)
-        .await
-        .map_err(|error| anyhow!("load routine session for {agent_id}: {error}"))?;
-
-        row.map(|row| {
-            Ok(RoutineSessionRow {
-                id: row
-                    .try_get("id")
-                    .map_err(|error| anyhow!("decode routine session id: {error}"))?,
-                session_key: row
-                    .try_get("session_key")
-                    .map_err(|error| anyhow!("decode routine session_key: {error}"))?,
-                thread_channel_id: row
-                    .try_get("thread_channel_id")
-                    .map_err(|error| anyhow!("decode routine thread_channel_id: {error}"))?,
-            })
-        })
-        .transpose()
     }
 
     async fn load_latest_thread_session(
@@ -876,28 +743,6 @@ fn parse_discord_channel_id(value: &str) -> Option<u64> {
     value.trim().parse::<u64>().ok()
 }
 
-fn target_channel_id(
-    primary_channel_id: u64,
-    routine_thread_channel_id: Option<u64>,
-    session_thread_channel_id: Option<u64>,
-) -> u64 {
-    session_thread_channel_id
-        .or(routine_thread_channel_id)
-        .unwrap_or(primary_channel_id)
-}
-
-fn fallback_tmux_channel_name(
-    primary_channel: &str,
-    primary_channel_id: u64,
-    target_channel_id: u64,
-) -> String {
-    if target_channel_id == primary_channel_id {
-        primary_channel.to_string()
-    } else {
-        format!("{primary_channel}-t{target_channel_id}")
-    }
-}
-
 fn fresh_teardown_fallback_tmux_session_name(
     routine: &RoutineRecord,
     agent_id: &str,
@@ -1068,25 +913,6 @@ mod tests {
     }
 
     #[test]
-    fn target_channel_prefers_session_thread_then_routine_thread_then_primary() {
-        assert_eq!(target_channel_id(100, Some(200), Some(300)), 300);
-        assert_eq!(target_channel_id(100, Some(200), None), 200);
-        assert_eq!(target_channel_id(100, None, None), 100);
-    }
-
-    #[test]
-    fn fallback_tmux_channel_name_preserves_thread_suffix() {
-        assert_eq!(
-            fallback_tmux_channel_name("agent-cdx", 100, 100),
-            "agent-cdx"
-        );
-        assert_eq!(
-            fallback_tmux_channel_name("agent-cdx", 100, 200),
-            "agent-cdx-t200"
-        );
-    }
-
-    #[test]
     fn fresh_teardown_fallback_tmux_name_matches_spawn_time_routine_label() {
         let provider = ProviderKind::Claude;
         let mut routine = routine_with_thread("fresh", Some("1485506232256168011"));
@@ -1102,9 +928,8 @@ mod tests {
 
         assert_eq!(teardown_time, spawn_time);
 
-        let old_channel_thread_fallback = provider.build_tmux_session_name(
-            &fallback_tmux_channel_name("1481478222", 1_481_478_222, 1_485_506_232_256_168_011),
-        );
+        let old_channel_thread_fallback =
+            provider.build_tmux_session_name("1481478222-t1485506232256168011");
         assert_ne!(teardown_time, old_channel_thread_fallback);
     }
 

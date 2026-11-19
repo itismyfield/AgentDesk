@@ -1967,6 +1967,7 @@ pub(crate) struct DeleteSessionResult {
 }
 
 pub(crate) struct ProviderSessionIds {
+    pub(crate) model: Option<String>,
     pub(crate) resolved_session_key: String,
     pub(crate) claude_session_id: Option<String>,
     pub(crate) raw_provider_session_id: Option<String>,
@@ -2050,7 +2051,7 @@ pub(crate) async fn load_provider_session_ids_pg(
     };
     let result = if let Some(provider) = provider {
         sqlx::query(
-            "SELECT claude_session_id, raw_provider_session_id, cwd,
+            "SELECT claude_session_id, raw_provider_session_id, cwd, model,
                     EXTRACT(EPOCH FROM (NOW() - COALESCE(claude_session_id_recorded_at, created_at)))::BIGINT
                         AS cache_entry_age_secs,
                     raw_provider_transcript_len_watermark,
@@ -2065,7 +2066,7 @@ pub(crate) async fn load_provider_session_ids_pg(
         .await
     } else {
         sqlx::query(
-            "SELECT claude_session_id, raw_provider_session_id, cwd,
+            "SELECT claude_session_id, raw_provider_session_id, cwd, model,
                     EXTRACT(EPOCH FROM (NOW() - COALESCE(claude_session_id_recorded_at, created_at)))::BIGINT
                         AS cache_entry_age_secs,
                     raw_provider_transcript_len_watermark,
@@ -2086,6 +2087,7 @@ pub(crate) async fn load_provider_session_ids_pg(
             claude_session_id: row.try_get("claude_session_id")?,
             raw_provider_session_id: row.try_get("raw_provider_session_id")?,
             cwd: row.try_get("cwd")?,
+            model: row.try_get("model")?,
             cache_entry_age_secs: row.try_get("cache_entry_age_secs")?,
             raw_provider_transcript_len_watermark: row
                 .try_get("raw_provider_transcript_len_watermark")?,
