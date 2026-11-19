@@ -91,9 +91,10 @@ production-only, test-aware, or repo-wide before adding hard gates.
 
 ## Non-Postgres Test Scope
 
-`just test-non-pg` runs the classifier's non-PG lib tests locally the way the native
-nightly does. CI does not call it: on `main` push and dispatch, every nightly, and on PRs whose
-`rust_tests` filter is on, `rust_build` archives the lib tests and plans every listed test
+`just test-non-pg` runs the classifier's non-PG lib tests locally using the same
+helper as nightly Windows. CI does not call the recipe. On `main` push and
+dispatch, every nightly, and on PRs whose `rust_tests` filter is on,
+`rust_build` archives the lib tests and plans every listed test
 over six `rust_tests` workers, each with its own PostgreSQL service, and
 `test_evidence` audits that every planned test ran. PR, main and nightly keep the same
 three jobs; `scripts/check-ci-runner-hardening.sh` allows them to differ only in
@@ -105,13 +106,13 @@ as part of N.
 
 The `lint` job runs fmt, clippy, the policy JS tests, the non-lib side of the
 recipe's `--all-targets` lines (`--bins --test '*'`), and the `ClaudeBinary`
-compile-fail doctests. The nightly macOS and Windows lanes run
-`scripts/ci/nextest-native.sh`: native source compare, plan, preflight, run
-record and audit on one worker. They plan the non-PG lib tests that
-`scripts/ci/pg_test_classifier.py` selects, then run the non-lib targets with
-`cargo test` and the non-Postgres skips.
+compile-fail doctests. Nightly Windows uses `scripts/ci/nextest-native.sh` to
+compare, plan, preflight, record and audit the non-PG lib tests selected by
+`scripts/ci/pg_test_classifier.py` on one worker. Both the macOS and Windows
+jobs run the non-lib targets with `cargo test` and the non-Postgres skips.
+Nightly macOS lib tests are paused due to hosted-runner memory pressure (#6082).
 
-The macOS-only `herdr_loaded_image_macos_` tests compile on no PR runner.
+The macOS-only `herdr_loaded_image_macos_` tests currently run outside CI.
 `scripts/ci/herdr_loaded_image_macos_ids.txt` lists them and a static test pins it
 to the macOS source inventory. A local Mac run checks that exactly those ran:
 `python3 scripts/run_test_lane.py --lane macos-loaded-image --expected-ids scripts/ci/herdr_loaded_image_macos_ids.txt -- env -u AGENTDESK_ROOT_DIR cargo test --lib herdr_loaded_image_macos_ -- --test-threads=1`.
