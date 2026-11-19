@@ -235,6 +235,28 @@ pub(crate) fn owned_prompt_for_tests(
     first_input::submit_owned(turn, hook, (lineage, None), attached, &sender).map(drop)
 }
 
+#[cfg(all(test, unix))]
+pub(crate) fn observe_cold_prompt_for_tests(
+    turn: &HerdrTurn<'_>,
+    record: &HostedExecution,
+    (session_id, transcript): (&str, PathBuf),
+    sender: Sender<StreamMessage>,
+) -> Result<(), String> {
+    first_input::observe_cold_for_tests(
+        turn,
+        Attached {
+            nonce: record.execution_nonce.clone(),
+            session_id: session_id.into(),
+            transcript,
+            target: gate(record)?,
+            bound: false,
+            awaiting_clear: false,
+            physical: physical(record),
+        },
+        sender,
+    )
+}
+
 /// The socket and pane the gate of `record` writes to.
 fn physical(record: &HostedExecution) -> Option<(String, String)> {
     let location = record.location.as_ref()?;

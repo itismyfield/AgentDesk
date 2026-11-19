@@ -930,8 +930,9 @@ session-activity/ActivityStopWitness.cfg	SessionActivity	NeverEscape	-
 session-activity/ActivitySubmitted.cfg	SessionActivity	-	-
 session-activity/ActivityToolPair.cfg	SessionActivity	-	-
 session-lifecycle/ClaudeColdLaunchBindingAfter.cfg	ClaudeColdLaunchBinding	-	-
-session-lifecycle/ClaudeColdLaunchBindingBefore.cfg	ClaudeColdLaunchBinding	FirstTurnBound	LaunchSettles
-session-lifecycle/ClaudeColdLaunchBindingNoBind.cfg	ClaudeColdLaunchBinding	FirstTurnBound	LaunchSettles
+session-lifecycle/ClaudeColdLaunchBindingBefore.cfg	ClaudeColdLaunchBinding	FirstTurnQueueEligible	-
+session-lifecycle/ClaudeColdLaunchBindingNoBind.cfg	ClaudeColdLaunchBinding	FirstTurnBound,FirstTurnQueueEligible	LaunchSettles
+session-lifecycle/ClaudeColdLaunchBindingNoRegistration.cfg	ClaudeColdLaunchBinding	FirstTurnBound,FirstTurnQueueEligible	LaunchSettles
 session-lifecycle/CodexHerdrBootstrapBefore.cfg	CodexHerdrBootstrap	-	HeldStarts,WriterReady
 session-lifecycle/CodexHerdrBootstrapDesign.cfg	CodexHerdrBootstrap	-	-
 session-lifecycle/CodexHerdrBootstrapDesign1Listing.cfg	CodexHerdrBootstrap	-	HeldStarts,WriterReady
