@@ -5,6 +5,7 @@ use tokio::task::JoinHandle;
 
 const WORK: &str = "native-http-work";
 const PROBE: &str = "native-completion-watcher-offset";
+type ApiCall = (axum::http::Method, String, StatusCode);
 
 fn fixture_commit(path: &Path) -> String {
     let run = |args: &[&str]| {
@@ -45,7 +46,7 @@ async fn work_state(pool: &PgPool) -> (String, Option<String>, i64) {
 
 struct Loopback {
     task: JoinHandle<()>,
-    calls: Arc<Mutex<Vec<(axum::http::Method, String)>>>,
+    calls: Arc<Mutex<Vec<ApiCall>>>,
 }
 
 impl Loopback {
@@ -62,14 +63,17 @@ impl Loopback {
                             .extensions()
                             .get::<axum::extract::OriginalUri>()
                             .map_or(request.uri(), |original| &original.0);
-                        observed
-                            .lock()
-                            .unwrap()
-                            .push((request.method().clone(), uri.path().to_owned()));
+                        let method = request.method().clone();
+                        let path = uri.path().to_owned();
                         request
                             .extensions_mut()
                             .insert(crate::server::routes::auth::loopback_peer());
-                        next.run(request).await
+                        let response = next.run(request).await;
+                        observed
+                            .lock()
+                            .unwrap()
+                            .push((method, path, response.status()));
+                        response
                     }
                 },
             ));
@@ -84,7 +88,7 @@ impl Loopback {
             .lock()
             .unwrap()
             .iter()
-            .filter(|(seen, path)| *seen == method && path == "/api/dispatches/native-http-work")
+            .filter(|(seen, path, _)| *seen == method && path == "/api/dispatches/native-http-work")
             .count()
     }
 }
@@ -97,6 +101,7 @@ impl Drop for Loopback {
 
 fn work_at_closer(has_id: bool) {
     use axum::http::Method;
+    crate::pipeline::ensure_loaded();
     let fx = Fixture::new(
         if has_id {
             "native-work"
@@ -166,7 +171,7 @@ fn work_at_closer(has_id: bool) {
         let mut fence = crate::db::session_transcripts::begin_channel_clear_boundary_tx(&fx.pool).await.unwrap();
         sqlx::query("SELECT pg_advisory_xact_lock(4533, hashtext($1))")
             .bind(CHANNEL.to_string()).execute(&mut *fence).await.unwrap();
-        let answer = format!("HTTP session answered 1\n{sha}");
+        let answer = format!("HTTP session answered 1\n[fixture {}] fixture commit", &sha[..10]);
         answer_with_body(&started.path, &started.session, &answer);
         let closer_end = std::fs::metadata(&started.path).unwrap().len();
         append(&started.path, &[json!({"type":"system","subtype":PROBE,"sessionId":started.session})]);
@@ -195,7 +200,8 @@ fn work_at_closer(has_id: bool) {
         let hook_count = || sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key='native-recovery-hook'")
             .fetch_optional(&fx.pool);
         assert_eq!(hook_count().await.unwrap(), None);
-        assert!(inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL).is_some());
+        let retained = inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL).expect("recovery preserves the native row");
+        assert_eq!(retained.dispatch_id.as_deref(), has_id.then_some(WORK));
         assert!(!discord::terminal_delivery_custody::retains_channel(CHANNEL).unwrap());
         fence.rollback().await.unwrap();
         completed(&intake, 1).await;
@@ -212,9 +218,10 @@ fn work_at_closer(has_id: bool) {
         assert_eq!(bodies.iter().map(|body| body.trim()).collect::<Vec<_>>(), [answer.as_str()]);
         let state = work_state(&fx.pool).await;
         let expected = if has_id { ("completed", Some("turn_bridge_explicit"), 1) } else { ("pending", None, 0) };
-        assert_eq!((state.0.as_str(), state.1.as_deref(), state.2), expected);
+        assert_eq!((state.0.as_str(), state.1.as_deref(), state.2), expected, "work API calls: {:?}", loopback.calls.lock().unwrap());
         assert_eq!(hook_count().await.unwrap().as_deref(), has_id.then_some("1"));
         assert_eq!(loopback.work_calls(Method::GET), usize::from(has_id));
+        assert!(loopback.calls.lock().unwrap().iter().filter(|(method, path, _)| *method == Method::GET && path == "/api/dispatches/native-http-work").all(|(_, _, status)| *status == StatusCode::OK));
         assert_eq!(loopback.work_calls(Method::PATCH), 0);
         fallback.assert_none();
     });

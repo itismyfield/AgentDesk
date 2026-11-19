@@ -81,6 +81,7 @@ async fn native_8148_dispatch_custody_completes_work_once_from_native_body_pg() 
         return;
     }
     use super::super::super::native_supply::native_completion::record;
+    crate::pipeline::ensure_loaded();
     let runtime = crate::config::TestRuntimeRootGuard::new();
     let live = RuntimeDatabase::after_env_lock();
     let db = TestPostgresDb::create().await;
@@ -158,8 +159,9 @@ async fn native_8148_dispatch_custody_completes_work_once_from_native_body_pg() 
     assert!(
         crate::services::discord::turn_finalizer::native_prepare::holds_row(&shared, &row).await
     );
+    let watcher_body = format!("[fixture {}] watcher fixture", &watcher_sha[..10]);
     assert_eq!(
-        watcher(&shared, &row, true, &watcher_sha).await,
+        watcher(&shared, &row, true, &watcher_body).await,
         (Some(WORK.into()), true)
     );
     assert_eq!(
@@ -171,7 +173,8 @@ async fn native_8148_dispatch_custody_completes_work_once_from_native_body_pg() 
         inflight::load_inflight_state_read_only(&ProviderKind::Claude, row.channel_id).is_some()
     );
 
-    let evidence = proof(&f, Some(&native_sha), Disposition::Executed);
+    let native_body = format!("[fixture {}] native fixture", &native_sha[..10]);
+    let evidence = proof(&f, Some(&native_body), Disposition::Executed);
     crate::services::discord::tmux::tmux_watcher::exercise_fresh_idle_with_row(
         &shared,
         &api.http,
@@ -227,11 +230,26 @@ async fn native_8148_watcher_dispatch_fallback_preserves_work_types_pg() {
     )) {
         return;
     }
-    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let live = RuntimeDatabase::after_env_lock();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     live.install(&db.database_url);
+    let row = inflight::InflightTurnState::new(
+        ProviderKind::Claude,
+        81_480_611,
+        None,
+        7,
+        81_480_612,
+        81_480_612,
+        "original".into(),
+        Some("fixture-session".into()),
+        Some("fixture-pane".into()),
+        None,
+        None,
+        0,
+    );
+    inflight::save_inflight_state(&row).unwrap();
     for (kind, id, held, completes) in [
         ("implementation", "implementation", false, true),
         ("rework", "rework", false, true),
@@ -249,8 +267,6 @@ async fn native_8148_watcher_dispatch_fallback_preserves_work_types_pg() {
         .await;
         crate::services::discord::internal_api::init(api.port, None);
         seed(&pool, id, kind).await;
-        let f = Fixture::at(runtime.path().join(id).join("frames.json"), 81480611, true);
-        let row = b2b_row(&f);
         let shared = b2b_shared(Some(pool.clone()));
         assert!(row.dispatch_id.is_none());
         assert!(crate::services::discord::adk_session::parse_dispatch_id(&row.user_text).is_none());

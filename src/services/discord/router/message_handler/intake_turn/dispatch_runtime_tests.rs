@@ -15,6 +15,10 @@ struct DispatchCase {
 async fn check_intake(case: DispatchCase, channel: ChannelId) {
     let count = Arc::new(AtomicUsize::new(0));
     let lookups = count.clone();
+    let linked_thread = case.text.starts_with("DISPATCH:");
+    let parent = ChannelId::new(channel.get() + 100);
+    let thread_path = format!("/channels/{channel}");
+    let parent_path = format!("/channels/{parent}");
     let answer: StatusAnswer = Arc::new(move |_, uri| match uri.path() {
         "/api/internal/pending-dispatch-for-thread" => {
             let nth = lookups.fetch_add(1, Ordering::SeqCst);
@@ -39,9 +43,23 @@ async fn check_intake(case: DispatchCase, channel: ChannelId) {
                 },
             )
         }
+        path if linked_thread && path.ends_with(&thread_path) => Some((
+            StatusCode::OK,
+            serde_json::json!({"id":channel.to_string(), "type":11, "name":"fixture-work",
+                "guild_id":"940487400000009", "parent_id":parent.to_string()}),
+        )),
+        path if linked_thread && path.ends_with(&parent_path) => Some((
+            StatusCode::OK,
+            serde_json::json!({"id":parent.to_string(), "type":0, "name":"fixture-parent",
+                "guild_id":"940487400000009", "position":0, "permission_overwrites":[]} ),
+        )),
         _ => None,
     });
-    let host = host_with_status(&[channel], answer).await;
+    let host = host_with_status(&[channel, parent], answer).await;
+    if case.prefix_detail_known {
+        sqlx::query("INSERT INTO task_dispatches (id,status,dispatch_type) VALUES ('dispatch-A','pending','review'), ('dispatch-B','pending','implementation')")
+            .execute(&host.pool).await.unwrap();
+    }
     let (complete, completed) = tokio::sync::oneshot::channel();
     *crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
         .lock()
