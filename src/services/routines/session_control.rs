@@ -1,5 +1,7 @@
 mod persistent_target;
 use anyhow::{Result, anyhow};
+#[cfg(test)]
+pub(crate) use persistent_target::seed_started_control_session;
 use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
 use serde_json::Value;
@@ -785,6 +787,10 @@ mod tests {
                 .await
                 .unwrap()
         } else {
+            let key = "fixture-host:queue-truth";
+            sqlx::query("INSERT INTO sessions (session_key, agent_id, provider, status) VALUES ($1,'agent-1','claude','idle')")
+                .bind(key).execute(&pool).await.unwrap();
+            seed_started_control_session(&pool, &routine, "claude", "6038771", key).await;
             controller
                 .control_persistent_session(&routine, RoutineSessionCommand::Reset, "test")
                 .await
@@ -813,11 +819,13 @@ mod tests {
         let pool = db.connect_and_migrate().await;
         sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_cdx) VALUES ('agent-1', 'verified routine reset', 'codex', $1)")
             .bind(fixture.channel.get().to_string()).execute(&pool).await.unwrap();
-        let (shared, registry, _key) = fixture.shared(&pool).await;
+        let (shared, registry, key) = fixture.shared(&pool).await;
         let queue = fixture.queue_bytes(&shared);
         let pin = fixture.pin_after_legacy_verdict();
         let controller = RoutineSessionController::new(Arc::new(pool.clone()), Some(registry));
-        let routine = routine_with_thread("persistent", Some(&fixture.channel.get().to_string()));
+        let channel = fixture.channel.get().to_string();
+        let routine = routine_with_thread("persistent", Some(&channel));
+        seed_started_control_session(&pool, &routine, "codex", &channel, &key).await;
         let actual = controller
             .control_persistent_session(&routine, RoutineSessionCommand::Reset, "verified pin race")
             .await

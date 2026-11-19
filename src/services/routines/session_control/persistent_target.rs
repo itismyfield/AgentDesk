@@ -166,3 +166,51 @@ impl RoutineSessionController {
         ))
     }
 }
+
+#[cfg(test)]
+pub(crate) async fn seed_started_control_session(
+    pool: &PgPool,
+    routine: &RoutineRecord,
+    provider: &str,
+    channel: &str,
+    session_key: &str,
+) {
+    sqlx::query("INSERT INTO routines (id, agent_id, script_ref, name, status, execution_strategy, discord_thread_id)
+        VALUES ($1,$2,$3,$4,'enabled','persistent',$5)")
+        .bind(&routine.id)
+        .bind(&routine.agent_id)
+        .bind(&routine.script_ref)
+        .bind(&routine.name)
+        .bind(&routine.discord_thread_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let store =
+        RoutineStore::new_with_timezone_and_checkpoint_limit(Arc::new(pool.clone()), "UTC", 4096);
+    let run = store.claim_run_now(&routine.id).await.unwrap().unwrap();
+    let turn = format!("fixture:{}", run.run_id);
+    let agent = routine.agent_id.as_deref().unwrap();
+    let mut result = serde_json::json!({
+        "status": "started", "turn_id": turn, "agent_id": agent,
+        "provider": provider, "channel_id": channel, "session_key": session_key,
+    });
+    assert!(
+        store
+            .mark_agent_turn_started(&run.run_id, &turn, Some(result.clone()), agent, "primary")
+            .await
+            .unwrap()
+    );
+    result["status"] = serde_json::json!("completed");
+    assert!(
+        store
+            .complete_agent_run(
+                &run.run_id,
+                Some(result),
+                None,
+                None,
+                crate::services::routines::store::NextDueAtUpdate::Preserve,
+            )
+            .await
+            .unwrap()
+    );
+}
