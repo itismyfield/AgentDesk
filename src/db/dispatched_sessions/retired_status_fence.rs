@@ -1,9 +1,8 @@
 //! A hook write may not bring a session row whose hosted execution is retired back to an active
 //! status; only a turn start under a nonce the row does not already record reopens it.
 
-/// `WHERE` predicate over the locked `sessions` row of a hook update, as one SQL literal.
-/// Binds it reads: `$2` the incoming status, `$17` the incoming turn-start nonce. Every comparison
-/// is null-safe so a row without a hosted record never evaluates to NULL and refuses the write.
+/// `WHERE` predicate over the locked hook-update row, reading `$2` (incoming status) and `$17`
+/// (turn-start nonce); null-safe, so a row without a hosted record never refuses the write.
 macro_rules! retired_revival_fence {
     () => {
         "NOT (lower($2) = 'turn_active'
