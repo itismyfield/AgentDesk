@@ -157,7 +157,6 @@ async fn key_and_bind(order: Order) {
     });
     crate::test_support::wait::await_within(sent, crate::test_support::wait::WAIT_CAP)
         .await
-        .unwrap()
         .unwrap();
     assert_eq!(rig.sends().len(), 1);
     f.transcript();
@@ -201,7 +200,6 @@ async fn key_and_bind(order: Order) {
     let result =
         crate::test_support::wait::await_within(producer, crate::test_support::wait::WAIT_CAP)
             .await
-            .unwrap()
             .unwrap();
     assert!(
         BIND_ON_READ.with(|slot| slot.take().is_none()),
