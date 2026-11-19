@@ -2517,7 +2517,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/routines/discord_log.rs`
 - `src/services/routines/store.rs`
 - `src/services/session_host/herdr_gate.rs`
-- `src/services/settings.rs`
 - `src/services/tmux_common.rs`
 - `src/services/tui_o/writer/deliver.rs`
 - `src/services/tui_prompt_dedupe/binding_events.rs`
