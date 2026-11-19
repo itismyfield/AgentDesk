@@ -197,9 +197,8 @@ pub(super) struct RetrySnapshot {
     resume_failure: bool,
     recovery_retry: bool,
     delivery_receipts: Vec<u64>,
-    /// Whether the destination was a resolved thread child when kept; after a restart such a body
-    /// reaches Legacy only once the boot places that child with a decided body. `None` is a custody
-    /// from before this was recorded, judged once from the stored row on its first resume.
+    /// Whether the destination was a resolved thread child when kept; `None` is a custody from
+    /// before this was recorded, judged once from its stored row on the first resume.
     #[serde(default)]
     thread_child: Option<bool>,
 }

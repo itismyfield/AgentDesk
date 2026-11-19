@@ -389,10 +389,8 @@ async fn a_refusal_before_the_custody_write_keeps_no_raw_custody() {
     assert_eq!(raw, 0, "no raw custody of the refused episode");
 }
 
-// A thread child kept while released with no Legacy run stays kept across a restart whose boot
-// does not place it again, hinted or not: no body, no reason. A custody written before the
-// attribution existed is judged from its row's parent hint; one whose every chunk is receipted
-// settles without a send; an old custody with no parent hint resumes as a non-child.
+// A kept unplaced child's body is not posted after a restart, old custody shape included; a fully
+// receipted custody settles with no send, and an old one with no parent hint resumes as no child.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_kept_thread_child_is_not_posted_after_a_restart_that_does_not_place_it() {
