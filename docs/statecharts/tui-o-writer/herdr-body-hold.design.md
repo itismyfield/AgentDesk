@@ -649,7 +649,7 @@ ownership. The union is the original 15 plus the following **12 additions**.
 | `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/registry.rs` | Shared manifests, coverage aliases, run and effect/attempt CAS; no TTL cleanup. |
 | `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/authority.rs` | Custodian verification, issue, guarded acquire and monotone revoke. |
 | `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/receipt.rs` | Exact proof bridge and consumption independent of current owner/run. |
-| `migrations/postgres/0195_herdr_body_debt_recovery.sql` | Shared schema, immutable key/hash constraints, unique active run and effect/attempt constraints. Renumbered from 0191 because parallel lanes took 0191-0194. |
+| `migrations/postgres/0200_herdr_body_debt_recovery.sql` | Shared schema, immutable key/hash constraints, unique active run and effect/attempt constraints. Renumbered from 0191 because parallel lanes took 0191-0194. |
 | `src/services/discord/runtime_bootstrap/o_writer_host/owner_port.rs` | Attach the validated current custodian/bot to the existing port; no new transport. |
 | `src/services/tui_o/writer/actor/fresh_resume.rs` | Invalidate old run/attachment on an actual rescope before it can be reused. |
 | `src/services/tui_o/writer/suspension.rs` | Expose a scoped live selection/stop witness at debt admission; do not weaken source policy. |
@@ -719,7 +719,7 @@ proof explicitly; no code may infer or fabricate the witness from run metadata.
 ### C2a implementation boundary
 
 C2a implements the strict original/debt artifact union in `owner_record/output.rs`
-and the shared tables in `migrations/postgres/0195_herdr_body_debt_recovery.sql`.
+and the shared tables in `migrations/postgres/0200_herdr_body_debt_recovery.sql`.
 Existing original artifact JSON, the original admission JOIN, and managed
 unstamped denial stay unchanged. The recovery branch requires the same custody
 lock plus a nonserialized, one-use live attachment. A deserialized token cannot

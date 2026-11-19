@@ -6,7 +6,7 @@
 Design on `6467b53cab3715e4cc096d2693762f3fc4f146ca` (D1a, xh CLEAN). No production code
 changes here. The landing unit is the current stack plus D1b. Revision 2 answers the design review
 (P1-1 and P2-1..P2-5); the four slices and deletion without a migration stay (the next free number,
-if one is ever needed, is 0199).
+if one is ever needed, is 0202).
 
 ## User decision being implemented
 
@@ -37,8 +37,8 @@ does not read it.
 | E8 | `src/services/discord/inflight/clear_store/herdr_row_end.rs:89-96` snapshot of the exact row | `Ok(true) \| Err(AwaitingAdoption \| AdoptionRefused)` snapshots | `Ok(true) \| Err(AwaitingAdoption)` only |
 | E9 | `src/services/discord/inflight/herdr_body_debt.rs:58-85` retained snapshot (`disposition: "retained"`) | written for E7's Awaiting and Refused rows | written for Awaiting only; a discard API removes a snapshot by episode |
 | E10 | `src/services/discord/inflight/herdr_body_debt/reconcile.rs`, `src/services/tui_o/writer/herdr_body_debt.rs:253-337` read/wake | retained snapshots are restored and woken until delivered | a snapshot whose channel is now Refused is discarded with one reason instead of woken |
-| E11 | `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/authority.rs:42-56` debt effect rows (0195); `debt_recovery.rs:208` `no_request` returns a reserved effect to `ready` but keeps its `attempt_id`, the `no_effect` attempt and the revoked grant | inserted `ready` under a debt session | a discarded episode's effect is deleted in one custody-locked transaction, in this order: check the effect is `ready` and every attempt of it is `no_effect`; clear `effects.attempt_id`; delete its `no_effect` attempts; delete its grants; delete the effect. `reserved`/`confirmed` effects and any unsettled attempt are never deleted. The 0196 reason row stays |
-| E12 | `src/services/discord/runtime_bootstrap/o_writer_host/adoption_wake.rs:23` boot debt wake | wakes retained debt channels | also settles Refused snapshots through E10, and resumes 0196 reason intents that no longer have a row (first post when no attempt exists; an intent holding an attempt keeps it and is not posted again) |
+| E11 | `src/services/cluster/intake_router_hook/owner_record/output/debt_recovery/authority.rs:42-56` debt effect rows (0200); `debt_recovery.rs:208` `no_request` returns a reserved effect to `ready` but keeps its `attempt_id`, the `no_effect` attempt and the revoked grant | inserted `ready` under a debt session | a discarded episode's effect is deleted in one custody-locked transaction, in this order: check the effect is `ready` and every attempt of it is `no_effect`; clear `effects.attempt_id`; delete its `no_effect` attempts; delete its grants; delete the effect. `reserved`/`confirmed` effects and any unsettled attempt are never deleted. The 0201 reason row stays |
+| E12 | `src/services/discord/runtime_bootstrap/o_writer_host/adoption_wake.rs:23` boot debt wake | wakes retained debt channels | also settles Refused snapshots through E10, and resumes 0201 reason intents that no longer have a row (first post when no attempt exists; an intent holding an attempt keeps it and is not posted again) |
 | E13 | `src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs:271` `preserve_or_publish` | preserves a foreign terminal snapshot for later publish | stops preserving a Refused episode, posts the reason, scrubs the stored body fields (the D2 paragraph in `herdr-body-hold.design.md`) |
 | E14 | `src/services/tui_o/channel_policy/adoption.rs:15-17` `#[cfg(test)] mod output_disposition` | fresh disposition, normalization and reason receipts compiled for tests only | installed: first fresh output normalizes, then adopts or posts one reason and discards |
 | E15 | `src/services/tui_o/writer/late_adopt/codex/normalization.rs`, `startup_dialog/normalize.rs`, `codex_tui/host_input/trust.rs`, `session_host/tmux_host.rs:66-74`, `platform/tmux.rs:641-656` | test-only (skip-pin `scripts/test_only_module_skip_pin.d/mac-mini-7651-d1a.txt`) | production; the skip-pin rows are removed by the census sync |
@@ -85,7 +85,7 @@ does not read it.
   persisted, nothing is released and the consumer retries. An uncertain reason is never a body
   delivery or input success. The reason is posted exactly once when its post is verified and at
   most once otherwise. The durable intent is resumed on its own: once the body, offset, row and
-  debt are gone, the 0196 row alone drives the post, so an intent with no attempt is posted on the
+  debt are gone, the 0201 row alone drives the post, so an intent with no attempt is posted on the
   next start (E12 sweep through E16) and one with an attempt keeps it and is not posted again.**
 
 ## E15 call site
@@ -117,13 +117,13 @@ rollout and the takeover's commit. Model: `NormProve`, `NormOneRepair`, `NormDea
 
 ## Migration
 
-- None required. `tui_output_dispositions` (0196) stores `identity` as a JSON object and `reason`
+- None required. `tui_output_dispositions` (0201) stores `identity` as a JSON object and `reason`
   as unconstrained text, so herdr row identities and an adoption-refused reason fit with a kind
   tag in the identity. Debt effects of a discarded episode are deleted, not given a new state.
-- No production database has 0195/0196 or C1 snapshots yet (the stack is unlanded), so there are
+- No production database has 0200/0201 or C1 snapshots yet (the stack is unlanded), so there are
   no existing Refused rows to clean up. If review asks for a durable `discarded` effect state
-  instead of deletion, the number assigned for this stack is 0199 (main has 0194 and 0197; this
-  branch 0195 and 0196).
+  instead of deletion, the number assigned for this stack is 0202 (main has 0194 and 0197; this
+  branch 0200 and 0201).
 
 ## State charts
 
@@ -182,7 +182,7 @@ rollout and the takeover's commit. Model: `NormProve`, `NormOneRepair`, `NormDea
   intent, after reserve before the post, and after the post before the receipt: no body is kept
   again, no second post, a restored receipt adds none, only a proven no-effect posts again. PG: an
   effect that went reserve, `no_request`, `ready` is deleted with its `no_effect` attempt and grants
-  while its 0196 reason row stays; a `reserved` effect is kept. Mutants: archive without the
+  while its 0201 reason row stays; a `reserved` effect is kept. Mutants: archive without the
   recheck, grant-first deletion (foreign-key RED), second reason, repost on uncertain, uncertain
   read as delivery, silent discard.
 - Episode key: a fresh reason intent or receipt, then the same episode restored through herdr and
@@ -212,7 +212,7 @@ Estimates of production files / net code lines, measured later with `pr_cap_prod
 
 | Slice | Content | Files | Net | Production change |
 |---|---|---|---|---|
-| D1b-1 | (c) and the reason infrastructure: E7-E12, E16, the canonical episode key (new child `channel_policy/adoption/episode_key.rs`), the reason outcome API and deletion order (new child `recovery_engine/refused_discard.rs`) | 13 | +440 | Refused herdr bodies are reasoned and discarded instead of retained; 0196 rows start being written |
+| D1b-1 | (c) and the reason infrastructure: E7-E12, E16, the canonical episode key (new child `channel_policy/adoption/episode_key.rs`), the reason outcome API and deletion order (new child `recovery_engine/refused_discard.rs`) | 13 | +440 | Refused herdr bodies are reasoned and discarded instead of retained; 0201 rows start being written |
 | D1b-2 | (b) fresh activation and consumers: E1, E4-E6, E13-E15, census sync | 13 | +340 | first fresh output normalizes; Refused bodies on watcher/recovery/foreign handoff are reasoned and discarded |
 | D1b-3 | (b) continuation: E17 from the carry patch | 3 | +310 | resumed output under the same contract |
 | D1b-4 | (a) prior evidence and the multi-source finish check: E18-E20, new child `late_adopt/codex/prior.rs` with the durable owed evidence, `finish_first` | 8 | +340 | admitted takeovers owe proven-undelivered earlier rollouts and are adopted with them |
