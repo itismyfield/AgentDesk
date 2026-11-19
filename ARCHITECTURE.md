@@ -729,7 +729,8 @@ src/
 │   │   │   ├── execution_mode_http_tests.rs
 │   │   │   ├── handlers.rs
 │   │   │   ├── helpers.rs
-│   │   │   └── responses.rs
+│   │   │   ├── responses.rs
+│   │   │   └── session_patch_tests.rs
 │   │   ├── scheduled_messages/
 │   │   │   ├── create.rs
 │   │   │   ├── delivery_render.rs
@@ -4092,6 +4093,7 @@ src/
 │   │   ├── run_diagnostics/
 │   │   │   └── formatting.rs
 │   │   ├── session_control/
+│   │   │   ├── persistent_target.rs
 │   │   │   └── provider_choice_tests.rs
 │   │   ├── store/
 │   │   │   ├── agent_start.rs
