@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -79,15 +80,31 @@ def prepare(root: Path, repo: Path, script: str) -> dict[str, str]:
 
 
 def observe(repo: Path, script: str, profile: str, *, evidence: Path | None = None,
-            target: str | None = None) -> dict:
+            target: str | None = None, legacy_checkout: bool = False) -> dict:
     with tempfile.TemporaryDirectory(prefix="adk-release-dry-") as temp:
         root = Path(temp).resolve()
         env = prepare(root, repo, script)
+        script_dir = root / "repo/scripts"
+        if legacy_checkout:
+            if script != "deploy-release.sh":
+                raise ValueError("legacy checkout fixture requires deploy-release.sh")
+            tool_dir = root / "tools/scripts"
+            shutil.copytree(script_dir, tool_dir)
+            script_dir = tool_dir
+            env["AGENTDESK_REPO_DIR"] = str(root / "repo")
+            legacy_token = root / "repo/scripts/build_token.py"
+            token = legacy_token.read_text()
+            legacy_token.write_text(token.replace(
+                "def main(argv: Sequence[str]) -> int:\n",
+                "def main(argv: Sequence[str]) -> int:\n"
+                "    if argv[1:2] == ['--witness-release-source']:\n"
+                "        raise FileNotFoundError('--witness-release-source')\n",
+            ))
         args = ["--fast"] if profile == "release-fast" else []
         if script == "build-release.sh":
             target = target or "aarch64-apple-darwin"
             args = ["--profile", profile, "--target", target]
-        result = subprocess.run(["/bin/bash", str(root / "repo/scripts" / script), *args],
+        result = subprocess.run(["/bin/bash", str(script_dir / script), *args],
                                 cwd=root / "repo", env=env, text=True,
                                 capture_output=True, timeout=30)
         log = root / "events.jsonl"

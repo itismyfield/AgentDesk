@@ -74,6 +74,18 @@ class ReleaseTokenWiringTests(unittest.TestCase):
                     self.assertTrue(all(event["checkout_sha"] is None for event in report["cargo"]
                                         if event["argv"][0] != "build"))
 
+    def test_current_deploy_tools_build_an_older_checkout(self):
+        for profile in ("release", "release-fast"):
+            with self.subTest(profile=profile):
+                report = observe(REPO, "deploy-release.sh", profile, legacy_checkout=True)
+                self.assertEqual(report["errors"], [], report)
+                build, = [event for event in report["cargo"] if event["argv"][0] == "build"]
+                self.assertTrue(build["held"] and build["in_target_checkout"], build)
+                self.assertEqual(build["checkout_sha"], "a" * 40)
+                self.assertEqual("--release" in build["argv"], profile == "release")
+                if profile == "release-fast":
+                    self.assertEqual(build["argv"][1:3], ["--profile", profile])
+
     def test_config_resolver_stub_accepts_only_its_fixture_path_and_root(self):
         with tempfile.TemporaryDirectory(prefix="release-resolver-stub-") as temp:
             root = Path(temp).resolve()

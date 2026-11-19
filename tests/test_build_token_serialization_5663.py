@@ -47,7 +47,7 @@ SUPERVISED_NAMES_UNDER_TEST = (
 )
 # Outside the wrapper by design, as build_token.py says (install.sh matches its
 # source install plus the two help texts that print the command for an operator).
-UNWIRED_BY_DESIGN = ("Makefile", "scripts/install.sh")
+UNWIRED_BY_DESIGN = ("scripts/install.sh",)
 
 _SEAL = f"""
 import functools, os, resource, signal, sys, time
@@ -389,7 +389,7 @@ class DeployPreflightTokenTests(unittest.TestCase):
             token, marker = root / "token", root / "built"
             driver = root / "driver.py"
             driver.write_text(_SEAL + """
-assert sys.argv[2] == "scripts/build_token.py"
+assert os.path.isabs(sys.argv[2]) and sys.argv[2].endswith("/build_token.py")
 assert sys.argv[3:5] == ["--witness-release-source", "--"]
 assert sys.argv[5:7] == ["bash", "-c"]
 open(sys.argv[-1] + ".waiter", "w").write(str(os.getpid()))

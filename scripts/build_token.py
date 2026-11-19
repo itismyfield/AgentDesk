@@ -5,9 +5,8 @@
 while holding it, and releases only after that direct child is reaped, so a
 second wrapper blocks while a first wrapper's build is still alive.
 
-Wiring is scoped, not universal: build-release.sh and deploy-release.sh route
-through this wrapper; `Makefile`'s signing target and install.sh's source
-install do not, and the #5663 owner test pins that list by scanning the repo.
+build-release.sh, deploy-release.sh and the Makefile release targets use this
+wrapper. install.sh's source installation remains a separate build path.
 
 Signal supervision is *derived*, not enumerated. Earlier revisions carried a
 hand-written list of terminating signals; it missed eight, then missed SIGEMT,

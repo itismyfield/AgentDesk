@@ -2773,12 +2773,12 @@ if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ "$PEER_BINARY_ACCEPTED" != 1 ]; th
     if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
         echo "▸ Building release binary..."
         # Recheck under the token: unwrapped/residual builders are still unsafe (#5818).
-        (cd "$REPO" && python3 scripts/build_token.py --witness-release-source -- bash -c \
+        (cd "$REPO" && python3 "$SCRIPT_DIR/build_token.py" --witness-release-source -- bash -c \
             '. "$1"; shift; _preflight_resource_contention || exit 1; exec "$@"' \
             bash "$SCRIPT_DIR/_defaults.sh" cargo build --release --bin agentdesk)
     else
         echo "▸ Building ${DEPLOY_BUILD_PROFILE} binary (opt-in fast deploy profile)..."
-        (cd "$REPO" && python3 scripts/build_token.py --witness-release-source -- bash -c \
+        (cd "$REPO" && python3 "$SCRIPT_DIR/build_token.py" --witness-release-source -- bash -c \
             '. "$1"; shift; _preflight_resource_contention || exit 1; exec "$@"' \
             bash "$SCRIPT_DIR/_defaults.sh" cargo build --profile "$DEPLOY_BUILD_PROFILE" --bin agentdesk)
     fi
@@ -2962,11 +2962,8 @@ fi
 # build aborts without leaving release down.
 if [ ! -x "$SOURCE_BINARY" ]; then
     echo "✗ Source binary missing or not executable: $SOURCE_BINARY"
-    if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
-        echo "  Run 'cargo build --release' or './scripts/build-release.sh' first."
-    else
-        echo "  Run 'cargo build --profile ${DEPLOY_BUILD_PROFILE} --bin agentdesk' first, or retry without --fast."
-    fi
+    printf '  Build first: (cd %q && python3 %q --witness-release-source -- cargo build --profile %q --bin agentdesk)\n' \
+        "$REPO" "$SCRIPT_DIR/build_token.py" "$DEPLOY_BUILD_PROFILE"
     exit 1
 fi
 
@@ -2985,11 +2982,9 @@ if [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" != "1" ] && [ -z "${AGENTDESK_DEPLO
         echo "✗ Binary is older than current HEAD (${HEAD_SHORT}):"
         echo "    binary mtime: ${BIN_MTIME_HUMAN}"
         echo "    HEAD commit:  ${HEAD_HUMAN}"
-        if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
-            echo "  Rebuild with 'cargo build --release' before deploying, or override with"
-        else
-            echo "  Rebuild with 'cargo build --profile ${DEPLOY_BUILD_PROFILE} --bin agentdesk' before deploying, or override with"
-        fi
+        printf '  Rebuild: (cd %q && python3 %q --witness-release-source -- cargo build --profile %q --bin agentdesk)\n' \
+            "$REPO" "$SCRIPT_DIR/build_token.py" "$DEPLOY_BUILD_PROFILE"
+        echo "  Or override with"
         echo "  AGENTDESK_DEPLOY_SKIP_FRESHNESS=1 when intentional."
         exit 1
     fi

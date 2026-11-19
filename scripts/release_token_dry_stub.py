@@ -51,7 +51,8 @@ if NAME == "cargo":
     marker = os.environ.get("ADK_BUILD_TOKEN_HOLDER", "")
     event.update(holder=marker, held=token_held(marker),
                  release="--release" in ARGS or "-r" in ARGS or profile.startswith("release"),
-                 checkout_sha=os.environ.get("ADK_RELEASE_CHECKOUT_SHA"))
+                 checkout_sha=os.environ.get("ADK_RELEASE_CHECKOUT_SHA"),
+                 in_target_checkout=Path.cwd() == ROOT / "repo")
 elif NAME == "git" and ARGS[2:8] == SOURCE_PROBE:
     event.update(source_probe=True, held=token_held(os.environ.get("ADK_BUILD_TOKEN_HOLDER", "")))
 with (ROOT / "events.jsonl").open("a") as log:
@@ -71,7 +72,7 @@ if NAME == "cargo":
 elif NAME == "python3":
     if ARGS and Path(ARGS[0]).name == "build_token.py":
         path = local(ARGS[0])
-        if path != ROOT / "repo/scripts/build_token.py":
+        if path not in (ROOT / "repo/scripts/build_token.py", ROOT / "tools/scripts/build_token.py"):
             blocked("unexpected token helper")
         os.execv(sys.executable, [sys.executable, "-I", str(path), *ARGS[1:]])
     elif ARGS and (ARGS[0] in ("-c", "-") or Path(ARGS[0]).name in (
@@ -82,7 +83,8 @@ elif NAME == "python3":
 elif NAME == "bash":
     if ARGS[:2] == ["-c", '. "$1"; shift; _preflight_resource_contention || exit 1; exec "$@"']:
         os.execv("/bin/bash", ["/bin/bash", *ARGS])
-    elif ARGS == [str(ROOT / "repo/scripts/resolve-config-path.sh"), str(ROOT / "release")]:
+    elif ARGS in ([str(ROOT / "repo/scripts/resolve-config-path.sh"), str(ROOT / "release")],
+                  [str(ROOT / "tools/scripts/resolve-config-path.sh"), str(ROOT / "release")]):
         print(ROOT / "release/config/agentdesk.yaml")
     elif ARGS and Path(ARGS[0]).name in ("verify-dashboard.sh", "check-dashboard-toolchain.sh"):
         pass

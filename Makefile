@@ -2,12 +2,14 @@ IDENTITY := Developer ID Application: Wonchang Oh (A7LJY7HNGA)
 BUNDLE_ID := com.itismyfield.agentdesk
 TARGET := target/release/agentdesk
 
-.PHONY: build clean docs-generated docs-generated-check
+.PHONY: build build-binary clean docs-generated docs-generated-check
 
-build:
-	cargo build --release
+build: build-binary
 	codesign -s "$(IDENTITY)" --options runtime --identifier "$(BUNDLE_ID)" --force "$(TARGET)"
 	@codesign -v "$(TARGET)" && echo "✓ Signed: $(TARGET)"
+
+build-binary:
+	python3 scripts/build_token.py --witness-release-source -- cargo build --release --bin agentdesk
 
 clean:
 	cargo clean
