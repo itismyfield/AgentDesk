@@ -1286,6 +1286,10 @@ tui-o-writer/CodexLateDeliveryR6PrebindFilter.cfg	CodexLateDelivery	NoAdoptionLo
 tui-o-writer/CodexLateDeliveryR6Residual.cfg	CodexLateDelivery	NoLossStrict,NoDupDelivered	-
 tui-o-writer/CodexLateDeliveryR6Rotate.cfg	CodexLateDelivery	-	-
 tui-o-writer/CodexLateDeliveryR6RowPending.cfg	CodexLateDelivery	-	-
+tui-o-writer/CustodyChildResumeBefore.cfg	CustodyChildResume	NoHeldLegacyPost	SentSettles
+tui-o-writer/CustodyChildResumeDesign.cfg	CustodyChildResume	-	-
+tui-o-writer/CustodyChildResumeGuardFirstMut.cfg	CustodyChildResume	-	SentSettles
+tui-o-writer/CustodyChildResumeOldAsFalseMut.cfg	CustodyChildResume	NoHeldLegacyPost	-
 tui-o-writer/NoticeEvidenceAfterDirect.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceAfterOwned.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceAfterPolicy.cfg	NoticeEvidence	-	-
