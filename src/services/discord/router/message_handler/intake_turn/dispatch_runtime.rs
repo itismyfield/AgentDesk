@@ -1,7 +1,7 @@
 use super::*;
+use crate::services::discord::{adk_session, prompt_builder::CurrentTaskContext};
 
 type DispatchInfo = super::super::super::thread_binding::DispatchInfo;
-use super::super::super::prompt_builder::CurrentTaskContext;
 
 pub(super) struct DispatchRuntime {
     pub(super) final_thread_parent: Option<(ChannelId, Option<String>)>,
@@ -51,11 +51,8 @@ pub(super) async fn prepare_post_redirect_dispatch_runtime(
             }
         }
     }
-    let first = crate::services::discord::adk_session::lookup_pending_dispatch_for_thread(
-        shared.api_port,
-        channel_id.get(),
-    )
-    .await;
+    let first =
+        adk_session::lookup_pending_dispatch_for_thread(shared.api_port, channel_id.get()).await;
     let first_hit = first.is_some();
     let looked_up = first.or_else(|| dispatch_id_for_thread.cloned());
     let active_dispatch_id_for_prompt = unheld_dispatch(shared, channel_id, looked_up).await;
@@ -90,12 +87,10 @@ pub(super) async fn row_dispatch(
     if let Some(dispatch) = pinned {
         return dispatch;
     }
-    let looked_up = super::super::super::adk_session::lookup_pending_dispatch_for_thread(
-        shared.api_port,
-        channel_id.get(),
-    )
-    .await
-    .or_else(|| super::super::super::adk_session::parse_dispatch_id(user_text));
+    let looked_up =
+        adk_session::lookup_pending_dispatch_for_thread(shared.api_port, channel_id.get())
+            .await
+            .or_else(|| adk_session::parse_dispatch_id(user_text));
     unheld_dispatch(shared, channel_id, looked_up).await
 }
 
@@ -131,7 +126,7 @@ pub(super) fn prompt_task<'a>(
 /// A held dispatch stays with its protected request, so a fresh input never inherits it. A dormant
 /// build reads nothing; a failed read keeps the dispatch as before.
 pub(super) async fn unheld_dispatch(
-    shared: &Arc<SharedData>,
+    shared: &SharedData,
     channel_id: ChannelId,
     dispatch_id: Option<String>,
 ) -> Option<String> {

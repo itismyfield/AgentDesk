@@ -9,6 +9,7 @@ use crate::services::scheduled_messages::turn_completion::{
 use crate::services::tui_input::human_frame::history::v2::Source;
 use crate::services::tui_input::human_frame::history::v2::native::Disposition;
 use crate::services::tui_o::writer::input_facts::native::Evidence;
+use poise::serenity_prelude::MessageId;
 use std::io::{Read, Seek, SeekFrom};
 
 /// Records an executed primary's completion once its result is durable and before its row CAS.
@@ -176,7 +177,7 @@ async fn write(
                     )),
                     turn_started_at_millis:
                         crate::db::session_transcripts::discord_message_started_at_millis(Some(
-                            serenity::MessageId::new(row.user_msg_id),
+                            MessageId::new(row.user_msg_id),
                         )),
                 },
                 None,
