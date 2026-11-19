@@ -426,6 +426,9 @@ pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, Led
                     .get(&input)
                     .ok_or("native registration missing")?;
                 if keyed {
+                    #[cfg(test)]
+                    super::terminal_handler::native_supply::source_binding::bind_before_key_witness()
+                        .await;
                     return prepared.any_key(&history);
                 }
                 prepared.remove_control(&history, &shared).await?;

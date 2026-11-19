@@ -85,6 +85,22 @@ CI checker가 **35/35 cfg의 예상 broken-rule 집합과 일치**, unexpected 0
 - 원시 로그 root: `/home/adk/adk/lane-runs/i8148/logs/termdelta-1/`. CI 전체 출력 `model-check.log`, 결과/시간/coverage `model-check.json`, direct TLC 로그·반례 `tlc/`, SHA/개별 rc/state 수 `tlc-results.json`.
 - `statechart` wrapper는 WSL에 없어 실행하지 않았다. 이 chart는 수동 계약 그림이며 TLC로 생성한 상태 그래프로 표시하지 않는다. 모델 검증은 Java/TLC 1.7.4와 저장소의 CI checker로 수행했다.
 
+## Source 결합과 AnyKey
+
+`AnyKeyBindRace`는 물리 키를 보낸 뒤 history ACK를 받는 구간을 모델링한다. 이전 모델에서
+`ReadAnyKeyTicket`은 PreSource를 캡처하고, `BindAnyKeySource`가 current source를 바꾸면
+`RecordSentKey`의 비교가 실패한다. 단일 history 트랜잭션은 현재 등록을 검증하고, 캡처된
+source가 비어 있으면 같은 ticket의 source 보강을 받아들여 AnyKey를 기록한다. 두 행동의
+순서 모두를 허용한다.
+
+| cfg | 판정 | 관측한 규칙 위반 |
+|---|---|---|
+| `NativeTerminalBeforeAtomicAnyKey.cfg` | RED | SentKeyEventuallyDurable |
+| `NativeTerminalFixedAnyKeyBind.cfg` | GREEN | 없음 |
+
+재실행 결과는 기존 설정 35개와 새 설정 2개를 합쳐 37/37 일치(21 GREEN, 16 expected RED)다.
+이 시나리오는 쓰기 가능성의 공정성을 전제로 하며 영구 I/O 장애는 이 모델의 범위 밖이다.
+
 ## 반례를 코드에 대응시킨 결과
 
 1. BeforeInterrupt: own membership 준비 → strict interrupt row → Prompt barrier가 먼저 true → native close 결과/cleanup 불가. 실제 PG ledger의 membership 640..1001/interrupt 1001..1207 및 native.rs:452,563,635와 일치한다.

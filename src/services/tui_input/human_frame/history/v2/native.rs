@@ -115,6 +115,16 @@ impl Outcome {
 }
 
 impl Settlement {
+    #[cfg(unix)]
+    pub(super) fn matches_key_witness(&self, captured: &Ticket) -> bool {
+        let current = &self.ticket;
+        current.key == captured.key
+            && current.channel_id == captured.channel_id
+            && current.owning_episode == captured.owning_episode
+            && current.extra == captured.extra
+            && (captured.source.is_none() || current.source == captured.source)
+    }
+
     pub(super) fn validate(&self, registration: &Registration) -> Result<(), String> {
         let ticket = &self.ticket;
         if ticket.key != registration.key
@@ -717,12 +727,21 @@ impl Registry {
         self.native_transaction(namespace, &ticket.key, |registration| {
             let current = registration
                 .native_settlement
-                .as_mut()
+                .as_ref()
                 .ok_or("native ticket missing")?;
-            if current.ticket != *ticket || current.outcome.is_some() {
+            current.validate(registration)?;
+            if !current.matches_key_witness(ticket) || current.outcome.is_some() {
                 return Err("native key receipt ticket mismatch".into());
             }
-            current.extra.insert("any_key".into(), Value::Bool(true));
+            if current.extra.get("not_sent") == Some(&Value::Bool(true)) {
+                return Err("native key follows confirmed NotSent".into());
+            }
+            registration
+                .native_settlement
+                .as_mut()
+                .ok_or("native ticket missing")?
+                .extra
+                .insert("any_key".into(), Value::Bool(true));
             Ok(())
         })
     }

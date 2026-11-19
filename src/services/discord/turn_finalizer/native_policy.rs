@@ -108,14 +108,7 @@ impl NativePrepared {
         history: &Registry,
         shared: &Arc<SharedData>,
     ) -> Result<(), String> {
-        let ticket = self.bound_ticket(history)?;
-        let settlement = history.native_settlement(&self.namespace, &ticket)?;
-        if settlement.extra.get("any_key") == Some(&serde_json::Value::Bool(true))
-            || settlement.outcome.is_some()
-        {
-            return Err("native no-key witness superseded".into());
-        }
-        history.try_native_not_sent(&self.namespace, &ticket)?;
+        history.try_native_not_sent(&self.namespace, &self.ticket)?;
         if self.actor.is_some() {
             let input = serde_json::to_string(&(&self.namespace, &self.ticket.key))
                 .map_err(|e| e.to_string())?;

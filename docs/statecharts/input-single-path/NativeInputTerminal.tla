@@ -4,6 +4,8 @@ CONSTANTS Scenario, ControlKind
 VARIABLE terminal
 TerminalVars == <<vars, terminal>>
 StableBase == <<phase, role, pin, prepared, anyKey, original, source, restored, admitted, review>>
+StableDuringKeyBind == <<phase, role, pin, prepared, original, restored, admitted, review, result>>
+KeyBindRace == Scenario = "AnyKeyBindRace"
 Stored == Scenario \in {"StoredInterrupt", "StoredBarrierMismatch", "StoredStampRace", "StoredBarrierRace"}
 Interrupt == Scenario = "Interrupt" \/ Stored
 StampRaced == Scenario \in {"StampRace", "StoredStampRace"}
@@ -23,8 +25,9 @@ BoundaryPolicy == Scenario = "StoredBarrierMismatch"
 EffectiveBarrier == terminal.barrier /\ ~OverridePermitted
 NativeMode == terminal.proofKind \in {"Interrupt", "Raw"}
 TerminalInit == /\ phase = "Unknown" /\ role = "Primary" /\ pin = "Primary"
-                /\ prepared = TRUE /\ anyKey = TRUE /\ original = TRUE
-                /\ result = "None" /\ source = "Bound" /\ restored = TRUE
+                /\ prepared = TRUE /\ anyKey = ~KeyBindRace /\ original = TRUE
+                /\ result = "None" /\ source = IF KeyBindRace THEN "PreSource" ELSE "Bound"
+                /\ restored = TRUE
                 /\ admitted = FALSE /\ review = [terminalRefinement |-> TRUE]
                 /\ terminal = [
                      scope |-> IF Scenario \in {"ForeignNonce", "ForeignSource", "ForeignKey"} THEN Scenario ELSE "Exact",
@@ -42,7 +45,25 @@ TerminalInit == /\ phase = "Unknown" /\ role = "Primary" /\ pin = "Primary"
                      row |-> TRUE, deleted |-> FALSE, deleteAuthority |-> FALSE,
                      deleteDurable |-> FALSE, crashed |-> FALSE, booted |-> TRUE,
                      changed |-> FALSE,
-                     readable |-> Scenario \notin {"RetryIO", "PermanentUnread"}]
+                     readable |-> Scenario \notin {"RetryIO", "PermanentUnread"},
+                     keyStage |-> IF KeyBindRace THEN "Sent" ELSE "Inactive",
+                     keyReadSource |-> "None"]
+
+ReadAnyKeyTicket == /\ KeyBindRace /\ Mode = "BeforeAtomicAnyKey"
+                    /\ terminal.keyStage = "Sent"
+                    /\ terminal' = [terminal EXCEPT !.keyStage = "Read", !.keyReadSource = source]
+                    /\ UNCHANGED <<anyKey, source, StableDuringKeyBind>>
+BindAnyKeySource == /\ KeyBindRace /\ source = "PreSource"
+                    /\ (Mode # "BeforeAtomicAnyKey" \/ terminal.keyStage = "Read")
+                    /\ source' = "Bound"
+                    /\ UNCHANGED <<terminal, anyKey, StableDuringKeyBind>>
+RecordSentKey == /\ KeyBindRace
+                 /\ IF Mode = "BeforeAtomicAnyKey"
+                       THEN terminal.keyStage = "Read" /\ source = "Bound"
+                       ELSE terminal.keyStage = "Sent"
+                 /\ anyKey' = (Mode # "BeforeAtomicAnyKey" \/ terminal.keyReadSource = source)
+                 /\ terminal' = [terminal EXCEPT !.keyStage = "Finished"]
+                 /\ UNCHANGED <<source, StableDuringKeyBind>>
 
 \* A strict interrupt closes its run and is never a Prompt/receipt candidate.
 InterruptTerminalRow == /\ Interrupt /\ terminal.booted /\ ~terminal.classified
@@ -144,24 +165,31 @@ RepairRead == /\ Scenario \in {"RetryIO", "SavedMissing"} /\ ~terminal.readable
               /\ terminal' = [terminal EXCEPT !.readable = TRUE]
               /\ UNCHANGED result
 
-TerminalNext == /\ (InterruptTerminalRow \/ RawEOFCloser \/ MetadataRace \/ BarrierRace \/ Reobserve
+TerminalWork == /\ ~KeyBindRace
+                /\ (InterruptTerminalRow \/ RawEOFCloser \/ MetadataRace \/ BarrierRace \/ Reobserve
                    \/ NativeTerminalCommit \/ ExistingControl \/ ExistingEndNotice
                    \/ FlushTerminalResult \/ CleanupTerminalRow \/ CrashAtBoundary \/ BootRetry \/ RepairRead)
                 /\ UNCHANGED StableBase
+TerminalNext == TerminalWork \/ ReadAnyKeyTicket \/ BindAnyKeySource \/ RecordSentKey
 TerminalSpec == TerminalInit /\ [][TerminalNext]_TerminalVars
-                /\ WF_TerminalVars(InterruptTerminalRow /\ UNCHANGED StableBase)
-                /\ WF_TerminalVars(RawEOFCloser /\ UNCHANGED StableBase)
-                /\ WF_TerminalVars(MetadataRace /\ UNCHANGED StableBase)
-                /\ WF_TerminalVars(BarrierRace /\ UNCHANGED StableBase)
-                /\ WF_TerminalVars(Reobserve /\ UNCHANGED StableBase)
-                /\ WF_TerminalVars(NativeTerminalCommit /\ UNCHANGED StableBase)
-                /\ WF_TerminalVars(ExistingControl /\ UNCHANGED StableBase)
-                /\ WF_TerminalVars(ExistingEndNotice /\ UNCHANGED StableBase)
-                /\ WF_TerminalVars(FlushTerminalResult /\ UNCHANGED StableBase)
-                /\ WF_TerminalVars(CleanupTerminalRow /\ UNCHANGED StableBase)
-                /\ WF_TerminalVars(CrashAtBoundary /\ UNCHANGED StableBase)
-                /\ WF_TerminalVars(BootRetry /\ UNCHANGED StableBase)
-                /\ WF_TerminalVars(RepairRead /\ UNCHANGED StableBase)
+                /\ IF KeyBindRace
+                      THEN /\ WF_TerminalVars(ReadAnyKeyTicket)
+                           /\ WF_TerminalVars(BindAnyKeySource)
+                           /\ WF_TerminalVars(RecordSentKey)
+                      ELSE
+                           /\ WF_TerminalVars(InterruptTerminalRow /\ UNCHANGED StableBase)
+                           /\ WF_TerminalVars(RawEOFCloser /\ UNCHANGED StableBase)
+                           /\ WF_TerminalVars(MetadataRace /\ UNCHANGED StableBase)
+                           /\ WF_TerminalVars(BarrierRace /\ UNCHANGED StableBase)
+                           /\ WF_TerminalVars(Reobserve /\ UNCHANGED StableBase)
+                           /\ WF_TerminalVars(NativeTerminalCommit /\ UNCHANGED StableBase)
+                           /\ WF_TerminalVars(ExistingControl /\ UNCHANGED StableBase)
+                           /\ WF_TerminalVars(ExistingEndNotice /\ UNCHANGED StableBase)
+                           /\ WF_TerminalVars(FlushTerminalResult /\ UNCHANGED StableBase)
+                           /\ WF_TerminalVars(CleanupTerminalRow /\ UNCHANGED StableBase)
+                           /\ WF_TerminalVars(CrashAtBoundary /\ UNCHANGED StableBase)
+                           /\ WF_TerminalVars(BootRetry /\ UNCHANGED StableBase)
+                           /\ WF_TerminalVars(RepairRead /\ UNCHANGED StableBase)
 
 NoTerminalEvidenceFreeDelete == terminal.deleted => terminal.deleteAuthority
 NoPartialTerminalRead == (terminal.proofReady /\ NativeMode) => terminal.whole /\ terminal.strict
@@ -175,6 +203,7 @@ NoStaleTerminalCommit == terminal.committedKind \in {"Interrupt", "Raw"}
 NoCaptureGuardWidening == terminal.captureCursor = 1
 NoCleanupBeforeDurable == terminal.deleted => terminal.deleteDurable
 AtMostOneTerminalResult == terminal.commits <= 1
+SentKeyEventuallyDurable == KeyBindRace => <>anyKey
 ClosedExecutionEventuallySettles == (terminal.ended /\ ScopeOK)
                                    ~> ~terminal.row
 =============================================================================

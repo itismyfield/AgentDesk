@@ -415,3 +415,5 @@ fn bound_source(
 mod tests;
 #[cfg(test)]
 pub(in crate::services::discord) use tests::BindingRoot;
+#[cfg(test)]
+pub(in crate::services::discord::turn_finalizer) use tests::key_witness::bind_before_key_witness;

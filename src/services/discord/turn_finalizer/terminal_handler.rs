@@ -474,16 +474,7 @@ impl NativePrepared {
         &self,
         history: &crate::services::tui_input::human_frame::history::v2::Registry,
     ) -> Result<(), String> {
-        let ticket = self.bound_ticket(history)?;
-        if history
-            .native_settlement(&self.namespace, &ticket)?
-            .extra
-            .get("not_sent")
-            == Some(&serde_json::Value::Bool(true))
-        {
-            return Err("native key follows confirmed NotSent".into());
-        }
-        history.note_native_any_key(&self.namespace, &ticket)?;
+        history.note_native_any_key(&self.namespace, &self.ticket)?;
         tracing::debug!(
             channel_id = self.key.channel_id.get(),
             elapsed_ms = self.started_before.elapsed().as_millis(),

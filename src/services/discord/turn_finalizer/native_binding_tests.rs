@@ -33,8 +33,15 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
-        let bindings = BindingRoot::enter(Some(root.path()));
         let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        Self::with_runtime(root, shared).await
+    }
+
+    async fn with_runtime(
+        root: crate::config::TestRuntimeRootGuard,
+        shared: Arc<SharedData>,
+    ) -> Self {
+        let bindings = BindingRoot::enter(Some(root.path()));
         let channel = 81489971;
         let logical = format!("cold-source-{}", uuid::Uuid::new_v4().simple());
         let nonce = uuid::Uuid::new_v4().simple().to_string();
@@ -149,6 +156,10 @@ impl Fixture {
         self.history
             .note_native_any_key(&self.namespace, &self.ticket)
             .unwrap();
+        self.project_submitted().await;
+    }
+
+    async fn project_submitted(&self) {
         let ticket = self.ticket.clone();
         let snapshot = self
             .shared
@@ -777,16 +788,6 @@ async fn native_8148_coldsource_cap_preserves_debt_and_reclaims_only_after_ack()
 async fn actual_o_recovery(boot: bool) {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::services::discord::{inflight, turn_finalizer as finalizer};
-    use crate::services::tui_o::{
-        ownership::OwnershipGate,
-        store::{Initialized, OStore, StoreConfig},
-        writer::{
-            deliver::ChannelWriter,
-            host::test_io::{Alarms, AnyLease, Posts},
-            pieces::UnitDeriver,
-            rotation::Sources,
-        },
-    };
     let f = Fixture::new().await;
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
@@ -897,6 +898,24 @@ async fn actual_o_recovery(boot: bool) {
             .await
             .unwrap()
     );
+    finish_with_o(&f, &shared).await;
+    pool.close().await;
+    db.drop().await;
+}
+
+async fn finish_with_o(f: &Fixture, shared: &Arc<SharedData>) {
+    use crate::services::discord::inflight;
+    use crate::services::tui_o::{
+        ownership::OwnershipGate,
+        store::{Initialized, OStore, StoreConfig},
+        writer::{
+            deliver::ChannelWriter,
+            host::test_io::{Alarms, AnyLease, Posts},
+            pieces::UnitDeriver,
+            rotation::Sources,
+        },
+    };
+    let channel = ChannelId::new(f.ticket.channel_id);
     let root = f._root.path().join("cold-source-test-store");
     std::fs::create_dir_all(&root).unwrap();
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &root)
@@ -956,6 +975,10 @@ async fn actual_o_recovery(boot: bool) {
         Some(&Disposition::Executed)
     );
     assert!(saved.cleanup_complete);
+    assert_eq!(
+        saved.outcome.as_ref().unwrap().extra["native_proof"]["membership_row"],
+        "cold-user"
+    );
     assert!(
         inflight::load_inflight_state_read_only(&ProviderKind::Claude, f.ticket.channel_id)
             .is_none()
@@ -975,8 +998,6 @@ async fn actual_o_recovery(boot: bool) {
             .await
             .unwrap()
     );
-    pool.close().await;
-    db.drop().await;
 }
 
 #[tokio::test]
@@ -988,3 +1009,6 @@ async fn native_8148_coldsource_actual_o_producerless_live_receipt_cleans_row_pg
 async fn native_8148_coldsource_actual_o_empty_owner_boot_receipt_cleans_row_pg() {
     actual_o_recovery(true).await;
 }
+
+#[path = "native_key_tests.rs"]
+pub(super) mod key_witness;

@@ -155,7 +155,7 @@ impl Registry {
                 .ok_or("native no-key ticket missing")?
                 .validate(registration)?;
             let native = settlement_mut(state, namespace, &ticket.key)?;
-            if native.ticket != *ticket
+            if !native.matches_key_witness(ticket)
                 || native.outcome.is_some()
                 || native.extra.get("any_key") == Some(&Value::Bool(true))
             {

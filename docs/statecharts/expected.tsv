@@ -1030,8 +1030,10 @@ input-single-path/NativeSupplyWithdrawFixed.cfg	NativeInputPreparation	-	-
 input-single-path/NativeTerminalAdvanceCapture.cfg	NativeInputTerminal	NoCaptureGuardWidening	-
 input-single-path/NativeTerminalAllowPartial.cfg	NativeInputTerminal	NoPartialTerminalRead,NoTerminalEvidenceFreeDelete	-
 input-single-path/NativeTerminalBareStoredOverride.cfg	NativeInputTerminal	NoForeignBarrierBypass,NoTerminalEvidenceFreeDelete	-
+input-single-path/NativeTerminalBeforeAtomicAnyKey.cfg	NativeInputTerminal	-	SentKeyEventuallyDurable
 input-single-path/NativeTerminalBeforeInterrupt.cfg	NativeInputTerminal	NoForeignTerminalBarrier	ClosedExecutionEventuallySettles
 input-single-path/NativeTerminalBeforeRaw.cfg	NativeInputTerminal	-	ClosedExecutionEventuallySettles
+input-single-path/NativeTerminalFixedAnyKeyBind.cfg	NativeInputTerminal	-	-
 input-single-path/NativeTerminalFixedBootAfter.cfg	NativeInputTerminal	-	-
 input-single-path/NativeTerminalFixedBootBefore.cfg	NativeInputTerminal	-	-
 input-single-path/NativeTerminalFixedCancel.cfg	NativeInputTerminal	-	-
