@@ -129,7 +129,8 @@ class Usage(Fixture):
             self.log.write_text("")
             lines(self.log, *codex_turn("old", "T0", [{**call, "input_tokens": 900}]))
             mark = usage.mark(self.log)
-            lines(self.log, *codex_turn("t1", "T1", calls, **options))
+            # A later turn already started when the settle reads must not count toward this one.
+            lines(self.log, *codex_turn("t1", "T1", calls, **options), *codex_turn("t2", "T2", [call]))
             return usage.turn("codex", [mark], "T1")
 
         self.assertEqual(measured([call, call]), {"input_tokens": 120, "output_tokens": 10, "cache_read_tokens": 80, "cache_write_tokens": 0})
