@@ -7,14 +7,11 @@ import {
   MACHINE_CLOCK_INTERVAL_MS, MACHINE_SNAPSHOT_MAX_AGE_MS,
   machineOnline, machineRole,
 } from "./SettingsMachineModel";
-import type { SettingsPanelContext } from "./SettingsPanelTypes";
-import { SettingsRowSection } from "./SettingsRowSection";
+import type { SettingsTr } from "./SettingsPanelTypes";
 import { SettingsAction, SettingsNotice, SettingsSectionHead } from "./SettingsPrimitives";
 
-const MACHINE_KEYWORDS = "머신 장치 hub runner cpu 메모리 디스크 gpu 네트워크 machine device memory disk network";
-
-export function SettingsMachinePanel({ ctx }: { ctx: SettingsPanelContext }) {
-  const { tr } = ctx;
+/** Hub and Runner machines with their resources; shown under the catalog's system category. */
+export function SettingsMachinePanel({ tr }: { tr: SettingsTr }) {
   const nodes = useMachineNodes();
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
@@ -29,9 +26,7 @@ export function SettingsMachinePanel({ ctx }: { ctx: SettingsPanelContext }) {
   }) : [];
   const online = machines.filter(node => machineOnline(node, now, cluster?.lease_ttl_secs)).length;
 
-  return <div className="min-w-0 space-y-9">
-    <SettingsRowSection ctx={ctx} panel="machine" section="server" />
-    {ctx.matches(MACHINE_KEYWORDS) ? <section className="min-w-0 space-y-3" data-testid="settings-machine-panel" aria-label={tr("Hub·Runner 머신", "Hub and Runner machines")}>
+  return <section className="min-w-0 space-y-3" data-testid="settings-machine-panel" aria-label={tr("Hub·Runner 머신", "Hub and Runner machines")}>
     <SettingsSectionHead
       title={tr("Hub·Runner 머신", "Hub and Runner machines")}
       description={<>
@@ -75,6 +70,5 @@ export function SettingsMachinePanel({ ctx }: { ctx: SettingsPanelContext }) {
           sessionCountsUnavailable={Boolean(nodes.data?.session_owner_error)} />)}
       </div>
     </>}
-  </section> : null}
-  </div>;
+  </section>;
 }

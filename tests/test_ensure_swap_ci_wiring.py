@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import re
 import shlex
@@ -16,6 +17,7 @@ import unittest
 from pathlib import Path
 
 import yaml
+from tests.test_fast_check_ci_wiring import eval_expression, eval_step_if
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +25,7 @@ ENSURE_SWAP = REPO_ROOT / ".github/actions/ensure-swap/ensure-swap.sh"
 MEM_MEASURE = REPO_ROOT / "scripts/ci/mem-measure.sh"
 SAMPLER_KILL_GRACE_SECONDS = 5
 SWAP_ACTION = "./.github/actions/ensure-swap"
+DUAL_RUNNER_WORKFLOWS = (".github/workflows/ci-main.yml", ".github/workflows/ci-pr.yml")
 
 # Ubuntu jobs that link the lib test binary or run workspace clippy, per workflow.
 EXPECTED_SWAP_JOBS = {
@@ -115,6 +118,61 @@ def write_tool(directory: Path, name: str, body: str) -> None:
 
 
 class SwapStepWiring(unittest.TestCase):
+    def test_rust_build_routes_only_trusted_events_to_wsl(self):
+        wsl = ["self-hosted", "linux", "x64", "adk-wsl-rust"]
+        hosted = ["ubuntu-latest"]
+        repo = "owner/project"
+        cases = (
+            ("push", "refs/heads/main", None, wsl),
+            ("push", "refs/heads/topic", None, hosted),
+            ("workflow_dispatch", "refs/heads/main", None, wsl),
+            ("pull_request", "refs/pull/1/merge", repo, wsl),
+            ("pull_request", "refs/pull/2/merge", "fork/project", hosted),
+            ("pull_request", "refs/pull/3/merge", None, hosted),
+            ("pull_request_target", "refs/heads/main", repo, hosted),
+            ("workflow_run", "refs/heads/main", repo, hosted),
+        )
+        for workflow in DUAL_RUNNER_WORKFLOWS:
+            document = yaml.safe_load((REPO_ROOT / workflow).read_text("utf-8"))
+            jobs = document["jobs"]
+            self.assertEqual(jobs["rust_tests"]["runs-on"], "ubuntu-latest")
+            expected_events = (
+                {"push": {"branches": ["main"]}, "workflow_dispatch": None}
+                if workflow.endswith("ci-main.yml")
+                else {"pull_request": {"types": ["opened", "synchronize", "reopened", "ready_for_review"]}}
+            )
+            self.assertEqual(document[True], expected_events, workflow)
+            runs_on = jobs["rust_build"]["runs-on"]
+            expression = re.fullmatch(r"\$\{\{ fromJSON\((.+)\) \}\}", str(runs_on))
+            self.assertIsNotNone(expression, workflow)
+            for event, ref, head_repo, expected in cases:
+                with self.subTest(workflow=workflow, event=event, ref=ref, head_repo=head_repo):
+                    selected = eval_expression(expression[1], {
+                        "github.event_name": event,
+                        "github.ref": ref,
+                        "github.event.pull_request.head.repo.full_name": head_repo,
+                        "github.repository": repo,
+                    })
+                    self.assertEqual(json.loads(selected), expected)
+
+    def test_rust_build_uses_only_the_caches_and_swap_for_its_runner(self):
+        actions = {SWAP_ACTION, "Swatinem/rust-cache@v2", "./.github/actions/sccache-or-nothing"}
+        for workflow in DUAL_RUNNER_WORKFLOWS:
+            job = yaml.safe_load((REPO_ROOT / workflow).read_text("utf-8"))["jobs"]["rust_build"]
+            hosted_steps = [step for step in job["steps"] if step.get("uses") in actions]
+            self.assertEqual({step["uses"] for step in hosted_steps}, actions)
+            self.assertEqual(len(hosted_steps), len(actions))
+            uncached, = [step for step in job["steps"] if step.get("name") == "Disable remote compiler cache"]
+            for environment, hosted in (("github-hosted", True), ("self-hosted", False)):
+                with self.subTest(workflow=workflow, environment=environment):
+                    context = {"runner.environment": environment}
+                    for step in hosted_steps:
+                        self.assertEqual(eval_step_if(step.get("if"), context), hosted, step["name"])
+                    self.assertEqual(eval_step_if(uncached.get("if"), context), not hosted)
+            self.assertLess(job["steps"].index(uncached),
+                            next(i for i, step in enumerate(job["steps"]) if needs_swap(step, job)))
+            self.assertIn("RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\n", uncached["run"])
+
     def test_every_ubuntu_lib_build_job_adds_swap_before_its_first_cargo_step(self) -> None:
         for relative, expected in EXPECTED_SWAP_JOBS.items():
             jobs = yaml.safe_load((REPO_ROOT / relative).read_text("utf-8"))["jobs"]
@@ -141,7 +199,12 @@ class SwapStepWiring(unittest.TestCase):
                     self.assertLess(checkout, swap, "local action needs the checkout")
                     self.assertLess(swap, first_cargo, "swap must exist before the build")
                     first_build = next(s for s in steps if needs_swap(s, jobs[job_id]))
-                    self.assertIn(steps[swap].get("if"), (None, first_build.get("if")))
+                    expected_gate = (
+                        ("runner.environment == 'github-hosted'",)
+                        if relative in DUAL_RUNNER_WORKFLOWS and job_id == "rust_build"
+                        else (None, first_build.get("if"))
+                    )
+                    self.assertIn(steps[swap].get("if"), expected_gate)
 
     def observer_inputs(self) -> tuple[dict, str]:
         jobs = yaml.safe_load(

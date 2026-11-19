@@ -7,7 +7,7 @@ import { getCampaigns, setCampaignAutoQueue, updateCampaignNode, type Campaign }
 import { createServerCampaign, editServerCampaignDefinition, sendServerCampaignCommand } from "../../api/serverCampaigns";
 import { campaignRawEdges, type RawEdgeKey } from "./campaignGraphRouting";
 import { campaignViewKey } from "./campaignViewStorage";
-import CampaignExplorer from "./CampaignExplorer";
+import CampaignRelations from "./CampaignRelations";
 import CampaignsPanel from "./CampaignsPanel";
 import { installMemoryStorage, makeCampaignNode } from "./campaignTestFixtures";
 
@@ -71,10 +71,10 @@ afterEach(async () => {
   vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.clearAllMocks();
 });
 
-const render = (shown: Campaign) => act(async () => root.render(<CampaignExplorer campaign={shown} live={{}} tr={(_, en) => en} onSaved={vi.fn()} drafts={{}} onDraftChange={vi.fn()} />));
+const relations = (shown: Campaign) => <CampaignRelations campaign={shown} selectedId={null} onOpen={vi.fn()} tr={(_: string, en: string) => en} />;
+const render = (shown: Campaign) => act(async () => root.render(relations(shown)));
 async function openGraph(shown = campaign) {
   await render(shown);
-  await click(button("Connections"));
 }
 const button = (name: string, scope: ParentNode = container) => [...scope.querySelectorAll("button")].find((element) => element.textContent?.trim() === name || element.getAttribute("aria-label") === name)!;
 const checkbox = (label: string, scope: ParentNode = container) => [...scope.querySelectorAll("label")].find((element) => element.textContent?.startsWith(label))!.querySelector("input")!;
@@ -138,7 +138,7 @@ it("keeps the drag preview and status refreshes out of undo, so undo returns the
   expect(ties()).toEqual([{ x: start.x + 100, y: start.y + 100 }]);
   // A status refresh delivers new node objects; neither the layout nor its undo history resets.
   const refreshed = { ...campaign, nodes: campaign.nodes.map((node) => ({ ...node, status: "running" as const })) };
-  await act(async () => root.render(<CampaignExplorer campaign={refreshed} live={{}} tr={(_, en) => en} onSaved={vi.fn()} drafts={{}} onDraftChange={vi.fn()} />));
+  await act(async () => root.render(relations(refreshed)));
   expect(ties()).toEqual([{ x: start.x + 100, y: start.y + 100 }]);
   await click(button("Undo"));
   expect(ties()).toEqual([start]);
@@ -415,7 +415,7 @@ it("forgets ties of dependencies deleted while the graph is closed or every task
   await act(async () => root.render(<CampaignsPanel language="en" />));
   await click(button("Connections"));
   await tieBoth();
-  await click(button("Grouped list"));
+  await click(button("Overview"));
   load({ ...campaign, nodes: campaign.nodes.map((node) => node.id === "D" ? { ...node, dependencies: [] } : node) });
   await click(button("Refresh"));
   expect(localStorage.getItem(key)).not.toContain('"D"');
@@ -436,8 +436,7 @@ it("leaves another tab's tie on a dependency this tab does not know yet, in stor
   document.body.appendChild(otherTab);
   const otherRoot = createRoot(otherTab);
   onTestFinished(async () => { await act(async () => otherRoot.unmount()); otherTab.remove(); });
-  await act(async () => otherRoot.render(<CampaignExplorer campaign={older} live={{}} tr={(_, en) => en} onSaved={vi.fn()} drafts={{}} onDraftChange={vi.fn()} />));
-  await act(async () => [...otherTab.querySelectorAll("button")].find((element) => element.textContent === "Connections")!.click());
+  await act(async () => otherRoot.render(relations(older)));
   await openGraph();
   await click(button("Tie lines"));
   await click(checkbox("B → D"));
@@ -501,9 +500,9 @@ it("keeps saved ties until the campaign list loads, then clears those of a campa
   expect(JSON.parse(localStorage.getItem(key)!).ties).toEqual([]);
   load(campaign, { ...campaign, id: "other-campaign" });
   await click(button("Refresh"));
-  const selector = container.querySelector<HTMLSelectElement>('select[aria-label="Select campaign"]')!;
-  await act(async () => { selector.value = campaign.id; selector.dispatchEvent(new Event("change", { bubbles: true })); });
-  expect(selector.value).toBe(campaign.id);
+  const card = container.querySelector<HTMLButtonElement>(`[data-campaign-key="legacy:${campaign.id}"]`)!;
+  await click(card);
+  expect(card.getAttribute("aria-current")).toBe("true");
   await click(button("Connections"));
   expect(ties()).toEqual([]);
   expect(pathOf("A->C")).toEqual(["campaign-group:G1", "campaign-group:G2"]);
@@ -520,7 +519,6 @@ function otherTab() {
   onTestFinished(async () => { await act(async () => tabRoot.unmount()); tab.remove(); });
   return { tab, show: (node: ReactNode) => act(async () => tabRoot.render(node)) };
 }
-const explorer = (shown: Campaign) => <CampaignExplorer campaign={shown} live={{}} tr={(_, en) => en} onSaved={vi.fn()} drafts={{}} onDraftChange={vi.fn()} />;
 const deliver = () => act(async () => { window.dispatchEvent(new StorageEvent("storage", { key, storageArea: localStorage })); });
 const stored = () => JSON.parse(localStorage.getItem(key)!) as { revision?: number; ties: { strandOrder: RawEdgeKey[] }[] };
 const members = () => stored().ties.map((tie) => tie.strandOrder);
@@ -528,12 +526,11 @@ const members = () => stored().ties.map((tie) => tie.strandOrder);
 it("keeps the newest tab's tie when an older tab, after receiving it, moves to another definition that still lacks it", async () => {
   // The older tab follows revisions 5 and 6, neither with B→D; this tab has revision 7 and ties B→D.
   const older = otherTab();
-  await older.show(explorer(define(5, { D: ["A"] })));
-  await click(button("Connections", older.tab));
+  await older.show(relations(define(5, { D: ["A"] })));
   await openGraph();
   await click(button("Tie lines")); await click(checkbox("B → D")); await click(button("Tie 1 lines"));
   await deliver();
-  await older.show(explorer(define(6, { C: ["A"] })));
+  await older.show(relations(define(6, { C: ["A"] })));
   await deliver();
   expect(members()).toEqual([[["B", "D"]]]);
   expect(stored().revision).toBe(7);
@@ -574,8 +571,7 @@ it("lets a campaign poll answered before another tab's newer tie keep that tie, 
 
 it("keeps the newest tab's tie through an older tab's own tie and its undo", async () => {
   const older = otherTab();
-  await older.show(explorer(define(6, { C: ["A"] })));
-  await click(button("Connections", older.tab));
+  await older.show(relations(define(6, { C: ["A"] })));
   await openGraph();
   await click(button("Tie lines")); await click(checkbox("B → D")); await click(button("Tie 1 lines"));
   await deliver();

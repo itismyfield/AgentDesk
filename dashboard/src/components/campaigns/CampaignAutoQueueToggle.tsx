@@ -27,27 +27,39 @@ export function handoffSummary(handoff: CampaignHandoff, tr: Tr): string {
   return waiting ? `${queued} ${tr("못 넘긴 작업", "Held back")}: ${waiting}` : queued;
 }
 
-export default function CampaignAutoQueueToggle({ campaign, tr, onSaved, checkedRead = null }: {
+// unknownSince is set when a save's outcome could not be read; a newer revision or a read started later settles it.
+export type AutoQueueRequest = { busy: boolean; message: string | null; unknownSince: { read: number; revision: number } | null };
+type HeldRequest = [AutoQueueRequest, (change: Partial<AutoQueueRequest>) => void];
+const IDLE: AutoQueueRequest = { busy: false, message: null, unknownSince: null };
+
+/** Requests by campaign id; the page holds them so a view switch that unmounts the toggle keeps an unconfirmed save. */
+export function useAutoQueueRequests(): (id: string) => HeldRequest {
+  const [requests, setRequests] = useState<Record<string, AutoQueueRequest>>({});
+  return (id) => [requests[id] ?? IDLE, (change) => setRequests((current) => ({ ...current, [id]: { ...(current[id] ?? IDLE), ...change } }))];
+}
+
+export default function CampaignAutoQueueToggle({ campaign, tr, onSaved, checkedRead = null, held }: {
   campaign: Campaign; tr: Tr; onSaved: (updated: Campaign) => void;
   /** Number of the newest campaign read applied to `campaign` (see campaignReadMark). */
   checkedRead?: number | null;
+  /** The page's request state for this campaign; without it the toggle keeps its own. */
+  held?: HeldRequest;
 }) {
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  // Set when a save's outcome could not be read; a newer revision or a read started later settles it.
-  const [unknownSince, setUnknownSince] = useState<{ read: number; revision: number } | null>(null);
+  const own = useAutoQueueRequests()(campaign.id);
+  const [{ busy, message, unknownSince }, patch] = held ?? own;
   const unknown = unknownSince !== null && unknownSince.revision === campaign.revision && !(checkedRead !== null && checkedRead > unknownSince.read);
   const stateNow = (value: Campaign) =>
     value.auto_queue ? tr("지금 서버에는 자동 진행이 켜져 있습니다.", "The server has auto-run on now.") : tr("지금 서버에는 자동 진행이 꺼져 있습니다.", "The server has auto-run off now.");
   const readBack = async () => {
     const latest = await getCampaign(campaign.id);
     onSaved(latest);
-    setUnknownSince(null);
+    patch({ unknownSince: null });
     return latest;
   };
   const toggle = async () => {
     const enabled = !campaign.auto_queue;
-    setBusy(true); setMessage(null); setUnknownSince(null);
+    patch({ busy: true, message: null, unknownSince: null });
+    const setMessage = (text: string) => patch({ message: text });
     try {
       const result = await setCampaignAutoQueue(campaign, enabled);
       onSaved(result.campaign);
@@ -65,18 +77,18 @@ export default function CampaignAutoQueueToggle({ campaign, tr, onSaved, checked
           ? `${tr(`응답을 받지 못했습니다 (${reason}).`, `No response (${reason}).`)} ${stateNow(latest)} ${tr("넘긴 작업은 노드 상태에서 확인하세요.", "Check the nodes for what was sent.")}`
           : `${tr(`응답을 받지 못했습니다 (${reason}).`, `No response (${reason}).`)} ${stateNow(latest)} ${tr("보낸 요청이 나중에 반영될 수 있습니다.", "The request may still apply later.")}`);
       } catch {
-        setUnknownSince({ read: campaignReadMark(), revision: campaign.revision });
+        patch({ unknownSince: { read: campaignReadMark(), revision: campaign.revision } });
         setMessage(tr(`저장 결과를 확인하지 못했습니다 (${reason}). 자동 진행 상태 확인을 눌러 다시 읽으세요.`, `Could not confirm the save (${reason}). Press Check auto-run to read it again.`));
       }
-    } finally { setBusy(false); }
+    } finally { patch({ busy: false }); }
   };
   const recheck = async () => {
-    setBusy(true); setMessage(null);
+    patch({ busy: true, message: null });
     try {
-      setMessage(stateNow(await readBack()));
+      patch({ message: stateNow(await readBack()) });
     } catch (cause) {
-      setMessage(tr("상태를 읽지 못했습니다: ", "Could not read the state: ") + (cause instanceof Error ? cause.message : String(cause)));
-    } finally { setBusy(false); }
+      patch({ message: tr("상태를 읽지 못했습니다: ", "Could not read the state: ") + (cause instanceof Error ? cause.message : String(cause)) });
+    } finally { patch({ busy: false }); }
   };
   const label = tr("자동 진행", "Auto-run");
   return <>

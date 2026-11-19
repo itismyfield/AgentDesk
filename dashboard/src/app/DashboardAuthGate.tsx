@@ -47,5 +47,5 @@ export function DashboardLogout() {
   const auth = useSyncExternalStore(subscribeAuth, getAuthSnapshot);
   if (!auth.authEnabled) return null;
   return <button type="button" onClick={() => requireAuthentication("로그아웃했습니다.")}
-    className="rounded border border-gray-600 px-2 py-1 text-xs" title="현재 탭의 토큰과 데이터를 지웁니다">로그아웃</button>;
+    className="min-h-11 rounded-[var(--r-sm)] border border-th-border px-3 text-xs text-th-text-secondary sm:min-h-9 pointer-coarse:min-h-11" title="현재 탭의 토큰과 데이터를 지웁니다">로그아웃</button>;
 }

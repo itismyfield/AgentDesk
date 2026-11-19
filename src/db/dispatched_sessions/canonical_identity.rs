@@ -70,6 +70,12 @@ pub(crate) struct SessionIdentityConflict {
     message: String,
 }
 
+impl SessionIdentityConflict {
+    pub(crate) fn into_message(self) -> String {
+        self.message
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum HookSessionUpsertError {
     Conflict(SessionIdentityConflict),
@@ -740,19 +746,6 @@ fn resolve_evidence(
         target = Some(evidence);
     }
     Ok(target)
-}
-
-pub(crate) fn hook_session_upsert_error_to_app_error(
-    error: HookSessionUpsertError,
-) -> crate::error::AppError {
-    match error {
-        HookSessionUpsertError::Conflict(conflict) => {
-            crate::error::AppError::conflict(conflict.message)
-        }
-        HookSessionUpsertError::Database(error) => {
-            crate::error::AppError::internal(error).with_code(crate::error::ErrorCode::Database)
-        }
-    }
 }
 
 fn validate_target_identity(

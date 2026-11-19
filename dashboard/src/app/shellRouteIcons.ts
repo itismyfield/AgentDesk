@@ -3,9 +3,9 @@ import {
   CalendarClock,
   GitBranch,
   Home,
-  Settings,
+  ScanText,
+  SlidersHorizontal,
   Users,
-  Wrench,
 } from "lucide-react";
 
 import type { AppRouteId } from "./routes";
@@ -18,13 +18,13 @@ export function iconForRoute(routeId: AppRouteId) {
       return GitBranch;
     case "routines":
       return CalendarClock;
-    case "ops":
-      return Wrench;
     case "stats":
       return BarChart3;
     case "agents":
       return Users;
+    case "audit":
+      return ScanText;
     case "settings":
-      return Settings;
+      return SlidersHorizontal;
   }
 }

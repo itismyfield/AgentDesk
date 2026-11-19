@@ -55,7 +55,7 @@ export function HomeAttention({ stats, isKo }: { stats: DashboardStats | null; i
       action={
         <Link
           to={QUEUE_PATH}
-          className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded-md px-2 text-xs font-medium text-th-text-secondary hover:bg-surface-subtle"
+          className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded-md px-2 text-xs font-medium text-th-text-secondary hover:bg-surface-subtle pointer-coarse:min-h-11"
         >
           {tr("대기열", "Queue")}
           <ArrowUpRight size={13} aria-hidden />
@@ -76,7 +76,7 @@ export function HomeAttention({ stats, isKo }: { stats: DashboardStats | null; i
               <Link
                 key={row.key}
                 to={QUEUE_PATH}
-                className="inline-flex min-h-9 items-center gap-2 rounded-md border border-th-border-subtle px-3 text-sm hover:bg-surface-subtle"
+                className="inline-flex min-h-9 items-center gap-2 rounded-md border border-th-border-subtle px-3 text-sm hover:bg-surface-subtle pointer-coarse:min-h-11"
               >
                 <span
                   className="h-2 w-2 rounded-full"

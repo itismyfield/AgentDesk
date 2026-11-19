@@ -1,6 +1,6 @@
 use super::*;
-use crate::engine::loader::ScopedBridgeDeadline;
 use crate::services::platform::tmux::liveness_tests::{output, probe};
+use crate::utils::bridge_deadline::ScopedBridgeDeadline;
 use std::cell::Cell;
 use std::time::Instant;
 

@@ -2,6 +2,17 @@
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
+static POLICY_CHANNEL: std::sync::OnceLock<fn(u64) -> u64> = std::sync::OnceLock::new();
+
+/// Installs the boot policy's read of a verified child's parent.
+pub(crate) fn install_policy_channel(read: fn(u64) -> u64) {
+    let _ = POLICY_CHANNEL.set(read);
+}
+
+pub(crate) fn policy_channel(channel: u64) -> u64 {
+    POLICY_CHANNEL.get().map_or(channel, |read| read(channel))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct VerifiedSurface {
     destination: u64,
@@ -33,6 +44,14 @@ impl VerifiedSurface {
         channel: &poise::serenity_prelude::GuildChannel,
         kind: RuntimeHandoffKind,
     ) -> Option<Self> {
+        Self::checked_parent(channel).map(|parent| Self {
+            destination: channel.id.get(),
+            parent,
+            kind,
+        })
+    }
+
+    pub(crate) fn checked_parent(channel: &poise::serenity_prelude::GuildChannel) -> Option<u64> {
         use poise::serenity_prelude::ChannelType;
         if !matches!(
             channel.kind,
@@ -41,11 +60,7 @@ impl VerifiedSurface {
             return None;
         }
         let (destination, parent) = (channel.id.get(), channel.parent_id?.get());
-        (destination != 0 && parent != 0 && destination != parent).then_some(Self {
-            destination,
-            parent,
-            kind,
-        })
+        (destination != 0 && parent != 0 && destination != parent).then_some(parent)
     }
 }
 

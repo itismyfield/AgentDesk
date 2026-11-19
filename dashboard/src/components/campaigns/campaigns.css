@@ -24,7 +24,7 @@
 .campaign-next { padding: 12px; border-radius: 8px; background: color-mix(in srgb, var(--th-accent-info) 8%, var(--th-card-bg)); }
 .campaign-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .campaign-actions a { font-size: 12px; color: var(--th-badge-sky-text); }
-.campaign-node-detail ul { padding-left: 16px; list-style: disc; font-size: 11px; }
+.campaign-node-detail :is(ul, ol) { padding-left: 16px; list-style: disc; font-size: 11px; }
 .campaign-node-detail code { overflow-wrap: anywhere; }
 .campaign-node-detail form { display: grid; gap: 12px; }
 .campaign-neighborhood { display: grid; gap: 10px; font-size: 11px; }
@@ -40,9 +40,6 @@
 .campaign-connections button { display: flex; align-items: center; gap: 8px; text-align: left; }
 .campaign-connections button strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .campaign-connections button :is(span, small) { flex-shrink: 0; font-size: 10px; color: var(--th-text-muted); }
-.campaigns-panel .campaign-server-list button { display: grid; gap: 4px; width: 100%; text-align: left; background: var(--th-card-bg); }
-.campaigns-panel .campaign-server-list button[aria-pressed="true"] { border-color: var(--th-badge-sky-text); box-shadow: inset 3px 0 var(--th-accent-info); }
-.campaign-server-list small { color: var(--th-text-muted); font-size: 11px; overflow-wrap: anywhere; }
 .campaign-server-detail, .campaign-server-controls, .campaign-server-check, .campaign-server-form, .campaign-server-task { display: grid; gap: 10px; min-width: 0; }
 .campaign-server-title { min-width: 0; margin-right: auto; }
 .campaign-server-reasons, .campaign-server-check ul, .campaign-inspector ul, .campaign-connections ol { padding-left: 16px; list-style: disc; font-size: 11px; overflow-wrap: anywhere; }
@@ -82,7 +79,7 @@
   .campaigns-panel { gap: 10px; }
   .campaigns-panel .campaign-inspector-header button { min-height: 44px; }
   .campaign-server-ac { grid-template-columns: minmax(0, 1fr); }
-  .campaigns-panel :is(.campaign-server-detail, .campaign-server-form, .campaign-server-list) button { min-height: 44px; }
+  .campaigns-panel :is(.campaign-server-detail, .campaign-server-form) button { min-height: 44px; }
   .campaigns-panel :is(.campaign-server-form, .campaign-server-feedback) :is(input, select, textarea) { font-size: 16px; min-height: 44px; }
 }
 }
