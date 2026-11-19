@@ -73,7 +73,9 @@ fn server_view_serialization_has_explicit_versions_modes_nulls_and_public_comman
                 "stage": "requirements", "disposition": "pending", "series": 1,
                 "quality_failures": 0, "repair_cycles": 0, "review_rounds": 0,
                 "current_attempt": null, "main_integrated": false, "acceptance_complete": false,
-                "evidence_current": false, "wait_reason": null
+                "evidence_current": false, "wait_reason": null,
+                "pending_gate": null, "wait_started_at": null, "evidence_url": null,
+                "reminder_interval_seconds": null, "human_status": null
             }, "direct_successors": ["b"], "ready_after_main": ["b"]
         })
     );
@@ -133,8 +135,8 @@ fn main_integration_does_not_imply_final_acceptance_or_campaign_success() {
     node.disposition = NodeDisposition::Verifying;
     let projected = view(&state, now());
     let a = projected.nodes.iter().find(|n| n.id == "a").unwrap();
-    assert!(a.runtime.main_integrated);
-    assert!(!a.runtime.acceptance_complete);
+    assert!(a.runtime.state.main_integrated);
+    assert!(!a.runtime.state.acceptance_complete);
     assert_eq!(projected.display, DisplayState::Running);
     state.control = CampaignControl::Succeeded;
     assert_eq!(view(&state, now()).display, DisplayState::NeedsInspection);
@@ -282,4 +284,42 @@ fn event_growth_keeps_definition_and_stop_availability_stable() {
     )
     .unwrap();
     assert_eq!(result.state.control, CampaignControl::Stopping);
+}
+
+#[test]
+fn dashboard_v3_awaiting_deploy_uses_only_current_unstarted_deploy_actions() {
+    let mut state = with_action(ActionState::Planned, true);
+    let runtime = |state: &CampaignState| {
+        serde_json::to_value(view(state, now())).unwrap()["nodes"][0]["runtime"].clone()
+    };
+    assert_eq!(runtime(&state)["human_status"], json!(null));
+    for (phase, status) in [
+        (ActionState::Planned, json!("awaiting_deploy")),
+        (ActionState::Claimed, json!("awaiting_deploy")),
+        (ActionState::StartPending, json!(null)),
+        (ActionState::Started, json!(null)),
+    ] {
+        let action = state
+            .run
+            .as_mut()
+            .unwrap()
+            .actions
+            .get_mut("action")
+            .unwrap();
+        action.kind = ActionKind::Deploy;
+        action.state = phase;
+        assert_eq!(runtime(&state)["human_status"], status, "{phase:?}");
+    }
+    let action = state
+        .run
+        .as_mut()
+        .unwrap()
+        .actions
+        .get_mut("action")
+        .unwrap();
+    action.state = ActionState::Planned;
+    action.binding.control_version -= 1;
+    assert_eq!(runtime(&state)["human_status"], json!(null));
+    state.control = CampaignControl::Stopped;
+    assert_eq!(runtime(&state)["human_status"], json!(null));
 }

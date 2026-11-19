@@ -736,6 +736,7 @@ src/
 │   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs
 │   │   ├── server_campaigns/
+│   │   │   ├── dashboard_wait_tests.rs
 │   │   │   ├── decision_tests.rs
 │   │   │   ├── dto.rs
 │   │   │   ├── http_tests.rs
@@ -974,6 +975,8 @@ src/
 │   │   │   └── ci_tests.rs
 │   │   ├── commands/
 │   │   │   └── transaction_tests.rs
+│   │   ├── view/
+│   │   │   └── dashboard_wait.rs
 │   │   ├── adk_adapter.rs
 │   │   ├── adk_observe.rs
 │   │   ├── adk_observe_tests.rs

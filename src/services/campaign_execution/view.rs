@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{control, model::*};
 
+mod dashboard_wait;
+use dashboard_wait::NodeRuntimeView;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayState {
@@ -40,7 +43,7 @@ pub struct Reason {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct NodeView<'a> {
     pub id: &'a str,
-    pub runtime: &'a NodeRuntime,
+    pub runtime: NodeRuntimeView<'a>,
     pub direct_successors: Vec<&'a str>,
     pub ready_after_main: Vec<&'a str>,
 }
@@ -245,7 +248,7 @@ pub fn view(state: &CampaignState, as_of: DateTime<Utc>) -> ServerCampaignView<'
         .filter_map(|(d, direct_successors, ready_after_main)| {
             state.nodes.get(&d.id).map(|runtime| NodeView {
                 id: &d.id,
-                runtime,
+                runtime: NodeRuntimeView::new(state, &d.id, runtime),
                 direct_successors,
                 ready_after_main,
             })

@@ -118,6 +118,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dashboard_v3_campaign_wait_and_approval_examples() {
+        let (status, body) =
+            request_docs_json(&docs_router(), "/api/docs/automation/campaigns").await;
+        assert_eq!(status, StatusCode::OK);
+        let endpoints = body["endpoints"].as_array().unwrap();
+        let endpoint = |path| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint["path"] == path)
+                .unwrap()
+        };
+        let detail = endpoint("/api/server-campaigns/{id}");
+        let runtime = &detail["example"]["response"]["campaign"]["view"]["nodes"][0]["runtime"];
+        assert_eq!(runtime["human_status"], "awaiting_approval");
+        assert!(runtime["pending_gate"]["binding"]["target"].is_object());
+        assert!(runtime["wait_started_at"].is_string());
+        assert_eq!(runtime.get("evidence_url"), Some(&Value::Null));
+        assert_eq!(runtime.get("reminder_interval_seconds"), Some(&Value::Null));
+
+        let approval = endpoint("/api/server-campaigns/{id}/commands");
+        let request = &approval["example"]["request"]["command"];
+        assert_eq!(request["command"], "approve");
+        for key in ["decision_ref", "response_ref", "response_at"] {
+            assert!(request["evidence"][key].is_string(), "{key}");
+        }
+    }
+
+    #[tokio::test]
     async fn kanban_category_docs_include_single_card_get() {
         let (status, body) = request_docs_json(&docs_router(), "/api/docs/kanban/kanban").await;
         assert_eq!(status, StatusCode::OK);
