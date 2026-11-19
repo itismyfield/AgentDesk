@@ -427,10 +427,15 @@ src/
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
 │   │   ├── execution_pin.rs
+│   │   ├── landing.rs
+│   │   ├── landing_tests.rs
 │   │   ├── lifecycle.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
+│   │   ├── pipeline.rs
+│   │   ├── pipeline_fields.rs
 │   │   ├── pipeline_rules.rs
+│   │   ├── pipeline_tests.rs
 │   │   ├── profile.rs
 │   │   ├── review_gate.rs
 │   │   ├── verification_run.rs
@@ -739,6 +744,7 @@ src/
 │   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs
 │   │   ├── server_campaigns/
+│   │   │   ├── dashboard_wait_tests.rs
 │   │   │   ├── decision_tests.rs
 │   │   │   ├── dto.rs
 │   │   │   ├── http_tests.rs
@@ -977,6 +983,10 @@ src/
 │   │   │   └── ci_tests.rs
 │   │   ├── commands/
 │   │   │   └── transaction_tests.rs
+│   │   ├── host_gate/
+│   │   │   └── authority.rs
+│   │   ├── view/
+│   │   │   └── dashboard_wait.rs
 │   │   ├── adk_adapter.rs
 │   │   ├── adk_observe.rs
 │   │   ├── adk_observe_tests.rs
@@ -988,6 +998,8 @@ src/
 │   │   ├── adk_workspace_tests.rs
 │   │   ├── candidate_seal.rs
 │   │   ├── candidate_seal_tests.rs
+│   │   ├── ci_exception.rs
+│   │   ├── ci_exception_tests.rs
 │   │   ├── commands.rs
 │   │   ├── control.rs
 │   │   ├── control_tests.rs
@@ -995,6 +1007,8 @@ src/
 │   │   ├── decision_commands_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
+│   │   ├── deploy_observe.rs
+│   │   ├── deploy_observe_tests.rs
 │   │   ├── effect_envelope.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
@@ -1010,6 +1024,12 @@ src/
 │   │   ├── host_journal.rs
 │   │   ├── host_worker.rs
 │   │   ├── host_worker_tests.rs
+│   │   ├── landing_effects.rs
+│   │   ├── landing_effects_tests.rs
+│   │   ├── landing_merge.rs
+│   │   ├── landing_merge_tests.rs
+│   │   ├── landing_prepare.rs
+│   │   ├── landing_prepare_tests.rs
 │   │   ├── lifecycle.rs
 │   │   ├── lifecycle_tests.rs
 │   │   ├── main_integration.rs
@@ -1138,6 +1158,7 @@ src/
 │   │   │   ├── ordered_queue.rs
 │   │   │   ├── queue_retention.rs
 │   │   │   ├── reaping_tests.rs
+│   │   │   ├── recovery_pace.rs
 │   │   │   ├── response_window.rs
 │   │   │   ├── too_early.rs
 │   │   │   └── transport_retry.rs
@@ -2168,6 +2189,8 @@ src/
 │   │   │   │   │   ├── herdr_fixture_tests.rs
 │   │   │   │   │   ├── herdr_safety_tests.rs
 │   │   │   │   │   └── herdr_tests.rs
+│   │   │   │   ├── held_watch/
+│   │   │   │   │   └── readiness.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── claude_handoff.rs
@@ -2602,6 +2625,7 @@ src/
 │   │   │   │   ├── provider_dispatch_idle_stash_tests.rs
 │   │   │   │   ├── provider_dispatch_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_restart_reply_tests.rs
+│   │   │   │   ├── provider_dispatch_restart_unrestorable_tests.rs
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
@@ -4094,6 +4118,8 @@ src/
 │   │   ├── script_refs.rs
 │   │   ├── session_control.rs
 │   │   └── store.rs
+│   ├── running_binary/
+│   │   └── windows_image.rs
 │   ├── scheduled_messages/
 │   │   ├── context_snapshot.rs
 │   │   ├── evidence.rs
@@ -4251,6 +4277,8 @@ src/
 │   ├── settings/
 │   │   ├── resolve/
 │   │   │   └── tests.rs
+│   │   ├── catalog.rs
+│   │   ├── catalog_tests.rs
 │   │   ├── resolve.rs
 │   │   ├── runtime_config_put.rs
 │   │   ├── startup.rs
@@ -4786,6 +4814,8 @@ src/
 │   │   │   │   ├── absent_open.rs
 │   │   │   │   ├── absent_open_tests.rs
 │   │   │   │   ├── clear_relaunch.rs
+│   │   │   │   ├── disposition_cache.rs
+│   │   │   │   ├── disposition_cache_tests.rs
 │   │   │   │   ├── fresh_admission.rs
 │   │   │   │   ├── herdr_bootstrap.rs
 │   │   │   │   ├── hold_detail.rs
@@ -4902,6 +4932,8 @@ src/
 │   │   │   │   ├── owner_tests.rs
 │   │   │   │   ├── projection.rs
 │   │   │   │   ├── projection_tests.rs
+│   │   │   │   ├── readiness_hold.rs
+│   │   │   │   ├── readiness_hold_tests.rs
 │   │   │   │   ├── refused.rs
 │   │   │   │   ├── requeue_tests.rs
 │   │   │   │   ├── retained.rs
@@ -5056,6 +5088,7 @@ src/
 │   ├── resident_loops.rs
 │   ├── retrospectives.rs
 │   ├── review_decision.rs
+│   ├── running_binary.rs
 │   ├── scheduled_messages.rs
 │   ├── scheduling.rs
 │   ├── service_error.rs

@@ -258,6 +258,7 @@ pub(crate) async fn run(
     pg_pool: Option<PgPool>,
 ) -> Result<()> {
     crate::config::validate_config(&config)?;
+    crate::services::running_binary::initialize();
     let modules = config.cluster.runtime_profile.modules();
     crate::services::dispatches::wait_queue::set_runtime_cluster_config(config.cluster.clone());
     let pg_pool = match pg_pool {

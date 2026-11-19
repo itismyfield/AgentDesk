@@ -42,6 +42,14 @@ pub(crate) fn verify_current_image(checker: &FileToken) -> Result<(), Unverified
     checker.fast_unchanged()
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn verify_current_release_image(checker: &FileToken) -> Result<(), Unverified> {
+    if !loaded_image::for_current_release()?.matches(checker) {
+        return Err(Unverified::Identity);
+    }
+    checker.fast_unchanged()
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PeerEnvironment {
     pub home: Vec<String>,

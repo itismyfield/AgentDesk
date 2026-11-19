@@ -1,0 +1,2 @@
+key: campaign-landing
+| `campaign-execution` PR preparation (#7438 M6) | M5 `733331d2db` | A push crosses an active or unknown CI window, a PR points at an unchecked head, a retry opens a second PR, or a preparation never settles | The fixed worker verifies the pinned checkout, checks observed CI before publication, records one exact PR and replays its receipt after restart. The deadline settles outstanding preparation. [Model](campaign-execution/CampaignLanding.tla). |

@@ -8,6 +8,9 @@ use std::time::Duration;
 use super::drive::{Drive, wake};
 use crate::services::claude_tui::busy_inject::Screen;
 
+#[path = "held_watch/readiness.rs"]
+pub(crate) mod readiness;
+
 /// One read of the refusing pane or of the cause that refused it.
 pub(crate) type ScreenProbe = Box<dyn FnMut() -> Screen + Send>;
 

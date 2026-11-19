@@ -74,8 +74,8 @@
         {
           "scenario": "E-51",
           "provider": "codex",
-          "host": "tmux",
-          "cell": "codex-tui",
+          "host": "herdr",
+          "cell": "codex-herdr",
           "surface": "channel",
           "origin": "announce_bot",
           "state": "sequential"

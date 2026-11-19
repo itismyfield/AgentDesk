@@ -33,7 +33,7 @@ The helper writes `config/agentdesk.yaml`, prompt stubs, workspace directories, 
 
 Windows and Linux run natively today, but they use the manual/runtime-first path instead of the macOS `curl | bash` bootstrap.
 
-1. Download the matching release artifact (`agentdesk-linux-<arch>.tar.gz` or `agentdesk-windows-<arch>.zip`) or build from source with `cargo build --release`.
+1. Download the matching release artifact (`agentdesk-linux-<arch>.tar.gz` or `agentdesk-windows-<arch>.zip`) or follow **Build from Source** below.
 2. Run `agentdesk init` (`agentdesk.exe init` on Windows) to create the runtime under `~/.adk/release` or `%USERPROFILE%\.adk\release`.
 3. Start `agentdesk dcserver` directly, or register the generated service path with `systemd --user` on Linux or `nssm` / `sc.exe` on Windows.
 4. Verify the host runtime with `agentdesk doctor`. Mutating repairs require explicit flags such as `agentdesk doctor --fix --allow-restart` or `agentdesk doctor --fix --repair-sqlite-cache`.
@@ -45,7 +45,7 @@ When tmux is unavailable, provider turns automatically fall back to `ProcessBack
 ```bash
 git clone https://github.com/itismyfield/AgentDesk.git
 cd AgentDesk
-cargo build --release
+cargo build --release --bin agentdesk
 
 # Verify the dashboard with the same command CI uses (Node >=22)
 ./scripts/verify-dashboard.sh

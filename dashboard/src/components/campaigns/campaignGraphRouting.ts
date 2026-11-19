@@ -14,8 +14,9 @@ export type EdgeRoute = {
   via: string[];
 };
 
-/** Which drawing a view belongs to: tie positions only mean something inside that drawing. */
-export type ViewScope = { mode: "legacy" | "server"; campaignId: string; projection: "groups"; taskScope: string };
+/** Which drawing a view belongs to: tie positions only mean something inside that drawing. "tasks" is the relations
+ * editor, whose task scope is the editing scope key. */
+export type ViewScope = { mode: "legacy" | "server"; campaignId: string; projection: "groups" | "tasks"; taskScope: string };
 
 export type CampaignGraphView = {
   schemaVersion: 1;

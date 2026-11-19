@@ -21,6 +21,7 @@ import tomllib
 import zipfile
 
 from install_runtime_assets import runtime_assets
+from release_source import sidecar, verified
 
 TARGETS = {
     "aarch64-apple-darwin": ("darwin", "aarch64"),
@@ -105,7 +106,8 @@ def census_bundle(root: Path, staging: Path, head: str, dirty: bool, binary: Pat
         return {"available":False}
 
 
-def package(root: Path, binary: Path, target: str, output: Path, dashboard: bool = True, profile: str = "release") -> Path:
+def package(root: Path, binary: Path, target: str, output: Path, dashboard: bool = True,
+            profile: str = "release", *, source_record: Path | None = None) -> Path:
     if profile not in {"release", "release-fast"}:
         raise ValueError("unsupported build profile")
     system, arch = TARGETS[target]
@@ -126,8 +128,13 @@ def package(root: Path, binary: Path, target: str, output: Path, dashboard: bool
         staging = scratch / name
         staging.mkdir()
         binary_name = "agentdesk.exe" if system == "windows" else "agentdesk"
-        copy_file(binary, staging / binary_name, binary.parent)
-        (staging / binary_name).chmod(0o755)
+        staged_binary = staging / binary_name
+        copy_file(binary, staged_binary, binary.parent)
+        staged_binary.chmod(0o755)
+        if source_record is not None and not dirty:
+            witness = verified(source_record, staged_binary)
+            if witness is not None and (witness["source_sha"], witness["target"]) == (head, target):
+                write_json(sidecar(staged_binary), witness)
         assets = git(root, "ls-files", "-z", "--", *runtime_assets(root)).split("\0")
         for relative in filter(None, assets):
             copy_file(root / relative, staging / relative, root)
@@ -177,12 +184,14 @@ def main() -> None:
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--target", required=True, choices=TARGETS)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--source-record", type=Path)
     parser.add_argument("--without-dashboard", action="store_true")
     parser.add_argument("--profile", choices=["release", "release-fast"], default="release")
     args = parser.parse_args()
     try:
         artifact = package(args.root.resolve(), args.binary.resolve(), args.target,
-                           (args.output or args.root / "dist").resolve(), not args.without_dashboard, args.profile)
+                           (args.output or args.root / "dist").resolve(), not args.without_dashboard, args.profile,
+                           source_record=args.source_record)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Release packaging failed: {error}\n")
     print(f"Artifact: {artifact}\nSHA-256: {sha256(artifact)}")

@@ -213,6 +213,7 @@ impl Owner {
         next.items.truncate(kept);
         next.head_injection = head;
         next.retained_inputs.clear();
+        next.prune_readiness_holds();
         next.unfinished_handoff = None;
         effort_continue::close_dropped(&mut next, effort_continue::Dropped::All);
         next.admission_binds.retain(|bind| match &bind.at {

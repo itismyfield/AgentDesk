@@ -47,7 +47,7 @@ SUPERVISED_NAMES_UNDER_TEST = (
 )
 # Outside the wrapper by design, as build_token.py says (install.sh matches its
 # source install plus the two help texts that print the command for an operator).
-UNWIRED_BY_DESIGN = ("Makefile", "scripts/install.sh")
+UNWIRED_BY_DESIGN = ("scripts/install.sh",)
 
 _SEAL = f"""
 import functools, os, resource, signal, sys, time
@@ -389,15 +389,15 @@ class DeployPreflightTokenTests(unittest.TestCase):
             token, marker = root / "token", root / "built"
             driver = root / "driver.py"
             driver.write_text(_SEAL + """
-assert sys.argv[2] == "scripts/build_token.py"
-assert sys.argv[3] == "--"
-assert sys.argv[4:6] == ["bash", "-c"]
+assert os.path.isabs(sys.argv[2]) and sys.argv[2].endswith("/build_token.py")
+assert sys.argv[3] == "--release-source" and sys.argv[7] == "--"
+assert sys.argv[8:10] == ["bash", "-c"]
 open(sys.argv[-1] + ".waiter", "w").write(str(os.getpid()))
-command = sys.argv[4:-1]
+command = sys.argv[8:-1]
 idx = command.index("cargo")
 assert command[idx:idx + 2] == ["cargo", "build"]
 command[idx:] = [sys.executable, "-c", "from pathlib import Path; Path(" + repr(sys.argv[-1]) + ").touch()"]
-raise SystemExit(bt.main([sys.argv[2], "--"] + command))
+raise SystemExit(bt.main(sys.argv[2:8] + command))
 """)
             script = root / "scenario.sh"
             script.write_text("""set -eu
@@ -406,6 +406,7 @@ DEPLOY_TEST_MODE=0
 REPO="$1/.."
 SCRIPT_DIR="$6"
 SOURCE_BINARY="$4"
+export TMPDIR="$6"
 DEPLOY_BUILD_PROFILE="$5"
 DEPLOY_LOCK_TIMEOUT_SECS="${TEST_LOCK_TIMEOUT:-1800}"
 PEER_BINARY_ACCEPTED=0

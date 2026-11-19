@@ -83,6 +83,16 @@ def _fetch_retry_delay(headers, body: Any) -> float:
     return max(MESSAGE_FETCH_MIN_RETRY_DELAY_S, *delays)
 
 
+# A host that runs the harness in its own process may set this; it is called with the text of every
+# channel input before it is sent and stops the input by raising. Unset means no gate.
+input_gate = None
+
+
+def _gate(content: str) -> None:
+    if input_gate is not None:
+        input_gate(content)
+
+
 @dataclasses.dataclass(frozen=True)
 class DiscordClient:
     base_url: str
@@ -97,6 +107,7 @@ class DiscordClient:
     body_observations: dict[str, float] | None = None
 
     def send(self, channel_id: int | str, content: str) -> dict[str, Any]:
+        _gate(content)
         body = json.dumps({"channel_id": str(channel_id), "content": content}).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base_url}/api/discord/send",
@@ -112,6 +123,7 @@ class DiscordClient:
 
     def deliver(self, agent, text, author, source, origin_id):
         """Deliver external human input; never retry an unconfirmed mutation."""
+        _gate(text)
         request = urllib.request.Request(
             f"{self.base_url.rstrip('/')}/api/agents/{urllib.parse.quote(str(agent), safe='')}/turn/deliver",
             data=json.dumps({"text": text, "author_discord_user_id": author,
@@ -251,6 +263,7 @@ class DiscordClient:
             raise ValueError(f"channel_kind must be 'cc' or 'cdx', got {channel_kind!r}")
 
         provider = "codex" if channel_kind == "cdx" else "claude"
+        _gate(content)
         body = json.dumps(
             {
                 "prompt": content,

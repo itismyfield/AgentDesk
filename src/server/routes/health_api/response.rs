@@ -262,6 +262,7 @@ async fn assemble(
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
         json["resident_loops"] = crate::services::resident_loops::health_json();
         json["release_source"] = release_source;
+        crate::services::running_binary::attach(&mut json, detailed);
         json["boot_incarnation"] = serde_json::json!(boot_incarnation());
         json["legacy_body_census"] = if detailed {
             crate::services::legacy_body_census::detail_json()
@@ -373,6 +374,7 @@ async fn assemble(
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
         json["resident_loops"] = crate::services::resident_loops::health_json();
         json["release_source"] = release_source;
+        crate::services::running_binary::attach(&mut json, detailed);
         attach_runtime_profile(&mut json, &state.config);
         super::writer_readiness::attach(&mut json, detailed);
         json["intake_routing"] =

@@ -10,7 +10,7 @@ import {
 } from "react";
 import type { Agent, Department, DispatchedSession, WSEvent } from "../types";
 import * as api from "../api/client";
-import { applySessionOverlay, deriveDispatchedAsAgents } from "./session-overlay";
+import { applySessionOverlay, deriveDispatchedAsAgents, mergeAgentStatus } from "./session-overlay";
 
 interface WorkspaceContextValue {
   /** Agents with live session state folded into `status`. */
@@ -18,6 +18,8 @@ interface WorkspaceContextValue {
   departments: Department[];
   sessions: DispatchedSession[];
   setSessions: React.Dispatch<React.SetStateAction<DispatchedSession[]>>;
+  /** The first session list failed to load; sessions seen since then still count. */
+  sessionsFailed: boolean;
   visibleDispatchedSessions: DispatchedSession[];
   /** `agents` plus unlinked dispatched sessions shown as pseudo-agents. */
   agentsWithDispatched: Agent[];
@@ -30,7 +32,7 @@ const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 interface WorkspaceProviderProps {
   initialAgents: Agent[];
   initialDepartments: Department[];
-  initialSessions: DispatchedSession[];
+  initialSessions: DispatchedSession[] | null;
   pushNotification: (msg: string, level: "info" | "success" | "warning" | "error") => void;
   children: ReactNode;
 }
@@ -44,7 +46,7 @@ export function WorkspaceProvider({
 }: WorkspaceProviderProps) {
   const [agents, setAgents] = useState<Agent[]>(initialAgents);
   const [departments, setDepartments] = useState<Department[]>(initialDepartments);
-  const [sessions, setSessions] = useState<DispatchedSession[]>(initialSessions);
+  const [sessions, setSessions] = useState<DispatchedSession[]>(initialSessions ?? []);
 
   const sessionAwareAgents = useMemo(() => applySessionOverlay(agents, sessions), [agents, sessions]);
   const agentsRef = useRef<Agent[]>(sessionAwareAgents);
@@ -75,7 +77,7 @@ export function WorkspaceProvider({
               pushNotificationRef.current(`${label} 작업 완료`, "success");
             }
           }
-          setAgents((prev) => prev.map((ag) => (ag.id === a.id ? { ...ag, ...a } : ag)));
+          setAgents((prev) => mergeAgentStatus(prev, a));
           break;
         }
         case "agent_created":
@@ -121,6 +123,7 @@ export function WorkspaceProvider({
         departments,
         sessions,
         setSessions,
+        sessionsFailed: initialSessions === null,
         visibleDispatchedSessions,
         agentsWithDispatched,
         refreshAgents,

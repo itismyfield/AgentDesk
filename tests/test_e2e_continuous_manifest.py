@@ -58,7 +58,7 @@ def validate(plan, root=ROOT):
     require(len(core) == 6 and len({entry['scenario'] for entry in core}) == 6, 'core is not six distinct occurrences')
     expected_smoke = {
         'E-50': ('claude', 'herdr', 'claude-herdr'),
-        'E-51': ('codex', 'tmux', 'codex-tui'),
+        'E-51': ('codex', 'herdr', 'codex-herdr'),
     }
     smoke = {entry['scenario']: (entry['provider'], entry['host'], entry['cell'])
              for entry in core if not entry['scenario'].startswith('R-')}

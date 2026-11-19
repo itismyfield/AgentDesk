@@ -11,6 +11,7 @@ import tempfile
 ROOT = Path(os.environ["DRY_ROOT"]).resolve()
 NAME = Path(sys.argv[0]).name
 ARGS = sys.argv[1:]
+SOURCE_PROBE = ["-c", "core.fsmonitor=false", "-c", "core.trustctime=true", "-c", "core.checkStat=default"]
 
 
 def blocked(reason):
@@ -49,7 +50,11 @@ if NAME == "cargo":
         profile = ARGS[ARGS.index("--profile") + 1]
     marker = os.environ.get("ADK_BUILD_TOKEN_HOLDER", "")
     event.update(holder=marker, held=token_held(marker),
-                 release="--release" in ARGS or "-r" in ARGS or profile.startswith("release"))
+                 release="--release" in ARGS or "-r" in ARGS or profile.startswith("release"),
+                 checkout_sha_in_cargo="ADK_RELEASE_CHECKOUT_SHA" in os.environ,
+                 in_target_checkout=Path.cwd() == ROOT / "repo")
+elif NAME == "git" and ARGS[2:8] == SOURCE_PROBE:
+    event.update(source_probe=True, held=token_held(os.environ.get("ADK_BUILD_TOKEN_HOLDER", "")))
 with (ROOT / "events.jsonl").open("a") as log:
     log.write(json.dumps(event) + "\n")
 
@@ -65,20 +70,29 @@ if NAME == "cargo":
         binary.write_text('#!/bin/bash\nprintf \'{"checks":[{"id":"postgres_connection","status":"pass"}]}\\n\'\n')
         binary.chmod(0o700)
 elif NAME == "python3":
-    if ARGS and Path(ARGS[0]).name == "build_token.py":
+    if ARGS and Path(ARGS[0]).name in ("build_token.py", "release_source.py"):
         path = local(ARGS[0])
-        if path != ROOT / "repo/scripts/build_token.py":
-            blocked("unexpected token helper")
-        os.execv(sys.executable, [sys.executable, "-I", str(path), *ARGS[1:]])
-    elif ARGS and (ARGS[0] in ("-c", "-") or Path(ARGS[0]).name in (
-            "check_postgres_migration_checksums.py", "package_release.py")):
+        if path.parent not in (ROOT / "repo/scripts", ROOT / "tools/scripts"):
+            blocked("unexpected release helper")
+        driver = "import runpy, sys; from pathlib import Path; sys.argv.pop(0); " \
+                 "sys.path.insert(0, str(Path(sys.argv[0]).parent)); runpy.run_path(sys.argv[0], run_name='__main__')"
+        os.execv(sys.executable, [sys.executable, "-I", "-c", driver, str(path), *ARGS[1:]])
+    elif ARGS and Path(ARGS[0]).name == "package_release.py":
+        if "--source-record" in ARGS:
+            path = local(ARGS[ARGS.index("--source-record") + 1])
+            if path.is_file():
+                with (ROOT / "events.jsonl").open("a") as log:
+                    log.write(json.dumps({"command": "package_witness",
+                                          "record": json.loads(path.read_text())}) + "\n")
+    elif ARGS and (ARGS[0] in ("-c", "-") or Path(ARGS[0]).name == "check_postgres_migration_checksums.py"):
         pass
     else:
         blocked(f"unexpected Python call: {ARGS}")
 elif NAME == "bash":
     if ARGS[:2] == ["-c", '. "$1"; shift; _preflight_resource_contention || exit 1; exec "$@"']:
         os.execv("/bin/bash", ["/bin/bash", *ARGS])
-    elif ARGS == [str(ROOT / "repo/scripts/resolve-config-path.sh"), str(ROOT / "release")]:
+    elif ARGS in ([str(ROOT / "repo/scripts/resolve-config-path.sh"), str(ROOT / "release")],
+                  [str(ROOT / "tools/scripts/resolve-config-path.sh"), str(ROOT / "release")]):
         print(ROOT / "release/config/agentdesk.yaml")
     elif ARGS and Path(ARGS[0]).name in ("verify-dashboard.sh", "check-dashboard-toolchain.sh"):
         pass
@@ -89,9 +103,20 @@ elif NAME == "git":
     if len(ARGS) < 3 or ARGS[0] != "-C":
         blocked(f"unexpected git: {ARGS}")
     local(ARGS[1])
-    if ARGS[2:] == ["rev-parse", "HEAD"]:
+    tail = ARGS[2:]
+    if tail[:6] == SOURCE_PROBE:
+        tail = tail[6:]
+        if tail == ["rev-parse", "--show-toplevel"]:
+            print(ROOT / "repo")
+        elif tail == ["rev-parse", "--verify", "HEAD^{commit}"]:
+            print("a" * 40)
+        elif tail == ["ls-files", "--stage", "-v", "-z"]:
+            sys.stdout.write("H 100644 " + "b" * 40 + " 0\tbuild.rs\0")
+        elif tail != ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"]:
+            blocked(f"unexpected source probe: {tail}")
+    elif tail == ["rev-parse", "HEAD"]:
         print("0" * 40)
-    elif ARGS[2:4] != ["status", "--porcelain"]:
+    elif tail[:2] != ["status", "--porcelain"]:
         blocked(f"unexpected git: {ARGS}")
 elif NAME == "dirname":
     print(os.path.dirname(ARGS[0]) or ".")

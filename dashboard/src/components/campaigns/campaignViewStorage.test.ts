@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { beforeEach, expect, it, vi } from "vitest";
 import { NO_TIES, type ViewScope } from "./campaignGraphRouting";
-import { campaignViewKey, loadCampaignView, saveCampaignView } from "./campaignViewStorage";
+import { campaignViewKey, editorViewScope, groupViewScope, loadCampaignView, saveCampaignView, storedEditorScopes, storedGroupViewCampaigns } from "./campaignViewStorage";
 import { installMemoryStorage } from "./campaignTestFixtures";
 
 const scope: ViewScope = { mode: "legacy", campaignId: "c1", projection: "groups", taskScope: "all" };
@@ -43,6 +43,15 @@ it("falls back to the original lines for a damaged, other-version or inconsisten
     localStorage.setItem(campaignViewKey(scope), raw);
     expect(loadCampaignView(scope), raw).toEqual({ view: NO_TIES, raw, recovered: true, revision: null });
   }
+});
+
+it("keeps the editor's ties per scope apart from the group graph's, and reads a value saved before revisions were recorded", () => {
+  const editor = editorViewScope("c1", "task:a:1");
+  saveCampaignView(editor, view, 3); saveCampaignView(groupViewScope("c1"), NO_TIES, 3); saveCampaignView(editorViewScope("c2", "group:G"), view, 3);
+  expect([storedEditorScopes("c1"), storedGroupViewCampaigns()]).toEqual([[editor], ["c1"]]);
+  expect(loadCampaignView(editorViewScope("c1", "task:a:2")).raw).toBeNull();
+  localStorage.setItem(campaignViewKey(scope), JSON.stringify({ schemaVersion: 1, scope, ...view }));
+  expect(loadCampaignView(scope)).toMatchObject({ view, recovered: false, revision: null });
 });
 
 it("reports a write the browser refused instead of swallowing it", () => {

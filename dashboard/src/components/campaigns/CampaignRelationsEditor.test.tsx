@@ -1,26 +1,37 @@
 // @vitest-environment happy-dom
-import { act } from "react";
+import { act, useEffect, type ComponentType, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { Connection, Edge, Node, NodeChange } from "@xyflow/react";
+import type { Connection, Edge, EdgeChange, Node, NodeChange, NodeProps } from "@xyflow/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getCampaignDetail, saveCampaignNodes, type Campaign } from "../../api/campaigns";
 import { ApiRequestError } from "../../api/httpClient";
 import CampaignRelationsEditor from "./CampaignRelationsEditor";
-import { makeCampaignNode as node } from "./campaignTestFixtures";
+import { campaignViewKey, editorViewScope } from "./campaignViewStorage";
+import { installMemoryStorage, makeCampaignNode as node } from "./campaignTestFixtures";
+import type { TieNodeData } from "./RelationsTaskNode";
 import { dropKeptDraft, keptDraft, type EditScope } from "./relationsEditorModel";
 
 vi.mock("../../api/campaigns", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/campaigns")>()), getCampaignDetail: vi.fn(), saveCampaignNodes: vi.fn(),
 }));
-type FlowProps = { nodes: Node[]; edges: Edge[]; onNodesChange: (changes: NodeChange[]) => void; onConnect: (connection: Connection) => void; onEdgesDelete: (edges: Edge[]) => void };
+type FlowProps = {
+  nodes: Node[]; edges: Edge[]; nodeTypes: Record<string, ComponentType<NodeProps>>; onInit: (instance: unknown) => void; onNodesChange: (changes: NodeChange[]) => void;
+  onEdgesChange: (changes: EdgeChange[]) => void; onEdgeClick: () => void; onEdgeDoubleClick: (event: { clientX: number; clientY: number }, edge: Edge) => void;
+  onNodeDragStop: (event: unknown, node: Node) => void; onConnect: (connection: Connection) => void; onEdgesDelete: (edges: Edge[]) => void;
+};
 const flow: { props: FlowProps | null } = { props: null };
 vi.mock("@xyflow/react", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@xyflow/react")>()),
+  // Tasks as buttons that select themselves; ties through their own node type, so their menu can be pressed.
   ReactFlow: (props: FlowProps) => {
     flow.props = props;
-    return <div>{props.nodes.map((value) => <button key={value.id} className="react-flow__node" data-node={value.id} data-id={value.id} onClick={() => props.onNodesChange([{ type: "select", id: value.id, selected: true }])}>{value.ariaLabel}</button>)}</div>;
+    useEffect(() => props.onInit({ screenToFlowPosition: (point: unknown) => point, setViewport: vi.fn(), setCenter: vi.fn(), fitView: vi.fn(), getViewport: () => ({ x: 0, y: 0, zoom: 1 }) }), []); // eslint-disable-line react-hooks/exhaustive-deps
+    const Tie = props.nodeTypes.relationsTie;
+    return <div>{props.nodes.map((value) => value.type === "relationsTie" ? <Tie key={value.id} {...{ id: value.id, data: value.data, selected: value.selected } as NodeProps} />
+      : <button key={value.id} className="react-flow__node" data-node={value.id} data-id={value.id} onClick={() => props.onNodesChange([{ type: "select", id: value.id, selected: true }])}>{value.ariaLabel}</button>)}</div>;
   },
-  Background: () => null, Controls: () => null,
+  NodeToolbar: ({ children, isVisible }: { children: ReactNode; isVisible: boolean }) => isVisible ? <div>{children}</div> : null,
+  Background: () => null, Controls: () => null, Handle: () => null,
 }));
 
 // A done → B → C, and B → D skipped.
@@ -36,13 +47,13 @@ const leave: { current: ((proceed: () => void) => void) | null } = { current: nu
 const onSaved = vi.fn();
 const onExit = vi.fn();
 beforeEach(() => {
-  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true }); installMemoryStorage();
   container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
 });
 afterEach(async () => {
   await act(async () => root.unmount()); container.remove(); dropKeptDraft(base.id); vi.clearAllMocks();
 });
-const render = (campaign = base, scope = G) => act(async () => root.render(<CampaignRelationsEditor campaign={campaign} scope={scope} onScope={vi.fn()} onExit={onExit} onSaved={onSaved} leave={leave} tr={(_: string, en: string) => en} />));
+const render = (campaign = base, scope: EditScope = G) => act(async () => root.render(<CampaignRelationsEditor campaign={campaign} scope={scope} onScope={vi.fn()} onExit={onExit} onSaved={onSaved} leave={leave} tr={(_: string, en: string) => en} />));
 const text = () => document.body.textContent ?? "";
 const named = (name: string) => [...document.querySelectorAll<HTMLElement>("button, select, input")].find((element) => element.getAttribute("aria-label") === name || element.textContent?.trim() === name)!;
 const click = (element: HTMLElement) => act(async () => element.click());
@@ -55,6 +66,15 @@ const saveButton = () => [...container.querySelectorAll("button")].find((element
 const asks = () => { const event = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; };
 const typeTitle = (value: string) => act(async () => { const input = container.querySelector<HTMLInputElement>("aside input")!;
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); });
+const edge = (id: string) => flow.props!.edges.find((value) => value.id === id)!;
+const ties = () => flow.props!.nodes.filter((value) => value.type === "relationsTie");
+/** Double-clicks a line; the fake canvas maps the pointer 1:1, so (129, 75) snaps the tie to (100, 60). */
+const tieAt = (id: string) => act(async () => flow.props!.onEdgeDoubleClick({ clientX: 129, clientY: 75 }, edge(id)));
+const press = (key: string) => act(async () => { container.querySelector("section")!.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })); });
+const menu = () => [...document.querySelectorAll<HTMLElement>('[aria-label="Cable tie menu"] button')];
+const unsaved = () =>/Unsaved · ([^U]*)/.exec(text())?.[1] ?? null;
+const tieKey = campaignViewKey(editorViewScope(base.id, "group:G"));
+const stored = (name = tieKey) => JSON.parse(localStorage.getItem(name)!) as { revision?: number; ties: { strandOrder: string[][] }[] };
 
 it("edits dependencies with the inspector's chips alone and blocks saving while a cycle stands", async () => {
   await render();
@@ -84,11 +104,11 @@ it("keeps completed and skipped tasks unchanged from the canvas, the inspector a
   expect(container.querySelector<HTMLInputElement>("aside input")!.disabled).toBe(true);
   expect(named("Add a dependency")).toBeUndefined();
   await act(async () => flow.props!.onConnect({ source: "C", target: "A", sourceHandle: null, targetHandle: null }));
-  await act(async () => flow.props!.onEdgesDelete([{ id: "B->D", source: "B", target: "D" }]));
+  await act(async () => flow.props!.onEdgesDelete([edge("B->D")]));
   expect(text()).not.toContain("Unsaved");
   expect(flow.props!.edges.find((edge) => edge.id === "B->D")?.deletable).toBe(false);
   expect(flow.props!.edges.find((edge) => edge.id === "A->B")?.deletable).toBe(true);
-  await act(async () => flow.props!.onEdgesDelete([{ id: "A->B", source: "A", target: "B" }]));
+  await act(async () => flow.props!.onEdgesDelete([edge("A->B")]));
   expect(text()).toContain("Unsaved · 1 dependencies");
 });
 
@@ -108,7 +128,7 @@ it("sends a 409 again up to three times, each on a fresh read, and takes the sav
   expect(text()).toContain("rev 9");
 
   vi.mocked(saveCampaignNodes).mockRejectedValue(conflict);
-  await act(async () => flow.props!.onEdgesDelete([{ id: "A->C", source: "A", target: "C" }]));
+  await act(async () => flow.props!.onEdgesDelete([edge("A->C")]));
   await click(saveButton());
   expect(vi.mocked(saveCampaignNodes)).toHaveBeenCalledTimes(8);
   expect(text()).toContain("The campaign keeps changing.");
@@ -133,9 +153,10 @@ const withNodes = (revision: number, patch: Record<string, Partial<Campaign["nod
 
 it("drops undo steps when a newer base arrives, so undo cannot put back what the server replaced", async () => {
   await render(extra);
-  await pick("B"); await choose("Add a dependency", "E"); await click(named("Remove dependency E E"));
+  await tieAt("B->C"); await pick("B"); await choose("Add a dependency", "E"); await click(named("Remove dependency E E"));
   await render(withNodes(5, { B: { dependencies: ["A", "F"] } }));
-  expect((named("Undo") as HTMLButtonElement).disabled).toBe(true);
+  // The tie stays drafted; only its undo step goes with the old base.
+  expect([(named("Undo") as HTMLButtonElement).disabled, ties().length]).toEqual([true, 1]);
   expect(named("Remove dependency F F")).toBeTruthy();
 });
 
@@ -179,7 +200,7 @@ it("brings a cycle that only the merge makes onto the canvas, and saves once one
   expect(saveCampaignNodes).not.toHaveBeenCalled();
   expect(flow.props!.edges.filter((edge) => edge.style?.strokeDasharray).map((edge) => edge.id).sort()).toEqual(["E->F", "F->E"]);
   expect([/Cycle: (E → F → E|F → E → F)/.test(text()), text().includes("1 errors"), saveButton().disabled]).toEqual([true, true, true]);
-  await act(async () => flow.props!.onEdgesDelete([{ id: "F->E", source: "F", target: "E" }]));
+  await act(async () => flow.props!.onEdgesDelete([edge("F->E")]));
   await click(saveButton());
   expect(vi.mocked(saveCampaignNodes).mock.calls[0][1].filter((value) => "EF".includes(value.id)).map((value) => value.dependencies)).toEqual([[], ["E"]]);
 });
@@ -188,11 +209,12 @@ it("asks before leaving with changes, warns on reload, and keeps an undecided dr
   await render();
   expect(leave.current).toBeNull();
   await act(async () => flow.props!.onConnect({ source: "A", target: "C", sourceHandle: null, targetHandle: null }));
+  await tieAt("B->C");
   const reload = new Event("beforeunload", { cancelable: true });
   window.dispatchEvent(reload);
   expect(reload.defaultPrevented).toBe(true);
   await click(named("Campaign"));
-  expect(text()).toContain("1 unsaved changes");
+  expect(text()).toContain("2 unsaved changes");
   await click(named("Keep editing"));
   const proceed = vi.fn();
   await act(async () => leave.current!(proceed));
@@ -201,12 +223,12 @@ it("asks before leaving with changes, warns on reload, and keeps an undecided dr
   expect(onExit).not.toHaveBeenCalled();
 
   await act(async () => root.unmount());
-  expect(keptDraft(base.id)?.edits).toEqual({ C: { dependencies: ["B", "A"] } });
+  expect([keptDraft(base.id)?.edits, Object.keys(keptDraft(base.id)!.ties)]).toEqual([{ C: { dependencies: ["B", "A"] } }, ["group:G"]]);
   expect(asks()).toBe(true);
   root = createRoot(container);
   await render();
   expect(text()).toContain("Your unsaved edits are back.");
-  expect(text()).toContain("Unsaved · 1 dependencies");
+  expect([unsaved(), ties().length]).toEqual(["1 dependencies · 1 cable ties", 1]);
   expect(asks()).toBe(true);
   await click(named("Discard"));
   expect(asks()).toBe(false);
@@ -241,6 +263,113 @@ it("below 1280px opens the inspector over the canvas only for a choice, and Esca
     expect(container.querySelector("aside")).toBeNull();
     expect(document.activeElement).toBe(container.querySelector('[data-node="C"]'));
   }
+});
+
+it("ties lines with the tool and B or a double-click, moves a tie onto the grid, unties, and undoes ties and fields in one order, never touching a dependency", async () => {
+  await render();
+  await click(named("Cable ties"));
+  for (const id of ["B->C", "B->D"]) await act(async () => flow.props!.onEdgesChange([{ type: "select", id, selected: true }]));
+  expect(text()).toContain("2 lines chosen.");
+  await press("b");
+  expect([ties().map((tie) => (tie.data as TieNodeData).count), edge("B->C").target, edge("B->C#1").target, unsaved()]).toEqual([[2], ties()[0].id, "C", "1 cable ties"]);
+  await pick("C"); await typeTitle("Mine C");
+  await tieAt("A->B");
+  expect(ties().find((tie) => (tie.data as TieNodeData).count === 1)?.position).toEqual({ x: 100, y: 60 });
+  const bundled = ties().find((tie) => (tie.data as TieNodeData).count === 2)!;
+  await act(async () => flow.props!.onNodeDragStop({}, { ...bundled, position: { x: 1013, y: 1011 } }));
+  expect(ties().find((tie) => tie.id === bundled.id)?.position).toEqual({ x: 1020, y: 1020 });
+  // The moved tie is chosen: take B → C out of it, preview its lines with the menu and H, then untie it with Delete.
+  await click(named("Take one line out"));
+  await click(menu()[2]);
+  expect([(ties().find((tie) => tie.id === bundled.id)?.data as TieNodeData).count, edge("B->C").target]).toEqual([1, "C"]);
+  await click(menu().at(-1)!);
+  expect(edge("preview:B->D")).toBeTruthy();
+  await press("h");
+  expect(edge("preview:B->D")).toBeUndefined();
+  await press("Delete");
+  expect([ties().length, unsaved()]).toEqual([1, "1 titles · 1 cable ties"]);
+  expect(flow.props!.edges.filter((value) => !value.id.includes("#")).map((value) => value.id).sort()).toEqual(["A->B", "B->C", "B->D"]);
+  const steps = [];
+  for (let step = 0; step < 6; step++) {
+    await click(named("Undo"));
+    steps.push([ties().map((tie) => `${(tie.data as TieNodeData).count}${tie.position.x === 1020 ? " moved" : ""}`).sort().join(), unsaved()]);
+  }
+  expect(steps).toEqual([
+    ["1,1 moved", "1 titles · 2 cable ties"], ["1,2 moved", "1 titles · 2 cable ties"], ["1,2", "1 titles · 2 cable ties"],
+    ["2", "1 titles · 1 cable ties"], ["2", "1 cable ties"], ["", null],
+  ]);
+  expect(saveCampaignNodes).not.toHaveBeenCalled();
+});
+
+it("writes ties only once the ledger holds the definition: no ledger call for ties alone, nothing on a conflict, a failed save or while one is out", async () => {
+  localStorage.setItem(tieKey, "{not json"); // a damaged value: drawn as no ties and replaced on save
+  await render();
+  expect(ties()).toEqual([]);
+  await tieAt("B->C");
+  await click(saveButton());
+  expect([vi.mocked(getCampaignDetail).mock.calls.length, vi.mocked(saveCampaignNodes).mock.calls.length, unsaved()]).toEqual([0, 0, null]);
+  expect(stored()).toMatchObject({ revision: 4, ties: [{ strandOrder: [["B", "C"]] }] });
+  const written = localStorage.getItem(tieKey);
+  await tieAt("A->B"); await pick("C"); await typeTitle("Mine C");
+  vi.mocked(getCampaignDetail).mockResolvedValue({ campaign: { ...base, revision: 9, nodes: base.nodes.map((value) => value.id === "C" ? { ...value, title: "Server C" } : value) }, live: {}, read: 1 });
+  await click(saveButton());
+  vi.mocked(getCampaignDetail).mockResolvedValue({ campaign: base, live: {}, read: 1 });
+  vi.mocked(saveCampaignNodes).mockRejectedValueOnce(new Error("Server down"));
+  await click(saveButton());
+  expect([localStorage.getItem(tieKey) === written, text().includes("Server down"), unsaved()]).toEqual([true, true, "1 titles · 1 cable ties"]);
+  let land!: (saved: Campaign) => void; vi.mocked(saveCampaignNodes).mockReturnValueOnce(new Promise((resolve) => { land = resolve; }));
+  await click(saveButton());
+  await tieAt("B->D");
+  expect([ties().length, localStorage.getItem(tieKey) === written]).toEqual([2, true]);
+  await act(async () => land({ ...base, revision: 5, nodes: vi.mocked(saveCampaignNodes).mock.calls.at(-1)![1] }));
+  expect([stored().revision, stored().ties.length, unsaved()]).toEqual([5, 2, null]);
+});
+
+it("hides a tie whose lines are gone, keeps another scope's draft counted, and drops on save the members the saved definition lacks", async () => {
+  const otherScope = editorViewScope(base.id, "task:C:1"), other = campaignViewKey(otherScope);
+  localStorage.setItem(other, JSON.stringify({ schemaVersion: 1, scope: otherScope, ties: [{ id: "t1", position: { x: 0, y: 0 }, strandOrder: [["B", "C"]] }], routes: [{ edge: ["B", "C"], via: ["t1"] }], showOriginal: false, revision: 4 }));
+  vi.mocked(getCampaignDetail).mockResolvedValue({ campaign: base, live: {}, read: 1 });
+  vi.mocked(saveCampaignNodes).mockImplementation(async (campaign, nodes) => ({ ...campaign, revision: campaign.revision + 1, nodes }));
+  await render();
+  await tieAt("B->C");
+  await act(async () => flow.props!.onEdgesDelete([edge("B->C")]));
+  expect([ties(), unsaved()]).toEqual([[], "1 dependencies · 1 cable ties"]);
+  await click(named("Undo"));
+  expect([ties().length, unsaved()]).toEqual([1, "1 cable ties"]);
+  await act(async () => flow.props!.onEdgesDelete([edge("B->C")]));
+  await render(base, { kind: "task", id: "C", depth: 1 });
+  expect([ties(), unsaved()]).toEqual([[], "1 dependencies · 1 cable ties"]);
+  await click(saveButton());
+  expect([stored().ties, stored(other).ties, unsaved()]).toEqual([[], [], null]);
+});
+
+it("keeps a refused tie draft unsaved, warned on leaving and undoable, and after a partial save undoes only what stayed unsaved", async () => {
+  localStorage.setItem(tieKey, JSON.stringify({ schemaVersion: 1, scope: editorViewScope(base.id, "group:G"), ties: [{ id: "t1", position: { x: 0, y: 0 }, strandOrder: [["B", "C"]] }], routes: [{ edge: ["B", "C"], via: ["t1"] }], showOriginal: false, revision: 4 }));
+  const refuse = () => vi.spyOn(localStorage, "setItem").mockImplementationOnce(() => { throw new DOMException("full", "QuotaExceededError"); });
+  await render();
+  await act(async () => flow.props!.onNodeDragStop({}, { ...ties()[0], position: { x: 1013, y: 1011 } }));
+  refuse(); await click(saveButton());
+  expect([text().includes("Could not save the cable ties."), unsaved(), asks(), (named("Undo") as HTMLButtonElement).disabled]).toEqual([true, "1 cable ties", true, false]);
+  // Another scope's tie lands while the refused move stays; undo then walks back only that move.
+  await render(base, { kind: "task", id: "C", depth: 1 });
+  await tieAt("B->C");
+  refuse(); await click(saveButton());
+  expect([unsaved(), stored(campaignViewKey(editorViewScope(base.id, "task:C:1"))).ties.length]).toEqual(["1 cable ties", 1]);
+  await click(named("Undo"));
+  expect([unsaved(), ties().length, asks(), stored().ties[0]]).toEqual([null, 1, false, expect.objectContaining({ position: { x: 0, y: 0 } })]);
+});
+
+it("below 1280px lights a clicked line at once and opens its inspector after the double-click window; a double-click ties it instead", async () => {
+  await render();
+  const clickLine = () => act(async () => { flow.props!.onEdgesChange([{ type: "select", id: "B->C", selected: true }]); flow.props!.onEdgeClick(); });
+  const wait = () => act(() => new Promise((resolve) => setTimeout(resolve, 450)));
+  await clickLine();
+  expect([edge("B->C").selected, container.querySelector("aside")]).toEqual([true, null]);
+  await wait();
+  expect(container.querySelector("aside")?.getAttribute("aria-label")).toBe("Dependency line");
+  await click(named("Close the inspector"));
+  await clickLine(); await tieAt("B->C"); await wait();
+  expect([ties().length, container.querySelector("aside"), edge("B->C#1").target]).toEqual([1, null, "C"]);
 });
 
 it("draws at most 120 tasks of a scope and says how many were left out", async () => {

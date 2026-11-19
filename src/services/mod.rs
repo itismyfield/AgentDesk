@@ -119,6 +119,7 @@ pub(crate) mod resident_loops;
 pub mod retrospectives;
 pub mod review_decision;
 pub mod routines;
+pub(crate) mod running_binary;
 pub mod scheduled_messages;
 pub(crate) mod scheduling;
 pub mod service_error;

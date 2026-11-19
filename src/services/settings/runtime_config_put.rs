@@ -1,8 +1,46 @@
 use serde_json::{Map, Value};
 
-use super::{
-    RUNTIME_CONFIG_EXPLICIT_KEYS_META, explicit_runtime_config_keys, is_runtime_config_key,
-};
+use super::{RUNTIME_CONFIG_EXPLICIT_KEYS_META, explicit_runtime_config_keys};
+
+pub(super) const RUNTIME_KEYS: &[(&str, &str)] = &[
+    ("maxRetries", "작업 재시도 횟수"),
+    ("maxEntryRetries", "자동 대기열 재시도 횟수"),
+    (
+        "staleDispatchedGraceMin",
+        "정체된 디스패치 복구 유예 시간 (분)",
+    ),
+    (
+        "staleDispatchedTerminalStatuses",
+        "디스패치 복구 대상 종료 상태",
+    ),
+    (
+        "staleDispatchedRecoverNullDispatch",
+        "ID가 비어 있는 디스패치 복구",
+    ),
+    (
+        "staleDispatchedRecoverMissingDispatch",
+        "기록이 없는 디스패치 복구",
+    ),
+    ("rateLimitWarningPct", "사용량 주의 표시 (%)"),
+    ("rateLimitDangerPct", "사용량 위험 표시 (%)"),
+    ("rateLimitStaleSec", "사용량 정보 유효 시간 (초)"),
+    (
+        "dispatchRateLimitGateEnabled",
+        "사용량이 많으면 자동 진행 멈추기",
+    ),
+    (
+        "dispatchRateLimitGateDangerPct",
+        "자동 진행을 멈출 사용량 (%)",
+    ),
+];
+
+pub(super) fn runtime_config_keys() -> impl Iterator<Item = &'static str> {
+    RUNTIME_KEYS.iter().map(|&(key, _)| key)
+}
+
+pub(crate) fn is_runtime_config_key(key: &str) -> bool {
+    runtime_config_keys().any(|known| known == key)
+}
 
 /// Normalize a PUT while keeping explicit-override authority server-owned.
 /// Supplied metadata is exact (including empty); metadata-less updates retain omitted

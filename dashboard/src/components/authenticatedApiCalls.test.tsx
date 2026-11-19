@@ -7,8 +7,8 @@ import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { beginAuthentication, getAuthSnapshot, requireAuthentication } from "../api/authState";
 import ClaudeAccountsWidget from "./dashboard/ClaudeAccountsWidget";
-import { MiniRateLimitBar } from "./dashboard/MiniRateLimitBar";
 import ReceiptWidget from "./dashboard/ReceiptWidget";
+import { HomeUsageCard } from "./home/HomeActivityCards";
 import OnboardingWizard from "./OnboardingWizard";
 import SettingsView from "./SettingsView";
 
@@ -127,13 +127,13 @@ const accounts = {
 };
 
 describe("dashboard widgets under token authentication", () => {
-  it("rate limit bar sends the tab token and renders the providers", async () => {
+  it("home usage sends the tab token and renders the providers", async () => {
     serve({
       "GET /api/rate-limits": ok({
         providers: [{ provider: "claude", buckets: [{ name: "5h", limit: 100, used: 40, remaining: 60, reset: 0 }], stale: false }],
       }),
     });
-    const view = await render(<MiniRateLimitBar isKo={false} />);
+    const view = await render(<MemoryRouter><HomeUsageCard tr={(_ko, en) => en} isKo={false} /></MemoryRouter>);
     expectBearer("GET /api/rate-limits");
     expect(view.textContent).toContain("Claude");
     expect(view.textContent).toContain("40%");

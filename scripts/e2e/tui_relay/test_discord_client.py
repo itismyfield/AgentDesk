@@ -132,6 +132,26 @@ class DiscordClientTurnActivityRetry(unittest.TestCase):
                 self.assertEqual(elapsed, 0.25)
 
 
+class DiscordClientInputGate(unittest.TestCase):
+    def test_every_provider_input_path_asks_the_gate_first_and_bookkeeping_does_not(self):
+        client = DiscordClient(base_url="http://127.0.0.1:1", handoff_to_agent="agent", handoff_from_agent="e2e")
+        asked = []
+
+        def gate(content):
+            asked.append(content)
+            raise RuntimeError("held")
+
+        with mock.patch("tui_relay.discord.input_gate", gate), \
+                mock.patch("urllib.request.urlopen", return_value=_Response({"ok": True})) as http:
+            for send in (lambda: client.send("1", "post"), lambda: client.send_prompt("1", "handoff"),
+                         lambda: DiscordClient(base_url="http://127.0.0.1:1").send_prompt("1", "plain"),
+                         lambda: client.deliver("agent", "deliver", "7", "src", "o1")):
+                self.assertRaisesRegex(RuntimeError, "held", send)
+            self.assertEqual((asked, http.call_count), (["post", "handoff", "plain", "deliver"], 0))
+            client.send_control("1", "### E2E SETUP")
+            self.assertEqual((len(asked), http.call_count), (4, 1))
+
+
 class DiscordClientSendPrompt(unittest.TestCase):
     def test_control_marker_uses_notify_bot(self):
         captured = {}

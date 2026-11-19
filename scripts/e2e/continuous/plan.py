@@ -68,7 +68,9 @@ def gate(manifest, row, capabilities):
         host = "tmux" if host == "tui" else host
         keys += [f"{scenario}/{host}", f"{provider}/{host}"]
     for key in keys:
-        if key in gaps and key not in capabilities:
+        # A capability named for this scenario on this host lifts the provider-wide gap for it alone.
+        scoped = cell is not None and key == f"{provider}/{host}" and f"{scenario}/{host}" in capabilities
+        if key in gaps and key not in capabilities and not scoped:
             return gaps[key]["status"], f"{key}: {gaps[key]['reason']}"
     if cell is None:
         return "BLOCKED_CAPABILITY", f"{scenario}: no runnable cell"

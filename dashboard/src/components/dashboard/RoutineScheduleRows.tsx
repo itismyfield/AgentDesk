@@ -63,12 +63,10 @@ const focusRing = "focus-visible:outline-2 focus-visible:-outline-offset-2 focus
 export const RoutineScheduleList = forwardRef<HTMLUListElement, {
   rows: RoutineRowView[];
   selectedId?: string | null;
-  /** Home card: no switch, and the latest result stays visible under the name. */
-  compact?: boolean;
   onOpen: (id: string, trigger: HTMLElement) => void;
   /** Pause or resume the routine (page only). */
   onToggle?: (id: string) => void;
-}>(function RoutineScheduleList({ rows, selectedId = null, compact = false, onOpen, onToggle }, ref) {
+}>(function RoutineScheduleList({ rows, selectedId = null, onOpen, onToggle }, ref) {
   const onKeyDown = (event: KeyboardEvent<HTMLUListElement>) => {
     const lower = event.key.toLowerCase();
     const down = event.key === "ArrowDown" || lower === "j";
@@ -136,7 +134,6 @@ export const RoutineScheduleList = forwardRef<HTMLUListElement, {
                   {row.agent ? ` · ${row.agent}` : ""}
                 </span>
                 <span className="hidden text-xs leading-4 tabular-nums text-[var(--fg-dim)] @max-[440px]/routines:block">{row.nextText}</span>
-                {compact && latest ? <span className="mt-1 flex">{latest}</span> : null}
               </span>
               <span
                 className={cx(
@@ -149,9 +146,7 @@ export const RoutineScheduleList = forwardRef<HTMLUListElement, {
                   <small className="whitespace-nowrap text-xs text-[var(--fg-faint)] @max-[640px]/routines:hidden">{row.relative}</small>
                 ) : null}
               </span>
-              {compact ? null : (
-                <span className="flex w-[6.75rem] shrink-0 justify-end @max-[640px]/routines:hidden">{latest}</span>
-              )}
+              <span className="flex w-[6.75rem] shrink-0 justify-end @max-[640px]/routines:hidden">{latest}</span>
             </button>
             {row.threadUrl ? (
               <a
@@ -171,19 +166,17 @@ export const RoutineScheduleList = forwardRef<HTMLUListElement, {
             ) : (
               <span className="w-11 shrink-0" aria-hidden />
             )}
-            {compact ? null : (
-              <span className="flex h-11 w-11 shrink-0 items-center justify-center">
-                <Switch
-                  size="sm"
-                  checked={row.enabled}
-                  disabled={row.switchLocked || row.switchPending || !onToggle}
-                  aria-busy={row.switchPending || undefined}
-                  aria-label={row.switchLabel}
-                  data-testid={`routine-switch-${row.id}`}
-                  onChange={() => onToggle?.(row.id)}
-                />
-              </span>
-            )}
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center">
+              <Switch
+                size="sm"
+                checked={row.enabled}
+                disabled={row.switchLocked || row.switchPending || !onToggle}
+                aria-busy={row.switchPending || undefined}
+                aria-label={row.switchLabel}
+                data-testid={`routine-switch-${row.id}`}
+                onChange={() => onToggle?.(row.id)}
+              />
+            </span>
           </li>
         );
       })}

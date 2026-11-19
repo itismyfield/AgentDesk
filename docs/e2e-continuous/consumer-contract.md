@@ -26,6 +26,8 @@ python3 -m scripts.e2e.continuous.consumer --status-file /mirror/status.json --h
 - 호스트/권한/읽기 오류: `UNKNOWN`, `HOST_UNAVAILABLE`.
 - 활성 상태에서 비교할 head가 없거나 full SHA가 아님: `UNKNOWN`, `HEAD_REQUIRED`.
 - JSON null·형식 오류·미지원 schema·미래 시각·오래된 head는 PASS가 아니다.
+- 요약 내부 필드의 타입 오류도 예외 없이 `UNKNOWN`, `MALFORMED_SUMMARY`다.
+- freshness 한도를 지난 결과: `UNKNOWN`, `STALE`, `stale=1`. 다른 head의 결과가 만료되면 `STALE_HEAD`를 유지하고 `stale=1`만 더한다.
 
 배포 companion은 다음 명령으로 비밀 없는 요청만 남긴다.
 
@@ -35,5 +37,7 @@ python3 -m scripts.e2e.continuous.companion --state-dir /test/state --request-id
 
 이 명령은 `inbox.submit`을 재사용한다. 파일에는 schema version·request ID·deploy SHA·접수 시각만 담는다.
 같은 ID의 재전달은 원래 요청을 보존하며 provider 턴이나 runner를 직접 실행하지 않는다.
-요청 거절·전달 실패는 JSON `REJECTED`와 종료 코드 0으로 남겨 기존 배포 결과를 보존한다.
-실제 시험 호스트로의 전달과 배포 후 호출은 coordinator 배선에서 수행한다.
+요청 거절·전달 실패·비공개(0700)가 아닌 inbox 디렉터리는 JSON `REJECTED`와 종료 코드 0으로 남겨 기존 배포 결과를 보존한다.
+릴리스 호스트에서는 `deploy-release.sh`가 스모크 뒤 `scripts/e2e/continuous/after_deploy.sh`로 이 요청을 넣는다.
+기기 전용 설정이 없으면 호출은 아무 일도 하지 않는다. 소비자가 읽을 파일은 `~/.adk/e2e-continuous/state/status.json`과
+같은 폴더의 `summary.json`이다. 자세한 구성은 [릴리스 호스트 프로필](release-host.md), 실측은 [묶음별 실측](measurements.md)에 있다.

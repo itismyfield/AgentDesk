@@ -277,6 +277,56 @@ async fn unavailable_scope_reuses_work_and_retries_after_five_seconds() {
     c.excluded(&mut actor, "missing");
 }
 
+async fn evaluations(actor: &mut Host) -> usize {
+    EVALUATIONS.with(|c| c.set((0, 0)));
+    actor.prepare_notices(&[]).await;
+    EVALUATIONS.with(|c| c.get().0)
+}
+
+#[tokio::test(start_paused = true)]
+async fn unchanged_unavailable_scope_retries_less_often_until_its_inputs_change() {
+    let c = Case::new("settle-backoff");
+    let frame = c.frame();
+    c.register(&frame);
+    c.input("missing", &frame);
+    let mut actor = c.open();
+    let fresh = actor.read_sources();
+    let parked = c.path.with_extension("parked");
+    std::fs::rename(&c.path, &parked).unwrap();
+    actor.prepare_notices(&fresh).await;
+    // Each retry on the same inputs waits twice as long: 5, 10, 20, 40, then a 60 second cap.
+    for wait in [5, 10, 20, 40, 60, 60] {
+        tokio::time::advance(std::time::Duration::from_secs(wait - 1)).await;
+        assert_eq!(
+            evaluations(&mut actor).await,
+            0,
+            "not yet due after {}s",
+            wait - 1
+        );
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert_eq!(evaluations(&mut actor).await, 1, "due after {wait}s");
+    }
+    // A dependency change reopens it at once and starts the waits over.
+    std::fs::write(&c.path, b"").unwrap();
+    assert_eq!(
+        evaluations(&mut actor).await,
+        1,
+        "a changed native file is selected now"
+    );
+    assert_eq!(evaluations(&mut actor).await, 0);
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    assert_eq!(
+        evaluations(&mut actor).await,
+        1,
+        "the wait is back to five seconds"
+    );
+    assert_eq!(actor.notice_debt_extra(), 1);
+    std::fs::remove_file(&c.path).unwrap();
+    std::fs::rename(parked, &c.path).unwrap();
+    actor.prepare_notices(&[]).await;
+    c.excluded(&mut actor, "missing");
+}
+
 #[tokio::test(start_paused = true)]
 async fn materialized_enrichment_reopens_only_its_changed_generation() {
     let c = Case::new("settle-evidence-generation");

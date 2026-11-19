@@ -151,6 +151,11 @@ impl Harness {
     // Only this isolated fixture supplies execution state until run creation is available.
     async fn seed_running(&self) -> CampaignState {
         let state = domain::with_action(ActionState::StartPending, false);
+        self.seed_running_state(&state).await;
+        state
+    }
+
+    async fn seed_running_state(&self, state: &CampaignState) {
         let body = json!({"id":"campaign","idempotency_key":"create","definition":state.definition.input()});
         assert_eq!(
             request(&self.app, "POST", "/server-campaigns", Some(body))
@@ -165,7 +170,6 @@ impl Harness {
         sqlx::query("UPDATE server_campaign_definitions SET control=$2, run_id=$3, nodes=$4 WHERE campaign_id=$1")
             .bind(&state.id).bind(sqlx::types::Json(state.control)).bind(&run.id).bind(sqlx::types::Json(&state.nodes)).execute(&mut *tx).await.unwrap();
         tx.commit().await.unwrap();
-        state
     }
 }
 
@@ -1159,3 +1163,6 @@ async fn shipped_docs_router_advertises_all_server_campaign_endpoints() {
         );
     }
 }
+
+#[path = "dashboard_wait_tests.rs"]
+mod dashboard_wait_tests;

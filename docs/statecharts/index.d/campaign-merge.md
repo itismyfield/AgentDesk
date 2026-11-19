@@ -1,0 +1,2 @@
+key: campaign-merge
+| `campaign-execution` merge and main confirmation (#7438 M7) | M6 `8fde154a5c` | A stale head or a stopped run merges, a runner loss lacks a paired success, or main adoption lacks a witness | The merge gate requires current head, review, approval, TLC and CI, and the main check observes the merged commit. The deadline settles outstanding jobs. [Model](campaign-execution/CampaignMerge.tla). |

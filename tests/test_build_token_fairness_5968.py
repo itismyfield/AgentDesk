@@ -264,12 +264,7 @@ class DegradationTests(FairnessTestCase):
 
 
 class WiringTests(unittest.TestCase):
-    def test_the_callers_interface_is_unchanged(self) -> None:
-        # The lane scripts, CI and deploy-release.sh drive this file through its
-        # CLI and its env vars only; the queue must stay invisible to them.
-        for rel, needle in (("scripts/build-release.sh", 'build_token.py" -- \\'),
-                            ("scripts/deploy-release.sh", "build_token.py -- bash -c")):
-            self.assertIn(needle, (REPO / rel).read_text(encoding="utf-8"), rel)
+    def test_legacy_separator_preserves_cargo_arguments(self) -> None:
         self.assertEqual(bt.parse_command(["build_token.py", "--", "cargo", "build"]),
                          ["cargo", "build"])
 
