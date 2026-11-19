@@ -769,10 +769,10 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => ARGV.fetch(2),
-    "job_timeout_minutes" => 100, "job_sha256" => "2c905a4135beeab0087a85e86e9d37ea4d704b72b1f59c1593ddd6798d017cec",
+    "job_timeout_minutes" => 100, "job_sha256" => "36fe9726e97b833fa7df1004d67b78d731558597e4d13a6ee9038474b94d55c1",
     "cargo_steps" => {
       "Disable remote compiler cache" => {
-        "commands" => [%q{printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\n' >> "$GITHUB_ENV"}], "timeout_minutes" => nil,
+        "commands" => [%q{printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\nADK_CARGO_PRIORITY=1\n' >> "$GITHUB_ENV"}], "timeout_minutes" => nil,
         "if_condition" => "runner.environment == 'self-hosted'", "env" => {"BASH_ENV" => "/dev/null"},
       },
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
@@ -780,7 +780,7 @@ targets = {
         "commands" => [
           "set -euo pipefail", 'NEXTEST_DIR="$RUNNER_TEMP/nextest"', 'mkdir -p "$NEXTEST_DIR" "$RUNNER_TEMP/nextest-census"',
           'cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"',
-          'cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \\',
+          %q{${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \\},
           '--extract-to "$RUNNER_TEMP/nextest-census" --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"',
           'python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"',
           'python3 scripts/ci/rust_test_sources.py compare --platform linux --list "$NEXTEST_DIR/universe.json" \\',
@@ -1225,11 +1225,16 @@ role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key
   if job_id == "rust_build"
     hosted_actions = %w[./.github/actions/sccache-or-nothing Swatinem/rust-cache@v2 ./.github/actions/ensure-swap]
     expected_nightly["runs-on"] = "ubuntu-latest"
-    expected_nightly["steps"] = expected_nightly["steps"].filter_map do |step|
+    expected_nightly["steps"] = expected_nightly["steps"].map do |step|
       next if step.is_a?(Hash) && step["name"] == "Disable remote compiler cache"
+      if step.is_a?(Hash) && step["name"] == "Archive, list, compare and plan"
+        list = "cargo nextest list --archive-file "
+        prefix = %q{${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}}
+        next step.merge("run" => step.fetch("run").sub(prefix + list, list))
+      end
 
       step.is_a?(Hash) && hosted_actions.include?(step["uses"]) ? step.reject { |key, _| key == "if" } : step
-    end
+    end.compact
   end
   # Nightly keeps the strict retry policy: its plan differs from main only in that argument.
   expected_nightly = JSON.parse(JSON.generate(expected_nightly).gsub("--retry-mode all-once", "--retry-mode policy"))

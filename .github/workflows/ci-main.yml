@@ -77,7 +77,7 @@ jobs:
         shell: bash
         env:
           BASH_ENV: /dev/null
-        run: printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\n' >> "$GITHUB_ENV"
+        run: printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\nADK_CARGO_PRIORITY=1\n' >> "$GITHUB_ENV"
       - name: Check Rust test source wiring
         shell: bash
         env:
@@ -101,7 +101,7 @@ jobs:
           NEXTEST_DIR="$RUNNER_TEMP/nextest"
           mkdir -p "$NEXTEST_DIR" "$RUNNER_TEMP/nextest-census"
           cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
-          cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
+          ${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
             --extract-to "$RUNNER_TEMP/nextest-census" --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"
           python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"
           python3 scripts/ci/rust_test_sources.py compare --platform linux --list "$NEXTEST_DIR/universe.json" \
