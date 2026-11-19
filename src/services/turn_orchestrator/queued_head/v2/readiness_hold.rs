@@ -24,18 +24,8 @@ impl Owner {
         if let Some(hold) = self.front_hold() {
             return Ok(hold.clone());
         }
-        // How long a readiness hold keeps an unstarted front before the owner refuses it.
-        const READINESS_HOLD_MS: u64 = 10_000;
-        let (identity, fingerprint) = hold_key(&front.1);
-        let hold = ReadinessHold {
-            identity,
-            fingerprint,
-            cause: cause.into(),
-            started_at_ms: now,
-            due_at_ms: now.saturating_add(READINESS_HOLD_MS),
-        };
         let mut next = self.snapshot.clone();
-        next.readiness_holds.push(hold.clone());
+        let hold = next.remember_readiness_hold(&front.1, cause, now);
         self.commit(next)?;
         Ok(hold)
     }
@@ -169,6 +159,33 @@ impl Owner {
 }
 
 impl SnapshotV2 {
+    /// A retry of the same input keeps its first deadline.
+    pub(super) fn remember_readiness_hold(
+        &mut self,
+        original: &PendingQueueItem,
+        cause: &str,
+        now: u64,
+    ) -> ReadinessHold {
+        let (identity, fingerprint) = hold_key(original);
+        if let Some(hold) = self
+            .readiness_holds
+            .iter()
+            .find(|hold| hold.identity == identity && hold.fingerprint == fingerprint)
+        {
+            return hold.clone();
+        }
+        const READINESS_HOLD_MS: u64 = 10_000;
+        let hold = ReadinessHold {
+            identity,
+            fingerprint,
+            cause: cause.into(),
+            started_at_ms: now,
+            due_at_ms: now.saturating_add(READINESS_HOLD_MS),
+        };
+        self.readiness_holds.push(hold.clone());
+        hold
+    }
+
     /// Drops holds whose original the owner no longer queues, attempts or retains.
     pub(super) fn prune_readiness_holds(&mut self) {
         let attempts =

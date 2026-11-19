@@ -21,6 +21,15 @@ pub(crate) struct PreparationHold {
 }
 
 impl PreparationHold {
+    pub(crate) const IDLE_EVIDENCE_PENDING: &str = "idle_evidence_pending";
+
+    pub(crate) fn waits_for_idle_evidence(&self) -> bool {
+        self.may_requeue()
+            && self.reason == Self::IDLE_EVIDENCE_PENDING
+            && !self.modal
+            && self.unproven.is_none()
+    }
+
     pub(crate) fn before(session: &str, reason: &'static str, detail: String) -> Self {
         crate::services::claude_tui::composer_lock::guard_draft(
             session,
@@ -59,7 +68,7 @@ impl PreparationHold {
     ) -> Self {
         Self {
             unproven,
-            ..Self::before(session, "idle_evidence_pending", detail)
+            ..Self::before(session, Self::IDLE_EVIDENCE_PENDING, detail)
         }
     }
 

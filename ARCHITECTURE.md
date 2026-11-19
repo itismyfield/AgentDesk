@@ -2524,6 +2524,7 @@ src/
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── owner_input_idle_tests/
+│   │   │   │   │   │   ├── metadata_hold.rs
 │   │   │   │   │   │   └── restart_gate_tests.rs
 │   │   │   │   │   ├── handoff_retry_tests.rs
 │   │   │   │   │   ├── owner_input.rs
