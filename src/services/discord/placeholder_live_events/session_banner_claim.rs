@@ -57,6 +57,9 @@ impl SessionBannerClaims {
                 .filter(|claim| claim.turn_id == turn_id)
                 .map(|claim| claim.line.clone());
         };
+        if session.suppress_banner {
+            return None;
+        }
         let line = render_session_panel_line(session, provider);
         let session_key = session_key(session, &line);
         if let Some(claim) = self.prefix.as_ref()
