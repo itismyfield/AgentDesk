@@ -241,6 +241,7 @@ src/
 │   │   ├── listing.rs
 │   │   ├── provider_resume_fence.rs
 │   │   ├── rebind_override.rs
+│   │   ├── rotation_selector.rs
 │   │   ├── tests.rs
 │   │   └── thread_gc.rs
 │   ├── dispatches/
@@ -3068,6 +3069,7 @@ src/
 │   │   │   ├── relay_ownership/
 │   │   │   │   └── hosted_source_tests.rs
 │   │   │   ├── session_rotation_settle/
+│   │   │   │   ├── selector.rs
 │   │   │   │   └── selector_tests.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff/

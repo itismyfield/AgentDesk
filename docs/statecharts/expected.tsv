@@ -1286,6 +1286,9 @@ session-lifecycle/SessionNameDualReadProbeAbsentNoDuplicate.cfg	SessionNameDualR
 session-lifecycle/SessionNameDualReadProbeAbsentNoForeignAdoption.cfg	SessionNameDualRead	-	-
 session-lifecycle/SessionNameDualReadProbeAbsentNoForeignTouch.cfg	SessionNameDualRead	-	-
 session-lifecycle/SessionNameDualReadProbeAbsentNoLiveCut.cfg	SessionNameDualRead	-	-
+session-lifecycle/SessionRotationSelector.cfg	SessionRotationSelector	-	-
+session-lifecycle/SessionRotationSelectorBefore.cfg	SessionRotationSelector	NoOldResume,NoOverwrite	StoredSelectorFollows
+session-lifecycle/SessionRotationSelectorRestart.cfg	SessionRotationSelector	NoOldResume	StoredSelectorFollows
 session-lifecycle/TmuxSession.cfg	TmuxSession	NoDeadlock,RowNamesSession,RowOnlyWithTurn	-
 session-lifecycle/TmuxSessionNamingDuplicateKill.cfg	TmuxSession	NoDuplicateKill	-
 session-lifecycle/TmuxSessionNamingFixed.cfg	TmuxSession	-	-
@@ -1480,6 +1483,3 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
-session-lifecycle/SessionRotationSelector.cfg	SessionRotationSelector	-	-
-session-lifecycle/SessionRotationSelectorBefore.cfg	SessionRotationSelector	NoOldResume,NoOverwrite	StoredSelectorFollows
-session-lifecycle/SessionRotationSelectorRestart.cfg	SessionRotationSelector	NoOldResume	StoredSelectorFollows
