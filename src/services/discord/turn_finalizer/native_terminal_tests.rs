@@ -353,6 +353,8 @@ fn replace_tail(path: &Path, through: u64) {
         br#"{"type":"system","subtype":"turn_duration","sessionId":"native","probe":"B"}"#,
     )
     .unwrap();
+    let end = file.stream_position().unwrap();
+    file.set_len(end).unwrap();
     file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(12))
         .unwrap();
 }
@@ -488,9 +490,15 @@ async fn check_file_change(
     if let Some(saved) = restore {
         fs::rename(saved, path).unwrap();
     }
+    if case == "append" {
+        replace_tail(path, capture.tail.through);
+    }
 
     let fresh = RawCapture::new(f, shared, &root.join(format!("{case}-fresh"))).await;
-    let raw = fresh.prove(fresh.tail.clone()).await.unwrap();
+    let raw = fresh
+        .prove(fresh.tail.clone())
+        .await
+        .unwrap_or_else(|error| panic!("{case}: fresh proof: {error}"));
     let reused = fresh
         .capture
         .sources
