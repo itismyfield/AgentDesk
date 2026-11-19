@@ -8,7 +8,8 @@ import { campaignGroup } from "./campaignModel";
 import type { Tr } from "./campaignPresentation";
 import { TaskGroupHeading } from "./TaskListParts";
 
-/** 관계도: the group graph, or the open task's direct connections; a chosen group lists its tasks under the graph. */
+/** 관계도: the group graph, or the open task's direct connections. A chosen group's task list stays while a task is
+ * open, so closing the task returns focus to its row. */
 export default function CampaignRelations({ campaign, selectedId, onOpen, tr }: {
   campaign: Campaign; selectedId: string | null; onOpen: (id: string | null) => void; tr: Tr;
 }) {
@@ -26,9 +27,9 @@ export default function CampaignRelations({ campaign, selectedId, onOpen, tr }: 
       <div><Button variant="secondary" onClick={() => onOpen(null)}>{tr("전체 그룹 관계", "All group connections")}</Button></div>
       <CampaignNeighborhood nodes={campaign.nodes} selectedId={selected.id} visibleIds={all} onSelect={onOpen} tr={tr} />
     </> : <CampaignGroupOverview campaignId={campaign.id} revision={campaign.revision} nodes={campaign.nodes} tr={tr} onSelectGroup={setGroup} />}
-    {!selected && group !== null && <div className="grid min-w-0 gap-0.5">
+    {group !== null && <div className="grid min-w-0 gap-0.5">
       <TaskGroupHeading open controls={listId} label={group || tr("미분류", "Ungrouped")} count={members.length} onToggle={() => setGroup(null)} />
-      <div id={listId} className="grid min-w-0 gap-0.5">{members.map((node) => <button key={node.id} type="button" data-node-id={node.id} onClick={() => onOpen(node.id)}
+      <div id={listId} className="grid min-w-0 gap-0.5">{members.map((node) => <button key={node.id} type="button" data-node-id={node.id} data-task-id={node.id} aria-current={node.id === selectedId || undefined} onClick={() => onOpen(node.id)}
         className="campaign-task-row !m-0 w-full min-w-0 truncate !rounded-[var(--r-sm)] !border-0 !bg-transparent !px-3 !py-2 text-left !text-[13px] hover:!bg-[color-mix(in_oklch,var(--fg)_5%,transparent)]">{node.title}</button>)}</div>
     </div>}
   </div>;

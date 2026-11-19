@@ -2,17 +2,16 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { getCampaignDetail, getCampaigns, updateCampaignNode, type Campaign } from "../../api/campaigns";
+import { getCampaign, getCampaignDetail, getCampaigns, setCampaignAutoQueue, updateCampaignNode, type Campaign } from "../../api/campaigns";
 import { ApiRequestError } from "../../api/httpClient";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import CampaignsPanel from "./CampaignsPanel";
-import { makeLargeCampaign } from "./campaignTestFixtures";
+import { makeCampaignNode, makeLargeCampaign } from "./campaignTestFixtures";
 
-vi.mock("../../api/campaigns", () => ({
-  getCampaigns: vi.fn(),
-  getCampaignDetail: vi.fn(),
-  updateCampaignNode: vi.fn(),
-  setCampaignAutoQueue: vi.fn(),
+vi.mock("../../api/campaigns", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/campaigns")>()),
+  getCampaigns: vi.fn(), getCampaign: vi.fn(), getCampaignDetail: vi.fn(), updateCampaignNode: vi.fn(), setCampaignAutoQueue: vi.fn(),
+  campaignReadMark: () => 1, // the mocked list reads are numbered 1
 }));
 // Server campaigns have their own tests; here the panel shows legacy campaigns only.
 vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
@@ -259,6 +258,36 @@ it("lists a group's tasks from the connections graph and opens one", async () =>
   await act(async () => container.querySelector<HTMLButtonElement>('.campaign-relations [data-node-id="task-30"]')!.click());
   expect(document.querySelector(".campaign-node-detail h3")?.textContent).toContain("Task 30");
   expect(page()).toContain("Direct connections to the selected task");
+  // The group's rows stay while the task is open, so closing it lands on the row that opened it.
+  await act(async () => button("Close details").click());
+  expect(document.activeElement?.getAttribute("data-task-id")).toBe("task-30");
+});
+
+it("keeps an auto-run save that could not be confirmed, or is still pending, across a switch to Connections and back", async () => {
+  vi.mocked(setCampaignAutoQueue).mockRejectedValueOnce(new Error("Offline")).mockReturnValueOnce(new Promise(() => {}));
+  vi.mocked(getCampaign).mockRejectedValueOnce(new Error("Offline")).mockResolvedValueOnce(campaign);
+  await render();
+  const control = () => container.querySelector<HTMLElement>(".campaign-auto-queue [role=switch], button.campaign-auto-queue")!;
+  const roundTrip = async () => { await act(async () => button("Connections").click()); await act(async () => button("Overview").click()); };
+  await act(async () => control().click());
+  await roundTrip();
+  expect([control().dataset.state, control().textContent]).toEqual(["unknown", "Check auto-run"]);
+  await act(async () => control().click()); // the read-back answers, then a save that never answers
+  await act(async () => control().click());
+  await roundTrip();
+  expect(control().matches(":disabled")).toBe(true);
+});
+
+it("finds a task outside every preview by its session or node id and opens it", async () => {
+  const nodes = Array.from({ length: 431 }, (_, index) => makeCampaignNode(`task-${index}`, { title: `Task ${index}`, status: index % 2 ? "completed" : "pending", session_id: `session-${index}` }));
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [{ ...campaign, nodes }], live: {}, read: 1 });
+  await render();
+  const found = () => Array.from(container.querySelectorAll('[aria-label="Found tasks"] [data-task-id]'), (row) => row.getAttribute("data-task-id"));
+  await typeValue(container.querySelector<HTMLInputElement>('input[aria-label="Find a task"]')!, "session-417");
+  expect(found()).toEqual(["task-417"]);
+  await typeValue(container.querySelector<HTMLInputElement>('input[aria-label="Find a task"]')!, "TASK-430");
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Found tasks"] [data-task-id="task-430"]')!.click());
+  expect(document.querySelector(".campaign-node-detail h3")?.textContent).toContain("Task 430");
 });
 
 it("does not discard a newer draft when an older save resolves after switching away and back", async () => {

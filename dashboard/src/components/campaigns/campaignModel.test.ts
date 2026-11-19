@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CampaignNode } from "../../api/campaigns";
 import { CAMPAIGN_STAGES, campaignIssueLabel, campaignProgress, campaignStageStep, dependencyNeighborhood, groupCampaignNodes, safeCampaignLink } from "./campaignModel";
-import { legacyTask, openGates, statusSentence } from "./campaignOverviewModel";
+import { legacyEntry, legacyTask, openGates, statusSentence } from "./campaignOverviewModel";
 import { makeCampaignNode, makeLargeCampaign } from "./campaignTestFixtures";
 
 function node(id: string, dependencies: string[] = [], status: CampaignNode["status"] = "pending"): CampaignNode {
@@ -88,6 +88,14 @@ describe("first-screen glance", () => {
     expect(tasks.filter((task) => task.attention).map((task) => task.id)).toEqual(["b", "r1"]);
     expect(tasks.map((task) => task.blocker)).toEqual([null, "waits on deploy", null, "선행: #1", null, null]);
     expect(statusSentence("Running", tasks, (_, en) => en)).toBe("Running · 2 running, 2 blocked");
+  });
+  it("counts the list card's attention with the live map, as the overview does", () => {
+    const live = { card_id: "card", card_status: "in_progress", dispatch_type: "implementation", dispatch_status: "dispatched", session_status: "turn_active", session_seen_at: null, running: true, queue_status: null };
+    const nodes = (["pending", "failed", "blocked", "completed"] as const).flatMap((status) => [0, 1].map((on) => ({ ...node(`${status}-${on}`, [], status), blocker: "waits on deploy" })));
+    const working = Object.fromEntries(nodes.filter((value) => value.id.endsWith("-1")).map((value) => [value.id, live]));
+    const tr = (_: string, en: string) => en;
+    expect(legacyEntry({ ...makeLargeCampaign(), nodes }, working, tr).attention).toBe("1 failed · 4 blocked");
+    expect(statusSentence("Running", nodes.map((value) => legacyTask(value, working[value.id])), tr)).toBe("Running · 3 running, 4 blocked, 1 failed");
   });
   it("keeps a gate open from its opening event until the same run, node and gate is approved", () => {
     const event = (sequence: number, event: string, run_id: string, node_id: string, gate: string) =>
