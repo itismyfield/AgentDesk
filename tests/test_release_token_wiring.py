@@ -30,7 +30,7 @@ class ReleaseTokenWiringTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.repo = Path(temp.name)
         (self.repo / "scripts/lib").mkdir(parents=True)
-        for name in ("build-release.sh", "deploy-release.sh", "build_token.py", *HELPERS):
+        for name in ("build-release.sh", "deploy-release.sh", "build_token.py", "release_source.py", *HELPERS):
             shutil.copy2(REPO / "scripts" / name, self.repo / "scripts" / name)
 
     def inject(self, script, command):
@@ -57,6 +57,40 @@ class ReleaseTokenWiringTests(unittest.TestCase):
         for target in ("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"):
             with self.subTest(target=target):
                 self.assertEqual(observe(REPO, "build-release.sh", "release", target=target)["errors"], [])
+
+    def test_release_source_is_checked_around_cargo_under_the_token(self):
+        for script in ("build-release.sh", "deploy-release.sh"):
+            for profile in ("release", "release-fast"):
+                with self.subTest(script=script, profile=profile):
+                    report = observe(REPO, script, profile)
+                    self.assertEqual(report["errors"], [], report)
+                    events = report["events"]
+                    build = next(i for i, event in enumerate(events)
+                                 if event["command"] == "cargo" and event["argv"][0] == "build")
+                    probes = [(i, event) for i, event in enumerate(events) if event.get("source_probe")]
+                    self.assertTrue(probes)
+                    self.assertLess(probes[0][0], build)
+                    self.assertGreater(probes[-1][0], build)
+                    self.assertTrue(all(event["held"] for _, event in probes), probes)
+                    self.assertFalse(events[build]["checkout_sha_in_cargo"])
+                    records = ([e["record"] for e in events if e["command"] == "package_witness"]
+                               if script == "build-release.sh" else report["staged_records"])
+                    witness, = records
+                    self.assertEqual(witness["source_sha"], "a" * 40)
+                    self.assertEqual(witness["target"], "aarch64-apple-darwin")
+
+    def test_current_deploy_tools_build_an_older_checkout(self):
+        for profile in ("release", "release-fast"):
+            with self.subTest(profile=profile):
+                report = observe(REPO, "deploy-release.sh", profile, legacy_checkout=True)
+                self.assertEqual(report["errors"], [], report)
+                build, = [event for event in report["cargo"] if event["argv"][0] == "build"]
+                self.assertTrue(build["held"] and build["in_target_checkout"], build)
+                witness, = report["staged_records"]
+                self.assertEqual(witness["source_sha"], "a" * 40)
+                self.assertEqual("--release" in build["argv"], profile == "release")
+                if profile == "release-fast":
+                    self.assertEqual(build["argv"][1:3], ["--profile", profile])
 
     def test_config_resolver_stub_accepts_only_its_fixture_path_and_root(self):
         with tempfile.TemporaryDirectory(prefix="release-resolver-stub-") as temp:
@@ -141,6 +175,7 @@ class SccacheConsumerTests(unittest.TestCase):
         self.brew = self.root / "late-brew"
         self.brew.mkdir()
         self.executable(self.brew / "sccache", "#!/bin/sh\nexit 0\n")
+        self.executable(self.bin / "rustc", "#!/bin/sh\necho host: aarch64-apple-darwin\n")
         self.output = self.root / "env.json"
         self.env = {"HOME": str(self.root), "PATH": f"{self.bin}:/usr/bin:/bin",
                     "ENV_OUTPUT": str(self.output)}
@@ -180,15 +215,15 @@ from pathlib import Path
 sys.path.insert(0, {str(REPO / 'scripts')!r})
 import build_token as bt
 assert Path(sys.argv[1]).resolve() == Path.cwd() / 'scripts/build_token.py'
-assert sys.argv[2] == '--'
-assert 'cargo' in sys.argv[3:]
+assert sys.argv[2] == '--release-source' and sys.argv[6] == '--'
+assert 'cargo' in sys.argv[7:]
 bt._HOMEBREW_BIN = {str(self.brew)!r}
 real_open = os.open
 def sealed_open(path, *args, **kwargs):
     assert 'adk-build-token.lock' not in str(path), 'canonical token forbidden'
     return real_open(path, *args, **kwargs)
 os.open = sealed_open
-raise SystemExit(bt.run(sys.argv[3:], path={str(self.root / 'token')!r}))
+raise SystemExit(bt.run(sys.argv[7:], path={str(self.root / 'token')!r}, release_source=tuple(sys.argv[3:6])))
 """)
         self.executable(self.bin / "cargo", f"#!{sys.executable}\n" +
                         "import json,os;json.dump(dict(os.environ),open(os.environ['ENV_OUTPUT'],'w'))\n")
@@ -215,6 +250,9 @@ DEPLOY_BUILD_PROFILE={profile}
 DEPLOY_LOCK_TIMEOUT_SECS=5
 DEPLOY_RUN_STARTED="$SECONDS"
 TARGET=aarch64-apple-darwin
+BINARY_DIR="$REPO"
+BINARY_NAME=artifact
+export TMPDIR="$REPO"
 CARGO_TARGET_ARGS=(--target "$TARGET")
 _ensure_dashboard_dependencies() {{ :; }}
 _check_repo_remote_freshness() {{ :; }}
@@ -239,6 +277,7 @@ _binary_would_revert_o_ledger() {{ return 1; }}
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertNotIn("command not found", result.stderr)
                     seen = json.loads(self.output.read_text())
+                    self.assertNotIn("ADK_RELEASE_CHECKOUT_SHA", seen)
                     self.assertEqual(seen["PATH"], self.env["PATH"])
                     self.assertEqual(seen["SCCACHE_CACHE_SIZE"], "15G")
                     if installed:

@@ -721,6 +721,18 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
             Some(event) => event,
             None => return Ok(unchanged(state)),
         },
+        Command::RecordMerge { node_id, fact } => {
+            match super::landing_merge::decide(&mut next, node_id, fact, envelope.observed_at)? {
+                Some(event) => event,
+                None => return Ok(unchanged(state)),
+            }
+        }
+        Command::RecordLanding { node_id, fact } => {
+            match super::landing_effects::decide(&mut next, node_id, fact, envelope.observed_at)? {
+                Some(event) => event,
+                None => return Ok(unchanged(state)),
+            }
+        }
         Command::SealCandidate { .. }
         | Command::BindVerificationSubject { .. }
         | Command::BindVerificationInput { .. }

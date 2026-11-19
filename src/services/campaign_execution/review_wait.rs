@@ -237,7 +237,7 @@ fn matches_reply(request: &ReviewRequest, review: &ReviewEvidence) -> bool {
             || review.findings.iter().any(|finding| finding.open))
 }
 
-fn assessment(run: &Run, action: &Action, job: &ReviewJob) -> Option<StageAssessment> {
+pub(super) fn assessment(run: &Run, action: &Action, job: &ReviewJob) -> Option<StageAssessment> {
     let (candidate, _) = current_candidate(run, action)?;
     let seal = run.seals.get(&candidate.work_attempt)?;
     let ReviewStatus::Received { record } = &job.status else {

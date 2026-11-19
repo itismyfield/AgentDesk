@@ -4,6 +4,7 @@ pub mod definition;
 pub mod evidence;
 pub mod evidence_gate;
 pub mod execution_pin;
+pub mod landing;
 pub mod lifecycle;
 pub mod model;
 pub mod pipeline;

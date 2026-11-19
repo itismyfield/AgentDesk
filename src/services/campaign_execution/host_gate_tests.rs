@@ -18,7 +18,9 @@ use crate::services::campaign_execution::model::{
 use crate::services::campaign_execution::stage_fsm::tests::{
     assigned, begin, execution, review_of, run_v, seal_of,
 };
-use crate::services::campaign_execution::verification_run::{PhaseInput, tests as a1};
+use crate::services::campaign_execution::verification_run::{
+    AuthoritySource, PhaseInput, tests as a1,
+};
 
 const PHASE: &str = "archive";
 

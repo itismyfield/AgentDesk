@@ -91,7 +91,7 @@ YAML의 timeout 합이나 약 3.3시간이라는 과거 명세 합
 
 | 묶음 | 고정 목록·조합 | 입력/턴/시간 근거와 주기 |
 | --- | --- | --- |
-| P: 배포 SHA 핵심 | E-50(Claude/Herdr/channel), E-51(Codex/tmux/channel), R-marker(Claude/tmux/channel/busy), R-inject(Claude/Herdr/channel/native-busy/no-managed-or-external-holder), R-fresh(Claude/tmux/thread/primary-no-slots), R-host(Claude/Herdr/thread/primary-no-slots, busy 후속·취소 포함) | 기존 둘은 작업 prompt 6개; 신규는 A+B, A+B, 첫 입력, A+B로 **계획상 7개**, 합 13개. busy 합류가 성공하면 계획상 native 턴 10개지만 **실제 턴 미실측**. 기존 둘의 시간 proxy만 있고 전체는 unknown. 배포 완료 이벤트당 중복 제거한 요청 1개, 자동 실행은 실측 활성화 뒤 |
+| P: 배포 SHA 핵심 | E-50(Claude/Herdr/channel), E-51(Codex/Herdr/channel), R-marker(Claude/tmux/channel/busy), R-inject(Claude/Herdr/channel/native-busy/no-managed-or-external-holder), R-fresh(Claude/tmux/thread/primary-no-slots), R-host(Claude/Herdr/thread/primary-no-slots, busy 후속·취소 포함) | 기존 둘은 작업 prompt 6개; 신규는 A+B, A+B, 첫 입력, A+B로 **계획상 7개**, 합 13개. busy 합류가 성공하면 계획상 native 턴 10개지만 **실제 턴 미실측**. 기존 둘의 시간 proxy만 있고 전체는 unknown. 배포 완료 이벤트당 중복 제거한 요청 1개, 자동 실행은 실측 활성화 뒤 |
 | R1: 기본 relay | E-1, E-2, E-3, E-5, E-15; 지원하는 두 TUI provider, host를 회차별 tmux/Herdr 교대 | n=0, 실제 턴/시간/token unknown |
 | R2: 입력·본문·로컬 제어 | E-16, E-20, E-22, E-23, E-52, E-64; YAML cells와 실제 capability의 교집합 | n=0. E-20은 같은 세션에 입력 동시 도착이며 provider 활성 턴 2개를 요구하는 E-11과 다름 |
 | R3: 직접 TUI·압축·모델 | E-4, E-6, E-7, E-10, E-21, E-37; tmux TUI 및 YAML의 provider만 | n=0; Herdr에 tmux-only 키 검사를 N/A로 바꿔 전체 PASS하지 않음 |
@@ -150,6 +150,11 @@ provider별 일일 turn/token/time 한도도 `null`이다. 미지정 한도는 �
 새 턴을 시작하지 않는다. 이미 보낸 입력을 성공으로 꾸미거나 새 kill 권한으로 끊지 않는다.
 usage를 못 읽으면 `null/unknown`이며 token 0/비용 0이 아니다. 이 경우 token 실측 DoD는 미완료,
 그 provider의 자동 주기는 off다. 일반 작업과 공유하는 계정의 잔여 quota를 보장한다고 주장하지 않는다.
+
+**상태(11-19):** 사용자 결정으로 #8124 시험 인스턴스 대신 릴리스 서버와 기존 로그인 계정을 쓴다
+([릴리스 호스트 프로필](e2e-continuous/release-host.md)). P의 E-50·E-51만 5회씩 실측해 12시간 주기와 예약·하루 한도를 정했다
+([묶음별 실측](e2e-continuous/measurements.md)). R1–R5·F는 n=0이라 회전과 일일 전체는 off다.
+driver는 하네스의 모든 입력 직전에 앞 턴을 실제 사용량으로 정산하며, E-51은 운영 경로에 맞춰 Codex/Herdr 칸으로 잰다.
 
 ## 3. 빠진 네 단언과 수정 전 RED 계약
 

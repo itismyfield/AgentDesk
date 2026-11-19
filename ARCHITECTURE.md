@@ -427,13 +427,12 @@ src/
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
 │   │   ├── execution_pin.rs
+│   │   ├── landing.rs
+│   │   ├── landing_tests.rs
 │   │   ├── lifecycle.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
-│   │   ├── pipeline.rs
-│   │   ├── pipeline_fields.rs
 │   │   ├── pipeline_rules.rs
-│   │   ├── pipeline_tests.rs
 │   │   ├── profile.rs
 │   │   ├── review_gate.rs
 │   │   ├── verification_run.rs
@@ -742,7 +741,6 @@ src/
 │   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs
 │   │   ├── server_campaigns/
-│   │   │   ├── dashboard_wait_tests.rs
 │   │   │   ├── decision_tests.rs
 │   │   │   ├── dto.rs
 │   │   │   ├── http_tests.rs
@@ -981,8 +979,8 @@ src/
 │   │   │   └── ci_tests.rs
 │   │   ├── commands/
 │   │   │   └── transaction_tests.rs
-│   │   ├── view/
-│   │   │   └── dashboard_wait.rs
+│   │   ├── host_gate/
+│   │   │   └── authority.rs
 │   │   ├── adk_adapter.rs
 │   │   ├── adk_observe.rs
 │   │   ├── adk_observe_tests.rs
@@ -994,6 +992,8 @@ src/
 │   │   ├── adk_workspace_tests.rs
 │   │   ├── candidate_seal.rs
 │   │   ├── candidate_seal_tests.rs
+│   │   ├── ci_exception.rs
+│   │   ├── ci_exception_tests.rs
 │   │   ├── commands.rs
 │   │   ├── control.rs
 │   │   ├── control_tests.rs
@@ -1001,6 +1001,8 @@ src/
 │   │   ├── decision_commands_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
+│   │   ├── deploy_observe.rs
+│   │   ├── deploy_observe_tests.rs
 │   │   ├── effect_envelope.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
@@ -1016,6 +1018,12 @@ src/
 │   │   ├── host_journal.rs
 │   │   ├── host_worker.rs
 │   │   ├── host_worker_tests.rs
+│   │   ├── landing_effects.rs
+│   │   ├── landing_effects_tests.rs
+│   │   ├── landing_merge.rs
+│   │   ├── landing_merge_tests.rs
+│   │   ├── landing_prepare.rs
+│   │   ├── landing_prepare_tests.rs
 │   │   ├── lifecycle.rs
 │   │   ├── lifecycle_tests.rs
 │   │   ├── main_integration.rs
@@ -4102,6 +4110,8 @@ src/
 │   │   ├── script_refs.rs
 │   │   ├── session_control.rs
 │   │   └── store.rs
+│   ├── running_binary/
+│   │   └── windows_image.rs
 │   ├── scheduled_messages/
 │   │   ├── context_snapshot.rs
 │   │   ├── evidence.rs
@@ -4259,8 +4269,6 @@ src/
 │   ├── settings/
 │   │   ├── resolve/
 │   │   │   └── tests.rs
-│   │   ├── catalog.rs
-│   │   ├── catalog_tests.rs
 │   │   ├── resolve.rs
 │   │   ├── runtime_config_put.rs
 │   │   ├── startup.rs
@@ -5068,6 +5076,7 @@ src/
 │   ├── resident_loops.rs
 │   ├── retrospectives.rs
 │   ├── review_decision.rs
+│   ├── running_binary.rs
 │   ├── scheduled_messages.rs
 │   ├── scheduling.rs
 │   ├── service_error.rs

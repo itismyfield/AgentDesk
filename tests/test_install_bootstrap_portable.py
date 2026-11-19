@@ -24,6 +24,76 @@ class InstallBootstrapPortableTests(unittest.TestCase):
     def read_script(self) -> str:
         return INSTALL_SCRIPT.read_text(encoding="utf-8")
 
+    def test_signed_install_and_rollback_keep_a_matching_source_record(self):
+        with tempfile.TemporaryDirectory(prefix="agentdesk-install-source-") as temp:
+            root = Path(temp)
+            support = root / "support"
+            support.mkdir()
+            (support / "install_runtime_assets.py").write_text("pass\n")
+            installer = INSTALL_SCRIPT.read_text()
+            start = installer.index("finish_install() {")
+            end = installer.index("verify_installed_policies() {", start)
+            driver = root / "install-fixture.sh"
+            driver.write_text(installer[start:end] + r"""
+set -eu
+INSTALL_DIR="$1/runtime"
+INSTALL_SUPPORT_DIR="$1/support"
+INSTALL_STAGE=""
+INSTALL_SCRATCH=""
+INSTALL_COMMITTED=0
+OLD_BINARY_PRESENT=0
+OLD_BINARY_LOCKED=0
+BINARY_REPLACED=0
+sign_binary_with_fallback() { printf '\n# test signature\n' >> "$1"; }
+chflags() { :; }
+stat() { :; }
+trap finish_install EXIT
+install_runtime "$1" "$1/agentdesk"
+if [ "$2" = rollback ]; then exit 7; fi
+INSTALL_COMMITTED=1
+""")
+            binary = root / "agentdesk"
+            binary.write_text("#!/bin/sh\nexit 0\n")
+            before_signing = hashlib.sha256(binary.read_bytes()).hexdigest()
+            record = root / "agentdesk.source.json"
+            installed = root / "runtime/bin/agentdesk"
+            installed_record = installed.with_name(record.name)
+
+            def write_record(source, sha):
+                record.write_text(json.dumps({
+                    "schema_version": 1, "source_sha": source,
+                    "target": "aarch64-apple-darwin", "sha256": sha,
+                }))
+
+            def install(mode="success"):
+                return subprocess.run(["bash", str(driver), str(root), mode],
+                                      capture_output=True, text=True, timeout=10)
+
+            def check(result, status):
+                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+
+            write_record("a" * 40, before_signing)
+            check(install(), 0)
+            previous = json.loads(installed_record.read_text())
+            self.assertEqual(previous["source_sha"], "a" * 40)
+            self.assertEqual(previous["sha256"], hashlib.sha256(installed.read_bytes()).hexdigest())
+            self.assertNotEqual(previous["sha256"], before_signing)
+
+            write_record("b" * 40, before_signing)
+            check(install("rollback"), 7)
+            self.assertEqual(json.loads(installed_record.read_text()), previous)
+            self.assertEqual(previous["sha256"], hashlib.sha256(installed.read_bytes()).hexdigest())
+
+            write_record("b" * 40, "0" * 64)
+            check(install(), 0)
+            self.assertFalse(installed_record.exists())
+
+            write_record("a" * 40, before_signing)
+            check(install(), 0)
+            record.unlink()
+            check(install(), 0)
+            self.assertFalse(installed_record.exists())
+
     def test_installer_allows_repo_and_install_dir_overrides(self):
         text = self.read_script()
 
