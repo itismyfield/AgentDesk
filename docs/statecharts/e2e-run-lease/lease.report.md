@@ -197,6 +197,72 @@ pending metadata는 읽을 수 있으나, 자료를 얻을 수 없는 off/host-u
 외부 요약 `report-s3-model-summary.md`에 입력 SHA256·전체 위반 집합·실행 환경을 기록한다.
 재현 명령은 S2와 같고 새로운 out 경로를 사용한다. 기존 46 cfg의 결과도 새 모델에서 다시 검사했다.
 
+## 만료된 옛 head 결과 (2026-11-19)
+
+S3 리뷰가 넘긴 우선순위 공백을 모델에 넣었다. 다른 배포 head의 결과가 freshness 한도까지 지나면
+소비자는 `STALE`이 아니라 `STALE_HEAD`를 유지한다(`result=UNKNOWN reason=STALE_HEAD stale=1`).
+감시자는 `STALE_HEAD`만 경보로 삼으므로, 만료가 불일치 표식을 지우면 새 배포의 결과가 없다는 경보가 사라진다.
+
+새 snapshot `old-head-stale`과 뮤턴트 `consumer-stale-masks-head`(만료가 head 불일치를 덮는 수정 전 판정)를
+추가했다. 뮤턴트는 `ConsumerStateMapping`을 위반한다. `NoOldHeadGreen`은 두 옛 head snapshot 모두에 적용한다.
+정상 cfg는 22 snapshot, 161 상태/361 step을 탐색하며 차트의 상태·화살표는 그대로다(만료된 옛 head도
+"다른 배포 head" 상태로 표시). 전체는 59 cfg = 10 GREEN + 49 expected RED다. 기존 58 cfg의 바이트는 그대로다.
+같은 head의 만료 결과는 계속 `STALE`이며, 두 조합의 실제 시각 경계는 Python 소비자 시험이 맡는다.
+
+## 관측 불가 분류와 핵심 묶음 주기 (2026-11-19)
+
+릴리스 호스트에서 상시 실행을 켜면서 두 행동을 모델에 넣었다.
+
+**관측 불가는 FAIL이 아니다.** 소비자 snapshot에 `unobserved`(조회 전송 타임아웃, 교체된 서버 로그)를 추가했다.
+표시는 `UNEVALUABLE`이고 알림 pending을 남긴다. 새 규칙 `UnobservedNeverFail`과 뮤턴트
+`consumer-unobserved-fail`(관측 실패를 기능 FAIL로 세는 판정)을 더했다. 뮤턴트는 `ConsumerStateMapping`과
+`UnobservedNeverFail`을 위반한다. 정상 cfg는 23 snapshot, 차트의 상태·화살표는 그대로다.
+
+**핵심 묶음 주기.** 새 모델 [CoreSchedule](schedule/CoreSchedule.tla)은 supervisor가 배포 head와 주기 칸마다 넣는
+요청을 다룬다. 배포 시작·끝(끝에서 새 head의 배포 요청 제출), 시간 경과, 다른 묶음 결과가 최신 summary를 바꾸는
+경우, 요청 제출, 실행 시작·완료·crash가 행동이다.
+
+| 규칙 | 뜻 | 깨는 뮤턴트 |
+| --- | --- | --- |
+| `OneCoreRunPerHeadAndSlot` | 같은 head·같은 칸의 주기 실행 기록은 많아야 하나 | `tick_id`: 요청 이름을 tick마다 새로 지음 |
+| `NoStartDuringDeploy` | 배포 lock이 잡힌 동안 실행을 시작하지 않음 | `ignore_deploy` |
+| `DeployRequestKeepsItsRun` | 같은 head의 주기 요청이 기다리던 배포 요청을 밀어내지 않음 | `ignore_waiting` |
+| `StartedRunIsRecorded`(생존성) | 시작한 실행은 결국 결과 또는 abandoned 기록을 남김 | `drop_on_crash` |
+
+정상 1 GREEN + 뮤턴트 4 RED, 기대 위반 집합과 일치한다. 한도는 head 2, 칸 2, 제출 4회다. 실제 시각·예산 보류·
+채널 lease는 기존 LeaseLifetime 모델과 Python 시험이 맡는다. 실행 도중 배포가 시작되는 경우(그 반대 방향)는
+막지 않으며, 이때 배포 스모크가 셀을 idle로 보지 못해 건너뛸 수 있다.
+
+## 턴별 예산·하네스 수명·끄기 전환 (2026-11-19 수리)
+
+리뷰가 찾은 세 가지를 모델에 넣었다. 뮤턴트는 고치기 전 코드의 행동이다.
+
+새 모델 [TurnBudget](turns/TurnBudget.tla)은 driver 한 번의 실행이다. 입력 전송, 앞 턴 정산(실측·미측정·상한 초과),
+보고, driver 사망이 행동이다. 입력은 driver가 살아 있고 앞 턴이 정산됐고 gate가 멈추지 않았을 때만 나간다.
+
+| 규칙 | 뜻 | 깨는 뮤턴트(고치기 전 행동) |
+| --- | --- | --- |
+| `NoInputBeforeSettlement` | 앞 턴을 정산하기 전에는 다음 입력이 없음 | `presettle`: 예산을 실행 전에 모두 확인하고 턴 사이에는 보지 않음 |
+| `NoInputAfterStop` | 미측정·상한 초과로 멈춘 뒤에는 입력이 없음 | `ignore_stop` |
+| `NoInputAfterDriverDeath` | lease를 가진 driver가 죽은 뒤에는 입력이 없음 | `detached_writer`: 하네스가 별도 프로세스 |
+| `UnmeasuredTurnIsNotReportedAsMeasured` | 미측정 턴이 있으면 토큰을 실측값으로 보고하지 않음 | `partial_usage`: 읽힌 usage만 합산 |
+| `RunEnds`(생존성) | 실행은 보고나 사망으로 끝나거나 정산을 기다림 | — |
+
+[CoreSchedule](schedule/CoreSchedule.tla)에는 끄기 스위치를 더했다. 끄면 요청 제출과 실행 시작이 없고, off tick이
+status를 꺼짐으로 바꾼다. 끌 때 돌던 실행은 끝나면서 켜짐으로 다시 쓰고, 그다음 off tick이 바로잡는다.
+새 규칙 `SwitchedOffIsShown`(실행이 없는 off tick 뒤에는 꺼짐으로 보임)을 뮤턴트 `off_silent`(off tick이 쓰지 않음)가 깬다.
+
+| cfg | 고치기 전 | 고친 뒤 |
+| --- | --- | --- |
+| `schedule/schedule-none.cfg` 외 기존 4개 | `SwitchedOffIsShown` 없음 | 규칙 추가, 기대 위반 집합은 그대로 |
+| `schedule/schedule-off_silent.cfg` | 없음 | 새 RED(`SwitchedOffIsShown`) |
+| `turns/turn-none.cfg` | 없음 | 새 GREEN |
+| `turns/turn-{presettle,ignore_stop,detached_writer,partial_usage}.cfg` | 없음 | 새 RED, 각각 위 표의 규칙 하나 |
+
+배포 lock 확인과 실행 시작 사이에 배포가 들어오는 간격은 이번에도 모델에 넣지 않았다(`Start`가 확인과 시작을 한 행동으로 둔다).
+
+전체는 71 cfg = 12 GREEN + 59 expected RED다.
+
 ## 코드 기준과 범위
 
 코드 감사 기준 `origin/main=79bebdd4eaa29b289bf88412825baa7d70a6ac77`, 레인 기반 `21c80274`다.

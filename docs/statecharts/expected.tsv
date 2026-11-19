@@ -166,6 +166,8 @@ e2e-run-lease/run-consumer-off-green.cfg	LeaseLifetime	ConsumerStateMapping,NoGr
 e2e-run-lease/run-consumer-old-head-green.cfg	LeaseLifetime	ConsumerStateMapping,NoGroundlessPass,NoOldHeadGreen	-
 e2e-run-lease/run-consumer-qualifier-green.cfg	LeaseLifetime	ConsumerStateMapping,NoGroundlessPass	-
 e2e-run-lease/run-consumer-stale-green.cfg	LeaseLifetime	ConsumerStateMapping,NoGroundlessPass	-
+e2e-run-lease/run-consumer-stale-masks-head.cfg	LeaseLifetime	ConsumerStateMapping	-
+e2e-run-lease/run-consumer-unobserved-fail.cfg	LeaseLifetime	ConsumerStateMapping,UnobservedNeverFail	-
 e2e-run-lease/run-consumer-usage-crash.cfg	LeaseLifetime	ConsumerStateMapping,FunctionalFailRetained,MalformedUsageCompletes	-
 e2e-run-lease/run-consumer-usage-green.cfg	LeaseLifetime	ConsumerStateMapping,NoGroundlessPass	-
 e2e-run-lease/run-consumer-zero-green.cfg	LeaseLifetime	ConsumerStateMapping,NoGroundlessPass	-
@@ -201,6 +203,17 @@ e2e-run-lease/run-tx-orphan-no-pause.cfg	LeaseLifetime	ReservedOrphanPausesProvi
 e2e-run-lease/run-tx-result-regress.cfg	LeaseLifetime	CompletedResultNeverRegresses	CompletedPublicationRecovers
 e2e-run-lease/run-tx-status-first.cfg	LeaseLifetime	StatusRequiresDurable	-
 e2e-run-lease/run-tx-unknown-zero.cfg	LeaseLifetime	EveryTurnWithinBudget,UnknownNeverZero	-
+e2e-run-lease/schedule/schedule-drop_on_crash.cfg	CoreSchedule	-	StartedRunIsRecorded
+e2e-run-lease/schedule/schedule-ignore_deploy.cfg	CoreSchedule	NoStartDuringDeploy	-
+e2e-run-lease/schedule/schedule-ignore_waiting.cfg	CoreSchedule	DeployRequestKeepsItsRun	-
+e2e-run-lease/schedule/schedule-none.cfg	CoreSchedule	-	-
+e2e-run-lease/schedule/schedule-off_silent.cfg	CoreSchedule	SwitchedOffIsShown	-
+e2e-run-lease/schedule/schedule-tick_id.cfg	CoreSchedule	OneCoreRunPerHeadAndSlot	-
+e2e-run-lease/turns/turn-detached_writer.cfg	TurnBudget	NoInputAfterDriverDeath	-
+e2e-run-lease/turns/turn-ignore_stop.cfg	TurnBudget	NoInputAfterStop	-
+e2e-run-lease/turns/turn-none.cfg	TurnBudget	-	-
+e2e-run-lease/turns/turn-partial_usage.cfg	TurnBudget	UnmeasuredTurnIsNotReportedAsMeasured	-
+e2e-run-lease/turns/turn-presettle.cfg	TurnBudget	NoInputBeforeSettlement	-
 execution-authority/ExecutionAuthority.cfg	ExecutionAuthority	-	-
 execution-authority/ExecutionAuthorityAmbiguousGateway.cfg	ExecutionAuthority	-	-
 execution-authority/ExecutionAuthorityBeforeGateway.cfg	ExecutionAuthority	-	-

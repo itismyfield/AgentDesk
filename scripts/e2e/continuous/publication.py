@@ -13,7 +13,9 @@ def status(state, config, now, running=None):
     interval = config.get("rotation_interval_s")
     due = cursor.get("last_scheduled_at")
     return {"schema_version": 1, "enabled": config.get("enabled") is True, "heartbeat_at": now,
-            "tick_interval_s": config.get("tick_interval_s", 60), "rotation_interval_s": interval,
+            # Consumers expire results by the active period: the rotation, else the core re-run.
+            "tick_interval_s": config.get("tick_interval_s", 60),
+            "rotation_interval_s": interval if interval is not None else config.get("core_interval_s"),
             "max_run_s": config.get("max_run_s", 600), "tick_grace_s": config.get("tick_grace_s", 60),
             "running": running, "last_completed_run": last.get("run_id"),
             "outbox_pending": outbox.pending(state) if config.get("enabled") is True else 0,
