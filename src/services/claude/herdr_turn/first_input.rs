@@ -388,6 +388,28 @@ pub(super) fn observe(
     if early.is_some() {
         return Ok(());
     }
+    // The tmux handoff's launch registration of the transcript, starting the read at `last_offset`.
+    let register = |last_offset| {
+        let binding = TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: transcript.clone(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(attached.session_id.clone()),
+            last_offset,
+            relay_last_offset: None,
+        };
+        crate::services::tui_prompt_dedupe::register_launched_tmux_runtime_binding(
+            logical, binding,
+        );
+    };
+    // With the transcript written, a cold start's Pending resolves and its row turns Bound before
+    // this turn is read, so the turn is observed bound and an early end leaves nothing waiting.
+    let mut bound = attached.bound;
+    if !bound {
+        register(start);
+        bound = runtime.block_on(bind_once_logged(turn, &attached.nonce));
+    }
     let (mut terminal, mut unconfirmed) = (None, false);
     if early.is_none() {
         let kind = Some(RuntimeHandoffKind::ClaudeTui);
@@ -424,19 +446,9 @@ pub(super) fn observe(
     // A Herdr turn hands off exactly where its terminal record ends, never past it.
     let terminal_end = terminal.as_ref().map(|(read, ..)| read.end);
     let handoff_end = || terminal_end.unwrap_or_else(length);
-    // The tmux handoff's launch registration; with the transcript now written it resolves a cold
-    // start's Pending source, before any terminal of this turn reaches admission.
-    let binding = TuiRuntimeBinding {
-        runtime_kind: RuntimeHandoffKind::ClaudeTui,
-        output_path: transcript.clone(),
-        relay_output_path: None,
-        input_fifo_path: None,
-        session_id: Some(attached.session_id.clone()),
-        last_offset: handoff_end(),
-        relay_last_offset: None,
-    };
-    crate::services::tui_prompt_dedupe::register_launched_tmux_runtime_binding(logical, binding);
-    if !attached.bound {
+    // Registered again at the handoff offset, before any terminal of this turn reaches admission.
+    register(handoff_end());
+    if !bound {
         runtime.block_on(bind_once_logged(turn, &attached.nonce));
     }
     if let Some((read, token)) = terminal.take() {

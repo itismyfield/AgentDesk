@@ -885,9 +885,9 @@ fn is_turn_prompt(line: &str) -> bool {
     }
 }
 
-/// The row turns Bound once the pane's latest logged source is this execution's; until then it
-/// stays Pending and the next turn attaches it again.
-async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
+/// The row turns Bound once the pane's latest logged source is this execution's, `true` when this
+/// call bound it; until then it stays Pending and the next turn attaches it again.
+async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) -> bool {
     let logical = turn.owner.logical_key.as_str();
     let logged = latest_logged(turn).is_some_and(|event| {
         event.execution_nonce.as_deref() == Some(nonce)
@@ -897,14 +897,16 @@ async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
             )
     });
     if !logged {
-        return;
+        return false;
     }
-    if let HostedLookup::Found(observed) = load(turn.pool, &turn.owner).await {
-        let bound = bind_pg(turn.pool, &observed, &turn.owner, nonce).await;
-        if bound != Ok(HostedCasOutcome::Written) {
-            tracing::warn!(logical, ?bound, "herdr turn: row not bound");
-        }
+    let HostedLookup::Found(observed) = load(turn.pool, &turn.owner).await else {
+        return false;
+    };
+    let bound = bind_pg(turn.pool, &observed, &turn.owner, nonce).await;
+    if bound != Ok(HostedCasOutcome::Written) {
+        tracing::warn!(logical, ?bound, "herdr turn: row not bound");
     }
+    bound == Ok(HostedCasOutcome::Written)
 }
 
 mod live_reader;
