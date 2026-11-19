@@ -7,9 +7,11 @@ use crate::services::tmux_common::{self as tc, TmuxSourceAuthority};
 use crate::services::tui_prompt_dedupe::binding_context::{self, BindingContext, SpawnNonceMarker};
 
 pub(crate) mod clear_relaunch;
+mod disposition_cache;
 mod hold_detail;
 pub(crate) use hold_detail::codex_verified_hold_detail;
 
+#[derive(Clone)]
 pub(super) struct PinnedIncarnation(BindingContext);
 
 impl PinnedIncarnation {
@@ -18,6 +20,7 @@ impl PinnedIncarnation {
     }
 }
 
+#[derive(Clone)]
 pub(super) enum SourcePolicyState {
     Legacy,
     VerifiedCurrent(PinnedIncarnation),
@@ -33,8 +36,33 @@ thread_local! {
 pub(super) fn disposition(authority: &TmuxSourceAuthority<'_>) -> SourcePolicyState {
     #[cfg(test)]
     DISPOSITIONS.with(|count| count.set(count.get() + 1));
+    // The canary also consults launch configuration, so it is always judged afresh.
+    if authority.session() == crate::services::codex_tui::canary::CANARY_TMUX {
+        return judge(authority).0;
+    }
+    let channel = {
+        let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        state
+            .channel_by_tmux
+            .get(authority.session())
+            .filter(|entry| entry.recorded_at.elapsed() <= SESSION_MAPPING_TTL)
+            .map(|entry| entry.value)
+    };
+    disposition_cache::disposition(authority, channel, || judge(authority))
+}
+
+/// The pane's policy from its marker, canonical context and binding log, with the nonce read.
+fn judge(authority: &TmuxSourceAuthority<'_>) -> (SourcePolicyState, Option<String>) {
     let observed = codex_verified::CanonicalObservation::read(authority.session());
-    match codex_verified::observed_context(authority, &observed) {
+    let nonce = observed.nonce().map(str::to_owned);
+    (judge_observed(authority, &observed), nonce)
+}
+
+fn judge_observed(
+    authority: &TmuxSourceAuthority<'_>,
+    observed: &codex_verified::CanonicalObservation,
+) -> SourcePolicyState {
+    match codex_verified::observed_context(authority, observed) {
         Ok(Some(context)) => {
             return SourcePolicyState::VerifiedCurrent(PinnedIncarnation(context));
         }

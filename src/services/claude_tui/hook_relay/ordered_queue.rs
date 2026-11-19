@@ -24,6 +24,8 @@ use crate::services::claude_tui::hook_server::relay_receipts::{DELIVERY_TTL, LED
 
 #[path = "queue_retention.rs"]
 mod queue_retention;
+#[path = "recovery_pace.rs"]
+mod recovery_pace;
 #[cfg(all(test, unix))]
 use crate::services::claude_tui::hook_server::relay_receipts::{
     RELAY_DEADLINE_HEADER, RELAY_PUBLISHED_AT_HEADER, RELAY_REQUEST_ID_HEADER,
@@ -33,7 +35,6 @@ use queue_retention::{IdleQueueRetentionGuard, prune_artifact_dir};
 const RELAY_QUEUE_IDLE_GRACE: Duration = Duration::from_millis(250);
 const RELAY_RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const RELAY_IN_FLIGHT_RETRY_INTERVAL: Duration = Duration::from_millis(25);
-const RELAY_RECOVERY_SCAN_INTERVAL: Duration = Duration::from_millis(100);
 const RELAY_RECOVERY_REPROBE: Duration = Duration::from_millis(250);
 const MAX_ACTIVE_QUEUE_FILES: usize = 4096;
 const MAX_QUARANTINE_FILES: usize = 256;
@@ -852,22 +853,30 @@ pub(crate) fn start_ordered_hook_relay_recovery_owner() -> Option<OrderedHookRel
     let thread = std::thread::Builder::new()
         .name("hook-relay-recovery".to_string())
         .spawn(move || {
+            let mut pace = recovery_pace::Pace::default();
             while !thread_stop.load(Ordering::Acquire) {
                 let scan_started = Instant::now();
-                match scan_ordered_hook_relay_queues_once(&runtime_root) {
-                    Ok(stats) => tracing::debug!(
-                        scan_latency_ms = scan_started.elapsed().as_millis(),
-                        queue_count = stats.queue_count,
-                        active_queue_count = stats.active_queue_count,
-                        "ordered hook relay recovery scan completed"
-                    ),
-                    Err(error) => tracing::warn!(
-                        scan_latency_ms = scan_started.elapsed().as_millis(),
-                        error,
-                        "ordered hook relay recovery scan failed"
-                    ),
-                }
-                let deadline = Instant::now() + RELAY_RECOVERY_SCAN_INTERVAL;
+                let collect = pace.collect(scan_started);
+                let active = match scan_ordered_hook_relay_queues(&runtime_root, collect) {
+                    Ok(stats) => {
+                        tracing::debug!(
+                            scan_latency_ms = scan_started.elapsed().as_millis(),
+                            queue_count = stats.queue_count,
+                            active_queue_count = stats.active_queue_count,
+                            "ordered hook relay recovery scan completed"
+                        );
+                        Some(stats.active_queue_count)
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            scan_latency_ms = scan_started.elapsed().as_millis(),
+                            error,
+                            "ordered hook relay recovery scan failed"
+                        );
+                        None
+                    }
+                };
+                let deadline = Instant::now() + recovery_pace::Pace::wait(active);
                 while !thread_stop.load(Ordering::Acquire) && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -886,8 +895,17 @@ struct OrderedHookRelayScanStats {
     active_queue_count: usize,
 }
 
+#[cfg(test)]
 fn scan_ordered_hook_relay_queues_once(
     runtime_root: &Path,
+) -> Result<OrderedHookRelayScanStats, String> {
+    scan_ordered_hook_relay_queues(runtime_root, true)
+}
+
+/// One recovery pass; `collect` also prunes and retires each idle queue's garbage.
+fn scan_ordered_hook_relay_queues(
+    runtime_root: &Path,
+    collect: bool,
 ) -> Result<OrderedHookRelayScanStats, String> {
     let mut stats = OrderedHookRelayScanStats::default();
     for provider in ["claude", "codex"] {
@@ -918,7 +936,9 @@ fn scan_ordered_hook_relay_queues_once(
                 continue;
             }
             stats.queue_count += 1;
-            gc_ordered_hook_relay_queue(&queue_dir);
+            if collect {
+                gc_ordered_hook_relay_queue(&queue_dir);
+            }
             let has_work = queue_ingress_paths(&queue_dir).is_ok_and(|paths| !paths.is_empty())
                 || queue_request_paths(&queue_dir).is_ok_and(|paths| !paths.is_empty());
             if has_work {

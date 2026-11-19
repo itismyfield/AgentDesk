@@ -463,6 +463,176 @@ mod unix {
         assert_eq!(reads(), 6, "oversize has no persistent cache entry");
         assert!(cache.bytes <= MAX_BYTES);
     }
+
+    fn scanned() -> u64 {
+        SCANNED_BYTES.with(|count| count.replace(0))
+    }
+
+    fn append(path: &Path, bytes: &[u8]) {
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+
+    fn noise() -> Vec<u8> {
+        b"{\"type\":\"assistant\",\"uuid\":\"a\"}\n".to_vec()
+    }
+
+    fn uuids(rows: &Option<Arc<Vec<Taken>>>) -> Vec<(u64, String, bool)> {
+        rows.as_ref()
+            .unwrap()
+            .iter()
+            .map(|row| (row.offset, row.uuid.clone(), row.user))
+            .collect()
+    }
+
+    #[test]
+    fn native_census_append_resumes_and_matches_a_full_rescan() {
+        let c = Case::new(&[user("first"), noise()].concat());
+        let mut cache = Cache::default();
+        scanned();
+        assert_eq!(ids(&c.read(&mut cache).1), ["first"]);
+        let initial = fs::metadata(&c.source.path).unwrap().len();
+        assert_eq!(
+            scanned(),
+            initial,
+            "the first census reads the whole prefix"
+        );
+        // O lags: the file grew but the cursor is where it was.
+        let lagging = fs::read(&c.source.path).unwrap();
+        append(&c.source.path, &user("second"));
+        assert_eq!(
+            ids(&cache.read(&c.source, initial, &prefix(&lagging)).1),
+            ["first"]
+        );
+        assert_eq!(
+            scanned(),
+            0,
+            "an unchanged cursor on a longer file reads nothing"
+        );
+        append(&c.source.path, &[noise(), user("third")].concat());
+        let (stamp, resumed) = c.read(&mut cache);
+        let total = fs::metadata(&c.source.path).unwrap().len();
+        assert_eq!(
+            scanned(),
+            total - initial,
+            "only the appended bytes are read"
+        );
+        assert_eq!(stamp, fingerprint(&c.source));
+        let (_, full) = c.read(&mut Cache::default());
+        assert_eq!(scanned(), total, "the control rescans every byte");
+        assert_eq!(uuids(&resumed), uuids(&full));
+        assert_eq!(ids(&resumed), ["first", "second", "third"]);
+    }
+
+    #[test]
+    fn native_census_replaced_shrunk_or_rewritten_source_rescans_in_full() {
+        // A new inode at the path is another file.
+        let c = Case::new(&user("first"));
+        let mut cache = Cache::default();
+        assert!(c.read(&mut cache).1.is_some());
+        let longer = [user("other"), user("second")].concat();
+        let replacement = c.source.path.with_extension("replacement");
+        fs::write(&replacement, &longer).unwrap();
+        fs::rename(&replacement, &c.source.path).unwrap();
+        let (dev, ino) = file_identity(&fs::metadata(&c.source.path).unwrap());
+        let renamed = SourceId {
+            dev,
+            ino,
+            ..c.source.clone()
+        };
+        scanned();
+        assert_eq!(
+            ids(&cache
+                .read(&renamed, longer.len() as u64, &prefix(&longer))
+                .1),
+            ["other", "second"]
+        );
+        assert_eq!(scanned(), longer.len() as u64);
+
+        // A shorter file is never a resume of the longer one.
+        let c = Case::new(&[user("first"), user("second")].concat());
+        let mut cache = Cache::default();
+        assert!(c.read(&mut cache).1.is_some());
+        fs::write(&c.source.path, user("other")).unwrap();
+        scanned();
+        assert_eq!(ids(&c.read(&mut cache).1), ["other"]);
+        assert_eq!(scanned(), user("other").len() as u64);
+
+        // A longer in-place rewrite changes the bytes behind the resume point.
+        let c = Case::new(&user("first"));
+        let mut cache = Cache::default();
+        assert!(c.read(&mut cache).1.is_some());
+        let rewritten = [user("other"), user("second")].concat();
+        fs::write(&c.source.path, &rewritten).unwrap();
+        scanned();
+        let (_, rows) = c.read(&mut cache);
+        assert_eq!(
+            scanned(),
+            rewritten.len() as u64,
+            "the guard forces a full read"
+        );
+        assert_eq!(ids(&rows), ["other", "second"]);
+    }
+
+    #[test]
+    fn native_census_growth_during_scan_keeps_only_a_proven_resume_point() {
+        let first = [user("first"), noise()].concat();
+        let c = Case::new(&first);
+        let mut cache = Cache::default();
+        let path = c.source.path.clone();
+        let _growth = mutate_once(Stage::AfterScan, move |_| append(&path, &user("second")));
+        scanned();
+        let (stamp, rows) = cache.read(&c.source, first.len() as u64, &prefix(&first));
+        assert!(
+            stamp.is_none() && rows.is_none(),
+            "a moving file still answers nothing"
+        );
+        assert_eq!(scanned(), first.len() as u64);
+        assert!(
+            cache
+                .read(&c.source, first.len() as u64, &prefix(&first))
+                .1
+                .is_some(),
+            "the resume point is not an answer, so the same key reads again"
+        );
+        assert_eq!(scanned(), 0, "and resumes at the proven cursor");
+        let mut cache = Cache::default();
+        let path = c.source.path.clone();
+        let _growth = mutate_once(Stage::AfterScan, move |_| append(&path, &user("third")));
+        assert!(c.read(&mut cache).0.is_none());
+        scanned();
+        let before = fs::metadata(&c.source.path).unwrap().len();
+        let (stamp, rows) = c.read(&mut cache);
+        assert!(stamp.is_some());
+        assert_eq!(ids(&rows), ["first", "second", "third"]);
+        assert_eq!(
+            scanned(),
+            before - (first.len() + user("second").len()) as u64
+        );
+    }
+
+    #[test]
+    fn native_census_wrong_prefix_leaves_no_resume_point() {
+        let bytes = user("first");
+        let c = Case::new(&bytes);
+        let mut cache = Cache::default();
+        assert!(
+            cache
+                .read(&c.source, bytes.len() as u64, &"0".repeat(64))
+                .1
+                .is_none()
+        );
+        append(&c.source.path, &user("second"));
+        scanned();
+        assert_eq!(ids(&c.read(&mut cache).1), ["first", "second"]);
+        let total = fs::metadata(&c.source.path).unwrap().len();
+        assert_eq!(scanned(), total, "an unproven prefix is never extended");
+    }
 }
 
 #[cfg(not(unix))]
