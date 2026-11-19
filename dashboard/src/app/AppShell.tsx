@@ -159,6 +159,7 @@ export default function AppShell({
   useEffect(() => {
     setShowNotificationPanel(false);
     setShowTweaksPanel(false);
+    setShowMobileMoreMenu(false);
   }, [location.pathname]);
 
   useEffect(() => {
@@ -299,12 +300,12 @@ export default function AppShell({
           currentRouteId={currentRoute?.id ?? null}
           iconForRoute={iconForRoute}
           isKo={isKo}
-          navigateToRoute={navigateToRoute}
           routeBadge={sidebarBadgeForRoute}
           routes={PRIMARY_ROUTES}
           sections={SIDEBAR_SECTION_ORDER}
           setAgentsPageTab={setAgentsPageTab}
           wsConnected={wsConnected}
+          wsLastEventTs={wsLastEventTs}
         />
       )}
 
@@ -381,6 +382,7 @@ export default function AppShell({
       {isMobileViewport && (
         <AppMobileNavigation
           activeRouteId={activeMobileRouteId}
+          currentRouteId={currentRoute?.id ?? null}
           bottomSheetZIndex={SHELL_BOTTOM_SHEET_Z_INDEX}
           iconForRoute={iconForRoute}
           isKo={isKo}

@@ -41,8 +41,9 @@
   --r-md: 0.875rem;
   --r-lg: 1rem;
   --r-xl: 1.25rem;
-  --shadow-sm: 0 10px 24px color-mix(in oklch, black 16%, transparent);
-  --shadow-md: 0 18px 40px color-mix(in oklch, black 24%, transparent);
+  /* Dark shadows; the light theme softens them below (v3 tokens). */
+  --shadow-sm: 0 10px 24px rgb(0 0 0 / 0.22);
+  --shadow-md: 0 18px 40px rgb(0 0 0 / 0.32);
   --accent-indigo: oklch(0.63 0.19 274);
   --accent-violet: oklch(0.67 0.21 307);
   --accent-amber: oklch(0.8 0.16 83);
@@ -67,7 +68,8 @@
   --fg-faint: oklch(0.55 0.008 250);
   --line: oklch(0.37 0.01 250);
   --line-soft: color-mix(in oklch, var(--line) 60%, transparent);
-  --accent-soft: color-mix(in oklch, var(--accent) 24%, var(--bg-2) 76%);
+  /* v3 accent-soft. oklab keeps the accent hue; the old oklch mix drifted toward the background hue 250. */
+  --accent-soft: color-mix(in oklab, var(--accent) 33%, var(--bg-1));
   --ok: oklch(0.78 0.17 150);
   --warn: oklch(0.81 0.16 85);
   --err: oklch(0.67 0.22 22);
@@ -120,14 +122,16 @@
      resolved to an empty string and stroked nothing. Map it to the existing
      `--ok` green so the cost graph appears alongside the token graph. */
   --th-accent-success: var(--ok);
-  --th-badge-sky-bg: color-mix(in oklch, var(--info) 16%, var(--bg-2) 84%);
-  --th-badge-sky-text: color-mix(in oklch, var(--info) 74%, var(--fg) 26%);
-  --th-badge-blue-bg: color-mix(in oklch, var(--accent) 18%, var(--bg-2) 82%);
-  --th-badge-blue-text: color-mix(in oklch, var(--accent) 72%, var(--fg) 28%);
-  --th-badge-emerald-bg: color-mix(in oklch, var(--ok) 16%, var(--bg-2) 84%);
-  --th-badge-emerald-text: color-mix(in oklch, var(--ok) 74%, var(--fg) 26%);
-  --th-badge-amber-bg: color-mix(in oklch, var(--warn) 16%, var(--bg-2) 84%);
-  --th-badge-amber-text: color-mix(in oklch, var(--warn) 70%, var(--fg) 30%);
+  /* Badge fills are the v3 *-soft colors. Text mixes in oklab so amber stays amber
+     (an oklch mix with the bluish fg turned it olive). */
+  --th-badge-sky-bg: oklch(0.3 0.05 230);
+  --th-badge-sky-text: color-mix(in oklab, var(--info) 74%, var(--fg));
+  --th-badge-blue-bg: var(--accent-soft);
+  --th-badge-blue-text: color-mix(in oklab, var(--accent) 55%, var(--fg));
+  --th-badge-emerald-bg: oklch(0.3 0.06 150);
+  --th-badge-emerald-text: color-mix(in oklab, var(--ok) 74%, var(--fg));
+  --th-badge-amber-bg: oklch(0.32 0.06 85);
+  --th-badge-amber-text: color-mix(in oklab, var(--warn) 70%, var(--fg));
 }
 
 [data-theme="light"] {
@@ -142,7 +146,17 @@
   --fg-faint: oklch(0.62 0.01 250);
   --line: oklch(0.83 0.008 250);
   --line-soft: color-mix(in oklch, var(--line) 74%, transparent);
-  --accent-soft: color-mix(in oklch, var(--accent) 15%, var(--bg-2) 85%);
+  /* oklab: an oklch mix with white swung the hue toward 0 and painted it pink. */
+  --accent-soft: color-mix(in oklab, var(--accent) 15%, var(--bg-2) 85%);
+  /* v3 light indigo: white text on it passes 4.5:1. */
+  --accent-indigo: oklch(0.55 0.2 274);
+  --shadow-sm: 0 10px 24px rgb(0 0 0 / 0.08);
+  --shadow-md: 0 18px 40px rgb(0 0 0 / 0.14);
+  --th-badge-sky-bg: oklch(0.94 0.03 230);
+  /* 50% keeps every accent preset (amber, lime included) above 4.5:1 on light surfaces. */
+  --th-badge-blue-text: color-mix(in oklab, var(--accent) 50%, var(--fg));
+  --th-badge-emerald-bg: oklch(0.94 0.04 150);
+  --th-badge-amber-bg: oklch(0.95 0.05 85);
   --th-modal-overlay: color-mix(in oklch, black 22%, transparent);
   --th-nav-bg: color-mix(in oklch, var(--bg-1) 88%, white 12%);
   --th-overlay-subtle: color-mix(in oklch, black 4%, transparent);
@@ -172,7 +186,8 @@
   --api-soft: color-mix(in oklch, var(--api) 12%, var(--bg-2) 88%);
   /* Semantic accents also need a darker L on light bg so badge text passes AA. */
   --ok: oklch(0.55 0.17 150);
-  --warn: oklch(0.62 0.16 85);
+  /* 0.55 L keeps warning text above 4.5:1 on white (0.62 was 3.7:1). */
+  --warn: oklch(0.55 0.14 70);
   --err: oklch(0.55 0.22 22);
   --info: oklch(0.55 0.13 230);
 }

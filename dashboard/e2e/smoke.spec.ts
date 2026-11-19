@@ -4,6 +4,7 @@ const ROUTES = [
   { path: "/home", label: /홈|Home/ },
   { path: "/campaigns", label: /캠페인|Campaigns/ },
   { path: "/routines", label: /루틴|Routines/ },
+  { path: "/audit", label: /감사|Audit/ },
   { path: "/ops", label: /운영|Ops/ },
   { path: "/stats", label: /통계|Stats/ },
   { path: "/agents", label: /에이전트|Agents/ },
@@ -1359,7 +1360,7 @@ test.describe("Dashboard smoke tests", () => {
     }));
     await page.goto("/home");
 
-    await page.getByLabel(/검색 열기|Open search/).click();
+    await page.getByLabel(/^찾기$|^Search$/).click();
     const palette = page.getByRole("dialog", {
       name: /명령 팔레트|Command Palette/,
     });
@@ -1373,7 +1374,7 @@ test.describe("Dashboard smoke tests", () => {
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/stats$/);
 
-    await page.getByLabel(/검색 열기|Open search/).click();
+    await page.getByLabel(/^찾기$|^Search$/).click();
     await expect(palette).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(palette).toHaveCount(0);
@@ -1386,8 +1387,27 @@ test.describe("Dashboard smoke tests", () => {
     const sidebar = page.getByTestId("app-sidebar-nav");
     await expect(sidebar).toBeVisible();
     const box = await sidebar.boundingBox();
-    expect(box?.width).toBeGreaterThan(210);
-    expect(box?.width).toBeLessThan(225);
+    expect(box?.width).toBeGreaterThan(228);
+    expect(box?.width).toBeLessThan(236);
+    // v3 rail order: settings sits below a divider and ops is off the menu.
+    await expect(sidebar.getByRole("link")).toHaveText([/홈|Home/, /캠페인|Campaigns/, /에이전트|Agents/, /루틴|Routines/, /감사|Audit/, /통계|Stats/, /설정|Settings/]);
+    await expect(sidebar.getByRole("link", { name: /^홈$|^Home$/ })).toHaveAttribute("aria-current", "page");
+  });
+
+  test("desktop: a short window keeps the rail status in view and the menu scrollable", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
+    await mockOpsHealthApi(page, () => MOCK_OPS_HEALTH_BASE);
+    await page.setViewportSize({ width: 950, height: 345 });
+    await page.goto("/home");
+    const sidebar = page.getByTestId("app-sidebar-nav");
+    const menu = page.getByTestId("app-sidebar-menu");
+    expect(await menu.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
+    const status = await page.getByTestId("sidebar-connection-status").boundingBox();
+    expect(status!.y + status!.height).toBeLessThanOrEqual(345);
+    await sidebar.getByRole("link", { name: /^설정$|^Settings$/ }).click();
+    await expect(page).toHaveURL(/\/settings$/);
+    await page.getByTestId("settings-ops-link").click();
+    await expect(page.getByTestId("ops-page")).toBeVisible();
   });
 
   test("responsive: 900px switches from mobile tab bar to desktop sidebar", async ({ page }, testInfo) => {
@@ -1413,10 +1433,10 @@ test.describe("Dashboard smoke tests", () => {
     const topbar = page.getByTestId("topbar");
     await expect(bottomNav).toBeVisible();
     await expect(bottomNav.locator("button")).toHaveCount(5);
-    for (const id of ["home", "campaigns", "routines", "ops"]) {
+    for (const id of ["home", "campaigns", "agents", "audit"]) {
       await expect(page.getByTestId(`app-mobile-tab-${id}`)).toBeVisible();
     }
-    await expect(page.getByTestId("app-mobile-more-button")).toContainText(/더보기|More/);
+    await expect(page.getByTestId("app-mobile-more-button")).toContainText(/더 보기|More/);
     await expect(page.getByTestId("app-mobile-tab-home")).toHaveAttribute("aria-current", "page");
 
     const tabMetrics = await bottomNav.locator("button").evaluateAll((buttons) =>
@@ -1452,13 +1472,13 @@ test.describe("Dashboard smoke tests", () => {
 
     const moreMenu = page.getByTestId("app-mobile-more-menu");
     await expect(moreMenu).toBeVisible();
-    await expect(moreMenu.getByRole("button", { name: /더보기 닫기|Close/ })).toBeFocused();
-    for (const id of ["stats", "agents", "settings"]) {
+    await expect(moreMenu.getByRole("button", { name: /더 보기 닫기|Close/ })).toBeFocused();
+    for (const id of ["routines", "stats", "settings"]) {
       await expect(page.getByTestId(`app-mobile-more-${id}`)).toBeVisible();
     }
     await expect(page.getByTestId("app-mobile-more-theme")).toBeVisible();
     await expect(page.getByTestId("app-mobile-more-tweaks")).toBeVisible();
-    await expect(moreMenu.getByRole("button", { name: /회의|Meetings|업적|Achievements|음성|Voice|칸반|Kanban/ })).toHaveCount(0);
+    await expect(moreMenu.getByRole("button", { name: /회의|Meetings|업적|Achievements|음성|Voice|칸반|Kanban|운영|Ops/ })).toHaveCount(0);
 
     const moreMenuBackdropZIndex = await moreMenu.evaluate((element) =>
       Number(window.getComputedStyle(element.parentElement as HTMLElement).zIndex),
@@ -1481,6 +1501,23 @@ test.describe("Dashboard smoke tests", () => {
     await page.keyboard.press("Escape");
     await expect(moreMenu).toHaveCount(0);
     await expect(page.getByTestId("app-mobile-more-button")).toBeFocused();
+  });
+
+  test("responsive: the More sheet closes on back navigation and marks the current page", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+    await page.goto("/home");
+    await page.getByTestId("app-mobile-tab-audit").click();
+    await expect(page).toHaveURL(/\/audit$/);
+    await page.getByTestId("app-mobile-more-button").click();
+    await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(/\/home$/);
+    await expect(page.getByTestId("app-mobile-more-menu")).toHaveCount(0);
+
+    await page.goto("/routines");
+    await page.getByTestId("app-mobile-more-button").click();
+    await expect(page.getByTestId("app-mobile-more-routines")).toHaveAttribute("aria-current", "page");
+    await expect(page.getByTestId("app-mobile-more-stats")).not.toHaveAttribute("aria-current", "page");
   });
 
   test("responsive: mobile topbar is a single row with title and search", async ({ page }, testInfo) => {
@@ -1532,14 +1569,14 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/home");
     await expectNoHorizontalOverflow(page);
 
-    for (const id of ["campaigns", "routines", "ops"]) {
+    for (const id of ["campaigns", "agents", "audit"]) {
       await page.getByTestId(`app-mobile-tab-${id}`).click();
       await expect(page).toHaveURL(new RegExp(`/${id}$`));
       await expect(page.getByTestId(`app-mobile-tab-${id}`)).toHaveAttribute("aria-current", "page");
       await expectNoHorizontalOverflow(page);
     }
 
-    for (const id of ["stats", "agents", "settings"]) {
+    for (const id of ["routines", "stats", "settings"]) {
       await page.getByTestId("app-mobile-more-button").click();
       await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible({ timeout: 15000 });
       await page.getByTestId(`app-mobile-more-${id}`).click();
@@ -2096,10 +2133,60 @@ test.describe("Dashboard smoke tests", () => {
 
     await page
       .getByTestId("app-sidebar-nav")
-      .getByRole("button", { name: /^설정$|^Settings$/ })
+      .getByRole("link", { name: /^설정$|^Settings$/ })
       .click();
     await expect(page).toHaveURL(/\/settings(\?.*)?$/);
     await expect(page.getByTestId("topbar")).toContainText(/설정|Settings/);
+    // Ops left the menu; settings keeps the way in.
+    await page.getByTestId("settings-ops-link").click();
+    await expect(page).toHaveURL(/\/ops$/);
+  });
+
+  test("bootstrap: the loading screen shows text without emoji", async ({ page }) => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    await page.route(/\/api\/settings$/, async (route) => { await gate; await route.fallback(); });
+    await page.goto("/home");
+    await expect(page.getByTestId("bootstrap-loading")).toHaveText(/AgentDesk 대시보드 로딩 중|Loading AgentDesk Dashboard/);
+    await expect(page.locator("body")).not.toContainText("🐾");
+    release();
+    await expect(page.getByTestId("topbar")).toBeVisible();
+  });
+
+  test("command palette: departments get an icon instead of their emoji and ops is not offered", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop keyboard shortcut coverage");
+    await page.route(/\/api\/departments(?:\?.*)?$/, (route) => route.fulfill({
+      json: { departments: [{ ...MOCK_AGENT_DEPARTMENTS[0], icon: "📁" }] },
+    }));
+    await page.goto("/home");
+    await expect(page.getByTestId("topbar")).toBeVisible();
+    await page.keyboard.press("ControlOrMeta+k");
+    const palette = page.getByRole("dialog", { name: /명령 팔레트|Command Palette/ });
+    await expect(palette.getByRole("option", { name: /^(통계|Stats)\s*(이동|Go)$/ })).toHaveCount(1);
+    await expect(palette.getByRole("option", { name: /^(운영|Ops)\s*(이동|Go)$/ })).toHaveCount(0);
+
+    await palette.getByPlaceholder(/검색|Search/).fill("플랫폼");
+    const department = palette.getByRole("option", { name: /플랫폼\s*(부서|Dept)$/ });
+    await expect(department).toBeVisible();
+    await expect(palette).not.toContainText("📁");
+    await department.click();
+    await expect(page).toHaveURL(/\/agents$/);
+  });
+
+  test("ops: the /control bookmark still opens the ops page", async ({ page }) => {
+    await mockOpsHealthApi(page, () => MOCK_OPS_HEALTH_BASE);
+    await page.goto("/control");
+    await expect(page).toHaveURL(/\/ops$/);
+    await expect(page.getByTestId("ops-page")).toBeVisible();
+  });
+
+  test("audit: both tabs show the pending-API empty state", async ({ page }) => {
+    await page.goto("/audit");
+    await expect(page.getByTestId("audit-panel-prompts")).toContainText("#8249");
+    await page.getByRole("tab", { name: /메멘토 앵커|Memento anchors/ }).click();
+    await expect(page).toHaveURL(/\/audit\?tab=anchors$/);
+    await expect(page.getByTestId("audit-panel-anchors")).toContainText("#8249");
+    await expectNoHorizontalOverflow(page);
   });
 
   test("settings: search feedback and user-facing copy stay stable", async ({ page }) => {
