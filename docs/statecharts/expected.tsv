@@ -1290,6 +1290,7 @@ tui-o-writer/CustodyChildResumeBefore.cfg	CustodyChildResume	NoHeldLegacyPost	Se
 tui-o-writer/CustodyChildResumeDesign.cfg	CustodyChildResume	-	-
 tui-o-writer/CustodyChildResumeGuardFirstMut.cfg	CustodyChildResume	-	SentSettles
 tui-o-writer/CustodyChildResumeOldAsFalseMut.cfg	CustodyChildResume	NoHeldLegacyPost	-
+tui-o-writer/CustodyChildResumeSelfAsPlainMut.cfg	CustodyChildResume	NoHeldLegacyPost	-
 tui-o-writer/NoticeEvidenceAfterDirect.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceAfterOwned.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceAfterPolicy.cfg	NoticeEvidence	-	-
