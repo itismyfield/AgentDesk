@@ -233,7 +233,35 @@ S3 리뷰가 넘긴 우선순위 공백을 모델에 넣었다. 다른 배포 he
 채널 lease는 기존 LeaseLifetime 모델과 Python 시험이 맡는다. 실행 도중 배포가 시작되는 경우(그 반대 방향)는
 막지 않으며, 이때 배포 스모크가 셀을 idle로 보지 못해 건너뛸 수 있다.
 
-전체는 65 cfg = 11 GREEN + 54 expected RED다.
+## 턴별 예산·하네스 수명·끄기 전환 (2026-11-19 수리)
+
+리뷰가 찾은 세 가지를 모델에 넣었다. 뮤턴트는 고치기 전 코드의 행동이다.
+
+새 모델 [TurnBudget](turns/TurnBudget.tla)은 driver 한 번의 실행이다. 입력 전송, 앞 턴 정산(실측·미측정·상한 초과),
+보고, driver 사망이 행동이다. 입력은 driver가 살아 있고 앞 턴이 정산됐고 gate가 멈추지 않았을 때만 나간다.
+
+| 규칙 | 뜻 | 깨는 뮤턴트(고치기 전 행동) |
+| --- | --- | --- |
+| `NoInputBeforeSettlement` | 앞 턴을 정산하기 전에는 다음 입력이 없음 | `presettle`: 예산을 실행 전에 모두 확인하고 턴 사이에는 보지 않음 |
+| `NoInputAfterStop` | 미측정·상한 초과로 멈춘 뒤에는 입력이 없음 | `ignore_stop` |
+| `NoInputAfterDriverDeath` | lease를 가진 driver가 죽은 뒤에는 입력이 없음 | `detached_writer`: 하네스가 별도 프로세스 |
+| `UnmeasuredTurnIsNotReportedAsMeasured` | 미측정 턴이 있으면 토큰을 실측값으로 보고하지 않음 | `partial_usage`: 읽힌 usage만 합산 |
+| `RunEnds`(생존성) | 실행은 보고나 사망으로 끝나거나 정산을 기다림 | — |
+
+[CoreSchedule](schedule/CoreSchedule.tla)에는 끄기 스위치를 더했다. 끄면 요청 제출과 실행 시작이 없고, off tick이
+status를 꺼짐으로 바꾼다. 끌 때 돌던 실행은 끝나면서 켜짐으로 다시 쓰고, 그다음 off tick이 바로잡는다.
+새 규칙 `SwitchedOffIsShown`(실행이 없는 off tick 뒤에는 꺼짐으로 보임)을 뮤턴트 `off_silent`(off tick이 쓰지 않음)가 깬다.
+
+| cfg | 고치기 전 | 고친 뒤 |
+| --- | --- | --- |
+| `schedule/schedule-none.cfg` 외 기존 4개 | `SwitchedOffIsShown` 없음 | 규칙 추가, 기대 위반 집합은 그대로 |
+| `schedule/schedule-off_silent.cfg` | 없음 | 새 RED(`SwitchedOffIsShown`) |
+| `turns/turn-none.cfg` | 없음 | 새 GREEN |
+| `turns/turn-{presettle,ignore_stop,detached_writer,partial_usage}.cfg` | 없음 | 새 RED, 각각 위 표의 규칙 하나 |
+
+배포 lock 확인과 실행 시작 사이에 배포가 들어오는 간격은 이번에도 모델에 넣지 않았다(`Start`가 확인과 시작을 한 행동으로 둔다).
+
+전체는 71 cfg = 12 GREEN + 59 expected RED다.
 
 ## 코드 기준과 범위
 

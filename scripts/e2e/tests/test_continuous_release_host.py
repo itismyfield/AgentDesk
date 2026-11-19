@@ -97,13 +97,17 @@ class Usage(Fixture):
         mark = usage.mark(self.log)
         lines(self.log, codex("asked", marker="T1"), codex("task_complete"))
         self.assertIsNone(usage.turn("codex", [mark], "T1"), "a finished task without its token count")
-        lines(self.log, codex("asked", marker="T1"), codex("total", input_tokens=300, cached_input_tokens=140, output_tokens=25))
-        self.assertIsNone(usage.turn("codex", [mark], "T1"), "a token count before the task finished")
+        lines(self.log, codex("total", input_tokens=300, cached_input_tokens=140, output_tokens=25))
+        self.assertIsNone(usage.turn("codex", [mark], "T1"), "a token count with no finished task after it")
         lines(self.log, codex("task_complete"))
         self.assertEqual(usage.turn("codex", [mark], "T1"),
                          {"input_tokens": 100, "output_tokens": 15, "cache_read_tokens": 100, "cache_write_tokens": 0})
-        lines(self.log, codex("asked", marker="T2"), codex("total", input_tokens=400, output_tokens=30), codex("task_complete"))
-        self.assertIsNone(usage.turn("codex", [usage.mark(self.root / "binary"), {"path": str(self.log), "offset": 0}], "T2"))
+        mark = usage.mark(self.log)
+        lines(self.log, codex("total", input_tokens=400, cached_input_tokens=150, output_tokens=30),
+              codex("asked", marker="T2"), codex("task_complete"))
+        self.assertIsNone(usage.turn("codex", [mark], "T2"), "a token count from before the turn's input")
+        lines(self.log, codex("total", input_tokens=500, output_tokens=40), codex("task_complete"))
+        self.assertIsNone(usage.turn("codex", [mark], "T2"), "a missing counter is not zero")
 
     def test_a_turn_answered_in_a_new_session_adds_nothing_from_the_session_it_left(self):
         lines(self.log, asked("T1"), claude("m1"))
@@ -134,10 +138,16 @@ class Posted:
 
 
 class Driver(Fixture):
-    def drive(self, budget=None, lease=True, harness=None, cell="claude-herdr", idle=0, answers=(), prompts=3):
-        """Run the driver entry point around a fake harness; `answers[i]` makes turn i 'silent' or 'huge'."""
+    def drive(self, budget=None, lease=True, harness=None, cell="claude-herdr", idle=0, answers=(), prompts=3,
+              scenario="E-50", stray=None):
+        """Run the driver around a fake harness that keeps going after a refused input, as a real one may.
+
+        `answers[i]` makes turn i 'silent' or 'huge'; `stray` is an extra prompt posted after the first turn.
+        `!clear` moves the cell to a new session transcript.
+        """
         calls, posted, smoke = [], Posted(), smoke_driver._smoke()[0]  # noqa: SLF001
-        discord, transcript, self.writer = smoke.cell_driver.discord, self.root / "transcript.jsonl", None
+        discord, self.writer = smoke.cell_driver.discord, None
+        session = [self.root / "transcript.jsonl"]
 
         def spawn(argv, **_kwargs):
             calls.append(argv)
@@ -149,20 +159,24 @@ class Driver(Fixture):
             row = {"id": "E-50", "run_id": run_id, "cell": "claude-tui", "channel_id": "20", "status": "pass",
                    "real_provider_contacted": True, "marker_counts": dict.fromkeys(markers)}
             state, client = {"row": row, "rc": 0, "rotate": False}, discord.DiscordClient(base_url="http://unused.test")
-            try:
-                channel_lock.inherited()
-                self.writer = os.getpid()
-                for index, marker in enumerate(markers[:prompts]):
+            channel_lock.inherited()
+            self.writer = os.getpid()
+            print("[e2e] harness output")
+            for index, marker in enumerate(markers[:prompts]):
+                try:
                     if index == 2:
                         client.send("20", "!clear now")
+                        session.append(self.root / f"session-{len(posted.sent)}.jsonl")
                     client.send("20", f"say {marker}")
                     row["marker_counts"][marker] = 1
                     kind = dict(enumerate(answers)).get(index)
-                    lines(transcript, asked(marker), *([] if kind == "silent" else [
+                    lines(session[-1], asked(marker), *([] if kind == "silent" else [
                         claude(f"{run_id}-{index}", output_tokens=500 if kind == "huge" else 2)]))
-            except turn_gate.Stop as stop:
-                row.update(status="fail", reason=f"harness: {stop}")
-                state["rc"] = 1
+                    if stray and index == 0:
+                        client.send("20", stray)
+                except turn_gate.Stop as stop:
+                    row.update(status="fail", reason=f"harness: {stop}")
+                    state["rc"] = 1
             (harness or (lambda _state: None))(state)
             log = self.root / "server.log"
             log.write_text(("rotated\n" if state["rotate"] else log.read_text()) + f"turn {SESSION} done\n")
@@ -170,13 +184,13 @@ class Driver(Fixture):
                 {"run_id": run_id, "cell": "claude-tui", "channel_id": "20", "coverage_class_violations": [], "scenarios": [row]}))
             return state["rc"]
 
-        args = argparse.Namespace(scenario="E-50", cell=cell, run_id="run", profile="default", deploy_sha=None,
+        args = argparse.Namespace(scenario=scenario, cell=cell, run_id="run", profile="default", deploy_sha=None,
                                   budget=json.dumps(budget or {"turns": 3, "tokens": 300, "time_s": 10}))
         held = channel_lock.acquire(self.root / "state", RESOURCE)
         self.addCleanup(held.close)
         witness = {"fd": held.fd, "device": held.identity.st_dev, "inode": held.identity.st_ino}
         env = {channel_lock.LEASE_ENV: json.dumps(witness)} if lease else {}
-        with mock.patch.dict(os.environ, env), mock.patch.object(smoke_driver, "_transcripts", return_value=str(transcript)), \
+        with mock.patch.dict(os.environ, env), mock.patch.object(smoke_driver, "_transcripts", side_effect=lambda *_: str(session[-1])), \
                 mock.patch.object(smoke.cell_driver, "main", main), mock.patch.object(discord.urllib.request, "urlopen", posted):
             if not lease:
                 os.environ.pop(channel_lock.LEASE_ENV, None)
@@ -185,7 +199,10 @@ class Driver(Fixture):
         return report, [text for text in posted.sent if not text.startswith("!")], calls
 
     def test_passing_scenario_reports_turns_tokens_identity_and_the_host_the_server_admits(self):
+        stdout = os.fstat(1)
         report, prompts, spawned = self.drive()
+        # The harness wrote to its log; the driver's own stdout still carries the report to the runner.
+        self.assertTrue(os.path.samestat(os.fstat(1), stdout) and "[e2e] harness output" in Path(report["evidence_paths"][1]).read_text())
         planned = next(row for row in plan.deploy_occurrences(plan.load()) if row["scenario"] == "E-50")
         self.assertEqual((report["status"], report["native_turns"], report["tokens"], report["budget_checked"]), ("PASS", 3, 30, 3))
         self.assertEqual(report["usage"], {"native_turns": 3, "input_tokens": 3, "output_tokens": 6,
@@ -209,13 +226,19 @@ class Driver(Fixture):
         self.assertEqual((report["native_turns"], report["tokens"], report["budget_checked"]), (1, 508, 1))
         report, prompts, _ = self.drive(answers=[None, None, "silent"])
         self.assertEqual((len(prompts), report["status"], report["reason"], report["tokens"]), (3, "UNEVALUABLE", "USAGE_UNKNOWN", None))
+        report, prompts, _ = self.drive(budget={"turns": 3, "tokens": 300, "time_s": 10, "deadline": time.monotonic() - 1})
+        self.assertEqual((prompts, report["reason"], report["native_turns"]), ([], "TURN_BUDGET_EXHAUSTED", 0))
+        for stray in ("an unplanned prompt", "!stop"):
+            report, prompts, _ = self.drive(stray=stray)
+            self.assertEqual((len(prompts), report["reason"], report["native_turns"]), (1, "UNPLANNED_PROVIDER_INPUT", 1))
 
     def test_refused_runs_send_no_prompt_and_charge_nothing(self):
         cases = [({"cell": "codex-herdr"}, "CELL_NOT_ENABLED"), ({"lease": False}, "CHANNEL_LEASE_MISSING"),
                  ({"budget": {"turns": 2, "tokens": 300, "time_s": 10}}, "BUDGET_TOO_SMALL_FOR_SCENARIO"),
                  ({"budget": {"turns": 3, "tokens": 299, "time_s": 10}}, "BUDGET_TOO_SMALL_FOR_SCENARIO"),
                  ({"budget": {"turns": 3, "tokens": 300, "time_s": 9}}, "BUDGET_TOO_SMALL_FOR_SCENARIO"),
-                 ({"idle": 1}, "CELL_NOT_IDLE: busy: turn")]
+                 ({"idle": 1}, "CELL_NOT_IDLE: busy: turn"),
+                 ({"scenario": "E-63"}, "SCENARIO_NOT_GATED"), ({"scenario": "E-64"}, "SCENARIO_NOT_GATED")]
         for options, reason in cases:
             with self.subTest(reason=reason, options=options):
                 report, prompts, _ = self.drive(**options)
@@ -253,9 +276,17 @@ class Driver(Fixture):
         for broken in (lambda state: timeout(state, duplicate=True), missing, unsent, refused, residue):
             report, _, _ = self.drive(harness=broken, prompts=2 if broken is not residue else 3)
             self.assertEqual((report["status"], report["assertions"][0]["status"]), ("FAIL", "FAIL"))
+        report, _, _ = self.drive(harness=lambda state: timeout(state, duplicate=True), answers=["silent"])
+        self.assertEqual((report["status"], report["tokens"]), ("FAIL", None), "a budget stop does not hide a seen duplicate")
 
 
 class Supervisor(Fixture):
+    def test_scenario_capability_opens_that_scenario_only_past_the_provider_wide_gap(self):
+        manifest, e51, e1 = plan.load(), {"scenario": "E-51", "cell": "codex-herdr"}, {"scenario": "E-1", "cell": "codex-herdr"}
+        self.assertIsNone(plan.gate(manifest, e51, ["E-51/herdr"]))
+        for row, granted in ((e51, []), (e1, ["E-51/herdr"]), ({"scenario": "E-13", "cell": "claude-pipe"}, ["E-13/pipe"])):
+            self.assertEqual(plan.gate(manifest, row, granted)[0], "BLOCKED_CAPABILITY", (row, granted))
+
     def requests(self):
         return sorted(path.stem for path in (self.root / "state" / "inbox").glob("*.json"))
 

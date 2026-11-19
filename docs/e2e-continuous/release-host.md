@@ -7,14 +7,18 @@
 
 | 조각 | 하는 일 |
 | --- | --- |
-| `scripts/e2e/continuous/release_host.py tick` | launchd가 5분마다 깨운다. off면 아무것도 읽지 않고 끝난다. 서버 identity를 관측하고, 핵심 묶음 주기 요청을 넣은 뒤 runner tick을 한 번 돈다 |
-| `scripts/e2e/continuous/smoke_driver.py` | runner가 부르는 driver. 스모크와 같은 preflight·하네스·판정을 돌리고 schema2 보고를 낸다 |
-| `scripts/e2e/continuous/usage.py` | 시험 셀 세션의 전사에서 그 실행이 덧붙인 바이트만 읽어 토큰을 센다 |
-| `scripts/e2e/continuous/after_deploy.sh` | `deploy-release.sh`가 스모크 뒤에 부른다. 배포 SHA 요청을 inbox에 넣고 tick job을 올린다 |
+| `scripts/e2e/continuous/release_host.py tick` | launchd가 5분마다 깨운다. off면 서버를 관측하지 않고, 아직 켜짐으로 보이는 status만 꺼짐으로 바꾼다. on이면 서버 identity를 관측하고, 핵심 묶음 주기 요청을 넣은 뒤 runner tick을 한 번 돈다 |
+| `scripts/e2e/continuous/smoke_driver.py` | runner가 부르는 driver. 스모크와 같은 preflight·판정을 쓰고, 하네스를 자기 프로세스 안에서 돌린 뒤 schema2 보고를 낸다 |
+| `scripts/e2e/continuous/turn_gate.py` | 하네스의 모든 입력 직전에 불린다. 앞 턴을 실제 사용량으로 정산한 뒤에만 다음 턴을 예약한다 |
+| `scripts/e2e/continuous/usage.py` | 시험 셀 세션의 전사에서 한 턴이 덧붙인 바이트만 읽어 토큰을 센다. 입력과 끝난 응답의 사용량이 모두 있어야 값이 된다 |
+| `scripts/e2e/continuous/after_deploy.sh` | `deploy-release.sh`가 스모크 뒤에 부른다. 배포 SHA 요청을 inbox에 넣고 tick job을 올린다. 전체가 20초 안에 끝나지 않으면 그 단계를 끊고 배포를 계속한다 |
 | `scripts/launchd/com.agentdesk.e2e-continuous.plist` | tick job 틀. 실행 주기가 아니라 깨우는 주기다 |
 
 기기 전용 설정은 `~/.adk/e2e-continuous/config.json`(0600, 디렉터리 0700)이고 상태는 그 옆 `state/`다.
 이 파일이 없으면 배포 스크립트의 호출은 아무 일도 하지 않는다. 끄기는 이 파일의 `enabled=false` 한 곳이다.
+끄면 다음 tick(또는 다음 배포)이 `status.json`을 꺼짐으로 바꿔 소비자가 `DISABLED`·`enabled=0`·`pending_alerts=0`을 본다.
+outbox 원장과 tick job은 그대로 둔다. 끌 때 돌던 실행이 끝나며 켜짐으로 다시 쓰면 그다음 tick이 바로잡는다.
+한 번도 켠 적이 없어 status가 없는 기기에는 아무것도 쓰지 않는다.
 채널 ID·bot ID·경로만 담고 비밀값은 담지 않는다.
 
 ```json
@@ -22,18 +26,23 @@
  "state_dir": "<home>/.adk/e2e-continuous/state",
  "resource": {"guild": "<id>", "parents": ["<claude 채널>", "<codex 채널>"], "bot_set": ["<bot id>"]},
  "driver": ["/usr/bin/env", "python3", "-m", "scripts.e2e.continuous.smoke_driver", "--config", "<이 파일>"],
- "capabilities": ["usage:claude", "turn_budget:claude", "usage:codex", "turn_budget:codex"],
- "reservation": {"P": {"claude": {"turns": 3, "tokens": 240000, "time_s": 150}}},
+ "capabilities": ["usage:claude", "turn_budget:claude", "usage:codex", "turn_budget:codex", "E-51/herdr"],
+ "reservation": {"P": {"claude": {"turns": 3, "tokens": 300000, "time_s": 150}}},
  "budget": {"claude": {"daily_turns": 36, "daily_tokens": 2880000, "daily_time_s": 1800}},
  "occurrence_contracts": {"E-50": {"busy_basis": null, "placement": null, "operation": "clear_and_turns", "occurrence": 1}},
  "required_assertions": {"E-50": ["turns_delivered_once"]},
  "release_host": {"base_url": "http://127.0.0.1:8791", "binary": "<release>/bin/agentdesk",
                   "runtime_root": "<release>/runtime", "server_log": "<release>/logs/dcserver.stdout.log",
                   "deploy_lock": "<release>/runtime/deploy-release.lock",
-                  "cells": {"claude-herdr": {"smoke_cell": "claude-tui", "channel_id": "<id>", "deadline_s": 120, "turn_tokens": 80000}}}}
+                  "cells": {"claude-herdr": {"smoke_cell": "claude-tui", "channel_id": "<id>", "deadline_s": 120, "turn_tokens": 100000},
+                            "codex-herdr": {"smoke_cell": "codex-tui", "channel_id": "<id>", "deadline_s": 150, "turn_tokens": 40000}}}}
 ```
 
 `cells`에 없는 칸은 켜지 않은 칸이다. driver는 입력을 보내지 않고 `UNEVALUABLE`/`CELL_NOT_ENABLED`를 낸다.
+칸 이름은 manifest의 칸이고 `smoke_cell`은 하네스가 쓰는 셀 이름이다. `usage_wait_s`(기본 20)는 한 턴의 사용량 기록을 기다리는 한도다.
+
+E-51은 Codex/Herdr 칸이다. 운영 Codex 채널이 모두 Herdr로 돌기 때문이다(근거는 [묶음별 실측](measurements.md)).
+manifest의 `codex/herdr` 공백은 회전 묶음을 계속 막고, `E-51/herdr` capability가 이 시나리오 하나만 연다.
 
 ## 주기
 
@@ -50,12 +59,18 @@
 ## driver 계약
 
 - 채널 lease를 상속받지 못했거나, 켜지 않은 칸이거나, 셀이 idle이 아니면 입력 없이 거절한다(턴 0, 토큰 0).
-- **턴 예산은 시나리오 단위로 미리 확인한다.** 하네스가 프롬프트를 직접 보내므로 driver는 턴 사이에 끼어들지 못한다.
-  그래서 시나리오의 프롬프트 수만큼 `TurnGuard.start(turn_tokens)`가 모두 통과하고 남은 시간이 `deadline_s` 이상일 때만
-  첫 입력을 보낸다. 하나라도 모자라면 시나리오 전체를 시작하지 않는다. 턴마다 다시 확인하는 runner 계약보다 거칠다.
-  실행 뒤 실제 턴·토큰이 예약을 넘으면 runner가 `UNEVALUABLE`로 내리고 그 provider를 보류한다.
-- native 턴 수는 그 실행의 marker가 들어 있는 native 입력 레코드 수다. 토큰은 Claude는 API message ID로 중복을 없앤
-  합계, Codex는 세션 누적값의 실행 전후 차이다. 전달된 프롬프트의 입력 레코드를 못 찾으면 사용량은 unknown이다.
+- **하네스는 driver 프로세스 안에서 돈다.** 채널 lease를 가진 프로세스가 곧 입력을 보내는 프로세스다. driver가 죽으면
+  입력도 같이 끝나고, lease가 풀린 뒤 남아서 보내는 프로세스가 없다.
+- **턴마다 예산을 확인한다.** 하네스의 모든 채널 입력은 보내기 직전에 gate를 지난다(`tui_relay/discord.py`의 `input_gate`).
+  gate는 앞 턴을 실제 사용량으로 정산한 뒤에만 `TurnGuard.start(turn_tokens)`로 다음 턴을 예약한다.
+  앞 턴의 사용량을 `usage_wait_s` 안에 못 읽거나, 턴당 상한을 넘었거나, 예산·기한이 모자라거나, 계획에 없는 프롬프트면
+  그 뒤 입력은 0이다(`TURN_USAGE_UNKNOWN`·`TURN_OVER_BUDGET`·`TURN_BUDGET_EXHAUSTED`·`UNPLANNED_PROVIDER_INPUT`).
+  `!clear` 같은 text command는 턴을 예약하지 않지만 앞 턴 정산은 똑같이 거친다.
+  시작 전에는 예약이 시나리오 전체(프롬프트 수 × 턴당 상한, `deadline_s`)를 담는지도 본다.
+- **한 턴의 사용량은 입력과 끝난 응답이 모두 전사에 있을 때만 값이다.** Claude는 그 턴 입력 뒤 `end_turn` 응답의 usage,
+  Codex는 그 턴 입력 뒤 `token_count`와 `task_complete`가 있어야 한다. 필수 counter가 빠지면 0이 아니라 unknown이다.
+  한 턴이라도 unknown이면 실행 전체의 턴·토큰을 unknown으로 보고한다. runner는 예약을 그대로 두고 그 provider를 보류한다.
+  이번 턴의 입력이 없는 옛 세션 전사는 0으로 센다.
 - host는 서버가 Herdr로 받는 채널 목록에서 읽는다. 계획한 칸의 host와 다르면 `actual_occurrence_key`가 어긋나
   PASS가 되지 않는다.
 - 실행 중 서버 head·boot·binary가 바뀌면 `SERVER_CHANGED_DURING_RUN`이다.
@@ -71,6 +86,7 @@
 | 시나리오는 통과했는데 서버 로그가 교체돼 발췌가 없음 | `UNEVALUABLE` / `UNOBSERVED_SERVER_LOG` |
 | 같은 본문이 두 번 이상 전달된 것을 봄(위 둘과 겹쳐도) | `FAIL` |
 | 전송 오류 없이 본문이 기한 안에 오지 않음 | `FAIL` |
+| 예산 gate가 남은 입력을 막아 시나리오가 끝까지 가지 못함(중복 전달·입력 거절을 본 경우는 `FAIL`) | `UNEVALUABLE` / gate 사유 |
 
 하네스 자체의 재시도 수리는 #7335 범위다.
 

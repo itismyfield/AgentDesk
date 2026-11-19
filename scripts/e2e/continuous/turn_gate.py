@@ -4,13 +4,13 @@ Before any input the previous turn must be settled. Unknown or over-limit usage,
 or an unplanned prompt stops every later input of the run.
 """
 
-import re
 import time
 
 from . import usage
 
-# Text commands such as `!clear` are handled by the server and start no provider turn.
-COMMAND = re.compile(r"^![a-z][a-z_-]*(?:\s|$)")
+# Handled by the server without starting a provider turn; any other text is a prompt.
+COMMANDS = ("!clear",)
+UNRESOLVED = (OSError, ValueError, KeyError, TypeError, AttributeError)
 
 
 class Stop(RuntimeError):
@@ -26,14 +26,14 @@ class TurnGate:
     def _marks(self):
         try:
             return [usage.mark(self.transcript())]
-        except (OSError, ValueError, KeyError):
+        except UNRESOLVED:
             return []  # A cell without a session yet starts one; its transcript is found when the turn settles.
 
     def _measure(self, turn):
         marks = list(turn["marks"])
         try:
             latest = self.transcript()
-        except (OSError, ValueError, KeyError):
+        except UNRESOLVED:
             latest = None
         if latest is not None and latest not in {item["path"] for item in marks}:
             marks.append({"path": latest, "offset": 0})
@@ -58,7 +58,7 @@ class TurnGate:
     def before_send(self, content):
         if self.stopped is None:
             self.settle()
-        if self.stopped is None and not COMMAND.match(content):
+        if self.stopped is None and content.split(" ", 1)[0] not in COMMANDS:
             marker = next((item for item in self.planned if item in content), None)
             if marker is None:
                 self.stopped = "UNPLANNED_PROVIDER_INPUT"

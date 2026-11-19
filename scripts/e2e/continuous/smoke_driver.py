@@ -23,6 +23,9 @@ SCENARIOS = REPO / "tests/e2e/tui_relay/scenarios"
 ASSERTION = "turns_delivered_once"
 TRANSPORT = re.compile(r"^(TimeoutError|socket\.timeout)\b|URL error|\bHTTP 5\d\d\b|retry budget exhausted")
 FINGERPRINT_BYTES = 65536
+# Every input of these steps is a channel post that passes the turn gate; nothing else is driven here.
+GATED_STEPS = {"send_discord_prompt", "wait_for_discord_text", "wait_for_raw_discord_text", "wait_idle_s",
+               "relay_author", "timeout_s"}
 
 
 def _smoke():
@@ -119,6 +122,11 @@ def run(args, config, spawn=subprocess.run):
     provider, channel = args.cell.split("-")[0], str(cell["channel_id"])
     run_id = f"{args.run_id}-{args.scenario}-{cell['smoke_cell']}"
     markers = smoke.expected_markers(SCENARIOS, args.scenario, run_id)
+    specs = (smoke.yaml.safe_load(path.read_text(encoding="utf-8")) for path in sorted(SCENARIOS.glob("*.yaml")))
+    spec = next((data for data in specs if isinstance(data, dict) and str(data.get("id")) == args.scenario), {})
+    steps = [step for step in spec.get("steps") or [] if isinstance(step, dict)]
+    if not steps or not all(set(step) <= GATED_STEPS for step in steps):
+        return refuse("SCENARIO_NOT_GATED")
     remaining, limit = json.loads(args.budget), cell["turn_tokens"]
     # The reservation must hold the whole worst-case plan before the first prompt; each turn is then gated.
     if (not markers or type(limit) is not int or limit <= 0 or remaining["turns"] < len(markers)

@@ -64,7 +64,7 @@ def _codex(path, offset, marker):
         if isinstance(total, dict) and start < offset:
             before = total
         elif isinstance(total, dict):
-            after, counted = total, asked
+            after, counted = total, True
         elif start >= offset and payload.get("type") == "message" and payload.get("role") == "user" \
                 and _asks(payload.get("content"), marker):
             asked, counted, finished = True, False, False
