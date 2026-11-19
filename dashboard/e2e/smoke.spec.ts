@@ -1394,6 +1394,22 @@ test.describe("Dashboard smoke tests", () => {
     await expect(sidebar.getByRole("link", { name: /^홈$|^Home$/ })).toHaveAttribute("aria-current", "page");
   });
 
+  test("desktop: a short window keeps the rail status in view and the menu scrollable", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
+    await mockOpsHealthApi(page, () => MOCK_OPS_HEALTH_BASE);
+    await page.setViewportSize({ width: 950, height: 345 });
+    await page.goto("/home");
+    const sidebar = page.getByTestId("app-sidebar-nav");
+    const menu = page.getByTestId("app-sidebar-menu");
+    expect(await menu.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
+    const status = await page.getByTestId("sidebar-connection-status").boundingBox();
+    expect(status!.y + status!.height).toBeLessThanOrEqual(345);
+    await sidebar.getByRole("link", { name: /^설정$|^Settings$/ }).click();
+    await expect(page).toHaveURL(/\/settings$/);
+    await page.getByTestId("settings-ops-link").click();
+    await expect(page.getByTestId("ops-page")).toBeVisible();
+  });
+
   test("responsive: 900px switches from mobile tab bar to desktop sidebar", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "mobile", "Desktop-only test");
 
@@ -1485,6 +1501,23 @@ test.describe("Dashboard smoke tests", () => {
     await page.keyboard.press("Escape");
     await expect(moreMenu).toHaveCount(0);
     await expect(page.getByTestId("app-mobile-more-button")).toBeFocused();
+  });
+
+  test("responsive: the More sheet closes on back navigation and marks the current page", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+    await page.goto("/home");
+    await page.getByTestId("app-mobile-tab-audit").click();
+    await expect(page).toHaveURL(/\/audit$/);
+    await page.getByTestId("app-mobile-more-button").click();
+    await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(/\/home$/);
+    await expect(page.getByTestId("app-mobile-more-menu")).toHaveCount(0);
+
+    await page.goto("/routines");
+    await page.getByTestId("app-mobile-more-button").click();
+    await expect(page.getByTestId("app-mobile-more-routines")).toHaveAttribute("aria-current", "page");
+    await expect(page.getByTestId("app-mobile-more-stats")).not.toHaveAttribute("aria-current", "page");
   });
 
   test("responsive: mobile topbar is a single row with title and search", async ({ page }, testInfo) => {
@@ -2107,6 +2140,44 @@ test.describe("Dashboard smoke tests", () => {
     // Ops left the menu; settings keeps the way in.
     await page.getByTestId("settings-ops-link").click();
     await expect(page).toHaveURL(/\/ops$/);
+  });
+
+  test("bootstrap: the loading screen shows text without emoji", async ({ page }) => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    await page.route(/\/api\/settings$/, async (route) => { await gate; await route.fallback(); });
+    await page.goto("/home");
+    await expect(page.getByTestId("bootstrap-loading")).toHaveText(/AgentDesk 대시보드 로딩 중|Loading AgentDesk Dashboard/);
+    await expect(page.locator("body")).not.toContainText("🐾");
+    release();
+    await expect(page.getByTestId("topbar")).toBeVisible();
+  });
+
+  test("command palette: departments get an icon instead of their emoji and ops is not offered", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop keyboard shortcut coverage");
+    await page.route(/\/api\/departments(?:\?.*)?$/, (route) => route.fulfill({
+      json: { departments: [{ ...MOCK_AGENT_DEPARTMENTS[0], icon: "📁" }] },
+    }));
+    await page.goto("/home");
+    await expect(page.getByTestId("topbar")).toBeVisible();
+    await page.keyboard.press("ControlOrMeta+k");
+    const palette = page.getByRole("dialog", { name: /명령 팔레트|Command Palette/ });
+    await expect(palette.getByRole("option", { name: /^(통계|Stats)\s*(이동|Go)$/ })).toHaveCount(1);
+    await expect(palette.getByRole("option", { name: /^(운영|Ops)\s*(이동|Go)$/ })).toHaveCount(0);
+
+    await palette.getByPlaceholder(/검색|Search/).fill("플랫폼");
+    const department = palette.getByRole("option", { name: /플랫폼\s*(부서|Dept)$/ });
+    await expect(department).toBeVisible();
+    await expect(palette).not.toContainText("📁");
+    await department.click();
+    await expect(page).toHaveURL(/\/agents$/);
+  });
+
+  test("ops: the /control bookmark still opens the ops page", async ({ page }) => {
+    await mockOpsHealthApi(page, () => MOCK_OPS_HEALTH_BASE);
+    await page.goto("/control");
+    await expect(page).toHaveURL(/\/ops$/);
+    await expect(page.getByTestId("ops-page")).toBeVisible();
   });
 
   test("audit: both tabs show the pending-API empty state", async ({ page }) => {

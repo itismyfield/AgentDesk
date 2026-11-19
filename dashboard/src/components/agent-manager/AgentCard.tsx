@@ -62,6 +62,8 @@ export default function AgentCard({ agent, locale, tr, topSkills, viewMode, sele
   const done = tr(`완료 ${agent.stats_tasks_done.toLocaleString()}건`, `${agent.stats_tasks_done.toLocaleString()} done`);
   const label = [name, secondary, status, task.value].filter(Boolean).join(", ");
   const muted = agent.status === "offline";
+  // The selected row sits on accent-soft, where fg-muted falls under 4.5:1 with bright accents such as lime.
+  const subtleText = selected ? "text-(--fg-dim)" : "text-(--fg-muted)";
 
   if (viewMode === "grid") {
     return (
@@ -131,11 +133,11 @@ export default function AgentCard({ agent, locale, tr, topSkills, viewMode, sele
         <strong className={`truncate font-medium leading-5 ${muted ? "text-(--fg-muted)" : "text-(--fg)"}`} title={name}>
           {name}
         </strong>
-        <small className="truncate text-xs leading-4 text-(--fg-muted) @2xl:hidden" title={task.value}>
+        <small className={`truncate text-xs leading-4 ${subtleText} @2xl:hidden`} title={task.value}>
           {secondary ? `${secondary} · ` : ""}
           {task.value}
         </small>
-        <small className="hidden truncate text-xs leading-4 text-(--fg-muted) @2xl:block" title={secondary ?? undefined}>
+        <small className={`hidden truncate text-xs leading-4 ${subtleText} @2xl:block`} title={secondary ?? undefined}>
           {secondary ?? " "}
         </small>
       </span>
@@ -148,7 +150,7 @@ export default function AgentCard({ agent, locale, tr, topSkills, viewMode, sele
       <span className="hidden w-20 shrink-0 truncate text-xs text-(--fg-dim) @lg:block" title={providerMeta.label}>
         {providerMeta.label}
       </span>
-      <span className="hidden min-w-16 shrink-0 whitespace-nowrap text-right text-xs tabular-nums text-(--fg-muted) @lg:block">{done}</span>
+      <span className={`hidden min-w-16 shrink-0 whitespace-nowrap text-right text-xs tabular-nums ${subtleText} @lg:block`}>{done}</span>
     </button>
   );
 }
