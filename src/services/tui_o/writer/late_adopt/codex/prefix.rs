@@ -196,6 +196,7 @@ pub(in crate::services::tui_o::writer::late_adopt) fn frontier(
 
 /// The native turn of `source` that `anchor` falls in: its opener and, once ended, its end. None
 /// when the rollout is not `source` any more or `anchor` lies outside every turn.
+#[cfg(unix)]
 pub(crate) fn native_turn(source: &SourceId, anchor: u64) -> Option<(u64, Option<u64>)> {
     let frontier = frontier(source).ok()?;
     let at = frontier

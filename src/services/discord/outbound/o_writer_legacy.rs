@@ -9,6 +9,7 @@ use super::super::SharedData;
 use super::delivery_record as dr;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider::ProviderKind;
+#[cfg(unix)]
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::writer::adoption::{
     CodexDelivered, CodexDelivery, LegacyCursor, LegacyEpoch, LegacyView,
@@ -112,6 +113,7 @@ impl LegacyView for LegacyRelay {
         Ok(codex_records(channel, tmux))
     }
 
+    #[cfg(unix)]
     fn codex_closures(
         &self,
         channel: u64,
