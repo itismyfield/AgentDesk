@@ -171,7 +171,6 @@ src/services/discord/turn_presence/activity/unbound/watcher_runtime_tests.rs
 src/services/discord/watchers/lifecycle/activity.rs
 src/services/discord/watchers/lifecycle/claims_host_tests.rs
 src/services/discord/watchers/lifecycle/claims.rs
-src/services/gemini.rs
 src/services/hang_forensics/tests/mod.rs
 src/services/health_diagnostics/pg_wire_proxy_tests.rs
 src/services/herdr_launch/unplaced_tests.rs
