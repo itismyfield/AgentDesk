@@ -11,6 +11,8 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider::ProviderKind;
 #[cfg(unix)]
 use crate::services::tui_o::shadow::SourceId;
+#[cfg(unix)]
+use crate::services::tui_o::writer::adoption::Closures;
 use crate::services::tui_o::writer::adoption::{
     CodexDelivered, CodexDelivery, LegacyCursor, LegacyEpoch, LegacyView,
 };
@@ -114,10 +116,7 @@ impl LegacyView for LegacyRelay {
     }
 
     #[cfg(unix)]
-    fn codex_closures(
-        &self,
-        channel: u64,
-    ) -> futures::future::BoxFuture<'static, Result<Vec<(SourceId, u64)>, String>> {
+    fn codex_closures(&self, channel: u64) -> futures::future::BoxFuture<'static, Closures> {
         let pool = self.shared.pg_pool.clone();
         Box::pin(async move {
             let Some(pool) = pool else {
@@ -133,9 +132,33 @@ impl LegacyView for LegacyRelay {
                         dev: closure.dev,
                         ino: closure.ino,
                     };
-                    (source, closure.from)
+                    (source, closure.from, closure.until)
                 })
                 .collect())
+        })
+    }
+
+    #[cfg(unix)]
+    fn close_unplaced(
+        &self,
+        channel: u64,
+        source: &SourceId,
+        (from, until): (u64, u64),
+    ) -> futures::future::BoxFuture<'static, Result<(), String>> {
+        let pool = self.shared.pg_pool.clone();
+        let http = self.shared.serenity_http_or_token_fallback();
+        let closed = crate::db::tui_output_disposition::closure::Closure {
+            session_id: source.session_id.clone(),
+            path: source.path.display().to_string(),
+            dev: source.dev,
+            ino: source.ino,
+            from,
+            until: Some(until),
+        };
+        Box::pin(async move {
+            let pool = pool.ok_or("no rejection store")?;
+            let close = super::super::recovery_engine::refused_discard::close_unplaced;
+            close(&pool, http, channel, &closed).await
         })
     }
 
