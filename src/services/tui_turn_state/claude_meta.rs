@@ -54,6 +54,7 @@ pub(crate) fn completed_reply(record: &Value) -> bool {
 }
 
 /// Only known non-conversation records may preserve a reply; user meta can itself start work.
+/// Compact completion reads past the same records, so a new metadata type is added only here.
 pub(crate) fn idle_metadata(record: &Value) -> bool {
     match record["type"].as_str() {
         Some(
@@ -68,7 +69,8 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
             | "cost-state"
             | "tools-used"
             | "pr-link"
-            | "frame-link",
+            | "frame-link"
+            | "repl-mode",
         ) => true,
         Some("system") => record["subtype"] == "informational",
         Some("attachment") => {
