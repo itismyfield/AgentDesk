@@ -1,5 +1,6 @@
 import { Lock } from "lucide-react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { useState } from "react";
+import { Handle, NodeToolbar, Position, type NodeProps } from "@xyflow/react";
 import { StatusMarker, type MarkerTone } from "./StatusMarker";
 
 export type TaskNodeData = {
@@ -30,5 +31,39 @@ export function RelationsTaskNode({ data, selected }: NodeProps) {
     {task.note && <p className={`m-0 flex items-center gap-1.5 border-t border-[var(--line)] px-3 py-1.5 ${task.note.tone === "err" ? "text-[var(--err)]" : ""}`}>
       {task.note.tone === "lock" && <Lock aria-hidden className="size-3" />}{task.note.text}
     </p>}
+  </div>;
+}
+
+/** The chosen tie's menu; labels come translated, strands are the tie's lines as `#A → #B`. */
+export type TieMenu = {
+  labels: { menu: string; remove: string; detach: string; preview: string };
+  strands: { key: string; label: string }[]; previewing: boolean;
+  act: { remove: () => void; detach: (key: string) => void; preview: () => void };
+};
+export type TieNodeData = { count: number; menu: TieMenu | null };
+
+/** Every line through a tie enters and leaves at its centre, so they gather at the dot and fan out again. */
+const centre = { left: "50%", top: "50%", width: 1, height: 1, minWidth: 0, minHeight: 0, border: 0, background: "transparent" };
+const ITEM = "!m-0 flex min-h-9 w-full items-center justify-between gap-6 !rounded-md !border-0 !bg-transparent !px-2.5 text-left text-[13px] text-[var(--fg)] hover:!bg-[color-mix(in_oklch,var(--fg)_6%,transparent)]";
+const KEY = "rounded border border-[var(--line)] px-1.5 font-mono text-[11px] text-[var(--fg-muted)]";
+
+/** A cable tie: a dot the lines pass through, with the number of lines it holds. Chosen, its menu opens above it. */
+export function RelationsTieNode({ data, selected }: NodeProps) {
+  const { count, menu } = data as TieNodeData;
+  const [detaching, setDetaching] = useState(false);
+  return <div className="grid size-11 cursor-grab place-items-center">
+    <Handle type="target" position={Position.Left} isConnectable={false} style={centre} />
+    <span className={`relative size-5 rounded-full border-2 bg-[var(--th-card-bg)] ${selected ? "border-[var(--info)] ring-4 ring-[color-mix(in_oklch,var(--info)_25%,transparent)]" : "border-[var(--fg-muted)]"}`}>
+      <span className="absolute -top-4 -right-4 min-w-5 rounded-full border border-[var(--line)] bg-[var(--th-card-bg)] px-1 text-center text-[11px] leading-4 text-[var(--fg)] tabular-nums">{count}</span>
+    </span>
+    <Handle type="source" position={Position.Right} isConnectable={false} style={centre} />
+    {menu && <NodeToolbar isVisible position={Position.Top} offset={12}>
+      <div role="group" aria-label={menu.labels.menu} className="nodrag nopan grid w-60 gap-0.5 rounded-lg border border-[var(--line)] bg-[var(--th-card-bg)] p-1 shadow-lg">
+        <button type="button" className={ITEM} onClick={menu.act.remove}>{menu.labels.remove}<kbd className={KEY}>Delete</kbd></button>
+        <button type="button" className={ITEM} aria-expanded={detaching} onClick={() => setDetaching(!detaching)}>{menu.labels.detach}</button>
+        {detaching && menu.strands.map((strand) => <button key={strand.key} type="button" className={`${ITEM} !pl-5 text-[var(--fg-muted)]`} onClick={() => menu.act.detach(strand.key)}>{strand.label}</button>)}
+        <button type="button" className={ITEM} aria-pressed={menu.previewing} onClick={menu.act.preview}>{menu.labels.preview}<kbd className={KEY}>H</kbd></button>
+      </div>
+    </NodeToolbar>}
   </div>;
 }
