@@ -3,9 +3,8 @@
 
 use super::*;
 
-/// Moves the channel's cached session onto `rotation`'s new session while it still names the
-/// session the pane left. A cleared, empty or unrelated cache stays as it is. Returns the left
-/// session when the cache now names the new one, so the stored selector may move off it.
+/// Moves a cache still naming the session the pane left onto the new one; a cleared or other cache
+/// stays. Returns the left session once the cache names the new one, for the stored selector.
 async fn follow_cached_selector(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
