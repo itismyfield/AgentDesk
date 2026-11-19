@@ -241,6 +241,7 @@ src/
 │   │   ├── listing.rs
 │   │   ├── provider_resume_fence.rs
 │   │   ├── rebind_override.rs
+│   │   ├── retired_status_fence.rs
 │   │   ├── tests.rs
 │   │   └── thread_gc.rs
 │   ├── dispatches/
