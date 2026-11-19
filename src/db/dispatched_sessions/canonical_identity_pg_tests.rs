@@ -3476,34 +3476,33 @@ async fn retired_row_refuses_late_active_hooks_until_a_new_turn_pg() {
     nonce.bind(id).execute(&pool).await.unwrap();
     let ended = http_force::disconnect_retired_pg(&pool, id, &retired, None, true).await;
     assert_eq!(ended, Ok(true));
-    for (status, turn, info, expected) in [
-        ("turn_active", None, "heartbeat", "disconnected/"),
-        ("turn_active", Some("t1"), "same turn", "disconnected/"),
-        (
-            "turn_active",
-            Some("t2"),
-            "new turn",
-            "turn_active/new turn",
-        ),
-        ("turn_active", None, "heartbeat", "turn_active/heartbeat"),
-        ("idle", None, "ended", "idle/ended"),
-        ("turn_active", None, "pending", "turn_active/pending"),
+    for (turn, info, expected) in [
+        (None, "beat", "disconnected/"),
+        (Some("t1"), "same", "disconnected/"),
+        (Some("t2"), "new", "turn_active/new"),
+        (None, "beat", "turn_active/beat"),
+        (None, "idle", "idle/idle"),
+        (None, "pending", "turn_active/pending"),
     ] {
         if info == "pending" {
             set_raw(&pool, key, Some(wire(&pending(&owner(channel), "n2")))).await;
         }
         let mut p = params(key, channel);
-        (p.status, p.turn_start_nonce, p.session_info) = (status, turn, Some(info));
-        upsert_hook_session_with_identity_pg(&pool, p, None)
-            .await
-            .unwrap();
+        p.status = if info == "idle" {
+            "idle"
+        } else {
+            "turn_active"
+        };
+        (p.turn_start_nonce, p.session_info) = (turn, Some(info));
+        let upsert = upsert_hook_session_with_identity_pg(&pool, p, None);
+        upsert.await.unwrap();
         let read = "SELECT status || '/' || COALESCE(session_info, '') FROM sessions WHERE id = $1";
-        let row: String = sqlx::query_scalar(read)
-            .bind(id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(row, expected, "{status} {turn:?} {info}");
+        let row = sqlx::query_scalar::<_, String>(read).bind(id);
+        assert_eq!(
+            row.fetch_one(&pool).await.unwrap(),
+            expected,
+            "{turn:?} {info}"
+        );
     }
     pool.close().await;
     db.drop().await;
