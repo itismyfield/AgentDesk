@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CampaignNode } from "../../api/campaigns";
-import { CAMPAIGN_STAGES, campaignGlance, campaignIssueLabel, campaignProgress, campaignStageStep, dependencyNeighborhood, EMPTY_FILTERS, filterCampaignNodes, groupCampaignNodes, safeCampaignLink } from "./campaignModel";
+import { CAMPAIGN_STAGES, campaignIssueLabel, campaignProgress, campaignStageStep, dependencyNeighborhood, groupCampaignNodes, safeCampaignLink } from "./campaignModel";
+import { legacyTask, statusSentence } from "./campaignOverviewModel";
 import { makeCampaignNode, makeLargeCampaign } from "./campaignTestFixtures";
 
 function node(id: string, dependencies: string[] = [], status: CampaignNode["status"] = "pending"): CampaignNode {
@@ -27,13 +28,6 @@ describe("large campaign exploration", () => {
     expect(groups.at(-1)?.key).toBe("");
     expect(groups.every((group) => group.nodes.length === 30)).toBe(true);
     expect(groups.every((group) => group.progress.counts.running === 5)).toBe(true);
-  });
-  it("finds issue numbers independently of the canonical node ID and composes filters", () => {
-    const nodes = makeLargeCampaign().nodes;
-    expect(filterCampaignNodes(nodes, { ...EMPTY_FILTERS, query: "#5701" }).map((value) => value.id)).toEqual(["task-1"]);
-    expect(filterCampaignNodes(nodes, { ...EMPTY_FILTERS, query: "5701" }).map((value) => value.id)).toEqual(["task-1"]);
-    expect(filterCampaignNodes(nodes, { ...EMPTY_FILTERS, group: "Gateway", status: "blocked" })).toHaveLength(5);
-    expect(filterCampaignNodes(nodes, { ...EMPTY_FILTERS, hideCompleted: true })).toHaveLength(100);
   });
   it("bounds a 120-node fan-in/out and reports omitted and external connections", () => {
     const upstream = Array.from({ length: 100 }, (_, index) => node(`up-${index}`));
@@ -87,17 +81,14 @@ describe("first-screen glance", () => {
     expect(raw.length).toBeLessThanOrEqual(28);
     expect(raw.endsWith("…")).toBe(true);
   });
-  it("leads with running then blocked work and only counts the other statuses", () => {
-    const result = campaignGlance([node("b", [], "blocked"), node("r", [], "running"), node("p1"), node("p2"), node("c", [], "completed"), node("s", [], "skipped")]);
-    expect(result.active.map((value) => value.id)).toEqual(["r", "b"]);
-    expect(result.running).toBe(1);
-    expect(result.buckets.map((bucket) => [bucket.status, bucket.nodes.length])).toEqual([["pending", 2], ["completed", 1], ["skipped", 1]]);
+  it("treats a pending task with a blocker like a blocked one and says so in the status sentence", () => {
+    const tasks = [node("b", [], "blocked"), node("r", [], "running"), { ...node("p1"), blocker: "waiting on review" }, node("p2"), node("c", [], "completed")].map((value) => legacyTask(value));
+    expect(tasks.filter((task) => task.attention).map((task) => task.id)).toEqual(["b", "p1"]);
+    expect(statusSentence("Running", tasks, (_, en) => en)).toBe("Running · 1 running, 2 blocked");
   });
   it("counts open nodes with work running now as running, and leaves closed and quiet ones alone", () => {
     const live = (running: boolean) => ({ card_id: "card", card_status: "in_progress", dispatch_type: "implementation", dispatch_status: "dispatched", session_status: running ? "turn_active" : "idle", session_seen_at: null, running, queue_status: null });
-    const result = campaignGlance([node("b", [], "blocked"), node("p-live"), node("p-quiet"), node("c-live", [], "completed")], { "p-live": live(true), "p-quiet": live(false), "c-live": live(true) });
-    expect(result.active.map((value) => value.id)).toEqual(["p-live", "b"]);
-    expect([result.running, result.blocked]).toEqual([1, 1]);
-    expect(result.buckets.map((bucket) => [bucket.status, bucket.nodes.length])).toEqual([["pending", 1], ["completed", 1]]);
+    const status = (value: CampaignNode, running: boolean) => legacyTask(value, live(running)).status;
+    expect([status(node("p-live"), true), status(node("p-quiet"), false), status(node("c-live", [], "completed"), true)]).toEqual(["running", "pending", "completed"]);
   });
 });

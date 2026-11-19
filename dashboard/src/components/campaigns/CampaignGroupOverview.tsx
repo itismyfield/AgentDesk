@@ -193,7 +193,7 @@ export default function CampaignGroupOverview({ campaignId, revision, nodes, onS
   const crossDependencies = overview.connections.reduce((total, connection) => total + connection.count, 0);
   return <section className="campaign-neighborhood" aria-label={tr("그룹별 전체 관계", "All campaign group relationships")}>
     <div className="campaign-row"><strong>{tr("그룹별 전체 관계", "All campaign group relationships")}</strong><span>{tr(`그룹 ${overview.groups.length}개 · 작업 ${nodes.length}개`, `${overview.groups.length} groups · ${nodes.length} tasks`)}</span></div>
-    <p className="campaign-muted">{tr("전체 작업의 그룹 관계입니다. 화살표는 선행 그룹 → 후속 그룹, 숫자는 연결된 의존성 수입니다. 그룹을 선택하면 해당 작업 목록으로 이동합니다.", "Groups across all tasks. Arrows point from dependency to dependent; numbers count the connecting dependencies. Select a group to open its task list.")}</p>
+    <p className="campaign-muted">{tr("전체 작업의 그룹 관계입니다. 화살표는 선행 그룹 → 후속 그룹, 숫자는 연결된 의존성 수입니다. 그룹을 고르면 그 작업이 아래에 나와요.", "Groups across all tasks. Arrows point from dependency to dependent; numbers count the connecting dependencies. Select a group to list its tasks below.")}</p>
     {nodes.length === 0 ? <p>{tr("표시할 작업이 없습니다.", "No tasks to display.")}</p> : <>
       <CampaignTiePanel tr={tr} strands={strands} ties={tieSummaries} tieMode={tieMode} draft={draft} selectedTie={selected ? selectedTie : null} focused={focused}
         canUndo={ties.canUndo} showOriginal={showOriginal} dragging={drag !== null} status={ties}

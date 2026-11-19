@@ -41,30 +41,27 @@ export default function ServerCampaignControls({ view, connection, stopIntent, b
   const stopBusy = busy || pendingStop?.status === "sending";
   const immediate = commandAvailability(view, "stop_immediate", connection);
   return <section className="campaign-server-controls" aria-label={tr("캠페인 제어", "Campaign controls")}>
-    <div className="campaign-actions">
+    <div className="campaign-actions items-start">
       <CommandButton view={view} command="start" connection={connection} busy={busy} onCommand={() => onCommand("start")} tr={tr} />
       <CommandButton view={view} command="resume" connection={connection} busy={busy} onCommand={() => onCommand("resume")} tr={tr} />
+      <CommandButton view={view} command="stop_finish_stage" connection={connection} busy={stopBusy} onCommand={() => onCommand("stop_finish_stage")} tr={tr} />
+      <ActionMenu label={tr("다른 중단 방법", "More ways to stop")} items={[{
+        key: "stop_immediate", danger: true, disabled: !immediate.enabled || stopBusy,
+        label: immediate.reason ? `${tr(...COMMAND_LABELS.stop_immediate)} · ${rejectionText(immediate.reason, tr)}` : tr(...COMMAND_LABELS.stop_immediate),
+        onSelect: () => onCommand("stop_immediate"),
+        confirm: {
+          title: tr("지금 바로 중단할까요?", "Stop right now?"),
+          description: tr("진행 중인 세션을 기다리지 않고 멈춥니다. 하던 단계는 끝나지 않은 채로 남습니다.", "Stops without waiting for running sessions. The current stages stay unfinished."),
+          confirmLabel: tr(...COMMAND_LABELS.stop_immediate), cancelLabel: tr("취소", "Cancel"),
+        },
+      }]} />
     </div>
-    <div className="campaign-server-stop grid gap-3 rounded-lg border border-th-border-subtle p-4">
-      <h4>{tr("중단", "Stop")}</h4>
+    <div className="campaign-server-stop grid gap-2">
       <p className="campaign-muted">
         {tr("진행 단계", "Current stages")}: {active.length ? active.map((node) => `${node.id} ${tr(...STAGE_LABELS[node.runtime.stage])}`).join(", ") : tr("없음", "none")}
         {" · "}{tr(`관련 세션 ${view.sessions.length}개`, `${view.sessions.length} related sessions`)}
         {" · "}{tr(`미대사 외부 동작 ${view.unreconciled_actions.length}개`, `${view.unreconciled_actions.length} unreconciled actions`)}
       </p>
-      <div className="campaign-actions">
-        <CommandButton view={view} command="stop_finish_stage" connection={connection} busy={stopBusy} onCommand={() => onCommand("stop_finish_stage")} tr={tr} />
-        <ActionMenu label={tr("다른 중단 방법", "More ways to stop")} items={[{
-          key: "stop_immediate", danger: true, disabled: !immediate.enabled || stopBusy,
-          label: immediate.reason ? `${tr(...COMMAND_LABELS.stop_immediate)} · ${rejectionText(immediate.reason, tr)}` : tr(...COMMAND_LABELS.stop_immediate),
-          onSelect: () => onCommand("stop_immediate"),
-          confirm: {
-            title: tr("지금 바로 중단할까요?", "Stop right now?"),
-            description: tr("진행 중인 세션을 기다리지 않고 멈춥니다. 하던 단계는 끝나지 않은 채로 남습니다.", "Stops without waiting for running sessions. The current stages stay unfinished."),
-            confirmLabel: tr(...COMMAND_LABELS.stop_immediate), cancelLabel: tr("취소", "Cancel"),
-          },
-        }]} />
-      </div>
       {phase && <p role="status">{tr(...PHASES[phase])}</p>}
       {pendingStop?.status === "unconfirmed" && <p role="status" className="campaign-filter-note">
         {tr("요청 결과 확인 중 · 같은 요청을 다시 보내도 한 번만 적용됩니다.", "Checking the request result · resending the same request applies it once.")}

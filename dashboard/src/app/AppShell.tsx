@@ -160,7 +160,7 @@ export default function AppShell({
     setShowNotificationPanel(false);
     setShowTweaksPanel(false);
     setShowMobileMoreMenu(false);
-  }, [location.pathname]);
+  }, [location.key]);
 
   useEffect(() => {
     if (!isMobileViewport) {
