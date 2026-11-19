@@ -42,7 +42,7 @@ The settle pass, store recovery, the turn start's finish and the deferred retry 
 | `SessionRotationSelector.cfg` | nothing | 10,724 states over every starting cache, owner, key, hop, bot and queue |
 | `SessionRotationSelectorRestart.cfg` | `NoOldResume`, `StoredSelectorFollows` | known gap: the store write fails, dcserver restarts before the retry and drops the in-memory rotation, and the next turn restores the old session from the store |
 
-The committed chart is the fixed design for a watcherless Herdr pane of another bot's channel whose first hook was queued, followed by a second hook; the full fixed config exceeds the chart budget.
+The committed chart is the fix3-era drawing of the fixed design for an empty cache, a watcherless Herdr pane of another bot's channel and a second hop; with the hook queue every fixed combination exceeds the chart budget of 500 states, so the queue paths are in the reports of `SessionRotationSelectorFix3Queue.cfg` and the full config only.
 
 ## Code map
 
