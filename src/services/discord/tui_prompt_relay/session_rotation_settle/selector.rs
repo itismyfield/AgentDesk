@@ -84,9 +84,8 @@ async fn channel_row(
     }
 }
 
-/// Follows the rotation on `runtime`'s channel under the turn start's session transition, so a
-/// turn reading the selector never sees the move half done. `admitted` names a Herdr execution
-/// the channel row must hold before anything moves.
+/// Follows the rotation under the channel's turn-start transition, so no turn sees it half done;
+/// `admitted` names a Herdr execution the channel row must hold before anything moves.
 async fn follow_channel_selector(
     runtime: &Arc<SharedData>,
     channel_id: ChannelId,
