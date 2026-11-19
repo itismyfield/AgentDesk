@@ -112,21 +112,26 @@ pub(crate) async fn run(
         if !held {
             crate::logging::intake_timing::not_sent(&format!("{completion:?}"));
         }
-        if held && let Some((channel, probe)) = proof.take_preparation_watch() {
-            super::held_watch::arm(channel, probe);
-        }
-        mailbox
+        let watch = held.then(|| proof.take_preparation_watch()).flatten();
+        let at = clock.clone();
+        let ended = mailbox
             .v2_request(move |slot| {
                 let owner = slot.as_mut().ok_or("V2 not adopted")?;
                 let key = parse(identity)?;
-                match (held, refused) {
+                // Past its original's readiness due the leaf's own proof ends the input for good.
+                let ended = owner.leaf_outlived_due(&key, &*at);
+                match (held && !ended, refused || ended) {
                     (true, _) => owner.hold_not_sent(&key, proof),
                     (_, true) => owner.refuse_not_sent(&key, proof),
                     _ => owner.retain_not_sent(&key, proof),
                 }
+                .map(|()| ended)
             })
             .await
             .map_err(unsent)?;
+        if !ended && let Some((channel, probe)) = watch {
+            super::held_watch::arm(channel, probe);
+        }
         return Ok(match completion {
             Completion::Held(reason)
             | Completion::NotSent(reason)

@@ -53,6 +53,7 @@ pub(crate) fn load_pending_queues_checked(
             SnapshotRead::ReadOnlyV2(ref v2)
                 if (!v2.retained_inputs.is_empty()
                     || !v2.refused_inputs.is_empty()
+                    || !v2.refused_fronts.is_empty()
                     || v2.unfinished_handoff.is_some())
                     && !snapshot.v2_holds_input() =>
             {
@@ -139,7 +140,8 @@ pub(crate) fn v2_held_sources(
         .flat_map(ids)
         .collect();
     let settled = snapshot.terminal_identities.iter();
-    let refused = snapshot.refused_inputs.iter().flat_map(|r| &r.members);
+    let refused = (snapshot.refused_inputs.iter().flat_map(|r| &r.members))
+        .chain(snapshot.refused_fronts.iter().flat_map(|r| &r.members));
     let settled = (settled.map(|terminal| &terminal.identity))
         .chain(refused.map(|member| &member.identity))
         .flat_map(|identity| identity.sources.iter().map(|s| s.message_id));
