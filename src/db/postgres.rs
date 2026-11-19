@@ -369,11 +369,17 @@ pub async fn connect_and_migrate(config: &Config) -> Result<Option<PgPool>, Stri
 }
 
 pub async fn migrate(pool: &PgPool) -> Result<(), String> {
-    POSTGRES_MIGRATOR
-        .run(pool)
-        .await
-        .map_err(|error| format!("run postgres migrations: {error}"))?;
-    Ok(())
+    async {
+        let mut connection = pool.acquire().await?;
+        // SQLx can exit before releasing its session advisory lock on error or cancellation.
+        connection.close_on_drop();
+        // A direct call avoids the generic Acquire lifetime in the spawned boot future.
+        POSTGRES_MIGRATOR
+            .run_direct(None, &mut *connection, false)
+            .await
+    }
+    .await
+    .map_err(|error| format!("run postgres migrations: {error}"))
 }
 
 async fn acquire_startup_advisory_lock(pool: &PgPool) -> Result<AdvisoryLockLease, String> {
