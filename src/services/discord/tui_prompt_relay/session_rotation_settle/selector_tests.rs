@@ -15,7 +15,6 @@ async fn retired_rotation_moves_the_channel_selector_to_the_rotated_session_pg()
     if !api_child(test) {
         return;
     }
-    let _serial = dedupe::lock_claude_session_rotations_for_tests();
     let _root = crate::config::TestRuntimeRootGuard::new();
     let (_db, pool) = postgres().await;
     let mut shared = shared_on(&pool).await;
