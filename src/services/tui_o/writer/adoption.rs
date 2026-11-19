@@ -57,6 +57,14 @@ pub trait LegacyView: Send + Sync + 'static {
     fn codex_delivered(&self, _channel: u64, _tmux: &str) -> Result<CodexDelivered, String> {
         Ok(CodexDelivered::default())
     }
+    /// The native turns `channel`'s rejections closed, by source and opener; a takeover never
+    /// starts on one. None from a host that stores no rejection.
+    fn codex_closures(
+        &self,
+        _channel: u64,
+    ) -> futures::future::BoxFuture<'static, Result<Vec<(SourceId, u64)>, String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
     /// An old run's exact receipt; a current channel frontier cannot stand in for this proof.
     fn historical_frontier(
         &self,

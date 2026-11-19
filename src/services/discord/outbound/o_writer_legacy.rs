@@ -9,6 +9,7 @@ use super::super::SharedData;
 use super::delivery_record as dr;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider::ProviderKind;
+use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::writer::adoption::{
     CodexDelivered, CodexDelivery, LegacyCursor, LegacyEpoch, LegacyView,
 };
@@ -109,6 +110,31 @@ impl LegacyView for LegacyRelay {
 
     fn codex_delivered(&self, channel: u64, tmux: &str) -> Result<CodexDelivered, String> {
         Ok(codex_records(channel, tmux))
+    }
+
+    fn codex_closures(
+        &self,
+        channel: u64,
+    ) -> futures::future::BoxFuture<'static, Result<Vec<(SourceId, u64)>, String>> {
+        let pool = self.shared.pg_pool.clone();
+        Box::pin(async move {
+            let Some(pool) = pool else {
+                return Ok(Vec::new());
+            };
+            let of_channel = crate::db::tui_output_disposition::closure::of_channel;
+            let closures = of_channel(&pool, channel).await?.into_iter();
+            Ok(closures
+                .map(|closure| {
+                    let source = SourceId {
+                        session_id: closure.session_id,
+                        path: closure.path.into(),
+                        dev: closure.dev,
+                        ino: closure.ino,
+                    };
+                    (source, closure.from)
+                })
+                .collect())
+        })
     }
 
     /// What `relay_auto_heal` restarts a redrive episode on, read without writing the inflight row.

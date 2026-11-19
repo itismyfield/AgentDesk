@@ -333,7 +333,7 @@ impl<I: HostIo> Takeover<'_, I> {
                 "a Legacy body send started since the baseline".into(),
             )),
             Some(Verdict::Eligible(prefix)) => {
-                let records = self.records(&events)?;
+                let records = self.records(&events).await?;
                 let judged = (&records, sent_from.as_slice(), &mut *unresolved);
                 let owed = match self.owed(&events, &bound, (at, since), judged) {
                     Ok(owed) => owed,
@@ -345,7 +345,7 @@ impl<I: HostIo> Takeover<'_, I> {
             Some(Verdict::Wait(detail)) => Err(Taken::Retry(detail)),
             // A rollout that holds output, or none bound since the baseline, starts at its frontier.
             Some(Verdict::Refuse(_)) | None => {
-                let records = self.records(&events)?;
+                let records = self.records(&events).await?;
                 let judged = (&records, sent_from.as_slice(), &mut *unresolved);
                 self.warm(&events, &bound, (at, since), judged).await
             }
@@ -378,14 +378,18 @@ impl<I: HostIo> Takeover<'_, I> {
         self.candidate.sends().0 != at.sends.0
     }
 
-    /// Legacy's Codex delivery records for the tmux the log binds now.
-    fn records(&self, events: &[BindingEvent]) -> Result<Records, Taken> {
+    /// Legacy's Codex delivery records for the tmux the log binds now, with the turns rejections
+    /// closed; an unread closure retries rather than take without it.
+    async fn records(&self, events: &[BindingEvent]) -> Result<Records, Taken> {
         let tmux = adoption::current(events).map(|(_, tmux)| tmux);
+        let legacy = self.io.legacy();
         let delivered = match tmux {
-            Some(tmux) => self.io.legacy().codex_delivered(self.channel, &tmux),
+            Some(tmux) => legacy.codex_delivered(self.channel, &tmux),
             None => Ok(Default::default()),
         };
-        Ok(Records::new(delivered.map_err(Taken::Retry)?, events))
+        let records = Records::new(delivered.map_err(Taken::Retry)?, events);
+        let closed = legacy.codex_closures(self.channel).await;
+        Ok(records.closing(closed.map_err(Taken::Retry)?))
     }
 
     /// Takes `bound` where Legacy's records stop, with every source owed before it.
@@ -436,9 +440,21 @@ impl<I: HostIo> Takeover<'_, I> {
         let frontier = prefix::frontier(source).map_err(retry)?;
         let floor = records.floor(source, &frontier);
         let covered = |end: Option<u64>| end.is_some_and(|end| end <= floor);
-        let Some(turn) = frontier.turns.iter().find(|turn| !covered(turn.ended_end)) else {
+        let closed = |turn: &&prefix::Span| records.closed(source, turn.opened);
+        let mut owed = frontier
+            .turns
+            .iter()
+            .filter(|turn| !covered(turn.ended_end));
+        // A turn its rejection closed is never owed; one owed before it holds the takeover, so
+        // neither is left out nor is the closed turn posted.
+        let Some(turn) = owed.find(|turn| !closed(turn)) else {
             return Ok(Start::End(frontier.complete));
         };
+        if owed.any(|turn| closed(&turn)) {
+            return Err(Taken::Retry(
+                "an undelivered turn precedes a turn closed with its reason".into(),
+            ));
+        }
         if turn.ended_at.is_none() && sent_from.contains(source) {
             return Ok(Start::Legacy(
                 "a turn Legacy sent from is still open".into(),

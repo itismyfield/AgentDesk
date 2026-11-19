@@ -20,6 +20,8 @@ struct Span {
 pub(in crate::services::tui_o::writer::late_adopt) struct Records {
     delivered: CodexDelivered,
     spans: Vec<Span>,
+    /// Turns a rejection closed, by source and native opener.
+    closed: Vec<(SourceId, u64)>,
 }
 
 impl Records {
@@ -62,7 +64,35 @@ impl Records {
                 until,
             });
         }
-        Self { delivered, spans }
+        let closed = Vec::new();
+        Self {
+            delivered,
+            spans,
+            closed,
+        }
+    }
+
+    /// These records with the turns rejections closed.
+    pub(in crate::services::tui_o::writer::late_adopt) fn closing(
+        mut self,
+        closed: Vec<(SourceId, u64)>,
+    ) -> Self {
+        self.closed = closed;
+        self
+    }
+
+    /// Whether a rejection closed `source`'s turn opened at `opened`. The session and file
+    /// identity name the rollout; a path may be spelled another way.
+    pub(in crate::services::tui_o::writer::late_adopt) fn closed(
+        &self,
+        source: &SourceId,
+        opened: u64,
+    ) -> bool {
+        self.closed.iter().any(|(closed, from)| {
+            *from == opened
+                && (closed.session_id == source.session_id)
+                && (closed.dev, closed.ino) == (source.dev, source.ino)
+        })
     }
 
     /// Every source bound in the current generation, oldest first; every source of the log when
