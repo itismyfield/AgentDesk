@@ -1,0 +1,2 @@
+key: session-lifecycle-claude-cold-launch-binding
+| `session-lifecycle` (Herdr Claude cold launch Pending, #8260) | `b54787cb19` | Before: the launch Pending and the row resolve only after the first turn's read ends, so the turn reads Unbound and an early end leaves both Pending; NoBind mutant is expected RED | After resolves and binds before the read; 3 cfg matched (GREEN 1 / expected RED 2). [Report](session-lifecycle/claude-cold-launch-binding.report.md) |
