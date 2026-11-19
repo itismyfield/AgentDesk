@@ -175,6 +175,9 @@ impl Owner {
         &mut self,
         identity: QueueIdentity,
     ) -> Result<(), String> {
+        if let Some(told) = self.front_refusal_told(&identity) {
+            return told;
+        }
         let mut next = self.snapshot.clone();
         let retained = next
             .retained_inputs

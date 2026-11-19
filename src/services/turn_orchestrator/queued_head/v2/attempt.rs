@@ -139,6 +139,11 @@ impl Owner {
             Some(PayloadWindow::Bootstrap) => {}
             None => return Err("unknown payload phase".into()),
         }
+        // An approved first key may already have parked a draft; its payload is never refused.
+        if self.first_key_approved.as_ref() != Some(key) && self.head_outlived_due(now) {
+            self.due_refused = Some(key.clone());
+            return Err("readiness_deadline".into());
+        }
         let mut next = self.snapshot.clone();
         let head = next
             .head_injection

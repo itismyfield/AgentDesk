@@ -832,3 +832,232 @@ async fn a_told_inputs_equal_queued_copy_is_never_submitted() {
     let copy = mailbox.v2_exact_turn(original(channel, 1), "t1b".into());
     assert_eq!(format!("{:?}", copy.await.unwrap()), "NotArmed");
 }
+
+/// A later head deadline already awaited never delays a held front's earlier readiness due: the
+/// timer re-arms for it and the owner refuses that front without waiting out the head's window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_earlier_readiness_due_rearms_past_a_later_awaited_deadline() {
+    let _root = TestRuntimeRootGuard::new();
+    let (registry, channel) = (ChannelMailboxRegistry::default(), 7_272_754);
+    let mailbox = owner(&registry, channel, 2).await;
+    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let first = original(channel, 0).message_id;
+    let attempt = serde_json::from_value(prepared(channel, "input 0").attempt).unwrap();
+    let key = mailbox.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let only_first = |item: &PendingQueueItem| {
+            (item.message_id == first).then(|| (String::new(), item.text.clone()))
+        };
+        let key = owner.reserve_unit(attempt, only_first)?;
+        drop(owner.arm(&key, now)?);
+        Ok(key)
+    });
+    let key = key.await.unwrap();
+    let noop: Handoff = Arc::new(|_| Box::pin(async { Ok(()) }));
+    let drive = Arc::new(Drive {
+        mailbox: mailbox.clone(),
+        channel,
+        handoff: noop,
+        settled: None,
+    });
+    arm_deadline(drive.clone());
+    let awaited = || *lane(channel).armed.lock().unwrap();
+    for _ in 0..500 {
+        if awaited().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        awaited(),
+        Some(now + 30_000),
+        "the head's window is awaited"
+    );
+    let held = mailbox.v2_request(move |slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        owner.settle(&key, true, now)?;
+        let front = owner.front().ok_or("no front")?;
+        owner.hold_readiness(&front, "test", now - 20_000).map(drop)
+    });
+    held.await.unwrap();
+    arm_deadline(drive);
+    for _ in 0..300 {
+        if snapshot(&mailbox).await["refused_fronts"] != serde_json::Value::Null {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let after = snapshot(&mailbox).await;
+    assert_eq!(
+        after["refused_fronts"].as_array().map(Vec::len),
+        Some(1),
+        "{after}"
+    );
+    assert_eq!(after["items"], json!([]), "{after}");
+}
+
+/// A leaf reserved before its original's due meets it at the first key: past it no key and the
+/// leaf's own proof refuses the input; before it one delivery and no refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reserved_leaf_meets_its_originals_due_at_the_first_key() {
+    let _root = TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    for (channel, at, delivered) in [(7_272_764, 11_000, false), (7_272_774, 10_999, true)] {
+        let mailbox = owner(&registry, channel, 1).await;
+        let front = mailbox.v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let front = owner.front().ok_or("no front")?;
+            owner.hold_readiness(&front, "test", 1_000)?;
+            owner.grant_front(&front)?;
+            Ok(front)
+        });
+        let front = front.await.unwrap();
+        let claim = claim_turn(&mailbox, front.1.message_id, &front)
+            .await
+            .unwrap();
+        let keys = Arc::new(AtomicUsize::new(0));
+        let k = keys.clone();
+        let leaf: Leaf = Box::new(move |_| {
+            if owner_input::start_payload().is_err() {
+                return Ok(Completion::NotSent("readiness_deadline".into()));
+            }
+            owner_input::keyed();
+            k.fetch_add(1, Ordering::SeqCst);
+            Ok(Completion::Submitted)
+        });
+        let prepared = prepared(channel, "input 0");
+        let ran = pump::submit_front(&mailbox, claim, prepared, Arc::new(move || at), leaf).await;
+        assert_eq!(
+            matches!(ran, Ok(Completion::Submitted)),
+            delivered,
+            "{ran:?}"
+        );
+        mailbox
+            .v2_request(|slot| slot.as_mut().ok_or("no owner")?.tick(11_000))
+            .await
+            .unwrap();
+        let after = snapshot(&mailbox).await;
+        assert_eq!(
+            keys.load(Ordering::SeqCst),
+            usize::from(delivered),
+            "{after}"
+        );
+        assert_eq!(after["items"], json!([]), "{after}");
+        assert!(after["head_injection"].is_null() && after["refused_fronts"].is_null());
+        let refused = after["refused_inputs"].as_array().map_or(0, Vec::len);
+        assert_eq!(refused, usize::from(!delivered), "{after}");
+        if !delivered {
+            assert_eq!(
+                after["refused_inputs"][0]["notice"]["enqueued"], false,
+                "{after}"
+            );
+        }
+    }
+}
+
+/// A held front granted, claimed and given a readiness due of 11 000 on `channel`.
+async fn claimed_with_due(
+    registry: &ChannelMailboxRegistry,
+    channel: u64,
+) -> (ChannelMailboxHandle, Option<FrontClaim>) {
+    let mailbox = owner(registry, channel, 1).await;
+    let front = mailbox.v2_request(|slot| {
+        let owner = slot.as_mut().ok_or("no owner")?;
+        let front = owner.front().ok_or("no front")?;
+        owner.hold_readiness(&front, "test", 1_000)?;
+        owner.grant_front(&front)?;
+        Ok(front)
+    });
+    let front = front.await.unwrap();
+    let claim = claim_turn(&mailbox, front.1.message_id, &front)
+        .await
+        .unwrap();
+    (mailbox, claim)
+}
+
+/// A leaf that gives up before any key (its composer never became readable) after its original's
+/// due ends that input for good through its own proof: no body is kept, one notice is owed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leaf_that_gives_up_before_any_key_past_the_due_refuses_the_input() {
+    let _root = TestRuntimeRootGuard::new();
+    let (registry, channel) = (ChannelMailboxRegistry::default(), 7_272_784);
+    let (mailbox, claim) = claimed_with_due(&registry, channel).await;
+    let leaf: Leaf = Box::new(|_| {
+        owner_input::vetoed("unproven: Retained");
+        Ok(Completion::NotSent("unproven: Retained".into()))
+    });
+    let prepared = prepared(channel, "input 0");
+    let ran = pump::submit_front(&mailbox, claim, prepared, Arc::new(|| 11_000), leaf).await;
+    assert!(matches!(ran, Ok(Completion::NotSent(_))), "{ran:?}");
+    let after = snapshot(&mailbox).await;
+    assert_eq!(after["items"], json!([]), "{after}");
+    assert!(
+        after["retained_inputs"]
+            .as_array()
+            .is_none_or(Vec::is_empty),
+        "{after}"
+    );
+    assert_eq!(
+        after["refused_inputs"].as_array().map(Vec::len),
+        Some(1),
+        "{after}"
+    );
+    assert_eq!(
+        after["refused_inputs"][0]["notice"]["enqueued"], false,
+        "{after}"
+    );
+    assert!(
+        !after.to_string().contains("input 0"),
+        "no body is kept: {after}"
+    );
+}
+
+/// A Busy leaf's order: owner consent before C-s, then the payload commit. A due that came first
+/// sends no key at all; a first key approved before it delivers even if the due passes after C-s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_due_is_judged_before_c_s_and_never_after_an_approved_first_key() {
+    let _root = TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    for (channel, ready_at, delivered) in [(7_272_794, 11_000, false), (7_272_804, 10_999, true)] {
+        let (mailbox, claim) = claimed_with_due(&registry, channel).await;
+        let (keys, now) = (
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(ready_at)),
+        );
+        let (k, n) = (keys.clone(), now.clone());
+        let leaf: Leaf = Box::new(move |_| {
+            if owner_input::ready_payload().is_err() {
+                return Ok(Completion::Refused("owner_refused".into()));
+            }
+            owner_input::keyed();
+            k.fetch_add(1, Ordering::SeqCst); // C-s parks the person's draft
+            n.store(11_000, Ordering::SeqCst); // the due passes between C-s and the payload
+            if owner_input::start_payload().is_err() {
+                return Ok(Completion::Failed("stash_failed".into()));
+            }
+            k.fetch_add(2, Ordering::SeqCst); // body and Enter
+            Ok(Completion::Submitted)
+        });
+        let clock = Arc::new(move || now.load(Ordering::SeqCst) as u64);
+        let ran = pump::submit_front(&mailbox, claim, prepared(channel, "input 0"), clock, leaf);
+        let ran = ran.await;
+        let after = snapshot(&mailbox).await;
+        let (sent, refused) = (
+            keys.load(Ordering::SeqCst),
+            after["refused_inputs"].as_array(),
+        );
+        assert_eq!(
+            matches!(ran, Ok(Completion::Submitted)),
+            delivered,
+            "{ran:?} {after}"
+        );
+        assert_eq!(sent, if delivered { 3 } else { 0 }, "{after}");
+        assert_eq!(
+            refused.map_or(0, Vec::len),
+            usize::from(!delivered),
+            "{after}"
+        );
+        assert_eq!(after["items"], json!([]), "{after}");
+        assert!(after["head_injection"].is_null(), "{after}");
+    }
+}

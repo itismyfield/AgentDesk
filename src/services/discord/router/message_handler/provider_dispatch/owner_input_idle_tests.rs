@@ -2241,6 +2241,95 @@ async fn a_boot_recovery_hands_the_kept_front_to_the_owner_drive() {
     assert!(handed, "the recovered owner's drive granted its kept front");
 }
 
+/// A boot refuses a kept front whose readiness due passed while down, before its woken drive hands
+/// it on: empty queue, one body-free refusal, one notice and the origin's Failed receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_boot_recovery_refuses_an_expired_held_front_before_its_drive_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let (channel, message) = (
+        poise::serenity_prelude::ChannelId::new(7_272_598),
+        72_725_981,
+    );
+    let persisted = crate::services::discord::queue_dispatch::persistence_context(
+        &shared,
+        &shared.provider,
+        channel,
+    );
+    let queue = crate::services::turn_orchestrator::v2_queue(&persisted, channel).unwrap();
+    let kept: PendingQueueItem = serde_json::from_value(json!({"author_id":7,
+        "message_id":message,"channel_id":channel.get(),"source_message_ids":[message],
+        "queued_generation":1,"text":"kept body"}))
+    .unwrap();
+    {
+        let before = ChannelMailboxRegistry::default();
+        let handle = before.handle(channel);
+        handle.v2_adopt(queue.0, queue.1).await.unwrap();
+        let context =
+            json!({"origin":"headless","metadata":{"human_input":{"origin_id":"o-boot"}}});
+        let admitted = handle.v2_admit_ticket_with_context(kept, "boot-1".into(), context);
+        admitted.await.unwrap();
+        let held = handle.v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let front = owner.front().ok_or("no front")?;
+            owner.hold_readiness(&front, "missing_launch", 1_000)?;
+            let snapshot = owner.json()?;
+            Ok((
+                snapshot["items"].as_array().map(Vec::len),
+                owner.settle_due(),
+                snapshot,
+            ))
+        });
+        let (items, due, snapshot) = held.await.unwrap();
+        assert_eq!((items, due), (Some(1), Some(11_000)), "{snapshot}");
+        assert!(snapshot["refused_fronts"].is_null(), "{snapshot}");
+    }
+    recover(&shared, channel).await;
+    let mailbox = shared.mailbox(channel);
+    let snapshot = mailbox.v2_request(|slot| slot.as_ref().ok_or("no owner")?.json());
+    let snapshot = snapshot.await.unwrap();
+    assert!(
+        snapshot["items"].as_array().is_none_or(Vec::is_empty),
+        "{snapshot}"
+    );
+    assert_eq!(
+        snapshot["refused_fronts"].as_array().map(Vec::len),
+        Some(1),
+        "{snapshot}"
+    );
+    assert!(!snapshot.to_string().contains("kept body"), "{snapshot}");
+    let outbox =
+        "SELECT COUNT(*) FROM message_outbox WHERE reason_code = 'refused.readiness_unproven'";
+    let notices: i64 = sqlx::query_scalar(outbox).fetch_one(&pool).await.unwrap();
+    assert_eq!(notices, 1);
+    let receipt = "SELECT terminal_outcome FROM turns WHERE turn_id = $1";
+    let receipt = sqlx::query_scalar(receipt).bind(format!("discord:{}:{message}", channel.get()));
+    let outcome: String = receipt.fetch_one(&pool).await.unwrap();
+    assert_eq!(outcome, "failed");
+    // The drive the recovery woke finishes its pass without handing anything on.
+    let passed = crate::test_support::wait::poll_within(
+        async || {
+            let results = OwnerTurn::drive_results(channel.get());
+            let settled = results.iter().any(|r| r == "loop-settled");
+            settled
+                .then_some(results)
+                .ok_or_else(|| "the woken drive is still running".into())
+        },
+        WAIT_CAP,
+        "woken drive pass",
+    );
+    let results = passed.await.unwrap();
+    assert!(
+        results.iter().all(|r| r == "loop-settled"),
+        "handoff 0: {results:?}"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
 /// Stands in for the live path's driver after it replaced the stale pane: the pane runs again under
 /// the channel's account, and the owner's hook writes the created execution's first prompt.
 fn relaunch(

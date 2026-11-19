@@ -43,7 +43,7 @@ pub(super) async fn running(
     let channel = ChannelId::new(channel);
     if let Some(shared) = shared {
         hold(
-            shared,
+            (shared, observation.state() == BusyState::Held),
             mailbox,
             channel,
             front,
@@ -122,7 +122,7 @@ impl OwnerTurn {
                     .await;
             }
             hold(
-                shared,
+                (shared, true),
                 &owner.mailbox,
                 channel,
                 owner.front(),
@@ -156,7 +156,7 @@ impl OwnerTurn {
                         .await;
                 }
                 hold(
-                    shared,
+                    (shared, false),
                     &owner.mailbox,
                     channel,
                     owner.front(),
@@ -384,8 +384,9 @@ fn hold_late(
     let probe = recoverable_probe(turn.host, observation, turn.pool, mailbox, Some(front))
         .map(|probe| unwound(turn.provider.clone(), probe, mailbox.clone(), at));
     let handle = tokio::runtime::Handle::current();
+    let typed = observation.state() == BusyState::Held;
     if let Some(shared) = turn.shared {
-        handle.block_on(hold(shared, mailbox, channel, front, probe));
+        handle.block_on(hold((shared, typed), mailbox, channel, front, probe));
     } else {
         handle.block_on(hold_start(mailbox, channel, front));
         if let Some(probe) = probe {
@@ -453,8 +454,9 @@ pub(super) fn unwound(
     })
 }
 
+/// Holds the front for its watch; a Busy-held read (`typed`) also gets the owner's deadline.
 async fn hold(
-    shared: &Shared,
+    (shared, typed): (&Shared, bool),
     mailbox: &ChannelMailboxHandle,
     channel: ChannelId,
     front: &Front,
@@ -477,7 +479,11 @@ async fn hold(
         channel.get(),
         held_front(probe, mailbox.clone(), front.clone()),
     );
-    held_watch::watch(drive(shared, channel), front.1.message_id);
+    let drive = drive(shared, channel);
+    if typed {
+        held_watch::readiness::hold(drive.clone(), front).await;
+    }
+    held_watch::watch(drive, front.1.message_id);
 }
 
 fn recoverable_probe(

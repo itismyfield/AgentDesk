@@ -333,6 +333,8 @@ fn adoption_forgets_the_ledger_entry_of_a_proven_unsent_paste() {
                 },
             }],
             refused_inputs: vec![],
+            readiness_holds: vec![],
+            refused_fronts: vec![],
             terminal_identities: vec![],
             namespace: Some(format!("migration-{channel}")),
             admission_receipts: vec![],
