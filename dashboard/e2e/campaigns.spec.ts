@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { serverCampaignFixtures } from "../src/api/serverCampaignsFixtures";
+import type { ServerCampaignView } from "../src/api/serverCampaigns";
 
 // Set CAMPAIGNS_SHOTS to a directory to also save 390/1440 x light/dark screenshots, plus dark fixture shots of a server campaign.
 const SHOTS = process.env.CAMPAIGNS_SHOTS;
@@ -108,8 +109,7 @@ async function openCampaigns(page: Page, theme: "dark" | "light" = "dark") {
   return calls;
 }
 
-async function serveServerCampaign(page: Page) {
-  const release = gatedServerCampaign();
+async function serveServerCampaign(page: Page, release = gatedServerCampaign()) {
   await json(page, /\/api\/server-campaigns\?.*$/, { campaigns: [release] });
   await json(page, /\/api\/server-campaigns\/release$/, { campaign: release });
   await json(page, /\/api\/server-campaigns\/release\/events(?:\?.*)?$/, { events: [
@@ -365,4 +365,135 @@ test("campaign tab: screenshots at 390 and 1440 in light and dark, and dark fixt
     await page.waitForTimeout(400);
     await page.screenshot({ path: `${SHOTS}/campaigns-fixture-server-${width}x${height}-dark-approval.png` });
   }
+});
+
+/** The gated campaign over all nine stages: an approval wait on a task not running, a failure the server would retry, a block
+ * before any work, a repair waiting again, a user stop and an empty main check. */
+function boardServerCampaign() {
+  const release = gatedServerCampaign();
+  const base = release.view.nodes[2];
+  for (const [id, title, runtime] of [
+    ["D", "모바일 셸", { stage: "design", disposition: "pending", repair_cycles: 1 }], ["E", "프롬프트 감사", { stage: "design_review", disposition: "running", series: 2 }],
+    ["F", "앵커 감사", { stage: "review", disposition: "interrupted" }], ["G", "재전송 큐 지표", { stage: "final_verification", disposition: "running" }],
+    ["H", "게이트웨이 복구", { stage: "complete", disposition: "complete" }],
+  ] as [string, string, Partial<ServerCampaignView["nodes"][number]["runtime"]>][]) {
+    release.definition.nodes.push({ ...release.definition.nodes[2], id, title, issue_url: issue(7441 + release.definition.nodes.length) });
+    release.view.nodes.push({ ...base, id, runtime: { ...base.runtime, current_attempt: null, ...runtime } });
+  }
+  release.view.commands = release.view.commands.map((entry) => entry.command === "prepare_retry" ? { ...entry, rejection: null } : entry);
+  release.view.nodes[2].runtime.disposition = "pending"; // only the gate makes its stage need someone
+  return release;
+}
+/** One ledger campaign in place of the default list, with its live card reads. */
+async function serveLedger(page: Page, value: ReturnType<typeof campaign>, live: Record<string, unknown> = {}) {
+  await page.clock.install({ time: new Date(NOW) });
+  await mockApi(page);
+  await json(page, /\/api\/campaigns\?.*$/, { campaigns: [value], live: { [value.id]: live }, limit: 100, offset: 0 });
+  await json(page, new RegExp(`/api/campaigns/${value.id}$`), { campaign: value, live });
+  await page.goto(`/campaigns?mode=legacy&campaign=${value.id}`);
+  await page.getByRole("tab", { name: "단계 보드" }).click();
+  return page.locator(".campaign-board");
+}
+const columnNames = (page: Page) => page.locator(".campaign-board section[aria-label]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
+const openGroups = (page: Page) => page.locator(".campaign-board section > button[aria-expanded]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-expanded") === "true"));
+const workingLive = { ...LIVE["open-issues-dag"].i7272 };
+
+test("stage board: ledger columns keep each task's own status, live work adds a mark, and phones lead with running and stuck groups", async ({ page }, testInfo) => {
+  const [ledger] = structuredClone(CAMPAIGNS);
+  ledger.nodes.push(node("i7350", "#7350 실패한 재시작 점검", { status: "failed", stage: "verify", issue_url: issue(7350) }),
+    node("i7360", "#7360 배포 확인", { status: "running", stage: "deploy", blocker: "외부 확인", issue_url: issue(7360) }));
+  const board = await serveLedger(page, ledger, { ...LIVE["open-issues-dag"], i7336: workingLive, i7350: workingLive });
+  await expect(board).toContainText("10 작업5 진행 중3 대기0 승인 대기0 실패2 막힘");
+  const phone = testInfo.project.name === "mobile";
+  expect(await columnNames(page)).toEqual(phone ? ["진행 중", "막힘", "실패", "대기", "완료", "건너뜀"] : ["대기", "진행 중", "막힘", "실패", "완료", "건너뜀"]);
+  if (phone) expect(await openGroups(page)).toEqual([true, true, true, false, false, false]);
+  for (const [column, id, chip] of [["막힘", "i7336", "막힘"], ["실패", "i7350", "실패"]]) {
+    const card = board.getByRole("region", { name: column }).locator(`[data-board-card="${id}"]`);
+    await expect(card.locator(".aui-badge-clean").first()).toHaveText(chip);
+    await expect(card.locator(".campaign-live")).toHaveText("리뷰 진행 중");
+  }
+  // A running task with a blocker keeps its own column and word; only its frame and reason say it is stuck.
+  const stuck = board.getByRole("region", { name: "진행 중" }).locator('[data-board-card="i7360"]');
+  await expect(stuck.locator(".aui-badge-clean").first()).toHaveText("진행 중");
+  await expect(stuck).toContainText("막힘: 외부 확인");
+  const done = board.getByRole("region", { name: "완료" });
+  await done.getByRole("button", phone ? { name: /^완료/ } : { name: "최근 1개 보기" }).click();
+  await expect(done.locator('[data-task-id="i7401"]')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await board.locator('[data-task-id="i7272"]').click();
+  await expect(page.locator(".campaign-node-detail")).toBeVisible();
+});
+
+test("stage board: a 431-task ledger shows the finished count and draws finished cards 20 at a time, latest first", async ({ page }, testInfo) => {
+  const statusAt = (index: number) => index < 346 ? "completed" : index < 381 ? "skipped" : index < 406 ? "running" : "pending";
+  const board = await serveLedger(page, campaign("big", "큰 원장", Array.from({ length: 431 }, (_, index) => node(`n${index}`, `작업 ${index}`,
+    { status: statusAt(index), updated_at: new Date(Date.parse(NOW) - (431 - index) * 60_000).toISOString() }))));
+  const done = board.getByRole("region", { name: "완료" });
+  const cards = done.locator("[data-board-card]");
+  await expect(done.locator(".aui-badge-clean").first()).toHaveText("346");
+  await expect(cards).toHaveCount(0);
+  await done.getByRole("button", testInfo.project.name === "mobile" ? { name: /^완료/ } : { name: "최근 20개 보기" }).click();
+  await expect(cards).toHaveCount(20);
+  await expect(cards.first()).toHaveAttribute("data-board-card", "n345");
+  await done.getByRole("button", { name: "20개 더 보기" }).click();
+  await expect(cards).toHaveCount(40);
+});
+
+test("stage board: a server campaign keeps the nine stages on wide screens, leads with live and stuck stages on phones, and keeps the server's words", async ({ page }, testInfo) => {
+  await page.clock.install({ time: new Date(NOW) });
+  await mockApi(page);
+  await serveServerCampaign(page, boardServerCampaign());
+  let sent: unknown = null;
+  await page.route(/\/api\/server-campaigns\/release\/commands$/, (route) => {
+    sent = route.request().postDataJSON();
+    return route.fulfill({ json: { result: { definition_revision: 7, run_id: "run-1", control_version: 1, event_sequence: 21, control: "running" } } });
+  });
+  await page.goto("/campaigns?mode=server&campaign=release");
+  await page.getByRole("tab", { name: "단계 보드" }).click();
+  const phone = testInfo.project.name === "mobile";
+  expect(await columnNames(page)).toEqual(phone ? ["요구사항", "설계 리뷰", "구현", "착지", "최종 확인", "설계", "리뷰", "main 확인", "완료"]
+    : ["요구사항", "설계", "설계 리뷰", "구현", "리뷰", "착지", "main 확인", "최종 확인", "완료"]);
+  if (phone) expect(await openGroups(page)).toEqual([true, true, true, true, true, false, false, false, false]);
+  const board = page.locator(".campaign-board");
+  const card = (id: string) => board.locator(`[data-board-card="${id}"]`);
+  await expect(card("C").getByRole("button", { name: "승인", exact: true })).toBeDisabled();
+  await expect(card("C")).toContainText("승인 API 준비 중(#8249)");
+  await expect(card("B")).toContainText("막힘: 선행 실패");
+  await expect(card("B")).not.toContainText("계열");
+  await expect(card("A")).toContainText("계열 1 · 수리 차수 3");
+  if (!phone) {
+    await expect(card("D")).toContainText("계열 1 · 수리 차수 1");
+    await expect(card("F").locator(".aui-badge-clean").first()).toHaveText("사용자 중단");
+    // Finished server tasks have no completion order or time, so the first page claims no recency.
+    await expect(board.getByRole("region", { name: "완료" }).getByRole("button", { name: "1개 보기" })).toBeVisible();
+  }
+  await expectNoHorizontalOverflow(page);
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/board-fixture-server-${page.viewportSize()!.width}x${page.viewportSize()!.height}-dark.png` });
+  await card("A").getByRole("button", { name: "다시 시도 준비" }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "다시 시도 준비" }).click();
+  await expect.poll(() => sent).toMatchObject({ command: { command: "retry", node_id: "A" } });
+});
+
+test.describe("board at 390px touch", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("stage board: no sideways scroll inside the board, 44px targets on the board and in the retry check", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Phone width check");
+    await page.clock.install({ time: new Date(NOW) });
+    await mockApi(page);
+    await serveServerCampaign(page, boardServerCampaign());
+    await page.goto("/campaigns?mode=server&campaign=release");
+    await page.getByRole("tab", { name: "단계 보드" }).click();
+    const board = page.locator(".campaign-board");
+    await expect(board.locator("[data-board-card]").first()).toBeVisible();
+    const small = (root: Element) => [...root.querySelectorAll<HTMLElement>("button, input, a[href]")]
+      .filter((node) => !(node as HTMLButtonElement).disabled && node.getClientRects().length)
+      .map((node) => node.getBoundingClientRect()).filter((box) => Math.min(box.width, box.height) < 44).length;
+    const sideways = (root: Element) => [root, ...root.querySelectorAll("*")]
+      .filter((node) => ["auto", "scroll"].includes(getComputedStyle(node).overflowX) && node.scrollWidth > node.clientWidth + 1).length;
+    expect(await board.evaluate(small)).toBe(0);
+    expect(await board.evaluate(sideways)).toBe(0);
+    await board.locator('[data-board-card="A"]').getByRole("button", { name: "다시 시도 준비" }).click();
+    expect(await page.getByRole("alertdialog").evaluate(small)).toBe(0);
+  });
 });

@@ -15,6 +15,8 @@ import { Modal } from "../common/overlay/Modal";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
 import { WidgetState } from "../common/WidgetState";
 import CampaignAutoQueueToggle, { useAutoQueueRequests } from "./CampaignAutoQueueToggle";
+import CampaignBoard from "./CampaignBoard";
+import { legacyBoard, serverBoard } from "./campaignBoardModel";
 import CampaignDetail from "./CampaignDetail";
 import CampaignList from "./CampaignList";
 import { campaignIssueLabel } from "./campaignModel";
@@ -276,6 +278,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       recent={{ title: tr("최근 바뀐 작업", "Recently changed tasks"), entries: recentTaskChanges(legacyTasks) }}
       selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
     relations={campaign.nodes.length > 0 && <CampaignRelations campaign={campaign} selectedId={node} onOpen={setNode} tr={tr} />}
+    board={(controls) => <CampaignBoard columns={legacyBoard(campaign.nodes, live[campaign.id])} tasks={legacyTasks} selectedId={node} controls={controls} onOpen={setNode} tr={tr} />}
     task={openNode && "status" in openNode ? { id: openNode.id, label: campaignIssueLabel(openNode), body: <CampaignNodeDetails key={openNode.id} campaign={campaign} node={openNode} live={live[campaign.id]?.[openNode.id]} tr={tr} onSaved={onSaved}
       editing={drafts[`${campaign.id}:${openNode.id}`] ?? null} onDraftChange={(draft, expected) => onDraftChange(`${campaign.id}:${openNode.id}`, draft, expected)} /> } : null}
     onCloseTask={() => setNode(null)} />;
@@ -286,6 +289,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
     const edit = commandAvailability(view, "edit_definition", connection);
     const shown = server.events?.campaign === id ? server.events : null;
     const profile = serverCampaignProfile(view);
+    const retry = commandAvailability(view, "prepare_retry", connection);
     const commands = <ServerCampaignControls view={view} connection={connection} stopIntent={stops[id] ?? null} busy={busy.has(id)} error={commandErrors[id] ?? null} onCommand={(name) => void runCommand(serverDoc, name)} tr={tr} />;
     return <CampaignDetail key={`server:${id}`} title={definition.title} showTitle={!phone} tr={tr}
       chips={(!phone || view.unknown) && <span className="flex flex-wrap items-center gap-2 text-xs">
@@ -306,6 +310,8 @@ export default function CampaignsPanel({ language }: { language: string }) {
         recent={{ title: tr("최근 이벤트", "Recent events"), entries: shown?.events ? recentServerEvents(shown.events) : null, note: shown && shown.failedAfter !== null ? tr("이벤트를 갱신하지 못했습니다", "Could not refresh events") : null }}
         footer={<>{phone && commands}<ServerCampaignSections document={serverDoc} link={`${window.location.origin}${window.location.pathname}${query ?? ""}`} tr={tr} /></>}
         selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
+      board={(controls) => <CampaignBoard columns={serverBoard(serverDoc, serverTaskViews, tr)} tasks={serverTaskViews} selectedId={node} controls={controls} onOpen={setNode} tr={tr}
+        retry={{ enabled: retry.enabled && !busy.has(id), reason: retry.reason, onRetry: (nodeId) => runCommand(serverDoc, "prepare_retry", nodeId) }} />}
       task={openNode && !("status" in openNode) ? { id: openNode.id, label: openNode.id, body: <ServerTaskDetails document={serverDoc} nodeId={openNode.id}
         gate={serverTaskViews.find((task) => task.id === openNode.id)?.gate ?? null} connection={connection} busy={busy.has(id)} onCommand={(name, nodeId) => void runCommand(serverDoc, name, nodeId)} tr={tr} /> } : null}
       onCloseTask={() => setNode(null)} />;

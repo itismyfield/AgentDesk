@@ -7,15 +7,15 @@ import { DrawerDockContext } from "../common/overlay/DrawerDock";
 import { CAMPAIGN_SCOPE, type Tr } from "./campaignPresentation";
 import { DetailDockPane, useDetailDock } from "./TaskListParts";
 
-type View = "overview" | "relations";
+type View = "overview" | "relations" | "board";
 
-/** The open campaign: title, chips and one status sentence, then 현황 (and 관계도 when there is one), and the task
+/** The open campaign: title, chips and one status sentence, then 현황 (with 관계도 and 단계 보드 when given), and the task
  * opened from it in the pinned pane on wide screens or a bottom sheet on phones. */
-export default function CampaignDetail({ title, showTitle, chips, sentence, actions, notes, description, overview, relations, task, onCloseTask, tr }: {
+export default function CampaignDetail({ title, showTitle, chips, sentence, actions, notes, description, overview, relations, board, task, onCloseTask, tr }: {
   title: string; showTitle: boolean; chips?: ReactNode; sentence: string; actions?: ReactNode; notes?: ReactNode;
   /** In the header on wide screens; below everything on phones, which lead with status and tasks. */
   description?: ReactNode;
-  overview: (controls: string | undefined) => ReactNode; relations?: ReactNode;
+  overview: (controls: string | undefined) => ReactNode; relations?: ReactNode; board?: (controls: string | undefined) => ReactNode;
   task: { id: string; label: string; body: ReactNode } | null; onCloseTask: () => void; tr: Tr;
 }) {
   const [view, setView] = useState<View>("overview");
@@ -38,11 +38,12 @@ export default function CampaignDetail({ title, showTitle, chips, sentence, acti
       {showTitle && description}
       {notes}
     </header>
-    {relations && <div className="w-full sm:w-64">
+    {(relations || board) && <div className="w-full sm:max-w-96">
       <SegmentedControl<View> kind="tabs" variant="tray" fullWidth size="sm" aria-label={tr("캠페인 보기", "Campaign view")} value={view} onChange={setView}
-        options={[{ value: "overview", label: tr("현황", "Overview") }, { value: "relations", label: tr("관계도", "Connections") }]} />
+        options={[{ value: "overview", label: tr("현황", "Overview") }, ...relations ? [{ value: "relations" as const, label: tr("관계도", "Connections") }] : [],
+          ...board ? [{ value: "board" as const, label: tr("단계 보드", "Stage board") }] : []]} />
     </div>}
-    {relations && view === "relations" ? relations : overview(controls)}
+    {relations && view === "relations" ? relations : board && view === "board" ? board(controls) : overview(controls)}
     {!showTitle && description}
     {task && <DetailDockPane dock={dock} label={tr("선택 작업", "Selected task")} empty={null} />}
     <DrawerDockContext.Provider value={dock.dock}>
