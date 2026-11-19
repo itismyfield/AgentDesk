@@ -2,6 +2,7 @@
 use super::*;
 use crate::services::session_host::surface_policy::VerifiedSurface;
 use crate::services::tui_o::channel_policy;
+use crate::services::tui_o::cutover::{BodyClaim, claim_then_send};
 
 pub(super) fn child_boot(
     f: &Fixture,

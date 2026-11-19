@@ -1,6 +1,7 @@
-//! Codex late takeover of a fresh rollout before Legacy posted any of its output.
-//! Legacy's sends are counted before the next bind, so a body sent from any rollout skips it.
+//! Codex late takeover: a fresh rollout from its first byte, or one that holds output from the
+//! first turn Legacy's records do not show delivered; a Legacy send since the baseline skips it.
 
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use super::Wake;
@@ -15,14 +16,15 @@ use crate::services::tui_o::writer::binding::{
 };
 use crate::services::tui_o::writer::host::{FencedFacts, HostIo, release, until_owned};
 use crate::services::tui_o::writer::renumbered;
+use crate::services::tui_o::writer::rotation::bound_source;
 
+mod delivered;
 pub(super) mod prefix;
+use delivered::Records;
 use prefix::{Prefix, Verdict};
 
-struct Checked {
-    prefix: Prefix,
-    admission: Option<FirstProof>,
-}
+/// How far a turn opener's own clock may trail this host's when judged against a baseline.
+const BIND_CLOCK_SLACK: chrono::TimeDelta = chrono::TimeDelta::seconds(1);
 
 /// Legacy's sends, then the last binding seq: only a rollout bound after it, with no Legacy send
 /// started since, may be taken.
@@ -55,7 +57,7 @@ pub(super) enum Taken {
     Soon(String),
     /// The rollout grew while still eligible; it is judged again at once.
     Again(String),
-    /// Legacy may hold this rollout's output; only a later bind is taken.
+    /// A Legacy body started since the baseline; the rollout's open turn stays Legacy's.
     Skip(String),
     /// The channel stays Legacy's for this process.
     Final(String),
@@ -71,6 +73,34 @@ impl Taken {
             | Self::Final(detail) => detail,
         }
     }
+}
+
+/// The init a takeover commits, judged again under the fence.
+#[derive(Clone, Copy)]
+pub(super) enum Plan<'p> {
+    /// A rollout before any output, read from its first byte, after any source owed before it.
+    Fresh(&'p Prefix, &'p [InitSource]),
+    /// Sources started at their frontiers; the bytes before each must still hash the same.
+    Warm(&'p [InitSource]),
+}
+
+/// Where O starts on a rollout that holds output.
+enum Start {
+    /// The earliest turn, ended or not, that Legacy's records do not show delivered.
+    Owed(u64),
+    /// The end of its last complete record: Legacy's records show every turn delivered.
+    End(u64),
+    /// Legacy may have sent part of that turn; it is judged again later.
+    Legacy(String),
+}
+
+/// When the baseline's sends were read: a turn opened after then holds no Legacy send while
+/// they hold.
+#[derive(Clone, Copy)]
+pub(super) struct Since {
+    at: DateTime<Utc>,
+    /// False for a turn mark, whose sends were read at a time this host does not know.
+    proves: bool,
 }
 
 /// One provider's takeover: its prefix judge and the origin its init records.
@@ -111,7 +141,12 @@ pub(super) async fn activate<I: HostIo>(
     };
     let mut admission_changes = candidate.first_changes();
     let (mut baseline, mut logged) = (None, None);
+    let mut sampled_at = Utc::now();
     let (mut retry_order, mut short_retries) = (0, 0);
+    // Rollouts a Legacy body was sent from while bound, this host run.
+    let mut sent_from = Vec::new();
+    // Rollouts judged owed or retried, until Legacy's records cover them or an init names them.
+    let mut unresolved = Vec::new();
     loop {
         if candidate.peek() != Adoption::Deferred {
             return false;
@@ -124,7 +159,11 @@ pub(super) async fn activate<I: HostIo>(
                     changed = admission_changes.changed() => { if changed.is_err() { return false; } }
                 }
             }
+            let fresh = baseline.is_none();
             let sampled = baseline.map_or_else(|| takeover.baseline(), Ok);
+            if fresh && sampled.is_ok() {
+                sampled_at = Utc::now();
+            }
             let mut used = None;
             let outcome = match sampled {
                 Ok(at) => {
@@ -134,7 +173,12 @@ pub(super) async fn activate<I: HostIo>(
                     if retry_order != at.order {
                         (retry_order, short_retries) = (at.order, 0);
                     }
-                    takeover.attempt(at).await
+                    let since = Since {
+                        at: sampled_at,
+                        proves: !at.turn_mark,
+                    };
+                    let seen = (&mut sent_from, &mut unresolved);
+                    takeover.attempt(at, since, seen).await
                 }
                 Err(taken) => Err(taken),
             };
@@ -235,28 +279,60 @@ impl<I: HostIo> Takeover<'_, I> {
         }
     }
 
-    async fn attempt(&self, at: Baseline) -> Result<(), Taken> {
-        if !self.candidate.first_ready() {
+    async fn attempt(
+        &self,
+        at: Baseline,
+        since: Since,
+        (sent_from, unresolved): (&mut Vec<SourceId>, &mut Vec<SourceId>),
+    ) -> Result<(), Taken> {
+        let admitted = self.candidate.first_changes().borrow().is_some();
+        if !self.candidate.first_ready() || (admitted && self.candidate.first_mark().is_none()) {
             return Err(Taken::Retry(
-                "first admission is reading its binding boundary".into(),
+                "first admission is not current and ready".into(),
             ));
         }
         let events = self.events()?;
-        let Some(bound) = bound_after(&events, at.seq) else {
+        let fresh = bound_after(&events, at.seq);
+        let Some(bound) = fresh.clone().or_else(|| bound_after(&events, 0)) else {
             return Err(Taken::Retry("no rollout bound since the baseline".into()));
         };
-        let verdict = if self.candidate.first_mark().is_some() {
-            prefix::buffered(&bound.0)
-        } else {
-            prefix::judge(&bound.0)
-        };
-        match verdict {
+        if admitted {
+            let bound = fresh.ok_or_else(|| {
+                Taken::Retry("no admitted rollout bound since the baseline".into())
+            })?;
+            return match prefix::buffered(&bound.0) {
+                Verdict::Eligible(prefix) if prefix.prompt_end.is_some() => {
+                    self.commit(at, &bound, &prefix).await
+                }
+                Verdict::Eligible(_) => Err(Taken::Retry(
+                    "the takeover rollout has no first user prompt yet".into(),
+                )),
+                Verdict::Wait(detail) => Err(Taken::Retry(detail)),
+                Verdict::Refuse(detail) => Err(Taken::Skip(detail)),
+            };
+        }
+        let verdict = fresh.map(|bound| prefix::judge(&bound.0));
+        // A fresh rollout judged now stays a candidate until a record covers it, as a warm one does.
+        if matches!(verdict, Some(Verdict::Eligible(_) | Verdict::Wait(_))) {
+            remember(unresolved, &bound.0);
+        }
+        let result = match verdict {
             // Turn mode is confirmed after the taken turn, so a rollout with no prompt is not taken yet.
-            Verdict::Eligible(prefix) if prefix.prompt_end.is_none() => Err(Taken::Retry(
+            Some(Verdict::Eligible(prefix)) if prefix.prompt_end.is_none() => Err(Taken::Retry(
                 "the takeover rollout has no first user prompt yet".into(),
             )),
-            Verdict::Eligible(prefix) => {
-                self.commit(at, &bound, &prefix)
+            // A Legacy send since the baseline resamples it before the earlier rollout is judged.
+            Some(Verdict::Eligible(_)) if self.sends_moved(at) => Err(Taken::Skip(
+                "a Legacy body send started since the baseline".into(),
+            )),
+            Some(Verdict::Eligible(prefix)) => {
+                let records = self.records(&events)?;
+                let judged = (&records, sent_from.as_slice(), &mut *unresolved);
+                let owed = match self.owed(&events, &bound, (at, since), judged) {
+                    Ok(owed) => owed,
+                    Err(taken) => return Err(taken),
+                };
+                self.fenced(at, &bound, Plan::Fresh(&prefix, &owed))
                     .await
                     .map_err(|taken| match taken {
                         Taken::Retry(detail)
@@ -271,12 +347,141 @@ impl<I: HostIo> Takeover<'_, I> {
                         other => other,
                     })
             }
-            Verdict::Wait(detail) => Err(Taken::Retry(detail)),
-            Verdict::Refuse(detail) => Err(Taken::Skip(detail)),
+            Some(Verdict::Wait(detail)) => Err(Taken::Retry(detail)),
+            // A rollout that holds output, or none bound since the baseline, starts at its frontier.
+            Some(Verdict::Refuse(_)) | None => {
+                let records = self.records(&events)?;
+                let judged = (&records, sent_from.as_slice(), &mut *unresolved);
+                self.warm(&events, &bound, (at, since), judged).await
+            }
+        };
+        if matches!(result, Err(Taken::Skip(_))) && !sent_from.contains(&bound.0) {
+            sent_from.push(bound.0.clone());
+        }
+        result
+    }
+
+    /// Whether a Legacy body send started since `at` read the sends.
+    fn sends_moved(&self, at: Baseline) -> bool {
+        let _adoption = self.candidate.lock();
+        self.candidate.sends().0 != at.sends.0
+    }
+
+    /// Legacy's Codex delivery records for the tmux the log binds now.
+    fn records(&self, events: &[BindingEvent]) -> Result<Records, Taken> {
+        let tmux = adoption::current(events).map(|(_, tmux)| tmux);
+        let delivered = match tmux {
+            Some(tmux) => self.io.legacy().codex_delivered(self.channel, &tmux),
+            None => Ok(Default::default()),
+        };
+        Ok(Records::new(delivered.map_err(Taken::Retry)?, events))
+    }
+
+    /// Takes `bound` where Legacy's records stop, with every source owed before it.
+    async fn warm(
+        &self,
+        events: &[BindingEvent],
+        bound: &(SourceId, u64),
+        (at, since): (Baseline, Since),
+        (records, sent_from, unresolved): (&Records, &[SourceId], &mut Vec<SourceId>),
+    ) -> Result<(), Taken> {
+        if self.sends_moved(at) {
+            return Err(Taken::Skip(
+                "a Legacy body send started since the baseline".into(),
+            ));
+        }
+        let start = match self.start_on(bound, (at, since), (records, sent_from)) {
+            Ok(Start::Owed(start)) => {
+                remember(unresolved, &bound.0);
+                start
+            }
+            Ok(Start::End(start)) => {
+                unresolved.retain(|judged| *judged != bound.0);
+                start
+            }
+            Ok(Start::Legacy(detail)) => {
+                remember(unresolved, &bound.0);
+                return Err(Taken::Retry(detail));
+            }
+            Err(taken) => {
+                remember(unresolved, &bound.0);
+                return Err(taken);
+            }
+        };
+        let judged = (records, sent_from, unresolved);
+        let mut sources = self.owed(events, bound, (at, since), judged)?;
+        sources.push(ranged(&bound.0, start)?);
+        self.fenced(at, bound, Plan::Warm(&sources)).await
+    }
+
+    /// Where O starts on `source`: at its earliest turn, ended or not, that Legacy's records do not
+    /// show delivered, once no Legacy send can be part of it. Turn time and custody prove nothing.
+    fn start_on(
+        &self,
+        (source, seq): &(SourceId, u64),
+        (at, since): (Baseline, Since),
+        (records, sent_from): (&Records, &[SourceId]),
+    ) -> Result<Start, Taken> {
+        let frontier = prefix::frontier(source).map_err(retry)?;
+        let floor = records.floor(source, &frontier);
+        let covered = |end: Option<u64>| end.is_some_and(|end| end <= floor);
+        let Some(turn) = frontier.turns.iter().find(|turn| !covered(turn.ended_end)) else {
+            return Ok(Start::End(frontier.complete));
+        };
+        if turn.ended_at.is_none() && sent_from.contains(source) {
+            return Ok(Start::Legacy(
+                "a turn Legacy sent from is still open".into(),
+            ));
+        }
+        // Sends read before a later bind or before the turn opened cannot hold it; nor can none.
+        let opened_after = (turn.opened_at)
+            .is_some_and(|opened| since.proves && opened > since.at + BIND_CLOCK_SLACK);
+        if *seq > at.seq || at.sends.0 == 0 || opened_after {
+            Ok(Start::Owed(turn.opened))
+        } else {
+            Ok(Start::Legacy(
+                "Legacy may have sent from the earliest undelivered turn".into(),
+            ))
         }
     }
 
-    /// The intake fence is held from before the final checks until the init is published.
+    /// Every other source the current tmux generation bound, and every one judged before, from
+    /// its earliest turn owed to O; one Legacy may have sent part of retries the takeover.
+    fn owed(
+        &self,
+        events: &[BindingEvent],
+        bound: &(SourceId, u64),
+        (at, since): (Baseline, Since),
+        (records, sent_from, unresolved): (&Records, &[SourceId], &mut Vec<SourceId>),
+    ) -> Result<Vec<InitSource>, Taken> {
+        let mut walked: Vec<SourceId> = unresolved.clone();
+        walked.retain(|source| !records.generation().contains(source));
+        walked.extend(records.generation());
+        let mut owed = Vec::new();
+        for source in walked.into_iter().filter(|source| *source != bound.0) {
+            let seq = (events.iter().rev())
+                .find(|event| bound_source(event) == Some(&source))
+                .map_or(0, |event| event.seq);
+            match self.start_on(&(source.clone(), seq), (at, since), (records, sent_from)) {
+                Ok(Start::End(_)) => unresolved.retain(|judged| *judged != source),
+                Ok(Start::Owed(start)) => {
+                    remember(unresolved, &source);
+                    owed.push(ranged(&source, start)?);
+                }
+                Ok(Start::Legacy(detail)) => {
+                    remember(unresolved, &source);
+                    return Err(Taken::Retry(format!("a rollout bound before: {detail}")));
+                }
+                Err(taken) => {
+                    remember(unresolved, &source);
+                    return Err(taken);
+                }
+            }
+        }
+        Ok(owed)
+    }
+
+    /// A fresh rollout from its first byte under the fence; see `fenced`.
     pub(super) async fn commit(
         &self,
         mut at: Baseline,
@@ -327,10 +532,37 @@ impl<I: HostIo> Takeover<'_, I> {
                 "buffered output has no admitted execution proof".into(),
             ));
         }
-        let checked = Checked {
-            prefix: prefix.clone(),
-            admission,
-        };
+        let plan = Plan::Fresh(prefix, &[]);
+        self.fenced_proved(at, bound, plan, admission.as_ref(), &debts)
+            .await
+    }
+
+    /// The intake fence is held from before the final checks until the init is published.
+    async fn fenced(
+        &self,
+        at: Baseline,
+        bound: &(SourceId, u64),
+        plan: Plan<'_>,
+    ) -> Result<(), Taken> {
+        // A child's old runs owe their delivery before any takeover publishes, as `commit` pins.
+        let (legacy, bindings) = (
+            self.io.legacy(),
+            self.io.bindings(self.channel, self.provider),
+        );
+        let debts = adoption::ChildDebt::pin(self.candidate, legacy, bindings, self.channel)
+            .await
+            .map_err(Taken::Retry)?;
+        self.fenced_proved(at, bound, plan, None, &debts).await
+    }
+
+    async fn fenced_proved(
+        &self,
+        at: Baseline,
+        bound: &(SourceId, u64),
+        plan: Plan<'_>,
+        admission: Option<&FirstProof>,
+        debts: &adoption::ChildDebt,
+    ) -> Result<(), Taken> {
         let (io, channel) = (self.io, self.channel);
         let Some(expected) = self.gate.current().epoch() else {
             return Err(Taken::Retry(
@@ -363,7 +595,7 @@ impl<I: HostIo> Takeover<'_, I> {
             }
             let mut why = None;
             let sources = || {
-                self.recheck(at, fence_sends, bound, &checked, &debts)
+                self.recheck(at, fence_sends, bound, plan, admission, debts)
                     .map_err(|taken| {
                         let detail = taken.detail().to_owned();
                         why = Some(taken);
@@ -403,15 +635,28 @@ impl<I: HostIo> Takeover<'_, I> {
     }
 
     /// Under the adoption lock: no Legacy send since the baseline or the fence, the same bind,
-    /// and the same eligible bytes. The init reads the rollout from its first byte.
+    /// the same eligible bytes of a fresh rollout and the same bytes before every frontier.
     fn recheck(
         &self,
         at: Baseline,
         fence_sends: (u64, u64),
-        (source, seq): &(SourceId, u64),
-        checked: &Checked,
+        bound: &(SourceId, u64),
+        plan: Plan<'_>,
+        admission: Option<&FirstProof>,
         debts: &adoption::ChildDebt,
     ) -> Result<Vec<InitSource>, Taken> {
+        if self.provider == ShadowProvider::Codex
+            && self
+                .candidate
+                .first_proof(&bound.0)
+                .map_err(Taken::Skip)?
+                .as_ref()
+                != admission
+        {
+            return Err(Taken::Skip(
+                "first admission changed during the intake fence".into(),
+            ));
+        }
         let prefix = &checked.prefix;
         if self.provider == ShadowProvider::Codex
             && self.candidate.first_proof(source).map_err(Taken::Skip)? != checked.admission
@@ -432,9 +677,7 @@ impl<I: HostIo> Takeover<'_, I> {
                 "a Legacy body send finished while O fenced the takeover".into(),
             ));
         }
-        // The admitted path already holds this source authority and revalidates its policy.
-        // Reading unjudged history here avoids reacquiring that same authority in the log port.
-        let events = if checked.admission.is_some() {
+        let events = if admission.is_some() {
             self.log
                 .binding_history(self.channel)
                 .map(renumbered::first_named)
@@ -445,50 +688,97 @@ impl<I: HostIo> Takeover<'_, I> {
         debts
             .recheck(&events, self.candidate)
             .map_err(Taken::Retry)?;
-        if checked.admission.as_ref().is_some_and(|proof| {
+        if admission.is_some_and(|proof| {
             !events
                 .iter()
-                .any(|event| event.seq == *seq && proof.names_binding(event))
+                .any(|event| event.seq == bound.1 && proof.names_binding(event))
         }) {
             return Err(Taken::Skip(
                 "binding execution changed during the intake fence".into(),
             ));
         }
-        let now = bound_after(&events, at.seq);
-        if now.as_ref().is_none_or(|(s, q)| s != source || q != seq) {
+        if bound_after(&events, 0).as_ref() != Some(bound) {
             return Err(Taken::Retry(
                 "the binding moved while O fenced the takeover".into(),
             ));
         }
-        if checked.admission.is_some() {
-            prefix
-                .preserved_in(source)
-                .map_err(|verdict| match verdict {
-                    Verdict::Wait(detail) => Taken::Retry(detail),
-                    Verdict::Refuse(detail) => Taken::Skip(detail),
-                    Verdict::Eligible(_) => unreachable!(),
-                })?;
-        }
-        let verdict = if checked.admission.is_some() {
-            prefix::buffered(source)
-        } else {
-            (self.judge)(source)
+        let (checked, fresh) = match plan {
+            Plan::Fresh(prefix, owed) => (owed, Some(prefix)),
+            Plan::Warm(sources) => (sources, None),
         };
-        match verdict {
-            Verdict::Eligible(now) if now == *prefix => {}
-            Verdict::Eligible(_) => {
-                return Err(Taken::Again(
-                    "the rollout grew while O fenced the takeover".into(),
+        if let Some(prefix) = fresh {
+            if admission.is_some() {
+                prefix
+                    .preserved_in(&bound.0)
+                    .map_err(|verdict| match verdict {
+                        Verdict::Wait(detail) => Taken::Retry(detail),
+                        Verdict::Refuse(detail) => Taken::Skip(detail),
+                        Verdict::Eligible(_) => unreachable!(),
+                    })?;
+            }
+            let verdict = if admission.is_some() {
+                prefix::buffered(&bound.0)
+            } else {
+                (self.judge)(&bound.0)
+            };
+            match verdict {
+                Verdict::Eligible(now) if now == *prefix => {}
+                Verdict::Eligible(_) => {
+                    return Err(Taken::Again(
+                        "the rollout grew while O fenced the takeover".into(),
+                    ));
+                }
+                Verdict::Wait(detail) => return Err(Taken::Retry(detail)),
+                // A Codex rollout that gained output is judged again at its frontier.
+                Verdict::Refuse(detail)
+                    if self.provider == ShadowProvider::Codex && admission.is_none() =>
+                {
+                    return Err(Taken::Again(detail));
+                }
+                Verdict::Refuse(detail) => return Err(Taken::Skip(detail)),
+            }
+        }
+        for source in checked {
+            let now = prefix::hash_before(&source.source_id, source.delivery_start);
+            if now.map_err(retry)? != source.prefix_hash {
+                return Err(Taken::Retry(
+                    "the bytes before a frontier changed while O fenced the takeover".into(),
                 ));
             }
-            Verdict::Wait(detail) => return Err(Taken::Retry(detail)),
-            Verdict::Refuse(detail) => return Err(Taken::Skip(detail)),
         }
-        Ok(vec![InitSource {
-            source_id: source.clone(),
-            delivery_start: 0,
-            prefix_hash: hex::encode(Sha256::digest(b"")),
-        }])
+        let mut sources = checked.to_vec();
+        if fresh.is_some() {
+            sources.push(InitSource {
+                source_id: bound.0.clone(),
+                delivery_start: 0,
+                prefix_hash: hex::encode(Sha256::digest(b"")),
+            });
+        }
+        Ok(sources)
+    }
+}
+
+/// A frontier read that does not pass now is judged again on the next wake.
+fn retry(verdict: Verdict) -> Taken {
+    match verdict {
+        Verdict::Wait(detail) | Verdict::Refuse(detail) => Taken::Retry(detail),
+        Verdict::Eligible(_) => Taken::Retry("the rollout was judged eligible".into()),
+    }
+}
+
+/// `source` from `start`, over the hash of the bytes before it.
+fn ranged(source: &SourceId, start: u64) -> Result<InitSource, Taken> {
+    Ok(InitSource {
+        source_id: source.clone(),
+        delivery_start: start,
+        prefix_hash: prefix::hash_before(source, start).map_err(retry)?,
+    })
+}
+
+/// Keeps `source` among the judged rollouts.
+fn remember(unresolved: &mut Vec<SourceId>, source: &SourceId) {
+    if !unresolved.contains(source) {
+        unresolved.push(source.clone());
     }
 }
 

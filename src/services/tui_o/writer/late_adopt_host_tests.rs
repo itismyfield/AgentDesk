@@ -400,6 +400,8 @@ async fn late_adopt_coalesced_bound_rotation_rejects_before_pin() {
     handle.stop_and_join().await.unwrap();
 }
 
+/// A frontier behind the reserved transcript's end is where O starts, never at EOF: the records
+/// Legacy did not deliver are posted once and nothing is abandoned.
 #[tokio::test(start_paused = true)]
 async fn late_adopt_stalled_frontier_never_skips_to_eof() {
     if !test_override::isolated_binding_case(concat!(
@@ -409,12 +411,13 @@ async fn late_adopt_stalled_frontier_never_skips_to_eof() {
         return;
     }
     let f = Late::new();
-    let end = f.bind_delivered();
+    f.bind_delivered();
     f.legacy.frontier.store(0, Ordering::SeqCst);
     let handle = f.start();
-    tokio::time::sleep(Duration::from_secs(90 * 60)).await;
-    assert!(!init_path(&f.harness, CHANNEL).exists());
-    assert_eq!(adoption(CHANNEL), Adoption::Deferred);
+    f.adopted().await;
+    assert_eq!(adoption(CHANNEL), Adoption::Committed);
+    let init = f.harness.store.read_init(CHANNEL).unwrap().unwrap();
+    assert_eq!(init.sources[0].delivery_start, 0);
     assert!(
         !f.io
             .alarms
@@ -424,8 +427,9 @@ async fn late_adopt_stalled_frontier_never_skips_to_eof() {
             .iter()
             .any(|(_, a)| matches!(a, WriterAlarm::Abandoned { .. }))
     );
-    f.legacy.frontier.store(end, Ordering::SeqCst);
-    f.assert_new_once(end).await;
+    polls(3).await;
+    let posts = ["old delivered payload", "-# ✅ 완료"];
+    assert_eq!(f.harness.port.posts(), posts);
     handle.stop_and_join().await.unwrap();
 }
 
@@ -552,8 +556,9 @@ async fn late_adopt_bind_after_the_reservation_boundary_releases_naming_its_seq(
     // A new transcript, then an earlier one bound again (A→B→A), after the boundary.
     for again in [false, true] {
         let f = Late::new();
-        let (mut sources, end) = restarted(&f, 4);
-        f.legacy.frontier.store(0, Ordering::SeqCst);
+        let (mut sources, _) = restarted(&f, 4);
+        // Open intake holds every commit, so only the rebase can change the reservation.
+        f.io.facts.lock().unwrap().as_mut().unwrap().open_intake = 1;
         let handle = f.start();
         tokio::time::sleep(Duration::from_secs(30)).await;
         assert_eq!(adoption(CHANNEL), Adoption::Deferred, "again {again}");
@@ -563,7 +568,6 @@ async fn late_adopt_bind_after_the_reservation_boundary_releases_naming_its_seq(
         };
         sources.push(next.clone());
         startup_binds(&f, &sources);
-        f.legacy.frontier.store(end, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_secs(30)).await;
         // The bind after the boundary rebases the wait onto it instead of releasing the channel.
         assert_eq!(adoption(CHANNEL), Adoption::Deferred, "again {again}");
@@ -610,7 +614,8 @@ async fn late_adopt_successor_host_keeps_the_reservation_boundary() {
     }
     let f = Late::new();
     let (mut sources, _) = restarted(&f, 4);
-    f.legacy.frontier.store(0, Ordering::SeqCst);
+    // Open intake holds the first host's commit; the successor finds it cleared.
+    f.io.facts.lock().unwrap().as_mut().unwrap().open_intake = 1;
     let handle = f.start();
     tokio::time::sleep(Duration::from_secs(30)).await;
     assert_eq!(adoption(CHANNEL), Adoption::Deferred);
@@ -630,6 +635,7 @@ async fn late_adopt_successor_host_keeps_the_reservation_boundary() {
     let next = source_id_for("s5", &between).unwrap();
     sources.push(next.clone());
     startup_binds(&f, &sources);
+    f.io.facts.lock().unwrap().as_mut().unwrap().open_intake = 0;
     let handle = f.start();
     tokio::time::sleep(Duration::from_secs(30)).await;
     assert_eq!(adoption(CHANNEL), Adoption::Committed);
