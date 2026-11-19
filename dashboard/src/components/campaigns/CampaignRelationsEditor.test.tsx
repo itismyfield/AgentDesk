@@ -16,7 +16,7 @@ vi.mock("../../api/campaigns", async (importOriginal) => ({
 }));
 type FlowProps = {
   nodes: Node[]; edges: Edge[]; nodeTypes: Record<string, ComponentType<NodeProps>>; onInit: (instance: unknown) => void; onNodesChange: (changes: NodeChange[]) => void;
-  onEdgesChange: (changes: EdgeChange[]) => void; onEdgeDoubleClick: (event: { clientX: number; clientY: number }, edge: Edge) => void;
+  onEdgesChange: (changes: EdgeChange[]) => void; onEdgeClick: () => void; onEdgeDoubleClick: (event: { clientX: number; clientY: number }, edge: Edge) => void;
   onNodeDragStop: (event: unknown, node: Node) => void; onConnect: (connection: Connection) => void; onEdgesDelete: (edges: Edge[]) => void;
 };
 const flow: { props: FlowProps | null } = { props: null };
@@ -341,6 +341,35 @@ it("hides a tie whose lines are gone, keeps another scope's draft counted, and d
   expect([ties(), unsaved()]).toEqual([[], "1 dependencies · 1 cable ties"]);
   await click(saveButton());
   expect([stored().ties, stored(other).ties, unsaved()]).toEqual([[], [], null]);
+});
+
+it("keeps a refused tie draft unsaved, warned on leaving and undoable, and after a partial save undoes only what stayed unsaved", async () => {
+  localStorage.setItem(tieKey, JSON.stringify({ schemaVersion: 1, scope: editorViewScope(base.id, "group:G"), ties: [{ id: "t1", position: { x: 0, y: 0 }, strandOrder: [["B", "C"]] }], routes: [{ edge: ["B", "C"], via: ["t1"] }], showOriginal: false, revision: 4 }));
+  const refuse = () => vi.spyOn(localStorage, "setItem").mockImplementationOnce(() => { throw new DOMException("full", "QuotaExceededError"); });
+  await render();
+  await act(async () => flow.props!.onNodeDragStop({}, { ...ties()[0], position: { x: 1013, y: 1011 } }));
+  refuse(); await click(saveButton());
+  expect([text().includes("Could not save the cable ties."), unsaved(), asks(), (named("Undo") as HTMLButtonElement).disabled]).toEqual([true, "1 cable ties", true, false]);
+  // Another scope's tie lands while the refused move stays; undo then walks back only that move.
+  await render(base, { kind: "task", id: "C", depth: 1 });
+  await tieAt("B->C");
+  refuse(); await click(saveButton());
+  expect([unsaved(), stored(campaignViewKey(editorViewScope(base.id, "task:C:1"))).ties.length]).toEqual(["1 cable ties", 1]);
+  await click(named("Undo"));
+  expect([unsaved(), ties().length, asks(), stored().ties[0]]).toEqual([null, 1, false, expect.objectContaining({ position: { x: 0, y: 0 } })]);
+});
+
+it("below 1280px lights a clicked line at once and opens its inspector after the double-click window; a double-click ties it instead", async () => {
+  await render();
+  const clickLine = () => act(async () => { flow.props!.onEdgesChange([{ type: "select", id: "B->C", selected: true }]); flow.props!.onEdgeClick(); });
+  const wait = () => act(() => new Promise((resolve) => setTimeout(resolve, 450)));
+  await clickLine();
+  expect([edge("B->C").selected, container.querySelector("aside")]).toEqual([true, null]);
+  await wait();
+  expect(container.querySelector("aside")?.getAttribute("aria-label")).toBe("Dependency line");
+  await click(named("Close the inspector"));
+  await clickLine(); await tieAt("B->C"); await wait();
+  expect([ties().length, container.querySelector("aside"), edge("B->C#1").target]).toEqual([1, null, "C"]);
 });
 
 it("draws at most 120 tasks of a scope and says how many were left out", async () => {

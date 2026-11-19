@@ -54,8 +54,9 @@ export default function CampaignGroupOverview({ campaignId, nodes, onSelectGroup
   const raw = useSyncExternalStore((listener) => subscribeCampaignView(scope, listener), () => readStoredRaw(scope));
   const view = useMemo(() => loadCampaignView(scope, raw).view, [scope, raw]);
   const overview = useMemo(() => buildCampaignGroupOverview(nodes, view), [nodes, view]);
-  const lines = useMemo(() => view.showOriginal ? overview.connections.map((line) => ({ ...line, via: [] })) : overview.connections, [overview.connections, view.showOriginal]);
-  const shownTies = useMemo(() => view.showOriginal ? [] : overview.ties.filter((tie) => lines.some((line) => line.via.includes(tie.id))), [overview.ties, lines, view.showOriginal]);
+  // A stored `showOriginal` is ignored: its switch is gone, so honouring it would hide these ties for good.
+  const lines = overview.connections;
+  const shownTies = useMemo(() => overview.ties.filter((tie) => lines.some((line) => line.via.includes(tie.id))), [overview.ties, lines]);
   const slots = useMemo(() => tieSlots(shownTies, lines), [shownTies, lines]);
 
   const graphNodes: Node[] = overview.groups.map((group) => {

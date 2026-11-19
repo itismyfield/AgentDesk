@@ -89,8 +89,9 @@ function pathOf(edge: string): string[] {
 }
 const stored = () => JSON.parse(localStorage.getItem(key)!) as { revision?: number; ties: { strandOrder: RawEdgeKey[] }[] };
 
-it("draws the group graph's saved ties as they were left, with no tie controls, writes or network", async () => {
+it("draws the group graph's saved ties as they were left, even with an old showOriginal, with no tie controls, writes or network", async () => {
   seed(groupScope, [AC, BD], 7);
+  localStorage.setItem(key, JSON.stringify({ ...stored(), showOriginal: true })); // left by the removed "show original lines" switch
   const writes = vi.spyOn(localStorage, "setItem");
   await render();
   expect(pathOf("A->C")).toEqual(["campaign-group:G1", "campaign-tie:t1[in-0]", "campaign-group:G2"]);

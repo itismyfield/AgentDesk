@@ -28,6 +28,8 @@ const NODE_TYPES = { relationsTask: RelationsTaskNode, relationsTie: RelationsTi
 const TIE = "cable-tie:";
 /** Ties land on the dot grid behind the canvas; a tie node is 44 units square. */
 const GRID = 20;
+/** How long a clicked line waits for a second click before the overlay inspector opens over it. */
+const DOUBLE_CLICK_MS = 400;
 const snap = (x: number, y: number) => ({ x: Math.round((x - 22) / GRID) * GRID, y: Math.round((y - 22) / GRID) * GRID });
 type Line = { dep: string; id: string };
 /** A 409 is sent again this many times, each on a fresh read; the ledger's revision moves every few seconds. */
@@ -88,6 +90,9 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   // which drops the focus from a line just chosen with the keyboard or the mouse.
   const [measured, setMeasured] = useState<Record<string, { width: number; height: number }>>({});
   const [arranged, setArranged] = useState<Campaign["nodes"] | null>(null);
+  const [waiting, setWaiting] = useState(false);
+  const clickWait = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(clickWait.current), []);
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState<{ text: string; conflicts?: Conflict[]; latest?: Campaign } | null>(null);
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
@@ -208,7 +213,12 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
       return !saveCampaignView(target, clean ? clean(draft.view) : draft.view, Math.max(definition.revision, recorded ?? 0)).ok;
     });
     for (const target of storedEditorScopes(campaign.id)) if (!ties[target.taskScope]) pruneStoredView(target, present, definition.revision);
-    setTies(Object.fromEntries(failed)); setUndo([]); typing.current = null; setTieReads((count) => count + 1);
+    // Undo steps lose only the scopes now saved, and steps that then change nothing; a refused draft keeps its steps.
+    const left = Object.fromEntries(failed), saved = (name: string) => !(name in left) && name in ties;
+    const now = JSON.stringify({ edits, ties: left });
+    setUndo((stack) => stack.map((step) => ({ edits: step.edits, ties: Object.fromEntries(Object.entries(step.ties).filter(([name]) => !saved(name))) }))
+      .filter((step, index, all) => JSON.stringify(step) !== (index + 1 < all.length ? JSON.stringify(all[index + 1]) : now)));
+    setTies(left); typing.current = null; setTieReads((count) => count + 1);
     if (failed.length) setProblem({ text: tr("케이블타이를 저장하지 못했어요. 다시 저장해 보세요.", "Could not save the cable ties. Try saving again.") });
     return failed.length === 0;
   };
@@ -442,7 +452,10 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
             if (tool === "tie") setBundle(bundle.includes(raw) ? bundle.filter((edge) => edge !== raw) : [...bundle, raw]);
             else { setSelection({ kind: "edge", source: line.dep, target: line.id }); setChosenTie(null); }
           }}
+          // Narrower than 1280px a clicked line is lit at once, but the overlay waits out a double-click that would land on it.
+          onEdgeClick={() => { if (wide || tool === "tie") return; clearTimeout(clickWait.current); setWaiting(true); clickWait.current = setTimeout(() => setWaiting(false), DOUBLE_CLICK_MS); }}
           onEdgeDoubleClick={(event, edge) => {
+            clearTimeout(clickWait.current); setWaiting(false);
             const line = edge.data as Line | undefined, point = flow.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY });
             if (line && point) made(tieCommit({ kind: "create", edges: [[line.dep, line.id]], position: snap(point.x, point.y) }));
           }}
@@ -458,7 +471,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
         </ReactFlow>
       </div>
       {/* Docked from 1280px; narrower, it opens over the canvas's right side only while a task or line is chosen. */}
-      {wide ? <div className="flex min-h-0 flex-col">{inspector}</div> : selection && <div ref={panel} className="absolute inset-y-0 right-0 z-20 flex w-80 max-w-[85%] flex-col bg-[var(--th-card-bg)] shadow-xl">
+      {wide ? <div className="flex min-h-0 flex-col">{inspector}</div> : selection && !waiting && <div ref={panel} className="absolute inset-y-0 right-0 z-20 flex w-80 max-w-[85%] flex-col bg-[var(--th-card-bg)] shadow-xl">
         <div className="flex justify-end border-b border-l border-[var(--line)] px-2 py-1"><IconButton icon={<X aria-hidden />} label={tr("검사기 닫기", "Close the inspector")} onClick={closeInspector} /></div>
         {inspector}
       </div>}
