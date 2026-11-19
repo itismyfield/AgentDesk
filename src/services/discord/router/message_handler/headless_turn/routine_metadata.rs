@@ -1,6 +1,6 @@
 //! Routine metadata and session identity helpers for headless turns.
 use super::*;
-use crate::db::dispatched_sessions::load_provider_session_ids_pg;
+use crate::db::dispatched_session_canonical_identity::resolve_session_key_pg;
 use crate::services::discord::adk_session::legacy_session_key_from_namespaced;
 
 pub(super) fn valid_routine_metadata(
@@ -97,7 +97,12 @@ pub(super) async fn models_for_turn(
         let model = if *provider == ProviderKind::Claude {
             None
         } else {
-            resumed_model(shared, provider, session_key, session).await
+            resumed_model(shared, provider, session_key, session)
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(provider = provider.as_str(), %error, "could not read resumed session model");
+                    None
+                })
         };
         return (model, None);
     }
@@ -127,29 +132,35 @@ async fn resumed_model(
     provider: &ProviderKind,
     session_key: Option<&str>,
     native_session: &str,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     let (Some(pool), Some(key)) = (shared.pg_pool.as_ref(), session_key) else {
-        return None;
+        return Ok(None);
     };
     let legacy = legacy_session_key_from_namespaced(key);
     for key in std::iter::once(key).chain(legacy.as_deref()) {
-        match load_provider_session_ids_pg(pool, key, Some(provider.as_str())).await {
-            Ok(Some(row))
-                if row.claude_session_id.as_deref() == Some(native_session)
-                    || row.raw_provider_session_id.as_deref() == Some(native_session) =>
-            {
-                return row.model.filter(|model| {
-                    !model.trim().is_empty() && !model.eq_ignore_ascii_case("default")
-                });
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(session_key = key, %error, "could not read resumed session model");
-                return None;
-            }
+        let Some(resolved) = resolve_session_key_pg(pool, key)
+            .await
+            .map_err(|error| format!("{error:?}"))?
+        else {
+            continue;
+        };
+        let model = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT model FROM sessions WHERE session_key=$1 AND provider=$2
+             AND $3 IN (claude_session_id, raw_provider_session_id)",
+        )
+        .bind(resolved)
+        .bind(provider.as_str())
+        .bind(native_session)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| error.to_string())?;
+        if let Some(model) = model {
+            return Ok(model.filter(|value| {
+                !value.trim().is_empty() && !value.eq_ignore_ascii_case("default")
+            }));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Process mode is explicit and only honored on fresh routine metadata.

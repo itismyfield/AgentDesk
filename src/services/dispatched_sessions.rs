@@ -944,7 +944,6 @@ mod kill_tmux_resume_tests {
         raw_provider_transcript_growth_proven: bool,
     ) -> ProviderSessionIds {
         ProviderSessionIds {
-            model: None,
             resolved_session_key: "test-session".to_string(),
             claude_session_id: claude_session_id.map(str::to_string),
             raw_provider_session_id: raw_provider_session_id.map(str::to_string),
