@@ -136,7 +136,6 @@ impl ProviderKind {
                 Vec::new()
             }
             ProviderCompactionAdapter::CodexCli
-            | ProviderCompactionAdapter::GeminiDisabled
             | ProviderCompactionAdapter::OpenCodeDisabled
             | ProviderCompactionAdapter::QwenDisabled
             | ProviderCompactionAdapter::StreamJsonDisabled(_) => Vec::new(),
@@ -165,7 +164,6 @@ impl ProviderKind {
                 )]
             }
             ProviderCompactionAdapter::ClaudeEnvironment
-            | ProviderCompactionAdapter::GeminiDisabled
             | ProviderCompactionAdapter::OpenCodeDisabled
             | ProviderCompactionAdapter::QwenDisabled
             | ProviderCompactionAdapter::StreamJsonDisabled(_) => Vec::new(),

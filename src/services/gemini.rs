@@ -11,7 +11,7 @@ use std::sync::mpsc::{RecvTimeoutError, Sender};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::services::agent_protocol::{StreamMessage, is_valid_session_id};
-use crate::services::process::{configure_child_process_group, kill_child_tree};
+use crate::services::process::configure_child_process_group;
 use crate::services::provider::{
     CancelToken, ProviderKind, StreamAttemptFailure, StreamAttemptResult, StreamFinalState,
     cancel_requested, is_readonly_tool_policy, register_child_pid, run_retrying_stream_attempts,
@@ -148,59 +148,6 @@ pub fn resolve_gemini_path() -> Option<String> {
 
 fn resolve_gemini_binary() -> crate::services::platform::BinaryResolution {
     crate::services::platform::resolve_provider_binary("gemini")
-}
-
-pub fn execute_command_simple_cancellable(
-    prompt: &str,
-    cancel_token: Option<&CancelToken>,
-) -> Result<String, String> {
-    let resolution = resolve_gemini_binary();
-    let gemini_bin = resolution
-        .resolved_path
-        .clone()
-        .ok_or_else(|| "Gemini CLI not found".to_string())?;
-    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let working_dir = resolve_gemini_requested_dir(current_dir)?;
-    let exec_args = build_exec_args(prompt, None, None, false)?;
-    let mut command = Command::new(&gemini_bin);
-    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    configure_child_process_group(&mut command);
-    let mut child = command
-        .args(&exec_args.args)
-        .current_dir(working_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to start Gemini: {}", e))?;
-
-    register_child_pid(cancel_token, child.id());
-    if is_cancelled(cancel_token) {
-        kill_child_tree(&mut child);
-        return Err("Gemini request cancelled".to_string());
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to read Gemini output: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() {
-        return Err(derive_error_message(
-            &stdout,
-            &stderr,
-            output.status.code(),
-            "Gemini",
-        ));
-    }
-
-    let text = extract_text_from_stream_output(&stdout);
-    if text.trim().is_empty() {
-        Err("Empty response from Gemini".to_string())
-    } else {
-        Ok(text)
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -966,25 +913,6 @@ fn looks_like_uuid(value: &str) -> bool {
         }
     }
     parts.next().is_none()
-}
-
-fn extract_text_from_stream_output(output: &str) -> String {
-    let mut final_text = String::new();
-    for line in output.lines() {
-        let Ok(json) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
-        };
-        let is_assistant = json.get("type").and_then(|v| v.as_str()) == Some("message")
-            && json.get("role").and_then(|v| v.as_str()) == Some("assistant");
-        if !is_assistant {
-            continue;
-        }
-        let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
-        if !content.is_empty() {
-            final_text.push_str(content);
-        }
-    }
-    final_text.trim().to_string()
 }
 
 fn derive_error_message(stdout: &str, stderr: &str, exit_code: Option<i32>, label: &str) -> String {

@@ -31,9 +31,7 @@ impl RoutineAgentExecutor {
             .await
             .map_err(|error| anyhow!("load agent bindings for {agent_id}: {error}"))?
             .ok_or_else(|| anyhow!("agent {agent_id} not found"))?;
-        let provider = bindings
-            .resolved_primary_provider_kind()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
+        let provider = bindings.require_primary_provider(agent_id)?;
         let headless = surface::headless(store, &claimed.run_id).await?;
         let execution_mode = match headless {
             true => surface::headless_backend(&provider, dm_user_id)?,

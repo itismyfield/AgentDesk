@@ -7,7 +7,9 @@ mod value_methods;
 
 pub(crate) use capabilities::CODEX_FALLBACK_CONTEXT_WINDOW;
 pub use capabilities::{ProviderCapabilities, ProviderDefaultBehavior};
-pub use catalog::{ProviderDescriptor, derived_counterpart_ids, provider_catalog};
+pub use catalog::{
+    ProviderDescriptor, derived_counterpart_ids, provider_catalog, retired_provider_id,
+};
 pub(crate) use execution::LegacyDispatchKind;
 pub use execution::{
     ProviderCompactionAdapter, ProviderExecutionAdapter, ProviderReadinessAdapter,

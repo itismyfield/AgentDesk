@@ -390,6 +390,15 @@ pub(super) fn load_discord_bot_configs() -> Vec<ResolvedDiscordBotConfig> {
         .bots
         .into_iter()
         .filter_map(|(name, bot)| {
+            // A retired provider bot stays down rather than launching as the default provider.
+            if bot
+                .provider
+                .as_deref()
+                .and_then(crate::domain::provider::retired_provider_id)
+                .is_some()
+            {
+                return None;
+            }
             let token = resolve_bot_token(&name, &bot)?;
             Some(ResolvedDiscordBotConfig {
                 name,

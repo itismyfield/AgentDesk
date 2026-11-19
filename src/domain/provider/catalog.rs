@@ -31,11 +31,21 @@ pub const fn provider_catalog() -> &'static [ProviderDescriptor] {
     rows::PROVIDER_CATALOG
 }
 
+/// Removed provider ids that old configs may still name; they never resolve to a provider.
+const RETIRED_PROVIDER_IDS: &[&str] = &["gemini"];
+
+pub fn retired_provider_id(raw: &str) -> Option<&'static str> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    RETIRED_PROVIDER_IDS
+        .iter()
+        .copied()
+        .find(|id| *id == normalized)
+}
+
 // Keep the historical first choice, then sort the remaining catalog IDs.
 const FROZEN_FIRST_COUNTERPART: &[(&str, &str)] = &[
     ("claude", "codex"),
     ("codex", "claude"),
-    ("gemini", "codex"),
     ("opencode", "codex"),
     ("qwen", "codex"),
     ("grok", "codex"),
@@ -72,7 +82,6 @@ impl ProviderDescriptor {
         Some(match self.id {
             "claude" => ProviderKind::Claude,
             "codex" => ProviderKind::Codex,
-            "gemini" => ProviderKind::Gemini,
             "opencode" => ProviderKind::OpenCode,
             "qwen" => ProviderKind::Qwen,
             "grok" => ProviderKind::Grok,

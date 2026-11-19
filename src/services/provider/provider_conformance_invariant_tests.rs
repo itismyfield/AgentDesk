@@ -59,8 +59,7 @@ fn provider_exec_registry_conformance_invariant() {
                 assert!(provider.compact_env_vars(80).is_empty());
                 assert!(!provider.compact_cli_config(80, 100_000).is_empty());
             }
-            ProviderCompactionAdapter::GeminiDisabled
-            | ProviderCompactionAdapter::OpenCodeDisabled
+            ProviderCompactionAdapter::OpenCodeDisabled
             | ProviderCompactionAdapter::QwenDisabled
             | ProviderCompactionAdapter::StreamJsonDisabled(_) => {
                 assert!(provider.compact_env_vars(80).is_empty());

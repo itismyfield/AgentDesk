@@ -706,10 +706,6 @@ pub(crate) fn tmux_capture_indicates_ready_for_input(
             crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
                 || tmux_capture_contains_wrapper_ready_marker(capture, provider)
         }
-        ProviderReadinessAdapter::Gemini => {
-            crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
-                || tmux_capture_contains_wrapper_ready_marker(capture, provider)
-        }
         ProviderReadinessAdapter::OpenCode => {
             crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
                 || tmux_capture_contains_wrapper_ready_marker(capture, provider)
