@@ -4,7 +4,7 @@ use super::*;
 use crate::db::turns::TerminalOutcome;
 
 /// The notice a readiness wait owes once it ended without evidence that the pane takes input.
-const READINESS_UNPROVEN: &str = "readiness_unproven";
+pub(super) const READINESS_UNPROVEN: &str = "readiness_unproven";
 
 impl Owner {
     /// Ends the head for good on a proof that no key was sent: every member leaves the queue, its
@@ -22,28 +22,14 @@ impl Owner {
         let now = origin::now_ms();
         next.owe_attempt(&input, TerminalOutcome::Failed, now);
         let members: Vec<PendingQueueItem> = input.members().cloned().collect();
-        if let Some(intent) = next.effort_restart.as_mut()
-            && intent.continuation.as_ref().is_some_and(|c| {
-                members
-                    .iter()
-                    .any(|item| source_admission::same_original(item, &c.original))
-            })
-        {
-            intent.cancelled = true;
-            intent.continuation = None;
-        }
+        next.cancel_refused_continuation(&members);
         // The attempt's tickets end with it; their receipts keep a retry of them a duplicate.
         let attempt = &key.attempt;
         (next.admission_binds)
             .retain(|b| !matches!(&b.at, BindAt::Attempt { attempt: a, .. } if a == attempt));
-        // The fingerprint is the digest a receipt carries for the same original.
-        let member = |item: &PendingQueueItem| RefusedMember {
-            identity: sources::identity(item),
-            fingerprint: source_admission::digest(&source_admission::canonical(item)),
-        };
         next.refused_inputs.push(RefusedInput {
             input: key.clone(),
-            members: members.iter().map(member).collect(),
+            members: members.iter().map(refused_member).collect(),
             reason,
             notice: NoticeIntent {
                 kind: READINESS_UNPROVEN.into(),
@@ -75,10 +61,31 @@ impl Owner {
     }
 }
 
+/// A refused original as its record keeps it: sources, and the digest a receipt carries for it.
+pub(super) fn refused_member(item: &PendingQueueItem) -> RefusedMember {
+    RefusedMember {
+        identity: sources::identity(item),
+        fingerprint: source_admission::digest(&source_admission::canonical(item)),
+    }
+}
+
 impl SnapshotV2 {
     /// A told refusal is forgotten after the window a delivered identity is kept for.
     pub(super) fn forget_told_refusals(&mut self, now: u64) {
-        self.refused_inputs
-            .retain(|r| !r.notice.enqueued || now.saturating_sub(r.refused_at_ms) < 86_400_000);
+        let kept = |told: bool, at: u64| !told || now.saturating_sub(at) < 86_400_000;
+        (self.refused_inputs).retain(|r| kept(r.notice.enqueued, r.refused_at_ms));
+        (self.refused_fronts).retain(|r| kept(r.notice.enqueued, r.refused_at_ms));
+    }
+
+    /// A refused original never runs, so a continuation it carried is cancelled with it.
+    pub(super) fn cancel_refused_continuation(&mut self, members: &[PendingQueueItem]) {
+        if let Some(intent) = self.effort_restart.as_mut()
+            && intent.continuation.as_ref().is_some_and(|c| {
+                (members.iter()).any(|item| source_admission::same_original(item, &c.original))
+            })
+        {
+            intent.cancelled = true;
+            intent.continuation = None;
+        }
     }
 }

@@ -65,8 +65,8 @@ pub(crate) struct Drive {
 struct Lane {
     running: AtomicBool,
     again: AtomicBool,
-    /// A head's confirmation deadline is already awaited.
-    armed: AtomicBool,
+    /// The settle deadline already awaited; an earlier one replaces it.
+    armed: Mutex<Option<u64>>,
 }
 
 fn lane(channel: u64) -> Arc<Lane> {
@@ -129,33 +129,43 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
     }
 }
 
-/// The head's confirmation window ends once at its deadline: the owner settles it there, then the
-/// drive looks again. Nothing polls before that deadline.
+/// Arms the owner's next settle deadline for a hold that no drive pass ended.
+pub(crate) fn arm_deadline(drive: Arc<Drive>) {
+    settle_at_deadline(lane(drive.channel), drive);
+}
+
+/// The owner's next deadline (a head's confirmation window or a held front's readiness due) is
+/// awaited once: the owner settles it there, then the drive looks again. Nothing polls before it.
 fn settle_at_deadline(lane: Arc<Lane>, drive: Arc<Drive>) {
-    if lane.armed.swap(true, Ordering::SeqCst) {
-        return;
-    }
     tokio::spawn(async move {
         let now = || chrono::Utc::now().timestamp_millis().max(0) as u64;
-        let due = super::recovery::settle_due(&drive.mailbox).await;
-        let ticked = match due {
-            Ok(Some(due)) => {
-                tokio::time::sleep(Duration::from_millis(due.saturating_sub(now()))).await;
-                let at = now();
-                let ticked = drive
-                    .mailbox
-                    .v2_request(move |slot| slot.as_mut().ok_or("V2 not adopted")?.tick(at));
-                Some(ticked.await)
-            }
-            _ => None,
+        let Ok(Some(due)) = super::recovery::settle_due(&drive.mailbox).await else {
+            return;
         };
-        lane.armed.store(false, Ordering::SeqCst);
+        let armed = |lane: &Lane| *lane.armed.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let mut armed = lane.armed.lock().unwrap_or_else(|e| e.into_inner());
+            if armed.is_some_and(|at| at <= due) {
+                return;
+            }
+            *armed = Some(due);
+        }
+        tokio::time::sleep(Duration::from_millis(due.saturating_sub(now()))).await;
+        // An earlier deadline replaced this one; its tick and wake re-arm whatever is due next.
+        if armed(&lane) != Some(due) {
+            return;
+        }
+        let at = now();
+        let ticked = drive
+            .mailbox
+            .v2_request(move |slot| slot.as_mut().ok_or("V2 not adopted")?.tick(at));
+        let ticked = ticked.await;
+        *lane.armed.lock().unwrap_or_else(|e| e.into_inner()) = None;
         match ticked {
-            Some(Ok(())) => wake(drive),
-            Some(Err(error)) => {
+            Ok(()) => wake(drive),
+            Err(error) => {
                 tracing::warn!(channel_id = drive.channel, %error, "owner deadline unsettled")
             }
-            None => {}
         }
     });
 }

@@ -32,6 +32,7 @@ pub(crate) fn tail() -> Vec<Value> {
         "permission-mode",
         "session-owner",
         "atis-latch",
+        "repl-mode",
     ] {
         records.push(json!({"type":kind}));
     }
