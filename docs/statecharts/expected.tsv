@@ -480,6 +480,10 @@ input-single-path/HerdrBusyReobserveRestartStaleGeneration.cfg	HerdrBusyReobserv
 input-single-path/HerdrBusyReobserveRestartStop.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveRestartStopContext.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveRestartTerminate.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveRestartTmuxMetadataAfter.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveRestartTmuxMetadataBefore.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
+input-single-path/HerdrBusyReobserveRestartTmuxMetadataNoWiring.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
+input-single-path/HerdrBusyReobserveRestartTmuxMetadataReboot.cfg	HerdrBusyReobserve	RHNoRebootMidHold	-
 input-single-path/HerdrBusyReobserveRestartTool.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveRestartUnwired.cfg	HerdrBusyReobserve	-	RHNoInfiniteKeep,RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveRestartValid.cfg	HerdrBusyReobserve	-	-
@@ -487,6 +491,14 @@ input-single-path/HerdrBusyReobserveRestartWiredMissing.cfg	HerdrBusyReobserve	-
 input-single-path/HerdrBusyReobserveSourceLateBefore.cfg	HerdrBusyReobserve	-	HealthyRecoveryDelivers
 input-single-path/HerdrBusyReobserveSourceLateFixed.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveSourceMismatchFixed.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveTmuxDraftHoldAfter.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveTmuxDraftHoldBefore.cfg	HerdrBusyReobserve	RHOtherHoldPreserved	RHHealthyDelivers
+input-single-path/HerdrBusyReobserveTmuxLateFollowerAfter.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveTmuxLateFollowerBefore.cfg	HerdrBusyReobserve	RHNoLateLoss	-
+input-single-path/HerdrBusyReobserveTmuxModalHoldAfter.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveTmuxModalHoldBefore.cfg	HerdrBusyReobserve	RHOtherHoldPreserved	RHHealthyDelivers
+input-single-path/HerdrBusyReobserveTmuxRetryDueAfter.cfg	HerdrBusyReobserve	-	-
+input-single-path/HerdrBusyReobserveTmuxRetryDueBefore.cfg	HerdrBusyReobserve	RHNoRetryPastDue	RHEndExactlyOnce
 input-single-path/HerdrBusyReobserveUnknownKeepResurrect.cfg	HerdrBusyReobserve	WakeNeedsSameOwner,NoResurrection,AtMostOnce,SettledExactlyOnce	-
 input-single-path/HerdrBusyReobserveUnknownkeepFixed.cfg	HerdrBusyReobserve	-	-
 input-single-path/HerdrBusyReobserveWriterLateBefore.cfg	HerdrBusyReobserve	-	HealthyRecoveryDelivers

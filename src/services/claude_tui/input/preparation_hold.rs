@@ -21,6 +21,16 @@ pub(crate) struct PreparationHold {
 }
 
 impl PreparationHold {
+    pub(crate) const IDLE_EVIDENCE_PENDING: &str = "idle_evidence_pending";
+    pub(crate) const OWNER_READINESS_DEADLINE: &str = "readiness_deadline";
+
+    pub(crate) fn waits_for_idle_evidence(&self) -> bool {
+        self.may_requeue()
+            && self.reason == Self::IDLE_EVIDENCE_PENDING
+            && !self.modal
+            && self.unproven.is_none()
+    }
+
     pub(crate) fn before(session: &str, reason: &'static str, detail: String) -> Self {
         crate::services::claude_tui::composer_lock::guard_draft(
             session,
@@ -59,7 +69,7 @@ impl PreparationHold {
     ) -> Self {
         Self {
             unproven,
-            ..Self::before(session, "idle_evidence_pending", detail)
+            ..Self::before(session, Self::IDLE_EVIDENCE_PENDING, detail)
         }
     }
 
@@ -69,6 +79,13 @@ impl PreparationHold {
 }
 
 pub(crate) fn readiness_failure(session: &str, error: String) -> SubmissionError {
+    if error == PreparationHold::OWNER_READINESS_DEADLINE {
+        return SubmissionError::Held(PreparationHold::before(
+            session,
+            PreparationHold::OWNER_READINESS_DEADLINE,
+            error,
+        ));
+    }
     if !is_prompt_ready_timeout_error(&error) {
         return guarded_outcome::readiness_error(session, error);
     }
