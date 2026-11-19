@@ -134,27 +134,6 @@ pub(super) async fn handle_stream_content_message(
     }
 
     match message {
-        StreamContentArmMessage::RetryBoundary => {
-                            if provider == ProviderKind::Gemini
-                                && handle_gemini_retry_boundary(
-                                    &mut full_response,
-                                    &mut current_tool_line,
-                                    &mut prev_tool_status,
-                                    &mut last_tool_name,
-                                    &mut last_tool_summary,
-                                    &mut any_tool_used,
-                                    &mut has_post_tool_text,
-                                    &mut response_sent_offset,
-                                    &mut last_edit_text,
-                                    &mut new_session_id,
-                                    &mut new_raw_provider_session_id,
-                                    inflight_state,
-                                )
-                            {
-                                transcript_events.clear();
-                                state_dirty = true;
-                            }
-                        }
         StreamContentArmMessage::Init {
                             session_id: sid,
                             raw_session_id,

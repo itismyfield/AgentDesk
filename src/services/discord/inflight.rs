@@ -1934,13 +1934,13 @@ mod stall_recovery_tests {
         assert_eq!(persisted.last_offset, 0);
     }
 
-    /// #3558 (Gemini retry non-destruction): after a same-turn retry reset
-    /// (full_response="", response_sent_offset=0), a streaming write that itself
+    /// After a same-turn full reset (full_response="", response_sent_offset=0),
+    /// a streaming write that itself
     /// carries the reset (empty body) must NOT pull the offset back up via any
     /// blanket max-merge — the patched value is preserved exactly and stays
     /// in-bounds.
     #[test]
-    fn watcher_stream_progress_preserves_gemini_retry_reset() {
+    fn watcher_stream_progress_preserves_same_turn_full_reset() {
         let temp = TempDir::new().unwrap();
         let channel_id = 35_580_005;
         let session = "AgentDesk-claude-3558-e";
@@ -1948,8 +1948,7 @@ mod stall_recovery_tests {
             seed_watcher_stream_state(temp.path(), channel_id, session, "first attempt", 100);
         let identity = InflightTurnIdentity::from_state(&state);
 
-        // Legitimate same-turn retry reset (mirrors reset_gemini_retry_attempt_state).
-        // A reset lowers full_response/offset to 0 on purpose for the SAME turn
+        // Legitimate same-turn full reset. A reset lowers full_response/offset to 0 on purpose for the SAME turn
         // identity — the bridge persists it; seed it via a direct write so the
         // intentional backward reset does not trip the test-only monotonic
         // tripwire (the production save records it OBSERVE-ONLY, never skips).
@@ -1991,8 +1990,8 @@ mod stall_recovery_tests {
         );
     }
 
-    /// The Gemini/Qwen `RetryBoundary` reset (empty body, `response_sent_offset`→0,
-    /// same turn) must not be enforce-skipped, so the re-streamed answer survives.
+    /// A same-turn full reset (empty body, `response_sent_offset`→0) must not be
+    /// enforce-skipped, so the re-streamed answer survives.
     #[test]
     fn authority_on_permits_legit_retry_reset_3933() {
         // Share the panic-hook serialization the other tripwire tests use.
@@ -2009,7 +2008,7 @@ mod stall_recovery_tests {
             "streamed answer body",
             120,
         );
-        // The RetryBoundary reset rewinds the SAME turn to re-stream from empty.
+        // The full reset rewinds the SAME turn to re-stream from empty.
         reset.full_response = String::new();
         reset.response_sent_offset = 0;
         let provider = ProviderKind::Claude;
@@ -3811,7 +3810,7 @@ mod stall_recovery_tests {
 
     #[test]
     fn authority_guard_distinguishes_legit_reset_from_stale_regression_3933() {
-        // The guard tells the Gemini/Qwen RetryBoundary reset apart from a genuine
+        // The guard tells a same-turn full reset apart from a genuine
         // stale-snapshot backward regression (a non-empty body moving back).
         use crate::services::discord::outbound::delivery_record as dr;
         // Same-turn backward move + legit reset signature → PERMIT.
@@ -6193,9 +6192,8 @@ mod recovery_relay_attempts_tests {
     }
 
     /// #3860 SAFETY: the bulk restart-mode marker must NOT undo a legitimate
-    /// same-turn frontier reset. A Gemini/Qwen RetryBoundary clears
-    /// `full_response` and rewinds `response_sent_offset` to 0 for the SAME
-    /// identity (turn_bridge/retry_state.rs) to re-stream the turn. If the marker
+    /// same-turn frontier reset, which clears `full_response` and rewinds
+    /// `response_sent_offset` to 0 for the SAME identity. If the marker
     /// then resurrected an older frontier the re-streamed body would be
     /// suppressed (or double-relayed). The RMW marker re-reads the FRESH on-disk
     /// row, so the legitimate rso=0 reset is preserved verbatim — the same-turn
