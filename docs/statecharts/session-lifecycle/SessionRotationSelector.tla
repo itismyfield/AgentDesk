@@ -3,129 +3,137 @@
 \* selector (cache) and the stored selector (db) must follow it before the next turn reads them.
 EXTENDS TLC
 
-CONSTANTS Design,     \* "before" | "fix1" | "fixed"
+CONSTANTS Design,     \* "before" | "fix1" | "fix2" | "fixed"
           Restarts,   \* whether a dcserver restart may happen
           Caches,     \* starting caches: "old", or "none" when the channel holds no session
           Owners,     \* "watcher", or "herdr" for a reconnected Herdr pane with no watcher
-          KeyMatches  \* whether the pane-name key resolves the channel's canonical row
+          KeyMatches, \* whether the pane-name key resolves the channel's canonical row
+          Hops,       \* whether the pane may hop once more (new -> c) before any Discord turn
+          Bots        \* "own": the idle loop runs on the channel's bot; "other": on another bot
 
-VARIABLES cache, cleared, db, up, outages, rotation, followed, pinned, held, started, last,
-          owner, keyMatch
+VARIABLES cache, cleared, db, up, outages, rotation, followed, pinned, held, phase, read,
+          started, stale, last, owner, keyMatch, hopped, bot
 
-vars == <<cache, cleared, db, up, outages, rotation, followed, pinned, held, started, last,
-          owner, keyMatch>>
+vars == <<cache, cleared, db, up, outages, rotation, followed, pinned, held, phase, read,
+          started, stale, last, owner, keyMatch, hopped, bot>>
 
 Init ==
-    /\ cache \in Caches
-    /\ cleared = FALSE /\ db = "old"
+    /\ cache \in Caches /\ cleared = FALSE /\ db = "old"
     /\ up = TRUE /\ outages = 0
     /\ rotation = "none"          \* none | pending | done | lost
-    /\ followed = FALSE           \* a watcherless pane's selector already followed
+    /\ followed = FALSE           \* a watcherless pane's selector already followed this target
     /\ pinned \in BOOLEAN         \* a turn on the frozen transcript still holds the channel
     /\ held = pinned              \* the queued input waits behind a running turn
-    /\ started = "-"              \* session the queued input's turn resumed
+    /\ phase = "idle"             \* the queued input's turn start: idle | read | done
+    /\ read = "-"                 \* what that turn start read before writing the cache
+    /\ started = "-" /\ stale = FALSE
     /\ last = "none"              \* last outside writer of the stored selector: none | clear | newer
-    /\ owner \in Owners
-    /\ keyMatch \in KeyMatches
+    /\ owner \in Owners /\ keyMatch \in KeyMatches /\ bot \in Bots
+    /\ hopped = FALSE
 
-\* The cache follows only while it still names the session the pane left.
-Followed == IF ~cleared /\ cache = "old" THEN "new" ELSE cache
+Target == IF hopped THEN "c" ELSE "new"
+\* sessions the pane left; fixed keeps all of them, the earlier designs only the first
+Left == IF hopped THEN {"old", "new"} ELSE {"old"}
+Base == IF Design = "fixed" THEN Left ELSE {"old"}
 
-\* Whether the settle pass writes the stored selector, by design.
-Write == IF Design = "fixed"
-         THEN ~cleared /\ Followed \in {"new", "none"} /\ db = "old"
-         ELSE Followed = "new" /\ cache # "new" /\ db = "old" /\ keyMatch
-\* fixed: a failed write keeps the rotation; fix1 also counts a missed row as done
+Followed == IF ~cleared /\ cache \in Base THEN Target ELSE cache
+RowFound == owner = "watcher" \/ bot = "own" \/ Design = "fixed"
+Write == IF Design \in {"fix2", "fixed"}
+         THEN ~cleared /\ Followed \in {Target, "none"} /\ db \in Base /\ RowFound
+         ELSE Followed = Target /\ cache # Target /\ db \in Base /\ keyMatch
 Ok == ~Write \/ up
+\* fixed: the settle pass waits while a turn start holds the channel transition
+Free == Design # "fixed" \/ phase # "read"
 
-Fixed2(rest) == UNCHANGED <<cleared, up, outages, started, last, owner, keyMatch>> /\ rest
+Keep(v) == UNCHANGED v
+Rest == <<cleared, up, outages, phase, read, started, stale, last, owner, keyMatch, hopped, bot>>
 
-\* hook adoption records the rotation
 Adopt == /\ rotation = "none" /\ rotation' = "pending"
-         /\ UNCHANGED <<cache, cleared, db, up, outages, followed, pinned, held, started, last,
-                        owner, keyMatch>>
+         /\ Keep(<<cache, db, followed, pinned, held>>) /\ Keep(Rest)
 
-\* the frozen turn finishes from its own transcript; the finalizer releases the queue
+\* a second hook adoption on the same pane while the record stays
+Hop == /\ Hops /\ rotation = "pending" /\ ~hopped /\ hopped' = TRUE /\ followed' = FALSE
+       /\ Keep(<<cache, cleared, db, up, outages, rotation, pinned, held, phase, read, started,
+                stale, last, owner, keyMatch, bot>>)
+
 FrozenFinish == /\ pinned /\ pinned' = FALSE /\ held' = FALSE
-                /\ UNCHANGED <<cache, cleared, db, up, outages, rotation, followed, started, last,
-                               owner, keyMatch>>
+                /\ Keep(<<cache, db, rotation, followed>>) /\ Keep(Rest)
 
-\* fix1/fixed with a watcher: the selector moves, then the queue is released
 WatcherSettle ==
-    /\ Design # "before" /\ owner = "watcher" /\ rotation = "pending"
+    /\ Design # "before" /\ owner = "watcher" /\ rotation = "pending" /\ Free
     /\ cache' = Followed
-    /\ db' = IF Write /\ up THEN "new" ELSE db
+    /\ db' = IF Write /\ up THEN Target ELSE db
     /\ rotation' = IF Design = "fix1" \/ Ok THEN "done" ELSE "pending"
     /\ pinned' = FALSE /\ held' = FALSE
-    /\ UNCHANGED followed
-    /\ Fixed2(TRUE)
+    /\ Keep(followed) /\ Keep(Rest)
 
-\* fixed, a Herdr pane with no watcher: only the selector follows, the rotation stays
+\* a Herdr pane with no watcher: only the selector follows, the rotation stays
 HerdrFollow ==
-    /\ Design = "fixed" /\ owner = "herdr" /\ rotation = "pending" /\ ~followed
+    /\ Design \in {"fix2", "fixed"} /\ owner = "herdr" /\ rotation = "pending" /\ ~followed
+    /\ Free /\ RowFound
     /\ cache' = Followed
-    /\ db' = IF Write /\ up THEN "new" ELSE db
+    /\ db' = IF Write /\ up THEN Target ELSE db
     /\ followed' = Ok
-    /\ UNCHANGED <<rotation, pinned, held>>
-    /\ Fixed2(TRUE)
+    /\ Keep(<<rotation, pinned, held>>) /\ Keep(Rest)
 
-\* before: the settle releases the queue first, then moves the selector and always retires
 BeforeRelease == /\ Design = "before" /\ owner = "watcher" /\ rotation = "pending" /\ pinned
                  /\ pinned' = FALSE /\ held' = FALSE
-                 /\ UNCHANGED <<cache, db, rotation, followed>>
-                 /\ Fixed2(TRUE)
+                 /\ Keep(<<cache, db, rotation, followed>>) /\ Keep(Rest)
 BeforeRetire ==
     /\ Design = "before" /\ owner = "watcher" /\ rotation = "pending" /\ ~pinned
     /\ cache' = Followed
-    /\ db' = IF Followed = "new" /\ cache = "old" /\ keyMatch /\ up THEN "new" ELSE db
+    /\ db' = IF Followed = Target /\ cache \in Base /\ keyMatch /\ up THEN Target ELSE db
     /\ rotation' = "done" /\ held' = FALSE
-    /\ UNCHANGED <<pinned, followed>>
-    /\ Fixed2(TRUE)
+    /\ Keep(<<pinned, followed>>) /\ Keep(Rest)
 
 Settle == WatcherSettle \/ HerdrFollow \/ BeforeRelease \/ BeforeRetire
 
-\* the queued input's turn start (session_preparation.rs restore)
-TurnStart ==
-    /\ rotation # "none" /\ ~held /\ started = "-"
-    /\ LET restored == IF cache = "none" /\ ~cleared /\ db # "null" THEN db ELSE cache
-           c == IF Design # "before" /\ rotation = "pending" /\ ~cleared /\ restored = "old"
-                THEN "new" ELSE restored
-       IN /\ cache' = c
-          /\ started' = c
-    /\ UNCHANGED <<cleared, db, up, outages, rotation, followed, pinned, held, last, owner,
-                   keyMatch>>
+\* the queued input's turn start reads the cache, or the store when the cache is empty, under
+\* the channel transition, then writes the cache and applies a rotation still pending
+TurnRead == /\ rotation # "none" /\ ~held /\ phase = "idle" /\ phase' = "read"
+            /\ read' = IF cache = "none" /\ ~cleared /\ db # "null" THEN db ELSE cache
+            /\ Keep(<<cache, cleared, db, up, outages, rotation, followed, pinned, held, started,
+                     stale, last, owner, keyMatch, hopped, bot>>)
+TurnFinish ==
+    /\ phase = "read" /\ phase' = "done"
+    /\ LET c == IF Design # "before" /\ rotation = "pending" /\ ~cleared /\ read \in Base
+                THEN Target ELSE read
+       IN /\ cache' = c /\ started' = c /\ stale' = (c \in Left)
+    /\ Keep(<<cleared, db, up, outages, rotation, followed, pinned, held, read, last, owner,
+             keyMatch, hopped, bot>>)
 
-\* user !clear empties the cache and the stored selector
-Clear == /\ cache' = "none" /\ cleared' = TRUE /\ db' = "null" /\ last' = "clear"
-         /\ UNCHANGED <<up, outages, rotation, followed, pinned, held, started, owner, keyMatch>>
+\* user !clear takes the same channel transition as a turn start
+Clear == /\ phase # "read"
+         /\ cache' = "none" /\ cleared' = TRUE /\ db' = "null" /\ last' = "clear"
+         /\ Keep(<<up, outages, rotation, followed, pinned, held, phase, read, started, stale,
+                  owner, keyMatch, hopped, bot>>)
 
-\* another writer stores a newer selector
 DbNewer == /\ db' = "x" /\ last' = "newer"
-           /\ UNCHANGED <<cache, cleared, up, outages, rotation, followed, pinned, held, started,
-                          owner, keyMatch>>
+           /\ Keep(<<cache, cleared, up, outages, rotation, followed, pinned, held, phase, read,
+                    started, stale, owner, keyMatch, hopped, bot>>)
 
 StoreDown == /\ up /\ outages = 0 /\ up' = FALSE /\ outages' = 1
-             /\ UNCHANGED <<cache, cleared, db, rotation, followed, pinned, held, started, last,
-                            owner, keyMatch>>
+             /\ Keep(<<cache, cleared, db, rotation, followed, pinned, held, phase, read, started,
+                      stale, last, owner, keyMatch, hopped, bot>>)
 StoreUp == /\ ~up /\ up' = TRUE
-           /\ UNCHANGED <<cache, cleared, db, outages, rotation, followed, pinned, held, started,
-                          last, owner, keyMatch>>
+           /\ Keep(<<cache, cleared, db, outages, rotation, followed, pinned, held, phase, read,
+                    started, stale, last, owner, keyMatch, hopped, bot>>)
 
-\* a restart loses the cache and the in-memory rotation record
-Restart == /\ Restarts /\ rotation = "pending"
+Restart == /\ Restarts /\ rotation = "pending" /\ phase # "read"
            /\ cache' = "none" /\ cleared' = FALSE /\ rotation' = "lost" /\ followed' = FALSE
-           /\ UNCHANGED <<db, up, outages, pinned, held, started, last, owner, keyMatch>>
+           /\ Keep(<<db, up, outages, pinned, held, phase, read, started, stale, last, owner,
+                    keyMatch, hopped, bot>>)
 
-Next == Adopt \/ FrozenFinish \/ Settle \/ TurnStart \/ Clear \/ DbNewer
+Next == Adopt \/ Hop \/ FrozenFinish \/ Settle \/ TurnRead \/ TurnFinish \/ Clear \/ DbNewer
         \/ StoreDown \/ StoreUp \/ Restart
 
-Spec == Init /\ [][Next]_vars /\ WF_vars(Settle) /\ WF_vars(StoreUp)
+Spec == Init /\ [][Next]_vars /\ WF_vars(Settle) /\ WF_vars(StoreUp) /\ WF_vars(TurnFinish)
 
-\* the first turn after the rotation never resumes the session the pane left
-NoOldResume == started # "old"
+\* the first turn after the rotation never resumes a session the pane left
+NoOldResume == ~stale
 \* a user clear or a newer stored selector is not overwritten
 NoOverwrite == /\ (last = "clear" => db = "null")
                /\ (last = "newer" => db = "x")
-\* the stored selector eventually leaves the old session once the pane rotated
-StoredSelectorFollows == (rotation # "none") ~> (db # "old")
+\* the stored selector eventually leaves every session the pane left
+StoredSelectorFollows == (rotation # "none") ~> (db \notin Left)
 ====

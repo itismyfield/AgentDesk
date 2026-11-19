@@ -1,7 +1,7 @@
 export const title = "Channel selector after an in-pane /clear";
-const names = { old: "old session", new: "new session", none: "empty", x: "newer selector", null: "empty", "-": "not started" };
+const names = { old: "old session", new: "new session", c: "third session", none: "empty", x: "newer selector", null: "empty", "-": "not started" };
 export const state = (v) =>
-  `${v.owner === "herdr" ? "Herdr, " : ""}cache ${names[v.cache]}${v.cleared ? " (cleared)" : ""}, stored ${names[v.db]}, rotation ${v.rotation}, next turn ${names[v.started]}`;
+  `${v.owner === "herdr" ? "Herdr, " : ""}${v.hopped ? "hopped twice, " : ""}cache ${names[v.cache]}${v.cleared ? " (cleared)" : ""}, stored ${names[v.db]}, rotation ${v.rotation}${v.followed ? " (selector followed)" : ""}, next turn ${names[v.started]}`;
 export const group = (v) => (v.started === "old" ? "ResumedOld" : v.rotation === "pending" ? "Pending" : "Settled");
 export const colors = { ResumedOld: "pink", Pending: "yellow", Settled: "teal" };
 const steps = {
@@ -11,7 +11,9 @@ const steps = {
   HerdrFollow: "the settle pass moves a watcherless Herdr pane's selector",
   BeforeRelease: "the settle pass releases the queue",
   BeforeRetire: "the settle pass moves the selector and retires",
-  TurnStart: "the queued input's turn starts",
+  TurnRead: "the queued input's turn start reads the selector",
+  TurnFinish: "that turn start writes the cache and claims",
+  Hop: "the hook moves the pane once more",
   Clear: "the user runs !clear",
   DbNewer: "a newer selector is stored",
   StoreDown: "the selector store fails",

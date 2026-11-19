@@ -8,25 +8,76 @@ stateDiagram-v2
   }
   class lg0 yellow
   class lg1 teal
-  s0: cache empty, stored old session, rotation none, next turn not started
-  s1: cache empty, stored newer selector, rotation none, next turn not started
-  s2: cache empty (cleared), stored empty, rotation none, next turn not started
-  s3: cache empty, stored old session, rotation pending, next turn not started
-  s4: cache empty (cleared), stored newer selector, rotation none, next turn not started
-  s5: cache empty, stored new session, rotation pending, next turn not started
-  s6: cache new session, stored old session, rotation pending, next turn new session
-  s7: cache empty, stored newer selector, rotation pending, next turn not started
-  s8: cache empty (cleared), stored empty, rotation pending, next turn not started
-  s9: cache new session, stored new session, rotation pending, next turn new session
-  s10: cache new session, stored newer selector, rotation pending, next turn new session
-  s11: cache newer selector, stored newer selector, rotation pending, next turn newer selector
-  s12: cache empty (cleared), stored empty, rotation pending, next turn new session
-  s13: cache empty (cleared), stored empty, rotation pending, next turn empty
-  s14: cache empty (cleared), stored newer selector, rotation pending, next turn not started
-  s15: cache empty (cleared), stored empty, rotation pending, next turn newer selector
-  s16: cache empty (cleared), stored newer selector, rotation pending, next turn new session
-  s17: cache empty (cleared), stored newer selector, rotation pending, next turn empty
-  s18: cache empty (cleared), stored newer selector, rotation pending, next turn newer selector
+  s0: Herdr, cache empty, stored old session, rotation none, next turn not started
+  s1: Herdr, cache empty, stored newer selector, rotation none, next turn not started
+  s2: Herdr, cache empty (cleared), stored empty, rotation none, next turn not started
+  s3: Herdr, cache empty, stored old session, rotation pending, next turn not started
+  s4: Herdr, cache empty (cleared), stored newer selector, rotation none, next turn not started
+  s5: Herdr, cache empty, stored new session, rotation pending (selector followed), next turn not started
+  s6: Herdr, hopped twice, cache empty, stored old session, rotation pending, next turn not started
+  s7: Herdr, cache empty, stored newer selector, rotation pending, next turn not started
+  s8: Herdr, cache empty (cleared), stored empty, rotation pending, next turn not started
+  s9: Herdr, cache new session, stored old session, rotation pending, next turn new session
+  s10: Herdr, hopped twice, cache empty, stored third session, rotation pending (selector followed), next turn not started
+  s11: Herdr, hopped twice, cache empty, stored new session, rotation pending, next turn not started
+  s12: Herdr, hopped twice, cache empty, stored newer selector, rotation pending, next turn not started
+  s13: Herdr, cache empty, stored newer selector, rotation pending (selector followed), next turn not started
+  s14: Herdr, hopped twice, cache empty (cleared), stored empty, rotation pending, next turn not started
+  s15: Herdr, cache empty (cleared), stored empty, rotation pending (selector followed), next turn not started
+  s16: Herdr, cache empty (cleared), stored newer selector, rotation pending, next turn not started
+  s17: Herdr, cache new session, stored new session, rotation pending (selector followed), next turn new session
+  s18: Herdr, hopped twice, cache third session, stored old session, rotation pending, next turn third session
+  s19: Herdr, hopped twice, cache new session, stored old session, rotation pending, next turn new session
+  s20: Herdr, cache new session, stored newer selector, rotation pending, next turn new session
+  s21: Herdr, cache newer selector, stored newer selector, rotation pending, next turn newer selector
+  s22: Herdr, cache empty (cleared), stored empty, rotation pending, next turn empty
+  s23: Herdr, cache empty (cleared), stored empty, rotation pending, next turn new session
+  s24: Herdr, hopped twice, cache empty, stored newer selector, rotation pending (selector followed), next turn not started
+  s25: Herdr, hopped twice, cache empty (cleared), stored empty, rotation pending (selector followed), next turn not started
+  s26: Herdr, hopped twice, cache empty (cleared), stored newer selector, rotation pending, next turn not started
+  s27: Herdr, cache empty (cleared), stored newer selector, rotation pending (selector followed), next turn not started
+  s28: Herdr, hopped twice, cache third session, stored third session, rotation pending (selector followed), next turn third session
+  s29: Herdr, hopped twice, cache third session, stored third session, rotation pending (selector followed), next turn new session
+  s30: Herdr, hopped twice, cache third session, stored new session, rotation pending, next turn third session
+  s31: Herdr, hopped twice, cache new session, stored new session, rotation pending, next turn new session
+  s32: Herdr, hopped twice, cache third session, stored newer selector, rotation pending, next turn third session
+  s33: Herdr, hopped twice, cache new session, stored newer selector, rotation pending, next turn new session
+  s34: Herdr, hopped twice, cache newer selector, stored newer selector, rotation pending, next turn newer selector
+  s35: Herdr, cache new session, stored newer selector, rotation pending (selector followed), next turn new session
+  s36: Herdr, cache newer selector, stored newer selector, rotation pending (selector followed), next turn newer selector
+  s37: Herdr, cache empty (cleared), stored empty, rotation pending, next turn newer selector
+  s38: Herdr, hopped twice, cache empty (cleared), stored empty, rotation pending, next turn empty
+  s39: Herdr, hopped twice, cache empty (cleared), stored empty, rotation pending, next turn third session
+  s40: Herdr, hopped twice, cache empty (cleared), stored empty, rotation pending, next turn new session
+  s41: Herdr, cache empty (cleared), stored empty, rotation pending (selector followed), next turn new session
+  s42: Herdr, cache empty (cleared), stored empty, rotation pending (selector followed), next turn empty
+  s43: Herdr, cache empty (cleared), stored newer selector, rotation pending, next turn empty
+  s44: Herdr, cache empty (cleared), stored newer selector, rotation pending, next turn new session
+  s45: Herdr, hopped twice, cache empty (cleared), stored newer selector, rotation pending (selector followed), next turn not started
+  s46: Herdr, hopped twice, cache third session, stored old session, rotation pending, next turn new session
+  s47: Herdr, hopped twice, cache third session, stored newer selector, rotation pending (selector followed), next turn third session
+  s48: Herdr, hopped twice, cache third session, stored newer selector, rotation pending (selector followed), next turn new session
+  s49: Herdr, hopped twice, cache newer selector, stored newer selector, rotation pending (selector followed), next turn newer selector
+  s50: Herdr, hopped twice, cache empty (cleared), stored empty, rotation pending, next turn newer selector
+  s51: Herdr, cache empty (cleared), stored empty, rotation pending (selector followed), next turn newer selector
+  s52: Herdr, hopped twice, cache empty (cleared), stored empty, rotation pending (selector followed), next turn third session
+  s53: Herdr, hopped twice, cache empty (cleared), stored empty, rotation pending (selector followed), next turn empty
+  s54: Herdr, hopped twice, cache empty (cleared), stored empty, rotation pending (selector followed), next turn new session
+  s55: Herdr, cache empty (cleared), stored newer selector, rotation pending, next turn newer selector
+  s56: Herdr, hopped twice, cache empty (cleared), stored newer selector, rotation pending, next turn empty
+  s57: Herdr, hopped twice, cache empty (cleared), stored newer selector, rotation pending, next turn third session
+  s58: Herdr, hopped twice, cache empty (cleared), stored newer selector, rotation pending, next turn new session
+  s59: Herdr, cache empty (cleared), stored newer selector, rotation pending (selector followed), next turn new session
+  s60: Herdr, cache empty (cleared), stored newer selector, rotation pending (selector followed), next turn empty
+  s61: Herdr, hopped twice, cache third session, stored new session, rotation pending, next turn new session
+  s62: Herdr, hopped twice, cache third session, stored newer selector, rotation pending, next turn new session
+  s63: Herdr, hopped twice, cache empty (cleared), stored empty, rotation pending (selector followed), next turn newer selector
+  s64: Herdr, hopped twice, cache empty (cleared), stored newer selector, rotation pending, next turn newer selector
+  s65: Herdr, cache empty (cleared), stored newer selector, rotation pending (selector followed), next turn newer selector
+  s66: Herdr, hopped twice, cache empty (cleared), stored newer selector, rotation pending (selector followed), next turn third session
+  s67: Herdr, hopped twice, cache empty (cleared), stored newer selector, rotation pending (selector followed), next turn empty
+  s68: Herdr, hopped twice, cache empty (cleared), stored newer selector, rotation pending (selector followed), next turn new session
+  s69: Herdr, hopped twice, cache empty (cleared), stored newer selector, rotation pending (selector followed), next turn newer selector
   [*] --> s0
   s0 --> s1: a newer selector is stored
   s0 --> s2: the user runs !clear
@@ -35,34 +86,174 @@ stateDiagram-v2
   s1 --> s7: the hook moves the pane to the new session
   s2 --> s4: a newer selector is stored
   s2 --> s8: the hook moves the pane to the new session
-  s3 --> s5: HerdrFollow
-  s3 --> s6: the queued input's turn starts
+  s3 --> s5: the settle pass moves a watcherless Herdr pane's selector
+  s3 --> s6: the hook moves the pane once more
   s3 --> s7: a newer selector is stored
   s3 --> s8: the user runs !clear
   s4 --> s2: the user runs !clear
-  s4 --> s14: the hook moves the pane to the new session
-  s5 --> s9: the queued input's turn starts
-  s5 --> s7: a newer selector is stored
-  s5 --> s8: the user runs !clear
-  s6 --> s9: HerdrFollow
-  s6 --> s10: a newer selector is stored
-  s6 --> s12: the user runs !clear
+  s4 --> s16: the hook moves the pane to the new session
+  s5 --> s11: the hook moves the pane once more
+  s5 --> s13: a newer selector is stored
+  s5 --> s15: the user runs !clear
+  s6 --> s10: the settle pass moves a watcherless Herdr pane's selector
+  s6 --> s12: a newer selector is stored
+  s6 --> s14: the user runs !clear
   s7 --> s8: the user runs !clear
-  s7 --> s11: the queued input's turn starts
-  s8 --> s13: the queued input's turn starts
-  s8 --> s14: a newer selector is stored
-  s9 --> s10: a newer selector is stored
-  s9 --> s12: the user runs !clear
-  s10 --> s12: the user runs !clear
-  s11 --> s15: the user runs !clear
-  s12 --> s16: a newer selector is stored
-  s13 --> s17: a newer selector is stored
-  s14 --> s8: the user runs !clear
-  s14 --> s17: the queued input's turn starts
-  s15 --> s18: a newer selector is stored
-  s16 --> s12: the user runs !clear
-  s17 --> s13: the user runs !clear
-  s18 --> s15: the user runs !clear
+  s7 --> s12: the hook moves the pane once more
+  s7 --> s13: the settle pass moves a watcherless Herdr pane's selector
+  s8 --> s14: the hook moves the pane once more
+  s8 --> s15: the settle pass moves a watcherless Herdr pane's selector
+  s8 --> s16: a newer selector is stored
+  s3 --> s9: that turn start writes the cache and claims
+  s9 --> s17: the settle pass moves a watcherless Herdr pane's selector
+  s9 --> s19: the hook moves the pane once more
+  s9 --> s20: a newer selector is stored
+  s9 --> s23: the user runs !clear
+  s10 --> s24: a newer selector is stored
+  s10 --> s25: the user runs !clear
+  s11 --> s10: the settle pass moves a watcherless Herdr pane's selector
+  s11 --> s12: a newer selector is stored
+  s11 --> s14: the user runs !clear
+  s12 --> s14: the user runs !clear
+  s12 --> s24: the settle pass moves a watcherless Herdr pane's selector
+  s13 --> s12: the hook moves the pane once more
+  s13 --> s15: the user runs !clear
+  s14 --> s25: the settle pass moves a watcherless Herdr pane's selector
+  s14 --> s26: a newer selector is stored
+  s15 --> s14: the hook moves the pane once more
+  s15 --> s27: a newer selector is stored
+  s16 --> s8: the user runs !clear
+  s16 --> s26: the hook moves the pane once more
+  s16 --> s27: the settle pass moves a watcherless Herdr pane's selector
+  s5 --> s17: that turn start writes the cache and claims
+  s6 --> s18: that turn start writes the cache and claims
+  s7 --> s20: that turn start writes the cache and claims
+  s7 --> s21: that turn start writes the cache and claims
+  s8 --> s22: that turn start writes the cache and claims
+  s17 --> s31: the hook moves the pane once more
+  s17 --> s35: a newer selector is stored
+  s17 --> s41: the user runs !clear
+  s18 --> s28: the settle pass moves a watcherless Herdr pane's selector
+  s18 --> s32: a newer selector is stored
+  s18 --> s39: the user runs !clear
+  s19 --> s29: the settle pass moves a watcherless Herdr pane's selector
+  s19 --> s33: a newer selector is stored
+  s19 --> s40: the user runs !clear
+  s20 --> s23: the user runs !clear
+  s20 --> s33: the hook moves the pane once more
+  s20 --> s35: the settle pass moves a watcherless Herdr pane's selector
+  s21 --> s34: the hook moves the pane once more
+  s21 --> s36: the settle pass moves a watcherless Herdr pane's selector
+  s21 --> s37: the user runs !clear
+  s22 --> s38: the hook moves the pane once more
+  s22 --> s42: the settle pass moves a watcherless Herdr pane's selector
+  s22 --> s43: a newer selector is stored
+  s23 --> s40: the hook moves the pane once more
+  s23 --> s41: the settle pass moves a watcherless Herdr pane's selector
+  s23 --> s44: a newer selector is stored
+  s24 --> s25: the user runs !clear
+  s25 --> s45: a newer selector is stored
+  s26 --> s14: the user runs !clear
+  s26 --> s45: the settle pass moves a watcherless Herdr pane's selector
+  s27 --> s15: the user runs !clear
+  s27 --> s26: the hook moves the pane once more
+  s10 --> s28: that turn start writes the cache and claims
+  s11 --> s30: that turn start writes the cache and claims
+  s12 --> s32: that turn start writes the cache and claims
+  s12 --> s34: that turn start writes the cache and claims
+  s13 --> s35: that turn start writes the cache and claims
+  s13 --> s36: that turn start writes the cache and claims
+  s14 --> s38: that turn start writes the cache and claims
+  s15 --> s42: that turn start writes the cache and claims
+  s16 --> s43: that turn start writes the cache and claims
+  s28 --> s47: a newer selector is stored
+  s28 --> s52: the user runs !clear
+  s29 --> s48: a newer selector is stored
+  s29 --> s54: the user runs !clear
+  s30 --> s28: the settle pass moves a watcherless Herdr pane's selector
+  s30 --> s32: a newer selector is stored
+  s30 --> s39: the user runs !clear
+  s31 --> s29: the settle pass moves a watcherless Herdr pane's selector
+  s31 --> s33: a newer selector is stored
+  s31 --> s40: the user runs !clear
+  s19 --> s46: the settle pass moves a watcherless Herdr pane's selector
+  s32 --> s39: the user runs !clear
+  s32 --> s47: the settle pass moves a watcherless Herdr pane's selector
+  s33 --> s40: the user runs !clear
+  s33 --> s48: the settle pass moves a watcherless Herdr pane's selector
+  s34 --> s49: the settle pass moves a watcherless Herdr pane's selector
+  s34 --> s50: the user runs !clear
+  s35 --> s41: the user runs !clear
+  s35 --> s33: the hook moves the pane once more
+  s36 --> s34: the hook moves the pane once more
+  s36 --> s51: the user runs !clear
+  s37 --> s50: the hook moves the pane once more
+  s37 --> s51: the settle pass moves a watcherless Herdr pane's selector
+  s37 --> s55: a newer selector is stored
+  s38 --> s53: the settle pass moves a watcherless Herdr pane's selector
+  s38 --> s56: a newer selector is stored
+  s39 --> s52: the settle pass moves a watcherless Herdr pane's selector
+  s39 --> s57: a newer selector is stored
+  s40 --> s54: the settle pass moves a watcherless Herdr pane's selector
+  s40 --> s58: a newer selector is stored
+  s41 --> s40: the hook moves the pane once more
+  s41 --> s59: a newer selector is stored
+  s42 --> s38: the hook moves the pane once more
+  s42 --> s60: a newer selector is stored
+  s43 --> s22: the user runs !clear
+  s43 --> s56: the hook moves the pane once more
+  s43 --> s60: the settle pass moves a watcherless Herdr pane's selector
+  s44 --> s23: the user runs !clear
+  s44 --> s58: the hook moves the pane once more
+  s44 --> s59: the settle pass moves a watcherless Herdr pane's selector
+  s45 --> s25: the user runs !clear
+  s24 --> s47: that turn start writes the cache and claims
+  s24 --> s49: that turn start writes the cache and claims
+  s25 --> s53: that turn start writes the cache and claims
+  s26 --> s56: that turn start writes the cache and claims
+  s27 --> s60: that turn start writes the cache and claims
+  s31 --> s61: the settle pass moves a watcherless Herdr pane's selector
+  s46 --> s40: the user runs !clear
+  s46 --> s62: a newer selector is stored
+  s47 --> s52: the user runs !clear
+  s48 --> s54: the user runs !clear
+  s49 --> s63: the user runs !clear
+  s50 --> s63: the settle pass moves a watcherless Herdr pane's selector
+  s50 --> s64: a newer selector is stored
+  s51 --> s50: the hook moves the pane once more
+  s51 --> s65: a newer selector is stored
+  s52 --> s66: a newer selector is stored
+  s53 --> s67: a newer selector is stored
+  s54 --> s68: a newer selector is stored
+  s55 --> s37: the user runs !clear
+  s55 --> s64: the hook moves the pane once more
+  s55 --> s65: the settle pass moves a watcherless Herdr pane's selector
+  s56 --> s38: the user runs !clear
+  s56 --> s67: the settle pass moves a watcherless Herdr pane's selector
+  s57 --> s39: the user runs !clear
+  s57 --> s66: the settle pass moves a watcherless Herdr pane's selector
+  s58 --> s40: the user runs !clear
+  s58 --> s68: the settle pass moves a watcherless Herdr pane's selector
+  s59 --> s41: the user runs !clear
+  s59 --> s58: the hook moves the pane once more
+  s60 --> s42: the user runs !clear
+  s60 --> s56: the hook moves the pane once more
+  s45 --> s67: that turn start writes the cache and claims
+  s61 --> s40: the user runs !clear
+  s61 --> s62: a newer selector is stored
+  s46 --> s29: the settle pass moves a watcherless Herdr pane's selector
+  s62 --> s40: the user runs !clear
+  s62 --> s48: the settle pass moves a watcherless Herdr pane's selector
+  s63 --> s69: a newer selector is stored
+  s64 --> s50: the user runs !clear
+  s64 --> s69: the settle pass moves a watcherless Herdr pane's selector
+  s65 --> s51: the user runs !clear
+  s65 --> s64: the hook moves the pane once more
+  s66 --> s52: the user runs !clear
+  s67 --> s53: the user runs !clear
+  s68 --> s54: the user runs !clear
+  s61 --> s29: the settle pass moves a watcherless Herdr pane's selector
+  s69 --> s63: the user runs !clear
   class s0 teal
   class s1 teal
   class s2 teal
@@ -82,3 +273,54 @@ stateDiagram-v2
   class s16 yellow
   class s17 yellow
   class s18 yellow
+  class s19 yellow
+  class s20 yellow
+  class s21 yellow
+  class s22 yellow
+  class s23 yellow
+  class s24 yellow
+  class s25 yellow
+  class s26 yellow
+  class s27 yellow
+  class s28 yellow
+  class s29 yellow
+  class s30 yellow
+  class s31 yellow
+  class s32 yellow
+  class s33 yellow
+  class s34 yellow
+  class s35 yellow
+  class s36 yellow
+  class s37 yellow
+  class s38 yellow
+  class s39 yellow
+  class s40 yellow
+  class s41 yellow
+  class s42 yellow
+  class s43 yellow
+  class s44 yellow
+  class s45 yellow
+  class s46 yellow
+  class s47 yellow
+  class s48 yellow
+  class s49 yellow
+  class s50 yellow
+  class s51 yellow
+  class s52 yellow
+  class s53 yellow
+  class s54 yellow
+  class s55 yellow
+  class s56 yellow
+  class s57 yellow
+  class s58 yellow
+  class s59 yellow
+  class s60 yellow
+  class s61 yellow
+  class s62 yellow
+  class s63 yellow
+  class s64 yellow
+  class s65 yellow
+  class s66 yellow
+  class s67 yellow
+  class s68 yellow
+  class s69 yellow
