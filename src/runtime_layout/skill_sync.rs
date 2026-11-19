@@ -164,7 +164,7 @@ fn skill_deployment_plan(
         let retired_target = entry
             .providers
             .iter()
-            .any(|provider| normalize_provider_name(provider).as_deref() == Some("gemini"));
+            .any(|provider| crate::domain::provider::retired_provider_id(provider).is_some());
         let providers = if providers.is_empty() && !retired_target {
             all_skill_providers()
         } else {

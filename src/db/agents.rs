@@ -161,7 +161,6 @@ mod tests {
         let bindings = binding("gemini", "1470000000000000001");
 
         assert_eq!(bindings.resolved_primary_provider_kind(), None);
-        assert_eq!(bindings.primary_channel(), None);
         let error = bindings.require_primary_provider("gm-agent").unwrap_err();
         assert_eq!(
             error.to_string(),
@@ -232,7 +231,6 @@ mod tests {
         };
 
         assert_eq!(bindings.resolved_primary_provider_kind(), None);
-        assert_eq!(bindings.primary_channel(), None);
     }
 
     #[test]

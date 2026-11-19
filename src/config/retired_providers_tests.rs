@@ -15,7 +15,7 @@ fn boot_config(provider: &str) -> crate::config::Config {
             "provider": provider,
             "channels": {provider: "1470000000000000001"},
         }],
-        "discord": {"bots": {provider: {"provider": provider}}},
+        "discord": {"bots": {provider: {"provider": provider, "token": "fixture-token"}}},
     }))
     .unwrap()
 }
@@ -35,11 +35,11 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RetiredWarnings {
 
 /// The boot gate installs process-wide snapshots, so each case runs in its own child process.
 #[tokio::test]
-async fn retired_provider_config_boots_with_exactly_one_warning() {
+async fn retired_provider_config_boots_with_one_warning_and_no_retired_bot() {
     let Ok(provider) = std::env::var(CASE) else {
         let test = concat!(
             module_path!(),
-            "::retired_provider_config_boots_with_exactly_one_warning"
+            "::retired_provider_config_boots_with_one_warning_and_no_retired_bot"
         )
         .trim_start_matches("agentdesk::");
         for provider in ["gemini", "claude"] {
@@ -68,4 +68,16 @@ async fn retired_provider_config_boots_with_exactly_one_warning() {
         crate::bootstrap::prepare_and_install_boot_snapshots(&boot_config(&provider), None).await;
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(*warnings.lock().unwrap(), usize::from(provider == "gemini"));
+    let launched: Vec<_> = crate::services::discord::load_discord_bot_launch_configs()
+        .into_iter()
+        .map(|bot| bot.provider)
+        .collect();
+    let expected = match provider.as_str() {
+        "gemini" => Vec::new(),
+        _ => vec![crate::services::provider::ProviderKind::Claude],
+    };
+    assert_eq!(
+        launched, expected,
+        "a retired bot must not launch as another provider"
+    );
 }

@@ -34,7 +34,6 @@ fn provider_catalog_names_aliases_and_cli_order_contract() {
     let expected = [
         ("claude", "claude (Anthropic)", &[][..]),
         ("codex", "codex (OpenAI)", &[][..]),
-        ("gemini", "gemini (Google)", &[][..]),
         ("opencode", "opencode (OpenCode)", &[][..]),
         ("qwen", "qwen (Alibaba)", &[][..]),
         ("grok", "grok (xAI)", &[][..]),
@@ -52,52 +51,27 @@ fn provider_counterpart_order_contract() {
     let expected = [
         (
             "claude",
-            ["codex", "antigravity", "gemini", "grok", "opencode", "qwen"],
+            ["codex", "antigravity", "grok", "opencode", "qwen"],
         ),
         (
             "codex",
-            [
-                "claude",
-                "antigravity",
-                "gemini",
-                "grok",
-                "opencode",
-                "qwen",
-            ],
-        ),
-        (
-            "gemini",
-            ["codex", "antigravity", "claude", "grok", "opencode", "qwen"],
+            ["claude", "antigravity", "grok", "opencode", "qwen"],
         ),
         (
             "opencode",
-            ["codex", "antigravity", "claude", "gemini", "grok", "qwen"],
+            ["codex", "antigravity", "claude", "grok", "qwen"],
         ),
         (
             "qwen",
-            [
-                "codex",
-                "antigravity",
-                "claude",
-                "gemini",
-                "grok",
-                "opencode",
-            ],
+            ["codex", "antigravity", "claude", "grok", "opencode"],
         ),
         (
             "grok",
-            [
-                "codex",
-                "antigravity",
-                "claude",
-                "gemini",
-                "opencode",
-                "qwen",
-            ],
+            ["codex", "antigravity", "claude", "opencode", "qwen"],
         ),
         (
             "antigravity",
-            ["codex", "claude", "gemini", "grok", "opencode", "qwen"],
+            ["codex", "claude", "grok", "opencode", "qwen"],
         ),
     ];
     for (id, counterparts) in expected {
@@ -121,64 +95,37 @@ fn provider_kind_catalog_helpers_preserve_known_alias_and_unknown_contract() {
             ProviderKind::Claude,
             "Claude",
             "claude (Anthropic)",
-            ["codex", "antigravity", "gemini", "grok", "opencode", "qwen"],
+            ["codex", "antigravity", "grok", "opencode", "qwen"],
         ),
         (
             ProviderKind::Codex,
             "Codex",
             "codex (OpenAI)",
-            [
-                "claude",
-                "antigravity",
-                "gemini",
-                "grok",
-                "opencode",
-                "qwen",
-            ],
-        ),
-        (
-            ProviderKind::Gemini,
-            "Gemini",
-            "gemini (Google)",
-            ["codex", "antigravity", "claude", "grok", "opencode", "qwen"],
+            ["claude", "antigravity", "grok", "opencode", "qwen"],
         ),
         (
             ProviderKind::OpenCode,
             "OpenCode",
             "opencode (OpenCode)",
-            ["codex", "antigravity", "claude", "gemini", "grok", "qwen"],
+            ["codex", "antigravity", "claude", "grok", "qwen"],
         ),
         (
             ProviderKind::Qwen,
             "Qwen Code",
             "qwen (Alibaba)",
-            [
-                "codex",
-                "antigravity",
-                "claude",
-                "gemini",
-                "grok",
-                "opencode",
-            ],
+            ["codex", "antigravity", "claude", "grok", "opencode"],
         ),
         (
             ProviderKind::Grok,
             "Grok",
             "grok (xAI)",
-            [
-                "codex",
-                "antigravity",
-                "claude",
-                "gemini",
-                "opencode",
-                "qwen",
-            ],
+            ["codex", "antigravity", "claude", "opencode", "qwen"],
         ),
         (
             ProviderKind::Antigravity,
             "Antigravity",
             "antigravity (agy)",
-            ["codex", "claude", "gemini", "grok", "opencode", "qwen"],
+            ["codex", "claude", "grok", "opencode", "qwen"],
         ),
     ];
     assert_eq!(
@@ -221,9 +168,9 @@ fn provider_kind_catalog_helpers_preserve_known_alias_and_unknown_contract() {
         Some(super::StreamJsonDialectId::Agy)
     );
     assert_eq!(ProviderKind::Claude.stream_json_dialect(), None);
-    assert_eq!(ProviderKind::provider_for_cli_init_index(7), None);
+    assert_eq!(ProviderKind::provider_for_cli_init_index(6), None);
     assert_eq!(ProviderKind::provider_for_cli_init_index(usize::MAX), None);
-    for raw in ["", " Future-CLI ", "claude-extra"] {
+    for raw in ["", " Future-CLI ", "claude-extra", "gemini"] {
         assert_eq!(ProviderKind::from_str(raw), None);
         let unknown = ProviderKind::Unsupported(raw.trim().to_string());
         assert_eq!(ProviderKind::from_str_or_unsupported(raw), unknown);
