@@ -537,8 +537,8 @@ test("relations editor: opens from the relations tab, edits dependencies in the 
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/relations-editor-fixture-1440x900-dark.png` });
 
   // Keyboard only: Enter on a focused task opens it, Enter on a chip's button removes that dependency.
-  for (const id of ["i7272", "i7402"]) { await task(id).focus(); await page.keyboard.press("Enter"); }
-  await expect(editor.getByRole("complementary")).toContainText("#7402 · Gateway");
+  // Each Enter waits for the one before it to land, so the graph has taken the new selection before the next key.
+  for (const id of ["7272", "7402"]) { await task(`i${id}`).focus(); await page.keyboard.press("Enter"); await expect(editor.getByRole("complementary")).toContainText(`#${id} · Gateway`); }
   await editor.getByRole("button", { name: /^선행 #7401 .+ 빼기$/ }).focus();
   await page.keyboard.press("Enter");
   await page.goBack();
@@ -553,7 +553,7 @@ test("relations editor: opens from the relations tab, edits dependencies in the 
   await expect(page).not.toHaveURL(/edit=relations/);
 });
 
-test("relations editor: phones get no way in, and a direct link says this screen only shows relations", async ({ page }, testInfo) => {
+test("relations editor: phones get no way in, a direct link only shows relations, and another campaign picked there opens no editor once widened", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "mobile", "Phone width");
   await openCampaigns(page);
   await page.locator(".campaigns-panel").getByRole("tab", { name: "관계도" }).click();
@@ -563,4 +563,34 @@ test("relations editor: phones get no way in, and a direct link says this screen
   await expect(page.getByText("관계도 편집은 900px 넘는 화면에서 열려요. 여기서는 보기만 해요.")).toBeVisible();
   await expect(page.locator(".campaign-relations-editor")).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
+  await page.locator(".campaign-picker").click();
+  const sheet = page.getByRole("dialog", { name: "캠페인 고르기" });
+  await sheet.getByRole("radio", { name: /준비/ }).click();
+  await sheet.locator('[data-campaign-key="legacy:release-train"]').click();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.locator(".campaign-detail-status")).toHaveText("멈춤 · 진행 중인 작업 없음");
+  await expect(page.locator(".campaign-relations-editor")).toHaveCount(0);
+  await expect(page).not.toHaveURL(/edit=relations/);
+});
+
+test("relations editor: a draft kept while another page shows asks before a reload, and stops once discarded", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "The editor is for wide screens");
+  await openCampaigns(page);
+  const [panel, editor, asked] = [page.locator(".campaigns-panel"), page.locator(".campaign-relations-editor"), [] as string[]];
+  const open = async (name: string) => { await panel.getByRole("tab", { name: "관계도" }).click(); await panel.getByRole("button", { name, exact: true }).click(); };
+  const reloadHome = async () => {
+    await page.getByRole("link", { name: "홈" }).click();
+    page.once("dialog", (dialog) => { asked.push(dialog.type()); void dialog.dismiss(); });
+    await page.reload({ timeout: 5_000 }).catch(() => undefined);
+  };
+  await open("편집");
+  await editor.locator('.react-flow__node[data-id="i7402"]').click(); await editor.getByLabel("선행 추가").selectOption("i7401");
+  await reloadHome();
+  expect(asked).toEqual(["beforeunload"]);
+  await page.getByRole("link", { name: "캠페인" }).click();
+  await open("이어서 편집");
+  await expect(editor.getByText("저장하지 않은 편집을 다시 불러왔어요.")).toBeVisible();
+  await editor.getByRole("button", { name: "버리기", exact: true }).click();
+  await reloadHome();
+  expect(asked).toEqual(["beforeunload"]);
 });

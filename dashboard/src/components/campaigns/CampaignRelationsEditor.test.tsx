@@ -52,6 +52,8 @@ const choose = (name: string, value: string) => act(async () => {
   select.value = value; select.dispatchEvent(new Event("change", { bubbles: true }));
 });
 const saveButton = () => [...container.querySelectorAll("button")].find((element) => element.textContent === "Save")!;
+const typeTitle = (value: string) => act(async () => { const input = container.querySelector<HTMLInputElement>("aside input")!;
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); });
 
 it("edits dependencies with the inspector's chips alone and blocks saving while a cycle stands", async () => {
   await render();
@@ -115,18 +117,70 @@ it("saves nothing when the server changed the same field, and can keep the newes
   const latest = { ...base, revision: 9, nodes: base.nodes.map((value) => value.id === "C" ? { ...value, title: "Server C" } : value) };
   vi.mocked(getCampaignDetail).mockResolvedValue({ campaign: latest, live: {}, read: 1 });
   await render();
-  await pick("C");
-  await act(async () => {
-    const input = container.querySelector<HTMLInputElement>("aside input")!;
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "Mine C");
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  });
+  await pick("C"); await typeTitle("Mine C");
   await click(saveButton());
   expect(saveCampaignNodes).not.toHaveBeenCalled();
   expect(text()).toContain("Changed elsewhere too, so nothing was saved: C title");
   await click(named("Keep the newest values there"));
   expect(text()).not.toContain("Unsaved");
   expect(text()).toContain("rev 9");
+});
+
+// Two free tasks for the server to point B at, or to close a loop with.
+const extra: Campaign = { ...base, nodes: [...base.nodes, node("E", { group: "G" }), node("F", { group: "G" })] };
+const withNodes = (revision: number, patch: Record<string, Partial<Campaign["nodes"][number]>>) => ({ ...extra, revision, nodes: extra.nodes.map((value) => ({ ...value, ...patch[value.id] })) });
+
+it("drops undo steps when a newer base arrives, so undo cannot put back what the server replaced", async () => {
+  await render(extra);
+  await pick("B"); await choose("Add a dependency", "E"); await click(named("Remove dependency E E"));
+  await render(withNodes(5, { B: { dependencies: ["A", "F"] } }));
+  expect((named("Undo") as HTMLButtonElement).disabled).toBe(true);
+  expect(named("Remove dependency F F")).toBeTruthy();
+});
+
+it("closes a conflict notice on undo, so the next save judges the restored draft again", async () => {
+  vi.mocked(getCampaignDetail).mockResolvedValue({ campaign: withNodes(9, { B: { dependencies: ["A", "F"] }, C: { title: "Server C" } }), live: {}, read: 1 });
+  await render(extra);
+  await pick("B"); await choose("Add a dependency", "E");
+  await pick("C"); await typeTitle("Mine C");
+  await pick("B"); await click(named("Remove dependency E E"));
+  await click(saveButton());
+  expect(text()).toContain("nothing was saved: C title");
+  await click(named("Undo"));
+  expect(named("Keep the newest values there")).toBeUndefined();
+  await click(saveButton());
+  expect(text()).toContain("nothing was saved: B dependencies · C title");
+});
+
+it("holds every edit while a save is out and sends what the screen shows, keeping a link it did not touch", async () => {
+  const linked = { ...base, nodes: base.nodes.map((value) => value.id === "C" ? { ...value, issue_url: "owner/repo/issues/9" } : value) };
+  vi.mocked(getCampaignDetail).mockResolvedValue({ campaign: linked, live: {}, read: 1 });
+  let land!: (saved: Campaign) => void; vi.mocked(saveCampaignNodes).mockReturnValue(new Promise((resolve) => { land = resolve; }));
+  await render(linked);
+  await pick("C"); await typeTitle("Mine C");
+  await click(saveButton());
+  expect((named("Add a dependency") as HTMLSelectElement).disabled).toBe(true);
+  expect((named("Remove dependency B B") as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => flow.props!.onConnect({ source: "A", target: "C", sourceHandle: null, targetHandle: null }));
+  const sent = vi.mocked(saveCampaignNodes).mock.calls[0][1];
+  await act(async () => land({ ...linked, revision: 5, nodes: sent }));
+  expect(sent.find((value) => value.id === "C")).toMatchObject({ title: "Mine C", dependencies: ["B"], issue_url: "owner/repo/issues/9" });
+  expect(text()).not.toContain("Unsaved");
+  expect(flow.props!.edges.map((edge) => edge.id)).not.toContain("A->C");
+});
+
+it("brings a cycle that only the merge makes onto the canvas, and saves once one side of it is removed", async () => {
+  vi.mocked(getCampaignDetail).mockResolvedValue({ campaign: withNodes(9, { E: { dependencies: ["F"] } }), live: {}, read: 1 });
+  vi.mocked(saveCampaignNodes).mockImplementation(async (campaign, nodes) => ({ ...campaign, revision: campaign.revision + 1, nodes }));
+  await render(extra);
+  await pick("F"); await choose("Add a dependency", "E");
+  await click(saveButton());
+  expect(saveCampaignNodes).not.toHaveBeenCalled();
+  expect(flow.props!.edges.filter((edge) => edge.style?.strokeDasharray).map((edge) => edge.id).sort()).toEqual(["E->F", "F->E"]);
+  expect([/Cycle: (E → F → E|F → E → F)/.test(text()), text().includes("1 errors"), saveButton().disabled]).toEqual([true, true, true]);
+  await act(async () => flow.props!.onEdgesDelete([{ id: "F->E", source: "F", target: "E" }]));
+  await click(saveButton());
+  expect(vi.mocked(saveCampaignNodes).mock.calls[0][1].filter((value) => "EF".includes(value.id)).map((value) => value.dependencies)).toEqual([[], ["E"]]);
 });
 
 it("asks before leaving with changes, warns on reload, and keeps an undecided draft for the next visit", async () => {
@@ -147,10 +201,14 @@ it("asks before leaving with changes, warns on reload, and keeps an undecided dr
 
   await act(async () => root.unmount());
   expect(keptDraft(base.id)?.edits).toEqual({ C: { dependencies: ["B", "A"] } });
+  const asks = () => { const event = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; };
+  expect(asks()).toBe(true);
   root = createRoot(container);
   await render();
   expect(text()).toContain("Your unsaved edits are back.");
   expect(text()).toContain("Unsaved · 1 dependencies");
+  await click(named("Discard"));
+  expect(asks()).toBe(false);
 });
 
 it("below 1280px opens the inspector over the canvas only for a choice, and Escape or the close button returns focus to it", async () => {

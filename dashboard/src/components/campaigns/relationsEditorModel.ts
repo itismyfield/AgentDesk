@@ -36,15 +36,14 @@ export function scopeTasks(nodes: CampaignNode[], scope: EditScope): { ids: stri
     const byId = new Map(nodes.map((node) => [node.id, node]));
     const dependents = new Map<string, string[]>();
     for (const node of nodes) for (const id of node.dependencies) dependents.set(id, [...dependents.get(id) ?? [], node.id]);
-    const seen = new Set<string>(byId.has(scope.id) ? [scope.id] : []);
-    // Upstream and downstream separately, so a dependency's other dependents (siblings) stay out.
+    // Upstream and downstream each keep their own visited set, so a dependency's other dependents (siblings) stay out
+    // and a task reached upstream through a cycle is still walked downstream.
     const walk = (next: (id: string) => string[]) => {
-      let frontier = [...seen].slice(0, 1);
-      for (let step = 0; step < scope.depth; step++) frontier = frontier.flatMap(next).filter((id) => byId.has(id) && !seen.has(id) && !!seen.add(id));
+      const seen = new Set([scope.id]);
+      for (let step = 0, frontier = [scope.id]; step < scope.depth; step++) frontier = frontier.flatMap(next).filter((id) => byId.has(id) && !seen.has(id) && !!seen.add(id));
+      return seen;
     };
-    walk((id) => byId.get(id)?.dependencies ?? []);
-    walk((id) => dependents.get(id) ?? []);
-    ids = [...seen];
+    if (byId.has(scope.id)) ids = [...new Set([...walk((id) => byId.get(id)?.dependencies ?? []), ...walk((id) => dependents.get(id) ?? [])])];
   }
   return { ids: ids.slice(0, SCOPE_LIMIT), total: ids.length };
 }
@@ -142,11 +141,11 @@ export function editCounts(edits: Edits): Record<EditField, number> {
   return counts;
 }
 
-/** Fields of a changed task the server would refuse or the screen cannot open. */
-export function fieldErrors(node: CampaignNode): Set<"title" | "issue_url"> {
+/** Changed fields the server would refuse or the screen cannot open; an untouched field stays as the ledger keeps it. */
+export function fieldErrors(node: CampaignNode, changed: Edits[string] = {}): Set<"title" | "issue_url"> {
   const errors = new Set<"title" | "issue_url">();
-  if (!node.title.trim() || new TextEncoder().encode(node.title).length > 512) errors.add("title");
-  if (node.issue_url && !safeCampaignLink(node.issue_url)) errors.add("issue_url");
+  if ("title" in changed && (!node.title.trim() || new TextEncoder().encode(node.title).length > 512)) errors.add("title");
+  if ("issue_url" in changed && node.issue_url && !safeCampaignLink(node.issue_url)) errors.add("issue_url");
   return errors;
 }
 
@@ -183,8 +182,12 @@ export function adoptLatest(latest: Campaign, edits: Edits, conflicts: Conflict[
   return next;
 }
 
-/** Unsaved edits kept for this tab's session when the editor goes away without a decision (rail, palette, another page). */
+export const warnBeforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+
+/** Unsaved edits kept for this tab's session when the editor goes away without a decision (rail, palette, another page).
+ * They live only in memory, so while any is kept a reload or close asks first, whatever page the tab shows. */
 const kept = new Map<string, { base: Campaign; edits: Edits }>();
-export const keepDraft = (draft: { base: Campaign; edits: Edits }) => kept.set(draft.base.id, draft);
+const guard = () => kept.size ? window.addEventListener("beforeunload", warnBeforeUnload) : window.removeEventListener("beforeunload", warnBeforeUnload);
+export const keepDraft = (draft: { base: Campaign; edits: Edits }) => { kept.set(draft.base.id, draft); guard(); };
 export const keptDraft = (campaignId: string) => kept.get(campaignId) ?? null;
-export const dropKeptDraft = (campaignId: string) => kept.delete(campaignId);
+export const dropKeptDraft = (campaignId: string) => { kept.delete(campaignId); guard(); };

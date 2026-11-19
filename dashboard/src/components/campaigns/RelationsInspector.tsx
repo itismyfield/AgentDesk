@@ -18,10 +18,12 @@ const SECTION = "grid gap-2 border-b border-[var(--line)] px-4 py-3 [&>*]:min-w-
 const HEADING = "m-0 text-xs font-medium text-[var(--fg-muted)]";
 
 /** The editor's right column: the chosen task's fields and dependency chips, the chosen line, or the check results. */
-export default function RelationsInspector({ node, edge, lock, nodes, cycles, errors, problems, cycleText, act, tr }: {
+export default function RelationsInspector({ node, edge, lock, busy, nodes, cycles, errors, problems, cycleText, act, tr }: {
   node: CampaignNode | null; edge: { source: string; target: string } | null;
   /** Why the chosen task (or the chosen line's dependent) cannot change, or null. */
   lock: string | null;
+  /** A save is out: every control waits for its answer. */
+  busy: boolean;
   nodes: ReadonlyMap<string, CampaignNode>; cycles: string[][]; errors: ReadonlySet<string>; problems: string[];
   cycleText: (path: string[]) => string; act: InspectorActions; tr: Tr;
 }) {
@@ -31,7 +33,7 @@ export default function RelationsInspector({ node, edge, lock, nodes, cycles, er
     <div className={SECTION}>
       <h3 className={HEADING}>{tr("선행 연결", "Dependency line")}</h3>
       <p className="m-0 text-sm text-[var(--fg)]">{name(edge.source)} → {name(edge.target)}</p>
-      {lockNote ?? <div><Button variant="secondary" size="sm" onClick={act.unlink}>{tr("선 끊기", "Remove line")}</Button></div>}
+      {lockNote ?? <div><Button variant="secondary" size="sm" disabled={busy} onClick={act.unlink}>{tr("선 끊기", "Remove line")}</Button></div>}
     </div>
   </aside>;
   if (!node) return <aside aria-label={tr("검사", "Checks")} className="min-h-0 flex-1 overflow-y-auto border-l border-[var(--line)]">
@@ -60,9 +62,9 @@ export default function RelationsInspector({ node, edge, lock, nodes, cycles, er
       </div>;
     })}
     <div className={SECTION}>
-      <TextField label={tr("제목", "Title")} size="lg" value={node.title} disabled={locked} maxLength={512}
+      <TextField label={tr("제목", "Title")} size="lg" value={node.title} disabled={locked || busy} maxLength={512}
         error={errors.has("title") ? tr("제목을 적어 주세요(512바이트까지).", "Enter a title (up to 512 bytes).") : undefined} onChange={(event) => act.field("title", event.target.value)} />
-      <TextField label={tr("이슈", "Issue")} size="lg" type="url" value={node.issue_url ?? ""} disabled={locked} placeholder="https://github.com/…/issues/123"
+      <TextField label={tr("이슈", "Issue")} size="lg" type="url" value={node.issue_url ?? ""} disabled={locked || busy} placeholder="https://github.com/…/issues/123"
         error={errors.has("issue_url") ? tr("http나 https 주소를 적어 주세요.", "Enter an http or https address.") : undefined} onChange={(event) => act.field("issue_url", event.target.value)} />
     </div>
     <div className={SECTION}>
@@ -70,11 +72,11 @@ export default function RelationsInspector({ node, edge, lock, nodes, cycles, er
       {node.dependencies.length ? <ul aria-label={tr("선행 작업", "Dependencies")} className="m-0 flex list-none flex-wrap gap-1.5 p-0">
         {node.dependencies.map((id) => <li key={id} className="flex min-w-0 max-w-full items-center gap-1 rounded-full border border-[var(--line)] py-0.5 pr-1 pl-2.5 text-xs text-[var(--fg)]">
           <span className="min-w-0 truncate">{name(id)}</span>
-          {!locked && <button type="button" aria-label={tr(`선행 ${name(id)} 빼기`, `Remove dependency ${name(id)}`)} onClick={() => act.remove(id)}
+          {!locked && <button type="button" disabled={busy} aria-label={tr(`선행 ${name(id)} 빼기`, `Remove dependency ${name(id)}`)} onClick={() => act.remove(id)}
             className="!m-0 grid size-6 shrink-0 place-items-center !rounded-full !border-0 !bg-transparent !p-0 text-[var(--fg-muted)] hover:!bg-[color-mix(in_oklch,var(--fg)_8%,transparent)]"><X aria-hidden className="size-3.5" /></button>}
         </li>)}
       </ul> : <p className="m-0 text-xs text-[var(--fg-muted)]">{tr("선행 작업이 없어요.", "No dependencies.")}</p>}
-      {!locked && <Select aria-label={tr("선행 추가", "Add a dependency")} value="" onChange={(event) => event.target.value && act.add(event.target.value)}>
+      {!locked && <Select aria-label={tr("선행 추가", "Add a dependency")} disabled={busy} value="" onChange={(event) => event.target.value && act.add(event.target.value)}>
         <option value="">{tr("+ 선행 추가", "+ Add a dependency")}</option>
         {candidates.map((other) => <option key={other.id} value={other.id}>{taskName(other)}</option>)}
       </Select>}
