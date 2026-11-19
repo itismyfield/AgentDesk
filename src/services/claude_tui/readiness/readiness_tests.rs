@@ -1717,3 +1717,6 @@ fn managed_stash_holds_when_the_final_composer_capture_is_unreadable() {
     .unwrap();
     assert_eq!(idle::before_paste(&pane, true), Ok(false));
 }
+
+#[path = "restored_reply_tests.rs"]
+mod restored_reply_tests;

@@ -109,30 +109,22 @@ async function shot(page: Page, name: string, projectName: string) {
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/${projectName}-${name}.png`, fullPage: true });
 }
 
-test("campaign tasks show one number, a one-line memo, a styled picker, and only the shown campaign is polled", async ({ page }, testInfo) => {
+test("a running campaign task shows as a card with its assignee and stage, and only the shown campaign is polled", async ({ page }, testInfo) => {
   await page.clock.install({ time: new Date(NOW) });
   const calls = await prepare(page, testInfo.project.name);
   await page.goto("/campaigns?mode=legacy&campaign=open-issues-dag");
 
   const panel = page.locator(".campaigns-panel");
-  await expect(panel.getByRole("heading", { name: "캠페인", exact: true })).toBeVisible({ timeout: 15_000 });
-  const picker = panel.getByLabel("캠페인 선택");
-  await expect(picker).toHaveValue("open-issues-dag");
-  expect(await picker.evaluate((element) => getComputedStyle(element).appearance)).toBe("none");
-  await expect(panel.getByRole("button", { name: "새 캠페인" })).toBeVisible();
+  const card = panel.locator('[data-task-id="i7272"]');
+  await expect(card).toBeVisible({ timeout: 15_000 });
+  await expect(card.locator("strong")).toHaveText(/^무중단 재시작/);
+  await expect(card).toContainText("#7272");
+  await expect(card.locator(".campaign-task-stage")).toHaveText(/^Absorbed into #7272 acceptance/);
+  await expect(card.getByRole("img", { name: /아다 대시보드/ })).toBeVisible();
+  if (testInfo.project.name === "desktop") await expect(panel.getByRole("button", { name: "새 캠페인" })).toBeVisible();
   await expect(panel.getByRole("switch", { name: "자동 진행" })).toHaveAttribute("aria-checked", "false");
-
-  const row = panel.locator(".campaign-task-row", { hasText: "무중단 재시작" });
-  await expect(row.locator(".campaign-task-id")).toHaveText("#7272");
-  await expect(row.locator("strong")).toHaveText(/^무중단 재시작/);
-  await expect(row.locator(".campaign-task-stage")).toHaveText(/^Absorbed into #7272 acceptance/);
-  const stageBox = await row.locator(".campaign-task-stage").boundingBox();
-  expect(stageBox?.height ?? 0).toBeLessThan(24);
   await expectNoHorizontalOverflow(page);
   await shot(page, "campaigns", testInfo.project.name);
-  const group = panel.locator(".campaign-task-group").first();
-  await group.scrollIntoViewIfNeeded();
-  if (SHOTS) await group.screenshot({ path: `${SHOTS}/${testInfo.project.name}-campaign-tasks.png` });
 
   const initialDetail = calls.filter((url) => url.startsWith("/api/campaigns/")).length;
   await page.clock.runFor(31_000);

@@ -2,17 +2,16 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { getCampaignDetail, getCampaigns, updateCampaignNode, type Campaign } from "../../api/campaigns";
+import { getCampaign, getCampaignDetail, getCampaigns, setCampaignAutoQueue, updateCampaignNode, type Campaign } from "../../api/campaigns";
 import { ApiRequestError } from "../../api/httpClient";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import CampaignsPanel from "./CampaignsPanel";
-import { makeLargeCampaign } from "./campaignTestFixtures";
+import { makeCampaignNode, makeLargeCampaign } from "./campaignTestFixtures";
 
-vi.mock("../../api/campaigns", () => ({
-  getCampaigns: vi.fn(),
-  getCampaignDetail: vi.fn(),
-  updateCampaignNode: vi.fn(),
-  setCampaignAutoQueue: vi.fn(),
+vi.mock("../../api/campaigns", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/campaigns")>()),
+  getCampaigns: vi.fn(), getCampaign: vi.fn(), getCampaignDetail: vi.fn(), updateCampaignNode: vi.fn(), setCampaignAutoQueue: vi.fn(),
+  campaignReadMark: () => 1, // the mocked list reads are numbered 1
 }));
 // Server campaigns have their own tests; here the panel shows legacy campaigns only.
 vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
@@ -108,24 +107,24 @@ afterEach(async () => {
 async function render() {
   await act(async () => root.render(<CampaignsPanel language="en" />));
 }
+// The task details open in a docked pane (or a sheet) outside the panel, so buttons and details are read from the page.
 function button(label: string) {
-  return Array.from(container.querySelectorAll("button")).find((value) => value.textContent === label)!;
+  return Array.from(document.querySelectorAll("button")).find((value) => value.textContent === label || value.getAttribute("aria-label") === label)!;
 }
+const taskOpener = (id: string) => container.querySelector<HTMLButtonElement>(`[data-task-id="${id}"]`);
+/** Opens a task from wherever the overview shows it: a running card, an attention row or a status list. */
 async function selectTask(id = "review") {
-  if (!container.querySelector(`[data-node-id="${id}"]`)) await act(async () => button("Expand all").click());
-  await act(async () => container.querySelector<HTMLButtonElement>(`[data-node-id="${id}"]`)!.click());
+  const more = () => Array.from(container.querySelectorAll("button")).filter((value) => /^Show (all )?\d+ (more|running)$/.test(value.textContent ?? ""));
+  for (const value of more()) if (!taskOpener(id)) await act(async () => value.click());
+  for (const chip of Array.from(container.querySelectorAll<HTMLButtonElement>(".campaign-status-chips button"))) {
+    if (taskOpener(id)) break;
+    if (chip.getAttribute("aria-expanded") !== "true") await act(async () => chip.click());
+    for (const value of more()) if (!taskOpener(id)) await act(async () => value.click());
+  }
+  await act(async () => taskOpener(id)!.click());
 }
-function selectFor(label: string): HTMLSelectElement {
-  return Array.from(container.querySelectorAll("label"))
-    .find((element) => element.querySelector("span")?.textContent === label)!
-    .querySelector("select")!;
-}
-async function changeSelect(select: HTMLSelectElement, value: string) {
-  await act(async () => {
-    select.value = value;
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-  });
-}
+const card = (id: string) => container.querySelector<HTMLButtonElement>(`[data-campaign-key="legacy:${id}"]`)!;
+const page = () => document.body.textContent ?? "";
 async function typeValue(input: HTMLInputElement | HTMLTextAreaElement, value: string) {
   const prototype = input.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   await act(async () => {
@@ -142,12 +141,12 @@ it("restores the selected campaign and exposes the durable continuation checkpoi
     live: {}, read: 1,
   });
   await render();
-  expect(selectFor("Select campaign").value).toBe("ongoing");
-  expect(container.querySelector(".campaign-node-detail")).toBeNull();
+  expect(card("ongoing").getAttribute("aria-current")).toBe("true");
+  expect(container.querySelector(".campaign-detail-status")?.textContent).toBe("Running · 1 running");
+  expect(document.querySelector(".campaign-node-detail")).toBeNull();
   await selectTask();
-  expect(container.textContent).toContain("session-42");
-  expect(container.textContent).toContain("Inspect the latest diff");
-  expect(container.querySelector("progress")?.value).toBe(0);
+  expect(page()).toContain("session-42");
+  expect(page()).toContain("Inspect the latest diff");
 });
 
 it("retains the prior checkpoint and explicitly marks a failed refresh", async () => {
@@ -155,18 +154,18 @@ it("retains the prior checkpoint and explicitly marks a failed refresh", async (
   await selectTask();
   vi.mocked(getCampaigns).mockRejectedValue(new Error("Offline"));
   await act(async () => button("Refresh").click());
-  expect(container.textContent).toContain("Showing the previous snapshot");
-  expect(container.textContent).toContain("Inspect the latest diff");
+  expect(page()).toContain("Showing the previous snapshot");
+  expect(page()).toContain("Inspect the latest diff");
 });
 
 it("shows an empty state and distinguishes initial fetch failure", async () => {
   vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [], live: {}, read: 1 });
   await render();
-  expect(container.textContent).toContain("No campaigns yet");
+  expect(page()).toContain("No campaigns yet");
   vi.mocked(getCampaigns).mockRejectedValue(new Error("Forbidden"));
   await act(async () => button("Refresh").click());
-  expect(container.querySelector('[role="alert"]')?.textContent).toContain("Forbidden");
-  expect(container.textContent).not.toContain("No campaigns yet");
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain("Forbidden");
+  expect(page()).not.toContain("No campaigns yet");
 });
 
 it("preserves the edit revision and the draft when another session changes the campaign", async () => {
@@ -179,38 +178,28 @@ it("preserves the edit revision and the draft when another session changes the c
   });
   await act(async () => button("Refresh").click());
   vi.mocked(updateCampaignNode).mockRejectedValue(new ApiRequestError("conflict", { status: 409 }));
-  await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  await act(async () => document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   expect(vi.mocked(updateCampaignNode).mock.calls[0][0].revision).toBe(5);
-  expect(container.querySelector('[role="alert"]')?.textContent).toContain("changed elsewhere");
-  expect(container.querySelector("textarea")?.value).toBe("Inspect the latest diff");
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain("changed elsewhere");
+  expect(document.querySelector("textarea")?.value).toBe("Inspect the latest diff");
 });
 
-it("browses 120 tasks through group collapse, issue search and combined filters without a full graph", async () => {
-  vi.mocked(getCampaigns).mockResolvedValue({
-    campaigns: [makeLargeCampaign()],
-    live: {}, read: 1,
-  });
+it("shows a 120-task campaign as running cards, attention rows and status lists without a full graph", async () => {
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [makeLargeCampaign()], live: {}, read: 1 });
   await render();
-  expect(container.querySelectorAll(".campaign-task-row")).toHaveLength(0);
-  expect(container.querySelectorAll(".campaign-group-heading")).toHaveLength(4);
   expect(container.querySelector("[data-graph-nodes]")).toBeNull();
-  expect(container.textContent).toContain("5 running");
-  await act(async () => button("Expand all").click());
-  expect(container.querySelectorAll(".campaign-task-row")).toHaveLength(120);
-  await act(async () => button("Collapse all").click());
-  expect(container.querySelectorAll(".campaign-task-row")).toHaveLength(0);
-  await act(async () => button("Expand all").click());
-  await typeValue(container.querySelector<HTMLInputElement>('input[type="search"]')!, "#5701");
-  expect(container.querySelectorAll(".campaign-task-row")).toHaveLength(1);
-  expect(container.querySelector(".campaign-task-row")?.getAttribute("data-node-id")).toBe("task-1");
-  await typeValue(container.querySelector<HTMLInputElement>('input[type="search"]')!, "");
-  await changeSelect(selectFor("Group filter"), JSON.stringify("Gateway"));
-  await changeSelect(selectFor("Status filter"), "blocked");
-  expect(container.querySelectorAll(".campaign-task-row")).toHaveLength(5);
-  await changeSelect(selectFor("Group filter"), "null");
-  await changeSelect(selectFor("Status filter"), "all");
-  await act(async () => container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
-  expect(container.querySelectorAll(".campaign-task-row")).toHaveLength(100);
+  expect(container.querySelector(".campaign-detail-status")?.textContent).toBe("Running · 20 running, 20 blocked, 20 failed");
+  expect(container.querySelectorAll(".campaign-task-card")).toHaveLength(6);
+  await act(async () => button("Show all 20 running").click());
+  expect(container.querySelectorAll(".campaign-task-card")).toHaveLength(20);
+  expect(container.querySelector(".campaign-attention")?.textContent).toContain("Blocked or failed 40");
+  expect(container.querySelectorAll(".campaign-attention .campaign-task-row")).toHaveLength(3);
+  const chips = Array.from(container.querySelectorAll(".campaign-status-chips button"), (chip) => chip.textContent);
+  expect(chips).toEqual(["Pending 20", "Completed 20", "Skipped 20", "Failed 20"]);
+  await act(async () => container.querySelector<HTMLButtonElement>(".campaign-status-chips button")!.click());
+  expect(container.querySelectorAll('[role="list"][aria-label="Pending"] .campaign-task-row')).toHaveLength(8);
+  await act(async () => button("Show 12 more").click());
+  expect(container.querySelectorAll('[role="list"][aria-label="Pending"] .campaign-task-row')).toHaveLength(20);
 });
 
 it("marks only post-merge held tasks with a hold badge in the task list", async () => {
@@ -218,13 +207,13 @@ it("marks only post-merge held tasks with a hold badge in the task list", async 
   large.nodes[0] = { ...large.nodes[0], post_merge_hold: "release deploy, then 24h relay observation" };
   vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [large], live: {}, read: 1 });
   await render();
-  await act(async () => button("Expand all").click());
+  await act(async () => container.querySelector<HTMLButtonElement>(".campaign-status-chips button")!.click());
   const held = (id: string) => container.querySelector(`.campaign-task-row[data-node-id="${id}"]`)?.textContent ?? "";
   expect(held(large.nodes[0].id)).toContain("On hold: post-merge work");
-  expect(held(large.nodes[1].id)).not.toContain("On hold");
+  expect(held(large.nodes[6].id)).not.toContain("On hold");
 });
 
-it("preserves selection, filters, collapse and a group edit draft across polls, task changes and campaign switches", async () => {
+it("preserves the selection and a task edit draft across polls, task changes and campaign switches", async () => {
   const large = makeLargeCampaign();
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [large, campaign],
@@ -233,78 +222,72 @@ it("preserves selection, filters, collapse and a group edit draft across polls, 
   await render();
   await selectTask("task-31");
   await act(async () => button("Edit task").click());
-  const groupInput = Array.from(container.querySelectorAll("form label"))
+  const groupInput = Array.from(document.querySelectorAll("form label"))
     .find((label) => label.textContent?.startsWith("Group"))!
     .querySelector("input")!;
   await typeValue(groupInput, "Gateway follow-up");
-  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Close details"]')!.click());
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Close details"]')!.click());
   await selectTask("task-32");
   await selectTask("task-31");
-  expect(container.querySelector("form")?.textContent).toContain("This draft stays available");
-  expect(Array.from(container.querySelectorAll("form input")).some((input) => (input as HTMLInputElement).value === "Gateway follow-up")).toBe(true);
-  await changeSelect(selectFor("Group filter"), JSON.stringify("Gateway"));
-  await act(async () => container.querySelector<HTMLButtonElement>(".campaign-group-heading")!.click());
+  expect(document.querySelector("form")?.textContent).toContain("This draft stays available");
+  expect(Array.from(document.querySelectorAll("form input")).some((input) => (input as HTMLInputElement).value === "Gateway follow-up")).toBe(true);
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [{ ...large, revision: 6 }, campaign],
     live: {}, read: 1,
   });
   await act(async () => button("Refresh").click());
-  expect(selectFor("Group filter").value).toBe(JSON.stringify("Gateway"));
-  expect(container.querySelector(".campaign-group-heading")?.getAttribute("aria-expanded")).toBe("false");
-  expect(container.querySelector(".campaign-node-detail h3")?.textContent).toContain("Task 31");
-  await changeSelect(selectFor("Select campaign"), campaign.id);
-  await changeSelect(selectFor("Select campaign"), large.id);
+  expect(document.querySelector(".campaign-node-detail h3")?.textContent).toContain("Task 31");
+  await act(async () => card(campaign.id).click());
+  expect(document.querySelector(".campaign-node-detail")).toBeNull();
+  await act(async () => card(large.id).click());
   await selectTask("task-31");
   vi.mocked(updateCampaignNode).mockRejectedValue(new ApiRequestError("conflict", { status: 409 }));
-  await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  await act(async () => document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   expect(vi.mocked(updateCampaignNode).mock.calls[0][0].revision).toBe(5);
   expect(vi.mocked(updateCampaignNode).mock.calls[0][1].group).toBe("Gateway follow-up");
-  expect(container.textContent).toContain("changed elsewhere");
+  expect(page()).toContain("changed elsewhere");
 });
 
-it("keeps hidden cross-group dependencies explicit and keyboard navigation skips collapsed rows", async () => {
-  vi.mocked(getCampaigns).mockResolvedValue({
-    campaigns: [makeLargeCampaign()],
-    live: {}, read: 1,
-  });
+it("lists a group's tasks from the connections graph and opens one", async () => {
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [makeLargeCampaign()], live: {}, read: 1 });
   await render();
-  await selectTask("task-30");
-  await changeSelect(selectFor("Group filter"), JSON.stringify("Gateway"));
-  expect(container.textContent).toContain("1 dependencies are outside the filters");
-  await act(async () => button("Connections").click());
-  expect(Number(container.querySelector("[data-graph-nodes]")?.getAttribute("data-graph-nodes"))).toBeLessThanOrEqual(17);
-  expect(container.textContent).toContain("including other groups and tasks outside your filters");
-  await act(async () => button("Grouped list").click());
-  const first = container.querySelector<HTMLButtonElement>('[data-node-id="task-30"]')!;
-  first.focus();
-  await act(async () => first.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
-  expect(document.activeElement?.getAttribute("data-node-id")).toBe("task-31");
-  await changeSelect(selectFor("Group filter"), "null");
-  await act(async () =>
-    Array.from(container.querySelectorAll<HTMLButtonElement>(".campaign-group-heading"))
-      .find((heading) => heading.textContent?.includes("Restart protocol"))!
-      .click(),
-  );
-  const lastGateway = container.querySelector<HTMLButtonElement>('[data-node-id="task-59"]')!;
-  await act(async () => lastGateway.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
-  expect(document.activeElement?.getAttribute("data-node-id")).toBe("task-60");
-});
-
-it("opens a canonical group from the overview and keeps advanced mobile filters opt-in", async () => {
-  vi.mocked(getCampaigns).mockResolvedValue({
-    campaigns: [makeLargeCampaign()],
-    live: {}, read: 1,
-  });
-  await render();
-  expect(button("Filters").getAttribute("aria-expanded")).toBe("false");
-  await act(async () => button("Filters").click());
-  expect(button("Filters").getAttribute("aria-expanded")).toBe("true");
   await act(async () => button("Connections").click());
   expect(container.querySelector("[data-graph-nodes]")?.getAttribute("data-graph-nodes")).toBe("4");
   await act(async () => container.querySelector<HTMLButtonElement>('[data-graph-group="Gateway"]')!.click());
-  expect(selectFor("Group filter").value).toBe(JSON.stringify("Gateway"));
-  expect(container.querySelectorAll(".campaign-task-row")).toHaveLength(30);
-  expect(button("Grouped list").getAttribute("aria-pressed")).toBe("true");
+  expect(container.querySelectorAll(".campaign-relations .campaign-task-row")).toHaveLength(30);
+  await act(async () => container.querySelector<HTMLButtonElement>('.campaign-relations [data-node-id="task-30"]')!.click());
+  expect(document.querySelector(".campaign-node-detail h3")?.textContent).toContain("Task 30");
+  expect(page()).toContain("Direct connections to the selected task");
+  // The group's rows stay while the task is open, so closing it lands on the row that opened it.
+  await act(async () => button("Close details").click());
+  expect(document.activeElement?.getAttribute("data-task-id")).toBe("task-30");
+});
+
+it("keeps an auto-run save that could not be confirmed, or is still pending, across a switch to Connections and back", async () => {
+  vi.mocked(setCampaignAutoQueue).mockRejectedValueOnce(new Error("Offline")).mockReturnValueOnce(new Promise(() => {}));
+  vi.mocked(getCampaign).mockRejectedValueOnce(new Error("Offline")).mockResolvedValueOnce(campaign);
+  await render();
+  const control = () => container.querySelector<HTMLElement>(".campaign-auto-queue [role=switch], button.campaign-auto-queue")!;
+  const roundTrip = async () => { await act(async () => button("Connections").click()); await act(async () => button("Overview").click()); };
+  await act(async () => control().click());
+  await roundTrip();
+  expect([control().dataset.state, control().textContent]).toEqual(["unknown", "Check auto-run"]);
+  await act(async () => control().click()); // the read-back answers, then a save that never answers
+  await act(async () => control().click());
+  await roundTrip();
+  expect(control().matches(":disabled")).toBe(true);
+});
+
+it("finds a task outside every preview by its session or node id and opens it", async () => {
+  const nodes = Array.from({ length: 431 }, (_, index) => makeCampaignNode(`task-${index}`, { title: `Task ${index}`, status: index % 2 ? "completed" : "pending", session_id: `session-${index}` }));
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [{ ...campaign, nodes }], live: {}, read: 1 });
+  await render();
+  const found = () => Array.from(container.querySelectorAll('[aria-label="Found tasks"] [data-task-id]'), (row) => row.getAttribute("data-task-id"));
+  await typeValue(container.querySelector<HTMLInputElement>('input[aria-label="Find a task"]')!, "session-417");
+  expect(found()).toEqual(["task-417"]);
+  await typeValue(container.querySelector<HTMLInputElement>('input[aria-label="Find a task"]')!, "TASK-430");
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Found tasks"] [data-task-id="task-430"]')!.click());
+  expect(document.querySelector(".campaign-node-detail h3")?.textContent).toContain("Task 430");
 });
 
 it("does not discard a newer draft when an older save resolves after switching away and back", async () => {
@@ -326,12 +309,12 @@ it("does not discard a newer draft when an older save resolves after switching a
   await render();
   await selectTask();
   await act(async () => button("Edit task").click());
-  await typeValue(container.querySelector("textarea")!, "first saved text");
-  await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  await typeValue(document.querySelector("textarea")!, "first saved text");
+  await act(async () => document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   expect(vi.mocked(updateCampaignNode).mock.calls[0][1].next_action).toBe("first saved text");
   await selectTask("other");
   await selectTask();
-  await typeValue(container.querySelector("textarea")!, "NEW UNSAVED DRAFT");
+  await typeValue(document.querySelector("textarea")!, "NEW UNSAVED DRAFT");
   await act(async () =>
     resolveSave({
       ...twoTasks,
@@ -339,11 +322,11 @@ it("does not discard a newer draft when an older save resolves after switching a
       nodes: [{ ...twoTasks.nodes[0], next_action: "first saved text" }, twoTasks.nodes[1]],
     }),
   );
-  expect(container.querySelector("form")).not.toBeNull();
-  expect(container.querySelector("textarea")?.value).toBe("NEW UNSAVED DRAFT");
+  expect(document.querySelector("form")).not.toBeNull();
+  expect(document.querySelector("textarea")?.value).toBe("NEW UNSAVED DRAFT");
   await act(async () => button("Cancel").click());
-  expect(container.querySelector("form")).toBeNull();
-  expect(container.querySelector(".campaign-next")?.textContent).toContain("first saved text");
+  expect(document.querySelector("form")).toBeNull();
+  expect(document.querySelector(".campaign-next")?.textContent).toContain("first saved text");
 });
 
 it("never regresses a newer polled revision when an older save response arrives", async () => {
@@ -357,7 +340,7 @@ it("never regresses a newer polled revision when an older save response arrives"
   await render();
   await selectTask();
   await act(async () => button("Edit task").click());
-  await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  await act(async () => document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   const latest = {
     ...campaign,
     revision: 9,
@@ -366,27 +349,27 @@ it("never regresses a newer polled revision when an older save response arrives"
   vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [latest], live: {}, read: 1 });
   await act(async () => button("Refresh").click());
   await act(async () => resolveSave({ ...campaign, revision: 6 }));
-  expect(container.querySelector("form")).toBeNull();
-  expect(container.querySelector(".campaign-next")?.textContent).toContain("Newer authoritative checkpoint");
+  expect(document.querySelector("form")).toBeNull();
+  expect(document.querySelector(".campaign-next")?.textContent).toContain("Newer authoritative checkpoint");
   // A stale read response is fenced too, regardless of its request arrival order.
   vi.mocked(getCampaigns).mockResolvedValue({
     campaigns: [{ ...campaign, revision: 7 }],
     live: {}, read: 1,
   });
   await act(async () => button("Refresh").click());
-  expect(container.querySelector(".campaign-next")?.textContent).toContain("Newer authoritative checkpoint");
+  expect(document.querySelector(".campaign-next")?.textContent).toContain("Newer authoritative checkpoint");
   await act(async () => button("Edit task").click());
   vi.mocked(updateCampaignNode).mockResolvedValue(latest);
-  await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  await act(async () => document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   expect(vi.mocked(updateCampaignNode).mock.calls[1][0].revision).toBe(9);
 });
 
 it("opens the existing task details from a running card on the first screen", async () => {
   await render();
-  expect(container.querySelector(".campaign-node-detail")).toBeNull();
+  expect(document.querySelector(".campaign-node-detail")).toBeNull();
   await act(async () => container.querySelector<HTMLButtonElement>('[data-glance-id="review"]')!.click());
-  expect(container.querySelector(".campaign-node-detail h3")?.textContent).toBe("Review current head");
-  expect(container.textContent).toContain("session-42");
+  expect(document.querySelector(".campaign-node-detail h3")?.textContent).toBe("Review current head");
+  expect(page()).toContain("session-42");
 });
 
 it("shows what the issue card is doing next to the ledger status without sending it back on save", async () => {
@@ -415,17 +398,17 @@ it("shows what the issue card is doing next to the ledger status without sending
     live: { ongoing: { review: live } }, read: 1,
   });
   await render();
-  expect(container.textContent).toContain("Running now 1");
+  expect(page()).toContain("Running tasks 1");
   await selectTask();
-  expect(container.querySelector(".campaign-task-row .campaign-live")?.textContent).toBe("Review running");
-  expect(container.querySelector(".campaign-inspector-header")?.textContent).toContain("#7");
-  const detail = container.querySelector(".campaign-live-detail")!;
+  expect(container.querySelector('[data-task-id="review"] .campaign-live')?.textContent).toBe("Review running");
+  expect(document.querySelector(".campaign-inspector-header")?.textContent).toContain("#7");
+  const detail = document.querySelector(".campaign-live-detail")!;
   expect(detail.textContent).toContain("Review");
   expect(detail.textContent).toContain("Working");
   expect(detail.textContent).toContain("Started by auto-queue");
   await act(async () => button("Edit task").click());
   vi.mocked(updateCampaignNode).mockResolvedValue({ ...linked, revision: 6 });
-  await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  await act(async () => document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   expect(vi.mocked(updateCampaignNode).mock.calls[0][1]).not.toHaveProperty("card_status");
 });
 
@@ -455,10 +438,10 @@ it("does not call a dispatch running when no session is working on it", async ()
     live: { ongoing: { review: live } }, read: 1,
   });
   await render();
-  expect(container.textContent).toContain("Running now 0");
+  expect(page()).toContain("Running tasks 0");
   await selectTask();
   expect(container.querySelector(".campaign-task-row .campaign-live")?.textContent).toBe("Review assigned");
-  expect(container.querySelector(".campaign-live-detail")?.textContent).toContain("No session on it");
+  expect(document.querySelector(".campaign-live-detail")?.textContent).toContain("No session on it");
 });
 
 it.each(["pending", "completed"])("shows the working implementation on a pending node when the latest consultation is %s", async (dispatchStatus) => {
@@ -487,12 +470,11 @@ it.each(["pending", "completed"])("shows the working implementation on a pending
     live: { ongoing: { review: live } }, read: 1,
   });
   await render();
-  expect(container.textContent).toContain("Running now 1");
-  expect(container.textContent).not.toContain("Nothing is running right now.");
-  expect(container.querySelector(".campaign-glance-card .campaign-live")?.textContent).toBe("Implementation running");
+  expect(page()).toContain("Running tasks 1");
+  expect(page()).not.toContain("Nothing is running right now.");
+  expect(container.querySelector("[data-glance-id] .campaign-live")?.textContent).toBe("Implementation running");
   await selectTask();
-  expect(container.querySelector(".campaign-task-row .campaign-live")?.textContent).toBe("Implementation running");
-  const detail = container.querySelector(".campaign-live-detail")!;
+  const detail = document.querySelector(".campaign-live-detail")!;
   expect(detail.textContent).toContain("Running dispatch");
   expect(detail.textContent).toContain("Implementation running");
   expect(detail.textContent).toContain("Working");
@@ -512,7 +494,7 @@ it("reads the campaign list once and then polls only the shown campaign, and non
     expect(getCampaigns).toHaveBeenCalledTimes(1);
     expect(getCampaignDetail).toHaveBeenCalledExactlyOnceWith("ongoing");
     await selectTask();
-    expect(container.querySelector(".campaign-next")?.textContent).toContain("Polled checkpoint");
+    expect(document.querySelector(".campaign-next")?.textContent).toContain("Polled checkpoint");
     Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
     await act(async () => { vi.advanceTimersByTime(45_000); });
     expect(getCampaignDetail).toHaveBeenCalledTimes(1);
@@ -525,10 +507,10 @@ it("reads the campaign list once and then polls only the shown campaign, and non
 });
 
 it("shows a task number once, and the stage as one line under the title", async () => {
-  const numbered = { ...campaign, nodes: [{ ...campaign.nodes[0], title: "#7 Review current head", issue_url: "https://github.com/o/r/issues/7", stage: "Absorbed into #7272 acceptance" }] };
+  const numbered = { ...campaign, nodes: [{ ...campaign.nodes[0], status: "pending" as const, title: "#7 Review current head", issue_url: "https://github.com/o/r/issues/7", stage: "Absorbed into #7272 acceptance" }] };
   vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [numbered], live: {}, read: 1 });
   await render();
-  if (!container.querySelector(".campaign-task-row")) await act(async () => button("Expand all").click());
+  await act(async () => container.querySelector<HTMLButtonElement>(".campaign-status-chips button")!.click());
   const row = container.querySelector(".campaign-task-row")!;
   expect(row.querySelector(".campaign-task-id")?.textContent).toBe("#7");
   expect(row.querySelector("strong")?.textContent).toBe("Review current head");
@@ -544,9 +526,24 @@ it("reads the shown campaign in full right after the summary list and notes the 
   await render();
   expect(getCampaignDetail).toHaveBeenCalledWith("ongoing");
   await selectTask();
-  expect(container.textContent).toContain("Loading details and verification records");
+  expect(page()).toContain("Loading details and verification records");
   await act(async () => finish({ campaign: full, live: {}, read: 2 }));
-  expect(container.textContent).toContain("Stored notes");
-  expect(container.textContent).not.toContain("Loading details and verification records");
+  expect(page()).toContain("Stored notes");
+  expect(page()).not.toContain("Loading details and verification records");
   expect(getCampaignDetail).toHaveBeenCalledOnce();
+});
+
+it("opens a task in a pane docked beside the overview and gives focus back to its card on close", async () => {
+  await render();
+  const pane = () => document.querySelector<HTMLElement>('aside[aria-label="Selected task"]');
+  expect(pane()).toBeNull();
+  await selectTask();
+  expect(pane()?.querySelector(".campaign-node-detail h3")?.textContent).toBe("Review current head");
+  const opener = taskOpener("review")!;
+  expect(opener.getAttribute("aria-current")).toBe("true");
+  expect(opener.getAttribute("aria-controls")).toBe(pane()!.id);
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Close details"]')!.click());
+  expect(pane()).toBeNull();
+  expect(opener.getAttribute("aria-current")).toBeNull();
+  expect(document.activeElement).toBe(opener);
 });

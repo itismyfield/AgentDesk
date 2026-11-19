@@ -291,12 +291,21 @@ impl Context {
         else {
             return false;
         };
-        let Some(proof) = readiness::observe(
-            &self.logical,
-            Some(std::path::Path::new(&binding.output_path)),
-        ) else {
+        let path = Some(std::path::Path::new(&binding.output_path));
+        let Some(proof) = readiness::observe(&self.logical, path)
+            .or_else(|| readiness::observe_restored_reply(&self.logical, path))
+        else {
             return false;
         };
+        if proof.restart()
+            && !self
+                .target
+                .capture_ansi(-80)
+                .as_deref()
+                .is_some_and(crate::services::claude::herdr_turn::composer::restored_screen_idle)
+        {
+            return false;
+        }
         let Some(reservation) = readiness::reserve(proof) else {
             return false;
         };

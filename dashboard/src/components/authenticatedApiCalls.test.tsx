@@ -3,9 +3,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { beginAuthentication, getAuthSnapshot, requireAuthentication } from "../api/authState";
-import type { CompanySettings } from "../types";
 import ClaudeAccountsWidget from "./dashboard/ClaudeAccountsWidget";
 import { MiniRateLimitBar } from "./dashboard/MiniRateLimitBar";
 import ReceiptWidget from "./dashboard/ReceiptWidget";
@@ -193,15 +193,15 @@ describe("settings under token authentication", () => {
       "GET /api/agents": ok({ agents: [] }),
     });
     const notify = vi.fn();
-    const settings = { companyName: "", ceoName: "", language: "en", theme: "dark" } as unknown as CompanySettings;
     const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = await render(
       <QueryClientProvider client={queries}>
-        <SettingsView settings={settings} onSave={async () => {}} isKo={false} onNotify={notify} />
+        <MemoryRouter>
+          <SettingsView isKo={false} language="en" theme="dark" onSaveSettings={vi.fn()} onNotify={notify} />
+        </MemoryRouter>
       </QueryClientProvider>,
     );
     expectBearer("GET /api/settings/config");
-    await act(async () => { view.querySelector<HTMLButtonElement>("#settings-tab-workflow")!.click(); });
     const input = [...view.querySelectorAll("input")].find((node) => node.value === "before");
     expect(input).toBeDefined();
 

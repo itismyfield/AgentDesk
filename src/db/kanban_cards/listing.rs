@@ -271,12 +271,13 @@ pub async fn load_card_json_pg(
     let latest_dispatch_context_raw: Option<String> = row
         .try_get("d_context")
         .map_err(|error| format!("decode d_context for {card_id}: {error}"))?;
-    let latest_dispatch_result_summary = crate::dispatch::summarize_dispatch_from_text(
-        latest_dispatch_type.as_deref(),
-        latest_dispatch_status.as_deref(),
-        latest_dispatch_result_raw.as_deref(),
-        latest_dispatch_context_raw.as_deref(),
-    );
+    let latest_dispatch_result_summary =
+        crate::domain::dispatch_summary::summarize_dispatch_from_text(
+            latest_dispatch_type.as_deref(),
+            latest_dispatch_status.as_deref(),
+            latest_dispatch_result_raw.as_deref(),
+            latest_dispatch_context_raw.as_deref(),
+        );
     let github_issue_number: Option<i64> = row
         .try_get("github_issue_number")
         .map_err(|error| format!("decode github_issue_number for {card_id}: {error}"))?;

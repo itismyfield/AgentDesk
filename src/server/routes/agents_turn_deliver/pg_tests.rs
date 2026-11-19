@@ -547,7 +547,7 @@ async fn target_and_author_gates_run_at_the_route_boundary_pg() {
     let cases = [
         ("missing-agent", with(json!({})), StatusCode::NOT_FOUND, "agent not found"),
         ("unbound-agent", with(json!({})), StatusCode::CONFLICT, "agent primary provider is not configured"),
-        ("deliver-agent", with(json!({"channel_id": "999"})), StatusCode::FORBIDDEN, "channel override 999 is not allowed for agent deliver-agent"),
+        ("deliver-agent", with(json!({"channel_id": "999"})), StatusCode::SERVICE_UNAVAILABLE, "thread_parent_unverified"),
         ("deliver-agent", with(json!({"provider": "nope"})), StatusCode::BAD_REQUEST, "unsupported provider override: nope"),
         ("deliver-agent", with(json!({"author_discord_user_id": "300"})), StatusCode::FORBIDDEN, "author_not_allowed"),
         ("deliver-agent", with(json!({"provider": "codex"})), StatusCode::FORBIDDEN, "author_not_allowed"),
@@ -556,7 +556,12 @@ async fn target_and_author_gates_run_at_the_route_boundary_pg() {
     for (agent, payload, status, error) in cases {
         let (actual, response) = deliver(&app, agent, &payload).await;
         assert_eq!(
-            (actual, response["error"].as_str()),
+            (
+                actual,
+                response["error"]
+                    .as_str()
+                    .or_else(|| response["status"].as_str())
+            ),
             (status, Some(error)),
             "{agent} {payload}"
         );

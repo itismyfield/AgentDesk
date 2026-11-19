@@ -1,349 +1,252 @@
-import { ChevronDown } from "lucide-react";
-import { useId, useState, type CSSProperties, type ReactNode } from "react";
-import type { SettingFlag, SettingRowMeta } from "./SettingsModel";
+import { useQuery } from "@tanstack/react-query";
+import type { ReactNode } from "react";
+import { getSettingsChannelName } from "../../api/settingsRuntime";
+import { RefreshCw } from "lucide-react";
+import { Select } from "../../kit/free/select-clean";
+import { Switch } from "../../kit/free/switch-clean";
+import { FreshnessIndicator } from "../common/FreshnessIndicator";
+import { STALE_AFTER_MS } from "../OpsPageModel";
+import { applyChip, applyText, defaultText, formatSettingValue, withRo, type CatalogItem, type StatusTone } from "./SettingsModel";
+import { SETTINGS_TRAY_CLASS, SettingsAction, SettingsBadge, SettingsTextField } from "./SettingsPrimitives";
 
-export const SETTINGS_INPUT_STYLE: CSSProperties = {
-  background: "var(--th-bg-surface)",
-  border: "1px solid color-mix(in srgb, var(--th-border) 70%, transparent)",
-  color: "var(--th-text)",
+// Pieces shared by the desktop catalog and the phone sheet: the row control, its chip and the detail lists.
+
+type Tr = (ko: string, en: string) => string;
+
+const DISCORD_ID_PATTERN = /^\d{17,20}$/;
+
+export const editableItem = (item: CatalogItem) => ["toggle", "number", "text", "choice"].includes(item.input);
+
+/** Option picker for "choice" rows: four languages do not fit a row as segments, so rows and the sheet use the kit Select. */
+export function ChoiceControl({ item, value, label, size, className, disabled, onChange }: { item: CatalogItem; value: string; label: string; size: "sm" | "lg"; className: string; disabled?: boolean; onChange: (value: string) => void }) {
+  return <Select aria-label={label} size={size} className={className} value={value} disabled={disabled} onChange={onChange} options={item.options ?? []} />;
+}
+
+/** "기본값 3으로 되돌리기" (short: "기본값 3"), or the inherit wording when reset stores "". */
+export function resetLabel(item: CatalogItem, tr: Tr, short = false): string {
+  if (item.resetTo === "" && item.baseline === null) return short ? tr("공통 값 따르기", "Use shared value") : tr("공통 값을 따르게 되돌리기", "Follow the shared value again");
+  const value = formatSettingValue(item.baseline ?? item.resetTo ?? "", item, tr);
+  return short ? tr(`기본값 ${value}`, `Default ${value}`) : tr(`기본값 ${withRo(value)} 되돌리기`, `Reset to default (${value})`);
+}
+
+/** The value the page currently holds for a row: its draft, else the stored value. */
+export const currentValue = (item: CatalogItem) => item.draft ?? item.saved;
+
+const TONE_TEXT: Record<StatusTone, string> = {
+  ok: "text-[var(--th-badge-emerald-text)]",
+  warn: "text-[var(--th-badge-amber-text)]",
+  unknown: "text-th-text-muted",
 };
 
-export const SETTINGS_PRIMARY_BUTTON =
-  "inline-flex min-h-11 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md bg-[var(--th-accent-primary)] px-4 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-50";
-export const SETTINGS_SECONDARY_BUTTON =
-  "inline-flex min-h-11 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-th-border px-4 py-2 text-sm font-medium text-th-text-secondary transition-colors hover:bg-surface-subtle hover:text-th-text-primary disabled:opacity-50";
-export const SETTINGS_SUBTLE_BUTTON =
-  "inline-flex min-h-11 shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-md px-2.5 text-xs font-medium text-th-text-muted transition-colors hover:bg-surface-subtle hover:text-th-text-primary disabled:opacity-50";
+/** Chips for an unsaved change, an override and how the value applies; the phone row keeps only the first. */
+export function ItemChip({ item, tr, all = false }: { item: CatalogItem; tr: Tr; all?: boolean }) {
+  const apply = applyChip(item, tr);
+  const chips = [
+    item.draft !== null ? <SettingsBadge key="draft" tone="warn">{tr("바뀜", "Changed")}</SettingsBadge> : null,
+    item.overridden ? <SettingsBadge key="override" tone="accent">{tr("덮어씀", "Overridden")}</SettingsBadge> : null,
+    apply ? <SettingsBadge key="apply">{apply}</SettingsBadge> : null,
+  ].filter(Boolean);
+  return <>{all ? chips : chips.slice(0, 1)}</>;
+}
 
-const BADGE_CLASS = "inline-flex shrink-0 items-center whitespace-nowrap rounded-full border px-2 py-px text-[11px] font-medium";
-
-function FlagBadge({ flag, isKo }: { flag: SettingFlag; isKo: boolean }) {
-  const labels: Record<SettingFlag, [string, string]> = {
-    alert: ["저장 전 확인", "Confirm on save"],
-    read_only: ["읽기 전용", "Read-only"],
-    restart_required: ["다시 시작 후 적용", "Applies after restart"],
-  };
-  const warn = flag !== "read_only";
+/** Plain value for read-only and status rows; status rows get their tone dot. */
+export function ItemValue({ item, tr }: { item: CatalogItem; tr: Tr }) {
+  const tone = item.status ? TONE_TEXT[item.status.tone] : "text-th-text-secondary";
   return (
-    <span
-      className={BADGE_CLASS}
-      style={{
-        background: warn ? "var(--th-badge-amber-bg)" : "var(--th-overlay-subtle)",
-        color: warn ? "var(--th-badge-amber-text)" : "var(--th-text-muted)",
-        borderColor: "var(--th-border-subtle)",
-      }}
-    >
-      {labels[flag][isKo ? 0 : 1]}
+    <span className={`inline-flex min-w-0 items-center gap-1.5 text-[13px] leading-5 tabular-nums break-keep ${tone}`}>
+      {item.input === "status" ? <span aria-hidden className="size-2 shrink-0 rounded-full bg-current" /> : null}
+      {formatSettingValue(item.saved, item, tr)}
     </span>
   );
 }
 
-function formatValue(value: unknown, unit: string | undefined, tr: (ko: string, en: string) => string): string {
-  if (value === undefined || value === null || value === "") return tr("없음", "None");
-  if (value === true || value === "true") return tr("켜짐", "On");
-  if (value === false || value === "false") return tr("꺼짐", "Off");
-  return unit ? `${String(value)}${unit}` : String(value);
+interface InlineControlProps {
+  item: CatalogItem;
+  label: string;
+  invalid?: boolean;
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  tr: Tr;
 }
 
-interface SettingRowProps {
-  meta: SettingRowMeta;
-  isKo: boolean;
-  onChange: (key: string, value: string | boolean | number) => void;
-  onReset?: (key: string) => void;
-  /** Extra line under the control, e.g. a resolved channel name. */
-  extra?: ReactNode;
-}
-
-export function SettingRow({ meta, isKo, onChange, onReset, extra }: SettingRowProps) {
-  const [open, setOpen] = useState(false);
-  const detailsId = useId();
-  const tr = (ko: string, en: string) => (isKo ? ko : en);
-  const label = isKo ? meta.labelKo : meta.labelEn;
-  const hint = isKo ? meta.hintKo : meta.hintEn;
-  const invalid = meta.validation && meta.validation.ok === false ? meta.validation : null;
-  const applyNote = isKo ? meta.applyNoteKo : meta.applyNoteEn;
-
-  const control = (() => {
-    if (!meta.editable) {
-      return (
-        <div
-          className="w-full rounded-md px-3 py-2 text-sm tabular-nums [overflow-wrap:anywhere]"
-          style={{
-            background: "color-mix(in srgb, var(--th-bg-surface) 60%, transparent)",
-            border: "1px dashed color-mix(in srgb, var(--th-border) 70%, transparent)",
-            color: "var(--th-text-secondary)",
-          }}
-        >
-          {formatValue(meta.effectiveValue, meta.valueUnit, tr)}
-        </div>
-      );
-    }
-    if (meta.inputKind === "toggle") {
-      const enabled = meta.effectiveValue === true || meta.effectiveValue === "true" || meta.effectiveValue === 1 || meta.effectiveValue === "1";
-      return (
-        <button
-          type="button"
-          role="switch"
-          aria-checked={enabled}
-          aria-label={label}
-          onClick={() => onChange(meta.key, !enabled)}
-          className="inline-flex min-h-11 items-center gap-2 rounded-md text-sm text-th-text-secondary"
-        >
-          <span className="inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors" style={{ background: enabled ? "var(--th-accent-primary)" : "var(--th-border)" }}>
-            <span className="inline-block h-5 w-5 rounded-full bg-white transition-transform" style={{ transform: enabled ? "translateX(1.4rem)" : "translateX(0.15rem)" }} />
-          </span>
-          {enabled ? tr("켜짐", "On") : tr("꺼짐", "Off")}
-        </button>
-      );
-    }
-    if (meta.inputKind === "select" && meta.selectOptions) {
-      return (
-        <select
-          aria-label={label}
-          aria-invalid={invalid ? true : undefined}
-          value={String(meta.effectiveValue ?? "")}
-          onChange={(event) => onChange(meta.key, event.target.value)}
-          className="min-h-11 w-full min-w-0 rounded-md px-3 py-2 text-sm"
-          style={SETTINGS_INPUT_STYLE}
-        >
-          {meta.selectOptions.map((option) => (
-            <option key={option.value} value={option.value}>
-              {isKo ? option.labelKo : option.labelEn}
-            </option>
-          ))}
-        </select>
-      );
-    }
-    if (meta.inputKind === "range" && meta.numericRange) {
-      const { min, max, step } = meta.numericRange;
-      const value = Number(meta.effectiveValue) || 0;
-      return (
-        <div className="flex items-center gap-3">
-          <input
-            type="range"
-            aria-label={label}
-            min={min}
-            max={max}
-            step={step}
-            value={value}
-            onChange={(event) => onChange(meta.key, Number(event.target.value))}
-            className="h-11 min-w-0 flex-1 cursor-pointer"
-            style={{ accentColor: "var(--th-accent-primary)" }}
-          />
-          <input
-            type="number"
-            aria-label={tr(`${label} 직접 입력`, `${label} value`)}
-            min={min}
-            max={max}
-            step={step}
-            value={value}
-            onChange={(event) => {
-              const next = Number(event.target.value);
-              if (Number.isFinite(next) && next >= min && next <= max) onChange(meta.key, next);
-            }}
-            className="min-h-11 w-20 shrink-0 rounded-md px-2 py-1.5 text-right text-sm tabular-nums"
-            style={SETTINGS_INPUT_STYLE}
-          />
-        </div>
-      );
-    }
+/** The row's own control: a switch, a number or text field, or the plain value when it cannot be edited here. */
+export function InlineControl({ item, label, invalid, disabled, onChange, tr }: InlineControlProps) {
+  const value = currentValue(item);
+  if (item.input === "toggle") {
+    return <Switch aria-label={label} checked={value === "true"} disabled={disabled} onChange={(event) => onChange(String(event.target.checked))} />;
+  }
+  if (item.input === "choice") return <ChoiceControl item={item} value={value} label={label} size="sm" className="w-44" disabled={disabled} onChange={onChange} />;
+  if (item.input === "number" || item.input === "text") {
+    const numeric = item.input === "number";
     return (
-      <input
+      <SettingsTextField
+        size="sm"
         aria-label={label}
-        aria-invalid={invalid ? true : undefined}
-        type={meta.inputKind === "number" ? "number" : "text"}
-        inputMode={meta.inputKind === "number" ? "numeric" : undefined}
-        value={String(meta.effectiveValue ?? "")}
-        onChange={(event) =>
-          onChange(meta.key, meta.inputKind === "number" ? Number(event.target.value) : event.target.value)
-        }
-        className="min-h-11 w-full min-w-0 rounded-md px-3 py-2 text-sm"
-        style={{ ...SETTINGS_INPUT_STYLE, ...(invalid ? { borderColor: "var(--th-accent-danger)" } : null) }}
+        aria-invalid={invalid || undefined}
+        type={numeric ? "number" : "text"}
+        inputMode={numeric ? "numeric" : undefined}
+        min={item.min}
+        max={item.max}
+        value={value}
+        disabled={disabled}
+        className={numeric ? "w-24" : "w-44"}
+        inputClassName={numeric ? "text-right tabular-nums" : "font-mono"}
+        onChange={(event) => onChange(event.target.value)}
       />
     );
-  })();
+  }
+  return <ItemValue item={item} tr={tr} />;
+}
 
+function FactRow({ label, note, children }: { label: string; note?: string; children: ReactNode }) {
   return (
-    <div className="setting-row min-w-0 py-4" data-testid={`setting-row-${meta.key}`}>
-      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-3 sm:grid-cols-[minmax(0,1fr)_minmax(13rem,0.9fr)_auto] sm:items-center sm:gap-x-5">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-sm font-medium break-keep text-th-text-primary">{label}</span>
-            {meta.changed ? (
-              <span
-                className={BADGE_CLASS}
-                style={{
-                  background: "color-mix(in srgb, var(--th-accent-primary) 14%, transparent)",
-                  color: "var(--th-accent-primary)",
-                  borderColor: "color-mix(in srgb, var(--th-accent-primary) 30%, transparent)",
-                }}
-              >
-                {tr("바뀜", "Changed")}
-              </span>
+    <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-4 text-[13px] leading-5">
+      <dt className="shrink-0 text-th-text-muted">{label}</dt>
+      <dd className="m-0 min-w-0 text-right tabular-nums text-th-text-primary [overflow-wrap:anywhere]">{children}</dd>
+      {note ? <dd className="m-0 basis-full text-right text-xs text-th-text-muted">{note}</dd> : null}
+    </div>
+  );
+}
+
+function ChannelName({ id, tr }: { id: string; tr: Tr }) {
+  const valid = DISCORD_ID_PATTERN.test(id);
+  const channel = useQuery({
+    queryKey: ["settings", "discord-channel", id],
+    queryFn: () => getSettingsChannelName(id),
+    enabled: valid,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  if (!id) return <>{tr("정하지 않음", "Not set")}</>;
+  if (!valid) return <span className="text-[var(--th-badge-amber-text)]">{tr("17~20자리 숫자가 아니에요", "Not a 17–20 digit ID")}</span>;
+  if (channel.isPending) return <>{tr("확인 중…", "Checking…")}</>;
+  if (channel.isError || !channel.data) return <span className="text-[var(--th-badge-amber-text)]">{tr("채널을 찾지 못했어요", "Channel not found")}</span>;
+  return <>#{channel.data}</>;
+}
+
+interface ItemFactsProps {
+  item: CatalogItem;
+  /** Value being edited when it differs from the draft (the phone sheet). */
+  pending?: string | null;
+  problem?: string | null;
+  tr: Tr;
+}
+
+/** Stored, pending and default values with when they apply; status rows list their facts, signals and setup steps. */
+export function ItemFacts({ item, pending = item.draft, problem, tr }: ItemFactsProps) {
+  const apply = applyText(item, tr);
+  return (
+    <div className="flex min-w-0 flex-col gap-3" data-testid={`settings-facts-${item.key}`}>
+      <dl className="m-0 flex min-w-0 flex-col gap-1.5">
+        {item.source === "status" ? item.status?.facts.map(([label, value, note]) => <FactRow key={label} label={label} note={note}>{value}</FactRow>) : (
+          <>
+            <FactRow label={tr("저장된 값", "Saved")}>{formatSettingValue(item.saved, item, tr)}</FactRow>
+            {pending !== null && pending !== item.saved ? (
+              <FactRow label={tr("고칠 값", "New value")}>
+                <span className="text-[var(--warn)]">{formatSettingValue(pending, item, tr)}</span>
+              </FactRow>
             ) : null}
-            {meta.flags.map((flag) => <FlagBadge key={flag} flag={flag} isKo={isKo} />)}
-          </div>
-          {hint ? <p className="mt-1 text-xs leading-5 break-keep text-th-text-muted">{hint}</p> : null}
-        </div>
-        <div className="col-span-2 row-start-2 min-w-0 sm:col-span-1 sm:col-start-2 sm:row-start-1">
-          {control}
-          {invalid ? (
-            <p role="alert" className="mt-1.5 text-xs leading-5 break-keep" style={{ color: "var(--th-accent-danger)" }}>
-              {tr(invalid.messageKo, invalid.messageEn)}
-            </p>
+            <FactRow label={tr("기본값", "Default")}>{defaultText(item, tr)}</FactRow>
+          </>
+        )}
+        {apply ? <FactRow label={tr("적용", "Applies")}>{apply}</FactRow> : null}
+        {item.key.endsWith("_channel_id") ? (
+          <FactRow label={tr("채널", "Channel")}><ChannelName id={(pending ?? item.saved).trim()} tr={tr} /></FactRow>
+        ) : null}
+      </dl>
+      {problem ? <p role="alert" className="m-0 text-xs leading-5 text-[var(--err)]">{problem}</p> : null}
+      {item.status?.updatedAt || item.status?.refresh ? (
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+          {item.status.updatedAt ? (
+            <FreshnessIndicator timestamp={item.status.updatedAt} label={tr("업데이트", "Updated")} staleAfterSeconds={STALE_AFTER_MS / 1000} criticalAfterSeconds={(STALE_AFTER_MS * 3) / 1000} />
+          ) : <span />}
+          {item.status.refresh ? (
+            <SettingsAction icon={<RefreshCw />} disabled={item.status.refresh.busy} onClick={item.status.refresh.run}>{tr("다시 확인", "Check again")}</SettingsAction>
           ) : null}
-          {extra}
         </div>
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-controls={detailsId}
-          onClick={() => setOpen((current) => !current)}
-          className={`${SETTINGS_SUBTLE_BUTTON} col-start-2 row-start-1 sm:col-start-3`}
-        >
-          {tr("자세히", "Details")}
-          <ChevronDown size={14} aria-hidden className={`transition-transform ${open ? "rotate-180" : ""}`} />
-        </button>
-      </div>
-      {open ? (
-        <div
-          id={detailsId}
-          className="mt-3 grid min-w-0 gap-2 rounded-md px-3 py-3 text-xs leading-5 sm:grid-cols-2 sm:gap-3 sm:px-4"
-          style={{
-            background: "color-mix(in srgb, var(--th-overlay-medium) 70%, transparent)",
-            border: "1px solid color-mix(in srgb, var(--th-border) 60%, transparent)",
-            color: "var(--th-text-muted)",
-          }}
-        >
-          <div>
-            {tr("기본값", "Default")}:{" "}
-            <span className="tabular-nums text-th-text-primary">{formatValue(meta.defaultValue, meta.valueUnit, tr)}</span>
-          </div>
-          <div className="break-keep">
-            {tr("적용", "Applies")}:{" "}
-            <span className="text-th-text-primary">
-              {!meta.editable
-                ? tr("여기서는 바꿀 수 없어요", "Cannot be changed here")
-                : meta.restartRequired
-                  ? tr("저장한 뒤 다시 시작해야 적용돼요", "After saving and restarting")
-                  : tr("저장하면 적용돼요", "When you save")}
-            </span>
-          </div>
-          {applyNote ? <div className="break-keep sm:col-span-2">{applyNote}</div> : null}
-          {meta.resettable && onReset ? (
-            <div className="sm:col-span-2">
-              <button type="button" onClick={() => onReset(meta.key)} className={`${SETTINGS_SECONDARY_BUTTON} min-h-11 px-3 text-xs`}>
-                {tr("기본값으로 되돌리기", "Reset to default")}
-              </button>
-            </div>
-          ) : null}
+      ) : null}
+      {item.status?.failed ? (
+        <p role="alert" className="m-0 text-xs leading-5 text-[var(--th-badge-amber-text)]">
+          {tr("최근 확인이 실패해서 마지막으로 받은 값을 보여 줘요.", "The latest check failed. Showing the last values received.")}
+        </p>
+      ) : null}
+      {item.status?.notes?.length ? (
+        <ul className="m-0 flex list-none flex-col gap-2 p-0" data-testid="settings-status-notes">
+          {item.status.notes.map((note, index, notes) => (
+            <li key={`${note.tooltip}-${note.title}`} className="flex min-w-0 gap-2 text-[13px] leading-5">
+              <span aria-hidden className={`mt-1.5 size-2 shrink-0 rounded-full ${note.tone === "danger" ? "bg-[var(--err)]" : "bg-[var(--warn)]"}`} />
+              <span className="min-w-0 flex-1">
+                <span className="flex justify-between gap-3">
+                  <span className="text-th-text-primary" title={note.tooltip}>{note.title}</span>
+                  {note.count !== undefined ? <span className="shrink-0 tabular-nums text-th-text-secondary">{note.count.toLocaleString()}</span> : null}
+                </span>
+                {/* Server-reported reasons share one explanation; say it once. */}
+                {note.detail !== notes[index - 1]?.detail ? <span className="block text-xs text-th-text-muted">{note.detail}</span> : null}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {item.status?.steps ? (
+        <div className="min-w-0">
+          <div className="text-xs font-medium text-th-text-muted">{tr("설정 방법", "How to set up")}</div>
+          <ul className="m-0 mt-1.5 flex list-none flex-col gap-1.5 p-0">
+            {item.status.steps.lines.map((line) => (
+              <li
+                key={line}
+                lang={item.status?.steps?.translated ? undefined : "en"}
+                className={`px-3 py-2 text-xs leading-5 [overflow-wrap:anywhere] ${SETTINGS_TRAY_CLASS} ${item.status?.steps?.translated ? "break-keep" : "font-mono"}`}
+              >
+                {line}
+              </li>
+            ))}
+          </ul>
         </div>
       ) : null}
     </div>
   );
 }
 
-const SECTION_STYLE: CSSProperties = {
-  borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-  background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-};
-
-interface SettingsSectionProps {
-  title: string;
-  description?: string;
-  actions?: ReactNode;
-  children: ReactNode;
-  /** Rows get dividers and side padding; "plain" pads other content; "open" drops the frame for content that brings its own cards. */
-  variant?: "rows" | "plain" | "open";
-  testId?: string;
-}
-
-export function SettingsSection({ title, description, actions, children, variant = "rows", testId }: SettingsSectionProps) {
-  if (variant === "open") {
-    return (
-      <section className="min-w-0" data-testid={testId}>
-        <header className="mb-3 flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-[12rem] flex-1">
-            <h3 className="text-sm font-semibold break-keep text-th-text-primary">{title}</h3>
-            {description ? <p className="mt-1 text-xs leading-5 break-keep text-th-text-muted">{description}</p> : null}
-          </div>
-          {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
-        </header>
-        {children}
-      </section>
-    );
-  }
+/** "함께 보는 설정": linked rows with the note that ties them, each opening that row. */
+export function RelatedSettings({ item, items, onSelect, disabled, tr }: { item: CatalogItem; items: CatalogItem[]; onSelect: (key: string) => void; disabled?: boolean; tr: Tr }) {
+  const links = item.related
+    .map((link) => ({ link, target: items.find((candidate) => candidate.key === link.key) }))
+    .filter((entry): entry is { link: CatalogItem["related"][number]; target: CatalogItem } => Boolean(entry.target));
+  if (links.length === 0) return null;
   return (
-    <section className="min-w-0 overflow-hidden rounded-lg border" style={SECTION_STYLE} data-testid={testId}>
-      <header
-        className="flex flex-wrap items-start justify-between gap-3 border-b px-4 py-4 sm:px-5"
-        style={{ borderColor: "color-mix(in srgb, var(--th-border) 60%, transparent)" }}
-      >
-        <div className="min-w-[12rem] flex-1">
-          <h3 className="text-sm font-semibold break-keep text-th-text-primary">{title}</h3>
-          {description ? <p className="mt-1 text-xs leading-5 break-keep text-th-text-muted">{description}</p> : null}
-        </div>
-        {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
-      </header>
-      {variant === "rows" ? (
-        <div className="divide-y divide-th-border-subtle px-4 sm:px-5">{children}</div>
-      ) : (
-        <div className="min-w-0 px-4 py-4 sm:px-5">{children}</div>
-      )}
-    </section>
+    <div className="min-w-0">
+      <div className="text-xs font-medium text-th-text-muted">{tr("함께 보는 설정", "Related settings")}</div>
+      <ul className="m-0 mt-1 flex list-none flex-col p-0">
+        {links.map(({ link, target }) => (
+          <li key={link.key}>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => onSelect(target.key)}
+              className="flex min-h-11 w-full min-w-0 items-start gap-2 rounded-[var(--r-sm)] px-1 py-1.5 text-left hover:bg-surface-subtle disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-9"
+            >
+              <span aria-hidden className="mt-1.5 size-2 shrink-0 rounded-full bg-[var(--accent)]" />
+              <span className="min-w-0 text-[13px] leading-5">
+                <span className="block text-th-text-primary">{target.label}</span>
+                {link.noteKo ? <span className="block text-xs text-th-text-muted">{tr(link.noteKo, link.noteEn ?? link.noteKo)}</span> : null}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
-interface SettingsDisclosureProps {
-  title: string;
-  description?: string;
-  openLabel: string;
-  closeLabel: string;
-  open: boolean;
-  onToggle: () => void;
-  children: ReactNode;
-  variant?: "rows" | "plain";
-  testId?: string;
-}
-
-/** A section whose body stays hidden until asked for, for settings most people never touch. */
-export function SettingsDisclosure({
-  title, description, openLabel, closeLabel, open, onToggle, children, variant = "rows", testId,
-}: SettingsDisclosureProps) {
-  const bodyId = useId();
+/** Category, name, mono key and description: the head of the inspector and the phone sheet. */
+export function ItemHeading({ item, category, showTitle = true }: { item: CatalogItem; category?: string; showTitle?: boolean }) {
   return (
-    <section className="min-w-0 overflow-hidden rounded-lg border" style={SECTION_STYLE} data-testid={testId}>
-      <header className="flex flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-5">
-        <div className="min-w-[12rem] flex-1">
-          <h3 className="text-sm font-semibold break-keep text-th-text-primary">{title}</h3>
-          {description ? <p className="mt-1 text-xs leading-5 break-keep text-th-text-muted">{description}</p> : null}
-        </div>
-        <button type="button" aria-expanded={open} aria-controls={bodyId} onClick={onToggle} className={SETTINGS_SECONDARY_BUTTON}>
-          {open ? closeLabel : openLabel}
-          <ChevronDown size={14} aria-hidden className={`transition-transform ${open ? "rotate-180" : ""}`} />
-        </button>
-      </header>
-      {open ? (
-        <div
-          id={bodyId}
-          className={variant === "rows" ? "divide-y divide-th-border-subtle border-t px-4 sm:px-5" : "min-w-0 border-t px-4 py-4 sm:px-5"}
-          style={{ borderColor: "color-mix(in srgb, var(--th-border) 60%, transparent)" }}
-        >
-          {children}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-export function SettingsStatusMessage({ children, tone = "muted" }: { children: ReactNode; tone?: "muted" | "error" }) {
-  return (
-    <p
-      role={tone === "error" ? "alert" : "status"}
-      className="py-4 text-sm leading-6 break-keep"
-      style={{ color: tone === "error" ? "var(--th-text-secondary)" : "var(--th-text-muted)" }}
-    >
-      {children}
-    </p>
+    <div className="min-w-0">
+      {category ? <div className="text-xs text-th-text-muted">{category}</div> : null}
+      {showTitle ? <h2 className="m-0 text-base leading-6 font-semibold text-th-text-heading break-keep">{item.label}</h2> : null}
+      <div className="font-mono text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">{item.key}</div>
+      {/* No verified description yet means a blank line, not a guess (#8249 brings server meta). */}
+      {item.description ? <p className="m-0 mt-1.5 text-[13px] leading-5 text-th-text-secondary break-keep">{item.description}</p> : null}
+    </div>
   );
 }

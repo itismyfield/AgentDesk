@@ -1,228 +1,101 @@
 import { Suspense, lazy } from "react";
-import { BarChart3, Cpu, Gauge } from "lucide-react";
+import { BarChart3 } from "lucide-react";
+import { Skeleton } from "../../kit/free/skeleton-clean";
 import type { TokenAnalyticsDailyPoint } from "../../types";
 import type { TFunction } from "../dashboard/model";
-import { DashboardEmptyState } from "../dashboard/ui";
-import {
-  computeDailyHitRate,
-  formatCompactDate,
-  formatDateLabel,
-  formatPercent,
-  formatTokens,
-  msg,
-  type DailySeriesDescriptor,
-  type ShareSegment,
-} from "./statsModel";
-import {
-  CardHead,
-  LegendDot,
-  NUMERIC_STYLE,
-  numericBadgeStyle,
-  positiveChipStyle,
-} from "./StatsCardPrimitives";
+import { msg, type DailySeriesDescriptor } from "./statsModel";
+import { NUMERIC_STYLE, StatsEmpty, StatsSwatch } from "./StatsCardPrimitives";
 
 const DailyTokenCompositionChart = lazy(() => import("./DailyTokenCompositionChart"));
 
+function ChartPlaceholder() {
+  return (
+    <div aria-hidden="true">
+      <Skeleton width="100%" height={232} radius={8} />
+      <div className="mt-2 flex items-center gap-2">
+        <Skeleton width={44} height={44} radius={8} />
+        <Skeleton width="100%" height={12} line />
+        <Skeleton width={44} height={44} radius={8} />
+      </div>
+    </div>
+  );
+}
+
+/** Daily stacked token chart with its legend and fixed readout (kit reading model, provider colors kept). */
 export function DailyTokenCompositionCard({
   t,
   localeTag,
   loading,
+  failed,
   daily,
   series,
 }: {
   t: TFunction;
   localeTag: string;
   loading: boolean;
+  failed: boolean;
   daily: TokenAnalyticsDailyPoint[];
   series: DailySeriesDescriptor[];
 }) {
-  return (
-    <article className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface">
-      <CardHead
-        title={t(
-          msg(
-            "일별 토큰 구성",
-            "Daily Token Composition",
-            "日次トークン構成",
-            "每日 Token 构成",
-          ),
-        )}
-        subtitle={t(
-          msg(
-            "input · output · cache read / write · 바 위에서 호버",
-            "input · output · cache read / write · hover bars",
-            "input · output · cache read / write · バーにホバー",
-            "input · output · cache read / write · 悬停柱状图",
-          ),
-        )}
-        actions={
-          <div
-            className="flex flex-wrap gap-3 text-[10.5px]"
-            style={{ color: "var(--th-text-muted)", ...NUMERIC_STYLE }}
-          >
-            {series.map((item) => (
-              <LegendDot key={item.key} color={item.color} label={item.label} />
-            ))}
-          </div>
-        }
-      />
+  const allZero = daily.length > 0 && daily.every((day) => day.total_tokens <= 0);
 
-      <div className="px-4 py-4 sm:px-5">
-        {daily.length === 0 ? (
-          <DashboardEmptyState
+  return (
+    <div className="px-4 pb-4 pt-3.5">
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold text-[var(--fg)]">
+            {t(msg("일별 토큰 구성", "Daily Token Composition", "日次トークン構成", "每日 Token 构成"))}
+          </h3>
+          <p className="mt-0.5 text-xs leading-5 text-[var(--fg-muted)]">
+            {t(
+              msg(
+                "input · output · cache read / write · 막대를 눌러 날짜별로 읽기",
+                "input · output · cache read / write · tap a bar to read a day",
+                "input · output · cache read / write · バーをタップして日別に表示",
+                "input · output · cache read / write · 点按柱状图查看每日数据",
+              ),
+            )}
+          </p>
+        </div>
+        <ul className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-[var(--fg-muted)]" style={NUMERIC_STYLE} aria-label={t(msg("범례", "Legend"))}>
+          {series.map((item) => (
+            <li key={item.key} className="inline-flex items-center gap-1.5">
+              <StatsSwatch color={item.color} />
+              <span>{item.label}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {daily.length === 0 ? (
+        loading ? (
+          <div role="status" aria-label={t(msg("일별 토큰 차트를 불러오는 중입니다.", "Loading daily token chart."))}>
+            <ChartPlaceholder />
+          </div>
+        ) : (
+          <StatsEmpty
             icon={<BarChart3 size={18} />}
-            title={
-              loading
-                ? t(
-                    msg(
-                      "일별 토큰 차트를 불러오는 중입니다.",
-                      "Loading daily token chart.",
-                    ),
-                  )
-                : t(
-                    msg(
-                      "표시할 일별 토큰 데이터가 없습니다.",
-                      "No daily token data available.",
-                    ),
-                  )
-            }
+            testId="stats-daily-empty"
+            title={failed
+              ? t(msg("일별 토큰을 불러오지 못했어요", "Daily tokens could not be loaded"))
+              : t(msg("표시할 일별 토큰 데이터가 없습니다.", "No daily token data available."))}
+            text={failed
+              ? t(msg("위의 다시 시도를 누르면 이 기간을 다시 불러와요.", "Use Retry above to load this range again."))
+              : t(msg("에이전트가 일하면 날짜별 토큰이 여기에 쌓여요.", "Tokens appear here by day once agents run."))}
           />
-        ) : (
-          <Suspense
-            fallback={
-              <div
-                className="h-[246px] rounded-xl"
-                style={{ background: "var(--th-overlay-subtle)" }}
-              />
-            }
-          >
-            <DailyTokenCompositionChart
-              t={t}
-              daily={daily}
-              localeTag={localeTag}
-              series={series}
-            />
+        )
+      ) : (
+        <>
+          {allZero ? (
+            <p className="mb-2 text-xs leading-5 text-[var(--fg-muted)]" data-testid="stats-daily-zero">
+              {t(msg("이 기간에는 기록된 토큰이 0이에요.", "No tokens were recorded in this range."))}
+            </p>
+          ) : null}
+          <Suspense fallback={<ChartPlaceholder />}>
+            <DailyTokenCompositionChart t={t} daily={daily} localeTag={localeTag} series={series} />
           </Suspense>
-        )}
-      </div>
-    </article>
+        </>
+      )}
+    </div>
   );
 }
-
-export function ModelDistributionCard({
-  t,
-  loading,
-  segments,
-  totalTokens,
-}: {
-  t: TFunction;
-  loading: boolean;
-  segments: ShareSegment[];
-  totalTokens: number;
-}) {
-  return (
-    <article className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface">
-      <CardHead
-        title={t(
-          msg("모델 분포", "Model Distribution", "モデル分布", "模型分布"),
-        )}
-        subtitle={t(
-          msg(
-            "Claude / Codex 모델별 토큰 배분",
-            "Token share by Claude / Codex models",
-            "Claude / Codex モデル別トークン配分",
-            "按 Claude / Codex 模型划分的 Token 占比",
-          ),
-        )}
-        actions={
-          <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-md border border-th-border-subtle bg-surface-subtle px-2 py-1 text-xs tabular-nums text-th-text-secondary" style={numericBadgeStyle}>
-            {formatTokens(totalTokens)} total
-          </span>
-        }
-      />
-
-      <div className="px-4 py-4 sm:px-5">
-        {segments.length === 0 ? (
-          <DashboardEmptyState
-            icon={<Cpu size={18} />}
-            title={
-              loading
-                ? t(
-                    msg(
-                      "모델 분포를 불러오는 중입니다.",
-                      "Loading model distribution.",
-                    ),
-                  )
-                : t(
-                    msg(
-                      "표시할 모델 데이터가 없습니다.",
-                      "No model data available.",
-                    ),
-                  )
-            }
-          />
-        ) : (
-          <div>
-            <div className="mb-4 flex h-2.5 overflow-hidden rounded-full">
-              {segments.map((segment) => (
-                <div
-                  key={segment.id}
-                  title={`${segment.label} ${formatPercent(segment.percentage)}`}
-                  style={{
-                    width: `${segment.percentage}%`,
-                    background: segment.color,
-                    minWidth: segment.percentage > 0 ? "8px" : "0",
-                  }}
-                />
-              ))}
-            </div>
-
-            <div className="space-y-3">
-              {segments.map((segment) => (
-                <div
-                  key={segment.id}
-                  className="grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-[14px] border border-transparent px-1 py-1"
-                >
-                  <span
-                    className="mt-1 h-2.5 w-2.5 rounded-[3px]"
-                    style={{ background: segment.color }}
-                  />
-                  <div className="min-w-0">
-                    <div
-                      className="[overflow-wrap:anywhere] text-sm font-semibold"
-                      style={{ color: "var(--th-text-heading)" }}
-                    >
-                      {segment.label}
-                    </div>
-                    <div
-                      className="mt-1 text-[11px]"
-                      style={{ color: "var(--th-text-muted)" }}
-                    >
-                      {segment.sublabel}
-                    </div>
-                  </div>
-                  <div
-                    className="text-right text-[11px]"
-                    style={{ color: "var(--th-text-muted)", ...NUMERIC_STYLE }}
-                  >
-                    {formatTokens(segment.tokens)}
-                  </div>
-                  <div
-                    className="min-w-[48px] text-right text-sm font-semibold"
-                    style={{
-                      color: "var(--th-text-heading)",
-                      ...NUMERIC_STYLE,
-                    }}
-                  >
-                    {formatPercent(segment.percentage)}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    </article>
-  );
-}
-

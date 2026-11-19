@@ -53,14 +53,11 @@ export default function App() {
   if (!data) {
     return (
       <div className="flex h-screen items-center justify-center bg-gray-900 text-gray-400">
-        <div className="text-center">
-          <div className="mb-4 text-4xl">🐾</div>
-          <div>
-            {t({
-              ko: "AgentDesk 대시보드 로딩 중...",
-              en: "Loading AgentDesk Dashboard...",
-            })}
-          </div>
+        <div role="status" data-testid="bootstrap-loading" className="text-center">
+          {t({
+            ko: "AgentDesk 대시보드 로딩 중...",
+            en: "Loading AgentDesk Dashboard...",
+          })}
         </div>
       </div>
     );

@@ -279,10 +279,23 @@ impl<I: HostIo> Takeover<'_, I> {
     /// The intake fence is held from before the final checks until the init is published.
     pub(super) async fn commit(
         &self,
-        at: Baseline,
+        mut at: Baseline,
         bound: &(SourceId, u64),
         prefix: &Prefix,
     ) -> Result<(), Taken> {
+        let debts = adoption::ChildDebt::pin(
+            self.candidate,
+            self.io.legacy(),
+            self.io.bindings(self.channel, self.provider),
+            self.channel,
+        )
+        .await
+        .map_err(Taken::Retry)?;
+        if matches!(prefix.class, prefix::PrefixClass::OutputFree) {
+            if let Some(sends) = debts.sends() {
+                at.sends = sends;
+            }
+        }
         let admission = if self.provider == ShadowProvider::Codex {
             let guard = self.candidate.lock();
             let proof = self.candidate.first_proof(&bound.0).map_err(Taken::Skip)?;
@@ -350,7 +363,7 @@ impl<I: HostIo> Takeover<'_, I> {
             }
             let mut why = None;
             let sources = || {
-                self.recheck(at, fence_sends, bound, &checked)
+                self.recheck(at, fence_sends, bound, &checked, &debts)
                     .map_err(|taken| {
                         let detail = taken.detail().to_owned();
                         why = Some(taken);
@@ -397,6 +410,7 @@ impl<I: HostIo> Takeover<'_, I> {
         fence_sends: (u64, u64),
         (source, seq): &(SourceId, u64),
         checked: &Checked,
+        debts: &adoption::ChildDebt,
     ) -> Result<Vec<InitSource>, Taken> {
         let prefix = &checked.prefix;
         if self.provider == ShadowProvider::Codex
@@ -428,6 +442,9 @@ impl<I: HostIo> Takeover<'_, I> {
         } else {
             self.events()?
         };
+        debts
+            .recheck(&events, self.candidate)
+            .map_err(Taken::Retry)?;
         if checked.admission.as_ref().is_some_and(|proof| {
             !events
                 .iter()

@@ -1,0 +1,100 @@
+---
+title: "완료 기록과 배포 요청ﬂ°°183¶ß알림 보존"
+---
+stateDiagram-v2
+  state "Run 요청 대기" as s0 {
+    state "Completion 완료 미기록" as s1 {
+      s2: Publication 발행 대기
+    }
+  }
+  state "Run 잠금#183;예약 경계" as s3 {
+    state "Completion 완료 미기록" as s4 {
+      s5: Publication 발행 대기
+    }
+  }
+  state "Run 프로세스 종료" as s6 {
+    state "Completion 완료 미기록" as s7 {
+      s8: Publication 발행 대기
+    }
+    state "Completion 완료 저장#183;적용 대기" as s9 {
+      s10: Publication 발행 대기
+      s11: Publication 실패 알림 pending
+      s12: Publication 결과 발행됨
+    }
+    state "Completion cursor#183;요청 적용됨" as s13 {
+      s14: Publication 발행 대기
+      s15: Publication 실패 알림 pending
+      s16: Publication 결과 발행됨
+    }
+  }
+  state "Run 예산 보류" as s17 {
+    state "Completion 완료 미기록" as s18 {
+      s19: Publication 발행 대기
+    }
+  }
+  state "Run 턴 실행" as s20 {
+    state "Completion 완료 미기록" as s21 {
+      s22: Publication 발행 대기
+    }
+  }
+  state "Run 고아 기록#183;provider pause" as s23 {
+    state "Completion 고아 정본 저장" as s24 {
+      s25: Publication 발행 대기
+      s26: Publication 실패 알림 pending
+    }
+  }
+  state "Run 완료 정본 저장" as s27 {
+    state "Completion 완료 저장#183;적용 대기" as s28 {
+      s29: Publication 발행 대기
+      s30: Publication 실패 알림 pending
+      s31: Publication 결과 발행됨
+    }
+    state "Completion cursor#183;요청 적용됨" as s32 {
+      s33: Publication 발행 대기
+      s34: Publication 실패 알림 pending
+      s35: Publication 결과 발행됨
+    }
+  }
+  state "Run 결과 적용" as s36 {
+    state "Completion cursor#183;요청 적용됨" as s37 {
+      s38: Publication 발행 대기
+      s39: Publication 실패 알림 pending
+      s40: Publication 결과 발행됨
+    }
+  }
+  [*] --> s2
+  s2 --> s5: enabled#183;예산 설정 확인 후 잠금
+  s5 --> s8: 저장 경계 crash
+  s5 --> s19: 요청을 남겨 예산 보류
+  s8 --> s19: 정본에서 복구
+  s19 --> s2: 다음 예산 창
+  s5 --> s22: 턴 예산 허용
+  s8 --> s25: 정본에서 복구
+  s22 --> s8: 저장 경계 crash
+  s25 --> s26: summary#183;status#183;outbox 발행
+  s22 --> s29: 완료 정본 저장
+  s29 --> s10: 저장 경계 crash
+  s29 --> s38: cursor#183;요청 멱등 반영
+  s29 --> s30: summary#183;status#183;outbox 발행
+  s29 --> s31: summary#183;status#183;outbox 발행
+  s10 --> s11: summary#183;status#183;outbox 발행
+  s10 --> s29: 정본에서 복구
+  s10 --> s12: summary#183;status#183;outbox 발행
+  s38 --> s14: 저장 경계 crash
+  s38 --> s39: summary#183;status#183;outbox 발행
+  s38 --> s40: summary#183;status#183;outbox 발행
+  s30 --> s11: 저장 경계 crash
+  s30 --> s39: cursor#183;요청 멱등 반영
+  s31 --> s12: 저장 경계 crash
+  s31 --> s40: cursor#183;요청 멱등 반영
+  s11 --> s30: 정본에서 복구
+  s12 --> s31: 정본에서 복구
+  s14 --> s15: summary#183;status#183;outbox 발행
+  s14 --> s33: 정본에서 복구
+  s14 --> s16: summary#183;status#183;outbox 발행
+  s39 --> s15: 저장 경계 crash
+  s40 --> s16: 저장 경계 crash
+  s15 --> s34: 정본에서 복구
+  s16 --> s35: 정본에서 복구
+  s33 --> s34: summary#183;status#183;outbox 발행
+  s33 --> s35: summary#183;status#183;outbox 발행

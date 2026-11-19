@@ -1,6 +1,6 @@
-import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route, type TestInfo } from "@playwright/test";
 
-// Settings IA checks at 1440x900 (desktop project) and 390x844 (mobile project).
+// Settings catalog checks at 1440x900 (desktop project) and 390x844 (mobile project).
 // Set SETTINGS_SHOT_DIR to collect screenshots outside the test output folder.
 
 // Shell fixtures copied from smoke.spec.ts so this file stays independent of it.
@@ -138,95 +138,27 @@ const MOCK_AGENTS = [
   },
 ];
 
-const MOCK_SETTINGS_FSM_PIPELINE = {
-  name: "agentdesk-default",
-  version: 1,
-  states: [
-    { id: "backlog", label: "backlog", terminal: false },
-    { id: "ready", label: "ready", terminal: false },
-    { id: "in_progress", label: "progress", terminal: false },
-    { id: "review", label: "review", terminal: false },
-    { id: "done", label: "done", terminal: true },
-    { id: "failed", label: "failed", terminal: false },
-  ],
-  transitions: [
-    { from: "backlog", to: "ready", type: "free", gates: [] },
-    { from: "ready", to: "in_progress", type: "free", gates: [] },
-    { from: "in_progress", to: "review", type: "free", gates: [] },
-    { from: "review", to: "done", type: "gated", gates: ["review_verdict_pass"] },
-    { from: "review", to: "in_progress", type: "gated", gates: ["review_verdict_rework"] },
-    { from: "review", to: "failed", type: "force_only", gates: [] },
-    { from: "failed", to: "ready", type: "free", gates: [] },
-  ],
-  gates: {
-    review_verdict_pass: {
-      type: "builtin",
-      check: "review_verdict_pass",
-      description: "Review approved",
-    },
-    review_verdict_rework: {
-      type: "builtin",
-      check: "review_verdict_rework",
-      description: "Changes requested",
-    },
-  },
-  hooks: {
-    backlog: { on_enter: [], on_exit: [] },
-    ready: { on_enter: [], on_exit: [] },
-    in_progress: { on_enter: [], on_exit: [] },
-    review: { on_enter: [], on_exit: [] },
-    done: { on_enter: [], on_exit: [] },
-    failed: { on_enter: [], on_exit: [] },
-  },
-  events: {
-    on_enqueue: ["OnQueueReady"],
-    on_dispatch: ["OnDispatchRequested"],
-    on_submit: ["OnDispatchCompleted"],
-    on_approve: ["OnReviewApproved"],
-    on_changes_request: ["OnChangesRequested"],
-    on_error: ["OnPipelineError"],
-    on_recover: ["OnRecoverFromFailure"],
-  },
-  clocks: {},
-  phase_gate: {
-    dispatch_to: "project-agentdesk",
-    dispatch_type: "review",
-  },
-};
-
-const MOCK_SETTINGS_PIPELINE_STAGES = [
-  {
-    stage_name: "implementation",
-    provider: null,
-    agent_override_id: null,
-    skip_condition: null,
-    trigger_after: "ready",
-  },
-];
-
 const NOW_SECONDS = Math.floor(Date.now() / 1000);
-const GIB = 1024 ** 3;
 const ALERT_CHANNEL_ID = "1234567890123456789";
+const live = { editable: true, restart_behavior: "persist-live-override" };
 
 const CONFIG_ENTRIES = [
-  { key: "deadlock_manager_channel_id", value: "", category: "pipeline", label_ko: "데드락 매니저 채널 ID", label_en: "Deadlock Manager Channel ID", editable: true, restart_behavior: "persist-live-override" },
-  { key: "agent_quality_monitoring_channel_id", value: ALERT_CHANNEL_ID, category: "quality", label_ko: "에이전트 품질 알림 채널 ID", label_en: "Agent Quality Alert Channel ID", editable: true },
-  { key: "review_enabled", value: "true", category: "review", label_ko: "리뷰 활성화", label_en: "Review Enabled", editable: true, restart_behavior: "persist-live-override" },
-  { key: "max_review_rounds", value: "3", default: "3", category: "review", label_ko: "최대 리뷰 라운드", label_en: "Max Review Rounds", editable: true, restart_behavior: "persist-live-override" },
-  { key: "server_port", value: "8791", category: "system", label_ko: "서버 포트", label_en: "Server Port", editable: false, restart_behavior: "config-only" },
-  { key: "requested_timeout_min", value: "45", default: "45", category: "timeout", label_ko: "요청됨 타임아웃 (분)", label_en: "Requested Timeout (min)", editable: true, restart_behavior: "persist-live-override" },
-  { key: "in_progress_stale_min", value: "120", default: "120", category: "timeout", label_ko: "진행 중 정체 판정 (분)", label_en: "In-Progress Stale (min)", editable: true, restart_behavior: "persist-live-override" },
-  { key: "context_compact_percent", value: "60", default: "60", category: "context", label_ko: "컨텍스트 compact 임계값 (%)", label_en: "Context Compact Threshold (%)", editable: true, restart_behavior: "persist-live-override" },
-  { key: "context_compact_percent_codex", value: null, category: "context", label_ko: "Codex 컨텍스트 compact 임계값 (%)", label_en: "Codex Context Compact Threshold (%)", editable: true },
-  { key: "context_compact_percent_claude", value: null, category: "context", label_ko: "Claude 컨텍스트 compact 임계값 (%)", label_en: "Claude Context Compact Threshold (%)", editable: true },
-  { key: "context_compact_lower_bound_tokens", value: "300000", default: "300000", category: "context", label_ko: "컨텍스트 compact 최소 토큰", label_en: "Context Compact Lower Bound (tokens)", editable: true },
+  { key: "deadlock_manager_channel_id", value: "", category: "pipeline", label_ko: "데드락 매니저 채널 ID", label_en: "Deadlock Manager Channel ID", override_active: true, ...live },
+  { key: "agent_quality_monitoring_channel_id", value: ALERT_CHANNEL_ID, category: "quality", label_ko: "GitHub 동기화 알림 채널 ID", label_en: "GitHub Sync Alert Channel ID", override_active: true, ...live },
+  { key: "review_enabled", value: "true", category: "review", label_ko: "리뷰 활성화", label_en: "Review Enabled", override_active: true, ...live },
+  { key: "max_review_rounds", value: "30", baseline: "3", baseline_source: "hardcoded", override_active: true, category: "review", label_ko: "최대 리뷰 라운드", label_en: "Max Review Rounds", ...live },
+  { key: "server_port", value: "8791", baseline: "8791", baseline_source: "config", category: "system", label_ko: "서버 포트", label_en: "Server Port", editable: false, restart_behavior: "config-only" },
+  { key: "requested_timeout_min", value: "45", baseline: "45", baseline_source: "hardcoded", category: "timeout", label_ko: "요청됨 타임아웃 (분)", label_en: "Requested Timeout (min)", ...live },
+  { key: "context_compact_percent", value: "60", baseline: "60", baseline_source: "hardcoded", category: "context", label_ko: "컨텍스트 compact 임계값 (%)", label_en: "Context Compact Threshold (%)", ...live },
+  { key: "context_compact_percent_codex", value: null, category: "context", label_ko: "Codex 컨텍스트 compact 임계값 (%)", label_en: "Codex Context Compact Threshold (%)", ...live },
+  { key: "context_compact_percent_claude", value: null, baseline: null, override_active: false, category: "context", label_ko: "Claude 컨텍스트 compact 임계값 (%)", label_en: "Claude Context Compact Threshold (%)", ...live },
 ];
 
 const RUNTIME_CONFIG = {
   maxRetries: 3,
   maxEntryRetries: 3,
   dispatchRateLimitGateEnabled: true,
-  dispatchRateLimitGateDangerPct: 95,
+  dispatchRateLimitGateDangerPct: 100,
   rateLimitWarningPct: 80,
   rateLimitDangerPct: 95,
   rateLimitStaleSec: 600,
@@ -235,10 +167,9 @@ const RUNTIME_CONFIG = {
 const CONNECTORS = {
   connectors: [
     { id: "obsidian_agent_prompts", name: "Obsidian agent prompts", state: "ready", optional: true, env_var: "AGENTDESK_OBSIDIAN_AGENTS_SRC", source: "/Users/me/ObsidianVault/RemoteVault/adk-config/agents", reason: null, detail: "state=ready", setup_actions: [], capabilities: ["obsidian_agent_prompts"] },
-    { id: "obsidian_skill_root", name: "Obsidian skill root", state: "ready", optional: true, env_var: "AGENTDESK_OBSIDIAN_SKILL_ROOT", source: "/Users/me/ObsidianVault/RemoteVault/99_Skills", reason: null, detail: "state=ready", setup_actions: [], capabilities: ["obsidian_skill_root"] },
-    { id: "kakao_scheduled_delivery", name: "Kakao default-account delivery", state: "skipped", optional: true, env_var: "AGENTDESK_KAKAO_ENABLED", source: null, reason: "disabled", detail: "state=skipped reason=disabled", setup_actions: ["Set AGENTDESK_KAKAO_ENABLED=true after configuring Kakao credentials."], capabilities: ["kakao_friend_message", "kakao_self_message"] },
+    { id: "kakao_scheduled_delivery", name: "Kakao default-account delivery", state: "skipped", optional: true, env_var: "AGENTDESK_KAKAO_ENABLED", source: null, reason: "disabled", detail: "state=skipped reason=disabled", setup_actions: ["Set AGENTDESK_KAKAO_ENABLED=true after configuring Kakao credentials."], capabilities: ["kakao_friend_message"] },
   ],
-  summary: { ready: 2, skipped: 1, missing_config: 0, missing_path: 0, missing_provider: 0, invalid_config: 0, invalid: 0, total: 3, core_runtime_blocking: false },
+  summary: { ready: 1, skipped: 1, missing_config: 0, missing_path: 0, missing_provider: 0, invalid_config: 0, invalid: 0, total: 2, core_runtime_blocking: false },
 };
 
 const ONBOARDING_STATUS = {
@@ -249,82 +180,38 @@ const ONBOARDING_STATUS = {
 };
 
 const HEALTH = {
-  status: "healthy",
+  status: "degraded",
+  uptime_secs: 3_600,
+  global_active: 3,
+  global_finalizing: 1,
+  queue_depth: 5,
+  degraded_reasons: ["tui_o:boundary_pending:1509350778043895902"],
+  dispatch_outbox: { pending: 2, retrying: 1, permanent_failures: 0, oldest_pending_age: 12 },
   providers: [
-    { name: "claude", connected: true, active_turns: 0, queue_depth: 0, sessions: 1, restart_pending: false, last_turn_at: null },
-    { name: "codex", connected: true, active_turns: 0, queue_depth: 0, sessions: 1, restart_pending: false, last_turn_at: null },
+    { name: "claude", connected: true, active_turns: 0, queue_depth: 2, sessions: 1, restart_pending: false, last_turn_at: null },
+    { name: "codex", connected: false, active_turns: 0, queue_depth: 4, sessions: 1, restart_pending: false, last_turn_at: null },
   ],
+};
+
+const RETENTION = {
+  total_stored_bytes: 2048, total_original_bytes: 4096, truncated_count: 1, manifest_count: 1, layer_count: 4,
+  oldest_full_content_at: null, retention_horizon_at: null, retention_days: 30, per_layer_max_bytes_adk_provided: 65536,
+  per_layer_max_bytes_user_derived: 16384, enabled: true, restart_required_for_config_changes: true,
+  config_applied_at: "boot", config_source: "agentdesk.yaml boot snapshot", hot_reload: false,
 };
 
 const PROVIDER_PROFILES = {
-  providers: [
-    {
-      id: "claude",
-      default_home: "/Users/me/.claude",
-      primary_profile_id: "default",
-      accounts: [
-        {
-          id: "default",
-          home: "/Users/me/.claude",
-          bound_agents: ["agentdesk"],
-          usage: { buckets: [
-            { name: "5h", limit: 100, used: 62, utilization: 62, reset: NOW_SECONDS + 7_200 },
-            { name: "7d", limit: 100, used: 40, utilization: 40, reset: NOW_SECONDS + 86_400 },
-            { name: "7d Fable", limit: 100, used: 0, utilization: 0, reset: NOW_SECONDS + 86_400 },
-          ], stale: false, unsupported: false, reason: null },
-        },
-        {
-          id: "work",
-          home: "/Users/me/.adk/provider-profiles/claude/work",
-          usage: { buckets: [{ name: "5h", limit: 100, used: 97, utilization: 97, reset: NOW_SECONDS + 3_600 }], stale: false, unsupported: false, reason: null },
-        },
-      ],
-    },
-    {
-      id: "qwen",
-      default_home: "/Users/me/.qwen",
-      accounts: [
-        { id: "default", home: "/Users/me/.qwen", usage: { buckets: [], stale: false, unsupported: true, reason: "No Qwen rate-limit telemetry source is implemented yet." } },
-      ],
-    },
-  ],
+  providers: [{
+    id: "claude",
+    default_home: "/Users/me/.claude",
+    primary_profile_id: "default",
+    accounts: [{
+      id: "default",
+      home: "/Users/me/.claude",
+      usage: { buckets: [{ name: "7d Fable", limit: 100, used: 97, utilization: 97, reset: NOW_SECONDS + 86_400 }], stale: false, unsupported: false, reason: null },
+    }],
+  }],
 };
-
-function machineResources(now: number, cpu: number, usedMemory: number) {
-  return {
-    schema: 1, observed_at_ms: now, expires_at_ms: now + 30_000, sample_interval_ms: 5_000,
-    cpu: { model: "Apple M4 Max", physical_cores: 16, logical_cores: 16, usage_percent: cpu },
-    memory: { total_bytes: 32 * GIB, used_bytes: usedMemory, available_bytes: 32 * GIB - usedMemory },
-    disks: [{ name: "Macintosh HD", mount_point: "/", kind: "SSD", total_bytes: 1024 * GIB, used_bytes: 400 * GIB, available_bytes: 624 * GIB }],
-    gpus: [],
-    network: { interface: "en0", wired: false, received_bytes_per_sec: 4096, transmitted_bytes_per_sec: 2048 },
-  };
-}
-
-function clusterNodes() {
-  const now = Date.now();
-  return {
-    cluster: { enabled: true, local_instance_id: "hub-mac", lease_ttl_secs: 30, heartbeat_interval_secs: 5 },
-    nodes: ["hub-mac", "runner-mac"].map((id, index) => ({
-      instance_id: id, hostname: index ? "mac-mini" : "mac-book", status: "online", role: index ? "runner" : "hub",
-      effective_role: index ? "worker" : "leader", process_id: 100 + index,
-      last_heartbeat_at: new Date(now).toISOString(), started_at: new Date(now - 60_000).toISOString(),
-      api_base_url: `https://${id}.example.invalid`, labels: [],
-      execution_active: 0, execution_occupied: 0, active_session_count: 1, active_dispatch_count: 0,
-      capabilities: {
-        machine_resources: index ? machineResources(now, 22.5, 12 * GIB) : machineResources(now, 99.1, 31.2 * GIB),
-        execution_capacity: { version: 1, slots: 2 },
-        execution_readiness: {
-          os: "macos", arch: "aarch64", runtime_profile: index ? "runner" : "full",
-          observed_at_ms: now, expires_at_ms: now + 60_000, backends: ["process"],
-          providers: { claude: { cli_installed: true, cli_usable: true } },
-        },
-      },
-      execution_readiness: { providers: { claude: { eligible: true, reasons: [] } } },
-      forwarding_diagnostics: { advertised: true, configured: true, trust_validated: true, reachability_verified: true, expires_at_ms: now + 30_000 },
-    })),
-  };
-}
 
 type Captured = { method: string; url: string; body: unknown };
 
@@ -370,39 +257,68 @@ async function mockShell(page: Page) {
   await page.route(/\/api\/kanban-cards(?:\?.*)?$/, (route) => route.fulfill({ json: { cards: [] } }));
   await page.route(/\/api\/kanban-repos$/, (route) => route.fulfill({ json: { repos: [] } }));
   await page.route(/\/api\/health(?:\/detail)?$/, (route) => route.fulfill({ json: HEALTH }));
+  await page.route(/\/api\/settings$/, (route) => route.fulfill({ json: { companyName: "AgentDesk", ceoName: "윤호", language: "ko", theme: "dark" } }));
 }
 
-async function mockSettings(page: Page, overrides: { onboarding?: unknown } = {}) {
-  const writes: Captured[] = [];
-  const capture = (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
-    const request = route.request();
-    writes.push({ method: request.method(), url: request.url(), body: request.postDataJSON() });
+type FakeServer = {
+  config: Array<Record<string, unknown>>;
+  runtime: Record<string, unknown>;
+  explicit: string[];
+  settings: Record<string, unknown>;
+  retention: typeof RETENTION;
+  /** null answers health with 404 (a failed refresh). */
+  health: typeof HEALTH | null;
+  failNextWrite: boolean;
+  /** Writes wait for this before answering (a save still in flight). */
+  gate?: Promise<void>;
+  writes: Captured[];
+};
+
+const fakeServer = (): FakeServer => ({
+  config: CONFIG_ENTRIES.map((entry) => ({ ...entry })),
+  runtime: {},
+  explicit: [],
+  settings: { companyName: "AgentDesk", ceoName: "윤호", language: "ko", theme: "dark" },
+  retention: { ...RETENTION },
+  health: HEALTH,
+  failNextWrite: false,
+  writes: [],
+});
+
+// Follows the server contract: a write lands in state and the next GET returns it (runtime PUT replaces the document).
+async function mockSettings(page: Page, server = fakeServer()) {
+  const write = async (route: Route, apply: (body: Record<string, unknown>) => void) => {
+    const body = route.request().postDataJSON();
+    server.writes.push({ method: route.request().method(), url: route.request().url(), body });
+    await server.gate;
+    if (server.failNextWrite) {
+      server.failNextWrite = false;
+      return route.fulfill({ status: 503, json: { error: "unavailable" } });
+    }
+    apply(body);
+    return route.fulfill({ json: { ok: true } });
   };
-  let generalSettings = { companyName: "AgentDesk", ceoName: "윤호", language: "ko", theme: "dark" };
-  await page.route(/\/api\/settings$/, (route) => {
-    if (route.request().method() === "PUT") {
-      capture(route);
-      generalSettings = { ...generalSettings, ...(route.request().postDataJSON() as object) };
-      return route.fulfill({ json: { ok: true } });
-    }
-    return route.fulfill({ json: generalSettings });
-  });
-  await page.route(/\/api\/settings\/config$/, (route) => {
-    if (route.request().method() === "PATCH") {
-      capture(route);
-      return route.fulfill({ json: { ok: true } });
-    }
-    return route.fulfill({ json: { entries: CONFIG_ENTRIES } });
-  });
-  await page.route(/\/api\/settings\/runtime-config$/, (route) => {
-    if (route.request().method() === "PUT") {
-      capture(route);
-      return route.fulfill({ json: { ok: true } });
-    }
-    return route.fulfill({ json: { current: RUNTIME_CONFIG, defaults: RUNTIME_CONFIG, explicit_keys: [] } });
-  });
+  await page.route(/\/api\/settings\/config$/, (route) => (route.request().method() === "PATCH"
+    ? write(route, (body) => {
+      for (const [key, value] of Object.entries(body)) {
+        const entry = server.config.find((candidate) => candidate.key === key);
+        if (entry) Object.assign(entry, { value, override_active: entry.baseline == null || value !== entry.baseline });
+      }
+    })
+    : route.fulfill({ json: { entries: server.config } })));
+  await page.route(/\/api\/settings\/runtime-config$/, (route) => (route.request().method() === "PUT"
+    ? write(route, ({ __runtimeConfigExplicitKeys, ...values }) => {
+      server.runtime = values;
+      server.explicit = __runtimeConfigExplicitKeys as string[];
+    })
+    : route.fulfill({ json: { current: { ...RUNTIME_CONFIG, ...server.runtime }, defaults: RUNTIME_CONFIG, explicit_keys: server.explicit } })));
+  await page.route(/\/api\/settings$/, (route) => (route.request().method() === "PUT"
+    ? write(route, (body) => { server.settings = body; })
+    : route.fulfill({ json: server.settings })));
+  await page.route(/\/api\/health(?:\/detail)?$/, (route) => (server.health ? route.fulfill({ json: server.health }) : route.fulfill({ status: 404, json: {} })));
   await page.route(/\/api\/settings\/operator-connectors$/, (route) => route.fulfill({ json: CONNECTORS }));
-  await page.route(/\/api\/onboarding\/status$/, (route) => route.fulfill({ json: overrides.onboarding ?? ONBOARDING_STATUS }));
+  await page.route(/\/api\/prompt-manifest\/retention$/, (route) => route.fulfill({ json: server.retention }));
+  await page.route(/\/api\/onboarding\/status$/, (route) => route.fulfill({ json: ONBOARDING_STATUS }));
   await page.route(/\/api\/discord\/channels\/\d+$/, (route) => {
     const id = route.request().url().split("/").pop();
     return id === ALERT_CHANNEL_ID
@@ -410,33 +326,7 @@ async function mockSettings(page: Page, overrides: { onboarding?: unknown } = {}
       : route.fulfill({ status: 404, json: { error: "channel not found" } });
   });
   await page.route(/\/api\/provider-auth-profiles$/, (route) => route.fulfill({ json: PROVIDER_PROFILES }));
-  await page.route(/\/api\/cluster\/nodes$/, (route) => route.fulfill({ json: clusterNodes() }));
-  await page.route(/\/api\/cluster\/machine-resources\/history\?/, (route) => {
-    const instance_id = new URL(route.request().url()).searchParams.get("instance_id");
-    return route.fulfill({ json: { instance_id, samples: [] } });
-  });
-  await page.route(/\/api\/github-repos$/, (route) => route.fulfill({ json: {
-    viewer_login: "itismyfield",
-    repos: [{ nameWithOwner: "itismyfield/AgentDesk", updatedAt: "2026-10-01T00:00:00Z", isPrivate: true, viewerPermission: "ADMIN" }],
-  } }));
-  await page.route(/\/api\/pipeline\/config\/effective\?repo=itismyfield%2FAgentDesk$/, (route) => route.fulfill({ json: {
-    pipeline: MOCK_SETTINGS_FSM_PIPELINE,
-    layers: { default: true, repo: false, agent: false },
-  } }));
-  await page.route(/\/api\/pipeline\/config\/repo\/itismyfield\/AgentDesk$/, (route) => route.fulfill({ json: {
-    repo: "itismyfield/AgentDesk",
-    pipeline_config: {
-      states: MOCK_SETTINGS_FSM_PIPELINE.states,
-      transitions: MOCK_SETTINGS_FSM_PIPELINE.transitions,
-      gates: MOCK_SETTINGS_FSM_PIPELINE.gates,
-      hooks: MOCK_SETTINGS_FSM_PIPELINE.hooks,
-      events: MOCK_SETTINGS_FSM_PIPELINE.events,
-      clocks: MOCK_SETTINGS_FSM_PIPELINE.clocks,
-      phase_gate: MOCK_SETTINGS_FSM_PIPELINE.phase_gate,
-    },
-  } }));
-  await page.route(/\/api\/pipeline\/stages\?repo=itismyfield%2FAgentDesk$/, (route) => route.fulfill({ json: { stages: MOCK_SETTINGS_PIPELINE_STAGES } }));
-  return writes;
+  return server;
 }
 
 async function expectNoHorizontalOverflow(page: Page) {
@@ -447,263 +337,483 @@ async function expectNoHorizontalOverflow(page: Page) {
   expect(metrics.width).toBeLessThanOrEqual(metrics.viewport + 1);
 }
 
-async function shot(page: Page, testInfo: TestInfo, name: string, scrollToBottom = false) {
-  const settingsPage = page.getByTestId("settings-page");
-  await settingsPage.evaluate((node, bottom) => node.scrollTo(0, bottom ? node.scrollHeight : 0), scrollToBottom);
+async function shot(page: Page, testInfo: TestInfo, name: string) {
   const dir = process.env.SETTINGS_SHOT_DIR;
   const file = `${testInfo.project.name}-${name}.png`;
   await page.screenshot({ path: dir ? `${dir}/${file}` : testInfo.outputPath(file) });
 }
 
-async function shotOf(page: Page, locator: Locator, testInfo: TestInfo, name: string) {
-  await locator.scrollIntoViewIfNeeded();
-  const dir = process.env.SETTINGS_SHOT_DIR;
-  const file = `${testInfo.project.name}-${name}.png`;
-  await page.screenshot({ path: dir ? `${dir}/${file}` : testInfo.outputPath(file) });
+async function openSettings(page: Page, query = "") {
+  await page.goto(`/settings${query}`);
+  await expect(page.getByTestId("settings-catalog")).toBeVisible({ timeout: 15_000 });
 }
 
-async function openSettings(page: Page, panel?: string) {
-  await page.goto(panel ? `/settings?settingsPanel=${panel}` : "/settings");
-  await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15_000 });
+const row = (page: Page, key: string) => page.getByTestId(`setting-row-${key}`);
+const isPhone = (testInfo: TestInfo) => testInfo.project.name === "mobile";
+
+/** Types a value and saves it: the phone sheet, or the desktop row and pending bar. */
+async function editAndSave(page: Page, key: string, value: string, phone: boolean) {
+  if (phone) {
+    await row(page, key).click();
+    const sheet = page.getByTestId("settings-edit-sheet");
+    await sheet.locator("input").fill(value);
+    await sheet.getByRole("button", { name: /저장$/ }).click();
+    await expect(sheet).toHaveCount(0);
+    return;
+  }
+  await row(page, key).locator("input").fill(value);
+  await page.getByTestId("settings-save-bar").getByRole("button", { name: "저장" }).click();
+  await expect(page.getByTestId("settings-save-bar")).toHaveCount(0);
 }
 
-const tabs = (page: Page) => page.getByRole("tablist", { name: "설정 패널" }).getByRole("tab");
+/** Picks an option in a language/theme row and saves it the same two ways. */
+async function pickAndSave(page: Page, key: string, option: string, phone: boolean) {
+  if (phone) await row(page, key).click();
+  const scope = phone ? page.getByTestId("settings-edit-sheet") : row(page, key);
+  await scope.getByRole("combobox").click();
+  await page.getByRole("option", { name: option }).click();
+  const save = (phone ? scope : page.getByTestId("settings-save-bar")).getByRole("button", { name: /^(저장|Save)$/ });
+  await save.click();
+  await expect(save).toHaveCount(0);
+}
 
-test.describe("settings", () => {
+test.describe("settings catalog", () => {
   test.beforeEach(async ({ page }, testInfo) => {
     if (testInfo.project.name === "desktop") await page.setViewportSize({ width: 1440, height: 900 });
     await page.addInitScript(() => window.localStorage.clear());
     await mockShell(page);
   });
 
-  test("five tabs, in order, each label on one line", async ({ page }, testInfo) => {
+  test("desktop: categories, filters and search narrow one list; the retired deadlock key never shows", async ({ page }, testInfo) => {
+    test.skip(isPhone(testInfo), "Desktop layout");
     await mockSettings(page);
     await openSettings(page);
+    const nav = page.getByRole("navigation", { name: "분류" });
+    await expect(nav.getByRole("button")).toHaveText(["전체26", "작업 흐름3", "리뷰2", "컨텍스트3", "사용량5", "알림 채널1", "시스템4", "연결8"]);
+    await expect(page.getByText("deadlock_manager_channel_id")).toHaveCount(0);
+    await expect(page.getByText("데드락")).toHaveCount(0);
 
-    await expect(tabs(page)).toHaveText(["일반", "작업 흐름", "AI 계정", "연결", "머신"]);
-    await expect(tabs(page).nth(0)).toHaveAttribute("aria-selected", "true");
-    const metrics = await tabs(page).evaluateAll((nodes) => nodes.map((node) => {
-      const label = node.querySelector("span") as HTMLElement;
-      const lineHeight = parseFloat(getComputedStyle(label).lineHeight) || 20;
-      return { height: node.getBoundingClientRect().height, lines: Math.round(label.getBoundingClientRect().height / lineHeight), wordBreak: getComputedStyle(node).wordBreak };
-    }));
-    for (const metric of metrics) {
-      expect(metric.lines).toBe(1);
-      expect(metric.height).toBeGreaterThanOrEqual(44);
-      expect(metric.height).toBeLessThan(56);
-      expect(metric.wordBreak).toBe("keep-all");
-    }
-    await expect(page.getByTestId("settings-page").getByText(/음성|온보딩/)).toHaveCount(0);
+    await page.getByRole("switch", { name: /기본값과 다름/ }).check();
+    await expect(page.getByTestId("settings-list-caption")).toHaveText("26개 중 3개 · 기본값과 다른 것만");
+    await page.getByRole("switch", { name: /기본값과 다름/ }).uncheck();
+    await page.getByRole("switch", { name: /재시작 필요/ }).check();
+    await expect(page.locator("[data-testid^=setting-row-]")).toHaveCount(2);
+    await expect(row(page, "server_port")).toContainText("설정 파일에서만");
+    await page.getByRole("switch", { name: /재시작 필요/ }).uncheck();
+
+    // A related row hidden by the search opens anyway: the search is lifted and the row selected.
+    await page.getByTestId("settings-search-input").fill("최대 리뷰");
+    await expect(page.locator("[data-testid^=setting-row-]")).toHaveCount(1);
+    await row(page, "max_review_rounds").getByRole("button").first().click();
+    await page.getByTestId("settings-inspector").getByRole("button", { name: /리뷰 활성화/ }).click();
+    await expect(page.getByTestId("settings-search-input")).toHaveValue("");
+    await expect(row(page, "review_enabled")).toHaveAttribute("data-selected", "true");
+    await expect(page.getByTestId("settings-inspector").getByRole("heading")).toHaveText("리뷰 활성화");
+
+    await page.getByTestId("settings-category-context").click();
+    await expect(page).toHaveURL(/category=context$/);
+    await expect(page.locator("[data-testid^=setting-row-]")).toHaveCount(3);
     await expectNoHorizontalOverflow(page);
-
-    for (const [index, name] of ["general", "workflow", "ai", "connections", "machine"].entries()) {
-      await tabs(page).nth(index).click();
-      await expect(page).toHaveURL(new RegExp(`settingsPanel=${name}`));
-      await expect(page.locator("#settings-panel-content .setting-row").first()).toBeVisible();
-      await page.waitForTimeout(300);
-      const copy = await page.locator("#settings-panel-content").innerText();
-      expect(copy).not.toMatch(/auto-queue|telemetry|kv_meta|Rate Limit|compact|즉시 반영|extra/);
-      await expectNoHorizontalOverflow(page);
-      await shot(page, testInfo, `${index + 1}-${name}`);
-      await shot(page, testInfo, `${index + 1}-${name}-bottom`, true);
-    }
+    await shot(page, testInfo, "catalog");
   });
 
-  test("old panel links open the tab that now holds those settings", async ({ page }) => {
-    await mockSettings(page);
-    for (const [legacy, current] of [["runtime", "workflow"], ["pipeline", "workflow"], ["providers", "ai"], ["connectors", "connections"], ["onboarding", "connections"], ["voice", "general"]]) {
-      await openSettings(page, legacy);
-      await expect(page.locator(`#settings-tab-${current}`)).toHaveAttribute("aria-selected", "true");
-      await expect(page).toHaveURL(new RegExp(`settingsPanel=${current}`));
-    }
-  });
+  for (const width of [1280, 1440]) {
+    test(`desktop ${width}px: rows keep the default, its source and both chips in view`, async ({ page }, testInfo) => {
+      test.skip(isPhone(testInfo), "Desktop layout");
+      await page.setViewportSize({ width, height: 900 });
+      await mockSettings(page);
+      await openSettings(page);
+      const rounds = page.getByTestId("setting-meta-max_review_rounds");
+      for (const text of ["기본 3 · 코드", "덮어씀", "바로 적용"]) await expect(rounds.getByText(text, { exact: true })).toBeVisible();
+      await expect(page.getByTestId("setting-meta-maxEntryRetries").getByText("기본 3 · 서버 기본값", { exact: true })).toBeVisible();
+    });
+  }
 
-  test("one save bar collects changes from every tab", async ({ page }, testInfo) => {
-    const writes = await mockSettings(page);
+  test("desktop: a failed write keeps the draft, a retry saves it, and the saved value survives a reload", async ({ page }, testInfo) => {
+    test.skip(isPhone(testInfo), "Desktop layout");
+    const server = await mockSettings(page);
     await openSettings(page);
     const bar = page.getByTestId("settings-save-bar");
-    await expect(bar).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "저장", exact: true })).toHaveCount(0);
-
-    await page.getByLabel("회사 이름").fill("AgentDesk Lab");
-    await expect(bar).toContainText("바뀐 설정 1개");
-    await expect(page.getByTestId("setting-row-companyName")).toContainText("바뀜");
-
-    await tabs(page).nth(1).click();
-    await page.getByLabel("작업 재시도 횟수 직접 입력").fill("5");
-    await expect(bar).toContainText("바뀐 설정 2개");
-    await expect(page.getByRole("button", { name: "저장", exact: true })).toHaveCount(1);
-
-    const viewport = page.viewportSize()!;
-    const box = (await bar.boundingBox())!;
-    expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1);
-    const onTop = await bar.evaluate((node) => {
-      const rect = node.getBoundingClientRect();
-      const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-      return Boolean(hit && node.contains(hit));
-    });
-    expect(onTop).toBe(true);
-    await shot(page, testInfo, "save-bar");
-
-    await bar.getByRole("button", { name: "되돌리기" }).click();
-    await expect(bar).toHaveCount(0);
-    await expect(page.getByLabel("작업 재시도 횟수 직접 입력")).toHaveValue("3");
-
-    await page.getByLabel("작업 재시도 횟수 직접 입력").fill("4");
-    await page.getByLabel("접수 후 대기 경고 (분)").fill("30");
-    await tabs(page).nth(0).click();
-    await page.getByLabel("회사 이름").fill("");
-    await expect(bar).toContainText("회사 이름을 입력해 주세요.");
+    await row(page, "max_review_rounds").getByRole("button").first().click();
+    const inspector = page.getByTestId("settings-inspector");
+    await expect(inspector).toContainText("바로 · 재시작해도 유지");
+    await row(page, "max_review_rounds").locator("input").fill("10");
+    await expect(bar).toContainText("최대 리뷰 라운드 30 → 10 · 저장하면 바로 적용돼요");
+    await expect(inspector).toContainText("고칠 값10");
+    await row(page, "maxEntryRetries").locator("input").fill("");
     await expect(bar.getByRole("button", { name: "저장" })).toBeDisabled();
-    await page.getByLabel("회사 이름").fill("AgentDesk Lab");
+    await row(page, "maxEntryRetries").locator("input").fill("5");
+    await expect(bar).toContainText("변경 2건");
+    await shot(page, testInfo, "pending");
+
+    server.failNextWrite = true;
+    await bar.getByRole("button", { name: "저장" }).click();
+    await expect(bar).toContainText("변경 1건");
+    await expect(row(page, "maxEntryRetries")).toContainText("바뀜");
     await bar.getByRole("button", { name: "저장" }).click();
     await expect(bar).toHaveCount(0);
-
-    expect(writes.find((write) => write.method === "PUT" && write.url.endsWith("/api/settings"))?.body).toMatchObject({ companyName: "AgentDesk Lab" });
-    expect(writes.find((write) => write.url.endsWith("/runtime-config"))?.body).toMatchObject({ maxRetries: 4, __runtimeConfigExplicitKeys: ["maxRetries"] });
-    expect(writes.find((write) => write.method === "PATCH")?.body).toEqual({ requested_timeout_min: "30" });
+    await expect(row(page, "max_review_rounds").locator("input")).toHaveValue("10");
+    expect(server.writes.find((write) => write.method === "PATCH")?.body).toEqual({ max_review_rounds: "10" });
+    expect(server.writes.at(-1)?.body).toMatchObject({ maxEntryRetries: 5, __runtimeConfigExplicitKeys: ["maxEntryRetries"] });
+    await page.reload();
+    await expect(row(page, "max_review_rounds").locator("input")).toHaveValue("10");
+    await expect(row(page, "maxEntryRetries").locator("input")).toHaveValue("5");
   });
 
-  test("workflow puts frequent settings first and the visual editor behind advanced editing", async ({ page }, testInfo) => {
-    await mockSettings(page);
-    await openSettings(page, "workflow");
-
-    const panel = page.locator("#settings-panel-content");
-    for (const label of ["접수 후 대기 경고 (분)", "진행 멈춤 경고 (분)", "작업 재시도 횟수", "자동 대기열 재시도 횟수", "사용량이 많으면 자동 진행 멈추기", "리뷰 단계 사용"]) {
-      await expect(panel.getByText(label, { exact: true })).toBeVisible();
+  test("desktop: number settings go out as integers and decimals cannot be saved", async ({ page }, testInfo) => {
+    test.skip(isPhone(testInfo), "Desktop layout");
+    const server = await mockSettings(page);
+    await openSettings(page, "?category=workflow");
+    const bar = page.getByTestId("settings-save-bar");
+    for (const [key, value] of [["requested_timeout_min", "1e2"], ["maxEntryRetries", "1e1"]]) {
+      await row(page, key).locator("input").fill("60.5");
+      await expect(bar.getByRole("button", { name: "저장" })).toBeDisabled();
+      await row(page, key).locator("input").fill(value);
     }
-    await expect(page.getByTestId("pipeline-flow-canvas")).toHaveCount(0);
-    await expect(panel.getByText("에이전트 품질 알림 채널 ID")).toHaveCount(0);
+    await bar.getByRole("button", { name: "저장" }).click();
+    await expect(bar).toHaveCount(0);
+    expect(server.writes.find((write) => write.method === "PATCH")?.body).toEqual({ requested_timeout_min: "100" });
+    expect(server.writes.find((write) => write.method === "PUT")?.body).toMatchObject({ maxEntryRetries: 10 });
+  });
 
-    const row = page.getByTestId("setting-row-requested_timeout_min");
-    await row.getByRole("button", { name: "자세히" }).click();
-    await expect(row).toContainText("기본값: 45");
-    await expect(row).toContainText("다시 시작해도 여기서 바꾼 값이 유지돼요.");
-
-    await panel.getByRole("button", { name: "고급 편집" }).click();
-    await expect(page.getByTestId("pipeline-flow-canvas")).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByTestId("pipeline-selection-title")).toContainText(/상태 · backlog/);
-    await expect(page.getByRole("button", { name: "이 상태 삭제" })).toHaveCount(0);
-
-    const hooks = page.locator('textarea[placeholder="OnCardTransition, OnReviewEnter"], textarea[placeholder="OnStateExit"]');
-    await expect(hooks).toHaveCount(2);
-    for (const metric of await hooks.evaluateAll((nodes) => nodes.map((node) => ({ width: node.clientWidth, scroll: node.scrollWidth })))) {
-      expect(metric.scroll).toBeLessThanOrEqual(metric.width + 1);
-      expect(metric.width).toBeGreaterThanOrEqual(240);
-    }
-
-    await page.getByRole("button", { name: "상태 메뉴" }).click();
-    await page.getByRole("menuitem", { name: "이 상태 삭제" }).click();
+  test("desktop: reset to the default and confirm a dangerous change before saving", async ({ page }, testInfo) => {
+    test.skip(isPhone(testInfo), "Desktop layout");
+    const server = await mockSettings(page);
+    await openSettings(page);
+    await row(page, "max_review_rounds").getByRole("button").first().click();
+    await page.getByRole("button", { name: "기본값 3으로 되돌리기" }).click();
+    await expect(row(page, "max_review_rounds").locator("input")).toHaveValue("3");
+    await page.getByRole("switch", { name: "리뷰 활성화" }).click();
+    const bar = page.getByTestId("settings-save-bar");
+    await bar.getByRole("button", { name: "저장" }).click();
     const dialog = page.getByRole("dialog");
-    await expect(dialog).toContainText("'backlog' 상태를 삭제할까요?");
-    await shot(page, testInfo, "workflow-delete-confirm");
-    await dialog.getByRole("button", { name: "취소" }).click();
-    await expect(page.getByTestId("pipeline-selection-title")).toContainText(/상태 · backlog/);
-    await expectNoHorizontalOverflow(page);
-    await shotOf(page, page.getByTestId("pipeline-selection-title"), testInfo, "workflow-editor-open");
+    await expect(dialog).toContainText("리뷰 게이트");
+    expect(server.writes).toHaveLength(0);
+    await dialog.getByRole("button", { name: "확인하고 저장" }).click();
+    await expect(bar).toHaveCount(0);
+    expect(server.writes[0]?.body).toEqual({ max_review_rounds: "3", review_enabled: "false" });
   });
 
-  test("a failed settings source shows one alert instead of empty editable defaults", async ({ page }) => {
+  test("desktop: edits typed while a runtime save is in flight stay pending", async ({ page }, testInfo) => {
+    test.skip(isPhone(testInfo), "Desktop layout");
+    const server = await mockSettings(page);
+    let release = () => {};
+    server.gate = new Promise((resolve) => { release = resolve; });
+    await openSettings(page, "?category=workflow");
+    const bar = page.getByTestId("settings-save-bar");
+    await row(page, "maxEntryRetries").locator("input").fill("5");
+    await bar.getByRole("button", { name: "저장" }).click();
+    await expect.poll(() => server.writes.length).toBe(1);
+    await row(page, "maxEntryRetries").locator("input").fill("6");
+    await row(page, "maxRetries").locator("input").fill("4");
+    release();
+    await expect.poll(() => server.runtime.maxEntryRetries).toBe(5);
+    await expect(bar).toContainText("변경 2건");
+    await expect(row(page, "maxEntryRetries").locator("input")).toHaveValue("6");
+    await expect(row(page, "maxRetries").locator("input")).toHaveValue("4");
+  });
+
+  test("desktop: language and theme stay locked while /api/settings saves", async ({ page }, testInfo) => {
+    test.skip(isPhone(testInfo), "Desktop layout");
+    const server = await mockSettings(page);
+    let release = () => {};
+    const hold = () => { server.gate = new Promise((resolve) => { release = resolve; }); };
+    const picker = (key: string) => row(page, key).getByRole("combobox");
+    const bar = page.getByTestId("settings-save-bar");
+    await openSettings(page, "?category=system");
+    await picker("theme").click();
+    await page.getByRole("option", { name: "밝게" }).click();
+
+    // A failed save unlocks both rows and keeps the draft.
+    hold();
+    server.failNextWrite = true;
+    await bar.getByRole("button", { name: "저장" }).click();
+    await expect.poll(() => server.writes.length).toBe(1);
+    await expect(picker("theme")).toBeDisabled();
+    await expect(picker("language")).toBeDisabled();
+    release();
+    await expect(picker("language")).toBeEnabled();
+    await expect(picker("theme")).toHaveText(/밝게/);
+    await expect(bar).toContainText("변경 1건");
+    expect(server.settings).toMatchObject({ theme: "dark" });
+
+    // The retry locks again and the saved theme applies once it lands.
+    hold();
+    await bar.getByRole("button", { name: "저장" }).click();
+    await expect.poll(() => server.writes.length).toBe(2);
+    await expect(picker("language")).toBeDisabled();
+    release();
+    await expect(bar).toHaveCount(0);
+    await expect(picker("language")).toBeEnabled();
+    await expect(picker("theme")).toHaveText(/밝게/);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    expect(server.settings).toMatchObject({ theme: "light", language: "ko" });
+    await pickAndSave(page, "language", "English", false);
+    await expect.poll(() => server.settings).toMatchObject({ theme: "light", language: "en" });
+  });
+
+  test("desktop: the Claude-only compact value can go back to following the shared one", async ({ page }, testInfo) => {
+    test.skip(isPhone(testInfo), "Desktop layout");
+    const server = await mockSettings(page);
+    await openSettings(page, "?category=context");
+    const claude = row(page, "context_compact_percent_claude");
+    // A first draft can already go back to following the shared value.
+    await claude.locator("input").fill("70");
+    await claude.getByRole("button").first().click();
+    await page.getByRole("button", { name: "공통 값을 따르게 되돌리기" }).click();
+    await expect(claude.locator("input")).toHaveValue("");
+    await expect(page.getByTestId("settings-save-bar")).toHaveCount(0);
+    await editAndSave(page, "context_compact_percent_claude", "70", false);
+    await expect(claude).toContainText("덮어씀");
+    await claude.getByRole("button").first().click();
+    await page.getByRole("button", { name: "공통 값을 따르게 되돌리기" }).click();
+    await page.getByTestId("settings-save-bar").getByRole("button", { name: "저장" }).click();
+    expect(server.writes.map((write) => write.body)).toEqual([{ context_compact_percent_claude: "70" }, { context_compact_percent_claude: "" }]);
+    await page.reload();
+    await row(page, "context_compact_percent_claude").getByRole("button").first().click();
+    await expect(page.getByTestId("settings-inspector")).toContainText("저장된 값공통 값 따름");
+    await expect(row(page, "context_compact_percent_claude")).not.toContainText("덮어씀");
+  });
+
+  test("desktop: with a Claude value in the config file, an emptied field reads as that value", async ({ page }, testInfo) => {
+    test.skip(isPhone(testInfo), "Desktop layout");
+    const server = fakeServer();
+    Object.assign(server.config.find((entry) => entry.key === "context_compact_percent_claude")!, { value: "70", baseline: "70", baseline_source: "yaml" });
+    await mockSettings(page, server);
+    await openSettings(page, "?category=context");
+    await editAndSave(page, "context_compact_percent_claude", "", false);
+    expect(server.writes.map((write) => write.body)).toEqual([{ context_compact_percent_claude: "" }]);
+    await page.reload();
+    await row(page, "context_compact_percent_claude").getByRole("button").first().click();
+    const inspector = page.getByTestId("settings-inspector");
+    await expect(inspector).toContainText("저장된 값설정 파일 기본값 70");
+    await expect(inspector).not.toContainText("공통 값 따름");
+    await expect(row(page, "context_compact_percent_claude")).not.toContainText("덮어씀");
+  });
+
+  test("runtime saves from two open screens keep each other's values", async ({ page, context }, testInfo) => {
+    const server = await mockSettings(page);
+    const second = await context.newPage();
+    await mockShell(second);
+    await mockSettings(second, server);
+    await openSettings(page, "?category=workflow");
+    await openSettings(second, "?category=usage");
+    await editAndSave(page, "maxEntryRetries", "5", isPhone(testInfo));
+    await editAndSave(second, "rateLimitWarningPct", "85", isPhone(testInfo));
+    expect(server.runtime).toMatchObject({ maxEntryRetries: 5, rateLimitWarningPct: 85 });
+    expect(server.explicit).toEqual(["maxEntryRetries", "rateLimitWarningPct"]);
+  });
+
+  test("connections: the old ops URL lands on health, delivery, setup and connectors", async ({ page }, testInfo) => {
+    const server = await mockSettings(page);
+    await page.goto("/ops");
+    await expect(page).toHaveURL(/\/settings\?category=connections$/);
+    await expect(row(page, "health.status")).toContainText("주의");
+    await expect(row(page, "health.providers")).toContainText("연결 끊김: Codex");
+    await expect(row(page, "health.dispatch_outbox")).toContainText("2건");
+    await expect(row(page, "kakao_scheduled_delivery")).toContainText("꺼짐");
+    await expect(page.getByTestId("cluster-nodes-panel")).toBeAttached();
+    await expect(page.getByRole("button", { name: "초기 설정 다시 하기" })).toBeVisible();
+
+    await row(page, "health.status").click();
+    const facts = page.getByTestId("settings-facts-health.status");
+    await expect(facts).toContainText("가동 시간1시간 0분");
+    await expect(facts).toContainText("처리 대기5진행 중 3 · 마무리 중 1");
+    await expect(facts.locator("li", { hasText: "프로바이더 대기열" })).toContainText("6");
+    await expect(facts.getByText("TUI 출력 마무리 대기")).toHaveAttribute("title", "tui_o:boundary_pending:1509350778043895902");
+    await expect(facts).toContainText("업데이트");
+    server.health = null;
+    await facts.getByRole("button", { name: "다시 확인" }).click();
+    await expect(facts.getByRole("alert")).toContainText("최근 확인이 실패해서 마지막으로 받은 값을 보여 줘요.");
+    await expect(facts).toContainText("진행 중 3 · 마무리 중 1");
+    await expect(row(page, "health.status")).toContainText("주의");
+    await shot(page, testInfo, "connections");
+    if (isPhone(testInfo)) await page.keyboard.press("Escape");
+
+    await row(page, "kakao_scheduled_delivery").click();
+    await expect(page.getByText("Kakao 인증 정보를 넣은 뒤 AGENTDESK_KAKAO_ENABLED=true로 켜세요.")).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+  });
+
+  test("system: prompt retention numbers refresh without a reload", async ({ page }) => {
+    const server = await mockSettings(page);
+    await openSettings(page, "?category=system");
+    await row(page, "prompt_manifest_retention").click();
+    const facts = page.getByTestId("settings-facts-prompt_manifest_retention");
+    await expect(facts).toContainText("조각4");
+    server.retention = { ...server.retention, layer_count: 9 };
+    await facts.getByRole("button", { name: "다시 확인" }).click();
+    await expect(facts).toContainText("조각9");
+  });
+
+  test("system: language and default theme save through /api/settings and reach a fresh browser", async ({ page, browser }, testInfo) => {
+    const server = await mockSettings(page);
+    await openSettings(page, "?category=system");
+    await expect(row(page, "language")).toContainText("기본 한국어 · 코드");
+    await pickAndSave(page, "theme", "밝게", isPhone(testInfo));
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    await pickAndSave(page, "language", "English", isPhone(testInfo));
+    await expect(row(page, "language")).toContainText("Language");
+    await expect(page.getByTestId("settings-search-input")).toHaveAttribute("placeholder", "Search by name, key or description");
+    await page.reload();
+    await expect(row(page, "language")).toContainText("Language");
+    expect(server.settings).toMatchObject({ language: "en", theme: "light" });
+
+    // A browser that never picked a theme starts on the saved default.
+    const other = await browser.newContext();
+    const fresh = await other.newPage();
+    await mockShell(fresh);
+    await mockSettings(fresh, server);
+    await fresh.goto("/home");
+    await expect(fresh.locator("html")).toHaveAttribute("data-theme", "light");
+    await other.close();
+  });
+
+  for (const order of [["theme", "language"], ["language", "theme"]] as const) {
+    test(`system: two tabs saving ${order.join(" then ")} keep each other's field`, async ({ page, context, browser }, testInfo) => {
+      const server = await mockSettings(page);
+      const second = await context.newPage();
+      await mockShell(second);
+      await mockSettings(second, server);
+      await openSettings(page, "?category=system");
+      await openSettings(second, "?category=system");
+      const choice = { theme: "밝게", language: "English" };
+      await pickAndSave(page, order[0], choice[order[0]], isPhone(testInfo));
+      await pickAndSave(second, order[1], choice[order[1]], isPhone(testInfo));
+      expect(server.settings).toMatchObject({ language: "en", theme: "light" });
+
+      const other = await browser.newContext({ viewport: page.viewportSize() });
+      const fresh = await other.newPage();
+      await mockShell(fresh);
+      await mockSettings(fresh, server);
+      await openSettings(fresh, "?category=system");
+      await expect(row(fresh, "language")).toContainText("Language");
+      await expect(fresh.locator("html")).toHaveAttribute("data-theme", "light");
+      await other.close();
+    });
+  }
+
+  test.describe("touch", () => {
+    test.use({ hasTouch: true, isMobile: true });
+
+    test("phone: search, text editing and the language and theme pickers use 16px text", async ({ page }, testInfo) => {
+      test.skip(!isPhone(testInfo), "Phone layout");
+      await mockSettings(page);
+      const fontSize = (locator: Locator) => locator.evaluate((node) => getComputedStyle(node).fontSize);
+      const sheet = page.getByTestId("settings-edit-sheet");
+      await openSettings(page, "?category=system");
+      expect(await fontSize(page.getByTestId("settings-search-input"))).toBe("16px");
+      for (const key of ["language", "theme"]) {
+        await row(page, key).click();
+        expect(await fontSize(sheet.getByRole("combobox"))).toBe("16px");
+        await page.keyboard.press("Escape");
+        await expect(sheet).toHaveCount(0);
+      }
+      await openSettings(page, "?category=alerts");
+      await row(page, "agent_quality_monitoring_channel_id").click();
+      expect(await fontSize(sheet.locator("input"))).toBe("16px");
+    });
+
+    test("phone: differing rows, category drill-down and a sheet that saves one row", async ({ page }, testInfo) => {
+      test.skip(!isPhone(testInfo), "Phone layout");
+      const server = await mockSettings(page);
+      await openSettings(page);
+      const differing = page.getByTestId("settings-differing");
+      await expect(differing).toContainText("기본값과 다름3");
+      await expect(differing.getByTestId("setting-row-max_review_rounds")).toContainText("30 · 기본 3 · 코드");
+      const heights = await page.getByRole("navigation", { name: "분류" }).getByRole("button").evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().height));
+      expect(Math.min(...heights)).toBeGreaterThanOrEqual(44);
+
+      await page.getByTestId("settings-category-review").click();
+      await expect(page.getByTestId("settings-phone-title")).toHaveText("리뷰");
+      await row(page, "max_review_rounds").click();
+      const sheet = page.getByTestId("settings-edit-sheet");
+      await expect(sheet).toContainText("max_review_rounds");
+      await sheet.getByRole("button", { name: "기본값 3" }).click();
+      await sheet.getByRole("button", { name: "1 늘리기" }).click();
+      for (const name of ["1 줄이기", "1 늘리기", "4로 저장"]) {
+        const box = (await sheet.getByRole("button", { name }).boundingBox())!;
+        expect(Math.min(box.width, box.height)).toBeGreaterThanOrEqual(48);
+      }
+      await shot(page, testInfo, "sheet");
+      await sheet.getByRole("button", { name: "4로 저장" }).click();
+      await expect(sheet).toHaveCount(0);
+      expect(server.writes[0]?.body).toEqual({ max_review_rounds: "4" });
+      await page.getByRole("button", { name: "분류 목록으로" }).click();
+      await expect(page.getByTestId("settings-differing")).toBeVisible();
+      await expectNoHorizontalOverflow(page);
+    });
+
+    test("phone: a sheet locks while its save is in flight, keeps the value on failure and closes on success", async ({ page }, testInfo) => {
+      test.skip(!isPhone(testInfo), "Phone layout");
+      const server = await mockSettings(page);
+      let release = () => {};
+      const hold = () => { server.gate = new Promise((resolve) => { release = resolve; }); };
+      const sheet = page.getByTestId("settings-edit-sheet");
+      const input = sheet.locator("input");
+      const close = page.getByRole("dialog").getByRole("button", { name: "Close" });
+      await openSettings(page, "?category=workflow");
+      await row(page, "maxEntryRetries").click();
+      await input.fill("5");
+
+      hold();
+      server.failNextWrite = true;
+      await sheet.getByRole("button", { name: "5로 저장" }).click();
+      await expect.poll(() => server.writes.length).toBe(1);
+      for (const control of [input, sheet.getByRole("button", { name: "1 줄이기" }), sheet.getByRole("button", { name: "1 늘리기" }), sheet.getByRole("button", { name: /^기본값/ })]) {
+        await expect(control).toBeDisabled();
+      }
+      await expect(close).toHaveCSS("pointer-events", "none");
+      await shot(page, testInfo, "sheet-saving");
+      await page.keyboard.press("Escape");
+      await close.dispatchEvent("click");
+      await expect(sheet).toBeVisible();
+      await expect(input).toHaveValue("5");
+      release();
+      await expect(input).toBeEnabled();
+      await expect(input).toHaveValue("5");
+      expect(server.runtime.maxEntryRetries).toBeUndefined();
+
+      hold();
+      await sheet.getByRole("button", { name: "5로 저장" }).click();
+      await expect.poll(() => server.writes.length).toBe(2);
+      await expect(input).toBeDisabled();
+      release();
+      await expect(sheet).toHaveCount(0);
+      expect(server.runtime.maxEntryRetries).toBe(5);
+      await row(page, "maxEntryRetries").click();
+      await expect(input).toHaveValue("5");
+      await page.keyboard.press("Escape");
+
+      // The language and theme pickers lock the same way.
+      await openSettings(page, "?category=system");
+      await row(page, "theme").click();
+      await sheet.getByRole("combobox").click();
+      await page.getByRole("option", { name: "밝게" }).click();
+      hold();
+      await sheet.getByRole("button", { name: "저장" }).click();
+      await expect.poll(() => server.writes.length).toBe(3);
+      await expect(sheet.getByRole("combobox")).toBeDisabled();
+      release();
+      await expect(sheet).toHaveCount(0);
+      expect(server.settings).toMatchObject({ theme: "light" });
+    });
+  });
+
+  test("usage keeps the AI account bars next to their thresholds", async ({ page }) => {
+    await mockSettings(page);
+    await openSettings(page, "?category=usage");
+    await expect(row(page, "rateLimitWarningPct")).toContainText("사용량 주의 표시 (%)");
+    await expect(page.getByTestId("settings-providers-panel").getByText("7일 한도 · Fable 모델")).toBeVisible();
+    await expect(page.getByTestId("settings-provider-usage-bar").first()).toHaveAttribute("data-level", "danger");
+  });
+
+  test("a failed source shows one alert instead of editable defaults", async ({ page }) => {
     await mockSettings(page);
     await page.route(/\/api\/settings\/runtime-config$/, (route) => route.fulfill({ status: 503, json: { error: "unavailable" } }));
-    await openSettings(page, "workflow");
-    const panel = page.locator("#settings-panel-content");
-    await expect(panel.getByRole("alert")).toHaveCount(1);
-    await expect(panel.getByRole("alert")).toContainText("일부 설정을 불러오지 못했어요");
-    await expect(panel.getByText("작업 재시도 횟수", { exact: true })).toHaveCount(0);
-    await expect(panel.getByText("접수 후 대기 경고 (분)", { exact: true })).toBeVisible();
-    await tabs(page).nth(0).click();
-    await expect(panel.getByRole("alert")).toHaveCount(0);
-  });
-
-  test("connections shows setup status, channel names and honest connector counts", async ({ page }, testInfo) => {
-    await mockSettings(page);
-    await openSettings(page, "connections");
-
-    await expect(page.getByTestId("settings-connection-bot")).toContainText("연결됨");
-    await expect(page.getByTestId("settings-connection-server")).toContainText("연결됨");
-    await expect(page.getByTestId("settings-connection-owner")).toContainText("설정됨");
-    await expect(page.getByTestId("settings-connection-ai")).toContainText("Claude, Codex 사용 중");
-    await expect(page.getByTestId("settings-channel-name-agent_quality_monitoring_channel_id")).toHaveText("#adk-alerts");
-    await expect(page.getByTestId("settings-channel-name-deadlock_manager_channel_id")).toContainText("아직 채널을 정하지 않았어요");
-    await page.getByLabel("막힘 감지 알림 채널 ID").fill("12ab");
-    await expect(page.getByTestId("settings-channel-name-deadlock_manager_channel_id")).toContainText("17~20자리 숫자");
-
-    await expect(page.getByTestId("settings-connectors-summary")).toHaveText("3개 중 2개 준비됐어요.");
-    await expect(page.getByTestId("settings-connector-kakao_scheduled_delivery")).toContainText("Kakao 메시지 보내기");
-    await expect(page.getByTestId("settings-connector-kakao_scheduled_delivery")).toContainText("꺼져 있어요.");
-    await page.getByTestId("settings-connector-kakao_scheduled_delivery").getByText("설정 방법 보기").click();
-    await expect(page.getByTestId("settings-connector-steps-kakao_scheduled_delivery")).toHaveText("Kakao 인증 정보를 넣은 뒤 AGENTDESK_KAKAO_ENABLED=true로 켜세요.");
-    await expect(page.getByTestId("settings-tab-attention-connections")).toHaveCount(0);
-    await expect(page.getByText("Obsidian agent prompts")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "초기 설정 다시 하기" })).toBeVisible();
-    await expectNoHorizontalOverflow(page);
-    await shot(page, testInfo, "connections");
-  });
-
-  test("connections tab badge counts setup that still needs attention", async ({ page }) => {
-    await mockSettings(page, { onboarding: { ...ONBOARDING_STATUS, owner_id: null } });
-    await openSettings(page, "general");
-    await expect(page.getByTestId("settings-tab-attention-connections")).toHaveText("확인 1");
-    await tabs(page).nth(3).click();
-    await expect(page.getByTestId("settings-connection-owner")).toHaveAttribute("data-tone", "warn");
-  });
-
-  test("AI accounts explains usage windows in plain Korean", async ({ page }, testInfo) => {
-    await mockSettings(page);
-    await openSettings(page, "ai");
-
-    const providers = page.getByTestId("settings-providers-panel");
-    await expect(providers.getByText("Claude", { exact: true })).toBeVisible();
-    await expect(providers.getByText("5시간 한도").first()).toBeVisible();
-    await expect(providers.getByText("7일 한도 · Fable 모델")).toBeVisible();
-    await expect(providers.getByText("Qwen 사용량은 아직 볼 수 없어요.")).toBeVisible();
-    await expect(providers.getByText(/telemetry|7d Fable|extra/)).toHaveCount(0);
-    await expect(page.getByTestId("settings-provider-account-work").getByTestId("settings-provider-usage-bar")).toHaveAttribute("data-level", "danger");
-    await expect(page.getByText("대화 요약 시작 시점 (%)", { exact: true })).toBeVisible();
-    await expect(page.getByText("사용량 주의 표시 (%)", { exact: true })).toBeVisible();
-
-    await expect(page.getByText("사용량 정보 유효 시간 (초)")).toHaveCount(0);
-    await page.getByRole("button", { name: "고급 설정 보기" }).click();
-    await expect(page.getByText("사용량 정보 유효 시간 (초)")).toBeVisible();
-
-    await shotOf(page, page.getByTestId("settings-provider-account-work"), testInfo, "ai-usage");
-    await page.getByRole("button", { name: "work 계정 메뉴" }).click();
-    await page.getByRole("menuitem", { name: "연결 해제" }).click();
-    await expect(page.getByRole("dialog")).toContainText("Claude “work” 계정 연결을 해제할까요?");
-    await page.getByRole("dialog").getByRole("button", { name: "취소" }).click();
-    await expectNoHorizontalOverflow(page);
-    await shot(page, testInfo, "ai");
-  });
-
-  test("machines show the server port and flag high usage", async ({ page }, testInfo) => {
-    await mockSettings(page);
-    await openSettings(page, "machine");
-
-    await expect(page.getByTestId("setting-row-server_port")).toContainText("8791");
-    await expect(page.getByTestId("setting-row-server_port")).toContainText("읽기 전용");
-    const hub = page.getByTestId("machine-node-hub-mac");
-    await expect(hub.getByRole("meter", { name: "CPU 사용률" })).toHaveAttribute("data-level", "high");
-    await expect(hub.getByRole("meter", { name: "메모리 사용률" })).toHaveAttribute("data-level", "high");
-    await expect(page.getByTestId("machine-node-runner-mac").getByRole("meter", { name: "CPU 사용률" })).toHaveAttribute("data-level", "normal");
-    await expect(page.getByText(/사용 가능|바로 쓸 수 있는 메모리/)).toHaveCount(0);
-    await expect(page.getByTestId("settings-tab-attention-machine")).toHaveCount(0);
-    await expectNoHorizontalOverflow(page);
-    await shot(page, testInfo, "machine");
-  });
-
-  test("search narrows the tabs and rows", async ({ page }, testInfo) => {
-    await mockSettings(page);
-    await openSettings(page, "workflow");
-    await page.getByTestId("settings-search-input").fill("요약");
-    await expect(tabs(page)).toHaveText(["AI 계정"]);
-    await expect(page.locator("#settings-panel-content")).toContainText("이 탭에는 “요약” 검색 결과가 없어요.");
-    await tabs(page).first().click();
-    await expect(page.getByText("대화 요약 시작 시점 (%)", { exact: true })).toBeVisible();
-    await expect(page.getByText("사용량 주의 표시 (%)", { exact: true })).toHaveCount(0);
-    await expect(page.getByTestId("settings-search-summary")).toContainText("4개 항목이 일치해요");
-    await shot(page, testInfo, "search");
-    await page.getByRole("button", { name: "검색 지우기" }).click();
-    await expect(tabs(page)).toHaveCount(5);
+    await openSettings(page, "?category=workflow");
+    await expect(page.getByRole("alert")).toContainText("일부 설정을 불러오지 못했어요");
+    await expect(row(page, "maxRetries")).toHaveCount(0);
+    await expect(row(page, "requested_timeout_min")).toBeVisible();
   });
 });

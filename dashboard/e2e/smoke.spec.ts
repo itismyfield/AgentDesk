@@ -4,7 +4,7 @@ const ROUTES = [
   { path: "/home", label: /홈|Home/ },
   { path: "/campaigns", label: /캠페인|Campaigns/ },
   { path: "/routines", label: /루틴|Routines/ },
-  { path: "/ops", label: /운영|Ops/ },
+  { path: "/audit", label: /감사|Audit/ },
   { path: "/stats", label: /통계|Stats/ },
   { path: "/agents", label: /에이전트|Agents/ },
   { path: "/settings", label: /설정|Settings/ },
@@ -16,6 +16,8 @@ const LEGACY_REDIRECTS = [
   { path: "/meetings", to: /\/agents$/ },
   { path: "/achievements", to: /\/stats$/ },
   { path: "/voice", to: /\/home$/ },
+  { path: "/ops", to: /\/settings\?category=connections$/ },
+  { path: "/control", to: /\/settings\?category=connections$/ },
 ];
 
 // Mirrors HOME_DEFAULT_WIDGETS in src/app/HomeOverviewConfig.ts.
@@ -1359,7 +1361,7 @@ test.describe("Dashboard smoke tests", () => {
     }));
     await page.goto("/home");
 
-    await page.getByLabel(/검색 열기|Open search/).click();
+    await page.getByLabel(/^찾기$|^Search$/).click();
     const palette = page.getByRole("dialog", {
       name: /명령 팔레트|Command Palette/,
     });
@@ -1373,7 +1375,7 @@ test.describe("Dashboard smoke tests", () => {
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/stats$/);
 
-    await page.getByLabel(/검색 열기|Open search/).click();
+    await page.getByLabel(/^찾기$|^Search$/).click();
     await expect(palette).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(palette).toHaveCount(0);
@@ -1386,8 +1388,26 @@ test.describe("Dashboard smoke tests", () => {
     const sidebar = page.getByTestId("app-sidebar-nav");
     await expect(sidebar).toBeVisible();
     const box = await sidebar.boundingBox();
-    expect(box?.width).toBeGreaterThan(210);
-    expect(box?.width).toBeLessThan(225);
+    expect(box?.width).toBeGreaterThan(228);
+    expect(box?.width).toBeLessThan(236);
+    // v3 rail order: settings sits below a divider and ops is off the menu.
+    await expect(sidebar.getByRole("link")).toHaveText([/홈|Home/, /캠페인|Campaigns/, /에이전트|Agents/, /루틴|Routines/, /감사|Audit/, /통계|Stats/, /설정|Settings/]);
+    await expect(sidebar.getByRole("link", { name: /^홈$|^Home$/ })).toHaveAttribute("aria-current", "page");
+  });
+
+  test("desktop: a short window keeps the rail status in view and the menu scrollable", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
+    await mockOpsHealthApi(page, () => MOCK_OPS_HEALTH_BASE);
+    await page.setViewportSize({ width: 950, height: 345 });
+    await page.goto("/home");
+    const sidebar = page.getByTestId("app-sidebar-nav");
+    const menu = page.getByTestId("app-sidebar-menu");
+    expect(await menu.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
+    const status = await page.getByTestId("sidebar-connection-status").boundingBox();
+    expect(status!.y + status!.height).toBeLessThanOrEqual(345);
+    await sidebar.getByRole("link", { name: /^설정$|^Settings$/ }).click();
+    await expect(page).toHaveURL(/\/settings$/);
+    await expect(page.getByTestId("settings-page")).toBeVisible();
   });
 
   test("responsive: 900px switches from mobile tab bar to desktop sidebar", async ({ page }, testInfo) => {
@@ -1413,10 +1433,10 @@ test.describe("Dashboard smoke tests", () => {
     const topbar = page.getByTestId("topbar");
     await expect(bottomNav).toBeVisible();
     await expect(bottomNav.locator("button")).toHaveCount(5);
-    for (const id of ["home", "campaigns", "routines", "ops"]) {
+    for (const id of ["home", "campaigns", "agents", "audit"]) {
       await expect(page.getByTestId(`app-mobile-tab-${id}`)).toBeVisible();
     }
-    await expect(page.getByTestId("app-mobile-more-button")).toContainText(/더보기|More/);
+    await expect(page.getByTestId("app-mobile-more-button")).toContainText(/더 보기|More/);
     await expect(page.getByTestId("app-mobile-tab-home")).toHaveAttribute("aria-current", "page");
 
     const tabMetrics = await bottomNav.locator("button").evaluateAll((buttons) =>
@@ -1452,13 +1472,13 @@ test.describe("Dashboard smoke tests", () => {
 
     const moreMenu = page.getByTestId("app-mobile-more-menu");
     await expect(moreMenu).toBeVisible();
-    await expect(moreMenu.getByRole("button", { name: /더보기 닫기|Close/ })).toBeFocused();
-    for (const id of ["stats", "agents", "settings"]) {
+    await expect(moreMenu.getByRole("button", { name: /더 보기 닫기|Close/ })).toBeFocused();
+    for (const id of ["routines", "stats", "settings"]) {
       await expect(page.getByTestId(`app-mobile-more-${id}`)).toBeVisible();
     }
     await expect(page.getByTestId("app-mobile-more-theme")).toBeVisible();
     await expect(page.getByTestId("app-mobile-more-tweaks")).toBeVisible();
-    await expect(moreMenu.getByRole("button", { name: /회의|Meetings|업적|Achievements|음성|Voice|칸반|Kanban/ })).toHaveCount(0);
+    await expect(moreMenu.getByRole("button", { name: /회의|Meetings|업적|Achievements|음성|Voice|칸반|Kanban|운영|Ops/ })).toHaveCount(0);
 
     const moreMenuBackdropZIndex = await moreMenu.evaluate((element) =>
       Number(window.getComputedStyle(element.parentElement as HTMLElement).zIndex),
@@ -1481,6 +1501,23 @@ test.describe("Dashboard smoke tests", () => {
     await page.keyboard.press("Escape");
     await expect(moreMenu).toHaveCount(0);
     await expect(page.getByTestId("app-mobile-more-button")).toBeFocused();
+  });
+
+  test("responsive: the More sheet closes on back navigation and marks the current page", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+    await page.goto("/home");
+    await page.getByTestId("app-mobile-tab-audit").click();
+    await expect(page).toHaveURL(/\/audit$/);
+    await page.getByTestId("app-mobile-more-button").click();
+    await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(/\/home$/);
+    await expect(page.getByTestId("app-mobile-more-menu")).toHaveCount(0);
+
+    await page.goto("/routines");
+    await page.getByTestId("app-mobile-more-button").click();
+    await expect(page.getByTestId("app-mobile-more-routines")).toHaveAttribute("aria-current", "page");
+    await expect(page.getByTestId("app-mobile-more-stats")).not.toHaveAttribute("aria-current", "page");
   });
 
   test("responsive: mobile topbar is a single row with title and search", async ({ page }, testInfo) => {
@@ -1532,14 +1569,14 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/home");
     await expectNoHorizontalOverflow(page);
 
-    for (const id of ["campaigns", "routines", "ops"]) {
+    for (const id of ["campaigns", "agents", "audit"]) {
       await page.getByTestId(`app-mobile-tab-${id}`).click();
       await expect(page).toHaveURL(new RegExp(`/${id}$`));
       await expect(page.getByTestId(`app-mobile-tab-${id}`)).toHaveAttribute("aria-current", "page");
       await expectNoHorizontalOverflow(page);
     }
 
-    for (const id of ["stats", "agents", "settings"]) {
+    for (const id of ["routines", "stats", "settings"]) {
       await page.getByTestId("app-mobile-more-button").click();
       await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible({ timeout: 15000 });
       await page.getByTestId(`app-mobile-more-${id}`).click();
@@ -1652,9 +1689,9 @@ test.describe("Dashboard smoke tests", () => {
 
     await expect(page.getByTestId("stats-page")).toBeVisible({ timeout: 15000 });
     await expect(page.getByTestId("stats-range-controls")).toBeVisible();
-    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-pressed", "false");
-    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-checked", "false");
+    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-checked", "false");
 
     await expect(page.getByTestId("stats-summary-total-tokens")).toBeVisible();
     await expect(page.getByTestId("stats-summary-api-spend")).toBeVisible();
@@ -1670,12 +1707,12 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("stats-claude-accounts").getByRole("button", { name: /^(Switch|Active)$/ })).toHaveCount(0);
 
     await page.getByTestId("stats-range-7d").click();
-    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByTestId("stats-range-30d")).toHaveAttribute("aria-checked", "false");
 
     await page.getByTestId("stats-range-90d").click();
-    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByTestId("stats-range-90d")).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-checked", "false");
   });
 
   test("stats: weekly chart fits and longer series support horizontal keyboard navigation", async ({ page }, testInfo) => {
@@ -1762,7 +1799,7 @@ test.describe("Dashboard smoke tests", () => {
     await expectNoHorizontalOverflow(page);
   });
 
-  test("routines: page lists jobs chronologically and the detail leads with thread and result", async ({ page }) => {
+  test("routines: page lists jobs chronologically and the detail leads with thread and result", async ({ page }, testInfo) => {
     await page.goto("/routines");
 
     await expect(page.getByTestId("routines-page")).toBeVisible({ timeout: 15000 });
@@ -1784,7 +1821,8 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("routine-row-routine-soon")).toContainText("오부장 프로필 점검");
 
     await page.getByTestId("routine-row-routine-late").click();
-    const drawer = page.getByRole("dialog");
+    // Wide screens show the detail beside the list; below 900px it opens as a sheet.
+    const drawer = testInfo.project.name === "desktop" ? page.getByTestId("routine-detail-pane") : page.getByRole("dialog");
     const threadLink = drawer.getByTestId("routine-thread-link");
     await expect(threadLink).toHaveAttribute("href", "https://discord.com/channels/1469870512812462284/1505086366654926908");
     await expect(drawer.getByTestId("routine-last-result")).toContainText("Profile probe failed");
@@ -1820,9 +1858,12 @@ test.describe("Dashboard smoke tests", () => {
     });
     await page.goto("/agents");
     // Phones always use the list; the grid/list switch exists on desktop only.
-    if (testInfo.project.name === "desktop") await page.getByRole("button", { name: /리스트|List/ }).click();
+    if (testInfo.project.name === "desktop") await page.getByRole("radio", { name: /리스트|List/ }).click();
     await page.getByTestId("agents-card-agent-ada").click();
-    const dialog = page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
+    // Desktop shows the detail beside the list; phones open it as a full-screen dialog.
+    const dialog = testInfo.project.name === "desktop"
+      ? page.getByRole("region", { name: /에이전트 상세|Agent details/ })
+      : page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
     const device = dialog.getByLabel(/우선 실행 장비|Preferred execution device/);
     const save = dialog.getByRole("button", { name: /^(저장|Save)$/ });
     await expect(device).toBeEnabled();
@@ -1834,7 +1875,7 @@ test.describe("Dashboard smoke tests", () => {
     await save.click();
     await expect(dialog.getByRole("status")).toContainText(/새 세션부터|new sessions/);
     expect(writes).toEqual([{ default_node_id: "windows-1" }]);
-    await page.getByRole("button", { name: /닫기|Close/ }).click();
+    await page.getByRole("button", { name: /닫기|Close|목록으로|Back to list/ }).click();
     await page.getByTestId("agents-card-agent-ada").click();
     await expect(device).toHaveValue("windows-1");
     await expect(save).toBeDisabled();
@@ -1862,11 +1903,11 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("agents-view-grid")).toBeVisible();
     await expect(page.getByRole("img", { name: /아다 대시보드|Ada Dashboard/ }).first()).toBeVisible();
 
-    await page.getByRole("button", { name: /리스트|List/ }).click();
+    await page.getByRole("radio", { name: /리스트|List/ }).click();
     await expect(page.getByTestId("agents-view-list")).toBeVisible();
 
     await page.getByTestId("agents-card-agent-ada").click();
-    const agentDetailDialog = page.getByRole("dialog", { name: /에이전트 상세|Agent details/ });
+    const agentDetailDialog = page.getByRole("region", { name: /에이전트 상세|Agent details/ });
     await expect(agentDetailDialog).toBeVisible();
     await expect(agentDetailDialog).toContainText("Ada Dashboard");
     await expect(agentDetailDialog.getByText(/Lv\.\s?\d|XP/)).toHaveCount(0);
@@ -1894,63 +1935,53 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("agents-tab-button-skills")).toHaveAttribute("aria-selected", "true");
   });
 
-  test("ops: route surfaces signal cards and bottlenecks", async ({ page }) => {
+  test("connections: server status carries the old ops signals and bottlenecks", async ({ page }, testInfo) => {
     await mockOpsHealthApi(page, () => ({
       ...MOCK_OPS_HEALTH_BASE,
       degraded_reasons: [...MOCK_OPS_HEALTH_BASE.degraded_reasons, "tui_o:boundary_pending:1509350778043895902"],
     }));
-    await page.goto("/ops");
+    await page.goto("/settings?category=connections");
 
-    await expect(page.getByTestId("ops-page")).toBeVisible();
-    await expect(page.getByTestId("ops-signal-grid")).toBeVisible();
-    await expect(page.getByTestId("ops-signal-deferred_hooks")).toBeVisible();
-    await expect(page.getByTestId("ops-signal-outbox_age")).toBeVisible();
-    await expect(page.getByTestId("ops-signal-pending_queue")).toBeVisible();
-    await expect(page.getByTestId("ops-signal-active_watchers")).toBeVisible();
-    await expect(page.getByText("복구 4분 0초", { exact: true })).toBeVisible();
-    await expect(page.getByText("가동 4시간 0분", { exact: true })).toBeVisible();
-
-    await expect(page.getByTestId("ops-bottlenecks")).toBeVisible();
-    await expect(page.getByTestId("ops-bottleneck-outbox_age")).toBeVisible();
-    await expect(page.getByTestId("ops-bottleneck-provider_disconnects")).toBeVisible();
-
-    await expect(page.getByTestId("ops-connection-panel")).toBeVisible();
-    await expect(page.getByTestId("ops-websocket-card")).toBeVisible();
-    await expect(page.getByTestId("ops-dispatch-outbox-card")).toBeVisible();
-    await expect(page.getByTestId("ops-providers-card")).toBeVisible();
-    await expect(page.getByTestId("ops-control-handoff")).toBeVisible();
-    await expect(page.getByTestId("ops-handoff-agents")).toHaveAttribute("href", "/agents");
+    await expect(page.getByTestId("setting-row-health.status")).toContainText("주의");
+    await expect(page.getByTestId("setting-row-health.dispatch_outbox")).toContainText("7건");
+    await page.getByTestId("setting-row-health.status").click();
+    const facts = page.getByTestId("settings-facts-health.status");
+    for (const label of ["후처리 대기", "전달 지연", "처리 대기", "감시 중"]) await expect(facts).toContainText(label);
+    await expect(facts).toContainText("복구 시간4분 0초");
+    await expect(facts).toContainText("가동 시간4시간 0분");
+    await expect(facts.getByText("프로바이더 연결 끊김")).toBeVisible();
 
     // Internal keys become readable titles; the raw key stays as a tooltip only.
     const rawKey = "tui_o:boundary_pending:1509350778043895902";
-    const reasonRow = page.getByTestId(`ops-bottleneck-${rawKey}`);
-    await expect(reasonRow.getByRole("heading", { name: "TUI 출력 마무리 대기" })).toHaveAttribute("title", rawKey);
+    await expect(facts.getByText("TUI 출력 마무리 대기")).toHaveAttribute("title", rawKey);
     await expect(page.getByText(/Tui O:|Boundary Pending/)).toHaveCount(0);
     for (const english of [/^LIVE$/, /uptime/, /boot snapshot/, /provider 추적/, /회의 타임라인/]) {
       await expect(page.getByText(english)).toHaveCount(0);
     }
+    if (testInfo.project.name === "mobile") await page.keyboard.press("Escape");
+    await expectNoHorizontalOverflow(page);
   });
 
-  test("ops: a tailnet device without detail access sees the summary, not zeros or error toasts", async ({ page }) => {
+  test("connections: a tailnet device without detail access sees the summary, not zeros or error toasts", async ({ page }) => {
     await mockOpsHealthApi(page, () => ({ status: "healthy", version: "2.4.1", db: true }));
     let detailCalls = 0;
     await page.route(/\/api\/health\/detail$/, (route) => {
       detailCalls += 1;
       return route.fulfill({ status: 403, json: { error: "auth_token required for non-loopback host" } });
     });
-    await page.goto("/ops");
+    await page.goto("/settings?category=connections");
 
-    await expect(page.getByTestId("ops-public-only-note")).toContainText("서버가 도는 맥");
-    await expect(page.getByTestId("ops-providers-card")).toContainText("—");
-    await expect(page.getByTestId("ops-dispatch-outbox-card")).toContainText("—");
-    await page.goto("/settings?settingsPanel=connections");
-    await expect(page.getByText("이 기기에서는 확인할 수 없어요")).toBeVisible();
+    await expect(page.getByTestId("setting-row-health.providers")).toContainText("이 기기에서는 확인할 수 없어요");
+    await expect(page.getByTestId("setting-row-health.dispatch_outbox")).toContainText("—");
+    await page.getByTestId("setting-row-health.status").click();
+    await expect(page.getByTestId("settings-facts-health.status")).toContainText("서버가 도는 맥");
     await expect(page.getByText(/API 오류/)).toHaveCount(0);
     // One probe per page load; polling reuses the public summary after the 403.
-    expect(detailCalls).toBe(2);
+    await page.waitForTimeout(6_000);
+    expect(detailCalls).toBe(1);
   });
 
-  test("ops: cluster controls distinguish readiness, bound output and stale state", async ({ page }, testInfo) => {
+  test("connections: cluster controls distinguish readiness, bound output and stale state", async ({ page }, testInfo) => {
     await page.route(/\/api\/settings$/, route => route.fulfill({ json: {
       language: testInfo.project.name === "desktop" ? "en" : "ko", theme: "dark",
     } }));
@@ -1999,7 +2030,7 @@ test.describe("Dashboard smoke tests", () => {
       stopCount++;
       await route.fulfill({ json: { ok: true } });
     });
-    await page.goto("/ops");
+    await page.goto("/settings?category=connections");
     const panel = page.getByTestId("cluster-nodes-panel");
     await expect(panel.getByText("Windows / x86_64", { exact: false })).toBeVisible();
     await expect(panel.getByText(/(?:실행 노드.*실행 전용|Runner.*Execution only)/)).toBeVisible();
@@ -2027,63 +2058,29 @@ test.describe("Dashboard smoke tests", () => {
     await expect(panel.getByRole("button", { name: /실행 중지|Stop execution/, exact: true })).toHaveCount(0);
   });
 
-  test("ops: ws events resync the health snapshot", async ({ page }) => {
-    let currentHealth = {
+  test("connections: server status refreshes while the category is open", async ({ page }) => {
+    let currentHealth: Record<string, unknown> = {
       ...MOCK_OPS_HEALTH_BASE,
       status: "healthy",
-      deferred_hooks: 0,
-      queue_depth: 0,
-      watcher_count: 2,
-      recovery_duration: 30,
-      outbox_age: 12,
       degraded_reasons: [],
-      dispatch_outbox: {
-        pending: 1,
-        retrying: 0,
-        permanent_failures: 0,
-        oldest_pending_age: 12,
-      },
-      providers: [
-        {
-          name: "codex",
-          connected: true,
-          active_turns: 1,
-          queue_depth: 0,
-          sessions: 2,
-          restart_pending: false,
-          last_turn_at: "2026-04-20T03:20:00Z",
-        },
-      ],
+      dispatch_outbox: { pending: 1, retrying: 0, permanent_failures: 0, oldest_pending_age: 12 },
     };
-
     await mockOpsHealthApi(page, () => currentHealth);
-    await page.goto("/ops");
+    await page.goto("/settings?category=connections");
 
-    const deferredHooksCard = page.getByTestId("ops-signal-deferred_hooks");
-    await expect(deferredHooksCard).toContainText("0");
-    await expect(page.getByTestId("ops-bottlenecks-empty")).toBeVisible();
+    const status = page.getByTestId("setting-row-health.status");
+    await expect(status).toContainText("정상");
+    await expect(page.getByTestId("setting-row-health.dispatch_outbox")).toContainText("1건");
 
     currentHealth = {
       ...currentHealth,
       status: "degraded",
-      deferred_hooks: 22,
-      queue_depth: 4,
-      outbox_age: 45,
       degraded_reasons: ["dispatch_outbox_oldest_pending_age:45"],
-      dispatch_outbox: {
-        pending: 4,
-        retrying: 1,
-        permanent_failures: 0,
-        oldest_pending_age: 45,
-      },
+      dispatch_outbox: { pending: 4, retrying: 1, permanent_failures: 0, oldest_pending_age: 45 },
     };
-
-    await page.evaluate(() => {
-      window.dispatchEvent(new CustomEvent("pcd-ws-event", { detail: { type: "health.updated" } }));
-    });
-
-    await expect(deferredHooksCard).toContainText("22", { timeout: 5000 });
-    await expect(page.getByTestId("ops-bottleneck-outbox_age")).toBeVisible();
+    // The ops page waited for WS events; the open connections category polls instead.
+    await expect(status).toContainText("주의", { timeout: 10_000 });
+    await expect(page.getByTestId("setting-row-health.dispatch_outbox")).toContainText("4건");
   });
 
   test("settings route is reachable from the desktop shell", async ({ page }, testInfo) => {
@@ -2092,38 +2089,87 @@ test.describe("Dashboard smoke tests", () => {
 
     await page
       .getByTestId("app-sidebar-nav")
-      .getByRole("button", { name: /^설정$|^Settings$/ })
+      .getByRole("link", { name: /^설정$|^Settings$/ })
       .click();
     await expect(page).toHaveURL(/\/settings(\?.*)?$/);
     await expect(page.getByTestId("topbar")).toContainText(/설정|Settings/);
+    // Ops left the menu; its status now lives in the connections category.
+    await page.getByTestId("settings-category-connections").click();
+    await expect(page).toHaveURL(/\/settings\?category=connections$/);
+    await expect(page.getByTestId("setting-row-health.status")).toBeVisible();
   });
 
-  test("settings: search feedback and user-facing copy stay stable", async ({ page }) => {
-    await page.route(/\/api\/settings\/runtime-config$/, route => route.fulfill({ json: { current: {}, defaults: {} } }));
+  test("bootstrap: the loading screen shows text without emoji", async ({ page }) => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    await page.route(/\/api\/settings$/, async (route) => { await gate; await route.fallback(); });
+    await page.goto("/home");
+    await expect(page.getByTestId("bootstrap-loading")).toHaveText(/AgentDesk 대시보드 로딩 중|Loading AgentDesk Dashboard/);
+    await expect(page.locator("body")).not.toContainText("🐾");
+    release();
+    await expect(page.getByTestId("topbar")).toBeVisible();
+  });
+
+  test("command palette: departments get an icon instead of their emoji and ops is not offered", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "mobile", "Desktop keyboard shortcut coverage");
+    await page.route(/\/api\/departments(?:\?.*)?$/, (route) => route.fulfill({
+      json: { departments: [{ ...MOCK_AGENT_DEPARTMENTS[0], icon: "📁" }] },
+    }));
+    await page.goto("/home");
+    await expect(page.getByTestId("topbar")).toBeVisible();
+    await page.keyboard.press("ControlOrMeta+k");
+    const palette = page.getByRole("dialog", { name: /명령 팔레트|Command Palette/ });
+    await expect(palette.getByRole("option", { name: /^(통계|Stats)\s*(이동|Go)$/ })).toHaveCount(1);
+    await expect(palette.getByRole("option", { name: /^(운영|Ops)\s*(이동|Go)$/ })).toHaveCount(0);
+
+    await palette.getByPlaceholder(/검색|Search/).fill("플랫폼");
+    const department = palette.getByRole("option", { name: /플랫폼\s*(부서|Dept)$/ });
+    await expect(department).toBeVisible();
+    await expect(palette).not.toContainText("📁");
+    await department.click();
+    await expect(page).toHaveURL(/\/agents$/);
+  });
+
+  test("ops: the /control bookmark lands on the settings connections category", async ({ page }) => {
+    await mockOpsHealthApi(page, () => MOCK_OPS_HEALTH_BASE);
+    await page.goto("/control");
+    await expect(page).toHaveURL(/\/settings\?category=connections$/);
+    await expect(page.getByTestId("setting-row-health.status")).toBeVisible();
+  });
+
+  test("audit: both tabs show the pending-API empty state", async ({ page }) => {
+    await page.goto("/audit");
+    await expect(page.getByTestId("audit-panel-prompts")).toContainText("#8249");
+    await page.getByRole("tab", { name: /메멘토 앵커|Memento anchors/ }).click();
+    await expect(page).toHaveURL(/\/audit\?tab=anchors$/);
+    await expect(page.getByTestId("audit-panel-anchors")).toContainText("#8249");
+    await expectNoHorizontalOverflow(page);
+  });
+
+  test("settings: search narrows the catalog and the copy stays plain", async ({ page }, testInfo) => {
+    const runtime = { maxRetries: 3, maxEntryRetries: 3 };
+    await page.route(/\/api\/settings\/runtime-config$/, route => route.fulfill({ json: { current: runtime, defaults: runtime } }));
     await page.goto("/settings?settingsPanel=runtime");
 
     await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
-    await expect(page.locator("#settings-tab-workflow")).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByText("작업 재시도 횟수", { exact: true })).toBeVisible();
+    if (testInfo.project.name === "desktop") await expect(page.getByTestId("settings-category-workflow")).toHaveAttribute("aria-current", "true");
+    else await expect(page.getByTestId("settings-phone-title")).toHaveText("작업 흐름");
+    await expect(page.getByTestId("setting-row-maxRetries")).toContainText("작업 재시도 횟수");
     await expect(page.getByText(/용어 빠른 정의|Quick term definitions/)).toHaveCount(0);
-    await expect(page.locator(".setting-key-token")).toHaveCount(0);
     await expect(page.getByText("kv_meta")).toHaveCount(0);
 
-    await page.getByTestId("settings-search-input").fill("재시도");
-    await expect(page.getByTestId("settings-search-summary")).toBeVisible();
-    await expect(page.getByTestId("settings-search-summary")).toContainText(/항목이 일치|matches/);
+    await page.getByTestId("settings-search-input").fill("대기열 재시도");
+    await expect(page.locator("[data-testid^=setting-row-]")).toHaveCount(1);
     await expectNoHorizontalOverflow(page);
-
-    await page.getByRole("button", { name: /검색 지우기|Clear search/ }).click();
-    await expect(page.getByTestId("settings-search-summary")).toHaveCount(0);
+    await page.getByTestId("settings-search-input").fill("");
+    await expect(page.locator("[data-testid^=setting-row-]")).toHaveCount(2);
   });
 
   test("settings: runtime fetch errors do not expose empty editable defaults", async ({ page }) => {
     await page.route(/\/api\/settings\/runtime-config$/, route => route.fulfill({ status: 503, json: { error: "unavailable" } }));
     await page.goto("/settings?settingsPanel=runtime");
-    const panel = page.locator("#settings-panel-content");
-    await expect(panel.getByRole("alert")).toContainText(/불러오지 못했어요|could not be loaded/);
-    await expect(panel.locator("input, select, [role='switch']")).toHaveCount(0);
+    await expect(page.getByRole("alert")).toContainText(/불러오지 못했어요|could not be loaded/);
+    await expect(page.locator("[data-testid^=setting-row-]")).toHaveCount(0);
   });
 
   test("settings: mobile page remains scrollable", async ({ page }, testInfo) => {
@@ -2133,28 +2179,10 @@ test.describe("Dashboard smoke tests", () => {
     const settingsPage = page.getByTestId("settings-page");
     await expect(settingsPage).toBeVisible({ timeout: 15000 });
 
-    const navMetrics = await page
-      .getByRole("tablist", { name: /설정 패널|Settings panels/ })
-      .evaluate((node) => {
-        const buttons = Array.from(node.querySelectorAll("button"));
-        return {
-          clientWidth: node.clientWidth,
-          scrollWidth: node.scrollWidth,
-          overflowX: window.getComputedStyle(node).overflowX,
-          columns: new Set(
-            buttons.map((button) => Math.round(button.getBoundingClientRect().left)),
-          ).size,
-          maxButtonHeight: Math.max(
-            0,
-            ...buttons.map((button) => button.getBoundingClientRect().height),
-          ),
-        };
-      });
-    expect(navMetrics.overflowX).toBe("auto");
-    // Chips scroll sideways; counting distinct left edges catches a collapse into one stacked column.
-    expect(navMetrics.columns).toBeGreaterThanOrEqual(2);
-    expect(navMetrics.maxButtonHeight).toBeGreaterThanOrEqual(44);
-    expect(navMetrics.maxButtonHeight).toBeLessThan(64);
+    const heights = await page.getByRole("navigation", { name: /분류|Categories/ }).getByRole("button")
+      .evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().height));
+    expect(heights.length).toBeGreaterThanOrEqual(7);
+    expect(Math.min(...heights)).toBeGreaterThanOrEqual(44);
 
     const before = await settingsPage.evaluate((node) => ({
       clientHeight: node.clientHeight,
@@ -2310,10 +2338,10 @@ test.describe("Dashboard smoke tests", () => {
     await page.goto("/settings?settingsPanel=machine");
     const panel = page.getByTestId("settings-machine-panel");
     await expect(panel).toBeVisible();
-    await expect(page.locator("#settings-tab-machine")).toHaveAttribute("aria-selected", "true");
+    const desktop = testInfo.project.name === "desktop";
+    if (desktop) await expect(page.getByTestId("settings-category-system")).toHaveAttribute("aria-current", "true");
+    else await expect(page.getByTestId("settings-phone-title")).toHaveText("시스템");
     await expect(panel.getByText(/온라인 2 \/ 전체 2|Online 2 \/ total 2/)).toBeVisible();
-    const order = await page.getByRole("tablist", { name: /설정 패널|Settings panels/ }).getByRole("tab").evaluateAll(tabs => tabs.map(tab => tab.id));
-    expect(order).toEqual(["settings-tab-general", "settings-tab-workflow", "settings-tab-ai", "settings-tab-connections", "settings-tab-machine"]);
     const runner = page.getByTestId("machine-node-runner-example");
     await expect(runner.getByText("Runner", { exact: true }).first()).toBeVisible();
     await expect(runner.getByText(/Windows \/ x86_64/)).toBeVisible();
@@ -2322,14 +2350,23 @@ test.describe("Dashboard smoke tests", () => {
     await expect(runner.getByText("Example CPU", { exact: true })).toBeVisible();
     await expect(runner.getByText("Example GPU", { exact: true })).toBeVisible();
     await expect(runner.getByTestId("machine-trend-cpu").locator("svg")).toBeVisible();
+    // Trend frames sit on the theme chart surface (--bg-1), not a fixed gray.
+    const chartSurface = await page.evaluate(() => {
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = "var(--bg-1)";
+      document.body.append(probe);
+      const color = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return color;
+    });
     for (const kind of ["cpu", "memory", "disk", "gpu"]) {
       const chart = runner.getByTestId(`machine-trend-${kind}`);
-      await expect(chart).toHaveCSS("background-color", "rgb(38, 38, 38)");
+      await expect(chart).toHaveCSS("background-color", chartSurface);
       await expect(chart.locator('[data-layer="line"]')).toHaveCount(1);
       await expect(chart.locator('[data-layer="area"]')).toHaveCount(1);
     }
     const networkChart = runner.getByTestId("machine-trend-network");
-    await expect(networkChart).toHaveCSS("background-color", "rgb(38, 38, 38)");
+    await expect(networkChart).toHaveCSS("background-color", chartSurface);
     await expect(networkChart.locator('[data-layer="line"]')).toHaveCount(2);
     await expect(networkChart.locator('[data-layer="area"]')).toHaveCount(2);
     await expect(networkChart.locator('[data-layer="line"][data-series="primary"]')).toHaveAttribute("stroke", "#f472b6");
@@ -2344,7 +2381,8 @@ test.describe("Dashboard smoke tests", () => {
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: testInfo.outputPath("machine-settings.png"), fullPage: true });
     await runner.getByRole("region", { name: /하드웨어 및 사용량|Hardware and utilization/ }).screenshot({ path: testInfo.outputPath("hardware-utilization.png") });
-    await page.locator("#settings-tab-general").click();
+    if (desktop) await page.getByTestId("settings-category-workflow").click();
+    else await page.getByRole("button", { name: "분류 목록으로" }).click();
     await expect(panel).toHaveCount(0);
     await page.goBack();
     await expect(panel).toBeVisible();

@@ -31,7 +31,6 @@ interface AgentManagerViewProps {
   onAssign?: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
   activeTab?: AgentManagerTab;
   onTabChange?: (tab: AgentManagerTab) => void;
-  onSelectAgent?: (agent: Agent) => void;
   showHeader?: boolean;
   showTabBar?: boolean;
   title?: string;
@@ -51,7 +50,6 @@ export default function AgentManagerView({
   onAssign,
   activeTab,
   onTabChange,
-  onSelectAgent,
   showHeader = true,
   showTabBar = true,
   title,
@@ -249,13 +247,13 @@ export default function AgentManagerView({
             sortedAgents={sortedAgents}
             includeTests={includeTests}
             setIncludeTests={setIncludeTests}
-            onOpenAgent={(agent) =>
-              onSelectAgent ? onSelectAgent(agent) : openEditAgent(agent)
-            }
+            isKo={isKo}
+            onCreateAgent={openCreateAgent}
             onEditAgent={openEditAgent}
             onDuplicateAgent={openDuplicateAgent}
             onEditDepartment={openEditDept}
             onDeleteAgent={handleDeleteAgent}
+            onAgentUpdated={onAgentsChange}
             saving={saving}
           />
         </div>

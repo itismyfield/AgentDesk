@@ -78,6 +78,13 @@ pub(crate) fn armed(channel: u64) -> bool {
     watches().get(&channel).is_some_and(|w| w.armed.is_some())
 }
 
+#[cfg(test)]
+pub(crate) fn has_watch(channel: u64) -> bool {
+    watches()
+        .get(&channel)
+        .is_some_and(|watch| watch.armed.is_some() || watch.probe.is_some() || watch.running)
+}
+
 /// Leaves the probe of the pane that just refused `channel`'s front, for the drive to watch.
 pub(crate) fn arm(channel: u64, probe: ScreenProbe) {
     watches().entry(channel).or_default().armed = Some(probe);

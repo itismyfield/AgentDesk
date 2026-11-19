@@ -171,7 +171,7 @@ pub(super) fn observe_session_host_with(
         Ok(legacy) => legacy,
         Err(deferral) => return deferred(deferral).to_string(),
     };
-    let budget = crate::engine::loader::bridge_op_deadline_remaining()
+    let budget = crate::utils::bridge_deadline::remaining()
         .unwrap_or(Duration::from_secs(2))
         .min(Duration::from_secs(2));
     let answer = probe_for_policy(&legacy.target, |session| match budget.is_zero() {

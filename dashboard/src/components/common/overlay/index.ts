@@ -2,6 +2,8 @@ export { Modal } from "./Modal";
 export type { ModalProps } from "./Modal";
 export { Drawer } from "./Drawer";
 export type { DrawerProps } from "./Drawer";
+export { DrawerDockContext, useDrawerDock } from "./DrawerDock";
+export type { DrawerDockTarget } from "./DrawerDock";
 export { BottomSheet } from "./BottomSheet";
 export type { BottomSheetProps } from "./BottomSheet";
 export { OverlayProvider } from "./OverlayProvider";

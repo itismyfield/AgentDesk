@@ -6,6 +6,8 @@ pub(crate) mod clear_epoch;
 mod codex_resume;
 pub(crate) mod policy;
 mod prepared;
+#[cfg(unix)]
+pub(crate) mod retire;
 pub(crate) mod retired_hold;
 pub(crate) mod runtime_marker;
 pub(crate) mod unplaced;

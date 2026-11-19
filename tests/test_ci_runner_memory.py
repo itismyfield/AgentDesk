@@ -48,8 +48,10 @@ class RunnerMemoryTests(unittest.TestCase):
     def memory(self, available=48, swap_free=12):
         self.write(self.proc / "meminfo", f"MemTotal: 65536 kB\nMemAvailable: {available * 1024} kB\nSwapTotal: 16384 kB\nSwapFree: {swap_free * 1024} kB\n")
 
-    def process(self, pid, name, rss, hwm):
+    def process(self, pid, name, rss, hwm, args=()):
         self.write(self.proc / pid / "status", f"Name:\t{name}\nVmRSS:\t{rss * 1024} kB\nVmHWM:\t{hwm * 1024} kB\n")
+        if args:
+            self.write(self.proc / pid / "cmdline", "\0".join((*args, "")))
 
     def run_probe(self, *arguments, check=True):
         result = subprocess.run(["bash", str(SCRIPT), *arguments], env=self.env,
@@ -64,6 +66,9 @@ class RunnerMemoryTests(unittest.TestCase):
 
     def summary(self):
         return json.loads((self.root / "runner-memory/summary.json").read_text())
+
+    def samples(self):
+        return [json.loads(line) for line in (self.root / "runner-memory/samples.jsonl").read_text().splitlines()]
 
     def test_step_boundaries_capture_short_steps_and_keep_lifetime_peaks_distinct(self):
         self.run_probe("start")
@@ -133,6 +138,55 @@ class RunnerMemoryTests(unittest.TestCase):
         self.assertIsNone(data["phases"]["build"]["max"]["rustc_processes"])
         self.assertIn("meminfo_unavailable", data["errors"])
         self.assertIn("unavailable", (self.root / "job-summary.md").read_text())
+        for row in self.samples():
+            self.assertNotIn("largest_rss_process", row)
+            self.assertNotIn("largest_hwm_process", row)
+
+    def test_sample_attributes_rss_to_test_compiler_and_hwm_to_linker(self):
+        self.process("100", "rustc", 10, 11, ("/toolchain/bin/rustc", "--crate-name", "agentdesk",
+                                              "--crate-type=lib", "--test", "--out-dir", "/private/build path"))
+        self.process("300", "ld.lld", 8, 14, ("/toolchain/bin/ld.lld", "/private/link input.o"))
+        self.run_probe("start")
+        row = self.samples()[0]
+        self.assertEqual(row["largest_rss_bytes"], 10 * MIB)
+        self.assertEqual(row["largest_hwm_bytes"], 14 * MIB)
+        self.assertEqual(row["largest_rss_process"], {
+            "comm": "rustc", "crate_name": "agentdesk", "crate_type": "lib", "test": True,
+        })
+        self.assertEqual(row["largest_hwm_process"], {"comm": "ld.lld"})
+
+    def test_sample_attributes_hwm_to_non_test_compiler_and_rss_to_general_process(self):
+        self.process("100", "rustc", 4, 12, ("rustc", "--crate-name=normal_build", "--crate-type", "rlib,cdylib",
+                                             "--crate-type=staticlib", "--", "--test"))
+        self.process("200", "python3", 6, 7, ("python3", "--test", "--crate-name", "ignored"))
+        self.run_probe("start")
+        row = self.samples()[0]
+        self.assertEqual(row["largest_rss_process"], {"comm": "python3"})
+        self.assertEqual(row["largest_hwm_process"], {
+            "comm": "rustc", "crate_name": "normal_build", "crate_type": "rlib,cdylib,staticlib", "test": False,
+        })
+
+    def test_missing_rustc_cmdline_keeps_both_counters_and_comm(self):
+        self.run_probe("start")
+        self.run_probe("finish")
+        row = self.samples()[0]
+        self.assertEqual(row["largest_rss_bytes"], 4 * MIB)
+        self.assertEqual(row["largest_hwm_bytes"], 6 * MIB)
+        self.assertEqual(row["largest_rss_process"], {"comm": "rustc"})
+        self.assertEqual(row["largest_hwm_process"], {"comm": "rustc"})
+        self.assertEqual(self.summary()["status"], "complete")
+
+    def test_finish_accepts_old_sample_rows_without_process_details(self):
+        self.run_probe("start")
+        self.run_probe("finish")
+        expected = self.summary()
+        rows = self.samples()
+        for row in rows:
+            row.pop("largest_rss_process", None)
+            row.pop("largest_hwm_process", None)
+        self.write(self.root / "runner-memory/samples.jsonl", "".join(json.dumps(row) + "\n" for row in rows))
+        self.run_probe("finish")
+        self.assertEqual(self.summary(), expected)
 
     def test_periodic_sampler_sees_peak_between_boundaries(self):
         self.env["RUNNER_MEMORY_INTERVAL_SECONDS"] = "0.05"
@@ -155,14 +209,44 @@ class RunnerMemoryTests(unittest.TestCase):
         self.assertEqual(data["phases"], {})
         self.assertIsNone(data["host_total_bytes"])
 
-    def test_only_resource_fields_are_written_without_environment_or_process_names(self):
+    def test_self_hosted_scope_is_in_metadata_and_summary(self):
+        self.env["RUNNER_ENVIRONMENT"] = "self-hosted"
+        self.run_probe("start")
+        self.run_probe("checkpoint")
+        self.run_probe("finish")
+        for folder, name in (
+            ("runner-memory", "metadata.json"),
+            ("runner-memory-checkpoint", "metadata.json"),
+            ("runner-memory", "summary.json"),
+        ):
+            data = json.loads((self.root / folder / name).read_text())
+            self.assertEqual(data["runner_environment"], "self-hosted")
+            self.assertIs(data["shared_host"], True)
+        self.assertIn("shared host", (self.root / "runner-memory/summary.md").read_text())
+
+    def test_runner_scope_is_available_even_without_samples(self):
+        for environment, expected in (("github-hosted", False), ("unrecognized", None)):
+            with self.subTest(environment=environment):
+                self.env["RUNNER_ENVIRONMENT"] = environment
+                self.run_probe("finish")
+                data = self.summary()
+                self.assertEqual(data["status"], "unavailable")
+                self.assertIs(data["shared_host"], expected)
+                self.assertEqual(data["runner_environment"], environment if expected is not None else None)
+
+    def test_artifacts_exclude_environment_unselected_names_and_cmdline_paths(self):
         secret = self.env["MEMORY_TEST_SECRET"]
         self.process("999", secret, 1, 1)
+        private_path = "/private/build path"
+        self.process("100", "rustc", 4, 6, (f"{private_path}/rustc", "--crate-name", private_path,
+                                            "--crate-type=" + private_path, "--out-dir", f"/tmp/{secret}"))
         self.run_probe("start")
         self.run_probe("finish")
         for path in (self.root / "runner-memory").iterdir():
             if path.is_file():
-                self.assertNotIn(secret, path.read_text(), path.name)
+                content = path.read_text()
+                self.assertNotIn(secret, content, path.name)
+                self.assertNotIn(private_path, content, path.name)
 
     def test_invalid_interval_fails_without_logging_environment(self):
         self.env["RUNNER_MEMORY_INTERVAL_SECONDS"] = "0"
