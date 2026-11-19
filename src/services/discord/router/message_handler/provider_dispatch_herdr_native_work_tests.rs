@@ -215,7 +215,7 @@ fn work_at_closer(has_id: bool) {
             ).await;
             assert_eq!(work_state(&fx.pool).await, state, "retry changed work completion");
             assert_eq!(hook_count().await.unwrap().as_deref(), Some("1"));
-            assert_eq!(*loopback.calls.lock().unwrap(), [(Method::GET, StatusCode::OK); 2]);
+            assert_eq!(*loopback.calls.lock().unwrap(), [const { (Method::GET, StatusCode::OK) }; 2]);
         }
         fallback.assert_none();
     });

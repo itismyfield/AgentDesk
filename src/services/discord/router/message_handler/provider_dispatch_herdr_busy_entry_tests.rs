@@ -1146,11 +1146,7 @@ fn assert_idle_tmux_queries(logical: &str) {
     );
 }
 
-async fn idle_turn_unwound(intake: &Intake, message: u64) {
-    let mut completions =
-        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
-            &intake.shared,
-        );
+async fn wait_for_idle_turn_to_unwind(intake: &Intake) {
     let finished = tokio::time::timeout(LIMIT, async {
         while intake.mailbox.has_active_turn().await != Ok(false) {
             tokio::task::yield_now().await;
@@ -1170,6 +1166,14 @@ async fn idle_turn_unwound(intake: &Intake, message: u64) {
             "the submitted native terminal did not unwind its Idle turn: token={token:?}, row={row:?}"
         );
     }
+}
+
+async fn idle_turn_unwound(intake: &Intake, message: u64) {
+    let mut completions =
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+            &intake.shared,
+        );
+    wait_for_idle_turn_to_unwind(intake).await;
     use crate::services::tui_input::human_frame::history::v2::{Registry, native::Disposition};
     let settlement = crate::test_support::wait::await_within(
         async {
