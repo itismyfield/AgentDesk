@@ -595,8 +595,6 @@ pub(super) async fn resume_with_gateway(
             full_response: &snapshot.full_response,
         })
     };
-    // O posts this destination's TUI body: settle the custody without posting or recording it.
-    // A held destination identity keeps the custody for a later retry, unless it is discarded.
     // A kept thread child's body waits until the boot places that child with a decided body.
     #[cfg(unix)]
     if snapshot.thread_child
@@ -604,6 +602,8 @@ pub(super) async fn resume_with_gateway(
     {
         return Ok(false);
     }
+    // O posts this destination's TUI body: settle the custody without posting or recording it.
+    // A held destination identity keeps the custody for a later retry, unless it is discarded.
     let kind = (snapshot.local.channel_id == snapshot.channel_id)
         .then_some(snapshot.local.runtime_kind)
         .flatten();
