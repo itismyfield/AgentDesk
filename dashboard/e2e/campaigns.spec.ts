@@ -573,6 +573,86 @@ test("relations editor: phones get no way in, a direct link only shows relations
   await expect(page).not.toHaveURL(/edit=relations/);
 });
 
+/** Opens the editor on Gateway with #7401 → #7402 → #7272 and #7401 → #7272 linked, and helpers for its lines and ties. */
+async function openLinkedEditor(page: Page) {
+  const linked = { ...CAMPAIGNS[0], nodes: CAMPAIGNS[0].nodes.map((value) => ({ ...value, dependencies: ({ i7402: ["i7401"], i7272: ["i7401", "i7402"] } as Record<string, string[]>)[value.id] ?? [] })) };
+  await page.clock.install({ time: new Date(NOW) });
+  const calls = await mockApi(page);
+  await json(page, /\/api\/campaigns\?.*$/, { campaigns: [linked, CAMPAIGNS[1]], live: LIVE, limit: 100, offset: 0 });
+  await json(page, /\/api\/campaigns\/open-issues-dag$/, { campaign: linked, live: LIVE["open-issues-dag"] });
+  await page.goto("/campaigns?mode=legacy&campaign=open-issues-dag&edit=relations&scope=group%3AGateway");
+  const editor = page.locator(".campaign-relations-editor");
+  const line = (id: string) => editor.locator(`.react-flow__edge[data-id="${id}"]`);
+  await expect(editor.locator(".react-flow__edge")).toHaveCount(3);
+  return {
+    calls, editor, line, tie: editor.locator('.react-flow__node[data-id^="cable-tie:"]'),
+    lines: () => editor.locator(".react-flow__edge").evaluateAll((all) => all.map((value) => value.getAttribute("data-id")).filter((id) => !id!.includes("#")).sort()),
+    /** A point on a line's drawn path, `share` of the way along, in page pixels. */
+    pointOn: (id: string, share = 0.5) => line(id).locator(".react-flow__edge-path").evaluate((path: SVGPathElement, at) => {
+      const point = path.getPointAtLength(path.getTotalLength() * at), m = path.getScreenCTM()!;
+      return { x: point.x * m.a + m.e, y: point.y * m.d + m.f };
+    }, share),
+  };
+}
+
+test("relations editor: cable ties bundle lines, move on the grid and untie without touching a dependency, and save in this browser alone", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "The editor is for wide screens");
+  const { calls, editor, line, tie, lines, pointOn } = await openLinkedEditor(page);
+  await editor.getByRole("button", { name: "케이블타이", exact: true }).click();
+  for (const id of ["i7401->i7272", "i7402->i7272"]) { await line(id).focus(); await page.keyboard.press("Enter"); }
+  await expect(editor.getByText("선 2개를 골랐어요.")).toBeVisible();
+  await page.keyboard.press("b");
+  await expect(tie).toHaveText("2");
+  await expect(editor.getByText("저장 안 됨 · 케이블타이 1")).toBeVisible();
+  // The new tie holds the focus, so H previews its lines and Escape closes its menu straight away.
+  await expect(tie).toBeFocused();
+  await page.keyboard.press("h");
+  await expect(editor.locator('.react-flow__edge[data-id^="preview:"]')).toHaveCount(2);
+  await page.keyboard.press("Escape");
+  await expect(editor.getByRole("group", { name: "케이블타이 메뉴" })).toHaveCount(0);
+  // A drag lands on the 20px grid; Delete then unties it and leaves every dependency as it was.
+  const at = async () => (await tie.evaluate((node) => getComputedStyle(node).transform)).match(/-?[\d.]+/g)!.slice(4).map(Number);
+  const [before, box] = [await at(), (await tie.boundingBox())!];
+  await page.mouse.move(box.x + 22, box.y + 22); await page.mouse.down(); await page.mouse.move(box.x + 140, box.y + 97, { steps: 8 }); await page.mouse.up();
+  const after = await at();
+  expect([after[0] % 20, after[1] % 20, after[0] > before[0] && after[1] > before[1]]).toEqual([0, 0, true]);
+  await page.keyboard.press("Delete");
+  await expect(tie).toHaveCount(0);
+  await expect(editor.getByText(/^저장 안 됨/)).toHaveCount(0);
+  expect(await lines()).toEqual(["i7401->i7272", "i7401->i7402", "i7402->i7272"]);
+  // One line double-clicked is tied where it was clicked; saving writes the browser only, and a reload draws it again.
+  const middle = await pointOn("i7401->i7402");
+  await page.mouse.dblclick(middle.x, middle.y);
+  await expect(tie).toHaveText("1");
+  await editor.getByRole("button", { name: "저장", exact: true }).click();
+  await expect(editor.getByText(/^저장 안 됨/)).toHaveCount(0);
+  expect(calls.filter((call) => call.startsWith("PUT"))).toEqual([]);
+  const saved = await page.evaluate(() => Object.entries(localStorage).filter(([key]) => key.startsWith("agentdesk.campaign-graph-view.v1:")).map(([, raw]) => JSON.parse(raw)));
+  expect(saved.map((value) => [value.scope.taskScope, value.revision, value.ties[0].strandOrder])).toEqual([["group:Gateway", 7, [["i7401", "i7402"]]]]);
+  await page.reload();
+  await expect(tie).toHaveText("1");
+  expect(await lines()).toEqual(["i7401->i7272", "i7401->i7402", "i7402->i7272"]);
+});
+
+test("relations editor: below 1280px a double-click on a line where the inspector opens ties it, and a single click opens the inspector once no second click comes", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "The editor is for wide screens");
+  await page.setViewportSize({ width: 1100, height: 900 });
+  const { calls, editor, tie, lines, pointOn } = await openLinkedEditor(page);
+  const canvas = (await editor.locator("[data-editor-canvas]").boundingBox())!;
+  // A point of #7402 → #7272 inside the 320px the overlay inspector covers.
+  const under = await pointOn("i7402->i7272", 0.8);
+  expect(under.x).toBeGreaterThan(canvas.x + canvas.width - 320);
+  await page.mouse.dblclick(under.x, under.y);
+  await expect(tie).toHaveText("1");
+  await page.waitForTimeout(500); // past the double-click window: no inspector comes after the tie
+  await expect(editor.getByRole("complementary")).toHaveCount(0);
+  expect(await lines()).toEqual(["i7401->i7272", "i7401->i7402", "i7402->i7272"]);
+  const single = await pointOn("i7401->i7402");
+  await page.mouse.click(single.x, single.y);
+  await expect(editor.getByRole("complementary", { name: "선행 연결" })).toBeVisible();
+  expect(calls.filter((call) => call.startsWith("PUT"))).toEqual([]);
+});
+
 test("relations editor: a draft kept while another page shows asks before a reload, and stops once discarded", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "The editor is for wide screens");
   await openCampaigns(page);

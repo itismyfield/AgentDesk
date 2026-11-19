@@ -1,5 +1,6 @@
 import type { Campaign, CampaignNode } from "../../api/campaigns";
 import { campaignGroup, campaignTaskNumber, campaignTaskTitle, safeCampaignLink } from "./campaignModel";
+import type { GraphViewSettings } from "./campaignGraphRouting";
 
 /** What the editor draws: one group, or a task with its dependencies and dependents up to `depth` steps out. */
 export type EditScope = { kind: "group"; key: string } | { kind: "task"; id: string; depth: number };
@@ -21,6 +22,22 @@ export function parseScope(scope: string | null, depth: string | null): EditScop
 
 export const scopeParams = (scope: EditScope): Record<string, string> =>
   scope.kind === "group" ? { scope: `group:${scope.key}` } : { scope: `task:${scope.id}`, depth: String(scope.depth) };
+/** Names a scope for its saved ties: tie positions belong to the drawing of exactly this scope. */
+export const scopeKey = (scope: EditScope) => scope.kind === "group" ? `group:${scope.key}` : `task:${scope.id}:${scope.depth}`;
+
+/** Unsaved ties per scope key: the stored view the draft started from, and the draft. */
+export type TieDrafts = Record<string, { base: GraphViewSettings; view: GraphViewSettings }>;
+
+/** Ties added, removed, or moved or changed in membership, counted against the stored view each draft started from. */
+export function tieChanges(drafts: TieDrafts): number {
+  let count = 0;
+  for (const { base, view } of Object.values(drafts)) {
+    const before = new Map(base.ties.map((tie) => [tie.id, JSON.stringify(tie)]));
+    const after = new Map(view.ties.map((tie) => [tie.id, JSON.stringify(tie)]));
+    for (const id of new Set([...before.keys(), ...after.keys()])) if (before.get(id) !== after.get(id)) count++;
+  }
+  return count;
+}
 
 /** Completed and skipped tasks keep their own fields and dependencies; a line out of them may still change. */
 export const isLocked = (node: CampaignNode | undefined) => node?.status === "completed" || node?.status === "skipped";
@@ -184,13 +201,14 @@ export function adoptLatest(latest: Campaign, edits: Edits, conflicts: Conflict[
 
 export const warnBeforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
 
-/** Unsaved edits kept for this tab's session when the editor goes away without a decision (rail, palette, another page).
- * They live only in memory, so while any is kept a reload or close asks first, whatever page the tab shows. */
-const kept = new Map<string, { base: Campaign; edits: Edits }>();
+/** Unsaved edits and ties kept for this tab's session when the editor goes away without a decision (rail, palette,
+ * another page). They live only in memory, so while any is kept a reload or close asks first, whatever page the tab shows. */
+type KeptDraft = { base: Campaign; edits: Edits; ties: TieDrafts };
+const kept = new Map<string, KeptDraft>();
 // Its own listener, not the editor's: a listener is one per function, so sharing one would let either side's removal
 // drop the other's warning (a restored draft, or another campaign's editor saving while a draft is kept).
 const keptGuard = (event: BeforeUnloadEvent) => warnBeforeUnload(event);
 const guard = () => kept.size ? window.addEventListener("beforeunload", keptGuard) : window.removeEventListener("beforeunload", keptGuard);
-export const keepDraft = (draft: { base: Campaign; edits: Edits }) => { kept.set(draft.base.id, draft); guard(); };
+export const keepDraft = (draft: KeptDraft) => { kept.set(draft.base.id, draft); guard(); };
 export const keptDraft = (campaignId: string) => kept.get(campaignId) ?? null;
 export const dropKeptDraft = (campaignId: string) => { kept.delete(campaignId); guard(); };
