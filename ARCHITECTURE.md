@@ -4099,6 +4099,7 @@ src/
 │   │   │   ├── agent_start.rs
 │   │   │   ├── execution_modes.rs
 │   │   │   ├── failure_escalation.rs
+│   │   │   ├── session_interrupt.rs
 │   │   │   └── thread_choices.rs
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
