@@ -278,7 +278,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       recent={{ title: tr("최근 바뀐 작업", "Recently changed tasks"), entries: recentTaskChanges(legacyTasks) }}
       selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
     relations={campaign.nodes.length > 0 && <CampaignRelations campaign={campaign} selectedId={node} onOpen={setNode} tr={tr} />}
-    board={(controls) => <CampaignBoard columns={legacyBoard(legacyTasks)} tasks={legacyTasks} selectedId={node} controls={controls} onOpen={setNode} tr={tr} />}
+    board={(controls) => <CampaignBoard columns={legacyBoard(campaign.nodes, live[campaign.id])} tasks={legacyTasks} selectedId={node} controls={controls} onOpen={setNode} tr={tr} />}
     task={openNode && "status" in openNode ? { id: openNode.id, label: campaignIssueLabel(openNode), body: <CampaignNodeDetails key={openNode.id} campaign={campaign} node={openNode} live={live[campaign.id]?.[openNode.id]} tr={tr} onSaved={onSaved}
       editing={drafts[`${campaign.id}:${openNode.id}`] ?? null} onDraftChange={(draft, expected) => onDraftChange(`${campaign.id}:${openNode.id}`, draft, expected)} /> } : null}
     onCloseTask={() => setNode(null)} />;

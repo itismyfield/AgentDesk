@@ -21,10 +21,11 @@ const WARN_FRAME = "border-[color-mix(in_srgb,var(--warn)_60%,var(--line))]";
 /** The server's retry command for failed tasks, as the campaign's command list offers it. */
 export interface BoardRetry { enabled: boolean; reason: string | null; onRetry: (id: string) => Promise<void> }
 
-function look(task: TaskView): { tone: BadgeTone; label: [string, string]; frame: string } {
+function look(task: TaskView, chip?: [string, string]): { tone: BadgeTone; label: [string, string]; frame: string } {
   if (task.gate) return { tone: "warning", label: ["승인 대기", "Awaiting approval"], frame: `${WARN_FRAME} bg-[color-mix(in_srgb,var(--warn)_7%,var(--th-card-bg))]` };
   if (task.status === "failed") return { tone: "danger", label: LABELS.failed, frame: "border-[color-mix(in_srgb,var(--err)_60%,var(--line))] bg-[var(--th-card-bg)]" };
   if (task.attention) return { tone: "warning", label: LABELS.blocked, frame: `${WARN_FRAME} bg-[var(--th-card-bg)]` };
+  if (chip) return { tone: "warning", label: chip, frame: "border-[var(--line)] bg-[var(--th-card-bg)]" };
   if (task.status === "running") return { tone: "info", label: LABELS.running, frame: "border-[color-mix(in_srgb,var(--info)_45%,var(--line))] bg-[var(--th-card-bg)]" };
   return { tone: task.status === "completed" ? "success" : "neutral", label: LABELS[task.status], frame: "border-[var(--line)] bg-[var(--th-card-bg)]" };
 }
@@ -34,7 +35,7 @@ function Card({ card, selected, controls, onOpen, roster, retry, tr }: {
 }) {
   const { task } = card;
   const agent = findAgent(roster, task.agent);
-  const { tone, label, frame } = look(task);
+  const { tone, label, frame } = look(task, card.chip);
   const waiting = tr("승인 API 준비 중(#8249)", "Approval API in progress (#8249)");
   const who = [agent && (agent.name_ko || agent.name), task.number].filter(Boolean).join(" · ");
   return <article data-board-card={task.id} className={`grid min-w-0 gap-2 rounded-[var(--r-md)] border p-2.5 ${selected ? "border-[var(--accent)] bg-[var(--accent-soft)]" : frame}`}>
@@ -79,6 +80,8 @@ export default function CampaignBoard({ columns, tasks, selectedId, controls, on
   // Phones open the columns with running work or something that needs someone, and finished ones once shown.
   const urgent = (column: BoardColumn) => !column.done && column.cards.some(({ task }) => task.status === "running" || task.attention || task.gate);
   const isOpen = (column: BoardColumn) => open[column.key] ?? (urgent(column) || (column.done && !hideDone));
+  // Phones also list those columns first, each group keeping its order; wide screens keep the pipeline order.
+  const groups = [...columns.filter(urgent), ...columns.filter((column) => !urgent(column))];
   const toggle = (column: BoardColumn) => {
     if (!isOpen(column) && limit(column) === 0) setShown((current) => ({ ...current, [column.key]: PAGE }));
     setOpen((current) => ({ ...current, [column.key]: !isOpen(column) }));
@@ -109,7 +112,7 @@ export default function CampaignBoard({ columns, tasks, selectedId, controls, on
       <Switch className="ml-auto" size="sm" label={tr("완료 숨기기", "Hide done")} checked={hideDone} onChange={(event) => { setHideDone(event.target.checked); setShown({}); setOpen({}); }} />
     </div>
     {phone ? <div className="grid min-w-0 gap-2">
-      {columns.map((column) => <section key={column.key} aria-label={tr(...column.label)} className="min-w-0 rounded-xl border border-[var(--line)] bg-[color-mix(in_oklch,var(--fg)_2%,transparent)]">
+      {groups.map((column) => <section key={column.key} aria-label={tr(...column.label)} className="min-w-0 rounded-xl border border-[var(--line)] bg-[color-mix(in_oklch,var(--fg)_2%,transparent)]">
         <button type="button" aria-expanded={isOpen(column)} aria-controls={`${id}-${column.key}`} onClick={() => toggle(column)}
           className="!m-0 flex w-full min-w-0 items-center gap-2 !border-0 !bg-transparent !px-3 text-left !text-sm font-semibold text-[var(--fg)]">
           <ChevronDown aria-hidden className={`size-4 shrink-0 text-[var(--fg-muted)] transition-transform motion-reduce:transition-none ${isOpen(column) ? "" : "-rotate-90"}`} />
