@@ -1,7 +1,7 @@
 use super::*;
 use crate::services::discord::admin_host_guard::tests::api_child;
 use crate::services::discord::host_defer_gate::tests::{map_channel, postgres};
-use crate::services::discord::host_teardown_gate::test_support::{channel_key, shared_on};
+use crate::services::discord::host_teardown_gate::test_support::shared_on;
 use crate::services::tui_prompt_dedupe::{self as dedupe, ClaudeSessionRotation};
 
 const OLD: &str = "af3ece1a-0000-4000-8000-000000008261";
@@ -17,7 +17,7 @@ async fn retired_rotation_moves_the_channel_selector_to_the_rotated_session_pg()
     )) {
         return;
     }
-    let f = Fixture::new().await;
+    let f = Fixture::new(true).await;
     // A user /clear emptied the cache and the stored selector; the rotation must not refill them.
     f.set(None, true, None).await;
     f.rotate();
@@ -33,12 +33,27 @@ async fn retired_rotation_moves_the_channel_selector_to_the_rotated_session_pg()
     settle_claude_session_rotations(&f.shared).await;
     assert_eq!(f.stored().await.0.as_deref(), Some(newer));
 
-    f.set(Some(OLD), false, Some(OLD)).await;
+    // An empty cache leaves the next turn to the stored selector, which follows the pane.
+    f.set(None, false, Some(OLD)).await;
     f.rotate();
+    settle_claude_session_rotations(&f.shared).await;
+    let new = Some(NEW.to_string());
+    assert_eq!(f.stored().await, (new.clone(), new.clone()));
+    assert_eq!(
+        f.restore().await,
+        (new.clone(), "db_provider_session_restored")
+    );
+
+    // With no row for the channel the rotation stays until a row takes the selector.
+    f.set(Some(OLD), false, Some(OLD)).await;
+    f.move_row("0").await;
+    f.rotate();
+    settle_claude_session_rotations(&f.shared).await;
+    assert!(dedupe::claude_session_rotation_for_tmux(&f.tmux).is_some());
+    f.move_row(&f.channel.get().to_string()).await;
     settle_claude_session_rotations(&f.shared).await;
     assert!(dedupe::claude_session_rotation_for_tmux(&f.tmux).is_none());
     assert_eq!(f.turn_start_session().await, Some(Some(NEW.to_string())));
-    let new = Some(NEW.to_string());
     assert_eq!(f.stored().await, (new.clone(), new));
 }
 
@@ -51,7 +66,7 @@ async fn a_failed_selector_store_keeps_the_rotation_until_it_lands_pg() {
     )) {
         return;
     }
-    let f = Fixture::new().await;
+    let f = Fixture::new(true).await;
     f.set(Some(OLD), false, Some(OLD)).await;
     let (provider, path) = (ProviderKind::Claude, f.frozen.display().to_string());
     let len = std::fs::metadata(&f.frozen).unwrap().len();
@@ -98,21 +113,45 @@ async fn a_failed_selector_store_keeps_the_rotation_until_it_lands_pg() {
     assert_eq!(f.stored().await, (new.clone(), new.clone()));
     // A restart rebuilds the cache from the stored selector at the next turn start.
     f.set(None, false, Some(NEW)).await;
-    let (mut session, mut memento, mut reason) = (None, false, "before");
-    let restore = crate::services::discord::router::message_handler::input_payload::restore_session;
-    let state = crate::services::discord::router::message_handler::input_payload::SessionRestore {
-        session_id: &mut session,
-        memento_context_loaded: &mut memento,
-        reason: &mut reason,
-        force_fresh: false,
-        cleared: false,
-        reset: false,
-        recreate: false,
-        session_key: Some(&f.key),
-        tmux: Some(&f.tmux),
-    };
-    restore(&f.shared, &ProviderKind::Claude, f.channel, state).await;
-    assert_eq!((session, reason), (new, "db_provider_session_restored"));
+    assert_eq!(f.restore().await, (new, "db_provider_session_restored"));
+}
+
+// A reconnected Herdr pane has no watcher, so its rotation keeps waiting for an owner, but its
+// channel's stored selector follows the pane once the row names the execution the reconcile admitted.
+#[tokio::test]
+async fn a_watcherless_herdr_pane_moves_its_channel_selector_pg() {
+    if !api_child(&format!(
+        "{TEST}a_watcherless_herdr_pane_moves_its_channel_selector_pg"
+    )) {
+        return;
+    }
+    use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests};
+    let f = Fixture::new(false).await;
+    f.set(Some(OLD), false, Some(OLD)).await;
+    let mut owner = tests::owner(&f.channel.get().to_string());
+    (owner.discord_token_hash, owner.logical_key) = (f.shared.token_hash.clone(), f.tmux.clone());
+    let hosted = tests::wire(&tests::record(&owner, "nonce-8261", HostedState::Bound));
+    sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1")
+        .bind(&f.key)
+        .bind(hosted)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    dedupe::register_tmux_channel(&f.tmux, f.channel.get());
+    // An admitted execution the channel row does not name moves nothing.
+    dedupe::admit_herdr_execution(&f.tmux, "nonce-other");
+    f.rotate();
+    settle_claude_session_rotations(&f.shared).await;
+    assert_eq!(f.stored().await.0.as_deref(), Some(OLD));
+
+    dedupe::release_herdr_execution(&f.tmux, "nonce-other");
+    dedupe::admit_herdr_execution(&f.tmux, "nonce-8261");
+    settle_claude_session_rotations(&f.shared).await;
+    let new = Some(NEW.to_string());
+    assert_eq!(f.stored().await, (new.clone(), new));
+    assert_eq!(f.turn_start_session().await, Some(Some(NEW.to_string())));
+    let kept = dedupe::claude_session_rotation_for_tmux(&f.tmux);
+    assert!(kept.is_some_and(|rotation| rotation.selector_followed));
 }
 
 struct Fixture {
@@ -130,7 +169,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn new() -> Self {
+    async fn new(watcher: bool) -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
         let (db, pool) = postgres().await;
         let mut shared = shared_on(&pool).await;
@@ -139,7 +178,8 @@ impl Fixture {
         let api = serve_api(&pool).await;
         let channel = ChannelId::new(1_479_671_302_387_082_610);
         let tmux = ProviderKind::Claude.build_tmux_session_name("rotation-selector");
-        let key = channel_key(&shared, &tmux);
+        // The canonical row's own key, not the one the pane name would compose.
+        let key = format!("claude/{}/lane-node:{}", shared.token_hash, tmux);
         let dir = tempfile::tempdir().unwrap();
         let (frozen, rotated) = (dir.path().join("old.jsonl"), dir.path().join("new.jsonl"));
         std::fs::write(&frozen, b"{}\n").unwrap();
@@ -153,19 +193,21 @@ impl Fixture {
             .get_mut(&channel)
             .unwrap()
             .current_path = Some(dir.path().display().to_string());
-        shared.tmux_watchers.insert(
-            channel,
-            crate::services::discord::TmuxWatcherHandle {
-                tmux_session_name: tmux.clone(),
-                output_path: rotated.display().to_string(),
-                paused: Arc::new(false.into()),
-                resume_offset: Arc::new(std::sync::Mutex::new(None)),
-                cancel: Arc::new(false.into()),
-                pause_epoch: Arc::new(0.into()),
-                turn_delivered: Arc::new(false.into()),
-                last_heartbeat_ts_ms: Arc::new(0.into()),
-            },
-        );
+        if watcher {
+            shared.tmux_watchers.insert(
+                channel,
+                crate::services::discord::TmuxWatcherHandle {
+                    tmux_session_name: tmux.clone(),
+                    output_path: rotated.display().to_string(),
+                    paused: Arc::new(false.into()),
+                    resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                    cancel: Arc::new(false.into()),
+                    pause_epoch: Arc::new(0.into()),
+                    turn_delivered: Arc::new(false.into()),
+                    last_heartbeat_ts_ms: Arc::new(0.into()),
+                },
+            );
+        }
         sqlx::query(
             "INSERT INTO sessions (session_key, provider, status, identity_kind,
                                    discord_token_hash, channel_id, claude_session_id)
@@ -204,6 +246,36 @@ impl Fixture {
             .execute(&self.pool)
             .await
             .unwrap();
+    }
+
+    async fn move_row(&self, channel: &str) {
+        sqlx::query("UPDATE sessions SET channel_id = $2 WHERE session_key = $1")
+            .bind(&self.key)
+            .bind(channel)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+    }
+
+    /// The session the next turn start's restore picks when the cache is empty.
+    async fn restore(&self) -> (Option<String>, &'static str) {
+        let (mut session, mut memento, mut reason) = (None, false, "before");
+        let input_payload =
+            crate::services::discord::router::message_handler::input_payload::restore_session;
+        let state =
+            crate::services::discord::router::message_handler::input_payload::SessionRestore {
+                session_id: &mut session,
+                memento_context_loaded: &mut memento,
+                reason: &mut reason,
+                force_fresh: false,
+                cleared: false,
+                reset: false,
+                recreate: false,
+                session_key: Some(&self.key),
+                tmux: Some(&self.tmux),
+            };
+        input_payload(&self.shared, &ProviderKind::Claude, self.channel, state).await;
+        (session, reason)
     }
 
     fn rotate(&self) {
