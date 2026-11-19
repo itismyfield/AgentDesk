@@ -1,218 +1,210 @@
-import { ChevronDown, RotateCcw } from "lucide-react";
-import { useId, useState, type ReactNode } from "react";
-import { SegmentedControl } from "../../kit/free/segmented-control-clean";
-import { Select } from "../../kit/free/select-clean";
+import { useQuery } from "@tanstack/react-query";
+import type { ReactNode } from "react";
+import { getSettingsChannelName } from "../../api/settingsRuntime";
 import { Switch } from "../../kit/free/switch-clean";
-import type { SettingFlag, SettingRowMeta } from "./SettingsModel";
-import { SETTINGS_ROW_PAD_CLASS, SETTINGS_TRAY_CLASS, SettingsAction, SettingsBadge, SettingsTextField } from "./SettingsPrimitives";
+import { applyChip, applyText, defaultText, formatSettingValue, type CatalogItem, type StatusTone } from "./SettingsModel";
+import { SETTINGS_TRAY_CLASS, SettingsBadge, SettingsTextField } from "./SettingsPrimitives";
 
-// A select this short reads better as segments (e.g. the theme row).
-const SEGMENTED_OPTION_LIMIT = 3;
-const FIELD_CLASS = "w-full @min-[37.5rem]:w-60";
+// Pieces shared by the desktop catalog and the phone sheet: the row control, its chip and the detail lists.
 
-const FLAG_LABELS: Record<SettingFlag, [string, string]> = {
-  alert: ["저장 전 확인", "Confirm on save"],
-  read_only: ["읽기 전용", "Read-only"],
-  restart_required: ["다시 시작 후 적용", "Applies after restart"],
+type Tr = (ko: string, en: string) => string;
+
+const DISCORD_ID_PATTERN = /^\d{17,20}$/;
+
+export const editableItem = (item: CatalogItem) => item.input === "toggle" || item.input === "number" || item.input === "text";
+
+/** The value the page currently holds for a row: its draft, else the stored value. */
+export const currentValue = (item: CatalogItem) => item.draft ?? item.saved;
+
+const TONE_TEXT: Record<StatusTone, string> = {
+  ok: "text-[var(--th-badge-emerald-text)]",
+  warn: "text-[var(--th-badge-amber-text)]",
+  unknown: "text-th-text-muted",
 };
 
-function formatValue(value: unknown, unit: string | undefined, tr: (ko: string, en: string) => string): string {
-  if (value === undefined || value === null || value === "") return tr("없음", "None");
-  if (value === true || value === "true") return tr("켜짐", "On");
-  if (value === false || value === "false") return tr("꺼짐", "Off");
-  return unit ? `${String(value)}${unit}` : String(value);
+/** Right-hand chip: an unsaved change, an override, or how the value applies. Status rows show none. */
+export function ItemChip({ item, tr }: { item: CatalogItem; tr: Tr }) {
+  if (item.draft !== null) return <SettingsBadge tone="warn">{tr("바뀜", "Changed")}</SettingsBadge>;
+  if (item.overridden) return <SettingsBadge tone="accent">{tr("덮어씀", "Overridden")}</SettingsBadge>;
+  const apply = applyChip(item, tr);
+  return apply ? <SettingsBadge>{apply}</SettingsBadge> : null;
 }
 
-interface SettingRowProps {
-  meta: SettingRowMeta;
-  isKo: boolean;
-  onChange: (key: string, value: string | boolean | number) => void;
-  onReset?: (key: string) => void;
-  /** Extra line under the control, e.g. a resolved channel name. */
-  extra?: ReactNode;
+/** Plain value for read-only and status rows; status rows get their tone dot. */
+export function ItemValue({ item, tr }: { item: CatalogItem; tr: Tr }) {
+  const tone = item.status ? TONE_TEXT[item.status.tone] : "text-th-text-secondary";
+  return (
+    <span className={`inline-flex min-w-0 items-center gap-1.5 text-[13px] leading-5 tabular-nums break-keep ${tone}`}>
+      {item.input === "status" ? <span aria-hidden className="size-2 shrink-0 rounded-full bg-current" /> : null}
+      {formatSettingValue(item.saved, item, tr)}
+    </span>
+  );
 }
 
-/** One settings row: label and hint on the left, the kit control on the right, details on demand. */
-export function SettingRow({ meta, isKo, onChange, onReset, extra }: SettingRowProps) {
-  const [open, setOpen] = useState(false);
-  const detailsId = useId();
-  const fieldId = useId();
-  const tr = (ko: string, en: string) => (isKo ? ko : en);
-  const label = isKo ? meta.labelKo : meta.labelEn;
-  const hint = isKo ? meta.hintKo : meta.hintEn;
-  const invalid = meta.validation && meta.validation.ok === false ? meta.validation : null;
-  const errorText = invalid ? tr(invalid.messageKo, invalid.messageEn) : undefined;
-  const applyNote = isKo ? meta.applyNoteKo : meta.applyNoteEn;
-  const inline = meta.editable && meta.inputKind === "toggle";
-  const labelled = meta.editable && (meta.inputKind === "text" || meta.inputKind === "number");
+interface InlineControlProps {
+  item: CatalogItem;
+  label: string;
+  invalid?: boolean;
+  onChange: (value: string) => void;
+  tr: Tr;
+}
 
-  const control = (() => {
-    if (!meta.editable) {
-      return (
-        <div className={`${FIELD_CLASS} ${SETTINGS_TRAY_CLASS} px-2.5 py-1.5 text-[13px] leading-5 tabular-nums text-th-text-secondary [overflow-wrap:anywhere]`}>
-          {formatValue(meta.effectiveValue, meta.valueUnit, tr)}
-        </div>
-      );
-    }
-    if (meta.inputKind === "toggle") {
-      const enabled = meta.effectiveValue === true || meta.effectiveValue === "true" || meta.effectiveValue === 1 || meta.effectiveValue === "1";
-      return <Switch aria-label={label} checked={enabled} onChange={(event) => onChange(meta.key, event.target.checked)} />;
-    }
-    if (meta.inputKind === "select" && meta.selectOptions) {
-      const options = meta.selectOptions.map((option) => ({ value: option.value, label: isKo ? option.labelKo : option.labelEn }));
-      const value = String(meta.effectiveValue ?? "");
-      if (options.length <= SEGMENTED_OPTION_LIMIT) {
-        // The kit control measures its own container, so it needs a sized slot (an auto column would collapse it).
-        return (
-          <div className={FIELD_CLASS}>
-            <SegmentedControl
-              aria-label={label}
-              variant="tray"
-              size="sm"
-              options={options}
-              value={value}
-              onChange={(next) => onChange(meta.key, next)}
-            />
-          </div>
-        );
-      }
-      return (
-        <Select
-          aria-label={label}
-          className={FIELD_CLASS}
-          options={options}
-          value={value}
-          error={errorText}
-          onChange={(next) => onChange(meta.key, next)}
-        />
-      );
-    }
-    if (meta.inputKind === "range" && meta.numericRange) {
-      const { min, max, step } = meta.numericRange;
-      const value = Number(meta.effectiveValue) || 0;
-      return (
-        <div className={`flex items-center gap-3 ${FIELD_CLASS}`}>
-          <input
-            type="range"
-            aria-label={label}
-            min={min}
-            max={max}
-            step={step}
-            value={value}
-            onChange={(event) => onChange(meta.key, Number(event.target.value))}
-            className="h-8 min-w-0 flex-1 cursor-pointer accent-[var(--accent)] pointer-coarse:h-11"
-          />
-          <SettingsTextField
-            type="number"
-            size="sm"
-            aria-label={tr(`${label} 직접 입력`, `${label} value`)}
-            min={min}
-            max={max}
-            step={step}
-            value={value}
-            className="w-20 shrink-0"
-            inputClassName="text-right"
-            onChange={(event) => {
-              const next = Number(event.target.value);
-              if (Number.isFinite(next) && next >= min && next <= max) onChange(meta.key, next);
-            }}
-          />
-        </div>
-      );
-    }
+/** The row's own control: a switch, a number or text field, or the plain value when it cannot be edited here. */
+export function InlineControl({ item, label, invalid, onChange, tr }: InlineControlProps) {
+  const value = currentValue(item);
+  if (item.input === "toggle") {
+    return <Switch aria-label={label} checked={value === "true"} onChange={(event) => onChange(String(event.target.checked))} />;
+  }
+  if (item.input === "number" || item.input === "text") {
+    const numeric = item.input === "number";
     return (
       <SettingsTextField
-        id={fieldId}
+        size="sm"
         aria-label={label}
-        type={meta.inputKind === "number" ? "number" : "text"}
-        inputMode={meta.inputKind === "number" ? "numeric" : undefined}
-        value={String(meta.effectiveValue ?? "")}
-        error={errorText}
-        className={FIELD_CLASS}
-        onChange={(event) =>
-          onChange(meta.key, meta.inputKind === "number" ? Number(event.target.value) : event.target.value)
-        }
+        aria-invalid={invalid || undefined}
+        type={numeric ? "number" : "text"}
+        inputMode={numeric ? "numeric" : undefined}
+        min={item.min}
+        max={item.max}
+        value={value}
+        className={numeric ? "w-24" : "w-44"}
+        inputClassName={numeric ? "text-right tabular-nums" : "font-mono"}
+        onChange={(event) => onChange(event.target.value)}
       />
     );
-  })();
+  }
+  return <ItemValue item={item} tr={tr} />;
+}
 
-  const detailsButton = (
-    <SettingsAction
-      variant="ghost"
-      aria-expanded={open}
-      aria-controls={detailsId}
-      onClick={() => setOpen((current) => !current)}
-      iconRight={<ChevronDown className={`transition-transform motion-reduce:transition-none ${open ? "rotate-180" : ""}`} />}
-      className="justify-self-end"
-    >
-      {tr("자세히", "Details")}
-    </SettingsAction>
-  );
-
+function FactRow({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className={`setting-row min-w-0 ${SETTINGS_ROW_PAD_CLASS}`} data-testid={`setting-row-${meta.key}`}>
-      <div
-        className={`grid min-h-9 min-w-0 items-center gap-x-3 gap-y-2.5 @min-[37.5rem]:gap-x-5 ${
-          inline
-            ? "grid-cols-[minmax(0,1fr)_auto_auto]"
-            : "grid-cols-[minmax(0,1fr)_auto] @min-[37.5rem]:grid-cols-[minmax(0,1fr)_auto_auto]"
-        }`}
-      >
+    <div className="flex min-w-0 items-baseline justify-between gap-4 text-[13px] leading-5">
+      <dt className="shrink-0 text-th-text-muted">{label}</dt>
+      <dd className="m-0 min-w-0 text-right tabular-nums text-th-text-primary [overflow-wrap:anywhere]">{children}</dd>
+    </div>
+  );
+}
+
+function ChannelName({ id, tr }: { id: string; tr: Tr }) {
+  const valid = DISCORD_ID_PATTERN.test(id);
+  const channel = useQuery({
+    queryKey: ["settings", "discord-channel", id],
+    queryFn: () => getSettingsChannelName(id),
+    enabled: valid,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  if (!id) return <>{tr("정하지 않음", "Not set")}</>;
+  if (!valid) return <span className="text-[var(--th-badge-amber-text)]">{tr("17~20자리 숫자가 아니에요", "Not a 17–20 digit ID")}</span>;
+  if (channel.isPending) return <>{tr("확인 중…", "Checking…")}</>;
+  if (channel.isError || !channel.data) return <span className="text-[var(--th-badge-amber-text)]">{tr("채널을 찾지 못했어요", "Channel not found")}</span>;
+  return <>#{channel.data}</>;
+}
+
+interface ItemFactsProps {
+  item: CatalogItem;
+  /** Value being edited when it differs from the draft (the phone sheet). */
+  pending?: string | null;
+  problem?: string | null;
+  tr: Tr;
+}
+
+/** Stored, pending and default values with when they apply; status rows list their facts, signals and setup steps. */
+export function ItemFacts({ item, pending = item.draft, problem, tr }: ItemFactsProps) {
+  const apply = applyText(item, tr);
+  return (
+    <div className="flex min-w-0 flex-col gap-3" data-testid={`settings-facts-${item.key}`}>
+      <dl className="m-0 flex min-w-0 flex-col gap-1.5">
+        {item.source === "status" ? item.status?.facts.map(([label, value]) => <FactRow key={label} label={label}>{value}</FactRow>) : (
+          <>
+            <FactRow label={tr("저장된 값", "Saved")}>{formatSettingValue(item.saved, item, tr)}</FactRow>
+            {pending !== null && pending !== item.saved ? (
+              <FactRow label={tr("고칠 값", "New value")}>
+                <span className="text-[var(--warn)]">{formatSettingValue(pending, item, tr)}</span>
+              </FactRow>
+            ) : null}
+            <FactRow label={tr("기본값", "Default")}>{defaultText(item, tr)}</FactRow>
+          </>
+        )}
+        {apply ? <FactRow label={tr("적용", "Applies")}>{apply}</FactRow> : null}
+        {item.key.endsWith("_channel_id") ? (
+          <FactRow label={tr("채널", "Channel")}><ChannelName id={(pending ?? item.saved).trim()} tr={tr} /></FactRow>
+        ) : null}
+      </dl>
+      {problem ? <p role="alert" className="m-0 text-xs leading-5 text-[var(--err)]">{problem}</p> : null}
+      {item.status?.notes?.length ? (
+        <ul className="m-0 flex list-none flex-col gap-2 p-0" data-testid="settings-status-notes">
+          {item.status.notes.map((note, index, notes) => (
+            <li key={`${note.tooltip}-${note.title}`} className="flex min-w-0 gap-2 text-[13px] leading-5">
+              <span aria-hidden className={`mt-1.5 size-2 shrink-0 rounded-full ${note.tone === "danger" ? "bg-[var(--err)]" : "bg-[var(--warn)]"}`} />
+              <span className="min-w-0">
+                <span className="block text-th-text-primary" title={note.tooltip}>{note.title}</span>
+                {/* Server-reported reasons share one explanation; say it once. */}
+                {note.detail !== notes[index - 1]?.detail ? <span className="block text-xs text-th-text-muted">{note.detail}</span> : null}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {item.status?.steps ? (
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-1.5">
-            {labelled ? (
-              <label htmlFor={fieldId} className="text-[13px] font-medium leading-5 break-keep text-th-text-primary">{label}</label>
-            ) : (
-              <span className="text-[13px] font-medium leading-5 break-keep text-th-text-primary">{label}</span>
-            )}
-            {meta.changed ? <SettingsBadge tone="accent">{tr("바뀜", "Changed")}</SettingsBadge> : null}
-            {meta.flags.map((flag) => (
-              <SettingsBadge key={flag} tone={flag === "read_only" ? "neutral" : "warn"}>{FLAG_LABELS[flag][isKo ? 0 : 1]}</SettingsBadge>
+          <div className="text-xs font-medium text-th-text-muted">{tr("설정 방법", "How to set up")}</div>
+          <ul className="m-0 mt-1.5 flex list-none flex-col gap-1.5 p-0">
+            {item.status.steps.lines.map((line) => (
+              <li
+                key={line}
+                lang={item.status?.steps?.translated ? undefined : "en"}
+                className={`px-3 py-2 text-xs leading-5 [overflow-wrap:anywhere] ${SETTINGS_TRAY_CLASS} ${item.status?.steps?.translated ? "break-keep" : "font-mono"}`}
+              >
+                {line}
+              </li>
             ))}
-          </div>
-          {hint ? <p className="mt-0.5 text-xs leading-4 break-keep text-th-text-muted">{hint}</p> : null}
-        </div>
-        <div
-          className={
-            inline
-              ? "flex min-w-0 justify-end"
-              : "col-span-2 row-start-2 min-w-0 @min-[37.5rem]:col-span-1 @min-[37.5rem]:col-start-2 @min-[37.5rem]:row-start-1 @min-[37.5rem]:justify-self-end"
-          }
-        >
-          {control}
-          {extra}
-        </div>
-        <div className={inline ? "flex" : "col-start-2 row-start-1 flex justify-end @min-[37.5rem]:col-start-3"}>{detailsButton}</div>
-      </div>
-      {open ? (
-        <div
-          id={detailsId}
-          className={`mt-3 grid min-w-0 gap-2 px-3 py-3 text-xs leading-5 text-th-text-muted @min-[37.5rem]:grid-cols-2 @min-[37.5rem]:gap-3 ${SETTINGS_TRAY_CLASS}`}
-        >
-          <div>
-            {tr("기본값", "Default")}:{" "}
-            <span className="tabular-nums text-th-text-primary">{formatValue(meta.defaultValue, meta.valueUnit, tr)}</span>
-          </div>
-          <div className="break-keep">
-            {tr("적용", "Applies")}:{" "}
-            <span className="text-th-text-primary">
-              {!meta.editable
-                ? tr("여기서는 바꿀 수 없어요", "Cannot be changed here")
-                : meta.restartRequired
-                  ? tr("저장한 뒤 다시 시작해야 적용돼요", "After saving and restarting")
-                  : tr("저장하면 적용돼요", "When you save")}
-            </span>
-          </div>
-          {applyNote ? <div className="break-keep @min-[37.5rem]:col-span-2">{applyNote}</div> : null}
-          {meta.resettable && onReset ? (
-            <div className="@min-[37.5rem]:col-span-2">
-              <SettingsAction icon={<RotateCcw />} onClick={() => onReset(meta.key)}>
-                {tr("기본값으로 되돌리기", "Reset to default")}
-              </SettingsAction>
-            </div>
-          ) : null}
+          </ul>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/** "함께 보는 설정": linked rows with the note that ties them, each opening that row. */
+export function RelatedSettings({ item, items, onSelect, tr }: { item: CatalogItem; items: CatalogItem[]; onSelect: (key: string) => void; tr: Tr }) {
+  const links = item.related
+    .map((link) => ({ link, target: items.find((candidate) => candidate.key === link.key) }))
+    .filter((entry): entry is { link: CatalogItem["related"][number]; target: CatalogItem } => Boolean(entry.target));
+  if (links.length === 0) return null;
+  return (
+    <div className="min-w-0">
+      <div className="text-xs font-medium text-th-text-muted">{tr("함께 보는 설정", "Related settings")}</div>
+      <ul className="m-0 mt-1 flex list-none flex-col p-0">
+        {links.map(({ link, target }) => (
+          <li key={link.key}>
+            <button
+              type="button"
+              onClick={() => onSelect(target.key)}
+              className="flex min-h-11 w-full min-w-0 items-start gap-2 rounded-[var(--r-sm)] px-1 py-1.5 text-left hover:bg-surface-subtle sm:min-h-9"
+            >
+              <span aria-hidden className="mt-1.5 size-2 shrink-0 rounded-full bg-[var(--accent)]" />
+              <span className="min-w-0 text-[13px] leading-5">
+                <span className="block text-th-text-primary">{target.label}</span>
+                {link.noteKo ? <span className="block text-xs text-th-text-muted">{tr(link.noteKo, link.noteEn ?? link.noteKo)}</span> : null}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Category, name, mono key and description: the head of the inspector and the phone sheet. */
+export function ItemHeading({ item, category, showTitle = true }: { item: CatalogItem; category?: string; showTitle?: boolean }) {
+  return (
+    <div className="min-w-0">
+      {category ? <div className="text-xs text-th-text-muted">{category}</div> : null}
+      {showTitle ? <h2 className="m-0 text-base leading-6 font-semibold text-th-text-heading break-keep">{item.label}</h2> : null}
+      <div className="font-mono text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">{item.key}</div>
+      {/* No verified description yet means a blank line, not a guess (#8249 brings server meta). */}
+      {item.description ? <p className="m-0 mt-1.5 text-[13px] leading-5 text-th-text-secondary break-keep">{item.description}</p> : null}
     </div>
   );
 }
