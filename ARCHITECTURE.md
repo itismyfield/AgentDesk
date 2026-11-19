@@ -4016,6 +4016,8 @@ src/
 │   │   │   └── provider_choice.rs
 │   │   ├── loader/
 │   │   │   └── discovery.rs
+│   │   ├── provider_choice/
+│   │   │   └── persistent_codex_patch.rs
 │   │   ├── reliability_pg_tests/
 │   │   │   └── run_diagnostics_tests.rs
 │   │   ├── run_diagnostics/

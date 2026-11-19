@@ -28,7 +28,9 @@ use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::routines::execution_mode::{
     ExecutionProjection, definition_for_create, notice_limit_for_create,
 };
-use crate::services::routines::provider_choice::{self, ProviderChoice, choice_for_request};
+use crate::services::routines::provider_choice::{
+    self, PersistentModelPatch, ProviderChoice, choice_for_request,
+};
 use crate::services::routines::store::{RoutineRecord, RoutineRunRecord};
 use crate::services::routines::{
     NewRoutine, RoutineLifecycleEvent, RoutineScriptLoader, RoutineSessionCommand,
@@ -93,7 +95,7 @@ async fn refuse_invalid_choice(
     store: &crate::services::routines::RoutineStore,
     choice: &ProviderChoice,
     agents: &[Option<&str>],
-    persistent_model_patch: Option<&RoutineRecord>,
+    persistent_model_patch: Option<&PersistentModelPatch<'_>>,
 ) -> AppResult<()> {
     let refusal =
         provider_choice::refusal_for_agents(store.pool(), choice, agents, persistent_model_patch)
@@ -365,11 +367,13 @@ pub async fn patch_routine(
         .execution_definition_patch(&definition)
         .map_err(unprocessable)?;
     let mut choice = None;
-    if agent_id.is_some()
+    let checks_route = agent_id.is_some()
         || fallback_agent_id.is_some()
         || body.provider.as_present().is_some()
         || body.model.as_present().is_some()
-    {
+        || body.execution_strategy.is_some()
+        || body.discord_thread_id.as_present().is_some();
+    if checks_route {
         let agent = agent_id.as_deref().or(current.agent_id.as_deref());
         let fallback = match &fallback_agent_id {
             Some(fallback) => fallback.as_deref(),
@@ -392,19 +396,30 @@ pub async fn patch_routine(
             .execution_strategy
             .as_deref()
             .unwrap_or(&current.execution_strategy);
-        let persistent_model_patch = (effective.model != current_choice.model
-            && execution.is_none()
-            && strategy == "persistent")
-            .then_some(&current);
+        let thread = match body.discord_thread_id.as_present() {
+            Some(thread) => thread.as_deref(),
+            None if agent == current.agent_id.as_deref()
+                && effective.provider == current_choice.provider =>
+            {
+                current.discord_thread_id.as_deref()
+            }
+            None => None,
+        };
+        let persistent_model_patch =
+            (execution.is_none() && strategy == "persistent").then_some(PersistentModelPatch {
+                routine: &current,
+                previous: &current_choice,
+                thread,
+            });
         refuse_invalid_choice(
             &store,
             effective,
             &[agent, fallback],
-            persistent_model_patch,
+            persistent_model_patch.as_ref(),
         )
         .await?;
     }
-    let expected_updated_at = choice.as_ref().map(|_| current.updated_at);
+    let expected_updated_at = checks_route.then_some(current.updated_at);
     let mut patch = body.into_patch(execution, notice_limit);
     patch.expected_updated_at = expected_updated_at;
     patch.agent_id = agent_id;

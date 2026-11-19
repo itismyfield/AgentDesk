@@ -97,6 +97,36 @@ fn read(tmux: &str) -> Option<Proof> {
     serde_json::from_slice(&std::fs::read(path(tmux)).ok()?).ok()
 }
 
+pub(crate) fn requested_model_for_native(
+    provider: &str,
+    tmux: &str,
+    session: &str,
+) -> Option<Option<String>> {
+    #[cfg(unix)]
+    {
+        use crate::services::tui_prompt_dedupe::binding_context::{
+            SpawnNonceMarker, observe_spawn_nonce_marker,
+        };
+        let SpawnNonceMarker::Known(nonce) = observe_spawn_nonce_marker(tmux) else {
+            return None;
+        };
+        read(tmux)
+            .filter(|proof| {
+                proof.provider == provider
+                    && proof.tmux == tmux
+                    && proof.session == session
+                    && proof.nonce == nonce
+                    && !proof.argv_sha256.is_empty()
+            })
+            .map(|proof| proof.model)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (provider, tmux, session);
+        None
+    }
+}
+
 /// Retire S and report whether another execution still owns the proof file.
 pub(crate) fn retire(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,

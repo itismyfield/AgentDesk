@@ -111,6 +111,39 @@ fn exhaustion_switches_before_launch_and_unknown_usage_is_eligible() {
 }
 
 #[test]
+fn account_preview_matches_launch_without_touching_sticky_route() {
+    let mut router = Router::default();
+    let candidates = vec!["default".into(), "work".into()];
+    assert_eq!(
+        router
+            .select_for_launch("codex", 1, &candidates, 100, |id| id != "default")
+            .as_deref(),
+        Some("work")
+    );
+    let key = ("codex".to_string(), 1);
+    let inspect_at = 101;
+    let preview = router
+        .healthy_choice("codex", 1, &candidates, inspect_at, |_| true)
+        .cloned();
+    assert_eq!(router.routes[&key].touched_at, 100);
+    assert_eq!(preview.as_deref(), Some("work"));
+    assert_eq!(
+        router.select_for_launch("codex", 1, &candidates, inspect_at, |_| true),
+        preview
+    );
+    let expired_at = inspect_at + 86400;
+    let preview = router
+        .healthy_choice("codex", 1, &candidates, expired_at, |_| true)
+        .cloned();
+    assert_eq!(router.routes[&key].touched_at, inspect_at);
+    assert_eq!(preview.as_deref(), Some("default"));
+    assert_eq!(
+        router.select_for_launch("codex", 1, &candidates, expired_at, |_| true),
+        preview
+    );
+}
+
+#[test]
 fn retry_chain_is_bounded_even_after_cooldown_expires() {
     let mut router = Router::default();
     let candidates = vec!["a".into(), "b".into(), "c".into()];

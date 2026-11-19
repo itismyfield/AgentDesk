@@ -179,16 +179,14 @@ fn configured_launch_profile(
     Ok((profile, recovery_pinned))
 }
 
-/// Read the configured account without choosing or recording a fallback launch.
-pub(crate) fn configured_launch_account_is_named(
+/// Inspect the same account a launch would select without recording a launch.
+pub(crate) fn launch_account_is_named(
     provider: &ProviderKind,
     channel_id: Option<u64>,
     agent_id: &str,
 ) -> Result<bool, String> {
-    let schema = load_org_schema_for_auth()?;
-    let (profile, _) =
-        configured_launch_profile(schema.as_ref(), provider, channel_id, Some(agent_id))?;
-    Ok(profile.is_some_and(|id| id != crate::services::provider_auth_profile::DEFAULT_PROFILE_ID))
+    let overlay = resolve_launch_auth_overlay(provider, channel_id, Some(agent_id), false)?;
+    Ok(overlay.profile_id != crate::services::provider_auth_profile::DEFAULT_PROFILE_ID)
 }
 
 /// The account a launch for the channel and agent would take, read without the fallback router a
@@ -258,10 +256,11 @@ fn fallback_selects(provider: &ProviderKind, policy: &FallbackPolicy) -> bool {
         && crate::services::provider_auth_profile::extra_account_login_supported(provider)
 }
 
-fn spawn_auth_overlay_for_context(
-    provider: ProviderKind,
+fn resolve_launch_auth_overlay(
+    provider: &ProviderKind,
     channel_id: Option<u64>,
     agent_id: Option<&str>,
+    record_launch: bool,
 ) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
     use crate::services::provider_auth_profile::resolve;
 
@@ -271,30 +270,39 @@ fn spawn_auth_overlay_for_context(
         .map(|schema| schema.profiles.clone())
         .unwrap_or_default();
     let (primary_overlay, fallback_route) =
-        launch_overlay_parts(schema.as_ref(), &provider, channel_id, agent_id, &catalog)?;
-    let overlay = if let Some((channel, policy)) = fallback_route {
+        launch_overlay_parts(schema.as_ref(), provider, channel_id, agent_id, &catalog)?;
+    if let Some((channel, policy)) = fallback_route {
         let candidates = crate::services::org_catalog::fallback_candidates(
             &policy,
-            &provider,
+            provider,
             &primary_overlay.profile_id,
             &catalog,
         );
-        let selected = if fallback_selects(&provider, &policy) {
-            crate::services::provider_auth_profile::fallback::select_for_launch(
-                &provider,
-                channel,
-                &candidates,
-                |id| fallback_profile_available(&provider, id, agent_id, &catalog),
-            )
+        let selected = if fallback_selects(provider, &policy) {
+            use crate::services::provider_auth_profile::fallback;
+            let available = |id: &str| fallback_profile_available(provider, id, agent_id, &catalog);
+            if record_launch {
+                fallback::select_for_launch(provider, channel, &candidates, available)
+            } else {
+                fallback::preview_for_launch(provider, channel, &candidates, available)
+            }
             .ok_or_else(|| format!("no configured {} auth profile", provider.as_str()))?
         } else {
             primary_overlay.profile_id.clone()
         };
         resolve(provider.clone(), Some(&selected), None, &catalog)
-            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
     } else {
-        primary_overlay
-    };
+        Ok(primary_overlay)
+    }
+}
+
+fn spawn_auth_overlay_for_context(
+    provider: ProviderKind,
+    channel_id: Option<u64>,
+    agent_id: Option<&str>,
+) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
+    let overlay = resolve_launch_auth_overlay(&provider, channel_id, agent_id, true)?;
     if let Some(binding) = channel_id.and_then(|id| resolve_role_binding(ChannelId::new(id), None))
     {
         if let Some(bound_provider) = binding.provider.clone() {

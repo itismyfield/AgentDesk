@@ -105,6 +105,12 @@ struct Route {
     touched_at: i64,
 }
 
+impl Route {
+    fn active_at(&self, now: i64) -> bool {
+        now.saturating_sub(self.touched_at) < 86400
+    }
+}
+
 #[derive(Default)]
 struct Router {
     routes: HashMap<(String, u64), Route>,
@@ -114,8 +120,31 @@ struct Router {
 impl Router {
     fn prune(&mut self, now: i64) {
         self.cooldowns.retain(|_, until| *until > now);
-        self.routes
-            .retain(|_, route| now.saturating_sub(route.touched_at) < 86400);
+        self.routes.retain(|_, route| route.active_at(now));
+    }
+
+    fn healthy_choice<'a>(
+        &self,
+        provider: &str,
+        channel: u64,
+        candidates: &'a [String],
+        now: i64,
+        available: impl Fn(&str) -> bool,
+    ) -> Option<&'a String> {
+        let eligible = |id: &str| {
+            self.cooldowns
+                .get(&(provider.to_string(), id.to_string()))
+                .is_none_or(|until| *until <= now)
+                && available(id)
+        };
+        let selected = self
+            .routes
+            .get(&(provider.to_string(), channel))
+            .filter(|route| route.candidates == candidates && route.active_at(now))
+            .and_then(|route| candidates.iter().find(|id| **id == route.selected));
+        selected
+            .filter(|id| eligible(id))
+            .or_else(|| candidates.iter().find(|id| eligible(id)))
     }
 
     fn select(
@@ -126,6 +155,9 @@ impl Router {
         now: i64,
         available: impl Fn(&str) -> bool,
     ) -> Option<String> {
+        let selected = self
+            .healthy_choice(provider, channel, candidates, now, available)
+            .cloned();
         self.prune(now);
         let route = self
             .routes
@@ -137,18 +169,7 @@ impl Router {
                 ..Route::default()
             };
         }
-        let eligible = |id: &str| {
-            !self
-                .cooldowns
-                .contains_key(&(provider.to_string(), id.to_string()))
-                && available(id)
-        };
-        // Keep a healthy selected account to preserve its warm session.
-        let selected = if candidates.contains(&route.selected) && eligible(&route.selected) {
-            route.selected.clone()
-        } else {
-            candidates.iter().find(|id| eligible(id)).cloned()?
-        };
+        let selected = selected?;
         route.selected = selected.clone();
         route.touched_at = now;
         Some(selected)
@@ -231,6 +252,20 @@ pub(crate) fn select_for_launch(
     let now = chrono::Utc::now().timestamp();
     let mut router = router().lock().unwrap_or_else(|p| p.into_inner());
     router.select_for_launch(provider.as_str(), channel, candidates, now, available)
+}
+
+pub(crate) fn preview_for_launch(
+    provider: &ProviderKind,
+    channel: u64,
+    candidates: &[String],
+    available: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let now = chrono::Utc::now().timestamp();
+    let router = router().lock().unwrap_or_else(|p| p.into_inner());
+    router
+        .healthy_choice(provider.as_str(), channel, candidates, now, available)
+        .or_else(|| candidates.first())
+        .cloned()
 }
 
 pub(crate) fn fail(
