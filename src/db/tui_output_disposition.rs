@@ -22,6 +22,8 @@ pub(crate) enum Reason {
     TrustUnavailable,
     /// The channel's O adoption was refused or released, so its held body is discarded.
     AdoptionRefused,
+    /// A restarted takeover could not place these turns before one closed with its reason.
+    Unplaced,
 }
 
 impl Reason {
@@ -41,6 +43,9 @@ impl Reason {
             }
             Self::AdoptionRefused => {
                 "이 채널의 출력 연결이 거부되어 응답을 게시하지 않았습니다. 답은 터미널 세션에 남아 있습니다."
+            }
+            Self::Unplaced => {
+                "서버 재시작 뒤 이어받지 못한 이전 응답이 있어 게시하지 않았습니다. 답은 터미널 세션에 남아 있습니다."
             }
         }
     }

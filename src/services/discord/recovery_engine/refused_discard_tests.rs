@@ -158,3 +158,33 @@ async fn a_closure_names_the_native_opener_and_never_a_normalized_offset() {
     let closed = closure::of(&ProviderKind::Codex, &row).await.unwrap();
     assert_eq!(closed.from, opened, "the raw witness names the turn");
 }
+
+// A straddle's range is closed with its own reason and closure; a repeated attempt reuses that
+// one row, so one notice is posted.
+#[tokio::test]
+async fn an_unplaced_range_is_closed_once_with_its_reason_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let closed = disposition::closure::Closure {
+        session_id: "s-codex".into(),
+        path: "rollout.jsonl".into(),
+        dev: 1,
+        ino: 2,
+        from: 10,
+        until: Some(40),
+    };
+    close_unplaced(&pool, None, 7_651, &closed).await.unwrap();
+    close_unplaced(&pool, None, 7_651, &closed).await.unwrap();
+    let rows: Vec<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT reason, closure FROM tui_output_dispositions")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let value = serde_json::to_value(&closed).unwrap();
+    assert_eq!(rows, [("\"unplaced\"".to_string(), value)]);
+    let read = disposition::closure::of_channel(&pool, 7_651)
+        .await
+        .unwrap();
+    assert_eq!(read, [closed]);
+    pool.close().await;
+}

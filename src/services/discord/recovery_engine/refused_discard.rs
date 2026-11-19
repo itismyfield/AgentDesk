@@ -106,6 +106,33 @@ pub(in crate::services::discord) async fn discard_held(
     true
 }
 
+/// Closes the uncovered turns a restarted takeover finds before a closed one with their own
+/// reason: intent and closure commit together, then the notice posts once. The key names the
+/// rollout range, so a repeated attempt reuses it.
+pub(in crate::services::discord) async fn close_unplaced(
+    pool: &PgPool,
+    http: Option<Arc<serenity::Http>>,
+    channel: u64,
+    closed: &disposition::closure::Closure,
+) -> Result<(), String> {
+    let range = (closed.from, closed.until.unwrap_or(closed.from));
+    let (session, file) = (&closed.session_id, (closed.dev, closed.ino));
+    let id = Identity {
+        channel,
+        input: 0,
+        nonce: format!("{session}:{}:{}:{}:{}", file.0, file.1, range.0, range.1),
+        execution: "codex".into(),
+        source: "unplaced:v1".into(),
+    };
+    disposition::closure::persist(pool, &id, Reason::Unplaced, Some(closed)).await?;
+    if let Some(http) = http {
+        let (pool, intent) = (pool.clone(), (id, Reason::Unplaced));
+        let notice = async move { post(&http, &pool, &[intent]).await };
+        crate::services::discord::task_supervisor::spawn_observed("tui_rejection_notice", notice);
+    }
+    Ok(())
+}
+
 /// Persists a refused row's reason intent; nothing of its body may go before this succeeds.
 pub(in crate::services::discord) async fn persist(
     pool: &PgPool,
