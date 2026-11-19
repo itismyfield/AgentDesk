@@ -39,43 +39,58 @@ def _asks(content, marker):
 
 def _claude(path, offset, marker):
     """One API message spans several records with the same id; its last record is the bill."""
-    messages, asked, finished = {}, False, False
+    messages, asked, finished, calls, results = {}, False, False, set(), set()
     for start, row in _rows(path):
         message = row.get("message")
         if start < offset or not isinstance(message, dict):
             continue
+        blocks = message.get("content") if isinstance(message.get("content"), list) else []
         if row.get("type") == "user" and _asks(message.get("content"), marker):
             asked, finished = True, False
+        elif row.get("type") == "user" and asked:
+            results |= {b.get("tool_use_id") for b in blocks if isinstance(b, dict) and b.get("type") == "tool_result"}
         elif row.get("type") == "assistant" and isinstance(message.get("id"), str):
             messages[message["id"]] = message.get("usage")
+            calls |= {b.get("id") for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"}
             finished = asked and message.get("stop_reason") == "end_turn"
+    # A tool result whose call is not recorded means an API message of the turn is missing.
+    finished = finished and results <= calls
     # Every counter must be present: a missing one is an unread bill, not zero.
     return [sum(_count(used[field]) for used in messages.values()) for field in CLAUDE], finished
 
 
+MODEL_OUTPUT = {"message", "reasoning", "function_call", "custom_tool_call", "web_search_call"}
+
+
 def _codex(path, offset, marker):
-    """Counters are cumulative per session, so the turn is the last total minus the one before it."""
-    before, after, asked, counted, finished = None, None, False, False, False
-    for start, row in _rows(path):
-        payload = row.get("payload")
-        payload = payload if isinstance(payload, dict) else {}
-        info = payload.get("info") if payload.get("type") == "token_count" else None
-        total = info.get("total_token_usage") if isinstance(info, dict) else None
-        if isinstance(total, dict) and start < offset:
-            before = total
-        elif isinstance(total, dict):
-            after, counted = total, True
-        elif start >= offset and payload.get("type") == "message" and payload.get("role") == "user" \
-                and _asks(payload.get("content"), marker):
-            asked, counted, finished = True, False, False
-        elif start >= offset and payload.get("type") == "task_complete":
-            finished = asked and counted
-    if after is None:
+    """The turn's own usage records, one per API response, must run through its final answer and add up."""
+    current, turn_id, asked, records, last_output, finished = None, None, False, [], -1, False
+    for index, (start, row) in enumerate(_rows(path)):
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        kind = payload.get("type")
+        if start < offset:
+            continue
+        if row.get("type") == "turn_context" or kind == "task_started":
+            current = payload.get("turn_id")
+        elif row.get("type") == "response_item" and not asked:
+            if kind == "message" and payload.get("role") == "user" and _asks(payload.get("content"), marker):
+                asked, turn_id = True, current
+        elif row.get("type") == "response_item" and current == turn_id and kind in MODEL_OUTPUT \
+                and payload.get("role") in (None, "assistant"):
+            last_output = index
+        elif row.get("type") == "token_usage_record" and asked and payload.get("turn_id") == turn_id:
+            records.append((index, payload))
+        elif kind == "task_complete" and asked and payload.get("turn_id") == turn_id:
+            finished = True
+    if not records or not isinstance(turn_id, str) or not turn_id:
         return [0, 0, 0, 0], False
-    spent = {field: _count(after[field]) - (_count(before[field]) if before is not None else 0) for field in CODEX}
-    # Cached input is a part of input; reasoning is already inside output.
-    return [_count(spent["input_tokens"] - spent["cached_input_tokens"]), _count(spent["output_tokens"]),
-            _count(spent["cached_input_tokens"]), 0], finished
+    final = records[-1][1]["turn_token_usage"]
+    each = [record["usage"] for _, record in records]
+    # A missing response leaves either its answer after the last record or a sum short of the turn total.
+    complete = finished and records[-1][0] > last_output and all(
+        sum(_count(used[field]) for used in each) == _count(final[field]) for field in CODEX)
+    return [_count(final["input_tokens"] - final["cached_input_tokens"]), _count(final["output_tokens"]),
+            _count(final["cached_input_tokens"]), _count(final.get("cache_write_input_tokens", 0))], complete
 
 
 def turn(provider, marks, marker):

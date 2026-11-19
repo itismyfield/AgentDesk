@@ -34,12 +34,12 @@ outbox 원장과 tick job은 그대로 둔다. 끌 때 돌던 실행이 끝나�
  "release_host": {"base_url": "http://127.0.0.1:8791", "binary": "<release>/bin/agentdesk",
                   "runtime_root": "<release>/runtime", "server_log": "<release>/logs/dcserver.stdout.log",
                   "deploy_lock": "<release>/runtime/deploy-release.lock",
-                  "cells": {"claude-herdr": {"smoke_cell": "claude-tui", "channel_id": "<id>", "deadline_s": 120, "turn_tokens": 100000},
-                            "codex-herdr": {"smoke_cell": "codex-tui", "channel_id": "<id>", "deadline_s": 150, "turn_tokens": 40000}}}}
+                  "cells": {"claude-herdr": {"channel_id": "<id>", "deadline_s": 120, "turn_tokens": 100000},
+                            "codex-herdr": {"channel_id": "<id>", "deadline_s": 150, "turn_tokens": 40000}}}}
 ```
 
 `cells`에 없는 칸은 켜지 않은 칸이다. driver는 입력을 보내지 않고 `UNEVALUABLE`/`CELL_NOT_ENABLED`를 낸다.
-칸 이름은 manifest의 칸이고 `smoke_cell`은 하네스가 쓰는 셀 이름이다. `usage_wait_s`(기본 20)는 한 턴의 사용량 기록을 기다리는 한도다.
+칸 이름은 manifest의 칸이다. `usage_wait_s`(기본 20)는 한 턴의 사용량 기록을 기다리는 한도다.
 
 E-51은 Codex/Herdr 칸이다. 운영 Codex 채널이 모두 Herdr로 돌기 때문이다(근거는 [묶음별 실측](measurements.md)).
 manifest의 `codex/herdr` 공백은 회전 묶음을 계속 막고, `E-51/herdr` capability가 이 시나리오 하나만 연다.
@@ -59,20 +59,29 @@ manifest의 `codex/herdr` 공백은 회전 묶음을 계속 막고, `E-51/herdr`
 ## driver 계약
 
 - 채널 lease를 상속받지 못했거나, 켜지 않은 칸이거나, 셀이 idle이 아니면 입력 없이 거절한다(턴 0, 토큰 0).
+- **idle 증명·하네스·판정은 서버가 실제로 그 채널을 돌리는 host를 따른다.** 서버가 Herdr로 받는 채널이면 하네스 셀은
+  `<provider>-herdr`이고, preflight는 `/api/health/detail`의 Herdr 블록과 릴리스 바이너리의 `herdr status`로 입력 hold가
+  0인지 본다. 판정도 Herdr detail·CLI 증거가 있어야 PASS다. 관측한 host가 계획한 칸과 다르면 `HOST_MISMATCH`,
+  Herdr endpoint가 하나로 정해지지 않으면 `HERDR_ENDPOINT_AMBIGUOUS`로 입력 전에 거절한다.
+  이 경로는 서버 상태가 `healthy`일 때만 idle로 본다(degraded 사유 허용 목록 없음).
 - **하네스는 driver 프로세스 안에서 돈다.** 채널 lease를 가진 프로세스가 곧 입력을 보내는 프로세스다. driver가 죽으면
   입력도 같이 끝나고, lease가 풀린 뒤 남아서 보내는 프로세스가 없다.
 - **턴마다 예산을 확인한다.** 하네스의 모든 채널 입력은 보내기 직전에 gate를 지난다(`tui_relay/discord.py`의 `input_gate`).
   gate는 앞 턴을 실제 사용량으로 정산한 뒤에만 `TurnGuard.start(turn_tokens)`로 다음 턴을 예약한다.
   앞 턴의 사용량을 `usage_wait_s` 안에 못 읽거나, 턴당 상한을 넘었거나, 예산·기한이 모자라거나, 계획에 없는 프롬프트면
   그 뒤 입력은 0이다(`TURN_USAGE_UNKNOWN`·`TURN_OVER_BUDGET`·`TURN_BUDGET_EXHAUSTED`·`UNPLANNED_PROVIDER_INPUT`).
-  `!clear` 같은 text command는 턴을 예약하지 않지만 앞 턴 정산은 똑같이 거친다.
+  `!clear` 같은 text command는 턴을 예약하지 않지만 앞 턴 정산과 실행 기한은 똑같이 거친다.
+  전사 조회가 느릴 수 있어 예산 확인을 보내기 직전의 마지막 단계로 둔다.
   시작 전에는 예약이 시나리오 전체(프롬프트 수 × 턴당 상한, `deadline_s`)를 담는지도 본다.
 - **한 턴의 사용량은 입력과 끝난 응답이 모두 전사에 있을 때만 값이다.** Claude는 그 턴 입력 뒤 `end_turn` 응답의 usage,
-  Codex는 그 턴 입력 뒤 `token_count`와 `task_complete`가 있어야 한다. 필수 counter가 빠지면 0이 아니라 unknown이다.
+  Codex는 그 턴(`turn_id`)의 `token_usage_record`가 마지막 모델 출력 뒤까지 있고, 각 응답의 사용량 합이 턴 누계와 같고,
+  `task_complete`가 있어야 한다. Claude도 도구 결과에 짝이 되는 도구 호출 메시지가 빠지면 unknown이다.
+  필수 counter가 빠지면 0이 아니라 unknown이다.
   한 턴이라도 unknown이면 실행 전체의 턴·토큰을 unknown으로 보고한다. runner는 예약을 그대로 두고 그 provider를 보류한다.
   이번 턴의 입력이 없는 옛 세션 전사는 0으로 센다.
-- host는 서버가 Herdr로 받는 채널 목록에서 읽는다. 계획한 칸의 host와 다르면 `actual_occurrence_key`가 어긋나
-  PASS가 되지 않는다.
+- 마지막 턴은 시나리오가 끝난 뒤 정산한다. 그 턴이 상한을 넘거나 사용량이 없으면 스모크가 통과했어도 `UNEVALUABLE`이다.
+  예산 gate가 실제로 입력을 막은 경우만 빠진 턴을 `UNEVALUABLE`로 완화하고, 모든 입력이 나간 뒤 본 전달 실패는 `FAIL`이다.
+- 실행 뒤에도 host를 다시 읽어 `actual_occurrence_key`에 싣는다. 실행 중 바뀌면 계획 key와 어긋나 PASS가 되지 않는다.
 - 실행 중 서버 head·boot·binary가 바뀌면 `SERVER_CHANGED_DURING_RUN`이다.
 - 서버 로그 발췌는 판정 계수만 읽고 지운다. 그 구간에는 다른 채널의 로그도 들어 있기 때문이다.
 

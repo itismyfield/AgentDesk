@@ -21,7 +21,8 @@ class TurnGate:
     def __init__(self, guard, provider, markers, turn_tokens, transcript, wait_s):
         self.guard, self.provider, self.planned = guard, provider, list(markers)
         self.turn_tokens, self.transcript, self.wait_s = turn_tokens, transcript, wait_s
-        self.open, self.spent, self.stopped = None, [], None
+        # `withheld` is the reason an input was actually refused; a stop found by the last settle refused none.
+        self.open, self.spent, self.stopped, self.withheld = None, [], None, None
 
     def _marks(self):
         try:
@@ -58,14 +59,21 @@ class TurnGate:
     def before_send(self, content):
         if self.stopped is None:
             self.settle()
-        if self.stopped is None and content.split(" ", 1)[0] not in COMMANDS:
+        if self.stopped is None and content.split(" ", 1)[0] in COMMANDS:
+            # A command takes no turn but is still an input, so the run's deadline applies to it.
+            if time.monotonic() >= self.guard.deadline:
+                self.stopped = "TURN_BUDGET_EXHAUSTED"
+        elif self.stopped is None:
             marker = next((item for item in self.planned if item in content), None)
+            # The transcript lookup can be slow; the budget check is the last step before the send.
+            marks = self._marks() if marker is not None else []
             if marker is None:
                 self.stopped = "UNPLANNED_PROVIDER_INPUT"
             elif not self.guard.start(self.turn_tokens):
                 self.stopped = "TURN_BUDGET_EXHAUSTED"
             else:
                 self.planned.remove(marker)
-                self.open = {"marker": marker, "marks": self._marks()}
+                self.open = {"marker": marker, "marks": marks}
         if self.stopped is not None:
+            self.withheld = self.withheld or self.stopped
             raise Stop(self.stopped)
