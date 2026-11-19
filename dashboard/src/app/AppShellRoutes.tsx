@@ -6,7 +6,7 @@ import type { Agent, CompanySettings, DashboardStats, Department, DispatchedSess
 import type { Notification } from "../components/NotificationCenter";
 import type { AgentManagerTab } from "../components/agent-manager/useAgentManagerController";
 import { APP_ROUTES, DEFAULT_ROUTE_PATH, LEGACY_ROUTE_REDIRECTS } from "./routes";
-import HomeOverviewPage from "./HomeOverviewPage";
+import HomePageView from "../components/home/HomePageView";
 
 export interface AppShellRoutesContext {
   agents: Agent[];
@@ -59,7 +59,6 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
     stats,
     visibleDispatchedSessions,
     wsConnected,
-    wsLastEventTs,
     refreshAgents,
     refreshDepartments,
   } = ctx;
@@ -89,11 +88,9 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
       <Route
         path="/home"
         element={
-          <HomeOverviewPage
+          <HomePageView
             isMobileViewport={isMobileViewport}
             isKo={isKo}
-            wsConnected={wsConnected}
-            wsLastEventTs={wsLastEventTs}
             stats={stats}
             agents={agentsWithDispatched}
             onOpenAgent={openDefaultAgentInfo}

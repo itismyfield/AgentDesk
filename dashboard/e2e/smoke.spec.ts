@@ -19,10 +19,8 @@ const LEGACY_REDIRECTS = [
   { path: "/voice", to: /\/home$/ },
 ];
 
-// Mirrors HOME_DEFAULT_WIDGETS in src/app/HomeOverviewConfig.ts.
-const DEFAULT_HOME_WIDGET_ORDER = ["working", "attention", "m_tokens", "m_cost", "m_rate_limit", "routines"];
-const CUSTOM_HOME_WIDGET_ORDER = [...DEFAULT_HOME_WIDGET_ORDER].reverse();
-const DRAGGED_HOME_WIDGET_ORDER = ["routines", "working", "attention", "m_tokens", "m_cost", "m_rate_limit"];
+// v3 home is a fixed order: to-dos, system, agents, campaigns, today's routines, usage.
+const HOME_SECTIONS = ["할 일", "시스템", "에이전트", "캠페인", "오늘 루틴", "사용량"];
 
 async function openAppearancePanel(page: Page, isMobile: boolean) {
   if (isMobile) {
@@ -46,13 +44,15 @@ async function expectNoHorizontalOverflow(page: Page) {
   ).toBeLessThanOrEqual(metrics.viewportWidth + 1);
 }
 
-async function getHomeWidgetOrder(page: Page) {
-  return page.locator('[data-testid^="home-widget-"]').evaluateAll((elements) =>
-    elements
-      .map((element) => element.getAttribute("data-testid") ?? "")
-      .filter(Boolean)
-      .map((value) => value.replace("home-widget-", "")),
-  );
+async function mockHomeSources(page: Page) {
+  await page.route(/\/api\/rate-limits$/, (route) => route.fulfill({ json: { providers: [
+    { provider: "claude", profile_id: "default", stale: false, fetched_at: 1_795_000_000, buckets: [{ name: "7d", limit: 100, used: 83, remaining: 17, reset: 0 }] },
+  ] } }));
+  await page.route(/\/api\/settings\/runtime-config$/, (route) => route.fulfill({ json: {
+    current: { dispatchRateLimitGateEnabled: true, dispatchRateLimitGateDangerPct: 90 }, defaults: {},
+  } }));
+  await page.route(/\/api\/campaigns\?/, (route) => route.fulfill({ json: { campaigns: [], live: {}, limit: 100, offset: 0 } }));
+  await page.route(/\/api\/server-campaigns\?/, (route) => route.fulfill({ json: { campaigns: [] } }));
 }
 
 const MOCK_SKILLS = [
@@ -1585,102 +1585,43 @@ test.describe("Dashboard smoke tests", () => {
     }
   });
 
-  test("home: widget order persists from storage and reset restores defaults", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
-
-    await page.addInitScript((order) => {
-      window.localStorage.setItem("agentdesk.home.order", JSON.stringify(order));
-    }, CUSTOM_HOME_WIDGET_ORDER);
-
+  test("home: fixed v3 order with to-dos first and no token cards or layout editing", async ({ page }) => {
+    await mockHomeSources(page);
     await page.goto("/home");
 
-    await expect(page.getByTestId("home-widget-working")).toBeVisible({ timeout: 15000 });
-    await expect(await getHomeWidgetOrder(page)).toEqual(CUSTOM_HOME_WIDGET_ORDER);
+    const home = page.getByTestId("home-page");
+    await expect(page.getByTestId("home-usage")).toContainText("83%", { timeout: 15000 });
+    expect(await home.locator("section[aria-label]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")))).toEqual(HOME_SECTIONS);
+    await expect(page.getByTestId("home-todo")).toContainText("검토 대기");
+    await expect(page.getByTestId("home-todo")).toContainText("수락 대기");
+    await expect(page.getByTestId("home-system-memento")).toContainText("확인 불가");
+    await expect(page.getByTestId("home-usage")).toContainText("Claude 7일");
+    await expect(page.getByTestId("home-usage")).toContainText("90% 이상이면 자동 진행을 멈춰요");
+    await expect(page.getByTestId("home-usage").getByRole("link", { name: "설정" })).toHaveAttribute("href", "/settings?settingsPanel=workflow");
 
-    await page.getByTestId("home-edit-toggle").click();
-    await expect(page.getByTestId("home-reset-order")).toBeVisible();
-    await page.getByTestId("home-reset-order").click();
-
-    await expect.poll(() => getHomeWidgetOrder(page)).toEqual(DEFAULT_HOME_WIDGET_ORDER);
-    await expect
-      .poll(() =>
-        page.evaluate(() => JSON.parse(window.localStorage.getItem("agentdesk.home.order") ?? "[]")),
-      )
-      .toEqual(DEFAULT_HOME_WIDGET_ORDER);
-  });
-
-  test("home: desktop edit mode supports drag reorder and persists layout", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
-
-    await page.goto("/home");
-
-    await expect(page.getByTestId("home-widget-routines")).toBeVisible({ timeout: 15000 });
-    await page.getByTestId("home-edit-toggle").click();
-
-    const sourceBox = await page.getByTestId("home-drag-handle-routines").boundingBox();
-    const sourceWidgetBox = await page.getByTestId("home-widget-routines").boundingBox();
-    const targetBox = await page.getByTestId("home-widget-working").boundingBox();
-    expect(sourceBox).not.toBeNull();
-    expect(sourceWidgetBox).not.toBeNull();
-    expect(targetBox).not.toBeNull();
-
-    // closestCenter compares the dragged widget's centre, so aim that centre (not the handle) at the target.
-    const sourceX = sourceBox!.x + sourceBox!.width / 2;
-    const sourceY = sourceBox!.y + sourceBox!.height / 2;
-    const targetX = targetBox!.x + targetBox!.width / 2 + (sourceX - (sourceWidgetBox!.x + sourceWidgetBox!.width / 2));
-    const targetY = targetBox!.y + targetBox!.height / 2 + (sourceY - (sourceWidgetBox!.y + sourceWidgetBox!.height / 2));
-
-    await page.mouse.move(sourceX, sourceY);
-    await page.mouse.down();
-    await page.mouse.move(sourceX, sourceY - 32, { steps: 6 });
-    await page.mouse.move(targetX, targetY, { steps: 24 });
-    await page.mouse.up();
-
-    await expect.poll(() => getHomeWidgetOrder(page)).toEqual(DRAGGED_HOME_WIDGET_ORDER);
-    await expect
-      .poll(() =>
-        page.evaluate(() => JSON.parse(window.localStorage.getItem("agentdesk.home.order") ?? "[]")),
-      )
-      .toEqual(DRAGGED_HOME_WIDGET_ORDER);
-  });
-
-  test("home: renders working agents, attention and usage without gamification", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name === "mobile", "Desktop-only test");
-
-    await page.goto("/home");
-
-    for (const widgetId of DEFAULT_HOME_WIDGET_ORDER) {
-      await expect(page.getByTestId(`home-widget-${widgetId}`)).toBeVisible({ timeout: 15000 });
-    }
-    await expect(await getHomeWidgetOrder(page)).toEqual(DEFAULT_HOME_WIDGET_ORDER);
-    await expect(page.getByTestId("home-widget-attention")).toContainText(/검토|Review/);
-    await expect(page.getByTestId("home-widget-m_rate_limit")).not.toContainText("→");
-
-    for (const removed of ["sidebar-user-level-ring", "home-widget-quality", "home-widget-missions", "home-support-toggle", "home-daily-missions"]) {
+    // Token and cost cards live on the stats page; v3 home has no layout editing or live-connection line.
+    await expect(home.getByText(/오늘 토큰|API 비용|실시간 연결/)).toHaveCount(0);
+    for (const removed of ["home-edit-toggle", "home-reset-order", "home-widget-m_tokens", "sidebar-user-level-ring", "home-daily-missions"]) {
       await expect(page.getByTestId(removed)).toHaveCount(0);
     }
     await expect(page.getByText(/Lv\.\s?\d|XP/)).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
   });
 
-  test("home: mobile pairs usage metrics and disables edit affordance", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
-
+  test("home: agents fold the rest on desktop and list only busy agents on phones", async ({ page }, testInfo) => {
+    const isMobile = testInfo.project.name === "mobile";
+    const extras = Array.from({ length: 9 }, (_, index) => ({ ...MOCK_AGENTS[1], id: `agent-extra-${index}`, name: `Extra ${index}`, name_ko: `추가 ${index}` }));
+    await page.route(/\/api\/agents(?:\?.*)?$/, (route) => route.fulfill({ json: { agents: [...MOCK_AGENTS, ...extras] } }));
+    await mockHomeSources(page);
     await page.goto("/home");
 
-    await expect(page.getByTestId("home-widget-m_tokens")).toBeVisible({ timeout: 15000 });
-    await expect(page.getByTestId("home-widget-m_cost")).toBeVisible();
-    await expect(page.getByTestId("home-widget-working")).toBeVisible();
-    await expect(page.getByTestId("home-edit-toggle")).toHaveCount(0);
-
-    const [tokensBox, costBox] = await Promise.all([
-      page.getByTestId("home-widget-m_tokens").boundingBox(),
-      page.getByTestId("home-widget-m_cost").boundingBox(),
-    ]);
-
-    expect(tokensBox).not.toBeNull();
-    expect(costBox).not.toBeNull();
-    expect(Math.abs(costBox!.y - tokensBox!.y)).toBeLessThanOrEqual(1);
-    expect(costBox!.x).toBeGreaterThan(tokensBox!.x + tokensBox!.width);
+    const card = page.getByTestId("home-agents");
+    const toggle = card.getByRole("button", { name: isMobile ? "10명 더 보기" : "나머지 4명" });
+    await expect(toggle).toBeVisible({ timeout: 15000 });
+    await expect(card.locator("li button")).toHaveCount(isMobile ? 2 : 8);
+    await toggle.click();
+    await expect(card.locator("li button")).toHaveCount(12);
+    await expect(card.getByRole("button", { name: "접기" })).toHaveAttribute("aria-expanded", "true");
     await expectNoHorizontalOverflow(page);
   });
 
@@ -1772,30 +1713,28 @@ test.describe("Dashboard smoke tests", () => {
     await expectNoHorizontalOverflow(page);
   });
 
-  test("home: routines card puts recent failures first and links threads", async ({ page }) => {
+  test("home: today's routines show run results and later due times only", async ({ page }) => {
+    const noon = new Date();
+    noon.setHours(12, 0, 0, 0);
+    const at = (hours: number, days = 0) => new Date(noon.getTime() + days * 86_400_000 + (hours - 12) * 3_600_000).toISOString();
+    const base = MOCK_ROUTINES[1];
+    await page.clock.setFixedTime(noon);
+    await page.route(/\/api\/routines(?:\?.*)?$/, (route) => route.fulfill({ json: { routines: [
+      { ...base, id: "r-fail", next_due_at: at(9, 1), last_run: { ...MOCK_ROUTINES[0].last_run, status: "failed", started_at: at(9) } },
+      { ...base, id: "r-sent", next_due_at: at(6, 1), last_run: { ...MOCK_ROUTINES[0].last_run, status: "succeeded", action: "agent", started_at: at(6) } },
+      { ...base, id: "r-later", next_due_at: at(18), last_run: null },
+      { ...base, id: "r-old", next_due_at: at(9, 1), last_run: { ...MOCK_ROUTINES[0].last_run, status: "succeeded", started_at: at(9, -1) } },
+    ] } }));
     await page.goto("/home");
 
-    const card = page.getByTestId("routines-timeline");
-    await expect(card).toBeVisible({ timeout: 15000 });
-    await expect(page.getByTestId("routines-filter-controls")).toHaveCount(0);
-    await expect(page.getByTestId("routine-row-routine-late")).toBeVisible({ timeout: 15000 });
-
-    const rowIds = await page
-      .getByTestId("routines-timeline-list")
-      .locator("[data-testid^='routine-row-']")
-      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-testid")));
-    expect(rowIds).toEqual([
-      "routine-row-routine-late",
-      "routine-row-routine-soon",
-      "routine-row-routine-manual",
-    ]);
-    await expect(page.getByTestId("routine-row-routine-late")).toContainText(/최근 실패|Last failed/);
-    await expect(page.getByTestId("routine-thread-routine-soon")).toHaveAttribute(
-      "href",
-      "https://discord.com/channels/1469870512812462284/1505086338448363660",
-    );
-    await expect(page.getByTestId("routine-thread-routine-manual")).toHaveCount(0);
-    await expect(card.getByRole("link", { name: /전체 보기|View all/ })).toHaveAttribute("href", "/routines");
+    const card = page.getByTestId("home-routines");
+    await expect(card.locator("[data-testid^='home-routine-']")).toHaveCount(3, { timeout: 15000 });
+    const rows = await card.locator("[data-testid^='home-routine-']").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-testid")));
+    expect(rows).toEqual(["home-routine-r-sent", "home-routine-r-fail", "home-routine-r-later"]);
+    await expect(card.getByTestId("home-routine-r-sent")).toContainText("보냄");
+    await expect(card.getByTestId("home-routine-r-fail")).toContainText("실패");
+    await expect(card.getByTestId("home-routine-r-later")).toContainText("예정");
+    await expect(card).toContainText("3개 중 2개 끝남");
     await expectNoHorizontalOverflow(page);
   });
 

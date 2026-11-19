@@ -1,0 +1,61 @@
+import { useCallback, useMemo } from "react";
+import { PageFrame } from "../../app/PageFrame";
+import { useKanban } from "../../contexts/KanbanContext";
+import { useWorkspace } from "../../contexts/WorkspaceContext";
+import { isTestAgent } from "../../lib/agentHelpers";
+import type { Agent, DashboardStats } from "../../types";
+import { HomeCampaignsCard, HomeRoutinesCard, HomeUsageCard } from "./HomeActivityCards";
+import { HomeAgentsCard, HomeSystemCard, HomeTodoCard } from "./HomeSummaryCards";
+import { buildTodoItems, classifyAgents } from "./homeModel";
+import { loadHomeCampaigns, usePolled } from "./useHomeData";
+
+/** v3 home in a fixed order: to-dos, system, agents, campaigns, today's routines, usage. */
+export default function HomePageView({ isKo, isMobileViewport, stats, agents, onOpenAgent }: {
+  isKo: boolean;
+  isMobileViewport: boolean;
+  stats: DashboardStats | null;
+  agents: Agent[];
+  onOpenAgent: (agent: Agent) => void;
+}) {
+  const tr = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
+  const { sessions } = useWorkspace();
+  // Same open-card list the campaign queue uses, so counts and rows agree.
+  const { kanbanCards, kanbanCardsState } = useKanban();
+  const campaigns = usePolled(loadHomeCampaigns, 60_000);
+  // E2E fixture agents stay out of the roster unless they are actually busy.
+  const entries = useMemo(
+    () => classifyAgents(agents.filter((agent) => !isTestAgent(agent) || agent.status === "working"), sessions),
+    [agents, sessions],
+  );
+  const todo = useMemo(
+    () => buildTodoItems({ cards: kanbanCards, stats, campaigns: campaigns.data?.summaries ?? null, tr, isKo }),
+    [kanbanCards, stats, campaigns.data, tr, isKo],
+  );
+
+  return (
+    <PageFrame
+      testId="home-page"
+      title={tr("홈", "Home")}
+      description={tr("사람이 할 일이 맨 위예요. 그 아래로 에이전트·캠페인·루틴이 이어져요.", "What needs you comes first, then agents, campaigns and routines.")}
+    >
+      <div className="flex min-w-0 flex-col gap-3 sm:gap-4">
+        <div className="flex min-w-0 flex-wrap items-stretch gap-3 sm:gap-4">
+          <HomeTodoCard
+            items={todo}
+            loading={kanbanCardsState === "idle" || kanbanCardsState === "loading"}
+            cardsFailed={kanbanCardsState === "error"}
+            tr={tr}
+            className="flex-[2_1_32.5rem]"
+          />
+          <HomeSystemCard campaigns={campaigns} tr={tr} className="flex-[1_1_18.75rem]" />
+        </div>
+        <HomeAgentsCard entries={entries} isMobile={isMobileViewport} tr={tr} isKo={isKo} onOpenAgent={onOpenAgent} />
+        <div className="flex min-w-0 flex-wrap items-stretch gap-3 sm:gap-4">
+          <HomeCampaignsCard campaigns={campaigns} tr={tr} className="flex-[3_1_26.25rem]" />
+          <HomeRoutinesCard tr={tr} isKo={isKo} className="flex-[2_1_18.75rem]" />
+          <HomeUsageCard tr={tr} isKo={isKo} className="flex-[2_1_16.25rem]" />
+        </div>
+      </div>
+    </PageFrame>
+  );
+}

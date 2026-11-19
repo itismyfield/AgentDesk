@@ -295,11 +295,11 @@ test.describe("Agents tab", () => {
 });
 
 test.describe("Shared agent detail overlay", () => {
-  test("opens from the home working list and closes", async ({ page }, testInfo) => {
+  test("opens from the home agents card and closes", async ({ page }, testInfo) => {
     await mockShell(page);
     await page.goto("/home");
     const isMobile = testInfo.project.name === "mobile";
-    await page.getByTestId("home-working-agents").getByRole("button").first().click();
+    await page.getByTestId("home-agents").getByRole("button", { name: /^(아다 대시보드|Ada Dashboard)/ }).click();
     const overlay = page.getByRole("dialog", { name: /ada — 에이전트 상세/ });
     await expect(overlay).toBeVisible();
     await expect(overlay.getByRole("heading", { name: "ada" })).toBeVisible();
