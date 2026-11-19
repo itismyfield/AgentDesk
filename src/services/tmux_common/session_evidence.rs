@@ -66,8 +66,9 @@ pub(crate) fn retire(
 ) -> Result<(), String> {
     use super::{legacy_tmp_session_path, session_temp_path};
     let tmux = authority.session();
-    let mut result =
-        crate::services::tui_input::routine_model::retire(authority, provider, session);
+    let other_proof =
+        crate::services::tui_input::routine_model::retire(authority, provider, session)?;
+    let mut result = Ok(());
     if matches!(provider, "claude" | "codex") {
         for path in [
             session_temp_path(tmux, CLAUDE_SESSION_AUTH_TEMP_EXT),
@@ -84,7 +85,7 @@ pub(crate) fn retire(
             };
             if account_record(&account).is_some_and(|(id, _)| id == session) {
                 let profile = auth.with_extension(TMUX_AUTH_PROFILE_TEMP_EXT);
-                if paired_profile(&profile) {
+                if !other_proof && paired_profile(&profile) {
                     let removed = remove(&profile);
                     result = result.and(removed);
                 }

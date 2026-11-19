@@ -706,6 +706,14 @@ async fn routine_fix6_clear_retires_only_the_forgotten_evidence_pg() {
     assert_eq!(set_selector().await.unwrap().rows_affected(), 1);
     clear().await.unwrap();
     assert_eq!(selector().await.unwrap(), None);
-    assert_eq!(std::fs::read_to_string(path).unwrap(), successor);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), successor);
     assert_eq!(fx.markers(), markers);
+
+    // The next execution's profile can be published before its native account record.
+    tc::write_claude_session_auth(&fx.name, SESSION, "work").unwrap();
+    assert_eq!(set_selector().await.unwrap().rows_affected(), 1);
+    clear().await.unwrap();
+    assert_eq!(selector().await.unwrap(), None);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), successor);
+    assert_eq!(fx.markers(), (Some("work".into()), None));
 }

@@ -97,17 +97,21 @@ fn read(tmux: &str) -> Option<Proof> {
     serde_json::from_slice(&std::fs::read(path(tmux)).ok()?).ok()
 }
 
+/// Retire S and report whether another execution still owns the proof file.
 #[cfg(unix)]
 pub(crate) fn retire(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     provider: &str,
     session: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let tmux = authority.session();
-    if tracks_native_session(provider, tmux, session) {
+    if let Some(proof) = read(tmux) {
+        if proof.provider != provider || proof.tmux != tmux || proof.session != session {
+            return Ok(true);
+        }
         crate::services::tmux_common::session_evidence::remove(&path(tmux))?;
     }
-    Ok(())
+    Ok(false)
 }
 
 /// A null claim needs the strict boundary when this pane already applied a routine model.
