@@ -18,7 +18,7 @@ import { RelationsTaskNode, type TaskNodeData } from "./RelationsTaskNode";
 import { nodeMarker } from "./StatusMarker";
 import {
   MAX_DEPTH, adoptLatest, applyEdits, editCounts, editField, fieldErrors, findCycles, isLocked, keepDraft, layoutTasks, parseScope, rebaseEdits,
-  NODE_WIDTH, dropKeptDraft, keptDraft, scopeTasks, taskLabel, taskName, type Conflict, type EditScope, type Edits,
+  NODE_WIDTH, dropKeptDraft, keptDraft, scopeTasks, warnBeforeUnload, taskLabel, taskName, type Conflict, type EditScope, type Edits,
 } from "./relationsEditorModel";
 
 const NODE_TYPES = { relationsTask: RelationsTaskNode };
@@ -84,7 +84,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   const counts = editCounts(edits);
   const changed = counts.dependencies + counts.title + counts.issue_url;
   const dirty = changed > 0;
-  const invalid = Object.keys(edits).flatMap((id) => [...fieldErrors(byId.get(id)!)].map((field) => ({ id, field })));
+  const invalid = Object.keys(edits).flatMap((id) => [...fieldErrors(byId.get(id)!, edits[id])].map((field) => ({ id, field })));
   const errors = cycles.length + invalid.length;
   const label = (id: string) => byId.get(id) ? taskLabel(byId.get(id)!) : id;
   const cycleText = (path: string[]) => tr(`순환: ${path.map(label).join(" → ")}`, `Cycle: ${path.map(label).join(" → ")}`);
@@ -93,11 +93,22 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   const parts = [[counts.dependencies, "선행", "dependencies"], [counts.title, "제목", "titles"], [counts.issue_url, "이슈", "issues"]] as const;
   const summary = parts.filter(([count]) => count > 0).map(([count, ko, en]) => tr(`${ko} ${count}`, `${count} ${en}`)).join(" · ");
 
+  /** A new base takes the undo steps with it: they were drafted against the old one and would undo the server's changes. */
+  const reset = (next: Campaign, nextEdits: Edits) => { setBase(next); setEdits(nextEdits); setUndo([]); typing.current = null; };
   // With nothing unsaved, a newer copy from the page's refresh becomes the base, so the screen stays current.
-  useEffect(() => { if (!dirty && campaign.revision > base.revision) setBase(campaign); }, [campaign, base.revision, dirty]);
+  useEffect(() => { if (!dirty && campaign.revision > base.revision) { setBase(campaign); setUndo([]); typing.current = null; } }, [campaign, base.revision, dirty]);
+  /** Tasks of a cycle the merge brought in: once drawn, the view moves so both ends show. */
+  const [reveal, setReveal] = useState<string[] | null>(null);
+  useEffect(() => {
+    const shown = reveal?.filter((id) => inScope.has(id)) ?? [];
+    if (shown.length && flow.current) void flow.current.fitView({ nodes: shown.map((id) => ({ id })), padding: 0.3, minZoom: 0.1, maxZoom: 1, duration: 200 });
+    if (reveal) setReveal(null);
+  }, [reveal]); // eslint-disable-line react-hooks/exhaustive-deps -- runs once per merge, on the tasks drawn after it
 
-  /** Every change goes through here: one undo step, and the save problem it may have answered is cleared. */
+  /** Every change goes through here: one undo step, and the save problem it may have answered is cleared. Nothing
+   * changes while a save is out, so what it sent is what the screen shows when it lands. */
   const commit = (update: (current: Edits) => Edits, run: string | null = null) => {
+    if (saving) return;
     const next = update(edits);
     if (next === edits) return;
     if (run === null || run !== typing.current) setUndo((stack) => [...stack, edits].slice(-UNDO_LIMIT));
@@ -120,8 +131,9 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   };
   const stepBack = () => {
     const previous = undo.at(-1);
-    if (!previous) return;
-    setUndo((stack) => stack.slice(0, -1)); setEdits(previous); typing.current = null;
+    if (!previous || saving) return;
+    // A conflict notice judged the draft before this step, so its list and its adopt button go with it.
+    setUndo((stack) => stack.slice(0, -1)); setEdits(previous); setProblem(null); typing.current = null;
   };
 
   /** Reads the newest copy, puts the edits on it and sends it; a 409 starts over from a fresh read. */
@@ -137,11 +149,16 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
           setProblem({ text: tr(`다른 곳에서도 바뀌어 저장하지 않았어요: ${list}`, `Changed elsewhere too, so nothing was saved: ${list}`), conflicts: merged.conflicts, latest });
           return false;
         }
+        // A cycle only the merge makes is brought onto the screen: the newest copy becomes the base with the draft on top.
         const loops = findCycles(merged.nodes);
-        if (loops.length) { setProblem({ text: tr(`최신본과 합치면 순환이 생겨요. ${cycleText(loops[0])}`, `Merged with the newest copy this makes a cycle. ${cycleText(loops[0])}`) }); return false; }
+        if (loops.length) {
+          reset(latest, adoptLatest(latest, edits, [])); setReveal(loops[0]);
+          setProblem({ text: tr(`최신본과 합치면 순환이 생겨 저장하지 않았어요. 최신본을 불러오고 고친 내용은 그대로 두었어요. ${cycleText(loops[0])}`, `Merged with the newest copy this makes a cycle, so nothing was saved. The newest copy is loaded and your edits are kept. ${cycleText(loops[0])}`) });
+          return false;
+        }
         try {
           const saved = await saveCampaignNodes(latest, merged.nodes);
-          onSaved(saved); setBase(saved); setEdits({}); setUndo([]); typing.current = null;
+          onSaved(saved); reset(saved, {});
           return true;
         } catch (cause) {
           if (!(cause instanceof ApiRequestError && cause.status === 409 && attempt < RETRIES)) throw cause;
@@ -154,8 +171,8 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
       return false;
     } finally { setSaving(false); }
   };
-  const adopt = (latest: Campaign, conflicts: Conflict[]) => { setBase(latest); setEdits(adoptLatest(latest, edits, conflicts)); setUndo([]); setProblem(null); };
-  const discard = () => { setBase(campaign); setEdits({}); setUndo([]); setRestored(false); };
+  const adopt = (latest: Campaign, conflicts: Conflict[]) => { reset(latest, adoptLatest(latest, edits, conflicts)); setProblem(null); };
+  const discard = () => { reset(campaign, {}); setRestored(false); };
 
   // Leaving with unsaved changes: the parent asks through `leave`, a reload or close through beforeunload, and an
   // unmount without a decision (rail, palette) keeps the draft for this tab's session.
@@ -168,9 +185,8 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   }, [dirty, request, leave]);
   useEffect(() => {
     if (!dirty) return;
-    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
   }, [dirty]);
   useEffect(() => { dropKeptDraft(campaign.id); return () => { if (keep.current) keepDraft(keep.current); }; }, [campaign.id]);
   const decide = async (choice: "discard" | "save") => {
@@ -251,7 +267,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
     if (hidden > 0) void flow.current.setViewport({ ...view, x: view.x - hidden }, { duration: 200 });
   }, [selection, wide]);
   const inspector =<RelationsInspector node={chosen} edge={selection?.kind === "edge" ? selection : null} lock={selection ? lockOf(selection.kind === "node" ? selection.id : selection.target) : null}
-    nodes={byId} cycles={cycles} errors={new Set(invalid.filter((entry) => entry.id === chosen?.id).map((entry) => entry.field))} problems={problems} cycleText={cycleText} tr={tr}
+    nodes={byId} cycles={cycles} errors={new Set(invalid.filter((entry) => entry.id === chosen?.id).map((entry) => entry.field))} problems={problems} cycleText={cycleText} busy={saving} tr={tr}
     act={{
       field: (field, value) => chosen && setText(chosen.id, field, value),
       add: (dependency) => chosen && link(dependency, chosen.id),
@@ -286,7 +302,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
       </div>}
       {restored && <div role="status" className="flex flex-wrap items-center gap-2 border-b border-[var(--line)] px-4 py-2 text-sm text-[var(--fg)]">
         <span className="min-w-0 flex-1">{tr("저장하지 않은 편집을 다시 불러왔어요.", "Your unsaved edits are back.")}</span>
-        <Button variant="ghost" size="sm" onClick={discard}>{tr("버리기", "Discard")}</Button>
+        <Button variant="ghost" size="sm" disabled={saving} onClick={discard}>{tr("버리기", "Discard")}</Button>
       </div>}
     </div>
     <div data-editor-chrome="scope" className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-[var(--line)] bg-[var(--th-card-bg)] px-3 py-2">
@@ -305,7 +321,7 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
     <div className={`relative grid min-h-0 ${wide ? "grid-cols-[minmax(0,1fr)_20rem]" : ""}`}>
       <div ref={canvas} data-editor-canvas className="relative min-h-0 min-w-0">
         <ReactFlow key={JSON.stringify(scope)} nodes={graphNodes} edges={edges} nodeTypes={NODE_TYPES} onInit={firstView} proOptions={{ hideAttribution: true }}
-          minZoom={0.1} maxZoom={1.5} nodesDraggable={false} panOnScroll zoomOnScroll={false} deleteKeyCode={["Delete", "Backspace"]}
+          minZoom={0.1} maxZoom={1.5} nodesDraggable={false} panOnScroll zoomOnScroll={false} nodesConnectable={!saving} deleteKeyCode={saving ? null : ["Delete", "Backspace"]}
           onConnect={({ source, target }) => source && target && link(source, target)}
           isValidConnection={({ target }) => lockOf(target) === null}
           // Selection arrives as a change for a click and for Enter on a focused task or line alike.
@@ -347,9 +363,9 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
       title={tr(`저장하지 않은 변경이 ${changed}건 있어요`, `${changed} unsaved changes`)}
       description={tr(`${summary}. 나가면 이 변경은 사라져요.`, `${summary}. Leaving drops them.`)}
       footer={<>
-        <Button variant="secondary" onClick={() => void decide("discard")}>{tr("버리고 나가기", "Discard and leave")}</Button>
+        <Button variant="secondary" disabled={saving} onClick={() => void decide("discard")}>{tr("버리고 나가기", "Discard and leave")}</Button>
         <Button variant="secondary" onClick={() => setLeaving(null)}>{tr("계속 편집", "Keep editing")}</Button>
-        <Button variant="primary" loading={saving} disabled={errors > 0} onClick={() => void decide("save")}>{tr("저장하고 나가기", "Save and leave")}</Button>
+        <Button variant="primary" loading={saving} disabled={saving || errors > 0} onClick={() => void decide("save")}>{tr("저장하고 나가기", "Save and leave")}</Button>
       </>} />
   </section>;
 }

@@ -20,6 +20,11 @@ describe("relations editor scope", () => {
     expect(scopeTasks(nodes, { kind: "task", id: "B", depth: 1 }).ids).toEqual(["B", "A", "C", "D"]);
     const many = Array.from({ length: SCOPE_LIMIT + 5 }, (_, index) => node(`n${index}`, { group: "big" }));
     expect(scopeTasks(many, { kind: "group", key: "big" })).toMatchObject({ total: SCOPE_LIMIT + 5 });
+    // S ↔ A, A → B: A, reached upstream through the loop, is still walked downstream to B; the limit holds on the union.
+    const loop = [node("S", { dependencies: ["A"] }), node("A", { dependencies: ["S"] }), node("B", { dependencies: ["A"] })];
+    expect(scopeTasks(loop, { kind: "task", id: "S", depth: 2 }).ids).toEqual(["S", "A", "B"]);
+    const hub = scopeTasks([node("H"), ...many.map((value) => ({ ...value, dependencies: ["H"] }))], { kind: "task", id: "H", depth: 1 });
+    expect([hub.ids.length, hub.total]).toEqual([SCOPE_LIMIT, SCOPE_LIMIT + 6]);
     expect(scopeTasks(many, { kind: "group", key: "big" }).ids).toHaveLength(SCOPE_LIMIT);
   });
 
@@ -42,8 +47,10 @@ describe("relations editor checks", () => {
     let edits = editField({}, nodes[1], "B", "dependencies", ["A", "E"]);
     edits = editField(edits, nodes[1], "B", "title", "  ");
     expect(editCounts(edits)).toEqual({ dependencies: 1, title: 1, issue_url: 0 });
-    expect(fieldErrors(applyEdits(nodes, edits)[1])).toEqual(new Set(["title"]));
-    expect(fieldErrors({ ...nodes[0], issue_url: "javascript:alert(1)" })).toEqual(new Set(["issue_url"]));
+    expect(fieldErrors(applyEdits(nodes, edits)[1], edits.B)).toEqual(new Set(["title"]));
+    expect(fieldErrors({ ...nodes[0], issue_url: "javascript:alert(1)" }, { issue_url: "javascript:alert(1)" })).toEqual(new Set(["issue_url"]));
+    // Only changed fields are judged: a link the ledger already holds in its own short form stays as it is.
+    expect(fieldErrors({ ...nodes[0], issue_url: "owner/repo/issues/9" }, { title: "A" })).toEqual(new Set());
     expect(editField(editField(edits, nodes[1], "B", "title", "B"), nodes[1], "B", "dependencies", ["A"])).toEqual({});
   });
 });

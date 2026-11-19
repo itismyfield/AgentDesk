@@ -86,8 +86,11 @@ export default function CampaignsPanel({ language }: { language: string }) {
   useEffect(() => { if (selectedPartial && selectedId) void refreshCampaign(selectedId); }, [selectedPartial, selectedId, refreshCampaign]);
   const [serverSelected, setServerSelected] = useState<string | null>(linked?.mode === "server" ? linked.campaign : null);
   const [node, setNode] = useState<string | null>(linked?.node ?? null);
-  // The ledger relations editor's scope while it is open; `leave` is set by the editor while it has unsaved changes.
-  const [editing, setEditing] = useState<EditScope | null>(linked?.mode === "legacy" ? linked.edit ?? null : null);
+  // The ledger relations editor's scope while it is open, tied to the campaign it opened on, so picking another campaign
+  // never opens that one on this scope; `leave` is set by the editor while it has unsaved changes.
+  const [edit, setEdit] = useState<{ campaign: string; scope: EditScope } | null>(linked?.mode === "legacy" && linked.edit ? { campaign: linked.campaign, scope: linked.edit } : null);
+  const editing = mode === "legacy" && edit?.campaign === selectedId ? edit.scope : null;
+  const setEditing = (scope: EditScope | null) => setEdit(scope && selectedId ? { campaign: selectedId, scope } : null);
   const leave = useRef<((proceed: () => void) => void) | null>(null);
   const leaveEditor = (proceed: () => void) => leave.current ? leave.current(proceed) : proceed();
   const server = useServerCampaignReads(mode === "server" ? serverSelected : null);
@@ -282,7 +285,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const select = (entry: CampaignEntry) => {
     setPicking(false);
     if (entry.kind === "server") selectServer(entry.id);
-    else { setMode("legacy"); setSelectedId(entry.id); setNode(null); }
+    else { setMode("legacy"); setSelectedId(entry.id); setNode(null); setEdit(null); }
   };
   const createNew = () => { setPicking(false); openDraft(NEW_DRAFT, () => createDraft(null)); };
   const list = <CampaignList entries={entries} selectedKey={selectedKey} onSelect={select} onCreate={createNew} createDisabled={serverDown}
