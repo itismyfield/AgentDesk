@@ -264,6 +264,12 @@ body {
   textarea { font-size: 16px; }
 }
 
+/* Kit Select/TextField size rules pin --fs (lg 14px) over their own touch rule; touch screens keep 16px. */
+@media (pointer: coarse) {
+  .aui-select-clean.aui-select-clean[data-size],
+  .aui-text-field-clean.aui-text-field-clean[data-size] { --fs: 16px; }
+}
+
 #root {
   height: 100dvh;
   display: flex;

@@ -14,7 +14,7 @@ REPO = Path(__file__).resolve().parents[1]
 DEPLOY_END = "\n_clean_release_build_cache_after_staging\n"
 # Shell files deploy-release.sh sources, copied verbatim into the dry repo.
 HELPERS = ("_deploy_policy_generation.sh", "lib/deploy_allow_degraded.sh",
-           "lib/dashboard_build_commit.sh")
+           "lib/dashboard_build_commit.sh", "lib/deploy_routines.sh")
 DEFAULTS = """
 ADK_DEFAULT_PORT=1
 setup_sccache_env() { return 1; }

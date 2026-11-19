@@ -1,11 +1,9 @@
 //! Durable manual-steer operation: a queue work receipt, never a turn owner.
 
-use std::fmt;
-
-use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::action_handle::ActionHandle;
+use super::fixed_str::deserialize_fixed_str;
+use super::handle_value::ActionHandle;
 
 /// Untruncated 256-bit value: a full BLAKE3 digest or an episode nonce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -44,29 +42,6 @@ impl<'de> Deserialize<'de> for Bytes256 {
             Self::from_hex,
         )
     }
-}
-
-/// Validates the borrowed string without creating an extra owned `String`; the deserializer
-/// may still buffer escaped input first.
-pub(super) fn deserialize_fixed_str<'de, D: Deserializer<'de>, T>(
-    deserializer: D,
-    expecting: &'static str,
-    parse: fn(&str) -> Option<T>,
-) -> Result<T, D::Error> {
-    struct FixedStr<T> {
-        expecting: &'static str,
-        parse: fn(&str) -> Option<T>,
-    }
-    impl<T> Visitor<'_> for FixedStr<T> {
-        type Value = T;
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str(self.expecting)
-        }
-        fn visit_str<E: de::Error>(self, text: &str) -> Result<T, E> {
-            (self.parse)(text).ok_or_else(|| E::custom(format_args!("expected {}", self.expecting)))
-        }
-    }
-    deserializer.deserialize_str(FixedStr { expecting, parse })
 }
 
 /// One Discord source message folded into the entry, at the generation it was queued.

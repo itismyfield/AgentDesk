@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import * as api from "../../api";
 import { getOnboardingConnectionStatus } from "../../api/settingsRuntime";
+import { LIVE_POLL_INTERVAL_MS } from "../OpsPageModel";
 import { providerDisplayName } from "./SettingsCopy";
 import type { SettingsNotificationType } from "./SettingsModel";
 import type { PendingProviderLogin, ProviderAuthProvider } from "./SettingsProvidersModel";
@@ -11,8 +12,8 @@ type Notify = (ko: string, en: string, type?: SettingsNotificationType) => void;
 
 const STATUS_STALE_MS = 30_000;
 
-/** Onboarding status and bot health, read once for the connection rows and the tab badge. */
-export function useConnectionStatus() {
+/** Onboarding status and server health for the connection rows; health polls while the connections category is open. */
+export function useConnectionStatus({ live }: { live: boolean }) {
   const onboarding = useQuery({
     queryKey: ["settings", "onboarding-status"],
     queryFn: getOnboardingConnectionStatus,
@@ -23,9 +24,19 @@ export function useConnectionStatus() {
     queryKey: ["settings", "health"],
     queryFn: () => api.getHealthDetail(),
     staleTime: STATUS_STALE_MS,
+    refetchInterval: live ? LIVE_POLL_INTERVAL_MS : false,
     retry: false,
   });
   return { onboarding, health };
+}
+
+export function usePromptRetention() {
+  return useQuery({
+    queryKey: ["settings", "prompt-retention"],
+    queryFn: () => api.getPromptManifestRetention(),
+    staleTime: STATUS_STALE_MS,
+    retry: false,
+  });
 }
 
 export function useOperatorConnectors() {
@@ -37,7 +48,7 @@ export function useOperatorConnectors() {
   });
 }
 
-/** Provider accounts load only once the AI tab is opened; the endpoint can be slow. */
+/** Provider accounts load only once the usage category is opened; the endpoint can be slow. */
 export function useProviderAccounts({ enabled, notify, tr }: { enabled: boolean; notify: Notify; tr: Tr }) {
   const query = useQuery({
     queryKey: ["settings", "provider-auth-profiles"],

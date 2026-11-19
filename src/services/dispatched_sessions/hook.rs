@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::dispatched_session_canonical_identity::HookSessionUpsertError;
 
 async fn hook_session_pg(
     state: &AppState,
@@ -209,11 +210,17 @@ async fn hook_session_pg(
                     "canonical session identity write rejected"
                 );
             }
-            Err(
-                crate::db::dispatched_session_canonical_identity::hook_session_upsert_error_to_app_error(
-                    error,
-                ),
-            )
+            Err(hook_session_upsert_error_to_app_error(error))
+        }
+    }
+}
+
+/// DB upsert 오류를 HTTP 응답 오류로 옮긴다. 충돌은 409, 저장 오류는 Database code의 500이다.
+fn hook_session_upsert_error_to_app_error(error: HookSessionUpsertError) -> AppError {
+    match error {
+        HookSessionUpsertError::Conflict(conflict) => AppError::conflict(conflict.into_message()),
+        HookSessionUpsertError::Database(error) => {
+            AppError::internal(error).with_code(ErrorCode::Database)
         }
     }
 }
@@ -232,4 +239,35 @@ pub async fn hook_session_with_query(
         return hook_session_pg(&state, pool, body, query.expected_turn_nonce.as_deref()).await;
     }
     Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HookSessionUpsertError, hook_session_upsert_error_to_app_error};
+    use crate::db::dispatched_session_canonical_identity::SessionIdentityConflictKind;
+    use crate::error::ErrorCode;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn canonical_identity_conflict_is_http_409_ready() {
+        let error = hook_session_upsert_error_to_app_error(HookSessionUpsertError::test_conflict(
+            SessionIdentityConflictKind::AmbiguousCanonical,
+            "ambiguous canonical identity",
+        ));
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.code(), ErrorCode::Conflict);
+        assert_eq!(error.to_string(), "ambiguous canonical identity");
+        assert!(error.context().is_empty());
+    }
+
+    #[test]
+    fn hook_session_database_error_is_http_500_with_database_code() {
+        let error = hook_session_upsert_error_to_app_error(HookSessionUpsertError::Database(
+            "pool closed".to_string(),
+        ));
+        assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code(), ErrorCode::Database);
+        assert_eq!(error.to_string(), "pool closed");
+        assert!(error.context().is_empty());
+    }
 }
