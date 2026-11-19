@@ -35,7 +35,42 @@ pub(super) fn stamp(source: &Source, file: &std::fs::File) -> Result<Fingerprint
 
 /// Reads exactly `through..EOF` once; a stamp or byte that differs from the capture discards it.
 fn read_tail(source: &Source, tail: &Tail) -> Result<(Vec<u8>, std::fs::File), String> {
-    read_tail_with(source, tail, |reader, bytes| reader.read_to_end(bytes))
+    read_tail_with(source, tail, |reader, bytes| {
+        #[cfg(test)]
+        {
+            read_probe::read(reader, bytes)
+        }
+        #[cfg(not(test))]
+        {
+            reader.read_to_end(bytes)
+        }
+    })
+}
+
+#[cfg(test)]
+pub(in crate::services::discord::turn_finalizer) mod read_probe {
+    use super::*;
+    use std::cell::RefCell;
+
+    type AfterRead = Box<dyn FnOnce(&[u8]) -> io::Result<()>>;
+
+    thread_local! {
+        static AFTER_READ: RefCell<Option<AfterRead>> = const { RefCell::new(None) };
+    }
+
+    pub(in crate::services::discord::turn_finalizer) fn after_next_read(
+        inspect: impl FnOnce(&[u8]) -> io::Result<()> + 'static,
+    ) {
+        AFTER_READ.with(|hook| assert!(hook.replace(Some(Box::new(inspect))).is_none()));
+    }
+
+    pub(super) fn read(reader: &mut Take<&File>, bytes: &mut Vec<u8>) -> io::Result<usize> {
+        let count = reader.read_to_end(bytes)?;
+        if let Some(inspect) = AFTER_READ.with(RefCell::take) {
+            inspect(bytes)?;
+        }
+        Ok(count)
+    }
 }
 
 pub(in crate::services::discord::turn_finalizer) fn read_tail_with(

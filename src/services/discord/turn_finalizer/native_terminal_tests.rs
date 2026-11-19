@@ -3,16 +3,19 @@ use super::*;
 use crate::services::session_host::herdr_socket_rig_tests::HerdrRig;
 use crate::services::tui_o::shadow::capture::Fingerprint;
 use crate::services::tui_o::writer::{
-    actor::native_input::NativePort,
+    actor::native_input::{EvidencePort, NativePort, Snapshot, Terminal},
     input_facts::native::{
-        Projection, Registration, registrations_fingerprint,
+        Barrier, Projection, Registration, registrations_fingerprint,
         terminal::{RawWitness, Tail},
     },
     input_notices::NoticeOrigin,
 };
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
-use std::path::Path;
+use std::future::Future;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Mutex;
 
 async fn stored_interrupt_barrier_replays(boot: bool) {
     use crate::db::auto_queue::test_support::TestPostgresDb;
@@ -197,14 +200,11 @@ fn witness(f: &Fixture, (through, len): (u64, u64), nonce: &str, stamp: String) 
 }
 
 const NONCE: &str = "incarnation-1";
-const CASES: [&str; 6] = [
-    "append",
-    "rewrite",
-    "rename",
-    "digest",
-    "stamp",
-    "read-error",
-];
+const CASES: [&str; 5] = ["append", "rewrite", "rename", "digest", "stamp"];
+const OWN_ROW: &str =
+    r#"{"type":"user","uuid":"own","sessionId":"native","message":{"content":"한국어 원본 입력"}}"#;
+const RAW_TAIL: &str =
+    r#"{"type":"system","subtype":"turn_duration","sessionId":"native","probe":"A"}"#;
 
 async fn ended_fixture(pool: &sqlx::PgPool, shared: &SharedData, rig: &HerdrRig, channel: u64) {
     use crate::db::dispatched_sessions::hosted_execution::{HostedLocation, HostedState, tests};
@@ -244,7 +244,6 @@ async fn ended_fixture(pool: &sqlx::PgPool, shared: &SharedData, rig: &HerdrRig,
 }
 
 struct RawCapture {
-    capture: SupplyCapture,
     port: NativePort,
     origin: NoticeOrigin,
     observed: Observation,
@@ -302,7 +301,6 @@ impl RawCapture {
             receipts: Vec::new(),
         };
         Self {
-            capture,
             port,
             origin,
             observed,
@@ -368,23 +366,15 @@ async fn check_file_change(
 ) {
     let source = f.ticket.source.as_ref().unwrap();
     let path = &source.transcript;
-    let rows = concat!(
-        r#"{"type":"user","uuid":"own","sessionId":"native","message":{"content":"한국어 원본 입력"}}"#,
-        "\n",
-        r#"{"type":"system","subtype":"turn_duration","sessionId":"native","probe":"A"}"#,
-    );
-    fs::write(path, rows).unwrap();
+    let rows = format!("{OWN_ROW}\n{RAW_TAIL}");
+    fs::write(path, &rows).unwrap();
     let (key, actor) = b2b_active(f, shared).await;
     b2b_row(f);
     supply_register(f, shared, key, Some(actor)).await;
     barrier_receipt(f);
 
     let capture = RawCapture::new(f, shared, &root.join(format!("{case}-old"))).await;
-    let proven = capture
-        .prove(capture.tail.clone())
-        .await
-        .expect("the real port proves the captured file");
-    let closed = capture.close(proven.clone()).await;
+    capture.prove(capture.tail.clone()).await.unwrap();
     let mut stale = capture.tail.clone();
     let mut restore = None;
     let error = match case {
@@ -404,7 +394,7 @@ async fn check_file_change(
         "rename" => {
             let saved = path.with_extension("saved");
             fs::rename(path, &saved).unwrap();
-            fs::write(path, rows).unwrap();
+            fs::write(path, &rows).unwrap();
             restore = Some(saved);
             capture.prove(stale).await.unwrap_err()
         }
@@ -426,16 +416,6 @@ async fn check_file_change(
             rig.on_reply(|_| {});
             result.unwrap_err()
         }
-        "read-error" => {
-            use super::super::native_supply::native_terminal::read_tail_with;
-            read_tail_with(source, &stale, |reader, bytes| {
-                let mut one = [0];
-                reader.read_exact(&mut one)?;
-                bytes.extend_from_slice(&one);
-                Err(io::Error::other("injected EOF read failure"))
-            })
-            .unwrap_err()
-        }
         _ => unreachable!("{case}"),
     };
     let expected = match case {
@@ -443,7 +423,6 @@ async fn check_file_change(
         "rename" => "path names a different inode",
         "digest" => "native tail changed during its read",
         "stamp" => "native tail changed after its execution ended",
-        "read-error" => "injected EOF read failure",
         _ => unreachable!("{case}"),
     };
     assert_eq!(
@@ -451,26 +430,6 @@ async fn check_file_change(
         "{case}: one rejected stale or unreadable proof"
     );
 
-    if case != "read-error" {
-        let current = Observation {
-            terminal: capture
-                .capture
-                .sources
-                .reuse_raw_witness(&closed.binding.source, &proven)
-                .cloned(),
-            ..closed.clone()
-        };
-        let offer = capture
-            .port
-            .inner
-            .offer(closed, current, 0, capture.origin.clone())
-            .await;
-        assert_eq!(
-            offer.unwrap_err(),
-            "native observation superseded",
-            "{case}: O offers only the current proof"
-        );
-    }
     let settled = || {
         f.history
             .native_settlement("native-fixture", &f.ticket)
@@ -499,11 +458,6 @@ async fn check_file_change(
         .prove(fresh.tail.clone())
         .await
         .unwrap_or_else(|error| panic!("{case}: fresh proof: {error}"));
-    let reused = fresh
-        .capture
-        .sources
-        .reuse_raw_witness(&fresh.observed.binding.source, &raw);
-    assert_eq!(reused, Some(&raw), "{case}: fresh witness is reusable");
     let closed = fresh.close(raw.clone()).await;
     assert!(
         fresh
@@ -550,4 +504,237 @@ async fn native_8148_terminal_raw_eof_rejects_changed_file_and_reobserves_pg() {
     }
     pool.close().await;
     db.drop().await;
+}
+
+type PortReply<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[derive(Default)]
+struct PollCalls {
+    terminals: Vec<Terminal>,
+    offers: Vec<Result<bool, String>>,
+}
+
+struct PollProbe {
+    port: Arc<dyn EvidencePort>,
+    append_after_proof: Mutex<Option<PathBuf>>,
+    calls: Arc<Mutex<PollCalls>>,
+}
+
+impl EvidencePort for PollProbe {
+    fn snapshot(&self, origin: NoticeOrigin) -> PortReply<'_, Result<Snapshot, String>> {
+        self.port.snapshot(origin)
+    }
+
+    fn offer(
+        &self,
+        observed: Observation,
+        current: Observation,
+        index: usize,
+        origin: NoticeOrigin,
+    ) -> PortReply<'_, Result<bool, String>> {
+        Box::pin(async move {
+            let result = self.port.offer(observed, current, index, origin).await;
+            self.calls.lock().unwrap().offers.push(result.clone());
+            result
+        })
+    }
+
+    fn terminal(
+        &self,
+        observed: Observation,
+        ticket: Registration,
+        tail: Tail,
+        origin: NoticeOrigin,
+    ) -> PortReply<'_, Terminal> {
+        Box::pin(async move {
+            let result = self.port.terminal(observed, ticket, tail, origin).await;
+            if result.is_ok()
+                && let Some(path) = self.append_after_proof.lock().unwrap().take()
+            {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(path)
+                    .unwrap()
+                    .write_all(b" ")
+                    .unwrap();
+            }
+            self.calls.lock().unwrap().terminals.push(result.clone());
+            result
+        })
+    }
+
+    fn receipt(
+        &self,
+        observed: Observation,
+        current: Observation,
+        index: usize,
+        origin: NoticeOrigin,
+    ) -> PortReply<'_, Result<(), String>> {
+        self.port.receipt(observed, current, index, origin)
+    }
+
+    fn abstain(
+        &self,
+        observed: Observation,
+        current: Observation,
+        proofs: (Vec<Barrier>, Vec<Barrier>),
+        idle: bool,
+        origin: NoticeOrigin,
+    ) -> PortReply<'_, Result<(), String>> {
+        self.port.abstain(observed, current, proofs, idle, origin)
+    }
+
+    fn retry(&self) -> PortReply<'_, ()> {
+        self.port.retry()
+    }
+}
+
+fn recording_port(
+    f: &Fixture,
+    shared: &Arc<SharedData>,
+    capture: &SupplyCapture,
+    append_after_proof: Option<PathBuf>,
+) -> (NativePort, Arc<Mutex<PollCalls>>) {
+    let port = super::super::native_supply::port(
+        f.ticket.channel_id,
+        shared.clone(),
+        capture.bindings.clone(),
+    );
+    let calls = Arc::new(Mutex::new(PollCalls::default()));
+    let inner = Arc::new(PollProbe {
+        port: port.inner,
+        append_after_proof: Mutex::new(append_after_proof),
+        calls: calls.clone(),
+    });
+    (NativePort { inner }, calls)
+}
+
+enum PollFault {
+    AppendAfterProof,
+    EofRead,
+}
+
+async fn check_writer_rejection(fault: PollFault) {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let rig = HerdrRig::start();
+    let _registry = rig.registry_on_this_thread();
+    let channel = 81480640;
+    let target = serde_json::json!({"host":"herdr","owner":"fixture-pane","execution_nonce":NONCE,"root":rig.socket()});
+    let f = Fixture::at_target(
+        runtime.path().join("runtime/injected_frames.json"),
+        channel,
+        true,
+        target,
+    );
+    let path = &f.ticket.source.as_ref().unwrap().transcript;
+    fs::write(path, format!("{OWN_ROW}\n{RAW_TAIL}")).unwrap();
+    let shared = b2b_shared(Some(pool.clone()));
+    ended_fixture(&pool, &shared, &rig, channel).await;
+    let (key, actor) = b2b_active(&f, &shared).await;
+    b2b_row(&f);
+    supply_register(&f, &shared, key, Some(actor)).await;
+    barrier_receipt(&f);
+
+    let append_path = match fault {
+        PollFault::AppendAfterProof => Some(path.clone()),
+        PollFault::EofRead => {
+            super::super::native_supply::native_terminal::read_probe::after_next_read(|bytes| {
+                assert_eq!(
+                    bytes,
+                    RAW_TAIL.as_bytes(),
+                    "the bounded read got the whole tail"
+                );
+                Err(io::Error::other("injected EOF read failure"))
+            });
+            None
+        }
+    };
+    let mut capture = SupplyCapture::new(&f, &runtime.path().join("first-store"), true);
+    let (port, calls) = recording_port(&f, &shared, &capture, append_path);
+    capture.sources.offer_native(&port).await;
+    {
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.terminals.len(),
+            1,
+            "one actual terminal proof attempt"
+        );
+        match fault {
+            PollFault::AppendAfterProof => {
+                assert!(calls.terminals[0].is_ok(), "the proof predates the append");
+                assert_eq!(
+                    calls.offers,
+                    [Err("native observation superseded".into())],
+                    "the writer must reject its stale terminal proof"
+                );
+                replace_tail(path, calls.terminals[0].as_ref().unwrap().tail.through);
+            }
+            PollFault::EofRead => {
+                assert_eq!(
+                    calls.terminals[0].as_ref().unwrap_err(),
+                    "injected EOF read failure",
+                    "the terminal port must propagate the bounded read error"
+                );
+                assert!(
+                    calls.offers.is_empty(),
+                    "a failed terminal proof must not be offered"
+                );
+            }
+        }
+    }
+    let saved = || {
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+    };
+    let row = || {
+        crate::services::discord::inflight::load_inflight_state_read_only(
+            &ProviderKind::Claude,
+            channel,
+        )
+    };
+    assert!(saved().outcome.is_none() && !saved().cleanup_complete);
+    assert!(row().is_some(), "the rejected poll preserves the owned row");
+
+    let mut fresh = SupplyCapture::new(&f, &runtime.path().join("fresh-store"), true);
+    let (port, calls) = recording_port(&f, &shared, &fresh, None);
+    fresh.sources.offer_native(&port).await;
+    let settled = saved();
+    let outcome = settled
+        .outcome
+        .as_ref()
+        .expect("a fresh poll settles the same ticket");
+    assert_eq!(outcome.disposition, Disposition::Executed);
+    assert!(settled.cleanup_complete && row().is_none());
+    fresh.sources.offer_native(&port).await;
+    {
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.terminals.len(), 1);
+        assert_eq!(
+            calls.offers,
+            [Ok(true)],
+            "only one actual result offer succeeds"
+        );
+        assert_eq!(
+            outcome.extra["native_proof"]["raw"],
+            serde_json::to_value(calls.terminals[0].as_ref().unwrap()).unwrap()
+        );
+    }
+    assert_eq!(saved(), settled);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn native_8148_terminal_writer_rejects_tail_appended_after_proof_pg() {
+    check_writer_rejection(PollFault::AppendAfterProof).await;
+}
+
+#[tokio::test]
+async fn native_8148_terminal_writer_holds_full_tail_read_failure_pg() {
+    check_writer_rejection(PollFault::EofRead).await;
 }
