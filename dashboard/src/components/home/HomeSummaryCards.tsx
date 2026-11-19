@@ -1,45 +1,45 @@
 import { ChevronRight } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router";
-import { getHealthDetail } from "../../api/settingsRuntime";
 import type { Agent } from "../../types";
 import AgentPersona, { type PersonaState } from "../AgentPersona";
 import { formatClock } from "../dashboard/routineModel";
 import { CardNote, CardSkeleton, Chip, Dot, HeaderLink, HomeCard, Muted, ROW_HOVER, toneText } from "./HomeCard";
 import {
-  AGENT_STATES, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows,
-  type HomeAgent, type HomeAgentState, type HomeTone, type TodoItem, type Tr,
+  AGENT_STATES, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, todoStatus,
+  type HomeAgent, type HomeAgentState, type HomeTone, type SourceState, type TodoItem, type Tr,
 } from "./homeModel";
-import { usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
+import { loadHomeHealth, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
 
 // Home's first three sections: what needs a person, how the system is, and who is working.
 
 const TODO_ROWS = 5;
 
 /** What only a person can move, at the top of home. Each row opens the screen where it is handled. */
-export function HomeTodoCard({ items, loading, cardsFailed, tr, className }: {
+export function HomeTodoCard({ items, cards, campaigns, tr, className }: {
   items: TodoItem[];
-  loading: boolean;
-  cardsFailed: boolean;
+  cards: SourceState;
+  campaigns: SourceState;
   tr: Tr;
   className?: string;
 }) {
-  const total = items.reduce((sum, item) => sum + item.count, 0);
-  const hidden = items.length - TODO_ROWS;
+  const total = items.length;
+  const hidden = total - TODO_ROWS;
+  const status = todoStatus(total, [cards, campaigns]);
   return (
     <HomeCard
       title={tr("할 일", "To do")}
-      count={loading ? null : total}
+      count={status === "loading" ? null : total}
       countTone={total > 0 ? "warn" : undefined}
       aside={<HeaderLink to={QUEUE_PATH}>{tr("대기열에서 보기", "Open queue")}</HeaderLink>}
       testId="home-todo"
       className={className}
     >
-      {loading ? (
+      {status === "loading" ? (
         <CardSkeleton label={tr("할 일 불러오는 중", "Loading to-dos")} />
       ) : (
         <>
-          {items.length === 0 ? <CardNote>{tr("지금 할 일이 없어요.", "Nothing needs you right now.")}</CardNote> : null}
+          {status === "empty" ? <CardNote>{tr("지금 할 일이 없어요.", "Nothing needs you right now.")}</CardNote> : null}
           <ul className="m-0 list-none p-0">
             {items.slice(0, TODO_ROWS).map((item) => (
               <li key={item.key} className="border-t border-[var(--line-soft)]">
@@ -62,28 +62,32 @@ export function HomeTodoCard({ items, loading, cardsFailed, tr, className }: {
               <HeaderLink to={QUEUE_PATH}>{tr(`${hidden}건 더 보기`, `${hidden} more`)}</HeaderLink>
             </div>
           ) : null}
-          {cardsFailed ? <CardNote>{tr("작업 카드를 읽지 못했어요. 잠시 뒤 다시 읽어요.", "Could not read task cards. Retrying shortly.")}</CardNote> : null}
+          {cards === "failed" ? <CardNote>{tr("작업 카드를 읽지 못해 할 일 일부는 확인 불가예요.", "Task cards did not load, so some to-dos are unknown.")}</CardNote> : null}
+          {campaigns === "failed" ? <CardNote>{tr("캠페인 요약을 읽지 못해 할 일 일부는 확인 불가예요.", "Campaign summaries did not load, so some to-dos are unknown.")}</CardNote> : null}
         </>
       )}
     </HomeCard>
   );
 }
 
-/** Server, Discord bots, Memento, campaign runs and the queue, one dot and value per line. */
+/** Server, Discord bots, Memento, campaign runs and the queue, one dot and value per line. A failed read shows
+ * unknown values and when the last answer came, never the last answer itself. */
 export function HomeSystemCard({ campaigns, tr, className }: { campaigns: Loaded<HomeCampaigns>; tr: Tr; className?: string }) {
-  const health = usePolled(getHealthDetail, 30_000);
+  const health = usePolled(loadHomeHealth, 30_000);
+  const current = health.failed ? null : health.data;
   const rows = buildSystemRows({
-    health: health.data,
+    health: current,
     healthFailed: health.failed,
     legacy: campaigns.data?.legacy ?? null,
     documents: campaigns.data?.documents ?? [],
     tr,
   });
-  const publicOnly = health.data?.publicOnly;
+  const publicOnly = current?.publicOnly;
+  const clock = health.at === null ? null : formatClock(health.at);
   return (
     <HomeCard
       title={tr("시스템", "System")}
-      aside={health.at ? <Muted className="tabular-nums">{tr(`${formatClock(health.at)} 확인`, `Checked ${formatClock(health.at)}`)}</Muted> : null}
+      aside={clock ? <Muted className="tabular-nums">{health.failed ? tr(`마지막 확인 ${clock}`, `Last checked ${clock}`) : tr(`${clock} 확인`, `Checked ${clock}`)}</Muted> : null}
       testId="home-system"
       className={className}
     >
@@ -108,8 +112,8 @@ export function HomeSystemCard({ campaigns, tr, className }: { campaigns: Loaded
 
 // The legend dots use the persona dot colors, so a count and its avatars read the same. A session opens when a
 // Discord message arrives, so an agent without one is at rest: gray, never the error color.
-const PERSONA: Record<HomeAgentState, PersonaState> = { working: "working", background: "waiting", resting: "idle", noSession: "idle" };
-const LEGEND_TONE: Record<HomeAgentState, HomeTone> = { working: "ok", background: "warn", resting: "neutral", noSession: "neutral" };
+const PERSONA: Record<HomeAgentState, PersonaState> = { working: "working", background: "waiting", resting: "idle", noSession: "idle", unknown: "offline" };
+const LEGEND_TONE: Record<HomeAgentState, HomeTone> = { working: "ok", background: "warn", resting: "neutral", noSession: "neutral", unknown: "neutral" };
 /** Desktop shows two rows of four: up to seven agents and the fold, unless more are busy. */
 const DESKTOP_SHOWN = 7;
 
@@ -140,7 +144,7 @@ export function HomeAgentsCard({ entries, isMobile, tr, isKo, onOpenAgent }: {
   const [expanded, setExpanded] = useState(false);
   const counts = Object.fromEntries(AGENT_STATES.map((state) => [state, entries.filter((entry) => entry.state === state).length])) as Record<HomeAgentState, number>;
   const busy = counts.working + counts.background;
-  const legendStates = isMobile ? AGENT_STATES.filter((state) => counts[state] > 0) : AGENT_STATES;
+  const legendStates = AGENT_STATES.filter((state) => counts[state] > 0 || (!isMobile && state !== "unknown"));
   const legend = (
     <Muted className="flex min-h-11 flex-wrap items-center gap-x-3.5 gap-y-1">
       {legendStates.map((state) => (
@@ -178,8 +182,8 @@ export function HomeAgentsCard({ entries, isMobile, tr, isKo, onOpenAgent }: {
           ) : null}
         </ul>
       ) : (
-        // Negative margins tuck the last column's and row's borders under the card edge.
-        <ul className="m-0 -mr-px -mb-px grid list-none grid-cols-2 border-t border-[var(--line-soft)] p-0 lg:grid-cols-4">
+        // Desktop starts at 900px, so four columns hold from there. Negative margins tuck the last borders under the card edge.
+        <ul className="m-0 -mr-px -mb-px grid list-none grid-cols-4 border-t border-[var(--line-soft)] p-0">
           {shown.map((entry) => (
             <li key={entry.agent.id} className="min-w-0 border-r border-b border-[var(--line-soft)]">
               <AgentCell entry={entry} tr={tr} isKo={isKo} onOpen={onOpenAgent} />
@@ -195,7 +199,7 @@ export function HomeAgentsCard({ entries, isMobile, tr, isKo, onOpenAgent }: {
                     ))}
                   </span>
                 )}
-                {toggleLabel}
+                <span className="break-keep">{toggleLabel}</span>
               </button>
             </li>
           ) : null}

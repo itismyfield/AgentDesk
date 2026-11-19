@@ -3,7 +3,7 @@ import type { RoutineRecord } from "../../api/routines";
 import type { ServerCampaignDocument, ServerCampaignSummary, ServerCampaignView } from "../../api/serverCampaigns";
 import type { HealthResponse, RuntimeConfigResponse } from "../../api/settingsRuntime";
 import { formatRelativeTime } from "../../app/shellFormatting";
-import type { Agent, DashboardStats, DispatchedSession, KanbanCard } from "../../types";
+import type { Agent, DispatchedSession, KanbanCard } from "../../types";
 import { cardTitle, coerceTimestampMs, isManualInterventionCard, isOpenKanbanCard } from "../agent-manager/kanban-utils";
 import { campaignProgress } from "../campaigns/campaignModel";
 import { queueLocationQuery } from "../campaigns/campaignQueueModel";
@@ -25,13 +25,14 @@ const join = (...parts: Array<string | null | undefined | false>) => parts.filte
 
 // ── Agents ──
 
-export type HomeAgentState = "working" | "background" | "resting" | "noSession";
-export const AGENT_STATES: HomeAgentState[] = ["working", "background", "resting", "noSession"];
+export type HomeAgentState = "working" | "background" | "resting" | "noSession" | "unknown";
+/** Display and sort order. `unknown` only appears when the session list failed to load. */
+export const AGENT_STATES: HomeAgentState[] = ["working", "background", "resting", "noSession", "unknown"];
 
 export interface HomeAgent {
   agent: Agent;
   state: HomeAgentState;
-  /** First line of the live session's summary, for working and background agents. */
+  /** First line of the summary of the session that set a working or background state. */
   info: string | null;
   /** Newest session signal: the live one for resting agents, the last one for agents without a session. */
   seenAt: number | null;
@@ -45,9 +46,17 @@ function newestSeen(sessions: DispatchedSession[]): number | null {
   return times.length ? Math.max(...times) : null;
 }
 
-/** One state per agent from its own sessions and the server's visual status. With no session list at all,
- * nothing proves a session is gone, so idle agents read as resting rather than without a session. */
-export function classifyAgents(agents: Agent[], sessions: DispatchedSession[]): HomeAgent[] {
+function newestSession(sessions: DispatchedSession[]): DispatchedSession | null {
+  const seen = (session: DispatchedSession) => coerceTimestampMs(session.last_seen_at) ?? 0;
+  return sessions.reduce<DispatchedSession | null>((best, session) => (best && seen(best) >= seen(session) ? best : session), null);
+}
+
+const firstLine = (text: string | null | undefined) => text?.split("\n")[0]?.trim() || null;
+
+/** One state per agent. Its own sessions set the state and the line together, so a session update replaces both.
+ * The agent list's visual status is a snapshot (cleared on the next session change): with sessions known it only adds
+ * background children, which no session status shows. A failed session list leaves idle agents unknown. */
+export function classifyAgents(agents: Agent[], sessions: DispatchedSession[], sessionsFailed: boolean): HomeAgent[] {
   const byAgent = new Map<string, DispatchedSession[]>();
   for (const session of sessions) {
     if (!session.linked_agent_id) continue;
@@ -58,20 +67,18 @@ export function classifyAgents(agents: Agent[], sessions: DispatchedSession[]): 
     .map((agent): HomeAgent => {
       const own = byAgent.get(agent.id) ?? [];
       const live = own.filter((session) => LIVE_STATUSES.has(session.status));
-      const visual = (agent as Agent & { visual_status_code?: string }).visual_status_code;
-      let state: HomeAgentState;
-      if (live.some((session) => TURN_STATUSES.has(session.status))) state = "working";
-      else if (live.some((session) => session.status === "awaiting_bg") || visual === "idle-bg-wait") state = "background";
-      else if (agent.status === "working" || visual === "active" || visual === "stuck-suspect") state = "working";
-      else if (live.length > 0 || sessions.length === 0 || agent.id.startsWith("dispatched:")) state = "resting";
-      else state = "noSession";
-      const busy = state === "working" || state === "background";
-      return {
-        agent,
-        state,
-        info: busy ? agent.session_info?.split("\n")[0]?.trim() || null : null,
-        seenAt: busy ? null : newestSeen(state === "resting" ? live : own),
-      };
+      const lead = newestSession(live.filter((session) => TURN_STATUSES.has(session.status)))
+        ?? newestSession(live.filter((session) => session.status === "awaiting_bg"));
+      if (lead) return { agent, state: TURN_STATUSES.has(lead.status) ? "working" : "background", info: firstLine(lead.session_info), seenAt: null };
+      const snapshot = (agent as Agent & { visual_status_code?: string }).visual_status_code;
+      if (snapshot === "idle-bg-wait") return { agent, state: "background", info: firstLine(agent.session_info), seenAt: null };
+      if (live.length) return { agent, state: "resting", info: null, seenAt: newestSeen(live) };
+      if (agent.status === "working" || (sessionsFailed && (snapshot === "active" || snapshot === "stuck-suspect"))) {
+        return { agent, state: "working", info: firstLine(agent.session_info), seenAt: null };
+      }
+      // Unlinked sessions shown as agents are live by construction.
+      if (agent.id.startsWith("dispatched:")) return { agent, state: "resting", info: null, seenAt: null };
+      return { agent, state: own.length || !sessionsFailed ? "noSession" : "unknown", info: null, seenAt: newestSeen(own) };
     })
     .sort((left, right) => rank(left.state) - rank(right.state) || agentName(left.agent, true).localeCompare(agentName(right.agent, true)));
 }
@@ -85,7 +92,8 @@ export function agentStateLabel(state: HomeAgentState, tr: Tr): string {
     case "working": return tr("작업 중", "Working");
     case "background": return tr("백그라운드 대기", "Background wait");
     case "resting": return tr("쉬는 중", "Resting");
-    default: return tr("세션 없음", "No session");
+    case "noSession": return tr("세션 없음", "No session");
+    default: return tr("확인 불가", "Unknown");
   }
 }
 
@@ -104,8 +112,6 @@ export interface TodoItem {
   title: string;
   detail: string;
   to: string;
-  /** How many things the row stands for; a count row stands for many cards. */
-  count: number;
 }
 
 const FAILED_STATUS = /(^|_)failed$/;
@@ -114,11 +120,11 @@ function repoName(repo: string | null): string | null {
   return repo ? repo.split("/").pop() || repo : null;
 }
 
-/** Things only a person can move: cards that need a decision, failed or waiting for review, the server's
- * stuck counts, and server campaigns that need inspection. Approval and deploy waits have no server field yet. */
-export function buildTodoItems({ cards, stats, campaigns, tr, isKo }: {
+/** Things the server leaves to a person: manual intervention as `src/manual_intervention.rs` defines it (a dilemma
+ * or a non-benign blocked reason), failed cards, and server campaigns that need inspection. Reviews, new requests
+ * and stalled work stay out: policies move them, and the timeout policy turns stalled work into manual intervention. */
+export function buildTodoItems({ cards, campaigns, tr, isKo }: {
   cards: KanbanCard[];
-  stats: DashboardStats | null;
   campaigns: ServerCampaignSummary[] | null;
   tr: Tr;
   isKo: boolean;
@@ -133,14 +139,11 @@ export function buildTodoItems({ cards, stats, campaigns, tr, isKo }: {
       key: `card:${card.id}`,
       title: `${card.github_issue_number ? `#${card.github_issue_number} ` : ""}${cardTitle(card.title)}`,
       to: `/campaigns${queueLocationQuery(card.id)}`,
-      count: 1,
     };
     if (isManualInterventionCard(card)) {
       items.push({ ...base, tone: "err", chip: tr("판단 필요", "Decide"), detail: card.blocked_reason?.trim() || tr("사람 판단을 기다려요", "Waiting for a decision") });
     } else if (FAILED_STATUS.test(card.status)) {
       items.push({ ...base, tone: "err", chip: tr("실패", "Failed"), detail: join(repoName(card.github_repo), card.latest_dispatch_result_summary ?? ago(card.updated_at)) });
-    } else if (card.status === "review") {
-      items.push({ ...base, tone: "warn", chip: tr("검토 대기", "Review"), detail: join(repoName(card.github_repo), ago(card.review_entered_at ?? card.updated_at)) });
     }
   }
   for (const summary of campaigns ?? []) {
@@ -153,27 +156,18 @@ export function buildTodoItems({ cards, stats, campaigns, tr, isKo }: {
       title: summary.definition.title,
       detail: displayText(summary.view, tr),
       to: `/campaigns${campaignLocationQuery({ mode: "server", campaign: campaign_id, node: null })}`,
-      count: 1,
     });
   }
-  const accepting = stats?.kanban.waiting_acceptance ?? 0;
-  if (accepting > 0) {
-    items.push({
-      key: "count:acceptance", tone: "warn", chip: tr("수락 대기", "Unaccepted"), to: QUEUE_PATH, count: accepting,
-      title: tr(`에이전트가 아직 받지 않은 작업 ${accepting}건`, `${accepting} tasks not accepted yet`),
-      detail: tr("대기열에서 담당을 확인해요", "Check the owner in the queue"),
-    });
-  }
-  const stalled = stats?.kanban.stale_in_progress ?? 0;
-  if (stalled > 0) {
-    items.push({
-      key: "count:stalled", tone: "warn", chip: tr("진행 멈춤", "Stalled"), to: QUEUE_PATH, count: stalled,
-      title: tr(`진행이 멈춘 작업 ${stalled}건`, `${stalled} stalled tasks`),
-      detail: tr("최근 움직임이 없어요", "No recent activity"),
-    });
-  }
-  // Red rows first; the sort is stable, so each source keeps its own order.
-  return items.sort((left, right) => Number(right.tone === "err") - Number(left.tone === "err"));
+  return items;
+}
+
+export type SourceState = "loading" | "ok" | "failed";
+
+/** The to-do list is empty only when every source answered; a failed source leaves it partial. */
+export function todoStatus(count: number, sources: SourceState[]): "loading" | "empty" | "partial" | "ready" {
+  if (sources.includes("failed")) return "partial";
+  if (count > 0) return "ready";
+  return sources.includes("loading") ? "loading" : "empty";
 }
 
 // ── System ──
@@ -233,7 +227,8 @@ export function buildSystemRows({ health, healthFailed, legacy, documents, tr }:
     if (autoRun && campaignTone === "neutral") campaignTone = "ok";
   }
 
-  const queueDepth = detail?.queue_depth;
+  // The server adds only the mailboxes it could read and lists the rest as observation failures.
+  const queueDepth = detail?.mailbox_observation_failures?.length ? null : detail?.queue_depth;
   return [
     { key: "server", label: tr("서버", "Server"), value: server, tone: serverTone },
     { key: "discord", label: tr("Discord 봇", "Discord bots"), ...discord },
@@ -254,13 +249,15 @@ export type StageSegment = "done" | "now" | "fail" | "todo";
 
 export interface CampaignRow {
   key: string;
+  /** Under way: a server campaign past preparation or an active ledger campaign. */
+  live: boolean;
   title: string;
   status: string;
   tone: HomeTone;
   to: string;
   /** Server campaigns: one segment per stage up to final verification. */
   segments: StageSegment[] | null;
-  /** Ledger campaigns: share of tasks completed. */
+  /** Ledger campaigns: share of tasks completed, null without tasks. */
   ratio: number | null;
   line: string;
 }
@@ -274,7 +271,8 @@ export function isOpenServerCampaign(summary: ServerCampaignSummary): boolean {
   return !CLOSED_DISPLAYS.has(summary.view.display);
 }
 
-/** A campaign stands at its slowest task's stage, so done segments are stages every task has passed. */
+/** A campaign stands at its slowest task's stage, so done segments are stages every task has passed. Without its
+ * detail the stages are unknown, never an empty track. */
 function serverCampaignRow(summary: ServerCampaignSummary, document: ServerCampaignDocument | undefined, tr: Tr): CampaignRow {
   const { display, campaign_id, failed_count } = summary.view;
   const nodes = document?.view.nodes ?? [];
@@ -283,13 +281,16 @@ function serverCampaignRow(summary: ServerCampaignSummary, document: ServerCampa
   const reasons = [...new Set((document?.view.reasons ?? []).map((reason) => reason.code))].slice(0, 2);
   return {
     key: `server:${campaign_id}`,
+    live: display !== "prepared",
     title: summary.definition.title,
     status: join(displayText(summary.view, tr), nodes.length > 0 && tr(`작업 ${nodes.length}개`, `${nodes.length} tasks`)),
     tone: display === "running" ? "info" : display === "unable_to_progress" || display === "needs_inspection" ? "err" : "neutral",
     to: `/campaigns${campaignLocationQuery({ mode: "server", campaign: campaign_id, node: null })}`,
     segments: at === null ? null : STAGES.map((_, index) => (index < at ? "done" : index === at ? current : "todo")),
     ratio: null,
-    line: join(at !== null && at < STAGES.length && tr(...STAGE_LABELS[STAGES[at]]), ...reasons.map((code) => tr(...REASON_LABELS[code]))) || summary.definition.goal,
+    line: document
+      ? join(at !== null && at < STAGES.length && tr(...STAGE_LABELS[STAGES[at]]), ...reasons.map((code) => tr(...REASON_LABELS[code]))) || summary.definition.goal
+      : tr("단계 확인 불가", "Stages unknown"),
   };
 }
 
@@ -300,12 +301,13 @@ function legacyCampaignRow(campaign: Campaign, tr: Tr): CampaignRow {
     : campaign.status === "paused" ? [tr("멈춤", "Paused"), "warn"] : [tr("준비됨", "Planned"), "neutral"];
   return {
     key: `legacy:${campaign.id}`,
+    live: campaign.status === "active",
     title: campaign.title,
     status: join(label, tr(`작업 ${total}개`, `${total} tasks`)),
     tone,
     to: `/campaigns${campaignLocationQuery({ mode: "legacy", campaign: campaign.id, node: null })}`,
     segments: null,
-    ratio: total ? counts.completed / total : 0,
+    ratio: total ? counts.completed / total : null,
     line: join(
       tr(`${total}개 중 ${counts.completed}개 끝남`, `${counts.completed} of ${total} done`),
       counts.running > 0 && tr(`진행 중 ${counts.running}`, `${counts.running} running`),
@@ -314,22 +316,24 @@ function legacyCampaignRow(campaign: Campaign, tr: Tr): CampaignRow {
   };
 }
 
-/** Open server campaigns first, then open ledger campaigns: active, paused, planned, newest first. */
+/** Campaigns under way first, server then ledger, then prepared, paused and planned ones. `shown` keeps every
+ * campaign under way visible and at least `limit` rows; home folds the rest. */
 export function buildCampaignRows({ legacy, summaries, documents, tr, limit }: {
   legacy: Campaign[] | null;
   summaries: ServerCampaignSummary[] | null;
   documents: ServerCampaignDocument[];
   tr: Tr;
   limit: number;
-}): { rows: CampaignRow[]; total: number } {
+}): { rows: CampaignRow[]; shown: number } {
   const server = (summaries ?? []).filter(isOpenServerCampaign).map((summary) =>
     serverCampaignRow(summary, documents.find((document) => document.view.campaign_id === summary.view.campaign_id), tr));
   const ledger = (legacy ?? [])
     .filter((campaign) => LEGACY_ORDER.includes(campaign.status))
     .sort((left, right) => LEGACY_ORDER.indexOf(left.status) - LEGACY_ORDER.indexOf(right.status) || right.updated_at.localeCompare(left.updated_at))
     .map((campaign) => legacyCampaignRow(campaign, tr));
-  const rows = [...server, ...ledger];
-  return { rows: rows.slice(0, limit), total: rows.length };
+  const all = [...server, ...ledger];
+  const live = all.filter((row) => row.live);
+  return { rows: [...live, ...all.filter((row) => !row.live)], shown: Math.max(limit, live.length) };
 }
 
 // ── Today's routines ──
@@ -348,15 +352,15 @@ function sameLocalDay(left: number, right: number): boolean {
   return new Date(left).toDateString() === new Date(right).toDateString();
 }
 
-/** Server times only: a run started today, else the next due time when it falls later today. No run times
- * are derived from the cron expression. */
+/** Server times only: a run started today and the next due time when it falls later today, as separate rows.
+ * No run times are derived from the cron expression. */
 export function buildTodayRoutines(routines: RoutineRecord[], now: number, tr: Tr): RoutineRow[] {
   const rows: RoutineRow[] = [];
   for (const routine of routines) {
     if (routine.status === "detached") continue;
     const run = routine.last_run ?? null;
     const runAt = parseTime(run?.started_at) ?? parseTime(routine.last_run_at);
-    const base = { key: routine.id, routine };
+    const base = { key: `${routine.id}:run`, routine };
     if (routine.in_flight_run_id || run?.status === "running") {
       rows.push({ ...base, at: runAt ?? now, chip: tr("도는 중", "Running"), tone: "info", finished: false });
     } else if (runAt !== null && sameLocalDay(runAt, now)) {
@@ -367,11 +371,10 @@ export function buildTodayRoutines(routines: RoutineRecord[], now: number, tr: T
           : status === "skipped" ? [tr("건너뜀", "Skipped"), "neutral"]
             : status === "paused" ? [tr("멈춤", "Paused"), "warn"] : [tr("실행됨", "Ran"), "neutral"];
       rows.push({ ...base, at: runAt, chip, tone, finished: true });
-    } else {
-      const due = parseTime(routine.next_due_at);
-      if (routine.status === "enabled" && due !== null && due >= now && sameLocalDay(due, now)) {
-        rows.push({ ...base, at: due, chip: tr("예정", "Scheduled"), tone: "neutral", finished: false });
-      }
+    }
+    const due = parseTime(routine.next_due_at);
+    if (routine.status === "enabled" && due !== null && due >= now && sameLocalDay(due, now)) {
+      rows.push({ key: `${routine.id}:due`, routine, at: due, chip: tr("예정", "Scheduled"), tone: "neutral", finished: false });
     }
   }
   return rows.sort((left, right) => left.at - right.at);
@@ -386,28 +389,40 @@ export interface UsageRow {
   label: string;
   /** Null when the tracker has no measurement for this window. */
   pct: number | null;
+  /** The provider reports a limit but no usage, so there is nothing to measure. */
+  unmeasured: boolean;
   level: RateLimitLevel;
   stale: boolean;
   measuredAt: number | null;
   note: string | null;
 }
 
-/** Limit tracker windows as bars; GitHub and hidden buckets stay out, as on the old usage widget. */
+// The server reads Gemini's quota limits but no usage and fills `used: 0` (`build_gemini_rate_limit_buckets`).
+const unmeasuredBucket = (provider: string | undefined, bucket: string) => provider === "gemini" && (bucket === "rpm" || bucket === "rpd");
+
+/** Limit tracker windows as bars; GitHub and hidden buckets stay out, as on the old usage widget. Only measured
+ * rows carry a measurement time. */
 export function buildUsageRows(raw: RawUsageProvider[], isKo: boolean): UsageRow[] {
   return raw.flatMap((source) => transformRLProviders([source]).flatMap((provider): UsageRow[] => {
-    const measuredAt = coerceTimestampMs(source.fetched_at ?? null);
-    const common = { stale: provider.stale, measuredAt, level: "normal" as RateLimitLevel };
+    const fetchedAt = coerceTimestampMs(source.fetched_at ?? null);
+    const common = { stale: provider.stale, level: "normal" as RateLimitLevel, unmeasured: false };
     if (provider.unsupported || provider.buckets.length === 0) {
-      return [{ ...common, key: `${provider.provider}:${provider.profileId}`, label: provider.provider, pct: null, note: provider.reason }];
+      return [{ ...common, key: `${provider.provider}:${provider.profileId}`, label: provider.provider, pct: null, measuredAt: null, note: provider.reason }];
     }
-    return provider.buckets.map((bucket) => ({
-      ...common,
-      key: `${provider.provider}:${provider.profileId}:${bucket.id}`,
-      label: `${provider.provider} ${formatRateLimitWindowLabel(bucket.label, isKo)}`,
-      pct: bucket.utilization,
-      level: bucket.level,
-      note: null,
-    }));
+    return provider.buckets.map((bucket) => {
+      const unmeasured = unmeasuredBucket(source.provider, bucket.id);
+      const pct = unmeasured ? null : bucket.utilization;
+      return {
+        ...common,
+        key: `${provider.provider}:${provider.profileId}:${bucket.id}`,
+        label: `${provider.provider} ${formatRateLimitWindowLabel(bucket.label, isKo)}`,
+        pct,
+        unmeasured,
+        measuredAt: pct === null ? null : fetchedAt,
+        level: unmeasured ? "normal" : bucket.level,
+        note: null,
+      };
+    });
   }));
 }
 

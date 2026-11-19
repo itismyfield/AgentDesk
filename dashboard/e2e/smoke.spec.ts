@@ -1593,8 +1593,9 @@ test.describe("Dashboard smoke tests", () => {
     const home = page.getByTestId("home-page");
     await expect(page.getByTestId("home-usage")).toContainText("83%", { timeout: 15000 });
     expect(await home.locator("section[aria-label]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")))).toEqual(HOME_SECTIONS);
-    await expect(page.getByTestId("home-todo")).toContainText("검토 대기");
-    await expect(page.getByTestId("home-todo")).toContainText("수락 대기");
+    // Only what the server leaves to a person: the blocked failed card, not the review in progress or new requests.
+    await expect(page.getByTestId("home-todo")).toContainText("판단 필요");
+    await expect(page.getByTestId("home-todo")).not.toContainText(/검토 대기|수락 대기/);
     await expect(page.getByTestId("home-system-memento")).toContainText("확인 불가");
     await expect(page.getByTestId("home-usage")).toContainText("Claude 7일");
     await expect(page.getByTestId("home-usage")).toContainText("90% 이상이면 자동 진행을 멈춰요");
@@ -1624,6 +1625,48 @@ test.describe("Dashboard smoke tests", () => {
     await expect(card.locator("li button")).toHaveCount(12);
     await expect(card.getByRole("button", { name: "접기" })).toHaveAttribute("aria-expanded", "true");
     await expectNoHorizontalOverflow(page);
+    if (isMobile) return;
+    // Desktop starts at 900px; the first four agents share a row there too.
+    await page.setViewportSize({ width: 960, height: 900 });
+    await expect.poll(() => card.locator("li").evaluateAll((nodes) => new Set(nodes.slice(0, 4).map((node) => node.getBoundingClientRect().top)).size)).toBe(1);
+  });
+
+  test("home: the server row follows a healthy answer, a 503 status and a lost connection", async ({ page }) => {
+    let mode: "healthy" | "unhealthy" | "down" = "healthy";
+    await page.clock.install();
+    await page.route(/\/api\/health(?:\/detail)?$/, (route) => (mode === "down"
+      ? route.abort()
+      : route.fulfill({ status: mode === "healthy" ? 200 : 503, json: { status: mode, providers: [] } })));
+    await page.goto("/home");
+
+    const server = page.getByTestId("home-system-server");
+    await expect(server).toContainText("정상", { timeout: 15000 });
+    mode = "unhealthy";
+    await page.clock.runFor(30_000);
+    await expect(server).toContainText("장애", { timeout: 15000 });
+    mode = "down";
+    await page.clock.runFor(30_000);
+    await expect(server).toContainText("확인 불가", { timeout: 15000 });
+    await expect(page.getByTestId("home-system")).toContainText("마지막 확인");
+  });
+
+  test("home: usage marks Gemini's limit-only buckets unmeasured and keeps the settings link without the rule", async ({ page }) => {
+    await mockHomeSources(page);
+    await page.route(/\/api\/rate-limits$/, (route) => route.fulfill({ json: { providers: [
+      { provider: "claude", profile_id: "default", stale: false, fetched_at: 1_795_000_000, buckets: [{ name: "5h", limit: 100, used: 0, remaining: 100, reset: 0 }] },
+      { provider: "gemini", profile_id: "default", stale: false, fetched_at: 1_795_000_060, buckets: [
+        { name: "rpm", limit: 15, used: 0, remaining: 15, reset: 0 }, { name: "rpd", limit: 1500, used: 0, remaining: 1500, reset: 0 },
+      ] },
+    ] } }));
+    await page.route(/\/api\/settings\/runtime-config$/, (route) => route.fulfill({ status: 503, json: { error: "unavailable" } }));
+    await page.goto("/home");
+
+    const usage = page.getByTestId("home-usage");
+    await expect(usage.locator("li")).toHaveCount(3, { timeout: 15000 });
+    await expect(usage.locator("li").first()).toContainText("0%");
+    await expect(usage.getByText("측정 안 됨")).toHaveCount(2);
+    await expect(usage).toContainText("자동 진행을 멈추는 기준은 확인 불가예요", { timeout: 15000 });
+    await expect(usage.getByRole("link", { name: "설정" })).toHaveAttribute("href", "/settings?settingsPanel=workflow");
   });
 
   test("stats: dedicated route exposes range controls and key widgets", async ({ page }) => {
@@ -1714,28 +1757,31 @@ test.describe("Dashboard smoke tests", () => {
     await expectNoHorizontalOverflow(page);
   });
 
-  test("home: today's routines show run results and later due times only", async ({ page }) => {
+  test("home: today's routines show names, run results and later due times only", async ({ page }) => {
     const noon = new Date();
     noon.setHours(12, 0, 0, 0);
     const at = (hours: number, days = 0) => new Date(noon.getTime() + days * 86_400_000 + (hours - 12) * 3_600_000).toISOString();
     const base = MOCK_ROUTINES[1];
     await page.clock.setFixedTime(noon);
+    // Same purpose for every routine, so only the names tell the rows apart.
     await page.route(/\/api\/routines(?:\?.*)?$/, (route) => route.fulfill({ json: { routines: [
-      { ...base, id: "r-fail", next_due_at: at(9, 1), last_run: { ...MOCK_ROUTINES[0].last_run, status: "failed", started_at: at(9) } },
-      { ...base, id: "r-sent", next_due_at: at(6, 1), last_run: { ...MOCK_ROUTINES[0].last_run, status: "succeeded", action: "agent", started_at: at(6) } },
-      { ...base, id: "r-later", next_due_at: at(18), last_run: null },
-      { ...base, id: "r-old", next_due_at: at(9, 1), last_run: { ...MOCK_ROUTINES[0].last_run, status: "succeeded", started_at: at(9, -1) } },
+      { ...base, id: "r-fail", name: "fail-check", next_due_at: at(9, 1), last_run: { ...MOCK_ROUTINES[0].last_run, status: "failed", started_at: at(9) } },
+      { ...base, id: "r-sent", name: "sent-brief", next_due_at: at(6, 1), last_run: { ...MOCK_ROUTINES[0].last_run, status: "succeeded", action: "agent", started_at: at(6) } },
+      { ...base, id: "r-twice", name: "twice-a-day", next_due_at: at(13), last_run: { ...MOCK_ROUTINES[0].last_run, status: "succeeded", action: "complete", started_at: at(11) } },
+      { ...base, id: "r-later", name: "evening-run", next_due_at: at(18), last_run: null },
+      { ...base, id: "r-old", name: "old-run", next_due_at: at(9, 1), last_run: { ...MOCK_ROUTINES[0].last_run, status: "succeeded", started_at: at(9, -1) } },
     ] } }));
     await page.goto("/home");
 
     const card = page.getByTestId("home-routines");
-    await expect(card.locator("[data-testid^='home-routine-']")).toHaveCount(3, { timeout: 15000 });
+    await expect(card.locator("[data-testid^='home-routine-']")).toHaveCount(5, { timeout: 15000 });
     const rows = await card.locator("[data-testid^='home-routine-']").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-testid")));
-    expect(rows).toEqual(["home-routine-r-sent", "home-routine-r-fail", "home-routine-r-later"]);
-    await expect(card.getByTestId("home-routine-r-sent")).toContainText("보냄");
-    await expect(card.getByTestId("home-routine-r-fail")).toContainText("실패");
-    await expect(card.getByTestId("home-routine-r-later")).toContainText("예정");
-    await expect(card).toContainText("3개 중 2개 끝남");
+    expect(rows).toEqual(["home-routine-r-sent:run", "home-routine-r-fail:run", "home-routine-r-twice:run", "home-routine-r-twice:due", "home-routine-r-later:due"]);
+    await expect(card.getByTestId("home-routine-r-sent:run")).toContainText(/sent-brief.*보냄/);
+    await expect(card.getByTestId("home-routine-r-fail:run")).toContainText(/fail-check.*실패/);
+    await expect(card.getByTestId("home-routine-r-twice:run")).toContainText(/11:00.*twice-a-day.*끝남/);
+    await expect(card.getByTestId("home-routine-r-twice:due")).toContainText(/13:00.*twice-a-day.*예정/);
+    await expect(card).toContainText("5개 중 3개 끝남");
     await expectNoHorizontalOverflow(page);
   });
 

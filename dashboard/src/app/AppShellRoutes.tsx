@@ -91,7 +91,6 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
           <HomePageView
             isMobileViewport={isMobileViewport}
             isKo={isKo}
-            stats={stats}
             agents={agentsWithDispatched}
             onOpenAgent={openDefaultAgentInfo}
           />

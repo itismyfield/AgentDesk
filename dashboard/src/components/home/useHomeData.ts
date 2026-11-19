@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getCampaigns, type Campaign } from "../../api/campaigns";
-import { request } from "../../api/httpClient";
+import { ApiRequestError, request } from "../../api/httpClient";
 import type { RoutineRecord } from "../../api/routines";
 import {
   getServerCampaign,
@@ -8,7 +8,7 @@ import {
   type ServerCampaignDocument,
   type ServerCampaignSummary,
 } from "../../api/serverCampaigns";
-import type { RuntimeConfigResponse } from "../../api/settingsRuntime";
+import { normalizeHealth, type HealthResponse, type RuntimeConfigResponse } from "../../api/settingsRuntime";
 import { pollWhileVisible } from "../../lib/pollWhileVisible";
 import { isOpenServerCampaign, type RawUsageProvider } from "./homeModel";
 
@@ -37,8 +37,8 @@ export function usePolled<T>(load: () => Promise<T>, intervalMs: number): Loaded
   return state;
 }
 
-/** Server campaigns whose stage track is read in full; the rest of the card only needs summaries. */
-export const SHOWN_CAMPAIGNS = 4;
+/** Server campaigns whose stage track is read per poll, those under way first; it bounds the detail requests. */
+export const DETAIL_CAMPAIGNS = 8;
 
 export interface HomeCampaigns {
   legacy: Campaign[] | null;
@@ -52,13 +52,43 @@ export async function loadHomeCampaigns(): Promise<HomeCampaigns> {
     getServerCampaignSummaries(),
   ]);
   if (legacy.status === "rejected" && summaries.status === "rejected") throw legacy.reason;
-  const open = summaries.status === "fulfilled" ? summaries.value.filter(isOpenServerCampaign).slice(0, SHOWN_CAMPAIGNS) : [];
+  const open = summaries.status === "fulfilled"
+    ? summaries.value.filter(isOpenServerCampaign).sort((left, right) => Number(left.view.display === "prepared") - Number(right.view.display === "prepared")).slice(0, DETAIL_CAMPAIGNS)
+    : [];
   const documents = await Promise.allSettled(open.map((summary) => getServerCampaign(summary.view.campaign_id)));
   return {
     legacy: legacy.status === "fulfilled" ? legacy.value : null,
     summaries: summaries.status === "fulfilled" ? summaries.value : null,
     documents: documents.flatMap((result) => (result.status === "fulfilled" ? [result.value] : [])),
   };
+}
+
+// Without a server auth token, detail answers loopback peers only, so tailnet devices get 403 every time.
+let healthDetailForbidden = false;
+
+async function readHealth(path: string): Promise<HealthResponse> {
+  try {
+    return normalizeHealth(await request<unknown>(path, { suppressErrorToast: true }));
+  } catch (error) {
+    // An unhealthy server answers 503 with its status, which home shows instead of a lost connection.
+    const body = error instanceof ApiRequestError && error.status === 503 ? error.body : null;
+    if (typeof (body as { status?: unknown } | null)?.status === "string") return normalizeHealth(body);
+    throw error;
+  }
+}
+
+/** Like `getHealthDetail`, but a 503 status body counts as an answer and failures stay quiet; only a read with no
+ * status body throws. */
+export async function loadHomeHealth(): Promise<HealthResponse> {
+  if (!healthDetailForbidden) {
+    try {
+      return await readHealth("/api/health/detail");
+    } catch (error) {
+      healthDetailForbidden = error instanceof ApiRequestError && error.status === 403;
+      if (!healthDetailForbidden) return { ...(await readHealth("/api/health")), publicOnly: "failed" };
+    }
+  }
+  return { ...(await readHealth("/api/health")), publicOnly: "forbidden" };
 }
 
 export async function loadHomeRoutines(): Promise<RoutineRecord[]> {

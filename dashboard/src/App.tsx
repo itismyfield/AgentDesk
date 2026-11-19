@@ -68,6 +68,7 @@ export default function App() {
       initialAgents={data.agents}
       initialDepartments={data.departments}
       initialSessions={data.sessions}
+      initialSessionsFailed={data.sessionsFailed}
       pushNotification={pushNotification}
     >
       <SettingsProvider

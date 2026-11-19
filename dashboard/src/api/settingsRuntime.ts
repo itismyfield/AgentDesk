@@ -151,6 +151,8 @@ export interface HealthResponse {
   dashboard?: boolean;
   outbox_age?: number;
   dispatch_outbox?: HealthDispatchOutboxStats;
+  /** Mailboxes the server could not read, so `queue_depth` leaves them out. */
+  mailbox_observation_failures?: unknown[];
   /** Set when only the public summary came back, so detail-only fields are absent, not zero. */
   publicOnly?: "forbidden" | "failed";
 }
@@ -159,7 +161,7 @@ export interface HealthResponse {
 // to defensively `??` everything. Adds default `providers: []` /
 // `degraded_reasons: []` / `dispatch_outbox` zero shape so UI render paths
 // can rely on consistent typing under transient server omissions.
-function normalizeHealth(raw: unknown): HealthResponse {
+export function normalizeHealth(raw: unknown): HealthResponse {
   const source = (raw ?? {}) as Partial<HealthResponse>;
   return {
     status: source.status ?? "unhealthy",
@@ -178,6 +180,7 @@ function normalizeHealth(raw: unknown): HealthResponse {
     db: source.db,
     dashboard: source.dashboard,
     outbox_age: source.outbox_age,
+    mailbox_observation_failures: Array.isArray(source.mailbox_observation_failures) ? source.mailbox_observation_failures : undefined,
     dispatch_outbox: source.dispatch_outbox ?? {
       pending: 0,
       retrying: 0,

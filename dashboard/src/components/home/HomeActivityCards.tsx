@@ -9,19 +9,24 @@ import { loadHomeRoutines, loadHomeUsage, loadRuntimeConfig, usePolled, type Hom
 
 const CAMPAIGN_ROWS = 4;
 
-/** Open campaigns with a progress track and one line of where each stands; a row opens the campaign. */
+/** Open campaigns with a progress track and one line of where each stands; a row opens the campaign. Campaigns
+ * under way lead and the rest unfold on home. */
 export function HomeCampaignsCard({ campaigns, tr, className }: { campaigns: Loaded<HomeCampaigns>; tr: Tr; className?: string }) {
-  const { rows, total } = buildCampaignRows({
+  const [expanded, setExpanded] = useState(false);
+  const { rows, shown } = buildCampaignRows({
     legacy: campaigns.data?.legacy ?? null,
     summaries: campaigns.data?.summaries ?? null,
     documents: campaigns.data?.documents ?? [],
     tr,
     limit: CAMPAIGN_ROWS,
   });
+  // One list failing leaves the other's rows; an empty answer beside a failure is not "no campaigns".
+  const partial = Boolean(campaigns.data && (!campaigns.data.legacy || !campaigns.data.summaries));
+  const rest = rows.length - shown;
   return (
     <HomeCard
       title={tr("캠페인", "Campaigns")}
-      count={campaigns.data ? total : null}
+      count={campaigns.data && !(partial && rows.length === 0) ? rows.length : null}
       aside={<HeaderLink to="/campaigns">{tr("모두 보기", "See all")}</HeaderLink>}
       testId="home-campaigns"
       className={className}
@@ -29,10 +34,10 @@ export function HomeCampaignsCard({ campaigns, tr, className }: { campaigns: Loa
       {!campaigns.data ? (
         campaigns.failed ? <CardNote>{tr("캠페인을 읽지 못했어요.", "Could not read campaigns.")}</CardNote> : <CardSkeleton label={tr("캠페인 불러오는 중", "Loading campaigns")} />
       ) : rows.length === 0 ? (
-        <CardNote>{tr("진행 중인 캠페인이 없어요.", "No open campaigns.")}</CardNote>
+        <CardNote>{partial ? tr("캠페인 목록 하나를 읽지 못해 확인 불가예요.", "One campaign list did not load, so campaigns are unknown.") : tr("진행 중인 캠페인이 없어요.", "No open campaigns.")}</CardNote>
       ) : (
         <ul className="m-0 list-none p-0">
-          {rows.map((row) => (
+          {(expanded ? rows : rows.slice(0, shown)).map((row) => (
             <li key={row.key} className="border-t border-[var(--line-soft)]">
               <Link
                 to={row.to}
@@ -43,19 +48,27 @@ export function HomeCampaignsCard({ campaigns, tr, className }: { campaigns: Loa
                   <span className="block truncate text-xs" style={{ color: toneText(row.tone) ?? "var(--fg-muted)" }}>{row.status}</span>
                 </span>
                 <span className="min-w-0 flex-1">
-                  {row.segments ? <StageTrack segments={row.segments} /> : <RatioBar ratio={row.ratio ?? 0} color={DONE_COLOR} />}
-                  <Muted className="mt-1.5 block truncate">{row.line}</Muted>
+                  {row.segments ? <StageTrack segments={row.segments} /> : row.ratio !== null ? <RatioBar ratio={row.ratio} color={DONE_COLOR} /> : null}
+                  <Muted className={`block truncate ${row.segments || row.ratio !== null ? "mt-1.5" : ""}`}>{row.line}</Muted>
                 </span>
               </Link>
             </li>
           ))}
+          {rest > 0 ? (
+            <li className="flex justify-center border-t border-[var(--line-soft)] p-1">
+              <button type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)} className={`min-h-11 rounded-[var(--r-md)] px-4 text-sm font-medium text-[var(--fg)] ${ROW_HOVER}`}>
+                {expanded ? tr("접기", "Show less") : tr(`${rest}개 더 보기`, `Show ${rest} more`)}
+              </button>
+            </li>
+          ) : null}
         </ul>
       )}
+      {partial && rows.length > 0 ? <CardNote>{tr("캠페인 목록 하나를 읽지 못해 일부는 확인 불가예요.", "One campaign list did not load, so some campaigns are unknown.")}</CardNote> : null}
     </HomeCard>
   );
 }
 
-/** Today's routine runs: time, what it does, and the result or that it is still to come. */
+/** Today's routine runs: time, the routine's name and what it does, and the result or that it is still to come. */
 export function HomeRoutinesCard({ tr, isKo, className }: { tr: Tr; isKo: boolean; className?: string }) {
   const routines = usePolled(loadHomeRoutines, 60_000);
   const [now, setNow] = useState(() => Date.now());
@@ -87,7 +100,10 @@ export function HomeRoutinesCard({ tr, isKo, className }: { tr: Tr; isKo: boolea
             return (
               <li key={row.key} data-testid={`home-routine-${row.key}`} className="flex min-h-11 items-center gap-3 border-t border-[var(--line-soft)] px-4 py-2.5">
                 <Muted className="w-11 shrink-0 tabular-nums">{formatClock(row.at)}</Muted>
-                <span className="min-w-0 flex-1 truncate text-sm" title={`${purpose} (${row.routine.name})`}>{purpose}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm" title={row.routine.name}>{row.routine.name}</span>
+                  {purpose !== row.routine.name ? <span className="block truncate text-xs text-[var(--fg-muted)]" title={purpose}>{purpose}</span> : null}
+                </span>
                 <Chip tone={row.tone}>{row.chip}</Chip>
               </li>
             );
@@ -131,24 +147,25 @@ export function HomeUsageCard({ tr, isKo, className }: { tr: Tr; isKo: boolean; 
                 <span className="min-w-0 flex-1 truncate text-[var(--fg-muted)]" title={row.note ?? row.label}>{row.label}</span>
                 {row.stale && row.measuredAt !== null ? <Muted>{tr(`${formatClock(row.measuredAt)} 값`, `as of ${formatClock(row.measuredAt)}`)}</Muted> : null}
                 <span className="shrink-0 tabular-nums" style={{ color: row.pct === null ? "var(--fg-muted)" : row.level === "normal" ? undefined : LEVEL_COLOR[row.level] }}>
-                  {row.pct === null ? unknown : `${row.pct}%`}
+                  {row.pct !== null ? `${row.pct}%` : row.unmeasured ? tr("측정 안 됨", "Not measured") : unknown}
                 </span>
               </span>
-              <span className="mt-1.5 block"><RatioBar ratio={(row.pct ?? 0) / 100} color={LEVEL_COLOR[row.level]} /></span>
+              {row.pct === null ? null : <span className="mt-1.5 block"><RatioBar ratio={row.pct / 100} color={LEVEL_COLOR[row.level]} /></span>}
             </li>
           ))}
         </ul>
       )}
-      {rule ? (
-        <p className="m-0 flex items-center gap-2 px-4 pb-1 text-xs text-[var(--fg-muted)]">
-          <span className="min-w-0 flex-1">
-            {rule.enabled && rule.pct !== null
+      {/* The settings link stays even when the rule could not be read. */}
+      <p className="m-0 flex items-center gap-2 px-4 pb-1 text-xs text-[var(--fg-muted)]">
+        <span className="min-w-0 flex-1">
+          {rule
+            ? rule.enabled && rule.pct !== null
               ? tr(`사용량이 ${rule.pct}% 이상이면 자동 진행을 멈춰요`, `Auto-run pauses at ${rule.pct}% usage`)
-              : tr("사용량으로 자동 진행을 멈추지 않아요", "Auto-run does not pause for usage")}
-          </span>
-          <Link to={AUTO_PAUSE_SETTINGS} className="-mr-1.5 inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center font-medium text-[var(--accent)] hover:underline">{tr("설정", "Settings")}</Link>
-        </p>
-      ) : null}
+              : tr("사용량으로 자동 진행을 멈추지 않아요", "Auto-run does not pause for usage")
+            : runtime.failed ? tr("자동 진행을 멈추는 기준은 확인 불가예요", "The auto-run pause rule is unknown") : null}
+        </span>
+        <Link to={AUTO_PAUSE_SETTINGS} className="-mr-1.5 inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center font-medium text-[var(--accent)] hover:underline">{tr("설정", "Settings")}</Link>
+      </p>
     </HomeCard>
   );
 }
