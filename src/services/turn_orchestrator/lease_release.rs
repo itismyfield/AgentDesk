@@ -373,7 +373,7 @@ mod lease_release_identity_tests {
             "the Clear arm must name the channel it retires: {logs}"
         );
         assert!(
-            logs.contains("provider=\"gemini\""),
+            logs.contains("provider=\"opencode\""),
             "the Clear arm carries the provider its message named: {logs}"
         );
         assert!(

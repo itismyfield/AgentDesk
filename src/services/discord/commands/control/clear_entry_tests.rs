@@ -87,7 +87,7 @@ const FAULTS: [Fault; 13] = [
     Fault::StopRefused,
 ];
 
-/// A Gemini runtime on PostgreSQL whose Discord REST calls land in a recorder.
+/// An OpenCode runtime on PostgreSQL whose Discord REST calls land in a recorder.
 struct Rig {
     api: Recorder,
     ctx: serenity::Context,

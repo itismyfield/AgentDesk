@@ -15,7 +15,7 @@
 //! ```
 //!
 //! - `provider_id` is the lowercase provider registry id (`claude`, `codex`,
-//!   `gemini`, `opencode`, `qwen`).
+//!   `opencode`, `qwen`).
 //! - `sanitized_channel` is the Discord channel name (or stable channel
 //!   identifier) with non-alphanumeric / non-`-_` characters replaced by `-`,
 //!   then prefix-truncated to 44 bytes. A trailing `-t{thread_id}` suffix is
