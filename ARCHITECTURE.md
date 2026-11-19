@@ -2087,6 +2087,7 @@ src/
 │   │   │   ├── o_writer_io.rs
 │   │   │   ├── o_writer_late_tmux_tests.rs
 │   │   │   ├── o_writer_legacy.rs
+│   │   │   ├── o_writer_legacy_codex_tests.rs
 │   │   │   ├── o_writer_repost_io.rs
 │   │   │   ├── o_writer_repost_io_tests.rs
 │   │   │   ├── outbound_delivery_port_tests.rs
@@ -4572,6 +4573,7 @@ src/
 │   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── codex/
 │   │   │   │   │   ├── buffered_tests.rs
+│   │   │   │   │   ├── delivered.rs
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── child_run.rs
