@@ -14,6 +14,7 @@ mod force_kill;
 pub(crate) mod hosted_execution;
 #[path = "dispatched_sessions/provider_resume_fence.rs"]
 pub(crate) mod provider_resume_fence;
+#[cfg(unix)]
 #[path = "dispatched_sessions/rotation_selector.rs"]
 pub(crate) mod rotation_selector;
 #[cfg(unix)]
