@@ -1,0 +1,2 @@
+key: session-lifecycle-claude-cold-launch-binding
+| `session-lifecycle` (Herdr Claude first-turn queue injection, #8260) | `356ee704f9` | Before has a Bound row after both launch hooks, but the first queue attempt is held for a missing source pin | After verifies the pin from the launch hook and first complete record. Four configs matched (one green, three expected red). [Report](session-lifecycle/claude-cold-launch-binding.report.md) |
