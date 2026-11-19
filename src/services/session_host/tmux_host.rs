@@ -319,7 +319,7 @@ mod tests {
     fn create_runs_the_prepared_argv_as_the_platform_does_and_keeps_the_raw_result() {
         use super::super::create::HostCreation;
         use crate::services::provider_teardown::tests::test_support::FakeTmux;
-        let root = crate::config::TestRuntimeRootGuard::new();
+        let _root = crate::config::TestRuntimeRootGuard::new();
         let name = "adk-s04-create-port";
         let fake = FakeTmux::install(name);
         let identity = crate::services::session_identity_metadata::runtime_identity(name).unwrap();
@@ -370,7 +370,6 @@ mod tests {
         let created = TmuxHost.create(HostCreate(session("true")));
         assert_eq!(created.creation, HostCreation::Created(name.into()));
         assert!(created.into_output().unwrap().status.success());
-        drop(root);
     }
 
     #[cfg(unix)]
