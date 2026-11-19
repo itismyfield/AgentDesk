@@ -5000,7 +5000,6 @@ src/
 │   ├── dispatches_followup.rs
 │   ├── escalation_cooldown.rs
 │   ├── explicit_auth_route.rs
-│   ├── gemini.rs
 │   ├── github_issue_creation.rs
 │   ├── hang_forensics.rs
 │   ├── health_diagnostics.rs
