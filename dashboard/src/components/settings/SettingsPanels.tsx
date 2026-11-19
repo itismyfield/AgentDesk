@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { getSettingsChannelName } from "../../api/settingsRuntime";
+import { SegmentedControl } from "../../kit/free/segmented-control-clean";
 import { Switch } from "../../kit/free/switch-clean";
 import { applyChip, applyText, defaultText, formatSettingValue, type CatalogItem, type StatusTone } from "./SettingsModel";
 import { SETTINGS_TRAY_CLASS, SettingsBadge, SettingsTextField } from "./SettingsPrimitives";
@@ -11,7 +12,16 @@ type Tr = (ko: string, en: string) => string;
 
 const DISCORD_ID_PATTERN = /^\d{17,20}$/;
 
-export const editableItem = (item: CatalogItem) => item.input === "toggle" || item.input === "number" || item.input === "text";
+export const editableItem = (item: CatalogItem) => ["toggle", "number", "text", "choice"].includes(item.input);
+
+/** Option picker for "choice" rows. The kit control sizes to its container, so the slot sets the width. */
+export function ChoiceControl({ item, value, label, size, className, onChange }: { item: CatalogItem; value: string; label: string; size: "sm" | "lg"; className: string; onChange: (value: string) => void }) {
+  return (
+    <div className={className}>
+      <SegmentedControl variant="tray" fullWidth size={size} aria-label={label} value={value} onChange={onChange} options={item.options ?? []} />
+    </div>
+  );
+}
 
 /** The value the page currently holds for a row: its draft, else the stored value. */
 export const currentValue = (item: CatalogItem) => item.draft ?? item.saved;
@@ -55,6 +65,7 @@ export function InlineControl({ item, label, invalid, onChange, tr }: InlineCont
   if (item.input === "toggle") {
     return <Switch aria-label={label} checked={value === "true"} onChange={(event) => onChange(String(event.target.checked))} />;
   }
+  if (item.input === "choice") return <ChoiceControl item={item} value={value} label={label} size="sm" className="w-44" onChange={onChange} />;
   if (item.input === "number" || item.input === "text") {
     const numeric = item.input === "number";
     return (

@@ -322,12 +322,12 @@ test.describe("settings catalog", () => {
     await mockSettings(page);
     await openSettings(page);
     const nav = page.getByRole("navigation", { name: "분류" });
-    await expect(nav.getByRole("button")).toHaveText(["전체23", "작업 흐름3", "리뷰2", "컨텍스트2", "사용량5", "알림 채널1", "시스템2", "연결8"]);
+    await expect(nav.getByRole("button")).toHaveText(["전체24", "작업 흐름3", "리뷰2", "컨텍스트2", "사용량5", "알림 채널1", "시스템3", "연결8"]);
     await expect(page.getByText("deadlock_manager_channel_id")).toHaveCount(0);
     await expect(page.getByText("데드락")).toHaveCount(0);
 
     await page.getByRole("switch", { name: /기본값과 다름/ }).check();
-    await expect(page.getByTestId("settings-list-caption")).toHaveText("23개 중 3개 · 기본값과 다른 것만");
+    await expect(page.getByTestId("settings-list-caption")).toHaveText("24개 중 3개 · 기본값과 다른 것만");
     await expect(row(page, "max_review_rounds")).toContainText("기본 3 · 코드");
     await expect(row(page, "max_review_rounds")).toContainText("덮어씀");
     await page.getByRole("switch", { name: /기본값과 다름/ }).uncheck();
@@ -452,6 +452,32 @@ test.describe("settings catalog", () => {
     await expect(row(page, "rateLimitWarningPct")).toContainText("사용량 주의 표시 (%)");
     await expect(page.getByTestId("settings-providers-panel").getByText("7일 한도 · Fable 모델")).toBeVisible();
     await expect(page.getByTestId("settings-provider-usage-bar").first()).toHaveAttribute("data-level", "danger");
+  });
+
+  test("system: the language row switches the copy as soon as it is saved", async ({ page }, testInfo) => {
+    await mockSettings(page);
+    let stored: Record<string, unknown> = { companyName: "AgentDesk", ceoName: "윤호", language: "ko", theme: "dark" };
+    const puts: unknown[] = [];
+    await page.route(/\/api\/settings$/, (route) => {
+      if (route.request().method() !== "PUT") return route.fulfill({ json: stored });
+      stored = route.request().postDataJSON();
+      puts.push(stored);
+      return route.fulfill({ json: { ok: true } });
+    });
+    await openSettings(page, "?category=system");
+    await expect(row(page, "language")).toContainText("기본 한국어 · 코드");
+    if (testInfo.project.name === "mobile") {
+      await row(page, "language").click();
+      const sheet = page.getByTestId("settings-edit-sheet");
+      await sheet.getByRole("radio", { name: "English" }).click();
+      await sheet.getByRole("button", { name: "저장", exact: true }).click();
+    } else {
+      await row(page, "language").getByRole("radio", { name: "English" }).click();
+      await page.getByTestId("settings-save-bar").getByRole("button", { name: "저장" }).click();
+    }
+    await expect(row(page, "language")).toContainText("Language");
+    await expect(page.getByTestId("settings-search-input")).toHaveAttribute("placeholder", "Search by name, key or description");
+    expect(puts).toEqual([expect.objectContaining({ language: "en", theme: "dark" })]);
   });
 
   test("a failed source shows one alert instead of editable defaults", async ({ page }) => {

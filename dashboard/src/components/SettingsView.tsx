@@ -15,6 +15,7 @@ import {
   configItems,
   draftProblem,
   filterCatalog,
+  languageItem,
   resetsOnRestart,
   resolveCategory,
   runtimeItems,
@@ -38,6 +39,9 @@ import { useConnectionStatus, useOperatorConnectors, usePromptRetention, useProv
 
 interface SettingsViewProps {
   isKo: boolean;
+  /** Saved dashboard language and the shell's /api/settings save path. */
+  language: string;
+  onSaveSettings: (patch: Record<string, unknown>) => Promise<void>;
   onNotify?: (message: string, type?: SettingsNotificationType) => string | void;
 }
 
@@ -71,7 +75,7 @@ function useSlashFocus(target: React.RefObject<HTMLInputElement | null>) {
 }
 
 /** Settings catalog: config, runtime-config and connection status in one searchable list (v3 stage 2). */
-export default function SettingsView({ isKo, onNotify }: SettingsViewProps) {
+export default function SettingsView({ isKo, language, onSaveSettings, onNotify }: SettingsViewProps) {
   const tr = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
   const notify = useCallback(
     (ko: string, en: string, type: SettingsNotificationType = "info") => {
@@ -104,6 +108,7 @@ export default function SettingsView({ isKo, onNotify }: SettingsViewProps) {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [saving, setSaving] = useState(false);
   const [pendingDangerous, setPendingDangerous] = useState<PendingDangerousSave | null>(null);
+  const [languageDraft, setLanguageDraft] = useState<string | null>(null);
 
   const config = useConfigEntriesDraft();
   const runtime = useRuntimeConfigDraft();
@@ -117,12 +122,13 @@ export default function SettingsView({ isKo, onNotify }: SettingsViewProps) {
     [connection.health, connection.onboarding, tr],
   );
   const items = useMemo(() => sortCatalog([
+    languageItem(language, languageDraft, isKo),
     ...configItems(config.entries, config.edits, isKo),
     ...(runtime.loaded && !runtime.error
       ? runtimeItems({ saved: runtime.saved, draft: runtime.values, defaults: runtime.defaults, changedKeys: runtime.changedKeys }, resetsOnRestart(config.entries), isKo)
       : []),
     ...connectionItems({ statusRows, health: connection.health, retention, connectors }, tr, isKo),
-  ]), [config.edits, config.entries, connection.health, connectors, isKo, retention, runtime.changedKeys, runtime.defaults, runtime.error, runtime.loaded, runtime.saved, runtime.values, statusRows, tr]);
+  ]), [config.edits, config.entries, connection.health, connectors, isKo, language, languageDraft, retention, runtime.changedKeys, runtime.defaults, runtime.error, runtime.loaded, runtime.saved, runtime.values, statusRows, tr]);
 
   const counts = useMemo(() => catalogCounts(items), [items]);
   const filtered = useMemo(() => filterCatalog(items, { category, query, ...filters }), [category, filters, items, query]);
@@ -147,12 +153,14 @@ export default function SettingsView({ isKo, onNotify }: SettingsViewProps) {
   const handleChange = useCallback((item: CatalogItem, value: string) => {
     if (item.source === "config") editConfig(item.key, value);
     else if (item.source === "runtime") changeRuntime(item.key, runtimeValue(item, value));
-  }, [changeRuntime, editConfig]);
+    else if (item.source === "app") setLanguageDraft(value === language ? null : value);
+  }, [changeRuntime, editConfig, language]);
   const handleReset = useCallback((item: CatalogItem) => {
     if (item.baseline === null) return;
     if (item.source === "runtime") resetToDefault(item.key);
+    else if (item.source === "app") setLanguageDraft(item.baseline === language ? null : item.baseline);
     else editConfig(item.key, item.baseline);
-  }, [editConfig, resetToDefault]);
+  }, [editConfig, language, resetToDefault]);
 
   // Dangerous config keys (review gate, context clearing) wait for a confirmation before any save path runs.
   const guarded = (keys: string[], run: () => void) => {
@@ -163,6 +171,12 @@ export default function SettingsView({ isKo, onNotify }: SettingsViewProps) {
   const saveAll = async () => {
     setSaving(true);
     let failed = false;
+    if (languageDraft !== null) {
+      try {
+        await onSaveSettings({ language: languageDraft });
+        setLanguageDraft(null);
+      } catch { failed = true; }
+    }
     if (runtime.dirty) {
       try { await runtime.save(); } catch { failed = true; }
     }
@@ -181,7 +195,10 @@ export default function SettingsView({ isKo, onNotify }: SettingsViewProps) {
     setSaving(true);
     try {
       if (item.source === "config") await config.save({ [item.key]: value });
-      else await runtime.saveKey(item.key, runtimeValue(item, value), value !== item.baseline);
+      else if (item.source === "app") {
+        await onSaveSettings({ language: value });
+        setLanguageDraft(null);
+      } else await runtime.saveKey(item.key, runtimeValue(item, value), value !== item.baseline);
       setSheetKey(null);
       notify("설정을 저장했어요.", "Saved settings.", "success");
     } catch {
@@ -254,6 +271,7 @@ export default function SettingsView({ isKo, onNotify }: SettingsViewProps) {
       onDiscard={() => {
         runtime.discard();
         config.discard();
+        setLanguageDraft(null);
       }}
       onSave={() => {
         if (!blockedReason) guarded(getDangerousConfigKeys(config.edits), () => void saveAll());
@@ -283,10 +301,6 @@ export default function SettingsView({ isKo, onNotify }: SettingsViewProps) {
     <PageFrame
       testId="settings-page"
       title={tr("설정", "Settings")}
-      description={tr(
-        `서버·런타임·연결 설정 ${counts.total}개예요. 값마다 기본값·출처·적용 시점을 함께 보여 줘요.`,
-        `${counts.total} server, runtime and connection settings, each with its default, source and when it applies.`,
-      )}
       actions={search}
     >
       {phone ? (
@@ -317,7 +331,7 @@ export default function SettingsView({ isKo, onNotify }: SettingsViewProps) {
           caption={caption}
           selected={selected}
           wide={wide}
-          loading={loading && items.every((item) => item.source === "status")}
+          loading={loading && !items.some((item) => item.source === "config" || item.source === "runtime")}
           notice={notice}
           saveBar={saveBar}
           blocks={openBlock}

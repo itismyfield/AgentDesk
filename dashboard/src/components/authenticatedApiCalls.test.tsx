@@ -197,7 +197,7 @@ describe("settings under token authentication", () => {
     const view = await render(
       <QueryClientProvider client={queries}>
         <MemoryRouter>
-          <SettingsView isKo={false} onNotify={notify} />
+          <SettingsView isKo={false} language="en" onSaveSettings={vi.fn()} onNotify={notify} />
         </MemoryRouter>
       </QueryClientProvider>,
     );

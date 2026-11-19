@@ -5,7 +5,7 @@ import { Switch } from "../../kit/free/switch-clean";
 import { BottomSheet } from "../common/overlay/BottomSheet";
 import type { SettingsCategory } from "./SettingsCopy";
 import { baselineText, draftProblem, formatSettingValue, withRo, type CatalogItem, type CategoryFilter } from "./SettingsModel";
-import { ItemChip, ItemFacts, ItemHeading, ItemValue, RelatedSettings, currentValue, editableItem } from "./SettingsPanels";
+import { ChoiceControl, ItemChip, ItemFacts, ItemHeading, ItemValue, RelatedSettings, currentValue, editableItem } from "./SettingsPanels";
 import { SETTINGS_CARD_CLASS, SETTINGS_TRAY_CLASS, SettingsSkeletonRows, SettingsTextField } from "./SettingsPrimitives";
 
 type Tr = (ko: string, en: string) => string;
@@ -148,6 +148,8 @@ export function SettingsEditSheet({ item, allItems, saving, onClose, onSave, onS
           <div className={`flex min-h-12 items-center px-3 ${SETTINGS_TRAY_CLASS}`}>
             <Switch placement="end" className="w-full" label={shown} checked={value === "true"} onChange={(event) => setValue(String(event.target.checked))} />
           </div>
+        ) : item.input === "choice" ? (
+          <ChoiceControl item={item} value={value} label={item.label} size="lg" className="w-full" onChange={setValue} />
         ) : item.input === "text" ? (
           <SettingsTextField aria-label={item.label} size="lg" value={value} inputClassName="font-mono" onChange={(event) => setValue(event.target.value)} />
         ) : null}
@@ -170,7 +172,7 @@ export function SettingsEditSheet({ item, allItems, saving, onClose, onSave, onS
               disabled={saving || Boolean(problem) || value === item.saved}
               onClick={() => onSave(item, value)}
             >
-              {item.input === "text" ? tr("저장", "Save") : tr(`${withRo(shown)} 저장`, `Save ${shown}`)}
+              {item.input === "text" || item.input === "choice" ? tr("저장", "Save") : tr(`${withRo(shown)} 저장`, `Save ${shown}`)}
             </Button>
           </div>
         ) : null}

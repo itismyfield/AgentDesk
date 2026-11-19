@@ -91,11 +91,6 @@ export function connectionStatusRows(
   return [bot, fromOnboarding("server", serverLabel), fromOnboarding("owner", ownerLabel), fromOnboarding("ai", aiLabel)];
 }
 
-/** Connectors that are set up but broken; optional ones left off do not count. */
-export function connectorsNeedingSetup(connectors: OperatorConnectorsResponse | undefined): number {
-  return connectors?.summary?.invalid ?? 0;
-}
-
 const ROW_KEYS: Record<ConnectionStatusRow["key"], string> = {
   bot: "health.providers",
   server: "onboarding.guild_id",

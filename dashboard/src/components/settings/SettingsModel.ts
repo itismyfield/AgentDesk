@@ -59,15 +59,16 @@ export interface StatusDetail {
   steps?: { lines: string[]; translated: boolean };
 }
 
-/** One row of the settings catalog, from /api/settings/config, /api/settings/runtime-config or a status source. */
+/** One row of the settings catalog: /api/settings/config, /api/settings/runtime-config, /api/settings ("app") or a status source. */
 export interface CatalogItem {
   key: string;
-  source: "config" | "runtime" | "status";
+  source: "config" | "runtime" | "app" | "status";
   category: SettingsCategory;
   label: string;
   /** Empty until the key's behavior is confirmed in code (server meta: #8249). */
   description: string;
-  input: "toggle" | "number" | "text" | "readonly" | "status";
+  input: "toggle" | "number" | "text" | "choice" | "readonly" | "status";
+  options?: Array<{ value: string; label: string }>;
   /** Stored value as text; "" means none. */
   saved: string;
   /** Unsaved value held by the page, or null. */
@@ -178,6 +179,32 @@ export function runtimeItems(runtime: RuntimeSnapshot, resetOnRestart: boolean, 
   });
 }
 
+const LANGUAGE_NAMES: Record<string, string> = { ko: "한국어", en: "English", ja: "日本語", zh: "中文" };
+
+/** Dashboard language from /api/settings. Only Korean and English have copy; another saved value still shows. */
+export function languageItem(saved: string, draft: string | null, isKo: boolean): CatalogItem {
+  const values = saved === "ja" || saved === "zh" ? ["ko", "en", saved] : ["ko", "en"];
+  return {
+    key: "language",
+    source: "app",
+    category: "system",
+    label: isKo ? "언어" : "Language",
+    description: describe("language", isKo),
+    input: "choice",
+    options: values.map((value) => ({ value, label: LANGUAGE_NAMES[value] })),
+    saved,
+    draft,
+    // DEFAULT_SETTINGS fills a language the server has not stored.
+    baseline: "ko",
+    baselineSource: "hardcoded",
+    overridden: saved !== "ko",
+    restartNeeded: false,
+    applies: "persist-live-override",
+    related: [],
+    dangerous: false,
+  };
+}
+
 /** True when the server wipes live overrides on restart, read from any config entry's restart note. */
 export function resetsOnRestart(entries: ConfigEntry[]): boolean {
   return entries.some((entry) => entry.restart_behavior === "reset-to-baseline" || entry.restart_behavior === "clear-on-restart");
@@ -216,8 +243,10 @@ export function catalogCounts(items: CatalogItem[]) {
   };
 }
 
-export function formatSettingValue(value: string, item: Pick<CatalogItem, "input">, tr: Tr): string {
+export function formatSettingValue(value: string, item: Pick<CatalogItem, "input" | "options">, tr: Tr): string {
   if (value === "") return tr("없음", "None");
+  const option = item.options?.find((candidate) => candidate.value === value);
+  if (option) return option.label;
   if (item.input === "toggle" && value === "true") return tr("켜짐", "On");
   if (item.input === "toggle" && value === "false") return tr("꺼짐", "Off");
   return value;

@@ -143,6 +143,11 @@ const SETTING_KEY_META: Record<string, SettingKeyMeta> = {
     descKo: "카드는 끝났는데 GitHub 이슈가 열려 있으면 이 Discord 채널로 알려요. ADK_GITHUB_SYNC_ALERT_CHANNEL 환경 변수가 있으면 그쪽을 먼저 써요.",
     descEn: "Discord channel told when a card is done but its GitHub issue is still open. ADK_GITHUB_SYNC_ALERT_CHANNEL wins when set.",
   },
+  language: {
+    category: "system", labelKo: "언어", labelEn: "Language",
+    descKo: "대시보드 화면에 쓰는 언어예요. 저장하면 바로 바뀌어요.",
+    descEn: "Language of the dashboard. Changes as soon as you save.",
+  },
   server_port: {
     category: "system",
     descKo: "대시보드와 에이전트가 접속하는 포트예요. 서버 설정 파일에서 정해요.",

@@ -7,6 +7,8 @@ import {
   configItems,
   draftProblem,
   filterCatalog,
+  formatSettingValue,
+  languageItem,
   resolveCategory,
   runtimeItems,
   withRo,
@@ -73,6 +75,8 @@ describe("settings catalog", () => {
     expect(draftProblem(rounds, "0", ko)).toBe("1 이상인 숫자를 넣어 주세요.");
     expect(draftProblem(rounds, "", ko)).toBeNull();
     expect(["3", "10", "1", "7", "켜짐", "기본"].map(withRo)).toEqual(["3으로", "10으로", "1로", "7로", "켜짐으로", "기본으로"]);
+    const language = languageItem("en", null, true);
+    expect([formatSettingValue(language.saved, language, ko), language.overridden, baselineText(language, ko)]).toEqual(["English", true, "기본 한국어 · 코드"]);
   });
 
   it("turns health, retention and connectors into status rows without zero placeholders", () => {
