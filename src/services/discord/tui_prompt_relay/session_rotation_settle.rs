@@ -310,6 +310,7 @@ async fn settle_one_claude_session_rotation(
             let settled =
                 submit_rotation_settle(shared, channel_id, rotation, undelivered_bytes, view).await;
             if settled {
+                follow_rotation_selector(shared, channel_id, rotation).await;
                 crate::services::tui_prompt_dedupe::clear_claude_session_rotation(
                     &rotation.tmux_session_name,
                 );
@@ -327,11 +328,54 @@ async fn settle_one_claude_session_rotation(
                 "#5188: retired Claude session rotation record; no inflight is pinned to the \
                  frozen transcript (feeder switch and delivery not verified here)"
             );
+            follow_rotation_selector(shared, channel_id, rotation).await;
             crate::services::tui_prompt_dedupe::clear_claude_session_rotation(
                 &rotation.tmux_session_name,
             );
         }
     }
+}
+
+/// Moves the channel's cached provider session and its stored selector onto the session the pane
+/// rotated to, so the next turn does not resume the old one. A cleared or other cache is left alone.
+#[cfg(unix)]
+async fn follow_rotation_selector(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    rotation: &crate::services::tui_prompt_dedupe::ClaudeSessionRotation,
+) {
+    let Some(old) = rotation.old_session_id.as_deref() else {
+        return;
+    };
+    let new = rotation.new_session_id.as_str();
+    {
+        let mut data = shared.core.lock().await;
+        let Some(session) = data
+            .sessions
+            .get_mut(&channel_id)
+            .filter(|session| !session.cleared && session.session_id.as_deref() == Some(old))
+        else {
+            return;
+        };
+        session.restore_provider_session(Some(new.to_string()));
+    }
+    let provider = ProviderKind::Claude;
+    let session_key = super::super::adk_session::build_namespaced_session_key(
+        &shared.token_hash,
+        &provider,
+        &rotation.tmux_session_name,
+    );
+    let save = super::super::adk_session::save_provider_session_id;
+    let port = shared.api_port;
+    save(&session_key, new, Some(new), &provider, channel_id, port).await;
+    tracing::info!(
+        provider = "claude",
+        channel_id = channel_id.get(),
+        tmux_session_name = %rotation.tmux_session_name,
+        old_session_id = old,
+        new_session_id = new,
+        "moved the channel's provider session selector to the rotated Claude session"
+    );
 }
 
 /// #5213: the drain observation the settle WARN must report. The ledger fold runs
@@ -434,6 +478,10 @@ async fn submit_rotation_settle(
     );
     gone_or_changed
 }
+
+#[cfg(all(test, unix))]
+#[path = "session_rotation_settle/selector_tests.rs"]
+mod selector_tests;
 
 #[cfg(test)]
 mod tests {
