@@ -1158,6 +1158,7 @@ src/
 │   │   │   ├── ordered_queue.rs
 │   │   │   ├── queue_retention.rs
 │   │   │   ├── reaping_tests.rs
+│   │   │   ├── recovery_pace.rs
 │   │   │   ├── response_window.rs
 │   │   │   ├── too_early.rs
 │   │   │   └── transport_retry.rs
@@ -4812,6 +4813,8 @@ src/
 │   │   │   │   ├── absent_open.rs
 │   │   │   │   ├── absent_open_tests.rs
 │   │   │   │   ├── clear_relaunch.rs
+│   │   │   │   ├── disposition_cache.rs
+│   │   │   │   ├── disposition_cache_tests.rs
 │   │   │   │   ├── fresh_admission.rs
 │   │   │   │   ├── herdr_bootstrap.rs
 │   │   │   │   ├── hold_detail.rs
