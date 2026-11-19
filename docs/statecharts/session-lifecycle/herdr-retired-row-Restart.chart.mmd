@@ -1,0 +1,62 @@
+---
+title: "Herdr 실행 퇴역 뒤 세션 행 status"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks EndedTurnNotSelectable or NoRevival
+    lg1: Path to the EndedTurnNotSelectable or NoRevival bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: 턴 진행 #183; 실행 Bound #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy
+  s1: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy
+  s2: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남
+  s3: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown
+  s4: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence busy #183; 한때 끝남 #183; 재시작 뒤
+  s5: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남
+  s6: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남
+  s7: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤
+  s8: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 한때 끝남 #183; 재시작 뒤
+  s9: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 한때 끝남 #183; 재시작 뒤
+  s10: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남
+  s11: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤
+  s12: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤
+  s13: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 한때 끝남 #183; 재시작 뒤
+  s14: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤
+  s15: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤
+  s16: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤
+  [*] --> s0
+  s0 --> s1: terminate#183;row end 퇴역
+  s1 --> s2: force postlude disconnect
+  s1 --> s3: 600초 정체 #8594; unknown
+  s2 --> s4: dcserver 재시작
+  s2 --> s5: reader 30초 working
+  s2 --> s6: 600초 정체 #8594; unknown
+  s3 --> s6: force postlude disconnect
+  s4 --> s7: 300초 경과
+  s4 --> s9: 600초 정체 #8594; unknown
+  s5 --> s8: dcserver 재시작
+  s5 --> s10: 600초 정체 #8594; unknown
+  s6 --> s9: dcserver 재시작
+  s6 --> s10: reader 30초 working
+  s7 --> s12: 600초 정체 #8594; unknown
+  s8 --> s11: 300초 경과
+  s8 --> s13: 600초 정체 #8594; unknown
+  s9 --> s12: 300초 경과
+  s10 --> s13: dcserver 재시작
+  s11 --> s14: stale sweep idle
+  s11 --> s15: 600초 정체 #8594; unknown
+  s13 --> s15: 300초 경과
+  s14 --> s16: 600초 정체 #8594; unknown
+  s15 --> s16: stale sweep idle
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s5 breaks
+  class s5 bugPath
+  class s8 breaks
+  class s10 breaks
+  class s11 breaks
+  class s13 breaks
+  class s15 breaks

@@ -1,0 +1,81 @@
+---
+title: "Herdr 실행 퇴역 뒤 세션 행 status"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks EndedTurnNotSelectable or NoRevival
+    lg1: Path to the EndedTurnNotSelectable or NoRevival or RowSettles bug
+    lg2: Repeats forever, so RowSettles breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  s0: 턴 진행 #183; 실행 Bound #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy
+  s1: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy
+  s2: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남
+  s3: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown
+  s4: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남
+  s5: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남
+  s6: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남
+  s7: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 새 턴 시작 뒤
+  s8: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남
+  s9: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남
+  s10: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남
+  s11: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남
+  s12: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; 새 턴 시작 뒤
+  s13: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤
+  s14: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남
+  s15: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤
+  s16: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남
+  s17: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤
+  s18: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(새 턴) #183; reader 살아 있음 #183; presence idle #183; heartbeat 오래됨 #183; 한때 끝남 #183; 새 턴 시작 뒤
+  s19: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(새 턴) #183; reader 살아 있음 #183; presence idle #183; 한때 끝남 #183; 새 턴 시작 뒤
+  [*] --> s0
+  s0 --> s1: terminate#183;row end 퇴역
+  s1 --> s2: force postlude disconnect
+  s1 --> s3: 600초 정체 #8594; unknown
+  s2 --> s4: 300초 경과
+  s2 --> s5: 새 실행 Pending 설치
+  s2 --> s6: 600초 정체 #8594; unknown
+  s2 --> s7: 새 nonce 턴 시작
+  s3 --> s6: force postlude disconnect
+  s4 --> s7: 새 nonce 턴 시작
+  s4 --> s8: 새 실행 Pending 설치
+  s4 --> s9: 600초 정체 #8594; unknown
+  s5 --> s10: reader 30초 working
+  s5 --> s11: 600초 정체 #8594; unknown
+  s5 --> s12: 새 nonce 턴 시작
+  s6 --> s7: 새 nonce 턴 시작
+  s6 --> s9: 300초 경과
+  s6 --> s11: 새 실행 Pending 설치
+  s7 --> s12: 새 실행 Pending 설치
+  s7 --> s13: 새 턴 IDLE
+  s8 --> s10: reader 30초 working
+  s8 --> s12: 새 nonce 턴 시작
+  s8 --> s14: 600초 정체 #8594; unknown
+  s9 --> s7: 새 nonce 턴 시작
+  s9 --> s14: 새 실행 Pending 설치
+  s10 --> s12: 새 nonce 턴 시작
+  s10 --> s16: 600초 정체 #8594; unknown
+  s11 --> s12: 새 nonce 턴 시작
+  s11 --> s16: reader 30초 working
+  s12 --> s17: 새 턴 IDLE
+  s13 --> s15: 300초 경과
+  s13 --> s17: 새 실행 Pending 설치
+  s14 --> s12: 새 nonce 턴 시작
+  s14 --> s16: reader 30초 working
+  s15 --> s18: 새 실행 Pending 설치
+  s16 --> s12: 새 nonce 턴 시작
+  s17 --> s19: reader 30초 working
+  s18 --> s19: reader 30초 working
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s5 bugPath
+  class s10 breaks
+  class s10 bugPath
+  class s12 bugPath
+  class s16 breaks
+  class s17 bugPath
+  class s19 repeats
