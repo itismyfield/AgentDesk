@@ -97,18 +97,17 @@ impl RestoredInput {
         shared: &Arc<SharedData>,
     ) -> Result<bool, String> {
         let history = Registry::runtime()?;
-        let (namespace, ticket) = self.identity();
-        super::super::terminal_handler::prepare_saved_notice(&history, namespace, ticket, shared)
-            .await?;
-        self.refreshed(&history)?
-            .record_completion(shared, &history)
-            .await;
+        let current = self.refreshed(&history)?;
+        if !current.prepare_completion(shared, &history).await? {
+            return Ok(false);
+        }
+        let (namespace, ticket) = current.identity();
         let (ack, rx) = oneshot::channel();
         shared
             .turn_finalizer
             .tx
             .send(FinalizeMsg::NativeBoot {
-                inputs: vec![self.clone()],
+                inputs: vec![current.clone()],
                 step: RestoreStep::Settle,
                 shared: shared.clone(),
                 ack,
@@ -200,30 +199,38 @@ impl RestoredInput {
         rx.await.map_err(|_| "boot abstain acknowledgement lost")?
     }
 
-    /// The boot half of the native completion records, before Settle removes the row.
-    async fn record_completion(&self, shared: &Arc<SharedData>, history: &Registry) {
-        let Some(proof) = self
-            .record
+    /// Record a proven result before Settle can remove its row.
+    async fn prepare_completion(
+        &self,
+        shared: &Arc<SharedData>,
+        history: &Registry,
+    ) -> Result<bool, String> {
+        let (namespace, ticket) = self.identity();
+        let settlement = super::super::terminal_handler::prepare_saved_notice(
+            history, namespace, ticket, shared,
+        )
+        .await?;
+        let mut current = self.record.clone();
+        current.settlement = settlement;
+        validate_record(&current)?;
+        if let Some(proof) = current
             .settlement
             .outcome
             .as_ref()
             .and_then(|outcome| outcome.extra.get("native_proof"))
-        else {
-            return;
-        };
-        let Ok(evidence) = Evidence::deserialize(proof) else {
-            return;
-        };
-        use super::super::terminal_handler::native_supply::native_completion::record;
-        record(
-            shared,
-            history,
-            &evidence,
-            self.key,
-            self.row.as_ref(),
-            None,
-        )
-        .await;
+        {
+            let evidence = Evidence::deserialize(proof).map_err(|error| error.to_string())?;
+            super::super::terminal_handler::native_supply::native_completion::record(
+                shared,
+                &current.settlement,
+                &evidence,
+                self.key,
+                self.row.as_ref(),
+                None,
+            )
+            .await;
+        }
+        Ok(current.settlement.outcome.is_some())
     }
 
     fn proof(&self) -> Result<(), String> {
@@ -381,18 +388,17 @@ impl BootInputs {
         self.send(self.inputs.clone(), RestoreStep::Register, shared)
             .await?;
         let history = Registry::runtime()?;
+        // A result saved later must pass through its own recording attempt.
+        let mut ready = Vec::new();
         for input in &self.inputs {
-            super::super::terminal_handler::prepare_saved_notice(
-                &history,
-                &input.record.namespace,
-                &input.record.settlement.ticket,
-                shared,
-            )
-            .await?;
-            input.record_completion(shared, &history).await;
+            if input.prepare_completion(shared, &history).await? {
+                ready.push(input.clone());
+            }
         }
-        self.send(self.inputs.clone(), RestoreStep::Settle, shared)
-            .await
+        if !ready.is_empty() {
+            self.send(ready, RestoreStep::Settle, shared).await?;
+        }
+        Ok(())
     }
 
     async fn send(

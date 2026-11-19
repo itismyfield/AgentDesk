@@ -341,9 +341,11 @@ impl TurnFinalizer {
         history: crate::services::tui_input::human_frame::history::v2::Registry,
         shared: Arc<SharedData>,
     ) -> Result<bool, String> {
-        contain_panic(work.prepare_notice(&history, &shared)).await??;
+        let settlement = contain_panic(work.prepare_notice(&history, &shared)).await??;
         super::terminal_handler::native_supply::native_completion::record_live(
-            &shared, &history, &work,
+            &shared,
+            &settlement,
+            &work,
         )
         .await;
         let (ack, result) = oneshot::channel();

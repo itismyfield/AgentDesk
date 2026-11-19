@@ -1,2 +1,2 @@
 key: 491-input-single-path-native-completion
-| `input-single-path` native completion records (#8148 S1) | Native result → recording step → cleanup | Thirteen before configurations cover record ordering, watcher custody, work completion and pending-dispatch lookup | Thirteen fixed scenarios and one baseline comparison. [Entry points and outcomes](input-single-path/native-completion.entrypoints.md) |
+| `input-single-path` native completion records (#8148 S1) | Native result → recording step → cleanup | Fifteen before configurations cover ordering, watcher custody, dispatch lookup, an empty startup session map and registry contention | Fifteen fixed scenarios and one baseline comparison. [Entry points and outcomes](input-single-path/native-completion.entrypoints.md) |

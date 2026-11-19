@@ -840,9 +840,11 @@ input-single-path/NativeAttributionPrefixReadFixed.cfg	NativeInputAttribution	-	
 input-single-path/NativeAttributionUnavailable.cfg	NativeInputAttribution	-	EveryInputEventuallySettled,HeadEventuallyInjected,IdleEventuallyReleased
 input-single-path/NativeCompletionRecordBaseFirstMissLateHit.cfg	NativeCompletionRecord	-	-
 input-single-path/NativeCompletionRecordBefore.cfg	NativeCompletionRecord	-	ScheduledEventuallySettles,TranscriptEventuallyRecorded,WorkEventuallyCompleted
+input-single-path/NativeCompletionRecordBootEmptySessionMapBefore.cfg	NativeCompletionRecord	-	TranscriptEventuallyRecorded
 input-single-path/NativeCompletionRecordCapturedBefore.cfg	NativeCompletionRecord	NoResurrectionAfterClear	-
 input-single-path/NativeCompletionRecordEarlyRetryBefore.cfg	NativeCompletionRecord	-	WorkEventuallyCompleted
 input-single-path/NativeCompletionRecordEmptyGateBefore.cfg	NativeCompletionRecord	-	ScheduledEventuallySettles
+input-single-path/NativeCompletionRecordFixedBootEmptySessionMap.cfg	NativeCompletionRecord	-	-
 input-single-path/NativeCompletionRecordFixedCancelled.cfg	NativeCompletionRecord	-	-
 input-single-path/NativeCompletionRecordFixedClearBeforeRecord.cfg	NativeCompletionRecord	-	-
 input-single-path/NativeCompletionRecordFixedCrashAfterDelete.cfg	NativeCompletionRecord	-	-
@@ -853,6 +855,7 @@ input-single-path/NativeCompletionRecordFixedFollower.cfg	NativeCompletionRecord
 input-single-path/NativeCompletionRecordFixedNoDispatchId.cfg	NativeCompletionRecord	-	-
 input-single-path/NativeCompletionRecordFixedNormal.cfg	NativeCompletionRecord	-	-
 input-single-path/NativeCompletionRecordFixedPromptOnlyId.cfg	NativeCompletionRecord	-	-
+input-single-path/NativeCompletionRecordFixedRegistryContended.cfg	NativeCompletionRecord	-	-
 input-single-path/NativeCompletionRecordFixedUnreadable.cfg	NativeCompletionRecord	-	-
 input-single-path/NativeCompletionRecordFixedWatcherRace.cfg	NativeCompletionRecord	-	-
 input-single-path/NativeCompletionRecordFixedWriteFail.cfg	NativeCompletionRecord	-	-
@@ -860,6 +863,7 @@ input-single-path/NativeCompletionRecordForeignBefore.cfg	NativeCompletionRecord
 input-single-path/NativeCompletionRecordGateAllBefore.cfg	NativeCompletionRecord	-	WorkEventuallyCompleted
 input-single-path/NativeCompletionRecordNativeWithoutIdBefore.cfg	NativeCompletionRecord	WorkAtMostOnce	-
 input-single-path/NativeCompletionRecordOrderingBefore.cfg	NativeCompletionRecord	NoCleanupBeforeRecordStage	ScheduledEventuallySettles,TranscriptEventuallyRecorded,WorkEventuallyCompleted
+input-single-path/NativeCompletionRecordRegistryContendedBefore.cfg	NativeCompletionRecord	-	ScheduledEventuallySettles,TranscriptEventuallyRecorded,WorkEventuallyCompleted
 input-single-path/NativeCompletionRecordSingleDecisionBefore.cfg	NativeCompletionRecord	-	WorkEventuallyCompleted
 input-single-path/NativeCompletionRecordTwoLookupsBefore.cfg	NativeCompletionRecord	-	WorkEventuallyCompleted
 input-single-path/NativeCompletionRecordWatcherClearBefore.cfg	NativeCompletionRecord	NoCleanupBeforeRecordStage	ScheduledEventuallySettles,TranscriptEventuallyRecorded,WorkEventuallyCompleted

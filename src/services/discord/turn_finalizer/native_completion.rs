@@ -7,16 +7,22 @@ use crate::services::scheduled_messages::turn_completion::{
     ScheduledTurnOutcome, classify, terminal_error_event,
 };
 use crate::services::tui_input::human_frame::history::v2::Source;
-use crate::services::tui_input::human_frame::history::v2::native::Disposition;
+use crate::services::tui_input::human_frame::history::v2::native::{Disposition, Settlement};
 use crate::services::tui_o::writer::input_facts::native::Evidence;
 use poise::serenity_prelude::MessageId;
 use std::io::{Read, Seek, SeekFrom};
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(in crate::services::discord::turn_finalizer) static RECORD_REGISTRY_LOCK:
+        (std::path::PathBuf, std::sync::Arc<std::sync::atomic::AtomicBool>);
+}
 
 /// Records an executed primary's completion once its result is durable and before its row CAS.
 /// A missing or replaced row, or an unreadable run, ends the step without records.
 pub(in crate::services::discord::turn_finalizer) async fn record(
     shared: &Arc<SharedData>,
-    history: &crate::services::tui_input::human_frame::history::v2::Registry,
+    settlement: &Settlement,
     evidence: &Evidence,
     key: TurnKey,
     captured: Option<&InflightTurnState>,
@@ -28,10 +34,26 @@ pub(in crate::services::discord::turn_finalizer) async fn record(
     if evidence.ticket.owning_episode.is_none() || evidence.disposition != Disposition::Executed {
         return;
     }
-    let pending = history
-        .try_native_settlement(&evidence.namespace, &evidence.ticket)
-        .is_ok_and(|saved| saved.outcome.is_some() && !saved.cleanup_complete);
-    if !pending {
+    #[cfg(test)]
+    let _registry_lock = RECORD_REGISTRY_LOCK
+        .try_with(|(path, entered)| {
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path.with_extension("lock"))
+                .unwrap();
+            lock.try_lock().unwrap();
+            entered.store(true, std::sync::atomic::Ordering::SeqCst);
+            lock
+        })
+        .ok();
+    if settlement.ticket != evidence.ticket
+        || settlement.cleanup_complete
+        || !settlement
+            .outcome
+            .as_ref()
+            .is_some_and(|saved| saved.disposition == Disposition::Executed)
+    {
         return;
     }
     let row = match crate::services::discord::inflight::load_inflight_state_read_only_result(
@@ -63,13 +85,13 @@ pub(in crate::services::discord::turn_finalizer) async fn record(
 /// [`record`] for a live result before its actor drive.
 pub(in crate::services::discord::turn_finalizer) async fn record_live(
     shared: &Arc<SharedData>,
-    history: &crate::services::tui_input::human_frame::history::v2::Registry,
+    settlement: &Settlement,
     work: &super::super::NativeCleanup,
 ) {
     if let Some((key, actor)) = &work.admission.cleanup {
         record(
             shared,
-            history,
+            settlement,
             &work.admission.evidence,
             *key,
             work.row.as_ref(),
@@ -140,17 +162,8 @@ async fn write(
     let turn_id = format!("discord:{}:{}", row.channel_id, row.user_msg_id);
     let answered = !body.trim().is_empty();
     if answered {
-        let dispatch_id = row
-            .dispatch_id
-            .clone()
-            .or_else(|| crate::services::discord::adk_session::parse_dispatch_id(&row.user_text));
-        let (isolated, routine) = crate::services::discord::turn_bridge::resolve_completion_scope(
-            shared,
-            channel,
-            &ProviderKind::Claude,
-            row.session_key.as_deref(),
-            &turn_id,
-            row,
+        let (isolated, routine) = crate::services::discord::turn_bridge::native_completion_scope(
+            shared, channel, &turn_id, row,
         )
         .await;
         let isolated_run = row.routine_presentation.isolated_run();
@@ -168,7 +181,7 @@ async fn write(
                     channel_id: Some(channel_text.as_str()),
                     agent_id: binding.as_ref().map(|binding| binding.role_id.as_str()),
                     provider: Some(ProviderKind::Claude.as_str()),
-                    dispatch_id: dispatch_id.as_deref(),
+                    dispatch_id: row.dispatch_id.as_deref(),
                     user_message: &row.user_text,
                     assistant_message: body,
                     events,

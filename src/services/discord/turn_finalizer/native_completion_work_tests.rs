@@ -186,8 +186,8 @@ async fn native_8148_dispatch_custody_completes_work_once_from_native_body_pg() 
         inflight::load_inflight_state_read_only(&ProviderKind::Claude, row.channel_id).is_some(),
         "fresh idle must preserve the native row before record"
     );
-    durable(&f, &evidence);
-    record(&shared, &f.history, &evidence, key, Some(&row), None).await;
+    let settlement = durable(&f, &evidence);
+    record(&shared, &settlement, &evidence, key, Some(&row), None).await;
     let completed = state(&pool, WORK).await;
     assert_eq!(
         completed,
@@ -208,7 +208,7 @@ async fn native_8148_dispatch_custody_completes_work_once_from_native_body_pg() 
             .unwrap()
             .cleanup_complete
     );
-    record(&shared, &f.history, &evidence, key, Some(&row), None).await;
+    record(&shared, &settlement, &evidence, key, Some(&row), None).await;
     assert_eq!(scheduled(&pool, &turn_id).await, Some(first));
     assert_eq!(state(&pool, WORK).await, completed);
     let hooks: String =

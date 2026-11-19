@@ -213,9 +213,20 @@ fn work_at_closer(has_id: bool) {
         assert_eq!(observed.snapshot().event_count("watcher_dispatch_call"), 0);
         assert!(!discord::terminal_delivery_custody::retains_channel(CHANNEL).unwrap());
         assert_eq!(stored_outcome(&fx.pool, turn_id).await.as_deref(), Some("delivered"));
-        let bodies: Vec<String> = sqlx::query_scalar("SELECT assistant_message FROM session_transcripts WHERE turn_id=$1")
-            .bind(turn_id).fetch_all(&fx.pool).await.unwrap();
-        assert_eq!(bodies.iter().map(|body| body.trim()).collect::<Vec<_>>(), [answer.as_str()]);
+        let transcripts: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT assistant_message, dispatch_id FROM session_transcripts WHERE turn_id=$1",
+        ).bind(turn_id).fetch_all(&fx.pool).await.unwrap();
+        assert_eq!(
+            transcripts.iter().map(|(body, id)| (body.trim(), id.as_deref())).collect::<Vec<_>>(),
+            [(answer.as_str(), has_id.then_some(WORK))],
+            "native transcript used an identifier without row custody"
+        );
+        assert_eq!(
+            crate::db::session_transcripts::dispatch_has_assistant_response_db(Some(&fx.pool), WORK)
+                .unwrap(),
+            has_id,
+            "a prompt-only identifier cannot prove a work response"
+        );
         let state = work_state(&fx.pool).await;
         let expected = if has_id { ("completed", Some("turn_bridge_explicit"), 1) } else { ("pending", None, 0) };
         assert_eq!((state.0.as_str(), state.1.as_deref(), state.2), expected, "work API calls: {:?}", loopback.calls.lock().unwrap());

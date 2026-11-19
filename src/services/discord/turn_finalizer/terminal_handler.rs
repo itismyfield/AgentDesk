@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use crate::services::tui_input::human_frame::history::v2::native::Settlement;
 
 #[cfg(unix)]
 #[path = "native_policy.rs"]
@@ -665,7 +667,7 @@ impl NativeCleanup {
         &self,
         history: &crate::services::tui_input::human_frame::history::v2::Registry,
         shared: &Arc<SharedData>,
-    ) -> Result<(), String> {
+    ) -> Result<Settlement, String> {
         let evidence = &self.admission.evidence;
         let outcome = self.outcome()?;
         history.record_native_outcome_at_stamp(
@@ -674,7 +676,12 @@ impl NativeCleanup {
             &outcome,
             &self.admission.registrations_fingerprint,
         )?;
-        prepare_saved_notice(history, &evidence.namespace, &evidence.ticket, shared).await
+        let saved =
+            prepare_saved_notice(history, &evidence.namespace, &evidence.ticket, shared).await?;
+        if saved.outcome.as_ref() != Some(&outcome) {
+            return Err("native durable result missing".into());
+        }
+        Ok(saved)
     }
 
     pub(super) async fn drive(
@@ -779,11 +786,11 @@ pub(super) async fn prepare_saved_notice(
     namespace: &str,
     ticket: &crate::services::tui_input::human_frame::history::v2::native::Ticket,
     shared: &Arc<SharedData>,
-) -> Result<(), String> {
+) -> Result<Settlement, String> {
     use crate::services::tui_input::human_frame::history::v2::native::Disposition;
-    let settlement = history.try_native_settlement(namespace, ticket)?;
+    let mut settlement = history.try_native_settlement(namespace, ticket)?;
     if settlement.cleanup_complete {
-        return Ok(());
+        return Ok(settlement);
     }
     if settlement
         .outcome
@@ -815,8 +822,9 @@ pub(super) async fn prepare_saved_notice(
         .map_err(|_| "native withdrawal outbox timed out")?
         .map_err(|e| e.to_string())?;
         history.ack_native_withdrawal_notice(namespace, ticket)?;
+        settlement.withdrawal_notice = true;
     }
-    Ok(())
+    Ok(settlement)
 }
 
 #[cfg(unix)]

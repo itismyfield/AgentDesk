@@ -166,7 +166,8 @@ use crate::db::session_status::{AWAITING_BG, AWAITING_USER, IDLE, TURN_ACTIVE};
 use bridge_entry_persist::bridge_stream_relay_suppressed;
 use bridge_entry_persist::unwind_and_notify;
 pub(in crate::services::discord) use completion_guard::complete_work_dispatch_on_turn_end;
-pub(in crate::services::discord) use completion_postlude::resolve_completion_scope;
+#[cfg(unix)]
+pub(in crate::services::discord) use completion_postlude::native_completion_scope;
 use context_window::{apply_context_token_update, persisted_context_tokens, resolve_done_response};
 use current_message_anchor::{
     cleanup_unbound_bridge_anchor, detached_current_msg_id_from_durable,
