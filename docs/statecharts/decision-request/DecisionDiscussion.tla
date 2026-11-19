@@ -1,8 +1,9 @@
 ------------------------ MODULE DecisionDiscussion ------------------------
 EXTENDS Naturals, FiniteSets, TLC
 CONSTANT Mode, Scenario, Actors
-Items == {1,2,3}
 Messages == {1,2}
+ButtonItems == {3}
+Items == Messages \cup ButtonItems
 BaseKind(m) == IF m = 3 \/ (m = 2 /\ Scenario = "Mixed") THEN "choice" ELSE "opinion"
 IsOwner(m) == ~(Actors = "ForeignSecond" /\ m = 2)
 Original(m) == IF m = 1 THEN "  raw opinion\n " ELSE "second raw opinion"
@@ -141,7 +142,8 @@ Boot == /\ ~alive
     /\ UNCHANGED <<gate, choice, first, ledger, kind, stage, raw, forwarded, claims, writes, pending, applied, cursor, scanned, notes, atClose, replyPending, closePending, replyCount, explicitClose, archived, locked, visible, crashes, busy, badScope, badReply, afterCloseAccepted, failureNotes>>
 Progress == (\E m \in Items: Begin(m) \/ Write(m) \/ RemoteEffect(m) \/ Confirm(m) \/ NormalizeFailureDiscard(m) \/ OpinionNotice(m) \/ FailureNotice(m)) \/ ChoiceCloses
 Repair == MakeEditable \/ PostReply \/ PostConclusion \/ RepairLifecycle
-Next == (\E m \in Messages, v \in {"gateway","scan"}: ObserveMessage(m,v)) \/ ObserveMessage(3,"button")
+Next == (\E m \in Messages, v \in {"gateway","scan"}: ObserveMessage(m,v))
+    \/ (\E m \in ButtonItems: ObserveMessage(m,"button"))
     \/ (\E m \in Messages: ScanSeen(m) \/ AdvanceCursor(m)) \/ Progress \/ Repair \/ TurnBoundary
     \/ (\E actor \in {"requester","other_agent"}: AgentReply(actor) \/ AgentClose(actor))
     \/ OpinionCloses \/ Crash \/ Boot
