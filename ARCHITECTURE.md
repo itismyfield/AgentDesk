@@ -431,7 +431,10 @@ src/
 │   │   ├── lifecycle.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
+│   │   ├── pipeline.rs
+│   │   ├── pipeline_fields.rs
 │   │   ├── pipeline_rules.rs
+│   │   ├── pipeline_tests.rs
 │   │   ├── profile.rs
 │   │   ├── review_gate.rs
 │   │   ├── verification_run.rs
