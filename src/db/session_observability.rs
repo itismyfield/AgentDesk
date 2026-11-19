@@ -22,13 +22,16 @@ pub async fn mark_session_tool_use_pg(
         return Ok(false);
     }
 
-    let result = sqlx::query(
+    // A tool record notes progress; it never reopens a retired row that already left active.
+    let result = sqlx::query(concat!(
         "UPDATE sessions
             SET last_tool_at = NOW(),
                 status = $2
           WHERE session_key = $1
-            AND status NOT IN ($3, $4)",
-    )
+            AND status NOT IN ($3, $4)
+            AND NOT ",
+        crate::db::dispatched_session_canonical_identity::retired_status_fence::retired_inactive_row!()
+    ))
     .bind(session_key)
     .bind(TURN_ACTIVE)
     .bind(DISCONNECTED)
