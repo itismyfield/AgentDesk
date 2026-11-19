@@ -859,15 +859,18 @@ fn thread_child_rebound_to_another_parent_is_held_and_offers_no_init() {
     assert_eq!(first.child_surface().map(|s| s.parent()), Some(42));
 }
 
-// A late thread child released before its first init waits for its parent's boundary: its gate
-// and its host end hold it, never refuse it, and Legacy sends none of it with no recorded run.
-// An ordinary member's release refuses it.
+// A late thread child released before its first init waits for its parent's boundary: its gate,
+// even under its own execution permit, and its host end hold it, never refuse it, and Legacy
+// sends none of it with no recorded run. An ordinary member's release refuses it.
 #[cfg(unix)]
-#[test]
-fn thread_children_released_late_child_is_held_and_a_released_member_is_refused() {
+#[tokio::test]
+async fn thread_children_released_late_child_is_held_and_a_released_member_is_refused_pg() {
     use crate::services::tui_o::cutover::{
         BodyClaim, IdentityError, claim_then_send, peek_o_owns_tui_output_for_channel as peek,
     };
+    use crate::services::tui_o::ownership::execution;
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
     const CHILD: u64 = 4_806;
     let kind = Some(RuntimeHandoffKind::ClaudeTui);
     let boot = BootChannels::validate(&config())
@@ -880,11 +883,13 @@ fn thread_children_released_late_child_is_held_and_a_released_member_is_refused(
     child.release(CHILD);
     assert_eq!(child.peek(), Adoption::Released);
     assert!(!child.refused_at_end(), "its host end is no refusal");
+    execution::tests::admission(&pool, "claude", CHILD, "mac-a").await;
+    let permit = execution::read(&pool, "claude", CHILD, "mac-a", || Ok(false)).await;
+    boot.install_execution(CHILD, Some(Ok(permit.unwrap().unwrap())));
     let _forced = test_override::force_boot(boot.clone());
     assert_eq!(peek(CHILD, kind), Err(IdentityError::ChildHeld));
     let claim = claim_then_send(Some(BodyClaim::new(CHILD, kind)), || async {});
-    let sent = futures::executor::block_on(claim);
-    assert_eq!(sent.unwrap_err(), IdentityError::ChildHeld);
+    assert_eq!(claim.await.unwrap_err(), IdentityError::ChildHeld);
     assert_eq!(child.sends(), (0, 0), "Legacy sends none of it");
     let member = BootChannels::validate(&config())
         .unwrap()
@@ -893,4 +898,5 @@ fn thread_children_released_late_child_is_held_and_a_released_member_is_refused(
     candidate.release(42);
     assert_eq!(candidate.peek(), Adoption::Refused);
     assert!(candidate.refused_at_end());
+    pool.close().await;
 }
