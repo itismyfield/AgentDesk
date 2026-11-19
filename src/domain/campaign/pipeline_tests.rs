@@ -93,6 +93,8 @@ fn pipeline_kinds_and_typed_conditions_round_trip() {
     );
     let encoded = serde_json::to_value(&original).unwrap();
     assert_eq!(graph(encoded), original);
+    let unknown_kind = json!({"id": "x", "kind": "script"});
+    assert!(serde_json::from_value::<PipelineState>(unknown_kind).is_err());
     let mut sparse = graph_wire();
     for key in ["events", "policy"] {
         sparse.as_object_mut().unwrap().remove(key);
