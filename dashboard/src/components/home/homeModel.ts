@@ -26,7 +26,7 @@ const join = (...parts: Array<string | null | undefined | false>) => parts.filte
 // ── Agents ──
 
 export type HomeAgentState = "working" | "background" | "resting" | "noSession";
-export const AGENT_STATES: HomeAgentState[] = ["working", "background", "noSession", "resting"];
+export const AGENT_STATES: HomeAgentState[] = ["working", "background", "resting", "noSession"];
 
 export interface HomeAgent {
   agent: Agent;
@@ -91,7 +91,7 @@ export function agentStateLabel(state: HomeAgentState, tr: Tr): string {
 
 export function agentLine({ state, info, seenAt }: HomeAgent, tr: Tr, isKo: boolean): string {
   const when = seenAt === null ? null : formatRelativeTime(seenAt, isKo);
-  if (state === "noSession" && when) return tr(`세션 없음 · ${when}에 끊김`, `No session · dropped ${when}`);
+  if (state === "noSession" && when) return tr(`세션 없음 · 마지막 세션 ${when}`, `No session · last session ${when}`);
   return join(agentStateLabel(state, tr), info ?? when);
 }
 

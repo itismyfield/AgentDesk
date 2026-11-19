@@ -36,7 +36,6 @@ export default function HomePageView({ isKo, isMobileViewport, stats, agents, on
     <PageFrame
       testId="home-page"
       title={tr("홈", "Home")}
-      description={tr("사람이 할 일이 맨 위예요. 그 아래로 에이전트·캠페인·루틴이 이어져요.", "What needs you comes first, then agents, campaigns and routines.")}
     >
       <div className="flex min-w-0 flex-col gap-3 sm:gap-4">
         <div className="flex min-w-0 flex-wrap items-stretch gap-3 sm:gap-4">

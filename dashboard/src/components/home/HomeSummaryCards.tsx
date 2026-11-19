@@ -106,10 +106,10 @@ export function HomeSystemCard({ campaigns, tr, className }: { campaigns: Loaded
   );
 }
 
-// The legend dots use the persona dot colors, so a count and its avatars read the same.
-const PERSONA: Record<HomeAgentState, PersonaState> = { working: "working", background: "waiting", resting: "idle", noSession: "error" };
-const LEGEND_TONE: Record<HomeAgentState, HomeTone> = { working: "ok", background: "warn", resting: "neutral", noSession: "err" };
-const LEGEND_ORDER: HomeAgentState[] = ["working", "background", "resting", "noSession"];
+// The legend dots use the persona dot colors, so a count and its avatars read the same. A session opens when a
+// Discord message arrives, so an agent without one is at rest: gray, never the error color.
+const PERSONA: Record<HomeAgentState, PersonaState> = { working: "working", background: "waiting", resting: "idle", noSession: "idle" };
+const LEGEND_TONE: Record<HomeAgentState, HomeTone> = { working: "ok", background: "warn", resting: "neutral", noSession: "neutral" };
 /** Desktop shows two rows of four: up to seven agents and the fold, unless more are busy. */
 const DESKTOP_SHOWN = 7;
 
@@ -122,14 +122,14 @@ function AgentCell({ entry, tr, isKo, onOpen }: { entry: HomeAgent; tr: Tr; isKo
       <span aria-hidden className="flex"><AgentPersona agent={entry.agent} state={PERSONA[entry.state]} size={32} /></span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-medium">{agentName(entry.agent, isKo)}</span>
-        <span className="block truncate text-xs" style={{ color: entry.state === "noSession" ? "var(--err)" : "var(--fg-muted)" }} title={line}>{line}</span>
+        <span className="block truncate text-xs text-[var(--fg-muted)]" title={line}>{line}</span>
       </span>
     </button>
   );
 }
 
 /** Everyone with a state dot and one line of what they do. Busy agents lead; desktop folds the rest into one cell,
- * phones list only busy agents and agents without a session. */
+ * phones list only busy agents. */
 export function HomeAgentsCard({ entries, isMobile, tr, isKo, onOpenAgent }: {
   entries: HomeAgent[];
   isMobile: boolean;
@@ -140,7 +140,7 @@ export function HomeAgentsCard({ entries, isMobile, tr, isKo, onOpenAgent }: {
   const [expanded, setExpanded] = useState(false);
   const counts = Object.fromEntries(AGENT_STATES.map((state) => [state, entries.filter((entry) => entry.state === state).length])) as Record<HomeAgentState, number>;
   const busy = counts.working + counts.background;
-  const legendStates = isMobile ? LEGEND_ORDER.filter((state) => state !== "resting" && counts[state] > 0) : LEGEND_ORDER;
+  const legendStates = isMobile ? AGENT_STATES.filter((state) => counts[state] > 0) : AGENT_STATES;
   const legend = (
     <Muted className="flex min-h-11 flex-wrap items-center gap-x-3.5 gap-y-1">
       {legendStates.map((state) => (
@@ -149,7 +149,7 @@ export function HomeAgentsCard({ entries, isMobile, tr, isKo, onOpenAgent }: {
     </Muted>
   );
 
-  const preferred = isMobile ? entries.filter((entry) => entry.state !== "resting") : entries.slice(0, Math.max(DESKTOP_SHOWN, busy));
+  const preferred = entries.slice(0, isMobile ? busy : Math.max(DESKTOP_SHOWN, busy));
   const folds = isMobile ? preferred.length < entries.length : entries.length > DESKTOP_SHOWN + 1 && preferred.length < entries.length;
   const shown = expanded || !folds ? entries : preferred;
   const rest = entries.length - preferred.length;

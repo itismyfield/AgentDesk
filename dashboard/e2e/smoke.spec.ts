@@ -1580,7 +1580,8 @@ test.describe("Dashboard smoke tests", () => {
       await page.getByTestId("app-mobile-more-button").click();
       await expect(page.getByTestId("app-mobile-more-menu")).toBeVisible({ timeout: 15000 });
       await page.getByTestId(`app-mobile-more-${id}`).click();
-      await expect(page).toHaveURL(new RegExp(`/${id}$`));
+      // Settings adds its open panel to the URL once mounted, so the query is allowed.
+      await expect(page).toHaveURL(new RegExp(`/${id}(\\?.*)?$`));
       await expectNoHorizontalOverflow(page);
     }
   });

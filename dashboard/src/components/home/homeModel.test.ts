@@ -20,10 +20,10 @@ describe("home agents", () => {
       [session("rest", "idle"), session("gone", "disconnected"), session("bg", "awaiting_bg"), session("run", "turn_active"), session("child", "idle")],
     );
     expect(entries.map(({ agent: { id }, state }) => [id, state])).toEqual([
-      ["run", "working"], ["bg", "background"], ["child", "background"], ["gone", "noSession"], ["rest", "resting"],
+      ["run", "working"], ["bg", "background"], ["child", "background"], ["rest", "resting"], ["gone", "noSession"],
     ]);
     expect(entries[1].info).toBe("CI 대기");
-    expect(agentLine(entries[3], tr, true)).toMatch(/^세션 없음 · .+에 끊김$/);
+    expect(agentLine(entries[4], tr, true)).toMatch(/^세션 없음 · 마지막 세션 \d+(초|분|시간|일) 전$/);
   });
 
   it("does not claim a lost session when no session list arrived", () => {
