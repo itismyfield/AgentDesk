@@ -42,6 +42,8 @@ Cancellation or timeout without confirmed delivery also retains this observabili
 Before enabling it, check that routine prompts do not require an interactive provider TUI
 or a persistent tmux pane. Shell/JS routines do not use the agent executor.
 
+Persistent Codex routines using a named account can choose a model at creation. A later model change or clear through `PATCH /api/routines/{id}` returns HTTP 422 and leaves the routine unchanged.
+
 ## Agent start deferral
 
 Before an agent-backed routine run touches its thread, reservation or run row, the executor

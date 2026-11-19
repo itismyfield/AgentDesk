@@ -667,6 +667,9 @@ pub struct RoutinePatch {
     /// Replaces both provider and model; the route validated it against the routine's agents.
     #[serde(skip)]
     pub provider_choice: Option<ProviderChoice>,
+    /// Persist a validated HTTP model/provider choice only against the same routine version.
+    #[serde(skip)]
+    pub expected_updated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -2247,6 +2250,7 @@ impl RoutineStore {
                 updated_at = NOW()
             WHERE id = $1
               AND status <> 'detached'
+              AND ($25::timestamptz IS NULL OR updated_at = $25)
             RETURNING id, agent_id, script_ref, name, status, execution_strategy,
                       schedule, next_due_at, last_run_at, last_result, checkpoint,
                       discord_thread_id, timeout_secs, fallback_agent_id, max_retries,
@@ -2282,6 +2286,7 @@ impl RoutineStore {
         .bind(choice.is_some())
         .bind(choice.as_ref().and_then(|choice| choice.provider.clone()))
         .bind(choice.and_then(|choice| choice.model))
+        .bind(patch.expected_updated_at)
         .fetch_optional(&*self.pool)
         .await
         .map_err(|e| anyhow!("patch routine {routine_id}: {e}"))

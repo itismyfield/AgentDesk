@@ -554,7 +554,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ),
             (
                 "model",
-                body_param("string|null", false, "Model for the provider turn, or null to use the channel setting; requires provider"),
+                body_param("string|null", false, "Model for the provider turn. Use null to inherit the channel setting. Requires provider. A model change or clear returns 422 for persistent Codex routines using a named account."),
             ),
             (
                 "fallback_agent_id",

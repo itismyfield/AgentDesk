@@ -157,20 +157,55 @@ pub async fn refusal_for_agents(
     pool: &PgPool,
     choice: &ProviderChoice,
     agents: &[Option<&str>],
+    persistent_model_patch: Option<&super::store::RoutineRecord>,
 ) -> Result<Option<String>> {
-    if choice.provider.is_none() {
+    if choice.provider.is_none() && persistent_model_patch.is_none() {
         return Ok(None);
     }
-    if agents.first().copied().flatten().is_none() {
+    if choice.provider.is_some() && agents.first().copied().flatten().is_none() {
         return Ok(Some("provider requires agent_id".into()));
     }
     for agent_id in agents.iter().flatten() {
         let channels = AgentProviderChannels::load(pool, agent_id).await?;
-        if let Err(error) = channels.route(agent_id, choice) {
-            return Ok(Some(error.to_string()));
+        let route = match channels.route(agent_id, choice) {
+            Ok(route) => route,
+            Err(error) if choice.provider.is_some() => return Ok(Some(error.to_string())),
+            Err(_) => continue,
+        };
+        if let Some(routine) = persistent_model_patch
+            && route.provider == ProviderKind::Codex
+            && codex_account_is_named(routine, agent_id, &route)?
+        {
+            return Ok(Some(
+                "Cannot change or clear the model of a persistent Codex routine using a named account. Choose the model when creating a new routine.".into(),
+            ));
         }
     }
     Ok(None)
+}
+
+fn codex_account_is_named(
+    routine: &super::store::RoutineRecord,
+    agent: &str,
+    route: &ProviderRoute,
+) -> Result<bool> {
+    use crate::services::discord::org_schema::configured_launch_account_is_named;
+    use crate::services::provider_auth_profile::DEFAULT_PROFILE_ID;
+    use crate::services::tmux_common::tmux_session_auth_profile;
+
+    let parent =
+        crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&route.channel)
+            .or_else(|| route.channel.parse().ok());
+    if configured_launch_account_is_named(&route.provider, parent, agent)
+        .map_err(|_| anyhow!("could not determine the configured Codex account"))?
+    {
+        return Ok(true);
+    }
+    // The existing wrapper may still use a named account after a config change or fallback.
+    let label = super::agent_executor::routine_agent_session_name(&routine.name, agent);
+    let tmux = route.provider.build_tmux_session_name(&label);
+    Ok(tmux_session_auth_profile(&tmux)
+        .is_some_and(|id| !id.is_empty() && id != DEFAULT_PROFILE_ID))
 }
 
 /// API view: explicit values plus the provider a run would inherit from the agent today.

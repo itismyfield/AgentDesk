@@ -184,6 +184,7 @@ impl PatchRoutineBody {
             headless_failure_notice_limit,
             agent_id: self.agent_id.into_option().flatten(),
             provider_choice: None,
+            expected_updated_at: None,
             name: self.name,
             fallback_agent_id: self.fallback_agent_id.into_option(),
             max_retries: self.max_retries,

@@ -2,6 +2,12 @@
 
 use super::*;
 
+pub(crate) fn tmux_session_auth_profile(session_name: &str) -> Option<String> {
+    resolve_session_temp_path(session_name, TMUX_AUTH_PROFILE_TEMP_EXT)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|value| value.trim().to_string())
+}
+
 /// Return whether a provider wrapper was created for the requested auth
 /// profile.  A legacy wrapper without a marker is safe to reuse only for the
 /// implicit default profile; named profiles must start a fresh provider
@@ -10,9 +16,7 @@ pub(crate) fn tmux_session_auth_profile_matches(
     session_name: &str,
     requested_profile_id: &str,
 ) -> bool {
-    let marker = resolve_session_temp_path(session_name, TMUX_AUTH_PROFILE_TEMP_EXT)
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .map(|value| value.trim().to_string());
+    let marker = tmux_session_auth_profile(session_name);
     match marker.as_deref() {
         Some(profile_id) => profile_id == requested_profile_id,
         None => requested_profile_id == crate::services::provider_auth_profile::DEFAULT_PROFILE_ID,

@@ -2,9 +2,13 @@
 use std::sync::Arc;
 
 use axum::Json;
+use axum::Router;
+use axum::body::{Body, to_bytes};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{Request, StatusCode};
+use axum::routing::{patch, post};
 use serde_json::{Value, json};
+use tower::ServiceExt;
 
 use super::super::AppState;
 use super::{attach_routine, patch_routine};
@@ -23,6 +27,179 @@ fn test_state(pool: sqlx::PgPool) -> AppState {
         batch_buffer,
         health_registry: None,
         cluster_instance_id: None,
+    }
+}
+
+async fn model_request(
+    router: &Router,
+    method: &str,
+    uri: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_patch_preserves_named_persistent_codex_routine_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let user = tempfile::tempdir().unwrap();
+    let _home =
+        crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("HOME", user.path());
+    let home = crate::services::provider_auth_profile::extra_account_home(
+        &crate::domain::provider::ProviderKind::Codex,
+        "work",
+    )
+    .unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let org = serde_json::json!({
+        "version": 1,
+        "agents": {
+            "work": {"display_name":"Work", "provider":"codex", "auth_profile":"work"},
+            "regular": {"display_name":"Regular", "provider":"codex"}
+        },
+        "provider_auth_profiles": {"work":{"provider":"codex","home":home}}
+    });
+    let path = crate::runtime_layout::org_schema_path(&crate::config::runtime_root().unwrap());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, serde_yaml::to_string(&org).unwrap()).unwrap();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    sqlx::query("INSERT INTO agents (id,name,provider,discord_channel_cc,discord_channel_cdx) VALUES ('work','Work','codex','7401','7402'), ('regular','Regular','codex','7501','7502'), ('claude','Claude','claude','7601',NULL), ('legacy','Legacy','codex',NULL,'7702')")
+        .execute(&pool).await.unwrap();
+    let router = Router::new()
+        .route("/api/routines", post(attach_routine))
+        .route("/api/routines/{id}", patch(patch_routine))
+        .with_state(test_state(pool.clone()));
+
+    let legacy_label =
+        crate::services::routines::agent_executor::routine_agent_session_name("original", "legacy");
+    let legacy_tmux =
+        crate::domain::provider::ProviderKind::Codex.build_tmux_session_name(&legacy_label);
+    crate::services::tmux_common::write_tmux_session_auth_profile(&legacy_tmux, "work").unwrap();
+
+    let mut refusals = Vec::new();
+    for (agent, provider, strategy, update, refuse) in [
+        (
+            "work",
+            "codex",
+            "persistent",
+            json!({"model":"model-b","name":"edited"}),
+            true,
+        ),
+        (
+            "work",
+            "codex",
+            "persistent",
+            json!({"model":null,"name":"edited"}),
+            true,
+        ),
+        (
+            "regular",
+            "codex",
+            "persistent",
+            json!({"agent_id":"work","model":"model-b"}),
+            true,
+        ),
+        (
+            "work",
+            "claude",
+            "persistent",
+            json!({"provider":"codex","model":"model-b"}),
+            true,
+        ),
+        (
+            "work",
+            "codex",
+            "persistent",
+            json!({"model":"model-a","name":"edited"}),
+            false,
+        ),
+        (
+            "regular",
+            "codex",
+            "persistent",
+            json!({"model":"model-b"}),
+            false,
+        ),
+        (
+            "claude",
+            "claude",
+            "persistent",
+            json!({"model":null}),
+            false,
+        ),
+        (
+            "legacy",
+            "codex",
+            "persistent",
+            json!({"model":"model-b"}),
+            true,
+        ),
+        (
+            "work",
+            "codex",
+            "persistent",
+            json!({"provider":null,"model":null}),
+            true,
+        ),
+        (
+            "regular",
+            "codex",
+            "persistent",
+            json!({"fallback_agent_id":"work","model":"model-b"}),
+            true,
+        ),
+        (
+            "work",
+            "codex",
+            "persistent",
+            json!({"execution_strategy":"fresh","model":"model-b"}),
+            false,
+        ),
+        ("work", "codex", "fresh", json!({"model":"model-b"}), false),
+    ] {
+        let (status, created) = model_request(&router, "POST", "/api/routines", json!({
+            "script_ref":"provider.js", "name":"original", "agent_id":agent, "provider":provider,
+            "model":"model-a", "execution_strategy":strategy,
+        })).await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(created["routine"]["model"], "model-a");
+        let id = created["routine"]["id"].as_str().unwrap();
+        let uri = format!("/api/routines/{id}");
+        let before = rows(&pool).await;
+        let (status, body) = model_request(&router, "PATCH", &uri, update.clone()).await;
+        if refuse {
+            refusals.push((update, status, body, rows(&pool).await == before));
+        } else {
+            assert_eq!(status, StatusCode::OK, "{update}: {body}");
+            assert_eq!(body["routine"]["model"], update["model"]);
+        }
+    }
+    pool.close().await;
+    db.drop().await;
+    for (update, status, body, unchanged) in &refusals {
+        assert!(
+            *status == StatusCode::UNPROCESSABLE_ENTITY
+                && body["error"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("named account"))
+                && *unchanged,
+            "model PATCH must be refused without writing: {refusals:?}; observed {update}"
+        );
     }
 }
 

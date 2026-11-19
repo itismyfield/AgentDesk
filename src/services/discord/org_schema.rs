@@ -179,6 +179,18 @@ fn configured_launch_profile(
     Ok((profile, recovery_pinned))
 }
 
+/// Read the configured account without choosing or recording a fallback launch.
+pub(crate) fn configured_launch_account_is_named(
+    provider: &ProviderKind,
+    channel_id: Option<u64>,
+    agent_id: &str,
+) -> Result<bool, String> {
+    let schema = load_org_schema_for_auth()?;
+    let (profile, _) =
+        configured_launch_profile(schema.as_ref(), provider, channel_id, Some(agent_id))?;
+    Ok(profile.is_some_and(|id| id != crate::services::provider_auth_profile::DEFAULT_PROFILE_ID))
+}
+
 /// The account a launch for the channel and agent would take, read without the fallback router a
 /// launch updates; `None` when a fallback policy may choose another account at launch.
 pub(crate) fn configured_launch_overlay(

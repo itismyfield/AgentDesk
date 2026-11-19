@@ -89,14 +89,16 @@ pub async fn list_routines(
 }
 
 /// A provider choice is stored only when every agent the run may start on owns that channel.
-async fn refuse_unrunnable_choice(
+async fn refuse_invalid_choice(
     store: &crate::services::routines::RoutineStore,
     choice: &ProviderChoice,
     agents: &[Option<&str>],
+    persistent_model_patch: Option<&RoutineRecord>,
 ) -> AppResult<()> {
-    let refusal = provider_choice::refusal_for_agents(store.pool(), choice, agents)
-        .await
-        .map_err(store_error)?;
+    let refusal =
+        provider_choice::refusal_for_agents(store.pool(), choice, agents, persistent_model_patch)
+            .await
+            .map_err(store_error)?;
     refusal.map_or(Ok(()), |reason| Err(unprocessable(reason)))
 }
 
@@ -279,10 +281,11 @@ pub async fn attach_routine(
         notice_limit_for_create(body.headless_failure_notice_limit).map_err(unprocessable)?;
     let choice = choice_for_request(body.provider.as_deref(), body.model.as_deref())
         .map_err(unprocessable)?;
-    refuse_unrunnable_choice(
+    refuse_invalid_choice(
         &store,
         &choice,
         &[agent_id.as_deref(), fallback_agent_id.as_deref()],
+        None,
     )
     .await?;
     let initial_status = initial_attach_status(&script_ref).to_string();
@@ -347,17 +350,26 @@ pub async fn patch_routine(
         }
         None => None,
     };
+    let current = store
+        .get_routine(&routine_id)
+        .await
+        .map_err(store_error)?
+        .ok_or_else(|| AppError::not_found(format!("routine {routine_id} not found")))?;
+    let definition = store
+        .load_execution_definitions(std::slice::from_ref(&routine_id))
+        .await
+        .map_err(store_error)?
+        .remove(&routine_id)
+        .ok_or_else(|| AppError::not_found(format!("routine {routine_id} not found")))?;
+    let (execution, notice_limit) = body
+        .execution_definition_patch(&definition)
+        .map_err(unprocessable)?;
     let mut choice = None;
     if agent_id.is_some()
         || fallback_agent_id.is_some()
         || body.provider.as_present().is_some()
         || body.model.as_present().is_some()
     {
-        let current = store
-            .get_routine(&routine_id)
-            .await
-            .map_err(store_error)?
-            .ok_or_else(|| AppError::not_found(format!("routine {routine_id} not found")))?;
         let agent = agent_id.as_deref().or(current.agent_id.as_deref());
         let fallback = match &fallback_agent_id {
             Some(fallback) => fallback.as_deref(),
@@ -376,18 +388,25 @@ pub async fn patch_routine(
             .provider_choice_patch(&current_choice)
             .map_err(unprocessable)?;
         let effective = choice.as_ref().unwrap_or(&current_choice);
-        refuse_unrunnable_choice(&store, effective, &[agent, fallback]).await?;
+        let strategy = body
+            .execution_strategy
+            .as_deref()
+            .unwrap_or(&current.execution_strategy);
+        let persistent_model_patch = (effective.model != current_choice.model
+            && execution.is_none()
+            && strategy == "persistent")
+            .then_some(&current);
+        refuse_invalid_choice(
+            &store,
+            effective,
+            &[agent, fallback],
+            persistent_model_patch,
+        )
+        .await?;
     }
-    let current = store
-        .load_execution_definitions(std::slice::from_ref(&routine_id))
-        .await
-        .map_err(store_error)?
-        .remove(&routine_id)
-        .ok_or_else(|| AppError::not_found(format!("routine {routine_id} not found")))?;
-    let (execution, notice_limit) = body
-        .execution_definition_patch(&current)
-        .map_err(unprocessable)?;
+    let expected_updated_at = choice.as_ref().map(|_| current.updated_at);
     let mut patch = body.into_patch(execution, notice_limit);
+    patch.expected_updated_at = expected_updated_at;
     patch.agent_id = agent_id;
     patch.provider_choice = choice;
     let Some(routine) = store
@@ -395,6 +414,17 @@ pub async fn patch_routine(
         .await
         .map_err(definition_store_error)?
     else {
+        if expected_updated_at.is_some()
+            && store
+                .get_routine(&routine_id)
+                .await
+                .map_err(store_error)?
+                .is_some_and(|routine| routine.status != "detached")
+        {
+            return Err(AppError::conflict(
+                "Routine changed while validating the update. Reload it and try again.",
+            ));
+        }
         return Err(AppError::not_found(format!(
             "routine {routine_id} not found"
         )));

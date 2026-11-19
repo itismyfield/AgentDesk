@@ -9,7 +9,7 @@ pub(crate) use session_markers::write_native_session_auth as write_claude_sessio
 pub(crate) use session_markers::write_tmux_runtime_kind_marker;
 pub(crate) use session_markers::{
     AuthMarkers, advance_claude_session_auth, resolve_tmux_runtime_kind_marker,
-    tmux_session_auth_profile_matches, write_tmux_session_auth_profile,
+    tmux_session_auth_profile, tmux_session_auth_profile_matches, write_tmux_session_auth_profile,
 };
 #[cfg(unix)]
 pub(crate) use session_markers::{
