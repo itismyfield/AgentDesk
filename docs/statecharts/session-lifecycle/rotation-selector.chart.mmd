@@ -1,0 +1,122 @@
+---
+title: "Channel selector after an in-pane /clear"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Pending
+    lg1: Settled
+  }
+  class lg0 yellow
+  class lg1 teal
+  s0: cache old session, stored old session, rotation none, next turn not started
+  s1: cache old session, stored newer selector, rotation none, next turn not started
+  s2: cache empty (cleared), stored empty, rotation none, next turn not started
+  s3: cache old session, stored old session, rotation pending, next turn not started
+  s4: cache new session, stored new session, rotation done, next turn not started
+  s5: cache empty (cleared), stored newer selector, rotation none, next turn not started
+  s6: cache new session, stored old session, rotation pending, next turn new session
+  s7: cache old session, stored newer selector, rotation pending, next turn not started
+  s8: cache empty (cleared), stored empty, rotation pending, next turn not started
+  s9: cache new session, stored new session, rotation done, next turn new session
+  s10: cache new session, stored newer selector, rotation done, next turn not started
+  s11: cache empty (cleared), stored empty, rotation done, next turn not started
+  s12: cache new session, stored old session, rotation pending, next turn not started
+  s13: cache new session, stored newer selector, rotation pending, next turn new session
+  s14: cache empty (cleared), stored empty, rotation pending, next turn new session
+  s15: cache empty (cleared), stored empty, rotation pending, next turn empty
+  s16: cache empty (cleared), stored newer selector, rotation pending, next turn not started
+  s17: cache new session, stored newer selector, rotation done, next turn new session
+  s18: cache empty (cleared), stored empty, rotation done, next turn new session
+  s19: cache empty (cleared), stored empty, rotation done, next turn empty
+  s20: cache empty (cleared), stored newer selector, rotation done, next turn not started
+  s21: cache new session, stored newer selector, rotation pending, next turn not started
+  s22: cache empty (cleared), stored newer selector, rotation pending, next turn new session
+  s23: cache empty (cleared), stored newer selector, rotation pending, next turn empty
+  s24: cache empty (cleared), stored newer selector, rotation done, next turn new session
+  s25: cache empty (cleared), stored newer selector, rotation done, next turn empty
+  [*] --> s0
+  s0 --> s1: a newer selector is stored
+  s0 --> s2: the user runs !clear
+  s0 --> s3: the hook moves the pane to the new session
+  s1 --> s2: the user runs !clear
+  s1 --> s7: the hook moves the pane to the new session
+  s2 --> s5: a newer selector is stored
+  s2 --> s8: the hook moves the pane to the new session
+  s3 --> s4: Settle
+  s3 --> s6: the queued input's turn starts
+  s3 --> s7: a newer selector is stored
+  s3 --> s8: the user runs !clear
+  s4 --> s9: the queued input's turn starts
+  s4 --> s10: a newer selector is stored
+  s4 --> s11: the user runs !clear
+  s5 --> s2: the user runs !clear
+  s5 --> s16: the hook moves the pane to the new session
+  s3 --> s12: Settle
+  s6 --> s9: Settle
+  s6 --> s13: a newer selector is stored
+  s6 --> s14: the user runs !clear
+  s7 --> s8: the user runs !clear
+  s7 --> s10: Settle
+  s7 --> s13: the queued input's turn starts
+  s8 --> s11: Settle
+  s8 --> s15: the queued input's turn starts
+  s8 --> s16: a newer selector is stored
+  s9 --> s17: a newer selector is stored
+  s9 --> s18: the user runs !clear
+  s10 --> s11: the user runs !clear
+  s10 --> s17: the queued input's turn starts
+  s11 --> s19: the queued input's turn starts
+  s11 --> s20: a newer selector is stored
+  s12 --> s6: the queued input's turn starts
+  s12 --> s8: the user runs !clear
+  s12 --> s21: a newer selector is stored
+  s13 --> s14: the user runs !clear
+  s13 --> s17: Settle
+  s14 --> s18: Settle
+  s14 --> s22: a newer selector is stored
+  s15 --> s19: Settle
+  s15 --> s23: a newer selector is stored
+  s16 --> s8: the user runs !clear
+  s16 --> s20: Settle
+  s16 --> s23: the queued input's turn starts
+  s17 --> s18: the user runs !clear
+  s18 --> s24: a newer selector is stored
+  s19 --> s25: a newer selector is stored
+  s20 --> s11: the user runs !clear
+  s20 --> s25: the queued input's turn starts
+  s12 --> s4: Settle
+  s21 --> s8: the user runs !clear
+  s21 --> s10: Settle
+  s21 --> s13: the queued input's turn starts
+  s22 --> s14: the user runs !clear
+  s22 --> s24: Settle
+  s23 --> s15: the user runs !clear
+  s23 --> s25: Settle
+  s24 --> s18: the user runs !clear
+  s25 --> s19: the user runs !clear
+  class s0 teal
+  class s1 teal
+  class s2 teal
+  class s3 yellow
+  class s4 teal
+  class s5 teal
+  class s6 yellow
+  class s7 yellow
+  class s8 yellow
+  class s9 teal
+  class s10 teal
+  class s11 teal
+  class s12 yellow
+  class s13 yellow
+  class s14 yellow
+  class s15 yellow
+  class s16 yellow
+  class s17 teal
+  class s18 teal
+  class s19 teal
+  class s20 teal
+  class s21 yellow
+  class s22 yellow
+  class s23 yellow
+  class s24 teal
+  class s25 teal
