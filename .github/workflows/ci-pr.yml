@@ -639,7 +639,7 @@ jobs:
           BASH_ENV: /dev/null
         run: |
           set -euo pipefail
-          cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json
+          cargo nextest list --lib --workspace --ignore-default-filter --message-format json > target/universe-windows.json
           python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json --json-out target/compare-windows.json
 
       - name: sccache stats
@@ -739,7 +739,7 @@ jobs:
           set -euo pipefail
           NEXTEST_DIR="$RUNNER_TEMP/nextest"
           mkdir -p "$NEXTEST_DIR" "$RUNNER_TEMP/nextest-census"
-          cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
+          cargo nextest archive --lib --workspace --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
           ${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
             --extract-to "$RUNNER_TEMP/nextest-census" --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"
           python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"
@@ -1094,7 +1094,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh 7a02a09456eff93e43e3f1e3637a58d0231b6625eead9703c7d6638e60a1eec9
+          pin scripts/check-ci-runner-hardening.sh dcbf9200b5111baf9df12c095f92576eaea8f87443fc3d1cbcb3be64458337c5
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks

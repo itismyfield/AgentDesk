@@ -16,6 +16,7 @@ Nothing here runs cargo.
 
 import argparse
 from bisect import bisect_right
+from collections import defaultdict
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -302,14 +303,14 @@ class Inventory:
     source_tokens: dict = field(default_factory=dict)
 
 
-def _include_target(tokens, index, source, repo_root):
+def _include_target(tokens, index, source, manifest_dir):
     """Path an `include!(...)` at tokens[index] names, None for a non-literal form."""
     args = [t for t in tokens[index + 3:index + 5 + len(MANIFEST_DIR_INCLUDE)]
             if t.kind != "punct" or t.value != ","][:len(MANIFEST_DIR_INCLUDE) + 1]
     if tokens[index + 3].kind == "string":
         return source.parent / tokens[index + 3].value
     if tuple(t.value for t in args[:-1]) == MANIFEST_DIR_INCLUDE and args[-1].kind == "string":
-        return repo_root / args[-1].value.lstrip("/")
+        return manifest_dir / args[-1].value.lstrip("/")
     return None
 
 
@@ -322,6 +323,8 @@ def module_directory(source, *, explicit_path=False, crate_root=False):
 def walk(root, repo_root, inventory=None, *, production=False):
     """Add every test the crate root reaches to the inventory, following mod, #[path] and include!."""
     inv = inventory if inventory is not None else Inventory()
+    manifest_dir = next((directory for directory in root.parents
+                         if directory.is_relative_to(repo_root) and (directory / "Cargo.toml").is_file()), repo_root)
     if production:
         try:
             from rust_cfg import cfg_requires_test
@@ -443,7 +446,7 @@ def walk(root, repo_root, inventory=None, *, production=False):
                     pending_path, pending_test, pending_cfgs = None, False, ()
             elif token.kind == "ident" and token.value == "include" and index + 3 < len(tokens) \
                     and tokens[index + 1].value == "!" and tokens[index + 2].value == "(":
-                target = _include_target(tokens, index, source, repo_root)
+                target = _include_target(tokens, index, source, manifest_dir)
                 if target is None:
                     inv.unreadable.append(f"{site} include! with a non-literal path")
                 elif not target.is_file():
@@ -486,10 +489,49 @@ def _cfg_attr_predicate(tokens):
     return ("(", *values[1:end], ")")
 
 
+def workspace_packages(repo_root):
+    """Explicit workspace member manifests, with the root package first."""
+    manifest = repo_root / "Cargo.toml"
+    if not manifest.is_file():
+        return [(manifest, {})]
+    cargo = tomllib.loads(manifest.read_text("utf-8"))
+    workspace = cargo.get("workspace", {})
+    excluded = {path.resolve() for pattern in workspace.get("exclude", []) for path in repo_root.glob(pattern)}
+    members = set()
+    for pattern in workspace.get("members", []):
+        if pattern == ".":
+            continue
+        paths = list(repo_root.glob(pattern))
+        if not paths:
+            raise ValueError(f"workspace member not found: {pattern}")
+        members.update(path.resolve() for path in paths)
+    packages = [(manifest, cargo)] if "package" in cargo else []
+    for member in sorted(members - excluded - {repo_root.resolve()}):
+        path = member / "Cargo.toml"
+        packages.append((path, tomllib.loads(path.read_text("utf-8"))))
+    return packages
+
+
+def workspace_lib_roots(repo_root):
+    libraries = {}
+    for manifest, cargo in workspace_packages(repo_root):
+        root = manifest.parent / cargo.get("lib", {}).get("path", "src/lib.rs")
+        if "lib" in cargo and not root.is_file():
+            raise ValueError(f"library root not found: {root.relative_to(repo_root)}")
+        if root.is_file():
+            binary = cargo.get("package", {}).get("name", "agentdesk")
+            if binary in libraries:
+                raise ValueError(f"duplicate library package: {binary}")
+            libraries[binary] = (manifest, root)
+    return libraries
+
+
 def crate_roots(repo_root):
-    src = repo_root / "src"
-    roots = [src / "lib.rs", src / "main.rs", *sorted((src / "bin").glob("*.rs")),
-             *sorted((src / "bin").glob("*/main.rs"))]
+    roots = [root for _, root in workspace_lib_roots(repo_root).values()]
+    for manifest, _ in workspace_packages(repo_root):
+        src = manifest.parent / "src"
+        roots.extend((src / "main.rs", *sorted((src / "bin").glob("*.rs")),
+                      *sorted((src / "bin").glob("*/main.rs"))))
     return [r for r in roots if r.is_file()]
 
 
@@ -508,11 +550,12 @@ def has_test_attr(path):
 
 def lib_inventory(repo_root):
     """Lib-target tests plus every file any crate root reaches (for the orphan check)."""
-    lib = walk(repo_root / "src/lib.rs", repo_root)
+    root = next((root for _, root in workspace_lib_roots(repo_root).values()), repo_root / "src/lib.rs")
+    lib = walk(root, repo_root)
     reached = Inventory(reached=set(lib.reached))
-    for root in crate_roots(repo_root):
-        if root.name != "lib.rs" or root.parent != repo_root / "src":
-            walk(root, repo_root, reached)
+    for other in crate_roots(repo_root):
+        if other != root:
+            walk(other, repo_root, reached)
     lib.reached = reached.reached
     for path, chains in reached.file_cfgs.items():
         lib.file_cfgs.setdefault(path, set()).update(chains)
@@ -522,6 +565,12 @@ def lib_inventory(repo_root):
     lib.missing_files += [e for e in reached.missing_files if e not in lib.missing_files]
     lib.unreadable += [u for u in reached.unreadable if u not in lib.unreadable]
     return lib
+
+
+def lib_tests_by_binary(repo_root):
+    """Binary ID -> (manifest directory, library-local inventory)."""
+    return {binary: (manifest.parent, lib_inventory(repo_root) if index == 0 else walk(root, repo_root))
+            for index, (binary, (manifest, root)) in enumerate(workspace_lib_roots(repo_root).items())}
 
 
 def orphans(repo_root, inventory):
@@ -599,23 +648,26 @@ def compiled_lib_tests(repo_root, platform="linux"):
     return platform_split(inventory, PLATFORMS[platform], default_features(repo_root))[0]
 
 
-def listed_lib_tests(path):
-    """Every test (runnable or ignored) of the lib binary in an unfiltered nextest list JSON."""
+def listed_lib_cases(path):
+    """Library binary ID -> all its cases in an unfiltered nextest list."""
     doc = json.loads(Path(path).read_text())
     suites = doc.get("rust-suites") if isinstance(doc, dict) else None
     if not isinstance(suites, dict):
         raise ValueError("nextest list has no rust-suites object")
-    libs = [s for s in suites.values() if isinstance(s, dict) and s.get("kind") == "lib"]
-    if len(libs) != 1 or not isinstance(libs[0].get("testcases"), dict) or not libs[0]["testcases"]:
-        raise ValueError(f"nextest list must hold exactly one lib suite with tests, found {len(libs)}")
-    return set(libs[0]["testcases"])
-
-
-def listed_lib_ignored(path):
-    """Tests the lib suite of a nextest list marks ignored."""
-    doc = json.loads(Path(path).read_text())
-    libs = [s for s in doc["rust-suites"].values() if isinstance(s, dict) and s.get("kind") == "lib"]
-    return {name for name, case in libs[0]["testcases"].items() if case.get("ignored") is True}
+    libs = {}
+    for suite in suites.values():
+        if not isinstance(suite, dict) or suite.get("kind") != "lib":
+            continue
+        binary, tests = suite.get("binary-id"), suite.get("testcases")
+        if (not isinstance(binary, str) or not binary or binary in libs or
+                suite.get("status", "listed") != "listed" or not isinstance(tests, dict) or
+                any(not isinstance(case, dict) or not isinstance(case.get("ignored"), bool)
+                    for case in tests.values())):
+            raise ValueError(f"invalid lib suite in nextest list: {binary!r}")
+        libs[binary] = tests
+    if not any(libs.values()):
+        raise ValueError("nextest list contains no lib tests")
+    return libs
 
 
 def compare(inventory, listed, target_os, features, listed_ignored=frozenset()):
@@ -637,30 +689,78 @@ def platform_tests(repo_root, allow_missing_files=False):
 
     allow_missing_files also reads a tree whose only errors are absent mod/include! files, unless a test file
     under src/ is then unreachable: its tests would silently drop out of the comparison."""
-    inv, features, found = lib_inventory(repo_root), default_features(repo_root), {}
-    if inv.unreadable:
-        raise ValueError(f"{repo_root}: unreadable attributes ({inv.unreadable[0]}); run `check` there")
-    if allow_missing_files and inv.missing_files:
-        stranded = orphans(repo_root, inv)
-        if stranded:
-            raise ValueError(f"{repo_root}: missing modules leave test sources unreachable: {stranded[0]}")
-    other = [e for e in inv.errors if not (allow_missing_files and e in inv.missing_files)]
-    for platform, target_os in PLATFORMS.items():
-        compiled, _, unknown = platform_split(inv, target_os, features)
-        if unknown or other:
-            raise ValueError(f"{repo_root}: cfg unknown or sources missing on {platform}; run `check` there")
-        ignored = set()
-        for test_id in compiled:
-            # Ignored only when every declaration that compiles here is ignored here.
-            states = [_ignored_on(inv.ignores.get(site, ()), target_os, features)
-                      for site, chain in inv.tests[test_id]
-                      if all(cfg_holds(p, target_os, features) is True for p in chain)]
-            if None in states:
-                raise ValueError(f"{repo_root}: cfg_attr ignore of {test_id} is unknown on {platform}")
-            if all(states):
-                ignored.add(test_id)
-        found[platform] = (compiled, ignored)
-    return found, list(inv.missing_files) if allow_missing_files else []
+    libraries = lib_tests_by_binary(repo_root)
+    if not libraries:
+        raise ValueError(f"{repo_root}: no library sources")
+    found = {platform: (set(), set()) for platform in PLATFORMS}
+    missing = set()
+    for binary, (manifest_dir, inv) in libraries.items():
+        features = default_features(manifest_dir)
+        if inv.unreadable:
+            raise ValueError(f"{repo_root}: unreadable attributes ({inv.unreadable[0]}); run `check` there")
+        if allow_missing_files and inv.missing_files:
+            stranded = orphans(repo_root, inv)
+            if stranded:
+                raise ValueError(f"{repo_root}: missing modules leave test sources unreachable: {stranded[0]}")
+            missing.update(inv.missing_files)
+        other = set(inv.errors) - missing
+        for platform, target_os in PLATFORMS.items():
+            compiled, _, unknown = platform_split(inv, target_os, features)
+            if unknown or other:
+                raise ValueError(f"{repo_root}: cfg unknown or sources missing on {platform}; run `check` there")
+            found[platform][0].update((binary, name) for name in compiled)
+            for name in compiled:
+                states = [_ignored_on(inv.ignores.get(site, ()), target_os, features)
+                          for site, chain in inv.tests[name]
+                          if all(cfg_holds(p, target_os, features) is True for p in chain)]
+                if None in states:
+                    raise ValueError(f"{repo_root}: cfg_attr ignore of {name} is unknown on {platform}")
+                if all(states):
+                    found[platform][1].add((binary, name))
+    return found, sorted(missing), libraries
+
+
+def _declarations(repo_root, libraries):
+    owners = defaultdict(set)
+    declarations = defaultdict(list)
+    for binary, (_, inventory) in libraries.items():
+        for file in inventory.modules:
+            owners[file].add(binary)
+        for name, sites in inventory.tests.items():
+            if len(sites) != 1:
+                continue
+            site, cfg = sites[0]
+            filename = site.rsplit(":", 1)[0]
+            key = (filename, name.rsplit("::", 1)[-1], cfg, tuple(inventory.ignores.get(site, ())))
+            declarations[key].append((binary, name))
+    return {key: ids[0] for key, ids in declarations.items()
+            if len(ids) == 1 and owners[(repo_root / key[0]).resolve()] == {ids[0][0]}}
+
+
+def _source_losses(base_root, head_root, base, head, base_libs, head_libs):
+    before = _declarations(base_root, base_libs)
+    after = _declarations(head_root, head_libs)
+    moves = {origin: after[key] for key, origin in before.items()
+             if key in after and origin[0] != after[key][0]}
+    by_binary = {key: {} for key in ("removed", "runnable_to_ignored", "present_tests")}
+    relocated = {}
+    for platform in PLATFORMS:
+        old, old_ignored = base[platform]
+        new, new_ignored = head[platform]
+        removed, added = old - new, new - old
+        relocated[platform] = sorted((a, b) for a, b in moves.items() if a in removed and b in added
+                                     and (a in old_ignored) == (b in new_ignored))
+        by_binary["removed"][platform] = sorted(removed)
+        by_binary["runnable_to_ignored"][platform] = sorted((old - old_ignored) & new_ignored)
+        by_binary["present_tests"][platform] = sorted(old | new)
+    # The source-only prepush checker also consumes the original bare-name projection.
+    legacy = {key: {platform: sorted({name for _, name in ids}) for platform, ids in rows.items()}
+              for key, rows in by_binary.items()}
+    for platform, pairs in relocated.items():
+        moved = {origin for origin, _ in pairs}
+        legacy["removed"][platform] = sorted({name for binary, name in by_binary["removed"][platform]
+                                              if (binary, name) not in moved})
+    return {**legacy, "by_binary": by_binary, "relocated": relocated}
 
 
 def _ignored_on(conditions, target_os, features):
@@ -869,7 +969,8 @@ def allowlist_growth(current, base, violations, approved=None):
 
 
 def check_findings(repo_root, allowlist_base="HEAD^1", approved=None):
-    inv = lib_inventory(repo_root)
+    libraries = lib_tests_by_binary(repo_root)
+    inv = next(iter(libraries.values()))[1] if libraries else lib_inventory(repo_root)
     found = [f"orphan test file: {path}" for path in orphans(repo_root, inv)]
     found += [f"missing source: {e}" for e in inv.errors]
     found += [f"unreadable: {u}" for u in inv.unreadable]
@@ -880,11 +981,25 @@ def check_findings(repo_root, allowlist_base="HEAD^1", approved=None):
                                   violations, approved)
     except ValueError as exc:
         found.append(f"unbounded wait allowlist: base {allowlist_base} unreadable ({exc}); pass --allowlist-base")
-    features = default_features(repo_root)
-    for platform, target_os in PLATFORMS.items():
-        _, _, unknown = platform_split(inv, target_os, features)
-        found += [f"cfg unknown on {platform}: {t} ({', '.join(s)})" for t, s in sorted(unknown.items())]
-    return inv, found
+    for manifest_dir, inventory in libraries.values():
+        features = default_features(manifest_dir)
+        for platform, target_os in PLATFORMS.items():
+            _, _, unknown = platform_split(inventory, target_os, features)
+            found += [f"cfg unknown on {platform}: {t} ({', '.join(s)})" for t, s in sorted(unknown.items())]
+    return sum(len(inventory.tests) for _, inventory in libraries.values()), found
+
+
+def compare_libraries(libraries, listed, platform):
+    if set(libraries) != set(listed):
+        raise ValueError(f"lib suite selection mismatch: source={sorted(libraries)}, nextest={sorted(listed)}")
+    result = {field: [] for field in ("static_only", "cargo_only", "unknown_cfg", "ignore_mismatch")}
+    for binary, (manifest_dir, inventory) in libraries.items():
+        cases = listed[binary]
+        ignored = {name for name, case in cases.items() if case["ignored"]}
+        diff = compare(inventory, set(cases), PLATFORMS[platform], default_features(manifest_dir), ignored)
+        for field, names in diff.items():
+            result[field].extend(names if len(libraries) == 1 else ((binary, name) for name in names))
+    return result
 
 
 def main(argv=None):
@@ -909,43 +1024,41 @@ def main(argv=None):
     if args.command == "removed":
         # Head first and strict: only the base may lack files, and only mod/include! targets.
         try:
-            head, _ = platform_tests(root)
+            head, _, head_libs = platform_tests(root)
         except (OSError, ValueError) as exc:
             print(f"ERROR head sources: {exc}", file=sys.stderr)
             return 1
         try:
-            base, missing = platform_tests(args.base_root.resolve(), allow_missing_files=True)
+            base_root = args.base_root.resolve()
+            base, missing, base_libs = platform_tests(base_root, allow_missing_files=True)
         except (OSError, ValueError) as exc:
             print(f"ERROR base sources: {exc}", file=sys.stderr)
             return 1
-        lost = {"removed": {p: sorted(base[p][0] - head[p][0]) for p in PLATFORMS},
-                "runnable_to_ignored": {p: sorted((base[p][0] - base[p][1]) & head[p][1]) for p in PLATFORMS},
-                "present_tests": {p: sorted(base[p][0] | head[p][0]) for p in PLATFORMS}}
+        lost = _source_losses(base_root, root, base, head, base_libs, head_libs)
         if missing:
             lost["base_missing_files"] = missing
         Path(args.json_out).write_text(json.dumps(lost, indent=1, sort_keys=True) + "\n")
         print(" · ".join(f"{p} -{len(lost['removed'][p])} ignored+{len(lost['runnable_to_ignored'][p])}"
                          for p in PLATFORMS))
         return 0
-    if args.command == "check":
-        inv, found = check_findings(root, args.allowlist_base)
-        for line in found:
-            print(f"ERROR {line}", file=sys.stderr)
-        print(f"{len(inv.tests)} lib tests reached; {len(found)} problem(s)")
-        return 1 if found else 0
-    inv = lib_inventory(root)
-    features = default_features(root)
-    if args.command == "inventory":
-        ids = (platform_split(inv, PLATFORMS[args.platform], features)[0] if args.platform else set(inv.tests))
-        Path(args.json_out).write_text(json.dumps(sorted(ids), indent=0) + "\n")
-        print(f"{len(ids)} tests")
-        return 0
     try:
-        listed, listed_ignored = listed_lib_tests(args.list), listed_lib_ignored(args.list)
+        if args.command == "check":
+            test_count, found = check_findings(root, args.allowlist_base)
+            for line in found:
+                print(f"ERROR {line}", file=sys.stderr)
+            print(f"{test_count} lib tests reached; {len(found)} problem(s)")
+            return 1 if found else 0
+        if args.command == "inventory":
+            inv = lib_inventory(root)
+            ids = (platform_split(inv, PLATFORMS[args.platform], default_features(root))[0]
+                   if args.platform else set(inv.tests))
+            Path(args.json_out).write_text(json.dumps(sorted(ids), indent=0) + "\n")
+            print(f"{len(ids)} tests")
+            return 0
+        result = compare_libraries(lib_tests_by_binary(root), listed_lib_cases(args.list), args.platform)
     except (OSError, ValueError) as exc:
         print(f"ERROR {exc}", file=sys.stderr)
         return 1
-    result = compare(inv, listed, PLATFORMS[args.platform], features, listed_ignored)
     Path(args.json_out).write_text(json.dumps(result, indent=1, sort_keys=True) + "\n")
     print(" · ".join(f"{k} {len(v)}" for k, v in sorted(result.items())))
     return 1 if result["static_only"] or result["unknown_cfg"] or result["ignore_mismatch"] else 0

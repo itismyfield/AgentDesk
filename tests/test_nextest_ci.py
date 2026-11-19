@@ -165,8 +165,13 @@ class Fixture(unittest.TestCase):
         return rc, err.getvalue()
 
     def plan(self, names, workers=2, ignored=(), timings=None, out="plan", policy=None,
-             order=None, today="2026-10-24", base="base.toml", build=None, sha=SHA, mode=None):
-        self.write("list.json", nextest_list(names, ignored, order))
+             order=None, today="2026-10-24", base="base.toml", build=None, sha=SHA, mode=None,
+             member=None, member_ignored=()):
+        listing = nextest_list(names, ignored, order)
+        if member is not None:
+            suite = nextest_list(member, member_ignored)["rust-suites"][BIN]
+            listing["rust-suites"]["adk-store"] = {**suite, "binary-id": "adk-store"}
+        self.write("list.json", listing)
         policy = policy or ("policy.toml" if FLAKY in names else "empty.toml")
         argv = ["plan", "--universe", self.dir / "list.json", "--archive", self.archive,
                 "--workers", workers, "--sha", sha, "--scope", "linux-lib", "--run-id", "7",
@@ -716,6 +721,34 @@ class BaseDiff(Fixture):
         self.assertEqual(diff["unjustified"], [f"{BIN} m::b | runnable->ignored", f"{BIN} m::c | removed"])
         self.assertIn(f"lost without a justification row: {BIN} m::c | removed", err)
 
+    def test_equal_names_in_separate_libs_do_not_mask_a_removal(self):
+        self.plan_ok(["m::same"], workers=1, out="base", member=["m::same", "m::retained"])
+        self.plan_ok(["m::same"], workers=1, member=["m::retained"])
+        source = {"by_binary": source_losses()}
+        rc, err = self.diff(SHA, source=source)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("lost without a justification row: adk-store m::same | removed", err)
+        self.assertNotIn(f"{BIN} m::same | removed", err)
+
+    def test_verified_source_relocation_keeps_linux_and_native_coverage(self):
+        old, new = [BIN, "m::old"], ["adk-store", "m::new"]
+        self.plan_ok(["m::old", "m::keep"], workers=1, out="base")
+        self.plan_ok(["m::keep", "m::new"], workers=1, member=["m::new"])
+        platforms = ("linux", "macos", "windows")
+        source = {"by_binary": source_losses(
+            removed={p: [old] for p in platforms}, present={p: [old, new] for p in platforms}),
+            "relocated": {p: [[old, new]] for p in platforms}}
+        rc, err = self.diff(SHA, source=source)
+        self.assertEqual(rc, 0, err)
+        result = json.loads((self.dir / "diff.json").read_text())
+        self.assertEqual((result["removed"], result["added"], result["platform_losses"]),
+                         ([], [f"{BIN} m::new"], {}))
+        self.assertEqual(result["relocated"], source["relocated"])
+        self.plan_ok(["m::keep", "m::new"], workers=1, member=[], member_ignored=["m::new"])
+        rc, err = self.diff(SHA, source=source)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("relocation disagrees with compiled plans", err)
+
     def test_landed_removal_rows_warn_with_full_row_and_do_not_fail(self):
         self.plan_ok(["m::a"], workers=1, out="base")
         self.plan_ok(["m::a"], workers=1)
@@ -926,6 +959,14 @@ class NativePlan(Fixture):
         self.assertIn("outside the listed universe", self.plan(["m::a"], workers=1,
                                                               build={**BUILD, "--only": self.dir / "pg.json"})[1])
 
+    def test_only_uses_binary_qualified_names_in_a_workspace(self):
+        args = {**BUILD, "--only": self.write("pg.json", {"non_pg_ids": [[BIN, "m::same"]]})}
+        plan = self.plan_ok(["m::same"], member=["m::same"], workers=1, build=args)
+        self.assertEqual(plan["workers"][0]["tests"], [[BIN, "m::same"]])
+        self.write("pg.json", {"non_pg": ["m::same"]})
+        _, err = self.plan(["m::same"], member=["m::same"], workers=1, build=args)
+        self.assertIn("binary-qualified test ID", err)
+
     def test_identity_from_copies_scope_and_build(self):
         head = self.plan_ok(["m::a"], workers=1, build={**BUILD, "--features": "default,extra"})
         rc, err = self.run_cli("plan", "--universe", self.dir / "list.json", "--archive", self.archive, "--workers", 1,
@@ -1117,7 +1158,7 @@ class BaseDiffScript(ScriptRepo):
                 self.assertIn("::warning title=nextest baseline fallback::", out)
                 self.assertIn("nextest baseline fallback:", summary)
                 self.assertIn("against the fallback base plan", summary)
-                self.assertIn("nextest archive --lib", cargo)
+                self.assertIn("nextest archive --lib --workspace", cargo)
 
     def test_loss_fails_on_either_path_and_a_failed_rebuild_never_passes(self):
         head = self.head_plan(["m::b"])
@@ -1335,7 +1376,7 @@ class AncestorBaseDiffScript(ScriptRepo):
                     self.assertNotIn("archive", cargo)
                 else:
                     self.assertIn(f"against the fallback base plan at {b}: exit 0", summary)
-                    self.assertIn("nextest archive --lib", cargo)
+                    self.assertIn("nextest archive --lib --workspace", cargo)
 
     def test_shallow_merge_checkout_fetches_the_first_parent_line(self):
         a_plan = self.baseline(["still_here"], out="a", sha=self.a_sha)
@@ -1737,6 +1778,45 @@ class RustSources(unittest.TestCase):
                 self.assertEqual(rc, 1)
                 self.assertIn("ERROR", err)
 
+    def test_workspace_compare_does_not_fold_identical_names(self):
+        self.tree({
+            "Cargo.toml": '[package]\nname = "x"\n[workspace]\nmembers = ["src/store"]\n',
+            "src/lib.rs": "#[test]\nfn same() {}\n",
+            "src/store/Cargo.toml": '[package]\nname = "adk-store"\n[lib]\npath = "seed.rs"\n',
+            "src/store/seed.rs": 'include!(concat!(env!("CARGO_MANIFEST_DIR"), "/contract.rs"));\n',
+            "src/store/contract.rs": "#[test]\nfn same() {}\n",
+        })
+        suites = {"x": {"binary-id": "x", "kind": "lib", "testcases": {"same": {"ignored": False}}}}
+        self.assertEqual(self.compare({"rust-suites": suites})[0], 1)
+        suites["adk-store"] = {"binary-id": "adk-store", "kind": "lib", "testcases": {}}
+        self.assertEqual(self.compare({"rust-suites": suites})[0], 1)
+        self.assertEqual(json.loads((self.root / "cmp.json").read_text())["static_only"], [["adk-store", "same"]])
+        suites["adk-store"]["testcases"]["same"] = {"ignored": False}
+        self.assertEqual(self.compare({"rust-suites": suites})[0], 0)
+
+    def test_workspace_move_keeps_exact_source_owner_and_runnable_status(self):
+        cargo = '[package]\nname = "x"\n'
+        files = {"Cargo.toml": cargo, "src/lib.rs": "mod db;\n", "src/db/mod.rs": "mod repository;\n",
+                 "src/db/repository.rs": "#[test]\nfn keep() {}\n#[test]\nfn disable() {}\n"}
+        for rel, contents in files.items():
+            self.tree({f"base/{rel}": contents})
+        self.tree({
+            "Cargo.toml": cargo + '[workspace]\nmembers = ["src/db"]\n',
+            "src/lib.rs": "#[test]\nfn parent() {}\n",
+            "src/db/Cargo.toml": '[package]\nname = "adk-store"\n[lib]\npath = "lib.rs"\n',
+            "src/db/lib.rs": "mod repository;\n",
+            "src/db/repository.rs": "\n#[test]\nfn keep() {}\n#[test]\n#[ignore]\nfn disable() {}\n",
+        })
+        out = self.root / "removed.json"
+        self.assertEqual(self.cli("removed", "--base-root", self.root / "base", "--json-out", out)[0], 0)
+        doc = json.loads(out.read_text())
+        for platform in rts.PLATFORMS:
+            self.assertEqual(doc["relocated"][platform],
+                             [[["x", "db::repository::keep"], ["adk-store", "repository::keep"]]])
+            self.assertEqual(doc["removed"][platform], ["db::repository::disable"])
+            self.assertEqual(doc["by_binary"]["removed"][platform],
+                             [["x", "db::repository::disable"], ["x", "db::repository::keep"]])
+
     def test_cfg_evaluator_operators(self):
         cases = [("( unix )", "linux", True), ("( not ( unix ) )", "linux", False),
                  ("( any ( windows target_os = macos ) )", "macos", True),
@@ -1843,6 +1923,7 @@ mod tests {
         )]
         pure = f"{module}::pure_pg"
         self.tree({
+            "Cargo.toml": f'[package]\nname = "{BIN}"\n',
             "src/lib.rs": "mod services; mod db;\n",
             "src/services.rs": "pub mod cluster { pub mod intake_worker { pub mod o_input; } }\n",
             "src/services/cluster/intake_worker/o_input.rs": """
@@ -2224,6 +2305,23 @@ fn opaque() { run(&pick()); }
         self.assertEqual(rc, 0, err)
         out = json.loads((self.root / "out.json").read_text())
         self.assertEqual(out["non_pg"], ["db::tests::pure", "ext_tests::ext_pure"])
+
+    def test_workspace_pg_classification_is_library_local(self):
+        self.tree({
+            "Cargo.toml": '[package]\nname = "x"\n[workspace]\nmembers = ["src/store"]\n',
+            "src/lib.rs": "#[test]\nfn same() { TestPostgresDb::new(); }\n",
+            "src/store/Cargo.toml": '[package]\nname = "adk-store"\n[lib]\npath = "lib.rs"\n',
+            "src/store/lib.rs": "#[test]\nfn same() {}\n",
+        })
+        listed = {"rust-suites": {binary: {"binary-id": binary, "kind": "lib",
+                                          "testcases": {"same": {"ignored": False}}}
+                                  for binary in ("x", "adk-store")}}
+        (self.root / "list.json").write_text(json.dumps(listed))
+        rc, err = self.cli("classify", "--json-out", self.root / "out.json", "--list", self.root / "list.json")
+        self.assertEqual(rc, 0, err)
+        out = json.loads((self.root / "out.json").read_text())
+        self.assertEqual(out["pg_by_binary"], {"x": {"same": "src/lib.rs"}, "adk-store": {}})
+        self.assertEqual(out["non_pg_ids"], [["adk-store", "same"]])
 
     def test_unreadable_list_or_problem_fails_the_cli(self):
         (self.root / "list.json").write_text(json.dumps({"rust-binaries": {}}))
