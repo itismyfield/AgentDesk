@@ -596,8 +596,8 @@ pub(super) async fn resume_with_gateway(
             full_response: &snapshot.full_response,
         })
     };
-    // A transport every chunk of which is receipted, or already delivered, needs no send right:
-    // it goes on to its settlement whatever the destination reads now.
+    // A transport every chunk of which is receipted, or already delivered, sends nothing more, so
+    // the child guard below does not hold its settlement; the destination's ownership still does.
     let transported = snapshot.delivery_receipts.len() == chunks.len()
         || decision() == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
     // A kept thread child's unsent body waits until the boot places that child with a decided body.
@@ -616,19 +616,15 @@ pub(super) async fn resume_with_gateway(
     let kind = (snapshot.local.channel_id == snapshot.channel_id)
         .then_some(snapshot.local.runtime_kind)
         .flatten();
-    let peeked = (!transported).then(|| {
-        crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
-            snapshot.channel_id,
-            kind,
-        )
-    });
-    let o_owns_body = match peeked {
-        None => false,
-        Some(Ok(owned)) => owned,
+    let o_owns_body = match crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+        snapshot.channel_id,
+        kind,
+    ) {
+        Ok(owned) => owned,
         #[cfg(unix)]
-        Some(Err(held)) => return Ok(discard_refused(shared, &provider, snapshot, held).await),
+        Err(held) => return Ok(discard_refused(shared, &provider, snapshot, held).await),
         #[cfg(not(unix))]
-        Some(Err(_)) => return Ok(false),
+        Err(_) => return Ok(false),
     };
     #[cfg(unix)]
     if o_owns_body {
