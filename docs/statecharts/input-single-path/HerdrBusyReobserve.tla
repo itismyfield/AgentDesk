@@ -173,7 +173,7 @@ RHFirstKeep == /\ r.phase = "held" /\ ~r.visible /\ ~RHTmux
 \* source cannot grant a first key. Its exact NotSent closes the attempt and keeps the original.
 RHTmuxReserve == /\ RHTmux /\ r.phase = "queued"
                  /\ r' = [r EXCEPT !.phase = "reserved", !.reserved = TRUE]
-RHTmuxNotSent == /\ RHTmux /\ r.phase = "reserved" /\ r.keys = 0 /\ ~r.permit
+RHTmuxNotSent == /\ RHTmux /\ r.phase = "reserved" /\ r.keys = 0 /\ ~r.permit /\ ~r.proof
                  /\ (~r.dueStored \/ r.age < 5)
                  /\ r' = [r EXCEPT !.phase = "held", !.reserved = FALSE,
                      !.dueStored = r.dueStored \/ (RHWired /\ Mutant # "NoWiring"
@@ -276,7 +276,8 @@ RHSwap == /\ Scenario \in {"stale-front", "stale-generation"} /\ r.other = "none
               !.front = IF Scenario = "stale-front" THEN 2 ELSE 1,
               !.generation = IF Scenario = "stale-generation" THEN 2 ELSE 1]
 \* The old original's deadline callback arrives at the new front and must be a no-op.
-RHStaleCallback == /\ r.other = "queued" /\ ~r.cbFired
+RHStaleCallback == /\ Scenario \in {"stale-front", "stale-generation"}
+                   /\ r.other = "queued" /\ ~r.cbFired
                    /\ r' = [r EXCEPT !.cbFired = TRUE,
                        !.other = IF RHSameFront THEN "refused" ELSE "queued"]
 \* One restart: durable hold/due/refusal/notice intent survive; proof, watch and drain do not.
