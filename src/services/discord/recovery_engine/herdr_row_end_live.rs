@@ -108,11 +108,8 @@ async fn disconnect_ended(
     let id = observation.session_id();
     match disconnect_retired_pg(pool, id, record, None, true).await {
         Ok(true) => {}
-        Ok(false) => tracing::info!(
-            session_id = id,
-            "ended Herdr row moved on; not disconnected"
-        ),
-        Err(error) => tracing::warn!(session_id = id, %error, "ended Herdr row disconnect failed"),
+        Ok(false) => tracing::info!(row_id = id, "ended Herdr row moved on; not disconnected"),
+        Err(error) => tracing::warn!(row_id = id, %error, "ended Herdr row disconnect failed"),
     }
 }
 
