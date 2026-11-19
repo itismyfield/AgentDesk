@@ -231,9 +231,8 @@ async fn a_restored_owner_on_the_idle_bot_follows_on_the_channel_bot_pg() {
     assert_eq!(f.row(&first_key).await.as_deref(), Some(chosen));
 }
 
-// A hook that arrived before its transcript is adopted from the deferred queue; once the
-// watcherless Herdr pane's selector follows it, the next hook is adopted through the real
-// receiver and the selector follows that too, the first frozen transcript kept.
+// Once a watcherless Herdr pane's selector follows a hook adopted from the deferred queue, the
+// next real hook is adopted and followed too, and the first frozen transcript is kept.
 #[test]
 fn a_queued_herdr_adoption_whose_selector_followed_lets_the_next_hook_adopt_pg() {
     use super::super::herdr_source::tests::Herdr;
