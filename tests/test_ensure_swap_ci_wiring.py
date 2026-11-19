@@ -169,9 +169,32 @@ class SwapStepWiring(unittest.TestCase):
                     for step in hosted_steps:
                         self.assertEqual(eval_step_if(step.get("if"), context), hosted, step["name"])
                     self.assertEqual(eval_step_if(uncached.get("if"), context), not hosted)
+                    if not hosted:
+                        self.assertIn('ADK_CARGO_PRIORITY=1\\n\' >> "$GITHUB_ENV"', uncached["run"])
             self.assertLess(job["steps"].index(uncached),
                             next(i for i, step in enumerate(job["steps"]) if needs_swap(step, job)))
             self.assertIn("RUSTC_WRAPPER=\\nSCCACHE_GHA_ENABLED=\\n", uncached["run"])
+
+    def test_rust_build_bypasses_cargo_slot_only_for_self_hosted_archive_list(self):
+        slot = "ADK_CARGO_SLOT_HELD"
+        archive_list = "cargo nextest list --archive-file "
+        for workflow in DUAL_RUNNER_WORKFLOWS:
+            with self.subTest(workflow=workflow):
+                document = yaml.safe_load((REPO_ROOT / workflow).read_text("utf-8"))
+                job = document["jobs"]["rust_build"]
+                steps = job["steps"]
+                for scope in (document, job, *steps):
+                    self.assertNotIn(slot, scope.get("env", {}))
+                plan, = [step["run"] for step in steps if "cargo nextest archive " in step.get("run", "")]
+                command, = [line.strip() for line in plan.splitlines() if archive_list in line]
+                slot_lines = [
+                    line.strip() for step in steps for line in step.get("run", "").splitlines() if slot in line
+                ]
+                self.assertEqual(slot_lines, [command])
+                prefix = command.split(archive_list, 1)[0]
+                self.assertRegex(prefix, r"^\$\{\{ .+ \}\}$")
+                for environment, expected in (("self-hosted", f"{slot}=1 "), ("github-hosted", "")):
+                    self.assertEqual(eval_expression(prefix, {"runner.environment": environment}), expected)
 
     def test_every_ubuntu_lib_build_job_adds_swap_before_its_first_cargo_step(self) -> None:
         for relative, expected in EXPECTED_SWAP_JOBS.items():
