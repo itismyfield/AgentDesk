@@ -348,6 +348,9 @@ src/
 │   │   └── write.rs
 │   ├── session_observability/
 │   │   └── background_ordering_pg_tests.rs
+│   ├── tui_output_disposition/
+│   │   ├── closure.rs
+│   │   └── closure_tests.rs
 │   ├── turns/
 │   │   ├── receipt_tests.rs
 │   │   └── timestamp_tests.rs
@@ -2298,6 +2301,7 @@ src/
 │   │   │   ├── rebind_runtime.rs
 │   │   │   ├── recovery_completion_outcome_tests.rs
 │   │   │   ├── refused_discard.rs
+│   │   │   ├── refused_discard_closure.rs
 │   │   │   ├── refused_discard_tests.rs
 │   │   │   ├── relay_output_replacements.rs
 │   │   │   ├── restore_inflight.rs
@@ -4626,6 +4630,7 @@ src/
 │   │   │   ├── host.rs
 │   │   │   ├── host_bo_provider_tests.rs
 │   │   │   ├── host_claude_takeover_tests.rs
+│   │   │   ├── host_codex_closure_tests.rs
 │   │   │   ├── host_codex_first_proof_tests.rs
 │   │   │   ├── host_codex_takeover_tests.rs
 │   │   │   ├── host_codex_turn_mark_tests.rs
