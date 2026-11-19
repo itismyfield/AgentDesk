@@ -318,7 +318,7 @@ cleanup_backup() {
     rm -f "$BACKUP_WRAPPER"
   fi
   if [ -n "${BACKUP_REAL:-}" ] && [ -f "$BACKUP_REAL" ]; then
-    rm -f "$BACKUP_REAL"
+    rm -f "$BACKUP_REAL" "$BACKUP_REAL.source.json"
   fi
 }
 
@@ -370,8 +370,12 @@ restore_previous_install() {
     rm -f "$WRAPPER_BIN"
   fi
 
+  rm -f "$REAL_BIN.source.json" || return 1
   if [ -n "${BACKUP_REAL:-}" ] && [ -f "$BACKUP_REAL" ]; then
-    install_file_atomically "$BACKUP_REAL" "$REAL_BIN" 755
+    install_file_atomically "$BACKUP_REAL" "$REAL_BIN" 755 || return 1
+    if [ -f "$BACKUP_REAL.source.json" ]; then
+      install_file_atomically "$BACKUP_REAL.source.json" "$REAL_BIN.source.json" 644 || return 1
+    fi
   else
     rm -f "$REAL_BIN"
   fi
@@ -464,7 +468,11 @@ fi
 if [ -e "$REAL_BIN" ]; then
   BACKUP_REAL="$(mktemp "$LIBEXEC_DIR/agentdesk.real.backup.XXXXXX")"
   cp "$REAL_BIN" "$BACKUP_REAL"
+  if [ -f "$REAL_BIN.source.json" ]; then
+    cp "$REAL_BIN.source.json" "$BACKUP_REAL.source.json"
+  fi
 fi
+rm -f "$REAL_BIN.source.json"
 install_file_atomically "$PROJECT_DIR/target/release/agentdesk" "$REAL_BIN" 755
 if [ "$OS" = "darwin" ]; then
   resolve_macos_codesign_mode \

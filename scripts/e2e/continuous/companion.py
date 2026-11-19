@@ -5,6 +5,7 @@ from pathlib import Path
 import time
 
 from . import inbox
+from .channel_lock import LeaseError
 
 
 def submit(state_dir, request_id, deploy_sha, *, now=None):
@@ -13,7 +14,7 @@ def submit(state_dir, request_id, deploy_sha, *, now=None):
             raise ValueError("state_dir must be an absolute path")
         row = inbox.submit(Path(state_dir), request_id, deploy_sha, time.time() if now is None else now)
         return {"status": "SUBMITTED", **row}
-    except (OSError, ValueError, TypeError):
+    except (LeaseError, OSError, ValueError, TypeError):
         return {"status": "REJECTED", "reason": "companion request unavailable or invalid"}
 
 

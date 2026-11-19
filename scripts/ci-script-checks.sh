@@ -578,6 +578,7 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tests.test_smoke_replay \
   scripts.e2e.tests.test_continuous_catalog \
   scripts.e2e.tests.test_continuous_runner \
+  scripts.e2e.tests.test_continuous_release_host \
   tests.test_e2e_continuous_manifest \
   scripts.e2e.tui_relay.test_retained_queue_idle \
   scripts.e2e.tui_relay.test_restart_queued_inputs \
@@ -789,6 +790,10 @@ if run_check contracts "Build token fairness tests (#5968)"; then
 # a lane that released and re-entered starved a waiter for 49 minutes. Same
 # reason as above -- Python, so only this unittest run gates it.
 "$PYTHON" -m unittest tests.test_build_token_fairness_5968
+fi
+
+if run_check cargo "Release Cargo witness cache parity"; then
+"$PYTHON" -m unittest tests.test_release_cargo_freshness
 fi
 
 if run_check cargo "Generate inventory docs (refresh workspace; gate source-of-truth invariants, #3036)"; then

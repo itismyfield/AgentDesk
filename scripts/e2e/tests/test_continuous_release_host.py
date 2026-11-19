@@ -1,0 +1,509 @@
+"""Release-host supervisor, smoke driver, transcript usage and the deploy hook of the continuous runner."""
+import argparse
+import contextlib
+import fcntl
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+REPO = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO))
+from scripts.e2e.continuous import (budget, channel_lock, consumer, plan, publication, release_host, runner,  # noqa: E402
+                                    smoke_driver, summary, turn_gate, usage)
+from scripts.e2e.continuous.store import read_json, write_json  # noqa: E402
+
+HEAD = "c" * 40
+HERDR = {"admission": "open", "restart_required": False, "endpoints": {"ep": {"local": True}}, "configured_channels": ["20"],
+         "input_holds": 0, "reconnect": {"channels": 1, "published": 1, "withheld": 0, "unknown": 0, "pending": 0}}
+DETAIL = {"boot_incarnation": "boot-1", "status": "healthy", "fully_recovered": True, "degraded_reasons": [], "mailboxes": [],
+          "tui_o_writer_readiness": [{"provider": "claude", "channel_id": "20", "accepts": True}], "herdr": HERDR,
+          "release_source": {"node_hostname": "host", "deployed_repo_head": HEAD}}
+RUNNING = {"channel": "20", "provider": "claude", "state": "bound", "input_hold": None, "pane": "provider_running",
+           "launch_evidence": "recorded", "nonce": "n1"}
+RESOURCE = {"guild": "1", "parents": ["20", "30"], "bot_set": ["4"]}
+CONTRACT = {"busy_basis": None, "placement": None, "operation": "clear_and_turns", "occurrence": 1}
+SESSION = "AgentDesk-claude-adk-claude-tui-2-e2e"
+
+
+def lines(path, *rows):
+    with open(path, "a", encoding="utf-8") as stream:
+        stream.writelines(json.dumps(row) + "\n" for row in rows)
+
+
+def asked(marker):
+    return {"type": "user", "message": {"role": "user", "content": f"say {marker}"}}
+
+
+def claude(message, stop="end_turn", **used):
+    used = {"input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 4, **used}
+    return {"type": "assistant", "message": {"id": message, "stop_reason": stop, "usage": used,
+                                             "content": [{"type": "text", "text": "ok"}]}}
+
+
+def codex_turn(turn, marker, calls, drop=None, done=True):
+    """A Codex native turn: its input, per API call a model output and its usage record, then its completion.
+
+    The last call's output is the final answer; `drop` loses one call's record while the turn total still counts it.
+    """
+    rows, total = [{"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn}},
+                   {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                                         "content": [{"type": "input_text", "text": f"say {marker}"}]}}], {}
+    for index, used in enumerate(calls):
+        final = index == len(calls) - 1
+        rows.append({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": []}
+                     if final else {"type": "function_call", "name": "x", "call_id": "c"}})
+        total = {key: total.get(key, 0) + used.get(key, 0) for key in used}
+        if index != drop:
+            rows.append({"type": "token_usage_record", "payload": {"turn_id": turn, "usage": used, "turn_token_usage": total}})
+    return rows + ([{"type": "event_msg", "payload": {"type": "task_complete", "turn_id": turn}}] if done else [])
+
+
+class Fixture(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="continuous-release-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        for name in ("server.log", "deploy.lock", "transcript.jsonl"):
+            (self.root / name).write_text("seed\n" if name == "server.log" else "")
+        # The release binary answers `herdr status` from a file the test controls.
+        (self.root / "binary").write_text(f"#!/bin/sh\nexec cat {self.root}/herdr-status.json\n")
+        (self.root / "binary").chmod(0o755)
+        write_json(self.root / "herdr-status.json", {"executions": [RUNNING], "other_input_holds": []})
+        self.path = self.root / "config.json"
+        self.config = {
+            "enabled": True, "state_dir": str(self.root / "state"), "resource": RESOURCE, "core_interval_s": 100,
+            "driver": [sys.executable, str(self.root / "driver.py")], "occurrence_contracts": {"E-50": CONTRACT, "E-51": CONTRACT},
+            "release_host": {"base_url": "http://127.0.0.1:9", "binary": str(self.root / "binary"),
+                             "runtime_root": str(self.root), "server_log": str(self.root / "server.log"),
+                             "deploy_lock": str(self.root / "deploy.lock"),
+                             "cells": {name: {"channel_id": "20", "deadline_s": 10, "turn_tokens": 100, "usage_wait_s": 0}
+                                       for name in ("claude-herdr", "claude-tui")}}}
+        self.save()
+        observed = mock.patch.object(release_host, "detail", return_value=DETAIL)
+        self.detail = observed.start()
+        self.addCleanup(observed.stop)
+        # The smoke and harness read the same server snapshot through their own HTTP helper.
+        api = mock.patch.object(smoke_driver._smoke()[0].cell_driver, "_read_api_json",  # noqa: SLF001
+                                side_effect=lambda *_args, **_kwargs: (200, self.detail.return_value))
+        api.start()
+        self.addCleanup(api.stop)
+
+    def save(self, **changes):
+        self.config.update(changes)
+        self.path.write_text(json.dumps(self.config))
+
+
+class Usage(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.log = self.root / "transcript.jsonl"
+
+    def test_claude_turn_is_billed_once_from_its_own_bytes_after_its_answer_finished(self):
+        lines(self.log, asked("T0"), claude("old", input_tokens=900))
+        mark = usage.mark(self.log)
+        lines(self.log, asked("T1"), claude("m1", stop="tool_use", output_tokens=1), claude("m1", stop="tool_use", output_tokens=5))
+        self.assertIsNone(usage.turn("claude", [mark], "T1"), "an answer still in flight is not a bill")
+        lines(self.log, claude("m2"))
+        self.assertEqual(usage.turn("claude", [mark], "T1"),
+                         {"input_tokens": 2, "output_tokens": 7, "cache_read_tokens": 6, "cache_write_tokens": 8})
+        self.assertIsNone(usage.turn("claude", [mark], "T2"), "usage without this turn's input belongs to another turn")
+        mark = usage.mark(self.log)
+        lines(self.log, asked("T2"), {"type": "assistant", "message": {"id": "m3", "stop_reason": "end_turn", "usage": {}}})
+        self.assertIsNone(usage.turn("claude", [mark], "T2"), "a missing counter is not zero")
+        mark = usage.mark(self.log)
+        result = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "u0", "content": "ok"}]}}
+        lines(self.log, asked("T3"), result, claude("m4"))
+        self.assertIsNone(usage.turn("claude", [mark], "T3"), "a tool result whose API call was not recorded")
+
+    def test_codex_turn_is_its_own_usage_records_through_the_final_answer(self):
+        call = {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 5}
+
+        def measured(calls, **options):
+            self.log.write_text("")
+            lines(self.log, *codex_turn("old", "T0", [{**call, "input_tokens": 900}]))
+            mark = usage.mark(self.log)
+            # A later turn already started when the settle reads must not count toward this one.
+            lines(self.log, *codex_turn("t1", "T1", calls, **options), *codex_turn("t2", "T2", [call]))
+            return usage.turn("codex", [mark], "T1")
+
+        self.assertEqual(measured([call, call]), {"input_tokens": 120, "output_tokens": 10, "cache_read_tokens": 80, "cache_write_tokens": 0})
+        self.assertIsNone(measured([call, call], done=False), "a turn that has not finished")
+        self.assertIsNone(measured([call, call], drop=1), "the final answer's usage record is missing")
+        self.assertIsNone(measured([call, call], drop=0), "a tool call's usage record is missing")
+        self.assertIsNone(measured([call, {"input_tokens": 1, "output_tokens": 1}]), "a missing counter is not zero")
+
+    def test_a_turn_answered_in_a_new_session_adds_nothing_from_the_session_it_left(self):
+        lines(self.log, asked("T1"), claude("m1"))
+        fresh = self.root / "fresh.jsonl"
+        lines(fresh, asked("T2"), claude("m2"))
+        marks = [usage.mark(self.log), {"path": str(fresh), "offset": 0}]
+        self.assertEqual(sum(usage.turn("claude", marks, "T2").values()), 10)
+        self.assertIsNone(usage.turn("claude", [*marks, {"path": str(self.root / "absent.jsonl"), "offset": 0}], "T2"))
+
+
+class Posted:
+    """Stands in for the HTTP transport under the real Discord client and records what was posted."""
+    def __init__(self):
+        self.sent = []
+
+    def __call__(self, request, timeout=None):
+        self.sent.append(json.loads(request.data)["content"])
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_error):
+        return False
+
+    def read(self):
+        return b"{}"
+
+
+class Driver(Fixture):
+    def drive(self, budget_left=None, lease=True, harness=None, cell="claude-herdr", answers=(), prompts=3,
+              scenario="E-50", stray=None, host="herdr", herdr=None, cli=True):
+        """Run the driver with the real smoke preflight and a fake harness that keeps going after a refused input.
+
+        `answers[i]` makes turn i 'silent' or 'huge'; `stray` is an extra prompt after the first turn; `!clear`
+        moves the cell to a new session transcript. `host="tmux"` plans and observes E-50 on a tmux cell.
+        """
+        calls, posted, smoke = [], Posted(), smoke_driver._smoke()[0]  # noqa: SLF001
+        discord, driver, self.writer = smoke.cell_driver.discord, smoke.cell_driver, None
+        session, detail = [self.root / "transcript.jsonl"], {**DETAIL, "herdr": {**HERDR, **(herdr or {})}}
+        self.config.pop("manifest", None)
+        if host == "tmux":
+            manifest = plan.load()
+            next(row for row in manifest["bundles"]["P"]["occurrences"] if row["scenario"] == "E-50").update(
+                host="tmux", cell="claude-tui")
+            write_json(self.root / "manifest.json", manifest)
+            self.config["manifest"], cell = str(self.root / "manifest.json"), "claude-tui"
+            detail["herdr"]["configured_channels"] = []
+        self.detail.return_value = detail
+        if not cli:
+            (self.root / "herdr-status.json").unlink()
+
+        def spawn(argv, **_kwargs):
+            calls.append(argv)
+            shown = io.StringIO()
+            with contextlib.redirect_stdout(shown):
+                code = smoke.main(argv[2:])
+            return subprocess.CompletedProcess(argv, code, stdout=shown.getvalue())
+
+        def main():
+            args = driver.parse_args()
+            markers = smoke.expected_markers(smoke_driver.SCENARIOS, "E-50", args.run_id)
+            row = {"id": "E-50", "run_id": args.run_id, "cell": args.cell, "channel_id": "20", "status": "pass",
+                   "real_provider_contacted": True, "marker_counts": dict.fromkeys(markers)}
+            state, client = {"row": row, "rc": 0, "rotate": False}, discord.DiscordClient(base_url="http://127.0.0.1:9")
+            channel_lock.inherited()
+            self.writer = os.getpid()
+            print("[e2e] harness output")
+            if args.cell.endswith("-herdr"):
+                row["herdr_observations"] = [driver.herdr.observe(driver, args, cold=True)]
+            for index, marker in enumerate(markers[:prompts]):
+                try:
+                    if index == 2:
+                        client.send("20", "!clear now")
+                        session.append(self.root / f"session-{len(posted.sent)}.jsonl")
+                    client.send("20", f"say {marker}")
+                    row["marker_counts"][marker] = 1
+                    kind = dict(enumerate(answers)).get(index)
+                    lines(session[-1], asked(marker), *([] if kind == "silent" else [
+                        claude(f"{args.run_id}-{index}", output_tokens=500 if kind == "huge" else 2)]))
+                    if stray and index == 0:
+                        client.send("20", stray)
+                except turn_gate.Stop as stop:
+                    row.update(status="fail", reason=f"harness: {stop}")
+                    state["rc"] = 1
+            if args.cell.endswith("-herdr"):
+                row["herdr_observations"].append(driver.herdr.observe(driver, args))
+            (harness or (lambda _state: None))(state)
+            log = self.root / "server.log"
+            log.write_text(("rotated\n" if state["rotate"] else log.read_text()) + f"turn {SESSION} done\n")
+            (Path(args.output) / f"report.{args.cell}.json").write_text(json.dumps(
+                {"run_id": args.run_id, "cell": args.cell, "channel_id": "20", "coverage_class_violations": [], "scenarios": [row]}))
+            return state["rc"]
+
+        args = argparse.Namespace(scenario=scenario, cell=cell, run_id="run", profile="default", deploy_sha=None,
+                                  budget=json.dumps(budget_left or {"turns": 3, "tokens": 300, "time_s": 10}))
+        held = channel_lock.acquire(self.root / "state", RESOURCE)
+        self.addCleanup(held.close)
+        witness = {"fd": held.fd, "device": held.identity.st_dev, "inode": held.identity.st_ino}
+        env = {channel_lock.LEASE_ENV: json.dumps(witness)} if lease else {}
+        with mock.patch.dict(os.environ, env), mock.patch.object(smoke_driver, "_transcripts", side_effect=lambda *_: str(session[-1])), \
+                mock.patch.object(driver, "main", main), mock.patch.object(discord.urllib.request, "urlopen", posted):
+            if not lease:
+                os.environ.pop(channel_lock.LEASE_ENV, None)
+            report = smoke_driver.run(args, self.config, spawn=spawn)
+        held.close()
+        return report, [text for text in posted.sent if not text.startswith("!")], calls
+
+    def test_passing_scenario_reports_turns_tokens_identity_and_the_host_the_server_admits(self):
+        stdout = os.fstat(1)
+        report, prompts, spawned = self.drive()
+        # The harness wrote to its log; the driver's own stdout still carries the report to the runner.
+        self.assertTrue(os.path.samestat(os.fstat(1), stdout) and "[e2e] harness output" in Path(report["evidence_paths"][1]).read_text())
+        planned = next(row for row in plan.deploy_occurrences(plan.load()) if row["scenario"] == "E-50")
+        self.assertEqual((report["status"], report["native_turns"], report["tokens"], report["budget_checked"]), ("PASS", 3, 30, 3))
+        self.assertEqual(report["usage"], {"native_turns": 3, "input_tokens": 3, "output_tokens": 6,
+                                           "cache_read_tokens": 9, "cache_write_tokens": 12})
+        self.assertEqual(report["actual_occurrence_key"], summary.occurrence_key({**planned, **CONTRACT}, "default"))
+        self.assertEqual((report["head"], report["boot_id"], report["instance_id"]), (HEAD, "boot-1", "release@host"))
+        # A Herdr channel is proven idle and judged on Herdr detail and CLI evidence, not the legacy mailbox.
+        self.assertIn("herdr=detail+CLI", report["verdict"])
+        # The input writer is this lease-holding process: no harness child exists to outlive it.
+        self.assertEqual((len(prompts), self.writer, [argv for argv in spawned if "preflight" not in argv]), (3, os.getpid(), []))
+        self.assertTrue(report["real_provider_contacted"] and all(Path(path).is_file() for path in report["evidence_paths"]))
+        report, _, _ = self.drive(harness=lambda state: state["row"].pop("herdr_observations"))
+        self.assertEqual(report["status"], "FAIL", "a Herdr result without its evidence is not a pass")
+        report, _, _ = self.drive(host="tmux")
+        self.assertEqual((report["status"], list((self.root / "state").rglob("server.log"))), ("PASS", []))
+        self.assertEqual(report["actual_occurrence_key"], summary.occurrence_key({**planned, **CONTRACT, "host": "tmux"}, "default"))
+
+    def test_no_input_follows_a_turn_whose_real_usage_is_unknown_or_over_its_limit(self):
+        report, prompts, _ = self.drive(answers=["silent"])
+        self.assertEqual((len(prompts), report["status"], report["reason"]), (1, "UNEVALUABLE", "TURN_USAGE_UNKNOWN"))
+        self.assertEqual((report["native_turns"], report["tokens"], report["usage"]["input_tokens"]), (None, None, None))
+        report, prompts, _ = self.drive(answers=["huge"])
+        self.assertEqual((len(prompts), report["status"], report["reason"]), (1, "UNEVALUABLE", "TURN_OVER_BUDGET"))
+        self.assertEqual((report["native_turns"], report["tokens"], report["budget_checked"]), (1, 508, 1))
+        # The last turn is settled after the scenario passed; its unknown or over-limit usage still holds the result.
+        report, prompts, _ = self.drive(answers=[None, None, "silent"])
+        self.assertEqual((len(prompts), report["status"], report["reason"], report["tokens"]), (3, "UNEVALUABLE", "TURN_USAGE_UNKNOWN", None))
+        report, prompts, _ = self.drive(answers=[None, None, "huge"])
+        self.assertEqual((len(prompts), report["status"], report["reason"], report["tokens"]), (3, "UNEVALUABLE", "TURN_OVER_BUDGET", 528))
+        report, prompts, _ = self.drive(budget_left={"turns": 3, "tokens": 300, "time_s": 10, "deadline": time.monotonic() - 1})
+        self.assertEqual((prompts, report["reason"], report["native_turns"]), ([], "TURN_BUDGET_EXHAUSTED", 0))
+        for stray in ("an unplanned prompt", "!stop"):
+            report, prompts, _ = self.drive(stray=stray)
+            self.assertEqual((len(prompts), report["reason"], report["native_turns"]), (1, "UNPLANNED_PROVIDER_INPUT", 1))
+
+    def gated(self, provider, lookup, deadline, *sends):
+        """Post through the real Discord client behind a fresh gate; a send may write the transcript after it."""
+        discord, posted = smoke_driver._smoke()[0].cell_driver.discord, Posted()  # noqa: SLF001
+        gate = turn_gate.TurnGate(budget.TurnGuard({"turns": 3, "tokens": 300, "time_s": 10, "deadline": deadline}),
+                                  provider, ["M1", "M2"], 100, lookup, 0)
+        with mock.patch.object(discord, "input_gate", gate.before_send), mock.patch.object(discord.urllib.request, "urlopen", posted):
+            for content, after in sends:
+                with contextlib.suppress(turn_gate.Stop):
+                    discord.DiscordClient(base_url="http://127.0.0.1:9").send("1", content)
+                    after()
+        return posted.sent, gate.withheld
+
+    def test_no_input_is_sent_after_the_deadline_even_when_the_lookup_or_a_command_comes_late(self):
+        log, now = str(self.root / "transcript.jsonl"), time.monotonic()
+        late = self.gated("claude", lambda: (time.sleep(0.4), log)[1], now + 0.2, ("say M1", lambda: None))
+        expired = self.gated("claude", lambda: log, now - 1, ("!clear now", lambda: None))
+        self.assertEqual((late, expired), (([], "TURN_BUDGET_EXHAUSTED"), ([], "TURN_BUDGET_EXHAUSTED")))
+
+    def test_a_codex_turn_missing_its_final_usage_or_over_its_limit_stops_the_next_prompt(self):
+        log, call = self.root / "rollout.jsonl", {"input_tokens": 30, "cached_input_tokens": 0, "output_tokens": 5}
+        for calls, drop, reason in (([call, call], 1, "TURN_USAGE_UNKNOWN"), ([call] * 4, None, "TURN_OVER_BUDGET")):
+            log.write_text("")
+            sent = self.gated("codex", lambda: str(log), time.monotonic() + 10,
+                              ("say M1", lambda: lines(log, *codex_turn("t1", "M1", calls, drop=drop))), ("say M2", lambda: None))
+            self.assertEqual(sent, (["say M1"], reason))
+
+    def test_refused_runs_send_no_prompt_and_charge_nothing(self):
+        cases = [({"cell": "codex-herdr"}, "CELL_NOT_ENABLED"), ({"lease": False}, "CHANNEL_LEASE_MISSING"),
+                 ({"budget_left": {"turns": 2, "tokens": 300, "time_s": 10}}, "BUDGET_TOO_SMALL_FOR_SCENARIO"),
+                 ({"budget_left": {"turns": 3, "tokens": 299, "time_s": 10}}, "BUDGET_TOO_SMALL_FOR_SCENARIO"),
+                 ({"budget_left": {"turns": 3, "tokens": 300, "time_s": 9}}, "BUDGET_TOO_SMALL_FOR_SCENARIO"),
+                 ({"herdr": {"input_holds": 1}}, "CELL_NOT_IDLE"), ({"cli": False}, "CELL_NOT_IDLE"),
+                 ({"herdr": {"configured_channels": []}}, "HOST_MISMATCH: planned=herdr observed=tmux"),
+                 ({"herdr": {"endpoints": {"a": {"local": True}, "b": {"local": True}}}}, "HERDR_ENDPOINT_AMBIGUOUS"),
+                 ({"scenario": "E-63"}, "SCENARIO_NOT_GATED"), ({"scenario": "E-64"}, "SCENARIO_NOT_GATED")]
+        for options, reason in cases:
+            with self.subTest(reason=reason, options=options):
+                report, prompts, _ = self.drive(**options)
+                self.assertEqual((report["status"], report["reason"][:len(reason)], prompts, self.writer), ("UNEVALUABLE", reason, [], None))
+                self.assertEqual((report["native_turns"], report["tokens"], report["real_provider_contacted"]), (0, 0, False))
+                write_json(self.root / "herdr-status.json", {"executions": [RUNNING], "other_input_holds": []})
+
+    def test_lost_observation_is_unevaluable_but_a_seen_or_unsent_failure_is_fail(self):
+        def timeout(state, duplicate=False):
+            first, second, _third = state["row"]["marker_counts"]
+            state["row"].update(status="fail", reason="TimeoutError: timed out",
+                                step_timings=[{"step": "send_discord_prompt"}, {"step": "wait_for_discord_text"}])
+            state["row"]["marker_counts"].update({first: 2 if duplicate else 1, second: 0})
+            state["rc"] = 1
+
+        def missing(state):
+            timeout(state)
+            state["row"]["reason"] = "wait_for_discord_text: marker not seen before the deadline"
+
+        def unsent(state):
+            timeout(state)
+            state["row"]["step_timings"].append({"step": "send_discord_prompt"})
+
+        def refused(state):
+            timeout(state)
+            state["row"]["input_refusals"] = [{"content": "busy"}]
+
+        def residue(state):
+            state["row"]["teardown_error"] = "session left busy"
+            state["rotate"] = True
+
+        def withheld(state):
+            *_, last = state["row"]["marker_counts"]
+            state["row"]["marker_counts"][last] = 0
+            state["row"].update(status="fail", reason="wait_for_discord_text: marker not seen before the deadline")
+            state["rc"] = 1
+
+        report, _, _ = self.drive(harness=timeout, prompts=2, host="tmux")
+        self.assertEqual((report["status"], report["reason"], report["native_turns"]), ("UNEVALUABLE", "UNOBSERVED_TRANSPORT", 2))
+        self.assertEqual(report["assertions"], [{"key": "turns_delivered_once", "status": "UNEVALUABLE", "complete": False}])
+        self.assertEqual(self.drive(harness=lambda state: state.update(rotate=True), host="tmux")[0]["reason"], "UNOBSERVED_SERVER_LOG")
+        for broken in (lambda state: timeout(state, duplicate=True), missing, unsent, refused, residue):
+            report, _, _ = self.drive(harness=broken, prompts=2 if broken is not residue else 3, host="tmux")
+            self.assertEqual((report["status"], report["assertions"][0]["status"]), ("FAIL", "FAIL"))
+        report, _, _ = self.drive(harness=lambda state: timeout(state, duplicate=True), answers=["silent"], host="tmux")
+        self.assertEqual((report["status"], report["tokens"]), ("FAIL", None), "a budget stop does not hide a seen duplicate")
+        # Every prompt went out and the last body never came; its missing usage does not soften that.
+        report, prompts, _ = self.drive(harness=withheld, answers=[None, None, "silent"])
+        self.assertEqual((len(prompts), report["status"], report["tokens"]), (3, "FAIL", None))
+
+
+class Supervisor(Fixture):
+    def test_scenario_capability_opens_that_scenario_only_past_the_provider_wide_gap(self):
+        manifest, e51, e1 = plan.load(), {"scenario": "E-51", "cell": "codex-herdr"}, {"scenario": "E-1", "cell": "codex-herdr"}
+        self.assertIsNone(plan.gate(manifest, e51, ["E-51/herdr"]))
+        for row, granted in ((e51, []), (e1, ["E-51/herdr"]), ({"scenario": "E-13", "cell": "claude-pipe"}, ["E-13/pipe"])):
+            self.assertEqual(plan.gate(manifest, row, granted)[0], "BLOCKED_CAPABILITY", (row, granted))
+
+    def requests(self):
+        return sorted(path.stem for path in (self.root / "state" / "inbox").glob("*.json"))
+
+    def test_off_observes_nothing_and_only_turns_a_status_that_shows_enabled_off(self):
+        self.save(enabled=False)
+        before = sorted(path.name for path in self.root.iterdir())
+        self.assertEqual(release_host.tick(self.path, now=1000), {"status": "DISABLED"})
+        self.assertEqual(release_host.after_deploy(self.path, "deploy-1", HEAD), {"status": "DISABLED"})
+        self.assertEqual(sorted(path.name for path in self.root.iterdir()), before, "a machine that never ran stays untouched")
+        state, pending = self.root / "state", {"schema_version": 1, "observed": {}, "events": {"e": {"status": "pending"}}}
+        write_json(state / "outbox.json", pending)
+        for now in (1100, 1200):  # The second round is a run that was in flight at the switch publishing enabled again.
+            self.assertEqual(publication.heartbeat(state, {**self.config, "enabled": True}, now - 50)["outbox_pending"], 1)
+            release_host.tick(self.path, now=now)
+            shown = consumer.view(state / "status.json", head=HEAD, now=now + 5000)
+            self.assertEqual((shown["check"]["result"], shown["monitor"]["enabled"], shown["monitor"]["pending_alerts"]), ("DISABLED", 0, 0))
+        release_host.tick(self.path, now=1300)
+        self.assertEqual(read_json(state / "status.json", {})["heartbeat_at"], 1200, "an off status is not rewritten")
+        self.assertEqual((self.detail.call_count, read_json(state / "outbox.json", {})), (0, pending))
+
+    def test_core_request_is_one_per_head_and_slot_and_yields_to_a_waiting_deploy_or_fresh_result(self):
+        with mock.patch.object(runner, "tick", return_value={"status": "NOT_DUE"}) as ticked:
+            release_host.tick(self.path, now=1000)
+            release_host.tick(self.path, now=1050)
+            self.assertEqual(self.requests(), [f"core-{HEAD[:12]}-10"])
+            self.assertEqual(ticked.call_args.kwargs["overrides"]["head"], HEAD)
+            (self.root / "state" / "inbox" / f"core-{HEAD[:12]}-10.json").unlink()
+            release_host.after_deploy(self.path, "deploy-1", HEAD)
+            release_host.tick(self.path, now=1000)
+            self.assertEqual(self.requests(), ["deploy-1"])
+            (self.root / "state" / "inbox" / "deploy-1.json").unlink()
+            write_json(self.root / "state" / "summary.json", {"head": HEAD, "suite": "P", "completed_at": 950})
+            release_host.tick(self.path, now=1000)
+            self.assertEqual(self.requests(), [])
+            release_host.tick(self.path, now=1050)
+            self.assertEqual(self.requests(), [f"core-{HEAD[:12]}-10"])
+
+    def test_deploy_in_progress_waits_visibly_and_an_unobservable_server_goes_stale(self):
+        write_json(self.root / "state" / "status.json", {"heartbeat_at": 1})
+        self.detail.side_effect = OSError("refused")
+        with mock.patch.object(runner, "tick") as ticked, open(self.root / "deploy.lock") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self.assertEqual(release_host.tick(self.path, now=1000), {"status": "DEFERRED_DEPLOY"})
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            self.assertEqual(read_json(self.root / "state" / "status.json", {})["heartbeat_at"], 1000)
+            self.assertEqual(release_host.tick(self.path, now=2000), {"status": "HOST_UNAVAILABLE"})
+            self.assertEqual((ticked.call_count, self.requests()), (0, []))
+        self.assertEqual(read_json(self.root / "state" / "status.json", {})["heartbeat_at"], 1000)
+
+    def test_supervised_tick_runs_the_core_bundle_under_the_observed_identity(self):
+        seen = release_host.identity(self.config["release_host"], DETAIL)
+        (self.root / "driver.py").write_text(
+            "import json\nprint(json.dumps({'schema_version': 2, 'status': 'PASS', 'native_turns': 1, 'tokens': 1,"
+            " 'budget_checked': 1, 'usage': {'native_turns': 1, 'input_tokens': 1, 'output_tokens': 0,"
+            f" 'cache_read_tokens': 0, 'cache_write_tokens': 0}}, **{seen!r}}}))\n")
+        amount = {"turns": 3, "tokens": 300, "time_s": 100}
+        self.save(capabilities=["E-51/herdr", *(f"{kind}:{name}" for kind in ("usage", "turn_budget") for name in ("claude", "codex"))],
+                  reservation={"P": {"claude": amount, "codex": amount}},
+                  budget={name: {f"daily_{key}": value for key, value in amount.items()} for name in ("claude", "codex")})
+        result = release_host.tick(self.path, now=1000)
+        state = self.root / "state"
+        published = read_json(state / "summary.json", {})
+        self.assertEqual(result["run_id"], published["run_id"])
+        self.assertEqual({key: published[key] for key in seen}, seen)
+        self.assertEqual((published["suite"], [row["head"] for row in published["occurrences"][:2]]), ("P", [HEAD, HEAD]))
+        self.assertEqual(read_json(state / "status.json", {})["rotation_interval_s"], 100)
+        self.assertEqual(read_json(state / "requests.json", {}), {f"core-{HEAD[:12]}-10": published["result"]})
+        self.assertEqual(release_host.tick(self.path, now=1010), {"status": "NOT_DUE"})
+        self.assertEqual(read_json(state / "status.json", {})["heartbeat_at"], 1010)
+
+
+class AfterDeploy(Fixture):
+    def hook(self, *, config=True, python=None, launchctl="", limit="20"):
+        home, tools = self.root / "home", self.root / "tools"
+        (home / "Library").mkdir(parents=True, exist_ok=True)
+        tools.mkdir(exist_ok=True)
+        (tools / "launchctl").write_text(f"#!/bin/sh\necho \"$@\" >> {self.root}/launchctl.log\n{launchctl}[ \"$1\" != print ]\n")
+        (tools / "python3").write_text(python or f"#!/bin/sh\nexec {sys.executable} \"$@\"\n")
+        for tool in tools.iterdir():
+            tool.chmod(0o755)
+        env = {"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin",
+               "AGENTDESK_E2E_CONTINUOUS_CONFIG": str(self.path if config else self.root / "absent.json")}
+        done = subprocess.run(["bash", str(REPO / "scripts/e2e/continuous/after_deploy.sh"), str(REPO), HEAD, "stamp", limit],
+                              env=env, capture_output=True, text=True, timeout=60)
+        calls = self.root / "launchctl.log"
+        return done, calls.read_text() if calls.exists() else "", home / "Library/LaunchAgents/com.agentdesk.e2e-continuous.plist"
+
+    def test_without_the_machine_config_nothing_is_run_or_written(self):
+        done, calls, plist = self.hook(config=False, python=f"#!/bin/sh\ntouch {self.root}/python-ran\n")
+        self.assertEqual((done.returncode, done.stdout, calls), (0, "", ""))
+        self.assertFalse(plist.exists() or (self.root / "python-ran").exists() or (self.root / "state").exists())
+
+    def test_enabled_config_submits_the_deploy_request_and_loads_the_tick_job_and_switching_off_is_reported(self):
+        done, calls, plist = self.hook()
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(read_json(self.root / "state/inbox/deploy-stamp.json", {})["deploy_sha"], HEAD)
+        text = plist.read_text()
+        self.assertTrue(f"<string>{REPO}</string>" in text and str(self.path) in text and "__" not in text)
+        self.assertIn("bootstrap", calls)
+        # Switched off with the job, the request and an enabled status all still in place.
+        publication.heartbeat(self.root / "state", self.config, time.time())
+        (self.root / "state/inbox/deploy-stamp.json").unlink()
+        self.save(enabled=False)
+        done, later, _ = self.hook()
+        self.assertIn('"status": "DISABLED"', done.stdout)
+        self.assertEqual((later, (self.root / "state/inbox/deploy-stamp.json").exists()), (calls, False))
+        shown = consumer.view(self.root / "state/status.json", head=HEAD, now=time.time() + 5000)
+        self.assertEqual((shown["check"]["result"], shown["monitor"]["enabled"]), ("DISABLED", 0))
+
+    def test_a_stalled_step_is_cut_off_at_the_time_limit_and_does_not_outlive_the_deploy(self):
+        stall = f"echo $$ > {self.root}/stalled.pid\nexec /bin/sleep 30\n"
+        # The launchctl case answers the Python step at once, so the stall is reached well inside the limit.
+        submitted = "#!/bin/sh\necho '{\"status\": \"SUBMITTED\"}'\n"
+        for options in ({"python": "#!/bin/sh\n" + stall},
+                        {"python": submitted, "launchctl": f"[ \"$1\" = print ] && {{ {stall.replace(chr(10), '; ')}}}\n"}):
+            with self.subTest(stalled=list(options)):
+                started = time.monotonic()
+                done, _, _ = self.hook(limit="3", **options)
+                self.assertEqual(done.returncode, 0)
+                self.assertIn("did not finish within 3s", done.stdout)
+                self.assertLess(time.monotonic() - started, 15)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(int((self.root / "stalled.pid").read_text()), 0)
+                (self.root / "stalled.pid").unlink()
+
+
+if __name__ == "__main__":
+    unittest.main()

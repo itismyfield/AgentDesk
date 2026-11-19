@@ -446,8 +446,10 @@ def _supervise_windows(
     command: list[str], child_env: dict[str, str], api: object,
     *, test_nonce: str | None = None, relay: _SignalRelay | None = None,
     trace: list[str] | None = None,
+    prepare_env: Callable[[dict[str, str]], None] | None = None,
+    finish: Callable[[], None] | None = None,
 ) -> int:
-    executable, command_line, environment = _prepare_process_inputs(command, child_env)
+    inputs = _prepare_process_inputs(command, child_env) if prepare_env is None else None
     relay = relay or _SignalRelay()
     scope = nullcontext() if trace is not None else _windows_signal_handlers(relay)
     with scope:
@@ -465,10 +467,15 @@ def _supervise_windows(
                     raise BuildTokenWindowsError(f"unexpected mutex wait status 0x{status:08X}")
             if not acquired or relay.signum is not None:
                 return 128 + relay.signum
+            if prepare_env is not None:
+                prepare_env(child_env)
+                if relay.signum is not None:
+                    return 128 + relay.signum
+                inputs = _prepare_process_inputs(command, child_env)
             job = api.new_job()
             child = None
             try:
-                child = api.create_suspended(executable, command_line, environment, trace)
+                child = api.create_suspended(*inputs, trace)
                 if relay.signum is not None:
                     _terminate_and_drain(api, job, child, 128 + relay.signum)
                     return 128 + relay.signum
@@ -478,6 +485,8 @@ def _supervise_windows(
                 result = _wait_foreground(api, job, child, relay)
                 if api.active_job_processes(job):
                     _terminate_and_drain(api, job, child, result)
+                if finish is not None and result == 0 and relay.signum is None:
+                    finish()
                 return result
             except BaseException:
                 if child is not None and child.process.value:
@@ -501,8 +510,12 @@ def _supervise_windows_for_test(
     if sys.platform != "win32":
         raise BuildTokenWindowsError("native Win32 test authority called off Windows")
     return _supervise_windows(command, child_env, _Win32(), test_nonce=nonce)
-def supervise_windows(command: list[str], child_env: dict[str, str]) -> int:
+def supervise_windows(
+    command: list[str], child_env: dict[str, str], *,
+    prepare_env: Callable[[dict[str, str]], None] | None = None,
+    finish: Callable[[], None] | None = None,
+) -> int:
     """Run one foreground command under the current user's canonical Win32 token."""
     if sys.platform != "win32":
         raise BuildTokenWindowsError("Win32 build-token backend called outside native Windows")
-    return _supervise_windows(command, child_env, _Win32())
+    return _supervise_windows(command, child_env, _Win32(), prepare_env=prepare_env, finish=finish)
