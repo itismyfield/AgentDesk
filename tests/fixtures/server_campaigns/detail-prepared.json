@@ -85,7 +85,12 @@
             "main_integrated": false,
             "acceptance_complete": false,
             "evidence_current": false,
-            "wait_reason": null
+            "wait_reason": null,
+            "pending_gate": null,
+            "wait_started_at": null,
+            "evidence_url": null,
+            "reminder_interval_seconds": null,
+            "human_status": null
           },
           "direct_successors": [],
           "ready_after_main": []
