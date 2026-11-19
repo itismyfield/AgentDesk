@@ -694,7 +694,7 @@ mod tests {
             .max()
             .expect("embedded migrations");
 
-        let initialize_with_unknown = |version: i64| {
+        let initialize_with_unknown = |pool: &sqlx::PgPool, version: i64| {
             let pool = pool.clone();
             async move {
                 sqlx::query(
@@ -717,16 +717,28 @@ mod tests {
             }
         };
 
-        let ahead = initialize_with_unknown(latest + 1).await;
+        let ahead = initialize_with_unknown(&pool, latest + 1).await;
         assert_eq!(ahead.kind(), PgConnectFailureKind::SchemaAhead, "{ahead}");
         assert!(
             ahead.to_string().contains(&format!("[{}]", latest + 1)),
             "{ahead}"
         );
 
-        let gap = initialize_with_unknown(0).await;
+        // A new pool cannot reuse the session that rejected the ahead migration.
+        let retry_pool =
+            crate::db::postgres::connect_test_pool(&pg_db.database_url, "bootstrap retry")
+                .await
+                .expect("connect independent bootstrap pool");
+        let gap = initialize_with_unknown(&retry_pool, 0).await;
         assert_eq!(gap.kind(), PgConnectFailureKind::Other, "{gap}");
+        assert!(
+            gap.to_string().contains(
+                "migration 0 was previously applied but is missing in the resolved migrations"
+            ),
+            "{gap}"
+        );
 
+        retry_pool.close().await;
         pool.close().await;
         pg_db.drop().await;
     }
