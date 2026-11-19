@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "f4ddafe40c996270fbbc8d59dc584da71426c70e",
+  "measured_at_sha": "ca0ccae99c78cdeaeb52d5db2b1fb794aee9ff2b",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_bounded_runner_outside_adapter": {
@@ -11,9 +11,7 @@
         "src/cli/dcserver.rs": 1,
         "src/server/routes/provider_auth_profiles.rs": 1,
         "src/services/claude.rs": 1,
-        "src/services/claude/tui_session_launch.rs": 2,
         "src/services/codex.rs": 1,
-        "src/services/codex/tui_session_launch/first_input.rs": 2,
         "src/services/qwen/session_lifecycle.rs": 1
       }
     },

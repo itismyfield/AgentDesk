@@ -334,7 +334,7 @@ pub(super) async fn run_bridge_stream_tick(
             shared_owned.as_ref(),
             channel_id,
             turn_id.as_str(),
-            inflight_state.tmux_session_name.as_deref(),
+            inflight_state,
         )
         .await;
     }
