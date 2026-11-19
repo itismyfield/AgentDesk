@@ -112,6 +112,7 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
   const [saving, setSaving] = useState(false);
   const [pendingDangerous, setPendingDangerous] = useState<PendingDangerousSave | null>(null);
   const [appDrafts, setAppDrafts] = useState<Record<string, string>>({});
+  const [appSaving, setAppSaving] = useState(false);
 
   const config = useConfigEntriesDraft();
   const runtime = useRuntimeConfigDraft();
@@ -157,17 +158,24 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
     const { [item.key]: _dropped, ...rest } = current;
     return value === item.saved ? rest : { ...rest, [item.key]: value };
   }), []);
+  // Language and theme lock while /api/settings saves; clearing their drafts afterwards cannot drop a newer pick.
+  const locked = useCallback((item: CatalogItem) => appSaving && item.source === "app", [appSaving]);
   const handleChange = useCallback((item: CatalogItem, value: string) => {
+    if (locked(item)) return;
     if (item.source === "config") editConfig(item.key, value);
     else if (item.source === "runtime") changeRuntime(item.key, runtimeValue(item, value));
     else if (item.source === "app") editApp(item, value);
-  }, [changeRuntime, editApp, editConfig]);
+  }, [changeRuntime, editApp, editConfig, locked]);
   const handleReset = useCallback((item: CatalogItem) => {
-    if (item.resetTo == null) return;
+    if (item.resetTo == null || locked(item)) return;
     if (item.source === "runtime") resetToDefault(item.key);
     else if (item.source === "app") editApp(item, item.resetTo);
     else editConfig(item.key, item.resetTo);
-  }, [editApp, editConfig, resetToDefault]);
+  }, [editApp, editConfig, locked, resetToDefault]);
+  const saveApp = async (patch: Record<string, string>) => {
+    setAppSaving(true);
+    try { await onSaveSettings(patch); } finally { setAppSaving(false); }
+  };
 
   // A related row may be hidden: lift only the search, filter or category that hides it, then select it.
   const openRelated = useCallback((key: string) => {
@@ -191,7 +199,7 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
     let failed = false;
     if (Object.keys(appDrafts).length > 0) {
       try {
-        await onSaveSettings({ ...appDrafts });
+        await saveApp({ ...appDrafts });
         setAppDrafts({});
       } catch { failed = true; }
     }
@@ -215,7 +223,7 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
     try {
       if (item.source === "config") await config.save({ [item.key]: configValue(item, value) });
       else if (item.source === "app") {
-        await onSaveSettings({ [item.key]: value });
+        await saveApp({ [item.key]: value });
         editApp(item, item.saved);
       } else await runtime.saveKey(item.key, runtimeValue(item, value), value !== item.baseline);
       setSheetKey(null);
@@ -359,6 +367,7 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
           onRelated={openRelated}
           onChange={handleChange}
           onReset={handleReset}
+          locked={locked}
           problemFor={problemFor}
           allItems={items}
           categoryLabel={categoryLabel}

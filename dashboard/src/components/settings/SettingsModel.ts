@@ -265,10 +265,9 @@ export function catalogCounts(items: CatalogItem[]) {
   };
 }
 
-/** Whether a value already equals what reset writes; an inheriting key's "" reads as its config-file value. */
+/** Whether a value already equals what reset writes, compared as stored text: an explicit "70" still resets to "". */
 export function isResetValue(item: CatalogItem, value: string): boolean {
-  const read = (text: string) => (item.inherits && text === "" ? item.baseline ?? "" : text);
-  return item.resetTo != null && read(value) === read(item.resetTo);
+  return item.resetTo != null && value === item.resetTo;
 }
 
 export function formatSettingValue(value: string, item: Pick<CatalogItem, "input" | "options" | "inherits" | "baseline">, tr: Tr): string {

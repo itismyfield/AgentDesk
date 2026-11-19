@@ -18,8 +18,8 @@ const DISCORD_ID_PATTERN = /^\d{17,20}$/;
 export const editableItem = (item: CatalogItem) => ["toggle", "number", "text", "choice"].includes(item.input);
 
 /** Option picker for "choice" rows: four languages do not fit a row as segments, so rows and the sheet use the kit Select. */
-export function ChoiceControl({ item, value, label, size, className, onChange }: { item: CatalogItem; value: string; label: string; size: "sm" | "lg"; className: string; onChange: (value: string) => void }) {
-  return <Select aria-label={label} size={size} className={className} value={value} onChange={onChange} options={item.options ?? []} />;
+export function ChoiceControl({ item, value, label, size, className, disabled, onChange }: { item: CatalogItem; value: string; label: string; size: "sm" | "lg"; className: string; disabled?: boolean; onChange: (value: string) => void }) {
+  return <Select aria-label={label} size={size} className={className} value={value} disabled={disabled} onChange={onChange} options={item.options ?? []} />;
 }
 
 /** "기본값 3으로 되돌리기" (short: "기본값 3"), or the inherit wording when reset stores "". */
@@ -64,17 +64,18 @@ interface InlineControlProps {
   item: CatalogItem;
   label: string;
   invalid?: boolean;
+  disabled?: boolean;
   onChange: (value: string) => void;
   tr: Tr;
 }
 
 /** The row's own control: a switch, a number or text field, or the plain value when it cannot be edited here. */
-export function InlineControl({ item, label, invalid, onChange, tr }: InlineControlProps) {
+export function InlineControl({ item, label, invalid, disabled, onChange, tr }: InlineControlProps) {
   const value = currentValue(item);
   if (item.input === "toggle") {
-    return <Switch aria-label={label} checked={value === "true"} onChange={(event) => onChange(String(event.target.checked))} />;
+    return <Switch aria-label={label} checked={value === "true"} disabled={disabled} onChange={(event) => onChange(String(event.target.checked))} />;
   }
-  if (item.input === "choice") return <ChoiceControl item={item} value={value} label={label} size="sm" className="w-44" onChange={onChange} />;
+  if (item.input === "choice") return <ChoiceControl item={item} value={value} label={label} size="sm" className="w-44" disabled={disabled} onChange={onChange} />;
   if (item.input === "number" || item.input === "text") {
     const numeric = item.input === "number";
     return (
@@ -87,6 +88,7 @@ export function InlineControl({ item, label, invalid, onChange, tr }: InlineCont
         min={item.min}
         max={item.max}
         value={value}
+        disabled={disabled}
         className={numeric ? "w-24" : "w-44"}
         inputClassName={numeric ? "text-right tabular-nums" : "font-mono"}
         onChange={(event) => onChange(event.target.value)}
@@ -206,7 +208,7 @@ export function ItemFacts({ item, pending = item.draft, problem, tr }: ItemFacts
 }
 
 /** "함께 보는 설정": linked rows with the note that ties them, each opening that row. */
-export function RelatedSettings({ item, items, onSelect, tr }: { item: CatalogItem; items: CatalogItem[]; onSelect: (key: string) => void; tr: Tr }) {
+export function RelatedSettings({ item, items, onSelect, disabled, tr }: { item: CatalogItem; items: CatalogItem[]; onSelect: (key: string) => void; disabled?: boolean; tr: Tr }) {
   const links = item.related
     .map((link) => ({ link, target: items.find((candidate) => candidate.key === link.key) }))
     .filter((entry): entry is { link: CatalogItem["related"][number]; target: CatalogItem } => Boolean(entry.target));
@@ -219,8 +221,9 @@ export function RelatedSettings({ item, items, onSelect, tr }: { item: CatalogIt
           <li key={link.key}>
             <button
               type="button"
+              disabled={disabled}
               onClick={() => onSelect(target.key)}
-              className="flex min-h-11 w-full min-w-0 items-start gap-2 rounded-[var(--r-sm)] px-1 py-1.5 text-left hover:bg-surface-subtle sm:min-h-9"
+              className="flex min-h-11 w-full min-w-0 items-start gap-2 rounded-[var(--r-sm)] px-1 py-1.5 text-left hover:bg-surface-subtle disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-9"
             >
               <span aria-hidden className="mt-1.5 size-2 shrink-0 rounded-full bg-[var(--accent)]" />
               <span className="min-w-0 text-[13px] leading-5">

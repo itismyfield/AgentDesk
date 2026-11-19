@@ -122,14 +122,25 @@ export function SettingsEditSheet({ item, allItems, saving, onClose, onSave, onS
   const shown = formatSettingValue(value, item, tr);
   // The kit button sizes itself in unlayered CSS, so the 48px sheet buttons set their height inline.
   const big = { minHeight: 48, minWidth: 48 };
+  // Saving locks every input and every way out; a blocked swipe remounts the sheet so it slides back up.
+  const [held, setHeld] = useState(0);
+  const close = () => (saving ? setHeld((count) => count + 1) : onClose());
 
   return (
-    <BottomSheet open onClose={onClose} title={item.label}>
-      <div className="flex min-w-0 flex-col gap-3" data-testid="settings-edit-sheet">
+    <BottomSheet
+      key={held}
+      open
+      onClose={close}
+      closeOnBackdrop={!saving}
+      closeOnEsc={!saving}
+      closeButtonClassName={saving ? "pointer-events-none opacity-40" : undefined}
+      title={item.label}
+    >
+      <div className="flex min-w-0 flex-col gap-3" data-testid="settings-edit-sheet" aria-busy={saving || undefined}>
         <ItemHeading item={item} showTitle={false} />
         {item.input === "number" ? (
           <div className="flex items-center gap-2">
-            <Button variant="secondary" className="w-12 shrink-0" style={big} aria-label={tr("1 줄이기", "Decrease by 1")} icon={<Minus />} onClick={() => step(-1)} />
+            <Button variant="secondary" className="w-12 shrink-0" style={big} aria-label={tr("1 줄이기", "Decrease by 1")} icon={<Minus />} disabled={saving} onClick={() => step(-1)} />
             <SettingsTextField
               aria-label={item.label}
               type="number"
@@ -138,29 +149,30 @@ export function SettingsEditSheet({ item, allItems, saving, onClose, onSave, onS
               value={value}
               min={item.min}
               max={item.max}
+              disabled={saving}
               className="min-w-0 flex-1"
               inputClassName="text-center text-xl tabular-nums"
               onChange={(event) => setValue(event.target.value)}
             />
-            <Button variant="secondary" className="w-12 shrink-0" style={big} aria-label={tr("1 늘리기", "Increase by 1")} icon={<Plus />} onClick={() => step(1)} />
+            <Button variant="secondary" className="w-12 shrink-0" style={big} aria-label={tr("1 늘리기", "Increase by 1")} icon={<Plus />} disabled={saving} onClick={() => step(1)} />
           </div>
         ) : item.input === "toggle" ? (
           <div className={`flex min-h-12 items-center px-3 ${SETTINGS_TRAY_CLASS}`}>
-            <Switch placement="end" className="w-full" label={shown} checked={value === "true"} onChange={(event) => setValue(String(event.target.checked))} />
+            <Switch placement="end" className="w-full" label={shown} checked={value === "true"} disabled={saving} onChange={(event) => setValue(String(event.target.checked))} />
           </div>
         ) : item.input === "choice" ? (
-          <ChoiceControl item={item} value={value} label={item.label} size="lg" className="w-full" onChange={setValue} />
+          <ChoiceControl item={item} value={value} label={item.label} size="lg" className="w-full" disabled={saving} onChange={setValue} />
         ) : item.input === "text" ? (
-          <SettingsTextField aria-label={item.label} size="lg" value={value} inputClassName="font-mono" onChange={(event) => setValue(event.target.value)} />
+          <SettingsTextField aria-label={item.label} size="lg" value={value} disabled={saving} inputClassName="font-mono" onChange={(event) => setValue(event.target.value)} />
         ) : null}
         <div className={`px-3 py-2.5 ${SETTINGS_TRAY_CLASS}`}>
           <ItemFacts item={item} pending={editable ? value : null} problem={problem} tr={tr} />
         </div>
-        <RelatedSettings item={item} items={allItems} onSelect={onSelect} tr={tr} />
+        <RelatedSettings item={item} items={allItems} onSelect={onSelect} disabled={saving} tr={tr} />
         {editable ? (
           <div className="flex gap-2">
             {item.resetTo != null ? (
-              <Button variant="secondary" className="flex-1" style={big} onClick={() => setValue(item.resetTo ?? "")}>
+              <Button variant="secondary" className="flex-1" style={big} disabled={saving} onClick={() => setValue(item.resetTo ?? "")}>
                 {resetLabel(item, tr, true)}
               </Button>
             ) : null}

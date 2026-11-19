@@ -16,6 +16,7 @@ import {
   withRo,
   type ConfigEntry,
 } from "./SettingsModel";
+import { resettable } from "./SettingsViewLayout";
 
 const ko = (text: string) => text;
 const entry = (key: string, extra: Partial<ConfigEntry> = {}): ConfigEntry => ({
@@ -68,7 +69,10 @@ describe("settings catalog", () => {
     expect(formatSettingValue("", claude(""), ko)).toBe("공통 값 따름");
     // With a Claude value in the config file, "" falls back to that value, not to the shared one.
     const yaml = claude("", "70");
-    expect([formatSettingValue("", yaml, ko), yaml.overridden, isResetValue(yaml, "70"), isResetValue(yaml, "80")]).toEqual(["설정 파일 기본값 70", false, true, false]);
+    expect([formatSettingValue("", yaml, ko), yaml.overridden, isResetValue(yaml, "")]).toEqual(["설정 파일 기본값 70", false, true]);
+    // An explicit "70" equal to the config file is still stored text, so reset (back to "") stays offered.
+    const explicit = claude("70", "70");
+    expect([explicit.resetTo, isResetValue(explicit, "70"), resettable(explicit), resettable(yaml)]).toEqual(["", false, true, false]);
     const [floor] = configItems([entry("context_compact_lower_bound_tokens")], {}, true);
     expect(floor.description).toContain("20만 토큰 창이면 이 값이 30만이어도 13만 6천 토큰에서 압축해요");
   });

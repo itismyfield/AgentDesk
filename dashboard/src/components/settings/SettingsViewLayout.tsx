@@ -21,6 +21,8 @@ interface CatalogActions {
   onRelated: (key: string) => void;
   onChange: (item: CatalogItem, value: string) => void;
   onReset: (item: CatalogItem) => void;
+  /** True while this row's save is in flight; its control and reset stay disabled until it ends. */
+  locked: (item: CatalogItem) => boolean;
   problemFor: (key: string) => string | null;
   allItems: CatalogItem[];
   categoryLabel: (id: SettingsCategory) => string;
@@ -125,7 +127,7 @@ export function SettingsDesktopCatalog(props: SettingsDesktopCatalogProps) {
   );
 }
 
-function CatalogRow({ item, selected, onSelect, onChange, problemFor, tr }: CatalogActions & { item: CatalogItem; selected: boolean }) {
+function CatalogRow({ item, selected, onSelect, onChange, locked, problemFor, tr }: CatalogActions & { item: CatalogItem; selected: boolean }) {
   return (
     // Clicking anywhere or focusing the control selects the row; the name button is the keyboard way in.
     <div
@@ -140,7 +142,7 @@ function CatalogRow({ item, selected, onSelect, onChange, problemFor, tr }: Cata
         <span className="block font-mono text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">{item.key}</span>
       </button>
       <div className="flex shrink-0 justify-end">
-        <InlineControl item={item} label={item.label} invalid={Boolean(problemFor(item.key))} onChange={(value) => onChange(item, value)} tr={tr} />
+        <InlineControl item={item} label={item.label} invalid={Boolean(problemFor(item.key))} disabled={locked(item)} onChange={(value) => onChange(item, value)} tr={tr} />
       </div>
       {/* A narrow list moves the default and chips to a second line instead of hiding them. */}
       <div className="flex w-full min-w-0 items-center gap-2 @min-[34rem]:w-auto" data-testid={`setting-meta-${item.key}`}>
@@ -151,7 +153,7 @@ function CatalogRow({ item, selected, onSelect, onChange, problemFor, tr }: Cata
   );
 }
 
-function Inspector({ item, heading = false, onRelated, onReset, problemFor, allItems, categoryLabel, tr }: CatalogActions & { item: CatalogItem; heading?: boolean }) {
+function Inspector({ item, heading = false, onRelated, onReset, locked, problemFor, allItems, categoryLabel, tr }: CatalogActions & { item: CatalogItem; heading?: boolean }) {
   return (
     <div className="flex min-w-0 flex-col">
       {heading ? <div className="p-4"><ItemHeading item={item} category={categoryLabel(item.category)} /></div> : null}
@@ -159,7 +161,7 @@ function Inspector({ item, heading = false, onRelated, onReset, problemFor, allI
         {heading ? null : <ItemHeading item={item} showTitle={false} />}
         <ItemFacts item={item} problem={problemFor(item.key)} tr={tr} />
         {resettable(item) ? (
-          <SettingsAction icon={<RotateCcw />} className="self-start" onClick={() => onReset(item)}>
+          <SettingsAction icon={<RotateCcw />} className="self-start" disabled={locked(item)} onClick={() => onReset(item)}>
             {resetLabel(item, tr)}
           </SettingsAction>
         ) : null}

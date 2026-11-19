@@ -513,6 +513,45 @@ test.describe("settings catalog", () => {
     await expect(row(page, "maxRetries").locator("input")).toHaveValue("4");
   });
 
+  test("desktop: language and theme stay locked while /api/settings saves", async ({ page }, testInfo) => {
+    test.skip(isPhone(testInfo), "Desktop layout");
+    const server = await mockSettings(page);
+    let release = () => {};
+    const hold = () => { server.gate = new Promise((resolve) => { release = resolve; }); };
+    const picker = (key: string) => row(page, key).getByRole("combobox");
+    const bar = page.getByTestId("settings-save-bar");
+    await openSettings(page, "?category=system");
+    await picker("theme").click();
+    await page.getByRole("option", { name: "밝게" }).click();
+
+    // A failed save unlocks both rows and keeps the draft.
+    hold();
+    server.failNextWrite = true;
+    await bar.getByRole("button", { name: "저장" }).click();
+    await expect.poll(() => server.writes.length).toBe(1);
+    await expect(picker("theme")).toBeDisabled();
+    await expect(picker("language")).toBeDisabled();
+    release();
+    await expect(picker("language")).toBeEnabled();
+    await expect(picker("theme")).toHaveText(/밝게/);
+    await expect(bar).toContainText("변경 1건");
+    expect(server.settings).toMatchObject({ theme: "dark" });
+
+    // The retry locks again and the saved theme applies once it lands.
+    hold();
+    await bar.getByRole("button", { name: "저장" }).click();
+    await expect.poll(() => server.writes.length).toBe(2);
+    await expect(picker("language")).toBeDisabled();
+    release();
+    await expect(bar).toHaveCount(0);
+    await expect(picker("language")).toBeEnabled();
+    await expect(picker("theme")).toHaveText(/밝게/);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    expect(server.settings).toMatchObject({ theme: "light", language: "ko" });
+    await pickAndSave(page, "language", "English", false);
+    await expect.poll(() => server.settings).toMatchObject({ theme: "light", language: "en" });
+  });
+
   test("desktop: the Claude-only compact value can go back to following the shared one", async ({ page }, testInfo) => {
     test.skip(isPhone(testInfo), "Desktop layout");
     const server = await mockSettings(page);
@@ -703,6 +742,61 @@ test.describe("settings catalog", () => {
       await page.getByRole("button", { name: "분류 목록으로" }).click();
       await expect(page.getByTestId("settings-differing")).toBeVisible();
       await expectNoHorizontalOverflow(page);
+    });
+
+    test("phone: a sheet locks while its save is in flight, keeps the value on failure and closes on success", async ({ page }, testInfo) => {
+      test.skip(!isPhone(testInfo), "Phone layout");
+      const server = await mockSettings(page);
+      let release = () => {};
+      const hold = () => { server.gate = new Promise((resolve) => { release = resolve; }); };
+      const sheet = page.getByTestId("settings-edit-sheet");
+      const input = sheet.locator("input");
+      const close = page.getByRole("dialog").getByRole("button", { name: "Close" });
+      await openSettings(page, "?category=workflow");
+      await row(page, "maxEntryRetries").click();
+      await input.fill("5");
+
+      hold();
+      server.failNextWrite = true;
+      await sheet.getByRole("button", { name: "5로 저장" }).click();
+      await expect.poll(() => server.writes.length).toBe(1);
+      for (const control of [input, sheet.getByRole("button", { name: "1 줄이기" }), sheet.getByRole("button", { name: "1 늘리기" }), sheet.getByRole("button", { name: /^기본값/ })]) {
+        await expect(control).toBeDisabled();
+      }
+      await expect(close).toHaveCSS("pointer-events", "none");
+      await shot(page, testInfo, "sheet-saving");
+      await page.keyboard.press("Escape");
+      await close.dispatchEvent("click");
+      await expect(sheet).toBeVisible();
+      await expect(input).toHaveValue("5");
+      release();
+      await expect(input).toBeEnabled();
+      await expect(input).toHaveValue("5");
+      expect(server.runtime.maxEntryRetries).toBeUndefined();
+
+      hold();
+      await sheet.getByRole("button", { name: "5로 저장" }).click();
+      await expect.poll(() => server.writes.length).toBe(2);
+      await expect(input).toBeDisabled();
+      release();
+      await expect(sheet).toHaveCount(0);
+      expect(server.runtime.maxEntryRetries).toBe(5);
+      await row(page, "maxEntryRetries").click();
+      await expect(input).toHaveValue("5");
+      await page.keyboard.press("Escape");
+
+      // The language and theme pickers lock the same way.
+      await openSettings(page, "?category=system");
+      await row(page, "theme").click();
+      await sheet.getByRole("combobox").click();
+      await page.getByRole("option", { name: "밝게" }).click();
+      hold();
+      await sheet.getByRole("button", { name: "저장" }).click();
+      await expect.poll(() => server.writes.length).toBe(3);
+      await expect(sheet.getByRole("combobox")).toBeDisabled();
+      release();
+      await expect(sheet).toHaveCount(0);
+      expect(server.settings).toMatchObject({ theme: "light" });
     });
   });
 
