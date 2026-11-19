@@ -45,7 +45,9 @@ async fn persistent_kill_fences_turn(stage: ControlPause) {
         ("adk-i8219-turn-one", "8219191"),
         ("adk-i8219-turn-two", "8219192"),
     ] {
-        tmux.start(name);
+        let created =
+            crate::services::platform::tmux::create_session(name, None, "sleep 600").unwrap();
+        assert!(created.status.success() && tmux.alive(name));
         let key = format!("{host}:{name}");
         sqlx::query("INSERT INTO sessions(session_key,agent_id,provider,status,thread_channel_id) VALUES($1,'actor','claude','turn_active',$2)")
             .bind(&key).bind(channel).execute(&pool).await.unwrap();
@@ -157,6 +159,7 @@ async fn persistent_kill_fences_turn(stage: ControlPause) {
     }
     let Json(kill) = kill.unwrap();
     assert_eq!(kill["interrupted_run_id"], run.run_id);
+    assert_eq!(kill["session"]["tmux_killed"], true);
     assert_eq!(terminal, ("interrupted".into(), Some("turn-one".into())));
     assert!(
         store
@@ -169,6 +172,10 @@ async fn persistent_kill_fences_turn(stage: ControlPause) {
     );
     assert!(!tmux.alive("adk-i8219-turn-one"));
     assert!(tmux.alive("adk-i8219-turn-two"));
+    assert_eq!(
+        field(&pool, "sessions", &keys[0], "status").await,
+        "disconnected"
+    );
     assert_eq!(
         field(&pool, "sessions", &keys[1], "status").await,
         "turn_active"
