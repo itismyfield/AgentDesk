@@ -363,3 +363,106 @@ async fn a_stored_reason_closes_the_episode_at_custody_whatever_the_gate_reads_p
         db.drop().await;
     }
 }
+
+// An episode already refused when the custody write starts keeps no raw custody: that refusal is
+// read again under the adoption's lock after the record lock, and nothing is written.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_refusal_before_the_custody_write_keeps_no_raw_custody() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let f = Fixture::new(765_143, ProviderKind::Claude, &["refused answer"]).await;
+    let kind = crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    let channel = f.row.channel_id;
+    let _boot =
+        crate::services::tui_o::cutover::test_override::force_candidates(&[(channel, kind)]);
+    let snapshot = crate::services::tui_o::cutover::boot_snapshot().unwrap();
+    snapshot.candidate(channel).unwrap().release(channel);
+    let payload = serde_json::json!({"full_response": f.body});
+    let kept = persist_unless_refused("refused-entry", &payload, &f.row, channel).await;
+    assert_eq!(kept, Ok(true), "the refusal kept the record unwritten");
+    let raw = crate::services::discord::terminal_delivery_custody::drain_for_test(
+        |payload, _| async move { (payload, Ok(true)) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(raw, 0, "no raw custody of the refused episode");
+}
+
+// A thread child kept while released with no Legacy run stays kept across a restart whose boot
+// does not place it again, with or without a reservation hint: no body, no reason.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_kept_thread_child_is_not_posted_after_a_restart_that_does_not_place_it() {
+    use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
+    use crate::services::tui_o::cutover::test_override;
+    for (case, hinted) in [(0_u64, false), (1, true)] {
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let f = Fixture::new(765_150 + case, ProviderKind::Claude, &["child answer"]).await;
+        let (http, _guard) = f.http().await;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let (child, parent) = (f.row.channel_id, 765_160 + case);
+        let config =
+            serde_json::from_value(serde_json::json!({"server": {}, "agents": [{"id": "a",
+            "name": "A", "channels": {"claude": {"id": parent.to_string(), "runtime": "tui"}}}],
+            "tui_o": {"writer": {"all_tui": false, "channels": [parent]}}}))
+            .unwrap();
+        let booted = || {
+            BootChannels::validate(&config)
+                .unwrap()
+                .adopted(Adoption::Committed)
+        };
+        let surface = serde_json::from_value(serde_json::json!({"id": child.to_string(),
+            "parent_id": parent.to_string(), "type": 11, "name": "fixture"}))
+        .unwrap();
+        let kind = crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+        let surface = crate::services::session_host::surface_policy::VerifiedSurface::from_discord(
+            &surface, kind,
+        )
+        .unwrap();
+        let before = booted();
+        before.reserve_boot_children(&[(child, parent)]);
+        assert!(before.resolve_child(child, surface, false));
+        before.output_candidate(child).unwrap().release(child);
+        let first = test_override::force_boot(before);
+        let outcome = preserve_or_publish(refused_handoff(&shared, &f.row, &f.body)).await;
+        assert!(
+            matches!(outcome, Outcome::Deferred { .. }),
+            "a held child keeps its body"
+        );
+        drop(first);
+        let after = booted();
+        if hinted {
+            after.reserve_boot_children(&[(child, parent)]);
+        }
+        let _restarted = test_override::force_boot(after);
+        let retired = crate::services::discord::terminal_delivery_custody::drain_for_test(
+            |mut payload, checkpoint| {
+                let gateway = crate::services::discord::gateway::DiscordGateway::new(
+                    http.clone(),
+                    shared.clone(),
+                    ProviderKind::Claude,
+                    None,
+                );
+                let shared = shared.clone();
+                async move {
+                    let result =
+                        resume_payload_with_gateway(&shared, &gateway, &mut payload, &checkpoint)
+                            .await;
+                    (payload, result)
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(retired, 0, "the custody stays");
+        let kept = crate::services::discord::terminal_delivery_custody::retains_channel(child);
+        assert_eq!(kept, Ok(true));
+        assert_eq!(
+            f.sends.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no body"
+        );
+    }
+}

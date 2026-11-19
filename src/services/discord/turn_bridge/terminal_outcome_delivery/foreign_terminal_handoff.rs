@@ -197,6 +197,10 @@ pub(super) struct RetrySnapshot {
     resume_failure: bool,
     recovery_retry: bool,
     delivery_receipts: Vec<u64>,
+    /// The destination was a resolved thread child when kept: after a restart it reaches Legacy
+    /// only once the boot places that child again and its body is decided.
+    #[serde(default)]
+    thread_child: bool,
 }
 
 pub(super) struct Handoff<'a> {
@@ -313,6 +317,11 @@ pub(super) async fn preserve_or_publish(ctx: Handoff<'_>) -> Outcome {
         resume_failure: ctx.resume_failure,
         recovery_retry: ctx.recovery_retry,
         delivery_receipts: Vec::new(),
+        #[cfg(unix)]
+        thread_child: crate::services::tui_o::cutover::thread_child_decided(ctx.channel_id.get())
+            .is_some(),
+        #[cfg(not(unix))]
+        thread_child: false,
     };
     // Full captured source/episode/body survive a process restart. Do not replace
     // A's identity with the current row or today's source generation.
@@ -588,6 +597,13 @@ pub(super) async fn resume_with_gateway(
     };
     // O posts this destination's TUI body: settle the custody without posting or recording it.
     // A held destination identity keeps the custody for a later retry, unless it is discarded.
+    // A kept thread child's body waits until the boot places that child with a decided body.
+    #[cfg(unix)]
+    if snapshot.thread_child
+        && crate::services::tui_o::cutover::thread_child_decided(snapshot.channel_id) != Some(true)
+    {
+        return Ok(false);
+    }
     let kind = (snapshot.local.channel_id == snapshot.channel_id)
         .then_some(snapshot.local.runtime_kind)
         .flatten();
@@ -825,10 +841,10 @@ async fn persist_unless_refused(
 ) -> Result<bool, String> {
     use crate::services::discord::terminal_delivery_custody::persist_under as custody;
     use crate::services::tui_o::cutover::IdentityError::{AdoptionRefused, AwaitingAdoption};
-    // Only a channel with an adoption to change takes its lock; others keep the plain write.
+    // A channel with an adoption, refused already or not, takes its lock; others write plainly.
     if !matches!(
         destination_adoption(local, channel),
-        Ok(_) | Err(AwaitingAdoption)
+        Ok(_) | Err(AwaitingAdoption | AdoptionRefused)
     ) {
         return custody(
             key,
