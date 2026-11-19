@@ -76,8 +76,15 @@ pub(in crate::services::discord) async fn discard_held(
                     crate::services::tui_o::cutover::codex_first_rejection(channel_id, nonce)
                 });
                 let reason = fresh.unwrap_or(Reason::AdoptionRefused);
-                let persisted = disposition::persist_intent(&pool, &id, reason).await;
-                persisted.map(|()| (id, reason))
+                let closure = closure::of(provider, row).await;
+                if closure.is_none() && matches!(provider, ProviderKind::Codex) {
+                    tracing::warn!(
+                        channel_id,
+                        "refused body's turn has no raw position to close"
+                    );
+                }
+                let persist = disposition::closure::persist(&pool, &id, reason, closure.as_ref());
+                persist.await.map(|()| (id, reason))
             }
             None => Err("the refused body has no key".into()),
         },
@@ -237,6 +244,9 @@ pub(in crate::services::discord) async fn post(
         }
     }
 }
+
+#[path = "refused_discard_closure.rs"]
+mod closure;
 
 #[cfg(test)]
 #[path = "refused_discard_tests.rs"]

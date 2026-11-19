@@ -14,6 +14,7 @@ use crate::services::tui_o::store::OStore;
 pub(super) mod child_run;
 pub(super) mod claude;
 pub(super) mod codex;
+pub(crate) use codex::prefix::native_turn;
 
 /// Subscribe before reading; a closed notice still gets the bounded disk fallback.
 pub(super) struct Wake {

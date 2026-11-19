@@ -194,6 +194,20 @@ pub(in crate::services::tui_o::writer::late_adopt) fn frontier(
     })
 }
 
+/// The native turn of `source` that `anchor` falls in: its opener and, once ended, its end. None
+/// when the rollout is not `source` any more or `anchor` lies outside every turn.
+pub(crate) fn native_turn(source: &SourceId, anchor: u64) -> Option<(u64, Option<u64>)> {
+    let frontier = frontier(source).ok()?;
+    let at = frontier
+        .turns
+        .iter()
+        .rposition(|turn| turn.opened <= anchor)?;
+    let turn = &frontier.turns[at];
+    let next = frontier.turns.get(at + 1).map(|next| next.opened);
+    let inside = turn.ended_end.or(next).is_none_or(|end| anchor < end);
+    (inside && anchor <= frontier.complete).then_some((turn.opened, turn.ended_end))
+}
+
 /// The SHA-256 of `source`'s bytes before `at`, as an init records the prefix it starts after.
 pub(in crate::services::tui_o::writer::late_adopt) fn hash_before(
     source: &SourceId,
