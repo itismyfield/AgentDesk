@@ -183,6 +183,76 @@ mod tests {
     }
 
     #[test]
+    fn headless_resumed_session_banner_does_not_claim() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4153);
+        let events = &shared.ui.placeholder_live_events;
+        assert!(events.set_session_panel_lifecycle_event_with_start(
+            channel_id,
+            None,
+            "session_resumed",
+            &json!({"providerSessionId": "session-a"}),
+            true,
+        ));
+        let render_prefix = |turn_id| {
+            with_session_banner_prefix(
+                &shared,
+                channel_id,
+                &ProviderKind::Antigravity,
+                turn_id,
+                true,
+                "body".to_string(),
+            )
+        };
+        assert_eq!(render_prefix("discord:4153:1"), "body");
+
+        // A TUI turn with the same session id can still claim the banner.
+        assert!(events.set_session_panel_lifecycle_event(
+            channel_id,
+            None,
+            "session_resumed",
+            &json!({"providerSessionId": "session-a"}),
+        ));
+        assert!(render_prefix("discord:4153:2").starts_with("기존 세션 복원"));
+    }
+
+    #[test]
+    fn headless_fresh_and_fallback_session_banners_are_kept() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        for (channel, kind, label) in [
+            (4154, "session_fresh", BANNER),
+            (
+                4155,
+                "session_resume_failed_with_recovery",
+                "Lifecycle fallback",
+            ),
+        ] {
+            let channel_id = ChannelId::new(channel);
+            assert!(
+                shared
+                    .ui
+                    .placeholder_live_events
+                    .set_session_panel_lifecycle_event_with_start(
+                        channel_id,
+                        None,
+                        kind,
+                        &json!({"providerSessionId": "session-b"}),
+                        true,
+                    )
+            );
+            let reply = with_session_banner_prefix(
+                &shared,
+                channel_id,
+                &ProviderKind::Antigravity,
+                &format!("discord:{channel}:1"),
+                true,
+                "body".to_string(),
+            );
+            assert!(reply.starts_with(label), "{kind}: {reply:?}");
+        }
+    }
+
+    #[test]
     fn banner_is_top_and_sticky_across_streaming_then_terminal() {
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel_id = ChannelId::new(4147);
