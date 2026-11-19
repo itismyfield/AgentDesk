@@ -66,6 +66,9 @@ pub(crate) struct ClaudeSessionRotation {
     pub polls_without_drain_progress: u32,
     /// The channel's stored selector already moved to `new_session_id` while the record stays.
     pub selector_followed: bool,
+    /// Every session this pane left while the record stays, oldest first; a channel selector
+    /// still naming one of them follows the pane. The recorder fills it.
+    pub left_session_ids: Vec<String>,
 }
 
 struct TimedRotation {
@@ -119,12 +122,21 @@ pub(crate) fn record_claude_session_rotation(rotation: ClaudeSessionRotation) {
     let mut rotations = lock_rotations();
     match rotations.get_mut(&rotation.tmux_session_name) {
         Some(existing) => {
+            // A hop to another session leaves the previous target behind for the selector too.
+            if existing.rotation.new_session_id != rotation.new_session_id {
+                let left = std::mem::take(&mut existing.rotation.new_session_id);
+                if !existing.rotation.left_session_ids.contains(&left) {
+                    existing.rotation.left_session_ids.push(left);
+                }
+                existing.rotation.selector_followed = false;
+            }
             existing.rotation.new_session_id = rotation.new_session_id;
             existing.rotation.new_output_path = rotation.new_output_path;
-            existing.rotation.selector_followed = false;
             existing.recorded_at = Instant::now();
         }
         None => {
+            let mut rotation = rotation;
+            rotation.left_session_ids = rotation.old_session_id.iter().cloned().collect();
             rotations.insert(
                 rotation.tmux_session_name.clone(),
                 TimedRotation {
@@ -303,6 +315,7 @@ mod tests {
             observed_drain_frontier: 0,
             polls_without_drain_progress: 0,
             selector_followed: false,
+            left_session_ids: Vec::new(),
         }
     }
 

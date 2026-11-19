@@ -310,16 +310,22 @@ async fn settle_one_claude_session_rotation(
             let undelivered_bytes = old_transcript_len.saturating_sub(delivered_frontier);
             // The selector moves before the settle can release the channel's queue to a next turn.
             let followed = follow_rotation_selector(shared, channel_id, rotation).await;
+            if matches!(followed, Followed::Busy) {
+                return;
+            }
             let settled =
                 submit_rotation_settle(shared, channel_id, rotation, undelivered_bytes, view).await;
-            if settled && followed {
+            if settled && matches!(followed, Followed::Done) {
                 crate::services::tui_prompt_dedupe::clear_claude_session_rotation(
                     &rotation.tmux_session_name,
                 );
             }
         }
         ClaudeRotationPlan::RebindOnly => {
-            if !follow_rotation_selector(shared, channel_id, rotation).await {
+            if !matches!(
+                follow_rotation_selector(shared, channel_id, rotation).await,
+                Followed::Done
+            ) {
                 return;
             }
             tracing::info!(
@@ -447,7 +453,7 @@ mod selector;
 #[cfg(unix)]
 pub(in crate::services::discord) use selector::follow_pending_rotation_selector;
 #[cfg(unix)]
-use selector::{follow_herdr_rotation_selector, follow_rotation_selector};
+use selector::{Followed, follow_herdr_rotation_selector, follow_rotation_selector};
 
 #[cfg(all(test, unix))]
 #[path = "session_rotation_settle/selector_tests.rs"]
@@ -617,6 +623,7 @@ mod tests {
                 observed_drain_frontier: 0,
                 polls_without_drain_progress: 0,
                 selector_followed: false,
+                left_session_ids: Vec::new(),
             },
         );
 
@@ -766,6 +773,7 @@ mod tests {
             observed_drain_frontier: 512,
             polls_without_drain_progress: ROTATION_DRAIN_STALL_POLLS - 1,
             selector_followed: false,
+            left_session_ids: Vec::new(),
         };
         let post_fold = ClaudeRotationView {
             old_transcript_len: 8192,

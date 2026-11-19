@@ -289,6 +289,7 @@ impl Fixture {
             observed_drain_frontier: 0,
             polls_without_drain_progress: 0,
             selector_followed: false,
+            left_session_ids: Vec::new(),
         });
     }
 

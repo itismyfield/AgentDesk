@@ -19,30 +19,38 @@ enum CacheStep {
     Kept,
 }
 
-/// Moves a cache still naming the session the pane left onto the new one.
+/// Whether the channel selector followed the rotation on this pass.
+pub(super) enum Followed {
+    /// The cache and the stored selector follow the pane, or a user choice keeps them.
+    Done,
+    /// The channel row is missing, not this pane's, or could not be written.
+    Retry,
+    /// A turn holds the channel's session transition; nothing changed.
+    Busy,
+}
+
+/// Moves a cache still naming a session the pane left onto the new one.
 async fn follow_cached_selector(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     rotation: &crate::services::tui_prompt_dedupe::ClaudeSessionRotation,
 ) -> CacheStep {
-    let (Some(old), new) = (rotation.old_session_id.as_deref(), &rotation.new_session_id) else {
-        return CacheStep::Kept;
-    };
+    let (left, new) = (&rotation.left_session_ids, &rotation.new_session_id);
     let mut data = shared.core.lock().await;
     let Some(session) = data.sessions.get_mut(&channel_id) else {
         return CacheStep::Empty;
     };
-    match session.session_id.as_deref() {
+    match session.session_id.clone() {
         _ if session.cleared => CacheStep::Kept,
         None => CacheStep::Empty,
-        Some(cached) if cached == new => CacheStep::New,
-        Some(cached) if cached == old => {
+        Some(cached) if cached == *new => CacheStep::New,
+        Some(cached) if left.contains(&cached) => {
             session.restore_provider_session(Some(new.clone()));
             tracing::info!(
                 provider = "claude",
                 channel_id = channel_id.get(),
                 tmux_session_name = %rotation.tmux_session_name,
-                old_session_id = old,
+                old_session_id = %cached,
                 new_session_id = %new,
                 "moved the channel's cached provider session to the rotated Claude session"
             );
@@ -76,68 +84,79 @@ async fn channel_row(
     }
 }
 
-/// Moves the row's stored selector off the old session; a row naming anything else is settled.
-async fn move_stored_selector(
-    pool: &sqlx::PgPool,
-    row: i64,
+/// Follows the rotation on `runtime`'s channel under the turn start's session transition, so a
+/// turn reading the selector never sees the move half done. `admitted` names a Herdr execution
+/// the channel row must hold before anything moves.
+async fn follow_channel_selector(
+    runtime: &Arc<SharedData>,
+    channel_id: ChannelId,
     rotation: &crate::services::tui_prompt_dedupe::ClaudeSessionRotation,
-) -> Result<(), String> {
-    let Some(old) = rotation.old_session_id.as_deref() else {
-        return Ok(());
+    admitted: Option<&str>,
+) -> Followed {
+    let Ok(_transition) = runtime.session_transition_lock(channel_id).try_lock_owned() else {
+        return Followed::Busy;
+    };
+    let pool = runtime.pg_pool.as_ref();
+    let row = match pool {
+        Some(pool) => channel_row(pool, runtime, channel_id).await,
+        None => Ok(None),
+    };
+    if let Some(nonce) = admitted {
+        let tmux = rotation.tmux_session_name.as_str();
+        let owned = matches!(&row, Ok(Some((_, HostedRecord::Known(execution))))
+            if execution.execution_nonce == nonce && execution.owner.logical_key == tmux);
+        if !owned {
+            return Followed::Retry;
+        }
+    }
+    if matches!(
+        follow_cached_selector(runtime, channel_id, rotation).await,
+        CacheStep::Kept
+    ) {
+        return Followed::Done;
+    }
+    let Some(pool) = pool else {
+        return Followed::Done;
     };
     let new = rotation.new_session_id.as_str();
     let moved = crate::db::dispatched_sessions::rotation_selector::move_provider_selector_pg;
-    moved(pool, row, old, new).await.map(drop)
-}
-
-/// Moves the cache and then the stored selector. Returns false while the channel row is missing
-/// or could not be written, so the caller keeps the rotation and tries again on the next pass.
-pub(super) async fn follow_rotation_selector(
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-    rotation: &crate::services::tui_prompt_dedupe::ClaudeSessionRotation,
-) -> bool {
-    if matches!(
-        follow_cached_selector(shared, channel_id, rotation).await,
-        CacheStep::Kept
-    ) {
-        return true;
-    }
-    let Some(pool) = shared.pg_pool.as_ref() else {
-        return true;
-    };
-    let stored = match channel_row(pool, shared, channel_id).await {
-        Ok(Some((row, _))) => move_stored_selector(pool, row, rotation).await,
+    let stored = match row {
+        Ok(Some((row, _))) => moved(pool, row, &rotation.left_session_ids, new).await,
         Ok(None) => Err("the channel has no sessions row".to_string()),
         Err(error) => Err(error),
     };
     let Err(error) = stored else {
-        return true;
+        return Followed::Done;
     };
     tracing::warn!(
         provider = "claude",
         channel_id = channel_id.get(),
         tmux_session_name = %rotation.tmux_session_name,
-        new_session_id = %rotation.new_session_id,
+        new_session_id = new,
         error,
         "stored provider selector did not move to the rotated Claude session; retrying"
     );
-    false
+    Followed::Retry
 }
 
-/// A Herdr pane without a watcher keeps its rotation; only its channel's selector follows, and
-/// only while the channel row names the execution the reconcile admitted for this pane.
+/// Follows the rotation on the settle pass's own channel.
+pub(super) async fn follow_rotation_selector(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    rotation: &crate::services::tui_prompt_dedupe::ClaudeSessionRotation,
+) -> Followed {
+    follow_channel_selector(shared, channel_id, rotation, None).await
+}
+
+/// A Herdr pane without a watcher keeps its rotation; only its channel's selector follows, on the
+/// bot runtime that owns the channel and only while its row names the admitted execution.
 pub(super) async fn follow_herdr_rotation_selector(
     shared: &Arc<SharedData>,
     rotation: &crate::services::tui_prompt_dedupe::ClaudeSessionRotation,
 ) {
     let tmux = rotation.tmux_session_name.as_str();
     let dedupe = crate::services::tui_prompt_dedupe::herdr_listing;
-    let (false, Some((nonce, true)), Some(pool)) = (
-        rotation.selector_followed,
-        dedupe(tmux),
-        shared.pg_pool.as_ref(),
-    ) else {
+    let (false, Some((nonce, true))) = (rotation.selector_followed, dedupe(tmux)) else {
         return;
     };
     let Some(channel) = crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux)
@@ -145,21 +164,20 @@ pub(super) async fn follow_herdr_rotation_selector(
         return;
     };
     let channel_id = ChannelId::new(channel);
-    let Ok(Some((row, HostedRecord::Known(execution)))) =
-        channel_row(pool, shared, channel_id).await
-    else {
-        return;
-    };
-    if execution.execution_nonce != nonce || execution.owner.logical_key != tmux {
-        return;
-    }
-    let followed = match follow_cached_selector(shared, channel_id, rotation).await {
-        CacheStep::Kept => true,
-        CacheStep::New | CacheStep::Empty => {
-            move_stored_selector(pool, row, rotation).await.is_ok()
+    // The idle loop runs on one bot's runtime; the channel's own bot holds its row and cache.
+    let runtime = match shared.health_registry.upgrade() {
+        Some(registry) => {
+            registry
+                .shared_for_provider_on_channel(&ProviderKind::Claude, channel_id)
+                .await
         }
+        None => Some(shared.clone()),
     };
-    if followed {
+    let Some(runtime) = runtime else {
+        return;
+    };
+    let followed = follow_channel_selector(&runtime, channel_id, rotation, Some(&nonce)).await;
+    if matches!(followed, Followed::Done) {
         let mark = crate::services::tui_prompt_dedupe::mark_claude_rotation_selector_followed;
         mark(tmux, &rotation.new_session_id);
     }
