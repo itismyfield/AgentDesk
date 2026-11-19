@@ -3469,7 +3469,6 @@ async fn retired_row_refuses_late_active_hooks_until_a_new_turn_pg() {
     let pool = db.migrate().await;
     let (key, channel) = ("claude/retired-revival", "435");
     let id = insert_session(&pool, key, "turn_active", None).await;
-    set_identity(&pool, key, channel).await;
     let retired = record(&owner(channel), "n1", HostedState::Retired);
     set_raw(&pool, key, Some(wire(&retired))).await;
     let nonce = sqlx::query("UPDATE sessions SET active_turn_nonce = 't1' WHERE id = $1");
