@@ -1,8 +1,19 @@
-//! Pending work is revisited only after an observable dependency change or a bounded retry.
+//! Pending work is revisited only after an observable dependency change or a bounded retry; a
+//! retry that finds the same dependencies again waits twice as long, up to a minute.
 use super::*;
 use crate::services::tui_o::store::ledger::input_notices::RecordId;
 use crate::services::tui_prompt_dedupe::binding_events;
 use tokio::time::{Duration, Instant};
+
+const RETRY_FIRST: Duration = Duration::from_secs(5);
+const RETRY_LIMIT: Duration = Duration::from_secs(60);
+
+/// The wait before the retry that follows `repeats` retries with unchanged dependencies.
+pub(super) fn retry_delay(repeats: u32) -> Duration {
+    RETRY_FIRST
+        .saturating_mul(1 << repeats.min(4))
+        .min(RETRY_LIMIT)
+}
 
 pub(crate) fn fingerprint(path: &Path) -> Option<Fingerprint> {
     #[cfg(test)]
@@ -25,6 +36,8 @@ struct Kept {
     revision: u64,
     retry: Option<Instant>,
     quick_retry: bool,
+    /// Retries already spent on these same dependencies and revision.
+    repeats: u32,
 }
 
 #[derive(Default)]
@@ -88,6 +101,11 @@ impl WorkCache {
                 .get(id)
                 .is_some_and(|kept| kept.dependencies == *deps && kept.revision == revision);
             let quick_retry = same && self.records.get(id).is_some_and(|kept| kept.quick_retry);
+            let repeats = self
+                .records
+                .get(id)
+                .filter(|_| same)
+                .map_or(0, |kept| kept.repeats);
             let unchanged = same
                 && self
                     .records
@@ -102,6 +120,7 @@ impl WorkCache {
                         revision,
                         retry: None,
                         quick_retry,
+                        repeats,
                     },
                 );
             }
@@ -146,11 +165,13 @@ impl WorkCache {
         if let Some(kept) = self.records.get_mut(id) {
             let delay = if transient && !kept.quick_retry {
                 kept.quick_retry = true;
-                0
+                Duration::ZERO
             } else {
-                5
+                let delay = retry_delay(kept.repeats);
+                kept.repeats = kept.repeats.saturating_add(1);
+                delay
             };
-            kept.retry = Some(Instant::now() + Duration::from_secs(delay));
+            kept.retry = Some(Instant::now() + delay);
         }
     }
 }
