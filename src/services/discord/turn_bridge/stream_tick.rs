@@ -110,7 +110,8 @@ pub(super) struct BridgeStreamTickState<'a> {
     pub(super) pending_long_running_retarget_after_state_save:
         &'a mut PendingLongRunningRetargetAfterStateSave,
     pub(super) long_running_placeholder_active: &'a mut LongRunningPlaceholderActive,
-    pub(super) last_adk_heartbeat: &'a mut std::time::Instant,
+    pub(super) session_row_writer:
+        &'a mut crate::services::discord::turn_bridge::session_row_writer::SessionRowWriter,
     pub(super) last_inflight_long_run_heartbeat: &'a mut std::time::Instant,
 }
 
@@ -179,7 +180,7 @@ pub(super) async fn run_bridge_stream_tick(
     let mut pending_long_running_retarget_after_state_save =
         state.pending_long_running_retarget_after_state_save.take();
     let mut long_running_placeholder_active = state.long_running_placeholder_active.take();
-    let mut last_adk_heartbeat = *state.last_adk_heartbeat;
+    let mut session_row_writer = *state.session_row_writer;
     let mut last_inflight_long_run_heartbeat = *state.last_inflight_long_run_heartbeat;
 
     macro_rules! tick_context {
@@ -244,6 +245,7 @@ pub(super) async fn run_bridge_stream_tick(
                 bridge_created_response_placeholder_msg_id:
                     &mut *bridge_created_response_placeholder_msg_id,
                 bridge_spans: &mut *bridge_spans,
+                session_row_writer: &mut session_row_writer,
             }
         };
     }
@@ -293,7 +295,7 @@ pub(super) async fn run_bridge_stream_tick(
             *state.pending_long_running_retarget_after_state_save =
                 pending_long_running_retarget_after_state_save;
             *state.long_running_placeholder_active = long_running_placeholder_active;
-            *state.last_adk_heartbeat = last_adk_heartbeat;
+            *state.session_row_writer = session_row_writer;
             *state.last_inflight_long_run_heartbeat = last_inflight_long_run_heartbeat;
         }};
     }
@@ -660,7 +662,7 @@ pub(super) async fn run_bridge_stream_tick(
         }
     }
 
-    if last_adk_heartbeat.elapsed() >= std::time::Duration::from_secs(30) {
+    if session_row_writer.heartbeat_due() {
         post_adk_session_status(
             adk_session_key.as_deref(),
             adk_session_name.as_deref(),
@@ -681,7 +683,7 @@ pub(super) async fn run_bridge_stream_tick(
             shared_owned.api_port,
         )
         .await;
-        last_adk_heartbeat = std::time::Instant::now();
+        session_row_writer.heartbeat_posted();
     }
 
     // codex round-8 P1: keep `placeholder_sweeper` from abandoning a
