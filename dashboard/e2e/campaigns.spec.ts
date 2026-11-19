@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { serverCampaignFixtures } from "../src/api/serverCampaignsFixtures";
+import type { ServerCampaignView } from "../src/api/serverCampaigns";
 
 // Set CAMPAIGNS_SHOTS to a directory to also save 390/1440 x light/dark screenshots, plus dark fixture shots of a server campaign.
 const SHOTS = process.env.CAMPAIGNS_SHOTS;
@@ -108,8 +109,7 @@ async function openCampaigns(page: Page, theme: "dark" | "light" = "dark") {
   return calls;
 }
 
-async function serveServerCampaign(page: Page) {
-  const release = gatedServerCampaign();
+async function serveServerCampaign(page: Page, release = gatedServerCampaign()) {
   await json(page, /\/api\/server-campaigns\?.*$/, { campaigns: [release] });
   await json(page, /\/api\/server-campaigns\/release$/, { campaign: release });
   await json(page, /\/api\/server-campaigns\/release\/events(?:\?.*)?$/, { events: [
@@ -313,4 +313,56 @@ test("campaign tab: screenshots at 390 and 1440 in light and dark, and dark fixt
     await page.waitForTimeout(400);
     await page.screenshot({ path: `${SHOTS}/campaigns-fixture-server-${width}x${height}-dark-approval.png` });
   }
+});
+
+/** The gated campaign over all nine stages: an approval wait, a failure the server would retry, a block and an empty main check. */
+function boardServerCampaign() {
+  const release = gatedServerCampaign();
+  const base = release.view.nodes[2];
+  for (const [id, title, runtime] of [
+    ["D", "모바일 셸", { stage: "design", disposition: "pending" }], ["E", "프롬프트 감사", { stage: "design_review", disposition: "running", series: 2 }],
+    ["F", "앵커 감사", { stage: "review", disposition: "verifying" }], ["G", "재전송 큐 지표", { stage: "final_verification", disposition: "running" }],
+    ["H", "게이트웨이 복구", { stage: "complete", disposition: "complete" }],
+  ] as [string, string, Partial<ServerCampaignView["nodes"][number]["runtime"]>][]) {
+    release.definition.nodes.push({ ...release.definition.nodes[2], id, title, issue_url: issue(7441 + release.definition.nodes.length) });
+    release.view.nodes.push({ ...base, id, runtime: { ...base.runtime, current_attempt: null, ...runtime } });
+  }
+  release.view.commands = release.view.commands.map((entry) => entry.command === "prepare_retry" ? { ...entry, rejection: null } : entry);
+  return release;
+}
+const columnNames = (page: Page) => page.locator(".campaign-board section[aria-label]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
+
+test("stage board: a ledger by status with finished columns folded, and a card opens the task", async ({ page }, testInfo) => {
+  await openCampaigns(page);
+  await page.getByRole("tab", { name: "단계 보드" }).click();
+  const board = page.locator(".campaign-board");
+  await expect(board).toContainText("8 작업2 진행 중3 대기0 승인 대기0 실패1 막힘");
+  expect(await columnNames(page)).toEqual(["대기", "진행 중", "막힘", "완료", "건너뜀"]);
+  await expect(board.locator('[data-task-id="i7401"]')).toHaveCount(0);
+  const done = board.getByRole("region", { name: "완료" });
+  await done.getByRole("button", testInfo.project.name === "mobile" ? { name: /^완료/ } : { name: "최근 1개 보기" }).click();
+  await expect(done.locator('[data-task-id="i7401"]')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await board.locator('[data-task-id="i7272"]').click();
+  await expect(page.locator(".campaign-node-detail")).toBeVisible();
+});
+
+test("stage board: a server campaign's nine stages in order; approval waits for its API and retry asks first", async ({ page }) => {
+  await page.clock.install({ time: new Date(NOW) });
+  await mockApi(page);
+  await serveServerCampaign(page, boardServerCampaign());
+  let sent: unknown = null;
+  await page.route(/\/api\/server-campaigns\/release\/commands$/, (route) => { sent = route.request().postDataJSON(); return route.fulfill({ json: { ok: true } }); });
+  await page.goto("/campaigns?mode=server&campaign=release");
+  await page.getByRole("tab", { name: "단계 보드" }).click();
+  expect(await columnNames(page)).toEqual(["요구사항", "설계", "설계 리뷰", "구현", "리뷰", "착지", "main 확인", "최종 확인", "완료"]);
+  const board = page.locator(".campaign-board");
+  await expect(board.locator('[data-board-card="C"]').getByRole("button", { name: "승인", exact: true })).toBeDisabled();
+  await expect(board.locator('[data-board-card="C"]')).toContainText("승인 API 준비 중(#8249)");
+  await expect(board.locator('[data-board-card="B"]')).toContainText("막힘: 선행 실패");
+  await expectNoHorizontalOverflow(page);
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/board-fixture-server-${page.viewportSize()!.width}x${page.viewportSize()!.height}-dark.png` });
+  await board.locator('[data-board-card="A"]').getByRole("button", { name: "다시 시도 준비" }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "다시 시도 준비" }).click();
+  await expect.poll(() => sent).toMatchObject({ command: { command: "retry", node_id: "A" } });
 });
