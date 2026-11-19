@@ -1,6 +1,6 @@
 # Change Surfaces
 
-<!-- doc-path-refs: removed src/services/discord/router/message_handler/voice_announcement_scope.rs src/services/discord/router/message_handler/voice_announcement_route.rs src/services/discord/runtime_bootstrap/voice.rs src/voice/turn_link.rs -->
+<!-- doc-path-refs: removed src/services/discord/router/message_handler/voice_announcement_scope.rs src/services/discord/router/message_handler/voice_announcement_route.rs src/services/discord/runtime_bootstrap/voice.rs src/voice/turn_link.rs src/services/gemini.rs -->
 
 > Source: [`docs/agent-maintenance/index.md`](index.md). For every "where do I
 > add this?" question, consult this page first. The giant-file list is the
