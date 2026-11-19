@@ -76,6 +76,32 @@ pub(super) fn for_process(
     )
 }
 
+/// Address the main executable's header directly when verifying this process.
+#[cfg(target_os = "macos")]
+pub(super) fn for_current_release() -> Result<LoadedImage, Unverified> {
+    unsafe extern "C" {
+        safe static _mh_execute_header: u8;
+    }
+    let pid = std::process::id();
+    let address = std::ptr::addr_of!(_mh_execute_header) as u64;
+    let region: RegionWithPath = pid_info(pid, PROC_PIDREGIONPATHINFO, address)?;
+    let stat = &region.vip.stat;
+    if stat.ino == 0
+        || address
+            .checked_sub(region.info.address)
+            .is_none_or(|offset| offset >= region.info.size)
+    {
+        return Err(Unverified::Identity);
+    }
+    let start =
+        super::super::super::provenance::process_start(pid).map_err(|_| Unverified::Peer)?;
+    predates_start(stat.ctime, stat.ctimensec, &start)?;
+    Ok(LoadedImage {
+        dev: stat.dev as i32 as u64,
+        ino: stat.ino,
+    })
+}
+
 #[cfg(target_os = "macos")]
 const PROC_PIDREGIONPATHINFO: libc::c_int = 8;
 #[cfg(target_os = "macos")]
@@ -195,11 +221,23 @@ fn judge(mapped: &Mapped, start: &ProcessStart) -> Result<LoadedImage, Unverifie
     if mapped.filesystem != b"apfs" {
         return Err(Unverified::ImageFilesystemUnsupported);
     }
+    predates_start(mapped.changed.0, mapped.changed.1, start)?;
+    Ok(LoadedImage {
+        dev: mapped.dev,
+        ino: mapped.ino,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn predates_start(
+    seconds_changed: i64,
+    nanos_changed: i64,
+    start: &ProcessStart,
+) -> Result<(), Unverified> {
     let super::super::super::provenance::StartIdentity::Darwin { seconds, micros } = start.identity
     else {
         return Err(Unverified::Identity);
     };
-    let (seconds_changed, nanos_changed) = mapped.changed;
     if !(0..1_000_000_000).contains(&nanos_changed) {
         return Err(Unverified::Identity);
     }
@@ -213,10 +251,7 @@ fn judge(mapped: &Mapped, start: &ProcessStart) -> Result<LoadedImage, Unverifie
             Unverified::ImageChangedSinceStart
         });
     }
-    Ok(LoadedImage {
-        dev: mapped.dev,
-        ino: mapped.ino,
-    })
+    Ok(())
 }
 
 /// One `proc_pidinfo` flavor that must fill the whole plain-integer struct `T`.

@@ -1,26 +1,7 @@
-use std::{env, fs, path::Path};
-
-const CHECKOUT_SHA_ENV: &str = "ADK_RELEASE_CHECKOUT_SHA";
+use std::{fs, path::Path};
 
 fn main() {
     rerun_if_changed_recursively(Path::new("migrations/postgres"));
-    println!("cargo:rerun-if-env-changed={CHECKOUT_SHA_ENV}");
-    let source = env::var(CHECKOUT_SHA_ENV).ok().filter(|value| {
-        value.len() == 40
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    });
-    let target = env::var("TARGET").ok().filter(|value| {
-        !value.is_empty()
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-    });
-    let (source, target) = source.zip(target).unwrap_or_default();
-    // Keep unwitnessed builds from inheriting a stamp meant for rustc.
-    println!("cargo:rustc-env=ADK_RUNNING_SOURCE_SHA={source}");
-    println!("cargo:rustc-env=ADK_RUNNING_SOURCE_TARGET={target}");
 }
 
 fn rerun_if_changed_recursively(path: &Path) {

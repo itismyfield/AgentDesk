@@ -180,6 +180,7 @@ CODESIGN_KEYCHAIN_NAME="${AGENTDESK_CODESIGN_KEYCHAIN_NAME:-$HOME/Library/Keycha
 RESOLVED_RELEASE_SIGNING_MODE=""
 DASHBOARD_SOURCE=""
 STAGED_BINARY=""
+SOURCE_RECORD=""
 POLICIES_STAGED=""
 LAUNCHD_MIGRATED_STAGED=""
 RELEASE_ROOT_SCRIPTS_STAGED=""
@@ -1298,13 +1299,16 @@ _rollback_release_binary() {
         # nouchg here is defensive. mv is an atomic same-dir rename: the backup
         # replaces the bad binary in one step — at no instant are both copies gone.
         chflags nouchg "$rel_binary" 2>/dev/null || true
-        if ! mv -f "$rel_backup" "$rel_binary"; then
+        if ! rm -f "$rel_binary.source.json" || ! mv -f "$rel_backup" "$rel_binary"; then
             echo "✗ Failed to restore previous binary from $rel_backup — manual intervention required"
             return 0
         fi
         # #3858 finding 3: re-lock is best-effort and MUST NOT abort the restart
         # below. A failed chflags can never leave the good binary restored but the
         # service stopped.
+        if [ -f "$rel_backup.source.json" ]; then
+            mv -f "$rel_backup.source.json" "$rel_binary.source.json" || true
+        fi
         chflags uchg "$rel_binary" 2>/dev/null || true
         _restore_policy_generation "$ADK_REL"
         echo "↩ Previous binary restored — restarting release..."
@@ -1491,6 +1495,9 @@ _preserve_staged_binary_for_recovery() {
     [ -n "${STAGED_BINARY:-}" ] && [ -e "${STAGED_BINARY:-}" ] || return 1
     target="$(_migration_floor_artifact_path "$ADK_REL/bin/agentdesk.migration-floor-recovery")"
     if mv -f "$STAGED_BINARY" "$target"; then
+        if [ -f "$STAGED_BINARY.source.json" ]; then
+            mv -f "$STAGED_BINARY.source.json" "$target.source.json" || true
+        fi
         STAGED_BINARY=""
         echo "   Migration-capable binary preserved at $target"
         return 0
@@ -1530,10 +1537,16 @@ _recover_or_preserve_past_migration_floor() {
         fi
         echo "   Replaced binary kept at $keep"
     fi
-    if ! mv -f "$STAGED_BINARY" "$rel_binary"; then
+    if [ -f "$rel_binary.source.json" ] && [ -f "${keep:-}" ]; then
+        cp -p "$rel_binary.source.json" "$keep.source.json" || true
+    fi
+    if ! rm -f "$rel_binary.source.json" || ! mv -f "$STAGED_BINARY" "$rel_binary"; then
         echo "✗ Could not install the staged binary over $rel_binary" >&2
         _preserve_staged_binary_for_recovery || true
         return 0
+    fi
+    if [ -f "$STAGED_BINARY.source.json" ]; then
+        mv -f "$STAGED_BINARY.source.json" "$rel_binary.source.json" || true
     fi
     STAGED_BINARY=""
     echo "✓ Installed the binary that ran the database migration at $rel_binary."
@@ -1571,9 +1584,10 @@ _cleanup_on_exit() {
             fi
             ;;
     esac
-    if [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
-        rm -f "$STAGED_BINARY" 2>/dev/null || true
+    if [ -n "${STAGED_BINARY:-}" ]; then
+        rm -f "$STAGED_BINARY" "$STAGED_BINARY.source.json" 2>/dev/null || true
     fi
+    [ -z "${SOURCE_RECORD:-}" ] || rm -f "$SOURCE_RECORD" 2>/dev/null || true
     if [ -n "${POLICIES_STAGED:-}" ] && [ -d "$POLICIES_STAGED" ]; then
         rm -rf "$POLICIES_STAGED" 2>/dev/null || true
     fi
@@ -2132,14 +2146,16 @@ _peer_binary_platform"
     PEER_BINARY_FAILURE="local signature or manifest failed"
     signature="$(_peer_binary_signature "$DEPLOY_PEER_BINARY_SOURCE")" || return 1
     local_dir="$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-peer-manifest.XXXXXX")" || return 1
-    if ! python3 - "$DEPLOY_PEER_BINARY_SOURCE" "$local_dir/manifest.json" "$sha" "$platform" "$signature" "$DEPLOY_BUILD_PROFILE" <<'PY'
+    if ! python3 - "$DEPLOY_PEER_BINARY_SOURCE" "$local_dir/manifest.json" "$sha" "$platform" "$signature" "$DEPLOY_BUILD_PROFILE" "$SCRIPT_DIR" <<'PY'
 import hashlib
 import json
 import subprocess
 import sys
 from pathlib import Path
 
-binary, output, sha, platform, signature, profile = sys.argv[1:]
+binary, output, sha, platform, signature, profile, scripts = sys.argv[1:]
+sys.path.insert(0, scripts)
+from release_source import sidecar, verified
 digest = hashlib.sha256()
 with open(binary, 'rb') as stream:
     for chunk in iter(lambda: stream.read(1024 * 1024), b''):
@@ -2147,6 +2163,9 @@ with open(binary, 'rb') as stream:
 manifest = dict(format=1, source_sha=sha, sha256=digest.hexdigest(),
                 size=Path(binary).stat().st_size, signature=signature,
                 platform=platform, profile=profile)
+witness = verified(sidecar(Path(binary)), Path(binary))
+if witness is not None and witness["source_sha"] == sha and witness["sha256"] == manifest["sha256"]:
+    manifest["running_source"] = witness
 subprocess.run([binary, 'build-info'], check=True, timeout=30,
                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 Path(output).write_text(json.dumps(manifest) + '\n')
@@ -2770,15 +2789,19 @@ if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ "$PEER_BINARY_ACCEPTED" != 1 ]; th
     # Cap token wait duration by the deploy-lock wait; this is not a shared absolute deadline.
     # An explicit operator override still wins.
     export ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS="${ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS:-$DEPLOY_LOCK_TIMEOUT_SECS}"
+    SOURCE_RECORD="$(mktemp "${TMPDIR:-/tmp}/agentdesk-release-source.XXXXXX")"
+    RELEASE_RUST_TARGET="$(cd "$REPO" && rustc -vV | sed -n 's/^host: //p')"
     if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
         echo "▸ Building release binary..."
         # Recheck under the token: unwrapped/residual builders are still unsafe (#5818).
-        (cd "$REPO" && python3 "$SCRIPT_DIR/build_token.py" --witness-release-source -- bash -c \
+        (cd "$REPO" && python3 "$SCRIPT_DIR/build_token.py" \
+            --release-source "$SOURCE_BINARY" "$SOURCE_RECORD" "$RELEASE_RUST_TARGET" -- bash -c \
             '. "$1"; shift; _preflight_resource_contention || exit 1; exec "$@"' \
             bash "$SCRIPT_DIR/_defaults.sh" cargo build --release --bin agentdesk)
     else
         echo "▸ Building ${DEPLOY_BUILD_PROFILE} binary (opt-in fast deploy profile)..."
-        (cd "$REPO" && python3 "$SCRIPT_DIR/build_token.py" --witness-release-source -- bash -c \
+        (cd "$REPO" && python3 "$SCRIPT_DIR/build_token.py" \
+            --release-source "$SOURCE_BINARY" "$SOURCE_RECORD" "$RELEASE_RUST_TARGET" -- bash -c \
             '. "$1"; shift; _preflight_resource_contention || exit 1; exec "$@"' \
             bash "$SCRIPT_DIR/_defaults.sh" cargo build --profile "$DEPLOY_BUILD_PROFILE" --bin agentdesk)
     fi
@@ -2962,7 +2985,7 @@ fi
 # build aborts without leaving release down.
 if [ ! -x "$SOURCE_BINARY" ]; then
     echo "✗ Source binary missing or not executable: $SOURCE_BINARY"
-    printf '  Build first: (cd %q && python3 %q --witness-release-source -- cargo build --profile %q --bin agentdesk)\n' \
+    printf '  Build first: (cd %q && python3 %q -- cargo build --profile %q --bin agentdesk)\n' \
         "$REPO" "$SCRIPT_DIR/build_token.py" "$DEPLOY_BUILD_PROFILE"
     exit 1
 fi
@@ -2982,7 +3005,7 @@ if [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" != "1" ] && [ -z "${AGENTDESK_DEPLO
         echo "✗ Binary is older than current HEAD (${HEAD_SHORT}):"
         echo "    binary mtime: ${BIN_MTIME_HUMAN}"
         echo "    HEAD commit:  ${HEAD_HUMAN}"
-        printf '  Rebuild: (cd %q && python3 %q --witness-release-source -- cargo build --profile %q --bin agentdesk)\n' \
+        printf '  Rebuild: (cd %q && python3 %q -- cargo build --profile %q --bin agentdesk)\n' \
             "$REPO" "$SCRIPT_DIR/build_token.py" "$DEPLOY_BUILD_PROFILE"
         echo "  Or override with"
         echo "  AGENTDESK_DEPLOY_SKIP_FRESHNESS=1 when intentional."
@@ -3063,7 +3086,18 @@ STAGED_BINARY="$(_staged_deploy_binary_path)"
 cp "$SOURCE_BINARY" "$STAGED_BINARY"
 chmod +x "$STAGED_BINARY"
 xattr -d com.apple.provenance "$STAGED_BINARY" 2>/dev/null || true
+STAGED_SOURCE_ID=""
+if [ "${PEER_BINARY_ACCEPTED:-0}" = 1 ]; then
+    STAGED_SOURCE_ID="$(python3 "$SCRIPT_DIR/release_source.py" inspect \
+        "$AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR/manifest.json" "$STAGED_BINARY" --peer)"
+elif [ -n "$SOURCE_RECORD" ]; then
+    STAGED_SOURCE_ID="$(python3 "$SCRIPT_DIR/release_source.py" inspect "$SOURCE_RECORD" "$STAGED_BINARY")"
+fi
 sign_binary_with_fallback "$STAGED_BINARY"
+if [ -n "$STAGED_SOURCE_ID" ]; then
+    python3 "$SCRIPT_DIR/release_source.py" seal "$STAGED_BINARY" \
+        "${STAGED_SOURCE_ID%% *}" "${STAGED_SOURCE_ID#* }"
+fi
 _cleanup_peer_binary
 DEPLOY_PEER_BINARY_SOURCE="$STAGED_BINARY"
 echo "▸ [timing] phase=release-staging seconds=$((SECONDS - STAGING_PHASE_STARTED))"
@@ -3647,7 +3681,13 @@ elif [ -f "$REL_BINARY" ]; then
     # .prev.tmp, which the `[ -f "$REL_BINARY_BACKUP" ]` guard never consumes.
     echo "▸ Backing up current release binary for rollback..."
     cp -p "$REL_BINARY" "$REL_BINARY_BACKUP.tmp"
+    rm -f "$REL_BINARY_BACKUP.source.json"
     mv -f "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP"
+    if [ -f "$REL_BINARY.source.json" ] \
+        && cp -p "$REL_BINARY.source.json" "$REL_BINARY_BACKUP.source.json.tmp"; then
+        mv -f "$REL_BINARY_BACKUP.source.json.tmp" "$REL_BINARY_BACKUP.source.json" || true
+    fi
+    rm -f "$REL_BINARY_BACKUP.source.json.tmp" || true
 fi
 
 # Resolved once before promotion so the new-binary and rollback health gates
@@ -3657,12 +3697,16 @@ DEPLOY_E2E_SMOKE_CHANNEL_IDS=$(_deploy_e2e_smoke_channel_ids "$REPO" \
     "$DEPLOY_CONFIG_PATH" "$POST_DEPLOY_SMOKE_RELAY_CELL" "$POST_DEPLOY_SMOKE_CODEX_TURNS_CELL")
 echo "▸ Smoke E2E channels whose reader-count or held-start alarm does not block health: ${DEPLOY_E2E_SMOKE_CHANNEL_IDS:-none}"
 echo "▸ Promoting staged binary..."
+rm -f "$REL_BINARY.source.json"
 mv -f "$STAGED_BINARY" "$REL_BINARY"
-STAGED_BINARY=""
 # #3858: arm the EXIT-trap rollback the instant the binary is live. From here,
 # ANY non-zero exit before DEPLOY_OK (set on the success path) restores the
 # last-known-good backup and restarts the service — see _rollback_release_binary.
 ROLLBACK_ARMED=1
+if [ -f "$STAGED_BINARY.source.json" ]; then
+    mv -f "$STAGED_BINARY.source.json" "$REL_BINARY.source.json" || rm -f "$STAGED_BINARY.source.json" || true
+fi
+STAGED_BINARY=""
 DEPLOY_PEER_BINARY_SOURCE="$REL_BINARY"
 # Swap policies with nothing fallible since promotion, so rollback and fail-forward see one generation.
 _swap_policy_generation "$ADK_REL" "$POLICIES_STAGED"
@@ -3941,7 +3985,7 @@ fi
 # healthy serving binary must not fail the deploy.
 chflags uchg "$REL_BINARY" 2>/dev/null || true
 chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
-rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
+rm -f "$REL_BINARY_BACKUP" "$REL_BINARY_BACKUP.source.json" 2>/dev/null || true
 # Also drop a stray atomic-backup temp, then the policy backup paired with .prev.
 rm -f "$REL_BINARY_BACKUP.tmp" 2>/dev/null || true
 _drop_policy_generation_backup "$ADK_REL" "$REL_BINARY_BACKUP"

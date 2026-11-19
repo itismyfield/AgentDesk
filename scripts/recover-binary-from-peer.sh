@@ -57,7 +57,7 @@ launchd_domain() {
 }
 
 STAGED="$(mktemp "$LOCAL_ROOT/bin/agentdesk.recover.XXXXXX")"
-trap 'rm -f "$STAGED"' EXIT
+trap 'rm -f "$STAGED" "$STAGED.source.json"' EXIT
 
 echo "▸ Resolving peer binary path on $PEER..."
 PEER_BIN=$(ssh "$PEER" 'echo "${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}/bin/agentdesk"')
@@ -65,6 +65,9 @@ echo "  peer binary: $PEER:$PEER_BIN"
 
 echo "▸ Copying peer binary into local staging..."
 scp -q "$PEER:$PEER_BIN" "$STAGED"
+if ! scp -q "$PEER:$PEER_BIN.source.json" "$STAGED.source.json" 2>/dev/null; then
+  rm -f "$STAGED.source.json"
+fi
 
 if ! file "$STAGED" | grep -q 'Mach-O .* arm64'; then
   echo "✗ Staged binary is not Mach-O arm64 — refusing to swap." >&2
@@ -98,7 +101,11 @@ fi
 
 echo "▸ Promoting staged binary..."
 chflags nouchg "$LOCAL_BIN" 2>/dev/null || true
+rm -f "$LOCAL_BIN.source.json"
 mv -f "$STAGED" "$LOCAL_BIN"
+if [ -f "$STAGED.source.json" ]; then
+  mv -f "$STAGED.source.json" "$LOCAL_BIN.source.json"
+fi
 trap - EXIT
 chmod +x "$LOCAL_BIN"
 chflags uchg "$LOCAL_BIN"

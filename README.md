@@ -45,7 +45,7 @@ When tmux is unavailable, provider turns automatically fall back to `ProcessBack
 ```bash
 git clone https://github.com/itismyfield/AgentDesk.git
 cd AgentDesk
-python3 scripts/build_token.py --witness-release-source -- cargo build --release --bin agentdesk
+cargo build --release --bin agentdesk
 
 # Verify the dashboard with the same command CI uses (Node >=22)
 ./scripts/verify-dashboard.sh

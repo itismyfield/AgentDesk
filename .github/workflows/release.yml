@@ -8,6 +8,7 @@ on:
       - '.github/workflows/release.yml'
       - 'scripts/build-release.sh'
       - 'scripts/package_release.py'
+      - 'scripts/release_source.py'
       - 'scripts/verify_release_artifacts.py'
       - 'tests/test_package_release.py'
   workflow_dispatch:

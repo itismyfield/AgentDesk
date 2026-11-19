@@ -51,7 +51,7 @@ if NAME == "cargo":
     marker = os.environ.get("ADK_BUILD_TOKEN_HOLDER", "")
     event.update(holder=marker, held=token_held(marker),
                  release="--release" in ARGS or "-r" in ARGS or profile.startswith("release"),
-                 checkout_sha=os.environ.get("ADK_RELEASE_CHECKOUT_SHA"),
+                 checkout_sha_in_cargo="ADK_RELEASE_CHECKOUT_SHA" in os.environ,
                  in_target_checkout=Path.cwd() == ROOT / "repo")
 elif NAME == "git" and ARGS[2:8] == SOURCE_PROBE:
     event.update(source_probe=True, held=token_held(os.environ.get("ADK_BUILD_TOKEN_HOLDER", "")))
@@ -70,13 +70,21 @@ if NAME == "cargo":
         binary.write_text('#!/bin/bash\nprintf \'{"checks":[{"id":"postgres_connection","status":"pass"}]}\\n\'\n')
         binary.chmod(0o700)
 elif NAME == "python3":
-    if ARGS and Path(ARGS[0]).name == "build_token.py":
+    if ARGS and Path(ARGS[0]).name in ("build_token.py", "release_source.py"):
         path = local(ARGS[0])
-        if path not in (ROOT / "repo/scripts/build_token.py", ROOT / "tools/scripts/build_token.py"):
-            blocked("unexpected token helper")
-        os.execv(sys.executable, [sys.executable, "-I", str(path), *ARGS[1:]])
-    elif ARGS and (ARGS[0] in ("-c", "-") or Path(ARGS[0]).name in (
-            "check_postgres_migration_checksums.py", "package_release.py")):
+        if path.parent not in (ROOT / "repo/scripts", ROOT / "tools/scripts"):
+            blocked("unexpected release helper")
+        driver = "import runpy, sys; from pathlib import Path; sys.argv.pop(0); " \
+                 "sys.path.insert(0, str(Path(sys.argv[0]).parent)); runpy.run_path(sys.argv[0], run_name='__main__')"
+        os.execv(sys.executable, [sys.executable, "-I", "-c", driver, str(path), *ARGS[1:]])
+    elif ARGS and Path(ARGS[0]).name == "package_release.py":
+        if "--source-record" in ARGS:
+            path = local(ARGS[ARGS.index("--source-record") + 1])
+            if path.is_file():
+                with (ROOT / "events.jsonl").open("a") as log:
+                    log.write(json.dumps({"command": "package_witness",
+                                          "record": json.loads(path.read_text())}) + "\n")
+    elif ARGS and (ARGS[0] in ("-c", "-") or Path(ARGS[0]).name == "check_postgres_migration_checksums.py"):
         pass
     else:
         blocked(f"unexpected Python call: {ARGS}")

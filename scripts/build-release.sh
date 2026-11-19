@@ -74,9 +74,12 @@ if ! setup_sccache_env; then
   export CARGO_BUILD_RUSTC_WRAPPER=""
 fi
 
+SOURCE_RECORD=$(mktemp "${TMPDIR:-/tmp}/agentdesk-release-source.XXXXXX")
+trap 'rm -f "$SOURCE_RECORD"' EXIT
 echo "[1/3] Building common AgentDesk binary for $TARGET ($BUILD_PROFILE)"
 # Keep the shared build-token contract and its separate contention diagnostics.
-ADK_BUILD_TOKEN_DIAG_FD=3 "$PYTHON" "$SCRIPT_DIR/build_token.py" --witness-release-source -- \
+ADK_BUILD_TOKEN_DIAG_FD=3 "$PYTHON" "$SCRIPT_DIR/build_token.py" \
+  --release-source "$BINARY_DIR/$BINARY_NAME" "$SOURCE_RECORD" "$TARGET" -- \
   cargo build --locked --profile "$BUILD_PROFILE" --bin agentdesk "${CARGO_TARGET_ARGS[@]}" 3>&2
 
 echo "[2/3] Dashboard ($DASHBOARD_MODE)"
@@ -88,7 +91,7 @@ esac
 echo "[3/3] Packaging binary and common runtime assets"
 # package_release.py owns policies, routines, managed skills and entrypoints
 # (scripts/queue-stability-batch.sh and scripts/_defaults.sh), plus checksums.
-PACKAGE_ARGS=(--binary "$BINARY_DIR/$BINARY_NAME" --target "$TARGET" --profile "$BUILD_PROFILE")
+PACKAGE_ARGS=(--binary "$BINARY_DIR/$BINARY_NAME" --target "$TARGET" --profile "$BUILD_PROFILE" --source-record "$SOURCE_RECORD")
 if [ "$DASHBOARD_MODE" = --skip-dashboard ]; then
   PACKAGE_ARGS+=(--without-dashboard)
 fi
