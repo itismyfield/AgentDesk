@@ -353,7 +353,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/settings/config",
             "settings",
-            "Get editable policy/config keys with effective value, baseline, and restart-behavior metadata",
+            "Get allowlisted policy/config keys with effective value, baseline, restart behavior, category and Korean description",
         )
         .with_example(
             json!({}),
@@ -370,7 +370,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                         "restart_behavior": "config-only",
                         "category": "system",
                         "label_ko": "서버 포트",
-                        "label_en": "Server Port"
+                        "label_en": "Server Port",
+                        "description_ko": "서버가 요청을 받는 포트입니다."
                     }
                 ]
             }),
@@ -391,7 +392,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/settings/runtime-config",
             "settings",
-            "Get runtime tuning as `current` merged over YAML-or-hardcoded `defaults`",
+            "Get runtime tuning as `current` merged over YAML-or-hardcoded `defaults`. Each supported key has a `key_metadata` entry with a display-only `label_ko`. Legacy keys in `current` may lack metadata.",
         )
         .with_example(
             json!({}),
@@ -406,7 +407,12 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "maxRetries": 3,
                     "maxEntryRetries": 3
                 },
-                "explicit_keys": ["maxEntryRetries", "maxRetries", "rateLimitStaleSec"]
+                "explicit_keys": ["maxEntryRetries", "maxRetries", "rateLimitStaleSec"],
+                "key_metadata": {
+                    "rateLimitStaleSec": {"label_ko": "사용량 정보 유효 시간 (초)"},
+                    "maxRetries": {"label_ko": "작업 재시도 횟수"},
+                    "maxEntryRetries": {"label_ko": "자동 대기열 재시도 횟수"}
+                }
             }),
         ),
         ep(
