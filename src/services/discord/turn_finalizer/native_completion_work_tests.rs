@@ -38,8 +38,8 @@ struct WorkFixture {
 impl WorkFixture {
     async fn new() -> Self {
         let runtime = crate::config::TestRuntimeRootGuard::new();
-        let live = RuntimeDatabase::after_env_lock();
         let completion = CompletionFixture::in_runtime(runtime).await;
+        let live = RuntimeDatabase::after_env_lock();
         live.install(&completion.db.database_url);
         Self { live, completion }
     }
