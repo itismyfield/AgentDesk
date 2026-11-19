@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
-use crate::domain::campaign::definition::ValidatedDefinition;
+use crate::domain::campaign::{decision_item::ApprovalBinding, definition::ValidatedDefinition};
 
 #[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +137,46 @@ pub async fn revisions(pool: &PgPool, id: &str) -> StoreResult<Vec<DefinitionRev
             })
         })
         .collect()
+}
+
+#[derive(Serialize)]
+pub(crate) struct ApprovalOpeningRequest<'a> {
+    pub campaign_id: &'a str,
+    pub event_sequence: u64,
+    pub binding: &'a ApprovalBinding,
+}
+
+pub(crate) type ApprovalOpeningTimes = BTreeMap<String, BTreeMap<String, DateTime<Utc>>>;
+
+pub(crate) async fn approval_opening_times(
+    pool: &PgPool,
+    requests: &[ApprovalOpeningRequest<'_>],
+) -> StoreResult<ApprovalOpeningTimes> {
+    if requests.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    // The projection preceded this query. The event sequence pins each lookup to that snapshot.
+    let openings: Vec<(String, String, Json<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT snapshot.campaign_id, snapshot.binding->>'node_id', opened.document->'observed_at'
+         FROM jsonb_to_recordset($1) AS snapshot(campaign_id text, event_sequence bigint, binding jsonb)
+         CROSS JOIN LATERAL (
+             SELECT document FROM server_campaign_events
+             WHERE campaign_id = snapshot.campaign_id
+                 AND run_id = snapshot.binding->>'run_id'
+                 AND sequence <= snapshot.event_sequence
+                 AND document #>> '{kind,event}' = 'approval_gate_opened'
+                 AND document #> '{kind,binding}' = snapshot.binding
+             ORDER BY sequence DESC LIMIT 1
+         ) AS opened",
+    )
+    .bind(Json(requests))
+    .fetch_all(pool)
+    .await?;
+    let mut times = ApprovalOpeningTimes::new();
+    for (campaign_id, node_id, Json(at)) in openings {
+        times.entry(campaign_id).or_default().insert(node_id, at);
+    }
+    Ok(times)
 }
 
 pub async fn events(
