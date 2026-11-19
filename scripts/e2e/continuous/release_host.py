@@ -1,7 +1,8 @@
 """Supervisor for the release host: observed identity, the periodic core request, then one runner tick.
 
 The running server names its own head, boot and Herdr channels through `/api/health/detail`; no
-server configuration file is read. Off returns before any observation, lock or state IO.
+server configuration file is read. Off returns before any observation or lock; its only write
+turns a status that still says enabled into the switched-off one.
 """
 
 import argparse
@@ -60,10 +61,24 @@ def deploying(lock_file):
         os.close(fd)
 
 
+def switched_off(config, now):
+    """Report the switch-off to file consumers; a machine that never ran has no status and gets none."""
+    state = config.get("state_dir")
+    if isinstance(state, str) and os.path.isabs(state) and (Path(state) / "status.json").is_file():
+        try:
+            shown = read_json(Path(state) / "status.json", None)
+        except ValueError:
+            shown = None
+        # A run that was in flight at the switch may publish enabled again; the next off tick corrects it.
+        if not isinstance(shown, dict) or shown.get("enabled") is not False:
+            publication.heartbeat(Path(state), config, now)
+    return {"status": "DISABLED"}
+
+
 def tick(config_path, now=None):
     config = runner.load_config(config_path)
     if config.get("enabled") is not True:
-        return {"status": "DISABLED"}
+        return switched_off(config, time.time() if now is None else now)
     host, interval = config["release_host"], config.get("core_interval_s")
     if interval is not None and (type(interval) is not int or interval <= 0):
         raise ValueError("core_interval_s must be null or a positive integer")
@@ -90,7 +105,7 @@ def tick(config_path, now=None):
 def after_deploy(config_path, request_id, deploy_sha):
     config = runner.load_config(config_path)
     if config.get("enabled") is not True:
-        return {"status": "DISABLED"}
+        return switched_off(config, time.time())
     return companion.submit(config.get("state_dir"), request_id, deploy_sha)
 
 

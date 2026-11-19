@@ -54,7 +54,7 @@ class Runner(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.config = {"enabled": True, "state_dir": str(self.state), "rotation_interval_s": 3600,
-                       "capabilities": ["usage:claude", "turn_budget:claude", "usage:codex", "turn_budget:codex"],
+                       "capabilities": ["usage:claude", "turn_budget:claude", "usage:codex", "turn_budget:codex", "E-51/herdr"],
                        "resource": {"guild": "1", "parents": ["2", "3"], "bot_set": ["4", "5"]},
                        "driver": [sys.executable, str(self.root / "driver.py")],
                        "budget": {p: {"daily_turns": 10, "daily_tokens": 10**6, "daily_time_s": 600} for p in ("claude", "codex")},
