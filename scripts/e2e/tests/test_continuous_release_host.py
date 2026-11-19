@@ -398,12 +398,15 @@ class AfterDeploy(Fixture):
 
     def test_a_stalled_step_is_cut_off_at_the_time_limit_and_does_not_outlive_the_deploy(self):
         stall = f"echo $$ > {self.root}/stalled.pid\nexec /bin/sleep 30\n"
-        for options in ({"python": "#!/bin/sh\n" + stall}, {"launchctl": f"[ \"$1\" = print ] && {{ {stall.replace(chr(10), '; ')}}}\n"}):
+        # The launchctl case answers the Python step at once, so the stall is reached well inside the limit.
+        submitted = "#!/bin/sh\necho '{\"status\": \"SUBMITTED\"}'\n"
+        for options in ({"python": "#!/bin/sh\n" + stall},
+                        {"python": submitted, "launchctl": f"[ \"$1\" = print ] && {{ {stall.replace(chr(10), '; ')}}}\n"}):
             with self.subTest(stalled=list(options)):
                 started = time.monotonic()
-                done, _, _ = self.hook(limit="1", **options)
+                done, _, _ = self.hook(limit="3", **options)
                 self.assertEqual(done.returncode, 0)
-                self.assertIn("did not finish within 1s", done.stdout)
+                self.assertIn("did not finish within 3s", done.stdout)
                 self.assertLess(time.monotonic() - started, 15)
                 with self.assertRaises(ProcessLookupError):
                     os.kill(int((self.root / "stalled.pid").read_text()), 0)
