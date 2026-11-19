@@ -578,19 +578,22 @@ test("relations editor: a draft kept while another page shows asks before a relo
   await openCampaigns(page);
   const [panel, editor, asked] = [page.locator(".campaigns-panel"), page.locator(".campaign-relations-editor"), [] as string[]];
   const open = async (name: string) => { await panel.getByRole("tab", { name: "관계도" }).click(); await panel.getByRole("button", { name, exact: true }).click(); };
-  const reloadHome = async () => {
-    await page.getByRole("link", { name: "홈" }).click();
+  const reload = async (home = true) => {
+    if (home) await page.getByRole("link", { name: "홈" }).click();
     page.once("dialog", (dialog) => { asked.push(dialog.type()); void dialog.dismiss(); });
     await page.reload({ timeout: 5_000 }).catch(() => undefined);
   };
   await open("편집");
   await editor.locator('.react-flow__node[data-id="i7402"]').click(); await editor.getByLabel("선행 추가").selectOption("i7401");
-  await reloadHome();
+  await reload();
   expect(asked).toEqual(["beforeunload"]);
   await page.getByRole("link", { name: "캠페인" }).click();
   await open("이어서 편집");
   await expect(editor.getByText("저장하지 않은 편집을 다시 불러왔어요.")).toBeVisible();
+  // Right after the draft comes back the editor itself still asks, and a cancelled reload keeps the edit.
+  await reload(false);
+  await expect(editor.getByText("저장 안 됨 · 선행 1")).toBeVisible();
   await editor.getByRole("button", { name: "버리기", exact: true }).click();
-  await reloadHome();
-  expect(asked).toEqual(["beforeunload"]);
+  await reload();
+  expect(asked).toEqual(["beforeunload", "beforeunload"]);
 });
