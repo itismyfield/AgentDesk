@@ -224,9 +224,8 @@ fn startup_dialog_rechecks_rollout_created_during_capture() {
     ));
 }
 
-// The admitted launch's startup check sees its trust menu first: it repairs it with the
-// admission's one repair instead of failing, and the rollout the Enter lets through completes.
-// A refused option keeps the startup failure and sends nothing.
+// An admitted launch's startup check repairs its trust menu with the admission's one repair and
+// completes; a refused option keeps the startup failure and sends nothing.
 #[test]
 fn an_admitted_launch_repairs_its_trust_menu_before_the_startup_check_fails_it() {
     use crate::services::tui_o::channel_policy::{Adoption, BootChannels, first_prompt_digest};

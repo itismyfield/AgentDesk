@@ -382,9 +382,8 @@ pub(crate) fn watch_codex_first_trust(
     runtime.spawn(watch);
 }
 
-/// Whether a startup folder-trust menu in `tmux` is the admitted launch's to repair rather than
-/// a startup failure: it repairs now with the admission's one repair, or that repair was spent and
-/// the admission's deadline still runs. A launch with no such admission fails as before.
+/// Whether a startup trust menu in `tmux` is the admitted launch's to repair (now, or already spent
+/// within its deadline) rather than a startup failure; a launch with no admission fails as before.
 #[cfg(unix)]
 pub(crate) fn codex_first_trust_holds_startup(tmux: &str, cwd: &std::path::Path) -> bool {
     use crate::services::codex_tui::{host_input::trust::TrustHost, normalize};

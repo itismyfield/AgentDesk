@@ -859,9 +859,8 @@ fn thread_child_rebound_to_another_parent_is_held_and_offers_no_init() {
     assert_eq!(first.child_surface().map(|s| s.parent()), Some(42));
 }
 
-// A late thread child released before its first init waits for its parent's boundary: its gate,
-// even under its own execution permit, and its host end hold it, never refuse it, and Legacy
-// sends none of it with no recorded run. An ordinary member's release refuses it.
+// A late thread child released before its first init is held, never refused, by its gate (even
+// under its own permit) and host end, with no Legacy send; a released member is refused.
 #[cfg(unix)]
 #[tokio::test]
 async fn thread_children_released_late_child_is_held_and_a_released_member_is_refused_pg() {

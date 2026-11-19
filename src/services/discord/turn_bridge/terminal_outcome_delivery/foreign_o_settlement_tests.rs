@@ -272,9 +272,8 @@ async fn a_refusal_landing_after_the_custody_entry_looked_keeps_no_custody_pg() 
     db.drop().await;
 }
 
-// An episode that already holds a reason is closed whatever the destination reads now: a waiting,
-// owned, Legacy, unknown-kind or mismatched destination keeps no new custody, an existing one
-// retires on resume, and the first reason stays.
+// An episode holding a reason is closed whatever the destination reads: no new custody, an
+// existing one retires on resume, and the first reason stays.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_stored_reason_closes_the_episode_at_custody_whatever_the_gate_reads_pg() {
