@@ -285,37 +285,31 @@ class Driver(Fixture):
             report, prompts, _ = self.drive(stray=stray)
             self.assertEqual((len(prompts), report["reason"], report["native_turns"]), (1, "UNPLANNED_PROVIDER_INPUT", 1))
 
+    def gated(self, provider, lookup, deadline, *sends):
+        """Post through the real Discord client behind a fresh gate; a send may write the transcript after it."""
+        discord, posted = smoke_driver._smoke()[0].cell_driver.discord, Posted()  # noqa: SLF001
+        gate = turn_gate.TurnGate(budget.TurnGuard({"turns": 3, "tokens": 300, "time_s": 10, "deadline": deadline}),
+                                  provider, ["M1", "M2"], 100, lookup, 0)
+        with mock.patch.object(discord, "input_gate", gate.before_send), mock.patch.object(discord.urllib.request, "urlopen", posted):
+            for content, after in sends:
+                with contextlib.suppress(turn_gate.Stop):
+                    discord.DiscordClient(base_url="http://127.0.0.1:9").send("1", content)
+                    after()
+        return posted.sent, gate.withheld
+
     def test_no_input_is_sent_after_the_deadline_even_when_the_lookup_or_a_command_comes_late(self):
-        client, smoke = None, smoke_driver._smoke()[0]  # noqa: SLF001
-        discord = smoke.cell_driver.discord
-        for content, lookup in (("say M1", lambda: (time.sleep(0.4), str(self.root / "transcript.jsonl"))[1]),
-                                ("!clear now", lambda: str(self.root / "transcript.jsonl"))):
-            with self.subTest(content=content):
-                guard = budget.TurnGuard({"turns": 3, "tokens": 300, "time_s": 10,
-                                                    "deadline": time.monotonic() + (0.2 if content == "say M1" else -1)})
-                gate, posted = turn_gate.TurnGate(guard, "claude", ["M1"], 100, lookup, 0), Posted()
-                client = discord.DiscordClient(base_url="http://127.0.0.1:9")
-                with mock.patch.object(discord, "input_gate", gate.before_send), \
-                        mock.patch.object(discord.urllib.request, "urlopen", posted):
-                    self.assertRaises(turn_gate.Stop, client.send, "1", content)
-                self.assertEqual((posted.sent, gate.withheld), ([], "TURN_BUDGET_EXHAUSTED"))
+        log, now = str(self.root / "transcript.jsonl"), time.monotonic()
+        late = self.gated("claude", lambda: (time.sleep(0.4), log)[1], now + 0.2, ("say M1", lambda: None))
+        expired = self.gated("claude", lambda: log, now - 1, ("!clear now", lambda: None))
+        self.assertEqual((late, expired), (([], "TURN_BUDGET_EXHAUSTED"), ([], "TURN_BUDGET_EXHAUSTED")))
 
     def test_a_codex_turn_missing_its_final_usage_or_over_its_limit_stops_the_next_prompt(self):
-        smoke = smoke_driver._smoke()[0]  # noqa: SLF001
-        discord, log = smoke.cell_driver.discord, self.root / "rollout.jsonl"
-        call = {"input_tokens": 30, "cached_input_tokens": 0, "output_tokens": 5}
-        for calls, drop, reason in (([call, call], 1, "TURN_USAGE_UNKNOWN"), ([call, call, call, call], None, "TURN_OVER_BUDGET")):
-            with self.subTest(reason=reason):
-                log.write_text("")
-                guard = budget.TurnGuard({"turns": 3, "tokens": 300, "time_s": 10})
-                gate, posted = turn_gate.TurnGate(guard, "codex", ["M1", "M2"], 100, lambda: str(log), 0), Posted()
-                client = discord.DiscordClient(base_url="http://127.0.0.1:9")
-                with mock.patch.object(discord, "input_gate", gate.before_send), \
-                        mock.patch.object(discord.urllib.request, "urlopen", posted):
-                    client.send("1", "say M1")
-                    lines(log, *codex_turn("t1", "M1", calls, drop=drop))
-                    self.assertRaises(turn_gate.Stop, client.send, "1", "say M2")
-                self.assertEqual((posted.sent, gate.withheld), (["say M1"], reason))
+        log, call = self.root / "rollout.jsonl", {"input_tokens": 30, "cached_input_tokens": 0, "output_tokens": 5}
+        for calls, drop, reason in (([call, call], 1, "TURN_USAGE_UNKNOWN"), ([call] * 4, None, "TURN_OVER_BUDGET")):
+            log.write_text("")
+            sent = self.gated("codex", lambda: str(log), time.monotonic() + 10,
+                              ("say M1", lambda: lines(log, *codex_turn("t1", "M1", calls, drop=drop))), ("say M2", lambda: None))
+            self.assertEqual(sent, (["say M1"], reason))
 
     def test_refused_runs_send_no_prompt_and_charge_nothing(self):
         cases = [({"cell": "codex-herdr"}, "CELL_NOT_ENABLED"), ({"lease": False}, "CHANNEL_LEASE_MISSING"),
