@@ -187,7 +187,10 @@ export const warnBeforeUnload = (event: BeforeUnloadEvent) => { event.preventDef
 /** Unsaved edits kept for this tab's session when the editor goes away without a decision (rail, palette, another page).
  * They live only in memory, so while any is kept a reload or close asks first, whatever page the tab shows. */
 const kept = new Map<string, { base: Campaign; edits: Edits }>();
-const guard = () => kept.size ? window.addEventListener("beforeunload", warnBeforeUnload) : window.removeEventListener("beforeunload", warnBeforeUnload);
+// Its own listener, not the editor's: a listener is one per function, so sharing one would let either side's removal
+// drop the other's warning (a restored draft, or another campaign's editor saving while a draft is kept).
+const keptGuard = (event: BeforeUnloadEvent) => warnBeforeUnload(event);
+const guard = () => kept.size ? window.addEventListener("beforeunload", keptGuard) : window.removeEventListener("beforeunload", keptGuard);
 export const keepDraft = (draft: { base: Campaign; edits: Edits }) => { kept.set(draft.base.id, draft); guard(); };
 export const keptDraft = (campaignId: string) => kept.get(campaignId) ?? null;
 export const dropKeptDraft = (campaignId: string) => { kept.delete(campaignId); guard(); };

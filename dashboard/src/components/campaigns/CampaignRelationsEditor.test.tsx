@@ -52,6 +52,7 @@ const choose = (name: string, value: string) => act(async () => {
   select.value = value; select.dispatchEvent(new Event("change", { bubbles: true }));
 });
 const saveButton = () => [...container.querySelectorAll("button")].find((element) => element.textContent === "Save")!;
+const asks = () => { const event = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; };
 const typeTitle = (value: string) => act(async () => { const input = container.querySelector<HTMLInputElement>("aside input")!;
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); });
 
@@ -201,14 +202,31 @@ it("asks before leaving with changes, warns on reload, and keeps an undecided dr
 
   await act(async () => root.unmount());
   expect(keptDraft(base.id)?.edits).toEqual({ C: { dependencies: ["B", "A"] } });
-  const asks = () => { const event = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; };
   expect(asks()).toBe(true);
   root = createRoot(container);
   await render();
   expect(text()).toContain("Your unsaved edits are back.");
   expect(text()).toContain("Unsaved · 1 dependencies");
+  expect(asks()).toBe(true);
   await click(named("Discard"));
   expect(asks()).toBe(false);
+});
+
+it("keeps a kept draft's reload warning while another campaign's editor opens, saves and closes", async () => {
+  await render();
+  await act(async () => flow.props!.onConnect({ source: "A", target: "C", sourceHandle: null, targetHandle: null }));
+  await act(async () => root.unmount());
+  const other = { ...base, id: "other" };
+  vi.mocked(getCampaignDetail).mockResolvedValue({ campaign: other, live: {}, read: 1 });
+  vi.mocked(saveCampaignNodes).mockImplementation(async (campaign, nodes) => ({ ...campaign, revision: campaign.revision + 1, nodes }));
+  root = createRoot(container);
+  await render(other);
+  await act(async () => flow.props!.onConnect({ source: "A", target: "C", sourceHandle: null, targetHandle: null }));
+  await click(saveButton());
+  expect([vi.mocked(saveCampaignNodes).mock.calls.length, text().includes("Unsaved"), asks()]).toEqual([1, false, true]);
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  expect(asks()).toBe(true);
 });
 
 it("below 1280px opens the inspector over the canvas only for a choice, and Escape or the close button returns focus to it", async () => {
