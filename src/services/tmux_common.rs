@@ -61,6 +61,11 @@ impl<'a> TmuxSourceAuthority<'a> {
         invalidate_session_temp_source(self.1);
     }
 
+    /// The revision [`Self::invalidate`] advances, for answers kept across holds.
+    pub(crate) fn revision(&self) -> Option<u64> {
+        crate::services::cluster::stream_relay::source_read_proof::revision(self.1)
+    }
+
     #[cfg(test)]
     pub(crate) fn pin(
         &self,
