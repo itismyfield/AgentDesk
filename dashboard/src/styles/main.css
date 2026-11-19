@@ -153,7 +153,8 @@
   --shadow-sm: 0 10px 24px rgb(0 0 0 / 0.08);
   --shadow-md: 0 18px 40px rgb(0 0 0 / 0.14);
   --th-badge-sky-bg: oklch(0.94 0.03 230);
-  --th-badge-blue-text: color-mix(in oklab, var(--accent) 80%, var(--fg));
+  /* 50% keeps every accent preset (amber, lime included) above 4.5:1 on light surfaces. */
+  --th-badge-blue-text: color-mix(in oklab, var(--accent) 50%, var(--fg));
   --th-badge-emerald-bg: oklch(0.94 0.04 150);
   --th-badge-amber-bg: oklch(0.95 0.05 85);
   --th-modal-overlay: color-mix(in oklch, black 22%, transparent);
