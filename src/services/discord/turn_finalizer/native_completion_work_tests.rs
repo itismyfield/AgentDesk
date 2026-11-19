@@ -174,6 +174,7 @@ async fn native_8148_dispatch_custody_completes_work_once_from_native_body_pg() 
     let evidence = proof(&f, Some(&native_sha), Disposition::Executed);
     crate::services::discord::tmux::tmux_watcher::exercise_fresh_idle_with_row(
         &shared,
+        &api.http,
         &row,
         evidence.range.1,
     )

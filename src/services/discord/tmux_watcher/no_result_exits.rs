@@ -750,16 +750,21 @@ pub(super) async fn handle_no_result_exits(
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) async fn exercise_fresh_idle_with_row(
     shared: &Arc<SharedData>,
+    http: &Arc<serenity::Http>,
     row: &InflightTurnState,
     mut end: u64,
 ) {
     let tmux = row.tmux_session_name.clone().unwrap();
     let output = row.output_path.clone().unwrap();
     let channel = serenity::ChannelId::new(row.channel_id);
-    shared
-        .tmux_relay_coord(channel)
-        .confirmed_end_offset
-        .store(end, Ordering::Release);
+    advance_watcher_confirmed_end(
+        shared,
+        &ProviderKind::Claude,
+        channel,
+        &tmux,
+        end,
+        "fresh idle fixture",
+    );
     let observed = crate::services::discord::inflight::o_seed_observation::Guard::new(
         &ProviderKind::Claude,
         row.channel_id,
@@ -767,7 +772,7 @@ pub(in crate::services::discord) async fn exercise_fresh_idle_with_row(
     let body = "watcher reached fresh idle".to_owned();
     let outcome = handle_no_result_exits(
         &NoResultExitContext {
-            http: &Arc::new(serenity::Http::new("")),
+            http,
             shared,
             channel_id: channel,
             watcher_provider: &ProviderKind::Claude,
