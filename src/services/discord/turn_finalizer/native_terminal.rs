@@ -16,7 +16,7 @@ use crate::services::tui_o::writer::input_facts::native::terminal::{RawWitness, 
 use std::io::{Read, Seek, SeekFrom};
 
 /// The opened file's stamp, only while the source path still names that same file.
-fn stamp(source: &Source, file: &std::fs::File) -> Result<Fingerprint, String> {
+pub(super) fn stamp(source: &Source, file: &std::fs::File) -> Result<Fingerprint, String> {
     let id = SourceId {
         session_id: source.session_id.clone(),
         path: source.transcript.clone(),

@@ -196,6 +196,16 @@ impl RestoredInput {
         rx.await.map_err(|_| "boot abstain acknowledgement lost")?
     }
 
+    /// The boot half of the native completion records, before Settle removes the row.
+    async fn record_completion(&self, shared: &Arc<SharedData>, history: &Registry) {
+        let proof = self.record.settlement.outcome.as_ref().map(|o| &o.extra["native_proof"]);
+        let Some(Ok(evidence)) = proof.map(|p| serde_json::from_value(p.clone())) else {
+            return;
+        };
+        use super::super::terminal_handler::native_supply::native_completion::record;
+        record(shared, history, &evidence, self.key, self.row.as_ref()).await;
+    }
+
     fn proof(&self) -> Result<(), String> {
         validate_record(&self.record)
     }
@@ -359,6 +369,7 @@ impl BootInputs {
                 shared,
             )
             .await?;
+            input.record_completion(shared, &history).await;
         }
         self.send(self.inputs.clone(), RestoreStep::Settle, shared)
             .await

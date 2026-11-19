@@ -11,6 +11,7 @@ mod channel_writeback;
 mod contracts;
 mod legacy_summary;
 mod prelude_lifecycle;
+pub(in crate::services::discord) use channel_writeback::resolve_completion_scope;
 pub(super) use contracts::{CompletionPostludeContext, CompletionPostludeState};
 
 pub(super) async fn run_completion_postlude(

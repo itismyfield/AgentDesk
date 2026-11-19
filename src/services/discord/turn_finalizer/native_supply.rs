@@ -13,6 +13,8 @@ use crate::services::tui_o::writer::{
 use std::sync::Mutex;
 #[path = "native_abstain.rs"]
 pub(in crate::services::discord::turn_finalizer) mod native_abstain;
+#[path = "native_completion.rs"]
+pub(in crate::services::discord::turn_finalizer) mod native_completion;
 #[path = "native_terminal.rs"]
 pub(in crate::services::discord) mod native_terminal;
 #[path = "native_binding.rs"]

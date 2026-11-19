@@ -1442,6 +1442,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // no separate cleanup is needed here.
         let runtime_binding_candidate_offset = terminal_output_committed
             .then(|| terminal_event_consumed_offset(current_offset, &all_data));
+        let pin_held = path_b_record::native_held(&shared, inflight_before_relay.as_ref()).await;
         let terminal_delivery_committed = relay_ok
             && has_assistant_response
             && mark_watcher_terminal_delivery_committed(
@@ -1459,13 +1460,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         &tool_state.transcript_events,
                     ),
                     false,
-                ),
+                )
+                .filter(|_| !pin_held),
             );
         // Record the scheduled outcome before the pre-panel release can drop the row.
         if terminal_delivery_committed && let Some(pin) = inflight_before_relay.as_ref() {
             path_b_record::settle_committed_range(
                 shared.pg_pool.as_ref(),
-                pin,
+                (pin, pin_held),
                 (&tmux_session_name, current_offset),
                 &full_response,
                 &tool_state.transcript_events,
@@ -2271,6 +2273,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             channel_effects,
                             completion_range: (&tmux_session_name, current_offset),
                             settle_pin: inflight_before_relay.as_ref(),
+                            native_held: (
+                                pin_held,
+                                path_b_record::native_held(&shared, inflight_state.as_ref()).await,
+                            ),
                         },
                         || async {
                             crate::services::discord::adk_session::lookup_pending_dispatch_for_thread(

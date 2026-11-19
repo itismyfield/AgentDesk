@@ -175,7 +175,7 @@ pub(super) enum FinalizeMsg {
     #[cfg(unix)]
     NativeScope {
         key: TurnKey,
-        actor: usize,
+        actor: Option<usize>,
         ack: oneshot::Sender<bool>,
     },
     #[cfg(unix)]
@@ -343,6 +343,10 @@ impl TurnFinalizer {
         shared: Arc<SharedData>,
     ) -> Result<bool, String> {
         contain_panic(work.prepare_notice(&history, &shared)).await??;
+        super::terminal_handler::native_supply::native_completion::record_live(
+            &shared, &history, &work,
+        )
+        .await;
         let (ack, result) = oneshot::channel();
         self.tx
             .send(FinalizeMsg::Native {

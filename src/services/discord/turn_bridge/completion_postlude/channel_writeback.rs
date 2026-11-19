@@ -83,7 +83,7 @@ pub(super) async fn replay_withheld(
 /// it grants no channel effects and the postlude also rejects cancelled turns.
 /// A scheduled snapshot turn is isolated by its launch mark as well, so a
 /// renamed channel or a restart kickoff cannot re-admit its channel writeback.
-pub(super) async fn resolve_completion_scope(
+pub(in crate::services::discord) async fn resolve_completion_scope(
     shared: &std::sync::Arc<super::super::super::SharedData>,
     channel_id: poise::serenity_prelude::ChannelId,
     provider: &crate::services::provider::ProviderKind,

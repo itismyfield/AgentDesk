@@ -33,6 +33,18 @@ pub(super) struct PathBTranscript<'a> {
     pub(super) completion_range: (&'a str, u64),
     /// The pre-relay row; the committed range settles its turn before the late row's.
     pub(super) settle_pin: Option<&'a InflightTurnState>,
+    /// Native custody of `(pin, late)`; a held row's records belong to its native completion.
+    pub(super) native_held: (bool, bool),
+}
+
+/// Whether native custody holds `row`, so the watcher records nothing of it.
+pub(super) async fn native_held(shared: &SharedData, row: Option<&InflightTurnState>) -> bool {
+    match row {
+        Some(row) => {
+            crate::services::discord::turn_finalizer::native_prepare::holds_row(shared, row).await
+        }
+        None => false,
+    }
 }
 
 impl<'a> PathBRecord<'a> {
@@ -91,7 +103,7 @@ impl<'a> PathBRecord<'a> {
         let state = self.state;
         let dispatch_id = self.dispatch_id(thread_fallback).await;
         self.settle_scheduled(&target).await;
-        if target.channel_effects.suppressed() {
+        if target.channel_effects.suppressed() || self.held(&target) {
             return dispatch_id;
         }
         let turn_id = format!("discord:{}:{}", target.channel_id.get(), state.user_msg_id);
@@ -123,14 +135,25 @@ impl<'a> PathBRecord<'a> {
         dispatch_id
     }
 
+    fn held(&self, target: &PathBTranscript<'_>) -> bool {
+        match self.source {
+            PathBSource::Late => target.native_held.1,
+            PathBSource::Pinned => target.native_held.0,
+        }
+    }
+
     /// Idempotent fallback of [`settle_committed_range`] for the pinned turn, else this row.
     async fn settle_scheduled(&self, target: &PathBTranscript<'_>) {
         if !crate::services::discord::scheduled_turn::fallback_settle_enabled() {
             return;
         }
+        let held = match target.settle_pin {
+            Some(_) => target.native_held.0,
+            None => self.held(target),
+        };
         settle_committed_range(
             target.pool,
-            target.settle_pin.unwrap_or(self.state),
+            (target.settle_pin.unwrap_or(self.state), held),
             target.completion_range,
             target.assistant_message,
             target.events,
@@ -139,16 +162,17 @@ impl<'a> PathBRecord<'a> {
     }
 }
 
-/// Settle `state`'s scheduled delivery only when its turn owns this committed range
-/// (same session, started before its end). The watcher runs it before any release.
+/// Settle `state`'s scheduled delivery only when its turn owns this committed range (same session,
+/// started before its end) and native custody does not hold it. The watcher runs it before any release.
 pub(super) async fn settle_committed_range(
     pool: Option<&sqlx::PgPool>,
-    state: &InflightTurnState,
+    (state, native_held): (&InflightTurnState, bool),
     (tmux_session_name, current_offset): (&str, u64),
     assistant_message: &str,
     events: &[SessionTranscriptEvent],
 ) {
-    if !state.scheduled.may_settle()
+    if native_held
+        || !state.scheduled.may_settle()
         || state.user_msg_id == 0
         || super::turn_identity::pinned_finalize_user_msg_id(
             Some(state),

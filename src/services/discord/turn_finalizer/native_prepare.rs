@@ -266,13 +266,45 @@ impl TurnFinalizer {
         self.tx
             .send(FinalizeMsg::NativeScope {
                 key,
-                actor: actor as *const CancelToken as usize,
+                actor: Some(actor as *const CancelToken as usize),
                 ack,
             })
             .map_err(|_| "native scope actor unavailable")?;
         rx.await
             .map_err(|_| "native scope acknowledgement lost".into())
     }
+
+    /// Whether native custody holds this exact turn, whichever actor drives it.
+    async fn native_holds(&self, key: TurnKey) -> Result<bool, String> {
+        let (ack, rx) = oneshot::channel();
+        self.tx
+            .send(FinalizeMsg::NativeScope {
+                key,
+                actor: None,
+                ack,
+            })
+            .map_err(|_| "native scope actor unavailable")?;
+        rx.await
+            .map_err(|_| "native scope acknowledgement lost".into())
+    }
+}
+
+/// A row native custody holds is recorded by the native completion alone; an unanswerable
+/// query counts as held so no other writer borrows its unscoped body.
+pub(in crate::services::discord) async fn holds_row(
+    shared: &SharedData,
+    row: &super::super::inflight::InflightTurnState,
+) -> bool {
+    if row.provider != ProviderKind::Claude.as_str() {
+        return false;
+    }
+    let key = TurnKey::new(
+        ChannelId::new(row.channel_id),
+        row.effective_finalizer_turn_id(),
+        row.born_generation,
+    )
+    .with_episode_nonce(row.turn_nonce.as_deref());
+    shared.turn_finalizer.native_holds(key).await.unwrap_or(true)
 }
 
 pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, LedgerEntry>) {
@@ -415,12 +447,19 @@ pub(super) async fn handle(msg: FinalizeMsg, ledger: &mut HashMap<LedgerKey, Led
             let _ = ack.send(settled);
         }
         FinalizeMsg::NativeScope { key, actor, ack } => {
-            let owned = ledger.get(&key.exact_key()).is_some_and(|entry| {
-                entry
-                    .native_inputs
-                    .values()
-                    .any(|input| input.owns_bridge(key, actor))
-            });
+            let owned = ledger
+                .get(&key.exact_key())
+                .is_some_and(|entry| match actor {
+                    Some(actor) => entry
+                        .native_inputs
+                        .values()
+                        .any(|input| input.owns_bridge(key, actor)),
+                    None => {
+                        !entry.native_inputs.is_empty()
+                            || !entry.native_boot_inputs.is_empty()
+                            || entry.completion_admission.native_input.is_some()
+                    }
+                });
             let _ = ack.send(owned);
         }
         _ => unreachable!("native custody dispatcher received another message"),
