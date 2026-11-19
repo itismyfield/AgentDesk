@@ -377,6 +377,9 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// lifecycle/error/cancel notifications still post.
     #[serde(default)]
     pub silent_turn: bool,
+    /// This turn started through headless intake and selected a process driver.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub headless_process_start: bool,
     /// Wire-only routine policy and exact terminal classification survive recovery.
     #[serde(
         default,
@@ -1145,6 +1148,7 @@ impl InflightTurnState {
             native_turn_id: None,
             delivery_bot: None,
             silent_turn: false,
+            headless_process_start: false,
             routine_presentation: Default::default(),
             dispatch_id: None,
             turn_nonce: Some(uuid::Uuid::new_v4().to_string()),
