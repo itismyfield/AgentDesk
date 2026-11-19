@@ -65,8 +65,10 @@ async fn tick_with(
     );
     let (mut generation, mut open_after, mut retarget_after, mut long_running) =
         (0u64, None, None, None);
-    let (mut heartbeat, mut long_run_heartbeat) =
-        (std::time::Instant::now(), std::time::Instant::now());
+    let (mut heartbeat, mut long_run_heartbeat) = (
+        crate::services::discord::turn_bridge::session_row_writer::SessionRowWriter::new(),
+        std::time::Instant::now(),
+    );
     let actor_nonce = baseline.turn_nonce.clone();
     let outcome = run_bridge_stream_tick(
         BridgeStreamTickContext {
@@ -132,7 +134,7 @@ async fn tick_with(
             pending_long_running_open_after_state_save: &mut open_after,
             pending_long_running_retarget_after_state_save: &mut retarget_after,
             long_running_placeholder_active: &mut long_running,
-            last_adk_heartbeat: &mut heartbeat,
+            session_row_writer: &mut heartbeat,
             last_inflight_long_run_heartbeat: &mut long_run_heartbeat,
         },
     )

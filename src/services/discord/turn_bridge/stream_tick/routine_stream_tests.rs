@@ -12,6 +12,7 @@ struct History {
     offset: usize,
     last_edit: String,
     state: InflightTurnState,
+    released_after_clear: (bool, bool),
 }
 
 async fn drive(
@@ -74,6 +75,8 @@ async fn drive(
         (None, None, None, None, None);
     let mut spans = crate::services::discord::turn_bridge::bridge_latency_spans::BridgeLatencySpans::starting_at(std::time::Instant::now());
     let mut dirty = false;
+    let mut row_writer =
+        crate::services::discord::turn_bridge::session_row_writer::SessionRowWriter::new();
     let none = None;
     let actor_nonce = baseline.turn_nonce.clone();
     let context = runtime::TickContext {
@@ -128,6 +131,7 @@ async fn drive(
         pending_current_message_candidate: &mut pending,
         bridge_created_response_placeholder_msg_id: &mut created,
         bridge_spans: &mut spans,
+        session_row_writer: &mut row_writer,
     };
     let claim = BodyClaim::new(channel.get(), None);
     let rolled = match run_rollover_loop(&context, &mut tick, &mut dirty, claim).await {
@@ -138,6 +142,10 @@ async fn drive(
         refresh_streaming_response(&context, &mut tick, &mut dirty, rolled, "⠋", claim).await,
         ControlFlow::Continue(())
     );
+    let before = tick.session_row_writer.released();
+    crate::services::discord::inflight::clear_inflight_state(provider, channel.get());
+    let _ = runtime::authorize_visible_mutation(&context, &mut tick, "row cleared").await;
+    let released_after_clear = (before, row_writer.released());
     let sends = gateway.sends.lock().unwrap().clone();
     let edits = gateway.edits.lock().unwrap().clone();
     History {
@@ -146,6 +154,7 @@ async fn drive(
         offset: sent,
         last_edit,
         state: inflight,
+        released_after_clear,
     }
 }
 
@@ -182,4 +191,9 @@ async fn i8117_stream_holds_all_c1_body_without_changing_raw_offset() {
     assert_eq!(history.last_edit, "");
     assert_eq!(history.state.full_response, body);
     assert_eq!(history.state.response_sent_offset, 0);
+    assert_eq!(
+        history.released_after_clear,
+        (false, true),
+        "a cleared owned row ends status writes"
+    );
 }
