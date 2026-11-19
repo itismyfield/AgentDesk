@@ -6,6 +6,7 @@ candidate is a later commit or the working tree. Only increases against that bas
 from __future__ import annotations
 
 import ast
+from hashlib import sha256
 import json
 import os
 import shutil
@@ -393,6 +394,110 @@ class LayerRules(GateFixture):
 
 
 class BaseResolution(GateFixture):
+    member_manifest = "crates/store/Cargo.toml"
+
+    def add_workspace_member(self, repo):
+        manifest = (repo.root / "Cargo.toml").read_text("utf-8")
+        repo.put("Cargo.toml", manifest + '\n[workspace]\nmembers = ["crates/store"]\n'
+                 '[dependencies]\nstore = { path = "crates/store" }\n')
+        repo.put(self.member_manifest, '[package]\nname = "store"\nversion = "0.1.0"\nedition = "2024"\n'
+                 '[lib]\npath = "../../src/store_lib.rs"\n')
+        repo.put("src/store_lib.rs", "pub mod upper { pub fn hit() {} }\n")
+
+    def workspace_base(self):
+        repo = self.repo("store::upper::hit();")
+        self.add_workspace_member(repo)
+        base = repo.commit("workspace base with existing reverse debt")
+        repo.main(base)
+        return repo, base
+
+    def push_env(self, repo, base):
+        return self.ci(repo, "push", {"ref": "refs/heads/main", "before": base})
+
+    def diagnostic_snapshot(self, repo, base, output):
+        script = ROOT / "scripts/audit_maintainability/checks/module_layer_baseline.py"
+        return subprocess.run([sys.executable, str(script), "--repo", str(repo.root),
+                               "--input-sha", base, "--output", str(output)],
+                              capture_output=True, text=True, check=False)
+
+    def test_workspace_snapshot_keeps_existing_debt_after_empty_commit(self):
+        repo, base = self.workspace_base()
+        repo.commit("empty follow-up")
+        result = self.run_gate(repo, self.push_env(repo, base))
+        self.assertEqual(self.codes(result), [], result["errors"])
+        debt = result["draft"]["base"]["reverse_dependencies"]
+        self.assertEqual([(row["source"], row["target"]) for row in debt],
+                         [(LOWER, "src/store_lib.rs::crate::upper")])
+        self.assertEqual(debt, result["draft"]["head"]["reverse_dependencies"])
+
+    def test_workspace_snapshot_reports_only_the_new_reverse_dependency(self):
+        repo, base = self.workspace_base()
+        repo.put("src/lib.rs", source("store::upper::hit(); crate::spare::hit();"))
+        repo.commit("add real reverse debt")
+        result = self.run_gate(repo, self.push_env(repo, base))
+        self.assertEqual(self.codes(result), ["new-id"], result["errors"])
+        self.assertEqual(result["errors"][0]["id"], self.edge(result, LOWER, SPARE)["id"])
+
+    def test_ci_refuses_a_candidate_with_only_a_dirty_member_manifest(self):
+        repo, base = self.workspace_base()
+        repo.commit("empty follow-up")
+        manifest = (repo.root / self.member_manifest).read_text("utf-8")
+        repo.put(self.member_manifest, manifest.replace('"0.1.0"', '"0.1.1"'))
+        result = self.run_gate(repo, self.push_env(repo, base))
+        self.assertEqual(self.codes(result), ["gate-unavailable"], result["errors"])
+        self.assertIn("differs from HEAD in measured paths", result["summary"])
+
+    def test_workspace_snapshot_remeasures_despite_an_unversioned_base_cache(self):
+        repo, base = self.workspace_base()
+        result = self.run_gate(repo)
+        original = result["draft"]["base"]
+        self.assertEqual(len(original["reverse_dependencies"]), 1)
+        old_key = sha256(gate._json([base, gate.code_hash(repo.root), sys.version]).encode()).hexdigest()
+        old_cache = gate._cache_path(repo.root, old_key)
+        old_cache.parent.mkdir(parents=True)
+        stale = {"payload": dict(original, reverse_dependencies=[]), "layers_of": {}, "ranks": {}}
+        stale_json = json.dumps(stale)
+        old_cache.write_text(stale_json, encoding="utf-8")
+        repo.commit("empty follow-up")
+
+        result = self.run_gate(repo)
+        self.assertEqual(self.codes(result), [], result["errors"])
+        self.assertEqual(result["draft"]["base"]["reverse_dependencies"], original["reverse_dependencies"])
+        self.assertEqual(old_cache.read_text("utf-8"), stale_json)
+        [new_cache] = set(old_cache.parent.glob("*.json")) - {old_cache}
+        self.assertEqual(json.loads(new_cache.read_text("utf-8"))["payload"], original)
+
+    def test_workspace_candidate_can_compare_against_base_without_crates(self):
+        repo = self.repo()
+        base = repo.git("rev-parse", "HEAD")
+        self.add_workspace_member(repo)
+        repo.commit("add workspace member")
+        result = self.run_gate(repo, self.push_env(repo, base))
+        self.assertEqual(self.codes(result), [], result["errors"])
+        self.assertEqual(len(result["draft"]["base"]["reverse_dependencies"]), 1)
+
+    def test_diagnostic_snapshot_refuses_tracked_member_manifest_drift(self):
+        repo, base = self.workspace_base()
+        output = repo.root / "snapshot.json"
+        clean = self.diagnostic_snapshot(repo, base, output)
+        self.assertEqual(clean.returncode, 0, clean.stderr)
+        saved = output.read_bytes()
+        manifest = (repo.root / self.member_manifest).read_text("utf-8")
+        repo.put(self.member_manifest, manifest.replace('"0.1.0"', '"0.1.1"'))
+        refused = self.diagnostic_snapshot(repo, base, output)
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertIn("input SHA does not match", refused.stderr)
+        self.assertEqual(output.read_bytes(), saved)
+
+    def test_diagnostic_snapshot_refuses_untracked_crate_manifest(self):
+        repo, base = self.workspace_base()
+        repo.put("crates/unrecorded/Cargo.toml", '[package]\nname = "unrecorded"\nversion = "0.1.0"\n')
+        output = repo.root / "snapshot.json"
+        refused = self.diagnostic_snapshot(repo, base, output)
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertIn("untracked source files", refused.stderr)
+        self.assertFalse(output.exists())
+
     def pull_request(self):
         repo = self.repo()
         base = repo.git("rev-parse", "HEAD")
