@@ -390,19 +390,26 @@ async fn a_refusal_before_the_custody_write_keeps_no_raw_custody() {
 }
 
 // A thread child kept while released with no Legacy run stays kept across a restart whose boot
-// does not place it again, with or without a reservation hint: no body, no reason.
+// does not place it again, hinted or not: no body, no reason. A custody written before the
+// attribution existed is judged from its row's parent hint; one whose every chunk is receipted
+// settles without a send; an old custody with no parent hint resumes as a non-child.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_kept_thread_child_is_not_posted_after_a_restart_that_does_not_place_it() {
     use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
     use crate::services::tui_o::cutover::test_override;
-    for (case, hinted) in [(0_u64, false), (1, true)] {
+    let cases = [(false, "new"), (true, "new"), (false, "old"), (true, "old")];
+    let cases = cases
+        .into_iter()
+        .chain([(false, "sent"), (true, "sent"), (false, "unhinted")]);
+    for (case, (hinted, stored)) in (0_u64..).zip(cases) {
         let root = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(root.path());
-        let f = Fixture::new(765_150 + case, ProviderKind::Claude, &["child answer"]).await;
+        let mut f = Fixture::new(765_150 + case, ProviderKind::Claude, &["child answer"]).await;
         let (http, _guard) = f.http().await;
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let (child, parent) = (f.row.channel_id, 765_160 + case);
+        let (child, parent) = (f.row.channel_id, 765_170 + case);
+        f.row.logical_channel_id = (stored != "unhinted").then_some(parent);
         let config =
             serde_json::from_value(serde_json::json!({"server": {}, "agents": [{"id": "a",
             "name": "A", "channels": {"claude": {"id": parent.to_string(), "runtime": "tui"}}}],
@@ -431,38 +438,55 @@ async fn a_kept_thread_child_is_not_posted_after_a_restart_that_does_not_place_i
             matches!(outcome, Outcome::Deferred { .. }),
             "a held child keeps its body"
         );
+        // The custody writer itself stores the old shape, or the receipt of a send that landed.
+        let rewrite = |mut payload: serde_json::Value, _| async move {
+            match stored {
+                "old" | "unhinted" => drop(payload.as_object_mut().unwrap().remove("thread_child")),
+                "sent" => payload["delivery_receipts"] = serde_json::json!([1_234_567_890_123_u64]),
+                _ => {}
+            }
+            (payload, Ok(false))
+        };
+        use crate::services::discord::terminal_delivery_custody::drain_for_test;
+        assert_eq!(drain_for_test(rewrite).await, Ok(0));
         drop(first);
         let after = booted();
         if hinted {
             after.reserve_boot_children(&[(child, parent)]);
         }
         let _restarted = test_override::force_boot(after);
-        let retired = crate::services::discord::terminal_delivery_custody::drain_for_test(
-            |mut payload, checkpoint| {
-                let gateway = crate::services::discord::gateway::DiscordGateway::new(
-                    http.clone(),
-                    shared.clone(),
-                    ProviderKind::Claude,
-                    None,
-                );
-                let shared = shared.clone();
-                async move {
-                    let result =
-                        resume_payload_with_gateway(&shared, &gateway, &mut payload, &checkpoint)
-                            .await;
-                    (payload, result)
-                }
-            },
-        )
+        let retired = drain_for_test(|mut payload, checkpoint| {
+            let gateway = crate::services::discord::gateway::DiscordGateway::new(
+                http.clone(),
+                shared.clone(),
+                ProviderKind::Claude,
+                None,
+            );
+            let shared = shared.clone();
+            async move {
+                let result =
+                    resume_payload_with_gateway(&shared, &gateway, &mut payload, &checkpoint).await;
+                (payload, result)
+            }
+        })
         .await
         .unwrap();
-        assert_eq!(retired, 0, "the custody stays");
-        let kept = crate::services::discord::terminal_delivery_custody::retains_channel(child);
-        assert_eq!(kept, Ok(true));
+        let (settles, posts) = match stored {
+            "sent" => (1, 0),
+            "unhinted" => (1, 1),
+            _ => (0, 0),
+        };
         assert_eq!(
-            f.sends.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "no body"
+            retired, settles,
+            "{stored} hinted={hinted}: settled custodies"
         );
+        let kept = crate::services::discord::terminal_delivery_custody::retains_channel(child);
+        assert_eq!(
+            kept,
+            Ok(settles == 0),
+            "{stored} hinted={hinted}: custody kept"
+        );
+        let sent = f.sends.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(sent, posts, "{stored} hinted={hinted}: body posts");
     }
 }

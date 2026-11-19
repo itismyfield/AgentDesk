@@ -197,10 +197,11 @@ pub(super) struct RetrySnapshot {
     resume_failure: bool,
     recovery_retry: bool,
     delivery_receipts: Vec<u64>,
-    /// The destination was a resolved thread child when kept: after a restart it reaches Legacy
-    /// only once the boot places that child again and its body is decided.
+    /// Whether the destination was a resolved thread child when kept; after a restart such a body
+    /// reaches Legacy only once the boot places that child with a decided body. `None` is a custody
+    /// from before this was recorded, judged once from the stored row on its first resume.
     #[serde(default)]
-    thread_child: bool,
+    thread_child: Option<bool>,
 }
 
 pub(super) struct Handoff<'a> {
@@ -318,10 +319,11 @@ pub(super) async fn preserve_or_publish(ctx: Handoff<'_>) -> Outcome {
         recovery_retry: ctx.recovery_retry,
         delivery_receipts: Vec::new(),
         #[cfg(unix)]
-        thread_child: crate::services::tui_o::cutover::thread_child_decided(ctx.channel_id.get())
-            .is_some(),
+        thread_child: Some(
+            crate::services::tui_o::cutover::thread_child_decided(ctx.channel_id.get()).is_some(),
+        ),
         #[cfg(not(unix))]
-        thread_child: false,
+        thread_child: Some(false),
     };
     // Full captured source/episode/body survive a process restart. Do not replace
     // A's identity with the current row or today's source generation.
@@ -595,10 +597,18 @@ pub(super) async fn resume_with_gateway(
             full_response: &snapshot.full_response,
         })
     };
-    // A kept thread child's body waits until the boot places that child with a decided body.
+    // A transport every chunk of which is receipted, or already delivered, needs no send right:
+    // it goes on to its settlement whatever the destination reads now.
+    let transported = snapshot.delivery_receipts.len() == chunks.len()
+        || decision() == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
+    // A kept thread child's unsent body waits until the boot places that child with a decided body.
     #[cfg(unix)]
-    if snapshot.thread_child
-        && crate::services::tui_o::cutover::thread_child_decided(snapshot.channel_id) != Some(true)
+    if !transported
+        && kept_child(
+            &mut snapshot.thread_child,
+            snapshot.channel_id,
+            &snapshot.local,
+        )
     {
         return Ok(false);
     }
@@ -607,15 +617,19 @@ pub(super) async fn resume_with_gateway(
     let kind = (snapshot.local.channel_id == snapshot.channel_id)
         .then_some(snapshot.local.runtime_kind)
         .flatten();
-    let o_owns_body = match crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
-        snapshot.channel_id,
-        kind,
-    ) {
-        Ok(owned) => owned,
+    let peeked = (!transported).then(|| {
+        crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+            snapshot.channel_id,
+            kind,
+        )
+    });
+    let o_owns_body = match peeked {
+        None => false,
+        Some(Ok(owned)) => owned,
         #[cfg(unix)]
-        Err(held) => return Ok(discard_refused(shared, &provider, snapshot, held).await),
+        Some(Err(held)) => return Ok(discard_refused(shared, &provider, snapshot, held).await),
         #[cfg(not(unix))]
-        Err(_) => return Ok(false),
+        Some(Err(_)) => return Ok(false),
     };
     #[cfg(unix)]
     if o_owns_body {
@@ -625,9 +639,7 @@ pub(super) async fn resume_with_gateway(
         )
         .await;
     }
-    let mut delivered = o_owns_body
-        || snapshot.delivery_receipts.len() == chunks.len()
-        || decision() == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
+    let mut delivered = o_owns_body || transported;
     let mut held_lease = None;
     if !delivered {
         // Reuse the row's existing owner contract. A foreign row is never A's
@@ -869,6 +881,18 @@ async fn persist_unless_refused(
     })
     .await?;
     Ok(refused)
+}
+
+/// Whether a kept body belongs to a thread child the boot has not placed with a decided body; a
+/// custody from before the attribution was kept is judged once from its row's parent hint.
+#[cfg(unix)]
+fn kept_child(stored: &mut Option<bool>, channel: u64, local: &InflightTurnState) -> bool {
+    use crate::services::tui_o::cutover::{maybe_thread_child, thread_child_decided};
+    let child = *stored.get_or_insert_with(|| {
+        let hint = (local.channel_id == channel).then_some(local.logical_channel_id);
+        maybe_thread_child(channel, hint.flatten())
+    });
+    child && thread_child_decided(channel) != Some(true)
 }
 
 /// Drops every stored copy of the body; the custody keeps only what retires it.

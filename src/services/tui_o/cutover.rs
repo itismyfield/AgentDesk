@@ -16,7 +16,8 @@ pub(crate) use channel_gate::{
 };
 #[cfg(unix)]
 pub(crate) use channel_gate::{
-    Observed, peek_o_owns_tui_output_for_channel_quiet, thread_child_decided, with_peeked_o_output,
+    Observed, maybe_thread_child, peek_o_owns_tui_output_for_channel_quiet, thread_child_decided,
+    with_peeked_o_output,
 };
 #[cfg(all(test, unix))]
 mod channel_lookup_tests;

@@ -105,6 +105,20 @@ pub(crate) fn thread_child_decided(channel_id: u64) -> Option<bool> {
     })
 }
 
+/// Whether `channel` may be one of O's thread children: the boot places it as one, or the parent
+/// its row hinted is a TUI channel O selects. A hint only keeps a body; it proves no relationship.
+#[cfg(unix)]
+pub(crate) fn maybe_thread_child(channel_id: u64, hinted_parent: Option<u64>) -> bool {
+    super::test_override::with_channels(|snapshot| {
+        snapshot.is_some_and(|boot| {
+            boot.child(channel_id).is_some()
+                || boot.unresolved_child(channel_id).is_some()
+                || hinted_parent
+                    .is_some_and(|parent| parent != channel_id && boot.kind(parent).is_some())
+        })
+    })
+}
+
 pub(crate) fn peek_o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,
