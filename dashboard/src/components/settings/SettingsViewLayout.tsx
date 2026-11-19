@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { EmptyState } from "../../kit/free/empty-state-clean";
 import { Switch } from "../../kit/free/switch-clean";
 import type { SettingsCategory } from "./SettingsCopy";
-import { baselineText, type CatalogItem, type CategoryFilter } from "./SettingsModel";
+import { baselineText, isResetValue, type CatalogItem, type CategoryFilter } from "./SettingsModel";
 import { ItemChip, ItemFacts, ItemHeading, InlineControl, RelatedSettings, currentValue, editableItem, resetLabel } from "./SettingsPanels";
 import { SETTINGS_CARD_CLASS, SettingsAction, SettingsSkeletonRows } from "./SettingsPrimitives";
 
@@ -46,7 +46,7 @@ interface SettingsDesktopCatalogProps extends CatalogActions {
 
 /** Whether a row can go back to its default (or to inheriting) from here. */
 export function resettable(item: CatalogItem): boolean {
-  return editableItem(item) && item.resetTo != null && currentValue(item) !== item.resetTo;
+  return editableItem(item) && item.resetTo != null && !isResetValue(item, currentValue(item));
 }
 
 /** Desktop catalog: categories and filters, the grouped list with the pending bar, and the selected row's details. */

@@ -24,8 +24,8 @@ export function ChoiceControl({ item, value, label, size, className, onChange }:
 
 /** "기본값 3으로 되돌리기" (short: "기본값 3"), or the inherit wording when reset stores "". */
 export function resetLabel(item: CatalogItem, tr: Tr, short = false): string {
-  if (item.resetTo === "") return short ? tr("공통 값 따르기", "Use shared value") : tr("공통 값을 따르게 되돌리기", "Follow the shared value again");
-  const value = formatSettingValue(item.resetTo ?? "", item, tr);
+  if (item.resetTo === "" && item.baseline === null) return short ? tr("공통 값 따르기", "Use shared value") : tr("공통 값을 따르게 되돌리기", "Follow the shared value again");
+  const value = formatSettingValue(item.baseline ?? item.resetTo ?? "", item, tr);
   return short ? tr(`기본값 ${value}`, `Default ${value}`) : tr(`기본값 ${withRo(value)} 되돌리기`, `Reset to default (${value})`);
 }
 

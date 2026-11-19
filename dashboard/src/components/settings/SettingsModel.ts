@@ -129,7 +129,7 @@ export function configItems(entries: ConfigEntry[], edits: Record<string, Config
     const readOnly = entry.editable === false;
     const saved = entry.value ?? "";
     const baseline = entry.baseline ?? entry.default ?? null;
-    // A stored "" on an inheriting key means "follow the shared value", which the server still flags as an override.
+    // An inheriting key stores "" to fall back: to its config-file value when there is one, else to the shared key.
     const inherits = Boolean(meta?.inherits);
     return {
       key: entry.key,
@@ -142,7 +142,7 @@ export function configItems(entries: ConfigEntry[], edits: Record<string, Config
       draft: entry.key in edits ? String(edits[entry.key]) : null,
       baseline,
       baselineSource: entry.baseline_source ?? null,
-      resetTo: baseline ?? (inherits && entry.override_active && saved !== "" ? "" : null),
+      resetTo: inherits ? "" : baseline,
       inherits,
       overridden: Boolean(entry.override_active) && !(inherits && saved === ""),
       restartNeeded: entry.restart_behavior === "config-only",
@@ -265,8 +265,15 @@ export function catalogCounts(items: CatalogItem[]) {
   };
 }
 
-export function formatSettingValue(value: string, item: Pick<CatalogItem, "input" | "options" | "inherits">, tr: Tr): string {
-  if (value === "") return item.inherits ? tr("공통 값 따름", "Follows the shared value") : tr("없음", "None");
+/** Whether a value already equals what reset writes; an inheriting key's "" reads as its config-file value. */
+export function isResetValue(item: CatalogItem, value: string): boolean {
+  const read = (text: string) => (item.inherits && text === "" ? item.baseline ?? "" : text);
+  return item.resetTo != null && read(value) === read(item.resetTo);
+}
+
+export function formatSettingValue(value: string, item: Pick<CatalogItem, "input" | "options" | "inherits" | "baseline">, tr: Tr): string {
+  if (value === "" && item.inherits) return item.baseline != null ? tr(`설정 파일 기본값 ${item.baseline}`, `Config file default ${item.baseline}`) : tr("공통 값 따름", "Follows the shared value");
+  if (value === "") return tr("없음", "None");
   const option = item.options?.find((candidate) => candidate.value === value);
   if (option) return option.label;
   if (item.input === "toggle" && value === "true") return tr("켜짐", "On");

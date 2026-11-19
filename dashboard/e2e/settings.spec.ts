@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route, type TestInfo } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route, type TestInfo } from "@playwright/test";
 
 // Settings catalog checks at 1440x900 (desktop project) and 390x844 (mobile project).
 // Set SETTINGS_SHOT_DIR to collect screenshots outside the test output folder.
@@ -269,6 +269,8 @@ type FakeServer = {
   /** null answers health with 404 (a failed refresh). */
   health: typeof HEALTH | null;
   failNextWrite: boolean;
+  /** Writes wait for this before answering (a save still in flight). */
+  gate?: Promise<void>;
   writes: Captured[];
 };
 
@@ -285,9 +287,10 @@ const fakeServer = (): FakeServer => ({
 
 // Follows the server contract: a write lands in state and the next GET returns it (runtime PUT replaces the document).
 async function mockSettings(page: Page, server = fakeServer()) {
-  const write = (route: Route, apply: (body: Record<string, unknown>) => void) => {
+  const write = async (route: Route, apply: (body: Record<string, unknown>) => void) => {
     const body = route.request().postDataJSON();
     server.writes.push({ method: route.request().method(), url: route.request().url(), body });
+    await server.gate;
     if (server.failNextWrite) {
       server.failNextWrite = false;
       return route.fulfill({ status: 503, json: { error: "unavailable" } });
@@ -361,6 +364,17 @@ async function editAndSave(page: Page, key: string, value: string, phone: boolea
   await row(page, key).locator("input").fill(value);
   await page.getByTestId("settings-save-bar").getByRole("button", { name: "저장" }).click();
   await expect(page.getByTestId("settings-save-bar")).toHaveCount(0);
+}
+
+/** Picks an option in a language/theme row and saves it the same two ways. */
+async function pickAndSave(page: Page, key: string, option: string, phone: boolean) {
+  if (phone) await row(page, key).click();
+  const scope = phone ? page.getByTestId("settings-edit-sheet") : row(page, key);
+  await scope.getByRole("combobox").click();
+  await page.getByRole("option", { name: option }).click();
+  const save = (phone ? scope : page.getByTestId("settings-save-bar")).getByRole("button", { name: /^(저장|Save)$/ });
+  await save.click();
+  await expect(save).toHaveCount(0);
 }
 
 test.describe("settings catalog", () => {
@@ -480,12 +494,37 @@ test.describe("settings catalog", () => {
     expect(server.writes[0]?.body).toEqual({ max_review_rounds: "3", review_enabled: "false" });
   });
 
+  test("desktop: edits typed while a runtime save is in flight stay pending", async ({ page }, testInfo) => {
+    test.skip(isPhone(testInfo), "Desktop layout");
+    const server = await mockSettings(page);
+    let release = () => {};
+    server.gate = new Promise((resolve) => { release = resolve; });
+    await openSettings(page, "?category=workflow");
+    const bar = page.getByTestId("settings-save-bar");
+    await row(page, "maxEntryRetries").locator("input").fill("5");
+    await bar.getByRole("button", { name: "저장" }).click();
+    await expect.poll(() => server.writes.length).toBe(1);
+    await row(page, "maxEntryRetries").locator("input").fill("6");
+    await row(page, "maxRetries").locator("input").fill("4");
+    release();
+    await expect.poll(() => server.runtime.maxEntryRetries).toBe(5);
+    await expect(bar).toContainText("변경 2건");
+    await expect(row(page, "maxEntryRetries").locator("input")).toHaveValue("6");
+    await expect(row(page, "maxRetries").locator("input")).toHaveValue("4");
+  });
+
   test("desktop: the Claude-only compact value can go back to following the shared one", async ({ page }, testInfo) => {
     test.skip(isPhone(testInfo), "Desktop layout");
     const server = await mockSettings(page);
     await openSettings(page, "?category=context");
-    await editAndSave(page, "context_compact_percent_claude", "70", false);
     const claude = row(page, "context_compact_percent_claude");
+    // A first draft can already go back to following the shared value.
+    await claude.locator("input").fill("70");
+    await claude.getByRole("button").first().click();
+    await page.getByRole("button", { name: "공통 값을 따르게 되돌리기" }).click();
+    await expect(claude.locator("input")).toHaveValue("");
+    await expect(page.getByTestId("settings-save-bar")).toHaveCount(0);
+    await editAndSave(page, "context_compact_percent_claude", "70", false);
     await expect(claude).toContainText("덮어씀");
     await claude.getByRole("button").first().click();
     await page.getByRole("button", { name: "공통 값을 따르게 되돌리기" }).click();
@@ -494,6 +533,22 @@ test.describe("settings catalog", () => {
     await page.reload();
     await row(page, "context_compact_percent_claude").getByRole("button").first().click();
     await expect(page.getByTestId("settings-inspector")).toContainText("저장된 값공통 값 따름");
+    await expect(row(page, "context_compact_percent_claude")).not.toContainText("덮어씀");
+  });
+
+  test("desktop: with a Claude value in the config file, an emptied field reads as that value", async ({ page }, testInfo) => {
+    test.skip(isPhone(testInfo), "Desktop layout");
+    const server = fakeServer();
+    Object.assign(server.config.find((entry) => entry.key === "context_compact_percent_claude")!, { value: "70", baseline: "70", baseline_source: "yaml" });
+    await mockSettings(page, server);
+    await openSettings(page, "?category=context");
+    await editAndSave(page, "context_compact_percent_claude", "", false);
+    expect(server.writes.map((write) => write.body)).toEqual([{ context_compact_percent_claude: "" }]);
+    await page.reload();
+    await row(page, "context_compact_percent_claude").getByRole("button").first().click();
+    const inspector = page.getByTestId("settings-inspector");
+    await expect(inspector).toContainText("저장된 값설정 파일 기본값 70");
+    await expect(inspector).not.toContainText("공통 값 따름");
     await expect(row(page, "context_compact_percent_claude")).not.toContainText("덮어씀");
   });
 
@@ -556,18 +611,9 @@ test.describe("settings catalog", () => {
     const server = await mockSettings(page);
     await openSettings(page, "?category=system");
     await expect(row(page, "language")).toContainText("기본 한국어 · 코드");
-    const pick = async (key: string, option: string) => {
-      const scope = isPhone(testInfo) ? page.getByTestId("settings-edit-sheet") : row(page, key);
-      if (isPhone(testInfo)) await row(page, key).click();
-      await scope.getByRole("combobox").click();
-      await page.getByRole("option", { name: option }).click();
-      const save = isPhone(testInfo) ? scope.getByRole("button", { name: /^(저장|Save)$/ }) : page.getByTestId("settings-save-bar").getByRole("button", { name: /^(저장|Save)$/ });
-      await save.click();
-      await expect(save).toHaveCount(0);
-    };
-    await pick("theme", "밝게");
+    await pickAndSave(page, "theme", "밝게", isPhone(testInfo));
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-    await pick("language", "English");
+    await pickAndSave(page, "language", "English", isPhone(testInfo));
     await expect(row(page, "language")).toContainText("Language");
     await expect(page.getByTestId("settings-search-input")).toHaveAttribute("placeholder", "Search by name, key or description");
     await page.reload();
@@ -584,8 +630,50 @@ test.describe("settings catalog", () => {
     await other.close();
   });
 
+  for (const order of [["theme", "language"], ["language", "theme"]] as const) {
+    test(`system: two tabs saving ${order.join(" then ")} keep each other's field`, async ({ page, context, browser }, testInfo) => {
+      const server = await mockSettings(page);
+      const second = await context.newPage();
+      await mockShell(second);
+      await mockSettings(second, server);
+      await openSettings(page, "?category=system");
+      await openSettings(second, "?category=system");
+      const choice = { theme: "밝게", language: "English" };
+      await pickAndSave(page, order[0], choice[order[0]], isPhone(testInfo));
+      await pickAndSave(second, order[1], choice[order[1]], isPhone(testInfo));
+      expect(server.settings).toMatchObject({ language: "en", theme: "light" });
+
+      const other = await browser.newContext({ viewport: page.viewportSize() });
+      const fresh = await other.newPage();
+      await mockShell(fresh);
+      await mockSettings(fresh, server);
+      await openSettings(fresh, "?category=system");
+      await expect(row(fresh, "language")).toContainText("Language");
+      await expect(fresh.locator("html")).toHaveAttribute("data-theme", "light");
+      await other.close();
+    });
+  }
+
   test.describe("touch", () => {
     test.use({ hasTouch: true, isMobile: true });
+
+    test("phone: search, text editing and the language and theme pickers use 16px text", async ({ page }, testInfo) => {
+      test.skip(!isPhone(testInfo), "Phone layout");
+      await mockSettings(page);
+      const fontSize = (locator: Locator) => locator.evaluate((node) => getComputedStyle(node).fontSize);
+      const sheet = page.getByTestId("settings-edit-sheet");
+      await openSettings(page, "?category=system");
+      expect(await fontSize(page.getByTestId("settings-search-input"))).toBe("16px");
+      for (const key of ["language", "theme"]) {
+        await row(page, key).click();
+        expect(await fontSize(sheet.getByRole("combobox"))).toBe("16px");
+        await page.keyboard.press("Escape");
+        await expect(sheet).toHaveCount(0);
+      }
+      await openSettings(page, "?category=alerts");
+      await row(page, "agent_quality_monitoring_channel_id").click();
+      expect(await fontSize(sheet.locator("input"))).toBe("16px");
+    });
 
     test("phone: differing rows, category drill-down and a sheet that saves one row", async ({ page }, testInfo) => {
       test.skip(!isPhone(testInfo), "Phone layout");

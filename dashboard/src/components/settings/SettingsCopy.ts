@@ -103,8 +103,8 @@ const SETTING_KEY_META: Record<string, SettingKeyMeta> = {
   },
   context_compact_percent_claude: {
     category: "context", input: "number", min: 0, max: 100,
-    descKo: "Claude 대화에 쓰는 압축 기준이에요. 비워 두면 공통 값을 따르고 0이면 자동 압축을 꺼요.",
-    descEn: "Compaction threshold for Claude conversations. Empty follows the shared value; 0 turns auto compaction off.",
+    descKo: "Claude 대화에 쓰는 압축 기준이에요. 비워 두면 설정 파일의 Claude 값을 쓰고 그 값도 없으면 공통 값을 따라요. 0이면 자동 압축을 꺼요.",
+    descEn: "Compaction threshold for Claude conversations. Empty uses the config file's Claude value, else the shared value; 0 turns auto compaction off.",
     related: [{ key: "context_compact_percent" }, { key: "context_compact_lower_bound_tokens" }],
     inherits: "context_compact_percent",
   },

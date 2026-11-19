@@ -10,6 +10,7 @@ import {
   appItems,
   configValue,
   formatSettingValue,
+  isResetValue,
   resolveCategory,
   runtimeItems,
   withRo,
@@ -61,10 +62,13 @@ describe("settings catalog", () => {
   });
 
   it("lets the Claude-only compact value go back to following the shared one", () => {
-    const claude = (value: string, override_active: boolean) => configItems([entry("context_compact_percent_claude", { value, baseline: null, override_active })], {}, true)[0];
-    expect(claude("70", true)).toMatchObject({ resetTo: "", overridden: true });
-    expect(claude("", true)).toMatchObject({ resetTo: null, overridden: false });
-    expect(formatSettingValue("", claude("", true), ko)).toBe("공통 값 따름");
+    const claude = (value: string, baseline: string | null = null) => configItems([entry("context_compact_percent_claude", { value, baseline, override_active: value !== baseline })], {}, true)[0];
+    expect(claude("70")).toMatchObject({ resetTo: "", overridden: true });
+    expect(claude("")).toMatchObject({ resetTo: "", overridden: false });
+    expect(formatSettingValue("", claude(""), ko)).toBe("공통 값 따름");
+    // With a Claude value in the config file, "" falls back to that value, not to the shared one.
+    const yaml = claude("", "70");
+    expect([formatSettingValue("", yaml, ko), yaml.overridden, isResetValue(yaml, "70"), isResetValue(yaml, "80")]).toEqual(["설정 파일 기본값 70", false, true, false]);
     const [floor] = configItems([entry("context_compact_lower_bound_tokens")], {}, true);
     expect(floor.description).toContain("20만 토큰 창이면 이 값이 30만이어도 13만 6천 토큰에서 압축해요");
   });

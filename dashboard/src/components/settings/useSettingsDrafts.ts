@@ -71,7 +71,10 @@ export function useRuntimeConfigDraft() {
   }, [saved]);
 
   // The PUT replaces the stored document, so re-read it and change only these keys: another screen may have saved since.
-  const persist = useCallback(async (updates: RuntimeConfigMap, explicitByKey: Record<string, boolean>, keepDrafts: boolean) => {
+  // Drafts outside this save and edits typed while it was in flight go back on top of the new server values.
+  const persist = useCallback(async (updates: RuntimeConfigMap, explicitByKey: Record<string, boolean>) => {
+    const start = { values, explicit };
+    const unsaved = new Set([...changedKeys].filter((key) => !(key in updates)));
     const fresh = await api.getRuntimeConfig();
     const nextValues = { ...(fresh?.current ?? {}), ...updates };
     const nextExplicit = new Set(fresh?.explicit_keys ?? []);
@@ -81,27 +84,32 @@ export function useRuntimeConfigDraft() {
     }
     await api.saveRuntimeConfig({ ...nextValues, __runtimeConfigExplicitKeys: Array.from(nextExplicit).sort() });
     setSaved({ values: nextValues, explicit: nextExplicit });
-    const pending = keepDrafts ? [...changedKeys].filter((key) => !(key in updates)) : [];
-    setValues((current) => ({ ...nextValues, ...Object.fromEntries(pending.map((key) => [key, current[key]])) }));
+    setValues((current) => {
+      const next = { ...nextValues };
+      for (const key of Object.keys(current)) {
+        if (unsaved.has(key) || current[key] !== start.values[key]) next[key] = current[key];
+      }
+      return next;
+    });
     setExplicit((current) => {
       const next = new Set(nextExplicit);
-      for (const key of pending) {
+      for (const key of new Set([...current, ...start.explicit, ...unsaved])) {
+        if (!unsaved.has(key) && current.has(key) === start.explicit.has(key)) continue;
         if (current.has(key)) next.add(key);
         else next.delete(key);
       }
       return next;
     });
-  }, [changedKeys]);
+  }, [changedKeys, explicit, values]);
 
   const save = useCallback(() => persist(
     Object.fromEntries([...changedKeys].map((key) => [key, values[key]])),
     Object.fromEntries([...changedKeys].map((key) => [key, explicit.has(key)])),
-    false,
   ), [changedKeys, explicit, persist, values]);
 
   /** Saves one key and leaves other unsaved drafts alone (the phone sheet). */
   const saveKey = useCallback(
-    (key: string, value: RuntimeConfigValue, isExplicit: boolean) => persist({ [key]: value }, { [key]: isExplicit }, true),
+    (key: string, value: RuntimeConfigValue, isExplicit: boolean) => persist({ [key]: value }, { [key]: isExplicit }),
     [persist],
   );
 
