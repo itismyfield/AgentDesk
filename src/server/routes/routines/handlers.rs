@@ -627,24 +627,6 @@ async fn control_routine_session(
             "routine {routine_id} not found"
         )));
     };
-    if routine.execution_strategy != "persistent" {
-        return Err(AppError::conflict(format!(
-            "routine {routine_id} uses execution_strategy={}; session control requires persistent",
-            routine.execution_strategy
-        )));
-    }
-    if routine
-        .agent_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_none()
-    {
-        return Err(AppError::conflict(format!(
-            "routine {routine_id} is not attached to an agent"
-        )));
-    }
-
     let reason = format!(
         "routine persistent session {} via POST /api/routines/{}/session/{}",
         command.as_str(),
@@ -659,10 +641,13 @@ async fn control_routine_session(
         || session.tmux_killed
         || session.inflight_cleared
         || session.disconnected_sessions > 0;
-    let interrupted_run_id = if session_changed {
+    let interrupted_run_id = if let (true, Some(expected_run)) =
+        (session_changed, session.controlled_run_id.as_deref())
+    {
         store
             .interrupt_in_flight_run(
                 &routine_id,
+                expected_run,
                 &reason,
                 Some(json!({
                     "status": "interrupted_by_session_control",
