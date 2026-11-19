@@ -858,11 +858,6 @@ fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec
             snapshot,
         ),
         check_provider_cli(ProviderKind::Codex, configured.contains("codex"), snapshot),
-        check_provider_cli(
-            ProviderKind::Gemini,
-            configured.contains("gemini"),
-            snapshot,
-        ),
         check_provider_cli(ProviderKind::OpenCode, opencode_configured, snapshot),
         check_opencode_mcp_config(opencode_configured),
         check_opencode_serve_health_probe(opencode_configured),

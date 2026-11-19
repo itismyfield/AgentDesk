@@ -59,8 +59,7 @@ fn provider_exec_registry_conformance_invariant() {
                 assert!(provider.compact_env_vars(80).is_empty());
                 assert!(!provider.compact_cli_config(80, 100_000).is_empty());
             }
-            ProviderCompactionAdapter::GeminiDisabled
-            | ProviderCompactionAdapter::OpenCodeDisabled
+            ProviderCompactionAdapter::OpenCodeDisabled
             | ProviderCompactionAdapter::QwenDisabled
             | ProviderCompactionAdapter::StreamJsonDisabled(_) => {
                 assert!(provider.compact_env_vars(80).is_empty());
@@ -95,15 +94,7 @@ fn provider_exec_registry_conformance_invariant() {
     );
     assert_eq!(
         supported_provider_ids(),
-        vec![
-            "claude",
-            "codex",
-            "gemini",
-            "opencode",
-            "qwen",
-            "grok",
-            "antigravity"
-        ]
+        vec!["claude", "codex", "opencode", "qwen", "grok", "antigravity"]
     );
     for provider_id in supported_provider_ids() {
         assert_eq!(
@@ -187,7 +178,6 @@ fn provider_exec_registry_conformance_invariant() {
             ProviderKind::Claude,
             vec![
                 ProviderKind::Codex,
-                ProviderKind::Gemini,
                 ProviderKind::Grok,
                 ProviderKind::OpenCode,
                 ProviderKind::Qwen,
@@ -196,17 +186,6 @@ fn provider_exec_registry_conformance_invariant() {
         (
             ProviderKind::Codex,
             vec![
-                ProviderKind::Claude,
-                ProviderKind::Gemini,
-                ProviderKind::Grok,
-                ProviderKind::OpenCode,
-                ProviderKind::Qwen,
-            ],
-        ),
-        (
-            ProviderKind::Gemini,
-            vec![
-                ProviderKind::Codex,
                 ProviderKind::Claude,
                 ProviderKind::Grok,
                 ProviderKind::OpenCode,
@@ -218,7 +197,6 @@ fn provider_exec_registry_conformance_invariant() {
             vec![
                 ProviderKind::Codex,
                 ProviderKind::Claude,
-                ProviderKind::Gemini,
                 ProviderKind::Grok,
                 ProviderKind::Qwen,
             ],
@@ -228,7 +206,6 @@ fn provider_exec_registry_conformance_invariant() {
             vec![
                 ProviderKind::Codex,
                 ProviderKind::Claude,
-                ProviderKind::Gemini,
                 ProviderKind::Grok,
                 ProviderKind::OpenCode,
             ],
@@ -238,7 +215,6 @@ fn provider_exec_registry_conformance_invariant() {
             vec![
                 ProviderKind::Codex,
                 ProviderKind::Claude,
-                ProviderKind::Gemini,
                 ProviderKind::OpenCode,
                 ProviderKind::Qwen,
             ],
@@ -261,7 +237,6 @@ fn provider_exec_registry_conformance_invariant() {
         vec![
             ProviderKind::Codex,
             ProviderKind::Claude,
-            ProviderKind::Gemini,
             ProviderKind::Grok,
             ProviderKind::OpenCode,
             ProviderKind::Qwen,

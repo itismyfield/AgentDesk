@@ -1,5 +1,7 @@
 # Gemini CLI 0.38.0 -> 0.38.1 Review for AgentDesk
 
+<!-- doc-path-refs: removed src/services/gemini.rs -->
+
 Issue: `#36`  
 Date: `2026-04-18`
 

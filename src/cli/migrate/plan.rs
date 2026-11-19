@@ -376,7 +376,7 @@ fn parse_fallback_provider(raw: Option<&str>) -> Result<Option<ProviderKind>, St
     };
     let parsed = ProviderKind::from_str(raw).ok_or_else(|| {
         format!(
-            "Unsupported --fallback-provider '{}'. Expected one of: claude, codex, gemini, opencode, qwen.",
+            "Unsupported --fallback-provider '{}'. Expected one of: claude, codex, opencode, qwen.",
             raw
         )
     })?;
@@ -996,7 +996,6 @@ fn map_known_provider(raw: &str) -> Option<ProviderKind> {
     match normalized.as_str() {
         "anthropic" => Some(ProviderKind::Claude),
         "openai" | "openai-codex" | "codex" => Some(ProviderKind::Codex),
-        "google" | "gemini" => Some(ProviderKind::Gemini),
         _ => None,
     }
 }
@@ -1008,9 +1007,6 @@ fn map_provider_from_model(model: &str) -> Option<ProviderKind> {
     }
     if normalized.starts_with("openai-codex/") || normalized.starts_with("openai/") {
         return Some(ProviderKind::Codex);
-    }
-    if normalized.starts_with("google/") || normalized.contains("gemini") {
-        return Some(ProviderKind::Gemini);
     }
     None
 }

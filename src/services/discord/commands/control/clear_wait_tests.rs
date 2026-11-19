@@ -43,7 +43,7 @@ fn context(shared: &SharedData, provider: &ProviderKind) -> QueuePersistenceCont
 fn a_clear_overtakes_a_held_pane_effect_and_discards_the_live_head() {
     let root = tempfile::tempdir().expect("scratch runtime root");
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let channel_id = ChannelId::new(6_995_101);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

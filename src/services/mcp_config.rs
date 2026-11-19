@@ -93,9 +93,6 @@ pub(crate) fn provider_has_mcp_server(provider: &ProviderKind, server_name: &str
                 normalized,
             )
         }),
-        ProviderKind::Gemini => {
-            runtime_config_contains_server(normalized) || gemini_config_contains_server(normalized)
-        }
         _ => false,
     }
 }
@@ -831,13 +828,6 @@ fn opencode_config_contains_server(server_name: &str) -> bool {
 
 fn qwen_config_contains_server(server_name: &str) -> bool {
     let Some(path) = qwen_config_path() else {
-        return false;
-    };
-    json_mcp_config_contains_server(&path, server_name)
-}
-
-fn gemini_config_contains_server(server_name: &str) -> bool {
-    let Some(path) = gemini_config_path() else {
         return false;
     };
     json_mcp_config_contains_server(&path, server_name)

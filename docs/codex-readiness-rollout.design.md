@@ -148,7 +148,7 @@ d2의 P2-B 경로(사람 턴 + 이름 없는 종료 + Stop 훅 없음)는 `Codex
 
 | 출처 | 진입 좌표 | 소유자 | 준비 판정 소비 |
 |---|---|---|---|
-| Discord 사람·봇 메시지(유휴) | `intake_turn.rs:1549`~`:1600` → tmux `codex/absence_launch.rs:235` `try_codex_tui_warm_followup`, herdr `provider_dispatch.rs:630` → `herdr_turn.rs:515` `followup` | 채널 mailbox, owner 입력이면 `owner_input.rs:835` `start_idle` | 준비 대기·제출 게이트 |
+| Discord 사람·봇 메시지(유휴) | `intake_turn.rs:1549`~`:1600` → tmux `codex/absence_launch.rs:235` `try_codex_tui_warm_followup`, herdr `provider_dispatch.rs:626` → `herdr_turn.rs:515` `followup` | 채널 mailbox, owner 입력이면 `owner_input.rs:835` `start_idle` | 준비 대기·제출 게이트 |
 | Discord 메시지(작업 중) | `discord/queue_io/input_owner/effect/codex.rs:116`(tmux), `:143`(herdr `busy.rs:17`) | 입력 owner | `read_turn`(이미 rollout). 화면은 초안·모달만 |
 | API·health 전달 | `discord/health/turn_deliver/inject.rs:329`·`:944` | 요청자 ticket | 위와 같음 |
 | 루틴·예약·HTTP 시작 | `owner_input.rs:847`~`:852`(provenance ticket 유지) | owner | `native_read` |

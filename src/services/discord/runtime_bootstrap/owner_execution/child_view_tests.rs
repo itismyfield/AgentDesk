@@ -15,6 +15,6 @@ async fn thread_children_refresh_reader_precedes_unrelated_provider_return() {
     let channel = root.path().join("o_store/43");
     std::fs::create_dir_all(&channel).unwrap();
     std::fs::write(channel.join("init"), b"damaged").unwrap();
-    refresh(&ProviderKind::Gemini, None).await;
+    refresh(&ProviderKind::OpenCode, None).await;
     assert_eq!(boot.child_fixture_held(43), Some(true));
 }

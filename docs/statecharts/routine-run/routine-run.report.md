@@ -54,7 +54,7 @@ Prejudge 결과는 스킬 스크립트의 종료 코드와 답을 추상화했�
 | MayHaveSent/keyPending | `queued_head/v2/attempt.rs:103-115`의 arm commit 뒤 first-key 가능성, `src/services/discord/queue_io/input_owner/effect.rs:105-152`의 positive NotSent vs WriteUncertain. keyPending은 실제 native 수용 관측을 나눈 모델용 boolean이며 durable authority 아님 |
 | acceptedTurns/lateAcceptedTurns | `launch.rs:214-271` start 확인과 별개인 실제 routine prompt 수용 관측. `agent_executor.rs:361-515,653-815`가 현행 새 turn retry를 할 수 있음. 0/1/2는 최소 반례 경계 |
 | expired/retryCount | `agent_executor.rs:481-515,995-1007`, `reliability.rs:6-25`의 current_attempt_started_at+timeout; `store.rs:2383-2429`의 retry_count. 실제 60/600초·timeout 값은 boolean 기한으로 축약 |
-| recovering | `src/server/mod.rs:2681-2688,2707-2712`의 boot/periodic expired lease recovery. 제안은 owner 취소 commit ACK 동안 기존 status=running 유지 |
+| recovering | `src/server/mod.rs:2397-2404,2423-2428`의 boot/periodic expired lease recovery. 제안은 owner 취소 commit ACK 동안 기존 status=running 유지 |
 | recorded/notified | `store.rs:2224-2381,2493`, `agent_executor.rs:406-422`의 exact terminal 저장; `discord_log/failure_alert.rs:47-104`, `discord_log.rs:286-324` 및 설계의 사건×방식 대시보드/알림 표 |
 | sharedDestroyed | `agent_executor.rs:825-828`의 owner_input shared TUI teardown no-op. mutant는 이 no-op 제거를 모델링 |
 | outcomeKind | `agent_executor/owner_input.rs:95-137`의 Consumed(현재 succeeded+agent 표기, 실제턴0)와 설계의 command_consumed 분리. agent 성공 불변식이 action 문자열만 보지 않음 |

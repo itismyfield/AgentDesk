@@ -812,7 +812,6 @@
 "src/services/dispatched_sessions.rs" = 1377
 "src/services/dispatches/discord_delivery/orchestration.rs" = 1502
 "src/services/dispatches/outbox_route.rs" = 1178
-"src/services/gemini.rs" = 1351
 "src/services/memory/memento.rs" = 1402
 "src/services/onboarding/mod.rs" = 2858
 "src/services/opencode.rs" = 2732

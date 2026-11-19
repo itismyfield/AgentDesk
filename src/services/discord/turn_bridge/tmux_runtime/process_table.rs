@@ -308,8 +308,7 @@ fn provider_cli_binary_name(provider: &ProviderKind) -> Option<&'static str> {
         ProviderKind::Claude => Some("claude"),
         ProviderKind::Codex => Some("codex"),
         ProviderKind::Qwen => Some("qwen"),
-        ProviderKind::Gemini
-        | ProviderKind::Grok
+        ProviderKind::Grok
         | ProviderKind::Antigravity
         | ProviderKind::OpenCode
         | ProviderKind::Unsupported(_) => None,
