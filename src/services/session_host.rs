@@ -1,6 +1,6 @@
-//! Session host boundary: where an interactive provider session lives (tmux
-//! pane or child process) and the observation/input operations on it. Creation,
-//! destruction, execution identity and cancel routing stay with their owners.
+//! Session host boundary: where an interactive provider session lives (tmux, Herdr pane or child
+//! process) and the observation, input, create and terminate effects on it. Launch preparation,
+//! admission, execution identity and cancel routing stay with their owners.
 
 mod herdr {
     #[cfg(unix)]
@@ -21,6 +21,10 @@ mod herdr {
     pub(crate) mod wire;
 }
 mod consumer_guard;
+mod create;
+pub(crate) use create::HostCreate;
+#[cfg(test)]
+pub(crate) use create::create_in_effect;
 mod herdr_gate;
 mod herdr_host;
 mod herdr_registry;

@@ -1,5 +1,6 @@
 //! Physical create is independent of the subsequent pane/evidence projection.
 use super::*;
+use crate::services::session_host::{HostCreate, host_for};
 
 pub(super) struct Created {
     pub witness: ServerWitness,
@@ -42,11 +43,13 @@ pub(super) async fn create(
         let sent_at = SystemTime::now();
         let created = on_blocking_thread(host, move |host| {
             let _held = held;
-            let _permit = match checked.begin_effect() {
+            let permit = match checked.begin_effect() {
                 Ok(permit) => permit,
                 Err(detail) => return HerdrCreateOutcome::NotSent(detail),
             };
-            host.create_user_default(&request)
+            host_for(HostKind::Herdr)
+                .create(HostCreate::herdr_user_default(host, &request, &permit))
+                .into_herdr()
         })
         .await;
         (witness, created, sent_at)
@@ -67,11 +70,13 @@ pub(super) async fn create(
         let sent_at = SystemTime::now();
         let created = on_blocking_thread(host, move |host| {
             let _held = held;
-            let _permit = match checked.begin_effect() {
+            let permit = match checked.begin_effect() {
                 Ok(permit) => permit,
                 Err(detail) => return HerdrCreateOutcome::NotSent(detail),
             };
-            host.create(&request)
+            host_for(HostKind::Herdr)
+                .create(HostCreate::herdr(host, &request, &permit))
+                .into_herdr()
         })
         .await;
         (witness, created, sent_at)

@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::process::Output;
 
+#[cfg(unix)]
+use super::create::{HostCreate, Request as CreateRequest, TmuxCreate, TmuxPlace};
 use super::model::{
     HostCapabilities, HostError, HostKey, HostKind, HostLiveness, HostMutation, HostPresence,
     HostSessionRef,
@@ -26,6 +28,18 @@ fn map_output(result: Result<Output, String>) -> Result<HostMutation, HostError>
     }
 }
 
+/// The physical tmux create of an admitted launch.
+#[cfg(unix)]
+pub(super) fn create(request: &TmuxCreate<'_>) -> Result<Output, String> {
+    let (session, dir, command) = (request.session, request.working_dir, request.command);
+    match request.place {
+        TmuxPlace::NewSession(identity) => {
+            tmux::create_session_with_identity(session, dir, command, identity)
+        }
+        TmuxPlace::DeadPane => tmux::respawn_dead_pane(session, dir, command),
+    }
+}
+
 /// tmux `send-keys` name of a host key.
 pub(crate) fn tmux_key_name(key: HostKey) -> &'static str {
     match key {
@@ -41,6 +55,41 @@ pub(crate) fn tmux_key_name(key: HostKey) -> &'static str {
 }
 
 impl TmuxHost {
+    /// A new detached session running the prepared command; the launch keeps tmux's raw result.
+    #[cfg(unix)]
+    pub(crate) fn create_session(
+        &self,
+        session: &str,
+        working_dir: Option<&str>,
+        command: &str,
+        identity: &crate::domain::session_identity::managed::ManagedIdentity,
+    ) -> Result<Output, String> {
+        self.create(HostCreate(CreateRequest::Tmux(TmuxCreate {
+            session,
+            working_dir,
+            command,
+            place: TmuxPlace::NewSession(identity),
+        })))
+        .into_output()
+    }
+
+    /// The prepared command started again in the session's dead pane; a live pane is refused.
+    #[cfg(unix)]
+    pub(crate) fn respawn_dead_pane(
+        &self,
+        session: &str,
+        working_dir: Option<&str>,
+        command: &str,
+    ) -> Result<Output, String> {
+        self.create(HostCreate(CreateRequest::Tmux(TmuxCreate {
+            session,
+            working_dir,
+            command,
+            place: TmuxPlace::DeadPane,
+        })))
+        .into_output()
+    }
+
     /// Preserve the stop owner's keys and raw status/error handling.
     pub(crate) fn interrupt_keys(&self, name: &str, keys: &[&str]) -> Result<Output, String> {
         tmux::send_keys(name, keys)
@@ -260,6 +309,67 @@ mod tests {
             .into_bounded()
             .unwrap();
         assert_eq!(std::fs::read_to_string(log).unwrap(), original);
+        drop(root);
+    }
+
+    // The prepared argv, cwd and identity reach tmux as the platform call sends them, a new session
+    // and a dead pane's restart stay distinct, and the launch reads tmux's own status and stderr.
+    #[cfg(unix)]
+    #[test]
+    fn create_runs_the_prepared_argv_as_the_platform_does_and_keeps_the_raw_result() {
+        use super::super::create::HostCreation;
+        use crate::services::provider_teardown::tests::test_support::FakeTmux;
+        let root = crate::config::TestRuntimeRootGuard::new();
+        let name = "adk-s04-create-port";
+        let fake = FakeTmux::install(name);
+        let identity = crate::services::session_identity_metadata::runtime_identity(name).unwrap();
+        let (dir, command) = (Some("/tmp"), "bash '/tmp/launch one.sh'");
+        let failed = |output: Result<Output, String>| {
+            let output = output.unwrap();
+            (output.status.code(), output.stderr)
+        };
+        let platform = [
+            failed(tmux::create_session_with_identity(
+                name, dir, command, &identity,
+            )),
+            failed(tmux::respawn_dead_pane(name, dir, command)),
+        ];
+        let original = fake.take_calls();
+        let through = [
+            failed(TmuxHost.create_session(name, dir, command, &identity)),
+            failed(TmuxHost.respawn_dead_pane(name, dir, command)),
+        ];
+        assert_eq!(fake.take_calls(), original);
+        assert_eq!(through, platform);
+        assert!(platform.iter().all(|(code, stderr)| *code == Some(1)
+            && String::from_utf8_lossy(stderr).contains("can't find session")));
+        let verbs: Vec<_> = original
+            .iter()
+            .filter_map(|call| call.split(' ').next())
+            .collect();
+        assert_eq!(verbs, ["new-session", "respawn-pane"], "{original:?}");
+        assert!(
+            original
+                .iter()
+                .all(|call| call.ends_with(&format!("-c /tmp {command}")))
+        );
+
+        let session = |command| {
+            CreateRequest::Tmux(TmuxCreate {
+                session: name,
+                working_dir: dir,
+                command,
+                place: TmuxPlace::NewSession(&identity),
+            })
+        };
+        let refused = TmuxHost.create(HostCreate(session(command)));
+        assert!(
+            matches!(refused.creation, HostCreation::Indeterminate(why) if why.contains("can't find session"))
+        );
+        fake.enable_fixture_launch();
+        let created = TmuxHost.create(HostCreate(session("true")));
+        assert_eq!(created.creation, HostCreation::Created(name.into()));
+        assert!(created.into_output().unwrap().status.success());
         drop(root);
     }
 

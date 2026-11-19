@@ -14,6 +14,10 @@ pub(crate) trait InteractiveSessionHost: Send + Sync {
     ) -> super::submit::SubmitOutcome {
         super::submit::submit(self.kind(), target, payload)
     }
+    /// Starts a launch its owner prepared and admitted; the reply is the create's, never a bind.
+    fn create(&self, request: super::create::HostCreate<'_>) -> super::create::CreateOutcome {
+        super::create::create(self.kind(), request)
+    }
     fn kind(&self) -> HostKind;
     fn capabilities(&self) -> HostCapabilities;
     fn presence(&self, session: HostSessionRef<'_>) -> HostPresence;
