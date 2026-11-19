@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::{PgPool, Row};
 
-use super::dispatch_summary::{parse_dispatch_json_text, summarize_dispatch_result};
+use crate::domain::dispatch_summary::{parse_dispatch_json_text, summarize_dispatch_result};
 
 pub(crate) async fn query_dispatch_row_pg(
     pool: &PgPool,

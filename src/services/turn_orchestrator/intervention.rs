@@ -1,11 +1,11 @@
 //! Queued message payloads and their per-source ownership metadata.
 use std::time::Instant;
 
-use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+use poise::serenity_prelude::{MessageId, UserId};
 
 use crate::services::cluster::attachment_transfer::uploads::PendingUploads;
 
-use super::SourceMessageQueuedGeneration;
+use super::{QueuedRoute, SourceMessageQueuedGeneration};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InterventionMode {
@@ -43,15 +43,6 @@ pub(crate) struct Intervention {
     pub(crate) has_reply_boundary: bool,
     pub(crate) merge_consecutive: bool,
     pub(crate) pending_uploads: PendingUploads,
-}
-
-/// Where a turn resolved to run and the routing its claim publishes, kept with a queued item so
-/// a replay uses this decision instead of resolving again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct QueuedRoute {
-    pub(crate) target: ChannelId,
-    pub(crate) parent: Option<ChannelId>,
-    pub(crate) role: Option<ChannelId>,
 }
 
 #[cfg(test)]

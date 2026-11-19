@@ -2,7 +2,14 @@
 //! Legacy local records retain their JSON string representation.
 use serde::{Deserialize, Serialize};
 
-use super::AttachmentMessageIdentity;
+/// The message a bundle belongs to. Every field is compared, so a bundle can
+/// never be consumed against another bot, channel, or message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AttachmentMessageIdentity {
+    pub provider: String,
+    pub channel_id: String,
+    pub user_msg_id: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
