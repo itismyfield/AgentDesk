@@ -91,3 +91,24 @@ Before, the tmux watch returns Keep with no stored due. Both `RHNoInfiniteKeep` 
 `RHEndExactlyOnce` fail. After, the same fixture reaches one explained refusal. Reboot's expected
 `RHNoRebootMidHold` witness demonstrates a pre-existing hold and an independent liveness check
 covers resolution. `NoWiring` removes the new due assignment and restores the liveness failures.
+
+## tmux review repairs
+
+The existing RHSpec follows the original's due into the reserved retry. When the first owner
+turn after expiry observes a reserved retry, the leaf returns NotSent and closes its own gate.
+An attemptless expiry and a reserved-leaf expiry compare the same original member boundary.
+Admission of B after A's hold leaves B queued in either ordering. Modal and manual draft
+hold their own disposition while the screen is blocked. Releasing the screen and publishing
+valid readiness let the existing watch wake the delivery route.
+
+| cfg pair | Before | After |
+|---|---|---|
+| `TmuxRetryDue` | `RHNoRetryPastDue`, `RHEndExactlyOnce` RED | GREEN |
+| `TmuxModalHold` | `RHOtherHoldPreserved`, `RHHealthyDelivers` RED | GREEN |
+| `TmuxDraftHold` | `RHOtherHoldPreserved`, `RHHealthyDelivers` RED | GREEN |
+| `TmuxLateFollower` | `RHNoLateLoss` RED | GREEN |
+
+The official WSL checker ran 102 cfg and 424 rule runs with zero unexpected outcomes.
+The four Before configs select the corresponding model defect and the After configs use the
+same scenario without it. The model's due rule concerns the next eligible actor transition.
+The regression tests cover preparation latency and the ingress barrier in the implementation.
