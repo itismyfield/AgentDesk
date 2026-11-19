@@ -2520,6 +2520,7 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/settings.rs`
 - `src/services/tmux_common.rs`
 - `src/services/tui_o/writer/deliver.rs`
+- `src/services/tui_o/writer/host.rs`
 - `src/services/tui_prompt_dedupe/binding_events.rs`
 - `src/services/tui_prompt_dedupe/runtime_binding/codex_cursor.rs`
 - `src/services/turn_orchestrator.rs`
