@@ -769,7 +769,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => ARGV.fetch(2),
-    "job_timeout_minutes" => 100, "job_sha256" => "36fe9726e97b833fa7df1004d67b78d731558597e4d13a6ee9038474b94d55c1",
+    "job_timeout_minutes" => 100, "job_sha256" => "ae7d7ced831496a2e7e8024ab2b77bb41752efe4a70101d07fe581e08e4dbca2",
     "cargo_steps" => {
       "Disable remote compiler cache" => {
         "commands" => [%q{printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=\nADK_CARGO_PRIORITY=1\n' >> "$GITHUB_ENV"}], "timeout_minutes" => nil,
@@ -788,7 +788,7 @@ targets = {
           'mapfile -t timings < <(bash scripts/ci/nextest-timings.sh "$RUNNER_TEMP/nextest-timings" 6)',
           'python3 scripts/ci/nextest_ci.py plan --universe "$NEXTEST_DIR/universe.json" \\',
           '--archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 6 --sha "$GITHUB_SHA" --scope linux-lib \\',
-          "--rust-version 1.94.1 --nextest-version \"$(cargo nextest --version | awk 'NR==1 {print $2}')\" \\",
+          %q{--rust-version 1.94.1 --nextest-version "$(${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}cargo nextest --version | awk 'NR==1 {print $2}')" \\},
           "--target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \\",
           '--build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan" "${timings[@]}"',
           'python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"',
@@ -1228,9 +1228,9 @@ role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key
     expected_nightly["steps"] = expected_nightly["steps"].map do |step|
       next if step.is_a?(Hash) && step["name"] == "Disable remote compiler cache"
       if step.is_a?(Hash) && step["name"] == "Archive, list, compare and plan"
-        list = "cargo nextest list --archive-file "
         prefix = %q{${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}}
-        next step.merge("run" => step.fetch("run").sub(prefix + list, list))
+        queries = /cargo nextest (?:list --archive-file|--version) /
+        next step.merge("run" => step.fetch("run").gsub(/#{Regexp.escape(prefix)}(?=#{queries})/, ""))
       end
 
       step.is_a?(Hash) && hosted_actions.include?(step["uses"]) ? step.reject { |key, _| key == "if" } : step
