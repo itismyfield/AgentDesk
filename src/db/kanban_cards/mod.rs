@@ -230,12 +230,13 @@ pub(crate) fn kanban_card_row_to_record_pg(
         latest_dispatch_chain_depth: row
             .try_get::<Option<i64>, _>("d_depth")
             .map_err(|error| format!("decode d_depth: {error}"))?,
-        latest_dispatch_result_summary: crate::dispatch::summarize_dispatch_from_text(
-            latest_dispatch_type.as_deref(),
-            latest_dispatch_status.as_deref(),
-            latest_dispatch_result_raw.as_deref(),
-            latest_dispatch_context_raw.as_deref(),
-        ),
+        latest_dispatch_result_summary:
+            crate::domain::dispatch_summary::summarize_dispatch_from_text(
+                latest_dispatch_type.as_deref(),
+                latest_dispatch_status.as_deref(),
+                latest_dispatch_result_raw.as_deref(),
+                latest_dispatch_context_raw.as_deref(),
+            ),
         description: row
             .try_get::<Option<String>, _>("description")
             .map_err(|error| format!("decode description: {error}"))?,

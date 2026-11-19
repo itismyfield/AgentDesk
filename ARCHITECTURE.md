@@ -413,7 +413,6 @@ src/
 │   ├── dispatch_query.rs
 │   ├── dispatch_snapshot_tests.rs
 │   ├── dispatch_status.rs
-│   ├── dispatch_summary.rs
 │   ├── fresh_worktree_pg_tests.rs
 │   ├── mod.rs
 │   ├── test_support.rs
@@ -481,7 +480,9 @@ src/
 │   ├── cluster_policy.rs
 │   ├── conversation.rs
 │   ├── dispatch_route.rs
+│   ├── dispatch_summary.rs
 │   ├── file_sync.rs
+│   ├── fix_safety.rs
 │   ├── host_observation.rs
 │   ├── human_input.rs
 │   ├── intake_consent.rs
@@ -5106,6 +5107,7 @@ src/
 │   ├── api.rs
 │   ├── async_bridge.rs
 │   ├── auth.rs
+│   ├── bridge_deadline.rs
 │   ├── dag.rs
 │   ├── discord.rs
 │   ├── env_flag.rs
