@@ -13,7 +13,8 @@ use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::{Fingerprint, MAX_PARTIAL_BYTES};
 use crate::services::tui_o::writer::input_facts::native::Registration;
 use crate::services::tui_o::writer::input_facts::native::terminal::{RawWitness, Tail, raw_closer};
-use std::io::{Read, Seek, SeekFrom};
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom, Take};
 
 /// The opened file's stamp, only while the source path still names that same file.
 pub(super) fn stamp(source: &Source, file: &std::fs::File) -> Result<Fingerprint, String> {
@@ -34,7 +35,15 @@ pub(super) fn stamp(source: &Source, file: &std::fs::File) -> Result<Fingerprint
 
 /// Reads exactly `through..EOF` once; a stamp or byte that differs from the capture discards it.
 fn read_tail(source: &Source, tail: &Tail) -> Result<(Vec<u8>, std::fs::File), String> {
-    let mut file = std::fs::File::open(&source.transcript).map_err(|e| e.to_string())?;
+    read_tail_with(source, tail, |reader, bytes| reader.read_to_end(bytes))
+}
+
+pub(in crate::services::discord::turn_finalizer) fn read_tail_with(
+    source: &Source,
+    tail: &Tail,
+    read: impl FnOnce(&mut Take<&File>, &mut Vec<u8>) -> io::Result<usize>,
+) -> Result<(Vec<u8>, File), String> {
+    let mut file = File::open(&source.transcript).map_err(|e| e.to_string())?;
     let before = stamp(source, &file)?;
     let want = before.len.saturating_sub(tail.through);
     if before != tail.fingerprint || want == 0 || want > MAX_PARTIAL_BYTES as u64 {
@@ -43,10 +52,7 @@ fn read_tail(source: &Source, tail: &Tail) -> Result<(Vec<u8>, std::fs::File), S
     let mut bytes = Vec::new();
     file.seek(SeekFrom::Start(tail.through))
         .map_err(|e| e.to_string())?;
-    (&file)
-        .take(want + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
+    read(&mut (&file).take(want + 1), &mut bytes).map_err(|e| e.to_string())?;
     if bytes.len() as u64 != want
         || blake3::hash(&bytes).to_hex().as_str() != tail.digest
         || stamp(source, &file)? != before

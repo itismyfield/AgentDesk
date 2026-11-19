@@ -454,7 +454,7 @@ impl<B: BindingEvents> Sources<B> {
 
     /// The buffered unterminated tail, once the seed has every complete record before it.
     #[cfg(unix)]
-    fn raw_tail(
+    pub(crate) fn raw_tail(
         &self,
         source: &SourceId,
     ) -> Option<super::super::input_facts::native::terminal::Tail> {
@@ -474,6 +474,15 @@ impl<B: BindingEvents> Sources<B> {
                 fingerprint,
             }
         })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn reuse_raw_witness<'a>(
+        &self,
+        source: &SourceId,
+        raw: &'a super::super::input_facts::native::terminal::RawWitness,
+    ) -> Option<&'a super::super::input_facts::native::terminal::RawWitness> {
+        (self.raw_tail(source).as_ref() == Some(&raw.tail)).then_some(raw)
     }
 
     /// Asks the port to prove a whole strict closer at EOF for one exact receipted ticket, then
@@ -665,8 +674,9 @@ impl<B: BindingEvents> Sources<B> {
                     break;
                 };
                 // A proof holds only while the capture still shows the tail it was read from.
-                let raw = raw.as_ref().map(|(_, raw)| raw);
-                let raw = raw.filter(|raw| self.raw_tail(&source).as_ref() == Some(&raw.tail));
+                let raw = raw
+                    .as_ref()
+                    .and_then(|(_, raw)| self.reuse_raw_witness(&source, raw));
                 let Ok((current, _)) =
                     native.observe(self.channel, &source, &origin, snapshot, raw)
                 else {
