@@ -29,12 +29,25 @@ async fn state(pool: &sqlx::PgPool, id: &str) -> (String, Option<String>, Option
     .unwrap()
 }
 
-async fn work_fixture() -> (RuntimeDatabase, CompletionFixture) {
-    let runtime = crate::config::TestRuntimeRootGuard::new();
-    let live = RuntimeDatabase::after_env_lock();
-    let fixture = CompletionFixture::in_runtime(runtime).await;
-    live.install(&fixture.db.database_url);
-    (live, fixture)
+struct WorkFixture {
+    // The live DB configuration must be restored while the ROOT lock still belongs to the fixture.
+    live: RuntimeDatabase,
+    completion: CompletionFixture,
+}
+
+impl WorkFixture {
+    async fn new() -> Self {
+        let runtime = crate::config::TestRuntimeRootGuard::new();
+        let live = RuntimeDatabase::after_env_lock();
+        let completion = CompletionFixture::in_runtime(runtime).await;
+        live.install(&completion.db.database_url);
+        Self { live, completion }
+    }
+
+    async fn close(self) {
+        drop(self.live);
+        self.completion.close().await;
+    }
 }
 
 async fn watcher(
@@ -96,7 +109,8 @@ async fn native_8148_watcher_dispatch_fallback_preserves_work_types_pg() {
     )) {
         return;
     }
-    let (_live, fixture) = work_fixture().await;
+    let work = WorkFixture::new().await;
+    let fixture = &work.completion;
     let pool = &fixture.pool;
     let row = b2b_row(&fixture.input(81480611));
     let shared = fixture.shared(1);
@@ -154,7 +168,7 @@ async fn native_8148_watcher_dispatch_fallback_preserves_work_types_pg() {
         );
         assert_eq!(state(pool, id).await.3, i64::from(completes), "{id}");
     }
-    fixture.close().await;
+    work.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -165,7 +179,8 @@ async fn native_8148_dispatch_snapshot_failure_settles_policy_and_cleans_row_pg(
     )) {
         return;
     }
-    let (_live, fixture) = work_fixture().await;
+    let work = WorkFixture::new().await;
+    let fixture = &work.completion;
     let pool = &fixture.pool;
     seed(pool, WORK, "implementation").await;
     let api = Recorder::start_with_status(Arc::new(|method, uri| {
@@ -195,5 +210,5 @@ async fn native_8148_dispatch_snapshot_failure_settles_policy_and_cleans_row_pg(
             .iter()
             .any(|call| call.starts_with("GET /api/dispatches/native-work "))
     );
-    fixture.close().await;
+    work.close().await;
 }
