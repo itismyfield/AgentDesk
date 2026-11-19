@@ -264,6 +264,7 @@ fn profile_hash_is_the_definition_hash_for_both_repositories() {
     for repository in [Repository::Adk, Repository::CookingHeart] {
         let definition = validate_definition(DefinitionInput {
             workflow_options: None,
+            pipeline: None,
             repository,
             title: "Contract".into(),
             goal: "Preserve exact evidence".into(),

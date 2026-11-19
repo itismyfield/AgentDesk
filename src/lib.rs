@@ -303,6 +303,7 @@ pub mod home_runtime {
 pub mod campaign_adapter {
     pub use crate::db::server_campaigns::evidence_store;
     pub use crate::domain::campaign::lifecycle::{HoldReason, NextAction, StepKey};
+    pub use crate::domain::campaign::{pipeline, pipeline_fields};
     pub use crate::services::campaign_execution::{
         adk_adapter, adk_observe, adk_profile, adk_resources, adk_workspace, candidate_seal,
         effect_envelope, evidence, evidence_gate, execution_pin, host_gate, host_worker,

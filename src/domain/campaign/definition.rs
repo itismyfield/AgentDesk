@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use super::model::Repository;
+use super::pipeline::PipelineDefinition;
 use super::workflow_options::WorkflowOptions;
 use crate::utils::dag::{self, DagError};
 
@@ -21,6 +22,8 @@ pub struct DefinitionInput {
     pub nodes: Vec<NodeDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_options: Option<WorkflowOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<Box<PipelineDefinition>>,
 }
 
 impl DefinitionInput {
@@ -158,6 +161,10 @@ fn graph_error(value: DagError) -> DefinitionError {
 
 pub fn validate_definition(input: DefinitionInput) -> Result<ValidatedDefinition, DefinitionError> {
     use DefinitionErrorCode as C;
+    // Pipeline definitions require the pipeline-aware save path.
+    if input.pipeline.is_some() {
+        return Err(error(C::InvalidField, "pipeline"));
+    }
     if !text(&input.title, 512)
         || !text(&input.goal, 64_000)
         || input.nodes.is_empty()

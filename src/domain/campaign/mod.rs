@@ -6,6 +6,8 @@ pub mod evidence_gate;
 pub mod execution_pin;
 pub mod lifecycle;
 pub mod model;
+pub mod pipeline;
+pub mod pipeline_fields;
 pub mod pipeline_rules;
 pub mod profile;
 pub mod review_gate;
