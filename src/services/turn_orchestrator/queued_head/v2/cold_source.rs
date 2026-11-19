@@ -10,36 +10,6 @@ use crate::services::turn_orchestrator::queued_head::v2_types::cold_source::{
     BindingIntent, PreKeyPin,
 };
 
-pub(super) fn validate(snapshot: &SnapshotV2) -> Result<(), String> {
-    if snapshot.source_bindings.len() > CAPACITY {
-        return Err("source binding debt exceeds capacity".into());
-    }
-    let mut keys = std::collections::HashSet::new();
-    for intent in &snapshot.source_bindings {
-        let key: AttemptRef =
-            serde_json::from_value(intent.ticket.key.clone()).map_err(|e| e.to_string())?;
-        if !keys.insert(serde_json::to_string(&intent.ticket.key).map_err(|e| e.to_string())?)
-            || intent.ticket.source.is_some()
-            || key.attempt.provider != "claude"
-            || !matches!(key.attempt.source, AttemptSource::PreSource { .. })
-            || intent.pin.binding_seq == 0
-            || intent.pin.session_id.is_empty()
-            || intent.pin.owner_root.is_empty()
-            || intent.selected.as_ref().is_some_and(|s| {
-                s.target != intent.ticket.key["attempt"]["target"]
-                    || s.provider != "claude"
-                    || s.session_id != intent.pin.session_id
-                    || s.transcript != intent.pin.transcript
-                    || s.offset != intent.pin.offset
-                    || intent.pin.file.is_some_and(|f| f != s.file)
-            })
-        {
-            return Err("stored source binding lineage invalid".into());
-        }
-    }
-    Ok(())
-}
-
 #[cfg(unix)]
 impl Owner {
     pub(crate) fn pin_source(

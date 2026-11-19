@@ -13,16 +13,7 @@ mod native_binding;
 #[cfg(all(test, unix))]
 pub(crate) mod native_tests;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Source {
-    pub(crate) target: Value,
-    pub(crate) provider: String,
-    pub(crate) session_id: String,
-    pub(crate) transcript: PathBuf,
-    pub(crate) file: [u64; 2],
-    pub(crate) offset: u64,
-    pub(crate) binding_watermark: Option<String>,
-}
+pub(crate) use crate::domain::human_input::native_source::Source;
 
 impl Source {
     pub(crate) fn validate(&self, key: &Value) -> Result<(), String> {

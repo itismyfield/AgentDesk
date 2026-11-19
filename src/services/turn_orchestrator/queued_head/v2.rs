@@ -9,6 +9,7 @@ pub(crate) mod actor;
 mod attempt;
 pub(crate) mod claude_handoff;
 pub(crate) mod clear;
+#[cfg(unix)]
 mod cold_source;
 mod commit;
 pub(crate) mod control;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::tui_input::human_frame::history::CAPACITY;
 
 pub(super) fn identity(item: &PendingQueueItem) -> QueueIdentity {
     let item = super::super::super::pending_queue_persistence::pending_queue_item_to_intervention(
@@ -105,12 +106,42 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
         ungroup(&mut snapshot, &head)?;
     }
     snapshot.namespace = Some(namespace.into());
-    super::cold_source::validate(&snapshot)?;
+    validate_source_bindings(&snapshot)?;
     // Released unarmed, every member still holds the queued bind its reserve kept.
     snapshot
         .head_injection
         .take_if(|head| head.phase == HeadPhase::Reserved);
     Ok(snapshot)
+}
+
+fn validate_source_bindings(snapshot: &SnapshotV2) -> Result<(), String> {
+    if snapshot.source_bindings.len() > CAPACITY {
+        return Err("source binding debt exceeds capacity".into());
+    }
+    let mut keys = std::collections::HashSet::new();
+    for intent in &snapshot.source_bindings {
+        let key: AttemptRef =
+            serde_json::from_value(intent.ticket.key.clone()).map_err(|e| e.to_string())?;
+        if !keys.insert(serde_json::to_string(&intent.ticket.key).map_err(|e| e.to_string())?)
+            || intent.ticket.source.is_some()
+            || key.attempt.provider != "claude"
+            || !matches!(key.attempt.source, AttemptSource::PreSource { .. })
+            || intent.pin.binding_seq == 0
+            || intent.pin.session_id.is_empty()
+            || intent.pin.owner_root.is_empty()
+            || intent.selected.as_ref().is_some_and(|s| {
+                s.target != intent.ticket.key["attempt"]["target"]
+                    || s.provider != "claude"
+                    || s.session_id != intent.pin.session_id
+                    || s.transcript != intent.pin.transcript
+                    || s.offset != intent.pin.offset
+                    || intent.pin.file.is_some_and(|f| f != s.file)
+            })
+        {
+            return Err("stored source binding lineage invalid".into());
+        }
+    }
+    Ok(())
 }
 
 /// Puts an unmatched reserved unit back as single queued originals in member order, lost members

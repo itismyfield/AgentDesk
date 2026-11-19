@@ -1,5 +1,6 @@
 //! Native input evidence stays attached to its original registration through projection.
 use super::*;
+pub(crate) use crate::domain::human_input::native_source::{Episode, Ticket};
 #[cfg(unix)]
 #[path = "native_barrier.rs"]
 pub(crate) mod barrier;
@@ -41,15 +42,6 @@ pub(crate) fn frame_hashes(text: &str) -> Vec<String> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Episode {
-    pub(crate) user_message_id: u64,
-    pub(crate) turn_nonce: String,
-    pub(crate) generation: u64,
-    #[serde(flatten)]
-    pub(crate) extra: serde_json::Map<String, Value>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Intent {
     Primary(Episode),
     Follower,
@@ -74,16 +66,6 @@ impl Intent {
             Self::Follower => Ok(None),
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Ticket {
-    pub(crate) key: Value,
-    pub(crate) channel_id: u64,
-    pub(crate) source: Option<Source>,
-    pub(crate) owning_episode: Option<Episode>,
-    #[serde(flatten)]
-    pub(crate) extra: serde_json::Map<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

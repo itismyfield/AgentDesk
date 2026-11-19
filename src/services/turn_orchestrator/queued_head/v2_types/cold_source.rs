@@ -1,5 +1,5 @@
 //! Bounded source evidence kept independently of a locally submitted queue head.
-use crate::services::tui_input::human_frame::history::v2::{Source, native::Ticket};
+use crate::domain::human_input::native_source::{Source, Ticket};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
