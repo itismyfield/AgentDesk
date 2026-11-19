@@ -598,7 +598,7 @@ pub(in crate::services::discord) fn model_hint(
                 "default + models resolved from Qwen settings files".to_string()
             }
         }
-        ProviderKind::Gemini | ProviderKind::Unsupported(_) => "모델 이름 또는 default".to_string(),
+        ProviderKind::Unsupported(_) => "모델 이름 또는 default".to_string(),
     }
 }
 
@@ -610,7 +610,7 @@ pub(crate) fn known_models(provider: &ProviderKind) -> Vec<ModelCatalogEntry> {
         | ProviderKind::Antigravity
         | ProviderKind::OpenCode
         | ProviderKind::Qwen => Vec::new(),
-        ProviderKind::Gemini | ProviderKind::Unsupported(_) => Vec::new(),
+        ProviderKind::Unsupported(_) => Vec::new(),
     }
 }
 
@@ -626,7 +626,7 @@ fn model_aliases(provider: &ProviderKind) -> &'static [(&'static str, &'static s
         | ProviderKind::Antigravity
         | ProviderKind::OpenCode
         | ProviderKind::Qwen => &[],
-        ProviderKind::Gemini | ProviderKind::Unsupported(_) => &[],
+        ProviderKind::Unsupported(_) => &[],
     }
 }
 

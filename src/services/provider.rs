@@ -110,7 +110,6 @@ mod prompt_reuse_tests {
             ProviderKind::Qwen.managed_tmux_wrapper_subcommand(),
             Some("qwen-tmux-wrapper")
         );
-        assert_eq!(ProviderKind::Gemini.managed_tmux_wrapper_subcommand(), None);
         assert_eq!(
             ProviderKind::OpenCode.managed_tmux_wrapper_subcommand(),
             None

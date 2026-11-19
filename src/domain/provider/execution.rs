@@ -138,7 +138,6 @@ impl ProviderReadinessAdapter {
 pub(crate) enum LegacyDispatchKind {
     Claude,
     Codex,
-    Gemini,
     OpenCode,
     Qwen,
     StreamJsonCli(StreamJsonDialectId),

@@ -21,7 +21,6 @@ pub use public_catalog::{ProviderCatalogEntry, public_provider_catalog};
 pub enum ProviderKind {
     Claude,
     Codex,
-    Gemini,
     OpenCode,
     Qwen,
     Grok,
@@ -34,7 +33,6 @@ impl ProviderKind {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
-            Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
             Self::Qwen => "qwen",
             Self::Grok => "grok",
@@ -47,7 +45,6 @@ impl ProviderKind {
         match self {
             Self::Claude => "provider_claude",
             Self::Codex => "provider_codex",
-            Self::Gemini => "provider_gemini",
             Self::OpenCode => "provider_opencode",
             Self::Qwen => "provider_qwen",
             Self::Grok => "provider_grok",

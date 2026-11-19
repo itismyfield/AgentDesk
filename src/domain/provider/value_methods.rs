@@ -100,7 +100,6 @@ impl ProviderKind {
         match self {
             Self::Claude => LegacyDispatchKind::Claude,
             Self::Codex => LegacyDispatchKind::Codex,
-            Self::Gemini => LegacyDispatchKind::Gemini,
             Self::OpenCode => LegacyDispatchKind::OpenCode,
             Self::Grok => LegacyDispatchKind::StreamJsonCli(StreamJsonDialectId::Grok),
             Self::Qwen => LegacyDispatchKind::Qwen,

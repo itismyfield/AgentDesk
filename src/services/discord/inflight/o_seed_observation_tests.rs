@@ -8,9 +8,9 @@ use crate::services::provider::ProviderKind;
 async fn o_seed_observation_raw_totals_include_unguarded_and_other_keys() {
     let channel = 63_251_191;
     let before = raw_process_totals();
-    let _ = load_inflight_state_read_only_result(&ProviderKind::Gemini, channel);
+    let _ = load_inflight_state_read_only_result(&ProviderKind::OpenCode, channel);
     assert_eq!(
-        key_totals(&ProviderKind::Gemini, channel).readonly_inflight_load_calls,
+        key_totals(&ProviderKind::OpenCode, channel).readonly_inflight_load_calls,
         1
     );
     assert!(
@@ -18,9 +18,9 @@ async fn o_seed_observation_raw_totals_include_unguarded_and_other_keys() {
     );
     let guard = Guard::new(&ProviderKind::Claude, channel);
     tokio::spawn(async move {
-        let _ = load_inflight_state(&ProviderKind::Gemini, channel);
-        let _ = load_inflight_state_read_only_result(&ProviderKind::Gemini, channel);
-        record_event(&ProviderKind::Gemini, channel, "final_joined");
+        let _ = load_inflight_state(&ProviderKind::OpenCode, channel);
+        let _ = load_inflight_state_read_only_result(&ProviderKind::OpenCode, channel);
+        record_event(&ProviderKind::OpenCode, channel, "final_joined");
     })
     .await
     .unwrap();
@@ -33,11 +33,11 @@ async fn o_seed_observation_raw_totals_include_unguarded_and_other_keys() {
     assert_eq!(keyed.readonly_inflight_load_calls, 0);
     assert_eq!(keyed.event_count("final_joined"), 0);
     assert_eq!(
-        key_totals(&ProviderKind::Gemini, channel).writable_inflight_load_calls,
+        key_totals(&ProviderKind::OpenCode, channel).writable_inflight_load_calls,
         1
     );
     assert_eq!(
-        key_totals(&ProviderKind::Gemini, channel).readonly_inflight_load_calls,
+        key_totals(&ProviderKind::OpenCode, channel).readonly_inflight_load_calls,
         2
     );
 }

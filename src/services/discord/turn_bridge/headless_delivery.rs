@@ -626,7 +626,6 @@ mod headless_delivery_tests {
         for provider in [
             ProviderKind::Claude,
             ProviderKind::Codex,
-            ProviderKind::Gemini,
             ProviderKind::OpenCode,
             ProviderKind::Qwen,
         ] {

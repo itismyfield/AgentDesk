@@ -23,7 +23,7 @@ use crate::services::turn_orchestrator::{
 };
 
 const OWNER: u64 = 1;
-const PROVIDER: ProviderKind = ProviderKind::Gemini;
+const PROVIDER: ProviderKind = ProviderKind::OpenCode;
 const FAILED: &str = "⚠️ 일부 저장을 한 번 재시도했지만 완료하지 못했어요. 재시작 후 버린 메시지나 이전 세션이 복원될 수 있어요.";
 const LANDED: &str = "⚠️ 일부 저장이 처음에 실패했지만 재시도로 완료했어요.";
 const STOP: &str = "⚠️ 실행 중이던 턴의 종료를 확인하지 못했어요.";

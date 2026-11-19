@@ -178,7 +178,7 @@ pub(super) fn resolve_kind_runtime_path(kind: &ProviderKind) -> Option<String> {
         ProviderKind::Antigravity => {
             crate::services::stream_json_cli::dialects::agy::resolve_agy_path()
         }
-        ProviderKind::Gemini | ProviderKind::Unsupported(_) => None,
+        ProviderKind::Unsupported(_) => None,
     }
 }
 

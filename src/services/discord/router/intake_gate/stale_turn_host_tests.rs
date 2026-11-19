@@ -218,7 +218,7 @@ async fn queue_guard_still_releases_a_process_turn_pg() {
     let tmux = ModeTmux::install();
     tmux.serve(Tmux::Dead);
     let (db, pool) = postgres().await;
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let (shared, _registry) = registered_runtime(&pool, &provider).await;
     let channel = ChannelId::new(1_479_671_344_000_000_001);
     map_channel(&shared, channel, "p4r1b-process").await;
@@ -238,7 +238,7 @@ async fn receipt_cleanup_case(queue_guard: bool, protected: bool) {
     let tmux = ModeTmux::install();
     tmux.serve(Tmux::Dead);
     let (db, pool) = postgres().await;
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let (shared, _registry) = registered_runtime(&pool, &provider).await;
     let channel = ChannelId::new(1_479_671_344_000_020_001);
     map_channel(&shared, channel, "b3b2-stale").await;
@@ -326,7 +326,7 @@ async fn s3act_b3b_stale_turn_b_stops_cleanup_after_protected_delete_pg() {
 
 use super::thread_guard_test_api::{clean, witness};
 
-/// A confirmed-legacy Gemini thread with stale turn A (finalizer id pinned) mapped from a parent:
+/// A confirmed-legacy OpenCode thread with stale turn A (finalizer id pinned) mapped from a parent:
 /// the runtime, its registry, A's token and the parent.
 async fn stale_thread(
     pool: &sqlx::PgPool,
@@ -338,7 +338,7 @@ async fn stale_thread(
     Arc<CancelToken>,
     ChannelId,
 ) {
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let (shared, registry) = registered_runtime(pool, &provider).await;
     map_channel(&shared, thread, label).await;
     let token = stale_turn(&shared, &provider, thread, None).await;
@@ -352,8 +352,8 @@ async fn stale_thread(
     (shared, registry, token, parent)
 }
 
-fn gemini_row(channel: ChannelId) -> Option<Vec<u8>> {
-    std::fs::read(inflight_path(&ProviderKind::Gemini, channel)).ok()
+fn opencode_row(channel: ChannelId) -> Option<Vec<u8>> {
+    std::fs::read(inflight_path(&ProviderKind::OpenCode, channel)).ok()
 }
 
 fn mapped(shared: &SharedData, parent: ChannelId) -> Option<ChannelId> {
@@ -375,7 +375,7 @@ async fn thread_guard_keeps_an_episode_readopted_after_the_witness_pg() {
     let tmux = ModeTmux::install();
     tmux.serve(Tmux::Dead);
     let (db, pool) = postgres().await;
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let thread = ChannelId::new(1_479_671_344_000_030_001);
     let (shared, _registry, token, parent) = stale_thread(&pool, thread, "i6199-readopt").await;
     let w = witness(&shared, &provider, thread)
@@ -392,7 +392,7 @@ async fn thread_guard_keeps_an_episode_readopted_after_the_witness_pg() {
     let start = crate::services::discord::mailbox_try_start_turn;
     assert!(start(&shared, thread, token.clone(), UserId::new(7), message).await);
     let (row, counter) = (
-        gemini_row(thread),
+        opencode_row(thread),
         shared.restart.global_active.load(Ordering::Relaxed),
     );
 
@@ -400,7 +400,7 @@ async fn thread_guard_keeps_an_episode_readopted_after_the_witness_pg() {
 
     assert!(holds(&shared, thread, &token).await);
     assert!(
-        row.is_some() && gemini_row(thread) == row,
+        row.is_some() && opencode_row(thread) == row,
         "row bytes unchanged"
     );
     assert_eq!(
@@ -420,7 +420,7 @@ async fn thread_guard_drops_only_witnessed_parents_still_on_the_thread_pg() {
     let tmux = ModeTmux::install();
     tmux.serve(Tmux::Dead);
     let (db, pool) = postgres().await;
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let thread = ChannelId::new(1_479_671_344_000_031_001);
     let (shared, _registry, token, parent) = stale_thread(&pool, thread, "i6199-routes").await;
     let other = ChannelId::new(thread.get() + 20);
@@ -459,7 +459,7 @@ async fn thread_guard_keeps_a_row_that_no_longer_names_the_witnessed_episode_pg(
     let tmux = ModeTmux::install();
     tmux.serve(Tmux::Dead);
     let (db, pool) = postgres().await;
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let thread = ChannelId::new(1_479_671_344_000_032_001);
     let (shared, _registry, token, parent) = stale_thread(&pool, thread, "i6199-row").await;
     let w = witness(&shared, &provider, thread)
@@ -471,13 +471,13 @@ async fn thread_guard_keeps_a_row_that_no_longer_names_the_witnessed_episode_pg(
     row["turn_nonce"] = "another-episode".into();
     row["started_at"] = "2001-01-01 00:00:00".into();
     std::fs::write(&path, serde_json::to_vec_pretty(&row).unwrap()).unwrap();
-    let bytes = gemini_row(thread);
+    let bytes = opencode_row(thread);
 
     assert!(clean(&shared, &provider, parent, thread, w).await);
 
     assert!(token.cancelled.load(Ordering::Relaxed), "A released");
     assert!(
-        bytes.is_some() && gemini_row(thread) == bytes,
+        bytes.is_some() && opencode_row(thread) == bytes,
         "row bytes unchanged"
     );
     db.drop().await;
@@ -491,7 +491,7 @@ async fn thread_guard_never_touches_a_row_naming_another_channel_pg() {
     let tmux = ModeTmux::install();
     tmux.serve(Tmux::Dead);
     let (db, pool) = postgres().await;
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let thread = ChannelId::new(1_479_671_344_000_033_001);
     let (shared, _registry, token, parent) = stale_thread(&pool, thread, "i6199-key").await;
     let other = ChannelId::new(thread.get() + 20);
@@ -505,18 +505,18 @@ async fn thread_guard_never_touches_a_row_naming_another_channel_pg() {
         serde_json::to_vec_pretty(&row).unwrap(),
     )
     .unwrap();
-    let (here, there) = (gemini_row(thread), gemini_row(other));
+    let (here, there) = (opencode_row(thread), opencode_row(other));
 
     if let Some(w) = witness(&shared, &provider, thread).await {
         clean(&shared, &provider, parent, thread, w).await;
     }
 
     assert!(
-        here.is_some() && gemini_row(thread) == here,
+        here.is_some() && opencode_row(thread) == here,
         "thread file unchanged"
     );
     assert!(
-        there.is_some() && gemini_row(other) == there,
+        there.is_some() && opencode_row(other) == there,
         "other file unchanged"
     );
     assert!(holds(&shared, thread, &token).await);
@@ -531,7 +531,7 @@ async fn thread_guard_racing_cleans_release_once_pg() {
     let tmux = ModeTmux::install();
     tmux.serve(Tmux::Dead);
     let (db, pool) = postgres().await;
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let thread = ChannelId::new(1_479_671_344_000_034_001);
     let (shared, _registry, token, parent) = stale_thread(&pool, thread, "i6199-race").await;
     shared.restart.global_active.store(2, Ordering::Relaxed);
@@ -568,13 +568,13 @@ async fn thread_guard_clean_requests_no_session_kill_pg() {
     let tmux = ModeTmux::install();
     tmux.serve(Tmux::Dead);
     let (db, pool) = postgres().await;
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let thread = ChannelId::new(1_479_671_344_000_035_001);
     let (shared, _registry, token, parent) = stale_thread(&pool, thread, "i6199-kill").await;
     let w = witness(&shared, &provider, thread)
         .await
         .expect("an admitted stale thread");
-    let name = "AgentDesk-gemini-i6199-shared".to_string();
+    let name = "AgentDesk-opencode-i6199-shared".to_string();
     *token.tmux_binding.lock().unwrap() = Some(TmuxBinding::NameOnly { name });
     take_requested_intents_for_test();
 
@@ -597,7 +597,7 @@ async fn thread_guard_keeps_the_successor_route_across_a_watcher_exit_row_clear_
     let tmux = ModeTmux::install();
     tmux.serve(Tmux::Dead);
     let (db, pool) = postgres().await;
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let thread = ChannelId::new(1_479_671_344_000_036_001);
     let (shared, _registry, _a, parent) = stale_thread(&pool, thread, "i6199-exit").await;
     let w = witness(&shared, &provider, thread)
@@ -631,14 +631,14 @@ async fn thread_guard_keeps_the_successor_route_across_a_watcher_exit_row_clear_
     b_row.user_msg_id = b_message.get();
     b_row.turn_nonce = b.turn_nonce().map(str::to_string);
     crate::services::discord::inflight::save_inflight_state_create_new(&b_row).expect("B's row");
-    let bytes = gemini_row(thread);
+    let bytes = opencode_row(thread);
 
     gate.resume.notify_one();
     assert!(cleaner.await.unwrap(), "A was released");
 
     assert_eq!(mapped(&shared, parent), Some(thread), "B's route");
     assert!(
-        bytes.is_some() && gemini_row(thread) == bytes,
+        bytes.is_some() && opencode_row(thread) == bytes,
         "B's row bytes"
     );
     assert!(holds(&shared, thread, &b).await);
@@ -662,7 +662,7 @@ async fn thread_guard_clears_the_witnessed_row_from_the_thread_file_only_pg() {
     let tmux = ModeTmux::install();
     tmux.serve(Tmux::Dead);
     let (db, pool) = postgres().await;
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let thread = ChannelId::new(1_479_671_344_000_037_001);
     let (shared, _registry, token, parent) = stale_thread(&pool, thread, "i6199-cas-key").await;
     let other = ChannelId::new(thread.get() + 20);
@@ -679,7 +679,7 @@ async fn thread_guard_clears_the_witnessed_row_from_the_thread_file_only_pg() {
     let row =
         crate::services::discord::inflight::load_inflight_state_read_only(&provider, thread.get())
             .expect("the thread's row");
-    let there = gemini_row(other);
+    let there = opencode_row(other);
     let w = super::thread_guard_test_api::Witness::for_test(
         thread,
         &row,
@@ -690,9 +690,9 @@ async fn thread_guard_clears_the_witnessed_row_from_the_thread_file_only_pg() {
     assert!(clean(&shared, &provider, parent, thread, w).await);
 
     assert!(token.cancelled.load(Ordering::Relaxed), "A released");
-    assert_eq!(gemini_row(thread), None, "the thread's file cleared");
+    assert_eq!(opencode_row(thread), None, "the thread's file cleared");
     assert!(
-        there.is_some() && gemini_row(other) == there,
+        there.is_some() && opencode_row(other) == there,
         "the other file unchanged"
     );
     db.drop().await;

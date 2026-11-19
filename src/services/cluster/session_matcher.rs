@@ -839,7 +839,6 @@ mod tests {
         for (provider, channel) in [
             (ProviderKind::Claude, "agent-cc"),
             (ProviderKind::Codex, "dev-cdx"),
-            (ProviderKind::Gemini, "research-gm"),
             (ProviderKind::OpenCode, "sandbox-oc"),
             (ProviderKind::Qwen, "sandbox-qw"),
         ] {
@@ -886,8 +885,8 @@ mod tests {
             Some(ProviderKind::Codex)
         );
         assert_eq!(
-            detect_provider_from_pane_command("gemini"),
-            Some(ProviderKind::Gemini)
+            detect_provider_from_pane_command("qwen"),
+            Some(ProviderKind::Qwen)
         );
     }
 

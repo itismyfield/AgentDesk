@@ -9,7 +9,7 @@ fn i8117_policy_and_exact_terminal_negative_matrix() {
         (ProviderKind::Claude, Some("scheduled_message"), true, false),
         (ProviderKind::Claude, None, true, false),
         (ProviderKind::Codex, Some("routine"), true, false),
-        (ProviderKind::Gemini, Some("routine"), true, false),
+        (ProviderKind::OpenCode, Some("routine"), true, false),
     ] {
         let mut policy = RoutinePresentation::at_start(&provider, source, process);
         assert_eq!(policy.holds_body(), c1);

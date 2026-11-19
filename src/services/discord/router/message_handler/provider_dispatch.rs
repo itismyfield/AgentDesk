@@ -478,16 +478,6 @@ fn drive(turn: StreamingTurn<'_>, sender: Sender<StreamMessage>) -> Result<(), S
             },
             turn.codex_observation,
         ),
-        // Gemini is retired: its turn fails with that reason instead of running another provider.
-        LegacyDispatchKind::Gemini => {
-            let _ = sender.send(StreamMessage::Error {
-                message: "Provider 'gemini' is retired; its binding does not run".into(),
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: None,
-            });
-            Ok(())
-        }
         LegacyDispatchKind::Qwen => qwen::execute_command_streaming(
             turn.prompt,
             turn.session_id,

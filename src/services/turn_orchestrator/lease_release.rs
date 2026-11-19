@@ -360,7 +360,7 @@ mod lease_release_identity_tests {
             );
             let cleared = handle
                 .clear(QueuePersistenceContext::new(
-                    &ProviderKind::Gemini,
+                    &ProviderKind::OpenCode,
                     "l1-clear",
                     None,
                 ))

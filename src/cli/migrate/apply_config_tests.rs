@@ -61,3 +61,44 @@ fn migrate_apply_keeps_disk_secrets_and_adds_the_imported_agent() {
     );
     assert_secrets_on_disk(&yaml_path);
 }
+
+/// A Gemini source agent, by provider hint or by model, is unsupported rather than remapped.
+#[test]
+fn migrate_plan_refuses_gemini_agents_without_remapping_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("openclaw");
+    std::fs::create_dir_all(source.join("agents")).unwrap();
+    let openclaw = serde_json::json!({"agents": {"list": [
+        {"id": "hint", "default": true, "runtime": {"provider": "gemini"}},
+        {"id": "model", "model": "google/gemini-2.5-pro"}
+    ]}});
+    std::fs::write(source.join("openclaw.json"), openclaw.to_string()).unwrap();
+    let args = OpenClawMigrateArgs {
+        root_path: Some(source.display().to_string()),
+        agentdesk_root: None,
+        agent_ids: Vec::new(),
+        all_agents: true,
+        dry_run: true,
+        resume: None,
+        fallback_provider: None,
+        workspace_root_rewrite: Vec::new(),
+        write_org: false,
+        write_bot_settings: false,
+        write_db: false,
+        overwrite: false,
+        with_channel_bindings: false,
+        with_sessions: false,
+        snapshot_source: false,
+        no_workspace: true,
+        no_memory: true,
+        no_prompts: true,
+        tool_policy_mode: "report".to_string(),
+        discord_token_mode: "report".to_string(),
+    };
+    let resolved = resolve_source_root(args.root_path.as_deref(), temp.path(), None).unwrap();
+    let error = build_import_plan(&resolved, &args, None).unwrap_err();
+    assert!(
+        error.contains("No importable OpenClaw agents remain"),
+        "{error}"
+    );
+}

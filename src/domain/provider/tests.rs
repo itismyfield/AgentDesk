@@ -8,7 +8,6 @@ fn provider_kind_value_contract() {
     let known = [
         (ProviderKind::Claude, "claude", "provider_claude"),
         (ProviderKind::Codex, "codex", "provider_codex"),
-        (ProviderKind::Gemini, "gemini", "provider_gemini"),
         (ProviderKind::OpenCode, "opencode", "provider_opencode"),
         (ProviderKind::Qwen, "qwen", "provider_qwen"),
         (ProviderKind::Grok, "grok", "provider_grok"),
