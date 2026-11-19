@@ -215,9 +215,9 @@ jobs:
             # require cross-OS verification on macOS/Windows). Pure JS policy,
             # shell script, most CI metadata, and Node package changes are
             # excluded — those are still verified by the ubuntu Rust lane plus
-            # Lint/Script checks, and the nightly workflow continues to run
-            # the full macOS/Windows matrix daily. ci-pr.yml itself is included
-            # so edits to this Rust CI lane exercise its own Windows job.
+            # Lint/Script checks. Nightly runs Windows tests and macOS non-PG,
+            # non-lib tests daily. ci-pr.yml is included so edits to this Rust
+            # CI lane exercise its own Windows job.
             #
             # Must include every compile-time Rust input. Audit before adding
             # new `include_str!`/`include_bytes!`/`sqlx::migrate!`/`build.rs`
@@ -505,10 +505,9 @@ jobs:
         # macOS PR lane temporarily disabled to unblock issue throughput
         # (2026-05-17). Agents run on macOS locally and verify
         # `cargo build --bin agentdesk` before pushing, so PR-time macOS
-        # coverage is largely redundant. Nightly (`ci-nightly.yml`) still
-        # exercises macOS daily so cross-OS Rust drift cannot land
-        # silently for more than 24h. Restore by adding `macos-latest`
-        # back to this matrix once issue backlog stabilises.
+        # coverage is largely redundant. Nightly runs macOS non-PG, non-lib
+        # tests daily. Restore by adding `macos-latest` back to this matrix
+        # once issue backlog stabilises.
         os: [windows-latest]
     steps:
       - uses: actions/checkout@v4
