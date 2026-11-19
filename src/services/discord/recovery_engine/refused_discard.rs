@@ -106,9 +106,8 @@ pub(in crate::services::discord) async fn discard_held(
     true
 }
 
-/// Closes the uncovered turns a restarted takeover finds before a closed one with their own
-/// reason: intent and closure commit together, then the notice posts once. The key names the
-/// rollout range, so a repeated attempt reuses it.
+/// Closes a takeover's uncovered turns before a closed one with their own reason and closure;
+/// the key names the range, so a repeated attempt reuses one row and one notice.
 pub(in crate::services::discord) async fn close_unplaced(
     pool: &PgPool,
     http: Option<Arc<serenity::Http>>,

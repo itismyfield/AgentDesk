@@ -429,10 +429,8 @@ impl<I: HostIo> Takeover<'_, I> {
         self.fenced(at, bound, Plan::Warm(&sources)).await
     }
 
-    /// Where O starts on `source`: at its earliest turn, ended or not, that Legacy's records do not
-    /// show delivered, once no Legacy send can be part of it. Turn time and custody prove nothing.
-    /// A turn its rejection closed is never owed; uncovered turns before the last closed one come
-    /// back as the range to close with their own reason, and O starts after it once it has ended.
+    /// Where O starts on `source`: its earliest undelivered, unclosed turn once no Legacy send can
+    /// be part of it, with any uncovered range before the last closed turn to close with a reason.
     fn start_on(
         &self,
         (source, seq): &(SourceId, u64),

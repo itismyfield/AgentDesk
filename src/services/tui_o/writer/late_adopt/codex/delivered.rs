@@ -81,9 +81,8 @@ impl Records {
         self
     }
 
-    /// Whether a rejection closed `source`'s turn opened at `opened`: the turn it names, or one
-    /// inside the range it closes. The session and file identity name the rollout; a path may be
-    /// spelled another way.
+    /// Whether a rejection closed `source`'s turn opened at `opened`, alone or inside a range;
+    /// session and file identity name the rollout, as a path may be spelled another way.
     pub(in crate::services::tui_o::writer::late_adopt) fn closed(
         &self,
         source: &SourceId,
