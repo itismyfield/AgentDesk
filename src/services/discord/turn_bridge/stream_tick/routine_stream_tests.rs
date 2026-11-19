@@ -142,6 +142,7 @@ async fn drive(
         refresh_streaming_response(&context, &mut tick, &mut dirty, rolled, "⠋", claim).await,
         ControlFlow::Continue(())
     );
+    let _ = runtime::authorize_visible_mutation(&context, &mut tick, "row owned").await;
     let before = tick.session_row_writer.released();
     crate::services::discord::inflight::clear_inflight_state(provider, channel.get());
     let _ = runtime::authorize_visible_mutation(&context, &mut tick, "row cleared").await;
