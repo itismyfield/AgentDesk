@@ -11,8 +11,7 @@ const NEW: &str = "fd530b40-0000-4000-8000-000000008261";
 // its next turn, through both the cache and the stored selector; a cleared channel stays cleared.
 #[tokio::test]
 async fn retired_rotation_moves_the_channel_selector_to_the_rotated_session_pg() {
-    let test = "services::discord::tui_prompt_relay::session_rotation_settle::selector_tests::\
-                retired_rotation_moves_the_channel_selector_to_the_rotated_session_pg";
+    let test = "services::discord::tui_prompt_relay::session_rotation_settle::selector_tests::retired_rotation_moves_the_channel_selector_to_the_rotated_session_pg";
     if !api_child(test) {
         return;
     }
