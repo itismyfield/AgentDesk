@@ -129,7 +129,7 @@ async fn deliver_with_bot(
         &row.source,
         bot,
         None,
-        Some(crate::services::discord::health::ManualOutboundDeliveryId {
+        Some(crate::domain::outbound::key::ManualOutboundDeliveryId {
             correlation_id: &correlation_id,
             semantic_event_id: &semantic_event_id,
         }),
