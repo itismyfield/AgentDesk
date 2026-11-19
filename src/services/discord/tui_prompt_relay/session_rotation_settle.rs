@@ -249,6 +249,7 @@ async fn settle_one_claude_session_rotation(
         // No authoritative owner channel: nothing can be settled or delivered for
         // this pane yet. Keep the record — the binding half of the rotation (R1)
         // is already in force and a later poll may resolve the channel.
+        follow_herdr_rotation_selector(shared, rotation).await;
         return;
     };
 
@@ -446,7 +447,7 @@ mod selector;
 #[cfg(unix)]
 pub(in crate::services::discord) use selector::follow_pending_rotation_selector;
 #[cfg(unix)]
-use selector::follow_rotation_selector;
+use selector::{follow_herdr_rotation_selector, follow_rotation_selector};
 
 #[cfg(all(test, unix))]
 #[path = "session_rotation_settle/selector_tests.rs"]
@@ -615,6 +616,7 @@ mod tests {
                 new_output_path: rotated.display().to_string(),
                 observed_drain_frontier: 0,
                 polls_without_drain_progress: 0,
+                selector_followed: false,
             },
         );
 
@@ -763,6 +765,7 @@ mod tests {
             new_output_path: "/tmp/67f48e65.jsonl".to_string(),
             observed_drain_frontier: 512,
             polls_without_drain_progress: ROTATION_DRAIN_STALL_POLLS - 1,
+            selector_followed: false,
         };
         let post_fold = ClaudeRotationView {
             old_transcript_len: 8192,

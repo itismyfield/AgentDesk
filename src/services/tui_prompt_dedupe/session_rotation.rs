@@ -64,6 +64,8 @@ pub(crate) struct ClaudeSessionRotation {
     /// advance. Bounds the "deliver the old transcript first" wait so a tail that
     /// is genuinely dead cannot hold the channel forever.
     pub polls_without_drain_progress: u32,
+    /// The channel's stored selector already moved to `new_session_id` while the record stays.
+    pub selector_followed: bool,
 }
 
 struct TimedRotation {
@@ -119,6 +121,7 @@ pub(crate) fn record_claude_session_rotation(rotation: ClaudeSessionRotation) {
         Some(existing) => {
             existing.rotation.new_session_id = rotation.new_session_id;
             existing.rotation.new_output_path = rotation.new_output_path;
+            existing.rotation.selector_followed = false;
             existing.recorded_at = Instant::now();
         }
         None => {
@@ -130,6 +133,18 @@ pub(crate) fn record_claude_session_rotation(rotation: ClaudeSessionRotation) {
                 },
             );
         }
+    }
+}
+
+/// Notes that the channel's stored selector moved to `new_session_id`; a later hop clears it.
+pub(crate) fn mark_claude_rotation_selector_followed(
+    tmux_session_name: &str,
+    new_session_id: &str,
+) {
+    if let Some(entry) = lock_rotations().get_mut(tmux_session_name.trim())
+        && entry.rotation.new_session_id == new_session_id
+    {
+        entry.rotation.selector_followed = true;
     }
 }
 
@@ -287,6 +302,7 @@ mod tests {
             new_output_path: new_path.to_string(),
             observed_drain_frontier: 0,
             polls_without_drain_progress: 0,
+            selector_followed: false,
         }
     }
 

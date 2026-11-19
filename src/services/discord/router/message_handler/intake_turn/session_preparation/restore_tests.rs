@@ -155,6 +155,7 @@ fn preparation_follows_a_pane_rotation_its_settle_pass_has_not_retired() {
             new_output_path: "/nonexistent/new.jsonl".to_string(),
             observed_drain_frontier: 0,
             polls_without_drain_progress: 0,
+            selector_followed: false,
         });
         let (mut session, mut memento, mut reason) = (Some(old.to_string()), true, "before");
         let state = Restore {
