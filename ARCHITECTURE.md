@@ -3444,6 +3444,7 @@ src/
 │   │   │   ├── native_completion_tests.rs
 │   │   │   ├── native_completion_work_tests.rs
 │   │   │   ├── native_input_tests.rs
+│   │   │   ├── native_key_tests.rs
 │   │   │   ├── native_policy.rs
 │   │   │   ├── native_prepare.rs
 │   │   │   ├── native_restore.rs
