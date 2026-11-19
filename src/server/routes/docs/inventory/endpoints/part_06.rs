@@ -554,7 +554,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ),
             (
                 "model",
-                body_param("string|null", false, "Model for the provider turn, or null to use the channel setting; requires provider"),
+                body_param("string|null", false, "Model for the provider turn, or null to use the channel setting; requires provider. For persistent routines, model changes take effect when the next new conversation starts."),
             ),
             (
                 "fallback_agent_id",
