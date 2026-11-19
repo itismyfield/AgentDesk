@@ -676,9 +676,8 @@ fn restored_screen_reads_marker_draft_modal_and_busy_but_not_a_stale_auth_banner
     }
 }
 
-/// #8161 S0: a wait that ends names its open cause, and a source an older launch lost settles.
-/// The dialog is 11-19 adk-dash-cc's screen: a background agent's Bash permission prompt sits
-/// where the composer is, so the composer reads Unread over a proof the source already gives.
+/// A wait that ends names its open cause; an older launch's lost source settles. The dialog, a
+/// background agent's permission prompt over the composer, reads Unread over a proven source.
 #[test]
 fn a_held_first_input_names_its_wait_and_a_lost_older_source_settles() {
     use crate::services::claude_tui::host_input::InputRefusal::{Unproven, Waits};

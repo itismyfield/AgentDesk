@@ -1,5 +1,5 @@
-//! #8161 S0: a readiness wait that ends without a proof names its open cause; a source an older
-//! launch lost settles as retained instead of holding for good.
+//! A readiness wait that ends without a proof names its open cause; a source an older launch lost
+//! settles as retained instead of holding for good.
 use super::*;
 
 /// An older launch whose finished turn this restarted daemon has not seen.
