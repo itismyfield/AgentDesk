@@ -23,6 +23,7 @@ import json
 import functools
 import os
 import re
+import select
 import signal
 import shutil
 import subprocess
@@ -66,13 +67,11 @@ bt.run = functools.partial(bt.run, path=TOKEN)
 run = bt.run
 """
 
-_CHILD_IGNORES_EMT = """
-import os, signal, sys, time
-signal.signal(signal.SIGEMT, signal.SIG_IGN)
-open(sys.argv[1], "w").write(str(os.getpid()))
-deadline = time.monotonic() + 90
-while time.monotonic() < deadline and not os.path.exists(sys.argv[2]):
-    time.sleep(0.05)
+_CHILD_SURVIVES_EMT = """
+import os, signal, sys
+signal.signal(signal.SIGEMT, lambda *_: print("SIGEMT", flush=True))
+print(os.getpid(), flush=True)
+sys.stdin.read()
 """
 
 _CHILD_FD_SCAN = """
@@ -180,16 +179,21 @@ class TokenTestCase(unittest.TestCase):
         self.addCleanup(os.close, fd)
         return fd
 
-    def driver(self, body: str, *args: str, env: dict[str, str] | None = None):
+    def driver(self, body: str, *args: str, env: dict[str, str] | None = None, stdin=None):
         merged = dict(os.environ)
         merged.update(env or {})
         proc = subprocess.Popen(
             [sys.executable, "-c", _SEAL + body, str(self.token), *args],
-            env=merged, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=merged, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         for pipe in (proc.stdout, proc.stderr):
             self.addCleanup(pipe.close)
         return proc
+
+    def child_line(self, stream):
+        ready, _, _ = select.select([stream], [], [], 30)
+        self.assertTrue(ready, "child never sent its event")
+        return stream.readline().strip()
 
     def isolated_cli(self, entered: Path | None = None, extra_seal: str = "") -> Path:
         source = (SCRIPTS / "build_token.py").read_text()
@@ -545,10 +549,7 @@ class FailClosedTests(TokenTestCase):
 
     def test_a_timeout_is_classified_before_its_base_error(self) -> None:
         self.assertTrue(issubclass(bt.BuildTokenTimeout, bt.BuildTokenError))
-        holder = self.driver("run([sys.executable, '-c', 'import time; time.sleep(6)'])")
-        self.addCleanup(holder.wait)
-        self.addCleanup(holder.kill)
-        time.sleep(1.5)
+        fcntl.flock(self.open_token(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         rc = bt.run([sys.executable, "-c", ""], env={bt.WAIT_TIMEOUT_ENV: "1"}, path=str(self.token))
         self.assertEqual(rc, bt.EXIT_TOKEN_TIMEOUT)
 
@@ -586,15 +587,19 @@ class SerializationTests(TokenTestCase):
         self.assertEqual(out.read_text(), "[]")
 
     def test_a_second_wrapper_blocks_until_the_first_finishes(self) -> None:
-        first = self.driver("run([sys.executable, '-c', 'import time; time.sleep(3)'])")
-        self.addCleanup(first.wait)
-        self.addCleanup(first.kill)
-        time.sleep(1.0)
-        started = time.monotonic()
-        rc = bt.run([sys.executable, "-c", ""], env={bt.WAIT_TIMEOUT_ENV: "30"}, path=str(self.token))
-        waited = time.monotonic() - started
-        self.assertEqual(rc, 0)
-        self.assertGreater(waited, 0.5, "second wrapper did not wait for the first")
+        first = self.driver("raise SystemExit(run([sys.executable, '-c', 'import sys; print(\"held\", flush=True); sys.stdin.read()']))",
+                            stdin=subprocess.PIPE)
+        self.addCleanup(first.wait, timeout=30)
+        self.addCleanup(first.stdin.close)
+        self.assertEqual(self.child_line(first.stdout), "held")
+        second = self.driver("raise SystemExit(run([sys.executable, '-c', '']))",
+                             env={bt.WAIT_TIMEOUT_ENV: "60", bt.DIAG_FD_ENV: ""})
+        self.addCleanup(second.wait, timeout=30)
+        self.addCleanup(second.kill)
+        self.assertIn("waiting for", self.child_line(second.stderr))
+        first.stdin.close()
+        self.assertEqual(first.wait(timeout=30), 0)
+        self.assertEqual(second.wait(timeout=30), 0)
 
 
 class ReentrantContractTests(TokenTestCase):
@@ -771,36 +776,14 @@ class SigemtLifetimeTests(TokenTestCase):
     """The exact regression: SIGEMT to the wrapper must not free a live build."""
 
     def test_sigemt_never_frees_the_token_while_the_direct_child_lives(self) -> None:
-        wrapper_pid = self.tmp / "wrapper.pid"
-        child_pid = self.tmp / "child.pid"
-        release = self.tmp / "release"
-        body = (f"open({str(wrapper_pid)!r}, 'w').write(str(os.getpid()))\n"
-                f"run([sys.executable, '-c', {_CHILD_IGNORES_EMT!r},"
-                f" {str(child_pid)!r}, {str(release)!r}])\n")
-        first = self.driver(body)
-        reaped = []
-
-        def cleanup() -> None:
-            release.touch()
-            if not reaped:
-                try:
-                    first.wait(timeout=15)
-                except subprocess.TimeoutExpired:  # pragma: no cover
-                    first.kill()
-                    first.wait()
-
-        self.addCleanup(cleanup)
-
-        wait_for(wrapper_pid)
-        wait_for(child_pid)
-        w1 = int(wrapper_pid.read_text())
-        c1 = int(child_pid.read_text())
-        self.assertEqual(w1, first.pid, "driver must report its own pid")
+        first = self.driver(f"run([sys.executable, '-c', {_CHILD_SURVIVES_EMT!r}])", stdin=subprocess.PIPE)
+        self.addCleanup(first.wait, timeout=30)
+        self.addCleanup(first.stdin.close)
+        c1 = int(self.child_line(first.stdout))
         self.assertTrue(alive(c1), "protected child should be running")
 
-        # Only PIDs this test created and recorded are ever signalled.
-        os.kill(w1, signal.SIGEMT)
-        time.sleep(1.0)
+        first.send_signal(signal.SIGEMT)
+        self.assertEqual(self.child_line(first.stdout), "SIGEMT")
 
         self.assertTrue(alive(c1), "the protected child must outlive the signal")
         second = bt.run([sys.executable, "-c", ""], env={bt.WAIT_TIMEOUT_ENV: "2"},
@@ -811,9 +794,8 @@ class SigemtLifetimeTests(TokenTestCase):
         )
         self.assertTrue(alive(c1), "child died before the serialization check ended")
 
-        release.touch()
+        first.stdin.close()
         first.wait(timeout=30)
-        reaped.append(True)
         self.assertEqual(first.returncode, -int(signal.SIGEMT),
                          "wrapper must die from SIGEMT only after reaping its child")
         self.assertFalse(alive(c1), "child must be reaped before the token is released")
@@ -928,9 +910,9 @@ class NestedHolderTests(TokenTestCase):
         self.assertFalse(ran.exists(), "a refused wrapper ran its command")
 
     def test_only_a_live_ancestor_holding_this_inode_refuses(self) -> None:
-        sibling = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        sibling = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
         self.addCleanup(sibling.wait)
-        self.addCleanup(sibling.kill)
+        self.addCleanup(sibling.stdin.close)
         other = self.tmp / "other.lock"
         other.touch()
         ppid, some_start = os.getppid(), bt.process_start(os.getpid())

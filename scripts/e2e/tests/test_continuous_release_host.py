@@ -6,10 +6,10 @@ import io
 import json
 import os
 from pathlib import Path
+import select
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from unittest import mock
 
@@ -168,6 +168,11 @@ class Posted:
 
 
 class Driver(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.now = 1000.0
+        self.enterContext(mock.patch.object(budget.time, "monotonic", side_effect=lambda: self.now))
+
     def drive(self, budget_left=None, lease=True, harness=None, cell="claude-herdr", answers=(), prompts=3,
               scenario="E-50", stray=None, host="herdr", herdr=None, cli=True):
         """Run the driver with the real smoke preflight and a fake harness that keeps going after a refused input.
@@ -280,7 +285,7 @@ class Driver(Fixture):
         self.assertEqual((len(prompts), report["status"], report["reason"], report["tokens"]), (3, "UNEVALUABLE", "TURN_USAGE_UNKNOWN", None))
         report, prompts, _ = self.drive(answers=[None, None, "huge"])
         self.assertEqual((len(prompts), report["status"], report["reason"], report["tokens"]), (3, "UNEVALUABLE", "TURN_OVER_BUDGET", 528))
-        report, prompts, _ = self.drive(budget_left={"turns": 3, "tokens": 300, "time_s": 10, "deadline": time.monotonic() - 1})
+        report, prompts, _ = self.drive(budget_left={"turns": 3, "tokens": 300, "time_s": 10, "deadline": self.now - 1})
         self.assertEqual((prompts, report["reason"], report["native_turns"]), ([], "TURN_BUDGET_EXHAUSTED", 0))
         for stray in ("an unplanned prompt", "!stop"):
             report, prompts, _ = self.drive(stray=stray)
@@ -299,16 +304,21 @@ class Driver(Fixture):
         return posted.sent, gate.withheld
 
     def test_no_input_is_sent_after_the_deadline_even_when_the_lookup_or_a_command_comes_late(self):
-        log, now = str(self.root / "transcript.jsonl"), time.monotonic()
-        late = self.gated("claude", lambda: (time.sleep(0.4), log)[1], now + 0.2, ("say M1", lambda: None))
-        expired = self.gated("claude", lambda: log, now - 1, ("!clear now", lambda: None))
+        log, deadline = str(self.root / "transcript.jsonl"), self.now + 1
+
+        def lookup():
+            self.now = deadline
+            return log
+
+        late = self.gated("claude", lookup, deadline, ("say M1", lambda: None))
+        expired = self.gated("claude", lambda: log, deadline - 1, ("!clear now", lambda: None))
         self.assertEqual((late, expired), (([], "TURN_BUDGET_EXHAUSTED"), ([], "TURN_BUDGET_EXHAUSTED")))
 
     def test_a_codex_turn_missing_its_final_usage_or_over_its_limit_stops_the_next_prompt(self):
         log, call = self.root / "rollout.jsonl", {"input_tokens": 30, "cached_input_tokens": 0, "output_tokens": 5}
         for calls, drop, reason in (([call, call], 1, "TURN_USAGE_UNKNOWN"), ([call] * 4, None, "TURN_OVER_BUDGET")):
             log.write_text("")
-            sent = self.gated("codex", lambda: str(log), time.monotonic() + 10,
+            sent = self.gated("codex", lambda: str(log), self.now + 10,
                               ("say M1", lambda: lines(log, *codex_turn("t1", "M1", calls, drop=drop))), ("say M2", lambda: None))
             self.assertEqual(sent, (["say M1"], reason))
 
@@ -451,18 +461,18 @@ class Supervisor(Fixture):
 
 
 class AfterDeploy(Fixture):
-    def hook(self, *, config=True, python=None, launchctl="", limit="20"):
+    def hook(self, *, config=True, python=None, launchctl="", limit="20", pass_fds=()):
         home, tools = self.root / "home", self.root / "tools"
         (home / "Library").mkdir(parents=True, exist_ok=True)
         tools.mkdir(exist_ok=True)
-        (tools / "launchctl").write_text(f"#!/bin/sh\necho \"$@\" >> {self.root}/launchctl.log\n{launchctl}[ \"$1\" != print ]\n")
+        (tools / "launchctl").write_text(f"#!/bin/bash\necho \"$@\" >> {self.root}/launchctl.log\n{launchctl}[ \"$1\" != print ]\n")
         (tools / "python3").write_text(python or f"#!/bin/sh\nexec {sys.executable} \"$@\"\n")
         for tool in tools.iterdir():
             tool.chmod(0o755)
         env = {"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin",
                "AGENTDESK_E2E_CONTINUOUS_CONFIG": str(self.path if config else self.root / "absent.json")}
         done = subprocess.run(["bash", str(REPO / "scripts/e2e/continuous/after_deploy.sh"), str(REPO), HEAD, "stamp", limit],
-                              env=env, capture_output=True, text=True, timeout=60)
+                              env=env, capture_output=True, text=True, timeout=60, pass_fds=pass_fds)
         calls = self.root / "launchctl.log"
         return done, calls.read_text() if calls.exists() else "", home / "Library/LaunchAgents/com.agentdesk.e2e-continuous.plist"
 
@@ -479,30 +489,49 @@ class AfterDeploy(Fixture):
         self.assertTrue(f"<string>{REPO}</string>" in text and str(self.path) in text and "__" not in text)
         self.assertIn("bootstrap", calls)
         # Switched off with the job, the request and an enabled status all still in place.
-        publication.heartbeat(self.root / "state", self.config, time.time())
+        publication.heartbeat(self.root / "state", self.config, 1000)
         (self.root / "state/inbox/deploy-stamp.json").unlink()
         self.save(enabled=False)
         done, later, _ = self.hook()
         self.assertIn('"status": "DISABLED"', done.stdout)
         self.assertEqual((later, (self.root / "state/inbox/deploy-stamp.json").exists()), (calls, False))
-        shown = consumer.view(self.root / "state/status.json", head=HEAD, now=time.time() + 5000)
+        shown = consumer.view(self.root / "state/status.json", head=HEAD, now=6000)
         self.assertEqual((shown["check"]["result"], shown["monitor"]["enabled"]), ("DISABLED", 0))
 
     def test_a_stalled_step_is_cut_off_at_the_time_limit_and_does_not_outlive_the_deploy(self):
-        stall = f"echo $$ > {self.root}/stalled.pid\nexec /bin/sleep 30\n"
-        # The launchctl case answers the Python step at once, so the stall is reached well inside the limit.
+        tools = self.root / "tools"
+        tools.mkdir()
+        watchdog_limit = self.root / "watchdog-limit"
         submitted = "#!/bin/sh\necho '{\"status\": \"SUBMITTED\"}'\n"
-        for options in ({"python": "#!/bin/sh\n" + stall},
-                        {"python": submitted, "launchctl": f"[ \"$1\" = print ] && {{ {stall.replace(chr(10), '; ')}}}\n"}):
-            with self.subTest(stalled=list(options)):
-                started = time.monotonic()
-                done, _, _ = self.hook(limit="3", **options)
-                self.assertEqual(done.returncode, 0)
+        for stage in ("python", "launchctl"):
+            with self.subTest(stage=stage), contextlib.ExitStack() as pipes:
+                ready_read, ready_write = os.pipe()
+                hold_read, hold_write = os.pipe()
+                exit_read, exit_write = os.pipe()
+                ready = pipes.enter_context(os.fdopen(ready_read, "rb"))
+                entering = pipes.enter_context(os.fdopen(ready_write, "wb"))
+                held = pipes.enter_context(os.fdopen(hold_read, "rb"))
+                pipes.enter_context(os.fdopen(hold_write, "wb"))
+                exited = pipes.enter_context(os.fdopen(exit_read, "rb"))
+                writer = pipes.enter_context(os.fdopen(exit_write, "wb"))
+                (tools / "sleep").write_text(
+                    f'#!/bin/bash\nexec {entering.fileno()}>&-\nread -r entered <&{ready.fileno()} || exit 1\n'
+                    f'printf "%s\\n" "$1" > "{watchdog_limit}"\n'
+                )
+                stall = f"echo ready >&{entering.fileno()}; exec /bin/cat <&{held.fileno()}"
+                options = {"python": "#!/bin/bash\n" + stall} if stage == "python" else {
+                    "python": submitted, "launchctl": f'[ "$1" = print ] && {{ {stall}; }}\n',
+                }
+                pass_fds = tuple(pipe.fileno() for pipe in (ready, entering, held, writer))
+                done, _, _ = self.hook(limit="3", pass_fds=pass_fds, **options)
+                writer.close()
+                self.assertEqual(done.returncode, 0, done.stderr)
                 self.assertIn("did not finish within 3s", done.stdout)
-                self.assertLess(time.monotonic() - started, 15)
-                with self.assertRaises(ProcessLookupError):
-                    os.kill(int((self.root / "stalled.pid").read_text()), 0)
-                (self.root / "stalled.pid").unlink()
+                self.assertEqual(watchdog_limit.read_text(), "3\n")
+                watchdog_limit.unlink()
+                # EOF proves the stalled process closed its inherited descriptor even if its PID is being reaped.
+                self.assertTrue(select.select([exited], [], [], 15)[0], "the stalled process kept its descriptor")
+                self.assertEqual(exited.read(1), b"")
 
 
 if __name__ == "__main__":
