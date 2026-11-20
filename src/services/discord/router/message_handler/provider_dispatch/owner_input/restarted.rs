@@ -74,7 +74,7 @@ impl OwnerTurn {
             .is_none_or(|row| row.hosted_execution_nonce.is_none())
         {
             // The regular Busy path already owns this turn.
-            return Ok(self);
+            return self.finish_restart_identity().await;
         }
         let host = crate::services::turn_host::for_observation(
             shared.pg_pool.as_ref(),
@@ -84,13 +84,15 @@ impl OwnerTurn {
         )
         .await;
         let row = match host {
-            TurnHost::Tmux | TurnHost::Return(_) => return Ok(self),
+            TurnHost::Tmux | TurnHost::Return(_) => return self.finish_restart_identity().await,
             TurnHost::Herdr(plan) => match plan.row {
-                None => return Ok(self),
-                Some(row) if matches!(&row.record, HostedRecord::Legacy) => return Ok(self),
+                None => return self.finish_restart_identity().await,
+                Some(row) if matches!(&row.record, HostedRecord::Legacy) => {
+                    return self.finish_restart_identity().await;
+                }
                 Some(row) if matches!(&row.record, HostedRecord::Known(record) if record.state != HostedState::Bound) =>
                 {
-                    return Ok(self);
+                    return self.finish_restart_identity().await;
                 }
                 row => row,
             },
@@ -108,7 +110,7 @@ impl OwnerTurn {
             {
                 if already_admitted(shared, record, channel) {
                     self.late.continued = true;
-                    return Ok(self);
+                    return self.finish_restart_identity().await;
                 }
                 let epoch = epoch_for(record, channel);
                 let (result, refreshed) = continue_owner(shared, pool, transition, row).await;
@@ -117,7 +119,7 @@ impl OwnerTurn {
                 };
                 match result {
                     // The normal provider path still has to adjudicate recovery.
-                    VerifiedReattach::Ended => return Ok(self),
+                    VerifiedReattach::Ended => return self.finish_restart_identity().await,
                     result @ (VerifiedReattach::Live | VerifiedReattach::AwaitingClear) => {
                         let cancel = self.mailbox.cancel_token().await.ok().flatten();
                         herdr_endpoints().view(record).map(|pane| {
@@ -139,7 +141,7 @@ impl OwnerTurn {
 
         if let Some(candidate) = candidate {
             self.late.restarted = Some(candidate);
-            return Ok(self);
+            return self.finish_restart_identity().await;
         }
 
         let probe = probe(
@@ -149,10 +151,41 @@ impl OwnerTurn {
             key.map(str::to_owned),
             row,
         );
-        hold_start(&self.mailbox, channel, self.front()).await;
+        self.hold_restart_identity(channel).await;
         held_watch::arm(channel.get(), probe);
         self.defer_before_submit("herdr_restart_held");
         Err(())
+    }
+
+    pub(in crate::services::discord) async fn hold_restart_identity(&self, channel: ChannelId) {
+        let front = self.front().clone();
+        let result = self
+            .mailbox
+            .v2_request(move |slot| slot.as_mut().ok_or("V2 not adopted")?.hold_identity(&front))
+            .await;
+        if let Err(error) = result {
+            tracing::warn!(channel_id = channel.get(), %error, "restart identity hold not recorded");
+        }
+    }
+
+    pub(in crate::services::discord) async fn finish_restart_identity(self) -> Result<Self, ()> {
+        let front = self.front().clone();
+        let result = self
+            .mailbox
+            .v2_request(move |slot| {
+                slot.as_mut()
+                    .ok_or("V2 not adopted")?
+                    .finish_identity_hold(&front)
+            })
+            .await;
+        match result {
+            Ok(()) => Ok(self),
+            Err(error) => {
+                tracing::warn!(%error, "restart identity hold not settled");
+                self.defer_before_submit("herdr_restart_hold_unsettled");
+                Err(())
+            }
+        }
     }
 }
 

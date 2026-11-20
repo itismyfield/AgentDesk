@@ -1,0 +1,49 @@
+---
+title: "Herdr 재시작 재부착과 평소 입력 경로"
+---
+stateDiagram-v2
+  state "pane identity 미확인" as s0 {
+    state "이름 유일#183;nonce 일치" as s1 {
+      s2: 기존 composer가 입력을 막음
+      s3: dcserver 종료
+      s4: 첫 원본 대기
+      s5: 같은 원본이 큐에 있음
+      s6: identity 보류가 저장된 기한을 중지
+      s7: 기한이 지나도 같은 원본 보존
+      s8: 종료 증명
+      s9: 이름으로 pane 선택
+      s10: watcher#183;진행 턴 lease#183;Busy grant 인수
+      s11: 유휴 pane 재부착
+      s12: 증명된 거절
+      s13: 평소 composer 차단
+      s14: 원본의 평소 Busy 주입 예약
+      s15: 원본의 평소 유휴 제출 예약
+      s16: 제출 결산
+      s17: 응답 불명, receipt 대기
+      s18: 답 채널 게시
+    }
+  }
+  [*] --> s2
+  s2 --> s3: composer 기한과 입력을 저장한 뒤 재시작
+  s3 --> s4: dcserver 부팅
+  s4 --> s5: 같은 원본 수락
+  s5 --> s6: 현재 pane과 이름을 확인
+  s6 --> s7: 보류 기준 시각 경과
+  s7 --> s5: 달라진 pane 증거로 같은 원본 재판정
+  s5 --> s9: 현재 pane과 이름을 확인
+  s5 --> s8: 현재 pane과 이름을 확인
+  s8 --> s12: 종료 증명으로 결산
+  s9 --> s10: 위치#183;registry#183;watcher와 owner 인수
+  s9 --> s11: 위치#183;registry#183;watcher와 owner 인수
+  s10 --> s13: 평소 입력 규칙 적용
+  s10 --> s14: 평소 입력 규칙 적용
+  s11 --> s13: 평소 입력 규칙 적용
+  s11 --> s15: 평소 입력 규칙 적용
+  s13 --> s10: composer가 입력 가능한 상태로 전환
+  s13 --> s11: composer가 입력 가능한 상태로 전환
+  s14 --> s16: 원본 한 번 전달
+  s14 --> s17: 원본 한 번 전달
+  s15 --> s16: 원본 한 번 전달
+  s15 --> s17: 원본 한 번 전달
+  s16 --> s18: 채널에 답 게시
+  s17 --> s16: 제출 증거 확인

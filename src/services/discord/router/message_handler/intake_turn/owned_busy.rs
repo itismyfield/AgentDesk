@@ -386,6 +386,16 @@ async fn hold(
     probe: Option<crate::services::claude_tui::host_input::busy::BusyProbe>,
 ) {
     hold_start(mailbox, channel, front).await;
+    watch_held((shared, typed), mailbox, channel, front, probe).await;
+}
+
+async fn watch_held(
+    (shared, typed): (&Shared, bool),
+    mailbox: &ChannelMailboxHandle,
+    channel: ChannelId,
+    front: &Front,
+    probe: Option<crate::services::claude_tui::host_input::busy::BusyProbe>,
+) {
     super::super::super::busy_retry::note_busy_result(
         shared,
         &ProviderKind::Claude,

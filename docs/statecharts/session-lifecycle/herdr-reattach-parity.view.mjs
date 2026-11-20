@@ -14,10 +14,14 @@ const targets = {
 
 export function state({ attach }) {
   const labels = {
+    beforeRestart: "기존 composer가 입력을 막음",
     down: "dcserver 종료",
     await: "첫 원본 대기",
     queued: "같은 원본이 큐에 있음",
-    identityHeld: attach.elapsed ? "기한이 지나도 같은 원본 보존" : "pane identity 재관찰 대기",
+    identityHeld: attach.elapsed ? "기한이 지나도 같은 원본 보존"
+      : attach.readiness === "suspended" ? "identity 보류가 저장된 기한을 중지"
+      : attach.readiness === "active" ? "identity 보류에 옛 기한이 남음"
+      : "pane identity 재관찰 대기",
     endProved: "종료 증명",
     named: "이름으로 pane 선택",
     exact: "정밀 판정으로 pane 선택",
@@ -29,7 +33,8 @@ export function state({ attach }) {
     receipt: "제출 결산",
     done: "답 채널 게시",
     rejected: "증명된 거절",
-    discarded: "살아 있는 pane의 원본 폐기",
+    discarded: attach.readiness === "active" ? "옛 기한이 원본과 followers를 폐기"
+      : "살아 있는 pane의 원본 폐기",
   };
   const claim = attach.headlessClaim === "new" ? " (새 headless claim이 기존 턴을 막음)"
     : attach.headlessClaim === "refused" ? " (기존 lease에 headless claim 거절)" : "";
@@ -40,11 +45,13 @@ export function state({ attach }) {
 }
 
 const actions = {
+  ParitySaveComposerHold: "composer 기한과 입력을 저장한 뒤 재시작",
   Boot: "dcserver 부팅",
   FirstInput: "같은 원본 수락",
   ReconcileIntake: "intake reconcile 완료",
   ParityAssess: "현재 pane과 이름을 확인",
   ParityIdentityDeadline: "보류 기준 시각 경과",
+  ParityReadoptIdentity: "identity 보류 중 같은 큐 재인수",
   ParityPinPathless: "기존 턴의 정확한 시작 위치를 확인",
   ParityResolveChild: "검증된 부모 설정과 child 행을 대조",
   ParityObserve: "달라진 pane 증거로 같은 원본 재판정",

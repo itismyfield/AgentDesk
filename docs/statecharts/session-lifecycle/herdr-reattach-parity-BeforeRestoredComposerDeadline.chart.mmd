@@ -1,0 +1,38 @@
+---
+title: "Herdr 재시작 재부착과 평소 입력 경로"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoIdentityLoss or RestoredComposerUnit
+    lg1: Path to the NoIdentityLoss or ParityResolves or RestoredComposerUnit bug
+    lg2: Repeats forever, so ParityResolves breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  state "pane identity 미확인" as s0 {
+    state "이름 유일#183;nonce 일치" as s1 {
+      s2: 기존 composer가 입력을 막음
+      s3: dcserver 종료
+      s4: 첫 원본 대기
+      s5: 같은 원본이 큐에 있음
+      s6: identity 보류에 옛 기한이 남음
+      s7: 옛 기한이 원본과 followers를 폐기
+    }
+  }
+  [*] --> s2
+  s2 --> s3: composer 기한과 입력을 저장한 뒤 재시작
+  s3 --> s4: dcserver 부팅
+  s4 --> s5: 같은 원본 수락
+  s5 --> s5: intake reconcile 완료
+  s5 --> s6: 현재 pane과 이름을 확인
+  s6 --> s7: 보류 기준 시각 경과
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s7 breaks
+  class s7 bugPath
+  class s7 repeats

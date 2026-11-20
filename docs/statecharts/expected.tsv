@@ -1246,6 +1246,7 @@ session-lifecycle/HerdrMissingBoundParityAfter.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundParityBeforeBusy.cfg	HerdrMissingBound	NoIdleOnly	ParityResolves
 session-lifecycle/HerdrMissingBoundParityBeforeClaimRace.cfg	HerdrMissingBound	NoCompetingClaim	ParityResolves
 session-lifecycle/HerdrMissingBoundParityBeforeIdentityDeadline.cfg	HerdrMissingBound	NoIdentityLoss	ParityResolves
+session-lifecycle/HerdrMissingBoundParityBeforeRestoredComposerDeadline.cfg	HerdrMissingBound	NoIdentityLoss,RestoredComposerUnit	ParityResolves
 session-lifecycle/HerdrMissingBoundParityBeforeUnproven.cfg	HerdrMissingBound	NoLiveDiscard	ParityResolves
 session-lifecycle/HerdrMissingBoundParityClaimRace.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundParityDuplicate.cfg	HerdrMissingBound	-	-
@@ -1254,6 +1255,7 @@ session-lifecycle/HerdrMissingBoundParityOtherNonce.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundParityParentEndpoint.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundParityPathlessBusy.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundParityResendUnknown.cfg	HerdrMissingBound	OwnerExactlyOnce	ParityResolves
+session-lifecycle/HerdrMissingBoundParityRestoredComposerDeadline.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundParityTrustName.cfg	HerdrMissingBound	NamedOnlyCurrent	-
 session-lifecycle/HerdrMissingBoundRetireOnlyLaunchFailure.cfg	HerdrMissingBound	NoRetainedRefusal	InputResolves
 session-lifecycle/HerdrPendingRegistrationAfter.cfg	HerdrPendingRegistration	-	-

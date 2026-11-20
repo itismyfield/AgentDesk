@@ -92,7 +92,7 @@ impl OwnerTurn {
         }
         .await;
         match recovery {
-            Ok(()) => Ok((Some(owner), false)),
+            Ok(()) => Ok((Some(owner.finish_restart_identity().await?), false)),
             Err(reason) => {
                 let observation =
                     claude_handoff::observe_busy(channel.get(), session, host, &shared.token_hash);
@@ -103,7 +103,8 @@ impl OwnerTurn {
                     &owner.mailbox,
                     Some(owner.front()),
                 );
-                hold(
+                owner.hold_restart_identity(channel).await;
+                watch_held(
                     (shared, false),
                     &owner.mailbox,
                     channel,

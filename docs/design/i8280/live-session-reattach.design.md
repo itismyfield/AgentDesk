@@ -63,6 +63,7 @@
 | E53 | `src/services/discord/router/message_handler/provider_dispatch/owner_input/restarted.rs:145` | pane 정체 보류는 동일 원본·ticket·followers를 유지한다. 관찰 변화로 재판정한다. |
 | E54 | `src/services/discord/recovery_engine/restore_inflight/live_reattach.rs:110` | 출력 경로가 없는 Claude Busy 행은 같은 nonce의 입력 receipt와 transcript 시작점을 확인하고 기존 진행 lease를 인수한다. |
 | E55 | `src/services/turn_host.rs:274`, `src/services/discord/herdr_terminate/root_replaced.rs:238` | 실제 스레드의 child 행과 검증된 부모 endpoint를 대조한다. 전환·owner·입력은 child에 남는다. |
+| E56 | `src/services/turn_orchestrator/queued_head/v2/readiness_hold.rs:47`, `src/services/turn_orchestrator/queued_head/v2/retained.rs:45`, `src/services/discord/router/message_handler/intake_turn/owned_busy/reconnect.rs:106` | 같은 원본의 유효한 composer 기한을 identity 보류에 넘긴다. 같은 큐를 재인수해도 옛 tick은 원본을 지울 수 없다. 관찰이 해결된 뒤 composer가 차단되면 별도 기한을 기록한다. |
 
 ## 부팅과 첫 메시지가 만나는 경계
 

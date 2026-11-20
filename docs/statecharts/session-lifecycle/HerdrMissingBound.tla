@@ -414,7 +414,7 @@ OwnerDelivers ==
 
 \* The revised parity projection keeps the first input under the original owner.
 ParityTargets ==
-    CASE Control = "identity-deadline" -> {"unknown"}
+    CASE Control \in {"identity-deadline", "restored-composer-deadline"} -> {"unknown"}
       [] Control \in {"busy", "unproven", "duplicate", "other-nonce", "headless-race", "pathless-busy"} -> {"busy"}
       [] Control = "parent-endpoint" -> {"idle", "busy"}
       [] OTHER -> {"idle", "busy", "dead", "unknown"}
@@ -422,7 +422,7 @@ ParityTargets ==
 ParityNames ==
     CASE Control = "duplicate" -> {"duplicate"}
       [] Control = "other-nonce" -> {"other"}
-      [] Control \in {"busy", "unproven", "headless-race", "identity-deadline", "pathless-busy", "parent-endpoint"} -> {"unique"}
+      [] Control \in {"busy", "unproven", "headless-race", "identity-deadline", "restored-composer-deadline", "pathless-busy", "parent-endpoint"} -> {"unique"}
       [] OTHER -> {"unique", "duplicate", "other"}
 
 ParityInit ==
@@ -430,19 +430,28 @@ ParityInit ==
     /\ \E t \in ParityTargets, n \in ParityNames, composer \in {"open", "modal"} :
        \E unproven \in (IF Control = "unproven" THEN {TRUE}
                        ELSE IF Control = "all" /\ t = "busy" THEN BOOLEAN ELSE {FALSE}) :
-           attach = [phase |-> "down", initial |-> t, target |-> t, name |-> n,
+           attach = [phase |-> IF Control = "restored-composer-deadline" THEN "beforeRestart" ELSE "down",
+                     initial |-> t, target |-> t, name |-> n,
                      composer |-> composer, unproven |-> unproven, reconciled |-> FALSE,
                      front |-> 1, claimed |-> 0, route |-> "none", reattached |-> 0,
                      locationFresh |-> FALSE, lease |-> FALSE, grant |-> "none",
                      provedEnd |-> FALSE, submits |-> 0, headlessClaim |-> "none",
-                     elapsed |-> FALSE, sourcePinned |-> FALSE, childEndpoint |-> FALSE]
+                     elapsed |-> FALSE, sourcePinned |-> FALSE, childEndpoint |-> FALSE,
+                     readiness |-> "none", unitKept |-> TRUE, heldReadopted |-> FALSE]
+
+ParitySaveComposerHold ==
+    /\ attach.phase = "beforeRestart"
+    /\ attach' = [attach EXCEPT !.phase = "down", !.readiness = "active"]
+    /\ UNCHANGED vars
 
 ParityAssess ==
     /\ attach.phase = "queued" /\ attach.reconciled
     /\ CASE attach.unproven /\ Policy = "parity-before" ->
                attach' = [attach EXCEPT !.phase = "discarded"]
          [] attach.target = "unknown" ->
-               attach' = [attach EXCEPT !.phase = "identityHeld"]
+               attach' = [attach EXCEPT !.phase = "identityHeld",
+                           !.readiness = IF @ = "active" /\ Policy # "parity-keep-old-due"
+                                        THEN "suspended" ELSE @]
          [] attach.target = "dead" ->
                attach' = [attach EXCEPT !.phase = "endProved", !.provedEnd = TRUE]
          [] OTHER ->
@@ -452,17 +461,25 @@ ParityAssess ==
     /\ UNCHANGED vars
 
 \* An elapsed identity wait keeps the original, including its unattempted ticket.
+ParityReadoptIdentity ==
+    /\ Control = "restored-composer-deadline" /\ attach.phase = "identityHeld" /\ ~attach.heldReadopted
+    /\ attach' = [attach EXCEPT !.heldReadopted = TRUE]
+    /\ UNCHANGED vars
+
 ParityIdentityDeadline ==
-    /\ Control = "identity-deadline" /\ attach.phase = "identityHeld" /\ ~attach.elapsed
-    /\ attach' = [attach EXCEPT !.elapsed = TRUE,
-                 !.phase = IF Policy = "parity-discard-identity" THEN "discarded" ELSE @]
+    /\ Control \in {"identity-deadline", "restored-composer-deadline"}
+    /\ attach.phase = "identityHeld" /\ ~attach.elapsed
+    /\ LET losesUnit == Policy = "parity-discard-identity" \/ attach.readiness = "active"
+       IN attach' = [attach EXCEPT !.elapsed = TRUE,
+                     !.phase = IF losesUnit THEN "discarded" ELSE @,
+                     !.unitKept = ~losesUnit]
     /\ UNCHANGED vars
 
 ParityObserve ==
     /\ attach.phase = "identityHeld"
-    /\ (Control # "identity-deadline" \/ attach.elapsed)
+    /\ (Control \notin {"identity-deadline", "restored-composer-deadline"} \/ attach.elapsed)
     /\ \E observed \in {"idle", "busy", "dead"} :
-       attach' = [attach EXCEPT !.target = observed, !.phase = "queued"]
+       attach' = [attach EXCEPT !.target = observed, !.phase = "queued", !.readiness = "none"]
     /\ UNCHANGED vars
 
 ParityPinPathless ==
@@ -539,13 +556,14 @@ ParityReject ==
     /\ UNCHANGED vars
 
 ParityNext ==
-    Boot \/ FirstInput \/ ReconcileIntake \/ ParityAssess \/ ParityObserve \/ ParityAttach
-    \/ ParityIdentityDeadline \/ ParityPinPathless \/ ParityResolveChild
+    ParitySaveComposerHold \/ Boot \/ FirstInput \/ ReconcileIntake \/ ParityAssess \/ ParityObserve \/ ParityAttach
+    \/ ParityReadoptIdentity \/ ParityIdentityDeadline \/ ParityPinPathless \/ ParityResolveChild
     \/ ParityHeadlessClaim \/ ParityInputRule \/ ParityComposerClears \/ ParitySubmit \/ ParityObserveReceipt
     \/ ParityResendUnknown \/ ParityPublishReply \/ ParityReject \/ AttachDone
 
 ParitySpec ==
     /\ ParityInit /\ [][ParityNext]_allVars
+    /\ WF_attach(ParitySaveComposerHold)
     /\ WF_attach(Boot) /\ WF_attach(FirstInput) /\ WF_attach(ReconcileIntake)
     /\ WF_attach(ParityAssess) /\ WF_attach(ParityObserve) /\ WF_attach(ParityAttach)
     /\ WF_attach(ParityIdentityDeadline) /\ WF_attach(ParityPinPathless) /\ WF_attach(ParityResolveChild)
@@ -554,6 +572,7 @@ ParitySpec ==
 
 NoLiveDiscard == attach.target \in {"idle", "busy"} => attach.phase # "discarded"
 NoIdentityLoss == attach.phase # "discarded"
+RestoredComposerUnit == attach.unitKept
 NoIdleOnly == attach.phase # "idleOnly"
 NamedOnlyCurrent == attach.route = "named" => attach.name = "unique" /\ attach.locationFresh
 BusyAuthority == attach.grant = "busy" => attach.lease /\ attach.reattached = 1

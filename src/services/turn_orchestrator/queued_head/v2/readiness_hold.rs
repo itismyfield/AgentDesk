@@ -28,7 +28,10 @@ impl Owner {
         if !self.front().is_some_and(|f| is_front(&f, front)) {
             return Err("not the owner's unattempted front".into());
         }
-        if let Some(hold) = self.front_hold() {
+        if let Some(hold) = self
+            .snapshot
+            .hold_for_member(&refused::refused_member(&front.1))
+        {
             return Ok(hold.clone());
         }
         let mut next = self.snapshot.clone();
@@ -39,7 +42,42 @@ impl Owner {
         Ok(hold)
     }
 
-    /// The hold of the queue front while no attempt runs; an attempted front is its leaf's.
+    /// Transfers a live composer hold on the exact original to the identity watch. Its retained
+    /// record no longer schedules a tick or constrains an input attempt.
+    pub(crate) fn hold_identity(&mut self, front: &Front) -> Result<(), String> {
+        self.hold_front(front)?;
+        let now = super::origin::now_ms();
+        let Some(hold) = self.front_hold().filter(|hold| !hold.expired(now)) else {
+            return Ok(());
+        };
+        let mut next = self.snapshot.clone();
+        if let Some(saved) = next.readiness_holds.iter_mut().find(|saved| *saved == hold) {
+            saved.identity_held_at_ms = Some(now);
+        }
+        self.commit(next)
+    }
+
+    /// Once the execution is adjudicated, the next genuine composer hold gets its own deadline.
+    pub(crate) fn finish_identity_hold(&mut self, front: &Front) -> Result<(), String> {
+        let member = refused::refused_member(&front.1);
+        let Some(hold) = self.snapshot.hold_for_member(&member) else {
+            return Ok(());
+        };
+        if hold.identity_held_at_ms.is_none() {
+            return Ok(());
+        }
+        if !self
+            .front()
+            .is_some_and(|current| is_front(&current, front))
+        {
+            return Err("not the owner's unattempted front".into());
+        }
+        let mut next = self.snapshot.clone();
+        next.readiness_holds.retain(|saved| saved != hold);
+        self.commit(next)
+    }
+
+    /// The timed hold of an unattempted front; an identity-held record has no timer.
     pub(crate) fn front_hold(&self) -> Option<&ReadinessHold> {
         if self.snapshot.head_injection.is_some() {
             return None;
@@ -168,6 +206,7 @@ impl Owner {
 impl SnapshotV2 {
     pub(super) fn readiness_hold(&self, original: &PendingQueueItem) -> Option<&ReadinessHold> {
         self.hold_for_member(&refused::refused_member(original))
+            .filter(|hold| hold.identity_held_at_ms.is_none())
     }
 
     fn hold_for_member(&self, member: &RefusedMember) -> Option<&ReadinessHold> {
@@ -196,6 +235,7 @@ impl SnapshotV2 {
             cause: cause.into(),
             started_at_ms: now,
             due_at_ms: now.saturating_add(READINESS_HOLD_MS),
+            identity_held_at_ms: None,
         };
         self.readiness_holds.push(hold.clone());
         hold
