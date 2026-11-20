@@ -186,6 +186,31 @@ class Runner(unittest.TestCase):
         blocked = {r["scenario"]: r["status"] for r in record["occurrences"] if r["status"] != "PASS"}
         self.assertEqual(blocked, dict.fromkeys(["R-marker", "R-inject", "R-fresh", "R-host"], "BLOCKED_CAPABILITY"))
 
+    def test_preflight_evidence_is_published_and_legacy_report_replays_unchanged(self):
+        evidence = {
+            "stage": "detail_readiness", "http_status": 200, "status": "degraded", "fully_recovered": True,
+            "reasons": [{"code": "tui_o:reader_retention_stalled", "scope": "target"}],
+        }
+        legacy = {"schema_version": 2, "status": "UNEVALUABLE", "native_turns": 0, "tokens": 0, "budget_checked": 0,
+                  "reason": "CELL_NOT_IDLE: legacy diagnostic"}
+        current = {**legacy, "preflight_failure": {**evidence, "private_extra": "fixture-private"}}
+        (self.root / "driver.py").write_text(f"""import json, sys
+report = {current!r} if 'E-50' in sys.argv else {legacy!r}
+print(json.dumps(report))
+""")
+        self.submit("deploy-preflight-refusal")
+        self.assertEqual(self.tick(5000, rotation_interval_s=None)["status"], "UNEVALUABLE")
+        published = read_json(self.state / "summary.json", {})
+        by_scenario = {row["scenario"]: row for row in published["occurrences"]}
+        self.assertEqual(by_scenario["E-50"].get("preflight_failure"), evidence)
+        self.assertEqual(by_scenario["E-50"].get("reason"), "CELL_NOT_IDLE")
+        self.assertNotIn("preflight_failure", by_scenario["E-51"])
+        legacy_path = Path(by_scenario["E-51"]["driver_report_path"])
+        before = legacy_path.read_bytes()
+        self.assertEqual(json.loads(before), legacy)
+        self.assertEqual(summary.build(published, self.config)["result"], "UNEVALUABLE")
+        self.assertEqual(legacy_path.read_bytes(), before)
+
 
 
 class Recovery(Runner):
