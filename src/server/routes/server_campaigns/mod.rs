@@ -38,8 +38,8 @@ fn pool(state: &AppState) -> AppResult<&sqlx::PgPool> {
     })
 }
 
-fn document(state: &CampaignState, as_of: chrono::DateTime<Utc>) -> Value {
-    json!({"definition": state.definition.input(), "view": view::view(state, as_of)})
+fn document(state: &CampaignState, view: view::ServerCampaignView<'_>) -> Value {
+    json!({"definition": state.definition.input(), "view": view})
 }
 
 /// A campaign picker's document: node definitions, node views, sessions and
@@ -48,7 +48,7 @@ fn summary_document(state: &CampaignState, as_of: chrono::DateTime<Utc>) -> Valu
     let full = view::view(state, as_of);
     let mut node_counts = std::collections::BTreeMap::<String, usize>::new();
     for node in &full.nodes {
-        if let Value::String(disposition) = json!(node.runtime.disposition) {
+        if let Value::String(disposition) = json!(node.runtime.state.disposition) {
             *node_counts.entry(disposition).or_default() += 1;
         }
     }
@@ -85,17 +85,30 @@ pub(super) async fn list(
             "limit must be 1..100 and offset nonnegative",
         ));
     }
-    let campaigns = store::list(pool(&state)?, query.limit, query.offset)
+    let pool = pool(&state)?;
+    let campaigns = store::list(pool, query.limit, query.offset)
         .await
         .map_err(store_error)?;
     let as_of = Utc::now();
-    let render = match query.view {
-        ListView::Full => document,
-        ListView::Summary => summary_document,
+    let documents: Vec<_> = match query.view {
+        ListView::Full => {
+            let mut views: Vec<_> = campaigns
+                .iter()
+                .map(|state| view::view(state, as_of))
+                .collect();
+            fill_approval_opening_times(pool, &mut views).await?;
+            campaigns
+                .iter()
+                .zip(views)
+                .map(|(state, view)| document(state, view))
+                .collect()
+        }
+        ListView::Summary => campaigns
+            .iter()
+            .map(|state| summary_document(state, as_of))
+            .collect(),
     };
-    Ok(Json(
-        json!({"campaigns": campaigns.iter().map(|state| render(state, as_of)).collect::<Vec<_>>()}),
-    ))
+    Ok(Json(json!({"campaigns": documents})))
 }
 
 pub(super) async fn detail(
@@ -105,11 +118,14 @@ pub(super) async fn detail(
 ) -> AppResult<Json<Value>> {
     id(&campaign_id)?;
     let Query(_) = query.map_err(|error| AppError::bad_request(error.body_text()))?;
-    let campaign = store::get(pool(&state)?, &campaign_id)
+    let pool = pool(&state)?;
+    let campaign = store::get(pool, &campaign_id)
         .await
         .map_err(store_error)?
         .ok_or_else(|| AppError::not_found("server campaign not found"))?;
-    Ok(Json(json!({"campaign": document(&campaign, Utc::now())})))
+    let mut view = view::view(&campaign, Utc::now());
+    fill_approval_opening_times(pool, std::slice::from_mut(&mut view)).await?;
+    Ok(Json(json!({"campaign": document(&campaign, view)})))
 }
 
 pub(super) async fn create(
@@ -202,6 +218,35 @@ pub(super) async fn events(
     Ok(Json(
         json!({"events": store::events(pool, &campaign_id, query.run_id.as_deref(), query.after, query.limit).await.map_err(store_error)?}),
     ))
+}
+
+async fn fill_approval_opening_times(
+    pool: &sqlx::PgPool,
+    views: &mut [view::ServerCampaignView<'_>],
+) -> AppResult<()> {
+    let requests: Vec<_> = views
+        .iter()
+        .flat_map(|view| {
+            view.nodes.iter().filter_map(|node| {
+                Some(store::ApprovalOpeningRequest {
+                    campaign_id: view.campaign_id,
+                    event_sequence: view.last_event_sequence,
+                    binding: node.runtime.pending_gate.as_ref()?.binding?,
+                })
+            })
+        })
+        .collect();
+    let times = store::approval_opening_times(pool, &requests)
+        .await
+        .map_err(store_error)?;
+    for view in views {
+        if let Some(openings) = times.get(view.campaign_id) {
+            for node in &mut view.nodes {
+                node.runtime.wait_started_at = openings.get(node.id).copied();
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -557,6 +557,7 @@ pub(crate) enum RowOwner {
 }
 
 /// One row that took a frame: its byte offset, uuid, class hashes and whether it is a user row.
+#[derive(Clone)]
 struct Taken {
     offset: u64,
     uuid: String,

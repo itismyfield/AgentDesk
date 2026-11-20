@@ -16,12 +16,26 @@ use crate::services::provider::ProviderRuntimeExt;
 
 impl AgentChannelBindings {
     fn primary_provider_kind(&self) -> Option<ProviderKind> {
+        if self.retired_provider().is_some() {
+            return None;
+        }
         self.configured_provider_kind()
             .or_else(ProviderKind::default_channel_provider)
     }
 
     pub(crate) fn resolved_primary_provider_kind(&self) -> Option<ProviderKind> {
         self.resolved_primary_provider_kind_with_provider(self.primary_provider_kind())
+    }
+
+    /// The provider a claimed run launches with; a retired provider is refused with its reason.
+    pub(crate) fn require_primary_provider(&self, agent_id: &str) -> anyhow::Result<ProviderKind> {
+        self.resolved_primary_provider_kind()
+            .ok_or_else(|| match self.retired_provider() {
+                Some(retired) => anyhow::anyhow!(
+                    "agent {agent_id} provider '{retired}' is retired; its binding does not run"
+                ),
+                None => anyhow::anyhow!("agent {agent_id} primary provider is not configured"),
+            })
     }
 
     pub fn primary_channel(&self) -> Option<String> {

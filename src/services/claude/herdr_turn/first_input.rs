@@ -357,6 +357,9 @@ pub(super) fn observe(
     submitted: Submitted,
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
+    use crate::services::claude_tui::{readiness, source_verify};
+    use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context};
+
     let Submitted {
         attached,
         transcript,
@@ -368,6 +371,26 @@ pub(super) fn observe(
     let cancel = turn.cancel.as_deref();
     let start = before;
     let logical = turn.owner.logical_key.as_str();
+    let launch_start = if attached.bound {
+        None
+    } else {
+        readiness::launch_start_hook(logical, &attached.nonce, &attached.session_id, path)
+    };
+    let transcript_ready = || {
+        use source_verify::{FirstRecord, OpenedTranscript};
+        if launch_start.is_none() {
+            return path.exists();
+        }
+        // An empty or partial first record cannot verify the launch source yet.
+        !matches!(
+            source_verify::observe_transcript(path),
+            Ok(OpenedTranscript::Missing
+                | OpenedTranscript::Opened {
+                    first: FirstRecord::NotWritten,
+                    ..
+                })
+        )
+    };
     let unread = || PromptReadinessSnapshot {
         prompt_marker_detected: false,
         prompt_draft_detected: false,
@@ -381,12 +404,41 @@ pub(super) fn observe(
         cancel,
         logical,
         super::super::CLAUDE_TUI_TRANSCRIPT_INITIAL_WAIT_TIMEOUT,
-        || path.exists(),
+        transcript_ready,
         || true,
         unread,
     )?;
     if early.is_some() {
         return Ok(());
+    }
+    let binding = |last_offset| TuiRuntimeBinding {
+        runtime_kind: RuntimeHandoffKind::ClaudeTui,
+        output_path: transcript.clone(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: Some(attached.session_id.clone()),
+        last_offset,
+        relay_last_offset: None,
+    };
+    // Resolve and verify the launch source before the first read exposes the busy turn.
+    let mut bound = attached.bound;
+    if !bound {
+        crate::services::tmux_common::with_tmux_source_authority(logical, |authority| {
+            let published = dedupe::register_launched_tmux_runtime_binding_under_source_authority(
+                authority,
+                binding(start),
+            );
+            if let (true, Some(hook)) = (published, launch_start.as_ref())
+                && dedupe::herdr_execution_is(logical, &attached.nonce)
+                && matches!(binding_context::observe_spawn_nonce_marker(logical),
+                    binding_context::SpawnNonceMarker::Known(nonce) if nonce == attached.nonce)
+                && let Err(error) =
+                    dedupe::reclaim_with_current_prompt(authority, &attached.session_id, hook)
+            {
+                tracing::warn!(logical, %error, "Claude launch source verification not persisted");
+            }
+        });
+        bound = runtime.block_on(bind_once_logged(turn, &attached.nonce));
     }
     let (mut terminal, mut unconfirmed) = (None, false);
     if early.is_none() {
@@ -424,19 +476,9 @@ pub(super) fn observe(
     // A Herdr turn hands off exactly where its terminal record ends, never past it.
     let terminal_end = terminal.as_ref().map(|(read, ..)| read.end);
     let handoff_end = || terminal_end.unwrap_or_else(length);
-    // The tmux handoff's launch registration; with the transcript now written it resolves a cold
-    // start's Pending source, before any terminal of this turn reaches admission.
-    let binding = TuiRuntimeBinding {
-        runtime_kind: RuntimeHandoffKind::ClaudeTui,
-        output_path: transcript.clone(),
-        relay_output_path: None,
-        input_fifo_path: None,
-        session_id: Some(attached.session_id.clone()),
-        last_offset: handoff_end(),
-        relay_last_offset: None,
-    };
-    crate::services::tui_prompt_dedupe::register_launched_tmux_runtime_binding(logical, binding);
-    if !attached.bound {
+    // Registered again at the handoff offset, before any terminal of this turn reaches admission.
+    dedupe::register_launched_tmux_runtime_binding(logical, binding(handoff_end()));
+    if !bound {
         runtime.block_on(bind_once_logged(turn, &attached.nonce));
     }
     if let Some((read, token)) = terminal.take() {
@@ -455,6 +497,21 @@ pub(super) fn observe(
         },
     });
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn observe_cold_for_tests(
+    turn: &HerdrTurn<'_>,
+    attached: Attached,
+    sender: Sender<StreamMessage>,
+) -> Result<(), String> {
+    let submitted = Submitted {
+        transcript: attached.transcript.display().to_string(),
+        attached,
+        before: 0,
+        started_at: chrono::Utc::now(),
+    };
+    observe(turn, &Handle::current(), submitted, sender)
 }
 
 #[cfg(test)]

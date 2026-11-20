@@ -67,7 +67,6 @@ pub(super) fn provider_from_channel_suffix(channel: &str) -> Option<&'static str
     ProviderKind::from_channel_suffix(channel).and_then(|provider| match provider {
         ProviderKind::Claude => Some("claude"),
         ProviderKind::Codex => Some("codex"),
-        ProviderKind::Gemini => Some("gemini"),
         ProviderKind::OpenCode => Some("opencode"),
         ProviderKind::Qwen => Some("qwen"),
         ProviderKind::Grok => Some("grok"),

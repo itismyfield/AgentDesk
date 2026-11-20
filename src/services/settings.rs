@@ -10,6 +10,9 @@ use sqlx::Row;
 
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
+mod catalog;
+use catalog::CONFIG_KEYS;
+pub use catalog::{RuntimeConfigResponse, SettingsConfigEntriesResponse, SettingsConfigEntry};
 mod resolve;
 mod runtime_config_put;
 pub mod startup;
@@ -21,7 +24,8 @@ pub use resolve::{
     RATE_LIMIT_STALE_SEC, Resolved, RowSetting, RuntimeSetting, SettingSource, max_entry_retries,
     policy_kv_rows, policy_value, resolve_row, resolve_with_kv, runtime_config_field,
 };
-use runtime_config_put::with_explicit_runtime_config_keys;
+pub(crate) use runtime_config_put::is_runtime_config_key;
+use runtime_config_put::{runtime_config_keys, with_explicit_runtime_config_keys};
 
 const RETIRED_SETTINGS_JSON_KEYS: &[&str] = &[
     "autoUpdateEnabled",
@@ -60,112 +64,7 @@ const RETIRED_CONFIG_KEYS: &[&str] = &[
 pub(crate) const RETIRED_CONFIG_KEY_PREFIXES: &[&str] =
     &["merge_strategy_mode:card:", "escalation_thread:"];
 
-const RUNTIME_CONFIG_KEYS: &[&str] = &[
-    "maxRetries",
-    "maxEntryRetries",
-    "staleDispatchedGraceMin",
-    "staleDispatchedTerminalStatuses",
-    "staleDispatchedRecoverNullDispatch",
-    "staleDispatchedRecoverMissingDispatch",
-    "rateLimitWarningPct",
-    "rateLimitDangerPct",
-    "rateLimitStaleSec",
-    "dispatchRateLimitGateEnabled",
-    "dispatchRateLimitGateDangerPct",
-];
-
-pub(crate) fn is_runtime_config_key(key: &str) -> bool {
-    RUNTIME_CONFIG_KEYS.contains(&key)
-}
-
 pub(crate) const RUNTIME_CONFIG_EXPLICIT_KEYS_META: &str = "__runtimeConfigExplicitKeys";
-
-/// Known individual `kv_meta` config keys surfaced to the dashboard and policy helpers.
-/// (key, category, label_ko, label_en, default_value)
-/// default_value is seeded into kv_meta on startup if absent.
-const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
-    (
-        "deadlock_manager_channel_id",
-        "pipeline",
-        "데드락 매니저 채널 ID",
-        "Deadlock Manager Channel ID",
-        None,
-    ),
-    (
-        // Key name predates its current sole reader, the GitHub-sync terminal/OPEN alert.
-        "agent_quality_monitoring_channel_id",
-        "quality",
-        "GitHub 동기화 알림 채널 ID",
-        "GitHub Sync Alert Channel ID",
-        None,
-    ),
-    (
-        // #3561 — operator override for the per-hour relay-loss signal alert
-        // threshold. Empty/absent ⇒ conservative per-signal code defaults.
-        "kanban_relay_alert_threshold",
-        "quality",
-        "릴레이 누락 신호 경보 임계",
-        "Relay Signal Alert Threshold",
-        None,
-    ),
-    (
-        "review_enabled",
-        "review",
-        "리뷰 활성화",
-        "Review Enabled",
-        None,
-    ),
-    (
-        "max_review_rounds",
-        "review",
-        "최대 리뷰 라운드",
-        "Max Review Rounds",
-        Some("3"),
-    ),
-    ("server_port", "system", "서버 포트", "Server Port", None),
-    (
-        "requested_timeout_min",
-        "timeout",
-        "요청됨 타임아웃 (분)",
-        "Requested Timeout (min)",
-        Some("45"),
-    ),
-    (
-        "in_progress_stale_min",
-        "timeout",
-        "진행 중 정체 판정 (분)",
-        "In-Progress Stale (min)",
-        Some("120"),
-    ),
-    (
-        "context_compact_percent",
-        "context",
-        "컨텍스트 compact 임계값 (%)",
-        "Context Compact Threshold (%)",
-        Some("60"),
-    ),
-    (
-        "context_compact_percent_codex",
-        "context",
-        "Codex 컨텍스트 compact 임계값 (%)",
-        "Codex Context Compact Threshold (%)",
-        None,
-    ),
-    (
-        "context_compact_percent_claude",
-        "context",
-        "Claude 컨텍스트 compact 임계값 (%)",
-        "Claude Context Compact Threshold (%)",
-        None,
-    ),
-    (
-        "context_compact_lower_bound_tokens",
-        "context",
-        "컨텍스트 compact 최소 토큰",
-        "Context Compact Lower Bound (tokens)",
-        Some("300000"),
-    ),
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KvSeedAction {
@@ -196,27 +95,6 @@ impl SettingsOkResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SettingsConfigEntriesResponse {
-    pub entries: Vec<SettingsConfigEntry>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SettingsConfigEntry {
-    pub key: String,
-    pub value: Option<String>,
-    pub category: String,
-    pub label_ko: String,
-    pub label_en: String,
-    #[serde(rename = "default")]
-    pub default_value: Option<String>,
-    pub baseline: Option<String>,
-    pub baseline_source: Option<String>,
-    pub override_active: bool,
-    pub editable: bool,
-    pub restart_behavior: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct SettingsConfigPatchResponse {
     pub ok: bool,
     pub updated: usize,
@@ -231,13 +109,6 @@ impl SettingsConfigPatchResponse {
             rejected,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RuntimeConfigResponse {
-    pub current: Map<String, Value>,
-    pub defaults: Map<String, Value>,
-    pub explicit_keys: Vec<String>,
 }
 
 impl SettingsService {
@@ -295,47 +166,7 @@ impl SettingsService {
     pub async fn get_config_entries(&self) -> ServiceResult<SettingsConfigEntriesResponse> {
         let pool = self.pg_pool("get_config_entries.pg_pool")?;
         let pg_values = load_pg_kv_values(pool).await?;
-
-        let mut entries = Vec::new();
-        for (key, category, label_ko, label_en, default_val) in CONFIG_KEYS {
-            let stored_value: Option<String> = if is_read_only_config_key(key) {
-                None
-            } else {
-                pg_values.get(*key).cloned()
-            };
-            let baseline = config_entry_default(self.config.as_ref(), key, *default_val);
-            let effective = config_entry_effective_value(key, stored_value, baseline.clone());
-            let editable = !is_read_only_config_key(key);
-            entries.push(SettingsConfigEntry {
-                key: (*key).to_string(),
-                value: effective.clone(),
-                category: (*category).to_string(),
-                label_ko: (*label_ko).to_string(),
-                label_en: (*label_en).to_string(),
-                default_value: baseline.clone(),
-                baseline: baseline.clone(),
-                baseline_source: config_entry_baseline_source(
-                    self.config.as_ref(),
-                    key,
-                    *default_val,
-                )
-                .map(str::to_string),
-                override_active: config_entry_override_active(
-                    editable,
-                    effective.as_deref(),
-                    baseline.as_deref(),
-                ),
-                editable,
-                restart_behavior: config_entry_restart_behavior(
-                    self.config.as_ref(),
-                    key,
-                    *default_val,
-                )
-                .to_string(),
-            });
-        }
-
-        Ok(SettingsConfigEntriesResponse { entries })
+        Ok(catalog::config_entries(self.config.as_ref(), &pg_values))
     }
 
     pub async fn patch_config_entries(
@@ -347,7 +178,7 @@ impl SettingsService {
                 .with_code(ErrorCode::Settings)
                 .with_operation("patch_config_entries.validate_body")
         })?;
-        let allowed: HashSet<&str> = CONFIG_KEYS.iter().map(|(k, _, _, _, _)| *k).collect();
+        let allowed: HashSet<&str> = CONFIG_KEYS.iter().map(|item| item.key).collect();
         let pool = self.pg_pool("patch_config_entries.pg_pool")?;
         let mut updated = 0;
         let mut rejected = Vec::new();
@@ -401,34 +232,10 @@ impl SettingsService {
                         .with_code(ErrorCode::Database)
                         .with_operation("get_runtime_config.load_pg")
                 })?;
-        let saved = saved_raw
-            .as_deref()
-            .and_then(|raw| serde_json::from_str(raw).ok())
-            .unwrap_or_else(|| json!({}));
-        let defaults = runtime_config_defaults_map(self.config.as_ref());
-
-        let mut current = defaults.clone();
-        if let Some(saved_obj) = saved.as_object() {
-            for (key, value) in saved_obj {
-                if key == RUNTIME_CONFIG_EXPLICIT_KEYS_META {
-                    continue;
-                }
-                current.insert(key.clone(), value.clone());
-            }
-        }
-        let mut explicit_keys = saved
-            .as_object()
-            .map(explicit_runtime_config_keys)
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<Vec<_>>();
-        explicit_keys.sort();
-
-        Ok(RuntimeConfigResponse {
-            current,
-            defaults,
-            explicit_keys,
-        })
+        Ok(catalog::runtime_config(
+            self.config.as_ref(),
+            saved_raw.as_deref(),
+        ))
     }
 
     pub async fn put_runtime_config(&self, body: Value) -> ServiceResult<SettingsOkResponse> {
@@ -616,22 +423,23 @@ fn config_entry_restart_behavior(
 pub(crate) fn config_default_seed_actions(config: &crate::config::Config) -> Vec<KvSeedAction> {
     let mut actions = Vec::new();
 
-    for (key, _, _, _, default_val) in CONFIG_KEYS {
-        if *key == "server_port" {
+    for item in CONFIG_KEYS {
+        let key = item.key;
+        if key == "server_port" {
             continue;
         }
 
         let yaml_value = yaml_section_value(config, key);
-        let baseline = config_entry_default(config, key, *default_val);
+        let baseline = config_entry_default(config, key, item.default_value);
 
         if config.runtime.reset_overrides_on_restart {
             match baseline {
                 Some(value) => actions.push(KvSeedAction::Put {
-                    key: (*key).to_string(),
+                    key: key.to_string(),
                     value,
                 }),
                 None => actions.push(KvSeedAction::Delete {
-                    key: (*key).to_string(),
+                    key: key.to_string(),
                 }),
             }
             continue;
@@ -639,11 +447,11 @@ pub(crate) fn config_default_seed_actions(config: &crate::config::Config) -> Vec
 
         match (yaml_value, baseline) {
             (Some(value), _) => actions.push(KvSeedAction::Put {
-                key: (*key).to_string(),
+                key: key.to_string(),
                 value,
             }),
             (None, Some(value)) => actions.push(KvSeedAction::PutIfAbsent {
-                key: (*key).to_string(),
+                key: key.to_string(),
                 value,
             }),
             (None, None) => {}
@@ -691,12 +499,7 @@ enum RuntimeConfigKvWrite {
 
 fn runtime_config_write_plan(value: String) -> Vec<RuntimeConfigKvWrite> {
     std::iter::once(RuntimeConfigKvWrite::UpsertBlob(value))
-        .chain(
-            RUNTIME_CONFIG_KEYS
-                .iter()
-                .copied()
-                .map(RuntimeConfigKvWrite::DeleteScalar),
-        )
+        .chain(runtime_config_keys().map(RuntimeConfigKvWrite::DeleteScalar))
         .collect()
 }
 
@@ -863,7 +666,7 @@ pub(crate) fn explicit_runtime_config_keys(values: &Map<String, Value>) -> HashS
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .filter(|key| RUNTIME_CONFIG_KEYS.contains(key))
+        .filter(|key| is_runtime_config_key(key))
         .map(ToOwned::to_owned)
         .collect()
 }
@@ -1011,7 +814,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    struct TestDatabase {
+    pub(super) struct TestDatabase {
         _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
         database_name: String,
@@ -1019,7 +822,7 @@ mod tests {
     }
 
     impl TestDatabase {
-        async fn create() -> Self {
+        pub(super) async fn create() -> Self {
             crate::db::postgres::postgres_test_database_url_base().expect(
                 "POSTGRES_TEST_DATABASE_URL_BASE required for settings runtime-config PG tests",
             ); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
@@ -1052,7 +855,7 @@ mod tests {
             }
         }
 
-        async fn connect(&self) -> sqlx::PgPool {
+        pub(super) async fn connect(&self) -> sqlx::PgPool {
             let pool = crate::db::postgres::connect_test_pool(
                 &self.database_url,
                 "settings runtime-config pg tests",
@@ -1072,7 +875,7 @@ mod tests {
             pool
         }
 
-        async fn drop(self) {
+        pub(super) async fn drop(self) {
             crate::db::postgres::drop_test_database(
                 &self.admin_url,
                 &self.database_name,
@@ -1083,7 +886,7 @@ mod tests {
         }
     }
 
-    async fn upsert_test_kv(pool: &sqlx::PgPool, key: &str, value: &str) {
+    pub(super) async fn upsert_test_kv(pool: &sqlx::PgPool, key: &str, value: &str) {
         sqlx::query(
             "INSERT INTO kv_meta (key, value, expires_at)
              VALUES ($1, $2, NULL)
@@ -1097,7 +900,7 @@ mod tests {
     }
 
     async fn seed_runtime_scalar_mirrors(pool: &sqlx::PgPool) {
-        for key in RUNTIME_CONFIG_KEYS {
+        for key in runtime_config_keys() {
             upsert_test_kv(pool, key, &format!("legacy-{key}")).await;
         }
     }
@@ -1114,7 +917,7 @@ mod tests {
             *expected
         );
 
-        for key in RUNTIME_CONFIG_KEYS {
+        for key in runtime_config_keys() {
             let scalar =
                 sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
                     .bind(key)
@@ -1134,7 +937,7 @@ mod tests {
         let pool = database.connect().await;
         let config = Arc::new(crate::config::Config::default());
         let service = SettingsService::new(Some(pool.clone()), config.clone());
-        let mut keys = CONFIG_KEYS.iter().map(|(key, ..)| key);
+        let mut keys = CONFIG_KEYS.iter().map(|item| item.key);
         assert!(!keys.any(|key| key.starts_with("merge_")));
         let actions = config_default_seed_actions(&config);
         let retired = [
@@ -1180,6 +983,7 @@ mod tests {
                 category: "review".to_string(),
                 label_ko: "최대 리뷰 라운드".to_string(),
                 label_en: "Max Review Rounds".to_string(),
+                description_ko: "리뷰를 반복할 수 있는 최대 횟수입니다.",
                 default_value: Some("3".to_string()),
                 baseline: Some("3".to_string()),
                 baseline_source: Some("hardcoded".to_string()),
@@ -1425,14 +1229,14 @@ mod tests {
                 r#"{"maxEntryRetries":7}"#.to_string()
             ))
         );
-        assert_eq!(plan.len(), RUNTIME_CONFIG_KEYS.len() + 1);
+        assert_eq!(plan.len(), runtime_config_keys().count() + 1);
         assert!(
             plan[1..]
                 .iter()
                 .all(|write| matches!(write, RuntimeConfigKvWrite::DeleteScalar(_)))
         );
-        for key in RUNTIME_CONFIG_KEYS {
-            assert!(plan.contains(&RuntimeConfigKvWrite::DeleteScalar(*key)));
+        for key in runtime_config_keys() {
+            assert!(plan.contains(&RuntimeConfigKvWrite::DeleteScalar(key)));
         }
     }
 
@@ -1661,7 +1465,7 @@ mod tests {
             blob, old_blob,
             "blob upsert must roll back with mirror deletes"
         );
-        for key in RUNTIME_CONFIG_KEYS {
+        for key in runtime_config_keys() {
             let scalar =
                 sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
                     .bind(key)
@@ -1700,7 +1504,7 @@ mod retired_key_tests {
                 .any(|action| matches!(action, KvSeedAction::Delete { key: k } if k == key))
         );
         assert!(!actions.iter().any(|action| matches!(action, KvSeedAction::Put { key: k, .. } | KvSeedAction::PutIfAbsent { key: k, .. } if k == key)));
-        assert!(CONFIG_KEYS.iter().all(|(k, ..)| *k != key));
+        assert!(CONFIG_KEYS.iter().all(|item| item.key != key));
     }
 
     /// A YAML that still carries the retired human-alert channel field parses to
@@ -1718,3 +1522,6 @@ mod retired_key_tests {
         assert!(!round_trip.contains(field), "retired field re-serialized");
     }
 }
+
+#[cfg(test)]
+mod catalog_tests;

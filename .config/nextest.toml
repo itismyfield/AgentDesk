@@ -33,6 +33,10 @@ leak-timeout = { period = "2s", result = "fail" }
 filter = "all()"
 test-group = "shared-fixture"
 
+[[profile.ci.overrides]]
+filter = 'test(=cli::dcserver_pg_bootstrap::tests::startup_initialization_reports_a_database_ahead_of_the_binary_pg)'
+slow-timeout = { period = "120s", terminate-after = 1, grace-period = "0s" }
+
 # The settled first-POST latency is observed, not gated, so its passing output must reach the CI log.
 [[profile.ci.overrides]]
 filter = 'test(=services::tui_o::writer::tests::actor::host_start::managed::restart_replay::restart_replay_host_settled_20000_posts_once_and_reports_first_post_ms)'

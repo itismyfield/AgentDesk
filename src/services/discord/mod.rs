@@ -631,7 +631,6 @@ pub(crate) fn has_fresh_inflight_for_channel(channel_id: u64) -> bool {
     [
         ProviderKind::Claude,
         ProviderKind::Codex,
-        ProviderKind::Gemini,
         ProviderKind::OpenCode,
         ProviderKind::Qwen,
     ]
@@ -1452,7 +1451,6 @@ fn infer_inflight_tmux_session_for_channel(channel_id: ChannelId) -> Option<Stri
     [
         ProviderKind::Claude,
         ProviderKind::Codex,
-        ProviderKind::Gemini,
         ProviderKind::Qwen,
     ]
     .into_iter()

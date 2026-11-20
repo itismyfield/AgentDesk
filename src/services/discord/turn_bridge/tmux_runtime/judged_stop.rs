@@ -100,7 +100,6 @@ impl ChannelStop {
                 let providers = [
                     ProviderKind::Claude,
                     ProviderKind::Codex,
-                    ProviderKind::Gemini,
                     ProviderKind::Qwen,
                 ];
                 providers

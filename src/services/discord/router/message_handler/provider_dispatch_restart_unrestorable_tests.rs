@@ -13,7 +13,7 @@ fn an_unrestorable_busy_hold_ends_at_its_due_with_one_notice_and_no_key_pg() {
         crate::config::TestRuntimeRootGuard::new(),
     );
     let launcher = Arc::new(Launcher::default());
-    let (_nonce, started) = reconnect::launch(&fx, &launcher);
+    let (_nonce, started) = reconnect::launch_pinless(&fx, &launcher);
     let before = fx.rig.sends().len();
     let _registry = fx.rig.registry_on_this_thread();
     let _admission = open_admission();

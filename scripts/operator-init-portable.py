@@ -81,8 +81,6 @@ providers:
     tui_hosting: true
   codex:
     tui_hosting: true
-  gemini:
-    tui_hosting: false
   qwen:
     tui_hosting: false
   opencode:

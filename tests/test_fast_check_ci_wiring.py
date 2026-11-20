@@ -923,36 +923,27 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for job_name in ("full_macos", "full_windows"):
             with self.subTest(job=job_name):
                 job = job_block(nightly, job_name)
-                # Lib tests run through the audited native path; the other targets run whole.
-                self.assertIn("pg-classifier", job)
                 self.assertIn("cargo test --bins --examples --test '*' -- --skip _pg --skip pg_ --skip postgres", job)
         self.assertIn("cargo test --test e2e -- --test-threads=1", job_block(nightly, "postgres_full"))
 
-    def test_native_nightly_runs_both_phases_with_separate_time_budgets(self) -> None:
+    def test_windows_nightly_runs_both_native_phases_with_separate_time_budgets(self) -> None:
         import shlex
         jobs = yaml.safe_load(NIGHTLY_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        for job_name, platform in (("full_macos", "macos"), ("full_windows", "windows")):
-            with self.subTest(job=job_name):
-                job = jobs[job_name]
-                steps = [s for s in job["steps"] if "nextest-native.sh" in s.get("run", "")]
-                self.assertEqual([shlex.split(s["run"])[-1] for s in steps], ["prepare", "run"])
-                for step in steps:
-                    argv = shlex.split(step["run"])
-                    # The macOS build reports its peak RSS through `time -l`, which keeps the build's exit status.
-                    if job_name == "full_macos" and argv[-1] == "prepare":
-                        self.assertEqual(argv[:2], ["/usr/bin/time", "-l"])
-                        argv = argv[2:]
-                    self.assertEqual(argv[:-1],
-                                     ["bash", "scripts/ci/nextest-native.sh", platform,
-                                      f"{platform}-lib", "pg-classifier"])
-                    self.assertEqual(step["shell"], "bash")
-                    self.assertNotIn("if", step)
-                    self.assertNotIn("continue-on-error", step)
-                expected_minutes = (4145.211 / 11041) * 13447 / 60
-                self.assertGreaterEqual(steps[1]["timeout-minutes"], expected_minutes * 1.5)
-                self.assertGreater(steps[0]["timeout-minutes"], 0)
-                self.assertLess(sum(s["timeout-minutes"] for s in steps), job.get("timeout-minutes", 360))
-                self.assertLessEqual(job.get("timeout-minutes", 360), 360)
+        job = jobs["full_windows"]
+        steps = [step for step in job["steps"] if "nextest-native.sh" in step.get("run", "")]
+        self.assertEqual([shlex.split(step["run"])[-1] for step in steps], ["prepare", "run"])
+        for step in steps:
+            self.assertEqual(shlex.split(step["run"])[:-1],
+                             ["bash", "scripts/ci/nextest-native.sh", "windows",
+                              "windows-lib", "pg-classifier"])
+            self.assertEqual(step["shell"], "bash")
+            self.assertNotIn("if", step)
+            self.assertNotIn("continue-on-error", step)
+        expected_minutes = (4145.211 / 11041) * 13447 / 60
+        self.assertGreaterEqual(steps[1]["timeout-minutes"], expected_minutes * 1.5)
+        self.assertGreater(steps[0]["timeout-minutes"], 0)
+        self.assertLess(sum(step["timeout-minutes"] for step in steps), job.get("timeout-minutes", 360))
+        self.assertLessEqual(job.get("timeout-minutes", 360), 360)
 
     def test_relay_authority_contract_job_uses_pinned_recipe(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

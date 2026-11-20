@@ -841,7 +841,7 @@ mod tests {
     fn provider_clear_behavior_documents_supported_reset_paths() {
         assert!(provider_clear_behavior(&ProviderKind::Claude).contains("/clear"));
         assert!(provider_clear_behavior(&ProviderKind::Codex).contains("managed process"));
-        assert!(provider_clear_behavior(&ProviderKind::Gemini).contains("mailbox clear only"));
+        assert!(provider_clear_behavior(&ProviderKind::OpenCode).contains("mailbox clear only"));
     }
 
     #[test]

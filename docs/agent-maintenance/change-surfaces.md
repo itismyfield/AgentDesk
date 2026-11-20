@@ -1,6 +1,6 @@
 # Change Surfaces
 
-<!-- doc-path-refs: removed src/services/discord/router/message_handler/voice_announcement_scope.rs src/services/discord/router/message_handler/voice_announcement_route.rs src/services/discord/runtime_bootstrap/voice.rs src/voice/turn_link.rs -->
+<!-- doc-path-refs: removed src/services/discord/router/message_handler/voice_announcement_scope.rs src/services/discord/router/message_handler/voice_announcement_route.rs src/services/discord/runtime_bootstrap/voice.rs src/voice/turn_link.rs src/services/gemini.rs -->
 
 > Source: [`docs/agent-maintenance/index.md`](index.md). For every "where do I
 > add this?" question, consult this page first. The giant-file list is the
@@ -2507,7 +2507,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/dispatches/discord_delivery/orchestration.rs`
 - `src/services/dispatches/outbox_route.rs`
 - `src/services/engine_runtime/mod.rs`
-- `src/services/gemini.rs`
 - `src/services/onboarding/mod.rs`
 - `src/services/opencode.rs`
 - `src/services/platform/binary_resolver.rs`
@@ -2517,7 +2516,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/routines/discord_log.rs`
 - `src/services/routines/store.rs`
 - `src/services/session_host/herdr_gate.rs`
-- `src/services/settings.rs`
 - `src/services/tmux_common.rs`
 - `src/services/tui_o/writer/deliver.rs`
 - `src/services/tui_prompt_dedupe/binding_events.rs`

@@ -1040,7 +1040,7 @@ fn owner_refusals_before_a_pane_need_no_session() {
             "remote_placement",
         ),
         (
-            ProviderKind::Gemini,
+            ProviderKind::OpenCode,
             target::Phase::Busy,
             Execution::LocalTui,
             "provider_unsupported",

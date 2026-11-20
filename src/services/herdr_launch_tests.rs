@@ -56,6 +56,8 @@ struct FakeHost {
     /// The root pid of the evidence the probe finds for the asked nonce, or its gap.
     evidence: Mutex<Result<u32, EvidenceGap>>,
     creates: AtomicUsize,
+    /// The creates that arrived through the session host's create port.
+    through_port: AtomicUsize,
     probes: AtomicUsize,
     probed: Mutex<Vec<EvidenceProbe>>,
     on_create: Hook,
@@ -71,6 +73,7 @@ impl FakeHost {
             reply,
             evidence: Mutex::new(Ok(100)),
             creates: AtomicUsize::new(0),
+            through_port: AtomicUsize::new(0),
             probes: AtomicUsize::new(0),
             probed: Mutex::default(),
             on_create: Box::new(|| {}),
@@ -106,6 +109,9 @@ impl HerdrLaunchHost for FakeHost {
 
     fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
         self.creates.fetch_add(1, Ordering::SeqCst);
+        let through_port = crate::services::session_host::create_in_effect();
+        self.through_port
+            .fetch_add(through_port as usize, Ordering::SeqCst);
         self.requests.lock().unwrap().push(request.clone());
         (self.on_create)();
         self.reply.clone()
@@ -268,6 +274,7 @@ async fn herdr_launch_commits_pending_then_marker_then_one_create_and_fills_that
     filled.expected = Some(expected(&execution_nonce, 100));
     assert_eq!(decoded(stored(&pool).await), HostedRecord::Known(filled));
     assert_eq!(host.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(host.through_port.load(Ordering::SeqCst), 1);
     // The probe is tied to the pane, the nonce and the server the create went to.
     let probed = host.probed.lock().unwrap().clone();
     assert_eq!(probed.len(), 1);
@@ -474,6 +481,7 @@ async fn herdr_launch_keeps_pending_and_never_recreates_after_a_lost_create_repl
         }
         assert_eq!(left, kept, "{reply:?}");
         assert_eq!(host.creates.load(Ordering::SeqCst), 1, "{reply:?}: resent");
+        assert_eq!(host.through_port.load(Ordering::SeqCst), 1, "{reply:?}");
         assert_eq!(host.probes.load(Ordering::SeqCst), 0, "{reply:?}: adopted");
         assert_eq!(marker(), HostKindMarker::Known(HostKind::Herdr));
     }

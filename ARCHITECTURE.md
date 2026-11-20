@@ -170,6 +170,8 @@ src/
 │   ├── poll_watcher_tests.rs
 │   ├── readers_live_reload_tests.rs
 │   ├── reload_classes.rs
+│   ├── retired_providers.rs
+│   ├── retired_providers_tests.rs
 │   ├── retired_relay_tests.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_root_guard.rs
@@ -241,6 +243,7 @@ src/
 │   │   ├── listing.rs
 │   │   ├── provider_resume_fence.rs
 │   │   ├── rebind_override.rs
+│   │   ├── retired_status_fence.rs
 │   │   ├── tests.rs
 │   │   └── thread_gc.rs
 │   ├── dispatches/
@@ -432,7 +435,10 @@ src/
 │   │   ├── lifecycle.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
+│   │   ├── pipeline.rs
+│   │   ├── pipeline_fields.rs
 │   │   ├── pipeline_rules.rs
+│   │   ├── pipeline_tests.rs
 │   │   ├── profile.rs
 │   │   ├── review_gate.rs
 │   │   ├── verification_run.rs
@@ -742,6 +748,7 @@ src/
 │   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs
 │   │   ├── server_campaigns/
+│   │   │   ├── dashboard_wait_tests.rs
 │   │   │   ├── decision_tests.rs
 │   │   │   ├── dto.rs
 │   │   │   ├── http_tests.rs
@@ -982,6 +989,8 @@ src/
 │   │   │   └── transaction_tests.rs
 │   │   ├── host_gate/
 │   │   │   └── authority.rs
+│   │   ├── view/
+│   │   │   └── dashboard_wait.rs
 │   │   ├── adk_adapter.rs
 │   │   ├── adk_observe.rs
 │   │   ├── adk_observe_tests.rs
@@ -1153,6 +1162,7 @@ src/
 │   │   │   ├── ordered_queue.rs
 │   │   │   ├── queue_retention.rs
 │   │   │   ├── reaping_tests.rs
+│   │   │   ├── recovery_pace.rs
 │   │   │   ├── response_window.rs
 │   │   │   ├── too_early.rs
 │   │   │   └── transport_retry.rs
@@ -3148,6 +3158,7 @@ src/
 │   │   │   ├── codex_idle_rollout.rs
 │   │   │   ├── headless.rs
 │   │   │   ├── headless_tests.rs
+│   │   │   ├── herdr_cold_first_turn_tests.rs
 │   │   │   ├── herdr_source.rs
 │   │   │   ├── herdr_source_tests.rs
 │   │   │   ├── hook_observer.rs
@@ -4249,6 +4260,7 @@ src/
 │   │   │   ├── fifo.rs
 │   │   │   └── input.rs
 │   │   ├── consumer_guard.rs
+│   │   ├── create.rs
 │   │   ├── herdr_gate.rs
 │   │   ├── herdr_gate_tests.rs
 │   │   ├── herdr_host.rs
@@ -4280,6 +4292,8 @@ src/
 │   ├── settings/
 │   │   ├── resolve/
 │   │   │   └── tests.rs
+│   │   ├── catalog.rs
+│   │   ├── catalog_tests.rs
 │   │   ├── resolve.rs
 │   │   ├── runtime_config_put.rs
 │   │   ├── startup.rs
@@ -4815,6 +4829,8 @@ src/
 │   │   │   │   ├── absent_open.rs
 │   │   │   │   ├── absent_open_tests.rs
 │   │   │   │   ├── clear_relaunch.rs
+│   │   │   │   ├── disposition_cache.rs
+│   │   │   │   ├── disposition_cache_tests.rs
 │   │   │   │   ├── fresh_admission.rs
 │   │   │   │   ├── herdr_bootstrap.rs
 │   │   │   │   ├── hold_detail.rs
@@ -5030,7 +5046,6 @@ src/
 │   ├── dispatches_followup.rs
 │   ├── escalation_cooldown.rs
 │   ├── explicit_auth_route.rs
-│   ├── gemini.rs
 │   ├── github_issue_creation.rs
 │   ├── hang_forensics.rs
 │   ├── health_diagnostics.rs

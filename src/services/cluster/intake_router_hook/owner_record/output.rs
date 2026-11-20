@@ -205,7 +205,6 @@ pub(crate) async fn acquire_unstamped(
     let mut identities = [
         ProviderKind::Claude,
         ProviderKind::Codex,
-        ProviderKind::Gemini,
         ProviderKind::OpenCode,
         ProviderKind::Qwen,
         ProviderKind::Grok,

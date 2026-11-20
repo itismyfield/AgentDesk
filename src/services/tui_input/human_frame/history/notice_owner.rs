@@ -46,6 +46,8 @@ struct Scope {
     prefix: String,
     owners: HashMap<String, String>,
     retry_at: Option<tokio::time::Instant>,
+    /// Retries already spent on these same inputs; each doubles the next wait up to a minute.
+    repeats: u32,
     through: u64,
     native_stamp: Option<Fingerprint>,
     exact: Answers,
@@ -54,6 +56,18 @@ struct Scope {
 
 impl Scope {
     fn current(
+        &self,
+        store: &ChannelStore,
+        history: &Option<Stamp>,
+        observations: &mut context_observation::Observations,
+    ) -> bool {
+        self.same_inputs(store, history, observations)
+            && self
+                .retry_at
+                .is_none_or(|at| tokio::time::Instant::now() < at)
+    }
+
+    fn same_inputs(
         &self,
         store: &ChannelStore,
         history: &Option<Stamp>,
@@ -76,9 +90,6 @@ impl Scope {
                 .executions
                 .iter()
                 .all(|(p, observed)| !observed.changed && observations.stamp(p) == observed.stamp)
-            && self
-                .retry_at
-                .is_none_or(|at| tokio::time::Instant::now() < at)
     }
 }
 
@@ -177,6 +188,12 @@ impl Batch {
                 self.scopes.push(previous.swap_remove(at));
                 continue;
             }
+            // Only a retry that comes due on unchanged inputs counts toward the longer wait.
+            let repeats = previous
+                .iter()
+                .find(|s| same_scope(&s.origin, origin) && s.retry_at.is_some())
+                .filter(|s| s.same_inputs(store, &before, &mut observations))
+                .map_or(0, |s| s.repeats.saturating_add(1));
             let snapshot = snapshot.get_or_insert_with(|| {
                 #[cfg(test)]
                 SNAPSHOT_READS.with(|c| c.set(c.get() + 1));
@@ -234,8 +251,13 @@ impl Batch {
                 owners,
                 retry_at: unstable.then(|| {
                     tokio::time::Instant::now()
-                        + tokio::time::Duration::from_secs(if transient { 0 } else { 5 })
+                        + if transient {
+                            tokio::time::Duration::ZERO
+                        } else {
+                            generation::retry_delay(repeats)
+                        }
                 }),
+                repeats: if unstable && !transient { repeats } else { 0 },
                 through: *through,
                 native_stamp: native_stamp.clone(),
                 exact,

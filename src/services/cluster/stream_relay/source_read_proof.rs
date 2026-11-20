@@ -37,6 +37,18 @@ pub(crate) fn invalidate_source(key: &str) {
     *revision = revision.and_then(|value| value.checked_add(1));
 }
 
+/// The revision [`invalidate_source`] last left for `key`; `None` once it overflowed.
+pub(crate) fn revision(key: &str) -> Option<u64> {
+    #[cfg(test)]
+    let _held = RevisionsHeld::enter();
+    REVISIONS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(key)
+        .copied()
+        .unwrap_or(Some(0))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SourcePin {
     key: String,
