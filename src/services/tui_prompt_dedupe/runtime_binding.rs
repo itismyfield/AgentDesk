@@ -866,6 +866,8 @@ fn adopt_continuation(
             new_output_path: new_output_path.clone(),
             observed_drain_frontier: 0,
             polls_without_drain_progress: 0,
+            selector_followed: false,
+            left_session_ids: Vec::new(),
         },
     );
     binding.value.output_path = new_output_path.clone();

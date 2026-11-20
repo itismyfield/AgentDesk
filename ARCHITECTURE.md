@@ -244,6 +244,7 @@ src/
 │   │   ├── provider_resume_fence.rs
 │   │   ├── rebind_override.rs
 │   │   ├── retired_status_fence.rs
+│   │   ├── rotation_selector.rs
 │   │   ├── tests.rs
 │   │   └── thread_gc.rs
 │   ├── dispatches/
@@ -3099,6 +3100,9 @@ src/
 │   │   │   │   └── thread_guard_host_e2e_tests.rs
 │   │   │   ├── relay_ownership/
 │   │   │   │   └── hosted_source_tests.rs
+│   │   │   ├── session_rotation_settle/
+│   │   │   │   ├── selector.rs
+│   │   │   │   └── selector_tests.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff/
 │   │   │   │   │   ├── reown/
