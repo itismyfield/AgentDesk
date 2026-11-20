@@ -96,7 +96,7 @@ impl ProviderKind {
             .unwrap_or("claude")
     }
 
-    pub(crate) fn legacy_streaming_dispatch_kind(&self) -> LegacyDispatchKind {
+    pub fn legacy_streaming_dispatch_kind(&self) -> LegacyDispatchKind {
         match self {
             Self::Claude => LegacyDispatchKind::Claude,
             Self::Codex => LegacyDispatchKind::Codex,

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-pub(crate) fn current_home_dir() -> Option<PathBuf> {
+pub fn current_home_dir() -> Option<PathBuf> {
     dirs::home_dir()
 }
 

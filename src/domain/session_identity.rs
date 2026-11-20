@@ -1,7 +1,7 @@
 //! Session-key values and parsing for legacy and namespaced wire formats.
 
-pub(crate) mod managed;
-pub(crate) mod naming;
+pub mod managed;
+pub mod naming;
 
 use crate::domain::provider::ProviderKind;
 

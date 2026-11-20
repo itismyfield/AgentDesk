@@ -14,7 +14,7 @@ pub(crate) fn parse_env_flag_for_test(name: &str, raw: Option<&str>, default: bo
 
 pub mod format;
 pub mod github_links;
-pub(crate) mod home_path;
+pub mod home_path;
 pub(crate) mod input_validation;
 pub mod loopback_url;
 pub(crate) mod parsed_bytes;

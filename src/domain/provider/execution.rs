@@ -135,7 +135,7 @@ impl ProviderReadinessAdapter {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum LegacyDispatchKind {
+pub enum LegacyDispatchKind {
     Claude,
     Codex,
     OpenCode,
