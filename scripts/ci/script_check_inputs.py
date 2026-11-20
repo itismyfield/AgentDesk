@@ -15,6 +15,7 @@ COMMON_INPUTS = (
     "scripts/ci/script_check_inputs.py",
     "tests/test_script_check_inputs.py",
     ".github/workflows/**",
+    "scripts/ci/generated_artifact_report.py",
 )
 SCRIPT_TEST_INPUTS = ("scripts/**", "tests/**")
 USER_FEATURE_MAP_INPUTS = (
@@ -76,6 +77,7 @@ SELF_TEST_INPUTS: dict[str, tuple[str, ...]] = {
     ),
     "Statechart index generator tests": (
         "scripts/ci/statechart_index.py",
+        "scripts/ci/statechart_index_report.py",
         "tests/test_statechart_index.py",
         "docs/statecharts/**",
     ),

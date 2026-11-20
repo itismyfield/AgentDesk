@@ -81,19 +81,19 @@ RUBY
   fi
 }
 
-verify_required_check_mirror_hash() {
-  local helper="scripts/required-check-mirror.sh"
-  local actual
+verify_helper_hash() {
+  local helper="$1" expected="$2" actual
   if [ ! -f "$helper" ]; then
     error "missing $helper"
-    return
+    return 1
   fi
   if ! actual="$(ruby -rdigest -e 'print Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$helper")"; then
     error "cannot hash $helper"
-    return
+    return 1
   fi
-  if [ "$actual" != "$REQUIRED_CHECK_MIRROR_SHA256" ]; then
-    error "$helper content hash mismatch: expected $REQUIRED_CHECK_MIRROR_SHA256, found $actual; review the helper and update this pin"
+  if [ "$actual" != "$expected" ]; then
+    error "$helper content hash mismatch: expected $expected, found $actual; review the helper and update this pin"
+    return 1
   fi
 }
 
@@ -366,6 +366,7 @@ unless trigger["pull_request"] == {"types" => %w[opened synchronize reopened rea
   warn "#{path}: pull_request must retain the default events plus ready_for_review"
   exit 1
 end
+require File.expand_path("scripts/ci/generated_artifact_steps", Dir.pwd)
 script_check_shard_jobs = {
   "scripts" => "cargo",
   "scripts_guards" => "guards",
@@ -631,7 +632,7 @@ end
 script_check_shard_jobs.each do |job_id, shard|
   next if job_id == "scripts"
 
-  expected_shard_step_env = expected_script_check_execution["step_env"].reject { |key, _| %w[ADK_LIB_TEST_ARTIFACT CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].include?(key) }.merge("SCRIPT_CHECK_SHARD" => shard)
+  expected_shard_step_env = expected_script_check_execution["step_env"].reject { |key, _| %w[ADK_LIB_TEST_ARTIFACT CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].include?(key) }.merge("SCRIPT_CHECK_SHARD" => shard).merge(GeneratedArtifactSteps.env(shard))
   expected_raw_shard_job = {
     "name" => "Script checks runner (#{shard})",
     "needs" => "changes",
@@ -644,18 +645,19 @@ script_check_shard_jobs.each do |job_id, shard|
       {"name" => "Install script-test Python deps", "run" => "python3 -m pip install --disable-pip-version-check pyyaml"},
       {"name" => "Install shellcheck", "run" => "sudo apt-get install -y shellcheck zsh"},
       {"name" => "Run script checks", "shell" => "bash", "run" => "./scripts/ci-script-checks.sh", "env" => expected_shard_step_env},
-    ],
+    ] + GeneratedArtifactSteps.tail(shard, "pr", raw: true),
   }
   unless raw_jobs.is_a?(Hash) && raw_jobs[job_id] == expected_raw_shard_job
     warn "#{path}: Script checks shard job #{job_id} must retain the exact fixed job surface (raw YAML scalars; checkout/setup/install/run inventory, action refs, timeout-minutes 45, !cancelled(), no permissions/env/defaults/continue-on-error)"
     exit 1
   end
-  shard_execution = effective_execution(document, job_id, expected_raw_shard_job["steps"].length - 1)
+  run_index = expected_raw_shard_job["steps"].index { |step| step["name"] == "Run script checks" }
+  shard_execution = effective_execution(document, job_id, run_index)
   shard_execution.delete("protected_step_inventory")
   expected_shard_execution = expected_script_check_execution.reject { |key, _| key == "protected_step_inventory" }
   expected_shard_execution = expected_shard_execution.merge(
     "step_env" => expected_shard_step_env,
-    "effective_env" => expected_shard_execution["effective_env"].reject { |key, _| %w[ADK_LIB_TEST_ARTIFACT CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].include?(key) }.merge("SCRIPT_CHECK_SHARD" => shard),
+    "effective_env" => expected_shard_execution["effective_env"].reject { |key, _| %w[ADK_LIB_TEST_ARTIFACT CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].include?(key) }.merge(expected_shard_step_env),
   )
   unless canonical_yaml(shard_execution) == canonical_yaml(expected_shard_execution)
     expected = JSON.generate(canonical_yaml(expected_shard_execution))
@@ -751,6 +753,7 @@ end
 
 # Test results travel only as the plan artifact and per-attempt worker artifacts the audit reads.
 expected_uploads = {
+  "scripts_contracts" => GeneratedArtifactSteps.uploads("pr"),
   "test_evidence" => [{"name" => "Upload census execution evidence", "if" => "${{ steps.audit.outputs.census_evidence_dir != '' }}", "continue-on-error" => true, "uses" => "actions/upload-artifact@v4", "with" => {"name" => "legacy-body-census-test-evidence-${{ github.run_attempt }}", "path" => "${{ steps.audit.outputs.census_evidence_dir }}", "if-no-files-found" => "warn", "retention-days" => 7}}],
   "rust_build" => [{"name" => "Upload nextest plan", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-plan", "path" => "${{ runner.temp }}/nextest", "if-no-files-found" => "error", "retention-days" => 1}}],
   "rust_tests" => [{"name" => "Upload worker results", "if" => "always()", "timeout-minutes" => 10, "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-worker-${{ matrix.worker }}-attempt-${{ github.run_attempt }}", "path" => "${{ runner.temp }}/nextest-result", "if-no-files-found" => "warn", "retention-days" => 7}}],
@@ -1073,76 +1076,11 @@ main_workflow=".github/workflows/ci-main.yml"
 warm_workflow=".github/workflows/ci-windows-cache-warm.yml"
 nightly_workflow=".github/workflows/ci-nightly.yml"
 sccache_action=".github/actions/sccache-or-nothing/action.yml"
+verify_helper_hash scripts/ci/generated_artifact_steps.rb 50a11150a23cb46e1e740612fb27232d276d63f8c51c70a1391de5621e4c4bbf || exit 1
+verify_helper_hash scripts/ci/main_script_check_shards.rb 52bd83f0cf608795ab5e9df277dad307dd92e252f83ae26912a1a3c9acdca32b || exit 1
 validate_runner_memory_wiring
 validate_main_script_check_shards() {
-  if ! ruby - "$main_workflow" "$RUNNER_MEMORY_STEPS_JSON" <<'RUBY'
-require "yaml"
-require "json"
-path = ARGV.fetch(0)
-memory_specs = JSON.parse(ARGV.fetch(1))
-document = YAML.load_file(path)
-jobs = document.fetch("jobs", {})
-errors = []
-expected_shards = {
-  "scripts" => ["cargo", "Main script checks"],
-  "scripts_guards" => ["guards", "Main script checks (guards)"],
-  "scripts_census" => ["census", "Main script checks (census)"],
-  "scripts_contracts" => ["contracts", "Main script checks (contracts)"],
-}
-base_env = {
-  "GFP_EVENT_NAME" => "${{ github.event_name }}",
-  "GFP_REF" => "${{ github.ref }}",
-  "GFP_REF_PROTECTED" => "${{ github.ref_protected }}",
-  "GFP_REPOSITORY" => "${{ github.repository }}",
-  "GFP_CANDIDATE_SHA" => "${{ github.sha }}",
-  "TEST_LANE_BASELINE_REF" => "HEAD",
-}
-selector_key = ->(key) { key.to_s.start_with?("SCRIPT_CHECK_", "GFP_", "TEST_LANE_") }
-errors << "workflow env must not set script-check selector variables" if (document["env"] || {}).keys.any?(&selector_key)
-runners = jobs.select do |_, job|
-  job.is_a?(Hash) && Array(job["steps"]).any? { |step| step.is_a?(Hash) && step["run"].to_s.include?("ci-script-checks.sh") }
-end
-errors << "jobs running ci-script-checks.sh must be exactly #{expected_shards.keys.sort}, found #{runners.keys.sort}" unless runners.keys.sort == expected_shards.keys.sort
-expected_shards.each do |job_id, (shard, name)|
-  job = jobs[job_id]
-  label = "job #{job_id}"
-  unless job.is_a?(Hash)
-    errors << "#{label} is missing"
-    next
-  end
-  errors << "#{label} must be named #{name.inspect}" unless job["name"] == name
-  errors << "#{label} must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
-  %w[if needs continue-on-error].each { |key| errors << "#{label} must not set #{key}" if job.key?(key) }
-  errors << "#{label} job env must not set script-check selector variables" if (job["env"] || {}).keys.any?(&selector_key)
-  steps = Array(job["steps"])
-  checkout = steps.first
-  errors << "#{label} must check out full history first" unless checkout.is_a?(Hash) && checkout["uses"] == "actions/checkout@v4" && checkout["with"] == {"fetch-depth" => 0}
-  runs = steps.select { |step| step.is_a?(Hash) && step["run"].to_s.include?("ci-script-checks.sh") }
-  run = runs.first
-  unless runs.length == 1 && run["name"] == "Run script checks" && run["run"] == "./scripts/ci-script-checks.sh"
-    errors << "#{label} must run ./scripts/ci-script-checks.sh in exactly one Run script checks step"
-    next
-  end
-  %w[if continue-on-error].each { |key| errors << "#{label} Run script checks must not set #{key}" if run.key?(key) }
-  expected_env = base_env.merge("SCRIPT_CHECK_SHARD" => shard)
-  errors << "#{label} Run script checks env must equal #{expected_env}" unless run["env"] == expected_env
-end
-uploads = jobs.flat_map do |job_id, job|
-  next [] unless job.is_a?(Hash)
-  Array(job["steps"]).select { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/upload-artifact") }.map { |step| [job_id, step] }
-end
-evidence = uploads.select { |_, step| step["name"] == "Upload giant-file progress evidence" }
-unless evidence == [["scripts", {"name" => "Upload giant-file progress evidence", "if" => "always()", "uses" => "actions/upload-artifact@v4", "with" => {"path" => "target/giant-file-progress/evidence.json"}}]]
-  errors << "giant-file progress evidence upload must remain exact, unconditional and only in the cargo shard job"
-end
-clippy_upload = {"name" => "Upload Clippy observation", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "clippy-observation-${{ github.sha }}", "path" => "target/clippy-observation/", "if-no-files-found" => "error"}}
-census_upload = {"name" => "Upload census execution evidence", "if" => "${{ steps.audit.outputs.census_evidence_dir != '' }}", "continue-on-error" => true, "uses" => "actions/upload-artifact@v4", "with" => {"name" => "legacy-body-census-test-evidence-${{ github.run_attempt }}", "path" => "${{ steps.audit.outputs.census_evidence_dir }}", "if-no-files-found" => "warn", "retention-days" => 7}}
-nextest_upload = ->(job_id, step) { %w[rust_build rust_tests].include?(job_id) && step["uses"] == "actions/upload-artifact@v4" && step["with"].to_h["name"].to_s.start_with?("nextest-") }
-errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) || nextest_upload.(job_id, step) || (job_id == "test_evidence" && step == census_upload) || (%w[rust_build lint scripts].include?(job_id) && step == memory_specs.fetch("Upload runner memory")) || (job_id == "lint" && step == memory_specs.fetch("Upload runner memory checkpoint")) }
-errors.each { |message| warn "#{path}: #{message}" }
-exit(errors.empty? ? 0 : 1)
-RUBY
-  then
+  if ! ruby scripts/ci/main_script_check_shards.rb "$main_workflow" "$RUNNER_MEMORY_STEPS_JSON"; then
     error "$main_workflow must preserve fail-closed giant-file selector and evidence wiring across every script-check shard"
   fi
 }
@@ -1682,7 +1620,7 @@ if [ ! -f "$pr_workflow" ]; then
   error "missing $pr_workflow"
 fi
 
-verify_required_check_mirror_hash
+verify_helper_hash scripts/required-check-mirror.sh "$REQUIRED_CHECK_MIRROR_SHA256" || true
 
 validate_workflow_entries
 

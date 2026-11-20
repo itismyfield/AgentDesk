@@ -676,3 +676,12 @@ jobs:
           GFP_CANDIDATE_SHA: ${{ github.sha }}
           TEST_LANE_BASELINE_REF: HEAD
           SCRIPT_CHECK_SHARD: contracts
+          GENERATED_ARTIFACT_REPORT_DIR: target/generated-contracts
+
+      - name: Upload statechart index
+        uses: actions/upload-artifact@v4
+        with:
+          name: statechart-index-main-${{ github.run_attempt }}
+          path: target/generated-contracts/statechart-index/
+          if-no-files-found: error
+          retention-days: 14

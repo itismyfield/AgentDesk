@@ -1094,7 +1094,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 17cd501765de06102fedd24410f04d2ada95702f1508221d3900ecb827048fef
-          pin scripts/check-ci-runner-hardening.sh aaaa2258c3a424205da15bac8e144bf44da364fa589ef0070ce802ef69a5f64f
+          pin scripts/check-ci-runner-hardening.sh 439204f16252e495d402a413ac34189dea30b7b558bdea1fdf40e2dd52405f7f
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1698,8 +1698,17 @@ jobs:
           GFP_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           TEST_LANE_BASELINE_REF: HEAD^1
           SCRIPT_CHECK_SHARD: contracts
+          GENERATED_ARTIFACT_REPORT_DIR: target/generated-contracts
           SCRIPT_CHECK_CHANGES_RESULT: ${{ needs.changes.result }}
           SCRIPT_CHECK_CHANGED_FILES: ${{ needs.changes.outputs.script_check_files }}
+
+      - name: Upload statechart index
+        uses: actions/upload-artifact@v4
+        with:
+          name: statechart-index-pr-${{ github.run_attempt }}
+          path: target/generated-contracts/statechart-index/
+          if-no-files-found: error
+          retention-days: 14
 
   relay_authority_mutations:
     name: Relay authority mutations (${{ matrix.shard }})

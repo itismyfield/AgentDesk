@@ -623,8 +623,11 @@ if run_check contracts "Script checks input selection contract"; then
 "$PYTHON" -m unittest tests.test_script_check_inputs
 fi
 
-if run_check contracts "Statechart index drift"; then
+if run_check contracts "Statechart index source contract"; then
 "$PYTHON" scripts/ci/statechart_index.py --check
+if [ "${GITHUB_ACTIONS:-}" = true ] || [ -n "${GENERATED_ARTIFACT_REPORT_DIR:-}" ]; then
+  "$PYTHON" -m scripts.ci.statechart_index_report "${GENERATED_ARTIFACT_REPORT_DIR:?}/statechart-index"
+fi
 fi
 
 if run_check contracts "Statechart index generator tests"; then
