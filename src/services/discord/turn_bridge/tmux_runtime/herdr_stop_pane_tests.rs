@@ -449,9 +449,8 @@ fn herdr_claude_stop_reads_a_tool_turn_past_trailing_session_metadata() {
     });
 }
 
-// A live screen decides whatever the transcript reads: a tool that returned at once, trailing
-// metadata, an ended tail or no nameable turn. An idle screen gets no Escape though its prompt or
-// reply carries the chrome's words, and an unread turn needs the interrupt offer itself.
+// A live screen decides whatever the transcript reads or leaves unread. An idle screen gets no
+// Escape though its text carries the chrome's words; an unread turn needs the interrupt offer.
 #[test]
 fn herdr_claude_stop_follows_a_live_screen_past_a_lagging_or_unread_transcript() {
     let live =
