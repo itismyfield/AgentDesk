@@ -4554,6 +4554,8 @@ src/
 │   │   │   │   ├── probe.rs
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
+│   │   │   ├── fresh_resume_tests/
+│   │   │   │   └── authority_contention_tests.rs
 │   │   │   ├── host/
 │   │   │   │   ├── activation_io.rs
 │   │   │   │   ├── child_retirement.rs

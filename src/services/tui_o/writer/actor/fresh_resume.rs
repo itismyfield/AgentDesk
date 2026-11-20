@@ -2,12 +2,26 @@
 
 use super::*;
 use crate::services::provider::ProviderRuntimeExt;
+use crate::services::tui_prompt_dedupe::clear_relaunch;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Rescope {
+    Unchanged,
+    Changed,
+    Busy,
+}
 
 #[cfg(test)]
 static WORK: (AtomicUsize, std::sync::atomic::AtomicBool) = (
     AtomicUsize::new(0),
     std::sync::atomic::AtomicBool::new(false),
 );
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_SCOPE_ATTEMPT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 #[cfg(test)]
 pub(super) fn note_work(owed: usize, unsealed: bool) {
@@ -21,20 +35,17 @@ pub(crate) fn work_for_tests() -> (usize, bool) {
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
-    pub(super) fn rescope(&mut self) -> bool {
+    pub(super) fn rescope(&mut self) -> Rescope {
         if self.sources.transition_provider()
             != crate::services::tui_o::shadow::ShadowProvider::Codex
         {
-            return false;
+            return Rescope::Unchanged;
         }
         let selection = self.writer.suspension.clone();
         let nonce = selection.nonce();
         let channel = self.writer.channel();
-        if !crate::services::tui_prompt_dedupe::clear_relaunch::fresh_scope_pending(
-            channel,
-            nonce.as_deref(),
-        ) {
-            return false;
+        if !clear_relaunch::fresh_scope_pending(channel, nonce.as_deref()) {
+            return Rescope::Unchanged;
         }
         let quiescent = self.owed.is_empty()
             && !self.deriver.has_unsealed()
@@ -51,7 +62,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .map(|cursor| cursor.source.clone())
             .collect();
         let mut persisted = Ok(());
-        let result = crate::services::tui_prompt_dedupe::clear_relaunch::with_fresh_scope(
+        #[cfg(test)]
+        if let Some(enter) = BEFORE_SCOPE_ATTEMPT.with_borrow_mut(Option::take) {
+            enter();
+        }
+        let result = clear_relaunch::with_fresh_scope(
             channel,
             nonce.as_deref(),
             &sources,
@@ -68,7 +83,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             self.writer.stop(WriterAlarm::Halted {
                 detail: format!("fresh selection write: {error:?}"),
             });
-            return false;
+            return Rescope::Unchanged;
         }
         match result {
             Ok(changed) => {
@@ -101,8 +116,13 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                         self.writer.store().ledger(),
                     );
                 }
-                changed
+                if changed {
+                    Rescope::Changed
+                } else {
+                    Rescope::Unchanged
+                }
             }
+            Err(clear_relaunch::FRESH_SCOPE_BUSY) => Rescope::Busy,
             Err(reason) => {
                 if self.scope_hold != Some(reason) {
                     tracing::info!(channel, reason, "[tui_o] source resume held");
@@ -126,7 +146,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                         });
                     }
                 }
-                false
+                Rescope::Unchanged
             }
         }
     }
