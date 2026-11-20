@@ -236,6 +236,16 @@ impl Reserved {
             .map(|source| (source.source_id, source.delivery_start))
             .collect()
     }
+
+    #[cfg(unix)]
+    fn body_posts(&self) -> Vec<String> {
+        self.harness
+            .port
+            .posts()
+            .into_iter()
+            .filter(|post| post != "-# ✅ 완료")
+            .collect()
+    }
 }
 
 /// A reserved host over `before`, a log already written as the reservation reads it first.
@@ -730,14 +740,14 @@ async fn exercise_resume(pool: &sqlx::PgPool, ch: u64, parent: u64, warm: bool) 
     *f.io.intake_pool.lock().unwrap() = Some(pool.clone());
     tokio::time::resume();
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        while f.harness.port.posts().is_empty() {
+        while f.body_posts().is_empty() {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
     assert_eq!(f.init(), [(source, start)]);
-    assert_eq!(f.harness.port.posts(), ["new answer"]);
+    assert_eq!(f.body_posts(), ["new answer"]);
     assert_eq!(log.binding_events_since(ch, 0).unwrap(), before);
     if let Some(candidate) = parked {
         assert_eq!(candidate.child_boundary_epoch(), 1);
@@ -826,14 +836,14 @@ async fn exercise_protected_thread_restart(
     f.start_host();
     tokio::time::resume();
     tokio::time::timeout(std::time::Duration::from_secs(12), async {
-        while f.harness.port.posts().len() < 2 {
+        while f.body_posts().len() < 2 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("the protected new answer must not wait for closed Legacy receipts");
     assert_eq!(f.init(), [(source, 0), (next, 0)]);
-    assert_eq!(f.harness.port.posts(), ["only C", "only D"]);
+    assert_eq!(f.body_posts(), ["only C", "only D"]);
     assert_eq!(
         BodyClaim::tmux(channel, Some(&f.binds.tmux)).peek(),
         Ok(true)
