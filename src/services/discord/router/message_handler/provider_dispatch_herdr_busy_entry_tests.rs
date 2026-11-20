@@ -1495,6 +1495,7 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
     intake.runtime.block_on(async {
         let counts = dispatch::OwnerTurn::probes(CHANNEL);
         let front = intake.front().await;
+        let original = front.1.clone();
         let (entered, resume) =
             discord::router::intake_dispatch::after_upload_take(ChannelId::new(CHANNEL))
                 .await
@@ -1508,7 +1509,7 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
             guard
         };
         let (result, _record) = tokio::join!(tokio::time::timeout(LIMIT, start), record);
-        assert_eq!(result.unwrap(), Ok(()), "the refused idle input is settled");
+        assert!(result.unwrap().is_err(), "the idle front is deferred");
         let after = dispatch::OwnerTurn::probes(CHANNEL);
         assert_eq!((after.0 - counts.0, after.1 - counts.1), (1, 0));
         assert_eq!(intake.mailbox.has_active_turn().await, Ok(false));
@@ -1527,29 +1528,25 @@ fn a_pinless_held_input_wakes_on_idle_proof_without_another_hook_pg() {
             .v2_request(|slot| slot.as_ref().ok_or("no owner")?.json())
             .await
             .unwrap();
-        assert_eq!(state["items"], json!([]));
+        assert_eq!(state["items"], json!([original]));
         assert!(state["head_injection"].is_null());
         assert_eq!(state["retained_inputs"], json!([]));
-        assert!(!held_watch::has_watch(CHANNEL));
+        assert!(held_watch::has_watch(CHANNEL));
         assert!(
-            !intake
-                .shared
-                .turn_view_reconciler
-                .ops()
-                .iter()
-                .any(|operation| operation.add && operation.emoji == '📬')
-        );
-        assert_eq!(
             intake
                 ._api
                 .take()
                 .iter()
-                .filter(|call| call.contains("이 입력을 폐기했습니다"))
-                .count(),
-            1
+                .all(|call| !call.contains("이 입력을 폐기했습니다"))
         );
         assert_eq!(fx.rig.sends().len(), before);
         assert!(heads.lock().unwrap().is_empty());
+
+        missing_input::append_terminal(&started, "i8114-working-message");
+        assert!(readiness::observe(fx.logical(), Some(&started.path)).is_some());
+        source_input_settled(&intake, &original, &heads).await;
+        idle_turn_unwound(&intake).await;
+        assert_eq!(fx.rig.sends().len() - before, 2);
         assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
     });
     drop(intake);
