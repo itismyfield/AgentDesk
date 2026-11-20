@@ -275,6 +275,8 @@ impl Owner {
 }
 
 impl ChannelMailboxHandle {
+    pub(crate) const ROUTINE_DELIVERY_DEADLINE: &str = DELIVERY_DEADLINE;
+
     pub(crate) async fn settle_routine_input(
         &self,
         (namespace, ticket): (String, String),
