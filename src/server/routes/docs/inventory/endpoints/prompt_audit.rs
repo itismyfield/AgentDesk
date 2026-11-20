@@ -16,14 +16,14 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
     ];
     vec![
         ep("GET", "/api/agents/{id}/prompt-audit", "agents",
-            "Inspect launch instructions. origin is current_session, latest_saved or canon_reassembled. Timestamps and logical file paths can be null. Section source is canon_file, memento, runtime or conditional. chars counts Unicode characters in the displayed text. Each credential match contributes to masked_count. The JSON body uses Cache-Control: no-store.")
+            "Inspect launch instructions. origin is current_session, latest_saved or unavailable, and sections is empty when unavailable. Timestamps and logical file paths can be null. Section source is canon_file, memento, runtime or conditional. chars counts Unicode characters in the displayed text. Text uses the Discord /system-prompt redaction and masked_count is its replacement count. The JSON body uses Cache-Control: no-store.")
             .with_params(params.clone())
             .with_example(json!(null), json!({
                 "agent_id":"example-agent","provider":"claude","session_id":"example-session",
                 "origin":"current_session","session_started_at":"2026-11-20T01:00:00Z",
-                "canon_modified_at":"2026-11-19T22:00:00Z","masked_count":1,
+                "masked_count":1,
                 "sections":[{"name":"role_prompt","source":"canon_file","path":"agents/role.prompt.md",
-                    "chars":29,"text":"Follow the role guidance.\n***","masked_count":1}]
+                    "chars":39,"text":"Follow the role guidance.\nAPI_TOKEN=***","masked_count":1}]
             })),
         ep("GET", "/api/agents/{id}/anchors", "agents",
             "Read the anchors injected into the selected provider session, with the most recent saved copy available when no current session is bound. source is current_session, latest_saved or unavailable. memento.status is connected, disconnected, unknown or unconfigured and checked_at is nullable. Metadata missing from legacy snapshots is null. overlap_candidates points to zero-based anchor indexes or logical canon paths. The JSON body uses Cache-Control: no-store.")

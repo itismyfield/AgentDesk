@@ -725,7 +725,6 @@ src/
 │   │   ├── prompt_audit/
 │   │   │   ├── anchors.rs
 │   │   │   ├── projection.rs
-│   │   │   ├── redaction.rs
 │   │   │   └── tests.rs
 │   │   ├── receipt/
 │   │   │   └── single_flight.rs
@@ -5147,8 +5146,6 @@ src/
 │   ├── ai_screen.rs
 │   └── mod.rs
 ├── utils/
-│   ├── redact/
-│   │   └── registered.rs
 │   ├── secret_file/
 │   │   ├── fresh_tests.rs
 │   │   └── private_directory.rs

@@ -5,16 +5,15 @@ use serde::Serialize;
 
 use crate::db::{prompt_manifests::PromptManifest, provider_session_prompts::SessionPrompt};
 use crate::domain::memory::{ANCHOR_CONTEXT_END, ANCHOR_CONTEXT_POLICY, ANCHOR_CONTEXT_START};
-use crate::services::{discord::prompt_builder::audit::CanonPrompt, provider::ProviderKind};
-
-use super::redaction;
+use crate::services::discord::prompt_builder::{audit::CanonPrompt, system_prompt_audit::redact};
+use crate::services::provider::ProviderKind;
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Origin {
     CurrentSession,
     LatestSaved,
-    CanonReassembled,
+    Unavailable,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -50,7 +49,6 @@ pub(super) struct PromptResponse {
     session_id: Option<String>,
     origin: Origin,
     session_started_at: Option<DateTime<Utc>>,
-    canon_modified_at: Option<DateTime<Utc>>,
     masked_count: usize,
     sections: Vec<Section>,
 }
@@ -72,35 +70,20 @@ pub(super) fn prompt_response(
             },
             saved_sections(&saved.system_prompt, manifest, canon),
         ),
-        None => (
-            Origin::CanonReassembled,
-            canon.iter().map(canon_section).collect(),
-        ),
+        // Like /system-prompt, only the saved copy is shown; a rebuild depends on the requester.
+        None => (Origin::Unavailable, Vec::new()),
     };
     let session_id = snapshot
         .map(|saved| saved.provider_session_id.as_str())
         .or(current.as_deref());
     PromptResponse {
-        agent_id: redaction::mask(id).0,
+        agent_id: redact(id).0,
         provider: provider.as_str().to_owned(),
-        session_id: session_id.map(|session| redaction::mask(session).0),
+        session_id: session_id.map(|session| redact(session).0),
         origin,
         session_started_at: snapshot.map(|saved| saved.started_at),
-        canon_modified_at: canon.iter().filter_map(|file| file.modified_at).max(),
         masked_count: sections.iter().map(|section| section.masked_count).sum(),
         sections,
-    }
-}
-
-fn canon_section(file: &CanonPrompt) -> Section {
-    let (text, masked_count) = redaction::mask(&file.content);
-    Section {
-        name: file.name.to_owned(),
-        source: Source::CanonFile,
-        path: Some(file.path),
-        chars: text.chars().count(),
-        text,
-        masked_count,
     }
 }
 
@@ -163,7 +146,6 @@ fn saved_sections(
     manifest: Option<&PromptManifest>,
     canon: &[CanonPrompt],
 ) -> Vec<Section> {
-    let secrets = redaction::ranges(input);
     let mut segments = Vec::new();
     if let Some(range) = anchor_context(input) {
         segments.push(Segment {
@@ -215,16 +197,11 @@ fn saved_sections(
         if segment.range.start < cursor {
             continue;
         }
-        push_section(
-            input,
-            runtime(cursor..segment.range.start),
-            &secrets,
-            &mut sections,
-        );
+        push_section(input, runtime(cursor..segment.range.start), &mut sections);
         cursor = segment.range.end;
-        push_section(input, segment, &secrets, &mut sections);
+        push_section(input, segment, &mut sections);
     }
-    push_section(input, runtime(cursor..input.len()), &secrets, &mut sections);
+    push_section(input, runtime(cursor..input.len()), &mut sections);
     sections
 }
 
@@ -237,17 +214,12 @@ fn runtime(range: Range<usize>) -> Segment<'static> {
     }
 }
 
-fn push_section(
-    input: &str,
-    segment: Segment<'_>,
-    secrets: &[Range<usize>],
-    sections: &mut Vec<Section>,
-) {
-    let raw = &input[segment.range.clone()];
+fn push_section(input: &str, segment: Segment<'_>, sections: &mut Vec<Section>) {
+    let raw = &input[segment.range];
     if raw.trim().is_empty() {
         return;
     }
-    let (text, masked_count) = redaction::mask_range(input, segment.range, secrets);
+    let (text, masked_count) = redact(raw);
     sections.push(Section {
         name: segment.name.to_owned(),
         source: segment.source,
