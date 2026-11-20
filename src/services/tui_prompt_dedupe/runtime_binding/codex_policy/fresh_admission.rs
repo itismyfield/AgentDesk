@@ -202,6 +202,8 @@ fn no_alias(denied: &[SourceId], current: &SourceId) -> bool {
     })
 }
 
+pub(crate) const FRESH_SCOPE_BUSY: &str = "source_busy";
+
 /// Installs only selection data under the existing authority; resume keeps its normal gates.
 pub(crate) fn with_fresh_scope(
     channel: u64,
@@ -213,7 +215,7 @@ pub(crate) fn with_fresh_scope(
     let Some(tmux) = input_target(channel) else {
         return Ok(false);
     };
-    tc::with_tmux_source_authority(&tmux, |authority| {
+    tc::try_with_tmux_source_authority(&tmux, |authority| {
         let SpawnNonceMarker::Known(nonce) = absent_open::read_nonce(&tmux) else {
             return Ok(false);
         };
@@ -285,4 +287,5 @@ pub(crate) fn with_fresh_scope(
         install(nonce, denied);
         Ok(changed)
     })
+    .unwrap_or(Err(FRESH_SCOPE_BUSY))
 }

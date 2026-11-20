@@ -118,19 +118,22 @@ async fn hook_session_pg(
             let resolved_session_key = outcome.session_key;
             let dispatch_id = body.dispatch_id.clone();
 
-            crate::kanban::fire_event_hooks_with_backends(
-                &state.engine,
-                "on_session_status_change",
-                "OnSessionStatusChange",
-                json!({
-                    "session_key": resolved_session_key,
-                    "instance_id": instance_id,
-                    "status": status,
-                    "agent_id": agent_id,
-                    "dispatch_id": dispatch_id,
-                    "provider": provider,
-                }),
-            );
+            // A write its row fence skipped changed no status, so no status-change hook runs.
+            if outcome.applied {
+                crate::kanban::fire_event_hooks_with_backends(
+                    &state.engine,
+                    "on_session_status_change",
+                    "OnSessionStatusChange",
+                    json!({
+                        "session_key": resolved_session_key,
+                        "instance_id": instance_id,
+                        "status": status,
+                        "agent_id": agent_id,
+                        "dispatch_id": dispatch_id,
+                        "provider": provider,
+                    }),
+                );
+            }
 
             if is_user_wait_status(status)
                 && let Some(aid) = agent_id.as_ref()

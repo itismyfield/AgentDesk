@@ -322,9 +322,10 @@ fn v2_and_unknown_objects_refuse_legacy_mutation_before_unlink() {
                 .handle(channel)
                 .clear(context())
                 .await;
-            assert!(result.persistence.failed.is_empty());
+            assert_eq!(result.persistence.failed, ["queue_read_only"]);
+            assert!(result.persistence.count_unknown);
             let after = std::fs::read_to_string(path).unwrap();
-            assert!(parse_snapshot(&after).unwrap().0.is_empty());
+            assert_eq!(after, content);
         }
         // An object that does not parse is not a snapshot to protect; /clear clears it as main does.
         let channel = ChannelId::new(7_272_272);

@@ -859,35 +859,13 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
         return matches[0]
 
     def _run_signal_cleanup(self, signal_name: str) -> tuple[int, str]:
-        """Run one real signal path with bounded child and parent lifetimes.
-
-        Code-path budget from measured runs: a typical successful path is
-        ~0.2–1.3 s.  Five isolated runs of the old 60 x 0.05 s signal guard
-        averaged 7.01 s on this host; added to readiness near 4 s, that agrees
-        with the observed ~10.75 s failure and disproves the former 8.25 s bound.
-        The reduced 20-iteration guard averaged 2.37 s, giving a conservative
-        serial estimate of ``4 + 2.37 + 1.25 = 7.62 s`` including maximum EXIT
-        cleanup.  The external 10 s timeout still fails closed and reaps the
-        process group, but scheduler delay can make it fire before the intended
-        internal diagnostic.
-        """
+        """Run one real signal path once the child confirms its handler is installed."""
         signal_status = {"INT": 130, "TERM": 143}[signal_name]
-        cleanup_sleep = self._cleanup_sleep_literal()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            fake_bin = root / "fake-bin"
-            fake_bin.mkdir()
             event_log = root / "events.log"
-            (fake_bin / "sleep").write_text(
-                "#!/bin/sh\n"
-                f'if [ "${{1:-}}" = {cleanup_sleep} ]; then\n'
-                '  printf "scaled-sleep=%s\\n" "$1" >> "$EVENT_LOG"\n'
-                "  exec /bin/sleep 0.05\n"
-                "fi\n"
-                "exec /bin/sleep 0.01\n",
-                encoding="utf-8",
-            )
-            (fake_bin / "sleep").chmod(0o755)
+            ready_pipe = root / "ready"
+            os.mkfifo(ready_pipe)
             probe = root / "probe.py"
             probe.write_text(
                 "#!/usr/bin/env python3\n"
@@ -905,9 +883,10 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                 "    raise SystemExit(124)\n"
                 "\n"
                 "signal.signal(signal.SIGALRM, expire)\n"
-                "signal.alarm(8)\n"
+                "signal.alarm(60)\n"
                 "with open(os.environ['EVENT_LOG'], 'a', encoding='utf-8') as handle:\n"
                 "    handle.write('probe-ready\\n')\n"
+                "print('ready', flush=True)\n"
                 "while True:\n"
                 "    signal.pause()\n",
                 encoding="utf-8",
@@ -916,7 +895,7 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
             script = (
                 "set -euo pipefail\n"
                 f"EVENT_LOG={shlex.quote(str(event_log))}\n"
-                f"PATH={shlex.quote(str(fake_bin))}:/usr/bin:/bin:/usr/sbin:/sbin\n"
+                "PATH=/usr/bin:/bin:/usr/sbin:/sbin\n"
                 "export EVENT_LOG PATH\n"
                 "PG_TUNNEL_PREFLIGHT_PID=\"\"\n"
                 "PG_TUNNEL_PREFLIGHT_CONNINFO_DIR=\"\"\n"
@@ -932,26 +911,12 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                 "_rollback_release_binary() { :; }\n"
                 "_finalize_detached_helper() { printf 'cleanup=%s\\n' \"$1\" >> \"$EVENT_LOG\"; }\n"
                 + self._production_cleanup_handlers()
-                + f"\nPARENT_PID=$$ {shlex.quote(str(probe))} &\n"
+                + f"\nPARENT_PID=$$ {shlex.quote(str(probe))} > {shlex.quote(str(ready_pipe))} &\n"
                 "PG_TUNNEL_PREFLIGHT_PID=$!\n"
-                "probe_ready_deadline=$((SECONDS + 4))\n"
-                "while ! grep -q '^probe-ready$' \"$EVENT_LOG\"; do\n"
-                "    if [ \"$SECONDS\" -ge \"$probe_ready_deadline\" ]; then\n"
-                "        printf 'probe-ready timeout at SECONDS=%s (deadline=%s)\\n' \"$SECONDS\" \"$probe_ready_deadline\" >&2\n"
-                "        exit 98\n"
-                "    fi\n"
-                "    /bin/sleep 0.01\n"
-                "done\n"
+                f"read -r ready < {shlex.quote(str(ready_pipe))}\n"
+                '[ "$ready" = ready ]\n'
                 f"kill -{signal_name} $$\n"
-                "signal_wait_attempts=0\n"
-                "while :; do\n"
-                "    if [ \"$signal_wait_attempts\" -ge 20 ]; then\n"
-                "        printf 'signal cleanup timeout after %s attempts\\n' \"$signal_wait_attempts\" >&2\n"
-                "        exit 97\n"
-                "    fi\n"
-                "    /bin/sleep 0.05\n"
-                "    signal_wait_attempts=$((signal_wait_attempts + 1))\n"
-                "done\n"
+                "exit 97\n"
             )
             process = subprocess.Popen(
                 ["bash", "-c", script],
@@ -961,7 +926,7 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                 start_new_session=True,
             )
             try:
-                stdout, stderr = process.communicate(timeout=10)
+                stdout, stderr = process.communicate(timeout=45)
             except subprocess.TimeoutExpired as exc:
                 # The probe is a child of the harness.  Kill its process group
                 # and synchronously communicate again so no orphan survives a
@@ -972,7 +937,7 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                     pass
                 stdout, stderr = process.communicate()
                 self.fail(
-                    "signal cleanup harness timed out after 10 s; "
+                    "signal cleanup harness timed out after 45 s; "
                     f"stdout={stdout or exc.stdout!r} stderr={stderr or exc.stderr!r}"
                 )
             p = subprocess.CompletedProcess(

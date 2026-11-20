@@ -1,5 +1,7 @@
 //! Routine metadata and session identity helpers for headless turns.
 use super::*;
+use crate::db::dispatched_session_canonical_identity::resolve_session_key_pg;
+use crate::services::discord::adk_session::legacy_session_key_from_namespaced;
 
 pub(super) fn valid_routine_metadata(
     metadata: Option<&serde_json::Value>,
@@ -70,6 +72,97 @@ pub(super) fn headless_session_basis(
     let snapshot = scheduled_snapshot_session_label(metadata);
     session_key_basis_override(snapshot.as_deref(), metadata, tmux_session_label).map(str::to_owned)
 }
+/// The model a routine pinned for its run; it outranks the channel model setting.
+fn routine_model(metadata: Option<&serde_json::Value>) -> Option<String> {
+    valid_routine_metadata(metadata)?
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+pub(super) async fn models_for_turn(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    provider: &ProviderKind,
+    metadata: Option<&serde_json::Value>,
+    session_key: Option<&str>,
+    native_session: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let persistent = valid_routine_metadata(metadata).is_some() && !fresh_routine_turn(metadata);
+    if let Some(session) = native_session.filter(|_| persistent) {
+        // Claude keeps its own resumed model. Other resumes reuse a recorded model
+        // from the matching conversation when available.
+        let model = if *provider == ProviderKind::Claude {
+            None
+        } else {
+            resumed_model(shared, provider, session_key, session)
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(provider = provider.as_str(), %error, "could not read resumed session model");
+                    None
+                })
+        };
+        return (model, None);
+    }
+
+    let requested = match routine_model(metadata) {
+        Some(model) => Some(model),
+        None => {
+            // Routine model inheritance starts at the agent's parent channel.
+            let model_channel = metadata_parent_channel_id(metadata).unwrap_or(channel);
+            super::super::super::super::commands::resolve_model_for_turn(
+                shared,
+                model_channel,
+                provider,
+            )
+            .await
+        }
+    };
+    // A new default-model conversation can occupy the previous conversation's row.
+    let published = requested
+        .clone()
+        .or_else(|| persistent.then(|| "default".to_string()));
+    (requested, published)
+}
+
+async fn resumed_model(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    session_key: Option<&str>,
+    native_session: &str,
+) -> Result<Option<String>, String> {
+    let (Some(pool), Some(key)) = (shared.pg_pool.as_ref(), session_key) else {
+        return Ok(None);
+    };
+    let legacy = legacy_session_key_from_namespaced(key);
+    for key in std::iter::once(key).chain(legacy.as_deref()) {
+        let Some(resolved) = resolve_session_key_pg(pool, key)
+            .await
+            .map_err(|error| format!("{error:?}"))?
+        else {
+            continue;
+        };
+        let model = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT model FROM sessions WHERE session_key=$1 AND provider=$2
+             AND $3 IN (claude_session_id, raw_provider_session_id)",
+        )
+        .bind(resolved)
+        .bind(provider.as_str())
+        .bind(native_session)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| error.to_string())?;
+        if let Some(model) = model {
+            return Ok(model.filter(|value| {
+                !value.trim().is_empty() && !value.eq_ignore_ascii_case("default")
+            }));
+        }
+    }
+    Ok(None)
+}
+
 /// Process mode is explicit and only honored on fresh routine metadata.
 pub(super) fn routine_process_turn(metadata: Option<&serde_json::Value>) -> bool {
     fresh_routine_turn(metadata)

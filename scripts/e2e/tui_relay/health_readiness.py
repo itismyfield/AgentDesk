@@ -1,8 +1,8 @@
-"""Readiness policy and same-response attribution for explicitly waived Unknowns."""
+"""Readiness policy and same-response attribution for degraded reasons."""
 
 import datetime as dt
 import re
-from collections import Counter, defaultdict
+from collections import defaultdict
 from urllib.parse import unquote_to_bytes
 
 
@@ -13,6 +13,10 @@ GROUP = re.compile(r"turn_presence_unknown:(claude|codex):(~|(?:[A-Za-z0-9_.-]|%
 STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)\Z")
 QUEUE_REASON = re.compile(r"provider:([a-z0-9_-]+):pending_queue_depth:([1-9][0-9]*)\Z")
 TARGET_QUEUE = re.compile(r"target_mailbox:([a-z0-9_-]+):pending_queue_depth<=([1-9][0-9]*)\Z")
+CHANNEL_NUMBER = r"[1-9][0-9]{0,19}"
+RETENTION_REASON = re.compile(rf"tui_o:reader_retention_stalled:({CHANNEL_NUMBER})")
+RELAY_UNKNOWN_REASON = re.compile(
+    rf"relay_verdict_unknown_(?:claude|codex|opencode|qwen|grok|antigravity)_({CHANNEL_NUMBER})")
 
 
 def unknown_family(reason):
@@ -68,61 +72,103 @@ def agent_component(value):
 
 
 def channel_id(value):
-    if type(value) is str and re.fullmatch(r"[1-9][0-9]*", value):
+    if type(value) is str and re.fullmatch(CHANNEL_NUMBER, value):
         value = int(value)
     return value if type(value) is int and 0 < value < 2**64 else None
 
 
-def unknown_error(body, target_channel):
-    """A group may be waived only when every complete detail row proves it is foreign."""
+def _presence_owners(body):
+    """Join every reported group to its channel ids in the same response."""
     reasons = body.get("degraded_reasons")
     if not isinstance(reasons, list) or any(not isinstance(r, str) for r in reasons):
-        return "Unknown reasons must be a string array"
+        return {}, "Unknown reasons must be a string array"
     groups = [r for r in reasons if unknown_family(r)]
-    if not groups and not body.get(PREFIX):
-        return None
-    target = channel_id(target_channel)
     rows = body.get(PREFIX)
-    if target is None or not isinstance(rows, list) or not rows or not groups:
-        return "Unknown target/detail missing or invalid"
-    expected, actual, seen = Counter(), defaultdict(list), set()
+    if not groups and not rows:
+        return {}, None
+    if not isinstance(rows, list) or not rows or not groups:
+        return {}, "Unknown target/detail missing or invalid"
+    expected, actual, seen = {}, defaultdict(list), set()
     try:
         for group in groups:
             match = GROUP.fullmatch(group)
             if match is None:
-                return "Unknown group malformed"
+                return {}, "Unknown group malformed"
             provider, agent, reason, leaf, count, age = match.groups()
             decoded = None if agent == "~" else unquote_to_bytes(agent).decode("utf-8")
             if agent_component(decoded) != agent or int(age) < 60:
-                return "Unknown group is not canonical"
+                return {}, "Unknown group is not canonical"
             key = (provider, agent, reason, leaf)
-            if any(item[:4] == key for item in expected):
-                return "Unknown group duplicated"
-            expected[(*key, int(count), int(age))] += 1
+            if key in expected:
+                return {}, "Unknown group duplicated"
+            expected[key] = (group, int(count), int(age))
         for row in rows:
             if not isinstance(row, dict):
-                return "Unknown detail row malformed"
+                return {}, "Unknown detail row malformed"
             channel, provider, agent = row["channel_id"], row["provider"], row["agent_id"]
             reason, leaf, age, stamp = row["reason"], row["hold_leaf"], row["elapsed_secs"], row["unknown_since"]
             if type(channel) is not int or channel_id(channel) is None or channel in seen:
-                return "Unknown detail channel invalid or duplicated"
+                return {}, "Unknown detail channel invalid or duplicated"
             seen.add(channel)
-            if channel == target:
-                return "Unknown target channel is never waived"
             if (provider not in ("claude", "codex") or not isinstance(reason, str) or not ATOM.fullmatch(reason)
                     or (leaf is not None and (not isinstance(leaf, str) or not ATOM.fullmatch(leaf)))
                     or (agent is not None and not isinstance(agent, str)) or agent == ""
                     or type(age) is not int or age < 60):
-                return "Unknown detail fields invalid"
+                return {}, "Unknown detail fields invalid"
             if not isinstance(stamp, str) or not STAMP.fullmatch(stamp) or dt.datetime.fromisoformat(stamp).utcoffset() is None:
-                return "Unknown detail timestamp invalid"
-            actual[(provider, agent_component(agent), reason, leaf or "none")].append(age)
+                return {}, "Unknown detail timestamp invalid"
+            actual[(provider, agent_component(agent), reason, leaf or "none")].append((channel, age))
     except (KeyError, TypeError, ValueError, UnicodeError):
-        return "Unknown detail/group invalid"
-    reconstructed = Counter({(*key, len(ages), max(ages)): 1 for key, ages in actual.items()})
-    if reconstructed != expected:
-        return "Unknown group/detail mismatch"
+        return {}, "Unknown detail/group invalid"
+    if actual.keys() != expected.keys() or any(
+        len(actual[key]) != count or max(age for _, age in actual[key]) != max_age
+        for key, (_, count, max_age) in expected.items()
+    ):
+        return {}, "Unknown group/detail mismatch"
+    return {group: {channel for channel, _ in actual[key]} for key, (group, _, _) in expected.items()}, None
+
+
+def unknown_error(body, target_channel):
+    """A group may be waived only when every complete detail row proves it is foreign."""
+    presence, error = _presence_owners(body)
+    if error:
+        return error
+    target = channel_id(target_channel)
+    if presence and target is None:
+        return "Unknown target/detail missing or invalid"
+    if any(target in channels for channels in presence.values()):
+        return "Unknown target channel is never waived"
     return None
+
+
+def classify_degraded_reasons(body, target_channel):
+    """Return internal reason matching text, a bounded code, and scope for each reason."""
+    reasons = body.get("degraded_reasons")
+    if not isinstance(reasons, list):
+        return []
+    target = channel_id(target_channel)
+    presence, presence_error = _presence_owners(body)
+    classifications = []
+    for reason in reasons:
+        channels = set()
+        code = "unclassified"
+        if not isinstance(reason, str):
+            reason = None
+        elif unknown_family(reason):
+            code, channels = PREFIX, presence.get(reason, set())
+        elif match := RETENTION_REASON.fullmatch(reason):
+            code, channels = "tui_o:reader_retention_stalled", {channel_id(match[1])}
+        elif match := RELAY_UNKNOWN_REASON.fullmatch(reason):
+            code, channels = "relay_verdict_unknown", {channel_id(match[1])}
+        elif reason.startswith("herdr_") and ATOM.fullmatch(reason):
+            code = "herdr"
+        scope = "unknown"
+        if target is not None and channels and None not in channels:
+            scope = "target" if target in channels else "foreign"
+        classifications.append((reason, code, scope))
+    if presence_error and body.get(PREFIX) and not any(unknown_family(r) for r in reasons):
+        classifications.append((None, PREFIX, "unknown"))
+    return classifications
 
 
 def ready_violations(payload, *, allowed_statuses=("healthy",), allowed_degraded_reasons=(), target_channel=None):

@@ -138,7 +138,7 @@ fn a_restored_reply_wakes_the_same_busy_hold_and_delivers_once_pg() {
                 assert_eq!(head["attempt"]["target"]["execution_nonce"], nonce);
             }
         }
-        idle_turn_unwound(&intake).await;
+        idle_turn_unwound(&intake, original.message_id).await;
         assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
     });
 }

@@ -53,6 +53,10 @@ pub(crate) fn record_preparation_watch(probe: PreparationWatch) {
             .unwrap_or_else(|e| e.into_inner()) = Some(probe);
     }
 }
+pub(crate) fn key_attempted() -> Option<bool> {
+    Some(current()?.keyed.load(Ordering::SeqCst))
+}
+
 pub(crate) fn readiness_deadline() -> Option<std::time::Instant> {
     current()?.readiness_deadline
 }
@@ -233,6 +237,7 @@ pub(crate) fn pinned() -> Result<Option<(String, String)>, String> {
 }
 pub(crate) fn payload<R>(send: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
     before_payload()?;
+    keyed();
     send()
 }
 #[cfg(unix)]

@@ -254,9 +254,19 @@ class InstanceSupervisorTests(unittest.TestCase):
             with lease.acquire(self.root, self.fixture.instance_id):
                 pass
 
-    def binary_fixture(self, *, wait=False, ignore_term=False, exit_code=0):
+    @contextlib.contextmanager
+    def child_channel(self):
+        with tempfile.TemporaryDirectory(prefix="adk-child-", dir="/tmp") as directory, \
+                socket.socket(socket.AF_UNIX) as listener:
+            path = str(Path(directory) / "ready")
+            listener.bind(path)
+            listener.listen(1)
+            listener.settimeout(30)
+            yield path, listener
+
+    def binary_fixture(self, *, channel=None, ignore_term=False, exit_code=0):
         script = f'''#!{sys.executable}
-import fcntl,json,os,signal,sys,time
+import json,os,signal,socket,sys
 from pathlib import Path
 root=Path(os.environ["AGENTDESK_ROOT_DIR"])
 witness=json.loads(os.environ["AGENTDESK_TEST_LEASE"])
@@ -266,8 +276,13 @@ record=json.loads(os.pread(fd,4096,0))
 if {ignore_term!r}: signal.signal(signal.SIGTERM,signal.SIG_IGN)
 capture={{"pid":os.getpid(),"argv":sys.argv[1:],"environment":dict(os.environ),"cwd":os.getcwd(),"witness":witness,"record":record,"device":metadata.st_dev,"inode":metadata.st_ino,"inherited":os.get_inheritable(fd)}}
 (root/"child-capture.json").write_text(json.dumps(capture))
-deadline=time.monotonic()+10
-while {wait!r} and not (root/"cooperative-stop").exists() and time.monotonic()<deadline: time.sleep(.01)
+if {channel!r}:
+    with socket.socket(socket.AF_UNIX) as ready:
+        ready.settimeout(30)
+        ready.connect({channel!r})
+        ready.sendall(b"R")
+        ready.recv(1)
+        os.close(fd)
 sys.exit({exit_code})
 '''
         self.binary.write_text(script)
@@ -328,25 +343,35 @@ sys.exit({exit_code})
         self.assertFalse((self.fixture.base / lease.LEASE_NAME).exists())
 
     def test_wall_timeout_stops_only_owned_child_and_releases_lease(self):
-        digest = self.binary_fixture(wait=True, ignore_term=True)
-        def ready_spawn(*args, **kwargs):
-            child = subprocess.Popen(*args, **kwargs)
-            try:
-                deadline = time.monotonic() + 5
-                while not (self.root / "child-capture.json").exists() and time.monotonic() < deadline:
-                    self.assertIsNone(child.poll(), "actual child exited before its ready witness")
-                    time.sleep(0.01)
-                self.assertTrue((self.root / "child-capture.json").exists())
+        with self.child_channel() as (path, listener), contextlib.ExitStack() as cleanup:
+            digest = self.binary_fixture(channel=path, ignore_term=True)
+            def ready_spawn(*args, **kwargs):
+                child = subprocess.Popen(*args, **kwargs)
+                cleanup.callback(child.wait, timeout=30)
+                cleanup.callback(child.kill)
+                connected, _ = listener.accept()
+                cleanup.enter_context(connected)
+                connected.settimeout(30)
+                self.assertEqual(connected.recv(1), b"R")
+                real_wait = child.wait
+
+                def wait(*, timeout):
+                    wait_budgets.append(timeout)
+                    if len(wait_budgets) <= 2:
+                        raise subprocess.TimeoutExpired(child.args, timeout)
+                    return real_wait(timeout=30)
+
+                # Dispatch both real signals but drive the two wait expirations on demand.
+                child.wait = wait
                 return child
-            except BaseException:
-                child.kill()
-                child.wait(timeout=5)
-                raise
-        started = time.monotonic()
-        result = self.supervise(digest, wall_timeout=2, stop_grace=0.1, spawn=ready_spawn)
+
+            wait_budgets = []
+            clock = mock.Mock(wraps=time, monotonic=lambda: 10)
+            with mock.patch.object(lifecycle, "time", clock):
+                result = self.supervise(digest, wall_timeout=2, stop_grace=0.1, spawn=ready_spawn)
+            self.assertEqual(wait_budgets, [2, 0.1, 0.1])
         self.assertEqual(result["status"], "TIMEOUT")
         self.assertEqual(result["child_exit"], -9)
-        self.assertLess(time.monotonic() - started, 6)
         with lease.acquire(self.root, self.fixture.instance_id):
             pass
 
@@ -385,53 +410,43 @@ sys.exit({exit_code})
         self.assertEqual(child.signals, ["term", "kill"])
 
     def test_wrapper_sigkill_keeps_child_lock_until_cooperative_exit(self):
-        digest = self.binary_fixture(wait=True)
-        command = [sys.executable, "-E", "-s", "-m", "scripts.dev_instance", "up",
-                   "--instance", self.fixture.instance_id, "--head", self.manifest["head"],
-                   "--binary-sha256", digest, "--wall-timeout", "5", "--stop-grace", "0.1"]
-        wrapper = subprocess.Popen(command, cwd=declarations.REPOSITORY,
-                                   env={"PATH": "/usr/bin:/bin", "HOME": str(self.fixture.home)},
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        self.addCleanup(lambda: (self.root / "cooperative-stop").touch())
-        try:
-            deadline = time.monotonic() + 5
-            while not (self.root / "child-capture.json").exists() and time.monotonic() < deadline:
-                self.assertIsNone(wrapper.poll(), "wrapper exited before its actual child exec")
-                time.sleep(0.01)
-            self.assertTrue((self.root / "child-capture.json").exists())
-            capture = json.loads((self.root / "child-capture.json").read_text())
-            lease_path = self.fixture.base / lease.LEASE_NAME
-            original_inode = lease_path.stat().st_ino
-            wrapper.kill()
-            wrapper.wait(timeout=5)
-            self.assertEqual(wrapper.returncode, -9)
-            with self.assertRaises(lease.LeaseBusy):
-                lease.acquire(self.root, self.fixture.instance_id)
-            self.assertEqual(lease_path.stat().st_ino, original_inode)
-            (self.root / "cooperative-stop").touch()
-            deadline = time.monotonic() + 5
-            acquired = False
-            while time.monotonic() < deadline:
+        with self.child_channel() as (path, listener):
+            digest = self.binary_fixture(channel=path)
+            command = [sys.executable, "-E", "-s", "-m", "scripts.dev_instance", "up",
+                       "--instance", self.fixture.instance_id, "--head", self.manifest["head"],
+                       "--binary-sha256", digest, "--wall-timeout", "60", "--stop-grace", "0.1"]
+            with subprocess.Popen(command, cwd=declarations.REPOSITORY,
+                                  env={"PATH": "/usr/bin:/bin", "HOME": str(self.fixture.home)},
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as wrapper:
                 try:
+                    connected, _ = listener.accept()
+                    with connected:
+                        connected.settimeout(30)
+                        self.assertEqual(connected.recv(1), b"R")
+                        capture = json.loads((self.root / "child-capture.json").read_text())
+                        lease_path = self.fixture.base / lease.LEASE_NAME
+                        original_inode = lease_path.stat().st_ino
+                        wrapper.kill()
+                        wrapper.wait(timeout=30)
+                        self.assertEqual(wrapper.returncode, -9)
+                        with self.assertRaises(lease.LeaseBusy):
+                            lease.acquire(self.root, self.fixture.instance_id)
+                        self.assertEqual(lease_path.stat().st_ino, original_inode)
+                        connected.shutdown(socket.SHUT_WR)
+                        self.assertEqual(connected.recv(1), b"")
                     with lease.acquire(self.root, self.fixture.instance_id) as next_owner:
                         self.assertEqual(lease_path.stat().st_ino, original_inode)
                         self.assertNotEqual(next_owner.nonce, capture["witness"]["nonce"])
-                        acquired = True
-                    break
-                except lease.LeaseBusy:
-                    time.sleep(0.01)
-            self.assertTrue(acquired, "last inherited holder did not release after its own exit")
-            print("WRAPPER_REACQUIRE " + json.dumps({
-                "wrapper_pid": wrapper.pid, "child_pid": capture["pid"], "wrapper_exit": wrapper.returncode,
-                "child_alive_acquire": "EWOULDBLOCK", "child_exit": "cooperative stop file then process exit",
-                "inode_before": original_inode, "inode_after": lease_path.stat().st_ino,
-                "reacquired": acquired, "lease_unlink": False, "lease_ttl": False,
-                "release": "close-only after last inherited holder exits"}), flush=True)
-        finally:
-            (self.root / "cooperative-stop").touch()
-            if wrapper.poll() is None:
-                wrapper.kill()
-            wrapper.communicate(timeout=5)
+                    print("WRAPPER_REACQUIRE " + json.dumps({
+                        "wrapper_pid": wrapper.pid, "child_pid": capture["pid"], "wrapper_exit": wrapper.returncode,
+                        "child_alive_acquire": "EWOULDBLOCK", "child_exit": "cooperative socket EOF",
+                        "inode_before": original_inode, "inode_after": lease_path.stat().st_ino,
+                        "reacquired": True, "lease_unlink": False, "lease_ttl": False,
+                        "release": "close-only after last inherited holder closes the lease"}), flush=True)
+                finally:
+                    if wrapper.poll() is None:
+                        wrapper.kill()
+                    wrapper.communicate(timeout=30)
 
     def test_cli_busy_is_nonzero_and_never_reports_ready(self):
         digest = self.binary_fixture()
@@ -551,27 +566,17 @@ class KeeperAdmissionTests(unittest.TestCase):
 
     def test_slow_partial_frame_has_one_total_deadline(self):
         keeper = self.api()
-        parent, peer = socket.socketpair()
-        parent.settimeout(.05)
-        def drip():
-            try:
-                for byte in b'{"long":"partial packet"}\n':
-                    peer.sendall(bytes([byte]))
-                    time.sleep(.02)
-            except OSError:
-                pass
-        worker = threading.Thread(target=drip)
-        started = time.monotonic()
-        worker.start()
-        try:
-            with self.assertRaises(TimeoutError):
-                keeper.receive(parent)
-            self.assertLess(time.monotonic()-started, .2)
-        finally:
-            parent.close()
-            peer.close()
-            worker.join(timeout=1)
-        self.assertFalse(worker.is_alive())
+        elapsed = 0
+        def receive_byte(_size):
+            nonlocal elapsed
+            elapsed += 1
+            return b"{"
+        channel = mock.Mock(gettimeout=lambda: 2, recv=mock.Mock(side_effect=receive_byte))
+        clock = mock.Mock(monotonic=lambda: elapsed)
+        with mock.patch.object(keeper, "time", clock), self.assertRaisesRegex(TimeoutError, "frame deadline"):
+            keeper.receive(channel)
+        self.assertEqual(channel.settimeout.call_args_list, [mock.call(2), mock.call(1)])
+        self.assertEqual(channel.recv.call_count, 2)
 
 
 
@@ -792,7 +797,10 @@ class ResourceAuthorityTests(ResourceFixture):
         peer.close()
         process = mock.Mock()
         process.wait.return_value = 1
-        with mock.patch.object(keeper, "launch", return_value=(process, parent)):
+        clock = mock.Mock(monotonic=lambda: 10)
+        with mock.patch.object(keeper, "launch", return_value=(process, parent)), \
+                mock.patch.object(lifecycle, "time", clock), \
+                mock.patch.object(lifecycle, "check_port"):
             with self.assertRaises(lifecycle.CleanupPending):
                 fixture.supervise(digest, resources=spec, wall_timeout=1, stop_grace=.1)
 
@@ -828,7 +836,7 @@ class VerifiedSupervisorWiringTests(unittest.TestCase):
             events.append('keeper-exit-ack')
             self.assertEqual(args[1]['exit'], child.returncode)
         ready = {'state':'RUNNING', 'sockets':sockets or {}}
-        stop = {'action':'stop', 'nonce':nonce, 'deadline':time.monotonic()+.5}
+        stop = {'action':'stop', 'nonce':nonce, 'deadline':10.5}
         closed = {'state':'STOPPED', 'known_resources_closed':True, 'live_ready':False}
         with mock.patch('scripts.dev_instance.manifest.resource_spec',
                         return_value={'startup_timeout':1, 'stop_grace':1}), \
@@ -838,11 +846,12 @@ class VerifiedSupervisorWiringTests(unittest.TestCase):
                 mock.patch.object(identity, 'wait_health', return_value={'live_ready':True}) as health, \
                 mock.patch.object(identity, 'cooperative_stop', side_effect=cooperative) as cooperate, \
                 mock.patch.object(lifecycle, 'publish_runtime', return_value=(171, 181)) as publication, \
+                mock.patch.object(lifecycle, 'time', mock.Mock(monotonic=lambda: 10)), \
                 mock.patch.object(lifecycle, '_verified_sigterm',
                                   return_value=contextlib.nullcontext(threading.Event())), \
                 mock.patch.object(lifecycle.select, 'select', return_value=([control], [], [])):
             result = lifecycle._supervise_resources(manifest, {}, Path('/synthetic/agentdesk'), {}, owner,
-                                                    time.monotonic()+10, 1, spawn, None,
+                                                    20, 1, spawn, None,
                                                     verification=(32, digest, observed))
         spawn.assert_called_once()
         self.assertEqual(spawn.call_args.kwargs['pass_fds'], (31, 32))

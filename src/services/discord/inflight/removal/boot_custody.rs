@@ -429,3 +429,65 @@ fn copy_segment(
         ))),
     }
 }
+
+/// Native registrations are copied before the ordinary row custody pass can retire their rows.
+pub(super) fn preserve_native_before_boot_reap(
+    root: &Path,
+    provider: &ProviderKind,
+) -> Result<bool, String> {
+    let source = root.join("injected_frames.json");
+    let records = crate::services::tui_input::human_frame::history::v2::native::boot_records(
+        &source,
+        provider.as_str(),
+    )?;
+    if records.is_empty() {
+        return Ok(false);
+    }
+    let custody = root.join("discord_custody").join(provider.as_str());
+    let _lock = super::custody_notice::retention::lock(&custody, true)
+        .map_err(|error| error.to_string())?;
+    let boot = runtime_store::process_generation_binding().generation;
+    for record in records {
+        let ticket = &record["settlement"]["ticket"];
+        let channel = ticket["channel_id"]
+            .as_u64()
+            .ok_or("native channel missing")?;
+        let message = ticket["owning_episode"]["user_message_id"]
+            .as_u64()
+            .or_else(|| ticket["key"]["identity"]["primary"].as_u64())
+            .ok_or("native input identity missing")?;
+        let key = episode_key(provider, [channel, message], None);
+        let dir = custody.join(sha(key.to_string().as_bytes()));
+        let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
+        preserve_episode(
+            root,
+            &dir,
+            key,
+            vec![Item("native_input", source.clone(), Ok(bytes), None, None)],
+            boot,
+        )?;
+    }
+    Ok(true)
+}
+
+pub(super) fn inflight_age_secs_for_path(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .elapsed()
+        .ok()
+        .map(|age| age.as_secs())
+}
+
+#[cfg(unix)]
+#[path = "native_input_custody.rs"]
+mod native_input_custody;
+#[cfg(unix)]
+pub(in crate::services::discord) use native_input_custody::{
+    native_boot_records, persist_native_boot_record, preserve_native_before_discard,
+};
+
+pub(in crate::services::discord) fn inflight_runtime_root() -> Option<PathBuf> {
+    discord_inflight_root()
+}

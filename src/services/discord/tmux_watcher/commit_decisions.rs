@@ -24,7 +24,10 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
-    expected_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+    (expected_identity, native_held): (
+        Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+        bool,
+    ),
     full_response: &str,
     turn_data_start_offset: u64,
     generation_mtime_ns: Option<i64>,
@@ -33,7 +36,7 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
         crate::services::scheduled_messages::turn_completion::ScheduledTurnOutcome,
     >,
 ) -> bool {
-    let Some(expected_identity) = expected_identity else {
+    let Some(expected_identity) = expected_identity.filter(|_| !native_held) else {
         return false;
     };
     if full_response.trim().is_empty() {

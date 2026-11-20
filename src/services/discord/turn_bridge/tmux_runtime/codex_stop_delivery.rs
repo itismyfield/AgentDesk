@@ -11,6 +11,7 @@ use super::claude_stop_delivery::{
 };
 
 use crate::db::dispatched_sessions::hosted_execution::{HostedLookup, HostedRecord, HostedState};
+use crate::services::agents::turn::AgentHerdrStop;
 use crate::services::provider::cancel_token_claude_interrupt::{
     ClaudeInterruptDeliveryGuard, HerdrSubmission, HerdrTurnStart, LateStop, herdr_cancel_enabled,
     herdr_stop_settlement_available,
@@ -420,6 +421,17 @@ pub(super) async fn herdr_command_stop(
     token: &Arc<CancelToken>,
     reason: &str,
 ) -> HerdrStop {
+    herdr_command_stop_on_row(shared, provider, channel, token, reason, None).await
+}
+
+pub(super) async fn herdr_command_stop_on_row(
+    shared: &Arc<crate::services::discord::SharedData>,
+    provider: &ProviderKind,
+    channel: poise::serenity_prelude::ChannelId,
+    token: &Arc<CancelToken>,
+    reason: &str,
+    expected: Option<&AgentHerdrStop>,
+) -> HerdrStop {
     let eligible =
         herdr_command_eligible(token, provider, channel.get(), &shared.token_hash, reason);
     if let Err(refusal) = eligible {
@@ -446,16 +458,17 @@ pub(super) async fn herdr_command_stop(
     #[cfg(all(test, unix))]
     if admitted.token.is_some() && !admitted.already_stopping {
         tests::cut::reached(tests::cut::Cut::IntentRecorded, None);
+        tests::after_herdr_intent().await;
     }
     let stop = match admitted.token {
         None => HerdrStop::Refused(HerdrNotSent::Generation),
         Some(_) if admitted.already_stopping => HerdrStop::AlreadyRequested,
         Some(token) => HerdrStop::Requested(match shared.pg_pool.as_ref() {
-            Some(pool) => match interrupt_herdr(pool, &token, provider).await {
+            Some(pool) => match interrupt_herdr_on_row(pool, &token, provider, expected).await {
                 HerdrDelivery::NotSent(HerdrNotSent::Pending) => {
                     #[cfg(all(test, unix))]
                     tests::before_late_stop().await;
-                    late_stop(shared, pool, &token, provider, channel).await
+                    late_stop(shared, pool, &token, provider, channel, expected).await
                 }
                 delivery => delivery,
             },
@@ -490,6 +503,7 @@ async fn late_stop(
     token: &Arc<CancelToken>,
     provider: &ProviderKind,
     channel: poise::serenity_prelude::ChannelId,
+    expected: Option<&AgentHerdrStop>,
 ) -> HerdrDelivery {
     let Some(state) = token.herdr_interrupt_state() else {
         return HerdrDelivery::NotSent(HerdrNotSent::Pending);
@@ -500,6 +514,7 @@ async fn late_stop(
         pool: pool.clone(),
         provider: provider.clone(),
         channel,
+        expected: expected.cloned(),
         handle: tokio::runtime::Handle::current(),
         #[cfg(test)]
         enabled: crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
@@ -509,7 +524,7 @@ async fn late_stop(
         return HerdrDelivery::NotSent(HerdrNotSent::Pending);
     }
     let after = state.seen_progress().unwrap_or(0);
-    let delivery = late_attempt(shared, pool, token, provider, channel).await;
+    let delivery = late_attempt(shared, pool, token, provider, channel, expected).await;
     if retries(delivery) {
         state.retry_late_stop(run.into_stop(), after);
     }
@@ -523,10 +538,11 @@ async fn late_attempt(
     token: &Arc<CancelToken>,
     provider: &ProviderKind,
     channel: poise::serenity_prelude::ChannelId,
+    expected: Option<&AgentHerdrStop>,
 ) -> Option<HerdrDelivery> {
     let current = shared.mailbox_peek(channel)?.cancel_token().await.ok()??;
     match Arc::ptr_eq(&current, token) {
-        true => Some(interrupt_herdr(pool, token, provider).await),
+        true => Some(interrupt_herdr_on_row(pool, token, provider, expected).await),
         false => None,
     }
 }
@@ -549,6 +565,7 @@ struct LateRun {
     pool: sqlx::PgPool,
     provider: ProviderKind,
     channel: poise::serenity_prelude::ChannelId,
+    expected: Option<AgentHerdrStop>,
     handle: tokio::runtime::Handle,
     #[cfg(test)]
     enabled: Option<bool>,
@@ -565,7 +582,14 @@ impl LateRun {
                 crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
                     .replace(self.enabled);
             // The reader is a blocking thread, as the tail's own waits are.
-            let attempt = late_attempt(&shared, &self.pool, &token, &self.provider, self.channel);
+            let attempt = late_attempt(
+                &shared,
+                &self.pool,
+                &token,
+                &self.provider,
+                self.channel,
+                self.expected.as_ref(),
+            );
             let delivery = self.handle.block_on(attempt);
             #[cfg(test)]
             crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE
@@ -585,11 +609,20 @@ impl LateRun {
     }
 }
 
-/// Dormant until settlement lands; only the Herdr user stop calls this executor.
+#[cfg(test)]
 pub(super) async fn interrupt_herdr(
     pool: &sqlx::PgPool,
     token: &Arc<CancelToken>,
     provider: &ProviderKind,
+) -> HerdrDelivery {
+    interrupt_herdr_on_row(pool, token, provider, None).await
+}
+
+async fn interrupt_herdr_on_row(
+    pool: &sqlx::PgPool,
+    token: &Arc<CancelToken>,
+    provider: &ProviderKind,
+    expected: Option<&AgentHerdrStop>,
 ) -> HerdrDelivery {
     use HerdrNotSent::*;
     if !herdr_stop_settlement_available() {
@@ -623,6 +656,12 @@ pub(super) async fn interrupt_herdr(
     else {
         return HerdrDelivery::NotSent(Pending);
     };
+    // Agent ownership can change independently of the mailbox's turn.
+    if let Some(expected) = expected
+        && (!expected.matches(&found) || !expected.still_assigned(pool).await)
+    {
+        return HerdrDelivery::NotSent(Identity);
+    }
     let HostedRecord::Known(record) = found.record else {
         return HerdrDelivery::NotSent(Pending);
     };

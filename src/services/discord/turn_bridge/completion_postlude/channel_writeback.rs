@@ -83,7 +83,7 @@ pub(super) async fn replay_withheld(
 /// it grants no channel effects and the postlude also rejects cancelled turns.
 /// A scheduled snapshot turn is isolated by its launch mark as well, so a
 /// renamed channel or a restart kickoff cannot re-admit its channel writeback.
-pub(super) async fn resolve_completion_scope(
+pub(in crate::services::discord) async fn resolve_completion_scope(
     shared: &std::sync::Arc<super::super::super::SharedData>,
     channel_id: poise::serenity_prelude::ChannelId,
     provider: &crate::services::provider::ProviderKind,
@@ -94,7 +94,54 @@ pub(super) async fn resolve_completion_scope(
     let canonical =
         super::super::super::adk_session::build_adk_session_key(shared, channel_id, provider, None)
             .await;
-    let isolated = turn_key.is_some_and(|key| canonical.as_deref() != Some(key))
+    let key_isolated = turn_key.is_some_and(|key| canonical.as_deref() != Some(key));
+    completion_scope(shared, channel_id, turn_id, inflight, key_isolated).await
+}
+
+#[cfg(unix)]
+pub(in crate::services::discord) async fn native_completion_scope(
+    shared: &std::sync::Arc<super::super::super::SharedData>,
+    channel_id: poise::serenity_prelude::ChannelId,
+    turn_id: &str,
+    inflight: &crate::services::discord::inflight::InflightTurnState,
+) -> (bool, bool) {
+    use crate::services::provider::ProviderKind;
+    let provider = ProviderKind::Claude;
+    let key = inflight.session_key.as_deref();
+    if let Some(key) = key
+        && let Some(pool) = shared.pg_pool.as_ref()
+    {
+        // Startup has no channel names yet. Use the durable channel's primary or promoted alias.
+        let owned = super::super::super::session_locator::owns_completion_key(
+            pool,
+            &shared.token_hash,
+            &provider,
+            channel_id.get(),
+            key,
+        )
+        .await;
+        if !matches!(owned, Ok(None)) {
+            return completion_scope(
+                shared,
+                channel_id,
+                turn_id,
+                inflight,
+                !matches!(owned, Ok(Some(true))),
+            )
+            .await;
+        }
+    }
+    resolve_completion_scope(shared, channel_id, &provider, key, turn_id, inflight).await
+}
+
+async fn completion_scope(
+    shared: &super::super::super::SharedData,
+    channel_id: poise::serenity_prelude::ChannelId,
+    turn_id: &str,
+    inflight: &crate::services::discord::inflight::InflightTurnState,
+    key_isolated: bool,
+) -> (bool, bool) {
+    let isolated = key_isolated
         || scheduled_turn::channel_effects(shared.pg_pool.as_ref(), &[Some(inflight)])
             .await
             .suppressed();

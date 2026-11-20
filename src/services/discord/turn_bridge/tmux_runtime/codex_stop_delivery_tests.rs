@@ -25,6 +25,16 @@ pub(super) fn take_after_send() -> Option<Box<dyn FnOnce() + Send>> {
 type Step = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 static BEFORE_LATE_STOP: Mutex<Option<Step>> = Mutex::new(None);
 
+thread_local! {
+    static AFTER_HERDR_INTENT: std::cell::RefCell<Option<Step>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(super) async fn after_herdr_intent() {
+    if let Some(step) = AFTER_HERDR_INTENT.with_borrow_mut(Option::take) {
+        step.await;
+    }
+}
+
 /// Runs the step a test placed between a stop's first Pending and its late arming.
 pub(super) async fn before_late_stop() {
     let step = BEFORE_LATE_STOP.lock().unwrap().take();

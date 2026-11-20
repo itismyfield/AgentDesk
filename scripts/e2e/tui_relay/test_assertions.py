@@ -1608,7 +1608,7 @@ class ScenarioFilterFailClosed(unittest.TestCase):
                  "--config", str(config), "--scenarios", str(ROOT / "tests/e2e/tui_relay/scenarios"),
                  "--output", str(output), "--dry-run", "--allow-destructive", "--cells", "claude-tui,codex-tui",
                  "--filter", "E-999", "--filter", " E-17, E-17, "],
-                cwd=ROOT, check=False, capture_output=True, text=True,
+                cwd=ROOT, check=False, capture_output=True, text=True, timeout=120,
             )
             self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
             report = json.loads((output / "matrix.json").read_text(encoding="utf-8"))

@@ -1,0 +1,22 @@
+---
+title: "Codex Herdr first input and runtime progress"
+---
+stateDiagram-v2
+  s0: Codex pane started
+  s1: Database lookup leaves pane free
+  s2: Database lookup returned
+  s3: Listing order locked
+  s4: Pane ownership locked
+  s5: Writer yielded while input is checked
+  s6: First input admitted
+  s7: First input refused
+  [*] --> s0
+  s0 --> s1: check the Pending execution
+  s1 --> s2: database responds
+  s2 --> s3: enter the listing order
+  s3 --> s4: take pane ownership
+  s4 --> s5: writer defers this poll
+  s4 --> s6: admit the first input
+  s4 --> s7: refuse the changed execution
+  s5 --> s6: admit the first input
+  s5 --> s7: refuse the changed execution

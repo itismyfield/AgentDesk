@@ -1,0 +1,193 @@
+{
+  "version": 1,
+  "issue": 8148,
+  "base": "79aa1c3ad6d85d2be8e4e47b7685f9cd91fe5a8d",
+  "original_filter_count": 21,
+  "original_id_count": 388,
+  "original_ids_sha256": "964a0fdf3357547de1ed7296bb98c5607dc038c2d820e5d5ac5ce8d8e99e8c8d",
+  "expected_unique_tests": 843,
+  "expected_ids_sha256": "4ee139e847c33d63b8eacd4d69436061b4593026fe1b1b1a6a6cb44f5a3de0c9",
+  "selection": "List each filter, subtract prior selected IDs, run every unique full ID with --exact --test-threads=1; no execution skips.",
+  "filters": [
+    {
+      "filter": "native_8148",
+      "args": [
+        "--skip",
+        "native_8148_activation_isolated_herdr_"
+      ],
+      "listed": 124,
+      "new_unique": 124
+    },
+    {
+      "filter": "services::tui_input::human_frame::history::",
+      "args": [
+        "--skip",
+        "native_8148"
+      ],
+      "listed": 86,
+      "new_unique": 86
+    },
+    {
+      "filter": "services::discord::inflight::removal::input_fence_reaper_tests::",
+      "args": [],
+      "listed": 2,
+      "new_unique": 2
+    },
+    {
+      "filter": "services::discord::turn_finalizer::episode::row_retirement_tests::",
+      "args": [],
+      "listed": 9,
+      "new_unique": 9
+    },
+    {
+      "filter": "services::tui_o::writer::input_notices::tests::history_tests::",
+      "args": [],
+      "listed": 2,
+      "new_unique": 2
+    },
+    {
+      "filter": "services::tui_o::writer::input_facts::",
+      "args": [
+        "--skip",
+        "native_8148"
+      ],
+      "listed": 40,
+      "new_unique": 40
+    },
+    {
+      "filter": "services::discord::queue_io::input_owner::pump::",
+      "args": [],
+      "listed": 2,
+      "new_unique": 2
+    },
+    {
+      "filter": "services::discord::turn_presence::activity::tests::",
+      "args": [
+        "--skip",
+        "native_8148"
+      ],
+      "listed": 47,
+      "new_unique": 47
+    },
+    {
+      "filter": "services::discord::turn_presence::activity::tail::",
+      "args": [],
+      "listed": 14,
+      "new_unique": 14
+    },
+    {
+      "filter": "services::discord::turn_presence::activity::effort_restart::",
+      "args": [],
+      "listed": 13,
+      "new_unique": 13
+    },
+    {
+      "filter": "services::discord::turn_presence::activity::effort_restart_baseline_tests::",
+      "args": [],
+      "listed": 2,
+      "new_unique": 2
+    },
+    {
+      "filter": "services::discord::health::turn_deliver::inject::first_input::pg_tests::",
+      "args": [],
+      "listed": 3,
+      "new_unique": 3
+    },
+    {
+      "filter": "services::turn_orchestrator::queued_head::v2::tests::conservation_tests::",
+      "args": [],
+      "listed": 6,
+      "new_unique": 6
+    },
+    {
+      "filter": "services::turn_orchestrator::queued_head::v2::control::tests::",
+      "args": [],
+      "listed": 9,
+      "new_unique": 9
+    },
+    {
+      "filter": "services::turn_orchestrator::queued_head::compat_tests::",
+      "args": [],
+      "listed": 10,
+      "new_unique": 10
+    },
+    {
+      "filter": "services::tui_o::shadow::capture::",
+      "args": [],
+      "listed": 19,
+      "new_unique": 19
+    },
+    {
+      "filter": "services::discord::turn_finalizer::completion_admission::codex_tests::",
+      "args": [],
+      "listed": 4,
+      "new_unique": 4
+    },
+    {
+      "filter": "services::discord::turn_finalizer::tests::watcher_register_start_",
+      "args": [],
+      "listed": 2,
+      "new_unique": 2
+    },
+    {
+      "filter": "services::discord::turn_finalizer::tests::unknown_user_msg_id_collapses_onto_registered_turn",
+      "args": [
+        "--exact"
+      ],
+      "listed": 1,
+      "new_unique": 1
+    },
+    {
+      "filter": "services::discord::turn_finalizer::tests::panic_in_handle_terminal_does_not_kill_actor_loop",
+      "args": [
+        "--exact"
+      ],
+      "listed": 1,
+      "new_unique": 1
+    },
+    {
+      "filter": "services::discord::turn_finalizer::completion_admission_actor::tests::",
+      "args": [],
+      "listed": 6,
+      "new_unique": 6
+    },
+    {
+      "filter": "services::discord::router::message_handler::provider_dispatch::owner_input::",
+      "args": [],
+      "listed": 274,
+      "new_unique": 271
+    },
+    {
+      "filter": "services::discord::router::message_handler::provider_dispatch::herdr_tests::busy_entry_tests::",
+      "args": [],
+      "listed": 9,
+      "new_unique": 9
+    },
+    {
+      "filter": "services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::",
+      "args": [],
+      "listed": 59,
+      "new_unique": 59
+    },
+    {
+      "filter": "services::legacy_body_census::",
+      "args": [],
+      "listed": 33,
+      "new_unique": 33
+    },
+    {
+      "filter": "services::discord::tmux::watcher_lifecycle::",
+      "args": [],
+      "listed": 67,
+      "new_unique": 67
+    },
+    {
+      "filter": "services::claude_tui::owner_input_tests::",
+      "args": [],
+      "listed": 2,
+      "new_unique": 2
+    }
+  ],
+  "captured_target": "aarch64-apple-darwin",
+  "isolated_e2e_environment": "On macOS, run native_8148_activation_isolated_herdr_ IDs separately with TMPDIR equal to the configured e2e root parent (e2e-b2b). Other fixtures can use /tmp. All selected IDs still execute exactly once."
+}

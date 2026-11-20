@@ -143,12 +143,32 @@ pub(in crate::services::discord) fn keep_marked(
     true
 }
 
-/// Records a marked row's terminal and removes the row; false while the commit still fails.
-async fn settle_marked(pool: Option<&PgPool>, state: &InflightTurnState) -> bool {
+async fn native_held(shared: &SharedData, state: &InflightTurnState) -> bool {
+    #[cfg(unix)]
+    {
+        super::turn_finalizer::native_prepare::holds_row(shared, state).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (shared, state);
+        false
+    }
+}
+
+/// Commits a marked receipt. Only a row outside native custody can be cleared here.
+async fn settle_marked(shared: &SharedData, state: &InflightTurnState) -> bool {
     let (Some(stamp), Some(provider)) = (state.terminal_receipt, state.provider_kind()) else {
         return false;
     };
-    if !record(pool, state, stamp.outcome, stamp.confirmed_at).await {
+    if !record(
+        shared.pg_pool.as_ref(),
+        state,
+        stamp.outcome,
+        stamp.confirmed_at,
+    )
+    .await
+        || native_held(shared, state).await
+    {
         return false;
     }
     matches!(
@@ -169,9 +189,7 @@ pub(in crate::services::discord) async fn settle_marked_row(
     channel_id: u64,
 ) -> bool {
     match inflight::load_inflight_state_read_only(provider, channel_id) {
-        Some(row) if row.terminal_receipt.is_some() => {
-            settle_marked(shared.pg_pool.as_ref(), &row).await
-        }
+        Some(row) if row.terminal_receipt.is_some() => settle_marked(shared, &row).await,
         _ => false,
     }
 }
@@ -188,17 +206,30 @@ pub(in crate::services::discord) async fn settle_boot(
     states: Vec<InflightTurnState>,
 ) -> (Vec<InflightTurnState>, BootReceipts) {
     let pool = shared.pg_pool.as_ref();
-    super::scheduled_turn::settle_loaded(pool, &states).await;
+    for state in states
+        .iter()
+        .filter(|state| state.terminal_delivery_completed())
+    {
+        // A watcher mirror on a native-held row is no outcome; its native completion settles it.
+        if native_held(shared, state).await {
+            continue;
+        }
+        super::scheduled_turn::settle_loaded(pool, std::slice::from_ref(state)).await;
+    }
     let mut kept = Vec::with_capacity(states.len());
     let mut watched = Vec::new();
     for state in states {
         if state.terminal_receipt.is_some() {
-            settle_marked(pool, &state).await;
+            settle_marked(shared, &state).await;
             continue;
         }
         if state.terminal_delivery_completed() {
             let outcome = body_outcome(&state.full_response);
             record(pool, &state, outcome, Utc::now()).await;
+        }
+        // Ordinary restore can infer work from prompt text and clear its rows.
+        if native_held(shared, &state).await {
+            continue;
         }
         if state.user_msg_id != 0 {
             watched.push(state.clone());
