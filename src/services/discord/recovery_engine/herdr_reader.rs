@@ -505,12 +505,6 @@ fn reconnect_unless_pending(
             continued,
             VerifiedReattach::Live | VerifiedReattach::AwaitingClear
         ) {
-            drop(transition);
-            drop(
-                shared.session_transition_completion(crate::services::discord::ChannelId::new(
-                    channel,
-                )),
-            );
             return (Reconnect::Published, None);
         }
         if refreshed != *row {

@@ -274,12 +274,24 @@ pub(crate) fn has_effective_herdr_endpoint(channel: u64) -> bool {
 pub(crate) fn bound_herdr_endpoint(
     channel: u64,
     record: &HostedExecution,
+    inherits_parent: bool,
 ) -> Option<ChannelEndpoint> {
-    session_hosts::herdr_endpoint(channel).or_else(|| {
-        let parent = crate::services::session_host::surface_policy::policy_channel(channel);
-        let endpoint = session_hosts::herdr_endpoint(parent)?;
-        bound_thread_endpoint_matches(record, channel, &endpoint).then_some(endpoint)
+    let parent = inherits_parent
+        .then(|| crate::services::session_host::surface_policy::policy_channel(channel))
+        .unwrap_or(channel);
+    session_hosts::herdr_endpoint_with_parent(channel, parent, |endpoint| {
+        parent != channel && bound_thread_endpoint_matches(record, channel, endpoint)
     })
+}
+
+pub(crate) fn herdr_restart_candidate(
+    channel: u64,
+    (hosted, kind, pathless): (bool, Option<RuntimeHandoffKind>, bool),
+) -> bool {
+    hosted
+        || (kind == Some(RuntimeHandoffKind::ClaudeTui)
+            && pathless
+            && has_effective_herdr_endpoint(channel))
 }
 
 /// Before resetting, reconciling or clearing a turn, refuse a configured Herdr session.
@@ -293,10 +305,7 @@ pub(crate) async fn refusal_before_turn<F>(
 where
     F: std::future::Future<Output = Option<String>>,
 {
-    let policy = crate::services::session_host::surface_policy::policy_channel(channel_id);
-    if !session_hosts::has_herdr_endpoint(channel_id)
-        && (policy == channel_id || !session_hosts::has_herdr_endpoint(policy))
-    {
+    if !has_effective_herdr_endpoint(channel_id) {
         return None;
     }
     let session_key = session_key().await;

@@ -61,7 +61,7 @@
 | E51 | `src/services/claude/herdr_turn/first_input.rs:27`, `src/services/codex/herdr_turn/first_input.rs:28`, `src/services/discord/queue_io/input_owner/effect.rs:96`, `src/services/discord/queue_io/input_owner/held_watch.rs:92` | 소유자의 첫 입력 effect, 확정·미실행·불확실 결과 구분, 관찰 변화 후 재구동. |
 | E52 | `src/services/discord/router/response_format/retry_prompt_context.rs:27`, `src/services/discord/router/response_format/retry_prompt_context.rs:59`, `src/services/discord/router/response_format/retry_prompt_context.rs:84`, `src/services/discord/tui_prompt_relay/claude_idle_runtime.rs:67` | 오래된 retry envelope와 소비 CAS, 렌더링, idle poll에서의 owner 소비. |
 | E53 | `src/services/discord/router/message_handler/provider_dispatch/owner_input/restarted.rs:145` | pane 정체 보류는 동일 원본·ticket·followers를 유지한다. 관찰 변화로 재판정한다. |
-| E54 | `src/services/discord/recovery_engine/restore_inflight/live_reattach.rs:112` | 출력 경로가 없는 Claude Busy 행은 같은 nonce의 입력 receipt와 transcript 시작점을 확인하고 기존 진행 lease를 인수한다. |
+| E54 | `src/services/discord/recovery_engine/restore_inflight/live_reattach.rs:107` | 출력 경로가 없는 Claude Busy 행은 같은 nonce의 입력 receipt와 transcript 시작점을 확인하고 기존 진행 lease를 인수한다. |
 | E55 | `src/services/turn_host.rs:274`, `src/services/discord/herdr_terminate/root_replaced.rs:238` | 실제 스레드의 child 행과 검증된 부모 endpoint를 대조한다. 전환·owner·입력은 child에 남는다. |
 
 ## 부팅과 첫 메시지가 만나는 경계

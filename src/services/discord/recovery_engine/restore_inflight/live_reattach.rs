@@ -15,15 +15,10 @@ pub(super) async fn restore_channel(
     let Ok(transition) = SessionTransitionLease::try_acquire(shared, channel) else {
         return false;
     };
-    let restored = matches!(
+    matches!(
         continue_channel(shared, provider, channel, &transition).await,
         Some(VerifiedReattach::Live | VerifiedReattach::AwaitingClear)
-    );
-    drop(transition);
-    if restored {
-        drop(shared.session_transition_completion(channel));
-    }
-    restored
+    )
 }
 
 pub(in crate::services::discord::recovery_engine) async fn attach(
@@ -122,8 +117,7 @@ fn recover_pathless(
 
     let logical = &record.owner.logical_key;
     let nonce = &record.execution_nonce;
-    if record.owner.provider != "claude"
-        || state.provider != "claude"
+    if state.provider != "claude"
         || state.runtime_kind != Some(ClaudeTui)
         || state.tmux_session_name.as_ref() != Some(logical)
         || state.hosted_record_id.is_some_and(|other| other != id)
