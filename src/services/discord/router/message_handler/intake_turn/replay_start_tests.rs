@@ -6,7 +6,7 @@ use super::super::provider_dispatch::{
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::replay_disposition::write::{self, BeginFrom, CanonicalInput, EffectProjection};
-use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
+use crate::services::discord::admin_host_guard::tests::{Recorder, StatusAnswer, api_child};
 use crate::services::discord::replay_policy::live::{RawObservation, Seen};
 use crate::services::discord::replay_policy::permit::EffectTarget;
 use crate::services::discord::replay_policy::{ExactHandoff, ExactRetry, RetryPermit};
@@ -14,6 +14,9 @@ use crate::services::discord::router::intake_dispatch::replay_admission::{
     input_hash, test_activation,
 };
 use std::time::Duration;
+
+#[path = "dispatch_runtime_tests.rs"]
+mod dispatch_runtime_tests;
 
 const STALE: &str = "stale-resume";
 
@@ -1881,13 +1884,22 @@ async fn host(channels: &[ChannelId]) -> Host {
 type Answer = Arc<dyn Fn(&axum::http::Method, &str) -> Option<serde_json::Value> + Send + Sync>;
 
 async fn host_with(channels: &[ChannelId], answer: Answer) -> Host {
+    let api = Recorder::start_with(answer).await;
+    host_using(channels, api).await
+}
+
+async fn host_with_status(channels: &[ChannelId], answer: StatusAnswer) -> Host {
+    let api = Recorder::start_with_status(answer).await;
+    host_using(channels, api).await
+}
+
+async fn host_using(channels: &[ChannelId], api: Recorder) -> Host {
     let root = crate::config::TestRuntimeRootGuard::new();
     let boot = serde_json::from_value(serde_json::json!({"server": {}, "agents": [], "providers": {"claude": {"runtime": "pipe"}}})).unwrap();
     crate::services::tui_o::channel_policy::install(&boot).unwrap();
     crate::services::provider_hosting::install_provider_hosting_config(&boot);
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let api = Recorder::start_with(answer).await;
     crate::services::discord::internal_api::init(api.port, None);
     let mut shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
@@ -1939,6 +1951,14 @@ async fn start<T>(
     channel: ChannelId,
     entry: impl std::future::Future<Output = T>,
 ) -> (T, Option<(SubmittedPrompt, std::sync::mpsc::Sender<()>)>) {
+    start_with_terminal_timing(channel, entry, true).await
+}
+
+async fn start_with_terminal_timing<T>(
+    channel: ChannelId,
+    entry: impl std::future::Future<Output = T>,
+    terminal_before_release: bool,
+) -> (T, Option<(SubmittedPrompt, std::sync::mpsc::Sender<()>)>) {
     let (capture, prompt) = tokio::sync::oneshot::channel();
     *INPUT_PROMPT_PROBE.lock().unwrap() = Some((channel.get(), capture));
     let (entered, _entered) = tokio::sync::oneshot::channel();
@@ -1947,7 +1967,7 @@ async fn start<T>(
         channel: channel.get(),
         entered,
         release,
-        terminal_before_release: true,
+        terminal_before_release,
     });
     let output = tokio::time::timeout(Duration::from_secs(60), entry)
         .await
@@ -1970,6 +1990,43 @@ async fn run(host: &Host, request: IntakeRequest) -> Option<SubmittedPrompt> {
         let _ = release.send(());
         prompt
     })
+}
+
+struct PausedIntake {
+    prompt: SubmittedPrompt,
+    release: std::sync::mpsc::Sender<()>,
+    completed: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl PausedIntake {
+    async fn finish(self) {
+        self.release.send(()).unwrap();
+        crate::test_support::wait::await_within(self.completed, Duration::from_secs(20))
+            .await
+            .unwrap();
+    }
+}
+
+async fn paused_intake(host: &Host, request: IntakeRequest) -> PausedIntake {
+    let channel = request.channel_id;
+    let (complete, completed) = tokio::sync::oneshot::channel();
+    *crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+        .lock()
+        .unwrap() = Some((channel, complete));
+    let entry = execute_intake_turn_core(&host.api.http, &host.shared, "", request, Vec::new());
+    let (result, started) = start_with_terminal_timing(channel, entry, false).await;
+    result.unwrap();
+    let (prompt, release) = started.unwrap_or_else(|| {
+        panic!(
+            "fixture provider did not enter for channel {channel}: {:?}",
+            host.api.take()
+        )
+    });
+    PausedIntake {
+        prompt,
+        release,
+        completed,
+    }
 }
 
 /// The receipt stored under the Discord request key, and its current attempt and projection.
@@ -2343,12 +2400,21 @@ fn held_dispatch_is_not_inherited_by_an_active_start_pg() {
         // Once set, the thread's card link answers with this dispatch, as for a card thread.
         let linked = Arc::new(std::sync::Mutex::new(None::<String>));
         let thread = linked.clone();
-        let answer = Arc::new(move |_: &axum::http::Method, path: &str| {
-            let lookup = path == "/api/internal/pending-dispatch-for-thread";
+        let active_lookups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lookups = active_lookups.clone();
+        let active_query = format!("thread_id={active}");
+        let answer: StatusAnswer = Arc::new(move |_, uri| {
+            let lookup = uri.path() == "/api/internal/pending-dispatch-for-thread";
+            if lookup && uri.query() == Some(active_query.as_str()) {
+                lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             let linked = thread.lock().unwrap().clone().filter(|_| lookup)?;
-            Some(serde_json::json!({ "dispatch_id": linked }))
+            Some((
+                axum::http::StatusCode::OK,
+                serde_json::json!({ "dispatch_id": linked }),
+            ))
         });
-        let host = host_with(&[dormant, active], answer).await;
+        let host = host_with_status(&[dormant, active], answer).await;
         for channel in [dormant, active] {
             let key = format!("held-dispatch-{channel}");
             let sources = vec![channel.to_string()];
@@ -2382,12 +2448,27 @@ fn held_dispatch_is_not_inherited_by_an_active_start_pg() {
         let _active = test_activation::activate(active.get());
         *linked.lock().unwrap() = Some(format!("held-{active}"));
         let text = format!("DISPATCH: held-{active}\nwork");
-        let started = run(&host, request(active, 6_008_791, &text)).await;
+        let turn = paused_intake(&host, request(active, 6_008_791, &text)).await;
         assert!(
-            started.is_some(),
-            "the active start runs without the dispatch"
+            !turn
+                .prompt
+                .system_prompt
+                .as_ref()
+                .unwrap()
+                .contains(&format!("Dispatch ID: held-{active}"))
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let active_row = crate::services::discord::inflight::load_inflight_state_read_only(
+            &ProviderKind::Claude,
+            active.get(),
+        )
+        .unwrap();
+        assert!(active_row.dispatch_id.is_none());
+        assert_eq!(
+            active_lookups.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "protected first hit is pinned"
+        );
+        turn.finish().await;
         let calls = host.api.take();
         let carried = |channel: ChannelId| {
             let lookup = format!("GET /api/dispatches/held-{channel} ");

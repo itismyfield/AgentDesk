@@ -1,0 +1,21 @@
+stateDiagram-v2
+    [*] --> BoundReceipt: 기존 B source ACK와 AnyKey·membership receipt
+    BoundReceipt --> StrictInterrupt: canonical parser가 terminal로 판정
+    StrictInterrupt --> Candidate: 새 barrier 없음, Cancelled edge만 생성
+    StrictInterrupt --> StoredBarrier: 기존 barrier가 남은 복원
+    StoredBarrier --> Candidate: 동일 row·range·hash의 typed supersession
+    StoredBarrier --> Held: 다른 genuine barrier는 보존
+    BoundReceipt --> CompletePrefix: O complete-line cursor C
+    CompletePrefix --> RawCandidate: exact execution Ended와 bounded tail
+    RawCandidate --> Held: partial·nonterminal·foreign·unread
+    Held --> CompletePrefix: 기존 O retry와 재관측
+    RawCandidate --> Candidate: same source·nonce·EOF와 strict whole JSON
+    Candidate --> CompletePrefix: current stamp 변경
+    Candidate --> DurableResult: exact native 결과 CAS와 flush ACK
+    BoundReceipt --> DurableResult: 기존 exact control 또는 E-notice policy
+    DurableResult --> Cleanup: 기존 actor·episode·row CAS
+    Cleanup --> [*]: cleanup ACK와 QueueEligible
+    Candidate --> Boot: 결과 전 crash
+    Boot --> CompletePrefix: 기존 custody adoption 후 새 EOF 검증
+    DurableResult --> BootSaved: 결과 후 crash
+    BootSaved --> Cleanup: durable proof 복원, 새 파일 증거 불필요
