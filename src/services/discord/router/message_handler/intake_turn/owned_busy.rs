@@ -450,9 +450,9 @@ fn hold_late(
     let probe = recoverable_probe(turn.host, observation, turn.pool, mailbox, Some(front))
         .map(|probe| unwound(turn.provider.clone(), probe, mailbox.clone(), at));
     let handle = tokio::runtime::Handle::current();
-    let typed = observation.state() == BusyState::Held;
+    let kind = source_hold(observation.state());
     if let Some(shared) = turn.shared {
-        handle.block_on(hold((shared, typed), mailbox, channel, front, probe));
+        handle.block_on(hold((shared, kind), mailbox, channel, front, probe));
     } else {
         handle.block_on(hold_start(mailbox, channel, front));
         if let Some(probe) = probe {
