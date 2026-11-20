@@ -391,7 +391,8 @@ AgyTurnLimit == IF Fix = "two" THEN 2 ELSE 1
 AgyZero == [i \in 1..AgyPages |-> 0]
 AgyTurn(id, phase) ==
     [id |-> id, phase |-> phase, oldDebt |-> phase = "waiting" /\ Fix # "short",
-     deltas |-> 0, terminal |-> "none", spool |-> TRUE, prepared |-> FALSE,
+     accepted |-> FALSE, deltas |-> 0, terminal |-> "none", spool |-> TRUE,
+     prepared |-> FALSE, discarded |-> FALSE, unresolved |-> FALSE,
      remote |-> AgyZero, offset |-> 0, frontier |-> 0, ends |-> 0, effects |-> 0, answers |-> 0,
      authority |-> TRUE, interrupted |-> FALSE, reconcile |-> FALSE,
      rejected |-> FALSE, retried |-> FALSE,
@@ -410,7 +411,7 @@ AgyAdopt ==
 AgyReserve ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.phase = "ready"
-    /\ agy' = [agy EXCEPT !.phase = "reserved"]
+    /\ agy' = [agy EXCEPT !.phase = "reserved", !.accepted = TRUE]
 AgySpawn ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.phase = "reserved"
@@ -419,21 +420,39 @@ AgyAppendDelta ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.phase = "running" /\ agy.deltas < AgyPages - 1
     /\ agy' = [agy EXCEPT !.deltas = @ + 1]
-AgyAppendDone ==
+AgyObserveSuccess ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.phase = "running" /\ agy.deltas = AgyPages - 1 /\ Fix # "failed"
+    /\ agy' = [agy EXCEPT !.phase = "childSucceeded"]
+AgyAppendDone ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "childSucceeded" /\ agy.authority /\ Mut # "missingDone"
     /\ agy' = [agy EXCEPT !.phase = "sealed", !.terminal = "done"]
+AgyObserveFailure ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase \in {"reserved", "running"}
+    /\ agy' = [agy EXCEPT !.phase = IF agy.phase = "reserved" THEN "spawnFailed" ELSE "childLost"]
 AgyChildFailed ==
     /\ UNCHANGED <<vars, lateVars>>
-    /\ agy.phase = "running" /\ Fix = "failed"
+    /\ agy.authority
+    /\ \/ agy.phase = "spawnFailed" /\ Mut # "missingSpawnFailure"
+       \/ agy.phase = "childLost" /\ Mut # "missingLostChild"
     /\ agy' = [agy EXCEPT !.phase = "sealed", !.terminal = "failed"]
+AgyDiscard ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ Fix = "clear" /\ agy.authority /\ ~agy.discarded
+    /\ agy.phase \in {"reserved", "running", "childSucceeded", "sealed", "delivery"}
+    /\ agy' = IF Mut = "missingDisposition"
+              THEN [agy EXCEPT !.phase = "dropped"]
+              ELSE [agy EXCEPT !.phase = "delivery", !.discarded = TRUE,
+                               !.unresolved = agy.prepared, !.prepared = FALSE]
 AgyReadSeal ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.phase = "sealed" /\ agy.spool /\ agy.authority
     /\ agy' = [agy EXCEPT !.phase = "delivery"]
 AgyPrepare ==
     /\ UNCHANGED <<vars, lateVars>>
-    /\ agy.phase = "delivery" /\ agy.terminal = "done" /\ agy.authority
+    /\ agy.phase = "delivery" /\ agy.terminal = "done" /\ agy.authority /\ ~agy.discarded
     /\ ~agy.prepared /\ agy.offset < AgyPages
     /\ agy' = [agy EXCEPT !.prepared = TRUE]
 AgyPost ==
@@ -452,10 +471,13 @@ AgyNotifyFailure ==
     /\ agy.phase = "delivery" /\ agy.authority /\ agy.terminal = "failed" /\ ~agy.alarm
     /\ agy' = [agy EXCEPT !.alarm = TRUE]
 AgyCanFinish == agy.phase = "delivery" /\ ~agy.prepared
-                /\ (agy.offset = AgyPages \/ agy.alarm)
+                /\ (agy.offset = AgyPages \/ agy.alarm \/ agy.discarded)
 AgyLoseAuthority ==
     /\ UNCHANGED <<vars, lateVars>>
-    /\ agy.phase \in {"running", "sealed", "delivery", "finishing"} /\ agy.authority /\ ~agy.interrupted
+    /\ agy.phase \in {"reserved", "running", "childSucceeded", "spawnFailed", "childLost",
+                      "sealed", "delivery", "finishing"}
+    /\ Mut = "abandon" => agy.terminal = "done"
+    /\ agy.authority /\ ~agy.interrupted
     /\ agy' = [agy EXCEPT !.authority = FALSE, !.interrupted = TRUE,
                            !.reconcile = IF agy.prepared THEN agy.remote[agy.offset + 1] > 0 ELSE FALSE]
 AgyRestore ==
@@ -470,7 +492,7 @@ AgyFinish ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ AgyCanFinish /\ agy.authority
     /\ agy' = [agy EXCEPT !.phase = "finishing", !.ends = @ + 1,
-                           !.answers = IF agy.terminal = "done" THEN @ + 1 ELSE @]
+                           !.answers = IF agy.terminal = "done" /\ ~agy.discarded THEN @ + 1 ELSE @]
 \* Each step represents an idempotent projection with its own durable marker.
 AgyApplyEnd ==
     /\ UNCHANGED <<vars, lateVars>>
@@ -480,7 +502,7 @@ AgyApplyEnd ==
 AgyArchive ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ (agy.phase = "ended" \/ (Mut = "purge" /\ agy.phase = "sealed"))
-    /\ agy.spool
+    /\ agy.spool /\ ~agy.unresolved
     /\ agy' = [agy EXCEPT !.spool = FALSE]
 AgyNextInput ==
     /\ UNCHANGED <<vars, lateVars>>
@@ -518,13 +540,15 @@ AgyPrematurePost ==
 AgyRest == UNCHANGED <<agy, vars, lateVars>>
 AgyNext ==
        \/ AgyLegacyReceipt \/ AgyAdopt \/ AgyReserve \/ AgySpawn \/ AgyAppendDelta
-       \/ AgyAppendDone \/ AgyChildFailed \/ AgyReadSeal \/ AgyPrepare \/ AgyPost \/ AgyReceipt
+       \/ AgyObserveSuccess \/ AgyAppendDone \/ AgyObserveFailure \/ AgyChildFailed \/ AgyDiscard
+       \/ AgyReadSeal \/ AgyPrepare \/ AgyPost \/ AgyReceipt
        \/ AgyNotifyFailure \/ AgyLoseAuthority \/ AgyRestore \/ AgyRejectFinish \/ AgyFinish \/ AgyApplyEnd
        \/ AgyArchive \/ AgyNextInput \/ AgyHeadlessAnswer \/ AgyLegacyRace \/ AgyBlindRepost
        \/ AgyRepeatDone \/ AgyStaleChild \/ AgyPrematurePost \/ AgyRest
 AgySpec == AgyInit /\ [][AgyNext]_agy
     /\ WF_agy(AgyLegacyReceipt) /\ WF_agy(AgyAdopt) /\ WF_agy(AgyReserve) /\ WF_agy(AgySpawn)
-    /\ WF_agy(AgyAppendDelta) /\ WF_agy(AgyAppendDone) /\ WF_agy(AgyReadSeal)
+    /\ WF_agy(AgyAppendDelta) /\ WF_agy(AgyObserveSuccess \/ AgyObserveFailure)
+    /\ WF_agy(AgyAppendDone) /\ WF_agy(AgyReadSeal)
     /\ WF_agy(AgyPrepare) /\ WF_agy(AgyPost) /\ WF_agy(AgyReceipt) /\ WF_agy(AgyRestore)
     /\ WF_agy(AgyFinish) /\ WF_agy(AgyApplyEnd) /\ WF_agy(AgyArchive) /\ WF_agy(AgyNextInput)
     /\ WF_agy(AgyChildFailed) /\ WF_agy(AgyNotifyFailure) /\ WF_agy(AgyHeadlessAnswer)
@@ -534,12 +558,12 @@ AgyNoDuplicate ==
     AgyOPath => /\ agy.legacy = 0
                 /\ \A i \in 1..AgyPages : agy.remote[i] <= 1
 AgyNoSilentLoss ==
-    /\ agy.terminal # "none" => agy.spool \/ agy.phase = "ended"
+    /\ agy.accepted => agy.spool \/ agy.phase = "ended"
     /\ (AgyOPath /\ agy.phase # "waiting") => ~agy.oldDebt
-    /\ (agy.phase = "ended" /\ agy.terminal = "failed") => agy.alarm
+    /\ agy.phase = "ended" => (agy.terminal = "done" \/ agy.alarm \/ agy.discarded)
 AgyExactlyOneAnswer ==
     /\ agy.answers <= 1
-    /\ (agy.phase = "ended" /\ agy.terminal = "done") =>
+    /\ (agy.phase = "ended" /\ agy.terminal = "done" /\ ~agy.discarded) =>
         /\ agy.answers = 1
         /\ \A i \in 1..AgyPages : agy.remote[i] = 1
 AgyOffsetMonotone == agy.offset = agy.frontier
@@ -549,11 +573,10 @@ AgyEndOnce ==
     /\ agy.effects > 0 => agy.ends = 1
     /\ agy.phase = "ended" => agy.effects = 3
 AgyInputIdentity == ~agy.stale
-\* Advancing to a new id requires archive after End, so a later id witnesses
-\* settlement of the earlier one even if the earlier end state is short-lived.
-AgyDoneEnds ==
+\* A later id witnesses End of the earlier one independently of spool retirement.
+AgyAcceptedEnds ==
     \A id \in 1..AgyTurnLimit :
-        []((agy.id = id /\ agy.terminal = "done") =>
+        []((agy.id = id /\ agy.accepted) =>
             <>(agy.id > id \/ (agy.id = id /\ agy.phase = "ended" /\ agy.ends = 1)))
 AgySecondTurnEnds == <>(agy.id = 2 /\ agy.phase = "ended")
 AgyFailedEnds == (Fix = "failed") => <>(agy.phase = "ended" /\ agy.alarm)

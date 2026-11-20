@@ -6,9 +6,14 @@ export function state({ agy }) {
     case "ready": return "새 입력 가능";
     case "reserved": return "스풀과 턴 소유권 확보";
     case "running": return "프로세스 출력 기록 중";
+    case "childSucceeded": return "성공 종료 관측";
+    case "spawnFailed":
+    case "childLost": return "spawn 실패 또는 child 소실 관측";
+    case "dropped": return "처분 없이 정지";
     case "sealed": return "최종 기록 보관됨";
     case "delivery":
       if (!agy.authority) return "새 게시 권한 대기";
+      if (agy.discarded) return "사용자 폐기 기록";
       if (agy.alarm) return "실패 안내 기록됨";
       if (agy.offset === 3) return "모든 조각 확인됨";
       return "본문 분할 게시 중";
@@ -25,8 +30,11 @@ const labels = {
   AgyReserve: "입력 구속",
   AgySpawn: "한 턴 프로세스 시작",
   AgyAppendDelta: "응답 조각 기록",
+  AgyObserveSuccess: "child 성공 종료",
   AgyAppendDone: "authoritative Done 내구 기록",
+  AgyObserveFailure: "spawn 실패 또는 child 소실 관측",
   AgyChildFailed: "종료 원인 내구 기록",
+  AgyDiscard: "추가 게시 중단과 기존 증거 보존",
   AgyReadSeal: "확정 본문과 조각 계획 읽기",
   AgyLoseAuthority: "게시 권한 회수",
   AgyRestore: "현재 소유자가 복원",
