@@ -12,12 +12,40 @@ mod root_replaced_recovery_tests;
 /// A first turn launches the pane and binds it, as T-E1 does; returns the launched nonce and
 /// session.
 pub(super) fn launch(fx: &Fixture, launcher: &Arc<Launcher>) -> (String, Started) {
+    launch_with(fx, launcher, || {
+        let started = fx.start_provider(launcher, true)?;
+        fx.answer(&started);
+        Some(started)
+    })
+}
+
+/// A provider start with composer readiness and no timestamped source evidence to replay.
+pub(super) fn launch_pinless(fx: &Fixture, launcher: &Arc<Launcher>) -> (String, Started) {
+    launch_with(fx, launcher, || {
+        let started = fx.start_provider(launcher, false)?;
+        crate::services::claude_tui::readiness::tests::pre_source(fx.logical(), &started.path);
+        fx.started.store(true, Ordering::SeqCst);
+        let (status, _) = fx.ingress.send_envelope(
+            &format!("/hooks/claude/SessionStart?session_id={}", started.session),
+            &json!({"session_id": started.session, "source": "startup",
+                "transcript_path": started.path}),
+            None,
+            Some(&started.envelope),
+        );
+        assert_eq!(status, 202);
+        fx.answer_with_submit_before_transcript(&started);
+        Some(started)
+    })
+}
+
+pub(super) fn launch_with(
+    fx: &Fixture,
+    launcher: &Arc<Launcher>,
+    play: impl FnOnce() -> Option<Started>,
+) -> (String, Started) {
     let started = Mutex::new(None);
     let (result, _) = fx.turn(&HostedRecord::Legacy, &fx.ports(launcher), || {
-        if let Some(launched) = fx.start_provider(launcher, true) {
-            fx.answer(&launched);
-            *started.lock().unwrap() = Some(launched);
-        }
+        *started.lock().unwrap() = play();
     });
     assert_eq!(result, Ok(()));
     assert_eq!(fx.row(), Some(HostedState::Bound));

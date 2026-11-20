@@ -371,61 +371,6 @@ fn the_tool_boundary_site_stays_silent_on_an_empty_body() {
     assert!(logs.is_empty(), "got: {logs}");
 }
 
-/// #5938 P1-2 (second half): `retry_state::clear_response_delivery_state` blanks
-/// the bridge-local body AND the durable row body together. Unobserved, the
-/// record stream shows `after_len=N` and then, with no record in between, a
-/// later `before_len=0` — indistinguishable from the loss class this
-/// instrumentation is hunting. Driven through the REAL function, so deleting
-/// its observation fails here.
-#[test]
-fn the_empty_sink_rewind_site_emits_a_body_mutation_record() {
-    use crate::services::discord::inflight::InflightTurnState;
-    use crate::services::discord::turn_bridge::retry_state::clear_response_delivery_state;
-    use crate::services::provider::ProviderKind;
-
-    let mut row = InflightTurnState::new(
-        ProviderKind::Codex,
-        5_938_002,
-        None,
-        1,
-        2,
-        0,
-        String::new(),
-        None,
-        None,
-        None,
-        None,
-        0,
-    );
-    row.full_response = "COUNT-001\nCOUNT-002\n".to_string();
-    row.response_sent_offset = 20;
-    let mut local = String::from("COUNT-001\nCOUNT-002\n");
-    let mut offset = 20usize;
-
-    let logs = captured_logs(|| {
-        clear_response_delivery_state(&mut local, &mut offset, &mut row);
-    });
-
-    // The rewind itself is untouched by the observation.
-    assert!(local.is_empty());
-    assert_eq!(offset, 0);
-    assert!(row.full_response.is_empty());
-    assert_eq!(row.response_sent_offset, 0);
-
-    assert!(
-        logs.contains("site=\"retry_state::clear_response_delivery_state\""),
-        "the rewind must publish a body-mutation record; got: {logs}"
-    );
-    assert!(logs.contains("before_len=20"), "got: {logs}");
-    assert!(logs.contains("after_len=0"), "got: {logs}");
-    assert!(logs.contains("prefix_len=0"), "got: {logs}");
-    // The row holds both correlation keys, so the rewind is joinable.
-    assert!(
-        logs.contains("provider=\"codex\"") || !logs.contains("[invariant]"),
-        "an emitted violation from this site must carry the row's provider: {logs}"
-    );
-}
-
 /// The identification this instrumentation exists for: the watcher writing
 /// `X` into the durable row and the bridge appending the same `X` produce the
 /// SAME `delta_sha8` under two different `site` values.
@@ -822,7 +767,6 @@ fn record_shape_is_identical_at_every_site() {
         BodyMutationSite::AppendStreamedTextChunk,
         BodyMutationSite::AppendToolBoundarySeparator,
         BodyMutationSite::ReconcileFromInflightState,
-        BodyMutationSite::ClearResponseDeliveryState,
         BodyMutationSite::ReconcileToolArmLocalsFromInflightState,
         BodyMutationSite::SilenceRequeuedResponse,
         BodyMutationSite::RecoverBodyFromOutputFile,

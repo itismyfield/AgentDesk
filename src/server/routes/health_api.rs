@@ -1870,7 +1870,7 @@ mod tests {
             "degraded_reasons": [
                 "provider:codex:pending_queue_depth:2",
                 "provider:claude:disconnected",
-                "provider:gemini:recovering_channels:5",
+                "provider:qwen:recovering_channels:5",
                 "provider:prod-mini-01:customerA:disconnected",
                 "db_unavailable"
             ],
@@ -1880,7 +1880,7 @@ mod tests {
             json!([
                 "provider:codex:pending_queue_depth:2",
                 "provider:claude:disconnected",
-                "provider:gemini:recovering_channels:5",
+                "provider:qwen:recovering_channels:5",
                 "provider:unsupported:disconnected",
                 "db_unavailable"
             ])

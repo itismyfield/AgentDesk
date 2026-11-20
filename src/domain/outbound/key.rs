@@ -36,6 +36,12 @@ impl OutboundDeliveryId {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ManualOutboundDeliveryId<'a> {
+    pub(crate) correlation_id: &'a str,
+    pub(crate) semantic_event_id: &'a str,
+}
+
 /// Typed components instead of a joined string, so `("a::b", "c")` and `("a", "b::c")` differ.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct OutboundDedupKey {

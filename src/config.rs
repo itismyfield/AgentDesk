@@ -26,6 +26,7 @@ pub mod config_path;
 pub(crate) mod disk_write;
 mod peer_filter;
 pub mod reload_classes;
+pub(crate) mod retired_providers;
 mod server_surface;
 mod tool_activity_display;
 pub use config_path::resolved_config_path;

@@ -708,11 +708,6 @@
       "count": 1
     },
     {
-      "path": "src/services/gemini.rs",
-      "lint": "too_many_arguments",
-      "count": 3
-    },
-    {
       "path": "src/services/git/runner.rs",
       "lint": "result_large_err",
       "count": 4

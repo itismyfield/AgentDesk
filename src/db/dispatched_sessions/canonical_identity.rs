@@ -6,6 +6,9 @@ use key_promotion::RegistrationWitness;
 #[cfg(all(test, unix))]
 #[path = "key_promotion_pg_tests.rs"]
 mod key_promotion_pg_tests;
+#[path = "retired_status_fence.rs"]
+mod retired_status_fence;
+use retired_status_fence::retired_revival_fence;
 
 use crate::db::dispatched_sessions::HookSessionUpsert;
 
@@ -880,7 +883,7 @@ async fn update_target(
     // Recheck background occupancy under the parent lock so a late terminal
     // publication cannot restore awaiting_bg after the last child closed.
     let terminal_actor_fenced = expected_terminal_nonce.is_some();
-    let updated = sqlx::query(
+    let updated = sqlx::query(concat!(
         "UPDATE sessions SET
             status = CASE
               WHEN lower($2) = 'awaiting_bg'
@@ -926,8 +929,10 @@ async fn update_target(
             last_heartbeat = NOW()
          WHERE id = $1 AND (NOT $19 OR (
              active_turn_nonce IS NOT DISTINCT FROM $20 AND status IS NOT DISTINCT FROM $21))
-           AND (NOT $22 OR active_turn_nonce IS NOT DISTINCT FROM $23)",
-    )
+           AND (NOT $22 OR active_turn_nonce IS NOT DISTINCT FROM $23)
+           AND ",
+        retired_revival_fence!()
+    ))
     .bind(session_id)
     .bind(params.status)
     .bind(params.instance_id)

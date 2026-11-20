@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// canary selection without requiring global PATH manipulation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderExecutionContext {
-    /// Provider identifier (e.g. "codex", "claude", "gemini", "qwen").
+    /// Provider identifier (e.g. "codex", "claude", "qwen").
     pub provider: String,
     /// Discord agent role id or logical agent identifier.
     #[serde(skip_serializing_if = "Option::is_none")]

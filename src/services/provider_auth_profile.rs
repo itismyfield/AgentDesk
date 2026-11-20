@@ -209,7 +209,7 @@ pub fn home_env_for(provider: &ProviderKind, home: &Path) -> BTreeMap<String, St
         ProviderKind::Grok => {
             env.insert("GROK_HOME".to_string(), home);
         }
-        ProviderKind::Antigravity | ProviderKind::Gemini | ProviderKind::Unsupported(_) => {}
+        ProviderKind::Antigravity | ProviderKind::Unsupported(_) => {}
     }
     env
 }
@@ -306,7 +306,6 @@ pub fn provider_credential_env_keys(provider: &ProviderKind) -> &'static [&'stat
         ProviderKind::Qwen => &["DASHSCOPE_API_KEY", "OPENAI_API_KEY"],
         ProviderKind::OpenCode => &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY"],
         ProviderKind::Antigravity => &["NVIDIA_API_KEY"],
-        ProviderKind::Gemini => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         ProviderKind::Unsupported(_) => &[],
     }
 }

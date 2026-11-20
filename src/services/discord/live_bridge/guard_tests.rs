@@ -991,7 +991,7 @@ async fn recovery_first_release_revalidates_actor_and_preserves_successor() {
 async fn other_providers_do_not_register_or_block_recovery() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let token = Arc::new(CancelToken::new());
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     assert!(
         register_original(&provider, 655_213_001, &token)
             .await

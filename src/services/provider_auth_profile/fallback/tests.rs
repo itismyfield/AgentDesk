@@ -73,7 +73,7 @@ fn invalid_or_cross_provider_policy_fails_closed() {
     assert!(policy.validate(&ProviderKind::Codex, &catalog).is_err());
     policy.fallback_profile = Some("a".into());
     assert!(policy.validate(&ProviderKind::Claude, &catalog).is_err());
-    assert!(policy.validate(&ProviderKind::Gemini, &catalog).is_err());
+    assert!(policy.validate(&ProviderKind::OpenCode, &catalog).is_err());
     policy.cooldown_secs = 0;
     assert!(policy.validate(&ProviderKind::Codex, &catalog).is_err());
     assert!(serde_yaml::from_str::<FallbackPolicy>("prioritty: [a]").is_err());

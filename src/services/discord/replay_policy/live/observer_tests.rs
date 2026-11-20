@@ -372,7 +372,7 @@ fn p2_only_owned_direct_runtimes_can_activate() {
     for provider in [
         ProviderKind::Claude,
         ProviderKind::Codex,
-        ProviderKind::Gemini,
+        ProviderKind::OpenCode,
         ProviderKind::Qwen,
     ] {
         for driver in [D::LegacyPrompt, D::TuiHosting] {

@@ -181,8 +181,6 @@ pub enum StreamMessage {
         session_id: String,
         raw_session_id: Option<String>,
     },
-    /// Provider started a fresh retry attempt after discarding stale session state
-    RetryBoundary,
     /// Text response chunk
     Text { content: String },
     /// Tool use started.
