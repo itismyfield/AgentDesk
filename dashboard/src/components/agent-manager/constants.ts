@@ -11,7 +11,6 @@ export const LEGACY_ONLY_PROVIDERS: CliProvider[] = [
 export const CLI_PROVIDERS: CliProvider[] = [
   "claude",
   "codex",
-  "gemini",
   "opencode",
   "qwen",
 ];

@@ -406,7 +406,11 @@ impl Candidate<'_> {
 
 /// Verifies the launch source on its own hook; a prompt may also reclaim a Pending it outlived.
 /// The binding, cursor and hook routing stay as they are.
-pub(crate) fn reclaim_with_current_prompt(session_id: &str, hook: &HookSignal) -> io::Result<bool> {
+pub(crate) fn reclaim_with_current_prompt(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    session_id: &str,
+    hook: &HookSignal,
+) -> io::Result<bool> {
     let session_id = session_id.trim();
     let payload_path = hook.transcript_path.as_deref().map(str::trim);
     let Some(payload_path) = payload_path
@@ -423,6 +427,9 @@ pub(crate) fn reclaim_with_current_prompt(session_id: &str, hook: &HookSignal) -
     let Some((tmux, binding)) = AdoptSkip::bound_pane(&state, &key, &mut skip) else {
         return Ok(false);
     };
+    if tmux != authority.session() {
+        return Ok(false);
+    }
     let bound = binding.value.clone();
     let claude = bound.runtime_kind == RuntimeHandoffKind::ClaudeTui;
     let output = PathBuf::from(&bound.output_path);

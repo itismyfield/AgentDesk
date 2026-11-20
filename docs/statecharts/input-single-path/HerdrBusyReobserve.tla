@@ -105,15 +105,19 @@ VerifiedClearReevaluatesIdle == <> (r.route = "idle")
 \* Restart/readiness refinement: the same pre-key owner front, no new input or hook needed.
 \* Domains and five two-second looks come from 8222-restart-held-readiness.design.md section 2.
 \* `elapsed` is real time since the first typed hold; `age` is what the stored due allows.
-RHInit == r = [phase |-> "restart", age |-> 0, elapsed |-> 0, visible |-> FALSE,
+RHScreenHold == Scenario \in {"tmux-modal-held", "tmux-draft-held"}
+RHTmux == Scenario \in {"tmux-meta", "tmux-meta-reboot", "tmux-retry-due", "tmux-late-follower"}
+          \/ RHScreenHold
+RHInit == r = [phase |-> IF RHTmux THEN "queued" ELSE "restart",
+    age |-> 0, elapsed |-> 0, visible |-> FALSE, retried |-> FALSE,
     nonce |-> 1, native |-> 1, inode |-> 1, front |-> 1, generation |-> 1,
     afterLaunch |-> Scenario \notin {"new-incarnation", "old-reply"},
-    pinned |-> Scenario # "legacy", complete |-> Scenario \notin {"missing", "replay"},
+    pinned |-> Scenario # "legacy", complete |-> ~RHTmux /\ Scenario \notin {"missing", "replay"},
     turn |-> IF Scenario = "prompt" THEN "prompt"
              ELSE IF Scenario = "tool" THEN "tool"
              ELSE IF Scenario = "stop-context" THEN "stop-context" ELSE "reply",
     fence |-> Scenario \in {"pending", "compact", "continuation"},
-    screen |-> Scenario \notin {"draft", "pane-unreadable"},
+    screen |-> ~RHScreenHold /\ Scenario \notin {"draft", "pane-unreadable"},
     owned |-> TRUE, gate |-> TRUE, proof |-> FALSE, reserved |-> FALSE, permit |-> FALSE,
     keys |-> 0, refusals |-> 0, notices |-> 0, requeues |-> 0, leafRefused |-> FALSE,
     records |-> 0, recordKey |-> 0, pendingAck |-> FALSE, epoch |-> 0,
@@ -147,7 +151,7 @@ RHPromptDriver == Entry = "prompt-driver"
 RHEnter == /\ r.phase = "restart"
            /\ r' = [r EXCEPT !.phase = "queued"]
 \* General observe has no proof; running fallback reads Unknown and cannot create Idle.
-RHBusyEntry == /\ r.phase = "queued" /\ Scenario # "no-holder-live"
+RHBusyEntry == /\ r.phase = "queued" /\ ~RHTmux /\ Scenario # "no-holder-live"
                /\ r' = [r EXCEPT !.phase = "held"]
 \* A live pane with no active turn reaches the missing-recovery refusal before any watch.
 RHRefuseUnheld == /\ r.phase = "queued" /\ Scenario = "no-holder-live"
@@ -156,7 +160,7 @@ RHRefuseUnheld == /\ r.phase = "queued" /\ Scenario = "no-holder-live"
 \* The first probe also reads Unknown. The fixture then exposes its existing source evidence.
 \* The wired Busy-held entry records the owner hold (a stored due survives; a hold without one gets
 \* it once here) and arms the drive's deadline timer, which a restart does not keep.
-RHFirstKeep == /\ r.phase = "held" /\ ~r.visible
+RHFirstKeep == /\ r.phase = "held" /\ ~r.visible /\ ~RHTmux
                /\ r' = [r EXCEPT !.visible = TRUE,
                    !.dueStored = r.dueStored \/ (RHWired /\ Mutant # "NoWiring"),
                    !.armed = r.armed \/ (RHWired /\ Mutant # "NoArm"),
@@ -165,6 +169,41 @@ RHFirstKeep == /\ r.phase = "held" /\ ~r.visible
                    !.nonce = IF Scenario = "nonce" THEN 2 ELSE 1,
                    !.native = IF Scenario = "native" THEN 2 ELSE 1,
                    !.inode = IF Scenario = "inode" THEN 2 ELSE 1]
+\* An owned tmux idle start reserves before its ordinary readiness wait. The metadata-only
+\* source cannot grant a first key. Its exact NotSent closes the attempt and keeps the original.
+RHTmuxReserve == /\ RHTmux /\ r.phase = "queued"
+                 /\ r' = [r EXCEPT !.phase = "reserved", !.reserved = TRUE]
+RHTmuxNotSent == /\ RHTmux /\ r.phase = "reserved" /\ r.keys = 0 /\ ~r.permit /\ ~r.proof
+                 /\ (~r.dueStored \/ r.age < 5)
+                 /\ r' = [r EXCEPT !.phase = "held", !.reserved = FALSE,
+                     !.dueStored = r.dueStored \/ (RHWired /\ Mutant # "NoWiring"
+                         /\ (r.screen \/ Mutant = "NoScreenGuard"))]
+\* Hold and due are one actor commit. The drive re-arms the timer even if the pane never wakes.
+RHTmuxLook == /\ RHTmux /\ r.phase = "held" /\ ~r.visible
+              /\ ~(r.replayed /\ r.dueStored /\ r.age = 5)
+              /\ r' = [r EXCEPT !.visible = TRUE,
+                  !.armed = r.dueStored /\ Mutant # "NoArm",
+                  !.age = IF r.age = 0 THEN 1 ELSE r.age,
+                  !.elapsed = IF r.age = 0 THEN Inc10(r.elapsed) ELSE r.elapsed]
+\* One existing external wake can retry the same front, with its first due unchanged.
+RHTmuxRetry == /\ RHTmux /\ r.phase = "held" /\ r.visible /\ ~r.retried
+               /\ (~r.dueStored \/ r.age < 5)
+               /\ ~RHScreenHold
+               /\ (Scenario # "tmux-retry-due" \/ r.age = 4)
+               /\ r' = [r EXCEPT !.phase = "reserved", !.reserved = TRUE, !.retried = TRUE]
+\* The existing watch retries after both focus and source are ready.
+RHReleaseScreen == /\ RHScreenHold /\ r.phase = "held" /\ ~r.screen /\ r.age = 5
+                   /\ r' = [r EXCEPT !.screen = TRUE, !.complete = TRUE]
+\* B commits after A's hold and before ingress can issue its wake.
+RHLateArrival == /\ Scenario = "tmux-late-follower" /\ r.phase = "held"
+                 /\ r.visible /\ r.other = "none" /\ r.age = 4
+                 /\ r' = [r EXCEPT !.other = "queued"]
+RHLateDisposition == IF Scenario = "tmux-late-follower" /\ Mutant = "NoMemberBoundary"
+                     /\ r.other = "queued" THEN "refused" ELSE r.other
+\* Without the inherited due, the reserved warm wait spends another preparation window.
+RHOverdueRetry == /\ Scenario = "tmux-retry-due" /\ Mutant = "NoInheritedDue"
+                  /\ r.phase = "reserved" /\ r.retried /\ r.age = 5 /\ r.elapsed = 5
+                  /\ r' = [r EXCEPT !.elapsed = 6]
 \* Same captured probe: restore only at the evidence boundary, and wake the Idle driver.
 RHRestoreWake == /\ RHFixed /\ r.phase = "held" /\ r.visible /\ RHOwner /\ RHAdmit
                  /\ (r.age < 5 \/ ~r.dueStored)
@@ -190,7 +229,7 @@ RHArm == /\ r.phase = "reserved" /\ ~r.permit /\ r.keys = 0 /\ (r.age < 5 \/ ~r.
          /\ r' = [r EXCEPT !.permit = TRUE,
              !.keyValid = (RHExact /\ r.proof /\ RHOwner /\ r.gate)]
 \* A failed leaf recheck is NotSent: the original returns to its hold with the same due.
-RHRecheckFail == /\ r.phase = "reserved" /\ ~r.permit /\ Mutant # "SkipDriverRecheck"
+RHRecheckFail == /\ ~RHTmux /\ r.phase = "reserved" /\ ~r.permit /\ Mutant # "SkipDriverRecheck"
                  /\ ~(RHExact /\ r.proof)
                  /\ r' = [r EXCEPT !.phase = "held", !.reserved = FALSE, !.proof = FALSE]
 \* First-key commit through the writer gate; a refusal that closed the gate leaves it 0.
@@ -202,16 +241,20 @@ RHRace == /\ Scenario = "race" /\ r.phase \in {"waking", "reserved"} /\ ~r.permi
           /\ r' = [r EXCEPT !.native = 2, !.proof = FALSE, !.changed = TRUE]
 \* Owner-only atomic pre-key refusal of an attemptless front, not a fabricated NotSentProof.
 \* It revokes the front's grant/claim; it cannot revoke a reserved leaf's writer gate.
-RHExpire == /\ RHFixed /\ Mutant # "NoDeadline" /\ r.dueStored /\ r.armed /\ r.age = 5
+RHExpire == /\ RHFixed /\ Mutant # "NoDeadline" /\ r.dueStored /\ r.age = 5
+            /\ (r.armed \/ (RHTmux /\ r.replayed /\ ~r.visible))
             /\ (r.phase \in {"held", "waking"} \/ (Mutant = "AttemptlessLeaf" /\ r.phase = "reserved"))
             /\ r.owned /\ RHSameFront /\ r.gate /\ r.keys = 0
             /\ r' = [r EXCEPT !.phase = "refused", !.refusals = @ + 1, !.owned = FALSE,
-                !.gate = r.phase = "reserved", !.reserved = FALSE, !.reason = RHReason]
+                !.gate = r.phase = "reserved", !.reserved = FALSE, !.reason = RHReason,
+                !.other = RHLateDisposition]
 \* A reserved attempt at due settles through its own NotSent and closes its writer gate.
 RHLeafExpire == /\ RHFixed /\ Mutant \notin {"NoDeadline", "NoReservedExpire"}
                 /\ r.phase = "reserved" /\ r.dueStored /\ r.age = 5 /\ r.keys = 0 /\ r.gate
+                /\ ~(Scenario = "tmux-retry-due" /\ Mutant = "NoInheritedDue" /\ r.retried)
                 /\ r' = [r EXCEPT !.phase = "refused", !.refusals = @ + 1, !.owned = FALSE,
-                    !.gate = FALSE, !.leafRefused = TRUE, !.reason = RHReason]
+                    !.gate = FALSE, !.leafRefused = TRUE, !.reason = RHReason,
+                    !.other = RHLateDisposition]
 NoticeKey == IF Mutant = "EpochNoticeKey" THEN r.epoch ELSE 0
 \* The outbox keeps one record per key; the durable ack may be lost to a crash after enqueue.
 RHNoticeEnqueue == /\ r.phase = "refused" /\ ~r.pendingAck
@@ -233,12 +276,13 @@ RHSwap == /\ Scenario \in {"stale-front", "stale-generation"} /\ r.other = "none
               !.front = IF Scenario = "stale-front" THEN 2 ELSE 1,
               !.generation = IF Scenario = "stale-generation" THEN 2 ELSE 1]
 \* The old original's deadline callback arrives at the new front and must be a no-op.
-RHStaleCallback == /\ r.other = "queued" /\ ~r.cbFired
+RHStaleCallback == /\ Scenario \in {"stale-front", "stale-generation"}
+                   /\ r.other = "queued" /\ ~r.cbFired
                    /\ r' = [r EXCEPT !.cbFired = TRUE,
                        !.other = IF RHSameFront THEN "refused" ELSE "queued"]
 \* One restart: durable hold/due/refusal/notice intent survive; proof, watch and drain do not.
 \* An active reserved attempt is the existing possibly-sent recovery's and is not modeled here.
-RHReboot == /\ Scenario \in {"replay", "reboot", "old-snapshot"} /\ ~r.replayed /\ ~r.permit
+RHReboot == /\ Scenario \in {"replay", "reboot", "old-snapshot", "tmux-meta-reboot"} /\ ~r.replayed /\ ~r.permit
             /\ r.phase \in {"held", "waking", "refused", "explained"}
             /\ r' = [r EXCEPT !.replayed = TRUE, !.epoch = 1, !.proof = FALSE,
                 !.pendingAck = FALSE, !.armed = FALSE,
@@ -258,6 +302,8 @@ RHRequeue == /\ Mutant = "RequeueBody" /\ r.phase = "explained" /\ r.requeues = 
              /\ r' = [r EXCEPT !.requeues = 1]
 RHWait == UNCHANGED vars
 RHNext == RHEnter \/ RHBusyEntry \/ RHRefuseUnheld \/ RHFirstKeep \/ RHRestoreWake \/ RHKeep \/ RHTick
+          \/ RHTmuxReserve \/ RHTmuxNotSent \/ RHTmuxLook \/ RHTmuxRetry
+          \/ RHReleaseScreen \/ RHLateArrival \/ RHOverdueRetry
           \/ RHIdleReserve \/ RHArm \/ RHRecheckFail \/ RHWrite \/ RHRace
           \/ RHExpire \/ RHLeafExpire \/ RHNoticeEnqueue \/ RHNoticeAck
           \/ RHLifecycle \/ RHSwap \/ RHStaleCallback \/ RHReboot
@@ -265,10 +311,12 @@ RHNext == RHEnter \/ RHBusyEntry \/ RHRefuseUnheld \/ RHFirstKeep \/ RHRestoreWa
 RHSpec == RHInit /\ [][RHNext]_vars
           /\ WF_vars(RHEnter) /\ WF_vars(RHBusyEntry) /\ WF_vars(RHRefuseUnheld)
           /\ WF_vars(RHFirstKeep)
+          /\ WF_vars(RHTmuxReserve) /\ WF_vars(RHTmuxNotSent) /\ WF_vars(RHTmuxLook)
           /\ WF_vars(RHRestoreWake) /\ WF_vars(RHKeep) /\ WF_vars(RHIdleReserve)
           /\ WF_vars(RHArm) /\ WF_vars(RHRecheckFail) /\ WF_vars(RHWrite)
           /\ WF_vars(RHExpire) /\ WF_vars(RHLeafExpire) /\ WF_vars(RHNoticeEnqueue)
           /\ WF_vars(RHNoticeAck) /\ WF_vars(RHLifecycle) /\ WF_vars(RHTick)
+          /\ WF_vars(RHReleaseScreen) /\ WF_vars(RHOverdueRetry)
 RHTypeOK == /\ r.phase \in {"restart", "queued", "held", "waking", "reserved",
                            "done", "refused", "explained"}
             /\ r.age \in 0..5 /\ r.nonce \in 1..2 /\ r.native \in 1..2 /\ r.inode \in 1..2
@@ -284,6 +332,9 @@ RHProofNeedsEvidence == r.proof => RHExact
 RHKeyNeedsRecheck == r.keys = 0 \/ r.keyValid
 \* An unstarted original never outlives the due its first typed hold fixed.
 RHBoundedHold == RHUnstarted => r.elapsed <= 5
+RHOtherHoldPreserved == RHScreenHold => ~r.dueStored /\ r.refusals = 0
+RHNoRetryPastDue == Scenario = "tmux-retry-due" => r.elapsed <= 5
+RHNoLateLoss == Scenario = "tmux-late-follower" => r.other # "refused"
 RHStaleNoop == r.other # "refused"
 RHOneNoticeRecord == r.records <= 1
 \* Witnesses: each is expected to break, proving its competing state is reached (not vacuous).

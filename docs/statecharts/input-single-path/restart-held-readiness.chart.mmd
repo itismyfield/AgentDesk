@@ -2,6 +2,9 @@ stateDiagram-v2
     [*] --> Restart: ledger/proof lost
     Restart --> Queued: owner original
     Queued --> Held: observe None / running Unknown
+    Queued --> Reserved: owned tmux idle attempt
+    Reserved --> Held: tmux preparation NotSent / persist first due
+    Held --> Held: reboot reuses stored due
     Held --> Held: probe Unknown / Keep, same original
     Held --> Wake: scoped source + current completed reply
     Wake --> Reserved: Idle driver recheck + reserve

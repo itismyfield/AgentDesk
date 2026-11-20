@@ -462,10 +462,9 @@ def _inside_test_region(offset: int, ranges: Iterable[ModuleRange], external: bo
 
 def _external_test_files(repo_root: Path, inventory: rust_test_sources.Inventory,
                          counter: list[int] | None = None, findings: list[Finding] | None = None) -> set[Path]:
-    src_root = (repo_root / "src").resolve()
     declarations: dict[Path, list[tuple[Path | None, bool, Finding]]] = {}
     targets: set[Path] = set()
-    for path in sorted(src_root.rglob("*.rs")):
+    for path in sorted(inventory.modules):
         source = path.read_text("utf-8")
         clean = strip_rust(source)
         ranges = _module_ranges(source, clean, counter)
@@ -493,10 +492,10 @@ def _external_test_files(repo_root: Path, inventory: rust_test_sources.Inventory
                     name = match.group("name")
                     candidates = (base / f"{name}.rs", base / name / "mod.rs")
                 target = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
-                if target and not target.is_relative_to(src_root):
+                if target and not target.is_relative_to(repo_root):
                     target = None
                 tried = ", ".join(Path(os.path.relpath(candidate, repo_root)).as_posix() for candidate in candidates)
-                finding = Finding("unresolved-external-test-module", f"{path.relative_to(repo_root).as_posix()}:{line}", f"mod {match.group('name')}; did not resolve inside src; tried: {tried}")
+                finding = Finding("unresolved-external-test-module", f"{path.relative_to(repo_root).as_posix()}:{line}", f"mod {match.group('name')}; did not resolve inside repository; tried: {tried}")
                 children.append((target, is_test, finding))
                 if is_test:
                     if target:
@@ -546,7 +545,7 @@ def _use_tree_entries(raw: str) -> list[str]:
 
 
 def discover_pg_inventory(
-    repo_root: Path, findings: list[Finding] | None = None
+    repo_root: Path, findings: list[Finding] | None = None, *, inventory: rust_test_sources.Inventory | None = None
 ) -> PgInventory:
     """Discover PG tests with a deliberately bounded Rust call model.
 
@@ -572,9 +571,9 @@ def discover_pg_inventory(
     """
     repo_root = repo_root.resolve()
     _matching_brace_cached.cache_clear()
-    src_root = (repo_root / "src").resolve()
     brace_counter = [0]
-    inventory = rust_test_sources.lib_inventory(repo_root)
+    if inventory is None:
+        inventory = rust_test_sources.lib_inventory(repo_root)
     external_tests = _external_test_files(repo_root, inventory, brace_counter, findings)
     declared_tests = set(inventory.tests)
     item_bodies: dict[tuple[tuple[str, ...], str, str], str] = {}
@@ -626,7 +625,7 @@ def discover_pg_inventory(
         )
 
     # Files the lib does not compile lend nothing; a file reached as several modules is read once per module.
-    reached = sorted((path, base) for path in src_root.rglob("*.rs") for base in inventory.modules.get(path.resolve(), ()))
+    reached = sorted((path, base) for path, bases in inventory.modules.items() for base in bases)
     for path, reached_base in reached:
         source = path.read_text("utf-8")
         clean = strip_rust(source)
@@ -1070,11 +1069,12 @@ def discover_pg_inventory(
     return PgInventory(tests)
 
 
-def classify(repo_root: Path, exempt: dict[str, str] | None = None) -> tuple[dict[str, str], list[str]]:
+def classify(repo_root: Path, exempt: dict[str, str] | None = None, *,
+             inventory: rust_test_sources.Inventory | None = None) -> tuple[dict[str, str], list[str]]:
     """(active PG test -> file, problems); problems make the classification unusable."""
     exempt = EXEMPT if exempt is None else exempt
     findings: list[Finding] = []
-    inventory = discover_pg_inventory(repo_root, findings)
+    inventory = discover_pg_inventory(repo_root, findings, inventory=inventory)
     problems = [f"{f.kind}: {f.source}: {f.detail}" for f in findings if f.kind in UNANALYZABLE]
     problems += [f"stale exemption: {name} is no longer classified as PG"
                  for name in sorted(set(exempt) - set(inventory.tests))]
@@ -1089,19 +1089,39 @@ def main(argv=None):
     c.add_argument("--json-out", required=True)
     c.add_argument("--list", help="unfiltered `cargo nextest list --message-format json` to split")
     args = parser.parse_args(argv)
-    pg, problems = classify(args.repo_root.resolve())
-    result = {"pg": dict(sorted(pg.items())), "exempt": dict(sorted(EXEMPT.items())), "problems": problems}
+    repo_root = args.repo_root.resolve()
+    problems = []
+    try:
+        libraries = rust_test_sources.lib_tests_by_binary(repo_root)
+        if not libraries:
+            raise ValueError("no library sources")
+    except (OSError, ValueError) as exc:
+        print(f"ERROR {exc}", file=sys.stderr)
+        return 1
+    primary = next(iter(libraries))
+    pg_by_binary = {}
+    for binary, (_, inventory) in libraries.items():
+        pg, errors = classify(repo_root, EXEMPT if binary == primary else {}, inventory=inventory)
+        pg_by_binary[binary] = dict(sorted(pg.items()))
+        problems.extend(f"{binary}: {error}" if len(libraries) > 1 else error for error in errors)
+    result = {"pg": pg_by_binary[primary], "pg_by_binary": pg_by_binary,
+              "exempt": dict(sorted(EXEMPT.items())), "problems": problems}
     if args.list:
         try:
-            listed = rust_test_sources.listed_lib_tests(args.list)
+            listed = rust_test_sources.listed_lib_cases(args.list)
+            if set(listed) != set(libraries):
+                raise ValueError(f"lib suite selection mismatch: source={sorted(libraries)}, nextest={sorted(listed)}")
         except (OSError, ValueError) as exc:
             problems.append(f"nextest list: {exc}")
         else:
-            result["non_pg"] = sorted(listed - set(pg))
+            non_pg = sorted((binary, name) for binary, cases in listed.items() for name in cases
+                            if name not in pg_by_binary[binary])
+            result["non_pg"] = [name for binary, name in non_pg if binary == primary]
+            result["non_pg_ids"] = non_pg
     Path(args.json_out).write_text(json.dumps(result, indent=1) + "\n")
     for line in problems:
         print(f"ERROR {line}", file=sys.stderr)
-    print(f"{len(pg)} PG tests; {len(problems)} problem(s)")
+    print(f"{sum(map(len, pg_by_binary.values()))} PG tests; {len(problems)} problem(s)")
     return 1 if problems else 0
 
 

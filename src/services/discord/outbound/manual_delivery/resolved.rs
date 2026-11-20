@@ -202,15 +202,7 @@ mod origin_tests {
             _: &str,
         ) -> Result<String, DispatchMessagePostError> {
             let mut guarded = true;
-            for provider in [
-                "claude",
-                "codex",
-                "gemini",
-                "opencode",
-                "qwen",
-                "grok",
-                "antigravity",
-            ] {
+            for provider in ["claude", "codex", "opencode", "qwen", "grok", "antigravity"] {
                 let mut tx = self.pool.begin().await.unwrap();
                 let available: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
                     .bind(OwnerIdentity::new(provider, channel).advisory_key())
@@ -319,6 +311,36 @@ mod origin_tests {
         assert_eq!(send(&client, &single).await.0, "409 Conflict");
         assert_eq!(client.calls.load(Ordering::SeqCst), 1);
         single.close().await;
+        pool.close().await;
+    }
+    /// A receipt the removed Gemini provider left behind still withholds unstamped output.
+    #[tokio::test]
+    async fn output_origin_unstamped_consumer_refuses_a_retired_gemini_receipt_pg() {
+        let (_db, pool, _) = output::tests::fixture("7336909").await;
+        let mut payload = output::tests::payload("7336910", "90003", "gateway");
+        payload.provider = "gemini".into();
+        let request = custody::StageRequest {
+            payload: &payload,
+            home_revision: 0,
+            wait_generation: None,
+            grace_seconds: 0,
+        };
+        assert!(custody::stage(&pool, request).await.unwrap() > 0);
+        let client = Client {
+            pool: pool.clone(),
+            entered: Notify::new(),
+            release: Notify::new(),
+            guarded: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
+        };
+        client.release.notify_one();
+        assert_eq!(send(&client, &pool).await.0, "409 Conflict");
+        assert_eq!(
+            client.calls.load(Ordering::SeqCst),
+            0,
+            "no POST on any provider"
+        );
         pool.close().await;
     }
 }

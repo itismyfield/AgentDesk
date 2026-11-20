@@ -10,7 +10,7 @@ retries a failed lib test. `.config/nextest.toml` stays at `retries = 0` and
 |---|---|---|---|
 | CI PR (`ci-pr.yml`) | `all-once` | every test, once | pass, listed |
 | CI Main (`ci-main.yml`) | `all-once` | every test, once | pass, listed |
-| CI Nightly (`ci-nightly.yml`, native lanes) | `policy` | only `scripts/ci/nextest-retry-policy.toml` entries, once | pass for an entry, otherwise `retry-not-allowed` failure |
+| CI Nightly (`ci-nightly.yml`, Linux and Windows) | `policy` | only `scripts/ci/nextest-retry-policy.toml` entries, once | pass for an entry, otherwise `retry-not-allowed` failure |
 
 A test that fails both attempts is `retry-exhausted` and fails the run in every
 mode; more than one retry is `retry-over-limit`. A FLAKY test still counts once

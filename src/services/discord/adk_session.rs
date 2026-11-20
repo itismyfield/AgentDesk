@@ -775,7 +775,7 @@ mod compact_threshold_tests {
         // Codex still uses its own override.
         assert_eq!(thresholds.compact_pct_for(&ProviderKind::Codex), 100);
         // Other providers fall back to the generic value.
-        assert_eq!(thresholds.compact_pct_for(&ProviderKind::Gemini), 80);
+        assert_eq!(thresholds.compact_pct_for(&ProviderKind::OpenCode), 80);
         // The launch path turns this percentage into an absolute safe window.
         assert!(thresholds.compact_pct_for(&ProviderKind::Claude) > 0);
     }

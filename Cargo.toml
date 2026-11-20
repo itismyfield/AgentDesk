@@ -5,6 +5,10 @@ edition = "2024"
 description = "AI agent orchestration platform"
 license = "MIT"
 
+[workspace]
+members = ["crates/adk-store"]
+resolver = "3"
+
 [lib]
 path = "src/lib.rs"
 
@@ -34,6 +38,7 @@ too_many_arguments = "deny"
 type_complexity = "deny"
 
 [dependencies]
+adk-store = { path = "crates/adk-store" }
 # HTTP server
 axum = { version = "0.8", features = ["ws", "macros"] }
 tower-http = { version = "0.6", features = ["fs", "cors", "compression-gzip"] }

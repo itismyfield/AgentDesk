@@ -22,12 +22,8 @@ pub(super) fn apply(
         claude_tui_followup_busy_readiness_timeout,
         super::super::super::router::queue_status_card_enabled(),
     ) {
-        // #5938 r2 P1-2: isomorphic to `retry_state::clear_response_delivery_state`
-        // — local body and durable row body blanked in the same breath — so it
-        // falls in the same recorded class. Without the record the readout shows
-        // `after_len=N` and then a later `before_len=0` with nothing between
-        // them, which is indistinguishable from the loss this instrumentation is
-        // hunting.
+        // Local and durable bodies are blanked together; without a record the readout
+        // jumps from `after_len=N` to `before_len=0`, indistinguishable from loss.
         observe_body_mutation(
             BodyMutationSite::SilenceRequeuedResponse,
             BodyMutationCorrelation::from_inflight_row(inflight_state),
