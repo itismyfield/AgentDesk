@@ -118,7 +118,7 @@ const RETRY_FAILED: &str = "⚠️ 일부 저장을 한 번 재시도했지만 �
 fn a_clear_whose_queue_write_fails_twice_still_resets_the_session_and_warns() {
     let root = tempfile::tempdir().expect("scratch runtime root");
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let channel_id = ChannelId::new(6_233_101);
     paused_runtime().block_on(async {
         let shared = make_shared_data_for_tests();
@@ -156,7 +156,7 @@ fn a_clear_whose_queue_write_fails_twice_still_resets_the_session_and_warns() {
 fn a_clear_whose_write_fails_stops_the_released_turn_once_and_runs_no_old_backlog() {
     let root = tempfile::tempdir().expect("scratch runtime root");
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let channel_id = ChannelId::new(6_233_103);
     paused_runtime().block_on(async {
         let shared = make_shared_data_for_tests();
@@ -249,7 +249,7 @@ fn a_clear_whose_write_fails_stops_the_released_turn_once_and_runs_no_old_backlo
 fn persisted_clear_still_resets_the_session_and_arms_no_kick() {
     let root = tempfile::tempdir().expect("scratch runtime root");
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let channel_id = ChannelId::new(6_233_102);
     paused_runtime().block_on(async {
         let shared = make_shared_data_for_tests();
@@ -343,7 +343,7 @@ pub(super) async fn boundary_rows(pool: &sqlx::PgPool, channel_id: ChannelId) ->
 fn a_clear_commits_its_transcript_boundary_whatever_its_queue_write_did_pg() {
     let root = tempfile::tempdir().expect("scratch runtime root");
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-    let provider = ProviderKind::Gemini;
+    let provider = ProviderKind::OpenCode;
     let channel_id = ChannelId::new(6_233_105);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

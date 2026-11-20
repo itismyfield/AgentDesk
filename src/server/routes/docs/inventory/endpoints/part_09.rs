@@ -10,7 +10,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/provider-cli",
             "provider-cli",
-            "List current channel snapshots and migration states for all providers (codex, claude, gemini, qwen).",
+            "List current channel snapshots and migration states for all providers (codex, claude, qwen).",
         )
         .with_example(
             json!(null),
@@ -29,7 +29,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_params([
             (
                 "provider",
-                path_param("Provider id: codex, claude, gemini, or qwen"),
+                path_param("Provider id: codex, claude, or qwen"),
             ),
             ("action", body_param("string", true, "confirm_promote | rollback | rollback_to_previous")),
             ("evidence", body_param("string", false, "Optional operator note recorded in migration history")),

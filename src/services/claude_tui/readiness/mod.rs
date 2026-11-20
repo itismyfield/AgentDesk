@@ -10,6 +10,8 @@ pub(crate) mod idle;
 mod restored_reply;
 mod resume_record;
 mod source;
+#[cfg(unix)]
+pub(crate) use source::launch_start_hook;
 #[cfg(test)]
 #[path = "readiness_tests.rs"]
 pub(crate) mod tests;
@@ -19,6 +21,8 @@ pub(crate) use watched::{Expiry, Unproven, WINDOW, watched};
 
 use super::hook_server::HookEventKind;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
+#[cfg(unix)]
+use crate::services::tui_prompt_dedupe::binding_events::HookSignal;
 use chrono::{DateTime, Utc};
 use evidence::{End, Stamp};
 use serde_json::Value;
@@ -32,6 +36,8 @@ struct Entry {
     revision: u64,
     start: bool,
     clear_start: bool,
+    #[cfg(unix)]
+    launch_start: Option<HookSignal>,
     pending: Option<(u64, u64)>,
     submitted: bool,
     compact_ticket: Option<u64>,
@@ -595,6 +601,14 @@ pub(crate) fn note_hook(
             entry.start = true;
             entry.resumed = resumed;
             entry.clear_start = payload["source"] == "clear";
+            #[cfg(unix)]
+            {
+                entry.launch_start = (payload["source"] == "startup" && ctx.launch_mode == "fresh")
+                    .then(|| HookSignal {
+                        published_at: Some(at),
+                        ..HookSignal::from_payload("session_start", payload)
+                    });
+            }
             entry.compact_done = None;
             entry.recovery = None;
             entry.revision += 1;

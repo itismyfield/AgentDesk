@@ -15,7 +15,7 @@
 //! ```
 //!
 //! - `provider_id` is the lowercase provider registry id (`claude`, `codex`,
-//!   `gemini`, `opencode`, `qwen`).
+//!   `opencode`, `qwen`).
 //! - `sanitized_channel` is the Discord channel name (or stable channel
 //!   identifier) with non-alphanumeric / non-`-_` characters replaced by `-`,
 //!   then prefix-truncated to 44 bytes. A trailing `-t{thread_id}` suffix is
@@ -839,7 +839,6 @@ mod tests {
         for (provider, channel) in [
             (ProviderKind::Claude, "agent-cc"),
             (ProviderKind::Codex, "dev-cdx"),
-            (ProviderKind::Gemini, "research-gm"),
             (ProviderKind::OpenCode, "sandbox-oc"),
             (ProviderKind::Qwen, "sandbox-qw"),
         ] {
@@ -886,8 +885,8 @@ mod tests {
             Some(ProviderKind::Codex)
         );
         assert_eq!(
-            detect_provider_from_pane_command("gemini"),
-            Some(ProviderKind::Gemini)
+            detect_provider_from_pane_command("qwen"),
+            Some(ProviderKind::Qwen)
         );
     }
 

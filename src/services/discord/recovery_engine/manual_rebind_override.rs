@@ -148,8 +148,7 @@ fn allowed_output_roots(provider: &ProviderKind) -> Vec<PathBuf> {
                 .chain(crate::services::tmux_common::persistent_sessions_dir())
                 .collect()
         }
-        ProviderKind::Gemini
-        | ProviderKind::Grok
+        ProviderKind::Grok
         | ProviderKind::Antigravity
         | ProviderKind::OpenCode
         | ProviderKind::Qwen => crate::services::tmux_common::persistent_sessions_dir()
@@ -540,7 +539,6 @@ mod tests {
         std::fs::write(&outside, b"{}\n").expect("outside output");
 
         for provider in [
-            ProviderKind::Gemini,
             ProviderKind::Grok,
             ProviderKind::OpenCode,
             ProviderKind::Qwen,
@@ -595,10 +593,10 @@ mod tests {
         let missing_runtime_root = root.path().join("missing-runtime-root");
         let _env =
             crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", &missing_runtime_root);
-        let output = root.path().join("gemini.jsonl");
+        let output = root.path().join("opencode.jsonl");
         std::fs::write(&output, b"{}\n").expect("output");
         assert!(
-            allowed_output_roots(&ProviderKind::Gemini)
+            allowed_output_roots(&ProviderKind::OpenCode)
                 .into_iter()
                 .all(|candidate| std::fs::canonicalize(candidate).is_err()),
             "test requires every allowed root to be unavailable"
@@ -606,12 +604,12 @@ mod tests {
 
         assert_eq!(
             ManualRebindOverrides::validated(
-                &ProviderKind::Gemini,
+                &ProviderKind::OpenCode,
                 Some(output.to_str().expect("utf8 path")),
                 None,
             )
             .unwrap_err(),
-            "gemini output_path override must be under an allowed session directory"
+            "opencode output_path override must be under an allowed session directory"
         );
     }
 }

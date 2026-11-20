@@ -4833,7 +4833,7 @@ pub(super) mod tests {
     }
 
     /// #3277 verify-3 (MINOR): a watcher-owned turn on a non-JSONL runtime
-    /// (Gemini → `CompletionSignal::Unknown`) keeps the generous 1800s
+    /// (OpenCode → `CompletionSignal::Unknown`) keeps the generous 1800s
     /// at-deadline behavior — the fast path never pulls its deadline in, so it
     /// stays Pending through the whole fast-path window.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -4849,7 +4849,7 @@ pub(super) mod tests {
                 .restore_active_turn(active_token, UserId::new(7), MessageId::new(160))
                 .await;
 
-            // Live watcher; Gemini has no structured JSONL turn state, so the
+            // Live watcher; OpenCode has no structured JSONL turn state, so the
             // transcript path is never read (signal = Unknown immediately).
             let session = format!("3277-nonjsonl-{}", std::process::id());
             shared.tmux_watchers.insert(
@@ -4859,7 +4859,7 @@ pub(super) mod tests {
 
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, 160, 0);
-            fin.register_start(k, ProviderKind::Gemini, RelayOwnerKind::Watcher, &shared);
+            fin.register_start(k, ProviderKind::OpenCode, RelayOwnerKind::Watcher, &shared);
 
             tokio::time::sleep(FAST_PATH_WINDOW).await;
             tokio::task::yield_now().await;
@@ -4871,7 +4871,7 @@ pub(super) mod tests {
             let outcome = fin
                 .submit_terminal(
                     k,
-                    ProviderKind::Gemini,
+                    ProviderKind::OpenCode,
                     TerminalEvent::Complete,
                     FinalizeContext::watcher(),
                     shared.clone(),

@@ -359,8 +359,8 @@ mod tests {
     fn a_provider_without_a_tui_runtime_arms_nothing() {
         assert!(
             routable_unwatched_sessions(
-                &ProviderKind::Gemini,
-                &[session("AgentDesk-gemini-adk-cc")],
+                &ProviderKind::OpenCode,
+                &[session("AgentDesk-opencode-adk-cc")],
                 |_| Some(RuntimeHandoffKind::ClaudeTui),
                 |_| Some(ChannelId::new(ADK_CC_CHANNEL)),
                 |_| false,

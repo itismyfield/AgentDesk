@@ -1212,7 +1212,6 @@ fn onboarding_config_path(runtime_root: &Path) -> PathBuf {
 fn default_secondary_command_provider(primary_provider: &str) -> &'static str {
     match primary_provider {
         "codex" => "claude",
-        "gemini" => "codex",
         "opencode" => "claude",
         "qwen" => "claude",
         _ => "codex",

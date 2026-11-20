@@ -144,7 +144,6 @@ grandfathered_baseline_paths = [
   "src/services/dispatched_sessions.rs",
   "src/services/dispatches/discord_delivery/orchestration.rs",
   "src/services/dispatches/outbox_route.rs",
-  "src/services/gemini.rs",
   "src/services/observability/pg_io.rs",
   "src/services/onboarding/mod.rs",
   "src/services/opencode.rs",
@@ -485,13 +484,6 @@ decision = "shrink"
 owner = "automation-pipeline"
 deadline = "2027-01-31"
 decompose_issue = "#4711"
-
-[[entry]]
-file = "src/services/gemini.rs"
-decision = "shrink"
-owner = "server-runtime"
-deadline = "2027-01-31"
-decompose_issue = "#4710"
 
 [[entry]]
 file = "src/services/onboarding/mod.rs"
