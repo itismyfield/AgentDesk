@@ -181,7 +181,11 @@ fn e0_herdr_channel_key_routine_withdraws_while_waiting_for_idle_pg() {
         let context = json!({
             "status":"input_pending", "origin":"routine","provider":"claude","turn_id":turn,
             "run_id":run.run_id,"routine_id":run.routine_id,"agent_id":"busy-entry",
-            "execution_strategy":"persistent","execution_mode":"tmux",
+            "execution_strategy":"persistent","execution_mode":"tmux","source":"routine",
+            "metadata":{
+                "agent_id":"busy-entry","routine_id":run.routine_id,"routine_run_id":run.run_id,
+                "execution_strategy":"persistent","execution_mode":"tmux","turn_id":turn
+            },
             "channel_id":CHANNEL.to_string(),"synthetic_label":null,"is_dm":false,
             "channel_name_hint":fx.logical().strip_prefix("AgentDesk-claude-"),
             (ChannelMailboxHandle::ROUTINE_DELIVERY_DEADLINE):now.timestamp_millis()
