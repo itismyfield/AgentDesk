@@ -603,6 +603,11 @@ input-single-path/HerdrInputHoldRestartUnreadable.cfg	HerdrInputHold	-	HoldEvent
 input-single-path/HerdrInputHoldSecondHold.cfg	HerdrInputHold	-	-
 input-single-path/HerdrInputHoldStashOther.cfg	HerdrInputHold	-	-
 input-single-path/HerdrInputHoldUnreadable.cfg	HerdrInputHold	-	HoldEventuallyReleased,LaterInputStarts
+input-single-path/I7651RestartAfter.cfg	I7651Restart	-	-
+input-single-path/I7651RestartBlindRetry.cfg	I7651Restart	NoticeExactlyOnce	-
+input-single-path/I7651RestartDeleteOnly.cfg	I7651Restart	NoticeExactlyOnce	-
+input-single-path/I7651RestartDropInput.cfg	I7651Restart	NoInputLoss	NextInputEventuallyProcessed
+input-single-path/I7651RestartNoSweep.cfg	I7651Restart	-	NextInputEventuallyProcessed
 input-single-path/InputCancelSelection.cfg	InputCancelSelection	-	-
 input-single-path/InputCancelSelectionAmbiguous.cfg	InputCancelSelection	NoAmbiguousExecution,NoAmbiguousOffer	-
 input-single-path/InputCancelSelectionLegacyGuarded.cfg	InputCancelSelection	LegacyFrontRemoved	-
