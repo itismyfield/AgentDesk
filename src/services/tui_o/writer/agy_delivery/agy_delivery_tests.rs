@@ -100,8 +100,8 @@ struct Wire {
 }
 
 impl Transport for Wire {
-    fn bot(&self) -> NonZeroU64 {
-        id(9)
+    fn bot(&self) -> Option<NonZeroU64> {
+        Some(id(9))
     }
 
     async fn post(&self, channel: u64, piece: &Piece) -> Post {
@@ -117,7 +117,7 @@ impl Transport for Wire {
             wire.push(Evidence {
                 id: message,
                 channel,
-                bot: self.bot().get(),
+                bot: 9,
                 content: piece.payload.clone(),
                 correlation: Some(piece.correlation.clone()),
             });

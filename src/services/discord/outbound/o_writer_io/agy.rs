@@ -11,8 +11,8 @@ use crate::services::tui_o::writer::agy_delivery::{
 use serenity::{ChannelId, CreateEmbed, CreateEmbedFooter, CreateMessage, GetMessages, Nonce};
 
 impl Transport for GatewayPort {
-    fn bot(&self) -> NonZeroU64 {
-        NonZeroU64::new(self.bot_id).expect("gateway port has a Discord bot id")
+    fn bot(&self) -> Option<NonZeroU64> {
+        NonZeroU64::new(self.bot_id)
     }
 
     async fn post(&self, channel: u64, piece: &Piece) -> Post {

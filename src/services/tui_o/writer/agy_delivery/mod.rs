@@ -48,7 +48,7 @@ pub(crate) struct Evidence {
 }
 
 pub(crate) trait Transport {
-    fn bot(&self) -> NonZeroU64;
+    fn bot(&self) -> Option<NonZeroU64>;
     fn post(&self, channel: u64, piece: &Piece) -> impl Future<Output = Post> + Send;
     fn history_before(
         &self,
@@ -141,7 +141,12 @@ impl<'a> Replay<'a> {
         if self.gate.current().epoch() != Some(self.epoch) {
             return Err(Error::Authority);
         }
-        let match_bot = |receipt: &Receipt| receipt.bot == port.bot();
+        let Some(bot) = port.bot() else {
+            return Ok(Progress::Held(
+                "agy delivery bot identity is missing".into(),
+            ));
+        };
+        let match_bot = |receipt: &Receipt| receipt.bot == bot;
         let state = self.journal.state();
         if !state
             .receipts
@@ -158,14 +163,14 @@ impl<'a> Replay<'a> {
                 let index = state.receipts.len();
                 if let Some(piece) = self.plan.body.get(index) {
                     return self
-                        .deliver(port, gate_lease, piece, index as u64, false)
+                        .deliver(port, gate_lease, piece, index as u64, false, bot)
                         .await;
                 }
                 self.commit(|state| state.ended = Some(Stage::Footer))
             }
             Some(Stage::Footer) => {
                 let serial = self.plan.body.len() as u64;
-                self.deliver(port, gate_lease, &self.plan.footer, serial, true)
+                self.deliver(port, gate_lease, &self.plan.footer, serial, true, bot)
                     .await
             }
             Some(Stage::Inflight) => {
@@ -191,9 +196,9 @@ impl<'a> Replay<'a> {
         piece: &Piece,
         serial: u64,
         footer: bool,
+        bot: NonZeroU64,
     ) -> Result<Progress, Error> {
         let channel = self.plan.key.destination.get();
-        let bot = port.bot();
         let Some(_held) = lease.try_acquire(channel, serial) else {
             return Ok(Progress::Held("agy delivery lease busy".into()));
         };
@@ -226,7 +231,7 @@ impl<'a> Replay<'a> {
                     }
                 }
             }
-            Some(Attempt::HandedOff) => match self.confirm(port, piece).await {
+            Some(Attempt::HandedOff) => match self.confirm(port, piece, bot).await {
                 Ok(id) => id,
                 Err(reason) => return Ok(Progress::Held(reason)),
             },
@@ -253,7 +258,12 @@ impl<'a> Replay<'a> {
         })
     }
 
-    async fn confirm(&self, port: &impl Transport, piece: &Piece) -> Result<NonZeroU64, String> {
+    async fn confirm(
+        &self,
+        port: &impl Transport,
+        piece: &Piece,
+        bot: NonZeroU64,
+    ) -> Result<NonZeroU64, String> {
         let channel = self.plan.key.destination.get();
         let after = self
             .journal
@@ -267,7 +277,7 @@ impl<'a> Replay<'a> {
             let page = super::confirm::bounded(port.history_before(channel, before)).await?;
             for evidence in page.iter().filter(|evidence| evidence.id.get() > after) {
                 if evidence.channel == channel
-                    && evidence.bot == port.bot().get()
+                    && evidence.bot == bot.get()
                     && evidence.correlation.as_deref() == Some(piece.correlation.as_str())
                     && (hash(&evidence.content) != piece.payload_hash
                         || candidate.replace(evidence.id).is_some())
