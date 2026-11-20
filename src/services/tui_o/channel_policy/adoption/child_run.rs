@@ -29,33 +29,6 @@ impl Default for RunState {
     }
 }
 impl Candidate {
-    pub(crate) fn names_legacy_turn(
-        &self,
-        nonce: Option<[u8; 32]>,
-        source: Option<[u8; 32]>,
-    ) -> bool {
-        let (Some(nonce), Some(source)) = (nonce, source) else {
-            return false;
-        };
-        let child = self
-            .child_run
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        child.run.iter().chain(&child.owed).any(|run| {
-            run.delivery
-                .as_ref()
-                .and_then(|delivery| delivery.source_path.to_str())
-                .map(first_turn::nonce_id)
-                == Some(source)
-                && run
-                    .turn
-                    .as_ref()
-                    .and_then(|turn| turn.4.as_deref())
-                    .map(first_turn::nonce_id)
-                    == Some(nonce)
-        })
-    }
-
     pub(crate) fn owed_runs(&self) -> Vec<LegacyRun> {
         self.child_run
             .lock()

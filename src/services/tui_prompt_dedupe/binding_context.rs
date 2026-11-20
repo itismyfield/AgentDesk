@@ -286,7 +286,7 @@ pub(crate) fn decode_binding_header(header: &str) -> Result<HookBindingEnvelope,
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 
-fn durable_directory(path: &Path) -> io::Result<()> {
+pub(super) fn durable_directory(path: &Path) -> io::Result<()> {
     if path.is_dir() {
         return Ok(());
     }

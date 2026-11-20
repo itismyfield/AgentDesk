@@ -22,7 +22,7 @@ use prefix::{Prefix, Verdict};
 struct Checked {
     prefix: Prefix,
     admission: Option<FirstProof>,
-    earlier: Option<super::claude::thread::Earlier>,
+    protected: Option<Vec<InitSource>>,
 }
 
 /// Legacy's sends, then the last binding seq: only a rollout bound after it, with no Legacy send
@@ -86,7 +86,6 @@ pub(super) struct Takeover<'a, I: HostIo> {
     pub(super) judge: fn(&SourceId) -> Verdict,
     pub(super) origin: InitOrigin,
     pub(super) protected_parent: Option<u64>,
-    pub(super) proofs: &'a [super::claude::Owed],
 }
 
 /// Waits for a rollout bound after the baseline that holds no output yet and commits it; false
@@ -112,7 +111,6 @@ pub(super) async fn activate<I: HostIo>(
         judge: prefix::judge,
         origin: InitOrigin::LateCodexTakeover,
         protected_parent: None,
-        proofs: &[],
     };
     let mut admission_changes = candidate.first_changes();
     let (mut baseline, mut logged) = (None, None);
@@ -288,20 +286,24 @@ impl<I: HostIo> Takeover<'_, I> {
         bound: &(SourceId, u64),
         prefix: &Prefix,
     ) -> Result<(), Taken> {
-        let debts = std::sync::Arc::new(
-            adoption::ChildDebt::pin(
-                self.candidate,
-                self.io.legacy(),
-                self.io.bindings(self.channel, self.provider),
-                self.channel,
+        let debts = if self.protected_parent.is_none() {
+            Some(
+                adoption::ChildDebt::pin(
+                    self.candidate,
+                    self.io.legacy(),
+                    self.io.bindings(self.channel, self.provider),
+                    self.channel,
+                )
+                .await
+                .map_err(Taken::Retry)?,
             )
-            .await
-            .map_err(Taken::Retry)?,
-        );
-        if matches!(prefix.class, prefix::PrefixClass::OutputFree) {
-            if let Some(sends) = debts.sends() {
-                at.sends = sends;
-            }
+        } else {
+            None
+        };
+        if matches!(prefix.class, prefix::PrefixClass::OutputFree)
+            && let Some(sends) = debts.as_ref().and_then(adoption::ChildDebt::sends)
+        {
+            at.sends = sends;
         }
         let admission = if self.provider == ShadowProvider::Codex {
             let guard = self.candidate.lock();
@@ -334,27 +336,23 @@ impl<I: HostIo> Takeover<'_, I> {
                 "buffered output has no admitted execution proof".into(),
             ));
         }
-        let earlier = if self.protected_parent.is_some() {
+        let protected = if let Some(parent) = self.protected_parent {
             let events = self.events()?;
-            let seq = bound.1;
-            let debts = debts.clone();
-            let proofs = self.proofs.to_vec();
-            let sends = at.sends;
-            Some(
-                tokio::task::spawn_blocking(move || {
-                    super::claude::thread::pin_earlier(events, seq, &debts, &proofs, sends)
-                })
-                .await
-                .map_err(|error| Taken::Retry(error.to_string()))?
-                .map_err(Taken::Retry)?,
-            )
+            let (again, sources) =
+                super::claude::thread::plan(&events, parent).ok_or_else(|| {
+                    Taken::Retry("protected Claude binding has no durable frontier".into())
+                })?;
+            if &again != bound {
+                return Err(Taken::Retry("protected Claude binding changed".into()));
+            }
+            Some(sources)
         } else {
             None
         };
         let checked = Checked {
             prefix: prefix.clone(),
             admission,
-            earlier,
+            protected,
         };
         let (io, channel) = (self.io, self.channel);
         let Some(expected) = self.gate.current().epoch() else {
@@ -388,7 +386,7 @@ impl<I: HostIo> Takeover<'_, I> {
             }
             let mut why = None;
             let sources = || {
-                self.recheck(at, fence_sends, bound, &checked, &debts)
+                self.recheck(at, fence_sends, bound, &checked, debts.as_ref())
                     .map_err(|taken| {
                         let detail = taken.detail().to_owned();
                         why = Some(taken);
@@ -398,7 +396,18 @@ impl<I: HostIo> Takeover<'_, I> {
             // Custody reads are not atomic; the fence, the sends and the relay are judged too.
             let local = || {
                 let custody = io.local_custody(channel, self.provider)?;
-                Ok(custody.blocks_takeover() || io.relaying(channel))
+                if custody.blocks_takeover() || io.relaying(channel) {
+                    return Ok(true);
+                }
+                if let Some(sources) = checked.protected.as_deref()
+                    && custody == super::super::host::Custody::PendingStart
+                {
+                    return io
+                        .legacy()
+                        .late_epoch(channel)
+                        .map(|epoch| !super::claude::thread::owns_row(epoch, sources));
+                }
+                Ok(false)
             };
             let result = self.gate.admit(|epoch| {
                 (epoch == expected).then(|| {
@@ -435,7 +444,7 @@ impl<I: HostIo> Takeover<'_, I> {
         fence_sends: (u64, u64),
         (source, seq): &(SourceId, u64),
         checked: &Checked,
-        debts: &adoption::ChildDebt,
+        debts: Option<&adoption::ChildDebt>,
     ) -> Result<Vec<InitSource>, Taken> {
         let prefix = &checked.prefix;
         if self.provider == ShadowProvider::Codex
@@ -467,9 +476,11 @@ impl<I: HostIo> Takeover<'_, I> {
         } else {
             self.events()?
         };
-        debts
-            .recheck(&events, self.candidate)
-            .map_err(Taken::Retry)?;
+        if let Some(debts) = debts {
+            debts
+                .recheck(&events, self.candidate)
+                .map_err(Taken::Retry)?;
+        }
         if checked.admission.as_ref().is_some_and(|proof| {
             !events
                 .iter()
@@ -479,9 +490,18 @@ impl<I: HostIo> Takeover<'_, I> {
                 "binding execution changed during the intake fence".into(),
             ));
         }
-        let now = if let Some(parent) = self.protected_parent {
-            super::claude::thread::binding(&events, parent)
-        } else if self.provider == ShadowProvider::Claude {
+        if let Some((parent, checked)) = self.protected_parent.zip(checked.protected.as_ref()) {
+            let (again, sources) = super::claude::thread::plan(&events, parent)
+                .ok_or_else(|| Taken::Retry("protected Claude binding disappeared".into()))?;
+            if again.0 != *source || again.1 != *seq || sources != *checked {
+                return Err(Taken::Retry(
+                    "protected Claude source frontier changed".into(),
+                ));
+            }
+            super::claude::thread::verify(&sources).map_err(Taken::Retry)?;
+            return Ok(sources);
+        }
+        let now = if self.provider == ShadowProvider::Claude {
             super::claude::takeover_binding(&events, at.seq)
         } else {
             bound_after(&events, at.seq)
@@ -490,9 +510,6 @@ impl<I: HostIo> Takeover<'_, I> {
             return Err(Taken::Retry(
                 "the binding moved while O fenced the takeover".into(),
             ));
-        }
-        if let Some(earlier) = &checked.earlier {
-            earlier.recheck(&events, *seq).map_err(Taken::Retry)?;
         }
         if checked.admission.is_some() {
             prefix

@@ -4,6 +4,7 @@
 use super::super::late_host::Legacy;
 use super::*;
 use crate::config::Config;
+use crate::services::tui_o::writer::host::{ManagedWriterHandle, start_managed};
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
 
@@ -60,15 +61,19 @@ fn record(value: serde_json::Value) -> Vec<u8> {
 
 /// What Claude writes through a first prompt, before any output.
 fn prompted() -> Vec<u8> {
+    prompt_in(SESSION, "u1")
+}
+
+fn prompt_in(session: &str, user_id: &str) -> Vec<u8> {
     [
-        record(serde_json::json!({"type": "mode", "mode": "normal", "sessionId": SESSION})),
+        record(serde_json::json!({"type": "mode", "mode": "normal", "sessionId": session})),
         record(serde_json::json!({"type": "file-history-snapshot", "messageId": "m"})),
         record(
-            serde_json::json!({"type": "user", "sessionId": SESSION, "uuid": "u1",
+            serde_json::json!({"type": "user", "sessionId": session, "uuid": user_id,
             "message": {"role": "user", "content": "hi"}}),
         ),
         record(
-            serde_json::json!({"type": "attachment", "sessionId": SESSION,
+            serde_json::json!({"type": "attachment", "sessionId": session,
             "attachment": {"type": "skill_listing"}}),
         ),
     ]
@@ -76,18 +81,36 @@ fn prompted() -> Vec<u8> {
 }
 
 fn answer(id: &str, text: &str) -> Vec<u8> {
+    answer_in(SESSION, id, text)
+}
+
+fn answer_in(session: &str, id: &str, text: &str) -> Vec<u8> {
     record(
-        serde_json::json!({"type": "assistant", "sessionId": SESSION, "uuid": format!("a-{id}"),
+        serde_json::json!({"type": "assistant", "sessionId": session, "uuid": format!("a-{id}"),
         "apiBlockIndex": 0, "message": {"id": id, "role": "assistant",
         "content": [{"type": "text", "text": text}]}}),
     )
 }
 
 fn turn_end() -> Vec<u8> {
+    turn_end_in(SESSION)
+}
+
+fn turn_end_in(session: &str) -> Vec<u8> {
     record(
         serde_json::json!({"type": "system", "subtype": "turn_duration", "durationMs": 5,
-        "sessionId": SESSION}),
+        "sessionId": session}),
     )
+}
+
+#[cfg(unix)]
+fn closed_reply(session: &str, id: &str, text: &str) -> Vec<u8> {
+    [
+        prompt_in(session, &format!("u-{id}")),
+        answer_in(session, id, text),
+        turn_end_in(session),
+    ]
+    .concat()
 }
 
 /// The channel's binding log as the hook writes it: each line one more seq.
@@ -161,11 +184,36 @@ struct Reserved {
     io: Arc<TestIo>,
     legacy: Arc<Legacy>,
     binds: Binds,
-    _tasks: Hosts,
+    host: Option<ManagedWriterHandle>,
     _reserved: test_override::ChannelsGuard,
 }
 
 impl Reserved {
+    fn start_host(&mut self) {
+        assert!(self.host.is_none());
+        let readiness = Arc::new(Readiness::default());
+        let owned = cutover::boot_ownership()
+            .into_iter()
+            .filter(|(channel, _, _)| *channel == self.harness.channel_id)
+            .collect();
+        let mut handles = start_managed(ShadowProvider::Claude, true, owned, || HostParts {
+            io: self.io.clone(),
+            runtime_root: Some(self.root().to_owned()),
+            gate: self.harness.gate.clone(),
+            readiness,
+        });
+        assert_eq!(handles.len(), 1);
+        self.host = handles.pop();
+    }
+
+    #[cfg(unix)]
+    async fn stop_host(&mut self) {
+        let host = self.host.take().unwrap();
+        host.keep_reservation();
+        let stopped = host.stop_and_join().await.unwrap();
+        assert_eq!(stopped.channel, self.harness.channel_id);
+    }
+
     fn root(&self) -> &Path {
         self.harness._runtime.path()
     }
@@ -213,18 +261,18 @@ async fn reserved_for(
         frontier: AtomicU64::new(0),
     });
     *io.legacy.lock().unwrap() = Some(legacy.clone());
-    let ready = Arc::new(Readiness::default());
-    let tasks = hosted_as(ShadowProvider::Claude, &harness, &io, (true, &ready));
-    polls(3).await;
-    assert_eq!(reserved_adoption(channel), Adoption::Deferred);
-    Reserved {
+    let mut fixture = Reserved {
         harness,
         io,
         legacy,
         binds,
-        _tasks: tasks,
+        host: None,
         _reserved: reserved,
-    }
+    };
+    fixture.start_host();
+    polls(3).await;
+    assert_eq!(reserved_adoption(channel), Adoption::Deferred);
+    fixture
 }
 
 fn reserved_adoption(channel: u64) -> Adoption {
@@ -290,6 +338,7 @@ async fn late_claude_thread_startup_and_same_execution_verification_take_one_sou
     assert_eq!(f.harness.port.posts(), ["thread answer"]);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn existing_tmux_thread_holds_buffered_body_until_previous_sources_are_proven_pg() {
     use crate::services::provider::ProviderKind;
@@ -337,6 +386,7 @@ async fn existing_tmux_thread_holds_buffered_body_until_previous_sources_are_pro
     let missing = f.root().join("old-source");
     let aside = f.root().join("old-source-aside");
     std::fs::rename(&missing, &aside).unwrap();
+    *f.io.custody.lock().unwrap() = Ok(Custody::Active);
     let policy = cutover::claude_thread::launch_policy(CH);
     assert!(policy.is_some());
     let launch = PreparedIncarnation::prepare_pinned(
@@ -356,7 +406,8 @@ async fn existing_tmux_thread_holds_buffered_body_until_previous_sources_are_pro
         nonce,
     )
     .unwrap();
-    let claim = BodyClaim::tmux(CH, Some(&f.binds.tmux));
+    let tmux = f.binds.tmux.clone();
+    let claim = BodyClaim::tmux(CH, Some(&tmux));
     let legacy = std::cell::Cell::new(0);
     let send = || async { legacy.set(legacy.get() + 1) };
     assert_eq!(
@@ -392,22 +443,18 @@ async fn existing_tmux_thread_holds_buffered_body_until_previous_sources_are_pro
         Err(IdentityError::ChildDeliveryHeld)
     );
     assert_eq!(legacy.get(), 0);
-    for task in std::mem::take(&mut f._tasks) {
-        task.abort();
-        let _ = task.await;
-    }
+    f.stop_host().await;
     let boot = boot_for(PARENT);
     boot.reserve_boot_children(&[(CH, PARENT)]);
     let _restored = test_override::force_boot(boot);
     assert_eq!(claim.peek(), Err(IdentityError::ChildDeliveryHeld));
     cutover::claude_thread::record_restored(&thread_for(CH, PARENT), &f.binds.tmux);
     assert_eq!(reserved_adoption(CH), Adoption::Deferred);
-    let ready = Arc::new(Readiness::default());
-    f._tasks = hosted_as(ShadowProvider::Claude, &f.harness, &f.io, (true, &ready));
+    f.start_host();
     tokio::time::advance(std::time::Duration::from_secs(81 * 60)).await;
     assert_eq!(claim.peek(), Err(IdentityError::ChildDeliveryHeld));
     assert_eq!(reserved_adoption(CH), Adoption::Deferred);
-    std::fs::rename(&aside, &missing).unwrap();
+    *f.io.custody.lock().unwrap() = Ok(Custody::Free);
     *f.io.intake_pool.lock().unwrap() = Some(pool.clone());
     tokio::time::resume();
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
@@ -425,10 +472,12 @@ async fn existing_tmux_thread_holds_buffered_body_until_previous_sources_are_pro
         Ok(BodySend::OwnedByO)
     );
     assert_eq!(legacy.get(), 0);
+    f.stop_host().await;
     pool.close().await;
     db.drop().await;
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn reserved_child_preserves_old_source_offer_but_holds_reused_turn_nonce_on_new_source() {
     use crate::services::tui_o::channel_policy::LegacyRun;
@@ -516,6 +565,228 @@ async fn reserved_child_preserves_old_source_offer_but_holds_reused_turn_nonce_o
         Err::<BodySend<()>, _>(IdentityError::ChildDeliveryHeld)
     );
     assert_eq!(candidate.sends(), (1, 1));
+}
+
+#[cfg(unix)]
+async fn seed_resume_row(pool: &sqlx::PgPool, channel: u64, tmux: &str) {
+    sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id, claude_session_id) VALUES ($1, 'claude', 'disconnected', 'discord_channel', '0123456789abcdef', $2, $3)")
+        .bind(format!("test-node:{tmux}"))
+        .bind(channel.to_string())
+        .bind(SESSION)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[cfg(unix)]
+fn mark_fixture_launch(f: &Reserved, native: &str, resume: bool) -> String {
+    use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
+    let policy = cutover::claude_thread::launch_policy(f.binds.channel);
+    assert!(policy.is_some());
+    let launch = PreparedIncarnation::prepare_pinned(
+        "claude",
+        &f.binds.tmux,
+        Some(f.binds.channel),
+        Some(native),
+        resume,
+        Some(f.root().to_owned()),
+        (None, policy),
+    )
+    .unwrap();
+    crate::services::tmux_common::host_marker::record_tmux_host_marker(&f.binds.tmux);
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(&f.binds.tmux, "spawn_nonce"),
+        &launch.context.execution_nonce,
+    )
+    .unwrap();
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(&f.binds.tmux, ClaudeTui).unwrap();
+    launch.context.execution_nonce
+}
+
+#[cfg(unix)]
+fn verify_fixture_launch(f: &Reserved, source: &SourceId, nonce: &str) {
+    f.binds.append(
+        f.root(),
+        nonce,
+        Some(source.clone()),
+        p5::BindingTarget::Source(source.clone()),
+        p5::BindingCause::SameSessionVerified,
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resumed_thread_keeps_old_history_and_posts_only_its_new_turn_pg() {
+    const CH: u64 = 8_118_136;
+    const PARENT: u64 = 8_118_137;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for (channel, warm) in [(CH, false), (CH + 20, true)] {
+        exercise_resume(&pool, channel, PARENT, warm).await;
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[cfg(unix)]
+async fn exercise_resume(pool: &sqlx::PgPool, ch: u64, parent: u64, warm: bool) {
+    use crate::services::claude::tui_session_launch::{ResumePane, reserve_thread_body_before_key};
+    use crate::services::provider::ProviderKind;
+    use crate::services::tui_o::cutover::{BodyClaim, IdentityError};
+    use crate::services::turn_host::{self, TurnHost};
+
+    let tmux = Binds::new(ch).tmux;
+    seed_resume_row(pool, ch, &tmux).await;
+    let _hosts =
+        crate::config::session_hosts::force_for_test(Some("test-node"), &[(parent, "test-node")]);
+    let _policy = reserve_for(ch, Some(parent));
+    assert!(matches!(
+        turn_host::for_turn(
+            Some(pool),
+            &ProviderKind::Claude,
+            ch,
+            Some(&format!("test-node:{tmux}"))
+        )
+        .await,
+        TurnHost::Tmux
+    ));
+    tokio::time::pause();
+    let mut f = reserved_for(ch, Some(parent), |h, binds| {
+        let root = h._runtime.path();
+        let path = root.join("resumed.jsonl");
+        std::fs::write(&path, closed_reply(SESSION, "old", "old answer")).unwrap();
+        let source = binds.source(root, "old-execution", &path);
+        binds.append(
+            root,
+            "old-execution",
+            Some(source.clone()),
+            p5::BindingTarget::Source(source),
+            p5::BindingCause::SameSessionVerified,
+        );
+        path
+    })
+    .await;
+    let path = &f.legacy.path;
+    let start = path.metadata().unwrap().len();
+    let source = source_id_for(SESSION, path).unwrap();
+    if warm {
+        let nonce = mark_fixture_launch(&f, SESSION, true);
+        assert!(cutover::record_thread_child(&thread_for(ch, parent), false));
+        reserve_thread_body_before_key(Some(ch), &tmux, Some(&nonce), SESSION, path, true).unwrap();
+    } else {
+        cutover::claude_thread::reserve_resume(ch, &tmux, SESSION, path, ResumePane::Cold).unwrap();
+        let nonce = mark_fixture_launch(&f, SESSION, true);
+        reserve_thread_body_before_key(Some(ch), &tmux, Some(&nonce), SESSION, path, false)
+            .unwrap();
+    }
+    let body = BodyClaim::tmux(ch, Some(&f.binds.tmux));
+    assert_eq!(body.peek(), Err(IdentityError::ChildDeliveryHeld));
+    append(path, &closed_reply(SESSION, "new", "new answer"));
+    *f.io.intake_pool.lock().unwrap() = Some(pool.clone());
+    tokio::time::resume();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while f.harness.port.posts().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(f.init(), [(source, start)]);
+    assert_eq!(f.harness.port.posts(), ["new answer"]);
+    assert_eq!(body.peek(), Ok(true));
+    f.stop_host().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn protected_thread_restart_needs_no_receipts_for_closed_legacy_sources_pg() {
+    const CH: u64 = 8_118_138;
+    const PARENT: u64 = 8_118_139;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    exercise_protected_thread_restart(&pool, CH, PARENT, p5::BindingCause::Startup).await;
+    exercise_protected_thread_restart(&pool, CH + 20, PARENT, p5::BindingCause::Clear).await;
+    pool.close().await;
+    db.drop().await;
+}
+
+#[cfg(unix)]
+async fn exercise_protected_thread_restart(
+    pool: &sqlx::PgPool,
+    channel: u64,
+    parent: u64,
+    successor: p5::BindingCause,
+) {
+    use crate::services::tui_o::cutover::{
+        BodyClaim,
+        intake_route::{IntakeRoute, route_for_placement},
+    };
+
+    const NEXT_SESSION: &str = "c1a0de00-0000-4000-8000-000000007620";
+    seed_resume_row(pool, channel, &Binds::new(channel).tmux).await;
+    tokio::time::pause();
+    let mut f = reserved_for(channel, Some(parent), |h, binds| {
+        let root = h._runtime.path();
+        for (name, nonce) in [("old-A", "old-a"), ("old-B", "old-b")] {
+            let path = root.join(name);
+            std::fs::write(&path, closed_reply(SESSION, name, "already handled")).unwrap();
+            binds.source(root, nonce, &path);
+        }
+        root.join("old-B")
+    })
+    .await;
+    *f.io.custody.lock().unwrap() = Ok(Custody::Active);
+    let nonce = mark_fixture_launch(&f, SESSION, false);
+    let path = f.file("new-C", &closed_reply(SESSION, "new-C", "only C"));
+    let source = f.binds.source(f.root(), &nonce, &path);
+    verify_fixture_launch(&f, &source, &nonce);
+    f.stop_host().await;
+    assert!(f.harness.store.read_init(channel).unwrap().is_none());
+    assert!(f.harness.port.posts().is_empty());
+
+    let successor_nonce = if successor == p5::BindingCause::Clear {
+        nonce
+    } else {
+        mark_fixture_launch(&f, NEXT_SESSION, false)
+    };
+    let next = f.file("new-D", &closed_reply(NEXT_SESSION, "new-D", "only D"));
+    let next = source_id_for(NEXT_SESSION, &next).unwrap();
+    f.binds.append(
+        f.root(),
+        &successor_nonce,
+        Some(source.clone()),
+        p5::BindingTarget::Source(next.clone()),
+        successor,
+    );
+    verify_fixture_launch(&f, &next, &successor_nonce);
+    let boot = boot_for(parent);
+    boot.reserve_boot_children(&[(channel, parent)]);
+    let _restored = test_override::force_boot(boot);
+    cutover::claude_thread::record_restored(&thread_for(channel, parent), &f.binds.tmux);
+    assert_eq!(
+        route_for_placement("claude", channel),
+        IntakeRoute::Unselected
+    );
+    *f.io.custody.lock().unwrap() = Ok(Custody::Free);
+    *f.io.intake_pool.lock().unwrap() = Some(pool.clone());
+    f.start_host();
+    tokio::time::resume();
+    tokio::time::timeout(std::time::Duration::from_secs(12), async {
+        while f.harness.port.posts().len() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the protected new answer must not wait for closed Legacy receipts");
+    assert_eq!(f.init(), [(source, 0), (next, 0)]);
+    assert_eq!(f.harness.port.posts(), ["only C", "only D"]);
+    assert_eq!(
+        BodyClaim::tmux(channel, Some(&f.binds.tmux)).peek(),
+        Ok(true)
+    );
+    f.stop_host().await;
 }
 
 /// A fresh launch binds Pending until its transcript exists; once resolved with its first prompt

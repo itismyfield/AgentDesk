@@ -189,6 +189,8 @@ fn request(session: &str) -> Request<'_> {
         text: PROMPT,
         cancel: None,
         timing: &FAST,
+        warm: false,
+        channel: None,
     }
 }
 

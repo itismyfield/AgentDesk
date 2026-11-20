@@ -215,7 +215,7 @@ fn record_in(
     if kind == RuntimeHandoffKind::ClaudeTui {
         crate::services::claude::tui_session_launch::install_thread_writer_policy(
             claude_thread::launch_policy,
-            claude_thread::earlier_launch_pending,
+            claude_thread::reserve_resume,
         );
     }
     snapshot.resolve_child(channel.id.get(), surface, fresh)
@@ -408,9 +408,6 @@ fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
         // The input stales any older retirement ticket and supersedes a retired store.
         if let Some(channel) = channel.filter(|_| child.is_some()) {
             snapshot.child_input_arrived(channel)?;
-            if claude_thread::earlier_launch_pending(channel, None) {
-                return Err("the thread writer is still settling an earlier launch".into());
-            }
         }
         if let Some(channel) = channel
             && let Some(view) = snapshot.execution(channel)

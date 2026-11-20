@@ -149,7 +149,6 @@ async fn attempt<I: HostIo>(
     };
     // A source bound while a deferred handoff waited, with the floor its old source's proof gave.
     let mut rebased: Option<deferred::Rebased> = None;
-    let mut reserved_proofs = Vec::new();
     let (mut short, mut logged) = (0, None);
     loop {
         if candidate.peek() != Adoption::Deferred {
@@ -196,7 +195,7 @@ async fn attempt<I: HostIo>(
             let reserved =
                 candidate.child_surface().is_some() && claude::thread::is_protected(&events);
             let looked = match (&floor, reserved) {
-                (Ok(floor), _) => claude::look(&at, &events, *floor, &reserved_proofs).await,
+                (Ok(floor), _) => claude::look(&at, &events, *floor).await,
                 (Err(_), true) => {
                     claude::look(
                         &at,
@@ -205,7 +204,6 @@ async fn attempt<I: HostIo>(
                             seq: boundary.takeover_after,
                             sends,
                         },
-                        &reserved_proofs,
                     )
                     .await
                 }
@@ -283,10 +281,7 @@ async fn attempt<I: HostIo>(
                         rebased = Some(next);
                         continue;
                     }
-                    Retried::ReservedClaude(proofs) => {
-                        reserved_proofs = proofs;
-                        continue;
-                    }
+                    Retried::ReservedClaude => continue,
                 }
             }
             let no_bound_source = first_bound(&events).is_none()

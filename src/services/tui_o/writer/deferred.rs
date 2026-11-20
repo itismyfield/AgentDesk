@@ -53,7 +53,7 @@ pub(super) enum Retried {
     Left,
     /// A late reservation's current source moved while it waited.
     Rebase(Rebased),
-    ReservedClaude(Vec<Owed>),
+    ReservedClaude,
 }
 
 /// The next source bound after the old one and the takeover floor its predecessors' proofs give.
@@ -306,14 +306,7 @@ pub(super) async fn retry<I: HostIo>(
             && candidate.child_surface().is_some()
             && claude::thread::is_protected(&observed)
         {
-            let mut proofs = waiting.owed;
-            if let Some(sample) = sample {
-                proofs.push(Owed {
-                    old: waiting.bound,
-                    sample: Some(sample),
-                });
-            }
-            return Retried::ReservedClaude(proofs);
+            return Retried::ReservedClaude;
         }
         if waiting.late
             && candidate.child_surface().is_some()

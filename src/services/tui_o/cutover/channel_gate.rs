@@ -26,7 +26,7 @@ pub(crate) enum IdentityError {
     UnselectedTui,
     #[error("thread child has no resolved parent policy or decided adoption")]
     ChildHeld,
-    #[error("thread writer is waiting for its execution and earlier delivery proofs")]
+    #[error("thread writer is waiting for its verified source and delivery fence")]
     ChildDeliveryHeld,
 }
 
@@ -454,7 +454,7 @@ fn session_kind(channel: u64, session: Option<&str>) -> Option<RuntimeHandoffKin
             .map(|binding| binding.runtime_kind)
             .or_else(|| crate::services::tmux_common::resolve_tmux_runtime_kind_marker(session))
             .or_else(|| {
-                super::claude_thread::holds_tmux_body(channel, session)
+                super::claude_thread::held_runtime_context(channel, session)
                     .then_some(RuntimeHandoffKind::ClaudeTui)
             })
     })
@@ -537,14 +537,35 @@ fn decide_with_snapshot(
         return Err(IdentityError::UnknownChannel);
     }
     // The body and its host share both state and sends.
-    let judged = |candidate: &channel_policy::Candidate| match usage {
-        Use::Body => match origin {
-            Some(origin) => candidate.claim_body_from(channel_id, origin),
-            None => candidate.claim_body(channel_id),
-        },
+    // The inner None is a boot child whose parent has yet to resolve.
+    let judged = |candidate: &channel_policy::Candidate, thread: Option<Option<u64>>| match usage {
+        Use::Body => candidate.claim_body_from(
+            channel_id,
+            origin.unwrap_or_else(std::panic::Location::caller),
+            |state| {
+                if !state.owned()
+                    && (thread.is_some() || evidence.reserved)
+                    && (evidence.reserved
+                        || super::claude_thread::resume_fenced(
+                            channel_id,
+                            evidence.session,
+                            thread.flatten(),
+                        ))
+                    && !super::claude_thread::names_legacy_turn(
+                        channel_id,
+                        candidate,
+                        evidence.nonce,
+                        evidence.source,
+                    )
+                {
+                    return Err(IdentityError::ChildDeliveryHeld);
+                }
+                Ok(())
+            },
+        ),
         Use::Peek => {
             let state = candidate.peek();
-            BodyClaimed {
+            Ok(BodyClaimed {
                 owned: state.owned(),
                 send: None,
                 reason: if state == channel_policy::Adoption::Pending {
@@ -552,7 +573,7 @@ fn decide_with_snapshot(
                 } else {
                     state.claim_reason()
                 },
-            }
+            })
         }
     };
     // A boot reservation with no parent read yet stays Legacy's; its sends gate the later handoff.
@@ -562,7 +583,7 @@ fn decide_with_snapshot(
         {
             return Err(IdentityError::ChildDeliveryHeld);
         }
-        return Ok(judged(&reserved));
+        return judged(&reserved, Some(None));
     }
     // The parent selects the policy. A known thread offers the kind of its own execution.
     let child = match snapshot.child(channel_id) {
@@ -592,9 +613,12 @@ fn decide_with_snapshot(
         && !child.candidate.peek().owned()
         && (evidence.reserved
             || super::claude_thread::holds_body(snapshot, channel_id, evidence.session))
-        && !child
-            .candidate
-            .names_legacy_turn(evidence.nonce, evidence.source)
+        && !super::claude_thread::names_legacy_turn(
+            channel_id,
+            &child.candidate,
+            evidence.nonce,
+            evidence.source,
+        )
     {
         return Err(IdentityError::ChildDeliveryHeld);
     }
@@ -634,12 +658,13 @@ fn decide_with_snapshot(
     // A child has its own adoption; an undecided one is held, as a claim would release it.
     if let Some(child) = child {
         child.body_owner().ok_or(IdentityError::ChildHeld)?;
-        return Ok(judged(&child.candidate));
+        let parent = (child.kind == RuntimeHandoffKind::ClaudeTui).then_some(Some(child.parent));
+        return judged(&child.candidate, parent);
     }
     let Some(candidate) = snapshot.candidate(channel_id) else {
         return Ok(legacy(ClaimReason::NoCandidate));
     };
-    Ok(judged(candidate))
+    judged(candidate, None)
 }
 
 #[cfg(test)]

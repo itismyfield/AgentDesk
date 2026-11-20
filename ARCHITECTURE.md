@@ -4570,8 +4570,7 @@ src/
 │   │   │   ├── late_adopt/
 │   │   │   │   ├── claude/
 │   │   │   │   │   ├── prefix.rs
-│   │   │   │   │   ├── prefix_tests.rs
-│   │   │   │   │   └── thread.rs
+│   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   ├── codex/
 │   │   │   │   │   ├── buffered_tests.rs
 │   │   │   │   │   ├── prefix.rs

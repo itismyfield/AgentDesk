@@ -316,22 +316,33 @@ impl Candidate {
     /// Whether O owns the channel for a placement, which carries no body; a pending adoption is
     /// released first. A placement is not a Legacy send, so it is not counted.
     pub(in crate::services::tui_o) fn claim(&self, channel: u64) -> bool {
-        self.take(channel).0.owned()
+        let mut state = self.lock();
+        self.take(channel, &mut state);
+        state.owned()
     }
 
     /// Whether O owns the channel for a body Legacy would otherwise send, releasing a pending
     /// adoption first; a Legacy send is counted under this lock until its guard drops.
     #[track_caller]
+    #[cfg(test)]
     pub(in crate::services::tui_o) fn claim_body(&self, channel: u64) -> BodyClaimed {
-        self.claim_body_from(channel, std::panic::Location::caller())
+        self.claim_body_from(
+            channel,
+            std::panic::Location::caller(),
+            |_| Ok::<(), ()>(()),
+        )
+        .expect("unconditional body claim")
     }
 
-    pub(in crate::services::tui_o) fn claim_body_from(
+    pub(in crate::services::tui_o) fn claim_body_from<E>(
         &self,
         channel: u64,
         origin: &'static std::panic::Location<'static>,
-    ) -> BodyClaimed {
-        let (state, reason) = self.take(channel);
+        verify: impl FnOnce(Adoption) -> Result<(), E>,
+    ) -> Result<BodyClaimed, E> {
+        let mut state = self.lock();
+        verify(*state)?;
+        let reason = self.take(channel, &mut state);
         let owned = state.owned();
         #[cfg(test)]
         if !owned {
@@ -353,15 +364,14 @@ impl Candidate {
             mark_seq = mark.map(|m| m.seq), mark_sends = ?mark.map(|m| m.sends),
             "[tui_o] body claim");
         drop(state);
-        BodyClaimed {
+        Ok(BodyClaimed {
             owned,
             send,
             reason,
-        }
+        })
     }
 
-    fn take(&self, channel: u64) -> (MutexGuard<'_, Adoption>, ClaimReason) {
-        let mut state = self.lock();
+    fn take(&self, channel: u64, state: &mut Adoption) -> ClaimReason {
         let reason = state.claim_reason();
         if *state == Adoption::Pending {
             *state = Adoption::Released;
@@ -369,7 +379,7 @@ impl Candidate {
             body_check::note_release(self);
             tracing::info!(channel, "[tui_o] Legacy took the channel before O adoption");
         }
-        (state, reason)
+        reason
     }
 
     /// Legacy body sends this channel started and finished so far; callers hold the state lock.
