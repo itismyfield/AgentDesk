@@ -134,8 +134,9 @@ const SYNTAX_CASES: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
-fn assert_review_cases(body: &str, cases: &[(&str, &str, &[&str])]) {
-    for (name, _, fragments) in cases {
+fn assert_review_secrets_absent(body: &[u8]) {
+    let body = std::str::from_utf8(body).unwrap();
+    for (name, _, fragments) in PEM_CASES.iter().chain(SYNTAX_CASES) {
         assert!(
             fragments.iter().all(|fragment| !body.contains(fragment)),
             "{name}: credential fragment leaked"
@@ -328,8 +329,7 @@ async fn prompt_audit_docs_publish_both_response_contracts() {
     let (status, Json(document)) =
         api_docs_group_category(Path(("agents".to_owned(), "agents".to_owned()))).await;
     assert_eq!(status, StatusCode::OK);
-    assert_review_cases(&document.to_string(), SYNTAX_CASES);
-    assert_review_cases(&document.to_string(), PEM_CASES);
+    assert_review_secrets_absent(document.to_string().as_bytes());
     let endpoints = document["endpoints"].as_array().unwrap();
     for (path, field) in [
         ("/api/agents/{id}/prompt-audit", "sections"),
@@ -457,16 +457,13 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
     ] {
         let (status, body) = get(&router, path, authenticated).await;
         assert_eq!(status, expected);
-        let body = std::str::from_utf8(&body).unwrap();
-        assert_review_cases(body, SYNTAX_CASES);
-        assert_review_cases(body, PEM_CASES);
+        assert_review_secrets_absent(&body);
     }
     let (status, bytes) = get(&router, uri, true).await;
     assert_eq!(status, StatusCode::OK);
     let serialized = std::str::from_utf8(&bytes).unwrap();
     assert_masked(serialized);
-    assert_review_cases(serialized, SYNTAX_CASES);
-    assert_review_cases(serialized, PEM_CASES);
+    assert_review_secrets_absent(&bytes);
     assert!(!serialized.contains("fixture-anchor-password"));
     assert!(!serialized.contains("different agent private text"));
     let response: Value = serde_json::from_slice(&bytes).unwrap();
@@ -494,9 +491,7 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
             .unwrap()
             .contains("fixture-anchor-password")
     );
-    let body = std::str::from_utf8(&bytes).unwrap();
-    assert_review_cases(body, SYNTAX_CASES);
-    assert_review_cases(body, PEM_CASES);
+    assert_review_secrets_absent(&bytes);
     let response: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(response["source"], "latest_saved");
     assert_eq!(response["memento"]["status"], "unconfigured");
@@ -554,17 +549,14 @@ async fn prompt_audit_http_masks_saved_prompt_and_checks_binding_pg() {
         .unwrap();
     let (status, body) = get(&router, anchor_uri, true).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    let body = std::str::from_utf8(&body).unwrap();
-    assert_review_cases(body, SYNTAX_CASES);
-    assert_review_cases(body, PEM_CASES);
+    assert_review_secrets_absent(&body);
 
     drop(trace);
     log.rewind().unwrap();
     let mut captured = String::new();
     log.read_to_string(&mut captured).unwrap();
     assert!(captured.contains("audit fixture started"));
-    assert_review_cases(&captured, SYNTAX_CASES);
-    assert_review_cases(&captured, PEM_CASES);
+    assert_review_secrets_absent(captured.as_bytes());
 
     drop(router);
     pool.close().await;
