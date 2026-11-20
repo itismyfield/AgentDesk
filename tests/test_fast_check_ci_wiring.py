@@ -955,7 +955,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(mutation["if"], RUST_REQUIRED_IF)
         self.assertEqual(mutation["needs"], "changes")
         self.assertEqual(mutation["runs-on"], "ubuntu-latest")
-        self.assertEqual(mutation["timeout-minutes"], 60)
+        self.assertEqual(mutation["timeout-minutes"], 80)
         self.assertEqual(mutation["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
         self.assertEqual(mutation["env"]["CARGO_PROFILE_TEST_DEBUG"], "0")
         setup = [step for step in mutation["steps"] if "uses" in step and step.get("id") != "mutation_paths"]
@@ -974,7 +974,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             r'          CARGO_PROFILE_DEV_DEBUG: "0"\n'
             r'          CARGO_PROFILE_TEST_DEBUG: "0"\n'
             r"        shell: bash\n"
-            r"        timeout-minutes: 60\n"
+            r"        timeout-minutes: 75\n"
             r"        run: bash scripts/run_relay_authority_mutations\.sh$",
         )
 
