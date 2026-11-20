@@ -564,6 +564,7 @@ pub(super) async fn run_bridge_stream_tick(
             "turn_bridge::stream_tick::dirty_flush",
         )
         .await;
+        session_row_writer.observe(flush_outcome);
         state_dirty = dirty_after_guarded_save(flush_outcome);
         if flush_outcome == GuardedSaveOutcome::Saved {
             reconcile_tick_runtime_from_inflight!(current_msg_id_before_flush);

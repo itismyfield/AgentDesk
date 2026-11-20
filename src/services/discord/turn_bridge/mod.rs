@@ -69,10 +69,7 @@ use super::turn_view_reconciler::{
     note_intake_turn_failed_via_shared as tv_fail, note_intake_turn_stopped_via_shared as tv_stop,
 };
 use super::*;
-use crate::db::session_observability::{
-    BackgroundChildSpawn, close_background_child_pg, insert_background_child_pg,
-    mark_session_tool_use_pg,
-};
+use crate::db::session_observability::{BackgroundChildSpawn, close_background_child_pg};
 use crate::db::session_transcripts::ChannelClearFence;
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::TurnTokenUsage;

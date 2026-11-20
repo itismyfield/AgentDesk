@@ -432,6 +432,7 @@ pub(super) async fn run_stream_loop(
                                     footer_owner,
                                     current_msg_id: &mut current_msg_id,
                                     captured_nonce: cancel_token.turn_nonce(),
+                                    session_row_released: session_row_writer.released(),
                                 },
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
@@ -498,6 +499,7 @@ pub(super) async fn run_stream_loop(
                                     footer_owner,
                                     current_msg_id: &mut current_msg_id,
                                     captured_nonce: cancel_token.turn_nonce(),
+                                    session_row_released: session_row_writer.released(),
                                 },
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
@@ -571,6 +573,7 @@ pub(super) async fn run_stream_loop(
                                     footer_owner,
                                     current_msg_id: &mut current_msg_id,
                                     captured_nonce: cancel_token.turn_nonce(),
+                                    session_row_released: session_row_writer.released(),
                                 },
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
