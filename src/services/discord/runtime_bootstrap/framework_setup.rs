@@ -222,6 +222,7 @@ pub(in crate::services::discord) fn run_bot_build_slash_commands()
         commands::cmd_health(),
         commands::cmd_allowall(),
         commands::cmd_usage(),
+        commands::cmd_usage_footer(),
         commands::cmd_help(),
         commands::cmd_system_prompt(),
         commands::cmd_restart(),

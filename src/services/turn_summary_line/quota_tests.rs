@@ -1,5 +1,26 @@
 use super::*;
-use crate::services::turn_summary_line::{Outcome, render};
+use crate::services::turn_summary_line::{Footer, Outcome, render as render_footer};
+
+fn render(
+    outcome: Outcome,
+    elapsed_ms: Option<u64>,
+    context_pct: Option<u8>,
+    quota: Option<Quota>,
+) -> String {
+    render_footer(
+        outcome,
+        Footer {
+            elapsed_ms,
+            context_pct,
+            quota,
+            ..Footer::default()
+        },
+    )
+}
+
+fn codex(data: &str, now: DateTime<Utc>) -> Option<Quota> {
+    buckets(data, now, false)
+}
 use serde_json::json;
 
 #[cfg(unix)]
@@ -77,7 +98,20 @@ fn statusline_quota_reaches_o_summary_when_cswap_usage_is_429() {
         })
         .collect::<Vec<_>>();
     let expected = format!(
-        "-# ⏱️ 2초 · 5h 24% ({}) · 7d 61% ({})",
+        "-# ⏱️ 2초 ({})\n-# 5h 24% ({}) · 7d 61% ({})",
+        (started + chrono::Duration::seconds(2))
+            .with_timezone(&chrono_tz::Asia::Seoul)
+            .format(
+                if started.with_timezone(&chrono_tz::Asia::Seoul).date_naive()
+                    == (started + chrono::Duration::seconds(2))
+                        .with_timezone(&chrono_tz::Asia::Seoul)
+                        .date_naive()
+                {
+                    "%H:%M"
+                } else {
+                    "%m/%d %H:%M"
+                }
+            ),
         five_reset
             .with_timezone(&chrono_tz::Asia::Seoul)
             .format("%H:%M"),
@@ -188,10 +222,10 @@ fn active_claude_quota_renders_one_line_in_order_with_kst_resets() {
     let line = render(Outcome::Completed, Some(150_000), Some(45), Some(quota));
     assert_eq!(
         line,
-        "-# ⏱️ 2분 30초 · 📦 45% · 5h 15% (11:30) · 7d 38% (10/27 16:00)"
+        "-# ⏱️ 2분 30초 · 📦 45%\n-# 5h 15% (11:30) · 7d 38% (10/27 16:00)"
     );
-    assert!(!line.chars().any(char::is_control));
-    assert_eq!(line.lines().count(), 1);
+    assert!(line.lines().all(|part| !part.chars().any(char::is_control)));
+    assert_eq!(line.lines().count(), 2);
     let mut rollover = accounts();
     rollover.accounts[1]
         .usage
@@ -208,7 +242,7 @@ fn active_claude_quota_renders_one_line_in_order_with_kst_resets() {
             Some(45),
             claude(&rollover, now())
         ),
-        "-# ⏱️ 2분 30초 · 📦 45% · 5h 15% (11:30) · 7d 38% (10/27 08:45)"
+        "-# ⏱️ 2분 30초 · 📦 45%\n-# 5h 15% (11:30) · 7d 38% (10/27 08:45)"
     );
 }
 
@@ -304,14 +338,20 @@ fn quota_windows_need_valid_percent_and_a_future_reset() {
         None,
         claude(&response, now()),
     );
-    assert_eq!(line, "-# ⏱️ 1초 · 7d 38% (10/27 16:00)");
+    assert_eq!(line, "-# ⏱️ 1초\n-# 7d 38% (10/27 16:00)");
 }
 
 fn cache() -> RwLock<Cache> {
     RwLock::new(Cache {
         quotas: BTreeMap::from([
-            ("default".into(), (now(), codex(&data(90), now()).unwrap())),
-            ("named".into(), (now(), codex(&data(15), now()).unwrap())),
+            (
+                ("codex".into(), "default".into()),
+                (now(), codex(&data(90), now()).unwrap()),
+            ),
+            (
+                ("codex".into(), "named".into()),
+                (now(), codex(&data(15), now()).unwrap()),
+            ),
         ]),
         profiles: BTreeMap::from([(
             ("codex".into(), 42),
@@ -383,13 +423,17 @@ fn codex_requires_the_selected_profile_and_a_fresh_cache() {
         None
     );
     cache.write().unwrap().profiles.get_mut(&key).unwrap().at = now();
-    cache.write().unwrap().quotas.remove("named");
+    cache
+        .write()
+        .unwrap()
+        .quotas
+        .remove(&("codex".into(), "named".into()));
     assert_eq!(
         cached_codex(&cache, 42, Selected::Before(now()), now()),
         None
     );
     assert_eq!(
-        snapshot("unsupported", 42, Some(Selected::Before(now())), None),
+        snapshot("unsupported", 42, Some(Selected::Before(now())), None, true).quota,
         None
     );
 }
@@ -416,7 +460,7 @@ fn codex_incomplete_duplicate_and_unrelated_windows_are_not_zero_percent() {
     );
     assert_eq!(
         render(Outcome::Completed, Some(1000), None, quota),
-        "-# ⏱️ 1초 · 5h 0% (11:30)"
+        "-# ⏱️ 1초\n-# 5h 0% (11:30)"
     );
 }
 
@@ -511,11 +555,64 @@ fn recorded_profile_and_collected_quota_reach_the_o_summary_boundary() {
         })
         .collect::<Vec<_>>();
     assert_eq!(lines.len(), 1);
-    assert!(lines[0].starts_with("-# ⏱️ 2초 · 5h 15% ("), "{lines:?}");
+    assert!(lines[0].starts_with("-# ⏱️ 2초 ("), "{lines:?}");
+    assert!(lines[0].contains("\n-# 5h 15% ("), "{lines:?}");
     assert!(lines[0].contains(" · 7d 38% ("), "{lines:?}");
     publish("codex", &overlay.profile_id, "{}", started.timestamp());
     assert_eq!(
-        snapshot("codex", channel, Some(Selected::Before(started)), None),
+        snapshot(
+            "codex",
+            channel,
+            Some(Selected::Before(started)),
+            None,
+            true
+        )
+        .quota,
         None
+    );
+}
+
+#[test]
+fn claude_fable_scoped_window_supplements_the_fresh_session_quota() {
+    let session = claude(&accounts(), now());
+    let mut response = accounts();
+    response.accounts[1].usage.as_mut().unwrap().extra.insert(
+        "scoped".into(),
+        json!([
+            {"name":"Other","pct":87,"resetsAt":"2026-10-27T07:00:00Z"},
+            {"name":"Fable","pct":47.6,"resetsAt":"2026-10-27T23:45:00Z"},
+        ]),
+    );
+    let account = claude(&response, now());
+    assert_eq!(
+        render(
+            Outcome::Completed,
+            Some(1000),
+            None,
+            merge_claude(session, account)
+        ),
+        "-# ⏱️ 1초\n-# 5h 15% (11:30) · 7d 38% (10/27 16:00) · Fable 7d 48% (10/28 08:45)"
+    );
+    response.usage_data_stale = true;
+    assert_eq!(merge_claude(session, claude(&response, now())), session);
+}
+
+#[test]
+fn fable_bucket_is_available_for_claude_profiles_and_ignored_for_codex() {
+    let data = json!({"buckets":[
+        {"name":"7d Fable","used":22,"limit":100,"reset":1793084400_i64}
+    ]})
+    .to_string();
+    assert_eq!(codex(&data, now()), None);
+    assert_eq!(
+        render_footer(
+            Outcome::Completed,
+            Footer {
+                ended: Some(now()),
+                quota: buckets(&data, now(), true),
+                ..Footer::default()
+            }
+        ),
+        "-# ✅ 완료 (09:00)\n-# Fable 7d 22% (10/27 16:00)"
     );
 }

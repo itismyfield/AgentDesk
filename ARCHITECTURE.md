@@ -1457,6 +1457,8 @@ src/
 │   │   │   ├── herdr_cancel.rs
 │   │   │   ├── inline_banner.rs
 │   │   │   └── submission.rs
+│   │   ├── rollout_index/
+│   │   │   └── summary_context.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── parser/
 │   │   │   │   ├── handoff_binding_tests.rs
@@ -1699,7 +1701,8 @@ src/
 │   │   │   ├── tmux_recreate.rs
 │   │   │   ├── tool_call.rs
 │   │   │   ├── tool_call_tests.rs
-│   │   │   └── tui_passthrough.rs
+│   │   │   ├── tui_passthrough.rs
+│   │   │   └── usage_footer.rs
 │   │   ├── delivery_lease_cell/
 │   │   │   ├── exact_lease/
 │   │   │   │   └── tests.rs
@@ -2767,7 +2770,8 @@ src/
 │   │   │   ├── durable_ancestors_tests.rs
 │   │   │   ├── durable_publish.rs
 │   │   │   ├── durable_publish_tests.rs
-│   │   │   └── durable_stores_tests.rs
+│   │   │   ├── durable_stores_tests.rs
+│   │   │   └── usage_footer.rs
 │   │   ├── session_relay_sink/
 │   │   │   ├── fixtures/
 │   │   │   │   └── o_writer.rs

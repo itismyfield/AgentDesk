@@ -428,3 +428,33 @@ async fn a_disposed_retained_tail_without_its_u0_mark_never_backfills_after_gc()
         assert_eq!(state.violation(), None);
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn prepared_old_footer_reconciles_using_its_saved_bytes_after_format_change() {
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let records = records("old-footer", 0);
+    let mut writer = harness.writer();
+    let mut derive = deriver(&mut writer);
+    derive.derive(&records[0]);
+    deliver_all(&mut writer, &derive.derive(&records[1])).await;
+    let mut prepared = summary(&derive.derive(&records[2]));
+    prepared.payload = "-# ⏱️ 10초 · 📦 10%".into();
+    crash_after_uncertain_post(&harness, &mut writer, &prepared).await;
+    drop(writer);
+
+    let mut writer = harness.writer();
+    let new_payload = summary(&replay(&mut writer, &records).await).payload;
+    assert_eq!(new_payload, "-# ⏱️ 10초 (09:00) · 📦 10%");
+    assert_eq!(
+        harness.port.posts(),
+        ["answer old-footer", &prepared.payload]
+    );
+    let (_, saved) = writer
+        .store()
+        .ledger()
+        .latest_piece(&prepared.unit_key, 0)
+        .unwrap();
+    assert_eq!(saved.payload, prepared.payload);
+    assert!(matches!(saved.outcome, Some(PieceOutcome::Posted(_))));
+}

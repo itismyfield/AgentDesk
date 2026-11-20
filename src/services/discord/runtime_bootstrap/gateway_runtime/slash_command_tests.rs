@@ -705,7 +705,7 @@ fn autocomplete_busy_cache_returns_empty_before_discord_deadline() {
 #[test]
 fn registered_choices_cover_every_fixed_slash_parameter() {
     let commands = run_bot_build_slash_commands();
-    assert_eq!(commands.len(), 24);
+    assert_eq!(commands.len(), 25);
     let inspect = commands.iter().find(|c| c.name == "adk").unwrap();
     assert_eq!(inspect.subcommands.len(), 1);
     for (command, parameter, expected) in [
@@ -736,6 +736,26 @@ fn registered_choices_cover_every_fixed_slash_parameter() {
         assert_eq!(names, expected, "{command}");
         assert!(names.len() <= 25 && names.iter().all(|name| name.chars().count() <= 100));
     }
+}
+
+#[test]
+fn usage_footer_registers_optional_on_off_choices() {
+    let command = run_bot_build_slash_commands()
+        .into_iter()
+        .find(|command| command.name == "usage-footer")
+        .expect("usage-footer slash command must be registered");
+    let registered = serde_json::to_value(command.create_as_slash_command().unwrap()).unwrap();
+    let options = registered["options"].as_array().unwrap();
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0]["name"], "action");
+    assert_ne!(options[0]["required"], true);
+    let choices: Vec<_> = options[0]["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|choice| choice["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(choices, ["on", "off"]);
 }
 
 const EFFORT_LEVELS: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
