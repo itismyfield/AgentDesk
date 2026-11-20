@@ -3,18 +3,32 @@ title: "Herdr 실행 퇴역 뒤 세션 행 status"
 ---
 stateDiagram-v2
   s0: 턴 진행 #183; 실행 Bound #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy
-  s1: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy
-  s2: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남
-  s3: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown
-  s4: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남
-  s5: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남
-  s6: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남
+  s1: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; reader 행 상실
+  s2: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; 한때 끝남 #183; reader 행 상실
+  s3: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; reader 행 상실
+  s4: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; reader 행 상실
+  s5: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s6: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; 한때 끝남 #183; reader 행 상실
+  s7: force postlude 전 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s8: force postlude 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; reader 행 상실
+  s9: 취소#183;row end 끝 #183; 실행 Retired #183; 행 disconnected(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
+  s10: force postlude 전 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; reader 행 상실
   [*] --> s0
   s0 --> s1: terminate#183;row end 퇴역
   s1 --> s2: force postlude disconnect
-  s1 --> s3: 600초 정체 #8594; unknown
-  s2 --> s4: 300초 경과
-  s2 --> s5: 600초 정체 #8594; unknown
+  s1 --> s3: 300초 경과
+  s1 --> s4: 600초 정체 #8594; unknown
+  s2 --> s5: 300초 경과
+  s2 --> s6: 600초 정체 #8594; unknown
   s3 --> s5: force postlude disconnect
-  s4 --> s6: 600초 정체 #8594; unknown
-  s5 --> s6: 300초 경과
+  s3 --> s7: stale sweep idle
+  s3 --> s8: 600초 정체 #8594; unknown
+  s4 --> s6: force postlude disconnect
+  s4 --> s8: 300초 경과
+  s5 --> s9: 600초 정체 #8594; unknown
+  s6 --> s9: 300초 경과
+  s7 --> s5: force postlude disconnect
+  s7 --> s10: 600초 정체 #8594; unknown
+  s8 --> s9: force postlude disconnect
+  s8 --> s10: stale sweep idle
+  s10 --> s9: force postlude disconnect

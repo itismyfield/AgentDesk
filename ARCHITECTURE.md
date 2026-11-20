@@ -3255,6 +3255,7 @@ src/
 │   │   │   │   ├── tool_arms/
 │   │   │   │   │   ├── authority.rs
 │   │   │   │   │   ├── authority_tests.rs
+│   │   │   │   │   ├── session_activity.rs
 │   │   │   │   │   ├── task_notification.rs
 │   │   │   │   │   └── types.rs
 │   │   │   │   ├── content_arms.rs
@@ -3396,6 +3397,7 @@ src/
 │   │   │   ├── resume_pin_tests.rs
 │   │   │   ├── retry_state.rs
 │   │   │   ├── runtime_handoff_loop.rs
+│   │   │   ├── session_row_writer.rs
 │   │   │   ├── single_message_footer.rs
 │   │   │   ├── skill_usage.rs
 │   │   │   ├── stale_resume.rs

@@ -43,6 +43,7 @@ mod stream_loop;
 pub(crate) use stream_loop::types::terminal_prepare_test::{
     TERMINAL_PREPARE_TEST_HOOK, TerminalPrepareTestHook,
 };
+mod session_row_writer;
 mod stream_receiver;
 mod stream_tick;
 mod streaming_edit_text;
@@ -68,10 +69,7 @@ use super::turn_view_reconciler::{
     note_intake_turn_failed_via_shared as tv_fail, note_intake_turn_stopped_via_shared as tv_stop,
 };
 use super::*;
-use crate::db::session_observability::{
-    BackgroundChildSpawn, close_background_child_pg, insert_background_child_pg,
-    mark_session_tool_use_pg,
-};
+use crate::db::session_observability::{BackgroundChildSpawn, close_background_child_pg};
 use crate::db::session_transcripts::ChannelClearFence;
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::TurnTokenUsage;
@@ -383,7 +381,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         };
         let mut terminal_session_reset_required = false;
         let mut recovery_retry = false;
-        let mut last_adk_heartbeat = std::time::Instant::now();
+        let mut session_row_writer = session_row_writer::SessionRowWriter::new();
         let mut pending_stream_messages: VecDeque<StreamMessage> = VecDeque::new();
         // #3084: pair tool_result → tool_use by provider tool-use id when the
         // backend supplies one. A long-running Task subagent returns its result
@@ -635,7 +633,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 session_handshake_seen: &mut session_handshake_seen,
                 terminal_session_reset_required: &mut terminal_session_reset_required,
                 recovery_retry: &mut recovery_retry,
-                last_adk_heartbeat: &mut last_adk_heartbeat,
+                session_row_writer: &mut session_row_writer,
                 pending_stream_messages: &mut pending_stream_messages,
                 pending_status_tool_results: &mut pending_status_tool_results,
                 pending_status_tool_results_by_id: &mut pending_status_tool_results_by_id,
@@ -707,6 +705,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 turn_id: turn_id.clone(),
                 current_msg_id,
                 entry_was_rowless,
+                session_row_released: session_row_writer.released(),
                 synthetic_actor: is_external_input_tui_direct.then(|| cancel_token.clone()),
                 codex_tui_terminal_range: stream_loop_output.codex_tui_terminal_range.clone(),
                 cancelled,

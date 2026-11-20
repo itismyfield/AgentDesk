@@ -124,6 +124,8 @@ async fn drive(
         pending_current_message_candidate: &mut pending,
         bridge_created_response_placeholder_msg_id: &mut created,
         bridge_spans: &mut spans,
+        session_row_writer:
+            &mut crate::services::discord::turn_bridge::session_row_writer::SessionRowWriter::new(),
     };
     let claim = BodyClaim::new(channel.get(), None);
     let rolled = match run_rollover_loop(&context, &mut tick, &mut dirty, claim).await {
