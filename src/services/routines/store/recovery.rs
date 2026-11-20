@@ -15,6 +15,7 @@ pub(in crate::services::routines) struct RecoveringOwnerRun {
     pub(super) run_id: String,
     pub(super) turn_id: String,
     pub(super) owner_input: Value,
+    pub(in crate::services::routines) owner_confirmed: bool,
 }
 
 impl RecoveringOwnerRun {
@@ -44,7 +45,9 @@ impl RoutineStore {
              SET result_json = jsonb_set(rr.result_json, '{owner_recovering}', 'true'),
                  updated_at = NOW()
              FROM expired WHERE rr.id = expired.id
-             RETURNING rr.id AS run_id, rr.turn_id, rr.result_json->'owner_input' AS owner_input",
+             RETURNING rr.id AS run_id, rr.turn_id, rr.result_json->'owner_input' AS owner_input,
+                       COALESCE(rr.result_json->>'status' IN ('accepted', 'started'), FALSE)
+                           AS owner_confirmed",
         )
         .fetch_all(&*self.pool)
         .await?)

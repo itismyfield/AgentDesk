@@ -27,11 +27,14 @@ pub(super) fn pin_delivery_deadline(
 async fn settle(
     executor: &RoutineAgentExecutor,
     (run_id, turn_id): (&str, &str),
-    raw: &Value,
+    (raw, owner_confirmed): (&Value, bool),
 ) -> Result<RoutineInputSettlement> {
-    let input = ChannelMailboxHandle::restore_owner_input(raw.clone())?;
+    let mut input = ChannelMailboxHandle::restore_owner_input(raw.clone())?;
     if input.context["run_id"] != run_id || input.context["turn_id"] != turn_id {
         return Err(anyhow!("routine owner run/turn mismatch"));
+    }
+    if owner_confirmed {
+        input.admission_committed = Some(true);
     }
     let handle = owner_input::custody::handle(executor, &input.provider, input.channel).await?;
     input
@@ -69,7 +72,10 @@ pub(super) async fn delivery_deadline(
     if !due || !store.run_forbids_retry_after_start(&run.run_id).await? {
         return Ok(Deadline::Proceed);
     }
-    let (status, error) = match settle(executor, (&run.run_id, turn_id), raw).await {
+    let owner_confirmed = result["status"] == "accepted" || result["status"] == "started";
+    let (status, error) = match settle(executor, (&run.run_id, turn_id), (raw, owner_confirmed))
+        .await
+    {
         Ok(RoutineInputSettlement::Withdrawn) => (
             "channel_input_unavailable",
             "routine input delivery deadline expired before the first key",
@@ -113,7 +119,13 @@ impl RoutineAgentExecutor {
         }
         let mut recovered = store.recover_stale_running_runs().await?;
         for run in store.begin_owner_recovery().await? {
-            let (status, error) = match settle(self, run.identity(), run.owner_input()).await {
+            let (status, error) = match settle(
+                self,
+                run.identity(),
+                (run.owner_input(), run.owner_confirmed),
+            )
+            .await
+            {
                 Ok(RoutineInputSettlement::Withdrawn) => (
                     "interrupted",
                     "routine interrupted by expired lease before the first key",
