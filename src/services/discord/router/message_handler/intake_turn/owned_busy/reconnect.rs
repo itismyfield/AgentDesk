@@ -57,26 +57,9 @@ impl OwnerTurn {
             let HostedRecord::Known(record) = &row.record else {
                 return Err("hosted record unreadable".into());
             };
-            let root = crate::config::runtime_root();
-            let at = record
-                .location
-                .as_ref()
-                .ok_or("recorded pane unavailable")?;
-            if record.state != HostedState::Bound
-                || record.owner.provider != "claude"
-                || record.owner.discord_token_hash != shared.token_hash
-                || record.owner.channel_id != channel.get().to_string()
-                || record.owner.logical_key != session
-                || root.as_deref() != Some(std::path::Path::new(&record.owner.runtime_root))
-                || crate::config::session_hosts::local_node().as_deref()
-                    != Some(record.owner.owner_node.as_str())
-                || record.owner.owner_node != plan.endpoint.execution_node
-                || at.execution_node != plan.endpoint.execution_node
-                || at.endpoint_config_key != plan.endpoint.config_key
-                || at.socket_addr != plan.endpoint.socket_addr
-                || at.named_session != plan.endpoint.herdr_session
-            {
-                return Err("local execution owner or endpoint differs".into());
+            // The reattach verdict already checked this Bound row's canonical owner and locality.
+            if record.owner.logical_key != session {
+                return Err("the observed execution belongs to another route".into());
             }
             let pool = shared.pg_pool.as_ref().ok_or("database unavailable")?;
             crate::services::discord::herdr_terminate::root_replaced::current(pool, row).await?;

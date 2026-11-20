@@ -288,13 +288,12 @@ fn restarted_front(busy: bool) {
             ]);
         }
     });
+    let HostedRecord::Known(mut record) = fx.record() else {
+        panic!("expected a Bound execution");
+    };
+    record.location.as_mut().unwrap().pane_id = "w0:p1".into();
     intake.runtime.block_on(async {
         let channel = ChannelId::new(CHANNEL);
-        let mut record = match fx.record() {
-            HostedRecord::Known(record) => record,
-            other => panic!("expected a Bound execution, got {other:?}"),
-        };
-        record.location.as_mut().unwrap().pane_id = "w0:p1".into();
         let row_id: i64 = sqlx::query_scalar(
             "UPDATE sessions SET hosted_execution=$1 WHERE channel_id=$2 RETURNING id",
         )
