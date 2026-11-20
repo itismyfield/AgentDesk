@@ -149,7 +149,9 @@ async fn observe<B: BindingEvents>(
                     })
                     .await
                     {
-                        ended = pin.start() != 0 && pin.start() >= observed_end;
+                        ended = pin.delivered_to_start()
+                            && pin.start() != 0
+                            && pin.start() >= observed_end;
                     }
                 }
                 if bind || turn || session || ended {
