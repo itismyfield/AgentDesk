@@ -411,16 +411,30 @@ impl HostIo for GatewayHost {
         );
     }
 
-    fn adopted(&self, channel: u64, provider: ShadowProvider) {
-        let kind = match provider {
-            ShadowProvider::Claude => ProviderKind::Claude,
-            ShadowProvider::Codex => ProviderKind::Codex,
-            ShadowProvider::Antigravity => return,
-        };
-        let confirm =
-            super::super::tui_direct_pending_start::turn_retirement::confirm_turn_channels;
-        let confirmed = confirm(&kind, Some(&self.turn), || vec![channel]);
-        super::super::turn_presence::supervisor::register(&kind, &confirmed);
+    fn pane_adopted(&self, channel: u64, provider: host::PaneAdoptionProvider) {
+        pane_confirmation::publish(self, channel, provider);
+    }
+}
+
+mod pane_confirmation {
+    use super::host::PaneAdoptionProvider as ShadowProvider;
+    use super::{GatewayHost, ProviderKind};
+
+    impl GatewayHost {
+        fn adopted(&self, channel: u64, provider: ShadowProvider) {
+            let kind = match provider {
+                ShadowProvider::Claude => ProviderKind::Claude,
+                ShadowProvider::Codex => ProviderKind::Codex,
+            };
+            let confirm =
+                super::super::tui_direct_pending_start::turn_retirement::confirm_turn_channels;
+            let confirmed = confirm(&kind, Some(&self.turn), || vec![channel]);
+            super::super::turn_presence::supervisor::register(&kind, &confirmed);
+        }
+    }
+
+    pub(super) fn publish(host: &GatewayHost, channel: u64, provider: ShadowProvider) {
+        host.adopted(channel, provider);
     }
 }
 

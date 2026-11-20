@@ -50,6 +50,7 @@ impl AgyShadowHost {
         let Some(generation) = gate.current().epoch().and_then(NonZeroU64::new) else {
             return Ok(None);
         };
+        let root = checked_dir(root)?;
         let phase = if child_retired(&root, target)? {
             Phase::Retired
         } else {
@@ -80,6 +81,7 @@ impl AgyShadowHost {
     }
 
     fn replay_all(&self, previous: &BTreeMap<u64, AgyFrontier>) -> io::Result<Vec<AgyReplay>> {
+        checked_dir(self.root.clone())?;
         if child_retired(&self.root, self.permit.target)? {
             return Err(io::Error::other("agy shadow reader lost custody"));
         }
