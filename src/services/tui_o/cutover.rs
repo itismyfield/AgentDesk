@@ -15,9 +15,7 @@ pub(crate) use channel_gate::{
     peek_o_owns_tui_output_for_channel_tmux,
 };
 #[cfg(unix)]
-pub(crate) use channel_gate::{
-    Observed, peek_o_owns_tui_output_for_channel_quiet, with_peeked_o_output,
-};
+pub(crate) use channel_gate::{peek_o_owns_tui_output_for_channel_quiet, with_peeked_o_output};
 #[cfg(all(test, unix))]
 mod channel_lookup_tests;
 #[cfg(all(test, unix))]

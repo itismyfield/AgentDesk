@@ -1,5 +1,4 @@
 use super::*;
-use crate::db::auto_queue::test_support::TestPostgresDb;
 
 // The key follows the turn nonce alone: a later view of the same turn reuses the first reason.
 #[test]
@@ -104,6 +103,8 @@ async fn a_closure_names_the_native_opener_and_never_a_normalized_offset() {
 // one row, so one notice is posted.
 #[tokio::test]
 async fn an_unplaced_range_is_closed_once_with_its_reason_pg() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let closed = disposition::closure::Closure {
